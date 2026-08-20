@@ -2550,6 +2550,597 @@ _kb_knowledge_yaml_field() {
     grep -m1 "^${field}:" "$file" 2>/dev/null | sed "s/^${field}:[[:space:]]*//" | tr -d '"'"'"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_canonical_kanban_dir_for_repo [<repo_root>] (XACA-0883-001)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Resolves the CANONICAL kanban/ directory that owns a given repo root — the
+# container-level kanban/ for container-layout teams (iOS/Android/Firebase/
+# DNS), where the git work-tree is a CHILD of the container and
+# kanban/ is a SIBLING of the work-tree (e.g.
+# .../{{ORG_NAME}}App-iOS/DEV → .../{{ORG_NAME}}App-iOS/kanban), and the repo's own
+# kanban/ for kanban-inside-repo teams (Academy/Command/Finance/Legal/
+# Medical), where repo_root IS the container (e.g. a repo whose own top level
+# holds kanban/ directly).
+#
+# Exists because _kb_knowledge_project_path's case-2 template expansion
+# ({repo_root}/kanban/knowledge/project, below) silently assumes
+# repo_root == container, which is false for container-layout teams — it was
+# writing knowledge into a SHADOW kanban/ under the work-tree instead of the
+# canonical one (XACA-0883). This resolver is the layout-aware
+# replacement for that assumption; callers use it to build a {kanban_dir}
+# token instead of a fixed offset from {repo_root}.
+#
+# Input: a repo root path (a git work-tree root). If omitted, derives it the
+# same worktree-aware way _kb_knowledge_project_path does (git rev-parse
+# --git-common-dir, XACA-0278) — a feature worktree resolves to the MAIN repo
+# root, never the ephemeral worktree.
+#
+# Resolution order:
+#   1. Registry reverse-lookup (primary, source of truth): read
+#      ~/.aiteamforge/team-paths.json (path via _kb_overlay_config_path) and
+#      find every team entry whose working_dir equals, or is an ancestor of,
+#      repo_root. Prefer the DEEPEST (longest) matching working_dir. Several
+#      team ids legitimately map to the SAME kanban_dir (e.g. a platform team id and
+#      a longer alias for it) — that is normal, not an error; only
+#      matches at the SAME depth whose kanban_dir VALUES disagree are
+#      genuinely ambiguous, and those fail closed.
+#   2. Sibling probe (fallback, bounded to 3 levels — never walks to /): a
+#      directory named exactly "kanban" that sits BESIDE repo_root or one of
+#      its near ancestors (i.e. parent(repo_root)/kanban,
+#      grandparent(repo_root)/kanban, ...) AND contains at least one
+#      *-board.json file — the marker that proves it's a real kanban dir,
+#      not a directory that merely happens to share the name.
+#   3. Neither resolves → return 1, print nothing.
+#
+# EXIT CODES (callers must distinguish 1 from 2):
+#   0 — resolved; the canonical kanban dir is on stdout.
+#   1 — NO ANSWER: no registry entry claims this repo and the sibling probe
+#       found nothing. Callers that merely resolve a path treat this as
+#       "fail open" and keep pre-XACA-0883 behaviour, which is what keeps
+#       unregistered container projects working.
+#   2 — AMBIGUOUS: registry entries at the same depth claim this repo with
+#       DIFFERENT kanban_dir values. This is a hard refusal for any WRITE —
+#       the layout guard turns it into T3 and refuses without creating a
+#       directory or writing a file. (XACA-0883-019: the guard used to tell
+#       these apart by grepping this function's stderr through a temp file;
+#       the numeric code removed that filesystem dependency entirely.)
+#   stdout is EMPTY on both 1 and 2 — a function that returns non-zero while
+#   still printing is the live hazard here, since callers substitute stdout.
+#
+# FAILS CLOSED by design: a wrong answer here silently redirects knowledge
+# writes into another team's tree, which is strictly worse than an error the
+# caller can see and act on. Every registry candidate is gated on
+# [ -d "$dir" ] — team-paths.json is known to carry at least one stale entry
+# (teams.command.kanban_dir → a removed /var/folders/... test path,
+# XACA-0883 landmine L1) that must never be trusted blind.
+#
+# zsh notes: no `echo "$VAR" | jq` (control chars) — JSON is read straight off
+# disk via jq (preferred) or python3, mirroring _kb_local_personas_for_team's
+# dual-path style. BARE_GLOB_QUAL is scoped LOCAL_OPTIONS so the `(N)`
+# qualifier below parses even under an interactive shell's
+# `setopt NO_BARE_GLOB_QUAL` (XACA-0737). No `[[ ]] &&` as this function's
+# last statement (a `set -e` caller would abort on a false match).
+_kb_canonical_kanban_dir_for_repo() {
+    setopt LOCAL_OPTIONS NO_NOMATCH BARE_GLOB_QUAL
+
+    local repo_root="${1-}"
+
+    if [[ -z "$repo_root" ]]; then
+        local git_common_dir
+        git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
+        if [[ -z "$git_common_dir" ]]; then
+            return 1
+        fi
+        if [[ "$git_common_dir" == ".git" ]]; then
+            repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+        else
+            repo_root=$(dirname "$git_common_dir")
+        fi
+    fi
+
+    if [[ -z "$repo_root" ]] || [[ ! -d "$repo_root" ]]; then
+        return 1
+    fi
+
+    # Normalize away a trailing slash so the ancestor prefix comparisons
+    # below aren't fooled by "/a/b/" vs "/a/b".
+    repo_root="${repo_root%/}"
+
+    # XACA-0883-015: normalize symlinks before any prefix comparison. `git
+    # rev-parse` hands back a symlink-RESOLVED path while team-paths.json's
+    # working_dir may be unresolved (the classic macOS "/var" vs "/private/var"
+    # split). A raw string prefix test then misses a registry entry that in fact
+    # owns this repo, and resolution falls through to the sibling probe — which,
+    # if it also finds no *-board.json within its hop budget, fails open to the
+    # legacy per-case resolution and SILENTLY REINTRODUCES the shadow-base bug
+    # this whole function exists to close. Normalizing both sides removes that
+    # failure mode instead of relying on the probe to mask it.
+    # `realpath` is not on stock macOS, so use a subshell cd + `pwd -P`; a
+    # failure here is non-fatal, we simply keep the unnormalized value.
+    local _cn_resolved
+    _cn_resolved=$(cd "$repo_root" 2>/dev/null && pwd -P) || _cn_resolved=""
+    [[ -n "$_cn_resolved" ]] && repo_root="$_cn_resolved"
+
+    # ---- 1. Registry reverse-lookup ----
+    local cfg
+    cfg=$(_kb_overlay_config_path)
+    if [[ -f "$cfg" ]]; then
+        local pairs=""
+        if command -v jq &>/dev/null; then
+            pairs=$(jq -r '
+                .teams
+                | to_entries[]
+                | select(.value.working_dir != null and .value.kanban_dir != null and .value.working_dir != "" and .value.kanban_dir != "")
+                | "\(.value.working_dir)\t\(.value.kanban_dir)"
+            ' "$cfg" 2>/dev/null)
+        elif command -v python3 &>/dev/null; then
+            pairs=$(python3 - "$cfg" <<'PYEOF'
+import json, sys
+cfg = sys.argv[1]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+for entry in data.get("teams", {}).values():
+    if not isinstance(entry, dict):
+        continue
+    wd = entry.get("working_dir")
+    kd = entry.get("kanban_dir")
+    if wd and kd:
+        print(f"{wd}\t{kd}")
+PYEOF
+)
+        fi
+
+        if [[ -n "$pairs" ]]; then
+            # NOTE: every one of these is declared HERE, outside the while loop.
+            # A bare `local X` re-executed inside a loop makes zsh echo "X=<value>"
+            # to STDOUT and corrupt this function's return value (the PR #755
+            # review finding). Do not move any of these inside the loop.
+            local best_depth=-1 best_kanban="" ambiguous="false" wd kd depth _wd_resolved
+            while IFS=$'\t' read -r wd kd; do
+                if [[ -z "$wd" ]] || [[ -z "$kd" ]]; then
+                    continue
+                fi
+                wd="${wd%/}"
+                # XACA-0883-015: symlink-normalize the registry side too, so the
+                # ancestor test compares like with like (repo_root was already
+                # normalized above). Without this a registry working_dir spelled
+                # "/var/..." never matches a repo_root git reported as
+                # "/private/var/...", and a legitimately-owned repo silently
+                # falls through to the probe. Non-fatal: an unresolvable wd keeps
+                # its literal value and is simply compared as-is.
+                _wd_resolved=$(cd "$wd" 2>/dev/null && pwd -P) || _wd_resolved=""
+                [[ -n "$_wd_resolved" ]] && wd="$_wd_resolved"
+                # Ancestor test: repo_root == wd, or repo_root is nested under wd.
+                if [[ "$repo_root" != "$wd" ]] && [[ "$repo_root" != "$wd"/* ]]; then
+                    continue
+                fi
+                # L1: gate every registry candidate on existence — stale entries
+                # (e.g. a removed test tmpdir) must never be trusted blind.
+                if [[ ! -d "$kd" ]]; then
+                    continue
+                fi
+                depth=${#wd}
+                if (( depth > best_depth )); then
+                    best_depth=$depth
+                    best_kanban="$kd"
+                    ambiguous="false"
+                elif (( depth == best_depth )); then
+                    # L2: multiple team ids sharing one working_dir/kanban_dir is
+                    # normal (e.g. a platform team id and a longer alias for
+                    # it) — only a same-depth DISAGREEMENT is genuinely
+                    # ambiguous.
+                    if [[ "$kd" != "$best_kanban" ]]; then
+                        ambiguous="true"
+                    fi
+                fi
+            done <<< "$pairs"
+
+            if (( best_depth >= 0 )); then
+                if [[ "$ambiguous" == "true" ]]; then
+                    echo "kb: _kb_canonical_kanban_dir_for_repo: conflicting registry entries at the same depth for '$repo_root' — refusing to guess." >&2
+                    # XACA-0883-019: exit code 2 means AMBIGUOUS (conflicting
+                    # claims), distinct from 1 = no answer at all. Callers must
+                    # tell these apart — ambiguity is a hard refusal while
+                    # no-answer fails open. Previously the only signal was a
+                    # substring match on stderr, which forced the caller to
+                    # capture stderr through a temp file just to classify the
+                    # failure. A numeric code needs no filesystem at all.
+                    return 2
+                fi
+                echo "$best_kanban"
+                return 0
+            fi
+        fi
+    fi
+
+    # ---- 2. Sibling probe (fallback) ----
+    local anc="$repo_root" parent sib hops=0
+    while (( hops < 3 )); do
+        parent=$(dirname "$anc")
+        if [[ "$parent" == "$anc" ]]; then
+            break  # reached filesystem root — never walk past it
+        fi
+        sib="${parent}/kanban"
+        if [[ -d "$sib" ]]; then
+            local -a _board_markers
+            _board_markers=("${sib}"/*-board.json(N))
+            if (( ${#_board_markers[@]} > 0 )); then
+                echo "$sib"
+                return 0
+            fi
+        fi
+        anc="$parent"
+        hops=$((hops + 1))
+    done
+
+    return 1
+}
+
+# Internal: XACA-0883 T3 diagnostic — enumerate the DISAGREEING same-depth
+# registry candidates for a repo, so the layout guard's refusal can name
+# names. Mirrors _kb_canonical_kanban_dir_for_repo's registry-lookup pass
+# (never the sibling probe — T3 is a registry-only condition, see the guard
+# contract §3.2) but additionally carries the team id, which the resolver's
+# own stdout contract deliberately omits (it returns a bare path). Kept
+# separate from the resolver so its hot, common-case path stays a single pass
+# with no team-id bookkeeping — this only runs after the resolver has already
+# told us (via its stderr) that this repo hit the ambiguous branch.
+# Usage: _kb_knowledge_layout_guard_report_t3 <repo_root> <resolved_path>
+_kb_knowledge_layout_guard_report_t3() {
+    local repo_root="${1-}" resolved_path="${2-}"
+    [[ -z "$repo_root" ]] && return 0
+    repo_root="${repo_root%/}"
+
+    # XACA-0883-022 (sibling drift): this reporter re-runs the resolver's
+    # ancestor test to name the conflicting teams, so it MUST normalize paths
+    # exactly as the resolver does. It originally did not, and the consequence
+    # was worse than the bug it replaced: with a symlinked working_dir every
+    # candidate missed, the empty-candidate branch fired, and the reporter
+    # printed a confident "no registry entry claims it" one line below the
+    # resolver's own "conflicting registry entries" on stderr — a complete,
+    # plausible, WRONG diagnosis. If the ancestor test here ever changes, change
+    # it in _kb_canonical_kanban_dir_for_repo too; these two are mirrors.
+    local _rr_resolved
+    _rr_resolved=$(cd "$repo_root" 2>/dev/null && pwd -P) || _rr_resolved=""
+    [[ -n "$_rr_resolved" ]] && repo_root="$_rr_resolved"
+
+    local cfg
+    cfg=$(_kb_overlay_config_path)
+    # best_lines carries one "<team> -> <kanban_dir>" entry per team id at
+    # the winning depth (for the printed listing); best_kd carries just the
+    # kanban_dir side of the same entries, in the same order, so the count
+    # below can be de-duplicated to DISTINCT values (XACA-0883-027) without
+    # re-parsing best_lines' "tid -> kd" strings.
+    local -a best_lines best_kd
+    if [[ -f "$cfg" ]]; then
+        local triples=""
+        if command -v jq &>/dev/null; then
+            triples=$(jq -r '
+                .teams
+                | to_entries[]
+                | select(.value.working_dir != null and .value.kanban_dir != null and .value.working_dir != "" and .value.kanban_dir != "")
+                | "\(.key)\t\(.value.working_dir)\t\(.value.kanban_dir)"
+            ' "$cfg" 2>/dev/null)
+        elif command -v python3 &>/dev/null; then
+            triples=$(python3 - "$cfg" <<'PYEOF'
+import json, sys
+cfg = sys.argv[1]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+for tid, entry in data.get("teams", {}).items():
+    if not isinstance(entry, dict):
+        continue
+    wd = entry.get("working_dir")
+    kd = entry.get("kanban_dir")
+    if wd and kd:
+        print(f"{tid}\t{wd}\t{kd}")
+PYEOF
+)
+        fi
+
+        if [[ -n "$triples" ]]; then
+            local best_depth=-1 tid wd kd depth _wd_resolved
+            while IFS=$'\t' read -r tid wd kd; do
+                [[ -z "$wd" || -z "$kd" ]] && continue
+                wd="${wd%/}"
+                # XACA-0883-022: mirror the resolver's symlink normalization.
+                _wd_resolved=$(cd "$wd" 2>/dev/null && pwd -P) || _wd_resolved=""
+                [[ -n "$_wd_resolved" ]] && wd="$_wd_resolved"
+                if [[ "$repo_root" != "$wd" ]] && [[ "$repo_root" != "$wd"/* ]]; then
+                    continue
+                fi
+                # Same existence gate as the resolver (L1) — a stale entry
+                # must not be listed as a live conflicting candidate.
+                [[ ! -d "$kd" ]] && continue
+                depth=${#wd}
+                if (( depth > best_depth )); then
+                    best_depth=$depth
+                    best_lines=("${tid} -> ${kd}")
+                    best_kd=("$kd")
+                elif (( depth == best_depth )); then
+                    best_lines+=("${tid} -> ${kd}")
+                    best_kd+=("$kd")
+                fi
+            done <<< "$triples"
+        fi
+    fi
+
+    # XACA-0883-027: group the winning-depth entries by kanban_dir VALUE, not
+    # by team id. Several team ids legitimately sharing one kanban_dir is
+    # normal (L2, same rule the resolver applies) — the resolver's own count
+    # in _kb_canonical_kanban_dir_for_repo already reflects DISTINCT values;
+    # this reporter used to count best_lines (one line per team id) instead,
+    # so two AGREEING team ids plus one genuinely divergent "stray" printed
+    # "3 registry entries claim it with DIFFERENT values" when only 2
+    # distinct values exist. `${(u)best_kd}` is zsh's
+    # unique-array expansion — no extra loop needed to de-dupe.
+    # Declared here (function scope, not inside the loop below) per this
+    # repo's zsh `local`-in-loop rule: a bare `local` re-executed inside a
+    # loop leaks the assignment to stdout and corrupts the caller's capture.
+    local -a distinct_kd
+    distinct_kd=("${(u)best_kd[@]}")
+    local _kd_key _t _kd_noun="directories" _kd_verb="are"
+    local -a _tid_list
+    local -A kd_teams
+    (( ${#distinct_kd[@]} == 1 )) && { _kd_noun="directory"; _kd_verb="is"; }
+
+    {
+        # XACA-0883-020: with an empty candidate list the old wording emitted
+        # "0 registry entries claim it with DIFFERENT values", which is
+        # self-contradictory and sends the reader hunting for a conflict that
+        # does not exist. Report the actual condition instead.
+        if (( ${#best_lines[@]} == 0 )); then
+            echo "Error: cannot determine the canonical kanban directory for this repo — no registry entry claims it, and no sibling kanban directory with a board file was found."
+        else
+            echo "Error: cannot determine the canonical kanban directory for this repo — ${#distinct_kd[@]} distinct kanban ${_kd_noun} ${_kd_verb} claimed by ${#best_lines[@]} registry entries at the same depth:"
+        fi
+        # Group by kanban_dir value so agreeing team ids (normal, L2) are
+        # visually distinct from a genuinely conflicting value, rather than
+        # a flat "tid -> value" list that reads as N-way disagreement.
+        local _bi _bi_tid _bi_kd
+        for _bi in "${best_lines[@]}"; do
+            _bi_tid="${_bi%% -> *}"
+            _bi_kd="${_bi#* -> }"
+            if [[ -n "${kd_teams[$_bi_kd]-}" ]]; then
+                kd_teams[$_bi_kd]="${kd_teams[$_bi_kd]} ${_bi_tid}"
+            else
+                kd_teams[$_bi_kd]="$_bi_tid"
+            fi
+        done
+        for _kd_key in "${distinct_kd[@]}"; do
+            _tid_list=(${=kd_teams[$_kd_key]})
+            echo "  ${_kd_key} (${#_tid_list[@]} $([[ ${#_tid_list[@]} -eq 1 ]] && echo entry || echo entries)):"
+            for _t in "${_tid_list[@]}"; do
+                echo "    ${_t}"
+            done
+        done
+        echo "Refusing to write project knowledge to a base that cannot be attributed to one team (XACA-0883)."
+        echo "  Fix: correct the divergent kanban_dir entries in ~/.aiteamforge/team-paths.json (see kb-port-reconcile's sibling problem), or set KB_KNOWLEDGE_PROJECT_PATH to an explicit absolute path for this session."
+        echo "  Override: pass --allow-nonstandard-base to write to ${resolved_path} as resolved, accepting an unattributed base."
+    } >&2
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_knowledge_project_layout_guard <resolved_path> <allow_nonstandard:true|false> \
+#                                     [<force_noninteractive:true|false>]
+# (XACA-0883-004, per the 005 guard contract; 3rd param added XACA-0883-021/024)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# force_noninteractive (default false): when "true", the T1 interactive
+# prompt branch is skipped even under a real tty, and the non-interactive
+# (redirect + report, never block) branch runs instead. Exists solely for
+# kb-knowledge-promote's dry-run mode: a preview must not ask the user a
+# question it isn't going to act on. Omitting this argument (every existing
+# caller, including kb-knowledge-add) leaves behavior byte-identical to
+# before this parameter existed — plain tty detection, same as always.
+#
+# stdout: the path the caller MUST use (possibly redirected to the canonical
+#         base). return: 0 = proceed with the path on stdout; 1 = refuse.
+#
+# Protects DESTINATION CORRECTNESS, not PII — that is
+# _kb_ambiguous_tier_write_guard's job, an independent, orthogonal invariant.
+# Ordering is load-bearing: the PII guard MUST run FIRST, on the pre-redirect
+# path, before this guard is even called — see the required call-site shape
+# at kb-knowledge-add's bare-project branch. Running this guard first would
+# open a real bypass: redirecting the path out from under
+# ${global_root}/projects/ makes the PII gate's prefix test
+# (`[[ "$target_dir" == "${global_root}/projects/"* ]]`) stop matching,
+# silently skipping a PII check that should have fired.
+#
+# "Fail closed" here means REDIRECT-TO-CANONICAL, not refuse — the canonical
+# kanban dir is the vouched-for destination, so redirecting to it IS the
+# fail-closed action; writing to the unvouched, unredirected path is the
+# fail-open one. Only T3 (an unattributable repo — a genuine same-depth
+# registry disagreement) refuses outright. This is the counterintuitive part
+# of the contract; do not "fix" it by making T1 refuse instead of redirect.
+#
+# T1 (structural, GATING): resolved_path is inside a git work-tree, the
+#   canonical kanban dir for that work-tree resolves AND exists, and
+#   resolved_path is not already under it. Trips → redirect (interactive:
+#   ask first; non-interactive: redirect + report, never block).
+# T2 (branch/env-token slug, ADVISORY ONLY): never gates on its own — observed
+#   false negatives (umbrella sub-repos with wrong bases behind
+#   legitimate-looking slugs) and false positives (a repo genuinely named
+#   'main-app'/'release-tools') make the token heuristic unfit to gate. Its
+#   sole job is one extra diagnostic sentence inside T1's message.
+# T3 (ambiguous canonical, GATING, REFUSE): _kb_canonical_kanban_dir_for_repo
+#   resolves more than one SAME-DEPTH registry candidate and the candidates
+#   DISAGREE (an agreeing multi-match, e.g. two team ids that legitimately
+#   share one kanban_dir, is normal and is already collapsed silently by the
+#   resolver — L2).
+#   Guessing here is exactly how a write lands in another team's live base;
+#   refusing is recoverable, a misattributed write is not.
+#
+# FAIL-OPEN when T1's structural condition can't be established at all — no
+# git work-tree, or the canonical resolver returns nothing (not disagreement,
+# just no answer): unregistered container/freelance projects and umbrella
+# sub-repos, and any repo the sibling probe can't reach, must not be blocked.
+# Absence of a canonical answer is not evidence of a wrong destination.
+_kb_knowledge_project_layout_guard() {
+    local resolved_path="${1-}"
+    local allow_nonstandard="${2:-false}"
+    local force_noninteractive="${3:-false}"
+
+    if [[ -z "$resolved_path" ]]; then
+        echo "$resolved_path"
+        return 0
+    fi
+
+    # --allow-nonstandard-base short-circuits everything: write to the
+    # resolved path exactly as given, no probing, no prompt, no warning.
+    # Does NOT waive the PII guard — that already ran, separately, before
+    # this function was ever called.
+    if [[ "$allow_nonstandard" == "true" ]]; then
+        echo "$resolved_path"
+        return 0
+    fi
+
+    # T1.1: is resolved_path inside a git work-tree? Probe from the nearest
+    # EXISTING ancestor — the target project-knowledge dir itself normally
+    # doesn't exist yet (kb-knowledge-add mkdir -p's it downstream).
+    local probe_dir="$resolved_path" parent
+    while [[ ! -d "$probe_dir" ]]; do
+        parent=$(dirname "$probe_dir")
+        [[ "$parent" == "$probe_dir" ]] && break
+        probe_dir="$parent"
+    done
+    if [[ ! -d "$probe_dir" ]]; then
+        echo "$resolved_path"
+        return 0
+    fi
+
+    local wt
+    wt=$(git -C "$probe_dir" rev-parse --show-toplevel 2>/dev/null)
+    if [[ -z "$wt" ]]; then
+        # Not inside a git work-tree at all — T1's structural condition
+        # doesn't hold. Fail open.
+        echo "$resolved_path"
+        return 0
+    fi
+    wt="${wt%/}"
+
+    # T1.2 / T3: resolve the canonical kanban dir for this work-tree.
+    # _kb_canonical_kanban_dir_for_repo already fails closed on a same-depth
+    # registry DISAGREEMENT (prints its own diagnostic to stderr, returns 1)
+    # and collapses an AGREEING multi-match silently (L2) — capture its
+    # stderr so the two rc=1 cases (disagreement vs. plain "no answer") can
+    # be told apart below.
+    # XACA-0883-019: classify the failure by EXIT CODE, not by grepping stderr.
+    # The previous implementation captured stderr into a temp file purely to
+    # tell "ambiguous" from "no answer", and fell back to a predictable
+    # "$$"-suffixed path when mktemp failed — a symlink/clobber vector. The
+    # resolver now returns 2 for ambiguous and 1 for no-answer, so there is no
+    # temp file, no fallback path, and no filesystem dependency. Diagnostics
+    # still flow to the caller's stderr, where a human can actually see them.
+    local canon
+    canon=$(_kb_canonical_kanban_dir_for_repo "$wt")
+    local canon_rc=$?
+
+    if (( canon_rc != 0 )); then
+        if (( canon_rc == 2 )); then
+            # T3: ambiguous canonical — GATING, REFUSE, no redirect, no
+            # directory created, no file written.
+            _kb_knowledge_layout_guard_report_t3 "$wt" "$resolved_path"
+            return 1
+        fi
+        # No canonical answer at all (no registry hit, no sibling-probe
+        # match) — T1.2 fails open, silently. This is the common, expected
+        # case for unregistered/freelance/umbrella-sub-repo projects.
+        echo "$resolved_path"
+        return 0
+    fi
+
+    if [[ -z "$canon" ]] || [[ ! -d "$canon" ]]; then
+        # Belt-and-suspenders: the resolver already gates every candidate on
+        # [ -d ] (L1), so this shouldn't fire — fail open anyway rather than
+        # trust an rc=0/empty-or-gone combination blind.
+        echo "$resolved_path"
+        return 0
+    fi
+
+    # T1.3: resolved_path already under the canonical base → nothing to do.
+    # This is the common case once the XACA-0883 case-2 fix in
+    # _kb_knowledge_project_path is in effect; this guard exists for the
+    # residue (an in-repo .knowledge-config.yml override, a caller-supplied
+    # path, or a session that hasn't picked up the fixed template yet).
+    if [[ "$resolved_path" == "$canon" ]] || [[ "$resolved_path" == "${canon}/"* ]]; then
+        echo "$resolved_path"
+        return 0
+    fi
+
+    # T1 has tripped: resolved_path is inside the work-tree, the canonical
+    # dir resolves and exists, and resolved_path is NOT under it.
+    local canonical_path="${canon}/knowledge/project"
+
+    # T2 (advisory only — never gates): does the work-tree's own basename, or
+    # its current branch name, look like a branch/environment slug rather
+    # than a project name? Case-insensitive per contract; zsh [[ =~ ]] is
+    # case-sensitive by default, so lowercase both sides via ${(L)...}
+    # instead of relying on a shell option.
+    local repo_basename branch_name t2_hit=false
+    repo_basename=$(basename "$wt")
+    local repo_basename_lc="${(L)repo_basename}"
+    if [[ "$repo_basename_lc" =~ ^(dev|qa|prod|stage|staging|uat|develop|development|main|master|trunk|release|hotfix|feature)([-_/].*)?$ ]]; then
+        t2_hit=true
+    else
+        branch_name=$(git -C "$wt" branch --show-current 2>/dev/null)
+        if [[ -n "$branch_name" ]] && [[ "$repo_basename_lc" == "${(L)branch_name}" ]]; then
+            t2_hit=true
+        fi
+    fi
+
+    # Interactive vs non-interactive: shape differs by who's watching
+    # (contract §3.3). Disclosure goes to stderr, so test -t 2 as well as
+    # -t 0 — prompting when stderr is redirected would be an invisible
+    # prompt. Precedent for the TTY test: kanban-helpers.sh:9980, :10121.
+    # force_noninteractive short-circuits this even under a real tty — see
+    # this function's header comment (XACA-0883-021/024, kb-knowledge-promote
+    # dry-run). Defaults to false, so every caller that omits the 3rd
+    # argument (including kb-knowledge-add) is unaffected.
+    if [[ "$force_noninteractive" != "true" ]] && [[ -t 0 ]] && [[ -t 2 ]]; then
+        {
+            echo "Warning: this project-knowledge write resolves INSIDE the git work-tree, but this repo's canonical kanban directory is a sibling of it (XACA-0883)."
+            echo "  Resolved:  ${resolved_path}"
+            echo "  Canonical: ${canonical_path}"
+            if $t2_hit; then
+                echo "  The project id '${repo_basename}' looks like a branch or environment name, not a project — that is the signature of this bug."
+            fi
+            echo "Writing to the resolved path creates a SECOND, invisible knowledge base that kb-knowledge-search will not read."
+        } >&2
+        local layout_confirm
+        printf "Write to the canonical base instead? [Y/n] " >&2
+        read -r layout_confirm
+        # XACA-0883-018: accept the full word too. Matching only a single
+        # character meant a user who typed "no" fell through to the DEFAULT
+        # (redirect) — i.e. their explicit refusal was silently inverted.
+        # Leading/trailing whitespace is trimmed so " n " still declines.
+        layout_confirm="${layout_confirm#"${layout_confirm%%[![:space:]]*}"}"
+        layout_confirm="${layout_confirm%"${layout_confirm##*[![:space:]]}"}"
+        if [[ "$layout_confirm" == [Nn] ]] || [[ "$layout_confirm" == [Nn][Oo] ]]; then
+            echo "Warning: writing to the non-canonical base ${resolved_path} as instructed. This entry will not be visible to sessions resolving the canonical base." >&2
+            echo "$resolved_path"
+            return 0
+        fi
+        echo "$canonical_path"
+        return 0
+    fi
+
+    # Non-interactive (agent, hook, pipe, CI): redirect + report. Do NOT
+    # prompt, do NOT block — blocking here would break the mandatory
+    # retrospective/knowledge-capture step at the end of every project, and
+    # losing the entry is strictly worse than writing it to the correct base.
+    echo "Warning: project-knowledge write redirected from ${resolved_path} to ${canonical_path} — the resolved path is inside the git work-tree, but this repo's canonical kanban directory is a sibling (XACA-0883). Pass --allow-nonstandard-base to write to the resolved path instead." >&2
+    echo "$canonical_path"
+    return 0
+}
+
 # Internal: resolve project knowledge path
 # Precedence: .knowledge-config.yml → KB_KNOWLEDGE_PROJECT_PATH → default
 # Writes result to stdout; returns 1 if not inside a git repo.
@@ -2577,15 +3168,167 @@ _kb_knowledge_project_path() {
     project_slug=$(basename "$repo_root")
 
     # 1. Per-project config file
-    local config_file="${repo_root}/.knowledge-config.yml"
-    if [[ -f "$config_file" ]]; then
-        local config_path
+    #
+    # XACA-0883: probe TWO locations, in priority order:
+    #   (i)  ${repo_root}/.knowledge-config.yml      — the historical location
+    #   (ii) ${container_root}/.knowledge-config.yml — where scripts/kb-init-team
+    #        (_create_dir_tree) actually WRITES it: at the team's registry
+    #        working_dir, which for a container-layout team is the CONTAINER, not
+    #        the git work-tree. For those teams (i) and (ii) never coincide, so a
+    #        config written by kb-init-team was invisible to this reader. The gap
+    #        is dormant only while no .knowledge-config.yml exists anywhere;
+    #        because case 1 OUTRANKS case 2, the first kb-init-team run would
+    #        otherwise silently defeat this ticket's entire case-2 fix.
+    #
+    # A relative ./path is expanded against the directory the config was FOUND in,
+    # NOT blindly against repo_root. Expanding a container-written
+    # './kanban/knowledge/project' against the work-tree would reintroduce the
+    # exact shadow-base bug this ticket exists to close.
+    local -a _kc_candidates
+    _kc_candidates=( "${repo_root}/.knowledge-config.yml" )
+    local _kc_canonical _kc_container
+    _kc_canonical=$(_kb_canonical_kanban_dir_for_repo "$repo_root" 2>/dev/null) || _kc_canonical=""
+    if [[ -n "$_kc_canonical" ]]; then
+        _kc_container=$(dirname "$_kc_canonical")
+        if [[ -n "$_kc_container" && "$_kc_container" != "$repo_root" ]]; then
+            _kc_candidates+=( "${_kc_container}/.knowledge-config.yml" )
+        fi
+    fi
+
+    # NOTE (zsh trap): both `config_file` and `config_path` MUST be declared here,
+    # OUTSIDE the loop. A bare `local X` re-executed for an already-declared local
+    # makes zsh print "X=<value>" to STDOUT, so a second loop iteration would
+    # prepend a junk line to this function's return value. That happens whenever
+    # the first candidate exists but yields no usable value. Caught in review of
+    # PR #755; regression-tested in kb-knowledge-project-path-layout.bats.
+    local config_file config_path
+    for config_file in "${_kc_candidates[@]}"; do
+        [[ -f "$config_file" ]] || continue
         config_path=$(grep -m1 '^project_knowledge_path:' "$config_file" 2>/dev/null | sed 's/^project_knowledge_path:[[:space:]]*//' | tr -d '"'"'")
         # Trim leading/trailing whitespace without xargs (which splits on whitespace and corrupts paths with spaces)
         config_path="${config_path## }"
         config_path="${config_path%% }"
         if [[ -n "$config_path" ]]; then
-            # Expand leading ./ relative to repo root
+            # Expand leading ./ relative to the config file's OWN directory (see above)
+            if [[ "$config_path" == ./* ]]; then
+                config_path="$(dirname "$config_file")/${config_path#./}"
+            fi
+            echo "$config_path"
+            return 0
+        fi
+    done
+
+    # 2. KB_KNOWLEDGE_PROJECT_PATH env var (template-expand {repo_root},
+    #    {project}, and {kanban_dir})
+    if [[ -n "$KB_KNOWLEDGE_PROJECT_PATH" ]]; then
+        # XACA-0883 (D1): resolve the canonical kanban dir once so both halves
+        # of the fix can use it — (a) the new {kanban_dir} token, and (b) the
+        # layout-correction rewrite below. Fails open (empty var) when the repo
+        # can't be attributed with confidence — see the fail-open block below.
+        local canonical_kanban_dir=""
+        canonical_kanban_dir=$(_kb_canonical_kanban_dir_for_repo "$repo_root" 2>/dev/null) || canonical_kanban_dir=""
+
+        local expanded="${KB_KNOWLEDGE_PROJECT_PATH//\{repo_root\}/$repo_root}"
+        expanded="${expanded//\{project\}/$project_slug}"
+        # (a) New token (XACA-0883 D1a): the going-forward way to reference the
+        # canonical kanban dir directly, instead of deriving it from
+        # {repo_root}. Left UNEXPANDED (literal "{kanban_dir}") when the repo
+        # can't be resolved — there is no deployed usage of this token yet to
+        # protect with a fallback, so leaving it literal surfaces the problem
+        # instead of silently guessing.
+        if [[ -n "$canonical_kanban_dir" ]]; then
+            expanded="${expanded//\{kanban_dir\}/$canonical_kanban_dir}"
+        fi
+
+        # (b) Layout-correct the existing {repo_root}-derived form (XACA-0883
+        # D1b). Deployed team shells commonly export the identical
+        # '{repo_root}/kanban/knowledge/project'. For container-layout teams
+        # (iOS/Android/Firebase/DNS) repo_root is the git work-tree,
+        # a CHILD of the container, while the real kanban/ is the container's —
+        # a SIBLING of the work-tree. Unpatched, that template expands to a
+        # shadow kanban/ under the work-tree instead of the canonical one.
+        # Re-root any expansion whose "kanban" segment came from {repo_root}
+        # onto the canonical kanban dir, preserving whatever comes after
+        # "kanban" verbatim (a team could point the template somewhere other
+        # than knowledge/project under kanban/, so this must not hardcode
+        # that suffix).
+        #
+        # FAIL-OPEN, non-negotiable (XACA-0883 guard contract §3.2): if the
+        # canonical dir can't be resolved with confidence, or it's identical
+        # to {repo_root}/kanban (the kanban-inside-repo case, where no
+        # rewrite is needed), emit exactly what the pre-fix code emitted.
+        # There are unregistered container/freelance projects the registry
+        # cannot resolve; breaking them would be a worse regression than the
+        # bug being fixed. Silent — no warning spam on every call.
+        if [[ -n "$canonical_kanban_dir" ]] && [[ "$canonical_kanban_dir" != "${repo_root}/kanban" ]]; then
+            local legacy_kanban_prefix="${repo_root}/kanban"
+            # XACA-0883-017: the prefix must end on a PATH-SEGMENT boundary.
+            # A bare "$prefix"* also matches sibling directories that merely
+            # start with the same characters — '{repo_root}/kanban-archive/...'
+            # or '{repo_root}/kanbanX' would be silently re-rooted onto the
+            # canonical kanban dir, corrupting a path this fix has no business
+            # touching. Accept only an exact match or a real child.
+            if [[ "$expanded" == "$legacy_kanban_prefix" ]] || [[ "$expanded" == "${legacy_kanban_prefix}"/* ]]; then
+                expanded="${canonical_kanban_dir}${expanded#${legacy_kanban_prefix}}"
+            fi
+        fi
+
+        echo "$expanded"
+        return 0
+    fi
+
+    # 3. Default
+    echo "$(_kb_knowledge_global_root)/projects/${project_slug}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_knowledge_project_path_legacy (TRANSITIONAL — XACA-0883)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Returns the LEGACY (pre-XACA-0883) case-2 resolution — i.e. exactly what
+# _kb_knowledge_project_path would have returned before this ticket's layout
+# fix, with no {kanban_dir} token and no {repo_root}/kanban re-rooting.
+# Cases 1 and 3 are byte-identical to the current resolver (this ticket did
+# not touch them) and are duplicated here only so this function is a complete,
+# self-contained "what used to happen" answer.
+#
+# Why this exists: pre-fix installs may already have knowledge entries sitting
+# in shadow bases created by the pre-fix resolver — some of them another
+# team's LIVE, actively-written base, which is deliberately NOT ours to
+# reconcile/move as part of this fix. The instant the writer/reader resolver
+# flips to the canonical path, kb-knowledge-search stops finding those entries
+# unless something still looks in the old place. That "something" is this
+# function, consumed ONLY by kb-knowledge-search's project-tier reader (never
+# by any writer — writers must target the canonical base exclusively).
+#
+# DELETE CONDITION: once a shadow-base sweep confirms every legacy base is
+# empty (or reconciled), delete this function and its call site in
+# kb-knowledge-search's project-tier resolution.
+_kb_knowledge_project_path_legacy() {
+    local repo_root project_slug
+
+    local git_common_dir
+    git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [[ -z "$git_common_dir" ]]; then
+        echo "$(_kb_knowledge_global_root)/projects/unknown"
+        return 0
+    fi
+    if [[ "$git_common_dir" == ".git" ]]; then
+        repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    else
+        repo_root=$(dirname "$git_common_dir")
+    fi
+
+    project_slug=$(basename "$repo_root")
+
+    # 1. Per-project config file (unchanged by XACA-0883 — duplicated verbatim)
+    local config_file="${repo_root}/.knowledge-config.yml"
+    if [[ -f "$config_file" ]]; then
+        local config_path
+        config_path=$(grep -m1 '^project_knowledge_path:' "$config_file" 2>/dev/null | sed 's/^project_knowledge_path:[[:space:]]*//' | tr -d '"'"'")
+        config_path="${config_path## }"
+        config_path="${config_path%% }"
+        if [[ -n "$config_path" ]]; then
             if [[ "$config_path" == ./* ]]; then
                 config_path="${repo_root}/${config_path#./}"
             fi
@@ -2594,7 +3337,8 @@ _kb_knowledge_project_path() {
         fi
     fi
 
-    # 2. KB_KNOWLEDGE_PROJECT_PATH env var (template-expand {repo_root} and {project})
+    # 2. KB_KNOWLEDGE_PROJECT_PATH env var — LEGACY expansion: {repo_root} and
+    #    {project} only, no {kanban_dir} token, no re-rooting rewrite.
     if [[ -n "$KB_KNOWLEDGE_PROJECT_PATH" ]]; then
         local expanded="${KB_KNOWLEDGE_PROJECT_PATH//\{repo_root\}/$repo_root}"
         expanded="${expanded//\{project\}/$project_slug}"
@@ -2602,7 +3346,7 @@ _kb_knowledge_project_path() {
         return 0
     fi
 
-    # 3. Default
+    # 3. Default (unchanged by XACA-0883 — duplicated verbatim)
     echo "$(_kb_knowledge_global_root)/projects/${project_slug}"
 }
 
@@ -2640,7 +3384,8 @@ _kb_knowledge_project_path_effective() {
 # Internal: derive a human-readable project display name from the project knowledge dir path.
 # Resolution order:
 #   a. .kb-project sentinel in $dir or ancestors (up to 3 levels up) — first non-blank line
-#   b. In-repo layout: */kanban/knowledge/project → basename of the repo root
+#   b. In-repo layout: */kanban/knowledge/project → owning project's name (XACA-0883:
+#      layout-aware — see below, NOT a naive dirname^3 of $dir)
 #   c. Fallback: basename($dir)
 #
 # NOTE on .kb-project sentinel (XACA-0389 / F-08-009):
@@ -2650,6 +3395,23 @@ _kb_knowledge_project_path_effective() {
 #   basename is not a friendly name. When absent, resolution falls through to (b)
 #   or (c), both of which always produce a non-empty result — absence is expected,
 #   not an error condition.
+#
+# NOTE on branch (b) and container layouts (XACA-0883):
+#   dirname^3($dir) (strip "/kanban/knowledge/project") assumes the "kanban"
+#   directory directly above is the CANONICAL one — true for kanban-inside-repo
+#   teams (Academy/Command/Finance/Legal/Medical: dirname^3 IS the repo root),
+#   but false for container-layout teams (iOS/Android/Firebase/DNS),
+#   where the git work-tree is a CHILD of the container and the real kanban/ is
+#   a SIBLING of it. A path rooted at the work-tree's shadow kanban/ (e.g.
+#   .../{{ORG_NAME}}App-iOS/DEV/kanban/knowledge/project — still reachable here via
+#   a caller-supplied --dir, or via the XACA-0883 transitional legacy-base
+#   union while shadow entries remain unswept) would naively yield the
+#   work-tree's basename ("DEV") instead of the project's ("{{ORG_NAME}}App-iOS").
+#   Fixed by resolving the CANONICAL kanban dir for the naive container and
+#   using its parent's basename instead; falls open to the naive dirname^3
+#   result when the canonical resolver can't attribute the repo (unregistered
+#   project, no sibling probe match) — same fail-open contract as
+#   _kb_canonical_kanban_dir_for_repo's other callers.
 # Usage: _kb_knowledge_project_display_name <project_knowledge_dir>
 _kb_knowledge_project_display_name() {
     setopt LOCAL_OPTIONS NO_NOMATCH
@@ -2673,9 +3435,30 @@ _kb_knowledge_project_display_name() {
         search_dir=$(dirname "$search_dir")
     done
 
-    # (b) In-repo layout: .../kanban/knowledge/project → repo dir basename
+    # (b) In-repo layout: .../kanban/knowledge/project → owning project's name
     if [[ "$dir" == */kanban/knowledge/project ]]; then
-        echo "$(basename "$(dirname "$(dirname "$(dirname "$dir")")")")"
+        # Strip "/kanban/knowledge/project" to get the naive container — correct
+        # as-is for kanban-inside-repo teams, but for container-layout teams this
+        # may be the work-tree (e.g. .../{{ORG_NAME}}App-iOS/DEV), not the container.
+        local naive_container
+        naive_container=$(dirname "$(dirname "$(dirname "$dir")")")
+
+        # Resolve the CANONICAL kanban dir for that container (registry lookup +
+        # sibling probe, XACA-0883-001) and report ITS parent's basename instead
+        # — this is what re-attributes a work-tree path back to the project it
+        # actually belongs to. Fails open to the naive basename when the
+        # resolver can't attribute the repo (unregistered project, no sibling
+        # match): a wrong display name is a cosmetic regression, but inventing
+        # one from a resolver that admitted it couldn't attribute the repo
+        # would be worse.
+        local canonical_kanban_dir=""
+        canonical_kanban_dir=$(_kb_canonical_kanban_dir_for_repo "$naive_container" 2>/dev/null) || canonical_kanban_dir=""
+
+        if [[ -n "$canonical_kanban_dir" ]]; then
+            echo "$(basename "$(dirname "$canonical_kanban_dir")")"
+        else
+            echo "$(basename "$naive_container")"
+        fi
         return 0
     fi
 
@@ -3337,6 +4120,24 @@ kb-knowledge-search() {
     local project_path
     project_path=$(_kb_knowledge_project_path_effective)
 
+    # TRANSITIONAL UNION (XACA-0883, delete per _kb_knowledge_project_path_legacy's
+    # doc comment once a shadow-base sweep confirms every legacy base is empty
+    # or reconciled): the layout fix moves the canonical project path for
+    # container-layout teams; some installs may still have entries sitting at
+    # the pre-fix location (possibly another team's LIVE base — not ours to
+    # reconcile/move). Cheap in the common case: computed once, and only
+    # pushed onto search_roots (the thing that costs real work below) when it
+    # differs from project_path AND exists AND is non-empty. Reader-only —
+    # writers must target project_path alone.
+    local project_path_legacy=""
+    project_path_legacy=$(_kb_knowledge_project_path_legacy 2>/dev/null)
+    local project_path_legacy_usable=false
+    if [[ -n "$project_path_legacy" ]] && [[ "$project_path_legacy" != "$project_path" ]] && [[ -d "$project_path_legacy" ]]; then
+        local -a _legacy_probe
+        _legacy_probe=("${project_path_legacy}"/*(N))
+        (( ${#_legacy_probe[@]} > 0 )) && project_path_legacy_usable=true
+    fi
+
     # ── Build the list of search roots, in discovery-precedence order ──────────
     # Order: project, team (reserved, included when populated), subject, agent
     local -a search_roots
@@ -3362,11 +4163,24 @@ kb-knowledge-search() {
             else
                 search_roots+=("$project_path")
                 root_tier_labels+=("project")
+                if $project_path_legacy_usable; then
+                    search_roots+=("$project_path_legacy")
+                    root_tier_labels+=("project")
+                fi
             fi
         else
-            if [[ -d "$project_path" ]] && ! $any_scope_flag_set; then
-                search_roots+=("$project_path")
-                root_tier_labels+=("project")
+            if ! $any_scope_flag_set; then
+                if [[ -d "$project_path" ]]; then
+                    search_roots+=("$project_path")
+                    root_tier_labels+=("project")
+                fi
+                # Pushed independently of $project_path's existence: a fresh
+                # canonical base with no entries yet must not hide a
+                # non-empty legacy shadow base (XACA-0883 transitional union).
+                if $project_path_legacy_usable; then
+                    search_roots+=("$project_path_legacy")
+                    root_tier_labels+=("project")
+                fi
             fi
         fi
     fi
@@ -3948,7 +4762,7 @@ kb-knowledge-add() {
     fi
 
     if $show_help; then
-        echo "Usage: kb-knowledge-add <tier> [<target>] \"<title>\" [--force] [--allow-foreign-host]"
+        echo "Usage: kb-knowledge-add <tier> [<target>] \"<title>\" [--force] [--allow-foreign-host] [--allow-nonstandard-base]"
         echo ""
         echo "  tier       agent | subject | project | team"
         echo "  target     Agent name, subject path, team name, or (project) optional slug"
@@ -3964,6 +4778,13 @@ kb-knowledge-add() {
         echo "             Normally refused, because the local knowledge root never syncs"
         echo "             — the entry would be stranded here and invisible on the owning"
         echo "             host, and its entry id can collide with one allocated there."
+        echo "  --allow-nonstandard-base"
+        echo "             project tier only (XACA-0883): write project knowledge to the"
+        echo "             path as resolved, even when it lands inside the git work-tree"
+        echo "             while this repo's canonical kanban directory is a sibling of"
+        echo "             it. Normally the write is redirected to the canonical base,"
+        echo "             because the resolved path creates a second knowledge base that"
+        echo "             search will not read. Does NOT waive --force's PII check."
         echo ""
         echo "Examples:"
         echo "  kb-knowledge-add agent emh \"kapt error patterns\""
@@ -3987,8 +4808,16 @@ kb-knowledge-add() {
     # reason. It is the agent/team-tier counterpart of --force (host
     # authorization rather than PII-session disambiguation); subject/project
     # tiers ignore it silently.
+    #
+    # XACA-0883: --allow-nonstandard-base is stripped the same way, and is a
+    # SEPARATE flag from --force by design (guard contract §3.5) — a user
+    # silencing a layout-correctness warning must not thereby also silence a
+    # PII control. Neither flag implies the other, in either direction.
+    # project tier only (agent/team/subject tiers ignore it silently — same
+    # treatment as --force).
     local flag_allow_global=false
     local flag_allow_foreign_host=false
+    local flag_allow_nonstandard_base=false
     local -a _kb_add_filtered_args=()
     local _kb_add_arg
     for _kb_add_arg in "$@"; do
@@ -3996,6 +4825,8 @@ kb-knowledge-add() {
             flag_allow_global=true
         elif [[ "$_kb_add_arg" == "--allow-foreign-host" ]]; then
             flag_allow_foreign_host=true
+        elif [[ "$_kb_add_arg" == "--allow-nonstandard-base" ]]; then
+            flag_allow_nonstandard_base=true
         else
             _kb_add_filtered_args+=("$_kb_add_arg")
         fi
@@ -4097,9 +4928,21 @@ kb-knowledge-add() {
                 # ambiguity-sensitive — an in-repo/env-var override already
                 # points somewhere outside the synced repo regardless of
                 # whether the session's team can be resolved.
+                #
+                # ORDERING IS LOAD-BEARING (XACA-0883 guard contract §3.5):
+                # the PII gate MUST run FIRST, on the pre-redirect $target_dir
+                # — running the layout guard first would open a real bypass,
+                # because redirecting target_dir out from under
+                # ${global_root}/projects/ makes THIS prefix test stop
+                # matching, silently skipping the PII check for a write that
+                # was inside the synced root a moment earlier.
                 if [[ "$target_dir" == "${global_root}/projects/"* ]]; then
                     _kb_ambiguous_tier_write_guard "$flag_allow_global" || return 1
                 fi
+                # Layout gate SECOND; may rewrite target_dir to the canonical
+                # base (XACA-0883). Independent of the PII guard above — see
+                # _kb_knowledge_project_layout_guard's header comment.
+                target_dir=$(_kb_knowledge_project_layout_guard "$target_dir" "$flag_allow_nonstandard_base") || return 1
             fi
             prefix="p"
             ;;
@@ -4252,20 +5095,40 @@ FRONTMATTER
 kb-knowledge-promote() {
     setopt LOCAL_OPTIONS NO_NOMATCH
     local source_ref="${1:-}" target_ref="${2:-}" flag_confirm=false
+    # XACA-0883-021/024: independent of --confirm in both directions, same
+    # design precedent as kb-knowledge-add's --allow-nonstandard-base
+    # (XACA-0883-004 guard contract §3.5) — a user silencing a layout warning
+    # must not thereby also silence the dry-run/execute control, or vice versa.
+    local flag_allow_nonstandard_base=false
 
     shift 2 2>/dev/null
     while [[ $# -gt 0 ]]; do
         case "${1-}" in
             --confirm) flag_confirm=true; shift ;;
+            --allow-nonstandard-base) flag_allow_nonstandard_base=true; shift ;;
             *) echo "Unknown flag: ${1-}" >&2; shift ;;
         esac
     done
 
     if [[ -z "$source_ref" ]] || [[ -z "$target_ref" ]]; then
-        echo "Usage: kb-knowledge-promote <source-ref> <target-ref> [--confirm]"
+        echo "Usage: kb-knowledge-promote <source-ref> <target-ref> [--confirm] [--allow-nonstandard-base]"
         echo ""
         echo "  source-ref   agents:<persona>:<entry-id>"
         echo "  target-ref   subjects:<path>  OR  subjects:<path>:<entry-id>"
+        echo ""
+        echo "  --confirm"
+        echo "             Execute the promotion. Without it, this is a dry-run: prints"
+        echo "             the plan (including the project-tier destination the real run"
+        echo "             would use) and exits without creating any directory or writing"
+        echo "             any file."
+        echo "  --allow-nonstandard-base"
+        echo "             project tier only (XACA-0883): write to the target path as"
+        echo "             resolved, even when it lands inside the git work-tree while"
+        echo "             this repo's canonical kanban directory is a sibling of it."
+        echo "             Normally the write is redirected to the canonical base, or"
+        echo "             refused outright if the canonical base is ambiguous (an"
+        echo "             unattributable, disagreeing registry). Independent of"
+        echo "             --confirm in both directions — neither implies the other."
         echo ""
         echo "Examples:"
         echo "  kb-knowledge-promote agents:emh:k042 subjects:ios/swift"
@@ -4280,6 +5143,17 @@ kb-knowledge-promote() {
     local source_tier target_tier
     source_tier="${source_ref%%:*}"
     target_tier="${target_ref%%:*}"
+
+    # XACA-0883-029: --allow-nonstandard-base is the project-tier layout
+    # guard's own override (XACA-0883-021/024) — it only has meaning when
+    # the target tier is "project", since the layout guard is never
+    # consulted for agents/teams/subjects targets. Refuse explicitly instead
+    # of silently accepting a flag that has no effect on any other tier.
+    if $flag_allow_nonstandard_base && [[ "$target_tier" != "project" ]]; then
+        echo "Error: --allow-nonstandard-base only applies to a project-tier target (XACA-0883); target tier here is '${target_tier}'." >&2
+        return 1
+    fi
+
     local source_rank target_rank
     source_rank=$(_kb_knowledge_tier_rank "$source_tier")
     target_rank=$(_kb_knowledge_tier_rank "$target_tier")
@@ -4394,6 +5268,28 @@ kb-knowledge-promote() {
             target_path_part=""
             target_entry_part="$target_remainder"
             target_dir=$(_kb_knowledge_project_path)
+            # XACA-0883-021/024: route through the same layout guard
+            # kb-knowledge-add's bare-project branch uses, so an
+            # ambiguous-registry (T3) work-tree REFUSES here too instead of
+            # silently promoting into a shadow base. A non-zero return
+            # aborts the whole promotion before the plan is even printed and
+            # before target_dir is used for anything — no directory
+            # created, no file written.
+            #
+            # Dry-run (no --confirm) must not prompt: force_noninteractive so
+            # a preview never blocks on stdin, while still showing (via the
+            # guard's own stderr disclosure + the plan's "Target:" line
+            # below) the destination a NON-interactive run would use.
+            # --confirm gets the guard's normal behavior (interactive prompt
+            # on a real tty, same as kb-knowledge-add) — and on a real tty a
+            # user who DECLINES that prompt gets the ORIGINAL resolved
+            # (non-canonical) path back instead, which this preview cannot
+            # predict (XACA-0883-028: see the disclosed caveat in the
+            # dry-run branch below, keyed off target_dir_pre_guard).
+            local target_dir_pre_guard="$target_dir"
+            local promote_force_noninteractive=true
+            $flag_confirm && promote_force_noninteractive=false
+            target_dir=$(_kb_knowledge_project_layout_guard "$target_dir" "$flag_allow_nonstandard_base" "$promote_force_noninteractive") || return 1
             target_prefix="p"
             ;;
         # No default branch: unknown tiers are caught upstream by the SPEC §7
@@ -4453,6 +5349,19 @@ kb-knowledge-promote() {
 
     if ! $flag_confirm; then
         echo ""
+        # XACA-0883-028: this preview's "Target:" line above reflects the
+        # NON-interactive redirect outcome (dry-run always forces that
+        # branch — see promote_force_noninteractive above). A real --confirm
+        # run on an actual terminal instead hits the guard's interactive
+        # prompt, and a user who declines it gets the ORIGINAL,
+        # non-canonical path back — a genuinely different destination this
+        # preview cannot predict. Disclose that only when it's actually
+        # possible (target_dir_pre_guard is set only for the project tier,
+        # and only differs from target_dir when the guard actually
+        # redirected — no redirect means no divergence risk).
+        if [[ "$target_tier" == "project" ]] && [[ "$target_dir" != "$target_dir_pre_guard" ]]; then
+            echo "  Note: the Target above is the non-interactive (redirected/canonical) outcome. A --confirm run on a real terminal will prompt first; declining there writes into ${target_dir_pre_guard} instead, not the Target shown above (XACA-0883-028)."
+        fi
         echo "  Dry-run only. Pass --confirm to execute."
         echo ""
         return 0
