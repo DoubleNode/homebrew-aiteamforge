@@ -4772,6 +4772,7 @@ kb-knowledge-add() {
         echo "             could not be resolved at all — normally refused, since an"
         echo "             unresolvable session might be a finance/legal/medical (PII) one."
         echo "             Ignored for agent/team tiers."
+        echo "             Does NOT waive --allow-nonstandard-base's layout check."
         echo "  --allow-foreign-host"
         echo "             agent/team tiers only (XACA-0802): write a local-only team's"
         echo "             entry on a host that is NOT that team's declared primary_host."
