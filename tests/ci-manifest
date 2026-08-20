@@ -93,6 +93,7 @@ test-xaca-0788-crash-recovery-in-tap.sh         plain-shell
 test-xaca-0792-team-instance-id.sh              plain-shell
 test-xaca-0799-restart-symmetry.sh              plain-shell
 test-xaca-0814-upgrade-connect-scripts.sh       plain-shell
+test-xaca-0819-pause-resume-active-span.sh      plain-shell
 test-xaca-0831-alloc-slot-atomicity.sh          plain-shell
 test-xaca-0834-connect-script-recovery.sh       plain-shell
 test-xaca-0845-connect-script-parametric-teams.sh plain-shell

@@ -1070,6 +1070,28 @@ _kb_get_timestamp() {
     date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
+# Ported from canonical kanban-helpers.sh for XACA-0819. Deliberately NOT
+# called from `kb-backlog demote` (per XACA-0884/XACA-0552) — definition only.
+_kb_flush_work_time() {
+    local board_file="$1" base_path="$2"
+    local work_started_at existing_time_ms total_time_ms
+    work_started_at=$(_kb_jq_read "$board_file" "${base_path}.workStartedAt // empty" -r)
+    existing_time_ms=$(_kb_jq_read "$board_file" "${base_path}.timeWorkedMs // 0")
+    total_time_ms="$existing_time_ms"
+    if [[ -n "$work_started_at" ]]; then
+        local start_epoch now_epoch elapsed_ms
+        # Strip fractional seconds and Z suffix before parsing as UTC (macOS date -j -f
+        # rejects sub-second precision; ${var%\.[0-9]*} drops .ffffff[Z] then %Z drops any Z)
+        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${${work_started_at%\.[0-9]*}%Z}" "+%s" 2>/dev/null || echo "0")
+        now_epoch=$(date -u "+%s")
+        if [[ "$start_epoch" != "0" ]] && [[ "$start_epoch" -gt 0 ]]; then
+            elapsed_ms=$(( (now_epoch - start_epoch) * 1000 ))
+            total_time_ms=$(( existing_time_ms + elapsed_ms ))
+        fi
+    fi
+    echo "$total_time_ms"
+}
+
 # Set the item/subitem being worked on for the current window
 # Usage: _kb_set_working_on <id> [work_mode]
 # ID can be an item (XFRE-0001) or subitem (XFRE-0001-001)
@@ -2324,6 +2346,29 @@ kb-pause() {
     local timestamp
     timestamp=$(_kb_get_timestamp)
 
+    # XACA-0551: A pause ENDS the current active span. Flush the elapsed time into
+    # timeWorkedMs and clear workStartedAt so post-resume time is measured fresh.
+    # The flush total is computed read-only; resolve the right base_path for either
+    # a main item or a subitem working_on_id.
+    local pause_total_time_ms="0"
+    if [[ -n "$working_on_id" ]]; then
+        if _kb_is_subitem_id "$working_on_id"; then
+            local pause_indices pause_pidx pause_sidx
+            pause_indices=$(_kb_resolve_subitem_id "$board_file" "$working_on_id")
+            pause_pidx="${pause_indices%%:*}"
+            pause_sidx="${pause_indices##*:}"
+            if [[ "$pause_pidx" != "-1" ]] && [[ "$pause_sidx" != "-1" ]]; then
+                pause_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$pause_pidx].subitems[$pause_sidx]")
+            fi
+        else
+            local pause_item_idx
+            pause_item_idx=$(_kb_find_by_id "$board_file" "$working_on_id")
+            if [[ "$pause_item_idx" -ge 0 ]]; then
+                pause_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$pause_item_idx]")
+            fi
+        fi
+    fi
+
     # Update the window AND the backlog item: set status to paused, store reason and previous status
     # Persisting to backlog item allows paused state to survive terminal restarts
     _kb_jq_update "$board_file" '
@@ -2343,18 +2388,22 @@ kb-pause() {
             # Try to find and update the item or subitem
             .backlog = [.backlog[] |
                 if .id == $workingOnId then
-                    # Direct match on parent item
+                    # Direct match on parent item — end the active span
                     .pausedReason = $reason |
                     .pausedAt = $timestamp |
                     .pausedPreviousStatus = $prevStatus |
+                    (if $timeMs != "0" then .timeWorkedMs = ($timeMs | tonumber) else . end) |
+                    del(.workStartedAt) |
                     .updatedAt = $timestamp
                 elif (.subitems // []) | any(.id == $workingOnId) then
-                    # Match on a subitem - update the subitem
+                    # Match on a subitem — end the active span on the subitem
                     .subitems = [(.subitems // [])[] |
                         if .id == $workingOnId then
                             .pausedReason = $reason |
                             .pausedAt = $timestamp |
                             .pausedPreviousStatus = $prevStatus |
+                            (if $timeMs != "0" then .timeWorkedMs = ($timeMs | tonumber) else . end) |
+                            del(.workStartedAt) |
                             .updatedAt = $timestamp
                         else . end
                     ]
@@ -2367,7 +2416,8 @@ kb-pause() {
     --arg reason "$reason" \
     --arg prevStatus "$current_status" \
     --arg workingOnId "$working_on_id" \
-    --arg timestamp "$timestamp"
+    --arg timestamp "$timestamp" \
+    --arg timeMs "$pause_total_time_ms"
 
     echo "⏸️  PAUSED: $reason"
     echo "   (was: $current_status)"
@@ -4107,18 +4157,24 @@ kb-resume() {
         (if $workingOnId != "" then
             .backlog = [.backlog[] |
                 if .id == $workingOnId then
-                    # Direct match on parent item
+                    # Direct match on parent item — START a fresh active span
+                    # (XACA-0551). kb-pause flushed + cleared workStartedAt; resume
+                    # restarts the clock so post-resume time is credited.
                     del(.pausedReason) |
                     del(.pausedAt) |
                     del(.pausedPreviousStatus) |
+                    .workStartedAt = $timestamp |
+                    .startedAt //= $timestamp |
                     .updatedAt = $timestamp
                 elif (.subitems // []) | any(.id == $workingOnId) then
-                    # Match on a subitem - clear from the subitem
+                    # Match on a subitem — START a fresh active span on the subitem
                     .subitems = [(.subitems // [])[] |
                         if .id == $workingOnId then
                             del(.pausedReason) |
                             del(.pausedAt) |
                             del(.pausedPreviousStatus) |
+                            .workStartedAt = $timestamp |
+                            .startedAt //= $timestamp |
                             .updatedAt = $timestamp
                         else . end
                     ]
@@ -5716,17 +5772,25 @@ kb-backlog() {
             demote_timestamp=$(_kb_get_timestamp)
 
             # XACA-0884/XACA-0552 -- DELIBERATE INVERSION of `sub todo` above.
-            # Do NOT call _kb_flush_work_time here, and do NOT add one. This
-            # template has no _kb_flush_work_time function at all (verified: grep
-            # this file), which today makes the freeze trivially correct -- but
-            # that is NOT luck to be "fixed" by a future sync toward canonical.
+            # Do NOT call _kb_flush_work_time here, and do NOT add one.
+            #
+            # XACA-0819 UPDATE: _kb_flush_work_time NOW EXISTS in this template
+            # (ported from canonical alongside the kb-pause/kb-resume active-span
+            # sync). The original form of this comment said the function was
+            # absent entirely, and rested the freeze's correctness on that
+            # absence. That premise is now FALSE -- but the instruction it
+            # guarded is UNCHANGED and is now load-bearing rather than trivially
+            # satisfied. demote is reachable from a caller that could flush, so
+            # this is the precondition the original comment anticipated.
             # A demoted item's open workStartedAt is DISCARDED, never credited
             # into timeWorkedMs -- items not actively being worked keep their
             # persisted timeWorkedMs verbatim. Precedent: a stale workStartedAt
             # left open for ~4 months would have been booked as ~4 months of
-            # phantom work by a naive flush-on-demote. If canonical's
-            # _kb_flush_work_time ever gets ported into this template, demote
-            # must still NOT call it.
+            # phantom work by a naive flush-on-demote. That port has now
+            # HAPPENED (XACA-0819) and demote still does NOT call it -- which is
+            # the whole point. Enforced by test-xaca-0819-pause-resume-active-span.sh,
+            # which asserts the only _kb_flush_work_time call sites in this file
+            # are the two inside kb-pause.
             local demote_jq_filter='
                 .backlog[$idx].status = "todo" |
                 .backlog[$idx].updatedAt = $ts |
