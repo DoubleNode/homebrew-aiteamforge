@@ -2886,10 +2886,9 @@ PYEOF
     # loop leaks the assignment to stdout and corrupts the caller's capture.
     local -a distinct_kd
     distinct_kd=("${(u)best_kd[@]}")
-    local _kd_key _t _kd_noun="directories" _kd_verb="are"
+    local _kd_key _t
     local -a _tid_list
     local -A kd_teams
-    (( ${#distinct_kd[@]} == 1 )) && { _kd_noun="directory"; _kd_verb="is"; }
 
     {
         # XACA-0883-020: with an empty candidate list the old wording emitted
@@ -2899,7 +2898,16 @@ PYEOF
         if (( ${#best_lines[@]} == 0 )); then
             echo "Error: cannot determine the canonical kanban directory for this repo — no registry entry claims it, and no sibling kanban directory with a board file was found."
         else
-            echo "Error: cannot determine the canonical kanban directory for this repo — ${#distinct_kd[@]} distinct kanban ${_kd_noun} ${_kd_verb} claimed by ${#best_lines[@]} registry entries at the same depth:"
+    # XACA-0883-033: the singular form of this message would be
+    # self-contradictory -- one distinct kanban directory is not a conflict at
+    # all. It is also unreachable: this reporter's sole caller invokes it only
+    # when the resolver returns rc=2, and the resolver sets that only after
+    # seeing a same-depth candidate whose kanban_dir DIFFERS from the first one
+    # recorded at that depth, so at least 2 distinct values exist. This reporter
+    # re-derives distinct_kd over the identical filter chain, so it can never be
+    # 1 here. Do not reintroduce a singular/plural branch without first proving
+    # distinct_kd can be 1 when rc=2.
+            echo "Error: cannot determine the canonical kanban directory for this repo — ${#distinct_kd[@]} distinct kanban directories are claimed by ${#best_lines[@]} registry entries at the same depth:"
         fi
         # Group by kanban_dir value so agreeing team ids (normal, L2) are
         # visually distinct from a genuinely conflicting value, rather than
