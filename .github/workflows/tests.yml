@@ -11,6 +11,7 @@ on:
     paths:
       - 'Formula/**'
       - '.github/workflows/tests.yml'
+      - 'share/**'
       - 'tests/**'
       - 'scripts/**'
       - 'fleet-monitor/**'
@@ -21,6 +22,7 @@ on:
     paths:
       - 'Formula/**'
       - '.github/workflows/tests.yml'
+      - 'share/**'
       - 'tests/**'
       - 'scripts/**'
       - 'fleet-monitor/**'

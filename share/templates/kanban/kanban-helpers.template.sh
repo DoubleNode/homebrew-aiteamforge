@@ -2307,7 +2307,7 @@ kb-unblock() {
 # Also persists paused state to backlog item for survival across terminal restarts
 # Note: PAUSED = external wait (manual resume). Different from future dependency-based blocking.
 kb-pause() {
-    local reason="$1"
+    local reason="${1-}"
 
     if [[ -z "$reason" ]]; then
         echo "Usage: kb-pause \"reason for pausing\""
@@ -2346,26 +2346,36 @@ kb-pause() {
     local timestamp
     timestamp=$(_kb_get_timestamp)
 
-    # XACA-0551: A pause ENDS the current active span. Flush the elapsed time into
+    # XACA-0551: A pause ENDS the current active span -- flush elapsed into
     # timeWorkedMs and clear workStartedAt so post-resume time is measured fresh.
-    # The flush total is computed read-only; resolve the right base_path for either
-    # a main item or a subitem working_on_id.
+    #
+    # SUBITEM ONLY -- deliberate divergence from canonical (XACA-0819-014).
+    # Canonical applies this to items AND subitems. Here it is applied to
+    # SUBITEMS ONLY, because this template's item level has no counterpart
+    # flush anywhere: kb-done / kb-cancel / kb-stop-working / kb-backlog unpick
+    # all delete an item's workStartedAt WITHOUT banking it. Writing item-level
+    # timeWorkedMs on pause alone would therefore produce a total that is always
+    # missing its final span -- and `kb-variance` (share/templates/aliases/
+    # kanban-aliases.sh) selects completed items on `timeWorkedMs > 0`, so those
+    # items would silently graduate from the honest `no_time` bucket into the
+    # estimate-accuracy math carrying a systematically LOW actual. An absent
+    # number is better than a plausible wrong one.
+    #
+    # Subitems have the counterpart flushes canonical assumes (4 sites in this
+    # file), so the span is fully accounted there and this is safe.
+    #
+    # Do NOT "complete" this by porting flush into those 4 item-level verbs
+    # without re-deriving the semantics first: canonical's `unpick` flush is on
+    # record inflating timeWorkedMs to ~12.2 BILLION ms from a single stale
+    # workStartedAt (see XACA-0884 in the outer CHANGELOG).
     local pause_total_time_ms="0"
-    if [[ -n "$working_on_id" ]]; then
-        if _kb_is_subitem_id "$working_on_id"; then
-            local pause_indices pause_pidx pause_sidx
-            pause_indices=$(_kb_resolve_subitem_id "$board_file" "$working_on_id")
-            pause_pidx="${pause_indices%%:*}"
-            pause_sidx="${pause_indices##*:}"
-            if [[ "$pause_pidx" != "-1" ]] && [[ "$pause_sidx" != "-1" ]]; then
-                pause_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$pause_pidx].subitems[$pause_sidx]")
-            fi
-        else
-            local pause_item_idx
-            pause_item_idx=$(_kb_find_by_id "$board_file" "$working_on_id")
-            if [[ "$pause_item_idx" -ge 0 ]]; then
-                pause_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$pause_item_idx]")
-            fi
+    if [[ -n "$working_on_id" ]] && _kb_is_subitem_id "$working_on_id"; then
+        local pause_indices pause_pidx pause_sidx
+        pause_indices=$(_kb_resolve_subitem_id "$board_file" "$working_on_id")
+        pause_pidx="${pause_indices%%:*}"
+        pause_sidx="${pause_indices##*:}"
+        if [[ "$pause_pidx" != "-1" ]] && [[ "$pause_sidx" != "-1" ]]; then
+            pause_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$pause_pidx].subitems[$pause_sidx]")
         fi
     fi
 
@@ -2388,12 +2398,11 @@ kb-pause() {
             # Try to find and update the item or subitem
             .backlog = [.backlog[] |
                 if .id == $workingOnId then
-                    # Direct match on parent item — end the active span
+                    # Direct match on parent item — paused state only.
+                    # NO span flush/clear here: see the SUBITEM ONLY note above.
                     .pausedReason = $reason |
                     .pausedAt = $timestamp |
                     .pausedPreviousStatus = $prevStatus |
-                    (if $timeMs != "0" then .timeWorkedMs = ($timeMs | tonumber) else . end) |
-                    del(.workStartedAt) |
                     .updatedAt = $timestamp
                 elif (.subitems // []) | any(.id == $workingOnId) then
                     # Match on a subitem — end the active span on the subitem
@@ -4157,14 +4166,18 @@ kb-resume() {
         (if $workingOnId != "" then
             .backlog = [.backlog[] |
                 if .id == $workingOnId then
-                    # Direct match on parent item — START a fresh active span
-                    # (XACA-0551). kb-pause flushed + cleared workStartedAt; resume
-                    # restarts the clock so post-resume time is credited.
+                    # Direct match on parent item — clear paused state ONLY.
+                    # Deliberately does NOT restart the span (XACA-0819-014):
+                    # kb-pause does not END it at item level in this template, so
+                    # overwriting workStartedAt here would DISCARD the pre-pause
+                    # elapsed that the live active-effort display still reads.
+                    # Item-level pause/resume behaviour is therefore unchanged
+                    # from before XACA-0819. Pause and resume must stay paired:
+                    # if the item-level flush is ever added to kb-pause, add the
+                    # restart back HERE in the same change, never separately.
                     del(.pausedReason) |
                     del(.pausedAt) |
                     del(.pausedPreviousStatus) |
-                    .workStartedAt = $timestamp |
-                    .startedAt //= $timestamp |
                     .updatedAt = $timestamp
                 elif (.subitems // []) | any(.id == $workingOnId) then
                     # Match on a subitem — START a fresh active span on the subitem
@@ -5773,24 +5786,17 @@ kb-backlog() {
 
             # XACA-0884/XACA-0552 -- DELIBERATE INVERSION of `sub todo` above.
             # Do NOT call _kb_flush_work_time here, and do NOT add one.
-            #
-            # XACA-0819 UPDATE: _kb_flush_work_time NOW EXISTS in this template
-            # (ported from canonical alongside the kb-pause/kb-resume active-span
-            # sync). The original form of this comment said the function was
-            # absent entirely, and rested the freeze's correctness on that
-            # absence. That premise is now FALSE -- but the instruction it
-            # guarded is UNCHANGED and is now load-bearing rather than trivially
-            # satisfied. demote is reachable from a caller that could flush, so
-            # this is the precondition the original comment anticipated.
+            # XACA-0819 ported that function into this template, so the freeze is
+            # now load-bearing rather than trivially satisfied by its absence.
             # A demoted item's open workStartedAt is DISCARDED, never credited
             # into timeWorkedMs -- items not actively being worked keep their
             # persisted timeWorkedMs verbatim. Precedent: a stale workStartedAt
             # left open for ~4 months would have been booked as ~4 months of
-            # phantom work by a naive flush-on-demote. That port has now
-            # HAPPENED (XACA-0819) and demote still does NOT call it -- which is
-            # the whole point. Enforced by test-xaca-0819-pause-resume-active-span.sh,
-            # which asserts the only _kb_flush_work_time call sites in this file
-            # are the two inside kb-pause.
+            # phantom work by a naive flush-on-demote. Now that canonical's
+            # _kb_flush_work_time HAS been ported into this template, demote
+            # must still NOT call it. Enforced by
+            # test-xaca-0819-pause-resume-active-span.sh, which asserts the only
+            # call sites in this file are the two inside kb-pause.
             local demote_jq_filter='
                 .backlog[$idx].status = "todo" |
                 .backlog[$idx].updatedAt = $ts |

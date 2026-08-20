@@ -10,14 +10,31 @@
 # elapsed time into `timeWorkedMs`. kb-resume then unconditionally overwrote
 # `workStartedAt` with a fresh timestamp on the NEXT resume, silently
 # DESTROYING the entire pre-pause span (measured: a ~9h span vanished on one
-# pause/resume cycle -- see the ticket's evidence). The fix:
-#   - kb-pause now flushes the active span via the newly-ported
+# pause/resume cycle -- see the ticket's evidence).
+#
+# SCOPE CORRECTION (XACA-0819-014, PR #756 review): the fix below is now
+# SUBITEM-ONLY, not "both branches" as an earlier draft of this ticket shipped
+# and this suite originally asserted. Why: this template's ITEM level has no
+# counterpart flush anywhere -- kb-done / kb-cancel / kb-stop-working /
+# kb-backlog unpick all DELETE an item's workStartedAt WITHOUT banking it.
+# Writing item-level timeWorkedMs on pause alone would therefore produce a
+# total that is ALWAYS missing its final span. Worse: `kb-variance` (share/
+# templates/aliases/kanban-aliases.sh) selects completed items on
+# `timeWorkedMs > 0`, so those items would silently graduate from the honest
+# `no_time` bucket into the estimate-accuracy math carrying a systematically
+# LOW actual -- a plausible-looking wrong number is worse than an absent one.
+# Subitems DO have the counterpart flushes canonical assumes (4 pre-existing
+# sites in this file), so the span is fully accounted there and applying the
+# full XACA-0551 sync to subitems only is safe. The fix, as shipped:
+#   - kb-pause flushes the active span via the newly-ported
 #     _kb_flush_work_time() into timeWorkedMs, then clears workStartedAt --
-#     for BOTH the parent-item branch and the subitem branch of its jq filter.
-#   - kb-resume now opens a FRESH span (`workStartedAt = $timestamp`) and
-#     seeds `startedAt` only if absent (`startedAt //= $timestamp`) so the
-#     item's original start time is never clobbered by a later resume --
-#     again for both branches.
+#     for the SUBITEM branch of its jq filter ONLY. The parent-item branch is
+#     UNCHANGED from pre-XACA-0819 behavior (no flush, no clear).
+#   - kb-resume opens a FRESH span (`workStartedAt = $timestamp`) and seeds
+#     `startedAt` only if absent (`startedAt //= $timestamp`) -- again for the
+#     SUBITEM branch ONLY. The parent-item branch only clears paused-state
+#     fields; it deliberately does NOT touch workStartedAt/startedAt, because
+#     kb-pause never ended that span at item level in the first place.
 #   - `_kb_flush_work_time` is a pure, read-only-of-intent helper: it computes
 #     existing_time_ms + elapsed(workStartedAt..now), but does NOT write
 #     anything itself; kb-pause applies its result via the jq --arg timeMs.
@@ -27,15 +44,28 @@
 #     as phantom work. This suite's static assertions are the enforcement
 #     mechanism the template's own comments point back to.
 #
-# THE PLATFORM TRAP (XACA-0819 ticket note, confirmed by reading the code):
+# THE PLATFORM TRAP (verified against the template's source):
 # _kb_flush_work_time parses timestamps via `date -j -f`, which is BSD/macOS-
-# only, with zero GNU `date -d` fallback anywhere in this template. Tap CI
-# runs ubuntu-latest, where that parse fails, the `|| echo "0"` guard fires,
-# and elapsed computes as exactly ZERO (existing_time_ms passes through
-# unchanged). This suite therefore NEVER asserts "elapsed time grew" -- every
-# assertion below is chosen to hold on BOTH macOS (seed + real elapsed) and
-# Linux (elapsed == 0, i.e. exactly the seed) while still being sensitive to
-# the actual regression:
+# only, with zero GNU `date -d` fallback anywhere in this template. On any
+# GNU-coreutils host that parse fails, the `|| echo "0"` guard fires, and
+# elapsed computes as exactly ZERO (existing_time_ms passes through unchanged).
+#
+# CORRECTION (PR #756 review): an earlier version of this header asserted "Tap
+# CI runs ubuntu-latest". That was WRONG and was inferred, not checked. The
+# manifest-driven plain-shell suites -- including this one -- run in the
+# `test-shell-homebrew-tap` job on **macos-latest**, in this tap repo's own
+# .github/workflows/tests.yml. The ubuntu-latest job that claim was taken from
+# lives in dev-team's tap-installer-tests.yml and runs installer tests, not
+# these suites.
+#
+# The portable assertions below are KEPT anyway, deliberately. They cost
+# nothing on macOS, they keep the suite correct if it is ever run on a Linux
+# runner or by a Linux consumer, and the property that actually catches the
+# regression -- (d) -- is platform-independent either way. This suite therefore
+# NEVER asserts "elapsed time grew" for the subitem cycle -- every assertion
+# below is chosen to hold on BOTH macOS (seed + real elapsed) and Linux
+# (elapsed == 0, i.e. exactly the seed) while still being sensitive to the
+# actual regression, on the SUBITEM which now carries the full behavior:
 #   (a) after pause:  workStartedAt is ABSENT                       [portable]
 #   (b) after pause:  timeWorkedMs >= seeded value                  [portable]
 #   (c) after resume: workStartedAt is PRESENT                      [portable]
@@ -46,22 +76,31 @@
 #   (e) startedAt is preserved across resume, never overwritten     [portable]
 #       <- proves the `//=` (not `=`) operator choice on kb-resume.
 #
-# Both the pause and resume jq filters carry TWO branches (parent-item id
-# match, and subitem id match within `.subitems[]`) -- both were changed by
-# this port and both are exercised here (Coverage 1 + 2 below).
+# The PARENT-ITEM branch is asserted SEPARATELY (Coverage 1) as UNCHANGED --
+# workStartedAt/timeWorkedMs/startedAt must all be identical before and after
+# a pause/resume cycle at item level, framed explicitly as a regression guard
+# against someone re-adding the item-level write without also adding the four
+# counterpart flushes XACA-0819-014 identified as missing.
 #
 # Coverage:
 #   A. Render + hygiene -- no {{placeholder}} survives the rendered template.
-#   1. Parent-item path: full pick-state -> pause -> resume cycle, asserting
-#      (a)-(e) on the top-level backlog item.
-#   2. Subitem path: same cycle, asserting (a)-(e) on a subitem nested under
-#      a parent item (`workingOnId` set to the SUBITEM id).
+#   1. [REGRESSION GUARD XACA-0819-014] Parent-item path: full pick-state ->
+#      pause -> resume cycle, asserting workStartedAt/timeWorkedMs/startedAt
+#      are ALL UNCHANGED throughout -- item-level pause/resume behavior must
+#      stay exactly as it was before XACA-0819 (no flush, no span restart).
+#   2. Subitem path: full XACA-0551 cycle, asserting (a)-(e) on a subitem
+#      nested under a parent item (`workingOnId` set to the SUBITEM id).
 #   3. Static structural assertions on the (unmodified, real) template:
 #        - exactly 1 _kb_flush_work_time function definition
-#        - exactly 2 real call sites (`_kb_flush_work_time "`), and BOTH fall
-#          inside kb-pause's own line range (extracted by isolating the
-#          function body between its `kb-pause() {` header and its own
-#          top-level closing `}`)
+#        - exactly 1 real call site (`_kb_flush_work_time "`), inside
+#          kb-pause's own line range (extracted by isolating the function
+#          body between its `kb-pause() {` header and its own top-level
+#          closing `}`)
+#        - kb-pause's PARENT-ITEM jq branch (isolated between its
+#          `if .id == $workingOnId then` and the following
+#          `elif (.subitems ...` marker) contains ZERO `timeWorkedMs` writes
+#          and ZERO `del(.workStartedAt)` calls -- the XACA-0819-014 guard
+#          that this suite's Coverage 1 exists to back up structurally.
 #        - ZERO real call sites inside the `kb-backlog demote` case arm
 #          (extracted the same way, between the `demote|todo)` case label and
 #          the next case label) -- comment mentions of the function's name do
@@ -221,7 +260,12 @@ _assert_board_in_sandbox() {
 _assert_board_in_sandbox
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Coverage 1: PARENT-ITEM pick -> pause -> resume cycle.
+# Coverage 1 [REGRESSION GUARD XACA-0819-014]: PARENT-ITEM pick -> pause ->
+# resume cycle. Item-level behavior must be COMPLETELY UNCHANGED by this
+# cycle -- no flush, no clear, no span restart -- because this template has
+# no counterpart flush at item level (kb-done/kb-cancel/kb-stop-working/
+# kb-backlog unpick all discard workStartedAt without banking it). A pass
+# here means item-level pause/resume is still a pure paused-state toggle.
 # ─────────────────────────────────────────────────────────────────────────────
 SEED_STARTED_AT="2026-08-20T09:00:00Z"
 SEED_TIME_MS="5000000"
@@ -246,33 +290,37 @@ cat > "$BOARD" <<JSON
 JSON
 
 zsh -c "source '$RENDERED' >/dev/null 2>&1; kb-pause 'suite pause reason'" >"$WORK_DIR/p1-pause.out" 2>&1
-_P1_WSA_AFTER_PAUSE=$(jq -r '.backlog[0] | has("workStartedAt")' "$BOARD")
-ok "1a: parent item — workStartedAt is ABSENT after pause" \
-   "$([ "$_P1_WSA_AFTER_PAUSE" = "false" ] && echo 1 || echo 0)" \
-   "expected workStartedAt absent, has()=$_P1_WSA_AFTER_PAUSE; board=$(cat "$BOARD")"
+_P1_WSA_AFTER_PAUSE=$(jq -r '.backlog[0].workStartedAt // "ABSENT"' "$BOARD")
+ok "1a [REGRESSION GUARD XACA-0819-014]: parent item — workStartedAt SURVIVES pause unchanged (no item-level flush exists)" \
+   "$([ "$_P1_WSA_AFTER_PAUSE" = "$SEED_STARTED_AT" ] && echo 1 || echo 0)" \
+   "expected workStartedAt still '$SEED_STARTED_AT' after pause (item level has no flush), got '$_P1_WSA_AFTER_PAUSE'; board=$(cat "$BOARD")"
 
 _P1_TWM_AFTER_PAUSE=$(jq -r '.backlog[0].timeWorkedMs' "$BOARD")
-ok "1b: parent item — timeWorkedMs >= seeded value ($SEED_TIME_MS) after pause" \
-   "$([ "${_P1_TWM_AFTER_PAUSE:-0}" -ge "$SEED_TIME_MS" ] 2>/dev/null && echo 1 || echo 0)" \
-   "expected >= $SEED_TIME_MS, got $_P1_TWM_AFTER_PAUSE"
+ok "1b [REGRESSION GUARD XACA-0819-014]: parent item — timeWorkedMs does NOT grow after pause (stays exactly seeded value)" \
+   "$([ "$_P1_TWM_AFTER_PAUSE" = "$SEED_TIME_MS" ] && echo 1 || echo 0)" \
+   "expected timeWorkedMs to remain exactly $SEED_TIME_MS after pause (a change means an item-level write crept back in without its counterpart flush machinery), got $_P1_TWM_AFTER_PAUSE"
 
 zsh -c "source '$RENDERED' >/dev/null 2>&1; kb-resume" >"$WORK_DIR/p1-resume.out" 2>&1
-_P1_WSA_AFTER_RESUME=$(jq -r '.backlog[0] | has("workStartedAt")' "$BOARD")
-ok "1c: parent item — workStartedAt is PRESENT after resume" \
-   "$([ "$_P1_WSA_AFTER_RESUME" = "true" ] && echo 1 || echo 0)" \
-   "expected workStartedAt present, has()=$_P1_WSA_AFTER_RESUME"
+_P1_WSA_AFTER_RESUME=$(jq -r '.backlog[0].workStartedAt // "ABSENT"' "$BOARD")
+ok "1c [REGRESSION GUARD XACA-0819-014]: parent item — workStartedAt after resume is STILL the ORIGINAL value (kb-resume does not restart the item-level span)" \
+   "$([ "$_P1_WSA_AFTER_RESUME" = "$SEED_STARTED_AT" ] && echo 1 || echo 0)" \
+   "expected workStartedAt still '$SEED_STARTED_AT' after resume (item-level span was never ended, so there is nothing to restart), got '$_P1_WSA_AFTER_RESUME'"
 
 _P1_TWM_AFTER_RESUME=$(jq -r '.backlog[0].timeWorkedMs' "$BOARD")
-ok "1d [REGRESSION GUARD]: parent item — timeWorkedMs UNCHANGED across resume ($_P1_TWM_AFTER_PAUSE -> $_P1_TWM_AFTER_RESUME)" \
-   "$([ "$_P1_TWM_AFTER_RESUME" = "$_P1_TWM_AFTER_PAUSE" ] && echo 1 || echo 0)" \
-   "post-pause timeWorkedMs=$_P1_TWM_AFTER_PAUSE, post-resume timeWorkedMs=$_P1_TWM_AFTER_RESUME — a mismatch means the active span was lost or re-banked across resume"
+ok "1d [REGRESSION GUARD XACA-0819-014]: parent item — timeWorkedMs UNCHANGED across the full pause+resume cycle ($_P1_TWM_AFTER_PAUSE -> $_P1_TWM_AFTER_RESUME)" \
+   "$([ "$_P1_TWM_AFTER_RESUME" = "$SEED_TIME_MS" ] && echo 1 || echo 0)" \
+   "expected timeWorkedMs to remain exactly $SEED_TIME_MS after resume, got $_P1_TWM_AFTER_RESUME"
 
 _P1_STARTED_AT_AFTER_RESUME=$(jq -r '.backlog[0].startedAt' "$BOARD")
-ok "1e: parent item — startedAt preserved across resume (proves //= not =)" \
+ok "1e [REGRESSION GUARD XACA-0819-014]: parent item — startedAt untouched throughout (item level was never part of this sync)" \
    "$([ "$_P1_STARTED_AT_AFTER_RESUME" = "$SEED_STARTED_AT" ] && echo 1 || echo 0)" \
    "expected startedAt still '$SEED_STARTED_AT', got '$_P1_STARTED_AT_AFTER_RESUME'"
 
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Re-assert the sandbox gate before this section's mutating calls (XACA-0819-018):
+# the header claims EVERY board-mutating call is gated, so every section must gate.
+_assert_board_in_sandbox
 # Coverage 2: SUBITEM pick -> pause -> resume cycle (workingOnId = subitem id).
 # ─────────────────────────────────────────────────────────────────────────────
 cat > "$BOARD" <<JSON
@@ -328,6 +376,42 @@ ok "2e: subitem — startedAt preserved across resume (proves //= not =)" \
    "$([ "$_P2_STARTED_AT_AFTER_RESUME" = "$SEED_STARTED_AT" ] && echo 1 || echo 0)" \
    "expected startedAt still '$SEED_STARTED_AT', got '$_P2_STARTED_AT_AFTER_RESUME'"
 
+# 2f: a FRESH subitem (never previously started — startedAt/workStartedAt
+# absent from the seed entirely) exercises the OTHER half of `//=`: when
+# startedAt is absent, resume must SET it. 2e alone cannot distinguish `//=`
+# from a stripped-entirely write, because when startedAt is already present
+# (2e's fixture), both "leave it alone" and "no-op due to missing line" look
+# identical. This scenario is the one that actually pins the operator down.
+cat > "$BOARD" <<JSON
+{
+  "nextId": 2,
+  "activeWindows": [
+    {"id": "agent:main", "status": "coding", "workingOnId": "XTST-0001-002"}
+  ],
+  "backlog": [
+    {
+      "id": "XTST-0001",
+      "title": "Parent of fresh subitem test",
+      "status": "in_progress",
+      "subitems": [
+        {
+          "id": "XTST-0001-002",
+          "title": "Fresh sub test item (never started)",
+          "status": "in_progress"
+        }
+      ]
+    }
+  ]
+}
+JSON
+
+zsh -c "source '$RENDERED' >/dev/null 2>&1; kb-pause 'fresh sub pause'" >"$WORK_DIR/p2f-pause.out" 2>&1
+zsh -c "source '$RENDERED' >/dev/null 2>&1; kb-resume" >"$WORK_DIR/p2f-resume.out" 2>&1
+_P2F_STARTED_AT_PRESENT=$(jq -r '.backlog[0].subitems[0] | has("startedAt")' "$BOARD")
+ok "2f [//= SETS-WHEN-ABSENT GUARD]: fresh subitem — startedAt becomes PRESENT on first resume (was never set before)" \
+   "$([ "$_P2F_STARTED_AT_PRESENT" = "true" ] && echo 1 || echo 0)" \
+   "expected startedAt present after resume on a subitem that never had one (proves the //= operator SETS on first use, not just 'preserves'), has()=$_P2F_STARTED_AT_PRESENT; board=$(cat "$BOARD")"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Coverage 3: static structural assertions on the rendered template.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -341,15 +425,16 @@ ok "3a: exactly 1 _kb_flush_work_time() definition in the rendered template" \
    "$([ "$_DEF_COUNT" -eq 1 ] && echo 1 || echo 0)" \
    "expected 1 definition, found $_DEF_COUNT"
 
-# 3b: exactly TWO real call sites file-wide (call-shaped substring, not mere mentions).
+# 3b: exactly ONE real call site file-wide (XACA-0819-014: subitem-only now,
+# so the parent-item call site that used to exist is gone).
 _CALL_COUNT_TOTAL=$(grep -c '_kb_flush_work_time "' "$RENDERED" 2>/dev/null)
 [ -n "$_CALL_COUNT_TOTAL" ] || _CALL_COUNT_TOTAL=0
-ok "3b: exactly 2 real _kb_flush_work_time call sites file-wide" \
-   "$([ "$_CALL_COUNT_TOTAL" -eq 2 ] && echo 1 || echo 0)" \
-   "expected 2 call sites (call-shaped substring '_kb_flush_work_time \"'), found $_CALL_COUNT_TOTAL"
+ok "3b [XACA-0819-014]: exactly 1 real _kb_flush_work_time call site file-wide (subitem-only scope)" \
+   "$([ "$_CALL_COUNT_TOTAL" -eq 1 ] && echo 1 || echo 0)" \
+   "expected 1 call site (call-shaped substring '_kb_flush_work_time \"'), found $_CALL_COUNT_TOTAL"
 
 # 3c: isolate kb-pause's own function body (from its header to its own
-# top-level closing brace) and confirm BOTH call sites fall inside it.
+# top-level closing brace) and confirm the call site falls inside it.
 KB_PAUSE_BODY="$WORK_DIR/kb-pause-body.txt"
 awk '
   /^kb-pause\(\) \{/ { flag=1; print; next }
@@ -359,11 +444,35 @@ awk '
 _KB_PAUSE_LINES=$(wc -l < "$KB_PAUSE_BODY" | tr -d '[:space:]')
 _CALL_COUNT_IN_PAUSE=$(grep -c '_kb_flush_work_time "' "$KB_PAUSE_BODY" 2>/dev/null)
 [ -n "$_CALL_COUNT_IN_PAUSE" ] || _CALL_COUNT_IN_PAUSE=0
-ok "3c: both _kb_flush_work_time call sites are inside kb-pause (body=${_KB_PAUSE_LINES} lines, calls found=${_CALL_COUNT_IN_PAUSE})" \
-   "$([ -n "$_KB_PAUSE_LINES" ] && [ "$_KB_PAUSE_LINES" -gt 20 ] && [ "$_CALL_COUNT_IN_PAUSE" -eq 2 ] && echo 1 || echo 0)" \
-   "expected kb-pause body >20 lines with exactly 2 call sites; got ${_KB_PAUSE_LINES} lines / ${_CALL_COUNT_IN_PAUSE} calls"
+ok "3c: the _kb_flush_work_time call site is inside kb-pause (body=${_KB_PAUSE_LINES} lines, calls found=${_CALL_COUNT_IN_PAUSE})" \
+   "$([ -n "$_KB_PAUSE_LINES" ] && [ "$_KB_PAUSE_LINES" -gt 20 ] && [ "$_CALL_COUNT_IN_PAUSE" -eq 1 ] && echo 1 || echo 0)" \
+   "expected kb-pause body >20 lines with exactly 1 call site; got ${_KB_PAUSE_LINES} lines / ${_CALL_COUNT_IN_PAUSE} calls"
 
-# 3d: isolate `kb-backlog demote`'s case arm (from its case label to the next
+# 3d [XACA-0819-014 GUARD]: isolate kb-pause's PARENT-ITEM jq branch (between
+# its `if .id == $workingOnId then` header and the following
+# `elif (.subitems ...` marker) and confirm it contains ZERO timeWorkedMs
+# writes and ZERO del(.workStartedAt) calls. Uses plain substring matching
+# (awk index(), not a /regex/ literal) deliberately -- an earlier draft of
+# this extraction used a /.../ regex containing an escaped `//` that is
+# fragile inside a regex delimiter and silently ran past its intended stop
+# marker to end-of-function during manual verification; index() sidesteps
+# that class of bug entirely by never treating the pattern as a regex.
+ITEM_BRANCH="$WORK_DIR/item-branch.txt"
+awk '
+  index($0, "if .id == $workingOnId then") > 0 && started == 0 { flag=1; started=1; next }
+  index($0, "elif (.subitems") > 0 { flag=0 }
+  flag { print }
+' "$KB_PAUSE_BODY" > "$ITEM_BRANCH"
+_ITEM_BRANCH_LINES=$(wc -l < "$ITEM_BRANCH" | tr -d '[:space:]')
+_ITEM_BRANCH_TWM=$(grep -c 'timeWorkedMs' "$ITEM_BRANCH" 2>/dev/null)
+[ -n "$_ITEM_BRANCH_TWM" ] || _ITEM_BRANCH_TWM=0
+_ITEM_BRANCH_DEL=$(grep -c 'del(\.workStartedAt)' "$ITEM_BRANCH" 2>/dev/null)
+[ -n "$_ITEM_BRANCH_DEL" ] || _ITEM_BRANCH_DEL=0
+ok "3d [XACA-0819-014 GUARD]: kb-pause's parent-item branch has ZERO timeWorkedMs writes and ZERO del(.workStartedAt) (branch=${_ITEM_BRANCH_LINES} lines)" \
+   "$([ -n "$_ITEM_BRANCH_LINES" ] && [ "$_ITEM_BRANCH_LINES" -ge 3 ] && [ "$_ITEM_BRANCH_TWM" -eq 0 ] && [ "$_ITEM_BRANCH_DEL" -eq 0 ] && echo 1 || echo 0)" \
+   "expected item branch >=3 lines, 0 timeWorkedMs writes, 0 del(.workStartedAt); got ${_ITEM_BRANCH_LINES} lines / ${_ITEM_BRANCH_TWM} timeWorkedMs mentions / ${_ITEM_BRANCH_DEL} del(.workStartedAt) — a non-zero count means the item-level write was re-added without its counterpart flush machinery (see Coverage 1)"
+
+# 3e: isolate `kb-backlog demote`'s case arm (from its case label to the next
 # case label at the same indentation) and confirm ZERO real call sites — the
 # XACA-0884/XACA-0552 inversion guard. The arm's prose comments MENTION the
 # function name but do not contain the call-shaped substring, so this grep
@@ -379,7 +488,7 @@ _CALL_COUNT_IN_DEMOTE=$(grep -c '_kb_flush_work_time "' "$DEMOTE_ARM" 2>/dev/nul
 [ -n "$_CALL_COUNT_IN_DEMOTE" ] || _CALL_COUNT_IN_DEMOTE=0
 _MENTION_COUNT_IN_DEMOTE=$(grep -c '_kb_flush_work_time' "$DEMOTE_ARM" 2>/dev/null)
 [ -n "$_MENTION_COUNT_IN_DEMOTE" ] || _MENTION_COUNT_IN_DEMOTE=0
-ok "3d [INVERSION GUARD]: zero real _kb_flush_work_time call sites inside kb-backlog demote arm (arm=${_DEMOTE_ARM_LINES} lines, comment mentions=${_MENTION_COUNT_IN_DEMOTE}, real calls=${_CALL_COUNT_IN_DEMOTE})" \
+ok "3e [INVERSION GUARD]: zero real _kb_flush_work_time call sites inside kb-backlog demote arm (arm=${_DEMOTE_ARM_LINES} lines, comment mentions=${_MENTION_COUNT_IN_DEMOTE}, real calls=${_CALL_COUNT_IN_DEMOTE})" \
    "$([ -n "$_DEMOTE_ARM_LINES" ] && [ "$_DEMOTE_ARM_LINES" -gt 20 ] && [ "$_CALL_COUNT_IN_DEMOTE" -eq 0 ] && [ "$_MENTION_COUNT_IN_DEMOTE" -ge 1 ] && echo 1 || echo 0)" \
    "expected demote arm >20 lines, >=1 comment mention, 0 real call sites; got ${_DEMOTE_ARM_LINES} lines / ${_MENTION_COUNT_IN_DEMOTE} mentions / ${_CALL_COUNT_IN_DEMOTE} calls"
 
@@ -441,9 +550,10 @@ fi
 
 # Exit non-zero if ANY assertion failed OR if zero real assertions ran (a
 # zero-assertion run is itself a harness failure, never a pass). Require at
-# least 13 assertions (5 x2 cycles + 4 static + 3 demote = 17 planned) so a
-# future accidental short-circuit that skips whole sections is still caught.
-if [ "$_P0819_FAIL" -gt 0 ] || [ "$_TOTAL" -lt 13 ]; then
+# least 17 assertions (5 item + 6 subitem[a-f] + 5 static + 3 demote = 19
+# planned) so a future accidental short-circuit that skips whole sections is
+# still caught.
+if [ "$_P0819_FAIL" -gt 0 ] || [ "$_TOTAL" -lt 17 ]; then
     exit 1
 fi
 exit 0
