@@ -5796,7 +5796,8 @@ kb-backlog() {
             # _kb_flush_work_time HAS been ported into this template, demote
             # must still NOT call it. Enforced by
             # test-xaca-0819-pause-resume-active-span.sh, which asserts the only
-            # call sites in this file are the two inside kb-pause.
+            # call site in this file is the ONE inside kb-pause's subitem branch
+            # (XACA-0819-014 narrowed the sync to subitems only).
             local demote_jq_filter='
                 .backlog[$idx].status = "todo" |
                 .backlog[$idx].updatedAt = $ts |
