@@ -105,7 +105,19 @@ while [[ $# -gt 0 ]]; do
             # is skipped entirely. See docs/ "CR-Divergence Halt (Guard 5)".
             _dry_run=1; shift ;;
         --help|-h)
-            grep '^#' "$0" | head -20 | sed 's/^# \{0,1\}//'
+            # XACA-0897-116: `grep '^#' | head -20` cut the header comment
+            # block off at a fixed line count, which sliced straight
+            # through the --dry-run documentation (added after line 20) --
+            # the "no writes / peek not consume" contract was invisible to
+            # --help. Fixed by capturing the WHOLE leading comment block
+            # instead of a hardcoded line count: read consecutive lines
+            # starting with '#' from the top of the file and stop at the
+            # first line that isn't one (the blank line right before the
+            # "Self-location" implementation-comment section below) --
+            # this is the file's actual header docstring boundary, and it
+            # tracks the header growing in the future instead of moving
+            # the cliff to wherever the next 20-line guess runs out.
+            awk '/^#/{print; next} {exit}' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         -*)
             echo "Error: Unknown option: ${1-}" >&2
@@ -372,26 +384,76 @@ _cr_div_valid_id_charset() {
 # rejected id would see the override escape hatch silently refuse to work,
 # with no signal why. Now loud: a charset rejection is reported here,
 # specifically, before returning failure.
+#
+# XACA-0897-117 (round 22): "loud" turned out to be too loud. This function
+# is called on EVERY divergence via _cr_div_check_override_sentinel, not
+# only when a human is actually attempting --override-cr-divergence, so an
+# ordinary rejected --release-id fired the charset warning even when nobody
+# was anywhere near the override escape hatch. Optional 3rd arg $3: pass
+# the literal string "quiet" to suppress the two warning blocks below (the
+# function still returns 1 exactly the same either way -- only the stderr
+# noise is conditional). Omit it (or pass "") to keep the original loud
+# behavior -- _cr_div_interactive_override_confirm's call site (reached
+# only once a human has actually invoked --override-cr-divergence) always
+# omits it, so the warning stays loud exactly where XACA-0897-109 needed it.
 _cr_div_override_sentinel_path() {
-    local rel="$1" plat="$2"
+    local rel="$1" plat="$2" quiet="${3:-}"
     local rdir
     if ! _cr_div_valid_id_charset "$rel"; then
-        echo "Warning: release id '${rel}' contains characters outside the allowed set" >&2
-        echo "  ([A-Za-z0-9_.-], no leading '.', no '..' anywhere) -- cannot resolve the" >&2
-        echo "  CR-divergence override sentinel path for it. The --override-cr-divergence" >&2
-        echo "  escape hatch is unavailable for this release id as given." >&2
+        if [[ "$quiet" != "quiet" ]]; then
+            echo "Warning: release id '${rel}' contains characters outside the allowed set" >&2
+            echo "  ([A-Za-z0-9_.-], no leading '.', no '..' anywhere) -- cannot resolve the" >&2
+            echo "  CR-divergence override sentinel path for it. The --override-cr-divergence" >&2
+            echo "  escape hatch is unavailable for this release id as given." >&2
+        fi
         return 1
     fi
     if ! _cr_div_valid_id_charset "$plat"; then
-        echo "Warning: platform '${plat}' contains characters outside the allowed set" >&2
-        echo "  ([A-Za-z0-9_.-], no leading '.', no '..' anywhere) -- cannot resolve the" >&2
-        echo "  CR-divergence override sentinel path for it. The --override-cr-divergence" >&2
-        echo "  escape hatch is unavailable for this platform as given." >&2
+        if [[ "$quiet" != "quiet" ]]; then
+            echo "Warning: platform '${plat}' contains characters outside the allowed set" >&2
+            echo "  ([A-Za-z0-9_.-], no leading '.', no '..' anywhere) -- cannot resolve the" >&2
+            echo "  CR-divergence override sentinel path for it. The --override-cr-divergence" >&2
+            echo "  escape hatch is unavailable for this platform as given." >&2
+        fi
         return 1
     fi
     rdir=$(_cr_div_releases_dir_from_board) || return 1
     [[ -z "$rdir" ]] && return 1
     echo "${rdir}/${rel}/cr-divergence-override-${plat}.json"
+}
+
+# Reads $1 (a sentinel file, on disk RIGHT NOW under that exact name) and
+# prints "yes"/"no" on stdout depending on whether its five recorded fields
+# EXACTLY match the divergence in $2-$6 (releaseId, platform, crId,
+# crSubmittedVersion, releaseVersionAtOverride). Never writes anything.
+# Shared by both the dry-run peek and the real claim-then-validate path
+# below so the match rule can never drift between the two.
+_cr_div_sentinel_matches() {
+    python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+except Exception:
+    print('no'); sys.exit(0)
+ok = (d.get('releaseId') == sys.argv[2] and d.get('platform') == sys.argv[3] and
+      d.get('crId') == sys.argv[4] and d.get('crSubmittedVersion') == sys.argv[5] and
+      d.get('releaseVersionAtOverride') == sys.argv[6])
+print('yes' if ok else 'no')
+" "$1" "$2" "$3" "$4" "$5" "$6" 2>/dev/null
+}
+
+# Prints a sentinel file's overriddenBy/overriddenAt/reason fields to
+# stderr. Shared by the dry-run peek and the real honor path.
+_cr_div_print_sentinel_details() {
+    python3 -c "
+import json, sys
+with open(sys.argv[1]) as fh:
+    d = json.load(fh)
+sys.stderr.write('  Overridden by: %s\n' % d.get('overriddenBy', '?'))
+sys.stderr.write('  Overridden at: %s\n' % d.get('overriddenAt', '?'))
+sys.stderr.write('  Reason:        %s\n' % d.get('reason', '?'))
+" "$1" 2>&1 1>&2 || true
 }
 
 # Checks for a pre-existing override sentinel whose recorded fields EXACTLY
@@ -405,61 +467,134 @@ _cr_div_override_sentinel_path() {
 # XACA-0897-round21: under --dry-run (global $_dry_run == 1) this becomes a
 # PEEK -- it still reports whether a matching override exists (so a dry-run
 # preview's verdict is genuine, not an assumed pass), but it does NOT delete
-# the sentinel. This is the fix for the round-20 regression: making
-# kb-release-push-promote --dry-run run this gate for real also made a mere
-# preview silently consume a human's single-use CR-divergence authorization
-# -- a grant that a live human, at a live TTY, outside any agent context,
-# had to go out of their way to create, and that an agent structurally
-# cannot recreate (_cr_div_interactive_override_confirm refuses outright in
-# any detected agent context). Real (non-dry-run) invocations are completely
-# unaffected -- the single-use property is enforced exactly as before.
+# the sentinel, and it does not claim/rename it either (see round-22 below).
+#
+# XACA-0897-113 (round 22, BLOCKING): the round-21 shape read the sentinel,
+# matched it, printed, and only THEN deleted it -- four separate, unlocked
+# steps. N concurrent REAL invocations could all observe match=='yes' before
+# any of them got as far as the `rm`, so all N honored the SAME single-use
+# grant (reproduced live: 6-8 of 8 concurrent runs against one fresh
+# sentinel all reported OVERRIDE HONORED). Fixed by making the CLAIM atomic
+# instead of the delete: a real (non-dry-run) run first renames the
+# sentinel to a per-process-unique name via `mv` before looking at its
+# content at all. `mv`/rename(2) is atomic within a filesystem -- of any
+# number of concurrent processes racing that exact rename, the kernel lets
+# exactly one succeed; every loser's `mv` fails because the source is
+# already gone, and a loser returns 1 (no override) immediately, same as
+# "sentinel absent". Only the single winner ever gets to look at the
+# content, so at most one process per sentinel can ever reach the
+# validate-and-honor branch below -- the TOCTOU window is closed by
+# construction, not by a lock file. Validation happens AFTER the claim now
+# (order flipped from round 21's read-then-delete): a claimed file that
+# turns out NOT to match this exact divergence is renamed back to its
+# original path (never burned by a claim that didn't apply to it) --
+# preserves the pre-existing "a mismatch does not consume" property.
+# Consumption (delete) on a genuine match is now VERIFIED, not attempted
+# (XACA-0897-119: a `rm -f ... || true` on a read-only/immutable sentinel
+# used to still print "consumed" and return 0 -- the second, independent
+# route to two real passes off one grant that the reviewer flagged). If the
+# verified delete fails, the claim is restored to its original path (so the
+# grant is not silently voided by a filesystem that merely refused the
+# unlink) and this returns 1 -- a failed consumption is reported as FAILURE,
+# never success, and the caller's normal fail-closed HALT takes over.
+#
+# RESIDUAL, disclosed rather than hidden: a process killed (`kill -9`, OOM,
+# host crash) strictly between the successful claim-rename and the
+# verified-delete leaves an orphaned `<path>.claimed.<pid>.<rand>` file on
+# disk. The original path is gone, so every subsequent run -- correctly --
+# sees "no sentinel" and fails closed (HALT), exactly as if the override had
+# never been granted. The human's one-time grant is lost, not double-spent:
+# this is the same direction of failure the fail-closed design already
+# treats as safe everywhere else in this script (absence is never read as
+# permission), so a crash here degrades to "ask the human to override
+# again", not to a second, unauthorized honor. No automatic reclaim of that
+# orphaned file is implemented -- a time-based "presume abandoned and
+# restore it" sweep would itself be a heuristic this script cannot
+# guarantee is race-free against a merely-slow (not dead) claimant, and
+# XACA-0897 already treats "state the residual, don't build an
+# unguaranteed cleanup" as the correct call here. Stranded `.claimed.*`
+# files are safe to delete by hand once confirmed abandoned.
 _cr_div_check_override_sentinel() {
     local rel="$1" plat="$2" crid="$3" cr_ver="$4" rel_ver="$5"
     local path
-    path=$(_cr_div_override_sentinel_path "$rel" "$plat") || return 1
-    [[ -z "$path" || ! -f "$path" ]] && return 1
+    # Only the human's actual override-attempt path (an interactive
+    # confirmation gated behind --override-cr-divergence) needs the loud
+    # charset-rejection warning (XACA-0897-109). This function runs on
+    # EVERY divergence, override requested or not, purely to see whether a
+    # PRE-EXISTING sentinel already covers it -- so an ordinary divergence
+    # with an out-of-charset release/platform id must not shout about the
+    # override escape hatch nobody asked for (XACA-0897-117).
+    local _sp_quiet=""
+    [[ "${_cr_div_override_requested:-0}" -eq 1 ]] || _sp_quiet="quiet"
+    path=$(_cr_div_override_sentinel_path "$rel" "$plat" "$_sp_quiet") || return 1
+    [[ -z "$path" ]] && return 1
 
-    local match
-    match=$(python3 -c "
-import json, sys
-try:
-    with open(sys.argv[1]) as fh:
-        d = json.load(fh)
-except Exception:
-    print('no'); sys.exit(0)
-ok = (d.get('releaseId') == sys.argv[2] and d.get('platform') == sys.argv[3] and
-      d.get('crId') == sys.argv[4] and d.get('crSubmittedVersion') == sys.argv[5] and
-      d.get('releaseVersionAtOverride') == sys.argv[6])
-print('yes' if ok else 'no')
-" "$path" "$rel" "$plat" "$crid" "$cr_ver" "$rel_ver" 2>/dev/null) || match="no"
-
-    if [[ "$match" == "yes" ]]; then
-        if [[ "${_dry_run:-0}" -eq 1 ]]; then
+    if [[ "${_dry_run:-0}" -eq 1 ]]; then
+        # PEEK ONLY: no claim, no rename, no delete -- see the round-22
+        # comment above. Reads the sentinel in place, exactly as round 21
+        # did.
+        [[ -f "$path" ]] || return 1
+        local match
+        match=$(_cr_div_sentinel_matches "$path" "$rel" "$plat" "$crid" "$cr_ver" "$rel_ver") || match="no"
+        if [[ "$match" == "yes" ]]; then
             echo "CR-DIVERGENCE OVERRIDE FOUND (dry-run preview): a matching human-confirmed override exists and would be consumed by a real run." >&2
             echo "  --dry-run makes no writes: the sentinel is NOT being consumed by this preview and remains available." >&2
-            python3 -c "
-import json, sys
-with open(sys.argv[1]) as fh:
-    d = json.load(fh)
-sys.stderr.write('  Overridden by: %s\n' % d.get('overriddenBy', '?'))
-sys.stderr.write('  Overridden at: %s\n' % d.get('overriddenAt', '?'))
-sys.stderr.write('  Reason:        %s\n' % d.get('reason', '?'))
-" "$path" 2>&1 1>&2 || true
+            _cr_div_print_sentinel_details "$path"
             return 0
         fi
-        echo "CR-DIVERGENCE OVERRIDE HONORED: a matching human-confirmed override was found and is being consumed (single-use)." >&2
-        python3 -c "
-import json, sys
-with open(sys.argv[1]) as fh:
-    d = json.load(fh)
-sys.stderr.write('  Overridden by: %s\n' % d.get('overriddenBy', '?'))
-sys.stderr.write('  Overridden at: %s\n' % d.get('overriddenAt', '?'))
-sys.stderr.write('  Reason:        %s\n' % d.get('reason', '?'))
-" "$path" 2>&1 1>&2 || true
-        rm -f "$path" 2>/dev/null || true
-        return 0
+        return 1
     fi
-    return 1
+
+    [[ -f "$path" ]] || return 1
+
+    # Atomic claim: rename to a name unique to this process before looking
+    # at the content at all. Exactly one concurrent racer can win this.
+    local claimed
+    claimed="${path}.claimed.$$.${RANDOM}"
+    if ! mv "$path" "$claimed" 2>/dev/null; then
+        # Lost the race (or it vanished between the -f check above and
+        # here, which is the same thing from this process's point of
+        # view): no override for THIS run. Fail-closed -- never "maybe".
+        return 1
+    fi
+
+    local match
+    match=$(_cr_div_sentinel_matches "$claimed" "$rel" "$plat" "$crid" "$cr_ver" "$rel_ver") || match="no"
+
+    if [[ "$match" != "yes" ]]; then
+        # Claimed something, but it does not describe THIS divergence.
+        # A non-matching sentinel must not be burned by a claim that
+        # didn't apply to it -- restore it so a later, correctly-matching
+        # check (this run's own retry, or a different run) can still find
+        # it.
+        if ! mv "$claimed" "$path" 2>/dev/null; then
+            echo "CR-DIVERGENCE OVERRIDE ERROR: claimed a non-matching sentinel and could not restore it to ${path} -- it is stranded at ${claimed}. Restore it by hand, or have the human re-run --override-cr-divergence." >&2
+        fi
+        return 1
+    fi
+
+    echo "CR-DIVERGENCE OVERRIDE HONORED: a matching human-confirmed override was found and is being consumed (single-use)." >&2
+    _cr_div_print_sentinel_details "$claimed"
+
+    rm -f "$claimed" 2>/dev/null || true
+    if [[ -f "$claimed" ]]; then
+        # XACA-0897-119: consumption must be VERIFIED, not attempted. The
+        # unlink did not take (read-only/immutable/permission failure) --
+        # this is a hard failure, never a success. Try to restore the
+        # claim so the grant is not silently voided by a filesystem that
+        # merely refused the unlink; either way, report failure and let
+        # the caller's ordinary fail-closed HALT take over -- this run
+        # must NOT proceed as if the override were honored.
+        echo "CR-DIVERGENCE OVERRIDE ERROR: matched and validated the override, but could not verify its deletion (still present at ${claimed} after rm) -- treating this as NOT consumed, not as honored." >&2
+        if mv "$claimed" "$path" 2>/dev/null; then
+            echo "  Restored to ${path} -- the override remains available for a subsequent attempt." >&2
+        else
+            echo "  Restore ALSO failed -- the override is stranded at ${claimed} (original path is gone). Manual recovery required." >&2
+        fi
+        return 1
+    fi
+
+    return 0
 }
 
 # Interactive-ONLY human confirmation. Refuses outright (returns 1) unless:
@@ -810,7 +945,19 @@ else
                 _cr_div_halt=1
             elif [[ "$_cr_div_release_version" != "$_cr_div_seen_version" ]]; then
                 if _cr_div_check_override_sentinel "$_release_id" "$_platform" "$_cr_div_seen_cr" "$_cr_div_seen_version" "$_cr_div_release_version"; then
-                    [[ $_quiet -eq 0 ]] && echo "CR-DIVERGENCE CHECK PASS (OVERRIDDEN, pre-recorded): release '${_release_id}' platform '${_platform}' proceeding on a consumed human override."
+                    # XACA-0897-118: under --dry-run, _cr_div_check_override_sentinel
+                    # PEEKS -- it never consumes anything (see its own doc comment
+                    # above, and the "dry-run preview" message it already printed
+                    # two lines earlier). This summary line used to say "proceeding
+                    # on a consumed human override" unconditionally, directly
+                    # contradicting the peek branch's own "NOT being consumed"
+                    # message from moments before. Say what actually happened on
+                    # each path instead of one fixed sentence for both.
+                    if [[ "${_dry_run:-0}" -eq 1 ]]; then
+                        [[ $_quiet -eq 0 ]] && echo "CR-DIVERGENCE CHECK PASS (dry-run preview): release '${_release_id}' platform '${_platform}' would proceed on a pre-recorded human override (not consumed by this preview)."
+                    else
+                        [[ $_quiet -eq 0 ]] && echo "CR-DIVERGENCE CHECK PASS (OVERRIDDEN, pre-recorded): release '${_release_id}' platform '${_platform}' proceeding on a consumed human override."
+                    fi
                 elif [[ "${_cr_div_override_requested:-0}" -eq 1 ]] \
                     && _cr_div_interactive_override_confirm "$_release_id" "$_platform" "$_cr_div_seen_cr" "$_cr_div_seen_version" "$_cr_div_release_version"; then
                     # Sentinel just WRITTEN by the interactive confirmation above.
