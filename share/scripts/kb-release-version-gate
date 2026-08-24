@@ -291,10 +291,23 @@ _cr_div_releases_dir_from_board() {
     echo "$(dirname "$_cr_div_board_file")/releases"
 }
 
+# XACA-0897-103: --release-id and --platform are user-supplied CLI values
+# spliced directly into a filesystem path below (${rdir}/${rel}/...). Apply
+# the SAME conservative allowlist XACA-0897-019 already established for team
+# names elsewhere in this codebase (letters, digits, underscore, hyphen) --
+# defense in depth against a crafted id (e.g. containing '../') escaping the
+# releases dir when the override sentinel is read or written. Both values
+# are expected to be exactly this shape in every legitimate call.
+_cr_div_valid_id_charset() {
+    [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]
+}
+
 # Path to the (per release+platform) single-use override sentinel.
 _cr_div_override_sentinel_path() {
     local rel="$1" plat="$2"
     local rdir
+    _cr_div_valid_id_charset "$rel" || return 1
+    _cr_div_valid_id_charset "$plat" || return 1
     rdir=$(_cr_div_releases_dir_from_board) || return 1
     [[ -z "$rdir" ]] && return 1
     echo "${rdir}/${rel}/cr-divergence-override-${plat}.json"
@@ -426,8 +439,28 @@ if declare -f _kb_get_board_file >/dev/null 2>&1; then
 fi
 
 _cr_div_release_obj=""
+_cr_div_board_parse_rc=0
 if [[ -n "$_cr_div_board_file" && -f "$_cr_div_board_file" ]]; then
-    _cr_div_release_obj=$(jq -c --arg id "$_release_id" '.releases[]? | select(.id == $id)' "$_cr_div_board_file" 2>/dev/null) || _cr_div_release_obj=""
+    _cr_div_release_obj=$(jq -c --arg id "$_release_id" '.releases[]? | select(.id == $id)' "$_cr_div_board_file" 2>/dev/null) || _cr_div_board_parse_rc=$?
+fi
+
+if [[ $_cr_div_board_parse_rc -ne 0 ]]; then
+    # XACA-0897-102: the board file EXISTS but jq could not parse it -- a
+    # genuinely broken record, NOT a confirmed "release not on board". Before
+    # this fix, a parse failure and an empty jq match (release id simply
+    # absent) both collapsed to the same empty _cr_div_release_obj, so this
+    # state fell into the fallback branch below and whether it halted then
+    # depended on the unrelated accident of whether a cached manifest.json
+    # happened to exist for this release -- the same parse-failure-as-absence
+    # substitution as the fallback-path bug this ticket exists to close (see
+    # the manifest-parse-rc handling a few lines down and in the "board
+    # resolved" branch below). "I could not read it" must never be
+    # representable as "there is nothing there" -- fail-closed, unconditionally,
+    # before we ever ask whether a manifest cache can paper over it.
+    echo "CR-DIVERGENCE HALT: board file for team '${_team}' (${_cr_div_board_file}) could not be parsed -- cannot verify CR governance for release '${_release_id}'." >&2
+    echo "  Fail-closed: a board file that exists but cannot be read is treated as UNSAFE, never skipped." >&2
+    _write_gate_status "cr_divergence_halt" "" "" 2>/dev/null || true
+    exit 3
 fi
 
 if [[ -z "$_cr_div_release_obj" ]]; then
@@ -571,13 +604,51 @@ else
     # and JSON strings always escape control chars (\n etc.) rather than
     # embedding them raw -- but the herestring sidesteps the forbidden pattern
     # outright rather than relying on that argument holding forever.
-    _cr_div_linked_ids=$(jq -r '[(.linkedCRs // [])[].crId] | unique | .[]' <<< "$_cr_div_release_obj" 2>/dev/null) || _cr_div_linked_ids=""
+    # XACA-0897-round20 (BLOCKING finding #1): both jq reads below used to
+    # squash stderr AND jq's exit code (`2>/dev/null) || _cr_div_linked_ids=""`),
+    # so a genuine PARSE FAILURE collapsed to the exact same empty string as
+    # "no CRs linked, confirmed" -- and the fall-through below is commented as
+    # a "POSITIVELY KNOWN fact", which is false for a parse failure. The
+    # correct standard already exists a few dozen lines up, in the
+    # board-unresolvable fallback branch (_cr_div_fallback_manifest_parse_rc):
+    # capture the rc, and treat "exists but unparseable" as fail-closed HALT,
+    # never as confirmed absence. Mirror that standard here rather than
+    # inventing a third variant -- this is the repo's documented
+    # sibling-heuristic-drift pattern (two parallel checks of the same fact
+    # that quietly drifted apart); the fix is to make them agree.
+    _cr_div_linked_ids=""
+    _cr_div_linkedcrs_parse_rc=0
+    _cr_div_linked_ids=$(jq -r '[(.linkedCRs // [])[].crId] | unique | .[]' <<< "$_cr_div_release_obj" 2>/dev/null) || _cr_div_linkedcrs_parse_rc=$?
+    if [[ $_cr_div_linkedcrs_parse_rc -ne 0 ]]; then
+        echo "CR-DIVERGENCE HALT: release '${_release_id}' object read from board '${_team}' could not be parsed for linkedCRs -- cannot verify CR governance." >&2
+        echo "  Fail-closed: a release record that exists but cannot be read is treated as UNSAFE, never skipped." >&2
+        _write_gate_status "cr_divergence_halt" "" "" 2>/dev/null || true
+        exit 3
+    fi
+
+    _cr_div_manifest_exists=0
+    _cr_div_manifest_parse_rc=0
     if [[ -z "$_cr_div_linked_ids" ]]; then
         _cr_div_releases_dir=$(_cr_div_releases_dir_from_board 2>/dev/null) || _cr_div_releases_dir=""
         _cr_div_manifest="${_cr_div_releases_dir}/${_release_id}/manifest.json"
         if [[ -n "$_cr_div_releases_dir" && -f "$_cr_div_manifest" ]]; then
-            _cr_div_linked_ids=$(jq -r '[(.crIds // [])[]] | unique | .[]' "$_cr_div_manifest" 2>/dev/null) || _cr_div_linked_ids=""
+            _cr_div_manifest_exists=1
+            _cr_div_linked_ids=$(jq -r '[(.crIds // [])[]] | unique | .[]' "$_cr_div_manifest" 2>/dev/null) || _cr_div_manifest_parse_rc=$?
         fi
+    fi
+
+    if [[ $_cr_div_manifest_exists -eq 1 && $_cr_div_manifest_parse_rc -ne 0 ]]; then
+        # The manifest EXISTS but could not be parsed -- a genuinely broken
+        # record, not a confirmed absence. Before this fix, THIS EXACT
+        # corrupt-manifest input HALTed via the board-unresolvable fallback
+        # branch above but silently PASSED here, on the board-resolved path
+        # every ordinary release cut actually takes -- same file, same
+        # corruption, two different verdicts depending on which branch found
+        # it first. Fail-closed, matching the fallback branch's standard.
+        echo "CR-DIVERGENCE HALT: release '${_release_id}' has no linkedCRs[] on the board, and the release manifest at ${_cr_div_manifest} could not be parsed -- cannot verify CR governance." >&2
+        echo "  Fail-closed: a manifest that exists but cannot be read is treated as UNSAFE, never skipped." >&2
+        _write_gate_status "cr_divergence_halt" "" "" 2>/dev/null || true
+        exit 3
     fi
 
     if [[ -z "$_cr_div_linked_ids" ]]; then

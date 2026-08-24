@@ -605,15 +605,26 @@ while IFS= read -r _plan_line; do
                 continue
             else
                 _gate_args=("$_release_id" "--platform" "$_platform" "--env" "$_target_env" "--team" "$_TEAM")
+                # XACA-0897-104: --dry-run used to SKIP running the gate entirely
+                # and force _gate_rc=0 -- a "would pass" verdict printed for a
+                # check that never ran, the exact reassuring-result-from-an-unrun-
+                # check failure mode this whole ticket exists to close, reproduced
+                # inside the tooling itself. --dry-run's own documented contract
+                # (see --help above) only promises to skip the promote API call
+                # and RELNOTES promotion -- it says nothing about skipping
+                # verification. Run it for real in both modes: kb-release-
+                # version-gate's Step 0 only reads local board/manifest state
+                # plus a best-effort, non-fatal LCARS gateStatus POST (already
+                # tolerated as non-fatal elsewhere in that gate) -- it never
+                # mutates the release itself, so running it is safe under a
+                # dry-run's "no real changes" contract.
                 if [ "$OPT_DRY_RUN" -eq 1 ]; then
-                    echo "[kb-release-push-promote] [dry-run] would run: kb-release-version-gate ${_gate_args[*]}"
-                    _gate_rc=0
-                else
-                    set +e
-                    bash "$_GATE_SCRIPT" "${_gate_args[@]}"
-                    _gate_rc=$?
-                    set -e
+                    echo "[kb-release-push-promote] [dry-run] running (read-only preview): kb-release-version-gate ${_gate_args[*]}"
                 fi
+                set +e
+                bash "$_GATE_SCRIPT" "${_gate_args[@]}"
+                _gate_rc=$?
+                set -e
 
                 if [ "$_gate_rc" -eq 3 ]; then
                     # ── CR-DIVERGENCE HALT (XACA-0897 Guard 5) ───────────────
@@ -638,19 +649,34 @@ while IFS= read -r _plan_line; do
                 elif [ "$_gate_rc" -ne 0 ]; then
                     # Ordinary gate failure (exit 1) — try auto-bump if requested
                     if [ "$OPT_AUTO_BUMP" -eq 1 ] && [ -n "$_BUMP_SCRIPT" ]; then
-                        echo "[kb-release-push-promote] gate failed — attempting auto-bump for ${_platform}..." >&2
-                        set +e
-                        bash "$_BUMP_SCRIPT" "$_release_id" "--platform" "$_platform" "--team" "$_TEAM"
-                        _bump_rc=$?
-                        set -e
-                        if [ "$_bump_rc" -eq 0 ]; then
-                            # Re-run gate
-                            set +e
-                            bash "$_GATE_SCRIPT" "${_gate_args[@]}"
-                            _gate_rc=$?
-                            set -e
+                        if [ "$OPT_DRY_RUN" -eq 1 ]; then
+                            # XACA-0897-104 companion fix: kb-release-version-bump
+                            # WRITES a real version-source file to disk -- unlike
+                            # the gate check above, this is NOT read-only, so
+                            # --dry-run must never invoke it for real. Before the
+                            # fix above, --dry-run's forced _gate_rc=0 made this
+                            # branch unreachable by accident (it only runs when
+                            # _gate_rc != 0); now that the gate runs for real in
+                            # dry-run too, a genuine ordinary failure previewed
+                            # under --dry-run --auto-bump DOES reach here, so it
+                            # needs its own explicit guard rather than relying on
+                            # that accident.
+                            echo "[kb-release-push-promote] [dry-run] would attempt auto-bump for ${_platform} (gate failed, rc=${_gate_rc}) — not run in dry-run." >&2
                         else
-                            echo "[kb-release-push-promote] ERROR: auto-bump failed for ${_platform}." >&2
+                            echo "[kb-release-push-promote] gate failed — attempting auto-bump for ${_platform}..." >&2
+                            set +e
+                            bash "$_BUMP_SCRIPT" "$_release_id" "--platform" "$_platform" "--team" "$_TEAM"
+                            _bump_rc=$?
+                            set -e
+                            if [ "$_bump_rc" -eq 0 ]; then
+                                # Re-run gate
+                                set +e
+                                bash "$_GATE_SCRIPT" "${_gate_args[@]}"
+                                _gate_rc=$?
+                                set -e
+                            else
+                                echo "[kb-release-push-promote] ERROR: auto-bump failed for ${_platform}." >&2
+                            fi
                         fi
                     fi
                 fi
