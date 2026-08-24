@@ -612,13 +612,21 @@ while IFS= read -r _plan_line; do
                 # inside the tooling itself. --dry-run's own documented contract
                 # (see --help above) only promises to skip the promote API call
                 # and RELNOTES promotion -- it says nothing about skipping
-                # verification. Run it for real in both modes: kb-release-
-                # version-gate's Step 0 only reads local board/manifest state
-                # plus a best-effort, non-fatal LCARS gateStatus POST (already
-                # tolerated as non-fatal elsewhere in that gate) -- it never
-                # mutates the release itself, so running it is safe under a
-                # dry-run's "no real changes" contract.
+                # verification. Run it for real in both modes.
+                #
+                # XACA-0897-round21 (BLOCKING follow-up to XACA-0897-104): the
+                # comment that used to sit here claimed the gate "never
+                # mutates the release itself" under dry-run -- false. Step 0's
+                # override-sentinel check unconditionally CONSUMED (deleted) a
+                # pending single-use human CR-divergence override, and the
+                # gate's own gateStatus POST is a real write too. Both are
+                # real effects a preview must not have. Forward --dry-run to
+                # the gate itself (added XACA-0897-round21) so it can suppress
+                # every write it knows about (peek, don't consume, the
+                # override sentinel; skip the gateStatus POST) while still
+                # genuinely evaluating and reporting the correct verdict.
                 if [ "$OPT_DRY_RUN" -eq 1 ]; then
+                    _gate_args+=("--dry-run")
                     echo "[kb-release-push-promote] [dry-run] running (read-only preview): kb-release-version-gate ${_gate_args[*]}"
                 fi
                 set +e

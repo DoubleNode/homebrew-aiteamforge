@@ -3,7 +3,7 @@
 # Version-confirmation gate: compare code version vs release target version.
 #
 # Usage:
-#   kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet]
+#   kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet] [--dry-run]
 #
 # Exit codes:
 #   0 — PASS (versions match) or SKIP (no target version set for non-PROD env, or no version_sources)
@@ -19,8 +19,18 @@
 #       --override-cr-divergence — requires a live interactive TTY, refuses outright
 #       in any detected AI-agent shell, and requires typed confirmation + a reason.
 #
+# --dry-run — genuinely evaluates the CR-divergence check and the ordinary
+#       version comparison (same exit codes as a real run: 0/1/3) but makes
+#       NO writes anywhere: it does not consume a pending human override
+#       sentinel (peek-only — see _cr_div_check_override_sentinel) and does
+#       not POST gateStatus to LCARS (see _write_gate_status). Combining
+#       --dry-run with --override-cr-divergence is a no-op for the override
+#       (loudly warned, not silently dropped) since recording an override is
+#       itself a write.
+#
 # The gate writes gateStatus to the release via the LCARS API (POST /api/releases/<id>/platform-gate-status).
-# If LCARS is down the status write is non-fatal; the exit code is still correct.
+# If LCARS is down the status write is non-fatal; the exit code is still correct. Under
+# --dry-run this write is skipped entirely (see above), independent of LCARS reachability.
 #
 # Canonical source: ~/dev-team/scripts/kb-release-version-gate
 # Tap mirror:       homebrew-tap/share/scripts/kb-release-version-gate
@@ -59,6 +69,7 @@ _env=""
 _team_override=""
 _quiet=0
 _cr_div_override_requested=0
+_dry_run=0
 
 while [[ $# -gt 0 ]]; do
     case "${1-}" in
@@ -77,12 +88,28 @@ while [[ $# -gt 0 ]]; do
             # below: it still requires a live TTY and refuses outright in
             # any detected AI-agent shell (CLAUDECODE/AI_AGENT env).
             _cr_div_override_requested=1; shift ;;
+        --dry-run)
+            # XACA-0897-round21 (BLOCKING fix): a non-consuming, non-writing
+            # preview mode. round 20 made kb-release-push-promote --dry-run
+            # run this gate FOR REAL (fixing "dry-run reports a pass it
+            # never computed") but the gate itself had no concept of
+            # dry-run, so the real Step 0 code path ran unmodified --
+            # including _cr_div_check_override_sentinel's unconditional
+            # `rm -f` of the single-use override sentinel. A preview run
+            # silently burned a human's one-time CR-divergence authorization.
+            # This flag makes the gate genuinely evaluate divergence (no
+            # reverting to an unconditional pass) while suppressing every
+            # write reachable from this script: the override sentinel is
+            # PEEKED, never consumed (see _cr_div_check_override_sentinel),
+            # and the best-effort LCARS gateStatus POST (_write_gate_status)
+            # is skipped entirely. See docs/ "CR-Divergence Halt (Guard 5)".
+            _dry_run=1; shift ;;
         --help|-h)
             grep '^#' "$0" | head -20 | sed 's/^# \{0,1\}//'
             exit 0 ;;
         -*)
             echo "Error: Unknown option: ${1-}" >&2
-            echo "Usage: kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet]" >&2
+            echo "Usage: kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet] [--dry-run]" >&2
             exit 1 ;;
         *)
             if [[ -z "$_release_id" ]]; then
@@ -95,15 +122,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "$_dry_run" -eq 1 && "$_cr_div_override_requested" -eq 1 ]]; then
+    # --override-cr-divergence's whole job is to WRITE a sentinel (after a
+    # live human confirms interactively) -- that is a write, so it cannot
+    # be honored under --dry-run's "no writes at all" contract. Neutralize
+    # it loudly rather than silently ignoring it or silently writing anyway:
+    # falls through to Step 0 with the override request cleared, so a real
+    # divergence still reports HALT under dry-run, matching what a real
+    # (non-override) run would report.
+    echo "Warning: --override-cr-divergence has no effect combined with --dry-run." >&2
+    echo "  --dry-run makes no writes, so no override can be recorded here. Re-run without" >&2
+    echo "  --dry-run (interactively, as a human) to actually record an override." >&2
+    _cr_div_override_requested=0
+fi
+
 if [[ -z "$_release_id" ]]; then
     echo "Error: release-id is required." >&2
-    echo "Usage: kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet]" >&2
+    echo "Usage: kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet] [--dry-run]" >&2
     exit 1
 fi
 
 if [[ -z "$_platform" ]]; then
     echo "Error: --platform is required." >&2
-    echo "Usage: kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet]" >&2
+    echo "Usage: kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet] [--dry-run]" >&2
     exit 1
 fi
 
@@ -177,6 +218,14 @@ _write_gate_status() {
     local result="$1"
     local code_ver="${2:-}"
     local target_ver="${3:-}"
+
+    # XACA-0897-round21: --dry-run makes NO writes, full stop -- this POST
+    # mutates the release's gateStatus via the LCARS API, so it is skipped
+    # under --dry-run exactly like the override-sentinel consumption is.
+    if [[ "${_dry_run:-0}" -eq 1 ]]; then
+        [[ $_quiet -eq 0 ]] && echo "[dry-run] would write gateStatus: result='${result}' codeVersion='${code_ver}' targetVersion='${target_ver}' -- skipped (--dry-run makes no writes)." >&2
+        return 0
+    fi
 
     # XACA-0658-014: skip the write entirely when the LCARS port couldn't be
     # resolved (rather than POSTing to a hardcoded 8080 that may be another service).
@@ -293,21 +342,53 @@ _cr_div_releases_dir_from_board() {
 
 # XACA-0897-103: --release-id and --platform are user-supplied CLI values
 # spliced directly into a filesystem path below (${rdir}/${rel}/...). Apply
-# the SAME conservative allowlist XACA-0897-019 already established for team
-# names elsewhere in this codebase (letters, digits, underscore, hyphen) --
-# defense in depth against a crafted id (e.g. containing '../') escaping the
-# releases dir when the override sentinel is read or written. Both values
-# are expected to be exactly this shape in every legitimate call.
+# a conservative allowlist -- defense in depth against a crafted id (e.g.
+# containing '../') escaping the releases dir when the override sentinel is
+# read or written.
+#
+# XACA-0897-109: the original allowlist (letters, digits, underscore, hyphen
+# -- mirroring XACA-0897-019's team-name check) rejected '.' outright. That
+# is over-broad for THIS value: a release/platform id is not a team name, and
+# a dotted id (a real-looking future shape, e.g. a semver-flavored release
+# id) is not itself a path-traversal vector -- '..' (parent-dir traversal) is
+# the actual concern, not '.' in isolation. '.' is now permitted; '..'
+# anywhere in the string, and a leading '.', remain rejected (the latter
+# also blocks the degenerate '.' / '..' ids outright).
 _cr_div_valid_id_charset() {
-    [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]
+    local val="$1"
+    [[ "$val" == *..* ]] && return 1
+    [[ "$val" == .* ]] && return 1
+    [[ "$val" =~ ^[A-Za-z0-9_.-]+$ ]]
 }
 
 # Path to the (per release+platform) single-use override sentinel.
+#
+# XACA-0897-109: a charset rejection here used to fail SILENTLY -- the
+# caller just got `return 1` indistinguishable from any other resolution
+# failure, and every caller of THIS function (_cr_div_check_override_sentinel,
+# _cr_div_interactive_override_confirm) folds that into a generic "no
+# override" / "could not resolve releases dir" outcome with no mention of
+# the actual cause. A human hitting this with a legitimately-shaped-but-
+# rejected id would see the override escape hatch silently refuse to work,
+# with no signal why. Now loud: a charset rejection is reported here,
+# specifically, before returning failure.
 _cr_div_override_sentinel_path() {
     local rel="$1" plat="$2"
     local rdir
-    _cr_div_valid_id_charset "$rel" || return 1
-    _cr_div_valid_id_charset "$plat" || return 1
+    if ! _cr_div_valid_id_charset "$rel"; then
+        echo "Warning: release id '${rel}' contains characters outside the allowed set" >&2
+        echo "  ([A-Za-z0-9_.-], no leading '.', no '..' anywhere) -- cannot resolve the" >&2
+        echo "  CR-divergence override sentinel path for it. The --override-cr-divergence" >&2
+        echo "  escape hatch is unavailable for this release id as given." >&2
+        return 1
+    fi
+    if ! _cr_div_valid_id_charset "$plat"; then
+        echo "Warning: platform '${plat}' contains characters outside the allowed set" >&2
+        echo "  ([A-Za-z0-9_.-], no leading '.', no '..' anywhere) -- cannot resolve the" >&2
+        echo "  CR-divergence override sentinel path for it. The --override-cr-divergence" >&2
+        echo "  escape hatch is unavailable for this platform as given." >&2
+        return 1
+    fi
     rdir=$(_cr_div_releases_dir_from_board) || return 1
     [[ -z "$rdir" ]] && return 1
     echo "${rdir}/${rel}/cr-divergence-override-${plat}.json"
@@ -320,6 +401,18 @@ _cr_div_override_sentinel_path() {
 # old approval. It never CREATES a sentinel -- only
 # _cr_div_interactive_override_confirm does that, and only after a live
 # human confirms interactively.
+#
+# XACA-0897-round21: under --dry-run (global $_dry_run == 1) this becomes a
+# PEEK -- it still reports whether a matching override exists (so a dry-run
+# preview's verdict is genuine, not an assumed pass), but it does NOT delete
+# the sentinel. This is the fix for the round-20 regression: making
+# kb-release-push-promote --dry-run run this gate for real also made a mere
+# preview silently consume a human's single-use CR-divergence authorization
+# -- a grant that a live human, at a live TTY, outside any agent context,
+# had to go out of their way to create, and that an agent structurally
+# cannot recreate (_cr_div_interactive_override_confirm refuses outright in
+# any detected agent context). Real (non-dry-run) invocations are completely
+# unaffected -- the single-use property is enforced exactly as before.
 _cr_div_check_override_sentinel() {
     local rel="$1" plat="$2" crid="$3" cr_ver="$4" rel_ver="$5"
     local path
@@ -341,6 +434,19 @@ print('yes' if ok else 'no')
 " "$path" "$rel" "$plat" "$crid" "$cr_ver" "$rel_ver" 2>/dev/null) || match="no"
 
     if [[ "$match" == "yes" ]]; then
+        if [[ "${_dry_run:-0}" -eq 1 ]]; then
+            echo "CR-DIVERGENCE OVERRIDE FOUND (dry-run preview): a matching human-confirmed override exists and would be consumed by a real run." >&2
+            echo "  --dry-run makes no writes: the sentinel is NOT being consumed by this preview and remains available." >&2
+            python3 -c "
+import json, sys
+with open(sys.argv[1]) as fh:
+    d = json.load(fh)
+sys.stderr.write('  Overridden by: %s\n' % d.get('overriddenBy', '?'))
+sys.stderr.write('  Overridden at: %s\n' % d.get('overriddenAt', '?'))
+sys.stderr.write('  Reason:        %s\n' % d.get('reason', '?'))
+" "$path" 2>&1 1>&2 || true
+            return 0
+        fi
         echo "CR-DIVERGENCE OVERRIDE HONORED: a matching human-confirmed override was found and is being consumed (single-use)." >&2
         python3 -c "
 import json, sys
