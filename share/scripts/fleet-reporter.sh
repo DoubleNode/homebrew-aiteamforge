@@ -731,19 +731,42 @@ pull_messages() {
     local client="$reporter_dir/msg-client.sh"
     local store="$dir/kanban-hooks/msg-store.py"
 
-    # Guard 1: msg-client.js/.sh not shipped to this box yet (older tap install,
-    # or dev checkout predating XACA-0777) — silent no-op.
-    [ -x "$client" ] || return 0
-    [ -f "$store" ] || return 0
-    command -v python3 >/dev/null 2>&1 || return 0
-    command -v node >/dev/null 2>&1 || return 0
+    # ── Skip reasons are RECORDED, not swallowed (XACA-0885-003) ─────────────
+    # Every guard below used to `return 0` without a word. That is the wrong
+    # asymmetry: the SEND side errors loudly and fail-closed, while the RECEIVE
+    # side went deaf in total silence. An un-provisioned box therefore never
+    # learned it was unreachable, and — the part that actually cost us — an
+    # empty inbox is indistinguishable from "nobody wrote to me". Mail sat
+    # unread for 32 days on this machine while every side of the system
+    # reported success.
+    #
+    # The guards still short-circuit exactly as before, and still BEFORE any
+    # node/libsodium startup or network round-trip. What changes is that the
+    # reason is written to a state file the doctor can read. Nothing is printed
+    # on the normal path: this runs every reporter cycle, and a recurring
+    # console warning would be tuned out within a day — which is how the
+    # original silence was rationalised in the first place.
+    _msg_record_skip() {
+        local reason="$1"
+        local dir="$HOME/.aiteamforge/run"
+        mkdir -p "$dir" 2>/dev/null || return 0
+        printf '%s\n' "$reason" > "$dir/kb-msg-pull-status" 2>/dev/null || true
+    }
 
-    # Guard 2: no vault key configured on this machine — silent no-op, and
-    # crucially BEFORE we pay for a node/libsodium startup + network round-trip
-    # on every reporter cycle on a box that was never set up for kb-msg.
+    # Guard 1: msg-client.js/.sh not shipped to this box yet (older tap install,
+    # or dev checkout predating XACA-0777).
+    [ -x "$client" ] || { _msg_record_skip "no-client: $client is missing or not executable"; return 0; }
+    [ -f "$store" ]  || { _msg_record_skip "no-store: $store is missing"; return 0; }
+    command -v python3 >/dev/null 2>&1 || { _msg_record_skip "no-python3"; return 0; }
+    command -v node    >/dev/null 2>&1 || { _msg_record_skip "no-node"; return 0; }
+
+    # Guard 2: no vault key configured on this machine.
     local machine_slug
     machine_slug=$(_msg_default_machine_slug)
-    _msg_has_vault_key "$machine_slug" || return 0
+    _msg_has_vault_key "$machine_slug" || {
+        _msg_record_skip "no-vault-key: nothing registered for machine '$machine_slug' — run kb-msg-provision"
+        return 0
+    }
 
     # Derive the relay base URL from the configured central API endpoint by
     # stripping the trailing /api/... path. Skip when there is no central server.
@@ -751,7 +774,7 @@ pull_messages() {
     if [ -n "${CENTRAL_API:-}" ]; then
         base="${CENTRAL_API%/api/*}"
     fi
-    [ -n "$base" ] || return 0
+    [ -n "$base" ] || { _msg_record_skip "no-relay: CENTRAL_API is unset, so there is no server to pull from"; return 0; }
 
     # msg-client.js reads FLEET_AUTH_TOKEN from env or fleet-config for the
     # Bearer header; pass the central token through explicitly. Both stderr and
@@ -760,6 +783,16 @@ pull_messages() {
     local decrypted
     decrypted=$(FLEET_MONITOR_URL="$base" FLEET_AUTH_TOKEN="${CENTRAL_AUTH_TOKEN:-}" \
         bash "$client" pull --server "$base" 2>/dev/null || true)
+
+    # Record the reached-the-relay state on EVERY cycle that gets this far, not
+    # just the ones that found mail. A status file that is only written on the
+    # skip paths is worse than none: the last skip reason would outlive the
+    # condition that caused it, and the doctor would keep reporting a problem
+    # that was fixed weeks ago. "ok" here means the guards passed and the pull
+    # was attempted — deliberately NOT "mail arrived", which is not a health
+    # signal (an empty inbox is the normal case).
+    _msg_record_skip "ok: relay reachable, pull attempted at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
     if [ -n "$decrypted" ]; then
         printf '%s\n' "$decrypted" | python3 "$store" ingest >/dev/null 2>&1 || true
         echo "  ✓ Pulled + ingested cross-machine kb-msg mail"

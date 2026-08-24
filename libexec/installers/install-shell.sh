@@ -215,6 +215,18 @@ install_helper_scripts() {
     #                     re-resolve ^0.7.16.
     # msg-client.sh stays in the executable loop above — fleet-reporter.sh's
     # Guard 1 tests `[ -x "$client" ]`, so its exec bit is load-bearing.
+    # kb-msg provisioning tools (XACA-0885). Executable, unlike the datafiles
+    # below: kb-msg-provision is invoked directly by an operator, and
+    # register-claude-hook.py is invoked by kb-msg-provision and kb-msg doctor.
+    # Without these a consumer box has no way to provision the comms channel at
+    # all — the tap shipped every kb-msg artifact and none of the setup path.
+    for helper in kb-msg-provision register-claude-hook.py; do
+        if [ -f "$scripts_src/$helper" ]; then
+            cp "$scripts_src/$helper" "$scripts_dest/$helper"
+            chmod +x "$scripts_dest/$helper"
+        fi
+    done
+
     for datafile in msg-client.js vault-keygen.js package.json package-lock.json; do
         if [ -f "$scripts_src/$datafile" ]; then
             cp "$scripts_src/$datafile" "$scripts_dest/$datafile"

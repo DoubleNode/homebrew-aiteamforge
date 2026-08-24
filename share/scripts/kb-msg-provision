@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""
+kb-msg-provision — Tier-2 provisioning for the kb-msg comms channel (XACA-0885-002).
+
+XACA-0777 shipped every Tier-2 artifact and nothing ever turned them on:
+nothing invokes vault-keygen, and nothing writes ~/.aiteamforge/team-machines.json.
+kb-msg's cross-machine path therefore fails closed on every box in the fleet.
+This provisions both, idempotently, on dev machines and tap consumers alike.
+
+WHAT THIS DOES NOT DO — and why that is deliberate
+--------------------------------------------------
+It does not invent a team -> machine mapping for teams it cannot see.
+
+The subitem this implements says "generate team-machines.json from the fleet
+topology". There is no fleet topology to read. `POST /api/team-register` carries
+no machine identifier, `GET /api/registered-teams` returns none, and the server's
+`machines` map (keyed by hostname) is never joined to `registeredTeams`. The
+mapping has never existed anywhere in the system, locally or server-side.
+
+What a machine CAN state authoritatively is which teams live on itself. So this
+maps every locally-present team to this machine and leaves every other entry
+exactly as found. A team we cannot see is recorded as unknown, never guessed:
+a wrong mapping routes mail to the wrong box and fails there, which is strictly
+worse than the current honest fail-closed error.
+
+Closing the remote half needs `machineId` threaded through team-register ->
+registered-teams. That is a server change, tracked separately.
+
+Usage:
+    kb-msg-provision [--check] [--dry-run] [--no-keygen]
+                     [--server <url>] [--machine-id <slug>] [--quiet]
+
+Exit codes:
+    0  provisioned (or already provisioned) / --check found everything
+    1  --check found a gap, or provisioning failed
+    2  environment problem (node missing, vault-keygen.js not found, unreadable map)
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+TEAM_PATHS = os.path.expanduser("~/.aiteamforge/team-paths.json")
+TEAM_MACHINES = os.path.expanduser("~/.aiteamforge/team-machines.json")
+BACKUP_SUFFIX = ".pre-kb-msg-provision.bak"
+
+
+def _die_env(msg):
+    print("kb-msg-provision: %s" % msg, file=sys.stderr)
+    raise SystemExit(2)
+
+
+# ── Locating the authority ───────────────────────────────────────────────────
+# vault-keygen.js is the ONLY correct source for the machine slug. Three other
+# derivations exist in this tree; measured on M3Pro 2026-08-24, fleet-reporter.sh
+# and timepad_config.py agree with it (darren-m3pro) while claude_code_cc_aliases.sh
+# diverges to darren-m3pro-local by keeping the ".local" mDNS suffix this strips.
+# A fourth reimplementation here would be a fourth chance to drift, so we require()
+# the real module instead.
+#
+# Two layouts, and the consumer one is not merely a different prefix: the tap
+# ships vault-keygen.js as a NON-EXECUTABLE datafile with no shebang and does not
+# ship vault-keygen.sh at all. There is no wrapper to invoke on a consumer, which
+# is why everything below drives node against the .js directly.
+def _locate_keygen():
+    base = os.environ.get("AITEAMFORGE_DIR") or os.path.expanduser("~/dev-team")
+    candidates = [
+        os.path.join(base, "fleet-monitor", "client", "vault-keygen.js"),  # dev repo
+        os.path.join(base, "scripts", "vault-keygen.js"),                  # tap consumer
+        os.path.expanduser("~/aiteamforge/scripts/vault-keygen.js"),       # default consumer root
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    _die_env(
+        "vault-keygen.js not found. Looked in:\n  " + "\n  ".join(candidates)
+        + "\n  Set AITEAMFORGE_DIR to the install root and retry."
+    )
+
+
+def _node(keygen_js, expr):
+    """Evaluate `expr` with the vault-keygen module bound to `kg`."""
+    if not shutil.which("node"):
+        _die_env("node not found on PATH. Install Node.js >= 18 and retry.")
+    script = "const kg=require(%s); %s" % (json.dumps(keygen_js), expr)
+    try:
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        _die_env("node timed out resolving the machine slug")
+    if out.returncode != 0:
+        _die_env("node failed: %s" % (out.stderr.strip() or "unknown error"))
+    return out.stdout.strip()
+
+
+def machine_slug(keygen_js, override=None):
+    if override:
+        return override
+    if os.environ.get("AITEAMFORGE_MACHINE_ID"):
+        return os.environ["AITEAMFORGE_MACHINE_ID"]
+    return _node(keygen_js, "process.stdout.write(kg.defaultMachineSlug())")
+
+
+def has_private_key(keygen_js, slug):
+    val = _node(keygen_js, "process.stdout.write(String(kg.privateKeyExists(%s)))" % json.dumps(slug))
+    return val == "true"
+
+
+# ── Template/instance aliases ────────────────────────────────────────────────
+# MIRROR of _kb_template_to_instance / _kb_instance_to_template in
+# kanban-helpers.sh (~1840, XACA-0576). Keep the three cases in lock-step; that
+# function's own comment already records one mirror in kanban-paths.sh, and this
+# is a second, for the same reason (Python here, and the tap installs standalone
+# and cannot source dev-team helpers at runtime).
+#
+# This is NOT cosmetic. team-paths.json keys personal-org teams by their INSTANCE
+# id (`medical-general`), while kb-msg addresses them by their TEMPLATE id
+# (`medical`) — `_kb_msg_resolve_machine` looks up whatever string the sender
+# typed. Writing only the instance form produces a routing map that resolves for
+# no one: provisioning reports success, the file looks correct, and
+# `kb-msg send medical "..."` still dies with "cannot resolve which machine".
+# Caught by probing the real send path before writing, not by reading the code.
+# Both forms are emitted so a lookup by either id succeeds, matching the
+# bidirectional intent the helper pair documents.
+INSTANCE_TO_TEMPLATE = {
+    "finance-personal":  "finance",
+    "legal-coparenting": "legal",
+    "medical-general":   "medical",
+}
+
+
+def with_aliases(teams):
+    """Every id a sender might legitimately use for these teams."""
+    out = list(teams)
+    for t in teams:
+        alias = INSTANCE_TO_TEMPLATE.get(t)
+        if alias and alias not in out:
+            out.append(alias)
+    return sorted(out)
+
+
+# ── Local team discovery ─────────────────────────────────────────────────────
+def local_teams():
+    """Teams this machine can speak for: those whose kanban_dir is present here.
+
+    Returns (local, unknown). `unknown` is NOT "remote" — it is "this machine
+    cannot tell", which is exactly why we refuse to write a mapping for them.
+    """
+    if not os.path.isfile(TEAM_PATHS):
+        _die_env("%s not found — cannot determine which teams live here." % TEAM_PATHS)
+    try:
+        data = json.load(open(TEAM_PATHS))
+    except ValueError as exc:
+        _die_env("%s is not valid JSON (%s)" % (TEAM_PATHS, exc))
+    teams = data.get("teams") or {}
+    local, unknown = [], []
+    for name, cfg in teams.items():
+        kd = os.path.expanduser((cfg or {}).get("kanban_dir") or "")
+        (local if kd and os.path.isdir(kd) else unknown).append(name)
+    return sorted(local), sorted(unknown)
+
+
+# ── team-machines.json ───────────────────────────────────────────────────────
+def load_map():
+    if not os.path.isfile(TEAM_MACHINES):
+        return {}, False
+    try:
+        data = json.load(open(TEAM_MACHINES))
+    except ValueError as exc:
+        # Never silently rebuild: an operator-maintained remote mapping is the
+        # only record of where other machines are, and it cannot be regenerated.
+        _die_env(
+            "%s is not valid JSON (%s).\n"
+            "  Refusing to rewrite it — fix it by hand, then re-run." % (TEAM_MACHINES, exc)
+        )
+    if not isinstance(data, dict):
+        _die_env("%s is not a JSON object; refusing to rewrite." % TEAM_MACHINES)
+    return data, True
+
+
+def write_map(data):
+    parent = os.path.dirname(TEAM_MACHINES)
+    os.makedirs(parent, exist_ok=True)
+    if os.path.exists(TEAM_MACHINES):
+        shutil.copy2(TEAM_MACHINES, TEAM_MACHINES + BACKUP_SUFFIX)
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".team-machines-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2, sort_keys=True))
+            fh.write("\n")
+        os.replace(tmp, TEAM_MACHINES)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def merge_local(existing, teams, slug):
+    """Assert `slug` for local teams. Returns (merged, added, retargeted).
+
+    Entries for teams not in `teams` are carried through untouched — those are
+    the operator's remote mappings and this machine has no standing to edit them.
+    """
+    merged = dict(existing)
+    added, retargeted = [], []
+    for t in teams:
+        cur = merged.get(t)
+        if cur == slug:
+            continue
+        if cur is None:
+            added.append(t)
+        else:
+            retargeted.append((t, cur))
+        merged[t] = slug
+    return merged, added, retargeted
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--check", action="store_true", help="Report state; never write. Exit 1 on a gap.")
+    ap.add_argument("--dry-run", action="store_true", help="Show what would change; never write.")
+    ap.add_argument("--no-keygen", action="store_true", help="Do not generate a keypair if absent.")
+    ap.add_argument("--server", default=None, help="Fleet Monitor URL for key registration.")
+    ap.add_argument("--machine-id", default=None, help="Override the machine slug.")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    def say(msg=""):
+        if not args.quiet:
+            print(msg)
+
+    keygen_js = _locate_keygen()
+    slug = machine_slug(keygen_js, args.machine_id)
+    have_key = has_private_key(keygen_js, slug)
+    loc, unknown = local_teams()
+    loc = with_aliases(loc)   # template ids too, or kb-msg looks up a name we never wrote
+    existing, map_existed = load_map()
+    merged, added, retargeted = merge_local(existing, loc, slug)
+
+    say("kb-msg provisioning")
+    say("  machine slug : %s" % slug)
+    say("  keygen       : %s" % keygen_js)
+    say("  vault key    : %s" % ("present" if have_key else "ABSENT"))
+    say("  local teams  : %d (%s)" % (len(loc), ", ".join(loc) or "none"))
+    if unknown:
+        say("  unmapped     : %d (%s)" % (len(unknown), ", ".join(unknown)))
+        say("                 not assumed remote — left untouched, see module docstring")
+    say("  routing map  : %s" % (TEAM_MACHINES if map_existed else "ABSENT"))
+
+    if args.check:
+        gaps = []
+        if not have_key:
+            gaps.append("no vault keypair for '%s' (run: kb-msg-provision)" % slug)
+        if not map_existed:
+            gaps.append("no %s" % TEAM_MACHINES)
+        missing = [t for t in loc if existing.get(t) != slug]
+        if missing:
+            gaps.append("%d local team(s) unmapped or mis-targeted: %s" % (len(missing), ", ".join(missing)))
+        if gaps:
+            say("\n  GAPS:")
+            for g in gaps:
+                say("    - %s" % g)
+            return 1
+        say("\n  All Tier-2 provisioning present.")
+        return 0
+
+    # ── keypair ──
+    if not have_key and not args.no_keygen:
+        if args.dry_run:
+            say("\n  [dry-run] would generate a vault keypair for '%s'" % slug)
+        else:
+            say("\n  Generating vault keypair for '%s'..." % slug)
+            cmd = ["node", keygen_js, "--machine-id", slug]
+            if args.server:
+                cmd += ["--server", args.server]
+            rc = subprocess.run(cmd).returncode
+            if rc != 0:
+                print("kb-msg-provision: vault-keygen failed (exit %d). Routing map not written."
+                      % rc, file=sys.stderr)
+                return 1
+            have_key = has_private_key(keygen_js, slug)
+    elif not have_key:
+        say("\n  Skipping keypair generation (--no-keygen). Tier 2 stays unavailable.")
+
+    # ── routing map ──
+    if not added and not retargeted:
+        say("  Routing map already correct for every local team — no change.")
+        return 0
+
+    if args.dry_run:
+        say("\n  [dry-run] would write %s" % TEAM_MACHINES)
+        for t in added:
+            say("    + %s -> %s" % (t, slug))
+        for t, was in retargeted:
+            say("    ~ %s -> %s (was %s)" % (t, slug, was))
+        return 0
+
+    try:
+        write_map(merged)
+    except Exception as exc:
+        print("kb-msg-provision: could not write %s: %s" % (TEAM_MACHINES, exc), file=sys.stderr)
+        return 1
+
+    say("\n  Wrote %s" % TEAM_MACHINES)
+    for t in added:
+        say("    + %s -> %s" % (t, slug))
+    for t, was in retargeted:
+        say("    ~ %s -> %s (was %s)" % (t, slug, was))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
