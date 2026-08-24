@@ -64,19 +64,66 @@ def _load(path):
 
 
 def _commands_for_event(data, event):
-    """Every command string already registered under `event`."""
+    """Every command string already registered under `event`.
+
+    The type guards below are load-bearing and were added after review: the
+    original read was `(data.get("hooks") or {}).get(event, []) or []`, and
+    `X or {}` only rescues a FALSY wrong type. `{"hooks": []}` degraded into the
+    correct exit-2 refusal by accident, while `{"hooks": ["x"]}` — the same wrong
+    type, merely non-empty — reached `.get` on a list and died with a raw
+    AttributeError traceback (exit 1) instead of the documented clean refusal.
+    The test that was supposed to cover this asserted only the empty shape, so it
+    passed for a narrower reason than its name claimed.
+
+    No data was ever at risk (the crash precedes any write), but this runs on
+    every session start, and an unhandled traceback there is indistinguishable
+    from the tool being broken.
+    """
+    hooks = data.get("hooks")
+    if hooks is None:
+        return []
+    if not isinstance(hooks, dict):
+        _die_unreadable(
+            "register-claude-hook: settings['hooks'] is not an object "
+            "(found %s); refusing to rewrite." % type(hooks).__name__
+        )
+    entries = hooks.get(event)
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        _die_unreadable(
+            "register-claude-hook: settings['hooks']['%s'] is not a list "
+            "(found %s); refusing to rewrite." % (event, type(entries).__name__)
+        )
     out = []
-    for block in (data.get("hooks") or {}).get(event, []) or []:
+    for block in entries:
         if not isinstance(block, dict):
             continue
-        for hook in block.get("hooks", []) or []:
+        inner = block.get("hooks")
+        if not isinstance(inner, list):
+            continue
+        for hook in inner:
             if isinstance(hook, dict) and "command" in hook:
                 out.append(hook["command"])
     return out
 
 
 def _register(data, event, command, matcher=None):
-    """Append a matcher block for `command`. Returns True if data was modified."""
+    """Append a matcher block for `command`. Returns True if data was modified.
+
+    DEDUP IS BY EXACT COMMAND STRING ONLY — `matcher` is deliberately not part of
+    the identity, and a caller re-registering the same command under a DIFFERENT
+    matcher gets a no-op rather than an updated block (review finding, PR #758).
+
+    That is correct for the only call site today: setup-hooks.sh registers one
+    fixed inbox-hook command with no matcher, and command-only dedup is exactly
+    what makes re-running it idempotent. It would be wrong for a future caller
+    that varies the matcher, which would silently keep the first one.
+
+    If you add such a caller, change the identity here — do not add a second
+    registration path. Two writers against settings.json is how the original
+    defect (a hook symlinked but never registered) became possible to miss.
+    """
     if command in _commands_for_event(data, event):
         return False
     hooks = data.setdefault("hooks", {})

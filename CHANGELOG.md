@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-0885 (follow-up) — re-mirror `register-claude-hook.py` after the canonical gained type guards.** The first mirror shipped the version whose `_commands_for_event` read `(data.get("hooks") or {})`, which only rescues a FALSY wrong type: a consumer whose `settings.json` held `{"hooks": ["x"]}` got a raw `AttributeError` traceback at exit 1 on **every session start**, instead of the clean exit-2 refusal. Caught by the PR's own `sync-tap-drift` gate — the canonical was fixed mid-review and the tap side was not re-synced, which is exactly the drift that gate exists to catch.
+
 - **XACA-0885 — the kb-msg comms channel is shipped to consumers with a setup path for the first time.** Every kb-msg artifact was already mirrored here; none of the provisioning was, so a consumer box could receive the feature and had no way to turn it on. Adds `share/scripts/kb-msg-provision` (vault keypair + `team-machines.json` routing map, with `--check`/`--dry-run`) and `share/scripts/register-claude-hook.py` (idempotent `settings.json` hook registration that refuses an unparseable file rather than rebuilding it). Both are installed **executable** by `install-shell.sh`, unlike the `msg-client.js`/`vault-keygen.js` datafiles beside them — these two are invoked directly, by an operator and by `kb-msg doctor` respectively.
 
   `share/scripts/fleet-reporter.sh` is re-mirrored: its kb-msg pull had six silent `return 0` guards and now records why it skipped to `~/.aiteamforge/run/kb-msg-pull-status`, including on the success path so a stale reason cannot outlive its cause. Nothing is printed on the normal path — this runs every reporter cycle.
