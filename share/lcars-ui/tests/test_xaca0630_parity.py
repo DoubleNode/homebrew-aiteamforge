@@ -334,6 +334,44 @@ _JQ_ROUND2_PRECEDENCE_BUG_REASON = (
     "(_jq_has_round2_precedence_bug() returned True); out of scope for XACA-0952."
 )
 
+# XACA-0952-035 (PR #767) -- all 4 uses below are `strict=True`, not the
+# `strict=False` an earlier round used. Reasoned through, not a reflexive
+# flip:
+#
+# `condition` (the marker's first positional arg) is
+# _JQ_ROUND2_PRECEDENCE_BUG, a RUNTIME PROBE of the actual jq binary on
+# THIS machine (_jq_has_round2_precedence_bug(), evaluated once at
+# collection time) -- not a static "this test is known-flaky" guess. That
+# makes the marker's two states qualitatively different:
+#
+#   * condition=False (jq >=1.8, the bug is fixed): pytest does not apply
+#     the xfail marker AT ALL in this case (this is pytest's own documented
+#     conditional-xfail semantics) -- the test runs as an ordinary test and
+#     must PASS outright, `strict` never enters into it either way.
+#   * condition=True (jq <1.8, the bug is present): every one of these 4
+#     tests hardcodes a literal expected value chosen specifically because
+#     the TRUE unrounded ratio has more than 2 decimal digits (1.125,
+#     18.0/14.0=1.28571428..., etc: see each test's own docstring). The
+#     bug makes round2 a no-op (identity function, per the root-cause
+#     analysis above) -- so a buggy jq returns the raw, many-decimal value,
+#     which by construction can never equal the hardcoded 2-decimal
+#     literal these tests assert against. XPASS -- the buggy jq
+#     "accidentally" producing the correct rounded literal -- is therefore
+#     not just unlikely but STRUCTURALLY unreachable for these 4 specific
+#     fixtures, short of an unrelated change to what round2 is even fed.
+#
+# Given that, `strict=True` costs nothing in the overwhelmingly common case
+# (fixed jq: marker inactive, strict irrelevant) and in the affected-jq
+# case (XFAIL is what actually happens, exactly as intended). What it buys:
+# if a future edit to these fixtures, to round2, or to the bug-detection
+# probe itself ever DOES let one of these 4 pass while flagged buggy, that
+# is worth a loud, self-contained failure instead of a silently-tolerated
+# "xpassed" a developer has no reason to go looking for -- the same
+# silent-tolerance failure mode XACA-0952 exists to close elsewhere in this
+# suite. See docs/testing/test-directory-coverage-gate.md's sibling
+# "gap: passes" discussion for the general principle this mirrors.
+_JQ_ROUND2_XFAIL_STRICT = True
+
 
 # ---------------------------------------------------------------------------
 # Test class: Committed-fixture board parity (XACA-0952 Blocker A)
@@ -536,7 +574,7 @@ class TestSpec72FixtureParity(unittest.TestCase):
         return next(b for b in src['buckets'] if b['label'] == label)
 
     @pytest.mark.xfail(
-        _JQ_ROUND2_PRECEDENCE_BUG, reason=_JQ_ROUND2_PRECEDENCE_BUG_REASON, strict=False
+        _JQ_ROUND2_PRECEDENCE_BUG, reason=_JQ_ROUND2_PRECEDENCE_BUG_REASON, strict=_JQ_ROUND2_XFAIL_STRICT
     )
     def test_cli_server_parity(self):
         """CLI and server produce identical field-for-field output on the §7.2 fixture."""
@@ -556,7 +594,7 @@ class TestSpec72FixtureParity(unittest.TestCase):
             )
 
     @pytest.mark.xfail(
-        _JQ_ROUND2_PRECEDENCE_BUG, reason=_JQ_ROUND2_PRECEDENCE_BUG_REASON, strict=False
+        _JQ_ROUND2_PRECEDENCE_BUG, reason=_JQ_ROUND2_PRECEDENCE_BUG_REASON, strict=_JQ_ROUND2_XFAIL_STRICT
     )
     def test_global_handicap(self):
         """Spec: 18.0/14.0 = 1.285714... -> 1.29"""
@@ -584,7 +622,7 @@ class TestSpec72FixtureParity(unittest.TestCase):
         self.assertEqual(self._bucket(self.srv, '1-4h')['handicap'], 1.0)
 
     @pytest.mark.xfail(
-        _JQ_ROUND2_PRECEDENCE_BUG, reason=_JQ_ROUND2_PRECEDENCE_BUG_REASON, strict=False
+        _JQ_ROUND2_PRECEDENCE_BUG, reason=_JQ_ROUND2_PRECEDENCE_BUG_REASON, strict=_JQ_ROUND2_XFAIL_STRICT
     )
     def test_bucket_1_4h_median_bankers_rounding(self):
         """Spec: 1-4h median=(0.75+1.5)/2=1.125 -> 1.12 (banker's: 112 is even)."""
@@ -668,7 +706,7 @@ class TestBoundaryAndEdgeCases(unittest.TestCase):
         self.assertEqual(b['median'], 0.75)
 
     @pytest.mark.xfail(
-        _JQ_ROUND2_PRECEDENCE_BUG, reason=_JQ_ROUND2_PRECEDENCE_BUG_REASON, strict=False
+        _JQ_ROUND2_PRECEDENCE_BUG, reason=_JQ_ROUND2_PRECEDENCE_BUG_REASON, strict=_JQ_ROUND2_XFAIL_STRICT
     )
     def test_bankers_rounding_1125(self):
         """1.125 -> 1.12 via banker's rounding (round-half-to-even: 112 is even).

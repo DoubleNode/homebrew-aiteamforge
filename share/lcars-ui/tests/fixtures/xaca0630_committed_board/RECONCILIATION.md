@@ -42,28 +42,99 @@ almost every field — verified locally: it produced 15 field mismatches
 not the 4 the real CI run reported for the *existing* tests this bug already
 affects.
 
-**Fix:** every eligible item in this fixture uses the **same fixed ratio,
-`2.0`** (`timeWorkedMs = points * 2.0 * 3600000`), and `points` values are
-chosen on a **0.25 (quarter-hour) grid**. This guarantees, by construction:
+**Fix, round 1 (superseded — see "Round 2" below):** every eligible item
+originally used the **same fixed ratio, `2.0`**
+(`timeWorkedMs = points * 2.0 * 3600000`), with `points` on a 0.25-hour grid.
+That decoupled the fixture from XACA-0968 (every value already exact to
+≤2 decimals), but XACA-0952-034 (PR #767) flagged a second problem with it:
+a uniform ratio makes `handicap` (weighted mean) and `median` identical —
+`2.0` — in every bucket and globally. A server-side formula bug (e.g.
+computing a mean where the spec requires a median) is invisible against
+constant input: mean and median of a constant list are the same number by
+definition, so `TestFixtureBoardParity` would pass over that bug rather than
+catch it.
 
-- `sumEstimatedHours` (= Σ points) stays on the 0.25 grid → ≤2 decimals.
-- `sumActualHours` (= 2.0 × Σ points) stays on the (coarser) 0.5 grid → ≤1 decimal.
-- `handicap` (= sumActual / sumEstimated) = `2.0` exactly, for every bucket
-  and globally — the ratio cancels out of the weighted average by
-  construction, regardless of how many items or what their individual
-  `points` are.
-- `median` = `2.0` exactly — every eligible item shares the identical ratio,
-  so the sorted-ratios list is constant regardless of `n` being odd or even.
+**Fix, round 2 (current):** `points` stay unchanged (still the 0.25 grid,
+still spanning all four buckets and their exact boundaries), but each
+item's `timeWorkedMs` now encodes a **distinct, hand-solved per-item ratio**
+— 7 chosen values plus one back-solved value per bucket — engineered so
+that, simultaneously, for **every** bucket and the global aggregate:
 
-None of these values ever need real rounding, so `round2` being a no-op
-under the XACA-0968 bug is indistinguishable from `round2` working
-correctly. This fixture is fully decoupled from that bug: verified by
-running the full suite with a jq binary that reproduces the bug (jq 1.7.1,
-matching GitHub Actions' ubuntu-latest image) substituted on `PATH` —
-`TestFixtureBoardParity` passes under BOTH jq 1.8.1 (this machine) and the
-substituted buggy 1.7.1, while the 4 already-known XACA-0968 tests correctly
-flip to `xfailed` under the latter and nothing else in the file changes
-outcome. See the PR description for the exact substitution method.
+- `handicap` (weighted mean, weighted by `points`) and `median` (of the
+  unweighted per-item ratios) are **different exact values**, so a
+  mean-vs-median mix-up is observable.
+- Neither equals any individual item's own ratio.
+- `sumEstimatedHours`, `sumActualHours`, `handicap`, and `median` are all
+  *already* exact to ≤2 decimal places — no field depends on `round2`
+  actually rounding anything, preserving the original XACA-0968 decoupling
+  goal in full (see "Verified decoupled from XACA-0968" below).
+
+The construction: within a bucket, 6 ratios are chosen directly (in
+ascending order, r0..r5), a 7th (r6) is chosen above them, and the 8th
+(r7, on the item with the largest `points` in the bucket) is solved
+algebraically so `Σ(points·ratio) / Σ(points)` lands exactly on a chosen
+2-decimal target `handicap`, subject to `r7 > r6` so it doesn't disturb
+sort order — which keeps `median = (r3 + r4) / 2` (the two middle values by
+position) independent of the solved value, letting `handicap` and `median`
+be engineered as two separate, non-interacting knobs. `handicap` targets
+were further restricted to multiples that keep the *pre-rounding*
+`sumActualHours` exact too (not just the post-`round2` `handicap`) — the
+bucket sums have denominators with prime factors (11, 17, 43) that make an
+arbitrary 2-decimal `handicap` produce a `sumActualHours` needing real
+rounding; the fix is to choose only `handicap` values whose hundredths are
+a multiple of the bucket's `sumEstimatedHours` denominator (worked out per
+bucket; see `scripts` referenced below). The resulting per-bucket and
+global values:
+
+| | handicap | median | sumEstimatedHours | sumActualHours |
+|---|---|---|---|---|
+| `<=1h` | 2.18 | 2.00 | 5 | 10.9 |
+| `1-4h` | 2.34 | 2.20 | 19.5 | 45.63 |
+| `4-8h` | 2.48 | 2.40 | 46.75 | 115.94 |
+| `>8h`  | 2.68 | 2.20 | 96.75 | 259.29 |
+| global | 2.57 | 2.20 | 168 | 431.76 |
+
+All 20 values above were produced by exact `fractions.Fraction` arithmetic
+(never floats) while solving for the per-item ratios, then independently
+confirmed by running the real CLI (`kb-variance --json --board-file …`)
+against the committed fixture and reading its output back — the table
+matches that run byte-for-byte.
+
+### Mutation proof (XACA-0952-034)
+
+Directly demonstrates the round-1 fixture's blind spot and round-2's fix,
+by mutating `_build_estimates_payload`'s `_compute_aggregate` in
+`lcars-ui/server.py` to compute a **mean** instead of the spec's median
+(`median = sum(ratios) / n` for both odd and even `n`, replacing the
+correct sort-and-middle logic) and re-running `TestFixtureBoardParity`:
+
+- **Against the round-1 (uniform ratio=2.0) fixture:** `test_parity`
+  **PASSES** — mean and median of a constant list are identical, so the
+  bug produces no observable diff.
+- **Against the round-2 (current, varied-ratio) fixture:** `test_parity`
+  **FAILS**, with a diff in all 4 buckets and the global block, e.g.
+  `buckets[0].median: CLI=2 vs server=2.02`,
+  `buckets[1].median: CLI=2.2 vs server=2.15`,
+  `buckets[2].median: CLI=2.4 vs server=2.37`,
+  `buckets[3].median: CLI=2.2 vs server=2.39`,
+  `global.median: CLI=2.2 vs server=2.23`.
+
+The mutation was reverted immediately after this check (never committed);
+`lcars-ui/server.py` in this PR is byte-identical to `develop` on this
+function.
+
+### Verified decoupled from XACA-0968 (round 2)
+
+No jq 1.7.1 binary was available in this environment to re-run the original
+substituted-`PATH` method, so decoupling was instead verified by
+implementing both the correct `round2` filter and the exact buggy
+operator-precedence parse XACA-0968 describes (`. * (100 as $s | …)`,
+literal-`100`-only, per the bug's own root-cause writeup above) as two `jq`
+functions, then applying both to every one of the 20 payload values in the
+table above: `correct == buggy` for all 20, because every one is already
+exact to ≤2 decimals and both implementations are true no-ops on such
+input. This is the same decoupling property round 1 had, now proven to
+still hold under a fixture whose values are no longer uniform.
 
 ## What this still preserves from the real board
 
@@ -99,16 +170,18 @@ lcars-ui/tests/fixtures/xaca0630_committed_board/academy-board.json`:
 ```
 eligible: 32
 excluded: {no_estimate: 2, no_time: 2, both_missing: 2, total: 6}
-global: {handicap: 2, median: 2, sumEstimatedHours: 168, sumActualHours: 336}
+global: {handicap: 2.57, median: 2.2, sumEstimatedHours: 168, sumActualHours: 431.76}
 buckets:
-  <=1h  n=8  handicap=2  median=2  sumEstimatedHours=5      sumActualHours=10
-  1-4h  n=8  handicap=2  median=2  sumEstimatedHours=19.5   sumActualHours=39
-  4-8h  n=8  handicap=2  median=2  sumEstimatedHours=46.75  sumActualHours=93.5
-  >8h   n=8  handicap=2  median=2  sumEstimatedHours=96.75  sumActualHours=193.5
+  <=1h  n=8  handicap=2.18  median=2    sumEstimatedHours=5      sumActualHours=10.9
+  1-4h  n=8  handicap=2.34  median=2.2  sumEstimatedHours=19.5   sumActualHours=45.63
+  4-8h  n=8  handicap=2.48  median=2.4  sumEstimatedHours=46.75  sumActualHours=115.94
+  >8h   n=8  handicap=2.68  median=2.2  sumEstimatedHours=96.75  sumActualHours=259.29
 ```
 
 These values are not hardcoded into the test (the test compares CLI output
 to server output, not to a hardcoded expectation) — they're recorded here so
 a future reader can sanity-check a fixture refresh against a known-good
 baseline, and can see at a glance why every value is already exact to ≤2
-decimals (the point of the ratio=2.0 / 0.25-grid design above).
+decimals (the point of the round-2 varied-ratio design above) despite no
+longer being uniform. Round 1's `handicap == median == 2` in every row is
+exactly the blind spot round 2 exists to close — see "Mutation proof" above.
