@@ -78,9 +78,10 @@ def inventory(
     devteam_root, root_config_key = _resolve_product_root(root, home, team_config)
 
     walked_roots: list[Path] = []
+    seen_paths: set[str] = set()
 
     if devteam_root.exists():
-        _walk_into(manifest, channels, devteam_root, home)
+        _walk_into(manifest, channels, devteam_root, home, seen_paths)
         walked_roots.append(devteam_root)
     else:
         reason = (
@@ -98,7 +99,7 @@ def inventory(
         if _covered_by(extra, walked_roots):
             continue
         if extra.exists():
-            _walk_into(manifest, channels, extra, home)
+            _walk_into(manifest, channels, extra, home, seen_paths)
             walked_roots.append(extra)
         else:
             reason = (
@@ -133,6 +134,18 @@ def _resolve_product_root(
         product_dir = team_config.get("product_dir")
         if product_dir:
             return home / "dev-team" / product_dir, "product_dir"
+        # XACA-0954-015: an explicitly EMPTY product_dir is a different thing from an
+        # omitted one, and silently treating them alike is the same absent-vs-empty
+        # conflation this ticket removed from `personas`. An omitted key is a config
+        # that predates product_dir; an empty one is a config someone edited wrongly.
+        # Fall back either way (the legacy path still works), but never silently.
+        if "product_dir" in team_config:
+            print(
+                f"WARNING [{DOMAIN}]: product_dir is present but empty in the team config; "
+                f"falling back to team name. Remove the key to use the legacy fallback "
+                f"deliberately, or give it the directory name under ~/dev-team/.",
+                file=sys.stderr,
+            )
         team = team_config.get("team", "")
         return home / "dev-team" / team, "team"
 
@@ -155,7 +168,16 @@ def _persona_dirs(team_config: dict | None, home: Path) -> list[Path]:
 
 
 def _covered_by(candidate: Path, walked_roots: list[Path]) -> bool:
-    """True if `candidate` equals or is nested inside an already-walked root."""
+    """True if `candidate` equals or is nested inside an already-walked root.
+
+    XACA-0954-016: deliberately ONE-DIRECTIONAL. A persona_dirs entry that is an
+    ANCESTOR of an already-walked root is NOT reported as covered, because skipping
+    it would drop everything under it that lies outside that root — turning a
+    redundant re-walk into silent data loss, which is the exact failure class this
+    ticket exists to remove. The overlap is handled per-file by the `seen` set in
+    inventory() instead, so an ancestor entry costs one extra directory traversal
+    and emits nothing twice.
+    """
     try:
         candidate_r = candidate.resolve()
     except OSError:
@@ -175,9 +197,18 @@ def _covered_by(candidate: Path, walked_roots: list[Path]) -> bool:
     return False
 
 
-def _walk_into(manifest: Manifest, channels: ChannelConfig, walk_root: Path, home: Path) -> None:
+def _walk_into(manifest: Manifest, channels: ChannelConfig, walk_root: Path, home: Path,
+               seen: set[str] | None = None) -> None:
     for p in walk_files(walk_root):
         abs_path = str(p)
+        # XACA-0954-016: overlapping roots (an ancestor persona_dirs entry) must not
+        # emit the same file twice. Cross-domain dedupe in the generator would mask
+        # this, but relying on a later pass to clean up a mess this function made is
+        # how a same-domain duplicate survives when that pass changes.
+        if seen is not None:
+            if abs_path in seen:
+                continue
+            seen.add(abs_path)
         ch = channels.resolve(abs_path)
         if ch == UNTAGGED:
             ch = AITEAMFORGE_PRODUCT  # safety net for new files in this tree

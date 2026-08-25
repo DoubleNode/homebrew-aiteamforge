@@ -1885,7 +1885,14 @@ def generate_export(job_id, team_id):
         )
         gen_output = (gen_result.stdout + gen_result.stderr).strip()
 
-        # exit 0 = clean, exit 1 = untagged gaps (warn only), exit 2 = config error
+        # exit 0 = clean, exit 1 = untagged gaps AND/OR missing domain roots,
+        # exit 2 = config error.
+        # XACA-0954: exit 1 is no longer "warn only". It now also means a configured
+        # domain root was never scanned, which is precisely the condition that let an
+        # export report success while omitting most of a team. We pass --allow-untagged
+        # (untagged files are a long-standing, tolerated condition here) but that flag
+        # deliberately does NOT waive missing roots, so we must inspect the manifest
+        # rather than infer completeness from the exit code alone.
         if gen_result.returncode == 2 or not tt_manifest_path.exists():
             _export_job_update(job_id, {
                 'status': 'failed',
@@ -1896,6 +1903,26 @@ def generate_export(job_id, team_id):
             return
 
         print(f"[LCARS Export] Generator exit={gen_result.returncode} for team={tt_team}")
+
+        # XACA-0954: surface unscanned domain roots to the operator. Without this the
+        # UI path reported 'Export ready for download' over an export that had silently
+        # skipped an entire domain root — the CLI gate alone does not protect the button.
+        missing_roots_detail = []
+        try:
+            with open(tt_manifest_path, "r", encoding="utf-8") as _mf:
+                missing_roots_detail = json.load(_mf).get("missing_roots") or []
+        except (OSError, ValueError) as _mr_err:
+            # A manifest we cannot parse is not evidence of completeness. Say so
+            # rather than defaulting to "no missing roots" and reporting success.
+            print(f"[LCARS Export] WARNING: could not read missing_roots from manifest: {_mr_err}")
+            missing_roots_detail = [{
+                "domain": "(unknown)", "path": str(tt_manifest_path), "config_key": "(unreadable)",
+                "reason": f"manifest could not be parsed to check for missing roots: {_mr_err}",
+            }]
+        if missing_roots_detail:
+            print(f"[LCARS Export] INCOMPLETE: {len(missing_roots_detail)} missing domain root(s) "
+                  f"for team={tt_team}: "
+                  + "; ".join(f"{r.get('domain')}:{r.get('path')}" for r in missing_roots_detail))
 
         # Step 2: Run pre-flight verifier, capture summary.
         _export_job_update(job_id, {'message': 'Running pre-flight verifier...', 'progress': 20})
@@ -2025,10 +2052,35 @@ def generate_export(job_id, team_id):
             _stamp_detection_failed_if_unavailable(secrets_summary)
 
         file_size = output_path.stat().st_size
+        # XACA-0954: the archive is still produced (an operator may knowingly want a
+        # partial export), but the message must never imply completeness when a
+        # configured root was never scanned. 'status' stays 'completed' so the download
+        # contract is unchanged; the incompleteness travels in the message and in
+        # missingRootsSummary, alongside verifierSummary.
+        if missing_roots_detail:
+            _completion_message = (
+                f'Export ready for download — INCOMPLETE: {len(missing_roots_detail)} '
+                f'configured domain root(s) were never scanned'
+            )
+        else:
+            _completion_message = 'Export ready for download'
         _export_job_update(job_id, {
             'status': 'completed',
             'progress': 100,
-            'message': 'Export ready for download',
+            'message': _completion_message,
+            'missingRootsSummary': {
+                'count': len(missing_roots_detail),
+                'complete': not missing_roots_detail,
+                'roots': [
+                    {
+                        'domain': r.get('domain', '?'),
+                        'path': r.get('path', '?'),
+                        'configKey': r.get('config_key', ''),
+                        'reason': r.get('reason', ''),
+                    }
+                    for r in missing_roots_detail
+                ],
+            },
             'filename': filename,
             'fileSize': format_bytes_export(file_size),
             'fileSizeBytes': file_size,

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import channels as channels_mod
 from . import domain_claude, domain_devteam, domain_git, domain_kanban, domain_knowledge
-from .channels import load_team_config
+from .channels import load_team_config, resolve_team_config_path
 from .checklist import emit_pre_export_checklist
 from .checksum import safe_relpath
 from .db_integrity import probe_db
@@ -193,12 +193,19 @@ def main(argv: list[str] | None = None) -> int:
             reason = r.get("reason", "")
             print(f"  [{domain}] config_key={config_key}  path={path}", flush=True)
             print(f"      reason: {reason}", flush=True)
+        # XACA-0954-013: name the actual config file. The operator should not have
+        # to know the packaged-config path convention to act on this.
+        _cfg_path = resolve_team_config_path(args.team, config_dir=team_cfg_dir)
+        _cfg_hint = str(_cfg_path) if _cfg_path else f"the team config for {args.team!r}"
         print(
             "\nThese roots are configured in the team YAML but do not exist on this machine.\n"
             "The domain scan never reached them, so their files are ABSENT from this manifest\n"
-            "— not counted as untagged, not counted anywhere. Fix the path for the config_key(s)\n"
-            "above (or correct/remove the stale entry) in the team config, then re-run the\n"
-            "generator before treating this export as complete.",
+            "— not counted as untagged, not counted anywhere.\n"
+            f"\nEdit: {_cfg_hint}\n"
+            "Fix the path for the config_key(s) listed above (or correct/remove the stale entry),\n"
+            + ("then re-run the generator if you need a complete export."
+               if args.allow_missing_roots
+               else "then re-run the generator before treating this export as complete."),
             flush=True,
         )
 
@@ -218,12 +225,25 @@ def main(argv: list[str] | None = None) -> int:
     # return here would skip whichever section renders second.
     if not gaps and not missing_roots:
         print("\n[generator] Zero untagged gaps — all files have a transfer channel.", flush=True)
-    elif missing_roots:
+    elif missing_roots and not args.allow_missing_roots:
         print(
             "\n[generator] NOT CLEAR TO EXPORT — missing domain root(s) above. This manifest is "
             "INCOMPLETE, not clean: a domain showing 0 (or few) files here may mean its root was "
             "never scanned, not that it was scanned and found empty. Do not export until resolved "
             "or explicitly waived with --allow-missing-roots.",
+            flush=True,
+        )
+    elif missing_roots:
+        # XACA-0954-012: the waiver was applied, so the alarm text must not repeat
+        # the instruction the operator already followed. Telling someone who passed
+        # --allow-missing-roots to "not export until waived with --allow-missing-roots"
+        # contradicts the exit code, and on a team that waives routinely it trains
+        # them to read past the one line that matters. Still never reads as clean.
+        print(
+            f"\n[generator] INCOMPLETE BY WAIVER — {len(missing_roots)} missing domain root(s) "
+            "above were accepted via --allow-missing-roots. Their files were never scanned and "
+            "are ABSENT from this manifest. Exit 0 reflects the waiver, NOT coverage: this export "
+            "is knowingly partial, and a domain showing 0 files may simply never have been looked at.",
             flush=True,
         )
     # else: gaps-only case already has its own remediation text printed above.

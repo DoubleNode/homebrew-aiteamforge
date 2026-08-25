@@ -115,10 +115,7 @@ def load_team_config(team: str, *, config_dir: Path | None = None) -> dict:
     Tokens in the returned config are NOT yet resolved — call resolve_tokens() or
     default_rules() which handles token substitution.
     """
-    candidates: list[Path] = []
-    if config_dir is not None:
-        candidates.append(Path(config_dir) / f"{team}.yaml")
-    candidates.append(_PACKAGE_CONFIG_DIR / f"{team}.yaml")
+    candidates = _team_config_candidates(team, config_dir)
 
     for path in candidates:
         if path.exists():
@@ -127,6 +124,28 @@ def load_team_config(team: str, *, config_dir: Path | None = None) -> dict:
 
     searched = ", ".join(str(c) for c in candidates)
     raise FileNotFoundError(f"No team config found for {team!r}. Searched: {searched}")
+
+
+def _team_config_candidates(team: str, config_dir: Path | None) -> list[Path]:
+    """Candidate config paths, in resolution order. Single source of truth for
+    load_team_config() and resolve_team_config_path() so the two cannot drift."""
+    candidates: list[Path] = []
+    if config_dir is not None:
+        candidates.append(Path(config_dir) / f"{team}.yaml")
+    candidates.append(_PACKAGE_CONFIG_DIR / f"{team}.yaml")
+    return candidates
+
+
+def resolve_team_config_path(team: str, *, config_dir: Path | None = None) -> Path | None:
+    """Return the path load_team_config() would actually read, or None if absent.
+
+    XACA-0954-013: the missing-root remediation text names the config file to edit
+    rather than making the operator know the packaged-config path convention.
+    """
+    for path in _team_config_candidates(team, config_dir):
+        if path.exists():
+            return path
+    return None
 
 
 def default_rules(team_config: dict, home: Path | None = None) -> list[ChannelRule]:
