@@ -1522,12 +1522,19 @@ body {
 /* Base pill. Negative margin-right collapses adjacent borders so touching
    pills show a single 2px separator instead of 4px, matching the Kanban bar. */
 .lcars-data-bar .legend-pill {
-    flex: 0 0 auto;
-    min-width: 6rem;
+    /* Uniform width, mirroring the Kanban mode bar's `flex: 0 0 100px`, so every
+       pill is the same size regardless of label length -- "1 OFFLINE" must not
+       render wider than "ADMIN". */
+    flex: 0 0 100px;
+    width: 100px;
+    min-width: 100px;
     display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 6px 14px;
+    /* Label seated in the lower-right CORNER, like the Kanban's pills and like
+       the sidebar buttons. These were previously centred on both axes. */
+    align-items: flex-end;
+    justify-content: flex-end;
+    line-height: 1;
+    padding: 6px 12px 3px;
     font-size: 0.65rem;
     font-weight: 600;
     letter-spacing: 0.08em;
@@ -1648,9 +1655,13 @@ body {
        replaced used `flex: 1; min-width: 0` and could never overflow; allowing
        shrink here keeps that guarantee while still preferring the legible size. */
     .lcars-data-bar .legend-pill {
+        /* Narrow widths drop the uniform 100px and allow shrink, so the cluster
+           can never be clipped by the overflow:hidden parent. Legibility of a
+           uniform grid matters less than not losing a pill entirely. */
         flex: 0 1 auto;
+        width: auto;
         min-width: 0;
-        padding: 4px 8px;
+        padding: 4px 8px 3px;
         font-size: 0.55rem;
         letter-spacing: 0;
         overflow: hidden;
