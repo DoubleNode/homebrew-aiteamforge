@@ -1814,6 +1814,68 @@ def _stamp_detection_failed_if_unavailable(summary: dict) -> dict:
     return summary
 
 
+
+# ---------------------------------------------------------------------------
+# XACA-0954-019 — pure helpers for the export path's missing-roots decision.
+#
+# Extracted from generate_export() so the logic that decides "is this export
+# complete, and what do we tell the operator" is unit-testable on its own.
+# Previously it was inline in a function that needs an export job, a staging
+# directory and the packer to run at all, so it could only be pinned by a
+# source guard — which cannot prove the wiring is right, only that it exists.
+# ---------------------------------------------------------------------------
+
+def _export_read_missing_roots(manifest_path) -> list:
+    """Read `missing_roots` out of a generated manifest.
+
+    Fails CLOSED: a manifest we cannot read or parse is NOT evidence of
+    completeness, so it yields a synthetic entry rather than an empty list. The
+    whole point of XACA-0954 is that "nothing reported" must never be produced by
+    a check that did not actually run.
+
+    An OLD manifest generated before this ticket simply has no such key and
+    correctly reads as [] — there is nothing to report for those.
+    """
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as mf:
+            return json.load(mf).get("missing_roots") or []
+    except (OSError, ValueError) as err:
+        print(f"[LCARS Export] WARNING: could not read missing_roots from manifest: {err}")
+        return [{
+            "domain": "(unknown)",
+            "path": str(manifest_path),
+            "config_key": "(unreadable)",
+            "reason": f"manifest could not be parsed to check for missing roots: {err}",
+        }]
+
+
+def _export_completion_message(missing_roots: list) -> str:
+    """Completion message for the export job. Never implies completeness wrongly."""
+    if missing_roots:
+        return (
+            f'Export ready for download — INCOMPLETE: {len(missing_roots)} '
+            f'configured domain root(s) were never scanned'
+        )
+    return 'Export ready for download'
+
+
+def _export_missing_roots_summary(missing_roots: list) -> dict:
+    """UI-facing summary, shaped for rendering beside verifierSummary."""
+    return {
+        'count': len(missing_roots),
+        'complete': not missing_roots,
+        'roots': [
+            {
+                'domain': r.get('domain', '?'),
+                'path': r.get('path', '?'),
+                'configKey': r.get('config_key', ''),
+                'reason': r.get('reason', ''),
+            }
+            for r in missing_roots
+        ],
+    }
+
+
 def generate_export(job_id, team_id):
     """Generate a per-team export zip (runs in background thread).
 
@@ -1907,18 +1969,9 @@ def generate_export(job_id, team_id):
         # XACA-0954: surface unscanned domain roots to the operator. Without this the
         # UI path reported 'Export ready for download' over an export that had silently
         # skipped an entire domain root — the CLI gate alone does not protect the button.
-        missing_roots_detail = []
-        try:
-            with open(tt_manifest_path, "r", encoding="utf-8") as _mf:
-                missing_roots_detail = json.load(_mf).get("missing_roots") or []
-        except (OSError, ValueError) as _mr_err:
-            # A manifest we cannot parse is not evidence of completeness. Say so
-            # rather than defaulting to "no missing roots" and reporting success.
-            print(f"[LCARS Export] WARNING: could not read missing_roots from manifest: {_mr_err}")
-            missing_roots_detail = [{
-                "domain": "(unknown)", "path": str(tt_manifest_path), "config_key": "(unreadable)",
-                "reason": f"manifest could not be parsed to check for missing roots: {_mr_err}",
-            }]
+        # XACA-0954-019: the decision logic lives in pure helpers above so it can be
+        # unit-tested directly, without an export job, a staging dir or the packer.
+        missing_roots_detail = _export_read_missing_roots(tt_manifest_path)
         if missing_roots_detail:
             print(f"[LCARS Export] INCOMPLETE: {len(missing_roots_detail)} missing domain root(s) "
                   f"for team={tt_team}: "
@@ -2057,30 +2110,12 @@ def generate_export(job_id, team_id):
         # configured root was never scanned. 'status' stays 'completed' so the download
         # contract is unchanged; the incompleteness travels in the message and in
         # missingRootsSummary, alongside verifierSummary.
-        if missing_roots_detail:
-            _completion_message = (
-                f'Export ready for download — INCOMPLETE: {len(missing_roots_detail)} '
-                f'configured domain root(s) were never scanned'
-            )
-        else:
-            _completion_message = 'Export ready for download'
+        _completion_message = _export_completion_message(missing_roots_detail)
         _export_job_update(job_id, {
             'status': 'completed',
             'progress': 100,
             'message': _completion_message,
-            'missingRootsSummary': {
-                'count': len(missing_roots_detail),
-                'complete': not missing_roots_detail,
-                'roots': [
-                    {
-                        'domain': r.get('domain', '?'),
-                        'path': r.get('path', '?'),
-                        'configKey': r.get('config_key', ''),
-                        'reason': r.get('reason', ''),
-                    }
-                    for r in missing_roots_detail
-                ],
-            },
+            'missingRootsSummary': _export_missing_roots_summary(missing_roots_detail),
             'filename': filename,
             'fileSize': format_bytes_export(file_size),
             'fileSizeBytes': file_size,

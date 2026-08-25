@@ -18066,20 +18066,85 @@ function updateExportProgress(percent, label, message) {
     if (msgEl) msgEl.textContent = message;
 }
 
+// XACA-0954-018: render unscanned domain roots in the export panel.
+//
+// The backend computes missingRootsSummary correctly, but nothing in the
+// frontend read it: onExportComplete() set the status label to 'READY'
+// unconditionally, and the only trace of incompleteness that reached the DOM
+// was data.message, appended after the phrase "Export ready for download" in a
+// secondary progress line. An operator exporting a team whose configured root
+// was never scanned still saw READY. That is the whole defect of XACA-0954,
+// surviving one layer above the backend fix -- correct data that nothing renders
+// is not a fixed interface.
+//
+// Built in JS rather than as markup in index.html so the warning cannot be
+// separated from the data that justifies it.
+function renderExportMissingRoots(container, summary) {
+    const existing = document.getElementById('export-missing-roots');
+    if (existing) existing.remove();
+    if (!container || !summary || !summary.count) return;
+
+    const box = document.createElement('div');
+    box.id = 'export-missing-roots';
+    box.className = 'export-missing-roots';
+    // Inline styles so the warning renders even if the stylesheet has not caught
+    // up -- a warning that depends on CSS is a warning that can silently vanish.
+    box.style.cssText = 'width:100%;margin-top:8px;padding:10px 12px;' +
+        'border-left:6px solid var(--lcars-red, #cc6666);' +
+        'background:var(--lcars-panel-bg, rgba(204,102,102,0.12));' +
+        'color:var(--lcars-text, #ffcc99);font-size:12px;line-height:1.5;';
+
+    const heading = document.createElement('div');
+    heading.style.cssText = 'font-weight:bold;letter-spacing:0.05em;margin-bottom:4px;';
+    heading.textContent = `\u26A0 INCOMPLETE EXPORT \u2014 ${summary.count} configured ` +
+        `domain root${summary.count === 1 ? '' : 's'} never scanned`;
+    box.appendChild(heading);
+
+    const blurb = document.createElement('div');
+    blurb.style.cssText = 'margin-bottom:6px;';
+    blurb.textContent = 'These paths are configured for this team but do not exist on this ' +
+        'machine. Their files are ABSENT from the archive below \u2014 a domain showing few ' +
+        'files may never have been looked at, rather than having been checked and found empty.';
+    box.appendChild(blurb);
+
+    const list = document.createElement('ul');
+    list.style.cssText = 'margin:0;padding-left:18px;';
+    (summary.roots || []).forEach((r) => {
+        const li = document.createElement('li');
+        // textContent throughout: these strings are filesystem paths from config.
+        li.textContent = `[${r.domain || '?'}] ${r.path || '?'}` +
+            (r.configKey ? `  (config key: ${r.configKey})` : '');
+        list.appendChild(li);
+    });
+    box.appendChild(list);
+    container.appendChild(box);
+}
+
 function onExportComplete(data) {
     const btn = document.getElementById('export-btn');
     const downloadSection = document.getElementById('export-download');
     const statusEl = document.getElementById('export-status-label');
 
-    updateExportProgress(100, 'COMPLETE', data.message || 'Export ready');
+    // XACA-0954-018: an export that skipped a configured root is not READY.
+    const missingSummary = data.missingRootsSummary;
+    const isIncomplete = !!(missingSummary && missingSummary.count > 0);
+
+    updateExportProgress(
+        100,
+        isIncomplete ? 'INCOMPLETE' : 'COMPLETE',
+        data.message || (isIncomplete ? 'Export incomplete' : 'Export ready'),
+    );
 
     if (downloadSection) {
         downloadSection.style.display = 'flex';
         document.getElementById('export-download-filename').textContent = data.filename || '--';
         document.getElementById('export-download-size').textContent = data.fileSize || '--';
         document.getElementById('export-download-files').textContent = `${data.totalFiles || 0} files`;
+        renderExportMissingRoots(downloadSection, missingSummary);
     }
-    if (statusEl) statusEl.textContent = 'READY';
+    // The archive is still offered for download -- a partial export can be a
+    // deliberate choice -- but the status must never read READY over one.
+    if (statusEl) statusEl.textContent = isIncomplete ? 'INCOMPLETE' : 'READY';
     if (btn) btn.disabled = false;
 }
 

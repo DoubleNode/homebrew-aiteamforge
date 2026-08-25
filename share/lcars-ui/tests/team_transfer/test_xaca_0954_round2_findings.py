@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -236,33 +237,95 @@ def test_nested_persona_dir_is_still_skipped_as_covered():
 
 
 # ---------------------------------------------------------------- finding 014
-def test_server_export_path_reads_missing_roots_and_conditions_its_message():
-    """XACA-0954-014: the LCARS 'Export Team' button must not report plain success.
+def _load_server_module():
+    """Import server.py as a module. It has no import-time side effects beyond
+    two optional-dependency warnings; it does not boot the HTTP server."""
+    import importlib.util
 
-    generate_export() passes --allow-untagged, which deliberately does NOT waive a
-    missing root, and it gated only on returncode == 2. So the UI path -- the one
-    that produced this ticket's original symptom, and the one the medical-general
-    transfer will actually be run from -- still said 'Export ready for download'
-    over an export that had skipped an entire domain root.
+    spec = importlib.util.spec_from_file_location("lcars_server_under_test", LCARS_UI / "server.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["lcars_server_under_test"] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
-    LIMITS OF THIS TEST, stated rather than implied: it is a source guard, not a
-    behavioural test. Driving generate_export() end to end needs an export job,
-    a staging dir and a packer. A source guard cannot prove the wiring is correct
-    -- it can only fail loudly if someone removes it, which is the regression that
-    matters here. Behavioural coverage of the underlying signal lives in
-    test_missing_roots_generator_gate.py.
+
+def test_export_read_missing_roots_returns_configured_gaps(tmp_path):
+    """XACA-0954-019: behavioural, not a source guard."""
+    srv = _load_server_module()
+    m = new_manifest()
+    m.add_missing_root("devteam", "/nope", "configured root does not exist", "product_dir")
+    mf = tmp_path / "manifest.json"
+    mf.write_text(m.to_json(), encoding="utf-8")
+
+    got = srv._export_read_missing_roots(mf)
+    assert len(got) == 1
+    assert got[0]["config_key"] == "product_dir"
+
+
+def test_export_read_missing_roots_is_empty_for_a_pre_ticket_manifest(tmp_path):
+    """An archive generated before this ticket has no such key: nothing to report."""
+    srv = _load_server_module()
+    mf = tmp_path / "manifest.json"
+    mf.write_text('{"schema_version": 2, "domains": {}}', encoding="utf-8")
+    assert srv._export_read_missing_roots(mf) == []
+
+
+@pytest.mark.parametrize("body", ["{not json", ""], ids=["corrupt", "empty"])
+def test_export_read_missing_roots_fails_CLOSED_on_an_unreadable_manifest(tmp_path, body):
+    """A manifest we cannot parse is NOT evidence of completeness.
+
+    This is the ticket's own thesis applied to the reader: returning [] here would
+    manufacture a reassuring answer from a check that never actually ran.
+    """
+    srv = _load_server_module()
+    mf = tmp_path / "manifest.json"
+    mf.write_text(body, encoding="utf-8")
+
+    got = srv._export_read_missing_roots(mf)
+    assert got, "unreadable manifest reported as 'no missing roots'"
+    assert got[0]["config_key"] == "(unreadable)"
+
+
+def test_export_read_missing_roots_fails_CLOSED_on_a_absent_manifest(tmp_path):
+    srv = _load_server_module()
+    got = srv._export_read_missing_roots(tmp_path / "does-not-exist.json")
+    assert got and got[0]["config_key"] == "(unreadable)"
+
+
+def test_export_completion_message_never_implies_completeness_wrongly():
+    srv = _load_server_module()
+    assert srv._export_completion_message([]) == "Export ready for download"
+
+    msg = srv._export_completion_message([{"domain": "devteam", "path": "/nope"}])
+    assert "INCOMPLETE" in msg
+    assert "1 configured domain root(s) were never scanned" in msg
+
+
+def test_export_missing_roots_summary_shape_is_renderable():
+    srv = _load_server_module()
+    clean = srv._export_missing_roots_summary([])
+    assert clean == {"count": 0, "complete": True, "roots": []}
+
+    dirty = srv._export_missing_roots_summary([
+        {"domain": "devteam", "path": "/nope", "config_key": "product_dir", "reason": "gone"},
+    ])
+    assert dirty["count"] == 1 and dirty["complete"] is False
+    assert dirty["roots"][0] == {
+        "domain": "devteam", "path": "/nope", "configKey": "product_dir", "reason": "gone",
+    }
+
+
+def test_generate_export_is_actually_wired_to_those_helpers():
+    """The helpers being correct is worthless if generate_export stopped calling them.
+
+    Deliberately a source guard: this pins the WIRING, which the unit tests above
+    cannot see. Driving generate_export() end to end needs a job, a staging dir and
+    the packer.
     """
     src = (LCARS_UI / "server.py").read_text(encoding="utf-8")
-
-    assert "missing_roots" in src, "server.py no longer reads the missing_roots signal"
-    assert "missingRootsSummary" in src, "export payload no longer surfaces missingRootsSummary"
-
-    # The completion message must be conditional, not a bare constant.
-    assert "'Export ready for download — INCOMPLETE:" in src or \
-           '"Export ready for download — INCOMPLETE:' in src, \
-           "completion message is not conditioned on missing roots"
-
-    # The stale comment that justified ignoring exit 1 must be gone.
+    assert "_export_read_missing_roots(tt_manifest_path)" in src
+    assert "_export_completion_message(missing_roots_detail)" in src
+    assert "_export_missing_roots_summary(missing_roots_detail)" in src
     assert "exit 1 = untagged gaps (warn only)" not in src, \
         "stale exit-code comment still claims exit 1 is warn-only"
 
@@ -288,3 +351,120 @@ def test_old_manifest_without_missing_roots_key_is_read_as_empty_not_crash():
     """
     raw = {"schema_version": 2, "domains": {}}
     assert (raw.get("missing_roots") or []) == []
+
+
+# ---------------------------------------------------------------- finding 018
+def _extract_js_functions(src: str, names: list[str]) -> str:
+    """Pull named top-level `function foo(...) { ... }` blocks out of lcars.js.
+
+    lcars.js is ~18k lines of browser globals and cannot be imported standalone,
+    but the export-panel logic is self-contained. Extracting just those functions
+    lets us drive the REAL shipped code against a stub DOM instead of settling for
+    a source guard — the finding here was precisely that correct backend data was
+    never rendered, which a source guard proves poorly.
+    """
+    out = []
+    for name in names:
+        start = src.index(f"function {name}(")
+        depth, i, seen = 0, src.index("{", start), False
+        while i < len(src):
+            if src[i] == "{":
+                depth += 1
+                seen = True
+            elif src[i] == "}":
+                depth -= 1
+                if seen and depth == 0:
+                    break
+            i += 1
+        out.append(src[start:i + 1])
+    return "\n\n".join(out)
+
+
+NODE = shutil.which("node")
+_encode = json.JSONEncoder().encode
+
+
+@pytest.mark.skipif(NODE is None, reason="node not available")
+@pytest.mark.parametrize(
+    "summary, expect_status, expect_label, expect_box",
+    [
+        (None,                                          "READY",      "COMPLETE",   False),
+        ({"count": 0, "complete": True, "roots": []},    "READY",      "COMPLETE",   False),
+        ({"count": 1, "complete": False,
+          "roots": [{"domain": "devteam", "path": "/nope",
+                     "configKey": "product_dir", "reason": "gone"}]},
+                                                        "INCOMPLETE", "INCOMPLETE", True),
+    ],
+    ids=["no-summary", "complete", "one-missing-root"],
+)
+def test_export_panel_never_reads_READY_over_an_unscanned_root(
+    summary, expect_status, expect_label, expect_box, tmp_path
+):
+    """XACA-0954-018: the LCARS export panel must not render READY over a partial export.
+
+    The backend was fixed to emit missingRootsSummary, but the frontend referenced
+    it nowhere: onExportComplete() set '#export-status-label' to 'READY'
+    unconditionally, and the only signal reaching the DOM was data.message as plain
+    text, positioned AFTER the phrase "Export ready for download". Correct data that
+    nothing renders is not a fixed interface — this is XACA-0954's own defect one
+    layer above the backend fix.
+
+    Drives the real shipped functions against a stub DOM.
+    """
+    src = (LCARS_UI / "js" / "lcars.js").read_text(encoding="utf-8")
+    js = _extract_js_functions(src, ["updateExportProgress", "renderExportMissingRoots",
+                                     "onExportComplete"])
+
+    harness = tmp_path / "h.js"
+    harness.write_text(
+        """
+const els = {};
+function mk(id) {
+  return { id, textContent: '', style: { cssText: '', width: '', display: '' },
+           children: [], className: '', disabled: false,
+           appendChild(c) { this.children.push(c); c.parent = this; },
+           remove() { if (this.parent) this.parent.children =
+                        this.parent.children.filter(x => x !== this); delete els[this.id]; } };
+}
+for (const id of ['export-progress-bar','export-progress-percent','export-progress-label',
+                  'export-progress-message','export-btn','export-download','export-status-label',
+                  'export-download-filename','export-download-size','export-download-files']) {
+  els[id] = mk(id);
+}
+global.document = {
+  getElementById: (id) => els[id] || null,
+  createElement: (tag) => mk('__' + tag),
+};
+"""
+        + js
+        + """
+const SUMMARY = JSON.parse(process.argv[2]);
+const data = { filename: 'x.zip', fileSize: '1 MB', totalFiles: 3,
+               message: 'Export ready for download' };
+if (SUMMARY !== null) data.missingRootsSummary = SUMMARY;
+onExportComplete(data);
+function findBox(node) {
+  if (!node || !node.children) return null;
+  for (const c of node.children) {
+    if (c.id === 'export-missing-roots') return c;
+    const f = findBox(c); if (f) return f;
+  }
+  return null;
+}
+console.log(JSON.stringify({
+  status: els['export-status-label'].textContent,
+  label: els['export-progress-label'].textContent,
+  box: !!findBox(els['export-download']),
+}));
+""",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run([NODE, str(harness), _encode(summary)],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"harness failed:\n{proc.stdout}\n{proc.stderr}"
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert got["status"] == expect_status, f"status label wrong: {got}"
+    assert got["label"] == expect_label, f"progress label wrong: {got}"
+    assert got["box"] is expect_box, f"missing-roots box presence wrong: {got}"
