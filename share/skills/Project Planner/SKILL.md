@@ -1949,10 +1949,24 @@ silently passed. The one relaxation the check allows is trailing whitespace on t
 whitespace cannot smuggle a claim. Every other field in W1–W3 is exact and load-bearing; do not loosen
 any of it to reduce noise.
 
-The same guard also flags a historical sentinel present on a now-live item (a stale banner — the
-copy-as-template failure mode) and flags any doc whose sentinel `item=` does not match its own resolved
-`<ITEM-ID>` (a copied doc). The guard reports; it does not create, cancel, or rewrite anything —
-remediation is a human or planner action.
+The guard reports; it does not create, cancel, or rewrite anything — remediation is a human or
+planner action.
+
+> **Scope limit — what this guard does NOT catch (as of XACA-0951).** Only Check A above is
+> implemented. The guard reaches a document ONLY for an item that is already terminal AND has zero
+> board subitems; for anything else it skips the item before opening any file. Two consequences,
+> both verified rather than assumed:
+>
+> - A **stale sentinel on a now-live item** (the copy-as-template failure mode — a banner carried
+>   into a doc for an item that is still open) is **not flagged**. Confirmed for `in_progress`,
+>   for absent-status, and for a terminal item that *does* have board subitems.
+> - A sentinel whose `item=` names a different item is caught only on a doc the guard already
+>   reaches. On a doc it skips, a mismatched `item=` is never examined.
+>
+> This is stated rather than quietly omitted because an earlier revision of this section claimed
+> both cases were covered when neither was — a contract asserting coverage it does not have is the
+> same defect this guard exists to catch, one level up. Extending to these cases is a real
+> follow-up; until then, do not read a clean audit as evidence that no stale banners exist.
 
 ---
 

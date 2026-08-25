@@ -125,9 +125,28 @@
     // ------------------------------------------------------------------
     function _buildBanner(data) {
         var team      = String(data.team || 'unknown');
-        var count     = (data.violations || []).length;
         var scanTime  = data.scan_time ? _relativeTime(data.scan_time) : 'recently';
-        var violations = data.violations || [];
+
+        // XACA-0951: the audit reports TWO finding kinds and `clean` is false when
+        // EITHER is non-empty. Counting only `violations` made a run with 7 real
+        // historical findings render as "0 VIOLATIONS" above an empty list — a
+        // banner that announces its own findings as nothing found. Any future
+        // finding kind must be added here too, or it inherits that same silence.
+        var misplaced  = data.violations || [];
+        var historical = data.historical_subitem_violations || [];
+
+        // Normalise both shapes to a single display line. Misplaced-artifact
+        // records carry `path`; historical-subitem records carry `plan_doc`
+        // plus the item id and row count, which is the useful part for a reader.
+        var violations = misplaced.map(function (v) {
+            return { line: v.path || '' };
+        }).concat(historical.map(function (h) {
+            var rows = (h.row_count === 1) ? '1 row' : String(h.row_count || 0) + ' rows';
+            return { line: String(h.item_id || '?') + ' — ' + rows +
+                           ' promised, never tracked (' + (h.plan_doc || '') + ')' };
+        }));
+
+        var count = violations.length;
 
         // Outer wrapper
         var banner = _el('div', {
@@ -179,7 +198,7 @@
         for (var i = 0; i < shown; i++) {
             var li = _el('li', {
                 style: 'margin:2px 0;opacity:0.85',
-                text: violations[i].path || ''
+                text: violations[i].line || ''
             });
             list.appendChild(li);
         }
