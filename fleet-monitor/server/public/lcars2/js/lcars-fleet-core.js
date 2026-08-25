@@ -26,7 +26,7 @@ window.LCARS_CORE = window.LCARS_CORE || {};
     // navigates but never highlights.
     // MUST stay BELOW 'use strict': a declaration above it breaks the directive
     // prologue, turning 'use strict' into an inert string literal.
-    var NAV_SELECTOR = NAV_SELECTOR;
+    var NAV_SELECTOR = '.sidebar-button[data-section], .legend-pill[data-section]';
 
     // =========================================================================
     // CANDY PILL SYSTEM
