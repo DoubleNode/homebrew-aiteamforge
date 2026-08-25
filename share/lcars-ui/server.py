@@ -19298,6 +19298,322 @@ class LCARSServer(LCARSQuietDisconnectMixin, http.server.ThreadingHTTPServer):
     daemon_threads = True
 
 
+# ===================================================================== #
+# XACA-0161-006 — network-layer bind control                            #
+# --------------------------------------------------------------------- #
+# Historically main() bound `("", port)` — every interface. That is a    #
+# real exposure, not a theoretical one: on a shared LAN (coffee shop,    #
+# hotel, office wifi) any host on the same segment could reach the       #
+# dashboard's TCP port directly, with only the application-layer         #
+# controls (API-key gate, Host allowlist, Origin check, DNS-rebinding    #
+# guard) standing between it and the board data. Those controls are      #
+# good, but they are the LAST line, not the only one.                    #
+#                                                                       #
+# This block adds a network-layer control BENEATH them. It does not      #
+# replace any of them — resolve_api_key_or_die() and the Host/Origin/    #
+# rebinding checks all still run exactly as before.                      #
+#                                                                       #
+# WHAT THIS DOES NOT FIX — read this before assuming you are done:       #
+#   Tailscale Funnel/Serve proxies to `localhost:<port>` from inside     #
+#   this machine. A loopback bind is, from the proxy's point of view,    #
+#   perfectly reachable. So binding to loopback does NOT close a funnel  #
+#   that is switched on. Closing that requires `tailscale funnel off`    #
+#   at the tailscaled layer. See docs/xaca-0161-threat-model.md.         #
+#                                                                       #
+# Modes (LCARS_BIND_MODE):                                              #
+#   auto      (default) loopback, plus this host's Tailscale IPv4 if one #
+#             can be determined. If it cannot, the server still starts   #
+#             — on loopback ONLY. That is failing CLOSED: the fallback   #
+#             is strictly more restrictive, never all-interfaces.        #
+#   loopback  127.0.0.1 only. No cross-machine access at all.            #
+#   tailscale Same address set as `auto`, but REFUSES to start when the  #
+#             Tailscale address cannot be determined. Use this when      #
+#             cross-machine dashboard access is required and a silent    #
+#             downgrade to loopback-only would be a broken deployment    #
+#             rather than a safe one.                                    #
+#   all       The pre-XACA-0161 behaviour, `("", port)`. Opt-in, and     #
+#             loud. Requires LCARS_BIND_ALLOW_ALL_INTERFACES=1 as a      #
+#             second, separate confirmation — one typo in one variable   #
+#             must not be enough to re-open every interface.             #
+#                                                                       #
+# LCARS_TAILSCALE_IP overrides detection. A value outside Tailscale's    #
+# 100.64.0.0/10 CGNAT range is treated as a hard configuration error,    #
+# not quietly ignored: someone who sets that variable meant something    #
+# by it, and guessing at what is worse than stopping.                    #
+# ===================================================================== #
+
+LCARS_BIND_MODE_ENV = "LCARS_BIND_MODE"
+LCARS_BIND_ALLOW_ALL_ENV = "LCARS_BIND_ALLOW_ALL_INTERFACES"
+LCARS_TAILSCALE_IP_ENV = "LCARS_TAILSCALE_IP"
+
+_LCARS_DEFAULT_BIND_MODE = "auto"
+_LCARS_VALID_BIND_MODES = ("auto", "loopback", "tailscale", "all")
+_LCARS_LOOPBACK_HOST = "127.0.0.1"
+
+# Tailscale hands every node an address out of the CGNAT block. Validating
+# against it means a stray 192.168.x.x from an ifconfig scan can never be
+# mistaken for the tailnet address and silently widen the bind.
+_LCARS_TAILSCALE_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
+
+# Absolute paths first (a login-less launchd/tmux context often has a thin
+# PATH), bare name last so a PATH install still resolves.
+_LCARS_TAILSCALE_CLI_CANDIDATES = (
+    "/usr/local/bin/tailscale",
+    "/opt/homebrew/bin/tailscale",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "tailscale",
+)
+
+_LCARS_SUBPROCESS_TIMEOUT_SEC = 5
+
+
+def _lcars_validated_tailscale_ipv4(raw):
+    """Return `raw` as a normalised str iff it is an IPv4 inside 100.64.0.0/10.
+
+    Returns None for anything else — empty input, IPv6, a LAN address, or
+    junk. Callers treat None as "not determined"; nothing here ever widens
+    a bind on a parse failure.
+    """
+    try:
+        addr = ipaddress.ip_address((raw or "").strip())
+    except ValueError:
+        return None
+    if addr.version != 4:
+        return None
+    if addr not in _LCARS_TAILSCALE_CGNAT_NET:
+        return None
+    return str(addr)
+
+
+def _lcars_tailscale_ipv4_from_cli():
+    """Ask the tailscale CLI for this node's IPv4. None if it cannot answer."""
+    for exe in _LCARS_TAILSCALE_CLI_CANDIDATES:
+        if os.path.sep in exe and not os.path.exists(exe):
+            continue
+        try:
+            proc = subprocess.run(
+                [exe, "ip", "-4"],
+                capture_output=True,
+                text=True,
+                timeout=_LCARS_SUBPROCESS_TIMEOUT_SEC,
+            )
+        except Exception:
+            # Missing binary, permission problem, or a hung tailscaled that
+            # blew the timeout. All of them mean "cannot determine" — which
+            # the caller handles safely — so none of them are fatal here.
+            continue
+        if proc.returncode != 0:
+            continue
+        for line in proc.stdout.splitlines():
+            ip = _lcars_validated_tailscale_ipv4(line)
+            if ip:
+                return ip
+    return None
+
+
+def _lcars_tailscale_ipv4_from_interfaces():
+    """Fallback: scan local interface addresses for a Tailscale CGNAT IPv4.
+
+    Covers the case where tailscaled is running but the `tailscale` CLI is
+    not installed or not reachable. Parsing ifconfig/ip output beats adding
+    a netifaces dependency for one address lookup, and the CGNAT range check
+    in _lcars_validated_tailscale_ipv4 is what makes the loose regex safe.
+    """
+    for cmd in (["ifconfig"], ["ip", "-4", "-o", "addr"]):
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=_LCARS_SUBPROCESS_TIMEOUT_SEC,
+            )
+        except Exception:
+            continue
+        if proc.returncode != 0:
+            continue
+        for token in re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", proc.stdout):
+            ip = _lcars_validated_tailscale_ipv4(token)
+            if ip:
+                return ip
+    return None
+
+
+def _lcars_detect_tailscale_ipv4():
+    """This host's Tailscale IPv4, or None if it cannot be determined."""
+    return _lcars_tailscale_ipv4_from_cli() or _lcars_tailscale_ipv4_from_interfaces()
+
+
+def resolve_bind_addresses_or_die():
+    """Resolve LCARS_BIND_MODE into the concrete list of hosts to listen on.
+
+    Returns a list of host strings suitable for `LCARSServer((host, port), ...)`.
+    A single-element list containing "" means all-interfaces, and is reachable
+    ONLY through the explicit two-variable opt-in.
+
+    Exits non-zero, with a message that says what to set, on every
+    misconfiguration. It never falls back to a wider bind than the one asked
+    for — the only implicit fallback in here is auto -> loopback-only, which
+    is narrower.
+    """
+    raw_mode = os.environ.get(LCARS_BIND_MODE_ENV, "").strip().lower()
+    mode = raw_mode or _LCARS_DEFAULT_BIND_MODE
+
+    if mode not in _LCARS_VALID_BIND_MODES:
+        print(
+            f"[LCARS][bind] FATAL: {LCARS_BIND_MODE_ENV}={raw_mode!r} is not a "
+            f"valid mode. Expected one of: {', '.join(_LCARS_VALID_BIND_MODES)}.\n"
+            f"[LCARS][bind] Refusing to start rather than guessing at a bind "
+            f"address. Unset it to get the default ({_LCARS_DEFAULT_BIND_MODE}).",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+    if mode == "all":
+        if os.environ.get(LCARS_BIND_ALLOW_ALL_ENV, "").strip() != "1":
+            print(
+                f"[LCARS][bind] FATAL: {LCARS_BIND_MODE_ENV}=all binds every "
+                f"interface, which exposes this dashboard to the whole local "
+                f"network.\n"
+                f"[LCARS][bind] That needs a second, explicit confirmation. Set "
+                f"{LCARS_BIND_ALLOW_ALL_ENV}=1 as well if you truly mean it.\n"
+                f"[LCARS][bind] If you actually wanted cross-machine access over "
+                f"the tailnet, use {LCARS_BIND_MODE_ENV}=tailscale instead — it "
+                f"gives you that without the LAN exposure.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(
+            "[LCARS][bind] ******************************************************\n"
+            "[LCARS][bind] * WARNING: binding ALL INTERFACES (0.0.0.0).         *\n"
+            "[LCARS][bind] * Every host on this LAN can reach this port. Only   *\n"
+            "[LCARS][bind] * the API-key gate and Host/Origin checks stand in   *\n"
+            "[LCARS][bind] * their way. This is the legacy escape hatch and is  *\n"
+            "[LCARS][bind] * NOT a supported posture — prefer                   *\n"
+            "[LCARS][bind] * LCARS_BIND_MODE=tailscale.                         *\n"
+            "[LCARS][bind] ******************************************************",
+            file=sys.stderr,
+            flush=True,
+        )
+        return [""]
+
+    hosts = [_LCARS_LOOPBACK_HOST]
+
+    if mode == "loopback":
+        print(
+            f"[LCARS][bind] posture: mode=loopback listening={_LCARS_LOOPBACK_HOST}",
+            flush=True,
+        )
+        return hosts
+
+    # mode is "auto" or "tailscale" from here.
+    override_raw = os.environ.get(LCARS_TAILSCALE_IP_ENV, "").strip()
+    if override_raw:
+        override = _lcars_validated_tailscale_ipv4(override_raw)
+        if override is None:
+            print(
+                f"[LCARS][bind] FATAL: {LCARS_TAILSCALE_IP_ENV}={override_raw!r} is "
+                f"not an IPv4 address inside Tailscale's 100.64.0.0/10 range.\n"
+                f"[LCARS][bind] Refusing to bind an address that was explicitly "
+                f"requested but cannot be verified as a tailnet address. Fix or "
+                f"unset the variable.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        tailscale_ip = override
+        source = "env-override"
+    else:
+        tailscale_ip = _lcars_detect_tailscale_ipv4()
+        source = "detected"
+
+    if tailscale_ip is None:
+        if mode == "tailscale":
+            print(
+                f"[LCARS][bind] FATAL: {LCARS_BIND_MODE_ENV}=tailscale but this "
+                f"host's Tailscale IPv4 could not be determined.\n"
+                f"[LCARS][bind] Checked the tailscale CLI and local interface "
+                f"addresses for an address in 100.64.0.0/10 and found none.\n"
+                f"[LCARS][bind] Is tailscaled running and this node logged in? "
+                f"Try `tailscale ip -4`. Set {LCARS_TAILSCALE_IP_ENV} to pin it "
+                f"explicitly, or use {LCARS_BIND_MODE_ENV}=loopback if you do not "
+                f"need cross-machine access.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # mode == "auto": narrow to loopback and say so plainly. This is the
+        # fail-closed path — note it does NOT widen to all-interfaces.
+        print(
+            f"[LCARS][bind] NOTICE: Tailscale IPv4 not determined; listening on "
+            f"{_LCARS_LOOPBACK_HOST} ONLY. Cross-machine dashboard access will "
+            f"not work until tailscaled is up. Use "
+            f"{LCARS_BIND_MODE_ENV}=tailscale to make this a hard failure "
+            f"instead of a degraded start.",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(
+            f"[LCARS][bind] posture: mode={mode} listening={_LCARS_LOOPBACK_HOST}",
+            flush=True,
+        )
+        return hosts
+
+    hosts.append(tailscale_ip)
+    print(
+        f"[LCARS][bind] posture: mode={mode} listening={','.join(hosts)} "
+        f"(tailscale-ip {source})",
+        flush=True,
+    )
+    return hosts
+
+
+def _lcars_serve_forever_on(bind_hosts, port):
+    """Listen on every address in `bind_hosts` and serve until interrupted.
+
+    Two addresses need two listening sockets: a single socket cannot cover
+    127.0.0.1 and 100.x.y.z without falling back to 0.0.0.0, which is the
+    exposure being removed. The first host is served on the main thread so
+    Ctrl+C still lands where an operator expects; the rest get daemon
+    threads.
+
+    Bind failures are fatal and specific. A partially-bound server — up on
+    loopback, silently missing the tailnet listener — is the kind of state
+    that gets diagnosed as "the dashboard is broken on the other Mac" three
+    days later, so it exits instead.
+    """
+    servers = []
+    try:
+        for host in bind_hosts:
+            try:
+                servers.append(LCARSServer((host, port), LCARSHandler))
+            except OSError as exc:
+                print(
+                    f"[LCARS][bind] FATAL: could not bind "
+                    f"{host or '0.0.0.0'}:{port} — {exc}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        for srv in servers[1:]:
+            threading.Thread(
+                target=srv.serve_forever,
+                name=f"lcars-listener-{srv.server_address[0]}",
+                daemon=True,
+            ).start()
+
+        try:
+            servers[0].serve_forever()
+        except KeyboardInterrupt:
+            print("\n[LCARS] Server shutting down...")
+        finally:
+            for srv in servers:
+                with contextlib.suppress(Exception):
+                    srv.shutdown()
+    finally:
+        for srv in servers:
+            with contextlib.suppress(Exception):
+                srv.server_close()
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
 
@@ -19363,12 +19679,16 @@ def main():
     # XACA-0890-004: LCARSServer is now http.server.ThreadingHTTPServer-based
     # (daemon_threads = True) — concurrent requests each get their own thread
     # instead of queueing behind whichever request is currently running.
-    with LCARSServer(("", port), LCARSHandler) as httpd:
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\n[LCARS] Server shutting down...")
-            httpd.shutdown()
+    # XACA-0161-006: resolve the bind address(es) before opening any socket.
+    # Deliberately placed AFTER the existing die-checks so their error
+    # ordering is unchanged, and immediately before the bind so nothing can
+    # slip a socket open between the decision and its use.
+    #
+    # This is a network-layer control that sits BENEATH the API-key gate,
+    # Host allowlist, Origin check and DNS-rebinding guard resolved above —
+    # it narrows who can reach the port at all, and replaces none of them.
+    bind_hosts = resolve_bind_addresses_or_die()
+    _lcars_serve_forever_on(bind_hosts, port)
 
 
 if __name__ == "__main__":
