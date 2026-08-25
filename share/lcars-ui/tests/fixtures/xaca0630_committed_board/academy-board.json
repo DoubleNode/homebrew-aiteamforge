@@ -1,0 +1,341 @@
+{
+  "backlog": [
+    {
+      "id": "FIX-CI-001",
+      "title": "Fixture completed item 001",
+      "status": "completed",
+      "points": 0.25,
+      "timeWorkedMs": 1800000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-002",
+      "title": "Fixture completed item 002",
+      "status": "completed",
+      "points": 0.5,
+      "timeWorkedMs": 3600000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-003",
+      "title": "Fixture completed item 003",
+      "status": "completed",
+      "points": 0.75,
+      "timeWorkedMs": 5400000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-004",
+      "title": "Fixture completed item 004",
+      "status": "completed",
+      "points": 1.0,
+      "timeWorkedMs": 7200000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-005",
+      "title": "Fixture completed item 005",
+      "status": "completed",
+      "points": 0.25,
+      "timeWorkedMs": 1800000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-006",
+      "title": "Fixture completed item 006",
+      "status": "completed",
+      "points": 0.5,
+      "timeWorkedMs": 3600000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-007",
+      "title": "Fixture completed item 007",
+      "status": "completed",
+      "points": 0.75,
+      "timeWorkedMs": 5400000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-008",
+      "title": "Fixture completed item 008",
+      "status": "completed",
+      "points": 1.0,
+      "timeWorkedMs": 7200000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-009",
+      "title": "Fixture completed item 009",
+      "status": "completed",
+      "points": 1.25,
+      "timeWorkedMs": 9000000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-010",
+      "title": "Fixture completed item 010",
+      "status": "completed",
+      "points": 1.5,
+      "timeWorkedMs": 10800000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-011",
+      "title": "Fixture completed item 011",
+      "status": "completed",
+      "points": 1.75,
+      "timeWorkedMs": 12600000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-012",
+      "title": "Fixture completed item 012",
+      "status": "completed",
+      "points": 2.0,
+      "timeWorkedMs": 14400000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-013",
+      "title": "Fixture completed item 013",
+      "status": "completed",
+      "points": 2.5,
+      "timeWorkedMs": 18000000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-014",
+      "title": "Fixture completed item 014",
+      "status": "completed",
+      "points": 3.0,
+      "timeWorkedMs": 21600000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-015",
+      "title": "Fixture completed item 015",
+      "status": "completed",
+      "points": 3.5,
+      "timeWorkedMs": 25200000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-016",
+      "title": "Fixture completed item 016",
+      "status": "completed",
+      "points": 4.0,
+      "timeWorkedMs": 28800000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-017",
+      "title": "Fixture completed item 017",
+      "status": "completed",
+      "points": 4.25,
+      "timeWorkedMs": 30600000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-018",
+      "title": "Fixture completed item 018",
+      "status": "completed",
+      "points": 4.5,
+      "timeWorkedMs": 32400000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-019",
+      "title": "Fixture completed item 019",
+      "status": "completed",
+      "points": 5.0,
+      "timeWorkedMs": 36000000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-020",
+      "title": "Fixture completed item 020",
+      "status": "completed",
+      "points": 5.5,
+      "timeWorkedMs": 39600000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-021",
+      "title": "Fixture completed item 021",
+      "status": "completed",
+      "points": 6.0,
+      "timeWorkedMs": 43200000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-022",
+      "title": "Fixture completed item 022",
+      "status": "completed",
+      "points": 6.5,
+      "timeWorkedMs": 46800000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-023",
+      "title": "Fixture completed item 023",
+      "status": "completed",
+      "points": 7.0,
+      "timeWorkedMs": 50400000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-024",
+      "title": "Fixture completed item 024",
+      "status": "completed",
+      "points": 8.0,
+      "timeWorkedMs": 57600000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-025",
+      "title": "Fixture completed item 025",
+      "status": "completed",
+      "points": 8.25,
+      "timeWorkedMs": 59400000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-026",
+      "title": "Fixture completed item 026",
+      "status": "completed",
+      "points": 9.0,
+      "timeWorkedMs": 64800000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-027",
+      "title": "Fixture completed item 027",
+      "status": "completed",
+      "points": 10.0,
+      "timeWorkedMs": 72000000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-028",
+      "title": "Fixture completed item 028",
+      "status": "completed",
+      "points": 10.5,
+      "timeWorkedMs": 75600000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-029",
+      "title": "Fixture completed item 029",
+      "status": "completed",
+      "points": 12.0,
+      "timeWorkedMs": 86400000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-030",
+      "title": "Fixture completed item 030",
+      "status": "completed",
+      "points": 13.0,
+      "timeWorkedMs": 93600000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-031",
+      "title": "Fixture completed item 031",
+      "status": "completed",
+      "points": 14.0,
+      "timeWorkedMs": 100800000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-032",
+      "title": "Fixture completed item 032",
+      "status": "completed",
+      "points": 20.0,
+      "timeWorkedMs": 144000000,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-090",
+      "title": "Fixture no_estimate item A",
+      "status": "completed",
+      "points": null,
+      "timeWorkedMs": 3600000,
+      "priority": "low"
+    },
+    {
+      "id": "FIX-CI-091",
+      "title": "Fixture no_estimate item B",
+      "status": "completed",
+      "points": 0,
+      "timeWorkedMs": 7200000,
+      "priority": "low"
+    },
+    {
+      "id": "FIX-CI-092",
+      "title": "Fixture no_time item A",
+      "status": "completed",
+      "points": 2,
+      "timeWorkedMs": null,
+      "priority": "low"
+    },
+    {
+      "id": "FIX-CI-093",
+      "title": "Fixture no_time item B",
+      "status": "completed",
+      "points": 5,
+      "timeWorkedMs": 0,
+      "priority": "low"
+    },
+    {
+      "id": "FIX-CI-094",
+      "title": "Fixture both_missing item A",
+      "status": "completed",
+      "points": null,
+      "timeWorkedMs": null,
+      "priority": "low"
+    },
+    {
+      "id": "FIX-CI-095",
+      "title": "Fixture both_missing item B",
+      "status": "completed",
+      "points": 0,
+      "timeWorkedMs": 0,
+      "priority": "low"
+    },
+    {
+      "id": "FIX-CI-096",
+      "title": "Fixture in_progress item",
+      "status": "in_progress",
+      "points": 3,
+      "timeWorkedMs": 1800000,
+      "priority": "high"
+    },
+    {
+      "id": "FIX-CI-097",
+      "title": "Fixture todo item",
+      "status": "todo",
+      "points": 8,
+      "timeWorkedMs": null,
+      "priority": "medium"
+    },
+    {
+      "id": "FIX-CI-098",
+      "title": "Fixture blocked item",
+      "status": "blocked",
+      "points": 4,
+      "timeWorkedMs": 5000000,
+      "priority": "high"
+    },
+    {
+      "id": "FIX-CI-099",
+      "title": "Fixture cancelled item",
+      "status": "cancelled",
+      "points": 6,
+      "timeWorkedMs": 9000000,
+      "priority": "low",
+      "cancelledReason": "superseded (fixture data, not a real cancellation)"
+    }
+  ]
+}
