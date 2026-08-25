@@ -6416,6 +6416,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         board_status_by_team = {}
 
         def _resolve_board_status(team, item_id):
+            # XACA-0948-027: mirror _resolve_release_items' `not team or not
+            # item_id` guard. Without the item_id half, an itemId-less row
+            # reaches `lookup.get(None)` and could resolve against a board
+            # entry whose own id is absent — the two paths would once again
+            # answer the same question differently, which is the divergence
+            # XACA-0948-019 converged them to remove. Unreachable on live
+            # data today (0 itemId-less manifest rows, 0 id-less board rows
+            # measured 2026-08-25), so this pins the invariant rather than
+            # fixing an observed failure.
+            if not team or not item_id:
+                return None
             if team not in board_status_by_team:
                 items_by_id = self._load_board_items_by_id(team)
                 lookup = {}
