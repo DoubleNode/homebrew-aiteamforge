@@ -384,6 +384,84 @@ NODE = shutil.which("node")
 _encode = json.JSONEncoder().encode
 
 
+def _run_export_panel_harness(tmp_path, summary):
+    """Drive the shipped export-panel functions against a stub DOM that models
+    parent/child ORDER, so sibling placement is observable."""
+    src = (LCARS_UI / "js" / "lcars.js").read_text(encoding="utf-8")
+    js = _extract_js_functions(src, ["updateExportProgress", "renderExportMissingRoots",
+                                     "applyExportPanelState", "onExportComplete"])
+    harness = tmp_path / "h.js"
+    harness.write_text(
+        """
+const els = {};
+function mk(id) {
+  return { id, textContent: '', className: '', disabled: false, attrs: {},
+           style: { cssText: '', width: '', display: '', background: '', borderColor: '' },
+           children: [], parentNode: null,
+           setAttribute(k, v) { this.attrs[k] = v; },
+           appendChild(c) { c.parentNode = this; this.children.push(c); return c; },
+           insertBefore(c, ref) {
+             c.parentNode = this;
+             const i = this.children.indexOf(ref);
+             if (i < 0) this.children.push(c); else this.children.splice(i, 0, c);
+             return c;
+           },
+           remove() { const p = this.parentNode;
+                      if (p) p.children = p.children.filter(x => x !== this);
+                      delete els[this.id]; } };
+}
+for (const id of ['export-progress-bar','export-progress-percent','export-progress-label',
+                  'export-progress-message','export-btn','export-download','export-status-label',
+                  'export-download-filename','export-download-size','export-download-files']) {
+  els[id] = mk(id);
+}
+// Give the download panel a real parent so sibling insertion is observable.
+const panelParent = mk('panel-parent');
+panelParent.appendChild(els['export-download']);
+global.document = {
+  getElementById: (id) => els[id] || null,
+  createElement: (tag) => mk('__' + tag),
+};
+"""
+        + js
+        + """
+const SUMMARY = JSON.parse(process.argv[2]);
+const data = { filename: 'x.zip', fileSize: '1 MB', totalFiles: 3,
+               message: 'Export ready for download' };
+if (SUMMARY !== null) data.missingRootsSummary = SUMMARY;
+onExportComplete(data);
+
+const kids = panelParent.children;
+const boxIdx = kids.findIndex(c => c.id === 'export-missing-roots');
+const panelIdx = kids.findIndex(c => c.id === 'export-download');
+const box = boxIdx >= 0 ? kids[boxIdx] : null;
+function textOf(n) {
+  if (!n) return '';
+  return (n.textContent || '') + (n.children || []).map(textOf).join(' ');
+}
+console.log(JSON.stringify({
+  status: els['export-status-label'].textContent,
+  label: els['export-progress-label'].textContent,
+  boxPresent: !!box,
+  boxIsChildOfPanel: !!(box && box.parentNode && box.parentNode.id === 'export-download'),
+  boxBeforePanel: boxIdx >= 0 && panelIdx >= 0 && boxIdx < panelIdx,
+  role: box ? box.attrs['role'] || '' : '',
+  ariaLive: box ? box.attrs['aria-live'] || '' : '',
+  headingText: box && box.children[0] ? box.children[0].textContent : '',
+  blurbText: box && box.children[1] ? box.children[1].textContent : '',
+  listItems: box && box.children[2] ? box.children[2].children.map(li => li.textContent) : [],
+  boxText: textOf(box),
+  panelBackground: els['export-download'].style.background,
+}));
+""",
+        encoding="utf-8",
+    )
+    proc = subprocess.run([NODE, str(harness), _encode(summary)],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"harness failed:\n{proc.stdout}\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
 @pytest.mark.skipif(NODE is None, reason="node not available")
 @pytest.mark.parametrize(
     "summary, expect_status, expect_label, expect_box",
@@ -400,71 +478,83 @@ _encode = json.JSONEncoder().encode
 def test_export_panel_never_reads_READY_over_an_unscanned_root(
     summary, expect_status, expect_label, expect_box, tmp_path
 ):
-    """XACA-0954-018: the LCARS export panel must not render READY over a partial export.
+    """XACA-0954-018: the LCARS export panel must not render READY over a partial export."""
+    got = _run_export_panel_harness(tmp_path, summary)
+    assert got["status"] == expect_status, got
+    assert got["label"] == expect_label, got
+    assert got["boxPresent"] is expect_box, got
 
-    The backend was fixed to emit missingRootsSummary, but the frontend referenced
-    it nowhere: onExportComplete() set '#export-status-label' to 'READY'
-    unconditionally, and the only signal reaching the DOM was data.message as plain
-    text, positioned AFTER the phrase "Export ready for download". Correct data that
-    nothing renders is not a fixed interface — this is XACA-0954's own defect one
-    layer above the backend fix.
 
-    Drives the real shipped functions against a stub DOM.
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_missing_roots_box_is_a_sibling_BEFORE_the_panel_not_a_flex_child(tmp_path):
+    """XACA-0954-019: placement, not just presence.
+
+    The first attempt appended the box INSIDE #export-download, which is
+    `display:flex; justify-content:space-between` with no flex-wrap. It could
+    therefore never drop below the file metadata as intended — it was squeezed
+    into the same row, and at ~520px the DOWNLOAD button overlapped the filename.
+    Found by rendering the real CSS in a browser, which this stub DOM cannot do;
+    what IS observable here is the structural cause, so that is what we pin.
     """
-    src = (LCARS_UI / "js" / "lcars.js").read_text(encoding="utf-8")
-    js = _extract_js_functions(src, ["updateExportProgress", "renderExportMissingRoots",
-                                     "onExportComplete"])
+    got = _run_export_panel_harness(tmp_path, {
+        "count": 1, "complete": False,
+        "roots": [{"domain": "devteam", "path": "/nope",
+                   "configKey": "product_dir", "reason": "gone"}],
+    })
+    assert got["boxPresent"]
+    assert got["boxIsChildOfPanel"] is False, \
+        "box is a flex child of .export-download again — it cannot wrap below the metadata"
+    assert got["boxBeforePanel"] is True, \
+        "warning must precede the panel it qualifies"
 
-    harness = tmp_path / "h.js"
-    harness.write_text(
-        """
-const els = {};
-function mk(id) {
-  return { id, textContent: '', style: { cssText: '', width: '', display: '' },
-           children: [], className: '', disabled: false,
-           appendChild(c) { this.children.push(c); c.parent = this; },
-           remove() { if (this.parent) this.parent.children =
-                        this.parent.children.filter(x => x !== this); delete els[this.id]; } };
-}
-for (const id of ['export-progress-bar','export-progress-percent','export-progress-label',
-                  'export-progress-message','export-btn','export-download','export-status-label',
-                  'export-download-filename','export-download-size','export-download-files']) {
-  els[id] = mk(id);
-}
-global.document = {
-  getElementById: (id) => els[id] || null,
-  createElement: (tag) => mk('__' + tag),
-};
-"""
-        + js
-        + """
-const SUMMARY = JSON.parse(process.argv[2]);
-const data = { filename: 'x.zip', fileSize: '1 MB', totalFiles: 3,
-               message: 'Export ready for download' };
-if (SUMMARY !== null) data.missingRootsSummary = SUMMARY;
-onExportComplete(data);
-function findBox(node) {
-  if (!node || !node.children) return null;
-  for (const c of node.children) {
-    if (c.id === 'export-missing-roots') return c;
-    const f = findBox(c); if (f) return f;
-  }
-  return null;
-}
-console.log(JSON.stringify({
-  status: els['export-status-label'].textContent,
-  label: els['export-progress-label'].textContent,
-  box: !!findBox(els['export-download']),
-}));
-""",
-        encoding="utf-8",
-    )
 
-    proc = subprocess.run([NODE, str(harness), _encode(summary)],
-                          capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, f"harness failed:\n{proc.stdout}\n{proc.stderr}"
-    got = json.loads(proc.stdout.strip().splitlines()[-1])
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_missing_roots_box_actually_contains_the_roots(tmp_path):
+    """XACA-0954-021 (thok): presence is not content.
 
-    assert got["status"] == expect_status, f"status label wrong: {got}"
-    assert got["label"] == expect_label, f"progress label wrong: {got}"
-    assert got["box"] is expect_box, f"missing-roots box presence wrong: {got}"
+    The earlier assertions checked only that a box EXISTS. A mutation that created
+    the box and never attached its heading/blurb/list passed every one of them —
+    an empty warning box would have shipped green. Assert what the operator reads.
+    """
+    got = _run_export_panel_harness(tmp_path, {
+        "count": 2, "complete": False,
+        "roots": [
+            {"domain": "devteam", "path": "/a", "configKey": "product_dir", "reason": "x"},
+            {"domain": "knowledge", "path": "/b", "configKey": "personas", "reason": "y"},
+        ],
+    })
+    assert "INCOMPLETE EXPORT" in got["headingText"]
+    assert "2 configured domain roots never scanned" in got["headingText"]
+    assert got["blurbText"], "explanatory blurb missing"
+    assert len(got["listItems"]) == 2, f"expected one line per root, got {got['listItems']}"
+    assert "/a" in got["boxText"] and "/b" in got["boxText"]
+    assert "product_dir" in got["boxText"] and "personas" in got["boxText"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_missing_roots_box_announces_itself_to_assistive_tech(tmp_path):
+    """XACA-0954-021 (lal): a screen-reader user must be told, not shown a colour.
+
+    Follows the pattern already established in index.html (#team-account-test-status).
+    WCAG 2.1 AA 4.1.3.
+    """
+    got = _run_export_panel_harness(tmp_path, {
+        "count": 1, "complete": False,
+        "roots": [{"domain": "devteam", "path": "/nope", "configKey": "product_dir"}],
+    })
+    assert got["role"] == "status", f"role missing/wrong: {got['role']!r}"
+    assert got["ariaLive"] == "polite", f"aria-live missing/wrong: {got['ariaLive']!r}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not available")
+@pytest.mark.parametrize("summary, expect_alert_chrome", [
+    ({"count": 1, "complete": False,
+      "roots": [{"domain": "d", "path": "/p", "configKey": "product_dir"}]}, True),
+    ({"count": 0, "complete": True, "roots": []}, False),
+], ids=["incomplete-tones-panel", "complete-leaves-panel-green"])
+def test_success_green_panel_chrome_does_not_survive_an_incomplete_export(
+    tmp_path, summary, expect_alert_chrome
+):
+    """The panel's success-green chrome contradicted the warning sitting above it."""
+    got = _run_export_panel_harness(tmp_path, summary)
+    assert bool(got["panelBackground"]) is expect_alert_chrome, got["panelBackground"]

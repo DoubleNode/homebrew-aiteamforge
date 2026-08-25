@@ -18066,32 +18066,45 @@ function updateExportProgress(percent, label, message) {
     if (msgEl) msgEl.textContent = message;
 }
 
-// XACA-0954-018: render unscanned domain roots in the export panel.
+// XACA-0954-018/019: render unscanned domain roots in the export panel.
 //
 // The backend computes missingRootsSummary correctly, but nothing in the
 // frontend read it: onExportComplete() set the status label to 'READY'
 // unconditionally, and the only trace of incompleteness that reached the DOM
 // was data.message, appended after the phrase "Export ready for download" in a
-// secondary progress line. An operator exporting a team whose configured root
-// was never scanned still saw READY. That is the whole defect of XACA-0954,
-// surviving one layer above the backend fix -- correct data that nothing renders
-// is not a fixed interface.
+// secondary progress line. Correct data that nothing renders is not a fixed
+// interface.
 //
-// Built in JS rather than as markup in index.html so the warning cannot be
-// separated from the data that justifies it.
-function renderExportMissingRoots(container, summary) {
+// XACA-0954-019 (round 4): the box is inserted as a SIBLING BEFORE
+// #export-download, not appended inside it. `.export-download` is
+// `display:flex; justify-content:space-between` with NO flex-wrap, so a third
+// child could never drop below the file metadata the way the first attempt
+// assumed -- it was squeezed into the same row and, at ~520px, the DOWNLOAD
+// button overlapped the filename. That was found by rendering the real CSS in a
+// browser; the stub-DOM test asserted structure and is blind to layout.
+// `.export-download` is also shared with #secrets-export-download, so adding
+// flex-wrap to it would have reached a second panel. A preceding sibling needs
+// no CSS change at all, and puts the warning before the thing it qualifies.
+function renderExportMissingRoots(downloadSection, summary) {
     const existing = document.getElementById('export-missing-roots');
     if (existing) existing.remove();
-    if (!container || !summary || !summary.count) return;
+    if (!downloadSection || !summary || !summary.count) return null;
 
     const box = document.createElement('div');
     box.id = 'export-missing-roots';
     box.className = 'export-missing-roots';
+    // role/aria-live per the established pattern (see #team-account-test-status):
+    // a screen-reader user must be told the export just came back incomplete,
+    // not only see a colour change. WCAG 2.1 AA 4.1.3.
+    box.setAttribute('role', 'status');
+    box.setAttribute('aria-live', 'polite');
     // Inline styles so the warning renders even if the stylesheet has not caught
-    // up -- a warning that depends on CSS is a warning that can silently vanish.
-    box.style.cssText = 'width:100%;margin-top:8px;padding:10px 12px;' +
-        'border-left:6px solid var(--lcars-red, #cc6666);' +
-        'background:var(--lcars-panel-bg, rgba(204,102,102,0.12));' +
+    // up -- a warning that depends on CSS is one that can silently vanish -- but
+    // colours come from the LCARS alert tokens rather than ad-hoc hex.
+    box.style.cssText = 'width:100%;box-sizing:border-box;margin-top:10px;padding:12px 14px;' +
+        'border:1px solid var(--lcars-alert-red, #ff6666);' +
+        'border-left:6px solid var(--lcars-alert-red, #ff6666);' +
+        'border-radius:8px;background:var(--lcars-alert-glow, rgba(255,102,102,0.12));' +
         'color:var(--lcars-text, #ffcc99);font-size:12px;line-height:1.5;';
 
     const heading = document.createElement('div');
@@ -18117,7 +18130,28 @@ function renderExportMissingRoots(container, summary) {
         list.appendChild(li);
     });
     box.appendChild(list);
-    container.appendChild(box);
+
+    // Sibling BEFORE the panel -- see the note above.
+    if (downloadSection.parentNode) {
+        downloadSection.parentNode.insertBefore(box, downloadSection);
+    }
+    return box;
+}
+
+// XACA-0954-019: the download panel's chrome is success-green
+// (rgba(68,204,68,...)) and stayed green over an incomplete export, contradicting
+// the warning directly above it. Toned to the alert palette when incomplete and
+// restored when not, inline so the shared `.export-download` class -- which
+// #secrets-export-download also uses -- is left alone.
+function applyExportPanelState(downloadSection, isIncomplete) {
+    if (!downloadSection) return;
+    if (isIncomplete) {
+        downloadSection.style.background = 'var(--lcars-alert-glow, rgba(255,102,102,0.12))';
+        downloadSection.style.borderColor = 'var(--lcars-alert-red, #ff6666)';
+    } else {
+        downloadSection.style.background = '';
+        downloadSection.style.borderColor = '';
+    }
 }
 
 function onExportComplete(data) {
@@ -18141,6 +18175,7 @@ function onExportComplete(data) {
         document.getElementById('export-download-size').textContent = data.fileSize || '--';
         document.getElementById('export-download-files').textContent = `${data.totalFiles || 0} files`;
         renderExportMissingRoots(downloadSection, missingSummary);
+        applyExportPanelState(downloadSection, isIncomplete);
     }
     // The archive is still offered for download -- a partial export can be a
     // deliberate choice -- but the status must never read READY over one.
