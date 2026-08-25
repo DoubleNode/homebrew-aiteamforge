@@ -256,15 +256,26 @@ tail -f ~/aiteamforge/logs/lcars.log
 
 **Solutions:**
 
-```bash
-# Verify server is bound to correct interface
-# Edit ~/aiteamforge/lcars-ui/server.py
-# Change to: server_address = ('0.0.0.0', 8082)
+Since XACA-0161/XACA-0397, LCARS chooses which interfaces to bind at
+startup based on `LCARS_BIND_MODE` (default: loopback + Tailscale IPv4 if
+detected) — it no longer hardcodes `server_address` in the source, and
+hand-editing `server.py` to force `0.0.0.0` is exactly the exposure this
+control exists to prevent. See
+[LCARS-NETWORK-BINDING.md](LCARS-NETWORK-BINDING.md) for the full mode
+reference. Quick fixes:
 
-# Restart LCARS
+```bash
+# See which addresses the server actually bound to
+grep '\[LCARS\]\[bind\]' ~/aiteamforge/logs/lcars.log
+
+# If you need cross-machine (tailnet) access and the posture line shows
+# loopback-only, either check Tailscale connectivity or pin the address
+# explicitly, then restart:
+export LCARS_TAILSCALE_IP=100.x.y.z   # from `tailscale ip -4` on this machine
 aiteamforge restart lcars
 
-# Try localhost explicitly
+# Try localhost explicitly — loopback is ALWAYS bound in every mode except
+# `all`, so this should work even when tailnet access does not:
 curl http://127.0.0.1:8082/health
 ```
 

@@ -38,6 +38,7 @@ Run with:
 
 import io
 import os
+import socket
 import sys
 import unittest
 from pathlib import Path
@@ -372,6 +373,208 @@ class TestInterfaceScanSafety(unittest.TestCase):
                 return_value=self._fake_proc("100.95.180.109\n", returncode=1),
             ):
                 self.assertIsNone(server._lcars_tailscale_ipv4_from_cli())
+
+
+class TestAggregateDetectionDeadline(unittest.TestCase):
+    """XACA-0397-015: the aggregate cap must stop issuing further detection
+    subprocess calls once the shared deadline is exhausted, rather than
+    letting each phase (CLI candidates, then interface-scan fallback) spend
+    its own full per-call budget independently — that's how a worst case of
+    up to 6 subprocess calls x 5s each could reach ~30s, comfortably past
+    the launcher's 15s readiness window.
+
+    Uses a simulated monotonic clock so this runs in milliseconds. A real
+    wall-clock measurement against a genuinely hanging subprocess (not
+    mocked) was done manually while writing this fix and is reported in the
+    PR/ticket — this test instead pins the CUTOFF LOGIC so a regression
+    (e.g. someone reverting to a per-phase budget) fails fast in CI.
+    """
+
+    def test_deadline_stops_further_subprocess_calls_once_exhausted(self):
+        call_timeouts = []
+        # Fake monotonic clock: starts at 0, advances 3s on every read. An
+        # 8s budget / 3s per read exhausts partway through the CLI phase,
+        # well before all 6 real candidates (4 CLI + 2 interface-scan
+        # commands) would otherwise be tried.
+        state = {"t": 0.0}
+
+        def fake_monotonic():
+            state["t"] += 3.0
+            return state["t"]
+
+        def fake_run(cmd, **kwargs):
+            call_timeouts.append(kwargs.get("timeout"))
+            raise Exception("simulated: tailscale unreachable")
+
+        with patch.object(server.os.path, "exists", return_value=True):
+            with patch.object(server.time, "monotonic", side_effect=fake_monotonic):
+                with patch.object(server.subprocess, "run", side_effect=fake_run):
+                    result = server._lcars_detect_tailscale_ipv4()
+
+        self.assertIsNone(result)
+        # Without the aggregate cap this would be 6. The shared deadline
+        # must cut it short well before every candidate is exhausted.
+        self.assertLess(
+            len(call_timeouts), 6,
+            "aggregate deadline did not stop the detection phases early",
+        )
+
+    def test_cli_and_interface_scan_default_to_independent_full_budgets_when_uncoupled(self):
+        """Direct/unit-test callers that invoke the phase functions WITHOUT a
+        shared deadline (as TestInterfaceScanSafety above does) must keep
+        working unchanged — each gets its own default full budget rather
+        than raising a TypeError for a missing argument."""
+        with patch.object(server.subprocess, "run", side_effect=Exception("boom")):
+            self.assertIsNone(server._lcars_tailscale_ipv4_from_cli())
+            self.assertIsNone(server._lcars_tailscale_ipv4_from_interfaces())
+
+
+class TestServeForeverGuards(unittest.TestCase):
+    """XACA-0397-016: an empty bind_hosts list must fail with a clear FATAL
+    message in this file's established voice, not a bare IndexError three
+    frames down at servers[0]."""
+
+    def test_empty_bind_hosts_exits_nonzero_with_fatal_message(self):
+        out = io.StringIO()
+        with patch.object(sys, "stderr", out):
+            with self.assertRaises(SystemExit) as ctx:
+                server._lcars_serve_forever_on([], 8901)
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertIn("FATAL", out.getvalue())
+
+
+class TestServeForeverOrchestration(unittest.TestCase):
+    """XACA-0397-017: covers _lcars_serve_forever_on's bind/threading/
+    cleanup orchestration with a lightweight fake server class standing in
+    for LCARSServer.
+
+    A fake is used here (rather than real sockets on two distinct
+    addresses) because this machine does not bind a second loopback alias
+    by default — `socket().bind(("127.0.0.2", port))` fails with
+    "Can't assign requested address" (errno 49) on macOS without extra
+    `ifconfig lo0 alias` setup, verified empirically while writing this
+    test — so a real-socket version of "one listener per address" would be
+    flaky/non-portable across dev machines and CI. The genuine bind-failure
+    + cleanup path IS tested with real sockets below in
+    TestServeForeverPartialBindCleanup, where a duplicate host entry
+    produces a real, deterministic EADDRINUSE without needing a second
+    address at all.
+    """
+
+    def _make_fake_server_class(self, fail_hosts=frozenset()):
+        created = []
+
+        class _FakeServer:
+            def __init__(self, address, handler_cls):
+                if address[0] in fail_hosts:
+                    raise OSError(48, "Address already in use")
+                self.server_address = address
+                self.handler_cls = handler_cls
+                self.serve_forever_calls = 0
+                self.shutdown_calls = 0
+                self.server_close_calls = 0
+                created.append(self)
+
+            def serve_forever(self):
+                self.serve_forever_calls += 1
+
+            def shutdown(self):
+                self.shutdown_calls += 1
+
+            def server_close(self):
+                self.server_close_calls += 1
+
+        return _FakeServer, created
+
+    def test_one_server_instance_per_resolved_address(self):
+        fake_cls, created = self._make_fake_server_class()
+        with patch.object(server, "LCARSServer", fake_cls):
+            server._lcars_serve_forever_on(["127.0.0.1", "100.101.102.103"], 8901)
+        self.assertEqual(len(created), 2)
+        self.assertEqual(
+            [s.server_address[0] for s in created],
+            ["127.0.0.1", "100.101.102.103"],
+        )
+
+    def test_first_server_runs_on_calling_thread_rest_get_daemon_threads(self):
+        fake_cls, created = self._make_fake_server_class()
+        with patch.object(server, "LCARSServer", fake_cls):
+            with patch.object(
+                server.threading, "Thread", wraps=server.threading.Thread
+            ) as thread_spy:
+                server._lcars_serve_forever_on(
+                    ["127.0.0.1", "100.101.102.103", "100.101.102.104"], 8901
+                )
+        # The first server is served directly on the calling thread — no
+        # threading.Thread wraps it.
+        self.assertEqual(created[0].serve_forever_calls, 1)
+        # The remaining two each get their own daemon thread.
+        self.assertEqual(thread_spy.call_count, 2)
+        for call in thread_spy.call_args_list:
+            self.assertTrue(call.kwargs.get("daemon"))
+
+    def test_all_servers_shut_down_and_closed_on_normal_completion(self):
+        fake_cls, created = self._make_fake_server_class()
+        with patch.object(server, "LCARSServer", fake_cls):
+            server._lcars_serve_forever_on(["127.0.0.1", "100.101.102.103"], 8901)
+        for srv in created:
+            self.assertEqual(srv.shutdown_calls, 1)
+            self.assertEqual(srv.server_close_calls, 1)
+
+    def test_bind_failure_still_closes_sockets_opened_before_it_fake_level(self):
+        """The orchestration-level mirror of the real-socket test below:
+        proves server_close() runs for every PRIOR successfully-opened
+        server even when a later host in the list fails to bind."""
+        fake_cls, created = self._make_fake_server_class(
+            fail_hosts={"100.101.102.103"}
+        )
+        with patch.object(server, "LCARSServer", fake_cls):
+            with patch.object(sys, "stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    server._lcars_serve_forever_on(
+                        ["127.0.0.1", "100.101.102.103"], 8901
+                    )
+        self.assertNotEqual(ctx.exception.code, 0)
+        # Only the first host's server was ever created (the second raised
+        # during construction, before being appended) — and it must have
+        # been closed, not leaked.
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].server_close_calls, 1)
+
+
+class TestServeForeverPartialBindCleanup(unittest.TestCase):
+    """XACA-0397-017: real-socket test proving a mid-list bind failure
+    closes sockets that were already opened rather than leaking a listener.
+
+    Uses a duplicate host entry (the SAME host:port twice) to force a
+    genuine second-bind EADDRINUSE without needing a second bindable
+    loopback address (127.0.0.2 does not bind on this machine by default —
+    see TestServeForeverOrchestration's docstring). SO_REUSEADDR (set on
+    LCARSServer per XACA-0889-018) only allows rebinding a port stuck in
+    TIME_WAIT from a previously-closed connection — it does NOT allow two
+    simultaneously-active listeners on the identical (address, port) pair,
+    so the second LCARSServer(...) construction below is expected to
+    genuinely fail while the first is still open.
+    """
+
+    PORT = 8902  # throwaway port, per XACA-0397 task instructions (8901-8903)
+
+    def test_partial_bind_failure_exits_nonzero_and_frees_the_port(self):
+        out = io.StringIO()
+        with patch.object(sys, "stderr", out):
+            with self.assertRaises(SystemExit) as ctx:
+                server._lcars_serve_forever_on(["127.0.0.1", "127.0.0.1"], self.PORT)
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertIn("FATAL", out.getvalue())
+
+        # No leaked listener: the port must be immediately re-bindable. If
+        # the first, successfully-opened server were never closed, this
+        # bind would itself raise "Address already in use".
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(("127.0.0.1", self.PORT))
+        finally:
+            probe.close()
 
 
 if __name__ == "__main__":

@@ -82,6 +82,13 @@ Fleet Monitor provides:
 
 Tailscale provides secure networking between machines without port forwarding or firewall configuration.
 
+> **Note:** this section covers Tailscale for **Fleet Monitor** (the
+> cross-machine coordinator on its own port, e.g. 3000). Each **team's LCARS
+> kanban dashboard** (`lcars-ui/server.py`, one port per team) has its own,
+> separate Tailscale-aware bind control — see
+> [LCARS-NETWORK-BINDING.md](LCARS-NETWORK-BINDING.md) for how to reach a
+> team's dashboard from another machine over the tailnet.
+
 ### Why Tailscale?
 
 - **Zero-config VPN** - Machines connect automatically

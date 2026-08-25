@@ -831,6 +831,13 @@ def _origin_matches_host(origin_header: str, host_header: str) -> bool:
 # Tailscale ships in several places on macOS depending on install method
 # (brew, standalone pkg, Mac App Store bundle). Tried in order; first one
 # that answers wins. Bare 'tailscale' last so a PATH install still works.
+#
+# XACA-0397-013: shared by BOTH Tailscale detectors in this file —
+# _detect_tailscale_dns_name() above (Host-header identity, `status --json`)
+# and _lcars_tailscale_ipv4_from_cli() below (bind-address detection,
+# `ip -4`). A second, near-identical tuple used to exist for the latter;
+# consolidated here to stop the two from drifting apart. See the longer note
+# by _LCARS_SUBPROCESS_TIMEOUT_SEC for why the ordering isn't load-bearing.
 _TAILSCALE_BINARY_CANDIDATES = (
     '/opt/homebrew/bin/tailscale',
     '/usr/local/bin/tailscale',
@@ -19141,7 +19148,8 @@ def validate_lcars_team_or_die() -> None:
 #   this machine. A loopback bind is, from the proxy's point of view,    #
 #   perfectly reachable. So binding to loopback does NOT close a funnel  #
 #   that is switched on. Closing that requires `tailscale funnel off`    #
-#   at the tailscaled layer. See docs/xaca-0161-threat-model.md.         #
+#   at the tailscaled layer — no LCARS_BIND_MODE setting can do it,      #
+#   because Funnel operates outside this process entirely.               #
 #                                                                       #
 # Modes (LCARS_BIND_MODE):                                              #
 #   auto      (default) loopback, plus this host's Tailscale IPv4 if one #
@@ -19178,16 +19186,33 @@ _LCARS_LOOPBACK_HOST = "127.0.0.1"
 # mistaken for the tailnet address and silently widen the bind.
 _LCARS_TAILSCALE_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
 
-# Absolute paths first (a login-less launchd/tmux context often has a thin
-# PATH), bare name last so a PATH install still resolves.
-_LCARS_TAILSCALE_CLI_CANDIDATES = (
-    "/usr/local/bin/tailscale",
-    "/opt/homebrew/bin/tailscale",
-    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    "tailscale",
-)
-
+# XACA-0397-013: this used to be its own tuple (_LCARS_TAILSCALE_CLI_CANDIDATES)
+# with the same 4 entries as _TAILSCALE_BINARY_CANDIDATES (line ~834) in a
+# different order — two Tailscale binary detectors that could silently drift
+# apart. Consolidated onto the pre-existing tuple. Checked both call sites
+# before merging: _detect_tailscale_dns_name() (line ~899, `status --json`)
+# and _lcars_tailscale_ipv4_from_cli() (below, `ip -4`) each just take the
+# first candidate that answers — the loop is a linear "first responder wins"
+# scan, not a preference ranking, so which of two *simultaneously installed*
+# tailscale binaries wins a tie is not behaviourally load-bearing for either
+# caller (both talk to the same tailscaled). Order is kept as
+# opt/homebrew-first (the original ordering) since Apple Silicon is now the
+# dominant Mac architecture this ships on.
 _LCARS_SUBPROCESS_TIMEOUT_SEC = 5
+
+# XACA-0397-015: aggregate wall-clock cap across the ENTIRE Tailscale
+# detection phase (CLI candidates + interface-scan fallback combined), not
+# just each subprocess call. _LCARS_SUBPROCESS_TIMEOUT_SEC bounds a single
+# call; left unchecked, up to 4 CLI candidates + 2 interface-scan commands
+# each get their own 5s budget, so a worst case (missing/hung tailscale
+# binaries) can burn ~30s BEFORE the socket even attempts to bind. The
+# launcher's readiness probe polls for up to 15s
+# (scripts/lcars-launch-helpers.sh: "Poll /api/status for up to 15s") and
+# declares the server dead if it never answers — so detection must leave
+# comfortable headroom under that, not consume most or all of it. 8s leaves
+# ~7s for module import, socket bind, and the first request to land within
+# the 15s window even in the worst case.
+_LCARS_TAILSCALE_DETECT_DEADLINE_SEC = 8.0
 
 
 def _lcars_validated_tailscale_ipv4(raw):
@@ -19208,17 +19233,44 @@ def _lcars_validated_tailscale_ipv4(raw):
     return str(addr)
 
 
-def _lcars_tailscale_ipv4_from_cli():
-    """Ask the tailscale CLI for this node's IPv4. None if it cannot answer."""
-    for exe in _LCARS_TAILSCALE_CLI_CANDIDATES:
+# XACA-0397-014: macOS/BSD ifconfig prints an unindented "<iface>: flags=..."
+# header line before each interface's indented address lines. `ip -o addr`
+# (Linux) instead prefixes every single-line record with "<idx>: <iface> ".
+# Both patterns are matched below so the interface name that supplied a
+# candidate address can be logged.
+_LCARS_IFCONFIG_HEADER_RE = re.compile(r"^(\S+):\s")
+_LCARS_IP_ADDR_LINE_RE = re.compile(r"^\d+:\s+(\S+)\s")
+
+
+def _lcars_tailscale_ipv4_from_cli(deadline=None):
+    """Ask the tailscale CLI for this node's IPv4. None if it cannot answer.
+
+    `deadline` is a `time.monotonic()` timestamp after which no further
+    subprocess is attempted — shared with _lcars_tailscale_ipv4_from_interfaces
+    via _lcars_detect_tailscale_ipv4 so the two phases share ONE aggregate
+    budget (XACA-0397-015) rather than each getting their own. Defaults to a
+    fresh full-budget deadline so direct/unit-test callers keep working
+    unchanged.
+    """
+    if deadline is None:
+        deadline = time.monotonic() + _LCARS_TAILSCALE_DETECT_DEADLINE_SEC
+    for exe in _TAILSCALE_BINARY_CANDIDATES:
         if os.path.sep in exe and not os.path.exists(exe):
             continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # Budget exhausted by earlier candidates. Stop trying rather than
+            # keep issuing subprocess calls past the launcher's readiness
+            # window — this is the same "undetermined" outcome as every
+            # other detection failure and the caller handles it identically
+            # (auto -> loopback NOTICE, tailscale -> FATAL). Never widens.
+            break
         try:
             proc = subprocess.run(
                 [exe, "ip", "-4"],
                 capture_output=True,
                 text=True,
-                timeout=_LCARS_SUBPROCESS_TIMEOUT_SEC,
+                timeout=min(_LCARS_SUBPROCESS_TIMEOUT_SEC, remaining),
             )
         except Exception:
             # Missing binary, permission problem, or a hung tailscaled that
@@ -19234,36 +19286,86 @@ def _lcars_tailscale_ipv4_from_cli():
     return None
 
 
-def _lcars_tailscale_ipv4_from_interfaces():
+def _lcars_tailscale_ipv4_from_interfaces(deadline=None):
     """Fallback: scan local interface addresses for a Tailscale CGNAT IPv4.
 
     Covers the case where tailscaled is running but the `tailscale` CLI is
     not installed or not reachable. Parsing ifconfig/ip output beats adding
     a netifaces dependency for one address lookup, and the CGNAT range check
     in _lcars_validated_tailscale_ipv4 is what makes the loose regex safe.
+
+    XACA-0397-014: this does NOT scope the scan to a specific interface name
+    (e.g. macOS's `utun*`). Measured on the machine this fix was written on:
+    12 simultaneously-up utun interfaces (Tailscale plus several unrelated
+    tunnel/VPN clients), so a name-based allowlist here would not reliably
+    distinguish Tailscale's utun from another VPN's utun — and on Linux,
+    Tailscale's interface is typically named `tailscale0`, not `utun*`, so a
+    macOS-shaped allowlist would just as easily reject the real interface
+    there. 100.64.0.0/10 is CGNAT space also used by cellular carriers, so a
+    cellular-addressed interface remains a theoretical false-positive this
+    scan cannot rule out by construction — instead of an unreliable filter,
+    the interface that supplied the winning address is logged so an operator
+    can see and audit what was actually chosen.
+
+    `deadline` is shared with _lcars_tailscale_ipv4_from_cli via
+    _lcars_detect_tailscale_ipv4 (XACA-0397-015); see that function's
+    docstring. Defaults to a fresh full-budget deadline for direct/unit-test
+    callers.
     """
+    if deadline is None:
+        deadline = time.monotonic() + _LCARS_TAILSCALE_DETECT_DEADLINE_SEC
     for cmd in (["ifconfig"], ["ip", "-4", "-o", "addr"]):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=_LCARS_SUBPROCESS_TIMEOUT_SEC,
+                timeout=min(_LCARS_SUBPROCESS_TIMEOUT_SEC, remaining),
             )
         except Exception:
             continue
         if proc.returncode != 0:
             continue
-        for token in re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", proc.stdout):
-            ip = _lcars_validated_tailscale_ipv4(token)
-            if ip:
-                return ip
+        current_iface = None
+        for line in proc.stdout.splitlines():
+            header = _LCARS_IFCONFIG_HEADER_RE.match(line)
+            if header is None:
+                header = _LCARS_IP_ADDR_LINE_RE.match(line)
+            if header:
+                current_iface = header.group(1)
+            for token in re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", line):
+                ip = _lcars_validated_tailscale_ipv4(token)
+                if ip:
+                    print(
+                        f"[LCARS][bind] Tailscale IPv4 {ip} found via interface "
+                        f"scan on {current_iface or 'unknown interface'!r} "
+                        f"({' '.join(cmd)}). 100.64.0.0/10 is also used by "
+                        f"cellular carriers — if this interface is unexpected, "
+                        f"verify it is actually Tailscale.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    return ip
     return None
 
 
 def _lcars_detect_tailscale_ipv4():
-    """This host's Tailscale IPv4, or None if it cannot be determined."""
-    return _lcars_tailscale_ipv4_from_cli() or _lcars_tailscale_ipv4_from_interfaces()
+    """This host's Tailscale IPv4, or None if it cannot be determined.
+
+    XACA-0397-015: both detection phases share ONE deadline computed here, so
+    the aggregate wall-clock spent across CLI candidates + interface-scan
+    fallback combined is capped at _LCARS_TAILSCALE_DETECT_DEADLINE_SEC —
+    not that budget PER PHASE. Without this, a hung/missing CLI could burn
+    its own full budget before the interface-scan fallback even started.
+    """
+    deadline = time.monotonic() + _LCARS_TAILSCALE_DETECT_DEADLINE_SEC
+    return (
+        _lcars_tailscale_ipv4_from_cli(deadline)
+        or _lcars_tailscale_ipv4_from_interfaces(deadline)
+    )
 
 
 def resolve_bind_addresses_or_die():
@@ -19406,6 +19508,22 @@ def _lcars_serve_forever_on(bind_hosts, port):
     that gets diagnosed as "the dashboard is broken on the other Mac" three
     days later, so it exits instead.
     """
+    if not bind_hosts:
+        # XACA-0397-016: unreachable from today's sole caller — main() always
+        # passes resolve_bind_addresses_or_die()'s result, which never
+        # returns an empty list (every branch returns at least
+        # [_LCARS_LOOPBACK_HOST] or [""]). Guarded anyway: without this,
+        # `servers[0]` a few lines down raises a bare IndexError with none of
+        # the other FATALs' "what to do about it" framing.
+        print(
+            "[LCARS][bind] FATAL: no bind addresses were provided — "
+            "nothing to listen on.\n"
+            "[LCARS][bind] This should be unreachable via "
+            "resolve_bind_addresses_or_die(); if you're calling "
+            "_lcars_serve_forever_on() directly, pass at least one host.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     servers = []
     try:
         for host in bind_hosts:
