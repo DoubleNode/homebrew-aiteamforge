@@ -3601,6 +3601,35 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         return bearer_cred if bearer_cred is not None else api_key_cred
 
+    def _cors_request_headers(self):
+        """Return (Host, Origin) for this request, tolerating a handler with
+        no usable `headers` mapping.
+
+        XACA-0401 follow-up: the code this replaced was
+        `send_header('Access-Control-Allow-Origin', '*')` — a constant that
+        touched no request state and therefore could not fail. Reading
+        `self.headers` reintroduced a way for HEADER EMISSION to raise, and an
+        AttributeError here surfaces as a 500 on a request that would
+        otherwise have succeeded (observed in CI: serve_calendar_items and
+        handle_delete_epic both turned 200 -> 500 against handlers built
+        without `headers`).
+
+        A response-header helper must never be the thing that fails a
+        response. Missing/!unusable headers degrade to (None, None), which
+        _resolve_cors_origin() maps to "omit the header" — the same
+        fail-closed outcome as an untrusted origin, never a wildcard.
+        """
+        headers = getattr(self, 'headers', None)
+        if headers is None:
+            return None, None
+        getter = getattr(headers, 'get', None)
+        if not callable(getter):
+            return None, None
+        try:
+            return getter('Host'), getter('Origin')
+        except Exception:
+            return None, None
+
     def _send_cors_headers(self):
         """XACA-0401 — emit the CORS headers for this request.
 
@@ -3616,8 +3645,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         absence of any ACAO header is load-bearing. See the block comment on
         _origin_matches_host().
         """
-        allowed = _resolve_cors_origin(
-            self.headers.get('Host'), self.headers.get('Origin'))
+        host, origin = self._cors_request_headers()
+        allowed = _resolve_cors_origin(host, origin)
         if allowed is None:
             return
         self.send_header('Access-Control-Allow-Origin', allowed)
@@ -3714,8 +3743,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         above — that widening was reverted for a documented reason).
         """
         self.send_response(200)
-        allowed = _resolve_cors_origin(
-            self.headers.get('Host'), self.headers.get('Origin'))
+        host, origin = self._cors_request_headers()
+        allowed = _resolve_cors_origin(host, origin)
         if allowed is not None:
             self.send_header('Access-Control-Allow-Origin', allowed)
             self.send_header('Vary', 'Origin')
