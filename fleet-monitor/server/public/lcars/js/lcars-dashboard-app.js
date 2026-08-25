@@ -216,15 +216,12 @@
 
         // Show/hide ADMIN button (only for 'all' dashboard)
         const adminBtn = document.querySelector('.sidebar-admin-btn');
-        const settingsBtn = document.querySelector('.sidebar-button[data-section="settings"]');
         if (adminBtn) {
-            const isAllDashboard = (CONFIG.dashboardId === 'all');
-            adminBtn.style.display = isAllDashboard ? '' : 'none';
-            // Transfer bottom border to SETTINGS when ADMIN is hidden
-            if (settingsBtn) {
-                settingsBtn.style.borderBottom = isAllDashboard ? '' : '2px solid var(--lcars-black)';
-            }
+            adminBtn.style.display = (CONFIG.dashboardId === 'all') ? '' : 'none';
         }
+        // No bottom-border transfer here: ENGINES sits below ADMIN, is always
+        // visible, and owns the terminating black bar in CSS. Transferring the
+        // border to SETTINGS (as this did) drew it in the middle of the stack.
 
         // If not on 'all' dashboard and ADMIN section would be shown, switch to OVERVIEW
         if (CONFIG.dashboardId !== 'all') {

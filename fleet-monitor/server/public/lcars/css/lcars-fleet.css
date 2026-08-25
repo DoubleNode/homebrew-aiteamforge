@@ -521,10 +521,13 @@ body {
 }
 .sidebar-button[data-section="admin"] {
     background: var(--lcars-orange);
-    border-bottom: 2px solid var(--lcars-black);
 }
+/* ENGINES is the LAST sidebar button, so it carries the terminating black bar.
+   ADMIN used to be last and owned that border; when ENGINES was appended the
+   border stayed put, giving a doubled 4px bar above ENGINES and none below. */
 .sidebar-button[data-section="engines"] {
     background: var(--lcars-amber);
+    border-bottom: 2px solid var(--lcars-black);
 }
 
 /* Active state - invert colors */
@@ -1083,7 +1086,7 @@ body.kiosk-active .kiosk-fab {
         border-top-width: 1px;
     }
 
-    .sidebar-button[data-section="admin"] {
+    .sidebar-button[data-section="engines"] {
         border-bottom-width: 1px;
     }
 
@@ -1133,7 +1136,7 @@ body.kiosk-active .kiosk-fab {
         flex: 0.1;
     }
 
-    .sidebar-button[data-section="admin"] + .sidebar-spacer {
+    .sidebar-button[data-section="engines"] + .sidebar-spacer {
         display: none;
     }
 

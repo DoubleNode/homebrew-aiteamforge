@@ -512,6 +512,13 @@ body {
 .sidebar-button[data-section="machines"] { background: var(--lcars-purple); }
 .sidebar-button[data-section="settings"] {
     background: var(--lcars-tan);
+}
+/* ENGINES is the LAST sidebar button, so it carries the terminating black bar.
+   SETTINGS used to be last and owned that border; when ENGINES was appended the
+   border stayed put, giving a doubled 4px bar above ENGINES and none below.
+   (Colour lives in SECTION 18; the border must stay here, ahead of the mobile
+   border-bottom-width override.) */
+.sidebar-button[data-section="engines"] {
     border-bottom: 2px solid var(--lcars-black);
 }
 
@@ -979,7 +986,7 @@ body {
         border-top-width: 1px;
     }
 
-    .sidebar-button[data-section="settings"] {
+    .sidebar-button[data-section="engines"] {
         border-bottom-width: 1px;
     }
 
@@ -1029,7 +1036,7 @@ body {
         flex: 0.1;
     }
 
-    .sidebar-button[data-section="settings"] + .sidebar-spacer {
+    .sidebar-button[data-section="engines"] + .sidebar-spacer {
         display: none;
     }
 
@@ -1087,7 +1094,10 @@ body {
    Styles for the ENGINES tab — engine cards, account table, modals, forms, buttons
    =============================================================================== */
 
-/* Sidebar button color for engines */
+/* Sidebar button color for engines.
+   The terminating black bar is declared up in SECTION 9 with the other sidebar
+   borders, NOT here — this block sits after the 600px media query, so a
+   border-bottom shorthand here would override the thin 1px mobile bar. */
 .sidebar-button[data-section="engines"] {
     background: var(--lcars-amber);
 }
