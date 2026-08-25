@@ -562,6 +562,15 @@ window.LCARS_CORE = window.LCARS_CORE || {};
                 btn.addEventListener('click', function() {
                     self.switchSection(btn.dataset.section);
                 });
+                // The utility-bar pills are divs with role="button" and tabindex="0",
+                // so they are focusable but get NO keyboard activation for free
+                // (XACA-0963). Without this they are reachable by Tab and inert on Enter.
+                btn.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        self.switchSection(btn.dataset.section);
+                    }
+                });
             });
 
             // Bind keyboard navigation

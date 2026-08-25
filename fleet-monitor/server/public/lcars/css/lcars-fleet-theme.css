@@ -641,10 +641,6 @@
     color: var(--lcars-crimson);
 }
 
-/* Refresh button - cyan accent */
-.sidebar-button.refresh-btn {
-    background: var(--lcars-cyan);
-}
 
 /* Section header color variants - additional themes */
 .section-header.red .section-title { color: var(--lcars-red); }
@@ -4047,10 +4043,6 @@
         display: none !important;
     }
 
-    /* Hide refresh button on mobile tabbar */
-    .sidebar-button.refresh-btn {
-        display: none !important;
-    }
 
     /* Horizontal button layout */
     .sidebar-button[data-section] {
@@ -4501,10 +4493,6 @@
         display: none !important;
     }
 
-    /* Hide refresh button on landscape tabbar */
-    .sidebar-button.refresh-btn {
-        display: none !important;
-    }
 
     /* Hide dashboard switcher in landscape */
     .sidebar-link {

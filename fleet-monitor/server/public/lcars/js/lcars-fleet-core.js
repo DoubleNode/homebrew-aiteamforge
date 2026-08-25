@@ -18,11 +18,14 @@
 window.LCARS_CORE = window.LCARS_CORE || {};
 
 (function(LCARS) {
+    'use strict';
+
     // Every surface that can navigate to a section. Sidebar buttons plus the
     // top utility-bar pills added in XACA-0963.
+    // MUST stay BELOW 'use strict': a declaration above it breaks the directive
+    // prologue, turning 'use strict' into an inert string literal and silently
+    // disabling strict mode for this entire module.
     var NAV_SELECTOR = '.sidebar-button[data-section], .legend-pill[data-section]';
-
-    'use strict';
 
     // =========================================================================
     // CANDY PILL SYSTEM
