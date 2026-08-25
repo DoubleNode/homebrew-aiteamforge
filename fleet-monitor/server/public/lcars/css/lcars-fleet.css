@@ -1565,6 +1565,10 @@ body.kiosk-active .kiosk-fab {
     width: 100px;
     min-width: 100px;
     display: flex;
+    /* Positioned ancestor for the .active::after indicator bar below. Without
+       this the bar anchors to the nearest positioned ancestor instead of the
+       pill, and lands somewhere else entirely. */
+    position: relative;
     /* Label seated in the lower-right CORNER, like the Kanban's pills and like
        the sidebar buttons. These were previously centred on both axes. */
     align-items: flex-end;
@@ -1620,6 +1624,26 @@ body.kiosk-active .kiosk-fab {
 }
 
 /* Per-pill colours, matching the sections they open. */
+/* Active-section indicator: a 6px vertical bar on the LEFT edge, identical to
+   .sidebar-button[data-section].active::after and to the Kanban's own
+   .legend-pill.mode-pill.active::after. `currentColor` picks up the pill's
+   active text colour, so SETTINGS shows tan and ADMIN shows orange.
+
+   Excludes .offline-pill for the same reason the .active background rule does:
+   that pill carries a STATUS colour (fleet state), not a "which section am I
+   viewing" state, and it takes .active incidentally because it shares
+   data-section="machines" with a real nav target. SOUND never matches -- it has
+   no data-section, so it never receives .active. */
+.lcars-data-bar .legend-pill.active:not(.offline-pill)::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    background: currentColor;
+}
+
 .lcars-data-bar .legend-pill[data-section="settings"] {
     background: var(--lcars-tan);
 }
