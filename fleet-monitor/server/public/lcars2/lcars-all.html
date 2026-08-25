@@ -120,6 +120,14 @@
                     <span>SETTINGS</span>
                 </div>
                 <!-- AI ENGINES button - account registry (XACA-0540) -->
+                <!-- ⚠️ ENGINES IS THE LAST SIDEBAR BUTTON — it carries the terminating
+                     black bar (border-bottom) that closes the stack, declared in
+                     css/lcars-fleet.css. If you append a NEW button below this one,
+                     the bar must MOVE to it, in THREE places per stylesheet: the
+                     base rule, the 600px border-bottom-width override, and the 600px
+                     "+ .sidebar-spacer" rule. Adding a button without moving all
+                     three reproduces XACA-0953: a doubled 4px bar above the new
+                     button and none below it. -->
                 <div class="sidebar-button" data-section="engines">
                     <span>ENGINES</span>
                 </div>
