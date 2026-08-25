@@ -13,6 +13,30 @@
 
 team: medical-general
 home_relative_root: "medical/general"
+# product_dir: bare directory NAME under ~/dev-team/ that holds this team's
+# product assets (personas, logos, board data). Differs from 'team' (medical-general)
+# -- see lcars-ui/server.py team_dir_map (XACA-0954-002).
+product_dir: "medical"
+# personas: this team's actual persona set (knowledge DIRECTORY names, since
+# domain_knowledge globs ~/knowledge*/agents/<persona>/). Required key -- absent
+# is a hard gap (XACA-0954-004). Source of truth: ~/dev-team/.claude/agents-master/medical/ (6 personas); dirs resolve under ~/knowledge-local/agents/ (XACA-0754 PII isolation).
+personas:
+  - "cameron"
+  - "chase"
+  - "cuddy"
+  - "foreman"
+  - "house"
+  - "wilson"
+
+# persona_dirs: extra directories walked by domain_devteam in addition to
+# product_dir. medical-general is the ONLY team with an above-root persona tree:
+# ~/medical/personas/ sits one level ABOVE home_relative_root ("medical/general"),
+# so no rule reached it and no domain walked it. It was not even reported as an
+# untagged gap, because "untagged" only counts files the scan actually reached --
+# 46 files / 6.0MB (avatars incl. _panel/_thumb variants + 6 terminal logos)
+# silently absent from every export (XACA-0954-005).
+persona_dirs:
+  - "{home}/medical/personas"
 
 # Board filename and kanban ticket prefix (used by domain_kanban + verifier).
 board_filename: "medical-general-board.json"
@@ -38,6 +62,13 @@ defaults:
     - pattern: "{home}/medical/.claude/agents/*"
       channel: aiteamforge_product
     - pattern: "{home}/medical/.claude/agents/**"
+      channel: aiteamforge_product
+    # Above-root persona tree (see persona_dirs above). Tagged explicitly rather
+    # than leaning on domain_devteam's UNTAGGED->aiteamforge_product safety net,
+    # so the routing is auditable in the config (XACA-0954-005).
+    - pattern: "{home}/medical/personas/*"
+      channel: aiteamforge_product
+    - pattern: "{home}/medical/personas/**"
       channel: aiteamforge_product
 
     # ----- USER_STATE: Claude memory/session logs + authored knowledge (user-owned) -----

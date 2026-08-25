@@ -131,6 +131,53 @@ def _render_header(manifest: "Manifest", team_config: dict, manifest_path: Path)
     return "\n".join(lines)
 
 
+def _render_missing_roots_warning(manifest: "Manifest") -> str:
+    """Render a blocking warning block for domain roots that were configured
+    but did not exist on the source machine when the generator ran.
+
+    XACA-0954: this is the human-facing counterpart to the generator's CLI
+    warning. Without it, an operator working ONLY from this checklist (not
+    watching the generator's console output) had no way to know a domain was
+    never scanned — a domain showing zero files here looked identical to a
+    domain that was scanned and genuinely found empty. Placed immediately
+    after the header, before the operator reaches a single checkbox, so it
+    cannot be skipped by reading top-to-bottom.
+    """
+    rows = []
+    for r in sorted(manifest.missing_roots, key=lambda r: (r.get("domain", ""), r.get("path", ""))):
+        domain = r.get("domain", "?")
+        path = r.get("path", "?")
+        config_key = r.get("config_key") or "(unspecified)"
+        reason = r.get("reason", "")
+        rows.append(f"- **{domain}** — `{path}` (config key: `{config_key}`)\n  reason: {reason}")
+
+    lines = [
+        "---",
+        "",
+        "## :warning: STOP — MISSING DOMAIN ROOTS — DO NOT EXPORT YET",
+        "",
+        "One or more domain roots configured in the team YAML did **not exist** on this "
+        "machine when the generator ran. The scan **never reached** these paths — this is "
+        "not the same as a domain being scanned and found empty. Any files under these "
+        "roots are **absent from this manifest and from the export**, silently.",
+        "",
+    ] + rows + [
+        "",
+        "**Before you proceed with ANY channel below:**",
+        "1. Fix the path for the `config_key`(s) above in the team YAML config "
+        "(or confirm the root is genuinely gone and remove the stale entry).",
+        "2. Re-run the generator:",
+        "   ```bash",
+        "   PYTHONPATH=lcars-ui python -m team_transfer.generator --team <team>",
+        "   ```",
+        "3. Confirm this section is gone from the regenerated checklist before exporting.",
+        "",
+        "Checking off items below while this section is present means shipping an "
+        "**incomplete** export.",
+    ]
+    return "\n".join(lines)
+
+
 def _render_auto_summary(manifest: "Manifest") -> str:
     rows = []
     for channel, mechanism in _AUTO_CHANNELS:
@@ -455,6 +502,13 @@ def emit_pre_export_checklist(
     # 1. Header
     sections.append(_render_header(manifest, team_config, manifest_path))
     sections.append("")
+
+    # 1b. Missing-roots warning (XACA-0954) — before ANY checklist content, so
+    # an operator reading only this file cannot miss it and cannot reach a
+    # single checkbox without seeing it first.
+    if manifest.missing_roots:
+        sections.append(_render_missing_roots_warning(manifest))
+        sections.append("")
 
     # 2. Auto-channel summary
     sections.append(_render_auto_summary(manifest))

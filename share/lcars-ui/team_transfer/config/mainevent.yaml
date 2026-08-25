@@ -17,6 +17,22 @@
 
 team: mainevent
 home_relative_root: ""
+# product_dir: bare directory NAME under ~/dev-team/ that holds this team's
+# product assets (personas, logos, board data). Matches 'team' here.
+product_dir: "mainevent"
+# personas: this team's actual persona set (knowledge DIRECTORY names, since
+# domain_knowledge globs ~/knowledge*/agents/<persona>/). Required key -- absent
+# is a hard gap (XACA-0954-004). Source of truth: ~/dev-team/.claude/agents-master/mainevent/ (7 personas). janeway and paris are renamed janeway-me/paris-me in the knowledge dirs to avoid collision with Command's own janeway/paris personas (see CLAUDE.md naming-collisions note).
+personas:
+  - "doctor"
+  - "janeway-me"
+  - "kim"
+  - "paris-me"
+  - "seven"
+  - "torres"
+  - "tuvok"
+
+
 
 # Board filename and kanban ticket prefix (used by domain_kanban + verifier).
 # The MainEvent coordination board lives in the ME dev-team repo kanban directory.

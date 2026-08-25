@@ -53,6 +53,13 @@ class Manifest:
     channels: list[str] = field(default_factory=list)
     channel_stats: dict[str, dict[str, int]] = field(default_factory=dict)
     untagged_gaps: list[str] = field(default_factory=list)
+    # XACA-0954: domain roots a config pointed at that do not exist on this machine.
+    # A domain that silently registers an empty block is indistinguishable from a
+    # domain that genuinely has no files, which is how an export dropped 105MB and
+    # still printed "Zero untagged gaps". Entries are plain dicts (not a dataclass)
+    # so _to_jsonable serializes them without a special case.
+    # Shape: {"domain": str, "path": str, "reason": str, "config_key": str}
+    missing_roots: list[dict[str, str]] = field(default_factory=list)
     domains: dict[str, DomainBlock] = field(default_factory=dict)
     teams: dict[str, dict[str, str]] = field(default_factory=dict)
     # Per-team source layout snapshot: { team_id: {"working_dir": "/abs/path"} }
@@ -76,6 +83,7 @@ class Manifest:
             channels=raw.get("channels", []),
             channel_stats=raw.get("channel_stats", {}),
             untagged_gaps=raw.get("untagged_gaps", []),
+            missing_roots=raw.get("missing_roots", []),
             teams=raw.get("teams", {}),
         )
         for dname, dblock in raw.get("domains", {}).items():
@@ -98,6 +106,37 @@ class Manifest:
 
     def add_file(self, domain: str, entry: FileEntry) -> None:
         self.domains.setdefault(domain, DomainBlock()).files.append(entry)
+
+    def add_missing_root(
+        self,
+        domain: str,
+        path: str,
+        reason: str,
+        config_key: str = "",
+    ) -> None:
+        """Record a configured domain root that does not exist on this machine.
+
+        XACA-0954: this is the fail-loud counterpart to a domain returning an
+        empty block. The generator surfaces these alongside untagged gaps and
+        refuses to print the all-clear line while any are recorded.
+
+        Idempotent on (domain, path) so a re-scan cannot inflate the count.
+        """
+        key = (domain, str(path))
+        for existing in self.missing_roots:
+            if (existing.get("domain"), existing.get("path")) == key:
+                return
+        self.missing_roots.append({
+            "domain": domain,
+            "path": str(path),
+            "reason": reason,
+            "config_key": config_key,
+        })
+
+    def collect_missing_roots(self) -> list[dict[str, str]]:
+        """Return recorded missing roots, sorted for stable output."""
+        self.missing_roots.sort(key=lambda r: (r.get("domain", ""), r.get("path", "")))
+        return self.missing_roots
 
     def recompute_channel_stats(self) -> None:
         from .channels import ALL_CHANNELS, UNTAGGED

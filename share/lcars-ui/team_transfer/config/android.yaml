@@ -14,6 +14,22 @@ team: android
 # Repo root: /Users/Shared/Development/Main Event/MainEventApp-Android
 # Pass --repo-root to generator explicitly for this team.
 home_relative_root: ""
+# product_dir: bare directory NAME under ~/dev-team/ that holds this team's
+# product assets (personas, logos, board data). Matches 'team' here.
+product_dir: "android"
+# personas: this team's actual persona set (knowledge DIRECTORY names, since
+# domain_knowledge globs ~/knowledge*/agents/<persona>/). Required key -- absent
+# is a hard gap (XACA-0954-004). Source of truth: ~/dev-team/.claude/agents-master/android/ (7 personas).
+personas:
+  - "chekov"
+  - "kirk"
+  - "mccoy"
+  - "scotty"
+  - "spock"
+  - "sulu"
+  - "uhura"
+
+
 
 # Board filename and kanban ticket prefix (used by domain_kanban + verifier).
 board_filename: "android-board.json"

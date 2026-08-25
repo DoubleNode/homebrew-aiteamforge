@@ -11,6 +11,20 @@
 
 team: academy
 home_relative_root: "dev-team"
+# product_dir: bare directory NAME under ~/dev-team/ that holds this team's
+# product assets (personas, logos, board data). Matches 'team' here.
+product_dir: "academy"
+# personas: this team's actual persona set (knowledge DIRECTORY names, since
+# domain_knowledge globs ~/knowledge*/agents/<persona>/). Required key -- absent
+# is a hard gap (XACA-0954-004). Source of truth: ~/dev-team/.claude/agents-master/academy/ (5 personas).
+personas:
+  - "emh"
+  - "lal"
+  - "nahla"
+  - "reno"
+  - "thok"
+
+
 
 # Board filename and kanban ticket prefix (used by domain_kanban + verifier).
 board_filename: "academy-board.json"

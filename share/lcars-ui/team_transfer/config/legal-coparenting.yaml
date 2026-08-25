@@ -12,6 +12,22 @@
 
 team: legal-coparenting
 home_relative_root: "legal/coparenting"
+# product_dir: bare directory NAME under ~/dev-team/ that holds this team's
+# product assets (personas, logos, board data). Differs from 'team' (legal-coparenting)
+# -- see lcars-ui/server.py team_dir_map (XACA-0954-002).
+product_dir: "legal"
+# personas: this team's actual persona set (knowledge DIRECTORY names, since
+# domain_knowledge globs ~/knowledge*/agents/<persona>/). Required key -- absent
+# is a hard gap (XACA-0954-004). Source of truth: ~/dev-team/.claude/agents-master/legal/ (6 personas); dirs resolve under ~/knowledge-local/agents/ (XACA-0754 PII isolation).
+personas:
+  - "advocate"
+  - "casemanager"
+  - "courtclerk"
+  - "lawclerk"
+  - "mediator"
+  - "paralegal"
+
+
 
 # Board filename and kanban ticket prefix (used by domain_kanban + verifier).
 board_filename: "legal-coparenting-board.json"

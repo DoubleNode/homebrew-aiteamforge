@@ -133,6 +133,24 @@ def test_per_channel_report_in_output(tmp_path):
         assert c in out
 
 
+def _make_synthetic_devteam_root(home: Path) -> Path:
+    """Create the on-disk `dev-team/<product_dir>` root the default 'finance'
+    team config expects (product_dir: "finance", see config/finance.yaml).
+
+    XACA-0954-007: since domain_devteam.inventory() now fail-loud gaps a
+    configured product_dir that does not exist on this machine (see
+    domain_devteam.py's `_resolve_product_root` + `add_missing_root`), a
+    synthetic $HOME built for these subprocess-generator tests must contain
+    this directory or the generator legitimately exits 1 with a "MISSING
+    DOMAIN ROOTS" section — that is the fail-loud guard working as designed,
+    not a bug in the generator. Creating the real (empty) root here exercises
+    the actual success path instead of masking the gap with a waiver flag.
+    """
+    root = home / "dev-team" / "finance"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def _run_generator(out_path: Path) -> subprocess.CompletedProcess:
     """Shared helper — invoke generator with --output and return the completed process."""
     lcars_ui = _lcars_ui_dir()
@@ -159,6 +177,7 @@ def test_generator_self_includes_manifest_in_output_when_under_home(tmp_path, mo
     import json
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    _make_synthetic_devteam_root(tmp_path)
     out_path = tmp_path / "manifest.json"
 
     proc = _run_generator(out_path)
@@ -214,6 +233,7 @@ def test_generator_dedupes_cross_domain_duplicates(tmp_path, monkeypatch):
     import json
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    _make_synthetic_devteam_root(tmp_path)
     out_path = tmp_path / "manifest.json"
 
     proc = _run_generator(out_path)

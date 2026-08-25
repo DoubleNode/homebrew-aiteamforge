@@ -7,6 +7,20 @@
 
 team: finance
 home_relative_root: "finance/personal"
+# product_dir: bare directory NAME under ~/dev-team/ that holds this team's
+# product assets (personas, logos, board data). Matches 'team' here.
+product_dir: "finance"
+# personas: this team's actual persona set (knowledge DIRECTORY names, since
+# domain_knowledge globs ~/knowledge*/agents/<persona>/). Required key -- absent
+# is a hard gap (XACA-0954-004). Source of truth: ~/dev-team/.claude/agents-master/finance/ (5 personas); dirs resolve under ~/knowledge-local/agents/ (XACA-0754 PII isolation) -- NOT ~/knowledge/agents/quark, which is Firebase's Quark.
+personas:
+  - "brunt"
+  - "nog"
+  - "quark-fin"
+  - "rom"
+  - "zek"
+
+
 
 # Board filename and kanban ticket prefix (used by domain_kanban + verifier).
 board_filename: "finance-personal-board.json"

@@ -39,6 +39,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="User-facing YAML override file with an 'overrides:' section (default: none — use the team config's built-in overrides: slot)")
     ap.add_argument("--allow-untagged", action="store_true",
                     help="Don't fail on untagged files (default: exit 1 if any)")
+    ap.add_argument("--allow-missing-roots", action="store_true",
+                    help="Don't fail on missing domain roots (default: exit 1 if any). "
+                         "Independent of --allow-untagged — a missing root is a different "
+                         "failure class (unscanned territory) than an untagged file (scanned "
+                         "but unrouted), and tolerating one is not consent for the other.")
     args = ap.parse_args(argv)
 
     home = Path.home()
@@ -92,23 +97,23 @@ def main(argv: list[str] | None = None) -> int:
         team_config=team_config,
         home=home,
     )
-    print(f"  -> {len(manifest.domains.get('git_repo', _empty()).files)} files", flush=True)
+    _print_domain_result(manifest, "git_repo")
 
     print("[generator] Domain 2: kanban ...", flush=True)
     domain_kanban.inventory(repo_root, manifest, channels, home=home, team_config=team_config)
-    print(f"  -> {len(manifest.domains.get('kanban', _empty()).files)} files", flush=True)
+    _print_domain_result(manifest, "kanban")
 
     print("[generator] Domain 3: devteam ...", flush=True)
     domain_devteam.inventory(manifest, channels, home=home, team_config=team_config)
-    print(f"  -> {len(manifest.domains.get('devteam', _empty()).files)} files", flush=True)
+    _print_domain_result(manifest, "devteam")
 
     print("[generator] Domain 4: knowledge ...", flush=True)
     domain_knowledge.inventory(manifest, channels, repo_root=repo_root, home=home, team_config=team_config)
-    print(f"  -> {len(manifest.domains.get('knowledge', _empty()).files)} files", flush=True)
+    _print_domain_result(manifest, "knowledge")
 
     print("[generator] Domain 5: claude ...", flush=True)
     domain_claude.inventory(manifest, channels, home=home, team_config=team_config)
-    print(f"  -> {len(manifest.domains.get('claude', _empty()).files)} files", flush=True)
+    _print_domain_result(manifest, "claude")
 
     # XACA-0496-012: Dedupe cross-domain duplicates. A file that's claimed by both
     # git_repo (broad sweep) and a more-specific domain (e.g. knowledge) used to
@@ -151,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest.recompute_channel_stats()
     gaps = manifest.collect_untagged()
+    missing_roots = manifest.collect_missing_roots()
 
     out.write_text(manifest.to_json(), encoding="utf-8")
     total = sum(len(d.files) for d in manifest.domains.values())
@@ -175,6 +181,27 @@ def main(argv: list[str] | None = None) -> int:
         s = manifest.channel_stats.get(ch, {"file_count": 0, "total_bytes": 0})
         print(f"  {ch:18s} {s['file_count']:>5d} files  {s['total_bytes']:>12,d} bytes", flush=True)
 
+    # XACA-0954: missing-roots section prints BEFORE untagged gaps. An unscanned
+    # root is the more severe condition — it means files were never even reached
+    # by the scan, vs. untagged gaps which were reached but couldn't be routed.
+    if missing_roots:
+        print(f"\n=== x MISSING DOMAIN ROOTS ({len(missing_roots)}) ===", flush=True)
+        for r in missing_roots:
+            domain = r.get("domain", "?")
+            path = r.get("path", "?")
+            config_key = r.get("config_key") or "(unspecified)"
+            reason = r.get("reason", "")
+            print(f"  [{domain}] config_key={config_key}  path={path}", flush=True)
+            print(f"      reason: {reason}", flush=True)
+        print(
+            "\nThese roots are configured in the team YAML but do not exist on this machine.\n"
+            "The domain scan never reached them, so their files are ABSENT from this manifest\n"
+            "— not counted as untagged, not counted anywhere. Fix the path for the config_key(s)\n"
+            "above (or correct/remove the stale entry) in the team config, then re-run the\n"
+            "generator before treating this export as complete.",
+            flush=True,
+        )
+
     if gaps:
         print(f"\n=== x UNTAGGED GAPS ({len(gaps)}) ===", flush=True)
         for g in gaps[:25]:
@@ -182,17 +209,53 @@ def main(argv: list[str] | None = None) -> int:
         if len(gaps) > 25:
             print(f"  ... and {len(gaps) - 25} more", flush=True)
         print("\nAdd matching rules to the 'overrides:' section of your team config and re-run.", flush=True)
-        if not args.allow_untagged:
-            return 1
-    else:
-        print("\n[generator] Zero untagged gaps — all files have a transfer channel.", flush=True)
 
-    return 0
+    # THE CORE FIX (XACA-0954): the all-clear line must never print over an
+    # unscanned root. collect_untagged() only counts files the scan actually
+    # reached — a root that was never walked contributes zero untagged files
+    # and used to read as perfect coverage. Print everything above first, THEN
+    # decide what the summary line says and what the exit code is — an early
+    # return here would skip whichever section renders second.
+    if not gaps and not missing_roots:
+        print("\n[generator] Zero untagged gaps — all files have a transfer channel.", flush=True)
+    elif missing_roots:
+        print(
+            "\n[generator] NOT CLEAR TO EXPORT — missing domain root(s) above. This manifest is "
+            "INCOMPLETE, not clean: a domain showing 0 (or few) files here may mean its root was "
+            "never scanned, not that it was scanned and found empty. Do not export until resolved "
+            "or explicitly waived with --allow-missing-roots.",
+            flush=True,
+        )
+    # else: gaps-only case already has its own remediation text printed above.
+
+    exit_code = 0
+    # Two independent failure classes with two independent opt-outs. Tolerating
+    # one (--allow-untagged) is not consent for the other — see the flag help text.
+    if gaps and not args.allow_untagged:
+        exit_code = 1
+    if missing_roots and not args.allow_missing_roots:
+        exit_code = 1
+    return exit_code
 
 
 def _empty():
     from .manifest import DomainBlock
     return DomainBlock()
+
+
+def _print_domain_result(manifest: "Manifest", domain: str) -> None:
+    """Print the '-> N files' progress line for a domain, plus a terse flag if
+    that domain just recorded a missing root (XACA-0954). Without this, the
+    only sign of trouble was a summary section 40+ lines later — this puts it
+    right where the scan happened, in real time.
+    """
+    n = len(manifest.domains.get(domain, _empty()).files)
+    mr = [r for r in manifest.missing_roots if r.get("domain") == domain]
+    if mr:
+        paths = ", ".join(r.get("path", "?") for r in mr)
+        print(f"  -> {n} files  [!! MISSING ROOT x{len(mr)}: {paths}]", flush=True)
+    else:
+        print(f"  -> {n} files", flush=True)
 
 
 def _dedupe_cross_domain(manifest) -> int:

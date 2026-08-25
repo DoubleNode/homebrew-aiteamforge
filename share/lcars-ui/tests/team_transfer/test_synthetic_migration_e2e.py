@@ -63,8 +63,18 @@ def _write_synthetic_team_yaml(config_dir: Path, team_config: dict) -> None:
         f'board_filename: "{cfg["board_filename"]}"',
         f'ticket_prefix: "{cfg["ticket_prefix"]}"',
         f'claude_project_dir_name: "{cfg["claude_project_dir_name"]}"',
-        "databases:",
     ]
+    # XACA-0954-003: personas must be explicit in team_config now — domain_knowledge
+    # no longer guesses a fallback list, and its absence is a fail-loud gap. Emit it
+    # even when empty so the synthetic yaml matches the fixture's declared personas.
+    personas = cfg.get("personas", [])
+    if personas:
+        lines.append("personas:")
+        for persona in personas:
+            lines.append(f'  - "{persona}"')
+    else:
+        lines.append("personas: []")
+    lines.append("databases:")
     for db in cfg.get("databases", []):
         lines.append(f'  - path: "{db["path"]}"')
         lines.append(f'    cls: {db["cls"]}')

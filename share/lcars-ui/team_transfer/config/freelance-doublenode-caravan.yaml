@@ -14,6 +14,23 @@
 
 team: freelance-doublenode-caravan
 home_relative_root: "../Shared/Development/DoubleNode/Caravan"
+# product_dir: bare directory NAME under ~/dev-team/ that holds this team's
+# product assets (personas, logos, board data). Differs from 'team' (freelance-doublenode-caravan)
+# -- see lcars-ui/server.py team_dir_map (XACA-0954-002).
+product_dir: "freelance"
+# personas: this team's actual persona set (knowledge DIRECTORY names, since
+# domain_knowledge globs ~/knowledge*/agents/<persona>/). Required key -- absent
+# is a hard gap (XACA-0954-004). Source of truth: ~/dev-team/.claude/agents-master/freelance/ (7 personas, shared across all freelance-* project configs).
+personas:
+  - "archer"
+  - "mayweather"
+  - "phlox"
+  - "reed"
+  - "sato"
+  - "tpol"
+  - "tucker"
+
+
 
 # Board filename and kanban ticket prefix (used by domain_kanban + verifier).
 board_filename: "freelance-doublenode-caravan-board.json"

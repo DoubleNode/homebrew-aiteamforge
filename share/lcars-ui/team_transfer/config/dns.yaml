@@ -23,6 +23,23 @@
 
 team: dns
 home_relative_root: "../Shared/Development/DNSFramework"
+# product_dir: bare directory NAME under ~/dev-team/ that holds this team's
+# product assets (personas, logos, board data). Differs from 'team' (dns)
+# -- see lcars-ui/server.py team_dir_map (XACA-0954-002).
+product_dir: "dns-framework"
+# personas: this team's actual persona set (knowledge DIRECTORY names, since
+# domain_knowledge globs ~/knowledge*/agents/<persona>/). Required key -- absent
+# is a hard gap (XACA-0954-004). Source of truth: ~/dev-team/.claude/agents-master/dns/ (7 personas).
+personas:
+  - "boimler"
+  - "mariner"
+  - "ransom"
+  - "rutherford"
+  - "shaxs"
+  - "tana"
+  - "tendi"
+
+
 
 # Board filename and kanban ticket prefix (used by domain_kanban + verifier).
 board_filename: "dns-board.json"

@@ -271,6 +271,10 @@ def _parse_team_yaml(text: str) -> dict:
       - defaults.icloud_excluded: list of glob strings
       - databases: list of {path, cls} maps
       - overrides: list of {pattern, channel} maps (user-editable slot for per-path corrections)
+      - personas / persona_dirs (XACA-0954-003/004): plain top-level lists of strings.
+        A "key:" header with no items (or an inline "key: []") produces an
+        explicit empty list — distinct from the key being absent entirely,
+        which callers (domain_knowledge) treat as a hard gap.
 
     No PyYAML dependency — stdlib-only hand parser for the subset we need.
     """
@@ -279,6 +283,9 @@ def _parse_team_yaml(text: str) -> dict:
         "databases": [],
         "overrides": [],
     }
+    # Top-level keys that are plain lists-of-strings (not lists-of-dicts like
+    # databases/overrides, and not nested under defaults like icloud_excluded).
+    _GENERIC_LIST_KEYS = ("personas", "persona_dirs")
 
     # Stack-based section tracking: section path as list of strings.
     # e.g. ["defaults"] or ["defaults", "rules"] or ["databases"]
@@ -317,11 +324,21 @@ def _parse_team_yaml(text: str) -> dict:
                 key = key.strip()
                 val = val.strip()
                 if val:
-                    # Scalar value
-                    result[key] = _yaml_value(val) if val else val
+                    if key in _GENERIC_LIST_KEYS and val == "[]":
+                        # Explicit empty list, e.g. "personas: []" — a real
+                        # empty list, not the literal string "[]".
+                        result[key] = []
+                    else:
+                        # Scalar value
+                        result[key] = _yaml_value(val) if val else val
                 else:
                     # Section start
                     section_path = [key]
+                    if key in _GENERIC_LIST_KEYS:
+                        # Initialize now so "key:" with zero following items still
+                        # yields an explicit [] (key present) rather than the key
+                        # being absent from result entirely.
+                        result[key] = []
             continue
 
         # Indent == 2: section member or nested section.
@@ -340,6 +357,8 @@ def _parse_team_yaml(text: str) -> dict:
                         pass  # shouldn't happen
                     elif section_path == ["defaults", "icloud_excluded"]:
                         result["defaults"]["icloud_excluded"].append(_yaml_value(item_val))
+                    elif len(section_path) == 1 and section_path[0] in _GENERIC_LIST_KEYS:
+                        result[section_path[0]].append(_yaml_value(item_val))
             elif ":" in stripped:
                 key, _, val = stripped.partition(":")
                 key = key.strip()

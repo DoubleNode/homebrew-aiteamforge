@@ -238,3 +238,76 @@ def test_git_dir_excluded_by_walker(tmp_path):
     assert "main.py" in found_names, "regular source file must be discovered"
     assert "pack-abc.pack" not in found_names, ".git/objects/pack file must be excluded"
     assert "HEAD" not in found_names, ".git/HEAD must be excluded"
+
+
+# ── XACA-0954-007: personas/persona_dirs top-level generic list parsing ──────
+#
+# channels.py's hand-rolled YAML parser previously had no support for a
+# top-level list-of-strings key (only lists-of-dicts like defaults.rules /
+# databases / overrides). A "personas:" block would silently vanish. This is
+# a load-bearing regression guard: a break here silently disarms every config's
+# persona-driven knowledge scan (domain_knowledge would report a gap on EVERY
+# team, all the time, with no signal beyond a stderr warning nobody watches).
+
+def test_parse_team_yaml_personas_populated_list(tmp_path):
+    text = textwrap.dedent("""\
+        team: synth
+        home_relative_root: "synth"
+        personas:
+          - "alpha"
+          - "beta"
+          - "gamma"
+        databases:
+        defaults:
+          rules:
+          icloud_excluded: []
+        overrides: []
+    """)
+    cfg = ch._parse_team_yaml(text)
+    assert cfg["personas"] == ["alpha", "beta", "gamma"]
+
+
+def test_parse_team_yaml_personas_explicit_empty_list(tmp_path):
+    text = textwrap.dedent("""\
+        team: synth
+        home_relative_root: "synth"
+        personas: []
+        databases:
+        defaults:
+          rules:
+          icloud_excluded: []
+        overrides: []
+    """)
+    cfg = ch._parse_team_yaml(text)
+    assert cfg["personas"] == []
+    assert "personas" in cfg, "explicit empty list must still be a present key, not absent"
+
+
+def test_parse_team_yaml_personas_key_absent_entirely(tmp_path):
+    text = textwrap.dedent("""\
+        team: synth
+        home_relative_root: "synth"
+        databases:
+        defaults:
+          rules:
+          icloud_excluded: []
+        overrides: []
+    """)
+    cfg = ch._parse_team_yaml(text)
+    assert "personas" not in cfg, "no personas: block at all -> key must be absent, not defaulted to []"
+
+
+def test_parse_team_yaml_persona_dirs_populated_list(tmp_path):
+    text = textwrap.dedent("""\
+        team: synth
+        home_relative_root: "synth"
+        persona_dirs:
+          - "{home}/synth/personas"
+        databases:
+        defaults:
+          rules:
+          icloud_excluded: []
+        overrides: []
+    """)
+    cfg = ch._parse_team_yaml(text)
+    assert cfg["persona_dirs"] == ["{home}/synth/personas"]
