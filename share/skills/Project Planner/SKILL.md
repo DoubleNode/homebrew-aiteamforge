@@ -1690,6 +1690,9 @@ PY
 ```
 
 **On `RESOLVE_FAILED` (exit 3), or any output you cannot parse: STOP.** Do not write the document.
+Exit 3 is not the only failure signature: an id whose prefix is not a known team resolves to an
+empty board path and the snippet dies with a `FileNotFoundError` traceback and **exit 1** instead.
+Both mean the same thing — the item's status was not established — and both mean stop.
 Report to the user and ask — neither default is safe to guess. Assuming "not closed" omits a required
 banner; assuming "closed" stamps a live plan as historical, telling implementers their tracked work is
 a dead record.
@@ -1712,8 +1715,8 @@ the board id verbatim; `closed=` is the `CLOSED_ON` value from the check above, 
 > ⚠️ **Keep this sentinel on its own line — never merge it into the canonical marker** (e.g.
 > `<!-- plan_doc: canonical, historical -->`). A retroactive doc for a closed item is still *the*
 > canonical plan doc for that item — `kb-retro-path` must keep finding it — and the detection check's
-> match is exact. A merged marker fails to flagged, which is correct but will read as a mystery to
-> whoever hits it.
+> match is exact. A merged marker fails to match, so the doc stays flagged — correct, but it will read as a
+> mystery to whoever hits it.
 
 **B. Banner**, immediately after the header metadata block, before `## Summary`. **C. Banner,
 repeated**, immediately under the retitled `## Subitems …` heading, above the table. The duplication
