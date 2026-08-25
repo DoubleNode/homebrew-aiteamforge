@@ -37,6 +37,7 @@ Exit codes:
 """
 
 import argparse
+import glob
 import json
 import os
 import shutil
@@ -109,6 +110,66 @@ def has_private_key(keygen_js, slug):
     return val == "true"
 
 
+
+FLEET_CONFIG = os.path.expanduser("~/.aiteamforge/fleet-config.json")
+
+
+def persist_relay_url(server):
+    """Record the relay URL where BOTH kb-msg and fleet-reporter already look.
+
+    Generating a keypair against --server but not recording it left the send
+    path unconfigured: msg-client defaults to http://localhost:3000, so every
+    cross-machine send failed as "fetch failed" on a machine that had just been
+    provisioned successfully. Provisioning that leaves the feature unusable is
+    the exact failure XACA-0885 exists to remove, one layer up.
+
+    Writes .centralServer.apiEndpoint -- the same key fleet-reporter reads -- and
+    MERGES into any existing config rather than replacing it.
+    Returns (changed, previous).
+    """
+    # The documented shape is "<base>/api/status" — see
+    # config/templates/fleet-config.client.example.json and
+    # fleet-reporter.sh:82's default. fleet-reporter POSTs status to this
+    # exact value and derives its relay base by stripping /api/*, so a bare
+    # "<base>/api" would both break its posting AND fail that strip.
+    endpoint = server.rstrip("/") + "/api/status"
+    data = {}
+    if os.path.isfile(FLEET_CONFIG):
+        try:
+            data = json.load(open(FLEET_CONFIG))
+        except ValueError as exc:
+            _die_env(
+                "%s is not valid JSON (%s).\n"
+                "  Refusing to rewrite it -- fix it by hand, then re-run."
+                % (FLEET_CONFIG, exc)
+            )
+        if not isinstance(data, dict):
+            _die_env("%s is not a JSON object; refusing to rewrite." % FLEET_CONFIG)
+    central = data.get("centralServer")
+    if not isinstance(central, dict):
+        central = {}
+    previous = central.get("apiEndpoint")
+    if previous == endpoint:
+        return False, previous
+    central["apiEndpoint"] = endpoint
+    data["centralServer"] = central
+    parent = os.path.dirname(FLEET_CONFIG)
+    os.makedirs(parent, exist_ok=True)
+    if os.path.exists(FLEET_CONFIG):
+        shutil.copy2(FLEET_CONFIG, FLEET_CONFIG + ".pre-kb-msg-provision.bak")
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".fleet-config-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2, sort_keys=True))
+            fh.write("\n")
+        os.replace(tmp, FLEET_CONFIG)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return True, previous
+
+
 # ── Template/instance aliases ────────────────────────────────────────────────
 # MIRROR of _kb_template_to_instance / _kb_instance_to_template in
 # kanban-helpers.sh (~1840, XACA-0576). Keep the three cases in lock-step; that
@@ -159,7 +220,20 @@ def local_teams():
     local, unknown = [], []
     for name, cfg in teams.items():
         kd = os.path.expanduser((cfg or {}).get("kanban_dir") or "")
-        (local if kd and os.path.isdir(kd) else unknown).append(name)
+        # Gate on the BOARD FILE, not merely the directory.
+        #
+        # Directory existence is a bad proxy for "this team lives here": the
+        # framework's team-init guard auto-recreates an EMPTY kanban skeleton
+        # shortly after one is removed. Observed 2026-08-24 — legal-coparenting
+        # and finance-personal were archived and deleted after moving to M4Mini,
+        # and both directories were back (0 files, no board) 12 minutes later.
+        # A dir-only check called them local again and would have silently
+        # reverted their routing from darren-m4-mini back to this machine,
+        # sending their mail to a box that no longer holds them.
+        #
+        # A board file is what a team actually IS here; an empty skeleton is not.
+        has_board = bool(glob.glob(os.path.join(kd, "*board*.json"))) if kd else False
+        (local if has_board else unknown).append(name)
     return sorted(local), sorted(unknown)
 
 
@@ -233,6 +307,11 @@ def main():
             print(msg)
 
     keygen_js = _locate_keygen()
+    if args.server and not (args.check or args.dry_run):
+        changed, prev = persist_relay_url(args.server)
+        if changed:
+            say("  Recorded relay URL in %s%s"
+                % (FLEET_CONFIG, "" if prev is None else " (was %s)" % prev))
     slug = machine_slug(keygen_js, args.machine_id)
     have_key = has_private_key(keygen_js, slug)
     loc, unknown = local_teams()

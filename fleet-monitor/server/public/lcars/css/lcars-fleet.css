@@ -522,21 +522,10 @@ body {
 .sidebar-button[data-section="admin"] {
     background: var(--lcars-orange);
 }
-/* ENGINES is the LAST sidebar button, so it carries the terminating black bar.
-   ADMIN used to be last and owned that border; when ENGINES was appended the
-   border stayed put, giving a doubled 4px bar above ENGINES and none below. */
 .sidebar-button[data-section="engines"] {
     background: var(--lcars-amber);
-    border-bottom: 2px solid var(--lcars-black);
 }
 
-/* XACA-0953: the scratch/demo pages (lcars-test.html) have no ENGINES button, so
-   the terminator above would never apply and their sidebar stack would not close.
-   Scoped to body.lcars-scratch so the real dashboards — where SETTINGS sits
-   mid-stack — are unaffected. */
-body.lcars-scratch .sidebar-button[data-section="settings"] {
-    border-bottom: 2px solid var(--lcars-black);
-}
 
 /* Active state - invert colors */
 .sidebar-button.active {
@@ -577,6 +566,23 @@ body.lcars-scratch .sidebar-button[data-section="settings"] {
     bottom: 0;
     width: 6px;
     background: currentColor;
+}
+
+/* ── Terminating black bar (XACA-0953) ────────────────────────────────────────
+   The sidebar column is orange; each button draws its own black border-top, so
+   the "black lines" between buttons are 2px of separation against that orange.
+   The button run therefore needs a closing bar or the last button bleeds
+   straight into the orange spacer below it.
+
+   That bar is drawn by the SPACER, not by a named button. Earlier revisions
+   pinned it to whichever [data-section=...] happened to be last (ADMIN, then
+   SETTINGS), and every time a button was appended below, the bar stayed put and
+   drew a doubled 4px line above the new button and none below it — the defect
+   this ticket fixed. Binding it to adjacency instead means appending a button
+   requires NO stylesheet change at all: the spacer always follows whatever the
+   last button is. Plain CSS2 adjacency, so no :has() support question. */
+.sidebar-button + .sidebar-spacer {
+    border-top: 2px solid var(--lcars-black);
 }
 
 /* Spacer - shows black gap between button groups */
@@ -1094,10 +1100,6 @@ body.kiosk-active .kiosk-fab {
         border-top-width: 1px;
     }
 
-    .sidebar-button[data-section="engines"],
-    body.lcars-scratch .sidebar-button[data-section="settings"] {
-        border-bottom-width: 1px;
-    }
 
     .top-sidebar-content .team-name {
         top: -25px;
@@ -1145,8 +1147,12 @@ body.kiosk-active .kiosk-fab {
         flex: 0.1;
     }
 
-    .sidebar-button[data-section="engines"] + .sidebar-spacer {
-        display: none;
+    /* Collapse the terminating spacer to its bar at narrow widths — NOT
+       display:none, which would take the bar down with it. */
+    .sidebar-button + .sidebar-spacer {
+        flex: 0 0 auto;
+        min-height: 0;
+        border-top-width: 1px;
     }
 
     .sidebar-button.refresh-btn {

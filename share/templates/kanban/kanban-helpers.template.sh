@@ -431,6 +431,55 @@ _kb_jq_update() {
     return $result
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared jq status-resolution library (XACA-0948).
+#
+# Implements kanban/plans/XACA-0948/ITEM_STATUS_CONTRACT.md §1.5 (backlog-item
+# precedence) and §1.1's recursive subitem-layer rule, as jq `def`s. Prefix
+# this string onto any jq PROGRAM passed to `_kb_jq_read`/`jq` whose filter
+# calls `kb_resolve_item_status` (item, `.` = the item object) or
+# `kb_resolve_subitem_status` (subitem, `.` = the subitem object).
+#
+# Rules encoded here (see the contract for full rationale + edge-case matrix):
+#   R1 — a RECORDED status (key present, value not null, and -- after
+#        trimming whitespace -- not "") always wins verbatim, INCLUDING
+#        non-canonical tokens (backlog/pending/ongoing, §1.4) and terminal
+#        states (completed/cancelled). jq's `//` alone does not catch `""`
+#        (contract §1.1, Case O) -- that is why this is a `def`, not `//`.
+#   R2 — unrecorded + a live (non-cancelled) subitem in in_progress,
+#        in_review, blocked, or completed -> "in_progress".
+#   R3 — unrecorded + activelyWorking truthy -> "in_progress".
+#   R4 — unrecorded + startedAt present -> "in_progress".
+#   R5 — unrecorded, no evidence -> "todo" (the board-convention default).
+# Ceiling: unrecorded NEVER resolves to a terminal state (completed/
+# cancelled) or to "blocked" -- completion/cancellation/blocking are always
+# DECLARED (recorded), never inferred (contract §1.2/§1.3).
+#
+# Subitems recurse into kb_resolve_subitem_status for the SAME R1/"" handling
+# but have no evidence branch of their own (contract §1.1: subitems have no
+# subitems, so R2-R4 do not apply at that layer) -- absent/null/"" -> "todo".
+# ─────────────────────────────────────────────────────────────────────────────
+_KB_ITEM_STATUS_JQ_DEFS='
+def kb_recorded_or_null:
+  (.status) as $raw |
+  if ($raw != null) and (($raw|tostring) as $s | ($s|gsub("^[[:space:]]+|[[:space:]]+$";"")) != "") then $raw else null end;
+
+def kb_resolve_subitem_status:
+  (kb_recorded_or_null) as $rec | if $rec != null then $rec else "todo" end;
+
+def kb_resolve_item_status:
+  (kb_recorded_or_null) as $rec |
+  if $rec != null then $rec
+  else
+    ( ((.subitems // []) | map(kb_resolve_subitem_status) | map(select(. != "cancelled"))) as $live |
+      if ($live | any(. == "in_progress" or . == "in_review" or . == "blocked" or . == "completed")) then "in_progress"
+      elif (.activelyWorking // false) then "in_progress"
+      elif ((.startedAt // null) != null) then "in_progress"
+      else "todo"
+      end )
+  end;
+'
+
 # Read board file with shared locking
 # Usage: _kb_jq_read "board_file" "jq_filter" [jq_args...]
 _kb_jq_read() {
@@ -4457,10 +4506,13 @@ kb-done() {
         local parent_idx
         parent_idx=$(_kb_find_by_id "$board_file" "$parent_id")
         if [[ "$parent_idx" -ge 0 ]]; then
-            # Capture old status before update
+            # Capture old status before update.
+            # XACA-0948: subitem-layer resolution (ITEM_STATUS_CONTRACT.md
+            # §1.1) -- recorded status wins verbatim (including ""-safe
+            # handling), else "todo". No evidence branch at the subitem layer.
             local sub_old_status
             sub_old_status=$(_kb_jq_read "$board_file" \
-                '[.backlog[$pidx].subitems[] | select(.id == $subId)] | first | .status // "todo"' \
+                "${_KB_ITEM_STATUS_JQ_DEFS} [.backlog[\$pidx].subitems[] | select(.id == \$subId)] | first | kb_resolve_subitem_status" \
                 --argjson pidx "$parent_idx" --arg subId "$working_id" -r 2>/dev/null || echo "todo")
             if ! _kb_jq_update "$board_file" '
                 .backlog[$pidx].subitems = [.backlog[$pidx].subitems[] |
@@ -5742,10 +5794,19 @@ kb-backlog() {
             fi
 
             # XACA-0884: some boards carry items with NO status key at all --
-            # absent means todo. This MUST default via // "todo", never // empty --
-            # a bare // empty would misclassify those items as "unknown status".
+            # absent must never resolve to "unknown status". XACA-0948 sharpens
+            # this from a flat "todo" default to full ITEM_STATUS_CONTRACT.md
+            # §1.5: an unrecorded item with evidence of active work
+            # (activelyWorking / startedAt / an in-flight subitem) resolves
+            # "in_progress", not "todo" -- which matters HERE specifically,
+            # because the `todo)` case arm below short-circuits with "already
+            # todo -- nothing to do" and returns WITHOUT clearing
+            # activelyWorking/workStartedAt. Under the old flat default, an
+            # unrecorded-but-actively-worked item hit that no-op and demote
+            # silently failed to clear its in-flight markers.
             local demote_current_status
-            demote_current_status=$(_kb_jq_read "$board_file" ".backlog[$index].status // \"todo\"" -r)
+            demote_current_status=$(_kb_jq_read "$board_file" \
+                "${_KB_ITEM_STATUS_JQ_DEFS} .backlog[$index] | kb_resolve_item_status" -r)
 
             case "$demote_current_status" in
                 completed)
@@ -6003,7 +6064,8 @@ kb-backlog() {
                     if [[ "$sub_count" -eq 0 ]]; then
                         echo "  (no subitems)"
                     else
-                        _kb_jq_read "$board_file" ".backlog[$parent_idx].subitems | to_entries[] | \"  [\(.key)] [\(.value.status | ascii_upcase | .[0:4])] \(.value.title)\(if .value.jiraKey then \" (\(.value.jiraKey))\" else \"\" end)\"" --argjson idx "$parent_idx" -r
+                        # XACA-0948: subitem-layer resolution (ITEM_STATUS_CONTRACT.md §1.1).
+                        _kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS} .backlog[$parent_idx].subitems | to_entries[] | \"  [\(.key)] [\((.value | kb_resolve_subitem_status) | ascii_upcase | .[0:4])] \(.value.title)\(if .value.jiraKey then \" (\(.value.jiraKey))\" else \"\" end)\"" --argjson idx "$parent_idx" -r
                     fi
                     ;;
 
@@ -6076,7 +6138,8 @@ kb-backlog() {
                     local sub_title sub_id sub_old_status
                     sub_title=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].title // empty" -r)
                     sub_id=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].id // empty" -r)
-                    sub_old_status=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].status // \"todo\"" -r)
+                    # XACA-0948: subitem-layer resolution (ITEM_STATUS_CONTRACT.md §1.1).
+                    sub_old_status=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS} .backlog[$parent_idx].subitems[$sub_idx] | kb_resolve_subitem_status" -r)
 
                     if [[ -z "$sub_title" ]]; then
                         echo "Error: Subitem not found at index $sub_idx"
@@ -6243,7 +6306,8 @@ kb-backlog() {
                     local sub_title sub_id sub_old_status
                     sub_title=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].title // empty" -r)
                     sub_id=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].id // empty" -r)
-                    sub_old_status=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].status // \"todo\"" -r)
+                    # XACA-0948: subitem-layer resolution (ITEM_STATUS_CONTRACT.md §1.1).
+                    sub_old_status=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS} .backlog[$parent_idx].subitems[$sub_idx] | kb_resolve_subitem_status" -r)
 
                     if [[ -z "$sub_title" ]]; then
                         echo "Error: Subitem not found at index $sub_idx"
@@ -6499,7 +6563,8 @@ kb-backlog() {
                     local sub_title sub_id sub_old_status
                     sub_title=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].title // empty" -r)
                     sub_id=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].id // empty" -r)
-                    sub_old_status=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].status // \"todo\"" -r)
+                    # XACA-0948: subitem-layer resolution (ITEM_STATUS_CONTRACT.md §1.1).
+                    sub_old_status=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS} .backlog[$parent_idx].subitems[$sub_idx] | kb_resolve_subitem_status" -r)
 
                     if [[ -z "$sub_title" ]]; then
                         echo "Error: Subitem not found at index $sub_idx"
@@ -7226,7 +7291,8 @@ else:
             item_id=$(_kb_jq_read "$board_file" ".backlog[$index].id // \"?\"" -r)
             item_title=$(_kb_jq_read "$board_file" ".backlog[$index].title // \"(no title)\"" -r)
             item_priority=$(_kb_jq_read "$board_file" ".backlog[$index].priority // \"medium\"" -r)
-            item_status=$(_kb_jq_read "$board_file" ".backlog[$index].status // \"todo\"" -r)
+            # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-backlog show).
+            item_status=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS} .backlog[$index] | kb_resolve_item_status" -r)
             item_desc=$(_kb_jq_read "$board_file" ".backlog[$index].description // \"\"" -r)
             item_jira=$(_kb_jq_read "$board_file" ".backlog[$index].jiraId // \"\"" -r)
             item_github=$(_kb_jq_read "$board_file" ".backlog[$index].githubIssue // \"\"" -r)
