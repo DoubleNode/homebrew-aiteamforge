@@ -11046,11 +11046,22 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     const itemCount = release.progress?.total || 0;
     const completedCount = release.progress?.completed || 0;
     const cancelledCount = release.progress?.cancelled || 0;
+    // XACA-0948-014: server's _calculate_release_progress also emits
+    // progress.unresolved (a row whose team/board couldn't be found) "so the
+    // gap is visible instead of silently green" — but nothing here read it,
+    // so a release's completed/total ratio could jump (e.g. 40%→80%) with no
+    // on-screen explanation, reading as unexplained data loss.
+    const unresolvedCount = release.progress?.unresolved || 0;
     // A release with zero items has nothing left to do — it's 100% complete
     const itemProgress = itemCount > 0 ? Math.round((completedCount / itemCount) * 100) : 100;
     // XACA-0206-001: Surface cancelled count so users see why denominator shrank.
     // "excluded" avoids the math-additive read of a leading + sign.
     const cancelledSuffix = cancelledCount > 0 ? ` <span class="release-item-cancelled-count">(${cancelledCount} cancelled, excluded)</span>` : '';
+    // XACA-0948-014: mirrors cancelledSuffix's pattern/tone. "unresolved" here
+    // matches the server's statusResolution vocabulary rather than inventing
+    // new wording — deliberately does NOT say "excluded" since unresolved rows
+    // stay IN the total per the server comment ("never less").
+    const unresolvedSuffix = unresolvedCount > 0 ? ` <span class="release-item-unresolved-count" title="${unresolvedCount} item(s) could not be resolved against a team/board and are counted as incomplete">(${unresolvedCount} unresolved)</span>` : '';
 
     // XACA-0056-007: Add archived badge for archived releases
     const archivedBadge = isArchived ? '<span class="archived-badge">ARCHIVED</span>' : '';
@@ -11090,7 +11101,7 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
                     ${tagsHtml}
                     <div class="release-card-meta">
                         <span class="release-card-date">${targetDate}</span>
-                        <span class="release-item-count">${completedCount}/${itemCount} items${cancelledSuffix}</span>
+                        <span class="release-item-count">${completedCount}/${itemCount} items${cancelledSuffix}${unresolvedSuffix}</span>
                         <span class="release-card-progress">${itemProgress}%</span>
                         <span class="release-expand-icon">${isExpanded ? '▼' : '▶'}</span>
                     </div>
@@ -11156,6 +11167,59 @@ async function toggleReleaseExpanded(releaseId) {
 }
 
 /**
+ * XACA-0948: canonical release-item status tokens that get their own CSS
+ * class name. Anything else — a non-canonical recorded token (contract
+ * §1.4, e.g. 'backlog'/'pending') or no value at all — falls back to
+ * 'unknown'/'unresolved' rather than being interpolated verbatim into
+ * `class=` (an unescaped-attribute smell, XACA-0948-004 §4.3 R3).
+ */
+const RELEASE_ITEM_STATUS_CLASSES = new Set([
+    'todo', 'in_progress', 'in_review', 'blocked', 'completed', 'cancelled', 'done'
+]);
+
+/**
+ * Resolve the CSS class suffix + display label for a release item's status.
+ *
+ * XACA-0948: `item.status` is resolved live per ITEM_STATUS_CONTRACT.md
+ * §1.5 and can legitimately be null/undefined (server reports
+ * `statusResolution: "unresolved"` when a row's team/board can't be
+ * resolved) or a non-canonical recorded token. Pulled out as a small, pure,
+ * DOM-free function specifically so it's unit-testable in isolation — see
+ * lcars-ui/tests/test-xaca-0948-release-item-status-guard.js. Before this
+ * fix, the caller did `item.status.toUpperCase()` unguarded here; a missing
+ * status threw inside the `.map()` over ALL release items and rendered
+ * "Error loading items" for the whole panel.
+ *
+ * XACA-0948-017: the CSS class keeps the raw underscored token
+ * (`status-in_review`) unchanged — that's what the stylesheet selectors in
+ * lcars.css match against — but the human-facing label is normalized
+ * underscore->space (`in_review` -> "IN REVIEW") to match the established
+ * convention elsewhere in this file (see the `.replace(/_/g, ' ')` pattern
+ * used for backlog-status chart labels). Only the label changes; statusClass
+ * is untouched so styling is unaffected.
+ *
+ * XACA-0948-016: `statusTitle` is a tooltip for the 'unresolved' case only.
+ * The server's `statusResolution` is a binary resolved/unresolved flag with
+ * no reason code — a dangling item id, a missing team, and an unreadable
+ * board are all indistinguishable from here — so the tooltip text is
+ * deliberately generic rather than promising a specific cause the data
+ * can't support. Non-unresolved statuses get an empty string (no tooltip).
+ *
+ * @param {{status: (string|null|undefined)}} item
+ * @returns {{statusClass: string, statusLabel: string, statusTitle: string}}
+ */
+function resolveReleaseItemStatusDisplay(item) {
+    const rawStatus = item.status;
+    const hasStatus = rawStatus !== null && rawStatus !== undefined && String(rawStatus).trim() !== '';
+    const statusClass = !hasStatus ? 'unresolved' : (RELEASE_ITEM_STATUS_CLASSES.has(rawStatus) ? rawStatus : 'unknown');
+    const statusLabel = hasStatus ? String(rawStatus).toUpperCase().replace(/_/g, ' ') : 'UNRESOLVED';
+    const statusTitle = !hasStatus
+        ? 'Status could not be resolved from a team board (e.g. a dangling item ID, missing team, or unreadable board data). Counted as incomplete pending resolution.'
+        : '';
+    return { statusClass, statusLabel, statusTitle };
+}
+
+/**
  * Load items for a release
  */
 async function loadReleaseItems(releaseId) {
@@ -11178,10 +11242,17 @@ async function loadReleaseItems(releaseId) {
             const isCompleted = item.status === 'done' || item.status === 'completed';
             const isCancelled = item.status === 'cancelled';
             const stateClass = isCompleted ? 'completed' : (isCancelled ? 'cancelled' : '');
+
+            const { statusClass, statusLabel, statusTitle } = resolveReleaseItemStatusDisplay(item);
+            // XACA-0948-016: only emit a title attribute when there's
+            // explanatory text to show — canonical/non-canonical statuses
+            // are self-explanatory from the label and get no tooltip.
+            const statusTitleAttr = statusTitle ? ` title="${escapeHtml(statusTitle)}"` : '';
+
             return `
             <div class="release-item ${stateClass}" data-item-id="${escapeHtml(item.itemId)}" onclick="navigateToBacklogItemById('${jsAttrEscape(item.itemId)}')">
                 <span class="release-item-id" role="button" tabindex="0" title="Click to copy item ID to clipboard" aria-label="Item ID: ${escapeHtml(item.itemId)}. Click to copy." onclick="event.stopPropagation(); copyToClipboard('${jsAttrEscape(item.itemId)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();event.stopPropagation();copyToClipboard('${jsAttrEscape(item.itemId)}');}">${escapeHtml(item.itemId)}</span>
-                <span class="release-item-status status-${item.status}">${item.status.toUpperCase()}</span>
+                <span class="release-item-status status-${statusClass}"${statusTitleAttr}>${escapeHtml(statusLabel)}</span>
                 <span class="release-item-title">${escapeHtml(item.title)}</span>
                 <button class="release-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}', this.getAttribute('data-retro-exists') === 'true', this.getAttribute('data-cr-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
                 <button class="release-item-remove" onclick="event.stopPropagation(); removeItemFromRelease('${releaseId}', '${item.itemId}')" title="Remove from release">✕</button>

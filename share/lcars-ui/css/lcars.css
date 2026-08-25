@@ -9515,6 +9515,48 @@ body {
     color: var(--lcars-red);
 }
 
+/* XACA-0948: item.status is resolved live per ITEM_STATUS_CONTRACT.md §1.5
+   and can now be 'blocked'/'in_review' (widened R2 evidence states), a
+   non-canonical recorded token (§1.4 — e.g. 'backlog', never coerced), or
+   entirely unresolved (server reports statusResolution: "unresolved" when
+   a row's team/board can't be found). Prior to this ticket there was no
+   rule for any of these, so a blocked/in_review/non-canonical item rendered
+   as an unstyled pill. */
+.release-item-status.status-blocked {
+    background: rgba(255, 68, 68, 0.2);
+    color: var(--lcars-error);
+}
+
+.release-item-status.status-in_review {
+    background: rgba(204, 153, 255, 0.2);
+    color: var(--lcars-purple);
+}
+
+.release-item-status.status-unknown {
+    background: rgba(255, 204, 0, 0.15);
+    color: var(--lcars-amber);
+    border: 1px dashed var(--lcars-amber);
+}
+
+/* XACA-0948-015: --lcars-muted has NO definition anywhere in this file (unlike
+   --lcars-amber above, which IS defined in :root). Referencing an undefined
+   custom property with no var() fallback is invalid at computed-value time —
+   for `color` that silently falls back to the inherited peach body text, and
+   for the `border` SHORTHAND it invalidates the whole declaration, so the
+   dashed border this rule exists to draw (a non-color a11y cue) never
+   rendered at all. Fixed per this file's established convention
+   (var(--lcars-muted, #888) — the dominant fallback used elsewhere, e.g.
+   line 7336) rather than leaving the var undefined. Verified contrast of the
+   actual rendered #888 against the composited badge background (~#141414,
+   i.e. rgba(102,102,102,0.2) over the black panel) = 5.20:1, which passes
+   WCAG 2.1 AA for normal text (4.5:1 required) despite the 9px font size. */
+.release-item-status.status-unresolved {
+    background: rgba(102, 102, 102, 0.2);
+    color: var(--lcars-muted, #888);
+    border: 1px dashed var(--lcars-muted, #888);
+    font-style: italic;
+}
+
 .release-item-title {
     flex: 1;
     color: var(--lcars-text);
@@ -9581,6 +9623,16 @@ body {
 .release-item-cancelled-count,
 .epic-item-cancelled-count {
     color: var(--lcars-red);
+    font-size: 10px;
+    font-weight: 500;
+}
+
+/* Unresolved count suffix in release card header (XACA-0948-014) — amber
+   rather than red: an unresolved row isn't a failure state like cancelled,
+   it's a data-resolution gap that needs attention. --lcars-amber IS defined
+   in :root (unlike --lcars-muted), so no fallback needed here. */
+.release-item-unresolved-count {
+    color: var(--lcars-amber);
     font-size: 10px;
     font-weight: 500;
 }

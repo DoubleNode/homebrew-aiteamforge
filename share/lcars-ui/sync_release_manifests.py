@@ -11,7 +11,9 @@
 Sync Release Manifests with Current Board Data
 
 This script updates all release manifest files with the current
-title, status, and priority from the kanban board items.
+title and priority from the kanban board items. 'status' is
+deprecated in manifest rows (XACA-0948, ITEM_STATUS_CONTRACT.md §4)
+and is never written here — it is resolved live from the board.
 
 Usage: python3 sync_release_manifests.py [--dry-run]
 """
@@ -129,10 +131,12 @@ def sync_manifest(manifest_path, items_by_id, dry_run=False):
             changes.append(f"title: '{old_title}...' -> '{new_title}...'")
             manifest_item['title'] = board_title
 
-        board_status = board_item.get('status')
-        if board_status and manifest_item.get('status') != board_status:
-            changes.append(f"status: {manifest_item.get('status')} -> {board_status}")
-            manifest_item['status'] = board_status
+        # XACA-0948: 'status' is deprecated in manifest.items[] rows
+        # (ITEM_STATUS_CONTRACT.md §4) — this was a THIRD, undocumented
+        # resolution rule (raw-with-no-default, guarded by `if board_status`
+        # so an unrecorded board item left the stale manifest value in
+        # place). A manifest row records ASSIGNMENT only; status is
+        # resolved live from the board on every read, never persisted here.
 
         board_priority = board_item.get('priority')
         if board_priority and manifest_item.get('priority') != board_priority:

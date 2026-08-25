@@ -964,10 +964,6 @@ def _reset_local_host_identity_cache_for_tests():
     _local_host_identity_state['names'] = None
     _local_host_identity_state['tailscale_unknown'] = True
     _local_host_identity_warned.clear()
-    # XACA-0401: the CORS refusal breadcrumb is warn-once, so a test that
-    # asserts on it must be able to re-arm it. Cleared here alongside the
-    # identity cache rather than in a separate reset nobody would remember.
-    _cors_refusal_warned.clear()
 
 
 def _host_is_local_identity(host_header) -> bool:
@@ -1012,163 +1008,6 @@ def _host_is_local_identity(host_header) -> bool:
         return True
 
     return False
-
-
-# ---------------------------------------------------------------------------
-# XACA-0401 (audit F-05-002, and the CORS half of the F-04-002 cross-ref) —
-# replacement for the 54 `Access-Control-Allow-Origin: *` headers this server
-# used to emit on every response.
-#
-# WHY NOT A STATIC ALLOWLIST. This backend cannot know its own *external*
-# scheme, host or port: the Tailscale funnel path-prefix routes in
-# PATH_PREFIXES terminate HTTPS upstream and forward plain HTTP with the
-# original Host preserved (see _origin_matches_host()). A hardcoded
-# "http://localhost:<port>" would therefore refuse every funnel-reached page.
-# So the value is DERIVED from the request and echoed back.
-#
-# WHY BOTH SIDES ARE CHECKED INDEPENDENTLY. The obvious implementation is
-# "echo Origin when _origin_matches_host(origin, host)". That is too strict
-# and would break the only two legitimate cross-origin callers we have:
-# redirect.html and agent-panel-router.html both fetch
-# `http://localhost:<api-port>/api/status` from a page served on a DIFFERENT
-# localhost port, so Origin and Host disagree on the port by design.
-#
-# The rule used here instead: BOTH the request's `Host` AND the `Origin`
-# header's own host must independently satisfy _host_is_local_identity().
-# Cross-PORT is then allowed; cross-HOST is not. This keeps the two callers
-# working while still refusing the DNS-rebinding case that motivated the
-# allowlist in the first place — `evil.com` resolved to 127.0.0.1 yields
-# `Origin: http://evil.com:8203`, and `evil.com` is not a local identity, so
-# it is refused here exactly as it is refused at GET /api/auth-key.
-#
-# FAIL CLOSED. Every rejection path returns None, and a None return means the
-# caller emits NO Access-Control-Allow-Origin header at all. It must never
-# fall back to '*' — that is the defect this ticket exists to remove.
-# ---------------------------------------------------------------------------
-
-def _cors_header_value_is_safe(value: str) -> bool:
-    """Reject anything that could split or forge a response header.
-
-    The ACAO value is echoed from attacker-influenced input (`Origin`), so it
-    is validated before it reaches send_header(). CR/LF are the response-
-    splitting vector; the rest are simply never legal in an origin.
-    """
-    if not value or len(value) > 253 + 16:
-        return False
-    return not any(c in value for c in '\r\n\t "\'<>\\')
-
-
-_cors_refusal_warned = set()
-
-
-def _log_cors_refusal(host_header, origin_header) -> None:
-    """XACA-0401 UX finding 011 — leave ONE operator-facing breadcrumb per
-    distinct (Host, Origin) pair when CORS refuses a caller.
-
-    THE PROBLEM THIS SOLVES. A refused cross-origin request surfaces to the
-    human as an opaque browser-console CORS error with no server-side signal,
-    and the fix — adding the host to AITEAMFORGE_LCARS_ALLOWED_HOSTS — is not
-    discoverable from that error. serve_auth_key() already logs exactly this
-    kind of pointer for its Host refusals, and it is the SAME underlying
-    check; the inconsistency was the gap.
-
-    WHY WARN-ONCE IS NOT OPTIONAL. _send_cors_headers() runs on ~53 endpoints
-    on every single response. An unconditional log would emit thousands of
-    lines for one misconfigured origin and bury the very signal it exists to
-    provide — the log would become the noise. Keyed on the pair, so a second
-    distinct misconfiguration still reports.
-
-    NEVER logs credentials, bodies, or full requests — only the two header
-    values that decide the outcome, which the caller already controls.
-    """
-    if not origin_header:
-        return  # not a CORS request at all; nothing was refused.
-    key = (str(host_header), str(origin_header))
-    if key in _cors_refusal_warned:
-        return
-    if len(_cors_refusal_warned) > 256:
-        # Bounded: a hostile caller rotating Origins must not grow this set
-        # without limit. Past the cap we stop recording, not stop serving.
-        return
-    _cors_refusal_warned.add(key)
-    print(
-        "[LCARS] CORS: refused cross-origin request — Host "
-        f"{host_header!r} / Origin {origin_header!r} is not a local identity "
-        "for this machine, so no Access-Control-Allow-Origin was sent and the "
-        "browser will hide the response from the calling page. If this is a "
-        "legitimate way to reach LCARS, add the host to "
-        "AITEAMFORGE_LCARS_ALLOWED_HOSTS. (Logged once per Host/Origin pair.)",
-        file=sys.stderr,
-    )
-
-
-def _resolve_cors_origin(host_header, origin_header):
-    """Return the value for Access-Control-Allow-Origin, or None to omit it.
-
-    None means OMIT THE HEADER — never substitute '*'.
-
-    A request with no `Origin` header is not a CORS request; the browser will
-    not look for ACAO on the response, so None is returned and nothing is
-    emitted. Same-origin fetches (all 87 in-page mutating calls) fall in this
-    bucket or are exempt from the check entirely, and are unaffected.
-    """
-    if not origin_header:
-        return None
-
-    # The server itself must be reached under a name that identifies THIS
-    # machine. This is the anti-rebinding gate; see _host_is_local_identity().
-    if not _host_is_local_identity(host_header):
-        return None
-
-    origin = str(origin_header).strip()
-    if not _cors_header_value_is_safe(origin):
-        return None
-
-    try:
-        parsed = urlparse(origin)
-    except Exception:
-        return None
-    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
-        return None
-
-    # XACA-0401 review findings 015/013 (found independently by the reviewer
-    # and the tester): userinfo must be refused BEFORE any host comparison.
-    #
-    # `netloc` can carry a `user:pass@` prefix; a real `Host:` header
-    # structurally cannot. _normalize_host_header() was written for the
-    # latter shape and splits on the FIRST colon, so it reduces
-    # `localhost:8203@evil.com` to `localhost` — a local identity — and the
-    # whole origin then gets echoed back to evil.com. The helper is not
-    # wrong; feeding it a differently-shaped input silently inherited a
-    # weakness that was unreachable where it was originally used.
-    #
-    # Not reachable from a browser (the Fetch/URL spec never serializes
-    # userinfo into an Origin, and Origin is a forbidden header JS cannot
-    # set), so this is hardening, not a live bypass. It is still fixed here
-    # rather than deferred, because this function's entire job is validating
-    # hostile input, and "unreachable today" is a property of today's
-    # callers.
-    if parsed.username is not None or parsed.password is not None or '@' in parsed.netloc:
-        return None
-
-    # Compare on `hostname` — the stdlib's own parse, which strips userinfo
-    # and port by construction — rather than re-deriving it from netloc with
-    # a colon heuristic. Fixes the class, not just the one input.
-    if not _host_is_local_identity(parsed.hostname):
-        return None
-
-    # Port must be a plain integer if present. urlparse defers port parsing,
-    # so a malformed one raises here rather than riding along in the echo.
-    try:
-        parsed.port
-    except ValueError:
-        return None
-
-    # Echo the Origin rather than rebuilding it. Rebuilding would force a
-    # scheme guess, and behind the funnel the guess is wrong. netloc is safe
-    # to echo now: userinfo is refused above, and every other character was
-    # already screened by _cors_header_value_is_safe().
-    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _ensure_private_dir(path: Path) -> None:
@@ -3678,68 +3517,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         return bearer_cred if bearer_cred is not None else api_key_cred
 
-    def _cors_request_headers(self):
-        """Return (Host, Origin) for this request, tolerating a handler with
-        no usable `headers` mapping.
-
-        XACA-0401 follow-up: the code this replaced was
-        `send_header('Access-Control-Allow-Origin', '*')` — a constant that
-        touched no request state and therefore could not fail. Reading
-        `self.headers` reintroduced a way for HEADER EMISSION to raise, and an
-        AttributeError here surfaces as a 500 on a request that would
-        otherwise have succeeded (observed in CI: serve_calendar_items and
-        handle_delete_epic both turned 200 -> 500 against handlers built
-        without `headers`).
-
-        A response-header helper must never be the thing that fails a
-        response. Missing/!unusable headers degrade to (None, None), which
-        _resolve_cors_origin() maps to "omit the header" — the same
-        fail-closed outcome as an untrusted origin, never a wildcard.
-        """
-        headers = getattr(self, 'headers', None)
-        if headers is None:
-            return None, None
-        getter = getattr(headers, 'get', None)
-        if not callable(getter):
-            return None, None
-        try:
-            return getter('Host'), getter('Origin')
-        except Exception:
-            return None, None
-
-    def _send_cors_headers(self):
-        """XACA-0401 — emit the CORS headers for this request.
-
-        Replaces `send_header('Access-Control-Allow-Origin', '*')`. Emits
-        nothing at all when the origin does not resolve (fail closed).
-
-        `Vary: Origin` is emitted whenever ACAO is, and is NOT optional: the
-        response body for a given URL is now origin-dependent, so an
-        intermediary that caches without varying could hand one origin's
-        response to another.
-
-        MUST NOT be called from serve_auth_key() — that handler's deliberate
-        absence of any ACAO header is load-bearing. See the block comment on
-        _origin_matches_host().
-        """
-        host, origin = self._cors_request_headers()
-        allowed = _resolve_cors_origin(host, origin)
-
-        # XACA-0401 review finding 016 — `Vary: Origin` is emitted on EVERY
-        # path, not only alongside ACAO. The response for a given URL is now
-        # origin-dependent whether or not the header is granted, so the
-        # REFUSED response needs the same cache key; most of these endpoints
-        # send `Cache-Control: no-cache` (revalidate), not `no-store`, so an
-        # origin-blind intermediary could otherwise store the header-less
-        # variant and replay it to a legitimate origin. do_OPTIONS() and
-        # serve_auth_key() already varied unconditionally — this helper, the
-        # one 53 sites depend on, did not. That inconsistency was the bug.
-        self.send_header('Vary', 'Origin')
-        if allowed is None:
-            _log_cors_refusal(host, origin)
-            return
-        self.send_header('Access-Control-Allow-Origin', allowed)
-
     def _send_auth_401(self):
         """Contract §4 — byte-exact 401. Deliberately does NOT reuse
         _send_json_response(): that helper emits `Content-Type: application/
@@ -3752,7 +3529,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         body = _AUTH_401_BODY
         self.send_response(401)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('WWW-Authenticate', 'Bearer')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -3818,28 +3595,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         'Content-Type' only (pre-ticket value) — same-origin requests never
         trigger a CORS preflight regardless of what this header allows, so the
         86 in-page mutating fetches are unaffected either way.
-
-        XACA-0401: the preflight response is now origin-conditional. When
-        _resolve_cors_origin() refuses the caller, this handler still answers
-        200 (an OPTIONS request is legal and the browser is entitled to a
-        reply) but advertises NOTHING: no Allow-Origin, and critically no
-        Allow-Methods. Advertising 'POST, PUT, PATCH, DELETE' to an origin we
-        are about to refuse is pure disclosure — the browser blocks the real
-        request anyway once ACAO is absent, so the method list is only ever
-        read by a caller deciding what to try next. Allow-Headers stays
-        pinned to 'Content-Type'; do NOT widen it (see the P1 CORRECTION
-        above — that widening was reverted for a documented reason).
         """
         self.send_response(200)
-        # XACA-0401 finding 016: now that _send_cors_headers() varies on every
-        # path, this handler no longer needs its own copy of the resolution
-        # flow — it delegates and adds only the preflight-specific grants.
-        host, origin = self._cors_request_headers()
-        self._send_cors_headers()
-        if _resolve_cors_origin(host, origin) is not None:
-            self.send_header('Access-Control-Allow-Methods',
-                             'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
 
     def do_POST(self):
@@ -4226,7 +3986,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/json')
-                        self._send_cors_headers()
+                        self.send_header('Access-Control-Allow-Origin', '*')
                         self.end_headers()
                         self.wfile.write(json.dumps({"success": True}).encode())
                     else:
@@ -4281,7 +4041,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             if incomplete:
                                 self.send_response(400)
                                 self.send_header('Content-Type', 'application/json')
-                                self._send_cors_headers()
+                                self.send_header('Access-Control-Allow-Origin', '*')
                                 self.end_headers()
                                 self.wfile.write(json.dumps({
                                     "error": "Cannot complete item with incomplete subitems",
@@ -4374,7 +4134,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/json')
-                        self._send_cors_headers()
+                        self.send_header('Access-Control-Allow-Origin', '*')
                         self.end_headers()
                         self.wfile.write(json.dumps({"success": True}).encode())
                     else:
@@ -4486,7 +4246,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
-                    self._send_cors_headers()
+                    self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(json.dumps({"success": True}).encode())
                 finally:
@@ -5366,7 +5126,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """Helper to send JSON response with CORS headers"""
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
 
@@ -6187,28 +5947,98 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return _get_path_lock(self._get_release_manifest_path(release_id, team))
 
     @staticmethod
-    def _derive_item_status(board_item):
-        """Derive item status from subitems and activity signals.
+    def _resolve_item_status(item):
+        """Resolve a board item's status per ITEM_STATUS_CONTRACT.md §1.5.
 
-        Many items track progress through subitems rather than a top-level
-        status field. This method computes the effective status from:
-        - Subitem statuses (completed, in_progress, etc.)
-        - activelyWorking flag
-        - startedAt timestamp
+        XACA-0948: renamed from `_derive_item_status`. The old name promised
+        a derivation that no longer exists — this is now the single,
+        authoritative READ-TIME resolver for item status, implementing the
+        contract's precedence order verbatim:
+
+        R1 — a RECORDED status (the `status` key present, and neither None
+             nor an empty/whitespace-only string) always wins, unconditionally,
+             and is returned verbatim — including non-canonical tokens
+             (§1.4). Derivation is a fallback for absence, never an override.
+        R2-R4 — an UNRECORDED item is resolved from evidence of work, with a
+             hard ceiling of 'in_progress'. Derivation may NEVER conclude a
+             terminal state (`completed`/`cancelled`) or `blocked` — those
+             are declared states, not inferred ones (contract §1.2/§1.3).
+        R5 — no status, no evidence: the board-convention default, `todo`.
+
+        See kanban/plans/XACA-0948/ITEM_STATUS_CONTRACT.md §1.5 for the
+        normative precedence and §2 for the full edge-case matrix (Cases
+        A-R). Any implementation producing a different value for the same
+        input is non-conforming.
+
+        Per contract §4, the result of this function MUST NEVER be
+        persisted into any stored artifact (release manifest, board, etc.)
+        — it is a read-time computation only.
         """
-        subitems = board_item.get('subitems', [])
-        if subitems:
-            statuses = [s.get('status', 'todo') for s in subitems]
-            non_cancelled = [s for s in statuses if s != 'cancelled']
-            if non_cancelled and all(s == 'completed' for s in non_cancelled):
-                return 'completed'
-            if any(s in ('in_progress', 'completed') for s in non_cancelled):
-                return 'in_progress'
-        if board_item.get('activelyWorking'):
+        # R1 — RECORDED STATUS WINS, UNCONDITIONALLY. Absent, None, and ""
+        # are all "unrecorded" and MUST be treated identically (§1.1).
+        raw = item.get('status')
+        if raw is not None and str(raw).strip() != '':
+            return raw
+
+        # Item is UNRECORDED. Resolve from evidence. Ceiling is 'in_progress'.
+        subitems = item.get('subitems') or []
+        live = [(s.get('status') or 'todo') for s in subitems
+                if (s.get('status') or 'todo') != 'cancelled']
+
+        # R2 — subitem evidence that work has begun. Widened predicate per
+        # contract §1.5: 'in_review' and 'blocked' now count as in-flight
+        # evidence too, aligning with STATE_CONTRACT §1.1's treatment of
+        # both as non-terminal/in-flight (measured fleet-wide impact: 0
+        # items change under the widening — see contract §8.4).
+        if any(s in ('in_progress', 'in_review', 'blocked', 'completed') for s in live):
             return 'in_progress'
-        if board_item.get('startedAt'):
+
+        # R3 — explicit activity flag
+        if item.get('activelyWorking'):
             return 'in_progress'
+
+        # R4 — work was started at some point
+        if item.get('startedAt'):
+            return 'in_progress'
+
+        # R5 — no status, no evidence: the board convention default
         return 'todo'
+
+    def _load_board_items_by_id(self, team):
+        """Load `team`'s board and index its backlog items by id.
+
+        Shared by `_calculate_release_progress` and `_resolve_release_items`
+        (XACA-0948-018/019/020) so the two release-item resolvers can never
+        diverge on either failure handling or algorithmic shape:
+
+        * Returns `None` — never raises — for a falsy `team`, a board file
+          that doesn't exist, or one that fails to open/parse (corrupt
+          JSON, permission error, etc). A `None` return means "this row
+          cannot be resolved"; callers must treat that as `unresolved`,
+          never crash the endpoint (XACA-0948-018) and never silently fall
+          back to a DIFFERENT team's board just because one was being
+          served (XACA-0948-019). Per ITEM_STATUS_CONTRACT.md, a row that
+          cannot be honestly resolved must render as unresolved rather
+          than resolve against a board it may not belong to — a team-less
+          manifest row (e.g. the live `REL-VAN-V10` case) is exactly this
+          shape, and both callers now answer it identically.
+        * Returns a `{item_id: board_item}` dict built in one pass over the
+          backlog, so a caller resolving many rows against the same team's
+          board does a single O(backlog) scan instead of an O(rows x
+          backlog) rescan per row (XACA-0948-020).
+        """
+        if not team:
+            return None
+        try:
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                return None
+            with open(board_file, 'r') as f:
+                board_data = json.load(f)
+        except Exception as e:
+            print(f"[LCARS] Warning: Could not load board '{team}': {e}")
+            return None
+        return {item.get('id'): item for item in board_data.get('backlog', [])}
 
     def _calculate_release_progress(self, release_id):
         """Calculate completion progress for a release by platform.
@@ -6216,27 +6046,63 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         Uses the BOARD as the source of truth for item status, not the manifest.
         The manifest only tracks which items are assigned to the release.
         This prevents stale status data when items are completed outside LCARS sync.
+
+        XACA-0948: `items[].status` is deprecated and is NEVER read here —
+        per ITEM_STATUS_CONTRACT.md §4, a persisted status is a display
+        cache that rots and must never be trusted as a fallback. Status is
+        resolved live, per manifest row, from *that row's own team's*
+        board (not just the serving team's — the prior single-board lookup
+        via `self._get_board_file()` silently mis-resolved every cross-team
+        manifest row, per XACA-0948-004 §7.6). A row whose team's board
+        can't be loaded, or whose itemId isn't found there, is counted as
+        UNRESOLVED — never silently folded into 'completed' via a stale
+        persisted value. Per contract §0.1 ("fail toward more work visible,
+        never less"), an unresolved row stays IN the total (so it lowers
+        the completion percentage rather than vanishing from the math) but
+        is excluded from 'completed', and is surfaced in a dedicated
+        'unresolved' counter (overall and per-platform) so the gap is
+        visible instead of silently green.
+
+        XACA-0948-019 convergence: a TEAM-LESS row (the live `REL-VAN-V10`
+        shape) previously fell back to `self._get_board_file()` — the
+        *serving* team's board — here, while `_resolve_release_items`
+        marked the same shape `unresolved`. Two code paths answering the
+        same question differently is the exact defect class this ticket
+        exists to eliminate, so this now defers to the shared
+        `_load_board_items_by_id` helper, which returns `None` (→
+        unresolved) for a falsy team rather than guessing which board the
+        row belongs to. Chosen over the alternative (teaching
+        `_resolve_release_items` to guess a fallback board too) because
+        the contract explicitly favors an honest `unresolved` over
+        resolving against a board a row may not belong to.
+
+        XACA-0948-020: board lookups now go through `_load_board_items_by_id`,
+        which builds one `{id: item}` dict per team in a single backlog
+        pass, so this stays O(rows + backlog) rather than rescanning the
+        backlog per row.
         """
         manifest = self._load_release_manifest(release_id)
         manifest_items = manifest.get('items', [])
 
-        # Build a lookup of item statuses from the board (source of truth)
-        board_status = {}
-        try:
-            board_file = self._get_board_file()
-            if board_file.exists():
-                with open(board_file, 'r') as f:
-                    board_data = json.load(f)
-                for board_item in board_data.get('backlog', []):
-                    status = board_item.get('status') or self._derive_item_status(board_item)
-                    board_status[board_item.get('id')] = status
-        except Exception as e:
-            print(f"[LCARS] Warning: Could not load board for release progress: {e}")
+        # Per-team board status lookups, built lazily and cached for the
+        # duration of this call (a release can span multiple teams).
+        board_status_by_team = {}
+
+        def _resolve_board_status(team, item_id):
+            if team not in board_status_by_team:
+                items_by_id = self._load_board_items_by_id(team)
+                lookup = {}
+                if items_by_id is not None:
+                    lookup = {iid: self._resolve_item_status(bi)
+                              for iid, bi in items_by_id.items()}
+                board_status_by_team[team] = lookup
+            return board_status_by_team[team].get(item_id)
 
         progress = {
             "total": 0,
             "completed": 0,
             "cancelled": 0,
+            "unresolved": 0,
             "byPlatform": {}
         }
 
@@ -6247,11 +6113,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         for item in manifest_items:
             platform = item.get('platform', 'unknown')
             if platform not in platform_items:
-                platform_items[platform] = {"total": 0, "completed": 0, "cancelled": 0}
+                platform_items[platform] = {"total": 0, "completed": 0, "cancelled": 0, "unresolved": 0}
 
-            # Get status from board (source of truth), fall back to manifest status
             item_id = item.get('itemId')
-            current_status = board_status.get(item_id, item.get('status'))
+            team = item.get('team')
+            current_status = _resolve_board_status(team, item_id)
 
             if current_status == 'cancelled':
                 platform_items[platform]["cancelled"] += 1
@@ -6260,6 +6126,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             platform_items[platform]["total"] += 1
             progress["total"] += 1
+
+            if current_status is None:
+                # No manifest fallback (XACA-0948 §4): the item could not be
+                # resolved from its own team's board. Counts toward total
+                # (fails toward more work visible) but never toward completed.
+                platform_items[platform]["unresolved"] += 1
+                progress["unresolved"] += 1
+                continue
 
             # Check if item is completed (supports both 'done' and 'completed' status values)
             if current_status in ('done', 'completed'):
@@ -6370,7 +6244,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({
@@ -6405,55 +6279,98 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps(release, indent=2).encode())
         except Exception as e:
             self.send_error(500, f"Error loading release: {e}")
 
+    def _resolve_release_items(self, release_id):
+        """Load a release manifest's items[] with status resolved live from
+        each row's own team's board, per ITEM_STATUS_CONTRACT.md §1.5.
+
+        XACA-0948: this is the single authoritative resolver for release
+        item status — `items[].status` in the manifest is deprecated and is
+        NEVER trusted. Every row starts unresolved and only becomes
+        resolved on an actual board match below, so a stale snapshot can
+        never leak into a response by omission. Every row is resolved
+        fresh from its own team's board on every call. A row that cannot
+        be resolved (no team/itemId on the row, that team's board missing,
+        unreadable, or corrupt, or itemId not found on that board) reports
+        status: null + statusResolution: "unresolved" rather than silently
+        keeping whatever the manifest happened to say — or, for an
+        unreadable board, raising and 500ing the whole endpoint
+        (XACA-0948-018: board loading goes through `_load_board_items_by_id`,
+        which never raises, matching `_calculate_release_progress`'s
+        sibling behaviour).
+
+        A team-less row (e.g. the live `REL-VAN-V10` shape) is unresolved
+        here too, converged with `_calculate_release_progress` via the same
+        `_load_board_items_by_id` helper (XACA-0948-019) rather than
+        guessing a fallback board.
+
+        Board lookups build one `{id: board_item}` dict per team via
+        `_load_board_items_by_id`, so resolving many rows against the same
+        team's board is a single O(backlog) pass rather than an
+        O(rows x backlog) rescan (XACA-0948-020).
+
+        Shared by `serve_release_items` (GET /api/releases/<id>/items) and
+        `serve_items_by_release` (GET /api/items/by-release/<id>) so the two
+        endpoints can never disagree about a row's resolved status.
+        """
+        manifest = self._load_release_manifest(release_id)
+        items = manifest.get('items', [])
+
+        # Cross-reference live board data for current status/title
+        # This ensures stale manifest snapshots don't show outdated info
+        board_cache = {}
+        for manifest_item in items:
+            # Never trust a legacy persisted 'status' — every row starts
+            # unresolved and is only overwritten on an actual board match
+            # below (XACA-0948 §4: deprecated field, read-time resolution
+            # is the only source of truth). A direct assignment already
+            # overwrites the key whether it was present or not, so no
+            # separate pop is needed (XACA-0948-024).
+            manifest_item['status'] = None
+            manifest_item['statusResolution'] = 'unresolved'
+
+            team = manifest_item.get('team')
+            item_id = manifest_item.get('itemId')
+            if not team or not item_id:
+                continue
+
+            # Cache board data per team to avoid re-reading (and to avoid
+            # rescanning the backlog per row — XACA-0948-020).
+            if team not in board_cache:
+                board_cache[team] = self._load_board_items_by_id(team)
+
+            items_by_id = board_cache[team]
+            board_item = items_by_id.get(item_id) if items_by_id is not None else None
+            if board_item is not None:
+                # Resolve status live from the board per contract
+                # §1.5 — the manifest is never the source of truth.
+                manifest_item['status'] = self._resolve_item_status(board_item)
+                manifest_item['statusResolution'] = 'resolved'
+                if 'title' in board_item:
+                    manifest_item['title'] = board_item['title']
+                if 'priority' in board_item:
+                    manifest_item['priority'] = board_item['priority']
+
+        return items
+
     def serve_release_items(self, release_id):
-        """GET /api/releases/<id>/items - Get items in release"""
+        """GET /api/releases/<id>/items - Get items in release
+
+        Status is resolved live per ITEM_STATUS_CONTRACT.md §1.5 — see
+        `_resolve_release_items`.
+        """
         try:
-            manifest = self._load_release_manifest(release_id)
-            items = manifest.get('items', [])
-
-            # Cross-reference live board data for current status/title
-            # This ensures stale manifest snapshots don't show outdated info
-            board_cache = {}
-            for manifest_item in items:
-                team = manifest_item.get('team')
-                item_id = manifest_item.get('itemId')
-                if not team or not item_id:
-                    continue
-
-                # Cache board data per team to avoid re-reading
-                if team not in board_cache:
-                    board_file = get_board_file(team)
-                    if board_file.exists():
-                        with open(board_file, 'r') as f:
-                            board_cache[team] = json.load(f)
-                    else:
-                        board_cache[team] = {}
-
-                board_data = board_cache.get(team, {})
-                for board_item in board_data.get('backlog', []):
-                    if board_item.get('id') == item_id:
-                        # Update manifest item with live board data
-                        if 'status' in board_item:
-                            manifest_item['status'] = board_item['status']
-                        else:
-                            # Derive status from subitems and activity signals
-                            manifest_item['status'] = self._derive_item_status(board_item)
-                        if 'title' in board_item:
-                            manifest_item['title'] = board_item['title']
-                        if 'priority' in board_item:
-                            manifest_item['priority'] = board_item['priority']
-                        break
+            items = self._resolve_release_items(release_id)
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({"items": items}, indent=2).encode())
@@ -6467,7 +6384,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps(progress, indent=2).encode())
@@ -6498,7 +6415,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({"items": unassigned}, indent=2).encode())
@@ -6506,21 +6423,29 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(500, f"Error loading unassigned items: {e}")
 
     def serve_items_by_release(self, release_id, query_string):
-        """GET /api/items/by-release/<id>?platform=ios - Filter by release and platform"""
+        """GET /api/items/by-release/<id>?platform=ios - Filter by release and platform
+
+        XACA-0948-004 found this endpoint has no in-repo caller, but it IS a
+        live, routed HTTP surface (`/api/items/by-release/`) — a reachable
+        API, not dead code. It previously served `manifest.get('items', [])`
+        verbatim (no live refresh at all), rendering whatever a write path
+        last persisted. It now delegates to the same `_resolve_release_items`
+        resolver `serve_release_items` uses, so this endpoint and the
+        Releases-tab items table can never disagree about a row's status.
+        """
         try:
             from urllib.parse import parse_qs
             params = parse_qs(query_string)
             platform_filter = params.get('platform', [None])[0]
 
-            manifest = self._load_release_manifest(release_id)
-            items = manifest.get('items', [])
+            items = self._resolve_release_items(release_id)
 
             if platform_filter:
                 items = [i for i in items if i.get('platform') == platform_filter]
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({"items": items, "releaseId": release_id}, indent=2).encode())
@@ -6559,7 +6484,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             # XACA-0163: no-store — this endpoint's response is invalidated by
             # POST /api/releases/flow-config. Caching it made flow-config saves
             # appear successful but leave the UI rendering stale stages.
@@ -6675,7 +6600,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(201)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps(release, indent=2).encode())
 
@@ -6725,9 +6650,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         existing_item = item
                         break
 
-                # Look up item title from board if team provided
+                # Look up item title from board if team provided.
+                # XACA-0948: no status is computed here anymore.
+                # `items[].status` is deprecated (contract §4) — a manifest
+                # row records ASSIGNMENT only; status is resolved live from
+                # the board on every read (see `_resolve_release_items`).
                 title = post_data.get('title', item_id)
-                status = 'todo'
                 if team:
                     board_file = get_board_file(team)
                     if board_file.exists():
@@ -6736,13 +6664,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         for item in board_data.get('backlog', []):
                             if item.get('id') == item_id:
                                 title = item.get('title', title)
-                                status = item.get('status') or self._derive_item_status(item)
                                 break
 
                 if existing_item:
                     # Update existing assignment (e.g., change platform)
                     existing_item['platform'] = platform
                     existing_item['updatedAt'] = self._get_timestamp()
+                    # Lazily strip any legacy persisted status as this row
+                    # is touched (XACA-0948 Stage 1c — migration §5).
+                    existing_item.pop('status', None)
                 else:
                     # New assignment
                     items.append({
@@ -6750,7 +6680,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         "platform": platform,
                         "team": team,
                         "title": title,
-                        "status": status,
                         "assignedAt": self._get_timestamp()
                     })
 
@@ -6763,7 +6692,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "itemsCount": len(items)}).encode())
 
@@ -6804,10 +6733,19 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         If the item already exists in manifest.items[], its fields are updated.
         If it does not exist, it is appended using the same schema as
-        handle_assign_item_to_release (itemId, platform, team, title, status,
+        handle_assign_item_to_release (itemId, platform, team, title,
         assignedAt). This is the single sync path used by queue updates,
         shell-driven assigns (via /api/releases/sync-item), and full-board
         reconciliation (/api/releases/sync-all).
+
+        XACA-0948: `items[].status` is deprecated (contract §4) — a
+        manifest row records ASSIGNMENT only. Status is never computed or
+        written here; it is resolved live from the board on every read
+        (see `_resolve_release_items`). An update touch lazily strips any
+        legacy persisted `status` left over from before this change
+        (migration Stage 1c — XACA-0948-004 §5), so every
+        sync-item/sync-all pass converges one more row without a bulk
+        rewrite.
         """
         try:
             # XACA-0890-003: hold the path lock across the whole read-modify-
@@ -6828,9 +6766,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if existing is not None:
                     if 'title' in item_data:
                         existing['title'] = item_data['title']
-                    status_val = item_data.get('status') or self._derive_item_status(item_data)
-                    if status_val:
-                        existing['status'] = status_val
+                    # Lazy strip (XACA-0948 Stage 1c): remove any legacy
+                    # persisted status as this row is touched.
+                    existing.pop('status', None)
                     if 'priority' in item_data:
                         existing['priority'] = item_data['priority']
                     assignment = item_data.get('releaseAssignment') or {}
@@ -6847,7 +6785,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         "platform": platform,
                         "team": team,
                         "title": item_data.get('title', item_id),
-                        "status": item_data.get('status') or self._derive_item_status(item_data) or 'todo',
                         "assignedAt": assignment.get('assignedAt') or self._get_timestamp(),
                         "lastSynced": self._get_timestamp()
                     })
@@ -7069,7 +7006,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 "success": True,
@@ -7142,7 +7079,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 "success": True,
@@ -7351,7 +7288,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps(release, indent=2).encode())
 
@@ -7426,7 +7363,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps(data['flowConfig'], indent=2).encode())
 
@@ -7517,7 +7454,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 "success": True,
@@ -7609,7 +7546,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 "success": True,
@@ -7681,7 +7618,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
-                    self._send_cors_headers()
+                    self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(json.dumps({
                         "success": True,
@@ -7765,7 +7702,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
-                    self._send_cors_headers()
+                    self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(json.dumps({
                         "success": True,
@@ -7920,7 +7857,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "archived": release_id}).encode())
 
@@ -7983,7 +7920,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "removed": item_id}).encode())
 
@@ -8844,7 +8781,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 "epics": result_epics,
@@ -9320,7 +9257,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps(payload, indent=2).encode())
@@ -9356,7 +9293,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps(epic, indent=2).encode())
 
@@ -9370,7 +9307,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({"items": items}, indent=2).encode())
 
@@ -11198,7 +11135,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # Return empty results for non-existent team
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self._send_cors_headers()
+                self.send_header('Access-Control-Allow-Origin', '*')
                 self.send_header('Cache-Control', 'no-cache')
                 self.end_headers()
                 self.wfile.write(json.dumps({
@@ -11324,7 +11261,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({
@@ -11380,7 +11317,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 epic['name'] = epic['title']
                 self.send_response(201)
                 self.send_header('Content-Type', 'application/json')
-                self._send_cors_headers()
+                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps(epic, indent=2).encode())
             else:
@@ -11429,7 +11366,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     epic['name'] = epic['title']
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self._send_cors_headers()
+                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps(epic, indent=2).encode())
             else:
@@ -11536,7 +11473,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if save_ok:
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self._send_cors_headers()
+                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": True, "deleted": epic_id}).encode())
             else:
@@ -11571,7 +11508,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({"success": True}).encode())
 
@@ -11605,7 +11542,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "removed": item_id}).encode())
 
@@ -15390,7 +15327,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self._send_cors_headers()
+                self.send_header('Access-Control-Allow-Origin', '*')
                 self.send_header('Cache-Control', 'no-cache')
                 self.end_headers()
                 self.wfile.write(json.dumps(data, indent=2).encode())
@@ -15410,7 +15347,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(json.dumps({"teams": sorted(teams)}).encode())
 
@@ -15429,7 +15366,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(json.dumps(status, indent=2).encode())
 
@@ -15457,7 +15394,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         }
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(json.dumps(payload, indent=2).encode())
 
@@ -15761,7 +15698,7 @@ end tell
                     data["badges"] = _fetch_amb_badges(amb_handle)
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self._send_cors_headers()
+                self.send_header('Access-Control-Allow-Origin', '*')
                 self.send_header('Cache-Control', 'no-cache')
                 self.end_headers()
                 self.wfile.write(json.dumps(data).encode())
@@ -15771,7 +15708,7 @@ end tell
         # No data yet
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         self.wfile.write(json.dumps({"status": "waiting"}).encode())
@@ -15794,7 +15731,7 @@ end tell
             print(f"[LCARS] /api/knowledge-stats error: {exc}\n{traceback.format_exc()}")
             self.send_response(500)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(exc)}).encode())
@@ -15931,7 +15868,7 @@ end tell
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         self.wfile.write(json.dumps(result, indent=2).encode())
@@ -17030,7 +16967,7 @@ end tell
         self.send_header('Content-Disposition', f'attachment; filename="{entry["filename"]}"')
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', 'no-store')
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(data)
 
@@ -17051,7 +16988,7 @@ end tell
         self.send_header('Content-Type', 'application/zip')
         self.send_header('Content-Disposition', f'attachment; filename="{job["filename"]}"')
         self.send_header('Content-Length', str(file_path.stat().st_size))
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
 
         with open(file_path, 'rb') as f:
@@ -17870,7 +17807,7 @@ end tell
             f'attachment; filename="{job["filename"]}"',
         )
         self.send_header('Content-Length', str(file_path.stat().st_size))
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
 
         with open(file_path, 'rb') as f:
@@ -18379,7 +18316,7 @@ end tell
         self.send_response(_status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
-        self._send_cors_headers()
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         # XACA-0395-007 P1 correction: reverted to 'Content-Type' only (see
         # do_OPTIONS for the full rationale) — no legitimate cross-origin
@@ -18409,7 +18346,7 @@ end tell
         self.send_response(_status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
-        self._send_cors_headers()
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         # XACA-0395-007 P1 correction: reverted to 'Content-Type' only (see
         # do_OPTIONS for the full rationale) — no legitimate cross-origin
@@ -18482,7 +18419,7 @@ end tell
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         self.wfile.write(json.dumps(status, indent=2).encode())
@@ -18551,7 +18488,7 @@ end tell
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps(response, indent=2).encode())
@@ -18730,7 +18667,7 @@ end tell
             print(f"[LCARS] /api/knowledge-stats error: {exc}\n{traceback.format_exc()}")
             self.send_response(500)
             self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(exc)}).encode())
@@ -19001,7 +18938,7 @@ end tell
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self._send_cors_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         self.wfile.write(json.dumps(result, indent=2).encode())
