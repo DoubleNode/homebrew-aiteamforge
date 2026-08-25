@@ -1596,6 +1596,45 @@ body.kiosk-active .kiosk-fab {
     color: var(--lcars-orange);
 }
 
+/* Persistent OFFLINE cue (XACA-0963 UX round).
+   Restores the always-visible fleet-offline signal the removed OFFLINE candy
+   pill carried. Hidden entirely while the fleet is healthy, so it costs no
+   space in the common case. */
+.lcars-data-bar .legend-pill.offline-pill {
+    background: var(--lcars-red);
+    /* White, not the black every other pill uses. Black on --lcars-red (#cc4444)
+       measures 4.48:1 — just under WCAG AA's 4.5:1 for text this size (0.65rem
+       bold is NOT "large text", so the 3:1 large-text allowance does not apply).
+       White measures 4.69:1 and passes. Rose and orange would both clear it too,
+       but they are the SOUND and ADMIN pill colours and reusing either would
+       blur what this pill means. */
+    color: var(--lcars-white);
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.lcars-data-bar .legend-pill.offline-pill[hidden] {
+    display: none;
+}
+
+/* Slow pulse so it draws the eye without behaving like a strobe. Respects
+   prefers-reduced-motion below. */
+.lcars-data-bar .legend-pill.offline-pill.offline-active {
+    animation: lcars-offline-pulse 2s ease-in-out infinite;
+}
+
+@keyframes lcars-offline-pulse {
+    0%, 100% { filter: brightness(1); }
+    50%      { filter: brightness(1.45); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .lcars-data-bar .legend-pill.offline-pill.offline-active {
+        animation: none;
+        filter: brightness(1.2);
+    }
+}
+
 /* Keyboard focus must be visible: these are divs with role="button", so they
    get no focus ring for free.
 

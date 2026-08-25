@@ -24,6 +24,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
   Also: the pills were `flex: 0 0 auto` with a fixed `min-width`, so they could not compress — and `.lcars-main`/`body` both set `overflow: hidden`. On a ~375px viewport the three-pill (ADMIN-visible) cluster needs about 212px against roughly 209px available, and the overflow would have been silently **clipped** rather than scrolled. The candy-pill layout this replaced used `flex: 1; min-width: 0` and could never overflow; the narrow-width rule now allows shrink with ellipsis, restoring that guarantee.
 
+  **Persistent OFFLINE indicator restored.** Removing the candy pills confined fleet-offline state to the OVERVIEW section's summary cards — a real glanceability loss for an ops tool, since the OFFLINE pill's red-alert cue had been visible from every section. A compact OFFLINE pill now lives in the utility cluster: hidden entirely while the fleet is healthy (so it costs no space in the common case), shown with a count and a slow pulse when machines are offline, and `prefers-reduced-motion` turns the pulse into a static brightness lift.
+
+  It is deliberately **not** routed through `updatePill()`. That function early-returns when its `.candy-pill` is absent — which is now always — so anything hung off it would silently never run. The indicator is driven from the same live `data.offlineMachines` value instead, on the same tick.
+
+  Its text is white rather than the black every other pill uses: black on `--lcars-red` (`#cc4444`) measures 4.48:1, just under WCAG AA's 4.5:1 for text this size (0.65rem bold does not qualify for the large-text allowance), while white measures 4.69:1. Rose and orange would both clear it too, but they are the SOUND and ADMIN pill colours and reusing either would blur what this pill means.
+
   Removing two sidebar buttons required **no stylesheet change at all**: XACA-0953 had just rebound the sidebar's terminating bar to `.sidebar-button + .sidebar-spacer`, and this is the first real exercise of that. Verified across all seven pages carrying a sidebar — each still draws exactly one terminator, correctly placed.
 
 - **XACA-0954 — `team_transfer` exports silently omitted most of a team while reporting success.** Consumer-visible: an export produced by `kb-team-export` / the LCARS Export panel could carry a small fraction of the team it claimed to export, and print `Zero untagged gaps` while doing it. Measured on `medical-general`: **~286KB exported of a ~30MB team**; now 31,353,333 bytes. Three independent fail-open defects:

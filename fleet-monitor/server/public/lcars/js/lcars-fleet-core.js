@@ -124,6 +124,8 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             // Pill 2: Offline machines (updates every 100ms)
             this.state.timers.push(setInterval(function() {
                 self.updatePill(2, self.formatNumber(self.data.offlineMachines, 4));
+                // Persistent utility-bar cue - independent of the dormant pill above.
+                self.updateOfflineIndicator(self.data.offlineMachines);
             }, this.intervals[2]));
 
             // Pill 3: Total sessions (updates every 200ms)
@@ -142,6 +144,32 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             }, this.intervals[5]));
         },
 
+
+        /**
+         * Update the persistent OFFLINE indicator in the utility bar.
+         *
+         * Deliberately NOT routed through updatePill(): that early-returns when
+         * its .candy-pill is absent, which is now always the case, so anything
+         * hung off it would silently never run. Driven from live data instead.
+         *
+         * @param {number} count - machines currently offline
+         */
+        updateOfflineIndicator: function(count) {
+            var el = document.getElementById('fleet-offline-indicator');
+            if (!el) return;
+
+            var n = Number(count) || 0;
+            var countEl = document.getElementById('fleet-offline-count');
+            if (countEl) countEl.textContent = String(n);
+
+            if (n > 0) {
+                el.hidden = false;
+                el.classList.add('offline-active');
+            } else {
+                el.hidden = true;
+                el.classList.remove('offline-active');
+            }
+        },
         /**
          * Update a specific candy pill
          * @param {number} index - Pill index (0-5)
