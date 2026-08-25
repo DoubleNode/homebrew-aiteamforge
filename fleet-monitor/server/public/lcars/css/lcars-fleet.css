@@ -1490,12 +1490,11 @@ body.kiosk-active .kiosk-fab {
     cursor: pointer;
     user-select: none;
     -webkit-user-select: none;
-    font-size: 0.65rem;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    flex: 0 0 auto;
-    min-width: 3.5rem;
-    justify-content: center;
+    /* NOTE: deliberately carries NO font, flex, min-width or justify-content.
+       Those were inherited from this rule's .candy-pill ancestry and, at 3
+       classes, silently outranked the 2-class base rule -- overriding the
+       uniform pill width and re-centring the label while every sibling sat in
+       the corner. Layout belongs to the base rule; this one is colour only. */
     transition:
         background-color 0.15s ease,
         opacity 0.15s ease,
@@ -1569,9 +1568,15 @@ body.kiosk-active .kiosk-fab {
     justify-content: flex-end;
     line-height: 1;
     padding: 6px 12px 3px;
-    font-size: 0.65rem;
+    /* Type matched to the Kanban's .legend-pill exactly: 12px / 600 / 1px. */
+    font-size: 12px;
     font-weight: 600;
-    letter-spacing: 0.08em;
+    letter-spacing: 1px;
+    /* Degrade gracefully rather than break the row if a label ever exceeds the
+       uniform width (e.g. a three-digit offline count). */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: var(--lcars-black);
     background: var(--lcars-tan);
     cursor: pointer;

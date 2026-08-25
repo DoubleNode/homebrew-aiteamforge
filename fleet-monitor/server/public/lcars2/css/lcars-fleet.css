@@ -1535,9 +1535,15 @@ body {
     justify-content: flex-end;
     line-height: 1;
     padding: 6px 12px 3px;
-    font-size: 0.65rem;
+    /* Type matched to the Kanban's .legend-pill exactly: 12px / 600 / 1px. */
+    font-size: 12px;
     font-weight: 600;
-    letter-spacing: 0.08em;
+    letter-spacing: 1px;
+    /* Degrade gracefully rather than break the row if a label ever exceeds the
+       uniform width. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: var(--lcars-black);
     background: var(--lcars-tan);
     cursor: pointer;
