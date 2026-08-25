@@ -387,6 +387,55 @@ _kb_jq_update() {
     return $result
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared jq status-resolution library (XACA-0948).
+#
+# Implements kanban/plans/XACA-0948/ITEM_STATUS_CONTRACT.md §1.5 (backlog-item
+# precedence) and §1.1's recursive subitem-layer rule, as jq `def`s. Prefix
+# this string onto any jq PROGRAM passed to `_kb_jq_read`/`jq` whose filter
+# calls `kb_resolve_item_status` (item, `.` = the item object) or
+# `kb_resolve_subitem_status` (subitem, `.` = the subitem object).
+#
+# Rules encoded here (see the contract for full rationale + edge-case matrix):
+#   R1 — a RECORDED status (key present, value not null, and -- after
+#        trimming whitespace -- not "") always wins verbatim, INCLUDING
+#        non-canonical tokens (backlog/pending/ongoing, §1.4) and terminal
+#        states (completed/cancelled). jq's `//` alone does not catch `""`
+#        (contract §1.1, Case O) -- that is why this is a `def`, not `//`.
+#   R2 — unrecorded + a live (non-cancelled) subitem in in_progress,
+#        in_review, blocked, or completed -> "in_progress".
+#   R3 — unrecorded + activelyWorking truthy -> "in_progress".
+#   R4 — unrecorded + startedAt present -> "in_progress".
+#   R5 — unrecorded, no evidence -> "todo" (the board-convention default).
+# Ceiling: unrecorded NEVER resolves to a terminal state (completed/
+# cancelled) or to "blocked" -- completion/cancellation/blocking are always
+# DECLARED (recorded), never inferred (contract §1.2/§1.3).
+#
+# Subitems recurse into kb_resolve_subitem_status for the SAME R1/"" handling
+# but have no evidence branch of their own (contract §1.1: subitems have no
+# subitems, so R2-R4 do not apply at that layer) -- absent/null/"" -> "todo".
+# ─────────────────────────────────────────────────────────────────────────────
+_KB_ITEM_STATUS_JQ_DEFS='
+def kb_recorded_or_null:
+  (.status) as $raw |
+  if ($raw != null) and (($raw|tostring) as $s | ($s|gsub("^[[:space:]]+|[[:space:]]+$";"")) != "") then $raw else null end;
+
+def kb_resolve_subitem_status:
+  (kb_recorded_or_null) as $rec | if $rec != null then $rec else "todo" end;
+
+def kb_resolve_item_status:
+  (kb_recorded_or_null) as $rec |
+  if $rec != null then $rec
+  else
+    ( ((.subitems // []) | map(kb_resolve_subitem_status) | map(select(. != "cancelled"))) as $live |
+      if ($live | any(. == "in_progress" or . == "in_review" or . == "blocked" or . == "completed")) then "in_progress"
+      elif (.activelyWorking // false) then "in_progress"
+      elif ((.startedAt // null) != null) then "in_progress"
+      else "todo"
+      end )
+  end;
+'
+
 # Read from board file with shared locking
 # Usage: _kb_jq_read "board_file" "jq_filter" [jq_args...]
 _kb_jq_read() {
@@ -720,7 +769,10 @@ kb-backlog() {
             item_id=$(_kb_jq_read "$board_file" ".backlog[$index].id // empty" -r)
             item_title=$(_kb_jq_read "$board_file" ".backlog[$index].title // empty" -r)
             item_priority=$(_kb_jq_read "$board_file" ".backlog[$index].priority // empty" -r)
-            item_status=$(_kb_jq_read "$board_file" ".backlog[$index].status // \"backlog\"" -r)
+            # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-backlog show).
+            # R5's board-convention default is "todo" -- not the "backlog"
+            # literal this line used to fall back to.
+            item_status=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS} .backlog[$index] | kb_resolve_item_status" -r)
             item_desc=$(_kb_jq_read "$board_file" ".backlog[$index].description // empty" -r)
             item_jira=$(_kb_jq_read "$board_file" ".backlog[$index].jiraId // empty" -r)
             item_added=$(_kb_jq_read "$board_file" ".backlog[$index].addedAt // empty" -r)
@@ -742,8 +794,9 @@ kb-backlog() {
             if [[ "$sub_count" -gt 0 ]]; then
                 echo ""
                 echo "  Subitems ($sub_count):"
+                # XACA-0948: subitem-layer resolution (ITEM_STATUS_CONTRACT.md §1.1).
                 _kb_jq_read "$board_file" \
-                    ".backlog[$index].subitems[] | \"    [\(.id // \"?\")] [\(.status | ascii_upcase | .[0:4])] \(.title)\"" -r
+                    "${_KB_ITEM_STATUS_JQ_DEFS} .backlog[$index].subitems[] | \"    [\(.id // \"?\")] [\((. | kb_resolve_subitem_status) | ascii_upcase | .[0:4])] \(.title)\"" -r
             fi
             echo ""
             ;;
@@ -925,8 +978,9 @@ kb-backlog() {
                     if [[ "$sub_count" -eq 0 ]]; then
                         echo "  (no subitems)"
                     else
+                        # XACA-0948: subitem-layer resolution (ITEM_STATUS_CONTRACT.md §1.1).
                         _kb_jq_read "$board_file" \
-                            ".backlog[$parent_idx].subitems | to_entries[] | \"  [\(.key)] [\(.value.id // \"?\")] [\(.value.status | ascii_upcase | .[0:4])] \(.value.title)\"" \
+                            "${_KB_ITEM_STATUS_JQ_DEFS} .backlog[$parent_idx].subitems | to_entries[] | \"  [\(.key)] [\(.value.id // \"?\")] [\((.value | kb_resolve_subitem_status) | ascii_upcase | .[0:4])] \(.value.title)\"" \
                             --argjson parent_idx "$parent_idx" -r
                     fi
                     ;;
@@ -1162,6 +1216,12 @@ kb-pr() {
 }
 
 # Mark the current item as done/merged.
+# XACA-0948 audit: this standalone alias-file kb-done unconditionally WRITES
+# status = "completed" -- it never READS the item's prior status (unlike the
+# richer kanban-helpers.template.sh kb-done, which captures sub_old_status
+# before an auto-complete cascade). ITEM_STATUS_CONTRACT.md governs resolving
+# an unrecorded status for READ purposes; there is no read site here for it
+# to apply to. Left as-is.
 kb-done() {
     _kb_check_jq || return 1
 

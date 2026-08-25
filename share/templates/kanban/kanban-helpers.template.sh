@@ -7562,7 +7562,8 @@ kb-pick() {
 
     # Check if item is blocked (XACA-0020)
     local item_status blocked_by
-    item_status=$(echo "$item_json" | jq -r '.status // "todo"')
+    # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-pick).
+    item_status=$(echo "$item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
     blocked_by=$(echo "$item_json" | jq -r '(.blockedBy // []) | join(", ")')
     if [[ "$item_status" == "blocked" ]] || [[ -n "$blocked_by" ]]; then
         echo "─────────────────────────────────────"
@@ -7834,7 +7835,8 @@ kb-run() {
     item_id=$(echo "$item_json" | jq -r '.id // empty')
     title=$(echo "$item_json" | jq -r '.title // empty')
     priority=$(echo "$item_json" | jq -r '.priority // "medium"')
-    item_status=$(echo "$item_json" | jq -r '.status // "todo"')
+    # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-run).
+    item_status=$(echo "$item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
 
     # Check if item is blocked (XACA-0020)
     # Check status, priority, AND blockedBy array - any of these can indicate blocked state
@@ -7881,8 +7883,13 @@ kb-run() {
             [[ -z "$blocker_id" ]] && continue
             # Check if blocker exists and is not completed
             local blocker_status
+            # XACA-0948: "unknown" is preserved ONLY for a blocker id that is
+            # not on the board at all (dangling reference) -- a genuinely
+            # different condition from "found, but no status recorded", which
+            # now resolves via ITEM_STATUS_CONTRACT.md §1.5 like every other
+            # item-status site.
             blocker_status=$(_kb_jq_read "$board_file" \
-                '.backlog[] | select(.id == $bid) | .status // "unknown"' \
+                "${_KB_ITEM_STATUS_JQ_DEFS} [.backlog[] | select(.id == \$bid)] | if length == 0 then \"unknown\" else (first | kb_resolve_item_status) end" \
                 --arg bid "$blocker_id" -r 2>/dev/null)
 
             if [[ -n "$blocker_status" ]] && [[ "$blocker_status" != "completed" ]] && [[ "$blocker_status" != "cancelled" ]]; then
@@ -8174,7 +8181,8 @@ kb-work() {
     item_id=$(echo "$item_json" | jq -r '.id // empty')
     title=$(echo "$item_json" | jq -r '.title // empty')
     priority=$(echo "$item_json" | jq -r '.priority // "medium"')
-    item_status=$(echo "$item_json" | jq -r '.status // "todo"')
+    # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-work).
+    item_status=$(echo "$item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
 
     # Check if item is blocked
     local blocked_by
@@ -8219,8 +8227,13 @@ kb-work() {
         while IFS= read -r blocker_id; do
             [[ -z "$blocker_id" ]] && continue
             local blocker_status
+            # XACA-0948: "unknown" is preserved ONLY for a blocker id that is
+            # not on the board at all (dangling reference) -- a genuinely
+            # different condition from "found, but no status recorded", which
+            # now resolves via ITEM_STATUS_CONTRACT.md §1.5 like every other
+            # item-status site.
             blocker_status=$(_kb_jq_read "$board_file" \
-                '.backlog[] | select(.id == $bid) | .status // "unknown"' \
+                "${_KB_ITEM_STATUS_JQ_DEFS} [.backlog[] | select(.id == \$bid)] | if length == 0 then \"unknown\" else (first | kb_resolve_item_status) end" \
                 --arg bid "$blocker_id" -r 2>/dev/null)
 
             if [[ -n "$blocker_status" ]] && [[ "$blocker_status" != "completed" ]] && [[ "$blocker_status" != "cancelled" ]]; then
@@ -8420,9 +8433,15 @@ _kb_reopen_item() {
     local index="$2"
     local item_id="$3"
 
-    # Read the item's current status
+    # Read the item's current status.
+    # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution. The gate below is
+    # unaffected by this change (unrecorded items can never resolve to
+    # completed/cancelled per the contract's ceiling, so this was already a
+    # behavioral no-op for the gate) -- it only fixes the early-return
+    # message, which used to print a blank "(status: )" for an unrecorded
+    # item instead of its resolved value.
     local current_status
-    current_status=$(_kb_jq_read "$board_file" ".backlog[$index].status // empty" -r)
+    current_status=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS} .backlog[$index] | kb_resolve_item_status" -r)
 
     # Only reopen completed or cancelled items
     if [[ "$current_status" != "completed" ]] && [[ "$current_status" != "cancelled" ]]; then
@@ -8657,7 +8676,8 @@ _kb_display_item_box() {
     jira_id=$(echo "$_box_item_json" | jq -r '.jiraId // empty')
     github_issue=$(echo "$_box_item_json" | jq -r '.githubIssue // empty')
     priority=$(echo "$_box_item_json" | jq -r '.priority // "medium"')
-    item_status=$(echo "$_box_item_json" | jq -r '.status // "todo"')
+    # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (_kb_display_item_box).
+    item_status=$(echo "$_box_item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
     due_date=$(echo "$_box_item_json" | jq -r '.dueDate // empty')
     tags=$(echo "$_box_item_json" | jq -r '(.tags // []) | join(", ")')
 
@@ -16209,10 +16229,14 @@ kb-epic() {
             if [[ "$item_count" -eq 0 ]]; then
                 echo "║   (no items assigned)"
             else
-                _kb_jq_read "$board_file" '
+                # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (this is a
+                # BACKLOG ITEM listing under an epic -- distinct from the
+                # epic's OWN recorded .status default in `kb-epic list` above,
+                # which XACA-0938 owns; that one is untouched here).
+                _kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS}"'
                     (.epics[$idx].itemIds // []) as $ids |
                     (.backlog // [])[] | select(.id as $id | $ids | index($id)) |
-                    "║   [\(.id)] \(.status | ascii_upcase | .[0:4]) \(.title)"
+                    "║   [\(.id)] \(kb_resolve_item_status | ascii_upcase | .[0:4]) \(.title)"
                 ' --argjson idx "$index" -r
             fi
 
