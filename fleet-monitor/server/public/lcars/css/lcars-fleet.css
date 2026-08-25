@@ -1575,7 +1575,13 @@ body.kiosk-active .kiosk-fab {
 }
 
 /* Active section — inverted, mirroring .sidebar-button.active. */
-.lcars-data-bar .legend-pill.active {
+/* The OFFLINE pill is excluded deliberately: it carries a STATUS colour
+   (green healthy / red alert) that encodes fleet state, not "which section am I
+   viewing", so the generic navigation inversion must not replace it. Written as
+   :not() rather than left to source order -- these selectors otherwise tie at
+   (0,3,0) and the status colour survived only because this rule happens to come
+   first in the file, which is one reorder away from a silent regression. */
+.lcars-data-bar .legend-pill.active:not(.offline-pill) {
     background: var(--lcars-black);
     color: var(--lcars-tan);
 }
@@ -1596,10 +1602,6 @@ body.kiosk-active .kiosk-fab {
     color: var(--lcars-orange);
 }
 
-/* Persistent OFFLINE cue (XACA-0963 UX round).
-   Restores the always-visible fleet-offline signal the removed OFFLINE candy
-   pill carried. Hidden entirely while the fleet is healthy, so it costs no
-   space in the common case. */
 /* Resting state: the fleet is healthy. The pill is ALWAYS visible with a live
    count, restoring the pre-XACA-0963 candy-pill pattern rather than appearing
    only on alert -- so there is an at-a-glance "monitoring is live" confirmation
@@ -1650,7 +1652,12 @@ body.kiosk-active .kiosk-fab {
     outline-offset: -4px;
 }
 
-.lcars-data-bar .legend-pill.active:focus-visible {
+/* Same exclusion, same reason -- and here the collision was REAL, not merely
+   order-dependent: this rule out-weighed the offline pill's own styling and
+   flipped its focus ring to cyan, measuring 1.38:1 on green and 2.78:1 on red,
+   both under the 3:1 focus-indicator minimum. The status pill keeps the black
+   ring from the base rule, which measures 17.12:1 and 4.48:1 respectively. */
+.lcars-data-bar .legend-pill.active:not(.offline-pill):focus-visible {
     outline-color: var(--lcars-cyan);
 }
 
