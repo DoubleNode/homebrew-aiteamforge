@@ -513,8 +513,6 @@ body {
 .sidebar-button[data-section="settings"] {
     background: var(--lcars-tan);
 }
-.sidebar-button[data-section="engines"] {
-}
 
 
 /* Active state - invert colors */
