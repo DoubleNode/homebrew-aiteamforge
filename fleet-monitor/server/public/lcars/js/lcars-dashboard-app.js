@@ -214,8 +214,10 @@
         if (titleMedium) titleMedium.textContent = config.name.toUpperCase() + ' OPS';
         if (titleShort) titleShort.textContent = config.name.toUpperCase();
 
-        // Show/hide ADMIN button (only for 'all' dashboard)
-        const adminBtn = document.querySelector('.sidebar-admin-btn');
+        // Show/hide the ADMIN pill (only for the 'all' dashboard).
+        // XACA-0963 moved it from the vertical sidebar into the top utility bar;
+        // the ALL-FLEET-only rule is unchanged, only the element moved.
+        const adminBtn = document.querySelector('.admin-pill');
         if (adminBtn) {
             adminBtn.style.display = (CONFIG.dashboardId === 'all') ? '' : 'none';
         }

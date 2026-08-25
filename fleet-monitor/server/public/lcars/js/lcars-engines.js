@@ -744,13 +744,9 @@
 
         console.log('[ENGINES] Initializing AI Engines UI (XACA-0281)...');
 
-        // Wire REFRESH button
-        var refreshBtn = document.getElementById('engines-refresh-btn');
-        if (refreshBtn) {
-            refreshBtn.addEventListener('click', function() {
-                LCARS_ENGINES.loadEngines();
-            });
-        }
+        // (XACA-0963) The ENGINES REFRESH button was removed from the UI; its
+        // binding went with it. The registry still reloads on section entry
+        // via loadEngines().
 
         // Wire ADD modal buttons
         var addSave   = document.getElementById('engines-add-save-btn');

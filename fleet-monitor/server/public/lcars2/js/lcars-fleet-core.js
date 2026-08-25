@@ -558,7 +558,7 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             }
 
             // Bind sidebar button clicks
-            document.querySelectorAll('.sidebar-button[data-section]').forEach(function(btn) {
+            document.querySelectorAll('.sidebar-button[data-section], .legend-pill[data-section]').forEach(function(btn) {
                 btn.addEventListener('click', function() {
                     self.switchSection(btn.dataset.section);
                 });
@@ -591,7 +591,7 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             this.saveSection(sectionName);
 
             // Update sidebar buttons
-            document.querySelectorAll('.sidebar-button[data-section]').forEach(function(btn) {
+            document.querySelectorAll('.sidebar-button[data-section], .legend-pill[data-section]').forEach(function(btn) {
                 btn.classList.toggle('active', btn.dataset.section === sectionName);
             });
 

@@ -1470,3 +1470,116 @@ body {
     max-width: 520px !important;
     width: 92% !important;
 }
+
+/* ===============================================================================
+   UTILITY BAR PILLS (XACA-0963)
+   Ported from the LCARS Kanban UI's mode bar (lcars-ui/css/lcars.css:
+   .legend-pill / .utility-cluster / .mode-bar-spacer / .mode-bar-separator) so
+   the two UIs read as one system. Scoped to .lcars-data-bar, which is the fleet
+   monitor's equivalent container.
+
+   The six metric candy pills that used to fill this bar were removed; the
+   .candy-pill rules below are deliberately KEPT because the demo/scratch pages
+   (lcars-test.html in both skins) still render them.
+   =============================================================================== */
+
+.lcars-data-bar .utility-cluster {
+    display: flex;
+    gap: 0;
+    align-items: stretch;
+    height: 100%;
+}
+
+/* Pushes the utility cluster hard right — this is what makes the bar
+   right-aligned rather than left-packed. */
+.lcars-data-bar .mode-bar-spacer {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* Purely decorative vertical tick between the empty run and the cluster. */
+.lcars-data-bar .mode-bar-separator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 8px;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.9em;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* Base pill. Negative margin-right collapses adjacent borders so touching
+   pills show a single 2px separator instead of 4px, matching the Kanban bar. */
+.lcars-data-bar .legend-pill {
+    flex: 0 0 auto;
+    min-width: 6rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 14px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--lcars-black);
+    background: var(--lcars-tan);
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    border-left: 2px solid var(--lcars-black);
+    border-right: 2px solid var(--lcars-black);
+    margin-right: -2px;
+    border-radius: 0;
+    transition:
+        background-color 0.15s ease,
+        opacity 0.15s ease,
+        filter 0.15s ease;
+}
+
+.lcars-data-bar .legend-pill:last-child {
+    margin-right: 0;
+}
+
+.lcars-data-bar .legend-pill:hover {
+    filter: brightness(1.3);
+}
+
+.lcars-data-bar .legend-pill:active {
+    filter: brightness(0.7);
+}
+
+/* Active section — inverted, mirroring .sidebar-button.active. */
+.lcars-data-bar .legend-pill.active {
+    background: var(--lcars-black);
+    color: var(--lcars-tan);
+}
+
+/* Per-pill colour. This skin has only SETTINGS — no ADMIN section, and no
+   sound engine (lcars-sound.js is never loaded here). */
+.lcars-data-bar .legend-pill[data-section="settings"] {
+    background: var(--lcars-tan);
+}
+.lcars-data-bar .legend-pill[data-section="settings"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-tan);
+}
+
+/* Keyboard focus must be visible: these are divs with role="button", so they
+   get no focus ring for free. */
+.lcars-data-bar .legend-pill:focus-visible {
+    outline: 2px solid var(--lcars-cyan);
+    outline-offset: -4px;
+}
+
+@media (max-width: 600px) {
+    .lcars-data-bar .legend-pill {
+        min-width: 4.5rem;
+        padding: 4px 8px;
+        font-size: 0.55rem;
+        letter-spacing: 0;
+    }
+    .lcars-data-bar .mode-bar-separator {
+        display: none;
+    }
+}
+

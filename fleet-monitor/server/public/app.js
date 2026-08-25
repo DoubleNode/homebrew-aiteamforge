@@ -1148,9 +1148,8 @@ document.addEventListener('DOMContentLoaded', () => {
         enginesSidebarBtn.addEventListener('click', () => loadEngines());
     }
 
-    // Refresh button
-    const refreshBtn = document.getElementById('engines-refresh-btn');
-    if (refreshBtn) refreshBtn.addEventListener('click', () => loadEngines());
+    // (XACA-0963) ENGINES REFRESH button removed; loadEngines() still
+    // runs on section entry.
 
     // Add modal
     const addSave   = document.getElementById('engines-add-save-btn');

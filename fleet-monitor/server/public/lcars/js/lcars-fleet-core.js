@@ -18,6 +18,10 @@
 window.LCARS_CORE = window.LCARS_CORE || {};
 
 (function(LCARS) {
+    // Every surface that can navigate to a section. Sidebar buttons plus the
+    // top utility-bar pills added in XACA-0963.
+    var NAV_SELECTOR = '.sidebar-button[data-section], .legend-pill[data-section]';
+
     'use strict';
 
     // =========================================================================
@@ -977,23 +981,30 @@ window.LCARS_CORE = window.LCARS_CORE || {};
                 this.switchSection('overview', true);
             }
 
-            // Bind sidebar button clicks
-            document.querySelectorAll('.sidebar-button[data-section]').forEach(function(btn) {
+            // Bind section navigation. Covers BOTH the vertical sidebar buttons and
+            // the top utility-bar pills (XACA-0963 moved SETTINGS and ADMIN up there).
+            // Anything carrying [data-section] navigates; keep this selector in sync if
+            // a third nav surface is ever added, or its buttons will render inert.
+            document.querySelectorAll(NAV_SELECTOR).forEach(function(btn) {
                 btn.addEventListener('click', function() {
                     self.switchSection(btn.dataset.section);
+                });
+                // The pills are divs with role="button", so Enter/Space must be handled
+                // explicitly - a div gets no keyboard activation for free.
+                btn.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        self.switchSection(btn.dataset.section);
+                    }
                 });
             });
 
             // Bind keyboard navigation
             this.initKeyboardNav();
 
-            // Bind refresh button
-            const refreshBtn = document.querySelector('.sidebar-button.refresh-btn');
-            if (refreshBtn) {
-                refreshBtn.addEventListener('click', function() {
-                    self.refresh();
-                });
-            }
+            // (XACA-0963) The REFRESH button was removed from the UI entirely; its
+            // click binding went with it. Refresh still fires via the 'lcars:refresh'
+            // CustomEvent dispatched by refresh(), which other code listens for.
 
             console.log('[LCARS] Section navigation initialized');
         },
@@ -1019,8 +1030,10 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             // Save to localStorage
             this.saveSection(sectionName);
 
-            // Update sidebar buttons
-            document.querySelectorAll('.sidebar-button[data-section]').forEach(function(btn) {
+            // Update nav buttons - sidebar AND top utility-bar pills (XACA-0963).
+            // Must use the same selector as the click binding above, or a pill can
+            // navigate but never show as active.
+            document.querySelectorAll(NAV_SELECTOR).forEach(function(btn) {
                 btn.classList.toggle('active', btn.dataset.section === sectionName);
             });
 
@@ -1208,16 +1221,8 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             });
             document.dispatchEvent(event);
 
-            // Visual feedback on refresh button - power surge animation
-            const btn = document.querySelector('.sidebar-button.refresh-btn');
-            if (btn) {
-                btn.classList.remove('lcars-surge'); // Reset if running
-                void btn.offsetWidth; // Force reflow
-                btn.classList.add('lcars-surge');
-                setTimeout(function() {
-                    btn.classList.remove('lcars-surge');
-                }, 500);
-            }
+            // (XACA-0963) The power-surge flourish animated the REFRESH button, which
+            // no longer exists. Removed with it rather than left querying a dead node.
         },
 
         /**

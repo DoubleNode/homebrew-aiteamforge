@@ -77,30 +77,19 @@
         <!-- ═══════════════════════════════════════════════════════════════════ -->
         <main class="lcars-main">
             <!-- Data Bar - Persistent Fleet Metrics across all sections -->
+            <!-- Utility bar - mirrors the LCARS Kanban UI's mode bar: flex spacer +
+                 separator + right-aligned utility cluster (XACA-0963).
+                 The six metric candy pills were removed; their pipeline in
+                 js/lcars-fleet-core.js is left INTACT AND DORMANT (all its
+                 .candy-pill lookups are null-safe), so the metrics can be
+                 resurfaced without rebuilding the plumbing.
+                 No SOUND or ADMIN pill here: this skin has no sound engine
+                 (lcars-sound.js is never loaded) and no admin section. -->
             <div class="lcars-data-bar">
-                <div class="candy-pill candy-blue" data-candy="0">
-                    <span class="candy-value">00000</span>
-                    <span class="candy-label">TOTAL</span>
-                </div>
-                <div class="candy-pill candy-cyan" data-candy="1">
-                    <span class="candy-value">0000</span>
-                    <span class="candy-label">ONLINE</span>
-                </div>
-                <div class="candy-pill candy-red" data-candy="2">
-                    <span class="candy-value">0000</span>
-                    <span class="candy-label">OFFLINE</span>
-                </div>
-                <div class="candy-pill candy-orange" data-candy="3">
-                    <span class="candy-value">00000</span>
-                    <span class="candy-label">SESSIONS</span>
-                </div>
-                <div class="candy-pill candy-tan" data-candy="4">
-                    <span class="candy-value">00000</span>
-                    <span class="candy-label">AUX-1</span>
-                </div>
-                <div class="candy-pill candy-peach" data-candy="5">
-                    <span class="candy-value">0000</span>
-                    <span class="candy-label">AUX-2</span>
+                <div class="mode-bar-spacer"></div>
+                <div class="mode-bar-separator">&#9482;</div>
+                <div class="utility-cluster">
+                    <div class="legend-pill" data-section="settings" role="button" tabindex="0">SETTINGS</div>
                 </div>
             </div>
 
@@ -115,9 +104,6 @@
                 </div>
                 <div class="sidebar-button" data-section="machines">
                     <span>MACHINES</span>
-                </div>
-                <div class="sidebar-button" data-section="settings">
-                    <span>SETTINGS</span>
                 </div>
                 <!-- AI ENGINES button - account registry (XACA-0540) -->
                 <!-- ENGINES is currently the last sidebar button. The black bar that
@@ -328,12 +314,6 @@
                             <code>~/.zshrc.secrets</code> remains the failover path.
                         </div>
 
-                        <!-- Controls bar -->
-                        <div style="margin-top: 15px; display: flex; justify-content: flex-end; gap: 10px;">
-                            <button class="btn-lcars btn-lcars-secondary" id="engines-refresh-btn">
-                                REFRESH
-                            </button>
-                        </div>
 
                         <!-- Engine cards container — populated by lcars-engines.js -->
                         <div id="engines-container" style="margin-top: 15px;">

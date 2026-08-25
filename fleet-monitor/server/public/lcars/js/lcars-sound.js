@@ -369,6 +369,7 @@
             target.closest('[data-category]') ||
             target.closest('[data-tag]') ||
             target.closest('.candy-pill:not([data-candy])') ||  // Fleet Monitor: interactive pills only — metric display pills carry data-candy (XACA-0533 review)
+            target.closest('.legend-pill') ||                   // XACA-0963: utility-bar pills (SETTINGS/ADMIN/SOUND) are .legend-pill, not .candy-pill
             target.closest('#sound-toggle')
         ) {
             // sound-toggle is handled by toggleMute directly; skip double-play

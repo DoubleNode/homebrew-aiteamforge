@@ -86,37 +86,28 @@
         <!-- ═══════════════════════════════════════════════════════════════════ -->
         <main class="lcars-main">
             <!-- Data Bar - Persistent Fleet Metrics across all sections -->
+            <!-- Utility bar - mirrors the LCARS Kanban UI's mode bar (lcars-ui/index.html):
+                 flex spacer + separator + right-aligned utility cluster.
+                 The six metric candy pills (TOTAL/ONLINE/OFFLINE/SESSIONS/AUX-1/AUX-2) were
+                 removed in XACA-0963. Their data pipeline in js/lcars-fleet-core.js is left
+                 INTACT AND DORMANT on purpose: every one of its six .candy-pill lookups is
+                 null-safe, so it no-ops with the markup gone and the metrics can be
+                 resurfaced without rebuilding the plumbing. Do not delete that code. -->
             <div class="lcars-data-bar">
-                <div class="candy-pill candy-blue" data-candy="0">
-                    <span class="candy-value">00000</span>
-                    <span class="candy-label">TOTAL</span>
-                </div>
-                <div class="candy-pill candy-cyan" data-candy="1">
-                    <span class="candy-value">0000</span>
-                    <span class="candy-label">ONLINE</span>
-                </div>
-                <div class="candy-pill candy-red" data-candy="2">
-                    <span class="candy-value">0000</span>
-                    <span class="candy-label">OFFLINE</span>
-                </div>
-                <div class="candy-pill candy-orange" data-candy="3">
-                    <span class="candy-value">00000</span>
-                    <span class="candy-label">SESSIONS</span>
-                </div>
-                <div class="candy-pill candy-tan" data-candy="4">
-                    <span class="candy-value">00000</span>
-                    <span class="candy-label">AUX-1</span>
-                </div>
-                <div class="candy-pill candy-peach" data-candy="5">
-                    <span class="candy-value">0000</span>
-                    <span class="candy-label">AUX-2</span>
-                </div>
-                <!-- Sound mute toggle pill (XACA-0533) — engine requires id="sound-toggle" + #sound-status child -->
-                <div class="candy-pill sound-pill" id="sound-toggle" role="button" tabindex="0"
-                     aria-label="Toggle interface sounds" aria-pressed="false"
-                     onclick="LCARSSound.toggleMute()"
-                     onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();LCARSSound.toggleMute()}">
-                    <span id="sound-status">SOUND</span>
+                <div class="mode-bar-spacer"></div>
+                <div class="mode-bar-separator">&#9482;</div>
+                <div class="utility-cluster">
+                    <div class="legend-pill" data-section="settings" role="button" tabindex="0">SETTINGS</div>
+                    <!-- ADMIN pill - only shown for ALL FLEET dashboard (gated in js/lcars-dashboard-app.js) -->
+                    <div class="legend-pill admin-pill" data-section="admin" style="display: none;" role="button" tabindex="0">ADMIN</div>
+                    <!-- Sound mute toggle (XACA-0533) - engine binds by id: requires id="sound-toggle"
+                         plus a #sound-status child. Renaming either breaks mute state silently. -->
+                    <div class="legend-pill sound-pill" id="sound-toggle" role="button" tabindex="0"
+                         aria-label="Toggle interface sounds" aria-pressed="false"
+                         onclick="LCARSSound.toggleMute()"
+                         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();LCARSSound.toggleMute()}">
+                        <span id="sound-status">SOUND</span>
+                    </div>
                 </div>
             </div>
 
@@ -135,15 +126,9 @@
                 <div class="sidebar-button" data-section="analytics">
                     <span>ANALYTICS</span>
                 </div>
-                <div class="sidebar-button" data-section="settings">
-                    <span>SETTINGS</span>
-                </div>
-                <!-- ADMIN button - only shown for ALL FLEET dashboard -->
-                <div class="sidebar-button sidebar-admin-btn" data-section="admin" style="display: none;">
-                    <span>ADMIN</span>
-                </div>
                 <!-- AI ENGINES button - account registry (XACA-0281) -->
-                <!-- ENGINES is currently the last sidebar button. The black bar that
+                <!-- ENGINES is the last sidebar button (SETTINGS and ADMIN moved to the
+                     top utility bar in XACA-0963). The black bar that
                      closes the button stack is drawn by the adjacent .sidebar-spacer
                      (".sidebar-button + .sidebar-spacer" in css/lcars-fleet.css), NOT by
                      this button — so appending a new button below this one needs NO
@@ -173,9 +158,6 @@
                     <div class="loading-text" style="padding: 10px; font-size: 11px; color: var(--lcars-tan);">Loading...</div>
                 </div>
                 <div class="sidebar-spacer"></div>
-                <div class="sidebar-button refresh-btn">
-                    <span>REFRESH</span>
-                </div>
             </nav>
 
             <!-- Content Area -->
@@ -532,12 +514,6 @@
                             <code>~/.zshrc.secrets</code> remains the failover path.
                         </div>
 
-                        <!-- Controls bar -->
-                        <div style="margin-top: 15px; display: flex; justify-content: flex-end; gap: 10px;">
-                            <button class="btn-lcars btn-lcars-secondary" id="engines-refresh-btn">
-                                REFRESH
-                            </button>
-                        </div>
 
                         <!-- Engine cards container — populated by lcars-engines.js -->
                         <div id="engines-container" style="margin-top: 15px;">

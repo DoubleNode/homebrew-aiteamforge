@@ -634,14 +634,6 @@ body.kiosk-active .kiosk-fab {
     display: none !important;
 }
 
-/* Refresh button */
-.sidebar-button.refresh-btn {
-    background: var(--lcars-cyan);
-    color: var(--lcars-black);
-    font-weight: 700;
-    margin-bottom: 16px;
-    border-bottom: 2px solid var(--lcars-black);
-}
 
 /* -------------------------------------------------------------------------------
    SECTION 10: CONTENT AREA
@@ -965,13 +957,6 @@ body.kiosk-active .kiosk-fab {
 
 /* Tablet (iPad) - fixed refresh with padding for dashboard visibility */
 @media (max-width: 1200px) {
-    .sidebar-button.refresh-btn {
-        position: fixed;
-        bottom: 0px;
-        left: 10px;
-        width: var(--sidebar-width);
-        z-index: 100;
-    }
 
     /* Ensure dashboard buttons visible above fixed refresh button */
     .lcars-sidebar {
@@ -995,13 +980,6 @@ body.kiosk-active .kiosk-fab {
         padding: 10px;
     }
 
-    .sidebar-button.refresh-btn {
-        position: fixed;
-        bottom: 0px;
-        left: 10px;
-        width: 150px;
-        z-index: 100;
-    }
 }
 
 @media (max-width: 600px) {
@@ -1155,15 +1133,6 @@ body.kiosk-active .kiosk-fab {
         border-top-width: 1px;
     }
 
-    .sidebar-button.refresh-btn {
-        position: fixed;
-        bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
-        left: 10px;
-        width: var(--sidebar-width);
-        z-index: 100;
-        margin-bottom: 0;
-        border-bottom: 1px solid var(--lcars-black);
-    }
 }
 
 /* -------------------------------------------------------------------------------
@@ -1498,7 +1467,7 @@ body.kiosk-active .kiosk-fab {
    Engine requires #sound-toggle (outer) + #sound-status (inner span).
    ============================================================================ */
 
-.lcars-data-bar .candy-pill.sound-pill {
+.lcars-data-bar .legend-pill.sound-pill {
     background: var(--lcars-rose);
     cursor: pointer;
     user-select: none;
@@ -1515,15 +1484,133 @@ body.kiosk-active .kiosk-fab {
         filter 0.15s ease;
 }
 
-.lcars-data-bar .candy-pill.sound-pill:hover {
+.lcars-data-bar .legend-pill.sound-pill:hover {
     filter: brightness(1.3);
 }
 
-.lcars-data-bar .candy-pill.sound-pill:active {
+.lcars-data-bar .legend-pill.sound-pill:active {
     filter: brightness(0.7);
 }
 
 /* Muted state — dim the pill so state is visually obvious */
-.lcars-data-bar .candy-pill.sound-pill.sound-muted {
+.lcars-data-bar .legend-pill.sound-pill.sound-muted {
     opacity: 0.4;
+}
+
+/* ===============================================================================
+   UTILITY BAR PILLS (XACA-0963)
+   Ported from the LCARS Kanban UI's mode bar (lcars-ui/css/lcars.css:
+   .legend-pill / .utility-cluster / .mode-bar-spacer / .mode-bar-separator) so
+   the two UIs read as one system. Scoped to .lcars-data-bar, which is the fleet
+   monitor's equivalent container.
+
+   The six metric candy pills that used to fill this bar were removed; the
+   .candy-pill rules below are deliberately KEPT because the demo/scratch pages
+   (lcars-test.html in both skins) still render them.
+   =============================================================================== */
+
+.lcars-data-bar .utility-cluster {
+    display: flex;
+    gap: 0;
+    align-items: stretch;
+    height: 100%;
+}
+
+/* Pushes the utility cluster hard right — this is what makes the bar
+   right-aligned rather than left-packed. */
+.lcars-data-bar .mode-bar-spacer {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* Purely decorative vertical tick between the empty run and the cluster. */
+.lcars-data-bar .mode-bar-separator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 8px;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.9em;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* Base pill. Negative margin-right collapses adjacent borders so touching
+   pills show a single 2px separator instead of 4px, matching the Kanban bar. */
+.lcars-data-bar .legend-pill {
+    flex: 0 0 auto;
+    min-width: 6rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 14px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--lcars-black);
+    background: var(--lcars-tan);
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    border-left: 2px solid var(--lcars-black);
+    border-right: 2px solid var(--lcars-black);
+    margin-right: -2px;
+    border-radius: 0;
+    transition:
+        background-color 0.15s ease,
+        opacity 0.15s ease,
+        filter 0.15s ease;
+}
+
+.lcars-data-bar .legend-pill:last-child {
+    margin-right: 0;
+}
+
+.lcars-data-bar .legend-pill:hover {
+    filter: brightness(1.3);
+}
+
+.lcars-data-bar .legend-pill:active {
+    filter: brightness(0.7);
+}
+
+/* Active section — inverted, mirroring .sidebar-button.active. */
+.lcars-data-bar .legend-pill.active {
+    background: var(--lcars-black);
+    color: var(--lcars-tan);
+}
+
+/* Per-pill colours, matching the sections they open. */
+.lcars-data-bar .legend-pill[data-section="settings"] {
+    background: var(--lcars-tan);
+}
+.lcars-data-bar .legend-pill[data-section="settings"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-tan);
+}
+.lcars-data-bar .legend-pill[data-section="admin"] {
+    background: var(--lcars-orange);
+}
+.lcars-data-bar .legend-pill[data-section="admin"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-orange);
+}
+
+/* Keyboard focus must be visible: these are divs with role="button", so they
+   get no focus ring for free. */
+.lcars-data-bar .legend-pill:focus-visible {
+    outline: 2px solid var(--lcars-cyan);
+    outline-offset: -4px;
+}
+
+@media (max-width: 600px) {
+    .lcars-data-bar .legend-pill {
+        min-width: 4.5rem;
+        padding: 4px 8px;
+        font-size: 0.55rem;
+        letter-spacing: 0;
+    }
+    .lcars-data-bar .mode-bar-separator {
+        display: none;
+    }
 }
