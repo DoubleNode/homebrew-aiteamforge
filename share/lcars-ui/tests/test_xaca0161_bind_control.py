@@ -249,6 +249,17 @@ class TestAllInterfacesEscapeHatch(BindControlTestBase):
         self.assertIn("WARNING", output)
         self.assertIn("ALL INTERFACES", output)
 
+    def test_all_mode_with_confirmation_prints_a_posture_line(self):
+        """XACA-0397-019: docs/homebrew-tap/LCARS-NETWORK-BINDING.md claims
+        every mode prints a `posture:` line an operator can grep — this is
+        the widest, most dangerous mode, and it must not be the one silent
+        exception."""
+        os.environ["LCARS_BIND_MODE"] = "all"
+        os.environ["LCARS_BIND_ALLOW_ALL_INTERFACES"] = "1"
+        _, output = self.resolve()
+        self.assertIn("posture:", output)
+        self.assertIn("mode=all", output)
+
     def test_confirmation_alone_does_not_widen_the_default(self):
         """The confirmation flag is inert unless mode=all is also set."""
         os.environ["LCARS_BIND_ALLOW_ALL_INTERFACES"] = "1"
@@ -391,7 +402,20 @@ class TestAggregateDetectionDeadline(unittest.TestCase):
     """
 
     def test_deadline_stops_further_subprocess_calls_once_exhausted(self):
-        call_timeouts = []
+        """XACA-0397-018/022: a COMBINED threshold across both phases cannot
+        detect a regression confined to just one of them. Measured on this
+        same fake clock: the shipped code (both phases' early-breaks intact)
+        makes 2 combined calls; a mutant with ONLY the CLI phase's
+        `if remaining <= 0: break` removed (interface-scan's break left
+        intact) makes 4 combined calls — still under the old `< 6` bound, so
+        that assertion passed over the regression. Tracking and asserting
+        the CLI phase's own call count, independent of whatever the
+        interface-scan phase does afterward, closes that gap: 2 (shipped)
+        vs. 4 (mutant), where there are only 4 CLI candidates total, so a
+        mutant that lets the CLI loop run unchecked hits every one of them.
+        """
+        cli_call_timeouts = []
+        iface_call_timeouts = []
         # Fake monotonic clock: starts at 0, advances 3s on every read. An
         # 8s budget / 3s per read exhausts partway through the CLI phase,
         # well before all 6 real candidates (4 CLI + 2 interface-scan
@@ -403,7 +427,10 @@ class TestAggregateDetectionDeadline(unittest.TestCase):
             return state["t"]
 
         def fake_run(cmd, **kwargs):
-            call_timeouts.append(kwargs.get("timeout"))
+            if cmd and cmd[0] in server._TAILSCALE_BINARY_CANDIDATES:
+                cli_call_timeouts.append(kwargs.get("timeout"))
+            else:
+                iface_call_timeouts.append(kwargs.get("timeout"))
             raise Exception("simulated: tailscale unreachable")
 
         with patch.object(server.os.path, "exists", return_value=True):
@@ -412,10 +439,21 @@ class TestAggregateDetectionDeadline(unittest.TestCase):
                     result = server._lcars_detect_tailscale_ipv4()
 
         self.assertIsNone(result)
-        # Without the aggregate cap this would be 6. The shared deadline
-        # must cut it short well before every candidate is exhausted.
+        # There are exactly 4 CLI candidates (_TAILSCALE_BINARY_CANDIDATES).
+        # Asserted on the CLI phase ALONE — not combined with the
+        # interface-scan phase's count — so a regression that only strips
+        # the CLI phase's own early-break cannot hide behind the other
+        # phase's break still being intact.
         self.assertLess(
-            len(call_timeouts), 6,
+            len(cli_call_timeouts), 4,
+            "the CLI phase's own early-break did not stop it mid-loop — "
+            "asserting on its count alone (not the combined total) is what "
+            "catches this regression",
+        )
+        # Sanity check retained: without ANY aggregate cap at all this would
+        # be 6 (4 CLI + 2 interface-scan).
+        self.assertLess(
+            len(cli_call_timeouts) + len(iface_call_timeouts), 6,
             "aggregate deadline did not stop the detection phases early",
         )
 
@@ -560,16 +598,72 @@ class TestServeForeverPartialBindCleanup(unittest.TestCase):
     PORT = 8902  # throwaway port, per XACA-0397 task instructions (8901-8903)
 
     def test_partial_bind_failure_exits_nonzero_and_frees_the_port(self):
+        """XACA-0397-021: the port-rebind probe alone does not structurally
+        prove server_close() ran — CPython's refcount-based GC closes the
+        orphaned socket's underlying fd as soon as the local `servers` list
+        inside _lcars_serve_forever_on drops out of scope (which
+        unittest.assertRaises' SystemExit handling does immediately), so a
+        mutant that deletes the `finally: srv.server_close()` block still
+        leaves the port re-bindable and this test green.
+
+        Fix: spy on LCARSServer.server_close (inherited from
+        socketserver.TCPServer — patched via patch.object so the spy is
+        restored afterward) so the assertion is on whether the *method* was
+        actually invoked by the code, not on the port's eventual
+        rebindability. The spy still forwards to the real implementation, so
+        the socket genuinely closes and the port-rebind probe keeps working
+        as a secondary, behavioural check.
+        """
+        original_init = server.LCARSServer.__init__
+        original_server_close = server.LCARSServer.server_close
+        constructed = []
+        close_calls = []
+
+        def spy_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            # Only reached if original_init returned normally — a failed
+            # bind raises out of it, so this records ONLY the
+            # successfully-bound-and-activated instance.
+            constructed.append(self)
+
+        def spy_server_close(self):
+            close_calls.append(self)
+            return original_server_close(self)
+
         out = io.StringIO()
-        with patch.object(sys, "stderr", out):
-            with self.assertRaises(SystemExit) as ctx:
-                server._lcars_serve_forever_on(["127.0.0.1", "127.0.0.1"], self.PORT)
+        with patch.object(server.LCARSServer, "__init__", spy_init):
+            with patch.object(server.LCARSServer, "server_close", spy_server_close):
+                with patch.object(sys, "stderr", out):
+                    with self.assertRaises(SystemExit) as ctx:
+                        server._lcars_serve_forever_on(["127.0.0.1", "127.0.0.1"], self.PORT)
         self.assertNotEqual(ctx.exception.code, 0)
         self.assertIn("FATAL", out.getvalue())
 
-        # No leaked listener: the port must be immediately re-bindable. If
-        # the first, successfully-opened server were never closed, this
-        # bind would itself raise "Address already in use".
+        # Exactly one host successfully bound — the second raises
+        # EADDRINUSE during construction, before it is ever appended to
+        # _lcars_serve_forever_on's own `servers` list.
+        self.assertEqual(len(constructed), 1)
+
+        # Structural: that successfully-opened server's server_close() must
+        # actually have been invoked by the code's own cleanup path. (There
+        # may be a SECOND, unrelated server_close() call recorded here too —
+        # stdlib's own TCPServer.__init__ calls self.server_close() on the
+        # second, FAILED instance as part of its own internal exception
+        # cleanup; that is not what this test is about, hence checking
+        # membership on the successful instance specifically rather than a
+        # bare call count.)
+        self.assertIn(
+            constructed[0], close_calls,
+            "server_close() was not called on the successfully-opened "
+            "server — a bare port-rebind probe cannot tell this apart from "
+            "CPython's GC finalizer closing the orphaned socket once the "
+            "SystemExit severs the traceback",
+        )
+
+        # Behavioural check retained: no leaked listener, the port must be
+        # immediately re-bindable. If the first, successfully-opened server
+        # were never closed, this bind would itself raise "Address already
+        # in use".
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             probe.bind(("127.0.0.1", self.PORT))

@@ -19420,6 +19420,18 @@ def resolve_bind_addresses_or_die():
             file=sys.stderr,
             flush=True,
         )
+        # XACA-0397-019: every OTHER mode prints a `posture:` line (see
+        # loopback/auto/tailscale below) so an operator can `grep
+        # '\[LCARS\]\[bind\]'` a log and see exactly what's listening — but
+        # this branch returned before ever emitting one, leaving the widest
+        # and most dangerous mode the one NOT covered by that grep. Matches
+        # the other posture lines' format; routed to stderr like the WARNING
+        # banner above it and the other three posture lines (XACA-0397-010).
+        print(
+            "[LCARS][bind] posture: mode=all listening=0.0.0.0 (all interfaces)",
+            file=sys.stderr,
+            flush=True,
+        )
         return [""]
 
     hosts = [_LCARS_LOOPBACK_HOST]

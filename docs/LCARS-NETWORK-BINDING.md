@@ -107,7 +107,7 @@ everyone else on the LAN.
 3. Confirm the bind posture in the server's own log — every mode prints a
    `[LCARS][bind] posture: ...` line naming exactly what it's listening on:
    ```bash
-   tail -20 ~/aiteamforge/logs/lcars-<team>.log | grep '\[LCARS\]\[bind\]'
+   tail -20 ~/aiteamforge/logs/lcars-server-<team>.log | grep '\[LCARS\]\[bind\]'
    ```
 4. From the other machine, browse to
    `http://<hosting-machine's-tailscale-name-or-ip>:<port>` — the same
