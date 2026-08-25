@@ -19121,183 +19121,6 @@ def validate_lcars_team_or_die() -> None:
     sys.exit(1)
 
 
-# XACA-0889-003: the lcars-health-check.sh watchdog (and any browser/curl
-# caller that navigates away mid-response) disconnects with a short
-# --max-time. On a stdlib http.server, that surfaces as a BrokenPipeError /
-# ConnectionResetError raised from inside a do_GET/do_POST handler's
-# self.wfile.write() (or from the implicit self.wfile.flush() that
-# BaseHTTPRequestHandler.handle_one_request() runs after every do_* call).
-# That exception is NOT caught anywhere in http.server or socketserver's
-# per-request dispatch — it propagates out of the request-handler instance's
-# handle() through BaseRequestHandler.__init__(), and is only ever caught by
-# socketserver.BaseServer's own request-processing wrapper, which calls
-# self.handle_error(request, client_address) before discarding the request.
-# This holds for BOTH the single-threaded TCPServer path
-# (BaseServer._handle_request_noblock's `except Exception: self.handle_error(...)`)
-# and the threaded path (ThreadingMixIn.process_request_thread's identical
-# `except Exception: self.handle_error(...)`) — confirmed against the
-# installed stdlib (see subitem verification notes). So a SERVER-level
-# handle_error() override is sufficient on its own to quiet a disconnect
-# raised from anywhere in a handler, including its write path; no separate
-# guarding of self.wfile.write()/do_GET is needed.
-#
-# Default BaseServer.handle_error() prints a ~40-line traceback to stderr for
-# EVERY exception, including these expected, benign disconnects — that's the
-# flood XACA-0889 is about. This mixin narrows that to a single log line for
-# exactly three client-disconnect exceptions and leaves every other
-# exception's full traceback completely intact by delegating to
-# super().handle_error(), so a real server bug is never silently swallowed.
-#
-# ConnectionAbortedError is included alongside BrokenPipeError/
-# ConnectionResetError because it's the same family of "the peer went away"
-# OSError subclasses a request can raise mid-write (e.g. Windows-style abort,
-# or a client closing before reading the full response) — none of the three
-# indicate a server-side bug, and all three are silent-to-the-client by
-# nature (there is no one left to send an error response to).
-class LCARSQuietDisconnectMixin:
-    """Server-class mixin: quiet client-disconnect exceptions in handle_error().
-
-    Compose this ahead of the actual server base class so its handle_error()
-    wins the MRO, e.g.:
-
-        class LCARSServer(LCARSQuietDisconnectMixin, http.server.ThreadingHTTPServer):
-            pass
-
-    XACA-0890-004: LCARSServer now composes this mixin ahead of
-    http.server.ThreadingHTTPServer (see below) — mixin stays FIRST in the
-    bases tuple so handle_error() still wins the MRO after the base swap.
-    Do not re-implement handle_error() separately — the swallow logic must
-    stay in exactly one place.
-    """
-
-    _QUIET_DISCONNECT_EXCEPTIONS = (
-        BrokenPipeError,
-        ConnectionResetError,
-        ConnectionAbortedError,
-    )
-
-    def handle_error(self, request, client_address):
-        exc = sys.exc_info()[1]
-        if isinstance(exc, self._QUIET_DISCONNECT_EXCEPTIONS):
-            # One concise line instead of the ~40-line traceback flood —
-            # still enough to correlate against log volume if needed.
-            print(
-                f"[LCARS] client disconnected mid-response "
-                f"({type(exc).__name__}) from {client_address}",
-                file=sys.stderr,
-            )
-            return
-        # Anything else is a real bug: preserve stock behaviour (full
-        # traceback to stderr) unmodified.
-        super().handle_error(request, client_address)
-
-
-class LCARSServer(LCARSQuietDisconnectMixin, http.server.ThreadingHTTPServer):
-    """The concrete server class main() binds.
-
-    Mixin first so LCARSQuietDisconnectMixin.handle_error() wins the MRO —
-    ThreadingHTTPServer/socketserver.BaseServer sits later in the MRO, so if
-    the mixin were ever moved out of first position, handle_error() would
-    resolve to the stdlib implementation instead and the BrokenPipeError
-    suppression XACA-0889 added would silently stop working (no crash, no
-    warning — the ~40-line traceback flood would just come back).
-
-    XACA-0889-018: allow_reuse_address is set HERE rather than by mutating
-    socketserver.TCPServer.allow_reuse_address globally. The global form
-    silently changed the default for every other TCPServer subclass in the
-    process — a side effect well outside what this server needs.
-
-    XACA-0890-004: base swapped from socketserver.TCPServer to
-    http.server.ThreadingHTTPServer (qualified form, matching the
-    socketserver.TCPServer style this replaced — coordinated with the test
-    harness, which resolves the base class by name), so one slow request no
-    longer blocks every other client. This was deliberately withheld from
-    XACA-0889 until the ~12 unlocked read-modify-write _atomic_write_json
-    call sites it identified were fixed (XACA-0890-002/003, via the
-    _get_path_lock registry, later widened to 14 sites and a proper
-    load-mutate-save transaction primitive by the review-gate fix — see
-    _board_write_transaction) — swapping the base first would have turned a
-    latent single-threaded-only-safe race into a live lost-update bug on
-    every one of those sites.
-
-    XACA-0890 review-gate finding (017) on `daemon_threads = True` below:
-    this line is REDUNDANT — http.server.ThreadingHTTPServer already sets
-    daemon_threads = True as its own class attribute (verified directly:
-    `http.server.ThreadingHTTPServer.__dict__['daemon_threads']` is True,
-    overriding ThreadingMixIn's own default of False). Kept explicit anyway,
-    deliberately, for readability: a reader of THIS class should not have to
-    walk the MRO to know its threads are daemons.
-
-    daemon_threads = True has a real, non-cosmetic consequence worth
-    documenting where a future reader will find it: socketserver's
-    `_Threads.append()` skips adding a thread to server_close()'s tracked
-    list the instant `thread.daemon` is True —
-        def append(self, thread):
-            self.reap()
-            if thread.daemon:
-                return          # <- never tracked, never joined
-            super().append(thread)
-    — so `server_close()`'s `self._threads.join()` waits for NOTHING.
-    Concretely: a SIGTERM/graceful shutdown that lands while a request
-    thread is mid-way through a multi-file handler (e.g.
-    handle_link_cr_to_release, which writes cr_board_file, THEN separately
-    writes board_file, THEN the release manifest) can abandon that thread
-    between writes, leaving the CR side updated but the release side not
-    yet (or vice versa) — a genuinely reachable half-applied state that the
-    old single-threaded server's shutdown() naturally avoided (it only ever
-    stops ACCEPTING new connections; the one in-flight request, on the main
-    thread, always ran to completion first).
-
-    Deliberately NOT flipped to daemon_threads = False here. Doing so would
-    make server_close() actually wait for in-flight threads — but a
-    non-daemon thread blocks process exit until it finishes, and this
-    server does not yet bound every handler's worst-case duration. The
-    known offender is handle_trigger_calendar_sync (review-gate finding
-    021, fixed in this same change — see its comment): before that fix it
-    held board_file's lock across un-timeout'd external CalDAV/Google
-    network calls, so a hung network call under daemon_threads = False
-    would have made a graceful SIGTERM hang the WHOLE PROCESS indefinitely
-    instead of merely risking one half-applied multi-file write — a worse
-    failure mode than the one being traded away. Flipping this default is a
-    reasonable follow-up once every handler's external-call worst case is
-    bounded (021 fixes the one identified instance; an exhaustive audit for
-    others is out of scope here).
-
-    XACA-0890 review-gate finding (020) — unbounded thread creation, no cap,
-    server binds all interfaces. Judged OUT OF SCOPE for this fix, with
-    reasoning (not a silent skip — see the ticket's protected [Review]
-    subitem 020 for the finding as filed):
-
-    - "Binds all interfaces": `("", port)` at the `with LCARSServer(...)`
-      call site in main() is PRE-EXISTING — the old socketserver.TCPServer
-      used the identical bind spec. Not a regression from this ticket, and
-      almost certainly intentional: this fleet runs LCARS instances across
-      multiple machines (see docs/ referencing M1Pro/M4Mini/fleet-monitor)
-      with cross-machine dashboard access as a real, used feature. Changing
-      the bind address is a product decision, not a threading-safety fix,
-      and not mine to make unilaterally here.
-    - "Unbounded thread creation per connection, no cap": this IS a real
-      consequence of XACA-0890-004's base swap — the old single-threaded
-      server had an implicit cap of 1 concurrent request; ThreadingHTTPServer
-      spawns a new OS thread per accepted connection with no ceiling, so a
-      client opening many connections rapidly can spawn proportionally many
-      threads (each costing stack memory + a file descriptor) with nothing
-      in this class stopping it. A properly-sized fix (bounded worker pool,
-      or a semaphore around process_request) needs real capacity planning —
-      how many concurrent requests this server's actual usage pattern
-      (teams x browser tabs x background collectors) needs headroom for —
-      that I do not have visibility into and should not guess at under
-      review-gate time pressure: sized too low, legitimate concurrent
-      dashboard usage starts queueing/failing, which is a worse regression
-      than the DoS exposure being fixed; sized too high, it fixes nothing.
-      Left as a follow-up requiring that capacity-planning input, not
-      bundled into this fix.
-    """
-
-    allow_reuse_address = True
-    daemon_threads = True
-
-
 # ===================================================================== #
 # XACA-0161-006 — network-layer bind control                            #
 # --------------------------------------------------------------------- #
@@ -19502,6 +19325,7 @@ def resolve_bind_addresses_or_die():
     if mode == "loopback":
         print(
             f"[LCARS][bind] posture: mode=loopback listening={_LCARS_LOOPBACK_HOST}",
+            file=sys.stderr,
             flush=True,
         )
         return hosts
@@ -19553,6 +19377,7 @@ def resolve_bind_addresses_or_die():
         )
         print(
             f"[LCARS][bind] posture: mode={mode} listening={_LCARS_LOOPBACK_HOST}",
+            file=sys.stderr,
             flush=True,
         )
         return hosts
@@ -19561,6 +19386,7 @@ def resolve_bind_addresses_or_die():
     print(
         f"[LCARS][bind] posture: mode={mode} listening={','.join(hosts)} "
         f"(tailscale-ip {source})",
+        file=sys.stderr,
         flush=True,
     )
     return hosts
@@ -19588,7 +19414,11 @@ def _lcars_serve_forever_on(bind_hosts, port):
             except OSError as exc:
                 print(
                     f"[LCARS][bind] FATAL: could not bind "
-                    f"{host or '0.0.0.0'}:{port} — {exc}",
+                    f"{host or '0.0.0.0'}:{port} — {exc}\n"
+                    f"[LCARS][bind] Something else is already listening on "
+                    f"that port. Find it with `lsof -nP -iTCP:{port} "
+                    f"-sTCP:LISTEN`, stop it, or start LCARS on a different "
+                    f"port.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
@@ -19612,6 +19442,183 @@ def _lcars_serve_forever_on(bind_hosts, port):
         for srv in servers:
             with contextlib.suppress(Exception):
                 srv.server_close()
+
+
+# XACA-0889-003: the lcars-health-check.sh watchdog (and any browser/curl
+# caller that navigates away mid-response) disconnects with a short
+# --max-time. On a stdlib http.server, that surfaces as a BrokenPipeError /
+# ConnectionResetError raised from inside a do_GET/do_POST handler's
+# self.wfile.write() (or from the implicit self.wfile.flush() that
+# BaseHTTPRequestHandler.handle_one_request() runs after every do_* call).
+# That exception is NOT caught anywhere in http.server or socketserver's
+# per-request dispatch — it propagates out of the request-handler instance's
+# handle() through BaseRequestHandler.__init__(), and is only ever caught by
+# socketserver.BaseServer's own request-processing wrapper, which calls
+# self.handle_error(request, client_address) before discarding the request.
+# This holds for BOTH the single-threaded TCPServer path
+# (BaseServer._handle_request_noblock's `except Exception: self.handle_error(...)`)
+# and the threaded path (ThreadingMixIn.process_request_thread's identical
+# `except Exception: self.handle_error(...)`) — confirmed against the
+# installed stdlib (see subitem verification notes). So a SERVER-level
+# handle_error() override is sufficient on its own to quiet a disconnect
+# raised from anywhere in a handler, including its write path; no separate
+# guarding of self.wfile.write()/do_GET is needed.
+#
+# Default BaseServer.handle_error() prints a ~40-line traceback to stderr for
+# EVERY exception, including these expected, benign disconnects — that's the
+# flood XACA-0889 is about. This mixin narrows that to a single log line for
+# exactly three client-disconnect exceptions and leaves every other
+# exception's full traceback completely intact by delegating to
+# super().handle_error(), so a real server bug is never silently swallowed.
+#
+# ConnectionAbortedError is included alongside BrokenPipeError/
+# ConnectionResetError because it's the same family of "the peer went away"
+# OSError subclasses a request can raise mid-write (e.g. Windows-style abort,
+# or a client closing before reading the full response) — none of the three
+# indicate a server-side bug, and all three are silent-to-the-client by
+# nature (there is no one left to send an error response to).
+class LCARSQuietDisconnectMixin:
+    """Server-class mixin: quiet client-disconnect exceptions in handle_error().
+
+    Compose this ahead of the actual server base class so its handle_error()
+    wins the MRO, e.g.:
+
+        class LCARSServer(LCARSQuietDisconnectMixin, http.server.ThreadingHTTPServer):
+            pass
+
+    XACA-0890-004: LCARSServer now composes this mixin ahead of
+    http.server.ThreadingHTTPServer (see below) — mixin stays FIRST in the
+    bases tuple so handle_error() still wins the MRO after the base swap.
+    Do not re-implement handle_error() separately — the swallow logic must
+    stay in exactly one place.
+    """
+
+    _QUIET_DISCONNECT_EXCEPTIONS = (
+        BrokenPipeError,
+        ConnectionResetError,
+        ConnectionAbortedError,
+    )
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, self._QUIET_DISCONNECT_EXCEPTIONS):
+            # One concise line instead of the ~40-line traceback flood —
+            # still enough to correlate against log volume if needed.
+            print(
+                f"[LCARS] client disconnected mid-response "
+                f"({type(exc).__name__}) from {client_address}",
+                file=sys.stderr,
+            )
+            return
+        # Anything else is a real bug: preserve stock behaviour (full
+        # traceback to stderr) unmodified.
+        super().handle_error(request, client_address)
+
+
+class LCARSServer(LCARSQuietDisconnectMixin, http.server.ThreadingHTTPServer):
+    """The concrete server class main() binds.
+
+    Mixin first so LCARSQuietDisconnectMixin.handle_error() wins the MRO —
+    ThreadingHTTPServer/socketserver.BaseServer sits later in the MRO, so if
+    the mixin were ever moved out of first position, handle_error() would
+    resolve to the stdlib implementation instead and the BrokenPipeError
+    suppression XACA-0889 added would silently stop working (no crash, no
+    warning — the ~40-line traceback flood would just come back).
+
+    XACA-0889-018: allow_reuse_address is set HERE rather than by mutating
+    socketserver.TCPServer.allow_reuse_address globally. The global form
+    silently changed the default for every other TCPServer subclass in the
+    process — a side effect well outside what this server needs.
+
+    XACA-0890-004: base swapped from socketserver.TCPServer to
+    http.server.ThreadingHTTPServer (qualified form, matching the
+    socketserver.TCPServer style this replaced — coordinated with the test
+    harness, which resolves the base class by name), so one slow request no
+    longer blocks every other client. This was deliberately withheld from
+    XACA-0889 until the ~12 unlocked read-modify-write _atomic_write_json
+    call sites it identified were fixed (XACA-0890-002/003, via the
+    _get_path_lock registry, later widened to 14 sites and a proper
+    load-mutate-save transaction primitive by the review-gate fix — see
+    _board_write_transaction) — swapping the base first would have turned a
+    latent single-threaded-only-safe race into a live lost-update bug on
+    every one of those sites.
+
+    XACA-0890 review-gate finding (017) on `daemon_threads = True` below:
+    this line is REDUNDANT — http.server.ThreadingHTTPServer already sets
+    daemon_threads = True as its own class attribute (verified directly:
+    `http.server.ThreadingHTTPServer.__dict__['daemon_threads']` is True,
+    overriding ThreadingMixIn's own default of False). Kept explicit anyway,
+    deliberately, for readability: a reader of THIS class should not have to
+    walk the MRO to know its threads are daemons.
+
+    daemon_threads = True has a real, non-cosmetic consequence worth
+    documenting where a future reader will find it: socketserver's
+    `_Threads.append()` skips adding a thread to server_close()'s tracked
+    list the instant `thread.daemon` is True —
+        def append(self, thread):
+            self.reap()
+            if thread.daemon:
+                return          # <- never tracked, never joined
+            super().append(thread)
+    — so `server_close()`'s `self._threads.join()` waits for NOTHING.
+    Concretely: a SIGTERM/graceful shutdown that lands while a request
+    thread is mid-way through a multi-file handler (e.g.
+    handle_link_cr_to_release, which writes cr_board_file, THEN separately
+    writes board_file, THEN the release manifest) can abandon that thread
+    between writes, leaving the CR side updated but the release side not
+    yet (or vice versa) — a genuinely reachable half-applied state that the
+    old single-threaded server's shutdown() naturally avoided (it only ever
+    stops ACCEPTING new connections; the one in-flight request, on the main
+    thread, always ran to completion first).
+
+    Deliberately NOT flipped to daemon_threads = False here. Doing so would
+    make server_close() actually wait for in-flight threads — but a
+    non-daemon thread blocks process exit until it finishes, and this
+    server does not yet bound every handler's worst-case duration. The
+    known offender is handle_trigger_calendar_sync (review-gate finding
+    021, fixed in this same change — see its comment): before that fix it
+    held board_file's lock across un-timeout'd external CalDAV/Google
+    network calls, so a hung network call under daemon_threads = False
+    would have made a graceful SIGTERM hang the WHOLE PROCESS indefinitely
+    instead of merely risking one half-applied multi-file write — a worse
+    failure mode than the one being traded away. Flipping this default is a
+    reasonable follow-up once every handler's external-call worst case is
+    bounded (021 fixes the one identified instance; an exhaustive audit for
+    others is out of scope here).
+
+    XACA-0890 review-gate finding (020) — unbounded thread creation, no cap,
+    server binds all interfaces. Judged OUT OF SCOPE for this fix, with
+    reasoning (not a silent skip — see the ticket's protected [Review]
+    subitem 020 for the finding as filed):
+
+    - "Binds all interfaces": `("", port)` at the `with LCARSServer(...)`
+      call site in main() is PRE-EXISTING — the old socketserver.TCPServer
+      used the identical bind spec. Not a regression from this ticket, and
+      almost certainly intentional: this fleet runs LCARS instances across
+      multiple machines (see docs/ referencing M1Pro/M4Mini/fleet-monitor)
+      with cross-machine dashboard access as a real, used feature. Changing
+      the bind address is a product decision, not a threading-safety fix,
+      and not mine to make unilaterally here.
+    - "Unbounded thread creation per connection, no cap": this IS a real
+      consequence of XACA-0890-004's base swap — the old single-threaded
+      server had an implicit cap of 1 concurrent request; ThreadingHTTPServer
+      spawns a new OS thread per accepted connection with no ceiling, so a
+      client opening many connections rapidly can spawn proportionally many
+      threads (each costing stack memory + a file descriptor) with nothing
+      in this class stopping it. A properly-sized fix (bounded worker pool,
+      or a semaphore around process_request) needs real capacity planning —
+      how many concurrent requests this server's actual usage pattern
+      (teams x browser tabs x background collectors) needs headroom for —
+      that I do not have visibility into and should not guess at under
+      review-gate time pressure: sized too low, legitimate concurrent
+      dashboard usage starts queueing/failing, which is a worse regression
+      than the DoS exposure being fixed; sized too high, it fixes nothing.
+      Left as a follow-up requiring that capacity-planning input, not
+      bundled into this fix.
+    """
+
+    allow_reuse_address = True
+    daemon_threads = True
 
 
 def main():
