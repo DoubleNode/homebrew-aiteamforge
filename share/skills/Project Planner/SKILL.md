@@ -1158,6 +1158,9 @@ Every plan document MUST include:
 6. ✅ **Implementation Order** (phased steps matching subitems)
 7. ✅ **Subitems Table** (all subitems with IDs and status)
 8. ✅ **Verification Checklist** (testable acceptance criteria)
+9. ✅ **Wiring** (every call-site hookup as a discrete, named step — see below)
+
+> **Wiring is mandatory, not optional (XACA-0297).** A Phase 6 retrospective (XACA-0296) found that pseudocode showing a new function being called is not the same as a step that says *do the hookup*. Two subagents wrote fully correct, self-contained code that nothing ever called — the audit-assembler hookup for a new view generator, and the dispatcher line for a new shell subcommand — because the plan's pseudocode implied the call but never listed it as its own step. The plan document MUST enumerate each integration point explicitly: which function, in which file, called from where. A pseudocode snippet showing `foo() calls bar()` does not satisfy this — `bar()`'s registration into `foo()` needs its own numbered line in Implementation Order (or its own Wiring subsection) naming the exact call site.
 
 > **Marker Convention (XACA-0478):** The `<!-- plan_doc: canonical -->` marker on line 1 lets `kb-retro-path` distinguish the canonical plan doc from side-docs (audit reports, SPECs, instruction files, feasibility notes) when `kanban/plans/<ID>/` contains multiple plan-adjacent files. The marker is invisible in GitHub Markdown, Confluence, and the LCARS UI plan viewer (per CommonMark HTML-comment stripping). **Side-docs MUST NOT carry this marker** — that is what makes the resolver pick correctly. Only the one canonical plan doc per item gets the marker.
 
@@ -1223,6 +1226,14 @@ Every plan document MUST include:
 
 ---
 
+## Wiring
+
+<For every new function/generator/handler introduced above, name the exact call site that invokes it — file, calling function, and line/location. A pseudocode line showing the call is not sufficient; the hookup itself must appear here as a discrete step.>
+
+- `<new_function()>` in `<file>` → called from `<calling_function()>` in `<file>`, at `<where in that function's flow>`.
+
+---
+
 ## Subitems
 
 | ID | Title | Status |
@@ -1240,6 +1251,8 @@ Every plan document MUST include:
 > ⚠️ **Note:** Testing & Debugging, PR Creation & Test Handoff, QA Testing & Code Review, [UX] UX/UI Evaluation, Retrospective and Knowledge Capture, and Sync Local Develop Branch subitems are MANDATORY for code-related projects.
 > [UX] is conditionally required: required for UI-touching projects, may be skipped or pre-cancelled for non-UI projects.
 > When present, these six subitems must always be the last six, in this order.
+
+> **Split implementation from wiring (XACA-0297).** On XACA-0296 Phase 6, two implementation subagents stream-timed-out mid-integration with their core logic complete but never hooked up (see the Wiring note above). Both had been handed one subitem covering "write the logic AND wire it in." As a guideline drawn from that one phase's observation — not a hard measured ceiling — keep each implementation subitem to roughly 300 lines of focused logic, and give its wiring step(s) a separate subitem. Smaller, single-purpose subitem scopes reduce the risk of a subagent stalling before it reaches the integration step.
 
 ---
 
@@ -1574,9 +1587,10 @@ If a kanban item was created WITHOUT a plan document (e.g., via direct `kb-backl
 1. Read the existing item details: `kb-backlog show <item-id>`
 2. List existing subitems: `kb-backlog sub list <item-id>`
 3. **Determine the correct team directory** using [Plan Document Path Resolution](#plan-document-path-resolution)
-4. Research the codebase for context
-5. Create the plan document in the **team-specific directory**
-6. Verify document creation
+4. **Determine whether the item is closed with zero board subitems** — see [Historical Banner for Closed Items](#mandatory-historical-banner-for-closed-items-xaca-0951) below. This decides whether the Subitems section you write in step 6 is a normal forward-looking table or a banner-carrying historical reconstruction.
+5. Research the codebase for context
+6. Create the plan document in the **team-specific directory**
+7. Verify document creation
 
 **Command to check for missing plan docs (project-aware):**
 ```bash
@@ -1614,6 +1628,328 @@ for id in $(kb-backlog list --ids-only); do
   fi
 done
 ```
+
+---
+
+### ⛔ MANDATORY: Historical Banner for Closed Items (XACA-0951)
+
+> **MANDATORY.** When creating a plan document retroactively, you MUST determine the item's board
+> status **before** writing the Subitems section. If the item is in a **terminal state** and has
+> **zero board subitems**, the document MUST carry the historical banner (below) and the retitled
+> Subitems heading. This is not optional and is not a judgement call.
+
+**Terminal state** means the board record's `status` field is one of:
+
+| `status` | Terminal? | Why |
+|---|---|---|
+| `completed` | **yes** | Work is closed; nothing listed can still be scheduled. |
+| `cancelled` | **yes** | Work was abandoned; a subitems table implies a plan that will never run. |
+| `todo`, `in_progress`, `blocked`, `pending`, `active`, `testing`, `planning`, `backlog` | no | Item is live; a normal forward-looking plan doc is correct. |
+| *(field absent)* | no | An absent `status` means `todo`, not closed. |
+
+`cancelled` is included deliberately. A cancelled item's reconstructed subitems table describes work
+that was consciously dropped, and a reader who assumes those rows were tracked will assume they were
+tracked *and then closed for a reason* — exactly backwards.
+
+**Zero board subitems** is the other required half of the trigger, not a convenience. If the item has
+real board subitems, the table is truthful — it reflects rows that exist and that `kb-sweep` can gate
+on. Banner it anyway and you've lied in the other direction.
+
+#### Determining status — do NOT use `kb-backlog show`
+
+⚠️ **`kb-backlog show <ID>` resolves only against the current terminal context's board.** Run from
+Academy context against a Firebase id, it prints `Error: Item not found: XFIR-0039` and exits **1** —
+but the usual idiom hides that: in `kb-backlog show "$ID" | grep -q 'Status: COMPLETED'` the pipeline
+reports *grep's* status, not the command's, so the failure is invisible. The grep returns *no match* for every
+cross-team item, and the check silently concludes "not completed," omitting the banner in exactly the
+case that needs it. `kb-backlog show` also does not print `completedAt`, which the banner requires.
+
+Use this instead — it resolves the item's own team from the id prefix, so it works correctly from any
+terminal context:
+
+```bash
+source ~/dev-team/kanban-helpers.sh
+ITEM_ID="<ITEM-ID>"
+BOARD=$(_kb_get_board_file "$(_kb_get_team_from_code "$ITEM_ID")")
+
+python3 - "$BOARD" "$ITEM_ID" <<'PY'
+import json, sys
+board, item_id = sys.argv[1], sys.argv[2]
+hit = next((e for e in json.load(open(board)).get('backlog', [])
+            if e.get('id') == item_id), None)
+if hit is None:
+    print('RESOLVE_FAILED'); sys.exit(3)
+status = (hit.get('status') or 'todo').lower()          # absent status == todo
+closed = (hit.get('completedAt') or hit.get('cancelledAt') or '')[:10] or 'unknown'
+nsub   = len(hit.get('subitems') or [])
+print('STATUS=%s'          % status)
+print('CLOSED_ON=%s'       % closed)
+print('SUBITEM_COUNT=%d'   % nsub)
+print('BANNER_REQUIRED=%s' % ('yes' if status in ('completed','cancelled') and nsub == 0 else 'no'))
+PY
+```
+
+**On `RESOLVE_FAILED` (exit 3), or any output you cannot parse: STOP.** Do not write the document.
+Report to the user and ask — neither default is safe to guess. Assuming "not closed" omits a required
+banner; assuming "closed" stamps a live plan as historical, telling implementers their tracked work is
+a dead record.
+
+#### The banner — three parts, all mandatory
+
+Two machine anchors and one human-facing block. Stripping any one of the three leaves the document
+flagged by the detection check below.
+
+**A. Sentinel** (machine) — preamble, line 2, directly under `<!-- plan_doc: canonical -->`:
+
+```
+<!-- plan_doc: retroactive-historical item=<ITEM-ID> closed=<YYYY-MM-DD|unknown> subitems=untracked -->
+```
+
+Exactly one space between fields, in this order, no trailing spaces, on its own line. `<ITEM-ID>` is
+the board id verbatim; `closed=` is the `CLOSED_ON` value from the check above, or the literal
+`unknown` only when the board record genuinely carries no `completedAt`/`cancelledAt`.
+
+> ⚠️ **Keep this sentinel on its own line — never merge it into the canonical marker** (e.g.
+> `<!-- plan_doc: canonical, historical -->`). A retroactive doc for a closed item is still *the*
+> canonical plan doc for that item — `kb-retro-path` must keep finding it — and the detection check's
+> match is exact. A merged marker fails to flagged, which is correct but will read as a mystery to
+> whoever hits it.
+
+**B. Banner**, immediately after the header metadata block, before `## Summary`. **C. Banner,
+repeated**, immediately under the retitled `## Subitems …` heading, above the table. The duplication
+is the point, not redundancy: a GitHub `#subitems` anchor link, the LCARS plan viewer's section
+navigation, a `grep` hit quoted into a chat or subagent prompt, and a scroll that starts mid-file all
+skip the document head. A top-only banner is defeated by all four routes — C is the copy that actually
+guards the failure this section exists to fix; B is the courtesy copy.
+
+Literal text for both B and C — substitute the four `<…>` fields, change nothing else:
+
+```markdown
+> ⛔ **HISTORICAL RECORD — NOT TRACKED WORK.** This plan document was written on **<DOC-DATE>**,
+> after item **<ITEM-ID>** had already been closed (**<STATUS>**, <CLOSED_ON>). The subitems listed
+> below were **never created on the board** and were **never worked**. They are a reconstruction of
+> the plan this item would have had, recorded for the historical record only.
+>
+> Do not read any row below as done, in progress, or scheduled. No workflow reads this table:
+> `kb-sweep` cannot gate on it, because the item has zero board subitems. If a row still describes
+> work worth doing, file it as a **new kanban item through the Project Planner** — it will not be
+> picked up from this document by anything.
+```
+
+Also replace the header's `**Status:** Planning Complete` — on a closed item it reads as "this plan is
+ready to execute," which is itself part of the deception:
+
+```markdown
+**Status:** Historical record — item closed (<STATUS>) <CLOSED_ON>
+```
+
+#### Section retitle
+
+```markdown
+## Subitems (Historical Reconstruction — Never Created)
+```
+
+And the column headers:
+
+| From | To |
+|---|---|
+| `\| ID \| Title \| Status \|` | `\| ID (never issued) \| Title \| Board State \|` |
+| per-row `todo` | per-row `never created` |
+
+`Status` → `Board State`, plus the fixed `never created` value, removes the last place a skimmer could
+read a lifecycle value (`todo` implies queued; `never created` cannot).
+
+⛔ **Do NOT decorate or strike the subitem ids** — no `~~XFIR-0039-001~~`, no backticks, no
+`(unissued)` prefix, no `x-` prefix. **This is the edit most likely to be made in good faith, as
+"extra caution" — and it is the most dangerous one in this whole section.** The detection check keys
+on `^\|\s*<ITEM-ID>-\d+\s*\|`; decorating the id makes the row stop matching, so the document stops
+being *detected at all* — and a document that is never detected is never checked for a valid banner
+either. Sanitizing the ids would feel like extra safety and would in fact create a silent, permanent
+blind spot. The disclosure belongs in the banner, the heading, and the `Board State` column; the id
+column belongs to the guard.
+
+Omit the six mandatory trailing subitems (Testing & Debugging, PR Creation & Test Handoff, QA Testing
+& Code Review, `[UX]` UX/UI Evaluation, Retrospective and Knowledge Capture, Sync Local Develop
+Branch) and the `⚠️ Note:` block that declares them MANDATORY — they were never created either, and on
+a historical doc that note reads as a live instruction. Reconstruct only the substantive subitems.
+
+#### Worked example — XFIR-0039 "Security Rules Audit"
+
+XFIR-0039 closed `completed` on 2026-01-15 with zero board subitems. Its plan doc, authored
+2026-01-26 — eleven days after closure — reconstructed seven subitems that were never created on the
+board, and every row carried a `todo` status:
+
+**BEFORE (the defect — what the planner would emit without this section):**
+
+```markdown
+# XFIR-0039: Security Rules Audit
+
+**Status:** Planning Complete
+**Priority:** High
+**Tags:** security, firestore, audit, rules
+**Created:** 2026-01-26
+**Team:** Firebase (DS9)
+**Epic:** EPIC-0002 (Security Audit Remediation)
+
+---
+
+## Summary
+
+Conduct comprehensive audit of Firebase Security Rules for Firestore, Storage, and Realtime
+Database. …
+
+## Subitems
+
+| ID | Title | Status |
+|----|-------|--------|
+| XFIR-0039-001 | Audit Firestore security rules | todo |
+| XFIR-0039-002 | Audit Storage security rules | todo |
+| XFIR-0039-003 | Identify overly permissive rules | todo |
+| XFIR-0039-004 | Define authorization helper functions | todo |
+| XFIR-0039-005 | Update rules with least privilege | todo |
+| XFIR-0039-006 | Test rules with emulator | todo |
+| XFIR-0039-007 | Deploy and validate | todo |
+```
+
+That table does not merely imply tracked work — it displays **seven open todos on an item that had
+already been closed for over seven months**. One of them, `XFIR-0039-005 Update rules with least
+privilege`, is a real security decision that sat unactioned for seven months because the document
+looked like it had been tracked. `kb-sweep` could not catch it: the item has zero board subitems, so
+the protected-subitem gate had nothing to gate on.
+
+**AFTER (correct output under this section):**
+
+```markdown
+<!-- plan_doc: canonical -->
+<!-- plan_doc: retroactive-historical item=XFIR-0039 closed=2026-01-15 subitems=untracked -->
+# XFIR-0039: Security Rules Audit
+
+**Status:** Historical record — item closed (completed) 2026-01-15
+**Priority:** High
+**Tags:** security, firestore, audit, rules
+**Created:** 2026-01-26
+**Team:** Firebase (DS9)
+**Epic:** EPIC-0002 (Security Audit Remediation)
+
+> ⛔ **HISTORICAL RECORD — NOT TRACKED WORK.** This plan document was written on **2026-01-26**,
+> after item **XFIR-0039** had already been closed (**completed**, 2026-01-15). The subitems listed
+> below were **never created on the board** and were **never worked**. They are a reconstruction of
+> the plan this item would have had, recorded for the historical record only.
+>
+> Do not read any row below as done, in progress, or scheduled. No workflow reads this table:
+> `kb-sweep` cannot gate on it, because the item has zero board subitems. If a row still describes
+> work worth doing, file it as a **new kanban item through the Project Planner** — it will not be
+> picked up from this document by anything.
+
+---
+
+## Summary
+
+Conduct comprehensive audit of Firebase Security Rules for Firestore, Storage, and Realtime
+Database. …
+
+## Subitems (Historical Reconstruction — Never Created)
+
+> ⛔ **HISTORICAL RECORD — NOT TRACKED WORK.** This plan document was written on **2026-01-26**,
+> after item **XFIR-0039** had already been closed (**completed**, 2026-01-15). The subitems listed
+> below were **never created on the board** and were **never worked**. They are a reconstruction of
+> the plan this item would have had, recorded for the historical record only.
+>
+> Do not read any row below as done, in progress, or scheduled. No workflow reads this table:
+> `kb-sweep` cannot gate on it, because the item has zero board subitems. If a row still describes
+> work worth doing, file it as a **new kanban item through the Project Planner** — it will not be
+> picked up from this document by anything.
+
+| ID (never issued) | Title | Board State |
+|-------------------|-------|-------------|
+| XFIR-0039-001 | Audit Firestore security rules | never created |
+| XFIR-0039-002 | Audit Storage security rules | never created |
+| XFIR-0039-003 | Identify overly permissive rules | never created |
+| XFIR-0039-004 | Define authorization helper functions | never created |
+| XFIR-0039-005 | Update rules with least privilege | never created |
+| XFIR-0039-006 | Test rules with emulator | never created |
+| XFIR-0039-007 | Deploy and validate | never created |
+```
+
+Note what is preserved: every row, every title, the numbering, the Design Decisions, and any Notes
+content. Nothing is thrown away. `XFIR-0039-005` is still legible as an open security concern — and
+now legible as one that was *never filed*, which is the sentence that gets it filed.
+
+#### Why banner instead of refuse (read this before deleting any of it)
+
+> **The settled decision.** When a retroactive plan document is written for an already-closed item,
+> the planner emits the subitems table **with** a historical banner and a machine-readable sentinel.
+> It does **not** refuse to emit the table. This was decided explicitly, with refusal on the table as
+> the alternative.
+>
+> **What refusal would have cost.** Refusing to emit the table is the stricter rule and the tempting
+> one: nothing untrue gets written. But the reconstruction is the only place the intended decomposition
+> of a closed item is ever recorded. On XFIR-0039 the reconstruction is what surfaced *Update rules
+> with least privilege* — a live security concern that had never been filed. Refuse, and that line is
+> not "prevented from misleading anyone"; it is deleted. The failure being fixed here is **an
+> unlabelled record**, not the record. Deleting evidence to avoid mislabelling it trades a fixable
+> presentation bug for permanent information loss, in the exact class of document that exists to
+> preserve information.
+>
+> **What the banner preserves.** Both halves at once: the reader cannot mistake the rows for tracked
+> work, and the rows survive to be re-filed. It is the only option that does both.
+>
+> **Why a prose-only banner is not enough.** The original defect was a document that reads plausibly
+> and that no workflow inspects. A human-readable warning that no workflow inspects repeats that
+> defect one level up: it degrades silently, and the degradation is invisible precisely because the
+> artifact still looks right. The sentinel exists so a check can tell a correctly-bannered historical
+> doc from a deceptive one — that is what lets the detection check stay quiet on good docs instead of
+> crying wolf on every historical doc forever, which is how a check gets turned off.
+>
+> **What specifically goes wrong if you strip any part of this:**
+> - **Strip the visible banner, keep the sentinel** → readers are deceived again, and because the
+>   sentinel is invisible the document *looks* clean to everyone who opens it. This is the worst
+>   state: the original bug, now with a marker asserting it was handled.
+> - **Strip the sentinel, keep the banner** → the doc is honest to humans and indistinguishable from a
+>   deceptive one to the guard. It gets flagged forever, someone gets tired of the noise, and the check
+>   is disabled — taking the real detections with it.
+> - **Decorate or remove the subitem ids to make them "look less real"** → the rows stop matching the
+>   detection regex, the document falls out of scope entirely, and it is never checked again. This is
+>   the most dangerous edit in the list because it presents as extra caution.
+> - **Relax the sentinel match to a substring or a bare token** → any pasted or leftover fragment
+>   whitelists a genuinely deceptive document. The exactness is not pedantry; it is the whole guarantee.
+>
+> **The invariant, if you change nothing else:** the marker must only ever be able to *earn* a green
+> result, never *grant* one. Any malformed, partial, mismatched or stale marker must leave the document
+> **flagged**. If an edit makes some failure mode silently pass, that edit reintroduces XACA-0951.
+>
+> **Precedent.** XFIR-0039 "Security Rules Audit" closed 2026-01-15; its plan doc was authored
+> 2026-01-26 listing seven subitems that were never created. `kb-sweep` could not catch it — the item
+> has zero board subitems, so the protected-subitem gate had nothing to gate on. A real security
+> decision sat unactioned for seven months.
+
+#### Detection contract (automated guard, outside this skill)
+
+A separate automated check scans plan documents for undisclosed historical subitems tables — this
+skill does not run it, but writes correctly *for* it. It fires when a doc has at least one row
+matching `^\|\s*<ITEM-ID>-\d+\s*\|`, the resolved board `status` is `completed` or `cancelled`
+(absent `status` counts as `todo` and does not fire), and the board subitem count is `0`.
+
+It suppresses the finding only when **all three** of the following hold — a conjunction, no partial
+credit:
+
+| # | Requirement | Test |
+|---|---|---|
+| W1 | Bound sentinel present | A line matching, exactly and anchored: `^<!-- plan_doc: retroactive-historical item=<ITEM-ID> closed=(\d{4}-\d{2}-\d{2}\|unknown) subitems=untracked -->[ \t]*$`, where `<ITEM-ID>` is the **board** id compared literally |
+| W2 | Sentinel date agrees with the board | If the board record has `completedAt`/`cancelledAt`, the sentinel's `closed=` MUST equal its first 10 characters. If the board has neither, `closed=unknown` is accepted; `closed=unknown` against a board that *has* a date is a **mismatch → flagged** |
+| W3 | Visible disclosure present | The doc contains the literals `HISTORICAL RECORD` **and** `NOT TRACKED WORK` **and** `## Subitems (Historical Reconstruction` (all ASCII, all case-sensitive) |
+
+**Fail direction: any deviation → FLAGGED, never whitelisted.** A sentinel that is absent, misspelled,
+reordered, missing `subitems=untracked`, id-mismatched, date-mismatched, present but with the visible
+banner removed, or present but with the section heading un-retitled is explicitly flagged rather than
+silently passed. The one relaxation the check allows is trailing whitespace on the sentinel line —
+whitespace cannot smuggle a claim. Every other field in W1–W3 is exact and load-bearing; do not loosen
+any of it to reduce noise.
+
+The same guard also flags a historical sentinel present on a now-live item (a stale banner — the
+copy-as-template failure mode) and flags any doc whose sentinel `item=` does not match its own resolved
+`<ITEM-ID>` (a copied doc). The guard reports; it does not create, cancel, or rewrite anything —
+remediation is a human or planner action.
 
 ---
 
