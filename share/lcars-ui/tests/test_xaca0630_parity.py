@@ -385,27 +385,68 @@ _JQ_ROUND2_XFAIL_STRICT = True
 #     /home/runner/work/dev-team/dev-team/kanban/academy-board.json'
 #
 # FIXTURE_BOARD is a COMMITTED, structurally-rich stand-in, so this class
-# actually executes in CI instead of being tolerated or skipped. Its 32
-# `completed` items span all four spec §5 buckets (including the exact
-# 1.0/4.0/8.0 boundary points) plus no_estimate/no_time/both_missing
-# exclusion items and several non-completed statuses -- the same shape a
-# live board has, stripped of every identifying field
-# (id/title/description/epicName/dates) and replaced with synthetic
-# FIX-CI-NNN ids/titles.
+# actually executes in CI instead of being tolerated or skipped. Its 29
+# `completed`+eligible items span all four spec §5 buckets (fixed points of
+# exactly 1.0/4.0/8.0/16.0 per bucket -- the first three ARE the spec's
+# boundary values) plus no_estimate/no_time/both_missing exclusion items and
+# several non-completed statuses -- the same shape a live board has, stripped
+# of every identifying field (id/title/description/epicName/dates) and
+# replaced with synthetic FIX-CI-NNN ids/titles.
 #
-# Every eligible item uses the SAME fixed ratio (2.0) with `points` on a
-# 0.25 grid -- NOT because that's simpler, but because a first draft sampled
-# from the live board's real (non-round) numbers and discovered it silently
-# reproduced the separately-tracked XACA-0968 jq round2 bug across nearly
-# every field (round2 is an IDENTITY function under that bug -- see
-# _jq_has_round2_precedence_bug()'s docstring below -- so any value that
-# isn't already exact to <=2 decimals mismatches CLI vs server). The
-# ratio=2.0 / 0.25-grid construction makes every handicap/median/sum in this
-# fixture exact to <=1-2 decimals BY CONSTRUCTION, so this class stays
-# decoupled from XACA-0968 instead of becoming an unscoped 5th instance of
-# it. Full rationale + the empirical A/B verification (real jq vs a jq 1.7.1
-# substituted on PATH) is in
-# fixtures/xaca0630_committed_board/RECONCILIATION.md.
+# ROUND 3 (current) -- DYADIC, not merely "<=2 decimals":
+#
+# Round 1 used a single fixed ratio (2.0, decoupled from XACA-0968 but with
+# no detection power: handicap==median==2.0 everywhere, so a mean-vs-median
+# mix-up on the server was invisible). Round 2 fixed that with varied
+# per-item ratios, restated the decoupling invariant as "every crossing
+# value exact to <=2 decimals" -- and that framing was WRONG. It reproduced
+# XACA-0968 on CI (jq 1.7.1) anyway: `buckets[1].sumActualHours: CLI=
+# 45.629999999999995 vs server=45.63` and 5 more like it. "2.34 has 2 decimal
+# digits" is a fact about the DECIMAL LITERAL used to author the fixture, not
+# about the IEEE-754 double that survives a chain of jq/Python divisions and
+# additions -- those two things coincide only when the value is *also*
+# exactly representable in binary at that precision, which "<=2 decimals"
+# alone never guarantees.
+#
+# The real invariant, worked out from first principles: XACA-0968 makes jq's
+# round2 a pure IDENTITY function (`. * 100 as $s | ...` parses under the bug
+# as `. * (100 as $s | ...)`, and the literal-`100` subexpression always
+# reduces to the constant `1` regardless of the real input -- see
+# _jq_has_round2_precedence_bug()'s docstring). So on affected jq, the CLI
+# emits raw values with ZERO rounding applied, while the server always emits
+# Python's correctly-rounded `round(x, 2)`. For those to agree, the RAW
+# double must equal `round(raw, 2)` bit-for-bit -- which is true precisely
+# when the value's EXACT binary representation has a power-of-2 denominator
+# that also divides 4 (i.e. it's a multiple of 0.25: 1, 2, or 4 in the
+# denominator). "Dyadic" alone (any power-of-2 denominator) is NOT
+# sufficient and is not even a discriminating test in isolation -- EVERY
+# finite double is dyadic by construction (IEEE-754 stores mantissa/2^k), so
+# `Fraction(any_float).denominator` is *always* a power of 2, including for
+# 45.629999999999995 itself. Genuine 8ths/16ths dyadics like 0.125 or 0.0625
+# fail this test (`round(0.125, 2) == 0.12 != 0.125`) even though they're
+# "dyadic" in the loose sense. The fixture therefore restricts every value
+# that crosses the round2/round(x,2) boundary (sumEstimatedHours,
+# sumActualHours, handicap, median -- 5 fields x 4 buckets + global = 20
+# values) to the quarter-hour grid specifically, not merely to "some"
+# power-of-2 denominator. TestFixtureDyadicity below enforces this
+# mechanically, on every test run, against whatever the fixture currently
+# contains -- not as a one-time hand-check.
+#
+# To keep varied per-item ratios (handicap != median, per bucket AND
+# globally) while satisfying that stricter constraint, all 7-8 items sharing
+# a bucket use the SAME points value (the bucket's own boundary: 1.0, 4.0,
+# 8.0, 16.0), which turns `handicap = sum_act/sum_est` into a plain mean of
+# the per-item ratios -- solvable in integer quarter-units so the mean lands
+# exactly on the quarter grid (sum of quarter-units divisible by n). Bucket
+# sizes are ODD (7, 7, 7) wherever possible so the bucket median is simply
+# one of the chosen ratios (trivially quarter-grid); the one even-sized
+# bucket (>8h, n=8) additionally requires its two middle sorted ratios to
+# share parity in quarter-units so their average stays on the grid. The
+# GLOBAL item count (29) is kept odd for the same trivial-median reason, and
+# the global handicap is solved (via a small modular-arithmetic system, one
+# bucket's mean as the free variable) to also land on the quarter grid.
+# Exact fraction arithmetic + the mechanical dyadicity/decoupling proof are
+# in fixtures/xaca0630_committed_board/RECONCILIATION.md.
 FIXTURE_BOARD = LCARS_UI / 'tests' / 'fixtures' / 'xaca0630_committed_board' / 'academy-board.json'
 
 
@@ -442,6 +483,87 @@ class TestFixtureBoardParity(unittest.TestCase):
             [b['label'] for b in cli['buckets']],
             ['<=1h', '1-4h', '4-8h', '>8h']
         )
+
+
+class TestFixtureDyadicity(unittest.TestCase):
+    """Mechanical, standing regression guard for the round-3 fixture's core
+    invariant (see the FIXTURE_BOARD comment block above): every value that
+    crosses the round2/round(x, 2) boundary must be exactly representable in
+    binary AND already sit on the quarter-hour grid, so that XACA-0968's
+    jq-round2-as-identity bug is a byte-for-byte no-op instead of a mismatch.
+
+    This does NOT re-derive numbers by hand -- it reads whatever the fixture
+    ACTUALLY produces (via the real server payload) and checks the property
+    mechanically with exact `fractions.Fraction` arithmetic on each field's
+    float. `Fraction(some_float)` is exact (it decodes the IEEE-754 bit
+    pattern, no decimal string parsing involved), so this cannot be fooled by
+    a value that merely LOOKS like it has <=2 decimal digits when printed.
+
+    Two checks are layered deliberately:
+      1. `_is_pow2(denominator)` -- true for literally every finite float
+         (IEEE-754 doubles are always mantissa/2^k), so this alone proves
+         nothing; it's here only as a sanity precondition for check 2.
+      2. `_on_quarter_grid` -- denominator divides 4 once reduced, i.e. the
+         value is an exact multiple of 0.25. THIS is the property that
+         actually matters: it's what makes `round(x, 2) == x` bit-for-bit,
+         which is what the buggy jq round2 (a proven identity function --
+         see _jq_has_round2_precedence_bug()'s docstring) needs to be safe.
+         A value satisfying only check 1 (e.g. 0.125, an eighth) is genuinely
+         dyadic but FAILS this test on purpose: round(0.125, 2) == 0.12, not
+         0.125, so it would desync CLI vs server on affected jq exactly like
+         the original XACA-0968 mismatches did.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.payload = normalize(run_server(str(FIXTURE_BOARD)))
+
+    @staticmethod
+    def _is_pow2(n: int) -> bool:
+        return n > 0 and (n & (n - 1)) == 0
+
+    def _assert_quarter_grid(self, label, value):
+        if value is None:
+            return
+        from fractions import Fraction
+        frac = Fraction(value)
+        self.assertTrue(
+            self._is_pow2(frac.denominator),
+            f"{label}={value!r} is not even dyadic (Fraction denominator "
+            f"{frac.denominator} is not a power of 2) -- this should be "
+            f"structurally impossible for any finite float; something is "
+            f"very wrong."
+        )
+        self.assertEqual(
+            (Fraction(4) * frac).denominator, 1,
+            f"{label}={value!r} (={frac}) is dyadic but NOT on the quarter-hour "
+            f"grid -- round(x, 2) would change it, so XACA-0968's buggy "
+            f"identity round2 on CI would desync from the server here."
+        )
+
+    def test_global_fields_are_quarter_grid(self):
+        g = self.payload['global']
+        for field in ('handicap', 'median', 'sumEstimatedHours', 'sumActualHours'):
+            self._assert_quarter_grid(f'global.{field}', g[field])
+
+    def test_bucket_fields_are_quarter_grid(self):
+        for b in self.payload['buckets']:
+            for field in ('handicap', 'median', 'sumEstimatedHours', 'sumActualHours'):
+                self._assert_quarter_grid(f"buckets[{b['label']}].{field}", b[field])
+
+    def test_handicap_differs_from_median(self):
+        """Detection-power guard (XACA-0952-034's original complaint): a
+        fixture where handicap == median everywhere can't distinguish a
+        mean-vs-median server bug from correct output. Every bucket with
+        n>0, plus global, must have handicap != median."""
+        g = self.payload['global']
+        self.assertNotEqual(g['handicap'], g['median'], "global: handicap == median, no detection power")
+        for b in self.payload['buckets']:
+            if b['n'] > 0:
+                self.assertNotEqual(
+                    b['handicap'], b['median'],
+                    f"buckets[{b['label']}]: handicap == median, no detection power"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -902,6 +1024,7 @@ if __name__ == '__main__':
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(TestLiveBoardParity))
+    suite.addTests(loader.loadTestsFromTestCase(TestFixtureDyadicity))
     suite.addTests(loader.loadTestsFromTestCase(TestEmptyStateParity))
     suite.addTests(loader.loadTestsFromTestCase(TestSpec72FixtureParity))
     suite.addTests(loader.loadTestsFromTestCase(TestBoundaryAndEdgeCases))
