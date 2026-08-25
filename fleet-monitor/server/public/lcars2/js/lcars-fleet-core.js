@@ -33,6 +33,9 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             currentSection: 'overview',
             inversionTimer: null,
             alertMode: false,
+            // Last value pushed to the offline aria-live region. `null` (not 0)
+            // so a genuine first reading of 0 still initialises the element.
+            offlineIndicatorValue: null,
             alertTimers: []
         },
 
@@ -152,6 +155,17 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             if (!el) return;
 
             var n = Number(count) || 0;
+
+            // Bail out when nothing changed. This is NOT a micro-optimisation:
+            // this runs on a 100ms interval and the element is an aria-live
+            // region, so writing to it unconditionally makes a screen reader
+            // re-announce the offline count ten times a second -- during exactly
+            // the incident this indicator exists to surface. updatePill() right
+            // above gates on its previous value for the same reason; this must
+            // follow that pattern. (XACA-0963 review round.)
+            if (this.state.offlineIndicatorValue === n) return;
+            this.state.offlineIndicatorValue = n;
+
             var countEl = document.getElementById('fleet-offline-count');
             if (countEl) countEl.textContent = String(n);
 
