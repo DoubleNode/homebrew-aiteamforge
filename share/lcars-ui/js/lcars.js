@@ -18107,7 +18107,7 @@ function renderExportMissingRoots(downloadSection, summary) {
     box.style.cssText = 'width:100%;box-sizing:border-box;margin-top:10px;padding:12px 14px;' +
         'border:1px solid var(--lcars-alert-red, #ff6666);' +
         'border-left:6px solid var(--lcars-alert-red, #ff6666);' +
-        'border-radius:8px;background:var(--lcars-alert-glow, rgba(255,102,102,0.12));' +
+        'border-radius:8px;background:var(--lcars-alert-glow, rgba(255,102,102,0.4));' +
         'color:var(--lcars-text, #ffcc99);font-size:12px;line-height:1.5;';
 
     const heading = document.createElement('div');
@@ -18173,9 +18173,13 @@ function applyExportPanelState(downloadSection, isIncomplete) {
     const filenameEl = document.getElementById('export-download-filename');
     const dlBtn = document.getElementById('export-download-btn');
     if (isIncomplete) {
-        downloadSection.style.background = 'var(--lcars-alert-glow, rgba(255,102,102,0.12))';
+        downloadSection.style.background = 'var(--lcars-alert-glow, rgba(255,102,102,0.4))';
         downloadSection.style.borderColor = 'var(--lcars-alert-red, #ff6666)';
-        if (filenameEl) filenameEl.style.color = 'var(--lcars-alert-red, #ff6666)';
+        // XACA-0954-023: NOT alert-red — red text on the alert-tinted panel measures
+        // 3.84:1, under the 4.5:1 AA floor for this size/weight. Same-hue on same-hue
+        // is what tanks it. This is the body-text token the warning banner above
+        // already uses (7.5:1 on the same background).
+        if (filenameEl) filenameEl.style.color = 'var(--lcars-text, #ffcc99)';
         if (dlBtn) dlBtn.style.background = 'var(--lcars-alert-red, #ff6666)';
     } else {
         downloadSection.style.background = '';

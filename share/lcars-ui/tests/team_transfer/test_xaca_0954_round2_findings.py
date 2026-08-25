@@ -20,6 +20,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import re
+
 import pytest
 
 from team_transfer import channels as ch
@@ -741,3 +743,49 @@ def test_onExportFailed_actually_calls_the_teardown():
     src = (LCARS_UI / "js" / "lcars.js").read_text(encoding="utf-8")
     body = _extract_js_functions(src, ["onExportFailed"])
     assert "clearExportMissingRoots()" in body
+
+
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_toned_filename_uses_the_body_text_token_not_alert_red(tmp_path):
+    """XACA-0954-023: red-on-red failed WCAG 2.1 AA at 3.84:1.
+
+    Toning the filename to --lcars-alert-red put same-hue text on the
+    alert-tinted panel. Measured 3.84:1 against the composited background
+    (rgba(255,102,102,0.4) over black), under the 4.5:1 floor for 14px/400.
+    The body-text token used by the warning banner one line above measures
+    7.50:1 on the same background.
+
+    Pinned as a token identity rather than a computed ratio because the stub DOM
+    has no layout or computed styles — the ratio itself was measured in real
+    Chromium by the UX gate, and is recorded in the docstring so a future reader
+    does not have to re-derive why this token and not the obvious one.
+    """
+    got = _sequence(tmp_path, """
+completeRun(INCOMPLETE);
+console.log(JSON.stringify({ r: report('incomplete') }));
+""")
+    color = got["r"]["filenameColor"]
+    assert "--lcars-text" in color, f"filename tone is not the body-text token: {color!r}"
+    assert "alert-red" not in color, (
+        f"filename toned to alert-red again — that is 3.84:1 on the alert panel: {color!r}"
+    )
+
+
+def test_inline_alert_glow_fallbacks_match_the_real_token():
+    """The inline fallbacks once claimed 0.12 alpha while :root defines 0.4.
+
+    The fallback never fired (the token exists), so nothing broke visually — but
+    the wrong value was load-bearing in the REASONING: it made the panel look 3.3x
+    subtler than it renders, which is how red-on-red text got approved. A fallback
+    that disagrees with its token is a lie waiting for the token to go missing.
+    """
+    js = (LCARS_UI / "js" / "lcars.js").read_text(encoding="utf-8")
+    css = (LCARS_UI / "css" / "lcars.css").read_text(encoding="utf-8")
+
+    m = re.search(r'--lcars-alert-glow:\s*rgba\(([^)]+)\)', css)
+    assert m, "--lcars-alert-glow not found in lcars.css"
+    real = [x.strip() for x in m.group(1).split(",")]
+
+    for fb in re.findall(r'var\(--lcars-alert-glow,\s*rgba\(([^)]+)\)\)', js):
+        got = [x.strip() for x in fb.split(",")]
+        assert got == real, f"inline fallback rgba({fb}) disagrees with :root rgba({m.group(1)})"
