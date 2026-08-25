@@ -130,13 +130,33 @@ describe('server.js - CORS origin is fail-closed (finding 017)', () => {
         // sendUnauthorized() used to set Access-Control-Allow-Origin: '*'
         // unconditionally, overriding the origin decision above on every
         // auth-rejected request. Guard against its return.
-        const res = await fetch(`${baseUrl}/api/teams`, {
+        //
+        // THIS TEST WAS HOLLOW WHEN FIRST WRITTEN, and the way it failed is
+        // the reason for the shape it has now. It POSTed to `/api/teams` — a
+        // route that does not exist (the real one is `/api/team-register`) —
+        // so Express 404'd before any route-level middleware ran, and a soft
+        // `if (res.status !== 401) return;` swallowed the mismatch and let
+        // the test report `ok` without ever evaluating its assertion. A guard
+        // that silently passes when its precondition is unmet is worse than
+        // no guard: it reports a safety property it never checked.
+        //
+        // Fixed two ways: target `POST /api/status`, which really is
+        // requireApiKey-gated (server.js), and ASSERT the precondition
+        // instead of skipping on it, so a future route rename fails loudly
+        // here rather than quietly disarming the check.
+        const res = await fetch(`${baseUrl}/api/status`, {
             method: 'POST',
             headers: { Origin: FOREIGN_ORIGIN, 'Content-Type': 'application/json' },
             body: '{}',
         });
-        if (res.status !== 401) return; // route not auth-gated in this build
+        assert.equal(
+            res.status, 401,
+            `precondition failed: POST /api/status must be auth-gated and reject an ` +
+            `unauthenticated request, but returned ${res.status}. If this route moved, ` +
+            `re-point this test at another requireApiKey route — do NOT soften it to a skip.`
+        );
         assert.notEqual(res.headers.get('access-control-allow-origin'), '*');
+        assert.equal(res.headers.get('access-control-allow-origin'), null);
     });
 });
 
