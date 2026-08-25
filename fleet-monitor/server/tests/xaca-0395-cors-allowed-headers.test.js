@@ -96,9 +96,23 @@ describe('server.js — CORS preflight refuses to approve Authorization (finding
         child = spawn(process.execPath, ['server.js'], {
             cwd: SERVER_DIR,
             env: {
+                // XACA-0401: FLEET_MONITOR_ALLOWED_ORIGINS is new. The cors()
+                // `origin` callback is now fail-closed, so a preflight from an
+                // origin that is NOT allow-listed gets no CORS headers at all --
+                // including no Access-Control-Allow-Headers for this suite to
+                // inspect, which made all three cases below fail.
+                //
+                // The fix is to ALLOW-LIST the origin rather than relax the
+                // assertions, because that preserves what this suite exists to
+                // prove: that even an origin we accept is never told
+                // `Authorization` is a permitted header. Asserting "no headers
+                // came back" instead would have passed for the wrong reason --
+                // the origin gate, not the allowedHeaders pinning -- and would
+                // have stayed green if allowedHeaders were re-widened.
                 ...process.env,
                 PORT: String(port),
                 FLEET_AUTH_TOKEN: 'test-fleet-token-not-a-real-secret',
+                FLEET_MONITOR_ALLOWED_ORIGINS: FOREIGN_ORIGIN,
             },
             stdio: ['ignore', 'ignore', 'ignore'],
         });

@@ -255,7 +255,14 @@ describe('401 response is byte-identical across every rejection reason', () => {
         assert.deepEqual(res.body, EXPECTED_BODY);
         assert.equal(res.headers['content-type'], 'application/json; charset=utf-8');
         assert.equal(res.headers['www-authenticate'], 'Bearer');
-        assert.equal(res.headers['access-control-allow-origin'], '*');
+        // XACA-0401: this asserted `'*'` until the wildcard was removed from
+        // sendUnauthorized(). That header overrode the fail-closed origin
+        // decision cors() had already made, on every auth-rejected request --
+        // so a 401 handed a wildcard to any origin that asked. The header is
+        // now absent, and cors() alone decides. This suite's actual subject
+        // is the BYTE-IDENTICAL BODY across rejection reasons (contract 4),
+        // which is unaffected either way; the ACAO assertion was incidental.
+        assert.equal(res.headers['access-control-allow-origin'], undefined);
     });
 
     test('wrong credential', async () => {
