@@ -20,6 +20,14 @@ window.LCARS_CORE = window.LCARS_CORE || {};
 (function(LCARS) {
     'use strict';
 
+    // Every surface that can navigate to a section: sidebar buttons plus the
+    // top utility-bar pills (XACA-0963). Shared so the click binding and the
+    // active-state toggle cannot drift apart -- if they ever diverge, a pill
+    // navigates but never highlights.
+    // MUST stay BELOW 'use strict': a declaration above it breaks the directive
+    // prologue, turning 'use strict' into an inert string literal.
+    var NAV_SELECTOR = NAV_SELECTOR;
+
     // =========================================================================
     // CANDY PILL SYSTEM
     // =========================================================================
@@ -596,7 +604,7 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             }
 
             // Bind sidebar button clicks
-            document.querySelectorAll('.sidebar-button[data-section], .legend-pill[data-section]').forEach(function(btn) {
+            document.querySelectorAll(NAV_SELECTOR).forEach(function(btn) {
                 btn.addEventListener('click', function() {
                     self.switchSection(btn.dataset.section);
                 });
@@ -638,7 +646,7 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             this.saveSection(sectionName);
 
             // Update sidebar buttons
-            document.querySelectorAll('.sidebar-button[data-section], .legend-pill[data-section]').forEach(function(btn) {
+            document.querySelectorAll(NAV_SELECTOR).forEach(function(btn) {
                 btn.classList.toggle('active', btn.dataset.section === sectionName);
             });
 
