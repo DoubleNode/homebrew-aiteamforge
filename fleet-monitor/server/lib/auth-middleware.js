@@ -248,9 +248,25 @@ function isAuthorized(req) {
 // ---------------------------------------------------------------------------
 
 function sendUnauthorized(res) {
+    // XACA-0401 (test finding 014): the unconditional
+    // `.set('Access-Control-Allow-Origin', '*')` that used to be here has been
+    // REMOVED. It was pre-existing (XACA-0395), but it overrode the
+    // fail-closed `origin` decision the cors() middleware in server.js makes
+    // for every other response — so every 401 from a requireApiKey-gated
+    // route still handed a literal wildcard to any origin that asked,
+    // regardless. A wildcard on the auth-REJECTED path is the last place it
+    // belongs.
+    //
+    // Nothing replaces it deliberately: cors() runs BEFORE the route handlers
+    // and has already applied the correct per-origin decision (including
+    // `Vary: Origin`, which the cors package emits automatically for a
+    // function-valued origin) by the time this runs. Setting anything here
+    // would override that decision a second time, which is the defect.
+    //
+    // The 401 BODY is untouched — contract §4 requires it byte-identical
+    // across every rejection reason, and that is unaffected by header changes.
     res.status(401)
         .set('WWW-Authenticate', 'Bearer')
-        .set('Access-Control-Allow-Origin', '*')
         .json(UNAUTHORIZED_BODY);
 }
 

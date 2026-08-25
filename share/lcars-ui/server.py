@@ -964,6 +964,10 @@ def _reset_local_host_identity_cache_for_tests():
     _local_host_identity_state['names'] = None
     _local_host_identity_state['tailscale_unknown'] = True
     _local_host_identity_warned.clear()
+    # XACA-0401: the CORS refusal breadcrumb is warn-once, so a test that
+    # asserts on it must be able to re-arm it. Cleared here alongside the
+    # identity cache rather than in a separate reset nobody would remember.
+    _cors_refusal_warned.clear()
 
 
 def _host_is_local_identity(host_header) -> bool:
@@ -1054,6 +1058,50 @@ def _cors_header_value_is_safe(value: str) -> bool:
     return not any(c in value for c in '\r\n\t "\'<>\\')
 
 
+_cors_refusal_warned = set()
+
+
+def _log_cors_refusal(host_header, origin_header) -> None:
+    """XACA-0401 UX finding 011 — leave ONE operator-facing breadcrumb per
+    distinct (Host, Origin) pair when CORS refuses a caller.
+
+    THE PROBLEM THIS SOLVES. A refused cross-origin request surfaces to the
+    human as an opaque browser-console CORS error with no server-side signal,
+    and the fix — adding the host to AITEAMFORGE_LCARS_ALLOWED_HOSTS — is not
+    discoverable from that error. serve_auth_key() already logs exactly this
+    kind of pointer for its Host refusals, and it is the SAME underlying
+    check; the inconsistency was the gap.
+
+    WHY WARN-ONCE IS NOT OPTIONAL. _send_cors_headers() runs on ~53 endpoints
+    on every single response. An unconditional log would emit thousands of
+    lines for one misconfigured origin and bury the very signal it exists to
+    provide — the log would become the noise. Keyed on the pair, so a second
+    distinct misconfiguration still reports.
+
+    NEVER logs credentials, bodies, or full requests — only the two header
+    values that decide the outcome, which the caller already controls.
+    """
+    if not origin_header:
+        return  # not a CORS request at all; nothing was refused.
+    key = (str(host_header), str(origin_header))
+    if key in _cors_refusal_warned:
+        return
+    if len(_cors_refusal_warned) > 256:
+        # Bounded: a hostile caller rotating Origins must not grow this set
+        # without limit. Past the cap we stop recording, not stop serving.
+        return
+    _cors_refusal_warned.add(key)
+    print(
+        "[LCARS] CORS: refused cross-origin request — Host "
+        f"{host_header!r} / Origin {origin_header!r} is not a local identity "
+        "for this machine, so no Access-Control-Allow-Origin was sent and the "
+        "browser will hide the response from the calling page. If this is a "
+        "legitimate way to reach LCARS, add the host to "
+        "AITEAMFORGE_LCARS_ALLOWED_HOSTS. (Logged once per Host/Origin pair.)",
+        file=sys.stderr,
+    )
+
+
 def _resolve_cors_origin(host_header, origin_header):
     """Return the value for Access-Control-Allow-Origin, or None to omit it.
 
@@ -1083,14 +1131,43 @@ def _resolve_cors_origin(host_header, origin_header):
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         return None
 
-    # The calling page's own host must ALSO be a local identity. Port may
-    # differ (that is the cross-port localhost case we must keep working);
-    # host may not.
-    if not _host_is_local_identity(parsed.netloc):
+    # XACA-0401 review findings 015/013 (found independently by the reviewer
+    # and the tester): userinfo must be refused BEFORE any host comparison.
+    #
+    # `netloc` can carry a `user:pass@` prefix; a real `Host:` header
+    # structurally cannot. _normalize_host_header() was written for the
+    # latter shape and splits on the FIRST colon, so it reduces
+    # `localhost:8203@evil.com` to `localhost` — a local identity — and the
+    # whole origin then gets echoed back to evil.com. The helper is not
+    # wrong; feeding it a differently-shaped input silently inherited a
+    # weakness that was unreachable where it was originally used.
+    #
+    # Not reachable from a browser (the Fetch/URL spec never serializes
+    # userinfo into an Origin, and Origin is a forbidden header JS cannot
+    # set), so this is hardening, not a live bypass. It is still fixed here
+    # rather than deferred, because this function's entire job is validating
+    # hostile input, and "unreachable today" is a property of today's
+    # callers.
+    if parsed.username is not None or parsed.password is not None or '@' in parsed.netloc:
         return None
 
-    # Echo the Origin verbatim rather than rebuilding it. Rebuilding would
-    # force a scheme guess, and behind the funnel the guess is wrong.
+    # Compare on `hostname` — the stdlib's own parse, which strips userinfo
+    # and port by construction — rather than re-deriving it from netloc with
+    # a colon heuristic. Fixes the class, not just the one input.
+    if not _host_is_local_identity(parsed.hostname):
+        return None
+
+    # Port must be a plain integer if present. urlparse defers port parsing,
+    # so a malformed one raises here rather than riding along in the echo.
+    try:
+        parsed.port
+    except ValueError:
+        return None
+
+    # Echo the Origin rather than rebuilding it. Rebuilding would force a
+    # scheme guess, and behind the funnel the guess is wrong. netloc is safe
+    # to echo now: userinfo is refused above, and every other character was
+    # already screened by _cors_header_value_is_safe().
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
@@ -3647,10 +3724,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """
         host, origin = self._cors_request_headers()
         allowed = _resolve_cors_origin(host, origin)
+
+        # XACA-0401 review finding 016 — `Vary: Origin` is emitted on EVERY
+        # path, not only alongside ACAO. The response for a given URL is now
+        # origin-dependent whether or not the header is granted, so the
+        # REFUSED response needs the same cache key; most of these endpoints
+        # send `Cache-Control: no-cache` (revalidate), not `no-store`, so an
+        # origin-blind intermediary could otherwise store the header-less
+        # variant and replay it to a legitimate origin. do_OPTIONS() and
+        # serve_auth_key() already varied unconditionally — this helper, the
+        # one 53 sites depend on, did not. That inconsistency was the bug.
+        self.send_header('Vary', 'Origin')
         if allowed is None:
+            _log_cors_refusal(host, origin)
             return
         self.send_header('Access-Control-Allow-Origin', allowed)
-        self.send_header('Vary', 'Origin')
 
     def _send_auth_401(self):
         """Contract §4 — byte-exact 401. Deliberately does NOT reuse
@@ -3743,17 +3831,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         above — that widening was reverted for a documented reason).
         """
         self.send_response(200)
+        # XACA-0401 finding 016: now that _send_cors_headers() varies on every
+        # path, this handler no longer needs its own copy of the resolution
+        # flow — it delegates and adds only the preflight-specific grants.
         host, origin = self._cors_request_headers()
-        allowed = _resolve_cors_origin(host, origin)
-        if allowed is not None:
-            self.send_header('Access-Control-Allow-Origin', allowed)
-            self.send_header('Vary', 'Origin')
+        self._send_cors_headers()
+        if _resolve_cors_origin(host, origin) is not None:
             self.send_header('Access-Control-Allow-Methods',
                              'GET, POST, PUT, PATCH, DELETE, OPTIONS')
             self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        else:
-            # Still vary: the decision above depends on Origin.
-            self.send_header('Vary', 'Origin')
         self.end_headers()
 
     def do_POST(self):

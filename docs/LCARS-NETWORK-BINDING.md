@@ -12,6 +12,7 @@
 - [LCARS_TAILSCALE_IP Override](#lcars_tailscale_ip-override)
 - [Fail-Closed Behaviour](#fail-closed-behaviour)
 - [The `all` Escape Hatch](#the-all-escape-hatch)
+- [Cross-Origin (CORS) Access](#cross-origin-cors-access)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -174,6 +175,56 @@ only remaining line of defense.
 
 ---
 
+## Cross-Origin (CORS) Access
+
+Binding controls *which interfaces* the server listens on. CORS controls
+*which web pages* are allowed to read its responses. They are separate gates
+and you can pass one while the other refuses you.
+
+Neither server sends `Access-Control-Allow-Origin: *` any more. Both derive
+the answer from the request and **fail closed** — a caller that does not
+validate gets no header at all, which makes the browser hide the response
+body from the calling page.
+
+### LCARS dashboard — `AITEAMFORGE_LCARS_ALLOWED_HOSTS`
+
+The LCARS server allows a cross-origin read only when **both** the request's
+`Host` and the calling page's own `Origin` host are identities of this
+machine. That covers, without any configuration:
+
+- `localhost` and `*.localhost`
+- any IP literal (v4 or v6)
+- this machine's Tailscale/MagicDNS name (`*.ts.net`) and its hostname
+
+Cross-**port** on localhost is allowed on purpose — some LCARS pages fetch
+another instance's `/api/status` on a different port. Cross-**host** is not.
+
+If you legitimately reach LCARS under a name that is not auto-detected (a
+reverse proxy, a CNAME, a custom local domain), add it:
+
+```bash
+export AITEAMFORGE_LCARS_ALLOWED_HOSTS="lcars.internal.example,dash.local"
+```
+
+The same variable also governs `GET /api/auth-key`, so a name missing here
+will refuse both the key handoff and every cross-origin read.
+
+### Fleet Monitor — `FLEET_MONITOR_ALLOWED_ORIGINS`
+
+Fleet Monitor takes an explicit **origin** allow-list rather than deriving
+one, because it is not necessarily reached on localhost:
+
+```bash
+export FLEET_MONITOR_ALLOWED_ORIGINS="https://fleet.example,https://ops.example"
+```
+
+Unset or blank means **no cross-origin browser request is allowed** — the
+normal posture, since Fleet Monitor's own pages are same-origin and its
+reporters are CLI tools (`curl`, Node), which CORS does not govern at all.
+Entries are matched exactly, including scheme and port.
+
+---
+
 ## Troubleshooting
 
 **Dashboard works locally but not from another machine on the tailnet:**
@@ -196,6 +247,19 @@ only remaining line of defense.
   requirement. Either fix Tailscale, set `LCARS_TAILSCALE_IP` explicitly, or
   drop to `auto`/`loopback` if cross-machine access isn't actually needed
   right now.
+
+**A dashboard page loads but its data panels stay empty, and the browser
+console shows a CORS error:**
+- This is the CORS gate, not the bind gate — the page reached the server and
+  the server answered; the browser is withholding the body.
+- Look for the breadcrumb the server logs once per Host/Origin pair:
+  `grep '\[LCARS\] CORS:' <log>`. It names the exact `Host` and `Origin`
+  that were refused.
+- Fix by adding that host to `AITEAMFORGE_LCARS_ALLOWED_HOSTS` (LCARS) or the
+  origin to `FLEET_MONITOR_ALLOWED_ORIGINS` (Fleet Monitor). See
+  [Cross-Origin (CORS) Access](#cross-origin-cors-access).
+- If the log shows nothing at all, the request never reached the server —
+  that is a binding/firewall problem, not CORS.
 
 **General network troubleshooting** (Tailscale connectivity, firewall,
 service discovery) is covered in
