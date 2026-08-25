@@ -613,7 +613,45 @@ const app = express();
 //     fleet-monitor/server/public/` returns nothing.
 // So the set of requests this change can break is empty, while the set it
 // refuses is exactly the credentialed cross-origin preflight.
-app.use(cors({ allowedHeaders: ['Content-Type'] }));
+//
+// XACA-0401 (audit F-05-002): `origin` is now pinned too, not just
+// allowedHeaders. Bare `cors()` / an unset `origin` REFLECTS whatever the
+// browser sends and answers `Access-Control-Allow-Origin: <that origin>`,
+// which is the wildcard defect this ticket removes.
+//
+// DEFAULT IS "no cross-origin browser client exists" -- verified, not assumed:
+//   * fleet-monitor's own pages under server/public/ make 96 fetch() calls and
+//     NONE uses an absolute http(s) URL -- every one is relative, i.e. same
+//     origin. Same-origin requests never consult CORS at all, so pinning this
+//     cannot affect them.
+//   * No page in lcars-ui/ or server/public/ fetches this server cross-origin;
+//     the only absolute URLs in browser code are a jsDelivr script tag and an
+//     appleid.apple.com link, both outbound.
+//   * Every Authorization sender is a CLI (fleet-reporter.sh, kanban-reporter.sh,
+//     knowledge-reporter.sh, vault-fetch.sh, client/msg-client.js). curl and
+//     Node do not preflight and are entirely unaffected by CORS.
+// So the set of requests this refuses is exactly the cross-origin browser
+// request, and that set is empty in normal operation.
+//
+// ESCAPE HATCH: set FLEET_MONITOR_ALLOWED_ORIGINS to a comma-separated list of
+// exact origins to re-open specific ones without a code change. Unset/blank
+// means no origin is allowed. Mirrors AITEAMFORGE_LCARS_ALLOWED_HOSTS.
+const FLEET_MONITOR_ALLOWED_ORIGINS = (process.env.FLEET_MONITOR_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  allowedHeaders: ['Content-Type'],
+  // Fail closed: an origin not on the list gets NO Access-Control-Allow-Origin
+  // header. `cors` treats `false` as "omit the header", not "send *".
+  origin(origin, callback) {
+    // `origin` is undefined for same-origin and for non-browser callers
+    // (curl, Node) -- both must proceed untouched.
+    if (!origin) return callback(null, true);
+    return callback(null, FLEET_MONITOR_ALLOWED_ORIGINS.includes(origin));
+  },
+}));
 app.use(express.json({ limit: '10mb' }));
 
 /**

@@ -72,6 +72,15 @@ from server import (  # noqa: E402
 # Helpers
 # ---------------------------------------------------------------------------
 
+# XACA-0401: CORS is no longer a wildcard — Access-Control-Allow-Origin is
+# derived from the request and emitted ONLY when both the `Host` and the
+# `Origin` host are local identities. Tests that want a CORS header must
+# therefore present both headers; a handler built with no headers correctly
+# gets no ACAO at all.
+CORS_LOCAL_HEADERS = {"Host": "localhost:8203", "Origin": "http://localhost:8203"}
+CORS_FOREIGN_HEADERS = {"Host": "localhost:8203", "Origin": "http://evil.example"}
+
+
 def _make_handler(path="/", method="GET", body=b"", headers=None):
     """
     Construct an LCARSHandler instance with all socket I/O mocked out.
@@ -232,7 +241,8 @@ class TestCORSOptions(unittest.TestCase):
     """CORS preflight (OPTIONS) handling."""
 
     def test_options_returns_200_with_cors_headers(self):
-        handler, buf = _make_handler(path="/api/status", method="OPTIONS")
+        handler, buf = _make_handler(path="/api/status", method="OPTIONS",
+                                     headers=dict(CORS_LOCAL_HEADERS))
         handler.do_OPTIONS()
 
         self.assertEqual(handler._response_code, 200)
@@ -257,7 +267,8 @@ class TestCORSOptions(unittest.TestCase):
         # consumer this header value protects, only an attack surface it
         # opens. This assertion is the guard against silently re-widening
         # it "to fix CORS" later without re-deriving that finding.
-        handler, buf = _make_handler(path="/api/status", method="OPTIONS")
+        handler, buf = _make_handler(path="/api/status", method="OPTIONS",
+                                     headers=dict(CORS_LOCAL_HEADERS))
         handler.do_OPTIONS()
 
         allow_headers = next(
@@ -268,15 +279,33 @@ class TestCORSOptions(unittest.TestCase):
         self.assertNotIn("Authorization", allow_headers)
         self.assertNotIn("X-API-Key", allow_headers)
 
-    def test_cors_origin_is_wildcard(self):
-        handler, buf = _make_handler(path="/api/status", method="OPTIONS")
+    def test_cors_origin_echoes_validated_origin(self):
+        """XACA-0401 (audit F-05-002) — this assertion used to read
+        `assertEqual(cors_origin, "*")`, i.e. it pinned the defect in place.
+        The wildcard is what let any page the user visited read this API's
+        responses. The header now echoes the caller's own origin, and only
+        after both Host and Origin are confirmed local identities."""
+        handler, buf = _make_handler(path="/api/status", method="OPTIONS",
+                                     headers=dict(CORS_LOCAL_HEADERS))
         handler.do_OPTIONS()
 
         cors_origin = next(
             (v for k, v in handler._headers_buffer if k == "Access-Control-Allow-Origin"),
             None,
         )
-        self.assertEqual(cors_origin, "*")
+        self.assertEqual(cors_origin, "http://localhost:8203")
+        self.assertNotEqual(cors_origin, "*")
+
+    def test_cors_origin_absent_for_foreign_origin(self):
+        """Fail closed: a refused origin gets NO header, never a wildcard."""
+        handler, buf = _make_handler(path="/api/status", method="OPTIONS",
+                                     headers=dict(CORS_FOREIGN_HEADERS))
+        handler.do_OPTIONS()
+
+        names = [k for k, _ in handler._headers_buffer]
+        self.assertNotIn("Access-Control-Allow-Origin", names)
+        self.assertNotIn("Access-Control-Allow-Methods", names)
+        self.assertEqual(handler._response_code, 200)
 
 
 # ---------------------------------------------------------------------------
@@ -293,12 +322,14 @@ class TestSendJsonResponse(unittest.TestCase):
         header_names_values = dict(handler._headers_buffer)
         self.assertEqual(header_names_values.get("Content-Type"), "application/json")
 
-    def test_sends_cors_wildcard(self):
-        handler, buf = _make_handler()
+    def test_sends_cors_echoed_origin(self):
+        handler, buf = _make_handler(headers=dict(CORS_LOCAL_HEADERS))
         handler._send_json_response({"key": "value"})
 
         header_names_values = dict(handler._headers_buffer)
-        self.assertEqual(header_names_values.get("Access-Control-Allow-Origin"), "*")
+        self.assertEqual(header_names_values.get("Access-Control-Allow-Origin"),
+                         "http://localhost:8203")
+        self.assertEqual(header_names_values.get("Vary"), "Origin")
 
     def test_default_status_is_200(self):
         handler, buf = _make_handler()
@@ -515,10 +546,21 @@ class TestServeStatus(unittest.TestCase):
         self.assertIn("ui_dir", data)
 
     def test_status_cors_header_present(self):
+        handler, buf = _make_handler(path="/api/status",
+                                     headers=dict(CORS_LOCAL_HEADERS))
+        handler.serve_status()
+        header_map = dict(handler._headers_buffer)
+        self.assertEqual(header_map.get("Access-Control-Allow-Origin"),
+                         "http://localhost:8203")
+        self.assertEqual(header_map.get("Vary"), "Origin")
+
+    def test_status_cors_header_absent_without_origin(self):
+        """A request with no Origin is not a CORS request — emit nothing
+        rather than falling back to a wildcard (XACA-0401)."""
         handler, buf = _make_handler(path="/api/status")
         handler.serve_status()
         header_map = dict(handler._headers_buffer)
-        self.assertEqual(header_map.get("Access-Control-Allow-Origin"), "*")
+        self.assertIsNone(header_map.get("Access-Control-Allow-Origin"))
 
     def test_status_200(self):
         handler, buf = _make_handler(path="/api/status")
@@ -598,7 +640,7 @@ class TestServeKanbanData(unittest.TestCase):
 
     def test_cors_header_present(self):
         board_data = {"team": "academy", "backlog": []}
-        handler, buf = _make_handler()
+        handler, buf = _make_handler(headers=dict(CORS_LOCAL_HEADERS))
         with patch("server.get_board_file") as mock_gbf:
             mock_path = MagicMock(spec=Path)
             mock_path.exists.return_value = True
@@ -607,7 +649,8 @@ class TestServeKanbanData(unittest.TestCase):
                 handler.serve_kanban_data("academy")
 
         header_map = dict(handler._headers_buffer)
-        self.assertEqual(header_map.get("Access-Control-Allow-Origin"), "*")
+        self.assertEqual(header_map.get("Access-Control-Allow-Origin"),
+                         "http://localhost:8203")
 
 
 # ---------------------------------------------------------------------------

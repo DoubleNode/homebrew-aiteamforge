@@ -1010,6 +1010,90 @@ def _host_is_local_identity(host_header) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# XACA-0401 (audit F-05-002, and the CORS half of the F-04-002 cross-ref) —
+# replacement for the 54 `Access-Control-Allow-Origin: *` headers this server
+# used to emit on every response.
+#
+# WHY NOT A STATIC ALLOWLIST. This backend cannot know its own *external*
+# scheme, host or port: the Tailscale funnel path-prefix routes in
+# PATH_PREFIXES terminate HTTPS upstream and forward plain HTTP with the
+# original Host preserved (see _origin_matches_host()). A hardcoded
+# "http://localhost:<port>" would therefore refuse every funnel-reached page.
+# So the value is DERIVED from the request and echoed back.
+#
+# WHY BOTH SIDES ARE CHECKED INDEPENDENTLY. The obvious implementation is
+# "echo Origin when _origin_matches_host(origin, host)". That is too strict
+# and would break the only two legitimate cross-origin callers we have:
+# redirect.html and agent-panel-router.html both fetch
+# `http://localhost:<api-port>/api/status` from a page served on a DIFFERENT
+# localhost port, so Origin and Host disagree on the port by design.
+#
+# The rule used here instead: BOTH the request's `Host` AND the `Origin`
+# header's own host must independently satisfy _host_is_local_identity().
+# Cross-PORT is then allowed; cross-HOST is not. This keeps the two callers
+# working while still refusing the DNS-rebinding case that motivated the
+# allowlist in the first place — `evil.com` resolved to 127.0.0.1 yields
+# `Origin: http://evil.com:8203`, and `evil.com` is not a local identity, so
+# it is refused here exactly as it is refused at GET /api/auth-key.
+#
+# FAIL CLOSED. Every rejection path returns None, and a None return means the
+# caller emits NO Access-Control-Allow-Origin header at all. It must never
+# fall back to '*' — that is the defect this ticket exists to remove.
+# ---------------------------------------------------------------------------
+
+def _cors_header_value_is_safe(value: str) -> bool:
+    """Reject anything that could split or forge a response header.
+
+    The ACAO value is echoed from attacker-influenced input (`Origin`), so it
+    is validated before it reaches send_header(). CR/LF are the response-
+    splitting vector; the rest are simply never legal in an origin.
+    """
+    if not value or len(value) > 253 + 16:
+        return False
+    return not any(c in value for c in '\r\n\t "\'<>\\')
+
+
+def _resolve_cors_origin(host_header, origin_header):
+    """Return the value for Access-Control-Allow-Origin, or None to omit it.
+
+    None means OMIT THE HEADER — never substitute '*'.
+
+    A request with no `Origin` header is not a CORS request; the browser will
+    not look for ACAO on the response, so None is returned and nothing is
+    emitted. Same-origin fetches (all 87 in-page mutating calls) fall in this
+    bucket or are exempt from the check entirely, and are unaffected.
+    """
+    if not origin_header:
+        return None
+
+    # The server itself must be reached under a name that identifies THIS
+    # machine. This is the anti-rebinding gate; see _host_is_local_identity().
+    if not _host_is_local_identity(host_header):
+        return None
+
+    origin = str(origin_header).strip()
+    if not _cors_header_value_is_safe(origin):
+        return None
+
+    try:
+        parsed = urlparse(origin)
+    except Exception:
+        return None
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return None
+
+    # The calling page's own host must ALSO be a local identity. Port may
+    # differ (that is the cross-port localhost case we must keep working);
+    # host may not.
+    if not _host_is_local_identity(parsed.netloc):
+        return None
+
+    # Echo the Origin verbatim rather than rebuilding it. Rebuilding would
+    # force a scheme guess, and behind the funnel the guess is wrong.
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 def _ensure_private_dir(path: Path) -> None:
     """Create *path* (and any parents) restricted to the owner, and tighten its
     permissions even when it already existed.
@@ -3517,6 +3601,28 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         return bearer_cred if bearer_cred is not None else api_key_cred
 
+    def _send_cors_headers(self):
+        """XACA-0401 — emit the CORS headers for this request.
+
+        Replaces `send_header('Access-Control-Allow-Origin', '*')`. Emits
+        nothing at all when the origin does not resolve (fail closed).
+
+        `Vary: Origin` is emitted whenever ACAO is, and is NOT optional: the
+        response body for a given URL is now origin-dependent, so an
+        intermediary that caches without varying could hand one origin's
+        response to another.
+
+        MUST NOT be called from serve_auth_key() — that handler's deliberate
+        absence of any ACAO header is load-bearing. See the block comment on
+        _origin_matches_host().
+        """
+        allowed = _resolve_cors_origin(
+            self.headers.get('Host'), self.headers.get('Origin'))
+        if allowed is None:
+            return
+        self.send_header('Access-Control-Allow-Origin', allowed)
+        self.send_header('Vary', 'Origin')
+
     def _send_auth_401(self):
         """Contract §4 — byte-exact 401. Deliberately does NOT reuse
         _send_json_response(): that helper emits `Content-Type: application/
@@ -3529,7 +3635,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         body = _AUTH_401_BODY
         self.send_response(401)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.send_header('WWW-Authenticate', 'Bearer')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -3595,11 +3701,30 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         'Content-Type' only (pre-ticket value) — same-origin requests never
         trigger a CORS preflight regardless of what this header allows, so the
         86 in-page mutating fetches are unaffected either way.
+
+        XACA-0401: the preflight response is now origin-conditional. When
+        _resolve_cors_origin() refuses the caller, this handler still answers
+        200 (an OPTIONS request is legal and the browser is entitled to a
+        reply) but advertises NOTHING: no Allow-Origin, and critically no
+        Allow-Methods. Advertising 'POST, PUT, PATCH, DELETE' to an origin we
+        are about to refuse is pure disclosure — the browser blocks the real
+        request anyway once ACAO is absent, so the method list is only ever
+        read by a caller deciding what to try next. Allow-Headers stays
+        pinned to 'Content-Type'; do NOT widen it (see the P1 CORRECTION
+        above — that widening was reverted for a documented reason).
         """
         self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        allowed = _resolve_cors_origin(
+            self.headers.get('Host'), self.headers.get('Origin'))
+        if allowed is not None:
+            self.send_header('Access-Control-Allow-Origin', allowed)
+            self.send_header('Vary', 'Origin')
+            self.send_header('Access-Control-Allow-Methods',
+                             'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        else:
+            # Still vary: the decision above depends on Origin.
+            self.send_header('Vary', 'Origin')
         self.end_headers()
 
     def do_POST(self):
@@ -3986,7 +4111,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/json')
-                        self.send_header('Access-Control-Allow-Origin', '*')
+                        self._send_cors_headers()
                         self.end_headers()
                         self.wfile.write(json.dumps({"success": True}).encode())
                     else:
@@ -4041,7 +4166,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             if incomplete:
                                 self.send_response(400)
                                 self.send_header('Content-Type', 'application/json')
-                                self.send_header('Access-Control-Allow-Origin', '*')
+                                self._send_cors_headers()
                                 self.end_headers()
                                 self.wfile.write(json.dumps({
                                     "error": "Cannot complete item with incomplete subitems",
@@ -4134,7 +4259,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/json')
-                        self.send_header('Access-Control-Allow-Origin', '*')
+                        self._send_cors_headers()
                         self.end_headers()
                         self.wfile.write(json.dumps({"success": True}).encode())
                     else:
@@ -4246,7 +4371,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self._send_cors_headers()
                     self.end_headers()
                     self.wfile.write(json.dumps({"success": True}).encode())
                 finally:
@@ -5126,7 +5251,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """Helper to send JSON response with CORS headers"""
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
 
@@ -6130,7 +6255,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({
@@ -6165,7 +6290,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps(release, indent=2).encode())
@@ -6213,7 +6338,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({"items": items}, indent=2).encode())
@@ -6227,7 +6352,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps(progress, indent=2).encode())
@@ -6258,7 +6383,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({"items": unassigned}, indent=2).encode())
@@ -6280,7 +6405,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({"items": items, "releaseId": release_id}, indent=2).encode())
@@ -6319,7 +6444,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             # XACA-0163: no-store — this endpoint's response is invalidated by
             # POST /api/releases/flow-config. Caching it made flow-config saves
             # appear successful but leave the UI rendering stale stages.
@@ -6435,7 +6560,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(201)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps(release, indent=2).encode())
 
@@ -6523,7 +6648,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "itemsCount": len(items)}).encode())
 
@@ -6829,7 +6954,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({
                 "success": True,
@@ -6902,7 +7027,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({
                 "success": True,
@@ -7111,7 +7236,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps(release, indent=2).encode())
 
@@ -7186,7 +7311,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps(data['flowConfig'], indent=2).encode())
 
@@ -7277,7 +7402,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({
                 "success": True,
@@ -7369,7 +7494,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({
                 "success": True,
@@ -7441,7 +7566,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self._send_cors_headers()
                     self.end_headers()
                     self.wfile.write(json.dumps({
                         "success": True,
@@ -7525,7 +7650,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self._send_cors_headers()
                     self.end_headers()
                     self.wfile.write(json.dumps({
                         "success": True,
@@ -7680,7 +7805,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "archived": release_id}).encode())
 
@@ -7743,7 +7868,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "removed": item_id}).encode())
 
@@ -8604,7 +8729,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({
                 "epics": result_epics,
@@ -9080,7 +9205,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps(payload, indent=2).encode())
@@ -9116,7 +9241,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps(epic, indent=2).encode())
 
@@ -9130,7 +9255,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({"items": items}, indent=2).encode())
 
@@ -10958,7 +11083,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # Return empty results for non-existent team
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._send_cors_headers()
                 self.send_header('Cache-Control', 'no-cache')
                 self.end_headers()
                 self.wfile.write(json.dumps({
@@ -11084,7 +11209,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({
@@ -11140,7 +11265,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 epic['name'] = epic['title']
                 self.send_response(201)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._send_cors_headers()
                 self.end_headers()
                 self.wfile.write(json.dumps(epic, indent=2).encode())
             else:
@@ -11189,7 +11314,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     epic['name'] = epic['title']
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._send_cors_headers()
                 self.end_headers()
                 self.wfile.write(json.dumps(epic, indent=2).encode())
             else:
@@ -11296,7 +11421,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if save_ok:
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._send_cors_headers()
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": True, "deleted": epic_id}).encode())
             else:
@@ -11331,7 +11456,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({"success": True}).encode())
 
@@ -11365,7 +11490,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "removed": item_id}).encode())
 
@@ -15150,7 +15275,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._send_cors_headers()
                 self.send_header('Cache-Control', 'no-cache')
                 self.end_headers()
                 self.wfile.write(json.dumps(data, indent=2).encode())
@@ -15170,7 +15295,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(json.dumps({"teams": sorted(teams)}).encode())
 
@@ -15189,7 +15314,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(json.dumps(status, indent=2).encode())
 
@@ -15217,7 +15342,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         }
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(json.dumps(payload, indent=2).encode())
 
@@ -15521,7 +15646,7 @@ end tell
                     data["badges"] = _fetch_amb_badges(amb_handle)
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._send_cors_headers()
                 self.send_header('Cache-Control', 'no-cache')
                 self.end_headers()
                 self.wfile.write(json.dumps(data).encode())
@@ -15531,7 +15656,7 @@ end tell
         # No data yet
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         self.wfile.write(json.dumps({"status": "waiting"}).encode())
@@ -15554,7 +15679,7 @@ end tell
             print(f"[LCARS] /api/knowledge-stats error: {exc}\n{traceback.format_exc()}")
             self.send_response(500)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(exc)}).encode())
@@ -15691,7 +15816,7 @@ end tell
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         self.wfile.write(json.dumps(result, indent=2).encode())
@@ -16790,7 +16915,7 @@ end tell
         self.send_header('Content-Disposition', f'attachment; filename="{entry["filename"]}"')
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', 'no-store')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(data)
 
@@ -16811,7 +16936,7 @@ end tell
         self.send_header('Content-Type', 'application/zip')
         self.send_header('Content-Disposition', f'attachment; filename="{job["filename"]}"')
         self.send_header('Content-Length', str(file_path.stat().st_size))
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.end_headers()
 
         with open(file_path, 'rb') as f:
@@ -17630,7 +17755,7 @@ end tell
             f'attachment; filename="{job["filename"]}"',
         )
         self.send_header('Content-Length', str(file_path.stat().st_size))
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.end_headers()
 
         with open(file_path, 'rb') as f:
@@ -18139,7 +18264,7 @@ end tell
         self.send_response(_status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         # XACA-0395-007 P1 correction: reverted to 'Content-Type' only (see
         # do_OPTIONS for the full rationale) — no legitimate cross-origin
@@ -18169,7 +18294,7 @@ end tell
         self.send_response(_status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         # XACA-0395-007 P1 correction: reverted to 'Content-Type' only (see
         # do_OPTIONS for the full rationale) — no legitimate cross-origin
@@ -18242,7 +18367,7 @@ end tell
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         self.wfile.write(json.dumps(status, indent=2).encode())
@@ -18311,7 +18436,7 @@ end tell
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps(response, indent=2).encode())
@@ -18490,7 +18615,7 @@ end tell
             print(f"[LCARS] /api/knowledge-stats error: {exc}\n{traceback.format_exc()}")
             self.send_response(500)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(exc)}).encode())
@@ -18761,7 +18886,7 @@ end tell
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         self.wfile.write(json.dumps(result, indent=2).encode())
