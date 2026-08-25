@@ -489,8 +489,11 @@ body {
        CORNER. align-items/justify-content:flex-end were already correct, but the
        default line-height's leading plus 6px of bottom padding left the text
        floating enough to read as vertically centred. */
-    padding: 6px 12px 3px;
-    line-height: 1;
+    /* Seating matched to the DASHBOARD buttons (.sidebar-link, theme stylesheet):
+       6px bottom padding and NO line-height override. line-height:1 removes the
+       leading that lifts the glyphs, and 3px bottom padding dropped them lower
+       still -- together those sat the label visibly below the dashboard links. */
+    padding: 6px 12px;
     /* Fixed height, and no flex grow OR shrink, so every button renders exactly
        the same size regardless of how many siblings share the column. min-height
        alone did not guarantee that. */
@@ -1533,8 +1536,8 @@ body {
        the sidebar buttons. These were previously centred on both axes. */
     align-items: flex-end;
     justify-content: flex-end;
-    line-height: 1;
-    padding: 6px 12px 3px;
+    /* Same seating as the sidebar and dashboard buttons -- see .sidebar-button. */
+    padding: 6px 12px;
     /* Type matched to the Kanban's .legend-pill exactly: 12px / 600 / 1px. */
     font-size: 12px;
     font-weight: 600;
