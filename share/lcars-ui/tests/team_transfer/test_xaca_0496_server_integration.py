@@ -65,9 +65,51 @@ def _parse_counts(output: str) -> dict[str, int]:
     return counts
 
 
-def test_subprocess_chain_produces_parseable_summary(tmp_path):
+def _seed_minimal_finance_repo(home: Path) -> None:
+    """Create one git-tracked file under <home>/finance/personal.
+
+    The generator's default '--team finance' config points at
+    <HOME>/finance/personal as its git_repo domain root. On a real developer
+    machine that directory is a populated personal repo, so the generator
+    finds real files and the verifier's SUMMARY block reports non-zero
+    counts. On a clean HOME (a fresh checkout, or a CI runner) that
+    directory doesn't exist, so every domain reports 0 files and every
+    PASS/WARN/FAIL line in the SUMMARY block is a literal 0 — which still
+    matches the parsing regex's *shape* but defeats the point of this test,
+    which is to prove the parser extracts non-trivial counts (XACA-0952-002).
+    Seeding a trivial repo makes the test hermetic instead of depending on
+    ambient machine state.
+    """
+    repo = home / "finance" / "personal"
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "README.md").write_text("XACA-0952-002 fixture file\n")
+    env = os.environ.copy()
+    env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "xaca-0952-fixture"
+    env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "xaca-0952-fixture@example.invalid"
+    subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True, capture_output=True)
+    subprocess.run(["git", "add", "README.md"], cwd=repo, env=env, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "xaca-0952 fixture"],
+        cwd=repo, env=env, check=True, capture_output=True,
+    )
+
+
+def test_subprocess_chain_produces_parseable_summary(tmp_path, monkeypatch):
     """Generator → verifier subprocess pipeline yields a SUMMARY block whose
-    PASS/WARN/FAIL lines the server's regex can extract."""
+    PASS/WARN/FAIL lines the server's regex can extract.
+
+    Runs against a hermetic HOME seeded with one real git-tracked file
+    (XACA-0952-002) rather than the ambient dev machine's real
+    ~/finance/personal content — the previous version of this test had no
+    monkeypatch.setenv("HOME", ...) at all, so it silently depended on
+    whatever real personal-team content happened to exist on the machine
+    running it. On a clean HOME (fresh checkout, CI runner) the generator
+    finds zero files in every domain, the verifier's SUMMARY block is
+    PASS:0/WARN:0/FAIL:0, and sum(counts.values()) is 0 — a false failure of
+    the parser contract this test exists to guard, not of the parser itself.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _seed_minimal_finance_repo(tmp_path)
     out_path = tmp_path / "manifest.json"
     exit_code, output = _run_chain(out_path)
     assert exit_code in (0, 1), f"verifier exited unexpectedly: {exit_code}\n{output}"
@@ -78,6 +120,10 @@ def test_subprocess_chain_produces_parseable_summary(tmp_path):
         f"verifierSummary. Output:\n{output[:1000]}"
     )
     assert "PASS" in counts and "FAIL" in counts
+    assert counts["PASS"] >= 1, (
+        "Expected the seeded fixture file to verify as PASS at least once — "
+        f"a zero here means the seeded repo wasn't picked up. Output:\n{output[:1000]}"
+    )
 
 
 def test_finance_team_has_zero_cross_domain_duplicates(tmp_path, monkeypatch):

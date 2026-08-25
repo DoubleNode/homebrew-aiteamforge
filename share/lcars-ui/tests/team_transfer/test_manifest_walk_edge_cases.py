@@ -549,58 +549,128 @@ def _build_synthetic_zip_for_edge(discovered: int = 0, expected: int = 0) -> byt
 # Test 4 — Oversized zip pre-check: Content-Length > 500 MB → HTTP 400
 # ---------------------------------------------------------------------------
 
-def test_oversized_upload_content_length_returns_400(edge_server: _LCARSServer):
-    """A request with Content-Length > 500*1024*1024 must be rejected with HTTP 400.
+def test_oversized_upload_content_length_returns_413(edge_server: _LCARSServer):
+    """A request with Content-Length > 500*1024*1024 must be rejected with HTTP 413.
 
-    We use Content-Length header trickery: send a tiny real body but declare a
-    Content-Length of 500 MB + 1 bytes.  The server checks Content-Length BEFORE
+    We use Content-Length header trickery: declare a Content-Length of 500 MB + 1
+    bytes and send NO body at all.  The server checks Content-Length BEFORE
     reading the body, so the request is rejected immediately — we never actually
     transmit 500 MB of data.
 
-    Expected: HTTP 400 with error 'Invalid or too-large upload (max 500 MB)'.
+    XACA-0952-002: this test previously asserted HTTP 400 with error
+    'Invalid or too-large upload (max 500 MB)', which was do_POST's own
+    handle_import_upload-level guard (server.py, was written against PR #433 /
+    XACA-0520, predates PR #607). PR #607 (XACA-0387) added a global 50 MiB
+    Content-Length cap that now runs unconditionally at the top of do_POST,
+    ahead of route dispatch — for ANY Content-Length above 50 MiB (including
+    this test's 500 MiB + 1), that global guard intercepts first and returns
+    413 "Request body too large", so the handler's own 500 MiB/400 check
+    (still present in the source, now unreachable for this case) never runs.
+    Updated to assert the now-authoritative behaviour. See also the negative
+    control below, which proves the boundary that actually governs is 50 MiB,
+    not 500 MB — a value in between the two would have kept this test passing
+    by coincidence.
+
+    XACA-0952-005 FIX 2 follow-up: this test previously sent a small real
+    multipart body (~100 bytes) alongside the oversized declared
+    Content-Length — the same "declared vs actual mismatch, real bytes left
+    unread at connection close" shape diagnosed and fixed for
+    test_zero_content_length_returns_400 below (do_POST's cap check rejects
+    on the DECLARED header alone, before any rfile.read(), so those ~100
+    bytes were always left unread when the HTTP/1.0 connection closes,
+    which can race an RST against the client's read of the response under
+    load). Sending no body at all removes that hazard; the assertion still
+    exercises exactly the header-based guard under test — server.py's check
+    reads only the parsed Content-Length header, never the actual bytes on
+    the wire, so this changes nothing about what is being proven.
+
+    Expected: HTTP 413 with error mentioning the request body is too large.
     """
     import urllib.request
     import urllib.error
 
-    # 500 MB + 1 byte in the header — the actual body is tiny.
+    # 500 MB + 1 byte in the header — no body is actually sent (see docstring).
     oversized_cl = str(500 * 1024 * 1024 + 1)
-
-    # A real (small) multipart body so the connection doesn't fail for protocol reasons.
     boundary = b"----OversizeTestBoundary"
-    tiny_body = (
-        b"--" + boundary + b"\r\n"
-        + b'Content-Disposition: form-data; name="file"; filename="oversize.zip"\r\n'
-        + b"Content-Type: application/zip\r\n"
-        + b"\r\n"
-        + b"PK\x03\x04"  # minimal zip magic
-        + b"\r\n"
-        + b"--" + boundary + b"--\r\n"
-    )
 
     req = urllib.request.Request(
         edge_server.url("/api/import/upload"),
-        data=tiny_body,
+        data=None,  # Declared Content-Length is a lie; send nothing on the wire.
         headers={
             "Content-Type": f"multipart/form-data; boundary={boundary.decode()}",
-            # Lie: claim 500MB+1 even though we only send tiny_body.
+            # Lie: claim 500MB+1 even though we send no body.
             "Content-Length": oversized_cl,
         },
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             status = resp.status
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         status = exc.code
         body = json.loads(exc.read().decode("utf-8"))
 
-    assert status == 400, (
-        f"Expected HTTP 400 for oversized upload (Content-Length={oversized_cl}); "
+    assert status == 413, (
+        f"Expected HTTP 413 for oversized upload (Content-Length={oversized_cl}); "
         f"got {status}.\nResponse: {body}"
     )
-    assert "too-large" in body.get("error", "").lower() or "500" in body.get("error", ""), (
-        f"400 response must mention 'too-large' or '500 MB'; got: {body}"
+    assert "too large" in body.get("error", "").lower(), (
+        f"413 response must mention the body being too large; got: {body}"
+    )
+
+
+def test_upload_content_length_between_50mib_and_500mib_returns_413(edge_server: _LCARSServer):
+    """Negative control for the guard-ordering fix above (XACA-0952-002).
+
+    A Content-Length of 500 MB + 1 is oversized under BOTH the old
+    handle_import_upload-level 500 MiB check and the current do_POST-level
+    50 MiB check, so asserting 413 against it alone doesn't prove which
+    guard actually fired — the test above would pass by coincidence even if
+    the global 50 MiB guard were silently removed and only the old 500
+    MiB/400 handler check remained (it would then return 400, and a careless
+    fix could re-target that instead).
+
+    This uses 100 MiB — well under the OLD 500 MiB threshold (which would
+    have let it through to the handler) but well over the NEW 50 MiB
+    do_POST-level cap. A 413 here can only come from the global guard,
+    proving 50 MiB (not 500 MB) is the boundary that actually governs.
+
+    XACA-0952-005 FIX 2 follow-up: same "declared vs actual mismatch" hazard
+    as the sibling above — sends no body at all instead of a small real
+    multipart body, for the same reason (see that test's docstring). The
+    boundary under test (50 MiB do_POST cap) is unaffected: the guard reads
+    only the declared Content-Length header, never actual bytes received.
+    """
+    import urllib.request
+    import urllib.error
+
+    oversized_cl = str(100 * 1024 * 1024)  # 100 MiB: > 50 MiB cap, < 500 MiB old check
+    boundary = b"----MidRangeOversizeBoundary"
+
+    req = urllib.request.Request(
+        edge_server.url("/api/import/upload"),
+        data=None,  # Declared Content-Length is a lie; send nothing on the wire.
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary.decode()}",
+            "Content-Length": oversized_cl,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            status = resp.status
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        body = json.loads(exc.read().decode("utf-8"))
+
+    assert status == 413, (
+        f"Expected HTTP 413 for a 100 MiB upload (between the 50 MiB do_POST cap "
+        f"and the old 500 MiB handler check); got {status}.\nResponse: {body}"
+    )
+    assert "too large" in body.get("error", "").lower(), (
+        f"413 response must mention the body being too large; got: {body}"
     )
 
 
@@ -608,16 +678,43 @@ def test_zero_content_length_returns_400(edge_server: _LCARSServer):
     """Content-Length of 0 must also be rejected with HTTP 400.
 
     The guard: content_length <= 0 or content_length > 500 * 1024 * 1024.
+
+    XACA-0952-005/FIX 2 (flake diagnosis): this test previously sent a
+    non-empty ``tiny_body`` (the multipart closing boundary, ~24 bytes) while
+    declaring "Content-Length: 0". ``http.client`` honors an explicit
+    Content-Length header over the real body length, so those ~24 bytes were
+    genuinely written to the socket -- server.py's handler correctly never
+    reads them (it returns 400 before ever calling ``self.rfile.read()`` for
+    a non-positive declared length), which leaves them sitting unread in the
+    server's socket receive buffer at the moment the connection is torn down
+    (this handler is HTTP/1.0, so ``close_connection`` is True after every
+    response). Closing a socket with unread inbound data still queued makes
+    the OS send RST instead of a clean FIN; under a fast/idle test run the
+    client has already finished reading the (tiny) response before that RST
+    is processed, so it's invisible, but under CI/system load the larger
+    scheduling gap between "request sent" and "response read" gives the RST
+    more opportunity to land first, which can surface as an uncaught
+    ConnectionResetError/RemoteDisconnected instead of a clean 400 --
+    consistent with the ~1-in-10-24 full-suite flake rate observed in
+    XACA-0952-005's testing (never reproduced in isolation, where there's no
+    contention). A genuine zero-length upload sends no body bytes at all, so
+    sending none here removes that self-inflicted unread-data hazard while
+    still exercising exactly the guard under test (content_length <= 0).
+    The client read timeout is also bumped from 10s to the 30s already used
+    by every OTHER edge_server HTTP helper in this file (_http_post_file /
+    _http_post_json), since this module-scoped fixture is a single-threaded
+    TCPServer shared with several large-upload tests in the same run and a
+    10s-only outlier here had no measured margin to justify being tighter
+    than its neighbors.
     """
     import urllib.request
     import urllib.error
 
     boundary = b"----ZeroCLBoundary"
-    tiny_body = b"--" + boundary + b"--\r\n"
 
     req = urllib.request.Request(
         edge_server.url("/api/import/upload"),
-        data=tiny_body,
+        data=None,  # Content-Length: 0 means NO body bytes on the wire.
         headers={
             "Content-Type": f"multipart/form-data; boundary={boundary.decode()}",
             "Content-Length": "0",
@@ -625,7 +722,7 @@ def test_zero_content_length_returns_400(edge_server: _LCARSServer):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             status = resp.status
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:

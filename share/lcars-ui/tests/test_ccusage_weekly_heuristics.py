@@ -20,7 +20,10 @@ from __future__ import annotations
 import datetime
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 # Make lcars-ui importable regardless of cwd.
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -375,6 +378,31 @@ class TestBandThresholds(unittest.TestCase):
 
 class TestTimeToReset(unittest.TestCase):
     """seconds_remaining and time_to_reset are computed from week anchor + now_utc."""
+
+    def setUp(self):
+        # XACA-0952-002: evaluate_weekly() calls read_weekly_anchor() with no
+        # path override, which falls back to the module-level
+        # ch.WEEKLY_ANCHOR_PATH (~/.lcars/weekly-anchor.json by default). A
+        # real manual anchor file left over from interactive use on the
+        # machine running this suite takes priority over the injected
+        # now_utc (XACA-0253-002 priority-1 "MANUAL" branch), producing
+        # arbitrary offsets unrelated to the ISO-week-fallback math every
+        # test below asserts. Point the module attribute at a fresh temp
+        # dir with no such file for the duration of each test in this class
+        # so the ISO_FALLBACK branch is exercised deterministically
+        # regardless of what's on disk on the machine running the suite —
+        # this is a test-side monkeypatch of the module global that
+        # read_weekly_anchor() already supports overriding via its `_path`
+        # kwarg; evaluate_weekly() just doesn't thread that kwarg through,
+        # so patching the module attribute is the only injection point
+        # available without changing product code.
+        tmp_dir = tempfile.TemporaryDirectory(prefix="xaca0952-anchor-")
+        self.addCleanup(tmp_dir.cleanup)
+        patcher = mock.patch.object(
+            ch, "WEEKLY_ANCHOR_PATH", Path(tmp_dir.name) / "weekly-anchor.json"
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _eval_at_now(self, now_utc: datetime.datetime) -> dict:
         current = _make_current_week(week=_WEEK_ANCHOR)

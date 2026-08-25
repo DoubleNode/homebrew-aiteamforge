@@ -511,6 +511,15 @@ class TestDoPOSTRouteDispatchForPlan(unittest.TestCase):
         handler.handle_platform_gate_status = MagicMock()
         handler.handle_link_cr_to_release = MagicMock()
 
+        # XACA-0952-002: _auth_gate() (XACA-0395) is the mandatory first
+        # statement of do_POST and 401s before route dispatch whenever the
+        # machine running the suite has a real resolvable API key (e.g.
+        # ~/.aiteamforge/api-key) — this test predates that gate (PR #642
+        # predates PR #748) and carries no credential. This class exists to
+        # test route-dispatch/id-extraction, not auth, so bypass the gate
+        # rather than depend on the machine's auth posture being "open".
+        handler._auth_gate = lambda: True
+
         handler.do_POST()
         return handler
 

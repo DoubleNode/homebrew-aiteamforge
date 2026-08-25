@@ -1,6 +1,7 @@
 """Tests for the channel resolver."""
 from __future__ import annotations
 
+import contextlib
 import warnings
 from pathlib import Path
 import textwrap
@@ -185,30 +186,62 @@ def test_export_database_resolves_for_db_path(tmp_path):
     assert cfg.resolve(str(home / "finance" / "personal" / "data" / "finance.db")) == ch.EXPORT_DATABASE
 
 
+@contextlib.contextmanager
+def _alias_warning_reset(alias_name: str):
+    """Snapshot + temporarily discard one alias from
+    channels._deprecated_alias_warned, restoring the exact prior state on exit.
+
+    `_deprecated_alias_warned` is intentional process-lifetime state (see
+    channels.py's own module docstring: "tests that assert on the warning
+    must either run before any other code path accesses the alias, or reset
+    the set explicitly in a fixture" — this is that fixture). Without it,
+    these two tests are order-dependent: whichever OTHER test file happens to
+    read channels.AITEAMFORGE / channels.EXPORT first (directly or via any
+    codepath that touches the alias) "uses up" the one-time warning for the
+    rest of the process, so a reversed (or any non-default) collection order
+    can make these fail deterministically even though the product's
+    warn-once semantics are working exactly as designed (XACA-0952-005 FIX
+    3; reproduced 3/3 under reversed collection order).
+
+    Restoring the exact pre-test snapshot (not just re-adding the alias)
+    means this fixture never leaks a forced state into any other test —
+    it only removes ITS OWN test's interference with the module-global set.
+    """
+    saved = set(ch._deprecated_alias_warned)
+    ch._deprecated_alias_warned.discard(alias_name)
+    try:
+        yield
+    finally:
+        ch._deprecated_alias_warned.clear()
+        ch._deprecated_alias_warned.update(saved)
+
+
 def test_deprecated_aiteamforge_alias_emits_warning():
     """Accessing channels.AITEAMFORGE emits a DeprecationWarning and equals AITEAMFORGE_PRODUCT."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        alias_value = ch.AITEAMFORGE  # noqa: B018 — intentional access to test the alias
-    assert any(issubclass(w.category, DeprecationWarning) for w in caught), (
-        "Expected DeprecationWarning when accessing channels.AITEAMFORGE"
-    )
-    assert alias_value == ch.AITEAMFORGE_PRODUCT, (
-        "channels.AITEAMFORGE must equal AITEAMFORGE_PRODUCT"
-    )
+    with _alias_warning_reset("AITEAMFORGE"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            alias_value = ch.AITEAMFORGE  # noqa: B018 — intentional access to test the alias
+        assert any(issubclass(w.category, DeprecationWarning) for w in caught), (
+            "Expected DeprecationWarning when accessing channels.AITEAMFORGE"
+        )
+        assert alias_value == ch.AITEAMFORGE_PRODUCT, (
+            "channels.AITEAMFORGE must equal AITEAMFORGE_PRODUCT"
+        )
 
 
 def test_deprecated_export_alias_emits_warning():
     """Accessing channels.EXPORT emits a DeprecationWarning and equals EXPORT_KANBAN."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        alias_value = ch.EXPORT  # noqa: B018 — intentional access to test the alias
-    assert any(issubclass(w.category, DeprecationWarning) for w in caught), (
-        "Expected DeprecationWarning when accessing channels.EXPORT"
-    )
-    assert alias_value == ch.EXPORT_KANBAN, (
-        "channels.EXPORT must equal EXPORT_KANBAN"
-    )
+    with _alias_warning_reset("EXPORT"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            alias_value = ch.EXPORT  # noqa: B018 — intentional access to test the alias
+        assert any(issubclass(w.category, DeprecationWarning) for w in caught), (
+            "Expected DeprecationWarning when accessing channels.EXPORT"
+        )
+        assert alias_value == ch.EXPORT_KANBAN, (
+            "channels.EXPORT must equal EXPORT_KANBAN"
+        )
 
 
 # ── XACA-0487 regression: .git/ directories must always be excluded ──────────

@@ -108,8 +108,33 @@ for _mod_name, _stub in _stub_modules.items():
     if _mod_name not in sys.modules:
         sys.modules[_mod_name] = _stub
 
+# XACA-0952-002: `server.LCARS_TEAM` is baked from os.environ at import time
+# (server.py module level), and `sys.modules` caches the module — so whichever
+# test file's collection is first to `import server` in the whole pytest
+# session permanently fixes server.LCARS_TEAM for every other test file too.
+# This file needs that bake to be 'academy' (its parity assertions compare
+# against a hardcoded `export KB_TEAM=academy` CLI subprocess), so it used to
+# do `os.environ.setdefault('LCARS_TEAM', 'academy')` unconditionally before
+# importing — but setdefault only ever ADDS the key, never removes it, so once
+# this module was collected the process env stayed polluted with
+# LCARS_TEAM=academy for the rest of the session. That is a real, deterministic
+# (not machine/OS-dependent) test-pollution bug: test_server.py's
+# test_lcars_team_defaults_to_empty_string reads os.environ.get("LCARS_TEAM")
+# fresh at *run* time and compares it against server.LCARS_TEAM baked at
+# *import* time — those two diverge whenever this file's module-level mutation
+# ran after `server` had already been imported (with an empty LCARS_TEAM)
+# elsewhere but before that other test ran.
+#
+# Fix: only set LCARS_TEAM for the duration of the import, and only if it
+# wasn't already present in the environment — then restore exactly the prior
+# state. This preserves the "ensure server sees a non-empty team on a cold
+# import" behavior this file needs, without leaking into any other file's
+# view of os.environ.
+_lcars_team_env_was_set = 'LCARS_TEAM' in os.environ
 os.environ.setdefault('LCARS_TEAM', 'academy')
 import server  # noqa: E402
+if not _lcars_team_env_was_set:
+    os.environ.pop('LCARS_TEAM', None)
 
 
 # ---------------------------------------------------------------------------

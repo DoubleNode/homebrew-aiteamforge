@@ -32,6 +32,7 @@ Run with:
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import io
 import json
@@ -113,6 +114,39 @@ def _has_port_collision(teams: dict) -> bool:
     return False
 
 
+@contextlib.contextmanager
+def _isolated_dev_home():
+    """Patch Path.home() to an isolated HOME whose "dev-team" entry is a
+    symlink to THIS checkout's own REPO_ROOT.
+
+    ``resolve_kb_port_fix()`` (kanban-hooks/portfix_runner.py) locates
+    kb-port-fix.py via ``Path.home() / "dev-team" / "homebrew-tap" / ...``,
+    and its docstring notes ``Path.home()`` is read at call time "so tests
+    can patch it" — the integration tests below previously ran unpatched,
+    which only ever exercised the resolver correctly on a machine where
+    ``$HOME/dev-team`` happens to BE the checkout (true on the author's dev
+    Mac, false on a GitHub Actions runner where ``$HOME=/home/runner`` and
+    the checkout lives at ``/home/runner/work/dev-team/dev-team``, and also
+    false in a worktree unless an ambient ``~/dev-team`` main repo happens to
+    exist). XACA-0952-005 FIX 1: reproduced 5/5 of these tests FAILING under
+    ``HOME=<empty temp dir>``.
+
+    Building a fake HOME with a symlink to this checkout's own REPO_ROOT
+    makes the resolver's REAL dev-tree search execute against the actual tap
+    content under test, in both layouts this suite runs in: a worktree
+    (REPO_ROOT not named "dev-team", e.g. worktrees/xaca-0952) and a plain
+    checkout (REPO_ROOT named "dev-team", as on CI once
+    ``submodules: true`` populates it). Does NOT stub resolve_kb_port_fix()
+    itself — the real search logic still runs, so this is coverage, not a
+    bypass.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_home = Path(tmpdir)
+        (fake_home / "dev-team").symlink_to(REPO_ROOT, target_is_directory=True)
+        with patch.object(Path, "home", return_value=fake_home):
+            yield fake_home
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -121,16 +155,24 @@ class TestResolveKbPortFix(unittest.TestCase):
     """_resolve_kb_port_fix() resolution logic."""
 
     def test_finds_dev_tree_path(self):
-        """Returns the dev-tree kb-port-fix.py path when it exists."""
-        resolved = WIZARD._resolve_kb_port_fix()
-        # Dev-tree path: ~/dev-team/homebrew-tap/libexec/commands/kb-port-fix.py
-        # This test machine always has it (dev M3Pro).
-        if KB_PORT_FIX_PATH.exists():
+        """Returns the dev-tree kb-port-fix.py path when it exists.
+
+        Hermetic (XACA-0952-005 FIX 1): patched via _isolated_dev_home() so
+        this validates the resolver's REAL dev-tree search against THIS
+        checkout's own tap content, not whatever ~/dev-team the runner
+        machine happens to have.
+        """
+        if not KB_PORT_FIX_PATH.exists():
+            # Defensive fallback for a genuinely tap-less checkout (no
+            # homebrew-tap/ submodule content at all).
+            self.skipTest("kb-port-fix.py not found — dev tree required")  # pragma: no cover
+        with _isolated_dev_home():
+            # Assert inside the context: the temp HOME (and its "dev-team"
+            # symlink) is removed on exit, so resolved.exists() must be
+            # checked before that cleanup runs.
+            resolved = WIZARD._resolve_kb_port_fix()
             self.assertIsNotNone(resolved)
             self.assertTrue(resolved.exists(), f"Resolved path does not exist: {resolved}")
-        else:
-            # CI without a tap checkout — allowed to return None.
-            pass  # pragma: no cover
 
     def test_returns_none_when_not_found(self):
         """Returns None when neither dev-tree nor brew path exists."""
@@ -173,7 +215,8 @@ class TestRunPortCollisionFix(unittest.TestCase):
             buf = io.StringIO()
             with patch.dict(os.environ, {"AITEAMFORGE_CONFIG": str(cfg)}, clear=False):
                 with patch("sys.stdout", buf):
-                    WIZARD._run_port_collision_fix(cfg)
+                    with _isolated_dev_home():
+                        WIZARD._run_port_collision_fix(cfg)
             output = buf.getvalue()
 
             # File should still exist and be collision-free.
@@ -206,7 +249,8 @@ class TestRunPortCollisionFix(unittest.TestCase):
             with patch.dict(os.environ, {"AITEAMFORGE_CONFIG": str(cfg)}, clear=False):
                 buf = io.StringIO()
                 with patch("sys.stdout", buf):
-                    WIZARD._run_port_collision_fix(cfg)
+                    with _isolated_dev_home():
+                        WIZARD._run_port_collision_fix(cfg)
 
             after = _read_team_paths(cfg)
             self.assertFalse(
@@ -229,7 +273,8 @@ class TestRunPortCollisionFix(unittest.TestCase):
             with patch.dict(os.environ, {"AITEAMFORGE_CONFIG": str(cfg)}, clear=False):
                 buf = io.StringIO()
                 with patch("sys.stdout", buf):
-                    WIZARD._run_port_collision_fix(cfg)
+                    with _isolated_dev_home():
+                        WIZARD._run_port_collision_fix(cfg)
                 output = buf.getvalue()
 
         # The summary should mention either the port number or "renumbered"/"updated"
@@ -383,9 +428,11 @@ class TestPortfixRunnerModule(unittest.TestCase):
     """The shared portfix_runner module (single resolver/runner, PR #472)."""
 
     def test_resolve_finds_dev_tree_path(self):
+        """Hermetic (XACA-0952-005 FIX 1): see _isolated_dev_home() docstring."""
         if not KB_PORT_FIX_PATH.exists():
             self.skipTest("kb-port-fix.py not found — dev tree required")  # pragma: no cover
-        resolved = PORTFIX.resolve_kb_port_fix()
+        with _isolated_dev_home():
+            resolved = PORTFIX.resolve_kb_port_fix()
         self.assertIsNotNone(resolved)
         self.assertTrue(str(resolved).endswith("kb-port-fix.py"))
 
@@ -414,7 +461,8 @@ class TestPortfixRunnerModule(unittest.TestCase):
             _write_team_paths(cfg, teams)
             self.assertTrue(_has_port_collision(_read_team_paths(cfg)["teams"]))
             with patch("sys.stdout", io.StringIO()):
-                rc = PORTFIX.run_port_collision_fix(cfg)
+                with _isolated_dev_home():
+                    rc = PORTFIX.run_port_collision_fix(cfg)
             self.assertEqual(rc, 0)
             self.assertFalse(_has_port_collision(_read_team_paths(cfg)["teams"]))
 

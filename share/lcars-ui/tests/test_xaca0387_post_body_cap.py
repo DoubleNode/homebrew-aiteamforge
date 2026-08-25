@@ -106,6 +106,16 @@ def _make_post_handler(path="/api/toggle-collapsed", body=b"", headers=None):
     handler.log_message = MagicMock()
     handler.log_error = MagicMock()
 
+    # XACA-0952-002: _auth_gate() (XACA-0395) is the mandatory first
+    # statement of do_POST — it 401s before this guard (or anything else in
+    # do_POST) runs whenever the machine running the suite has a real
+    # resolvable API key (e.g. ~/.aiteamforge/api-key) and this mock request
+    # carries no credential. These tests exist to exercise the
+    # Content-Length guard specifically, not auth, so bypass it here rather
+    # than depend on the machine's auth posture being "open" for these
+    # assertions to mean what they say.
+    handler._auth_gate = lambda: True
+
     return handler, response_buf
 
 
