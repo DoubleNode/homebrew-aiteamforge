@@ -18002,6 +18002,9 @@ async function startTeamExport() {
     if (btn) btn.disabled = true;
     if (progressSection) progressSection.style.display = 'block';
     if (downloadSection) downloadSection.style.display = 'none';
+    // XACA-0954-023: the warning is a sibling of the panel, so hiding the panel
+    // does not hide it. Clear it explicitly or it describes the previous run.
+    clearExportMissingRoots();
     if (statusEl) statusEl.textContent = 'EXPORTING';
 
     updateExportProgress(0, 'EXPORTING...', 'Initializing...');
@@ -18138,6 +18141,22 @@ function renderExportMissingRoots(downloadSection, summary) {
     return box;
 }
 
+// XACA-0954-023: tear down the incomplete-export warning.
+//
+// Moving the box OUT of #export-download (to escape the no-wrap flex row) also
+// moved it out of the panel's lifecycle: startTeamExport() hides the panel with
+// `downloadSection.style.display = 'none'`, which no longer reaches a sibling,
+// and onExportFailed() never removed it at all. A stale INCOMPLETE banner from
+// one run therefore survived into the next -- describing a run it was not about.
+// That is this ticket's own defect class (false state shown to the operator),
+// relocated by the fix for it. Every path that starts, fails, or restarts an
+// export must call this.
+function clearExportMissingRoots() {
+    const existing = document.getElementById('export-missing-roots');
+    if (existing) existing.remove();
+    applyExportPanelState(document.getElementById('export-download'), false);
+}
+
 // XACA-0954-019: the download panel's chrome is success-green
 // (rgba(68,204,68,...)) and stayed green over an incomplete export, contradicting
 // the warning directly above it. Toned to the alert palette when incomplete and
@@ -18145,12 +18164,24 @@ function renderExportMissingRoots(downloadSection, summary) {
 // #secrets-export-download also uses -- is left alone.
 function applyExportPanelState(downloadSection, isIncomplete) {
     if (!downloadSection) return;
+    // XACA-0954-024: the container shell alone is not the panel an operator
+    // looks at. `.download-filename` and `.export-download-btn` carry hardcoded
+    // success-green, so toning only the border left a green filename and a green
+    // DOWNLOAD button sitting inside a red-bordered panel under a red warning.
+    // Not a contrast failure, but it half-answers the complaint that the panel
+    // "stayed green over an incomplete export".
+    const filenameEl = document.getElementById('export-download-filename');
+    const dlBtn = document.getElementById('export-download-btn');
     if (isIncomplete) {
         downloadSection.style.background = 'var(--lcars-alert-glow, rgba(255,102,102,0.12))';
         downloadSection.style.borderColor = 'var(--lcars-alert-red, #ff6666)';
+        if (filenameEl) filenameEl.style.color = 'var(--lcars-alert-red, #ff6666)';
+        if (dlBtn) dlBtn.style.background = 'var(--lcars-alert-red, #ff6666)';
     } else {
         downloadSection.style.background = '';
         downloadSection.style.borderColor = '';
+        if (filenameEl) filenameEl.style.color = '';
+        if (dlBtn) dlBtn.style.background = '';
     }
 }
 
@@ -18186,6 +18217,9 @@ function onExportComplete(data) {
 function onExportFailed(data) {
     const btn = document.getElementById('export-btn');
     const statusEl = document.getElementById('export-status-label');
+    // XACA-0954-023: a failed run must not leave the previous run's INCOMPLETE
+    // banner on screen, where it reads as a description of this failure.
+    clearExportMissingRoots();
     updateExportProgress(0, 'FAILED', data.message || 'Export failed');
     if (statusEl) statusEl.textContent = 'ERROR';
     if (btn) btn.disabled = false;

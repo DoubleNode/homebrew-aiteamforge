@@ -365,7 +365,8 @@ def _extract_js_functions(src: str, names: list[str]) -> str:
     """
     out = []
     for name in names:
-        start = src.index(f"function {name}(")
+        idx = src.find(f"async function {name}(")
+        start = idx if idx >= 0 else src.index(f"function {name}(")
         depth, i, seen = 0, src.index("{", start), False
         while i < len(src):
             if src[i] == "{":
@@ -389,7 +390,8 @@ def _run_export_panel_harness(tmp_path, summary):
     parent/child ORDER, so sibling placement is observable."""
     src = (LCARS_UI / "js" / "lcars.js").read_text(encoding="utf-8")
     js = _extract_js_functions(src, ["updateExportProgress", "renderExportMissingRoots",
-                                     "applyExportPanelState", "onExportComplete"])
+                                     "applyExportPanelState", "clearExportMissingRoots",
+                                     "onExportComplete", "onExportFailed"])
     harness = tmp_path / "h.js"
     harness.write_text(
         """
@@ -418,10 +420,21 @@ for (const id of ['export-progress-bar','export-progress-percent','export-progre
 // Give the download panel a real parent so sibling insertion is observable.
 const panelParent = mk('panel-parent');
 panelParent.appendChild(els['export-download']);
+// A real getElementById finds dynamically-created elements once they are in the
+// tree. A map-only stub cannot, which silently disables renderExportMissingRoots'
+// `existing.remove()` dedup and makes the harness report a stacking bug the real
+// DOM does not have -- a test harness that tests the wrong thing.
+function findById(node, id) {
+  if (!node) return null;
+  if (node.id === id) return node;
+  for (const c of node.children || []) { const f = findById(c, id); if (f) return f; }
+  return null;
+}
 global.document = {
-  getElementById: (id) => els[id] || null,
+  getElementById: (id) => els[id] || findById(panelParent, id),
   createElement: (tag) => mk('__' + tag),
 };
+global.alert = () => {};
 """
         + js
         + """
@@ -558,3 +571,173 @@ def test_success_green_panel_chrome_does_not_survive_an_incomplete_export(
     """The panel's success-green chrome contradicted the warning sitting above it."""
     got = _run_export_panel_harness(tmp_path, summary)
     assert bool(got["panelBackground"]) is expect_alert_chrome, got["panelBackground"]
+
+
+# ------------------------------------------------------- finding 023 (lifecycle)
+def _sequence(tmp_path, tail):
+    """Drive the shipped export functions through a multi-run SEQUENCE."""
+    src = (LCARS_UI / "js" / "lcars.js").read_text(encoding="utf-8")
+    js = _extract_js_functions(src, ["updateExportProgress", "renderExportMissingRoots",
+                                     "applyExportPanelState", "clearExportMissingRoots",
+                                     "onExportComplete", "onExportFailed"])
+    harness = tmp_path / "seq.js"
+    harness.write_text(
+        """
+const els = {};
+function mk(id) {
+  return { id, textContent: '', className: '', disabled: false, attrs: {},
+           style: { cssText: '', width: '', display: '', background: '', borderColor: '', color: '' },
+           children: [], parentNode: null,
+           setAttribute(k, v) { this.attrs[k] = v; },
+           appendChild(c) { c.parentNode = this; this.children.push(c); return c; },
+           insertBefore(c, ref) { c.parentNode = this;
+             const i = this.children.indexOf(ref);
+             if (i < 0) this.children.push(c); else this.children.splice(i, 0, c);
+             return c; },
+           remove() { const p = this.parentNode;
+                      if (p) p.children = p.children.filter(x => x !== this);
+                      delete els[this.id]; } };
+}
+for (const id of ['export-progress-bar','export-progress-percent','export-progress-label',
+                  'export-progress-message','export-btn','export-download','export-status-label',
+                  'export-download-filename','export-download-size','export-download-files',
+                  'export-download-btn']) { els[id] = mk(id); }
+const panelParent = mk('panel-parent');
+panelParent.appendChild(els['export-download']);
+// A real getElementById finds dynamically-created elements once they are in the
+// tree. A map-only stub cannot, which silently disables renderExportMissingRoots'
+// `existing.remove()` dedup and makes the harness report a stacking bug the real
+// DOM does not have -- a test harness that tests the wrong thing.
+function findById(node, id) {
+  if (!node) return null;
+  if (node.id === id) return node;
+  for (const c of node.children || []) { const f = findById(c, id); if (f) return f; }
+  return null;
+}
+global.document = {
+  getElementById: (id) => els[id] || findById(panelParent, id),
+  createElement: (tag) => mk('__' + tag),
+};
+global.alert = () => {};
+
+const INCOMPLETE = { count: 1, complete: false,
+  roots: [{ domain: 'devteam', path: '/nope', configKey: 'product_dir', reason: 'gone' }] };
+function completeRun(summary) {
+  const d = { filename: 'x.zip', fileSize: '1 MB', totalFiles: 3,
+              message: 'Export ready for download' };
+  if (summary) d.missingRootsSummary = summary;
+  onExportComplete(d);
+}
+function boxCount() {
+  return panelParent.children.filter(c => c.id === 'export-missing-roots').length;
+}
+function report(tag) {
+  return { tag, boxes: boxCount(), status: els['export-status-label'].textContent,
+           panelBg: els['export-download'].style.background,
+           filenameColor: els['export-download-filename'].style.color,
+           btnBg: els['export-download-btn'].style.background };
+}
+"""
+        + js + chr(10) + tail,
+        encoding="utf-8",
+    )
+    proc = subprocess.run([NODE, str(harness)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"harness failed:\n{proc.stdout}\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_stale_incomplete_banner_does_not_survive_into_the_next_export(tmp_path):
+    """XACA-0954-023: run 1 INCOMPLETE, then run 2 starts.
+
+    startTeamExport() hides the panel with `display='none'`, which does not reach
+    a SIBLING box. Without the explicit teardown the previous run's banner stayed
+    on screen through the whole of run 2 — describing a run it was not about.
+    """
+    got = _sequence(tmp_path, """
+completeRun(INCOMPLETE);
+const after1 = report('after-run-1');
+clearExportMissingRoots();           // what startTeamExport() does
+const after2 = report('after-restart');
+console.log(JSON.stringify({ after1, after2 }));
+""")
+    assert got["after1"]["boxes"] == 1, got
+    assert got["after2"]["boxes"] == 0, "stale INCOMPLETE banner survived into the next run"
+    assert got["after2"]["panelBg"] == "", "alert chrome survived the restart"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_stale_incomplete_banner_does_not_survive_a_failed_export(tmp_path):
+    """XACA-0954-023: onExportFailed() previously never removed the box at all,
+    so a failure left the prior run's INCOMPLETE banner up indefinitely."""
+    got = _sequence(tmp_path, """
+completeRun(INCOMPLETE);
+const before = report('before-failure');
+onExportFailed({ message: 'Export failed', error: 'boom' });
+const after = report('after-failure');
+console.log(JSON.stringify({ before, after }));
+""")
+    assert got["before"]["boxes"] == 1, got
+    assert got["after"]["boxes"] == 0, "banner survived a failed export"
+    assert got["after"]["status"] == "ERROR"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_repeated_polls_do_not_stack_duplicate_boxes(tmp_path):
+    """thok: no test exercised the `existing.remove()` dedup across polls."""
+    got = _sequence(tmp_path, """
+completeRun(INCOMPLETE);
+completeRun(INCOMPLETE);
+completeRun(INCOMPLETE);
+console.log(JSON.stringify({ final: report('after-3-polls') }));
+""")
+    assert got["final"]["boxes"] == 1, f"boxes stacked across polls: {got}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_incomplete_tones_the_salient_descendants_not_only_the_shell(tmp_path):
+    """XACA-0954-024: filename and DOWNLOAD button carry hardcoded success-green.
+
+    Toning only the container left a green filename and green button inside a
+    red-bordered panel under a red warning — half-answering the complaint.
+    """
+    got = _sequence(tmp_path, """
+completeRun(INCOMPLETE);
+const bad = report('incomplete');
+completeRun({ count: 0, complete: true, roots: [] });
+const good = report('complete');
+console.log(JSON.stringify({ bad, good }));
+""")
+    assert got["bad"]["filenameColor"], "filename not toned on an incomplete export"
+    assert got["bad"]["btnBg"], "download button not toned on an incomplete export"
+    # ...and fully restored on a clean run, or the next good export looks broken.
+    assert got["good"]["filenameColor"] == "", "filename tone leaked into a clean export"
+    assert got["good"]["btnBg"] == "", "button tone leaked into a clean export"
+    assert got["good"]["panelBg"] == "", "panel chrome leaked into a clean export"
+
+
+def test_startTeamExport_actually_calls_the_teardown():
+    """XACA-0954-023 WIRING: the helper being correct is worthless unwired.
+
+    Deliberately a source guard, and here is why it is not laziness: the
+    behavioural test above calls clearExportMissingRoots() directly, simulating
+    what startTeamExport() does. Mutation-checking proved that test does NOT
+    redden when the call is deleted from startTeamExport — it guards the helper,
+    not the hookup. startTeamExport() is async and drives apiFetch/polling, so
+    running it needs a fetch stub and a fake job lifecycle; that is a real test
+    worth writing but it is not this one. Until then, this pins the call site,
+    which is the exact byte a regression would remove.
+    """
+    src = (LCARS_UI / "js" / "lcars.js").read_text(encoding="utf-8")
+    body = _extract_js_functions(src, ["startTeamExport"])
+    assert "clearExportMissingRoots()" in body, (
+        "startTeamExport() no longer clears the previous run's INCOMPLETE banner; "
+        "the panel's display toggle does not reach the sibling box"
+    )
+
+
+def test_onExportFailed_actually_calls_the_teardown():
+    """Companion wiring guard. This one IS also covered behaviourally above."""
+    src = (LCARS_UI / "js" / "lcars.js").read_text(encoding="utf-8")
+    body = _extract_js_functions(src, ["onExportFailed"])
+    assert "clearExportMissingRoots()" in body
