@@ -1597,18 +1597,41 @@ body.kiosk-active .kiosk-fab {
 }
 
 /* Keyboard focus must be visible: these are divs with role="button", so they
-   get no focus ring for free. */
+   get no focus ring for free.
+
+   The ring colour is STATE-CONDITIONAL, and deliberately so. A single flat
+   colour cannot satisfy WCAG 2.1 AA SC 1.4.11 (3:1 for focus indicators) across
+   both the pastel pill backgrounds AND their black inverted .active state:
+   cyan measures 1.5:1 on tan, 1.27:1 on orange and 1.66:1 on rose — all failing
+   — while black measures 7.5-9.8:1 against those same three. So black is the
+   default, and cyan is used only where the pill has gone black on .active
+   (12.44:1). Do not collapse these two rules back into one colour. */
 .lcars-data-bar .legend-pill:focus-visible {
-    outline: 2px solid var(--lcars-cyan);
+    outline: 2px solid var(--lcars-black);
     outline-offset: -4px;
 }
 
+.lcars-data-bar .legend-pill.active:focus-visible {
+    outline-color: var(--lcars-cyan);
+}
+
 @media (max-width: 600px) {
+    /* Allow the pills to SHRINK at narrow widths. With `flex: 0 0 auto` and a
+       fixed min-width they cannot compress, and .lcars-main/body both set
+       `overflow: hidden` — so on a ~375px viewport the three-pill (ADMIN-visible)
+       cluster needs about 212px against roughly 209px available and the overflow
+       is silently CLIPPED rather than scrolled. The candy-pill layout this
+       replaced used `flex: 1; min-width: 0` and could never overflow; allowing
+       shrink here keeps that guarantee while still preferring the legible size. */
     .lcars-data-bar .legend-pill {
-        min-width: 4.5rem;
+        flex: 0 1 auto;
+        min-width: 0;
         padding: 4px 8px;
         font-size: 0.55rem;
         letter-spacing: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
     .lcars-data-bar .mode-bar-separator {
         display: none;
