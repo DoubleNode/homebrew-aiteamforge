@@ -485,8 +485,18 @@ body {
 
 .sidebar-button {
     color: var(--lcars-black);
-    padding: 6px 12px;
+    /* Tight bottom padding + line-height:1 seat the label in the lower-right
+       CORNER. align-items/justify-content:flex-end were already correct, but the
+       default line-height's leading plus 6px of bottom padding left the text
+       floating enough to read as vertically centred. */
+    padding: 6px 12px 3px;
+    line-height: 1;
+    /* Fixed height, and no flex grow OR shrink, so every button renders exactly
+       the same size regardless of how many siblings share the column. min-height
+       alone did not guarantee that. */
+    height: var(--bar-height);
     min-height: var(--bar-height);
+    flex: 0 0 auto;
     font-size: 12px;
     font-weight: 600;
     letter-spacing: 1px;

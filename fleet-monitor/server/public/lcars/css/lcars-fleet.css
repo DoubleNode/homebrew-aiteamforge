@@ -490,8 +490,18 @@ body {
 
 .sidebar-button {
     color: var(--lcars-black);
-    padding: 6px 12px;
+    /* Tight bottom padding + line-height:1 seat the label in the lower-right
+       CORNER. align-items/justify-content:flex-end were already correct, but the
+       default line-height's leading plus 6px of bottom padding left the text
+       floating enough to read as vertically centred. */
+    padding: 6px 12px 3px;
+    line-height: 1;
+    /* Fixed height, and no flex grow OR shrink, so every button renders exactly
+       the same size regardless of how many siblings share the column. min-height
+       alone did not guarantee that. */
+    height: var(--bar-height);
     min-height: var(--bar-height);
+    flex: 0 0 auto;
     font-size: 12px;
     font-weight: 600;
     letter-spacing: 1px;
@@ -516,6 +526,10 @@ body {
 .sidebar-button[data-section="overview"] { background: var(--lcars-cyan); }
 .sidebar-button[data-section="organizations"] { background: var(--lcars-peach); }
 .sidebar-button[data-section="machines"] { background: var(--lcars-purple); }
+/* ANALYTICS previously had NO background rule at all, so it painted the sidebar's
+   own colour and read as blank space rather than a button (XACA-0963 follow-up).
+   Tan was freed when SETTINGS moved to the utility bar. */
+.sidebar-button[data-section="analytics"] { background: var(--lcars-tan); }
 .sidebar-button[data-section="settings"] {
     background: var(--lcars-tan);
 }
@@ -543,6 +557,10 @@ body {
 .sidebar-button[data-section="machines"].active {
     background: var(--lcars-black);
     color: var(--lcars-purple);
+}
+.sidebar-button[data-section="analytics"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-tan);
 }
 .sidebar-button[data-section="settings"].active {
     background: var(--lcars-black);
