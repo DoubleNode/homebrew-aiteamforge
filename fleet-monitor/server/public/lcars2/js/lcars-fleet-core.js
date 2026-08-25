@@ -169,13 +169,9 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             var countEl = document.getElementById('fleet-offline-count');
             if (countEl) countEl.textContent = String(n);
 
-            if (n > 0) {
-                el.hidden = false;
-                el.classList.add('offline-active');
-            } else {
-                el.hidden = true;
-                el.classList.remove('offline-active');
-            }
+            // The pill stays visible at zero (restoring the pre-XACA-0963 pattern);
+            // only the alert state is toggled.
+            el.classList.toggle('offline-active', n > 0);
         },
         /**
          * Update a specific candy pill

@@ -97,12 +97,12 @@
                 <div class="mode-bar-spacer"></div>
                 <div class="mode-bar-separator">&#9482;</div>
                 <div class="utility-cluster">
-                    <!-- Persistent OFFLINE cue (XACA-0963). Hidden while the fleet is
-                         healthy; shown with a count when machines are offline. This
+                    <!-- Persistent OFFLINE cue (XACA-0963). Always visible with a live count, escalating to
+                         a red alert state above zero. This
                          replaces the red-alert cue the removed OFFLINE candy pill
                          carried, which was visible from every section. Driven by
                          updateOfflineIndicator() in js/lcars-fleet-core.js. -->
-                    <div class="legend-pill offline-pill" id="fleet-offline-indicator" hidden
+                    <div class="legend-pill offline-pill" id="fleet-offline-indicator"
                          role="button" aria-live="polite" data-section="machines" tabindex="0">
                         <span id="fleet-offline-count">0</span>&nbsp;OFFLINE
                     </div>
