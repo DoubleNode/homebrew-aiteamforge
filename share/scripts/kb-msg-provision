@@ -56,6 +56,17 @@ def _die_env(msg):
     raise SystemExit(2)
 
 
+def _notice(msg):
+    """Module-level operator notice.
+
+    main()'s `say` is a CLOSURE over `args` and does not exist outside it;
+    calling it from a module-level helper raises NameError and prints a raw
+    traceback -- which is what happened the first time this notice was added.
+    Goes to stderr so it cannot corrupt anything parsing stdout.
+    """
+    print("kb-msg-provision: %s" % msg, file=sys.stderr)
+
+
 # ── Locating the authority ───────────────────────────────────────────────────
 # vault-keygen.js is the ONLY correct source for the machine slug. Three other
 # derivations exist in this tree; measured on M3Pro 2026-08-24, fleet-reporter.sh
@@ -115,6 +126,31 @@ def has_private_key(keygen_js, slug):
 FLEET_CONFIG = os.path.expanduser("~/.aiteamforge/fleet-config.json")
 
 
+def _redact_url(value):
+    """Render a --server value safely for display in an error message.
+
+    TEST-GATE FINDING XACA-0885-049. The credential refusal below redacted its
+    own message, but `_relay_endpoint` has TWO error paths and the OTHER one --
+    "must be an absolute URL", which fires FIRST -- echoed the raw value. Every
+    shape that carries credentials without a parsable scheme+host ("user:pw@h",
+    "//user:pw@h", "https:user:pw@h") therefore failed that earlier check and
+    had its password printed to stderr and into any log, by the very function
+    added to stop exactly that.
+
+    The mistake was attaching redaction to the branch that was ABOUT
+    credentials, rather than to the boundary where the untrusted value enters.
+    A value is sanitised once here and every message uses the result, so a
+    future error path cannot reintroduce the leak by forgetting.
+
+    Over-redacts deliberately: any "@" is treated as possible user info, since
+    losing a little diagnostic detail is the right failure direction when the
+    alternative is printing a secret.
+    """
+    if "@" in value:
+        return "<redacted: value appears to contain credentials>"
+    return repr(value)
+
+
 def _relay_endpoint(server):
     """Build the <base>/api/status endpoint from a user-supplied --server value.
 
@@ -129,12 +165,13 @@ def _relay_endpoint(server):
     Parse, discard query/fragment (an API base carries neither), and join on the
     path component, so the result is well-formed for any input shape.
     """
+    shown = _redact_url(server)
     parsed = urllib.parse.urlsplit(server)
     if not parsed.scheme or not parsed.netloc:
         _die_env(
             "--server must be an absolute URL with a scheme and host "
-            "(got %r).\n  Example: --server https://fleet-monitor.fly.dev"
-            % server
+            "(got %s).\n  Example: --server https://fleet-monitor.fly.dev"
+            % shown
         )
     # Refuse embedded credentials rather than writing them to disk in the clear.
     # urlsplit preserves "user:pass@host" faithfully, so the naive thing is to
@@ -144,6 +181,29 @@ def _relay_endpoint(server):
     # still be WRONG for a relay that actually needs those credentials, failing
     # later with an auth error that points nowhere near this line. Auth belongs
     # in the config's own token field, not in the URL.
+    # Check the RAW string, not urlsplit's derived fields. urlsplit terminates
+    # netloc at the first "/", "?" or "#", so a password containing any of them
+    # is reclassified: "https://user:p/w0rd@host" parses as netloc "user:p" with
+    # the rest in path, and .username/.password both come back None -- the
+    # credential branch never fires. The "/" form then survives into the config,
+    # because path is the one component this function keeps. Measured: it
+    # persisted "https://user:p/w0rd@host/api/status" to disk. The "?" and "#"
+    # forms are worse in a different way -- they persist "https://user:p", so
+    # the recorded host IS the username fragment.
+    #
+    # No parse-based rule can be trusted here, because the parse is what the
+    # attack manipulates. Any "@" at all is refused instead: an operator-supplied
+    # API base has no legitimate use for one, and over-refusing costs a retype
+    # while under-refusing writes a secret to disk. Same conservatism as
+    # _redact_url, and deliberately the same rule, so the thing that detects a
+    # credential and the thing that hides it cannot disagree.
+    if "@" in server:
+        _die_env(
+            "--server must not embed credentials (value contains %r).\n"
+            "  It would be written to %s in plaintext.\n"
+            "  Pass the bare URL and configure authentication separately."
+            % ("@", FLEET_CONFIG)
+        )
     if parsed.username is not None or parsed.password is not None:
         # Report the host, never the value. Echoing the offending URL would
         # print the password to the terminal and into any log capturing this
@@ -154,6 +214,19 @@ def _relay_endpoint(server):
             "  They would be written to %s in plaintext.\n"
             "  Pass the bare URL and configure authentication separately."
             % (parsed.hostname or "<none>", FLEET_CONFIG)
+        )
+    # REVIEW-GATE FINDING XACA-0885-050. Discarding these silently is
+    # inconsistent with refusing credentials in the userinfo: "?token=..." is the
+    # same class of secret, handled the opposite way, and the operator was told
+    # nothing either time. Say what was dropped -- never its value, which may be
+    # the token itself.
+    dropped = [n for n, v in (("query", parsed.query), ("fragment", parsed.fragment)) if v]
+    if dropped:
+        _notice(
+            "discarding the %s from --server; an API base carries neither.\n"
+            "  If that carried an auth token, configure authentication"
+            " separately — it was NOT recorded and will not be used."
+            % " and ".join(dropped)
         )
     path = parsed.path.rstrip("/") + "/api/status"
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
