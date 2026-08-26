@@ -181,9 +181,36 @@
         return ORG_CLASSES[org] || fallback || 'org-academy';
     }
 
+    /**
+     * Operator-facing hint for an organization heading, or '' if none is needed.
+     *
+     * XACA-0970-012: the console.warn above names the unresolved division and the
+     * exact remediation, but an operator looking at the dashboard sees only the
+     * word UNKNOWN and has no reason to open the console. This surfaces the same
+     * remediation as a tooltip on the heading.
+     *
+     * The heading is deliberately NOT renamed to 'UNREGISTERED'. Before this
+     * ticket, a registered-but-suffixed team landed in this bucket, so
+     * "unregistered" would have described most of its contents. The registry
+     * prefix match now resolves those, so what remains here is genuinely
+     * unresolvable -- a division code we cannot account for, which may well be a
+     * typo rather than an unregistered team. Naming it UNREGISTERED would assert
+     * a cause we have not established.
+     */
+    var UNKNOWN_HINT =
+        'No organization could be resolved for these divisions. Each unresolved ' +
+        'division code is named in the browser console, along with the file and ' +
+        'the entry to add. Register the team, or add it to STATIC_ORGS in ' +
+        'shared/js/lcars-org-resolution.js.';
+
+    function describe(org) {
+        return org === 'UNKNOWN' ? UNKNOWN_HINT : '';
+    }
+
     global.LCARS_ORG = {
         resolve: resolve,
         resolveColor: resolveColor,
+        describe: describe,
         STATIC_ORGS: STATIC_ORGS,
         ORG_CLASSES: ORG_CLASSES,
         // Exposed for tests: lets a harness assert the warn-once behaviour.

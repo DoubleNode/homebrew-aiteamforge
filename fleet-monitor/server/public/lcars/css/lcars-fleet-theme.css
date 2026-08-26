@@ -6127,3 +6127,9 @@
 .lcars-avatar-tooltip.team-mainevent .tooltip-divider {
     background: linear-gradient(90deg, var(--lcars-mauve) 0%, transparent 100%);
 }
+
+/* XACA-0970-012: a heading that carries a remediation tooltip should look
+   like it does -- otherwise the tooltip is only found by accident. */
+.organization-header[title] {
+    cursor: help;
+}

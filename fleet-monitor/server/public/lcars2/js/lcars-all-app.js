@@ -228,6 +228,13 @@
             orgHeader.className = 'organization-header';
             orgHeader.innerHTML = '<span class="organization-title">' + orgName + '</span>' +
                 '<span class="organization-count">' + totalSessions + ' Sessions</span>';
+            // XACA-0970-012: surface the console remediation to an operator who has
+            // no reason to open the console. describe() returns '' for every resolved
+            // org, so only the UNKNOWN heading gets a tooltip.
+            if (window.LCARS_ORG && window.LCARS_ORG.describe) {
+                const orgHint = window.LCARS_ORG.describe(orgName);
+                if (orgHint) { orgHeader.title = orgHint; }
+            }
             orgContainer.appendChild(orgHeader);
 
             // Sort divisions by priority
