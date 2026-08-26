@@ -41,6 +41,7 @@
     /* Blue Spectrum - Used for DoubleNode organization, info, navigation */
     --lcars-blue: #9999ff;          /* Core blue - primary UI elements */
     --lcars-cyan: #99ccff;          /* Cyan - Dev Team, secondary info */
+    --lcars-teal: #66cccc;           /* Teal - MEDICAL org (XACA-0970) */
     --lcars-lavender: #ccccff;      /* Light lavender - subtle highlights */
     --lcars-navy: #6666cc;          /* Dark blue - pressed states */
 
@@ -103,7 +104,7 @@
     --org-personal: var(--lcars-green);       /* Personal - Green */
     --org-legal: var(--lcars-green);          /* Legal - Green */
     --org-finance: var(--lcars-amber);
-    --org-medical: var(--lcars-cyan);
+    --org-medical: var(--lcars-teal);
 
     /* ═══════════════════════════════════════════════════════════════════════════
        DIVISION COLORS
@@ -216,8 +217,8 @@
 
 .org-medical {
     --org-color: var(--org-medical);
-    --org-color-light: var(--lcars-cyan);
-    --org-color-dark: var(--lcars-blue);
+    --org-color-light: var(--lcars-teal);
+    --org-color-dark: var(--lcars-cyan);
 }
 
 
@@ -1823,6 +1824,8 @@
 .org-nav-button.org-academy { background: var(--lcars-cyan); }
 .org-nav-button.org-personal { background: var(--lcars-green); }
 .org-nav-button.org-legal { background: var(--lcars-green); }
+.org-nav-button.org-finance { background: var(--lcars-amber); }
+.org-nav-button.org-medical { background: var(--lcars-teal); }
 
 /* -------------------------------------------------------------------------------
    Teams Grid - Card layout for teams

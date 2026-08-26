@@ -152,6 +152,10 @@
      * one of them. Note `.org-medical` has never existed either — MEDICAL has
      * silently fallen back for as long as it has been mapped (tracked
      * separately; not introduced here).
+     *
+     * MEDICAL uses teal, not cyan: cyan is already ACADEMY (routed theme) and
+     * DEVTEAM, so sharing it made two org groups render identically. Teal is
+     * also what the team registry itself declares for MEDICAL.
      */
     var ORG_CLASSES = {
         'DEVTEAM':    'org-academy',
@@ -163,11 +167,18 @@
     };
 
     /**
-     * @param {string} org organization name as returned by resolve()
-     * @returns {string} CSS class name; falls back to org-academy as before
+     * @param {string} org        organization name as returned by resolve()
+     * @param {string} [fallback] class to use when the org is unmapped.
+     *   Callers MUST pass their own previous default. Before centralising, each
+     *   copy of getGroupColor() had its own: most used 'org-academy' but the
+     *   doublenode and mainevent pages used 'org-doublenode'/'org-mainevent'.
+     *   Hard-coding one default here silently changed those two pages' unmapped
+     *   rendering — caught in review. The parameter keeps per-page behaviour
+     *   identical while still sharing the map.
+     * @returns {string} CSS class name
      */
-    function resolveColor(org) {
-        return ORG_CLASSES[org] || 'org-academy';
+    function resolveColor(org, fallback) {
+        return ORG_CLASSES[org] || fallback || 'org-academy';
     }
 
     global.LCARS_ORG = {

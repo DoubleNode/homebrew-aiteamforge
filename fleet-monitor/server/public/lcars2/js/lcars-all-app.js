@@ -394,7 +394,7 @@
         //   shared/js/lcars-org-resolution.js
         //
         // Do NOT reintroduce a local copy. This function previously existed in
-        // ELEVEN files across SEVEN variants -- and the only copy that handled
+        // FOURTEEN files across multiple variants -- and the only copy that handled
         // `finance` lived in a file no page loaded, so the bug looked fixed and
         // never ran. Add teams in the shared module, nowhere else.
         if (!window.LCARS_ORG) {
