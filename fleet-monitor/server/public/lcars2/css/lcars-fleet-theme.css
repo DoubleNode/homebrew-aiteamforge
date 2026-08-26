@@ -3920,8 +3920,20 @@
 /* .organization-panel clips its children (overflow: hidden) and the hint adds
    no height to it, being absolutely positioned -- so a short UNKNOWN panel
    would clip the hint exactly where it is needed. Lift the clip only while the
-   panel contains focus, which is the only time the hint is visible. */
-.organization-panel:focus-within {
+   HEADING holds focus.
+
+   Scoped with :has() rather than a bare :focus-within on the panel. That
+   version happened to behave correctly only because nothing else inside the
+   panel is focusable -- team cards carry click handlers but no tabindex -- an
+   invariant nothing enforces and which would widen this silently the day a
+   card becomes keyboard-reachable. This says what it means instead.
+
+   The clip is load-bearing: it curves the ::before L-bar and the ::after
+   corner blend, both positioned outside the panel's box on purpose. Lifting it
+   un-clips them for exactly as long as the hint is shown. That trade is
+   deliberate -- a momentary square corner beats a remediation the user cannot
+   read -- and it is why the lift is scoped this narrowly. */
+.organization-panel:has(.organization-header:focus-within) {
     overflow: visible;
 }
 

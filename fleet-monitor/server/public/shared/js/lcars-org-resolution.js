@@ -21,7 +21,13 @@
  *   9  dead, zero pages        app.js, {academy,mainevent,doublenode}-app.js,
  *                              lcars/js/lcars-{academy,all,doublenode,finance,
  *                              mainevent}-app.js
- * The 5 reachable ones delegate here; the 9 dead are removed under XACA-0971.
+ * The 5 reachable ones delegate here. Of the 9 dead, XACA-0971 removes SIX --
+ * the remaining three are scoped to neither ticket and still carry the pre-fix
+ * innerHTML sinks. Deadness here is a property of the DIRECTORY, not the
+ * basename: `lcars2/*.html` loads `src="js/<name>.js"`, which resolves inside
+ * lcars2/, so grepping for a basename reports the lcars/ twin as referenced
+ * when nothing loads it. Resolve every script src before trusting either
+ * answer.
  *
  * If you are adding a team, add it HERE and nowhere else. If you find yourself
  * copying this function into an app file, that is the bug this module exists to
@@ -130,7 +136,10 @@
         }
 
         // 3. Static map for teams that are not registered.
-        if (own(STATIC_ORGS, code)) {
+        //    own() proves the KEY is present, not that the VALUE is usable: a
+        //    malformed entry would otherwise be returned as-is and break the
+        //    @returns {string} contract the same way a prototype lookup did.
+        if (own(STATIC_ORGS, code) && STATIC_ORGS[code]) {
             return STATIC_ORGS[code];
         }
 
