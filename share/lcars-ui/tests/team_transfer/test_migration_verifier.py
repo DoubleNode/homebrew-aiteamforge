@@ -197,20 +197,40 @@ def test_generator_self_includes_manifest_in_output_when_under_home(tmp_path, mo
     assert self_entries[0]["cls"] == "present", "self-entry must be PRESENT-class (no self-hash paradox)"
 
 
-def test_generator_skips_self_entry_when_output_outside_home(tmp_path):
+def test_generator_skips_self_entry_when_output_outside_home(tmp_path, tmp_path_factory, monkeypatch):
     """XACA-0496-013: when --output is outside $HOME (e.g. /tmp/...), generator
     must NOT add a self-entry to the manifest. The entry would otherwise produce
     a spurious FAIL on every same-machine verify-only run because the temp file
     is gone before the verifier runs.
+
+    XACA-0952-0954fix: this test used to run against the real ambient $HOME
+    (no monkeypatch.setenv at all) — the one test in this file that didn't
+    follow the HOME-isolation idiom its own siblings
+    (test_generator_self_includes_manifest_in_output_when_under_home,
+    test_generator_dedupes_cross_domain_duplicates) already use. On a
+    developer machine with a populated ~/dev-team/finance that's harmless;
+    on a clean $HOME (fresh checkout, CI runner) the generator's devteam
+    domain fail-loud-exits 1 with "MISSING DOMAIN ROOTS" before it ever
+    reaches the self-entry logic under test — see _make_synthetic_devteam_root
+    for the same class of gap XACA-0954-007 introduced and XACA-0952-002
+    already patched once in this file's siblings.
+    Point HOME at its own throwaway tmp_path_factory dir (never tmp_path
+    itself, which must stay outside HOME to exercise the branch under test)
+    and seed it with the synthetic devteam root, exactly like the siblings.
     """
     import json
 
-    # tmp_path under pytest is /var/folders/... or /tmp/... — both outside $HOME.
-    # Sanity-check that assumption before relying on it.
-    home = Path(os.environ.get("HOME", "/"))
+    synthetic_home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(synthetic_home))
+    _make_synthetic_devteam_root(synthetic_home)
+
+    # tmp_path (pytest's default per-test temp dir) and synthetic_home (a
+    # separate tmp_path_factory dir minted above) are always siblings under
+    # pytest's root tmp dir, never nested in each other — but keep the
+    # sanity-check guard so the assumption is verified, not just asserted.
     try:
-        tmp_path.relative_to(home)
-        pytest.skip(f"pytest tmp_path {tmp_path} happens to be under HOME {home}; cannot exercise this branch")
+        tmp_path.relative_to(synthetic_home)
+        pytest.skip(f"pytest tmp_path {tmp_path} happens to be under synthetic HOME {synthetic_home}; cannot exercise this branch")
     except ValueError:
         pass
 
