@@ -59,7 +59,101 @@ const KEYCHAIN_SERVICE = 'com.aiteamforge.vault';
 const VAULT_DIR        = path.join(os.homedir(), '.aiteamforge', 'vault');
 const BASE64_ORIGINAL  = 'base64.ORIGINAL'; // sentinel; resolved against sodium at runtime
 
-const DEFAULT_SERVER_URL = process.env.FLEET_MONITOR_URL || 'http://localhost:3000';
+// -----------------------------------------------------------------------------
+// Fleet URL resolution (XACA-0972-001)
+// -----------------------------------------------------------------------------
+//
+// The vault clients used to default to `http://localhost:3000` when
+// FLEET_MONITOR_URL was unset. Nothing listens on :3000 on a normal fleet
+// machine, so every vault call died as "Network error fetching ciphertext:
+// fetch failed" - measured on M3Pro 2026-08-25, where the identical call
+// succeeded the moment the URL was supplied. A silent localhost fallback for a
+// FLEET service is the wrong default: it turns "not configured" into
+// "connection refused", which reads as a network fault rather than a missing
+// setting. There is no localhost fallback here, by design.
+//
+// This mirrors _kb_msg_relay_url in kanban-helpers.sh - keep the two in sync.
+//
+// These live in vault-keygen.js rather than a new shared module ON PURPOSE:
+// vault-fetch.js, msg-client.js and vault-migrate-env-keys.js already require
+// this file, and it is the ONLY vault file mirrored into the Homebrew tap
+// (sync-tap.sh). A new module would also have to be added to sync-tap.sh AND
+// install-shell.sh's copy allowlist, or a tap-installed consumer would die on
+// MODULE_NOT_FOUND at require time. For the same reason this block uses node
+// builtins only (os/fs/path, already required above) - add no new top-level
+// require to this file.
+
+/**
+ * Locate the fleet-config.json the fleet reporters read.
+ * Prefers ~/.aiteamforge/, falls back to the legacy ~/.dev-team/ location.
+ * Mirrors msg-client.js fleetConfigPath(). When neither exists the preferred
+ * path is returned anyway, so callers have a concrete path to name in an error.
+ * @returns {string} absolute path (which may not exist)
+ */
+function fleetConfigPath() {
+    const a = path.join(os.homedir(), '.aiteamforge', 'fleet-config.json');
+    const b = path.join(os.homedir(), '.dev-team', 'fleet-config.json');
+    if (fs.existsSync(a)) return a;
+    if (fs.existsSync(b)) return b;
+    return a;
+}
+
+/**
+ * Resolve the fleet base URL - resolved, never guessed.
+ *
+ * Order: explicit FLEET_MONITOR_URL, then .centralServer.apiEndpoint from
+ * fleet-config.json (the same key fleet-reporter reads) with its /api... suffix
+ * stripped. Call this LAZILY, at use time - never bind it to a module-level
+ * constant, or the config is read once at require time and can never be
+ * exercised per-test.
+ *
+ * @returns {string|null} base URL with no trailing slash, or null when
+ *                        unresolvable. NEVER returns localhost.
+ */
+function resolveFleetUrl() {
+    if (process.env.FLEET_MONITOR_URL) {
+        return process.env.FLEET_MONITOR_URL.replace(/\/+$/, '') || null;
+    }
+
+    let endpoint;
+    try {
+        const cfg = JSON.parse(fs.readFileSync(fleetConfigPath(), 'utf8'));
+        endpoint = cfg && cfg.centralServer && cfg.centralServer.apiEndpoint;
+    } catch (_) {
+        return null; // missing, unreadable, or malformed config
+    }
+    if (typeof endpoint !== 'string' || endpoint.length === 0) return null;
+
+    // Strip the trailing /api... path, exactly as _kb_msg_relay_url does - in TWO
+    // steps, and the second is NOT redundant. The documented shape is
+    // "<base>/api/status", which the first step handles; the bare "<base>/api"
+    // form has no slash AFTER /api and does not match it. Omitting the second
+    // step silently produced a relay base of "https://host/api" during the
+    // XACA-0885 fix and only surfaced in a test. Do not collapse these.
+    let base = endpoint;
+    const apiIdx = base.lastIndexOf('/api/');   // mirrors ${ep%/api/*}
+    if (apiIdx !== -1) base = base.slice(0, apiIdx);
+    base = base.replace(/\/api$/, '');          // mirrors ${base%/api}
+
+    return base.replace(/\/+$/, '') || null;
+}
+
+/**
+ * The one canonical "no fleet URL anywhere" message, shared by every vault
+ * client so the operator sees the same actionable text from all of them.
+ * Names BOTH the environment variable and the concrete config path - a bare
+ * "fetch failed" is what sent us down this road in the first place.
+ * @param {string} toolName e.g. "vault-fetch"
+ * @returns {string}
+ */
+function unresolvedFleetUrlMessage(toolName) {
+    return `${toolName}: no fleet server URL is configured, so there is nothing to talk to.\n` +
+           `  Fix it by any ONE of:\n` +
+           `    - pass --server <url>\n` +
+           `    - export FLEET_MONITOR_URL=<url>\n` +
+           `    - set .centralServer.apiEndpoint in ${fleetConfigPath()}\n` +
+           `  (There is deliberately no localhost fallback: a fleet service is remote by definition.)`;
+}
 
 // Lazily-loaded sodium handle so the module is requireable without the dep present
 // (e.g. in environments that only run the storage/payload logic). Crypto callers
@@ -373,7 +467,15 @@ async function buildRegistrationPayload({ id, label, publicKey }) {
  */
 async function registerMachine(payload, opts) {
     opts = opts || {};
-    const serverUrl = (opts.serverUrl || DEFAULT_SERVER_URL).replace(/\/+$/, '');
+    // Resolve LAZILY, at call time. An explicit opts.serverUrl always wins; only
+    // the default changed (XACA-0972-002). No silent localhost fallback.
+    const resolved = opts.serverUrl || resolveFleetUrl();
+    if (!resolved) {
+        const err = new Error(unresolvedFleetUrlMessage('vault-keygen'));
+        err.code = 'FLEET_URL_UNRESOLVED';
+        throw err;
+    }
+    const serverUrl = resolved.replace(/\/+$/, '');
     const doFetch = opts.fetchImpl || globalThis.fetch;
     if (typeof doFetch !== 'function') {
         throw new Error('No fetch implementation available (Node 18+ required, or pass opts.fetchImpl)');
@@ -517,8 +619,11 @@ Options:
   --machine-id <slug>   Machine id/slug (default: slugified hostname).
                         Must match ^[a-z][a-z0-9-]*$, max 64 chars.
   --label <text>        Human-readable label (default: user@hostname).
-  --server <url>        Vault base URL (default: $FLEET_MONITOR_URL or
-                        http://localhost:3000).
+  --server <url>        Vault base URL. Default: $FLEET_MONITOR_URL, else
+                        .centralServer.apiEndpoint from
+                        ~/.aiteamforge/fleet-config.json. There is NO localhost
+                        fallback - if neither is set this exits non-zero and
+                        tells you exactly what to set.
   --rotate              Generate a NEW keypair for an existing machine and update
                         its registration in place (PUT). You MUST then re-seal all
                         existing secrets to the new key (SECRET-VAULT-DESIGN.md §5.4).
@@ -572,7 +677,10 @@ module.exports = {
     KEYCHAIN_SERVICE,
     VAULT_DIR,
     X25519_KEY_BYTES,
-    DEFAULT_SERVER_URL,
+    // fleet URL resolution (shared with vault-fetch.js / vault-migrate-env-keys.js)
+    fleetConfigPath,
+    resolveFleetUrl,
+    unresolvedFleetUrlMessage,
     // slug/label
     defaultMachineSlug,
     validateSlug,
