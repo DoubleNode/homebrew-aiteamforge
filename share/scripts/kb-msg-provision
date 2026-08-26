@@ -44,6 +44,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 
 TEAM_PATHS = os.path.expanduser("~/.aiteamforge/team-paths.json")
 TEAM_MACHINES = os.path.expanduser("~/.aiteamforge/team-machines.json")
@@ -114,6 +115,83 @@ def has_private_key(keygen_js, slug):
 FLEET_CONFIG = os.path.expanduser("~/.aiteamforge/fleet-config.json")
 
 
+def _relay_endpoint(server):
+    """Build the <base>/api/status endpoint from a user-supplied --server value.
+
+    This was `server.rstrip("/") + "/api/status"`, which is string concatenation
+    applied to a STRUCTURED value. A URL carrying a query string or fragment --
+    "https://fm.example.com/?token=x" -- produced
+    "https://fm.example.com/?token=x/api/status": the path is appended INSIDE the
+    query, so the request never reaches /api/status and the config records an
+    endpoint that cannot work. It fails at first use, far from the provisioning
+    run that wrote it.
+
+    Parse, discard query/fragment (an API base carries neither), and join on the
+    path component, so the result is well-formed for any input shape.
+    """
+    parsed = urllib.parse.urlsplit(server)
+    if not parsed.scheme or not parsed.netloc:
+        _die_env(
+            "--server must be an absolute URL with a scheme and host "
+            "(got %r).\n  Example: --server https://fleet-monitor.fly.dev"
+            % server
+        )
+    path = parsed.path.rstrip("/") + "/api/status"
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _write_json_atomic(path, data, what):
+    """Guarded atomic JSON write with a one-time backup. THE only write path here.
+
+    Both writers in this file previously open-coded the same four-step sequence
+    (makedirs / copy2 / mkstemp / replace), and every fix so far patched one
+    instance at a time. A file-wide audit found FOUR unguarded sites across the
+    two functions -- including an `os.makedirs` sitting one line above the two
+    lines a previous round had just guarded. Patching instances is what produced
+    that; the sequence is now written once and shared, so a future writer cannot
+    reintroduce the class by forgetting a step.
+
+    Guarantees, uniformly:
+      * every OSError becomes this file's exit-2 refusal, never a raw traceback
+      * the backup is written ONCE -- a second run must not overwrite the true
+        original with post-first-run state
+      * a failed write leaves the target untouched and removes the temp file
+    """
+    parent = os.path.dirname(path) or "."
+    try:
+        os.makedirs(parent, exist_ok=True)
+    except OSError as exc:
+        _die_env("cannot create %s: %s\n  Nothing was changed." % (parent, exc))
+
+    bak = path + BACKUP_SUFFIX
+    if os.path.exists(path) and not os.path.exists(bak):
+        try:
+            shutil.copy2(path, bak)
+        except OSError as exc:
+            _die_env("cannot write %s: %s\n"
+                     "  The directory is not writable; nothing was changed." % (bak, exc))
+
+    try:
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix=".%s-" % what, suffix=".json")
+    except OSError as exc:
+        _die_env("cannot write %s: %s\n"
+                 "  The directory is not writable; nothing was changed." % (path, exc))
+
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2, sort_keys=True))
+            fh.write("\n")
+        os.replace(tmp, path)
+    except OSError as exc:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        _die_env("cannot write %s: %s\n  Nothing was changed." % (path, exc))
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
 def persist_relay_url(server):
     """Record the relay URL where BOTH kb-msg and fleet-reporter already look.
 
@@ -132,7 +210,7 @@ def persist_relay_url(server):
     # fleet-reporter.sh:82's default. fleet-reporter POSTs status to this
     # exact value and derives its relay base by stripping /api/*, so a bare
     # "<base>/api" would both break its posting AND fail that strip.
-    endpoint = server.rstrip("/") + "/api/status"
+    endpoint = _relay_endpoint(server)
     data = {}
     if os.path.isfile(FLEET_CONFIG):
         try:
@@ -153,20 +231,7 @@ def persist_relay_url(server):
         return False, previous
     central["apiEndpoint"] = endpoint
     data["centralServer"] = central
-    parent = os.path.dirname(FLEET_CONFIG)
-    os.makedirs(parent, exist_ok=True)
-    if os.path.exists(FLEET_CONFIG):
-        shutil.copy2(FLEET_CONFIG, FLEET_CONFIG + ".pre-kb-msg-provision.bak")
-    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".fleet-config-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(data, indent=2, sort_keys=True))
-            fh.write("\n")
-        os.replace(tmp, FLEET_CONFIG)
-    except Exception:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    _write_json_atomic(FLEET_CONFIG, data, "fleet-config")
     return True, previous
 
 
@@ -232,7 +297,10 @@ def local_teams():
         # sending their mail to a box that no longer holds them.
         #
         # A board file is what a team actually IS here; an empty skeleton is not.
-        has_board = bool(glob.glob(os.path.join(kd, "*board*.json"))) if kd else False
+        # "*-board.json", not "*board*.json": the latter is an unanchored
+        # substring and matches dashboard.json, which is not a board at all
+        # (review finding, PR #764). Real boards are all "<team>-board.json".
+        has_board = bool(glob.glob(os.path.join(kd, "*-board.json"))) if kd else False
         (local if has_board else unknown).append(name)
     return sorted(local), sorted(unknown)
 
@@ -256,20 +324,12 @@ def load_map():
 
 
 def write_map(data):
-    parent = os.path.dirname(TEAM_MACHINES)
-    os.makedirs(parent, exist_ok=True)
-    if os.path.exists(TEAM_MACHINES):
-        shutil.copy2(TEAM_MACHINES, TEAM_MACHINES + BACKUP_SUFFIX)
-    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".team-machines-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(data, indent=2, sort_keys=True))
-            fh.write("\n")
-        os.replace(tmp, TEAM_MACHINES)
-    except Exception:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    """Persist the routing map. Uses the shared guarded writer (see
+    _write_json_atomic) -- this function previously open-coded the same sequence
+    with THREE unguarded steps, found by a file-wide audit after the sibling
+    site was fixed. Fixing one side of a matched pair and leaving the other is
+    how this class of bug survives."""
+    _write_json_atomic(TEAM_MACHINES, data, "team-machines")
 
 
 def merge_local(existing, teams, slug):
@@ -377,11 +437,13 @@ def main():
             say("    ~ %s -> %s (was %s)" % (t, slug, was))
         return 0
 
-    try:
-        write_map(merged)
-    except Exception as exc:
-        print("kb-msg-provision: could not write %s: %s" % (TEAM_MACHINES, exc), file=sys.stderr)
-        return 1
+    # No try/except here. This previously caught `Exception`, which became DEAD
+    # CODE when both writers moved onto _write_json_atomic: that helper reports
+    # every failure via _die_env, which raises SystemExit(2) — a BaseException,
+    # not an Exception, so the handler could never fire (review finding, PR #764).
+    # Leaving it would tell the next reader that write_map failures are handled
+    # here, and they are not; they exit 2 from inside the helper.
+    write_map(merged)
 
     say("\n  Wrote %s" % TEAM_MACHINES)
     for t in added:
