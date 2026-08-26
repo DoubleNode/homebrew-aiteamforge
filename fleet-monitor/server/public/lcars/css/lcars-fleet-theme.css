@@ -41,7 +41,12 @@
     /* Blue Spectrum - Used for DoubleNode organization, info, navigation */
     --lcars-blue: #9999ff;          /* Core blue - primary UI elements */
     --lcars-cyan: #99ccff;          /* Cyan - Dev Team, secondary info */
-    --lcars-teal: #66cccc;           /* Teal - MEDICAL org (XACA-0970) */
+    /* Shared by MEDICAL (--org-medical) and the freelance division borders,
+       which already referenced var(--lcars-teal, #66cccc) while the token was
+       undefined. Retune MEDICAL via --org-medical, NOT here, or freelance
+       moves with it. (XACA-0970) */
+    --lcars-teal: #66cccc;          /* Teal - MEDICAL org, freelance borders */
+    --lcars-teal-dark: #339999;     /* Pressed/dark variant of teal */
     --lcars-lavender: #ccccff;      /* Light lavender - subtle highlights */
     --lcars-navy: #6666cc;          /* Dark blue - pressed states */
 
@@ -218,7 +223,7 @@
 .org-medical {
     --org-color: var(--org-medical);
     --org-color-light: var(--lcars-teal);
-    --org-color-dark: var(--lcars-cyan);
+    --org-color-dark: var(--lcars-teal-dark);
 }
 
 
@@ -694,6 +699,7 @@
         --lcars-surface: #1a1a1a;
         --lcars-blue: #aaaaff;
         --lcars-cyan: #aaddff;
+        --lcars-teal: #77dddd;
         --lcars-crimson: #ff5577;
         --lcars-green: #aaffaa;
     }
@@ -707,6 +713,7 @@
     :root {
         --lcars-blue: #aaaaff;
         --lcars-cyan: #aaddff;
+        --lcars-teal: #77dddd;
         --lcars-crimson: #ff5577;
     }
 
@@ -6132,4 +6139,27 @@
    like it does -- otherwise the tooltip is only found by accident. */
 .organization-header[title] {
     cursor: help;
+}
+
+/* The heading is focusable only when it carries a hint, so it needs a focus
+   ring like any other interactive surface. Matches the existing convention
+   above (2px cyan, 2px offset). */
+.organization-header[title]:focus-visible {
+    outline: 2px solid var(--lcars-cyan);
+    outline-offset: 2px;
+}
+
+/* Read by screen readers via aria-describedby; not shown, because the same
+   text is already the tooltip for everyone else. Not display:none, which
+   would remove it from the accessibility tree and defeat the point. */
+.organization-hint {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }

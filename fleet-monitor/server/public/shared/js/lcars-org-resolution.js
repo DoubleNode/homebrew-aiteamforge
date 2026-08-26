@@ -79,6 +79,18 @@
     var warned = {};
 
     /**
+     * Own-property test. Every map lookup in this module goes through it.
+     *
+     * Division codes arrive from the network, so `STATIC_ORGS['constructor']`
+     * and friends are reachable input, not a theoretical concern: bare access
+     * resolves up the prototype chain and yields a Function where the caller
+     * expects a string.
+     */
+    function own(obj, key) {
+        return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
+    }
+
+    /**
      * Resolve a division code to an organization name.
      *
      * @param {string} divisionCode  e.g. "finance", "legal", "freelance-doublenode-starwords"
@@ -93,7 +105,14 @@
         // 1. Exact registry match — the division code IS the team id.
         //    True for academy/android/command/dns/firebase/ios and for each
         //    freelance-<project> division.
-        if (teams && teams[code] && teams[code].organization) {
+        //
+        //    own() rather than bare property access: a division code of
+        //    "constructor" or "__proto__" hits Object.prototype and returns a
+        //    Function or an Object, so resolve() would break its own
+        //    @returns {string} contract and hand a non-string to className and
+        //    to innerHTML — without tripping the tier-5 warn, because the
+        //    truthiness test above would have "succeeded".
+        if (own(teams, code) && teams[code] && teams[code].organization) {
             return teams[code].organization;
         }
 
@@ -104,14 +123,14 @@
         if (teams) {
             for (var id in teams) {
                 if (!Object.prototype.hasOwnProperty.call(teams, id)) { continue; }
-                if (id.indexOf(code + '-') === 0 && teams[id].organization) {
+                if (id.indexOf(code + '-') === 0 && teams[id] && teams[id].organization) {
                     return teams[id].organization;
                 }
             }
         }
 
         // 3. Static map for teams that are not registered.
-        if (STATIC_ORGS[code]) {
+        if (own(STATIC_ORGS, code)) {
             return STATIC_ORGS[code];
         }
 
@@ -178,7 +197,7 @@
      * @returns {string} CSS class name
      */
     function resolveColor(org, fallback) {
-        return ORG_CLASSES[org] || fallback || 'org-academy';
+        return (own(ORG_CLASSES, org) && ORG_CLASSES[org]) || fallback || 'org-academy';
     }
 
     /**
@@ -203,14 +222,69 @@
         'the entry to add. Register the team, or add it to STATIC_ORGS in ' +
         'shared/js/lcars-org-resolution.js.';
 
-    function describe(org) {
+    function remediationHint(org) {
         return org === 'UNKNOWN' ? UNKNOWN_HINT : '';
+    }
+
+    /**
+     * Attach the remediation to an organization heading, or do nothing.
+     *
+     * Owns the whole presentation policy, not just the string. The first cut of
+     * this set `el.title` from six lines pasted into each of the five pages —
+     * the string and the condition were centralised but the *decision to render
+     * it as a tooltip* was not, which is a smaller version of the duplication
+     * this whole ticket exists to remove.
+     *
+     * `title` alone was also mouse-only: the heading is a plain <div>, so it
+     * takes no focus, and a title on a non-interactive element is announced
+     * inconsistently by screen readers. The remediation was therefore invisible
+     * to exactly the operators least able to guess it. The heading now takes
+     * focus and carries an aria-describedby pointing at the same text, so
+     * keyboard and AT users reach it by the same route as everyone else.
+     *
+     * @param {Element} el   the .organization-header element
+     * @param {string}  org  organization name as returned by resolve()
+     * @returns {boolean} whether a hint was attached
+     */
+    function decorateHeading(el, org) {
+        if (!el || typeof el.setAttribute !== 'function') { return false; }
+
+        var hint = remediationHint(org);
+        if (!hint) { return false; }
+
+        el.title = hint;
+        el.setAttribute('tabindex', '0');
+
+        var doc = el.ownerDocument;
+        if (doc && typeof doc.createElement === 'function') {
+            var id = 'org-hint-' + String(org).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+            var note = doc.createElement('span');
+            note.className = 'organization-hint';
+            note.id = id;
+            // textContent, never innerHTML: this string is a literal today, and
+            // that is exactly the assumption that stops being true later.
+            note.textContent = hint;
+            el.appendChild(note);
+            el.setAttribute('aria-describedby', id);
+        }
+        return true;
+    }
+
+    // Exported by reference, so without this any later script on the page could
+    // rewrite org resolution for every dashboard. Frozen rather than copied so a
+    // stray write fails loudly in strict mode instead of landing on a clone that
+    // silently diverges from the map actually being consulted.
+    if (Object.freeze) {
+        Object.freeze(STATIC_ORGS);
+        Object.freeze(ORG_CLASSES);
+        Object.freeze(PREFIX_ORGS);
     }
 
     global.LCARS_ORG = {
         resolve: resolve,
         resolveColor: resolveColor,
-        describe: describe,
+        remediationHint: remediationHint,
+        decorateHeading: decorateHeading,
         STATIC_ORGS: STATIC_ORGS,
         ORG_CLASSES: ORG_CLASSES,
         // Exposed for tests: lets a harness assert the warn-once behaviour.

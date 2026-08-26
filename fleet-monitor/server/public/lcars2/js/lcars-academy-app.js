@@ -197,8 +197,19 @@
 
             const navButton = document.createElement('button');
             navButton.className = 'org-nav-button ' + getGroupColor(orgName);
-            navButton.innerHTML = '<span class="org-nav-name">' + orgName + '</span>' +
-                '<span class="org-nav-stats">' + divisionCount + ' Divisions • ' + totalSessions + ' Sessions</span>';
+            // textContent, not innerHTML: orgName arrives from the `organization`
+            // field of /api/team-register's body, validated for presence only, so
+            // innerHTML made this an injection sink for any API-key holder.
+            // (XACA-0970, review gate.)
+            const navName = document.createElement('span');
+            navName.className = 'org-nav-name';
+            navName.textContent = orgName;
+            navButton.appendChild(navName);
+
+            const navStats = document.createElement('span');
+            navStats.className = 'org-nav-stats';
+            navStats.textContent = divisionCount + ' Divisions • ' + totalSessions + ' Sessions';
+            navButton.appendChild(navStats);
 
             navButton.onclick = function() {
                 const targetId = 'org-' + orgName.toLowerCase().replace(/\s+/g, '-');
@@ -248,14 +259,21 @@
 
             const orgHeader = document.createElement('div');
             orgHeader.className = 'organization-header';
-            orgHeader.innerHTML = '<span class="organization-title">' + orgName + '</span>' +
-                '<span class="organization-count">' + totalSessions + ' Sessions</span>';
-            // XACA-0970-012: surface the console remediation to an operator who has
-            // no reason to open the console. describe() returns '' for every resolved
-            // org, so only the UNKNOWN heading gets a tooltip.
-            if (window.LCARS_ORG && window.LCARS_ORG.describe) {
-                const orgHint = window.LCARS_ORG.describe(orgName);
-                if (orgHint) { orgHeader.title = orgHint; }
+            // textContent, not innerHTML -- same untrusted `organization` field as the
+            // nav button above. (XACA-0970, review gate.)
+            const orgTitle = document.createElement('span');
+            orgTitle.className = 'organization-title';
+            orgTitle.textContent = orgName;
+            orgHeader.appendChild(orgTitle);
+
+            const orgCount = document.createElement('span');
+            orgCount.className = 'organization-count';
+            orgCount.textContent = totalSessions + ' Sessions';
+            orgHeader.appendChild(orgCount);
+            // XACA-0970-012: the UNKNOWN heading carries its own remediation.
+            // All of the policy lives in the shared module -- see decorateHeading().
+            if (window.LCARS_ORG && window.LCARS_ORG.decorateHeading) {
+                window.LCARS_ORG.decorateHeading(orgHeader, orgName);
             }
             orgContainer.appendChild(orgHeader);
 
