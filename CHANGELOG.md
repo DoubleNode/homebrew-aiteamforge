@@ -13,6 +13,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
   **Tap-layout constraint held:** `vault-keygen.js` is the module the flattened `share/scripts/` layout has other clients require, so its top-level dependencies remain `os`/`fs`/`path`/`child_process` with libsodium still lazy. Verified by copying the file alone into an empty directory with no `node_modules` — it loads, and both `resolveFleetUrl()` and `defaultMachineSlug()` work. The resolver was deliberately placed here rather than in a new shared module for exactly this reason: a new file would have needed adding to both `sync-tap.sh` and the installer allowlist, or this copy would break on a top-level require.
 
+  `share/scripts/package.json` is mirrored in the same cycle: its `test` script listed only two of the three canonical suites. As before, the paths it names do not resolve inside the flattened `share/scripts/` layout — that file is carried so the libsodium `npm install` bootstrap resolves, not so `npm test` runs there — so this keeps the mirror faithful to canonical without changing tap behaviour.
+
   Mirrors the canonical change in `fleet-monitor/client/vault-keygen.js`. The 404-vs-unreachable exit-code work and the `cc` credential-chain fix in the same ticket are in files that are not tap-mirrored.
 
 - **XACA-0970 — teams whose division code differs from their team id no longer resolve to an UNKNOWN organization.** Consumer-visible: `finance` rendered under UNKNOWN in the Fleet Monitor ORGS view. Three compounding faults, only the first of which is structural:

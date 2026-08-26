@@ -9,7 +9,7 @@
     "vault-fetch": "vault-fetch.js"
   },
   "scripts": {
-    "test": "node --test tests/vault-keygen.test.js tests/vault-fetch.test.js"
+    "test": "node --test tests/vault-keygen.test.js tests/vault-fetch.test.js ../../scripts/tests/vault-migrate-env-keys.test.js"
   },
   "keywords": [
     "aiteamforge",
