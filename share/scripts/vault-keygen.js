@@ -84,18 +84,121 @@ const BASE64_ORIGINAL  = 'base64.ORIGINAL'; // sentinel; resolved against sodium
 // require to this file.
 
 /**
+ * Every fleet-config.json location we consult, in precedence order:
+ * ~/.aiteamforge/ first, then the legacy ~/.dev-team/ location.
+ *
+ * Returned as a LIST, not a single winner, because resolveFleetUrl() must be
+ * able to fall THROUGH a file that exists but carries no apiEndpoint - see the
+ * note on resolveFleetUrl below. Computed per call (never cached at module
+ * scope) so a test that redirects $HOME is actually honoured.
+ * @returns {string[]} absolute paths, most-preferred first (may not exist)
+ */
+function fleetConfigCandidates() {
+    return [
+        path.join(os.homedir(), '.aiteamforge', 'fleet-config.json'),
+        path.join(os.homedir(), '.dev-team', 'fleet-config.json'),
+    ];
+}
+
+/**
  * Locate the fleet-config.json the fleet reporters read.
  * Prefers ~/.aiteamforge/, falls back to the legacy ~/.dev-team/ location.
  * Mirrors msg-client.js fleetConfigPath(). When neither exists the preferred
  * path is returned anyway, so callers have a concrete path to name in an error.
+ *
+ * This is the path we NAME IN DIAGNOSTICS. It is deliberately NOT the one
+ * resolveFleetUrl() reads from - that one loops (XACA-0972-016).
  * @returns {string} absolute path (which may not exist)
  */
 function fleetConfigPath() {
-    const a = path.join(os.homedir(), '.aiteamforge', 'fleet-config.json');
-    const b = path.join(os.homedir(), '.dev-team', 'fleet-config.json');
-    if (fs.existsSync(a)) return a;
-    if (fs.existsSync(b)) return b;
-    return a;
+    const candidates = fleetConfigCandidates();
+    for (const c of candidates) {
+        if (fs.existsSync(c)) return c;
+    }
+    return candidates[0];
+}
+
+// -----------------------------------------------------------------------------
+// Fleet URL validation (XACA-0972-022)
+// -----------------------------------------------------------------------------
+//
+// The resolved URL no longer comes only from an env var the operator typed this
+// session - it now comes from a FILE on disk. vault-migrate-env-keys seals real
+// API keys to machine public keys FETCHED FROM THIS HOST, so a hostile or
+// corrupted fleet-config.json can redirect key material to an attacker-chosen
+// server. That makes the config file an input worth validating, not just parsing.
+//
+// Rules, and why each one:
+//   - must parse as an absolute URL           - a bare "example.com" or a typo'd
+//                                               fragment is a misconfiguration
+//   - scheme must be http: or https:          - blocks file:, data:, javascript:
+//                                               and any other exotic scheme from
+//                                               reaching a fetch() call site
+//   - host must be non-empty                  - "http:///path" resolves to no host
+//   - NO embedded userinfo (user:pass@host)   - "https://fleet-monitor.fly.dev@evil
+//                                               .example/" reads to a human as the
+//                                               real host but RESOLVES to
+//                                               evil.example. That is the exact
+//                                               confusion this check exists to stop,
+//                                               and it also keeps credentials out of
+//                                               a URL we may echo in diagnostics.
+//
+// https is NOT required: a LAN/dev fleet-monitor over plain http is a legitimate
+// deployment, and the tests exercise it. Tightening that is a separate decision.
+
+const ALLOWED_FLEET_SCHEMES = ['http:', 'https:'];
+
+/**
+ * Validate a candidate fleet base URL.
+ * @param {string} value
+ * @returns {{ ok: true, url: string }|{ ok: false, reason: string }}
+ *          `reason` is short, human-actionable, and never echoes credentials.
+ */
+function validateFleetUrl(value) {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+        return { ok: false, reason: 'is empty' };
+    }
+    let parsed;
+    try {
+        parsed = new URL(value);           // WHATWG URL is a Node global - no new require
+    } catch (_) {
+        return { ok: false, reason: `is not a valid absolute URL: ${JSON.stringify(value)}` };
+    }
+    if (!ALLOWED_FLEET_SCHEMES.includes(parsed.protocol)) {
+        return {
+            ok: false,
+            reason: `uses unsupported scheme "${parsed.protocol}" ` +
+                    `(only ${ALLOWED_FLEET_SCHEMES.join(' and ')} are allowed)`,
+        };
+    }
+    if (!parsed.hostname) {
+        return { ok: false, reason: 'has no host' };
+    }
+    if (parsed.username || parsed.password) {
+        // Do NOT echo the userinfo back - it may be a credential. Name the host
+        // the URL ACTUALLY resolves to, which is the whole point of the warning.
+        return {
+            ok: false,
+            reason: `embeds credentials before the host (it actually resolves to ` +
+                    `"${parsed.hostname}", which is probably not what it looks like)`,
+        };
+    }
+    return { ok: true, url: value };
+}
+
+// The most recent rejection, so unresolvedFleetUrlMessage() can say WHY rather
+// than the misleading "nothing is configured" when something IS configured but
+// was refused. Module-scoped and overwritten per resolve attempt; read it only
+// immediately after a resolveFleetUrl() that returned null.
+let _lastFleetUrlRejection = null;
+
+/**
+ * The reason the last resolveFleetUrl() call refused a configured value, or null
+ * when the last call simply found nothing configured.
+ * @returns {{ source: string, reason: string }|null}
+ */
+function lastFleetUrlRejection() {
+    return _lastFleetUrlRejection;
 }
 
 /**
@@ -111,31 +214,66 @@ function fleetConfigPath() {
  *                        unresolvable. NEVER returns localhost.
  */
 function resolveFleetUrl() {
+    _lastFleetUrlRejection = null;
+
     if (process.env.FLEET_MONITOR_URL) {
-        return process.env.FLEET_MONITOR_URL.replace(/\/+$/, '') || null;
+        const raw = process.env.FLEET_MONITOR_URL.replace(/\/+$/, '');
+        if (!raw) return null;
+        const v = validateFleetUrl(raw);
+        if (!v.ok) {
+            _lastFleetUrlRejection = { source: '$FLEET_MONITOR_URL', reason: v.reason };
+            return null;
+        }
+        return raw;
     }
 
-    let endpoint;
-    try {
-        const cfg = JSON.parse(fs.readFileSync(fleetConfigPath(), 'utf8'));
-        endpoint = cfg && cfg.centralServer && cfg.centralServer.apiEndpoint;
-    } catch (_) {
-        return null; // missing, unreadable, or malformed config
+    // XACA-0972-016: LOOP over every candidate config and fall THROUGH one that
+    // exists but carries no usable apiEndpoint. The previous version picked
+    // fleetConfigPath() - the FIRST file that EXISTS - and gave up if that file
+    // happened to lack the key, so an empty ~/.aiteamforge/fleet-config.json
+    // masked a perfectly good ~/.dev-team/fleet-config.json underneath it.
+    //
+    // That was a real divergence from _kb_msg_relay_url in kanban-helpers.sh,
+    // which this function is documented to mirror: the shell version iterates
+    // both paths and `continue`s when the endpoint is empty. Keep the two in
+    // sync - including this fall-through.
+    for (const cfgPath of fleetConfigCandidates()) {
+        let endpoint;
+        try {
+            const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+            endpoint = cfg && cfg.centralServer && cfg.centralServer.apiEndpoint;
+        } catch (_) {
+            continue; // missing, unreadable, or malformed - try the next one
+        }
+        if (typeof endpoint !== 'string' || endpoint.length === 0) continue;
+
+        // Strip the trailing /api... path, exactly as _kb_msg_relay_url does - in TWO
+        // steps, and the second is NOT redundant. The documented shape is
+        // "<base>/api/status", which the first step handles; the bare "<base>/api"
+        // form has no slash AFTER /api and does not match it. Omitting the second
+        // step silently produced a relay base of "https://host/api" during the
+        // XACA-0885 fix and only surfaced in a test. Do not collapse these.
+        let base = endpoint;
+        const apiIdx = base.lastIndexOf('/api/');   // mirrors ${ep%/api/*}
+        if (apiIdx !== -1) base = base.slice(0, apiIdx);
+        base = base.replace(/\/api$/, '');          // mirrors ${base%/api}
+        base = base.replace(/\/+$/, '');
+        if (!base) continue;
+
+        // XACA-0972-022: this value came off DISK. Validate before any caller
+        // fetches machine public keys from it and seals secrets to them.
+        // A refused config does NOT fall through to the next candidate - a
+        // hostile entry must not be able to make us quietly try somewhere else
+        // as if nothing happened. Record why and stop.
+        const v = validateFleetUrl(base);
+        if (!v.ok) {
+            _lastFleetUrlRejection = { source: cfgPath, reason: v.reason };
+            return null;
+        }
+        return base;
     }
-    if (typeof endpoint !== 'string' || endpoint.length === 0) return null;
 
-    // Strip the trailing /api... path, exactly as _kb_msg_relay_url does - in TWO
-    // steps, and the second is NOT redundant. The documented shape is
-    // "<base>/api/status", which the first step handles; the bare "<base>/api"
-    // form has no slash AFTER /api and does not match it. Omitting the second
-    // step silently produced a relay base of "https://host/api" during the
-    // XACA-0885 fix and only surfaced in a test. Do not collapse these.
-    let base = endpoint;
-    const apiIdx = base.lastIndexOf('/api/');   // mirrors ${ep%/api/*}
-    if (apiIdx !== -1) base = base.slice(0, apiIdx);
-    base = base.replace(/\/api$/, '');          // mirrors ${base%/api}
-
-    return base.replace(/\/+$/, '') || null;
+    return null;
 }
 
 /**
@@ -147,8 +285,19 @@ function resolveFleetUrl() {
  * @returns {string}
  */
 function unresolvedFleetUrlMessage(toolName) {
-    return `${toolName}: no fleet server URL is configured, so there is nothing to talk to.\n` +
-           `  Fix it by any ONE of:\n` +
+    // XACA-0972-022: distinguish "nothing configured" from "something IS
+    // configured and we REFUSED it". Telling an operator to set a value they
+    // already set sends them in a circle; naming the rejected source and the
+    // reason points them straight at the bad line.
+    const rejection = lastFleetUrlRejection();
+    const head = rejection
+        ? `${toolName}: the configured fleet server URL was REJECTED, so there is nothing safe to talk to.\n` +
+          `  Source: ${rejection.source}\n` +
+          `  Problem: the URL ${rejection.reason}.\n` +
+          `  Fix that value, or override it by any ONE of:\n`
+        : `${toolName}: no fleet server URL is configured, so there is nothing to talk to.\n` +
+          `  Fix it by any ONE of:\n`;
+    return head +
            `    - pass --server <url>\n` +
            `    - export FLEET_MONITOR_URL=<url>\n` +
            `    - set .centralServer.apiEndpoint in ${fleetConfigPath()}\n` +
@@ -679,6 +828,9 @@ module.exports = {
     X25519_KEY_BYTES,
     // fleet URL resolution (shared with vault-fetch.js / vault-migrate-env-keys.js)
     fleetConfigPath,
+    fleetConfigCandidates,
+    validateFleetUrl,
+    lastFleetUrlRejection,
     resolveFleetUrl,
     unresolvedFleetUrlMessage,
     // slug/label

@@ -34,14 +34,11 @@
  * every relay call. Auth gates who may RELAY; sealing gates who may READ.
  */
 
-const os   = require('os');
 const fs   = require('fs');
-const path = require('path');
 
 // Reuse slug + private-key storage helpers from vault-keygen.js (same dir).
 const kg = require('./vault-keygen.js');
 
-const DEFAULT_SERVER = process.env.FLEET_MONITOR_URL || 'http://localhost:3000';
 
 // ── libsodium lazy handle (same pattern as vault-fetch.js / vault-keygen.js) ──
 let _sodium = null;
@@ -55,13 +52,14 @@ async function ensureSodium() {
 
 // ── Config resolution ────────────────────────────────────────────────────────
 
-/** Locate the fleet-config.json used by the reporters (for auth token). */
+/**
+ * Locate the fleet-config.json used by the reporters (for auth token).
+ * Delegates to vault-keygen.js so there is exactly ONE definition of where
+ * these files live - this used to be a hand-copied duplicate that could drift
+ * from the shared one (XACA-0972-015/016).
+ */
 function fleetConfigPath() {
-    const a = path.join(os.homedir(), '.aiteamforge', 'fleet-config.json');
-    const b = path.join(os.homedir(), '.dev-team', 'fleet-config.json');
-    if (fs.existsSync(a)) return a;
-    if (fs.existsSync(b)) return b;
-    return a;
+    return kg.fleetConfigPath();
 }
 
 /** Resolve the relay bearer token: env override, else fleet-config. '' if none. */
@@ -116,8 +114,37 @@ async function sealOpenLocal(sealedB64, machineSlug) {
 
 // ── Relay HTTP ───────────────────────────────────────────────────────────────
 
+/**
+ * Resolve the relay base URL. XACA-0972-015.
+ *
+ * An explicit --server (opts.server) ALWAYS wins - that precedence is
+ * load-bearing, because _kb_msg_relay_url in kanban-helpers.sh already resolves
+ * the URL shell-side and passes it in on every call. The shared resolver is the
+ * defense-in-depth default underneath it, for any call site that forgets.
+ *
+ * There is no localhost fallback. This module used to carry
+ * `process.env.FLEET_MONITOR_URL || 'http://localhost:3000'` in a
+ * module-level constant, which was wrong twice over: nothing listens on :3000
+ * on a fleet machine, so "not configured" surfaced as "fetch failed"; and being
+ * module-level, it read the environment once at REQUIRE time and could never be
+ * exercised per-test. Resolve lazily, here, at use time.
+ *
+ * @param {{ server?: string }} opts
+ * @returns {string} base URL with no trailing slash
+ * @throws {Error} with .code = 'FLEET_URL_UNRESOLVED' when nothing resolves,
+ *                 carrying the one canonical actionable message.
+ */
 function serverBase(opts) {
-    return (opts.server || DEFAULT_SERVER).replace(/\/+$/, '');
+    const explicit = opts && opts.server;
+    if (explicit) return explicit.replace(/\/+$/, '');
+
+    const resolved = kg.resolveFleetUrl();
+    if (!resolved) {
+        const err = new Error(kg.unresolvedFleetUrlMessage('msg-client'));
+        err.code = 'FLEET_URL_UNRESOLVED';
+        throw err;
+    }
+    return resolved.replace(/\/+$/, '');
 }
 
 /** Fetch a registered machine's public key from the vault machine registry. */

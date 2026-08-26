@@ -17,6 +17,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
   `share/scripts/package.json` is mirrored in the same cycle: its `test` script listed only two of the three canonical suites. As before, the paths it names do not resolve inside the flattened `share/scripts/` layout — that file is carried so the libsodium `npm install` bootstrap resolves, not so `npm test` runs there — so this keeps the mirror faithful to canonical without changing tap behaviour.
 
+  **Round 2 also mirrors `share/scripts/msg-client.js`**, which carried the same `http://localhost:3000` default and now routes through `resolveFleetUrl()`. An explicit `--server` still wins, so the caller-side resolution shipped for the kb-msg relay is unaffected — this closes the last of the four clients that carried the localhost default.
+
+  `resolveFleetUrl()` gained two corrections consumers should know about. It now **loops over every candidate config** and falls through one that exists but carries no `apiEndpoint`, instead of stopping at the first file that merely exists — a present-but-empty `~/.aiteamforge/fleet-config.json` previously masked a good `~/.dev-team/` one. And it now **validates the resolved URL**, rejecting non-`http(s)` schemes, hostless URLs, and credentials-before-host: the value is read from a config *file*, and the migration tool seals real API keys to machine public keys fetched from that host, so a corrupted config could otherwise redirect key material.
+
   Mirrors the canonical change in `fleet-monitor/client/vault-keygen.js`. The 404-vs-unreachable exit-code work and the `cc` credential-chain fix in the same ticket are in files that are not tap-mirrored.
 
 - **XACA-0970 — teams whose division code differs from their team id no longer resolve to an UNKNOWN organization.** Consumer-visible: `finance` rendered under UNKNOWN in the Fleet Monitor ORGS view. Three compounding faults, only the first of which is structural:
