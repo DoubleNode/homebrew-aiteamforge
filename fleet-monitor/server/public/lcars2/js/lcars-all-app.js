@@ -332,6 +332,16 @@
                 card.addEventListener('click', function() {
                     window.open(lcarsUrl, '_blank');
                 });
+            } else if (lcarsUrl && !isOnline) {
+                // XACA-0979: match the flat dashboards' offline treatment so one
+                // team's card behaves identically in every dashboard view.
+                card.classList.add('lcars-offline');
+                card.title = 'LCARS terminal unavailable - machine is ' + status;
+            } else {
+                // XACA-0979: no hostname reported for this session - never leave
+                // the card looking actionable without saying why.
+                card.classList.add('lcars-offline');
+                card.title = 'LCARS terminal misconfigured - no hostname reported for this session';
             }
         }
 
