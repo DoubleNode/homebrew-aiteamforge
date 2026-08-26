@@ -102,6 +102,8 @@
     --org-academy: var(--lcars-cyan);         /* Academy - Cyan (matches sidebar) */
     --org-personal: var(--lcars-green);       /* Personal - Green */
     --org-legal: var(--lcars-green);          /* Legal - Green */
+    --org-finance: var(--lcars-amber);
+    --org-medical: var(--lcars-cyan);
 
     /* ═══════════════════════════════════════════════════════════════════════════
        DIVISION COLORS
@@ -199,6 +201,25 @@
     --org-color-light: var(--lcars-green);
     --org-color-dark: var(--lcars-green-dark);
 }
+
+/* XACA-0970: FINANCE became a first-class org group when finance stopped
+   resolving to UNKNOWN, so it needs an identity colour like its siblings.
+   .org-medical is added at the same time: MEDICAL has been mapped to it in
+   getGroupColor() for as long as that mapping existed, but the class was never
+   defined -- so MEDICAL has been silently falling back. Not introduced here,
+   but fixed here rather than left as a second instance of the same gap. */
+.org-finance {
+    --org-color: var(--org-finance);
+    --org-color-light: var(--lcars-amber);
+    --org-color-dark: var(--lcars-orange);
+}
+
+.org-medical {
+    --org-color: var(--org-medical);
+    --org-color-light: var(--lcars-cyan);
+    --org-color-dark: var(--lcars-blue);
+}
+
 
 /* Division Classes - Set the --div-color variable */
 .div-ios { --div-color: var(--div-ios); }

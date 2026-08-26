@@ -410,13 +410,16 @@
     }
 
     function getGroupColor(group) {
-        const colors = {
-            'DEVTEAM': 'org-academy',
-            'DOUBLENODE': 'org-doublenode',
-            'MAIN EVENT': 'org-mainevent',
-            'LEGAL': 'org-legal'
-        };
-        return colors[group] || 'org-academy';
+        // Delegates to the shared module (XACA-0970), same as
+        // getOrganizationGroup above. FINANCE was missing from every one of
+        // the 14 copies of this map, so the org this ticket exists to surface
+        // would have rendered with a fallback colour instead of its own.
+        if (!window.LCARS_ORG) {
+            console.error('[LCARS][org] shared/js/lcars-org-resolution.js is not '
+                + 'loaded -- it must appear BEFORE this script.');
+            return 'org-academy';
+        }
+        return window.LCARS_ORG.resolveColor(group);
     }
 
     function getDivisionPriority(divisionCode) {
