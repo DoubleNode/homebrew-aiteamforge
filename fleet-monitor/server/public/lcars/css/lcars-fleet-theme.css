@@ -6154,11 +6154,8 @@
    would get the ring above and never see the text. Revealing the hint node that
    already exists for aria-describedby covers that without putting a permanent
    icon on an already dense dashboard. Positioned, so it cannot reflow the
-   header's flex row. */
-.organization-header {
-    position: relative;
-}
-
+   header's flex row. `.organization-header` is already `position: relative`
+   from an unrelated rule above, so no containing block is introduced here. */
 .organization-header[title]:focus-within .organization-hint,
 .organization-header[title]:focus-visible .organization-hint {
     position: absolute;
@@ -6179,6 +6176,14 @@
     border-radius: 4px;
     font-size: 13px;
     line-height: 1.4;
+}
+
+/* .organization-panel clips its children (overflow: hidden) and the hint adds
+   no height to it, being absolutely positioned -- so a short UNKNOWN panel
+   would clip the hint exactly where it is needed. Lift the clip only while the
+   panel contains focus, which is the only time the hint is visible. */
+.organization-panel:focus-within {
+    overflow: visible;
 }
 
 /* Read by screen readers via aria-describedby; not shown, because the same
