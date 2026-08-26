@@ -2066,6 +2066,60 @@
     margin-top: 15px;
 }
 
+/* XACA-0973: tablet-landscape column pin.
+   .teams-grid above uses auto-fill at a 280px minimum. After the ORGS layout's
+   266px of horizontal chrome (200px --sidebar-width + 36px .lcars-content
+   margin-left [--corner-radius 30 + --gap 6] + 30px .lcars-content padding),
+   three columns need 3*280 + 2*16 = 872px of grid width -- i.e. a 1138px
+   viewport. iPad landscape straddles that: 10.2" (1080) and mini (1133) fall
+   short and drop to 2 columns, while Air (1180) and Pro 11" (1194) make it.
+   Pinning 3 columns across the tablet band fixes the short devices without
+   touching desktop density -- lowering the global 280px minimum instead would
+   silently add a column on wide displays (5 -> 6 at 1920px). Cards land at
+   260-278px here, close to the 280px minimum they replace.
+
+   Floor is 1080px, not a round 1000px: 1080 is the narrowest real target
+   (10.2" iPad). A 1000px floor would also catch desktop windows resized to
+   1000-1079px, forcing a comfortable 2-column ~359px layout into a pinned
+   3-column ~234px one -- narrower than the 280px minimum this rule replaces,
+   on a population that was never broken. (XACA-0973-012)
+
+   NOTE ON CASCADE: this block must stay AFTER the second .teams-grid base
+   rule above it. Both skins carry a duplicate .teams-grid base declaration
+   (an older one earlier in the file, already dead by source order); at equal
+   specificity the last declaration wins, so placement here is load-bearing.
+   The dead rule is left in place -- removing it is unrelated cleanup and
+   would widen this PR's blast radius. (XACA-0973-011) */
+@media (min-width: 1080px) and (max-width: 1200px) {
+    .teams-grid {
+        grid-template-columns: repeat(3, 1fr);
+    }
+
+    /* Skin parity with lcars. NOTE: the clipping this guards against was only
+       reproducible in the lcars skin, whose ORGS cards carry a
+       .team-avatar-stack (flex-shrink:0) that squeezes .session-info. lcars2's
+       cards have no avatar column, so they were never observed to overflow --
+       these rules are carried here for parity and as a guard if that markup
+       ever converges, not because a defect was rendered here.
+
+       WHICH DECLARATION DOES THE WORK: overflow-wrap. Mutation-isolating the
+       two showed removing min-width:0 ALONE reproduces nothing; the 34px@1080 /
+       16px@1133 overflow only returns when BOTH are removed.
+
+       WHY NOT ellipsis + white-space:nowrap: this band targets touch-primary
+       iPads, where the title= tooltip is inert -- ellipsis would hide the
+       hostname outright with no way to recover it. (XACA-0973 [UX]) */
+    .teams-grid .session-info,
+    .teams-grid .session-detail,
+    .teams-grid .session-value {
+        min-width: 0;
+    }
+
+    .teams-grid .session-value {
+        overflow-wrap: anywhere;
+    }
+}
+
 .team-card {
     background: var(--lcars-dark);
     border-radius: 8px;

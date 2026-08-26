@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-0973** — Fleet Monitor ORGS team grid pinned to 3 columns across the 1080–1200px tablet band, fixing iPad landscape rendering 2 across. Includes the accompanying `min-width: 0` / `overflow-wrap: anywhere` guard that stops an unbreakable hostname being clipped mid-word by `.team-card`'s `overflow: hidden` at the narrower card widths, and the `?v=` cache-buster bump on the 6 mirrored pages that link the changed stylesheet.
+
 - **XACA-0972 — `vault-keygen.js` no longer defaults the fleet server to `http://localhost:3000`.** Consumer-visible on every tap machine: the shipped vault client read `$FLEET_MONITOR_URL` and otherwise fell back to localhost, never consulting `~/.aiteamforge/fleet-config.json` where the real endpoint lives. On a box where that variable is unset — the normal case — every vault operation failed against a port nothing listens on, surfacing as `fetch failed`. A silent localhost default for a *fleet* service turns "not configured" into "connection refused", which reads to the operator as a network fault rather than a missing setting.
 
   New `resolveFleetUrl()` resolves `$FLEET_MONITOR_URL` first, then `.centralServer.apiEndpoint` from `~/.aiteamforge/fleet-config.json` (`~/.dev-team/` as fallback), stripping the `/api/...` suffix — including the bare `<base>/api` form, which the obvious single-pattern strip silently misses and which produced a malformed base during the sibling XACA-0885 fix. When nothing resolves it returns `null` and the caller fails with an actionable message naming all three remedies; it never invents a localhost target. `DEFAULT_SERVER_URL` is removed.
