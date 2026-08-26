@@ -81,11 +81,24 @@
         ['finance',   'FINANCE']
     ];
 
-    /** Codes already warned about, so a render loop cannot flood the console. */
-    var warned = {};
+    /**
+     * Codes already warned about, so a render loop cannot flood the console.
+     *
+     * Object.create(null) rather than {}: a plain object inherits from
+     * Object.prototype, so a polluted prototype could pre-seed this cache and
+     * suppress the warning. own() below is the primary guard; a null prototype
+     * means there is nothing to inherit in the first place.
+     */
+    var warned = Object.create(null);
 
     /**
-     * Own-property test. Every map lookup in this module goes through it.
+     * Own-property test. Every map lookup in this module goes through it --
+     * FIVE call sites: registry exact (tier 1), registry prefix loop (tier 2),
+     * STATIC_ORGS (tier 3), the warn-once cache (tier 5), and resolveColor.
+     * Three of those five were found untested one round at a time, and tier 2
+     * was worse than untested: it was a second inline implementation, which is
+     * precisely why it read as covered. One helper, five call sites, each with
+     * a test that fails when its guard is removed.
      *
      * Division codes arrive from the network, so `STATIC_ORGS['constructor']`
      * and friends are reachable input, not a theoretical concern: bare access
@@ -174,7 +187,15 @@
         //    module was written to fix survived for months because `|| 'UNKNOWN'`
         //    said nothing. If this fires, a team is missing from the registry or
         //    from STATIC_ORGS above.
-        if (!warned[code]) {
+        // own(), like every other map read in this module. This was the FOURTH
+        // bare property read found, and the last: same-realm prototype
+        // pollution on a matching code would make `warned[code]` truthy and
+        // silently suppress the operator warning. Lower severity than tiers
+        // 1-3 -- resolve() still returns UNKNOWN, so this suppresses the
+        // DIAGNOSTIC rather than corrupting the answer -- which is exactly why
+        // it is worth closing: the whole point of that warning is that a
+        // silent failure is what let the original bug live for months.
+        if (!own(warned, code)) {
             warned[code] = true;
             if (global.console && global.console.warn) {
                 global.console.warn(
@@ -312,7 +333,7 @@
         STATIC_ORGS: STATIC_ORGS,
         ORG_CLASSES: ORG_CLASSES,
         // Exposed for tests: lets a harness assert the warn-once behaviour.
-        _resetWarnings: function () { warned = {}; }
+        _resetWarnings: function () { warned = Object.create(null); }
     };
 
     // Freeze the namespace itself, not just the maps inside it. The first cut
