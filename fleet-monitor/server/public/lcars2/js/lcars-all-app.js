@@ -390,31 +390,23 @@
     }
 
     function getOrganizationGroup(divisionCode) {
-        const code = divisionCode.toLowerCase();
-
-        // Check dynamic team config first (auto-discovered from board files)
-        if (teamConfig && teamConfig.teams && teamConfig.teams[code]) {
-            return teamConfig.teams[code].organization;
+        // Delegates to THE single implementation (XACA-0970):
+        //   shared/js/lcars-org-resolution.js
+        //
+        // Do NOT reintroduce a local copy. This function previously existed in
+        // ELEVEN files across SEVEN variants -- and the only copy that handled
+        // `finance` lived in a file no page loaded, so the bug looked fixed and
+        // never ran. Add teams in the shared module, nowhere else.
+        if (!window.LCARS_ORG) {
+            // Loud on purpose: a missing module must not masquerade as a team
+            // with no organization, which is the exact silent failure this
+            // ticket exists to remove. Check script order in the page.
+            console.error('[LCARS][org] shared/js/lcars-org-resolution.js is not '
+                + 'loaded -- it must appear BEFORE this script. Falling back to UNKNOWN.');
+            return 'UNKNOWN';
         }
-
-        // Fallback: Handle freelance-* divisions
-        if (code.startsWith('freelance')) {
-            return 'DOUBLENODE';
-        }
-        // Fallback: Handle legal-* divisions (legal-coparenting, etc.)
-        if (code.startsWith('legal')) {
-            return 'LEGAL';
-        }
-        // Fallback: Static mapping for backward compatibility
-        const groups = {
-            'academy': 'DEVTEAM',
-            'android': 'MAIN EVENT',
-            'command': 'MAIN EVENT',
-            'dns': 'DOUBLENODE',
-            'firebase': 'MAIN EVENT',
-            'ios': 'MAIN EVENT'
-        };
-        return groups[code] || 'UNKNOWN';
+        var cfg = (typeof teamConfig !== 'undefined') ? teamConfig : null;
+        return window.LCARS_ORG.resolve(divisionCode, cfg);
     }
 
     function getGroupColor(group) {

@@ -727,6 +727,9 @@
     <!-- Kiosk Team Status: Team status board grid kiosk page — registers with LCARSAnalyticsPages -->
     <script src="js/lcars-kiosk-team-status.js"></script>
     <!-- Unified Dashboard Application -->
+    <!-- Division -> organization resolution. MUST load BEFORE the app script
+         below, which delegates to it; loaded after, it is a silent no-op. -->
+    <script src="../shared/js/lcars-org-resolution.js?v=20260825e"></script>
     <script src="js/lcars-dashboard-app.js"></script>
     <!-- Dashboard Admin UI Module -->
     <script src="js/lcars-dashboards-ui.js"></script>

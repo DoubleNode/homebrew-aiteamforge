@@ -518,6 +518,9 @@
     <!-- Kiosk Mode: Auto-Rotation on Idle (shared) -->
     <script src="../shared/js/lcars-kiosk.js"></script>
     <!-- All Fleet Dashboard Application -->
+    <!-- Division -> organization resolution. MUST load BEFORE the app script
+         below, which delegates to it; loaded after, it is a silent no-op. -->
+    <script src="../shared/js/lcars-org-resolution.js?v=20260825e"></script>
     <script src="js/lcars-all-app.js"></script>
 </body>
 </html>
