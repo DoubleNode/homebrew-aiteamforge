@@ -23,7 +23,16 @@
  *     - GET /lcars/js/lcars-fleet-core.js   → no-cache
  *     - GET /lcars/css/<any>.css            → no-cache
  *     - GET /styles.css (root public/)      → no-cache
- *     - GET /app.js (root public/)          → no-cache
+ *     - GET /all.html (root public/)        → no-cache, must-revalidate
+ *       (XACA-0971: /app.js was the original probe for this mount, but it was
+ *       deleted as dead code — zero HTML pages ever loaded it. /all.html is the
+ *       replacement probe: it is a real, live, root-mounted asset served by the
+ *       exact same `express.static(PUBLIC_DIR, { setHeaders: setStaticCacheHeaders })`
+ *       mount, registered before the `/all` sendFile route, so a request for
+ *       `/all.html` (unlike bare `/all`) resolves through the static mount, not
+ *       sendFile. After the XACA-0971 deletions, no .js file remains at the root
+ *       mount at all, so an HTML probe is the only option left that still proves
+ *       the mount's setHeaders wiring is intact.)
  *
  *   sendFile HTML routes (integration via minimal Express app):
  *     - GET /       → no-cache, must-revalidate
@@ -212,13 +221,27 @@ test('GET /lcars/css/lcars-fleet.css returns 200 with Cache-Control: no-cache', 
 });
 
 // ===========================================================================
-// INTEGRATION TESTS: root public/ static mount — JS and CSS
+// INTEGRATION TESTS: root public/ static mount — HTML and CSS
 // ===========================================================================
 
-test('GET /app.js (root public mount) returns 200 with Cache-Control: no-cache', async () => {
-    const res = await request(getApp()).get('/app.js');
+// XACA-0971: probe repointed from /app.js (deleted dead code, loaded by zero
+// HTML pages) to /all.html — a live, root-mounted asset served by the same
+// express.static(PUBLIC_DIR, { setHeaders: setStaticCacheHeaders }) mount,
+// which is registered ahead of the `/all` sendFile route so this request
+// resolves through the static mount rather than sendFile. This keeps the
+// root-mount setHeaders wiring under real coverage now that no .js file
+// remains at the root mount.
+test('GET /all.html (root public mount) returns 200 with Cache-Control: no-cache, must-revalidate', async () => {
+    const res = await request(getApp()).get('/all.html');
     assert.equal(res.status, 200);
-    assert.equal(res.headers['cache-control'], 'no-cache');
+    assert.ok(
+        res.headers['cache-control'] && res.headers['cache-control'].includes('no-cache'),
+        `Expected Cache-Control to include no-cache, got: ${res.headers['cache-control']}`
+    );
+    assert.ok(
+        res.headers['cache-control'].includes('must-revalidate'),
+        `Expected Cache-Control to include must-revalidate, got: ${res.headers['cache-control']}`
+    );
 });
 
 test('GET /styles.css (root public mount) returns 200 with Cache-Control: no-cache', async () => {
