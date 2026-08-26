@@ -280,7 +280,7 @@
         Object.freeze(PREFIX_ORGS);
     }
 
-    global.LCARS_ORG = {
+    var API = {
         resolve: resolve,
         resolveColor: resolveColor,
         remediationHint: remediationHint,
@@ -290,4 +290,14 @@
         // Exposed for tests: lets a harness assert the warn-once behaviour.
         _resetWarnings: function () { warned = {}; }
     };
+
+    // Freeze the namespace itself, not just the maps inside it. The first cut
+    // froze STATIC_ORGS and ORG_CLASSES and left this object writable, so
+    // `LCARS_ORG.resolve = function () { return 'DEVTEAM'; }` still succeeded --
+    // the comment above described a threat the code only half-closed. Review
+    // caught it; the maps were the harder-looking half and the easier half was
+    // the one that mattered.
+    if (Object.freeze) { Object.freeze(API); }
+
+    global.LCARS_ORG = API;
 })(typeof window !== 'undefined' ? window : this);

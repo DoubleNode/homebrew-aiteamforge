@@ -190,8 +190,18 @@
 
             const navButton = document.createElement('button');
             navButton.className = 'org-nav-button ' + getGroupColor(orgName);
-            navButton.innerHTML = '<span class="org-nav-name">' + orgName + '</span>' +
-                '<span class="org-nav-stats">' + divisionCount + ' Divisions • ' + totalSessions + ' Sessions</span>';
+            // textContent, not innerHTML: orgName arrives from the `organization`
+            // field of /api/team-register's body, validated for presence only.
+            // Mirrors the canonical fix in fleet-monitor/server/public (XACA-0970).
+            var navName = document.createElement('span');
+            navName.className = 'org-nav-name';
+            navName.textContent = orgName;
+            navButton.appendChild(navName);
+
+            var navStats = document.createElement('span');
+            navStats.className = 'org-nav-stats';
+            navStats.textContent = divisionCount + ' Divisions • ' + totalSessions + ' Sessions';
+            navButton.appendChild(navStats);
 
             navButton.onclick = function() {
                 const targetId = 'org-' + orgName.toLowerCase().replace(/\s+/g, '-');
@@ -241,8 +251,16 @@
 
             const orgHeader = document.createElement('div');
             orgHeader.className = 'organization-header';
-            orgHeader.innerHTML = '<span class="organization-title">' + orgName + '</span>' +
-                '<span class="organization-count">' + totalSessions + ' Sessions</span>';
+            // textContent, not innerHTML -- same untrusted field as above.
+            var orgTitle = document.createElement('span');
+            orgTitle.className = 'organization-title';
+            orgTitle.textContent = orgName;
+            orgHeader.appendChild(orgTitle);
+
+            var orgCount = document.createElement('span');
+            orgCount.className = 'organization-count';
+            orgCount.textContent = totalSessions + ' Sessions';
+            orgHeader.appendChild(orgCount);
             orgContainer.appendChild(orgHeader);
 
             // Sort divisions by priority

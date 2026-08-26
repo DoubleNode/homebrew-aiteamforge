@@ -6149,6 +6149,38 @@
     outline-offset: 2px;
 }
 
+/* A native title tooltip is not reliably shown on KEYBOARD focus -- WebKit has
+   long been inconsistent -- so a sighted keyboard user with no screen reader
+   would get the ring above and never see the text. Revealing the hint node that
+   already exists for aria-describedby covers that without putting a permanent
+   icon on an already dense dashboard. Positioned, so it cannot reflow the
+   header's flex row. */
+.organization-header {
+    position: relative;
+}
+
+.organization-header[title]:focus-within .organization-hint,
+.organization-header[title]:focus-visible .organization-hint {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 20;
+    width: auto;
+    max-width: 42ch;
+    height: auto;
+    margin: 0;
+    padding: 8px 12px;
+    overflow: visible;
+    clip: auto;
+    white-space: normal;
+    background: var(--lcars-black);
+    color: var(--lcars-cyan);
+    border: 2px solid var(--lcars-cyan);
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
 /* Read by screen readers via aria-describedby; not shown, because the same
    text is already the tooltip for everyone else. Not display:none, which
    would remove it from the accessibility tree and defeat the point. */
