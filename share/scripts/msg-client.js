@@ -166,7 +166,12 @@ function serverBase(opts) {
 // MESSAGES TO, so a 30x to an attacker's host substitutes the recipient key and
 // the ciphertext becomes readable by whoever served the redirect.
 async function relayFetch(url, init) {
-    return kg.assertNoRedirect(await fetch(url, { ...kg.fleetFetchInit(), ...(init || {}) }), url);
+    // XACA-0972-037: fleetFetchInit() goes LAST so a caller's init can never
+    // override `redirect: 'manual'`. With the old order a caller passing
+    // redirect:'follow' would have been honoured, fetch would have followed
+    // transparently, and the post-fetch assertion would have seen a 200 from
+    // the redirected host and passed -- silently defeating the guard entirely.
+    return kg.assertNoRedirect(await fetch(url, { ...(init || {}), ...kg.fleetFetchInit() }), url);
 }
 
 /** Fetch a registered machine's public key from the vault machine registry. */

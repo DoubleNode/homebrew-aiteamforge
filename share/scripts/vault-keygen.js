@@ -309,6 +309,26 @@ function fleetFetchInit() {
  */
 function assertNoRedirect(res, requestUrl) {
     if (!res || typeof res.status !== 'number') return res;
+
+    // XACA-0972-037: a 3xx status is only what an UNFOLLOWED redirect looks
+    // like. If `redirect: 'manual'` is ever lost -- a caller override, a new
+    // call site that forgets fleetFetchInit() -- fetch follows transparently
+    // and hands us a 200 from the redirected host, which the status check
+    // below would wave straight through. `res.redirected` is the only signal
+    // that survives that, so check it FIRST and treat it as the same refusal.
+    // Defence in depth: the spread order is the primary guard, this is the
+    // backstop for when someone changes it.
+    if (res.redirected === true) {
+        const err = new Error(
+            'fleet server redirected and the redirect was FOLLOWED before this ' +
+            'check ran, which means the redirect guard was bypassed. Refusing ' +
+            'the response: key material must not reach a host the URL ' +
+            'validation never saw. Ensure the fetch init keeps redirect: manual.'
+        );
+        err.code = 'FLEET_REDIRECT_FOLLOWED';
+        throw err;
+    }
+
     if (res.status < 300 || res.status > 399) return res;
 
     let where = 'an undisclosed host';
@@ -797,10 +817,11 @@ async function registerMachine(payload, opts) {
     // carries the machine's PUBLIC key and registers it under an id; a redirect
     // would register this machine with a host the URL validation never saw.
     const res = assertNoRedirect(await doFetch(url, {
-        ...fleetFetchInit(),
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        // XACA-0972-037: LAST, so nothing above can override the guard.
+        ...fleetFetchInit(),
     }), url);
 
     let body = null;
