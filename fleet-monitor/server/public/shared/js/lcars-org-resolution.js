@@ -94,7 +94,8 @@
     /**
      * Own-property test. Every map lookup in this module goes through it --
      * FIVE call sites: registry exact (tier 1), registry prefix loop (tier 2),
-     * STATIC_ORGS (tier 3), the warn-once cache (tier 5), and resolveColor.
+     * STATIC_ORGS (tier 3), the warn-once cache (step 5, which resolves
+     * nothing -- it only decides whether to warn), and resolveColor.
      * Three of those five were found untested one round at a time, and tier 2
      * was worse than untested: it was a second inline implementation, which is
      * precisely why it read as covered. One helper, five call sites, each with
