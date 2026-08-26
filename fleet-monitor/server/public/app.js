@@ -15,28 +15,7 @@ const API_BASE = window.location.origin;
 const REFRESH_INTERVAL = 60000; // 60 seconds
 const STARDATE_OFFSET = 41000; // TNG era stardate
 
-// LCARS Terminal Configuration
-// Tailscale Funnel configuration for external access via port 443
-const TAILSCALE_HOSTNAME = 'darren.tail4637d5.ts.net';
-
-// Map local LCARS ports to Tailscale Funnel paths
-// All routes now go through port 443 with path-based routing
-// This ensures access from any network (carriers block non-443 ports)
-const LCARS_PATH_MAP = {
-    8260: '/ios',
-    8280: '/android',
-    8240: '/firebase',
-    8203: '/academy',
-    8180: '/dns',
-    8505: '/freelance-doublenode-workstats',
-    8717: '/freelance-doublenode-starwords',
-    8413: '/freelance-doublenode-appplanning',
-    8234: '/command',
-    8220: '/legal',
-    8230: '/legal-coparenting'
-};
-
-// Default fallback port (shouldn't be needed with proper mapping)
+// Default fallback port (used only if a session doesn't report lcars_port)
 const LCARS_PORT = 8080;
 
 // ============================================================================
@@ -581,10 +560,11 @@ function isLcarsTerminal(teamData) {
 }
 
 /**
- * Get the LCARS URL for a team's terminal
- * Maps local LCARS ports to Tailscale Funnel paths for external access
- * All access goes through port 443 with path-based routing
- * Uses HTTPS via Tailscale Funnel
+ * Get the LCARS URL for a team's terminal.
+ * Always derives the link from the reporting machine's hostname
+ * (Tailscale MagicDNS name), which the Fleet Monitor payload carries
+ * per-session. See XACA-0979 — the funnel/path-map approach was retired
+ * because it hardcoded a device name that silently breaks on rename.
  */
 function getLcarsUrl(teamData) {
     if (!teamData || !teamData.sessions || teamData.sessions.length === 0) {
@@ -603,17 +583,12 @@ function getLcarsUrl(teamData) {
     // Get local port from session data
     const localPort = lcarsSession.lcars_port || LCARS_PORT;
 
-    // Map to Tailscale Funnel path
-    const funnelPath = LCARS_PATH_MAP[localPort];
-
-    if (!funnelPath) {
-        // No mapping found - fall back to local HTTP URL
-        console.warn(`No Tailscale Funnel mapping for port ${localPort}`);
-        return `http://${lcarsSession.hostname}:${localPort}`;
+    if (!lcarsSession.hostname) {
+        console.warn(`No hostname reported for LCARS session on port ${localPort}`);
+        return null;
     }
 
-    // Construct HTTPS URL via Tailscale Funnel (port 443 with path routing)
-    return `https://${TAILSCALE_HOSTNAME}${funnelPath}`;
+    return `http://${lcarsSession.hostname}:${localPort}`;
 }
 
 /**

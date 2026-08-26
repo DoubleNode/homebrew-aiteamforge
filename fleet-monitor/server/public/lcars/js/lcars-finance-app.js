@@ -28,22 +28,6 @@
         emptyMessage: 'No active Finance sessions detected'
     };
 
-    // LCARS Terminal Configuration
-    const TAILSCALE_HOSTNAME = 'darren.tail4637d5.ts.net';
-    const LCARS_PATH_MAP = {
-        8260: '/ios',
-        8280: '/android',
-        8240: '/firebase',
-        8203: '/academy',
-        8180: '/dns',
-        8505: '/freelance-doublenode-workstats',
-        8717: '/freelance-doublenode-starwords',
-        8413: '/freelance-doublenode-appplanning',
-        8234: '/command',
-        8220: '/legal',
-        8230: '/legal-coparenting',
-        8360: '/finance-personal'
-    };
     const LCARS_PORT = 8080;
 
     // ============================================================================
@@ -1730,13 +1714,13 @@
         if (!lcarsSession) return null;
 
         const localPort = lcarsSession.lcars_port || LCARS_PORT;
-        const funnelPath = LCARS_PATH_MAP[localPort];
 
-        if (!funnelPath) {
-            return 'http://' + lcarsSession.hostname + ':' + localPort;
+        if (!lcarsSession.hostname) {
+            console.warn('No hostname reported for LCARS session on port ' + localPort);
+            return null;
         }
 
-        return 'https://' + TAILSCALE_HOSTNAME + funnelPath;
+        return 'http://' + lcarsSession.hostname + ':' + localPort;
     }
 
     /**
