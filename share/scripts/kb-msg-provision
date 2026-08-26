@@ -163,6 +163,19 @@ def _describe_value(value):
     for ch, name in (("@", "'@'"), ("?", "a query"), ("#", "a fragment")):
         if ch in value:
             facts.append("contains %s" % name)
+    # REVIEW-GATE FINDING XACA-0885-056. Not echoing the value costs one real
+    # diagnostic: a pasted token with a stray trailing newline, or a shell
+    # quoting slip, previously showed as visibly odd and now shows only as an
+    # unexplained character count. Reporting the PRESENCE of such characters
+    # restores that without reproducing any of them.
+    if value != value.strip():
+        facts.append("has leading/trailing whitespace")
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        facts.append("contains control characters")
+    if any(ord(c) > 126 for c in value):
+        facts.append("contains non-ASCII characters")
+    if "%" in value:
+        facts.append("contains percent-encoding")
     if not value:
         facts = ["empty"]
     return "<%s>" % ", ".join(facts)
@@ -253,8 +266,70 @@ def _relay_endpoint(server):
             " separately — it was NOT recorded and will not be used."
             % " and ".join(dropped)
         )
+    # Rebuild the authority from VALIDATED COMPONENTS. urlunsplit was handed
+    # parsed.netloc verbatim, so anything embedded in it survived into the
+    # persisted value whatever its encoding: "%40" is a percent-encoded "@" with
+    # no literal "@" byte, so it walked past the refusal above and was written
+    # to fleet-config.json in the clear ON THE SUCCESS PATH, exit 0 -- the one
+    # outcome this function exists to prevent, and invisible to every test here
+    # because they all key on a refusal.
+    #
+    # Detecting bad authorities failed six times. Constructing only a known-good
+    # one cannot fail the same way: user info is not copied because it is never
+    # read, so no encoding of it can survive. Same rule the message path
+    # already follows -- build what is known good rather than filter what is
+    # known bad.
+    #
+    # ATTRIBUTION, measured rather than assumed: it is the host and port
+    # validation below that REFUSES the "%40" shapes -- restoring the verbatim
+    # netloc passthrough leaves them refused, so the reconstruction is not what
+    # closes that hole. What the reconstruction does is guarantee user info can
+    # never be COPIED even if a guard above is later weakened, and normalise the
+    # host (an upper-case authority is persisted lower-cased). That normalisation
+    # is what T9k pins, so this branch is exercised rather than merely asserted.
+    host = parsed.hostname
+    if not host:
+        _die_env(
+            "--server has no host %s.\n"
+            "  Example: --server https://fleet-monitor.fly.dev" % shown
+        )
+    try:
+        port = parsed.port
+    except ValueError:
+        # A non-numeric port is what a smuggled credential looks like after the
+        # parser splits "user:SECRET%40host" -- host "user", port the rest.
+        _die_env(
+            "--server has an invalid port %s.\n"
+            "  Example: --server https://fleet-monitor.fly.dev" % shown
+        )
+    # The host must LOOK like a host. Without this, "https://user%40fleet.
+    # example.com" is accepted whole -- there is no colon, so the entire
+    # percent-encoded string becomes the hostname and is persisted. Percent-
+    # encoding is not valid in an authority at all, and "%40" is the same
+    # smuggled "@" one line up wearing a different hat.
+    #
+    # Allowed: letters, digits, dot, hyphen, underscore (some internal names use
+    # it), and colon for an IPv6 literal, which urlsplit returns unbracketed.
+    # A non-ASCII host is refused rather than guessed at: IDNA has its own
+    # normalisation rules and this is not the place to reimplement them --
+    # punycode (xn--...) passes as plain ASCII.
+    if not host or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789.-_:" for c in host):
+        _die_env(
+            "--server host is not a valid host name %s.\n"
+            "  Percent-encoding and non-ASCII are not permitted in a host;"
+            " use punycode for an internationalised domain.\n"
+            "  Example: --server https://fleet-monitor.fly.dev" % shown
+        )
+    # urlsplit strips the brackets from an IPv6 literal, so they must be put
+    # back: without them "2001:db8::1" plus a port renders as
+    # "2001:db8::1:8443", which is not a parsable authority. Caught by checking
+    # that LEGITIMATE inputs still round-trip -- the hostile-input sweep alone
+    # would never have shown it.
+    if ":" in host:
+        host = "[%s]" % host
+    netloc = host if port is None else "%s:%d" % (host, port)
     path = parsed.path.rstrip("/") + "/api/status"
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, path, "", ""))
 
 
 def _write_json_atomic(path, data, what):
@@ -484,6 +559,13 @@ def main():
             print(msg)
 
     keygen_js = _locate_keygen()
+    if args.server and (args.check or args.dry_run):
+        # REVIEW-GATE FINDING XACA-0885-057. These modes skipped _relay_endpoint
+        # entirely, so a credential-bearing or malformed --server passed silently
+        # in exactly the mode an operator runs as a PREFLIGHT. Dry-run should be
+        # the safest place to catch it, not the one place that does not look.
+        # Validate (which refuses on its own) and discard the result.
+        _relay_endpoint(args.server)
     if args.server and not (args.check or args.dry_run):
         changed, prev = persist_relay_url(args.server)
         if changed:
