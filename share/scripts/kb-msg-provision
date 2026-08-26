@@ -136,6 +136,25 @@ def _relay_endpoint(server):
             "(got %r).\n  Example: --server https://fleet-monitor.fly.dev"
             % server
         )
+    # Refuse embedded credentials rather than writing them to disk in the clear.
+    # urlsplit preserves "user:pass@host" faithfully, so the naive thing is to
+    # persist it verbatim into fleet-config.json -- a plaintext secret the
+    # operator never chose to store and is not told about. Stripping it silently
+    # is worse than refusing: the endpoint would still be well-formed and would
+    # still be WRONG for a relay that actually needs those credentials, failing
+    # later with an auth error that points nowhere near this line. Auth belongs
+    # in the config's own token field, not in the URL.
+    if parsed.username is not None or parsed.password is not None:
+        # Report the host, never the value. Echoing the offending URL would
+        # print the password to the terminal and into any log capturing this
+        # run -- committing the same disclosure this branch exists to prevent,
+        # one layer over.
+        _die_env(
+            "--server must not embed credentials (found user info for host %r).\n"
+            "  They would be written to %s in plaintext.\n"
+            "  Pass the bare URL and configure authentication separately."
+            % (parsed.hostname or "<none>", FLEET_CONFIG)
+        )
     path = parsed.path.rstrip("/") + "/api/status"
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
