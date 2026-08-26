@@ -212,8 +212,10 @@ def resolve_timepad_token(
       Tier 1 — Vault live fetch:
         Calls vault-fetch.sh with engine="timepad", account=<team_slug>.
         Exit codes 0 and 5 both deliver plaintext on stdout (live vs cache-hit).
-        On exit 4 (unreachable) falls through to tier 2.
-        On exit 3 (not configured) or 6 (decrypt failed) falls through to tier 3.
+        On exit 4 (unreachable) or 8 (keypair present but no fleet server URL
+        resolved/accepted) falls through to tier 2 — both mean "there is a vault
+        here we cannot currently reach", so the cache tiers still apply.
+        On exit 3 (no keypair) or 6 (decrypt failed) falls through to tier 3.
       Tier 2 — Vault offline cache (fresh, within TTL):
         Reads ~/$AITEAMFORGE/vault-cache/<machine>/timepad/<team>.plain.
         Returns if within TTL.
@@ -237,8 +239,10 @@ def resolve_timepad_token(
         team_code:    Optional short code (e.g. "ACADEMY").  Derived when None.
         token_ref:    Optional env-var name from config's auth.tokenRef field.
                       When present, it is used as the tier-3 primary lookup.
-        server_url:   Override fleet-monitor URL (default: $FLEET_MONITOR_URL
-                      or http://localhost:3000).  For testing.
+        server_url:   Override fleet-monitor URL.  When None and $FLEET_MONITOR_URL
+                      is unset, NO --server flag is passed and vault-fetch.sh
+                      resolves the endpoint itself from fleet-config.json
+                      (XACA-0972).  For testing.
         _testing_env: Override os.environ for tier-3 lookup.  For unit tests.
         _skip_vault:  When True, skip the vault tiers (1, 2, 2b) entirely and
                       resolve from the env-var failover only.  Lets hermetic unit
@@ -257,9 +261,24 @@ def resolve_timepad_token(
     vault_sh = None if _skip_vault else _vault_fetch_sh_path()
     if vault_sh:
         try:
-            vault_url = server_url or env.get("FLEET_MONITOR_URL", "http://localhost:3000")
+            # XACA-0972: pass --server ONLY when we actually have one. Defaulting
+            # to "$FLEET_MONITOR_URL or localhost" here OVERRODE vault-fetch's own
+            # resolver, so this call still hard-targeted a dead port even after the
+            # resolver landed -- an explicit flag always wins. Omitting it lets
+            # vault-fetch resolve .centralServer.apiEndpoint from fleet-config.json
+            # and report exit 8 (no-fleet-url) when nothing resolves, instead of
+            # a connection-refused that reads as a network fault.
+            #
+            # Exit 8, NOT exit 3 (XACA-0972-018/-026): vault-fetch checks the
+            # keypair BEFORE it resolves the URL, so "no URL" proves a keypair
+            # IS present. Exit 3 means the opposite — no keypair at all. An
+            # earlier revision of this comment said 3 and was wrong.
+            vault_url = server_url or env.get("FLEET_MONITOR_URL") or ""
+            vault_cmd = ["bash", vault_sh, VAULT_ENGINE_SLUG, team_slug]
+            if vault_url:
+                vault_cmd += ["--server", vault_url]
             result = subprocess.run(
-                ["bash", vault_sh, VAULT_ENGINE_SLUG, team_slug, "--server", vault_url],
+                vault_cmd,
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -269,9 +288,14 @@ def resolve_timepad_token(
                 token = result.stdout.strip()
                 if token:
                     return token  # in-memory only, never written
-            # Exit 4 = unreachable (retryable) → fall through to tier 2
-            # Exit 3 = not-configured; exit 6 = decrypt-failed → fall through to tier 3
+            # Exit 4 = unreachable (retryable)          → fall through to tier 2
+            # Exit 8 = keypair present, no fleet URL      → fall through to tier 2
+            # Exit 3 = no keypair; exit 6 = decrypt-failed → fall through to tier 3
             # Any other exit → fall through
+            # NB: every non-(0,5) code reaches the tier-2 cache read below, so
+            # 3 and 6 are "tier 3" only in the sense that their cache lookups
+            # are expected to miss. The distinction is documentary, not control
+            # flow — do not "optimise" it into an early jump past tier 2.
         except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError):
             pass  # vault unavailable — fall through
 
