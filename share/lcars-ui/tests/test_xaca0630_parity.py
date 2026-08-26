@@ -189,6 +189,46 @@ def run_server(board_file: str) -> dict:
         server.get_board_file = original_get_board_file
 
 
+def run_server_raw(board_file: str) -> dict:
+    """Like run_server(), but with the `round` builtin patched to an identity
+    function for the duration of the call, so the returned payload carries
+    the RAW pre-rounding computed values (the actual floats returned by
+    `sum_act/sum_est` and the median selection) instead of `round(x, 2)`.
+
+    XACA-0952-041: `_build_estimates_payload()` always applies `round(x, 2)`
+    to `handicap`/`median`/`sumEstimatedHours`/`sumActualHours` before
+    returning (server.py's own docstring: "Rounding to 2 decimal places is
+    applied ONLY to the final emitted values"). A guard that reads
+    `run_server()`'s payload is therefore checking values that are already
+    snapped onto the quarter-hour grid by construction -- it cannot detect a
+    raw value that is a near-miss (e.g. `492.75000027777776`) landing just
+    off the grid, which is exactly the class of defect this guard exists to
+    catch (RECONCILIATION.md Proof 2 asserts on this same raw input; the
+    standing mechanization here previously regressed to the rounded one).
+    Patching `round` to identity reproduces Proof 2's raw values mechanically
+    on every run instead of relying on a one-time hand computation.
+    """
+    import builtins
+
+    original_get_board_file = server.get_board_file
+    original_round = builtins.round
+
+    def _patched_board_file(team):
+        return Path(board_file)
+
+    def _identity_round(x, ndigits=None):
+        return x
+
+    server.get_board_file = _patched_board_file
+    builtins.round = _identity_round
+    try:
+        handler = object.__new__(server.LCARSHandler)
+        return handler._build_estimates_payload('academy')
+    finally:
+        server.get_board_file = original_get_board_file
+        builtins.round = original_round
+
+
 def normalize(payload: dict) -> dict:
     """Remove generatedAt (timestamp) from a payload for comparison."""
     p = dict(payload)
@@ -331,7 +371,13 @@ _JQ_ROUND2_PRECEDENCE_BUG_REASON = (
     "bug ('. * 100 as $s | ...' parses as '. * (100 as $s | ...)', discarding the "
     "floor()/round result) that breaks banker's rounding on non-round ratios -- "
     "reproduced directly against the jq binary on THIS machine "
-    "(_jq_has_round2_precedence_bug() returned True); out of scope for XACA-0952."
+    "(_jq_has_round2_precedence_bug() returned True); out of scope for XACA-0952. "
+    "XACA-0952-037: if THIS is an XPASS(strict) failure, that does not mean the "
+    "bug is fixed -- the probe above just confirmed the buggy jq IS present on "
+    "this runner, so the buggy jq produced a correct result anyway. Do not remove "
+    "this marker; instead investigate WHY a probe-confirmed-buggy jq passed here "
+    "(a change to this fixture's values, to round2 itself, or to the probe) "
+    "before deciding what to do."
 )
 
 # XACA-0952-035 (PR #767) -- all 4 uses below are `strict=True`, not the
@@ -415,10 +461,20 @@ _JQ_ROUND2_XFAIL_STRICT = True
 # _jq_has_round2_precedence_bug()'s docstring). So on affected jq, the CLI
 # emits raw values with ZERO rounding applied, while the server always emits
 # Python's correctly-rounded `round(x, 2)`. For those to agree, the RAW
-# double must equal `round(raw, 2)` bit-for-bit -- which is true precisely
+# double must equal `round(raw, 2)` bit-for-bit -- which is GUARANTEED (a
+# SUFFICIENT, deliberately stricter-than-necessary condition -- XACA-0952-042)
 # when the value's EXACT binary representation has a power-of-2 denominator
 # that also divides 4 (i.e. it's a multiple of 0.25: 1, 2, or 4 in the
-# denominator). "Dyadic" alone (any power-of-2 denominator) is NOT
+# denominator). This is NOT the complete condition -- the complete condition
+# is simply `round(raw, 2) == raw`, and quarter-grid is a conservative
+# over-approximation of it: e.g. the double nearest the decimal `45.63`
+# satisfies `round(x, 2) == x` (so it's safe) but has a Fraction denominator
+# of 2^47, nowhere near the quarter grid. Quarter-grid is the right choice
+# for THIS fixture (tractable to solve for by hand/script, and it can never
+# admit an unsafe value), but it rejects some legitimate `round(x, 2) == x`
+# values along with the unsafe ones -- it is not a definition of safety, only
+# a stricter-than-necessary way to guarantee it.
+# "Dyadic" alone (any power-of-2 denominator) is NOT
 # sufficient and is not even a discriminating test in isolation -- EVERY
 # finite double is dyadic by construction (IEEE-754 stores mantissa/2^k), so
 # `Fraction(any_float).denominator` is *always* a power of 2, including for
@@ -493,11 +549,16 @@ class TestFixtureDyadicity(unittest.TestCase):
     jq-round2-as-identity bug is a byte-for-byte no-op instead of a mismatch.
 
     This does NOT re-derive numbers by hand -- it reads whatever the fixture
-    ACTUALLY produces (via the real server payload) and checks the property
-    mechanically with exact `fractions.Fraction` arithmetic on each field's
-    float. `Fraction(some_float)` is exact (it decodes the IEEE-754 bit
-    pattern, no decimal string parsing involved), so this cannot be fooled by
-    a value that merely LOOKS like it has <=2 decimal digits when printed.
+    ACTUALLY produces (via run_server_raw(), which patches `round` to an
+    identity function so the payload carries the RAW pre-rounding computed
+    values, not `_build_estimates_payload()`'s normal `round(x, 2)` output --
+    see run_server_raw()'s docstring for why: asserting on the already-
+    rounded payload snaps any near-miss value onto the grid before this
+    guard ever sees it, XACA-0952-041) and checks the property mechanically
+    with exact `fractions.Fraction` arithmetic on each field's float.
+    `Fraction(some_float)` is exact (it decodes the IEEE-754 bit pattern, no
+    decimal string parsing involved), so this cannot be fooled by a value
+    that merely LOOKS like it has <=2 decimal digits when printed.
 
     Two checks are layered deliberately:
       1. `_is_pow2(denominator)` -- true for literally every finite float
@@ -516,7 +577,10 @@ class TestFixtureDyadicity(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.payload = normalize(run_server(str(FIXTURE_BOARD)))
+        # XACA-0952-041: run_server_raw(), not run_server() -- the latter's
+        # payload has already had round(x, 2) applied, which is exactly the
+        # transformation this guard exists to check the RAW values against.
+        cls.payload = normalize(run_server_raw(str(FIXTURE_BOARD)))
 
     @staticmethod
     def _is_pow2(n: int) -> bool:

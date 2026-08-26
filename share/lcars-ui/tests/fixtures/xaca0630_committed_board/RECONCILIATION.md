@@ -83,17 +83,30 @@ accident — see below) and silently diverged for round 2's.
 
 ## Fix, round 3 (current): dyadic, not merely "≤2 decimals"
 
-The property that actually decides whether the buggy jq round2's
-raw-value-passthrough matches Python's `round(x, 2)` is: **the raw double's
-exact binary value must already sit on the quarter-hour grid** — i.e. it's
-an exact multiple of `0.25`. This is *stricter* than "dyadic" in the loose
-sense (any power-of-2 denominator): **every finite IEEE-754 double is
-dyadic** (mantissa/2^k by construction), including `45.629999999999995`
-itself, so "is the denominator a power of 2" is true for literally any float
-and proves nothing on its own. The discriminating test is whether that
-power is small enough — specifically ≤2 (denominator ∈ {1, 2, 4}) — for
-`round(x, 2)` to be a no-op. A genuinely dyadic eighth like `0.125` **fails**
-this: `round(0.125, 2) == 0.12 != 0.125`.
+The COMPLETE condition for the buggy jq round2's raw-value-passthrough to
+match Python's `round(x, 2)` is simply `round(raw, 2) == raw`. **The raw
+double's exact binary value already sitting on the quarter-hour grid**
+(i.e. being an exact multiple of `0.25`) is a SUFFICIENT, deliberately
+stricter-than-necessary way to guarantee that — not an iff. A counterexample
+proves the gap: the double nearest the decimal literal `45.63` satisfies
+`round(x, 2) == x` (so it's safe) but has a `Fraction` denominator of `2^47`,
+nowhere near the quarter grid — `2.34`, `2.57`, and `0.07` behave the same
+way. Quarter-grid is *stricter* than "dyadic" in the loose sense (any
+power-of-2 denominator): **every finite IEEE-754 double is dyadic**
+(mantissa/2^k by construction), including `45.629999999999995` itself, so
+"is the denominator a power of 2" is true for literally any float and proves
+nothing on its own. The discriminating test is whether that power is small
+enough — specifically ≤2 (denominator ∈ {1, 2, 4}) — for `round(x, 2)` to be
+a no-op. A genuinely dyadic eighth like `0.125` **fails** this:
+`round(0.125, 2) == 0.12 != 0.125`.
+
+Quarter-grid is the right design choice for *this* fixture — it's tractable
+to solve for by hand/script over integer quarter-units, and it can never
+admit an unsafe value — but it is an over-approximation, not a
+characterization: it rejects some legitimate `round(x, 2) == x` values (like
+`45.63`) along with the unsafe ones. A future fixture author choosing a
+value that fails the quarter-grid check has not necessarily chosen an unsafe
+one; they've chosen one this deliberately conservative test can't vouch for.
 
 Round 1's uniform `ratio=2.0` fixture happened to satisfy this (every sum,
 handicap, and median came out to a whole number or a simple half/quarter),
@@ -156,10 +169,15 @@ Per-item ratios (actual hours ÷ points), by bucket, in fixture order:
 Every one of these 29 ratios, every bucket's 4 emitted fields, and the 4
 global fields — 20 values that cross the round2/`round(x, 2)` boundary in
 total — are on the quarter-hour grid. `TestFixtureDyadicity` in
-`test_xaca0630_parity.py` checks this mechanically against the *actual*
-server payload on every test run (not just once, by hand, at fixture-authoring
-time), using `fractions.Fraction` on the real float (exact — no decimal
-string parsing) rather than eyeballing decimal digit counts.
+`test_xaca0630_parity.py` checks this mechanically against the RAW,
+pre-rounding computed values (via `run_server_raw()`, which patches `round`
+to identity — see its docstring; XACA-0952-041) on every test run (not just
+once, by hand, at fixture-authoring time), using `fractions.Fraction` on the
+real float (exact — no decimal string parsing) rather than eyeballing
+decimal digit counts. It deliberately does NOT assert on the normal
+`run_server()` payload, which has already had `round(x, 2)` applied and
+would snap any near-miss raw value onto the grid before the check could see
+it.
 
 ### Proof 1 — Dyadicity, mechanically verified
 
@@ -304,10 +322,14 @@ buckets:
 These values are not hardcoded into `test_parity` (it compares CLI output to
 server output, not to a hardcoded expectation) — they're recorded here so a
 future reader can sanity-check a fixture refresh against a known-good
-baseline. `TestFixtureDyadicity` DOES assert structurally on this payload
-(quarter-grid + `handicap != median`), so a future edit that breaks either
-property fails loudly instead of waiting for the next CI run on affected jq
-to notice.
+baseline. Because every crossing value in this fixture is already on the
+quarter-hour grid, these rounded display values are numerically identical to
+the raw pre-rounding values `TestFixtureDyadicity` actually asserts on (see
+above) — the guard checks the raw computation, not this rounded display
+table, but for this fixture the two happen to coincide. `TestFixtureDyadicity`
+DOES assert structurally on that raw computation (quarter-grid +
+`handicap != median`), so a future edit that breaks either property fails
+loudly instead of waiting for the next CI run on affected jq to notice.
 
 ## Verification status: what is confirmed here vs. what needs CI
 
