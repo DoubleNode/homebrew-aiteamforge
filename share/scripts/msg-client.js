@@ -136,9 +136,22 @@ async function sealOpenLocal(sealedB64, machineSlug) {
  */
 function serverBase(opts) {
     const explicit = opts && opts.server;
-    if (explicit) return explicit.replace(/\/+$/, '');
 
-    const resolved = kg.resolveFleetUrl();
+    // XACA-0972-027: VALIDATE the explicit value too. This is the bypass that
+    // mattered most: _kb_msg_relay_url in kanban-helpers.sh reads the very same
+    // fleet-config.json, shell-side and unvalidated, and passes the result here
+    // as --server on every single call. So on the primary msg path "explicit"
+    // does NOT mean "an operator typed it" - it means "the same file, read by a
+    // reader with no checks". Waving it through made the finding-022 guard
+    // decorative on the route that actually carries traffic.
+    //
+    // Precedence is unchanged: an explicit value still wins over resolution. It
+    // just has to be acceptable first, and a refused one fails closed here
+    // rather than quietly falling back to resolveFleetUrl().
+    const resolved = explicit
+        ? kg.acceptFleetUrl(explicit, '--server (as passed by the caller, e.g. _kb_msg_relay_url)')
+        : kg.resolveFleetUrl();
+
     if (!resolved) {
         const err = new Error(kg.unresolvedFleetUrlMessage('msg-client'));
         err.code = 'FLEET_URL_UNRESOLVED';
@@ -147,9 +160,18 @@ function serverBase(opts) {
     return resolved.replace(/\/+$/, '');
 }
 
+// XACA-0972-029: every relay request goes through this wrapper so redirect
+// refusal cannot be forgotten at a call site. fetchMachinePubKey below is the
+// one that makes it load-bearing - it returns the public key this client SEALS
+// MESSAGES TO, so a 30x to an attacker's host substitutes the recipient key and
+// the ciphertext becomes readable by whoever served the redirect.
+async function relayFetch(url, init) {
+    return kg.assertNoRedirect(await fetch(url, { ...kg.fleetFetchInit(), ...(init || {}) }), url);
+}
+
 /** Fetch a registered machine's public key from the vault machine registry. */
 async function fetchMachinePubKey(base, machineSlug) {
-    const res = await fetch(`${base}/api/vault/machines`, { headers: authHeaders() });
+    const res = await relayFetch(`${base}/api/vault/machines`, { headers: authHeaders() });
     if (!res.ok) {
         throw new Error(`vault machine registry returned HTTP ${res.status}`);
     }
@@ -209,7 +231,7 @@ async function cmdSend(opts) {
         created_at:  record.created_at,
     };
 
-    const res = await fetch(`${base}/api/msg`, {
+    const res = await relayFetch(`${base}/api/msg`, {
         method:  'POST',
         headers: authHeaders(),
         body:    JSON.stringify(envelope),
@@ -229,7 +251,7 @@ async function cmdPull(opts) {
     const base = serverBase(opts);
     const slug = opts.machine || kg.defaultMachineSlug();
 
-    const res = await fetch(`${base}/api/msg?machine=${encodeURIComponent(slug)}`, {
+    const res = await relayFetch(`${base}/api/msg?machine=${encodeURIComponent(slug)}`, {
         headers: authHeaders(),
     });
     if (!res.ok) {
@@ -259,7 +281,7 @@ async function cmdPull(opts) {
     // Ack the ones we successfully opened so the relay can drop them.
     if (openedIds.length) {
         try {
-            await fetch(`${base}/api/msg/ack`, {
+            await relayFetch(`${base}/api/msg/ack`, {
                 method:  'POST',
                 headers: authHeaders(),
                 body:    JSON.stringify({ machine: slug, ids: openedIds }),
@@ -342,6 +364,12 @@ if (require.main === module) {
 module.exports = {
     seal,
     sealOpenLocal,
+    // XACA-0972-027: exported so the URL-validation contract is testable
+    // directly. It was previously reachable only through a subcommand that
+    // performs real I/O, which is why the missing validation on the explicit
+    // --server path had no test standing in its way.
+    serverBase,
+    relayFetch,
     fetchMachinePubKey,
     resolveAuthToken,
     authHeaders,

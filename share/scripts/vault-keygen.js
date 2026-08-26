@@ -162,7 +162,25 @@ function validateFleetUrl(value) {
     try {
         parsed = new URL(value);           // WHATWG URL is a Node global - no new require
     } catch (_) {
-        return { ok: false, reason: `is not a valid absolute URL: ${JSON.stringify(value)}` };
+        // XACA-0972-028: do NOT echo the value. This branch used to interpolate it
+        // via JSON.stringify, which contradicted the contract the userinfo branch
+        // below deliberately upholds - and did so on the ONE input class most
+        // likely to carry a credential. "https://user:pass@host:notaport/" fails
+        // to PARSE, so it lands here, not in the userinfo branch: the credential
+        // would have been printed to stderr and, through the cc path, into the
+        // operator's terminal and shell scrollback.
+        //
+        // The caller already names the SOURCE (the env var, or the config file
+        // path), which is what an operator needs to find the bad line. The length
+        // is included because it is the one detail that distinguishes a truncated
+        // or whitespace-only value from a genuinely malformed one, and a character
+        // count is not a credential.
+        const len = typeof value === 'string' ? value.length : 0;
+        return {
+            ok: false,
+            reason: `is not a valid absolute URL (${len} characters; the value is ` +
+                    `not echoed here because a malformed URL can embed credentials)`,
+        };
     }
     if (!ALLOWED_FLEET_SCHEMES.includes(parsed.protocol)) {
         return {
@@ -184,6 +202,139 @@ function validateFleetUrl(value) {
         };
     }
     return { ok: true, url: value };
+}
+
+// -----------------------------------------------------------------------------
+// Explicitly-supplied fleet URLs (XACA-0972-027)
+// -----------------------------------------------------------------------------
+//
+// validateFleetUrl above is only reached by resolveFleetUrl(), i.e. by the
+// values this process reads for itself. But every vault client also accepts an
+// EXPLICIT URL - `--server` on the CLI, `opts.serverUrl` / `opts.server` in
+// process - and an explicit value has always short-circuited resolution
+// entirely (`opts.serverUrl || resolveFleetUrl()`). That made the finding-022
+// guard bypassable on the route that is actually used most:
+//
+//   _kb_msg_relay_url in kanban-helpers.sh reads THE SAME fleet-config.json,
+//   shell-side, with no validation of any kind, and passes the result to
+//   msg-client as `--server`. So the file we hardened is re-read by a different
+//   reader and handed straight to fetch(), and the JS-side check never runs.
+//
+// "Explicit means the operator typed it" does not hold here: on the primary msg
+// path the explicit value came off the same disk as the resolved one. Validate
+// BOTH, so the guarantee is a property of the JS entry points rather than of
+// what any particular caller happens to pass. vault-migrate-env-keys already
+// did this; this makes the other clients match.
+//
+// NOTE: this deliberately does NOT fall back to resolveFleetUrl() when an
+// explicit value is refused. A caller that named a server and got it rejected
+// must fail closed, not quietly talk to somewhere else instead - the same rule
+// resolveFleetUrl() applies to a rejected config entry.
+
+/**
+ * Accept an explicitly-supplied fleet base URL, or refuse it.
+ *
+ * Records the rejection so unresolvedFleetUrlMessage() can name the source and
+ * the reason, exactly as it does for a refused config entry.
+ *
+ * @param {string} value  the URL as supplied (trailing slashes are tolerated)
+ * @param {string} source human-readable origin, e.g. '--server'
+ * @returns {string|null} normalised base URL (no trailing slash), or null when refused
+ */
+function acceptFleetUrl(value, source) {
+    const raw = typeof value === 'string' ? value.replace(/\/+$/, '') : '';
+    const v = validateFleetUrl(raw);
+    if (!v.ok) {
+        _lastFleetUrlRejection = { source: source || 'an explicitly supplied server URL', reason: v.reason };
+        return null;
+    }
+    _lastFleetUrlRejection = null;
+    return raw;
+}
+
+// -----------------------------------------------------------------------------
+// Redirect refusal (XACA-0972-029)
+// -----------------------------------------------------------------------------
+//
+// fetch() follows redirects by default, which quietly undoes the host
+// validation above: a validated https://fleet.example may 30x to
+// https://evil.example, and every check we just performed was against a host we
+// no longer talk to. The consequence is not abstract. The machine-registry GET
+// returns the PUBLIC KEYS that vault-migrate-env-keys and msg-client then SEAL
+// SECRETS TO. Substitute that response and the operator's real API keys are
+// sealed to an attacker's key - by a client that validated its URL and found
+// nothing wrong, because at validation time nothing was.
+//
+// DECISION: `redirect: 'manual'` plus an explicit refusal, NOT `redirect:
+// 'error'`, and NOT follow-then-re-validate.
+//
+//   * vs 'error': both fail closed, but 'error' collapses a redirect into a
+//     generic `TypeError: fetch failed`, indistinguishable from a dead network.
+//     That is precisely the "a missing setting reads as a network fault"
+//     failure mode this whole ticket exists to remove. With 'manual' the 3xx
+//     comes back as a real Response, so the diagnostic can name what happened
+//     and where it pointed.
+//   * vs follow-and-re-validate: the vault API has no legitimate reason to
+//     redirect, so there is no working deployment to preserve. Re-validating
+//     per hop means getting every hop right forever, on the path that handles
+//     key material; refusing outright is one rule with no edge cases.
+//
+// The legitimate non-redirect path is untouched: a 2xx, a 4xx and a 5xx all
+// behave exactly as before. Only a 3xx - which no vault endpoint emits - is
+// newly refused.
+//
+// REDACTION: the message names ONLY the redirect target's hostname, never the
+// raw Location header, which can carry credentials or a token in its query
+// string. Same contract as validateFleetUrl (XACA-0972-028).
+
+/**
+ * The fetch init fields every fleet-bound request must carry.
+ * Spread into the caller's own init: `{ ...fleetFetchInit(), method: 'POST' }`.
+ * @returns {{ redirect: 'manual' }}
+ */
+function fleetFetchInit() {
+    return { redirect: 'manual' };
+}
+
+/**
+ * Refuse a redirect response instead of following it.
+ *
+ * Pass-through for every non-3xx response, so callers can wrap a fetch() call
+ * inline without changing how they handle success or ordinary HTTP errors.
+ *
+ * @param {{ status?: number, headers?: { get?: Function } }} res
+ * @param {string} [requestUrl] the URL that was requested (base for a relative Location)
+ * @returns {*} res, unchanged, when it is not a redirect
+ * @throws {Error} with .code = 'FLEET_REDIRECT_REFUSED' and .httpStatus set
+ */
+function assertNoRedirect(res, requestUrl) {
+    if (!res || typeof res.status !== 'number') return res;
+    if (res.status < 300 || res.status > 399) return res;
+
+    let where = 'an undisclosed host';
+    try {
+        const loc = res.headers && typeof res.headers.get === 'function'
+            ? res.headers.get('location')
+            : null;
+        if (loc) {
+            // Resolve against the request URL so a RELATIVE Location still yields
+            // a hostname. Refused either way - a same-host redirect is still a
+            // redirect from an API that must not emit one - but naming the host
+            // is what makes the message actionable.
+            const target = new URL(loc, requestUrl || undefined);
+            where = `"${target.hostname}"`;
+        }
+    } catch (_) { /* unparseable Location - stay with the redacted placeholder */ }
+
+    const err = new Error(
+        `fleet server returned HTTP ${res.status} (a redirect) and it was REFUSED, ` +
+        `not followed: it pointed at ${where}. The vault API does not redirect. ` +
+        `Following it would hand key material to a host that was never validated. ` +
+        `Point the fleet URL directly at the real server.`
+    );
+    err.code       = 'FLEET_REDIRECT_REFUSED';
+    err.httpStatus = res.status;
+    throw err;
 }
 
 // The most recent rejection, so unresolvedFleetUrlMessage() can say WHY rather
@@ -618,7 +769,14 @@ async function registerMachine(payload, opts) {
     opts = opts || {};
     // Resolve LAZILY, at call time. An explicit opts.serverUrl always wins; only
     // the default changed (XACA-0972-002). No silent localhost fallback.
-    const resolved = opts.serverUrl || resolveFleetUrl();
+    //
+    // XACA-0972-027: an explicit value is VALIDATED too, not waved through. It
+    // still wins over resolution, but "wins" means "is used if acceptable", not
+    // "skips the check". A refused explicit URL does NOT fall back to
+    // resolveFleetUrl() - see acceptFleetUrl's note on failing closed.
+    const resolved = opts.serverUrl
+        ? acceptFleetUrl(opts.serverUrl, '--server / opts.serverUrl')
+        : resolveFleetUrl();
     if (!resolved) {
         const err = new Error(unresolvedFleetUrlMessage('vault-keygen'));
         err.code = 'FLEET_URL_UNRESOLVED';
@@ -635,11 +793,15 @@ async function registerMachine(payload, opts) {
         ? `${serverUrl}/api/vault/machines/${encodeURIComponent(payload.id)}`
         : `${serverUrl}/api/vault/machines`;
 
-    const res = await doFetch(url, {
+    // XACA-0972-029: refuse redirects rather than following them. This request
+    // carries the machine's PUBLIC key and registers it under an id; a redirect
+    // would register this machine with a host the URL validation never saw.
+    const res = assertNoRedirect(await doFetch(url, {
+        ...fleetFetchInit(),
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-    });
+    }), url);
 
     let body = null;
     try { body = await res.json(); } catch (_) { /* non-JSON / empty body */ }
@@ -830,9 +992,12 @@ module.exports = {
     fleetConfigPath,
     fleetConfigCandidates,
     validateFleetUrl,
+    acceptFleetUrl,
     lastFleetUrlRejection,
     resolveFleetUrl,
     unresolvedFleetUrlMessage,
+    fleetFetchInit,
+    assertNoRedirect,
     // slug/label
     defaultMachineSlug,
     validateSlug,
