@@ -40,6 +40,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -126,28 +127,53 @@ def has_private_key(keygen_js, slug):
 FLEET_CONFIG = os.path.expanduser("~/.aiteamforge/fleet-config.json")
 
 
+# A --server value is operator-supplied and may carry a secret in any component:
+# user info ("u:pw@h"), a query token ("?token=..."), a fragment, or the whole
+# string. Four rounds of this PR tried to enumerate the DANGEROUS shapes and
+# missed one every time -- userinfo, then delimiter-reclassified userinfo, then
+# a query on a value with no scheme. Enumerating what is dangerous has failed
+# here repeatedly; enumerating what is SAFE cannot fail the same way, because
+# anything unanticipated falls outside the allowlist and is redacted by default.
+#
+# SAFE_TO_ECHO matches only characters that appear in a bare scheme/host/path
+# with no user info, query, fragment, or percent-encoding. Note "%" is excluded
+# deliberately: percent-encoding can hide any of the above from a naive reader.
+SAFE_TO_ECHO = re.compile(r"\A[A-Za-z0-9._~:/-]*\Z")
+
+
+def _carries_secret(value):
+    """Does this --server value look like it embeds a credential?
+
+    THE single predicate. The guard that REFUSES a credential and the redactor
+    that HIDES one previously shared a rule only because two commits happened to
+    write the same literal -- nothing stopped them drifting apart, and a detector
+    that disagrees with its redactor leaks precisely the values it fails to
+    catch. Both now call this.
+    """
+    return "@" in value
+
+
 def _redact_url(value):
     """Render a --server value safely for display in an error message.
 
-    TEST-GATE FINDING XACA-0885-049. The credential refusal below redacted its
-    own message, but `_relay_endpoint` has TWO error paths and the OTHER one --
-    "must be an absolute URL", which fires FIRST -- echoed the raw value. Every
-    shape that carries credentials without a parsable scheme+host ("user:pw@h",
-    "//user:pw@h", "https:user:pw@h") therefore failed that earlier check and
-    had its password printed to stderr and into any log, by the very function
-    added to stop exactly that.
-
-    The mistake was attaching redaction to the branch that was ABOUT
-    credentials, rather than to the boundary where the untrusted value enters.
-    A value is sanitised once here and every message uses the result, so a
-    future error path cannot reintroduce the leak by forgetting.
-
-    Over-redacts deliberately: any "@" is treated as possible user info, since
-    losing a little diagnostic detail is the right failure direction when the
-    alternative is printing a secret.
+    Allowlist, not blocklist. Every message in this module passes the value
+    through here, so a new error path cannot reintroduce the disclosure by
+    forgetting -- and an input shape nobody thought of is redacted rather than
+    echoed.
     """
-    if "@" in value:
-        return "<redacted: value appears to contain credentials>"
+    if not (SAFE_TO_ECHO.match(value) and not _carries_secret(value)):
+        return "<redacted: value may contain credentials or a token>"
+    # Safe characters are not enough on their own. A bare opaque string --
+    # "SEKRIT123" -- is all-alphanumeric and so passes the allowlist, yet it is
+    # indistinguishable from a short host name by pattern alone. An operator who
+    # pastes a token into --server by mistake would have it echoed into any log
+    # capturing the run, which is the disclosure this module keeps closing.
+    #
+    # Require it to LOOK like a URL or host before echoing. The diagnostic cost
+    # is near zero: "got <redacted>" plus the worked example still tells the
+    # operator their input was malformed, which is the whole job of the message.
+    if "://" not in value and "." not in value:
+        return "<redacted: value may contain credentials or a token>"
     return repr(value)
 
 
@@ -197,24 +223,18 @@ def _relay_endpoint(server):
     # while under-refusing writes a secret to disk. Same conservatism as
     # _redact_url, and deliberately the same rule, so the thing that detects a
     # credential and the thing that hides it cannot disagree.
-    if "@" in server:
+    if _carries_secret(server):
         _die_env(
             "--server must not embed credentials (value contains %r).\n"
             "  It would be written to %s in plaintext.\n"
             "  Pass the bare URL and configure authentication separately."
             % ("@", FLEET_CONFIG)
         )
-    if parsed.username is not None or parsed.password is not None:
-        # Report the host, never the value. Echoing the offending URL would
-        # print the password to the terminal and into any log capturing this
-        # run -- committing the same disclosure this branch exists to prevent,
-        # one layer over.
-        _die_env(
-            "--server must not embed credentials (found user info for host %r).\n"
-            "  They would be written to %s in plaintext.\n"
-            "  Pass the bare URL and configure authentication separately."
-            % (parsed.hostname or "<none>", FLEET_CONFIG)
-        )
+    # The urlsplit-based check that used to sit here is GONE, not merely
+    # redundant: it is unreachable behind _carries_secret (any value with
+    # user info contains "@"), and it was the check that failed when a
+    # delimiter in the password reclassified the parse. Keeping a weaker
+    # duplicate of a rule invites a future edit to "simplify" onto the wrong one.
     # REVIEW-GATE FINDING XACA-0885-050. Discarding these silently is
     # inconsistent with refusing credentials in the userinfo: "?token=..." is the
     # same class of secret, handled the opposite way, and the operator was told
