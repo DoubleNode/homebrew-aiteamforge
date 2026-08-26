@@ -601,8 +601,17 @@ class TestFixtureDyadicity(unittest.TestCase):
         self.assertEqual(
             (Fraction(4) * frac).denominator, 1,
             f"{label}={value!r} (={frac}) is dyadic but NOT on the quarter-hour "
-            f"grid -- round(x, 2) would change it, so XACA-0968's buggy "
-            f"identity round2 on CI would desync from the server here."
+            f"grid this fixture deliberately constrains itself to (see "
+            f"RECONCILIATION.md's round-3 sufficient-not-necessary caveat). "
+            f"That does NOT prove round(x, 2) would change it -- quarter-grid "
+            f"is a stricter-than-necessary check, and a value can fail it "
+            f"while still satisfying round(x, 2) == x (e.g. 45.63: "
+            f"round(45.63, 2) == 45.63 is True, yet its Fraction denominator "
+            f"is 2**47, off-grid). What it DOES mean: this value is outside "
+            f"the conservative grid this fixture vouches for, so CLI/server "
+            f"agreement under XACA-0968's buggy identity round2 is no longer "
+            f"guaranteed here -- pick a different value rather than assume "
+            f"this one is unsafe."
         )
 
     def test_global_fields_are_quarter_grid(self):

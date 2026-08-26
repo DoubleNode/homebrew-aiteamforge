@@ -18,6 +18,18 @@ run 32882458626.
 
 ---
 
+## Quick Reference
+
+**If you're regenerating or extending this fixture, you want [Construction](#construction) below** — the current (round 3) recipe: fix `points` per bucket, choose per-item ratios as quarter-unit integers so every emitted `handicap`/`median`/`sumEstimatedHours`/`sumActualHours` lands exactly on the 0.25-hour grid.
+
+**The operative invariant:** every value that crosses the `round2`/`round(x, 2)` boundary must be an exact multiple of `0.25` (`Fraction` denominator ∈ {1, 2, 4}). This is checked mechanically, every run, by `TestFixtureDyadicity` in `test_xaca0630_parity.py` — see "Fix, round 3 (current)" below for the derivation.
+
+**Caveat you need if a value fails the quarter-grid check:** quarter-grid is *sufficient but not necessary* — it rejects some values that would actually be safe (e.g. `45.63`: `round(45.63, 2) == 45.63` is True, yet its `Fraction` denominator is `2**47`, off-grid). A failing value has not necessarily been proven unsafe; it's simply one this deliberately conservative fixture can't vouch for. Pick a different value rather than assume the check is wrong. Full reasoning: "Fix, round 3 (current)" below.
+
+**Why three rounds of history precede this:** rounds 1 and 2 are not dead ends to skip past — they record two *different* ways a fixture verification for this exact bug can look green while proving nothing (round 1's uniform-ratio design hid a mean-vs-median server bug; round 2's "≤2 decimals" invariant and its own decoupling proof both tested already-rounded values). Both are why round 3 looks the way it does, and are the guardrail against a fourth attempt repeating either mistake.
+
+---
+
 ## Design constraint: this fixture must not become a 5th instance of XACA-0968
 
 The first draft of this fixture sampled real `(points, timeWorkedMs)` pairs
