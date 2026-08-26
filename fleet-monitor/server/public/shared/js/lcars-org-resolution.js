@@ -128,7 +128,15 @@
         //    suffixed team falls through to the hard-coded lists below.
         if (teams) {
             for (var id in teams) {
-                if (!Object.prototype.hasOwnProperty.call(teams, id)) { continue; }
+                // own(), not a second inline hasOwnProperty. This was the last
+                // call site written by hand rather than routed through the
+                // helper, which is why it read like the same guard as tiers 1
+                // and 3 while being a separate implementation nothing tested.
+                // for...in walks inherited enumerable keys, so without this a
+                // prototype key with a dash suffix -- Object.prototype
+                // ['finance-pwn'] = { organization: 'PWNED' } -- is matched by
+                // the prefix test below and returned as a real organization.
+                if (!own(teams, id)) { continue; }
                 if (id.indexOf(code + '-') === 0 && teams[id] && teams[id].organization) {
                     return teams[id].organization;
                 }
@@ -139,6 +147,13 @@
         //    own() proves the KEY is present, not that the VALUE is usable: a
         //    malformed entry would otherwise be returned as-is and break the
         //    @returns {string} contract the same way a prototype lookup did.
+        //
+        //    NOT reachable today, and the tests say so rather than implying
+        //    otherwise: STATIC_ORGS is frozen with all-truthy values, so no
+        //    test can construct a malformed entry to drive this branch. What
+        //    IS tested is the precondition that makes it unreachable -- every
+        //    value being a usable string -- so adding a malformed entry fails
+        //    loudly instead of silently relying on this guard.
         if (own(STATIC_ORGS, code) && STATIC_ORGS[code]) {
             return STATIC_ORGS[code];
         }
