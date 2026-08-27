@@ -61,10 +61,14 @@
 # This file and its template are CANONICAL SOURCE in dev-team and are mirrored to
 # the tap by sync-tap.sh (both sync_file entries are already added). But
 # `libexec/` is NOT mirrored by sync-tap.sh — it is tap-native with no dev-team
-# source — so the three call-site edits below must be made INSIDE the
+# source — so the three call-site edits below had to be made INSIDE the
 # homebrew-tap submodule, which was uninitialized in the worktree where this was
-# written. They are listed here so the wiring cannot be silently forgotten; an
-# unwired reconciler is inert, which is precisely the XACA-0814 failure shape.
+# written. An unwired reconciler is inert, which is precisely the XACA-0814
+# failure shape.
+#
+# STATUS: all three APPLIED in tap commit c8dc5ce (XACA-0161, PR #776 review
+# finding). They are retained below as the record of what the wiring is and why,
+# so a future edit to libexec/ can see what depends on it.
 #
 #   1. libexec/commands/aiteamforge-upgrade.sh
 #      _xaca0673_mandatory_materialize_basenames() — add:
