@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-08-27
+
 - **XACA-0992 round four — the icon-drift gate now compares pixels, not compressed bytes.** The gate this ticket adds was red on its own first CI run for all 12 teams, while passing locally on the identical pinned Pillow: the platform wheel bundles a different zlib, so the compressed stream differs even though the image is identical. Comparison is now decoded pixel content, making it portable across encoders and platforms while still catching every real drift; the Pillow pin relaxes from `==12.1.1` to `>=12.1.1`. Also mirrors three Fleet Monitor pages whose icon links were left unmirrored when the branch rebased, and adds `/medical-general` to the funnel path-prefix list so medical's prefixed requests resolve like every other team's.
 - **XACA-0988 — LCARS duplicate server spawns on stray ports: startup double-spawn fixed, spawn attribution made durable, and a test-harness collision that corrupted live state closed.** `finance-startup.sh` and `medical-startup.sh` set `SKIP_ATTACH=1` at their per-terminal dispatch sites but not `SKIP_SERVER_START=1`, while also calling `start_lcars_server()` themselves — so both paths raced to spawn a server for the same team+port on every startup, by construction (finance had two such sites, medical one; the other 9 master scripts were already correct). Academy's own stray-port spawns had a different cause: `tests/test-lcars-server-startup-serialization.sh` forced `team="academy"` and derived its session name as `"${team}-lcars"` — literally the production session — so the real `_lcars_port_drift_guard` self-healed the production `lcars-ports/academy-lcars.port` to a throwaway 8910-8999 scratch port. Closed with a session rename plus a new `LCARS_SKIP_DRIFT_GUARD=1` opt-out the guard honours. Also adds `share/scripts/lcars-spawn-ledger.sh` (new, sourced by `lcars-launch-helpers.sh` under an `[[ -f ]]` guard): an append-only, never-rotated spawn ledger plus launch-id banners in the per-team log, so a bind-posture line can no longer be misattributed to another PID after XACA-0661's per-launch log rotation destroys the previous generation. `server.py` gains a durable `bind` block on `/api/status` with a `degraded` flag — the loopback-only bind was an independent, transient auto-detection failure that nothing would ever have corrected, because the health check probes `127.0.0.1`, which a loopback-only server always passes.
 
@@ -2212,7 +2214,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.1...HEAD
+[0.20.1]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.8...v0.18.0
