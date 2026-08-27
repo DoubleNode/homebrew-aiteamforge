@@ -2869,6 +2869,15 @@
    ticket assumed first occurs at a 280px viewport, below the Reflow floor.
    Every candidate fix CREATED the clipping it was meant to cure.
 
+   WHY IT IS SAFE TO PIN THIS ELEMENT AT ALL -- the precondition, and the first
+   thing to re-check if it ever stops holding. The label vocabulary is a CLOSED
+   SET of hardcoded string literals: Session:, Machine:, Windows:, Uptime:,
+   Status:, Backup:, Working:, Port:. None is data-driven, and the widest is
+   45.8px. flex-shrink:0 is only ever safe on an element whose width is bounded
+   and not content-controlled. If a future label is ever interpolated from data,
+   this rule starves the value instead, and the correct shape becomes a fixed
+   label rail (flex: 0 0 6rem) rather than a pin.
+
    flex-shrink:0 is a measured no-op today (identical to baseline in 24/24
    skin x width cells, 320-1920, at the real 12px font that .session-detail
    hardcodes). Kept anyway because it strictly dominates min-width:auto: with it
