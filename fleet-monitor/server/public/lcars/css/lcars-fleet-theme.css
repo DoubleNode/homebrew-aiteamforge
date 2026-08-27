@@ -2884,15 +2884,18 @@
      .lcars-content -> .lcars-section[data-section="organizations"] -> section
        -> #divisions-container -> .organization-panel -> .division-container
        -> .teams-grid
-   .organization-panel (72px padding/border/margin) and .division-container
-   (39px -- 40 less a -1px hairline margin) dominate; .lcars-section adds 10px padding plus an 8px scrollbar
-   gutter under overflow-y:auto; #divisions-container is width-neutral. Dropping
-   the two dominant wrappers inflates .teams-grid at 320px from 202px to 300px
-   (lcars) and 108px to 192px (lcars2) -- 1.49x and 1.78x -- which reads as
-   "the label clips after all". FOUR measurement passes have now made some
-   version of this mistake, two against harnesses and one in an earlier draft of
-   THIS comment, which named only the two dominant wrappers and so prescribed a
-   rig ~9% too wide. Verify against the live DOM; do not trust this list alone.
+   Reference values, measured: .teams-grid is 202px (lcars) / 108px (lcars2) at
+   a 320px viewport. If your rig disagrees, you are missing wrappers.
+
+   NO PER-WRAPPER PIXEL ATTRIBUTION IS GIVEN HERE, DELIBERATELY. Five separate
+   passes have now got some version of these widths wrong -- two harnesses, and
+   three drafts of THIS comment. The most recent named .organization-panel as
+   72px, which is its superseded base rule: it is overridden twice, including
+   inside @media (max-width:480px), so at the 320px floor this paragraph is
+   keyed to it is 35px, not 72. The chain STRUCTURE above is verified and is
+   what you need; the per-wrapper arithmetic was load-bearing for nothing and
+   kept being wrong, so it is gone rather than tuned again. Measure the live
+   DOM.
 
    Two figures here are deliberately soft. Peak label loss under min-width:0
    measured 30.9px and 30.2px on two independent rigs -- treat it as ~30px, not
