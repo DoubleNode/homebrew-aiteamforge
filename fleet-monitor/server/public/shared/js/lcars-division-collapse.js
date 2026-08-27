@@ -94,7 +94,40 @@
     }
 
     function expandAll(divisionIds) {
-        writeExpanded((divisionIds || []).slice());
+        var ids = (divisionIds || []).slice();
+        // XACA-0989-015: an empty id list here is not "the user asked to
+        // expand nothing" -- expandAll's only caller (the EXPAND ALL/
+        // COLLAPSE ALL button) derives ids from the CURRENTLY REGISTERED
+        // controllers, which is empty whenever zero divisions are rendered
+        // (e.g. renderDivisions' empty-poll branch, or a click landing
+        // between render passes). Before this guard, that state fell
+        // straight into writeExpanded([]) and silently wiped every
+        // division the user had legitimately expanded on a PRIOR poll that
+        // did have data -- an empty CURRENT render pass is not evidence the
+        // user wants an empty PERSISTED set. A deliberate "collapse
+        // everything" already has its own explicit entry point
+        // (collapseAll()), which still writes [] unconditionally because
+        // that call is never a byproduct of "nothing to iterate" -- it is
+        // the whole point of calling it.
+        if (ids.length === 0) {
+            // XACA-0989-027: the guard above skips the WRITE (that is the
+            // whole point -- an empty CURRENT pass must not persist an
+            // empty set) but must not also skip the REFRESH. Today the
+            // only caller (wireExpandCollapseAll's click handler) derives
+            // `ids` from the very same `controllers` array notifyStateChange
+            // iterates, so with zero controllers this call is a genuine
+            // no-op regardless -- but that is a coincidence of the CURRENT
+            // caller's wiring, not a guarantee expandAll() itself makes. A
+            // future caller invoking expandAll([]) while controllers or
+            // sectionRefreshers are non-empty must still see the UI reflect
+            // the (unchanged) persisted state instead of going stale
+            // because nothing was written. notifyStateChange() is cheap
+            // and idempotent, so always calling it removes that asymmetry
+            // rather than relying on it.
+            notifyStateChange();
+            return;
+        }
+        writeExpanded(ids);
         notifyStateChange();
     }
 
@@ -173,14 +206,43 @@
         '<path d="M3.2 4.4 L5.2 6.1 L3.2 7.8 M6.6 7.8 L9 7.8" stroke-linecap="round" stroke-linejoin="round"></path>' +
         '</svg>';
 
+    // XACA-0989-030: warning-triangle+bang, same hand-drawn single-stroke
+    // style as TERMINAL_ICON_SVG above (stroke="currentColor", fill="none",
+    // stroke-width 1.3, round caps/joins) -- ONLY the exclamation dot is
+    // filled (a zero-length stroke at that size reads as a faint smudge,
+    // not a dot; a small filled circle is the standard way this glyph
+    // family draws a period regardless). Replaces the raw Unicode '⚠'
+    // (U+26A0) .chip-backup-alert used to render as text: some browser/OS
+    // combinations present a bare U+26A0 as a full-colour emoji that
+    // ignores `color` entirely, which would defeat XACA-0989-028's
+    // contrast fix on exactly those platforms and undercut the "shape-
+    // distinct, not colour-alone" rationale this glyph exists for in the
+    // first place. An SVG with an explicit stroke/fill inherits
+    // `.chip-backup-alert`'s `color` via currentColor deterministically,
+    // on every platform, the same way TERMINAL_ICON_SVG already does.
+    var BACKUP_ALERT_ICON_SVG =
+        '<svg class="chip-backup-alert-icon" width="10" height="10" viewBox="0 0 14 14" ' +
+        'fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" ' +
+        'stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M7 1.6 L13 12.4 L1 12.4 Z"></path>' +
+        '<path d="M7 5.3 L7 8.7"></path>' +
+        '<circle cx="7" cy="10.7" r="0.85" fill="currentColor" stroke="none"></circle>' +
+        '</svg>';
+
     /**
-     * helpers: { isLcarsTerminal: fn(data)->bool, getLcarsUrl: fn(data)->string|null }
+     * helpers: { isLcarsTerminal: fn(data)->bool, getLcarsUrl: fn(data)->string|null,
+     *            getBackupAction: fn(data)->string|null (OPTIONAL) }
      * injected per-caller so this module doesn't re-implement per-skin
      * terminal detection (both skins already define these identically).
+     * getBackupAction is OPTIONAL and lcars-skin-only (XACA-0989-022):
+     * the lcars2 skin's expanded card has no backup-health row at all, so
+     * its caller never injects this helper, and the chip correctly shows
+     * nothing extra there either -- see the call site below for why.
      */
     function createSessionChip(name, data, helpers) {
         var isLcarsFn = helpers && helpers.isLcarsTerminal;
         var getUrlFn = helpers && helpers.getLcarsUrl;
+        var getBackupActionFn = helpers && helpers.getBackupAction;
 
         var chip = document.createElement('div');
         var isLcars = isLcarsFn ? !!isLcarsFn(data) : false;
@@ -222,11 +284,14 @@
         // here: textContent cannot be escaped out of, so this chip stays safe
         // regardless of what escaper XACA-0416 settles on.
         // Parse the static icon via <template> and append the real <svg
-        // class="chip-icon"> node, so the chip's direct flex children are
-        // EXACTLY as before this hardening: icon / name / badge / dot. A
-        // wrapper span here would become an undeclared flex child
-        // (flex-shrink defaulting to 1) and silently break the shrink
-        // discipline the .chip-icon rule establishes.
+        // class="chip-icon"> node, so the chip's direct FLEX children are
+        // icon / name / [badge] / dot -- the badge only when isLcars,
+        // everything else unconditional. A wrapper span here would become
+        // an undeclared flex child (flex-shrink defaulting to 1) and
+        // silently break the shrink discipline the .chip-icon rule
+        // establishes. The backup-alert appended below is NOT part of this
+        // flex chain (it's position:absolute -- see its CSS) precisely so
+        // it never has to compete with .chip-name for the same budget.
         var iconTpl = document.createElement('template');
         iconTpl.innerHTML = TERMINAL_ICON_SVG;    // static module constant, no interpolation
         if (iconTpl.content.firstElementChild) {
@@ -239,6 +304,73 @@
         chip.appendChild(nameSpan);
 
         if (isLcars) {
+            // XACA-0989-022: backup-health exception signal. Renders ONLY
+            // when unhealthy (action === 'error') -- a healthy backup adds
+            // NOTHING to the chip, by design (Q3's minimal-detail spec).
+            // getBackupActionFn mirrors createTeamCard's Backup: row
+            // derivation exactly (see getBackupAction() in
+            // lcars-dashboard-app.js): same field (backupStatus.boards
+            // keyed by session.division), same fallback-to-null for a
+            // missing/unknown value. A missing value is 'unknown', NOT
+            // 'unhealthy' -- this never claims a failure the data does not
+            // support. 'auto-restore' (the card's text-warning state) also
+            // deliberately does NOT trigger this -- it is an anomaly the
+            // card already surfaces distinctly from a hard failure, and
+            // this exception-only chip signal exists specifically for the
+            // "silently failed, operator has no cue" case, not a second,
+            // broader status vocabulary.
+            if (getBackupActionFn && getBackupActionFn(data) === 'error') {
+                var backupAlert = document.createElement('span');
+                backupAlert.className = 'chip-backup-alert';
+                // Not color alone (req. #4): a warning-triangle GLYPH,
+                // shape-distinct from the round .status-indicator dot, not
+                // just a differently-colored dot. Static -- never animated
+                // (only .status-indicator pulses; a second animated element
+                // would compete with that signal). This information is not
+                // conveyed anywhere else on the chip, so it needs its own
+                // accessible name, not just aria-hidden decoration.
+                // Appended, not inserted before the badge/dot -- it does not
+                // matter WHERE in the DOM this lands relative to its
+                // siblings because its CSS takes it out of the flex flow
+                // entirely (position: absolute, corner-anchored to the
+                // chip). See its CSS rule for why a flex sibling was tried
+                // and rejected (it clipped "communications" in the lcars
+                // skin's real webfont).
+                // No `.title` here (XACA-0989-025): the element sits under
+                // `pointer-events: none` (see its CSS rule) so it never
+                // receives the mouseover that would fire a title tooltip --
+                // hover falls through to `.session-chip` beneath it and
+                // shows THAT element's title instead. A title attribute
+                // here would be dead code that looks live. aria-label above
+                // already carries the same text to screen readers, which is
+                // the audience this glyph's accessible name exists for.
+                backupAlert.setAttribute('role', 'img');
+                // XACA-0989-031: echo the expanded card's own status
+                // vocabulary ('Backup:' label + 'ERROR' value -- see
+                // createTeamCard's backupHtml derivation in
+                // lcars-dashboard-app.js) instead of a differently-worded
+                // generic message. This chip only ever renders this glyph
+                // for the `action === 'error'` case (see the comment
+                // above), so 'ERROR' is not a paraphrase -- it is the same
+                // word the card would show for this exact same underlying
+                // fact. Two views of one fact should say the same thing.
+                backupAlert.setAttribute('aria-label', 'Backup: ERROR for ' + name);
+                // XACA-0989-030: inline SVG, not the raw '⚠' (U+26A0) text
+                // glyph -- some browser/OS combos render bare U+26A0 as a
+                // full-colour emoji that ignores `color`, which would
+                // defeat the contrast fix below on exactly those platforms.
+                // Parsed via <template> exactly like TERMINAL_ICON_SVG
+                // above: static module constant, no interpolation, so this
+                // is not an innerHTML-of-untrusted-data risk (see the
+                // XACA-0989/XACA-0416 comment on this function).
+                var alertIconTpl = document.createElement('template');
+                alertIconTpl.innerHTML = BACKUP_ALERT_ICON_SVG;
+                if (alertIconTpl.content.firstElementChild) {
+                    backupAlert.appendChild(alertIconTpl.content.firstElementChild);
+                }
+                chip.appendChild(backupAlert);
+            }
+
             var badgeSpan = document.createElement('span');
             badgeSpan.className = 'lcars-badge';
             badgeSpan.textContent = 'LCARS';
@@ -261,7 +393,13 @@
                 chip.classList.add('lcars-clickable');
                 chip.title = 'Click to open LCARS terminal: ' + lcarsUrl;
                 chip.addEventListener('click', function () {
-                    window.open(lcarsUrl, '_blank');
+                    // XACA-0989-017: `noopener` -- the opened tab must not get
+                    // a `window.opener` handle back to this dashboard. The
+                    // existing card (createTeamCard/createServiceOnlyLcarsCard)
+                    // omits it too, but that is pre-existing scope we do not
+                    // touch here; this is new code and gets it right from the
+                    // start rather than copying a known gap forward.
+                    window.open(lcarsUrl, '_blank', 'noopener');
                 });
                 // XACA-0983-014 parity: a clickable div is mouse-only unless
                 // it is also focusable and keyboard-activatable. The chip had
@@ -278,14 +416,38 @@
                         evt.key === 'Spacebar' ||
                         evt.keyCode === 13 || evt.keyCode === 32) {
                         evt.preventDefault();
-                        window.open(lcarsUrl, '_blank');
+                        window.open(lcarsUrl, '_blank', 'noopener');
                     }
                 });
-            } else if (lcarsUrl && !isOnline && !session && svc) {
-                // Service-only AND unreachable: say what is actually known.
-                // "machine is offline" is wrong here -- there is no machine
-                // session to be offline; a service was reported and did not
-                // answer. Wording matches createServiceOnlyLcarsCard.
+            } else if (!session && svc) {
+                // Service-only path (XACA-0983 fix (b)): match
+                // createServiceOnlyLcarsCard's wording EXACTLY, for every
+                // sub-state, not just "unreachable with a hostname".
+                //
+                // XACA-0989-018: this branch used to require `lcarsUrl &&
+                // !isOnline`, so a service-only team that IS reachable but
+                // reports NO hostname (getLcarsUrl() returns null whenever
+                // hostname is missing, regardless of reachability) fell
+                // through to the generic `!lcarsUrl` branch below and said
+                // "misconfigured - no hostname reported for this session" --
+                // while the card, for the identical piece of data, says
+                // "LCARS terminal service is reported but not reachable"
+                // (createServiceOnlyLcarsCard's gate is `reachable &&
+                // svc.hostname`: ANY failure to build the actionable link,
+                // whether from being unreachable OR from a missing hostname,
+                // collapses to that one message there -- the card does not
+                // distinguish those two causes for a service-only team).
+                //
+                // The card is the established view (XACA-0983), so the chip
+                // defers to its wording rather than asserting a more precise
+                // message the card itself doesn't have. This is deliberately
+                // NOT "reachable but misconfigured" -- reproducing that
+                // distinction here would just create a THIRD wording for one
+                // state instead of reconciling the two that already existed.
+                // Dropping the `lcarsUrl && !isOnline` guard makes this branch
+                // cover every non-clickable service-only sub-state uniformly,
+                // which is what keeps it in parity with the card for all of
+                // them, not just the one this finding happened to name.
                 chip.classList.add('lcars-offline');
                 chip.title = 'LCARS terminal service is reported but not reachable';
             } else if (lcarsUrl && !isOnline) {

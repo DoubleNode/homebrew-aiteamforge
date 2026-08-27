@@ -39,6 +39,11 @@
     border: 1px solid var(--lcars-tan);
     border-radius: 13px;
     background: var(--lcars-dark);
+    /* XACA-0989-024: anchor for the focus-reveal overlay on .chip-name
+       below -- position:relative here doesn't move or resize anything
+       (no absolutely-positioned child existed until that rule), it only
+       gives that child something non-static to anchor to. */
+    position: relative;
 }
 
 .session-chip.lcars-terminal {
@@ -56,6 +61,24 @@
 .session-chip.lcars-clickable:hover .chip-name,
 .session-chip.lcars-clickable:hover .chip-icon {
     color: var(--lcars-black);
+}
+
+/* XACA-0989-016/020: the chip gets tabindex/role=button (see the
+   lcars-clickable branch in createSessionChip(), shared/js/
+   lcars-division-collapse.js) but had no branded focus ring of its own --
+   keyboard focus fell back to the browser default outline. Every other
+   interactive control in this app (.sidebar-button, .lcars-button,
+   .org-nav-button, .team-card in lcars-fleet-theme.css; .division-header-
+   toggle above) uses this exact outline/outline-offset pair. This was not
+   a WCAG failure -- the default ring IS visible -- but it broke the
+   XACA-0983-014 parity this chip explicitly claims with the expanded card.
+   Only .lcars-clickable gets it: the non-clickable branches deliberately
+   carry no tabindex/role (see the comment in createSessionChip()), so they
+   are never keyboard-focusable and this rule never has anything to match
+   there. */
+.session-chip.lcars-clickable:focus-visible {
+    outline: 2px solid var(--lcars-cyan);
+    outline-offset: 2px;
 }
 
 .session-chip.lcars-offline {
@@ -89,8 +112,155 @@
     flex-shrink: 0;
 }
 
+/* XACA-0989-022: backup-health exception signal. Static (never animated --
+   only .status-indicator pulses; a second animated element on a
+   default-visible chip would compete with that signal), not color alone
+   (a warning-triangle GLYPH, shape-distinct from the round
+   .status-indicator dot -- see createSessionChip() for why a color-only
+   dot was rejected). Renders ONLY when unhealthy, so a healthy backup adds
+   nothing, by construction, to the SAME budget every other chip uses.
+   MEASURED, not assumed (a first draft added this as a flex sibling with
+   `flex-shrink: 0`, exactly as a naive reading of "don't let it grow" would
+   suggest -- real-browser measurement of "communications" + the LCARS
+   badge + that flex sibling, in the actual Antonio webfont, showed it
+   DID clip in the `lcars` skin (scrollWidth 75px vs the 60px left after a
+   5th flex child + its gap ate 15px from the name). A flex sibling was
+   therefore the wrong shape for "must never clip the name," not merely a
+   sizing detail to tune -- so this is `position: absolute`, entirely OUT
+   of the flex flow, anchored to `.session-chip`'s `position: relative`
+   (added above for the focus-reveal overlay) as a small corner mark. It
+   costs the name's flex budget NOTHING, in any skin, at any name length,
+   by construction rather than by measurement margin -- re-verified after
+   this change with the same real-font harness: no clipping in either skin
+   at 700px or 1920px viewports, with "communications" + badge + alert all
+   present together. */
+.chip-backup-alert {
+    position: absolute;
+    top: -5px;
+    right: -3px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--lcars-alert-red);
+    /* XACA-0989-030: the glyph is now an inline SVG (BACKUP_ALERT_ICON_SVG
+       in shared/js/lcars-division-collapse.js), not text -- `text-shadow`
+       does not apply to SVG content, so the black-halo legibility aid this
+       rule used to provide via two stacked text-shadows is reproduced with
+       `filter: drop-shadow(...)` instead (same idea: a small dark halo so
+       the red glyph reads against light AND dark backdrops alike). */
+    filter: drop-shadow(0 0 1px var(--lcars-black)) drop-shadow(0 0 1px var(--lcars-black));
+    pointer-events: none;
+}
+
+.chip-backup-alert-icon {
+    display: block;
+}
+
+/* XACA-0989-028 (BLOCKING): WCAG 1.4.11 non-text contrast. `.lcars-offline`
+   (above) sets `opacity: 0.5` on the WHOLE `.session-chip`, and CSS
+   opacity composites the ENTIRE subtree -- including this glyph --
+   through that 0.5 alpha onto whatever is actually behind the chip
+   (measured: the division panel's flat `--lcars-darker` backdrop,
+   #0d0d1a in both skins; the glyph sits outside the chip's own painted
+   box via its negative `top`/`right` offset, so it is the panel
+   background it composites onto, not the chip's own `--lcars-dark`
+   fill). `var(--lcars-alert-red)` (#ff6666) survives that unchanged on
+   an online chip (measured contrast ~5:1, comfortably over 3:1) but
+   composited at 50% over #0d0d1a it lands at ~2:1 -- confirmed with
+   harness/faithful-chrome/measure-chip-contrast.js against the REAL
+   compiled DOM+CSS, not estimated from the token.
+
+   Escaping the ancestor opacity (rendering the glyph in a sibling
+   stacking context outside `.session-chip.lcars-offline`'s subtree)
+   was evaluated and rejected: it needs a wrapper element that every
+   other `.session-chip` rule (hover, `:focus-visible`, the `.chip-name`
+   focus-reveal anchor at XACA-0989-024) would have to be re-scoped
+   around, for a chip that already has five conditionally-rendered
+   children -- broad blast radius for a fix that only needs to hold for
+   ONE state. Compensating the colour is the targeted alternative:
+   scoped to `.lcars-offline` only, so the ONLINE glyph keeps the
+   original, more saturated red and only the composited-at-50% case
+   gets a lighter value chosen so the COMPOSITE clears 3:1, not so the
+   token itself looks like an alert-red in isolation (it doesn't -- at
+   full opacity this pink would read as a much weaker signal, which is
+   exactly why it is scoped to `.lcars-offline` and not applied
+   globally). Value chosen by measurement, not formula: the naive
+   50/50-blend estimate ((#0d0d1a + candidate) / 2) systematically
+   overstated the harness's actual rendered contrast by ~13% (SVG
+   anti-aliasing + the drop-shadow halo above both eat into the
+   composited result) on this exact glyph, so the candidate was picked
+   by iterating against the real harness output, not the blend formula
+   alone. Re-verify with the harness (both skins, both states) after
+   ANY change to this value, the icon's SVG, or the drop-shadow -- all
+   three feed the same composited pixel. */
+.session-chip.lcars-offline .chip-backup-alert {
+    color: #ffd9d9;
+}
+
 .session-chip .status-indicator {
     flex-shrink: 0;
+}
+
+/* XACA-0989-024: the `title` tooltip that reveals a truncated .chip-name
+   (Q5 -- ellipsis + title tooltip) fires on HOVER only; it never fires on
+   keyboard focus in any browser. The chip is keyboard-focusable (see the
+   lcars-clickable tabindex/role above), so a sighted keyboard-only user can
+   Tab onto a truncated chip and never learn what it says -- the mouse-only
+   escape hatch doesn't exist for them. Screen reader users are unaffected
+   (the accessible name is already the full, untruncated string via
+   textContent/title, independent of the visual clip), so this is a purely
+   VISUAL reveal-on-focus, not an accessible-name fix.
+   CSS-only: on focus, let .chip-name grow past its normal ellipsis box and
+   overlay in place (anchored to .session-chip's position:relative above)
+   instead of adding a JS tooltip widget. `pointer-events: none` so it never
+   intercepts the click/keydown handlers already bound to the chip itself. */
+.session-chip:focus-visible .chip-name {
+    position: absolute;
+    left: 20px;
+    top: 50%;
+    transform: translateY(-50%);
+    /* No `right`/`width` -- shrink-to-fit on content is what lets the
+       bordered/background box grow to the full name's width instead of
+       clipping the reveal at the chip's own right edge. */
+    overflow: visible;
+    white-space: nowrap;
+    background: var(--lcars-dark);
+    border: 1px solid var(--lcars-cyan);
+    border-radius: 4px;
+    padding: 2px 6px;
+    z-index: 5;
+    max-width: none;
+    pointer-events: none;
+}
+
+/* XACA-0989-029: when a chip is BOTH truncated AND unhealthy, the
+   focus-reveal box above and the corner-anchored `.chip-backup-alert`
+   converge on the same top-right corner -- measured live (500px
+   viewport): the reveal box's right edge lands at ~366.7px against the
+   alert's left edge at ~364px, a ~2.7x2.5px real overlap, with the
+   alert glyph's own top edge poking into the reveal box's top border.
+   Nothing clips, but three strokes (the chip's own :focus-visible pill
+   outline, the reveal box's cyan border, and the alert triangle) meet
+   in one small corner and read as visually crowded in a real-browser
+   screenshot.
+   Fix: hide the alert glyph specifically while its own chip is
+   showing the focus reveal, rather than repositioning either element.
+   This is safe (not an information loss) because at this exact moment
+   -- the chip focused -- both facts the glyph exists to carry are
+   already available through OTHER channels: the accessible name (via
+   `.chip-backup-alert`'s own `role="img"`/`aria-label`, still present
+   in the accessibility tree regardless of visual hiding) for screen
+   reader users, and the chip's `title` tooltip reveal above for sighted
+   keyboard users. Repositioning the glyph further into the corner was
+   considered and rejected -- it only shrinks the overlap, it does not
+   eliminate the "three strokes in one corner" crowding the finding
+   actually describes, and risks pushing the glyph off making it read
+   as clipped instead. `display: none`, not `opacity: 0` -- the glyph
+   is already `pointer-events: none` (see its own rule above) so there
+   is no interaction to preserve, and removing it from paint entirely
+   is simplest to reason about. */
+.session-chip:focus-visible .chip-backup-alert {
+    display: none;
 }
 
 /* -------------------------------------------------------------------------
@@ -140,4 +310,49 @@
 .division-expand-all-toggle:hover {
     background: var(--lcars-tan);
     color: var(--lcars-black);
+}
+
+/* -------------------------------------------------------------------------
+   XACA-0989-021: reduced motion for the chip's status dot ONLY.
+
+   PRE-EXISTING GAP, NOT OURS TO FIX HERE: neither skin's
+   lcars-fleet-theme.css lists `.status-indicator` in its own
+   @media (prefers-reduced-motion: reduce) block, so the theme-wide pulse/
+   blink keyframes (status-pulse-offline / status-online-pulse /
+   status-offline-blink / status-warning-pulse, plus the `lcars`-skin-only
+   online ::after ping ripple) keep animating everywhere else in the app
+   regardless of the OS preference -- verified live. That gap is theme-wide
+   (every dashboard, every card, every status dot) and out of scope for
+   this ticket; we do not edit lcars-fleet-theme.css (XACA-0985/0983 own
+   it). This module owns a NEW surface built from the same indicator class
+   that is DEFAULT-VISIBLE (the collapsed chip row, not an expanded-on-
+   demand card), so at minimum it must honour the preference for its own
+   copy rather than adding yet another always-animating instance to the
+   page.
+
+   Specificity note: the theme's rules key on `.status-indicator.<state>`
+   (2 classes). `.session-chip .status-indicator.<state>` (3 classes) is
+   needed here, not a bare `.session-chip .status-indicator`, because a
+   lower-specificity selector would lose to the theme's `.offline`/
+   `.online`/`.warning` state rules regardless of load order.
+   ------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+    .session-chip .status-indicator.online,
+    .session-chip .status-indicator.offline,
+    .session-chip .status-indicator.warning {
+        animation: none;
+    }
+
+    /* `lcars` skin only (verified: this `::after` ping ripple rule exists
+       only in lcars/css/lcars-fleet-theme.css, not lcars2's -- an earlier
+       revision of this comment had the two skins backwards, caught by
+       real-browser measurement, not by re-reading the CSS): the online
+       ping ripple is a ::after pseudo-element driven by its own keyframe,
+       not the `animation` shorthand above, so it needs its own override.
+       Harmless no-op in the lcars2 skin, where no rule ever gives this
+       pseudo-element a `content` to begin with. */
+    .session-chip .status-indicator.online::after {
+        animation: none;
+        content: none;
+    }
 }

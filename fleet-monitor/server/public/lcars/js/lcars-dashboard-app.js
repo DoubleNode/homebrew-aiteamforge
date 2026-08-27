@@ -99,6 +99,17 @@
             LCARS_KIOSK.init();
         }
 
+        // XACA-0989: Expand All / Collapse All control for the divisions
+        // section -- wired once; #divisions-container's re-renders don't
+        // touch it.
+        if (window.LCARS_DIVISIONS) {
+            const divisionsContainer = document.getElementById('divisions-container');
+            const sectionHeader = divisionsContainer && divisionsContainer.previousElementSibling;
+            if (sectionHeader) {
+                window.LCARS_DIVISIONS.wireExpandCollapseAll(sectionHeader);
+            }
+        }
+
         // Fetch team configuration for avatar/org mapping
         await fetchTeamConfig();
 
@@ -544,12 +555,26 @@
 
     function renderDivisions(divisions) {
         const container = document.getElementById('divisions-container');
-        if (!container) return;
+        // XACA-0989-019: beginRenderPass()/endRenderPass() must bracket the
+        // ENTIRE render pass, including this early "no container" exit --
+        // not just the body below it. Before this fix, a missing container
+        // returned before beginRenderPass() ever ran, so the PREVIOUS pass's
+        // controllers array was left in place, still registered against
+        // whatever nodes it pointed at (now potentially detached, since a
+        // container going missing usually means the DOM around it changed).
+        // A later notifyStateChange() (e.g. from a toggle click elsewhere)
+        // would then call applyState() against those stale controllers.
+        if (window.LCARS_DIVISIONS) window.LCARS_DIVISIONS.beginRenderPass();
+        if (!container) {
+            if (window.LCARS_DIVISIONS) window.LCARS_DIVISIONS.endRenderPass();
+            return;
+        }
 
         container.innerHTML = '';
 
         if (!divisions || Object.keys(divisions).length === 0) {
             container.innerHTML = '<p class="empty-message">' + CONFIG.emptyMessage + '</p>';
+            if (window.LCARS_DIVISIONS) window.LCARS_DIVISIONS.endRenderPass();
             return;
         }
 
@@ -609,6 +634,10 @@
 
             container.appendChild(orgContainer);
         });
+
+        // XACA-0989: refresh the Expand All / Collapse All label now that
+        // this pass's division set (and each panel's initial paint) is final.
+        if (window.LCARS_DIVISIONS) window.LCARS_DIVISIONS.endRenderPass();
     }
 
     function createDivisionPanel(name, data) {
@@ -618,11 +647,17 @@
 
         const header = document.createElement('div');
         header.className = 'division-header';
+        // XACA-0989: '.division-toggle-icon' is filled in by
+        // LCARS_DIVISIONS.wireDivisionToggle() below -- empty here.
         header.innerHTML = getDivisionTitle(name) +
-            '<span class="division-stats">' + data.total_sessions + ' Sessions</span>';
+            '<span class="division-stats">' + data.total_sessions + ' Sessions' +
+            '<span class="division-toggle-icon" aria-hidden="true"></span></span>';
         panel.appendChild(header);
 
-        // Add avatar grid showing active agents in this division
+        // Add avatar grid showing active agents in this division. This is a
+        // division-level roster summary, independent of the collapse state
+        // (XACA-0989 scope is the per-team cards/chips only) -- it stays
+        // visible in both the collapsed and expanded views.
         const avatarGrid = createDivisionAvatarGrid(name, data);
         if (avatarGrid) {
             panel.appendChild(avatarGrid);
@@ -630,6 +665,10 @@
 
         const content = document.createElement('div');
         content.className = 'teams-grid';
+
+        // XACA-0989: collected alongside the (unchanged) expanded cards so
+        // the collapsed chip view never has to re-walk data.projects.
+        const chipEntries = [];
 
         for (const projectKey in data.projects) {
             const projectData = data.projects[projectKey];
@@ -650,10 +689,33 @@
             teamNames.forEach(function(teamName) {
                 const teamCard = createTeamCard(teamName, projectData.teams[teamName]);
                 content.appendChild(teamCard);
+                chipEntries.push([teamName, projectData.teams[teamName]]);
             });
         }
 
         panel.appendChild(content);
+
+        // XACA-0989: collapsed-by-default chip view, single shared renderer
+        // (shared/js/lcars-division-collapse.js). This skin's createTeamCard
+        // is richer (avatar stack) than lcars2's -- the chip renderer stays
+        // agnostic to that and only needs isLcarsTerminal/getLcarsUrl.
+        // Fails safe to the pre-XACA-0989 always-expanded behavior if the
+        // module didn't load.
+        if (window.LCARS_DIVISIONS) {
+            const chipRow = window.LCARS_DIVISIONS.buildChipRow(chipEntries, {
+                isLcarsTerminal: isLcarsTerminal,
+                getLcarsUrl: getLcarsUrl,
+                // XACA-0989-022: lcars-skin-ONLY -- this skin's createTeamCard
+                // is the one that renders the Backup: row (via backupStatus,
+                // fetched only in this file); lcars2's card has no such row,
+                // so lcars2's call sites deliberately do NOT inject this
+                // helper (see those files' buildChipRow calls, unchanged).
+                getBackupAction: getBackupAction
+            });
+            panel.insertBefore(chipRow, content);
+            window.LCARS_DIVISIONS.wireDivisionToggle(panel, header, chipRow, content);
+        }
+
         return panel;
     }
 
@@ -1754,6 +1816,30 @@
         }
 
         return null;
+    }
+
+    // XACA-0989-022: mirrors createTeamCard's Backup: row derivation
+    // EXACTLY (same `backupStatus.boards[session.division.toLowerCase()]`
+    // lookup, same `lastAction` field, same "missing = unknown, not
+    // failed" fallback) so the chip's backup-health signal can never
+    // disagree with the card's for the same team -- the same class of fix
+    // XACA-0989-018 made for the reachability wording, applied here to
+    // avoid inventing a second derivation for the same underlying data.
+    // `backupStatus` is this file's module-scoped cache (populated by its
+    // own separate fetch -- see its declaration near the top of this
+    // file); this is a per-file closure over it, exactly like
+    // getLcarsUrl/isLcarsTerminal above, not a field read off `teamData`
+    // itself. Returns the raw `lastAction` value ('backed_up' / 'skipped'
+    // / 'auto-restore' / 'error'), or null when there is nothing to report
+    // -- the shared module decides what (if anything) to render from that,
+    // so this stays a pure data lookup, not a rendering decision.
+    function getBackupAction(teamData) {
+        const session = teamData && teamData.sessions && teamData.sessions[0];
+        if (!backupStatus || !backupStatus.boards || !session || !session.division) {
+            return null;
+        }
+        const teamBackup = backupStatus.boards[session.division.toLowerCase()];
+        return (teamBackup && teamBackup.lastAction) ? teamBackup.lastAction : null;
     }
 
     function updateElement(id, value) {
