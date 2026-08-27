@@ -2145,10 +2145,13 @@
 
    DO NOT TRUST THE 145px/79px/124px PHONE-WIDTH TABLE from the ticket -- that
    specific table is a harness artifact and the withdrawal is scoped to it
-   alone. It came from XACA-0973's stub-lcars.html, which hardcodes fixed
+   alone. It came from XACA-0973's stub-lcars.html, which hardcoded fixed
    sidebar, margin and padding chrome AT EVERY VIEWPORT, so it modelled neither
    the 480px collapse nor the --sidebar-width steps and produced a "124px card"
-   that cannot occur in production. XACA-0973's OTHER numbers -- 34px@1080 /
+   that cannot occur in production. That stub was never tracked in this repo
+   and is gone; to reproduce these figures now, run `npm run measure` in
+   harness/faithful-chrome/ (XACA-0986), which renders against the shipped
+   stylesheets with faithful chrome. XACA-0973's OTHER numbers -- 34px@1080 /
    16px@1133 -- were broadly right and are not withdrawn: removing the guard
    outright reproduces them at faithful chrome as 37px / 20px. The real measured
    card at 500px is 314px (playwright-chromium against the shipped stylesheets);

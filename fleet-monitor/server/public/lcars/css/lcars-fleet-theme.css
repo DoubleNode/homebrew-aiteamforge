@@ -2743,14 +2743,17 @@
 
    DO NOT TRUST THE 145px/79px/124px PHONE-WIDTH TABLE from the ticket -- that
    specific table is a harness artifact, and the withdrawal is scoped to it
-   alone. It came from XACA-0973's stub-lcars.html, which hardcodes a fixed
+   alone. It came from XACA-0973's stub-lcars.html, which hardcoded a fixed
    200px sidebar plus fixed margin and padding AT EVERY VIEWPORT, so it modelled
    neither the 480px collapse nor the --sidebar-width steps and produced a
-   "124px card" that cannot occur in production. The real measured card at 500px
-   is 314px (playwright-chromium against the shipped stylesheets with faithful
-   chrome); no arithmetic derivation is given here on purpose, because the two
-   attempts at one both failed to reconstruct that number and substituting a
-   third guess is the exact error this ticket exists to correct.
+   "124px card" that cannot occur in production. That stub was never tracked in
+   this repo and is gone; to reproduce these figures now, run
+   `npm run measure` in harness/faithful-chrome/ (XACA-0986), which renders
+   against the shipped stylesheets with faithful chrome. The real measured card
+   at 500px is 314px (playwright-chromium against the shipped stylesheets with
+   faithful chrome); no arithmetic derivation is given here on purpose, because
+   the two attempts at one both failed to reconstruct that number and
+   substituting a third guess is the exact error this ticket exists to correct.
 
    WHICH DECLARATION DOES THE WORK -- both, for different content shapes; keep
    both. Isolated at lcars2/320 against faithful chrome: min-width:0 ALONE gives
