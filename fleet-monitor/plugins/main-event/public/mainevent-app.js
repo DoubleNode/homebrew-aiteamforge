@@ -358,9 +358,15 @@ function createTeamCard(name, data) {
     const lcarsBadge = isLcars ? '<span class="lcars-badge">LCARS</span>' : '';
 
     // Build LCARS action indicator for header (only for LCARS terminals)
+    // XACA-0979: gate the actionable badge on a resolvable URL, not just online
+    // state. A card that advertises "OPEN" but has no link to open looks
+    // actionable and silently does nothing when clicked.
+    const lcarsUrl = isLcars ? getLcarsUrl(data) : null;
     let lcarsAction = '';
     if (isLcars) {
-        if (isOnline) {
+        if (!lcarsUrl) {
+            lcarsAction = '<span class="lcars-action lcars-action-offline">⊘ UNAVAILABLE</span>';
+        } else if (isOnline) {
             lcarsAction = '<span class="lcars-action lcars-action-open">▶ OPEN</span>';
         } else {
             lcarsAction = '<span class="lcars-action lcars-action-offline">⊘ OFFLINE</span>';
@@ -402,8 +408,6 @@ function createTeamCard(name, data) {
 
     // Make LCARS terminals clickable - navigate to LCARS page (only if online)
     if (isLcars) {
-        const lcarsUrl = getLcarsUrl(data);
-
         if (lcarsUrl && isOnline) {
             // Machine is online - make clickable
             card.classList.add('lcars-clickable');
@@ -415,6 +419,11 @@ function createTeamCard(name, data) {
             // Machine is offline - show disabled state
             card.classList.add('lcars-offline');
             card.title = `LCARS terminal unavailable - machine is ${status}`;
+        } else {
+            // XACA-0979: no hostname reported for this session - never leave the
+            // card looking actionable without saying why.
+            card.classList.add('lcars-offline');
+            card.title = 'LCARS terminal misconfigured - no hostname reported for this session';
         }
     }
 
