@@ -1745,6 +1745,81 @@ def _split_team_id(team_id):
 # archives from overwriting other teams' knowledge on restore.
 MULTI_PROJECT_BASE_TEAMS = frozenset({'finance', 'legal', 'medical', 'freelance'})
 
+# XACA-0992: canonical short, correctly-cased display names for each base
+# brand, keyed by the same base-brand slug _split_team_id()/_resolve_base_team()
+# already produce. This is the ONE place in the file that owns "how to find a
+# team's base brand" (see the comment on _resolve_base_team below) — adding a
+# second, differently-scoped naming table elsewhere would be exactly the
+# sibling-heuristic-drift pattern this codebase keeps getting bitten by (see
+# MEMORY.md k501-sibling-heuristic-drift-pattern), so brand display names live
+# here, next to MULTI_PROJECT_BASE_TEAMS, rather than inline in the manifest
+# handler.
+#
+# Two independent defects this fixes for the PWA manifest's `short_name`:
+#   1. registry.json's `name` field is a THEMATIC marketing string (e.g.
+#      "Star Trek: TNG - iOS", "Ferengi Commerce Authority") — fine as the
+#      manifest's `name`, but far too long for `short_name`: iOS truncates a
+#      home-screen label at roughly 11-12 characters.
+#   2. `base_team.title()` naive title-casing mangles brands with
+#      non-standard capitalization: 'dns' -> 'Dns' (should be 'DNS'),
+#      'ios' -> 'Ios' (should be 'iOS'), 'mainevent' -> 'Mainevent' (should
+#      be 'MainEvent'). This table supplies the human-correct form directly
+#      instead of trying to out-clever a casing heuristic.
+#
+# Deliberately covers every base brand this file resolves teams to,
+# including 'dns' and 'mainevent', which have NO entry in registry.json
+# (that absence is what makes the naive fallback path fire for them in the
+# first place — see _serve_appicon_manifest). Keeping this map complete
+# means the manifest's short_name is correct regardless of whether
+# registry.json ever gains those entries.
+_BASE_BRAND_SHORT_NAMES = {
+    'academy': 'Academy',
+    'ios': 'iOS',
+    'android': 'Android',
+    'firebase': 'Firebase',
+    'command': 'Command',
+    'dns': 'DNS',
+    'legal': 'Legal',
+    'medical': 'Medical',
+    'finance': 'Finance',
+    'mainevent': 'MainEvent',
+    'freelance': 'Freelance',
+}
+
+# XACA-0992: hard cap enforced on the FALLBACK path only (a base brand not
+# yet present in _BASE_BRAND_SHORT_NAMES above). Every explicit entry in that
+# map is already well under this — the cap exists so a *future* unmapped
+# brand can never regress the "short_name must actually be short" property
+# this ticket is about, even before someone remembers to add it to the map.
+_SHORT_NAME_MAX_LEN = 12
+
+
+def _base_brand_short_name(base_team, raw_team_id=''):
+    """Return a non-empty, length-bounded, correctly-cased short brand name.
+
+    Looks up *base_team* in _BASE_BRAND_SHORT_NAMES first. If the brand isn't
+    mapped yet (a newly-added team registered in team-paths.json/registry.json
+    but not yet added here), degrades to a title-cased, length-capped
+    derivation of *base_team* — falling back further to *raw_team_id* and
+    finally a literal 'App' so this NEVER returns an empty string, by
+    construction, regardless of what garbage the caller passes in.
+    """
+    mapped = _BASE_BRAND_SHORT_NAMES.get(base_team, '').strip()
+    if mapped:
+        return mapped
+
+    fallback_source = (base_team or raw_team_id or '').strip()
+    if not fallback_source:
+        return 'App'
+
+    derived = fallback_source.replace('-', ' ').replace('_', ' ').title().strip()
+    if not derived:
+        # Title-casing a non-empty string can't actually produce an empty
+        # result, but this belt-and-suspenders check keeps the "never empty"
+        # guarantee true even if that assumption ever stops holding.
+        derived = fallback_source
+    return derived[:_SHORT_NAME_MAX_LEN]
+
 
 def _base_team_knowledge_dir(base_team):
     """Return the canonical out-of-tree knowledge dir for a base team.
@@ -16069,18 +16144,61 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """
         return _split_team_id(team)[0]
 
+    @staticmethod
+    def _resolve_contained_path(root, *parts):
+        """Join *parts onto *root* and return the resolved Path IFF it stays
+        within *root*; otherwise return None.
+
+        XACA-0992 SECURITY: this is the ONE containment check every route
+        that builds a filesystem path out of request-controlled input must
+        go through — resolve() the candidate, then relative_to() the root,
+        rejecting anything that escapes (a '../' traversal, an absolute-path
+        component, a symlink pointing outside root, ...). serve_appicon()
+        below used to inline this exact two-line resolve()+relative_to()
+        pattern directly; serve_image() built its "local images" candidate
+        path with NO containment check at all, which is what let a request
+        like /images/../../../../../../etc/passwd read arbitrary files off
+        the box regardless of the 127.0.0.1/tailnet bind (caught in PR #780
+        review). A second, slightly-different inline copy of this check in
+        serve_image was considered and rejected: same sibling-heuristic-drift
+        concern that governs _resolve_base_team/_BASE_BRAND_SHORT_NAMES
+        above — one function, reused everywhere a request path touches disk,
+        not two copies that can quietly diverge.
+
+        Returns None (never raises, never falls back to the unresolved
+        candidate) so every caller's contract is identical: `if path is None:
+        treat as not found`.
+        """
+        root = root.resolve()
+        try:
+            candidate = root.joinpath(*parts).resolve()
+            candidate.relative_to(root)
+        except ValueError:
+            return None
+        return candidate
+
     def serve_image(self, path, head_only=False):
         """Serve team logos and avatars from their respective directories.
 
         XACA-0992: head_only honors HEAD requests (send headers only, no
         body) — see do_HEAD, which wires this in for /images/* parity with
         serve_no_cache_static's existing head_only idiom.
+
+        XACA-0992 SECURITY: filename is request-controlled (it's everything
+        after '/images/' in the URL path, verbatim). Both file-serving paths
+        below — the flat "local images" lookup and the team/name/type
+        lookup further down — resolve their candidate path through
+        _resolve_contained_path() before ever calling .exists()/open() on
+        it, so a '../' (or a symlink escape) can never resolve to a path
+        outside the intended root. See _resolve_contained_path's docstring
+        for the vulnerability this closes.
         """
         filename = path.replace('/images/', '')
 
         # First, check if the file exists in the local images directory (for startup logos, etc.)
-        local_image_path = UI_DIR / "images" / filename
-        if local_image_path.exists():
+        local_images_root = UI_DIR / "images"
+        local_image_path = self._resolve_contained_path(local_images_root, filename)
+        if local_image_path is not None and local_image_path.exists():
             try:
                 with open(local_image_path, 'rb') as f:
                     data = f.read()
@@ -16144,23 +16262,35 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         if team_dir != team:
             alt_filename = filename.replace(team + '_', team_dir + '_', 1)
 
-        # Try PNG first (if valid), then SVG as fallback
-        png_path = base_dir / filename
+        # Try PNG first (if valid), then SVG as fallback.
+        #
+        # XACA-0992 SECURITY: `filename` is already traversal-free by
+        # construction here — it matched the `^([a-z-]+)_([a-z_]+)_(logo|avatar)\.png$`
+        # regex above, whose character classes admit no '.' or '/', so no
+        # '../' or absolute-path component can occur. These joins are
+        # additionally routed through _resolve_contained_path() anyway (the
+        # same helper serve_image's local-images lookup above and
+        # serve_appicon() below both use) rather than a bare `base_dir /
+        # filename` — belt and suspenders against the regex ever being
+        # loosened later, and one fewer place doing the join a different way.
         svg_filename = filename.replace('.png', '.svg')
-        svg_path = base_dir / svg_filename
+        png_path = self._resolve_contained_path(base_dir, filename)
+        svg_path = self._resolve_contained_path(base_dir, svg_filename)
 
         # Also try alternate filenames with mapped team prefix
         if alt_filename:
-            alt_png_path = base_dir / alt_filename
-            alt_svg_path = base_dir / alt_filename.replace('.png', '.svg')
-            if not png_path.exists() and alt_png_path.exists():
+            alt_png_path = self._resolve_contained_path(base_dir, alt_filename)
+            alt_svg_path = self._resolve_contained_path(
+                base_dir, alt_filename.replace('.png', '.svg')
+            )
+            if (png_path is None or not png_path.exists()) and alt_png_path is not None and alt_png_path.exists():
                 png_path = alt_png_path
-            if not svg_path.exists() and alt_svg_path.exists():
+            if (svg_path is None or not svg_path.exists()) and alt_svg_path is not None and alt_svg_path.exists():
                 svg_path = alt_svg_path
 
         # Check if PNG exists and is a valid PNG (starts with PNG magic bytes)
         png_valid = False
-        if png_path.exists():
+        if png_path is not None and png_path.exists():
             with open(png_path, 'rb') as f:
                 header = f.read(8)
                 # PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
@@ -16169,7 +16299,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         if png_valid:
             file_path = png_path
             content_type = 'image/png'
-        elif svg_path.exists():
+        elif svg_path is not None and svg_path.exists():
             file_path = svg_path
             content_type = 'image/svg+xml'
         else:
@@ -16278,14 +16408,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             )
             team_dir = (appicons_root / self.APPICON_FALLBACK_TEAM).resolve()
 
-        icon_path = (team_dir / name).resolve()
-
-        # Containment check: resolved path must stay inside the resolved
-        # appicons root. Rejects any residual traversal/symlink escape the
-        # whitelist check above didn't already rule out.
-        try:
-            icon_path.relative_to(appicons_root)
-        except ValueError:
+        # Containment check via the shared helper (also used by serve_image()
+        # above): rejects any residual traversal/symlink escape the
+        # whitelist check above didn't already rule out. `team_dir` is
+        # itself always inside `appicons_root` (built from base_team/
+        # APPICON_FALLBACK_TEAM, never from request input), so resolving
+        # `name` against team_dir and containing against appicons_root is
+        # equivalent to containing against team_dir directly — done against
+        # appicons_root here to match the pre-existing check exactly.
+        icon_path = self._resolve_contained_path(appicons_root, team_dir.relative_to(appicons_root), name)
+        if icon_path is None:
             self.send_error(404, f"Unknown appicon file: {name}")
             return
 
@@ -16341,18 +16473,33 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """
         base_team = self._resolve_base_team(LCARS_TEAM)
         branding = self._load_registry_branding(base_team)
-        if branding and branding.get('teamName'):
-            display_name = branding['teamName']
-        else:
-            # Registry unavailable (e.g. homebrew-tap submodule not checked
-            # out — see kb-sync-personas / worktree tap-init docs) or team
-            # not found in it: degrade to a readable name rather than fail
-            # the manifest request. Best-effort only — not a source of truth.
-            display_name = base_team.replace('-', ' ').replace('_', ' ').title()
+        registry_name = ''
+        if branding:
+            registry_name = (branding.get('teamName') or '').strip()
+
+        # XACA-0992: short_name is ALWAYS derived from the base-brand map/
+        # fallback (never from registry_name) — registry.json's `name` is a
+        # thematic marketing string with no length discipline (e.g. "Star
+        # Trek: TNG - iOS", "Ferengi Commerce Authority"), which is exactly
+        # what makes a naive `short_name = name` wrong: iOS truncates a
+        # home-screen label at roughly 11-12 characters. _base_brand_short_name
+        # is guaranteed non-empty and length-capped by construction, so this
+        # can never regress into an unnamed or unusably-long icon label.
+        short_name = _base_brand_short_name(base_team, LCARS_TEAM)
+
+        # `name` has more room than short_name, so prefer registry.json's
+        # thematic name when one is actually present. Falls back to the same
+        # short_name otherwise (registry unavailable — e.g. homebrew-tap
+        # submodule not checked out, see kb-sync-personas / worktree tap-init
+        # docs — or the team isn't registered there, like 'dns'/'mainevent').
+        # Never falls back to a naive base_team.title() directly: that's the
+        # exact source of the 'Dns' / 'Mainevent' mis-casing this ticket
+        # fixes, and short_name already carries the correctly-cased form.
+        display_name = registry_name or short_name
 
         manifest = {
             "name": display_name,
-            "short_name": display_name,
+            "short_name": short_name,
             "start_url": "../",
             "scope": "../",
             "display": "standalone",

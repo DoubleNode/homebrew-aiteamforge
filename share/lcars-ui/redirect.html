@@ -20,8 +20,15 @@
     <link rel="icon" type="image/png" sizes="192x192" href="appicons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="appicons/icon-512.png">
     <link rel="manifest" href="appicons/team.webmanifest">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="mobile-web-app-capable" content="yes">
+    <!-- XACA-0992: apple-mobile-web-app-capable / mobile-web-app-capable are
+         deliberately OMITTED here. This page's entire mechanism is an
+         automatic window.location.href redirect after a port scan — that is
+         exactly the sort of thing that can fail. Standalone mode's only
+         effect is stripping Safari's chrome, so a failed redirect would
+         strand the user full-screen with no address bar and no back button.
+         The touch-icon/manifest links below still give a bookmark of this
+         page a proper icon; it just won't launch chrome-less. See the UX
+         gate finding on PR #780 for the full reasoning. -->
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <script>
         // Load lcars-target.js with cache busting and proper onload handling.

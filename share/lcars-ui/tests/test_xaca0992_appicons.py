@@ -50,6 +50,7 @@ import io
 import json
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -410,6 +411,90 @@ class TestServeAppiconManifest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 3b. Manifest name/short_name correctness (PR #780 UX gate, Finding 1)
+# ---------------------------------------------------------------------------
+#
+# Before this fix: `short_name` was simply an alias of `name` — fine for
+# teams whose registry.json `name` happens to be short (e.g. "Boston
+# Legal"), but wrong for `ios` ("Star Trek: TNG - iOS", 20 chars — iOS
+# truncates a home-screen label at roughly 11-12 characters) and for teams
+# with NO registry.json entry (`dns`, `mainevent`), which fell through to a
+# naive `base_team.title()`: 'dns' -> 'Dns' (should be 'DNS'), 'mainevent'
+# -> 'Mainevent' (should be 'MainEvent'). Fixed via _BASE_BRAND_SHORT_NAMES
+# + _base_brand_short_name() (server.py, next to MULTI_PROJECT_BASE_TEAMS).
+
+class TestManifestShortNameAllRegisteredIds(unittest.TestCase):
+    """Every one of the 15 registered runtime ids must produce a non-empty
+    `name` and a non-empty, <=12-character, correctly-cased `short_name`."""
+
+    _SHORT_NAME_MAX_LEN = 12
+
+    def _manifest_for(self, team):
+        with patch.object(server, "LCARS_TEAM", team):
+            handler, buf = _make_handler("/appicons/team.webmanifest")
+            handler.serve_appicon("/appicons/team.webmanifest")
+            self.assertEqual(handler._response_code, 200, team)
+            return json.loads(buf.getvalue())
+
+    def test_all_15_registered_ids_have_nonempty_bounded_short_name(self):
+        for team_id, _base in _REGISTERED_RUNTIME_TEAM_IDS:
+            with self.subTest(team_id=team_id):
+                manifest = self._manifest_for(team_id)
+                name = manifest["name"]
+                short_name = manifest["short_name"]
+                self.assertTrue(name.strip(), f"{team_id}: empty name")
+                self.assertTrue(short_name.strip(), f"{team_id}: empty short_name")
+                self.assertLessEqual(
+                    len(short_name), self._SHORT_NAME_MAX_LEN,
+                    f"{team_id}: short_name {short_name!r} exceeds "
+                    f"{self._SHORT_NAME_MAX_LEN} chars",
+                )
+
+    def test_short_name_casing_for_known_brands(self):
+        """Pins the exact human-correct casing this fix produces — a naive
+        base_team.title() would instead give 'Dns'/'Mainevent' (pre-fix
+        bug, reproduced by the mutation test below)."""
+        expected = {
+            "dns": "DNS",
+            "ios": "iOS",
+            "mainevent": "MainEvent",
+            "mainevent-dev-team": "MainEvent",
+            "android": "Android",
+            "finance-personal": "Finance",
+            "legal-coparenting": "Legal",
+            "medical-general": "Medical",
+        }
+        for team_id, expected_short in expected.items():
+            with self.subTest(team_id=team_id):
+                self.assertEqual(self._manifest_for(team_id)["short_name"], expected_short)
+
+    def test_name_is_never_empty_even_with_no_registry_entry(self):
+        """dns and mainevent have NO registry.json entry at all — `name`
+        must still be non-empty (falls back to the short_name, itself
+        guaranteed non-empty by _base_brand_short_name)."""
+        for team_id in ("dns", "mainevent"):
+            with self.subTest(team_id=team_id):
+                self.assertTrue(self._manifest_for(team_id)["name"].strip())
+
+    def test_short_name_can_actually_regress(self):
+        """Mutation proof: with _BASE_BRAND_SHORT_NAMES emptied, dns's
+        short_name reverts to the pre-fix naive title-case bug ('Dns') —
+        proving the map (not something else) is what fixes casing, and
+        that the tests above are not vacuously true."""
+        with patch.object(server, "_BASE_BRAND_SHORT_NAMES", {}):
+            mutated = self._manifest_for("dns")
+        self.assertEqual(
+            mutated["short_name"], "Dns",
+            "Expected the pre-fix naive-title-case bug to reappear with "
+            "the map emptied — got something else, so this mutation no "
+            "longer demonstrates what the map fixes",
+        )
+        # And confirm it's restored once the patch context exits.
+        restored = self._manifest_for("dns")
+        self.assertEqual(restored["short_name"], "DNS")
+
+
+# ---------------------------------------------------------------------------
 # 4. HEAD/GET parity regression guard (XACA-0992 Defect 1)
 # ---------------------------------------------------------------------------
 
@@ -421,10 +506,18 @@ class TestHeadGetParity(unittest.TestCase):
     and 404'd. Also covers the funnel-prefixed form (PATH_PREFIXES stripping
     was previously missing from do_HEAD entirely)."""
 
+    # XACA-0992 (PR #780 review): "/images/academy_lcars_logo.png" used to be
+    # in this list. It depends on ~/dev-team/academy/terminals/logos/
+    # academy_lcars_logo.png existing — true on THIS machine (this
+    # worktree's checkout doubles as ~/dev-team) but not on a fresh clone or
+    # CI runner, since serve_image()'s lookup is `Path.home() / "dev-team" /
+    # ...` — hardcoded to the developer's home directory layout, not to
+    # wherever a given checkout actually lives. Moved to its own test below
+    # with a self-contained fixture (patches Path.home() to a tmp dir) so
+    # /images/ HEAD/GET parity is still covered without that host coupling.
     PARITY_PATHS = [
         "/appicons/icon-192.png",
         "/appicons/team.webmanifest",
-        "/images/academy_lcars_logo.png",
         "/academy/appicons/icon-192.png",
     ]
 
@@ -464,6 +557,77 @@ class TestHeadGetParity(unittest.TestCase):
                     path,
                 )
 
+    def test_head_get_parity_for_team_logo_image(self):
+        """/images/<team>_<name>_logo.png HEAD/GET parity — exercised
+        against a SELF-CONTAINED fixture (Path.home() patched to a tmp dir)
+        rather than the real ~/dev-team/academy/terminals/logos/
+        academy_lcars_logo.png this case used to depend on directly (see
+        the comment on PARITY_PATHS above for why that's not CI-safe). This
+        still walks the exact same serve_image() code path — the
+        team/name/type regex match, PNG-magic validity check, and
+        Content-Type/Content-Length headers — just against a fixture file
+        this test builds and owns instead of a host-machine asset.
+        """
+        # Only the PNG magic bytes matter to serve_image() (it checks
+        # header[:4] == b'\x89PNG' and otherwise serves the file's raw
+        # bytes verbatim — it never decodes the image) so this fixture
+        # doesn't need to be a real, renderable PNG.
+        png_bytes = b'\x89PNG\r\n\x1a\n' + b'FIXTURE-PNG-BYTES-NOT-A-REAL-IMAGE'
+        path = "/images/academy_lcars_logo.png"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_home = Path(tmp)
+            logos_dir = fake_home / "dev-team" / "academy" / "terminals" / "logos"
+            logos_dir.mkdir(parents=True)
+            (logos_dir / "academy_lcars_logo.png").write_bytes(png_bytes)
+
+            with patch.object(server, "LCARS_TEAM", "academy"), \
+                 patch.object(server.Path, "home", return_value=fake_home):
+                get_handler, get_buf = _make_handler(path, method="GET")
+                get_handler.do_GET()
+                head_handler, head_buf = _make_handler(path, method="HEAD")
+                head_handler.do_HEAD()
+
+            # Assertions run while the tmp dir is still alive (do_GET/do_HEAD
+            # already read the bytes into buffers by this point, but keeping
+            # them inside the `with` avoids relying on that ordering).
+            self.assertEqual(get_handler._response_code, 200)
+            self.assertEqual(head_handler._response_code, 200)
+            self.assertEqual(
+                _headers_dict(head_handler).get("Content-Type"),
+                _headers_dict(get_handler).get("Content-Type"),
+            )
+            self.assertEqual(_headers_dict(get_handler).get("Content-Type"), "image/png")
+            self.assertEqual(
+                _headers_dict(head_handler).get("Content-Length"),
+                _headers_dict(get_handler).get("Content-Length"),
+            )
+            self.assertEqual(head_buf.getvalue(), b"")
+            self.assertEqual(get_buf.getvalue(), png_bytes)
+
+    def test_team_logo_fixture_can_actually_fail(self):
+        """Mutation proof: the fixture test above is not vacuously true —
+        confirm that WITHOUT patching Path.home(), the same request 404s on
+        this repo layout (proving the patch is load-bearing) OR serves a
+        DIFFERENT file than the fixture (proving the fixture, not some
+        other lookup, is what the patched test actually reads)."""
+        path = "/images/academy_lcars_logo.png"
+        with patch.object(server, "LCARS_TEAM", "academy"):
+            handler, buf = _make_handler(path, method="GET")
+            handler.do_GET()
+        # Whatever this machine's real ~/dev-team/academy/terminals/logos/
+        # academy_lcars_logo.png contains (present here, absent on CI), it
+        # is never the synthetic fixture bytes the patched test asserts —
+        # proving that test is reading ITS OWN fixture, not incidentally
+        # passing against the real file regardless of the patch.
+        self.assertNotEqual(
+            buf.getvalue(),
+            b'\x89PNG\r\n\x1a\n' + b'FIXTURE-PNG-BYTES-NOT-A-REAL-IMAGE',
+            "Unpatched request returned the exact fixture bytes — the "
+            "Path.home() patch in the test above would not be proven "
+            "load-bearing",
+        )
+
     def test_head_parity_can_actually_fail_against_the_pre_fix_dispatcher(self):
         """Mutation proof: do_HEAD's pre-fix form (no /appicons or /images
         branch, no PATH_PREFIXES stripping) reproduces the exact 404 QA
@@ -500,6 +664,162 @@ class TestHeadGetParity(unittest.TestCase):
             "(that's the bug) — got 200, so this mutation no longer "
             "demonstrates the regression the parity test guards against",
         )
+
+
+# ---------------------------------------------------------------------------
+# 5. web-app-capable meta tag policy (PR #780 UX gate, Finding 2)
+# ---------------------------------------------------------------------------
+#
+# apple-mobile-web-app-capable / mobile-web-app-capable must appear ONLY on
+# real destination pages (index.html, agent-panel.html) — NOT on pages
+# whose entire mechanism is an automatic window.location.href redirect
+# (redirect.html, agent-panel-router.html) or a diagnostic page with no
+# reason to solicit an install (audio-test.html). Standalone mode's only
+# effect is stripping Safari's chrome; a failed redirect would strand the
+# user full-screen with no address bar and no back button.
+
+class TestWebAppCapableMetaTagPolicy(unittest.TestCase):
+    MUST_NOT_HAVE = ["redirect.html", "agent-panel-router.html", "audio-test.html"]
+    MUST_HAVE = ["index.html", "agent-panel.html"]
+
+    def _read(self, name):
+        return (LCARS_UI_DIR / name).read_text()
+
+    def test_fragile_and_diagnostic_pages_omit_web_app_capable(self):
+        for name in self.MUST_NOT_HAVE:
+            with self.subTest(file=name):
+                html = self._read(name)
+                self.assertNotIn('<meta name="apple-mobile-web-app-capable"', html)
+                self.assertNotIn('<meta name="mobile-web-app-capable"', html)
+                # Must still get a proper icon + status bar styling — this
+                # is a "remove ONE tag pair", not "strip all PWA metadata".
+                self.assertEqual(html.count('rel="apple-touch-icon"'), 4, name)
+                self.assertEqual(html.count('rel="manifest"'), 1, name)
+                self.assertIn('apple-mobile-web-app-status-bar-style', html, name)
+
+    def test_real_destination_pages_still_declare_web_app_capable(self):
+        for name in self.MUST_HAVE:
+            with self.subTest(file=name):
+                html = self._read(name)
+                self.assertIn('<meta name="apple-mobile-web-app-capable"', html)
+
+    def test_policy_can_actually_regress(self):
+        """Mutation proof: re-inserting the tag into a copy of redirect.html
+        (never the real file) DOES trip the assertion above — proving the
+        test is checking real tag presence/absence, not something vacuous
+        like a comment that happens to mention the tag's name."""
+        html = self._read("redirect.html")
+        # Sanity: the explanatory HTML comment left in place DOES mention
+        # the tag names in prose — if the test above searched for the bare
+        # substring instead of the literal opening tag, it would false-fail
+        # against the comment itself. Confirms the assertion is specific
+        # enough to survive that.
+        self.assertIn("apple-mobile-web-app-capable", html)  # in the comment
+        self.assertNotIn('<meta name="apple-mobile-web-app-capable"', html)  # not a live tag
+
+        broken = html.replace(
+            '<meta name="apple-mobile-web-app-status-bar-style"',
+            '<meta name="apple-mobile-web-app-capable" content="yes">\n'
+            '    <meta name="apple-mobile-web-app-status-bar-style"',
+            1,
+        )
+        self.assertIn('<meta name="apple-mobile-web-app-capable"', broken)
+
+
+# ---------------------------------------------------------------------------
+# 6. serve_image() path traversal (PR #780 security review)
+# ---------------------------------------------------------------------------
+#
+# serve_image()'s "local images" fast path built its candidate file path
+# with NO containment check at all: `UI_DIR / "images" / filename` where
+# filename is everything after '/images/' in the request path, verbatim.
+# A request like /images/../server.py (or a deep .../../../../../etc/passwd
+# chain) resolved to a real file OUTSIDE the intended images/ directory and
+# was served as-is — full server.py source, or arbitrary files off the box,
+# regardless of the 127.0.0.1/tailnet bind. Closed via the shared
+# _resolve_contained_path() helper (the same one serve_appicon() uses).
+
+class TestServeImageRejectsTraversal(unittest.TestCase):
+    TRAVERSAL_PATHS = [
+        "/images/../server.py",
+        "/images/../../../../../../../etc/passwd",
+        "/images/..%2fserver.py",
+        "/images/..%252fserver.py",
+        "/images//etc/shadow",
+    ]
+
+    def test_traversal_variants_all_404_get(self):
+        with patch.object(server, "LCARS_TEAM", "academy"):
+            for path in self.TRAVERSAL_PATHS:
+                with self.subTest(path=path):
+                    handler, buf = _make_handler(path)
+                    handler.serve_image(path)
+                    self.assertEqual(handler._response_code, 404, path)
+                    self.assertEqual(buf.getvalue(), b"")
+
+    def test_traversal_variants_all_404_head(self):
+        with patch.object(server, "LCARS_TEAM", "academy"):
+            for path in self.TRAVERSAL_PATHS:
+                with self.subTest(path=path):
+                    handler, buf = _make_handler(path, method="HEAD")
+                    handler.serve_image(path, head_only=True)
+                    self.assertEqual(handler._response_code, 404, path)
+                    self.assertEqual(buf.getvalue(), b"")
+
+    def test_legit_team_logo_paths_still_resolve(self):
+        """The real per-team logo/avatar paths named in the PR #780 review
+        must still resolve exactly as before — a containment fix that
+        breaks real logo serving is worse than the bug. Uses the same
+        Path.home()-patched fixture technique as
+        TestHeadGetParity.test_head_get_parity_for_team_logo_image (these
+        are real, git-tracked assets on THIS machine but not guaranteed on
+        a CI runner, since serve_image()'s lookup is Path.home()-relative,
+        not checkout-relative)."""
+        png_bytes = b'\x89PNG\r\n\x1a\n' + b'FIXTURE-PNG-BYTES-NOT-A-REAL-IMAGE'
+        cases = [
+            # (request path, on-disk base_team dir, on-disk filename)
+            ("/images/dns_command_logo.png", "dns-framework", "dns_command_logo.png"),
+            ("/images/legal_chambers_logo.png", "legal", "legal_chambers_logo.png"),
+            ("/images/freelance_command_logo.png", "freelance", "freelance_command_logo.png"),
+            # legal-coparenting -> legal alt_filename remap path.
+            ("/images/legal-coparenting_chambers_logo.png", "legal", "legal_chambers_logo.png"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_home = Path(tmp)
+            for _path, base_dir_name, filename in cases:
+                logos_dir = fake_home / "dev-team" / base_dir_name / "terminals" / "logos"
+                logos_dir.mkdir(parents=True, exist_ok=True)
+                (logos_dir / filename).write_bytes(png_bytes)
+
+            with patch.object(server, "LCARS_TEAM", "academy"), \
+                 patch.object(server.Path, "home", return_value=fake_home):
+                for path, _base_dir_name, _filename in cases:
+                    with self.subTest(path=path):
+                        handler, buf = _make_handler(path)
+                        handler.serve_image(path)
+                        self.assertEqual(handler._response_code, 200, path)
+                        self.assertEqual(buf.getvalue(), png_bytes, path)
+
+    def test_traversal_defense_can_actually_fail(self):
+        """Mutation proof: reconstruct the PRE-FIX local-images lookup
+        (bare `UI_DIR / "images" / filename`, no containment check) inline
+        and confirm it DOES resolve to server.py's own source for
+        '/images/../server.py' — proving the 404 tests above are not
+        vacuously true against the current code."""
+        filename = "../server.py"
+        pre_fix_candidate = server.UI_DIR / "images" / filename
+        self.assertTrue(
+            pre_fix_candidate.exists(),
+            "Fixture assumption broken: the pre-fix bare join no longer "
+            "resolves to an existing file for this traversal path — this "
+            "mutation no longer demonstrates the vulnerability the fix "
+            "closes.",
+        )
+        # And it's genuinely OUTSIDE the images/ root, not some legitimate
+        # same-directory file that happens to also be named via '../'.
+        images_root = (server.UI_DIR / "images").resolve()
+        with self.assertRaises(ValueError):
+            pre_fix_candidate.resolve().relative_to(images_root)
 
 
 if __name__ == "__main__":
