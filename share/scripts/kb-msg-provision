@@ -349,9 +349,17 @@ def _relay_endpoint(server):
     #
     # Measured before changing anything: that is not currently reachable. A colon
     # only survives into .hostname via brackets, and urlsplit RAISES for bracket
-    # contents that are not a valid IPv6 literal -- ":::a" and "a-:-a" are
-    # refused today by the port guard and by urlsplit respectively, not by the
-    # rule they bypass. So this is hardening, not a live defect.
+    # contents that are not a valid IPv6 literal.
+    #
+    # The two inputs the finding named are refused today, but NOT by the guards
+    # an earlier version of this comment claimed -- it had them swapped, and
+    # named urlsplit for one that never reaches it. Measured, one at a time:
+    #   ":::a"   -> "--server has no host"      (hostname is None)
+    #   "a-:-a"  -> "--server has an invalid port"
+    # Neither is caught by the per-label rule they bypass, so the conclusion
+    # stands: this is hardening, not a live defect. The correction is recorded
+    # because a confident wrong attribution in a comment outlives whoever wrote
+    # it, and this file has already had to fix that once.
     #
     # It is worth doing anyway, and not for the inputs named: the safety
     # currently rests on urlsplit validating bracket contents, an IMPLICIT
@@ -360,17 +368,37 @@ def _relay_endpoint(server):
     # and leaked a credential in a traceback. Asking ipaddress directly states
     # the intent and removes the dependency.
     #
-    # NO TEST COVERS THIS BRANCH, and that is recorded rather than papered over:
-    # deleting it reddens nothing, because no input reaches it. It is
-    # unreachable-by-construction defence in depth against a stdlib change, and
-    # writing a test that pretended to exercise it would assert something false.
-    # Same call as the makedirs guard at write_map's call site (see T5e).
-    bad_host = not any(c.isalnum() for c in host)
-    if not bad_host and ":" in host:
+    # COVERAGE, stated per PATH rather than per branch, because the two halves
+    # differ and an earlier version of this comment flattened them into one
+    # false claim ("no test covers this branch"):
+    #
+    #   ACCEPT (a valid IPv6 literal) IS covered -- T9k round-trips "[::]",
+    #     "[::0]", "[::1]", "[::ffff:1.2.3.4]" and "[2001:db8::1]:8443" to
+    #     literal endpoints; making this arm reject instead reddens T9k.
+    #   REJECT (a colon-bearing host that is NOT valid IPv6) is NOT covered and
+    #     cannot be: urlsplit raises on such bracket contents before this runs.
+    #     It is defence in depth against a stdlib change, and a test pretending
+    #     to reach it would assert something false -- the same call as the
+    #     makedirs guard at write_map's call site (see T5e).
+    #
+    # Reordering this check ahead of the alphanumeric rule is what made the
+    # accept path reachable at all; before that, neither half was exercised.
+    # Order matters: the IPv6 shape check runs FIRST and is authoritative for a
+    # colon-bearing host. The alphanumeric rule used to run unconditionally
+    # ahead of it, which rejected "::" -- the unspecified address, and the only
+    # valid IPv6 literal containing no alphanumeric character. "::0" and "0::0"
+    # were accepted, so the behaviour was inconsistent as well as wrong. It
+    # failed closed and no relay is ever addressed that way, but "harmless" is
+    # not the same as "correct", and the asymmetry is the kind of thing that
+    # reads as a deliberate rule later.
+    if ":" in host:
         try:
             ipaddress.IPv6Address(host)
+            bad_host = False
         except ValueError:
             bad_host = True
+    else:
+        bad_host = not any(c.isalnum() for c in host)
     if not bad_host and ":" not in host:
         for label in host.split("."):
             if not label or label[0] == "-" or label[-1] == "-":
