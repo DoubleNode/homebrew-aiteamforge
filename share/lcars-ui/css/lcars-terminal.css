@@ -262,8 +262,12 @@
 @keyframes tc-pulse { 50% { opacity: 0.25; } }
 
 .tc-pane-btn {
-    min-width: 40px;
-    min-height: 32px;
+    /* XACA-0161 UX review: was 40x32, undershooting this file's own
+       --tc-touch floor. A fullscreen toggle sitting in a pane header is
+       exactly the control a thumb reaches for while holding the iPad, so
+       it is the wrong one to make small. */
+    min-width: var(--tc-touch);
+    min-height: var(--tc-touch);
     padding: 0 10px;
     border: none;
     border-radius: 8px;
@@ -538,6 +542,29 @@
  * switcher is the honest trade, and it is why the tab bar exists rather than
  * being a nicety bolted onto a desktop grid.
  */
+/* XACA-0161 UX review: the single-pane collapse was width-only, so a
+   landscape iPad with the soft keyboard up stayed tiled and squeezed every
+   pane into roughly half the vertical space -- the case where the grid is
+   least usable. The height query collapses to one pane when there is not
+   enough vertical room for a tiled row, regardless of width.
+
+   Unverified on real hardware: iPadOS reports keyboard geometry through
+   visualViewport rather than by resizing the layout viewport, so whether this
+   media query fires on keyboard show needs a device pass. index.html also
+   drives a --tc-vh custom property from visualViewport for that reason; this
+   query is the CSS-only floor beneath it, not a replacement. */
+@media (max-height: 520px) {
+    .tc-grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr;
+    }
+    .tc-grid .tc-pane { display: none; }
+    /* Must match the width rule's selector and display value exactly. A first
+       draft used `.is-focused { display: flex }` -- the wrong class and the
+       wrong display -- which would have hidden every pane and revealed none. */
+    .tc-grid .tc-pane.is-active-single { display: grid; }
+}
+
 @media (max-width: 900px) {
     .tc-grid {
         grid-template-columns: 1fr;

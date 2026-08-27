@@ -4344,18 +4344,30 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         if ttyd_port is None:
             return
 
-        # Session cap BEFORE the ticket burn, so a refusal at the cap does not
-        # consume the caller's single-use nonce (evaluation §6.5 item 3 — the
-        # cap itself is mandatory: each pane pins a thread for its lifetime on
-        # a server whose unbounded thread creation is a recorded open issue).
+        # Ticket BEFORE the session cap. XACA-0161 PR #776 review finding:
+        # the original order acquired the cap first, so that a refusal at the
+        # cap would not burn the caller's single-use nonce. That is a real
+        # convenience, but it made the cap consumable by a caller with NO
+        # credential and NO ticket -- anyone who could reach the route could
+        # exhaust every slot and deny the feature to authenticated users. A
+        # pre-auth denial-of-service is a worse defect than making a legitimate
+        # user mint a second nonce, and minting is cheap and already gated by
+        # `_auth_gate()`, so the client simply re-mints (it re-mints on every
+        # reconnect regardless).
+        #
+        # Redeem is validate-AND-burn under one lock, so there is no window
+        # here for two callers to both pass before either burns.
+        if not self._terminal_redeem(terminal, query):
+            return
+
+        # The cap itself is mandatory: each pane pins a thread for its lifetime
+        # on a server whose unbounded thread creation is a recorded open issue.
         if not _TERMINAL_SESSIONS.acquire():
             self._terminal_refuse(503, 'session-cap-reached',
                                   "Too many active terminal sessions")
             return
 
         try:
-            if not self._terminal_redeem(terminal, query):
-                return
 
             try:
                 upstream = _lcars_terminal.connect_upstream(

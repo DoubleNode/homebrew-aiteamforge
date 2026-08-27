@@ -1,9 +1,9 @@
 <!DOCTYPE html>
 <!--
-    terminal.html
+    cockpit/index.html
     DoubleNode Dev-Team Infrastructure (AITeamForge)
 
-    Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+    Copyright © 2025 - 2026 DoubleNode.com. All rights reserved.
 
     XACA-0161-004 — the iPad cockpit.
 
@@ -119,7 +119,7 @@
         <button class="tc-key" type="button" data-send="-">-</button>
     </div>
 
-    <nav class="tc-tabbar" id="tc-tabbar" aria-label="Terminal selector"></nav>
+    <nav class="tc-tabbar" id="tc-tabbar" role="tablist" aria-label="Terminal selector"></nav>
 </div>
 
 <script src="../js/api-auth.js"></script>
@@ -335,6 +335,13 @@
     function buildPane(info) {
         var el = document.createElement('section');
         el.className = 'tc-pane';
+        // XACA-0161 UX review: the other half of the tab pattern. The tab's
+        // aria-controls points here, so this id must exist or the reference
+        // dangles -- which is worse than omitting it, because assistive tech
+        // reports a broken relationship rather than none.
+        el.id = 'tc-pane-' + info.name;
+        el.setAttribute('role', 'tabpanel');
+        el.setAttribute('aria-labelledby', 'tc-tab-' + info.name);
         el.dataset.color = info.color || '';
         el.dataset.terminal = info.name;
 
@@ -397,8 +404,25 @@
         // `click` so focus lands before xterm's own selection handling runs.
         el.addEventListener('mousedown', function () { focusPane(info.name); });
         el.addEventListener('touchstart', function () { focusPane(info.name); }, { passive: true });
+        // XACA-0161 UX review: pointer events alone left keyboard users desynced.
+        // Tabbing into a pane's xterm textarea moved the real focus without
+        // updating focusedName, so the on-screen key bar (ESC / CTRL / ^C) kept
+        // targeting the previously-tapped pane. On a cockpit where every pane is
+        // a different agent's shell, sending ^C to the wrong one is the expensive
+        // mistake. `focusin` bubbles, unlike `focus`, so one listener covers the
+        // textarea xterm creates inside the pane.
+        el.addEventListener('focusin', function () {
+            // focusInput:false — the element already has real focus; re-focusing
+            // it here would fight the browser and can scroll the pane.
+            focusPane(info.name, { focusInput: false });
+        });
 
         var term = new window.Terminal({
+            // XACA-0161 UX review: without this xterm renders into a canvas
+            // with no accessible live region, so a screen reader announces
+            // nothing as output arrives. Unverified against VoiceOver on real
+            // hardware -- see the device-pass list in the PR.
+            screenReaderMode: true,
             fontSize: fontSize,
             fontFamily: '"JetBrains Mono", "SF Mono", Menlo, Monaco, Consolas, monospace',
             theme: XTERM_THEME,
@@ -480,6 +504,12 @@
         tab.dataset.color = info.color || '';
         tab.dataset.state = 'disconnected';
         tab.setAttribute('role', 'tab');
+        // XACA-0161 UX review: role="tab" alone is an incomplete pattern --
+        // without aria-controls the tab announces no relationship to the pane
+        // it selects, so a screen-reader user hears a list of buttons rather
+        // than a tab set. The pane carries the matching role="tabpanel".
+        tab.id = 'tc-tab-' + info.name;
+        tab.setAttribute('aria-controls', 'tc-pane-' + info.name);
         var tabLabel = document.createElement('span');
         tabLabel.className = 'tc-tab-label';
         tabLabel.textContent = info.name;

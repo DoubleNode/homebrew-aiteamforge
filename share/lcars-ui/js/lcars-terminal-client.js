@@ -8,7 +8,7 @@
 /**
  * lcars-terminal-client.js — XACA-0161-004: the transport half of the iPad
  * cockpit. Everything here is DOM-free and dependency-injected so the whole
- * ticket/reconnect/codec surface is unit-testable in Node; `terminal.html`
+ * ticket/reconnect/codec surface is unit-testable in Node; `cockpit/index.html`
  * owns the DOM and xterm.js wiring and calls into this.
  *
  * WHAT THIS TALKS TO
@@ -155,7 +155,7 @@
      * the wrong trade, so we pin stable 6.0.0 and reproduce the upstream
      * condition here, in six lines we own and can test.
      *
-     * DELETE THIS (and the `attachCustomKeyEventHandler` call in terminal.html)
+     * DELETE THIS (and the `attachCustomKeyEventHandler` call in cockpit/index.html)
      * when the vendored xterm.js is a stable release >= 6.1.0. Check first, in
      * the vendored bundle, that `case 13` tests `ctrlKey` — do not infer it
      * from a version number.
@@ -231,6 +231,8 @@
         var random = deps.random || Math.random;
 
         var socket = null;
+
+        var connecting = false;
         var attempt = 0;
         var reconnectTimer = null;
         var closedByUs = false;
@@ -269,7 +271,16 @@
          * the file docstring.
          */
         function connect() {
-            if (socket) return Promise.resolve();
+            // `socket` is assigned only AFTER mintTicket() resolves, so a
+            // synchronous `if (socket)` guard does not cover the await window:
+            // two rapid RECONNECT taps both passed it, both minted, and both
+            // opened a socket -- orphaning the first, which then held a
+            // server-side session-cap slot until it timed out. A guard that
+            // reads state set after the await is the same shape as a TOCTOU.
+            // `connecting` is set synchronously here and cleared on every exit
+            // path, so it covers the whole window.
+            if (socket || connecting) return Promise.resolve();
+            connecting = true;
             closedByUs = false;
             emitStatus(attempt > 0 ? 'reconnecting' : 'connecting');
 
@@ -279,6 +290,7 @@
                 ws.binaryType = 'arraybuffer';
                 socket = ws;
 
+                connecting = false;
                 ws.onopen = function () {
                     attempt = 0;
                     ws.send(encodeHandshake(lastSize.cols, lastSize.rows));
@@ -296,6 +308,12 @@
                 };
                 ws.onerror = function () { /* onclose always follows; handle there */ };
             }).catch(function (err) {
+                // MUST clear here too. If mintTicket() rejects or buildWsUrl
+                // throws, the success path that clears this flag never runs,
+                // and connect() would be permanently dead -- a worse failure
+                // than the double-connect it guards against, because the pane
+                // could never recover.
+                connecting = false;
                 socket = null;
                 if (err && err.code === 'INSECURE_ORIGIN') {
                     // Not retryable: no amount of backoff turns http into https.
@@ -340,6 +358,7 @@
 
         function disconnect() {
             closedByUs = true;
+            connecting = false;
             if (reconnectTimer) { clearTimeoutImpl(reconnectTimer); reconnectTimer = null; }
             if (socket) { try { socket.close(); } catch (e) { /* already gone */ } socket = null; }
             emitStatus('disconnected');

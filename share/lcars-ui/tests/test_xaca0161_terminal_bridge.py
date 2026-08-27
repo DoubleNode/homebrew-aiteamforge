@@ -665,6 +665,9 @@ class FakeTtyd:
         self._sock.bind(('127.0.0.1', port))
         self._sock.listen(8)
         self._stop = threading.Event()
+        self._conns = []
+        self._conns_lock = threading.Lock()
+        self._workers = []
         self._thread = threading.Thread(target=self._serve, daemon=True)
 
     def start(self):
@@ -681,7 +684,11 @@ class FakeTtyd:
             except OSError:
                 break
             self.connections += 1
-            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+            with self._conns_lock:
+                self._conns.append(conn)
+            worker = threading.Thread(target=self._handle, args=(conn,), daemon=True)
+            self._workers.append(worker)
+            worker.start()
 
     def _handle(self, conn):
         try:
@@ -752,16 +759,62 @@ class FakeTtyd:
                 pass
 
     def stop(self):
+        """Release the listening port DETERMINISTICALLY.
+
+        XACA-0161 CI regression: the first version set the stop flag and closed
+        the listening socket, then returned immediately. On macOS that is
+        enough -- SO_REUSEADDR lets the next test rebind a port still held in
+        TIME_WAIT or by a lingering accepted connection. On Linux it is not:
+        SO_REUSEADDR does NOT permit rebinding while another socket is still
+        actively bound, so the next test in the same derived block died with
+        `OSError: [Errno 98] Address already in use`.
+
+        The suite passed locally and failed on the only neutral runner, and
+        nine of the casualties were the security assertions themselves -- so
+        the properties this file exists to prove were not executing in CI.
+
+        Closing the accepted connections and joining the threads is what
+        actually frees the port, rather than asking the OS to tolerate the
+        overlap.
+        """
         self._stop.set()
+        with self._conns_lock:
+            conns, self._conns = list(self._conns), []
+        for conn in conns:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                conn.close()
+            except OSError:
+                pass
         try:
             self._sock.close()
         except OSError:
             pass
+        self._thread.join(timeout=5)
+        for worker in self._workers:
+            worker.join(timeout=5)
+        self._workers = []
 
 
 def _port_is_free(port):
+    """True if `port` can be bound right now.
+
+    XACA-0161 CI regression note: this is a probe, not a reservation. It binds,
+    learns the answer, and closes -- so between this returning True and the
+    caller's real bind, anything may take the port. That window is why the
+    band scan below re-verifies at bind time instead of trusting this result.
+
+    It also deliberately does NOT set SO_REUSEADDR. With the option set on
+    Linux a probe can succeed against a port held in TIME_WAIT that a real
+    listener then fails to bind -- the probe would report free and the bind
+    would raise Errno 98, which is precisely the failure this file shipped.
+    Probing without the option is the conservative direction: it can report a
+    usable port as busy, never a busy port as usable.
+    """
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         probe.bind(('127.0.0.1', port))
         return True
@@ -1152,6 +1205,50 @@ class TestTerminalBridgeProxy(TerminalBridgeServerCase):
         sock.sendall(b'hello-terminal')
         echoed = sock.recv(65536)
         self.assertEqual(echoed, b'>hello-terminal')
+
+    def test_a_ticketless_upgrade_never_touches_the_session_limiter(self):
+        """PR #776 review finding: the cap must not be reachable pre-auth.
+
+        The original order acquired the session cap BEFORE redeeming the
+        ticket, so an unauthenticated caller reached the limiter. Because the
+        refusal path releases in a `finally`, a SEQUENTIAL flood could not
+        exhaust it -- the exposure was a concurrency race window, narrower than
+        "anyone can exhaust the cap". Ordering is still the right fix: an
+        unauthenticated caller has no business touching the limiter at all.
+
+        This asserts the ordering property DIRECTLY by counting acquisitions,
+        because the observable-consequence version of this test passes against
+        the vulnerable code (the cap is released before the next request) and
+        would have been vacuous.
+        """
+        acquisitions = []
+        limiter = server._TERMINAL_SESSIONS
+        real_acquire = limiter.acquire
+
+        def counting_acquire():
+            granted = real_acquire()
+            acquisitions.append(granted)
+            return granted
+
+        limiter.acquire = counting_acquire
+        self.addCleanup(setattr, limiter, 'acquire', real_acquire)
+
+        sock, first = self.open_ws('engineering', ticket=None)
+        sock.close()
+        self.assertNotIn(b'101 Switching Protocols', first)
+        self.assertEqual(
+            acquisitions, [],
+            "a ticketless upgrade reached the session limiter; the cap is "
+            "acquired before the ticket is redeemed, exposing it pre-auth")
+
+        # And the limiter is still reached on the authenticated path, so this
+        # test cannot pass by the cap having been removed entirely.
+        sock, first = self.open_ws('engineering',
+                                   ticket=self.mint('engineering')['ticket'])
+        self.addCleanup(sock.close)
+        self.assertIn(b'101 Switching Protocols', first)
+        self.assertEqual(acquisitions, [True],
+                         "the authenticated path must still consume a slot")
 
     def test_a_ticket_is_accepted_once_and_rejected_on_reuse(self):
         minted = self.mint('engineering')

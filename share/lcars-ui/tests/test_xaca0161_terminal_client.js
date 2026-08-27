@@ -443,3 +443,24 @@ test('fetchTerminals raises with the status when discovery is refused', async fu
         }),
         function (err) { return err.status === 401; });
 });
+
+
+test('a double-tap on RECONNECT opens exactly one socket', async function () {
+    // PR #776 review finding: `if (socket) return` was evaluated synchronously,
+    // but `socket` is assigned only AFTER mintTicket() resolves. Two rapid taps
+    // both passed the guard, both minted, and both opened -- orphaning the
+    // first socket, which held a server-side session-cap slot until it timed
+    // out. A guard reading state set after the await is a TOCTOU.
+    FakeSocket.reset();
+    var f = makeMintFetch();
+    var t = makeTransport(f);
+    var p1 = t.connect();
+    var p2 = t.connect();          // same tick, before p1's await settles
+    await Promise.all([p1, p2]);
+
+    assert.equal(FakeSocket.instances.length, 1,
+        'a concurrent second connect() opened a second socket; the in-flight ' +
+        'guard does not cover the mintTicket() await window');
+    assert.equal(f.state.calls, 1,
+        'the second connect() minted a ticket it never used, burning a nonce');
+});

@@ -44,7 +44,7 @@ Version determined by: file header comment `/*! Chart.js v4.5.1` on line 1.
 
 ### xterm.js — `xterm.js`, `xterm.css`, `xterm-addon-fit.js`
 
-Added by XACA-0161-004 for the iPad terminal cockpit (`lcars-ui/terminal.html`).
+Added by XACA-0161-004 for the iPad terminal cockpit (`lcars-ui/cockpit/index.html`).
 
 | Field | Value |
 |-------|-------|
@@ -93,7 +93,7 @@ Vendoring a prerelease of the dependency that renders a root-equivalent shell
 is the wrong trade, so this pins stable 6.0.0 and reproduces the upstream
 condition in six owned, unit-tested lines: `isIpadCtrlC()` in
 `lcars-ui/js/lcars-terminal-client.js`, applied via
-`term.attachCustomKeyEventHandler()` in `terminal.html`.
+`term.attachCustomKeyEventHandler()` in `lcars-ui/cockpit/index.html`.
 
 **When 6.1.0 (or later) ships as stable, upgrade and delete the shim** — but
 confirm the fix is in the bundle you actually vendored (grep the extracted

@@ -302,17 +302,34 @@ for team in sorted(teams):
 
     # Sorted by name so the index -> port mapping is stable across runs and
     # machines. Dict order in the JSON is NOT a contract.
-    names = sorted(terminals)
+    #
+    # FILTER BEFORE INDEXING -- this ordering is load-bearing and must match
+    # lcars_terminal.terminal_names() exactly. That function drops names failing
+    # the shape check and THEN indexes the survivors. An earlier version of this
+    # script indexed first and skipped invalid names inside the loop, so a board
+    # containing one unusable name gave every later terminal a DIFFERENT index
+    # here than the proxy computed -- e.g. {alpha, "bad name!", charlie} yields
+    # charlie=2 in the shell and charlie=1 in Python. The LaunchAgent would then
+    # listen on one port while the proxy dialled another, and with enough
+    # terminals the proxy lands on a DIFFERENT AGENT'S SHELL. Silent, and the
+    # worst failure this component can produce.
+    #
+    # Latent today (all 10 boards have only valid names), which is exactly why
+    # it needs to be structural rather than left to chance.
+    names = sorted(t for t in terminals if isinstance(t, str) and NAME_RE.match(t))
+    for bad in sorted(t for t in terminals if not (isinstance(t, str) and NAME_RE.match(t))):
+        print(f"skip {team}/{bad!r}: terminal name must match [a-zA-Z0-9_-]+ "
+              f"(dropped BEFORE indexing, to stay in step with the proxy)",
+              file=sys.stderr)
+    if not names:
+        print(f"skip team {team!r}: no terminal names survive the shape check", file=sys.stderr)
+        continue
     if len(names) > slots:
         print(f"skip team {team!r}: {len(names)} terminals exceeds {slots} slots per team; "
               f"raise SLOTS_PER_TEAM (this changes every port)", file=sys.stderr)
         continue
 
     for idx, term in enumerate(names):
-        if not NAME_RE.match(term):
-            print(f"skip {team}/{term!r}: terminal name must match [a-zA-Z0-9_-]+",
-                  file=sys.stderr)
-            continue
         print(f"{team}\t{term}\t{idx}\t{port}\t{base + (port - floor) * slots + idx}")
 PY
 }
