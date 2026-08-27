@@ -110,6 +110,25 @@ lcars_runtime_target_file() {
 # launch — on both the dev source machine and tap-installed consumers — runs
 # this check automatically. No additional per-machine steps are required.
 #
+# LCARS_SKIP_DRIFT_GUARD=1 (XACA-0988-003): opt-out for test/sandbox callers.
+#   Check 1 below blindly trusts its <port> argument and self-heals
+#   lcars-ports/<session_name>.port to it — keyed on SESSION NAME alone, with
+#   NO re-verification against team-paths.json. That is safe as long as every
+#   caller's session name is either the real production session (matching
+#   team-paths.json's own value) or a test-scoped name that can never collide
+#   with one. XACA-0988-003 found exactly that collision: a regression suite
+#   forced team="academy" (server.py FATALs on an unknown team) but derived
+#   its SESSION name from the same team ("academy-lcars") — identical to the
+#   real production session — and every run silently overwrote the real
+#   lcars-ports/academy-lcars.port with a throwaway scratch port. The fix at
+#   that call site was renaming the session (defense layer 1); this flag is
+#   defense layer 2 — a harness that legitimately needs to exercise
+#   start_lcars_server() against an arbitrary/ephemeral port can set this and
+#   the guard becomes a no-op unconditionally, so a FUTURE session-name
+#   collision (whatever its cause) can never again corrupt a real .port file.
+#   Unset/any value other than "1" preserves today's behavior exactly —
+#   no production caller sets this, so real startups are unaffected.
+#
 # Two checks:
 #
 # 1. .port file drift (SELF-HEAL):
@@ -172,6 +191,18 @@ _lcars_port_drift_guard() {
     # normal use, but we promised to never abort startup).
     if [[ -z "$_guard_team" || -z "$_guard_port" || -z "$_guard_session" || -z "$_guard_base" ]]; then
         echo "  [port-drift-guard] WARNING: missing arguments — skipping guard" >&2
+        return 0
+    fi
+
+    # XACA-0988-003: explicit test/sandbox opt-out. See the function header
+    # above for the full rationale — a set caller is asserting its session
+    # name may not be trustworthy for self-heal purposes (ephemeral, or
+    # deliberately reusing a real team id), so skip BOTH checks entirely
+    # rather than attempt to guess. Mirrors the LCARS_SKIP_TARGET_WRITE
+    # pattern already used elsewhere in this file (both: default unset,
+    # "1" opts in, any other value is treated as unset).
+    if [[ "${LCARS_SKIP_DRIFT_GUARD:-0}" == "1" ]]; then
+        echo "  [port-drift-guard] SKIPPED: LCARS_SKIP_DRIFT_GUARD=1 (test/sandbox caller) — ${_guard_session}.port left untouched." >&2
         return 0
     fi
 
@@ -716,6 +747,62 @@ ensure_lcars_tmux_session() {
 }
 
 # ---------------------------------------------------------------------------
+# _lcars_stamp_launch_banner <log_file> <launch_id> <fields>
+#
+# XACA-0988-006: appends one "=== LCARS-LAUNCH ... ===" banner line to
+# <log_file>. start_lcars_server calls this TWICE per launch:
+#   1. immediately after rotating the per-team log (phase=pre-spawn) —
+#      launch_id, team, port, and the invoking shell's PID;
+#   2. immediately after the server's PID is known (phase=spawned) —
+#      launch_id and spawned_pid.
+#
+# WHY THIS EXISTS: start_lcars_server unconditionally rotates the per-team
+# log (`mv -f … .old`, XACA-0661) at the top of every invocation, so a fresh
+# log only ever contains the CURRENT launch's server.py stderr. That is
+# correct behavior for the common "show me only the current failure" case,
+# but it has a sharp edge: if launch A is healthy and RUNNING, and a LATER
+# launch B for the same port rotates A's log out from under it (a
+# lock-bypass "proceeding unlocked" edge case, or two teams sharing a port
+# during a mis-registration), a reader who assumes "the current file = the
+# currently running process" can be misled — A's own most recent bind-
+# posture line is sitting in a file that now LOOKS like a stale backup, while
+# the "current" file may show a failed launch attempt from a process that
+# never actually bound the port. That is the exact misattribution this
+# ticket was filed against: one investigator attributed a log line to the
+# wrong PID because the file-identity heuristic silently broke.
+#
+# THE FIX: every line in a log is now bracketed by explicit banners. A reader
+# scans upward from ANY line for the nearest preceding "=== LCARS-LAUNCH"
+# banner (there are at most two per launch, and they are adjacent — nothing
+# else writes banner-shaped lines into this file) to recover the launch_id
+# and, once the second banner has landed, the actual spawned PID. This holds
+# even after N further rotations, because rotation is a `mv`, not a
+# truncation — the WHOLE file (banners included) moves intact to .old, and
+# that .old file's own banners are still correct for whatever process wrote
+# them. The only case this does not fully solve is TWO processes writing to
+# the exact same current-generation file concurrently (would require the
+# per-port lock above to have already been bypassed) — in that rare case the
+# banners still bound which launches were involved, even if individual
+# interleaved server.py lines between them cannot be split further; a full
+# per-line tag would require piping server.py's stderr through a prefixing
+# process, which breaks the `wait "$pid"` signal-decoding contract
+# _lcars_spawn_detached's header documents (RETURN CHANNEL note) — not worth
+# that regression risk for an edge case the per-port lock already guards
+# against in the first place.
+#
+# Never aborts the caller (diagnostic instrumentation, not load-bearing).
+# ---------------------------------------------------------------------------
+_lcars_stamp_launch_banner() {
+    local _log_file="${1:?_lcars_stamp_launch_banner: log_file required}"
+    local _lid="${2:-unknown}"
+    local _fields="${3:-}"
+    {
+        printf '=== LCARS-LAUNCH launch_id=%s ts=%s %s ===\n' \
+            "${_lid}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_fields}"
+    } >> "${_log_file}" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
 # start_lcars_server <team> <port> [session_name]
 #
 # Writes the router redirect file, kills any stale server on <port>, starts a
@@ -749,6 +836,62 @@ start_lcars_server() {
     # override if ever needed.
     local _atf_base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
     local lcars_ui_dir="${LCARS_UI_DIR:-${_atf_base}/lcars-ui}"
+
+    # -------------------------------------------------------------------------
+    # XACA-0988-006 / XACA-0988-001: one launch id for this whole invocation,
+    # plus the append-only spawn ledger.
+    #
+    # Sourced HERE (not at file scope) so a caller of just
+    # ensure_lcars_tmux_session / open_lcars_tab never pays for it, and
+    # resolved via the portable _atf_base rather than self-locating —
+    # mirrors this file's existing resolve_lcars_port precedent for loading
+    # a co-located helper (BASH_SOURCE is empty under zsh —
+    # feedback_bash_source_empty_under_zsh — every caller here is either a
+    # zsh script (lcars-health-check.sh) or, once sourced, running under
+    # whatever shell sourced it — see lcars-spawn-ledger.sh's own header for
+    # why every function it defines is bash-3.2/zsh dual-portable).
+    #
+    # _launch_id is THE mechanism XACA-0988-006 and XACA-0988-001 share: the
+    # SAME id is stamped into this launch's per-team server-log banners
+    # (_lcars_stamp_launch_banner, below) AND into this launch's rows in the
+    # spawn ledger (_lcars_ledger_write) — one id ties a ledger row to its
+    # log banner, so an investigator can pivot between "what did the server
+    # print" and "who spawned it" without a separate correlation step.
+    #
+    # Soft-fail throughout: a missing/unsourceable ledger helper degrades to
+    # "_launch_id stays empty, no ledger row is written" — it must never
+    # block a real startup.
+    local _ledger_helpers="${_atf_base}/scripts/lcars-spawn-ledger.sh"
+    if [[ -f "${_ledger_helpers}" ]]; then
+        # shellcheck disable=SC1090
+        source "${_ledger_helpers}" 2>/dev/null || true
+    fi
+    local _launch_id=""
+    if typeset -f _lcars_new_launch_id >/dev/null 2>&1; then
+        _launch_id="$(_lcars_new_launch_id)"
+    fi
+
+    # XACA-0988-001: which call path reached this function. Health-check's
+    # delegate (_hc_start_lcars_server in lcars-health-check.sh) sets this via
+    # a dynamically-scoped `local` before calling start_lcars_server — the
+    # same pattern this file already uses for LCARS_SKIP_TARGET_WRITE just
+    # below. Every other caller (every master <team>-startup.sh's own direct
+    # call, XACA-0988's site #1) gets the default "start_lcars_server".
+    local _ledger_site="${LCARS_SPAWN_LEDGER_SITE:-start_lcars_server}"
+
+    # SKIP_SERVER_START / SKIP_ATTACH: recorded AS SEEN in this function's
+    # ambient environment. They gate the per-terminal *-lcars-startup.sh
+    # dispatch (a sibling shell that has usually already exited by the time
+    # start_lcars_server runs from the master script) — start_lcars_server
+    # itself never reads them. Logging whatever is actually visible here
+    # (almost always empty) is honest instrumentation: it records ground
+    # truth, not an inferred semantic that could be wrong.
+    if typeset -f _lcars_ledger_write >/dev/null 2>&1; then
+        _lcars_ledger_write "${_ledger_site}" "spawn_attempt" "${_launch_id}" \
+            "${team}" "${port}" "${session_name}" "" "$$" \
+            "server.py ${port}" \
+            "${SKIP_SERVER_START:-}" "${SKIP_ATTACH:-}"
+    fi
 
     # -------------------------------------------------------------------------
     # XACA-0661 (007): Per-port startup lock — serialize concurrent invocations.
@@ -1017,6 +1160,12 @@ start_lcars_server() {
         mv -f "${_server_log}" "${_server_log}.old" 2>/dev/null || true
     fi
 
+    # XACA-0988-006: stamp a pre-spawn launch banner into the now-fresh log —
+    # see _lcars_stamp_launch_banner's header comment (above start_lcars_server)
+    # for the full misattribution rationale this closes.
+    _lcars_stamp_launch_banner "${_server_log}" "${_launch_id}" \
+        "phase=pre-spawn team=${team} port=${port} invoker_pid=$$"
+
     # XACA-0652 / XACA-0763: Durable server launch.
     #
     # WHY THE OLD FORM WORKED ON DEV BUT NOT ON A TAP-INSTALLED CONSUMER:
@@ -1065,6 +1214,23 @@ start_lcars_server() {
     local _server_pid
     _lcars_spawn_detached "${lcars_ui_dir}" "${team}" "${session_name}" "${lcars_python}" "${port}" "${_server_log}" "${_atf_base}"
     _server_pid="${_LCARS_SPAWNED_PID}"
+
+    # XACA-0988-006: stamp the second (spawned) banner now that the PID is
+    # known — bracketing this launch's server.py stderr with a banner that
+    # carries the actual PID.
+    _lcars_stamp_launch_banner "${_server_log}" "${_launch_id}" \
+        "phase=spawned spawned_pid=${_server_pid}"
+
+    # XACA-0988-001: record the spawn result (PID now known) in the
+    # append-only ledger — never in the per-team log above, which XACA-0661
+    # rotates on every launch; see lcars-spawn-ledger.sh's header for why
+    # that separation is deliberate.
+    if typeset -f _lcars_ledger_write >/dev/null 2>&1; then
+        _lcars_ledger_write "${_ledger_site}" "spawn_result" "${_launch_id}" \
+            "${team}" "${port}" "${session_name}" "${_server_pid}" "$$" \
+            "${lcars_python} server.py ${port}" \
+            "${SKIP_SERVER_START:-}" "${SKIP_ATTACH:-}"
+    fi
 
     # Poll /api/status for up to 15s (30 × 0.5s). A ready response means the
     # server is serving routes. If the process dies before answering, a crashed

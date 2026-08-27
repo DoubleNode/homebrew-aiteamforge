@@ -54,6 +54,31 @@ if [ $? != 0 ]; then
 
     # Start server ONLY if not launched by main startup script
     # (Main script handles server startup more reliably with wait-for-ready loop)
+    # XACA-0988-001: append-only spawn-ledger instrumentation (site #3 of 3
+    # known server.py spawn sites -- this tmux send-keys dispatch bypasses
+    # start_lcars_server entirely: no per-port lock, no pkill, no log
+    # rotation -- see scripts/lcars-spawn-ledger.sh's header). Fires on BOTH
+    # branches below so "we decided NOT to spawn here" is just as
+    # recoverable during an incident review as "we did". PASSIVE: never
+    # blocks the real dispatch below it.
+    # shellcheck disable=SC1090
+    [ -f "$SESSION_DIRECTORY/scripts/lcars-spawn-ledger.sh" ] && source "$SESSION_DIRECTORY/scripts/lcars-spawn-ledger.sh"
+    _XACA0988_LID=""
+    if typeset -f _lcars_new_launch_id >/dev/null 2>&1; then
+        _XACA0988_LID="$(_lcars_new_launch_id)"
+    fi
+    if typeset -f _lcars_ledger_write >/dev/null 2>&1; then
+        if [ -z "$SKIP_SERVER_START" ]; then
+            _lcars_ledger_write "team_startup_sendkeys" "spawn_attempt" "$_XACA0988_LID" \
+                "$LCARS_TEAM" "$LCARS_PORT" "$SESSION_CODE" "" "$$" \
+                "python3 server.py $LCARS_PORT" "$SKIP_SERVER_START" "$SKIP_ATTACH"
+        else
+            _lcars_ledger_write "team_startup_sendkeys" "spawn_skipped" "$_XACA0988_LID" \
+                "$LCARS_TEAM" "$LCARS_PORT" "$SESSION_CODE" "" "$$" \
+                "python3 server.py $LCARS_PORT" "$SKIP_SERVER_START" "$SKIP_ATTACH"
+        fi
+    fi
+
     if [ -z "$SKIP_SERVER_START" ]; then
         $TMUX_CMD send-keys -t $SESSION_CODE:0 "cd $SESSION_DIRECTORY/lcars-ui && LCARS_TEAM=$LCARS_TEAM LCARS_SESSION_NAME=$SESSION_CODE python3 server.py $LCARS_PORT" C-m
     else

@@ -153,7 +153,7 @@ for base_name in "${base_terminals[@]}"; do
         echo "  Initializing $session_name..."
         # Run in background with bash
         # Pass LCARS_PORT so the LCARS script can use the project-specific port
-        SKIP_ATTACH=1 MEDICAL_PROJECTID="$PROJECTID" MEDICAL_PROJECT_DIR="$PROJECT_DIR" MEDICAL_LCARS_PORT="$LCARS_PORT" \
+        SKIP_ATTACH=1 SKIP_SERVER_START=1 MEDICAL_PROJECTID="$PROJECTID" MEDICAL_PROJECT_DIR="$PROJECT_DIR" MEDICAL_LCARS_PORT="$LCARS_PORT" \
             bash "$script" >>"$STARTUP_LOG" 2>&1 &
         pids+=($!)
         # Small delay to stagger tmux commands slightly

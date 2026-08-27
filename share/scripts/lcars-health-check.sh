@@ -562,6 +562,15 @@ _hc_start_lcars_server() {
     # this health-check-triggered restart — see header comment above for why.
     local LCARS_SKIP_TARGET_WRITE=1
 
+    # XACA-0988-001: tag the spawn ledger rows start_lcars_server is about to
+    # write with the real call path — this is site #2 of the 3 known
+    # server.py spawn sites (health-check's delegate), distinct from a master
+    # <team>-startup.sh's own direct call (site #1, which shares the same
+    # start_lcars_server function body and would otherwise be
+    # indistinguishable in the ledger). Same dynamically-scoped `local`
+    # pattern as LCARS_SKIP_TARGET_WRITE just above.
+    local LCARS_SPAWN_LEDGER_SITE="health_check_delegate"
+
     # XACA-0983: recreate the `<team>-lcars` tmux session BEFORE starting the
     # server — mirrors canonical startup ordering (session first, server
     # second: academy-lcars-startup.sh:29 then academy-startup.sh:203) so the

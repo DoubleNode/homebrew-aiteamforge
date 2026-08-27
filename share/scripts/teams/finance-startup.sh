@@ -149,7 +149,7 @@ for base_name in "${base_terminals[@]}"; do
     if [ -f "$script" ]; then
         echo "  Initializing $session_name..."
         # Pass LCARS_PORT so the LCARS script can use the project-specific port.
-        SKIP_ATTACH=1 FINANCE_PROJECTID="$PROJECTID" FINANCE_PROJECT_DIR="$PROJECT_DIR" FINANCE_LCARS_PORT="$LCARS_PORT" \
+        SKIP_ATTACH=1 SKIP_SERVER_START=1 FINANCE_PROJECTID="$PROJECTID" FINANCE_PROJECT_DIR="$PROJECT_DIR" FINANCE_LCARS_PORT="$LCARS_PORT" \
             bash "$script" >>"$STARTUP_LOG" 2>&1 &
         pids+=($!)
         # Small delay to stagger tmux commands slightly
@@ -182,7 +182,7 @@ if [[ ${#missing[@]} -gt 0 ]]; then
         script="$HOME/dev-team/finance/scripts/finance-${base_name}-startup.sh"
         session_name="${SESSION_PREFIX}-${base_name}"
         echo "    Retrying $session_name..."
-        SKIP_ATTACH=1 FINANCE_PROJECTID="$PROJECTID" FINANCE_PROJECT_DIR="$PROJECT_DIR" FINANCE_LCARS_PORT="$LCARS_PORT" \
+        SKIP_ATTACH=1 SKIP_SERVER_START=1 FINANCE_PROJECTID="$PROJECTID" FINANCE_PROJECT_DIR="$PROJECT_DIR" FINANCE_LCARS_PORT="$LCARS_PORT" \
             bash "$script" >>"$STARTUP_LOG" 2>&1
         if tmux -L "$TMUX_SOCKET" has-session -t "$session_name" 2>/dev/null; then
             echo "    ✓ $session_name created on retry"

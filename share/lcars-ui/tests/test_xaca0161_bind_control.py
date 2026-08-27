@@ -671,5 +671,118 @@ class TestServeForeverPartialBindCleanup(unittest.TestCase):
             probe.close()
 
 
+class TestBindStatusDiagnostic(BindControlTestBase):
+    """XACA-0988-005: resolve_bind_addresses_or_die() must leave a durable,
+    in-process record of what it decided (_LCARS_BIND_STATUS), independent of
+    the stderr "posture:"/"NOTICE:" lines it also prints.
+
+    Why this exists: those stderr lines are the ONLY other record of a bind
+    decision, and start_lcars_server 2>>'s them into a per-team log file that
+    XACA-0661 rotates (mv -f to .old) at the START of every subsequent launch
+    for that team name — including a test-suite invocation that passes a real
+    team name on a scratch port (this file's own `self.resolve()` helper is
+    exactly that shape, minus the log). That rotation is what destroyed the
+    evidence trail for the XACA-0988 loopback-only-bind incident: two
+    unrelated test-suite launches 13s apart rotated lcars-server-academy.log
+    out from under a still-running production process before its posture line
+    could be read. _LCARS_BIND_STATUS survives for the life of the process
+    regardless of what happens to the log.
+    """
+
+    def _status(self):
+        return dict(server._LCARS_BIND_STATUS)
+
+    def test_default_success_records_dual_bind_not_degraded(self):
+        self.resolve()
+        status = self._status()
+        self.assertEqual(status["mode"], "auto")
+        self.assertEqual(status["hosts"], ["127.0.0.1", FAKE_TS_IP])
+        self.assertTrue(status["tailnet_bound"])
+        self.assertEqual(status["tailscale_ip"], FAKE_TS_IP)
+        self.assertEqual(status["source"], "detected")
+        self.assertFalse(
+            status["degraded"], "a successful dual bind must not read as degraded"
+        )
+
+    def test_auto_fallback_to_loopback_is_recorded_as_degraded(self):
+        """The exact condition this ticket investigates: detection failed and
+        auto mode narrowed to loopback-only. The record must say so plainly —
+        this is the durable substitute for the log line that got rotated
+        away for PID 7437."""
+        self.resolve(detected_ip=None)
+        status = self._status()
+        self.assertEqual(status["mode"], "auto")
+        self.assertEqual(status["hosts"], ["127.0.0.1"])
+        self.assertFalse(status["tailnet_bound"])
+        self.assertIsNone(status["tailscale_ip"])
+        self.assertTrue(
+            status["degraded"],
+            "auto-mode fallback to loopback-only must be flagged degraded",
+        )
+
+    def test_explicit_loopback_mode_is_not_degraded(self):
+        """Negative control for the previous test: loopback-only is only
+        'degraded' when it is an unwanted fallback. An operator who explicitly
+        asked for LCARS_BIND_MODE=loopback got exactly what they asked for."""
+        os.environ["LCARS_BIND_MODE"] = "loopback"
+        self.resolve()
+        status = self._status()
+        self.assertEqual(status["mode"], "loopback")
+        self.assertEqual(status["hosts"], ["127.0.0.1"])
+        self.assertFalse(status["tailnet_bound"])
+        self.assertFalse(
+            status["degraded"],
+            "an explicitly-requested loopback bind is not a degraded fallback",
+        )
+
+    def test_tailscale_mode_success_records_dual_bind(self):
+        os.environ["LCARS_BIND_MODE"] = "tailscale"
+        self.resolve()
+        status = self._status()
+        self.assertEqual(status["mode"], "tailscale")
+        self.assertTrue(status["tailnet_bound"])
+        self.assertFalse(status["degraded"])
+
+    def test_all_mode_records_tailnet_bound_true(self):
+        """mode=all binds 0.0.0.0, which reaches the tailnet address too —
+        tailnet_bound must read True, not False, for this host list."""
+        os.environ["LCARS_BIND_MODE"] = "all"
+        os.environ["LCARS_BIND_ALLOW_ALL_INTERFACES"] = "1"
+        self.resolve()
+        status = self._status()
+        self.assertEqual(status["mode"], "all")
+        self.assertEqual(status["hosts"], [""])
+        self.assertTrue(status["tailnet_bound"])
+        self.assertFalse(status["degraded"])
+
+    def test_env_override_ip_records_its_source(self):
+        os.environ["LCARS_TAILSCALE_IP"] = FAKE_TS_IP
+        self.resolve()
+        status = self._status()
+        self.assertEqual(status["source"], "env-override")
+        self.assertEqual(status["tailscale_ip"], FAKE_TS_IP)
+
+    def test_a_fatal_exit_leaves_no_stale_success_status(self):
+        """Negative control: a mode that refuses to start (tailscale, ip not
+        found) must not leave behind a status dict claiming success from a
+        PRIOR test's resolve() call in the same process. Establish a known
+        dual-bound baseline, then force a FATAL and confirm the baseline
+        status was never overwritten by a fabricated success — the FATAL
+        path correctly never calls _lcars_record_bind_status at all, so the
+        last real decision (the baseline) is what remains visible."""
+        self.resolve()  # baseline: dual-bound success
+        baseline = self._status()
+        self.assertTrue(baseline["tailnet_bound"])
+
+        os.environ["LCARS_BIND_MODE"] = "tailscale"
+        self.resolve_expecting_exit(detected_ip=None)
+        after_fatal = self._status()
+        self.assertEqual(
+            after_fatal, baseline,
+            "a FATAL exit must not mutate _LCARS_BIND_STATUS — the last "
+            "successful decision should remain the visible record",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -567,6 +567,72 @@ class TestServeStatus(unittest.TestCase):
         handler.serve_status()
         self.assertEqual(handler._response_code, 200)
 
+    def test_status_includes_bind_diagnostic(self):
+        """XACA-0988-005: /api/status must surface the resolved bind posture
+        so it is queryable at any time after startup, independent of the
+        per-team server log (which XACA-0661 rotates on every subsequent
+        launch of that team name and can lose the only other record of this
+        decision — see _LCARS_BIND_STATUS's header comment in server.py)."""
+        fake_status = {
+            "mode": "auto",
+            "hosts": ["127.0.0.1", "100.101.102.103"],
+            "tailnet_bound": True,
+            "tailscale_ip": "100.101.102.103",
+            "source": "detected",
+            "degraded": False,
+        }
+        with patch.object(server, "_LCARS_BIND_STATUS", fake_status):
+            handler, buf = _make_handler(path="/api/status")
+            handler.serve_status()
+        data = _response_json(buf)
+        self.assertIn("bind", data)
+        self.assertEqual(data["bind"], fake_status)
+
+    def test_status_bind_diagnostic_reflects_degraded_fallback(self):
+        """Negative control: a degraded (loopback-only fallback) posture must
+        be visible in the API response, not silently indistinguishable from
+        an explicit/healthy loopback bind."""
+        degraded_status = {
+            "mode": "auto",
+            "hosts": ["127.0.0.1"],
+            "tailnet_bound": False,
+            "tailscale_ip": None,
+            "source": "undetermined",
+            "degraded": True,
+        }
+        with patch.object(server, "_LCARS_BIND_STATUS", degraded_status):
+            handler, buf = _make_handler(path="/api/status")
+            handler.serve_status()
+        data = _response_json(buf)
+        self.assertTrue(data["bind"]["degraded"])
+        self.assertFalse(data["bind"]["tailnet_bound"])
+
+    def test_status_bind_diagnostic_reads_current_module_state(self):
+        """Two requests against two different _LCARS_BIND_STATUS values must
+        get two different responses — confirms serve_status reads the module
+        global at call time rather than a value captured once at import."""
+        first_status = {
+            "mode": "loopback", "hosts": ["127.0.0.1"], "tailnet_bound": False,
+            "tailscale_ip": None, "source": "explicit-loopback", "degraded": False,
+        }
+        second_status = {
+            "mode": "auto", "hosts": ["127.0.0.1", "100.101.102.103"],
+            "tailnet_bound": True, "tailscale_ip": "100.101.102.103",
+            "source": "detected", "degraded": False,
+        }
+        with patch.object(server, "_LCARS_BIND_STATUS", first_status):
+            handler, buf = _make_handler(path="/api/status")
+            handler.serve_status()
+        first_data = _response_json(buf)
+
+        with patch.object(server, "_LCARS_BIND_STATUS", second_status):
+            handler, buf = _make_handler(path="/api/status")
+            handler.serve_status()
+        second_data = _response_json(buf)
+
+        self.assertEqual(first_data["bind"]["mode"], "loopback")
+        self.assertEqual(second_data["bind"]["mode"], "auto")
+
 
 # ---------------------------------------------------------------------------
 # Tests: LCARSHandler — serve_kanban_data
