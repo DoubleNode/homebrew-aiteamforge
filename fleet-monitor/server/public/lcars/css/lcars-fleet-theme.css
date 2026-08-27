@@ -2775,13 +2775,33 @@
    this skin at 900-1920, where min-width:0 alone will not force a break inside
    an unbreakable token. Dropping either one re-opens a real regime.
 
-   WHY NOT ellipsis + white-space:nowrap: this skin emits title= on the Machine
-   row only (lcars-dashboard-app.js:964), and that tooltip is inert on the
-   touch-primary iPad surface this reporting page targets -- so ellipsis would
-   hide the hostname with no practical recovery path. In lcars2 it is worse
-   still: none of that skin's four team-card app files emits title= at all (its
-   only title= sites sit in an unrelated engines table). Wrapping can break a
-   domain mid-token but never destroys information.
+   WHY NOT ellipsis + white-space:nowrap: the real asymmetry is at the VALUE
+   level, not the skin level. This skin puts title="<hostname>" on the Machine
+   row's .session-value span (lcars-dashboard-app.js:964); lcars2 puts no title
+   on any .session-value in any row. BOTH skins additionally set a CARD-level
+   tooltip through the DOM property -- card.title, three variants
+   (online / unavailable / misconfigured) at lcars-dashboard-app.js:985,993,998
+   and the same three in each of lcars2's four team-card apps -- so nothing is
+   claimed here about title= presence at skin scope.
+
+   That card tooltip is a weak fallback, not a substitute. It is inert on the
+   touch-primary iPad surface this argument is about, and it carries a hostname
+   ONLY in the online variant, which embeds getLcarsUrl's
+   'http://<hostname>:<port>'; the unavailable and misconfigured variants carry
+   none. So for a card whose machine is offline or misreporting there is no
+   recovery path for a truncated hostname at all -- ellipsis would destroy
+   information precisely in the states where it is least recoverable. Wrapping
+   can break a domain mid-token but never destroys information.
+
+   HOW THIS SENTENCE WAS WRONG TWICE -- a reusable trap worth the lines. An
+   earlier revision claimed lcars2 "emits no title= anywhere"; the correction to
+   it claimed "only lcars's team-card renderer adds title=". Both were produced
+   by grepping the HTML-string form title=" and never the DOM-property form
+   element.title =, which is how all twelve of lcars2's card.title sites stayed
+   invisible across two passes -- and the second pass was confident precisely
+   because it had "verified" with a grep. An attribute can be set as markup OR
+   as a DOM property; grepping one form returns a clean, wrong answer. Search
+   both forms before asserting an attribute is absent.
 
    WHY THIS IS AN ACCESSIBILITY FIX, NOT A COSMETIC ONE: at 320px the pre-fix
    state is arguably a WCAG 1.4.10 (Reflow) failure -- content is clipped and

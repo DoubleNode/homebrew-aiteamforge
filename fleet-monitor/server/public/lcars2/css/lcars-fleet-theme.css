@@ -2178,14 +2178,35 @@
    lcars skin at 900-1920, where min-width:0 alone will not force a break inside
    an unbreakable token.
 
-   WHY NOT ellipsis + white-space:nowrap -- and note the premise is different in
-   THIS skin: its four app files (lcars-academy-app.js:332, lcars-all-app.js:310,
-   lcars-doublenode-app.js:332, lcars-mainevent-app.js:332) emit the Machine
-   value as a BARE <span class="session-value"> with NO title attribute at all.
-   Only lcars's team-card renderer adds title=. So the argument is stronger here
-   than "the tooltip is inert on touch": in the skin that actually clipped there
-   is ZERO recovery path for a truncated hostname. Wrapping can break a domain
-   mid-token but never destroys information.
+   WHY NOT ellipsis + white-space:nowrap -- and the premise is different in THIS
+   skin, but at the VALUE level, not the skin level. Its four app files
+   (lcars-academy-app.js:332, lcars-all-app.js:310, lcars-doublenode-app.js:332,
+   lcars-mainevent-app.js:332) emit the Machine value as a BARE
+   <span class="session-value"> with no per-value title, where lcars puts
+   title="<hostname>" on that span (lcars-dashboard-app.js:964). That per-value
+   asymmetry is real and is what the argument rests on. What is NOT asymmetric:
+   BOTH skins set a CARD-level tooltip through the DOM property -- card.title,
+   three variants (online / unavailable / misconfigured) at :353, :361, :366 in
+   this skin's academy app and the same three in each of the other three, plus
+   lcars-dashboard-app.js:985,993,998. Nothing is claimed here about title=
+   presence at skin scope.
+
+   The card tooltip does not rescue a truncated value. It is inert on the
+   touch-primary surface this argument is about, and it carries a hostname ONLY
+   in the online variant, which embeds getLcarsUrl's 'http://<hostname>:<port>';
+   the unavailable and misconfigured variants carry none. So in the skin that
+   actually clipped, a card whose machine is offline or misreporting has no
+   recovery path for the hostname at all, and even an online card offers only an
+   untappable tooltip. Wrapping can break a domain mid-token but never destroys
+   information.
+
+   HOW THIS SENTENCE WAS WRONG TWICE -- a reusable trap. An earlier revision
+   claimed this skin has "NO title attribute at all"; the correction to it
+   claimed "only lcars's team-card renderer adds title=". Both came from
+   grepping the HTML-string form title=" and never the DOM-property form
+   element.title =, which is how this skin's twelve card.title sites stayed
+   invisible across two passes. An attribute can be set as markup OR as a DOM
+   property; grepping one form returns a clean, wrong answer. Search both.
 
    WHY THIS IS AN ACCESSIBILITY FIX, NOT A COSMETIC ONE: at 320px the pre-fix
    state is arguably a WCAG 1.4.10 (Reflow) failure -- content clipped and
