@@ -57,17 +57,6 @@
             LCARS_KIOSK.init();
         }
 
-        // XACA-0989: Expand All / Collapse All control for the divisions
-        // section -- wired once; #divisions-container's re-renders don't
-        // touch it.
-        if (window.LCARS_DIVISIONS) {
-            const divisionsContainer = document.getElementById('divisions-container');
-            const sectionHeader = divisionsContainer && divisionsContainer.previousElementSibling;
-            if (sectionHeader) {
-                window.LCARS_DIVISIONS.wireExpandCollapseAll(sectionHeader);
-            }
-        }
-
         // Fetch team configuration for dynamic organization mapping
         await fetchTeamConfig();
 
@@ -202,13 +191,9 @@
         if (!container) return;
 
         container.innerHTML = '';
-        // XACA-0989: divisions rebuild from scratch every poll -- reset the
-        // shared module's per-pass toggle registry before repopulating it.
-        if (window.LCARS_DIVISIONS) window.LCARS_DIVISIONS.beginRenderPass();
 
         if (!divisions || Object.keys(divisions).length === 0) {
             container.innerHTML = '<p class="empty-message">' + CONFIG.emptyMessage + '</p>';
-            if (window.LCARS_DIVISIONS) window.LCARS_DIVISIONS.endRenderPass();
             return;
         }
 
@@ -270,10 +255,6 @@
 
             container.appendChild(orgContainer);
         });
-
-        // XACA-0989: refresh the Expand All / Collapse All label now that
-        // this pass's division set (and each panel's initial paint) is final.
-        if (window.LCARS_DIVISIONS) window.LCARS_DIVISIONS.endRenderPass();
     }
 
     function createDivisionPanel(name, data) {
@@ -283,19 +264,12 @@
 
         const header = document.createElement('div');
         header.className = 'division-header';
-        // XACA-0989: '.division-toggle-icon' is filled in by
-        // LCARS_DIVISIONS.wireDivisionToggle() below -- empty here.
         header.innerHTML = getDivisionTitle(name) +
-            '<span class="division-stats">' + data.total_sessions + ' Sessions' +
-            '<span class="division-toggle-icon" aria-hidden="true"></span></span>';
+            '<span class="division-stats">' + data.total_sessions + ' Sessions</span>';
         panel.appendChild(header);
 
         const content = document.createElement('div');
         content.className = 'teams-grid';
-
-        // XACA-0989: collected alongside the (unchanged) expanded cards so
-        // the collapsed chip view never has to re-walk data.projects.
-        const chipEntries = [];
 
         for (const projectKey in data.projects) {
             const projectData = data.projects[projectKey];
@@ -310,24 +284,10 @@
             teamNames.forEach(function(teamName) {
                 const teamCard = createTeamCard(teamName, projectData.teams[teamName]);
                 content.appendChild(teamCard);
-                chipEntries.push([teamName, projectData.teams[teamName]]);
             });
         }
 
         panel.appendChild(content);
-
-        // XACA-0989: collapsed-by-default chip view, single shared renderer
-        // (shared/js/lcars-division-collapse.js). Fails safe to the
-        // pre-XACA-0989 always-expanded behavior if the module didn't load.
-        if (window.LCARS_DIVISIONS) {
-            const chipRow = window.LCARS_DIVISIONS.buildChipRow(chipEntries, {
-                isLcarsTerminal: isLcarsTerminal,
-                getLcarsUrl: getLcarsUrl
-            });
-            panel.insertBefore(chipRow, content);
-            window.LCARS_DIVISIONS.wireDivisionToggle(panel, header, chipRow, content);
-        }
-
         return panel;
     }
 
@@ -562,9 +522,9 @@
     // ============================================================================
 
     // XACA-0990: extracted to shared/js/lcars-terminal-card.js. This shim
-    // preserves the local call sites verbatim; escapeHtml (still defined in
-    // this file, it has other callers) is injected as the module has no
-    // access to this scope.
+    // preserves the local call site verbatim. Unlike createServiceOnlyLcarsCard
+    // below, isLcarsTerminal takes no injected dependencies -- it has no
+    // escapeHtml (or any other) callback to thread through.
     function isLcarsTerminal(teamData) {
         return LCARS_TERMINAL_CARD.isLcarsTerminal(teamData);
     }

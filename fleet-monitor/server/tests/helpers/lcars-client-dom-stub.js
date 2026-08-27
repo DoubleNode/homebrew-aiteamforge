@@ -243,4 +243,15 @@ function loadClientApp(relPath, ctx) {
     return exports;
 }
 
-module.exports = { createDomStub, loadClientApp, textContentToInnerHtml, FakeElement };
+// Exported (XACA-0990-005) so a test can load ONLY the shared module --
+// e.g. to exercise LCARS_TERMINAL_CARD.createServiceOnlyLcarsCard's
+// escapeHtml-must-be-a-function guard directly -- without needing to load
+// one of the 5 client app shims on top of it. loadClientApp() above still
+// calls this itself as step 1 of loading a client app.
+module.exports = {
+    createDomStub,
+    loadClientApp,
+    loadSharedTerminalCardModule,
+    textContentToInnerHtml,
+    FakeElement
+};

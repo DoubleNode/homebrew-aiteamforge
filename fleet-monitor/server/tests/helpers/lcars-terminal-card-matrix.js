@@ -45,9 +45,12 @@ const { createDomStub, loadClientApp } = require('./lcars-client-dom-stub.js');
 const PUBLIC_ROOT = path.join(__dirname, '..', '..', 'public');
 
 // Same tap-mirroring existence filter XACA-0983-013/014/015 uses: 5 files in
-// dev-team, 4 in homebrew-tap (lcars-doublenode-app.js is XACA-0139-excluded
-// from the tap mirror). Filtering to what actually exists on disk keeps this
-// module correct in both repos instead of throwing ENOENT in the tap.
+// dev-team, 3 in homebrew-tap. sync-tap.sh (XACA-0139 debranding, see its
+// "fleet-monitor/server/" section around line 602) excludes BOTH
+// lcars-doublenode-app.js and lcars-mainevent-app.js (and their HTML pages)
+// from the tap mirror -- not just doublenode. Filtering to what actually
+// exists on disk keeps this module correct in both repos instead of
+// throwing ENOENT in the tap.
 const ALL_CLIENT_FILES = [
     'lcars/js/lcars-dashboard-app.js',
     'lcars2/js/lcars-academy-app.js',
@@ -56,6 +59,73 @@ const ALL_CLIENT_FILES = [
     'lcars2/js/lcars-mainevent-app.js'
 ];
 const CLIENT_FILES = ALL_CLIENT_FILES.filter((relPath) => fs.existsSync(path.join(PUBLIC_ROOT, relPath)));
+
+// The two -- and ONLY two -- file sets this suite may ever legitimately run
+// against. XACA-0990-gate-finding-1: the old existence-filter-only approach
+// let CLIENT_FILES silently resolve to whatever exists on disk, with no
+// check that the resulting set was actually one of the known-good shapes.
+// That is what made the suite unrunnable in the tap (3 files discovered,
+// golden baseline has 5 keys, byte-diff against the whole golden object can
+// never match) and, in the other direction, would let an accidental 5->4 (or
+// 5->3, 3->2, ...) shrink in dev-team pass silently as long as the count
+// stayed nonzero. identifyKnownFileSet() below turns "whatever exists" into
+// an assertion: the discovered set must equal one of these two literal
+// arrays exactly, or the suite fails loudly naming what's missing/unexpected.
+const KNOWN_GOOD_FILE_SETS = {
+    'dev-team (5 files)': [
+        'lcars/js/lcars-dashboard-app.js',
+        'lcars2/js/lcars-academy-app.js',
+        'lcars2/js/lcars-all-app.js',
+        'lcars2/js/lcars-doublenode-app.js',
+        'lcars2/js/lcars-mainevent-app.js'
+    ],
+    'homebrew-tap (3 files -- XACA-0139 excludes doublenode + mainevent)': [
+        'lcars/js/lcars-dashboard-app.js',
+        'lcars2/js/lcars-academy-app.js',
+        'lcars2/js/lcars-all-app.js'
+    ]
+};
+
+// Returns { label, files } for the KNOWN_GOOD_FILE_SETS entry that exactly
+// matches discoveredFiles (order-independent), or throws a descriptive
+// Error naming what was unexpected / what was missing from the closest known
+// set. `files` on the returned object is the literal array from
+// KNOWN_GOOD_FILE_SETS -- a fixed constant in source, NOT derived from
+// discoveredFiles.length -- so callers that need an "expected count" can use
+// files.length as a number that is independent of the very thing being
+// verified (see the characterization test's vacuity guard).
+function identifyKnownFileSet(discoveredFiles) {
+    const discoveredSorted = [...discoveredFiles].sort();
+    for (const [label, files] of Object.entries(KNOWN_GOOD_FILE_SETS)) {
+        const knownSorted = [...files].sort();
+        const matches =
+            discoveredSorted.length === knownSorted.length &&
+            discoveredSorted.every((f, i) => f === knownSorted[i]);
+        if (matches) {
+            return { label: label, files: files };
+        }
+    }
+
+    const allKnownFiles = new Set(Object.values(KNOWN_GOOD_FILE_SETS).flat());
+    const unexpected = discoveredFiles.filter((f) => !allKnownFiles.has(f));
+    const ranked = Object.entries(KNOWN_GOOD_FILE_SETS)
+        .map(([label, files]) => ({
+            label: label,
+            missing: files.filter((f) => !discoveredFiles.includes(f))
+        }))
+        .sort((a, b) => a.missing.length - b.missing.length);
+    const closest = ranked[0];
+
+    throw new Error(
+        'CLIENT_FILES resolved to a file set that matches NEITHER known-good ' +
+            'configuration.\n' +
+            'Discovered (' + discoveredFiles.length + '): ' + JSON.stringify(discoveredSorted) + '\n' +
+            (unexpected.length > 0
+                ? 'File(s) not in ANY known set: ' + JSON.stringify(unexpected) + '\n'
+                : '') +
+            'Closest known set "' + closest.label + '" is missing: ' + JSON.stringify(closest.missing)
+    );
+}
 
 // ============================================================================
 // isLcarsTerminal(teamData) input matrix -- 10 cases
@@ -240,6 +310,8 @@ module.exports = {
     PUBLIC_ROOT,
     ALL_CLIENT_FILES,
     CLIENT_FILES,
+    KNOWN_GOOD_FILE_SETS,
+    identifyKnownFileSet,
     ISLCARS_CASES,
     CARD_CASES,
     XSS_METACHARS,
