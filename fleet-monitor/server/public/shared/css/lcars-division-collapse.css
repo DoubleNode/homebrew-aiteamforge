@@ -245,22 +245,39 @@
    screenshot.
    Fix: hide the alert glyph specifically while its own chip is
    showing the focus reveal, rather than repositioning either element.
-   This is safe (not an information loss) because at this exact moment
-   -- the chip focused -- both facts the glyph exists to carry are
-   already available through OTHER channels: the accessible name (via
-   `.chip-backup-alert`'s own `role="img"`/`aria-label`, still present
-   in the accessibility tree regardless of visual hiding) for screen
-   reader users, and the chip's `title` tooltip reveal above for sighted
-   keyboard users. Repositioning the glyph further into the corner was
-   considered and rejected -- it only shrinks the overlap, it does not
-   eliminate the "three strokes in one corner" crowding the finding
-   actually describes, and risks pushing the glyph off making it read
-   as clipped instead. `display: none`, not `opacity: 0` -- the glyph
-   is already `pointer-events: none` (see its own rule above) so there
-   is no interaction to preserve, and removing it from paint entirely
-   is simplest to reason about. */
+   This is safe VISUALLY (not an information loss to a SIGHTED keyboard
+   user) because at this exact moment -- the chip focused -- the fact
+   is still available through the chip's `title` tooltip reveal above.
+
+   XACA-0989-034/036 CORRECTION: the visual-hiding technique below used
+   to be `display: none`, on the claim that the glyph's `role="img"`/
+   `aria-label` stays "present in the accessibility tree regardless of
+   visual hiding". That claim is true of `opacity`/`clip` but FALSE of
+   `display: none` -- `display: none` removes the node from the
+   accessibility tree outright, and the chip (role="button", tabindex=0)
+   computes its accessible name from its rendered subtree, so the
+   ERROR fact silently DROPS OUT of the chip's accessible name for the
+   entire duration it is focused. Verified live against Chromium's real
+   accessibility tree (harness/faithful-chrome pattern): unfocused, the
+   button's accessible name includes "Backup: ERROR for <name>"; focused
+   with the old `display: none` rule, it does not -- confirming this was
+   a real regression against pre-fix behaviour (the alert used to always
+   be visible/accessible) for BOTH screen-reader and sighted-keyboard
+   users at the one moment (keyboard focus) an AT user is most likely to
+   be inspecting the chip.
+
+   Fix: `opacity: 0` instead of `display: none`. Opacity does not remove
+   a node from the accessibility tree (only `display: none`,
+   `visibility: hidden`, and `aria-hidden` do) -- the glyph disappears
+   from PAINT exactly as before (resolving the -029 crowding), while its
+   `role="img"`/`aria-label` keeps contributing to the chip's accessible
+   name the whole time it is focused. Nothing else needs to change: the
+   glyph is already `pointer-events: none` (see its own rule above), so
+   there is no click/hover behaviour that opacity 0 vs. display none
+   could differ on. Re-verified with the same accessibility-tree check,
+   focused and unfocused: the ERROR fact is now present in both. */
 .session-chip:focus-visible .chip-backup-alert {
-    display: none;
+    opacity: 0;
 }
 
 /* -------------------------------------------------------------------------
