@@ -2252,7 +2252,7 @@
    min-width:0 on the label deletes the priority, flex-shrink then distributes
    across both items, and the label starts losing pixels on every row with a
    long hostname AT EVERY WIDTH: measured, 11.3px off `Machine:` and 20.0px off
-   `Working:` at 1920, 24.1/29.0px at 1080, peak 30.9px, against a baseline that
+   `Working:` at 1920, 24.1/29.0px at 1080, peak ~30px, against a baseline that
    loses 0.0px everywhere in both skins.
 
    THE TRAP IS WIDER THAN min-width:0, which is why flex-shrink:0 and not just
@@ -2281,9 +2281,14 @@
    metrics but stacks the value under the label at 1920 (cardH 265 -> 281).
    Measure the row's HEIGHT and child positions, not just its overflow.
 
-   Measurement provenance, the two-rig disagreement and the wrapper chain these
-   figures depend on are recorded in CHANGELOG.md under XACA-0985; they are not
-   repeated here. If you re-measure and disagree, start there. */
+   IF YOU RE-MEASURE AND DISAGREE, CHECK YOUR WRAPPER CHAIN FIRST. It must be
+   .lcars-content -> section -> .organization-panel -> .division-container ->
+   .teams-grid. Omitting .organization-panel/.division-container inflates every
+   width here by ~1.7-1.9x at 320px, which reads as "the label clips after all".
+   Three separate measurement passes have now made that exact mistake, two of
+   them against harnesses. Full provenance and the two-rig reconciliation are in
+   CHANGELOG.md under XACA-0985. Peak label loss under min-width:0 measured
+   30.9px and 30.2px on two independent rigs; treat it as ~30px, not a constant. */
 .teams-grid .session-label {
     flex-shrink: 0;
 }
