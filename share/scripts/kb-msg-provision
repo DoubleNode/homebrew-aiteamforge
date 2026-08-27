@@ -38,6 +38,7 @@ Exit codes:
 
 import argparse
 import glob
+import ipaddress
 import json
 import os
 import shutil
@@ -342,7 +343,34 @@ def _relay_endpoint(server):
     # a LABEL, and the host itself ends in "m". Caught by checking that
     # legitimate-looking-but-invalid inputs are refused, not by the hostile
     # sweep. IPv6 literals carry ":" and no labels, so they skip this.
+    # REVIEW-GATE FINDING XACA-0885-063. The IPv6 exemption keyed on the
+    # PRESENCE of a colon rather than the SHAPE of the value, so a colon-bearing
+    # non-IPv6 host would skip the label rule.
+    #
+    # Measured before changing anything: that is not currently reachable. A colon
+    # only survives into .hostname via brackets, and urlsplit RAISES for bracket
+    # contents that are not a valid IPv6 literal -- ":::a" and "a-:-a" are
+    # refused today by the port guard and by urlsplit respectively, not by the
+    # rule they bypass. So this is hardening, not a live defect.
+    #
+    # It is worth doing anyway, and not for the inputs named: the safety
+    # currently rests on urlsplit validating bracket contents, an IMPLICIT
+    # STDLIB DEPENDENCY. This module has already been bitten once by relying on
+    # unstated urlsplit behaviour -- its NFKC ValueError embeds the raw netloc
+    # and leaked a credential in a traceback. Asking ipaddress directly states
+    # the intent and removes the dependency.
+    #
+    # NO TEST COVERS THIS BRANCH, and that is recorded rather than papered over:
+    # deleting it reddens nothing, because no input reaches it. It is
+    # unreachable-by-construction defence in depth against a stdlib change, and
+    # writing a test that pretended to exercise it would assert something false.
+    # Same call as the makedirs guard at write_map's call site (see T5e).
     bad_host = not any(c.isalnum() for c in host)
+    if not bad_host and ":" in host:
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError:
+            bad_host = True
     if not bad_host and ":" not in host:
         for label in host.split("."):
             if not label or label[0] == "-" or label[-1] == "-":
