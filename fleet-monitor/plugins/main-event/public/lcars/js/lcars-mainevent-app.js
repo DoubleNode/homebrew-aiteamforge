@@ -524,22 +524,22 @@
         if (avatarUrl) {
             var divisionClass = session.division ? 'div-' + session.division.toLowerCase() : 'div-mainevent';
             avatarHtml = '<div class="team-avatar-container">' +
-                '<img src="' + avatarUrl + '" alt="' + name + '" class="team-avatar lcars-avatar ' + divisionClass + '" data-persona="' + avatarPersona + '" onerror="this.style.display=\'none\'">' +
+                '<img src="' + escapeAttr(avatarUrl) + '" alt="' + escapeAttr(name) + '" class="team-avatar lcars-avatar ' + escapeAttr(divisionClass) + '" data-persona="' + escapeAttr(avatarPersona) + '" onerror="this.style.display=\'none\'">' +
                 '</div>';
         }
 
         card.innerHTML =
             '<div class="team-header">' +
-                '<div class="team-name">' + name + (isLcars ? '<span class="lcars-badge">LCARS</span>' : '') + '</div>' +
+                '<div class="team-name">' + escapeHtml(name) + (isLcars ? '<span class="lcars-badge">LCARS</span>' : '') + '</div>' +
                 '<span class="status-indicator ' + status + '"></span>' +
             '</div>' +
             '<div class="session-info-with-avatar">' +
                 avatarHtml +
                 '<div class="session-info">' +
-                    '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value">' + session.name + '</span></div>' +
-                    '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value" title="' + session.hostname + '">' + machineDisplayName + '</span></div>' +
-                    '<div class="session-detail"><span class="session-label">Windows:</span><span class="session-value">' + session.windows + '</span></div>' +
-                    '<div class="session-detail"><span class="session-label">Uptime:</span><span class="session-value">' + session.uptime_display + '</span></div>' +
+                    '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value">' + escapeHtml(session.name) + '</span></div>' +
+                    '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value" title="' + escapeAttr(session.hostname) + '">' + escapeHtml(machineDisplayName) + '</span></div>' +
+                    '<div class="session-detail"><span class="session-label">Windows:</span><span class="session-value">' + escapeHtml(session.windows) + '</span></div>' +
+                    '<div class="session-detail"><span class="session-label">Uptime:</span><span class="session-value">' + escapeHtml(session.uptime_display) + '</span></div>' +
                     '<div class="session-detail"><span class="session-label">Status:</span><span class="session-value text-' + status + '">' + status.toUpperCase() + '</span></div>' +
                     backupHtml +
                     workingItemHtml +
@@ -1076,6 +1076,22 @@
     /**
      * Escape HTML to prevent XSS
      */
+    // XACA-0416: escapeHtml() is for ELEMENT CONTENT only. It round-trips through
+    // textContent -> innerHTML, which per the WHATWG HTML fragment-serialization
+    // spec escapes '&', U+00A0, '<' and '>', and DELIBERATELY LEAVES QUOTES ALONE
+    // (quotes are only special inside an attribute value). escapeAttr() below is
+    // for QUOTED ATTRIBUTE VALUES. Using escapeHtml() on an attribute value is a
+    // FALSE FIX: '" onmouseover=alert(1) x="' still breaks out. Not interchangeable.
+    function escapeAttr(text) {
+        if (!text) return '';
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     function escapeHtml(text) {
         if (!text) return '';
         const div = document.createElement('div');

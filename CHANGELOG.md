@@ -7,6 +7,33 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-0416 — stored-XSS sink closed in the two forked `main-event` plugin app files.** Both
+  `fleet-monitor/plugins/main-event/public/lcars2/js/lcars-mainevent-app.js` and
+  `.../lcars/js/lcars-mainevent-app.js` built their team card by string-concatenating
+  `name`, `session.name`, `session.hostname`, `session.windows` and `session.uptime_display`
+  straight into `card.innerHTML`. Those values arrive from `POST /api/team-register`, which the
+  server validates for PRESENCE only, and Fleet Monitor sets no CSP — so any API-key holder (a
+  reporter machine, lower trust than an operator) could inject markup into an operator's dashboard.
+
+  **These two copies are DELIBERATELY FORKED from canonical, not mirrored**, so they do not inherit
+  the canonical fix and had to be patched directly — the divergence class open ticket XACA-0974
+  exists to guard. They were found by grepping the tap for the sink rather than by any gate; nothing
+  in CI would have reported them.
+
+  **The `lcars/js/` copy needed a second, different escaper.** It renders `session.hostname` inside a
+  quoted attribute (`title="..."`), and its avatar block puts `name`, `avatarUrl`, `divisionClass`
+  and `avatarPersona` into `src`/`alt`/`class`/`data-persona`. The existing `escapeHtml()` is
+  `textContent` → `innerHTML`, which per the WHATWG fragment-serialization spec escapes `&`, `<`, `>`
+  and **deliberately leaves quotes alone** — so wrapping an attribute value in it is a *false fix*
+  that still permits `" onmouseover=... x="` breakout. A quote-safe `escapeAttr()` is added
+  alongside it, with the contract documented at the definition. `escapeHtml()` itself is unchanged;
+  its behaviour is pinned by the XACA-0990 characterization baseline.
+
+  Patched surgically onto tap HEAD rather than by a wholesale `sync-tap.sh` run, which would have
+  reverted in-flight sibling work and swept gitignored `fleet-monitor/server/data/history/*.json`
+  runtime files into the shipped tap.
+
+
 ## [0.20.1] - 2026-08-27
 
 - **XACA-0992 round four — the icon-drift gate now compares pixels, not compressed bytes.** The gate this ticket adds was red on its own first CI run for all 12 teams, while passing locally on the identical pinned Pillow: the platform wheel bundles a different zlib, so the compressed stream differs even though the image is identical. Comparison is now decoded pixel content, making it portable across encoders and platforms while still catching every real drift; the Pillow pin relaxes from `==12.1.1` to `>=12.1.1`. Also mirrors three Fleet Monitor pages whose icon links were left unmirrored when the branch rebased, and adds `/medical-general` to the funnel path-prefix list so medical's prefixed requests resolve like every other team's.
