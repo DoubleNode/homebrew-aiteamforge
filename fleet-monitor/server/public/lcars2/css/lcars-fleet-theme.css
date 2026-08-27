@@ -2097,73 +2097,93 @@
 }
 
 /* XACA-0976: session-value clipping guard -- GLOBAL, deliberately NOT scoped to
-   the tablet band above. THIS IS THE SKIN THAT ACTUALLY CLIPPED.
+   the tablet band above. Load-bearing in BOTH skins, for different reasons.
 
    XACA-0973 placed these declarations inside the 1080-1200px band and carried
-   them into this skin only "for parity", believing the clipping was an lcars
-   problem caused by that skin's flex-shrink:0 .team-avatar-stack squeezing
-   .session-info. Measurement against faithful chrome inverted that:
+   them here "for parity". Both halves of that need correcting: there are
+   MULTIPLE reachable regimes rather than one, reachability depends on the SHAPE
+   OF THE HOSTNAME as well as the viewport, and this skin has a clipping regime
+   of its own that the band never covered.
 
-       pre-fix, lcars  skin: ZERO row overflow at every width tested
-       pre-fix, lcars2 skin: 14px row overflow at 320, zero elsewhere
+   THIS SKIN'S OWN REGIME: 14px row overflow at 320 pre-fix with the shipped
+   sample hostname, and zero elsewhere. The cause is not the avatar column --
+   this skin has none. It is that lcars collapses its content area at the narrow
+   end and this one does not: lcars's @media (max-width: 480px) block gives
+   .lcars-content `grid-column: 1 !important; margin-left: 0 !important;
+   padding: 0`, taking the sidebar out of the content column, while THIS file's
+   480px block keeps `margin-left: -1px; padding: 10px 10px 60px 0`. Cards
+   therefore run ~100px narrower here at the narrow end -- 182@320, 237@375,
+   276@414 against 284 / 339 / 378 in lcars -- and are identical from 500px up
+   (314@500, 414@600, 553@799, 294@900 ...), which is why the overflow appears
+   at 320 and nowhere else. This skin also renders the RAW session.hostname,
+   where lcars renders a shortened machineDisplayName.
 
-   That 14px is the entire real defect this fix eliminates, and it is here, in
-   the skin with NO avatar column. The reason is not the avatar stack at all --
-   it is that lcars collapses its content area at the narrow end and this skin
-   does not. lcars's @media (max-width: 480px) block gives .lcars-content
-   `grid-column: 1 !important; margin-left: 0 !important; padding: 0`, taking
-   the sidebar out of the content column; this skin's 480px block keeps
-   `margin-left: -1px; padding: 10px 10px 60px 0`. Cards therefore run ~100px
-   narrower here at the same viewport: 182@320, 237@375, 276@414, against
-   284/339/378 in lcars. From 500px up the two skins are identical (314@500,
-   414@600, 553@799, 294@900 ...), which is why the overflow appears at 320 only.
+   XACA-0973'S AVATAR STORY WAS INCOMPLETE, NOT WRONG. At 1080/1133 both skins
+   have identical cards (251px / 268px) and only lcars overflows, so the
+   flex-shrink:0 .team-avatar-stack IS the differentiator there, exactly as it
+   said. Two real defects in two regimes; the global scope covers both.
 
-   WHY THE BAND WAS THE WRONG SCOPE: .teams-grid is
+   HOSTNAME SHAPE MATTERS AS MUCH AS VIEWPORT -- the durable lesson here. The
+   shipped sample (M1Pro-mstudio.tail1234.ts.net) contains a HYPHEN, a natural
+   UAX-14 break opportunity, so plain overflow-wrap:normal already breaks it and
+   the sample understates the defect everywhere. Measured with an ordinary
+   hyphen-free MagicDNS name (macbookpro16darren.taile4f2c.ts.net), the LCARS
+   skin overflows pre-fix at seven widths (320/375/900/1080/1133/1210/1920) --
+   two of them outside XACA-0973's band. Vary the hostname before concluding a
+   width is clean; a single sample is not a measurement.
+
+   Underlying mechanism: nothing in .session-info > .session-detail >
+   .session-value sets min-width:0, so a flex item cannot shrink below its
+   content, and .team-card's overflow:hidden clips the result. .teams-grid is
    repeat(auto-fill, minmax(280px, 1fr)), so while two or more tracks fit no
-   track is ever under 280px -- that minimum, not the band, is what protects the
-   multi-column regime. At the 800px breakpoint the grid collapses to a single
-   1fr column while --sidebar-width steps down (200 -> 150 at <=800px, -> 100 at
-   <=600px -- lcars-fleet.css:904,916), so the card loses its floor and tracks
-   the viewport. The reachable regime is sub-600px single-column; 1080-1200px
-   never was.
+   track is under 280px; at the 800px breakpoint the grid collapses to a single
+   1fr column while --sidebar-width steps down (lcars-fleet.css:906 and :918,
+   `--sidebar-width: 150px` / `100px`, inside the @media blocks at :904 / :916).
 
-   DO NOT TRUST THE 145px/79px/124px TABLE from the ticket -- it is a harness
-   artifact. Those numbers came from XACA-0973's stub-lcars.html, which
-   hardcodes a fixed 200px sidebar plus 36px margin and 30px padding AT EVERY
-   VIEWPORT, so it never modelled either the 480px collapse or the
-   --sidebar-width steps and produced a "124px card" that cannot occur in
-   production. Corroborated at 500px, where the 480px collapse does not apply:
-   500 - 100 (sidebar) - 26 (margin; --corner-radius is 20 at <=600) - 60
-   (padding both sides) = 314px, exactly what a faithful render measures. The
-   stub claimed 194.
+   DO NOT TRUST THE 145px/79px/124px PHONE-WIDTH TABLE from the ticket -- that
+   specific table is a harness artifact and the withdrawal is scoped to it
+   alone. It came from XACA-0973's stub-lcars.html, which hardcodes fixed
+   sidebar, margin and padding chrome AT EVERY VIEWPORT, so it modelled neither
+   the 480px collapse nor the --sidebar-width steps and produced a "124px card"
+   that cannot occur in production. XACA-0973's OTHER numbers -- 34px@1080 /
+   16px@1133 -- were broadly right and are not withdrawn: removing the guard
+   outright reproduces them at faithful chrome as 37px / 20px. The real measured
+   card at 500px is 314px (playwright-chromium against the shipped stylesheets);
+   no arithmetic derivation is given here on purpose, because two attempts at
+   one both failed to reconstruct it and a third guess is the exact error this
+   ticket exists to correct.
 
-   WHICH DECLARATION DOES THE WORK IS UNDETERMINED -- do not drop either one.
-   XACA-0973 reported that overflow-wrap alone accounts for the fix and that
-   min-width:0 is inert, but that isolation ran under the same flawed stub
-   against cards that cannot occur, so the finding does not transfer. What IS
-   measured against faithful chrome: overflow-wrap:anywhere is INERT at desktop
-   widths -- the sample hostname contains a hyphen, so overflow-wrap:normal
-   already breaks at the same point, and .session-value heights are identical
-   pre/post at 1080/1210/1440/1920 in both skins. The only height change
-   anywhere is this skin at 320, 32px -> 48px (2 lines -> 3): the fix wrapping
-   instead of clipping, information preserved. The two declarations have been
-   mutation-verified only TOGETHER, never separately, at that one width.
-   Re-isolating them needs a browser harness against faithful chrome; until
-   someone runs one, treat both as load-bearing.
+   WHICH DECLARATION DOES THE WORK -- both, for different content shapes; keep
+   both. Isolated at THIS skin's 320px against faithful chrome: min-width:0
+   ALONE gives 0 overflow (value wraps to 2 lines), overflow-wrap:anywhere ALONE
+   gives 0 overflow (3 lines), and neither gives 4px. Either independently fixes
+   the shipped sample, which refutes XACA-0973's "min-width:0 is inert" -- a
+   conclusion drawn under the flawed stub. They are NOT redundant: the
+   hyphen-free hostname needs overflow-wrap in the lcars skin at 900-1920, where
+   min-width:0 alone will not force a break inside an unbreakable token.
 
-   WHY NOT ellipsis + white-space:nowrap: unchanged from XACA-0973, and not a
-   measurement claim. The reporting surface is a touch-primary iPad standalone
-   web app, where the title= tooltip these .session-value spans carry is inert.
-   Ellipsis would hide the hostname outright with no way to recover it, whereas
-   wrapping can break a domain mid-token but never destroys information.
+   WHY NOT ellipsis + white-space:nowrap -- and note the premise is different in
+   THIS skin: its four app files (lcars-academy-app.js:332, lcars-all-app.js:310,
+   lcars-doublenode-app.js:332, lcars-mainevent-app.js:332) emit the Machine
+   value as a BARE <span class="session-value"> with NO title attribute at all.
+   Only lcars adds title=. So the argument is stronger here than "the tooltip is
+   inert on touch": in the skin that actually clipped there is ZERO recovery
+   path for a truncated hostname. Wrapping can break a domain mid-token but
+   never destroys information.
+
+   WHY THIS IS AN ACCESSIBILITY FIX, NOT A COSMETIC ONE: at 320px the pre-fix
+   state is arguably a WCAG 1.4.10 (Reflow) failure -- content clipped and
+   unreachable, .team-card has overflow:hidden, no scroll mechanism and no
+   alternative path to the value. The clipping is also SILENT AND PLAUSIBLE:
+   this skin at 320 rendered `mstudio.tail1234.ts.ne`, which reads as a complete
+   but different hostname rather than a truncated one -- and a hostname is an
+   identifier someone may type, compare or paste.
 
    WHY .session-info STAYS IN THIS SELECTOR LIST (XACA-0976-003) while the lcars
    copy drops it: this skin has no .session-info-with-avatar rule anywhere, and
-   its app files (lcars-academy-app.js, lcars-all-app.js, lcars-doublenode-app.js,
-   lcars-mainevent-app.js) emit a bare .session-info, so this is its ONLY source
+   the four app files above emit a bare .session-info, so this is its ONLY source
    of min-width:0. lcars can drop it because a pre-existing avatar rule already
-   covers it there. The asymmetry is intentional -- do not "unify" the two
-   selector lists.
+   covers it there. The asymmetry is intentional -- do not "unify" the lists.
 
    CASCADE: these selectors are 0,2,0. Nothing below them competes -- the later
    base .session-info / .session-detail / .session-value rules are 0,1,0, and the
