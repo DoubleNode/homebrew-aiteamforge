@@ -63,6 +63,13 @@ from urllib.parse import urlparse, urlencode, parse_qs
 # font files served under /fonts/. (XACA-0572)
 mimetypes.add_type('font/woff2', '.woff2')
 mimetypes.add_type('font/woff', '.woff')
+# XACA-0161-005: the cockpit PWA manifest. Registered here for the same reason
+# the woff2 types above are — the platform mimetypes DB drifts across OS and
+# Python versions (see XACA-0572). It happens to resolve correctly on this
+# machine's Python; that is not a property to depend on. iOS will refuse a
+# manifest served as text/plain, which fails as "Add to Home Screen produced a
+# bookmark, not an app" — a symptom that points nowhere near a MIME type.
+mimetypes.add_type('application/manifest+json', '.webmanifest')
 
 # Add kanban-hooks to path (shared modules: kanban_utils, aiteamforge_paths)
 _KANBAN_HOOKS_DIR = str(Path(__file__).parent.parent / "kanban-hooks")
@@ -193,6 +200,24 @@ except ImportError as e:
         return False
     SECRETS_EXPORT_MANIFEST_KIND = "lcars-team-secrets"
     SECRETS_EXPORT_MANIFEST_VERSION = "1.0"
+
+# XACA-0161-003: terminal-bridge primitives (ticket store, ttyd port
+# derivation, socket pump). Kept in its own module so the only socket-hijack
+# code in this repository sits in one small, separately reviewable unit —
+# evaluation §5.1 records that there is NO streaming, SSE, chunked, or
+# raw-socket precedent anywhere in this 20,000-line file, so review should be
+# able to find all of it in one place.
+#
+# A failed import must not take the server down: it only means the terminal
+# routes are unavailable, which is the same posture as the (default) disabled
+# one. Every terminal route re-checks TERMINAL_BRIDGE_AVAILABLE.
+try:
+    import lcars_terminal as _lcars_terminal
+    TERMINAL_BRIDGE_AVAILABLE = True
+except ImportError as e:
+    _lcars_terminal = None  # type: ignore[assignment]
+    TERMINAL_BRIDGE_AVAILABLE = False
+    print(f"[LCARS] Warning: lcars_terminal not available, terminal panes disabled: {e}")
 
 # Configuration
 DEFAULT_PORT = 8080
@@ -541,6 +566,35 @@ def _auth_safe_equal(presented: str, expected: str) -> bool:
     a = hashlib.sha256(presented.encode('utf-8')).digest()
     b = hashlib.sha256(expected.encode('utf-8')).digest()
     return hmac.compare_digest(a, b)
+
+
+# XACA-0161-003: process-wide terminal-bridge state.
+#
+# `_auth_safe_equal` is INJECTED into the ticket store rather than imported by
+# lcars_terminal: importing this module from there would be circular, and
+# re-implementing a credential-comparison primitive on the other side of that
+# boundary is how two copies drift apart. One implementation, passed in.
+#
+# Both objects are cheap and inert when the feature is disabled — they hold no
+# resources and start no threads — so constructing them unconditionally keeps
+# the enable/disable decision in exactly one place (`_terminal_gate()`).
+if TERMINAL_BRIDGE_AVAILABLE:
+    _TERMINAL_TICKETS = _lcars_terminal.TicketStore(_auth_safe_equal)
+    _TERMINAL_SESSIONS = _lcars_terminal.SessionLimiter()
+else:  # pragma: no cover - exercised only when the module fails to import
+    _TERMINAL_TICKETS = None
+    _TERMINAL_SESSIONS = None
+
+# Matched BEFORE every other do_GET branch. Anchored and deliberately narrow:
+# evaluation §6.5 item 5 — LCARSHandler extends SimpleHTTPRequestHandler, whose
+# do_GET serves files from disk, so a loose pattern here is a path-traversal-
+# adjacent surface rather than merely a routing bug.
+_TERMINAL_WS_ROUTE_RE = re.compile(r'^/terminal/([a-zA-Z0-9_-]+)/ws$')
+# The two ordinary (buffered) ttyd endpoints: the index (empty leaf) and
+# /token. Both need X-WEBAUTH-USER injected too — ttyd 1.7.7 with
+# `-H X-WEBAUTH-USER` answers 407 on BOTH without it (measured 2026-08-26).
+_TERMINAL_ASSET_ROUTE_RE = re.compile(r'^/terminal/([a-zA-Z0-9_-]+)/(|token)$')
+_TERMINAL_ROUTE_PREFIX = '/terminal/'
 
 
 def _load_api_key_from_file():
@@ -3879,6 +3933,501 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         return True
 
+    # -----------------------------------------------------------------
+    # XACA-0161-003 — terminal bridge (discovery, ticket mint, ws proxy).
+    #
+    # READ docs/xaca-0161-terminal-bridge-evaluation.md §5, §6.4 and §6.5
+    # before touching anything below. The short version:
+    #
+    #   * A WebSocket handshake is a GET, and _auth_gate() is NOT wired into
+    #     do_GET. Nothing above this comment authenticates the ws route —
+    #     the checks in serve_terminal_ws() are the only ones there are.
+    #   * _auth_gate() FAILS OPEN with no API key configured. These routes
+    #     fail CLOSED instead. That divergence is the point, not an
+    #     inconsistency to tidy up.
+    #   * `ttyd -W` is a writable shell. Every refusal below is a refusal to
+    #     hand a caller remote code execution.
+    # -----------------------------------------------------------------
+
+    def _terminal_audit(self, event: str, **fields):
+        """One-line audit record for every terminal decision (threat model
+        §6.6: "Every bridge connection: timestamp, source address, session.
+        Cheap now, invaluable during an incident").
+
+        NEVER pass a ticket, an API key, or any part of either. The caller
+        controls what lands here; keep it to identifiers and outcomes.
+        """
+        try:
+            source = self.client_address[0]
+        except (AttributeError, IndexError, TypeError):
+            source = '?'
+        detail = ' '.join(f"{k}={v}" for k, v in fields.items())
+        print(f"[LCARS] TERMINAL {event} src={source} {detail}".rstrip(), flush=True)
+
+    def _terminal_refuse(self, status: int, reason: str, message: str = None):
+        """Refuse a terminal request, audit it, and return.
+
+        The client-visible message is deliberately coarse while the audited
+        `reason` is specific: an attacker probing the ws route should not be
+        able to tell "expired ticket" from "ticket for another terminal" from
+        "no such terminal", but an operator reading the log must.
+        """
+        self._terminal_audit('REFUSE', reason=reason, status=status)
+        self._send_json_response({"error": message or "Terminal request refused"}, status)
+
+    def _terminal_gate(self) -> bool:
+        """Common precondition for ALL three terminal routes. False means a
+        response has already been written and the caller must return."""
+        if not TERMINAL_BRIDGE_AVAILABLE or not _lcars_terminal.terminal_enabled():
+            # 404 rather than 503: a machine that has not opted in should not
+            # confirm that a shell endpoint exists here at all. The feature is
+            # off by default on every machine in the fleet.
+            self._send_json_response({"error": "Not found"}, 404)
+            return False
+
+        key, _rejected_for_mode = _get_resolved_api_key()
+        if not key:
+            # THE DELIBERATE DIVERGENCE (evaluation §5 conclusion 3, §6.4
+            # item 3). _auth_gate() returns True here — open posture — and for
+            # a kanban board that is a considered trade-off. For an
+            # interactive writable shell it is remote code execution for
+            # anyone who can reach the port. There is no acceptable degraded
+            # mode, so the route refuses to serve rather than serving
+            # unauthenticated.
+            self._terminal_audit('REFUSE', reason='no-api-key-configured', status=503)
+            self._send_json_response({
+                "error": "Terminal bridge refuses to serve without an API key",
+                "detail": (
+                    "No AITEAMFORGE_API_KEY is configured on this machine. The "
+                    "terminal routes fail closed rather than following the "
+                    "open posture the rest of the server uses, because an "
+                    "unauthenticated terminal is an unauthenticated shell. "
+                    "Provision ~/.aiteamforge/api-key (regular file, mode 0600) "
+                    "and restart."
+                ),
+            }, 503)
+            return False
+        return True
+
+    def _terminal_host_origin_ok(self) -> bool:
+        """Host allowlist + Origin check for terminal routes.
+
+        Browsers DO send `Origin` on a WebSocket upgrade — threat model §6.3
+        calls this "one place the check has teeth" — so this is the control
+        that stops a foreign page in an already-authenticated browser from
+        opening a shell socket with a stolen ticket. `Host` is checked first
+        because Origin-vs-Host compares two attacker-supplied values and is
+        blind to DNS rebinding on its own (see _origin_matches_host()).
+        """
+        host = self.headers.get('Host', '')
+        if not _host_is_local_identity(host):
+            self._terminal_refuse(403, 'host-not-local-identity', "Forbidden")
+            return False
+        origin = self.headers.get('Origin')
+        if origin and not _origin_matches_host(origin, host):
+            self._terminal_refuse(403, 'origin-mismatch', "Forbidden")
+            return False
+        return True
+
+    def _terminal_credential_ok(self) -> bool:
+        """GET-scoped credential check, for routes that a browser reaches with
+        an ordinary fetch() and can therefore attach a header to.
+
+        This is NOT reusable for the WebSocket route: the browser WebSocket
+        constructor cannot set headers (evaluation §3.4), which is precisely
+        why that route uses a ticket instead. Discovery is a plain XHR, so it
+        gets the strong check.
+        """
+        expected_key, _rejected_for_mode = _get_resolved_api_key()
+        if not expected_key:
+            # Unreachable via _terminal_gate(), but never assume a caller
+            # ordered the checks correctly.
+            self._terminal_refuse(503, 'no-api-key-configured')
+            return False
+        presented = self._extract_presented_credential()
+        if presented is None or presented is _AUTH_CREDENTIAL_CONFLICT:
+            self._terminal_audit('REFUSE', reason='no-credential', status=401)
+            self._send_auth_401()
+            return False
+        if not _auth_safe_equal(presented, expected_key):
+            self._terminal_audit('REFUSE', reason='bad-credential', status=401)
+            self._send_auth_401()
+            return False
+        return True
+
+    def _terminal_lcars_port(self):
+        """Port this server is actually bound to.
+
+        Read from the live socket rather than a global set in main(), so the
+        derived ttyd ports are correct for whatever instance is running —
+        including a throwaway test instance on an arbitrary port.
+        """
+        try:
+            return int(self.server.server_address[1])
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return None
+
+    def _terminal_board_terminals(self):
+        """The current team's `terminals` map, or {} when unreadable."""
+        try:
+            board_file = get_board_file(LCARS_TEAM)
+            with open(board_file, 'r', encoding='utf-8') as handle:
+                board = json.load(handle)
+        except (OSError, ValueError, TypeError):
+            return {}
+        if not isinstance(board, dict):
+            return {}
+        terminals = board.get('terminals', {})
+        return terminals if isinstance(terminals, dict) else {}
+
+    def serve_terminals_list(self):
+        """GET /api/terminals — discovery.
+
+        GATED, and here is the justification the subitem asked for. The
+        response names every terminal on this machine and the loopback port
+        each shell listens on. That is a map of exactly which ports an
+        attacker who lands any local code execution should dial — precisely
+        the topology the loopback binding exists to keep private. `_auth_gate()`
+        does not cover GET, so the gate is written out explicitly above; the
+        cost is that the PWA must attach `X-API-Key` to this fetch, which it
+        can (unlike the WebSocket handshake) and already does for other calls.
+        The alternative — an open discovery endpoint "because the names aren't
+        secret" — trades a real disclosure for zero convenience.
+        """
+        if not self._terminal_gate():
+            return
+        if not self._terminal_host_origin_ok():
+            return
+        if not self._terminal_credential_ok():
+            return
+
+        lcars_port = self._terminal_lcars_port()
+        if lcars_port is None:
+            self._terminal_refuse(503, 'unknown-lcars-port')
+            return
+
+        board_terminals = self._terminal_board_terminals()
+        entries = []
+        for name in _lcars_terminal.terminal_names(board_terminals):
+            try:
+                ttyd_port = _lcars_terminal.resolve_ttyd_port(lcars_port, board_terminals, name)
+            except _lcars_terminal.TerminalConfigError as exc:
+                # A board with more terminals than the block allows, or a
+                # dashboard port outside the derivation band. Surface it —
+                # silently omitting the terminal would look like a UI bug.
+                entries.append({"name": name, "available": False, "error": str(exc)})
+                continue
+            info = board_terminals.get(name) or {}
+            entries.append({
+                "name": name,
+                "available": True,
+                "developer": info.get('developer'),
+                "avatar": info.get('avatar'),
+                "role": info.get('role'),
+                "color": info.get('color'),
+                "ttydPort": ttyd_port,
+                # wsPath is authoritative. A full wsUrl is NOT returned: this
+                # backend cannot know its own external scheme (it speaks plain
+                # HTTP even behind an HTTPS-terminating Tailscale Serve — see
+                # _origin_matches_host()), so any wss:// URL it composed would
+                # be a guess. The client builds it from location.* instead,
+                # which is the only place the real scheme is known.
+                "wsPath": f"/terminal/{name}/ws",
+            })
+
+        self._send_json_response({
+            "team": LCARS_TEAM,
+            "lcarsPort": lcars_port,
+            "terminals": entries,
+            "maxSessions": _lcars_terminal.max_sessions(),
+            "activeSessions": _TERMINAL_SESSIONS.active,
+            "ticketTtlSeconds": _lcars_terminal.ticket_ttl_seconds(),
+            "ticketPath": "/api/terminal/ticket",
+        })
+
+    def handle_terminal_ticket(self):
+        """POST /api/terminal/ticket {"terminal": "engineering"} — mint.
+
+        This is the root of trust for the whole feature (evaluation §6.4
+        item 1). It is a POST, so do_POST's `_auth_gate()` has already run
+        with the full Bearer/X-API-Key check — and `_terminal_gate()` below
+        closes that gate's fail-open hole for this route.
+        """
+        # DRAIN THE BODY BEFORE ANY REFUSAL — this ordering is load-bearing and
+        # it is not stylistic. Every refusal below writes a response and then
+        # lets the connection close. If an unread request body is still sitting
+        # in the socket at that point, macOS answers the close with an RST
+        # instead of a FIN, and the client raises ConnectionResetError while
+        # reading a response the server had already written correctly. The
+        # caller never learns WHY it was refused — it sees a reset connection,
+        # which reads as "the server crashed", not "you are not authorised".
+        #
+        # Found as an intermittent (~1-in-6) failure in this subitem's own test
+        # suite, on the two refusal paths that skipped the read: the 404 when
+        # the feature is disabled and the 503 when no API key is configured.
+        # Reading first is safe: do_POST has already applied _auth_gate() and
+        # capped Content-Length at MAX_POST_BODY_BYTES before dispatch, so this
+        # read is bounded and no less authenticated than every other POST route.
+        raw = self._terminal_drain_request_body()
+
+        if not self._terminal_gate():
+            return
+        if not self._terminal_host_origin_ok():
+            return
+
+        try:
+            payload = json.loads(raw.decode('utf-8')) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            self._terminal_refuse(400, 'malformed-body', "Invalid JSON body")
+            return
+        if not isinstance(payload, dict):
+            self._terminal_refuse(400, 'malformed-body', "Invalid JSON body")
+            return
+
+        terminal = payload.get('terminal')
+        if not isinstance(terminal, str) or not _lcars_terminal.TERMINAL_NAME_RE.match(terminal):
+            self._terminal_refuse(400, 'bad-terminal-name', "Invalid terminal name")
+            return
+
+        lcars_port = self._terminal_lcars_port()
+        if lcars_port is None:
+            self._terminal_refuse(503, 'unknown-lcars-port')
+            return
+
+        board_terminals = self._terminal_board_terminals()
+        try:
+            # Resolve now so a ticket is never minted for a terminal that
+            # cannot possibly be dialled.
+            _lcars_terminal.resolve_ttyd_port(lcars_port, board_terminals, terminal)
+        except _lcars_terminal.TerminalConfigError:
+            self._terminal_refuse(404, 'unknown-terminal', "Unknown terminal")
+            return
+
+        ticket, ttl = _TERMINAL_TICKETS.mint(terminal)
+        self._terminal_audit('MINT', terminal=terminal, ttl=ttl)
+        self._send_json_response({
+            "terminal": terminal,
+            "ticket": ticket,
+            "expiresInSeconds": ttl,
+            "wsPath": f"/terminal/{terminal}/ws",
+        })
+
+    def _terminal_drain_request_body(self) -> bytes:
+        """Read the declared request body off the socket, always.
+
+        See the call site in handle_terminal_ticket() for why this must happen
+        BEFORE any refusal is written: an unread body turns the connection
+        close into an RST and the client loses the response it was about to
+        read. Returns b'' on any read failure — a body we could not read is a
+        body the caller will be refused over anyway.
+
+        Bounded by do_POST's MAX_POST_BODY_BYTES check, which has already run.
+        """
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except (TypeError, ValueError):
+            return b''
+        if length <= 0:
+            return b''
+        try:
+            return self.rfile.read(length)
+        except OSError:
+            return b''
+
+    def _terminal_resolve_port(self, terminal: str):
+        """Shared precondition for every /terminal/<name>/* route. Returns the
+        ttyd port, or None when a refusal has already been written."""
+        lcars_port = self._terminal_lcars_port()
+        if lcars_port is None:
+            self._terminal_refuse(503, 'unknown-lcars-port')
+            return None
+        try:
+            return _lcars_terminal.resolve_ttyd_port(
+                lcars_port, self._terminal_board_terminals(), terminal)
+        except _lcars_terminal.TerminalConfigError:
+            self._terminal_refuse(404, 'unknown-terminal', "Unknown terminal")
+            return None
+
+    def _terminal_redeem(self, terminal: str, query: str) -> bool:
+        """Validate and BURN the single-use ticket from the query string.
+
+        False means a 401 has been written. One generic refusal covers
+        expired / unknown / reused / wrong-terminal / malformed, so a caller
+        cannot use the response to distinguish them; the audit line records
+        only that it failed, never the presented value.
+        """
+        values = parse_qs(query or '').get('ticket') or []
+        ticket = values[0] if len(values) == 1 else ''
+        if _TERMINAL_TICKETS.redeem(ticket, terminal):
+            return True
+        self._terminal_audit('REFUSE', reason='ticket-rejected',
+                             terminal=terminal, status=401)
+        self._send_auth_401()
+        return False
+
+    def serve_terminal_asset(self, terminal: str, leaf: str, query: str):
+        """GET /terminal/<name>/ and /terminal/<name>/token — buffered proxy.
+
+        These exist because ttyd serves them and XACA-0161-002 starts ttyd
+        with `-b /terminal/<name>`. Measured against live ttyd 1.7.7: with
+        `-H X-WEBAUTH-USER` both return **407** unless the header is present
+        AND non-empty, so the header must be injected here too — not only on
+        the upgrade. `/token` itself is a no-op (`{"token": ""}` with no `-c`);
+        ttyd's in-band token is not, and must never be treated as, the gate.
+
+        Ticketed exactly like the upgrade. A client needing index + token +
+        socket mints three tickets. That is the cost of single-use, and
+        single-use is the property that makes a URL-borne credential
+        acceptable at all.
+        """
+        if not self._terminal_gate():
+            return
+        if not self._terminal_host_origin_ok():
+            return
+        ttyd_port = self._terminal_resolve_port(terminal)
+        if ttyd_port is None:
+            return
+        if not self._terminal_redeem(terminal, query):
+            return
+
+        upstream_path = f"{_TERMINAL_ROUTE_PREFIX}{terminal}/{leaf}"
+        try:
+            status, headers, body = _lcars_terminal.proxy_buffered_get(
+                _lcars_terminal.ttyd_host(), ttyd_port, upstream_path,
+                _lcars_terminal.webauth_user())
+        except (_lcars_terminal.HandshakeError, OSError):
+            self._terminal_refuse(502, 'upstream-unreachable', "Terminal backend unavailable")
+            return
+
+        if status != 200:
+            # ttyd's 407 body (or any other non-200) is NOT relayed: a 407 here
+            # means the injected header failed ttyd's own check, which is a
+            # server misconfiguration, not something to hand the client.
+            self._terminal_refuse(502, f'upstream-status-{status}',
+                                  "Terminal backend refused the request")
+            return
+
+        self._terminal_audit('ASSET', terminal=terminal, leaf=leaf or 'index',
+                             bytes=len(body))
+        self.send_response(200)
+        for name, value in headers:
+            self.send_header(name, value)
+        self._send_cors_headers()
+        # ttyd's index embeds the client for a live shell — never let an
+        # intermediary or the browser keep a copy.
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_terminal_ws(self, terminal: str, query: str):
+        """GET /terminal/<name>/ws?ticket=<nonce> — redeem, then relay.
+
+        THE ONLY HIJACK PATH IN THIS FILE. Ordering below is load-bearing:
+        every refusal happens BEFORE the socket leaves the handler's control,
+        because once bytes of a relayed 101 are on the wire there is no way to
+        send an HTTP error instead.
+        """
+        if not self._terminal_gate():
+            return
+        if not self._terminal_host_origin_ok():
+            return
+
+        # Only a genuine upgrade may reach the hijack. A plain GET that landed
+        # on this route is refused with an ordinary HTTP response while that
+        # is still possible.
+        if not _lcars_terminal.is_websocket_upgrade(self.headers):
+            self._terminal_refuse(400, 'not-a-websocket-upgrade', "Expected a WebSocket upgrade")
+            return
+
+        ttyd_port = self._terminal_resolve_port(terminal)
+        if ttyd_port is None:
+            return
+
+        # Session cap BEFORE the ticket burn, so a refusal at the cap does not
+        # consume the caller's single-use nonce (evaluation §6.5 item 3 — the
+        # cap itself is mandatory: each pane pins a thread for its lifetime on
+        # a server whose unbounded thread creation is a recorded open issue).
+        if not _TERMINAL_SESSIONS.acquire():
+            self._terminal_refuse(503, 'session-cap-reached',
+                                  "Too many active terminal sessions")
+            return
+
+        try:
+            if not self._terminal_redeem(terminal, query):
+                return
+
+            try:
+                upstream = _lcars_terminal.connect_upstream(
+                    _lcars_terminal.ttyd_host(), ttyd_port)
+            except OSError:
+                # The upstream reason (refused / no route / timeout) is audited
+                # but not returned: it tells a caller which loopback ports have
+                # a live shell behind them.
+                self._terminal_refuse(502, 'upstream-unreachable', "Terminal backend unavailable")
+                return
+
+            try:
+                request_path = f"{_TERMINAL_ROUTE_PREFIX}{terminal}/ws"
+                handshake = _lcars_terminal.build_upstream_handshake(
+                    request_path, self.headers,
+                    _lcars_terminal.ttyd_host(), ttyd_port,
+                    _lcars_terminal.webauth_user())
+                upstream.sendall(handshake)
+                head, status, upstream_residue = _lcars_terminal.read_upstream_head(upstream)
+            except (_lcars_terminal.HandshakeError, OSError):
+                self._terminal_refuse(502, 'upstream-handshake-failed',
+                                      "Terminal backend unavailable")
+                upstream.close()
+                return
+
+            if status != 101:
+                # ttyd's own error body is NOT relayed — it would leak upstream
+                # detail to an unauthenticated-shaped caller.
+                self._terminal_refuse(502, 'upstream-refused-upgrade',
+                                      "Terminal backend refused the connection")
+                upstream.close()
+                return
+
+            # ---- POINT OF NO RETURN -------------------------------------
+            # Past here the socket is ours. No send_response(), no
+            # _send_json_response(), no send_error(): all three would emit
+            # Server:/Date: headers and an access-log line into what is now a
+            # WebSocket stream (evaluation §6.5 item 6). The 101 is relayed
+            # verbatim from ttyd instead.
+            #
+            # close_connection stops handle_one_request()'s keep-alive loop
+            # from trying to parse another request off a socket that now
+            # carries WebSocket frames (§6.5 item 4).
+            self.close_connection = True
+
+            # §6.5 item 2 — bytes a client pipelined after its handshake are
+            # already inside rfile's buffer and are invisible to select() on
+            # the raw socket. Drain them, or lose them.
+            residue = _lcars_terminal.drain_buffered_reader(self.connection, self.rfile)
+
+            self._terminal_audit('OPEN', terminal=terminal, ttyd_port=ttyd_port,
+                                 active=_TERMINAL_SESSIONS.active)
+            try:
+                c2u, u2c, reason = _lcars_terminal.pump(
+                    self.connection, upstream,
+                    initial_to_upstream=residue,
+                    initial_to_client=head + upstream_residue,
+                    idle_timeout=_lcars_terminal.idle_timeout_seconds(),
+                )
+            finally:
+                try:
+                    upstream.close()
+                except OSError:
+                    pass
+            self._terminal_audit('CLOSE', terminal=terminal, reason=reason,
+                                 c2u=c2u, u2c=u2c)
+        finally:
+            # Released on EVERY path, including the hijacked one — a leaked
+            # slot here would silently shrink the cap to zero over time and
+            # look like "terminals stopped working".
+            _TERMINAL_SESSIONS.release()
+
     def do_OPTIONS(self):
         """Handle CORS preflight requests.
 
@@ -3962,6 +4511,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if path.startswith(prefix + '/'):
                 path = path[len(prefix):] or '/'
                 break
+
+        # XACA-0161-003: ticket mint. A POST specifically so the existing
+        # _auth_gate() above already applied the Bearer/X-API-Key check —
+        # this route is the root of trust for the WebSocket ticket.
+        if path == '/api/terminal/ticket':
+            self.handle_terminal_ticket()
+            return
 
         if path == '/api/toggle-collapsed':
             self.handle_toggle_collapsed()
@@ -15140,6 +15696,32 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.path = path + ('?' + parsed.query if parsed.query else '')
                 break
 
+        # XACA-0161-003: terminal-bridge routes, matched FIRST.
+        #
+        # Evaluation §6.5 item 5: this class extends SimpleHTTPRequestHandler,
+        # whose do_GET serves files from disk. Matching the terminal route
+        # anywhere after a fallback — or with a loose prefix test — turns a
+        # routing mistake into a path-traversal-adjacent surface. The regex is
+        # fully anchored and the match runs before every other branch, so no
+        # request under /terminal/ can ever reach the static file server:
+        # anything shaped like a terminal path that is NOT the exact ws route
+        # is refused here (404) rather than falling through.
+        terminal_match = _TERMINAL_WS_ROUTE_RE.match(path)
+        if terminal_match:
+            self.serve_terminal_ws(terminal_match.group(1), parsed.query)
+            return
+        asset_match = _TERMINAL_ASSET_ROUTE_RE.match(path)
+        if asset_match:
+            self.serve_terminal_asset(asset_match.group(1), asset_match.group(2),
+                                      parsed.query)
+            return
+        if path.startswith(_TERMINAL_ROUTE_PREFIX):
+            self._send_json_response({"error": "Not found"}, 404)
+            return
+        if path == '/api/terminals':
+            self.serve_terminals_list()
+            return
+
         # Serve kanban data
         if path == '/data/freelance-board.json':
             self.serve_kanban_data('freelance')
@@ -18857,6 +19439,17 @@ end tell
         """
         from urllib.parse import urlparse
         path = urlparse(self.path).path
+        # XACA-0161-003: HEAD never reaches the terminal bridge. A HEAD cannot
+        # carry a WebSocket upgrade, and letting it fall through to
+        # SimpleHTTPRequestHandler.do_HEAD would put /terminal/* in front of
+        # the static file server — the exact shadowing evaluation §6.5 item 5
+        # warns about, on the one route family that must never touch disk.
+        if path.startswith(_TERMINAL_ROUTE_PREFIX) or path == '/api/terminals':
+            self.send_response(405)
+            self.send_header('Allow', 'GET')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         # XACA-0798: HEAD parity for the runtime router-target route.
         if path == '/lcars-target.js':
             self.serve_lcars_target(head_only=True)

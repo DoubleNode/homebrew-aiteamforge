@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<!--
+  offline.html
+  DoubleNode Dev-Team Infrastructure (AITeamForge)
+
+  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+
+  XACA-0161-005 — the cockpit's offline state.
+
+  THIS PAGE HAS NO JAVASCRIPT, AND THAT IS THE POINT.
+  The cockpit is a live view of tmux panes over a WebSocket to a tailnet host.
+  With no route there is nothing to show, so a cached shell that renders LCARS
+  chrome and empty panes would be a lie that looks like a product. Worse, a
+  cached shell is code, and code that runs from cache long after the tailnet
+  came back is how a stale connection scheme gets re-established by accident.
+
+  So the offline state is a sign, not an application: no script tag, and a meta
+  CSP of `script-src 'none'; connect-src 'none'` so it is enforced by the
+  browser rather than by whoever edits this file next. Retry is an ordinary
+  <a href> to the cockpit route -- a real navigation, which the service worker
+  answers from the network or not at all.
+
+  Everything it loads is same-origin and precached: one icon, one font. No CDN,
+  no remote anything (merged threat model, section 7).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; connect-src 'none'; style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<meta name="theme-color" content="#000000">
+<meta name="robots" content="noindex">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Cockpit">
+<link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon-180x180.png">
+<link rel="apple-touch-icon" sizes="167x167" href="./icons/apple-touch-icon-167x167.png">
+<link rel="apple-touch-icon" sizes="152x152" href="./icons/apple-touch-icon-152x152.png">
+<link rel="apple-touch-icon" sizes="120x120" href="./icons/apple-touch-icon-120x120.png">
+<title>No Route to the Fleet — LCARS Cockpit</title>
+<style>
+/* Inlined rather than linked to /css/lcars.css: this page must render with no
+   network, and precaching the full LCARS stylesheet to draw one sign would put
+   a large, frequently-changing file in the offline cache for no benefit.
+   Palette values are copied verbatim from lcars.css :root. */
+@font-face {
+  font-family: 'Antonio';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('../fonts/antonio/Antonio-Variable.woff2') format('woff2');
+}
+
+:root {
+  --lcars-black: #000000;
+  --lcars-purple: #cc99ff;
+  --lcars-orange: #ff9900;
+  --lcars-peach: #ffcc99;
+  --lcars-cyan: #99ccff;
+  --lcars-alert-red: #ff6666;
+  --lcars-surface: #252540;
+  --bar: 28px;
+  --gap: 6px;
+  --elbow: 56px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: var(--lcars-black);
+}
+
+body {
+  color: var(--lcars-peach);
+  font-family: 'Antonio', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+           max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  display: flex;
+  justify-content: center;
+}
+
+.frame {
+  width: 100%;
+  max-width: 900px;
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  grid-template-rows: auto 1fr auto;
+  gap: var(--gap);
+}
+
+/* --- LCARS elbow chrome ------------------------------------------------- */
+.elbow-top {
+  grid-column: 1 / 2;
+  background: var(--lcars-purple);
+  border-radius: var(--elbow) 0 0 0;
+  min-height: 68px;
+  position: relative;
+}
+.elbow-top::after {
+  content: '';
+  position: absolute;
+  left: 100%;
+  bottom: 0;
+  width: var(--gap);
+  height: var(--bar);
+  background: var(--lcars-purple);
+}
+.rail-top {
+  grid-column: 2 / 3;
+  align-self: end;
+  height: var(--bar);
+  background: var(--lcars-orange);
+  border-radius: 0 var(--bar) var(--bar) 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 18px;
+  color: var(--lcars-black);
+  font-size: 15px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.spine {
+  grid-column: 1 / 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+.spine span {
+  background: var(--lcars-purple);
+  border-radius: 0;
+  min-height: 26px;
+}
+.spine span:nth-child(2) { background: var(--lcars-cyan); flex: 0 0 60px; }
+.spine span:nth-child(3) { background: var(--lcars-orange); flex: 0 0 34px; }
+.spine span:last-child   { background: var(--lcars-purple); flex: 1 1 auto; }
+
+.elbow-bottom {
+  grid-column: 1 / 2;
+  background: var(--lcars-purple);
+  border-radius: 0 0 0 var(--elbow);
+  min-height: 56px;
+  position: relative;
+}
+.elbow-bottom::after {
+  content: '';
+  position: absolute;
+  left: 100%;
+  top: 0;
+  width: var(--gap);
+  height: var(--bar);
+  background: var(--lcars-purple);
+}
+.rail-bottom {
+  grid-column: 2 / 3;
+  align-self: start;
+  height: var(--bar);
+  background: var(--lcars-cyan);
+  border-radius: 0 var(--bar) var(--bar) 0;
+}
+
+/* --- content ------------------------------------------------------------ */
+main {
+  grid-column: 2 / 3;
+  padding: 22px 4px 22px 20px;
+}
+
+.mark {
+  width: 64px;
+  height: 64px;
+  display: block;
+  border-radius: 12px;
+  margin-bottom: 20px;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: clamp(30px, 7vw, 52px);
+  line-height: 1.02;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--lcars-alert-red);
+}
+
+.status-code {
+  margin: 0 0 26px;
+  font-size: 13px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--lcars-cyan);
+}
+
+p { margin: 0 0 16px; font-size: 17px; line-height: 1.5; max-width: 66ch; }
+strong { color: var(--lcars-peach); font-weight: 600; }
+
+.plain {
+  color: #b9b9d6;
+}
+
+h2 {
+  margin: 30px 0 12px;
+  font-size: 13px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--lcars-orange);
+  font-weight: 600;
+}
+
+ol {
+  margin: 0 0 26px;
+  padding: 0;
+  list-style: none;
+  counter-reset: chk;
+}
+ol li {
+  counter-increment: chk;
+  position: relative;
+  padding: 11px 0 11px 46px;
+  border-top: 2px solid var(--lcars-surface);
+  font-size: 16px;
+  line-height: 1.45;
+  color: #b9b9d6;
+}
+ol li:last-child { border-bottom: 2px solid var(--lcars-surface); }
+ol li::before {
+  content: counter(chk, decimal-leading-zero);
+  position: absolute;
+  left: 0;
+  top: 11px;
+  color: var(--lcars-purple);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.1em;
+}
+ol li b { color: var(--lcars-peach); font-weight: 600; }
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+  letter-spacing: 0;
+  color: var(--lcars-cyan);
+}
+footer code { color: inherit; }
+
+.retry {
+  display: inline-flex;
+  align-items: center;
+  min-height: 54px;
+  padding: 0 32px;
+  background: var(--lcars-orange);
+  color: var(--lcars-black);
+  border-radius: 27px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-decoration: none;
+}
+.retry:active { background: var(--lcars-peach); }
+.retry:focus-visible { outline: 3px solid var(--lcars-cyan); outline-offset: 3px; }
+
+footer {
+  margin-top: 34px;
+  padding-top: 14px;
+  border-top: 2px solid var(--lcars-surface);
+  font-size: 12px;
+  line-height: 1.6;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  /* Bright enough to actually be read: this paragraph carries the https
+     requirement and the Apple bug number, which is the single most useful
+     thing on the page for whoever is debugging a dead pane. */
+  color: #a6a6cc;
+}
+
+@media (max-width: 620px) {
+  .frame { grid-template-columns: 64px 1fr; }
+  :root { --elbow: 32px; }
+  main { padding-left: 14px; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* No animation on this page by design: it is a static sign, and a blinking
+     LCARS panel reads as activity when there is none. Declared explicitly so
+     the absence is legible as a decision. */
+}
+</style>
+</head>
+<body>
+<div class="frame">
+
+  <div class="elbow-top" aria-hidden="true"></div>
+  <div class="rail-top">LCARS Cockpit &middot; XACA-0161</div>
+
+  <div class="spine" aria-hidden="true">
+    <span></span><span></span><span></span><span></span>
+  </div>
+
+  <main>
+    <img class="mark" src="./icons/icon-192.png" width="64" height="64" alt="">
+
+    <h1>No route to the fleet</h1>
+    <p class="status-code">Link severed &middot; 0 panes attached</p>
+
+    <p>
+      This is <strong>not a cached copy of the cockpit</strong>. The cockpit is a
+      live window onto tmux sessions running on a machine on your tailnet — with
+      no route to that machine there are no panes to show, and a screen that
+      pretended otherwise would be worse than this one.
+    </p>
+    <p class="plain">
+      Your agent sessions are unaffected. They run inside tmux on the host, not
+      in this browser, so nothing was lost when the link dropped and reconnecting
+      re-attaches to exactly the state you left.
+    </p>
+
+    <h2>Check, in this order</h2>
+    <ol>
+      <li><b>Tailscale is connected on this iPad.</b> Open the Tailscale app and confirm it is active — a captive-portal or hotel Wi-Fi will hold the connection down.</li>
+      <li><b>The host is awake.</b> A sleeping Mac drops off the tailnet entirely; nothing on this device can wake it.</li>
+      <li><b>LCARS is running on the host</b>, on this team's port, and Tailscale Serve is fronting it with TLS.</li>
+      <li><b>The address is <code>https://</code>.</b> The terminal panes do not survive plain <code>http://</code> on iPadOS — see below.</li>
+    </ol>
+
+    <a class="retry" href="./">Retry connection</a>
+
+    <footer>
+      Terminal panes require https. iPadOS 26 tears down non-TLS WebSockets to
+      local-network hosts about a second after they connect (Apple FB21416603,
+      still open) — so an <code>http://</code> cockpit will look connected and
+      then go dead. This page stores nothing from your sessions.
+    </footer>
+  </main>
+
+  <div class="elbow-bottom" aria-hidden="true"></div>
+  <div class="rail-bottom" aria-hidden="true"></div>
+
+</div>
+</body>
+</html>

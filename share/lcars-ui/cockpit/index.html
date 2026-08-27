@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<!--
+    terminal.html
+    DoubleNode Dev-Team Infrastructure (AITeamForge)
+
+    Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+
+    XACA-0161-004 — the iPad cockpit.
+
+    A multi-pane terminal view over the XACA-0161-003 ticket-authenticated
+    WebSocket bridge. Targets an iPad running the PWA in `display: standalone`,
+    and stays usable in a desktop browser.
+
+    WHY THIS PAGE HOSTS xterm.js INSTEAD OF IFRAMING ttyd
+    ====================================================
+    Settled in XACA-0161-003, restated here because it is the first thing
+    anyone will try to "simplify": an `<iframe src="/terminal/<name>/">` of
+    ttyd's own index CANNOT work. ttyd's bundled JavaScript builds its own
+    WebSocket URL and has nowhere to attach a single-use ticket, so the upgrade
+    arrives ticketless and the proxy refuses it — correctly. Hosting the
+    terminal emulator here is what lets us construct `wss://…/ws?ticket=…`
+    ourselves. It is also the only way to get a multi-pane grid and a touch key
+    bar, neither of which ttyd's single-terminal page could ever provide.
+
+    EVERY ASSET IS LOCAL
+    ====================
+    No CDN, no external font, no remote script. This page is one tap away from
+    a root-equivalent shell, so a third-party script host would be a
+    supply-chain path straight into it. xterm.js is vendored under js/vendor/
+    with its digest recorded in js/vendor/VENDOR.md.
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>LCARS Terminal Cockpit</title>
+
+    <!--
+        PWA head block, pasted verbatim from the contract in cockpit/pwa.js
+        (XACA-0161-005). These meta tags cannot be injected from JavaScript:
+        iOS reads them at parse time and again on "Add to Home Screen", and a
+        tag added later is not reliably seen.
+
+        Note what is NOT here: `user-scalable=no`. An earlier draft of this
+        page set it, reasoning that pinch-zooming a terminal grid re-lays out
+        the xterm canvas. Dropped, for two reasons — iOS Safari has ignored
+        `user-scalable=no` since iOS 10 precisely because it is an
+        accessibility footgun, so on the one device this page targets it was
+        never doing anything; and the honest way to make text bigger here is
+        the A−/A+ control in the header, which changes the real font size and
+        tells the far end its new dimensions, rather than magnifying pixels.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#000000">
+    <meta name="color-scheme" content="dark">
+    <link rel="manifest" href="./manifest.webmanifest">
+
+    <!-- iOS honours these, and they are NOT the same set as the spec's. -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="Cockpit">
+
+    <link rel="apple-touch-icon" sizes="180x180"
+          href="./icons/apple-touch-icon-180x180.png">
+    <link rel="apple-touch-icon" sizes="167x167"
+          href="./icons/apple-touch-icon-167x167.png">
+    <link rel="apple-touch-icon" sizes="152x152"
+          href="./icons/apple-touch-icon-152x152.png">
+    <link rel="apple-touch-icon" sizes="120x120"
+          href="./icons/apple-touch-icon-120x120.png">
+
+    <script src="./pwa.js" defer></script>
+
+    <link rel="stylesheet" href="../css/lcars.css">
+    <link rel="stylesheet" href="../js/vendor/xterm.css">
+    <link rel="stylesheet" href="../css/lcars-terminal.css">
+</head>
+<body>
+
+<div class="tc-shell" id="tc-shell">
+
+    <header class="tc-header">
+        <div class="tc-header-cap"></div>
+        <div class="tc-title">Terminal Cockpit</div>
+        <div class="tc-header-fill"></div>
+        <div class="tc-session-count" id="tc-session-count">—</div>
+        <button class="tc-header-btn" id="tc-font-smaller" type="button" aria-label="Decrease text size">A−</button>
+        <button class="tc-header-btn" id="tc-font-larger" type="button" aria-label="Increase text size">A+</button>
+    </header>
+
+    <main class="tc-grid" id="tc-grid" aria-label="Terminal panes">
+        <div class="tc-notice" id="tc-boot">
+            <h2>Establishing Link</h2>
+            <p>Contacting the LCARS terminal bridge…</p>
+        </div>
+    </main>
+
+    <!--
+        The key bar. Not a convenience: an iPad software keyboard has no Esc,
+        no Ctrl, no Tab and no arrow keys, and a terminal without those is a
+        toy. Hidden on desktop (see the CSS), where the real keys exist.
+    -->
+    <div class="tc-keybar" id="tc-keybar" role="toolbar" aria-label="Terminal control keys">
+        <button class="tc-key" type="button" data-send="\x1b">ESC</button>
+        <button class="tc-key" type="button" data-latch="ctrl" id="tc-ctrl">CTRL</button>
+        <button class="tc-key" type="button" data-latch="alt" id="tc-alt">ALT</button>
+        <button class="tc-key" type="button" data-send="\t">TAB</button>
+        <button class="tc-key" type="button" data-ctrl-letter="c">^C</button>
+        <button class="tc-key" type="button" data-ctrl-letter="d">^D</button>
+        <button class="tc-key" type="button" data-ctrl-letter="z">^Z</button>
+        <button class="tc-key" type="button" data-ctrl-letter="l">^L</button>
+        <button class="tc-key" type="button" data-send="\x1b[A" aria-label="Up arrow">▲</button>
+        <button class="tc-key" type="button" data-send="\x1b[B" aria-label="Down arrow">▼</button>
+        <button class="tc-key" type="button" data-send="\x1b[D" aria-label="Left arrow">◀</button>
+        <button class="tc-key" type="button" data-send="\x1b[C" aria-label="Right arrow">▶</button>
+        <button class="tc-key" type="button" data-send="|">|</button>
+        <button class="tc-key" type="button" data-send="~">~</button>
+        <button class="tc-key" type="button" data-send="/">/</button>
+        <button class="tc-key" type="button" data-send="-">-</button>
+    </div>
+
+    <nav class="tc-tabbar" id="tc-tabbar" aria-label="Terminal selector"></nav>
+</div>
+
+<script src="../js/api-auth.js"></script>
+<script src="../js/vendor/xterm.js"></script>
+<script src="../js/vendor/xterm-addon-fit.js"></script>
+<script src="../js/lcars-terminal-client.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    var C = window.lcarsTerminalClient;
+    var shell = document.getElementById('tc-shell');
+    var grid = document.getElementById('tc-grid');
+    var tabbar = document.getElementById('tc-tabbar');
+    var keybar = document.getElementById('tc-keybar');
+    var sessionCount = document.getElementById('tc-session-count');
+
+    var panes = [];            // { name, term, fit, transport, el, tab, ... }
+    var focusedName = null;
+    var fullscreenName = null;
+    var fontSize = 13;
+    var latched = { ctrl: false, alt: false };
+
+    /* ── Soft-keyboard-aware height ─────────────────────────────────────
+     *
+     * See the long note in lcars-terminal.css. iOS overlays the keyboard
+     * instead of resizing the window, so `100vh` keeps the bottom of the page
+     * — the prompt — hidden underneath it. visualViewport.height DOES shrink,
+     * so that is what drives the shell height.
+     *
+     * `offsetTop` is added back because iOS also SCROLLS the layout viewport
+     * when focusing an input near the bottom; without it the shell is the
+     * right height but sits in the wrong place.
+     */
+    function applyViewportHeight() {
+        var vv = window.visualViewport;
+        var h = vv ? (vv.height - (vv.offsetTop || 0)) : window.innerHeight;
+        document.documentElement.style.setProperty('--tc-vh', h + 'px');
+        refitAll();
+    }
+
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', applyViewportHeight);
+        window.visualViewport.addEventListener('scroll', applyViewportHeight);
+    }
+    window.addEventListener('orientationchange', function () {
+        // The orientation event fires BEFORE the new metrics settle; one frame
+        // of delay is the difference between fitting to the old size and the
+        // new one.
+        setTimeout(applyViewportHeight, 250);
+    });
+    window.addEventListener('resize', applyViewportHeight);
+
+    function refitAll() {
+        panes.forEach(function (p) { refit(p); });
+    }
+
+    /* Refit one pane and TELL THE FAR END. A resize that only changes the
+     * local xterm produces a terminal whose idea of its own width disagrees
+     * with the shell's, which shows up as wrapped and overwritten lines rather
+     * than as an obvious error. */
+    function refit(p) {
+        if (!p.el.isConnected || p.el.offsetParent === null) return;
+        try {
+            p.fit.fit();
+            p.transport.resize(p.term.cols, p.term.rows);
+        } catch (e) { /* pane not laid out yet; the next refit catches it */ }
+    }
+
+    /* ── Focus ──────────────────────────────────────────────────────────
+     *
+     * On a touch device there is no cursor and no hover, so "which pane gets
+     * my keystrokes" has to be an explicit, visible, tap-driven state. Tapping
+     * anywhere in a pane focuses it; the ring and the brightened header say
+     * which one won.
+     */
+    function focusPane(name, opts) {
+        opts = opts || {};
+        focusedName = name;
+        panes.forEach(function (p) {
+            var on = (p.name === name);
+            p.el.classList.toggle('is-focused', on);
+            p.el.classList.toggle('is-active-single', on);
+            p.tab.classList.toggle('is-active', on);
+            p.tab.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        var p = paneByName(name);
+        if (p) {
+            // Focusing the xterm textarea is what raises the soft keyboard.
+            // Skip it when the user got here by tapping a pane they were
+            // already typing in, and when switching tabs programmatically at
+            // boot, so the keyboard never appears unbidden.
+            if (opts.focusInput !== false) { try { p.term.focus(); } catch (e) {} }
+            setTimeout(function () { refit(p); }, 0);
+        }
+    }
+
+    function paneByName(n) {
+        for (var i = 0; i < panes.length; i++) if (panes[i].name === n) return panes[i];
+        return null;
+    }
+
+    function toggleFullscreen(name) {
+        fullscreenName = (fullscreenName === name) ? null : name;
+        grid.classList.toggle('is-fullscreen', !!fullscreenName);
+        panes.forEach(function (p) {
+            p.el.classList.toggle('is-fullscreen', p.name === fullscreenName);
+            p.fsBtn.textContent = (p.name === fullscreenName) ? '▣' : '⛶';
+            p.fsBtn.setAttribute('aria-label',
+                (p.name === fullscreenName ? 'Exit full screen for ' : 'Full screen for ') + p.name);
+        });
+        if (fullscreenName) focusPane(fullscreenName, { focusInput: false });
+        setTimeout(refitAll, 0);
+    }
+
+    /* ── Key bar ────────────────────────────────────────────────────────
+     *
+     * CTRL/ALT are LATCHING, not held: a thumb cannot hold a modifier and
+     * press a letter at the same time. Tap CTRL, then tap a letter on the
+     * software keyboard, and the letter is transformed on its way out. The
+     * latch auto-clears after one keystroke — a modifier that silently stayed
+     * on would make the NEXT thing the user types do something they did not
+     * ask for.
+     */
+    function setLatch(which, on) {
+        latched[which] = on;
+        var btn = document.getElementById('tc-' + which);
+        if (btn) btn.classList.toggle('is-latched', on);
+    }
+
+    function clearLatches() { setLatch('ctrl', false); setLatch('alt', false); }
+
+    /** Apply any latched modifier to one chunk of user input. */
+    function applyLatches(data) {
+        if (latched.ctrl && data.length === 1) {
+            var ch = data.toLowerCase();
+            if (ch >= 'a' && ch <= 'z') {
+                data = String.fromCharCode(ch.charCodeAt(0) - 96);
+            } else if (ch === '[') { data = '\x1b'; }
+        }
+        if (latched.alt && data.length >= 1) data = '\x1b' + data;
+        if (latched.ctrl || latched.alt) clearLatches();
+        return data;
+    }
+
+    function sendToFocused(data) {
+        var p = paneByName(focusedName);
+        if (!p) return;
+        p.transport.send(data);
+        try { p.term.focus(); } catch (e) {}
+    }
+
+    keybar.addEventListener('click', function (ev) {
+        var btn = ev.target.closest('.tc-key');
+        if (!btn) return;
+        if (btn.dataset.latch) {
+            setLatch(btn.dataset.latch, !latched[btn.dataset.latch]);
+            var p = paneByName(focusedName);
+            if (p) { try { p.term.focus(); } catch (e) {} }
+            return;
+        }
+        if (btn.dataset.ctrlLetter) {
+            sendToFocused(String.fromCharCode(btn.dataset.ctrlLetter.charCodeAt(0) - 96));
+            return;
+        }
+        if (btn.dataset.send !== undefined) {
+            // Escapes are written as text in the markup so the HTML stays
+            // readable; unescape them here rather than embedding raw control
+            // bytes in the document.
+            sendToFocused(btn.dataset.send
+                .replace(/\\x1b/g, '\x1b')
+                .replace(/\\t/g, '\t')
+                .replace(/\\r/g, '\r'));
+        }
+    });
+
+    /* ── Font size ──────────────────────────────────────────────────────
+     * The supported alternative to pinch-zoom (which is disabled — see the
+     * viewport meta). This changes the real font size, so the shell is told
+     * its new dimensions and the text stays crisp instead of magnified. */
+    function setFontSize(next) {
+        fontSize = Math.max(9, Math.min(24, next));
+        panes.forEach(function (p) {
+            p.term.options.fontSize = fontSize;
+            refit(p);
+        });
+        try { localStorage.setItem('lcars.terminal.fontSize', String(fontSize)); } catch (e) {}
+    }
+
+    document.getElementById('tc-font-smaller').addEventListener('click', function () { setFontSize(fontSize - 1); });
+    document.getElementById('tc-font-larger').addEventListener('click', function () { setFontSize(fontSize + 1); });
+
+    try {
+        var saved = parseInt(localStorage.getItem('lcars.terminal.fontSize'), 10);
+        if (saved >= 9 && saved <= 24) fontSize = saved;
+    } catch (e) {}
+
+    /* ── Pane construction ──────────────────────────────────────────────── */
+
+    var XTERM_THEME = {
+        background: '#000000',
+        foreground: '#ffcc99',      /* --lcars-peach */
+        cursor: '#ff9900',          /* --lcars-orange */
+        cursorAccent: '#000000',
+        selectionBackground: 'rgba(153, 153, 255, 0.35)',
+        black: '#1a1a2e', red: '#ff4444', green: '#99ff99', yellow: '#ffff99',
+        blue: '#9999ff', magenta: '#cc99ff', cyan: '#99ccff', white: '#ffcc99',
+        brightBlack: '#666688', brightRed: '#ff6666', brightGreen: '#aaffaa',
+        brightYellow: '#ffffcc', brightBlue: '#ccccff', brightMagenta: '#ddaaff',
+        brightCyan: '#cceeff', brightWhite: '#ffffff'
+    };
+
+    function buildPane(info) {
+        var el = document.createElement('section');
+        el.className = 'tc-pane';
+        el.dataset.color = info.color || '';
+        el.dataset.terminal = info.name;
+
+        var head = document.createElement('div');
+        head.className = 'tc-pane-head';
+
+        var nameEl = document.createElement('span');
+        nameEl.className = 'tc-pane-name';
+        nameEl.textContent = info.name;
+
+        var whoEl = document.createElement('span');
+        whoEl.className = 'tc-pane-who';
+        whoEl.textContent = info.developer || '';
+
+        var status = document.createElement('span');
+        status.className = 'tc-status';
+        status.dataset.state = 'disconnected';
+        status.setAttribute('role', 'status');
+        var dot = document.createElement('span');
+        dot.className = 'tc-status-dot';
+        var statusText = document.createElement('span');
+        statusText.textContent = 'OFFLINE';
+        status.appendChild(dot);
+        status.appendChild(statusText);
+
+        var fsBtn = document.createElement('button');
+        fsBtn.type = 'button';
+        fsBtn.className = 'tc-pane-btn';
+        fsBtn.textContent = '⛶';
+        fsBtn.setAttribute('aria-label', 'Full screen for ' + info.name);
+        fsBtn.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            toggleFullscreen(info.name);
+        });
+
+        head.appendChild(nameEl);
+        head.appendChild(whoEl);
+        head.appendChild(status);
+        head.appendChild(fsBtn);
+
+        var body = document.createElement('div');
+        body.className = 'tc-pane-body';
+
+        var overlay = document.createElement('div');
+        overlay.className = 'tc-pane-overlay';
+        var msg = document.createElement('p');
+        msg.className = 'tc-overlay-msg';
+        var retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'tc-overlay-btn';
+        retry.textContent = 'Reconnect';
+        overlay.appendChild(msg);
+        overlay.appendChild(retry);
+        body.appendChild(overlay);
+
+        el.appendChild(head);
+        el.appendChild(body);
+
+        // Tapping anywhere in the pane focuses it. `mousedown` rather than
+        // `click` so focus lands before xterm's own selection handling runs.
+        el.addEventListener('mousedown', function () { focusPane(info.name); });
+        el.addEventListener('touchstart', function () { focusPane(info.name); }, { passive: true });
+
+        var term = new window.Terminal({
+            fontSize: fontSize,
+            fontFamily: '"JetBrains Mono", "SF Mono", Menlo, Monaco, Consolas, monospace',
+            theme: XTERM_THEME,
+            cursorBlink: true,
+            scrollback: 5000,
+            // The far end is tmux, which owns its own scrollback and mouse
+            // reporting; letting xterm also grab the wheel double-scrolls.
+            allowProposedApi: true,
+            macOptionIsMeta: true
+        });
+        var fit = new window.FitAddon.FitAddon();
+        term.loadAddon(fit);
+        term.open(body);
+
+        /*
+         * THE iPad Ctrl+C SHIM.
+         *
+         * Safari on iPad reports keyCode 13 for Ctrl+C on a hardware keyboard,
+         * and xterm.js's key handling switches on keyCode — so `case 13` sends
+         * a carriage return and the user's Ctrl+C silently becomes Enter.
+         * Upstream fixed this (xterm.js #5721) but, verified against the
+         * published sourcemaps on 2026-08-26, the fix ships ONLY in the
+         * 6.1.0-beta line: it is absent from 5.4.0, 5.5.0 and 6.0.0. We pin
+         * stable 6.0.0 and reproduce the condition here.
+         *
+         * Returning false stops xterm from also handling the event, so ETX is
+         * sent exactly once. Remove this (and isIpadCtrlC) once the vendored
+         * xterm.js is a stable release carrying the upstream fix — and check
+         * the bundle, not the version number.
+         */
+        term.attachCustomKeyEventHandler(function (ev) {
+            if (C.isIpadCtrlC(ev)) {
+                transport.send(C.ETX);
+                return false;
+            }
+            return true;
+        });
+
+        var transport = C.createTerminalTransport(info.name, {
+            fetchImpl: window.apiFetch || window.fetch.bind(window),
+            WebSocketImpl: window.WebSocket,
+            location: window.location,
+            textDecoder: new TextDecoder()
+        }, {
+            onOutput: function (data) { term.write(data); },
+            onTitle: function () { /* tmux drives the title; the pane header is ours */ },
+            onStatus: function (state, detail) {
+                status.dataset.state = state;
+                statusText.textContent = ({
+                    connected: 'ONLINE', connecting: 'LINKING',
+                    reconnecting: 'RELINK', disconnected: 'OFFLINE', failed: 'DOWN'
+                })[state] || state.toUpperCase();
+                tab.dataset.state = state;
+                el.classList.toggle('is-failed', state === 'failed');
+                if (state === 'failed') {
+                    msg.textContent = detail ||
+                        'Lost the connection to this terminal.';
+                }
+                if (state === 'connected') setTimeout(function () { refit(pane); }, 0);
+                updateSessionCount();
+            },
+            onError: function () { /* surfaced through onStatus + the overlay */ }
+        });
+
+        // The user never learns what a ticket is. This button re-mints,
+        // re-dials and clears the backoff budget.
+        retry.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            msg.textContent = 'Reconnecting…';
+            transport.retryNow();
+        });
+
+        term.onData(function (data) { transport.send(applyLatches(data)); });
+        term.onResize(function (d) { transport.resize(d.cols, d.rows); });
+
+        var tab = document.createElement('button');
+        tab.type = 'button';
+        tab.className = 'tc-tab';
+        tab.dataset.color = info.color || '';
+        tab.dataset.state = 'disconnected';
+        tab.setAttribute('role', 'tab');
+        var tabLabel = document.createElement('span');
+        tabLabel.className = 'tc-tab-label';
+        tabLabel.textContent = info.name;
+        var tabDot = document.createElement('span');
+        tabDot.className = 'tc-tab-dot';
+        tab.appendChild(tabLabel);
+        tab.appendChild(tabDot);
+        tab.addEventListener('click', function () { focusPane(info.name); });
+
+        var pane = {
+            name: info.name, el: el, term: term, fit: fit,
+            transport: transport, tab: tab, fsBtn: fsBtn
+        };
+        return pane;
+    }
+
+    function updateSessionCount() {
+        var live = panes.filter(function (p) { return p.transport.getState() === 'connected'; }).length;
+        sessionCount.textContent = live + ' / ' + panes.length + ' LINKED';
+    }
+
+    /* ── Boot ───────────────────────────────────────────────────────────── */
+
+    function showNotice(title, htmlSafeLines) {
+        grid.innerHTML = '';
+        var n = document.createElement('div');
+        n.className = 'tc-notice';
+        var h = document.createElement('h2');
+        h.textContent = title;
+        n.appendChild(h);
+        htmlSafeLines.forEach(function (line) {
+            var p = document.createElement('p');
+            p.textContent = line;   // textContent, never innerHTML — server text
+            n.appendChild(p);
+        });
+        grid.appendChild(n);
+    }
+
+    function boot() {
+        C.fetchTerminals({
+            fetchImpl: window.fetch.bind(window),
+            resolveKey: window.lcarsApiAuth && window.lcarsApiAuth.resolveKey
+        }).then(function (data) {
+            var list = (data.terminals || []).filter(function (t) { return t.available; });
+            if (!list.length) {
+                showNotice('No Terminals', [
+                    'The bridge is running but this team has no terminals configured.']);
+                return;
+            }
+            grid.innerHTML = '';
+            tabbar.innerHTML = '';
+            panes = list.map(buildPane);
+            panes.forEach(function (p) {
+                grid.appendChild(p.el);
+                tabbar.appendChild(p.tab);
+            });
+
+            applyViewportHeight();
+            updateSessionCount();
+
+            // Focus the first pane WITHOUT raising the keyboard — a cockpit
+            // that opens with the keyboard already up hides half the grid
+            // before the user has chosen anything.
+            focusPane(panes[0].name, { focusInput: false });
+
+            // Connect every pane. Each mints its own ticket, at connect time.
+            panes.forEach(function (p) { p.transport.connect(); });
+        }).catch(function (err) {
+            if (err && err.status === 404) {
+                showNotice('Terminal Bridge Disabled', [
+                    'This LCARS instance was not started with LCARS_TERMINAL_ENABLED=1, ' +
+                    'so the terminal routes are switched off.',
+                    'Enable it on the host and restart LCARS.']);
+            } else if (err && (err.status === 401 || err.status === 403)) {
+                showNotice('Not Authorised', [
+                    'LCARS refused the terminal discovery request.',
+                    'Check that this machine has an API key configured and that you ' +
+                    'reached LCARS on one of its own addresses.']);
+            } else if (err && err.status === 503) {
+                showNotice('Bridge Unavailable', [
+                    'The terminal bridge is enabled but refused to serve: no API key is ' +
+                    'configured on this machine.',
+                    'A terminal without authentication is an unauthenticated shell, so ' +
+                    'the bridge fails closed rather than opening one.']);
+            } else {
+                showNotice('Link Failed', [
+                    'Could not reach the LCARS terminal bridge.',
+                    (err && err.message) || 'Unknown error.']);
+            }
+        });
+    }
+
+    // A non-HTTPS origin cannot open a terminal socket at all (Apple tears
+    // down ws:// in standalone mode — see lcars-terminal-client.js). Say so up
+    // front rather than letting four panes each fail on their own.
+    if (window.location.protocol !== 'https:') {
+        showNotice('HTTPS Required', [
+            'Terminal panes need an encrypted connection, and this page was loaded over ' +
+            window.location.protocol + '.',
+            'On iPad especially, an unencrypted terminal socket is torn down by the ' +
+            'system about a second after it connects, so the cockpit refuses to open ' +
+            'one rather than handing you a shell that dies mid-command.',
+            'Reach LCARS over its https:// address and reload.'
+        ]);
+    } else {
+        boot();
+    }
+
+    applyViewportHeight();
+})();
+</script>
+</body>
+</html>

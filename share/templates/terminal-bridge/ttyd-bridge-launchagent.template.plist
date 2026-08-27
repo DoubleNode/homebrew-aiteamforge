@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ttyd Terminal-Bridge LaunchAgent — XACA-0161-002
+  ================================================
+  ONE JOB PER TERMINAL. Rendered by scripts/kb-ttyd-bridge.sh from the team
+  board's `terminals` map; one plist per (team, terminal) pair, labelled
+  com.aiteamforge.ttyd-bridge.<team>.<terminal>.
+
+  WHY ONE JOB PER TERMINAL AND NOT ONE SUPERVISOR
+  ----------------------------------------------
+  A single supervising job that forks N ttyd children was considered and
+  rejected on three grounds:
+
+    1. It reinvents launchd. KeepAlive/ThrottleInterval already give per-process
+       supervision, restart-on-crash and crash-loop damping. A supervisor would
+       reimplement all of it, worse.
+    2. Failure isolation. This mirrors the explicit rationale on the sibling
+       per-team CR poller (install-kanban.sh): "isolating one LaunchAgent per
+       team means a bad team config only wedges that team's poller; others keep
+       running." A terminal whose tmux session is missing must not take down the
+       three that are healthy.
+    3. AbandonProcessGroup hazard (XACA-0763-002). launchd SIGKILLs every process
+       left in a job's process group the instant the job itself exits. A
+       supervisor that spawns ttyd children and returns would have them reaped
+       out from under it; keeping the supervisor resident to avoid that is just
+       launchd again, in shell.
+
+  Per-terminal jobs also give per-terminal `launchctl list` visibility and
+  per-terminal teardown, which is what makes the uninstall path verifiable.
+
+  SECURITY POSTURE (see docs/xaca-0161-terminal-bridge-evaluation.md)
+  ------------------------------------------------------------------
+  * `-i lo0`  — loopback ONLY. Measured: `lsof` shows 127.0.0.1:<port> and
+    nothing else; a probe from this host's LAN address returns exit=7. The
+    UNIX-domain-socket form documented upstream returns 502 through
+    `tailscale serve` on this machine and is deliberately NOT used here.
+  * NO `-W`  — read-only by default. ttyd logs "will start in readonly mode".
+    The writable variant is opt-in and renders an explicit <string>-W</string>
+    in place of the {{WRITABLE_ARG}} line below; when read-only, the renderer
+    DELETES that line rather than emitting an empty <string/>, which ttyd would
+    otherwise receive as a stray empty argv entry.
+  * `-H X-WEBAUTH-USER` — ttyd answers 407 to any request WITHOUT a non-empty
+    X-WEBAUTH-USER header, on EVERY endpoint (index, /token and /ws alike;
+    measured). The proxy is therefore the only usable caller, and it must inject
+    that header on every proxied request, not just the WebSocket upgrade.
+  * `-m {{MAX_CLIENTS}}` — ttyd's default is 0 (UNLIMITED). Always set.
+  * NO `-a/--url-arg` — that flag turns the URL into a command-injection vector.
+
+  TMUX ATTACH SEMANTICS
+  ---------------------
+  * `-L {{TEAM}}` — the team's tmux server runs on a NAMED socket. Omitting -L
+    talks to the default server and finds nothing.
+  * `attach -t`, never `new -A -s`. `-A` would silently spawn a rogue empty
+    session named after an agent, which LCARS would then display as a live
+    terminal nobody is driving. Attach must fail loudly when the session is absent.
+  * `-f ignore-size` — REQUIRED. Without it an attaching iPad resizes the
+    operator's desktop iTerm2 pane to the iPad's dimensions, reflowing an
+    agent's terminal out from under it mid-task.
+
+  TMUX_TMPDIR is emitted explicitly because launchd starts jobs with a minimal
+  environment. kanban-helpers.sh resolves the socket dir as
+  "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"; the renderer resolves the same
+  expression at render time so the job looks in the same place the team's tmux
+  server actually lives.
+
+  ProcessType is deliberately OMITTED (= Standard). `man launchd.plist` states
+  Interactive "should only be used if an app's ability to be responsive depends
+  on it"; an idle terminal bridge does not qualify, and Background would apply
+  I/O throttling we do not want on a keystroke path.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{LABEL}}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{TTYD_BIN}}</string>
+        <string>-p</string>
+        <string>{{TTYD_PORT}}</string>
+        <string>-i</string>
+        <string>lo0</string>
+        <string>-m</string>
+        <string>{{MAX_CLIENTS}}</string>
+        <string>-H</string>
+        <string>X-WEBAUTH-USER</string>
+        <string>-b</string>
+        <string>{{BASE_PATH}}</string>
+        {{WRITABLE_ARG}}
+        <string>{{TMUX_BIN}}</string>
+        <string>-L</string>
+        <string>{{TEAM}}</string>
+        <string>attach</string>
+        <string>-t</string>
+        <string>{{TMUX_SESSION}}</string>
+        <string>-f</string>
+        <string>ignore-size</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!--
+      KeepAlive: ttyd is a resident server, not a one-shot. Restart it if it
+      dies. SuccessfulExit=false means "restart only on abnormal exit" — a clean
+      shutdown (e.g. our own uninstall path) is not fought.
+    -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!--
+      ThrottleInterval: damps a crash loop. The realistic failure here is a port
+      that is already bound, in which case ttyd exits immediately and launchd
+      would otherwise respawn it as fast as it can.
+    -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/{{TEAM}}-{{TERMINAL}}.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/{{TEAM}}-{{TERMINAL}}.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>{{HOME_DIR}}</string>
+        <key>AITEAMFORGE_DIR</key>
+        <string>{{AITEAMFORGE_DIR}}</string>
+        <key>TMUX_TMPDIR</key>
+        <string>{{TMUX_TMPDIR}}</string>
+        <!--
+          launchd gives a job no locale. Without LANG, tmux/ttyd fall back to a
+          non-UTF-8 codeset and box-drawing characters in TUI output arrive as
+          mojibake in the pane.
+        -->
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+</dict>
+</plist>

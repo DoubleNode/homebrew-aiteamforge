@@ -1,0 +1,577 @@
+/*
+ *  lcars-terminal.css
+ *  DoubleNode Dev-Team Infrastructure (AITeamForge)
+ *
+ *  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+ */
+
+/*
+ * lcars-terminal.css — XACA-0161-004: the iPad cockpit's layout.
+ *
+ * Loaded AFTER css/lcars.css, which supplies the palette (`--lcars-*`), the
+ * locally-hosted Antonio @font-face set, `html, body { height:100%;
+ * overflow:hidden }`, and the toast styles. Nothing here redefines a palette
+ * token — this file is layout and component styling only, so a future palette
+ * change lands here for free.
+ *
+ * THE THREE THINGS A TOUCH DEVICE CHANGES
+ * =======================================
+ * 1. NO HOVER. Every affordance a mouse would reveal on hover has to be
+ *    permanently visible, so pane controls sit in a persistent header strip
+ *    rather than appearing on approach. `@media (hover: hover)` adds the
+ *    desktop nicety on top; it is never the only way to discover a control.
+ *
+ * 2. NO PHYSICAL ESCAPE KEY (and no Ctrl, Tab, or arrows on the software
+ *    keyboard). A terminal without Escape and Ctrl is not usable, so
+ *    `.tc-keybar` is not a convenience — it is the difference between a demo
+ *    and a tool. It is pinned directly above the soft keyboard.
+ *
+ * 3. THE SOFT KEYBOARD DOES NOT RESIZE THE WINDOW. On iOS the on-screen
+ *    keyboard overlays the viewport: `window.innerHeight` does not change, so
+ *    a `height: 100vh` shell keeps its full height and the bottom third —
+ *    including the prompt the user is typing at — sits underneath the
+ *    keyboard. The fix is `visualViewport`, whose height DOES shrink. JS
+ *    writes it to `--tc-vh` and every full-height rule below is expressed in
+ *    that variable, never in `vh`. If you add a rule using `100vh` here, you
+ *    are reintroducing that bug.
+ */
+
+/* ── Shell ─────────────────────────────────────────────────────────────── */
+
+:root {
+    /* Set from visualViewport by JS. The fallback matters: it is what the
+       page uses for the one frame before the first measurement, and on any
+       browser without the visualViewport API. */
+    --tc-vh: 100vh;
+
+    /* Minimum touch target. 44px is Apple's HIG floor and it is a floor, not
+       a target — every interactive element below meets or exceeds it. */
+    --tc-touch: 44px;
+
+    --tc-head-h: 48px;
+    --tc-tabbar-h: 56px;
+    --tc-keybar-h: 52px;
+}
+
+.tc-shell {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    height: var(--tc-vh);
+    max-height: var(--tc-vh);
+    overflow: hidden;
+    background: var(--lcars-black);
+}
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+
+.tc-header {
+    display: flex;
+    align-items: stretch;
+    gap: var(--gap);
+    height: var(--tc-head-h);
+    padding: 0 var(--gap);
+    background: var(--lcars-black);
+}
+
+.tc-header-cap {
+    width: 56px;
+    flex: 0 0 56px;
+    background: var(--lcars-orange);
+    border-top-left-radius: 24px;
+    border-bottom-left-radius: 24px;
+}
+
+.tc-title {
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    background: var(--lcars-orange);
+    color: var(--lcars-black);
+    font-weight: 700;
+    font-size: 16px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.tc-header-fill {
+    flex: 1;
+    background: var(--lcars-tan);
+    min-width: 12px;
+}
+
+.tc-session-count {
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    background: var(--lcars-tan);
+    color: var(--lcars-black);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    white-space: nowrap;
+}
+
+.tc-header-btn {
+    min-width: var(--tc-touch);
+    height: auto;
+    padding: 0 18px;
+    border: none;
+    background: var(--lcars-blue);
+    color: var(--lcars-black);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-top-right-radius: 24px;
+    border-bottom-right-radius: 24px;
+}
+
+.tc-header-btn:active { filter: brightness(1.25); }
+
+/* ── Pane grid ─────────────────────────────────────────────────────────── */
+
+.tc-grid {
+    display: grid;
+    gap: var(--gap);
+    padding: var(--gap);
+    min-height: 0;      /* lets a grid child actually shrink and scroll */
+    overflow: hidden;
+    /*
+     * 560px is not a round number, it is a legibility floor. An 80-column
+     * shell at the default 13px monospace needs roughly 620px; below that the
+     * far end keeps sending 80-column lines and the pane wraps them mid-word.
+     * Measured at 1400px with a 320px minimum, this grid produced FOUR ~340px
+     * columns and `echo` rendered as "ec / ho" — technically a working
+     * terminal, practically unreadable.
+     *
+     * At 560px a 1400px desktop gets a 2x2 grid and a 1180px landscape iPad
+     * gets 2x2 as well, which is the layout this cockpit is actually for.
+     * `min(100%, 560px)` keeps the track from overflowing a viewport narrower
+     * than the floor itself.
+     */
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr));
+    grid-auto-rows: minmax(0, 1fr);
+}
+
+/* Panes carry their terminal's Starfleet department colour, which the
+   discovery endpoint hands us per terminal (`color: command|operations|
+   medical|science`). Mapped to on-palette hues rather than inventing new
+   ones; anything unrecognised falls back to tan rather than disappearing. */
+.tc-pane { --tc-accent: var(--lcars-tan); }
+.tc-pane[data-color="command"]    { --tc-accent: var(--lcars-amber); }
+.tc-pane[data-color="operations"] { --tc-accent: var(--lcars-orange); }
+.tc-pane[data-color="science"]    { --tc-accent: var(--lcars-blue); }
+.tc-pane[data-color="medical"]    { --tc-accent: var(--lcars-cyan); }
+
+.tc-pane {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    background: var(--lcars-darker);
+    border-radius: 16px;
+    /* The focus ring is drawn with an inset box-shadow rather than a border so
+       that focusing a pane cannot change its box size — a border would reflow
+       the grid and force xterm to re-fit on every focus change. */
+    box-shadow: inset 0 0 0 2px var(--lcars-surface);
+    transition: box-shadow 0.12s ease;
+}
+
+/* FOCUS IS THE PRIMARY TOUCH AFFORDANCE. With no hover and no cursor, the
+   only way a user knows which pane will receive their keystrokes is this
+   ring plus the brightened header. It is deliberately loud. */
+.tc-pane.is-focused {
+    box-shadow: inset 0 0 0 3px var(--tc-accent), 0 0 18px rgba(0, 0, 0, 0.6);
+}
+
+.tc-pane-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px 4px 12px;
+    min-height: 36px;
+    background: var(--lcars-dark);
+    border-top-left-radius: 14px;
+    border-top-right-radius: 14px;
+}
+
+.tc-pane.is-focused .tc-pane-head { background: var(--lcars-surface); }
+
+.tc-pane-name {
+    color: var(--tc-accent);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tc-pane-who {
+    flex: 1;
+    min-width: 0;
+    color: var(--lcars-tan);
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Status is colour AND text. Colour alone would fail both a colour-blind
+   operator and a glance in bright sun on a patio, which is where an iPad
+   actually gets used. */
+.tc-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    white-space: nowrap;
+    background: var(--lcars-black);
+}
+
+.tc-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: 0 0 8px;
+}
+
+.tc-status[data-state="connected"]    { color: var(--lcars-green); }
+.tc-status[data-state="connecting"]   { color: var(--lcars-yellow); }
+.tc-status[data-state="reconnecting"] { color: var(--lcars-amber); }
+.tc-status[data-state="disconnected"] { color: var(--lcars-tan); }
+.tc-status[data-state="failed"]       { color: var(--lcars-alert-red); }
+
+.tc-status[data-state="connecting"] .tc-status-dot,
+.tc-status[data-state="reconnecting"] .tc-status-dot {
+    animation: tc-pulse 1s ease-in-out infinite;
+}
+
+@keyframes tc-pulse { 50% { opacity: 0.25; } }
+
+.tc-pane-btn {
+    min-width: 40px;
+    min-height: 32px;
+    padding: 0 10px;
+    border: none;
+    border-radius: 8px;
+    background: var(--lcars-surface);
+    color: var(--lcars-peach);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    cursor: pointer;
+}
+
+.tc-pane-btn:active { filter: brightness(1.4); }
+
+.tc-pane-body {
+    position: relative;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    padding: 4px 0 4px 8px;
+    background: var(--lcars-black);
+    border-bottom-left-radius: 14px;
+    border-bottom-right-radius: 14px;
+}
+
+.tc-pane-body .xterm { height: 100%; }
+
+/* ── The dropped-socket overlay ────────────────────────────────────────── */
+
+/*
+ * A blank pane is the worst possible outcome of a dropped socket: it is
+ * indistinguishable from a shell with nothing to say. When a pane gives up,
+ * it says so in words and offers one large button — the user never has to
+ * know what a ticket is, and the automatic re-mint happens behind this.
+ */
+.tc-pane-overlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 20px;
+    text-align: center;
+    background: rgba(13, 13, 26, 0.94);
+    border-radius: 14px;
+    z-index: 5;
+}
+
+.tc-pane.is-failed .tc-pane-overlay { display: flex; }
+
+.tc-overlay-msg {
+    color: var(--lcars-peach);
+    font-size: 13px;
+    line-height: 1.5;
+    max-width: 44ch;
+    letter-spacing: 0.5px;
+}
+
+.tc-overlay-btn {
+    min-height: var(--tc-touch);
+    padding: 0 32px;
+    border: none;
+    border-radius: 22px;
+    background: var(--lcars-orange);
+    color: var(--lcars-black);
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+}
+
+.tc-overlay-btn:active { filter: brightness(1.25); }
+
+/* ── Fullscreen (one pane fills the grid) ──────────────────────────────── */
+
+/*
+ * Implemented by hiding siblings rather than by CSS `position: fixed` or the
+ * Fullscreen API. iOS Safari does not support the Fullscreen API on iPad in
+ * standalone mode, and a `position: fixed` element interacts badly with the
+ * soft keyboard. Collapsing the grid to one cell keeps the pane inside the
+ * same `--tc-vh` shell, so the keyboard handling above keeps working
+ * unchanged.
+ */
+.tc-grid.is-fullscreen { grid-template-columns: 1fr; }
+.tc-grid.is-fullscreen .tc-pane { display: none; }
+.tc-grid.is-fullscreen .tc-pane.is-fullscreen { display: grid; }
+
+/* ── Key bar (ESC / CTRL / TAB / arrows) ───────────────────────────────── */
+
+.tc-keybar {
+    display: flex;
+    align-items: stretch;
+    gap: 4px;
+    padding: 4px var(--gap);
+    height: var(--tc-keybar-h);
+    background: var(--lcars-dark);
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+}
+
+.tc-keybar::-webkit-scrollbar { display: none; }
+
+.tc-key {
+    flex: 1 0 auto;
+    min-width: var(--tc-touch);
+    min-height: var(--tc-touch);
+    padding: 0 12px;
+    border: none;
+    border-radius: 8px;
+    background: var(--lcars-surface);
+    color: var(--lcars-peach);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    cursor: pointer;
+    /* Stops iOS from selecting the label text or firing the callout menu on a
+       long press, both of which make a key feel broken under a fast thumb. */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+}
+
+.tc-key:active { background: var(--lcars-tan); color: var(--lcars-black); }
+
+/* A latched modifier must LOOK latched — a sticky Ctrl the user cannot see is
+   a trap, because the next key they press does something they did not ask
+   for. */
+.tc-key.is-latched {
+    background: var(--lcars-orange);
+    color: var(--lcars-black);
+}
+
+/* ── Tab bar ───────────────────────────────────────────────────────────── */
+
+/*
+ * Follows the existing `.mobile-tabbar` idiom from lcars.css — rounded
+ * endcaps, per-item colour, black-inverted active state with a `currentColor`
+ * indicator bar — rather than inventing a second tab language for one page.
+ */
+.tc-tabbar {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    height: calc(var(--tc-tabbar-h) + env(safe-area-inset-bottom, 0px));
+    padding: 0 40px env(safe-area-inset-bottom, 0px);
+    background: var(--lcars-black);
+    flex: 0 0 auto;
+}
+
+.tc-tabbar::before,
+.tc-tabbar::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: env(safe-area-inset-bottom, 0px);
+    width: 38px;
+    background: var(--lcars-orange);
+}
+
+.tc-tabbar::before { left: 0; border-top-left-radius: 20px; }
+.tc-tabbar::after { right: 0; border-top-right-radius: 20px; }
+
+.tc-tab {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    min-height: var(--tc-touch);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 4px 6px;
+    border: none;
+    border-right: 1px solid var(--lcars-black);
+    background: var(--tc-accent, var(--lcars-tan));
+    color: var(--lcars-black);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.tc-tab[data-color="command"]    { --tc-accent: var(--lcars-amber); }
+.tc-tab[data-color="operations"] { --tc-accent: var(--lcars-orange); }
+.tc-tab[data-color="science"]    { --tc-accent: var(--lcars-blue); }
+.tc-tab[data-color="medical"]    { --tc-accent: var(--lcars-cyan); }
+
+.tc-tab:last-of-type { border-right: none; }
+
+.tc-tab.is-active {
+    background: var(--lcars-black);
+    color: var(--tc-accent, var(--lcars-tan));
+}
+
+.tc-tab.is-active::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    background: currentColor;
+}
+
+.tc-tab-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+/* Per-tab connection state, so a backgrounded pane's trouble is visible
+   without switching to it. */
+.tc-tab-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--lcars-black);
+    opacity: 0.35;
+}
+
+.tc-tab.is-active .tc-tab-dot { background: currentColor; }
+.tc-tab[data-state="connected"] .tc-tab-dot { opacity: 1; }
+.tc-tab[data-state="failed"] .tc-tab-dot { background: var(--lcars-error); opacity: 1; }
+
+/* ── Boot / empty states ───────────────────────────────────────────────── */
+
+.tc-notice {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    height: 100%;
+    padding: 32px;
+    text-align: center;
+    color: var(--lcars-peach);
+}
+
+.tc-notice h2 {
+    color: var(--lcars-orange);
+    font-size: 18px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+}
+
+.tc-notice p { font-size: 13px; line-height: 1.6; max-width: 52ch; }
+.tc-notice code {
+    font-family: 'JetBrains Mono', 'SF Mono', Menlo, Monaco, monospace;
+    color: var(--lcars-amber);
+    letter-spacing: 0;
+}
+
+/* ── Responsive ────────────────────────────────────────────────────────── */
+
+/*
+ * Below 900px (iPad portrait and every phone) the grid stops tiling and shows
+ * ONE pane at a time, driven by the tab bar. A 2x2 tile of 80-column shells on
+ * a portrait iPad gives four unreadable slivers; one legible shell plus a fast
+ * switcher is the honest trade, and it is why the tab bar exists rather than
+ * being a nicety bolted onto a desktop grid.
+ */
+@media (max-width: 900px) {
+    .tc-grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr;
+    }
+    .tc-grid .tc-pane { display: none; }
+    .tc-grid .tc-pane.is-active-single { display: grid; }
+    .tc-title { font-size: 13px; letter-spacing: 1px; padding: 0 10px; }
+    .tc-session-count { display: none; }
+}
+
+/*
+ * Desktop pointer. Two things happen here, and both are conditional on a real
+ * mouse rather than on screen width — a 1024px touch device and a 1024px
+ * laptop want opposite treatment, and width cannot tell them apart.
+ *
+ *   1. Hover styling is ADDITIVE. Every control is already fully visible and
+ *      operable without it; hover only brightens.
+ *   2. The key bar is hidden, because a desktop keyboard already has Escape,
+ *      Ctrl, Tab and arrows. Keeping it would cost 52px of terminal for
+ *      buttons duplicating keys the user is already resting their fingers on.
+ */
+@media (hover: hover) and (pointer: fine) {
+    .tc-pane-btn:hover { filter: brightness(1.3); }
+    .tc-key:hover { filter: brightness(1.2); }
+    .tc-tab:hover:not(.is-active) { filter: brightness(1.12); }
+
+    .tc-keybar { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tc-pane,
+    .tc-status-dot {
+        transition: none;
+        animation: none;
+    }
+}

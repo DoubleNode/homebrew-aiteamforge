@@ -42,11 +42,74 @@ Version determined by: file header comment `/*! Chart.js v4.5.1` on line 1.
 
 ---
 
+### xterm.js — `xterm.js`, `xterm.css`, `xterm-addon-fit.js`
+
+Added by XACA-0161-004 for the iPad terminal cockpit (`lcars-ui/terminal.html`).
+
+| Field | Value |
+|-------|-------|
+| Library | xterm.js — terminal emulator for the browser |
+| Version | **6.0.0** (`@xterm/xterm`), plus `@xterm/addon-fit` **0.11.0** |
+| Source URL | https://unpkg.com/@xterm/xterm@6.0.0/lib/xterm.js · https://unpkg.com/@xterm/xterm@6.0.0/css/xterm.css · https://unpkg.com/@xterm/addon-fit@0.11.0/lib/addon-fit.js |
+| License | MIT (Copyright (c) 2017–, The xterm.js authors) |
+| Locations | `lcars-ui/js/vendor/xterm.js`, `xterm.css`, `xterm-addon-fit.js` |
+
+Upstream digests, verified 2026-08-26 to be **identical** from the npm registry
+tarball and from unpkg (two independent fetch paths agreeing on the bytes):
+
+| File | Upstream SHA-256 | Upstream size |
+|------|------------------|---------------|
+| `lib/xterm.js` | `14903579ff54664cd72f8e8699e6961a6272c21863ec1c3b118cdc8af5d4a972` | 488663 |
+| `css/xterm.css` | `854a7c0fb70e8b1a083c16797ab827299fb18744f5ad34f227b48337e33293c6` | 7112 |
+| `addon-fit/lib/addon-fit.js` | `ba3ea256ce0620a0992a197d6c9baea64823fc93d8da07a9e366ca9943c18527` | 1521 |
+
+**The vendored JS files are NOT byte-identical to upstream, by design.** The
+trailing `//# sourceMappingURL=…` comment is stripped from `xterm.js` and
+`xterm-addon-fit.js` because the `.map` files are deliberately not vendored;
+leaving the comment makes every devtools session emit a 404 for a file we chose
+not to ship. `xterm.css` is copied verbatim. Digests of the files as committed:
+
+| File | Vendored SHA-256 | Vendored size |
+|------|------------------|---------------|
+| `xterm.js` | `98d0973151aff2991d335b1adbbdac2e14da26341abe329d677d4c0034402bdf` | 488630 |
+| `xterm.css` | `854a7c0fb70e8b1a083c16797ab827299fb18744f5ad34f227b48337e33293c6` | 7112 |
+| `xterm-addon-fit.js` | `4df3789fa7bff5d545ba38462a8cd2f7460ba971021bce3f81c2870f937a201e` | 1484 |
+
+#### Why 6.0.0 and not the 6.1.0 beta — read before upgrading
+
+The cockpit needs xterm.js issue **#5721**: Safari on iPad/iOS/visionOS reports
+`keyCode === 13` for **Ctrl+C on a hardware keyboard**, and xterm's key handling
+switches on `keyCode`, so `case 13` emits CR and the user's Ctrl+C silently
+becomes Enter. In a terminal that is not cosmetic.
+
+Verified on 2026-08-26 by extracting `src/common/input/Keyboard.ts` from each
+release's own published sourcemap — not from a changelog — the upstream fix
+(`if (ev.key === 'c' && ev.ctrlKey) result.key = C0.ETX`) is:
+
+* **absent** from 5.4.0, 5.5.0 and 6.0.0 — i.e. from every stable release;
+* **present** only in the `6.1.0-beta.*` line.
+
+Vendoring a prerelease of the dependency that renders a root-equivalent shell
+is the wrong trade, so this pins stable 6.0.0 and reproduces the upstream
+condition in six owned, unit-tested lines: `isIpadCtrlC()` in
+`lcars-ui/js/lcars-terminal-client.js`, applied via
+`term.attachCustomKeyEventHandler()` in `terminal.html`.
+
+**When 6.1.0 (or later) ships as stable, upgrade and delete the shim** — but
+confirm the fix is in the bundle you actually vendored (grep the extracted
+`Keyboard.ts` for `case 13` and check it tests `ctrlKey`) rather than inferring
+it from the version number.
+
+---
+
 ## How to Verify Digests
 
 ```bash
 shasum -a 256 lcars-ui/js/vendor/cytoscape.min.js
 shasum -a 256 lcars-ui/js/vendor/chart.umd.min.js
+shasum -a 256 lcars-ui/js/vendor/xterm.js
+shasum -a 256 lcars-ui/js/vendor/xterm.css
+shasum -a 256 lcars-ui/js/vendor/xterm-addon-fit.js
 shasum -a 256 fleet-monitor/server/public/lcars/js/vendor/chart.umd.min.js
 # Confirm chart copies are identical
 diff lcars-ui/js/vendor/chart.umd.min.js fleet-monitor/server/public/lcars/js/vendor/chart.umd.min.js && echo "IDENTICAL"
