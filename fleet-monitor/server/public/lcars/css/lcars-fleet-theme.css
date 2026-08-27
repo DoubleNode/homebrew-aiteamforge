@@ -2885,7 +2885,7 @@
        -> #divisions-container -> .organization-panel -> .division-container
        -> .teams-grid
    .organization-panel (72px padding/border/margin) and .division-container
-   (40px) dominate; .lcars-section adds 10px padding plus an 8px scrollbar
+   (39px -- 40 less a -1px hairline margin) dominate; .lcars-section adds 10px padding plus an 8px scrollbar
    gutter under overflow-y:auto; #divisions-container is width-neutral. Dropping
    the two dominant wrappers inflates .teams-grid at 320px from 202px to 300px
    (lcars) and 108px to 192px (lcars2) -- 1.49x and 1.78x -- which reads as
