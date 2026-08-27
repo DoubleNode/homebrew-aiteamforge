@@ -196,6 +196,18 @@ def _relay_endpoint(server):
     path component, so the result is well-formed for any input shape.
     """
     shown = _describe_value(server)
+    # REVIEW-GATE FINDING XACA-0885-061, first half. urlsplit SILENTLY DELETES
+    # ASCII tab, CR and LF anywhere in the input (WHATWG behaviour), so
+    # "https://h/a<TAB>b" was accepted and persisted as "https://h/ab" -- a
+    # value the operator never typed, recorded without comment. Checked on the
+    # RAW string, because by the time urlsplit has run the evidence is gone.
+    if any(ord(c) < 32 or ord(c) == 127 for c in server):
+        _die_env(
+            "--server contains control characters %s.\n"
+            "  They are silently removed by URL parsing, so the recorded value"
+            " would differ from what you typed.\n"
+            "  Example: --server https://fleet-monitor.fly.dev" % shown
+        )
     try:
         parsed = urllib.parse.urlsplit(server)
     except ValueError:
@@ -320,6 +332,29 @@ def _relay_endpoint(server):
             " use punycode for an internationalised domain.\n"
             "  Example: --server https://fleet-monitor.fly.dev" % shown
         )
+    # REVIEW-GATE FINDING XACA-0885-062. The character allowlist above says
+    # WHICH characters may appear, not that the result is shaped like a host, so
+    # "..." and "---" were accepted and persisted. A host must carry at least one
+    # alphanumeric, must not begin or end with a separator, and must not contain
+    # an empty label.
+    # Checked PER LABEL, not on the whole string: the first version tested only
+    # host[0] and host[-1], so "trail-.com" passed -- the offending hyphen ends
+    # a LABEL, and the host itself ends in "m". Caught by checking that
+    # legitimate-looking-but-invalid inputs are refused, not by the hostile
+    # sweep. IPv6 literals carry ":" and no labels, so they skip this.
+    bad_host = not any(c.isalnum() for c in host)
+    if not bad_host and ":" not in host:
+        for label in host.split("."):
+            if not label or label[0] == "-" or label[-1] == "-":
+                bad_host = True
+                break
+    if bad_host:
+        _die_env(
+            "--server host is not a valid host name %s.\n"
+            "  A host needs at least one letter or digit, no empty labels, and"
+            " cannot begin or end with '.' or '-'.\n"
+            "  Example: --server https://fleet-monitor.fly.dev" % shown
+        )
     # urlsplit strips the brackets from an IPv6 literal, so they must be put
     # back: without them "2001:db8::1" plus a port renders as
     # "2001:db8::1:8443", which is not a parsable authority. Caught by checking
@@ -328,6 +363,21 @@ def _relay_endpoint(server):
     if ":" in host:
         host = "[%s]" % host
     netloc = host if port is None else "%s:%d" % (host, port)
+    # REVIEW-GATE FINDING XACA-0885-061, second half. The authority is validated
+    # and rebuilt, but the path was copied through untouched -- and it IS
+    # persisted. Percent-encoding there can hide any byte from a reader, which is
+    # how "%40" got through in the first place one component over. Same
+    # allowlist discipline: state what a base path may contain and refuse the
+    # rest, rather than enumerate what it may not.
+    if any(c not in
+           "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-/"
+           for c in parsed.path):
+        _die_env(
+            "--server path contains characters not allowed in a base path %s.\n"
+            "  Letters, digits, '.', '_', '~', '-' and '/' only; percent-encoding"
+            " is not accepted here.\n"
+            "  Example: --server https://fleet-monitor.fly.dev" % shown
+        )
     path = parsed.path.rstrip("/") + "/api/status"
     return urllib.parse.urlunsplit((parsed.scheme, netloc, path, "", ""))
 
