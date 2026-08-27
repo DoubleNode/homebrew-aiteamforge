@@ -375,14 +375,15 @@ def _relay_endpoint(server):
     #   ACCEPT (a valid IPv6 literal) IS covered -- T9k round-trips "[::]",
     #     "[::0]", "[::1]", "[::ffff:1.2.3.4]" and "[2001:db8::1]:8443" to
     #     literal endpoints; making this arm reject instead reddens T9k.
-    #   REJECT (a colon-bearing host that is NOT valid IPv6) is NOT covered and
-    #     cannot be: urlsplit raises on such bracket contents before this runs.
-    #     It is defence in depth against a stdlib change, and a test pretending
-    #     to reach it would assert something false -- the same call as the
-    #     makedirs guard at write_map's call site (see T5e).
+    #   REJECT IS covered, and the claim that it could not be was WRONG THREE
+    #     TIMES in this same comment block. urlsplit does not raise on every
+    #     invalid bracket content: it accepts IPvFuture ("[v1.fe80::1]",
+    #     "[v1.abc]"), which reaches here and is correctly refused. T9q pins it.
     #
-    # Reordering this check ahead of the alphanumeric rule is what made the
-    # accept path reachable at all; before that, neither half was exercised.
+    # The lesson is not the specific inputs. Three times this comment asserted
+    # an "unreachable" branch from reasoning about what the stdlib does, and
+    # three times a measurement found an input that reaches it. Reachability
+    # claims belong to mutation tests and probes, not to prose.
     # Order matters: the IPv6 shape check runs FIRST and is authoritative for a
     # colon-bearing host. The alphanumeric rule used to run unconditionally
     # ahead of it, which rejected "::" -- the unspecified address, and the only
@@ -391,7 +392,15 @@ def _relay_endpoint(server):
     # failed closed and no relay is ever addressed that way, but "harmless" is
     # not the same as "correct", and the asymmetry is the kind of thing that
     # reads as a deliberate rule later.
-    if ":" in host:
+    # The signal is "was written as a bracketed IP literal", NOT "contains a
+    # colon". urlsplit accepts RFC 3986 IPvFuture syntax -- "[v1.fe80::1]",
+    # "[v1.abc]" -- and strips the brackets, so a colon test misses the
+    # colon-less forms entirely. "[v1.abc]" was therefore treated as an ordinary
+    # host name, passed the label rule, and was PERSISTED as
+    # "https://v1.abc/api/status": brackets silently dropped, an IP-literal
+    # request quietly turned into a host name. Found while checking a review
+    # finding about the colon test, not by the finding itself.
+    if "[" in parsed.netloc:
         try:
             ipaddress.IPv6Address(host)
             bad_host = False
