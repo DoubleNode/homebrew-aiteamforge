@@ -12,8 +12,8 @@
  * The 5 LCARS client apps under fleet-monitor/server/public/{lcars,lcars2}/js/
  * are plain browser IIFEs -- no module.exports, no bundler, no jsdom
  * dependency in package.json. To unit-test createServiceOnlyLcarsCard(),
- * createTeamCard(), and escapeHtml() without adding a new heavy dependency,
- * this loader:
+ * createTeamCard(), isLcarsTerminal(), and escapeHtml() without adding a new
+ * heavy dependency, this loader:
  *
  *   1. Reads the real client file off disk (the actual shipped source, not
  *      a copy/paraphrase -- so these tests exercise the real defect and the
@@ -186,6 +186,29 @@ function createDomStub() {
     return { ctx, document: documentStub, windowOpenCalls };
 }
 
+// XACA-0990-004: isLcarsTerminal()/createServiceOnlyLcarsCard() were
+// extracted out of the 5 client app files into
+// public/shared/js/lcars-terminal-card.js; each app file now delegates to
+// the global LCARS_TERMINAL_CARD the real HTML pages load via a <script>
+// tag ahead of the app.js tag (see the 5 lcars*.html pages). This vm.Context
+// has no such tag-ordering, so without loading the shared module first, the
+// patched client source below throws ReferenceError: LCARS_TERMINAL_CARD is
+// not defined the moment its shim functions run. Load the real shared-module
+// file (same "actual shipped source" rule as loadClientApp itself) into the
+// SAME ctx, before the client app script, so it lands as a bare global the
+// same way a browser's <script> tag would.
+const SHARED_MODULE_REL_PATH = 'shared/js/lcars-terminal-card.js';
+
+function loadSharedTerminalCardModule(ctx) {
+    const filePath = path.join(PUBLIC_ROOT, SHARED_MODULE_REL_PATH);
+    const src = fs.readFileSync(filePath, 'utf8');
+    vm.runInContext(src, ctx, { filename: SHARED_MODULE_REL_PATH });
+
+    if (!ctx.window || typeof ctx.window.LCARS_TERMINAL_CARD !== 'object') {
+        throw new Error('lcars-client-dom-stub: LCARS_TERMINAL_CARD failed to load from ' + SHARED_MODULE_REL_PATH);
+    }
+}
+
 // Loads one of the 5 client app IIFEs and returns whatever functions it
 // stashed onto window.__lcarsTestExports. `relPath` is relative to
 // fleet-monitor/server/public/ (e.g. 'lcars2/js/lcars-academy-app.js').
@@ -203,12 +226,14 @@ function loadClientApp(relPath, ctx) {
         '\n    window.__lcarsTestExports = {' +
         ' escapeHtml: escapeHtml,' +
         ' createServiceOnlyLcarsCard: createServiceOnlyLcarsCard,' +
-        ' createTeamCard: createTeamCard' +
+        ' createTeamCard: createTeamCard,' +
+        ' isLcarsTerminal: isLcarsTerminal' +
         ' };\n';
 
     const patched = src.slice(0, lastIdx) + exportStmt + src.slice(lastIdx);
 
     vm.createContext(ctx);
+    loadSharedTerminalCardModule(ctx);
     vm.runInContext(patched, ctx, { filename: relPath });
 
     const exports = ctx.window.__lcarsTestExports;

@@ -873,58 +873,12 @@
     // degraded state, not the primary path, and this file's normal card is
     // already the richest of the five; matching that complexity here would
     // multiply the surface with no session data to actually back it.
+    // XACA-0990: extracted to shared/js/lcars-terminal-card.js. This shim
+    // preserves the local call site verbatim; escapeHtml (still defined in
+    // this file, it has other callers) is injected as the module has no
+    // access to this scope.
     function createServiceOnlyLcarsCard(name, svc) {
-        const card = document.createElement('div');
-        const reachable = svc.reachable === true;
-        // reachable === false OR null (curl unavailable, or the probe was
-        // skipped on the reporting host) both render as unreachable -- this
-        // UI never claims health it did not actually observe.
-        card.className = 'team-card lcars-terminal' + (reachable ? '' : ' lcars-offline');
-
-        const statusClass = reachable ? 'online' : 'offline';
-        const statusText = reachable ? 'REACHABLE' : 'UNREACHABLE';
-
-        // XACA-0983-015: name/hostname come from fleet-reporter data, not a
-        // user text field, but they still flow into innerHTML unescaped --
-        // escape them. svc.port is excluded: server.js's parseFleetData
-        // gates it through Number.isFinite before it ever reaches this card,
-        // so it can never carry markup -- do not remove that gate.
-        card.innerHTML =
-            '<div class="team-header">' +
-                '<div class="team-name">' + escapeHtml(name) + '<span class="lcars-badge">LCARS</span></div>' +
-                '<span class="status-indicator ' + statusClass + '"></span>' +
-            '</div>' +
-            '<div class="session-info">' +
-                '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value text-offline">NO ACTIVE SESSION</span></div>' +
-                '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value">' + escapeHtml(svc.hostname || 'unknown') + '</span></div>' +
-                '<div class="session-detail"><span class="session-label">Port:</span><span class="session-value">' + svc.port + '</span></div>' +
-                '<div class="session-detail"><span class="session-label">Status:</span><span class="session-value text-' + statusClass + '">' + statusText + '</span></div>' +
-            '</div>';
-
-        if (reachable && svc.hostname) {
-            const lcarsUrl = 'http://' + svc.hostname + ':' + svc.port;
-            card.classList.add('lcars-clickable');
-            card.title = 'Click to open LCARS terminal: ' + lcarsUrl;
-            // XACA-0983-014: keyboard-only users need the same path mouse
-            // users get. The UNREACHABLE branch below (the `else`) never
-            // reaches this code -- it stays a plain non-focusable div, since
-            // it is not actionable and must not claim to be.
-            card.setAttribute('tabindex', '0');
-            card.setAttribute('role', 'button');
-            card.addEventListener('click', function() {
-                window.open(lcarsUrl, '_blank');
-            });
-            card.addEventListener('keydown', function(evt) {
-                if (evt.key === 'Enter' || evt.key === ' ' || evt.key === 'Spacebar' || evt.keyCode === 13 || evt.keyCode === 32) {
-                    evt.preventDefault();
-                    window.open(lcarsUrl, '_blank');
-                }
-            });
-        } else {
-            card.title = 'LCARS terminal service is reported but not reachable';
-        }
-
-        return card;
+        return LCARS_TERMINAL_CARD.createServiceOnlyLcarsCard(name, svc, escapeHtml);
     }
 
     function createTeamCard(name, data) {
@@ -1765,24 +1719,12 @@
     // UTILITY FUNCTIONS
     // ============================================================================
 
+    // XACA-0990: extracted to shared/js/lcars-terminal-card.js. This shim
+    // preserves the local call sites verbatim; escapeHtml (still defined in
+    // this file, it has other callers) is injected as the module has no
+    // access to this scope.
     function isLcarsTerminal(teamData) {
-        if (!teamData) {
-            return false;
-        }
-        if (teamData.sessions && teamData.sessions.some(function(session) {
-            return session.name && session.name.toLowerCase().includes('lcars');
-        })) {
-            return true;
-        }
-        // XACA-0983 fix (b): a team can be a known LCARS terminal via a
-        // reported service record (data.lcars_service -- see server.js's
-        // parseFleetData / fleet-reporter.sh's get_lcars_services()) even
-        // with NO live tmux session, e.g. a health-check self-heal killed
-        // the session and nothing recreated it. Gating solely on a session
-        // NAME substring (the original bug) makes a healthy-or-even-known-
-        // down backend invisible; checking lcars_service too closes that
-        // gap without requiring a session to exist at all.
-        return !!(teamData.lcars_service);
+        return LCARS_TERMINAL_CARD.isLcarsTerminal(teamData);
     }
 
     function getLcarsUrl(teamData) {
