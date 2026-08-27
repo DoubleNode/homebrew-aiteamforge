@@ -2281,6 +2281,34 @@
     color: var(--lcars-black);
 }
 
+/* XACA-0983-013: UNREACHABLE (and the pre-existing XACA-0979 offline
+   path) must read as degraded at a glance, not only via the 10px
+   status dot -- neither of the loaded stylesheets on these 5 pages had
+   any rule at all for .lcars-offline before this. Mirrors the bolder
+   .status-row.offline red-background inversion elsewhere in this file
+   rather than styles.css's dimmed/opacity treatment: swapping the card
+   BACKGROUND to --lcars-alert-red keeps the existing forced black
+   session-value text (block above) at a directly-computable ~7.34:1
+   contrast (WCAG relative luminance, #000 on #ff6666) -- AA for normal
+   text and just past AAA's 7:1. An opacity dim was rejected because it
+   blends with whatever sits behind the card, making contrast
+   unpredictable rather than computable. Do NOT raise any text-color
+   selector's specificity to "fix" this further -- the block above
+   depends on .team-card.lcars-terminal .session-value (3 classes)
+   out-specifying .session-value.text-online/.text-offline (2 classes)
+   on purpose, since red-on-orange (1.34:1) and green-on-orange
+   (1.75:1) both fail WCAG catastrophically inside an LCARS card. */
+.team-card.lcars-terminal.lcars-offline {
+    cursor: not-allowed;
+    background: var(--lcars-alert-red);
+    box-shadow: 0 0 15px rgba(255, 102, 102, 0.3);
+}
+
+.team-card.lcars-terminal.lcars-offline:hover {
+    transform: none;
+    box-shadow: 0 0 15px rgba(255, 102, 102, 0.3);
+}
+
 /* Clickable team cards */
 .team-card.lcars-clickable {
     cursor: pointer;

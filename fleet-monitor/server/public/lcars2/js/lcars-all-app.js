@@ -291,6 +291,13 @@
         return panel;
     }
 
+    function escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
     // XACA-0983 fix (b), third render state: a team can be a KNOWN LCARS
     // service (data.lcars_service, from server.js's parseFleetData -- see
     // fleet-reporter.sh's get_lcars_services()) with NO live tmux session.
@@ -313,14 +320,19 @@
         const statusClass = reachable ? 'online' : 'offline';
         const statusText = reachable ? 'REACHABLE' : 'UNREACHABLE';
 
+        // XACA-0983-015: name/hostname come from fleet-reporter data, not a
+        // user text field, but they still flow into innerHTML unescaped --
+        // escape them. svc.port is excluded: server.js's parseFleetData
+        // gates it through Number.isFinite before it ever reaches this card,
+        // so it can never carry markup -- do not remove that gate.
         card.innerHTML =
             '<div class="team-header">' +
-                '<div class="team-name">' + name + '<span class="lcars-badge">LCARS</span></div>' +
+                '<div class="team-name">' + escapeHtml(name) + '<span class="lcars-badge">LCARS</span></div>' +
                 '<span class="status-indicator ' + statusClass + '"></span>' +
             '</div>' +
             '<div class="session-info">' +
                 '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value text-offline">NO ACTIVE SESSION</span></div>' +
-                '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value">' + (svc.hostname || 'unknown') + '</span></div>' +
+                '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value">' + escapeHtml(svc.hostname || 'unknown') + '</span></div>' +
                 '<div class="session-detail"><span class="session-label">Port:</span><span class="session-value">' + svc.port + '</span></div>' +
                 '<div class="session-detail"><span class="session-label">Status:</span><span class="session-value text-' + statusClass + '">' + statusText + '</span></div>' +
             '</div>';
@@ -329,8 +341,20 @@
             const lcarsUrl = 'http://' + svc.hostname + ':' + svc.port;
             card.classList.add('lcars-clickable');
             card.title = 'Click to open LCARS terminal: ' + lcarsUrl;
+            // XACA-0983-014: keyboard-only users need the same path mouse
+            // users get. The UNREACHABLE branch below (the `else`) never
+            // reaches this code -- it stays a plain non-focusable div, since
+            // it is not actionable and must not claim to be.
+            card.setAttribute('tabindex', '0');
+            card.setAttribute('role', 'button');
             card.addEventListener('click', function() {
                 window.open(lcarsUrl, '_blank');
+            });
+            card.addEventListener('keydown', function(evt) {
+                if (evt.key === 'Enter' || evt.key === ' ' || evt.key === 'Spacebar' || evt.keyCode === 13 || evt.keyCode === 32) {
+                    evt.preventDefault();
+                    window.open(lcarsUrl, '_blank');
+                }
             });
         } else {
             card.title = 'LCARS terminal service is reported but not reachable';
@@ -355,6 +379,13 @@
         const status = session.machine_status || 'offline';
         const isOnline = status === 'online';
 
+        // XACA-0983-015 scope note: name/session.name/session.hostname
+        // below are interpolated unescaped, same as before this ticket.
+        // That is pre-existing debt already tracked and scoped for a
+        // shared fix under XACA-0416 (todo, high) -- not addressed here
+        // to avoid colliding with that ticket's broader sweep across
+        // these same 5 files. Only the NEW createServiceOnlyLcarsCard
+        // code above got escapeHtml() as part of this ticket.
         card.innerHTML =
             '<div class="team-header">' +
                 '<div class="team-name">' + name + (isLcars ? '<span class="lcars-badge">LCARS</span>' : '') + '</div>' +
@@ -382,8 +413,18 @@
             if (lcarsUrl && isOnline) {
                 card.classList.add('lcars-clickable');
                 card.title = 'Click to open LCARS terminal: ' + lcarsUrl;
+                // XACA-0983-014: same keyboard-activation support as the
+                // service-only card above -- see createServiceOnlyLcarsCard.
+                card.setAttribute('tabindex', '0');
+                card.setAttribute('role', 'button');
                 card.addEventListener('click', function() {
                     window.open(lcarsUrl, '_blank');
+                });
+                card.addEventListener('keydown', function(evt) {
+                    if (evt.key === 'Enter' || evt.key === ' ' || evt.key === 'Spacebar' || evt.keyCode === 13 || evt.keyCode === 32) {
+                        evt.preventDefault();
+                        window.open(lcarsUrl, '_blank');
+                    }
                 });
             } else if (lcarsUrl && !isOnline) {
                 // XACA-0979: match the flat dashboards' offline treatment so one
