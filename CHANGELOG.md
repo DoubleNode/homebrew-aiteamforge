@@ -33,6 +33,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   reverted in-flight sibling work and swept gitignored `fleet-monitor/server/data/history/*.json`
   runtime files into the shipped tap.
 
+  **Follow-up commit — the same triage applied to the rest of both forked files.** A full sweep of the
+  remaining concatenating sinks upstream found four more defects that these forked copies also carry:
+  `machine.hostname` reaching element content unescaped (both files); `data-machine-id="..."` ×3 and a
+  reporter-supplied `data-timestamp="..."` (`machine.timestamp` off the POST body) unescaped in
+  attributes; and two further *false fixes* where `escapeHtml` was already applied inside quoted
+  attributes (`data-current=`, and `value=`/`placeholder=` in the nickname editor). All now use the
+  quote-safe `escapeAttr`. Fixing only the session sink here would have left these copies diverged from
+  canonical on the exact defect class this entry is about.
+
 
 ## [0.20.1] - 2026-08-27
 

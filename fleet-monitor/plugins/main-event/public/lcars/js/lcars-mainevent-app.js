@@ -690,7 +690,7 @@
             });
             if (backupStatuses.length > 0) {
                 backupHtml =
-                    '<div class="machine-backup-container" data-machine-id="' + machine.machine_id + '">' +
+                    '<div class="machine-backup-container" data-machine-id="' + escapeAttr(machine.machine_id) + '">' +
                         '<div class="machine-backup-status clickable">' +
                             '<span class="backup-expand-indicator' + (isBackupExpanded ? ' expanded' : '') + '">▶</span>' +
                             '<span class="backup-label">BACKUP:</span>' +
@@ -719,15 +719,15 @@
             '<div class="machine-row-header">' +
                 '<span class="machine-expand-indicator' + (isExpanded ? ' expanded' : '') + '">▶</span>' +
                 '<span class="status-indicator ' + machine.status + '"></span>' +
-                '<span class="machine-hostname">' + machine.hostname + '</span>' +
+                '<span class="machine-hostname">' + escapeHtml(machine.hostname) + '</span>' +
                 '<span class="machine-sessions">' + machine.session_count + ' sessions</span>' +
             '</div>' +
             '<div class="machine-nickname-row">' +
                 '<span class="machine-nickname-label">Nickname:</span>' +
-                '<span class="machine-nickname-value' + (hasNickname ? '' : ' empty') + '" data-machine-id="' + machine.machine_id + '">' +
+                '<span class="machine-nickname-value' + (hasNickname ? '' : ' empty') + '" data-machine-id="' + escapeAttr(machine.machine_id) + '">' +
                     (hasNickname ? escapeHtml(machine.nickname) : 'Not set') +
                 '</span>' +
-                '<button class="nickname-edit-btn" data-machine-id="' + machine.machine_id + '" data-current="' + escapeHtml(machine.nickname || '') + '" title="Edit nickname">✎</button>' +
+                '<button class="nickname-edit-btn" data-machine-id="' + escapeAttr(machine.machine_id) + '" data-current="' + escapeAttr(machine.nickname || '') + '" title="Edit nickname">✎</button>' +
             '</div>' +
             '<div class="machine-guid">GUID: ' + machineGuid + '</div>' +
             backupHtml +
@@ -735,7 +735,7 @@
                 '<div class="machine-meta">' +
                     '<div class="machine-meta-item">' +
                         '<span class="machine-meta-label">Last:</span>' +
-                        '<span class="machine-meta-value last-seen-value" data-timestamp="' + (machine.last_seen || '') + '">' + lastSeenRelative + '</span>' +
+                        '<span class="machine-meta-value last-seen-value" data-timestamp="' + escapeAttr(machine.last_seen || '') + '">' + lastSeenRelative + '</span>' +
                     '</div>' +
                     '<div class="machine-meta-item">' +
                         '<span class="machine-meta-label">Since:</span>' +
@@ -1126,7 +1126,7 @@
         var editor = document.createElement('div');
         editor.className = 'nickname-editor';
         editor.innerHTML =
-            '<input type="text" class="nickname-input" value="' + escapeHtml(currentNickname) + '" placeholder="' + escapeHtml(hostname) + '" maxlength="32">' +
+            '<input type="text" class="nickname-input" value="' + escapeAttr(currentNickname) + '" placeholder="' + escapeAttr(hostname) + '" maxlength="32">' +
             '<button class="nickname-save-btn" title="Save">✓</button>' +
             '<button class="nickname-cancel-btn" title="Cancel">✗</button>';
 

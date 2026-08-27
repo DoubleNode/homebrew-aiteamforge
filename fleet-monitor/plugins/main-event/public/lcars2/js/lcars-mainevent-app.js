@@ -487,7 +487,7 @@
 
         item.innerHTML =
             '<span class="status-indicator ' + machine.status + '"></span>' +
-            '<span class="lcars-text-sm" style="flex: 1;">' + machine.hostname + '</span>' +
+            '<span class="lcars-text-sm" style="flex: 1;">' + escapeHtml(machine.hostname) + '</span>' +
             '<span class="lcars-text-xs" style="color: var(--lcars-tan);">' + machine.session_count + ' sessions</span>';
 
         return item;
