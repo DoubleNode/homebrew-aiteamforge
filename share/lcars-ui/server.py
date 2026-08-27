@@ -3715,7 +3715,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # Note: Team names follow specific formats:
     # - Freelance: freelance-{clientId}-{projectId} (e.g., freelance-doublenode-workstats)
     # - Legal: legal-{projectId} (e.g., legal-coparenting)
+    # - Medical: medical-{projectId} (e.g., medical-general)
     # - MainEvent floaters: mainevent-{projectId} (project-specific)
+    #
+    # XACA-0992 (round-three gate remediation): medical-general was added
+    # here to match legal-coparenting and finance-personal — all three are
+    # the same architectural tier (parameterized personal-team instances;
+    # see _build_team_kanban_dirs() above and _PARAMETERIZED_TEMPLATES),
+    # and its absence was a prior round's false completion claim (it had
+    # instead added an unrelated 'medical': 'Medical' entry to
+    # _BASE_BRAND_SHORT_NAMES, which does not touch funnel routing at all).
     # XACA-0628: the per-client/project freelance prefixes are no longer hardcoded
     # here — they're derived from the live team registry (TEAM_KANBAN_DIRS, which
     # is built from list_teams() incl. the per-machine overlay), so EVERY
@@ -3723,7 +3732,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # hardcoded subset. The strip loop is order-independent (startswith match).
     PATH_PREFIXES = (
         ['/academy', '/firebase', '/dns', '/command', '/ios', '/android',
-         '/mainevent', '/legal-coparenting', '/finance-personal']
+         '/mainevent', '/legal-coparenting', '/medical-general', '/finance-personal']
         + sorted(
             '/' + _t for _t in TEAM_KANBAN_DIRS
             if _t.startswith('freelance-')

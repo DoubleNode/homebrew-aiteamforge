@@ -10,6 +10,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="apple-touch-icon" sizes="180x180" href="/appicons/apple-touch-icon-180.png">
+    <link rel="apple-touch-icon" sizes="167x167" href="/appicons/apple-touch-icon-167.png">
+    <link rel="apple-touch-icon" sizes="152x152" href="/appicons/apple-touch-icon-152.png">
+    <link rel="apple-touch-icon" sizes="120x120" href="/appicons/apple-touch-icon-120.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/appicons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/appicons/icon-512.png">
+    <link rel="manifest" href="/appicons/fleet.webmanifest">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Fleet Monitor">
     <title>LCARS - Fleet Operations</title>
 
     <!-- LCARS-003: Antonio Typography from Google Fonts - Preload for faster loading -->
@@ -24,8 +35,6 @@
     <link rel="stylesheet" href="../shared/css/lcars-kiosk.css?v=20260825e">
     <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
     <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20260827a">
-    <!-- XACA-0989: collapsible divisions + compact session chips (shared) -->
-    <link rel="stylesheet" href="../shared/css/lcars-division-collapse.css?v=20260827a">
     <!-- LCARS Kiosk Health & Status Screen Styles -->
     <link rel="stylesheet" href="css/lcars-kiosk-health.css?v=20260825e">
     <!-- LCARS Dashboard Admin Styles -->
@@ -732,11 +741,7 @@
     <!-- Division -> organization resolution. MUST load BEFORE the app script
          below, which delegates to it; loaded after, it is a silent no-op. -->
     <script src="../shared/js/lcars-org-resolution.js?v=20260825e"></script>
-    <script src="../shared/js/lcars-terminal-card.js?v=20260827a"></script>
-    <!-- XACA-0989: collapsible divisions + compact session chips (shared).
-         MUST load BEFORE the app script below, which calls into it. -->
-    <script src="../shared/js/lcars-division-collapse.js?v=20260827a"></script>
-    <script src="js/lcars-dashboard-app.js?v=20260827a"></script>
+    <script src="js/lcars-dashboard-app.js"></script>
     <!-- Dashboard Admin UI Module -->
     <script src="js/lcars-dashboards-ui.js"></script>
     <!-- LCARS Analytics: Knowledge Base Charts Module -->

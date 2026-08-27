@@ -1045,5 +1045,98 @@ class TestServeImageRejectsTraversal(unittest.TestCase):
             pre_fix_candidate.resolve().relative_to(images_root)
 
 
+# ---------------------------------------------------------------------------
+# 6. PATH_PREFIXES membership + funnel-prefix behavior (XACA-0992 round three)
+# ---------------------------------------------------------------------------
+#
+# A prior round of this ticket claimed medical-general had been added to
+# PATH_PREFIXES and had NOT — it had instead added an unrelated
+# 'medical': 'Medical' entry to _BASE_BRAND_SHORT_NAMES (a manifest
+# short_name map, already covered by TestManifestShortNameAllRegisteredIds
+# above), which does not touch funnel routing at all. medical-general sits
+# at the identical architectural tier as legal-coparenting and
+# finance-personal (see TEAM_KANBAN_DIRS / _PARAMETERIZED_TEMPLATES in
+# server.py) — both of which WERE already present — so its absence from
+# PATH_PREFIXES was the actual, unfixed gap. Live-verified against a
+# throwaway `LCARS_TEAM=medical-general` server on a scratch port: bare
+# '/medical-general' -> 301 to '/medical-general/', both GET and HEAD for
+# '/medical-general/appicons/icon-192.png' -> 200 image/png with the SAME
+# Content-Length as the unprefixed '/appicons/icon-192.png' route — exactly
+# the behavior every other funnel-prefixed team gets.
+
+class TestPathPrefixesMembership(unittest.TestCase):
+    """Pins PATH_PREFIXES' membership so this specific regression — a team
+    architecturally identical to two already-listed teams silently missing
+    from the list — cannot recur unnoticed."""
+
+    # The non-freelance prefixes are a fixed, hand-maintained list (freelance
+    # entries are derived dynamically from the team registry — see the
+    # class comment on PATH_PREFIXES itself — and are deliberately excluded
+    # here so this test doesn't have to track per-machine overlay teams).
+    EXPECTED_FIXED_PREFIXES = {
+        '/academy', '/firebase', '/dns', '/command', '/ios', '/android',
+        '/mainevent', '/legal-coparenting', '/medical-general', '/finance-personal',
+    }
+
+    def test_fixed_prefixes_match_exactly(self):
+        actual_fixed = {
+            p for p in server.LCARSHandler.PATH_PREFIXES
+            if not p.startswith('/freelance-')
+        }
+        self.assertEqual(
+            actual_fixed, self.EXPECTED_FIXED_PREFIXES,
+            "PATH_PREFIXES' fixed (non-freelance) membership changed — if "
+            "this was intentional (a new single-instance personal/funnel "
+            "team), update EXPECTED_FIXED_PREFIXES here too; if not, a "
+            "team was silently added or removed from funnel routing.",
+        )
+
+    def test_medical_general_is_present(self):
+        """The specific regression this round fixed: medical-general sits
+        at the same tier as legal-coparenting/finance-personal (both
+        already present) but was missing."""
+        self.assertIn('/medical-general', server.LCARSHandler.PATH_PREFIXES)
+
+    def test_bare_medical_general_redirects_to_trailing_slash(self):
+        with patch.object(server, "LCARS_TEAM", "medical-general"):
+            handler, buf = _make_handler("/medical-general")
+            handler.do_GET()
+        self.assertEqual(handler._response_code, 301)
+        self.assertIn(("Location", "/medical-general/"), handler._headers_sent)
+
+    def test_medical_general_prefixed_appicon_matches_unprefixed(self):
+        """'/medical-general/appicons/icon-192.png' must strip to
+        '/appicons/icon-192.png' and serve identically — the same parity
+        TestHeadGetParity pins for '/academy/appicons/icon-192.png'."""
+        with patch.object(server, "LCARS_TEAM", "medical-general"):
+            prefixed_handler, prefixed_buf = _make_handler(
+                "/medical-general/appicons/icon-192.png")
+            prefixed_handler.do_GET()
+            bare_handler, bare_buf = _make_handler("/appicons/icon-192.png")
+            bare_handler.do_GET()
+        self.assertEqual(prefixed_handler._response_code, 200)
+        self.assertEqual(bare_handler._response_code, 200)
+        self.assertEqual(prefixed_buf.getvalue(), bare_buf.getvalue())
+
+    def test_membership_pin_can_actually_fail(self):
+        """Mutation proof: with medical-general removed from PATH_PREFIXES
+        (reconstructing the exact pre-fix list), the bare-prefix redirect
+        this file pins above must NOT fire — confirming the test is not
+        vacuously true."""
+        pre_fix_prefixes = tuple(
+            p for p in server.LCARSHandler.PATH_PREFIXES if p != '/medical-general'
+        )
+        with patch.object(server, "LCARS_TEAM", "medical-general"), \
+             patch.object(server.LCARSHandler, "PATH_PREFIXES", pre_fix_prefixes):
+            handler, buf = _make_handler("/medical-general")
+            handler.do_GET()
+        self.assertNotEqual(
+            handler._response_code, 301,
+            "Pre-fix PATH_PREFIXES (without medical-general) was expected "
+            "to NOT redirect the bare prefix — got a 301 anyway, so this "
+            "mutation no longer demonstrates the regression the fix closes",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

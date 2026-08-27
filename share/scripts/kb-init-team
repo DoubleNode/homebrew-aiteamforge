@@ -420,30 +420,39 @@ _derive_defaults() {
     #
     # The default case below used to be `ASSET_DIR="${TEAM_ID}"` — the FULL
     # team id, hyphens and all. For any hyphenated id whose first segment
-    # is not one of the four enumerated multi-project prefixes (a brand
-    # new 'mainevent-<project>-<platform>' team, or any future org that
-    # follows the same <brand>-<project>-<platform> convention), that
-    # produced an ASSET_DIR the serving code would NEVER actually look
-    # in — server.py always collapses to the first segment regardless of
-    # what this script decided to materialize on disk, so a team
-    # provisioned under the old default silently 404s (or falls back to
-    # APPICON_FALLBACK_TEAM's icons / no logo at all) with no error
-    # anywhere pointing at the mismatch. Defaulting to `first_seg` instead
-    # makes this script's default agree with server.py's resolution by
-    # construction, for every prefix, present or future — not just the
-    # four enumerated here today. An operator who genuinely needs a
-    # different physical directory can still pass `--asset-dir` explicitly
-    # (this default only fires when unset); doing so for a prefix outside
-    # the dns-framework exception is almost certainly a mismatch with how
-    # server.py will resolve that team's requests, so treat that as a
-    # deliberate, documented override, not a routine choice.
+    # wasn't already special-cased (a brand new 'mainevent-<project>-
+    # <platform>' team, or any future org that follows the same
+    # <brand>-<project>-<platform> convention), that produced an ASSET_DIR
+    # the serving code would NEVER actually look in — server.py always
+    # collapses to the first segment regardless of what this script decided
+    # to materialize on disk, so a team provisioned under the old default
+    # silently 404s (or falls back to APPICON_FALLBACK_TEAM's icons / no
+    # logo at all) with no error anywhere pointing at the mismatch.
+    # Defaulting to `first_seg` instead makes this script's default agree
+    # with server.py's resolution by construction, for every prefix,
+    # present or future.
+    #
+    # XACA-0992 (protected subitem, round-three gate remediation): this case
+    # statement previously carried FOUR extra named arms —
+    # freelance/legal/medical/finance, each just restating
+    # `ASSET_DIR="${first_seg}"` verbatim for its own name (e.g.
+    # `legal) ASSET_DIR="legal" ;;`) — which the `*)` default arm already
+    # produces for those exact same inputs. They were pure noise: removing
+    # them changes no team's resolved ASSET_DIR. `dns` is the ONLY genuine
+    # exception in this list — the one case where the resolved value
+    # (`dns-framework`) actually differs from `first_seg` (`dns`) — so it's
+    # the only prefix that needs (or ever needed) an explicit arm.
+    # freelance/legal/medical/finance/mainevent, and any future
+    # <brand>-<project>[-<platform>] team, all fall through `*)` unchanged.
+    # An operator who genuinely needs a different physical directory can
+    # still pass `--asset-dir` explicitly (this default only fires when
+    # unset); doing so for a prefix outside the dns-framework exception is
+    # almost certainly a mismatch with how server.py will resolve that
+    # team's requests, so treat that as a deliberate, documented override,
+    # not a routine choice.
     if [[ -z "$ASSET_DIR" ]]; then
         local first_seg="${TEAM_ID%%-*}"
         case "$first_seg" in
-            freelance) ASSET_DIR="freelance" ;;
-            legal)     ASSET_DIR="legal" ;;
-            medical)   ASSET_DIR="medical" ;;
-            finance)   ASSET_DIR="finance" ;;
             dns)       ASSET_DIR="dns-framework" ;;
             *)         ASSET_DIR="${first_seg}" ;;
         esac
