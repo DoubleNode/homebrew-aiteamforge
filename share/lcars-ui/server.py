@@ -63,12 +63,16 @@ from urllib.parse import urlparse, urlencode, parse_qs
 # font files served under /fonts/. (XACA-0572)
 mimetypes.add_type('font/woff2', '.woff2')
 mimetypes.add_type('font/woff', '.woff')
-# XACA-0161-005: the cockpit PWA manifest. Registered here for the same reason
-# the woff2 types above are — the platform mimetypes DB drifts across OS and
-# Python versions (see XACA-0572). It happens to resolve correctly on this
-# machine's Python; that is not a property to depend on. iOS will refuse a
-# manifest served as text/plain, which fails as "Add to Home Screen produced a
-# bookmark, not an app" — a symptom that points nowhere near a MIME type.
+# Web App Manifest MIME type — serves BOTH the XACA-0161 cockpit PWA manifest
+# (lcars-ui/cockpit/manifest.webmanifest) and the XACA-0992 per-team kiosk
+# manifest (/appicons/team.webmanifest, see serve_appicon). Registered for the
+# same reason as the woff2 types above (XACA-0572: the platform mimetypes DB
+# drifts across OS and Python versions) — but note this one is load-bearing
+# rather than merely defensive: unlike woff2, .webmanifest is NOT in Python's
+# stdlib DB on any version this project targets. iOS refuses a manifest served
+# as text/plain, and it fails as "Add to Home Screen produced a bookmark, not
+# an app" — a symptom pointing nowhere near a MIME type.
+# https://www.iana.org/assignments/media-types/application/manifest+json
 mimetypes.add_type('application/manifest+json', '.webmanifest')
 
 # Add kanban-hooks to path (shared modules: kanban_utils, aiteamforge_paths)
@@ -15769,6 +15773,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.serve_backup_files(team_filter=team)
         elif path.startswith('/images/'):
             self.serve_image(path)
+        # XACA-0992: Add-to-Home-Screen app icons + webmanifest for the
+        # RUNNING team (LCARS_TEAM), fixed paths so one HTML file works for
+        # all registered teams. See serve_appicon() for the funnel-relative-
+        # ref reasoning.
+        elif path.startswith('/appicons/'):
+            self.serve_appicon(path)
         # Release API endpoints
         elif path == '/api/releases':
             self.serve_releases_list(parsed.query)
@@ -16023,8 +16033,49 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_error(500, f"Error serving {path}: {e}")
 
-    def serve_image(self, path):
-        """Serve team logos and avatars from their respective directories"""
+    # XACA-0628 + XACA-0992: base-brand resolution shared by team logo/avatar
+    # serving (serve_image, below) and Add-to-Home-Screen icon serving
+    # (serve_appicon, below). Collapses a per-project/per-client runtime team
+    # id down to the "base brand" slug its assets actually live under, e.g.
+    # legal-coparenting -> legal, mainevent-maineventwrapper-ios -> mainevent.
+    #
+    # XACA-0992: this used to be a hand-rolled dict + freelance-only prefix
+    # rule (mirroring the one still in serve_image's inline comments below).
+    # Building the mainevent equivalent of that prefix rule would have been
+    # a SECOND near-identical table drifting from a first — exactly the
+    # sibling-heuristic-drift pattern this codebase has hit repeatedly (see
+    # MEMORY.md k501-sibling-heuristic-drift-pattern). `_split_team_id()`
+    # (module-level, defined near line 1667) already IS this exact rule,
+    # generalized: split a team id on its first '-' and keep the prefix.
+    # It already produces legal-coparenting -> legal, medical-general ->
+    # medical, finance-personal -> finance, and freelance-{c}-{p} ->
+    # freelance today (used for kanban-dir and knowledge-dir resolution
+    # elsewhere in this file) — and mainevent-{project} -> mainevent falls
+    # out of the SAME rule for free, with no new prefix check to write or
+    # maintain. Delegating here means there is exactly one place in the
+    # file that knows "how to find a team's base brand".
+    @classmethod
+    def _resolve_base_team(cls, team: str) -> str:
+        """Collapse a runtime team id to its base-brand slug.
+
+        Thin, named wrapper around the module-level `_split_team_id()` —
+        kept as its own method so callers read "give me the base brand"
+        rather than "split this string and take element 0, discarding the
+        project-params tail". `dns` is the one base brand this does NOT
+        fully resolve for every caller: it stays 'dns' here (matching the
+        appicons/dns/ master directory), but serve_image further maps that
+        to the 'dns-framework' dev-team subdirectory locally, since that's
+        an unrelated on-disk-layout quirk, not a base-brand question.
+        """
+        return _split_team_id(team)[0]
+
+    def serve_image(self, path, head_only=False):
+        """Serve team logos and avatars from their respective directories.
+
+        XACA-0992: head_only honors HEAD requests (send headers only, no
+        body) — see do_HEAD, which wires this in for /images/* parity with
+        serve_no_cache_static's existing head_only idiom.
+        """
         filename = path.replace('/images/', '')
 
         # First, check if the file exists in the local images directory (for startup logos, etc.)
@@ -16047,7 +16098,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header('Content-Length', len(data))
                 self.send_header('Cache-Control', 'max-age=3600')
                 self.end_headers()
-                self.wfile.write(data)
+                if not head_only:
+                    self.wfile.write(data)
                 return
             except Exception as e:
                 self.send_error(500, f"Error reading local image: {e}")
@@ -16065,21 +16117,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         team, name, img_type = match.groups()
 
-        # Map team names to actual directory names
-        team_dir_map = {
-            'dns': 'dns-framework',
-            'legal-coparenting': 'legal',
-            'medical-general': 'medical',
-            'finance-personal': 'finance',
-        }
-        # XACA-0628: every per-client/project freelance slug (now overlay-only)
-        # shares the single 'freelance' asset directory. Use a prefix rule rather
-        # than enumerating each project so current AND future overlay-only
-        # freelance slugs resolve their logos/avatars without a hardcoded entry.
-        if team.startswith('freelance-'):
-            team_dir = 'freelance'
-        else:
-            team_dir = team_dir_map.get(team, team)
+        # Map team names to actual directory names. XACA-0992: the
+        # freelance-/legal-/medical-/finance- collapsing lives in the shared
+        # _resolve_base_team() (see comment above it) so this and
+        # serve_appicon() can't drift apart. 'dns' is the one exception:
+        # its base brand IS 'dns' (that's the appicon master's directory
+        # name), but its dev-team logos/avatars physically live under
+        # 'dns-framework' — a serve_image-only on-disk quirk, applied here
+        # on top of the shared resolution rather than folded into it.
+        team_dir = self._resolve_base_team(team)
+        if team_dir == 'dns':
+            team_dir = 'dns-framework'
 
         # Build the actual file path
         dev_team_dir = Path.home() / "dev-team"
@@ -16137,9 +16185,212 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Length', len(data))
             self.send_header('Cache-Control', 'max-age=3600')
             self.end_headers()
-            self.wfile.write(data)
+            if not head_only:
+                self.wfile.write(data)
         except Exception as e:
             self.send_error(500, f"Error reading image: {e}")
+
+    # XACA-0992: the exact 7 Add-to-Home-Screen filenames scripts/gen-appicons.py
+    # produces per team (that script is frozen — do not import it here, it pulls
+    # in a hard Pillow dependency at module-import time, which server.py — the
+    # always-running production process — must never require). Keep this set in
+    # sync with gen-appicons.py's SPECS by hand; both are short and rarely change.
+    APPICON_FILENAMES = frozenset({
+        'apple-touch-icon-180.png',
+        'apple-touch-icon-167.png',
+        'apple-touch-icon-152.png',
+        'apple-touch-icon-120.png',
+        'icon-192.png',
+        'icon-512.png',
+        'icon-maskable-512.png',
+    })
+
+    # XACA-0992: base brand to fall back to when a running team's resolved
+    # base brand has no master directory on disk. See the fallback-decision
+    # comment inside serve_appicon() for the reasoning — a 404 here silently
+    # reproduces the exact "iOS Safari falls back to a screenshot thumbnail"
+    # bug this whole ticket exists to fix, so we fall back to a real icon
+    # instead. 'academy' matches the existing "unknown team -> academy"
+    # fallback precedent already used for kanban-dir resolution (see
+    # get_board_file()'s "Unknown freelance team" warning path, above).
+    APPICON_FALLBACK_TEAM = 'academy'
+
+    def serve_appicon(self, path, head_only=False):
+        """GET /appicons/<filename> and /appicons/team.webmanifest.
+
+        Serves the CURRENTLY RUNNING team's (LCARS_TEAM's) Add-to-Home-Screen
+        icon set at fixed, team-agnostic paths, resolved server-side — so the
+        single lcars-ui HTML file served to all 15 registered teams can use
+        one unqualified `<link rel="apple-touch-icon" href="appicons/...">`
+        (and one `<link rel="manifest" href="appicons/team.webmanifest">`)
+        without knowing which team it's running as.
+
+        Funnel note: PATH_PREFIXES strips a leading team segment (e.g.
+        '/academy') from self.path BEFORE do_GET's dispatch ever sees this
+        method, so a funnel request for '/academy/appicons/icon-192.png'
+        and a bare request for '/appicons/icon-192.png' both arrive here as
+        an identical '/appicons/icon-192.png' — this method never needs to
+        know which form the browser actually used.
+
+        XACA-0992: head_only honors HEAD requests (headers only, no body) —
+        see do_HEAD, which wires this in so iOS's HEAD-before-GET probe for
+        the icon/manifest gets the same status/headers a GET would.
+        """
+        name = path[len('/appicons/'):]
+
+        if name == 'team.webmanifest':
+            self._serve_appicon_manifest(head_only=head_only)
+            return
+
+        # Whitelist membership against a fixed, enumerated set of exactly 7
+        # literal filenames IS the path-traversal defense here: no traversal
+        # sequence ('../', encoded variants, absolute paths, ...) can ever
+        # equal one of these 7 exact strings, so anything else is rejected
+        # before a Path is ever built from it. The containment check below is
+        # a second, defense-in-depth guard matching this file's existing
+        # convention (see the CR-doc handlers' `.resolve()` + `.relative_to()`
+        # pattern, e.g. serve_cr_content, above) — belt and suspenders, not
+        # either/or.
+        if name not in self.APPICON_FILENAMES:
+            self.send_error(404, f"Unknown appicon file: {name}")
+            return
+
+        base_team = self._resolve_base_team(LCARS_TEAM)
+        appicons_root = (UI_DIR / "images" / "appicons").resolve()
+        team_dir = (appicons_root / base_team).resolve()
+
+        # Fallback decision (documented, not implicit): if the running team's
+        # resolved base brand has no master directory on disk, DO NOT 404.
+        # An apple-touch-icon 404 makes iOS Safari silently substitute a
+        # screenshot thumbnail of the page for the home-screen icon — that
+        # silent substitution is the precise bug XACA-0992 exists to fix, so
+        # a 404 here would just move the bug rather than close it. Instead,
+        # fall back to a real, generic icon (APPICON_FALLBACK_TEAM) and log
+        # loudly, so a missing master is a visible operator problem
+        # (check server logs / add the master) rather than an invisible one
+        # (icon silently looks "fine" with no record anything was wrong).
+        if not team_dir.is_dir():
+            print(
+                f"[LCARS] WARNING: no appicons master for base team "
+                f"'{base_team}' (running team '{LCARS_TEAM}') — "
+                f"falling back to '{self.APPICON_FALLBACK_TEAM}'. "
+                f"Run scripts/gen-appicons.py --team {base_team} to fix."
+            )
+            team_dir = (appicons_root / self.APPICON_FALLBACK_TEAM).resolve()
+
+        icon_path = (team_dir / name).resolve()
+
+        # Containment check: resolved path must stay inside the resolved
+        # appicons root. Rejects any residual traversal/symlink escape the
+        # whitelist check above didn't already rule out.
+        try:
+            icon_path.relative_to(appicons_root)
+        except ValueError:
+            self.send_error(404, f"Unknown appicon file: {name}")
+            return
+
+        if not icon_path.is_file():
+            self.send_error(404, f"Appicon not found: {icon_path}")
+            return
+
+        try:
+            with open(icon_path, 'rb') as f:
+                data = f.read()
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/png')
+            self.send_header('Content-Length', len(data))
+            # XACA-0992: longer-lived than serve_image's max-age=3600 for
+            # logos/avatars — appicon masters only change on a deliberate
+            # regenerate-and-redeploy (scripts/gen-appicons.py + a restart),
+            # never as a side effect of routine team activity, so a full day
+            # trades a bit of staleness-on-redeploy for far fewer repeat
+            # fetches of files that rarely differ. Moot after the user
+            # actually adds the page to their home screen either way — iOS
+            # caches that bookmark's icon independently of any HTTP header
+            # once it's on the home screen.
+            self.send_header('Cache-Control', 'max-age=86400')
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(data)
+        except Exception as e:
+            self.send_error(500, f"Error reading appicon: {e}")
+
+    def _serve_appicon_manifest(self, head_only=False):
+        """GET /appicons/team.webmanifest — per-team Web App Manifest.
+
+        Icon `src` values are deliberately MANIFEST-RELATIVE bare filenames
+        (e.g. "icon-192.png", not "/appicons/icon-192.png" and not
+        "appicons/icon-192.png"). Per the Web App Manifest spec, a manifest's
+        relative URLs resolve against the manifest's OWN fetched URL, not the
+        page's URL. Under the Tailscale funnel the browser fetches this
+        manifest as e.g. '/academy/appicons/team.webmanifest' — PATH_PREFIXES
+        stripping is a SERVER-side rewrite of self.path, invisible to the
+        browser, so as far as the browser's manifest-URL-resolution is
+        concerned the manifest still lives at '/academy/appicons/'. A bare
+        filename resolves relative to that directory, giving
+        '/academy/appicons/icon-192.png' — which round-trips back through
+        PATH_PREFIXES correctly. A root-absolute "/appicons/icon-192.png"
+        would resolve to that literal path with NO team prefix, silently
+        breaking the funnel-prefixed form while looking correct when tested
+        bare (localhost, no prefix) — the same test gap this whole ticket's
+        Testing section calls out for the icon route itself. `start_url` and
+        `scope` use "../" for the identical reason: relative to
+        '.../appicons/', "../" is the directory ABOVE appicons/ — i.e. the
+        site root under whatever prefix the browser actually used.
+        """
+        base_team = self._resolve_base_team(LCARS_TEAM)
+        branding = self._load_registry_branding(base_team)
+        if branding and branding.get('teamName'):
+            display_name = branding['teamName']
+        else:
+            # Registry unavailable (e.g. homebrew-tap submodule not checked
+            # out — see kb-sync-personas / worktree tap-init docs) or team
+            # not found in it: degrade to a readable name rather than fail
+            # the manifest request. Best-effort only — not a source of truth.
+            display_name = base_team.replace('-', ' ').replace('_', ' ').title()
+
+        manifest = {
+            "name": display_name,
+            "short_name": display_name,
+            "start_url": "../",
+            "scope": "../",
+            "display": "standalone",
+            "background_color": "#000000",
+            "theme_color": "#000000",
+            "icons": [
+                {
+                    "src": "icon-192.png",
+                    "sizes": "192x192",
+                    "type": "image/png",
+                    "purpose": "any",
+                },
+                {
+                    "src": "icon-512.png",
+                    "sizes": "512x512",
+                    "type": "image/png",
+                    "purpose": "any",
+                },
+                {
+                    "src": "icon-maskable-512.png",
+                    "sizes": "512x512",
+                    "type": "image/png",
+                    "purpose": "maskable",
+                },
+            ],
+        }
+
+        data = json.dumps(manifest, indent=2).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/manifest+json')
+        self.send_header('Content-Length', len(data))
+        # XACA-0992: shorter-lived than the PNG icons above — this is a tiny
+        # JSON document and a stale team NAME (vs. a stale pixel) is the more
+        # user-visible mismatch if it lags a redeploy.
+        self.send_header('Cache-Control', 'max-age=3600')
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(data)
 
     # XACA-0460-002: registry.json path — resolved once at class definition time.
     # server.py lives at <repo>/lcars-ui/server.py; registry.json is at
@@ -19448,14 +19699,60 @@ end tell
         XACA-0569: extend HEAD parity to .js / .html / .css served via
         serve_no_cache_static so HEAD probes see the same no-cache headers as
         GET. Falls through to the parent handler for everything else.
+
+        XACA-0992: two more parity gaps closed here.
+
+        1. PATH_PREFIXES stripping. do_GET strips a leading funnel prefix
+           (e.g. '/academy') from self.path BEFORE any of its dispatch runs
+           (server.py's do_GET, near the top). do_HEAD never did this, so
+           'HEAD /academy/index.html' fell all the way through to
+           super().do_HEAD() with the prefix still attached, which resolves
+           against UI_DIR/academy/index.html (no such on-disk path) and
+           404s — confirmed live before this fix. Mirroring do_GET's loop
+           here (same redirect-on-bare-prefix behavior included) makes HEAD
+           see the identical stripped path GET dispatches on.
+        2. /appicons/* and /images/* routes. Neither serve_appicon nor
+           serve_image was ever wired into do_HEAD, so a HEAD for either
+           fell through to SimpleHTTPRequestHandler.do_HEAD(), which only
+           knows the on-disk static tree and can't see these server-side-
+           resolved virtual routes — 404 on both, confirmed live. Both
+           methods below take head_only the same way serve_no_cache_static
+           and serve_lcars_target already do.
         """
         from urllib.parse import urlparse
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        # XACA-0992: mirror do_GET's PATH_PREFIXES stripping so HEAD sees the
+        # same virtual path GET does for funnel-prefixed requests. Also
+        # rewrite self.path (not just the local `path`), matching do_GET,
+        # so the super().do_HEAD() static-file fallback below (which reads
+        # self.path, not this method's local variable) sees the stripped
+        # form too.
+        #
+        # ORDERING (XACA-0992 rebase onto XACA-0161): this stripping runs
+        # BEFORE the /terminal/ guard below, deliberately. That guard matches
+        # on a bare '/terminal/...' prefix, so against a funnel-prefixed
+        # '/academy/terminal/...' it would not fire at all and the request
+        # would fall through to the static handler — precisely the shadowing
+        # the guard exists to prevent. Stripping first makes it fire for both
+        # the bare and the prefixed form.
+        for prefix in self.PATH_PREFIXES:
+            if path == prefix:
+                self.send_response(301)
+                self.send_header('Location', prefix + '/')
+                self.end_headers()
+                return
+            if path.startswith(prefix + '/'):
+                path = path[len(prefix):] or '/'
+                self.path = path + ('?' + parsed.query if parsed.query else '')
+                break
+
         # XACA-0161-003: HEAD never reaches the terminal bridge. A HEAD cannot
         # carry a WebSocket upgrade, and letting it fall through to
         # SimpleHTTPRequestHandler.do_HEAD would put /terminal/* in front of
-        # the static file server — the exact shadowing evaluation §6.5 item 5
-        # warns about, on the one route family that must never touch disk.
+        # the static file server — the exact shadowing evaluation section 6.5
+        # item 5 warns about, on the one route family that must never touch disk.
         if path.startswith(_TERMINAL_ROUTE_PREFIX) or path == '/api/terminals':
             self.send_response(405)
             self.send_header('Allow', 'GET')
@@ -19468,6 +19765,16 @@ end tell
             return
         if path == '/lcars-target.local.js':
             self.serve_lcars_target_local(head_only=True)
+            return
+        # XACA-0992: HEAD parity for the per-team Add-to-Home-Screen icons +
+        # webmanifest, and for /images/ (team logos/avatars — pre-existing
+        # gap, same one-line class of fix, fixed alongside for a clearly
+        # beneficial and mechanically identical parity win).
+        if path.startswith('/appicons/'):
+            self.serve_appicon(path, head_only=True)
+            return
+        if path.startswith('/images/'):
+            self.serve_image(path, head_only=True)
             return
         if path.endswith('.js') or path.endswith('.html') or path.endswith('.css') or path == '/':
             self.serve_no_cache_static(path, head_only=True)
