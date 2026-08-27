@@ -46,7 +46,15 @@
 #     9.  claude/statusline-command.sh _get_team_kanban_dir() case
 #
 #   STATIC MAPS (not derivable from registry):
-#     10. lcars-ui/server.py team_dir_map (asset dir for image serving)
+#     10. RETIRED (XACA-0992): lcars-ui/server.py's per-team `team_dir_map`
+#         dict this site used to populate was replaced by the generic
+#         _resolve_base_team()/_split_team_id() rule (splits any team id on
+#         its first hyphen — no per-team registration needed at all). This
+#         numbered slot is kept as a no-op, reported as such below, so the
+#         site numbering below and in kb-init-team --check-only output
+#         doesn't shift out from under any doc/runbook referencing sites by
+#         number. See scripts/kb-init-team's ASSET_DIR derivation comment
+#         for the invariant server.py now enforces instead.
 #     11. amb-session-map.json (terminal-session → persona entries)
 #
 #   BOARD + DIRECTORY TREE (provisioning, not registration):
@@ -397,6 +405,38 @@ _derive_defaults() {
     fi
 
     # ASSET_DIR: derive from team-id prefix segment
+    #
+    # XACA-0992 (protected subitem 022): lcars-ui/server.py's
+    # _resolve_base_team()/_split_team_id() resolve ANY runtime team id to
+    # a base-brand slug by splitting on the FIRST hyphen and keeping only
+    # that first segment (e.g. 'mainevent-newproject-ios' -> 'mainevent') —
+    # unconditionally, with no per-team registration required. That is a
+    # hard invariant server.py's image/appicon serving depends on: whatever
+    # directory a team's logos/avatars/appicon masters actually live under
+    # MUST be exactly that first segment (or the one hardcoded exception,
+    # 'dns' -> 'dns-framework', which server.py's serve_image applies on
+    # top of the shared resolution and is NOT something new teams get by
+    # default here).
+    #
+    # The default case below used to be `ASSET_DIR="${TEAM_ID}"` — the FULL
+    # team id, hyphens and all. For any hyphenated id whose first segment
+    # is not one of the four enumerated multi-project prefixes (a brand
+    # new 'mainevent-<project>-<platform>' team, or any future org that
+    # follows the same <brand>-<project>-<platform> convention), that
+    # produced an ASSET_DIR the serving code would NEVER actually look
+    # in — server.py always collapses to the first segment regardless of
+    # what this script decided to materialize on disk, so a team
+    # provisioned under the old default silently 404s (or falls back to
+    # APPICON_FALLBACK_TEAM's icons / no logo at all) with no error
+    # anywhere pointing at the mismatch. Defaulting to `first_seg` instead
+    # makes this script's default agree with server.py's resolution by
+    # construction, for every prefix, present or future — not just the
+    # four enumerated here today. An operator who genuinely needs a
+    # different physical directory can still pass `--asset-dir` explicitly
+    # (this default only fires when unset); doing so for a prefix outside
+    # the dns-framework exception is almost certainly a mismatch with how
+    # server.py will resolve that team's requests, so treat that as a
+    # deliberate, documented override, not a routine choice.
     if [[ -z "$ASSET_DIR" ]]; then
         local first_seg="${TEAM_ID%%-*}"
         case "$first_seg" in
@@ -405,9 +445,30 @@ _derive_defaults() {
             medical)   ASSET_DIR="medical" ;;
             finance)   ASSET_DIR="finance" ;;
             dns)       ASSET_DIR="dns-framework" ;;
-            *)         ASSET_DIR="${TEAM_ID}" ;;
+            *)         ASSET_DIR="${first_seg}" ;;
         esac
     fi
+
+    # XACA-0992 (protected subitem 022): cheap enforcement of the same
+    # invariant for an EXPLICIT `--asset-dir` override too — the default
+    # case above can no longer drift from server.py's resolution by
+    # construction, but a hand-supplied override bypasses that default
+    # entirely and gets no such guarantee. Warn (not a hard fail: an
+    # operator may deliberately be pointing at an existing shared brand
+    # directory, e.g. a new mainevent-* team explicitly passing
+    # `--asset-dir mainevent`, which is exactly the correct override for a
+    # prefix this script does not yet special-case) whenever the value
+    # will not actually be what server.py's _resolve_base_team()/dns
+    # exception resolves this team id to — that mismatch is invisible
+    # until someone notices a broken icon/logo, so surface it at creation
+    # time instead.
+    _asset_dir_first_seg="${TEAM_ID%%-*}"
+    _asset_dir_expected="${_asset_dir_first_seg}"
+    [[ "$_asset_dir_first_seg" == "dns" ]] && _asset_dir_expected="dns-framework"
+    if [[ "$ASSET_DIR" != "$_asset_dir_expected" ]]; then
+        echo "WARNING: --asset-dir '${ASSET_DIR}' does not match what lcars-ui/server.py's _resolve_base_team() will resolve team '${TEAM_ID}' to ('${_asset_dir_expected}'). Logo/avatar/appicon serving always uses the RESOLVED value, never this script's ASSET_DIR directly — if '${ASSET_DIR}' is not also '${_asset_dir_expected}' on disk (or a deliberate symlink to it), image serving for this team will silently 404 or fall back to another team's icons. Proceeding with the explicit override as requested." >&2
+    fi
+    unset _asset_dir_first_seg _asset_dir_expected
 
     # PORT_BAND_BASE: default based on team-id prefix
     if [[ -z "$PORT_BAND_BASE" ]]; then
@@ -719,35 +780,18 @@ open(path, 'w').write(new_src)
 PYEOF
 }
 
-# ── Insert into server.py team_dir_map ────────────────────────────────────────
-
-_insert_team_dir_map() {
-    local team_id="$1" asset_dir="$2"
-    python3 - "${SERVER_PY}" "$team_id" "$asset_dir" <<'PYEOF'
-import sys, re
-path, team_id, asset_dir = sys.argv[1], sys.argv[2], sys.argv[3]
-src = open(path).read()
-
-# Check already present
-if f"'{team_id}': '{asset_dir}'" in src or f'"{team_id}": "{asset_dir}"' in src:
-    sys.exit(0)
-
-# Find team_dir_map dict closing brace
-pattern = r'(        team_dir_map = \{[^}]+\})'
-m = re.search(pattern, src, re.DOTALL)
-if not m:
-    print(f"ERROR: team_dir_map not found in {path}", file=sys.stderr)
-    sys.exit(1)
-
-# Insert before the closing brace
-dict_text = m.group(0)
-insert_line = f"            '{team_id}': '{asset_dir}',"
-closing_brace_idx = dict_text.rfind('}')
-new_dict = dict_text[:closing_brace_idx] + insert_line + '\n        ' + dict_text[closing_brace_idx:]
-new_src = src[:m.start()] + new_dict + src[m.end():]
-open(path, 'w').write(new_src)
-PYEOF
-}
+# ── server.py team_dir_map insertion — RETIRED (XACA-0992) ───────────────────
+#
+# `_insert_team_dir_map()` used to live here. Removed: the dict it edited
+# (lcars-ui/server.py's hand-rolled `team_dir_map`) was itself removed when
+# serve_image()/serve_appicon() moved to the generic
+# _resolve_base_team()/_split_team_id() rule, so this function's regex could
+# never match again and every call would `exit 1` — which, under this
+# script's `set -euo pipefail`, aborted the entire provisioning run at
+# site 10, after sites 1-9 had already succeeded. See site 10's comment at
+# its call site (search "RETIRED (XACA-0992)") for the full story and the
+# ASSET_DIR derivation comment above for the invariant server.py now
+# enforces instead.
 
 # ── Insert into amb-session-map.json ─────────────────────────────────────────
 
@@ -1504,9 +1548,12 @@ _run_check_only() {
         _check_site "statusline-command.sh _get_team_kanban_dir" \
             _chk_case_label _get_team_kanban_dir "$STATUSLINE_SH" "$TEAM_ID" || all_ok=1
 
-        # 10. server.py team_dir_map
-        _check_site "server.py team_dir_map" \
-            _chk_grep_literal "'${TEAM_ID}'" "$SERVER_PY" || all_ok=1
+        # 10. RETIRED (XACA-0992) — see the doc comment near the top of this
+        # file. server.py's team_dir_map dict no longer exists; a fresh
+        # team gets no literal entry there by design (_resolve_base_team()
+        # resolves it generically), so grepping for one would only ever
+        # report a false failure here going forward. No-op, informational.
+        echo -e "${CYAN}[SKIP]${NC} server.py team_dir_map — retired (XACA-0992, resolved generically now)"
 
         # 11. amb-session-map.json
         _check_site "amb-session-map.json" \
@@ -2016,17 +2063,27 @@ sys.exit(0 if '${TEAM_ID}' in d.get('teams', {}) else 1)
             fi
         fi
 
-        # ── Site 10: server.py team_dir_map ──────────────────────────────
-
+        # ── Site 10: RETIRED (XACA-0992) ──────────────────────────────────
+        #
+        # This used to insert '${TEAM_ID}': '${ASSET_DIR}' into a hand-rolled
+        # team_dir_map dict in lcars-ui/server.py. That dict was removed
+        # entirely when server.py's team-logo/avatar/appicon serving moved
+        # to the generic _resolve_base_team()/_split_team_id() rule (splits
+        # any team id on its first hyphen, no per-team entry required) —
+        # so the pattern this step used to search for no longer exists in
+        # server.py at all. Left wired in, this step would `exit 1` on
+        # every future team (site 10's python helper prints "ERROR:
+        # team_dir_map not found" and fails closed) and, under this
+        # script's `set -euo pipefail`, would silently abort the ENTIRE
+        # provisioning run right here — after sites 1-9 already succeeded,
+        # before sites 11-14 (amb-session-map.json, board, directory tree,
+        # knowledge scaffolding) ever ran. Retired to a no-op instead of
+        # deleted outright so the site numbering below (and anything that
+        # references sites by number) doesn't shift.
         if [[ "$DRY_RUN" -eq 1 ]]; then
-            _dry "Would insert '${TEAM_ID}': '${ASSET_DIR}' into server.py team_dir_map"
+            _dry "server.py team_dir_map — retired (XACA-0992), nothing to insert"
         else
-            if grep -q "'${TEAM_ID}'" "${SERVER_PY}"; then
-                _skip "server.py team_dir_map"
-            else
-                _insert_team_dir_map "$TEAM_ID" "$ASSET_DIR"
-                _ok "server.py team_dir_map"
-            fi
+            echo -e "${CYAN}[SKIP]${NC} server.py team_dir_map — retired (XACA-0992, resolved generically now)"
         fi
 
         # ── Site 11: amb-session-map.json ─────────────────────────────────
@@ -2157,7 +2214,7 @@ sys.exit(0 if any(k.startswith('${TEAM_ID}-') for k in d) else 1)
         _info "  1. Run ./sync-tap.sh to sync canonical sources to homebrew-tap/share/"
         _info "  2. Commit: git add <changed-files> && git commit -m 'feat: register team ${TEAM_ID}'"
         _info "  3. The tap's share/kanban-hooks/ copies sync via sync-tap.sh (XACA-0340 rule)"
-        _info "  4. LCARS server restart needed to pick up new team_dir_map entry in server.py"
+        _info "  4. server.py needs NO new entry (XACA-0992: _resolve_base_team() resolves this generically from the team id) — restart only picks up other config, e.g. team-paths.json"
         _info "  5. kanban_utils and server prefix maps derive at next import — no restart needed"
     else
         _info "Team '${TEAM_ID}' board and directory tree provisioned (local-only mode)."

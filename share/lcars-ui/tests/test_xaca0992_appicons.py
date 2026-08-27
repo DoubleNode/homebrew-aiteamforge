@@ -364,6 +364,229 @@ class TestServeAppiconRejectsInvalidAndTraversal(unittest.TestCase):
         self.assertEqual(mut_buf.getvalue(), ios_buf.getvalue())
 
 
+class _NeverRemembers:
+    """A dedupe-set stand-in that never records anything — every
+    `in` check is False and `.add()` is a no-op. Used to mutate away the
+    XACA-0992 subitem-020 throttle guard: with this swapped in for
+    `_appicon_missing_master_warned`, the "already warned" branch can never
+    be true, reproducing the pre-fix behaviour of printing on every single
+    call regardless of prior warnings for the same base team."""
+
+    def __contains__(self, item):
+        return False
+
+    def add(self, item):
+        pass
+
+
+class TestServeAppiconMissingMasterWarningThrottled(unittest.TestCase):
+    """XACA-0992 review (protected subitem 020): serve_appicon()'s "no
+    appicons master" fallback warning used to print unconditionally on
+    every request, so one page load (which fetches all 7 appicon files)
+    logged 7 identical WARNING lines for a single missing master. Throttled
+    to once per base_team via a class-level dedupe set, matching the
+    existing _planned_heal_warned convention elsewhere in this file — see
+    the comment above _appicon_missing_master_warned."""
+
+    def _missing_master_fixture(self, tmp):
+        """Build an appicons_root with ONLY the fallback ('academy') master
+        present — the requested base team has no directory at all, so
+        every request for it hits the missing-master branch."""
+        fake_ui_dir = Path(tmp)
+        appicons_root = fake_ui_dir / "images" / "appicons"
+        fallback_dir = appicons_root / "academy"
+        fallback_dir.mkdir(parents=True)
+        png_bytes = b'\x89PNG\r\n\x1a\nFALLBACK'
+        for filename in server.LCARSHandler.APPICON_FILENAMES:
+            (fallback_dir / filename).write_bytes(png_bytes)
+        return fake_ui_dir
+
+    def test_second_request_for_same_missing_team_does_not_rewarn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_ui_dir = self._missing_master_fixture(tmp)
+
+            with patch.object(server, "UI_DIR", fake_ui_dir), \
+                 patch.object(server, "LCARS_TEAM", "missingteam"), \
+                 patch.object(server.LCARSHandler, "_appicon_missing_master_warned", set()), \
+                 patch("builtins.print") as mock_print:
+                handler1, buf1 = _make_handler("/appicons/icon-192.png")
+                handler1.serve_appicon("/appicons/icon-192.png")
+                handler2, buf2 = _make_handler("/appicons/icon-512.png")
+                handler2.serve_appicon("/appicons/icon-512.png")
+
+            # Both requests still succeed (served from the fallback) —
+            # throttling the WARNING must never affect the actual response.
+            self.assertEqual(handler1._response_code, 200)
+            self.assertEqual(handler2._response_code, 200)
+
+            warning_calls = [
+                c for c in mock_print.call_args_list
+                if c.args and "no appicons master" in str(c.args[0])
+            ]
+            self.assertEqual(
+                len(warning_calls), 1,
+                "Two requests for the SAME missing base team must produce "
+                f"exactly one WARNING print, got {len(warning_calls)}: "
+                f"{warning_calls}",
+            )
+
+    def test_different_missing_team_still_gets_its_own_warning(self):
+        """Throttling is keyed per base_team, not a single global on/off —
+        a distinct missing team must still warn even after another team's
+        warning has already fired."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_ui_dir = self._missing_master_fixture(tmp)
+
+            with patch.object(server, "UI_DIR", fake_ui_dir), \
+                 patch.object(server.LCARSHandler, "_appicon_missing_master_warned", set()), \
+                 patch("builtins.print") as mock_print:
+                # No hyphens — a hyphenated id (e.g. 'missingteam-one') would
+                # collapse via _split_team_id() to the SAME base brand
+                # ('missingteam'), which would defeat this test's own
+                # premise of two genuinely distinct base teams.
+                with patch.object(server, "LCARS_TEAM", "missingteamone"):
+                    h1, _ = _make_handler("/appicons/icon-192.png")
+                    h1.serve_appicon("/appicons/icon-192.png")
+                with patch.object(server, "LCARS_TEAM", "missingteamtwo"):
+                    h2, _ = _make_handler("/appicons/icon-192.png")
+                    h2.serve_appicon("/appicons/icon-192.png")
+
+            warning_calls = [
+                c for c in mock_print.call_args_list
+                if c.args and "no appicons master" in str(c.args[0])
+            ]
+            self.assertEqual(
+                len(warning_calls), 2,
+                "Two DIFFERENT missing base teams must each get their own "
+                f"warning, got {len(warning_calls)}: {warning_calls}",
+            )
+
+    def test_throttle_can_actually_fail_against_an_unguarded_mutation(self):
+        """Mutation proof: swap the real dedupe set for _NeverRemembers(),
+        which can never report "already warned" — reproducing the pre-fix
+        unconditional-print behaviour. Two requests for the SAME missing
+        team must then produce TWO warnings, proving the throttle test
+        above is exercising a real guard and not vacuously passing (e.g.
+        because the fixture only happens to trigger one request)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_ui_dir = self._missing_master_fixture(tmp)
+
+            with patch.object(server, "UI_DIR", fake_ui_dir), \
+                 patch.object(server, "LCARS_TEAM", "missingteam"), \
+                 patch.object(server.LCARSHandler, "_appicon_missing_master_warned", _NeverRemembers()), \
+                 patch("builtins.print") as mock_print:
+                h1, _ = _make_handler("/appicons/icon-192.png")
+                h1.serve_appicon("/appicons/icon-192.png")
+                h2, _ = _make_handler("/appicons/icon-512.png")
+                h2.serve_appicon("/appicons/icon-512.png")
+
+            warning_calls = [
+                c for c in mock_print.call_args_list
+                if c.args and "no appicons master" in str(c.args[0])
+            ]
+            self.assertEqual(
+                len(warning_calls), 2,
+                "With the dedupe guard defeated, two requests for the same "
+                f"missing team must produce two warnings, got "
+                f"{len(warning_calls)} — this mutation no longer proves the "
+                "throttle test above is load-bearing.",
+            )
+
+
+class TestServeAppiconSymlinkEscapeReturns404(unittest.TestCase):
+    """PR #780 review (non-blocking regression): `team_dir.relative_to(
+    appicons_root)` used to be evaluated as a bare argument expression to
+    `_resolve_contained_path(...)`, OUTSIDE that helper's own try/except.
+    If the on-disk `appicons/<base_team>` entry is a symlink pointing
+    outside `appicons_root`, `team_dir` (already `.resolve()`d earlier in
+    serve_appicon) points at the escaped, real target — and `.is_dir()`
+    still returns True for it (it's a real directory, just not the one
+    under appicons_root), so the "no master for this team" fallback branch
+    does NOT trigger either. `.relative_to(appicons_root)` then raises
+    ValueError, uncaught, producing an unhandled-exception 500 instead of
+    the clean 404 every other containment failure on this route produces.
+    Fixed by moving that call inside its own try/except ValueError -> 404.
+    """
+
+    def test_symlinked_team_dir_escaping_root_returns_404_not_500(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_ui_dir = Path(tmp)
+            appicons_root = fake_ui_dir / "images" / "appicons"
+            appicons_root.mkdir(parents=True)
+
+            outside = fake_ui_dir / "outside-appicons-root"
+            outside.mkdir()
+            # A file here would be leaked bytes if the escape ever served
+            # content instead of 404ing — not exercised directly (this test
+            # only checks status/response emptiness), but documents what a
+            # successful escape would actually expose.
+            (outside / "icon-192.png").write_bytes(b'\x89PNG\r\n\x1a\nESCAPED-BYTES')
+
+            # 'evilteam' has no hyphen, so _resolve_base_team/_split_team_id
+            # returns it unchanged — base_team == 'evilteam', matching the
+            # symlink name below with no extra remapping to account for.
+            (appicons_root / "evilteam").symlink_to(outside, target_is_directory=True)
+
+            # Real fallback dir too, so if the fix regresses to over-eagerly
+            # falling back (rather than 404ing) this test still fails
+            # loudly instead of accidentally passing on a 200 from academy's
+            # real fallback icon.
+            fallback_dir = appicons_root / "academy"
+            fallback_dir.mkdir()
+            (fallback_dir / "icon-192.png").write_bytes(b'\x89PNG\r\n\x1a\nFALLBACK')
+
+            with patch.object(server, "UI_DIR", fake_ui_dir), \
+                 patch.object(server, "LCARS_TEAM", "evilteam"):
+                handler, buf = _make_handler("/appicons/icon-192.png")
+                handler.serve_appicon("/appicons/icon-192.png")
+
+            self.assertEqual(
+                handler._response_code, 404,
+                "Symlinked team dir escaping appicons_root must 404, not "
+                "500/raise — got response code "
+                f"{handler._response_code!r}",
+            )
+            self.assertEqual(buf.getvalue(), b"")
+
+    def test_symlink_escape_can_actually_fail_against_the_pre_fix_call(self):
+        """Mutation proof: reconstruct the PRE-FIX call shape — evaluating
+        `team_dir.relative_to(appicons_root)` as a bare expression, not
+        inside a try/except — against the exact same escaped-symlink
+        fixture, and confirm it raises ValueError uncaught. This proves
+        the 404 assertion above is not vacuously true against the current
+        code (i.e. the escape fixture genuinely produces a containment
+        failure, not e.g. a coincidental 404 from some unrelated check)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_ui_dir = Path(tmp)
+            appicons_root = fake_ui_dir / "images" / "appicons"
+            appicons_root.mkdir(parents=True)
+            outside = fake_ui_dir / "outside-appicons-root"
+            outside.mkdir()
+            (appicons_root / "evilteam").symlink_to(outside, target_is_directory=True)
+
+            team_dir = (appicons_root / "evilteam").resolve()
+            appicons_root_resolved = appicons_root.resolve()
+
+            # Sanity: the escape fixture actually escapes.
+            with self.assertRaises(ValueError):
+                team_dir.relative_to(appicons_root_resolved)
+
+            # And is_dir() is True (proving the earlier fallback branch,
+            # which checks `not team_dir.is_dir()`, would NOT have caught
+            # this — the bug is specifically in the relative_to() call, not
+            # a missing directory).
+            self.assertTrue(team_dir.is_dir())
+
+            # Pre-fix call shape: bare expression, no try/except -> raises,
+            # uncaught, exactly reproducing the pre-fix 500.
+            with self.assertRaises(ValueError):
+                server.LCARSHandler._resolve_contained_path(
+                    appicons_root_resolved,
+                    team_dir.relative_to(appicons_root_resolved),
+                    "icon-192.png",
+                )
+
+
 class _PermissiveContainsEverything:
     """A whitelist stand-in whose `in` always returns True — the mutation
     used above to prove the real whitelist is load-bearing."""

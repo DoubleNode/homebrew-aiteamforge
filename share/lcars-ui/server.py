@@ -16345,6 +16345,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # get_board_file()'s "Unknown freelance team" warning path, above).
     APPICON_FALLBACK_TEAM = 'academy'
 
+    # XACA-0992 review (protected subitem 020): per-base_team dedupe set for
+    # the "no appicons master" fallback warning below — same convention as
+    # _planned_heal_warned above (keyed by team, populated on first
+    # occurrence, reset never: warn once per process). Without this, every
+    # page load prints one WARNING line per appicon file requested (7 —
+    # APPICON_FILENAMES' size — plus the manifest), all identical, for as
+    # long as the missing master stays missing. Keyed on base_team, not
+    # LCARS_TEAM: base_team is what actually determines whether a master
+    # exists, and it is effectively constant for the life of a running
+    # instance (one team per process), so this amounts to "warn once at
+    # startup, not once per request" without silencing the signal entirely
+    # — the whole point of the warning is that a missing master stays
+    # diagnosable, just not by flooding the log on every fetch.
+    _appicon_missing_master_warned: set = set()
+
     def serve_appicon(self, path, head_only=False):
         """GET /appicons/<filename> and /appicons/team.webmanifest.
 
@@ -16400,12 +16415,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # (check server logs / add the master) rather than an invisible one
         # (icon silently looks "fine" with no record anything was wrong).
         if not team_dir.is_dir():
-            print(
-                f"[LCARS] WARNING: no appicons master for base team "
-                f"'{base_team}' (running team '{LCARS_TEAM}') — "
-                f"falling back to '{self.APPICON_FALLBACK_TEAM}'. "
-                f"Run scripts/gen-appicons.py --team {base_team} to fix."
-            )
+            if base_team not in self.__class__._appicon_missing_master_warned:
+                self.__class__._appicon_missing_master_warned.add(base_team)
+                print(
+                    f"[LCARS] WARNING: no appicons master for base team "
+                    f"'{base_team}' (running team '{LCARS_TEAM}') — "
+                    f"falling back to '{self.APPICON_FALLBACK_TEAM}'. "
+                    f"Run scripts/gen-appicons.py --team {base_team} to fix. "
+                    f"(Logged once per base team per process.)"
+                )
             team_dir = (appicons_root / self.APPICON_FALLBACK_TEAM).resolve()
 
         # Containment check via the shared helper (also used by serve_image()
@@ -16416,7 +16434,25 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # `name` against team_dir and containing against appicons_root is
         # equivalent to containing against team_dir directly — done against
         # appicons_root here to match the pre-existing check exactly.
-        icon_path = self._resolve_contained_path(appicons_root, team_dir.relative_to(appicons_root), name)
+        #
+        # XACA-0992 (PR #780 review, non-blocking regression): `team_dir`
+        # is built from base_team/APPICON_FALLBACK_TEAM, not request input —
+        # but if the on-disk `appicons/<base_team>` entry is itself a
+        # SYMLINK pointing outside appicons_root, `team_dir`'s own .resolve()
+        # above already followed it, and `.relative_to(appicons_root)` here
+        # then raises ValueError. That call used to sit as a bare expression
+        # (an argument to _resolve_contained_path, evaluated before the
+        # function body's own try/except ever runs), so the ValueError
+        # propagated uncaught out of this method as an unhandled exception
+        # -> 500, instead of the clean 404 every other containment failure
+        # on this route produces. Caught explicitly here so a symlinked
+        # team directory degrades the same way a '../' traversal does.
+        try:
+            team_dir_rel = team_dir.relative_to(appicons_root)
+        except ValueError:
+            self.send_error(404, f"Unknown appicon file: {name}")
+            return
+        icon_path = self._resolve_contained_path(appicons_root, team_dir_rel, name)
         if icon_path is None:
             self.send_error(404, f"Unknown appicon file: {name}")
             return
