@@ -244,7 +244,30 @@ test('all client files produce IDENTICAL isLcarsTerminal + createServiceOnlyLcar
     }
 });
 
-test('actual output matches the checked-in golden baseline byte-for-byte, restricted to files present here', () => {
+// XACA-0990 re-review finding 1: the diff test below normalises the golden
+// side (JSON.parse -> stableStringify) before comparing, so it cannot see a
+// whitespace-only edit to the artifact on disk -- yet its name promised
+// "byte-for-byte on disk". The whole correctness argument of this ticket rests
+// on that artifact being the UNTOUCHED pre-refactor capture, so the promise is
+// worth keeping rather than the name worth softening. This test pins the raw
+// on-disk bytes: the file must be exactly what stableStringify would emit for
+// its own parsed content. Any reformat, re-indent, or trailing-newline change
+// fails here, loudly, before the (still normalised) content diff runs.
+test('golden baseline file is byte-exact on disk, not merely equivalent when parsed', () => {
+    const raw = fs.readFileSync(BASELINE_PATH, 'utf8');
+    const roundTripped = stableStringify(JSON.parse(raw));
+    assert.strictEqual(
+        raw,
+        roundTripped,
+        'The golden baseline\'s raw bytes differ from its canonical serialisation. ' +
+            'Content may be unchanged, but the artifact has been reformatted -- which ' +
+            'means something rewrote a file that must stay the untouched pre-refactor ' +
+            'capture. Investigate WHY it was rewritten before restoring it; do NOT ' +
+            'regenerate it to make this pass.'
+    );
+});
+
+test('actual output matches the golden baseline (canonical form), restricted to files present here', () => {
     assert.ok(
         fs.existsSync(BASELINE_PATH),
         'golden baseline missing at ' + BASELINE_PATH + ' -- run node tests/scripts/generate-xaca-0990-001-baseline.js'

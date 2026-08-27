@@ -108,12 +108,19 @@ function identifyKnownFileSet(discoveredFiles) {
 
     const allKnownFiles = new Set(Object.values(KNOWN_GOOD_FILE_SETS).flat());
     const unexpected = discoveredFiles.filter((f) => !allKnownFiles.has(f));
+    // XACA-0990 re-review finding 2: rank by SYMMETRIC difference, not by
+    // missing-count alone. A superset (e.g. the tap's 3 files plus one that
+    // should not be there) has missing.length === 0, so a missing-only rank
+    // named it "closest" and then reported "missing: []" -- true, useless,
+    // and actively misleading for what is the likeliest real failure. Both
+    // halves of the difference are now ranked and reported.
     const ranked = Object.entries(KNOWN_GOOD_FILE_SETS)
-        .map(([label, files]) => ({
-            label: label,
-            missing: files.filter((f) => !discoveredFiles.includes(f))
-        }))
-        .sort((a, b) => a.missing.length - b.missing.length);
+        .map(([label, files]) => {
+            const missing = files.filter((f) => !discoveredFiles.includes(f));
+            const extra = discoveredFiles.filter((f) => !files.includes(f));
+            return { label: label, missing: missing, extra: extra };
+        })
+        .sort((a, b) => (a.missing.length + a.extra.length) - (b.missing.length + b.extra.length));
     const closest = ranked[0];
 
     throw new Error(
@@ -123,7 +130,9 @@ function identifyKnownFileSet(discoveredFiles) {
             (unexpected.length > 0
                 ? 'File(s) not in ANY known set: ' + JSON.stringify(unexpected) + '\n'
                 : '') +
-            'Closest known set "' + closest.label + '" is missing: ' + JSON.stringify(closest.missing)
+            'Closest known set "' + closest.label + '":\n' +
+            '  missing from discovered: ' + JSON.stringify(closest.missing) + '\n' +
+            '  present but not in that set: ' + JSON.stringify(closest.extra)
     );
 }
 
