@@ -2686,38 +2686,87 @@
     .teams-grid {
         grid-template-columns: repeat(3, 1fr);
     }
+}
 
-    /* Narrower cards expose a latent flex defect. In the lcars skin,
-       .team-avatar-stack is flex-shrink:0, and nothing in .session-info >
-       .session-detail > .session-value sets min-width:0, so a flex item
-       cannot shrink below its content. An unbreakable hostname
-       (M1Pro-mstudio.tail1234.ts.net) then overflows and .team-card's
-       overflow:hidden clips it MID-WORD with no ellipsis and no signal.
-       Render-confirmed at 1080 and 1133, and absent at 1210 with identical
-       markup -- introduced by the pin above, not pre-existing.
+/* XACA-0976: session-value clipping guard -- GLOBAL, deliberately NOT scoped to
+   the tablet band above.
 
-       WHICH DECLARATION DOES THE WORK: overflow-wrap. Mutation-isolating the
-       two showed removing min-width:0 ALONE reproduces nothing -- 34px@1080 /
-       16px@1133 only returns when BOTH are removed. overflow-wrap:anywhere
-       already shrinks the automatic minimum size enough on its own. min-width:0
-       is kept as the canonical flex guard for other content shapes, not because
-       it is what fixes this case.
+   XACA-0973 placed these two declarations inside the 1080-1200px band. The
+   guard belongs at every width instead, because the narrow-card regime that can
+   clip a hostname is the sub-600px SINGLE-COLUMN one, which that band never
+   covered. .teams-grid is repeat(auto-fill, minmax(280px, 1fr)), so while two
+   or more tracks fit no track is ever under 280px; at the 800px breakpoint the
+   grid collapses to a single 1fr column while --sidebar-width steps down
+   (200 -> 150 at <=800px, -> 100 at <=600px -- lcars-fleet.css:994,1006).
 
-       WHY NOT ellipsis + white-space:nowrap: this band targets iPads, which are
-       touch-primary, and the title= tooltip these values carry is inert on
-       touch. Ellipsis would therefore hide the hostname outright on the exact
-       device class this band exists for, with no way to recover it. Wrapping is
-       uglier -- a domain can break mid-token -- but never destroys information.
-       (XACA-0973 [UX]) */
-    .teams-grid .session-info,
-    .teams-grid .session-detail,
-    .teams-grid .session-value {
-        min-width: 0;
-    }
+   MEASURED IN THIS SKIN, PRE-FIX: ZERO row overflow at every width tested
+   (320/375/414/500/600/799/900/1080/1133/1210/1440/1920). Cards stay wide at
+   the narrow end -- 284@320, 339@375, 378@414, 314@500 -- because this file's
+   @media (max-width: 480px) block gives .lcars-content
+   `grid-column: 1 !important; margin-left: 0 !important; padding: 0`, taking
+   the sidebar out of the content column entirely. So in THIS skin these rules
+   are a flex guard for other content shapes and skin parity, NOT a fix for an
+   observed defect. .team-avatar-stack (flex-shrink:0, 64px + 16px gap) does
+   cost real width here, but never enough to overflow at any tested viewport.
 
-    .teams-grid .session-value {
-        overflow-wrap: anywhere;
-    }
+   lcars2 is where the actual clipping was: 14px at 320 and zero elsewhere. Its
+   480px block does NOT collapse the content column (margin-left: -1px;
+   padding: 10px 10px 60px 0), so its cards run ~100px narrower at the same
+   widths (182@320 vs 284 here). Note this inverts the intuition XACA-0973
+   worked from: the skin WITHOUT the avatar column is the one that overflowed.
+
+   DO NOT TRUST THE 145px/79px/124px TABLE from the ticket -- it is a harness
+   artifact. Those numbers came from XACA-0973's stub-lcars.html, which
+   hardcodes a fixed 200px sidebar plus 36px margin and 30px padding AT EVERY
+   VIEWPORT. The real stylesheets do neither, which is how the stub produced a
+   "124px card" that cannot occur in production. Corroborated at 500px, where
+   the 480px collapse does not apply: 500 - 100 (sidebar) - 26 (margin;
+   --corner-radius is 20 at <=600) - 60 (padding both sides) = 314px, which is
+   exactly what a faithful render measures. The stub claimed 194.
+
+   WHICH DECLARATION DOES THE WORK IS UNDETERMINED -- do not drop either one.
+   XACA-0973 reported that overflow-wrap alone accounts for the fix and that
+   min-width:0 is inert, but that isolation ran under the same flawed stub
+   against cards that cannot occur, so the finding does not transfer. What IS
+   measured against faithful chrome: overflow-wrap:anywhere is INERT at desktop
+   widths -- the sample hostname contains a hyphen, so overflow-wrap:normal
+   already breaks at the same point, and .session-value heights are identical
+   pre/post at 1080/1210/1440/1920 in both skins. The two declarations have been
+   mutation-verified only TOGETHER, never separately, at the single width that
+   actually overflowed. Re-isolating them needs a browser harness against
+   faithful chrome; until someone runs one, treat both as load-bearing.
+
+   WHY NOT ellipsis + white-space:nowrap: unchanged from XACA-0973, and not a
+   measurement claim. The reporting surface is a touch-primary iPad standalone
+   web app, where the title= tooltip these .session-value spans carry is inert.
+   Ellipsis would hide the hostname outright with no way to recover it. Wrapping
+   can break a domain mid-token but never destroys information -- which is what
+   the one real height change shows: lcars2@320 goes 32px -> 48px (2 lines -> 3)
+   instead of clipping.
+
+   WHY .session-info IS ABSENT FROM THIS SELECTOR LIST (XACA-0976-003): in this
+   skin it would be dead. lcars-dashboard-app.js emits .session-info only ever
+   nested inside .session-info-with-avatar, and .session-info-with-avatar
+   .session-info (further down, in the XACA-0063-004 avatar block) already sets
+   min-width:0. This is ASYMMETRIC on purpose: lcars2 has no
+   .session-info-with-avatar rule at all, so its copy DOES keep .session-info,
+   where it is load-bearing. Do not "unify" the two selector lists.
+
+   CASCADE: these selectors are 0,2,0. Everything below them that touches the
+   same elements loses or does not compete -- the later base .session-info /
+   .session-detail / .session-value rules are 0,1,0, and the later
+   .team-card.lcars-terminal .session-value rules are 0,3,0 but set color only,
+   never min-width or overflow-wrap. The one equal-specificity rule in this file,
+   .session-info-with-avatar .session-info, no longer collides now that
+   .session-info is dropped here. The .teams-grid rules inside the 800/600/480px
+   blocks set grid and box properties only. */
+.teams-grid .session-detail,
+.teams-grid .session-value {
+    min-width: 0;
+}
+
+.teams-grid .session-value {
+    overflow-wrap: anywhere;
 }
 
 .team-card {
