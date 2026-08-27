@@ -49,6 +49,33 @@ function formatUptime(seconds) {
     return `${minutes}m`;
 }
 
+// Mirrored from server.js's resolveDivisionKey/ensureTeamBucket (XACA-0983
+// fix (b)) -- MUST stay in sync with the real implementation, same as every
+// other function in this section. See server.js for the full rationale
+// comment; not repeated here to avoid drift between two copies of the same
+// prose.
+function resolveDivisionKey(division, project) {
+    if (division === 'freelance' && project) {
+        const projectSuffix = project.replace('doublenode-', '');
+        const divisionKey = `freelance-${projectSuffix}`;
+        return { divisionKey, divisionName: divisionKey };
+    }
+    return { divisionKey: division, divisionName: division };
+}
+
+function ensureTeamBucket(divisions, divisionKey, divisionName, projectKey, projectName, team) {
+    if (!divisions[divisionKey]) {
+        divisions[divisionKey] = { name: divisionName, total_sessions: 0, projects: {} };
+    }
+    if (!divisions[divisionKey].projects[projectKey]) {
+        divisions[divisionKey].projects[projectKey] = { name: projectName, teams: {} };
+    }
+    if (!divisions[divisionKey].projects[projectKey].teams[team]) {
+        divisions[divisionKey].projects[projectKey].teams[team] = { name: team, sessions: [] };
+    }
+    return divisions[divisionKey].projects[projectKey].teams[team];
+}
+
 function generateUUID() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
         const r = Math.random() * 16 | 0;
@@ -204,27 +231,13 @@ function createApp(opts = {}) {
             for (const session of machineData.sessions || []) {
                 const { division, project, team, name, windows, attached, created, uptime_seconds, lcars_port, theme_color, tab_order } = session;
 
-                let divisionKey = division;
-                let divisionName = division;
-                if (division === 'freelance' && project) {
-                    const projectSuffix = project.replace('doublenode-', '');
-                    divisionKey = `freelance-${projectSuffix}`;
-                    divisionName = divisionKey;
-                }
+                const { divisionKey, divisionName } = resolveDivisionKey(division, project);
+                const projectKey = project || '_default';
+                const teamBucket = ensureTeamBucket(divisions, divisionKey, divisionName, projectKey, project, team);
 
-                if (!divisions[divisionKey]) {
-                    divisions[divisionKey] = { name: divisionName, total_sessions: 0, projects: {} };
-                }
                 divisions[divisionKey].total_sessions++;
 
-                const projectKey = project || '_default';
-                if (!divisions[divisionKey].projects[projectKey]) {
-                    divisions[divisionKey].projects[projectKey] = { name: project, teams: {} };
-                }
-                if (!divisions[divisionKey].projects[projectKey].teams[team]) {
-                    divisions[divisionKey].projects[projectKey].teams[team] = { name: team, sessions: [] };
-                }
-                divisions[divisionKey].projects[projectKey].teams[team].sessions.push({
+                teamBucket.sessions.push({
                     name, division, project, team,
                     hostname: machineData.hostname,
                     machine_status: machineData.status,
@@ -232,6 +245,30 @@ function createApp(opts = {}) {
                     uptime_display: formatUptime(uptime_seconds || 0),
                     lcars_port, theme_color, tab_order
                 });
+            }
+
+            // XACA-0983 fix (b) -- mirrors server.js's parseFleetData lcars_services
+            // loop. See server.js for the full rationale comment.
+            const lcarsServices = Array.isArray(machineData.lcars_services) ? machineData.lcars_services : [];
+            for (const svc of lcarsServices) {
+                if (!svc || typeof svc !== 'object') continue;
+                const { division, project, team, port, reachable, session_name, source } = svc;
+                if (!division || !team || !Number.isFinite(Number(port))) continue;
+
+                const { divisionKey, divisionName } = resolveDivisionKey(division, project);
+                const projectKey = project || '_default';
+                const teamBucket = ensureTeamBucket(divisions, divisionKey, divisionName, projectKey, project, team);
+
+                const existing = teamBucket.lcars_service;
+                if (!existing || reachable === true || existing.reachable !== true) {
+                    teamBucket.lcars_service = {
+                        port: Number(port),
+                        reachable: reachable === true ? true : (reachable === false ? false : null),
+                        session_name: session_name || null,
+                        source: source || 'portfile',
+                        hostname: machineData.hostname
+                    };
+                }
             }
         }
 
@@ -306,7 +343,7 @@ function createApp(opts = {}) {
     // POST /api/status
     app.post('/api/status', (req, res) => {
         try {
-            const { machine, sessions, backup_status } = req.body;
+            const { machine, sessions, backup_status, lcars_services } = req.body;
             if (!machine || !machine.hostname) {
                 return res.status(400).json({ error: 'Missing required field: machine.hostname' });
             }
@@ -335,7 +372,8 @@ function createApp(opts = {}) {
                 sessions: sessions || [],
                 session_count: sessionCount,
                 uptime_history: uptimeHistory,
-                backup_status: backup_status || null
+                backup_status: backup_status || null,
+                lcars_services: Array.isArray(lcars_services) ? lcars_services : []
             });
 
             res.status(200).json({
