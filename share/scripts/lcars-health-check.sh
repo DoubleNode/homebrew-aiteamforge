@@ -521,13 +521,26 @@ _hc_wait_for_port_release() {
 # degradation, not silent breakage).
 #
 # Called by: run_health_check (normal unhealthy-team restart) AND
-# _hc_heal_noncanonical_port (XACA-0706 non-canonical-port self-heal) — both
-# keep working unmodified since this function's own signature/behavior
-# contract (args, return 0/1, log() messages) is preserved.
+# _hc_heal_noncanonical_port (XACA-0706 non-canonical-port self-heal).
+#
+# XACA-0983: gained a 4th (optional) arg, tmux_socket. Both existing callers
+# already had a tmux_socket value in lexical scope (heal path: its own $4;
+# restart path: the outer run_health_check loop variable) and were updated to
+# pass it, so this is not a break for either — but it IS a real arity/behavior
+# change: before starting the server, this function now also ensures the
+# `<team>-lcars` tmux session exists (see ensure_lcars_tmux_session in
+# lcars-launch-helpers.sh). The heal path kills that session as part of its
+# repair with nothing to recreate it, leaving a healthy server with no tmux
+# session — no Fleet Monitor LCARS tab, and the operator's attached LCARS
+# terminal tab dies with the session. If tmux_socket is omitted, session
+# recreation is skipped (loud log, not a silent no-op) and the rest of this
+# function's original contract (args, return 0/1, log() messages) is
+# unchanged.
 _hc_start_lcars_server() {
     local local_port=$1
     local team=$2
     local session_name=$3
+    local tmux_socket=$4
 
     log "  Starting LCARS server: team=$team port=$local_port session=$session_name"
 
@@ -548,6 +561,27 @@ _hc_start_lcars_server() {
     # XACA-0763 (004): suppress the lcars-target.js router-redirect write for
     # this health-check-triggered restart — see header comment above for why.
     local LCARS_SKIP_TARGET_WRITE=1
+
+    # XACA-0983: recreate the `<team>-lcars` tmux session BEFORE starting the
+    # server — mirrors canonical startup ordering (session first, server
+    # second: academy-lcars-startup.sh:29 then academy-startup.sh:203) so the
+    # session is present the instant the server answers. start_lcars_server
+    # itself never touches tmux (bare nohup spawn); this is what closes the
+    # kill-with-no-recreate gap in _hc_heal_noncanonical_port (see that
+    # function's header comment). Soft-fail: a missing tmux_socket or a
+    # failed create only logs — it never blocks the server start below,
+    # matching this function's existing soft-fail contract.
+    if [[ -n "$tmux_socket" ]]; then
+        if typeset -f ensure_lcars_tmux_session >/dev/null 2>&1; then
+            if ! ensure_lcars_tmux_session "$session_name" "$tmux_socket"; then
+                log "  ⚠️  ensure_lcars_tmux_session failed for $session_name (socket $tmux_socket) — continuing without a tmux session"
+            fi
+        else
+            log "  ⚠️  ensure_lcars_tmux_session is not available (failed to source ${_helpers}) — tmux session will not be recreated"
+        fi
+    else
+        log "  ⚠️  no tmux_socket passed to _hc_start_lcars_server — skipping tmux session recreation for $session_name"
+    fi
 
     # NOTE argument order: start_lcars_server takes (team, port, session_name),
     # this function's own params are (local_port, team, session_name) — do not
@@ -750,8 +784,10 @@ _hc_heal_noncanonical_port() {
     done
     sleep 1
 
-    # 3. Recreate on the CANONICAL port via the shared restart path.
-    _hc_start_lcars_server "$canonical_port" "$team" "$session_name"
+    # 3. Recreate on the CANONICAL port via the shared restart path. Pass
+    #    tmux_socket (our own $4) so _hc_start_lcars_server can recreate the
+    #    session we just killed above, on the same tmux server (XACA-0983).
+    _hc_start_lcars_server "$canonical_port" "$team" "$session_name" "$tmux_socket"
     return $?
 }
 
@@ -1219,7 +1255,10 @@ run_health_check() {
         ((unhealthy++))
 
         if [[ "$STATUS_ONLY" == "false" ]]; then
-            _hc_start_lcars_server "$local_port" "$team" "$canonical_session"
+            # Pass tmux_socket (the loop variable above) so a team whose
+            # session is already gone — reboot, crash, or a prior run of
+            # this very bug — gets it recreated here too (XACA-0983).
+            _hc_start_lcars_server "$local_port" "$team" "$canonical_session" "$tmux_socket"
             if [[ $? -eq 0 ]]; then
                 ((restarted++))
             fi

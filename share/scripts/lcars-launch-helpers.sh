@@ -2,8 +2,9 @@
 # shellcheck shell=bash
 # lcars-launch-helpers.sh — Shared helper functions for LCARS server startup
 #
-# Source this file in team-startup scripts; it provides two functions:
+# Source this file in team-startup scripts; it provides three functions:
 #
+#   ensure_lcars_tmux_session <session_name> <tmux_socket> [working_dir]
 #   start_lcars_server <team> <port> [session_name]
 #   open_lcars_tab <port> <window_title> <tab_name> <tmux_socket> <lcars_session> <startup_log>
 #
@@ -622,6 +623,96 @@ _lcars_spawn_detached() {
     # background job becomes a child of a subshell and `wait` breaks.
     _LCARS_SPAWNED_PID=$!
     disown "${_LCARS_SPAWNED_PID}" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# ensure_lcars_tmux_session <session_name> <tmux_socket> [working_dir]
+#
+# XACA-0983: idempotently guarantee a `<session_name>` tmux session exists on
+# `<tmux_socket>`, creating a BARE window if it does not. Does nothing else —
+# no theming, no attach, no server launch.
+#
+# WHY THIS EXISTS: start_lcars_server (below) is a bare `nohup … server.py &`
+# spawn — it issues zero tmux commands (verified: `grep -n tmux` on this file
+# returns exactly one real invocation, `attach -t` inside open_lcars_tab).
+# Session creation has always lived solely in the per-team `<team>-lcars-
+# startup.sh` scripts. That is fine for a normal boot, but
+# lcars-health-check.sh's self-heal path (_hc_heal_noncanonical_port) KILLS a
+# team's `<team>-lcars` tmux session and then calls start_lcars_server via
+# _hc_start_lcars_server to recreate the server — with nothing to recreate the
+# session. Result: a healthy server, no tmux session, no Fleet Monitor LCARS
+# tab, and the operator's attached LCARS terminal tab dies with the session.
+# _hc_start_lcars_server calls this helper first to close that gap.
+#
+# IDEMPOTENT — MANDATORY. The health check's "NOT RESPONDING" restart path
+# fires this on every unhealthy-team pass (every 120s under the
+# com.devteam.lcars-health LaunchAgent); `has-session || new-session` is what
+# makes repeated calls safe.
+#
+# HEADLESS — MANDATORY. Only `has-session` / `new-session -d`. Never calls
+# open_lcars_tab (AppleScript/iTerm2) and never attaches — this runs under a
+# LaunchAgent with no desktop session to spawn a tab into.
+#
+# SOCKET SELECTION mirrors the kill-side branch in lcars-health-check.sh
+# (_hc_heal_noncanonical_port, `[[ -S "$socket_path" ]]` → `tmux -S`, else
+# `tmux -L`) exactly, so a recreated session lands on the SAME tmux server the
+# kill targeted. Under launchd, `-L <name>` resolves against the agent's own
+# $TMPDIR — get this wrong and the recreate lands on a different tmux server
+# than the one the operator's terminal and the fleet reporter enumerate: a
+# session nobody can see. `TMUX_SOCKET_DIR` is honored if the caller already
+# set it (lcars-health-check.sh does, for launchd-safe socket resolution);
+# otherwise it is computed the same way lcars-health-check.sh computes it.
+#
+# WINDOW CONTENTS: bare. `-n "lcars-monitor" -c <working_dir>`, nothing sent
+# to it. Mirrors the canonical creator's own SKIP_SERVER_START behavior
+# (academy-lcars-startup.sh:48, when the real server is launched separately,
+# the window runs nothing). Deliberately does NOT `send-keys` a server.py
+# invocation — start_lcars_server already launches the detached server, and a
+# second one would duplicate it on the same port.
+#
+# ACCEPTED COSMETIC GAP: a session created here does not carry the division's
+# tmux theming (status-line colors etc. set by `<team>-lcars-startup.sh`).
+# Replicating 11 divisions' color schemes into this generic helper is exactly
+# the kind of per-team duplication that drifts; the name is what the Fleet
+# Monitor gate keys on, and the colors return on the next full team startup.
+#
+# Returns 0 if the session exists on return (already present or just
+# created), 1 if tmux itself is unavailable or session creation failed.
+# ---------------------------------------------------------------------------
+ensure_lcars_tmux_session() {
+    local _ets_session="${1:?ensure_lcars_tmux_session: session_name required}"
+    local _ets_socket="${2:?ensure_lcars_tmux_session: tmux_socket required}"
+    local _ets_dir="${3:-${AITEAMFORGE_DIR:-$HOME/dev-team}}"
+
+    if ! command -v tmux >/dev/null 2>&1; then
+        return 1
+    fi
+
+    # Match lcars-health-check.sh's socket-dir computation exactly when it
+    # has already set TMUX_SOCKET_DIR (launchd-safe); otherwise derive it the
+    # same way it does, so a caller that never set it still resolves the
+    # standard per-uid tmux socket dir.
+    local _ets_socket_dir="${TMUX_SOCKET_DIR:-/tmp/tmux-$(id -u)}"
+    local _ets_socket_path="${_ets_socket_dir}/${_ets_socket}"
+
+    # Plain if/else (no array-of-command-words) — deliberately mirrors the
+    # kill-side idiom at lcars-health-check.sh's _hc_heal_noncanonical_port
+    # (`[[ -S "$socket_path" ]]` -> `tmux -S`, else `tmux -L`) statement for
+    # statement, and stays safe under bash 3.2 (macOS's shipped bash), which
+    # this file must support (feedback_verify_under_bin_bash_not_path_bash).
+    if [[ -S "$_ets_socket_path" ]]; then
+        if tmux -S "$_ets_socket_path" has-session -t "$_ets_session" 2>/dev/null; then
+            return 0
+        fi
+        tmux -S "$_ets_socket_path" new-session -d -s "$_ets_session" -n "lcars-monitor" -c "$_ets_dir" 2>/dev/null
+        return $?
+    else
+        if tmux -L "$_ets_socket" has-session -t "$_ets_session" 2>/dev/null; then
+            return 0
+        fi
+        tmux -L "$_ets_socket" new-session -d -s "$_ets_session" -n "lcars-monitor" -c "$_ets_dir" 2>/dev/null
+        return $?
+    fi
 }
 
 # ---------------------------------------------------------------------------
