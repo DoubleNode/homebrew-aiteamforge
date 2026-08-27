@@ -2849,11 +2849,17 @@
    label wins, value yields -- and it is what makes the value guard work at all.
    min-width:0 on the label deletes the priority, flex-shrink then distributes
    across both items, and the label starts losing pixels on every row with a
-   long hostname AT EVERY WIDTH. Measured: min-width:0 alone costs Machine:
-   11.3px and Working: 20.0px at 1920, and 24.1/29.0px at 1080; peak loss is
-   30.9px. Baseline loses 0.0px at every width, every label, both skins. Adding
-   ellipsis does not rescue that -- it only makes the loss legible: at 1080 the
-   card then renders `Sess...`, `Ma...`, `W...` on a desktop that is clean today.
+   long hostname AT EVERY WIDTH: measured, 11.3px off `Machine:` and 20.0px off
+   `Working:` at 1920, 24.1/29.0px at 1080, peak 30.9px, against a baseline that
+   loses 0.0px everywhere in both skins.
+
+   THE TRAP IS WIDER THAN min-width:0, which is why flex-shrink:0 and not just
+   "don't set min-width". text-overflow:ellipsis requires overflow:hidden, and
+   overflow:hidden ALONE makes min-width:auto compute to 0 (CSS Sizing 3: the
+   automatic minimum applies only when overflow is visible). So reaching for
+   ellipsis deletes the shrink-priority even if nobody types min-width:0 -- it
+   does not make the loss safe, it makes the loss legible. flex-shrink:0 is
+   immune to both routes.
 
    WHY NO ELLIPSIS, even though labels are short known tokens and hostnames are
    not: the argument is sound and the premise is false. There is nothing to
@@ -2863,31 +2869,19 @@
    ticket assumed first occurs at a 280px viewport, below the Reflow floor.
    Every candidate fix CREATED the clipping it was meant to cure.
 
-   PROVENANCE, because these figures will be re-quoted: they come from the real
-   pages served over HTTP, with the card rendered by the page's own
-   createTeamCard() against mocked /api endpoints -- NOT hand-injected markup,
-   and NOT stub-lcars.html (see XACA-0986). An earlier measurement pass wrapped
-   the card in a nonexistent `org-container` instead of the real
-   .organization-panel and inflated every width figure by a constant 35px
-   padding delta; that is where an earlier draft's 131/117px and "2.5-2.8x"
-   came from. If you re-measure and disagree, check your wrapper chain first:
-   .lcars-content -> section -> .organization-panel -> .division-container ->
-   .teams-grid.
-
-   flex-shrink:0 is a measured no-op today -- card width, card height, label
-   widths and row/card overflow identical to baseline in 24/24 skin x width
-   cells, 320-1920, at the real 12px font. (Do not restate that on a font-size
-   axis: .session-detail hardcodes font-size:12px, so root-size changes are
-   inert, and cardH on a grid item is the ROW height, contaminated by the
-   sibling card's image-load timing -- it does not repeat across trials.) It is
-   kept anyway because it strictly dominates min-width:auto: with it present,
-   adding min-width:0 costs 0px. It is the specific defence against the edit
-   this ticket nearly shipped.
+   flex-shrink:0 is a measured no-op today (identical to baseline in 24/24
+   skin x width cells, 320-1920, at the real 12px font that .session-detail
+   hardcodes). Kept anyway because it strictly dominates min-width:auto: with it
+   present, adding min-width:0 costs 0px. It is the specific defence against the
+   edit this ticket nearly shipped.
 
    NOT flex-wrap:wrap on .session-detail either -- it scores inert on overflow
-   metrics but stacks the value under the label at 1920 (cardH 265 -> 281, three
-   rows stacked). Measure the row's HEIGHT and child positions, not just its
-   overflow. */
+   metrics but stacks the value under the label at 1920 (cardH 265 -> 281).
+   Measure the row's HEIGHT and child positions, not just its overflow.
+
+   Measurement provenance, the two-rig disagreement and the wrapper chain these
+   figures depend on are recorded in CHANGELOG.md under XACA-0985; they are not
+   repeated here. If you re-measure and disagree, start there. */
 .teams-grid .session-label {
     flex-shrink: 0;
 }
