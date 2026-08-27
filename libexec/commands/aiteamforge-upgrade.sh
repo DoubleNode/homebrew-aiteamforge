@@ -1488,6 +1488,7 @@ kb-init-team
 remote-tmux-attach.sh
 lcars-launch-helpers.sh
 kb-api-key
+kb-ttyd-bridge.sh
 EOF
 }
 
@@ -1601,6 +1602,22 @@ update_runtime_helpers() {
       echo "Would update: fleet-monitor/client/fleet-reporter.sh (operative copy)"
     fi
   fi
+}
+
+# XACA-0161-002: reconcile the per-(team, terminal) ttyd terminal-bridge
+# LaunchAgents. Placed AFTER update_runtime_helpers because that is what
+# materializes scripts/kb-ttyd-bridge.sh onto an already-installed box; calling
+# this before it would be a no-op on exactly the machines that need it.
+#
+# `reconcile` is level-triggered and a no-op when the feature is disabled, which
+# is the default, so this is safe to run unconditionally on every box. An
+# unwired reconciler is inert -- the XACA-0814 failure shape -- which is why
+# this call exists rather than living only in the installer.
+update_ttyd_bridge() {
+  print_section "Terminal Bridge"
+  local s="${WORKING_DIR}/scripts/kb-ttyd-bridge.sh"
+  [ -x "$s" ] || return 0
+  if [ "$DRY_RUN" = true ]; then "$s" reconcile --dry-run; else "$s" reconcile; fi
 }
 
 # XACA-0925: Persona-content refresh on the UPGRADE path.
@@ -2686,6 +2703,7 @@ update_aux_scripts
 update_team_scripts
 update_connect_scripts
 update_runtime_helpers
+update_ttyd_bridge
 update_imgcat
 update_shell_helpers
 update_team_personas

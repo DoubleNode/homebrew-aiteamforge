@@ -2588,6 +2588,14 @@ install_kanban_system() {
     install_backup_launchagent
     install_lcars_health_launchagent
     install_cr_confluence_poller_launchagent
+    # XACA-0161-002: the ttyd terminal-bridge agents are per-(team, terminal),
+    # dynamic, and config-gated OFF by default, so they are reconciled by their
+    # own script rather than rendered from the static launchagent map. Install
+    # and upgrade deliberately share ONE entry point -- `reconcile` is
+    # level-triggered (renders missing, refreshes drifted, prunes undesired) --
+    # so there is no second code path to forget when the shape changes.
+    # `|| true` because a machine that never opts in must not fail its install.
+    "$AITEAMFORGE_DIR/scripts/kb-ttyd-bridge.sh" reconcile || true
     install_auto_upgrade_launchagent
     install_lcars_watch_launchagent
     install_cellar_watch_launchagent
