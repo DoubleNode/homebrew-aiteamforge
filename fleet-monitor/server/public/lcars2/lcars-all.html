@@ -23,7 +23,9 @@
     <!-- LCARS Kiosk Mode Styles (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-kiosk.css?v=20260825e">
     <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
-    <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20260826c">
+    <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20260827a">
+    <!-- XACA-0989: collapsible divisions + compact session chips (shared) -->
+    <link rel="stylesheet" href="../shared/css/lcars-division-collapse.css?v=20260827a">
 </head>
 <body class="org-color-lavender">
     <!-- ═══════════════════════════════════════════════════════════════════════════ -->
@@ -522,6 +524,9 @@
          below, which delegates to it; loaded after, it is a silent no-op. -->
     <script src="../shared/js/lcars-org-resolution.js?v=20260825e"></script>
     <script src="../shared/js/lcars-terminal-card.js?v=20260827a"></script>
-    <script src="js/lcars-all-app.js"></script>
+    <!-- XACA-0989: collapsible divisions + compact session chips (shared).
+         MUST load BEFORE the app script below, which calls into it. -->
+    <script src="../shared/js/lcars-division-collapse.js?v=20260827a"></script>
+    <script src="js/lcars-all-app.js?v=20260827a"></script>
 </body>
 </html>

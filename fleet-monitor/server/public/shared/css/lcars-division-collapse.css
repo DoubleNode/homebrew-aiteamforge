@@ -1,0 +1,143 @@
+/*
+ * lcars-division-collapse.css
+ * DoubleNode Dev-Team Infrastructure (AITeamForge)
+ *
+ * XACA-0989: collapsible divisions + compact session chips (collapsed view).
+ * Shared across all 5 fleet-monitor dashboards (lcars + lcars2 skins) --
+ * companion to shared/js/lcars-division-collapse.js. See that file's header
+ * comment for the full design contract (Q1-Q5 + 600px collapse floor).
+ *
+ * Chip sizing is FIXED WIDTH (172px); column count is EMERGENT via
+ * flex-wrap -- a deliberate structural break from the pinned-column
+ * approach XACA-0973 had to patch after XACA-0976. Fixing the chip width
+ * and letting columns be fluid means a chip can never become too narrow
+ * for its content, by construction.
+ *
+ * Reuses the existing .status-indicator and .lcars-badge rules (already
+ * global, already sized/colored per-skin) rather than redeclaring them --
+ * only the new chip container and its own children are styled here.
+ */
+
+.chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.session-chip {
+    /* Q3: fixed basis, never grows, never shrinks -- emergent column count */
+    flex: 0 0 172px;
+    flex-shrink: 0;
+    min-width: 0;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 26px;
+    padding: 0 5px;
+    border: 1px solid var(--lcars-tan);
+    border-radius: 13px;
+    background: var(--lcars-dark);
+}
+
+.session-chip.lcars-terminal {
+    border-color: var(--lcars-peach);
+}
+
+.session-chip.lcars-clickable {
+    cursor: pointer;
+}
+
+.session-chip.lcars-clickable:hover {
+    background: var(--lcars-tan);
+}
+
+.session-chip.lcars-clickable:hover .chip-name,
+.session-chip.lcars-clickable:hover .chip-icon {
+    color: var(--lcars-black);
+}
+
+.session-chip.lcars-offline {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.chip-icon {
+    /* Q4: decorative "is a terminal" icon -- static, never animated, so it
+       never competes with the .status-indicator pulse for attention. */
+    flex-shrink: 0;
+    color: var(--lcars-tan);
+}
+
+.chip-name {
+    /* Q5: min-width:0 declared explicitly -- this is the flex child whose
+       shrinkability is the whole point (ellipsis needs somewhere to clip
+       to). See feedback_render_dont_read_for_layout_defects.md /
+       XACA-0985 for the bug class this guards against. */
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    color: var(--lcars-tan);
+}
+
+.session-chip .lcars-badge {
+    flex-shrink: 0;
+}
+
+.session-chip .status-indicator {
+    flex-shrink: 0;
+}
+
+/* -------------------------------------------------------------------------
+   Per-division toggle affordance on .division-header. Base .division-header
+   rules (position/size/color) stay in each skin's own theme CSS -- this
+   only adds the interactive/chevron layer, and only when interactive
+   (module removes this class + the chevron below the 600px collapse floor).
+   ------------------------------------------------------------------------- */
+
+.division-header-toggle {
+    cursor: pointer;
+}
+
+.division-header-toggle:focus-visible {
+    outline: 2px solid var(--lcars-peach);
+    outline-offset: 2px;
+}
+
+.division-toggle-icon {
+    display: inline-block;
+    margin-left: 6px;
+}
+
+/* -------------------------------------------------------------------------
+   Global Expand All / Collapse All control, appended into the
+   ORGANIZATIONS section header (both skins share the same
+   #divisions-container preceded by a .section-header). Hidden below the
+   600px collapse floor by the module, not by CSS media query, so its
+   visibility always matches the per-division affordance's.
+   ------------------------------------------------------------------------- */
+
+.division-expand-all-toggle {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--lcars-tan);
+    color: var(--lcars-tan);
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-radius: 4px;
+    padding: 3px 10px;
+    cursor: pointer;
+}
+
+.division-expand-all-toggle:hover {
+    background: var(--lcars-tan);
+    color: var(--lcars-black);
+}
