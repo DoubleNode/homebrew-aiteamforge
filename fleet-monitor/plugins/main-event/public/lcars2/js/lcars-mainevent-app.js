@@ -1,3 +1,10 @@
+//
+//  lcars-mainevent-app.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * LCARS Main Event Dashboard Application
  * Filtered view showing Main Event divisions
@@ -176,14 +183,15 @@
             const navButton = document.createElement('button');
             navButton.className = 'org-nav-button ' + getGroupColor(orgName);
             // textContent, not innerHTML: orgName arrives from the `organization`
-            // field of /api/team-register's body, validated for presence only.
-            // Mirrors the canonical fix in fleet-monitor/server/public (XACA-0970).
-            var navName = document.createElement('span');
+            // field of /api/team-register's body, validated for presence only, so
+            // innerHTML made this an injection sink for any API-key holder.
+            // (XACA-0970, review gate.)
+            const navName = document.createElement('span');
             navName.className = 'org-nav-name';
             navName.textContent = orgName;
             navButton.appendChild(navName);
 
-            var navStats = document.createElement('span');
+            const navStats = document.createElement('span');
             navStats.className = 'org-nav-stats';
             navStats.textContent = divisionCount + ' Divisions • ' + totalSessions + ' Sessions';
             navButton.appendChild(navStats);
@@ -236,16 +244,22 @@
 
             const orgHeader = document.createElement('div');
             orgHeader.className = 'organization-header';
-            // textContent, not innerHTML -- same untrusted field as above.
-            var orgTitle = document.createElement('span');
+            // textContent, not innerHTML -- same untrusted `organization` field as the
+            // nav button above. (XACA-0970, review gate.)
+            const orgTitle = document.createElement('span');
             orgTitle.className = 'organization-title';
             orgTitle.textContent = orgName;
             orgHeader.appendChild(orgTitle);
 
-            var orgCount = document.createElement('span');
+            const orgCount = document.createElement('span');
             orgCount.className = 'organization-count';
             orgCount.textContent = totalSessions + ' Sessions';
             orgHeader.appendChild(orgCount);
+            // XACA-0970-012: the UNKNOWN heading carries its own remediation.
+            // All of the policy lives in the shared module -- see decorateHeading().
+            if (window.LCARS_ORG && window.LCARS_ORG.decorateHeading) {
+                window.LCARS_ORG.decorateHeading(orgHeader, orgName);
+            }
             orgContainer.appendChild(orgHeader);
 
             // Sort divisions by priority
@@ -299,13 +313,66 @@
         return panel;
     }
 
+    // XACA-0983 fix (b), third render state: a team can be a KNOWN LCARS
+    // service (data.lcars_service, from server.js's parseFleetData -- see
+    // fleet-reporter.sh's get_lcars_services()) with NO live tmux session.
+    // Before this, createTeamCard returned an EMPTY card for every
+    // session-less team, so a genuinely-down (or simply session-less-but-
+    // healthy) LCARS terminal rendered identically to "not an LCARS
+    // terminal at all" -- the same silent-absence bug this ticket exists to
+    // fix, just moved one layer up. This function is called ONLY when
+    // isLcarsTerminal(data) is true AND there is no session, so a team that
+    // was never an LCARS terminal is unaffected and still gets the original
+    // empty card below.
+    function createServiceOnlyLcarsCard(name, svc) {
+        const card = document.createElement('div');
+        const reachable = svc.reachable === true;
+        // reachable === false OR null (curl unavailable, or the probe was
+        // skipped on the reporting host) both render as unreachable -- this
+        // UI never claims health it did not actually observe.
+        card.className = 'team-card lcars-terminal' + (reachable ? '' : ' lcars-offline');
+
+        const statusClass = reachable ? 'online' : 'offline';
+        const statusText = reachable ? 'REACHABLE' : 'UNREACHABLE';
+
+        card.innerHTML =
+            '<div class="team-header">' +
+                '<div class="team-name">' + name + '<span class="lcars-badge">LCARS</span></div>' +
+                '<span class="status-indicator ' + statusClass + '"></span>' +
+            '</div>' +
+            '<div class="session-info">' +
+                '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value text-offline">NO ACTIVE SESSION</span></div>' +
+                '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value">' + (svc.hostname || 'unknown') + '</span></div>' +
+                '<div class="session-detail"><span class="session-label">Port:</span><span class="session-value">' + svc.port + '</span></div>' +
+                '<div class="session-detail"><span class="session-label">Status:</span><span class="session-value text-' + statusClass + '">' + statusText + '</span></div>' +
+            '</div>';
+
+        if (reachable && svc.hostname) {
+            const lcarsUrl = 'http://' + svc.hostname + ':' + svc.port;
+            card.classList.add('lcars-clickable');
+            card.title = 'Click to open LCARS terminal: ' + lcarsUrl;
+            card.addEventListener('click', function() {
+                window.open(lcarsUrl, '_blank');
+            });
+        } else {
+            card.title = 'LCARS terminal service is reported but not reachable';
+        }
+
+        return card;
+    }
+
     function createTeamCard(name, data) {
         const card = document.createElement('div');
         const isLcars = isLcarsTerminal(data);
         card.className = isLcars ? 'team-card lcars-terminal' : 'team-card';
 
         const session = data.sessions && data.sessions[0];
-        if (!session) return card;
+        if (!session) {
+            if (isLcars && data.lcars_service) {
+                return createServiceOnlyLcarsCard(name, data.lcars_service);
+            }
+            return card;
+        }
 
         const status = session.machine_status || 'offline';
         const isOnline = status === 'online';
@@ -340,6 +407,16 @@
                 card.addEventListener('click', function() {
                     window.open(lcarsUrl, '_blank');
                 });
+            } else if (lcarsUrl && !isOnline) {
+                // XACA-0979: match the flat dashboards' offline treatment so one
+                // team's card behaves identically in every dashboard view.
+                card.classList.add('lcars-offline');
+                card.title = 'LCARS terminal unavailable - machine is ' + status;
+            } else {
+                // XACA-0979: no hostname reported for this session - never leave
+                // the card looking actionable without saying why.
+                card.classList.add('lcars-offline');
+                card.title = 'LCARS terminal misconfigured - no hostname reported for this session';
             }
         }
 
@@ -408,31 +485,37 @@
     }
 
     function getOrganizationGroup(divisionCode) {
-        const code = divisionCode.toLowerCase();
-        // Handle legal-* divisions (legal-coparenting, etc.)
-        if (code.startsWith('legal')) {
-            return 'LEGAL';
+        // Delegates to THE single implementation (XACA-0970):
+        //   shared/js/lcars-org-resolution.js
+        //
+        // Do NOT reintroduce a local copy. This function previously existed in
+        // FOURTEEN files across multiple variants -- and the only copy that handled
+        // `finance` lived in a file no page loaded, so the bug looked fixed and
+        // never ran. Add teams in the shared module, nowhere else.
+        if (!window.LCARS_ORG) {
+            // Loud on purpose: a missing module must not masquerade as a team
+            // with no organization, which is the exact silent failure this
+            // ticket exists to remove. Check script order in the page.
+            console.error('[LCARS][org] shared/js/lcars-org-resolution.js is not '
+                + 'loaded -- it must appear BEFORE this script. Falling back to UNKNOWN.');
+            return 'UNKNOWN';
         }
-        const groups = {
-            'academy': 'DEVTEAM',
-            'android': 'MAIN EVENT',
-            'command': 'MAIN EVENT',
-            'dns': 'DOUBLENODE',
-            'firebase': 'MAIN EVENT',
-            'freelance': 'DOUBLENODE',
-            'ios': 'MAIN EVENT'
-        };
-        return groups[code] || 'UNKNOWN';
+        var cfg = (typeof teamConfig !== 'undefined') ? teamConfig : null;
+        return window.LCARS_ORG.resolve(divisionCode, cfg);
     }
 
     function getGroupColor(group) {
-        const colors = {
-            'DEVTEAM': 'org-academy',
-            'DOUBLENODE': 'org-doublenode',
-            'MAIN EVENT': 'org-mainevent',
-            'LEGAL': 'org-legal'
-        };
-        return colors[group] || 'org-mainevent';
+        // Delegates to the shared module (XACA-0970), same as
+        // getOrganizationGroup above. FINANCE was missing from every one of
+        // the 14 copies of this map, so the org this ticket exists to surface
+        // would have rendered with a fallback colour instead of its own.
+        if (!window.LCARS_ORG) {
+            console.error('[LCARS][org] shared/js/lcars-org-resolution.js is not '
+                + 'loaded -- it must appear BEFORE this script.');
+            return 'org-academy';
+        }
+        // This page's own pre-centralisation fallback -- see resolveColor's docs.
+        return window.LCARS_ORG.resolveColor(group, 'org-mainevent');
     }
 
     function getDivisionPriority(divisionCode) {
@@ -455,33 +538,52 @@
     // ============================================================================
 
     function isLcarsTerminal(teamData) {
-        if (!teamData || !teamData.sessions || teamData.sessions.length === 0) {
+        if (!teamData) {
             return false;
         }
-        return teamData.sessions.some(function(session) {
+        if (teamData.sessions && teamData.sessions.some(function(session) {
             return session.name && session.name.toLowerCase().includes('lcars');
-        });
+        })) {
+            return true;
+        }
+        // XACA-0983 fix (b): a team can be a known LCARS terminal via a
+        // reported service record (data.lcars_service -- see server.js's
+        // parseFleetData / fleet-reporter.sh's get_lcars_services()) even
+        // with NO live tmux session, e.g. a health-check self-heal killed
+        // the session and nothing recreated it. Gating solely on a session
+        // NAME substring (the original bug) makes a healthy-or-even-known-
+        // down backend invisible; checking lcars_service too closes that
+        // gap without requiring a session to exist at all.
+        return !!(teamData.lcars_service);
     }
 
     function getLcarsUrl(teamData) {
-        if (!teamData || !teamData.sessions || teamData.sessions.length === 0) {
+        if (!teamData) {
             return null;
         }
 
-        const lcarsSession = teamData.sessions.find(function(session) {
+        const lcarsSession = teamData.sessions && teamData.sessions.find(function(session) {
             return session.name && session.name.toLowerCase().includes('lcars');
         });
 
-        if (!lcarsSession) return null;
+        if (lcarsSession) {
+            const localPort = lcarsSession.lcars_port || LCARS_PORT;
 
-        const localPort = lcarsSession.lcars_port || LCARS_PORT;
+            if (!lcarsSession.hostname) {
+                console.warn('No hostname reported for LCARS session on port ' + localPort);
+                return null;
+            }
 
-        if (!lcarsSession.hostname) {
-            console.warn('No hostname reported for LCARS session on port ' + localPort);
-            return null;
+            return 'http://' + lcarsSession.hostname + ':' + localPort;
         }
 
-        return 'http://' + lcarsSession.hostname + ':' + localPort;
+        // No session -- fall back to the reported service record directly
+        // (XACA-0983 fix (b)).
+        if (teamData.lcars_service && teamData.lcars_service.hostname) {
+            return 'http://' + teamData.lcars_service.hostname + ':' + teamData.lcars_service.port;
+        }
+
+        return null;
     }
 
     function updateElement(id, value) {

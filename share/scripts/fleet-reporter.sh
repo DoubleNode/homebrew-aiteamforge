@@ -526,9 +526,121 @@ get_tmux_sessions() {
     echo "$sessions"
 }
 
+# Get LCARS service records independent of tmux session enumeration (XACA-0983).
+#
+# WHY THIS EXISTS: get_lcars_port() (above) reads $LCARS_PORTS_DIR/<session>.port
+# off disk and has always been able to answer "what port does this LCARS use" --
+# but it is only ever CALLED from inside get_tmux_sessions()'s loop over live tmux
+# sessions (see "Check for LCARS port" above). When a team's <team>-lcars tmux
+# session dies (e.g. a health-check self-heal that kills-without-recreating -- see
+# lcars-health-check.sh's _hc_heal_noncanonical_port, XACA-0983 fix (a)), the loop
+# never iterates for that team and the reporter emits NOTHING for it, even though
+# the .port file is still on disk and the server may still be answering.
+#
+# This is a MACHINE-LEVEL array, deliberately NOT nested under sessions[] --
+# nesting it there would recreate the exact bug it fixes: a session-less team
+# would still be structurally absent from the payload.
+#
+# Forward/backward compatibility: an old server ignores this unknown top-level
+# key; this reporter still emits sessions[] unchanged, so an old server sees
+# no behavior change. See server.js parseFleetData() for the other half of the
+# contract.
+get_lcars_services() {
+    local dir="$LCARS_PORTS_DIR"
+    [ -d "$dir" ] || { echo "[]"; return; }
+
+    local have_curl=false
+    command -v curl &>/dev/null && have_curl=true
+
+    # Pass 1: collect (session_name, division, project, team, port) tuples
+    # from portfiles. Cheap and synchronous -- no network I/O here.
+    #
+    # division/project/team are derived with the SAME parse_session_name()
+    # used for sessions[] above -- deliberately, so a server-side consumer
+    # (parseFleetData in server.js) can key a service record into the exact
+    # same divisionKey/projectKey/teamKey a live session for that same LCARS
+    # terminal would produce, instead of inventing a second, incompatible
+    # naming scheme it would have to reconcile.
+    local -a session_names=() divisions=() projects=() teams=() ports=()
+    local port_file session_name division project team port
+    for port_file in "$dir"/*-lcars.port; do
+        [ -e "$port_file" ] || continue
+        session_name=$(basename "$port_file" .port)
+        port=$(cat "$port_file" 2>/dev/null | tr -d '[:space:]')
+
+        # Skip malformed/empty port files rather than emit an invalid record --
+        # a non-numeric port would break server-side JSON number consumers.
+        case "$port" in
+            ''|*[!0-9]*) continue ;;
+        esac
+
+        IFS='|' read -r division project team <<< "$(parse_session_name "$session_name")"
+
+        session_names+=("$session_name")
+        divisions+=("$division")
+        projects+=("$project")
+        teams+=("$team")
+        ports+=("$port")
+    done
+
+    if [ ${#session_names[@]} -eq 0 ]; then
+        echo "[]"
+        return
+    fi
+
+    # Pass 2: probe reachability IN PARALLEL, not serially. This reporter runs
+    # on a ~30-60s cron/LaunchAgent cadence; probing N teams serially at up to
+    # --max-time each would multiply wall time by N and risk the reporter
+    # overrunning its own cadence (flagged explicitly in the XACA-0983 decision
+    # doc §4.1). Each probe writes its verdict to a scratch file; we wait for
+    # all of them, then assemble JSON synchronously with no I/O left to do.
+    local tmp_dir=""
+    if [ "$have_curl" = true ]; then
+        tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fleet-lcars-probe.XXXXXX" 2>/dev/null || echo "")
+    fi
+    if [ -n "$tmp_dir" ]; then
+        trap 'command rm -rf "$tmp_dir"' RETURN
+
+        local i
+        for i in "${!ports[@]}"; do
+            (
+                if curl -s --connect-timeout 1 --max-time 2 "http://localhost:${ports[$i]}/api/status" > /dev/null 2>&1; then
+                    echo "true" > "$tmp_dir/$i"
+                else
+                    echo "false" > "$tmp_dir/$i"
+                fi
+            ) &
+        done
+        wait
+    fi
+
+    local -a entries=()
+    local reachable_json session_esc division_esc project_json team_esc i
+    for i in "${!ports[@]}"; do
+        reachable_json="null"
+        if [ -n "$tmp_dir" ] && [ -f "$tmp_dir/$i" ]; then
+            reachable_json=$(cat "$tmp_dir/$i")
+        fi
+        session_esc=$(json_escape "${session_names[$i]}")
+        division_esc=$(json_escape "${divisions[$i]}")
+        team_esc=$(json_escape "${teams[$i]}")
+        if [ -z "${projects[$i]}" ]; then
+            project_json="null"
+        else
+            project_json="\"$(json_escape "${projects[$i]}")\""
+        fi
+        entries+=("{\"session_name\":\"$session_esc\",\"division\":\"$division_esc\",\"project\":$project_json,\"team\":\"$team_esc\",\"port\":${ports[$i]},\"reachable\":$reachable_json,\"source\":\"portfile\"}")
+    done
+
+    local joined
+    joined=$(IFS=,; echo "${entries[*]}")
+    echo "[$joined]"
+}
+
 # Build status payload
 build_payload() {
     local sessions=$(get_tmux_sessions)
+    local lcars_services=$(get_lcars_services)
     local backup_status=$(get_backup_status)
 
     # Build backup_status JSON field (null if not available)
@@ -567,6 +679,7 @@ build_payload() {
     "timestamp": "$timestamp_esc"$dashboard_group_json$fleet_mode_json
   },
   "sessions": $sessions,
+  "lcars_services": $lcars_services,
   "backup_status": $backup_json
 }
 EOF

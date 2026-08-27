@@ -858,13 +858,70 @@
         return null;
     }
 
+    // XACA-0983 fix (b), third render state: a team can be a KNOWN LCARS
+    // service (data.lcars_service, from server.js's parseFleetData -- see
+    // fleet-reporter.sh's get_lcars_services()) with NO live tmux session.
+    // Before this, createTeamCard returned an EMPTY card for every
+    // session-less team, so a genuinely-down (or simply session-less-but-
+    // healthy) LCARS terminal rendered identically to "not an LCARS
+    // terminal at all" -- the same silent-absence bug this ticket exists to
+    // fix, just moved one layer up. This function is called ONLY when
+    // isLcarsTerminal(data) is true AND there is no session, so a team that
+    // was never an LCARS terminal is unaffected and still gets the original
+    // empty card below. Deliberately kept minimal (no avatar/backup/working-
+    // item panels the session-based card below builds) -- this is a
+    // degraded state, not the primary path, and this file's normal card is
+    // already the richest of the five; matching that complexity here would
+    // multiply the surface with no session data to actually back it.
+    function createServiceOnlyLcarsCard(name, svc) {
+        const card = document.createElement('div');
+        const reachable = svc.reachable === true;
+        // reachable === false OR null (curl unavailable, or the probe was
+        // skipped on the reporting host) both render as unreachable -- this
+        // UI never claims health it did not actually observe.
+        card.className = 'team-card lcars-terminal' + (reachable ? '' : ' lcars-offline');
+
+        const statusClass = reachable ? 'online' : 'offline';
+        const statusText = reachable ? 'REACHABLE' : 'UNREACHABLE';
+
+        card.innerHTML =
+            '<div class="team-header">' +
+                '<div class="team-name">' + name + '<span class="lcars-badge">LCARS</span></div>' +
+                '<span class="status-indicator ' + statusClass + '"></span>' +
+            '</div>' +
+            '<div class="session-info">' +
+                '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value text-offline">NO ACTIVE SESSION</span></div>' +
+                '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value">' + (svc.hostname || 'unknown') + '</span></div>' +
+                '<div class="session-detail"><span class="session-label">Port:</span><span class="session-value">' + svc.port + '</span></div>' +
+                '<div class="session-detail"><span class="session-label">Status:</span><span class="session-value text-' + statusClass + '">' + statusText + '</span></div>' +
+            '</div>';
+
+        if (reachable && svc.hostname) {
+            const lcarsUrl = 'http://' + svc.hostname + ':' + svc.port;
+            card.classList.add('lcars-clickable');
+            card.title = 'Click to open LCARS terminal: ' + lcarsUrl;
+            card.addEventListener('click', function() {
+                window.open(lcarsUrl, '_blank');
+            });
+        } else {
+            card.title = 'LCARS terminal service is reported but not reachable';
+        }
+
+        return card;
+    }
+
     function createTeamCard(name, data) {
         const card = document.createElement('div');
         const isLcars = isLcarsTerminal(data);
         card.className = isLcars ? 'team-card lcars-terminal' : 'team-card';
 
         const session = data.sessions && data.sessions[0];
-        if (!session) return card;
+        if (!session) {
+            if (isLcars && data.lcars_service) {
+                return createServiceOnlyLcarsCard(name, data.lcars_service);
+            }
+            return card;
+        }
 
         const status = session.machine_status || 'offline';
         const isOnline = status === 'online';
@@ -1675,33 +1732,52 @@
     // ============================================================================
 
     function isLcarsTerminal(teamData) {
-        if (!teamData || !teamData.sessions || teamData.sessions.length === 0) {
+        if (!teamData) {
             return false;
         }
-        return teamData.sessions.some(function(session) {
+        if (teamData.sessions && teamData.sessions.some(function(session) {
             return session.name && session.name.toLowerCase().includes('lcars');
-        });
+        })) {
+            return true;
+        }
+        // XACA-0983 fix (b): a team can be a known LCARS terminal via a
+        // reported service record (data.lcars_service -- see server.js's
+        // parseFleetData / fleet-reporter.sh's get_lcars_services()) even
+        // with NO live tmux session, e.g. a health-check self-heal killed
+        // the session and nothing recreated it. Gating solely on a session
+        // NAME substring (the original bug) makes a healthy-or-even-known-
+        // down backend invisible; checking lcars_service too closes that
+        // gap without requiring a session to exist at all.
+        return !!(teamData.lcars_service);
     }
 
     function getLcarsUrl(teamData) {
-        if (!teamData || !teamData.sessions || teamData.sessions.length === 0) {
+        if (!teamData) {
             return null;
         }
 
-        const lcarsSession = teamData.sessions.find(function(session) {
+        const lcarsSession = teamData.sessions && teamData.sessions.find(function(session) {
             return session.name && session.name.toLowerCase().includes('lcars');
         });
 
-        if (!lcarsSession) return null;
+        if (lcarsSession) {
+            const localPort = lcarsSession.lcars_port || LCARS_PORT;
 
-        const localPort = lcarsSession.lcars_port || LCARS_PORT;
+            if (!lcarsSession.hostname) {
+                console.warn('No hostname reported for LCARS session on port ' + localPort);
+                return null;
+            }
 
-        if (!lcarsSession.hostname) {
-            console.warn('No hostname reported for LCARS session on port ' + localPort);
-            return null;
+            return 'http://' + lcarsSession.hostname + ':' + localPort;
         }
 
-        return 'http://' + lcarsSession.hostname + ':' + localPort;
+        // No session -- fall back to the reported service record directly
+        // (XACA-0983 fix (b)).
+        if (teamData.lcars_service && teamData.lcars_service.hostname) {
+            return 'http://' + teamData.lcars_service.hostname + ':' + teamData.lcars_service.port;
+        }
+
+        return null;
     }
 
     function updateElement(id, value) {

@@ -800,6 +800,55 @@ function cleanupLegacyMachines() {
 // Clean up legacy machines on startup
 cleanupLegacyMachines();
 
+// Resolve the (divisionKey, divisionName) pair a session or an
+// lcars_services record folds into. Factored out of parseFleetData's
+// session loop (XACA-0983) so the freelance-splitting rule has exactly ONE
+// implementation shared by both the session path and the lcars_services
+// path -- two copies of this is exactly the sibling-heuristic-drift
+// antipattern this codebase has repeated datapoints on (see
+// k501-sibling-heuristic-drift-pattern in project knowledge): a fix to one
+// copy silently not applying to the other.
+function resolveDivisionKey(division, project) {
+    // For freelance division, split by project name (e.g., "doublenode-starwords" -> "freelance-doublenode-starwords")
+    if (division === 'freelance' && project) {
+        const projectSuffix = project.replace('doublenode-', '');
+        const divisionKey = `freelance-${projectSuffix}`;
+        return { divisionKey, divisionName: divisionKey };
+    }
+    return { divisionKey: division, divisionName: division };
+}
+
+// Ensure divisions[divisionKey].projects[projectKey].teams[team] exists and
+// return it. Shared by the session loop and the lcars_services loop so a
+// team can be materialized by EITHER a live session or a reported service
+// record, in whichever order they're encountered, without either path
+// clobbering data the other already wrote.
+function ensureTeamBucket(divisions, divisionKey, divisionName, projectKey, projectName, team) {
+    if (!divisions[divisionKey]) {
+        divisions[divisionKey] = {
+            name: divisionName,
+            total_sessions: 0,
+            projects: {}
+        };
+    }
+
+    if (!divisions[divisionKey].projects[projectKey]) {
+        divisions[divisionKey].projects[projectKey] = {
+            name: projectName,
+            teams: {}
+        };
+    }
+
+    if (!divisions[divisionKey].projects[projectKey].teams[team]) {
+        divisions[divisionKey].projects[projectKey].teams[team] = {
+            name: team,
+            sessions: []
+        };
+    }
+
+    return divisions[divisionKey].projects[projectKey].teams[team];
+}
+
 /**
  * Parse sessions into hierarchical structure
  */
@@ -834,46 +883,15 @@ function parseFleetData() {
         for (const session of machineData.sessions) {
             const { division, project, team, name, windows, attached, created, uptime_seconds, lcars_port, theme_color, tab_order } = session;
 
-            // For freelance division, split by project name (e.g., "doublenode-starwords" -> "freelance-doublenode-starwords")
-            let divisionKey = division;
-            let divisionName = division;
-            if (division === 'freelance' && project) {
-                const projectSuffix = project.replace('doublenode-', '');
-                divisionKey = `freelance-${projectSuffix}`;
-                divisionName = divisionKey;
-            }
+            const { divisionKey, divisionName } = resolveDivisionKey(division, project);
+            const projectKey = project || '_default';
 
-            // Initialize division if needed
-            if (!divisions[divisionKey]) {
-                divisions[divisionKey] = {
-                    name: divisionName,
-                    total_sessions: 0,
-                    projects: {}
-                };
-            }
+            const teamBucket = ensureTeamBucket(divisions, divisionKey, divisionName, projectKey, project, team);
 
             divisions[divisionKey].total_sessions++;
 
-            // Handle projects (if exists)
-            const projectKey = project || '_default';
-
-            if (!divisions[divisionKey].projects[projectKey]) {
-                divisions[divisionKey].projects[projectKey] = {
-                    name: project,
-                    teams: {}
-                };
-            }
-
-            // Initialize team if needed
-            if (!divisions[divisionKey].projects[projectKey].teams[team]) {
-                divisions[divisionKey].projects[projectKey].teams[team] = {
-                    name: team,
-                    sessions: []
-                };
-            }
-
             // Add session to team
-            divisions[divisionKey].projects[projectKey].teams[team].sessions.push({
+            teamBucket.sessions.push({
                 name,
                 division,
                 project,
@@ -889,6 +907,51 @@ function parseFleetData() {
                 theme_color,
                 tab_order
             });
+        }
+
+        // ------------------------------------------------------------------
+        // XACA-0983 fix (b): fold in lcars_services[] -- a machine-level,
+        // tmux-session-INDEPENDENT report of LCARS backends (see
+        // fleet-reporter.sh's get_lcars_services()). Without this loop,
+        // parseFleetData() could never produce a team with zero sessions:
+        // a team whose sole session died (e.g. a health-check self-heal
+        // that kills a tmux session without recreating it -- XACA-0983
+        // fix (a)) would vanish from the payload entirely even though its
+        // server was still answering /api/status.
+        //
+        // Backward/forward compatibility: `machineData.lcars_services` is
+        // undefined for any machine still running a pre-XACA-0983 reporter
+        // (the field simply never arrives in POST /api/status's body) --
+        // Array.isArray() below treats that identically to an empty array,
+        // so this loop is a silent no-op for old reporters. A malformed
+        // record (missing team/division/port) is skipped individually
+        // rather than aborting the whole report.
+        // ------------------------------------------------------------------
+        const lcarsServices = Array.isArray(machineData.lcars_services) ? machineData.lcars_services : [];
+        for (const svc of lcarsServices) {
+            if (!svc || typeof svc !== 'object') continue;
+            const { division, project, team, port, reachable, session_name, source } = svc;
+            if (!division || !team || !Number.isFinite(Number(port))) continue;
+
+            const { divisionKey, divisionName } = resolveDivisionKey(division, project);
+            const projectKey = project || '_default';
+            const teamBucket = ensureTeamBucket(divisions, divisionKey, divisionName, projectKey, project, team);
+
+            // Prefer a reachable=true record over a previously-seen
+            // reachable=false/null one (e.g. from another machine, or a
+            // stale prior poll) rather than blindly last-writer-wins --
+            // an unreachable report should not mask a reachable one from
+            // the same or another host.
+            const existing = teamBucket.lcars_service;
+            if (!existing || reachable === true || existing.reachable !== true) {
+                teamBucket.lcars_service = {
+                    port: Number(port),
+                    reachable: reachable === true ? true : (reachable === false ? false : null),
+                    session_name: session_name || null,
+                    source: source || 'portfile',
+                    hostname: machineData.hostname
+                };
+            }
         }
     }
 
@@ -950,7 +1013,7 @@ function formatUptime(seconds) {
  */
 app.post('/api/status', requireApiKey, (req, res) => {
     try {
-        const { machine, sessions, backup_status } = req.body;
+        const { machine, sessions, backup_status, lcars_services } = req.body;
 
         if (!machine || !machine.hostname) {
             return res.status(400).json({ error: 'Missing required field: machine.hostname' });
@@ -1015,7 +1078,14 @@ app.post('/api/status', requireApiKey, (req, res) => {
             sessions: sessions || [],
             session_count: sessionCount,
             uptime_history: uptimeHistory,
-            backup_status: backup_status || null
+            backup_status: backup_status || null,
+            // XACA-0983 fix (b): old reporters never send this field, so it
+            // arrives as `undefined` here -- normalize to [] so downstream
+            // consumers (parseFleetData) only ever see an array, never have
+            // to re-check, and a mixed fleet of old/new reporters degrades
+            // uniformly instead of some machines carrying the key and others
+            // not.
+            lcars_services: Array.isArray(lcars_services) ? lcars_services : []
         });
 
         // Log to activity log
