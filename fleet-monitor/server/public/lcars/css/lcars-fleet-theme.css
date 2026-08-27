@@ -2754,20 +2754,34 @@
 
    WHICH DECLARATION DOES THE WORK -- both, for different content shapes; keep
    both. Isolated at lcars2/320 against faithful chrome: min-width:0 ALONE gives
-   0 overflow (value wraps to 2 lines), overflow-wrap:anywhere ALONE gives 0
-   overflow (3 lines), and neither gives 4px. So either one independently fixes
-   the shipped sample -- which refutes XACA-0973's "min-width:0 is inert",
-   a conclusion drawn under the flawed stub. They are NOT redundant: the
-   hyphen-free hostname above needs overflow-wrap in this skin at 900-1920,
-   where min-width:0 alone will not force a break inside an unbreakable token.
-   Dropping either one re-opens a real regime.
+   0 overflow (value wraps to 2 lines), and overflow-wrap:anywhere ALONE gives 0
+   overflow (3 lines). With NEITHER present the overflow returns. So either one
+   independently fixes the shipped sample -- which refutes XACA-0973's
+   "min-width:0 is inert", a conclusion drawn under the flawed stub.
+
+   OPEN DISCREPANCY on that both-removed control, recorded rather than resolved:
+   two passes reported different magnitudes for it at this width -- 14px from
+   the guard-absent-entirely control, 4px from the declaration-level isolation
+   -- using the IDENTICAL shipped sample hostname, so it is not a sample
+   difference. It may be a truncated reading of the same figure, or the two
+   passes may have measured at different levels (leaf vs row is a documented
+   confounder on this surface: XACA-0973 recorded the leaf metric reading 0
+   while the row overflowed 34px). Neither explanation has been verified and no
+   harness was re-run for it, because the isolation conclusion turns only on
+   zero-versus-nonzero, not on the magnitude. Do not repeat either figure as
+   settled.
+
+   They are NOT redundant: the hyphen-free hostname above needs overflow-wrap in
+   this skin at 900-1920, where min-width:0 alone will not force a break inside
+   an unbreakable token. Dropping either one re-opens a real regime.
 
    WHY NOT ellipsis + white-space:nowrap: this skin emits title= on the Machine
    row only (lcars-dashboard-app.js:964), and that tooltip is inert on the
    touch-primary iPad surface this reporting page targets -- so ellipsis would
    hide the hostname with no practical recovery path. In lcars2 it is worse
-   still: that skin emits no title= anywhere. Wrapping can break a domain
-   mid-token but never destroys information.
+   still: none of that skin's four team-card app files emits title= at all (its
+   only title= sites sit in an unrelated engines table). Wrapping can break a
+   domain mid-token but never destroys information.
 
    WHY THIS IS AN ACCESSIBILITY FIX, NOT A COSMETIC ONE: at 320px the pre-fix
    state is arguably a WCAG 1.4.10 (Reflow) failure -- content is clipped and

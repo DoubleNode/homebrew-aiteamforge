@@ -2116,7 +2116,10 @@
    276@414 against 284 / 339 / 378 in lcars -- and are identical from 500px up
    (314@500, 414@600, 553@799, 294@900 ...), which is why the overflow appears
    at 320 and nowhere else. This skin also renders the RAW session.hostname,
-   where lcars renders a shortened machineDisplayName.
+   where lcars renders machineDisplayName -- which is a registered nickname only
+   when cachedMachineData holds one for that host, and the SAME raw hostname
+   otherwise (lcars-dashboard-app.js:872-876). lcars is therefore not reliably
+   shorter, and this is not a reason its guard matters less.
 
    XACA-0973'S AVATAR STORY WAS INCOMPLETE, NOT WRONG. At 1080/1133 both skins
    have identical cards (251px / 268px) and only lcars overflows, so the
@@ -2155,21 +2158,34 @@
 
    WHICH DECLARATION DOES THE WORK -- both, for different content shapes; keep
    both. Isolated at THIS skin's 320px against faithful chrome: min-width:0
-   ALONE gives 0 overflow (value wraps to 2 lines), overflow-wrap:anywhere ALONE
-   gives 0 overflow (3 lines), and neither gives 4px. Either independently fixes
-   the shipped sample, which refutes XACA-0973's "min-width:0 is inert" -- a
-   conclusion drawn under the flawed stub. They are NOT redundant: the
-   hyphen-free hostname needs overflow-wrap in the lcars skin at 900-1920, where
-   min-width:0 alone will not force a break inside an unbreakable token.
+   ALONE gives 0 overflow (value wraps to 2 lines), and overflow-wrap:anywhere
+   ALONE gives 0 overflow (3 lines). With NEITHER present the overflow returns.
+   Either independently fixes the shipped sample, which refutes XACA-0973's
+   "min-width:0 is inert" -- a conclusion drawn under the flawed stub.
+
+   OPEN DISCREPANCY on that both-removed control, recorded rather than resolved:
+   two passes reported different magnitudes for it at this width -- 14px from
+   the guard-absent-entirely control, 4px from the declaration-level isolation
+   -- using the IDENTICAL shipped sample hostname, so it is not a sample
+   difference. It may be a truncated reading of the same figure, or the two
+   passes may have measured at different levels (leaf vs row is a documented
+   confounder here: XACA-0973 recorded the leaf metric reading 0 while the row
+   overflowed 34px). Neither explanation has been verified and no harness was
+   re-run for it, because the isolation conclusion turns only on
+   zero-versus-nonzero. Do not repeat either figure as settled.
+
+   They are NOT redundant: the hyphen-free hostname needs overflow-wrap in the
+   lcars skin at 900-1920, where min-width:0 alone will not force a break inside
+   an unbreakable token.
 
    WHY NOT ellipsis + white-space:nowrap -- and note the premise is different in
    THIS skin: its four app files (lcars-academy-app.js:332, lcars-all-app.js:310,
    lcars-doublenode-app.js:332, lcars-mainevent-app.js:332) emit the Machine
    value as a BARE <span class="session-value"> with NO title attribute at all.
-   Only lcars adds title=. So the argument is stronger here than "the tooltip is
-   inert on touch": in the skin that actually clipped there is ZERO recovery
-   path for a truncated hostname. Wrapping can break a domain mid-token but
-   never destroys information.
+   Only lcars's team-card renderer adds title=. So the argument is stronger here
+   than "the tooltip is inert on touch": in the skin that actually clipped there
+   is ZERO recovery path for a truncated hostname. Wrapping can break a domain
+   mid-token but never destroys information.
 
    WHY THIS IS AN ACCESSIBILITY FIX, NOT A COSMETIC ONE: at 320px the pre-fix
    state is arguably a WCAG 1.4.10 (Reflow) failure -- content clipped and
