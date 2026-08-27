@@ -54,6 +54,37 @@
 # TEST ISOLATION: LCARS_SPAWN_LEDGER_PATH overrides the resolved path — used
 # by tests/test-xaca-0988-001-spawn-ledger.sh so test runs never touch the
 # real fleet's ledger file.
+#
+# RETENTION / SIZE POLICY (XACA-0988-016)
+# This file's own APPEND-ONLY invariant above is deliberate and this script
+# must NEVER rotate, truncate, or size-cap the ledger itself — see "WHY A
+# SEPARATE FILE" above for why: XACA-0661's per-launch rotation destroying
+# the very evidence a spawn investigation needs is the defect this ticket
+# exists to fix, and a ledger that quietly rotated itself out from under a
+# runaway-spawn-loop investigation — the ONE scenario this ledger exists to
+# diagnose, and the ONE scenario that grows it fastest and least boundedly —
+# would recreate that exact defect at one remove, in the one file that is
+# supposed to be immune to it.
+#
+# That does not mean unbounded growth is fine to ignore. The answer is
+# observability, not automatic destruction, split two ways:
+#   1. _lcars_ledger_write emits a LOUD, repeated warning to stderr (see
+#      _lcars_ledger_maybe_warn_size, below) once the ledger crosses
+#      LCARS_SPAWN_LEDGER_SIZE_WARN_BYTES (default 50 MiB). It keeps
+#      appending regardless — a diagnostic write must never fail because of
+#      its own size, per _lcars_ledger_write's existing `|| true` contract —
+#      but the warning repeats on every subsequent write past the threshold
+#      so it cannot be missed by anyone tailing server stderr or grepping
+#      "[LCARS][ledger]" in a health-check sweep.
+#   2. Retention, when it is ever actually needed, is an OPERATOR-RUN,
+#      OUT-OF-BAND action this script never decides on its own — no cron, no
+#      startup-time check, no code path here that fires it automatically.
+#      An operator who has confirmed no active incident investigation still
+#      needs the older rows can prune manually, e.g.:
+#        tail -n 200000 "$LEDGER" > "${LEDGER}.pruned" && mv "${LEDGER}.pruned" "$LEDGER"
+#      That boundary (a human types this, with eyes on the situation,
+#      instead of the script running it unattended) is load-bearing, not
+#      incidental — see the file header's WHY above.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -111,21 +142,88 @@ _lcars_ledger_path() {
 }
 
 # ---------------------------------------------------------------------------
-# _lcars_json_escape <string>
+# _lcars_json_escape_var <string> <out_var_name>
 #
 # Minimal JSON string-body escaper for the small, shell-controlled field set
 # this ledger writes (no untrusted external input reaches it). Escapes
-# backslash and double-quote, and flattens embedded newlines/tabs to spaces
-# so one ledger row always occupies exactly one line (a reader can safely
-# process this file with `wc -l` / `tail -1` / `jq -c`).
+# backslash and double-quote, and flattens EVERY C0 control byte (0x00-0x1F)
+# to a single space each — not just newline/tab — so one ledger row always
+# occupies exactly one line and a strict JSON parser (python's json.loads,
+# jq) never sees a raw control byte in a string body.
+#
+# XACA-0988-017: the original version flattened only \n and \t. Any OTHER
+# C0 byte reaching a field — e.g. a `comm` value pulled from `ps` while
+# walking the ancestor chain below, which can legitimately contain odd bytes
+# for some processes — reached the ledger raw and produced a line strict
+# JSON parsers reject outright, defeating the ledger's entire purpose
+# ("tooling must parse this"). Every byte in 0x01-0x1F is now flattened.
+# 0x00 (NUL) is deliberately EXCLUDED: it cannot occur in a value sourced
+# from `ps`/`awk`/shell argv (all NUL-terminated C strings, incapable of
+# embedding one), and `${_s//$'\x00'/ }` is a hard parse error under macOS's
+# shipped bash 3.2 ("bad substitution: no closing `}`" — confirmed
+# empirically, feedback_verify_under_bin_bash_not_path_bash) — so including
+# it would trade a hypothetical hole for a guaranteed crash on every call.
+#
+# XACA-0988-018: writes the result into the CALLER-NAMED variable ($2) via
+# `printf -v`, instead of the caller capturing this function's stdout
+# through `$(...)`. Every command substitution forks a subshell in both
+# bash and zsh, even when the command inside is a builtin/function with no
+# external calls of its own — _lcars_ledger_write previously paid that fork
+# 13 times per write (once per field) on top of the ancestor-chain cost
+# below. `printf -v "$name"` with a DYNAMIC variable name is honored by both
+# bash 3.2 and zsh 5.9 (verified) and does the same job with zero forks.
 # ---------------------------------------------------------------------------
-_lcars_json_escape() {
+_lcars_json_escape_var() {
     local _s="${1:-}"
     _s="${_s//\\/\\\\}"
     _s="${_s//\"/\\\"}"
-    _s="${_s//$'\n'/ }"
+    _s="${_s//$'\x01'/ }"
+    _s="${_s//$'\x02'/ }"
+    _s="${_s//$'\x03'/ }"
+    _s="${_s//$'\x04'/ }"
+    _s="${_s//$'\x05'/ }"
+    _s="${_s//$'\x06'/ }"
+    _s="${_s//$'\x07'/ }"
+    _s="${_s//$'\x08'/ }"
     _s="${_s//$'\t'/ }"
-    printf '%s' "${_s}"
+    _s="${_s//$'\n'/ }"
+    _s="${_s//$'\x0b'/ }"
+    _s="${_s//$'\x0c'/ }"
+    _s="${_s//$'\x0d'/ }"
+    _s="${_s//$'\x0e'/ }"
+    _s="${_s//$'\x0f'/ }"
+    _s="${_s//$'\x10'/ }"
+    _s="${_s//$'\x11'/ }"
+    _s="${_s//$'\x12'/ }"
+    _s="${_s//$'\x13'/ }"
+    _s="${_s//$'\x14'/ }"
+    _s="${_s//$'\x15'/ }"
+    _s="${_s//$'\x16'/ }"
+    _s="${_s//$'\x17'/ }"
+    _s="${_s//$'\x18'/ }"
+    _s="${_s//$'\x19'/ }"
+    _s="${_s//$'\x1a'/ }"
+    _s="${_s//$'\x1b'/ }"
+    _s="${_s//$'\x1c'/ }"
+    _s="${_s//$'\x1d'/ }"
+    _s="${_s//$'\x1e'/ }"
+    _s="${_s//$'\x1f'/ }"
+    printf -v "${2}" '%s' "${_s}"
+}
+
+# ---------------------------------------------------------------------------
+# _lcars_json_escape <string>
+#
+# Back-compat wrapper around _lcars_json_escape_var with the ORIGINAL
+# print-to-stdout interface, for any caller (tests, a future call site) that
+# wants a plain `$(...)`-captured result and doesn't need the zero-fork
+# path. _lcars_ledger_write itself calls _lcars_json_escape_var directly and
+# never goes through this wrapper.
+# ---------------------------------------------------------------------------
+_lcars_json_escape() {
+    local _out
+    _lcars_json_escape_var "${1:-}" _out
+    printf '%s' "${_out}"
 }
 
 # ---------------------------------------------------------------------------
@@ -141,6 +239,19 @@ _lcars_json_escape() {
 #
 # Portable `ps -o ppid=,comm= -p <pid>` invocation — works under both macOS
 # BSD ps and Linux procps without GNU-only flags.
+#
+# XACA-0988-018: each hop previously forked 3 processes — the unavoidable
+# `ps` call, PLUS two separate `awk` calls (one to pull ppid, one to pull
+# comm) — so a full 15-hop chain could cost ~45 forks on the server spawn
+# path. The two `awk` calls are replaced below with a single `read -r _ppid
+# _comm <<< "${_ps_out}"`: a shell BUILTIN, not a fork. `read` with two
+# target variables gives the first var the first whitespace-delimited field
+# (ppid) and gives the LAST var the entire REMAINDER of the line verbatim —
+# same behavior as the old `awk '{$1=""; sub(/^ /,"")}'` for a multi-word
+# comm (e.g. "Google Chrome Helper"), including the empty-`_ps_out` early-
+# exit case. Verified identical under both bash 3.2 and zsh 5.9. This drops
+# per-hop cost from 3 forks to 1 (the `ps` call itself — irreducible, since
+# there is no builtin that reads another process's ancestry).
 # ---------------------------------------------------------------------------
 _lcars_ancestor_chain() {
     local _pid="${1:-$$}"
@@ -155,8 +266,9 @@ _lcars_ancestor_chain() {
             _chain="${_chain}${_chain:+ <- }${_cur}:?"
             break
         fi
-        _ppid="$(printf '%s\n' "${_ps_out}" | awk '{print $1}')"
-        _comm="$(printf '%s\n' "${_ps_out}" | awk '{$1=""; sub(/^ /,""); print}')"
+        _ppid=""
+        _comm=""
+        read -r _ppid _comm <<< "${_ps_out}"
         _chain="${_chain}${_chain:+ <- }${_cur}:${_comm:-?}"
         if [[ -z "${_ppid}" ]] || [[ "${_ppid}" == "${_cur}" ]]; then
             break
@@ -169,6 +281,48 @@ _lcars_ancestor_chain() {
         _hop=$((_hop + 1))
     done
     printf '%s' "${_chain}"
+}
+
+# ---------------------------------------------------------------------------
+# _lcars_ledger_maybe_warn_size <path>
+#
+# XACA-0988-016: this ledger is intentionally APPEND-ONLY and unbounded (see
+# the RETENTION / SIZE POLICY section of the file header for why no code
+# here may rotate/truncate/cap it). Unbounded is not the same as unwatched:
+# emit a LOUD, un-throttled warning to stderr once the ledger crosses
+# LCARS_SPAWN_LEDGER_SIZE_WARN_BYTES (default 50 MiB, overridable for tests)
+# so a genuine runaway-spawn-loop — the ONE scenario this ledger exists to
+# diagnose, and the one that grows it fastest — cannot go unnoticed. Fires
+# on EVERY write past the threshold, deliberately: a one-shot warning is
+# exactly the kind of thing that scrolls off a log and gets missed mid-
+# incident, and this path is already best-effort/non-blocking (matches
+# _lcars_ledger_write's own `|| true` contract — sizing must never fail a
+# spawn). A malformed/non-numeric override is treated as "no check" rather
+# than a fatal error, for the same reason.
+# ---------------------------------------------------------------------------
+_lcars_ledger_maybe_warn_size() {
+    local _path="${1:-}"
+    if [[ -z "${_path}" ]] || [[ ! -f "${_path}" ]]; then
+        return 0
+    fi
+    local _limit="${LCARS_SPAWN_LEDGER_SIZE_WARN_BYTES:-52428800}"
+    case "${_limit}" in
+        ''|*[!0-9]*)
+            return 0
+            ;;
+    esac
+    local _size
+    _size="$(wc -c < "${_path}" 2>/dev/null | tr -d '[:space:]')"
+    case "${_size}" in
+        ''|*[!0-9]*)
+            return 0
+            ;;
+    esac
+    if [[ "${_size}" -gt "${_limit}" ]]; then
+        printf '[LCARS][ledger] WARNING: %s is %s bytes, over the %s-byte size-warning threshold.\n[LCARS][ledger] This ledger is APPEND-ONLY BY DESIGN (XACA-0988) — nothing here will rotate or truncate it automatically.\n[LCARS][ledger] If retention is genuinely needed, prune it manually and out-of-band; see the RETENTION / SIZE POLICY comment atop scripts/lcars-spawn-ledger.sh.\n' \
+            "${_path}" "${_size}" "${_limit}" >&2 2>/dev/null || true
+    fi
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -212,19 +366,42 @@ _lcars_ledger_write() {
     local _ancestors
     _ancestors="$(_lcars_ancestor_chain "$$" 15)"
 
+    # XACA-0988-018: escape every field via _lcars_json_escape_var (writes
+    # into the named local below) instead of `"$(_lcars_json_escape ...)"` —
+    # the latter forked a subshell PER FIELD (13 forks per write) purely to
+    # capture a value this process could just as well receive directly.
+    local _e_ts _e_site _e_event _e_launch_id _e_team _e_port _e_session
+    local _e_pid _e_ppid _e_argv _e_skip_server_start _e_skip_attach
+    local _e_ancestors
+    _lcars_json_escape_var "${_ts}" _e_ts
+    _lcars_json_escape_var "${_site}" _e_site
+    _lcars_json_escape_var "${_event}" _e_event
+    _lcars_json_escape_var "${_launch_id}" _e_launch_id
+    _lcars_json_escape_var "${_team}" _e_team
+    _lcars_json_escape_var "${_port}" _e_port
+    _lcars_json_escape_var "${_session}" _e_session
+    _lcars_json_escape_var "${_pid}" _e_pid
+    _lcars_json_escape_var "${_ppid}" _e_ppid
+    _lcars_json_escape_var "${_argv}" _e_argv
+    _lcars_json_escape_var "${_skip_server_start}" _e_skip_server_start
+    _lcars_json_escape_var "${_skip_attach}" _e_skip_attach
+    _lcars_json_escape_var "${_ancestors}" _e_ancestors
+
     printf '{"ts":"%s","site":"%s","event":"%s","launch_id":"%s","team":"%s","port":"%s","session":"%s","pid":"%s","ppid":"%s","argv":"%s","skip_server_start":"%s","skip_attach":"%s","ancestors":"%s"}\n' \
-        "$(_lcars_json_escape "${_ts}")" \
-        "$(_lcars_json_escape "${_site}")" \
-        "$(_lcars_json_escape "${_event}")" \
-        "$(_lcars_json_escape "${_launch_id}")" \
-        "$(_lcars_json_escape "${_team}")" \
-        "$(_lcars_json_escape "${_port}")" \
-        "$(_lcars_json_escape "${_session}")" \
-        "$(_lcars_json_escape "${_pid}")" \
-        "$(_lcars_json_escape "${_ppid}")" \
-        "$(_lcars_json_escape "${_argv}")" \
-        "$(_lcars_json_escape "${_skip_server_start}")" \
-        "$(_lcars_json_escape "${_skip_attach}")" \
-        "$(_lcars_json_escape "${_ancestors}")" \
+        "${_e_ts}" \
+        "${_e_site}" \
+        "${_e_event}" \
+        "${_e_launch_id}" \
+        "${_e_team}" \
+        "${_e_port}" \
+        "${_e_session}" \
+        "${_e_pid}" \
+        "${_e_ppid}" \
+        "${_e_argv}" \
+        "${_e_skip_server_start}" \
+        "${_e_skip_attach}" \
+        "${_e_ancestors}" \
         >> "${_path}" 2>/dev/null || true
+
+    _lcars_ledger_maybe_warn_size "${_path}"
 }

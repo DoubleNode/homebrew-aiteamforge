@@ -633,6 +633,128 @@ class TestServeStatus(unittest.TestCase):
         self.assertEqual(first_data["bind"]["mode"], "loopback")
         self.assertEqual(second_data["bind"]["mode"], "auto")
 
+    def test_status_all_mode_omits_tailscale_ip(self):
+        """XACA-0988-019 (PR #783 review): LCARS_BIND_MODE=all (0.0.0.0) is
+        reachable from any device on the LAN, not just the tailnet, and
+        /api/status has no auth gate of its own. An unauthenticated LAN
+        client must not be able to learn this server's tailnet address
+        through it. Adversarial fixture: tailscale_ip is populated here even
+        though today's resolve_bind_addresses_or_die() never does that for
+        mode=all — the API layer must mask it regardless of whether the
+        internal recorder currently populates it, so a future change to that
+        branch cannot silently reopen the leak."""
+        all_mode_status_with_ip = {
+            "mode": "all",
+            "hosts": [""],
+            "tailnet_bound": True,
+            "tailscale_ip": "100.101.102.103",
+            "source": "all-interfaces",
+            "degraded": False,
+        }
+        with patch.object(server, "_LCARS_BIND_STATUS", all_mode_status_with_ip):
+            handler, buf = _make_handler(path="/api/status")
+            handler.serve_status()
+        data = _response_json(buf)
+        self.assertIsNone(data["bind"]["tailscale_ip"])
+        # Only the specific IP is masked — the server is still reachable via
+        # the tailnet under mode=all, and that fact itself is not secret.
+        self.assertTrue(data["bind"]["tailnet_bound"])
+        self.assertEqual(data["bind"]["mode"], "all")
+
+    def test_status_non_all_mode_keeps_tailscale_ip(self):
+        """Negative control for the mask above: auto/tailscale mode binds
+        NARROWLY to [loopback, tailscale ip] — a caller able to reach that
+        bind already has tailnet or local-host access, so the field carries
+        no new disclosure and must still be returned (existing behavior;
+        also covered by test_status_includes_bind_diagnostic)."""
+        tailscale_mode_status = {
+            "mode": "tailscale",
+            "hosts": ["127.0.0.1", "100.101.102.103"],
+            "tailnet_bound": True,
+            "tailscale_ip": "100.101.102.103",
+            "source": "detected",
+            "degraded": False,
+        }
+        with patch.object(server, "_LCARS_BIND_STATUS", tailscale_mode_status):
+            handler, buf = _make_handler(path="/api/status")
+            handler.serve_status()
+        data = _response_json(buf)
+        self.assertEqual(data["bind"]["tailscale_ip"], "100.101.102.103")
+
+
+class TestLcarsBindStatusForApi(unittest.TestCase):
+    """XACA-0988-019/020 (PR #783 review): unit tests for the helper
+    serve_status() delegates to, isolated from the HTTP handler plumbing."""
+
+    def test_hosts_list_is_an_independent_copy(self):
+        """XACA-0988-020: dict(_LCARS_BIND_STATUS) alone is a SHALLOW copy —
+        its "hosts" value is the SAME list object as the module global's.
+        Mutating the returned copy's "hosts" list must never be observable
+        on the module global (or on a second call's result)."""
+        real_status = {
+            "mode": "auto",
+            "hosts": ["127.0.0.1", "100.101.102.103"],
+            "tailnet_bound": True,
+            "tailscale_ip": "100.101.102.103",
+            "source": "detected",
+            "degraded": False,
+        }
+        with patch.object(server, "_LCARS_BIND_STATUS", real_status):
+            result = server._lcars_bind_status_for_api()
+            self.assertIsNot(
+                result["hosts"], real_status["hosts"],
+                "hosts must be a fresh list, not the same object as the "
+                "module global's",
+            )
+            result["hosts"].append("999.999.999.999")
+            self.assertEqual(
+                real_status["hosts"], ["127.0.0.1", "100.101.102.103"],
+                "mutating the returned copy corrupted the module global",
+            )
+
+    def test_mode_all_masks_tailscale_ip(self):
+        fake_status = {
+            "mode": "all",
+            "hosts": [""],
+            "tailnet_bound": True,
+            "tailscale_ip": "100.101.102.103",
+            "source": "all-interfaces",
+            "degraded": False,
+        }
+        with patch.object(server, "_LCARS_BIND_STATUS", fake_status):
+            result = server._lcars_bind_status_for_api()
+        self.assertIsNone(result["tailscale_ip"])
+        # Masking the API-facing copy must not rewrite the module global —
+        # a future consumer that reads _LCARS_BIND_STATUS directly (e.g. a
+        # local diagnostic, not the LAN-facing API) still sees the truth.
+        self.assertEqual(fake_status["tailscale_ip"], "100.101.102.103")
+
+    def test_mode_other_than_all_keeps_tailscale_ip(self):
+        for mode in ("auto", "tailscale", "loopback"):
+            fake_status = {
+                "mode": mode,
+                "hosts": ["127.0.0.1"],
+                "tailnet_bound": False,
+                "tailscale_ip": None,
+                "source": "explicit-loopback",
+                "degraded": False,
+            }
+            with patch.object(server, "_LCARS_BIND_STATUS", fake_status):
+                result = server._lcars_bind_status_for_api()
+            self.assertIsNone(result["tailscale_ip"])
+
+        with_ip = {
+            "mode": "tailscale",
+            "hosts": ["127.0.0.1", "100.101.102.103"],
+            "tailnet_bound": True,
+            "tailscale_ip": "100.101.102.103",
+            "source": "detected",
+            "degraded": False,
+        }
+        with patch.object(server, "_LCARS_BIND_STATUS", with_ip):
+            result = server._lcars_bind_status_for_api()
+        self.assertEqual(result["tailscale_ip"], "100.101.102.103")
+
 
 # ---------------------------------------------------------------------------
 # Tests: LCARSHandler — serve_kanban_data
