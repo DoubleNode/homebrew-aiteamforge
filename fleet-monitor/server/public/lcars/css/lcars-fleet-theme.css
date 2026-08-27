@@ -2839,6 +2839,59 @@
     overflow-wrap: anywhere;
 }
 
+/* XACA-0985: .session-label is DELIBERATELY UNSHRINKABLE. This is the other
+   half of the guard above, not an oversight in it -- do not "finish the job"
+   by giving the label the min-width:0 the value got.
+
+   .session-detail is a flex row, space-between, both children flex-shrink:1.
+   The value gets min-width:0 so it yields; the label keeps min-width:auto so it
+   is pinned at its min-content. That asymmetry IS a shrink-priority ordering --
+   label wins, value yields -- and it is what makes the value guard work at all.
+   min-width:0 on the label deletes the priority, flex-shrink then distributes
+   across both items, and the label starts losing pixels on every row with a
+   long hostname AT EVERY WIDTH. Measured: min-width:0 alone costs Machine:
+   11.3px and Working: 20.0px at 1920, and 24.1/29.0px at 1080; peak loss is
+   30.9px. Baseline loses 0.0px at every width, every label, both skins. Adding
+   ellipsis does not rescue that -- it only makes the loss legible: at 1080 the
+   card then renders `Sess...`, `Ma...`, `W...` on a desktop that is clean today.
+
+   WHY NO ELLIPSIS, even though labels are short known tokens and hostnames are
+   not: the argument is sound and the premise is false. There is nothing to
+   truncate. The narrowest .session-info the real page produces at the 320px
+   Reflow floor is 96px in lcars / 82px in lcars2, against a 46.28px worst-case
+   label (Windows:) -- 2.07x / 1.77x headroom. The sub-60px .session-info the
+   ticket assumed first occurs at a 280px viewport, below the Reflow floor.
+   Every candidate fix CREATED the clipping it was meant to cure.
+
+   PROVENANCE, because these figures will be re-quoted: they come from the real
+   pages served over HTTP, with the card rendered by the page's own
+   createTeamCard() against mocked /api endpoints -- NOT hand-injected markup,
+   and NOT stub-lcars.html (see XACA-0986). An earlier measurement pass wrapped
+   the card in a nonexistent `org-container` instead of the real
+   .organization-panel and inflated every width figure by a constant 35px
+   padding delta; that is where an earlier draft's 131/117px and "2.5-2.8x"
+   came from. If you re-measure and disagree, check your wrapper chain first:
+   .lcars-content -> section -> .organization-panel -> .division-container ->
+   .teams-grid.
+
+   flex-shrink:0 is a measured no-op today -- card width, card height, label
+   widths and row/card overflow identical to baseline in 24/24 skin x width
+   cells, 320-1920, at the real 12px font. (Do not restate that on a font-size
+   axis: .session-detail hardcodes font-size:12px, so root-size changes are
+   inert, and cardH on a grid item is the ROW height, contaminated by the
+   sibling card's image-load timing -- it does not repeat across trials.) It is
+   kept anyway because it strictly dominates min-width:auto: with it present,
+   adding min-width:0 costs 0px. It is the specific defence against the edit
+   this ticket nearly shipped.
+
+   NOT flex-wrap:wrap on .session-detail either -- it scores inert on overflow
+   metrics but stacks the value under the label at 1920 (cardH 265 -> 281, three
+   rows stacked). Measure the row's HEIGHT and child positions, not just its
+   overflow. */
+.teams-grid .session-label {
+    flex-shrink: 0;
+}
+
 .team-card {
     background: var(--lcars-dark);
     border-radius: 8px;
