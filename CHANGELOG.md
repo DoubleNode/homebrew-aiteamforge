@@ -33,6 +33,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   reverted in-flight sibling work and swept gitignored `fleet-monitor/server/data/history/*.json`
   runtime files into the shipped tap.
 
+  **Second gate round — a CSS-injection sink, closed with an allowlist rather than an escaper.**
+  `session.theme_color` was assigned straight into `teamNameEl.style.cssText` in all five live apps
+  and both forks. `server.js` stores it verbatim from the reporter POST, and `cssText` replaces the
+  whole declaration block, so `red; position:fixed; font-size:900px; z-index:9999` is a genuine
+  style injection on every operator's dashboard. **No HTML escaper closes it** — `;` and `:` are not
+  HTML-special, and `escapeAttr()` was measured returning that payload byte-for-byte intact. Adds
+  `safeCssColor()` (accepts `#RGB`/`#RGBA`/`#RRGGBB`/`#RRGGBBAA` plus a conservative named set;
+  rejection takes the existing no-theme path rather than substituting a colour), and narrows the
+  sink from `cssText` to `setProperty('color', …, 'important')`. Also mirrors surrogate-safe
+  truncation of working-item titles, `aria-label`s on the nickname editor, and the updated DOM-stub
+  test helper.
+
   **The three MIRRORED files now carry the fix too.** Distinct from the forked copies above,
   `fleet-monitor/server/public/{lcars/js/lcars-dashboard-app.js, lcars2/js/lcars-academy-app.js,
   lcars2/js/lcars-all-app.js}` are byte-identical mirrors of canonical. They were initially missed —

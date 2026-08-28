@@ -275,7 +275,18 @@
 
         select.innerHTML = dashboardsToShow.map(function(d) {
             const selected = d.id === CONFIG.dashboardId ? ' selected' : '';
-            return '<option value="lcars-dashboard.html?dashboard=' + d.id + '"' + selected + '>' + d.name.toUpperCase() + '</option>';
+            // XACA-0416 (review finding 1): d.id and d.name come from
+            // POST /api/dashboards, which sits on the SAME requireApiKey tier as
+            // /api/team-register and stores these with presence-only validation --
+            // so they are exactly as untrusted as the session.* fields this ticket
+            // already escapes. d.id lands in a QUOTED ATTRIBUTE that is also a URL
+            // query parameter: encodeURIComponent first (correct for the URL layer,
+            // and the identity function for the slug-shaped ids in use), then
+            // escapeAttr for the attribute layer -- escapeHtml would be a false fix
+            // here because it leaves `"` untouched. d.name is ELEMENT CONTENT ->
+            // escapeHtml. String(d.name || '') because .toUpperCase() on a missing
+            // name would throw and blank the whole dropdown.
+            return '<option value="lcars-dashboard.html?dashboard=' + escapeAttr(encodeURIComponent(d.id)) + '"' + selected + '>' + escapeHtml(String(d.name || '').toUpperCase()) + '</option>';
         }).join('');
 
         select.onchange = function() {
@@ -1021,12 +1032,14 @@
                 // the cut land inside an entity and emit broken markup like
                 // '&am'. workSubitem is a pre-built fragment by the time it is
                 // concatenated below, so it is NOT escaped again.
-                var workTitle = teamWork.title || teamWork.id;
-                if (workTitle.length > 30) workTitle = workTitle.substring(0, 30) + '...';
+                //
+                // XACA-0416 (UX finding): the cut is made by truncateChars(), not
+                // .substring(). See that helper for why -- .substring() splits
+                // surrogate pairs and emits U+FFFD mid-title.
+                var workTitle = truncateChars(teamWork.title || teamWork.id, 30);
                 var workSubitem = '';
                 if (teamWork.subitem) {
-                    var subTitle = teamWork.subitem.title || teamWork.subitem.id;
-                    if (subTitle.length > 25) subTitle = subTitle.substring(0, 25) + '...';
+                    var subTitle = truncateChars(teamWork.subitem.title || teamWork.subitem.id, 25);
                     workSubitem = ' <span class="work-subitem">(' + escapeHtml(subTitle) + ')</span>';
                 }
                 workingItemHtml = '<div class="session-detail working-item"><span class="session-label">Working:</span><span class="session-value text-online">' + escapeHtml(workTitle) + workSubitem + '</span></div>';
@@ -1095,15 +1108,25 @@
                 '<div class="session-info">' +
                     '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value">' + escapeHtml(session.name) + '</span></div>' +
                     '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value" title="' + escapeAttr(session.hostname) + '">' + escapeHtml(machineDisplayName) + '</span></div>' +
-                    // XACA-0416-004 KNOWN EDGE CASE (documented, deliberately NOT
-                    // fixed): escapeHtml() opens with `if (!text) return ''`, so a
-                    // numeric 0 renders as a blank cell rather than "0". Left as-is
-                    // -- session.windows is a tmux window count and is >= 1 for any
-                    // live session, the impact is cosmetic rather than a security
-                    // issue, and relaxing escapeHtml's falsy guard would disturb the
-                    // pinned characterization baseline in
-                    // tests/xaca-0990-001-lcars-terminal-card-baseline.json.
-                    '<div class="session-detail"><span class="session-label">Windows:</span><span class="session-value">' + escapeHtml(session.windows) + '</span></div>' +
+                    // XACA-0416 UX gate: FIXED. The earlier note here claimed a
+                    // numeric 0 was unreachable because "a tmux window count is >= 1
+                    // for any live session". That reasoned about tmux, not about the
+                    // reporter. fleet-reporter.sh:452 ends the window-count pipeline
+                    // with `|| echo 0`, and line 517 emits `"windows":$windows`
+                    // UNQUOTED -- so under the script's `set -o pipefail` a line that
+                    // does not match `N windows` produces the JSON NUMBER 0, not a
+                    // string. escapeHtml() opens with `if (!text) return ''`, which
+                    // swallows numeric zero, so that case rendered a BLANK cell where
+                    // the pre-XACA-0416 raw concatenation had coerced it to "0".
+                    //
+                    // The fix coerces at the CALL SITE rather than relaxing
+                    // escapeHtml's falsy guard -- escapeHtml's body is pinned by the
+                    // XACA-0990 characterization baseline in
+                    // tests/xaca-0990-001-lcars-terminal-card-baseline.json and has
+                    // other callers. `String(undefined)` is "undefined", which renders
+                    // WORSE than blank, so null/undefined are mapped to '' explicitly
+                    // and keep rendering blank; only a real 0 becomes "0".
+                    '<div class="session-detail"><span class="session-label">Windows:</span><span class="session-value">' + escapeHtml(session.windows == null ? '' : String(session.windows)) + '</span></div>' +
                     '<div class="session-detail"><span class="session-label">Uptime:</span><span class="session-value">' + escapeHtml(session.uptime_display) + '</span></div>' +
                     '<div class="session-detail"><span class="session-label">Status:</span><span class="session-value text-' + status + '">' + status.toUpperCase() + '</span></div>' +
                     backupHtml +
@@ -1111,11 +1134,21 @@
                 '</div>' +
             '</div>';
 
-        if (session.theme_color && !isLcars) {
-            card.style.borderLeft = '4px solid ' + session.theme_color;
+        // XACA-0416: validate BEFORE either style sink, and gate the whole block
+        // on the VALIDATED value -- an unrecognised theme_color renders exactly
+        // like no theme_color at all.
+        var themeColor = safeCssColor(session.theme_color);
+        if (themeColor && !isLcars) {
+            card.style.borderLeft = '4px solid ' + themeColor;
             var teamNameEl = card.querySelector('.team-name');
             if (teamNameEl) {
-                teamNameEl.style.cssText = 'color: ' + session.theme_color + ' !important;';
+                // Single-property write instead of cssText: cssText replaces the
+                // ENTIRE declaration block, and setProperty is the narrower sink.
+                // Behaviour-preserving here -- teamNameEl is built fresh from this
+                // card's innerHTML and carries no other inline declaration -- and
+                // setProperty keeps the `!important` that a plain
+                // `style.color = ...` assignment cannot express.
+                teamNameEl.style.setProperty('color', themeColor, 'important');
             }
         }
 
@@ -1382,6 +1415,19 @@
         return container;
     }
 
+    // XACA-0416 (review finding 2): machineId / expandedMachineId are
+    // interpolated into ATTRIBUTE SELECTORS below. This is NOT an XSS sink --
+    // querySelector parses CSS, it does not create markup -- it is a
+    // CORRECTNESS bug. `machine_id` comes verbatim from the reporter's POSTed
+    // payload (server.js applies presence-only validation), so a value holding
+    // a `"` closes the selector's quoted string early and querySelector throws
+    // SyntaxError, taking out the nickname editor and the expand/collapse of
+    // the history and backup panels. CSS.escape() is the standard fix and its
+    // output is valid inside a quoted attribute-selector string. Used bare, no
+    // polyfill: lcars-ui/js/lcars.js already calls CSS.escape() unguarded in
+    // five places, and this repo ships no browserslist, no transpile step and
+    // no polyfill of any kind -- a speculative guard here would be the only one
+    // in the codebase.
     function toggleHistoryPanel(machineId, container) {
         var panel = container.querySelector('.machine-history-panel');
         var indicator = container.querySelector('.machine-expand-indicator');
@@ -1392,7 +1438,7 @@
             if (indicator) indicator.classList.remove('expanded');
         } else {
             if (expandedMachineId) {
-                var prevContainer = document.querySelector('.machine-item-container[data-machine-id="' + expandedMachineId + '"]');
+                var prevContainer = document.querySelector('.machine-item-container[data-machine-id="' + CSS.escape(expandedMachineId) + '"]');
                 if (prevContainer) {
                     var prevPanel = prevContainer.querySelector('.machine-history-panel');
                     var prevIndicator = prevContainer.querySelector('.machine-expand-indicator');
@@ -1419,7 +1465,7 @@
             if (indicator) indicator.classList.remove('expanded');
         } else {
             if (expandedBackupMachineId) {
-                var prevContainer = document.querySelector('.machine-backup-container[data-machine-id="' + expandedBackupMachineId + '"]');
+                var prevContainer = document.querySelector('.machine-backup-container[data-machine-id="' + CSS.escape(expandedBackupMachineId) + '"]');
                 if (prevContainer) {
                     var prevPanel = prevContainer.querySelector('.backup-details-panel');
                     var prevIndicator = prevContainer.querySelector('.backup-expand-indicator');
@@ -1650,6 +1696,91 @@
             .replace(/'/g, '&#39;');
     }
 
+    // XACA-0416 (review finding 1): org_color is NOT an HTML problem, and no
+    // HTML escaper fixes it. It is interpolated into a CSS custom-property
+    // reference -- `var(--lcars-<org_color>)` -- inside a style="..." attribute.
+    // escapeAttr() stops the value breaking OUT of the attribute, but it touches
+    // none of `)`, `;` or `:`, so a perfectly attribute-escaped org_color of
+    // `red); background-image: url(https://attacker.example/x` still closes the
+    // var() and appends attacker-chosen CSS declarations. A CSS context needs an
+    // ALLOWLIST, not an escaper. A custom-property suffix is a CSS identifier, so
+    // accept only identifier characters and fall back to the existing default for
+    // anything else. escapeAttr() is still applied to the finished style string
+    // on top of this -- that layer guards the HTML attribute, this one guards the
+    // CSS inside it.
+    function safeCssIdent(value, fallback) {
+        var s = (value === null || value === undefined) ? '' : String(value);
+        return /^[A-Za-z0-9_-]+$/.test(s) ? s : fallback;
+    }
+
+    // XACA-0416 (UX/Test finding): session.theme_color is a CSS context, not an
+    // HTML one -- the same class safeCssIdent() exists for, but a colour is not
+    // an identifier, so it needs its own allowlist rather than that one.
+    //
+    // server.js stores theme_color VERBATIM from the reporter's POST (the
+    // endpoint validates presence, not shape) and it was assigned straight into
+    // `teamNameEl.style.cssText`. cssText REPLACES the whole declaration block,
+    // so a value like `red; position:fixed; font-size:900px; z-index:9999` is a
+    // genuine style injection on every operator's dashboard, not a cosmetic
+    // glitch. No HTML escaper closes it: `;` and `:` are not HTML-special, so
+    // escapeAttr() hands that payload back byte-for-byte intact.
+    //
+    // ACCEPTED: #RGB, #RGBA, #RRGGBB, #RRGGBBAA, plus a conservative set of CSS
+    // named colours. Every theme file the fleet actually ships is #RRGGBB
+    // (fleet-reporter.sh's get_theme_color() cats lcars-ports/<session>.theme),
+    // so the hex branch covers production and the named set is slack for a
+    // hand-edited file. rgb()/rgba() are deliberately NOT accepted: admitting
+    // them means validating three or four numeric components and their
+    // separators, and nothing in the fleet emits them, so that parser would be
+    // untested surface bought for no caller.
+    //
+    // REJECTION TAKES THE NO-THEME PATH: it returns '' and the caller skips the
+    // whole styling block, which is byte-identical to what already happens when
+    // theme_color is absent. It does not substitute a colour of its own.
+    var CSS_NAMED_COLORS = {
+        aqua: 1, black: 1, blue: 1, cyan: 1, fuchsia: 1, gold: 1, gray: 1,
+        green: 1, grey: 1, indigo: 1, lavender: 1, lime: 1, magenta: 1,
+        maroon: 1, navy: 1, olive: 1, orange: 1, orchid: 1, pink: 1, purple: 1,
+        red: 1, salmon: 1, silver: 1, tan: 1, teal: 1, tomato: 1, turquoise: 1,
+        violet: 1, white: 1, yellow: 1
+    };
+
+    function safeCssColor(value) {
+        var s = (value === null || value === undefined) ? '' : String(value).trim();
+        if (/^#(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{3})$/.test(s)) {
+            return s;
+        }
+        return Object.prototype.hasOwnProperty.call(CSS_NAMED_COLORS, s.toLowerCase()) ? s : '';
+    }
+
+    // XACA-0416 (UX finding): String.prototype.substring() cuts by UTF-16 code
+    // UNIT. Any astral character -- every emoji above U+FFFF included -- occupies
+    // TWO units, so a title whose 30th unit lands between the halves of a
+    // surrogate pair is cut mid-character and emits a LONE SURROGATE, which the
+    // browser renders as the U+FFFD replacement glyph. Reproduced at 29 ASCII
+    // characters followed by one emoji. Array.from() iterates by code POINT, so
+    // a pair is never split.
+    //
+    // SCOPE, so a pass is not read as more than it is: this makes the cut
+    // CODE-POINT safe, not fully grapheme-cluster safe. A ZWJ sequence
+    // (family emoji) or a combining mark can still be separated from its base at
+    // the boundary; that degrades to two valid glyphs, not to a replacement
+    // glyph, and full segmentation would mean Intl.Segmenter. The reported defect
+    // is the replacement glyph, and this removes it.
+    //
+    // The length TEST moves to code points too, deliberately: comparing a
+    // code-unit length against a code-point slice would truncate strings that the
+    // slice then leaves untouched, appending a bare '...' to a complete title.
+    //
+    // ORDERING IS UNCHANGED AND LOAD-BEARING -- callers still truncate the RAW
+    // value and escape at the point of interpolation. Escaping first would let
+    // the cut land inside a character entity and emit '&am'.
+    function truncateChars(text, limit) {
+        var s = (text === null || text === undefined) ? '' : String(text);
+        var chars = Array.from(s);
+        return chars.length > limit ? chars.slice(0, limit).join('') + '...' : s;
+    }
+
     // ============================================================================
     // NICKNAME EDITOR
     // ============================================================================
@@ -1657,7 +1788,7 @@
     function openNicknameEditor(machineId, currentNickname, hostname) {
         closeNicknameEditor();
 
-        var valueEl = document.querySelector('.machine-nickname-value[data-machine-id="' + machineId + '"]');
+        var valueEl = document.querySelector('.machine-nickname-value[data-machine-id="' + CSS.escape(machineId) + '"]');
         if (!valueEl) return;
 
         var row = valueEl.closest('.machine-nickname-row');
@@ -1674,9 +1805,21 @@
         // alone. currentNickname comes from the nickname endpoint and hostname from
         // the reporter's POST /api/status payload; both are untrusted.
         editor.innerHTML =
-            '<input type="text" class="nickname-input" value="' + escapeAttr(currentNickname) + '" placeholder="' + escapeAttr(hostname) + '" maxlength="32">' +
-            '<button class="nickname-save-btn" title="Save">✓</button>' +
-            '<button class="nickname-cancel-btn" title="Cancel">✗</button>';
+            // XACA-0416 (UX finding, WCAG 2.1 AA 4.1.2 Name/Role/Value): the input
+            // had no accessible name but its placeholder, which is the LAST resort
+            // in the accessible-name computation and, worse, disappears the moment
+            // the operator types -- so the field goes nameless exactly while it is
+            // being edited. The two buttons carried a glyph and a title= only;
+            // title is also a last-resort source and is not announced by every
+            // AT/browser pairing. aria-label is authoritative for all three.
+            //
+            // These three aria-label values are STATIC LITERALS, so they get no
+            // escaper -- adding one here would be noise that implies an untrusted
+            // source that does not exist. value= and placeholder= interpolate
+            // untrusted data and keep their escapeAttr().
+            '<input type="text" class="nickname-input" aria-label="Machine nickname" value="' + escapeAttr(currentNickname) + '" placeholder="' + escapeAttr(hostname) + '" maxlength="32">' +
+            '<button class="nickname-save-btn" title="Save" aria-label="Save machine nickname">✓</button>' +
+            '<button class="nickname-cancel-btn" title="Cancel" aria-label="Cancel machine nickname edit">✗</button>';
 
         row.appendChild(editor);
 
@@ -1729,7 +1872,7 @@
         .then(function(data) {
             console.log('[LCARS] Nickname saved:', data);
 
-            var valueEl = document.querySelector('.machine-nickname-value[data-machine-id="' + machineId + '"]');
+            var valueEl = document.querySelector('.machine-nickname-value[data-machine-id="' + CSS.escape(machineId) + '"]');
             if (valueEl) {
                 if (data.nickname) {
                     valueEl.textContent = data.nickname;
@@ -1740,7 +1883,7 @@
                 }
             }
 
-            var editBtn = document.querySelector('.nickname-edit-btn[data-machine-id="' + machineId + '"]');
+            var editBtn = document.querySelector('.nickname-edit-btn[data-machine-id="' + CSS.escape(machineId) + '"]');
             if (editBtn) {
                 editBtn.setAttribute('data-current', data.nickname || '');
             }
@@ -2053,8 +2196,11 @@
             // Build links HTML with org colors
             const linksHtml = dashboardsToShow.map(function(d) {
                 const isActive = d.id === CONFIG.dashboardId;
-                const orgColor = d.org_color || 'lavender';
-                const linkUrl = 'lcars-dashboard.html?dashboard=' + d.id;
+                // XACA-0416 (review finding 1): org_color reaches a CSS context,
+                // not an HTML one -- see safeCssIdent()'s note. Allowlist it here;
+                // escapeAttr on the finished style string below is the second layer.
+                const orgColor = safeCssIdent(d.org_color, 'lavender');
+                const linkUrl = 'lcars-dashboard.html?dashboard=' + encodeURIComponent(d.id);
 
                 var colorStyle;
                 if (isActive) {
@@ -2062,8 +2208,11 @@
                 } else {
                     colorStyle = 'background: var(--lcars-' + orgColor + '); color: var(--lcars-black);';
                 }
-                return '<a href="' + linkUrl + '" class="sidebar-link' + (isActive ? ' active' : '') +
-                       '" style="' + colorStyle + '">' + d.name.toUpperCase() + '</a>';
+                // href and style are QUOTED ATTRIBUTES -> escapeAttr (escapeHtml
+                // leaves quotes alone and would be a false fix). The link text is
+                // ELEMENT CONTENT -> escapeHtml.
+                return '<a href="' + escapeAttr(linkUrl) + '" class="sidebar-link' + (isActive ? ' active' : '') +
+                       '" style="' + escapeAttr(colorStyle) + '">' + escapeHtml(String(d.name || '').toUpperCase()) + '</a>';
             }).join('');
 
             container.innerHTML = linksHtml;

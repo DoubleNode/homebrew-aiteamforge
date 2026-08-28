@@ -71,6 +71,49 @@ class FakeClassList {
     }
 }
 
+// XACA-0416: a CSSStyleDeclaration stand-in. The stub previously used a bare
+// `{}`, which is enough for `el.style.display = 'none'` but silently lacks
+// setProperty() -- so the theme_color path could not be RENDERED at all, only
+// read. It models the three behaviours the theme_color assertions depend on:
+//
+//   * setProperty(name, value, priority) records the value AND its priority, so
+//     a test can prove the `!important` survived the move off cssText.
+//   * cssText is a real accessor pair, so a test can prove nothing wrote the
+//     whole declaration block (the wide sink) behind its back.
+//   * plain property assignment (`style.borderLeft = ...`) keeps working as an
+//     own property, exactly as it did against the bare object.
+//
+// It is NOT a CSS parser: setting cssText does not populate individual
+// properties, and setProperty does not validate the value. Both are out of
+// scope -- these tests assert what the CLIENT CODE writes to the sink, not what
+// a browser would then do with it.
+class FakeStyle {
+    constructor() {
+        Object.defineProperty(this, '_props', { value: new Map(), enumerable: false, writable: true });
+        Object.defineProperty(this, '_cssText', { value: '', enumerable: false, writable: true });
+    }
+    setProperty(name, value, priority) {
+        this._props.set(String(name), { value: String(value), priority: priority || '' });
+    }
+    removeProperty(name) {
+        this._props.delete(String(name));
+    }
+    getPropertyValue(name) {
+        const entry = this._props.get(String(name));
+        return entry ? entry.value : '';
+    }
+    getPropertyPriority(name) {
+        const entry = this._props.get(String(name));
+        return entry ? entry.priority : '';
+    }
+    get cssText() {
+        return this._cssText;
+    }
+    set cssText(v) {
+        this._cssText = String(v);
+    }
+}
+
 class FakeElement {
     constructor(tag) {
         this.tagName = String(tag || 'div').toUpperCase();
@@ -78,7 +121,7 @@ class FakeElement {
         this._innerHTML = '';
         this._attrs = new Map();
         this._listeners = new Map();
-        this.style = {};
+        this.style = new FakeStyle();
         this.title = '';
         this.classList = new FakeClassList(this);
         this.children = [];
@@ -143,12 +186,43 @@ class FakeElement {
         this.children.push(child);
         return child;
     }
-    querySelector() {
-        // Not exercised by any code path these tests cover (the only
-        // querySelector call in these files is gated behind
-        // `session.theme_color && !isLcars`, which the LCARS-card tests
-        // never hit).
-        return null;
+    querySelector(selector) {
+        // XACA-0416: the previous version returned null unconditionally, with a
+        // note that no covered path reached it. That is no longer true -- the
+        // theme_color guard's assertions render createTeamCard() with a
+        // non-LCARS session, which takes the `card.querySelector('.team-name')`
+        // branch, and a permanent null would have made those assertions pass
+        // VACUOUSLY: the injection sink is inside `if (teamNameEl)`, so a null
+        // means the sink is never reached and "no payload in the style block"
+        // is true for the wrong reason.
+        //
+        // Deliberately minimal: ONE simple class selector, matched against the
+        // element's innerHTML string. This stub does not parse HTML, so the
+        // returned node is synthesised rather than found -- which is exactly
+        // what these tests need (a fresh element carrying an empty style
+        // declaration block, which is what a browser hands back here too). It
+        // is cached per class so repeated queries return the SAME node, as a
+        // real DOM would; without that, a test reading the style back would
+        // read it off a different element than the one the client code wrote.
+        // Anything more complex than `.class` returns null rather than guessing.
+        const m = /^\.([A-Za-z][A-Za-z0-9_-]*)$/.exec(String(selector || ''));
+        if (!m) return null;
+        const cls = m[1];
+        // Token membership, not a substring match: `.team` must not match
+        // class="team-card". Pull every class attribute out of the markup and
+        // split each on whitespace, the same tokenisation the HTML spec uses.
+        const classAttrs = String(this._innerHTML || '').match(/class="[^"]*"/g) || [];
+        const present = classAttrs.some(function (attr) {
+            return attr.slice('class="'.length, -1).split(/\s+/).indexOf(cls) !== -1;
+        });
+        if (!present) return null;
+        if (!this._querySelectorCache) this._querySelectorCache = new Map();
+        if (!this._querySelectorCache.has(cls)) {
+            const el = new FakeElement('div');
+            el.className = cls;
+            this._querySelectorCache.set(cls, el);
+        }
+        return this._querySelectorCache.get(cls);
     }
 }
 
@@ -222,12 +296,22 @@ function loadClientApp(relPath, ctx) {
         throw new Error('lcars-client-dom-stub: closing "})();" not found in ' + relPath);
     }
 
+    // XACA-0416 adds `setWorkingItems`. The working-item row createTeamCard()
+    // renders is gated on the IIFE-scoped `workingItems` cache, which is only
+    // ever populated by a fetch inside the DOMContentLoaded handler this loader
+    // never dispatches -- so without a setter, the truncation path is
+    // unreachable from a test and could only be READ, not rendered. It is
+    // `typeof`-guarded because only lcars-dashboard-app.js declares that
+    // variable; in the four lcars2 files the export lands as null rather than
+    // throwing a ReferenceError at load.
     const exportStmt =
         '\n    window.__lcarsTestExports = {' +
         ' escapeHtml: escapeHtml,' +
         ' createServiceOnlyLcarsCard: createServiceOnlyLcarsCard,' +
         ' createTeamCard: createTeamCard,' +
-        ' isLcarsTerminal: isLcarsTerminal' +
+        ' isLcarsTerminal: isLcarsTerminal,' +
+        ' setWorkingItems: (typeof workingItems !== "undefined")' +
+        '     ? function (v) { workingItems = v; } : null' +
         ' };\n';
 
     const patched = src.slice(0, lastIdx) + exportStmt + src.slice(lastIdx);
@@ -253,5 +337,6 @@ module.exports = {
     loadClientApp,
     loadSharedTerminalCardModule,
     textContentToInnerHtml,
-    FakeElement
+    FakeElement,
+    FakeStyle
 };

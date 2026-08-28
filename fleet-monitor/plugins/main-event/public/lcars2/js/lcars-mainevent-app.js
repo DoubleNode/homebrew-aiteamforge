@@ -313,6 +313,46 @@
         return panel;
     }
 
+    // XACA-0416 (UX/Test finding): session.theme_color is a CSS context, not an
+    // HTML one -- the same class safeCssIdent() exists for, but a colour is not
+    // an identifier, so it needs its own allowlist rather than that one.
+    //
+    // server.js stores theme_color VERBATIM from the reporter's POST (the
+    // endpoint validates presence, not shape) and it was assigned straight into
+    // `teamNameEl.style.cssText`. cssText REPLACES the whole declaration block,
+    // so a value like `red; position:fixed; font-size:900px; z-index:9999` is a
+    // genuine style injection on every operator's dashboard, not a cosmetic
+    // glitch. No HTML escaper closes it: `;` and `:` are not HTML-special, so
+    // escapeAttr() hands that payload back byte-for-byte intact.
+    //
+    // ACCEPTED: #RGB, #RGBA, #RRGGBB, #RRGGBBAA, plus a conservative set of CSS
+    // named colours. Every theme file the fleet actually ships is #RRGGBB
+    // (fleet-reporter.sh's get_theme_color() cats lcars-ports/<session>.theme),
+    // so the hex branch covers production and the named set is slack for a
+    // hand-edited file. rgb()/rgba() are deliberately NOT accepted: admitting
+    // them means validating three or four numeric components and their
+    // separators, and nothing in the fleet emits them, so that parser would be
+    // untested surface bought for no caller.
+    //
+    // REJECTION TAKES THE NO-THEME PATH: it returns '' and the caller skips the
+    // whole styling block, which is byte-identical to what already happens when
+    // theme_color is absent. It does not substitute a colour of its own.
+    var CSS_NAMED_COLORS = {
+        aqua: 1, black: 1, blue: 1, cyan: 1, fuchsia: 1, gold: 1, gray: 1,
+        green: 1, grey: 1, indigo: 1, lavender: 1, lime: 1, magenta: 1,
+        maroon: 1, navy: 1, olive: 1, orange: 1, orchid: 1, pink: 1, purple: 1,
+        red: 1, salmon: 1, silver: 1, tan: 1, teal: 1, tomato: 1, turquoise: 1,
+        violet: 1, white: 1, yellow: 1
+    };
+
+    function safeCssColor(value) {
+        var s = (value === null || value === undefined) ? '' : String(value).trim();
+        if (/^#(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{3})$/.test(s)) {
+            return s;
+        }
+        return Object.prototype.hasOwnProperty.call(CSS_NAMED_COLORS, s.toLowerCase()) ? s : '';
+    }
+
     function escapeHtml(text) {
         if (!text) return '';
         const div = document.createElement('div');
@@ -415,11 +455,15 @@
             '</div>';
 
         // Apply theme color to non-LCARS cards
-        if (session.theme_color && !isLcars) {
-            card.style.borderLeft = '4px solid ' + session.theme_color;
+        // XACA-0416: validate BEFORE either style sink, and gate the whole block
+        // on the VALIDATED value -- an unrecognised theme_color renders exactly
+        // like no theme_color at all.
+        var themeColor = safeCssColor(session.theme_color);
+        if (themeColor && !isLcars) {
+            card.style.borderLeft = '4px solid ' + themeColor;
             var teamNameEl = card.querySelector('.team-name');
             if (teamNameEl) {
-                teamNameEl.style.cssText = 'color: ' + session.theme_color + ' !important;';
+                teamNameEl.style.setProperty('color', themeColor, 'important');
             }
         }
 
