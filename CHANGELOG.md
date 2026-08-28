@@ -7,6 +7,40 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1000 — the release ARCHIVE gate no longer hardcodes ios/android/firebase, so non-mobile
+  teams can archive a completed release.** `is_release_complete()` in `share/lcars-ui/server.py`
+  and its browser twin `isReleaseComplete()` in `share/lcars-ui/js/lcars.js` both required one of
+  `ios`/`android`/`firebase` to be present before a release could count as complete. Academy,
+  Command, DNS, Finance, Legal and Medical all declare their single platform as `other`, so the
+  per-platform loop never executed and the closing `has_any_required` check returned False for
+  every release those teams ever cut. The UI renders `''` rather than a disabled control in that
+  branch, so operators saw no ARCHIVE button and nothing explaining its absence; the API was not a
+  workaround either, since the archive endpoint calls the same predicate and answers 400.
+
+  **The same hardcoded list caused the opposite error, and that half is a real correctness fix
+  rather than an unblocking.** Because the loop only inspected the three mobile keys, a declared
+  platform outside that list was never checked at all — a release with `ios` at PROD and `other` at
+  DEV evaluated COMPLETE and could be archived while a platform it declared was still mid-pipeline.
+  Both directions are fixed by requiring every platform the release actually declares to be at PROD.
+  Verified against the live Academy board: exactly one of 14 releases changes archivability (the one
+  that genuinely reached PROD); the other 13 stay blocked at PLANNED or DEV, so XACA-0238's
+  "PLANNED is not PROD" invariant is demonstrably intact.
+
+  **One existing assertion was deliberately inverted.** `TestIsReleaseComplete::
+  test_non_required_platform_alone_not_complete` asserted the defect by name and is renamed to
+  `test_non_mobile_platform_alone_at_prod_is_complete`, with the reversal and its reason documented
+  in the docstring. Four new Python cases and a new cross-language parity test
+  (`share/lcars-ui/tests/test-xaca-1000-release-archive-platform-set.js`, 21 assertions) cover the
+  non-mobile, mixed-platform and missing-environment paths. The JS test source-slices the predicate
+  out of `lcars.js` — following the XACA-0948 pattern, since this repo has no jsdom harness — and
+  carries an anchor guard that fails loudly if the extracted function still mentions
+  `requiredPlatforms`, so a reverted fix or a stale duplicate cannot make it pass vacuously.
+  Negative-controlled: three of the new Python tests fail against the pre-fix implementation.
+
+  The two predicates are duplicated by necessity (no shared module between the Python server and the
+  browser bundle) and now carry reciprocal comments saying so, because a change to one without the
+  other makes the UI offer a button the API refuses, or hide one it would have accepted.
+
 ## [0.20.2] - 2026-08-28
 
 - **XACA-0416 — stored-XSS sink closed in the two forked `main-event` plugin app files.** Both

@@ -10758,40 +10758,45 @@ function showCommandDetail(index) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Check if a release is complete (all platforms at PROD environment)
+ * Check if a release is complete (every declared platform at PROD).
  *
- * A release is considered complete when ALL of the following platforms
- * (if present) are at "PROD" environment:
- * - ios
- * - android
- * - firebase
+ * A release is complete when it declares at least one platform and EVERY
+ * platform it declares is at "PROD" - whatever those platform keys are.
+ *
+ * XACA-1000: this deliberately has no hardcoded platform list. It used to
+ * require one of ios/android/firebase to be present, which made the predicate
+ * return false for any release whose only platform key was something else
+ * (Academy/Command/DNS/Finance/Legal/Medical all use "other"). Because the
+ * ARCHIVE button below renders '' rather than a disabled control when this
+ * returns false, those teams saw no button and no explanation. The same
+ * hardcoded list caused the opposite error too - a platform outside the list
+ * was skipped by the loop, so a release with ios at PROD and other at DEV
+ * evaluated complete. Both directions are fixed by checking the platforms the
+ * release actually has.
+ *
+ * Platforms at "PLANNED" are NOT complete - PLANNED !== PROD, so they block
+ * completion just like DEV, QA, ALPHA, BETA, or GAMMA would (XACA-0238).
+ *
+ * Keep this in lockstep with is_release_complete() in lcars-ui/server.py, which
+ * is the actual archive gate. The two are duplicated by necessity (no shared
+ * module between the Python server and the browser bundle); if you change one,
+ * change the other, or this will offer a button the API refuses - or hide one
+ * it would have accepted.
  *
  * @param {Object} release - Release object with platforms dict
- * @returns {boolean} True if all required platforms are at PROD, false otherwise
+ * @returns {boolean} True if every declared platform is at PROD, false otherwise
  */
 function isReleaseComplete(release) {
-    const platforms = release.platforms || {};
-    const requiredPlatforms = ['ios', 'android', 'firebase'];
+    const platforms = (release && release.platforms) || {};
 
     // If no platforms exist at all, not complete
-    if (Object.keys(platforms).length === 0) {
+    const platformNames = Object.keys(platforms);
+    if (platformNames.length === 0) {
         return false;
     }
 
-    // Check each required platform that exists in the release
-    for (const platformKey of requiredPlatforms) {
-        if (platformKey in platforms) {
-            const platform = platforms[platformKey];
-            const environment = platform.environment;
-            if (environment !== 'PROD') {
-                return false;
-            }
-        }
-    }
-
-    // If we have at least one of the required platforms and all are PROD, complete
-    const hasAnyRequired = requiredPlatforms.some(p => p in platforms);
-    return hasAnyRequired;
+    // Every declared platform must be at PROD - no platform is exempt.
+    return platformNames.every(name => (platforms[name] || {}).environment === 'PROD');
 }
 
 /**

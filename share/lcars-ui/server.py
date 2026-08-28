@@ -7145,42 +7145,51 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return progress
 
     def is_release_complete(self, release):
-        """Check if a release is complete (all platforms at PROD environment)
+        """Check if a release is complete (every declared platform at PROD).
 
-        A release is considered complete when ALL of the following platforms
-        (if present) are at "PROD" environment:
-        - ios
-        - android
-        - firebase
+        A release is complete when it declares at least one platform and EVERY
+        platform it declares is at "PROD" — whatever those platform keys are.
+
+        XACA-1000: this deliberately has no hardcoded platform list. It used to
+        require one of ios/android/firebase to be present, which made the
+        predicate return False for any release whose only platform key was
+        something else (Academy/Command/DNS/Finance/Legal/Medical all use
+        "other"). Those teams could never archive a release: the UI suppressed
+        the ARCHIVE button entirely and this gate rejected the API call with a
+        400. The same hardcoded list caused the opposite error too — a platform
+        outside the list was skipped by the loop, so a release with ios at PROD
+        and other at DEV evaluated COMPLETE and could be archived while a
+        declared platform was still mid-pipeline. Both directions are fixed by
+        checking the platforms the release actually has.
 
         Platforms at "PLANNED" (the initial holding state, before development
         begins) are explicitly NOT complete — PLANNED != PROD, so they block
-        completion just like DEV, QA, ALPHA, BETA, or GAMMA would.
+        completion just like DEV, QA, ALPHA, BETA, or GAMMA would (XACA-0238).
+
+        Keep this in lockstep with isReleaseComplete() in lcars-ui/js/lcars.js,
+        which gates whether the ARCHIVE button renders. The two are duplicated
+        by necessity (no shared module between the Python server and the browser
+        bundle); if you change one, change the other, or the UI will offer a
+        button the API refuses — or hide one it would have accepted.
 
         Args:
             release: Release object with platforms dict
 
         Returns:
-            bool: True if all required platforms are at PROD, False otherwise
+            bool: True if every declared platform is at PROD, False otherwise
         """
         platforms = release.get('platforms', {})
-        required_platforms = ['ios', 'android', 'firebase']
 
         # If no platforms exist at all, not complete
         if not platforms:
             return False
 
-        # Check each required platform that exists in the release
-        for platform_key in required_platforms:
-            if platform_key in platforms:
-                platform = platforms[platform_key]
-                environment = platform.get('environment')
-                if environment != 'PROD':
-                    return False
+        # Every declared platform must be at PROD — no platform is exempt.
+        for platform in platforms.values():
+            if (platform or {}).get('environment') != 'PROD':
+                return False
 
-        # If we have at least one of the required platforms and all are PROD, complete
-        has_any_required = any(p in platforms for p in required_platforms)
-        return has_any_required
+        return True
 
     # --- GET Handlers ---
 

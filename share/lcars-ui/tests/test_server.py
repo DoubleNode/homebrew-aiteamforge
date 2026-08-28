@@ -1894,11 +1894,60 @@ class TestIsReleaseComplete(unittest.TestCase):
         handler = self._make_handler_simple()
         self.assertFalse(handler.is_release_complete({}))
 
-    def test_non_required_platform_alone_not_complete(self):
-        """A platform that isn't in the required list (ios/android/firebase) alone → not complete."""
+    def test_non_mobile_platform_alone_at_prod_is_complete(self):
+        """A non-mobile platform alone at PROD IS complete — XACA-1000.
+
+        DELIBERATE INVERSION. This assertion previously read assertFalse, under
+        the name test_non_required_platform_alone_not_complete, and encoded the
+        rule that a release had to declare one of ios/android/firebase before it
+        could ever be considered complete.
+
+        That rule was the defect. Academy, Command, DNS, Finance, Legal and
+        Medical all declare their single platform as "other", so every release
+        those teams ever cut evaluated incomplete forever: the LCARS UI
+        suppressed the ARCHIVE button entirely (rendering '' rather than a
+        disabled control, so there was nothing to explain the absence) and the
+        archive endpoint rejected the call with a 400. Reported against
+        REL-2026-Q3-013, which reached PROD with all of its items closed.
+
+        The invariant XACA-0238 actually cared about — PLANNED/DEV/QA/ALPHA/
+        BETA/GAMMA are not PROD and block completion — is untouched and is
+        still asserted by the other tests in this class.
+        """
         handler = self._make_handler_simple()
-        release = self._release(other_platform="PROD")
+        release = self._release(other="PROD")
+        self.assertTrue(handler.is_release_complete(release))
+
+    def test_non_mobile_platform_below_prod_blocks_completion(self):
+        """A declared non-mobile platform below PROD blocks completion — XACA-1000.
+
+        This is the OPPOSITE-direction half of the same defect, and the reason
+        the fix is not purely permissive. The old implementation looped only
+        over ios/android/firebase, so a platform outside that list was never
+        inspected at all: a release with ios at PROD and other at DEV returned
+        True and could be archived while a platform it declared was still
+        mid-pipeline. Under the old code this test FAILS.
+        """
+        handler = self._make_handler_simple()
+        release = self._release(ios="PROD", other="DEV")
         self.assertFalse(handler.is_release_complete(release))
+
+    def test_multiple_non_mobile_platforms_all_at_prod_is_complete(self):
+        """Several non-mobile platforms, all at PROD → complete (XACA-1000)."""
+        handler = self._make_handler_simple()
+        release = self._release(other="PROD", docs="PROD", infra="PROD")
+        self.assertTrue(handler.is_release_complete(release))
+
+    def test_one_non_mobile_platform_below_prod_blocks_siblings(self):
+        """One lagging non-mobile platform blocks otherwise-complete siblings (XACA-1000)."""
+        handler = self._make_handler_simple()
+        release = self._release(other="PROD", docs="QA", infra="PROD")
+        self.assertFalse(handler.is_release_complete(release))
+
+    def test_platform_with_missing_environment_key_not_complete(self):
+        """A declared platform carrying no environment at all is not PROD (XACA-1000)."""
+        handler = self._make_handler_simple()
+        self.assertFalse(handler.is_release_complete({"platforms": {"other": {}}}))
 
     def test_partial_required_platforms_all_at_prod_is_complete(self):
         """Only ios present and at PROD → complete (not all three required; those present are done)."""
