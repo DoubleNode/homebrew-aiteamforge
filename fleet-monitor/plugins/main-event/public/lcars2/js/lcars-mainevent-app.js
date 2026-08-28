@@ -286,7 +286,7 @@
 
         const header = document.createElement('div');
         header.className = 'division-header';
-        header.innerHTML = getDivisionTitle(name) +
+        header.innerHTML = escapeHtml(getDivisionTitle(name)) +
             '<span class="division-stats">' + data.total_sessions + ' Sessions</span>';
         panel.appendChild(header);
 

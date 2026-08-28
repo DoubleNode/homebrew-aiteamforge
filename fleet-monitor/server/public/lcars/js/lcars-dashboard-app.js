@@ -649,7 +649,14 @@
         header.className = 'division-header';
         // XACA-0989: '.division-toggle-icon' is filled in by
         // LCARS_DIVISIONS.wireDivisionToggle() below -- empty here.
-        header.innerHTML = getDivisionTitle(name) +
+        // XACA-0416-004: getDivisionTitle() falls through to `code.toUpperCase()`
+        // for ANY unrecognised division code, and `division` is copied verbatim
+        // from the reporter's POSTed session payload (server.js parseFleetData ->
+        // resolveDivisionKey), so an unknown code arrives here as attacker-
+        // influenced text, not a fixed-set label. Element content -> escapeHtml.
+        // data.total_sessions is a server-side integer counter
+        // (divisions[key].total_sessions++), never interpolated input -> unwrapped.
+        header.innerHTML = escapeHtml(getDivisionTitle(name)) +
             '<span class="division-stats">' + data.total_sessions + ' Sessions' +
             '<span class="division-toggle-icon" aria-hidden="true"></span></span>';
         panel.appendChild(header);
@@ -990,6 +997,11 @@
                     }
                 }
             }
+            // XACA-0416-004: SAFE, no escaping needed -- backupStatusClass and
+            // backupStatusText are both fixed-set literals assigned by the
+            // if/else ladder above ('BACKED UP'/'NO CHANGES'/'RESTORED'/'ERROR'
+            // and the matching text-* class). Nothing from teamBackup reaches
+            // this string; only `action` is read, and only to pick a branch.
             backupHtml = '<div class="session-detail"><span class="session-label">Backup:</span><span class="session-value ' + backupStatusClass + '">' + backupStatusText + '</span></div>';
         }
 
@@ -997,15 +1009,27 @@
         if (!isLcars && workingItems) {
             var teamWork = workingItems[name.toLowerCase()];
             if (teamWork) {
+                // XACA-0416-004: workTitle/subTitle are kanban item + subitem
+                // titles served by GET /api/working-items, which returns
+                // activeItem.title straight off the board with no sanitising.
+                // Operator-authored rather than reporter-POSTed, so lower severity
+                // than the session fields -- but still free-form text reaching a
+                // sink, so it gets escaped. ELEMENT CONTENT -> escapeHtml.
+                //
+                // ORDER MATTERS: truncate the RAW value first and escape at the
+                // point of interpolation. Escaping before .substring() would let
+                // the cut land inside an entity and emit broken markup like
+                // '&am'. workSubitem is a pre-built fragment by the time it is
+                // concatenated below, so it is NOT escaped again.
                 var workTitle = teamWork.title || teamWork.id;
                 if (workTitle.length > 30) workTitle = workTitle.substring(0, 30) + '...';
                 var workSubitem = '';
                 if (teamWork.subitem) {
                     var subTitle = teamWork.subitem.title || teamWork.subitem.id;
                     if (subTitle.length > 25) subTitle = subTitle.substring(0, 25) + '...';
-                    workSubitem = ' <span class="work-subitem">(' + subTitle + ')</span>';
+                    workSubitem = ' <span class="work-subitem">(' + escapeHtml(subTitle) + ')</span>';
                 }
-                workingItemHtml = '<div class="session-detail working-item"><span class="session-label">Working:</span><span class="session-value text-online">' + workTitle + workSubitem + '</span></div>';
+                workingItemHtml = '<div class="session-detail working-item"><span class="session-label">Working:</span><span class="session-value text-online">' + escapeHtml(workTitle) + workSubitem + '</span></div>';
             }
         }
 
@@ -1035,32 +1059,52 @@
         var avatarTooltip = avatarPersona
             ? avatarPersona.charAt(0).toUpperCase() + avatarPersona.slice(1) + ' — ' + name + ' (' + divDisplay + ')'
             : name + ' (' + divDisplay + ')';
+        // XACA-0416-003: every interpolation below lands inside a QUOTED ATTRIBUTE
+        // value (src=, alt=, class=, title=, data-*), so all of them use
+        // escapeAttr(), never escapeHtml() -- escapeHtml leaves quotes untouched
+        // and would let a value like '" onmouseover=alert(1) x="' break out of the
+        // attribute. avatarTooltip is escaped here at the sink rather than where it
+        // is built above, so the escaping is visible at the point of interpolation.
         avatarHtml = '<div class="team-avatar-stack">' +
-            '<img src="' + terminalLogoUrl + '" alt="' + name + ' terminal" class="team-terminal-logo ' + divisionClass + '" data-terminal-name="' + terminalDisplayName + '" data-terminal-division="' + divDisplay + '" data-terminal-agent="' + name + '" onerror="this.style.display=\'none\'">' +
+            '<img src="' + escapeAttr(terminalLogoUrl) + '" alt="' + escapeAttr(name) + ' terminal" class="team-terminal-logo ' + escapeAttr(divisionClass) + '" data-terminal-name="' + escapeAttr(terminalDisplayName) + '" data-terminal-division="' + escapeAttr(divDisplay) + '" data-terminal-agent="' + escapeAttr(name) + '" onerror="this.style.display=\'none\'">' +
             (avatarUrl
-                ? '<img src="' + avatarUrl + '" alt="' + name + '" title="' + avatarTooltip + '" class="team-avatar lcars-avatar ' + divisionClass + '" data-persona="' + avatarPersona + '" onerror="this.style.display=\'none\'">'
+                ? '<img src="' + escapeAttr(avatarUrl) + '" alt="' + escapeAttr(name) + '" title="' + escapeAttr(avatarTooltip) + '" class="team-avatar lcars-avatar ' + escapeAttr(divisionClass) + '" data-persona="' + escapeAttr(avatarPersona) + '" onerror="this.style.display=\'none\'">'
                 : '') +
             '</div>';
 
-        // XACA-0983-015 scope note: name/session.name/session.hostname
-        // below are interpolated unescaped, same as before this ticket.
-        // That is pre-existing debt already tracked and scoped for a
-        // shared fix under XACA-0416 (todo, high) -- not addressed here
-        // to avoid colliding with that ticket's broader sweep across
-        // these same 5 files. Only the NEW createServiceOnlyLcarsCard
-        // code above got escapeHtml() as part of this ticket.
+        // XACA-0416-003: this one statement mixes BOTH output contexts, so the
+        // escaper is chosen per interpolation, not per statement:
+        //   element content        -> escapeHtml()
+        //   quoted attribute value -> escapeAttr()
+        // session.hostname appears in BOTH -- as the title="..." attribute value
+        // (escapeAttr) and, via machineDisplayName, as element content
+        // (escapeHtml). Using escapeHtml for the title= value would be a false
+        // fix: it leaves quotes untouched, so the value would still break out.
+        // `status` is left unwrapped deliberately -- it is derived
+        // (session.machine_status || 'offline'), not interpolated raw; triaged
+        // separately under XACA-0416-004. backupHtml and workingItemHtml are
+        // pre-built HTML fragments and must NOT be escaped here (that would
+        // double-escape their real markup); their own inputs are triaged in 004.
         card.innerHTML =
             '<div class="team-header">' +
-                '<div class="team-name">' + name + (isLcars ? '<span class="lcars-badge">LCARS</span>' : '') + '</div>' +
+                '<div class="team-name">' + escapeHtml(name) + (isLcars ? '<span class="lcars-badge">LCARS</span>' : '') + '</div>' +
                 '<span class="status-indicator ' + status + '"></span>' +
             '</div>' +
             '<div class="session-info-with-avatar">' +
                 avatarHtml +
                 '<div class="session-info">' +
-                    '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value">' + session.name + '</span></div>' +
-                    '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value" title="' + session.hostname + '">' + machineDisplayName + '</span></div>' +
-                    '<div class="session-detail"><span class="session-label">Windows:</span><span class="session-value">' + session.windows + '</span></div>' +
-                    '<div class="session-detail"><span class="session-label">Uptime:</span><span class="session-value">' + session.uptime_display + '</span></div>' +
+                    '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value">' + escapeHtml(session.name) + '</span></div>' +
+                    '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value" title="' + escapeAttr(session.hostname) + '">' + escapeHtml(machineDisplayName) + '</span></div>' +
+                    // XACA-0416-004 KNOWN EDGE CASE (documented, deliberately NOT
+                    // fixed): escapeHtml() opens with `if (!text) return ''`, so a
+                    // numeric 0 renders as a blank cell rather than "0". Left as-is
+                    // -- session.windows is a tmux window count and is >= 1 for any
+                    // live session, the impact is cosmetic rather than a security
+                    // issue, and relaxing escapeHtml's falsy guard would disturb the
+                    // pinned characterization baseline in
+                    // tests/xaca-0990-001-lcars-terminal-card-baseline.json.
+                    '<div class="session-detail"><span class="session-label">Windows:</span><span class="session-value">' + escapeHtml(session.windows) + '</span></div>' +
+                    '<div class="session-detail"><span class="session-label">Uptime:</span><span class="session-value">' + escapeHtml(session.uptime_display) + '</span></div>' +
                     '<div class="session-detail"><span class="session-label">Status:</span><span class="session-value text-' + status + '">' + status.toUpperCase() + '</span></div>' +
                     backupHtml +
                     workingItemHtml +
@@ -1134,7 +1178,10 @@
             });
         } catch (error) {
             console.error('[LCARS] renderMachines error:', error);
-            container.innerHTML = '<p class="empty-message" style="color: #ff6666;">RENDER ERROR: ' + error.message + '</p>';
+            // XACA-0416-004: error.message is engine-generated, but V8 embeds
+            // offending values in several message templates, so it is not a fixed
+            // string. Element content -> escapeHtml.
+            container.innerHTML = '<p class="empty-message" style="color: #ff6666;">RENDER ERROR: ' + escapeHtml(error.message) + '</p>';
         }
     }
 
@@ -1190,13 +1237,19 @@
                 }
 
                 const displayName = (window.LCARS_CORE && LCARS_CORE.formatBackupDisplayName) ? LCARS_CORE.formatBackupDisplayName(boardName) : boardName.toUpperCase();
-                backupStatuses.push('<span class="backup-team-status"><span class="backup-team-name">' + displayName + ':</span><span class="' + statusClass + '">' + statusText + '</span></span>');
+                // XACA-0416-004: boardName (and therefore displayName) is a KEY of
+                // the reporter-POSTed backup_status.boards object, and
+                // formatBackupDisplayName() is a pass-through uppercase/prefix
+                // rewrite that sanitises nothing. Element content -> escapeHtml.
+                // statusClass/statusText/statusLabel are fixed-set literals chosen
+                // by the if/else ladder above -> unwrapped.
+                backupStatuses.push('<span class="backup-team-status"><span class="backup-team-name">' + escapeHtml(displayName) + ':</span><span class="' + statusClass + '">' + statusText + '</span></span>');
 
                 const lastCheck = teamBackup.lastCheck ? formatBackupTime(teamBackup.lastCheck) : '--';
                 const lastBackup = teamBackup.lastBackup ? formatBackupTime(teamBackup.lastBackup) : '--';
                 backupDetails.push(
                     '<div class="backup-detail-row">' +
-                        '<span class="backup-detail-division">' + displayName + '</span>' +
+                        '<span class="backup-detail-division">' + escapeHtml(displayName) + '</span>' +
                         '<span class="backup-detail-time">' + lastBackup + '</span>' +
                         '<span class="backup-detail-check-group">' +
                             '<span class="backup-detail-status ' + statusClass + '">' + statusLabel + '</span>' +
@@ -1219,7 +1272,9 @@
             });
             if (backupStatuses.length > 0) {
                 backupHtml =
-                    '<div class="machine-backup-container" data-machine-id="' + machine.machine_id + '">' +
+                    // XACA-0416-004: QUOTED ATTRIBUTE -> escapeAttr. machine_id is
+                    // the reporter's own machine.machine_id from POST /api/status.
+                    '<div class="machine-backup-container" data-machine-id="' + escapeAttr(machine.machine_id) + '">' +
                         '<div class="machine-backup-status clickable">' +
                             '<span class="backup-expand-indicator' + (isBackupExpanded ? ' expanded' : '') + '">▶</span>' +
                             '<span class="backup-label">BACKUP:</span>' +
@@ -1241,27 +1296,48 @@
         const hasNickname = !!machine.nickname;
         const isExpanded = expandedMachineId === machine.machine_id;
 
+        // XACA-0416-004: this statement mixes BOTH output contexts, so the escaper
+        // is chosen per interpolation, not per statement:
+        //   element content        -> escapeHtml()
+        //   quoted attribute value -> escapeAttr()
+        // Untrusted here means "supplied by whatever POSTed /api/status or PUT the
+        // nickname endpoint" -- the server stores machine.hostname, machine_id and
+        // machine.timestamp verbatim. machine.status and machine.session_count are
+        // server-DERIVED (updateMachineStatuses() writes only 'online'/'offline'/
+        // 'warning'; session_count is a computed integer) and stay unwrapped.
+        // backupHtml and sparklineHtml are pre-built markup fragments whose own
+        // inputs are escaped at the point they were built -- escaping them here
+        // would double-escape their real tags. lastSeenRelative/firstSeenDate come
+        // out of formatRelativeTime()/formatShortDate(), which emit only digits and
+        // fixed words, so they carry nothing from the input string.
         item.innerHTML =
             '<div class="machine-row-header">' +
                 '<span class="machine-expand-indicator' + (isExpanded ? ' expanded' : '') + '">▶</span>' +
                 '<span class="status-indicator ' + machine.status + '"></span>' +
-                '<span class="machine-hostname">' + machine.hostname + '</span>' +
+                '<span class="machine-hostname">' + escapeHtml(machine.hostname) + '</span>' +
                 '<span class="machine-sessions">' + machine.session_count + ' sessions</span>' +
             '</div>' +
             '<div class="machine-nickname-row">' +
                 '<span class="machine-nickname-label">Nickname:</span>' +
-                '<span class="machine-nickname-value' + (hasNickname ? '' : ' empty') + '" data-machine-id="' + machine.machine_id + '">' +
+                '<span class="machine-nickname-value' + (hasNickname ? '' : ' empty') + '" data-machine-id="' + escapeAttr(machine.machine_id) + '">' +
                     (hasNickname ? escapeHtml(machine.nickname) : 'Not set') +
                 '</span>' +
-                '<button class="nickname-edit-btn" data-machine-id="' + machine.machine_id + '" data-current="' + escapeHtml(machine.nickname || '') + '" title="Edit nickname">✎</button>' +
+                // data-current= was previously escapeHtml() -- a FALSE FIX: escapeHtml
+                // is textContent->innerHTML, which per the WHATWG fragment-
+                // serialization spec leaves quote characters untouched, so a nickname
+                // of '" onmouseover=alert(1) x="' still broke out of the attribute.
+                '<button class="nickname-edit-btn" data-machine-id="' + escapeAttr(machine.machine_id) + '" data-current="' + escapeAttr(machine.nickname || '') + '" title="Edit nickname">✎</button>' +
             '</div>' +
-            '<div class="machine-guid">GUID: ' + machineGuid + '</div>' +
+            '<div class="machine-guid">GUID: ' + escapeHtml(machineGuid) + '</div>' +
             backupHtml +
             '<div class="machine-row-footer">' +
                 '<div class="machine-meta">' +
                     '<div class="machine-meta-item">' +
                         '<span class="machine-meta-label">Last:</span>' +
-                        '<span class="machine-meta-value last-seen-value" data-timestamp="' + (machine.last_seen || '') + '">' + lastSeenRelative + '</span>' +
+                        // machine.last_seen is `machine.timestamp || now` from the
+                        // POST /api/status body -- reporter-supplied, and this is a
+                        // QUOTED ATTRIBUTE, so escapeAttr, not escapeHtml.
+                        '<span class="machine-meta-value last-seen-value" data-timestamp="' + escapeAttr(machine.last_seen || '') + '">' + lastSeenRelative + '</span>' +
                     '</div>' +
                     '<div class="machine-meta-item">' +
                         '<span class="machine-meta-label">Since:</span>' +
@@ -1548,11 +1624,30 @@
         container.innerHTML = html;
     }
 
+    // XACA-0416: escaping contract for the two output contexts used by this file.
+    // escapeHtml() is for ELEMENT CONTENT only — it round-trips through
+    // textContent -> innerHTML, which per the WHATWG HTML fragment-serialization
+    // spec escapes '&', U+00A0, '<' and '>', and DELIBERATELY LEAVES QUOTES ALONE
+    // (quotes are only special inside an attribute value, not element content).
+    // escapeAttr() is for QUOTED ATTRIBUTE VALUES (e.g. title="...", alt="...").
+    // Using escapeHtml() on an attribute value is a FALSE FIX: a value like
+    // '" onmouseover=alert(1) x="' still breaks out of the attribute because no
+    // quote character was touched. Do not use these interchangeably.
     function escapeHtml(text) {
         if (!text) return '';
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    function escapeAttr(text) {
+        if (!text) return '';
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     // ============================================================================
@@ -1574,8 +1669,12 @@
 
         var editor = document.createElement('div');
         editor.className = 'nickname-editor';
+        // XACA-0416-004: value= and placeholder= are QUOTED ATTRIBUTES. Both were
+        // previously escapeHtml() -- a FALSE FIX, since escapeHtml leaves quotes
+        // alone. currentNickname comes from the nickname endpoint and hostname from
+        // the reporter's POST /api/status payload; both are untrusted.
         editor.innerHTML =
-            '<input type="text" class="nickname-input" value="' + escapeHtml(currentNickname) + '" placeholder="' + escapeHtml(hostname) + '" maxlength="32">' +
+            '<input type="text" class="nickname-input" value="' + escapeAttr(currentNickname) + '" placeholder="' + escapeAttr(hostname) + '" maxlength="32">' +
             '<button class="nickname-save-btn" title="Save">✓</button>' +
             '<button class="nickname-cancel-btn" title="Cancel">✗</button>';
 

@@ -33,6 +33,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   reverted in-flight sibling work and swept gitignored `fleet-monitor/server/data/history/*.json`
   runtime files into the shipped tap.
 
+  **The three MIRRORED files now carry the fix too.** Distinct from the forked copies above,
+  `fleet-monitor/server/public/{lcars/js/lcars-dashboard-app.js, lcars2/js/lcars-academy-app.js,
+  lcars2/js/lcars-all-app.js}` are byte-identical mirrors of canonical. They were initially missed —
+  the first pass patched only the forks — so the tap briefly shipped the exact stored-XSS the
+  canonical change closes, with `escapeAttr` not even defined. Caught by the `sync-tap-drift` gate
+  (`VERDICT: BLOCK — owned=3`) and by both PR gate bots reading the tap at the PR's own gitlink.
+  Mirrored file-for-file after confirming each was still byte-identical to develop, so no sibling
+  work was overwritten. `lcars-doublenode-*` and `lcars-mainevent-*` remain unsynced under
+  `server/public/` by existing design (XACA-0139 debranding) — an omission by design, not an oversight.
+
   **Follow-up commit — the same triage applied to the rest of both forked files.** A full sweep of the
   remaining concatenating sinks upstream found four more defects that these forked copies also carry:
   `machine.hostname` reaching element content unescaped (both files); `data-machine-id="..."` ×3 and a

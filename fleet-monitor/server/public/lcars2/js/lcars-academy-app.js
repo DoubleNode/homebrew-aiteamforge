@@ -317,7 +317,13 @@
         header.className = 'division-header';
         // XACA-0989: '.division-toggle-icon' is filled in by
         // LCARS_DIVISIONS.wireDivisionToggle() below -- empty here.
-        header.innerHTML = getDivisionTitle(name) +
+        // XACA-0416-004: getDivisionTitle() falls through to `code.toUpperCase()`
+        // for ANY unrecognised division code, and `division` is copied verbatim
+        // from the reporter's POSTed session payload (server.js parseFleetData ->
+        // resolveDivisionKey), so an unknown code arrives here as attacker-
+        // influenced text. Element content -> escapeHtml. data.total_sessions is a
+        // server-side integer counter, never interpolated input -> unwrapped.
+        header.innerHTML = escapeHtml(getDivisionTitle(name)) +
             '<span class="division-stats">' + data.total_sessions + ' Sessions' +
             '<span class="division-toggle-icon" aria-hidden="true"></span></span>';
         panel.appendChild(header);
@@ -405,23 +411,16 @@
         const status = session.machine_status || 'offline';
         const isOnline = status === 'online';
 
-        // XACA-0983-015 scope note: name/session.name/session.hostname
-        // below are interpolated unescaped, same as before this ticket.
-        // That is pre-existing debt already tracked and scoped for a
-        // shared fix under XACA-0416 (todo, high) -- not addressed here
-        // to avoid colliding with that ticket's broader sweep across
-        // these same 5 files. Only the NEW createServiceOnlyLcarsCard
-        // code above got escapeHtml() as part of this ticket.
         card.innerHTML =
             '<div class="team-header">' +
-                '<div class="team-name">' + name + (isLcars ? '<span class="lcars-badge">LCARS</span>' : '') + '</div>' +
+                '<div class="team-name">' + escapeHtml(name) + (isLcars ? '<span class="lcars-badge">LCARS</span>' : '') + '</div>' +
                 '<span class="status-indicator ' + status + '"></span>' +
             '</div>' +
             '<div class="session-info">' +
-                '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value">' + session.name + '</span></div>' +
-                '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value">' + session.hostname + '</span></div>' +
-                '<div class="session-detail"><span class="session-label">Windows:</span><span class="session-value">' + session.windows + '</span></div>' +
-                '<div class="session-detail"><span class="session-label">Uptime:</span><span class="session-value">' + session.uptime_display + '</span></div>' +
+                '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value">' + escapeHtml(session.name) + '</span></div>' +
+                '<div class="session-detail"><span class="session-label">Machine:</span><span class="session-value">' + escapeHtml(session.hostname) + '</span></div>' +
+                '<div class="session-detail"><span class="session-label">Windows:</span><span class="session-value">' + escapeHtml(session.windows) + '</span></div>' +
+                '<div class="session-detail"><span class="session-label">Uptime:</span><span class="session-value">' + escapeHtml(session.uptime_display) + '</span></div>' +
                 '<div class="session-detail"><span class="session-label">Status:</span><span class="session-value text-' + status + '">' + status.toUpperCase() + '</span></div>' +
             '</div>';
 
@@ -496,9 +495,16 @@
         const item = document.createElement('div');
         item.className = 'status-row ' + machine.status;
 
+        // XACA-0416-004: machine.hostname is stored verbatim from the POST
+        // /api/status body -- untrusted, ELEMENT CONTENT -> escapeHtml.
+        // machine.status is server-derived by updateMachineStatuses(), which only
+        // ever writes 'online'/'offline'/'warning', and machine.session_count is a
+        // computed integer; both stay unwrapped. No untrusted value reaches a
+        // quoted attribute in this file, so escapeAttr() is deliberately NOT
+        // defined here -- do not add a helper with no call site.
         item.innerHTML =
             '<span class="status-indicator ' + machine.status + '"></span>' +
-            '<span class="lcars-text-sm" style="flex: 1;">' + machine.hostname + '</span>' +
+            '<span class="lcars-text-sm" style="flex: 1;">' + escapeHtml(machine.hostname) + '</span>' +
             '<span class="lcars-text-xs" style="color: var(--lcars-tan);">' + machine.session_count + ' sessions</span>';
 
         return item;
