@@ -1949,6 +1949,70 @@ class TestIsReleaseComplete(unittest.TestCase):
         handler = self._make_handler_simple()
         self.assertFalse(handler.is_release_complete({"platforms": {"other": {}}}))
 
+    # --- XACA-1000-015: malformed input must return False, never raise -------
+    # The JS twin returns false for all of these. Before the isinstance guards
+    # the Python side raised AttributeError on several, which meant the UI could
+    # render an ARCHIVE button that the API then 500'd on instead of refusing
+    # cleanly. Parity here is the point, not merely not-crashing.
+
+    def test_platforms_as_list_not_complete(self):
+        """`platforms` as a list is malformed data, not zero platforms."""
+        handler = self._make_handler_simple()
+        self.assertFalse(handler.is_release_complete({"platforms": []}))
+        self.assertFalse(
+            handler.is_release_complete({"platforms": [{"environment": "PROD"}]})
+        )
+
+    def test_platforms_as_string_not_complete(self):
+        handler = self._make_handler_simple()
+        self.assertFalse(handler.is_release_complete({"platforms": "PROD"}))
+
+    def test_platform_value_as_string_not_complete(self):
+        """A platform whose value is a bare string cannot be at PROD."""
+        handler = self._make_handler_simple()
+        self.assertFalse(
+            handler.is_release_complete({"platforms": {"other": "PROD"}})
+        )
+
+    def test_platform_value_as_none_not_complete(self):
+        handler = self._make_handler_simple()
+        self.assertFalse(
+            handler.is_release_complete({"platforms": {"other": None}})
+        )
+
+    def test_none_release_not_complete(self):
+        """A null release must not raise — the JS twin returns false."""
+        handler = self._make_handler_simple()
+        self.assertFalse(handler.is_release_complete(None))
+
+    def test_malformed_input_never_raises(self):
+        """Sweep: none of the malformed shapes may raise (XACA-1000-015).
+
+        Asserted as its own case because a raise and a False are the SAME
+        result to a caller wrapped in try/except — this pins the distinction.
+        """
+        handler = self._make_handler_simple()
+        for bad in (
+            None,
+            {},
+            {"platforms": None},
+            {"platforms": []},
+            {"platforms": "PROD"},
+            {"platforms": 42},
+            {"platforms": {"other": None}},
+            {"platforms": {"other": "PROD"}},
+            {"platforms": {"other": []}},
+            {"platforms": {"other": {}}},
+        ):
+            try:
+                result = handler.is_release_complete(bad)
+            except Exception as exc:  # noqa: BLE001 - the assertion IS "no raise"
+                self.fail(
+                    "is_release_complete(%r) raised %s: %s"
+                    % (bad, type(exc).__name__, exc)
+                )
+            self.assertFalse(result, "expected False for %r" % (bad,))
+
     def test_partial_required_platforms_all_at_prod_is_complete(self):
         """Only ios present and at PROD → complete (not all three required; those present are done)."""
         handler = self._make_handler_simple()

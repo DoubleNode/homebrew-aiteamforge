@@ -41,6 +41,75 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   browser bundle) and now carry reciprocal comments saying so, because a change to one without the
   other makes the UI offer a button the API refuses, or hide one it would have accepted.
 
+  **Gate follow-ups, all in the same PR (XACA-1000-011 through -019).** The PR's three review gates
+  approved the fix and then filed nine findings against it; all nine were addressed rather than
+  deferred.
+
+  * **The ARCHIVE control no longer disappears when a release is incomplete (-011 / -018).** The
+    render ternary emitted an EMPTY STRING in that branch — no button, no tooltip, nothing — while
+    every sibling control on the same card (PROMOTE / EDIT / DELETE) renders as a *disabled* button
+    when unavailable. That silence is why the platform-set defect went unnoticed for so long:
+    operators could not tell "you may not archive this yet" from "this product has no archive
+    feature", so there was nothing to search for and nothing to report. A new `renderArchiveAction()`
+    now returns a disabled ARCHIVE button whose tooltip names each blocking platform and the
+    environment it sits at ("Archive unavailable — Android is at QA, not PROD"), via a new
+    `getIncompletePlatforms()`.
+  * **`getPlatformName()` gained an `'other'` entry and a title-cased fallback (-012).** It had no
+    mapping for the key every non-mobile team uses, so it fell through to the raw key and rendered a
+    lowercase `other` beside `iOS`/`Android`. Before this ticket that label was effectively dead
+    code; the predicate fix put it on the normal path for six teams, making it fallout of the fix
+    rather than pre-existing cosmetic debt.
+  * **All three archive-control states carry a `title` (-013),** matching `.release-cr-link` on the
+    same card, which has had one all along. This required a new `escapeAttr()` — `escapeHtml()` is
+    `textContent`→`innerHTML`, which per the WHATWG spec deliberately leaves QUOTES alone, so using
+    it in a `title="…"` attribute looks correct, passes review, and still permits a
+    `" onmouseover=… x="` breakout. That is the exact false-fix XACA-0416 found across five client
+    apps; the new JS test asserts the entity, not merely the absence of a crash.
+  * **Archive/unarchive now announces to assistive technology (-014).** The success `alert()` had
+    been deliberately removed "to avoid popup fatigue", leaving the re-rendered card as the only
+    signal — visible to a sighted user, invisible to a screen-reader user. A shared visually-hidden
+    `role="status"` region restores the confirmation without restoring the popup. The clear-then-set
+    is deliberate: a live region whose text is unchanged is not re-announced, so archiving two
+    releases in a row would otherwise announce once.
+  * **Malformed platform data now returns False on both sides instead of raising on one (-015).**
+    `platforms` as a list/string, or a platform value that is not a dict, previously raised
+    `AttributeError` in Python where the JS twin returned `false`. Reachability analysis said the
+    call site could not deliver those shapes today — but the asymmetry itself is the defect this
+    ticket is about, so both sides now carry matching guards.
+  * **The JS test's anti-vacuity guard is now semantic, not nominal (-017).** It string-matched the
+    identifier `requiredPlatforms`, which a reintroduced list under any other name would walk
+    straight past. It now asserts that the extracted predicate contains no platform literal at all —
+    a predicate that is correct by this ticket's definition has no business naming one. The test also
+    moved from anchor-slicing to brace-matching extraction, so an unrelated function inserted between
+    two anchors can no longer silently widen the evaluated slice.
+  * **`lcars-ui/tests/*.js` now runs in CI at all (-016).** New `lcars-ui-js-suite.yml`. Nine JS
+    suites (251 assertions) had never been executed by any workflow — `lcars-ui-pytest-suite.yml`
+    (XACA-0952) closed the gap for `*.py`, and pytest never sees a `.js` file. The JS half of this
+    very fix, the half that decides whether the button renders, was guarded solely by a test nobody
+    ran. Same shape of gap as XACA-0432, XACA-0852, XACA-0858 and XACA-0952. Complementary to the
+    open XACA-0229 (which proposes NEW render-snapshot infrastructure); this runs what already
+    exists. The gate carries per-suite assertion floors AND a **discovery guard** that fails when a
+    `*.js` file exists in that directory but is absent from the workflow's list — without it, the one
+    failure this gate could not catch would be the exact one it was written for. Two output
+    conventions coexist there (7 node:test, 2 plain scripts) and the parser handles both; that was
+    found by running the gate's own logic locally, which also caught an unguarded `grep` in a
+    `pipefail` pipeline that aborted the step after seven suites with no error message.
+  * **Python/JS predicate parity is now mechanically enforced (-019).** New
+    `scripts/check-release-complete-cochange.sh` + `release-complete-cochange.yml`, following
+    XACA-0862's guard. Co-change, not body-equality: the two bodies are different languages and can
+    never be byte-identical, and a permanently-red gate is one somebody turns off. If
+    `is_release_complete()`'s normalized body changes, `isReleaseComplete()`'s must change in the
+    same PR, or the PR carries `Release-Predicate-Divergence: <reason>`. The guard self-tests before
+    every real run — with fixture-sanity, negative and false-positive controls — because an extractor
+    that silently finds nothing makes every verdict `OK-UNCHANGED`, a gate that passes because it
+    read nothing. Its own self-test caught a `trap … RETURN` in it that re-fired in the caller and
+    aborted the script under `set -u` *after* reporting 9/9 PASS.
+
+  Not filed as new work: the reviewer's finding that the JS tests run in no CI workflow was already
+  tracked (XACA-0229 / the `tests/.test-directories` note) — the QA agent correctly declined to
+  duplicate it and the reviewer's copy was reconciled against the existing ticket rather than filed
+  twice.
+
 ## [0.20.2] - 2026-08-28
 
 - **XACA-0416 — stored-XSS sink closed in the two forked `main-event` plugin app files.** Both

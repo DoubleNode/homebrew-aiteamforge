@@ -7178,15 +7178,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         Returns:
             bool: True if every declared platform is at PROD, False otherwise
         """
-        platforms = release.get('platforms', {})
+        platforms = (release or {}).get('platforms', {})
 
-        # If no platforms exist at all, not complete
-        if not platforms:
+        # XACA-1000-015: `platforms` must be a real dict. A list or a string is
+        # malformed data, not "zero platforms" — and calling .values() on it
+        # would raise AttributeError where the JavaScript twin simply returns
+        # false, so the UI would render an ARCHIVE button the API then 500s on.
+        # Mirrors the isinstance guard already used in
+        # _derive_release_roadmap_state, and keeps both predicates returning
+        # False on exactly the same inputs.
+        if not isinstance(platforms, dict) or not platforms:
             return False
 
         # Every declared platform must be at PROD — no platform is exempt.
+        # A platform value that is not a dict cannot be at PROD.
         for platform in platforms.values():
-            if (platform or {}).get('environment') != 'PROD':
+            if not isinstance(platform, dict):
+                return False
+            if platform.get('environment') != 'PROD':
                 return False
 
         return True

@@ -10758,6 +10758,83 @@ function showCommandDetail(index) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
+ * List the platforms holding a release back from completion.
+ *
+ * XACA-1000-011: used to explain WHY the ARCHIVE button is unavailable. Returns
+ * `[{name, environment}]` for every declared platform not yet at PROD, in the
+ * order the release declares them. An empty array means either "complete" or
+ * "no platforms at all" — callers distinguish via isReleaseComplete().
+ *
+ * @param {Object} release - Release object with platforms dict
+ * @returns {Array<{name: string, environment: string}>} blocking platforms
+ */
+function getIncompletePlatforms(release) {
+    const platforms = (release && release.platforms) || {};
+    if (typeof platforms !== 'object' || Array.isArray(platforms)) {
+        return [];
+    }
+    return Object.keys(platforms).reduce((acc, name) => {
+        const platform = platforms[name];
+        const env = (platform && typeof platform === 'object' && platform.environment) || 'unknown';
+        if (env !== 'PROD') {
+            acc.push({ name: name, environment: env });
+        }
+        return acc;
+    }, []);
+}
+
+/**
+ * Render the ARCHIVE / UNARCHIVE control for a release card.
+ *
+ * XACA-1000-011 / -018: this branch previously emitted an EMPTY STRING when a
+ * release was not complete — no button, no tooltip, nothing. That silence is
+ * why the XACA-1000 platform-set defect went unnoticed: operators on six teams
+ * could not tell "you may not archive this yet" apart from "this product has
+ * no archive feature", and had nothing to search for or report. Every sibling
+ * control on this card (PROMOTE / EDIT / DELETE) already renders as a DISABLED
+ * button when unavailable, so the empty string was also the odd one out.
+ *
+ * An incomplete release now renders a disabled ARCHIVE button whose tooltip
+ * names the platforms still holding it back and the environment each sits at.
+ *
+ * XACA-1000-013: all three states carry a `title`, matching `.release-cr-link`
+ * on this same card, which has had one all along.
+ *
+ * @param {Object} release - Release object
+ * @param {boolean} isArchived - Whether the release is currently archived
+ * @returns {string} HTML for the archive/unarchive control
+ */
+function renderArchiveAction(release, isArchived) {
+    const id = escapeHtml(String((release && release.id) || ''));
+
+    if (isArchived) {
+        return '<button class="release-action-btn unarchive-btn"' +
+            ' onclick="event.stopPropagation(); toggleReleaseArchive(\'' + id + '\')"' +
+            ' title="Unarchive this release and return it to the active list">' +
+            '<span class="action-icon">\uD83D\uDCE4</span> UNARCHIVE</button>';
+    }
+
+    if (isReleaseComplete(release)) {
+        return '<button class="release-action-btn archive-btn"' +
+            ' onclick="event.stopPropagation(); toggleReleaseArchive(\'' + id + '\')"' +
+            ' title="Archive this release (every platform is at PROD)">' +
+            '<span class="action-icon">\uD83D\uDCE6</span> ARCHIVE</button>';
+    }
+
+    // Not complete: explain what is missing rather than rendering nothing.
+    const blocking = getIncompletePlatforms(release);
+    const reason = blocking.length
+        ? 'Archive unavailable \u2014 ' + blocking
+            .map((p) => getPlatformName(p.name) + ' is at ' + p.environment + ', not PROD')
+            .join('; ')
+        : 'Archive unavailable \u2014 this release declares no platforms';
+
+    return '<button class="release-action-btn archive-btn" disabled' +
+        ' title="' + escapeAttr(reason) + '">' +
+        '<span class="action-icon">\uD83D\uDCE6</span> ARCHIVE</button>';
+}
+
+/**
  * Check if a release is complete (every declared platform at PROD).
  *
  * A release is complete when it declares at least one platform and EVERY
@@ -10789,6 +10866,15 @@ function showCommandDetail(index) {
 function isReleaseComplete(release) {
     const platforms = (release && release.platforms) || {};
 
+    // XACA-1000-015: `platforms` must be a real object. A list or a string is
+    // malformed data, not "zero platforms" — treat it as not-complete rather
+    // than letting Object.keys() yield indices/characters that could never
+    // match 'PROD'. The Python twin carries the same isinstance guard, so both
+    // return false on the same inputs instead of one throwing and one not.
+    if (typeof platforms !== 'object' || Array.isArray(platforms)) {
+        return false;
+    }
+
     // If no platforms exist at all, not complete
     const platformNames = Object.keys(platforms);
     if (platformNames.length === 0) {
@@ -10796,7 +10882,11 @@ function isReleaseComplete(release) {
     }
 
     // Every declared platform must be at PROD - no platform is exempt.
-    return platformNames.every(name => (platforms[name] || {}).environment === 'PROD');
+    // A platform value that is not an object cannot be at PROD.
+    return platformNames.every((name) => {
+        const platform = platforms[name];
+        return !!platform && typeof platform === 'object' && platform.environment === 'PROD';
+    });
 }
 
 /**
@@ -11126,12 +11216,7 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
                 <button class="release-action-btn promote-btn" onclick="event.stopPropagation(); ${isArchived ? 'return false' : 'promoteRelease(\'' + release.id + '\')'}" ${isArchived ? 'disabled' : ''}>PROMOTE</button>
                 <button class="release-action-btn" onclick="event.stopPropagation(); viewReleaseNotes('${release.id}')">RELNOTES</button>
                 <button class="release-action-btn edit-btn" onclick="event.stopPropagation(); ${isArchived ? 'return false' : 'showEditReleaseModal(\'' + release.id + '\')'}" ${isArchived ? 'disabled' : ''}>EDIT</button>
-                ${isArchived
-                    ? '<button class="release-action-btn unarchive-btn" onclick="event.stopPropagation(); toggleReleaseArchive(\'' + release.id + '\')"><span class="action-icon">📤</span> UNARCHIVE</button>'
-                    : (isReleaseComplete(release)
-                        ? '<button class="release-action-btn archive-btn" onclick="event.stopPropagation(); toggleReleaseArchive(\'' + release.id + '\')"><span class="action-icon">📦</span> ARCHIVE</button>'
-                        : '')
-                }
+                ${renderArchiveAction(release, isArchived)}
                 <button class="release-action-btn danger delete-btn" onclick="event.stopPropagation(); ${isArchived ? 'return false' : 'deleteRelease(\'' + release.id + '\', \'' + escapeHtml(release.name) + '\')'}" ${isArchived ? 'disabled' : ''}>DELETE</button>
             </div>
         </div>
@@ -11315,9 +11400,19 @@ function getPlatformName(key) {
         'ios': 'iOS',
         'android': 'Android',
         'firebase': 'Firebase',
-        'web': 'Web'
+        'web': 'Web',
+        // XACA-1000-012: 'other' is the platform key every non-mobile team uses
+        // (Academy, Command, DNS, Finance, Legal, Medical). Before XACA-1000 a
+        // release on those teams could never reach PROD/ARCHIVE, so this label
+        // was effectively dead code; it is now on the normal path for six teams
+        // and was rendering as a bare lowercase 'other' beside 'iOS'/'Android'.
+        'other': 'Other'
     };
-    return names[key.toLowerCase()] || key;
+    const safeKey = String(key == null ? '' : key);
+    // Title-case the fallback so an unmapped key never renders lowercase next
+    // to the Title-Case labels above.
+    return names[safeKey.toLowerCase()] ||
+        (safeKey ? safeKey.charAt(0).toUpperCase() + safeKey.slice(1) : safeKey);
 }
 
 /**
@@ -11354,6 +11449,69 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// XACA-1000-013: Escape a value for interpolation into a QUOTED HTML ATTRIBUTE
+// (e.g. title="${escapeAttr(text)}").
+//
+// escapeHtml() above is textContent -> innerHTML, which per the WHATWG
+// fragment-serialization spec escapes &, U+00A0, < and > and DELIBERATELY
+// LEAVES QUOTES ALONE -- quotes are only special inside an attribute value.
+// Using it in attribute context therefore looks correct, passes review, and
+// still permits a `" onmouseover=... x="` breakout (XACA-0416 found exactly
+// this shape across five client apps). Use escapeAttr in attribute context.
+//
+// Distinct from jsAttrEscape() below, which additionally applies JS-string
+// escapes (\ and ') because its output lands inside a JS string literal within
+// an attribute. Using that here would render an apostrophe as \' to the user.
+function escapeAttr(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// XACA-1000-014: Announce a transient status change to assistive technology.
+//
+// Several LCARS actions signal success only by re-rendering the affected card
+// (the archive/unarchive toggle is one -- its success alert() was deliberately
+// removed to avoid popup fatigue). A sighted user sees the card move; a screen
+// reader user gets nothing and must re-discover the new state unaided.
+//
+// Writes into a single shared visually-hidden role="status" region, following
+// the established pattern (see #team-account-test-status and the export-missing
+// -roots box). aria-live="polite" so it never interrupts, per WCAG 2.1 AA 4.1.3.
+//
+// The clear-then-set on a timer is deliberate: assistive tech does not re-announce
+// a live region whose text is unchanged, so archiving two releases in a row would
+// announce only once without it. Any pending set is cancelled first so rapid
+// consecutive calls announce the LAST message rather than interleaving.
+function announceToScreenReader(message) {
+    if (!message || typeof document === 'undefined' || !document.body) return;
+    var region = document.getElementById('lcars-sr-announcer');
+    if (!region) {
+        region = document.createElement('div');
+        region.id = 'lcars-sr-announcer';
+        region.setAttribute('role', 'status');
+        region.setAttribute('aria-live', 'polite');
+        region.setAttribute('aria-atomic', 'true');
+        // Visually hidden but still exposed to assistive tech -- display:none
+        // and visibility:hidden would remove it from the accessibility tree.
+        region.style.cssText = 'position:absolute;width:1px;height:1px;margin:-1px;' +
+            'padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;';
+        document.body.appendChild(region);
+    }
+    if (region._lcarsAnnounceTimer) {
+        window.clearTimeout(region._lcarsAnnounceTimer);
+    }
+    region.textContent = '';
+    region._lcarsAnnounceTimer = window.setTimeout(function () {
+        region.textContent = String(message);
+        region._lcarsAnnounceTimer = null;
+    }, 50);
 }
 
 // XACA-0277: Escape a value for safe interpolation as a JS string literal
@@ -12333,8 +12491,17 @@ async function toggleReleaseArchive(releaseId) {
         // Refresh the releases list
         loadReleases();
 
-        // Show success message (optional - removed to avoid popup fatigue)
-        // alert(`Release ${result.status === 'archived' ? 'archived' : 'unarchived'} successfully.`);
+        // XACA-1000-014: a success alert() was deliberately removed here to
+        // avoid popup fatigue, leaving the re-rendered card as the ONLY signal
+        // that anything happened. A sighted user sees the card move; a screen
+        // reader user got nothing at all and had to re-discover the state.
+        // announceToScreenReader() restores the confirmation without restoring
+        // the popup — it is polite, so it will not interrupt.
+        announceToScreenReader(
+            result && result.archived === false
+                ? 'Release unarchived and returned to the active list.'
+                : 'Release archived.'
+        );
 
     } catch (error) {
         console.error('Error toggling release archive:', error);
