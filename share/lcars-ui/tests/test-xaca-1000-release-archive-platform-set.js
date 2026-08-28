@@ -98,6 +98,7 @@ let getIncompletePlatforms;
 let renderArchiveAction;
 let getPlatformName;
 let escapeAttr;
+let jsAttrEscape;
 let isReleaseCompleteSrc;
 
 try {
@@ -108,6 +109,7 @@ try {
         extractFunction('renderArchiveAction'),
         extractFunction('getPlatformName'),
         extractFunction('escapeAttr'),
+        extractFunction('jsAttrEscape'),
     ].join('\n\n');
 
     // escapeHtml() is DOM-backed (textContent -> innerHTML) and cannot run in
@@ -121,7 +123,7 @@ try {
     const factory = new Function(
         preamble + slices +
         '\nreturn { isReleaseComplete, getIncompletePlatforms, renderArchiveAction,' +
-        ' getPlatformName, escapeAttr };'
+        ' getPlatformName, escapeAttr, jsAttrEscape };'
     );
     ({
         isReleaseComplete,
@@ -129,6 +131,7 @@ try {
         renderArchiveAction,
         getPlatformName,
         escapeAttr,
+        jsAttrEscape,
     } = factory());
 } catch (e) {
     console.error(`FAIL: ${e.message}`);
@@ -301,6 +304,61 @@ check('payload is inert text inside the attribute, not markup',
     /onmouseover=alert\(1\)[^"]*"/.test(quotedHtml) &&
         quotedHtml.indexOf('ev\u0022il') === -1, true);
 
+// --- onclick JS-string-literal escaping (XACA-1000-021) --------------------
+// THREE escapers, THREE contexts, not interchangeable. The release id lands
+// inside a JS STRING LITERAL within an HTML attribute --
+// toggleReleaseArchive('<id>') -- where escapeHtml is NOT sufficient: it is
+// textContent->innerHTML and leaves ' and \\ untouched, so an id can close the
+// string and execute. This shipped wrong in the first cut of
+// renderArchiveAction and was caught in review, so it gets a regression test.
+const evilId = "x'); alert(document.cookie); ('";
+const evilArchived = renderArchiveAction({ id: evilId, platforms: {} }, true);
+const evilComplete = renderArchiveAction(
+    { id: evilId, platforms: { other: { environment: 'PROD' } } }, false);
+
+// A substring check is NOT the right assertion here and was wrong in the first
+// draft of this test: the correctly-escaped output still CONTAINS "'); alert"
+// as a substring, because the escaped form is  \'); alert  . The property that
+// actually matters is that the id cannot TERMINATE the JS string it sits in.
+// So: walk to the first UNESCAPED quote after toggleReleaseArchive(' and assert
+// the call closes immediately there — i.e. the whole id stayed inside one string.
+function firstUnescapedQuoteEndsTheCall(html) {
+    const open = "toggleReleaseArchive('";
+    const start = html.indexOf(open);
+    if (start === -1) return false;
+    let i = start + open.length;
+    while (i < html.length) {
+        if (html[i] === '\\') { i += 2; continue; }   // escaped char: skip both
+        if (html[i] === "'") break;                    // first unescaped quote
+        i++;
+    }
+    // The argument string must close, the CALL must close, and the onclick
+    // ATTRIBUTE must end right there. Checking only for "')" is VACUOUS -- a
+    // successful breakout also produces "');" at that point (the injected id
+    // closes the string and the call, then runs its own statements). Requiring
+    // the attribute's closing double-quote immediately after is what separates
+    // "the id ended the string" from "the id escaped the string". Verified by
+    // reverting the fix: this assertion passes with escapeHtml under the
+    // 2-char form and fails under the 3-char form.
+    return html.slice(i, i + 3) === "')\"";
+}
+
+check('onclick: a hostile release id cannot terminate the JS string (archived)',
+    firstUnescapedQuoteEndsTheCall(evilArchived), true);
+check('onclick: a hostile release id cannot terminate the JS string (complete)',
+    firstUnescapedQuoteEndsTheCall(evilComplete), true);
+// Positive control: the escaped form must actually be present, so the test
+// above cannot pass merely because the id was dropped entirely.
+check('onclick: the id is present in escaped form, not silently discarded',
+    /\\'\); alert/.test(evilArchived), true);
+check('jsAttrEscape escapes a single quote for a JS string literal',
+    jsAttrEscape("a'b"), "a\\'b");
+check('jsAttrEscape escapes a backslash first',
+    jsAttrEscape('a\\b'), 'a\\\\b');
+// escapeHtml would NOT have caught this -- that is the whole point.
+check('escapeAttr alone is insufficient for a JS string literal (it leaves \\ )',
+    escapeAttr('a\\b'), 'a\\b');
+
 // --- getPlatformName (XACA-1000-012) --------------------------------------
 
 check('getPlatformName maps ios', getPlatformName('ios'), 'iOS');
@@ -321,6 +379,30 @@ check('escapeAttr escapes ampersand first', escapeAttr('&<>'), '&amp;&lt;&gt;');
 check('escapeAttr handles null', escapeAttr(null), '');
 check('escapeAttr does not double-escape a plain string',
     escapeAttr('Android is at QA, not PROD'), 'Android is at QA, not PROD');
+
+// --- Disabled-state styling (XACA-1000-020) --------------------------------
+// A disabled ARCHIVE button that LOOKS identical to the live buttons beside it
+// defeats the point of rendering it at all. The CSS lives in a separate file
+// from the markup, so `git diff -- lcars-ui/js` cannot show this gap; assert it
+// here, against the stylesheet, or nothing does.
+const CSS_PATH = path.join(__dirname, '..', 'css', 'lcars.css');
+const css = fs.readFileSync(CSS_PATH, 'utf8');
+
+check('stylesheet has a :disabled rule for .release-action-btn',
+    /\.release-action-btn:disabled\s*\{/.test(css), true);
+check('disabled action buttons get a not-allowed cursor',
+    /\.release-action-btn:disabled\s*\{[^}]*cursor:\s*not-allowed/.test(css), true);
+check('disabled action buttons are visually dimmed',
+    /\.release-action-btn:disabled\s*\{[^}]*opacity:/.test(css), true);
+// The base .release-action-btn:hover rule has no :not(:disabled) guard, so a
+// disabled button would otherwise LIGHTEN on hover while being inert.
+check('the disabled hover state is neutralised',
+    /\.release-action-btn:disabled:hover\s*\{/.test(css), true);
+// pointer-events:none would kill the native tooltip, which is the entire
+// explanation channel for why the archive is blocked.
+const disabledRule = (css.match(/\.release-action-btn:disabled\s*\{[^}]*\}/) || [''])[0];
+check('disabled rule does NOT use pointer-events:none (it would suppress the tooltip)',
+    /pointer-events:\s*none/.test(disabledRule), false);
 
 if (failures > 0) {
     console.error(`\n${failures} test(s) failed.`);

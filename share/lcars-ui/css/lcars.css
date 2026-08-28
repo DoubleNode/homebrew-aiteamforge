@@ -9361,6 +9361,45 @@ body {
     color: #fff;
 }
 
+/* XACA-1000-020: attribute-based disabled styling for release-card actions.
+
+   The rules below this block dim PROMOTE/EDIT/DELETE, but they are scoped to
+   `.release-card.archived` and matched by CLASS, so they only fire on an
+   archived card. XACA-1000 introduced a disabled ARCHIVE button on
+   NON-archived cards (an incomplete release now explains why it cannot be
+   archived instead of rendering nothing), and no rule reached it: it inherited
+   the base `.release-action-btn` styling — full teal, `cursor: pointer`, and an
+   unguarded `:hover` that LIGHTENS it — so an inert control looked identical to
+   the live PROMOTE/RELNOTES/EDIT beside it and lit up when hovered. Matching on
+   `:disabled` rather than on a card state fixes that for any disabled action
+   button, wherever it appears.
+
+   NOT `pointer-events: none`, deliberately, unlike the archived-card rule
+   below. That property suppresses the native tooltip, and the tooltip IS the
+   feature here — it names the platform blocking the archive. The button must
+   stay hoverable while being visibly and functionally inert, so the hover
+   styling is neutralised explicitly instead.
+
+   opacity 0.5 matches `.lcars-btn:disabled` rather than the 0.3 used below:
+   the archived-card buttons are merely inert, whereas this one is meant to be
+   noticed and hovered for its explanation, so it stays legible. */
+.release-action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Neutralise the base and variant hover states for any disabled action button
+   (the base `.release-action-btn:hover` carries no `:not(:disabled)` guard). */
+.release-action-btn:disabled:hover {
+    background: rgba(102, 204, 204, 0.2);
+    color: var(--lcars-teal, #66cccc);
+}
+
+.release-action-btn.danger:disabled:hover {
+    background: rgba(204, 102, 102, 0.2);
+    color: var(--lcars-alert-red, #cc6666);
+}
+
 /* XACA-0056-005: Archived Release Cards - Disabled Buttons */
 .release-card.archived .release-action-btn.edit-btn,
 .release-card.archived .release-action-btn.promote-btn,

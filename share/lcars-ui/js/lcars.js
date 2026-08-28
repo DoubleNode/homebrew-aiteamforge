@@ -10805,7 +10805,17 @@ function getIncompletePlatforms(release) {
  * @returns {string} HTML for the archive/unarchive control
  */
 function renderArchiveAction(release, isArchived) {
-    const id = escapeHtml(String((release && release.id) || ''));
+    // XACA-1000-021: jsAttrEscape, NOT escapeHtml. `id` lands inside a JS STRING
+    // LITERAL within an HTML attribute -- toggleReleaseArchive('<id>') -- and
+    // escapeHtml is textContent->innerHTML, which leaves ' and \ untouched. A
+    // release id of  x'); alert(document.cookie); ('  therefore breaks straight
+    // out of the string and executes. jsAttrEscape (XACA-0277) exists for this
+    // exact sink and escapes \ and ' as well as the HTML metacharacters.
+    // Three escapers, three contexts, and they are NOT interchangeable:
+    //   escapeHtml    -> text content
+    //   escapeAttr    -> a quoted HTML attribute value (the title= below)
+    //   jsAttrEscape  -> a JS string literal inside an attribute (here)
+    const id = jsAttrEscape(String((release && release.id) || ''));
 
     if (isArchived) {
         return '<button class="release-action-btn unarchive-btn"' +
