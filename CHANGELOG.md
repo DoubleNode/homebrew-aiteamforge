@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-08-28
+
 - **XACA-0416 — stored-XSS sink closed in the two forked `main-event` plugin app files.** Both
   `fleet-monitor/plugins/main-event/public/lcars2/js/lcars-mainevent-app.js` and
   `.../lcars/js/lcars-mainevent-app.js` built their team card by string-concatenating
@@ -2283,7 +2285,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.2...HEAD
+[0.20.2]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.18.0...v0.19.0
