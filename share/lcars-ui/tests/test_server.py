@@ -1980,6 +1980,24 @@ class TestIsReleaseComplete(unittest.TestCase):
             handler.is_release_complete({"platforms": {"other": None}})
         )
 
+    def test_scalar_release_not_complete(self):
+        """A non-dict release must return False, not raise (XACA-1000-022).
+
+        `(release or {})` did not cover this: a scalar is TRUTHY, so it survived
+        the `or` and then blew up on .get(). The JS twin returns false for the
+        same inputs.
+        """
+        handler = self._make_handler_simple()
+        for bad in ("x", 42, 3.5, True, [], ["ios"], set()):
+            try:
+                result = handler.is_release_complete(bad)
+            except Exception as exc:  # noqa: BLE001 - the assertion IS "no raise"
+                self.fail(
+                    "is_release_complete(%r) raised %s: %s"
+                    % (bad, type(exc).__name__, exc)
+                )
+            self.assertFalse(result, "expected False for scalar release %r" % (bad,))
+
     def test_none_release_not_complete(self):
         """A null release must not raise — the JS twin returns false."""
         handler = self._make_handler_simple()

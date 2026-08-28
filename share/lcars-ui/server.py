@@ -7178,7 +7178,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         Returns:
             bool: True if every declared platform is at PROD, False otherwise
         """
-        platforms = (release or {}).get('platforms', {})
+        # XACA-1000-022: `release` itself must be a dict before .get() is safe.
+        # `(release or {})` only rescues falsy values — a scalar like "x" or 42
+        # is truthy, so .get() raised AttributeError where the JavaScript twin
+        # returned false (there, "x".platforms is simply undefined). Same
+        # asymmetry class this ticket exists to fix, one level out from the
+        # `platforms` guard below.
+        if not isinstance(release, dict):
+            return False
+
+        platforms = release.get('platforms', {})
 
         # XACA-1000-015: `platforms` must be a real dict. A list or a string is
         # malformed data, not "zero platforms" — and calling .values() on it

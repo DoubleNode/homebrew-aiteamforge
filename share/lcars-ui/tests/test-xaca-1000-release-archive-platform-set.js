@@ -99,6 +99,9 @@ let renderArchiveAction;
 let getPlatformName;
 let escapeAttr;
 let jsAttrEscape;
+let announceToScreenReader;
+let __flush;
+let __state;
 let isReleaseCompleteSrc;
 
 try {
@@ -110,20 +113,42 @@ try {
         extractFunction('getPlatformName'),
         extractFunction('escapeAttr'),
         extractFunction('jsAttrEscape'),
+        extractFunction('announceToScreenReader'),
     ].join('\n\n');
 
     // escapeHtml() is DOM-backed (textContent -> innerHTML) and cannot run in
     // bare Node. renderArchiveAction uses it only on release.id, which is not
     // the security-sensitive interpolation here — the tooltip goes through
     // escapeAttr, which IS sliced from source and tested for real below.
+    // announceToScreenReader is the first sliced function that touches the DOM,
+    // so the factory gets a minimal document/window stub. It is deliberately
+    // minimal — just enough to observe what the function DOES (element created,
+    // attributes set, appended once, text written on a timer) rather than
+    // simulating a browser.
     const preamble = 'function escapeHtml(t) { return String(t == null ? "" : t)' +
-        '.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }\n';
+        '.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }\n' +
+        'var __els = {}; var __appended = []; var __timers = []; var __nextTimer = 1;\n' +
+        'var document = {\n' +
+        '  body: { appendChild: function (el) { __appended.push(el); __els[el.id] = el; } },\n' +
+        '  getElementById: function (id) { return __els[id] || null; },\n' +
+        '  createElement: function () {\n' +
+        '    return { id: "", textContent: "", style: { cssText: "" }, _attrs: {},\n' +
+        '             setAttribute: function (k, v) { this._attrs[k] = v; } };\n' +
+        '  }\n' +
+        '};\n' +
+        'var window = {\n' +
+        '  setTimeout: function (fn) { var h = __nextTimer++; __timers.push({h: h, fn: fn, live: true}); return h; },\n' +
+        '  clearTimeout: function (h) { __timers.forEach(function (t) { if (t.h === h) t.live = false; }); }\n' +
+        '};\n' +
+        'function __flush() { __timers.filter(function (t) { return t.live; }).forEach(function (t) { t.fn(); }); }\n' +
+        'function __state() { return { els: __els, appended: __appended, timers: __timers }; }\n';
 
     // eslint-disable-next-line no-new-func
     const factory = new Function(
         preamble + slices +
         '\nreturn { isReleaseComplete, getIncompletePlatforms, renderArchiveAction,' +
-        ' getPlatformName, escapeAttr, jsAttrEscape };'
+        ' getPlatformName, escapeAttr, jsAttrEscape, announceToScreenReader,' +
+        ' __flush, __state };'
     );
     ({
         isReleaseComplete,
@@ -132,6 +157,9 @@ try {
         getPlatformName,
         escapeAttr,
         jsAttrEscape,
+        announceToScreenReader,
+        __flush,
+        __state,
     } = factory());
 } catch (e) {
     console.error(`FAIL: ${e.message}`);
@@ -403,6 +431,62 @@ check('the disabled hover state is neutralised',
 const disabledRule = (css.match(/\.release-action-btn:disabled\s*\{[^}]*\}/) || [''])[0];
 check('disabled rule does NOT use pointer-events:none (it would suppress the tooltip)',
     /pointer-events:\s*none/.test(disabledRule), false);
+
+// --- announceToScreenReader (XACA-1000-025) --------------------------------
+// This was the only function added in round 2 with no coverage at all. It is
+// the entire accessibility affordance for archive/unarchive — a sighted user
+// sees the card re-render, a screen-reader user has nothing else — so an
+// untested version of it is an affordance nobody can prove exists.
+
+announceToScreenReader('Release archived.');
+let st = __state();
+const region = st.els['lcars-sr-announcer'];
+
+check('announce: creates the live region', !!region, true);
+check('announce: region has role=status', region && region._attrs.role, 'status');
+check('announce: region is polite, not assertive',
+    region && region._attrs['aria-live'], 'polite');
+check('announce: region is atomic', region && region._attrs['aria-atomic'], 'true');
+check('announce: region is appended to the document exactly once',
+    st.appended.length, 1);
+// Visually hidden but still in the accessibility tree — display:none or
+// visibility:hidden would remove it and silence the announcement entirely.
+check('announce: region is visually hidden without leaving the a11y tree',
+    /position:absolute/.test(region.style.cssText) &&
+        !/display:\s*none/.test(region.style.cssText) &&
+        !/visibility:\s*hidden/.test(region.style.cssText), true);
+// The text is written on a timer, not synchronously: a live region whose text
+// is unchanged is not re-announced, so it is cleared first.
+check('announce: text is empty until the timer fires', region.textContent, '');
+__flush();
+check('announce: text is set after the timer fires',
+    region.textContent, 'Release archived.');
+
+// Second call must reuse the same region rather than stacking new ones.
+announceToScreenReader('Release unarchived and returned to the active list.');
+st = __state();
+check('announce: reuses the existing region (no duplicate appended)',
+    st.appended.length, 1);
+__flush();
+check('announce: second message replaces the first',
+    st.els['lcars-sr-announcer'].textContent,
+    'Release unarchived and returned to the active list.');
+
+// A pending set must be cancelled so rapid consecutive calls announce the LAST
+// message, not an interleaving of both.
+announceToScreenReader('first');
+announceToScreenReader('second');
+__flush();
+check('announce: rapid consecutive calls announce the last message only',
+    __state().els['lcars-sr-announcer'].textContent, 'second');
+
+// Empty/absent messages must be a no-op, not an empty announcement.
+const beforeCount = __state().timers.filter(function (t) { return t.live; }).length;
+announceToScreenReader('');
+announceToScreenReader(null);
+announceToScreenReader(undefined);
+check('announce: empty/null/undefined messages are a no-op',
+    __state().timers.filter(function (t) { return t.live; }).length, beforeCount);
 
 if (failures > 0) {
     console.error(`\n${failures} test(s) failed.`);

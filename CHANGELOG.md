@@ -105,6 +105,40 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     read nothing. Its own self-test caught a `trap … RETURN` in it that re-fired in the caller and
     aborted the script under `set -u` *after* reporting 9/9 PASS.
 
+  **Round-4 follow-ups (XACA-1000-021/-022/-023/-025), all four gate-approved before being fixed.**
+
+  * **-021, the sharpest: the new co-change guard false-fired on documentation.** `_norm_stream`
+    strips `#` and `//` comment lines, but a Python docstring is a STRING LITERAL and survived
+    normalization intact — 27 of the canonical function's 37 normalized lines were docstring prose,
+    so ~73% of what the guard compared was documentation. Rewording one sentence (zero logic change)
+    flipped the body and fired VIOLATION, demanding a matching JavaScript edit for nothing. That is
+    the exact failure the guard's own header warns about: a gate that cries wolf gets turned off. Now
+    stripped via `_strip_pydoc`; the canonical body drops 37 -> 12 normalized lines. **Its
+    false-positive control was itself vacuous** — it churned `#` comments and whitespace, both
+    already stripped, and its comment even claimed cover for "a docstring rewrap". A new case 5b
+    rewords real docstring prose and asserts no false fire. Re-verified in the other direction too: a
+    logic mutation is still detected, so stripping did not make the guard blind.
+  * **-022**: `is_release_complete()` guarded `release.platforms` but not `release` itself.
+    `(release or {})` only rescues falsy values — a scalar like `"x"` or `42` is truthy and blew up on
+    `.get()`, where the JS twin returns false. Same asymmetry class this ticket exists to fix, one
+    level further out.
+  * **-023**: the co-change workflow read `$GITHUB_EVENT_BEFORE`, which is not a GitHub Actions
+    variable at all — `before` exists only on the push payload. Written as
+    `${GITHUB_EVENT_BEFORE:-HEAD~1}` it silently took the fallback on every push instead of ever
+    failing, which is why nothing surfaced it. Now bound as a real step env var from
+    `github.event.before`, with the all-zeros new-branch case handled explicitly and the chosen
+    fallback logged rather than taken silently.
+  * **-025**: `announceToScreenReader` — the entire accessibility affordance for archive/unarchive —
+    had no coverage at all. 12 assertions added behind a DOM/timer stub: role/aria-live/atomic,
+    appended exactly once, visually hidden without leaving the accessibility tree, clear-then-set
+    timing, region reuse, last-message-wins on rapid calls, and empty-message no-op.
+
+  **-024 (a native `disabled` button is out of the tab order, so the tooltip is unreachable by the
+  users it was added for) is deliberately NOT fixed here.** Both the UX and code-review gates
+  independently concluded it should be a follow-up: the native-`disabled` pattern is inherited from
+  PROMOTE/EDIT/DELETE, so converting only ARCHIVE to `aria-disabled` would leave it inconsistent with
+  its three siblings, and doing the family properly needs a click guard on each plus `aria-describedby`.
+
   Not filed as new work: the reviewer's finding that the JS tests run in no CI workflow was already
   tracked (XACA-0229 / the `tests/.test-directories` note) — the QA agent correctly declined to
   duplicate it and the reviewer's copy was reconciled against the existing ticket rather than filed
