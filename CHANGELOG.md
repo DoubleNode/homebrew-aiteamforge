@@ -45,6 +45,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   truncation of working-item titles, `aria-label`s on the nickname editor, and the updated DOM-stub
   test helper.
 
+  **Third gate round — guard hardening and a CSS token that was never defined.** `safeCssColor()`
+  now warns once per distinct rejected value instead of failing silently, so a mistyped theme is
+  diagnosable rather than indistinguishable from no theme (throttled per value: the card renders on
+  every poll). `safeCssIdent()` gained a runtime existence check — it validated identifier SYNTAX
+  but not token EXISTENCE, so a syntactically valid but undefined custom property still emitted an
+  invalid declaration. Measured live: `--lcars-gold` is defined in **none** of the six stylesheets
+  the dashboard loads, while the control `--lcars-lavender` is, so `finance` ships an invisible
+  sidebar link today. Fixed with a cached, fail-safe `getComputedStyle` lookup rather than by adding
+  that one colour, because the single-case repair leaves the next undefined token failing
+  identically and silently.
+
   **The three MIRRORED files now carry the fix too.** Distinct from the forked copies above,
   `fleet-monitor/server/public/{lcars/js/lcars-dashboard-app.js, lcars2/js/lcars-academy-app.js,
   lcars2/js/lcars-all-app.js}` are byte-identical mirrors of canonical. They were initially missed —

@@ -1128,12 +1128,31 @@
         violet: 1, white: 1, yellow: 1
     };
 
+    var _warnedCssColors = Object.create(null);
+
     function safeCssColor(value) {
         var s = (value === null || value === undefined) ? '' : String(value).trim();
         if (/^#(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{3})$/.test(s)) {
             return s;
         }
-        return Object.prototype.hasOwnProperty.call(CSS_NAMED_COLORS, s.toLowerCase()) ? s : '';
+        if (Object.prototype.hasOwnProperty.call(CSS_NAMED_COLORS, s.toLowerCase())) {
+            return s;
+        }
+        // XACA-0416-025 (PR #784 UX gate): rejecting SILENTLY makes a mistyped or
+        // unsupported theme indistinguishable from no theme at all -- the card
+        // simply renders unstyled and nobody learns why. Warn once per distinct
+        // value (not per render: createTeamCard runs on every poll, so an
+        // unthrottled warn would flood the console). Measured zero live impact
+        // today -- all 86 shipped .theme files are 6-digit hex -- so this is
+        // diagnosability for hand-edited values, not a live fix.
+        if (s && !_warnedCssColors[s]) {
+            _warnedCssColors[s] = true;
+            if (typeof console !== 'undefined' && console.warn) {
+                console.warn('[LCARS] theme_color rejected, rendering untinted: ' + s +
+                    ' (accepted: #RGB/#RGBA/#RRGGBB/#RRGGBBAA or a supported colour name)');
+            }
+        }
+        return '';
     }
 
     function escapeHtml(text) {

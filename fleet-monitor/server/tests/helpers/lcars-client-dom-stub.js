@@ -186,6 +186,19 @@ class FakeElement {
         this.children.push(child);
         return child;
     }
+    // XACA-0416-027 (PR #784 test gate) -- SECOND anti-vacuity note, about the
+    // OTHER direction. The node returned below is SYNTHESISED and DETACHED: it
+    // is not spliced into the innerHTML string this FakeElement holds, so a
+    // style write on it never serializes back into `card.innerHTML`. A
+    // legitimately-applied `#4A9EFF` is therefore absent from card.innerHTML by
+    // construction.
+    //
+    // The tests written against this today are correct because they read
+    // `style.getPropertyValue(...)` -- the live channel. But any FUTURE
+    // assertion shaped "the payload is NOT in card.innerHTML" for the theme
+    // sink would pass VACUOUSLY, whatever the sink does, and would look like
+    // proof. Assert on the style object, or splice the node before asserting on
+    // markup. Do not assert absence from innerHTML here.
     querySelector(selector) {
         // XACA-0416: the previous version returned null unconditionally, with a
         // note that no covered path reached it. That is no longer true -- the
@@ -226,7 +239,62 @@ class FakeElement {
     }
 }
 
-function createDomStub() {
+// XACA-0416 (review finding: safeCssIdent validates syntax, not token existence).
+//
+// The client's cssTokenIsDefined() asks the DOM whether `--lcars-<ident>`
+// resolves to anything. To render that decision honestly this stub needs a
+// getComputedStyle backed by the tokens the REAL page defines -- not a
+// hand-written table, which would let the test agree with itself while the
+// shipped stylesheets said something else.
+//
+// So: read the page's own <link rel="stylesheet"> list, resolve each href
+// relative to the HTML file, and collect every `--name: value` definition. Same
+// "actual shipped source" rule loadClientApp() follows for the JS.
+//
+// OPT-IN. Without `cssVarsFromPage`, getComputedStyle is ABSENT from the
+// context, exactly as before -- so every pre-existing test keeps rendering
+// against the same stub surface it was written for, and the client's
+// fail-safe-to-current-behaviour branch is what those tests exercise.
+function collectCssCustomProperties(pageRelPath) {
+    const pagePath = path.join(PUBLIC_ROOT, pageRelPath);
+    const html = fs.readFileSync(pagePath, 'utf8');
+    const pageDir = path.dirname(pagePath);
+
+    const hrefs = [];
+    const linkRe = /<link\b[^>]*rel=["']stylesheet["'][^>]*>/gi;
+    let m;
+    while ((m = linkRe.exec(html)) !== null) {
+        const hrefMatch = /href=["']([^"']+)["']/i.exec(m[0]);
+        if (!hrefMatch) continue;
+        const href = hrefMatch[1].split('?')[0];
+        // Remote sheets (the Google Fonts import) cannot define --lcars-*
+        // tokens and are not on disk to read. Skipped rather than fetched --
+        // a unit test must not depend on the network.
+        if (/^(https?:)?\/\//i.test(href)) continue;
+        hrefs.push(href);
+    }
+    if (hrefs.length === 0) {
+        throw new Error('lcars-client-dom-stub: no local stylesheets found in ' + pageRelPath);
+    }
+
+    const vars = new Map();
+    hrefs.forEach(function (href) {
+        const cssPath = path.resolve(pageDir, href);
+        if (!fs.existsSync(cssPath)) {
+            throw new Error('lcars-client-dom-stub: stylesheet missing on disk: ' + cssPath);
+        }
+        const css = fs.readFileSync(cssPath, 'utf8');
+        const declRe = /(--[A-Za-z0-9_-]+)\s*:\s*([^;}]+)/g;
+        let d;
+        while ((d = declRe.exec(css)) !== null) {
+            vars.set(d[1], d[2].trim());
+        }
+    });
+    return vars;
+}
+
+function createDomStub(options) {
+    const opts = options || {};
     const documentStub = {
         createElement(tag) {
             return new FakeElement(tag);
@@ -257,7 +325,26 @@ function createDomStub() {
     ctx.window.open = ctx.open;
     ctx.window.addEventListener = function () {};
 
-    return { ctx, document: documentStub, windowOpenCalls };
+    let cssVars = null;
+    if (opts.cssVarsFromPage) {
+        cssVars = collectCssCustomProperties(opts.cssVarsFromPage);
+        documentStub.documentElement = new FakeElement('html');
+        const computed = {
+            // A real getComputedStyle returns '' for a custom property that is
+            // not defined anywhere in the cascade -- that '' is the entire
+            // signal cssTokenIsDefined() reads.
+            getPropertyValue(name) {
+                const key = String(name);
+                return cssVars.has(key) ? cssVars.get(key) : '';
+            }
+        };
+        ctx.getComputedStyle = function () {
+            return computed;
+        };
+        ctx.window.getComputedStyle = ctx.getComputedStyle;
+    }
+
+    return { ctx, document: documentStub, windowOpenCalls, cssVars };
 }
 
 // XACA-0990-004: isLcarsTerminal()/createServiceOnlyLcarsCard() were
@@ -311,7 +398,14 @@ function loadClientApp(relPath, ctx) {
         ' createTeamCard: createTeamCard,' +
         ' isLcarsTerminal: isLcarsTerminal,' +
         ' setWorkingItems: (typeof workingItems !== "undefined")' +
-        '     ? function (v) { workingItems = v; } : null' +
+        '     ? function (v) { workingItems = v; } : null,' +
+        // XACA-0416 (review finding: safeCssIdent validates syntax, not token
+        // existence). dashboardLinkStyle() is the sidebar-link CSS sink; only
+        // lcars-dashboard-app.js defines it, so it is typeof-guarded for the
+        // same reason setWorkingItems is -- in the four lcars2 files the export
+        // lands as null rather than throwing a ReferenceError at load.
+        ' dashboardLinkStyle: (typeof dashboardLinkStyle !== "undefined")' +
+        '     ? dashboardLinkStyle : null' +
         ' };\n';
 
     const patched = src.slice(0, lastIdx) + exportStmt + src.slice(lastIdx);
@@ -333,6 +427,7 @@ function loadClientApp(relPath, ctx) {
 // one of the 5 client app shims on top of it. loadClientApp() above still
 // calls this itself as step 1 of loading a client app.
 module.exports = {
+    collectCssCustomProperties,
     createDomStub,
     loadClientApp,
     loadSharedTerminalCardModule,

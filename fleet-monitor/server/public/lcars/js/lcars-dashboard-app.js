@@ -1713,6 +1713,84 @@
         return /^[A-Za-z0-9_-]+$/.test(s) ? s : fallback;
     }
 
+    // XACA-0416 (review finding: safeCssIdent validates SYNTAX, not EXISTENCE).
+    // safeCssIdent() accepts any /^[A-Za-z0-9_-]+$/ identifier, which is the
+    // right security answer -- it is what stops `red); background-image: url(...`
+    // -- but it says nothing about whether `--lcars-<ident>` is a property this
+    // theme actually DEFINES. A syntactically perfect but UNDEFINED token still
+    // emits a declaration the browser cannot resolve, and `background:
+    // var(--lcars-nosuch)` renders as no background at all.
+    //
+    // MEASURED, not hypothetical: data/dashboards.json gives the `finance`
+    // dashboard org_color=gold, and `--lcars-gold` has NO definition in either
+    // shipped theme (public/lcars/css/lcars-fleet-theme.css or
+    // public/lcars2/css/lcars-fleet-theme.css) -- verified against the working
+    // control `--lcars-lavender`, which IS defined in both at line 50. So that
+    // sidebar link ships with an invisible background today.
+    //
+    // The fix is a RUNTIME EXISTENCE CHECK rather than either single-case repair
+    // available (adding a --lcars-gold definition, or editing dashboards.json to
+    // say `amber`): both of those fix `finance` and leave the next undefined
+    // token to fail exactly the same silent way. getComputedStyle() on the root
+    // element returns '' for a custom property that resolves to nothing, so one
+    // lookup answers the general question.
+    //
+    // FAILS SAFE. If getComputedStyle is unavailable (a non-browser host, an
+    // older embedded webview, the unit-test DOM stub) or throws, this returns
+    // true -- i.e. keeps the CURRENT behaviour of accepting the syntactically
+    // valid ident. A missing capability must never silently repaint the fleet's
+    // dashboards to the fallback colour.
+    //
+    // Cached per ident: the sidebar renders one link per dashboard, and the
+    // answer cannot change without a stylesheet reload, which reloads the page.
+    var _cssTokenDefinedCache = {};
+
+    function cssTokenIsDefined(ident) {
+        if (Object.prototype.hasOwnProperty.call(_cssTokenDefinedCache, ident)) {
+            return _cssTokenDefinedCache[ident];
+        }
+        var defined = true;
+        try {
+            var gcs = (typeof getComputedStyle === 'function')
+                ? getComputedStyle
+                : (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function'
+                    ? window.getComputedStyle
+                    : null);
+            var root = (typeof document !== 'undefined') ? document.documentElement : null;
+            if (gcs && root) {
+                var resolved = gcs(root).getPropertyValue('--lcars-' + ident);
+                defined = String(resolved === null || resolved === undefined ? '' : resolved).trim() !== '';
+            }
+        } catch (e) {
+            defined = true;
+        }
+        _cssTokenDefinedCache[ident] = defined;
+        return defined;
+    }
+
+    // Two layers, in this order, because they answer different questions:
+    // safeCssIdent() answers "is this SAFE to interpolate into CSS?" and
+    // cssTokenIsDefined() answers "does it RESOLVE to anything?". A value that
+    // fails the first never reaches the second.
+    function safeOrgColorIdent(value, fallback) {
+        var ident = safeCssIdent(value, fallback);
+        if (ident === fallback) return ident;
+        return cssTokenIsDefined(ident) ? ident : fallback;
+    }
+
+    // Extracted from the sidebar-link map callback so the emitted declaration
+    // can be asserted by rendering the SHIPPED function, rather than by a test
+    // re-implementing the concatenation and then proving something about its
+    // own copy. Returns the style attribute VALUE; the caller still escapeAttr()s
+    // it, because this is the CSS layer and that is the HTML-attribute layer.
+    function dashboardLinkStyle(orgColorValue, isActive) {
+        var orgColor = safeOrgColorIdent(orgColorValue, 'lavender');
+        if (isActive) {
+            return 'background: var(--lcars-black); color: var(--lcars-' + orgColor + ');';
+        }
+        return 'background: var(--lcars-' + orgColor + '); color: var(--lcars-black);';
+    }
+
     // XACA-0416 (UX/Test finding): session.theme_color is a CSS context, not an
     // HTML one -- the same class safeCssIdent() exists for, but a colour is not
     // an identifier, so it needs its own allowlist rather than that one.
@@ -1745,12 +1823,31 @@
         violet: 1, white: 1, yellow: 1
     };
 
+    var _warnedCssColors = Object.create(null);
+
     function safeCssColor(value) {
         var s = (value === null || value === undefined) ? '' : String(value).trim();
         if (/^#(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{3})$/.test(s)) {
             return s;
         }
-        return Object.prototype.hasOwnProperty.call(CSS_NAMED_COLORS, s.toLowerCase()) ? s : '';
+        if (Object.prototype.hasOwnProperty.call(CSS_NAMED_COLORS, s.toLowerCase())) {
+            return s;
+        }
+        // XACA-0416-025 (PR #784 UX gate): rejecting SILENTLY makes a mistyped or
+        // unsupported theme indistinguishable from no theme at all -- the card
+        // simply renders unstyled and nobody learns why. Warn once per distinct
+        // value (not per render: createTeamCard runs on every poll, so an
+        // unthrottled warn would flood the console). Measured zero live impact
+        // today -- all 86 shipped .theme files are 6-digit hex -- so this is
+        // diagnosability for hand-edited values, not a live fix.
+        if (s && !_warnedCssColors[s]) {
+            _warnedCssColors[s] = true;
+            if (typeof console !== 'undefined' && console.warn) {
+                console.warn('[LCARS] theme_color rejected, rendering untinted: ' + s +
+                    ' (accepted: #RGB/#RGBA/#RRGGBB/#RRGGBBAA or a supported colour name)');
+            }
+        }
+        return '';
     }
 
     // XACA-0416 (UX finding): String.prototype.substring() cuts by UTF-16 code
@@ -2199,15 +2296,11 @@
                 // XACA-0416 (review finding 1): org_color reaches a CSS context,
                 // not an HTML one -- see safeCssIdent()'s note. Allowlist it here;
                 // escapeAttr on the finished style string below is the second layer.
-                const orgColor = safeCssIdent(d.org_color, 'lavender');
+                // safeOrgColorIdent() adds the third: an ident that is valid but
+                // names no defined --lcars-* property falls back rather than
+                // emitting an unresolvable var() (see cssTokenIsDefined()).
                 const linkUrl = 'lcars-dashboard.html?dashboard=' + encodeURIComponent(d.id);
-
-                var colorStyle;
-                if (isActive) {
-                    colorStyle = 'background: var(--lcars-black); color: var(--lcars-' + orgColor + ');';
-                } else {
-                    colorStyle = 'background: var(--lcars-' + orgColor + '); color: var(--lcars-black);';
-                }
+                var colorStyle = dashboardLinkStyle(d.org_color, isActive);
                 // href and style are QUOTED ATTRIBUTES -> escapeAttr (escapeHtml
                 // leaves quotes alone and would be a false fix). The link text is
                 // ELEMENT CONTENT -> escapeHtml.
