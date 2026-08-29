@@ -11384,7 +11384,18 @@ function displayReleases(releases, flowConfig = null, projectEnvironments = {}) 
  * @param {Object} projectEnvironments - Optional per-project stage overrides (XACA-0163)
  */
 function renderReleaseCard(release, flowConfig = null, projectEnvironments = {}) {
-    const typeClass = release.type ? `type-${release.type}` : '';
+    // XACA-1005-001 (8th round, PR #795 gate, BLOCKING, reviewer-verified):
+    // release.type reaches TWO sinks raw -- this CLASS-ATTRIBUTE position and
+    // typeBadge below (attribute AND element content). release.type is in
+    // server.py handle_update_release's allowed_fields with
+    // `release[field] = post_data[field]` and NO validation. Live PoC
+    // produced a real onmouseover= event-handler attribute and a live
+    // <IMG ... ONERROR=...> element; .toUpperCase() below is not a
+    // mitigation, it just uppercases the payload before it executes. Fixed:
+    // escapeAttr() here (class-attribute position), escapeAttr()+escapeHtml()
+    // at typeBadge below (attribute vs content, not one escaper for both --
+    // the point of this ticket).
+    const typeClass = release.type ? `type-${escapeAttr(release.type)}` : '';
     // XACA-1005-001 (6th round, PR #795 gate): found while checking whether
     // formatDate()'s catch-and-return-raw pattern is a CLASS, not an
     // instance -- formatTargetDate() (lcars.js ~11756) has the IDENTICAL
@@ -11424,8 +11435,20 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     let platformCount = 0;
 
     const platformsHtml = Object.entries(release.platforms || {}).map(([key, platform]) => {
+        // XACA-1005-001 (8th round, PR #795 gate, BLOCKING, reviewer-verified):
+        // this is a SIBLING KEY of platform.version, fixed one round ago six
+        // lines below this -- same release.platforms provenance reasoning
+        // applies. Reachable via POST /api/releases with an unvalidated list
+        // that omits "PLANNED", so the initial value (server.py ~7551,
+        // ~7577-7588) becomes whatever the client sent, with no enum check.
+        // currentEnv reaches TWO sinks: envClass below (class-attribute
+        // position, via .toLowerCase() on the RAW value first -- transform
+        // before escape, matching the truncateTitle() composition-order
+        // lesson from an earlier round, so case transforms never operate on
+        // already-escaped entity text) and the platform-env span's element
+        // content further down (escaped independently there, its own sink).
         const currentEnv = platform.environment || 'DEV';
-        const envClass = `env-${currentEnv.toLowerCase()}`;
+        const envClass = `env-${escapeAttr(currentEnv.toLowerCase())}`;
 
         // Calculate progress based on position in enabled environments (XACA-0027)
         const currentIdx = enabledEnvironments.indexOf(currentEnv);
@@ -11504,7 +11527,7 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
                 <div class="platform-progress">
                     <div class="platform-progress-bar ${progressComplete}" style="width: ${envProgress}%"></div>
                 </div>
-                <span class="platform-env ${envClass}">${currentEnv}</span>
+                <span class="platform-env ${envClass}">${escapeHtml(currentEnv)}</span>
             </div>
         `;
     }).join('');
@@ -11537,8 +11560,19 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     const archivedBadge = isArchived ? '<span class="archived-badge">ARCHIVED</span>' : '';
 
     // XACA-0056: Add type badge
+    // XACA-1005-001 (8th round, PR #795 gate, BLOCKING, reviewer-verified):
+    // releaseType (from release.type, same defect as typeClass above) was
+    // raw at BOTH the class-attribute position AND element content below.
+    // Fixed with the context-appropriate escaper at each site, not one
+    // escaper for both: escapeAttr() for the attribute, escapeHtml() for
+    // the content. .toUpperCase() runs on the RAW value first, then the
+    // result is escaped -- uppercasing an already-escaped string risks
+    // mangling a named entity's case (escapeHtml() never needs this here
+    // since it only ever produces &amp;/&lt;/&gt;, but transform-then-escape
+    // is the safe default order regardless, matching the truncateTitle()
+    // composition-order lesson from an earlier round).
     const releaseType = release.type || 'feature';
-    const typeBadge = `<span class="release-type-badge type-${releaseType}">${releaseType.toUpperCase()}</span>`;
+    const typeBadge = `<span class="release-type-badge type-${escapeAttr(releaseType)}">${escapeHtml(releaseType.toUpperCase())}</span>`;
 
     // XACA-0209 round 5: purple tag pills on each release card — clicking a pill
     // sets the release search input (handler wired via bindItemTagClicks).

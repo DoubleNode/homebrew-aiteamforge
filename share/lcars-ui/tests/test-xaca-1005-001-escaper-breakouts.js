@@ -2239,6 +2239,175 @@ function runXaca1005001Round7PlatformInfoTest() {
 }
 runXaca1005001Round7PlatformInfoTest();
 
+
+// ===========================================================================
+// 8th ROUND (PR #795 gate). Reviewer REQUEST_CHANGES on four more raw
+// client-settable values in renderReleaseCard() -- the SAME function whose
+// formatTargetDate/platform.version sinks this ticket already fixed. The
+// reviewer explicitly validated the round-7 line ("fix what this PR touches,
+// file what it doesn't") and applied it here with the opposite answer: these
+// four sites ARE inside a touched function, so they are in scope this round.
+//
+// FULL PROPERTY ENUMERATION (requested by the coordinator, reported here so
+// the next reader does not have to re-derive it): every `release.*` and
+// `platform.*` property read inside renderReleaseCard(), whether it reaches
+// a sink, and whether it is escaped there. See CHANGELOG.md for the complete
+// table with reasoning per property; this file pins only the four sites
+// fixed this round with LIVE/source-level coverage.
+// ===========================================================================
+
+const HOSTILE_RELEASE_TYPE = '"><img src=x onerror=alert(1)>';
+const HOSTILE_PLATFORM_ENV = '"><img src=x onerror=alert(2)>';
+
+// --- Fixture-level NEGATIVE/POSITIVE controls. ---
+function buildOldTypeClassAndBadge(type) {
+    const typeClass = type ? `type-${type}` : '';
+    const releaseType = type || 'feature';
+    const typeBadge = `<span class="release-type-badge type-${releaseType}">${releaseType.toUpperCase()}</span>`;
+    return `<div class="release-card ${typeClass}"></div>${typeBadge}`;
+}
+function buildFixedTypeClassAndBadge(type) {
+    const typeClass = type ? `type-${escapeAttr(type)}` : '';
+    const releaseType = type || 'feature';
+    const typeBadge = `<span class="release-type-badge type-${escapeAttr(releaseType)}">${escapeHtml(releaseType.toUpperCase())}</span>`;
+    return `<div class="release-card ${typeClass}"></div>${typeBadge}`;
+}
+
+function assertNoRawImg(label, html, mustBreakOut) {
+    check(`${label}: hostile <img> ${mustBreakOut ? 'DOES' : 'does NOT'} introduce a raw element`,
+        html.indexOf('<img') !== -1, mustBreakOut);
+    if (!mustBreakOut) {
+        check(`${label}: the hostile '<' survives as the &lt; entity, not raw`,
+            html.indexOf('&lt;img') !== -1, true);
+    }
+}
+
+assertNoRawImg('NEGATIVE CONTROL (pre-fix raw release.type -> typeClass/typeBadge, 8th round)',
+    buildOldTypeClassAndBadge(HOSTILE_RELEASE_TYPE), /* mustBreakOut */ true);
+assertNoRawImg('POSITIVE CONTROL (escapeAttr/escapeHtml release.type, 8th round)',
+    buildFixedTypeClassAndBadge(HOSTILE_RELEASE_TYPE), /* mustBreakOut */ false);
+
+function buildOldEnv(env) {
+    const currentEnv = env || 'DEV';
+    const envClass = `env-${currentEnv.toLowerCase()}`;
+    return `<span class="platform-env ${envClass}">${currentEnv}</span>`;
+}
+function buildFixedEnv(env) {
+    const currentEnv = env || 'DEV';
+    const envClass = `env-${escapeAttr(currentEnv.toLowerCase())}`;
+    return `<span class="platform-env ${envClass}">${escapeHtml(currentEnv)}</span>`;
+}
+
+assertNoRawImg('NEGATIVE CONTROL (pre-fix raw platform environment, 8th round)',
+    buildOldEnv(HOSTILE_PLATFORM_ENV), /* mustBreakOut */ true);
+assertNoRawImg('POSITIVE CONTROL (escapeAttr/escapeHtml platform environment, 8th round)',
+    buildFixedEnv(HOSTILE_PLATFORM_ENV), /* mustBreakOut */ false);
+
+// Legitimate-input parity: normal values must render unchanged.
+check('Legitimate-input parity: a normal release type ("feature") still renders unchanged through escapeAttr/escapeHtml (8th round)',
+    buildFixedTypeClassAndBadge('feature'), buildOldTypeClassAndBadge('feature'));
+check('Legitimate-input parity: a normal environment ("PROD") still renders unchanged through escapeAttr/escapeHtml (8th round)',
+    buildFixedEnv('PROD'), buildOldEnv('PROD'));
+
+// --- Source-level locks. ---
+const typeClassAssignment = source.match(/const typeClass = release\.type \? `type-\$\{(\w+)\(release\.type\)\}` : '';/);
+check('source: typeClass statement located in lcars.js (8th round)', !!typeClassAssignment, true);
+if (typeClassAssignment) {
+    check('source: typeClass uses escapeAttr (class-attribute position, 8th round)', typeClassAssignment[1], 'escapeAttr');
+}
+
+const typeBadgeAssignment = source.match(
+    /<span class="release-type-badge type-\$\{(\w+)\(releaseType\)\}">\$\{(\w+)\(releaseType\.toUpperCase\(\)\)\}<\/span>/
+);
+check('source: typeBadge statement located in lcars.js (8th round)', !!typeBadgeAssignment, true);
+if (typeBadgeAssignment) {
+    check('source: typeBadge class-attribute position uses escapeAttr (8th round)', typeBadgeAssignment[1], 'escapeAttr');
+    check('source: typeBadge element-content position uses escapeHtml (8th round)', typeBadgeAssignment[2], 'escapeHtml');
+}
+
+const envClassAssignment = source.match(/const envClass = `env-\$\{(\w+)\(currentEnv\.toLowerCase\(\)\)\}`;/);
+check('source: envClass statement located in lcars.js (8th round)', !!envClassAssignment, true);
+if (envClassAssignment) {
+    check('source: envClass uses escapeAttr (class-attribute position, 8th round)', envClassAssignment[1], 'escapeAttr');
+}
+
+const platformEnvSpanAssignment = source.match(/<span class="platform-env \$\{envClass\}">\$\{(\w+)\(currentEnv\)\}<\/span>/);
+check('source: platform-env span statement located in lcars.js (8th round)', !!platformEnvSpanAssignment, true);
+if (platformEnvSpanAssignment) {
+    check('source: platform-env span uses escapeHtml (element-content position, 8th round)', platformEnvSpanAssignment[1], 'escapeHtml');
+}
+
+// --- LIVE integration: the ALREADY-EXTRACTED renderReleaseCard() with a
+// hostile release.type AND a hostile platform environment. ---
+function runXaca1005001Round8ReleaseTypeAndEnvironmentTest() {
+    const hostileTypeRelease = {
+        id: 'REL-TYPE-1', name: 'Type Test Release', status: 'active', type: HOSTILE_RELEASE_TYPE,
+        platforms: { other: { environment: 'DEV', version: '1.0.0' } },
+    };
+    const typeHtml = renderReleaseCard(hostileTypeRelease);
+    check('LIVE renderReleaseCard(): hostile release.type release was rendered (non-empty), 8th round', typeHtml.length > 0, true);
+    const cardTag = extractOpeningTag(typeHtml, '<div', 'class="release-card');
+    check('LIVE renderReleaseCard(): release-card tag located, 8th round', !!cardTag, true);
+    if (cardTag) {
+        check('LIVE renderReleaseCard(): release.type does not break out of the class attribute (8th round)',
+            cardTag.indexOf('<img') === -1, true);
+    }
+    const typeBadgeContent = extractElementContent(typeHtml, '<span class="release-type-badge', '</span>');
+    // extractElementContent expects an exact opening-tag string; the class
+    // attribute here is dynamic (type-XXX appended), so locate the badge via
+    // its stable class PREFIX and content boundaries directly instead.
+    const badgeOpenIdx = typeHtml.indexOf('<span class="release-type-badge');
+    const badgeContentStart = typeHtml.indexOf('>', badgeOpenIdx) + 1;
+    const badgeContentEnd = typeHtml.indexOf('</span>', badgeContentStart);
+    const badgeTag = typeHtml.slice(badgeOpenIdx, badgeContentStart);
+    const badgeContent = typeHtml.slice(badgeContentStart, badgeContentEnd);
+    check('LIVE renderReleaseCard(): release-type-badge tag located, 8th round', badgeOpenIdx !== -1, true);
+    check('LIVE renderReleaseCard(): release.type does not break out of the type-badge class attribute (8th round)',
+        badgeTag.indexOf('<img') === -1, true);
+    check('LIVE renderReleaseCard(): release.type does not introduce a raw element in the type-badge content (8th round)',
+        badgeContent.indexOf('<img') === -1, true);
+    check('LIVE renderReleaseCard(): release.type survives as the escaped &lt;IMG entity in the type-badge content (8th round)',
+        badgeContent.indexOf('&lt;IMG') !== -1, true);
+
+    const hostileEnvRelease = {
+        id: 'REL-ENV-1', name: 'Env Test Release', status: 'active',
+        platforms: { other: { environment: HOSTILE_PLATFORM_ENV, version: '1.0.0' } },
+    };
+    const envHtml = renderReleaseCard(hostileEnvRelease);
+    check('LIVE renderReleaseCard(): hostile platform environment release was rendered (non-empty), 8th round', envHtml.length > 0, true);
+    const envSpanOpenIdx = envHtml.indexOf('<span class="platform-env');
+    check('LIVE renderReleaseCard(): platform-env span located, 8th round', envSpanOpenIdx !== -1, true);
+    const envSpanContentStart = envHtml.indexOf('>', envSpanOpenIdx) + 1;
+    const envSpanContentEnd = envHtml.indexOf('</span>', envSpanContentStart);
+    const envSpanTag = envHtml.slice(envSpanOpenIdx, envSpanContentStart);
+    const envSpanContent = envHtml.slice(envSpanContentStart, envSpanContentEnd);
+    check('LIVE renderReleaseCard(): platform environment does not break out of the platform-env class attribute (8th round)',
+        envSpanTag.indexOf('<img') === -1, true);
+    check('LIVE renderReleaseCard(): platform environment does not introduce a raw element in the platform-env content (8th round)',
+        envSpanContent.indexOf('<img') === -1, true);
+    check('LIVE renderReleaseCard(): platform environment survives as the escaped &lt;img entity in the platform-env content (8th round)',
+        envSpanContent.indexOf('&lt;img') !== -1, true);
+
+    // Legitimate-input parity against the REAL function.
+    const normalRelease = {
+        id: 'REL-NORMAL-1', name: 'Normal Release', status: 'active', type: 'hotfix',
+        platforms: { other: { environment: 'PROD', version: '1.0.0' } },
+    };
+    const normalHtml = renderReleaseCard(normalRelease);
+    check('LIVE renderReleaseCard(): a normal release type ("hotfix") still renders its type-hotfix class (legitimate-input parity, 8th round)',
+        normalHtml.indexOf('type-hotfix') !== -1, true);
+    check('LIVE renderReleaseCard(): a normal release type still renders "HOTFIX" in the badge content (legitimate-input parity, 8th round)',
+        normalHtml.indexOf('>HOTFIX<') !== -1, true);
+    check('LIVE renderReleaseCard(): a normal platform environment ("PROD") still renders its env-prod class (legitimate-input parity, 8th round)',
+        normalHtml.indexOf('env-prod') !== -1, true);
+    const normalEnvSpanOpenIdx = normalHtml.indexOf('<span class="platform-env');
+    const normalEnvSpanContentStart = normalHtml.indexOf('>', normalEnvSpanOpenIdx) + 1;
+    const normalEnvSpanContentEnd = normalHtml.indexOf('</span>', normalEnvSpanContentStart);
+    check('LIVE renderReleaseCard(): a normal platform environment still renders "PROD" in element content (legitimate-input parity, 8th round)',
+        normalHtml.slice(normalEnvSpanContentStart, normalEnvSpanContentEnd), 'PROD');
+}
+runXaca1005001Round8ReleaseTypeAndEnvironmentTest();
+
 function finalize() {
     if (failures > 0) {
         console.error(`\n${failures} test(s) failed.`);
