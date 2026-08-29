@@ -4449,33 +4449,95 @@ kb-sweep() {
     # changed. Short-circuit on a bare `git status --porcelain` probe (no
     # directory-tree walk, no per-file content parsing) before paying
     # kb-knowledge-validate --changed's own ~1.3-2.5s.
-    local kv_global_root kv_local_root kv_has_candidate=false
+    # XACA-0991-003 (blocking-tier hardening — [Test]/[Review] findings from
+    # code review): this probe decides ONE thing — should kb-sweep bother
+    # invoking kb-knowledge-validate --changed at all — and, on that
+    # question, is deliberately biased to invoke whenever it cannot cheaply
+    # PROVE "nothing to check". It does NOT itself decide what counts as an
+    # error; that logic lives once, inside kb-knowledge-validate --changed
+    # (global root absent/unreadable = FAIL; local_root/project_path
+    # absent = silently fine, optional; present-but-unreadable = FAIL;
+    # inside a gitignored tree = fail-open, validate everything). Pushing
+    # all of that into a SINGLE place means this probe can stay simple and
+    # still never accidentally skip an error condition — any root in an
+    # ambiguous or error-shaped state just falls through to "invoke", and
+    # the real function's own (already-tested) logic takes it from there.
+    #
+    # THREE roots feed this probe now, not two: the ORIGINAL version only
+    # ever checked global/local and never resolved project_path at all — a
+    # kanban-inside-repo team's project-tier root (typically gitignored,
+    # e.g. `kanban/` here) was therefore UNREACHABLE from kb-sweep no matter
+    # what it contained. Confirmed live: `git check-ignore -v
+    # kanban/knowledge/project` in this repo matches `.gitignore:197:/kanban/`,
+    # and `git status --porcelain --untracked-files=all -- .` from inside it
+    # returns zero lines regardless of real content.
+    local kv_global_root kv_local_root kv_project_path kv_should_invoke=false
     kv_global_root=$(_kb_knowledge_global_root 2>/dev/null)
     kv_local_root=$(_kb_knowledge_local_root 2>/dev/null)
-    if [[ -d "$kv_global_root" ]]; then
-        if git -C "$kv_global_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            if git -C "$kv_global_root" status --porcelain --untracked-files=all -- . 2>/dev/null | grep -q '\.md$'; then
-                kv_has_candidate=true
+
+    # GLOBAL: required. Absent or unreadable is an ERROR condition that
+    # kb-knowledge-validate --changed itself must surface — invoke so it can.
+    case "$(_kb_val_root_state "$kv_global_root")" in
+        absent|unreadable) kv_should_invoke=true ;;
+        *)
+            if git -C "$kv_global_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                if git -C "$kv_global_root" status --porcelain --untracked-files=all -- . 2>/dev/null | grep -q '\.md$'; then
+                    kv_should_invoke=true
+                fi
+            else
+                # Can't cheaply diff a non-git root — same fail-OPEN
+                # reasoning kb-knowledge-validate --changed itself applies.
+                kv_should_invoke=true
             fi
-        else
-            # Can't cheaply diff a non-git root (e.g. ~/knowledge-local,
-            # XACA-0754) — same fail-OPEN reasoning kb-knowledge-validate
-            # --changed itself applies: assume there's something to check
-            # rather than silently skipping a root we can't probe.
-            kv_has_candidate=true
-        fi
+            ;;
+    esac
+
+    # LOCAL: optional (XACA-0754 — legitimately absent on a host that has
+    # never held PII-team knowledge; that stays silent, unchanged). Present
+    # but unreadable is still an error the real function must surface.
+    if ! $kv_should_invoke; then
+        case "$(_kb_val_root_state "$kv_local_root")" in
+            absent) : ;;  # optional root, legitimately absent — no-op
+            unreadable) kv_should_invoke=true ;;
+            *)
+                if git -C "$kv_local_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                    if git -C "$kv_local_root" status --porcelain --untracked-files=all -- . 2>/dev/null | grep -q '\.md$'; then
+                        kv_should_invoke=true
+                    fi
+                else
+                    kv_should_invoke=true
+                fi
+                ;;
+        esac
     fi
-    if ! $kv_has_candidate && [[ -d "$kv_local_root" ]]; then
-        if git -C "$kv_local_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            if git -C "$kv_local_root" status --porcelain --untracked-files=all -- . 2>/dev/null | grep -q '\.md$'; then
-                kv_has_candidate=true
-            fi
-        else
-            kv_has_candidate=true
+
+    # PROJECT: optional (many repos have no project-tier knowledge yet), and
+    # may be gitignored (kanban-inside-repo teams — the [Review]-finding
+    # case this block exists to close). Ignored is treated the same as
+    # non-git: can't cheaply confirm "clean", so invoke and let the real
+    # function's fail-open path validate it in full.
+    if ! $kv_should_invoke; then
+        kv_project_path=$(_kb_knowledge_project_path 2>/dev/null)
+        if [[ -n "$kv_project_path" ]]; then
+            case "$(_kb_val_root_state "$kv_project_path")" in
+                absent) : ;;
+                unreadable) kv_should_invoke=true ;;
+                *)
+                    if git -C "$kv_project_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                        if _kb_val_root_is_ignored "$kv_project_path"; then
+                            kv_should_invoke=true
+                        elif git -C "$kv_project_path" status --porcelain --untracked-files=all -- . 2>/dev/null | grep -q '\.md$'; then
+                            kv_should_invoke=true
+                        fi
+                    else
+                        kv_should_invoke=true
+                    fi
+                    ;;
+            esac
         fi
     fi
 
-    if $kv_has_candidate; then
+    if $kv_should_invoke; then
         if ! command -v kb-knowledge-validate >/dev/null 2>&1; then
             # FAIL SAFE: the gate function isn't loaded in this shell. This
             # must never silently read as "nothing to check" — it's an
@@ -9966,6 +10028,35 @@ _kb_knowledge_local_root() {
     echo "${KB_KNOWLEDGE_LOCAL_ROOT:-${HOME}/knowledge-local}"
 }
 
+# XACA-0991-003 (blocking-tier hardening, ported from canonical
+# kanban-helpers.sh — not region-parity-gated, hand-mirrored so
+# kb-knowledge-validate and kb-sweep's ported code below can call them):
+# shared root-state helpers. THREE-STATE PRINCIPLE: a knowledge root is
+# either (a) usable, (b) legitimately ABSENT (optional roots only — silent
+# skip), or (c) present but UNREADABLE (a real misconfiguration — must
+# surface as a validation FAILURE, never a silent pass).
+_kb_val_root_state() {
+    local d="${1-}"
+    if [[ -z "$d" ]] || [[ ! -e "$d" ]]; then
+        echo "absent"
+    elif [[ ! -r "$d" ]] || [[ ! -x "$d" ]]; then
+        echo "unreadable"
+    else
+        echo "ok"
+    fi
+}
+
+# _kb_val_root_is_ignored <dir> — return 0 if <dir> resolves inside a git
+# work tree AND that work tree's own ignore rules exclude <dir> itself (a
+# kanban-inside-repo team's project-tier root typically lives under a
+# gitignored kanban/ directory). Caller must have already confirmed the
+# directory exists and is readable.
+_kb_val_root_is_ignored() {
+    local d="${1-}"
+    git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+    git -C "$d" check-ignore -q -- . 2>/dev/null
+}
+
 # Internal: the git-tracked, hardcoded floor of local-only (PII) teams.
 # THIS is the authoritative safety control, not team-paths.json (see
 # _kb_is_local_only_team below) — a regenerated or missing team-paths.json
@@ -15113,7 +15204,31 @@ kb-knowledge-validate() {
     # the diff to files under $root and below.
     _kb_val_collect_changed_root() {
         local root="${1%/}"
-        [[ -d "$root" ]] || return 0
+        local root_state
+        root_state=$(_kb_val_root_state "$root")
+        case "$root_state" in
+            absent)
+                # XACA-0754/XACA-0532: local_root and project_path are
+                # OPTIONAL — a host that has never held PII-team knowledge,
+                # or a repo with no project-tier entries yet, legitimately
+                # has no such directory. Silent skip preserves the existing,
+                # already-tested behavior. (global_root's absence is a
+                # DIFFERENT, non-optional case, hard-checked by the caller
+                # before this function is ever invoked for it — see the
+                # --changed flag handling above.)
+                return 0
+                ;;
+            unreadable)
+                # XACA-0991-003 (blocking-tier hardening): the root EXISTS
+                # but this user cannot read it (permission denied, etc.).
+                # This must NOT collapse into "nothing found" — a directory
+                # walk into an unreadable path silently globs to nothing,
+                # which previously read as a clean pass despite genuinely
+                # not having examined anything. Report it as a real FAILURE.
+                _kb_val_error "Cannot read ${root} (permission denied) — --changed cannot verify whether it contains changes; reported as a FAILURE, not silently skipped or treated as clean"
+                return 0
+                ;;
+        esac
         if ! git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
             # XACA-0754: ~/knowledge-local is deliberately never a git repo
             # (the sync daemon must never be able to see it). We cannot
@@ -15124,6 +15239,27 @@ kb-knowledge-validate() {
             # failing open here doesn't reproduce the runtime problem
             # --changed exists to fix.
             echo "  [--changed] ${root} is not a git repository — cannot compute a diff, so every entry file under it is in scope this run (failing OPEN, not skipped)."
+            _kb_val_scope_all_roots[$root]=1
+            return 0
+        fi
+        if _kb_val_root_is_ignored "$root"; then
+            # XACA-0991-003 [Review] finding: a kanban-inside-repo team's
+            # project-tier root typically lives under a gitignored kanban/
+            # directory (verified live: `git check-ignore -v
+            # kanban/knowledge/project` in this repo matches
+            # `.gitignore:197:/kanban/`), and plain `git status --porcelain
+            # --untracked-files=all -- .` from inside an ignored directory
+            # returns ZERO lines regardless of real content — verified live,
+            # not assumed. A validator that never reaches a whole documented
+            # tier is the SAME defect class this ticket exists to close, one
+            # level up. Same treatment as the non-git branch above: fail
+            # OPEN, every entry file under this root is in scope this run.
+            # Deliberately NOT `--ignored` on the general collection path —
+            # that would sweep every ignored file in every repo (a
+            # different, and likely much slower, kind of wrong); this only
+            # fires for a root ALREADY identified as belonging to the
+            # knowledge tree.
+            echo "  [--changed] ${root} is inside a gitignored tree — cannot compute a diff, so every entry file under it is in scope this run (failing OPEN, not skipped)."
             _kb_val_scope_all_roots[$root]=1
             return 0
         fi
@@ -15211,14 +15347,33 @@ kb-knowledge-validate() {
         # --changed is a misconfiguration, not "nothing changed", so this
         # reports a FAILURE instead of silently reproducing the same
         # vacuous-green shape whole-tree mode is allowed to produce.
-        if [[ ! -d "$global_root" ]]; then
+        # XACA-0991-003 (blocking-tier hardening, [Test] finding): the
+        # global root is the one root this whole system always expects to
+        # exist. Both ABSENT and UNREADABLE must hard-fail here — an
+        # unreadable-but-present directory previously fell through to the
+        # normal collection path, which globs to "nothing found" on a
+        # permission-denied directory and silently reports a clean pass
+        # despite never having actually examined anything. That is the same
+        # could-not-validate-collapsing-into-validated-clean shape this
+        # entire ticket exists to close, just one layer up from where it
+        # was first measured (a nonexistent root: 0 passed | 0 warnings | 0
+        # errors, exit 0). "Could not validate" must always surface as
+        # FAIL, never as a silent PASS.
+        local global_root_state
+        global_root_state=$(_kb_val_root_state "$global_root")
+        if [[ "$global_root_state" != "ok" ]]; then
             echo ""
             echo "═══════════════════════════════════════════════════════════════════════════"
             echo "  KNOWLEDGE VALIDATE --changed"
-            echo "  [FAIL] global root does not exist: ${global_root}"
-            echo "  --changed cannot compute a diff against a missing root. Reported as a"
-            echo "  FAILURE, not a vacuous pass — see kb-knowledge-validate --help."
-            echo "  VERDICT: FAIL — exit code 1 (global root missing under --changed)"
+            if [[ "$global_root_state" == "unreadable" ]]; then
+                echo "  [FAIL] global root exists but is not readable: ${global_root}"
+                echo "  --changed cannot verify whether an unreadable root contains changes."
+            else
+                echo "  [FAIL] global root does not exist: ${global_root}"
+                echo "  --changed cannot compute a diff against a missing root."
+            fi
+            echo "  Reported as a FAILURE, not a vacuous pass — see kb-knowledge-validate --help."
+            echo "  VERDICT: FAIL — exit code 1 (global root ${global_root_state} under --changed)"
             echo "═══════════════════════════════════════════════════════════════════════════"
             echo ""
             return 1
@@ -15382,7 +15537,25 @@ kb-knowledge-validate() {
                 # _kb_val_collect_changed_root. $ef itself (used below for the
                 # real validation I/O) is left untouched; only the lookup key
                 # is normalized.
-                if [[ -n "${_kb_val_scope_files[${ef:A}]-}" ]] || [[ -n "${_kb_val_scope_all_roots[$cur_root]-}" ]]; then
+                #
+                # XACA-0991-003 [Review] finding: check BOTH $cur_root and
+                # ${val_dir%/} against _kb_val_scope_all_roots, not just
+                # $cur_root. The bare project_path fallback below (this same
+                # loop, a few dozen lines down) deliberately tags that val_dir
+                # with val_roots+=("$global_root") — a PRE-EXISTING choice,
+                # unrelated to and unchanged by this ticket — so cur_root for
+                # that val_dir is $global_root, never $project_path itself.
+                # _kb_val_collect_changed_root registers the fail-open root
+                # under its OWN path ($project_path), so a cur_root-only
+                # lookup silently misses it: the root gets correctly marked
+                # fail-open, but none of its files ever match the scope
+                # check, reproducing "0 examined" for the exact tier this fix
+                # is about. ${val_dir%/} always equals the literal directory
+                # just walked, independent of how it's tagged, so it is
+                # falls back correctly for any val_dir/root tagging mismatch.
+                if [[ -n "${_kb_val_scope_files[${ef:A}]-}" ]] \
+                    || [[ -n "${_kb_val_scope_all_roots[$cur_root]-}" ]] \
+                    || [[ -n "${_kb_val_scope_all_roots[${val_dir%/}]-}" ]]; then
                     entry_files_scoped+=("$ef")
                 fi
             done
