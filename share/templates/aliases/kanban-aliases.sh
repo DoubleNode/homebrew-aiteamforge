@@ -5711,6 +5711,22 @@ FRONTMATTER
 
     echo "Created: ${new_file}"
 
+    # XACA-0991-003: validate-on-write (ported from canonical kanban-helpers.sh
+    # — not region-parity-gated, hand-mirrored for product consistency).
+    # `local out; out=$(cmd)` is split across two statements deliberately —
+    # `local out=$(cmd)` would fold local's own (always-0) exit status over
+    # cmd's, masking a real failure.
+    local _kb_add_validate_output
+    _kb_add_validate_output=$(kb-knowledge-validate --quiet --file "$new_file" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        echo "" >&2
+        echo "Error: the entry just written failed validation — this indicates a bug in" >&2
+        echo "kb-knowledge-add itself (the write path above), not in your input. Left on" >&2
+        echo "disk for inspection: ${new_file}" >&2
+        echo "${_kb_add_validate_output}" >&2
+        return 1
+    fi
+
     # XACA-0263: scaffold INDEX.md immediately so a fresh tier dir is queryable
     # without a follow-up `kb-knowledge-reindex` call. Silent on success;
     # failure here doesn't block entry creation (file is already on disk).
@@ -7088,17 +7104,42 @@ _kb_knowledge_persona_dup_pairs() {
 #   - Duplicate persona directories under agents/ (XACA-0842) — FAILS, not warns
 kb-knowledge-validate() {
     setopt LOCAL_OPTIONS NO_NOMATCH
-    local flag_quiet=false flag_fix=false
+    local flag_quiet=false flag_fix=false flag_changed=false
+    local flag_file=""
 
     while [[ $# -gt 0 ]]; do
         case "${1-}" in
             --quiet|-q) flag_quiet=true; shift ;;
             --fix)      flag_fix=true;   shift ;;
+            --changed)  flag_changed=true; shift ;;
+            --file)
+                flag_file="${2-}"
+                if [[ -z "$flag_file" ]]; then
+                    echo "Error: --file requires a path argument" >&2
+                    return 1
+                fi
+                shift 2
+                ;;
             --help|-h)
-                echo "Usage: kb-knowledge-validate [--quiet] [--fix]"
+                echo "Usage: kb-knowledge-validate [--quiet] [--fix] [--changed] [--file <path>]"
                 echo ""
                 echo "  --quiet    Show only failures"
                 echo "  --fix      Auto-fix safe issues (INDEX regeneration, casing warnings)"
+                echo "  --changed  XACA-0991-003: validate only entry files that are modified OR"
+                echo "             untracked (git status --porcelain --untracked-files=all across"
+                echo "             every root), instead of the whole tree. The three whole-tree"
+                echo "             structural checks (duplicate ID-slot, INDEX orphan, duplicate"
+                echo "             persona-dir) still run in full every time — they only read"
+                echo "             directory/filename listings and are cheap regardless of scope."
+                echo "             A root that is not a git repo (e.g. ~/knowledge-local, XACA-0754)"
+                echo "             can't be diffed, so it fails OPEN: every entry under it is"
+                echo "             validated every run rather than silently skipped. A missing"
+                echo "             global root is treated as a hard FAILURE under --changed (not"
+                echo "             the whole-tree mode's silent 0/0/0 pass) — see code comment."
+                echo "  --file <path>"
+                echo "             Validate exactly one entry file (used by kb-knowledge-add's"
+                echo "             validate-on-write). Same content-loop scoping as --changed,"
+                echo "             restricted to a single path instead of a git diff."
                 return 0
                 ;;
             *) echo "Unknown flag: ${1-}" >&2; shift ;;
@@ -7123,15 +7164,162 @@ kb-knowledge-validate() {
     local dup_slots dup_slot dup_files root_label
     local has_id has_tier has_date has_tags has_agent has_team file_id file_tier xref_line xref resolved_xref resolver_rc idx_id idx_file
     local xref_frontmatter
-    # XACA-0991-004: per-file error flag, reset each entry_files iteration —
-    # lets the loop skip _kb_val_pass for a file that raised an error this
-    # iteration instead of always reporting every examined file as passing.
+    # XACA-0991-004: per-file error flag. Reset at the top of each entry_files
+    # iteration; _kb_val_error sets it via zsh dynamic scoping (same mechanism
+    # error_count already relies on). Lets the end of the loop skip _kb_val_pass
+    # for a file that raised an error THIS iteration, instead of unconditionally
+    # reporting every examined file as passed regardless of what it just failed.
     local file_had_error
     local -a entry_files index_ids
+
+    # XACA-0991-003: --changed / --file scoping. _kb_val_scope_files is the set
+    # of absolute paths in scope (git-diff-derived, or the single --file path);
+    # _kb_val_scope_all_roots holds roots we could NOT diff (non-git — fail
+    # OPEN, every file under that root is in scope). Both stay empty, and
+    # _kb_val_scope_active stays false, in plain whole-tree mode — nothing
+    # below this block changes behavior when neither flag is passed.
+    local -A _kb_val_scope_files _kb_val_scope_all_roots
+    local _kb_val_scope_active=false
+    local _kb_val_scope_candidate_count=0
+    local _kb_val_examined_count=0
+    local -a entry_files_scoped
 
     _kb_val_error()   { echo "  [FAIL] $*" >&2; error_count=$((error_count + 1)); file_had_error=1; }
     _kb_val_warn()    { echo "  [WARN] $*" >&2; warning_count=$((warning_count + 1)); }
     _kb_val_pass()    { $flag_quiet || echo "  [OK]   $*"; pass_count=$((pass_count + 1)); }
+
+    # Internal: collect one root's changed/untracked *.md entry files into
+    # _kb_val_scope_files. Paths from `git status --porcelain` are relative to
+    # the REPO TOP, not to the -C directory or the pathspec — verified live
+    # (git -C ~/knowledge/agents status --porcelain -- . still prints
+    # "agents/bashir/INDEX.md", not "bashir/INDEX.md") — so this resolves the
+    # repo top separately and joins against THAT, never against $root itself.
+    # That matters because $root is sometimes a SUBTREE of a larger repo (the
+    # project-tier path can be a subdirectory of e.g. the dev-team checkout),
+    # not the repo's own top level. The `-- .` pathspec still correctly scopes
+    # the diff to files under $root and below.
+    _kb_val_collect_changed_root() {
+        local root="${1%/}"
+        [[ -d "$root" ]] || return 0
+        if ! git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            # XACA-0754: ~/knowledge-local is deliberately never a git repo
+            # (the sync daemon must never be able to see it). We cannot
+            # compute a diff against it, so --changed degrades to "everything
+            # under this root is in scope" — fail OPEN (validate more, never
+            # silently validate nothing because a diff couldn't be computed).
+            # This root is typically small (personal/PII team data), so
+            # failing open here doesn't reproduce the runtime problem
+            # --changed exists to fix.
+            echo "  [--changed] ${root} is not a git repository — cannot compute a diff, so every entry file under it is in scope this run (failing OPEN, not skipped)."
+            _kb_val_scope_all_roots[$root]=1
+            return 0
+        fi
+        local repo_top
+        repo_top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)
+        [[ -n "$repo_top" ]] || return 0
+        # XACA-0991-003: command substitution + here-string, NOT `< <(...)`
+        # process substitution. Reproduced live: `while read ... done < <(git
+        # status ...)` inside a function that is itself called from ANOTHER
+        # function (exactly this call shape — kb-knowledge-validate calls this
+        # nested function) silently yielded ZERO lines under zsh, consistently
+        # across repeated runs, even though the identical git command run
+        # directly (or from a single, non-nested function) produced the
+        # expected output every time. Root-caused to nested-function process
+        # substitution timing, not to git or to the parsing logic below —
+        # switching to `git_out=$(...)` + `<<< "$git_out"` fixed it
+        # reliably in the same repro. Left as a documented trap: this
+        # function must never be changed back to `< <(...)`.
+        local git_out
+        git_out=$(git -C "$root" status --porcelain=v1 --untracked-files=all -- . 2>/dev/null)
+        # NOTE: do not name this loop var `status` — zsh reserves that as a
+        # read-only alias for `$?` and `local status` throws
+        # "read-only variable: status" at runtime (caught live while testing
+        # this function).
+        # NOTE: also do not name it `path` — zsh reserves that as the
+        # array form of $PATH; `local path` + a scalar assignment silently
+        # corrupts PATH for the rest of this shell, which then broke
+        # `basename` ("command not found: basename") a few lines below,
+        # caught live in the same test run as the `status` collision above.
+        local line gs_status gs_path
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            gs_status="${line:0:2}"
+            gs_path="${line:3}"
+            # Non -z porcelain renders a rename as "old -> new"; the NEW path
+            # is what's on disk now and what needs validating — the old path
+            # is stale. Our filenames never legitimately contain " -> ", so
+            # this split is unambiguous.
+            if [[ "$gs_path" == *" -> "* ]]; then
+                gs_path="${gs_path#* -> }"
+            fi
+            [[ "$gs_path" == *.md ]] || continue
+            [[ "$(basename "$gs_path")" == "INDEX.md" ]] && continue
+            local abs="${repo_top}/${gs_path}"
+            [[ -f "$abs" ]] || continue   # deletes have nothing on disk to validate
+            # XACA-0991-003: key on the :A-normalized (collapsed-slash,
+            # symlink-resolved) absolute path, NOT the raw concatenation.
+            # entry_files below is built from val_dir/*.md where val_dir
+            # already carries a trailing slash (from the "${root}/agents"/*/
+            # glob), so its members literally contain "agents/foo//bar.md"
+            # — a double slash. That's a harmless no-op to the filesystem but
+            # a DIFFERENT STRING than this function's single-slash
+            # "${repo_top}/${gs_path}" join, so a raw-string set lookup
+            # silently missed every match (caught live: --changed reported
+            # candidates discovered but 0 examined for the affected
+            # directory). :A normalizes both sides to the same string.
+            abs="${abs:A}"
+            if [[ -z "${_kb_val_scope_files[$abs]-}" ]]; then
+                _kb_val_scope_files[$abs]=1
+                _kb_val_scope_candidate_count=$((_kb_val_scope_candidate_count + 1))
+            fi
+        done <<< "$git_out"
+    }
+
+    if [[ -n "$flag_file" ]]; then
+        _kb_val_scope_active=true
+        local _kb_val_file_resolved="${flag_file:A}"
+        if [[ ! -f "$_kb_val_file_resolved" ]]; then
+            echo "Error: --file target not found: ${flag_file}" >&2
+            return 1
+        fi
+        _kb_val_scope_files[$_kb_val_file_resolved]=1
+        _kb_val_scope_candidate_count=1
+    fi
+
+    if $flag_changed; then
+        _kb_val_scope_active=true
+        # XACA-0991-003: whole-tree mode pointed at a nonexistent root is
+        # DOCUMENTED, TESTED, existing behavior — 0 passed | 0 warnings | 0
+        # errors, exit 0, ~138ms (a legitimate "there is nothing here"
+        # report, e.g. a host with no local PII root). --changed is a NEW
+        # mode built specifically to gate CI/kb-sweep, so it holds itself to
+        # a stricter bar: on any correctly configured host the global root
+        # is the canonical, always-present store. Its absence under
+        # --changed is a misconfiguration, not "nothing changed", so this
+        # reports a FAILURE instead of silently reproducing the same
+        # vacuous-green shape whole-tree mode is allowed to produce.
+        if [[ ! -d "$global_root" ]]; then
+            echo ""
+            echo "═══════════════════════════════════════════════════════════════════════════"
+            echo "  KNOWLEDGE VALIDATE --changed"
+            echo "  [FAIL] global root does not exist: ${global_root}"
+            echo "  --changed cannot compute a diff against a missing root. Reported as a"
+            echo "  FAILURE, not a vacuous pass — see kb-knowledge-validate --help."
+            echo "  VERDICT: FAIL — exit code 1 (global root missing under --changed)"
+            echo "═══════════════════════════════════════════════════════════════════════════"
+            echo ""
+            return 1
+        fi
+        _kb_val_collect_changed_root "$global_root"
+        if [[ "${local_root%/}" != "${global_root%/}" ]]; then
+            _kb_val_collect_changed_root "$local_root"
+        fi
+        if [[ -d "$project_path" \
+           && "$project_path" != "${global_root}/projects/"* \
+           && "$project_path" != "${local_root}/projects/"* ]]; then
+            _kb_val_collect_changed_root "$project_path"
+        fi
+    fi
 
     # ── Collect search directories ──────────────────────────────────────────────
     # val_roots tracks, per collected dir, WHICH root it came from. Two reasons:
@@ -7246,7 +7434,6 @@ kb-knowledge-validate() {
         # pointed outside $HOME (sandboxed tests) otherwise renders as "~//tmp/…".
         dir_label="${val_dir#${HOME}/}"
         [[ "$dir_label" != "$val_dir" ]] && dir_label="~/${dir_label}"
-        $flag_quiet || echo "  Directory: [${root_label}] ${dir_label}"
 
         # Determine expected prefix for this tier
         case "$expected_tier" in
@@ -7257,7 +7444,13 @@ kb-knowledge-validate() {
             *)       exp_prefix="" ;;
         esac
 
-        # Collect entry files (not INDEX.md, not retrospectives/)
+        # Collect entry files (not INDEX.md, not retrospectives/). This stays
+        # the FULL listing regardless of --changed/--file — the duplicate
+        # ID-slot check right below is a filename-only comparison over every
+        # file in the directory (cheap, and XACA-0991-003 requires it keep
+        # running in full on every invocation). entry_files_scoped, computed
+        # after it, is the subset the CONTENT-validation loop further down
+        # actually iterates.
         entry_files=()
         index_ids=()
         for ef in "${val_dir}"/*.md; do
@@ -7265,6 +7458,34 @@ kb-knowledge-validate() {
             [[ "$(basename "$ef")" == "INDEX.md" ]] && continue
             entry_files+=("$ef")
         done
+
+        # XACA-0991-003: scope the CONTENT-validation loop only. Unscoped
+        # (plain whole-tree run): identical to entry_files, so this changes
+        # nothing when neither --changed nor --file is passed.
+        if $_kb_val_scope_active; then
+            entry_files_scoped=()
+            for ef in "${entry_files[@]}"; do
+                # :A-normalize before the lookup — see the matching comment in
+                # _kb_val_collect_changed_root. $ef itself (used below for the
+                # real validation I/O) is left untouched; only the lookup key
+                # is normalized.
+                if [[ -n "${_kb_val_scope_files[${ef:A}]-}" ]] || [[ -n "${_kb_val_scope_all_roots[$cur_root]-}" ]]; then
+                    entry_files_scoped+=("$ef")
+                fi
+            done
+        else
+            entry_files_scoped=("${entry_files[@]}")
+        fi
+        _kb_val_examined_count=$((_kb_val_examined_count + ${#entry_files_scoped[@]}))
+
+        # Directory header: always shown in whole-tree mode; in scoped mode,
+        # only for a directory that actually has something in scope this run
+        # — otherwise a --changed run against a handful of files would print
+        # a "Directory:" line for every one of the ~150+ tier directories in
+        # the tree, all but a few of them empty.
+        if ! $_kb_val_scope_active || [[ ${#entry_files_scoped[@]} -gt 0 ]]; then
+            $flag_quiet || echo "  Directory: [${root_label}] ${dir_label}"
+        fi
 
         # ── Duplicate ID-slot check (XACA-0802) ────────────────────────────────
         # kb-knowledge-add allocates the next entry ID by scanning the TARGET
@@ -7310,10 +7531,14 @@ kb-knowledge-validate() {
             done < "$index_file"
         fi
 
-        # Validate each entry file
-        for ef in "${entry_files[@]}"; do
+        # Validate each entry file. XACA-0991-003: iterates entry_files_scoped
+        # (== entry_files in whole-tree mode; the --changed/--file subset
+        # otherwise) — see the computation above.
+        for ef in "${entry_files_scoped[@]}"; do
             fname=$(basename "$ef" .md)
-            # XACA-0991-004: reset per file — see declaration comment above.
+            # XACA-0991-004: reset per-file. See declaration comment above —
+            # without this reset every file after the first FAIL would inherit
+            # the previous file's error state.
             file_had_error=0
 
             # Casing check
@@ -7392,8 +7617,16 @@ kb-knowledge-validate() {
                 done < <(echo "$xref_line" | grep -oE '(agents|teams|subjects|project):[a-z0-9/:_-]+')
             done <<< "$xref_frontmatter"
 
-            # XACA-0991-004: only report/count this file as passed if it did
-            # not raise an error above. WARN-only still counts as passed.
+            # XACA-0991-004 (Defect A): a file that raised one or more errors
+            # this iteration must NOT also be reported/counted as passing — the
+            # prior unconditional call printed "[OK] <file>" directly beneath
+            # that same file's own [FAIL] lines, which two agents (three,
+            # counting this ticket's own re-verification) independently
+            # misread as the file having passed. A file with WARN-only (no
+            # FAIL) still counts as passed: a warning is non-blocking by
+            # definition (casing, missing prefix, stale INDEX entry) — the
+            # thing that was misleading was FAIL immediately followed by OK
+            # for the identical entity, not WARN followed by OK.
             if [[ "$file_had_error" -eq 0 ]]; then
                 _kb_val_pass "$(basename "$ef")"
             fi
@@ -7469,11 +7702,27 @@ kb-knowledge-validate() {
     done
 
     # ── Summary ─────────────────────────────────────────────────────────────────
-    # XACA-0991-004: an unambiguous verdict line — a piped `| tail` loses the
-    # real exit code (it becomes tail's), and a backgrounding harness's own
-    # wrapper line is not the command's status either. State PASS/FAIL and the
-    # exit code in words so this survives both.
+    # XACA-0991-004 (Defects B+C): the "N passed | N warnings | N errors" line
+    # is the same SHAPE whether the run passed or failed, and both known misread
+    # paths (piped through `| tail`, where $? becomes tail's; backgrounded, where
+    # the harness appends its own "[exited with code N]" wrapper line) strip away
+    # the caller's ability to check the real exit code. Colour would not survive
+    # either path either (stripped in pipes/CI logs). The one thing this function
+    # fully controls is its OWN last visible output, so state the verdict and the
+    # exit code IN WORDS, unmissable in a `tail -8` of a failing run.
     echo "═══════════════════════════════════════════════════════════════════════════"
+    # XACA-0991-003: anti-vacuous-green assertion for --changed/--file. Always
+    # printed (not gated by --quiet) so "0 examined" is never silently
+    # indistinguishable from "the scope computation was fooled" — it states
+    # BOTH the candidate count git-status actually discovered and how many of
+    # those matched the known agents/teams/subjects/projects layout and were
+    # examined. 0/0 with a clean git status is a legitimate "nothing changed"
+    # report; a nonzero candidate count with 0 examined means git found
+    # changes outside the validated layout (e.g. SPEC.md) — also legitimate,
+    # and now visible rather than silently collapsed into the same "0".
+    if $_kb_val_scope_active; then
+        echo "  SCOPE: ${_kb_val_scope_candidate_count} candidate file(s) discovered (git status / --file)  |  ${_kb_val_examined_count} examined (matched known tier layout)"
+    fi
     echo "  RESULTS: ${pass_count} passed  |  ${warning_count} warnings  |  ${error_count} errors"
     if [[ "$error_count" -eq 0 ]]; then
         echo "  VERDICT: PASS — exit code 0"
