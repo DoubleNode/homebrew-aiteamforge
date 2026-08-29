@@ -8102,7 +8102,38 @@ function renderConflictItem(conflict, index) {
                     </div>
                     <div class="version-field">
                         <label>Due Date:</label>
-                        <div class="field-value">${formatDate(localVersion.dueDate) || 'None'}</div>
+                        <!-- XACA-1005-001 (6th round, PR #795 gate): formatDate()'s
+                             CATCH-AND-RETURN-RAW pattern (its parseLocalDate() call
+                             throws for ANY non-string dueDate -- .split('-') is
+                             string-only -- and the catch returns the offending
+                             value VERBATIM, unstringified) makes this an ELEMENT-
+                             CONTENT injection sink, not merely a "malformed date
+                             string" edge case: a dueDate of ["<img src=x
+                             onerror=alert(1)>"] (array) or an object with a
+                             hostile toString() reaches the template literal's
+                             implicit ToString and renders as a live element.
+                             XACA-1020 established handle_update_item applies
+                             client JSON fields with no type validation, so a
+                             non-string dueDate is directly reachable -- this is
+                             NOT narrowed to malformed date STRINGS the way
+                             "Invalid Date" is (a string always launders safely;
+                             .split() never throws on one). Fixed:
+                             escapeHtml(String(formatDate(x) ?? 'None')) --
+                             String() first so a raw array/object is stringified
+                             (invoking its toString(), which is exactly the value
+                             that must be escaped) BEFORE escapeHtml() runs, and
+                             ?? (not the original ||) preserves the exact
+                             legitimate-input behavior: formatDate() only ever
+                             returns null for a genuinely absent/falsy dueDate
+                             (never 0/false/NaN/''), so ?? and || are equivalent
+                             for every real return value -- verified against the
+                             real function bodies, not assumed, both here and in
+                             the regression suite below. Do NOT "fix" formatDate()
+                             itself: its catch behavior is shared by every caller,
+                             and formatDate has an exact ONE call site outside
+                             this function (verified by grep) -- see the CHANGELOG
+                             entry for the full site-by-site accounting. -->
+                        <div class="field-value">${escapeHtml(String(formatDate(localVersion.dueDate) ?? 'None'))}</div>
                     </div>
                     <div class="version-field">
                         <label>Modified:</label>
@@ -8117,7 +8148,7 @@ function renderConflictItem(conflict, index) {
                     </div>
                     <div class="version-field">
                         <label>Due Date:</label>
-                        <div class="field-value">${formatDate(externalVersion.dueDate) || 'None'}</div>
+                        <div class="field-value">${escapeHtml(String(formatDate(externalVersion.dueDate) ?? 'None'))}</div>
                     </div>
                     <div class="version-field">
                         <label>Modified:</label>
@@ -8195,24 +8226,85 @@ function showMergeDialog(itemId, conflictIndex) {
     const externalTitle = conflictItem.querySelector('.external-version .field-value:nth-of-type(1)').textContent;
     const externalDueDate = conflictItem.querySelector('.external-version .field-value:nth-of-type(2)').textContent;
 
+    // XACA-1005-001 (folded-in scope expansion): localTitle/externalTitle are
+    // read back via .textContent from renderConflictItem()'s already-rendered
+    // markup (~line 8101/8116 above), which the browser DECODES on the way
+    // out — so by the time these locals exist they are plain text again, not
+    // pre-escaped for whatever sink they land in below. `conflict.localVersion`
+    // is this client's own kanban item data; `conflict.externalVersion` comes
+    // from GET /api/calendar/conflicts, i.e. the external calendar sync feed
+    // — outside this app's trust boundary. Both get identical treatment below
+    // because the SINK, not the source's trust level, determines the escaper,
+    // and either field reaching either sink unescaped is exploitable.
+    //
+    // SIX sinks below, two escapers, verified against the actual escaper
+    // bodies (escapeAttr ~line 11504, jsAttrEscape ~line 11558). (Corrected
+    // 4th-round PR-gate finding, XACA-1005-021: this comment previously said
+    // "three sinks", counting only the Title row -- it undercounted the
+    // identically-shaped Due Date row below, which has the SAME three
+    // interpolation positions for localDueDate/externalDueDate.)
+    //   - `value="${...}"` (the two <input> elements below, Title and Due
+    //     Date) is a plain QUOTED ATTRIBUTE -> escapeAttr. jsAttrEscape would
+    //     be wrong there: it additionally escapes ' as \', so an apostrophe
+    //     in a real title would render as a literal backslash-quote in the
+    //     input's value instead of the apostrophe the user typed.
+    //   - All four suggestion buttons' onclick (two Title, two Due Date)
+    //     assign into a JS STRING LITERAL embedded in an HTML attribute
+    //     (`...value = '${...}'`) -> jsAttrEscape, which escapes \ and ' in
+    //     addition to the HTML metacharacters escapeHtml/escapeAttr cover.
+    //     A title of `'); alert(1); //` closes the string literal and
+    //     executes arbitrary JS with escapeHtml (which leaves ' untouched)
+    //     — the same class of bug as the epic-selector fix above, and worse
+    //     than a plain attribute breakout.
+    //
+    // localDueDate/externalDueDate REACHABILITY (XACA-1005-021): normally
+    // laundered safe by formatDate() (lcars.js ~11853), whose only two
+    // outcomes for a STRING dueDate are a formatted date ("Jan 1, 2026") or
+    // the fixed literal "Invalid Date" -- neither is attacker-shaped.
+    // formatDate() has a narrower path that is NOT laundered: its try/catch
+    // returns the RAW, UNPARSED dateString verbatim if parseLocalDate()
+    // throws, which only happens for a NON-STRING truthy value (a string's
+    // .split('-') never throws, whatever its content). XACA-1020 established
+    // handle_update_item applies client fields with no type validation at
+    // all, so a dueDate of a non-string type is reachable in principle. That
+    // said, THIS FUNCTION reads localDueDate/externalDueDate via .textContent
+    // from renderConflictItem()'s already-rendered DOM -- the same mechanism
+    // already established safe for localTitle/externalTitle above, since any
+    // real element a raw tag produced there would have already become part
+    // of the DOM tree, and .textContent on that subtree returns only text,
+    // not tag markup. So these two sinks in showMergeDialog() are fixed here
+    // for the same defense-in-depth reason as SITES 3/4/5 (the sink, not the
+    // source's trust level, decides the escaper) -- not because a live
+    // exploit was demonstrated reaching THIS function specifically.
+    //
+    // A DIFFERENT, EARLIER sink was found while tracing this: renderConflictItem()
+    // (~8105/8120) interpolates `${formatDate(localVersion.dueDate) || 'None'}`
+    // as ELEMENT CONTENT with NO escaper at all (unlike the adjacent Title
+    // field on the same lines, which uses escapeHtml()) -- if formatDate()'s
+    // catch-fallback ever returns attacker-shaped text (per the non-string
+    // dueDate path above), THAT is where it would actually execute, before
+    // showMergeDialog() is ever invoked. NOT fixed here: it is a different
+    // function than the one named in this round's findings, and its
+    // reachability has the SAME XACA-1020 mass-assignment gap as its
+    // precondition -- reported to the coordinator, not touched.
     const mergeDialog = document.createElement('div');
     mergeDialog.className = 'merge-dialog';
     mergeDialog.innerHTML = `
         <h3>Manual Merge: ${itemId}</h3>
         <div class="merge-field">
             <label>Title:</label>
-            <input type="text" id="merge-title" value="${escapeHtml(localTitle)}" />
+            <input type="text" id="merge-title" value="${escapeAttr(localTitle)}" />
             <div class="merge-suggestions">
-                <button class="suggestion-btn" onclick="document.getElementById('merge-title').value = '${escapeHtml(localTitle)}'">Local</button>
-                <button class="suggestion-btn" onclick="document.getElementById('merge-title').value = '${escapeHtml(externalTitle)}'">Calendar</button>
+                <button class="suggestion-btn" onclick="document.getElementById('merge-title').value = '${jsAttrEscape(localTitle)}'">Local</button>
+                <button class="suggestion-btn" onclick="document.getElementById('merge-title').value = '${jsAttrEscape(externalTitle)}'">Calendar</button>
             </div>
         </div>
         <div class="merge-field">
             <label>Due Date:</label>
-            <input type="date" id="merge-duedate" value="${localDueDate !== 'None' ? localDueDate : ''}" />
+            <input type="date" id="merge-duedate" value="${escapeAttr(localDueDate !== 'None' ? localDueDate : '')}" />
             <div class="merge-suggestions">
-                <button class="suggestion-btn" onclick="document.getElementById('merge-duedate').value = '${localDueDate !== 'None' ? localDueDate : ''}'">Local</button>
-                <button class="suggestion-btn" onclick="document.getElementById('merge-duedate').value = '${externalDueDate !== 'None' ? externalDueDate : ''}'">Calendar</button>
+                <button class="suggestion-btn" onclick="document.getElementById('merge-duedate').value = '${jsAttrEscape(localDueDate !== 'None' ? localDueDate : '')}'">Local</button>
+                <button class="suggestion-btn" onclick="document.getElementById('merge-duedate').value = '${jsAttrEscape(externalDueDate !== 'None' ? externalDueDate : '')}'">Calendar</button>
             </div>
         </div>
         <div class="merge-actions">
@@ -8653,9 +8745,49 @@ function renderDayItems(date) {
         if (item.isExternal) {
             // External events - read-only with sync icon (XACA-0039-010)
             const sourceLabel = item.source ? ` (${item.source})` : '';
-            html += `<div class="calendar-item external-event" title="${item.title}${sourceLabel}">
-                <span class="event-sync-badge" title="Synced from ${item.source || 'external calendar'}">↻</span>
-                ${truncateTitle(item.title, 25)}
+            // XACA-1005-001 (3rd folded-in scope expansion, FINDING B): both
+            // item.title and item.source were interpolated RAW into quoted
+            // title="..." attributes below -- no escaper at all. item.source
+            // comes from the external calendar feed (outside this app's
+            // trust boundary, same provenance as externalTitle in SITES
+            // 3/4); item.title here is the external event's own title, same
+            // untrusted-feed provenance. Fixed: escapeAttr() at each
+            // interpolation site. sourceLabel is escaped as a whole at its
+            // one usage (verified single-consumer via grep) rather than at
+            // its `const sourceLabel = ...` construction two lines up --
+            // escapeAttr() only touches &/</>/"/', so the surrounding
+            // " (" / ")" literal parens pass through unaffected.
+            //
+            // 4th-round PR-gate fix (blocking reviewer finding): the
+            // ${truncateTitle(item.title, 25)} below was left RAW as ELEMENT
+            // CONTENT -- the same FINDING-A defect class, in the same
+            // branch this round already hardened for forward-safety, so
+            // leaving the worst sink in it unescaped was incoherent. This
+            // sibling is dead code today for the SAME reason FINDING B is
+            // (the branch is unreachable -- see the note above the div),
+            // fixed for the same forward-safety reason.
+            //
+            // COMPOSITION ORDER IS LOAD-BEARING: escapeHtml(truncateTitle(x,
+            // n)), NEVER truncateTitle(escapeHtml(x), n). Truncating AFTER
+            // escaping can cut an entity in half (e.g. "&lt" with the ";"
+            // sliced off), and HTML5's legacy no-semicolon character-
+            // reference table decodes a severed "&lt" back to a raw "<" on
+            // the next parse -- a truncation step that MANUFACTURES the
+            // injection it was meant to prevent. Escaping after truncation
+            // only ever produces MORE entity text, never less, so it cannot
+            // create this failure mode.
+            //
+            // String(item.title ?? '') guards truncateTitle()'s unguarded
+            // `title.length` (throws on null/undefined -- item.title here is
+            // always a string per the item-building code above, but this
+            // matches the identical guard added at the epic-branch sibling
+            // and keeps the two call sites textually parallel) and ALSO
+            // fixes escapeHtml's falsy-vs-escapeAttr's-nullish guard mismatch
+            // for the numeric-0-title case (see the row2 fix below for the
+            // full explanation) -- one change serves both purposes here.
+            html += `<div class="calendar-item external-event" title="${escapeAttr(item.title)}${escapeAttr(sourceLabel)}">
+                <span class="event-sync-badge" title="Synced from ${escapeAttr(item.source || 'external calendar')}">↻</span>
+                ${escapeHtml(truncateTitle(String(item.title ?? ''), 25))}
             </div>`;
         } else if (item.type === 'epic') {
             // Epic items - distinct gold/amber styling with urgency
@@ -8667,23 +8799,190 @@ function renderDayItems(date) {
             // Add urgency class based on due date
             const dueDateStatus = getDueDateStatus(dateStr);
             const urgencyClass = getUrgencyClass(dueDateStatus);
-            html += `<div class="calendar-item epic-item ${urgencyClass}" data-epic-id="${item.id}" title="Epic: ${titleText} (click to navigate)">
-                <span class="epic-badge">E</span> ${truncateTitle(displayTitle, 20)}
+            // XACA-1005-001 (2nd folded-in scope expansion, SITE 6): titleText
+            // (built two lines above from item.title, user-supplied epic
+            // title) was interpolated RAW into the QUOTED title="..." attribute
+            // below -- no escaper at all, not merely the wrong one. Verified
+            // titleText has exactly ONE consumer in this branch (this
+            // attribute) via grep before choosing where to escape, so wrapping
+            // it at the interpolation site (rather than reassigning it at its
+            // `const titleText = ...` construction two lines up) cannot
+            // double-escape a second use. escapeAttr() is correct: a plain
+            // quoted HTML attribute, not a JS string literal.
+            //
+            // urgencyClass and item.id, interpolated in the SAME line, were
+            // independently evaluated and left alone:
+            //   - urgencyClass comes from getUrgencyClass(getDueDateStatus(...))
+            //     above, which returns one of a small fixed set of literal
+            //     strings ('urgency-future'/'urgency-overdue'/'urgency-imminent'/
+            //     'urgency-soon') -- no external input reaches
+            //     it, so escaping it would be purely defensive noise.
+            //   - item.id is produced by kanban-helpers.sh's _kb_generate_id()
+            //     as `PREFIX-NNNN` (team/series code + zero-padded counter) on
+            //     the normal item-creation path, a constrained charset that
+            //     cannot contain a quote. NOTE (reported, not fixed here --
+            //     out of scope for this ticket): server.py's handle_update_item
+            //     applies `updates.items()` as a fully generic field setter
+            //     with no per-field allowlist or validation, so a client could
+            //     in principle overwrite an item's `id` field to an arbitrary
+            //     string via that endpoint, bypassing the generator entirely.
+            //     That is a mass-assignment gap in a different class from the
+            //     escaper-choice defects this ticket fixes, and would affect
+            //     every sink that renders item.id, not just this one -- flagged
+            //     for the coordinator/audit rather than fixed here.
+            // 4th-round PR-gate fix (BLOCKING, reviewer-verified): the
+            // ${truncateTitle(displayTitle, 20)} below is the exact
+            // FINDING-A defect class -- displayTitle = item.shortTitle ||
+            // item.title, and the epic-items push above (this same
+            // function) sets only `title`, never `shortTitle`, so
+            // displayTitle is always item.title here: raw, unescaped
+            // ELEMENT CONTENT, one line below the title="..." attribute this
+            // ticket already escaped on the SAME field. The 20-char cap is
+            // not mitigation -- `<svg onload=alert()>` is 20 characters, and
+            // truncateTitle() returns a string that short completely
+            // untouched. Fixed: escapeHtml(truncateTitle(...)).
+            //
+            // COMPOSITION ORDER IS LOAD-BEARING: escapeHtml(truncateTitle(x,
+            // n)), NEVER truncateTitle(escapeHtml(x), n). Truncating AFTER
+            // escaping can cut an entity in half (e.g. "&lt" with its ";"
+            // sliced off), and HTML5's legacy no-semicolon character-
+            // reference table decodes a severed "&lt" back to a raw "<" on
+            // the next parse -- a truncation step that MANUFACTURES the
+            // injection it was meant to prevent. escapeHtml(truncateTitle())
+            // only ever produces MORE entity text from an already-cut plain
+            // string, never a cut entity, so it cannot create this failure
+            // mode. See tests/... for a payload engineered so the cut lands
+            // mid-entity, proving the ORDER, not just the presence, of the
+            // escaper matters.
+            //
+            // String(displayTitle ?? '') guards truncateTitle()'s unguarded
+            // `title.length` (throws on null/undefined; displayTitle can in
+            // principle be null/undefined if a future change adds an epic
+            // push without a `title` field, though today's push above always
+            // sets one) and ALSO fixes a real behaviour regression this
+            // ticket's row2 fix (below, kanban-item branch) introduced:
+            // escapeHtml()'s guard is `if (!text) return ''` (FALSY), while
+            // escapeAttr()'s is `value === null || value === undefined`
+            // (NULLISH) -- so a numeric title of `0` renders as EMPTY via a
+            // bare escapeHtml(x) but as "0" via escapeAttr(x), a visible
+            // mismatch between two renderings of the SAME field on the same
+            // card. XACA-1020 established that handle_update_item applies
+            // client fields with no type/enum validation, so a numeric title
+            // is reachable, however unlikely. Fixed at THIS call site, not
+            // by changing escapeHtml()'s shared guard (which would alter
+            // rendering at every escapeHtml() call across this 21,000-line
+            // file for a defect that only exists at these three sites).
+            html += `<div class="calendar-item epic-item ${urgencyClass}" data-epic-id="${item.id}" title="Epic: ${escapeAttr(titleText)} (click to navigate)">
+                <span class="epic-badge">E</span> ${escapeHtml(truncateTitle(String(displayTitle ?? ''), 20))}
                 ${progress ? `<span class="epic-progress">${progress}</span>` : ''}
             </div>`;
         } else {
             // Kanban items - show ID, priority, epic badge, subitem count with urgency
             const priorityClass = item.priority ? item.priority.toLowerCase() : 'medium';
-            const epicBadge = item.epicId ? `<span class="epic-badge" title="Part of epic: ${getEpicTitleById(item.epicId) || item.epicName || item.epicId}">E</span>` : '';
+            // XACA-1005-001 (3rd folded-in scope expansion, FINDING C): this
+            // whole fallback chain was interpolated RAW into a quoted
+            // title="..." attribute -- no escaper at all. The FIRST branch,
+            // getEpicTitleById(item.epicId), resolves an epic TITLE --
+            // user-supplied free text, same provenance as SITE 2's
+            // epic.title (server.py's epic-creation handler assigns the POST
+            // body's `name` straight through with no sanitization). Not a
+            // system id, despite the local being named "Badge". Fixed:
+            // escapeAttr() wraps the WHOLE ternary chain at this single
+            // interpolation site -- item.epicName/item.epicId, the fallback
+            // branches, pass through escapeAttr() unchanged when they hold
+            // an ordinary id/name with no HTML metacharacters, so wrapping
+            // the whole expression does not conflict with XACA-1013's
+            // separate, already-ticketed judgment that item.id/epic.id are
+            // safe on their normal creation path -- this is a DIFFERENT
+            // interpolation site than the item.id/epic.id occurrences left
+            // bare elsewhere in this function for XACA-1013.
+            const epicBadge = item.epicId ? `<span class="epic-badge" title="Part of epic: ${escapeAttr(getEpicTitleById(item.epicId) || item.epicName || item.epicId)}">E</span>` : '';
             const subitemBadge = item.subitemCount > 0 ? `<span class="subitem-badge" title="${item.subitemCount} subitems with due dates">${item.subitemCount}</span>` : '';
 
             // Add urgency class based on due date
             const dueDateStatus = getDueDateStatus(dateStr);
             const urgencyClass = getUrgencyClass(dueDateStatus);
 
-            html += `<div class="calendar-item priority-${priorityClass} ${urgencyClass}" data-item-id="${item.id}" title="${item.id}: ${item.title} (click to navigate)">
+            // XACA-1005-001 (2nd folded-in scope expansion, SITE 7): item.title
+            // was interpolated RAW into the QUOTED title="..." attribute below
+            // -- same defect as SITE 6, same fix: escapeAttr(), a plain quoted
+            // attribute, not a JS string literal.
+            //
+            // priorityClass, interpolated in the SAME line's class="..."
+            // attribute, was independently evaluated (per the "do not
+            // reflexively escape" note) and judged GENUINELY UNSAFE, unlike
+            // urgencyClass/item.id below: `item.priority` reaches this render
+            // via server.py's handle_update_item, which applies
+            // `updates.items()` as a fully generic field setter with NO
+            // enum/format validation on `priority` (the enum check at
+            // TODO_PRIORITY_ORDER gates a DIFFERENT resource -- todos, not
+            // backlog items). So a priority value of e.g. `x" onmouseover=
+            // alert(1) y="` reaches `.toLowerCase()` untouched and breaks out
+            // of this class="..." attribute exactly like SITE 1's crTitle did.
+            // Fixed: escapeAttr(priorityClass) at the interpolation site --
+            // verified it has exactly one consumer in this branch (this
+            // attribute), so wrapping here cannot double-escape a second use.
+            //
+            // urgencyClass and item.id are unescaped for the same reasons
+            // given at SITE 6 above (urgencyClass: fixed literal set, no
+            // external input; item.id: constrained-charset generator on the
+            // normal path, with the same out-of-scope mass-assignment caveat
+            // reported there, not fixed here).
+            //
+            // XACA-1005-001 (3rd folded-in scope expansion, FINDING A --
+            // HIGHEST SEVERITY of the three folded in this round): the
+            // row2 div below interpolated item.title RAW as ELEMENT CONTENT,
+            // with no escaper at all. Unlike SITES 1/6/7's attribute
+            // breakouts, this is not an attribute-context injection -- it is
+            // a full HTML-injection sink: a title containing an <img> tag
+            // with an onerror handler renders as a live element and
+            // executes, no attribute boundary needs breaking at all. Fixed:
+            // escapeHtml(item.title). escapeAttr() would ALSO be safe here
+            // (a strict superset in element content -- see SITE 1's
+            // reasoning above), but escapeHtml() is the conventional choice
+            // for a plain element-content sink and is what the rest of this
+            // file uses for this shape (e.g. crIdEsc near the top of this
+            // file). This same item.title also appears in the title="..."
+            // attribute a few lines up (escaped there with escapeAttr()) --
+            // two SEPARATE call sites on the SAME raw field, each escaping
+            // independently for its own context, not one escaped value
+            // reused across both (which would risk double-escaping).
+            //
+            // 4th-round PR-gate fix (BLOCKING [UX] regression, XACA-1005-020
+            // -- introduced by the escapeHtml() fix above, caught by review):
+            // escapeHtml()'s guard is `if (!text) return ''` (FALSY), while
+            // escapeAttr()'s guard is `value === null || value === undefined`
+            // (NULLISH). So for a numeric item.title of `0`, the bare
+            // escapeHtml(item.title) below rendered EMPTY while the
+            // escapeAttr(item.title) in the title="..." attribute a few
+            // lines up rendered "0" -- two DIFFERENT renderings of the SAME
+            // field on the SAME card, and a behaviour change from the
+            // pre-fix code (which was raw and rendered `0` correctly, by
+            // accident, alongside the actual XSS hole). XACA-1020
+            // established handle_update_item applies client fields with no
+            // type/enum validation at all, so a numeric title is reachable,
+            // however unlikely. Fixed HERE, at the call site, with
+            // String(item.title ?? '') -- matching escapeAttr()'s nullish
+            // semantics locally so the two renderings of one field can never
+            // disagree again. Deliberately NOT fixed by changing
+            // escapeHtml()'s shared guard from falsy to nullish: that
+            // function is called throughout this 21,000-line file, and
+            // widening its blast radius for a defect that only exists at
+            // these three call sites (this one, and the two truncateTitle()
+            // sites in the same function) is exactly the kind of
+            // "while I'm here" cleanup a security fix should not carry.
+            //
+            // NOTE: HTML comments (<!-- ... -->), not JS ones, are the only
+            // safe way to annotate INSIDE this template literal below --
+            // `//`/`/* */` are not comments in a template literal, they are
+            // literal output text, and a naive `{/* ... */}` (JSX habit) is
+            // actively wrong here: it both renders as visible junk in the
+            // markup AND its own backtick-delimited code span would open a
+            // nested template-literal expression, a syntax error this exact
+            // mistake was caught and reverted while authoring this fix.
+            html += `<div class="calendar-item priority-${escapeAttr(priorityClass)} ${urgencyClass}" data-item-id="${item.id}" title="${item.id}: ${escapeAttr(item.title)} (click to navigate)">
                 <div class="calendar-item-row1"><span class="item-id">${item.id}</span>${epicBadge}${subitemBadge}</div>
-                <div class="calendar-item-row2">${item.title}</div>
+                <div class="calendar-item-row2">${escapeHtml(String(item.title ?? ''))}</div>
             </div>`;
         }
     });
@@ -11086,6 +11385,21 @@ function displayReleases(releases, flowConfig = null, projectEnvironments = {}) 
  */
 function renderReleaseCard(release, flowConfig = null, projectEnvironments = {}) {
     const typeClass = release.type ? `type-${release.type}` : '';
+    // XACA-1005-001 (6th round, PR #795 gate): found while checking whether
+    // formatDate()'s catch-and-return-raw pattern is a CLASS, not an
+    // instance -- formatTargetDate() (lcars.js ~11756) has the IDENTICAL
+    // shape: `catch (e) { return dateStr; }`, reached via the SAME
+    // parseLocalDate()-throws-on-non-string mechanism. release.targetDate
+    // is set via server.py's handle_update_release, whose `allowed_fields`
+    // list DOES include 'targetDate' -- but that list only restricts which
+    // KEYS may be set, not the VALUE TYPE of any of them (unlike XACA-1020's
+    // handle_update_item, which restricts neither), so a non-string
+    // targetDate (array / hostile-toString object) is reachable through
+    // this different, allowlisted endpoint. Verified live against the real
+    // formatTargetDate() body before fixing (see the regression suite).
+    // Escaped at the interpolation site below (verified single consumer of
+    // this local via grep) rather than here at construction, matching this
+    // ticket's established pattern.
     const targetDate = release.targetDate ? formatTargetDate(release.targetDate) : 'No target';
     const isExpanded = releasesState.expandedReleases.has(release.id);
     const expandedClass = isExpanded ? 'expanded' : '';
@@ -11153,11 +11467,38 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
             gateHtml = `<span class="platform-gate-badge ${gsClass}" title="${tooltipAttr}">${gsResult.toUpperCase()}${staleMarker}</span>`;
         }
 
+        // XACA-1005-001 (7th round, PR #795 gate, BLOCKING, reviewer-verified):
+        // both spans below were RAW ELEMENT CONTENT, no escaper at all.
+        // getPlatformName(key) (~11779) maps a small known set of platform
+        // keys ('ios'/'android'/'firebase'/'web'/'other') to display labels,
+        // but falls through for any UNMAPPED key to
+        // `safeKey.charAt(0).toUpperCase() + safeKey.slice(1)` -- a
+        // TITLE-CASED PASSTHROUGH of the raw key, not a safe default. `key`
+        // and `platform.version` both come from `release.platforms`, reached
+        // through the SAME unvalidated server.py handle_update_release path
+        // the targetDate fix above already depends on: its allowed_fields
+        // list is key-only (no value-type validation), 'tags' gets
+        // isinstance filtering three lines below it in that handler, but
+        // platforms gets nothing. Verified live: a hostile platform key or
+        // version string renders `<img src=x onerror=alert(1)>` as a live
+        // element. Fixed at the SINK (not inside getPlatformName(), which is
+        // a shared helper -- consistent with every other fix in this
+        // ticket): escapeHtml(getPlatformName(key)) and
+        // escapeHtml(String(platform.version || '1.0.0')) -- the extra
+        // String() guards platform.version being a non-string (same
+        // no-type-validation reachability as release.targetDate above), and
+        // is a no-op for the ordinary string case.
+        //
+        // gs.result (the gate-status badge a few lines above) is
+        // deliberately NOT touched here: the reviewer confirmed the
+        // producing endpoint validates it to the fixed enum pass|fail|skip,
+        // so it carries no untrusted text and re-escaping it would be
+        // decorative.
         return `
             <div class="release-platform">
                 <div class="platform-info">
-                    <span class="platform-name">${getPlatformName(key)}</span>
-                    <span class="platform-version">${platform.version || '1.0.0'}</span>
+                    <span class="platform-name">${escapeHtml(getPlatformName(key))}</span>
+                    <span class="platform-version">${escapeHtml(String(platform.version || '1.0.0'))}</span>
                     ${gateHtml}
                 </div>
                 <div class="platform-progress">
@@ -11205,13 +11546,43 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
 
     // XACA-0657-005: Linked CR chips — snapshot crTitle/crId; each chip navigates
     // to the CHANGE REQ section and highlights the target CR row.
+    //
+    // XACA-1005-001: crTitle is interpolated TWICE below — once inside
+    // title="Navigate to CR: ${crTitle}" (a QUOTED ATTRIBUTE) and once as
+    // element content (${crIdEsc} — ${crTitle}). It was escaped with
+    // escapeHtml() for both, which is a FALSE FIX in the attribute slot:
+    // escapeHtml is textContent -> innerHTML, which per the WHATWG
+    // fragment-serialization spec escapes &, U+00A0, < and > and
+    // DELIBERATELY LEAVES QUOTES ALONE (see the comment above escapeAttr()).
+    // A CR title of `Fix " onmouseover=alert(1) x="` — CR titles are
+    // user-supplied, verified against live board data — therefore closed the
+    // title="..." attribute early and injected a new onmouseover= attribute
+    // onto the <button>, a hand-verified breakout (XACA-0416 found this exact
+    // shape across five other client apps).
+    //
+    // Fixed by switching crTitle to escapeAttr() for BOTH interpolations
+    // rather than introducing a second variable, because escapeAttr is a
+    // SAFE SUPERSET of escapeHtml in element content, not merely a different
+    // escaper: escapeAttr additionally turns a raw `"`/`'` into `&quot;`/
+    // `&#39;`, and the HTML parser decodes those entities in TEXT content
+    // exactly the same way it does inside an attribute value, back to the
+    // literal `"`/`'` character. `&`/`<`/`>` are escaped identically by both
+    // functions. So a CR title containing `'`, `"`, `&` or `<` renders
+    // IDENTICALLY on screen whichever escaper produced it — escapeAttr just
+    // also closes the attribute-breakout hole that escapeHtml leaves open.
+    // One variable, one escaper, no second failure mode to keep in sync.
+    //
+    // crIdEsc (below) was independently re-checked against this same
+    // reasoning: it is interpolated exactly ONCE, as `${crIdEsc} — ${crTitle}`
+    // element content, and never inside an attribute — so escapeHtml remains
+    // the right, and sufficient, escaper for it. Left unchanged.
     const linkedCRs = Array.isArray(release.linkedCRs) ? release.linkedCRs : [];
     const linkedCRsHtml = linkedCRs.length > 0
         ? `<div class="release-linked-crs">
                 <span class="release-linked-crs-label">CHANGE REQUESTS</span>
                 ${linkedCRs.map(entry => {
                     const crId    = entry.crId    ? jsAttrEscape(entry.crId)    : '';
-                    const crTitle = entry.crTitle ? escapeHtml(entry.crTitle)   : escapeHtml(entry.crId || '');
+                    const crTitle = entry.crTitle ? escapeAttr(entry.crTitle)   : escapeAttr(entry.crId || '');
                     const crIdEsc = entry.crId    ? escapeHtml(entry.crId)      : '';
                     if (!crId) return '';
                     return `<button class="release-cr-link" onclick="event.stopPropagation(); navigateToReleaseCR('${crId}')" title="Navigate to CR: ${crTitle}">${crIdEsc} — ${crTitle}</button>`;
@@ -11229,7 +11600,7 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
                 <div class="release-card-header-right">
                     ${tagsHtml}
                     <div class="release-card-meta">
-                        <span class="release-card-date">${targetDate}</span>
+                        <span class="release-card-date">${escapeHtml(targetDate)}</span>
                         <span class="release-item-count">${completedCount}/${itemCount} items${cancelledSuffix}${unresolvedSuffix}</span>
                         <span class="release-card-progress">${itemProgress}%</span>
                         <span class="release-expand-icon">${isExpanded ? '▼' : '▶'}</span>
@@ -13818,10 +14189,37 @@ async function showEpicAssignModal(itemId, itemTitle, team, currentEpicId) {
                 const epicDisplayName = epic.shortTitle
                     ? `${epic.shortTitle} — ${epic.title || epic.name}`
                     : (epic.title || epic.name);
+                // XACA-1005-001 (folded-in scope expansion): epic.id and
+                // epic.title/epic.name land inside a JS STRING LITERAL within
+                // an HTML attribute — selectEpicForItem('${...}', '${...}') —
+                // not element content and not a plain quoted attribute. They
+                // were escapeHtml()'d, which leaves BOTH ' and \ untouched.
+                // epic.title is user-supplied (server.py's epic-creation POST
+                // handler assigns the request body's `name` straight to the
+                // "title" field with no escaping), so an epic titled
+                // `'); alert(1); //` terminated the string literal and
+                // executed arbitrary JS — a strictly worse outcome than an
+                // attribute-only breakout. jsAttrEscape (XACA-0277) is the
+                // escaper built for exactly this context: it escapes \ and '
+                // in addition to the HTML metacharacters escapeHtml covers.
+                // epic.id sits in the identical JS-string-literal slot one
+                // argument over and gets the same escaper for consistency,
+                // even though it is a server-assigned id rather than
+                // free-text — the context, not the field's provenance, is
+                // what determines the escaper.
+                // 4th-round PR-gate fix, XACA-1005-023: data-epic-id below was
+                // bare/unescaped and no ticket enumerated it (distinct from
+                // the item.id/epic.id occurrences in renderDayItems(), which
+                // ARE already tracked under XACA-1013 and are deliberately
+                // left bare there to avoid colliding with that ticket).
+                // Fixed here rather than deferred: it is one line, in a
+                // function this ticket already touches, and escapeAttr() on
+                // a compliant epic.id is a no-op (no HTML metacharacters to
+                // escape), so there is no reason not to close it now.
                 return `
                     <div class="epic-select-option ${isSelected ? 'selected' : ''}"
-                         data-epic-id="${epic.id}"
-                         onclick="selectEpicForItem('${epic.id}', '${escapeHtml(epic.title || epic.name)}')"
+                         data-epic-id="${escapeAttr(epic.id)}"
+                         onclick="selectEpicForItem('${jsAttrEscape(epic.id)}', '${jsAttrEscape(epic.title || epic.name)}')"
                          style="--epic-color: ${colorHex}">
                         <div class="epic-select-color" style="background-color: ${colorHex}"></div>
                         <div class="epic-select-info">
