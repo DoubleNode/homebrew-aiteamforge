@@ -10420,6 +10420,462 @@ _kb_validate_subject_path() {
     return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0934 / XACA-0784 — Knowledge DESTINATION guard (is this a REAL place?)
+#
+# XACA-0754 answered "which ROOT does this write go to" (~/knowledge vs
+# ~/knowledge-local). XACA-0802 answered "is THIS HOST allowed to author it".
+# Neither ever asked the prior question: **does the destination the caller
+# named actually exist as a live knowledge home at all?** kb-knowledge-add
+# resolved a target_dir from a raw, unvalidated slug and then ran an
+# unconditional `mkdir -p` on it. Any typo, any stale name, any short form of a
+# real slug therefore SUCCEEDED — it manufactured the directory it was told to
+# write to, and reported success.
+#
+# The two tiers keyed by an explicit slug argument each have their own,
+# differently-shaped failure from that:
+#
+#   agent tier — STRANDED KNOWLEDGE. XACA-0842 consolidated seven duplicate
+#     persona directories that existed because an old migration slugified a
+#     persona's DISPLAY BYLINE instead of its canonical agent id; XACA-0907
+#     reduced each stale directory to a TOMBSTONE holding only a README.md
+#     redirect. `kb-knowledge-add agent jett-reno "..."` then walked straight
+#     back into the tombstone and wrote an entry there — into a directory
+#     nothing searches, which is the exact failure XACA-0842 existed to
+#     eliminate. It also collided the id counter (the tombstone looks empty, so
+#     the allocator handed out k001/k002 — ids that already existed in the
+#     canonical dir), and re-scaffolded an INDEX.md, partially undoing
+#     XACA-0907. Then kb-knowledge-validate flagged the resurrected directory
+#     as a duplicate-persona FAIL: the tooling created work for itself.
+#     Reproduced twice — agents/jett-reno, then agents/nahla-ake on 2026-08-24.
+#
+#   team tier — LEAKED PII, and this is the sharper edge of the two
+#     (XACA-0784). The three personal teams carry real personal data and are
+#     routed to the unsynced local root by slug match against
+#     _kb_local_only_teams_hardcoded. A SHORT or typo'd slug does not match
+#     that floor — so `kb-knowledge-add team finance "..."` does not route to
+#     ~/knowledge-local at all. It silently creates a BRAND NEW shared
+#     ~/knowledge/teams/finance/ and writes the entry into the git-synced,
+#     fleet-replicated root. The agent tier's worst case is knowledge nobody
+#     can find; the team tier's worst case is personal data pushed to every
+#     machine in the fleet. Hence: fail CLOSED here, and stay closed.
+#
+# WHY TOMBSTONE DISCOVERY IS DYNAMIC AND NOT A HARDCODED SLUG LIST
+#
+# The obvious implementation is a literal list of the seven retired slugs. It
+# is wrong for the same reason the XACA-0842 gate refused to allow-list them
+# (see _kb_kpd_has_entries): a hardcoded list encodes a snapshot of one
+# migration, and the NEXT consolidation — there will be one; XACA-0907 was
+# already the second — silently falls outside it. The guard would then pass a
+# freshly-retired directory and reintroduce the identical bug, with the added
+# insult that the list LOOKS maintained.
+#
+# The retirement is already declared, authoritatively, in the artifact that
+# retirement produces: each tombstone's README.md frontmatter carries
+# `status: retired` and `consolidated_into: agents/<canonical>`. Reading that
+# at call time makes this guard self-maintaining — a future retirement is
+# covered the moment its README lands, with ZERO code change here — and it is
+# what lets the error name the canonical slug instead of just saying "no".
+# A guard that only says "refused" repeats the original sin of silence.
+#
+# The team tier has no equivalent per-directory declaration, so it validates
+# against the REGISTRY instead (team-paths.json + the hardcoded PII floor).
+#
+# NAMING IS LOAD-BEARING, not cosmetic: every helper added here is named
+# `_kb_knowledge_*`. tests/test-knowledge-helper-parity.sh DERIVES its required
+# symbol set by grepping canonical kanban-helpers.sh for exactly that prefix,
+# so a helper named anything else is INVISIBLE to the tap-mirror parity gate —
+# and _kb_knowledge_destination_guard reaches five of them, so a mirror ported
+# from the gate's list alone would ship a guard that calls undefined functions
+# on every consumer machine. Keep the prefix; the gate is what keeps the two
+# tap copies honest (the recurring class behind XACA-0788/0802/0818).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# _kb_knowledge_retired_dir_canonical <dir>
+# True (0) when <dir> is a RETIREMENT TOMBSTONE — a consolidated-away knowledge
+# directory kept only as a redirect. Echoes the canonical slug it was folded
+# into (possibly empty, when a README declares `status: retired` without a
+# `consolidated_into:` target).
+#
+# Retirement is declared by EITHER frontmatter key: `status: retired` or a
+# non-empty `consolidated_into:`. Accepting either is deliberate — a README
+# that carries only one of the two is still an explicit human statement that
+# the directory is dead, and treating a half-filled tombstone as live is the
+# failure mode this whole function exists to prevent. The canonical slug is
+# read from `consolidated_into:`, whose value is a TIER-QUALIFIED path
+# ("agents/reno"), so the leading "<tier>/" segment is stripped to leave the
+# bare slug the caller must retype.
+_kb_knowledge_retired_dir_canonical() {
+    local dir="${1-}"
+    [[ -z "$dir" ]] && return 1
+
+    local readme="${dir}/README.md"
+    [[ -f "$readme" ]] || return 1
+
+    local status_field consolidated
+    status_field=$(_kb_knowledge_yaml_field "$readme" "status")
+    consolidated=$(_kb_knowledge_yaml_field "$readme" "consolidated_into")
+
+    if [[ "$status_field" != "retired" ]] && [[ -z "$consolidated" ]]; then
+        return 1
+    fi
+
+    # "agents/reno" -> "reno". Strip only the leading tier segment; a slug
+    # never contains a slash (_kb_validate_name_component forbids it), so this
+    # is unambiguous.
+    printf '%s\n' "${consolidated##*/}"
+    return 0
+}
+
+# _kb_knowledge_all_persona_slugs
+# Every canonical persona slug this machine can see, one per line. Empty (and
+# returns 1) when the roster cannot be resolved at all.
+#
+# Source is the master persona catalogue at ~/dev-team/.claude/agents-master/,
+# reading each persona file's frontmatter `name:` — the RUNTIME BINDING, and
+# the same field SPEC 2.1 and the XACA-0842 consolidation treat as canonical.
+# Never the filename, which is precisely the display-byline spelling that
+# created the seven tombstones in the first place.
+#
+# ADVISORY ONLY — see the fail-open ruling in _kb_knowledge_destination_guard.
+# agents-master is an Academy/M3Pro checkout; a tap consumer machine does not
+# have it, so this roster is legitimately unresolvable there and callers must
+# treat "no roster" as "no opinion", never as "unknown persona".
+_kb_knowledge_all_persona_slugs() {
+    # NO_NOMATCH is set locally, not inherited: under zsh's default NOMATCH an
+    # unmatched glob is a hard error that aborts the command, and the roster
+    # glob below legitimately matches nothing on a machine without an
+    # agents-master checkout. kb-knowledge-add happens to set NO_NOMATCH for
+    # its own body, but these helpers must not depend on their caller's
+    # options — they are also reachable directly and from kb-knowledge-promote.
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local master_root="${HOME}/dev-team/.claude/agents-master"
+    [[ -d "$master_root" ]] || return 1
+
+    local f name found=false
+    for f in "$master_root"/*/*.md; do
+        [[ -f "$f" ]] || continue
+        name=$(_kb_knowledge_yaml_field "$f" "name")
+        if [[ -n "$name" ]]; then
+            printf '%s\n' "$name"
+            found=true
+        fi
+    done
+    [[ "$found" == "true" ]]
+}
+
+# _kb_knowledge_registered_team_slugs
+# Every team slug this machine recognises, one per line, unsorted and possibly
+# duplicated (callers only ever membership-test).
+#
+# TWO sources, unioned, mirroring _kb_is_local_only_team's two-source shape:
+#   1. The hardcoded PII floor. Listed FIRST and unconditionally so that a
+#      missing, corrupt, or regenerated team-paths.json can never make one of
+#      the personal teams look UNREGISTERED — which would refuse the very
+#      writes that most need to succeed locally.
+#   2. The team-paths.json overlay's `.teams` keys — the live registry, so a
+#      newly provisioned team is recognised with no code change.
+_kb_knowledge_registered_team_slugs() {
+    _kb_local_only_teams_hardcoded
+
+    local config_path
+    config_path=$(_kb_overlay_config_path)
+    [[ -f "$config_path" ]] || return 0
+
+    if command -v jq &>/dev/null; then
+        jq -r '.teams | keys[]?' "$config_path" 2>/dev/null
+    elif command -v python3 &>/dev/null; then
+        python3 - "$config_path" <<'PYEOF'
+import sys, json
+from pathlib import Path
+try:
+    config = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+    for k in (config.get('teams') or {}):
+        print(k)
+except Exception:
+    pass
+PYEOF
+    fi
+    return 0
+}
+
+# _kb_knowledge_suggest_from_list <want>   (candidates on STDIN, one per line)
+# The shared "did you mean" matcher. Echoes the candidates a typo'd or short
+# <want> most plausibly meant, one per line, best tier only.
+#
+# Tier 1 (prefix, either direction): one string is a prefix of the other. Both
+#   directions are needed because the two callers see OPPOSITE typo shapes —
+#   the team tier sees a SHORT form ("finance" -> "finance-personal", the
+#   canonical XACA-0784 case) while the agent tier sees an OVER-LONG one
+#   ("renoo" -> "reno", a doubled keystroke). Matching only "candidate starts
+#   with want" would have found nothing at all for the agent case.
+# Tier 2 (containment, either direction): consulted only when tier 1 is empty.
+#   The reverse direction requires a candidate of 3+ characters, so a very
+#   short slug cannot pattern-match its way into every suggestion list as
+#   noise.
+#
+# Best-effort by contract: an empty result means the error message carries no
+# "did you mean" line, NEVER that the caller softens its verdict.
+_kb_knowledge_suggest_from_list() {
+    local want="${1-}"
+    [[ -z "$want" ]] && return 0
+
+    local s
+    # -U (zsh unique array): callers legitimately feed duplicate candidates —
+    # _kb_knowledge_registered_team_slugs unions two overlapping sources (the
+    # hardcoded PII floor and the overlay keys both list the personal teams),
+    # so a raw collection prints "finance-personal finance-personal".
+    # Membership tests do not care; a human-facing "did you mean" line does.
+    local -aU prefix_hits substr_hits
+    prefix_hits=(); substr_hits=()
+    while IFS= read -r s; do
+        [[ -z "$s" ]] && continue
+        [[ "$s" == "$want" ]] && continue
+        if [[ "$s" == "${want}"* ]] || [[ "$want" == "${s}"* ]]; then
+            prefix_hits+=("$s")
+        elif [[ "$s" == *"${want}"* ]]; then
+            substr_hits+=("$s")
+        elif (( ${#s} >= 3 )) && [[ "$want" == *"${s}"* ]]; then
+            substr_hits+=("$s")
+        fi
+    done
+
+    if (( ${#prefix_hits[@]} > 0 )); then
+        printf '%s\n' "${prefix_hits[@]}"
+    elif (( ${#substr_hits[@]} > 0 )); then
+        printf '%s\n' "${substr_hits[@]}"
+    fi
+    return 0
+}
+
+# _kb_knowledge_suggest_team_slugs <slug>
+# Registered TEAM slugs a typo'd/short <slug> most plausibly meant, one per
+# line. Thin binding of the registry source to the shared matcher above.
+_kb_knowledge_suggest_team_slugs() {
+    local want="${1-}"
+    [[ -z "$want" ]] && return 0
+    _kb_knowledge_registered_team_slugs | _kb_knowledge_suggest_from_list "$want"
+}
+
+# _kb_knowledge_destination_guard <tier:agent|team> <slug> <write_root> [allow:true|false]
+# The policy function. Returns 0 to proceed, 1 to refuse the write.
+#
+# MUST be called after routing resolves write_root (so it inspects the
+# directory the write would ACTUALLY land in) and BEFORE mkdir -p / id
+# allocation — same contract as _kb_knowledge_host_affinity_guard, and for the
+# same reason: a refusal has to leave no directory and no file behind. It is
+# also called BEFORE the host-affinity guard, because name correctness is the
+# prior question — asking "is this host authorized to author team X" is
+# meaningless when X is not a team, and would in fact fail OPEN there
+# (_kb_team_primary_host finds no entry for a slug that isn't registered).
+#
+# The two <allow> slots are the tier's OWN escape hatches, passed in
+# already-resolved by the caller. They are positional, and each tier binds them
+# to its own flags — read this table before adding a call site:
+#
+#   tier    $4 (allow)                    $5 (allow_new)
+#   ─────   ───────────────────────────   ──────────────────────
+#   agent   --allow-retired-agent-dir     --allow-new-agent-dir
+#   team    --allow-new-team              (unused)
+#
+# Every one of these is a SEPARATE flag, and separate again from --force /
+# --allow-foreign-host / --allow-nonstandard-base, per the XACA-0883 guard
+# contract §3.5 — a flag that silences one control must never silence another.
+# That matters acutely here, because the three controls are of very different
+# weight: --allow-retired-agent-dir and --allow-new-agent-dir each waive a
+# findability control (and waive DIFFERENT ones — a tombstone and an unknown
+# slug are distinct mistakes with distinct fixes), while --allow-new-team
+# waives a PII-containment control. Collapsing any of them together would let
+# someone who just wanted to append to a retired persona directory also,
+# invisibly, unlock creation of a new shared team directory.
+#
+# subject and project tiers are deliberately NOT handled: neither is keyed by a
+# registry-backed slug (a subject path is free-form taxonomy, a project slug is
+# repo-derived), so there is nothing to validate against and a guard here would
+# be pure friction. They keep their existing _kb_ambiguous_tier_write_guard /
+# layout-guard controls.
+_kb_knowledge_destination_guard() {
+    # Self-contained glob behaviour — see _kb_knowledge_all_persona_slugs. The team arm's
+    # "does this directory already hold entries" glob matches nothing whenever
+    # the directory does not exist, which is the single most common path
+    # through this function.
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local tier="${1-}" slug="${2-}" write_root="${3-}" allow="${4:-false}" allow_new="${5:-false}"
+    [[ -z "$tier" || -z "$slug" || -z "$write_root" ]] && return 0
+
+    case "$tier" in
+        agent)
+            local target_dir="${write_root}/agents/${slug}"
+            local canonical
+            if ! canonical=$(_kb_knowledge_retired_dir_canonical "$target_dir"); then
+                # Not a tombstone. Second pass: is this even a known persona?
+                # A typo'd slug is the other way an agent-tier entry gets
+                # stranded, and if anything it is the WORSE way — a tombstone
+                # at least carries a README pointing at the live slug, whereas
+                # a typo'd directory is a silent orphan nothing will ever read.
+                # Forensics for this ticket found entries sitting in the wrong
+                # agent directory twice, so this is an observed failure, not a
+                # theoretical one.
+                #
+                # TIERED strictness — FAIL CLOSED WHERE WE CAN SEE, ADVISORY
+                # WHERE WE CANNOT:
+                #
+                #   target dir EXISTS          -> pass silently, always
+                #   roster resolves + slug
+                #     unknown + dir absent     -> HARD ERROR (waivable with
+                #                                 --allow-new-agent-dir)
+                #   roster UNRESOLVABLE        -> advisory warning, never refuse
+                #
+                # The dir-EXISTS pass-through is load-bearing and must NOT be
+                # "tidied away" by a future reader as a redundant early return.
+                # The agent tier legitimately hosts NON-PERSONA homes, and two
+                # are live right now: agents/ios (2 entries) and
+                # agents/security-reviewer (1 entry). Neither slug will ever
+                # appear in the persona catalogue, so a blanket hard error
+                # would refuse every future append to both. An established
+                # directory holding real knowledge is its own evidence of
+                # legitimacy; what this guard exists to stop is CREATING a new
+                # one from a slug nobody can vouch for.
+                #
+                # The unresolvable-roster arm stays advisory because the roster
+                # lives in ~/dev-team/.claude/agents-master/, an Academy/M3Pro
+                # checkout that a tap consumer machine does not have. Failing
+                # closed on a registry we cannot read would brick agent-tier
+                # authoring on every consumer host — the same trap XACA-0802
+                # avoided with its fail-open ruling on an undeclared
+                # primary_host. No roster, no opinion.
+                if [[ -d "$target_dir" ]]; then
+                    return 0
+                fi
+
+                local _kb_dg_roster _kb_dg_known=false _kb_dg_p
+                if ! _kb_dg_roster=$(_kb_knowledge_all_persona_slugs 2>/dev/null); then
+                    echo "Warning: cannot verify persona '${slug}' — the master persona catalogue (~/dev-team/.claude/agents-master/) is not present on this host, so agents/${slug}/ is being created UNVERIFIED. If this is a typo, the entry will be invisible to kb-knowledge-search for the persona you meant." >&2
+                    return 0
+                fi
+
+                for _kb_dg_p in ${(f)_kb_dg_roster}; do
+                    if [[ "$_kb_dg_p" == "$slug" ]]; then _kb_dg_known=true; break; fi
+                done
+                if [[ "$_kb_dg_known" == "true" ]]; then
+                    return 0
+                fi
+
+                if [[ "$allow_new" == "true" ]]; then
+                    echo "Warning: '${slug}' is not a known persona — creating a NEW agent knowledge directory anyway because --allow-new-agent-dir was passed. If this is a typo rather than a deliberate non-persona home, the entry will be invisible to kb-knowledge-search for the persona you meant." >&2
+                    return 0
+                fi
+
+                echo "Error: '${slug}' is not a known persona in the master catalogue, and agents/${slug}/ does not exist — refusing to create a new agent knowledge directory." >&2
+                local -a _kb_dg_sugg
+                _kb_dg_sugg=($(printf '%s\n' "$_kb_dg_roster" | _kb_knowledge_suggest_from_list "$slug"))
+                if (( ${#_kb_dg_sugg[@]} == 1 )); then
+                    # Exactly one candidate — safe to hand back a runnable
+                    # command, the same treatment the team arm gives its
+                    # unambiguous "finance" -> "finance-personal" case.
+                    echo "  Did you mean: ${_kb_dg_sugg[1]}" >&2
+                    echo "  Fix: kb-knowledge-add agent ${_kb_dg_sugg[1]} \"<title>\"" >&2
+                elif (( ${#_kb_dg_sugg[@]} > 1 )); then
+                    # Several candidates — deliberately NO "Fix:" line, for the
+                    # same reason as the team arm: printing one arbitrary slug
+                    # as THE answer would be a confident guess, and a
+                    # confidently wrong destination is the failure this guard
+                    # exists to prevent.
+                    echo "  Did you mean one of: ${_kb_dg_sugg[*]}" >&2
+                else
+                    echo "  Fix: use a persona slug from the master catalogue — the frontmatter 'name:' field in ~/dev-team/.claude/agents-master/<team>/<persona>.md, which is the runtime binding, not the filename." >&2
+                fi
+                echo "  Why this fails CLOSED: a slug nobody can vouch for creates a brand-new directory that no kb-knowledge-search for the persona you meant will ever read — the 'stranded and invisible' entry XACA-0842 was raised to eliminate. An EXISTING agent directory is always accepted, so a legitimate non-persona home (agents/ios, agents/security-reviewer) is unaffected; only creating a new one is gated." >&2
+                echo "  Override: pass --allow-new-agent-dir to create the directory anyway — correct when you are deliberately opening a new NON-persona agent home." >&2
+                return 1
+            fi
+
+            # Reaching here means the destination is a tombstone.
+            # NOTE the deliberate asymmetry with every other flag in this
+            # function: --allow-retired-agent-dir waives THIS policy check, and
+            # nothing more. The independent mechanism backstop in
+            # _kb_alloc_slot (XACA-0934-002) still refuses an EMPTY tombstone,
+            # so in the common case the override warns here and the write is
+            # then rejected one layer down. That is intended, not a bug — the
+            # id collision the backstop prevents is unrecoverable-in-place, so
+            # it is unwaivable by design (precedent: the two tap parity gates
+            # that carry no waiver). What the override does buy is the case the
+            # backstop correctly declines to touch: a retired directory that
+            # still holds real entries, where the id space is unambiguous and
+            # the author genuinely means to append.
+            if [[ "$allow" == "true" ]]; then
+                echo "Warning: 'agents/${slug}' is a RETIRED persona directory — writing there anyway because --allow-retired-agent-dir was passed. The entry will be invisible to kb-knowledge-search, and its id may collide with one already used in the canonical directory." >&2
+                return 0
+            fi
+
+            echo "Error: 'agents/${slug}' is a RETIRED persona directory (consolidated away by XACA-0842/XACA-0907) — refusing to write knowledge into a tombstone." >&2
+            if [[ -n "$canonical" ]]; then
+                echo "  Fix: use the canonical slug instead —" >&2
+                echo "         kb-knowledge-add agent ${canonical} \"<title>\"" >&2
+            else
+                echo "  Fix: its README.md declares 'status: retired'; use the live persona slug it points at." >&2
+            fi
+            echo "  Why: nothing searches a retired directory, so the entry would be stranded and invisible (the exact failure XACA-0842 eliminated), the id allocator would hand out an id the canonical directory already uses, and kb-knowledge-validate would then FAIL on the resurrected duplicate." >&2
+            echo "  Override: pass --allow-retired-agent-dir to write there anyway, accepting a stranded entry and a probable id collision." >&2
+            return 1
+            ;;
+        team)
+            local t
+            for t in $(_kb_knowledge_registered_team_slugs); do
+                [[ "$t" == "$slug" ]] && return 0
+            done
+
+            # Not in the registry. Before refusing, accept an ESTABLISHED
+            # directory — one that already holds at least one real tNNN-*.md
+            # entry — as self-evidence of a real team. This is not a loophole;
+            # it is the specific fail-closed friction worth avoiding. A
+            # team-paths.json can be regenerated or clobbered by an installer
+            # (it has been: all ten freelance-* teams vanished from it once),
+            # and a registry wipe must not lock an existing team out of its own
+            # knowledge base. What XACA-0784 asks to block is the creation of a
+            # NEW shared directory from an unrecognised slug — and an empty or
+            # nonexistent directory is exactly that case.
+            local target_dir="${write_root}/teams/${slug}"
+            local f
+            for f in "${target_dir}"/t[0-9][0-9][0-9]-*.md; do
+                [[ -f "$f" ]] || continue
+                return 0
+            done
+
+            if [[ "$allow" == "true" ]]; then
+                echo "Warning: '${slug}' is not a registered team — creating a NEW shared team knowledge directory because --allow-new-team was passed. Verify this slug carries no personal data: this write goes to the fleet-synced knowledge root." >&2
+                return 0
+            fi
+
+            echo "Error: '${slug}' is not a registered team — refusing to create a new shared team knowledge directory." >&2
+            local -a suggestions
+            suggestions=($(_kb_knowledge_suggest_team_slugs "$slug"))
+            if (( ${#suggestions[@]} == 1 )); then
+                # Exactly one candidate — safe to hand back a runnable command.
+                # This is the canonical XACA-0784 case ("finance" ->
+                # "finance-personal"), and a copy-pasteable fix is the whole
+                # point of naming the slug rather than just refusing.
+                echo "  Did you mean: ${suggestions[1]}" >&2
+                echo "  Fix: kb-knowledge-add team ${suggestions[1]} \"<title>\"" >&2
+            elif (( ${#suggestions[@]} > 1 )); then
+                # Several candidates (e.g. "freelance" prefixes ten real
+                # teams). Deliberately NO "Fix:" line here — printing one
+                # arbitrary slug as THE answer would be a confident guess, and
+                # a confidently wrong destination is the failure this guard
+                # exists to prevent.
+                echo "  Did you mean one of: ${suggestions[*]}" >&2
+            else
+                echo "  Fix: use a slug registered in ~/.aiteamforge/team-paths.json (run 'kb-knowledge-add team --help', or provision the team with scripts/kb-init-team)." >&2
+            fi
+            echo "  Why this fails CLOSED: an unrecognised slug does NOT match the local-only (PII) team floor, so it is routed to the SYNCED knowledge root — a short or typo'd form of a personal team (e.g. 'finance' for 'finance-personal') would publish personal data to every machine in the fleet instead of containing it locally (XACA-0784, surfaced by XACA-0779)." >&2
+            echo "  Override: pass --allow-new-team to create the directory anyway, only after confirming the entry carries no personal data." >&2
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
 # Internal: slugify a string → lowercase, hyphen-separated, no non-alnum chars
 _kb_knowledge_slugify() {
     local s="${1-}"
@@ -12598,9 +13054,67 @@ EOF
 # Stdout: absolute path of the reserved (empty, 0-byte) placeholder file.
 # Returns non-zero (and prints nothing usable) on failure.
 _kb_alloc_slot() {
+    # Self-contained glob behaviour — see _kb_knowledge_all_persona_slugs. Matters here
+    # because kb-knowledge-promote also calls this function and does not set
+    # NO_NOMATCH, and the tombstone backstop below globs a directory that by
+    # definition holds no entries.
+    setopt LOCAL_OPTIONS NO_NOMATCH
     local target_dir="${1:?_kb_alloc_slot: target_dir required}"
     local prefix="${2:?_kb_alloc_slot: prefix required}"
     local slug="${3:?_kb_alloc_slot: slug required}"
+
+    # ── XACA-0934-002: tombstone backstop ────────────────────────────────────
+    #
+    # Refuse to allocate an id inside a directory that holds a RETIREMENT
+    # README and ZERO real <prefix>NNN-*.md entries.
+    #
+    # THIS IS NOT REDUNDANT WITH _kb_knowledge_destination_guard, and it is
+    # deliberately not folded into it. The two catch the same event by two
+    # independent mechanisms, and each covers the other's blind spot:
+    #
+    #   * The destination guard is a POLICY check on the caller's SLUG, in
+    #     kb-knowledge-add only. It is bypassable by design (--allow-retired-
+    #     agent-dir), and it reads the tombstone's frontmatter — so it goes
+    #     quiet if a future README drifts, loses its `status:`/`consolidated_
+    #     into:` keys, or is hand-edited.
+    #
+    #   * This is a MECHANISM check at the allocator, the single chokepoint
+    #     every writer funnels through — kb-knowledge-add AND kb-knowledge-
+    #     promote, which the destination guard does not cover at all. It gates
+    #     on the property that actually caused the damage: an entry-free
+    #     directory reports "highest NNN = 0", so the allocator confidently
+    #     hands out <prefix>001 — ids that already exist in the canonical
+    #     directory. That is the mechanism that produced the k001/k002
+    #     collision, twice (agents/jett-reno, then agents/nahla-ake on
+    #     2026-08-24). It must still fire even if the policy guard above is
+    #     bypassed or has gone blind.
+    #
+    # The ZERO-ENTRIES half of the condition is load-bearing, and it is the
+    # same rule the XACA-0842 validate gate settled on (_kb_kpd_has_entries):
+    # a directory that already holds real entries is a live knowledge home
+    # whatever its README says, and refusing to extend it would strand the
+    # author instead of the knowledge. Only the entry-free case is a tombstone.
+    if [[ -f "${target_dir}/README.md" ]]; then
+        local _kb_as_status _kb_as_into
+        _kb_as_status=$(_kb_knowledge_yaml_field "${target_dir}/README.md" "status")
+        _kb_as_into=$(_kb_knowledge_yaml_field "${target_dir}/README.md" "consolidated_into")
+        if [[ "$_kb_as_status" == "retired" ]] || [[ -n "$_kb_as_into" ]]; then
+            local _kb_as_f _kb_as_has_entries=false
+            for _kb_as_f in "${target_dir}/${prefix}"[0-9][0-9][0-9]-*.md; do
+                [[ -f "$_kb_as_f" ]] || continue
+                _kb_as_has_entries=true
+                break
+            done
+            if [[ "$_kb_as_has_entries" != "true" ]]; then
+                echo "Error: refusing to allocate an entry id in '${target_dir}' — its README.md declares the directory RETIRED and it holds no entries (XACA-0934-002)." >&2
+                if [[ -n "$_kb_as_into" ]]; then
+                    echo "  Canonical destination: ${_kb_as_into}" >&2
+                fi
+                echo "  Why: an empty tombstone reports 'highest id = 0', so this allocator would hand out ${prefix}001 — an id the canonical directory already uses. That is exactly the collision XACA-0934 exists to stop." >&2
+                return 1
+            fi
+        fi
+    fi
 
     # Normalize to an absolute path so the lock key is stable regardless of the
     # caller's cwd. Callers mkdir -p target_dir before calling, so it exists;
@@ -12658,7 +13172,7 @@ kb-knowledge-add() {
     fi
 
     if $show_help; then
-        echo "Usage: kb-knowledge-add <tier> [<target>] \"<title>\" [--force] [--allow-foreign-host] [--allow-nonstandard-base]"
+        echo "Usage: kb-knowledge-add <tier> [<target>] \"<title>\" [--force] [--allow-foreign-host] [--allow-nonstandard-base] [--allow-retired-agent-dir] [--allow-new-agent-dir] [--allow-new-team]"
         echo ""
         echo "  tier       agent | subject | project | team"
         echo "  target     Agent name, subject path, team name, or (project) optional slug"
@@ -12682,6 +13196,37 @@ kb-knowledge-add() {
         echo "             it. Normally the write is redirected to the canonical base,"
         echo "             because the resolved path creates a second knowledge base that"
         echo "             search will not read. Does NOT waive --force's PII check."
+        echo "  --allow-retired-agent-dir"
+        echo "             agent tier only (XACA-0934): write into a RETIRED persona"
+        echo "             directory — one consolidated away by XACA-0842/XACA-0907 and"
+        echo "             kept only as a README redirect. Normally refused, because the"
+        echo "             entry would be invisible to kb-knowledge-search and its id"
+        echo "             would collide with one already used in the canonical"
+        echo "             directory. Use the canonical slug the error names instead."
+        echo "             Does NOT waive --allow-new-team's PII check, does NOT waive"
+        echo "             --allow-new-agent-dir's unknown-slug check, and does NOT"
+        echo "             waive the allocator's own refusal to hand out an id inside an"
+        echo "             EMPTY tombstone (XACA-0934-002) — that one has no waiver."
+        echo "  --allow-new-agent-dir"
+        echo "             agent tier only (XACA-0934): CREATE an agent knowledge"
+        echo "             directory for a slug that is not a known persona in the master"
+        echo "             catalogue. Normally refused, because a typo'd slug produces a"
+        echo "             brand-new directory that no search for the persona you meant"
+        echo "             will ever read. Only ever consulted when the directory does"
+        echo "             NOT already exist — an established one (e.g. the non-persona"
+        echo "             homes agents/ios and agents/security-reviewer) always passes,"
+        echo "             and a host with no persona catalogue at all only warns."
+        echo "             Use this when deliberately opening a new non-persona home."
+        echo "             Does NOT waive --allow-retired-agent-dir's tombstone check."
+        echo "  --allow-new-team"
+        echo "             team tier only (XACA-0784): create a NEW shared team knowledge"
+        echo "             directory for a slug that is not registered in team-paths.json"
+        echo "             and is not a known local-only team. Normally refused, because"
+        echo "             an unregistered slug never matches the local-only (PII) floor —"
+        echo "             so a typo'd or short form of a personal team (e.g. 'finance'"
+        echo "             for 'finance-personal') publishes personal data to the"
+        echo "             fleet-synced root instead of containing it locally."
+        echo "             Does NOT waive either agent-tier check above."
         echo ""
         echo "Examples:"
         echo "  kb-knowledge-add agent emh \"kapt error patterns\""
@@ -12715,6 +13260,9 @@ kb-knowledge-add() {
     local flag_allow_global=false
     local flag_allow_foreign_host=false
     local flag_allow_nonstandard_base=false
+    local flag_allow_retired_agent_dir=false
+    local flag_allow_new_agent_dir=false
+    local flag_allow_new_team=false
     local -a _kb_add_filtered_args=()
     local _kb_add_arg
     for _kb_add_arg in "$@"; do
@@ -12724,6 +13272,12 @@ kb-knowledge-add() {
             flag_allow_foreign_host=true
         elif [[ "$_kb_add_arg" == "--allow-nonstandard-base" ]]; then
             flag_allow_nonstandard_base=true
+        elif [[ "$_kb_add_arg" == "--allow-retired-agent-dir" ]]; then
+            flag_allow_retired_agent_dir=true
+        elif [[ "$_kb_add_arg" == "--allow-new-agent-dir" ]]; then
+            flag_allow_new_agent_dir=true
+        elif [[ "$_kb_add_arg" == "--allow-new-team" ]]; then
+            flag_allow_new_team=true
         else
             _kb_add_filtered_args+=("$_kb_add_arg")
         fi
@@ -12764,9 +13318,17 @@ kb-knowledge-add() {
             if _kb_is_local_persona "$persona"; then
                 write_root="$local_root"
             fi
-            # XACA-0802: routing is settled; now ask whether THIS HOST is allowed
-            # to author it. Must run before mkdir -p / id allocation below so a
-            # refusal leaves no directory and no file.
+            # XACA-0934: routing is settled; ask FIRST whether the destination
+            # is a live persona directory at all, or a RETIREMENT TOMBSTONE
+            # left behind by the XACA-0842/XACA-0907 consolidations. Runs
+            # before the host-affinity guard (name correctness precedes host
+            # authorization) and before mkdir -p / id allocation below, so a
+            # refusal leaves no directory and no file — same contract as the
+            # guard beneath it.
+            _kb_knowledge_destination_guard agent "$persona" "$write_root" "$flag_allow_retired_agent_dir" "$flag_allow_new_agent_dir" || return 1
+            # XACA-0802: now ask whether THIS HOST is allowed to author it.
+            # Must run before mkdir -p / id allocation below so a refusal
+            # leaves no directory and no file.
             _kb_knowledge_host_affinity_guard "$persona" agent "$flag_allow_foreign_host" || return 1
             title_raw="${*:2}"
             target_dir="${write_root}/agents/${persona}"
@@ -12857,6 +13419,13 @@ kb-knowledge-add() {
             if _kb_is_local_only_team "$team_name"; then
                 write_root="$local_root"
             fi
+            # XACA-0784: is this a REGISTERED team, or an unrecognised slug
+            # that would silently manufacture a new SHARED team directory?
+            # This is the PII-critical arm of the destination guard — an
+            # unregistered slug never matches the local-only floor above, so
+            # write_root is still the fleet-synced global root at this point.
+            # Fails closed. Refuses BEFORE mkdir -p / id allocation.
+            _kb_knowledge_destination_guard team "$team_name" "$write_root" "$flag_allow_new_team" || return 1
             # XACA-0802: same host-authorization check as the agent tier — see
             # the comment there. Refuses BEFORE mkdir -p / id allocation.
             _kb_knowledge_host_affinity_guard "$team_name" team "$flag_allow_foreign_host" || return 1
