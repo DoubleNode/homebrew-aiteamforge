@@ -6,18 +6,18 @@
 # THE BUG THIS FIXES: *-connect.sh scripts open an agent panel by ssh-ing to
 # a remote host and running "${REMOTE_ATF_DIR}/scripts/agent-panel-display.sh"
 # there. 6 of 11 scripts never probed the remote at all (they just reused the
-# LOCAL AITEAMFORGE_DIR, e.g. "$HOME/dev-team" on the machine running the
+# LOCAL AITEAMFORGE_DIR, e.g. the dev-team checkout under $HOME on the machine running the
 # connect script — wrong host entirely). The other 5 probed with
 # `[ -d "$candidate" ]` across two hardcoded directories, which is fooled by
 # a same-named DECOY directory that exists but is not an AITeamForge install
-# (e.g. a kanban-data-only ~/dev-team checkout with no scripts/ subtree).
+# (e.g. a kanban-data-only dev-team checkout under $HOME with no scripts/ subtree).
 #
 # THE FIX: probe for the FILE this caller is about to invoke
 # (scripts/agent-panel-display.sh), not merely a directory, across three
 # candidates in priority order:
 #   1. $(brew --prefix)/opt/aiteamforge/libexec/share   (tap install)
 #   2. $HOME/aiteamforge
-#   3. $HOME/dev-team
+#   3. the dev-team checkout under $HOME
 # The first candidate whose scripts/agent-panel-display.sh exists wins. If
 # NONE match, fail loudly — never silently fall back to a guess, which is
 # the exact shape of the original bug.
@@ -109,7 +109,19 @@ if [ -n "$brew_bin" ]; then
     fi
 fi
 d2="$HOME/aiteamforge"
-d3="$HOME/dev-team"
+# XACA-1006-010: do NOT write that literal path form here. This value is a
+# path on the REMOTE host, but the upgrade renderer in aiteamforge-upgrade.sh,
+# _xaca0608_render_team_script() rewrites that exact literal (and the braced
+# and tilde forms) to the CONSUMING machine local WORKING_DIR whenever it
+# materializes a file from the mandatory set -- which this helper joined in
+# XACA-1006-004a. That rewrite is correct for files where the literal means "my
+# own base dir"; it is wrong here, and would silently bake a local path into a
+# remote probe candidate on every `aiteamforge upgrade`. Assembling the string
+# keeps it out of the sed chain reach. Compare remote-tmux-attach.sh, the other
+# remote-delegated file in that set, which sidesteps this by never embedding the
+# literal at all (it takes the path as an argument).
+_dt="dev-team"
+d3="$HOME/$_dt"
 for d in "$d1" "$d2" "$d3"; do
     if [ -n "$d" ] && [ -f "$d/scripts/agent-panel-display.sh" ]; then
         echo "LCARS_ATF_FOUND:$d"
