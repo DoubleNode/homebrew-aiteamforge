@@ -659,6 +659,42 @@ install_remote_tmux_attach_script() {
     success "Installed: $dest"
 }
 
+# XACA-1006: Install lcars-remote-atf-resolve.sh to AITEAMFORGE_DIR/scripts/ so
+# freshly rendered *-connect.sh scripts (which hard-source it as
+# ${AITEAMFORGE_DIR}/scripts/lcars-remote-atf-resolve.sh, a LOCAL client-side
+# path, to resolve the REMOTE AITeamForge dir for the agent-panel ssh command)
+# find it on disk. Same shape as XACA-0774's remote-tmux-attach.sh seeding
+# above — a fresh install with no prior copy on disk needs an explicit seed;
+# the upgrade path's materialize-when-absent sweep (see
+# _xaca0673_mandatory_materialize_basenames in aiteamforge-upgrade.sh) only
+# fixes ALREADY-installed machines going forward, not a brand-new install.
+# SIBLING-DRIFT NOTE: this install function is paired with:
+#   (a) the _xaca0673_mandatory_materialize_basenames entry in
+#       aiteamforge-upgrade.sh (materialize-when-absent on upgrade — this is a
+#       BRAND-NEW file, so the self-maintaining *.sh sweep's default "only
+#       refresh if already present" rule would otherwise never lay it down on
+#       existing installs).
+#   (b) no per-file removal entry in aiteamforge-uninstall.sh — that script
+#       removes the entire scripts/ directory wholesale (remove_files()'s
+#       dirs_to_remove), so this file is covered without an individual entry.
+# All sites must stay in sync when lcars-remote-atf-resolve.sh is renamed or moved.
+install_lcars_remote_atf_resolve_script() {
+    local scripts_src="$INSTALL_ROOT/share/scripts"
+    local src="${scripts_src}/lcars-remote-atf-resolve.sh"
+    local dest="$AITEAMFORGE_DIR/scripts/lcars-remote-atf-resolve.sh"
+
+    if [ ! -f "$src" ]; then
+        warning "lcars-remote-atf-resolve.sh not found at: ${src} (skipping)"
+        return 0
+    fi
+
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    info "Installing lcars-remote-atf-resolve.sh (remote AITeamForge dir resolver)"
+    cp "$src" "$dest"
+    chmod +x "$dest"
+    success "Installed: $dest"
+}
+
 # XACA-0698: Install kb-init-team and kb-init-team-guard.sh to AITEAMFORGE_DIR/scripts/
 # so a fresh install with NO team selected still has the provisioner available.
 # Without this, install-team.sh (which is team-gated) is the only installer that
@@ -2521,6 +2557,7 @@ install_kanban_system() {
     install_worktree_personas_script
     install_kb_port_reconcile_script
     install_remote_tmux_attach_script
+    install_lcars_remote_atf_resolve_script
     install_kb_init_team_scripts
     install_kanban_hooks
 
