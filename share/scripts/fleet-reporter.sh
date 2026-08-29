@@ -810,8 +810,14 @@ get_lcars_services() {
     _lcars_build_live_map
 
     local -a session_names=() divisions=() projects=() teams=() ports=()
+    # live_port/live_team are deliberately read-and-discarded: they name fields
+    # 2 and 3 of the live-map record so the read below stays self-documenting,
+    # but the port is re-resolved through get_lcars_port() (see the comment in
+    # the loop) rather than trusted from the map. Keeping the descriptive names
+    # is worth one suppression; renaming them to _ would hide the record shape.
     local session_name live_port live_team division project team port
 
+    # shellcheck disable=SC2034
     while read -r session_name live_port live_team; do
         [ -n "$session_name" ] || continue
 
