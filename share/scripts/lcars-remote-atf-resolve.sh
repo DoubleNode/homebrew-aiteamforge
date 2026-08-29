@@ -83,7 +83,7 @@ lcars_resolve_remote_atf_dir() {
     local remote_out
     remote_out="$(ssh -o ConnectTimeout=5 -o BatchMode=yes -- "$host" /bin/zsh -s 2>&1 <<'REMOTE_PROBE'
 # `ssh ... /bin/zsh -s` is a non-login, non-interactive shell: it does NOT
-# source .zprofile/.zshrc, so Homebrew's PATH shellenv line never runs and
+# source .zprofile/.zshrc, so the Homebrew PATH shellenv line never runs and
 # `command -v brew` silently fails even when Homebrew is installed and
 # healthy (observed live on darren-m4-mini: candidate 1 resolved empty and
 # the probe fell through to $HOME/aiteamforge instead of the tap install).
