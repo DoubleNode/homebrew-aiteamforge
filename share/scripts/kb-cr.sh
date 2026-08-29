@@ -275,8 +275,10 @@ _kb_cr_preamble() {
 # file already use to answer "which CR does this item belong to".
 #
 # The distinction is what keeps this from breaking genuinely-legacy items:
-#   * flat cr_id present, no crAssignment  -> a real v1 CR. PERMITTED, exactly
-#     as before. This is the population the v1 path exists for.
+#   * flat cr_id present, no crAssignment  -> a real v1 CR. PERMITTED, provided
+#     the CR it names actually EXISTS in .crs[] (XACA-0924-018 — presence of an
+#     id is not existence of the CR; see the inline note at the check). This is
+#     the population the v1 path exists for.
 #   * neither present                      -> pristine, or freshly detached.
 #     There is no CR here to submit, approve or deploy, so every v1 verb is
 #     refused. This case is unambiguously wrong, which is why it is the only
@@ -300,7 +302,49 @@ _kb_cr_require_item_binding() {
 
     flat=$(_kb_jq_read "$board_file" \
         ".backlog[$item_idx].cr_id // \"\"" -r 2>/dev/null)
-    [[ -n "$flat" ]] && return 0
+    if [[ -n "$flat" ]]; then
+        # XACA-0924-018. PRESENCE of a flat cr_id is not EXISTENCE of the CR it
+        # names. The original check accepted any non-empty string, so a flat
+        # cr_id pointing at a CR that is not on the board satisfied the binding
+        # and `kb-cr approve` stamped crState=cr-approved + cr_approved_at
+        # against nothing — the same "invent a change request" outcome this
+        # helper was added to close, reached by a different door.
+        #
+        # Narrow by design, for back-compat: the existence test runs ONLY when
+        # the board actually has a .crs[] array with entries in it. A true
+        # pre-container v1 board has no containers to look the id up in, and
+        # failing every flat binding there would break exactly the legacy
+        # population this path exists to serve. Where .crs[] IS populated, an
+        # id absent from it is unambiguously dangling.
+        #
+        # Measured across the 6 real team boards before the change: exactly one
+        # item is bound by flat cr_id alone (XIOS-0632 -> CR-IOS-20260505-0632),
+        # and that CR IS present in .crs[]. So this costs the real legacy
+        # population nothing.
+        local cr_count
+        cr_count=$(_kb_jq_read "$board_file" '(.crs // []) | length' -r 2>/dev/null)
+        [[ -z "$cr_count" ]] && cr_count=0
+        if [[ "$cr_count" -eq 0 ]]; then
+            return 0
+        fi
+
+        local found
+        # --arg, not string interpolation: a cr_id carrying a quote or a
+        # backslash would otherwise splice into the jq program itself.
+        found=$(_kb_jq_read "$board_file" \
+            '[(.crs // [])[] | select(.id == $cid)] | length' \
+            --arg cid "$flat" -r 2>/dev/null)
+        [[ -z "$found" ]] && found=0
+        if [[ "$found" -gt 0 ]]; then
+            return 0
+        fi
+
+        echo "kb-cr $verb: item '$item_id' names CR '$flat', but no such CR exists on this board." >&2
+        echo "  The legacy flat cr_id field is set, but .crs[] holds $cr_count container(s) and none of them has that id, so the binding is dangling." >&2
+        echo "  Proceeding would write a CR state and timestamp for a change request that is not on the board — which is indistinguishable, downstream, from one that was never raised." >&2
+        echo "  Re-point the item at a real CR with 'kb-cr attach <CR-ID> $item_id', or raise one with 'kb-cr draft $item_id'." >&2
+        return 1
+    fi
 
     echo "kb-cr $verb: item '$item_id' has no change request." >&2
     echo "  It has neither a crAssignment.crId back-pointer to a CR container nor a legacy flat cr_id, so there is no CR to $verb." >&2
@@ -765,8 +809,40 @@ _kb_cr_stamp_state_entry() {
     # Evidence gate — see the header block. Only a FABRICATING write is gated:
     # if $existing is set we are preserving, which asserts nothing new.
     local missing=""
+    local _me_rc=0
     if [[ -z "$existing" ]]; then
+        # XACA-0924-013. `missing=$(...)` captures stdout; the EXIT CODE has to
+        # be read separately or it is discarded — and _kb_cr_missing_evidence
+        # returns non-zero with EMPTY stdout for a state it does not recognise.
+        # Discarding it made "I could not evaluate the prerequisites" arrive at
+        # the `[[ -n "$missing" ]]` test looking exactly like "there are no
+        # prerequisites", so the refusal never fired and the gate stamped the
+        # timestamp. Fail-open, in the gate itself.
+        #
+        # Reproduced by modelling the drift the header of
+        # _kb_cr_state_required_evidence warns about: a new crState added to
+        # _kb_cr_state_entry_ts_field and to `transition`'s whitelist but MISSED
+        # in the prerequisite map. `kb-cr transition <CR> <new-state>` then
+        # stamped that state's entry timestamp on a pristine cr-drafted CR with
+        # no --force and no cr_evidence_override event. (The unknown-state arm
+        # is not reachable through _kb_cr_state_entry_ts_field TODAY, because
+        # the two case lists happen to agree — which is the point: the gate's
+        # safety was resting on a hand-synced coincidence, and XACA-0924-016
+        # now tests that agreement rather than assuming it.)
+        #
+        # `local missing` is declared on its own line above precisely so `$?`
+        # here belongs to the command substitution and not to `local`. Keep it
+        # that way — folding them back together would silently re-open this.
         missing=$(_kb_cr_missing_evidence "$board_file" "$cr_idx" "$new_state")
+        _me_rc=$?
+        if [[ $_me_rc -ne 0 ]]; then
+            echo "_kb_cr_stamp_state_entry: refusing to stamp $ts_field on CR [$cr_id] — could not determine the prerequisite evidence for state '$new_state'." >&2
+            echo "  _kb_cr_missing_evidence exited $_me_rc, which means _kb_cr_state_required_evidence does not recognise '$new_state'." >&2
+            echo "  That is NOT the same as 'this state has no prerequisites', and it is not safe to treat it as though it were: the answer is unknown, so the write is refused." >&2
+            echo "  If '$new_state' is a legitimate new state, add it to _kb_cr_state_required_evidence (and to _kb_cr_state_entry_ts_field and cr-schema-validator.py's STATE_ENTRY_TS/EVIDENCE_PREREQS) — all four are hand-synced." >&2
+            echo "  --force does NOT override this, deliberately: --force lets an operator skip evidence they know is missing, but nothing here can tell them what the missing evidence would have been. This is a defect in the state maps, not a decision to make." >&2
+            return 1
+        fi
         if [[ -n "$missing" ]]; then
             if [[ "$force_flag" != "force" ]]; then
                 local _m
@@ -5645,11 +5721,20 @@ _kb_cr_help() {
     echo "              when set. cr_doc_link is deprecated — use cr_confluence_url."
     echo "  list [--state <state>] [--platform <name>]"
     echo "              List all CRs on the board (filterable)."
-    echo "  transition <CR-ID> <new-state>"
-    echo "              Update crState. Does NOT write cr_*_at timestamps."
+    echo "  transition <CR-ID> <new-state> [--force]"
+    echo "              Administrative force-write of crState. ALSO STAMPS the"
+    echo "              target state's entry timestamp (XACA-0297) — an existing"
+    echo "              one is preserved, never overwritten."
     echo "              Valid states: cr-drafted, cr-published, cr-submitted,"
     echo "              cr-approved, cr-rejected, cr-held, implementing,"
-    echo "              deployed-dev, deployed-prod, emergency-deployed"
+    echo "              deployed-dev, deployed-prod, emergency-deployed,"
+    echo "              cr-closed"
+    echo "              REFUSED (XACA-0924) when stamping that timestamp would"
+    echo "              invent evidence: the prerequisite stamps for the target"
+    echo "              state must already be on the record. e.g. implementing"
+    echo "              needs cr_submitted_at + cr_approved_at."
+    echo "              --force overrides the refusal and records a"
+    echo "              cr_evidence_override event in the CR activity log."
     echo "  reschedule <CR-ID> <date>"
     echo "              Post-hoc setter for deploy_window_planned (UTC-normalized)."
     echo "              Valid at any crState — no state transition occurs."
