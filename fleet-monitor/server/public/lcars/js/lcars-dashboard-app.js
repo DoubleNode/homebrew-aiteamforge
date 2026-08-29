@@ -690,20 +690,15 @@
 
         for (const projectKey in data.projects) {
             const projectData = data.projects[projectKey];
-            const teamNames = Object.keys(projectData.teams).sort(function(a, b) {
-                // LCARS terminals always sort first
-                const aIsLcars = isLcarsTerminal(projectData.teams[a]);
-                const bIsLcars = isLcarsTerminal(projectData.teams[b]);
-                if (aIsLcars && !bIsLcars) return -1;
-                if (!aIsLcars && bIsLcars) return 1;
-                // Then sort by tab_order
-                const aSession = projectData.teams[a].sessions && projectData.teams[a].sessions[0];
-                const bSession = projectData.teams[b].sessions && projectData.teams[b].sessions[0];
-                const aOrder = aSession && typeof aSession.tab_order === 'number' ? aSession.tab_order : 999;
-                const bOrder = bSession && typeof bSession.tab_order === 'number' ? bSession.tab_order : 999;
-                if (aOrder !== bOrder) return aOrder - bOrder;
-                return a.localeCompare(b);
-            });
+            // XACA-1002-014: LCARS terminals first, then live before
+            // idle-registered, then tab_order (this skin only -- the four
+            // lcars2 skins never had that tier), then alphabetical.
+            // Extracted to the shared module; useTabOrder preserves this
+            // skin's extra tier exactly rather than silently collapsing it
+            // to lcars2's ordering.
+            const teamNames = Object.keys(projectData.teams).sort(
+                LCARS_TERMINAL_CARD.createTeamNameComparator(projectData.teams, { useTabOrder: true })
+            );
             teamNames.forEach(function(teamName) {
                 const teamCard = createTeamCard(teamName, projectData.teams[teamName]);
                 content.appendChild(teamCard);
@@ -961,6 +956,17 @@
         return LCARS_TERMINAL_CARD.createServiceOnlyLcarsCard(name, svc, escapeHtml);
     }
 
+    // XACA-1002: a team can be REGISTERED (present in the team registry /
+    // port map) with no live session and no lcars_service -- server.js's
+    // parseFleetData synthesizes a session-less "idle" bucket for it
+    // (data.idle_registered). This shim preserves the local call site
+    // pattern established by createServiceOnlyLcarsCard above; escapeHtml
+    // (still defined in this file, it has other callers) is injected as
+    // the module has no access to this scope.
+    function createIdleTeamCard(name, idle) {
+        return LCARS_TERMINAL_CARD.createIdleTeamCard(name, idle, escapeHtml);
+    }
+
     function createTeamCard(name, data) {
         const card = document.createElement('div');
         const isLcars = isLcarsTerminal(data);
@@ -970,6 +976,14 @@
         if (!session) {
             if (isLcars && data.lcars_service) {
                 return createServiceOnlyLcarsCard(name, data.lcars_service);
+            }
+            // XACA-1002: gate on the idle_registered marker specifically --
+            // never call the idle renderer unconditionally, or a genuinely
+            // malformed bucket (no sessions, no lcars_service, no marker)
+            // would render a misleading "idle" card instead of the original
+            // empty fallback below.
+            if (data.idle_registered) {
+                return createIdleTeamCard(name, data.idle_registered);
             }
             return card;
         }

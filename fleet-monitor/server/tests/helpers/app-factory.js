@@ -76,6 +76,52 @@ function ensureTeamBucket(divisions, divisionKey, divisionName, projectKey, proj
     return divisions[divisionKey].projects[projectKey].teams[team];
 }
 
+// Mirrored from server.js's resolveRegistryKey (XACA-1002) -- MUST stay in
+// sync with the real implementation, same discipline as resolveDivisionKey/
+// ensureTeamBucket above. See server.js for the full rationale comment
+// (registry-key -> {division, project} inversion, 4-tier precedence,
+// `project === undefined` means `_default`); not repeated here to avoid
+// drift between two copies of the same prose.
+//
+// `liveDivisions` MUST be a snapshot of the divisions that existed BEFORE
+// any idle bucket was materialized -- see server.js's header comment on
+// ensureRegisteredTeamBuckets for the Map-insertion-order hazard this
+// guards against (tests/xaca-1002-registered-team-buckets.test.js's
+// determinism test exercises this directly).
+function resolveRegistryKey(registryKey, liveDivisions) {
+    // 1. Exact division match -- the registry key already IS a live division key.
+    if (liveDivisions[registryKey]) {
+        const projects = liveDivisions[registryKey];
+        let project; // undefined => projectKey resolves to '_default'
+        if (projects.indexOf('_default') !== -1) {
+            project = undefined;
+        } else {
+            project = projects.length === 1 ? projects[0] : undefined;
+        }
+        return { division: registryKey, project };
+    }
+
+    // 2. freelance-<project> -- e.g. "freelance-doublenode-starwords".
+    // Division strips "doublenode-" (via resolveDivisionKey); project keeps it.
+    if (registryKey.startsWith('freelance-')) {
+        const rest = registryKey.slice('freelance-'.length);
+        const { divisionKey } = resolveDivisionKey('freelance', rest);
+        return { division: divisionKey, project: rest };
+    }
+
+    // 3. <div>-<project> -- split at the FIRST hyphen (e.g. "legal-coparenting").
+    const hyphenIdx = registryKey.indexOf('-');
+    if (hyphenIdx !== -1) {
+        const div = registryKey.slice(0, hyphenIdx);
+        const proj = registryKey.slice(hyphenIdx + 1);
+        const { divisionKey } = resolveDivisionKey(div, proj);
+        return { division: divisionKey, project: proj };
+    }
+
+    // 4. Bare key -- no hyphen at all (e.g. "dns", "academy").
+    return { division: registryKey, project: undefined };
+}
+
 function generateUUID() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
         const r = Math.random() * 16 | 0;
@@ -208,6 +254,73 @@ function createApp(opts = {}) {
         }
     }
 
+    // Mirrored from server.js's ensureRegisteredTeamBuckets (XACA-1002) --
+    // MUST stay in sync with the real implementation. Defined INSIDE
+    // createApp() (unlike resolveDivisionKey/ensureTeamBucket/
+    // resolveRegistryKey above, which are pure and module-level) because the
+    // real server.js version reads the module-scoped `registeredTeams` Map
+    // as a free variable rather than a parameter -- mirroring that exactly
+    // means this must close over this factory instance's own `registeredTeams`
+    // binding (the same one `opts.registeredTeams` seeds and the
+    // POST /api/team-register route above mutates), not a copy of it.
+    //
+    // Returned from createApp() below so tests can call it directly against
+    // a hand-built or fixture-derived `divisions` object without going
+    // through the full machine/session parsing pipeline -- see server.js for
+    // the full rationale comment (never-overwrite, roster-bounded,
+    // snapshot-before-mutating-liveDivisions determinism).
+    function ensureRegisteredTeamBuckets(divisions) {
+        const liveDivisions = {};
+        for (const divisionKey of Object.getOwnPropertyNames(divisions)) {
+            const projects = (divisions[divisionKey] && divisions[divisionKey].projects) || {};
+            liveDivisions[divisionKey] = Object.getOwnPropertyNames(projects);
+        }
+
+        for (const [registryKey, teamData] of registeredTeams.entries()) {
+            if (!teamData || typeof teamData !== 'object') continue;
+
+            const terminals = teamData.terminals;
+            if (!terminals || typeof terminals !== 'object' || Array.isArray(terminals)) continue;
+
+            let division, project;
+            try {
+                ({ division, project } = resolveRegistryKey(registryKey, liveDivisions));
+            } catch (e) {
+                // Mirrors server.js: resilient but never silent -- a swallowed
+                // failure here makes a registered team's terminals invisible,
+                // which is the very defect XACA-1002 fixes.
+                console.error(`[XACA-1002] resolveRegistryKey failed for registry key '${registryKey}' -- its terminals will not be rendered:`, e && e.message);
+                continue;
+            }
+            if (!division) {
+                console.error(`[XACA-1002] resolveRegistryKey returned no division for registry key '${registryKey}' -- its terminals will not be rendered.`);
+                continue;
+            }
+
+            const projectKey = project || '_default';
+
+            for (const terminalName of Object.keys(terminals)) {
+                if (!terminalName) continue;
+
+                const existingProject = divisions[division] && divisions[division].projects
+                    ? divisions[division].projects[projectKey]
+                    : null;
+                if (existingProject && existingProject.teams && existingProject.teams[terminalName]) {
+                    continue;
+                }
+
+                const teamBucket = ensureTeamBucket(divisions, division, division, projectKey, project, terminalName);
+                teamBucket.idle_registered = {
+                    team: registryKey,
+                    teamName: teamData.teamName,
+                    terminal: terminalName,
+                    registeredAt: teamData.registeredAt,
+                    lastSeen: teamData.lastSeen
+                };
+            }
+        }
+    }
+
     function parseFleetData() {
         updateMachineStatuses();
 
@@ -271,6 +384,11 @@ function createApp(opts = {}) {
                 }
             }
         }
+
+        // XACA-1002 -- mirrors server.js's parseFleetData call site: runs
+        // AFTER the machine loop above (so every live session/lcars_service
+        // has already claimed its bucket) and BEFORE machineList is built.
+        ensureRegisteredTeamBuckets(divisions);
 
         const machineList = Array.from(machines.values())
             .filter(m => m.machine_id && m.machine_id.length >= 36)
@@ -1023,7 +1141,14 @@ function createApp(opts = {}) {
     return {
         app,
         state: { machines, registeredTeams, pushedBoards, pushedKnowledge, activityLog },
-        tmpDir
+        tmpDir,
+        // XACA-1002: exposed so a test can call the idle-bucket materializer
+        // directly against a hand-built or fixture-derived `divisions` object
+        // (this instance's own `registeredTeams` Map is what it reads --
+        // seed it via opts.registeredTeams or state.registeredTeams before
+        // calling this) without needing a full machine/session round trip.
+        ensureRegisteredTeamBuckets,
+        parseFleetData
     };
 }
 
@@ -1039,6 +1164,13 @@ module.exports = {
         formatUptime,
         generateUUID,
         generateDashboardId,
-        calcBoardStats
+        calcBoardStats,
+        // XACA-1002 + XACA-0983: pure, module-level, no registeredTeams
+        // closure needed -- safe to export directly (unlike
+        // ensureRegisteredTeamBuckets, which is per-createApp()-instance;
+        // see createApp()'s return value for that one).
+        resolveDivisionKey,
+        ensureTeamBucket,
+        resolveRegistryKey
     }
 };

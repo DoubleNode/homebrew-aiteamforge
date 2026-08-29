@@ -315,14 +315,13 @@
 
         for (const projectKey in data.projects) {
             const projectData = data.projects[projectKey];
-            // Sort teams with LCARS terminals first
-            const teamNames = Object.keys(projectData.teams).sort(function(a, b) {
-                const aIsLcars = isLcarsTerminal(projectData.teams[a]);
-                const bIsLcars = isLcarsTerminal(projectData.teams[b]);
-                if (aIsLcars && !bIsLcars) return -1;
-                if (!aIsLcars && bIsLcars) return 1;
-                return a.localeCompare(b);
-            });
+            // XACA-1002-014: LCARS terminals first, then live before
+            // idle-registered, then alphabetical. Extracted to the shared
+            // module -- this comparator was previously inline in all five
+            // app files, the copy-paste shape that module exists to prevent.
+            const teamNames = Object.keys(projectData.teams).sort(
+                LCARS_TERMINAL_CARD.createTeamNameComparator(projectData.teams)
+            );
             teamNames.forEach(function(teamName) {
                 const teamCard = createTeamCard(teamName, projectData.teams[teamName]);
                 content.appendChild(teamCard);
@@ -432,6 +431,17 @@
         return LCARS_TERMINAL_CARD.createServiceOnlyLcarsCard(name, svc, escapeHtml);
     }
 
+    // XACA-1002: a team can be REGISTERED (present in the team registry /
+    // port map) with no live session and no lcars_service -- server.js's
+    // parseFleetData synthesizes a session-less "idle" bucket for it
+    // (data.idle_registered). This shim preserves the local call site
+    // pattern established by createServiceOnlyLcarsCard above; escapeHtml
+    // (still defined in this file, it has other callers) is injected as
+    // the module has no access to this scope.
+    function createIdleTeamCard(name, idle) {
+        return LCARS_TERMINAL_CARD.createIdleTeamCard(name, idle, escapeHtml);
+    }
+
     function createTeamCard(name, data) {
         const card = document.createElement('div');
         const isLcars = isLcarsTerminal(data);
@@ -441,6 +451,14 @@
         if (!session) {
             if (isLcars && data.lcars_service) {
                 return createServiceOnlyLcarsCard(name, data.lcars_service);
+            }
+            // XACA-1002: gate on the idle_registered marker specifically --
+            // never call the idle renderer unconditionally, or a genuinely
+            // malformed bucket (no sessions, no lcars_service, no marker)
+            // would render a misleading "idle" card instead of the original
+            // empty fallback below.
+            if (data.idle_registered) {
+                return createIdleTeamCard(name, data.idle_registered);
             }
             return card;
         }

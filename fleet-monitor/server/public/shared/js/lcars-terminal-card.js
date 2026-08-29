@@ -69,6 +69,115 @@
     }
 
     /**
+     * Render a card for a team that is REGISTERED (present in the team
+     * registry / port map) but has never reported a live session AND has
+     * no lcars_service record either -- i.e. server.js's parseFleetData
+     * synthesized a session-less "idle" bucket for it (XACA-1002). Until
+     * XACA-1002 this bucket type did not exist in the payload at all, so
+     * this is new render surface, not an extracted copy.
+     *
+     * escapeHtml is REQUIRED for the same reason as createServiceOnlyLcarsCard
+     * above: a missing/invalid escapeHtml is a caller programming error, not
+     * a degraded-but-safe runtime state, so this throws loudly instead of
+     * defaulting to a no-op/identity function that would silently reintroduce
+     * the unescaped-innerHTML hazard XACA-0983-015 closed.
+     *
+     * No Port/Machine row: an idle-registered team has neither -- inventing
+     * "unknown" placeholders for both would make the card read as a broken
+     * live card instead of a deliberately idle one. No tabindex/role/click-
+     * or-keydown listeners either -- there is nothing to open, and an
+     * element must not claim to be actionable when it is not (same
+     * principle as the UNREACHABLE branch of createServiceOnlyLcarsCard).
+     *
+     * Built entirely from CSS classes that already exist in both
+     * lcars/css/lcars-fleet-theme.css and lcars2/css/lcars-fleet-theme.css
+     * (.team-card, .team-header, .team-name, .status-indicator.idle,
+     * .session-info, .session-detail, .session-label, .session-value,
+     * .text-status-idle) -- this ticket adds zero new CSS.
+     *
+     * TEXT COLOUR IS .text-status-idle, NOT .text-offline (XACA-1002-012).
+     * .text-offline resolves to --lcars-alert-red, the same red used for a
+     * genuine UNREACHABLE service failure. Idle is a normal resting state,
+     * not a fault, so painting these rows red contradicted the deliberately
+     * muted tan .status-indicator.idle dot in the header -- the card said
+     * "calm" with its dot and "alarm" with its text. .text-status-idle
+     * (--lcars-tan) already existed in both theme sheets and was referenced
+     * by no JS at all, so this agreement costs no new CSS. Do not "restore"
+     * .text-offline here for consistency with createServiceOnlyLcarsCard:
+     * that card IS reporting a failure, and this one is not.
+     *
+     * THE TIMESTAMP ROW IS LABELLED "Last Registered", NOT "Last Seen"
+     * (XACA-1002-013). idle.lastSeen comes from the team registry, and
+     * server.js only ever writes that field in POST /api/team-register --
+     * it tracks registration recency, never session activity. A team that
+     * has NEVER had a live session still shows a recent value every time
+     * its startup script re-registers. Labelling that "Last Seen" invites
+     * an operator to read activity into a number that does not measure it.
+     *
+     * @param {string} name          team/terminal name
+     * @param {object} idle          data.idle_registered record: { team,
+     *                               teamName, terminal, registeredAt, lastSeen }
+     * @param {function} escapeHtml  HTML-escaping function; same contract as
+     *                               createServiceOnlyLcarsCard's escapeHtml
+     *                               param. REQUIRED -- see rationale above.
+     * @returns {HTMLElement}
+     */
+    function createIdleTeamCard(name, idle, escapeHtml) {
+        if (typeof escapeHtml !== 'function') {
+            throw new TypeError(
+                'LCARS_TERMINAL_CARD.createIdleTeamCard: escapeHtml must be a function ' +
+                '(the caller\'s own HTML-escaping helper). Refusing to render unescaped markup ' +
+                'into innerHTML instead of silently skipping escaping.'
+            );
+        }
+
+        const card = document.createElement('div');
+        card.className = 'team-card';
+
+        const teamName = (idle && idle.teamName) || '';
+        const lastSeenDisplay = formatIdleTimestamp(idle && idle.lastSeen);
+
+        card.innerHTML =
+            '<div class="team-header">' +
+                '<div class="team-name">' + escapeHtml(name) + '</div>' +
+                '<span class="status-indicator idle"></span>' +
+            '</div>' +
+            '<div class="session-info">' +
+                '<div class="session-detail"><span class="session-label">Session:</span><span class="session-value text-status-idle">NO ACTIVE SESSION</span></div>' +
+                '<div class="session-detail"><span class="session-label">Team:</span><span class="session-value">' + escapeHtml(teamName) + '</span></div>' +
+                '<div class="session-detail"><span class="session-label">Status:</span><span class="session-value text-status-idle">IDLE (REGISTERED)</span></div>' +
+                '<div class="session-detail"><span class="session-label">Last Registered:</span><span class="session-value">' + escapeHtml(lastSeenDisplay) + '</span></div>' +
+            '</div>';
+
+        card.title = 'Registered team with no active session';
+
+        return card;
+    }
+
+    /**
+     * Render idle.lastSeen (an ISO timestamp string from the team registry)
+     * readably. Falls back to the raw string -- never to a fabricated
+     * "unknown" value -- so a malformed timestamp is visibly malformed
+     * instead of silently laundered into a normal-looking placeholder.
+     *
+     * @param {string} isoString
+     * @returns {string}
+     */
+    function formatIdleTimestamp(isoString) {
+        if (!isoString) {
+            return 'unknown';
+        }
+        const d = new Date(isoString);
+        if (isNaN(d.getTime())) {
+            return String(isoString);
+        }
+        return d.toLocaleString('en-US', {
+            year: 'numeric', month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit'
+        });
+    }
+
+    /**
      * Render a card for a team known to be an LCARS terminal via reported
      * service data (data.lcars_service) but with NO live tmux session.
      *
@@ -165,9 +274,71 @@
         return card;
     }
 
+    /**
+     * Build the comparator used to order team names within one project panel.
+     *
+     * XACA-1002-014. Before this, the comparator was written inline in each of
+     * the FIVE app files -- the exact copy-paste shape this module exists to
+     * prevent. They were NOT all identical: the four lcars2 skins shared one
+     * byte-identical body (LCARS-first, then localeCompare) while
+     * lcars/js/lcars-dashboard-app.js carried an extra tab_order tier between
+     * the two. Extracting them to a single body that "looked right" would have
+     * silently dropped that tier and reordered every card in the dashboard
+     * skin, so the tier is preserved behind `options.useTabOrder` and each
+     * caller keeps the semantics it already had.
+     *
+     * Tiers, in order:
+     *   1. LCARS terminals first (both skins, unchanged).
+     *   2. Live before idle-registered (NEW). 28 idle cards arriving at once
+     *      -- 7 in dns and 7 in each of three freelance divisions -- otherwise
+     *      interleave alphabetically with live ones, so answering "what is
+     *      actually running right now" means reading every card in the panel.
+     *      An idle bucket can never be an LCARS terminal (it has neither a
+     *      session nor an lcars_service, the only two things isLcarsTerminal
+     *      looks at), so tiers 1 and 2 cannot contradict each other.
+     *   3. tab_order, dashboard skin only (`useTabOrder`), unchanged there and
+     *      still absent from lcars2. Idle teams have no session and so always
+     *      scored the 999 sentinel here; tier 2 now states that intent
+     *      directly instead of relying on a sentinel comparison to imply it.
+     *   4. localeCompare on the team name (both skins, unchanged).
+     *
+     * @param {object} teams    projectData.teams -- name -> team bucket
+     * @param {object} [options] { useTabOrder: boolean }
+     * @returns {function(string, string): number}
+     */
+    function createTeamNameComparator(teams, options) {
+        var useTabOrder = !!(options && options.useTabOrder);
+
+        return function (a, b) {
+            var aData = teams[a];
+            var bData = teams[b];
+
+            var aIsLcars = isLcarsTerminal(aData);
+            var bIsLcars = isLcarsTerminal(bData);
+            if (aIsLcars && !bIsLcars) { return -1; }
+            if (!aIsLcars && bIsLcars) { return 1; }
+
+            var aIdle = !!(aData && aData.idle_registered);
+            var bIdle = !!(bData && bData.idle_registered);
+            if (aIdle !== bIdle) { return aIdle ? 1 : -1; }
+
+            if (useTabOrder) {
+                var aSession = aData && aData.sessions && aData.sessions[0];
+                var bSession = bData && bData.sessions && bData.sessions[0];
+                var aOrder = aSession && typeof aSession.tab_order === 'number' ? aSession.tab_order : 999;
+                var bOrder = bSession && typeof bSession.tab_order === 'number' ? bSession.tab_order : 999;
+                if (aOrder !== bOrder) { return aOrder - bOrder; }
+            }
+
+            return a.localeCompare(b);
+        };
+    }
+
     var API = {
         isLcarsTerminal: isLcarsTerminal,
-        createServiceOnlyLcarsCard: createServiceOnlyLcarsCard
+        createServiceOnlyLcarsCard: createServiceOnlyLcarsCard,
+        createTeamNameComparator: createTeamNameComparator,
+        createIdleTeamCard: createIdleTeamCard
     };
 
     // Freeze the namespace itself, not just leave its methods writable —

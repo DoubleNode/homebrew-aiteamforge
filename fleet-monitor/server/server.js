@@ -849,6 +849,169 @@ function ensureTeamBucket(divisions, divisionKey, divisionName, projectKey, proj
     return divisions[divisionKey].projects[projectKey].teams[team];
 }
 
+// XACA-1002: invert resolveDivisionKey() -- map a REGISTRY key (the Map key
+// under `registeredTeams`, e.g. "freelance-doublenode-starwords",
+// "legal-coparenting", "dns") to the (division, project) pair the LIVE
+// payload actually uses. Returning only a division would be wrong: a
+// mis-resolved project doesn't produce a missing card, it produces a
+// phantom DUPLICATE bucket alongside the real one, which is worse than the
+// bug this exists to fix. `project` here is the raw project value (matching
+// the `project` field ensureTeamBucket()/the session loop pass through --
+// undefined means "_default", never the literal string) so callers can do
+// `projectKey = project || '_default'` exactly like the session loop does.
+//
+// Reuses resolveDivisionKey() for the freelance doublenode- stripping rule
+// rather than re-implementing it -- see that function's header comment on
+// why a second copy of that rule is the sibling-heuristic-drift antipattern
+// this codebase has repeated datapoints on.
+// `liveDivisions` MUST be a SNAPSHOT of the divisions that existed before any
+// idle bucket was materialized -- never the live, still-being-mutated
+// `divisions` object. Reading the mutating object makes rule 1 depend on
+// `registeredTeams`' Map insertion order: given registry keys "foo-bar" and
+// "foo", materializing "foo-bar" first creates division "foo" (project "bar"),
+// after which "foo" hits rule 1, finds a sole project "bar", and drops its
+// terminals into "foo/bar" -- silently MERGING two registries' terminals and
+// losing cards. That is the same invisible-terminal defect this ticket exists
+// to close, reintroduced through a different door. With the snapshot, both
+// orders resolve identically ("foo" -> foo/_default, "foo-bar" -> foo/bar).
+function resolveRegistryKey(registryKey, liveDivisions) {
+    // 1. Exact division match -- the registry key already IS a live division key.
+    if (liveDivisions[registryKey]) {
+        const projects = liveDivisions[registryKey];
+        let project; // undefined => projectKey resolves to '_default'
+        if (projects.indexOf('_default') !== -1) {
+            project = undefined;
+        } else {
+            project = projects.length === 1 ? projects[0] : undefined;
+        }
+        return { division: registryKey, project };
+    }
+
+    // 2. freelance-<project> -- e.g. "freelance-doublenode-starwords".
+    // Division strips "doublenode-" (via resolveDivisionKey); project keeps it.
+    if (registryKey.startsWith('freelance-')) {
+        const rest = registryKey.slice('freelance-'.length);
+        const { divisionKey } = resolveDivisionKey('freelance', rest);
+        return { division: divisionKey, project: rest };
+    }
+
+    // 3. <div>-<project> -- split at the FIRST hyphen (e.g. "legal-coparenting").
+    //
+    // XACA-1002-015: this first-hyphen split is NOT an assumption invented
+    // here -- it is the established fleet-wide team-id convention. lcars-ui/
+    // server.py resolves team assets through _split_team_id()/
+    // _resolve_base_team(), which splits ANY team id on its first hyphen with
+    // no per-team table, and scripts/kb-init-team defaults a new team's
+    // ASSET_DIR to that same first segment specifically so provisioning agrees
+    // with that resolution by construction. Rule 3 therefore matches the rest
+    // of the system rather than diverging from it.
+    //
+    // THE LIMITATION, recorded rather than papered over: a team whose OWN id
+    // legitimately contains a hyphen (a hypothetical "main-event" that is one
+    // division, not division "main" + project "event") resolves wrongly here.
+    // Rule 1 would catch it, but only once that division is already live --
+    // structurally unavailable for the never-yet-started team this function
+    // exists to serve. No such team exists today: every hyphenated registry
+    // key is genuinely <div>-<project>. Deliberately NOT "fixed" with a
+    // liveDivisions existence check on the split half, because that would make
+    // an idle team land in its own division and then JUMP to a different
+    // division the moment it started -- trading a hypothetical bug for a
+    // guaranteed one. The real fix is a canonical division field in the
+    // registry rather than string-splitting; that is a schema change, not a
+    // guard. See the characterization test pinning this behaviour.
+    const hyphenIdx = registryKey.indexOf('-');
+    if (hyphenIdx !== -1) {
+        const div = registryKey.slice(0, hyphenIdx);
+        const proj = registryKey.slice(hyphenIdx + 1);
+        const { divisionKey } = resolveDivisionKey(div, proj);
+        return { division: divisionKey, project: proj };
+    }
+
+    // 4. Bare key -- no hyphen at all (e.g. "dns", "academy").
+    return { division: registryKey, project: undefined };
+}
+
+// XACA-1002: materialize a card for every REGISTERED terminal that has no
+// live tmux session and no lcars_service record -- without this, a
+// registered-but-currently-idle terminal simply never enters the ORGS grid
+// (it can only be created by the machine/session loop or the lcars_services
+// loop above, both of which require a live report). Call AFTER those two
+// loops have finished claiming their buckets so the never-overwrite check
+// below has something to check against.
+//
+// Bounded strictly by `registeredTeams`' `terminals` object -- it is
+// structurally impossible for this function to invent a team that isn't in
+// the registry. Never overwrites an existing bucket (the live path always
+// wins) and never touches total_sessions at any level, since an idle team
+// contributes zero sessions -- ensureTeamBucket() itself never increments
+// total_sessions (only the session loop's explicit `divisions[...].total_
+// sessions++` does), so simply not doing that here is sufficient.
+function ensureRegisteredTeamBuckets(divisions) {
+    // Snapshot the LIVE divisions (division key -> its project keys) BEFORE
+    // materializing anything. resolveRegistryKey()'s rule 1 reads this instead
+    // of `divisions` so its answer cannot change as this loop mutates
+    // `divisions` -- see that function's header comment for the card-losing
+    // failure that order-dependence causes.
+    const liveDivisions = {};
+    for (const divisionKey of Object.getOwnPropertyNames(divisions)) {
+        const projects = (divisions[divisionKey] && divisions[divisionKey].projects) || {};
+        liveDivisions[divisionKey] = Object.getOwnPropertyNames(projects);
+    }
+
+    for (const [registryKey, teamData] of registeredTeams.entries()) {
+        // Defensive like the lcars_services loop: skip a malformed registry
+        // record rather than aborting the whole report.
+        if (!teamData || typeof teamData !== 'object') continue;
+
+        const terminals = teamData.terminals;
+        if (!terminals || typeof terminals !== 'object' || Array.isArray(terminals)) continue;
+
+        let division, project;
+        try {
+            ({ division, project } = resolveRegistryKey(registryKey, liveDivisions));
+        } catch (e) {
+            // Skipping this registry entry makes its terminals invisible in the
+            // ORGS grid -- which is precisely the defect XACA-1002 exists to
+            // fix. A silent `continue` here would reintroduce that bug through
+            // the error path and leave no trace to diagnose it from, so this
+            // stays resilient (one bad entry must not abort the whole report)
+            // but is never silent.
+            console.error(`[XACA-1002] resolveRegistryKey failed for registry key '${registryKey}' -- its terminals will not be rendered:`, e && e.message);
+            continue;
+        }
+        if (!division) {
+            console.error(`[XACA-1002] resolveRegistryKey returned no division for registry key '${registryKey}' -- its terminals will not be rendered.`);
+            continue;
+        }
+
+        const projectKey = project || '_default';
+
+        for (const terminalName of Object.keys(terminals)) {
+            if (!terminalName) continue;
+
+            // Never overwrite -- a live session or lcars_service already
+            // claimed this exact (division, project, team) triple.
+            const existingProject = divisions[division] && divisions[division].projects
+                ? divisions[division].projects[projectKey]
+                : null;
+            if (existingProject && existingProject.teams && existingProject.teams[terminalName]) {
+                continue;
+            }
+
+            const teamBucket = ensureTeamBucket(divisions, division, division, projectKey, project, terminalName);
+            // Bucket was just freshly created (the never-overwrite check
+            // above passed), so it's always safe to mark it idle here.
+            teamBucket.idle_registered = {
+                team: registryKey,
+                teamName: teamData.teamName,
+                terminal: terminalName,
+                registeredAt: teamData.registeredAt,
+                lastSeen: teamData.lastSeen
+            };
+        }
+    }
+}
+
 /**
  * Parse sessions into hierarchical structure
  */
@@ -954,6 +1117,15 @@ function parseFleetData() {
             }
         }
     }
+
+    // XACA-1002: materialize idle (registered-but-not-live) team cards. Runs
+    // AFTER the machine loop above so every live session and lcars_service
+    // has already claimed its bucket -- ensureRegisteredTeamBuckets()'s
+    // never-overwrite rule depends on that ordering to have anything to
+    // check against. Does not affect totalSessions (fleet-level, computed
+    // above from machineData.session_count) or any division's total_sessions
+    // (see that function's header comment).
+    ensureRegisteredTeamBuckets(divisions);
 
     // Build machine list (only machines with valid GUIDs)
     const machineList = Array.from(machines.values())
