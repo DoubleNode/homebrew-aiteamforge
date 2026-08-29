@@ -6554,9 +6554,13 @@ kb-knowledge-validate() {
     local dup_slots dup_slot dup_files root_label
     local has_id has_tier has_date has_tags has_agent has_team file_id file_tier xref_line xref resolved_xref resolver_rc idx_id idx_file
     local xref_frontmatter
+    # XACA-0991-004: per-file error flag, reset each entry_files iteration —
+    # lets the loop skip _kb_val_pass for a file that raised an error this
+    # iteration instead of always reporting every examined file as passing.
+    local file_had_error
     local -a entry_files index_ids
 
-    _kb_val_error()   { echo "  [FAIL] $*" >&2; error_count=$((error_count + 1)); }
+    _kb_val_error()   { echo "  [FAIL] $*" >&2; error_count=$((error_count + 1)); file_had_error=1; }
     _kb_val_warn()    { echo "  [WARN] $*" >&2; warning_count=$((warning_count + 1)); }
     _kb_val_pass()    { $flag_quiet || echo "  [OK]   $*"; pass_count=$((pass_count + 1)); }
 
@@ -6740,6 +6744,8 @@ kb-knowledge-validate() {
         # Validate each entry file
         for ef in "${entry_files[@]}"; do
             fname=$(basename "$ef" .md)
+            # XACA-0991-004: reset per file — see declaration comment above.
+            file_had_error=0
 
             # Casing check
             if echo "$fname" | grep -qE '^[KTSPMV]'; then
@@ -6817,7 +6823,11 @@ kb-knowledge-validate() {
                 done < <(echo "$xref_line" | grep -oE '(agents|teams|subjects|project):[a-z0-9/:_-]+')
             done <<< "$xref_frontmatter"
 
-            _kb_val_pass "$(basename "$ef")"
+            # XACA-0991-004: only report/count this file as passed if it did
+            # not raise an error above. WARN-only still counts as passed.
+            if [[ "$file_had_error" -eq 0 ]]; then
+                _kb_val_pass "$(basename "$ef")"
+            fi
         done
 
         # Orphan check: files in INDEX but not on disk (D3: idx_id already contains .md suffix)
@@ -6890,8 +6900,17 @@ kb-knowledge-validate() {
     done
 
     # ── Summary ─────────────────────────────────────────────────────────────────
+    # XACA-0991-004: an unambiguous verdict line — a piped `| tail` loses the
+    # real exit code (it becomes tail's), and a backgrounding harness's own
+    # wrapper line is not the command's status either. State PASS/FAIL and the
+    # exit code in words so this survives both.
     echo "═══════════════════════════════════════════════════════════════════════════"
     echo "  RESULTS: ${pass_count} passed  |  ${warning_count} warnings  |  ${error_count} errors"
+    if [[ "$error_count" -eq 0 ]]; then
+        echo "  VERDICT: PASS — exit code 0"
+    else
+        echo "  VERDICT: FAIL — exit code 1 (${error_count} error(s) reported above; this is NOT a passing run)"
+    fi
     echo "═══════════════════════════════════════════════════════════════════════════"
     echo ""
 
