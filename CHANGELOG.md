@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1001 — mirrors the release-card action-button accessibility fix (native `disabled` -> `aria-disabled` with per-handler click guards) into the tap, plus its cache-buster bump.** Four files re-copied from canonical, matching exactly the drift `sync-tap.sh --check` reported (no other file diverged): `share/lcars-ui/js/lcars.js`, `share/lcars-ui/css/lcars.css` (new `[aria-disabled="true"]` rule blocks and `.sr-only`), `share/lcars-ui/index.html` (`css/lcars.css?v=32.29` -> `32.30`, `js/lcars.js?v=3.70` -> `3.71`), and `share/lcars-ui/tests/test-xaca-1000-release-archive-platform-set.js` (extended with the click-guard positive/negative controls and the `announceToScreenReader` timer-ordering fixes added in XACA-1001-006/XACA-1001-012). Scoped copy of exactly those four files, not a wholesale `sync-tap.sh --commit` run — write-mode `sync_dir` ignores `.gitignore` and has a documented history of sweeping gitignored runtime data into the shipped tap.
+
 - **XACA-1000 — the release ARCHIVE gate no longer hardcodes ios/android/firebase, so non-mobile
   teams can archive a completed release.** `is_release_complete()` in `share/lcars-ui/server.py`
   and its browser twin `isReleaseComplete()` in `share/lcars-ui/js/lcars.js` both required one of

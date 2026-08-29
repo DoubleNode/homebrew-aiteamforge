@@ -9383,7 +9383,21 @@ body {
    opacity 0.5 matches `.lcars-btn:disabled` rather than the 0.3 used below:
    the archived-card buttons are merely inert, whereas this one is meant to be
    noticed and hovered for its explanation, so it stays legible. */
+/* XACA-1001: [aria-disabled="true"] rules added ALONGSIDE :disabled (as
+   SEPARATE rule blocks, not a combined selector list) -- aria-disabled does
+   NOT match the :disabled pseudo-class, so without this a button converted
+   to aria-disabled would silently fall out of every rule below and render
+   fully enabled-looking. Native `disabled` still appears on other,
+   out-of-scope controls elsewhere in this stylesheet, so the :disabled
+   selector/rule stays exactly as it was (kept as a standalone block, not
+   merged into a comma list, so existing tests asserting on
+   `.release-action-btn:disabled {` keep matching). */
 .release-action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.release-action-btn[aria-disabled="true"] {
     opacity: 0.5;
     cursor: not-allowed;
 }
@@ -9395,17 +9409,32 @@ body {
     color: var(--lcars-teal, #66cccc);
 }
 
+.release-action-btn[aria-disabled="true"]:hover {
+    background: rgba(102, 204, 204, 0.2);
+    color: var(--lcars-teal, #66cccc);
+}
+
 .release-action-btn.danger:disabled:hover {
     background: rgba(204, 102, 102, 0.2);
     color: var(--lcars-alert-red, #cc6666);
 }
 
-/* XACA-0056-005: Archived Release Cards - Disabled Buttons */
+.release-action-btn.danger[aria-disabled="true"]:hover {
+    background: rgba(204, 102, 102, 0.2);
+    color: var(--lcars-alert-red, #cc6666);
+}
+
+/* XACA-0056-005: Archived Release Cards - Disabled Buttons
+   XACA-1001: `pointer-events: none` REMOVED. It killed mouse hover, which
+   meant `title` never rendered for archived PROMOTE/EDIT/DELETE -- silently
+   defeating the reason-text fix in the same ticket. Safe to remove ONLY
+   because the click guard (`if (this.getAttribute('aria-disabled') ===
+   'true') return;`, added in the same change) now blocks activation; without
+   that guard this would turn a safely-inert control into a live one. */
 .release-card.archived .release-action-btn.edit-btn,
 .release-card.archived .release-action-btn.promote-btn,
 .release-card.archived .release-action-btn.delete-btn {
     opacity: 0.3;
-    pointer-events: none;
     cursor: not-allowed;
 }
 
@@ -9414,6 +9443,24 @@ body {
 .release-card.archived .release-action-btn.delete-btn:hover {
     background: rgba(102, 204, 204, 0.2);
     color: var(--lcars-teal, #66cccc);
+}
+
+/* XACA-1001: visually-hidden reason text for inert release-card action
+   buttons, exposed to assistive tech via aria-describedby while invisible
+   on screen. Mirrors the inline style already used by
+   announceToScreenReader() in lcars.js -- display:none/visibility:hidden
+   would remove it from the accessibility tree instead of merely hiding it
+   visually, which would silence the very explanation this exists to carry. */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
 }
 
 /* Release Card Items (Expandable) */

@@ -80,7 +80,32 @@ function extractFunction(name) {
             `Update this test to match.`
         );
     }
-    const bodyStart = source.indexOf('{', start);
+    // Locate the body's opening brace by first walking PAST the parameter
+    // list, matching parens rather than scanning for the first '{'. A
+    // default parameter value that is itself an object literal (e.g.
+    // `renderReleaseCard(release, flowConfig = null, projectEnvironments =
+    // {})`) contains a `{}` that balances to zero immediately, so a naive
+    // `source.indexOf('{', start)` finds that `{}` instead of the function
+    // body and returns an empty/truncated slice — caught while wiring up
+    // renderReleaseCard for XACA-1001-006 (its extraction silently produced
+    // an 8-char "body" that was just the tail of the signature, and the
+    // generated Function source then failed with a bare "Unexpected token
+    // 'return'" from the real body's now-dangling statements).
+    const parenOpen = source.indexOf('(', start);
+    let parenDepth = 0;
+    let parenClose = -1;
+    for (let i = parenOpen; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === '(') parenDepth++;
+        else if (ch === ')') {
+            parenDepth--;
+            if (parenDepth === 0) { parenClose = i; break; }
+        }
+    }
+    if (parenClose === -1) {
+        throw new Error(`unbalanced parens while locating ${name}'s parameter list`);
+    }
+    const bodyStart = source.indexOf('{', parenClose);
     let depth = 0;
     for (let i = bodyStart; i < source.length; i++) {
         const ch = source[i];
@@ -100,6 +125,7 @@ let getPlatformName;
 let escapeAttr;
 let jsAttrEscape;
 let announceToScreenReader;
+let renderReleaseCard;
 let __flush;
 let __state;
 let isReleaseCompleteSrc;
@@ -114,6 +140,15 @@ try {
         extractFunction('escapeAttr'),
         extractFunction('jsAttrEscape'),
         extractFunction('announceToScreenReader'),
+        // XACA-1001-006: renderReleaseCard is the actual PROMOTE/EDIT/DELETE
+        // markup source (renderArchiveAction only covers the ARCHIVE button).
+        // getReleaseEnvironments and buildItemTagsHtml are its two dependencies
+        // that are not already sliced above; both are extracted UNMODIFIED so
+        // the onclick strings tested below are exactly what ships, not a
+        // reimplementation of them.
+        extractFunction('getReleaseEnvironments'),
+        extractFunction('buildItemTagsHtml'),
+        extractFunction('renderReleaseCard'),
     ].join('\n\n');
 
     // escapeHtml() is DOM-backed (textContent -> innerHTML) and cannot run in
@@ -140,15 +175,42 @@ try {
         '  setTimeout: function (fn) { var h = __nextTimer++; __timers.push({h: h, fn: fn, live: true}); return h; },\n' +
         '  clearTimeout: function (h) { __timers.forEach(function (t) { if (t.h === h) t.live = false; }); }\n' +
         '};\n' +
-        'function __flush() { __timers.filter(function (t) { return t.live; }).forEach(function (t) { t.fn(); }); }\n' +
-        'function __state() { return { els: __els, appended: __appended, timers: __timers }; }\n';
+        // XACA-1001-012: mark each timer consumed (live = false) BEFORE
+        // calling it, not just when clearTimeout() cancels it. A real
+        // setTimeout firing is a one-shot event -- calling __flush() again
+        // later must NOT re-run it. The original stub only ever set
+        // live = false from clearTimeout(), so a timer that had already
+        // fired stayed "live" forever and was RE-FIRED on every later
+        // __flush() call in the same test run. That is precisely why the two
+        // checks this ticket targets ("second message replaces the first",
+        // "rapid consecutive calls announce the last message only") could
+        // pass by TIMER-ORDERING ALONE even with clearTimeout() completely
+        // broken: a stale already-fired timer would refire and repaint
+        // stale text, then a genuinely-live later timer would refire right
+        // after it and paint over it again, landing on the right answer for
+        // the wrong reason. Surfaced by the new pre-flush live-timer-count
+        // assertion below, which is meaningless against the old stub (it
+        // counts every timer ever created that was never explicitly
+        // cancelled, fired or not).
+        'function __flush() { __timers.filter(function (t) { return t.live; })' +
+        '.forEach(function (t) { t.live = false; t.fn(); }); }\n' +
+        'function __state() { return { els: __els, appended: __appended, timers: __timers }; }\n' +
+        // XACA-1001-006: minimal stand-ins for renderReleaseCard's two global
+        // dependencies. CANONICAL_STAGES is a plain data constant (copied
+        // verbatim, not reimplemented logic). releasesState is a stub with just
+        // the one member renderReleaseCard reads (expandedReleases). Test
+        // release objects deliberately carry no `tags` and no `targetDate`, so
+        // buildItemTagsHtml short-circuits before touching `document` and the
+        // formatTargetDate branch is never taken -- neither needs a fuller stub.
+        'var CANONICAL_STAGES = ["DEV", "QA", "ALPHA", "BETA", "GAMMA", "PROD"];\n' +
+        'var releasesState = { expandedReleases: new Set() };\n';
 
     // eslint-disable-next-line no-new-func
     const factory = new Function(
         preamble + slices +
         '\nreturn { isReleaseComplete, getIncompletePlatforms, renderArchiveAction,' +
         ' getPlatformName, escapeAttr, jsAttrEscape, announceToScreenReader,' +
-        ' __flush, __state };'
+        ' renderReleaseCard, __flush, __state };'
     );
     ({
         isReleaseComplete,
@@ -158,6 +220,7 @@ try {
         escapeAttr,
         jsAttrEscape,
         announceToScreenReader,
+        renderReleaseCard,
         __flush,
         __state,
     } = factory());
@@ -293,11 +356,26 @@ check('complete state is not disabled', /disabled/.test(completeHtml), false);
 check('complete state is clickable', /toggleReleaseArchive/.test(completeHtml), true);
 check('complete state has a tooltip', /title="[^"]+"/.test(completeHtml), true);
 
+// XACA-1001-012 (Task A): the two checks below used to be a single assertion,
+// `/disabled/.test(incompleteHtml) === true`. Since XACA-1001 converted this
+// button to `aria-disabled="true"`, that regex matches the substring "disabled"
+// INSIDE "aria-disabled" -- it would pass identically for `aria-disabled`,
+// `data-disabled`, or even a typo'd `not-disabled`. It passed before Wave 1
+// (native `disabled`) and passes after (aria-disabled) without distinguishing
+// them, so it stopped proving anything the moment the markup changed under it.
+// Split into two checks that assert what the ticket actually changed:
+//   1. the SPECIFIC attribute the button must carry now
+//   2. the ABSENCE of the old native attribute, via a regex anchored on
+//      whitespace-then-"disabled" so it does not also match "aria-disabled"
+//      (there is no whitespace immediately before "disabled" in that string).
 const incompleteHtml = renderArchiveAction(release({ ios: 'PROD', android: 'QA' }), false);
 // THE core regression: this branch used to return ''.
 check('incomplete state is NOT an empty string', incompleteHtml.length > 0, true);
 check('incomplete state renders a button', /<button/.test(incompleteHtml), true);
-check('incomplete state is disabled', /disabled/.test(incompleteHtml), true);
+check('incomplete state carries aria-disabled="true"',
+    /aria-disabled="true"/.test(incompleteHtml), true);
+check('incomplete state carries NO native disabled attribute',
+    /<button[^>]*\sdisabled[\s>]/.test(incompleteHtml), false);
 check('incomplete state is NOT clickable',
     /toggleReleaseArchive/.test(incompleteHtml), false);
 check('incomplete tooltip names the blocking platform',
@@ -307,9 +385,14 @@ check('incomplete tooltip names the blocking environment',
 check('incomplete tooltip does not name a passing platform',
     /iOS/.test(incompleteHtml), false);
 
+// Same substring hazard as above: `/<button[^>]*disabled/` matches
+// "aria-disabled" too, so it cannot tell an aria-disabled button apart from a
+// native-disabled one. Split the same way.
 const noPlatformsHtml = renderArchiveAction({ id: 'REL-X', platforms: {} }, false);
-check('no-platforms state still renders a disabled button',
-    /<button[^>]*disabled/.test(noPlatformsHtml), true);
+check('no-platforms state still renders an aria-disabled button',
+    /<button[^>]*aria-disabled="true"/.test(noPlatformsHtml), true);
+check('no-platforms state carries NO native disabled attribute',
+    /<button[^>]*\sdisabled[\s>]/.test(noPlatformsHtml), false);
 check('no-platforms tooltip explains the absence',
     /declares no platforms/.test(noPlatformsHtml), true);
 
@@ -431,6 +514,177 @@ check('the disabled hover state is neutralised',
 const disabledRule = (css.match(/\.release-action-btn:disabled\s*\{[^}]*\}/) || [''])[0];
 check('disabled rule does NOT use pointer-events:none (it would suppress the tooltip)',
     /pointer-events:\s*none/.test(disabledRule), false);
+// XACA-1001: the .release-card.archived group used to use pointer-events:none
+// to dim PROMOTE/EDIT/DELETE, which killed hover (and with it the `title`
+// tooltip) and is no longer safe now that click-through is guarded in JS
+// instead of blocked by the browser. Assert the specific rule block that
+// covers those three buttons, not the whole file, so an unrelated
+// pointer-events:none elsewhere in the stylesheet cannot mask a regression.
+const archivedActionRule = (css.match(
+    /\.release-card\.archived \.release-action-btn\.edit-btn,[\s\S]*?\{[^}]*\}/
+) || [''])[0];
+check('archived-card action-button rule exists',
+    archivedActionRule.length > 0, true);
+check('archived-card action-button rule does NOT use pointer-events:none' +
+    ' (it would kill hover and silence the reason tooltip)',
+    /pointer-events:\s*none/.test(archivedActionRule), false);
+
+// --- click guard on aria-disabled PROMOTE/EDIT/DELETE (XACA-1001-006) ------
+//
+// The safety-critical property Wave 1 introduced: an aria-disabled button is
+// still a live element that fires `click`. Making it inert is the JOB of the
+// leading `if (this.getAttribute('aria-disabled') === 'true') return;` guard
+// inside each onclick -- the browser will not do it for us. If that guard is
+// ever weakened or removed, this ticket's fix makes previously-safe controls
+// clickable, which is strictly worse than the native `disabled` it replaced.
+//
+// This must exercise the ACTUAL rendered onclick STRING from renderReleaseCard
+// -- not a hand-written reimplementation of the guard, which would prove
+// nothing about the shipped markup. The onclick text is identical between the
+// archived and active renders (only the surrounding aria-disabled/title/
+// aria-describedby attributes differ); what changes is what `this.getAttribute`
+// would actually return in each case, which is exactly what is stubbed below,
+// keyed off the REAL attribute value read back out of each render.
+
+/** Locate a `<button class="EXACT">...` tag and return its outer markup. */
+function extractButtonTag(html, exactClassAttr) {
+    const marker = 'class="' + exactClassAttr + '"';
+    const markerIdx = html.indexOf(marker);
+    if (markerIdx === -1) return null;
+    const tagStart = html.lastIndexOf('<button', markerIdx);
+    const tagEnd = html.indexOf('>', markerIdx);
+    if (tagStart === -1 || tagEnd === -1) return null;
+    return html.slice(tagStart, tagEnd + 1);
+}
+
+function getAttr(tag, name) {
+    const m = tag && tag.match(new RegExp(name + '="([^"]*)"'));
+    return m ? m[1] : null;
+}
+
+/** A call-count spy with no real Jest/Sinon dependency in this repo. */
+function makeSpy() {
+    const spy = function () { spy.callCount++; };
+    spy.callCount = 0;
+    return spy;
+}
+
+/**
+ * Execute a real extracted onclick attribute string against a stub `this`
+ * (the button) whose getAttribute('aria-disabled') returns exactly what was
+ * read back from the actual rendered tag. The three action functions are
+ * passed in as parameters so the Function constructor's global-scope body can
+ * see the spies without polluting the real global object.
+ */
+function runOnclick(onclickSrc, ariaDisabledValue, spies) {
+    const btn = {
+        getAttribute: function (name) {
+            return name === 'aria-disabled' ? ariaDisabledValue : null;
+        },
+    };
+    const evt = { stopPropagation: function () {} };
+    // eslint-disable-next-line no-new-func
+    const fn = new Function(
+        'event', 'promoteRelease', 'showEditReleaseModal', 'deleteRelease', onclickSrc
+    );
+    fn.call(btn, evt, spies.promoteRelease, spies.showEditReleaseModal, spies.deleteRelease);
+}
+
+const archivedCardRelease = {
+    id: 'REL-CARD-ARCH', name: 'Archived Card Release',
+    status: 'archived', platforms: {},
+};
+const activeCardRelease = {
+    id: 'REL-CARD-ACTIVE', name: 'Active Card Release',
+    status: 'active', platforms: { other: { environment: 'DEV' } },
+};
+const archivedCardHtml = renderReleaseCard(archivedCardRelease);
+const activeCardHtml = renderReleaseCard(activeCardRelease);
+
+function checkGuardedButton(label, exactClassAttr, fnName) {
+    const archivedTag = extractButtonTag(archivedCardHtml, exactClassAttr);
+    const activeTag = extractButtonTag(activeCardHtml, exactClassAttr);
+    if (!archivedTag || !activeTag) {
+        fail(`${label}: could not locate <button class="${exactClassAttr}"> in ` +
+            `rendered renderReleaseCard() markup — it may have been renamed.`);
+        return;
+    }
+
+    const archivedOnclick = getAttr(archivedTag, 'onclick');
+    const activeOnclick = getAttr(activeTag, 'onclick');
+    const archivedAria = getAttr(archivedTag, 'aria-disabled');
+    const activeAria = getAttr(activeTag, 'aria-disabled');
+
+    check(`${label}: archived render carries aria-disabled="true"`, archivedAria, 'true');
+    check(`${label}: active render carries no aria-disabled attribute`, activeAria, null);
+
+    // NEGATIVE CONTROL: guard active -> the real handler must NOT call fnName.
+    let spies = { promoteRelease: makeSpy(), showEditReleaseModal: makeSpy(), deleteRelease: makeSpy() };
+    runOnclick(archivedOnclick, archivedAria, spies);
+    check(`${label}: guard active (aria-disabled="true") blocks ${fnName}()`,
+        spies[fnName].callCount, 0);
+
+    // POSITIVE CONTROL (mandatory pairing): guard inactive -> the SAME
+    // extracted handler source, run against the non-archived render's actual
+    // attribute state, MUST call fnName. Without this, "blocked" above could
+    // just as easily mean "the eval silently failed" or "the spy was never
+    // wired" -- only the pair proves the negative control is measuring the
+    // guard and not a broken harness.
+    spies = { promoteRelease: makeSpy(), showEditReleaseModal: makeSpy(), deleteRelease: makeSpy() };
+    runOnclick(activeOnclick, activeAria, spies);
+    check(`${label}: guard inactive (no aria-disabled) lets ${fnName}() run`,
+        spies[fnName].callCount, 1);
+
+    // aria-describedby must resolve to a real rendered .sr-only span, or the
+    // reason text is announced to nobody -- a dangling reference is invisible
+    // to every check above.
+    const archivedDescribedBy = getAttr(archivedTag, 'aria-describedby');
+    check(`${label}: archived render has an aria-describedby id`,
+        !!archivedDescribedBy, true);
+    if (archivedDescribedBy) {
+        const spanRe = new RegExp(
+            '<span id="' + archivedDescribedBy + '" class="sr-only">[^<]*</span>'
+        );
+        check(`${label}: aria-describedby id resolves to a rendered .sr-only span`,
+            spanRe.test(archivedCardHtml), true);
+    }
+
+    // Inert buttons carry BOTH title and aria-describedby; enabled buttons
+    // carry NEITHER -- either half missing/leaking is a regression.
+    check(`${label}: archived render has a title tooltip`,
+        /title="[^"]+"/.test(archivedTag), true);
+    check(`${label}: active render has NO title attribute`,
+        /\stitle="/.test(activeTag), false);
+    check(`${label}: active render has NO aria-describedby attribute`,
+        /aria-describedby=/.test(activeTag), false);
+}
+
+checkGuardedButton('PROMOTE', 'release-action-btn promote-btn', 'promoteRelease');
+checkGuardedButton('EDIT', 'release-action-btn edit-btn', 'showEditReleaseModal');
+checkGuardedButton('DELETE', 'release-action-btn danger delete-btn', 'deleteRelease');
+
+// ARCHIVE is a deliberate exception (see renderArchiveAction's XACA-1001
+// comment): its inert branch has NO action call behind the guard at all, so
+// a "spy not called" negative control would pass trivially -- there is
+// nothing to call, which proves nothing about whether a guard works. That is
+// precisely the false-confidence failure mode this whole task exists to
+// prevent, so do NOT write that check here. Assert the STRUCTURAL property
+// instead: the rendered markup contains no reference to toggleReleaseArchive
+// at all when the button is inert. A future reader must not mistake a
+// passing ARCHIVE check here for proof that ARCHIVE's guard is load-bearing
+// -- it is decorative, kept only for attribute uniformity across all four
+// controls (see the comment in renderArchiveAction).
+const incompleteCardRelease = {
+    id: 'REL-CARD-INCOMPLETE', name: 'Incomplete Card Release',
+    status: 'active', platforms: { ios: 'PROD', android: 'QA' },
+};
+const incompleteCardHtml = renderReleaseCard(incompleteCardRelease);
+const incompleteArchiveTag = extractButtonTag(incompleteCardHtml, 'release-action-btn archive-btn');
+check('ARCHIVE (structural only, NOT a guard-effectiveness proof): inert render' +
+    ' carries aria-disabled="true"', getAttr(incompleteArchiveTag, 'aria-disabled'), 'true');
+check('ARCHIVE (structural only): inert render calls toggleReleaseArchive nowhere' +
+    ' in the whole card (there is nothing for the guard to gate)',
+    /toggleReleaseArchive/.test(incompleteCardHtml), false);
 
 // --- announceToScreenReader (XACA-1000-025) --------------------------------
 // This was the only function added in round 2 with no coverage at all. It is
@@ -467,6 +721,15 @@ announceToScreenReader('Release unarchived and returned to the active list.');
 st = __state();
 check('announce: reuses the existing region (no duplicate appended)',
     st.appended.length, 1);
+// XACA-1001-012: PRE-FLUSH check. The prior version of this test only ever
+// checked "text is empty until the timer fires" right after the FIRST
+// announceToScreenReader() call ever made (above). A regression where a
+// SECOND (or later) call skipped the clear-before-set step would go
+// undetected by that alone, because __flush() fires in push order regardless
+// and the eventual textContent would look identical either way. Check it
+// again here, before flushing, on a call that is not the first.
+check('announce: text is cleared again on a RE-announce, before its timer fires',
+    st.els['lcars-sr-announcer'].textContent, '');
 __flush();
 check('announce: second message replaces the first',
     st.els['lcars-sr-announcer'].textContent,
@@ -476,9 +739,38 @@ check('announce: second message replaces the first',
 // message, not an interleaving of both.
 announceToScreenReader('first');
 announceToScreenReader('second');
+// XACA-1001-012: PRE-FLUSH check. __flush() fires every LIVE timer in PUSH
+// ORDER -- so if clearTimeout() were entirely broken, the 'first' timer would
+// still be pushed before the 'second' timer, __flush would run 'first' then
+// 'second' in that order, and the FINAL textContent would still read 'second'
+// by push-order coincidence, not because cancellation worked. The check below
+// (on the post-flush textContent alone, as this test used to read) cannot
+// tell those two cases apart. Counting LIVE timers BEFORE flushing can: it is
+// what actually proves the pending 'first' timer was cancelled rather than
+// merely outrun.
+check('announce: rapid consecutive calls leave exactly ONE live timer pending',
+    __state().timers.filter(function (t) { return t.live; }).length, 1);
 __flush();
 check('announce: rapid consecutive calls announce the last message only',
     __state().els['lcars-sr-announcer'].textContent, 'second');
+
+// XACA-1001-012: identical-message round-trip. Assistive tech does not
+// re-announce a live region whose text is unchanged -- that is the entire
+// reason the clear-then-set sequence exists, and nothing above covers it:
+// every prior case announces a DIFFERENT string than what preceded it, so a
+// regression that skipped the clear specifically when the new message equals
+// the old one would still pass every check above. Announcing the same string
+// twice must still go 'X' -> '' -> 'X'.
+announceToScreenReader('X');
+__flush();
+check('announce: identical-message round-trip — first announce sets the text',
+    __state().els['lcars-sr-announcer'].textContent, 'X');
+announceToScreenReader('X');
+check('announce: identical-message round-trip — re-announce clears before its timer fires',
+    __state().els['lcars-sr-announcer'].textContent, '');
+__flush();
+check('announce: identical-message round-trip — re-announce sets the text again',
+    __state().els['lcars-sr-announcer'].textContent, 'X');
 
 // Empty/absent messages must be a no-op, not an empty announcement.
 const beforeCount = __state().timers.filter(function (t) { return t.live; }).length;

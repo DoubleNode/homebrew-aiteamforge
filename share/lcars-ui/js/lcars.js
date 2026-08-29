@@ -10839,9 +10839,24 @@ function renderArchiveAction(release, isArchived) {
             .join('; ')
         : 'Archive unavailable \u2014 this release declares no platforms';
 
-    return '<button class="release-action-btn archive-btn" disabled' +
+    // XACA-1001: escapeAttr (not jsAttrEscape) -- this id lands in a plain
+    // HTML `id`/`aria-describedby` attribute value, not inside a JS string
+    // literal, so the plain attribute escaper is the right one here.
+    const reasonId = 'release-archive-reason-' + escapeAttr(String((release && release.id) || ''));
+
+    // XACA-1001: guard added even though this branch is unconditionally
+    // aria-disabled (there is no live call to gate here, unlike the other
+    // three buttons) -- kept ONLY so the guard is uniformly present on all
+    // four controls for a later test to assert against. Deliberately no
+    // toggleReleaseArchive(...) call behind it: a pre-existing regression
+    // test (XACA-1000-018, "incomplete state is NOT clickable") asserts this
+    // markup contains no reference to that function at all.
+    return '<button class="release-action-btn archive-btn" aria-disabled="true"' +
+        ' onclick="event.stopPropagation(); if (this.getAttribute(\'aria-disabled\') === \'true\') return;"' +
+        ' aria-describedby="' + reasonId + '"' +
         ' title="' + escapeAttr(reason) + '">' +
-        '<span class="action-icon">\uD83D\uDCE6</span> ARCHIVE</button>';
+        '<span class="action-icon">\uD83D\uDCE6</span> ARCHIVE</button>' +
+        '<span id="' + reasonId + '" class="sr-only">' + escapeHtml(reason) + '</span>';
 }
 
 /**
@@ -11078,6 +11093,15 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     const isArchived = release.status === 'archived';
     const archivedClass = isArchived ? 'archived' : '';
 
+    // XACA-1001: reason text for the inert PROMOTE/EDIT/DELETE controls when
+    // archived, surfaced via both `title` (sighted hover) and
+    // `aria-describedby` (screen reader) -- matching the voice of the
+    // ARCHIVE-button reason composed in renderArchiveAction() below.
+    const promoteReason = 'Promote unavailable — this release is archived. Unarchive it to promote.';
+    const editReason = 'Edit unavailable — this release is archived. Unarchive it to edit.';
+    const deleteReason = 'Delete unavailable — this release is archived. Unarchive it to delete.';
+    const safeReleaseId = escapeAttr(release.id);
+
     // Get enabled environments based on flowConfig (XACA-0027, XACA-0163)
     const enabledEnvironments = getReleaseEnvironments(release, flowConfig, projectEnvironments);
 
@@ -11223,11 +11247,14 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
             </div>
             <div class="release-card-actions">
                 <button class="release-action-btn docs" data-item-id="${release.id}" onclick="event.stopPropagation(); showPlanDocModal('${release.id}', this.getAttribute('data-retro-exists') === 'true', this.getAttribute('data-cr-exists') === 'true')" style="display:none">DOCS</button>
-                <button class="release-action-btn promote-btn" onclick="event.stopPropagation(); ${isArchived ? 'return false' : 'promoteRelease(\'' + release.id + '\')'}" ${isArchived ? 'disabled' : ''}>PROMOTE</button>
+                <button class="release-action-btn promote-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; promoteRelease('${release.id}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-promote-reason-${safeReleaseId}" title="${escapeAttr(promoteReason)}"` : ''}>PROMOTE</button>
+                ${isArchived ? `<span id="release-promote-reason-${safeReleaseId}" class="sr-only">${escapeHtml(promoteReason)}</span>` : ''}
                 <button class="release-action-btn" onclick="event.stopPropagation(); viewReleaseNotes('${release.id}')">RELNOTES</button>
-                <button class="release-action-btn edit-btn" onclick="event.stopPropagation(); ${isArchived ? 'return false' : 'showEditReleaseModal(\'' + release.id + '\')'}" ${isArchived ? 'disabled' : ''}>EDIT</button>
+                <button class="release-action-btn edit-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; showEditReleaseModal('${release.id}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-edit-reason-${safeReleaseId}" title="${escapeAttr(editReason)}"` : ''}>EDIT</button>
+                ${isArchived ? `<span id="release-edit-reason-${safeReleaseId}" class="sr-only">${escapeHtml(editReason)}</span>` : ''}
                 ${renderArchiveAction(release, isArchived)}
-                <button class="release-action-btn danger delete-btn" onclick="event.stopPropagation(); ${isArchived ? 'return false' : 'deleteRelease(\'' + release.id + '\', \'' + escapeHtml(release.name) + '\')'}" ${isArchived ? 'disabled' : ''}>DELETE</button>
+                <button class="release-action-btn danger delete-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; deleteRelease('${release.id}', '${escapeHtml(release.name)}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-delete-reason-${safeReleaseId}" title="${escapeAttr(deleteReason)}"` : ''}>DELETE</button>
+                ${isArchived ? `<span id="release-delete-reason-${safeReleaseId}" class="sr-only">${escapeHtml(deleteReason)}</span>` : ''}
             </div>
         </div>
     `;
