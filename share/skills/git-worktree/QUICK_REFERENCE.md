@@ -52,6 +52,18 @@ MainEventApp-iOS/
 | `"Create worktree for hotfix/crash-3455"` | Creates `worktrees/hotfix-crash-3455/` with new branch |
 | `"Create worktree from existing branch feature/MEM-445"` | Checks out existing branch |
 
+**After every worktree creation (container-layout teams):** personas must be deployed so Claude loads `spock`, `geordi`, etc. instead of falling back to built-in agent types. Two paths:
+
+- **Tap machines (new worktrees):** `wt-new` auto-deploys personas via `deploy-worktree-personas.sh` from `~/aiteamforge/<team>/personas/agents/`. No manual step needed.
+- **Tap machines (pre-existing worktrees):** backfill all at once: `deploy-worktree-personas.sh --all <team>` (tap equivalent of `kb-sync-personas sync-worktrees --all`).
+- **Dev machines:** run manually after `git worktree add` succeeds:
+
+  ```bash
+  kb-sync-personas sync-worktrees <team> 2>/dev/null || true
+  ```
+
+iOS/Android/Firebase/DNS gitignore `.claude/agents/` — new worktrees start with NO personas without one of these steps. Deployed files are untracked and ephemeral; do NOT `git add` them.
+
 ### List & Status
 
 | Command | Result |

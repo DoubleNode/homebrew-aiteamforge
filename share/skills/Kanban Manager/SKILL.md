@@ -42,8 +42,8 @@ model: sonnet
 **Author:** Commander Jett Reno (Starfleet Academy)
 **Command Shortcut:** `kb-backlog`
 **Platforms:** All dev-team platforms
-**Last Updated:** February 17, 2026
-**New in 1.8.2:** `kb-release create` command - create releases from CLI via LCARS server API
+**Last Updated:** June 1, 2026
+**New in 1.8.3:** `kb-release edit` and `kb-release reschedule` commands - update release metadata and target dates from CLI
 
 ---
 
@@ -76,10 +76,10 @@ source ~/dev-team/kanban-helpers.sh && <kb-command>
 **Examples:**
 ```bash
 # Start a subitem
-source ~/dev-team/kanban-helpers.sh && kb-backlog sub start XFIR-0001-001
+source ~/dev-team/kanban-helpers.sh && kb-backlog sub start XACA-0001-001
 
 # Mark subitem done
-source ~/dev-team/kanban-helpers.sh && kb-backlog sub done XFIR-0001-001
+source ~/dev-team/kanban-helpers.sh && kb-backlog sub done XACA-0001-001
 
 # List backlog
 source ~/dev-team/kanban-helpers.sh && kb-backlog list
@@ -95,11 +95,13 @@ source ~/dev-team/kanban-helpers.sh && kb-backlog list
 
 | Command | Description |
 |---------|-------------|
-| `kb-backlog add "title" [priority] [description] [jira-id] [os]` | Add new backlog item |
+| `kb-backlog add "title" [priority] [description] [jira-id] [os] [--points <hours>]` | Add new backlog item (points optional at creation) |
 | `kb-backlog list` | List all backlog items with indices |
 | `kb-backlog change <idx> ["title"] [priority]` | Modify existing item |
 | `kb-backlog remove <idx>` | Remove item (use sparingly - prefer completing) |
 | `kb-backlog priority <idx> [priority]` | View/set priority (critical/high/medium/low/blocked) |
+| `kb-backlog points <id> [<hours>\|-]` | View/set/clear developer-hours estimate (required before start) |
+| `kb-backlog unestimated` | List all open items that have no effort estimate |
 | `kb-backlog jira <idx> [jira-id]` | View/set/clear JIRA ID |
 | `kb-backlog github <idx> [issue-ref]` | View/set/clear GitHub issue |
 | `kb-backlog desc <idx> [description]` | View/set/clear description |
@@ -113,7 +115,8 @@ source ~/dev-team/kanban-helpers.sh && kb-backlog list
 
 | Command | Description |
 |---------|-------------|
-| `kb-backlog sub add <parent-id> "title" [jira-id] [os]` | Add subitem |
+| `kb-backlog sub add <parent-id> "title" [jira-id] [os]` | Add subitem (always appends) |
+| `kb-backlog sub insert <parent-id> <pos> "title" [jira-id] [os]` | Insert subitem at 0-based position; new ID = max existing ID + 1 (existing IDs are NOT renumbered) |
 | `kb-backlog sub list <parent-id>` | List subitems |
 | `kb-backlog sub remove <parent-id> <sub-idx>` | Remove subitem (use sparingly) |
 | `kb-backlog sub start <subitem-id>` | Start working on subitem (tracks worktree) |
@@ -125,6 +128,8 @@ source ~/dev-team/kanban-helpers.sh && kb-backlog list
 | `kb-backlog sub github <parent-id> <sub-idx> <issue-ref>` | Set subitem GitHub |
 | `kb-backlog sub tag <parent-id> <sub-idx> [add\|rm\|clear] [tags...]` | Manage subitem tags |
 | `kb-backlog sub due <parent-id> <sub-idx> [YYYY-MM-DD]` | Set subitem due date |
+| `kb-backlog sub rename-id <old-id> <new-id>` | Repair a mis-prefixed subitem **ID** (changes the identifier, not the title) |
+| `kb-backlog sub rename <subitem-id> "new title"` | Change a subitem's visible **title text** (changes the title, not the ID; see `rename-id` for ID repairs) |
 
 **Note:** Subitem IDs use format `XTEAM-0001-001` (parent ID + 3-digit suffix)
 
@@ -158,6 +163,40 @@ source ~/dev-team/kanban-helpers.sh && kb-backlog list
 ---
 
 ## Detailed Usage
+
+### 🛑 BEFORE `kb-backlog add` — Choose the Right Container
+
+> **Most common kanban-pollution mistake:** agents create a regular backlog item titled `"EPIC: ..."`, `"RELEASE: ..."`, or `"TODO: ..."` instead of using the dedicated container. These prefixes are a red flag — if you're typing one, you're using the wrong tool.
+
+| Work shape | Wrong | Right |
+|------------|-------|-------|
+| Umbrella initiative spanning multiple items / sprints / teams | `kb-backlog add "EPIC: Big Initiative"` | `kb-epic create "Big Initiative" "<desc>" <priority> <category>` then `kb-epic add-item EPIC-xxxx <ITEM-ID>` |
+| Coordinated deployment moving through environments (DEV→QA→PROD) | `kb-backlog add "RELEASE: Q2 2026"` | `/release create "Q2 2026 Feature Release" --platforms ios,android,firebase` then `/release assign <ITEM-ID> <REL-ID>` |
+| Checklist of steps inside one piece of work | `kb-backlog add "TODO: Cleanup tasks"` (or stuffing markdown checkboxes in description) | `kb-backlog sub add <PARENT-ID> "<step>"` — subitems ARE the kanban TODO list |
+| Single deliverable that fits in one work session / PR | `kb-backlog add` typed directly into a shell | **Invoke the `Project Planner` skill** — it calls `kb-backlog add` in its Phase 3. See `claude/CLAUDE.md` § "Project Planner is MANDATORY for ticket creation" |
+
+**Forbidden title patterns** (if your title matches any of these, STOP and pick the correct container above):
+
+```
+"EPIC: ..."          "Epic - ..."        "<Initiative>: Phase N"
+"RELEASE: ..."       "Release: ..."      "REL-2026-... ..."
+"TODO: ..."          "Todos for ..."     "Checklist for ..."
+```
+
+**Check for an existing parent first:**
+
+```bash
+source ~/dev-team/kanban-helpers.sh
+kb-epic list                                    # existing epics for this team
+kb-release list  # or:  /release list           # active releases
+kb-backlog list                                 # existing items (look for parents)
+```
+
+If a matching parent exists, **attach** to it — do NOT create a near-duplicate sibling.
+
+**Why first-class containers matter:** Epics and Releases get their own LCARS tabs, child-item rollups, progress aggregation, and (for releases) environment promotion. A backlog item titled `"EPIC: Foo"` is just a string — none of that machinery fires.
+
+---
 
 ### Adding Backlog Items
 
@@ -195,9 +234,29 @@ kb-backlog add "Android notification bug" medium "" "" Android
 kb-backlog add "Firebase auth update" high "" FIR-456 Firebase
 ```
 
+**With an effort estimate (developer-hours for a normal human developer):**
+```bash
+kb-backlog add "Refactor auth module" high "Extract token validation" "" "" --points 4
+kb-backlog add "Quick config fix" low "" "" "" --points 0.5
+```
+
 **Valid OS values:** `iOS`, `Android`, `Firebase` (case-insensitive)
 
 > **Note:** OS is stored as the first element in the tags array. In the LCARS UI, OS displays as a logo below the priority pill. Click the logo to change the OS selection.
+
+### Effort Estimates (points)
+
+Every item **must have a developer-hours estimate before it can be started** (`kb-pick`, `kb-run`, or `kb-work`). Estimation is optional at creation — the estimate can be added or updated at any time using the `points` setter:
+
+```bash
+kb-backlog points XACA-0001 4       # Set estimate: 4 developer-hours
+kb-backlog points XACA-0001 0.5     # Fractional hours OK
+kb-backlog points XACA-0001         # View current estimate
+kb-backlog points XACA-0001 -       # Clear estimate (back to unestimated)
+kb-backlog unestimated              # List all open items with no estimate
+```
+
+Units are **normal human developer hours** — not AI-speed, not story points, not days. The coordinating agent may self-estimate at pick-up (no human needed) as long as the figure is realistic for a human developer.
 
 ### Priority Levels
 
@@ -223,9 +282,38 @@ kb-backlog sub add 0 "Update documentation"
 
 **Add subitems with OS:**
 ```bash
-kb-backlog sub add XIOS-0001 "Fix UI crash" ME-789 iOS
-kb-backlog sub add XAND-0002 "Update notifications" "" Android
+kb-backlog sub add XACA-0001 "Fix UI crash" PROJ-789 iOS
+kb-backlog sub add XACA-0002 "Update notifications" "" Android
 ```
+
+**Insert a subitem at a specific position:**
+
+Use `sub insert` to splice a new subitem into an existing list without appending to the end. The position argument is **0-based** (0 = before all existing subitems). The new subitem's ID is assigned using the **monotonic max+1 rule**: it receives the highest existing numeric ID suffix + 1. Existing subitems are **never renumbered** — only the array order changes.
+
+```bash
+# Current list: 001 "Design API schema", 002 "Write tests", 003 "Update docs"
+kb-backlog sub insert 0 1 "Implement endpoints" ME-124
+# Result: 001 "Design API schema", 004 "Implement endpoints" (ME-124), 002 "Write tests", 003 "Update docs"
+# Note: new ID is 004 (max was 003 + 1), inserted at array index 1
+```
+
+If `<pos>` exceeds the current subitem count, the new subitem is appended to the end with an informational note.
+
+```bash
+kb-backlog sub insert 0 99 "Appended step"   # pos out of range → appended
+```
+
+**Rename a subitem's title:**
+
+Use `sub rename` to change the visible title text of an existing subitem. Takes the full subitem ID (e.g. `XACA-0001-004`), not a parent+index.
+
+> **rename vs. rename-id:** `sub rename` changes the **title text** displayed in LCARS and reports. `sub rename-id` changes the **subitem's ID** (used to repair mis-prefixed IDs from XACA-0233 tooling). Do not confuse them.
+
+```bash
+kb-backlog sub rename XACA-0001-004 "Implement REST endpoints"
+```
+
+No-op if the new title matches the existing title.
 
 **View subitems:**
 ```bash
@@ -301,10 +389,10 @@ The LCARS Mission Queue supports inline editing of priority and due dates direct
 
 ### External Issue Linking
 
-**JIRA (Main Event teams):**
+**JIRA (teams with JIRA integration):**
 ```bash
-kb-backlog jira 0 ME-123              # Parent item
-kb-backlog sub jira 0 1 ME-124        # Subitem
+kb-backlog jira 0 PROJ-123            # Parent item (use your team's JIRA project key)
+kb-backlog sub jira 0 1 PROJ-124      # Subitem
 ```
 
 **GitHub (Academy, DNS, Freelance):**
@@ -377,14 +465,14 @@ Location: Each team's board is in their own repository under `kanban/`:
 | Team | Board Location |
 |------|----------------|
 | Academy | `~/dev-team/kanban/academy-board.json` |
-| iOS | `/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban/ios-board.json` |
-| Android | `/Users/Shared/Development/Main Event/MainEventApp-Android/kanban/android-board.json` |
-| Firebase | `/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/firebase-board.json` |
-| Command | `/Users/Shared/Development/Main Event/dev-team/kanban/command-board.json` |
-| DNS | `/Users/Shared/Development/DNSFramework/kanban/dns-board.json` |
-| Starwords | `/Users/Shared/Development/DoubleNode/Starwords/kanban/freelance-doublenode-starwords-board.json` |
-| appPlanning | `/Users/Shared/Development/DoubleNode/appPlanning/kanban/freelance-doublenode-appplanning-board.json` |
-| WorkStats | `/Users/Shared/Development/DoubleNode/WorkStats/kanban/freelance-doublenode-workstats-board.json` |
+| iOS | `<ios-repo>/kanban/ios-board.json` |
+| Android | `<android-repo>/kanban/android-board.json` |
+| Firebase | `<firebase-repo>/kanban/firebase-board.json` |
+| Command | `<command-repo>/kanban/command-board.json` |
+| DNS | `<dns-repo>/kanban/dns-board.json` |
+| Starwords | `<starwords-repo>/kanban/freelance-doublenode-starwords-board.json` |
+| appPlanning | `<appplanning-repo>/kanban/freelance-doublenode-appplanning-board.json` |
+| WorkStats | `<workstats-repo>/kanban/freelance-doublenode-workstats-board.json` |
 | Legal | `~/legal/coparenting/kanban/legal-coparenting-board.json` |
 
 ```json
@@ -488,15 +576,15 @@ Location: Each team's board is in their own repository under `kanban/`:
 **Simple assignment (mark as active):**
 ```bash
 kb-backlog list                    # View available items
-# Check for plan doc in team kanban/: ls <team-kanban>/XIOS-0001_*.md
-kb-pick XIOS-0001                  # Mark item as active (no Claude, no worktree)
+# Check for plan doc in team kanban/: ls <team-kanban>/XACA-0001_*.md
+kb-pick XACA-0001                  # Mark item as active (no Claude, no worktree)
 ```
 
 **Full launch with Claude Code:**
 ```bash
 kb-backlog list                    # View available items
-# Check for plan doc in team kanban/: ls <team-kanban>/XIOS-0001_*.md
-kb-run XIOS-0001                   # Launch Claude + auto-create worktree
+# Check for plan doc in team kanban/: ls <team-kanban>/XACA-0001_*.md
+kb-run XACA-0001                   # Launch Claude + auto-create worktree
 ```
 
 **Pick subitem:**
@@ -535,25 +623,25 @@ Each state is visible in the LCARS kanban swimlanes. Paused cards appear in the 
 When completing a **main item** (not a subitem), `kb-done` will check that all subitems are completed first:
 
 ```bash
-# If item XIOS-0001 has incomplete subitems:
-kb-done XIOS-0001
+# If item XACA-0001 has incomplete subitems:
+kb-done XACA-0001
 # ═══════════════════════════════════════════════════════
 # ❌ Cannot complete item: Incomplete subitems found
 # ═══════════════════════════════════════════════════════
 #
 # The following subitems must be completed first:
-#   • XIOS-0001-001 - API Integration
-#   • XIOS-0001-003 - Write tests
+#   • XACA-0001-001 - API Integration
+#   • XACA-0001-003 - Write tests
 #
 # Options:
 #   1. Complete the subitems first: kb-done <subitem-id>
-#   2. Force complete anyway:       kb-done XIOS-0001 --force
+#   2. Force complete anyway:       kb-done XACA-0001 --force
 # ═══════════════════════════════════════════════════════
 ```
 
 **To bypass this check** (use with caution):
 ```bash
-kb-done XIOS-0001 --force
+kb-done XACA-0001 --force
 ```
 
 This ensures all planned work is accounted for before marking a parent item complete.
@@ -623,14 +711,14 @@ Each team has their own kanban directory in their repository:
 | Team | Kanban Directory | Focus |
 |------|------------------|-------|
 | Academy | `~/dev-team/kanban/` | Dev Team Infrastructure |
-| iOS | `.../MainEventApp-iOS/kanban/` | Main Event iOS App |
-| Android | `.../MainEventApp-Android/kanban/` | Main Event Android App |
-| Firebase | `.../MainEventApp-Functions/kanban/` | Firebase Functions/Rules |
-| Command | `.../Main Event/dev-team/kanban/` | Strategic Operations |
-| DNS | `.../DNSFramework/kanban/` | DNS Framework Packages |
-| Starwords | `.../DoubleNode/Starwords/kanban/` | Starwords Freelance Project |
-| appPlanning | `.../DoubleNode/appPlanning/kanban/` | AppPlanning Freelance Project |
-| WorkStats | `.../DoubleNode/WorkStats/kanban/` | WorkStats Freelance Project |
+| iOS | `<ios-repo>/kanban/` | iOS App |
+| Android | `<android-repo>/kanban/` | Android App |
+| Firebase | `<firebase-repo>/kanban/` | Firebase Functions/Rules |
+| Command | `<command-repo>/kanban/` | Strategic Operations |
+| DNS | `<dns-repo>/kanban/` | DNS Framework Packages |
+| Starwords | `<starwords-repo>/kanban/` | Starwords Freelance Project |
+| appPlanning | `<appplanning-repo>/kanban/` | AppPlanning Freelance Project |
+| WorkStats | `<workstats-repo>/kanban/` | WorkStats Freelance Project |
 | Legal | `~/legal/coparenting/kanban/` | Legal CoParenting Project |
 
 Team is auto-detected from terminal name, `$LCARS_TEAM` env var, or working directory.
@@ -667,8 +755,8 @@ Warning: Board file locked, retrying...
 ### Complex Task Breakdown
 
 ```bash
-# Add parent task
-kb-backlog add "User Authentication Refactor" high "Complete auth system overhaul" ME-200
+# Add parent task (with estimate at creation, or set it after)
+kb-backlog add "User Authentication Refactor" high "Complete auth system overhaul" ME-200 --points 8
 
 # Add subitems
 kb-backlog sub add 0 "Extract token validation" ME-201
@@ -676,6 +764,9 @@ kb-backlog sub add 0 "Add refresh token support" ME-202
 kb-backlog sub add 0 "Update error handling" ME-203
 kb-backlog sub add 0 "Write integration tests" ME-204
 kb-backlog sub add 0 "Update documentation"
+
+# Items must be estimated before starting — set after creation if not done above
+# kb-backlog points XACA-NNNN 8
 
 # Start first subitem
 kb-backlog sub start 0 0
@@ -690,12 +781,16 @@ kb-backlog sub start 0 1
 ```bash
 # Morning: Check backlog
 kb-backlog list
+kb-backlog unestimated              # Surface any open items missing an estimate
+
+# Estimate before starting (required — kb-pick/kb-run will block without it)
+kb-backlog points XACA-0001 4
 
 # Quick assignment (just mark as active)
-kb-pick XIOS-0001
+kb-pick XACA-0001
 
 # OR full Claude launch with worktree
-kb-run XIOS-0001
+kb-run XACA-0001
 
 # Work through phases
 kb-code
@@ -704,7 +799,7 @@ kb-commit
 kb-done
 
 # Or work on specific subitem
-kb-backlog sub start XIOS-0001-001
+kb-backlog sub start XACA-0001-001
 ```
 
 ### Reopening Completed Items
@@ -778,14 +873,14 @@ Plan documents are stored in each team's `kanban/` directory (same as board file
 | Team | Plan Doc Directory |
 |------|-------------------|
 | Academy | `~/dev-team/kanban/` |
-| iOS | `.../MainEventApp-iOS/kanban/` |
-| Android | `.../MainEventApp-Android/kanban/` |
-| Firebase | `.../MainEventApp-Functions/kanban/` |
-| Command | `.../Main Event/dev-team/kanban/` |
-| DNS | `.../DNSFramework/kanban/` |
-| Starwords | `.../DoubleNode/Starwords/kanban/` |
-| appPlanning | `.../DoubleNode/appPlanning/kanban/` |
-| WorkStats | `.../DoubleNode/WorkStats/kanban/` |
+| iOS | `<ios-repo>/kanban/` |
+| Android | `<android-repo>/kanban/` |
+| Firebase | `<firebase-repo>/kanban/` |
+| Command | `<command-repo>/kanban/` |
+| DNS | `<dns-repo>/kanban/` |
+| Starwords | `<starwords-repo>/kanban/` |
+| appPlanning | `<appplanning-repo>/kanban/` |
+| WorkStats | `<workstats-repo>/kanban/` |
 | Legal | `~/legal/coparenting/kanban/` |
 
 ### Document Types & Naming Conventions
@@ -809,8 +904,8 @@ For complex backlog items with multiple subitems.
 
 **Examples:**
 - `XACA-0015_os_tag_display_feature.md`
-- `XIOS-0023_funcard_reload_flow.md`
-- `XFIR-0008_auth_token_refresh.md`
+- `XDNS-0023_resolver_cache_flow.md`
+- `XFWS-0008_auth_token_refresh.md`
 
 **Template:**
 ```markdown
@@ -865,7 +960,7 @@ For epics that group multiple related items across a larger initiative.
 # EPIC: <Title>
 
 **Epic ID:** EPIC-xxxx
-**JIRA:** [KEY-xxx](https://jira.example.com/browse/KEY-xxx)
+**JIRA:** [KEY-xxx](https://your-team.atlassian.net/browse/KEY-xxx)
 **Status:** Planning | Active | Completed | On Hold
 **Priority:** Critical | High | Medium | Low
 **Category:** Epic / Feature | Epic / Bugfix | Epic / Refactor
@@ -882,7 +977,7 @@ High-level description of the epic's goals and scope.
 ## Child Stories
 | ID | Title | JIRA | Status | Due Date |
 |----|-------|------|--------|----------|
-| XIOS-0001 | Story title | KEY-001 | todo | YYYY-MM-DD |
+| XACA-0001 | Story title | KEY-001 | todo | YYYY-MM-DD |
 
 ## Technical Approach
 Implementation strategy, patterns, and key decisions.
@@ -948,20 +1043,20 @@ Brief description of the release goals and scope.
 
 ## Included Items
 
-### iOS
+### Platform A (e.g., iOS)
 | ID | Title | Status | Priority |
 |----|-------|--------|----------|
-| XIOS-0001 | Item title | in_progress | high |
+| PROJ-0001 | Item title | in_progress | high |
 
-### Android
+### Platform B (e.g., Android)
 | ID | Title | Status | Priority |
 |----|-------|--------|----------|
-| XAND-0001 | Item title | todo | high |
+| PROJ-0002 | Item title | todo | high |
 
-### Firebase
+### Platform C (e.g., Firebase)
 | ID | Title | Status | Priority |
 |----|-------|--------|----------|
-| XFIR-0001 | Item title | todo | medium |
+| PROJ-0003 | Item title | todo | medium |
 
 ## Release Checklist
 
@@ -1030,7 +1125,7 @@ kb-backlog tag <id> add feature planning
 source ~/dev-team/kanban-helpers.sh && kb-epic create "Epic Title" "Description" high feature
 
 # 2. Add items to epic
-source ~/dev-team/kanban-helpers.sh && kb-epic add-item EPIC-0001 XIOS-0001
+source ~/dev-team/kanban-helpers.sh && kb-epic add-item EPIC-0001 XACA-0001
 
 # 3. Create plan document
 # Location: <team-kanban>/EPIC-xxxx_<description>.md
@@ -1042,7 +1137,7 @@ source ~/dev-team/kanban-helpers.sh && kb-epic add-item EPIC-0001 XIOS-0001
 /release create "Q1 2026 Feature Release" --platforms ios,android,firebase
 
 # 2. Assign items to release
-/release assign XIOS-0001 REL-2026-Q1-001 --platform ios
+/release assign XACA-0001 REL-2026-Q1-001 --platform academy
 
 # 3. Create plan document
 # Location: <team-kanban>/REL-xxxx_<description>.md
@@ -1149,14 +1244,14 @@ Manifest files are stored in each team's `kanban/releases/` directory:
 | Team | Manifest Path |
 |------|---------------|
 | **Academy** | `~/dev-team/kanban/releases/<release-id>/manifest.json` |
-| **iOS** | `.../MainEventApp-iOS/kanban/releases/<release-id>/manifest.json` |
-| **Android** | `.../MainEventApp-Android/kanban/releases/<release-id>/manifest.json` |
-| **Firebase** | `.../MainEventApp-Functions/kanban/releases/<release-id>/manifest.json` |
-| **Command** | `.../Main Event/dev-team/kanban/releases/<release-id>/manifest.json` |
-| **DNS** | `.../DNSFramework/kanban/releases/<release-id>/manifest.json` |
-| **Starwords** | `.../DoubleNode/Starwords/kanban/releases/<release-id>/manifest.json` |
-| **appPlanning** | `.../DoubleNode/appPlanning/kanban/releases/<release-id>/manifest.json` |
-| **WorkStats** | `.../DoubleNode/WorkStats/kanban/releases/<release-id>/manifest.json` |
+| **iOS** | `<ios-repo>/kanban/releases/<release-id>/manifest.json` |
+| **Android** | `<android-repo>/kanban/releases/<release-id>/manifest.json` |
+| **Firebase** | `<firebase-repo>/kanban/releases/<release-id>/manifest.json` |
+| **Command** | `<command-repo>/kanban/releases/<release-id>/manifest.json` |
+| **DNS** | `<dns-repo>/kanban/releases/<release-id>/manifest.json` |
+| **Starwords** | `<starwords-repo>/kanban/releases/<release-id>/manifest.json` |
+| **appPlanning** | `<appplanning-repo>/kanban/releases/<release-id>/manifest.json` |
+| **WorkStats** | `<workstats-repo>/kanban/releases/<release-id>/manifest.json` |
 | **Legal** | `~/legal/coparenting/kanban/releases/<release-id>/manifest.json` |
 
 **Pattern:** `<team-repo>/kanban/releases/<release-id>/manifest.json`
@@ -1179,6 +1274,8 @@ Manifest files are stored in each team's `kanban/releases/` directory:
 | `kb-release assign <item-id> <release-id> [platform]` | Assign item to release (item must be in current team's backlog) |
 | `kb-release unassign <item-id>` | Remove release assignment from item (item must be in current team's backlog) |
 | `kb-release show <item-id>` | Show item's release assignment (item must be in current team's backlog) |
+| `kb-release edit <id> [options]` | Edit release metadata (name, dates, status, tags, platform versions) via PUT API; `update` is an alias |
+| `kb-release reschedule <id> <date>` | Change a release's target date (date-only sugar for `edit --target-date`) |
 
 **Platform values:** `ios`, `android`, `firebase` (default: `ios`)
 
@@ -1188,7 +1285,7 @@ Manifest files are stored in each team's `kanban/releases/` directory:
 |--------|-------------|---------|
 | `--type <type>` | Release type: `feature`, `bugfix`, `hotfix`, `maintenance` | `feature` |
 | `--platforms <list>` | Comma-separated platforms: `ios,android,firebase` | `ios,android` |
-| `--project <name>` | Project name (e.g., `Starwords`, `MainEvent`) | none |
+| `--project <name>` | Project name (e.g., `Starwords`, `MyApp`) | none |
 | `--target-date <date>` | Target release date (`YYYY-MM-DD`) | none |
 | `--short-title <title>` | Short display name for LCARS UI | none |
 
@@ -1213,13 +1310,19 @@ source ~/dev-team/kanban-helpers.sh && kb-release create "Starwords 1.2.0" --pro
 source ~/dev-team/kanban-helpers.sh && kb-release list
 
 # Assign item to a release
-source ~/dev-team/kanban-helpers.sh && kb-release assign XFIR-0001 REL-2026-Q1-001 firebase
+source ~/dev-team/kanban-helpers.sh && kb-release assign XACA-0001 REL-2026-Q1-001 academy
 
 # Check item's release assignment
-source ~/dev-team/kanban-helpers.sh && kb-release show XFIR-0001
+source ~/dev-team/kanban-helpers.sh && kb-release show XACA-0001
 
 # Remove release assignment
-source ~/dev-team/kanban-helpers.sh && kb-release unassign XFIR-0001
+source ~/dev-team/kanban-helpers.sh && kb-release unassign XACA-0001
+
+# Edit a release's metadata
+source ~/dev-team/kanban-helpers.sh && kb-release edit REL-2026-Q1-001 --target-date 2026-03-20 --status in-progress
+
+# Reschedule a release to a new target date
+source ~/dev-team/kanban-helpers.sh && kb-release reschedule REL-2026-Q1-001 2026-03-25
 ```
 
 ### Release Data Structure
@@ -1236,7 +1339,7 @@ Releases are stored in the team's board JSON under the `releases` array:
 | `status` | string | Yes | planning, in_progress, completed, archived |
 | `targetDate` | string | No | Target release date (YYYY-MM-DD) |
 | `createdAt` | string | Yes | ISO 8601 timestamp |
-| `environments` | array | Yes | Environment progression (DEV, QA, ALPHA, BETA, GAMMA, PROD) |
+| `environments` | array | Yes | Environment progression (PLANNED, DEV, QA, ALPHA, BETA, GAMMA, PROD) |
 | `platforms` | object | Yes | Platform-specific version/environment tracking |
 | `tags` | array | No | Array of tag strings |
 | `team` | string | Yes | Owning team |
@@ -1273,23 +1376,24 @@ Each release has a manifest file in the team's repository at `<team-repo>/dev-te
 **Item object in manifest:**
 ```json
 {
-  "itemId": "XFIR-0001",
+  "itemId": "XACA-0001",
   "title": "Item Title",
-  "status": "todo",
   "platform": "firebase",
   "team": "firebase",
   "assignedAt": "2026-01-27T03:49:20Z"
 }
 ```
 
+**`status` is deprecated on this object (XACA-0948).** It is never written or trusted here — item status is resolved live from the board on read, per `kanban/plans/XACA-0948/ITEM_STATUS_CONTRACT.md` §1.5. A `status` key surviving on an older manifest row is a stale snapshot; ignore it.
+
 ### Manifest System
 
 The release system maintains item assignments in two places:
 
 1. **Board item's `releaseAssignment` field** - Quick lookup from item perspective
-2. **Manifest `items` array** - Authoritative list for release perspective
+2. **Manifest `items` array** - Authoritative list for release *assignment* — which items belong to this release. It is **not** authoritative for item *status*; that is always resolved live from the board (XACA-0948).
 
-When items are assigned via `kb-release assign` or the LCARS UI, both are updated. The LCARS Releases tab reads from manifests.
+When items are assigned via `kb-release assign` or the LCARS UI, both are updated. The LCARS Releases tab reads from manifests for assignment/title, but resolves each item's status live from the board on every request.
 
 **Manifest sync utility:**
 
@@ -1308,7 +1412,7 @@ python3 ~/dev-team/scripts/sync-release-manifests.py --dry-run
 
 ### Environment Promotion
 
-Releases progress through environments: `DEV → QA → ALPHA → BETA → GAMMA → PROD`
+Releases progress through environments: `PLANNED → DEV → QA → ALPHA → BETA → GAMMA → PROD`
 
 Promotion is done via the LCARS Releases tab:
 1. Click on a release card to expand
@@ -1393,11 +1497,19 @@ source ~/dev-team/kanban-helpers.sh && kb-epic add-item EPIC-0002 XACA-0015
 1. Verify you're in the correct team's terminal (item prefix should match your team)
 2. Check current team context: `echo $LCARS_TEAM` or check terminal name
 3. Switch to the correct team's terminal before running release commands
-4. Example: To assign `XAND-0001` to a release, you must run the command from an Android team terminal
+4. Example: To assign an Android item to a release, you must run the command from an Android team terminal
 
 ---
 
 ## Version History
+
+**v1.8.3** (June 1, 2026)
+- **`kb-release edit` and `kb-release reschedule` commands** - Update release metadata from CLI (XACA-0595)
+  - `kb-release edit <id> [options]` wraps `PUT /api/releases/<id>` for name, short-title, target-date, status, type, project, tags, platform versions
+  - `kb-release update` is an alias for `edit`
+  - `kb-release reschedule <id> <YYYY-MM-DD>` provides date-only shorthand (sugar for `edit --target-date`)
+  - All changes merge on server side (partial updates supported)
+  - Consistent error handling and validation with `create`
 
 **v1.8.2** (February 17, 2026)
 - **`kb-release create` command** - Create releases from CLI without LCARS UI

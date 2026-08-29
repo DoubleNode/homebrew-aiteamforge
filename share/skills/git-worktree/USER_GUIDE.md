@@ -268,6 +268,28 @@ cd /Users/Shared/development/Main\ Event/MainEventApp-iOS/
 - Checks out existing `feature/MEM-445` branch (doesn't create new branch)
 - Useful for reviewing someone else's work or resuming old work
 
+#### Post-Creation: Deploy Personas
+
+For container-layout teams (iOS, Android, Firebase, DNS), `.claude/agents/` is gitignored — a new worktree contains no personas and Claude falls back to built-in agent types. The deployment path depends on your machine:
+
+**Tap machines (`~/aiteamforge` installed):** `wt-new` handles this automatically. The `deploy-worktree-personas.sh` helper runs on every successful `wt-new` call, copying personas from `~/aiteamforge/<team>/personas/agents/` into the worktree's `.claude/agents/`. A `.synced-from-tap` marker records that these came from the tap installation. No manual action needed.
+
+**Pre-existing worktrees on tap machines:** If worktrees already existed before the tap was installed (or before XACA-0588), use the `--all` backfill mode to deploy personas to all of them at once:
+
+```bash
+deploy-worktree-personas.sh --all <team>
+```
+
+This is the tap-machine equivalent of `kb-sync-personas sync-worktrees --all`. Idempotent — skips worktrees that already have `.synced-from-tap`. Use `--force` to refresh all.
+
+**Dev machines (dev-team present, no tap):** run this manually immediately after `git worktree add` succeeds:
+
+```bash
+kb-sync-personas sync-worktrees <team> 2>/dev/null || true
+```
+
+This is a safe no-op for git-tracked-persona teams (Academy, Command, Finance, Legal) and for repos with no personas, so you can run it unconditionally. The deployed files are intentionally untracked (they vanish with the worktree) — do NOT `git add` them.
+
 ### Listing Worktrees
 
 #### List Current Project's Worktrees

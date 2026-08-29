@@ -2,32 +2,16 @@
 name: git-worktree-manager
 description: Manages Git worktrees for parallel development workflows. Use when creating, listing, switching between, or cleaning up worktrees for iOS/Android/Firebase projects. Automates worktree creation with context-aware naming (feature/hotfix/refactor/release/test), handles branch management, shows status across all worktrees, and safely removes stale worktrees with validation.
 version: 1.0.0
-author: Darren Ehlers (Dave & Buster's Entertainment, Inc.)
-company: Dave & Buster's Entertainment, Inc.
-project: Main Event Entertainment Apps
+author: Commander Jett Reno (Chief Technical Instructor)
+company: Starfleet Academy - Engineering Lab
+project: Dev Team LCARS Infrastructure
 platforms:
   - iOS
   - Android
   - Firebase Backend
+  - Any Git-based project
 terminals:
-  - ios-bridge
-  - ios-engineering
-  - ios-sickbay
-  - ios-holodeck
-  - ios-observation
-  - ios-stellar
-  - android-bridge
-  - android-engineering
-  - android-sickbay
-  - android-science-lab
-  - android-communications
-  - android-briefing-room
-  - firebase-ops
-  - firebase-engineering
-  - firebase-infirmary
-  - firebase-science-lab
-  - firebase-security
-  - firebase-wardroom
+  - All terminals (auto-detects project from context)
 supported_os:
   - macOS
   - Linux
@@ -52,8 +36,8 @@ model: haiku
 
 **Name:** Git Worktree Manager  
 **Version:** 1.0.0  
-**Author:** Darren Ehlers (Dave & Buster's Entertainment, Inc.)  
-**Primary Terminals:** All iOS/Android/Firebase terminals  
+**Author:** Commander Jett Reno (Starfleet Academy)  
+**Primary Terminals:** All project terminals (iOS, Android, Firebase, Academy, DNS, Freelance)  
 **Platforms:** macOS, Linux, Windows (WSL2)  
 **Last Updated:** November 2025
 
@@ -101,11 +85,11 @@ Git worktrees allow checking out multiple branches simultaneously from the same 
 Each project is a separate Git repository with its own worktrees organized in a `worktrees/` subdirectory:
 
 ```
-/Users/Shared/Development/Main Event/
+<your-project-root>/
 │
-├── MainEventApp-iOS/                    # iOS Git repository (develop branch)
+├── <ProjectName-iOS>/                   # iOS Git repository (develop branch)
 │   ├── .git/                            # Git metadata
-│   ├── MainEventApp.xcodeproj           # Xcode project
+│   ├── <AppName>.xcodeproj              # Xcode project
 │   ├── Sources/                         # Source code
 │   ├── Tests/                           # Tests
 │   ├── README_DEV.md                    # Release documentation
@@ -116,7 +100,7 @@ Each project is a separate Git repository with its own worktrees organized in a 
 │       ├── release/                     # Release worktree
 │       └── test/                        # Test worktree
 │
-├── MainEventApp-Android/                # Android Git repository (develop branch)
+├── <ProjectName-Android>/               # Android Git repository (develop branch)
 │   ├── .git/                            # Git metadata
 │   ├── app/                             # Android app module
 │   ├── build.gradle.kts                 # Gradle build files
@@ -128,7 +112,7 @@ Each project is a separate Git repository with its own worktrees organized in a 
 │       ├── release/                     # Release worktree
 │       └── test/                        # Test worktree
 │
-└── MainEventApp-Functions/              # Firebase Git repository (develop branch)
+└── <ProjectName-Functions>/             # Firebase Git repository (develop branch)
     ├── .git/                            # Git metadata
     ├── functions/                       # Cloud Functions source
     ├── firebase.json                    # Firebase config
@@ -145,7 +129,7 @@ Each project is a separate Git repository with its own worktrees organized in a 
 - Each project has its own independent Git repository
 - Worktrees are stored in `[project-root]/worktrees/` subdirectory
 - Worktree names are simple: `feature`, `hotfix`, `refactor`, `release`, `test`
-- For multiple worktrees of same type, use descriptive names: `feature-funcard`, `hotfix-crash-3455`
+- For multiple worktrees of same type, use descriptive names: `feature-my-thing`, `hotfix-crash-3455`
 
 ### Naming Pattern
 
@@ -170,29 +154,29 @@ Since worktrees are stored within each project's `worktrees/` subdirectory, the 
 
 **Full Path Examples:**
 
-**iOS Project:**
+**iOS Project (substitute your actual repo path):**
 ```
-/Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/feature/
-/Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/feature-funcard-reload/
-/Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/hotfix/
-/Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/hotfix-crash-3455/
-/Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/refactor-force-unwraps/
+<ios-repo>/worktrees/feature/
+<ios-repo>/worktrees/feature-my-feature/
+<ios-repo>/worktrees/hotfix/
+<ios-repo>/worktrees/hotfix-crash-3455/
+<ios-repo>/worktrees/refactor-force-unwraps/
 ```
 
 **Android Project:**
 ```
-/Users/Shared/Development/Main Event/MainEventApp-Android/worktrees/feature/
-/Users/Shared/Development/Main Event/MainEventApp-Android/worktrees/feature-rewards-compose/
-/Users/Shared/Development/Main Event/MainEventApp-Android/worktrees/hotfix/
-/Users/Shared/Development/Main Event/MainEventApp-Android/worktrees/hotfix-payment-crash/
+<android-repo>/worktrees/feature/
+<android-repo>/worktrees/feature-rewards-compose/
+<android-repo>/worktrees/hotfix/
+<android-repo>/worktrees/hotfix-payment-crash/
 ```
 
 **Firebase Project:**
 ```
-/Users/Shared/Development/Main Event/MainEventApp-Functions/worktrees/feature/
-/Users/Shared/Development/Main Event/MainEventApp-Functions/worktrees/feature-webhook-handler/
-/Users/Shared/Development/Main Event/MainEventApp-Functions/worktrees/hotfix/
-/Users/Shared/Development/Main Event/MainEventApp-Functions/worktrees/refactor-query-optimization/
+<firebase-repo>/worktrees/feature/
+<firebase-repo>/worktrees/feature-webhook-handler/
+<firebase-repo>/worktrees/hotfix/
+<firebase-repo>/worktrees/refactor-query-optimization/
 ```
 
 ### Branch Naming Patterns
@@ -221,10 +205,10 @@ Since worktrees are stored within each project's `worktrees/` subdirectory, the 
 
 ## Terminal Context Mappings
 
-### iOS Team (Star Trek: TNG) - MainEventApp-iOS
+### iOS Team (Star Trek: TNG)
 
-**Project Root:** `/Users/Shared/Development/Main Event/MainEventApp-iOS/`
-**Worktrees Root:** `/Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/`
+**Project Root:** `<ios-repo>/` (auto-detected from terminal name or cwd)
+**Worktrees Root:** `<ios-repo>/worktrees/`
 
 | Terminal | Location | Persona | Typical Worktree | Full Path | Branch Pattern |
 |----------|----------|---------|------------------|-----------|----------------|
@@ -235,10 +219,10 @@ Since worktrees are stored within each project's `worktrees/` subdirectory, the 
 | **ios-observation** | Observation Lounge | Deanna | `review` | `.../worktrees/review/` | Any (for reviewing) |
 | **ios-stellar** | Stellar Cartography | Data | `refactor` | `.../worktrees/refactor/` | `refactor/*` |
 
-### Android Team (Star Trek: TOS) - MainEventApp-Android
+### Android Team (Star Trek: TOS)
 
-**Project Root:** `/Users/Shared/Development/Main Event/MainEventApp-Android/`
-**Worktrees Root:** `/Users/Shared/Development/Main Event/MainEventApp-Android/worktrees/`
+**Project Root:** `<android-repo>/` (auto-detected from terminal name or cwd)
+**Worktrees Root:** `<android-repo>/worktrees/`
 
 | Terminal | Location | Persona | Typical Worktree | Full Path | Branch Pattern |
 |----------|----------|---------|------------------|-----------|----------------|
@@ -249,10 +233,10 @@ Since worktrees are stored within each project's `worktrees/` subdirectory, the 
 | **android-communications** | Communications | Uhura | `review` | `.../worktrees/review/` | Any (for reviewing) |
 | **android-briefing-room** | Briefing Room | Multiple | `test` | `.../worktrees/test/` | `test/*` |
 
-### Firebase Team (Star Trek: DS9) - MainEventApp-Functions
+### Firebase Team (Star Trek: DS9)
 
-**Project Root:** `/Users/Shared/Development/Main Event/MainEventApp-Functions/`
-**Worktrees Root:** `/Users/Shared/Development/Main Event/MainEventApp-Functions/worktrees/`
+**Project Root:** `<firebase-repo>/` (auto-detected from terminal name or cwd)
+**Worktrees Root:** `<firebase-repo>/worktrees/`
 
 | Terminal | Location | Persona | Typical Worktree | Full Path | Branch Pattern |
 |----------|----------|---------|------------------|-----------|----------------|
@@ -276,46 +260,39 @@ The skill automatically detects which project you're working on using multiple m
 1. **Terminal Name Prefix**
    ```bash
    # Terminal name starts with project identifier
-   ios-bridge       → iOS project (MainEventApp-iOS)
-   android-sickbay  → Android project (MainEventApp-Android)
-   firebase-ops     → Firebase project (MainEventApp-Functions)
+   ios-bridge       → iOS project
+   android-sickbay  → Android project
+   firebase-ops     → Firebase project
+   academy-*        → Academy dev-team project
+   dns-*            → DNS Framework project
    ```
 
 2. **Current Working Directory**
    ```bash
-   # If pwd contains project directory
-   /Users/Shared/Development/Main Event/MainEventApp-iOS/...
-   → Detected: iOS project
-
-   /Users/Shared/Development/Main Event/MainEventApp-Android/...
-   → Detected: Android project
-
-   /Users/Shared/Development/Main Event/MainEventApp-Functions/...
-   → Detected: Firebase project
+   # If pwd contains a recognized project directory name
+   git rev-parse --show-toplevel   # root of git repo
+   # → Detected from terminal prefix or cwd heuristic
    ```
 
 3. **Git Remote URL**
    ```bash
    # Check git remote origin
    git remote get-url origin
-   
-   # If contains "MainEventApp-iOS" → iOS project
-   # If contains "MainEventApp-Android" → Android project
-   # If contains "MainEventApp-Functions" → Firebase project
+   # → Matches project by remote URL pattern
    ```
 
 4. **Project Files**
    ```bash
    # Check for platform-specific files
-   MainEventApp.xcodeproj → iOS project
+   *.xcodeproj      → iOS project
    build.gradle.kts → Android project
-   firebase.json → Firebase project
+   firebase.json    → Firebase project
    ```
 
 5. **Explicit Override**
    ```bash
    # User can explicitly specify in command
-   "Create iOS worktree for feature/funcard-reload"
+   "Create iOS worktree for feature/my-feature"
    "Create Android worktree for hotfix"
    "Create Firebase worktree for refactor"
    ```
@@ -325,48 +302,48 @@ The skill automatically detects which project you're working on using multiple m
 **Scenario 1: In iOS terminal**
 ```
 Terminal: ios-bridge
-Location: /Users/Shared/Development/Main Event/MainEventApp-iOS/
+Location: <ios-repo>/
 Command: "Create worktree for feature"
 
 Skill detects:
 ✓ Terminal prefix: ios-*
-✓ Working directory: MainEventApp-iOS
-✓ Project files: MainEventApp.xcodeproj found
+✓ Working directory: <ios-repo>
+✓ Project files: *.xcodeproj found
 → Project: iOS
 
-Creates: /Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/feature/
+Creates: <ios-repo>/worktrees/feature/
 Branch: feature/[name]
 ```
 
 **Scenario 2: In Android terminal**
 ```
 Terminal: android-sickbay
-Location: /Users/Shared/Development/Main Event/MainEventApp-Android/
+Location: <android-repo>/
 Command: "Create worktree for hotfix"
 
 Skill detects:
 ✓ Terminal prefix: android-*
-✓ Working directory: MainEventApp-Android
+✓ Working directory: <android-repo>
 ✓ Project files: build.gradle.kts found
 → Project: Android
 
-Creates: /Users/Shared/Development/Main Event/MainEventApp-Android/worktrees/hotfix/
+Creates: <android-repo>/worktrees/hotfix/
 Branch: hotfix/[name]
 ```
 
 **Scenario 3: In Firebase terminal**
 ```
 Terminal: firebase-ops
-Location: /Users/Shared/Development/Main Event/MainEventApp-Functions/
+Location: <firebase-repo>/
 Command: "Create worktree for feature"
 
 Skill detects:
 ✓ Terminal prefix: firebase-*
-✓ Working directory: MainEventApp-Functions
+✓ Working directory: <firebase-repo>
 ✓ Project files: firebase.json found
 → Project: Firebase
 
-Creates: /Users/Shared/Development/Main Event/MainEventApp-Functions/worktrees/feature/
+Creates: <firebase-repo>/worktrees/feature/
 Branch: feature/[name]
 ```
 
@@ -383,9 +360,9 @@ Skill responds:
 - "Create Firebase worktree for feature"
 
 Or navigate to a project directory first:
-- cd /Users/Shared/Development/Main Event/MainEventApp-iOS/
-- cd /Users/Shared/Development/Main Event/MainEventApp-Android/
-- cd /Users/Shared/Development/Main Event/MainEventApp-Functions/
+- cd <ios-repo>/
+- cd <android-repo>/
+- cd <firebase-repo>/
 ```
 
 ### Cross-Project Work
@@ -395,16 +372,16 @@ Yes! Each project has its own independent worktree structure:
 
 ```
 # iOS Feature Work (in ios-bridge)
-cd /Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/feature/
-[Working on iOS Fun Card widget]
+cd <ios-repo>/worktrees/feature/
+[Working on iOS feature]
 
 # Android Feature Work (in android-bridge) 
-cd /Users/Shared/Development/Main Event/MainEventApp-Android/worktrees/feature/
-[Working on Android Fun Card widget]
+cd <android-repo>/worktrees/feature/
+[Working on Android feature]
 
 # Firebase Backend Support (in firebase-ops)
-cd /Users/Shared/Development/Main Event/MainEventApp-Functions/worktrees/feature/
-[Working on Fun Card balance sync endpoint]
+cd <firebase-repo>/worktrees/feature/
+[Working on Firebase backend]
 
 All three can be in progress simultaneously!
 ```
@@ -415,46 +392,46 @@ All three can be in progress simultaneously!
 
 **Output:**
 ```
-📁 Git Worktrees - All Main Event Projects
+📁 Git Worktrees - All Projects
 
 ═══════════════════════════════════════════════════
-iOS Project (MainEventApp-iOS)
+iOS Project
 ═══════════════════════════════════════════════════
 
 Feature Development:
   🟢 feature
-     Branch: feature/funcard-reload
+     Branch: feature/my-feature
      Status: Clean
-     Path: .../MainEventApp-iOS/worktrees/feature/
+     Path: .../worktrees/feature/
      Ahead of develop: 3 commits
 
 Bug Fixes:
   🔴 hotfix
      Branch: hotfix/crash-3455
      Status: DIRTY (2 uncommitted files)
-     Path: .../MainEventApp-iOS/worktrees/hotfix/
+     Path: .../worktrees/hotfix/
      Ahead of develop: 1 commit
 
 ═══════════════════════════════════════════════════
-Android Project (MainEventApp-Android)
+Android Project
 ═══════════════════════════════════════════════════
 
 Feature Development:
   🟢 feature
-     Branch: feature/funcard-widget-compose
+     Branch: feature/compose-refactor
      Status: Clean
-     Path: .../MainEventApp-Android/worktrees/feature/
+     Path: .../worktrees/feature/
      Ahead of develop: 5 commits
 
 ═══════════════════════════════════════════════════
-Firebase Project (MainEventApp-Functions)
+Firebase Project
 ═══════════════════════════════════════════════════
 
 Feature Development:
   🟢 feature
-     Branch: feature/balance-sync-endpoint
+     Branch: feature/sync-endpoint
      Status: Clean
-     Path: .../MainEventApp-Functions/worktrees/feature/
+     Path: .../worktrees/feature/
      Ahead of develop: 2 commits
 
 Total worktrees: 4 across 3 projects
@@ -475,7 +452,7 @@ Total worktrees: 4 across 3 projects
 # In ios-bridge terminal
 "Create worktree for feature"
 → Detects iOS project from terminal name
-→ Creates /Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/feature/
+→ Creates <ios-repo>/worktrees/feature/
 → Checks out develop branch initially
 → Ready for new feature branch creation
 ```
@@ -483,7 +460,7 @@ Total worktrees: 4 across 3 projects
 **Project-specific worktree (explicit):**
 ```
 "Create Android worktree for feature"
-→ Creates /Users/Shared/Development/Main Event/MainEventApp-Android/worktrees/feature/
+→ Creates <android-repo>/worktrees/feature/
 → Checks out develop branch
 → Ready for Android feature work
 ```
@@ -491,10 +468,10 @@ Total worktrees: 4 across 3 projects
 **Feature worktree with specific branch:**
 ```
 # In ios-bridge terminal
-"Create worktree for feature/funcard-reload"
+"Create worktree for feature/my-feature"
 → Detects iOS project
-→ Creates /Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/feature-funcard-reload/
-→ Creates new branch: feature/funcard-reload
+→ Creates <ios-repo>/worktrees/feature-my-feature/
+→ Creates new branch: feature/my-feature
 → Based on current develop branch
 ```
 
@@ -503,7 +480,7 @@ Total worktrees: 4 across 3 projects
 # In android-sickbay terminal
 "Create worktree for hotfix"
 → Detects Android project
-→ Creates /Users/Shared/Development/Main Event/MainEventApp-Android/worktrees/hotfix/
+→ Creates <android-repo>/worktrees/hotfix/
 → Checks out develop branch
 → Ready for hotfix branch creation
 ```
@@ -513,7 +490,7 @@ Total worktrees: 4 across 3 projects
 # In ios-sickbay terminal
 "Create worktree for hotfix/crash-3455"
 → Detects iOS project
-→ Creates /Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/hotfix-crash-3455/
+→ Creates <ios-repo>/worktrees/hotfix-crash-3455/
 → Creates branch: hotfix/crash-3455
 → Based on develop branch
 ```
@@ -523,7 +500,7 @@ Total worktrees: 4 across 3 projects
 # In firebase-science-lab terminal
 "Create worktree for refactor/query-optimization"
 → Detects Firebase project
-→ Creates /Users/Shared/Development/Main Event/MainEventApp-Functions/worktrees/refactor-query-optimization/
+→ Creates <firebase-repo>/worktrees/refactor-query-optimization/
 → Creates branch: refactor/query-optimization
 → Based on develop branch
 ```
@@ -533,7 +510,7 @@ Total worktrees: 4 across 3 projects
 # In android-engineering terminal
 "Create worktree for release/1.6.0"
 → Detects Android project
-→ Creates /Users/Shared/Development/Main Event/MainEventApp-Android/worktrees/release/
+→ Creates <android-repo>/worktrees/release/
 → Creates branch: release/1.6.0
 → Based on develop branch
 ```
@@ -545,16 +522,16 @@ Total worktrees: 4 across 3 projects
 → Detects iOS project from terminal name
 → Detects sickbay context (bug fixes)
 → Suggests hotfix worktree
-→ Creates /Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/hotfix/
+→ Creates <ios-repo>/worktrees/hotfix/
 ```
 
 **Worktree from existing branch:**
 ```
 # In android-bridge terminal
-"Create worktree from existing branch feature/MEM-445"
+"Create worktree from existing branch feature/PROJ-445"
 → Detects Android project
-→ Creates /Users/Shared/Development/Main Event/MainEventApp-Android/worktrees/feature-MEM-445/
-→ Checks out existing feature/MEM-445 branch
+→ Creates <android-repo>/worktrees/feature-PROJ-445/
+→ Checks out existing feature/PROJ-445 branch
 → No new branch created
 ```
 
@@ -672,9 +649,9 @@ Total worktrees: 4 across 3 projects
 ```
 "Suggest worktree setup"
 → "You're in ios-bridge (Picard - Strategic Feature Development)"
-→ "Detected project: iOS (MainEventApp-iOS)"
-→ "I recommend creating: /Users/Shared/Development/Main Event/MainEventApp-iOS-feature"
-→ "Branch pattern: feature/MEM-[ID]-[description]"
+→ "Detected project: iOS"
+→ "I recommend creating: <ios-repo>/worktrees/feature/"
+→ "Branch pattern: feature/[ID]-[description]"
 → "Would you like me to create it?"
 ```
 
@@ -682,9 +659,9 @@ Total worktrees: 4 across 3 projects
 ```
 "Suggest worktree setup"
 → "You're in ios-sickbay (Beverly - Bug Diagnosis)"
-→ "Detected project: iOS (MainEventApp-iOS)"
-→ "I recommend creating: /Users/Shared/Development/Main Event/MainEventApp-iOS-hotfix"
-→ "Branch pattern: hotfix/crash-[ID] or bugfix/MEM-[ID]"
+→ "Detected project: iOS"
+→ "I recommend creating: <ios-repo>/worktrees/hotfix/"
+→ "Branch pattern: hotfix/crash-[ID] or bugfix/PROJ-[ID]"
 → "Would you like me to create it?"
 ```
 
@@ -696,22 +673,22 @@ Total worktrees: 4 across 3 projects
 
 **Coordinated feature across iOS + Android + Firebase:**
 ```
-"Create coordinated worktrees for Fun Card widget feature"
+"Create coordinated worktrees for cross-platform widget feature"
 
 Skill responds:
 → "Creating coordinated worktrees for cross-platform feature..."
 
 ✅ iOS worktree created:
-   Path: /Users/Shared/Development/Main Event/MainEventApp-iOS-feature-funcard-widget
-   Branch: feature/MEM-445-funcard-widget
+   Path: <ios-repo>/worktrees/feature-widget/
+   Branch: feature/PROJ-445-widget
 
 ✅ Android worktree created:
-   Path: /Users/Shared/Development/Main Event/MainEventApp-Android-feature-funcard-widget
-   Branch: feature/MEM-445-funcard-widget
+   Path: <android-repo>/worktrees/feature-widget/
+   Branch: feature/PROJ-445-widget
 
 ✅ Firebase worktree created:
-   Path: /Users/Shared/Development/Main Event/MainEventApp-Functions-feature-funcard-sync
-   Branch: feature/MEM-445-funcard-sync-endpoint
+   Path: <firebase-repo>/worktrees/feature-widget-sync/
+   Branch: feature/PROJ-445-widget-sync-endpoint
 
 All worktrees ready for coordinated development!
 
@@ -723,26 +700,26 @@ Terminal assignments:
 
 **Check status of coordinated feature:**
 ```
-"Status of Fun Card widget feature across all projects"
+"Status of widget feature across all projects"
 
 Skill responds:
-📊 Cross-Project Feature Status: Fun Card Widget
+📊 Cross-Project Feature Status: Widget
 
-iOS (MainEventApp-iOS-feature-funcard-widget):
-  Branch: feature/MEM-445-funcard-widget
+iOS:
+  Branch: feature/PROJ-445-widget
   Status: Clean
   Commits ahead: 8
-  Last commit: "Complete Fun Card widget UI layouts"
+  Last commit: "Complete widget UI layouts"
   
-Android (MainEventApp-Android-feature-funcard-widget):
-  Branch: feature/MEM-445-funcard-widget
+Android:
+  Branch: feature/PROJ-445-widget
   Status: DIRTY (1 uncommitted file)
   Commits ahead: 6
   Last commit: "Add Material You theming to widget"
   ⚠️  Uncommitted: WidgetProvider.kt
   
-Firebase (MainEventApp-Functions-feature-funcard-sync):
-  Branch: feature/MEM-445-funcard-sync-endpoint
+Firebase:
+  Branch: feature/PROJ-445-widget-sync-endpoint
   Status: Clean
   Commits ahead: 4
   Last commit: "Implement real-time balance sync endpoint"
@@ -824,13 +801,39 @@ All Fun Card widget worktrees cleaned up!
 
 **Post-Creation Actions:**
 
-1. **Record worktree metadata** (optional)
+1. **Deploy personas into the new worktree**
+
+   Container-layout teams (iOS, Android, Firebase, DNS) gitignore `.claude/agents/`, which means a freshly created worktree has NO personas — Claude falls back to built-in agent types instead of loading `spock`, `geordi`, etc. (Originating incident: Android worktree where the `spock` refactoring persona failed to load.)
+
+   Two paths depending on machine type — behavior is automatic on tap machines:
+
+   **Dev machines (dev-team present):** Run immediately after `git worktree add` succeeds:
+
+   ```bash
+   kb-sync-personas sync-worktrees <team> 2>/dev/null || true
+   ```
+
+   Replace `<team>` with the team slug (`ios`, `android`, `firebase`, `dns`). The command auto-skips git-tracked-persona teams (Academy, Command, Finance, Legal) and repos with no personas, so it is always safe to run unconditionally.
+
+   **Tap machines (`~/aiteamforge` present):** `wt-new` calls `deploy-worktree-personas.sh` automatically on every successful creation — no manual step required. The helper reads personas from `~/aiteamforge/<team>/personas/agents/` and copies them into the new worktree's `.claude/agents/`. A `.synced-from-tap` marker is written to record provenance (tap-machine equivalent of XACA-0584's `.synced-from-master`). On dev machines the helper is absent, so the guard (`-x "$_dwp"`) makes this a silent no-op.
+
+   **Pre-existing worktrees on tap machines:** If worktrees were created before the tap was installed (or before XACA-0588), they have no personas. Backfill all of them with:
+
+   ```bash
+   deploy-worktree-personas.sh --all <team>
+   ```
+
+   This is the tap-machine equivalent of `kb-sync-personas sync-worktrees --all`. It enumerates every worktree under `<repo>/worktrees/`, skips any that already have `.synced-from-tap` (idempotent), and deploys personas into the rest. Use `--force` to refresh existing deployments. Pass the repo path explicitly if running from outside the repo.
+
+   The deployed files are intentionally UNTRACKED — they vanish when the worktree is removed. Do NOT `git add` them; seeing them in `.claude/agents/` after creation is expected, not drift.
+
+2. **Record worktree metadata** (optional)
    - Terminal that created it
    - Creation timestamp
    - Purpose/description
    - Associated Jira issue (if applicable)
 
-2. **Update terminal session** (if in tmux)
+3. **Update terminal session** (if in tmux)
    - Can automatically cd into new worktree
    - Update tmux window title with worktree name
 
@@ -865,38 +868,38 @@ All Fun Card widget worktrees cleaned up!
 **Example Output Format:**
 
 ```
-📁 Git Worktrees for Main Event iOS
+📁 Git Worktrees for iOS Project
 
 Feature Development:
-  🟢 main-event-feature
-     Branch: feature/funcard-reload
+  🟢 feature
+     Branch: feature/my-feature
      Status: Clean
-     Path: ~/dev-team/main-event-feature
-     Last commit: MEM-445: Add Fun Card widget foundation
+     Path: <ios-repo>/worktrees/feature/
+     Last commit: PROJ-445: Add widget foundation
      Ahead of develop: 3 commits
 
 Bug Fixes:
-  🔴 main-event-hotfix-crash-3455
+  🔴 hotfix-crash-3455
      Branch: hotfix/crash-3455
      Status: DIRTY (2 uncommitted files)
-     Path: ~/dev-team/main-event-hotfix-crash-3455
+     Path: <ios-repo>/worktrees/hotfix-crash-3455/
      Last commit: Fix force unwrap in booking flow
      Ahead of develop: 1 commit
      ⚠️  Uncommitted changes - commit before cleanup!
 
 Refactoring:
-  🟢 main-event-refactor-force-unwraps
+  🟢 refactor-force-unwraps
      Branch: refactor/force-unwraps
      Status: Clean
-     Path: ~/dev-team/main-event-refactor-force-unwraps
-     Last commit: Refactor RewardsViewController guard statements
+     Path: <ios-repo>/worktrees/refactor-force-unwraps/
+     Last commit: Refactor ViewController guard statements
      Ahead of develop: 8 commits
 
 Main Repository:
-  🟢 main-event-ios
+  🟢 (main repo)
      Branch: develop
      Status: Clean
-     Path: ~/dev-team/main-event-ios
+     Path: <ios-repo>/
 ```
 
 ### Worktree Cleanup Rules
@@ -1020,7 +1023,7 @@ The skill detects the current terminal context to provide intelligent suggestion
 
 **Sickbay (Beverly, Bones, Bashir):**
 - Default: Hotfix worktree
-- Suggested branches: `hotfix/crash-[ID]` or `bugfix/MEM-[ID]`
+- Suggested branches: `hotfix/crash-[ID]` or `bugfix/PROJ-[ID]`
 - Typical workflow: Rapid bug diagnosis and fixes
 
 **Engineering (Geordi, Scotty, O'Brien):**
@@ -1054,14 +1057,14 @@ When you start a task in a specific terminal, the skill can suggest the appropri
 **Example in ios-bridge:**
 
 ```
-You: "I need to start working on the Fun Card reload feature"
+You: "I need to start working on the new feature"
 
 Skill: "You're in ios-bridge (Captain Picard - Strategic Feature Development).
 
 I recommend setting up a feature worktree:
 
-  Directory: ~/dev-team/main-event-feature-funcard-reload
-  Branch: feature/MEM-445-funcard-reload
+  Directory: <ios-repo>/worktrees/feature-my-feature/
+  Branch: feature/PROJ-445-my-feature
   Based on: develop
 
 Would you like me to create this worktree? (yes/no)"
@@ -1073,9 +1076,9 @@ Skill: [Creates worktree]
 "✅ Worktree created successfully!
 
 To get started:
-  cd ~/dev-team/main-event-feature-funcard-reload
+  cd <ios-repo>/worktrees/feature-my-feature/
 
-Your feature branch 'feature/MEM-445-funcard-reload' is ready.
+Your feature branch 'feature/PROJ-445-my-feature' is ready.
 You're now in a clean workspace isolated from other work.
 
 Suggested next steps:
@@ -1124,11 +1127,11 @@ The skill can enhance bash prompts to show current worktree context:
 
 ```bash
 # Example enhanced prompt
-[ios-sickbay] ~/dev-team/main-event-hotfix (hotfix/crash-3455) $
+[ios-sickbay] <ios-repo>/worktrees/hotfix (hotfix/crash-3455) $
 
 # Breakdown:
 # [ios-sickbay] - Terminal context
-# ~/dev-team/main-event-hotfix - Worktree directory
+# <ios-repo>/worktrees/hotfix - Worktree directory
 # (hotfix/crash-3455) - Current branch
 ```
 
@@ -1142,7 +1145,7 @@ You: [Switch from ios-bridge to ios-sickbay]
 Skill: "Welcome to ios-sickbay, Dr. Crusher.
 
 I notice you have a hotfix worktree available:
-  ~/dev-team/main-event-hotfix (hotfix/crash-3455)
+  <ios-repo>/worktrees/hotfix (hotfix/crash-3455)
   Last commit: 2 hours ago
   Status: Clean
 
@@ -1340,32 +1343,32 @@ What would you like to do?
 
 **For Feature Development:**
 ```
-1. Create worktree: "Create worktree for feature/MEM-445-widget"
-2. Work in worktree: cd ~/dev-team/main-event-feature-MEM-445
+1. Create worktree: "Create worktree for feature/PROJ-445-widget"
+2. Work in worktree: cd <repo>/worktrees/feature-PROJ-445/
 3. Commit regularly: git commit -m "Progress on widget"
-4. Push to remote: git push origin feature/MEM-445-widget
+4. Push to remote: git push origin feature/PROJ-445-widget
 5. Create PR when ready
-6. After merge: "Remove worktree main-event-feature-MEM-445"
+6. After merge: "Remove worktree feature-PROJ-445"
 ```
 
 **For Hotfixes:**
 ```
 1. Create worktree: "Create worktree for hotfix/crash-3455"
-2. Fix issue quickly: cd ~/dev-team/main-event-hotfix-crash-3455
+2. Fix issue quickly: cd <repo>/worktrees/hotfix-crash-3455/
 3. Test fix thoroughly
 4. Commit and push: git commit -m "Fix crash #3455" && git push
 5. Create PR for fast-track review
-6. After merge and deploy: "Remove worktree main-event-hotfix-crash-3455"
+6. After merge and deploy: "Remove worktree hotfix-crash-3455"
 ```
 
 **For Refactoring:**
 ```
 1. Create worktree: "Create worktree for refactor/force-unwraps"
-2. Systematic refactoring: cd ~/dev-team/main-event-refactor-force-unwraps
+2. Systematic refactoring: cd <repo>/worktrees/refactor-force-unwraps/
 3. Commit frequently (one file or logical group at a time)
 4. Push regularly to prevent data loss
 5. Create PR when refactor is complete
-6. After merge: "Remove worktree main-event-refactor-force-unwraps"
+6. After merge: "Remove worktree refactor-force-unwraps"
 ```
 
 ### Multi-Terminal Workflow
@@ -1374,17 +1377,17 @@ What would you like to do?
 
 ```
 Terminal 1 (ios-bridge):
-  Working directory: ~/dev-team/main-event-feature-funcard
-  Branch: feature/funcard-reload
-  Task: Implementing Fun Card reload feature
+  Working directory: <ios-repo>/worktrees/feature-my-feature/
+  Branch: feature/my-feature
+  Task: Implementing new feature
 
 Terminal 2 (ios-sickbay):
-  Working directory: ~/dev-team/main-event-hotfix-crash
+  Working directory: <ios-repo>/worktrees/hotfix-crash/
   Branch: hotfix/crash-3455
   Task: Fixing booking flow crash
 
 Terminal 3 (ios-stellar):
-  Working directory: ~/dev-team/main-event-refactor
+  Working directory: <ios-repo>/worktrees/refactor-force-unwraps/
   Branch: refactor/force-unwraps
   Task: Systematic force unwrap elimination
 
@@ -1496,29 +1499,29 @@ No branch switching, no stashing, no conflicts.
 **Initial State:**
 ```
 Terminal: ios-bridge
-Location: /Users/Shared/Development/Main Event/MainEventApp-iOS/ (develop branch)
-Task: About to start Fun Card reload feature
+Location: <ios-repo>/ (develop branch)
+Task: About to start new feature
 ```
 
 **Step 1: Create feature worktree**
 ```
-You: "Create worktree for feature/MEM-445-funcard-reload"
+You: "Create worktree for feature/PROJ-445-my-feature"
 
 Skill: 
 → Detected iOS project from terminal name (ios-bridge)
-→ [Creates /Users/Shared/Development/Main Event/MainEventApp-iOS-feature-funcard-reload]
+→ [Creates <ios-repo>/worktrees/feature-PROJ-445-my-feature/]
 
 ✅ Worktree created!
-   Directory: /Users/Shared/Development/Main Event/MainEventApp-iOS-feature-funcard-reload
-   Branch: feature/MEM-445-funcard-reload (new, based on develop)
+   Directory: <ios-repo>/worktrees/feature-PROJ-445-my-feature/
+   Branch: feature/PROJ-445-my-feature (new, based on develop)
    
 To start working:
-   cd /Users/Shared/Development/Main Event/MainEventApp-iOS-feature-funcard-reload
+   cd <ios-repo>/worktrees/feature-PROJ-445-my-feature/
 ```
 
 **Step 2: Start feature work**
 ```
-You: cd /Users/Shared/Development/Main Event/MainEventApp-iOS-feature-funcard-reload
+You: cd <ios-repo>/worktrees/feature-PROJ-445-my-feature/
 You: [Start implementing feature, make 3 commits over 2 hours]
 ```
 
@@ -1529,26 +1532,26 @@ You: "Create worktree for hotfix/crash-3455"
 
 Skill: 
 → Detected iOS project from terminal name (ios-sickbay)
-→ [Creates /Users/Shared/Development/Main Event/MainEventApp-iOS-hotfix-crash-3455]
+→ [Creates <ios-repo>/worktrees/hotfix-crash-3455/]
 
 ✅ Hotfix worktree ready!
-   Directory: /Users/Shared/Development/Main Event/MainEventApp-iOS-hotfix-crash-3455
+   Directory: <ios-repo>/worktrees/hotfix-crash-3455/
    Branch: hotfix/crash-3455 (new, based on develop)
    
-This is isolated from your feature work in MainEventApp-iOS-feature-funcard-reload.
+This is isolated from your feature work in worktrees/feature-PROJ-445-my-feature/.
 Fix the crash here without disrupting your feature development.
 ```
 
 **Step 4: Fix crash (30 minutes)**
 ```
-You: cd /Users/Shared/Development/Main Event/MainEventApp-iOS-hotfix-crash-3455
+You: cd <ios-repo>/worktrees/hotfix-crash-3455/
 You: [Fix crash, commit, push]
 You: [Create PR, get it merged]
 ```
 
 **Step 5: Clean up hotfix worktree**
 ```
-You: "Remove worktree MainEventApp-iOS-hotfix-crash-3455"
+You: "Remove worktree hotfix-crash-3455"
 
 Skill: 
 ⚠️  Checking safety before removal...
@@ -1561,7 +1564,7 @@ Safe to remove. Proceed? (yes/no)
 You: yes
 
 Skill:
-✅ Removed worktree: /Users/Shared/Development/Main Event/MainEventApp-iOS-hotfix-crash-3455
+✅ Removed worktree: <ios-repo>/worktrees/hotfix-crash-3455/
 ✅ Deleted local branch: hotfix/crash-3455 (merged)
 ✅ Pruned administrative files
 
@@ -1571,7 +1574,7 @@ You can now return to your feature work!
 **Step 6: Resume feature work**
 ```
 You: [Switch back to ios-bridge terminal]
-You: cd /Users/Shared/Development/Main Event/MainEventApp-iOS-feature-funcard-reload
+You: cd <ios-repo>/worktrees/feature-PROJ-445-my-feature/
 You: [Continue exactly where you left off, no merge conflicts, no stashing]
 ```
 
@@ -1590,16 +1593,16 @@ You: "Create worktree for refactor/force-unwraps"
 
 Skill:
 ✅ Refactor worktree created!
-   Directory: ~/dev-team/main-event-refactor-force-unwraps
+   Directory: <ios-repo>/worktrees/refactor-force-unwraps/
    Branch: refactor/force-unwraps (new, based on develop)
    
 Perfect for systematic refactoring, Lt. Cmdr. Data.
-Fascinating how many force unwraps we can eliminate! 🖖
+Fascinating how many force unwraps we can eliminate!
 ```
 
 **Step 2: Systematic refactoring over several days**
 ```
-Day 1: cd ~/dev-team/main-event-refactor-force-unwraps
+Day 1: cd <ios-repo>/worktrees/refactor-force-unwraps/
        Refactor BookingViewController.swift
        Commit: "Refactor BookingViewController force unwraps"
        
@@ -1617,30 +1620,30 @@ Day 3: Refactor AccountManager.swift
 You: "Check worktree status"
 
 Skill:
-📁 Git Worktrees for Main Event iOS
+📁 Git Worktrees for iOS Project
 
 Refactoring:
-  🟢 main-event-refactor-force-unwraps
+  🟢 refactor-force-unwraps
      Branch: refactor/force-unwraps
      Status: Clean
-     Path: ~/dev-team/main-event-refactor-force-unwraps
+     Path: <ios-repo>/worktrees/refactor-force-unwraps/
      Last commit: Refactor AccountManager force unwraps
      Ahead of develop: 12 commits
      📊 Force unwraps eliminated: ~85
 
 Feature Development:
-  🟢 main-event-feature-funcard-reload
-     Branch: feature/MEM-445-funcard-reload
+  🟢 feature-my-feature
+     Branch: feature/PROJ-445-my-feature
      Status: Clean
-     Path: ~/dev-team/main-event-feature-funcard-reload
-     Last commit: Complete Fun Card widget UI
+     Path: <ios-repo>/worktrees/feature-my-feature/
+     Last commit: Complete widget UI
      Ahead of develop: 8 commits
 
 Main Repository:
-  🟢 main-event-ios
+  🟢 (main repo)
      Branch: develop
      Status: Clean
-     Path: ~/dev-team/main-event-ios
+     Path: <ios-repo>/
 ```
 
 **Step 4: Complete refactoring**
@@ -1652,7 +1655,7 @@ You: [Create PR, get code review, merge]
 
 **Step 5: Clean up**
 ```
-You: "Remove worktree main-event-refactor-force-unwraps"
+You: "Remove worktree refactor-force-unwraps"
 
 Skill:
 ✅ Branch refactor/force-unwraps is merged to develop
@@ -1676,16 +1679,16 @@ You: "Create worktree for release/2.9.0"
 
 Skill:
 ✅ Release worktree created!
-   Directory: ~/dev-team/main-event-release
+   Directory: <ios-repo>/worktrees/release/
    Branch: release/2.9.0 (new, based on develop)
    
 Release management ready, Commander La Forge.
-All systems nominal! 🚀
+All systems nominal!
 ```
 
 **Step 2: Prepare release**
 ```
-You: cd ~/dev-team/main-event-release
+You: cd <ios-repo>/worktrees/release/
 You: [Update version numbers, finalize release notes]
 You: [Run final tests, verify build settings]
 You: [Commit release preparation changes]
@@ -1694,7 +1697,7 @@ You: [Commit release preparation changes]
 **Step 3: Feature work continues in parallel**
 ```
 [Meanwhile, in ios-bridge terminal]
-Other developer: cd ~/dev-team/main-event-feature-v2.10
+Other developer: cd <ios-repo>/worktrees/feature-v2.10/
 Other developer: [Working on v2.10.0 features without affecting release]
 ```
 
@@ -1889,10 +1892,9 @@ git clean -fd
 
 ## Support & Feedback
 
-**Skill Author:** Darren Ehlers  
-**Company:** Dave & Buster's Entertainment, Inc.  
-**Team:** Main Event Mobile Development  
-**Contact:** [Your corporate email]  
+**Skill Author:** Commander Jett Reno (Chief Technical Instructor)  
+**Company:** Starfleet Academy - Engineering Lab  
+**Team:** Academy Dev Team Infrastructure  
 **Last Updated:** November 2025
 
 **Feedback Welcome:**
