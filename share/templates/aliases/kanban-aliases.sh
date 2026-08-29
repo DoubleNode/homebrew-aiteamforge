@@ -5711,11 +5711,23 @@ FRONTMATTER
 
     echo "Created: ${new_file}"
 
-    # XACA-0991-003: validate-on-write (ported from canonical kanban-helpers.sh
-    # — not region-parity-gated, hand-mirrored for product consistency).
+    # XACA-0991-003: validate-on-write. kb-knowledge-add was the ONE place
+    # that wrote entry files with no validation at all — only argument
+    # sanitisation on the way in, nothing checked on the way out. 3 of the 14
+    # errors in the XACA-0860 two-day drift measurement traced to a
+    # HAND-WRITTEN entry that bypassed this scaffolding entirely, which is a
+    # different failure mode from the one this check catches — but a future
+    # bug in the write path ABOVE (frontmatter composition, id/tier
+    # derivation) would previously accumulate silently across every
+    # subsequent call until someone ran a whole-tree kb-knowledge-validate by
+    # hand, exactly the blind spot XACA-0991 exists to close. --file scopes
+    # kb-knowledge-validate to just this one path — sub-second, and the three
+    # whole-tree structural checks it still runs (duplicate ID-slot, INDEX
+    # orphan, duplicate persona-dir) are directory/filename-listing cheap.
+    #
     # `local out; out=$(cmd)` is split across two statements deliberately —
     # `local out=$(cmd)` would fold local's own (always-0) exit status over
-    # cmd's, masking a real failure.
+    # cmd's, masking a real failure (feedback_pipefail_hides_exit_code.md).
     local _kb_add_validate_output
     _kb_add_validate_output=$(kb-knowledge-validate --quiet --file "$new_file" 2>&1)
     if [[ $? -ne 0 ]]; then
