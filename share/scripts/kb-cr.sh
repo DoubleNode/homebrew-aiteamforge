@@ -254,6 +254,61 @@ _kb_cr_preamble() {
     return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_require_item_binding <board_file> <item_idx> <item_id> <verb>
+#
+# Refuse (return 1) when a backlog item has NO CR binding of any kind. Silent
+# success (return 0) when it has one.
+#
+# XACA-0924 (F2). The v1 per-item lifecycle helpers below were entirely
+# ungated: they wrote flat crState + timestamps onto whatever backlog index the
+# preamble resolved, with no check that the item was ever part of a CR at all.
+# `kb-cr approve <ITEM>` therefore succeeded against a PRISTINE item that had
+# never had a CR, stamping crState=cr-approved and cr_approved_at out of
+# nothing. That path is reached whenever crAssignment.crId is empty — including
+# immediately after an ordinary `kb-cr detach`, which deletes both the
+# crAssignment object and the flat fields.
+#
+# BINDING IS DEFINED AS: crAssignment.crId (v2 container back-pointer) OR the
+# flat cr_id field (true v1 legacy). That is not a new convention — it is the
+# same "nested first, flat fallback" pair that four existing read sites in this
+# file already use to answer "which CR does this item belong to".
+#
+# The distinction is what keeps this from breaking genuinely-legacy items:
+#   * flat cr_id present, no crAssignment  -> a real v1 CR. PERMITTED, exactly
+#     as before. This is the population the v1 path exists for.
+#   * neither present                      -> pristine, or freshly detached.
+#     There is no CR here to submit, approve or deploy, so every v1 verb is
+#     refused. This case is unambiguously wrong, which is why it is the only
+#     one closed.
+# Measured across the 6 real team boards at the time of the fix: 194 items
+# carry a CR trace — 192 bound via crAssignment (which route to the container
+# path and never reach here at all), 1 bound via flat cr_id only (still
+# permitted), 1 with no binding (now refused). The narrow rule costs nothing
+# real and closes the hole.
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_require_item_binding() {
+    local board_file="$1"
+    local item_idx="$2"
+    local item_id="$3"
+    local verb="$4"
+
+    local assigned flat
+    assigned=$(_kb_jq_read "$board_file" \
+        ".backlog[$item_idx].crAssignment.crId // \"\"" -r 2>/dev/null)
+    [[ -n "$assigned" ]] && return 0
+
+    flat=$(_kb_jq_read "$board_file" \
+        ".backlog[$item_idx].cr_id // \"\"" -r 2>/dev/null)
+    [[ -n "$flat" ]] && return 0
+
+    echo "kb-cr $verb: item '$item_id' has no change request." >&2
+    echo "  It has neither a crAssignment.crId back-pointer to a CR container nor a legacy flat cr_id, so there is no CR to $verb." >&2
+    echo "  Writing a CR state onto it would invent a change request that was never raised." >&2
+    echo "  Create one with 'kb-cr draft $item_id', or attach it to an existing CR with 'kb-cr attach <CR-ID> $item_id'." >&2
+    return 1
+}
+
 # Write a crState and optional timestamp field to an item atomically.
 # Usage: _kb_cr_transition <board> <idx> <new_state> [<ts_field> <ts_value>] [extra jq args...]
 _kb_cr_write_state() {
@@ -524,6 +579,93 @@ _kb_cr_state_entry_ts_field() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_state_required_evidence — canonical state -> prerequisite evidence
+#
+# Echoes the timestamps.<field> names that MUST already be present before a CR
+# can legitimately have entered <state>, one per line. Empty output means the
+# state has no prerequisite. Non-zero exit means <state> is not a valid crState.
+#
+# XACA-0924 (F1). "Is this CR currently in state X?" is a question about the
+# present, and crState is mutable by any transition command. Authorization needs
+# the past — "has this CR ever legitimately reached X?" — and timestamps are the
+# evidence that survives a state rewrite. This map is what turns the second
+# question into something answerable.
+#
+# DERIVED, not invented: each line mirrors the "Predecessor states:" contract
+# the dedicated verb for that state already enforces a few hundred lines below,
+# so this encodes the lifecycle that ships rather than a stricter one.
+#   * approve / reject / hold accept only cr-submitted  -> cr_submitted_at.
+#   * start-dev accepts only cr-approved, deploy-dev accepts cr-approved or
+#     implementing -> cr_approved_at, and cr_submitted_at behind it.
+#   * deploy-prod accepts deployed-dev OR (with a warning) cr-approved direct,
+#     so it requires cr_approved_at but deliberately NOT cr_deployed_dev_at —
+#     skipping dev is a documented path, not a skipped rank.
+#
+# Three states deliberately have NO prerequisite, each for a stated reason:
+#   * cr-published — rank 5, BELOW cr-submitted. Publishing a draft is not
+#     submitting it for review, and XACA-0465's one-stage path reaches a
+#     Confluence page without `kb-cr publish` at all.
+#   * emergency-deployed — break-glass. `kb-cr emergency-deploy` is documented
+#     "allowed from any state"; requiring approval evidence would gate the one
+#     path whose entire purpose is bypassing approval. Its audit trail is
+#     emergency_justification.
+#   * cr-closed — `kb-cr close` is reachable from any state.
+#
+# Kept in sync BY HAND with two siblings that answer different questions and
+# must not be merged with this one (same standing caveat as
+# _kb_cr_state_entry_ts_field vs _kb_cr_state_strip_spec):
+#   * scripts/cr-schema-validator.py  EVIDENCE_PREREQS  (check8)
+#   * claude-hooks/damage-control/confluence-cr-guard.py POST_APPROVAL_EVIDENCE
+#     — which DOES include emergency, because it asks "was this page acted on",
+#     not "could the verbs produce this shape".
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_state_required_evidence() {
+    case "$1" in
+        cr-drafted)         ;;
+        cr-published)       ;;
+        cr-submitted)       ;;
+        cr-rejected)        echo "cr_submitted_at" ;;
+        cr-held)            echo "cr_submitted_at" ;;
+        cr-approved)        echo "cr_submitted_at" ;;
+        implementing)       printf 'cr_submitted_at\ncr_approved_at\n' ;;
+        deployed-dev)       printf 'cr_submitted_at\ncr_approved_at\n' ;;
+        deployed-prod)      printf 'cr_submitted_at\ncr_approved_at\n' ;;
+        emergency-deployed) ;;                      # break-glass, by design
+        cr-closed)          ;;                      # reachable from any state
+        *)                  return 1 ;;
+    esac
+    return 0
+}
+
+# _kb_cr_missing_evidence <board_file> <cr_idx> <state>
+#
+# Echo the prerequisite timestamp fields for <state> that are absent or null on
+# .crs[<cr_idx>], space-separated on one line. Empty output means every
+# prerequisite is present (or the state has none). Non-zero exit = bad state.
+_kb_cr_missing_evidence() {
+    local board_file="$1"
+    local cr_idx="$2"
+    local state="$3"
+
+    local required
+    required=$(_kb_cr_state_required_evidence "$state") || return 1
+    [[ -z "$required" ]] && return 0
+
+    local field value missing=""
+    while IFS= read -r field; do
+        [[ -z "$field" ]] && continue
+        value=$(_kb_jq_read "$board_file" \
+            ".crs[$cr_idx].timestamps[\"$field\"] // \"\"" -r 2>/dev/null)
+        if [[ -z "$value" ]]; then
+            missing="${missing:+$missing }$field"
+        fi
+    done <<< "$required"
+
+    [[ -n "$missing" ]] && echo "$missing"
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _kb_cr_stamp_state_entry — force-write <new_state> AND stamp its entry
 # timestamp, preserving any timestamp already present.
 #
@@ -541,12 +683,38 @@ _kb_cr_state_entry_ts_field() {
 #
 # Delegates to _kb_cr_lifecycle_advance, so the cr_state_changed activity
 # event is emitted here — callers must NOT append their own.
+#
+# EVIDENCE GATE (XACA-0924, F1). Optional 5th arg:
+#     _kb_cr_stamp_state_entry <board_file> <cr_idx> <cr_id> <new_state> [force]
+# Pass the literal string "force" to skip ranks with no supporting evidence.
+#
+# `transition` is a DELIBERATE admin force-write (see the header note at the top
+# of this file) and that escape hatch is a designed capability, so it is kept.
+# What is NOT designed is FABRICATING evidence: before this gate, one call —
+# `kb-cr transition <CR> deployed-prod` against a cr-drafted CR — wrote a
+# cr_deployed_prod_at that had never happened, with no cr_submitted_at, no
+# cr_approved_at and no approver anywhere on the record. Downstream readers
+# cannot tell that timestamp from an earned one; that is what laundering IS.
+#
+# So the gate is narrow and keys on the write, not on the state name:
+#   * Refuses only when it would INVENT the target state's entry timestamp
+#     while that state's prerequisite evidence is absent.
+#   * Preserving a timestamp that is already there stays unconditionally fine —
+#     that path asserts nothing new, and re-stamping is what would destroy the
+#     original moment irreversibly.
+#   * "force" proceeds and records the override in the activity log, so an
+#     operator who genuinely needs the hatch has it and the audit trail says so.
+#
+# The gate lives HERE, in the shared write path, rather than in the CLI's
+# argument parsing, so the LCARS HTTP transition endpoint (server.py, XACA-0328)
+# inherits it unchanged — it calls the 4-arg form, which is the gated form.
 # ─────────────────────────────────────────────────────────────────────────────
 _kb_cr_stamp_state_entry() {
     local board_file="$1"
     local cr_idx="$2"
     local cr_id="$3"
     local new_state="$4"
+    local force_flag="${5:-}"
 
     local ts_field
     ts_field=$(_kb_cr_state_entry_ts_field "$new_state")
@@ -593,6 +761,41 @@ _kb_cr_stamp_state_entry() {
     local existing
     existing=$(_kb_jq_read "$board_file" \
         ".crs[$cr_idx].timestamps[\"$ts_field\"] // \"\"" -r 2>/dev/null)
+
+    # Evidence gate — see the header block. Only a FABRICATING write is gated:
+    # if $existing is set we are preserving, which asserts nothing new.
+    local missing=""
+    if [[ -z "$existing" ]]; then
+        missing=$(_kb_cr_missing_evidence "$board_file" "$cr_idx" "$new_state")
+        if [[ -n "$missing" ]]; then
+            if [[ "$force_flag" != "force" ]]; then
+                local _m
+                echo "_kb_cr_stamp_state_entry: refusing to stamp $ts_field for state '$new_state' on CR [$cr_id] — the evidence that this CR ever reached that state is not on the record." >&2
+                echo "  Missing prerequisite evidence:" >&2
+                # Split on spaces via tr, NOT `for _m in $missing`: zsh does no
+                # word-splitting on unquoted expansions, so the bash-idiomatic
+                # loop prints all fields as one line under the shell most
+                # kb-* callers actually run in.
+                printf '%s\n' "$missing" | tr ' ' '\n' | while IFS= read -r _m; do
+                    [[ -n "$_m" ]] && echo "    - timestamps.$_m" >&2
+                done
+                echo "  Writing $ts_field now would create a timestamp for something that did not happen, and nothing downstream can tell a fabricated one from an earned one." >&2
+                echo "  Advance the CR through the verbs that record the evidence (kb-cr submit / approve / …), or re-run with --force to override deliberately — the override is written to the CR activity log." >&2
+                return 1
+            fi
+            # Forced. Record the override BEFORE the write so the audit trail
+            # survives a failure in the write itself.
+            local _ovr_evt
+            _ovr_evt=$(_kb_cr_activity_event "cr_evidence_override" \
+                "to_state=$new_state" "field=$ts_field" \
+                "note=forced state entry with missing prerequisite evidence: $missing" \
+                2>/dev/null || echo "")
+            if [[ -n "$_ovr_evt" ]]; then
+                _kb_cr_activity_append "$board_file" "$cr_id" "$_ovr_evt" 2>/dev/null || true
+            fi
+            echo "_kb_cr_stamp_state_entry: WARNING: forcing '$new_state' on CR [$cr_id] with missing evidence ($missing). Recorded as cr_evidence_override in the activity log." >&2
+        fi
+    fi
 
     if [[ -n "$existing" ]]; then
         _kb_cr_lifecycle_advance "$board_file" "$cr_idx" "$cr_id" \
@@ -3302,11 +3505,24 @@ _kb_cr_container_list() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 _kb_cr_container_transition() {
+    # XACA-0924 (F1): --force is the explicit opt-in for a transition that skips
+    # ranks with no supporting evidence. Scanned out of the args first so it can
+    # appear in any position; the two remaining positionals keep their meaning.
+    local force_flag="" _t_arg
+    local -a _t_pos=()
+    for _t_arg in "$@"; do
+        case "$_t_arg" in
+            --force) force_flag="force" ;;
+            *)       _t_pos+=("$_t_arg") ;;
+        esac
+    done
+    set -- "${_t_pos[@]:-}"
+
     local cr_id="${1:-}"
     local new_state="${2:-}"
 
     if [[ -z "$cr_id" || -z "$new_state" ]]; then
-        echo "Usage: kb-cr transition <CR-ID> <new-state>" >&2
+        echo "Usage: kb-cr transition <CR-ID> <new-state> [--force]" >&2
         echo "Valid states: cr-drafted, cr-published, cr-submitted, cr-approved," >&2
         echo "              cr-rejected, cr-held, implementing, deployed-dev," >&2
         echo "              deployed-prod, emergency-deployed, cr-closed" >&2
@@ -3352,7 +3568,10 @@ _kb_cr_container_transition() {
             ".crs[$cr_idx].timestamps[\"$ts_field\"] // \"\"" -r 2>/dev/null)
     fi
 
-    _kb_cr_stamp_state_entry "$_cr_board" "$cr_idx" "$cr_id" "$new_state" || return 1
+    _kb_cr_stamp_state_entry "$_cr_board" "$cr_idx" "$cr_id" "$new_state" "$force_flag" || {
+        echo "kb-cr transition: refused — CR [$cr_id] stays in state '$old_state'." >&2
+        return 1
+    }
 
     if [[ -z "$ts_field" ]]; then
         echo "Transitioned CR [$cr_id]: $old_state -> $new_state (no entry timestamp for this state)"
@@ -4309,6 +4528,9 @@ _kb_cr_submit() {
     _kb_cr_preamble "$item_id" || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
 
+    # XACA-0924 (F2): v1-legacy path — refuse an item with no CR binding.
+    _kb_cr_require_item_binding "$_cr_board" "$_cr_idx" "$item_id" "submit" || return 1
+
     local ts
     ts=$(_kb_cr_timestamp)
 
@@ -4357,6 +4579,9 @@ _kb_cr_approve() {
     _kb_cr_preamble "$item_id" || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
 
+    # XACA-0924 (F2): v1-legacy path — refuse an item with no CR binding.
+    _kb_cr_require_item_binding "$_cr_board" "$_cr_idx" "$item_id" "approve" || return 1
+
     local ts
     ts=$(_kb_cr_timestamp)
 
@@ -4392,6 +4617,9 @@ _kb_cr_reject() {
     _kb_cr_preamble "$item_id" || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
 
+    # XACA-0924 (F2): v1-legacy path — refuse an item with no CR binding.
+    _kb_cr_require_item_binding "$_cr_board" "$_cr_idx" "$item_id" "reject" || return 1
+
     # Rejection: no timestamp recorded; it is not a positive lifecycle event.
     # Increment pushback count.
     local ts
@@ -4417,6 +4645,9 @@ _kb_cr_hold() {
     _kb_cr_preamble "$item_id" || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
 
+    # XACA-0924 (F2): v1-legacy path — refuse an item with no CR binding.
+    _kb_cr_require_item_binding "$_cr_board" "$_cr_idx" "$item_id" "hold" || return 1
+
     local ts
     ts=$(_kb_cr_timestamp)
 
@@ -4438,6 +4669,9 @@ _kb_cr_start_dev() {
     _kb_cr_preamble "$item_id" || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
 
+    # XACA-0924 (F2): v1-legacy path — refuse an item with no CR binding.
+    _kb_cr_require_item_binding "$_cr_board" "$_cr_idx" "$item_id" "start-dev" || return 1
+
     local ts
     ts=$(_kb_cr_timestamp)
 
@@ -4455,6 +4689,9 @@ _kb_cr_start_test() {
     local _cr_team _cr_board _cr_enabled _cr_item_id _cr_idx
     _kb_cr_preamble "$item_id" || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    # XACA-0924 (F2): v1-legacy path — refuse an item with no CR binding.
+    _kb_cr_require_item_binding "$_cr_board" "$_cr_idx" "$item_id" "start-test" || return 1
 
     # start-test does NOT change crState — the item's status field tracks testing.
     local ts
@@ -4475,6 +4712,9 @@ _kb_cr_deploy_dev() {
     _kb_cr_preamble "$item_id" || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
 
+    # XACA-0924 (F2): v1-legacy path — refuse an item with no CR binding.
+    _kb_cr_require_item_binding "$_cr_board" "$_cr_idx" "$item_id" "deploy-dev" || return 1
+
     local ts
     ts=$(_kb_cr_timestamp)
 
@@ -4492,6 +4732,9 @@ _kb_cr_deploy_prod() {
     local _cr_team _cr_board _cr_enabled _cr_item_id _cr_idx
     _kb_cr_preamble "$item_id" || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    # XACA-0924 (F2): v1-legacy path — refuse an item with no CR binding.
+    _kb_cr_require_item_binding "$_cr_board" "$_cr_idx" "$item_id" "deploy-prod" || return 1
 
     local ts
     ts=$(_kb_cr_timestamp)
@@ -4526,6 +4769,9 @@ _kb_cr_emergency() {
     local _cr_team _cr_board _cr_enabled _cr_item_id _cr_idx
     _kb_cr_preamble "$item_id" || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    # XACA-0924 (F2): v1-legacy path — refuse an item with no CR binding.
+    _kb_cr_require_item_binding "$_cr_board" "$_cr_idx" "$item_id" "emergency" || return 1
 
     local ts
     ts=$(_kb_cr_timestamp)
