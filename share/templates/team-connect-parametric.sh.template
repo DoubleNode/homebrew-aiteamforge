@@ -522,18 +522,47 @@ fi
 LCARS_PORT="${CANDIDATE_PORTS[@]:0:1}"
 
 # ============================================================================
-# Resolve remote AITEAMFORGE_DIR (XACA-0607 §3)
-# Remote may be a tap install (~/aiteamforge) or a dev clone (~/dev-team).
+# Resolve remote AITEAMFORGE_DIR (XACA-1006 / XACA-0607 §3)
+# Remote may be a tap install ($(brew --prefix)/opt/aiteamforge/libexec/share),
+# ~/aiteamforge, or a dev clone (~/dev-team). Delegates to the shared resolver
+# (scripts/lcars-remote-atf-resolve.sh), which probes for the FILE
+# scripts/agent-panel-display.sh on the remote — not merely a directory's
+# existence, which a same-named decoy (e.g. a kanban-data-only ~/dev-team with
+# no scripts/ subtree, as seen live on darren-m4-mini) can satisfy while still
+# being unusable (XACA-1006).
+#
+# HARD DEPENDENCY: sourced unconditionally, NOT soft-sourced with `|| true`
+# the way the OPTIONAL lcars-launch-helpers.sh nicety above is. An undefined
+# function here would silently reproduce the exact "assumed the path exists
+# on the other machine" bug this ticket exists to eliminate.
 # ============================================================================
-REMOTE_ATF_DIR="$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$HOST" \
-    "/bin/zsh -lc 'for d in \$HOME/aiteamforge \$HOME/dev-team; do [ -d \"\$d\" ] && echo \"\$d\" && break; done'" \
-    2>/dev/null | head -1)"
-[[ -z "$REMOTE_ATF_DIR" ]] && REMOTE_ATF_DIR="\$HOME/dev-team"
+# shellcheck source=/dev/null
+if ! source "${AITEAMFORGE_DIR}/scripts/lcars-remote-atf-resolve.sh"; then
+    echo "  ✗ FATAL: required helper scripts/lcars-remote-atf-resolve.sh" >&2
+    echo "    not found under \$AITEAMFORGE_DIR. Run 'aiteamforge upgrade'." >&2
+    exit 1
+fi
+if ! REMOTE_ATF_DIR="$(lcars_resolve_remote_atf_dir "$HOST")"; then
+    # lcars_resolve_remote_atf_dir already wrote a loud, host-named,
+    # candidate-itemized error to stderr. Abort the WHOLE script here rather
+    # than degrading to tabs-only: REMOTE_ATF_DIR is also a hard dependency of
+    # the auto-start recovery path below (XACA-0614 §5) — exactly the path
+    # this script leans on when the remote isn't already up, which is the
+    # scenario it exists to make reliable. Continuing without it would
+    # silently disable crash-recovery while LOOKING like it worked (tabs
+    # still open via remote-tmux-attach.sh below, which never uses this var)
+    # — the same "silently wrong" bug shape XACA-1006 set out to kill.
+    exit 1
+fi
 
 # XACA-0614-013: REMOTE_ATF_DIR is interpolated into single-quoted remote zsh
-# command strings (lcars-health-check.sh / cold-start). Reject characters that
-# would break that quoting or inject tokens. '$' and '/' are intentionally
-# allowed — the default is "$HOME/dev-team", expanded on the remote side.
+# command strings (lcars-health-check.sh / cold-start / agent-panel-display.sh
+# below). Reject characters that would break that quoting or inject tokens.
+# '$' and '/' are intentionally allowed. Redundant with
+# lcars_resolve_remote_atf_dir's own internal blacklist check (same rule,
+# scripts/lcars-remote-atf-resolve.sh:_lcars_atf_path_is_safe) — kept here as
+# defense-in-depth since REMOTE_ATF_DIR feeds several separate remote command
+# interpolations in this file, not only the resolver's own caller.
 case "$REMOTE_ATF_DIR" in
     *\'*|*\`*|*\;*|*'&'*|*'|'*|*$'\n'*)
         echo "  ✗ Remote AITEAMFORGE_DIR contains unsafe characters: ${REMOTE_ATF_DIR}" >&2
@@ -875,6 +904,16 @@ if has_iterm_gui; then
     # is a remote display-refresh loop (agent-panel-display.sh polling
     # kanban/tmp state), not a tmux session attach. The reconnect helper only
     # applies to `tmux ... attach` surfaces.
+    #
+    # XACA-1006: do NOT pass KANBAN_DIR=${REMOTE_ATF_DIR}/kanban here.
+    # scripts/lcars-tmp-dir.sh's _get_lcars_tmp_dir() honours an inherited
+    # KANBAN_DIR whenever that directory exists, short-circuiting the normal
+    # per-team tmp-dir resolution — one team's KANBAN_DIR override silently
+    # made every team's panel read the SAME team's tmp dir. Proven live: with
+    # the remote dir fixed but KANBAN_DIR still passed, the panel rendered
+    # the empty "Awaiting agent..." state; dropping the override rendered
+    # real content. Passing only AITEAMFORGE_DIR lets agent-panel-display.sh
+    # derive the correct per-team KANBAN_DIR itself.
     # ------------------------------------------------------------------
     if [[ ${#SESSIONS[@]} -gt 0 ]]; then
         _first_tab="${SESSIONS[1]#"${INSTANCE}"-}"
@@ -905,7 +944,7 @@ if has_iterm_gui; then
                     --action split-agent-panel \
                     --window-title "$ITERM_WINDOW_NAME" \
                     --tab-name "$tab" \
-                    --command "ssh -t ${HOST} \"/bin/zsh -lc 'AITEAMFORGE_DIR=${REMOTE_ATF_DIR} KANBAN_DIR=${REMOTE_ATF_DIR}/kanban ${REMOTE_ATF_DIR}/scripts/agent-panel-display.sh ${session}'\"" \
+                    --command "ssh -t ${HOST} \"/bin/zsh -lc 'AITEAMFORGE_DIR=${REMOTE_ATF_DIR} ${REMOTE_ATF_DIR}/scripts/agent-panel-display.sh ${session}'\"" \
                     2>>"$ITERM_CONNECT_LOG"
                 # shellcheck disable=SC2181
                 if [[ $? -eq 0 ]]; then
