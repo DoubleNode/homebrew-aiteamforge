@@ -210,17 +210,231 @@ BACKUP_STATUS_FILE="$HOME/aiteamforge-backups/kanban/backup-status.json"
 # FUNCTIONS
 # ============================================================================
 
-# Get LCARS port for a session (if available)
-# Looks for port file at ~/dev-team/lcars-ports/{session_name}.port
+# ---------------------------------------------------------------------------
+# LCARS port resolution (XACA-0998)
+#
+# AUTHORITY MODEL -- decided in XACA-0998-002 (Q1, "Option A-prime"), signed
+# off 2026-08-29. Resolution precedence, in this exact order:
+#
+#   1. LIVE PROCESS    -- the port the running LCARS server was launched on,
+#                         joined on its exported LCARS_SESSION_NAME. Ground truth.
+#   2. team-paths.json -- the canonical registry (.teams.<id>.lcars_port).
+#   3. ""              -- empty string; the call site OMITS the field.
+#
+# <session>.port files are NEVER read on any reporting path. That is the entire
+# point of the ticket. A .port file records "what some launcher wrote here
+# once", not "what a dashboard link will actually reach" -- and 6 of 11 teams
+# write it from a hardcoded literal that never touches the registry. The
+# registry is canonical but demonstrably lossy (six damaged snapshots on this
+# machine 2026-04 -> 2026-08; a restore from a stale backup on 2026-08-29
+# reverted three freelance teams to pre-XACA-0838 ports while their servers
+# were running on the corrected ones). Putting the live process ABOVE the
+# registry means neither a stale file nor a stale registry can render a dead
+# link: we report what is actually true instead of arbitrating between two
+# artifacts, neither of which is ground truth.
+#
+# ACCEPTED TRADE-OFF (explicitly signed off): the field's semantics change from
+# *configured port* to *currently-bound port*. Tier 2 covers the down/
+# restarting case with the configured value, so the field disappears only when
+# a team is unknown to BOTH the process table and the registry.
+#
+# FAIL CLOSED HERE MEANS WITHHOLD, NOT ALARM. This is a reporting path:
+# unresolvable must yield "" so the caller omits lcars_port entirely. A missing
+# link is safe; a wrong link is not. The *detection* path (XACA-0998-005) fails
+# closed in the opposite shape -- by alarming, because silence is its failure
+# mode. Different subsystem, different consumer: do not let the checker's rule
+# leak into this emit path.
+#
+# DEPENDENCIES: tier 1 is parser-free (pgrep + ps, i.e. /usr/bin/pgrep and
+# /bin/ps -- both unconditionally on the LaunchAgent plist's fixed PATH). Tier
+# 2 uses jq, then python3, each behind its own `command -v` guard, mirroring
+# the jq-or-degrade pattern in json_escape() below. Nothing here adds a new
+# UNCONDITIONAL dependency to the reporter's core collection path, and every
+# optional dependency degrades into tier 3 rather than into a wrong value.
+# ---------------------------------------------------------------------------
+
+# One-shot sweep of live LCARS servers, cached for the whole reporter run.
+#
+# PERFORMANCE: `ps eww` output is far larger than the single `cat` this
+# replaced, and the reporter runs on a ~60s launchd cadence. Sweep ONCE and
+# answer every lookup from the cached map -- never once per session.
+#
+# Map format: one record per line, "<session_name> <port> <team>". A
+# newline-delimited string rather than an associative array because this script
+# must run under bash 3.2 (macOS /bin/bash), which has no `declare -A`.
+_LCARS_LIVE_MAP=""
+_LCARS_LIVE_MAP_BUILT=false
+
+_lcars_build_live_map() {
+    if [ "$_LCARS_LIVE_MAP_BUILT" = true ]; then
+        return 0
+    fi
+    _LCARS_LIVE_MAP_BUILT=true
+    _LCARS_LIVE_MAP=""
+
+    command -v pgrep >/dev/null 2>&1 || return 0
+    command -v ps >/dev/null 2>&1 || return 0
+
+    # pgrep exits 1 with empty output when nothing matches; `|| true` keeps
+    # `set -e` from aborting the reporter when no LCARS server is running.
+    local pids
+    pids="$(pgrep -f 'server\.py' 2>/dev/null || true)"
+    if [ -z "$pids" ]; then
+        return 0
+    fi
+
+    local pid args session team port
+    for pid in $pids; do
+        [ -z "$pid" ] && continue
+        args="$(ps eww -o args= -p "$pid" 2>/dev/null || true)"
+        [ -z "$args" ] && continue
+
+        # Only an LCARS server carries LCARS_SESSION_NAME in its environment,
+        # so this doubles as the "is this actually an LCARS server" filter.
+        #
+        # LCARS_SESSION_NAME is the normative join key (XACA-0998-002 Q3):
+        # verified across 8 live servers, every exported value is an EXACT
+        # match for the reporter's own session_name -- including the multi-part
+        # names (finance-personal-lcars, legal-coparenting-lcars) where a naive
+        # "-lcars" strip is ambiguous. Equality join, no parsing, no inference.
+        # parse_session_name() is disqualified for this: it takes the LAST
+        # hyphen-part as `team`, so it returns team=lcars for every LCARS
+        # session name and can never produce a registry team id.
+        case "$args" in
+            *" LCARS_SESSION_NAME="*) ;;
+            *) continue ;;
+        esac
+        session="${args##* LCARS_SESSION_NAME=}"
+        session="${session%%[[:space:]]*}"
+        [ -z "$session" ] && continue
+
+        team=""
+        case "$args" in
+            *" LCARS_TEAM="*)
+                team="${args##* LCARS_TEAM=}"
+                team="${team%%[[:space:]]*}"
+                ;;
+        esac
+
+        # Bound port = the first integer token immediately after "server.py ".
+        # Same extraction aiteamforge-doctor.sh::check_lcars_port_drift() uses
+        # (the one live-process read already proven in this codebase). If
+        # "server.py " is absent the expansion is a no-op and the digit trim
+        # yields "", so the record is skipped rather than guessed at.
+        port="${args#*server.py }"
+        port="${port%%[![:digit:]]*}"
+        case "$port" in
+            ''|*[!0-9]*) continue ;;
+            0*) continue ;;
+        esac
+
+        _LCARS_LIVE_MAP="${_LCARS_LIVE_MAP}${session} ${port} ${team}
+"
+    done
+
+    return 0
+}
+
+# Tier 1 lookup: exact-equality join of $1 against a live server's
+# LCARS_SESSION_NAME. Prints the bound port, or nothing at all.
+_lcars_live_port_for_session() {
+    local session_name="$1"
+    [ -n "$session_name" ] || return 0
+    _lcars_build_live_map
+    [ -n "$_LCARS_LIVE_MAP" ] || return 0
+    printf '%s' "$_LCARS_LIVE_MAP" | awk -v want="$session_name" '$1 == want { print $2; exit }'
+}
+
+# Tier 2 lookup: the canonical registry, .teams.<team_id>.lcars_port.
+#
+# The session -> team-id bridge here is the naive "-lcars" suffix strip, and it
+# is BEST-EFFORT by design -- documented rather than hidden. Two known-invalid
+# classes: (a) the three legal orphan sessions (legal-lcars,
+# legal-personal-lcars, legal-coparent-lcars) strip to ids that do not exist in
+# the registry, which holds only legal-coparenting; (b) five of mainevent's six
+# registry entries have no session of their own at all -- there is only ever
+# one mainevent-lcars session for the whole team -- so the strip is
+# structurally inapplicable to them. Both classes simply miss and fall through
+# to tier 3, which is the correct outcome: no entry, no link.
+#
+# Tier 1 needs no mapping whatsoever; that is precisely why LCARS_SESSION_NAME
+# is normative and this strip survives only down here on the fallback branch.
+_lcars_registry_port_for_team() {
+    local team_id="$1"
+    [ -n "$team_id" ] || return 0
+
+    # Same resolution aiteamforge_paths.py uses: $AITEAMFORGE_CONFIG wins,
+    # otherwise the well-known dotdir path.
+    local registry="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+    [ -f "$registry" ] || return 0
+
+    local port=""
+    if command -v jq >/dev/null 2>&1; then
+        port="$(jq -r --arg t "$team_id" '.teams[$t].lcars_port // empty' "$registry" 2>/dev/null | head -1 || true)"
+    elif command -v python3 >/dev/null 2>&1; then
+        port="$(REGISTRY="$registry" TEAM_ID="$team_id" python3 -c '
+import json, sys
+from os import environ
+try:
+    with open(environ["REGISTRY"]) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+teams = data.get("teams") if isinstance(data, dict) else None
+if not isinstance(teams, dict):
+    sys.exit(0)
+entry = teams.get(environ["TEAM_ID"])
+if not isinstance(entry, dict):
+    sys.exit(0)
+value = entry.get("lcars_port")
+if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    sys.exit(0)
+print(value)
+' 2>/dev/null || true)"
+    fi
+
+    # Reject null / non-integer / <= 0 / leading-zero values rather than emit a
+    # malformed JSON number. A bad registry entry degrades to tier 3 (no field),
+    # never to a wrong link. "0" and "007" are both caught by the 0* arm.
+    case "$port" in
+        ''|*[!0-9]*) return 0 ;;
+        0*) return 0 ;;
+    esac
+
+    printf '%s' "$port"
+}
+
+# Get LCARS port for a session (if available).
+#
+# CONTRACT (unchanged, and load-bearing): prints a bare integer on success or
+# an EMPTY string when unresolvable, and always exits 0. The call site in
+# get_tmux_sessions() gates on `[ -n "$lcars_port" ]` before appending the
+# `,"lcars_port":<n>` JSON fragment, so an empty return omits the field
+# cleanly. Never print diagnostics to stdout here and never exit non-zero --
+# the first lands inside the payload, the second aborts the reporter under
+# `set -e`.
 get_lcars_port() {
     local session_name="$1"
-    local port_file="$LCARS_PORTS_DIR/${session_name}.port"
+    local port=""
 
-    if [ -f "$port_file" ]; then
-        cat "$port_file"
-    else
-        echo ""
+    # Tier 1 -- live process. Ground truth.
+    port="$(_lcars_live_port_for_session "$session_name")"
+    if [ -n "$port" ]; then
+        printf '%s\n' "$port"
+        return 0
     fi
+
+    # Tier 2 -- canonical registry, via the best-effort session -> team strip.
+    port="$(_lcars_registry_port_for_team "${session_name%-lcars}")"
+    if [ -n "$port" ]; then
+        printf '%s\n' "$port"
+        return 0
+    fi
+
+    # Tier 3 -- withhold. $LCARS_PORTS_DIR/<session>.port is deliberately NOT
+    # consulted, on this or any other reporting path.
+    echo ""
+    return 0
 }
 
 # Get theme color for a session (if available)
@@ -528,60 +742,100 @@ get_tmux_sessions() {
 
 # Get LCARS service records independent of tmux session enumeration (XACA-0983).
 #
-# WHY THIS EXISTS: get_lcars_port() (above) reads $LCARS_PORTS_DIR/<session>.port
-# off disk and has always been able to answer "what port does this LCARS use" --
-# but it is only ever CALLED from inside get_tmux_sessions()'s loop over live tmux
-# sessions (see "Check for LCARS port" above). When a team's <team>-lcars tmux
-# session dies (e.g. a health-check self-heal that kills-without-recreating -- see
-# lcars-health-check.sh's _hc_heal_noncanonical_port, XACA-0983 fix (a)), the loop
-# never iterates for that team and the reporter emits NOTHING for it, even though
-# the .port file is still on disk and the server may still be answering.
+# WHY THIS EXISTS: get_lcars_port() is only ever CALLED from inside
+# get_tmux_sessions()'s loop over live tmux sessions (see "Check for LCARS
+# port" above). When a team's <team>-lcars tmux session dies (e.g. a
+# health-check self-heal that kills-without-recreating -- see
+# lcars-health-check.sh's _hc_heal_noncanonical_port, XACA-0983 fix (a)), that
+# loop never iterates for the team and the reporter emits NOTHING for it, even
+# though its server may still be answering.
 #
 # This is a MACHINE-LEVEL array, deliberately NOT nested under sessions[] --
 # nesting it there would recreate the exact bug it fixes: a session-less team
 # would still be structurally absent from the payload.
 #
+# ---- XACA-0998: THE ENUMERATION SOURCE CHANGED ---------------------------
+# This function used to glob $LCARS_PORTS_DIR/*-lcars.port for its catalog. It
+# no longer reads .port files at all -- the signed-off authority model (see the
+# block above get_lcars_port()) removes them from EVERY reporting path, and
+# this was the file's second, independent .port reader. Leaving it would have
+# made the fix merely look done while the service catalog kept publishing stale
+# ports and curl-probing the wrong ones.
+#
+# Enumeration is now the live-process sweep (_lcars_build_live_map), and each
+# record's port goes through get_lcars_port() -- the SAME precedence chain
+# sessions[] uses, so the two can never disagree about a team.
+#
+# WHY NOT ALSO ENUMERATE REGISTRY-KNOWN TEAMS as known-but-not-running entries:
+# because team-paths.json carries no machine attribution. Every one of its
+# entries (25 on this machine) looks identical whether the team is hosted here
+# or on another machine in the fleet, so seeding this array from the registry
+# would fabricate machine-level service records on EVERY host for teams that
+# live elsewhere -- lighting up phantom LCARS cards fleet-wide. lcars_services[]
+# is by definition a report about THIS machine; a fleet-wide registry cannot
+# scope it. The live process table can, and does.
+#
+# Coverage after the change -- the XACA-0983 gap stays closed:
+#   session alive + server alive  -> sessions[] AND lcars_services[]
+#   session DEAD  + server alive  -> lcars_services[]   <- the XACA-0983 case
+#   session alive + server DEAD   -> sessions[] (name-based LCARS gate still
+#                                   fires; the port field is omitted, which is
+#                                   the accepted semantic change)
+#   session DEAD  + server DEAD   -> nothing. Previously a stale .port file
+#                                   produced a phantom entry with
+#                                   reachable=false; under the signed-off model
+#                                   that record correctly disappears.
+#
 # Forward/backward compatibility: an old server ignores this unknown top-level
 # key; this reporter still emits sessions[] unchanged, so an old server sees
 # no behavior change. See server.js parseFleetData() for the other half of the
-# contract.
+# contract -- it requires a non-empty division and team plus a finite numeric
+# port on every record, and passes `source` straight through.
 get_lcars_services() {
-    local dir="$LCARS_PORTS_DIR"
-    [ -d "$dir" ] || { echo "[]"; return; }
-
     local have_curl=false
     command -v curl &>/dev/null && have_curl=true
 
-    # Pass 1: collect (session_name, division, project, team, port) tuples
-    # from portfiles. Cheap and synchronous -- no network I/O here.
+    # Pass 1: collect (session_name, division, project, team, port) tuples from
+    # the live-process sweep. Cheap and synchronous -- no network I/O here, and
+    # the `ps` sweep itself is cached across the whole reporter run.
     #
-    # division/project/team are derived with the SAME parse_session_name()
-    # used for sessions[] above -- deliberately, so a server-side consumer
-    # (parseFleetData in server.js) can key a service record into the exact
-    # same divisionKey/projectKey/teamKey a live session for that same LCARS
-    # terminal would produce, instead of inventing a second, incompatible
-    # naming scheme it would have to reconcile.
-    local -a session_names=() divisions=() projects=() teams=() ports=()
-    local port_file session_name division project team port
-    for port_file in "$dir"/*-lcars.port; do
-        [ -e "$port_file" ] || continue
-        session_name=$(basename "$port_file" .port)
-        port=$(cat "$port_file" 2>/dev/null | tr -d '[:space:]')
+    # division/project/team are still derived with the SAME parse_session_name()
+    # used for sessions[] above -- deliberately unchanged, so a server-side
+    # consumer (parseFleetData in server.js) can key a service record into the
+    # exact same divisionKey/projectKey/teamKey a live session for that same
+    # LCARS terminal would produce, instead of inventing a second, incompatible
+    # naming scheme it would have to reconcile. parse_session_name() is
+    # disqualified for PORT resolution (it yields team=lcars for every LCARS
+    # session name), not for the display hierarchy it was written for.
+    _lcars_build_live_map
 
-        # Skip malformed/empty port files rather than emit an invalid record --
-        # a non-numeric port would break server-side JSON number consumers.
+    local -a session_names=() divisions=() projects=() teams=() ports=()
+    local session_name live_port live_team division project team port
+
+    while read -r session_name live_port live_team; do
+        [ -n "$session_name" ] || continue
+
+        # Resolve through the shared precedence chain rather than trusting the
+        # map's own port directly, so this catalog and sessions[] can never
+        # report different ports for the same terminal.
+        port="$(get_lcars_port "$session_name")"
         case "$port" in
             ''|*[!0-9]*) continue ;;
         esac
 
         IFS='|' read -r division project team <<< "$(parse_session_name "$session_name")"
 
+        # server.js drops any record with an empty division or team; skip it
+        # here rather than emit one that is silently discarded downstream.
+        [ -n "$division" ] || continue
+        [ -n "$team" ] || continue
+
         session_names+=("$session_name")
         divisions+=("$division")
         projects+=("$project")
         teams+=("$team")
         ports+=("$port")
-    done
+    done <<< "$_LCARS_LIVE_MAP"
 
     if [ ${#session_names[@]} -eq 0 ]; then
         echo "[]"
@@ -592,8 +846,13 @@ get_lcars_services() {
     # on a ~30-60s cron/LaunchAgent cadence; probing N teams serially at up to
     # --max-time each would multiply wall time by N and risk the reporter
     # overrunning its own cadence (flagged explicitly in the XACA-0983 decision
-    # doc §4.1). Each probe writes its verdict to a scratch file; we wait for
-    # all of them, then assemble JSON synchronously with no I/O left to do.
+    # doc section 4.1). Each probe writes its verdict to a scratch file; we wait
+    # for all of them, then assemble JSON synchronously with no I/O left to do.
+    #
+    # The probe is NOT redundant now that enumeration is live-process-based: a
+    # server can be bound and still not answering (wedged, mid-startup, or
+    # bound to an interface this probe cannot reach), which is exactly what
+    # reachable=false is for.
     local tmp_dir=""
     if [ "$have_curl" = true ]; then
         tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fleet-lcars-probe.XXXXXX" 2>/dev/null || echo "")
@@ -629,7 +888,7 @@ get_lcars_services() {
         else
             project_json="\"$(json_escape "${projects[$i]}")\""
         fi
-        entries+=("{\"session_name\":\"$session_esc\",\"division\":\"$division_esc\",\"project\":$project_json,\"team\":\"$team_esc\",\"port\":${ports[$i]},\"reachable\":$reachable_json,\"source\":\"portfile\"}")
+        entries+=("{\"session_name\":\"$session_esc\",\"division\":\"$division_esc\",\"project\":$project_json,\"team\":\"$team_esc\",\"port\":${ports[$i]},\"reachable\":$reachable_json,\"source\":\"live-process\"}")
     done
 
     local joined

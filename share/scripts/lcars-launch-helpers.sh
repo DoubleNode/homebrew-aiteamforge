@@ -102,6 +102,88 @@ lcars_runtime_target_file() {
 }
 
 # ---------------------------------------------------------------------------
+# _lcars_guard_live_bound_port <session_name>
+#
+# XACA-0998-003. Prints the port(s) that live server.py process(es) are ACTUALLY
+# bound to for <session_name>, joined on an exact LCARS_SESSION_NAME match, and
+# returns 0. Returns 1 (printing nothing) when no live server matches or when
+# the process tools are unavailable.
+#
+# This is the ground-truth tier of the XACA-0998-002 Q1 authority model: a file
+# records what something wrote once, a registry records intent, but only the
+# running process knows what a connection will actually reach.
+#
+# Parser-free by design (XACA-0998-002 Q5): pgrep + ps + shell parameter
+# expansion, no jq and no python3. /usr/bin/pgrep and /bin/ps are both covered
+# by the LCARS LaunchAgent's fixed PATH, whereas jq/python3 live in
+# /opt/homebrew/bin and are not guaranteed on a tap consumer machine.
+#
+# Join key rationale (Q3): LCARS servers are launched as
+#   env LCARS_TEAM=<team> LCARS_SESSION_NAME=<session> python3 server.py <PORT>
+# so LCARS_SESSION_NAME is an exact equality join against the guard's own
+# <session_name> — no inference, no mapping table. Measured across 8 live
+# servers in XACA-0998-002: every one exports it, and every value is an exact
+# match for a .port filename stem, including the multi-part names
+# (finance-personal-lcars, legal-coparenting-lcars) where a naive "-lcars"
+# strip is ambiguous.
+#
+# Normally prints exactly one port. It can print several space-separated ports
+# if two servers claim the same session name — a genuine split-brain the caller
+# should surface rather than silently pick from.
+#
+# Shell compatibility: sourced under BOTH /bin/bash 3.2 and zsh. Note the
+# `while read` over a here-doc rather than `for x in $pids`: zsh does not
+# word-split unquoted parameter expansions, so the `for` form would iterate
+# once over the entire newline-joined blob. A here-doc redirect (not a pipe)
+# also keeps the loop in the current shell, so accumulation into _lgb_out
+# survives. All locals are declared BEFORE the loop (feedback: zsh local-in-loop).
+# ---------------------------------------------------------------------------
+_lcars_guard_live_bound_port() {
+    local _lgb_session="${1:-}"
+    [ -n "$_lgb_session" ] || return 1
+    command -v pgrep >/dev/null 2>&1 || return 1
+    command -v ps    >/dev/null 2>&1 || return 1
+
+    local _lgb_pids _lgb_pid _lgb_args _lgb_sess _lgb_port _lgb_out
+    # pgrep exits 1 with empty stdout when nothing matches; `|| true` keeps a
+    # `set -e` caller alive, per this guard's never-abort contract.
+    _lgb_pids="$(pgrep -f 'server\.py' 2>/dev/null || true)"
+    [ -n "$_lgb_pids" ] || return 1
+
+    _lgb_out=""
+    while IFS= read -r _lgb_pid; do
+        [ -n "$_lgb_pid" ] || continue
+        _lgb_args="$(ps eww -o args= -p "$_lgb_pid" 2>/dev/null || true)"
+        [ -n "$_lgb_args" ] || continue
+        # Only LCARS servers carry LCARS_SESSION_NAME; team/session ids contain
+        # no spaces, so the trailing "%% *" cut is safe.
+        case "$_lgb_args" in
+            *" LCARS_SESSION_NAME="*) ;;
+            *) continue ;;
+        esac
+        _lgb_sess="${_lgb_args##* LCARS_SESSION_NAME=}"
+        _lgb_sess="${_lgb_sess%% *}"
+        [ "$_lgb_sess" = "$_lgb_session" ] || continue
+        _lgb_port="${_lgb_args##*server.py }"
+        _lgb_port="${_lgb_port%% *}"
+        case "$_lgb_port" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        # De-duplicate: two PIDs of one process group can report the same port.
+        case " $_lgb_out " in
+            *" $_lgb_port "*) ;;
+            *) _lgb_out="${_lgb_out:+$_lgb_out }$_lgb_port" ;;
+        esac
+    done <<_LGB_EOF
+$_lgb_pids
+_LGB_EOF
+
+    [ -n "$_lgb_out" ] || return 1
+    printf '%s\n' "$_lgb_out"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # _lcars_port_drift_guard <team> <port> <session_name> <atf_base>
 #
 # XACA-0626 startup-time port drift guard.
@@ -111,34 +193,85 @@ lcars_runtime_target_file() {
 # this check automatically. No additional per-machine steps are required.
 #
 # LCARS_SKIP_DRIFT_GUARD=1 (XACA-0988-003): opt-out for test/sandbox callers.
-#   Check 1 below blindly trusts its <port> argument and self-heals
-#   lcars-ports/<session_name>.port to it — keyed on SESSION NAME alone, with
-#   NO re-verification against team-paths.json. That is safe as long as every
-#   caller's session name is either the real production session (matching
-#   team-paths.json's own value) or a test-scoped name that can never collide
-#   with one. XACA-0988-003 found exactly that collision: a regression suite
-#   forced team="academy" (server.py FATALs on an unknown team) but derived
-#   its SESSION name from the same team ("academy-lcars") — identical to the
-#   real production session — and every run silently overwrote the real
-#   lcars-ports/academy-lcars.port with a throwaway scratch port. The fix at
-#   that call site was renaming the session (defense layer 1); this flag is
-#   defense layer 2 — a harness that legitimately needs to exercise
-#   start_lcars_server() against an arbitrary/ephemeral port can set this and
-#   the guard becomes a no-op unconditionally, so a FUTURE session-name
-#   collision (whatever its cause) can never again corrupt a real .port file.
-#   Unset/any value other than "1" preserves today's behavior exactly —
-#   no production caller sets this, so real startups are unaffected.
+#   RETAINED FOR COMPATIBILITY (XACA-0998-003). The flag was introduced when
+#   Check 1 still WROTE lcars-ports/<session_name>.port: a regression suite
+#   forced team="academy" (server.py FATALs on an unknown team) but derived its
+#   SESSION name from that same team ("academy-lcars") -- identical to the real
+#   production session -- so every run silently overwrote the real
+#   lcars-ports/academy-lcars.port with a throwaway scratch port. Check 1 no
+#   longer writes anything (see below), so the corruption vector this flag was
+#   built to block cannot occur any more. The flag is kept regardless, because
+#   callers in the wild already set it and removing it would silently change
+#   their behavior with no error; it now suppresses the guard's REPORTING too,
+#   which is what a sandbox caller wants anyway (its ports are deliberately
+#   fake, so its divergence report would be pure noise). Unset, or any value
+#   other than "1", preserves the reporting behavior.
 #
 # Two checks:
 #
-# 1. .port file drift (SELF-HEAL):
-#    Reads lcars-ports/<session_name>.port. If the value differs from <port>
-#    (what the caller resolved via resolve_lcars_port / team-paths.json), the
-#    file is REWRITTEN to <port> and a one-line notice is emitted. This closes
-#    the "no automated sync" gap identified in XACA-0626-003 §6 (MISSING WRITER):
-#    the .port file is written once at provisioning (kb-init-team) and was
-#    never re-synced by any startup path. The 8427 stale cksum residue on M1Pro
-#    is the canonical example — a single startup now self-heals it permanently.
+# 1. Port-source divergence (REPORT-ONLY -- writes NOTHING):
+#    XACA-0998-003 removed this check's self-heal. It previously rewrote
+#    lcars-ports/<session_name>.port to whatever <port> its caller passed, and
+#    created that file when it was absent. Both writes are gone.
+#
+#    Why the self-heal was wrong, per the XACA-0998-002 authority decision
+#    (signed off 2026-08-29):
+#      * Q1 adopted model A-prime: the LIVE BOUND PORT outranks team-paths.json,
+#        which outranks .port. The caller's <port> argument is NOT the top tier,
+#        so healing .port toward it asserts an authority that argument does not
+#        have. restart_team_lcars() makes this concrete -- it READS .port and
+#        passes that same value straight back in as <port>, so the "self-heal"
+#        was a no-op that merely laundered a stale value into looking verified.
+#      * Q4 forbids a checker from prescribing a direction. A self-heal is the
+#        strongest possible form of prescribing one: it does not advise, it acts.
+#        On 2026-08-29 the REGISTRY was the stale side (restored from a
+#        pre-XACA-0838 backup with no recency gate), and a guard healing toward
+#        it would have rewritten three healthy freelance teams' .port files.
+#      * XACA-0998-002 section 1.3a: during the freelance registry wipe, .port
+#        was the ONLY on-disk artifact still carrying the correct post-XACA-0838
+#        values. A guard that overwrites .port destroys the very witness that
+#        made the drift detectable in the first place.
+#
+#    What it does instead: gathers up to four values, each reported WITH its
+#    provenance and never ranked against the others --
+#      live-bound   the port a running server.py is actually bound to, joined on
+#                   an EXACT LCARS_SESSION_NAME match (XACA-0998-002 Q3).
+#                   parse_session_name() is disqualified for this: it returns
+#                   team=lcars for every LCARS portfile.
+#      startup-arg  the <port> this launch is about to bind (the caller's arg).
+#      portfile     lcars-ports/<session_name>.port as it currently reads.
+#      registry     team-paths.json via kanban-hooks/lcars_ports.py, keyed on
+#                   <team> -- a real team id. lcars_ports.py does NOT accept a
+#                   session name ("academy" resolves, "academy-lcars" does not).
+#    Silent when every value it could observe agrees, and silent when fewer than
+#    two values are observable (nothing to compare). On disagreement it prints
+#    one line per source and states explicitly that it changed nothing and is
+#    NOT asserting which value is correct.
+#
+#    This check does NO band arithmetic and therefore cannot regress XACA-0803.
+#    It never flags a port for differing from a band base or a DEFAULT_TEAMS
+#    value; it reports only that two independently observed sources disagree,
+#    which is a different question. Band membership stays exclusively in
+#    Check 2, warn-only, exactly as XACA-0803 left it.
+#
+#    Consequence deliberately accepted: nothing in this guard re-syncs a stale
+#    .port. That is the XACA-0626 gap this check was originally built to close,
+#    and it is reopened knowingly, because:
+#      (a) XACA-0626's premise -- ".port is written once at provisioning
+#          (kb-init-team) and never re-synced by any startup path" -- is NOT
+#          accurate in the current tree. Twelve startup-path writers rewrite it
+#          (verified in-tree, XACA-0998-003):
+#          {academy,android,command,finance,firebase,ios,legal,medical,
+#           mainevent,freelance}/scripts/*-lcars-startup.sh,
+#          dns-framework/scripts/dns-lcars-startup.sh, lcars-ui/lcars-launch.sh.
+#      (b) under Q1 no REPORTING path reads .port any more (XACA-0998-004
+#          converted both fleet-reporter.sh readers), so a stale value can no
+#          longer render a dead dashboard link -- the headline harm is gone.
+#    Residual gap, stated honestly rather than papered over: those twelve writes
+#    sit inside each script's `tmux has-session` fresh-session branch, so a
+#    session that is ALREADY up does not re-write .port. Reconciling that is
+#    kb-port-reconcile's job -- it is the designed three-way tool and the only
+#    thing that should ever resolve a direction -- not a startup guard's.
 #
 # 2. team-paths.json port vs its allocated port BAND (WARN-ONLY):
 #    ~/.aiteamforge/team-paths.json is the AUTHORITATIVE port registry — this
@@ -147,9 +280,11 @@ lcars_runtime_target_file() {
 #    XACA-0792. DEFAULT_TEAMS in aiteamforge_paths.py is an explicitly
 #    DEPRECATED (XACA-0463) band-base fallback, NOT a canonical value to
 #    reconcile team-paths.json toward — treating it as such gets the
-#    authority backwards (see Check 1 above, which already self-heals the
-#    .port file TO the team-paths value; Check 2 must agree with it, not
-#    contradict it).
+#    authority backwards. (This paragraph previously justified itself by
+#    pointing at Check 1's self-heal "TO the team-paths value"; that self-heal
+#    was removed in XACA-0998-003 and the cross-reference is retired with it.
+#    Check 2's warn-only, never-write posture is unchanged and was always the
+#    correct one — it is now simply the guard's only remaining opinion.)
 #
 #    The XACA-0463 band allocator (compute_instance_port) hands each team a
 #    port band [lcars_port_base, lcars_port_base + lcars_port_range) and
@@ -170,13 +305,18 @@ lcars_runtime_target_file() {
 #    auto-correct team-paths.json here: that file is written by the
 #    installer's allocator, and rewriting it mid-startup could fight a
 #    concurrent install or mask a real collision that the operator needs to
-#    consciously resolve. The .port rewrite (check 1) is the sufficient,
-#    safe self-heal for connectivity; team-paths band drift is a secondary
-#    issue that requires informed operator action.
+#    consciously resolve. As of XACA-0998-003 neither check writes anything:
+#    Check 1 reports source divergence and Check 2 reports band misallocation,
+#    and BOTH leave remediation to an informed operator running
+#    kb-port-reconcile. The guard observes; it does not reconcile.
 #
 # Defensive contract: any failure in this guard (missing files, Python errors,
-# unresolvable band) emits a stderr warning and returns 0 — the guard
-# NEVER aborts the startup. A broken guard is worse than no guard.
+# unresolvable band, absent pgrep/ps) emits a stderr warning and returns 0 —
+# the guard NEVER aborts the startup. A broken guard is worse than no guard.
+# This is unchanged by XACA-0998-003 and is load-bearing: the guard now runs a
+# process sweep, which has more ways to fail than a file read did, so every new
+# failure path below degrades to "that source is unobservable" and the report is
+# emitted from whatever sources remain.
 #
 # Shell compatibility: #!/bin/zsh (macOS system zsh). No bashisms beyond what
 # zsh supports; avoids "local" inside loops (feedback_zsh_local_in_loop_gotcha).
@@ -214,27 +354,215 @@ _lcars_port_drift_guard() {
     local _guard_ports_py="${_guard_base}/kanban-hooks/aiteamforge_paths.py"
 
     # ------------------------------------------------------------------
-    # Check 1: .port file vs resolved port (SELF-HEAL)
+    # Shared resolution (XACA-0998-003): the team's allocated port BAND and its
+    # REGISTRY port, in ONE python3 invocation, consumed by BOTH checks below.
+    #
+    # This is hoisted above Check 1 deliberately. Check 1 needs the band to
+    # honour the XACA-0803 rule (an in-band allocation is never drift), and
+    # Check 2 needs it for its own band test — computing it once here means
+    # Check 1 REUSES Check 2's proven band logic rather than growing a second,
+    # subtly-different copy of the same arithmetic. Both checks stay read-only.
+    #
+    # Soft-dependency contract (XACA-0998-002 Q5): if aiteamforge_paths.py or
+    # python3 is unavailable, every field below stays empty and both checks
+    # degrade to "that source is unobservable" — never to a wrong value and
+    # never to an abort.
     # ------------------------------------------------------------------
+    local _guard_check2_raw=""
+    local _guard_default_port="" _guard_band_base="" _guard_band_range="" _guard_reg_port=""
+    local _guard_rest=""
+    if [[ -f "$_guard_ports_py" ]] && command -v python3 >/dev/null 2>&1; then
+        local _guard_py_dir
+        _guard_py_dir="$(dirname "$_guard_ports_py")"
+
+        # The Python source below is SINGLE-quoted, and the two runtime values it
+        # needs (module dir, team id) are passed as argv rather than interpolated
+        # into the program text. Interpolating them would let a team id containing
+        # a quote character execute arbitrary Python (XACA-0803 review finding —
+        # a pre-existing pattern, proven exploitable, closed here). Team ids come
+        # from operator argv and are constrained to existing directory names, so
+        # this was never a privilege boundary; it is still not a defensible thing
+        # to leave in a file that every startup sources.
+        #
+        # The trailing `|| true` matters: under `set -e`, a failing command
+        # substitution in an assignment aborts the caller. The production call
+        # site already appends `|| true`, but the guard's documented contract is
+        # that it can NEVER abort a startup, so it must hold under bare
+        # invocation too rather than depending on how it happens to be called.
+        _guard_check2_raw="$(python3 -c '
+    import sys
+    sys.path.insert(0, sys.argv[1])
+    try:
+        from aiteamforge_paths import DEFAULT_TEAMS, _resolve_template_band, load_config
+    except Exception:
+        print("|||")
+        sys.exit(0)
+
+    team = sys.argv[2]
+
+    default_port = ""
+    try:
+        entry = DEFAULT_TEAMS.get(team)
+        if entry:
+            p = entry.get("lcars_port")
+            if p:
+                default_port = str(int(p))
+    except Exception:
+        pass
+
+    band_base = ""
+    band_range = ""
+    try:
+        base, rng = _resolve_template_band(team)
+        band_base = str(int(base))
+        band_range = str(int(rng))
+    except Exception:
+        pass
+
+    # 4th field (XACA-0998-003): the REGISTRY port, resolved with exactly the
+    # precedence lcars_ports.py uses -- the live team-paths.json overlay first,
+    # DEFAULT_TEAMS as fallback -- so Check 1 reports the same value the canonical
+    # resolver would, without a second python3 invocation.
+    registry_port = ""
+    try:
+        entry = (load_config().get("teams", {}) or {}).get(team) or DEFAULT_TEAMS.get(team)
+        if entry:
+            p = entry.get("lcars_port")
+            if p:
+                registry_port = str(int(p))
+    except Exception:
+        pass
+
+    print(default_port + "|" + band_base + "|" + band_range + "|" + registry_port)
+    ' "$_guard_py_dir" "$_guard_team" 2>/dev/null || true)"
+
+        # Parse the pipe-delimited '<default_port>|<band_base>|<band_range>'
+        # triple with plain parameter expansion (no external process, works
+        # identically under bash and zsh).
+        _guard_default_port="${_guard_check2_raw%%|*}"
+        _guard_rest="${_guard_check2_raw#*|}"
+        _guard_band_base="${_guard_rest%%|*}"
+        _guard_rest="${_guard_rest#*|}"
+        _guard_band_range="${_guard_rest%%|*}"
+        _guard_reg_port="${_guard_rest#*|}"
+        # Registry value must be a clean positive integer to be reportable; an
+        # unknown team, a null lcars_port, or an unimportable module all leave it
+        # empty, which Check 1 renders as "(unresolved)" rather than guessing.
+        case "$_guard_reg_port" in
+            ''|*[!0-9]*) _guard_reg_port="" ;;
+        esac
+    fi
+
+
+    # ------------------------------------------------------------------
+    # Check 1: port-source divergence (REPORT-ONLY — writes NOTHING)
+    #
+    # See the function header for why the former self-heal was removed
+    # (XACA-0998-002 Q1/Q4 + the .port-as-witness argument). Every branch
+    # below either observes a value or gives up on that source; none of them
+    # writes, creates, or repairs anything, and none of them says which value
+    # is correct. Ordering here is presentation order, NOT precedence — the
+    # whole point is that this check does not rank the sources.
+    # ------------------------------------------------------------------
+
+    # Source: live-bound. Ground truth — what a connection would actually
+    # reach right now. The guard runs BEFORE this launch binds, so a value
+    # here describes the server currently up for this session (the one about
+    # to be replaced, or a concurrent one), never the launch in progress.
+    local _guard_live_port=""
+    _guard_live_port="$(_lcars_guard_live_bound_port "$_guard_session" 2>/dev/null || true)"
+
+    # Source: portfile. Read-only; absence is reported, not corrected.
+    local _guard_file_port=""
     if [[ -f "$_guard_port_file" ]]; then
-        local _guard_current_port
-        _guard_current_port="$(cat "$_guard_port_file" 2>/dev/null | tr -d '[:space:]')"
-        if [[ -n "$_guard_current_port" && "$_guard_current_port" != "$_guard_port" ]]; then
-            # Rewrite .port to the resolved canonical value before server binds.
-            if printf '%s\n' "$_guard_port" > "$_guard_port_file" 2>/dev/null; then
-                echo "  [port-drift-guard] NOTICE: ${_guard_session}.port was ${_guard_current_port}, corrected to ${_guard_port} (stale value self-healed)." >&2
-            else
-                echo "  [port-drift-guard] WARNING: ${_guard_session}.port is stale (${_guard_current_port} vs ${_guard_port}) but could not be rewritten — check permissions on ${_guard_port_file}" >&2
+        _guard_file_port="$(cat "$_guard_port_file" 2>/dev/null | tr -d '[:space:]')"
+    fi
+
+    # Source: registry. Already resolved in the shared step above
+    # (_guard_reg_port), using the same team-paths.json -> DEFAULT_TEAMS
+    # precedence lcars_ports.py itself applies, keyed on the TEAM id. It is
+    # empty when the team is absent from the registry, its lcars_port is null,
+    # or python3/aiteamforge_paths.py was unavailable.
+
+    # Count DISTINCT observed values. Fewer than two distinct values means
+    # either everything agrees or there was nothing to compare — both silent.
+    # Accumulate into a space-padded string rather than an array: bash 3.2 and
+    # zsh disagree on array indexing, and this never exceeds four entries.
+    local _guard_seen=" "
+    local _guard_ndistinct=0
+    local _guard_v
+    for _guard_v in "$_guard_live_port" "$_guard_port" "$_guard_file_port" "$_guard_reg_port"; do
+        [[ -n "$_guard_v" ]] || continue
+        case "$_guard_seen" in
+            *" $_guard_v "*) ;;
+            *) _guard_seen="${_guard_seen}${_guard_v} "; _guard_ndistinct=$(( _guard_ndistinct + 1 )) ;;
+        esac
+    done
+
+    # XACA-0803 REGRESSION GUARD — do not remove.
+    # The XACA-0463 band allocator hands each team the lowest FREE port in its
+    # band [base, base+range), so a team sitting at 8361 when its band base is
+    # 8360 is a CORRECT allocation, not drift. XACA-0803 was the shipped bug of
+    # flagging exactly that. If EVERY value observed above lies inside the
+    # team's own declared band, the differences between them are legal
+    # allocations and this check stays silent.
+    #
+    # Deliberate, documented trade-off: this also suppresses the report when two
+    # sources hold DIFFERENT in-band ports (e.g. portfile 8365 vs live 8361).
+    # That is the price of the XACA-0803 rule and it is accepted knowingly here
+    # rather than rediscovered later — the band, not the individual port, is the
+    # unit of correctness for an allocated team. Anything genuinely wrong in
+    # that situation is a band-allocation problem, which is Check 2's question,
+    # not this one's. A value OUTSIDE the band (the 2026-08-29 freelance case:
+    # registry 8478 against a [8500,8600) band) still reports normally.
+    local _guard_all_in_band=0
+    if [[ -n "$_guard_band_base" && -n "$_guard_band_range" \
+          && "$_guard_band_base" =~ ^[0-9]+$ && "$_guard_band_range" =~ ^[0-9]+$ ]]; then
+        _guard_all_in_band=1
+        local _guard_band_hi=$(( _guard_band_base + _guard_band_range ))
+        local _guard_vn
+        for _guard_v in "$_guard_live_port" "$_guard_port" "$_guard_file_port" "$_guard_reg_port"; do
+            [[ -n "$_guard_v" ]] || continue
+            # Non-numeric can't be band-tested; fall through to reporting.
+            case "$_guard_v" in
+                ''|*[!0-9]*) _guard_all_in_band=0; break ;;
+            esac
+            # Force base 10: a zero-padded "08361" is octal-invalid to $(( )).
+            _guard_vn=$(( 10#$_guard_v ))
+            if (( _guard_vn < _guard_band_base || _guard_vn >= _guard_band_hi )); then
+                _guard_all_in_band=0
+                break
             fi
+        done
+    fi
+
+    if (( _guard_ndistinct > 1 )) && (( _guard_all_in_band == 0 )); then
+        echo "  [port-drift-guard] DIVERGENCE: LCARS port sources disagree for session '${_guard_session}' (team '${_guard_team}'):" >&2
+        if [[ -n "$_guard_live_port" ]]; then
+            echo "                     live-bound  : ${_guard_live_port}  (a running server.py with LCARS_SESSION_NAME=${_guard_session})" >&2
+        else
+            echo "                     live-bound  : (none observed — no running server.py matched LCARS_SESSION_NAME=${_guard_session})" >&2
         fi
-    else
-        # Port file does not exist — create it so future checks and connect
-        # scripts have a value to read (mirrors kb-init-team P1 logic).
-        if [[ -d "$_guard_ports_dir" ]]; then
-            if printf '%s\n' "$_guard_port" > "$_guard_port_file" 2>/dev/null; then
-                echo "  [port-drift-guard] NOTICE: ${_guard_session}.port did not exist — created with port ${_guard_port}." >&2
-            fi
+        echo "                     startup-arg : ${_guard_port}  (the port this launch is about to bind)" >&2
+        if [[ -n "$_guard_file_port" ]]; then
+            echo "                     portfile    : ${_guard_file_port}  (${_guard_port_file})" >&2
+        elif [[ -f "$_guard_port_file" ]]; then
+            echo "                     portfile    : (present but empty or unreadable — ${_guard_port_file})" >&2
+        else
+            echo "                     portfile    : (absent — ${_guard_port_file})" >&2
         fi
+        if [[ -n "$_guard_reg_port" ]]; then
+            echo "                     registry    : ${_guard_reg_port}  (team-paths.json, via lcars_ports.py '${_guard_team}')" >&2
+        else
+            echo "                     registry    : (unresolved — no entry for team '${_guard_team}', or python3/lcars_ports.py unavailable)" >&2
+        fi
+        # The no-direction rule (XACA-0998-002 Q4). Do NOT add a "canonical is
+        # X", a "--prefer" mode, or any other remediation direction here: on
+        # 2026-08-29 the registry was the stale side, and any directional advice
+        # would have pointed three HEALTHY freelance teams at wrong ports. The
+        # pointer below is deliberately to the read-only --check mode.
+        echo "                     No file was changed. This guard does NOT determine which value is correct." >&2
+        echo "                     To investigate: kb-port-reconcile --check --team ${_guard_team}" >&2
     fi
 
     # ------------------------------------------------------------------
@@ -268,64 +596,6 @@ _lcars_port_drift_guard() {
     # messages so the text still shows what the registry literally holds.
     local _guard_port_n=$(( 10#$_guard_port ))
 
-    local _guard_py_dir
-    _guard_py_dir="$(dirname "$_guard_ports_py")"
-
-    # The Python source below is SINGLE-quoted, and the two runtime values it
-    # needs (module dir, team id) are passed as argv rather than interpolated
-    # into the program text. Interpolating them would let a team id containing
-    # a quote character execute arbitrary Python (XACA-0803 review finding —
-    # a pre-existing pattern, proven exploitable, closed here). Team ids come
-    # from operator argv and are constrained to existing directory names, so
-    # this was never a privilege boundary; it is still not a defensible thing
-    # to leave in a file that every startup sources.
-    #
-    # The trailing `|| true` matters: under `set -e`, a failing command
-    # substitution in an assignment aborts the caller. The production call
-    # site already appends `|| true`, but the guard's documented contract is
-    # that it can NEVER abort a startup, so it must hold under bare
-    # invocation too rather than depending on how it happens to be called.
-    local _guard_check2_raw
-    _guard_check2_raw="$(python3 -c '
-import sys
-sys.path.insert(0, sys.argv[1])
-try:
-    from aiteamforge_paths import DEFAULT_TEAMS, _resolve_template_band
-except Exception:
-    print("||")
-    sys.exit(0)
-
-team = sys.argv[2]
-
-default_port = ""
-try:
-    entry = DEFAULT_TEAMS.get(team)
-    if entry:
-        p = entry.get("lcars_port")
-        if p:
-            default_port = str(int(p))
-except Exception:
-    pass
-
-band_base = ""
-band_range = ""
-try:
-    base, rng = _resolve_template_band(team)
-    band_base = str(int(base))
-    band_range = str(int(rng))
-except Exception:
-    pass
-
-print(default_port + "|" + band_base + "|" + band_range)
-' "$_guard_py_dir" "$_guard_team" 2>/dev/null || true)"
-
-    # Parse the pipe-delimited '<default_port>|<band_base>|<band_range>'
-    # triple with plain parameter expansion (no external process, works
-    # identically under bash and zsh).
-    local _guard_default_port="${_guard_check2_raw%%|*}"
-    local _guard_rest="${_guard_check2_raw#*|}"
-    local _guard_band_base="${_guard_rest%%|*}"
-    local _guard_band_range="${_guard_rest#*|}"
 
     if [[ -n "$_guard_band_base" && -n "$_guard_band_range" \
           && "$_guard_band_base" =~ ^[0-9]+$ && "$_guard_band_range" =~ ^[0-9]+$ ]]; then
