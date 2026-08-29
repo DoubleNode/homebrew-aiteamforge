@@ -15663,10 +15663,22 @@ kb-knowledge-validate() {
     # Also include the resolved project_path ONLY if it lives outside BOTH roots
     # (in-repo layout: .knowledge-config.yml / KB_KNOWLEDGE_PROJECT_PATH pointing
     # elsewhere). Skip if already covered by a glob above to avoid double-validating.
+    #
+    # XACA-0991-018 [Review] fix: tag with $project_path (this val_dir's own,
+    # literal directory), NOT $global_root. Tagging it $global_root was a
+    # pre-existing bug — verified live it made _kb_val_scope_all_roots'
+    # fail-open registration (keyed by $project_path itself, see
+    # _kb_val_collect_changed_root's "$project_path" call below) invisible to
+    # a cur_root-only lookup, papered over by a ${val_dir%/} fallback lookup
+    # a few dozen lines down. $project_path is correct here because this is
+    # the val_dir's actual parent — the scope-check and root_label consumers
+    # key/compare on that literal identity. See the resolve_ref call further
+    # down for why the xref-resolution consumer deliberately does NOT reuse
+    # this same value unchanged.
     if [[ -d "$project_path" \
        && "$project_path" != "${global_root}/projects/"* \
        && "$project_path" != "${local_root}/projects/"* ]]; then
-        val_dirs+=("$project_path"); val_tiers+=("project"); val_roots+=("$global_root")
+        val_dirs+=("$project_path"); val_tiers+=("project"); val_roots+=("$project_path")
     fi
 
     echo ""
@@ -15747,24 +15759,32 @@ kb-knowledge-validate() {
                 # real validation I/O) is left untouched; only the lookup key
                 # is normalized.
                 #
-                # XACA-0991-003 [Review] finding: check BOTH $cur_root and
-                # ${val_dir%/} against _kb_val_scope_all_roots, not just
-                # $cur_root. The bare project_path fallback below (this same
-                # loop, a few dozen lines down) deliberately tags that val_dir
-                # with val_roots+=("$global_root") — a PRE-EXISTING choice,
-                # unrelated to and unchanged by this ticket — so cur_root for
-                # that val_dir is $global_root, never $project_path itself.
-                # _kb_val_collect_changed_root registers the fail-open root
-                # under its OWN path ($project_path), so a cur_root-only
-                # lookup silently misses it: the root gets correctly marked
-                # fail-open, but none of its files ever match the scope
-                # check, reproducing "0 examined" for the exact tier this fix
-                # is about. ${val_dir%/} always equals the literal directory
-                # just walked, independent of how it's tagged, so it is
-                # falls back correctly for any val_dir/root tagging mismatch.
+                # XACA-0991-003 [Review] finding (superseded by XACA-0991-018):
+                # this used to also check ${val_dir%/} as a fallback, because
+                # the bare project_path fallback a few dozen lines down
+                # mistagged that val_dir with val_roots+=("$global_root")
+                # instead of its own path, so cur_root for that val_dir was
+                # never $project_path and a cur_root-only lookup silently
+                # missed the fail-open registration
+                # (_kb_val_collect_changed_root registers it keyed by
+                # $project_path). XACA-0991-018 fixed the mistagging at the
+                # source instead of continuing to work around it here: cur_root
+                # now always equals the val_dir's own literal root for every
+                # tagging site (agent/team/subject/project-under-a-root all
+                # already tagged correctly; the standalone project_path entry
+                # now does too), so a cur_root-only lookup is sufficient — the
+                # ${val_dir%/} fallback was removed as dead weight rather than
+                # kept as defense-in-depth. It never protected against a
+                # DIFFERENT class of mismatch: every val_roots call site is
+                # visible above (grep val_roots+=) and, post-fix, tags with
+                # the literal root each val_dir came from in every case, so a
+                # future accidental mismatch here would mean a NEW bug at one
+                # of those call sites, not a scope-check gap this loop could
+                # paper over. Re-add a targeted check only if a future root
+                # source is added and provably still gets this same
+                # tagging/lookup mismatch — don't restore this preemptively.
                 if [[ -n "${_kb_val_scope_files[${ef:A}]-}" ]] \
-                    || [[ -n "${_kb_val_scope_all_roots[$cur_root]-}" ]] \
-                    || [[ -n "${_kb_val_scope_all_roots[${val_dir%/}]-}" ]]; then
+                    || [[ -n "${_kb_val_scope_all_roots[$cur_root]-}" ]]; then
                     entry_files_scoped+=("$ef")
                 fi
             done
@@ -15895,6 +15915,28 @@ kb-knowledge-validate() {
             # Scanning the full file body causes false positives when cross-ref tokens appear in
             # code samples, prose discussions, or quoted text (see XACA-0222 review subitem 014).
             xref_frontmatter=$(awk '/^---$/{if(found){exit}; found=1; next} found{print}' "$ef" 2>/dev/null | head -50)
+            # XACA-0991-018 [Review] fix: $cur_root is now the val_dir's own
+            # literal directory (see the project_path tagging fix above), which
+            # for the standalone project_path fallback is a single project's
+            # entry directory, NOT a four-tier store with its own agents/teams/
+            # subjects/projects children. _kb_knowledge_resolve_ref's `agents:`/
+            # `teams:`/`subjects:`/`project:<slug>:` forms all expect a real
+            # four-tier root (its own local var is literally named
+            # "global_root") — passing $project_path there breaks every such
+            # ref (verified live: an `agents:reno:k036...` ref inside a real
+            # project-tier entry resolved correctly when this consumer got
+            # $global_root, and reported as a false "Broken cross-ref" when it
+            # got $project_path instead). So: reuse cur_root when it IS one of
+            # the two real stores (global or local — this preserves the
+            # existing, already-tested "local-only entry resolves against
+            # local_root" behavior unchanged); fall back to $global_root
+            # otherwise, reproducing this consumer's pre-fix behavior for the
+            # standalone project_path case rather than inheriting the val_roots
+            # retagging above.
+            local _kb_val_xref_root="$cur_root"
+            if [[ "${cur_root%/}" != "${global_root%/}" && "${cur_root%/}" != "${local_root%/}" ]]; then
+                _kb_val_xref_root="$global_root"
+            fi
             while IFS= read -r xref_line; do
                 # Extract bare cross-refs (tokens like agents:*, subjects:*, project:*, teams:*)
                 while read -r xref; do
@@ -15902,7 +15944,7 @@ kb-knowledge-validate() {
                     # local-only entry's refs point at siblings under
                     # ~/knowledge-local, and resolving those against the global
                     # root would report every one of them as broken.
-                    resolved_xref=$(_kb_knowledge_resolve_ref "$xref" "$cur_root" 2>/dev/null)
+                    resolved_xref=$(_kb_knowledge_resolve_ref "$xref" "$_kb_val_xref_root" 2>/dev/null)
                     resolver_rc=$?
                     if [[ $resolver_rc -ne 0 ]]; then
                         _kb_val_error "Broken cross-ref '${xref}' in ${ef} (resolver rejected — invalid format)"
