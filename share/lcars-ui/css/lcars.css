@@ -9445,6 +9445,52 @@ body {
     color: var(--lcars-teal, #66cccc);
 }
 
+/* XACA-1001-014: focus indicator for .release-action-btn, including its
+   NOW-FOCUSABLE-FOR-THE-FIRST-TIME inert states -- the ARCHIVE button at
+   opacity 0.5 ([aria-disabled="true"]) and the archived-card PROMOTE/EDIT/
+   DELETE group at opacity 0.3 (.release-card.archived .release-action-btn.*).
+   Matches the existing outline+box-shadow idiom used by .release-card-id,
+   .release-cr-link and .epic-card-id elsewhere in this file.
+
+   opacity is dimmed BEFORE the outline is drawn -- CSS opacity applies to the
+   element's whole rendered output, outline included -- so a plain outline
+   declaration here would inherit the same 0.3/0.5 dimming that made these
+   controls hard to see in the first place, undermining the very fix this
+   rule exists to make. Each block below also sets opacity: 1, so a keyboard
+   user tabbing onto an inert button briefly sees it at full strength with a
+   solid amber outline, comfortably clearing 3:1 contrast against the LCARS
+   dark background (WCAG 2.4.11 / 1.4.11) regardless of which dimmed state it
+   came from. This does not change click behaviour -- the aria-disabled guard
+   in the onclick handlers still blocks activation.
+
+   Specificity note: the archived-card selectors below intentionally repeat
+   the full .release-card.archived .release-action-btn.<variant> chain (not
+   just adding :focus-visible to the bare class) so each rule's specificity
+   meets or exceeds the opacity: 0.3 rule it must override -- a lower-
+   specificity .release-action-btn:focus-visible alone would lose that fight
+   regardless of source order. */
+.release-action-btn:focus-visible {
+    outline: 2px solid var(--lcars-amber, #ffcc00);
+    outline-offset: 2px;
+    box-shadow: 0 0 8px rgba(255, 204, 0, 0.5);
+}
+
+.release-action-btn[aria-disabled="true"]:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--lcars-amber, #ffcc00);
+    outline-offset: 2px;
+    box-shadow: 0 0 8px rgba(255, 204, 0, 0.5);
+}
+
+.release-card.archived .release-action-btn.edit-btn:focus-visible,
+.release-card.archived .release-action-btn.promote-btn:focus-visible,
+.release-card.archived .release-action-btn.delete-btn:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--lcars-amber, #ffcc00);
+    outline-offset: 2px;
+    box-shadow: 0 0 8px rgba(255, 204, 0, 0.5);
+}
+
 /* XACA-1001: visually-hidden reason text for inert release-card action
    buttons, exposed to assistive tech via aria-describedby while invisible
    on screen. Mirrors the inline style already used by

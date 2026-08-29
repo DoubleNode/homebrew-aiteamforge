@@ -11247,13 +11247,13 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
             </div>
             <div class="release-card-actions">
                 <button class="release-action-btn docs" data-item-id="${release.id}" onclick="event.stopPropagation(); showPlanDocModal('${release.id}', this.getAttribute('data-retro-exists') === 'true', this.getAttribute('data-cr-exists') === 'true')" style="display:none">DOCS</button>
-                <button class="release-action-btn promote-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; promoteRelease('${release.id}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-promote-reason-${safeReleaseId}" title="${escapeAttr(promoteReason)}"` : ''}>PROMOTE</button>
+                <button class="release-action-btn promote-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; promoteRelease('${jsAttrEscape(release.id)}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-promote-reason-${safeReleaseId}" title="${escapeAttr(promoteReason)}"` : ''}>PROMOTE</button>
                 ${isArchived ? `<span id="release-promote-reason-${safeReleaseId}" class="sr-only">${escapeHtml(promoteReason)}</span>` : ''}
                 <button class="release-action-btn" onclick="event.stopPropagation(); viewReleaseNotes('${release.id}')">RELNOTES</button>
-                <button class="release-action-btn edit-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; showEditReleaseModal('${release.id}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-edit-reason-${safeReleaseId}" title="${escapeAttr(editReason)}"` : ''}>EDIT</button>
+                <button class="release-action-btn edit-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; showEditReleaseModal('${jsAttrEscape(release.id)}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-edit-reason-${safeReleaseId}" title="${escapeAttr(editReason)}"` : ''}>EDIT</button>
                 ${isArchived ? `<span id="release-edit-reason-${safeReleaseId}" class="sr-only">${escapeHtml(editReason)}</span>` : ''}
                 ${renderArchiveAction(release, isArchived)}
-                <button class="release-action-btn danger delete-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; deleteRelease('${release.id}', '${escapeHtml(release.name)}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-delete-reason-${safeReleaseId}" title="${escapeAttr(deleteReason)}"` : ''}>DELETE</button>
+                <button class="release-action-btn danger delete-btn" onclick="event.stopPropagation(); if (this.getAttribute('aria-disabled') === 'true') return; deleteRelease('${jsAttrEscape(release.id)}', '${jsAttrEscape(release.name)}')" ${isArchived ? `aria-disabled="true" aria-describedby="release-delete-reason-${safeReleaseId}" title="${escapeAttr(deleteReason)}"` : ''}>DELETE</button>
                 ${isArchived ? `<span id="release-delete-reason-${safeReleaseId}" class="sr-only">${escapeHtml(deleteReason)}</span>` : ''}
             </div>
         </div>

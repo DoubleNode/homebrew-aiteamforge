@@ -529,6 +529,53 @@ check('archived-card action-button rule does NOT use pointer-events:none' +
     ' (it would kill hover and silence the reason tooltip)',
     /pointer-events:\s*none/.test(archivedActionRule), false);
 
+// --- focus-visible indicator on .release-action-btn (XACA-1001-014) --------
+// PROMOTE/EDIT/DELETE (archived, opacity 0.3) and ARCHIVE (aria-disabled,
+// opacity 0.5) became focusable for the first time in this PR. A control a
+// keyboard user can tab to but cannot SEE they have landed on is a defect
+// this PR authored, not a pre-existing one. This is a regex existence check
+// against the stylesheet text -- it can prove the rule exists and is
+// non-empty, it CANNOT prove the resulting indicator clears 3:1 contrast at
+// runtime (that needs a real renderer). Named and scoped accordingly.
+check('stylesheet has a :focus-visible rule for .release-action-btn',
+    /\.release-action-btn:focus-visible\s*\{/.test(css), true);
+const actionBtnFocusRule = (css.match(
+    /\.release-action-btn:focus-visible\s*\{[^}]*\}/
+) || [''])[0];
+check('.release-action-btn:focus-visible rule is not empty',
+    actionBtnFocusRule.length > 0 &&
+        /outline/.test(actionBtnFocusRule), true);
+// The ARCHIVE button's inert state is [aria-disabled="true"] at opacity 0.5.
+// CSS opacity dims the WHOLE element, outline included, so the focus rule
+// must additionally restore full opacity there or the indicator is drawn but
+// invisible at 0.5 alpha over a dark background.
+check('stylesheet has a :focus-visible rule for .release-action-btn[aria-disabled="true"]',
+    /\.release-action-btn\[aria-disabled="true"\]:focus-visible\s*\{/.test(css), true);
+const ariaDisabledFocusRule = (css.match(
+    /\.release-action-btn\[aria-disabled="true"\]:focus-visible\s*\{[^}]*\}/
+) || [''])[0];
+check('aria-disabled focus-visible rule restores full opacity (undoes the 0.5 dimming)',
+    /opacity:\s*1\b/.test(ariaDisabledFocusRule), true);
+check('aria-disabled focus-visible rule draws an outline',
+    /outline/.test(ariaDisabledFocusRule), true);
+// The archived-card PROMOTE/EDIT/DELETE group is dimmed to opacity 0.3 by a
+// HIGHER-specificity selector (.release-card.archived .release-action-btn.*,
+// four classes) than a bare .release-action-btn:focus-visible (two
+// class-level selectors) could ever override, regardless of source order.
+// The focus rule for that group must repeat the same specificity chain.
+check('stylesheet has a :focus-visible rule matching the archived-card' +
+    ' PROMOTE/EDIT/DELETE specificity chain (so it can win over their' +
+    ' opacity: 0.3 rule)',
+    /\.release-card\.archived \.release-action-btn\.edit-btn:focus-visible,[\s\S]{0,400}?\{[^}]*\}/
+        .test(css), true);
+const archivedFocusRule = (css.match(
+    /\.release-card\.archived \.release-action-btn\.edit-btn:focus-visible,[\s\S]*?\{[^}]*\}/
+) || [''])[0];
+check('archived-card focus-visible rule restores full opacity (undoes the 0.3 dimming)',
+    /opacity:\s*1\b/.test(archivedFocusRule), true);
+check('archived-card focus-visible rule draws an outline',
+    /outline/.test(archivedFocusRule), true);
+
 // --- click guard on aria-disabled PROMOTE/EDIT/DELETE (XACA-1001-006) ------
 //
 // The safety-critical property Wave 1 introduced: an aria-disabled button is
@@ -662,6 +709,176 @@ function checkGuardedButton(label, exactClassAttr, fnName) {
 checkGuardedButton('PROMOTE', 'release-action-btn promote-btn', 'promoteRelease');
 checkGuardedButton('EDIT', 'release-action-btn edit-btn', 'showEditReleaseModal');
 checkGuardedButton('DELETE', 'release-action-btn danger delete-btn', 'deleteRelease');
+
+// --- onclick JS-string-literal escaping on renderReleaseCard (XACA-1001-013)
+//
+// promoteRelease/showEditReleaseModal/deleteRelease interpolate release.id
+// (and, for deleteRelease, release.name) into the SAME onclick JS-string-
+// literal-within-an-HTML-attribute context that XACA-1000-021 above already
+// covers for renderArchiveAction's toggleReleaseArchive call. Before this
+// ticket these three used raw release.id (no escaping at all) and
+// escapeHtml(release.name) (textContent->innerHTML -- leaves quotes alone by
+// design, per the comment on escapeAttr above escapeHtml is simply the WRONG
+// escaper for this context, not merely a weaker one). jsAttrEscape is the
+// escaper built for exactly this context (used three lines away by
+// copyToClipboard on the SAME card) and is what all three now use.
+//
+// XACA-1001 also changed WHICH releases reach this code at all: develop
+// rendered `return false` for an archived release, so release.id never
+// appeared in the onclick for PROMOTE/EDIT/DELETE when archived. This PR
+// replaced that render-time conditional with a runtime aria-disabled guard,
+// so the interpolation is now unconditional -- the archived path is a newly
+// exposed sink, not a pre-existing one, and must be covered here just as
+// much as the active path.
+//
+// Reuses the SAME evilId + firstUnescapedQuoteEndsTheCall property test as
+// XACA-1000-021 above: a naive substring check is the wrong assertion here
+// too, for the identical reason (the correctly-escaped form still contains
+// "'); alert" as a substring). The property that matters is that the hostile
+// value cannot TERMINATE the JS string it sits in.
+
+/**
+ * Generalised sibling of firstUnescapedQuoteEndsTheCall (XACA-1000-021)
+ * above: same walk-to-first-unescaped-quote algorithm, but parameterised on
+ * the call's open marker and what must immediately follow the argument's
+ * closing quote, so it can check ANY single-string-argument JS call embedded
+ * in an HTML attribute, not just toggleReleaseArchive('...').
+ */
+function firstUnescapedQuoteEndsAt(html, openMarker, expectedSuffix) {
+    const start = html.indexOf(openMarker);
+    if (start === -1) return { found: false, ok: false, nextIndex: -1 };
+    let i = start + openMarker.length;
+    while (i < html.length) {
+        if (html[i] === '\\') { i += 2; continue; }
+        if (html[i] === "'") break;
+        i++;
+    }
+    const ok = html.slice(i, i + expectedSuffix.length) === expectedSuffix;
+    return { found: true, ok, nextIndex: i + expectedSuffix.length };
+}
+
+// A hostile release.name using the SAME breakout shape as evilId (defined
+// above, in the XACA-1000-021 section), so both interpolation sites in
+// deleteRelease('id', 'name') are exercised by an equally hostile payload.
+const evilName = "n'); alert(document.cookie); ('";
+// A hostile value using a raw DOUBLE quote, to prove jsAttrEscape's HTML-
+// attribute-breakout coverage (not just the JS-string-literal coverage
+// evilId exercises) -- escapeAttr alone would catch this one; escapeHtml
+// alone (the pre-fix escaper for release.name) would NOT.
+const evilQuoteId = 'q"); alert(1); ("';
+const evilQuoteName = 'r"); alert(2); ("';
+
+function checkOnclickEscaping(label, cardHtml, exactClassAttr, openMarker, isTwoArg) {
+    const tag = extractButtonTag(cardHtml, exactClassAttr);
+    if (!tag) {
+        fail(`${label}: could not locate <button class="${exactClassAttr}"> in ` +
+            `rendered renderReleaseCard() markup — it may have been renamed.`);
+        return;
+    }
+    const onclick = getAttr(tag, 'onclick');
+    if (onclick === null) {
+        fail(`${label}: no onclick attribute found`);
+        return;
+    }
+    // getAttr's regex itself stops at the first raw double quote, which is
+    // exactly the breakout this is checking for: if a hostile "" made it
+    // through unescaped, the captured onclick value would be truncated
+    // right there instead of containing the full call.
+    check(`${label}: onclick attribute value is not truncated by a raw` +
+        ' double quote (proves the id/name did not break out of the attribute)',
+        onclick.indexOf(openMarker) !== -1, true);
+
+    if (!isTwoArg) {
+        // Single-arg calls inside this attribute are the LAST thing in the
+        // onclick value, so the call's closing "')" must be immediately
+        // followed by the attribute's own closing quote -- reuse the exact
+        // 3-char "')\"" suffix the XACA-1000-021 helper checks, just against
+        // the getAttr()-extracted VALUE (which already lacks the outer
+        // onclick=" wrapper), so re-append the attribute-closing quote getAttr
+        // stripped off.
+        const withClosingQuote = onclick + '"';
+        const full = firstUnescapedQuoteEndsAt(withClosingQuote, openMarker, "')\"");
+        check(`${label}: found ${openMarker}`, full.found, true);
+        check(`${label}: hostile value cannot terminate the JS string`, full.ok, true);
+    } else {
+        // Two-arg call: deleteRelease('id', 'name'). First arg's closing
+        // quote must be followed by the literal ", '" separator (unescaped),
+        // and the SECOND arg must then close with "')" immediately before
+        // the attribute's closing quote.
+        const withClosingQuote = onclick + '"';
+        const firstRes = firstUnescapedQuoteEndsAt(withClosingQuote, openMarker, "', '");
+        check(`${label}: found ${openMarker}`, firstRes.found, true);
+        check(`${label}: first argument (id) cannot terminate the JS string early`,
+            firstRes.ok, true);
+        if (firstRes.ok) {
+            let i = firstRes.nextIndex;
+            while (i < withClosingQuote.length) {
+                if (withClosingQuote[i] === '\\') { i += 2; continue; }
+                if (withClosingQuote[i] === "'") break;
+                i++;
+            }
+            check(`${label}: second argument (name) cannot terminate the JS string`,
+                withClosingQuote.slice(i, i + 3) === "')\"", true);
+        }
+    }
+}
+
+function buildHostileCards(archived) {
+    const base = {
+        id: evilId, name: evilName,
+        status: archived ? 'archived' : 'active',
+        platforms: archived ? {} : { other: { environment: 'DEV' } },
+    };
+    return renderReleaseCard(base);
+}
+const hostileArchivedHtml = buildHostileCards(true);
+const hostileActiveHtml = buildHostileCards(false);
+
+checkOnclickEscaping('PROMOTE (archived)', hostileArchivedHtml,
+    'release-action-btn promote-btn', "promoteRelease('", false);
+checkOnclickEscaping('PROMOTE (active)', hostileActiveHtml,
+    'release-action-btn promote-btn', "promoteRelease('", false);
+checkOnclickEscaping('EDIT (archived)', hostileArchivedHtml,
+    'release-action-btn edit-btn', "showEditReleaseModal('", false);
+checkOnclickEscaping('EDIT (active)', hostileActiveHtml,
+    'release-action-btn edit-btn', "showEditReleaseModal('", false);
+checkOnclickEscaping('DELETE (archived)', hostileArchivedHtml,
+    'release-action-btn danger delete-btn', "deleteRelease('", true);
+checkOnclickEscaping('DELETE (active)', hostileActiveHtml,
+    'release-action-btn danger delete-btn', "deleteRelease('", true);
+
+// Positive control: the escaped forms must actually be present, not silently
+// dropped -- mirrors the equivalent XACA-1000-021 check on renderArchiveAction.
+check('PROMOTE onclick: the id is present in escaped form, not silently discarded',
+    /\\'\); alert\(document\.cookie\)/.test(
+        getAttr(extractButtonTag(hostileArchivedHtml, 'release-action-btn promote-btn'), 'onclick') || ''
+    ), true);
+check('DELETE onclick: both id and name are present in escaped form',
+    /\\'\); alert\(document\.cookie\)/.test(
+        getAttr(extractButtonTag(hostileArchivedHtml, 'release-action-btn danger delete-btn'), 'onclick') || ''
+    ) &&
+    /n\\'\); alert\(document\.cookie\)/.test(
+        getAttr(extractButtonTag(hostileArchivedHtml, 'release-action-btn danger delete-btn'), 'onclick') || ''
+    ), true);
+
+// A hostile value containing a raw " must not break out of the onclick HTML
+// ATTRIBUTE (as distinct from the JS string literal checked above). Checked
+// against DELETE, which carries both interpolation sites.
+const hostileQuoteCardHtml = renderReleaseCard({
+    id: evilQuoteId, name: evilQuoteName, status: 'active',
+    platforms: { other: { environment: 'DEV' } },
+});
+const deleteQuoteTag = extractButtonTag(hostileQuoteCardHtml, 'release-action-btn danger delete-btn');
+const deleteQuoteOnclick = getAttr(deleteQuoteTag, 'onclick');
+check('DELETE onclick: a hostile " in the id/name is present as the &quot; entity, not raw',
+    deleteQuoteOnclick !== null && /&quot;/.test(deleteQuoteOnclick), true);
+check('DELETE onclick: attribute value contains no raw double quote' +
+    ' (getAttr would otherwise have truncated it, which the two checks above already rule out)',
+    deleteQuoteOnclick !== null && deleteQuoteOnclick.indexOf('"') === -1, true);
+check('DELETE onclick: the hostile payload text is inert inside the attribute, not markup',
+    deleteQuoteOnclick !== null &&
+        /alert\(1\)/.test(deleteQuoteOnclick) &&
+        deleteQuoteOnclick.indexOf('q"') === -1, true);
 
 // ARCHIVE is a deliberate exception (see renderArchiveAction's XACA-1001
 // comment): its inert branch has NO action call behind the guard at all, so
