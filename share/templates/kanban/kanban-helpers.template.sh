@@ -4513,28 +4513,48 @@ kb-sweep() {
 
     # PROJECT: optional (many repos have no project-tier knowledge yet), and
     # may be gitignored (kanban-inside-repo teams — the [Review]-finding
-    # case this block exists to close). Ignored is treated the same as
-    # non-git: can't cheaply confirm "clean", so invoke and let the real
-    # function's fail-open path validate it in full.
-    if ! $kv_should_invoke; then
-        kv_project_path=$(_kb_knowledge_project_path 2>/dev/null)
-        if [[ -n "$kv_project_path" ]]; then
-            case "$(_kb_val_root_state "$kv_project_path")" in
-                absent) : ;;
-                unreadable) kv_should_invoke=true ;;
-                *)
-                    if git -C "$kv_project_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-                        if _kb_val_root_is_ignored "$kv_project_path"; then
-                            kv_should_invoke=true
-                        elif git -C "$kv_project_path" status --porcelain --untracked-files=all -- . 2>/dev/null | grep -q '\.md$'; then
+    # case this block exists to close).
+    #
+    # XACA-0991-019 (ported from canonical — not region-parity-gated, hand-
+    # mirrored): kv_project_path is resolved UNCONDITIONALLY (not only
+    # inside `if ! $kv_should_invoke`) — the cache-record step after the
+    # invocation further down needs it regardless of why kb-knowledge-
+    # validate ends up invoked.
+    kv_project_path=$(_kb_knowledge_project_path 2>/dev/null)
+    if [[ -n "$kv_project_path" ]] && ! $kv_should_invoke; then
+        case "$(_kb_val_root_state "$kv_project_path")" in
+            absent) : ;;
+            unreadable) kv_should_invoke=true ;;
+            *)
+                if git -C "$kv_project_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                    if _kb_val_root_is_ignored "$kv_project_path"; then
+                        # XACA-0991-019: used to be an unconditional
+                        # kv_should_invoke=true here — every kb-sweep paid
+                        # the full content-validation cost on every
+                        # kanban-inside-repo team, every time, even when
+                        # nothing changed (measured: 54-61s against a
+                        # real 116-file project tier). The mtime probe
+                        # below is a cheap (~20ms measured) fail-open
+                        # check: any uncertainty (no cache, corrupt
+                        # cache, a signature mismatch, or a cached run
+                        # that itself did not pass cleanly) still
+                        # invokes.
+                        if ! _kb_val_mtime_probe_is_clean "$kv_project_path"; then
                             kv_should_invoke=true
                         fi
-                    else
+                    elif git -C "$kv_project_path" status --porcelain --untracked-files=all -- . 2>/dev/null | grep -q '\.md$'; then
                         kv_should_invoke=true
                     fi
-                    ;;
-            esac
-        fi
+                else
+                    # Non-git project root: same "can't cheaply diff via
+                    # git" shape as the ignored-tree branch above — reuse
+                    # the identical mtime probe (XACA-0991-019).
+                    if ! _kb_val_mtime_probe_is_clean "$kv_project_path"; then
+                        kv_should_invoke=true
+                    fi
+                fi
+                ;;
+        esac
     fi
 
     if $kv_should_invoke; then
@@ -4552,10 +4572,13 @@ kb-sweep() {
         else
             # Capture-first: read $? on the line directly after the command
             # substitution, before anything else can overwrite it
-            # (feedback_pipefail_hides_exit_code.md).
-            local kv_output
+            # (feedback_pipefail_hides_exit_code.md). Stored into kv_rc so
+            # XACA-0991-019's cache-record step below still has the exact
+            # exit code after other commands run in between.
+            local kv_output kv_rc
             kv_output=$(kb-knowledge-validate --quiet --changed 2>&1)
-            if [[ $? -ne 0 ]]; then
+            kv_rc=$?
+            if [[ $kv_rc -ne 0 ]]; then
                 echo "  🚫 KNOWLEDGE VALIDATION FAILED (changed knowledge files — distinct from the"
                 echo "     PROTECTED SUBITEMS gate above; blocks kb-done via kb-sweep's own exit"
                 echo "     code, same mechanism as the retrospective check above):"
@@ -4563,6 +4586,19 @@ kb-sweep() {
                 echo "     Full detail: kb-knowledge-validate --changed"
                 echo ""
                 remaining_count=$((remaining_count + 1))
+            fi
+
+            # XACA-0991-019 (ported from canonical — not region-parity-
+            # gated, hand-mirrored): record this run's project-tier
+            # signature + outcome for the mtime probe above. Scoped to
+            # exactly the two cases that probe is ever consulted from
+            # (ignored-tree, or a non-git project root). Best-effort and
+            # silent — a caching failure never changes kb-sweep's verdict.
+            if [[ -n "$kv_project_path" ]] && [[ "$(_kb_val_root_state "$kv_project_path")" == "ok" ]]; then
+                if ! git -C "$kv_project_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+                   || _kb_val_root_is_ignored "$kv_project_path"; then
+                    _kb_val_mtime_probe_record "$kv_project_path" "$kv_rc"
+                fi
             fi
         fi
     fi
@@ -10055,6 +10091,145 @@ _kb_val_root_is_ignored() {
     local d="${1-}"
     git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
     git -C "$d" check-ignore -q -- . 2>/dev/null
+}
+
+# XACA-0991-019 (ported from canonical — not region-parity-gated, hand-
+# mirrored): cheap change-probe for a root git cannot cheaply diff
+# (gitignored or non-git). State lives under
+# ~/.aiteamforge/run/kb-knowledge-validate-cache/ (override:
+# KB_VAL_PROBE_CACHE_DIR) — never ~/knowledge, never a team's kanban/.
+# Deleting any/all of this state at any time is always safe: every reader
+# below treats missing/unreadable/unparseable state as "uncertain", which
+# folds into "invoke full validation", never "clean".
+
+# _kb_val_probe_hash — sha256 of stdin via shasum, falling back to
+# sha256sum. Returns 1 with no output if neither exists.
+_kb_val_probe_hash() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 2>/dev/null | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum 2>/dev/null | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+# _kb_val_mtime_signature <dir> — sha256 signature over every direct
+# *.md entry file under <dir> (INDEX.md excluded, non-recursive — same
+# scope kb-knowledge-validate uses for a standalone project-tier val_dir).
+# DETECTS: any file added/removed/renamed, or any edit that changes a
+# file's byte count or mtime. CANNOT DETECT a content edit that preserves
+# BOTH the exact byte count and exact mtime of the file it replaces — the
+# same blind spot git's own stat-cache fast path already has. Not
+# vulnerable to clock skew: every timestamp comes from the filesystem's
+# own per-file mtime, not compared against "now". Returns 1 (empty
+# stdout) if `stat` succeeds on neither GNU nor BSD form, or hashing is
+# unavailable — callers must treat empty as "cannot compute", i.e. invoke.
+# An empty directory hashes to a fixed sentinel rather than returning
+# empty (it is a real, cacheable state).
+_kb_val_mtime_signature() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local root="${1%/}"
+    local -a efiles
+    local ef
+    efiles=()
+    for ef in "${root}"/*.md; do
+        [[ -f "$ef" ]] || continue
+        [[ "$(basename "$ef")" == "INDEX.md" ]] && continue
+        efiles+=("$ef")
+    done
+
+    if [[ ${#efiles[@]} -eq 0 ]]; then
+        printf '%s' "EMPTY" | _kb_val_probe_hash
+        return 0
+    fi
+
+    local lines
+    # GNU form first: `-c` fails cleanly on BSD (illegal option) rather
+    # than silently succeeding with the wrong meaning — never invert this
+    # order (BSD's `-f` on a GNU host means --file-system there).
+    lines=$(stat -c '%n|%s|%Y' "${efiles[@]}" 2>/dev/null)
+    if [[ -z "$lines" ]]; then
+        lines=$(stat -f '%N|%z|%m' "${efiles[@]}" 2>/dev/null)
+    fi
+    [[ -n "$lines" ]] || return 1
+
+    printf '%s\n' "$lines" | sort | _kb_val_probe_hash
+}
+
+# _kb_val_probe_cache_dir — resolves the probe-state directory. Honors
+# KB_VAL_PROBE_CACHE_DIR for test isolation.
+_kb_val_probe_cache_dir() {
+    echo "${KB_VAL_PROBE_CACHE_DIR:-${HOME}/.aiteamforge/run/kb-knowledge-validate-cache}"
+}
+
+# _kb_val_probe_cache_file <resolved-root-path> — cache file path for one
+# root, named by a hash of its own :A-normalized path.
+_kb_val_probe_cache_file() {
+    local resolved="${1-}"
+    [[ -n "$resolved" ]] || return 1
+    local key
+    key=$(printf '%s' "$resolved" | _kb_val_probe_hash) || return 1
+    [[ -n "$key" ]] || return 1
+    echo "$(_kb_val_probe_cache_dir)/root-${key:0:16}.state"
+}
+
+# _kb_val_mtime_probe_is_clean <dir> — return 0 (safe to skip) ONLY when
+# the current signature matches a cache record whose recorded result was
+# 0 (the run that produced this signature validated clean, not merely
+# "ran"). A cached FAILURE is never eligible to be skipped — caching
+# "this exact broken tree was examined" would let a persistently
+# malformed entry go unreported on every run after the first. No branch
+# here concludes "clean" from an absence of information.
+_kb_val_mtime_probe_is_clean() {
+    local root="${1%/}"
+    local resolved="${root:A}"
+    local sig
+    sig=$(_kb_val_mtime_signature "$root") || return 1
+    [[ -n "$sig" ]] || return 1
+
+    local cache_file
+    cache_file=$(_kb_val_probe_cache_file "$resolved") || return 1
+    [[ -f "$cache_file" && -r "$cache_file" ]] || return 1
+
+    local cached_sig="" cached_result=""
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            signature=*) cached_sig="${line#signature=}" ;;
+            result=*)    cached_result="${line#result=}" ;;
+        esac
+    done < "$cache_file"
+
+    [[ -n "$cached_sig" && -n "$cached_result" ]] || return 1
+    [[ "$cached_result" == "0" ]] || return 1
+    [[ "$cached_sig" == "$sig" ]] || return 1
+    return 0
+}
+
+# _kb_val_mtime_probe_record <dir> <result_code> — best-effort atomic
+# persistence of this run's signature + outcome. A write failure is
+# swallowed, never propagated — this is a performance cache, never a
+# correctness dependency.
+_kb_val_mtime_probe_record() {
+    local root="${1%/}" result_code="${2-}"
+    [[ -n "$root" && -n "$result_code" ]] || return 0
+    local resolved="${root:A}"
+    local sig
+    sig=$(_kb_val_mtime_signature "$root") || return 0
+    [[ -n "$sig" ]] || return 0
+
+    local cache_file
+    cache_file=$(_kb_val_probe_cache_file "$resolved") || return 0
+    [[ -n "$cache_file" ]] || return 0
+
+    mkdir -p "${cache_file:h}" 2>/dev/null || return 0
+
+    local tmp_file="${cache_file}.tmp.$$"
+    { echo "signature=${sig}"; echo "result=${result_code}"; } > "$tmp_file" 2>/dev/null \
+        || { rm -f "$tmp_file" 2>/dev/null; return 0; }
+    mv -f "$tmp_file" "$cache_file" 2>/dev/null || rm -f "$tmp_file" 2>/dev/null
+    return 0
 }
 
 # Internal: the git-tracked, hardcoded floor of local-only (PII) teams.

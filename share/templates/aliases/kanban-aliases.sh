@@ -2101,6 +2101,145 @@ _kb_val_root_is_ignored() {
     git -C "$d" check-ignore -q -- . 2>/dev/null
 }
 
+# XACA-0991-019 (ported from canonical — not region-parity-gated, hand-
+# mirrored): cheap change-probe for a root git cannot cheaply diff
+# (gitignored or non-git). State lives under
+# ~/.aiteamforge/run/kb-knowledge-validate-cache/ (override:
+# KB_VAL_PROBE_CACHE_DIR) — never ~/knowledge, never a team's kanban/.
+# Deleting any/all of this state at any time is always safe: every reader
+# below treats missing/unreadable/unparseable state as "uncertain", which
+# folds into "invoke full validation", never "clean".
+
+# _kb_val_probe_hash — sha256 of stdin via shasum, falling back to
+# sha256sum. Returns 1 with no output if neither exists.
+_kb_val_probe_hash() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 2>/dev/null | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum 2>/dev/null | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+# _kb_val_mtime_signature <dir> — sha256 signature over every direct
+# *.md entry file under <dir> (INDEX.md excluded, non-recursive — same
+# scope kb-knowledge-validate uses for a standalone project-tier val_dir).
+# DETECTS: any file added/removed/renamed, or any edit that changes a
+# file's byte count or mtime. CANNOT DETECT a content edit that preserves
+# BOTH the exact byte count and exact mtime of the file it replaces — the
+# same blind spot git's own stat-cache fast path already has. Not
+# vulnerable to clock skew: every timestamp comes from the filesystem's
+# own per-file mtime, not compared against "now". Returns 1 (empty
+# stdout) if `stat` succeeds on neither GNU nor BSD form, or hashing is
+# unavailable — callers must treat empty as "cannot compute", i.e. invoke.
+# An empty directory hashes to a fixed sentinel rather than returning
+# empty (it is a real, cacheable state).
+_kb_val_mtime_signature() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local root="${1%/}"
+    local -a efiles
+    local ef
+    efiles=()
+    for ef in "${root}"/*.md; do
+        [[ -f "$ef" ]] || continue
+        [[ "$(basename "$ef")" == "INDEX.md" ]] && continue
+        efiles+=("$ef")
+    done
+
+    if [[ ${#efiles[@]} -eq 0 ]]; then
+        printf '%s' "EMPTY" | _kb_val_probe_hash
+        return 0
+    fi
+
+    local lines
+    # GNU form first: `-c` fails cleanly on BSD (illegal option) rather
+    # than silently succeeding with the wrong meaning — never invert this
+    # order (BSD's `-f` on a GNU host means --file-system there).
+    lines=$(stat -c '%n|%s|%Y' "${efiles[@]}" 2>/dev/null)
+    if [[ -z "$lines" ]]; then
+        lines=$(stat -f '%N|%z|%m' "${efiles[@]}" 2>/dev/null)
+    fi
+    [[ -n "$lines" ]] || return 1
+
+    printf '%s\n' "$lines" | sort | _kb_val_probe_hash
+}
+
+# _kb_val_probe_cache_dir — resolves the probe-state directory. Honors
+# KB_VAL_PROBE_CACHE_DIR for test isolation.
+_kb_val_probe_cache_dir() {
+    echo "${KB_VAL_PROBE_CACHE_DIR:-${HOME}/.aiteamforge/run/kb-knowledge-validate-cache}"
+}
+
+# _kb_val_probe_cache_file <resolved-root-path> — cache file path for one
+# root, named by a hash of its own :A-normalized path.
+_kb_val_probe_cache_file() {
+    local resolved="${1-}"
+    [[ -n "$resolved" ]] || return 1
+    local key
+    key=$(printf '%s' "$resolved" | _kb_val_probe_hash) || return 1
+    [[ -n "$key" ]] || return 1
+    echo "$(_kb_val_probe_cache_dir)/root-${key:0:16}.state"
+}
+
+# _kb_val_mtime_probe_is_clean <dir> — return 0 (safe to skip) ONLY when
+# the current signature matches a cache record whose recorded result was
+# 0 (the run that produced this signature validated clean, not merely
+# "ran"). A cached FAILURE is never eligible to be skipped — caching
+# "this exact broken tree was examined" would let a persistently
+# malformed entry go unreported on every run after the first. No branch
+# here concludes "clean" from an absence of information.
+_kb_val_mtime_probe_is_clean() {
+    local root="${1%/}"
+    local resolved="${root:A}"
+    local sig
+    sig=$(_kb_val_mtime_signature "$root") || return 1
+    [[ -n "$sig" ]] || return 1
+
+    local cache_file
+    cache_file=$(_kb_val_probe_cache_file "$resolved") || return 1
+    [[ -f "$cache_file" && -r "$cache_file" ]] || return 1
+
+    local cached_sig="" cached_result=""
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            signature=*) cached_sig="${line#signature=}" ;;
+            result=*)    cached_result="${line#result=}" ;;
+        esac
+    done < "$cache_file"
+
+    [[ -n "$cached_sig" && -n "$cached_result" ]] || return 1
+    [[ "$cached_result" == "0" ]] || return 1
+    [[ "$cached_sig" == "$sig" ]] || return 1
+    return 0
+}
+
+# _kb_val_mtime_probe_record <dir> <result_code> — best-effort atomic
+# persistence of this run's signature + outcome. A write failure is
+# swallowed, never propagated — this is a performance cache, never a
+# correctness dependency.
+_kb_val_mtime_probe_record() {
+    local root="${1%/}" result_code="${2-}"
+    [[ -n "$root" && -n "$result_code" ]] || return 0
+    local resolved="${root:A}"
+    local sig
+    sig=$(_kb_val_mtime_signature "$root") || return 0
+    [[ -n "$sig" ]] || return 0
+
+    local cache_file
+    cache_file=$(_kb_val_probe_cache_file "$resolved") || return 0
+    [[ -n "$cache_file" ]] || return 0
+
+    mkdir -p "${cache_file:h}" 2>/dev/null || return 0
+
+    local tmp_file="${cache_file}.tmp.$$"
+    { echo "signature=${sig}"; echo "result=${result_code}"; } > "$tmp_file" 2>/dev/null \
+        || { rm -f "$tmp_file" 2>/dev/null; return 0; }
+    mv -f "$tmp_file" "$cache_file" 2>/dev/null || rm -f "$tmp_file" 2>/dev/null
+    return 0
+}
+
 # Internal: the git-tracked, hardcoded floor of local-only (PII) teams.
 # THIS is the authoritative safety control, not team-paths.json (see
 # _kb_is_local_only_team below) — a regenerated or missing team-paths.json
