@@ -2726,9 +2726,36 @@ _kb_knowledge_retired_dir_canonical() {
         return 1
     fi
 
-    # "agents/reno" -> "reno". Strip only the leading tier segment; a slug
-    # never contains a slash (_kb_validate_name_component forbids it), so this
-    # is unambiguous.
+    # XACA-0934-020: validate the RAW value BEFORE stripping, not after.
+    #
+    # This ordering is the entire fix. The strip below is a ${##*/}, which is
+    # greedy to the LAST slash — so it does not merely remove a leading tier
+    # segment, it reduces `../../../etc/passwd` to `passwd`. A post-strip
+    # check is therefore worthless: `passwd` is a perfectly well-formed slug
+    # and sails through _kb_validate_name_component. The strip LAUNDERS a
+    # traversal-shaped value into a clean-looking one, and every caller
+    # downstream — including the tombstone refusal that prints this back
+    # formatted as a runnable `kb-knowledge-add agent <slug>` command — then
+    # trusts the laundered result. Validating first is what actually closes it.
+    #
+    # Accepted shapes are exactly the two a real tombstone carries: a
+    # tier-qualified path (`agents/reno`) or a bare slug (`reno`). At most one
+    # slash, and each component must be slug-shaped, which rejects `..`
+    # segments, absolute paths, and anything carrying shell metacharacters.
+    #
+    # A malformed value yields an EMPTY canonical with return 0 — deliberately
+    # the same contract this function already documents for a README that
+    # declares `status: retired` with no `consolidated_into:` at all. The
+    # directory is still correctly reported as a tombstone and callers still
+    # refuse the write; they simply get no slug to suggest, which is the
+    # honest answer when the frontmatter does not contain a usable one.
+    if [[ ! "$consolidated" =~ ^([a-z][a-z0-9_-]*/)?[a-z][a-z0-9_-]*$ ]]; then
+        printf '%s\n' ""
+        return 0
+    fi
+
+    # "agents/reno" -> "reno". Safe now that the raw value is known to hold at
+    # most one slash and slug-shaped components on both sides of it.
     printf '%s\n' "${consolidated##*/}"
     return 0
 }
@@ -2987,7 +3014,21 @@ _kb_knowledge_destination_guard() {
     # "does this directory already hold entries" glob matches nothing whenever
     # the directory does not exist, which is the single most common path
     # through this function.
-    setopt LOCAL_OPTIONS NO_NOMATCH
+    #
+    # XACA-0934-021: NO_KSH_ARRAYS is here for the same self-containment
+    # reason. This function reads its suggestion arrays 1-indexed
+    # (${suggestions[1]}), which is this repo's enforced house style —
+    # zsh-array-indexing-check.yml is a required-style gate, so the subscripts
+    # must NOT be rewritten to 0-indexed or to ${arr[@]} gymnastics to
+    # accommodate a caller. Under a caller that has KSH_ARRAYS set, those
+    # subscripts silently resolve EMPTY, and the observed damage is a
+    # did-you-mean line reading "Did you mean: " plus a Fix: line offering
+    # `kb-knowledge-add agent  "<title>"` — a blank, unrunnable command. The
+    # refusal itself still fires and nothing is created (the guard fails closed
+    # either way), so this is a degradation of the MESSAGE, not of the policy.
+    # Normalising the option locally fixes every subscript in one place and is
+    # invisible to callers: LOCAL_OPTIONS restores their setting on return.
+    setopt LOCAL_OPTIONS NO_NOMATCH NO_KSH_ARRAYS
     local tier="${1-}" slug="${2-}" write_root="${3-}" allow="${4:-false}" allow_new="${5:-false}"
     [[ -z "$tier" || -z "$slug" || -z "$write_root" ]] && return 0
 
@@ -3115,11 +3156,49 @@ _kb_knowledge_destination_guard() {
             fi
 
             echo "Error: 'agents/${slug}' is a RETIRED persona directory (consolidated away by XACA-0842/XACA-0907) — refusing to write knowledge into a tombstone." >&2
-            if [[ -n "$canonical" ]]; then
+            # XACA-0934-020: $canonical is FILE CONTENT — it comes from the
+            # tombstone README's `consolidated_into:` frontmatter, which is not
+            # validated anywhere upstream, and the "agents/reno" -> "reno" strip
+            # in _kb_knowledge_retired_dir_canonical is a ${##*/} that happily
+            # reduces `../../../etc/passwd` to `passwd`. Printing that back
+            # formatted as a runnable command hands the operator a
+            # copy-pasteable string derived from an unvalidated file, and the
+            # whole point of this guard is to refuse an unvalidated slug — so
+            # trusting one on the way OUT is the same mistake pointed the other
+            # way. Nothing here executes it today, but the moment someone wraps
+            # this stderr in $(...) or pipes it onward, it stops being cosmetic.
+            #
+            # So: shape-check before offering a command. Note the refusal above
+            # has ALREADY been printed and the function still returns 1 below —
+            # only the suggestion is conditional. A tombstone with malformed
+            # frontmatter is still refused; it just gets told its README is
+            # broken instead of being handed a bogus command.
+            #
+            # _kb_validate_name_component alone, deliberately NOT a roster
+            # membership test: the roster is advisory and resolves EMPTY on a
+            # bare tap host with no agents-master checkout (the M4Mini
+            # condition), so gating on it would suppress the correct Fix: line
+            # for all seven real tombstones on exactly the machines least able
+            # to guess the answer. Shape validation is host-independent, and it
+            # is sufficient — no traversal- or command-shaped string survives
+            # ^[a-z][a-z0-9_-]*$.
+            if [[ -n "$canonical" ]] && _kb_validate_name_component "$canonical"; then
                 echo "  Fix: use the canonical slug instead —" >&2
                 echo "         kb-knowledge-add agent ${canonical} \"<title>\"" >&2
             else
                 echo "  Fix: its README.md declares 'status: retired'; use the live persona slug it points at." >&2
+                # Distinguish "no consolidated_into: at all" (nothing to say)
+                # from "consolidated_into: present but unusable" (the author
+                # needs to know their frontmatter is broken, otherwise the
+                # missing suggestion looks like a tool bug). Re-reading the
+                # field here rather than plumbing a second return value keeps
+                # _kb_knowledge_retired_dir_canonical's contract single-valued;
+                # this branch is an error path, so the extra read is free.
+                local _kb_dg_raw_into
+                _kb_dg_raw_into=$(_kb_knowledge_yaml_field "${target_dir}/README.md" "consolidated_into")
+                if [[ -n "$_kb_dg_raw_into" ]]; then
+                    echo "  NOTE: that README's 'consolidated_into:' value is not a usable slug, so no command is suggested here. Repair the frontmatter — expected 'consolidated_into: agents/<slug>' with <slug> matching ^[a-z][a-z0-9_-]*\$." >&2
+                fi
             fi
             echo "  Why: nothing searches a retired directory, so the entry would be stranded and invisible (the exact failure XACA-0842 eliminated), the id allocator would hand out an id the canonical directory already uses, and kb-knowledge-validate would then FAIL on the resurrected duplicate." >&2
             echo "  Override: pass --allow-retired-agent-dir to write there anyway, accepting a stranded entry and a probable id collision." >&2
