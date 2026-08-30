@@ -4448,7 +4448,14 @@ kb-sweep() {
     # overwhelming common case is that NOTHING under the knowledge roots
     # changed. Short-circuit on a bare `git status --porcelain` probe (no
     # directory-tree walk, no per-file content parsing) before paying
-    # kb-knowledge-validate --changed's own ~1.3-2.5s.
+    # kb-knowledge-validate --changed's own cost.
+    #
+    # XACA-0991-019 CORRECTION (ported from canonical): the "~1.3-2.5s"
+    # figure this comment originally cited was measured on a SMALL
+    # git-diffable changed set and does not cover the gitignored
+    # project-tier fail-open path below, which validates the ENTIRE
+    # project tier every time (measured 54-61s against a real 116-file
+    # tree — see the mtime probe ported next to _kb_val_root_is_ignored).
     # XACA-0991-003 (blocking-tier hardening — [Test]/[Review] findings from
     # code review): this probe decides ONE thing — should kb-sweep bother
     # invoking kb-knowledge-validate --changed at all — and, on that
