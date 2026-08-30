@@ -13769,11 +13769,11 @@ kb-knowledge-add() {
         echo "  tier       agent | subject | project | team"
         echo "  target     Agent name, subject path, team name, or (project) optional slug"
         echo "  title      Human-readable title for the entry"
-        echo "  --force    subject/project tiers only (XACA-0754-014, ported XACA-0770):"
-        echo "             proceed with a shared/synced write even when the session's team"
-        echo "             could not be resolved at all — normally refused, since an"
-        echo "             unresolvable session might be a finance/legal/medical (PII) one."
-        echo "             Ignored for agent/team tiers."
+        echo "  --force    subject/project tiers only (XACA-0754-014): proceed with a"
+        echo "             shared/synced write even when the session's team could not be"
+        echo "             resolved at all (no tmux, KB_TEAM, or .kb-team sentinel) —"
+        echo "             normally refused, since an unresolvable session might be a"
+        echo "             finance/legal/medical (PII) one. Ignored for agent/team tiers."
         echo "             Does NOT waive --allow-nonstandard-base's layout check."
         echo "  --allow-foreign-host"
         echo "             agent/team tiers only (XACA-0802): write a local-only team's"
@@ -13832,11 +13832,11 @@ kb-knowledge-add() {
 
     shift  # consumed $1 (tier)
 
-    # XACA-0754-014 (ported XACA-0770): --force is recognized anywhere in the
-    # remaining args and stripped out BEFORE tier-specific positional parsing
-    # runs — otherwise it would get swept into title_raw (which greedily
-    # joins "${*:2}"/"$*"). Only subject/project tiers consult it; agent/team
-    # tiers ignore it silently (harmless no-op, not an error).
+    # XACA-0754-014: --force is recognized anywhere in the remaining args and
+    # stripped out BEFORE tier-specific positional parsing runs — otherwise it
+    # would get swept into title_raw (which greedily joins "${*:2}"/"$*").
+    # Only subject/project tiers consult it (see _kb_ambiguous_tier_write_guard);
+    # agent/team tiers ignore it silently (harmless no-op, not an error).
     #
     # XACA-0802: --allow-foreign-host is stripped the same way, for the same
     # reason. It is the agent/team-tier counterpart of --force (host
@@ -13846,9 +13846,30 @@ kb-knowledge-add() {
     # XACA-0883: --allow-nonstandard-base is stripped the same way, and is a
     # SEPARATE flag from --force by design (guard contract §3.5) — a user
     # silencing a layout-correctness warning must not thereby also silence a
-    # PII control. Neither flag implies the other, in either direction.
-    # project tier only (agent/team/subject tiers ignore it silently — same
-    # treatment as --force).
+    # PII control. Precedent: XACA-0802 added --allow-foreign-host as its own
+    # flag rather than extending --force, for the identical reason. Neither
+    # flag implies the other, in either direction. project tier only (agent/
+    # team/subject tiers ignore it silently — same treatment as --force).
+    #
+    # XACA-0934/XACA-0784: --allow-retired-agent-dir, --allow-new-agent-dir and
+    # --allow-new-team are stripped the same way, and are THREE separate flags
+    # rather than one shared "--allow-unregistered-destination", again per
+    # guard contract §3.5. They waive controls of very different weight:
+    #   --allow-retired-agent-dir  findability — write into a RETIRED persona
+    #                              tombstone that only exists as a redirect.
+    #   --allow-new-agent-dir      findability — CREATE an agent directory for
+    #                              a slug absent from the persona catalogue.
+    #                              Distinct mistake, distinct fix: the
+    #                              tombstone case has a canonical slug to
+    #                              retype, this one may be a typo OR a
+    #                              deliberate non-persona home.
+    #   --allow-new-team           PII containment — create a NEW directory in
+    #                              the fleet-synced root from an unrecognised
+    #                              slug, which is how a typo'd "finance" leaks
+    #                              personal data instead of routing local.
+    # One flag covering these would let a user who only meant to append to a
+    # retired persona directory also, invisibly, unlock the PII path. No flag
+    # implies any other, and none implies --force or --allow-foreign-host.
     local flag_allow_global=false
     local flag_allow_foreign_host=false
     local flag_allow_nonstandard_base=false
@@ -13881,10 +13902,10 @@ kb-knowledge-add() {
     local local_root
     local_root=$(_kb_knowledge_local_root)
 
-    # XACA-0754/XACA-0754-013 (ported XACA-0770): which root a write actually
-    # lands under. Defaults to global; flipped to local_root below whenever
-    # the write targets a local-only (PII) team. agent/team tiers key off the
-    # explicit persona/team-name argument (_kb_is_local_persona /
+    # XACA-0754/XACA-0754-013: which root a write actually lands under.
+    # Defaults to global; flipped to local_root below whenever the write
+    # targets a local-only (PII) team. agent/team tiers key off the explicit
+    # persona/team-name argument (_kb_is_local_persona /
     # _kb_is_local_only_team). subject and bare-project tiers have no such
     # argument — they key off the CURRENT SESSION's team instead
     # (_kb_current_session_is_local_only_team), and named-project keys off
@@ -13940,9 +13961,9 @@ kb-knowledge-add() {
                 echo "Error: invalid subject path '${subj_path}' — each component must match ^[a-z][a-z0-9_-]*$ (no path traversal, no uppercase)" >&2
                 return 1
             fi
-            # XACA-0754-014 (ported XACA-0770): fail closed if the
-            # session's team is genuinely unresolvable (ambiguous — could be
-            # PII). No-op when it resolved, whether local or not.
+            # XACA-0754-014: fail closed if the session's team is genuinely
+            # unresolvable (ambiguous — could be PII). No-op when it resolved,
+            # whether local or not.
             _kb_ambiguous_tier_write_guard "$flag_allow_global" || return 1
             if _kb_current_session_is_local_only_team; then
                 write_root="$local_root"
@@ -13959,9 +13980,8 @@ kb-knowledge-add() {
                     echo "Error: invalid project slug '${proj_slug}' — each component must match ^[a-z][a-z0-9_-]*$ (no path traversal)" >&2
                     return 1
                 fi
-                # XACA-0754-014 (ported XACA-0770): same fail-closed
-                # guard as subject — a named project slug carries no team
-                # information of its own either.
+                # XACA-0754-014: same fail-closed guard as subject — a named
+                # project slug carries no team information of its own either.
                 _kb_ambiguous_tier_write_guard "$flag_allow_global" || return 1
                 if _kb_current_session_is_local_only_team; then
                     write_root="$local_root"
@@ -13970,17 +13990,18 @@ kb-knowledge-add() {
                 target_dir="${write_root}/projects/${proj_slug}"
             else
                 title_raw="$*"
-                # XACA-0754-013 (ported XACA-0770): use the "effective"
-                # resolver, which redirects only the bare
-                # ${global_root}/projects/<slug> fallback case to local_root
-                # for a local-only session — an in-repo .knowledge-config.yml
-                # / KB_KNOWLEDGE_PROJECT_PATH override already points outside
-                # the synced repo and passes through unchanged.
+                # XACA-0754-013: use the "effective" resolver, which redirects
+                # only the bare ${global_root}/projects/<slug> fallback case to
+                # local_root for a local-only session — an in-repo
+                # .knowledge-config.yml / KB_KNOWLEDGE_PROJECT_PATH override is
+                # already outside the synced repo and passes through unchanged.
                 target_dir=$(_kb_knowledge_project_path_effective)
                 # XACA-0754-014: only the global-root FALLBACK case is
                 # ambiguity-sensitive — an in-repo/env-var override already
                 # points somewhere outside the synced repo regardless of
-                # whether the session's team can be resolved.
+                # whether the session's team can be resolved, so it must NOT
+                # be gated (that would be a pointless friction regression for
+                # any team using that convention from a context-less shell).
                 #
                 # ORDERING IS LOAD-BEARING (XACA-0883 guard contract §3.5):
                 # the PII gate MUST run FIRST, on the pre-redirect $target_dir
@@ -14047,12 +14068,18 @@ kb-knowledge-add() {
     title_slug=$(_kb_knowledge_slugify "$title_raw")
 
     # XACA-0818: close the scan→compute→create TOCTOU race in the id allocator.
-    # See _kb_alloc_slot's header comment for the full race description. It
-    # serializes the whole critical section under an exclusive lock (kept
-    # under TMPDIR, keyed by target-dir hash — NOT inside the synced tree, so
-    # it can't wedge kb-knowledge-sync's Guard-3 dirty check) and reserves an
-    # empty placeholder <prefix>NNN-<slug>.md inside target_dir. The real
-    # content is written into that reserved file below, after the lock
+    # Concurrent kb-knowledge-add callers all read the SAME highest NNN before
+    # any of them writes its file, then each writes a DISTINCT slug into the
+    # SAME NNN slot (e.g. k002-foo.md AND k002-bar.md — both creates succeed
+    # because the filenames differ, so an O_EXCL/noclobber guard on the FINAL
+    # filename cannot fix this). The atomic unit is the whole "scan existing
+    # files → compute next NNN → reserve the slot", NOT the final file.
+    #
+    # _kb_alloc_slot serializes that whole critical section under an exclusive
+    # lock (kept under TMPDIR, keyed by target-dir hash — NOT inside the synced
+    # tree, so it can't wedge kb-knowledge-sync's Guard-3 dirty check) and
+    # reserves an empty placeholder <prefix>NNN-<slug>.md inside target_dir. The
+    # real content is written into that reserved file below, after the lock
     # releases (safe: the filename is uniquely ours).
     local new_file
     new_file=$(_kb_alloc_slot "$target_dir" "$prefix" "$title_slug")
@@ -14130,6 +14157,17 @@ ${frontmatter}
 
 
 FRONTMATTER
+    fi
+
+    # XACA-0818 ([Review]): if the post-lock content write failed, the reserved
+    # placeholder is still 0 bytes. Remove it so a stray empty <prefix>NNN-*.md
+    # doesn't leak (and permanently advance) an NNN slot. A successful write
+    # always emits the frontmatter header, so `-s` (non-empty) is a reliable
+    # success proxy here.
+    if [[ ! -s "$new_file" ]]; then
+        rm -f "$new_file"
+        echo "Error: failed to write knowledge entry content to ${new_file}; released reserved slot ${entry_id}" >&2
+        return 1
     fi
 
     echo "Created: ${new_file}"
