@@ -390,50 +390,50 @@ _lcars_port_drift_guard() {
         # that it can NEVER abort a startup, so it must hold under bare
         # invocation too rather than depending on how it happens to be called.
         _guard_check2_raw="$(python3 -c '
-    import sys
-    sys.path.insert(0, sys.argv[1])
-    try:
-        from aiteamforge_paths import DEFAULT_TEAMS, _resolve_template_band, load_config
-    except Exception:
-        print("|||")
-        sys.exit(0)
+import sys
+sys.path.insert(0, sys.argv[1])
+try:
+    from aiteamforge_paths import DEFAULT_TEAMS, _resolve_template_band, load_config
+except Exception:
+    print("|||")
+    sys.exit(0)
 
-    team = sys.argv[2]
+team = sys.argv[2]
 
-    default_port = ""
-    try:
-        entry = DEFAULT_TEAMS.get(team)
-        if entry:
-            p = entry.get("lcars_port")
-            if p:
-                default_port = str(int(p))
-    except Exception:
-        pass
+default_port = ""
+try:
+    entry = DEFAULT_TEAMS.get(team)
+    if entry:
+        p = entry.get("lcars_port")
+        if p:
+            default_port = str(int(p))
+except Exception:
+    pass
 
-    band_base = ""
-    band_range = ""
-    try:
-        base, rng = _resolve_template_band(team)
-        band_base = str(int(base))
-        band_range = str(int(rng))
-    except Exception:
-        pass
+band_base = ""
+band_range = ""
+try:
+    base, rng = _resolve_template_band(team)
+    band_base = str(int(base))
+    band_range = str(int(rng))
+except Exception:
+    pass
 
-    # 4th field (XACA-0998-003): the REGISTRY port, resolved with exactly the
-    # precedence lcars_ports.py uses -- the live team-paths.json overlay first,
-    # DEFAULT_TEAMS as fallback -- so Check 1 reports the same value the canonical
-    # resolver would, without a second python3 invocation.
-    registry_port = ""
-    try:
-        entry = (load_config().get("teams", {}) or {}).get(team) or DEFAULT_TEAMS.get(team)
-        if entry:
-            p = entry.get("lcars_port")
-            if p:
-                registry_port = str(int(p))
-    except Exception:
-        pass
+# 4th field (XACA-0998-003): the REGISTRY port, resolved with exactly the
+# precedence lcars_ports.py uses -- the live team-paths.json overlay first,
+# DEFAULT_TEAMS as fallback -- so Check 1 reports the same value the canonical
+# resolver would, without a second python3 invocation.
+registry_port = ""
+try:
+    entry = (load_config().get("teams", {}) or {}).get(team) or DEFAULT_TEAMS.get(team)
+    if entry:
+        p = entry.get("lcars_port")
+        if p:
+            registry_port = str(int(p))
+except Exception:
+    pass
 
-    print(default_port + "|" + band_base + "|" + band_range + "|" + registry_port)
+print(default_port + "|" + band_base + "|" + band_range + "|" + registry_port)
     ' "$_guard_py_dir" "$_guard_team" 2>/dev/null || true)"
 
         # Parse the pipe-delimited '<default_port>|<band_base>|<band_range>'

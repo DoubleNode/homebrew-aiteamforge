@@ -259,6 +259,22 @@ BACKUP_STATUS_FILE="$HOME/aiteamforge-backups/kanban/backup-status.json"
 # replaced, and the reporter runs on a ~60s launchd cadence. Sweep ONCE and
 # answer every lookup from the cached map -- never once per session.
 #
+# WHERE THE SWEEP MUST BE TRIGGERED FROM, AND WHY (XACA-0998-019/023).
+# The cache is a plain global, so it is only shared by shells that DESCEND from
+# the one that built it. get_lcars_port() is invoked as `$(get_lcars_port ...)`
+# from inside get_tmux_sessions()'s per-session loop, and a command
+# substitution is a SUBSHELL: a map built lazily down there dies with that
+# subshell and _LCARS_LIVE_MAP_BUILT never flips in the caller, so the sweep
+# re-ran once per LCARS session (measured on the review PR: 3 sweeps for 3
+# sessions, ~0.118s each with 12 pids) -- exactly what the paragraph above
+# promises does not happen. The fix is not in this function: every entry point
+# that will resolve ports calls _lcars_build_live_map in ITS OWN scope, BEFORE
+# any command substitution -- build_payload() (so one sweep covers the whole
+# payload), get_tmux_sessions() and get_lcars_services() (so each stays correct
+# when a test or a future caller drives it directly). The guard below makes the
+# extra calls free. tests/test-xaca-0998-020-live-map-sweep-count.sh counts the
+# sweeps and fails if any of those calls is removed.
+#
 # Map format: one record per line, "<session_name> <port> <team>". A
 # newline-delimited string rather than an associative array because this script
 # must run under bash 3.2 (macOS /bin/bash), which has no `declare -A`.
@@ -283,8 +299,19 @@ _lcars_build_live_map() {
         return 0
     fi
 
+    # `while IFS= read -r` over a HERE-DOC, not `for pid in $pids` (XACA-0998-022).
+    # This file is bash-only today, but the identical sweep in
+    # scripts/lcars-launch-helpers.sh (_lcars_guard_live_bound_port) is sourced
+    # under zsh as well, and zsh does NOT word-split an unquoted parameter
+    # expansion -- the `for` form there would iterate exactly once over the
+    # whole newline-joined blob and every extraction below would run on
+    # garbage. The two readers are kept in the same shape deliberately so the
+    # bash-only one cannot become the template someone copies into a zsh file.
+    # A here-doc REDIRECT (not a pipe) keeps the loop in the current shell, so
+    # accumulation into _LCARS_LIVE_MAP survives. All locals are declared
+    # BEFORE the loop (zsh local-in-loop).
     local pid args session team port
-    for pid in $pids; do
+    while IFS= read -r pid; do
         [ -z "$pid" ] && continue
         args="$(ps eww -o args= -p "$pid" 2>/dev/null || true)"
         [ -z "$args" ] && continue
@@ -330,19 +357,44 @@ _lcars_build_live_map() {
 
         _LCARS_LIVE_MAP="${_LCARS_LIVE_MAP}${session} ${port} ${team}
 "
-    done
+    done <<_LBLM_EOF
+$pids
+_LBLM_EOF
 
     return 0
 }
 
 # Tier 1 lookup: exact-equality join of $1 against a live server's
-# LCARS_SESSION_NAME. Prints the bound port, or nothing at all.
-_lcars_live_port_for_session() {
+# LCARS_SESSION_NAME. Prints every DISTINCT bound port for that session name,
+# space-separated, or nothing at all. Always exits 0.
+#
+# WHY IT REPORTS ALL OF THEM RATHER THAN THE FIRST (XACA-0998-024).
+# Normally there is exactly one. Two servers can claim one session name --
+# a genuine split-brain -- and this used to resolve it with
+# `awk '{print $2; exit}'`, i.e. by picking whichever pgrep listed first.
+# That is a coin flip presented to the dashboard as a fact. Enumerating
+# instead lets get_lcars_port() see the ambiguity and WITHHOLD, per the
+# fail-closed shape this reporting path is signed off on: a missing link is
+# safe, a wrong link is not.
+#
+# This deliberately mirrors _lcars_guard_live_bound_port() in
+# scripts/lcars-launch-helpers.sh, which also returns all of them. The two
+# readers now SEE the same thing and differ only in what they DO with it --
+# the guard surfaces the split-brain to a human at startup, this one omits
+# the field. That inversion is intentional and is the whole reason both
+# functions enumerate rather than guess.
+#
+# Distinctness matters: two PIDs of one process group report the same port and
+# must not read as a conflict, so the count is over distinct VALUES, not rows.
+_lcars_live_ports_for_session() {
     local session_name="$1"
     [ -n "$session_name" ] || return 0
     _lcars_build_live_map
     [ -n "$_LCARS_LIVE_MAP" ] || return 0
-    printf '%s' "$_LCARS_LIVE_MAP" | awk -v want="$session_name" '$1 == want { print $2; exit }'
+    printf '%s' "$_LCARS_LIVE_MAP" | awk -v want="$session_name" '
+        $1 == want && $2 != "" && !seen[$2]++ { out = (out == "" ? $2 : out " " $2) }
+        END { if (out != "") print out }
+    '
 }
 
 # Tier 2 lookup: the canonical registry, .teams.<team_id>.lcars_port.
@@ -418,11 +470,28 @@ get_lcars_port() {
     local port=""
 
     # Tier 1 -- live process. Ground truth.
-    port="$(_lcars_live_port_for_session "$session_name")"
-    if [ -n "$port" ]; then
-        printf '%s\n' "$port"
-        return 0
-    fi
+    #
+    # An AMBIGUOUS tier-1 answer (two live servers exporting the same
+    # LCARS_SESSION_NAME on different ports) is not a tier-1 miss and must not
+    # fall through to tier 2: the registry records intent, and under a
+    # split-brain "intent" is just a third opinion about which of two running
+    # servers a dashboard link should open. Withhold outright (XACA-0998-024).
+    # This is the ONE place the tier chain short-circuits to tier 3 without
+    # consulting tier 2, and it does so in the safe direction -- no field
+    # rather than a coin-flip field.
+    port="$(_lcars_live_ports_for_session "$session_name")"
+    case "$port" in
+        '')
+            ;;
+        *' '*)
+            echo ""
+            return 0
+            ;;
+        *)
+            printf '%s\n' "$port"
+            return 0
+            ;;
+    esac
 
     # Tier 2 -- canonical registry, via the best-effort session -> team strip.
     port="$(_lcars_registry_port_for_team "${session_name%-lcars}")"
@@ -647,6 +716,17 @@ get_tmux_sessions() {
         echo "[]"
         return
     fi
+
+    # XACA-0998-019/023: build the live-process map HERE, in this function's
+    # own shell, BEFORE the loop -- exactly as get_lcars_services() already
+    # does. get_lcars_port() below is called as `$(get_lcars_port ...)`, and a
+    # command substitution is a subshell: left to build the map lazily, it
+    # rebuilt it once per LCARS session and threw it away each time. Priming it
+    # in this scope means every one of those subshells inherits a map that is
+    # already built, so the `ps eww` sweep happens once for this whole call.
+    # See the "WHERE THE SWEEP MUST BE TRIGGERED FROM" note above
+    # _LCARS_LIVE_MAP; the call is idempotent via _LCARS_LIVE_MAP_BUILT.
+    _lcars_build_live_map
 
     # Iterate through each socket
     while IFS= read -r socket; do
@@ -904,6 +984,13 @@ get_lcars_services() {
 
 # Build status payload
 build_payload() {
+    # Prime the live-process sweep in THIS scope so the two command
+    # substitutions below share one `ps eww` pass instead of taking one each.
+    # Both callees also call it themselves (they must stay correct under a
+    # direct call), and the _LCARS_LIVE_MAP_BUILT guard makes those free.
+    # This is what makes "sweep once per reporter run" literally true.
+    _lcars_build_live_map
+
     local sessions=$(get_tmux_sessions)
     local lcars_services=$(get_lcars_services)
     local backup_status=$(get_backup_status)
