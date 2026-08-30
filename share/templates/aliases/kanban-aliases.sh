@@ -2135,6 +2135,12 @@ _kb_val_probe_hash() {
 # unavailable — callers must treat empty as "cannot compute", i.e. invoke.
 # An empty directory hashes to a fixed sentinel rather than returning
 # empty (it is a real, cacheable state).
+#
+# XACA-0991-020 [Test] correction: uses `${ef:t}` (zsh tail modifier),
+# NOT `$(basename "$ef")` — the latter forks a subshell per file, ~8.5ms
+# x 118 files against the real project tier, which is why this
+# function's earlier "~20ms" cost claim was actually 700-1057ms. Measured
+# after the fix: 34.5-73ms across repeated runs, steady-state ~38ms.
 _kb_val_mtime_signature() {
     setopt LOCAL_OPTIONS NO_NOMATCH
     local root="${1%/}"
@@ -2143,7 +2149,7 @@ _kb_val_mtime_signature() {
     efiles=()
     for ef in "${root}"/*.md; do
         [[ -f "$ef" ]] || continue
-        [[ "$(basename "$ef")" == "INDEX.md" ]] && continue
+        [[ "${ef:t}" == "INDEX.md" ]] && continue
         efiles+=("$ef")
     done
 
@@ -2182,19 +2188,19 @@ _kb_val_probe_cache_file() {
     echo "$(_kb_val_probe_cache_dir)/root-${key:0:16}.state"
 }
 
-# _kb_val_mtime_probe_is_clean <dir> — return 0 (safe to skip) ONLY when
-# the current signature matches a cache record whose recorded result was
-# 0 (the run that produced this signature validated clean, not merely
-# "ran"). A cached FAILURE is never eligible to be skipped — caching
-# "this exact broken tree was examined" would let a persistently
-# malformed entry go unreported on every run after the first. No branch
-# here concludes "clean" from an absence of information.
+# _kb_val_mtime_probe_is_clean <dir> <signature> — return 0 (safe to
+# skip) ONLY when <signature> (caller-supplied, never recomputed here —
+# see the TOCTOU note on _kb_val_mtime_probe_record below) matches a
+# cache record whose recorded result was 0 (the run that produced this
+# signature validated clean, not merely "ran"). A cached FAILURE is
+# never eligible to be skipped — caching "this exact broken tree was
+# examined" would let a persistently malformed entry go unreported on
+# every run after the first. No branch here concludes "clean" from an
+# absence of information.
 _kb_val_mtime_probe_is_clean() {
-    local root="${1%/}"
-    local resolved="${root:A}"
-    local sig
-    sig=$(_kb_val_mtime_signature "$root") || return 1
+    local root="${1%/}" sig="${2-}"
     [[ -n "$sig" ]] || return 1
+    local resolved="${root:A}"
 
     local cache_file
     cache_file=$(_kb_val_probe_cache_file "$resolved") || return 1
@@ -2215,17 +2221,29 @@ _kb_val_mtime_probe_is_clean() {
     return 0
 }
 
-# _kb_val_mtime_probe_record <dir> <result_code> — best-effort atomic
-# persistence of this run's signature + outcome. A write failure is
-# swallowed, never propagated — this is a performance cache, never a
-# correctness dependency.
+# _kb_val_mtime_probe_record <dir> <result_code> <signature> —
+# best-effort atomic persistence of <signature> + <result_code>. A write
+# failure is swallowed, never propagated — this is a performance cache,
+# never a correctness dependency.
+#
+# XACA-0991-020 [Review] TOCTOU FIX — this was the actual reported
+# defect: this function used to recompute the signature itself, INSIDE
+# this call, which every caller invoked strictly AFTER
+# kb-knowledge-validate --changed had already run for ~54-61s. That
+# recompute reads the tree as it exists at RECORD time, not as it
+# existed when the run that earned <result_code> actually STARTED — a
+# file dropped into the tree during that window got folded into the
+# recorded signature and paired with a result code from a run that never
+# scanned it, so the next is_clean call would match it and skip,
+# silently certifying an unscanned file. <signature> is now REQUIRED
+# from the caller — captured once, before the invoke, and threaded
+# through unchanged. A pre-invoke signature paired with a post-invoke
+# result is conservative in the correct direction: any change during the
+# window makes the cached signature stale on the next comparison.
 _kb_val_mtime_probe_record() {
-    local root="${1%/}" result_code="${2-}"
-    [[ -n "$root" && -n "$result_code" ]] || return 0
+    local root="${1%/}" result_code="${2-}" sig="${3-}"
+    [[ -n "$root" && -n "$result_code" && -n "$sig" ]] || return 0
     local resolved="${root:A}"
-    local sig
-    sig=$(_kb_val_mtime_signature "$root") || return 0
-    [[ -n "$sig" ]] || return 0
 
     local cache_file
     cache_file=$(_kb_val_probe_cache_file "$resolved") || return 0

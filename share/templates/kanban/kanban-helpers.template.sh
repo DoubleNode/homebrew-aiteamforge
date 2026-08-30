@@ -4479,6 +4479,7 @@ kb-sweep() {
     # and `git status --porcelain --untracked-files=all -- .` from inside it
     # returns zero lines regardless of real content.
     local kv_global_root kv_local_root kv_project_path kv_should_invoke=false
+    local kv_project_needs_probe=false kv_project_sig=""
     kv_global_root=$(_kb_knowledge_global_root 2>/dev/null)
     kv_local_root=$(_kb_knowledge_local_root 2>/dev/null)
 
@@ -4528,6 +4529,27 @@ kb-sweep() {
     # invocation further down needs it regardless of why kb-knowledge-
     # validate ends up invoked.
     kv_project_path=$(_kb_knowledge_project_path 2>/dev/null)
+
+    # XACA-0991-020 [Review] TOCTOU FIX (ported from canonical): capture
+    # the project-tier signature EXACTLY ONCE, HERE, before
+    # kb-knowledge-validate --changed ever runs — thread that single
+    # value through to BOTH the skip-decision below AND the post-invoke
+    # record call further down. A prior version let record recompute the
+    # signature AFTER the ~54-61s invoke had already finished, which
+    # could fold in anything that landed in the tree during that window
+    # and pair it with a result code from a run that never scanned it —
+    # a signature captured pre-invoke and paired with a post-invoke
+    # result is conservative in the safe direction instead (any change
+    # during the window makes the cached signature stale on the next
+    # comparison, forcing full re-validation).
+    if [[ -n "$kv_project_path" ]] && [[ "$(_kb_val_root_state "$kv_project_path")" == "ok" ]]; then
+        if ! git -C "$kv_project_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+           || _kb_val_root_is_ignored "$kv_project_path"; then
+            kv_project_needs_probe=true
+            kv_project_sig=$(_kb_val_mtime_signature "$kv_project_path")
+        fi
+    fi
+
     if [[ -n "$kv_project_path" ]] && ! $kv_should_invoke; then
         case "$(_kb_val_root_state "$kv_project_path")" in
             absent) : ;;
@@ -4541,12 +4563,14 @@ kb-sweep() {
                         # kanban-inside-repo team, every time, even when
                         # nothing changed (measured: 54-61s against a
                         # real 116-file project tier). The mtime probe
-                        # below is a cheap (~20ms measured) fail-open
-                        # check: any uncertainty (no cache, corrupt
-                        # cache, a signature mismatch, or a cached run
-                        # that itself did not pass cleanly) still
-                        # invokes.
-                        if ! _kb_val_mtime_probe_is_clean "$kv_project_path"; then
+                        # below is a cheap (~35-45ms measured,
+                        # XACA-0991-020 corrected) fail-open check: any
+                        # uncertainty (no cache, corrupt cache, a
+                        # signature mismatch, or a cached run that itself
+                        # did not pass cleanly) still invokes. Takes
+                        # $kv_project_sig (captured once, above) rather
+                        # than recomputing — see the TOCTOU comment above.
+                        if [[ -z "$kv_project_sig" ]] || ! _kb_val_mtime_probe_is_clean "$kv_project_path" "$kv_project_sig"; then
                             kv_should_invoke=true
                         fi
                     elif git -C "$kv_project_path" status --porcelain --untracked-files=all -- . 2>/dev/null | grep -q '\.md$'; then
@@ -4555,8 +4579,9 @@ kb-sweep() {
                 else
                     # Non-git project root: same "can't cheaply diff via
                     # git" shape as the ignored-tree branch above — reuse
-                    # the identical mtime probe (XACA-0991-019).
-                    if ! _kb_val_mtime_probe_is_clean "$kv_project_path"; then
+                    # the identical mtime probe and the same
+                    # once-captured $kv_project_sig (XACA-0991-019/020).
+                    if [[ -z "$kv_project_sig" ]] || ! _kb_val_mtime_probe_is_clean "$kv_project_path" "$kv_project_sig"; then
                         kv_should_invoke=true
                     fi
                 fi
@@ -4595,17 +4620,16 @@ kb-sweep() {
                 remaining_count=$((remaining_count + 1))
             fi
 
-            # XACA-0991-019 (ported from canonical — not region-parity-
-            # gated, hand-mirrored): record this run's project-tier
-            # signature + outcome for the mtime probe above. Scoped to
-            # exactly the two cases that probe is ever consulted from
-            # (ignored-tree, or a non-git project root). Best-effort and
-            # silent — a caching failure never changes kb-sweep's verdict.
-            if [[ -n "$kv_project_path" ]] && [[ "$(_kb_val_root_state "$kv_project_path")" == "ok" ]]; then
-                if ! git -C "$kv_project_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-                   || _kb_val_root_is_ignored "$kv_project_path"; then
-                    _kb_val_mtime_probe_record "$kv_project_path" "$kv_rc"
-                fi
+            # XACA-0991-020 [Review] TOCTOU FIX (ported from canonical):
+            # record against $kv_project_sig — the signature captured
+            # ONCE, before this invoke ever started (see the capture site
+            # above) — NEVER a fresh recompute here. $kv_project_needs_probe
+            # mirrors the exact same ignored/non-git test used at capture
+            # time, decided once up-front rather than re-derived post-invoke.
+            # Best-effort and silent — a caching failure never changes
+            # kb-sweep's verdict.
+            if [[ -n "$kv_project_path" ]] && $kv_project_needs_probe && [[ -n "$kv_project_sig" ]]; then
+                _kb_val_mtime_probe_record "$kv_project_path" "$kv_rc" "$kv_project_sig"
             fi
         fi
     fi
@@ -10134,6 +10158,12 @@ _kb_val_probe_hash() {
 # unavailable — callers must treat empty as "cannot compute", i.e. invoke.
 # An empty directory hashes to a fixed sentinel rather than returning
 # empty (it is a real, cacheable state).
+#
+# XACA-0991-020 [Test] correction: uses `${ef:t}` (zsh tail modifier),
+# NOT `$(basename "$ef")` — the latter forks a subshell per file, ~8.5ms
+# x 118 files against the real project tier, which is why this
+# function's earlier "~20ms" cost claim was actually 700-1057ms. Measured
+# after the fix: 34.5-73ms across repeated runs, steady-state ~38ms.
 _kb_val_mtime_signature() {
     setopt LOCAL_OPTIONS NO_NOMATCH
     local root="${1%/}"
@@ -10142,7 +10172,7 @@ _kb_val_mtime_signature() {
     efiles=()
     for ef in "${root}"/*.md; do
         [[ -f "$ef" ]] || continue
-        [[ "$(basename "$ef")" == "INDEX.md" ]] && continue
+        [[ "${ef:t}" == "INDEX.md" ]] && continue
         efiles+=("$ef")
     done
 
@@ -10181,19 +10211,19 @@ _kb_val_probe_cache_file() {
     echo "$(_kb_val_probe_cache_dir)/root-${key:0:16}.state"
 }
 
-# _kb_val_mtime_probe_is_clean <dir> — return 0 (safe to skip) ONLY when
-# the current signature matches a cache record whose recorded result was
-# 0 (the run that produced this signature validated clean, not merely
-# "ran"). A cached FAILURE is never eligible to be skipped — caching
-# "this exact broken tree was examined" would let a persistently
-# malformed entry go unreported on every run after the first. No branch
-# here concludes "clean" from an absence of information.
+# _kb_val_mtime_probe_is_clean <dir> <signature> — return 0 (safe to
+# skip) ONLY when <signature> (caller-supplied, never recomputed here —
+# see the TOCTOU note on _kb_val_mtime_probe_record below) matches a
+# cache record whose recorded result was 0 (the run that produced this
+# signature validated clean, not merely "ran"). A cached FAILURE is
+# never eligible to be skipped — caching "this exact broken tree was
+# examined" would let a persistently malformed entry go unreported on
+# every run after the first. No branch here concludes "clean" from an
+# absence of information.
 _kb_val_mtime_probe_is_clean() {
-    local root="${1%/}"
-    local resolved="${root:A}"
-    local sig
-    sig=$(_kb_val_mtime_signature "$root") || return 1
+    local root="${1%/}" sig="${2-}"
     [[ -n "$sig" ]] || return 1
+    local resolved="${root:A}"
 
     local cache_file
     cache_file=$(_kb_val_probe_cache_file "$resolved") || return 1
@@ -10214,17 +10244,29 @@ _kb_val_mtime_probe_is_clean() {
     return 0
 }
 
-# _kb_val_mtime_probe_record <dir> <result_code> — best-effort atomic
-# persistence of this run's signature + outcome. A write failure is
-# swallowed, never propagated — this is a performance cache, never a
-# correctness dependency.
+# _kb_val_mtime_probe_record <dir> <result_code> <signature> —
+# best-effort atomic persistence of <signature> + <result_code>. A write
+# failure is swallowed, never propagated — this is a performance cache,
+# never a correctness dependency.
+#
+# XACA-0991-020 [Review] TOCTOU FIX — this was the actual reported
+# defect: this function used to recompute the signature itself, INSIDE
+# this call, which every caller invoked strictly AFTER
+# kb-knowledge-validate --changed had already run for ~54-61s. That
+# recompute reads the tree as it exists at RECORD time, not as it
+# existed when the run that earned <result_code> actually STARTED — a
+# file dropped into the tree during that window got folded into the
+# recorded signature and paired with a result code from a run that never
+# scanned it, so the next is_clean call would match it and skip,
+# silently certifying an unscanned file. <signature> is now REQUIRED
+# from the caller — captured once, before the invoke, and threaded
+# through unchanged. A pre-invoke signature paired with a post-invoke
+# result is conservative in the correct direction: any change during the
+# window makes the cached signature stale on the next comparison.
 _kb_val_mtime_probe_record() {
-    local root="${1%/}" result_code="${2-}"
-    [[ -n "$root" && -n "$result_code" ]] || return 0
+    local root="${1%/}" result_code="${2-}" sig="${3-}"
+    [[ -n "$root" && -n "$result_code" && -n "$sig" ]] || return 0
     local resolved="${root:A}"
-    local sig
-    sig=$(_kb_val_mtime_signature "$root") || return 0
-    [[ -n "$sig" ]] || return 0
 
     local cache_file
     cache_file=$(_kb_val_probe_cache_file "$resolved") || return 0
