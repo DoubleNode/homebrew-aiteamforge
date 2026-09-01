@@ -102,11 +102,6 @@ Key: branch_env_map (object)
 ----------------------------------------------------------------------------
 
 Bootstrap behaviour (when config is missing or corrupt):
-    - CORRUPT (file exists but is invalid/structurally broken) → ALWAYS
-      self-heals: writes DEFAULT_TEAMS to the config file, with a backup
-      snapshot of the broken file first (XACA-0457). Unconditional — does not
-      depend on TTY or the opt-in flag below. A corrupt file is an active
-      defect regardless of who is reading it.
     - MISSING (no file at all) → auto-write is opt-in only, via
       $AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1 (XACA-0804). Non-interactive
       callers (hooks, subagents, CI, the LCARS server) are overwhelmingly
@@ -114,6 +109,115 @@ Bootstrap behaviour (when config is missing or corrupt):
       Without the opt-in, the missing path silently falls back to
       DEFAULT_TEAMS in-memory — no write, no stderr noise. Interactive TTY
       sessions still get a human-readable "run init" hint.
+    - CORRUPT — XACA-1029 CHOSEN SEMANTICS (this replaces the pre-XACA-1029
+      "always overwrite in place, unconditionally" behaviour, which twice
+      wiped every overlay-only team, most notably the 10 freelance-<client>-
+      <project> teams that exist ONLY in the per-machine overlay since
+      XACA-0628). load_config() distinguishes TWO structurally different
+      corrupt branches, because they carry different information:
+
+        B1 — hard parse failure (json.loads()/read raises). The bytes are
+             unusable; NO team set is knowable from them.
+        B2 — structural-validity failure (JSON parsed fine, but
+             config_is_structurally_valid() rejects it — e.g. no
+             schema_version, or an empty/academy-alone "teams" dict). The
+             parsed team set IS in hand.
+
+      Both branches apply, in order:
+        (a) Retry with bounded backoff. A single failed parse/validate is
+            not proof of corruption — it may be a concurrent writer caught
+            between the unlink-old and materialize-new steps of an atomic
+            replace, or (empirically, XACA-1029) a 0-byte/short read from a
+            NON-atomic writer. Retry per `_CORRUPT_READ_RETRY_BACKOFF_SECONDS`
+            (a 3-step schedule, ~0.85s worst case — REVIEW ROUND 2 widened
+            this from a single 0.1s retry after an independent action-sweep
+            proof measured a hard cliff above ~120ms, and R13 established
+            real concurrent self-heal bursts on this machine). A success on
+            ANY attempt in the schedule means an earlier read was transient —
+            proceed normally with the fresh data, no heal.
+        (b) Quarantine, never overwrite in place — UNLESS the source has
+            nothing worth quarantining (see the B1 suspect carve-out below).
+            On confirmed corruption (every attempt in the schedule failed),
+            the suspect file is MOVED (os.replace — never copied) to a
+            uniquely-named quarantine path (`<name>.bak-<tag>-<timestamp>-
+            <pid>-<seq>`) before anything is written to config_path. A move
+            cannot race a concurrent reader/writer the way a read-then-copy
+            can, so the quarantine file is guaranteed to hold EXACTLY what
+            was on disk — the original bytes always survive under the
+            quarantine name, never deleted, never truncated in place. The
+            pid+sequence-number suffix prevents two self-heals — whether
+            concurrent PROCESSES (R13: three within 4 seconds observed) or,
+            as important, two quarantine calls from the SAME process within
+            one wall-clock second (a real collision hit writing this
+            module's own test suite) — from overwriting each other's
+            quarantine file.
+        (c) Refuse to reseed when it would REMOVE teams — B2 ONLY. B1 has no
+            team set to compare against (nothing to refuse with — R1), so on
+            B1 the self-heal proceeds to a DEFAULT_TEAMS reseed after
+            (a)+(b) — UNLESS the B1 suspect carve-out below applies. On B2,
+            before reseeding, load_config() computes
+            `lost = teams_keys - set(DEFAULT_TEAMS)` (a SET difference —
+            R10: team COUNT is the wrong signal, since a reseed can INCREASE
+            the total count while destroying every overlay-only team). If
+            `lost` is non-empty, load_config() REFUSES to write: the
+            quarantine step still runs, but DEFAULT_TEAMS is never written
+            to config_path. The in-memory parsed config is returned AS-IS
+            for this process (so a live process does not additionally lose
+            in-memory access to data it already had), a CRITICAL line
+            naming every lost team id is printed to stderr, and the four
+            on-disk self-heal backfill passes below are skipped for this
+            call (they would otherwise quietly re-materialize a fresh file
+            at config_path, defeating "leave it quarantined for a human to
+            inspect"). A human must restore or repair the file manually;
+            nothing here writes DEFAULT_TEAMS over recoverable data.
+        (d) A quarantine/backup file must never SILENTLY read as empty. Two
+            enforcement layers:
+              - Since (b) is a rename rather than a read+copy, a quarantine
+                file's size is definitionally whatever was really on disk —
+                our OWN quarantine step cannot itself truncate it further.
+                If that size is below `_MIN_PLAUSIBLE_REGISTRY_BYTES`, the
+                quarantine filename is tagged `SUSPECT` and a stderr line
+                explains why — loud, not silent.
+              - B1 SUSPECT CARVE-OUT (REVIEW ROUND 2, the direct fix for a
+                gap the round-1 implementation left open): on B1, after the
+                full retry schedule in (a) is exhausted, if the file is ALSO
+                implausibly short (`_file_looks_implausibly_short` — 0 bytes
+                is the exact signature of the incident this ticket exists to
+                fix: 12 zero-byte `.bak-*` files across three separate
+                days), load_config() does NOT quarantine it and does NOT
+                reseed config_path at all. A 0-byte quarantine copy has zero
+                forensic value — it is noise, not evidence — and silently
+                replacing a visibly-broken (0-byte, unreadable) registry
+                with a schema-valid 15-team DEFAULT_TEAMS file is exactly
+                backwards: it hides the loss instead of surfacing it. The
+                file is left completely untouched at config_path (still
+                loudly broken for the next human or tool that looks at it),
+                a CRITICAL line is printed, and the CALLER still receives
+                DEFAULT_TEAMS in memory only, so the process keeps working.
+                With nothing written to config_path, the NEXT load_config()
+                call (this process or a fresh one) takes the MISSING branch
+                per XACA-0804 above, which is itself already opt-in-write-
+                only. This carve-out applies ONLY when the source is BOTH
+                confirmed-corrupt AND implausibly short — a plausibly-sized
+                B1 file that is still genuinely unparseable after the full
+                retry schedule keeps the round-1 behaviour (quarantine +
+                unconditional reseed): there, "recovery is manual, from the
+                quarantine file" genuinely holds, because the quarantine
+                file actually contains something.
+
+      Deliberately NOT implemented here (see XACA-1029 orchestrator notes
+      R16): a "last-known-good" sidecar written on every successful read.
+      That would add a write to the READ path, which XACA-0804 already
+      established must not happen — and it would not help B1 anyway (B1
+      has no in-memory prior state to fall back on within a single call).
+      A separate, out-of-process alarm (XACA-1029-006) owns comparing
+      against a prior snapshot; this module only ever protects against
+      writing DESTRUCTIVE content, it does not attempt to resurrect
+      already-lost bytes. This is also why the B1 suspect carve-out above
+      cannot "recover" the pre-corruption team set even though it refuses to
+      reseed — refusing prevents further, self-inflicted damage; it does
+      not undo damage that already happened to the bytes before this
+      module ever read them.
 
 Module-level side effects
     NONE.  All I/O happens on first function call, not at import time.
@@ -132,10 +236,12 @@ migrate to this module (Wave 3, XACA-0168-006 onwards).  For now both exist.
 from __future__ import annotations
 
 import fcntl
+import itertools
 import json
 import os
 import stat
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -493,6 +599,37 @@ _CONTRACT_SCRUB_ATTEMPTED: bool = False  # once-per-process guard (XACA-0643)
 _BOARD_LESS_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0794)
 _PRIMARY_HOST_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0802)
 
+# XACA-1029 (003/004/005): corrupt-config self-heal safety constants. See the
+# "Bootstrap behaviour" section of the module docstring for the full contract.
+# Module-level (not inline literals) so tests can monkeypatch the schedule to
+# near-zero for speed without changing behaviour.
+#
+# XACA-1029 REVIEW ROUND 2 (Lura Thok): a single-shot 0.1s retry has a hard
+# cliff — measured directly by an independent action-sweep proof: an
+# unreadable window of 120ms or less recovers cleanly, but 200ms+ declares
+# corrupt and fires the destructive reseed path, EVEN THOUGH R13 already
+# established this machine sees concurrent self-heal bursts (three within 4
+# seconds) and several non-atomic writers still exist outside this module's
+# scope (aiteamforge-paths-init.sh, the shell canonical, two bats helpers).
+# A >200ms unreadable window under load is not hypothetical. Widened to a
+# bounded backoff schedule — each entry is a delay before the NEXT attempt,
+# so exhausting the whole schedule costs ~0.85s (capped near 1s total) and
+# the happy path (first read succeeds) pays nothing extra.
+_CORRUPT_READ_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (0.1, 0.25, 0.5)
+# A real team-paths.json is never this small (the smallest real registry —
+# a single minimal team entry — is several hundred bytes; the live baseline
+# is 13256 bytes for 25 teams). Below this floor, a read is far more likely
+# to be a transient/partial view than genuine content (R2).
+_MIN_PLAUSIBLE_REGISTRY_BYTES: int = 200
+# Monotonic per-process counter appended to quarantine filenames (R13). PID +
+# second-resolution timestamp alone can still collide when the SAME process
+# quarantines twice in the same wall-clock second (observed directly while
+# writing this module's own test suite) — os.replace() onto an existing
+# quarantine name would silently clobber the first one, destroying exactly
+# the forensic evidence this contract exists to preserve. A counter makes
+# every call from this process unique regardless of clock resolution.
+_QUARANTINE_SEQ = itertools.count()
+
 SUPPORTED_SCHEMA_VERSION = 3
 
 # Teams that MUST appear in any valid config.  If any are absent the config is
@@ -695,28 +832,25 @@ def _make_default_config() -> dict:
 
 
 def _write_defaults(config_path: Path) -> None:
-    """Write DEFAULT_TEAMS to config_path (non-interactive bootstrap)."""
+    """Write DEFAULT_TEAMS to config_path (non-interactive bootstrap).
+
+    XACA-1029-003/-005: if something still exists at config_path (e.g. this
+    is invoked directly rather than via load_config()'s corrupt-quarantine
+    step, which already moves the suspect file aside before calling here),
+    quarantine it first via the shared helper — MOVE, not read+copy, so the
+    forensic trail can never be a truncated/0-byte artifact of a read race
+    (see module docstring). When load_config() already quarantined the file,
+    config_path.exists() is False here and this is a no-op — no double
+    quarantine, no double backup. The actual write goes through
+    _atomic_write_json (tmp file + os.replace + fsync) rather than a bare
+    write_text (XACA-1029-003).
+    """
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        # Backup-before-write so regressions ALWAYS leave a forensic trail. (XACA-0457)
-        if config_path.exists():
-            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            backup_path = config_path.with_name(f"{config_path.name}.bak-{timestamp}")
-            try:
-                backup_path.write_bytes(config_path.read_bytes())
-                print(
-                    f"[aiteamforge-paths] backup snapshot: {backup_path}",
-                    file=sys.stderr,
-                )
-            except OSError as exc:
-                print(
-                    f"[aiteamforge-paths] WARNING: failed to write backup snapshot {backup_path}: {exc}",
-                    file=sys.stderr,
-                )
-        config_path.write_text(
-            json.dumps(_make_default_config(), indent=2) + "\n",
-            encoding="utf-8",
+        _quarantine_or_snapshot_existing(
+            config_path, tag="pre-write-defaults", label="_write_defaults"
         )
+        _atomic_write_json(config_path, _make_default_config())
     except OSError as exc:
         print(
             f"[aiteamforge-paths] WARNING: could not write default config to "
@@ -761,9 +895,22 @@ def _bootstrap(config_path: Path, corrupt: bool = False) -> dict:
     is opt-in only (read-only must not write; opt-in only — XACA-0804).
     """
     if corrupt:
-        # CORRUPT: unconditional self-heal (XACA-0457), NOT gated by the
-        # opt-in flag — a broken file is an active defect regardless of who's
-        # reading it, and two existing test suites assert this stays unconditional.
+        # CORRUPT: self-heal, NOT gated by the opt-in flag — a broken file is
+        # an active defect regardless of who's reading it. XACA-1029: by the
+        # time _bootstrap(corrupt=True) is reached, load_config() has already
+        # (a) exhausted the retry backoff schedule, (b) quarantined the
+        # suspect file (it no longer exists at config_path), and — on B2
+        # only — (c) refused this call entirely and returned early if
+        # reseeding would remove a known team (see the module docstring's
+        # "Bootstrap behaviour" section). REVIEW ROUND 2: a B1 file that is
+        # ALSO implausibly short never reaches here at all — that carve-out
+        # short-circuits earlier in load_config(), before _bootstrap() is
+        # ever called, because there both quarantine AND reseed are refused.
+        # Reaching here therefore means either a plausibly-sized B1 (no team
+        # set was ever knowable, but the quarantine file holds real bytes) or
+        # a B2 reseed that provably loses nothing. The test suites that
+        # exercise this path now assert THAT (data-preserving-or-refused)
+        # contract, not "unconditional" in the pre-XACA-1029 sense.
         print(
             f"[aiteamforge-paths] Config corrupt at {config_path} — writing defaults (auto-heal)",
             file=sys.stderr,
@@ -802,6 +949,229 @@ def _available_teams_hint(config: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# XACA-1029 (003/004/005) — corrupt-config self-heal safety machinery.
+# See the module docstring's "Bootstrap behaviour" section for the contract
+# these implement. Kept together, and factored once, per R3/R12 (this same
+# ticket's own investigation): three near-identical read+write_bytes backup
+# sites and one bespoke atomic-write reimplementation is exactly the
+# sibling-heuristic-drift shape (k501) that produced the original defect.
+# ---------------------------------------------------------------------------
+
+def _quarantine_or_snapshot_existing(config_path: Path, *, tag: str, label: str) -> Path | None:
+    """MOVE (never copy) whatever currently exists at config_path aside.
+
+    Used both as the "backup snapshot before I overwrite this" step (the
+    three sites XACA-1029-003/R3 identified: _write_defaults,
+    wizard_hook_create_config, and load_config()'s own corrupt-detection
+    branch) and as the "quarantine, don't destroy" step contract part (b)
+    requires. Both needs are the same operation: whatever is at config_path
+    right now must survive, verbatim, under a new name, before anything else
+    touches config_path.
+
+    Why MOVE and not read+write_bytes(): a copy re-reads the source, which
+    can land in the middle of some OTHER writer's non-atomic
+    open-truncate-write and capture a transiently-empty/partial view — this
+    produced the 0-byte ".bak-*" forensic backups from the incident this
+    ticket exists to fix (R2/R3). `os.replace()` performs a filesystem
+    rename: no read of the source content occurs, so there is no window in
+    which our OWN snapshot step can observe (or manufacture) a truncated
+    copy. Whatever is really on disk becomes the quarantine file's content,
+    byte-for-byte, guaranteed.
+
+    The destination name embeds a timestamp, the pid, AND a per-process
+    monotonic sequence number (R13: the real incident showed multiple
+    concurrent processes independently hitting the corrupt branch within
+    seconds of each other; timestamp+pid alone can STILL collide when the
+    SAME process quarantines twice within one wall-clock second — observed
+    directly in this module's own test suite — and os.replace() onto an
+    existing destination silently clobbers it, the exact forensic-evidence
+    loss this contract exists to prevent).
+
+    XACA-0794-009 symlink note: operates on config_path.resolve(), exactly
+    like _atomic_write_json. `os.replace()` on a SYMLINK path itself would
+    move the link, not its target — leaving the real (corrupt) file
+    untouched and un-quarantined while config_path silently goes missing.
+    Resolving first means a symlinked config's underlying file is what gets
+    quarantined, and the symlink itself is left alone to keep pointing at
+    wherever _atomic_write_json subsequently writes the replacement.
+
+    Returns the quarantine path on success, or None if there was nothing to
+    quarantine (config_path does not exist) or the move itself failed (rare;
+    logged loudly, never raised — callers proceed as if there was nothing to
+    snapshot, matching this module's "never raises" contract for callers
+    that are themselves best-effort, like _write_defaults).
+    """
+    if not config_path.exists():
+        return None
+
+    resolved = config_path.resolve()
+
+    try:
+        size = resolved.stat().st_size
+    except OSError:
+        size = -1
+
+    suspect = 0 <= size < _MIN_PLAUSIBLE_REGISTRY_BYTES
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    name_tag = f"SUSPECT-{tag}" if suspect else tag
+    seq = next(_QUARANTINE_SEQ)
+    quarantine_path = resolved.with_name(
+        f"{resolved.name}.bak-{name_tag}-{timestamp}-{os.getpid()}-{seq}"
+    )
+
+    try:
+        os.replace(str(resolved), str(quarantine_path))
+    except OSError as exc:
+        print(
+            f"[aiteamforge-paths] {label}: WARNING: failed to quarantine "
+            f"{resolved} to {quarantine_path}: {exc} — proceeding without "
+            f"a snapshot",
+            file=sys.stderr,
+        )
+        return None
+
+    if suspect:
+        print(
+            f"[aiteamforge-paths] {label}: quarantined {config_path} -> "
+            f"{quarantine_path} (SUSPECT: only {size} bytes — below the "
+            f"{_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte plausibility floor for a "
+            f"real registry; likely itself a transient/partial read that the "
+            f"retry in (a) did not happen to resolve, per XACA-1029 part d)",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[aiteamforge-paths] {label}: quarantined {config_path} -> {quarantine_path}",
+            file=sys.stderr,
+        )
+    return quarantine_path
+
+
+def _file_looks_implausibly_short(config_path: Path) -> bool:
+    """R2/review-round-2: cheap size-only discriminator, checked AFTER every
+    retry attempt is exhausted. A file below `_MIN_PLAUSIBLE_REGISTRY_BYTES`
+    (0 bytes included) that STILL fails to parse/validate after the full
+    backoff schedule is not just "corrupt" — it is corrupt in the specific
+    way that makes a quarantine-and-reseed response actively harmful (see
+    _read_config_with_transient_retry's B1 caller in load_config()): there
+    is nothing in it to quarantine that has any forensic value, and
+    replacing it with a schema-valid DEFAULT_TEAMS file would make a LOUD,
+    visibly-broken registry look silently healthy again.
+    """
+    try:
+        return config_path.stat().st_size < _MIN_PLAUSIBLE_REGISTRY_BYTES
+    except OSError:
+        return False
+
+
+def _read_config_with_transient_retry(config_path: Path) -> tuple[dict | None, bool]:
+    """Read+parse config_path; on failure, retry with bounded backoff before
+    declaring it corrupt.
+
+    Implements contract part (a) for branch B1 (hard parse failure — see
+    module docstring): a single failed read/parse is not proof of
+    corruption. It may be a concurrent writer caught mid-replace, or (R2) a
+    short/0-byte read. Only exhausting the FULL backoff schedule
+    (`_CORRUPT_READ_RETRY_BACKOFF_SECONDS`) with every attempt still failing
+    counts as confirmed corruption.
+
+    XACA-1029 REVIEW ROUND 2: a single 0.1s retry had a measured hard cliff
+    — an independent action-sweep proof showed windows above ~120ms firing
+    the destructive path even though R13 established real concurrent bursts
+    on this machine. The schedule below trades a slightly slower worst case
+    (only paid when the file is ACTUALLY failing to parse — the happy path
+    is unaffected) for materially wider transient-race coverage.
+
+    Returns (config_or_None, confirmed_corrupt):
+      - (dict, False)  — parsed on the first attempt.
+      - (dict, False)  — first attempt failed, but a later retry in the
+                          schedule succeeded (transient race, not corruption
+                          — proceed normally with this freshly re-read data,
+                          do NOT self-heal).
+      - (None, True)   — every attempt in the schedule failed. Genuinely
+                          corrupt (B1). No team set is knowable from these
+                          bytes (R1) — the caller decides between quarantine
+                          (file is at least plausibly-sized — manual
+                          recovery from the quarantine file genuinely holds)
+                          and an in-memory-only refusal (file is also
+                          implausibly short — see _file_looks_implausibly_short
+                          and the module docstring's B1 suspect carve-out).
+                          Part (c) cannot apply on B1 either way.
+    """
+    def _attempt() -> tuple[dict | None, Exception | None]:
+        try:
+            raw = config_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return None, exc
+        try:
+            return json.loads(raw), None
+        except json.JSONDecodeError as exc:
+            return None, exc
+
+    cfg, err = _attempt()
+    if err is None:
+        return cfg, False
+
+    last_err = err
+    total_attempts = len(_CORRUPT_READ_RETRY_BACKOFF_SECONDS) + 1
+    for i, delay in enumerate(_CORRUPT_READ_RETRY_BACKOFF_SECONDS, start=2):
+        print(
+            f"[aiteamforge-paths] transient-read suspect at {config_path} "
+            f"({last_err}) — retrying (attempt {i}/{total_attempts}) after "
+            f"{delay}s before declaring corrupt",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+        cfg, err = _attempt()
+        if err is None:
+            print(
+                f"[aiteamforge-paths] retry succeeded at {config_path} "
+                f"(attempt {i}/{total_attempts}) — transient race, not "
+                f"corruption; proceeding with the re-read config",
+                file=sys.stderr,
+            )
+            return cfg, False
+        last_err = err
+
+    print(
+        f"[aiteamforge-paths] all {total_attempts} attempts failed to parse "
+        f"{config_path} ({last_err}) — confirmed corrupt",
+        file=sys.stderr,
+    )
+    return None, True
+
+
+def _reread_and_revalidate_once(config_path: Path) -> dict | None:
+    """Bounded-backoff retry for a structurally-invalid-but-parseable read (B2).
+
+    Mirrors _read_config_with_transient_retry's spirit (and its
+    _CORRUPT_READ_RETRY_BACKOFF_SECONDS schedule) for the branch where JSON
+    parsed fine but config_is_structurally_valid() rejected it (e.g. a
+    momentary empty "teams": {} skeleton). XACA-1029-003 routes every writer
+    in this module through _atomic_write_json (tmp file + os.replace), so a
+    reader should no longer observe such an intermediate shape from THIS
+    module's own writers — this retry is defense-in-depth against writers
+    outside this module (the shell canonical, a hand-edit, etc).
+
+    Returns the freshly re-read config dict from the FIRST attempt in the
+    schedule that both parses AND passes the structural check, else None
+    once the whole schedule is exhausted (confirmed corrupt — B2).
+    """
+    for delay in _CORRUPT_READ_RETRY_BACKOFF_SECONDS:
+        time.sleep(delay)
+        try:
+            raw = config_path.read_text(encoding="utf-8")
+            cfg = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            continue
+        has_schema = "schema_version" in cfg
+        teams_keys = set(cfg.get("teams", {}).keys())
+        if config_is_structurally_valid(teams_keys, has_schema):
+            return cfg
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Public API — load_config and friends
 # ---------------------------------------------------------------------------
 
@@ -811,8 +1181,13 @@ def load_config() -> dict:
     On missing config: bootstraps (see _bootstrap) — write is opt-in only via
     AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1 (XACA-0804); read-only must not write.
     On unknown schema_version: warns but continues.
-    On corrupt JSON or failed structural-integrity check: bootstraps with an
-    UNCONDITIONAL self-heal write (XACA-0457), regardless of the opt-in flag.
+    On corrupt JSON (B1) or failed structural-integrity check (B2): see the
+    module docstring's "Bootstrap behaviour" section (XACA-1029) for the full
+    contract — bounded-backoff retry, quarantine (never overwrite in place,
+    unless there's nothing worth quarantining — see the B1 suspect
+    carve-out), and on B2 ONLY, refuse the reseed entirely if it would
+    remove a team not present in DEFAULT_TEAMS (a set-difference check,
+    never a count comparison).
 
     Returns a dict with at least {"schema_version": int, "teams": dict}.
     Never raises.
@@ -835,17 +1210,67 @@ def load_config() -> dict:
     # _bootstrap()'s `corrupt` param (corrupt always self-heals; missing is
     # opt-in only via AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE).
     _path_existed_at_start = config_path.exists()
+    # XACA-1029 part (c): set True only on the B2 refuse path (structurally-
+    # invalid read whose reseed would remove known teams). Suppresses the
+    # unconditional _bootstrap() reseed AND the four on-disk self-heal
+    # backfill passes below — both would otherwise re-materialize a fresh
+    # file at config_path, defeating "leave it quarantined for a human."
+    _refused_team_loss = False
+    # XACA-1029 REVIEW ROUND 2: set True only on the B1 SUSPECT refuse path
+    # (confirmed-corrupt AND implausibly short — see _file_looks_implausibly_short).
+    # Same suppression as _refused_team_loss, for the same reason: a suspect
+    # 0-byte/near-empty file has nothing worth quarantining, and silently
+    # replacing it with a schema-valid DEFAULT_TEAMS file would hide a LOUD,
+    # visibly-broken registry behind a healthy-looking one.
+    _b1_suspect_no_reseed = False
 
     if config_path.exists():
-        try:
-            raw = config_path.read_text(encoding="utf-8")
-            config = json.loads(raw)
-        except (json.JSONDecodeError, OSError) as exc:
-            print(
-                f"[aiteamforge-paths] WARNING: could not parse {config_path}: {exc} — using defaults",
-                file=sys.stderr,
-            )
-            config = None
+        # XACA-1029-004(a)/R1 branch B1: a hard parse failure gets a bounded
+        # backoff retry before being declared genuinely corrupt. No team set
+        # is knowable from unparseable bytes, so part (c) cannot apply here —
+        # see module docstring.
+        config, confirmed_corrupt_b1 = _read_config_with_transient_retry(config_path)
+        if config is None and confirmed_corrupt_b1:
+            if _file_looks_implausibly_short(config_path):
+                # XACA-1029 REVIEW ROUND 2 (R2, restated): a confirmed-corrupt
+                # file that is ALSO implausibly short (0 bytes included) is
+                # the exact signature of the incident this ticket exists to
+                # fix — 12 zero-byte `.bak-*` files across three separate
+                # days. There is nothing in it to quarantine that has any
+                # forensic value (a 0-byte quarantine copy of a 0-byte file
+                # is not evidence, it is noise), and reseeding config_path
+                # with a schema-valid DEFAULT_TEAMS file would make a LOUD,
+                # unmistakably-broken registry look silently healthy again —
+                # exactly backwards from what a self-heal should do. Leave
+                # the file EXACTLY as-is (no quarantine, no write) so it
+                # keeps screaming "broken" at the next human or tool that
+                # looks at it, and hand this process DEFAULT_TEAMS in memory
+                # only, so it keeps functioning without touching disk.
+                print(
+                    f"[aiteamforge-paths] CRITICAL: {config_path} is confirmed "
+                    f"corrupt AND implausibly short "
+                    f"(< {_MIN_PLAUSIBLE_REGISTRY_BYTES} bytes) — refusing to "
+                    f"quarantine or reseed. A near-empty file has nothing "
+                    f"recoverable to preserve, and overwriting it with "
+                    f"DEFAULT_TEAMS would silently hide a visibly-broken "
+                    f"registry. Returning DEFAULT_TEAMS in memory for THIS "
+                    f"process only — no disk write. The file is left "
+                    f"untouched at {config_path}; a human must inspect and "
+                    f"restore it manually.",
+                    file=sys.stderr,
+                )
+                config = _make_default_config()
+                _b1_suspect_no_reseed = True
+            else:
+                _quarantine_or_snapshot_existing(
+                    config_path, tag="corrupt-unparseable", label="corrupt-config (B1)"
+                )
+                # config stays None -> falls through to the unconditional
+                # _bootstrap() reseed below. config_path no longer exists (it
+                # was just quarantined), so _write_defaults's own quarantine
+                # attempt is a no-op — no double-quarantine, no double backup.
+                # The manual-recovery-from-quarantine rationale genuinely
+                # holds here: the file was at least plausibly-sized.
 
     # Schema-integrity check (XACA-0457) — catch partial-write corruption where
     # JSON is technically valid but the config is missing required teams or the
@@ -861,34 +1286,88 @@ def load_config() -> dict:
         # consumer installs that have no academy team in their overlay).
         missing_required, has_non_required = teams_satisfy_canonical_guard(teams_keys)
         if not config_is_structurally_valid(teams_keys, has_schema):
-            print(
-                f"[aiteamforge-paths] WARNING: {config_path} appears corrupt "
-                f"(has_schema_version={has_schema}, missing_required={sorted(missing_required)}, "
-                f"has_non_required_team={has_non_required}) — bootstrapping defaults",
-                file=sys.stderr,
-            )
-            # Snapshot the corrupt file BEFORE nulling config — _bootstrap may
-            # take the interactive-TTY path and skip _write_defaults, leaving
-            # the corrupt file on disk without a forensic trail.  (XACA-0457-012)
-            if config_path.exists():
-                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                backup_path = config_path.with_name(
-                    f"{config_path.name}.bak-{timestamp}"
+            # XACA-1029-004(a)/R1 branch B2: JSON parsed fine, but the
+            # structural predicate rejected it. One bounded retry (defense in
+            # depth against non-atomic writers OUTSIDE this module — every
+            # writer inside this module is now atomic, XACA-1029-003) before
+            # declaring corrupt.
+            retried = _reread_and_revalidate_once(config_path)
+            if retried is not None:
+                print(
+                    f"[aiteamforge-paths] retry succeeded at {config_path} — "
+                    f"transient structural-invalid read, not corruption; "
+                    f"proceeding with the re-read config",
+                    file=sys.stderr,
                 )
-                try:
-                    backup_path.write_bytes(config_path.read_bytes())
-                    print(
-                        f"[aiteamforge-paths] backup snapshot (corrupt config): {backup_path}",
-                        file=sys.stderr,
-                    )
-                except OSError as exc:
-                    print(
-                        f"[aiteamforge-paths] WARNING: failed to write backup snapshot {backup_path}: {exc}",
-                        file=sys.stderr,
-                    )
-            config = None
+                config = retried
+            else:
+                print(
+                    f"[aiteamforge-paths] WARNING: {config_path} appears corrupt "
+                    f"(has_schema_version={has_schema}, missing_required={sorted(missing_required)}, "
+                    f"has_non_required_team={has_non_required}) — bootstrapping defaults",
+                    file=sys.stderr,
+                )
 
-    if config is None:
+                # XACA-1029-004(c)/R1/R10: on B2 the parsed team set IS known —
+                # refuse to reseed if doing so would REMOVE any of them. SET
+                # difference, never a count comparison (R10: a reseed can
+                # INCREASE the total team count while destroying every
+                # overlay-only team).
+                reseed_would_lose = teams_keys - set(DEFAULT_TEAMS.keys())
+                if reseed_would_lose:
+                    quarantine_path = _quarantine_or_snapshot_existing(
+                        config_path,
+                        tag="REFUSED-teamloss",
+                        label="corrupt-config (B2, refused)",
+                    )
+                    print(
+                        f"[aiteamforge-paths] CRITICAL: refusing to reseed "
+                        f"{config_path} — doing so would permanently remove "
+                        f"{len(reseed_would_lose)} team(s) not present in "
+                        f"DEFAULT_TEAMS: {sorted(reseed_would_lose)}. Original "
+                        f"quarantined at {quarantine_path}. A human must "
+                        f"restore or repair the config manually — no reseed "
+                        f"was written.",
+                        file=sys.stderr,
+                    )
+                    _refused_team_loss = True
+                    # `config` already holds the parsed (structurally-invalid
+                    # by schema only, but DATA-INTACT) dict — return it as-is
+                    # for this process rather than discarding it. Falling
+                    # through to _bootstrap() would perform, in memory, the
+                    # exact data loss we just refused to write to disk.
+                    #
+                    # XACA-1029-015 (PR #801 review): "structurally invalid"
+                    # has TWO triggers (config_is_structurally_valid) — a
+                    # missing schema_version is one of them. So the dict we
+                    # are about to hand back can legitimately lack that key,
+                    # which would contradict this function's own documented
+                    # contract ("Returns a dict with at least
+                    # {schema_version: int, teams: dict}"). Every caller today
+                    # uses .get(), so nothing breaks now — but a future caller
+                    # that trusts the docstring would KeyError, and the
+                    # refusal path is exactly the rare branch nobody exercises
+                    # by hand. Back-fill the key rather than weaken the
+                    # contract; the TEAM DATA (the thing we refused to
+                    # destroy) is untouched by this.
+                    if "schema_version" not in config:
+                        config["schema_version"] = SUPPORTED_SCHEMA_VERSION
+                        print(
+                            f"[aiteamforge-paths] corrupt-config (B2, refused): "
+                            f"the preserved config had no schema_version — "
+                            f"back-filling {SUPPORTED_SCHEMA_VERSION} IN MEMORY "
+                            f"ONLY so the documented return contract holds. "
+                            f"{config_path} on disk is unchanged (quarantined); "
+                            f"this does not repair the file.",
+                            file=sys.stderr,
+                        )
+                else:
+                    _quarantine_or_snapshot_existing(
+                        config_path, tag="corrupt-structural", label="corrupt-config (B2)"
+                    )
+                    config = None
+
+    if config is None and not (_refused_team_loss or _b1_suspect_no_reseed):
         # XACA-0804: corrupt (file existed, failed to load/validate) always
         # self-heals; missing (no file ever existed) is opt-in only. See
         # _bootstrap()'s docstring for the full rationale.
@@ -917,46 +1396,58 @@ def load_config() -> dict:
         )
         config["teams"] = DEFAULT_TEAMS
 
-    # Contract scrub (XACA-0643) — self-heal configs written before XACA-0643,
-    # which seeded bare parameterized-template keys ("medical", "freelance").
-    # Those keys are contract violations that lcars-ui/server.py drops with a
-    # loud warning on every read; removing them here stops the noise on existing
-    # machines. Flag-flipped BEFORE the call (same once-per-process discipline
-    # as the A.1 backfill below). Runs first so the backfill operates on the
-    # already-cleaned team set.
-    if not _CONTRACT_SCRUB_ATTEMPTED:
-        _CONTRACT_SCRUB_ATTEMPTED = True
-        maybe_scrubbed = _scrub_contract_violating_keys_on_disk(config_path, config)
-        if maybe_scrubbed is not None:
-            config = maybe_scrubbed
+    # XACA-1029-004(c): none of the four self-heal passes below may run when
+    # we just REFUSED to reseed a team-losing B2 corrupt file, OR refused a
+    # B1 suspect (implausibly short) corrupt file. In the B2 case config_path
+    # was quarantined (moved away); in the B1-suspect case it was left
+    # completely untouched. Either way, these passes would otherwise write a
+    # FRESH file back to config_path from the in-memory config, silently
+    # re-materializing exactly what the refusal was meant to prevent ("leave
+    # it quarantined/untouched for a human to inspect"). Deliberately NOT
+    # flipping the _ATTEMPTED flags here either: if this same long-lived
+    # process calls load_config() again later after a human restores the
+    # file, these passes must still be free to run then.
+    if not (_refused_team_loss or _b1_suspect_no_reseed):
+        # Contract scrub (XACA-0643) — self-heal configs written before XACA-0643,
+        # which seeded bare parameterized-template keys ("medical", "freelance").
+        # Those keys are contract violations that lcars-ui/server.py drops with a
+        # loud warning on every read; removing them here stops the noise on existing
+        # machines. Flag-flipped BEFORE the call (same once-per-process discipline
+        # as the A.1 backfill below). Runs first so the backfill operates on the
+        # already-cleaned team set.
+        if not _CONTRACT_SCRUB_ATTEMPTED:
+            _CONTRACT_SCRUB_ATTEMPTED = True
+            maybe_scrubbed = _scrub_contract_violating_keys_on_disk(config_path, config)
+            if maybe_scrubbed is not None:
+                config = maybe_scrubbed
 
-    # A.1 backfill (XACA-0522) — flag-flipped BEFORE the call so even a failed
-    # disk write doesn't cause a second lock attempt within the same process.
-    if not _A1_BACKFILL_ATTEMPTED:
-        _A1_BACKFILL_ATTEMPTED = True
-        maybe_upgraded = _backfill_a1_fields_on_disk(config_path, config)
-        if maybe_upgraded is not None:
-            config = maybe_upgraded
+        # A.1 backfill (XACA-0522) — flag-flipped BEFORE the call so even a failed
+        # disk write doesn't cause a second lock attempt within the same process.
+        if not _A1_BACKFILL_ATTEMPTED:
+            _A1_BACKFILL_ATTEMPTED = True
+            maybe_upgraded = _backfill_a1_fields_on_disk(config_path, config)
+            if maybe_upgraded is not None:
+                config = maybe_upgraded
 
-    # Board-less marker backfill (XACA-0794) — self-heal overlays whose board-less
-    # teams carry a bare `"kanban_dir": null` with no explanation. Runs LAST so it
-    # operates on the already-scrubbed + already-backfilled team set. Same
-    # once-per-process flag discipline as the two passes above.
-    if not _BOARD_LESS_BACKFILL_ATTEMPTED:
-        _BOARD_LESS_BACKFILL_ATTEMPTED = True
-        maybe_marked = _backfill_board_less_markers_on_disk(config_path, config)
-        if maybe_marked is not None:
-            config = maybe_marked
+        # Board-less marker backfill (XACA-0794) — self-heal overlays whose board-less
+        # teams carry a bare `"kanban_dir": null` with no explanation. Runs LAST so it
+        # operates on the already-scrubbed + already-backfilled team set. Same
+        # once-per-process flag discipline as the two passes above.
+        if not _BOARD_LESS_BACKFILL_ATTEMPTED:
+            _BOARD_LESS_BACKFILL_ATTEMPTED = True
+            maybe_marked = _backfill_board_less_markers_on_disk(config_path, config)
+            if maybe_marked is not None:
+                config = maybe_marked
 
-    # primary_host backfill (XACA-0802) — the overlay on every existing machine
-    # predates the field, so without this pass the shell host-affinity guard
-    # would see "no declared host" for the PII teams forever and fail open
-    # forever. Runs after the passes above so it operates on the final team set.
-    if not _PRIMARY_HOST_BACKFILL_ATTEMPTED:
-        _PRIMARY_HOST_BACKFILL_ATTEMPTED = True
-        maybe_hosted = _backfill_primary_host_on_disk(config_path, config)
-        if maybe_hosted is not None:
-            config = maybe_hosted
+        # primary_host backfill (XACA-0802) — the overlay on every existing machine
+        # predates the field, so without this pass the shell host-affinity guard
+        # would see "no declared host" for the PII teams forever and fail open
+        # forever. Runs after the passes above so it operates on the final team set.
+        if not _PRIMARY_HOST_BACKFILL_ATTEMPTED:
+            _PRIMARY_HOST_BACKFILL_ATTEMPTED = True
+            maybe_hosted = _backfill_primary_host_on_disk(config_path, config)
+            if maybe_hosted is not None:
+                config = maybe_hosted
 
     _CONFIG_CACHE = config
     _CONFIG_PATH_AT_LOAD = config_path_str
@@ -2585,25 +3076,14 @@ def wizard_hook_create_config(teams_dict: dict, force: bool = False) -> bool:
     }
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        # Backup-before-write so future regressions ALWAYS leave a forensic trail. (XACA-0457)
-        if config_path.exists():
-            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            backup_path = config_path.with_name(f"{config_path.name}.bak-{timestamp}")
-            try:
-                backup_path.write_bytes(config_path.read_bytes())
-                print(
-                    f"[aiteamforge-paths] backup snapshot: {backup_path}",
-                    file=sys.stderr,
-                )
-            except OSError as exc:
-                print(
-                    f"[aiteamforge-paths] WARNING: failed to write backup snapshot {backup_path}: {exc}",
-                    file=sys.stderr,
-                )
-        config_path.write_text(
-            json.dumps(config, indent=2) + "\n",
-            encoding="utf-8",
+        # XACA-1029-003/-005: quarantine (MOVE, never read+copy) whatever
+        # exists before overwriting, then write atomically. See
+        # _quarantine_or_snapshot_existing's docstring for why a move is
+        # required rather than the old read+write_bytes copy.
+        _quarantine_or_snapshot_existing(
+            config_path, tag="pre-wizard-overwrite", label="wizard_hook_create_config"
         )
+        _atomic_write_json(config_path, config)
         # Invalidate cache so the next load_config() re-reads the file
         _CONFIG_CACHE = None
         _CONFIG_PATH_AT_LOAD = None

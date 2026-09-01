@@ -522,6 +522,13 @@ class TestLoadConfigCanonicalGuardXACA0647(unittest.TestCase):
         # Stash any existing AITEAMFORGE_CONFIG so we can restore it.
         self._orig_env = os.environ.get("AITEAMFORGE_CONFIG")
         os.environ["AITEAMFORGE_CONFIG"] = self._config_path
+        # XACA-1029 REVIEW ROUND 2: the corrupt-config retry backoff schedule
+        # is real time.sleep() (0.1s/0.25s/0.5s, ~0.85s worst case) — several
+        # tests in this class deliberately write B2 (structurally-invalid)
+        # fixtures that exercise it. Drop it to near-zero for test speed;
+        # restored in tearDown.
+        self._orig_retry_backoff = aiteamforge_paths._CORRUPT_READ_RETRY_BACKOFF_SECONDS
+        aiteamforge_paths._CORRUPT_READ_RETRY_BACKOFF_SECONDS = (0.01, 0.01, 0.01)
 
     def tearDown(self):
         """Reset module caches and restore env after each test."""
@@ -530,6 +537,7 @@ class TestLoadConfigCanonicalGuardXACA0647(unittest.TestCase):
             os.environ.pop("AITEAMFORGE_CONFIG", None)
         else:
             os.environ["AITEAMFORGE_CONFIG"] = self._orig_env
+        aiteamforge_paths._CORRUPT_READ_RETRY_BACKOFF_SECONDS = self._orig_retry_backoff
         # Clean up temp files (non-fatal on Windows).
         import shutil
         try:
@@ -609,12 +617,26 @@ class TestLoadConfigCanonicalGuardXACA0647(unittest.TestCase):
         self.assertEqual(set(teams.keys()), {"academy", "legal-coparenting"})
 
     # ── CORRUPT configs (must trigger bootstrap → DEFAULT_TEAMS) ─────────────
+    #
+    # XACA-1029: these B2 (structurally-invalid-but-parseable) fixtures all
+    # share one property — every team they contain (here: none, or academy
+    # alone) is already a SUBSET of DEFAULT_TEAMS. XACA-1029-004(c)'s refuse
+    # guard is `teams_keys - set(DEFAULT_TEAMS) != {}` (a strict SET
+    # difference — see aiteamforge_paths.py module docstring), which is
+    # empty for every fixture below, so the reseed proceeds exactly as
+    # before. The direct regression test for the REFUSE path (a config
+    # holding a team NOT in DEFAULT_TEAMS, e.g. freelance-*) lives in
+    # tests/test_xaca1029_corrupt_selfheal_repro.py, not here — these tests
+    # additionally now assert the NEW quarantine-via-move mechanics (part b)
+    # that replaced the old read+write_bytes backup copy.
 
     def test_corrupt_academy_alone_is_reseeded(self):
         """academy as the ONLY team is the partial-write corruption signature.
 
         load_config() must detect this and bootstrap → DEFAULT_TEAMS which
-        includes 'ios' (and all other canonical teams).
+        includes 'ios' (and all other canonical teams). XACA-1029: also
+        verifies the corrupt original was quarantined (moved aside, never
+        deleted) rather than left in place or destructively overwritten.
         """
         self._write_config({"academy": _minimal_team_entry("academy")})
 
@@ -631,8 +653,28 @@ class TestLoadConfigCanonicalGuardXACA0647(unittest.TestCase):
             "Re-seeded config must contain more than one team (full DEFAULT_TEAMS)",
         )
 
+        # XACA-1029-004(b): the original academy-alone content must survive,
+        # verbatim, under a quarantine name — never silently discarded.
+        quarantine_files = sorted(Path(self._tmp).glob("team-paths.json.bak-*"))
+        self.assertEqual(
+            len(quarantine_files), 1,
+            f"expected exactly one quarantine file, found {quarantine_files}",
+        )
+        quarantined = json.loads(quarantine_files[0].read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(quarantined.get("teams", {}).keys()), {"academy"},
+            "the quarantine file must preserve the exact pre-reseed content",
+        )
+
     def test_corrupt_empty_teams_is_reseeded(self):
-        """Empty teams dict is corrupt — load_config() must bootstrap DEFAULT_TEAMS."""
+        """Empty teams dict is corrupt — load_config() must bootstrap DEFAULT_TEAMS.
+
+        XACA-1029: an empty teams dict carries no team-id information to
+        protect, so the part (c) refuse-guard is a no-op here (the set
+        difference against DEFAULT_TEAMS is trivially empty) — the reseed
+        proceeds. Also verifies the empty original was quarantined (moved),
+        not silently discarded, per part (b).
+        """
         self._write_config({})
 
         result = aiteamforge_paths.load_config()
@@ -643,6 +685,14 @@ class TestLoadConfigCanonicalGuardXACA0647(unittest.TestCase):
             "Empty-teams config must be re-seeded with DEFAULT_TEAMS (ios expected)",
         )
         self.assertGreater(len(teams), 1)
+
+        quarantine_files = sorted(Path(self._tmp).glob("team-paths.json.bak-*"))
+        self.assertEqual(
+            len(quarantine_files), 1,
+            f"expected exactly one quarantine file, found {quarantine_files}",
+        )
+        quarantined = json.loads(quarantine_files[0].read_text(encoding="utf-8"))
+        self.assertEqual(quarantined.get("teams", {}), {})
 
     def test_custom_team_only_no_academy_is_preserved(self):
         """XACA-0705 regression: a config with a custom non-academy team but NO
@@ -728,7 +778,16 @@ class TestLoadConfigCanonicalGuardXACA0647(unittest.TestCase):
         )
 
     def test_corrupt_missing_schema_version_is_reseeded(self):
-        """A config without schema_version (partial-write) is corrupt and re-seeded."""
+        """A config without schema_version (partial-write) is corrupt and re-seeded.
+
+        XACA-1029: this is the SAME defect shape as the original incident
+        (R10) — a parseable file missing schema_version — but this fixture's
+        teams ({academy, ios}) are both already in DEFAULT_TEAMS, so the
+        part (c) refuse-guard's set difference is empty and the reseed is
+        non-destructive. For the fixture that DOES hold an overlay-only team
+        (e.g. freelance-*) and must trigger a REFUSAL instead, see
+        tests/test_xaca1029_corrupt_selfheal_repro.py::test_missing_schema_version_with_overlay_only_teams_refuses_to_reseed.
+        """
         # Write raw JSON without schema_version — bypass _write_config's wrapper.
         cfg = {
             "teams": {
@@ -748,6 +807,17 @@ class TestLoadConfigCanonicalGuardXACA0647(unittest.TestCase):
             "Bootstrapped config must carry SUPPORTED_SCHEMA_VERSION",
         )
         self.assertIn("ios", teams)
+
+        # XACA-1029-004(b): the pre-reseed content (academy+ios, no
+        # schema_version) must have been quarantined, not discarded.
+        quarantine_files = sorted(Path(self._tmp).glob("team-paths.json.bak-*"))
+        self.assertEqual(
+            len(quarantine_files), 1,
+            f"expected exactly one quarantine file, found {quarantine_files}",
+        )
+        quarantined = json.loads(quarantine_files[0].read_text(encoding="utf-8"))
+        self.assertNotIn("schema_version", quarantined)
+        self.assertEqual(set(quarantined.get("teams", {}).keys()), {"academy", "ios"})
 
     # ── VALID single non-personal team configs (XACA-0647 Task 005) ─────────
 
