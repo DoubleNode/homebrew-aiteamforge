@@ -489,40 +489,69 @@
 
     /**
      * Classify an interaction target into a sound type ('nav' | 'alert' |
-     * 'action'), or null if it doesn't map to a sound. Shared by both the
-     * pointerdown and click delegates below so the closest() branches exist
-     * in exactly one place instead of being duplicated per listener.
+     * 'action') AND the matched container element, or null if it doesn't
+     * map to a sound. Shared by the pointerdown, keydown, and click
+     * delegates below so the closest() branches exist in exactly one place
+     * instead of being duplicated per listener.
+     *
+     * Returning the container (not just the type) is what lets the dedupe
+     * guard below compare "did this event resolve to the same LOGICAL
+     * control" instead of raw e.target identity (XACA-1022-016/017): a DOM
+     * mutation/retarget between pointerdown and its trailing click (a
+     * hover-swapped icon, a node replaced under the pointer), or a `<label
+     * for>` whose associated control click lands on a different node,
+     * still resolves to the same container via closest(), so the guard
+     * survives it instead of false-double-playing or wrongly swallowing.
      */
-    function _classifySound(target) {
+    function _classifyMatch(target) {
+        var container;
+
         // Nav sounds — sidebar navigation
-        if (
+        container =
             target.closest('.sidebar-button') ||
             target.closest('.sidebar-submenu-item') ||
             target.closest('.analytics-page-pill') ||   // Fleet Monitor: analytics page-nav pills
-            target.closest('.sidebar-link')             // Fleet Monitor: dashboard-switcher links
-        ) {
-            return 'nav';
+            target.closest('.sidebar-link');             // Fleet Monitor: dashboard-switcher links
+        if (container) {
+            return { type: 'nav', container: container };
         }
 
         // Alert sounds — status changes and priority/category/tag clickables
-        if (
+        container =
             target.closest('.status-btn') ||
             target.closest('.status-indicator') ||
             target.closest('[data-priority]') ||
             target.closest('[data-category]') ||
             target.closest('[data-tag]') ||
             target.closest('.candy-pill:not([data-candy])') ||  // Fleet Monitor: interactive pills only — metric display pills carry data-candy (XACA-0533 review)
-            target.closest('#sound-toggle')
-        ) {
+            target.closest('#sound-toggle');
+        if (container) {
             // sound-toggle is handled by toggleMute directly; skip double-play
             if (target.closest('#sound-toggle')) {
                 return null;
             }
-            return 'alert';
+            return { type: 'alert', container: container };
         }
 
         // Action sounds — cards, toggles, general buttons
-        if (
+        //
+        // XACA-1022-015: `.legend-pill` is normalized to 'action' here for
+        // BOTH engine copies. Fleet Monitor previously ALSO listed it in the
+        // alert-group condition above (XACA-0963), which meant the SAME
+        // visual pill sounded 'alert' on Fleet Monitor and 'action' on the
+        // lcars-ui cockpit — a real cross-surface auditory inconsistency.
+        // Per this file's own documented group semantics (alert = status
+        // changes and priority/category/tag clickables; action = cards,
+        // toggles, general buttons), the pills this affects (SETTINGS /
+        // ADMIN / SOUND on Fleet Monitor; TEAM / KANBAN / DATA / VIEWSCREEN
+        // on the cockpit) are general buttons, not status changes — so
+        // 'action' is the correct target and the XACA-0963 alert-group line
+        // is removed rather than kept. This is a user-perceptible behaviour
+        // change on Fleet Monitor: those three pills go alert -> action.
+        // This is also now the ONLY `.legend-pill` check in either file —
+        // it was previously unreachable dead code in fleet-monitor because
+        // the alert-group condition, evaluated first, always won.
+        container =
             target.closest('.kanban-card') ||
             target.closest('.card') ||
             target.closest('.legend-pill') ||
@@ -531,12 +560,21 @@
             target.closest('.summary-card') ||          // Fleet Monitor: overview summary cards
             target.closest('.btn-lcars') ||             // Fleet Monitor: LCARS-styled buttons
             target.closest('.lcars-button') ||          // Fleet Monitor: settings CLASSIC UI button
-            target.closest('.kiosk-fab')                // Fleet Monitor: kiosk mode FAB
-        ) {
-            return 'action';
+            target.closest('.kiosk-fab');                // Fleet Monitor: kiosk mode FAB
+        if (container) {
+            return { type: 'action', container: container };
         }
 
         return null;
+    }
+
+    /**
+     * Thin wrapper over _classifyMatch for callers that only need the sound
+     * type, not the matched container.
+     */
+    function _classifySound(target) {
+        var match = _classifyMatch(target);
+        return match ? match.type : null;
     }
 
     // XACA-1022: press/click dedupe guard.
@@ -560,16 +598,32 @@
     // second press. Either way it's a race against real input timing, not a
     // deterministic fact about the DOM.
     //
-    // Chosen: remember the exact target `pointerdown` played for. A `click`
-    // is only ever treated as "already played" when its target is IDENTICAL
-    // (===) to the pointerdown's target — we check the causal relationship
-    // instead of guessing at it from timing. The guard is consumed (cleared)
-    // the instant ANY click is evaluated against it, whether or not it
-    // matched, so it can never persist forward to swallow a later, unrelated
-    // click. `pointercancel` (browser takes the gesture over as a scroll/pan)
-    // also clears it directly, for the case where no click ever follows.
+    // XACA-1022-016/017: originally this guard compared raw `e.target`
+    // IDENTITY between pointerdown and click. Two failure modes fall out of
+    // that: (1) a DOM mutation/retarget between the two events (a
+    // hover-swapped icon, a node replaced under the pointer) hands the click
+    // a DIFFERENT target object for the SAME physical press, causing a false
+    // double-play; (2) a mouse pointerdown followed by release OUTSIDE the
+    // pressed element fires neither a matching click NOR pointercancel, so
+    // the guard could stay armed on that element indefinitely and later
+    // swallow an unrelated, real click on it (most concerningly a keyboard
+    // activation, which never gets its sound as a result).
+    //
+    // Chosen: remember the matched CONTAINER — the element `_classifyMatch`'s
+    // winning closest() call returned — not the raw event target. A click's
+    // own container, computed the same way, only counts as "already played"
+    // when it is IDENTICAL (===) to the pending container: this survives a
+    // same-press retarget because both events resolve through the same
+    // closest() selector to the same logical control. The guard is consumed
+    // (cleared) the instant ANY click is evaluated against it, whether or
+    // not it matched, so it can never persist forward to swallow a later,
+    // unrelated click. `pointercancel` (browser takes the gesture over as a
+    // scroll/pan) clears it directly for the case where no click ever
+    // follows; `pointerup` landing on a DIFFERENT container closes the
+    // remaining gap — a press that ends elsewhere, with neither a matching
+    // click nor a pointercancel ever coming (XACA-1022-017).
     var _pendingPointerId = null;
-    var _pendingPointerTarget = null;
+    var _pendingContainer = null;
 
     document.addEventListener('pointerdown', function (e) {
         if (_muted) { return; }
@@ -579,8 +633,8 @@
         // secondary touch points (multi-touch) stay silent.
         if (e.button !== 0 || !e.isPrimary) { return; }
 
-        var type = _classifySound(e.target);
-        if (!type) { return; }
+        var match = _classifyMatch(e.target);
+        if (!match) { return; }
 
         // XACA-1022-003: fire immediately rather than waiting to see whether
         // the gesture turns into a scroll/pan — that wait IS the latency
@@ -593,7 +647,7 @@
         // (below) tells us the gesture became a scroll, the tone has already
         // started. We accept this: it's strictly narrower than "any swipe
         // beeps" (a swipe starting on empty background never matches
-        // _classifySound and stays silent, before and after this change),
+        // _classifyMatch and stays silent, before and after this change),
         // and closing it fully would mean delaying every press to disambiguate
         // tap-from-scroll — defeating the point of this ticket.
         //
@@ -605,10 +659,44 @@
         // could silence it early, but that's a change to the audio pipeline
         // and belongs with 006/007, not here.
         _pendingPointerId = e.pointerId;
-        _pendingPointerTarget = e.target;
+        _pendingContainer = match.container;
 
-        LCARSSound.play(type);
+        LCARSSound.play(match.type);
     }, true); // capture phase — mirrors the click delegate below
+
+    document.addEventListener('pointerup', function (e) {
+        // XACA-1022-017: a mouse pointerdown followed by release OUTSIDE the
+        // pressed element (drag-away) fires neither a matching `click` (the
+        // browser only fires `click` when press and release resolve to the
+        // same target, or a shared ancestor) NOR `pointercancel` (the
+        // browser never took the gesture over as a scroll/pan). Left alone,
+        // the guard armed by that pointerdown would stay set indefinitely
+        // and could later swallow an unrelated, real click — most
+        // concerningly a keyboard Enter/Space activation of that SAME
+        // element, silently dropping a real keyboard sound.
+        //
+        // Only act if this pointerup belongs to the pointer that armed the
+        // guard, and only clear when it resolves to a DIFFERENT container
+        // than the one pending.
+        //
+        // Do NOT clear unconditionally here: `click` fires AFTER `pointerup`
+        // for the SAME gesture (spec order is pointerdown -> pointerup ->
+        // click), so an unconditional clear on every pointerup would erase
+        // the guard before its own matching click ever arrives, defeating
+        // the dedupe entirely and double-playing every normal press. This
+        // ordering is reasoned from the event-order spec, not observed on a
+        // real device in this environment — see the test suite's "what
+        // remains unverified" note before "simplifying" this into an
+        // unconditional clear.
+        if (_pendingPointerId === null || e.pointerId !== _pendingPointerId) { return; }
+
+        var match = _classifyMatch(e.target);
+        var upContainer = match ? match.container : null;
+        if (upContainer === _pendingContainer) { return; }
+
+        _pendingPointerId = null;
+        _pendingContainer = null;
+    }, true);
 
     document.addEventListener('pointercancel', function (e) {
         // Gesture was taken over by the browser (scroll/pan) or otherwise
@@ -617,32 +705,79 @@
         // rationale comment above).
         if (e.pointerId === _pendingPointerId) {
             _pendingPointerId = null;
-            _pendingPointerTarget = null;
+            _pendingContainer = null;
         }
     }, true);
 
-    document.addEventListener('click', function (e) {
+    // XACA-1022-014: some role="button" elements invoke their handler
+    // DIRECTLY from onkeydown and never produce a native `click` event at
+    // all — lcars-ui's #usage-toggle (index.html, onkeydown calls
+    // switchSection('usage') directly) and Fleet Monitor's
+    // NAV_SELECTOR-bound settings/admin/offline pills (lcars-fleet-core.js
+    // binds a keydown listener that calls self.switchSection(...) directly,
+    // never .click()). The click fallback below never sees those
+    // activations, so keyboard users get zero sound from them. This
+    // listener plays directly on Enter/Space for anything that classifies,
+    // closing that gap.
+    //
+    // Many SIBLING pills instead call `this.click()` from their own
+    // onkeydown handler (verified in lcars-ui/index.html's mode-pill
+    // markup), which DOES still dispatch a real `click` right after this
+    // listener runs — capture-phase listeners registered on `document` run
+    // before any bubble/target-phase handler on the event's target,
+    // including an inline `onkeydown` attribute, so this listener always
+    // sees the keydown first. Without a guard that would double-play
+    // (keydown sound, then the resulting click's sound). This arms the SAME
+    // container guard the pointerdown path uses, so the click delegate
+    // below dedupes the trailing click exactly as it would a pointerdown's.
+    document.addEventListener('keydown', function (e) {
         if (_muted) { return; }
+        if (e.repeat) { return; } // ignore key-repeat while held
+        if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') { return; }
 
+        var match = _classifyMatch(e.target);
+        if (!match) { return; }
+
+        _pendingPointerId = null; // no pointer gesture is in flight — this IS the activation
+        _pendingContainer = match.container;
+
+        LCARSSound.play(match.type);
+    }, true);
+
+    document.addEventListener('click', function (e) {
         var target = e.target;
 
-        // XACA-1022: consume the dedupe guard unconditionally — this is the
-        // one and only click evaluated against whatever pointerdown last set
-        // it. If the target matches, that pointerdown already played the
-        // sound for this interaction; skip it here.
-        var wasPointerHandled = (_pendingPointerTarget !== null && _pendingPointerTarget === target);
+        // XACA-1022-019: consume the dedupe guard BEFORE the `_muted` early
+        // return below, not after. The guard's rationale comment above
+        // states the invariant as "consumed the instant ANY click is
+        // evaluated against it, whether or not it matched" — that has to
+        // include a click evaluated while muted, or the invariant is false
+        // in code even though the comment states it. Previously `_muted`
+        // was checked first, so a click evaluated while muted left the
+        // guard armed, contradicting that invariant. Unreachable today (the
+        // only mute-toggle path, #sound-toggle, never arms the guard —
+        // `_classifyMatch` returns null for it) but fixed for
+        // defense-in-depth in case a future mute-toggle path is added.
+        var pendingContainer = _pendingContainer;
         _pendingPointerId = null;
-        _pendingPointerTarget = null;
+        _pendingContainer = null;
+
+        if (_muted) { return; }
+
+        // XACA-1022-016: dedupe on the matched CONTAINER, not raw e.target
+        // identity — see the guard's rationale comment above.
+        var match = _classifyMatch(target);
+        var wasPointerHandled = (pendingContainer !== null && match !== null && match.container === pendingContainer);
         if (wasPointerHandled) { return; }
 
-        // XACA-1022-002: no matching pointerdown means this click did not
-        // come from a pointer press we already sounded. Most notably this
-        // covers keyboard Enter/Space activation of a role="button" element
-        // (native <button> Enter/Space and this codebase's own
-        // onkeydown-driven `.click()` calls both emit `click` with no
-        // preceding `pointerdown`), plus any other programmatic `.click()`.
-        // Play it here so keyboard users — and anything else that only ever
-        // fires `click` — still get sound.
+        // XACA-1022-002: no matching pointerdown/keydown means this click
+        // did not come from an activation we already sounded. The keydown
+        // listener above already handles onkeydown-driven `.click()` calls
+        // (and native <button> Enter/Space) by arming this same guard, so
+        // this branch is left for anything that STILL only ever produces a
+        // bare `click` with nothing preceding it — any other programmatic
+        // `.click()` call being the main case. Play it here so that path
+        // still gets sound.
         //
         // Note: MouseEvent.detail is 0 for a non-mouse-generated click per
         // spec, and could in principle distinguish "keyboard/synthetic" from
@@ -652,10 +787,9 @@
         // no automated cross-browser coverage to catch a regression in that
         // property. The pointerdown/click identity guard above already
         // solves the same problem without relying on it.
-        var type = _classifySound(target);
-        if (!type) { return; }
+        if (!match) { return; }
 
-        LCARSSound.play(type);
+        LCARSSound.play(match.type);
     }, true); // capture phase so it fires before stopPropagation in other handlers
 
     // -------------------------------------------------------------------------

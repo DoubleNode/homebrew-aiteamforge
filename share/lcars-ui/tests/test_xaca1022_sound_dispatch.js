@@ -27,21 +27,27 @@
  * because the shipped file no longer has it; `_playWav` is back to a
  * fresh-Audio-per-call implementation.
  *
- * TWO ENGINE COPIES, BOTH COVERED: fleet-monitor and lcars-ui ship separate,
- * diverged copies of this file (not mirrors of one canonical source). They
- * differ by exactly one line: fleet-monitor's `_classifySound` alert branch
- * carries a `.legend-pill` selector (XACA-0963) that lcars-ui's does not,
- * which changes what `.legend-pill` classifies as between the two copies.
- * This suite runs the FULL matrix against BOTH files and asserts that
- * divergence explicitly (see the "legend-pill parity" tests) — normalizing
- * it away in a test would be a false pass on real, intentional behavior.
+ * TWO ENGINE COPIES, BOTH COVERED: fleet-monitor and lcars-ui ship separate
+ * copies of this file (not mirrors of one canonical source — there is no
+ * build step that keeps them in sync, they are just expected to read
+ * identically). Historically they differed by exactly one line:
+ * fleet-monitor's `_classifyMatch` alert branch carried an extra
+ * `.legend-pill` selector (XACA-0963) that lcars-ui's did not, so the SAME
+ * visual pill sounded 'alert' on Fleet Monitor and 'action' on the lcars-ui
+ * cockpit. XACA-1022-015 normalized that away — both copies now classify
+ * `.legend-pill` as 'action' — and the "cross-engine structural pin" test
+ * below asserts the two files are now IDENTICAL, not merely close. This
+ * suite still runs the FULL matrix against BOTH files independently rather
+ * than assuming that identity holds: a future edit to only one copy should
+ * fail this suite loudly, not silently pass because "they're the same file
+ * anyway."
  *
  * WHOLE-FILE EVAL, NOT PER-FUNCTION EXTRACTION: unlike
  * test_xaca0920_copy_to_clipboard.js (which extracts one function out of a
  * large multi-purpose file), lcars-sound.js is itself a single self-contained
  * IIFE built for exactly this purpose — extracting a sub-function would still
  * require re-supplying its private closure state (`_muted`,
- * `_pendingPointerTarget`, etc.), which is exactly what
+ * `_pendingContainer`, etc.), which is exactly what
  * evaluating the whole IIFE gives us for free. So this suite reads the
  * ENTIRE shipped file with fs.readFileSync and runs it verbatim in a fresh
  * vm context per test — no hand-reimplemented logic anywhere in this file.
@@ -49,14 +55,16 @@
  * The one thing this suite adds to the shipped source is a single-line,
  * marker-anchored splice immediately after the shipped `window.LCARSSound =
  * LCARSSound;` export line: an additional `window.__TEST_HOOKS__ = {...}`
- * object exposing the IIFE's otherwise-private internals (the
- * classification function, the mute/pending-pointer state) so
- * assertions can reach them. This is a peephole for observation only — it
- * adds no new logic and calls no shipped function differently than
- * production does. If the export line's exact text ever moves or changes,
- * the marker lookup below fails loudly (an `assert.ok`) rather than silently
- * testing against a stale splice point — mirroring the guarantee
- * test_xaca0920_copy_to_clipboard.js makes for its own start/end markers.
+ * object exposing the IIFE's otherwise-private internals — the
+ * classification functions (`_classifySound`, and `_classifyMatch` which
+ * additionally reports the matched CONTAINER element, XACA-1022-016/017)
+ * and the mute/pending-guard state — so assertions can reach them. This is a
+ * peephole for observation only — it adds no new logic and calls no shipped
+ * function differently than production does. If the export line's exact
+ * text ever moves or changes, the marker lookup below fails loudly (an
+ * `assert.ok`) rather than silently testing against a stale splice point —
+ * mirroring the guarantee test_xaca0920_copy_to_clipboard.js makes for its
+ * own start/end markers.
  *
  * Usage:
  *   node --test lcars-ui/tests/test_xaca1022_sound_dispatch.js
@@ -76,14 +84,12 @@ var ENGINES = [
     {
         label: 'fleet-monitor',
         filePath: path.join(__dirname, '../../fleet-monitor/server/public/lcars/js/lcars-sound.js'),
-        legendPillType: 'alert',       // XACA-0963: fleet-monitor's alert branch carries .legend-pill
-        totalClosestCalls: 22,
+        totalClosestCalls: 21,
         distinctSelectors: 20
     },
     {
         label: 'lcars-ui',
         filePath: path.join(__dirname, '../js/lcars-sound.js'),
-        legendPillType: 'action',      // lacks the XACA-0963 alert-branch line — falls through to action group
         totalClosestCalls: 21,
         distinctSelectors: 20
     }
@@ -105,10 +111,11 @@ function instrument(rawSrc, label) {
         EXPORT_MARKER + '\n' +
         '    window.__TEST_HOOKS__ = {\n' +
         '        classifySound: _classifySound,\n' +
+        '        classifyMatch: _classifyMatch,\n' +
         '        playWav: _playWav,\n' +
         '        isMuted: function () { return _muted; },\n' +
         '        setMuted: function (v) { _muted = v; },\n' +
-        '        getPendingPointerTarget: function () { return _pendingPointerTarget; },\n' +
+        '        getPendingContainer: function () { return _pendingContainer; },\n' +
         '        getPendingPointerId: function () { return _pendingPointerId; }\n' +
         '    };\n';
 
@@ -122,11 +129,33 @@ function instrument(rawSrc, label) {
  * in `matchSelectors`, null otherwise — this tests "does this selector map
  * to this sound type", not real CSS matching (which _classifySound doesn't
  * do either; it delegates to the real DOM's closest() in production).
+ *
+ * The "container" a plain makeTarget() resolves to is always the target
+ * object itself (closest() returns `this`) — fine for the original
+ * identity-based tests, but it can't express "two DIFFERENT DOM nodes that
+ * both resolve to the SAME logical container", which is exactly the
+ * XACA-1022-016 retarget scenario. Use makeTargetWithContainer() for that.
  */
 function makeTarget(matchSelectors) {
     var set = new Set(matchSelectors || []);
     return {
         closest: function (sel) { return set.has(sel) ? this : null; }
+    };
+}
+
+/**
+ * A target node stub whose `.closest(selector)` resolves to an explicitly
+ * supplied `container` object (which may be a DIFFERENT object than the
+ * target itself), for any selector in `matchSelectors`. This is what lets a
+ * test simulate a DOM mutation/retarget between pointerdown and click — two
+ * distinct target objects that both resolve to the same matched container —
+ * without which the container-based dedupe guard (XACA-1022-016/017) can't
+ * be distinguished from the old raw-identity guard in a stubbed DOM.
+ */
+function makeTargetWithContainer(matchSelectors, container) {
+    var set = new Set(matchSelectors || []);
+    return {
+        closest: function (sel) { return set.has(sel) ? container : null; }
     };
 }
 
@@ -310,8 +339,25 @@ function dispatchClick(env, target) {
     env.doc._dispatch('click', { target: target });
 }
 
+function dispatchPointerup(env, target, opts) {
+    opts = opts || {};
+    env.doc._dispatch('pointerup', {
+        target: target,
+        pointerId: opts.pointerId !== undefined ? opts.pointerId : 1
+    });
+}
+
 function dispatchPointercancel(env, pointerId) {
     env.doc._dispatch('pointercancel', { pointerId: pointerId });
+}
+
+function dispatchKeydown(env, target, opts) {
+    opts = opts || {};
+    env.doc._dispatch('keydown', {
+        target: target,
+        key: opts.key !== undefined ? opts.key : 'Enter',
+        repeat: opts.repeat !== undefined ? opts.repeat : false
+    });
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -351,7 +397,7 @@ ENGINES.forEach(function (engine) {
         var target = makeTarget(['.card']);
         dispatchPointerdown(env, target, { button: 2 });
         assert.equal(env.dispatchLog.length, 0);
-        assert.equal(env.hooks.getPendingPointerTarget(), null, 'guard must not be armed for a non-primary button');
+        assert.equal(env.hooks.getPendingContainer(), null, 'guard must not be armed for a non-primary button');
     });
 
     test(P + 'e.isPrimary === false (secondary touch contact) plays nothing on pointerdown', function () {
@@ -359,7 +405,7 @@ ENGINES.forEach(function (engine) {
         var target = makeTarget(['.card']);
         dispatchPointerdown(env, target, { isPrimary: false, pointerId: 7 });
         assert.equal(env.dispatchLog.length, 0);
-        assert.equal(env.hooks.getPendingPointerTarget(), null);
+        assert.equal(env.hooks.getPendingContainer(), null);
     });
 
     test(P + 'pointercancel clears the guard; a later unrelated click is not swallowed', function () {
@@ -369,10 +415,10 @@ ENGINES.forEach(function (engine) {
 
         dispatchPointerdown(env, targetA, { pointerId: 5 });
         assert.equal(env.dispatchLog.length, 1);
-        assert.equal(env.hooks.getPendingPointerTarget(), targetA);
+        assert.equal(env.hooks.getPendingContainer(), targetA);
 
         dispatchPointercancel(env, 5);
-        assert.equal(env.hooks.getPendingPointerTarget(), null, 'pointercancel must clear the guard');
+        assert.equal(env.hooks.getPendingContainer(), null, 'pointercancel must clear the guard');
 
         dispatchClick(env, targetB); // unrelated target, no pointerdown ever recorded for it
         assert.equal(env.dispatchLog.length, 2, 'the unrelated click on B must not be swallowed by a stale guard');
@@ -387,7 +433,7 @@ ENGINES.forEach(function (engine) {
         assert.equal(env.dispatchLog.length, 1, 'A\'s pointerdown plays');
         // No click and no pointercancel ever arrives for A (e.g. focus moved
         // away). The guard is still holding A's identity.
-        assert.equal(env.hooks.getPendingPointerTarget(), targetA);
+        assert.equal(env.hooks.getPendingContainer(), targetA);
 
         dispatchClick(env, targetB); // click on a DIFFERENT, unrelated target
         assert.equal(env.dispatchLog.length, 2,
@@ -411,6 +457,174 @@ ENGINES.forEach(function (engine) {
         assert.equal(env.dispatchLog.length, 0, 'pointerdown on #sound-toggle must stay silent');
         dispatchClick(env, target);
         assert.equal(env.dispatchLog.length, 0, 'click on #sound-toggle must stay silent too');
+    });
+
+    // ─── XACA-1022-016: container-based dedupe survives a same-press retarget ─
+
+    test(P + 'a DOM retarget between pointerdown and click does NOT double-play, as long as both resolve to the same container',
+        function () {
+            var env = wrapPlay(buildEnv(engine));
+            var container = {}; // the logical control both nodes below resolve to via closest()
+            var pressNode = makeTargetWithContainer(['.sidebar-button'], container);
+            var clickNode = makeTargetWithContainer(['.sidebar-button'], container); // a DIFFERENT object — e.g. a hover-swapped icon
+
+            dispatchPointerdown(env, pressNode);
+            assert.equal(env.dispatchLog.length, 1, 'pointerdown plays');
+            assert.equal(env.hooks.getPendingContainer(), container, 'guard should hold the CONTAINER, not the raw target object');
+
+            dispatchClick(env, clickNode); // different node identity, same matched container
+            assert.equal(env.dispatchLog.length, 1,
+                'the trailing click must still be deduped even though its e.target is a different object than pointerdown\'s, ' +
+                'because both resolve to the same container — this is what container-based (not raw e.target) matching buys us');
+        });
+
+    test(P + 'a click whose matched container differs from the pending one is NOT treated as the trailing click',
+        function () {
+            var env = wrapPlay(buildEnv(engine));
+            var containerA = {};
+            var containerB = {};
+            var pressNode = makeTargetWithContainer(['.card'], containerA);
+            var clickNode = makeTargetWithContainer(['.toast-close'], containerB);
+
+            dispatchPointerdown(env, pressNode);
+            assert.equal(env.dispatchLog.length, 1);
+
+            dispatchClick(env, clickNode);
+            assert.equal(env.dispatchLog.length, 2,
+                'a click resolving to a genuinely different container must still play its own sound');
+        });
+
+    // ─── XACA-1022-017: pointerup landing elsewhere clears the guard ───────
+
+    test(P + 'pointerup on a DIFFERENT container than the pending one clears the guard (drag-away release)',
+        function () {
+            var env = wrapPlay(buildEnv(engine));
+            var targetA = makeTarget(['.sidebar-button']);
+            var elsewhere = makeTarget(['.totally-unmapped-thing']); // release landed off any sound-mapped element
+
+            dispatchPointerdown(env, targetA, { pointerId: 11 });
+            assert.equal(env.dispatchLog.length, 1);
+            assert.equal(env.hooks.getPendingContainer(), targetA);
+
+            dispatchPointerup(env, elsewhere, { pointerId: 11 });
+            assert.equal(env.hooks.getPendingContainer(), null,
+                'a release that resolves to neither the pending container nor any container at all must clear the guard');
+
+            // No click ever follows this abandoned press (real browsers fire
+            // neither `click` nor `pointercancel` for a drag-away release).
+            // A LATER, independent keyboard click on the SAME element A must
+            // still produce sound — proving the guard did not stay stuck.
+            dispatchClick(env, targetA);
+            assert.equal(env.dispatchLog.length, 2,
+                'a later keyboard click on A must not be swallowed by the abandoned press\'s stale guard');
+        });
+
+    test(P + 'pointerup on the SAME container as the pending one leaves the guard alone (normal press-and-release)',
+        function () {
+            var env = wrapPlay(buildEnv(engine));
+            var target = makeTarget(['.sidebar-button']);
+
+            dispatchPointerdown(env, target, { pointerId: 12 });
+            assert.equal(env.dispatchLog.length, 1);
+
+            dispatchPointerup(env, target, { pointerId: 12 });
+            assert.equal(env.hooks.getPendingContainer(), target,
+                'pointerup resolving to the SAME container must NOT clear the guard — click (which fires next, per spec) ' +
+                'is what consumes it; an unconditional clear here would double-play every normal press');
+
+            dispatchClick(env, target); // the real trailing click for this same press
+            assert.equal(env.dispatchLog.length, 1, 'the trailing click must still be deduped');
+        });
+
+    test(P + 'pointerup for an UNRELATED pointerId does not touch the guard', function () {
+        var env = wrapPlay(buildEnv(engine));
+        var target = makeTarget(['.sidebar-button']);
+
+        dispatchPointerdown(env, target, { pointerId: 20 });
+        assert.equal(env.dispatchLog.length, 1);
+
+        dispatchPointerup(env, makeTarget(['.totally-unmapped-thing']), { pointerId: 999 }); // different pointer entirely
+        assert.equal(env.hooks.getPendingContainer(), target, 'an unrelated pointerId must not clear this guard');
+
+        dispatchClick(env, target);
+        assert.equal(env.dispatchLog.length, 1, 'the real trailing click is still deduped');
+    });
+
+    // ─── XACA-1022-014: keydown Enter/Space plays for handlers that never dispatch click ─
+
+    test(P + 'keydown Enter on a classified element plays, with no preceding pointerdown or click', function () {
+        var env = wrapPlay(buildEnv(engine));
+        var target = makeTarget(['.legend-pill']);
+        dispatchKeydown(env, target, { key: 'Enter' });
+        assert.deepEqual(env.dispatchLog, ['action'],
+            'a keydown-only activation (handler calls switchSection() directly, never .click()) must still sound');
+    });
+
+    test(P + "keydown Space (both ' ' and legacy 'Spacebar') on a classified element plays", function () {
+        var env = wrapPlay(buildEnv(engine));
+        dispatchKeydown(env, makeTarget(['.legend-pill']), { key: ' ' });
+        assert.equal(env.dispatchLog.length, 1, "key ' ' must trigger sound");
+
+        var env2 = wrapPlay(buildEnv(engine));
+        dispatchKeydown(env2, makeTarget(['.legend-pill']), { key: 'Spacebar' });
+        assert.equal(env2.dispatchLog.length, 1, "legacy key 'Spacebar' must also trigger sound");
+    });
+
+    test(P + 'keydown Enter followed by the resulting .click() (sibling pills that call this.click() from onkeydown) does NOT double-play',
+        function () {
+            var env = wrapPlay(buildEnv(engine));
+            var target = makeTarget(['.legend-pill']);
+            dispatchKeydown(env, target, { key: 'Enter' });
+            assert.equal(env.dispatchLog.length, 1, 'keydown plays once');
+            dispatchClick(env, target); // simulates this.click() called from the element's own onkeydown handler
+            assert.equal(env.dispatchLog.length, 1,
+                'the click a sibling onkeydown handler triggers via .click() must be deduped by the same container guard');
+        });
+
+    test(P + 'keydown with e.repeat=true (held key) does not re-play', function () {
+        var env = wrapPlay(buildEnv(engine));
+        var target = makeTarget(['.legend-pill']);
+        dispatchKeydown(env, target, { key: 'Enter' });
+        assert.equal(env.dispatchLog.length, 1);
+        dispatchKeydown(env, target, { key: 'Enter', repeat: true });
+        assert.equal(env.dispatchLog.length, 1, 'auto-repeat keydown must be ignored');
+    });
+
+    test(P + 'keydown on a non-activation key (e.g. Tab) does not play', function () {
+        var env = wrapPlay(buildEnv(engine));
+        dispatchKeydown(env, makeTarget(['.legend-pill']), { key: 'Tab' });
+        assert.equal(env.dispatchLog.length, 0);
+    });
+
+    test(P + 'keydown is suppressed while muted', function () {
+        var env = wrapPlay(buildEnv(engine));
+        env.hooks.setMuted(true);
+        dispatchKeydown(env, makeTarget(['.legend-pill']), { key: 'Enter' });
+        assert.equal(env.dispatchLog.length, 0);
+    });
+
+    // ─── XACA-1022-019: the guard is consumed even when the click is muted ─
+
+    test(P + 'a click evaluated while muted still consumes the guard (does not leak forward once unmuted)', function () {
+        var env = wrapPlay(buildEnv(engine));
+        var target = makeTarget(['.sidebar-button']);
+
+        dispatchPointerdown(env, target); // unmuted — arms the guard and plays once
+        assert.equal(env.dispatchLog.length, 1);
+        assert.equal(env.hooks.getPendingContainer(), target);
+
+        env.hooks.setMuted(true);
+        dispatchClick(env, makeTarget(['.totally-unmapped-thing'])); // ANY click, muted, unrelated target
+        assert.equal(env.dispatchLog.length, 1, 'no sound plays while muted');
+        assert.equal(env.hooks.getPendingContainer(), null,
+            'the guard must be consumed the instant this click was evaluated, even though _muted short-circuited before ' +
+            'classification — consuming it BEFORE the _muted check is exactly XACA-1022-019\'s fix');
+
+        env.hooks.setMuted(false);
+        dispatchClick(env, target); // a later click on the ORIGINAL element, now unmuted
+        assert.equal(env.dispatchLog.length, 2,
+            'since the guard was already consumed by the muted click, this later click on the original element is treated ' +
+            'as a fresh, unmatched click and must play — proving the guard did not survive past the muted evaluation');
     });
 
     // ─── Classification: every distinct closest() selector branch ─────────
@@ -458,34 +672,25 @@ ENGINES.forEach(function (engine) {
         assert.equal(env.hooks.classifySound(makeTarget(['.totally-unmapped-thing'])), null);
     });
 
-    // ─── legend-pill parity: intentional, pre-existing divergence ─────────
+    // ─── legend-pill normalization (XACA-1022-015) ─────────────────────────
+    //
+    // Historically fleet-monitor's alert-group condition carried an EXTRA
+    // '.legend-pill' entry (XACA-0963) that lcars-ui's did not, so the same
+    // visual pill sounded 'alert' on Fleet Monitor and 'action' on the
+    // lcars-ui cockpit — and, because that alert-group check ran first,
+    // fleet-monitor's own action-group '.legend-pill' entry (present in both
+    // copies) was unreachable dead code. That divergence is now normalized:
+    // '.legend-pill' classifies as 'action' in BOTH copies, via the single
+    // action-group entry that already existed in both. This is a
+    // user-perceptible behaviour change on Fleet Monitor's SETTINGS / ADMIN /
+    // SOUND utility-bar pills (alert -> action) — see the comment above
+    // _classifyMatch's action branch in lcars-sound.js for the full
+    // rationale. Do NOT reintroduce the alert-group line.
 
-    test(P + 'classify: .legend-pill -> ' + engine.legendPillType + ' (intentional cross-engine divergence, do not normalize)',
-        function () {
-            var env = buildEnv(engine);
-            assert.equal(env.hooks.classifySound(makeTarget(['.legend-pill'])), engine.legendPillType);
-        });
-
-    if (engine.label === 'fleet-monitor') {
-        test(P + 'FINDING: the action-group .legend-pill line is dead code, shadowed by the earlier alert-group entry',
-            function () {
-                // fleet-monitor's _classifySound lists '.legend-pill' TWICE:
-                // once in the alert-group condition (XACA-0963) and again,
-                // unconditionally, in the action-group condition further
-                // down. Because the alert-group `if` runs first and already
-                // returns 'alert' for any target matching '.legend-pill',
-                // the action-group's own '.legend-pill' check can never be
-                // reached for such a target — it is unreachable/dead code.
-                // This is PRE-EXISTING (not introduced by this ticket's
-                // diff) and out of this ticket's scope to fix; recorded here
-                // so it isn't rediscovered as a surprise later. It does NOT
-                // affect lcars-ui, which only lists '.legend-pill' once (in
-                // the action group), where it IS reachable.
-                var env = buildEnv(engine);
-                assert.equal(env.hooks.classifySound(makeTarget(['.legend-pill'])), 'alert',
-                    'a target matching ONLY .legend-pill resolves via the alert group, never reaching the action group\'s own .legend-pill check');
-            });
-    }
+    test(P + 'classify: .legend-pill -> action (normalized across both engines, XACA-1022-015)', function () {
+        var env = buildEnv(engine);
+        assert.equal(env.hooks.classifySound(makeTarget(['.legend-pill'])), 'action');
+    });
 
     // ─── _playWav return contract ──────────────────────────────────────────
 
@@ -509,34 +714,34 @@ ENGINES.forEach(function (engine) {
 // Cross-engine structural pins
 // ═════════════════════════════════════════════════════════════════════════
 
-test('the two engine copies differ by exactly the one documented .legend-pill line', function () {
-    var fleetSrc = fs.readFileSync(ENGINES[0].filePath, 'utf8').split('\n');
-    var lcarsSrc = fs.readFileSync(ENGINES[1].filePath, 'utf8').split('\n');
-
-    // A full diff algorithm is unnecessary here: the two files are expected
-    // to be IDENTICAL except for one inserted line in fleet-monitor. If a
-    // real diff ever grows beyond that, this file-length delta assertion
-    // catches it immediately (loudly, not silently), even though it doesn't
-    // itself pinpoint the new difference — `diff` in a terminal does that.
-    assert.equal(fleetSrc.length, lcarsSrc.length + 1,
-        'fleet-monitor should have exactly one MORE line than lcars-ui (the XACA-0963 .legend-pill alert-branch line). ' +
-        'If this fails, the two copies have diverged further than this suite assumes — re-run `diff` on both files ' +
-        'and update either the source files or this pin.');
-
-    var legendLine = fleetSrc.filter(function (l) { return l.indexOf('XACA-0963') !== -1; });
-    assert.equal(legendLine.length, 1, 'expected exactly one XACA-0963-tagged line in fleet-monitor\'s copy');
-    assert.ok(legendLine[0].indexOf(".closest('.legend-pill')") !== -1,
-        'the extra fleet-monitor line should be the .legend-pill closest() check');
+test('the two engine copies are now IDENTICAL (XACA-1022-015 normalized the last divergence)', function () {
+    // Historically this pin asserted the two files differed by exactly the
+    // one documented .legend-pill alert-branch line (XACA-0963). That line
+    // is now removed from fleet-monitor's copy (see the legend-pill
+    // normalization comment above _classifyMatch's action branch in
+    // lcars-sound.js), and no other divergence has ever existed between
+    // these two files — so the correct pin is now byte-for-byte equality,
+    // not a one-line delta. If this ever fails, the two copies have
+    // diverged again; re-run `diff` on both files to see how, and either
+    // fix the file that drifted or, if the divergence is intentional this
+    // time, replace this assertion with one that documents the new,
+    // deliberate difference (as this file's header comment used to for
+    // XACA-0963) rather than silently loosening it.
+    var fleetSrc = fs.readFileSync(ENGINES[0].filePath, 'utf8');
+    var lcarsSrc = fs.readFileSync(ENGINES[1].filePath, 'utf8');
+    assert.equal(fleetSrc, lcarsSrc,
+        'fleet-monitor and lcars-ui copies of lcars-sound.js must be byte-for-byte identical post-XACA-1022-015 — run ' +
+        '`diff fleet-monitor/server/public/lcars/js/lcars-sound.js lcars-ui/js/lcars-sound.js` to see what drifted.');
 });
 
 ENGINES.forEach(function (engine) {
-    test('[' + engine.label + '] _classifySound has the expected total closest() call count (' + engine.totalClosestCalls + ')',
+    test('[' + engine.label + '] _classifyMatch has the expected total closest() call count (' + engine.totalClosestCalls + ')',
         function () {
             var src = fs.readFileSync(engine.filePath, 'utf8');
-            var start = src.indexOf('function _classifySound(target) {');
-            assert.ok(start !== -1, '[' + engine.label + '] could not locate _classifySound() — has it been renamed?');
+            var start = src.indexOf('function _classifyMatch(target) {');
+            assert.ok(start !== -1, '[' + engine.label + '] could not locate _classifyMatch() — has it been renamed?');
             var end = src.indexOf('\n    // XACA-1022: press/click dedupe guard.', start);
-            assert.ok(end !== -1, '[' + engine.label + '] could not locate the dedupe-guard comment marking the end of _classifySound()');
+            assert.ok(end !== -1, '[' + engine.label + '] could not locate the dedupe-guard comment marking the end of _classifyMatch()');
             var body = src.slice(start, end);
             var matches = body.match(/\.closest\(/g) || [];
             assert.equal(matches.length, engine.totalClosestCalls,
@@ -556,13 +761,24 @@ ENGINES.forEach(function (engine) {
 // catch the synthetic input-click, because its target is the input element,
 // not the label — a real double-play.
 //
-// This static scan walks every `<label ... for="...">` in fleet-monitor's
+// This static scan walks every `<label ... for="...">` in a surface's
 // shipped HTML and collects the class/id/data-* selectors of its DOM
 // ancestors (a small hand-rolled tag-stack parser — sufficient for this
 // codebase's well-formed, non-self-closing-div markup; it is NOT a general
 // HTML parser). It then checks those ancestor selectors against the ACTUAL
-// selector list _classifySound uses (parsed from the shipped file itself, so
-// this test does not go stale if new selectors are added later).
+// selector list that surface's OWN _classifyMatch uses (parsed from the
+// shipped file itself, so this test does not go stale if new selectors are
+// added later).
+//
+// XACA-1022-018: this scan originally walked ONLY
+// fleet-monitor/server/public/**/*.html against fleet-monitor's engine copy.
+// lcars-ui/index.html was never scanned, so a future lcars-ui-only markup
+// change nesting a <label for=> inside a sound-mapped ancestor would have
+// shipped with no automated guard on that surface. It now also runs against
+// lcars-ui/index.html, checked against lcars-ui's own engine copy — kept as
+// a SEPARATE extraction per surface (not one shared selector set) so this
+// stays correct if the two engine copies ever diverge again in the future,
+// even though XACA-1022-015 made them byte-identical today.
 // ═════════════════════════════════════════════════════════════════════════
 
 var VOID_TAGS = new Set([
@@ -621,7 +837,7 @@ function findLabelAncestorSelectors(html, forId) {
 
 /** Extracts every distinct closest() selector string from a lcars-sound.js source. */
 function extractClassifySelectors(src) {
-    var start = src.indexOf('function _classifySound(target) {');
+    var start = src.indexOf('function _classifyMatch(target) {');
     var end = src.indexOf('\n    // XACA-1022: press/click dedupe guard.', start);
     var body = src.slice(start, end);
     var re = /\.closest\(\s*['"]([^'"]+)['"]\s*\)/g;
@@ -649,51 +865,64 @@ function ancestorSelectorsIntersectSoundMap(ancestorSelectorLists, soundSelector
     return null;
 }
 
+function walkHtmlFiles(dir, out) {
+    fs.readdirSync(dir, { withFileTypes: true }).forEach(function (entry) {
+        var full = path.join(dir, entry.name);
+        if (entry.isDirectory()) { walkHtmlFiles(full, out); return; }
+        if (entry.isFile() && entry.name.endsWith('.html')) out.push(full);
+    });
+}
+
+/**
+ * Runs the label-for double-play scan for one surface: `htmlFiles` (relative
+ * to `relativeToDir` for reporting) checked against the selector set
+ * extracted from `engineFilePath`'s own _classifyMatch. Shared by both the
+ * fleet-monitor (many files, directory walk) and lcars-ui (single file)
+ * surfaces below (XACA-1022-018) so the scan logic exists in exactly one
+ * place instead of being duplicated per surface.
+ */
+function scanLabelForHazards(label, engineFilePath, htmlFiles, relativeToDir) {
+    var soundSrc = fs.readFileSync(engineFilePath, 'utf8');
+    var soundSelectors = extractClassifySelectors(soundSrc);
+    assert.ok(soundSelectors.size > 0, '[' + label + '] sanity: expected to extract at least one selector from _classifyMatch()');
+    assert.ok(htmlFiles.length > 0, '[' + label + '] sanity: expected at least one HTML file to scan');
+
+    var labelForRe = /<label\b[^>]*\bfor=["']([^"']+)["']/g;
+    var checked = 0;
+    var hazards = [];
+
+    htmlFiles.forEach(function (file) {
+        var html = fs.readFileSync(file, 'utf8');
+        var seenIdsInFile = new Set();
+        var m;
+        labelForRe.lastIndex = 0;
+        while ((m = labelForRe.exec(html))) {
+            var forId = m[1];
+            if (seenIdsInFile.has(forId)) continue; // dedupe repeated for= within one file (none observed, defensive)
+            seenIdsInFile.add(forId);
+            var ancestors = findLabelAncestorSelectors(html, forId);
+            assert.ok(ancestors !== null,
+                '[' + label + '] ' + file + ': label for="' + forId + '" matched by scan regex but not by the ' +
+                'ancestor-walk parser — investigate the tag-stack parser, don\'t assume this is safe.');
+            checked++;
+            var hazard = ancestorSelectorsIntersectSoundMap(ancestors, soundSelectors);
+            if (hazard) {
+                hazards.push({ file: path.relative(relativeToDir, file), forId: forId, selector: hazard });
+            }
+        }
+    });
+
+    assert.ok(checked > 0, '[' + label + '] sanity: expected to find and check at least one <label for=> element');
+    return hazards;
+}
+
 test('label-for double-play investigation: every <label for=> in fleet-monitor\'s shipped HTML has a NON-sound-mapped ancestor chain',
     function () {
-        var fleetSoundSrc = fs.readFileSync(ENGINES[0].filePath, 'utf8');
-        var soundSelectors = extractClassifySelectors(fleetSoundSrc);
-        assert.ok(soundSelectors.size > 0, 'sanity: expected to extract at least one selector from _classifySound()');
-
-        function walk(dir, out) {
-            fs.readdirSync(dir, { withFileTypes: true }).forEach(function (entry) {
-                var full = path.join(dir, entry.name);
-                if (entry.isDirectory()) { walk(full, out); return; }
-                if (entry.isFile() && entry.name.endsWith('.html')) out.push(full);
-            });
-        }
-
         var publicDir = path.join(__dirname, '../../fleet-monitor/server/public');
         var htmlFiles = [];
-        walk(publicDir, htmlFiles);
-        assert.ok(htmlFiles.length > 0, 'sanity: expected to find at least one HTML file under fleet-monitor/server/public');
+        walkHtmlFiles(publicDir, htmlFiles);
 
-        var labelForRe = /<label\b[^>]*\bfor=["']([^"']+)["']/g;
-        var checked = 0;
-        var hazards = [];
-
-        htmlFiles.forEach(function (file) {
-            var html = fs.readFileSync(file, 'utf8');
-            var seenIdsInFile = new Set();
-            var m;
-            labelForRe.lastIndex = 0;
-            while ((m = labelForRe.exec(html))) {
-                var forId = m[1];
-                if (seenIdsInFile.has(forId)) continue; // dedupe repeated for= within one file (none observed, defensive)
-                seenIdsInFile.add(forId);
-                var ancestors = findLabelAncestorSelectors(html, forId);
-                assert.ok(ancestors !== null,
-                    file + ': label for="' + forId + '" matched by scan regex but not by the ancestor-walk parser — ' +
-                    'investigate the tag-stack parser, don\'t assume this is safe.');
-                checked++;
-                var hazard = ancestorSelectorsIntersectSoundMap(ancestors, soundSelectors);
-                if (hazard) {
-                    hazards.push({ file: path.relative(publicDir, file), forId: forId, selector: hazard });
-                }
-            }
-        });
-
-        assert.ok(checked > 0, 'sanity: expected to find and check at least one <label for=> element');
+        var hazards = scanLabelForHazards('fleet-monitor', ENGINES[0].filePath, htmlFiles, publicDir);
 
         // XACA-1022-008 finding: as of this writing, every `<label for=>` in
         // fleet-monitor's shipped HTML sits inside a `.modal-overlay` /
@@ -701,7 +930,7 @@ test('label-for double-play investigation: every <label for=> in fleet-monitor\'
         // engines-add/engines-edit account modals, replicated near-
         // identically across lcars/lcars-dashboard.html and the four
         // lcars2/lcars-*.html variants). None of those ancestor classes
-        // appear in _classifySound's selector list, so the label-for
+        // appear in _classifyMatch's selector list, so the label-for
         // double-play vector does NOT currently manifest anywhere in this
         // codebase. If this assertion ever fails, that is a REAL new
         // double-play hazard introduced by markup change — do not silence
@@ -713,6 +942,33 @@ test('label-for double-play investigation: every <label for=> in fleet-monitor\'
             JSON.stringify(hazards));
     });
 
+test('label-for double-play investigation (XACA-1022-018): every <label for=> in lcars-ui/index.html has a NON-sound-mapped ancestor chain',
+    function () {
+        // Extends the scan above to lcars-ui's own shipped markup, checked
+        // against lcars-ui's own engine copy (ENGINES[1]) — previously this
+        // suite only ever walked fleet-monitor/server/public/**/*.html, so a
+        // lcars-ui-only markup change nesting a <label for=> inside a
+        // sound-mapped ancestor would have shipped with no automated guard
+        // on this surface at all.
+        var lcarsUiDir = path.join(__dirname, '..');
+        var htmlFiles = [path.join(lcarsUiDir, 'index.html')];
+
+        var hazards = scanLabelForHazards('lcars-ui', ENGINES[1].filePath, htmlFiles, lcarsUiDir);
+
+        // Measured at write time (XACA-1022-018): 31 distinct <label for=>
+        // ids in lcars-ui/index.html, none of them inside an ancestor that
+        // matches any of _classifyMatch's 20 distinct selectors — every one
+        // sits inside plain layout/modal wrappers (e.g. .secrets-export-*,
+        // .team-config-*, .modal-*) that carry no sound-mapped class. If
+        // this assertion ever fails, that is a REAL new double-play hazard
+        // introduced by an index.html markup change — do not silence it by
+        // loosening the selector match; fix the click dispatch and file a
+        // ticket, same as the fleet-monitor investigation above.
+        assert.equal(hazards.length, 0,
+            'found <label for=> element(s) inside a sound-mapped ancestor in lcars-ui/index.html — real double-play risk: ' +
+            JSON.stringify(hazards));
+    });
+
 // ═════════════════════════════════════════════════════════════════════════
 // What remains UNVERIFIED by this suite (see also the XACA-1022-008 report):
 //   - Real Safari/WebKit pointerdown->click event ORDERING and timing on an
@@ -721,9 +977,20 @@ test('label-for double-play investigation: every <label for=> in fleet-monitor\'
 //     for touch-originated events under load).
 //   - Real touch-to-scroll gesture disambiguation (pointercancel timing is
 //     simulated by direct dispatch, not by an actual finger-drag).
+//   - The real pointerdown -> pointerup -> click ORDERING the XACA-1022-017
+//     pointerup guard relies on (a click firing AFTER its gesture's
+//     pointerup is asserted from the DOM event-order spec in this file's
+//     comments, not observed on a real device — this suite's stub dispatches
+//     events in whatever order a test tells it to, it does not enforce or
+//     verify the browser's own ordering).
+//   - The real keydown -> click ORDERING the XACA-1022-014 keyboard-fallback
+//     guard relies on (that a capture-phase `document` keydown listener runs
+//     before an inline `onkeydown` attribute's `this.click()` call, and
+//     before a native <button>'s own Enter/Space activation) — reasoned from
+//     the DOM event-phase spec, not observed in a real browser.
 //   - Any actual latency number (pointerdown-to-audible-tone). This suite
 //     has no audio output and no wall clock measurement; that is the
 //     probe/xaca-1022-audio-latency.html harness's job, on a real device.
 // A human needs a real iPhone in mobile Safari (Fleet Monitor's stated
-// target surface) to close both of the above.
+// target surface) to close all of the above.
 // ═════════════════════════════════════════════════════════════════════════
