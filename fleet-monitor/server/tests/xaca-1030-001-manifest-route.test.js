@@ -368,3 +368,56 @@ test('shadowing proof (d): server.js itself registers the route BEFORE express.s
     assert.ok(routeAt < staticAt,
         `server.js registers express.static(public) at index ${staticAt} BEFORE the manifest route at index ${routeAt}. The static file then shadows the route and every Add-to-Home-Screen bookmark launches Academy again -- the exact XACA-1030 defect.`);
 });
+
+// ============================================================================
+// XACA-1030-018 / -019 / -022: gate-round review findings.
+// ============================================================================
+
+test('XACA-1030-019: the lcars2 path map is not a bare object index (constructor/__proto__ cannot resolve)', () => {
+    // dashboardId is gated by validIds, but those ids come from dashboards.json.
+    // A dashboard whose id is 'constructor' would, under a bare index, resolve
+    // through Object.prototype to a FUNCTION and be emitted as start_url.
+    const SERVER_JS = path.join(SERVER_DIR, 'server.js');
+    const src = fs.readFileSync(SERVER_JS, 'utf8');
+    assert.ok(
+        src.includes('Object.prototype.hasOwnProperty.call(MANIFEST_LCARS2_PATHS, dashboardId)'),
+        'MANIFEST_LCARS2_PATHS must be probed with hasOwnProperty, not a bare index'
+    );
+    assert.ok(
+        !/if \(ui === 'lcars2' && MANIFEST_LCARS2_PATHS\[dashboardId\]\)/.test(src),
+        'the bare-index form must not have come back'
+    );
+});
+
+test('XACA-1030-018: short_name is trimmed after the length cap', () => {
+    const SERVER_JS = path.join(SERVER_DIR, 'server.js');
+    const src = fs.readFileSync(SERVER_JS, 'utf8');
+    assert.ok(
+        src.includes('name.slice(0, MANIFEST_SHORT_NAME_MAX_LEN).trim()'),
+        'short_name must be trimmed after slicing, or a name cut on a space leaves a trailing gap in the home-screen label'
+    );
+    // Demonstrate the case the trim exists for: 'Academy Ops Center' cuts to
+    // 'Academy Ops ' at 12 chars -- a trailing space that renders as a gap.
+    const MAX = 12;
+    assert.equal('Academy Ops Center'.slice(0, MAX), 'Academy Ops ');
+    assert.equal('Academy Ops Center'.slice(0, MAX).trim(), 'Academy Ops');
+});
+
+test('XACA-1030-022: the handler copied into this file has not diverged from server.js', () => {
+    // This suite duplicates manifestRouteHandler rather than importing it
+    // (server.js has no module.exports and listens at import time). The copy
+    // can silently drift from the original, which would make every contract
+    // test above assert against code that is no longer shipped. Pin the values
+    // that actually determine routing so a divergence fails here.
+    const src = fs.readFileSync(path.join(SERVER_DIR, 'server.js'), 'utf8');
+    for (const [id, expected] of Object.entries(MANIFEST_LCARS2_PATHS)) {
+        assert.ok(
+            src.includes(`${id}: '${expected}'`),
+            `server.js lcars2 map is missing "${id}: '${expected}'" -- this file's copy has diverged from the shipped handler`
+        );
+    }
+    assert.ok(src.includes(`MANIFEST_SHORT_NAME_MAX_LEN = ${MANIFEST_SHORT_NAME_MAX_LEN}`),
+        'short_name cap differs between server.js and this file');
+    assert.ok(src.includes(`MANIFEST_DEFAULT_DASHBOARD = '${MANIFEST_DEFAULT_DASHBOARD}'`),
+        'default dashboard differs between server.js and this file');
+});

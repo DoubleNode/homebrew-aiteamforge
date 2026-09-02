@@ -748,7 +748,11 @@ app.get('/appicons/fleet.webmanifest', (req, res) => {
         const dashboardEntry = dashboards.find((d) => d.id === dashboardId);
         name = (dashboardEntry && dashboardEntry.name) || 'Academy';
 
-        if (ui === 'lcars2' && MANIFEST_LCARS2_PATHS[dashboardId]) {
+        // XACA-1030-019: hasOwnProperty rather than a bare index. dashboardId is
+        // already gated by validIds, but those ids come from dashboards.json --
+        // an id of 'constructor' or 'toString' would resolve through
+        // Object.prototype and yield a function rather than a path.
+        if (ui === 'lcars2' && Object.prototype.hasOwnProperty.call(MANIFEST_LCARS2_PATHS, dashboardId)) {
             startUrl = MANIFEST_LCARS2_PATHS[dashboardId];
         } else {
             // ui=lcars, OR ui=lcars2 for a dashboard with no lcars2 page yet
@@ -758,7 +762,9 @@ app.get('/appicons/fleet.webmanifest', (req, res) => {
             startUrl = `/lcars/lcars-dashboard.html?dashboard=${dashboardId}`;
         }
 
-        shortName = name.slice(0, MANIFEST_SHORT_NAME_MAX_LEN);
+        // XACA-1030-018: trim after slicing — a 13+ char name cut at the cap can
+        // land on a space, which renders as a trailing gap in the home-screen label.
+        shortName = name.slice(0, MANIFEST_SHORT_NAME_MAX_LEN).trim();
     }
 
     const manifest = {
