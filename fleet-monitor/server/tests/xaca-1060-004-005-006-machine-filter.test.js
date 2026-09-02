@@ -592,6 +592,84 @@ test('a "warning" machine shows WARNING · <last-known session_count>, never col
     assert.equal(btn.getAttribute('aria-label'), 'Toggle team cards for M1Pro (Warning, last known 44 sessions)');
 });
 
+// XACA-1062-012 regression: session_count is coerced IDENTICALLY at both
+// call sites, so the "these two sites cannot disagree" invariant is
+// structural rather than contingent on the server always emitting a number.
+//
+// Why this test calls the two sites SEPARATELY instead of doing a normal
+// render pass: updateMachineNavStats() runs at the tail of every render pass
+// and OVERWRITES what renderMachineFilterNav() wrote, so after a full pass
+// site 2 always wins and a divergence is invisible. It becomes visible when
+// site 2 does NOT run -- which is exactly what happens on renderDivisions()'s
+// early-exit paths (they return before applyMachineFilter()), and #machine-nav
+// is a sibling OUTSIDE #divisions-container, so those buttons survive the
+// early exit still showing site 1's text. Driving each site directly is the
+// only way to assert the two agree rather than asserting that the later one
+// ran last.
+//
+// Teeth: with Number() removed from site 1, the string '1' makes site 1 emit
+// 'last known 1 sessions' (because '1' === 1 is false) while site 2 emits
+// 'last known 1 session'. Reverting the coercion fails this test.
+test('XACA-1062-012: a STRING session_count renders identically at both call sites (render vs. stats-refresh)', () => {
+    const fixture = loadFixture();
+    const machines = cloneMachines(fixture);
+    const m1mini = machines.find((m) => m.hostname === M1MINI_HOST);
+    m1mini.status = 'offline';
+    m1mini.session_count = '1'; // STRING, not number -- the provenance this module does not control
+
+    const { ctx, mod } = setupDashboard();
+    const machineNav = ctx.document.createElement('div');
+    const divisionsContainer = ctx.document.createElement('div');
+    ctx.document.__registerById('machine-nav', machineNav);
+    ctx.document.__registerById('divisions-container', divisionsContainer);
+
+    // Site 1 in isolation.
+    mod.renderMachineFilterNav(machines);
+    const btn = machineNav.querySelectorAll('.machine-nav-button[data-machine-host]')
+        .filter((b) => b.dataset.machineHost === M1MINI_HOST)[0];
+    assert.ok(btn, 'M1Mini\'s button must render');
+    const site1Stat = btn.querySelector('.machine-nav-stats').textContent;
+    const site1Aria = btn.getAttribute('aria-label');
+
+    // Site 2 in isolation, over the same button.
+    mod.updateMachineNavStats();
+    const site2Stat = btn.querySelector('.machine-nav-stats').textContent;
+    const site2Aria = btn.getAttribute('aria-label');
+
+    assert.equal(site1Stat, site2Stat, 'stat text must be identical at both call sites for a string session_count');
+    assert.equal(site1Aria, site2Aria, 'aria-label must be identical at both call sites for a string session_count');
+    assert.equal(site1Stat, 'OFFLINE \u00b7 1', 'string \'1\' must render as OFFLINE \u00b7 1');
+    assert.equal(site1Aria, 'Toggle team cards for M1Mini (Offline, last known 1 session)',
+        'string \'1\' must pluralise as SINGULAR at both sites -- the latent aria bug the coercion closes');
+});
+
+// XACA-1062-012 regression, garbage arm: a non-numeric session_count must
+// floor to 0 at BOTH sites rather than being interpolated verbatim into
+// user-visible text ('OFFLINE \u00b7 abc').
+test('XACA-1062-012: a non-numeric session_count floors to 0 identically at both call sites', () => {
+    const fixture = loadFixture();
+    const machines = cloneMachines(fixture);
+    const m1mini = machines.find((m) => m.hostname === M1MINI_HOST);
+    m1mini.status = 'offline';
+    m1mini.session_count = 'abc';
+
+    const { ctx, mod } = setupDashboard();
+    const machineNav = ctx.document.createElement('div');
+    const divisionsContainer = ctx.document.createElement('div');
+    ctx.document.__registerById('machine-nav', machineNav);
+    ctx.document.__registerById('divisions-container', divisionsContainer);
+
+    mod.renderMachineFilterNav(machines);
+    const btn = machineNav.querySelectorAll('.machine-nav-button[data-machine-host]')
+        .filter((b) => b.dataset.machineHost === M1MINI_HOST)[0];
+    const site1Stat = btn.querySelector('.machine-nav-stats').textContent;
+    mod.updateMachineNavStats();
+    const site2Stat = btn.querySelector('.machine-nav-stats').textContent;
+
+    assert.equal(site1Stat, site2Stat, 'garbage session_count must render identically at both sites');
+    assert.equal(site1Stat, 'OFFLINE \u00b7 0', 'non-numeric session_count must floor to 0, never interpolate verbatim');
+});
+
 test('singular last-known session count: aria-label says "1 session", not "1 sessions"', () => {
     const fixture = loadFixture();
     const machines = cloneMachines(fixture);
