@@ -597,15 +597,23 @@ test('a "warning" machine shows WARNING · <last-known session_count>, never col
 // structural rather than contingent on the server always emitting a number.
 //
 // Why this test calls the two sites SEPARATELY instead of doing a normal
-// render pass: updateMachineNavStats() runs at the tail of every render pass
-// and OVERWRITES what renderMachineFilterNav() wrote, so after a full pass
-// site 2 always wins and a divergence is invisible. It becomes visible when
-// site 2 does NOT run -- which is exactly what happens on renderDivisions()'s
-// early-exit paths (they return before applyMachineFilter()), and #machine-nav
-// is a sibling OUTSIDE #divisions-container, so those buttons survive the
-// early exit still showing site 1's text. Driving each site directly is the
-// only way to assert the two agree rather than asserting that the later one
-// ran last.
+// render pass: updateMachineNavStats() (site 2) runs at the tail of every
+// completing render pass via applyMachineFilter(), and OVERWRITES what
+// renderMachineFilterNav() (site 1) wrote. After a full pass site 2 always
+// wins, so a divergence between them is invisible to a full-pass test --
+// such a test would only be asserting that site 2 ran last.
+//
+// Be precise about what that means: site 1's raw output is NOT reachable in
+// production. Its only production caller is renderDivisions() (one call
+// site), which sits BELOW both of that function's early exits, and
+// applyMachineFilter()'s own '!divisionsContainer' guard cannot fire in a
+// pass that got far enough to call site 1, since renderDivisions() already
+// required that same element earlier in the same synchronous tick. So this
+// is NOT a latent user-visible bug being regression-tested -- it is an
+// invariant being made structural instead of contingent on the server
+// always emitting a numeric session_count, which is a property of server.js
+// and not of this module. The test exists so that a future change to that
+// provenance fails here rather than silently.
 //
 // Teeth: with Number() removed from site 1, the string '1' makes site 1 emit
 // 'last known 1 sessions' (because '1' === 1 is false) while site 2 emits
