@@ -218,11 +218,14 @@ CELLAR_WATCH_PLIST="$FAKE_LAUNCHAGENTS/com.aiteamforge.cellar-watch.plist"
 # XACA-0734 — the mandatory set and the map agree with what we test
 # ═══════════════════════════════════════════════════════════════════════════
 
-test_start "XACA-0734: mandatory set is exactly {auto-upgrade, lcars-health, kanban-backup}"
+test_start "XACA-0734/XACA-1066: mandatory set is exactly {auto-upgrade, lcars-health, kanban-backup, host-ready}"
 _mandatory="$(_xaca0734_mandatory_launchagent_basenames)"
 assert_contains "$_mandatory" "com.aiteamforge.auto-upgrade.plist" "auto-upgrade must be mandatory (it performs upgrades)"
 assert_contains "$_mandatory" "com.aiteamforge.lcars-health.plist" "lcars-health must be mandatory"
 assert_contains "$_mandatory" "com.aiteamforge.kanban-backup.plist" "kanban-backup must be mandatory"
+assert_contains "$_mandatory" "com.aiteamforge.host-ready.plist" "host-ready must be mandatory (XACA-1066 — inert without config, so free to add fleet-wide)"
+assert_contains "$(_xaca0734_launchagent_map)" "com.aiteamforge.host-ready.plist:kanban/host-ready-plist.template" \
+  "host-ready must resolve to the kanban/ template subpath (rendered by the shared _render_launchagent_template)"
 assert_not_contains "$_mandatory" "com.aiteamforge.lcars-watch.plist" "lcars-watch is an accelerator, NOT mandatory"
 assert_not_contains "$_mandatory" "com.aiteamforge.cellar-watch.plist" "cellar-watch is an accelerator, NOT mandatory"
 assert_not_contains "$_mandatory" "cr-confluence-poller" "cr-confluence-poller is config-gated, NOT mandatory"
@@ -655,6 +658,12 @@ reset_launchagents
 _xaca0734_record_optout "com.aiteamforge.auto-upgrade.plist"
 _xaca0734_record_optout "com.aiteamforge.lcars-health.plist"
 _xaca0734_record_optout "com.aiteamforge.kanban-backup.plist"
+# XACA-1066: host-ready joined the mandatory set alongside the original three.
+# $FAKE_FRAMEWORK has no host-ready-plist.template (that fixture is added by a
+# sibling ticket), so leaving it un-opted-out here would make THIS agent
+# "still missing" for a reason unrelated to what this test is checking —
+# opting it out too keeps the assertion honest about what it actually tests.
+_xaca0734_record_optout "com.aiteamforge.host-ready.plist"
 output="$(FORCE=false DRY_RUN=false run_update_launchagents 2>&1)"
 assert_not_contains "$output" "Mandatory LaunchAgent still missing" \
   "an intentionally opted-out agent is SUPPOSED to be absent — never warn about it"
@@ -679,8 +688,17 @@ test_pass
 # DRY_RUN=true + no-change path — tempfile cleanup and no-op assertion
 # ═══════════════════════════════════════════════════════════════════════════
 
+# XACA-1066: host-ready has no host-ready-plist.template fixture in
+# $FAKE_FRAMEWORK (that fixture is added by a sibling ticket alongside the
+# canonical template), so it can never reach "materialized" in this sandbox —
+# a DRY_RUN=true pass would keep reporting "Would install" for it forever,
+# which is a fixture gap, not the no-op behaviour these three tests exist to
+# check. Opt it out after each reset so these tests keep testing what their
+# names say.
+
 test_start "DRY_RUN=true + no-change: target is unchanged after run"
 reset_launchagents
+_xaca0734_record_optout "com.aiteamforge.host-ready.plist"
 # Seed target with the real rendered content so diff sees no change
 FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
 content_before="$(cat "$BACKUP_PLIST")"
@@ -692,6 +710,7 @@ test_pass
 
 test_start "DRY_RUN=true + no-change: no .new tempfile remains after run"
 reset_launchagents
+_xaca0734_record_optout "com.aiteamforge.host-ready.plist"
 # Seed with real content so diff is clean
 FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
 FORCE=false DRY_RUN=true run_update_launchagents >/dev/null 2>&1
@@ -700,6 +719,7 @@ test_pass
 
 test_start "DRY_RUN=true + no-change: output reports 'All LaunchAgents up to date'"
 reset_launchagents
+_xaca0734_record_optout "com.aiteamforge.host-ready.plist"
 # Seed with real content so diff is clean (materializes all mandatory agents)
 FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
 output="$(FORCE=false DRY_RUN=true run_update_launchagents 2>&1)"
@@ -1266,6 +1286,7 @@ for _fn in uninstall_backup_launchagent \
            uninstall_cellar_watch_launchagent \
            uninstall_auto_upgrade_launchagent \
            uninstall_lcars_watch_launchagent \
+           uninstall_host_ready_launchagent \
            uninstall_kanban_system; do
   _body="$(_extract_func "$_fn")"
   if [ -z "$_body" ]; then

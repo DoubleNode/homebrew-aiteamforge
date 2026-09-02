@@ -2516,6 +2516,119 @@ uninstall_knowledge_sync_launchagent() {
     fi
 }
 
+# Install host-ready LaunchAgent (XACA-1066)
+#
+# Per-host login readiness: restores the machine's configured tmux team
+# sessions and, where recorded, switches to the login window — see
+# kanban/plans/XACA-1066/XACA-1066-001-design.md for the full requirement.
+# Modeled 1:1 on install_auto_upgrade_launchagent above (mandatory-set member,
+# same opt-out-gated / inline-sed / load-verify shape).
+#
+# Script installed to: $AITEAMFORGE_DIR/scripts/kb-host-ready.sh
+# Plist:               ~/Library/LaunchAgents/com.aiteamforge.host-ready.plist
+# Log:                 $AITEAMFORGE_DIR/logs/host-ready.log
+#
+# THIS IS A FRESH-INSTALL PATH, not the only one. A machine that already has
+# scripts/kb-host-ready.sh but never had the plist (i.e. it upgraded across
+# the XACA-1066 release rather than running `aiteamforge setup`) is reached by
+# a DIFFERENT path: update_launchagents()'s mandatory-set loop in
+# aiteamforge-upgrade.sh, generically, because com.aiteamforge.host-ready.plist
+# is in _xaca0734_mandatory_launchagent_basenames (lib/launchagents.sh). The
+# script itself reaching an upgraded box is covered by that file's
+# _xaca0673_mandatory_materialize_basenames entry (XACA-1066). This installer
+# covers the fresh-install / `aiteamforge setup` (including reconfigure) case.
+#
+# XACA-0571-014 SIBLING-DRIFT NOTE: this installer uses inline sed for
+# first-time render, same as install_auto_upgrade_launchagent. A SECOND
+# renderer lives at libexec/lib/launchagents.sh (_render_launchagent_template,
+# shared by aiteamforge-upgrade.sh and aiteamforge-doctor.sh) which re-renders
+# the SAME template on every `aiteamforge upgrade` / `doctor --fix`. Both must
+# understand the SAME placeholder vocabulary for this template
+# ({{AITEAMFORGE_DIR}}, {{HOME_DIR}}, {{LOG_DIR}}, and any placeholder the
+# template's author actually used) — adding a placeholder to the template
+# requires updating BOTH sed chains, or one of the two render paths ships a
+# plist with unresolved {{...}} tokens.
+#
+# The absent-config no-op (§1.4 of the design) lives entirely INSIDE
+# kb-host-ready.sh, not here — this installer's only job is to get the plist
+# and the script onto disk and loaded. A box with no
+# ~/.aiteamforge/host-ready.json still gets this LaunchAgent; it just does
+# nothing when it fires. That is the property that licenses this agent's
+# membership in the mandatory set — see the comment on
+# _xaca0734_mandatory_launchagent_basenames in lib/launchagents.sh.
+install_host_ready_launchagent() {
+    local plist_template="$INSTALL_ROOT/share/templates/kanban/host-ready-plist.template"
+    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.host-ready.plist"
+    local script_src="$INSTALL_ROOT/share/scripts/kb-host-ready.sh"
+    local script_dest="$AITEAMFORGE_DIR/scripts/kb-host-ready.sh"
+
+    # XACA-0734: see the identical guard in install_backup_launchagent.
+    if _xaca0734_is_opted_out "com.aiteamforge.host-ready.plist"; then
+        info "Skipping host-ready LaunchAgent — opted out. To reinstall, remove this line from $(_xaca0734_optout_file): com.aiteamforge.host-ready.plist"
+        return 0
+    fi
+
+    if [ ! -f "$script_src" ]; then
+        warning "kb-host-ready.sh not found at $script_src (skipping host-ready LaunchAgent)"
+        return 0
+    fi
+
+    if [ ! -f "$plist_template" ]; then
+        warning "host-ready LaunchAgent template not found (skipping)"
+        return 0
+    fi
+
+    info "Installing host-ready LaunchAgent..."
+
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    mkdir -p "$AITEAMFORGE_DIR/logs"
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    cp "$script_src" "$script_dest"
+    chmod +x "$script_dest"
+
+    sed \
+        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+        -e "s|{{HOME_DIR}}|$HOME|g" \
+        -e "s|{{USER_HOME}}|$HOME|g" \
+        -e "s|{{LOG_DIR}}|$AITEAMFORGE_DIR/logs|g" \
+        "$plist_template" > "$plist_dest"
+
+    _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
+
+    # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
+    # installers): verify registration via `launchctl list` rather than trust
+    # the legacy `launchctl load` exit code, which returns 0 even when the
+    # job is rejected.
+    _aitf_launchctl load "$plist_dest" 2>/dev/null || true
+    if launchctl list 2>/dev/null | grep -q "com.aiteamforge.host-ready"; then
+        success "Host-ready LaunchAgent installed (runs at login)"
+        info "Script:  $script_dest"
+        info "Log:     $AITEAMFORGE_DIR/logs/host-ready.log"
+        info "Config:  ~/.aiteamforge/host-ready.json (absent = no-op; run 'kb-host-ready.sh suggest' for a starting point)"
+    else
+        warning "Host-ready LaunchAgent installed but not loaded — activate with: launchctl load ${plist_dest}"
+    fi
+    return 0
+}
+
+# Uninstall host-ready LaunchAgent
+# XACA-0734: records the opt-out — see uninstall_backup_launchagent. A targeted
+# removal here means "do not restore my teams / do not lock at login on this
+# box", which `aiteamforge upgrade` must respect rather than re-materialize.
+uninstall_host_ready_launchagent() {
+    local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.host-ready.plist"
+
+    _xaca0734_record_optout_unless_batch "com.aiteamforge.host-ready.plist"
+
+    if [ -f "$plist_file" ]; then
+        info "Unloading host-ready LaunchAgent..."
+        _aitf_launchctl unload "$plist_file" 2>/dev/null || true
+        rm -f "$plist_file"
+        success "Removed host-ready LaunchAgent"
+    fi
+}
+
 #──────────────────────────────────────────────────────────────────────────────
 # Main Installation Function
 #──────────────────────────────────────────────────────────────────────────────
@@ -2637,6 +2750,7 @@ install_kanban_system() {
     install_lcars_watch_launchagent
     install_cellar_watch_launchagent
     install_knowledge_sync_launchagent
+    install_host_ready_launchagent
     # com.aiteamforge.lcars-runatload retired (XACA-0763-005) — no install-side
     # call. uninstall_lcars_runatload_launchagent below is kept so existing
     # installs can still be torn down.
@@ -2725,6 +2839,7 @@ uninstall_kanban_system() {
     uninstall_lcars_watch_launchagent
     uninstall_lcars_runatload_launchagent
     uninstall_knowledge_sync_launchagent
+    uninstall_host_ready_launchagent
 
     unset _XACA0734_BATCH_UNINSTALL
 

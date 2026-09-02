@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.aiteamforge.host-ready.plist — TEMPLATE (XACA-1066)
+
+  Canonical source:  scripts/templates/host-ready-plist.template   (dev-team)
+  Tap mirror:        share/templates/kanban/host-ready-plist.template
+  Rendered by:       _render_launchagent_template() in
+                      homebrew-tap/libexec/lib/launchagents.sh — the SAME
+                      renderer as this directory's other siblings
+                      (backup-plist.template, lcars-health-plist.template).
+                      No new sed placeholder was added for this template;
+                      every {{TOKEN}} below is already resolved by that
+                      renderer's existing chain (USER_HOME, HOME_DIR,
+                      AITEAMFORGE_DIR, LOG_DIR, ...). The script path is
+                      composed from {{AITEAMFORGE_DIR}} rather than via a new
+                      {{HOST_READY_SCRIPT}} token, the same way the renderer
+                      already composes {{AUTO_UPGRADE_SCRIPT}}'s sibling path.
+  Design doc:         kanban/plans/XACA-1066/XACA-1066-001-design.md §7
+
+  ── WHY THIS FILE'S PROVENANCE DIVERGES FROM ITS share/templates/kanban/
+     SIBLINGS — DO NOT "FIX" THIS BACK ───────────────────────────────────
+  backup-plist.template, lcars-health-plist.template and
+  cr-confluence-poller-plist.template are TAP-NATIVE: they have no dev-team
+  canonical source and no sync-tap.sh entry (verified — grep for their
+  basenames in sync-tap.sh returns nothing). This file is deliberately NOT
+  like them, per the XACA-0340 canonical-source rule and this ticket's own
+  mandate: it lives here, in dev-team, as the single source of truth, and is
+  mirrored to the tap by an explicit `sync_file` line in sync-tap.sh. A
+  future reader who notices the inconsistency with its directory-mates
+  should not "correct" it by deleting the sync_file entry or moving this
+  file tap-side-only — that would silently detach it from XACA-0340 and let
+  the next tap-only edit revert on the next forward sync. The shared
+  DESTINATION directory (share/templates/kanban/) is correct because this
+  template is rendered by the same shared renderer those siblings use; only
+  the PROVENANCE differs.
+
+  ── TWO HARD REQUIREMENTS, BOTH VERIFIED — DO NOT "MODERNIZE" ───────────
+
+  1. /bin/bash, NEVER /bin/zsh or a shebang-only invocation.
+     Every <team>-startup.sh opens with a `cleanup_orphans` sweep:
+       ps -eo pid,ppid,tty,comm | grep zsh | grep "??" | awk '$2 == 1 {print $1}' | xargs kill
+     i.e. it kills every zsh process with ppid 1 and no controlling tty. A
+     LaunchAgent-spawned process is EXACTLY that shape. If this plist ever
+     invoked kb-host-ready.sh as zsh, the very first startup script the
+     restore loop execs would kill its own parent mid-run — the lock step
+     (§6 of the design) would then never be reached, silently, and on
+     lock_after_login:true hosts that is a privacy hole, not a cosmetic bug.
+     kb-host-ready.sh is itself #!/usr/bin/env bash for the same reason.
+
+  2. PATH MUST include /opt/homebrew/bin.
+     XACA-0713: launchd's inherited environment does not include Homebrew's
+     bin dir, and that is where `tmux` lives on this fleet. Without it every
+     tmux probe and every team restore invocation fails silently.
+
+  ── TMUX_TMPDIR — DELIBERATE AND VERIFIED, NOT A LIMITATION ─────────────
+  Set to the literal /tmp below. This is correct for this fleet and was
+  verified live, not inferred.
+
+  tmux resolves its socket dir as ${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)
+  (see kanban-helpers.sh). TMUX_TMPDIR is set NOWHERE in this repo's shell
+  surface nor in the user's zsh startup files, so /tmp is the operative
+  default for every interactively-started team. Confirmed against the
+  running fleet: sockets live at /private/tmp/tmux-<uid>/ (academy, dns,
+  finance-personal, legal-coparenting, medical, ...), and
+  `tmux -L academy display-message -p '#{socket_path}'` reports
+  /private/tmp/tmux-<uid>/academy.
+
+  Pinning the literal here is therefore DEFENSIVE: it forces this launchd
+  job onto the same socket directory the interactive sessions already use,
+  closing exactly the divergence a launchd context could otherwise
+  introduce. tests/test-xaca-0983-lcars-tmux-session-recreate.sh exists to
+  simulate that very hazard ("a launchd agent whose $TMPDIR differs").
+
+  DO NOT "fix" this by resolving `getconf DARWIN_USER_TEMP_DIR` inside
+  kb-host-ready.sh. That would put this agent's sockets under
+  /var/folders/<hash>/T/ while every interactive session stays on /tmp, so
+  a restored team would be INVISIBLE to the user's own <team>-connect.sh —
+  the precise failure this literal prevents. (kb-ttyd-bridge.sh's
+  {{TMUX_TMPDIR}} placeholder resolves ${TMUX_TMPDIR:-/tmp}, which on this
+  fleet evaluates to /tmp — the same value, reached by a longer route.)
+
+  Genuinely open: per-host confirmation that M4Mini and M1Pro also resolve
+  to /tmp. Neither sets TMUX_TMPDIR today, but that is a per-host fact and
+  is carried into subitem 007's on-host checklist.
+
+  ── StandardOutPath / StandardErrorPath ─────────────────────────────────
+  Both point at the SAME file. This runs unattended (nobody is watching
+  stdout at login), so a single chronologically-interleaved log is more
+  useful post-mortem than two files that have to be read side by side to
+  reconstruct the sequence — the same choice auto-upgrade-launchagent.template.plist
+  makes for the same reason.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiteamforge.host-ready</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{AITEAMFORGE_DIR}}/scripts/kb-host-ready.sh</string>
+        <string>login</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/host-ready.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/host-ready.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>{{HOME_DIR}}</string>
+        <key>AITEAMFORGE_DIR</key>
+        <string>{{AITEAMFORGE_DIR}}</string>
+        <key>TMUX_TMPDIR</key>
+        <string>/tmp</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+</dict>
+</plist>

@@ -76,6 +76,7 @@ com.aiteamforge.lcars-health.plist:kanban/lcars-health-plist.template
 com.aiteamforge.auto-upgrade.plist:auto-upgrade/auto-upgrade-launchagent.template.plist
 com.aiteamforge.lcars-watch.plist:auto-upgrade/lcars-watch-launchagent.template.plist
 com.aiteamforge.cellar-watch.plist:auto-upgrade/cellar-watch-launchagent.template.plist
+com.aiteamforge.host-ready.plist:kanban/host-ready-plist.template
 EOF
 }
 
@@ -116,6 +117,34 @@ EOF
 #       down until a human notices.
 #   com.aiteamforge.kanban-backup.plist
 #       Periodic kanban board backups. Without it board data has no recovery point.
+#   com.aiteamforge.host-ready.plist (XACA-1066)
+#       Per-host login readiness: restores a machine's configured tmux team
+#       sessions and, where recorded, switches to the login window so a second
+#       user can reach their own account without ending the owner's session.
+#       Added by owner decision on XACA-1066, whose root incident is the SAME
+#       "self-sealing, no human present" shape this mandatory set was created
+#       for (XACA-0734): after an unattended M4Mini reset, no supported
+#       mechanism restored the team tmux sessions and every user-scoped
+#       aiteamforge LaunchAgent (including auto-upgrade) stayed down until a
+#       human physically logged in. A box without this agent is exactly that
+#       box again.
+#       WHAT LICENSES MEMBERSHIP HERE, specifically: the script backing this
+#       agent (scripts/kb-host-ready.sh) is a COMPLETE NO-OP whenever its
+#       config file (~/.aiteamforge/host-ready.json) is absent — verified by
+#       filesystem diff (no files created, not even a state file), not by a
+#       log-message grep. So materializing the plist fleet-wide costs nothing
+#       behaviourally on every box that has not opted in via a config file;
+#       the plist itself is inert without one. This is what distinguishes it
+#       from lcars-watch/cellar-watch below (excluded for the OPPOSITE
+#       reason — they'd add live filesystem watchers to boxes that never had
+#       them) and makes the "meaningfully broken, not merely less convenient"
+#       bar something this entry actually clears rather than argues past.
+#       RunAtLoad only, no KeepAlive — a one-shot per login, not a resident
+#       server, so `aiteamforge upgrade`'s mandatory `launchctl load` at
+#       upgrade time is guarded INSIDE the script (a login-session stamp +
+#       session-age refusal) rather than here, so an upgrade landing mid-day
+#       cannot suspend a working session. See XACA-1066-001-design.md §4.5/§7.3
+#       for the full reasoning — do not re-derive it from scratch.
 #
 # DELIBERATE EXCLUSIONS — do not re-litigate these without a reason:
 #   com.aiteamforge.lcars-watch.plist / com.aiteamforge.cellar-watch.plist
@@ -134,6 +163,7 @@ _xaca0734_mandatory_launchagent_basenames() {
 com.aiteamforge.auto-upgrade.plist
 com.aiteamforge.lcars-health.plist
 com.aiteamforge.kanban-backup.plist
+com.aiteamforge.host-ready.plist
 EOF
 }
 

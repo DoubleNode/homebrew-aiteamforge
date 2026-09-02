@@ -1480,6 +1480,23 @@ PYEOF
 # same reason kb-init-team needed one) — this entry alone is not sufficient,
 # since a mandatory-materialize basename that never reaches the sweep loop is
 # never evaluated in the first place.
+# XACA-1066: kb-host-ready.sh is a BRAND-NEW file, same gap class as
+# remote-tmux-attach.sh above — it already carries the .sh extension, so
+# update_runtime_helpers' self-maintaining *.sh glob sweep refreshes it
+# automatically ONCE PRESENT, but the sweep's default rule is "only refresh
+# what's already there", and a machine upgrading across this release has no
+# target on disk yet. Without this entry the script that backs
+# com.aiteamforge.host-ready.plist (mandatory as of XACA-1066 — see
+# lib/launchagents.sh) would never reach an already-installed box: the plist
+# would render and load (that half IS covered, generically, by
+# update_launchagents()'s mandatory-set loop), launchd would fire it at the
+# next login, and it would exec a script that does not exist — a guaranteed
+# failure on every upgraded box, silent except in the plist's own log. A
+# fresh install/`aiteamforge setup` does not need this entry: `share/scripts/`
+# is bulk-copied (and chmod +x'd) wholesale by aiteamforge-setup.sh's
+# "Copying framework files" step, which runs before install_kanban_system;
+# this list exists specifically for boxes that skip that step because they
+# are upgrading, not installing.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -1490,6 +1507,7 @@ lcars-launch-helpers.sh
 lcars-remote-atf-resolve.sh
 kb-api-key
 kb-ttyd-bridge.sh
+kb-host-ready.sh
 EOF
 }
 

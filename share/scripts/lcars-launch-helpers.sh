@@ -679,7 +679,19 @@ is_headless() {
 # Replaces the repeated literal `[[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep`
 # across all startup scripts (XACA-0614 sibling-drift fix R1).
 # (XACA-0614)
+#
+# Override: AITF_NO_ITERM_GUI=1 forces this to report "no GUI", regardless of
+# what is actually running. Added for XACA-1066 (kb-host-ready.sh restore):
+# at login, if iTerm2 is ALSO a login item racing the restore, `pgrep` can
+# flip true mid-run and the 4 AppleScript blocks this function gates would
+# then drive tabs into a window that isn't ready yet (XACA-1066-001-design.md
+# §9 R3 — "a genuine problem with the approach as specified"). A headless
+# restore (tmux sessions created, no iTerm tabs opened) satisfies "restore
+# team sessions" for that caller, so kb-host-ready.sh sets this before
+# invoking any `<team>-startup.sh`. Every other caller is unaffected — this
+# only changes behavior when the caller has explicitly opted in.
 has_iterm_gui() {
+    if [[ "${AITF_NO_ITERM_GUI:-}" == "1" ]]; then return 1; fi
     [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]] || pgrep -f "iTerm.app" >/dev/null 2>&1
 }
 
