@@ -268,7 +268,43 @@ _hc_host_matches() {
     return 1
 }
 
-# _hc_team_ownership_state <team>
+# _hc_host_matches_resolved <declared> <actual> <scutil_name> <short_name>
+# XACA-1063-016: NOT part of the drift-guarded trio above (_hc_host_normalize
+# / _hc_this_host_id / _hc_host_matches must stay byte-identical to
+# kanban-helpers.sh's _kb_* originals — see the "CANONICAL SOURCE" block
+# near the top of this section). This is a purely local performance helper
+# with no canonical counterpart, free to exist only here.
+#
+# Same matching semantics as _hc_host_matches, but takes the live host-name
+# forms (scutil ComputerName, hostname -s) as PARAMETERS instead of deriving
+# them via a fresh subprocess fork on every call. _hc_host_matches is called
+# once per declared-host team per sweep (_hc_team_ownership_state's callsite
+# below); on a host with several declared-host teams that means several
+# redundant scutil+hostname forks per 120s sweep for values that cannot have
+# changed since _hc_this_host_id resolved the same host identity moments
+# earlier in the same sweep (XACA-1063-016 review finding — see PR #810).
+# Resolve those forms ONCE per sweep (run_health_check, alongside
+# _hc_actual_host) and thread them through here instead.
+#
+# _hc_host_matches itself is left completely untouched — this function
+# exists purely so the guarded original never has to change.
+_hc_host_matches_resolved() {
+    local declared="${1-}" actual="${2-}" scutil_name="${3-}" short_name="${4-}"
+    [[ -z "$declared" ]] && return 1
+
+    local want
+    want=$(_hc_host_normalize "$declared")
+    [[ -z "$want" ]] && return 1
+
+    local cand
+    for cand in "$actual" "$scutil_name" "$short_name"; do
+        [[ -z "$cand" ]] && continue
+        [[ "$(_hc_host_normalize "$cand")" == "$want" ]] && return 0
+    done
+    return 1
+}
+
+# _hc_team_ownership_state <team> <actual> [<scutil_name> <short_name>]
 # Resolves one team's ownership state against _TEAM_PRIMARY_HOST + this
 # host's identity. Echoes one of: "local" (restart-eligible, silent),
 # "absent" (restart-eligible, silent — row 1), "malformed" (restart-eligible,
@@ -280,15 +316,19 @@ _hc_host_matches() {
 # the check is duplicated defensively here so this function is safe to call
 # in isolation too).
 #
-# THE ROW-6 GUARD: _hc_host_matches queries scutil/hostname internally on
-# every call regardless of what "actual" it's handed, so an empty actual
-# alone does not automatically make every team "foreign" — but it is exactly
-# the state a naive reading of row 3 gets wrong (see XACA-1063-001 § 2's
-# "sixth state"). Treating empty actual as its own explicit state, checked
-# FIRST, is what prevents that failure mode rather than relying on
-# _hc_host_matches to happen to fail safe.
+# THE ROW-6 GUARD: when called WITHOUT scutil_name/short_name (isolated call
+# — e.g. a test calling this directly), it falls back to _hc_host_matches,
+# which queries scutil/hostname internally on every call regardless of what
+# "actual" it's handed, so an empty actual alone does not automatically make
+# every team "foreign" — but it is exactly the state a naive reading of row 3
+# gets wrong (see XACA-1063-001 § 2's "sixth state"). Treating empty actual
+# as its own explicit state, checked FIRST below, is what prevents that
+# failure mode rather than relying on _hc_host_matches to happen to fail
+# safe. The optimized path (scutil_name/short_name supplied by the sweep
+# loop, XACA-1063-016) preserves this identically — only WHERE the live
+# names are derived changes, never the matching logic or the row-6 ordering.
 _hc_team_ownership_state() {
-    local team="$1" actual="$2"
+    local team="$1" actual="$2" scutil_name="${3-}" short_name="${4-}"
     # NOTE the `-` (not `:-`). A team with a MALFORMED (present-but-empty)
     # primary_host has _TEAM_PRIMARY_HOST[$team] set to the empty string, and
     # `:-` treats empty-but-set the same as unset — which would silently
@@ -315,7 +355,17 @@ _hc_team_ownership_state() {
         return 0
     fi
 
-    if _hc_host_matches "$declared" "$actual"; then
+    # XACA-1063-016: use the resolved-forms variant when the sweep loop has
+    # already supplied scutil_name/short_name (the hot path, avoids 2
+    # subprocess forks per call); fall back to the guarded, unmodified
+    # _hc_host_matches for an isolated call that didn't supply them.
+    if [[ -n "$scutil_name" || -n "$short_name" ]]; then
+        if _hc_host_matches_resolved "$declared" "$actual" "$scutil_name" "$short_name"; then
+            printf '%s\n' "local"
+        else
+            printf '%s\n' "foreign"
+        fi
+    elif _hc_host_matches "$declared" "$actual"; then
         printf '%s\n' "local"
     else
         printf '%s\n' "foreign"
@@ -1338,6 +1388,19 @@ run_health_check() {
         log "⚠️  WARNING: could not resolve this host's identity (scutil --get ComputerName and hostname -s both empty/unavailable) — host-ownership gate disabled for this sweep; every team restarts as if unclaimed (fail-open, XACA-1063-001 row 6)"
     fi
 
+    # XACA-1063-016: resolve the live host-name forms ONCE per sweep too
+    # (same rationale as _hc_actual_host above) and thread them into
+    # _hc_team_ownership_state per team, so _hc_host_matches_resolved never
+    # has to fork scutil/hostname again for a value that cannot have changed
+    # since the lines above resolved it. See _hc_host_matches_resolved's
+    # comment for the accounting (2 forks x N declared-host teams x 720
+    # sweeps/day, previously).
+    local _hc_scutil_name="" _hc_short_name=""
+    if command -v scutil &>/dev/null; then
+        _hc_scutil_name=$(scutil --get ComputerName 2>/dev/null)
+    fi
+    _hc_short_name=$(hostname -s 2>/dev/null)
+
     # XACA-0706: one ps sweep up front — map every live LCARS server's actual
     # bound port by team, so the loop can catch a server bound to the wrong port
     # (the XACA-0613 refresh-gap) before the registry-port health check masks it.
@@ -1368,7 +1431,7 @@ run_health_check() {
         # ruling this implements (XACA-1063-001). This can only ever
         # SUBTRACT a restart — every branch except "foreign" falls straight
         # through to the unchanged pre-XACA-1063 sweep below.
-        _hc_ownership=$(_hc_team_ownership_state "$team" "$_hc_actual_host")
+        _hc_ownership=$(_hc_team_ownership_state "$team" "$_hc_actual_host" "$_hc_scutil_name" "$_hc_short_name")
         case "$_hc_ownership" in
             foreign)
                 # Row 3: positive foreign-host claim — suppress. Do not
