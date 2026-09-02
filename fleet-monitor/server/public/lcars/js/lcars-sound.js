@@ -524,6 +524,16 @@
             target.closest('[data-category]') ||
             target.closest('[data-tag]') ||
             target.closest('.candy-pill:not([data-candy])') ||  // Fleet Monitor: interactive pills only — metric display pills carry data-candy (XACA-0533 review)
+            // XACA-1022-016 (UX dissent): #fleet-offline-indicator is a `.legend-pill`, so the
+            // normalization of `.legend-pill` to 'action' below would otherwise sweep it into the
+            // general-button tone. It is not a button: its own markup comment in
+            // lcars-dashboard.html describes it as a persistent OFFLINE cue "escalating to a red
+            // alert state above zero", replacing the red-alert cue the removed OFFLINE candy pill
+            // carried. That is alert-shaped by this group's own definition (status changes), so it
+            // is matched HERE, ahead of the action branch, to keep its status semantics.
+            // Inert on the lcars-ui cockpit (the id exists only in Fleet Monitor markup), which is
+            // why both engine copies stay byte-identical.
+            target.closest('#fleet-offline-indicator') ||
             target.closest('#sound-toggle');
         if (container) {
             // sound-toggle is handled by toggleMute directly; skip double-play

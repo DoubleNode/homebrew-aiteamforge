@@ -84,13 +84,13 @@ var ENGINES = [
     {
         label: 'fleet-monitor',
         filePath: path.join(__dirname, '../../fleet-monitor/server/public/lcars/js/lcars-sound.js'),
-        totalClosestCalls: 21,
+        totalClosestCalls: 22,
         distinctSelectors: 20
     },
     {
         label: 'lcars-ui',
         filePath: path.join(__dirname, '../js/lcars-sound.js'),
-        totalClosestCalls: 21,
+        totalClosestCalls: 22,
         distinctSelectors: 20
     }
 ];
@@ -672,6 +672,18 @@ ENGINES.forEach(function (engine) {
         assert.equal(env.hooks.classifySound(makeTarget(['.totally-unmapped-thing'])), null);
     });
 
+    // XACA-1022-016 (UX dissent): #fleet-offline-indicator carries .legend-pill,
+    // so the normalization above would sweep it into 'action'. Its own markup
+    // comment calls it a persistent OFFLINE cue "escalating to a red alert state
+    // above zero" — a status indicator, not a general button — so it is matched
+    // by the ALERT group ahead of the action branch. This test pins that ordering:
+    // if someone removes the alert-group entry, the .legend-pill action entry
+    // silently takes over and the red-alert cue starts sounding like a button.
+    test(P + 'classify: #fleet-offline-indicator -> alert (beats its own .legend-pill action match)', function () {
+        var env = buildEnv(engine);
+        assert.equal(env.hooks.classifySound(makeTarget(['#fleet-offline-indicator', '.legend-pill'])), 'alert');
+    });
+
     // ─── legend-pill normalization (XACA-1022-015) ─────────────────────────
     //
     // Historically fleet-monitor's alert-group condition carried an EXTRA
@@ -682,8 +694,11 @@ ENGINES.forEach(function (engine) {
     // copies) was unreachable dead code. That divergence is now normalized:
     // '.legend-pill' classifies as 'action' in BOTH copies, via the single
     // action-group entry that already existed in both. This is a
-    // user-perceptible behaviour change on Fleet Monitor's SETTINGS / ADMIN /
-    // SOUND utility-bar pills (alert -> action) — see the comment above
+    // user-perceptible behaviour change on Fleet Monitor's SETTINGS and ADMIN
+    // utility-bar pills (alert -> action). NOT the SOUND pill (#sound-toggle
+    // classifies as null, silent before and after) and NOT the OFFLINE
+    // indicator (#fleet-offline-indicator is matched by the alert group ahead
+    // of this one, deliberately — see below) — see the comment above
     // _classifyMatch's action branch in lcars-sound.js for the full
     // rationale. Do NOT reintroduce the alert-group line.
 
