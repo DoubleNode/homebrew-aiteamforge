@@ -16,12 +16,67 @@
     <link rel="apple-touch-icon" sizes="120x120" href="/appicons/apple-touch-icon-120.png">
     <link rel="icon" type="image/png" sizes="192x192" href="/appicons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/appicons/icon-512.png">
-    <link rel="manifest" href="/appicons/fleet.webmanifest">
+    <link rel="manifest" href="/appicons/fleet.webmanifest?dashboard=academy&amp;ui=lcars">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="Fleet Monitor">
+    <meta name="apple-mobile-web-app-title" content="Academy">
     <title>LCARS - Fleet Operations</title>
+
+    <!-- XACA-1030-004: lcars-dashboard.html is the ONE page under public/
+         whose dashboard is chosen at RUNTIME via ?dashboard=<id>, not baked
+         in at author time. Every other page (the 4 root pages + 7 lcars/
+         redirect stubs, XACA-1030-002/005) is wired to a single hardcoded
+         dashboard= manifest variant because each one only ever serves that
+         one dashboard. This page serves all five, selected by query param
+         each load, so its correct manifest variant is unknowable when the
+         HTML is written and must be resolved here instead.
+         /lcars/, /lcars/all, /lcars/mainevent and /lcars/doublenode all
+         302-redirect to this file, so it is where nearly every real
+         Add-to-Home-Screen actually happens — get this wrong and every one
+         of those bookmarks launches the wrong dashboard.
+         The static href/content set above are the no-JS fallback (academy)
+         and are intentionally left in place, not removed.
+         Validate against a literal allowlist BEFORE writing anything to the
+         DOM. The server validates dashboard= too (falls back to academy for
+         anything unrecognized), but that does not make it safe to reflect
+         an unvalidated query param into an href/content attribute here —
+         keeping the raw value out of the DOM entirely, and writing only the
+         literal allowlisted strings, is the correct layer to stop it. -->
+    <script>
+    (function () {
+        try {
+            var DASHBOARDS = {
+                academy:    'Academy',
+                mainevent:  'Main Event',
+                doublenode: 'DoubleNode',
+                finance:    'Finance',
+                all:        'All Fleet'
+            };
+            var requested = new URLSearchParams(location.search).get('dashboard');
+            var id = Object.prototype.hasOwnProperty.call(DASHBOARDS, requested)
+                ? requested
+                : 'academy';
+
+            var manifestLink = document.querySelector('link[rel="manifest"]');
+            if (manifestLink) {
+                manifestLink.setAttribute(
+                    'href',
+                    '/appicons/fleet.webmanifest?dashboard=' + id + '&ui=lcars'
+                );
+            }
+
+            var titleMeta = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+            if (titleMeta) {
+                titleMeta.setAttribute('content', DASHBOARDS[id]);
+            }
+        } catch (e) {
+            // Defensive: never let this throw. A head-script exception here
+            // would abort the inline scripts that follow it on this page
+            // (e.g. the Chart.js CDN fallback below).
+        }
+    })();
+    </script>
 
     <!-- LCARS-003: Antonio Typography from Google Fonts - Preload for faster loading -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -34,7 +89,7 @@
     <!-- LCARS Kiosk Mode Styles (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-kiosk.css?v=20260825e">
     <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
-    <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20260901a">
+    <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20260827a">
     <!-- XACA-0989: collapsible divisions + compact session chips (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-division-collapse.css?v=20260827a">
     <!-- LCARS Kiosk Health & Status Screen Styles -->
@@ -246,18 +301,7 @@
                 <!-- SECTION: ORGANIZATIONS - Division/Team Hierarchy                     -->
                 <!-- ═══════════════════════════════════════════════════════════════════ -->
                 <div class="lcars-section" data-section="organizations">
-                    <!-- XACA-1060: MACHINES filter bar. Container filled by renderMachineFilterNav();
-                         each pill is an independent multi-select show/hide toggle over that
-                         machine's team cards below (not a single-select radio like ORG nav). -->
                     <section>
-                        <div class="section-header purple">
-                            <span class="section-title">FILTER BY MACHINE</span>
-                            <div class="section-bar"></div>
-                        </div>
-                        <div id="machine-nav" class="machine-nav" style="margin-top: 15px;"></div>
-                    </section>
-
-                    <section style="margin-top: 20px;">
                         <div class="section-header peach">
                             <span class="section-title">ALL DIVISIONS</span>
                             <div class="section-bar"></div>
@@ -774,6 +818,6 @@
     <!-- AI Engines Registry UI (XACA-0281) — load after core so lcars:sectionChange is available -->
     <script src="js/lcars-engines.js"></script>
     <!-- LCARS Sound Engine (XACA-0533) — button tap audio feedback with persistent mute -->
-    <script src="js/lcars-sound.js?v=1.2"></script>
+    <script src="js/lcars-sound.js?v=1.0"></script>
 </body>
 </html>

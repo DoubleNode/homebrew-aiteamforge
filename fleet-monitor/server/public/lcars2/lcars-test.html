@@ -16,11 +16,16 @@
     <link rel="apple-touch-icon" sizes="120x120" href="/appicons/apple-touch-icon-120.png">
     <link rel="icon" type="image/png" sizes="192x192" href="/appicons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/appicons/icon-512.png">
-    <link rel="manifest" href="/appicons/fleet.webmanifest">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="manifest" href="/appicons/fleet.webmanifest?ui=root">
+    <!-- XACA-0992-017: apple-mobile-web-app-capable / mobile-web-app-capable are
+         deliberately OMITTED here. This is a diagnostic/test surface, not a
+         real destination a user would rely on — standalone mode's only
+         effect is stripping Safari's chrome (no address bar, no back
+         button), which has no benefit on a throwaway diagnostic view and
+         only removes the user's way back out. The touch-icon/manifest
+         links above still give a bookmark of this page a proper icon. -->
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="Fleet Monitor">
+    <meta name="apple-mobile-web-app-title" content="Fleet">
     <title>LCARS Fleet Monitor - Framework Test</title>
 
     <!-- LCARS-003: Antonio Typography from Google Fonts -->

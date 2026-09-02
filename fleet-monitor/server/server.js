@@ -669,6 +669,122 @@ function setStaticCacheHeaders(res, filePath) {
     }
 }
 
+// ============================================================================
+// PER-DASHBOARD WEB APP MANIFEST (XACA-1030)
+// ============================================================================
+
+// ui=lcars2 filename map. Genuinely irregular per-dashboard filenames (NOT
+// derivable programmatically the way the ui=lcars form is -- e.g. academy's
+// page is "lcars-index.html", not "lcars-academy.html"). `finance` has no
+// lcars2 page yet, so it is intentionally absent here; the route below falls
+// back to the ui=lcars form for any dashboard id missing from this map.
+const MANIFEST_LCARS2_PATHS = {
+    academy: '/lcars2/lcars-index.html',
+    mainevent: '/lcars2/lcars-mainevent.html',
+    doublenode: '/lcars2/lcars-doublenode.html',
+    all: '/lcars2/lcars-all.html',
+};
+
+const MANIFEST_VALID_UI = new Set(['root', 'lcars', 'lcars2']);
+const MANIFEST_DEFAULT_DASHBOARD = 'academy';
+const MANIFEST_DEFAULT_UI = 'lcars';
+// XACA-0992-016 lesson: iOS truncates a home-screen label at roughly 11-12
+// characters; a prior manifest route shipped short_name = name uncapped and
+// had to be fixed. All 5 current dashboard names are <= 10 chars, so this
+// cap is a no-op today -- it exists so a future long dashboard name can't
+// regress into an unusable home-screen label.
+const MANIFEST_SHORT_NAME_MAX_LEN = 12;
+
+/**
+ * GET /appicons/fleet.webmanifest?dashboard=<id>&ui=<root|lcars|lcars2>
+ *
+ * Per-dashboard Web App Manifest (XACA-1030). MUST be registered BEFORE the
+ * `express.static(public)` mount immediately below -- Express matches
+ * middleware/routes in registration order, so a route registered earlier
+ * shadows a static file that would otherwise match the same path
+ * (public/appicons/fleet.webmanifest). That static file is intentionally
+ * left in place as a belt-and-braces fallback: if this route is ever moved
+ * below the static mount by accident, requests fall through to a known,
+ * correct-for-academy manifest rather than a 404.
+ *
+ * iOS 16.4+ reads `start_url` from this manifest at Add-to-Home-Screen time.
+ * Before this route existed, every dashboard page linked the SAME static
+ * manifest with `start_url` hardcoded to Academy, so an Add-to-Home-Screen
+ * bookmark created from any other dashboard (e.g. ALL FLEET) silently
+ * opened Academy instead. This route computes start_url/name/short_name
+ * from validated `dashboard`/`ui` query params so each dashboard's bookmark
+ * opens back into that same dashboard.
+ *
+ * SECURITY: `dashboard` is validated against the live `id` values in
+ * data/dashboards.json (via loadDashboardConfig(), so a newly-added
+ * dashboard is picked up with no server restart); `ui` is validated against
+ * a fixed 3-value set. Neither raw query param is EVER echoed into the
+ * response -- only the matching server-side table value is used. A caller
+ * value reaching `start_url` unvalidated would let it redirect
+ * Add-to-Home-Screen installs to an arbitrary path; validating against an
+ * allow-list closes that off entirely rather than merely encoding it.
+ */
+app.get('/appicons/fleet.webmanifest', (req, res) => {
+    const config = loadDashboardConfig();
+    const dashboards = config.dashboards || [];
+    const validIds = new Set(dashboards.map((d) => d.id));
+
+    const rawDashboard = typeof req.query.dashboard === 'string' ? req.query.dashboard : '';
+    const dashboardId = validIds.has(rawDashboard) ? rawDashboard : MANIFEST_DEFAULT_DASHBOARD;
+
+    const rawUi = typeof req.query.ui === 'string' ? req.query.ui : '';
+    const ui = MANIFEST_VALID_UI.has(rawUi) ? rawUi : MANIFEST_DEFAULT_UI;
+
+    let startUrl;
+    let name;
+    let shortName;
+
+    if (ui === 'root') {
+        // `dashboard` is ignored entirely for ui=root.
+        startUrl = '/';
+        name = 'Fleet Monitor';
+        shortName = 'Fleet';
+    } else {
+        const dashboardEntry = dashboards.find((d) => d.id === dashboardId);
+        name = (dashboardEntry && dashboardEntry.name) || 'Academy';
+
+        if (ui === 'lcars2' && MANIFEST_LCARS2_PATHS[dashboardId]) {
+            startUrl = MANIFEST_LCARS2_PATHS[dashboardId];
+        } else {
+            // ui=lcars, OR ui=lcars2 for a dashboard with no lcars2 page yet
+            // (currently: finance) -- falls back to the ui=lcars form. This
+            // is also today's exact pre-existing behavior when no query
+            // string is supplied at all (dashboard=academy, ui=lcars).
+            startUrl = `/lcars/lcars-dashboard.html?dashboard=${dashboardId}`;
+        }
+
+        shortName = name.slice(0, MANIFEST_SHORT_NAME_MAX_LEN);
+    }
+
+    const manifest = {
+        name,
+        short_name: shortName,
+        start_url: startUrl,
+        scope: '/',
+        display: 'standalone',
+        background_color: '#000000',
+        theme_color: '#000000',
+        icons: [
+            { src: '/appicons/icon-192.png', sizes: '192x192', type: 'image/png' },
+            { src: '/appicons/icon-512.png', sizes: '512x512', type: 'image/png' },
+            { src: '/appicons/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+        ],
+    };
+
+    res.set('Content-Type', 'application/manifest+json');
+    // Live static file today serves `public, max-age=0` -- deliberately kept
+    // this short (not longer-lived): a stale start_url pinned on someone's
+    // home screen is the exact failure mode this route exists to fix.
+    res.set('Cache-Control', 'public, max-age=0, must-revalidate');
+    res.json(manifest);
+});
+
+
 // Disable directory redirect to allow explicit route handlers for /lcars
 app.use(express.static(path.join(__dirname, 'public'), { redirect: false, setHeaders: setStaticCacheHeaders }));
 
