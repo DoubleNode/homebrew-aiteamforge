@@ -588,6 +588,60 @@
         });
     }
 
+    // XACA-1062: given a machine's last-reported `status`, returns the
+    // human-readable status word used in both the stat line and the
+    // aria-label. 'warning' is a real third status (a machine that IS
+    // still reporting but flagged degraded) and must never collapse into
+    // 'offline' -- see the XACA-1062 plan doc's "warning is not offline"
+    // design note. Any status this build doesn't recognize falls back to
+    // 'Offline' (fail toward "treat the count as stale", not toward
+    // "assume the machine is fine").
+    function machineStatusLabel(status) {
+        switch (status) {
+            case 'online': return 'Online';
+            case 'warning': return 'Warning';
+            default: return 'Offline';
+        }
+    }
+
+    // XACA-1062: single source of truth for the MACHINES nav button's stat
+    // text, called from BOTH renderMachineFilterNav() (first paint) and
+    // updateMachineNavStats() (every applyMachineFilter() pass) so the two
+    // sites can never disagree. `cardCount` is the number of rendered
+    // '.team-card[data-machine-host]' nodes for this host -- meaningful
+    // only for an ONLINE machine, since the server excludes non-online
+    // machines' sessions from the `divisions` tree entirely, so a
+    // non-online machine's cardCount is always 0 regardless of how many
+    // sessions it actually has (that's the bug this ticket fixes -- see
+    // plan doc Summary). For a non-online machine we show the LAST-KNOWN
+    // session_count instead, but always paired with the status word:
+    // session_count on the machine record is what that machine last
+    // reported, not what's currently on screen, and showing it bare would
+    // just trade one misleading number ("0 Teams") for another (a stale
+    // count presented as if it were live).
+    function machineNavStatText(status, sessionCount, cardCount) {
+        if (status === 'online') {
+            return cardCount + (cardCount === 1 ? ' Team' : ' Teams');
+        }
+        const count = sessionCount || 0;
+        return machineStatusLabel(status).toUpperCase() + ' · ' + count;
+    }
+
+    // XACA-1062: aria-label text for the MACHINES nav button. Sighted users
+    // get the status from the stat line's text/colour (see XACA-1062-002
+    // for the styling); without this, assistive tech only ever heard
+    // "Toggle team cards for <name>" with no way to learn the machine is
+    // offline (or warning) -- requirement 3 of the XACA-1062 plan doc.
+    function machineNavAriaLabel(displayName, status, sessionCount) {
+        const statusWord = machineStatusLabel(status);
+        if (status === 'online') {
+            return 'Toggle team cards for ' + displayName + ' (' + statusWord + ')';
+        }
+        const count = sessionCount || 0;
+        return 'Toggle team cards for ' + displayName + ' (' + statusWord + ', last known ' +
+            count + (count === 1 ? ' session' : ' sessions') + ')';
+    }
+
     // XACA-1060: MACHINES filter bar. One multi-select toggle button per
     // fleet.machines[] entry, independent of the ORGANIZATIONS nav above
     // (that one is single-target scroll-to; this one show/hides team cards
@@ -611,15 +665,25 @@
 
             const displayName = machine.nickname || machine.hostname;
             const isDisabled = !!machineFilterState[host];
+            const status = machine.status || 'offline';
+            const sessionCount = machine.session_count || 0;
 
             const navButton = document.createElement('button');
             navButton.type = 'button';
-            navButton.className = 'machine-nav-button status-' + (machine.status || 'offline') + (isDisabled ? ' disabled' : '');
+            navButton.className = 'machine-nav-button status-' + status + (isDisabled ? ' disabled' : '');
             navButton.dataset.machineHost = host;
+            // XACA-1062: carried on the button because updateMachineNavStats()
+            // is purely DOM-driven and has no access to fleet.machines[] --
+            // stashing status/session_count here (rather than adding a second
+            // module-scoped machine-data cache) is what lets that function
+            // recompute the identical stat text/aria-label from this same
+            // source of truth instead of a copy of it.
+            navButton.dataset.machineStatus = status;
+            navButton.dataset.machineSessionCount = String(sessionCount);
             navButton.setAttribute('aria-pressed', isDisabled ? 'false' : 'true');
             // setAttribute (not innerHTML) -- not a markup sink, so this is safe
             // even though displayName is untrusted (see textContent note below).
-            navButton.setAttribute('aria-label', 'Toggle team cards for ' + displayName);
+            navButton.setAttribute('aria-label', machineNavAriaLabel(displayName, status, sessionCount));
 
             // textContent, not innerHTML: hostname/nickname arrive from reporter
             // payloads, same untrusted-input class as the `organization` field
@@ -632,15 +696,20 @@
 
             const navStats = document.createElement('span');
             navStats.className = 'machine-nav-stats';
-            // XACA-1060: 0 Teams here is a placeholder, not the real number --
-            // team cards for this poll haven't been created yet at this call
-            // site (renderDivisions calls this BEFORE building division panels,
-            // mirroring renderOrganizationNav's call site). applyMachineFilter(),
-            // wired at the tail of renderDivisions inside the SAME synchronous
-            // render pass (see endRenderPass() below), calls
-            // updateMachineNavStats() to fill in the real count before the
-            // browser ever gets a chance to paint this placeholder.
-            navStats.textContent = '0 Teams';
+            // XACA-1060/XACA-1062: cardCount is always 0 here, not the real
+            // number -- team cards for this poll haven't been created yet at
+            // this call site (renderDivisions calls this BEFORE building
+            // division panels, mirroring renderOrganizationNav's call site).
+            // applyMachineFilter(), wired at the tail of renderDivisions
+            // inside the SAME synchronous render pass (see endRenderPass()
+            // below), calls updateMachineNavStats() to fill in the real
+            // count before the browser ever gets a chance to paint this.
+            // Routing through machineNavStatText() even at this placeholder
+            // stage means a non-online machine's FIRST paint already reads
+            // e.g. "OFFLINE · 44" instead of a "0 Teams" placeholder that
+            // updateMachineNavStats() would otherwise have to overwrite a
+            // moment later -- there is no placeholder text for that case.
+            navStats.textContent = machineNavStatText(status, sessionCount, 0);
             navButton.appendChild(navStats);
 
             navButton.onclick = function() {
@@ -688,10 +757,28 @@
                     if (cards[c].dataset.machineHost === host) count++;
                 }
             }
+            // XACA-1062: this function is purely DOM-driven -- it has no
+            // access to fleet.machines[] -- so status/session_count ride
+            // along on the button's own dataset, stashed there by
+            // renderMachineFilterNav() at first paint (see the comment on
+            // that dataset assignment above). Reading them back here, rather
+            // than keeping a second machine-data cache in sync with it, is
+            // what keeps these two call sites from ever disagreeing.
+            const status = btn.dataset.machineStatus || 'offline';
+            const sessionCount = Number(btn.dataset.machineSessionCount) || 0;
+
             const statsEl = btn.querySelector('.machine-nav-stats');
             if (statsEl) {
-                statsEl.textContent = count + (count === 1 ? ' Team' : ' Teams');
+                statsEl.textContent = machineNavStatText(status, sessionCount, count);
             }
+
+            // aria-label refreshed alongside aria-pressed below -- same
+            // reasoning as XACA-1060's existing aria-pressed refresh: this
+            // function runs on every applyMachineFilter() pass, so a stale
+            // aria-label from first paint would otherwise never update.
+            const nameEl = btn.querySelector('.machine-nav-name');
+            const displayName = nameEl ? nameEl.textContent : host;
+            btn.setAttribute('aria-label', machineNavAriaLabel(displayName, status, sessionCount));
 
             const isDisabled = !!machineFilterState[host];
             btn.classList.toggle('disabled', isDisabled);

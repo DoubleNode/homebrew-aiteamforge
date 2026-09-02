@@ -235,22 +235,46 @@ test('MACHINES nav renders one button per fleet.machines[] entry, positioned bef
     assert.ok(pos & window.Node.DOCUMENT_POSITION_FOLLOWING, 'MACHINES section must precede divisions-container in DOM order');
 });
 
-test('offline/warning machines show "0 Teams" and a distinct status-* class; online machines show their real count', async () => {
+// XACA-1062: independent oracle for the non-online stat/aria-label status
+// word -- deliberately re-derived here rather than imported from the
+// shipped machineStatusLabel(), so this is a real cross-check and not a
+// tautology. 'warning' is the one recognized non-online status; every
+// other value (including 'offline' and anything unrecognized/missing)
+// must read as Offline -- fail CLOSED toward "treat the count as stale",
+// never toward "assume the machine is fine" (see the XACA-1062 plan doc's
+// "warning is not offline" design note).
+function expectedStatusWord(status) {
+    return status === 'warning' ? 'Warning' : 'Offline';
+}
+
+test('offline/warning machines show STATUS · last-known session_count (not a bare card count); online machines show their real count', async () => {
     const fixture = loadFixture();
     const { document, mod } = await setupDashboard();
     mod.setCachedMachineData(fixture.fleet.machines);
     mod.renderDivisions(fixture.fleet.divisions);
 
     const navButtons = document.querySelectorAll('#machine-nav .machine-nav-button');
+    let nonOnlineChecked = 0;
     navButtons.forEach((btn) => {
         const host = btn.dataset.machineHost;
         const m = fixture.fleet.machines.find((mm) => mm.hostname === host);
         assert.ok(btn.classList.contains('status-' + (m.status || 'offline')), `button for ${m.nickname} must carry status-${m.status}`);
         const statsText = btn.querySelector('.machine-nav-stats').textContent;
+        const ariaLabel = btn.getAttribute('aria-label');
         if (m.status === 'offline' || m.status === 'warning') {
-            assert.equal(statsText, '0 Teams', `${m.nickname} (${m.status}) must show 0 Teams`);
+            const statusWord = expectedStatusWord(m.status);
+            const count = m.session_count || 0;
+            // · is U+00B7 MIDDLE DOT -- the exact separator
+            // machineNavStatText() emits, not a lookalike character.
+            assert.equal(statsText, statusWord.toUpperCase() + ' · ' + count, `${m.nickname} (${m.status}) must show ${statusWord.toUpperCase()} · ${count}`);
+            assert.ok(ariaLabel.indexOf('(' + statusWord + ', last known ' + count + (count === 1 ? ' session)' : ' sessions)')) !== -1,
+                `${m.nickname}'s aria-label must convey status + last-known count: got "${ariaLabel}"`);
+            nonOnlineChecked++;
+        } else {
+            assert.ok(ariaLabel.indexOf('(Online)') !== -1, `${m.nickname} (online) aria-label must convey Online status: got "${ariaLabel}"`);
         }
     });
+    assert.equal(nonOnlineChecked, 2, 'fixture ground truth: exactly 2 non-online machines (M1Pro warning, M1Mini offline) must have been checked');
 });
 
 test('per-host card counts match the independent fixture oracle (37 M3Pro / 50 M4Mini / 0 offline hosts, 87 total)', async () => {
@@ -367,7 +391,7 @@ test('deselecting every machine leaves zero visible cards AND zero visible divis
     assert.equal(restoredCards.length, 87, 'restoring every machine must bring back all 87 cards');
 });
 
-test('toggling a machine with zero cards (M1Pro) changes no card visibility and is otherwise harmless', async () => {
+test('toggling a machine with zero cards (M1Pro, status warning) changes no card visibility and is otherwise harmless', async () => {
     const fixture = loadFixture();
     const { document, mod } = await setupDashboard();
     mod.setCachedMachineData(fixture.fleet.machines);
@@ -381,7 +405,11 @@ test('toggling a machine with zero cards (M1Pro) changes no card visibility and 
 
     const btn = document.querySelector(`.machine-nav-button[data-machine-host="${M1PRO_HOST}"]`);
     assert.ok(btn.classList.contains('disabled'), 'the button itself must still reflect the disabled state');
-    assert.equal(btn.querySelector('.machine-nav-stats').textContent, '0 Teams');
+    // XACA-1062: M1Pro's status is 'warning' (not 'offline') in this
+    // fixture, session_count 0 -- the stat text must say WARNING, never
+    // collapse into OFFLINE, and toggling it must not perturb that text.
+    // · is U+00B7 MIDDLE DOT.
+    assert.equal(btn.querySelector('.machine-nav-stats').textContent, 'WARNING · 0');
     mod.toggleMachineFilter(M1PRO_HOST); // restore
 });
 
@@ -573,6 +601,64 @@ test('filter selection SURVIVES two full renderDivisions() re-renders (never res
     assert.ok(m3proHidden, 'every M3Pro card must be hidden after poll #2');
 
     mod.toggleMachineFilter(M3PRO_HOST); // restore
+});
+
+// XACA-1062: same poll-survival discipline as the test directly above,
+// applied to the NEW stat text for a non-online machine, in a real DOM
+// (jsdom, not the stub) and with a non-degenerate (nonzero) last-known
+// session_count -- this fixture's M1Pro/M1Mini both report session_count 0
+// naturally, which would make a survival check vacuous (0 "surviving"
+// unchanged proves nothing about the STATUS·COUNT text itself).
+test('MACHINES nav stat text for a non-online machine survives two full renderDivisions() re-renders unchanged (real DOM, nonzero last-known count)', async () => {
+    const fixture = loadFixture();
+    const machines = JSON.parse(JSON.stringify(fixture.fleet.machines));
+    const m1pro = machines.find((m) => m.hostname === M1PRO_HOST);
+    m1pro.session_count = 44; // status stays 'warning', as this fixture already has it
+
+    const { document, mod } = await setupDashboard();
+    mod.setCachedMachineData(machines);
+    mod.renderDivisions(fixture.fleet.divisions); // poll #1
+
+    function statTextFor() {
+        const btn = document.querySelector(`.machine-nav-button[data-machine-host="${M1PRO_HOST}"]`);
+        return btn.querySelector('.machine-nav-stats').textContent;
+    }
+
+    const text1 = statTextFor();
+    assert.equal(text1, 'WARNING · 44', 'poll #1 must show the real WARNING stat text (· is U+00B7 MIDDLE DOT)');
+
+    mod.renderDivisions(fixture.fleet.divisions); // poll #2 -- real innerHTML='' clear + full rebuild
+    assert.equal(statTextFor(), text1, 'poll #2 must not have drifted from poll #1\'s text');
+
+    mod.renderDivisions(fixture.fleet.divisions); // poll #3
+    assert.equal(statTextFor(), text1, 'poll #3 must still match');
+});
+
+// XACA-1062: real-DOM cross-check that renderMachineFilterNav()'s first
+// paint (called directly, before any team cards exist) and
+// updateMachineNavStats()'s refresh (via the real renderDivisions() ->
+// applyMachineFilter() production sequence) compute IDENTICAL text for a
+// non-online machine, upgrading the stub-based suite's equivalent check
+// with a real HTML-parsed DOM.
+test('renderMachineFilterNav()\'s first paint agrees with updateMachineNavStats()\'s refresh for a non-online machine (real DOM)', async () => {
+    const fixture = loadFixture();
+    const machines = JSON.parse(JSON.stringify(fixture.fleet.machines));
+    const m1pro = machines.find((m) => m.hostname === M1PRO_HOST);
+    m1pro.session_count = 44;
+
+    const { document, mod } = await setupDashboard();
+
+    mod.renderMachineFilterNav(machines); // site #1, called directly -- first paint
+    const firstPaintBtn = document.querySelector(`.machine-nav-button[data-machine-host="${M1PRO_HOST}"]`);
+    const firstPaintText = firstPaintBtn.querySelector('.machine-nav-stats').textContent;
+
+    mod.setCachedMachineData(machines);
+    mod.renderDivisions(fixture.fleet.divisions); // site #2, via the real production sequence
+    const finalBtn = document.querySelector(`.machine-nav-button[data-machine-host="${M1PRO_HOST}"]`);
+    const finalText = finalBtn.querySelector('.machine-nav-stats').textContent;
+
+    assert.equal(firstPaintText, 'WARNING · 44', 'sanity: first paint must already carry the real text (cardCount is irrelevant to a non-online machine)');
+    assert.equal(firstPaintText, finalText, 'the two call sites must never disagree on stat text for the same machine data');
 });
 
 // ============================================================================

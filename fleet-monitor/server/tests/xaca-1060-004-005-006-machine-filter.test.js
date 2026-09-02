@@ -348,8 +348,17 @@ test('renderMachineFilterNav: one button per machine (including zero-card machin
     }
     assert.equal(statsTextOf(byHost[M3PRO_HOST]), expected[M3PRO_HOST] + ' Teams', 'M3Pro\'s live count must match the oracle');
     assert.equal(statsTextOf(byHost[M4MINI_HOST]), expected[M4MINI_HOST] + ' Teams', 'M4Mini\'s live count must match the oracle');
-    assert.equal(statsTextOf(byHost[M1MINI_HOST]), '0 Teams', 'a machine with zero team cards must still show an honest 0, not be silently omitted');
-    assert.equal(statsTextOf(byHost[M1PRO_HOST]), '0 Teams', 'same for the other zero-card machine');
+    // XACA-1062: a non-online machine no longer shows a rendered-card count
+    // at all (that count is always 0 for it -- the server excludes its
+    // sessions from `divisions` entirely, which is the bug this ticket
+    // fixed). It shows its STATUS word plus its last-known session_count
+    // instead: 'OFFLINE · <session_count>' (· is U+00B7 MIDDLE
+    // DOT, the exact separator machineNavStatText() emits -- not a
+    // lookalike hyphen/bullet). Both machines in this fixture report
+    // session_count 0, so this also doubles as the "honest 0" case the
+    // pre-XACA-1062 assertion here used to cover, just spelled the new way.
+    assert.equal(statsTextOf(byHost[M1MINI_HOST]), 'OFFLINE · 0', 'an offline machine with zero last-known sessions must show OFFLINE · 0, not a bare card count');
+    assert.equal(statsTextOf(byHost[M1PRO_HOST]), 'OFFLINE · 0', 'same for the other offline machine');
 
     // None disabled yet.
     buttons.forEach((b) => {
@@ -540,4 +549,217 @@ test('lcars-kiosk.js startOrgsAutoScroll: both organization-panel queries exclud
     // about stopOrgsAutoScroll's scope is stale.
     const unfiltered = src.match(/document\.querySelectorAll\('#divisions-container \.organization-panel'\)/g) || [];
     assert.equal(unfiltered.length, 1, 'expected exactly 1 remaining plain query: stopOrgsAutoScroll\'s cleanup sweep, unchanged by design');
+});
+
+// ============================================================================
+// XACA-1062 -- offline/warning machines show STATUS · last-known
+// session_count instead of a bare (always-zero) rendered-card count; online
+// machines are unchanged. Covers plan-doc verification-checklist items not
+// already exercised above: warning-is-not-offline, singular vs plural
+// stat/aria-label text, aria-label status conveyance for both online and
+// non-online, poll-to-poll stability, fail-closed on an unrecognized/missing
+// status, and agreement between the two call sites (renderMachineFilterNav()'s
+// first paint and updateMachineNavStats()'s per-pass refresh). · below is
+// U+00B7 MIDDLE DOT -- the exact separator machineNavStatText() emits, not a
+// lookalike hyphen/bullet.
+// ============================================================================
+
+// Clones fixture.fleet.machines so a test can mutate one entry's
+// status/session_count without perturbing another test's independent
+// loadFixture() read of the same on-disk fixture -- same pattern the
+// existing XSS test above (`JSON.parse(JSON.stringify(fixture.fleet.machines))`)
+// already uses for the identical reason.
+function cloneMachines(fixture) {
+    return JSON.parse(JSON.stringify(fixture.fleet.machines));
+}
+
+test('a "warning" machine shows WARNING · <last-known session_count>, never collapsed into OFFLINE', () => {
+    const fixture = loadFixture();
+    const machines = cloneMachines(fixture);
+    const m1pro = machines.find((m) => m.hostname === M1PRO_HOST);
+    m1pro.status = 'warning';
+    m1pro.session_count = 44;
+
+    const { mod, freshRenderPass } = setupDashboard();
+    mod.setCachedMachineData(machines);
+    const { machineNav } = freshRenderPass(fixture.fleet.divisions);
+
+    const btn = machineNav.querySelectorAll('.machine-nav-button[data-machine-host]').filter((b) => b.dataset.machineHost === M1PRO_HOST)[0];
+    assert.ok(btn, 'M1Pro\'s button must still render');
+    assert.ok(btn.className.indexOf('status-warning') !== -1, 'must carry status-warning');
+    assert.ok(btn.className.indexOf('status-offline') === -1, 'must NOT also carry status-offline');
+    assert.equal(btn.querySelector('.machine-nav-stats').textContent, 'WARNING · 44', 'a warning machine\'s stat line must read WARNING, not OFFLINE');
+    assert.equal(btn.getAttribute('aria-label'), 'Toggle team cards for M1Pro (Warning, last known 44 sessions)');
+});
+
+test('singular last-known session count: aria-label says "1 session", not "1 sessions"', () => {
+    const fixture = loadFixture();
+    const machines = cloneMachines(fixture);
+    const m1mini = machines.find((m) => m.hostname === M1MINI_HOST);
+    m1mini.session_count = 1; // stays 'offline'
+
+    const { mod, freshRenderPass } = setupDashboard();
+    mod.setCachedMachineData(machines);
+    const { machineNav } = freshRenderPass(fixture.fleet.divisions);
+
+    const btn = machineNav.querySelectorAll('.machine-nav-button[data-machine-host]').filter((b) => b.dataset.machineHost === M1MINI_HOST)[0];
+    assert.equal(btn.querySelector('.machine-nav-stats').textContent, 'OFFLINE · 1');
+    assert.equal(btn.getAttribute('aria-label'), 'Toggle team cards for M1Mini (Offline, last known 1 session)', 'singular "session", not "1 sessions"');
+});
+
+test('an online machine with exactly one rendered card shows "1 Team" (singular), aria-label conveys Online', () => {
+    // A minimal, hand-built single-team/single-host fixture -- none of this
+    // suite's real fixture hosts happen to have exactly 1 card, and the
+    // singular-vs-plural branch is otherwise unexercised. Schema mirrors
+    // tests/xaca-1002-001-registered-team-buckets.test.js's minimal
+    // divisions literals. Hostname deliberately does NOT match `.ts.net`
+    // (tests/test-xaca-0979-lcars-link-host-guard.sh forbids that pattern
+    // anywhere in a fleet-monitor .js file, comments included, with no
+    // allow-list) -- a synthetic non-tailnet-shaped name sidesteps it
+    // entirely rather than needing an exemption.
+    const SYNTHETIC_HOST = 'synthetic-single-card-host';
+    const divisions = {
+        academy: {
+            name: 'academy',
+            total_sessions: 1,
+            projects: {
+                _default: {
+                    name: null,
+                    teams: {
+                        engineering: {
+                            name: 'engineering',
+                            sessions: [{ name: 'academy-engineering', division: 'academy', hostname: SYNTHETIC_HOST, machine_status: 'online' }]
+                        }
+                    }
+                }
+            }
+        }
+    };
+    const machines = [{ hostname: SYNTHETIC_HOST, nickname: 'SyntheticOne', status: 'online', session_count: 1 }];
+
+    const { mod, freshRenderPass } = setupDashboard();
+    mod.setCachedMachineData(machines);
+    const { machineNav, divisionsContainer } = freshRenderPass(divisions);
+
+    const cards = divisionsContainer.querySelectorAll('.team-card[data-machine-host]');
+    assert.equal(cards.length, 1, 'sanity: exactly one card must render for this synthetic single-team fixture');
+
+    const btn = machineNav.querySelectorAll('.machine-nav-button[data-machine-host]')[0];
+    assert.equal(btn.querySelector('.machine-nav-stats').textContent, '1 Team', 'singular "Team", not "1 Teams"');
+    assert.equal(btn.getAttribute('aria-label'), 'Toggle team cards for SyntheticOne (Online)');
+});
+
+test('fail-closed: an unrecognized or entirely missing status is treated as Offline, never as Online', () => {
+    const fixture = loadFixture();
+
+    // Variant 1: status is a value this build does not recognize.
+    const machinesUnknown = cloneMachines(fixture);
+    const m1 = machinesUnknown.find((m) => m.hostname === M1MINI_HOST);
+    m1.status = 'rebooting'; // not 'online', not 'warning' -- must fall back to Offline
+    m1.session_count = 7;
+
+    const { mod: modA, freshRenderPass: freshA } = setupDashboard();
+    modA.setCachedMachineData(machinesUnknown);
+    const { machineNav: navA } = freshA(fixture.fleet.divisions);
+    const btnA = navA.querySelectorAll('.machine-nav-button[data-machine-host]').filter((b) => b.dataset.machineHost === M1MINI_HOST)[0];
+    assert.equal(btnA.querySelector('.machine-nav-stats').textContent, 'OFFLINE · 7', 'an unrecognized status word must still read as OFFLINE, not be echoed verbatim or treated as online');
+    assert.ok(btnA.getAttribute('aria-label').indexOf('(Offline, last known 7 sessions)') !== -1, 'aria-label must also fail closed to Offline');
+
+    // Variant 2: status field entirely absent.
+    const machinesMissing = cloneMachines(fixture);
+    const m2 = machinesMissing.find((m) => m.hostname === M1PRO_HOST);
+    delete m2.status;
+    m2.session_count = 3;
+
+    const { mod: modB, freshRenderPass: freshB } = setupDashboard();
+    modB.setCachedMachineData(machinesMissing);
+    const { machineNav: navB } = freshB(fixture.fleet.divisions);
+    const btnB = navB.querySelectorAll('.machine-nav-button[data-machine-host]').filter((b) => b.dataset.machineHost === M1PRO_HOST)[0];
+    assert.ok(btnB.className.indexOf('status-offline') !== -1, 'a missing status must be normalized to offline for the CSS class too');
+    assert.equal(btnB.querySelector('.machine-nav-stats').textContent, 'OFFLINE · 3', 'a missing status must still show OFFLINE, not crash or read blank');
+});
+
+test('renderMachineFilterNav()\'s first-paint stat/aria-label for a non-online machine already agrees with updateMachineNavStats()\'s post-filter refresh', () => {
+    const fixture = loadFixture();
+    const machines = cloneMachines(fixture);
+    const m1pro = machines.find((m) => m.hostname === M1PRO_HOST);
+    m1pro.status = 'warning';
+    m1pro.session_count = 44;
+
+    // Site #1 in isolation: call renderMachineFilterNav() directly against a
+    // bare container, exactly as renderDivisions() does BEFORE any team
+    // cards exist for the pass (cardCount is unreachable at this call site --
+    // see the source comment on its navStats.textContent assignment).
+    const { ctx, mod } = setupDashboard();
+    const firstPaintNav = ctx.document.createElement('div');
+    ctx.document.__registerById('machine-nav', firstPaintNav);
+    mod.renderMachineFilterNav(machines);
+    const firstPaintBtn = firstPaintNav.querySelectorAll('.machine-nav-button[data-machine-host]').filter((b) => b.dataset.machineHost === M1PRO_HOST)[0];
+    const firstPaintText = firstPaintBtn.querySelector('.machine-nav-stats').textContent;
+    const firstPaintAria = firstPaintBtn.getAttribute('aria-label');
+
+    // Site #2, the real production sequence: renderDivisions() ->
+    // renderMachineFilterNav() -> applyMachineFilter() -> updateMachineNavStats().
+    const { mod: mod2, freshRenderPass } = setupDashboard();
+    mod2.setCachedMachineData(machines);
+    const { machineNav: finalNav } = freshRenderPass(fixture.fleet.divisions);
+    const finalBtn = finalNav.querySelectorAll('.machine-nav-button[data-machine-host]').filter((b) => b.dataset.machineHost === M1PRO_HOST)[0];
+    const finalText = finalBtn.querySelector('.machine-nav-stats').textContent;
+    const finalAria = finalBtn.getAttribute('aria-label');
+
+    assert.equal(firstPaintText, 'WARNING · 44', 'sanity: first paint must already carry the real text for a non-online machine (cardCount is irrelevant to it, so there is no placeholder gap)');
+    assert.equal(firstPaintText, finalText, 'renderMachineFilterNav() and updateMachineNavStats() must never disagree on stat text for the same machine data');
+    assert.equal(firstPaintAria, finalAria, 'the two call sites must never disagree on aria-label either');
+});
+
+test('a non-online machine\'s stat text survives multiple full renderDivisions() re-renders unchanged (no drift back to a placeholder)', () => {
+    const fixture = loadFixture();
+    const machines = cloneMachines(fixture);
+    const m1pro = machines.find((m) => m.hostname === M1PRO_HOST);
+    m1pro.status = 'warning';
+    m1pro.session_count = 44;
+
+    const { mod, freshRenderPass } = setupDashboard();
+    mod.setCachedMachineData(machines);
+
+    function statTextFor(nav) {
+        const btn = nav.querySelectorAll('.machine-nav-button[data-machine-host]').filter((b) => b.dataset.machineHost === M1PRO_HOST)[0];
+        return btn.querySelector('.machine-nav-stats').textContent;
+    }
+
+    const { machineNav: nav1 } = freshRenderPass(fixture.fleet.divisions); // poll #1
+    const text1 = statTextFor(nav1);
+    assert.equal(text1, 'WARNING · 44', 'poll #1 must already carry the real text');
+
+    const { machineNav: nav2 } = freshRenderPass(fixture.fleet.divisions); // poll #2
+    assert.equal(statTextFor(nav2), text1, 'poll #2 must not have drifted from poll #1\'s text');
+
+    const { machineNav: nav3 } = freshRenderPass(fixture.fleet.divisions); // poll #3, for good measure
+    assert.equal(statTextFor(nav3), text1, 'poll #3 must still match');
+});
+
+test('toggling a warning machine changes no card visibility, and its own stat text is unaffected by its own toggle state', () => {
+    const fixture = loadFixture();
+    const machines = cloneMachines(fixture);
+    const m1pro = machines.find((m) => m.hostname === M1PRO_HOST);
+    m1pro.status = 'warning';
+    m1pro.session_count = 44;
+
+    const { mod, freshRenderPass } = setupDashboard();
+    mod.setCachedMachineData(machines);
+    const { divisionsContainer, machineNav } = freshRenderPass(fixture.fleet.divisions);
+
+    const visibleBefore = divisionsContainer.querySelectorAll('.team-card[data-machine-host]').filter((c) => !c.hidden).length;
+
+    mod.toggleMachineFilter(M1PRO_HOST);
+
+    const visibleAfter = divisionsContainer.querySelectorAll('.team-card[data-machine-host]').filter((c) => !c.hidden).length;
+    assert.equal(visibleAfter, visibleBefore, 'disabling a 0-card warning machine must not hide any card');
+
+    const btn = machineNav.querySelectorAll('.machine-nav-button[data-machine-host]').filter((b) => b.dataset.machineHost === M1PRO_HOST)[0];
+    assert.ok(btn.classList.contains('disabled'), 'button must still reflect the disabled state');
+    assert.equal(btn.querySelector('.machine-nav-stats').textContent, 'WARNING · 44', 'stat text must be unaffected by the machine\'s own toggle state');
+
+    mod.toggleMachineFilter(M1PRO_HOST); // restore
+    assert.equal(btn.querySelector('.machine-nav-stats').textContent, 'WARNING · 44', 'still unaffected after re-enabling');
 });

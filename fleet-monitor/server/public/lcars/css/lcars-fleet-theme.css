@@ -1935,6 +1935,30 @@
     box-shadow: none;
 }
 
+/* XACA-1062: the warning/offline stat line reads "WARNING · <N>" or
+   "OFFLINE · <N>" -- N is a last-known session_count, not a live rendered
+   count (see machineNavStatText() in lcars-dashboard-app.js). The status
+   word already carries that distinction for a screen reader and for a
+   colourblind viewer (WCAG 1.4.1 -- never rely on colour/background hue
+   alone), but a sighted viewer scanning the row by shape/weight, not
+   reading every word, has no visual cue that THIS number is stale while
+   the sibling ".machine-nav-stats" on an online button is live. Italicizing
+   only the non-online line reinforces that distinction without introducing
+   a new colour: it reuses the same font-style: italic convention this
+   stylesheet already applies to other non-live/placeholder text
+   (.empty-message, .machine-nickname-value.empty, .log-entry.empty,
+   .history-empty) rather than inventing a one-off treatment. Selector
+   covers both the enabled and .disabled states in one rule -- toggling a
+   button off never removes its status-warning/status-offline class (see
+   renderMachineFilterNav()'s className assignment), so this does not need
+   a second `.disabled` variant. font-style is independent of colour/alpha,
+   so it has no effect on -- and was verified not to affect -- the contrast
+   ratios computed for both states below. */
+.machine-nav-button.status-warning .machine-nav-stats,
+.machine-nav-button.status-offline .machine-nav-stats {
+    font-style: italic;
+}
+
 /* Deselected (filtered-out) state. This is a multi-select TOGGLE, not a
    disabled control, so it must stay obviously clickable: no pointer-events:
    none, no cursor: not-allowed. A desaturating grayscale + brightness filter
@@ -1975,7 +1999,20 @@
    ~4.1:1, brown/offline ~3.6:1 -- both under the WCAG 2.1 AA 4.5:1 minimum for
    small text. Raising the alpha to 0.95 (scoped to disabled only -- the
    enabled-state 0.7 convention shared with .org-nav-stats is untouched)
-   clears all three: green ~11.0:1, tan/warning ~5.7:1, brown/offline ~4.8:1. */
+   clears all three: green ~11.0:1, tan/warning ~5.7:1, brown/offline ~4.8:1.
+
+   XACA-1062 re-verified this independently (script, not eyeballed) while
+   adding the italic treatment above, and got the same figures to two
+   decimal places: green 11.00:1, tan/warning 5.71:1, brown/offline 4.76:1.
+   Also checked the ENABLED (non-disabled) state, not just disabled: black
+   @ alpha 0.7 straight over the unfiltered status background --
+   green 7.72:1, tan/warning 5.17:1, brown/offline 4.54:1 -- all clear AA's
+   4.5:1 small-text threshold too, though offline's enabled margin is thin
+   (4.54:1, ~1% of headroom); flagged for the UX gate (XACA-1062-008), not
+   changed here since it already passes and touching it would mean
+   reopening a value this file has already gated on twice. font-style
+   (added above, scoped to status-warning/status-offline) does not read
+   colour/alpha at all, so it changes none of these numbers. */
 .lcars-section.active .machine-nav-button.disabled .machine-nav-stats {
     color: rgba(0, 0, 0, 0.95);
 }
