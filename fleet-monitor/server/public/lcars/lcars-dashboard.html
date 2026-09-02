@@ -89,7 +89,7 @@
     <!-- LCARS Kiosk Mode Styles (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-kiosk.css?v=20260825e">
     <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
-    <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20260827a">
+    <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20260901a">
     <!-- XACA-0989: collapsible divisions + compact session chips (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-division-collapse.css?v=20260827a">
     <!-- LCARS Kiosk Health & Status Screen Styles -->
@@ -301,7 +301,18 @@
                 <!-- SECTION: ORGANIZATIONS - Division/Team Hierarchy                     -->
                 <!-- ═══════════════════════════════════════════════════════════════════ -->
                 <div class="lcars-section" data-section="organizations">
+                    <!-- XACA-1060: MACHINES filter bar. Container filled by renderMachineFilterNav();
+                         each pill is an independent multi-select show/hide toggle over that
+                         machine's team cards below (not a single-select radio like ORG nav). -->
                     <section>
+                        <div class="section-header purple">
+                            <span class="section-title">FILTER BY MACHINE</span>
+                            <div class="section-bar"></div>
+                        </div>
+                        <div id="machine-nav" class="machine-nav" style="margin-top: 15px;"></div>
+                    </section>
+
+                    <section style="margin-top: 20px;">
                         <div class="section-header peach">
                             <span class="section-title">ALL DIVISIONS</span>
                             <div class="section-bar"></div>
