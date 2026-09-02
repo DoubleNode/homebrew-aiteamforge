@@ -769,6 +769,7 @@
         // hidden; count re-summed from the divisions' own (already-updated)
         // filtered stat above rather than re-walking data.projects.
         const orgPanels = divisionsContainer.querySelectorAll('.organization-panel');
+        let visibleOrgPanelCount = 0;
         for (let o = 0; o < orgPanels.length; o++) {
             const orgPanel = orgPanels[o];
             const orgDivisions = orgPanel.querySelectorAll('.division-container');
@@ -784,11 +785,37 @@
                 }
             }
             orgPanel.hidden = (visibleDivisionCount === 0);
+            if (!orgPanel.hidden) visibleOrgPanelCount++;
 
             const orgCountEl = orgPanel.querySelector('.organization-count');
             if (orgCountEl) {
                 orgCountEl.textContent = orgVisibleSessions + ' Sessions';
             }
+        }
+
+        // 4b. XACA-1060-017: when the MACHINES filter hides every org panel,
+        // the container would otherwise go visually blank -- indistinguishable
+        // from a broken page. This is deliberately a SEPARATE element/class
+        // from CONFIG.emptyMessage's '.empty-message' (the "server sent zero
+        // divisions" case in renderDivisions, which returns before this
+        // function's body even runs and rebuilds no org panels at all) so the
+        // two states are never confusable and never collide in the DOM.
+        // Only relevant when there WERE org panels to filter -- an org-less
+        // poll is already handled by renderDivisions' own empty-message path.
+        // Re-derived every call (both the poll re-render tail call and the
+        // per-click toggleMachineFilter() call), so it survives
+        // renderDivisions() wiping '#divisions-container' each pass and never
+        // leaves a stale message once a panel becomes visible again.
+        let filterEmptyMessageEl = divisionsContainer.querySelector('.machine-filter-empty-message');
+        if (orgPanels.length > 0 && visibleOrgPanelCount === 0) {
+            if (!filterEmptyMessageEl) {
+                filterEmptyMessageEl = document.createElement('p');
+                filterEmptyMessageEl.className = 'empty-message machine-filter-empty-message';
+                divisionsContainer.appendChild(filterEmptyMessageEl);
+            }
+            filterEmptyMessageEl.textContent = 'All machines filtered out — re-enable a machine above to see teams';
+        } else if (filterEmptyMessageEl) {
+            filterEmptyMessageEl.remove();
         }
 
         // 5. Nav button disabled class / aria-pressed / live team count.

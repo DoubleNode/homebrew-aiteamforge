@@ -600,3 +600,91 @@ test('lcars-kiosk.js: the exact :not([hidden]) org-panel selector string resolve
     assert.equal(document.querySelectorAll(ORGS_SELECTOR).length, 0, 'with every machine disabled, the selector must resolve to zero org panels');
     fixture.fleet.machines.forEach((m) => { if (m.hostname) mod.toggleMachineFilter(m.hostname); }); // restore
 });
+
+// ============================================================================
+// Prototype-pollution safety (XACA-1060-015)
+//
+// machineFilterState is `Object.create(null)`, not `{}`, and that is
+// deliberate: `hostname` is untrusted reporter input, so a machine literally
+// named `toString` or `constructor` would read back TRUTHY off
+// Object.prototype BEFORE ever being toggled -- with a plain `{}`,
+// `machineFilterState['toString']` resolves to the inherited
+// Object.prototype.toString function (truthy) the instant that key is read,
+// permanently hiding that machine's cards with no toggle ever having run.
+// Worse, it LATCHES: `delete machineFilterState['toString']` removes the own
+// property (once one exists), but the lookup then falls through to the same
+// inherited member again -- so a plain `{}` implementation could disable the
+// machine but could never explicitly re-enable it either. This was caught in
+// review on PR #804, not by a test, and nothing before this exercised it --
+// a future "simplify this back to {}" refactor would regress it silently.
+// ============================================================================
+
+// Rewrites one hostname everywhere it appears in a fixture clone --
+// fleet.machines[].hostname, every team's sessions[].hostname, and every
+// team's lcars_service.hostname -- so a renamed machine produces real,
+// correctly-attributed team cards in the rendered DOM, not just a nav
+// button with no cards behind it (renameHostThroughout mirrors the same
+// (sessions[].hostname ∪ lcars_service.hostname) attribution split
+// computeExpectedHostCardCounts() above and getTeamHosts() in the shipped
+// app both use).
+function renameHostThroughout(fixtureClone, oldHost, newHost) {
+    const machine = fixtureClone.fleet.machines.find((m) => m.hostname === oldHost);
+    if (!machine) throw new Error('renameHostThroughout: no machine with hostname ' + oldHost);
+    machine.hostname = newHost;
+
+    const divisions = fixtureClone.fleet.divisions;
+    for (const dk of Object.getOwnPropertyNames(divisions)) {
+        const projects = divisions[dk].projects || {};
+        for (const pk of Object.getOwnPropertyNames(projects)) {
+            const teams = projects[pk].teams || {};
+            for (const tk of Object.getOwnPropertyNames(teams)) {
+                const team = teams[tk];
+                (team.sessions || []).forEach((s) => {
+                    if (s && s.hostname === oldHost) s.hostname = newHost;
+                });
+                if (team.lcars_service && team.lcars_service.hostname === oldHost) {
+                    team.lcars_service.hostname = newHost;
+                }
+            }
+        }
+    }
+    return fixtureClone;
+}
+
+['toString', 'constructor'].forEach((pollutingName) => {
+    test('machine hostnamed "' + pollutingName + '" renders VISIBLE by default (not shadowed by Object.prototype) and toggles cleanly both ways', async () => {
+        const fixture = loadFixture();
+        renameHostThroughout(fixture, M3PRO_HOST, pollutingName);
+
+        const { document, mod } = await setupDashboard();
+        mod.setCachedMachineData(fixture.fleet.machines);
+        mod.renderDivisions(fixture.fleet.divisions);
+
+        const cardsForHost = () => document.querySelectorAll('.team-card[data-machine-host="' + pollutingName + '"]');
+        const navBtn = document.querySelector('.machine-nav-button[data-machine-host="' + pollutingName + '"]');
+        assert.ok(navBtn, 'nav button for host "' + pollutingName + '" must exist');
+        assert.ok(cardsForHost().length > 0, 'fixture rename must have produced at least one card for host "' + pollutingName + '"');
+
+        // Default state must be VISIBLE. With Object.create(null),
+        // machineFilterState[pollutingName] is undefined until explicitly
+        // toggled. With a plain {}, the inherited Object.prototype member of
+        // the same name would already read back truthy here -- hiding the
+        // machine by default with NO toggle ever having happened.
+        assert.ok(Array.from(cardsForHost()).every((c) => !c.hidden), 'host "' + pollutingName + '" must be VISIBLE by default, not shadowed by Object.prototype');
+        assert.ok(!navBtn.classList.contains('disabled'), 'nav button for "' + pollutingName + '" must not start disabled');
+
+        // Toggle off: must actually hide.
+        mod.toggleMachineFilter(pollutingName);
+        assert.ok(Array.from(cardsForHost()).every((c) => c.hidden), 'host "' + pollutingName + '" must hide after toggling off');
+        assert.ok(navBtn.classList.contains('disabled'), 'nav button for "' + pollutingName + '" must show disabled after toggling off');
+
+        // Toggle on again: must actually restore. This is the direction a
+        // plain-{} implementation fails even AFTER an explicit toggle:
+        // `delete machineFilterState[pollutingName]` clears the own property,
+        // but the read falls through to the same inherited (truthy) member
+        // again, so the machine can never be re-enabled -- it latches hidden.
+        mod.toggleMachineFilter(pollutingName);
+        assert.ok(Array.from(cardsForHost()).every((c) => !c.hidden), 'host "' + pollutingName + '" must become visible again after toggling back on -- not latched');
+        assert.ok(!navBtn.classList.contains('disabled'), 'nav button for "' + pollutingName + '" must clear disabled after toggling back on');
+    });
+});

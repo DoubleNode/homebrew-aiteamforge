@@ -1937,22 +1937,47 @@
 
 /* Deselected (filtered-out) state. This is a multi-select TOGGLE, not a
    disabled control, so it must stay obviously clickable: no pointer-events:
-   none, no cursor: not-allowed. Reduced opacity + a desaturating grayscale
-   filter carry the "off" state, paired with a non-colour cue (dashed inset
+   none, no cursor: not-allowed. A desaturating grayscale + brightness filter
+   carries the "off" state, paired with a non-colour cue (dashed inset
    outline) so the state still reads for a viewer who can't perceive the
-   opacity/colour shift. Scoped under .lcars-section.active so it wins over
+   colour shift. Scoped under .lcars-section.active so it wins over
    the equal-weight .lcars-section.active .machine-nav-button opacity rule
-   above (both are 3 classes deep; this one is 4). */
+   above (both are 3 classes deep; this one is 4).
+   XACA-1060 UX gate (Lal): deliberately NOT using `opacity` here. Element-
+   level opacity composites the WHOLE subtree -- including the black label
+   text -- toward the page's pure-black (#000) backdrop, so as opacity drops
+   the black text and the darkening pill face converge on the same colour.
+   Measured against all three status variants, opacity 0.45 (the original
+   value) crushed the machine-nav-name text-vs-pill contrast to ~1.9-2.9:1,
+   under both the WCAG 2.1 AA 4.5:1 (normal text) and 3:1 (UI component)
+   minimums. `filter: grayscale()/brightness()` alone still visibly dims and
+   desaturates the pill relative to its enabled sibling, but leaves black
+   text at true black (grayscale/brightness of pure black is a no-op), which
+   measures at >=4.5:1 for all three status colours (green ~11.6:1,
+   tan/warning ~6.0:1, brown/offline ~5.0:1). */
 .lcars-section.active .machine-nav-button.disabled {
-    opacity: 0.45;
     filter: grayscale(0.65) brightness(0.85);
     outline: 2px dashed rgba(0, 0, 0, 0.5);
     outline-offset: -4px;
 }
 
 .lcars-section.active .machine-nav-button.disabled:hover {
-    opacity: 0.65;
     filter: grayscale(0.45) brightness(0.95);
+}
+
+/* XACA-1060 UX gate (Lal), follow-up: the secondary .machine-nav-stats line
+   inherits the base rgba(0, 0, 0, 0.7) colour, and that alpha is composited
+   with the pill background BEFORE the grayscale/brightness filter above runs
+   (filter rasterizes the whole element, text included) -- so the same "no
+   opacity on the element" reasoning that fixed .machine-nav-name doesn't
+   apply here; alpha=0.7 is baked into the text pixel itself, not the layer.
+   Measured post-filter contrast at 0.7 alpha: green ~6.3:1 (fine), tan/warning
+   ~4.1:1, brown/offline ~3.6:1 -- both under the WCAG 2.1 AA 4.5:1 minimum for
+   small text. Raising the alpha to 0.95 (scoped to disabled only -- the
+   enabled-state 0.7 convention shared with .org-nav-stats is untouched)
+   clears all three: green ~11.0:1, tan/warning ~5.7:1, brown/offline ~4.8:1. */
+.lcars-section.active .machine-nav-button.disabled .machine-nav-stats {
+    color: rgba(0, 0, 0, 0.95);
 }
 
 
