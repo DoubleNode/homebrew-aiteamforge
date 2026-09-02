@@ -44,7 +44,7 @@
  * /api/fleet payload (same capture session as this ticket's manual
  * verification pass) -- 4 machines, 14 divisions, 100 team buckets (21
  * hostless -> dropped, 8 multi-host -> split), 87 rendered cards (37 on
- * darren-m3pro-mbp.tail4637d5.ts.net, 50 on darren-m4-mini.tail4637d5.ts.net).
+ * the M3Pro/M4Mini hosts, 50 on the M3Pro/M4Mini hosts).
  * Checked for secrets/tokens/emails/home-directory paths before being
  * committed -- none found; its hostnames/private-LAN IPs are the same
  * class of data already committed in tests/fixtures/xaca-1002-live-fleet.json.
@@ -66,10 +66,26 @@ const KIOSK_REL_PATH = 'shared/js/lcars-kiosk.js';
 
 const FIXTURE_PATH = path.join(__dirname, 'fixtures', 'xaca-1060-live-fleet.json');
 
-const M3PRO_HOST = 'darren-m3pro-mbp.tail4637d5.ts.net';
-const M4MINI_HOST = 'darren-m4-mini.tail4637d5.ts.net';
-const M1PRO_HOST = 'darren-m1pro-mbp.tail4637d5.ts.net';   // status 'warning', 0 cards in the fixture
-const M1MINI_HOST = 'jasons-mac-mini.tail4637d5.ts.net';   // status 'offline', 0 cards in the fixture
+// XACA-0979 guard: no *.js or *.html file under fleet-monitor/ may contain a
+// tailnet hostname literal. That check scans file CONTENT -- comments included
+// -- and deliberately carries NO allow-list, on the reasoning that an
+// unreachable exemption is worse than none. So resolve each host from the
+// fixture's own machines[] by nickname rather than hardcoding it. That is
+// better anyway: refresh the fixture and these follow, instead of silently
+// asserting against a host that is no longer in the payload at all.
+function hostForNickname(nickname) {
+    const machines = (loadFixture().fleet || {}).machines || [];
+    const match = machines.find(function (m) { return m && m.nickname === nickname; });
+    if (!match || !match.hostname) {
+        throw new Error('fixture has no machine nicknamed ' + nickname + ' (fixture changed?)');
+    }
+    return match.hostname;
+}
+
+const M3PRO_HOST = hostForNickname('M3Pro');
+const M4MINI_HOST = hostForNickname('M4Mini');
+const M1PRO_HOST = hostForNickname('M1Pro');   // status 'warning', 0 cards in the fixture
+const M1MINI_HOST = hostForNickname('M1Mini'); // status 'offline', 0 cards in the fixture
 
 function loadFixture() {
     // Fresh parse per test -- same discipline as
