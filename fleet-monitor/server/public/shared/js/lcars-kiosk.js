@@ -492,7 +492,12 @@
      * Repeats on KIOSK_CONFIG.orgsScrollDelay interval.
      */
     function startOrgsAutoScroll() {
-        const panels = document.querySelectorAll('#divisions-container .organization-panel');
+        // XACA-1060: excludes panels the MACHINES filter bar has hidden (via
+        // the `hidden` attribute, never style.display) -- without
+        // :not([hidden]) here, kiosk auto-scroll could park on (or cycle
+        // through) a filtered-out, invisible panel. This skin's own
+        // scroll-index arithmetic below is otherwise unaware of the filter.
+        const panels = document.querySelectorAll('#divisions-container .organization-panel:not([hidden])');
 
         if (!panels || panels.length === 0) {
             _log('[LCARS KIOSK] startOrgsAutoScroll: no organization panels found — skipping.');
@@ -516,8 +521,11 @@
 
         // Set up repeating scroll through panels
         orgsScrollTimer = setInterval(function() {
-            // Re-query in case DOM updated between ticks
-            const currentPanels = document.querySelectorAll('#divisions-container .organization-panel');
+            // Re-query in case DOM updated between ticks. XACA-1060: same
+            // :not([hidden]) exclusion as the initial query above -- a poll
+            // between ticks can change which panels the MACHINES filter has
+            // hidden, and this re-query is exactly what's supposed to catch that.
+            const currentPanels = document.querySelectorAll('#divisions-container .organization-panel:not([hidden])');
             if (!currentPanels || currentPanels.length === 0) return;
 
             const prevIndex = orgsScrollIndex;

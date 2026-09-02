@@ -246,7 +246,18 @@
                 <!-- SECTION: ORGANIZATIONS - Division/Team Hierarchy                     -->
                 <!-- ═══════════════════════════════════════════════════════════════════ -->
                 <div class="lcars-section" data-section="organizations">
+                    <!-- XACA-1060: MACHINES filter bar. Container filled by renderMachineFilterNav();
+                         each pill is an independent multi-select show/hide toggle over that
+                         machine's team cards below (not a single-select radio like ORG nav). -->
                     <section>
+                        <div class="section-header purple">
+                            <span class="section-title">MACHINES</span>
+                            <div class="section-bar"></div>
+                        </div>
+                        <div id="machine-nav" class="machine-nav" style="margin-top: 15px;"></div>
+                    </section>
+
+                    <section style="margin-top: 20px;">
                         <div class="section-header peach">
                             <span class="section-title">ALL DIVISIONS</span>
                             <div class="section-bar"></div>

@@ -53,6 +53,30 @@
     let teamConfig = null;
     let divisionToTeamMap = {};  // Maps fleet division keys to registered team keys
 
+    // XACA-1060: MACHINES filter bar state. Plain object used as a set of
+    // DISABLED hostnames (mirrors the object-as-set idiom in getTeamHosts()
+    // below). renderDivisions() does `container.innerHTML = ''` on EVERY
+    // poll, so this state cannot live in the DOM -- it has to survive here,
+    // at module scope, across render passes. Empty object == everything
+    // shown: defaulting to "empty means all on" is deliberate, so a machine
+    // that appears for the first time between polls is shown by default
+    // rather than silently hidden.
+    //
+    // A hostname disabled here that later drops out of fleet.machines[]
+    // (machine goes offline / deregisters) is intentionally left in place
+    // rather than pruned -- there's just no nav button to click until that
+    // machine reappears, at which point the user's earlier choice is
+    // honored again instead of silently reset.
+    // XACA-1060: Object.create(null), NOT {} -- `hostname` is copied verbatim
+    // from reporter payloads (same untrusted-input class as the `organization`
+    // field XACA-0970 had to fix), so a machine legitimately or maliciously
+    // named 'toString', 'constructor' or 'valueOf' would hit Object.prototype
+    // on a plain-object lookup and read back TRUTHY while never having been
+    // toggled -- permanently hiding that machine's cards with no way to
+    // un-hide them (the toggle's `delete` on an inherited key is a no-op, so
+    // it would latch). A null-prototype map has no inherited keys at all.
+    let machineFilterState = Object.create(null);
+
     // ============================================================================
     // INITIALIZATION
     // ============================================================================
@@ -564,6 +588,213 @@
         });
     }
 
+    // XACA-1060: MACHINES filter bar. One multi-select toggle button per
+    // fleet.machines[] entry, independent of the ORGANIZATIONS nav above
+    // (that one is single-target scroll-to; this one show/hides team cards
+    // in place). Built fresh every render pass -- like renderOrganizationNav,
+    // it does not try to diff against the previous pass's buttons.
+    function renderMachineFilterNav(machines) {
+        const navContainer = document.getElementById('machine-nav');
+        if (!navContainer) return;
+
+        navContainer.innerHTML = '';
+
+        const sortedMachines = (machines || []).slice().sort(function(a, b) {
+            const nameA = (a.nickname || a.hostname || '').toLowerCase();
+            const nameB = (b.nickname || b.hostname || '').toLowerCase();
+            return nameA.localeCompare(nameB);
+        });
+
+        sortedMachines.forEach(function(machine) {
+            const host = machine.hostname;
+            if (!host) return; // nothing on a card could ever match this button
+
+            const displayName = machine.nickname || machine.hostname;
+            const isDisabled = !!machineFilterState[host];
+
+            const navButton = document.createElement('button');
+            navButton.type = 'button';
+            navButton.className = 'machine-nav-button status-' + (machine.status || 'offline') + (isDisabled ? ' disabled' : '');
+            navButton.dataset.machineHost = host;
+            navButton.setAttribute('aria-pressed', isDisabled ? 'false' : 'true');
+            // setAttribute (not innerHTML) -- not a markup sink, so this is safe
+            // even though displayName is untrusted (see textContent note below).
+            navButton.setAttribute('aria-label', 'Toggle team cards for ' + displayName);
+
+            // textContent, not innerHTML: hostname/nickname arrive from reporter
+            // payloads, same untrusted-input class as the `organization` field
+            // XACA-0970 had to fix in renderOrganizationNav above -- an
+            // injection sink here would be the exact same bug in a new spot.
+            const navName = document.createElement('span');
+            navName.className = 'machine-nav-name';
+            navName.textContent = displayName;
+            navButton.appendChild(navName);
+
+            const navStats = document.createElement('span');
+            navStats.className = 'machine-nav-stats';
+            // XACA-1060: 0 Teams here is a placeholder, not the real number --
+            // team cards for this poll haven't been created yet at this call
+            // site (renderDivisions calls this BEFORE building division panels,
+            // mirroring renderOrganizationNav's call site). applyMachineFilter(),
+            // wired at the tail of renderDivisions inside the SAME synchronous
+            // render pass (see endRenderPass() below), calls
+            // updateMachineNavStats() to fill in the real count before the
+            // browser ever gets a chance to paint this placeholder.
+            navStats.textContent = '0 Teams';
+            navButton.appendChild(navStats);
+
+            navButton.onclick = function() {
+                toggleMachineFilter(host);
+            };
+
+            navContainer.appendChild(navButton);
+        });
+    }
+
+    // XACA-1060: flips one host's membership in the disabled set and
+    // re-applies the filter immediately -- no full renderDivisions() re-run,
+    // since the cards/chips/panels already exist and only need hidden
+    // toggled + stats recomputed.
+    function toggleMachineFilter(hostname) {
+        if (!hostname) return;
+        if (machineFilterState[hostname]) {
+            delete machineFilterState[hostname];
+        } else {
+            machineFilterState[hostname] = true;
+        }
+        applyMachineFilter();
+    }
+
+    // XACA-1060: refreshes each MACHINES nav button's disabled class,
+    // aria-pressed, and live team-card count. The count is the TOTAL number
+    // of team cards rendered for that host, independent of that host's own
+    // filter state (so a filtered-off machine still shows an honest count of
+    // what enabling it would reveal) -- but it does live under
+    // #divisions-container, so it's still 0 for a poll where nothing has
+    // rendered yet.
+    function updateMachineNavStats() {
+        const navContainer = document.getElementById('machine-nav');
+        if (!navContainer) return;
+        const divisionsContainer = document.getElementById('divisions-container');
+
+        const buttons = navContainer.querySelectorAll('.machine-nav-button[data-machine-host]');
+        for (let i = 0; i < buttons.length; i++) {
+            const btn = buttons[i];
+            const host = btn.dataset.machineHost;
+            let count = 0;
+            if (divisionsContainer) {
+                const cards = divisionsContainer.querySelectorAll('.team-card[data-machine-host]');
+                for (let c = 0; c < cards.length; c++) {
+                    if (cards[c].dataset.machineHost === host) count++;
+                }
+            }
+            const statsEl = btn.querySelector('.machine-nav-stats');
+            if (statsEl) {
+                statsEl.textContent = count + (count === 1 ? ' Team' : ' Teams');
+            }
+
+            const isDisabled = !!machineFilterState[host];
+            btn.classList.toggle('disabled', isDisabled);
+            btn.setAttribute('aria-pressed', isDisabled ? 'false' : 'true');
+        }
+    }
+
+    // XACA-1060: applies machineFilterState to the already-rendered DOM.
+    // Uses the `hidden` ATTRIBUTE, never style.display and never an ad-hoc
+    // class -- wireDivisionToggle() in shared/js/lcars-division-collapse.js
+    // (XACA-0989) already owns style.display on '.chip-row' and
+    // '.teams-grid' themselves (the CONTAINERS), so this only ever sets
+    // `hidden` on the individual CHILDREN of those containers (cards, chips,
+    // avatar thumbs) plus the division/organization panels one level up.
+    // Two different mechanisms on two different levels of the tree -- they
+    // don't fight because neither one touches the element the other owns.
+    function applyMachineFilter() {
+        const divisionsContainer = document.getElementById('divisions-container');
+        if (!divisionsContainer) return;
+
+        // 1. Expanded-view team cards.
+        const cards = divisionsContainer.querySelectorAll('.team-card[data-machine-host]');
+        for (let i = 0; i < cards.length; i++) {
+            cards[i].hidden = !!machineFilterState[cards[i].dataset.machineHost];
+        }
+
+        // 2. Collapsed-view chips -- same rule, so the chip row filters
+        // identically to the expanded grid it stands in for.
+        const chips = divisionsContainer.querySelectorAll('.chip-row > *[data-machine-host]');
+        for (let j = 0; j < chips.length; j++) {
+            chips[j].hidden = !!machineFilterState[chips[j].dataset.machineHost];
+        }
+
+        // 2b. Division avatar-grid thumbnails (XACA-1060-006) -- tagged with
+        // the same per-host granularity as the card/chip split.
+        const avatars = divisionsContainer.querySelectorAll('.org-avatar-thumb[data-machine-host]');
+        for (let k = 0; k < avatars.length; k++) {
+            avatars[k].hidden = !!machineFilterState[avatars[k].dataset.machineHost];
+        }
+
+        // 3. Division panels, hidden when their visible card count is zero --
+        // and their filtered session-count stat recomputed to match. This is
+        // a literal "zero visible cards -> hidden" rule: it also hides a
+        // division whose only teams were hostless (already dropped from the
+        // DOM entirely up in createDivisionPanel/splitTeamByHost) regardless
+        // of whether the MACHINES filter is what caused it -- there's nothing
+        // useful to show either way.
+        const panels = divisionsContainer.querySelectorAll('.division-container');
+        for (let p = 0; p < panels.length; p++) {
+            const panel = panels[p];
+            const panelCards = panel.querySelectorAll('.team-card[data-machine-host]');
+            let visibleCardCount = 0;
+            let visibleSessionCount = 0;
+            for (let c2 = 0; c2 < panelCards.length; c2++) {
+                if (!panelCards[c2].hidden) {
+                    visibleCardCount++;
+                    visibleSessionCount += parseInt(panelCards[c2].dataset.sessionCount, 10) || 0;
+                }
+            }
+            panel.hidden = (visibleCardCount === 0);
+
+            // Preserve '.division-toggle-icon': wireDivisionToggle() (XACA-0989)
+            // requires that span to exist and writes the chevron glyph into it
+            // every render pass. Rewrite only the dedicated
+            // '.division-stats-count' text span added in createDivisionPanel
+            // for exactly this purpose -- never '.division-stats.textContent',
+            // which would delete the icon span and silently kill collapse.
+            const statsCountEl = panel.querySelector('.division-stats-count');
+            if (statsCountEl) {
+                statsCountEl.textContent = visibleSessionCount + (visibleSessionCount === 1 ? ' Session' : ' Sessions');
+            }
+        }
+
+        // 4. Organization panels, hidden when every division inside them is
+        // hidden; count re-summed from the divisions' own (already-updated)
+        // filtered stat above rather than re-walking data.projects.
+        const orgPanels = divisionsContainer.querySelectorAll('.organization-panel');
+        for (let o = 0; o < orgPanels.length; o++) {
+            const orgPanel = orgPanels[o];
+            const orgDivisions = orgPanel.querySelectorAll('.division-container');
+            let visibleDivisionCount = 0;
+            let orgVisibleSessions = 0;
+            for (let d2 = 0; d2 < orgDivisions.length; d2++) {
+                if (!orgDivisions[d2].hidden) {
+                    visibleDivisionCount++;
+                    const dCountEl = orgDivisions[d2].querySelector('.division-stats-count');
+                    if (dCountEl) {
+                        orgVisibleSessions += parseInt(dCountEl.textContent, 10) || 0;
+                    }
+                }
+            }
+            orgPanel.hidden = (visibleDivisionCount === 0);
+
+            const orgCountEl = orgPanel.querySelector('.organization-count');
+            if (orgCountEl) {
+                orgCountEl.textContent = orgVisibleSessions + ' Sessions';
+            }
+        }
+
+        // 5. Nav button disabled class / aria-pressed / live team count.
+        updateMachineNavStats();
+    }
+
     function renderDivisions(divisions) {
         const container = document.getElementById('divisions-container');
         // XACA-0989-019: beginRenderPass()/endRenderPass() must bracket the
@@ -601,6 +832,11 @@
 
         const sortedOrgs = Object.keys(organizationGroups).sort();
         renderOrganizationNav(sortedOrgs, organizationGroups);
+        // XACA-1060: builds the MACHINES nav buttons themselves; their live
+        // team counts are placeholders here (cards don't exist yet this
+        // pass) and get filled in by applyMachineFilter() below, inside the
+        // same synchronous pass, before this ever paints.
+        renderMachineFilterNav(cachedMachineData);
 
         sortedOrgs.forEach(function(orgName) {
             const orgContainer = document.createElement('div');
@@ -646,9 +882,69 @@
             container.appendChild(orgContainer);
         });
 
+        // XACA-1060: re-apply the MACHINES filter now that this pass's cards,
+        // chips, and avatar thumbs all exist -- must run BEFORE endRenderPass()
+        // reads the controllers array (division/organization panel `hidden`
+        // state and the nav buttons' live counts all need to be correct
+        // before that pass is considered final), but stays INSIDE the
+        // beginRenderPass()/endRenderPass() bracket per XACA-0989-019: that
+        // bracket must span the entire pass, not just the parts unrelated to
+        // this feature.
+        applyMachineFilter();
+
         // XACA-0989: refresh the Expand All / Collapse All label now that
         // this pass's division set (and each panel's initial paint) is final.
         if (window.LCARS_DIVISIONS) window.LCARS_DIVISIONS.endRenderPass();
+    }
+
+    // XACA-1060: a team bucket is keyed server-side on (division, project,
+    // team) -- machine is NOT part of that identity, so a team running on
+    // two machines (e.g. an LCARS terminal migrated m3pro -> m4-mini mid-
+    // flight, or genuinely dual-homed) collapses into one misleading card
+    // that can only show one machine's data. Machine attribution IS present
+    // client-side on data.sessions[].hostname and data.lcars_service.hostname
+    // -- these two helpers pull that attribution out and use it to fan a
+    // single bucket into one card per machine. Pure/DOM-free by design so
+    // they're independently testable against a saved /api/fleet payload.
+    function getTeamHosts(teamData) {
+        const hosts = {};
+        if (teamData) {
+            const sessions = teamData.sessions;
+            if (sessions) {
+                for (let i = 0; i < sessions.length; i++) {
+                    const h = sessions[i] && sessions[i].hostname;
+                    if (h) hosts[h] = true;
+                }
+            }
+            const svc = teamData.lcars_service;
+            if (svc && svc.hostname) {
+                hosts[svc.hostname] = true;
+            }
+        }
+        return Object.keys(hosts).sort();
+    }
+
+    // XACA-1060: returns [[hostname, narrowedTeamData], ...] sorted by
+    // hostname, one entry per host from getTeamHosts(). A bucket with no
+    // host attribution at all -- e.g. XACA-1002's idle_registered synthetic
+    // bucket, which has no sessions and no lcars_service -- returns [],
+    // which the createDivisionPanel call site below treats as "drop this
+    // team" (see XACA-1060 comment there). Each narrowedTeamData is a
+    // shallow copy; teamData itself is never mutated.
+    function splitTeamByHost(teamData) {
+        const hosts = getTeamHosts(teamData);
+        return hosts.map(function(host) {
+            const narrowed = Object.assign({}, teamData);
+            narrowed.sessions = (teamData.sessions || []).filter(function(s) {
+                return s && s.hostname === host;
+            });
+            if (teamData.lcars_service && teamData.lcars_service.hostname === host) {
+                narrowed.lcars_service = teamData.lcars_service;
+            } else {
+                delete narrowed.lcars_service;
+            }
+            return [host, narrowed];
+        });
     }
 
     function createDivisionPanel(name, data) {
@@ -667,8 +963,14 @@
         // influenced text, not a fixed-set label. Element content -> escapeHtml.
         // data.total_sessions is a server-side integer counter
         // (divisions[key].total_sessions++), never interpolated input -> unwrapped.
+        // XACA-1060: '.division-stats-count' wraps just the count text so
+        // applyMachineFilter() can rewrite it after filtering WITHOUT
+        // touching '.division-toggle-icon' -- wireDivisionToggle() (XACA-0989)
+        // requires that sibling span to exist and writes the chevron glyph
+        // into it every pass; rewriting '.division-stats.textContent'
+        // directly would silently delete it and kill collapse/expand.
         header.innerHTML = escapeHtml(getDivisionTitle(name)) +
-            '<span class="division-stats">' + data.total_sessions + ' Sessions' +
+            '<span class="division-stats"><span class="division-stats-count">' + data.total_sessions + ' Sessions</span>' +
             '<span class="division-toggle-icon" aria-hidden="true"></span></span>';
         panel.appendChild(header);
 
@@ -687,6 +989,10 @@
         // XACA-0989: collected alongside the (unchanged) expanded cards so
         // the collapsed chip view never has to re-walk data.projects.
         const chipEntries = [];
+        // XACA-1060: parallel array, index-aligned with chipEntries, recording
+        // which machine each chip belongs to -- used to tag the chip row's
+        // DOM children after buildChipRow() builds them (see below).
+        const chipHosts = [];
 
         for (const projectKey in data.projects) {
             const projectData = data.projects[projectKey];
@@ -700,9 +1006,43 @@
                 LCARS_TERMINAL_CARD.createTeamNameComparator(projectData.teams, { useTabOrder: true })
             );
             teamNames.forEach(function(teamName) {
-                const teamCard = createTeamCard(teamName, projectData.teams[teamName]);
-                content.appendChild(teamCard);
-                chipEntries.push([teamName, projectData.teams[teamName]]);
+                // XACA-1060: a bucket is keyed on (division, project, team) --
+                // machine is not part of that identity server-side, so fan
+                // this one team out into one card per machine it actually
+                // has attribution for (splitTeamByHost, above).
+                //
+                // A team with ZERO host attribution (no sessions, no
+                // lcars_service) is dropped here rather than rendered.
+                // Concretely today that's XACA-1002's idle_registered
+                // synthetic bucket -- registered in the team registry but
+                // with no live process anywhere. This deliberately REVERSES
+                // the visible ORGS effect of XACA-1002 (which added a card
+                // for exactly that bucket, on purpose): that rationale is
+                // superseded, not overlooked. An idle team has no host, so
+                // no machine button on this new filter bar could honestly
+                // claim it -- there is nothing to route the click to. Gate
+                // is on the EMPTY HOST SET, never on data.idle_registered
+                // directly, so a malformed hostless bucket (no sessions, no
+                // lcars_service, no idle marker either) is excluded the same
+                // way instead of falling through to a misleading card.
+                const hostEntries = splitTeamByHost(projectData.teams[teamName]);
+                if (hostEntries.length === 0) {
+                    return;
+                }
+                hostEntries.forEach(function(hostEntry) {
+                    const host = hostEntry[0];
+                    const narrowedTeamData = hostEntry[1];
+                    const teamCard = createTeamCard(teamName, narrowedTeamData);
+                    teamCard.dataset.machineHost = host;
+                    // XACA-1060-006: this host's slice of the session count,
+                    // read back by applyMachineFilter() to recompute the
+                    // division's '.division-stats-count' from only the
+                    // currently-visible cards, without re-walking data.projects.
+                    teamCard.dataset.sessionCount = String((narrowedTeamData.sessions || []).length);
+                    content.appendChild(teamCard);
+                    chipEntries.push([teamName, narrowedTeamData]);
+                    chipHosts.push(host);
+                });
             });
         }
 
@@ -725,6 +1065,18 @@
                 // helper (see those files' buildChipRow calls, unchanged).
                 getBackupAction: getBackupAction
             });
+            // XACA-1060: buildChipRow() appends exactly one child per
+            // chipEntries entry, in input order (see buildChipRow in
+            // shared/js/lcars-division-collapse.js) -- so chipRow.children[i]
+            // corresponds to chipHosts[i]. Guard the length match rather than
+            // trusting that invariant blindly: a future change to
+            // buildChipRow that skips or merges entries would otherwise
+            // silently mis-tag chips with the wrong machine.
+            if (chipRow.children.length === chipHosts.length) {
+                for (let ci = 0; ci < chipRow.children.length; ci++) {
+                    chipRow.children[ci].dataset.machineHost = chipHosts[ci];
+                }
+            }
             panel.insertBefore(chipRow, content);
             window.LCARS_DIVISIONS.wireDivisionToggle(panel, header, chipRow, content);
         }
@@ -833,18 +1185,33 @@
 
         const activeAgents = [];
 
-        // Collect all unique team names and their status from this division
+        // Collect all unique team names and their status from this division.
+        // XACA-1060: one avatar per HOST a team is attributed to, via the
+        // same splitTeamByHost() used to fan team cards out above -- a
+        // dual-homed team needs the same per-machine granularity here as on
+        // the cards/chips, or the MACHINES filter would either strand a
+        // stale avatar for a now-hidden host, or hide the only avatar for a
+        // team that's still live on the host that's still shown.
         for (const projectKey in divisionData.projects) {
             const projectData = divisionData.projects[projectKey];
             for (const teamName in projectData.teams) {
                 const teamData = projectData.teams[teamName];
-                const session = teamData.sessions && teamData.sessions[0];
-                if (session) {
+                const hostEntries = splitTeamByHost(teamData);
+                hostEntries.forEach(function(hostEntry) {
+                    const host = hostEntry[0];
+                    const narrowedTeamData = hostEntry[1];
+                    const session = narrowedTeamData.sessions && narrowedTeamData.sessions[0];
+                    // Service-only host entry (lcars_service, no session on
+                    // this host) -- no session means no status to badge an
+                    // avatar with, same as the pre-XACA-1060 single-session
+                    // behavior this mirrors.
+                    if (!session) return;
                     const avatarInfo = getTeamAvatarUrl(teamName, divisionName);
                     if (avatarInfo) {
                         const status = session.machine_status || 'offline';
                         activeAgents.push({
                             name: teamName,
+                            host: host,
                             avatarUrl: avatarInfo.url,
                             terminalLogoUrl: getTerminalLogoUrl(teamName, divisionName),
                             persona: avatarInfo.persona,
@@ -852,7 +1219,7 @@
                             isOnline: status === 'online'
                         });
                     }
-                }
+                });
             }
         }
 
@@ -883,6 +1250,9 @@
             img.className = 'org-avatar-thumb lcars-avatar' + (agent.isOnline ? '' : ' offline');
             img.title = agent.name + ' (' + agent.status + ')';
             img.dataset.persona = agent.persona;
+            // XACA-1060-006: toggled by applyMachineFilter() alongside the
+            // team cards/chips this agent's slice belongs to.
+            img.dataset.machineHost = agent.host;
             img.onerror = function() {
                 this.style.display = 'none';
             };

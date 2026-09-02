@@ -69,6 +69,21 @@ class FakeClassList {
     contains(cls) {
         return (this._el.className || '').split(/\s+/).filter(Boolean).includes(cls);
     }
+    // XACA-1060: .remove()/.toggle() -- classList.add()/.contains() were the
+    // only members previously exercised by any test through this stub;
+    // updateMachineNavStats() (lcars-dashboard-app.js) is the first caller to
+    // reach .toggle(force). Standard DOM semantics: toggle(cls) flips
+    // membership; toggle(cls, force) sets membership to !!force.
+    remove(cls) {
+        const current = this._el.className ? this._el.className.split(/\s+/).filter(Boolean) : [];
+        const next = current.filter((c) => c !== cls);
+        this._el.className = next.join(' ');
+    }
+    toggle(cls, force) {
+        const shouldHave = force === undefined ? !this.contains(cls) : !!force;
+        if (shouldHave) this.add(cls); else this.remove(cls);
+        return shouldHave;
+    }
 }
 
 // XACA-0416: a CSSStyleDeclaration stand-in. The stub previously used a bare
@@ -114,6 +129,165 @@ class FakeStyle {
     }
 }
 
+// XACA-1060: dataset <-> data-* attribute reflection (camelCase <->
+// kebab-case), same round-trip a real HTMLElement.dataset performs. Added
+// for the MACHINES filter bar tests, which are the first callers to write
+// `.dataset.foo = x` through this stub -- FakeElement previously had no
+// `dataset` at all, so that write threw "Cannot set properties of
+// undefined". Backed by the SAME `_attrs` Map setAttribute/getAttribute
+// already use, so `el.dataset.machineHost = 'x'` and
+// `el.getAttribute('data-machine-host')` agree, exactly like a real DOM.
+function toKebabCase(name) {
+    return String(name).replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
+}
+function toCamelCase(name) {
+    return String(name).replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase());
+}
+function createDatasetProxy(el) {
+    return new Proxy({}, {
+        get(_target, prop) {
+            if (typeof prop !== 'string') return undefined;
+            const attr = 'data-' + toKebabCase(prop);
+            return el._attrs.has(attr) ? el._attrs.get(attr) : undefined;
+        },
+        set(_target, prop, value) {
+            if (typeof prop === 'string') {
+                el._attrs.set('data-' + toKebabCase(prop), String(value));
+            }
+            return true;
+        },
+        has(_target, prop) {
+            return el._attrs.has('data-' + toKebabCase(String(prop)));
+        },
+        deleteProperty(_target, prop) {
+            return el._attrs.delete('data-' + toKebabCase(String(prop)));
+        },
+        ownKeys() {
+            const keys = [];
+            for (const k of el._attrs.keys()) {
+                if (k.indexOf('data-') === 0) keys.push(toCamelCase(k.slice(5)));
+            }
+            return keys;
+        },
+        getOwnPropertyDescriptor(_target, prop) {
+            const attr = 'data-' + toKebabCase(String(prop));
+            if (el._attrs.has(attr)) {
+                return { enumerable: true, configurable: true, value: el._attrs.get(attr) };
+            }
+            return undefined;
+        }
+    });
+}
+
+// XACA-1060: a SMALL, deliberately non-general selector grammar -- just
+// enough to support what applyMachineFilter()/renderMachineFilterNav() in
+// lcars-dashboard-app.js actually pass: an optional tag (or `*`), zero or
+// more `.class` tokens, and zero or more `[attr]` / `[attr="value"]`
+// conditions, chained by AT MOST one descendant (space) or direct-child
+// (`>`) combinator. This is not a CSS engine -- anything past that shape
+// (attribute selectors with operators, `:not()`, sibling combinators,
+// selector lists) is out of scope and will simply fail to match rather than
+// silently do the wrong thing.
+function parseCompoundSelector(str) {
+    const m = /^([a-zA-Z][a-zA-Z0-9]*|\*)?((?:\.[A-Za-z0-9_-]+)*)((?:\[[^\]]+\])*)$/.exec(String(str || '').trim());
+    if (!m) return null;
+    const tag = m[1] || null;
+    const classes = (m[2].match(/\.[A-Za-z0-9_-]+/g) || []).map((c) => c.slice(1));
+    const attrs = (m[3].match(/\[[^\]]+\]/g) || []).map((a) => {
+        const inner = a.slice(1, -1);
+        const eq = inner.indexOf('=');
+        if (eq === -1) return { name: inner.trim(), value: null };
+        const name = inner.slice(0, eq).trim();
+        const value = inner.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+        return { name, value };
+    });
+    return { tag, classes, attrs };
+}
+
+function elementMatchesCompound(el, compound) {
+    if (!compound) return false;
+    if (compound.tag && compound.tag !== '*' && el.tagName !== compound.tag.toUpperCase()) return false;
+    for (const cls of compound.classes) {
+        if (!el.classList || !el.classList.contains(cls)) return false;
+    }
+    for (const attr of compound.attrs) {
+        const has = el._attrs && el._attrs.has(attr.name);
+        if (attr.value === null) {
+            if (!has) return false;
+        } else if (!has || el._attrs.get(attr.name) !== attr.value) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Parses "A" or "A B" (descendant) or "A > B" (direct child) into a list of
+// {combinator, compound} steps. Bare-minimum: at most 2 steps, which is
+// everything the client code passes today (e.g. '.chip-row > *[data-machine-host]').
+function parseSelectorSteps(selector) {
+    const childGroups = String(selector || '').split('>').map((s) => s.trim());
+    const steps = [];
+    childGroups.forEach((group, gi) => {
+        group.split(/\s+/).filter(Boolean).forEach((part, pi) => {
+            const combinator = pi > 0 ? 'descendant' : (gi > 0 ? 'child' : null);
+            steps.push({ combinator, compound: parseCompoundSelector(part) });
+        });
+    });
+    return steps;
+}
+
+// Real, tree-based (this.children, built by createElement()+appendChild())
+// descendant search -- deliberately does NOT fall back to the innerHTML-string
+// regex/synthesis FakeElement.querySelector() below relies on, so it only
+// ever finds nodes that genuinely exist as objects in the tree. An element
+// whose content was set via a raw `.innerHTML = "<span>...</span>"` template
+// string (e.g. createDivisionPanel's division-header) has NO real children
+// for its string-embedded markup, so this intentionally does not see inside
+// it -- see the XACA-1060 test file for which assertions that rules out.
+function collectDescendants(root, out) {
+    (root.children || []).forEach((child) => {
+        out.push(child);
+        collectDescendants(child, out);
+    });
+    return out;
+}
+
+function deepQuerySelectorAll(root, selector) {
+    const steps = parseSelectorSteps(selector);
+    if (steps.length === 0 || steps.some((s) => !s.compound)) return [];
+
+    let candidateSets = [collectDescendants(root, [])];
+    steps.forEach((step, i) => {
+        const prevMatches = i === 0 ? candidateSets[0] : candidateSets[candidateSets.length - 1];
+        let next;
+        if (i === 0) {
+            next = prevMatches.filter((el) => elementMatchesCompound(el, step.compound));
+        } else if (step.combinator === 'child') {
+            // Direct children of each element that matched the PREVIOUS step.
+            const parents = candidateSets[candidateSets.length - 1];
+            next = [];
+            parents.forEach((parent) => {
+                (parent.children || []).forEach((child) => {
+                    if (elementMatchesCompound(child, step.compound)) next.push(child);
+                });
+            });
+        } else {
+            // Descendant combinator (or a bare second token, treated the same).
+            next = collectDescendants(root, []).filter((el) => elementMatchesCompound(el, step.compound));
+        }
+        candidateSets.push(next);
+    });
+
+    // De-duplicate while preserving order (a node can be reached via more
+    // than one branch when the selector has multiple steps).
+    const seen = new Set();
+    const result = [];
+    candidateSets[candidateSets.length - 1].forEach((el) => {
+        if (!seen.has(el)) { seen.add(el); result.push(el); }
+    });
+    return result;
+}
+
 class FakeElement {
     constructor(tag) {
         this.tagName = String(tag || 'div').toUpperCase();
@@ -125,6 +299,23 @@ class FakeElement {
         this.title = '';
         this.classList = new FakeClassList(this);
         this.children = [];
+        this._hidden = false;
+        this.dataset = createDatasetProxy(this);
+    }
+    get id() {
+        return this._attrs.has('id') ? this._attrs.get('id') : '';
+    }
+    set id(v) {
+        this._attrs.set('id', String(v));
+    }
+    // XACA-1060: boolean IDL reflection of the `hidden` content attribute --
+    // applyMachineFilter() sets `.hidden = true/false` directly (never
+    // style.display, deliberately, per that function's own comments).
+    get hidden() {
+        return this._hidden;
+    }
+    set hidden(v) {
+        this._hidden = !!v;
     }
     set innerHTML(v) {
         this._innerHTML = v;
@@ -186,6 +377,19 @@ class FakeElement {
         this.children.push(child);
         return child;
     }
+    // XACA-1060: real, tree-based querySelectorAll -- walks this.children
+    // (populated by appendChild(), i.e. actual createElement()-built nodes),
+    // NEVER the innerHTML-string regex/synthesis path querySelector() below
+    // uses. Deliberately does not fall back to string-embedded content: a
+    // selector that can only match markup baked into a raw `.innerHTML =`
+    // template string (e.g. '.division-stats-count', nested inside
+    // createDivisionPanel's division-header) returns an empty NodeList here,
+    // same as it structurally must -- there is no such node anywhere in the
+    // tree to find. See parseSelectorSteps/deepQuerySelectorAll above for the
+    // (deliberately small) selector grammar this supports.
+    querySelectorAll(selector) {
+        return deepQuerySelectorAll(this, selector);
+    }
     // XACA-0416-027 (PR #784 test gate) -- SECOND anti-vacuity note, about the
     // OTHER direction. The node returned below is SYNTHESISED and DETACHED: it
     // is not spliced into the innerHTML string this FakeElement holds, so a
@@ -221,6 +425,18 @@ class FakeElement {
         const m = /^\.([A-Za-z][A-Za-z0-9_-]*)$/.exec(String(selector || ''));
         if (!m) return null;
         const cls = m[1];
+        // XACA-1060: check REAL children (this.children, appendChild()-built)
+        // FIRST, depth-first -- if a genuine node with this class exists in
+        // the tree, return that live node instead of a synthesised, detached
+        // one. This is backward compatible by construction: every existing
+        // caller of querySelector() targets an element whose matching content
+        // was set via a raw innerHTML STRING (createTeamCard,
+        // createServiceOnlyLcarsCard, ...), which appendChild() never
+        // populated, so `this.children` is empty for those and this check
+        // always misses, falling through to the untouched regex/synthesis
+        // path below exactly as before XACA-1060.
+        const realMatches = deepQuerySelectorAll(this, '.' + cls);
+        if (realMatches.length > 0) return realMatches[0];
         // Token membership, not a substring match: `.team` must not match
         // class="team-card". Pull every class attribute out of the markup and
         // split each on whitespace, the same tokenisation the HTML spec uses.
@@ -295,6 +511,15 @@ function collectCssCustomProperties(pageRelPath) {
 
 function createDomStub(options) {
     const opts = options || {};
+    // XACA-1060: id -> element registry, opt-in only. A real document finds
+    // an element by id because it is somewhere in the live tree; this stub
+    // has no such tree root to search (createElement() builds detached nodes
+    // until a test's own code appendChild()s them together), so a test that
+    // needs getElementById('foo') to resolve registers that specific element
+    // explicitly via document.__registerById('foo', el) BEFORE calling into
+    // client code. Every existing test that never calls __registerById sees
+    // getElementById() return null exactly as before this change.
+    const byId = new Map();
     const documentStub = {
         createElement(tag) {
             return new FakeElement(tag);
@@ -303,8 +528,11 @@ function createDomStub(options) {
             // DOMContentLoaded etc. -- registered, never dispatched by
             // these tests, so a no-op is sufficient and correct.
         },
-        getElementById() {
-            return null;
+        getElementById(id) {
+            return byId.has(id) ? byId.get(id) : null;
+        },
+        __registerById(id, el) {
+            byId.set(id, el);
         }
     };
 
@@ -405,7 +633,33 @@ function loadClientApp(relPath, ctx) {
         // same reason setWorkingItems is -- in the four lcars2 files the export
         // lands as null rather than throwing a ReferenceError at load.
         ' dashboardLinkStyle: (typeof dashboardLinkStyle !== "undefined")' +
-        '     ? dashboardLinkStyle : null' +
+        '     ? dashboardLinkStyle : null,' +
+        // XACA-1060: MACHINES filter bar (subitems 004-006) -- only
+        // lcars-dashboard-app.js defines these, hence typeof-guarded like
+        // the two exports above. setCachedMachineData lets a test populate
+        // the module-scope cachedMachineData cache renderMachineFilterNav()
+        // reads, without needing to run the fetch-driven renderDashboard().
+        ' renderDivisions: (typeof renderDivisions !== "undefined")' +
+        '     ? renderDivisions : null,' +
+        ' applyMachineFilter: (typeof applyMachineFilter !== "undefined")' +
+        '     ? applyMachineFilter : null,' +
+        ' toggleMachineFilter: (typeof toggleMachineFilter !== "undefined")' +
+        '     ? toggleMachineFilter : null,' +
+        ' renderMachineFilterNav: (typeof renderMachineFilterNav !== "undefined")' +
+        '     ? renderMachineFilterNav : null,' +
+        ' updateMachineNavStats: (typeof updateMachineNavStats !== "undefined")' +
+        '     ? updateMachineNavStats : null,' +
+        ' setCachedMachineData: (typeof cachedMachineData !== "undefined")' +
+        '     ? function (v) { cachedMachineData = v; } : null,' +
+        // setTeamConfig/setDivisionToTeamMap: createDivisionAvatarGrid's
+        // avatar lookup (getTeamAvatarUrl) is gated on both of these
+        // module-scope caches, normally populated by a fetch this loader
+        // never dispatches -- without a setter the avatar-grid path is
+        // unreachable from a test, same rationale as setWorkingItems above.
+        ' setTeamConfig: (typeof teamConfig !== "undefined")' +
+        '     ? function (v) { teamConfig = v; } : null,' +
+        ' setDivisionToTeamMap: (typeof divisionToTeamMap !== "undefined")' +
+        '     ? function (v) { divisionToTeamMap = v; } : null' +
         ' };\n';
 
     const patched = src.slice(0, lastIdx) + exportStmt + src.slice(lastIdx);

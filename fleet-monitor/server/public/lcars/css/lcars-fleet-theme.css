@@ -1124,6 +1124,7 @@
 /* Content within sections cascades in */
 .lcars-section .summary-cards,
 .lcars-section .organization-nav,
+.lcars-section .machine-nav,
 .lcars-section .keyboard-shortcuts,
 .lcars-section .connection-status,
 .lcars-section #divisions-container,
@@ -1135,6 +1136,7 @@
 
 .lcars-section.active .summary-cards,
 .lcars-section.active .organization-nav,
+.lcars-section.active .machine-nav,
 .lcars-section.active .keyboard-shortcuts,
 .lcars-section.active .connection-status,
 .lcars-section.active #divisions-container,
@@ -1146,6 +1148,7 @@
 /* Content appears slightly after its parent section header */
 .lcars-section.active > section:nth-child(1) .summary-cards,
 .lcars-section.active > section:nth-child(1) .organization-nav,
+.lcars-section.active > section:nth-child(1) .machine-nav,
 .lcars-section.active > section:nth-child(1) .keyboard-shortcuts,
 .lcars-section.active > section:nth-child(1) .connection-status,
 .lcars-section.active > section:nth-child(1) #divisions-container,
@@ -1155,6 +1158,7 @@
 
 .lcars-section.active > section:nth-child(2) .summary-cards,
 .lcars-section.active > section:nth-child(2) .organization-nav,
+.lcars-section.active > section:nth-child(2) .machine-nav,
 .lcars-section.active > section:nth-child(2) .keyboard-shortcuts,
 .lcars-section.active > section:nth-child(2) .connection-status,
 .lcars-section.active > section:nth-child(2) #divisions-container,
@@ -1164,6 +1168,7 @@
 
 .lcars-section.active > section:nth-child(3) .summary-cards,
 .lcars-section.active > section:nth-child(3) .organization-nav,
+.lcars-section.active > section:nth-child(3) .machine-nav,
 .lcars-section.active > section:nth-child(3) .keyboard-shortcuts,
 .lcars-section.active > section:nth-child(3) .connection-status,
 .lcars-section.active > section:nth-child(3) #divisions-container,
@@ -1251,6 +1256,8 @@
 .lcars-section.refreshing .summary-cards,
 .lcars-section.refreshing .organization-nav,
 .lcars-section.refreshing .org-nav-button,
+.lcars-section.refreshing .machine-nav,
+.lcars-section.refreshing .machine-nav-button,
 .lcars-section.refreshing .keyboard-shortcuts,
 .lcars-section.refreshing .shortcut-item,
 .lcars-section.refreshing .connection-status,
@@ -1299,6 +1306,7 @@
 .lcars-section.exiting .summary-cards,
 .lcars-section.exiting .summary-card,
 .lcars-section.exiting .organization-nav,
+.lcars-section.exiting .machine-nav,
 .lcars-section.exiting .keyboard-shortcuts,
 .lcars-section.exiting .shortcut-item,
 .lcars-section.exiting .connection-status,
@@ -1338,6 +1346,7 @@
 /* Content containers fade after their children start */
 .lcars-section.exiting .summary-cards,
 .lcars-section.exiting .organization-nav,
+.lcars-section.exiting .machine-nav,
 .lcars-section.exiting .keyboard-shortcuts,
 .lcars-section.exiting .connection-status,
 .lcars-section.exiting #divisions-container,
@@ -1833,6 +1842,119 @@
 .org-nav-button.org-legal { background: var(--lcars-green); }
 .org-nav-button.org-finance { background: var(--lcars-amber); }
 .org-nav-button.org-medical { background: var(--lcars-teal); }
+
+/* -------------------------------------------------------------------------------
+   XACA-1060: Machine Filter Navigation - MACHINES filter bar (mirrors the
+   Organization Navigation block above). Container filled by
+   renderMachineFilterNav() (implemented in a later subitem). Unlike the
+   organization nav (a single-select jump list), each button here is an
+   independent multi-select show/hide toggle over that machine's team cards,
+   hence the added .disabled (deselected-but-clickable) and per-status
+   (.status-online/.status-warning/.status-offline) treatments below that
+   have no .org-nav-button equivalent.
+   ------------------------------------------------------------------------------- */
+.machine-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.machine-nav-button {
+    background: var(--lcars-blue);
+    border: none;
+    border-radius: 20px;
+    padding: 10px 20px;
+    /* Transition-based cascade */
+    opacity: 0;
+    transform: translateY(8px) scale(0.95);
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    /* Smoother easing curve for continuous flow */
+    transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), filter 0.2s ease, opacity 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+    font-family: var(--lcars-font);
+}
+
+/* When section is active, buttons become visible with stagger */
+.lcars-section.active .machine-nav-button {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+}
+
+/* Stagger delays - more visible separation */
+.lcars-section.active .machine-nav-button:nth-child(1) { transition-delay: 0.15s; }
+.lcars-section.active .machine-nav-button:nth-child(2) { transition-delay: 0.25s; }
+.lcars-section.active .machine-nav-button:nth-child(3) { transition-delay: 0.35s; }
+.lcars-section.active .machine-nav-button:nth-child(4) { transition-delay: 0.45s; }
+.lcars-section.active .machine-nav-button:nth-child(5) { transition-delay: 0.55s; }
+
+/* Reverse cascade on exit */
+.lcars-section.exiting .machine-nav-button {
+    opacity: 0;
+    transform: translateY(8px) scale(0.95);
+    transition-delay: 0s;
+    transition-duration: 0.1s;
+}
+
+.machine-nav-button:hover {
+    transform: scale(1.02);
+    filter: brightness(1.1);
+}
+
+.machine-nav-button .machine-nav-name {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--lcars-black);
+    letter-spacing: var(--lcars-spacing-wide);
+}
+
+.machine-nav-button .machine-nav-stats {
+    font-size: 0.65rem;
+    color: rgba(0, 0, 0, 0.7);
+    letter-spacing: var(--lcars-spacing-normal);
+}
+
+/* Machine status variants (fleet.machines[].status: online/warning/offline).
+   Online stays bright + glowing to match .status-indicator.online; warning and
+   offline step down to muted palette entries so both read as dimmer than
+   online at a glance, independent of the hue difference. */
+.machine-nav-button.status-online {
+    background: var(--lcars-green);
+    box-shadow: 0 0 8px var(--lcars-green-glow);
+}
+
+.machine-nav-button.status-warning {
+    background: var(--lcars-tan);
+    box-shadow: 0 0 6px var(--lcars-yellow-glow);
+}
+
+.machine-nav-button.status-offline {
+    background: var(--lcars-brown);
+    box-shadow: none;
+}
+
+/* Deselected (filtered-out) state. This is a multi-select TOGGLE, not a
+   disabled control, so it must stay obviously clickable: no pointer-events:
+   none, no cursor: not-allowed. Reduced opacity + a desaturating grayscale
+   filter carry the "off" state, paired with a non-colour cue (dashed inset
+   outline) so the state still reads for a viewer who can't perceive the
+   opacity/colour shift. Scoped under .lcars-section.active so it wins over
+   the equal-weight .lcars-section.active .machine-nav-button opacity rule
+   above (both are 3 classes deep; this one is 4). */
+.lcars-section.active .machine-nav-button.disabled {
+    opacity: 0.45;
+    filter: grayscale(0.65) brightness(0.85);
+    outline: 2px dashed rgba(0, 0, 0, 0.5);
+    outline-offset: -4px;
+}
+
+.lcars-section.active .machine-nav-button.disabled:hover {
+    opacity: 0.65;
+    filter: grayscale(0.45) brightness(0.95);
+}
+
 
 /* -------------------------------------------------------------------------------
    Teams Grid - Card layout for teams
@@ -4542,6 +4664,12 @@
         overflow-x: hidden !important;
     }
 
+    /* XACA-1060: Machine nav constrained */
+    .machine-nav {
+        max-width: 100% !important;
+        overflow-x: hidden !important;
+    }
+
     /* Machines list constrained */
     #machines-list {
         max-width: 100% !important;
@@ -5022,6 +5150,20 @@
     transform: scale(0.98);
 }
 
+/* XACA-1060: Machine nav button interactions */
+.machine-nav-button {
+    transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.machine-nav-button:hover {
+    transform: translateY(-3px) scale(1.02);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+.machine-nav-button:active {
+    transform: scale(0.98);
+}
+
 /* Machine status row interactions */
 .status-row {
     transition: transform 0.2s ease, background 0.2s ease;
@@ -5065,6 +5207,7 @@
     .team-card:hover,
     .summary-card:hover,
     .org-nav-button:hover,
+    .machine-nav-button:hover,
     .status-row:hover,
     .lcars-button:hover,
     .sidebar-link:hover,
@@ -5105,6 +5248,7 @@
 .sidebar-button:focus-visible,
 .lcars-button:focus-visible,
 .org-nav-button:focus-visible,
+.machine-nav-button:focus-visible,
 .team-card:focus-visible {
     outline: 2px solid var(--lcars-cyan);
     outline-offset: 2px;
