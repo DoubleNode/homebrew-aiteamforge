@@ -13,7 +13,10 @@
  *
  * Uses Audio elements instead of Web Audio API oscillators because
  * iTerm2's WKWebView (behind tmux) silently swallows AudioContext.destination
- * output while HTML5 <audio> playback works correctly.
+ * output while HTML5 <audio> playback works correctly. (XACA-1022-007
+ * evaluated a Web Audio hybrid and deferred it — see the "Web Audio hybrid
+ * evaluation" comment block below _playWav for the reasoning and the
+ * trigger condition for revisiting.)
  *
  * Exposes global: LCARSSound
  *
@@ -216,15 +219,20 @@
     }
 
     /**
-     * Play a cached WAV via a new Audio element.
+     * Play a cached WAV via a fresh Audio element.
      * Each call creates a fresh Audio instance so overlapping plays work.
+     * Returns the Audio element that was played, or null if nothing played
+     * (unknown type, or a synchronous playback error). The returned handle
+     * exists so a future change (tracked separately, NOT this subitem) can
+     * silence an in-flight tone from a pointercancel handler.
      */
     function _playWav(type) {
         _ensureWavCache();
         var uri = _wavCache[type];
-        if (!uri) return;
+        if (!uri) return null;
+        var audio;
         try {
-            var audio = new Audio(uri);
+            audio = new Audio(uri);
             audio.volume = 1.0;
             var p = audio.play();
             if (p && p.catch) {
@@ -234,8 +242,133 @@
             }
         } catch (e) {
             console.warn('[LCARSSound] Audio playback error:', e);
+            return null;
         }
+        return audio;
     }
+
+    // -------------------------------------------------------------------------
+    // XACA-1022-007: Web Audio hybrid evaluation — EVALUATED AND DEFERRED,
+    // not implemented. This block documents the decision so it isn't
+    // re-litigated from scratch, and states the trigger condition for
+    // revisiting it. No code below this comment executes.
+    //
+    // WHAT WAS ACTUALLY MEASURED (XACA-1022-006, on-device: iPhone, iOS 18.7,
+    // Safari 27.0, via the A/B battery in probe/xaca-1022-audio-latency.html):
+    //
+    //   Decode cost is real and scales with size (construction-only batch,
+    //   20 samples/tone): nav 9,490B -> 268.45ms; action 14,194B -> 282.75ms;
+    //   alert 29,482B -> 337.25ms. `new Audio()` construction itself is
+    //   ~0.1ms — the cost is decode-availability, not the constructor call.
+    //   XACA-1022-006 pre-constructed and pooled Audio elements per sound
+    //   type specifically to move that 268-337ms off the per-press hot path.
+    //
+    //   It did NOT make sound arrive sooner. Rounds 3-15 of the serialized
+    //   A/B battery (warm-up rounds dropped): play()-promise resolution was
+    //   ~100ms FASTER pooled (65ms vs 165ms), while `progress` — first
+    //   observed currentTime > 0, the real end-to-end "is it audible yet"
+    //   signal — was ~97ms SLOWER pooled (434ms vs 337ms). The probe's own
+    //   headline delta was +3.8%: pooled was slower, not faster, end to end.
+    //
+    //   The gap between promise-resolution and actual audio progression was
+    //   consistently ~369ms pooled vs ~172ms baseline across all 13 rounds.
+    //   A `currentTime = 0` seek penalty on reused elements was considered
+    //   and REJECTED by the data: the first four pooled draws are fresh,
+    //   never-played elements, and the later reuses were *faster* (~439ms)
+    //   than first-use (~590ms) — the opposite of a seek cost.
+    //
+    //   Reading: iOS audio-pipeline start latency dominates time-to-audible
+    //   and is paid either way — pooling moved decode work off the critical
+    //   path without moving the moment sound actually starts. XACA-1022-006
+    //   was reverted on this evidence; the dispatch fix (pointerdown timing,
+    //   001-004) shipped alone. Do not re-add pooling without a NEW number
+    //   showing it moves the `progress` timestamp, not just promise
+    //   resolution — promise resolution is not a proxy for audible sound on
+    //   this platform, per the measurement above.
+    //
+    // WHAT A WEB AUDIO PATH WOULD STILL NEED TO PROVE:
+    //   Decode each sound ONCE into an AudioBuffer (via
+    //   AudioContext.decodeAudioData), then per press create a fresh
+    //   BufferSource, connect it, and call start(0). BufferSource creation
+    //   and scheduling are near-zero-cost compared to <audio> element
+    //   playback-start, and start() can be scheduled against
+    //   AudioContext.currentTime, a more precise clock than anything
+    //   HTMLMediaElement exposes. But the measurement above already
+    //   disproved the parallel claim for <audio> — "remove decode cost from
+    //   the hot path" did not reduce time-to-audible there, because decode
+    //   was never the bottleneck. The open question is therefore NOT "does
+    //   Web Audio avoid decode cost" (it does) but whether iOS's underlying
+    //   audio-pipeline start latency is beatable with `<audio>` at all, or
+    //   is a floor that AudioContext's separate output path can actually
+    //   sit below. That is unmeasured. Nothing here shows Web Audio wins —
+    //   only that <audio> pooling, tried and measured, did not.
+    //
+    // WHAT IT COSTS:
+    //   - A second playback code path to maintain alongside <audio> (this
+    //     file already carries two sound-classification paths for
+    //     pointerdown/click — a third dimension for playback itself is
+    //     real, ongoing complexity, not a one-time cost).
+    //   - The AudioContext resume()/user-gesture dance: a fresh
+    //     AudioContext starts 'suspended' and must be resume()'d inside a
+    //     user-gesture handler before it will produce output — the same
+    //     class of unlock problem XACA-1022-006's (reverted) Audio pool had
+    //     to solve for <audio> elements. The problem doesn't go away by
+    //     switching APIs; it moves.
+    //   - The WKWebView risk, which is the deciding factor: this file's own
+    //     header documents that iTerm2's WKWebView (the lcars-ui cockpit
+    //     surface) "silently swallows AudioContext.destination output" —
+    //     resume() can report success, buffers can decode, start() can be
+    //     called, and NOTHING is heard, with no error, no rejected promise,
+    //     nothing to catch. That is a strictly worse failure mode than the
+    //     current one: a working HTML5 <audio> engine replaced by a
+    //     Web-Audio path that *looks* complete in code review and testing,
+    //     then plays silently on the one desktop surface this app runs on
+    //     unattended, in production, indefinitely.
+    //
+    // THE ASYMMETRY THAT MAKES A SINGLE VERDICT WRONG:
+    //   The AudioContext-swallowing environment (iTerm2 WKWebView) and the
+    //   iPhone-measured environment (mobile Safari, via Fleet Monitor) are
+    //   DIFFERENT surfaces sharing this one file. Mobile Safari's
+    //   AudioContext works correctly; iTerm2's WKWebView is exactly where
+    //   it's unsafe. "Adopt everywhere" ignores the WKWebView risk. "Adopt
+    //   nowhere, forever" forecloses a latency question that is still open
+    //   on the surface this ticket was filed against — the <audio> pooling
+    //   experiment ruled out decode cost as the cause, it did not rule out
+    //   every possible Web Audio benefit. Both blanket answers are probably
+    //   wrong; this file cannot safely tell surfaces apart today (no
+    //   capability/output check exists here, and UA-sniffing "is this
+    //   iTerm2" is explicitly rejected below).
+    //
+    // RECOMMENDATION: DEFER on both surfaces. Do not adopt unconditionally,
+    // and do not build a speculative hybrid without a number that justifies
+    // it. The on-device measurement that now exists (above) closed the
+    // "decode cost is the bottleneck" theory for <audio> — it did not open
+    // a case for Web Audio, because no one has yet instrumented an actual
+    // AudioContext/BufferSource path on the target device to see whether
+    // its start-to-audible latency differs from <audio>'s at all.
+    //
+    // TRIGGER CONDITION for revisiting — both of these, not either alone:
+    //   1. A real AudioContext/BufferSource prototype (not the reverted
+    //      <audio> pool — a different API) is instrumented with the same
+    //      "first observed progress" methodology as the probe's A/B battery,
+    //      on a real target device, and its time-to-audible is measurably
+    //      lower than the pooled/baseline `<audio>` numbers above.
+    //   2. That win is confirmed to survive the WKWebView environment, or
+    //      the hybrid is scoped to exclude it via a genuine capability/
+    //      output check (see below) — not shipped blind to both surfaces.
+    //   If both hold, the recommended shape is: adopt Web Audio ONLY where
+    //   proven, gated behind a genuine capability/output check (e.g.
+    //   resume() the context, play a near-silent probe buffer, and verify
+    //   currentTime actually advances / an audible-confirmation signal is
+    //   observed — NOT navigator.userAgent string matching, which is
+    //   fragile and was rejected here for the same reason the click handler
+    //   above rejected MouseEvent.detail sniffing). HTML5 <audio> MUST
+    //   remain the unconditional fallback — whenever the capability check
+    //   does not PROVE the AudioContext path is working, fail safe to
+    //   <audio>, never to silence. Never adopt Web Audio on lcars-ui at all
+    //   unless this same proof is obtained for the iTerm2 WKWebView
+    //   specifically (which today's evidence says it will not be).
+    // -------------------------------------------------------------------------
 
     // -------------------------------------------------------------------------
     // Mute state — persisted to localStorage
@@ -339,17 +472,28 @@
     };
 
     // -------------------------------------------------------------------------
-    // Global click interceptor
-    // Classifies click targets and plays the appropriate sound.
+    // Global interaction interceptor
+    // Classifies interaction targets and plays the appropriate sound.
     // Uses event delegation — does NOT attach to individual elements.
-    // Does NOT interfere with existing click handlers.
+    // Does NOT interfere with existing click/pointer handlers.
+    //
+    // XACA-1022: sound now fires on `pointerdown` (press) instead of waiting
+    // for `click` (release), so the tone starts at the moment of contact
+    // instead of ~tens-to-hundreds of ms later. The trailing `click` that the
+    // browser still fires for that same press is deduped below so it doesn't
+    // play a second time. A `click` path is kept as a fallback for
+    // activations that never produce a `pointerdown` at all — keyboard
+    // Enter/Space on a focusable element, or a programmatic `.click()` call —
+    // so non-pointer activation still gets sound (XACA-1022-002).
     // -------------------------------------------------------------------------
 
-    document.addEventListener('click', function (e) {
-        if (_muted) { return; }
-
-        var target = e.target;
-
+    /**
+     * Classify an interaction target into a sound type ('nav' | 'alert' |
+     * 'action'), or null if it doesn't map to a sound. Shared by both the
+     * pointerdown and click delegates below so the closest() branches exist
+     * in exactly one place instead of being duplicated per listener.
+     */
+    function _classifySound(target) {
         // Nav sounds — sidebar navigation
         if (
             target.closest('.sidebar-button') ||
@@ -357,8 +501,7 @@
             target.closest('.analytics-page-pill') ||   // Fleet Monitor: analytics page-nav pills
             target.closest('.sidebar-link')             // Fleet Monitor: dashboard-switcher links
         ) {
-            LCARSSound.play('nav');
-            return;
+            return 'nav';
         }
 
         // Alert sounds — status changes and priority/category/tag clickables
@@ -373,10 +516,10 @@
             target.closest('#sound-toggle')
         ) {
             // sound-toggle is handled by toggleMute directly; skip double-play
-            if (!target.closest('#sound-toggle')) {
-                LCARSSound.play('alert');
+            if (target.closest('#sound-toggle')) {
+                return null;
             }
-            return;
+            return 'alert';
         }
 
         // Action sounds — cards, toggles, general buttons
@@ -391,10 +534,129 @@
             target.closest('.lcars-button') ||          // Fleet Monitor: settings CLASSIC UI button
             target.closest('.kiosk-fab')                // Fleet Monitor: kiosk mode FAB
         ) {
-            LCARSSound.play('action');
-            return;
+            return 'action';
         }
 
+        return null;
+    }
+
+    // XACA-1022: press/click dedupe guard.
+    //
+    // A single physical press produces `pointerdown` (immediate) followed,
+    // after release, by `click` (0–300ms later depending on platform). We
+    // play on `pointerdown` for latency, so the trailing `click` for that
+    // *same* interaction must be skipped, not played again.
+    //
+    // Rejected: a bare boolean ("a pointerdown happened"). It can't tell "the
+    // click I'm looking at IS the trailing click of that pointerdown" apart
+    // from "some click arrived eventually" — if the pointerdown's own click
+    // never fires (finger drags off and the gesture is cancelled/becomes a
+    // scroll — see the pointercancel handler below), a plain flag is left
+    // set and wrongly swallows the *next*, unrelated click on some other
+    // element.
+    //
+    // Rejected: clearing the flag with setTimeout(). The delay is a guess —
+    // too short and a legitimately slow click on a real device slips past it
+    // and double-plays; too long and it risks swallowing a fast, deliberate
+    // second press. Either way it's a race against real input timing, not a
+    // deterministic fact about the DOM.
+    //
+    // Chosen: remember the exact target `pointerdown` played for. A `click`
+    // is only ever treated as "already played" when its target is IDENTICAL
+    // (===) to the pointerdown's target — we check the causal relationship
+    // instead of guessing at it from timing. The guard is consumed (cleared)
+    // the instant ANY click is evaluated against it, whether or not it
+    // matched, so it can never persist forward to swallow a later, unrelated
+    // click. `pointercancel` (browser takes the gesture over as a scroll/pan)
+    // also clears it directly, for the case where no click ever follows.
+    var _pendingPointerId = null;
+    var _pendingPointerTarget = null;
+
+    document.addEventListener('pointerdown', function (e) {
+        if (_muted) { return; }
+
+        // XACA-1022-003: only the primary mouse button / primary touch or
+        // pen contact triggers sound. Right-click, middle-click, and
+        // secondary touch points (multi-touch) stay silent.
+        if (e.button !== 0 || !e.isPrimary) { return; }
+
+        var type = _classifySound(e.target);
+        if (!type) { return; }
+
+        // XACA-1022-003: fire immediately rather than waiting to see whether
+        // the gesture turns into a scroll/pan — that wait IS the latency
+        // this ticket removes, so we deliberately do not add one.
+        //
+        // Tradeoff this creates: on touch, a scroll gesture that STARTS with
+        // a finger down directly on a sound-mapped element (e.g. beginning a
+        // column-scroll drag on top of a kanban card) still produces one
+        // chirp at the moment of contact, because by the time `pointercancel`
+        // (below) tells us the gesture became a scroll, the tone has already
+        // started. We accept this: it's strictly narrower than "any swipe
+        // beeps" (a swipe starting on empty background never matches
+        // _classifySound and stays silent, before and after this change),
+        // and closing it fully would mean delaying every press to disambiguate
+        // tap-from-scroll — defeating the point of this ticket.
+        //
+        // We can't cut an in-flight tone short from here either way: `_playWav()`
+        // (subitems 006/007's audio pipeline, out of scope for this change)
+        // creates a fire-and-forget Audio element and returns nothing, so
+        // there's no handle to `.pause()` on cancel. A fast-follow could have
+        // `_playWav` return its Audio element so a `pointercancel` handler
+        // could silence it early, but that's a change to the audio pipeline
+        // and belongs with 006/007, not here.
+        _pendingPointerId = e.pointerId;
+        _pendingPointerTarget = e.target;
+
+        LCARSSound.play(type);
+    }, true); // capture phase — mirrors the click delegate below
+
+    document.addEventListener('pointercancel', function (e) {
+        // Gesture was taken over by the browser (scroll/pan) or otherwise
+        // cancelled before a click could follow. Clear the guard so it can't
+        // leak forward onto an unrelated future click (see the guard's
+        // rationale comment above).
+        if (e.pointerId === _pendingPointerId) {
+            _pendingPointerId = null;
+            _pendingPointerTarget = null;
+        }
+    }, true);
+
+    document.addEventListener('click', function (e) {
+        if (_muted) { return; }
+
+        var target = e.target;
+
+        // XACA-1022: consume the dedupe guard unconditionally — this is the
+        // one and only click evaluated against whatever pointerdown last set
+        // it. If the target matches, that pointerdown already played the
+        // sound for this interaction; skip it here.
+        var wasPointerHandled = (_pendingPointerTarget !== null && _pendingPointerTarget === target);
+        _pendingPointerId = null;
+        _pendingPointerTarget = null;
+        if (wasPointerHandled) { return; }
+
+        // XACA-1022-002: no matching pointerdown means this click did not
+        // come from a pointer press we already sounded. Most notably this
+        // covers keyboard Enter/Space activation of a role="button" element
+        // (native <button> Enter/Space and this codebase's own
+        // onkeydown-driven `.click()` calls both emit `click` with no
+        // preceding `pointerdown`), plus any other programmatic `.click()`.
+        // Play it here so keyboard users — and anything else that only ever
+        // fires `click` — still get sound.
+        //
+        // Note: MouseEvent.detail is 0 for a non-mouse-generated click per
+        // spec, and could in principle distinguish "keyboard/synthetic" from
+        // "real pointer click" without needing the guard above at all.
+        // Deliberately NOT used here — it has a documented history of
+        // inconsistent values across WebKit versions, and this codebase has
+        // no automated cross-browser coverage to catch a regression in that
+        // property. The pointerdown/click identity guard above already
+        // solves the same problem without relying on it.
+        var type = _classifySound(target);
+        if (!type) { return; }
+
+        LCARSSound.play(type);
     }, true); // capture phase so it fires before stopPropagation in other handlers
 
     // -------------------------------------------------------------------------
