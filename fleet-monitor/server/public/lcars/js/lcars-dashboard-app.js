@@ -666,18 +666,40 @@
             const displayName = machine.nickname || machine.hostname;
             const isDisabled = !!machineFilterState[host];
             const status = machine.status || 'offline';
-            const sessionCount = machine.session_count || 0;
+            // XACA-1062-012: Number(...) || 0 here MIRRORS the identical
+            // coercion updateMachineNavStats() applies when reading the value
+            // back off the dataset. The two sites agree today regardless,
+            // because the server derives session_count as (sessions||[]).length
+            // and it is therefore always a number -- but that is a property of
+            // server.js, not of this file. Coercing at BOTH ends makes the
+            // "these two call sites cannot disagree" claim structural rather
+            // than contingent on a provenance this module does not control.
+            const sessionCount = Number(machine.session_count) || 0;
 
             const navButton = document.createElement('button');
             navButton.type = 'button';
             navButton.className = 'machine-nav-button status-' + status + (isDisabled ? ' disabled' : '');
             navButton.dataset.machineHost = host;
-            // XACA-1062: carried on the button because updateMachineNavStats()
-            // is purely DOM-driven and has no access to fleet.machines[] --
-            // stashing status/session_count here (rather than adding a second
-            // module-scoped machine-data cache) is what lets that function
-            // recompute the identical stat text/aria-label from this same
-            // source of truth instead of a copy of it.
+            // XACA-1062: status/session_count are carried on the button so
+            // updateMachineNavStats() can recompute the identical stat text
+            // and aria-label without re-deriving them.
+            //
+            // XACA-1062-011: to be accurate about the alternative -- the
+            // module-scoped `cachedMachineData` (declared at the top of this
+            // IIFE, assigned from fleet.machines before renderDivisions runs,
+            // and already used for hostname lookups elsewhere in this file) IS
+            // in scope there. The choice was NOT "dataset vs. a cache that
+            // doesn't exist"; it was "dataset vs. re-finding this record in
+            // the cache". Dataset wins on two counts: it is O(1) per button
+            // instead of an O(machines) .find() per button per refresh, and it
+            // binds each button to the EXACT record that built it rather than
+            // to whatever currently matches its hostname -- so a mid-flight
+            // poll that replaces cachedMachineData cannot make a button's
+            // stat disagree with the name rendered beside it.
+            //
+            // The ceiling is worth knowing: dataset values are strings, so
+            // anything richer than a primitive (or anything needing the whole
+            // record) should read cachedMachineData rather than widen this.
             navButton.dataset.machineStatus = status;
             navButton.dataset.machineSessionCount = String(sessionCount);
             navButton.setAttribute('aria-pressed', isDisabled ? 'false' : 'true');
@@ -757,13 +779,15 @@
                     if (cards[c].dataset.machineHost === host) count++;
                 }
             }
-            // XACA-1062: this function is purely DOM-driven -- it has no
-            // access to fleet.machines[] -- so status/session_count ride
-            // along on the button's own dataset, stashed there by
-            // renderMachineFilterNav() at first paint (see the comment on
-            // that dataset assignment above). Reading them back here, rather
-            // than keeping a second machine-data cache in sync with it, is
-            // what keeps these two call sites from ever disagreeing.
+            // XACA-1062: status/session_count ride along on the button's own
+            // dataset, stashed there by renderMachineFilterNav() at first
+            // paint (see the comment on that dataset assignment for why the
+            // dataset is preferred over re-finding the record in the
+            // module-scoped cachedMachineData, which IS reachable from here --
+            // XACA-1062-011 corrected an earlier claim that it was not).
+            // Reading them back here is what keeps these two call sites from
+            // ever disagreeing: both derive from one write, not from two
+            // independent lookups that could drift apart between polls.
             const status = btn.dataset.machineStatus || 'offline';
             const sessionCount = Number(btn.dataset.machineSessionCount) || 0;
 
