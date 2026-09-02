@@ -93,6 +93,15 @@ while [[ $# -gt 0 ]]; do
             echo "team (matched against the team field of the infra table) instead of every"
             echo "configured team on this host. Composable with --status/--daemon. Omit for"
             echo "the existing full-sweep behaviour (used by cron/LaunchAgent/--daemon)."
+            echo ""
+            echo "Host-ownership gate (XACA-1063): a team whose registry primary_host names"
+            echo "a DIFFERENT fleet host than this one is reported as SUPPRESSED (marked"
+            echo "with 🚫) instead of being restarted or counted unhealthy — the sweep skips"
+            echo "it entirely and moves on. Every other state (no declared host, declared"
+            echo "host matches this one, an unreadable registry, or this host's own identity"
+            echo "failing to resolve) restarts exactly as before this change — the gate can"
+            echo "only ever subtract a restart, never add one. Applies identically in"
+            echo "--status mode: a suppressed team shows as suppressed, not unhealthy."
             exit 0
             ;;
         *)
@@ -145,15 +154,29 @@ for _e in "${_LCARS_INFRA[@]}"; do
     _INFRA_TEAMS+=("$_team")
 done
 
-# Emits "team:port" per line to stdout; missing/None ports → stderr warning,
-# omitted from output so we never build a LCARS_SERVERS entry with "".
-# The port returned is from the registry (team-paths.json), not DEFAULT_TEAMS fallback.
-_PORT_LOOKUP=$(python3 "${_KANBAN_HOOKS_DIR}/lcars_ports.py" "${_INFRA_TEAMS[@]}")
+# Emits "team:port:primary_host_field" per line to stdout (XACA-1063-002: the
+# --with-primary-host flag added to lcars_ports.py); missing/None ports →
+# stderr warning, omitted from output so we never build a LCARS_SERVERS entry
+# with "". The port returned is from the registry (team-paths.json), not
+# DEFAULT_TEAMS fallback (except when the registry itself is unreadable — see
+# lcars_ports.py's own load_config()/DEFAULT_TEAMS fallback ladder, which this
+# script deliberately reuses rather than re-implementing — XACA-1063-001 § 4.2
+# note 3). primary_host_field is one of: "-" (ABSENT — no declared owner,
+# the normal state), "" (present but empty-string/null — malformed, distinct
+# from ABSENT), or the declared owning host verbatim. See lcars_ports.py's
+# docstring for the full field contract. ONE python invocation resolves BOTH
+# port and ownership from the SAME registry snapshot (D9 in the design doc) —
+# reading them separately would risk the two disagreeing mid-sweep if the
+# registry is transiently corrupt between two reads.
+_PORT_LOOKUP=$(python3 "${_KANBAN_HOOKS_DIR}/lcars_ports.py" --with-primary-host "${_INFRA_TEAMS[@]}")
 
-# Build a team->port associative array from the lookup output.
+# Build team->port and team->declared-primary-host associative arrays from the
+# lookup output.
 typeset -A _TEAM_PORT
-while IFS=':' read -r _t _p; do
+typeset -A _TEAM_PRIMARY_HOST
+while IFS=':' read -r _t _p _ph; do
     [[ -n "$_t" && -n "$_p" ]] && _TEAM_PORT[$_t]=$_p
+    [[ -n "$_t" && -n "$_p" ]] && _TEAM_PRIMARY_HOST[$_t]="$_ph"
 done <<< "$_PORT_LOOKUP"
 
 # Build LCARS_SERVERS by combining infra metadata with derived ports.
@@ -168,6 +191,140 @@ for _e in "${_LCARS_INFRA[@]}"; do
     fi
     LCARS_SERVERS+=("${_fp}:${_lp}:${_team}:${_sock}:${_pat}")
 done
+
+# ============================================================================
+# XACA-1063-002 — Host-Ownership Gate
+# ============================================================================
+# Ruling (XACA-1063-001, kanban/plans/XACA-1063/XACA-1063-001-host-ownership-rule.md):
+# refuse a restart ONLY on a positive foreign-host match; every other state —
+# absent, empty, null, unreadable registry, unknown local host — falls through
+# to pre-XACA-1063 behaviour and restarts. Fail OPEN. This gate can only ever
+# SUBTRACT a restart the script would otherwise perform; it must never make
+# the script more aggressive than it was before this change.
+#
+# ── CANONICAL SOURCE (drift guard obligation) ──────────────────────────────
+# _hc_host_normalize / _hc_this_host_id / _hc_host_matches below are a
+# DELIBERATE LOCAL COPY of kanban-helpers.sh's _kb_host_normalize /
+# _kb_this_host_id / _kb_host_matches (~line 14380 onward), taken instead of
+# sourcing kanban-helpers.sh because: (1) sourcing resets AITEAMFORGE_DIR
+# (XACA-0564), unacceptable in a job that runs 720x/day under launchd; (2) the
+# 14,000+ line file is a poor trade for four small functions on that cadence;
+# (3) this script ships to homebrew-tap/share/scripts/ and must not gain a
+# runtime dependency on a dev-tree-only helper file (XACA-1063-001 § 7).
+# kanban-helpers.sh's versions are CANONICAL — this copy must be kept in
+# lockstep with them. A byte-for-byte drift guard belongs in
+# scripts/tests/ (XACA-1063-004, owned by QA) and must assert semantic
+# equivalence between the two copies; do not let this copy diverge silently.
+# ============================================================================
+
+# _hc_host_normalize <host> — lowercased, trailing ".local" stripped.
+# Mirrors kanban-helpers.sh's _kb_host_normalize exactly.
+_hc_host_normalize() {
+    local h
+    h=$(printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]')
+    h="${h%.local}"
+    printf '%s\n' "$h"
+}
+
+# _hc_this_host_id — this host's canonical identity: `scutil --get
+# ComputerName`, falling back to `hostname -s` when scutil is unavailable
+# (non-macOS, or PATH stripped under launchd) or returns empty. Never fails;
+# worst case echoes an empty line. Mirrors kanban-helpers.sh's
+# _kb_this_host_id exactly.
+_hc_this_host_id() {
+    local id=""
+    if command -v scutil &>/dev/null; then
+        id=$(scutil --get ComputerName 2>/dev/null)
+    fi
+    if [[ -z "$id" ]]; then
+        id=$(hostname -s 2>/dev/null)
+    fi
+    printf '%s\n' "$id"
+}
+
+# _hc_host_matches <declared> <actual> — true (0) when <declared> names THIS
+# box. Case-insensitive, trailing ".local" stripped, matched against <actual>
+# OR either live form (scutil ComputerName, hostname -s). Mirrors
+# kanban-helpers.sh's _kb_host_matches exactly.
+_hc_host_matches() {
+    local declared="${1-}" actual="${2-}"
+    [[ -z "$declared" ]] && return 1
+
+    local want
+    want=$(_hc_host_normalize "$declared")
+    [[ -z "$want" ]] && return 1
+
+    local scutil_name="" short_name=""
+    if command -v scutil &>/dev/null; then
+        scutil_name=$(scutil --get ComputerName 2>/dev/null)
+    fi
+    short_name=$(hostname -s 2>/dev/null)
+
+    local cand
+    for cand in "$actual" "$scutil_name" "$short_name"; do
+        [[ -z "$cand" ]] && continue
+        [[ "$(_hc_host_normalize "$cand")" == "$want" ]] && return 0
+    done
+    return 1
+}
+
+# _hc_team_ownership_state <team>
+# Resolves one team's ownership state against _TEAM_PRIMARY_HOST + this
+# host's identity. Echoes one of: "local" (restart-eligible, silent),
+# "absent" (restart-eligible, silent — row 1), "malformed" (restart-eligible,
+# warn — row 5), "foreign" (SUPPRESS — row 3), "unknown-host" (restart-
+# eligible, warn-once — row 6: this host's own identity could not be
+# resolved, so it cannot claim any team is not its own; the caller is
+# expected to have already checked $_HC_ACTUAL_HOST once per sweep and short-
+# circuited every team to "unknown-host" rather than call this per team, but
+# the check is duplicated defensively here so this function is safe to call
+# in isolation too).
+#
+# THE ROW-6 GUARD: _hc_host_matches queries scutil/hostname internally on
+# every call regardless of what "actual" it's handed, so an empty actual
+# alone does not automatically make every team "foreign" — but it is exactly
+# the state a naive reading of row 3 gets wrong (see XACA-1063-001 § 2's
+# "sixth state"). Treating empty actual as its own explicit state, checked
+# FIRST, is what prevents that failure mode rather than relying on
+# _hc_host_matches to happen to fail safe.
+_hc_team_ownership_state() {
+    local team="$1" actual="$2"
+    # NOTE the `-` (not `:-`). A team with a MALFORMED (present-but-empty)
+    # primary_host has _TEAM_PRIMARY_HOST[$team] set to the empty string, and
+    # `:-` treats empty-but-set the same as unset — which would silently
+    # collapse "malformed" into "absent" here and drop row 5's warning
+    # entirely (caught in manual verification: a live-registry probe with
+    # dns's primary_host forced to "" produced zero WARNING output before
+    # this fix). `-` only substitutes the ABSENT_SENTINEL when the key is
+    # genuinely missing from the array, which is the only case that means
+    # ABSENT.
+    local declared="${_TEAM_PRIMARY_HOST[$team]-$_HC_ABSENT_SENTINEL}"
+
+    if [[ -z "$actual" ]]; then
+        printf '%s\n' "unknown-host"
+        return 0
+    fi
+
+    if [[ "$declared" == "$_HC_ABSENT_SENTINEL" ]]; then
+        printf '%s\n' "absent"
+        return 0
+    fi
+
+    if [[ -z "$declared" ]]; then
+        printf '%s\n' "malformed"
+        return 0
+    fi
+
+    if _hc_host_matches "$declared" "$actual"; then
+        printf '%s\n' "local"
+    else
+        printf '%s\n' "foreign"
+    fi
+}
+
+# Must match lcars_ports.py's _ABSENT_SENTINEL exactly — the wire contract
+# between the two halves of this gate.
+_HC_ABSENT_SENTINEL="-"
 
 # XACA-0890-025 fix: single source of truth for --team matching, called by
 # BOTH the eager validation below and the sweep filter in run_health_check
@@ -1149,16 +1306,37 @@ run_health_check() {
     local skipped=0
     local restarted=0
     local drifted=0
+    local foreign=0
     # XACA-0706: hoist loop-scoped scratch var. A bare `local _bp` INSIDE the
     # outer loop re-declares an already-set local on the 2nd+ iteration, which
     # zsh prints as `_bp=<value>` to stdout — corrupting the health-check log
     # (k501-zsh-local-in-loop-gotcha). Declare once here, assign without `local`
     # inside the loop.
     local _bp
+    # XACA-1063-002: same k501-zsh-local-in-loop-gotcha as _bp above — this is
+    # assigned once per team INSIDE the sweep loop below, so it must be
+    # declared here, not with `local` at the point of assignment.
+    local _hc_ownership
 
     log "═══════════════════════════════════════════════════════"
     log "LCARS Health Check"
     log "═══════════════════════════════════════════════════════"
+
+    # XACA-1063-002: resolve this host's identity ONCE per sweep (D9 — one
+    # snapshot, shared by every team's ownership check this run) rather than
+    # once per team. If it resolves empty (no scutil, stripped PATH under
+    # launchd, hostname -s also fails), this host cannot make a positive
+    # claim about who anything belongs to — XACA-1063-001 § 2's "sixth
+    # state." Treat that exactly like an unreadable registry (row 4): warn
+    # ONCE for the whole sweep, and let every team fall through to its
+    # pre-XACA-1063 behaviour. _hc_team_ownership_state re-checks this per
+    # team too (defense in depth), but the once-per-sweep warning belongs
+    # here, not spammed per team.
+    local _hc_actual_host
+    _hc_actual_host=$(_hc_this_host_id)
+    if [[ -z "$_hc_actual_host" ]]; then
+        log "⚠️  WARNING: could not resolve this host's identity (scutil --get ComputerName and hostname -s both empty/unavailable) — host-ownership gate disabled for this sweep; every team restarts as if unclaimed (fail-open, XACA-1063-001 row 6)"
+    fi
 
     # XACA-0706: one ps sweep up front — map every live LCARS server's actual
     # bound port by team, so the loop can catch a server bound to the wrong port
@@ -1184,6 +1362,34 @@ run_health_check() {
         if [[ -n "$TEAM_FILTER" ]] && ! _hc_team_filter_matches "$team" "$TEAM_FILTER"; then
             continue
         fi
+
+        # XACA-1063-002: Host-Ownership Gate. See the "XACA-1063-002 —
+        # Host-Ownership Gate" section above for the primitives and the
+        # ruling this implements (XACA-1063-001). This can only ever
+        # SUBTRACT a restart — every branch except "foreign" falls straight
+        # through to the unchanged pre-XACA-1063 sweep below.
+        _hc_ownership=$(_hc_team_ownership_state "$team" "$_hc_actual_host")
+        case "$_hc_ownership" in
+            foreign)
+                # Row 3: positive foreign-host claim — suppress. Do not
+                # start, do not count as unhealthy. Logged on EVERY sweep
+                # (D8): XACA-0998's inversion survived precisely because
+                # nothing spoke up about it.
+                log "🚫 $team:$local_port - declared owner is '${_TEAM_PRIMARY_HOST[$team]}', this host is '$_hc_actual_host' — SUPPRESSING restart (not this host's team, XACA-1063 host-ownership gate)"
+                ((foreign++))
+                continue
+                ;;
+            malformed)
+                # Row 5: primary_host key present but empty-string/null.
+                # Same ACTION as absent (restart), opposite MEANING (a
+                # writer is malfunctioning) — warn, then fall through.
+                log "⚠️  WARNING: $team - primary_host is present but empty/null (malformed registry field) — treating as unclaimed and proceeding with normal health check"
+                ;;
+            absent|local|unknown-host)
+                # Rows 1, 2, and 6 (unknown-host warned once above, not
+                # per-team): unchanged behaviour, silent.
+                ;;
+        esac
 
         # The <instance>-lcars session name = pattern minus the ".*" glob
         # (freelance uses ".*-lcars"). Used for both surgical heal and the
@@ -1275,7 +1481,7 @@ run_health_check() {
     done
 
     log "───────────────────────────────────────────────────────"
-    log "Summary: $healthy healthy, $unhealthy unhealthy (configured teams that were restarted/retried), $drifted non-canonical-port drift, $skipped skipped (port-unresolved)"
+    log "Summary: $healthy healthy, $unhealthy unhealthy (configured teams that were restarted/retried), $drifted non-canonical-port drift, $skipped skipped (port-unresolved), $foreign suppressed (not this host's team, XACA-1063)"
 
     if [[ "$STATUS_ONLY" == "false" && $restarted -gt 0 ]]; then
         log "Restarted: $restarted servers"
