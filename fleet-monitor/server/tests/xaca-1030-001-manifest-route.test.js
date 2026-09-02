@@ -45,12 +45,14 @@
  * actual shipped static file, not a stand-in.
  */
 
-const { test } = require('node:test');
+const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const net = require('node:net');
+const { spawn } = require('child_process');
 
 const SERVER_DIR = path.join(__dirname, '..');
 const PUBLIC_DIR = path.join(SERVER_DIR, 'public');
@@ -106,13 +108,13 @@ function manifestRouteHandler(req, res) {
         const dashboardEntry = dashboards.find((d) => d.id === dashboardId);
         name = (dashboardEntry && dashboardEntry.name) || 'Academy';
 
-        if (ui === 'lcars2' && MANIFEST_LCARS2_PATHS[dashboardId]) {
+        if (ui === 'lcars2' && Object.prototype.hasOwnProperty.call(MANIFEST_LCARS2_PATHS, dashboardId)) {
             startUrl = MANIFEST_LCARS2_PATHS[dashboardId];
         } else {
             startUrl = `/lcars/lcars-dashboard.html?dashboard=${dashboardId}`;
         }
 
-        shortName = name.slice(0, MANIFEST_SHORT_NAME_MAX_LEN);
+        shortName = name.slice(0, MANIFEST_SHORT_NAME_MAX_LEN).trim();
     }
 
     const manifest = {
@@ -420,4 +422,176 @@ test('XACA-1030-022: the handler copied into this file has not diverged from ser
         'short_name cap differs between server.js and this file');
     assert.ok(src.includes(`MANIFEST_DEFAULT_DASHBOARD = '${MANIFEST_DEFAULT_DASHBOARD}'`),
         'default dashboard differs between server.js and this file');
+
+    // XACA-1030 gate round 2: constants alone were NOT enough. The first
+    // version of this guard pinned exactly the three values above and passed
+    // green while the copy below still carried the PRE-FIX bare index and
+    // un-trimmed slice that the review round had just changed in server.js --
+    // the divergence it was named for, sitting undetected inside the detector.
+    // Pin the LOGIC that actually drifted, in BOTH files.
+    const selfSrc = fs.readFileSync(__filename, 'utf8');
+    const SHARED_LOGIC = [
+        'Object.prototype.hasOwnProperty.call(MANIFEST_LCARS2_PATHS, dashboardId)',
+        'name.slice(0, MANIFEST_SHORT_NAME_MAX_LEN).trim()',
+    ];
+    for (const marker of SHARED_LOGIC) {
+        assert.ok(src.includes(marker),
+            `server.js is missing "${marker}" -- either it regressed, or this guard's expectation is stale`);
+        assert.ok(selfSrc.includes(marker),
+            `this test file's COPY of the handler is missing "${marker}" -- it has diverged from the shipped code, so every contract test in this file is asserting against code that is not what ships`);
+    }
+    // And the pre-fix forms must not have come back on either side.
+    //
+    // These markers are ASSEMBLED from fragments rather than written as
+    // literals. The first draft of this check spelled them out, and every
+    // literal it searched for was therefore present in this file's own source
+    // -- so `selfSrc.includes(banned)` was trivially true and the assertion
+    // failed against a file that was actually correct. A guard that matches
+    // its own text is the grep-hits-its-own-comment trap in assertion form.
+    const BANNED = [
+        'MANIFEST_LCARS2_PATHS' + '[dashboardId])',
+        'MANIFEST_SHORT_NAME_MAX_LEN' + ');',
+    ];
+    for (const banned of BANNED) {
+        assert.ok(!src.includes(banned), `server.js regressed to the pre-fix form "${banned}"`);
+        assert.ok(!selfSrc.includes(banned), `this file's copy regressed to the pre-fix form "${banned}"`);
+    }
+});
+
+// ============================================================================
+// XACA-1030 gate round 2: shadowing proof (e) -- the REAL server, over HTTP.
+//
+// Proof (d) asserts SOURCE order in server.js: the route registration's
+// indexOf precedes the express.static mount's. The code review defeated it
+// with an ordinary refactor -- wrap the route in
+// `function registerManifestRoute(app) { ... }` DEFINED above the static
+// mount and INVOKED below it. Both markers are still found, source order
+// still holds, the suite still passes -- and a live server on that build
+// serves the static file again, with the original bug fully restored.
+//
+// Source order was a proxy for REGISTRATION order, and the two came apart.
+// This section removes the proxy: it boots the actual server.js as a child
+// process on an ephemeral port and asks it over HTTP. There is no textual
+// stand-in left to defeat -- whatever Express actually ends up with is what
+// gets asserted.
+//
+// Proof (d) is kept, not replaced: it fails fast and with a precise message
+// on a rename, a deletion, or a move into a Router, and costs no spawn. This
+// section covers what it structurally cannot.
+//
+// The spawn + getFreePort + waitForReady + SIGTERM teardown shape follows
+// tests/xaca-0395-005-auth-wiring.test.js's own "live server" section, rather
+// than inventing a second convention in the same directory.
+// ============================================================================
+describe('shadowing proof (e): the real server.js answers the manifest route (live HTTP)', () => {
+    const STARTUP_TIMEOUT_MS = 20000;
+    const POLL_INTERVAL_MS = 200;
+
+    let child;
+    let baseUrl;
+
+    function getFreePort() {
+        return new Promise((resolve, reject) => {
+            const srv = net.createServer();
+            srv.on('error', reject);
+            srv.listen(0, '127.0.0.1', () => {
+                const { port } = srv.address();
+                srv.close(() => resolve(port));
+            });
+        });
+    }
+
+    async function waitForReady(url, timeoutMs) {
+        const deadline = Date.now() + timeoutMs;
+        let lastErr;
+        while (Date.now() < deadline) {
+            try {
+                const res = await fetch(`${url}/api/health`);
+                if (res.ok) return;
+            } catch (err) {
+                lastErr = err;
+            }
+            await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        }
+        throw new Error(`server did not become ready within ${timeoutMs}ms: ${lastErr}`);
+    }
+
+    before(async () => {
+        const port = await getFreePort();
+        baseUrl = `http://127.0.0.1:${port}`;
+        const childEnv = Object.assign({}, process.env, {
+            PORT: String(port),
+            FLEET_REQUIRE_AUTH: '0',
+        });
+        child = spawn(process.execPath, ['server.js'], {
+            cwd: SERVER_DIR,
+            env: childEnv,
+            stdio: ['ignore', 'ignore', 'ignore'],
+        });
+        await waitForReady(baseUrl, STARTUP_TIMEOUT_MS);
+    });
+
+    after(async () => {
+        if (!child) return;
+        await new Promise((resolve) => {
+            child.once('exit', resolve);
+            child.kill('SIGTERM');
+            setTimeout(resolve, 3000);
+        });
+    });
+
+    test('the ROUTE answers, not the static file -- scope is present and start_url varies by query', async () => {
+        // The static public/appicons/fleet.webmanifest is a fixed document with
+        // no "scope" key and a hardcoded academy start_url. It cannot vary by
+        // query string. Both properties holding at once is what proves Express
+        // resolved to the route rather than to the file.
+        const rootRes = await fetch(`${baseUrl}/appicons/fleet.webmanifest?ui=root`);
+        assert.equal(rootRes.status, 200);
+        const root = await rootRes.json();
+        assert.equal(root.start_url, '/', 'ui=root must give the site root -- the static file cannot');
+        assert.ok(Object.prototype.hasOwnProperty.call(root, 'scope'),
+            'no "scope" key: the STATIC file answered, so express.static is mounted ahead of the route and XACA-1030 is live again');
+
+        const allRes = await fetch(`${baseUrl}/appicons/fleet.webmanifest?dashboard=all&ui=lcars2`);
+        const all = await allRes.json();
+        assert.equal(all.start_url, '/lcars2/lcars-all.html');
+        assert.notEqual(root.start_url, all.start_url,
+            'the response did not vary by query string, which is what a static file does');
+    });
+
+    test('the SHIPPED handler rejects prototype-shaped ids at the validIds gate (defence layer 1 of 2)', async () => {
+        // Honest scope note. This does NOT exercise the -019 hasOwnProperty
+        // fix. A prototype-shaped id never reaches MANIFEST_LCARS2_PATHS,
+        // because validIds (built from dashboards.json) rejects it first and
+        // dashboardId falls back to academy. -019's fix guards the case where
+        // dashboards.json ITSELF contains such an id, which cannot be produced
+        // over HTTP without editing that file -- the textual guard above
+        // covers that layer. What this asserts is that layer 1 holds and that
+        // nothing prototype-shaped reaches the response body.
+        //
+        // The expected value is deliberately the lcars2 form: the id falls back
+        // to academy, and academy on ui=lcars2 is lcars-index.html, NOT the
+        // lcars form. An earlier draft asserted the lcars form and failed --
+        // against correct shipped behaviour.
+        for (const hostile of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+            const res = await fetch(`${baseUrl}/appicons/fleet.webmanifest?dashboard=${encodeURIComponent(hostile)}&ui=lcars2`);
+            assert.equal(res.status, 200, `${hostile} did not return 200`);
+            const body = await res.json();
+            assert.equal(body.start_url, '/lcars2/lcars-index.html',
+                `dashboard=${hostile} must fall back to academy on the lcars2 ui`);
+            assert.equal(typeof body.start_url, 'string', `${hostile} produced a non-string start_url`);
+            const serialized = JSON.stringify(body);
+            assert.ok(!/function|\[native code\]/.test(serialized),
+                `a prototype member leaked into the manifest body for ${hostile}`);
+            assert.ok(!serialized.includes(hostile),
+                `the ${hostile} payload was echoed into the response body`);
+        }
+    });
+
+    test('the SHIPPED handler still serves the no-query academy default and the right content-type', async () => {
+        const res = await fetch(`${baseUrl}/appicons/fleet.webmanifest`);
+        const body = await res.json();
+        assert.equal(body.start_url, '/lcars/lcars-dashboard.html?dashboard=academy');
+        assert.ok((res.headers.get('content-type') || '').startsWith('application/manifest+json'));
+    });
 });
