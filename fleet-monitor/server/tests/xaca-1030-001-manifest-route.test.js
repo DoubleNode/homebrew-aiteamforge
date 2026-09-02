@@ -621,4 +621,74 @@ describe('shadowing proof (e): the real server.js answers the manifest route (li
         assert.equal(body.start_url, '/lcars/lcars-dashboard.html?dashboard=academy');
         assert.ok((res.headers.get('content-type') || '').startsWith('application/manifest+json'));
     });
+
+    // ========================================================================
+    // XACA-1030-029: the PARSE-TIME head of lcars-dashboard.html.
+    //
+    // These assert the raw HTML as served -- deliberately NOT a DOM after
+    // scripts run. That distinction is the entire bug this closes.
+    //
+    // XACA-1030-004 shipped an inline head script that rewrites the manifest
+    // href and the web-app title from location.search. It is correct, and the
+    // jsdom tests that covered it passed, and the live page in a real DOM
+    // still produces "All Fleet" for ?dashboard=all. It was verified over HTTP
+    // and it was verified in a browser engine, and the icon on a real iPad
+    // still said "Academy" and still opened Academy.
+    //
+    // Safari fetches the manifest named in the INITIAL HTML during parse.
+    // Rewriting the href afterwards does not make it re-fetch. So every test
+    // that inspected the post-script DOM was measuring something iOS had
+    // already stopped caring about. Only the bytes on the wire matter, and
+    // only a server can set them -- which is why these tests read the response
+    // text and never construct a DOM.
+    // ========================================================================
+    const PARSE_TIME_CASES = [
+        ['all', 'All Fleet'],
+        ['mainevent', 'Main Event'],
+        ['doublenode', 'DoubleNode'],
+        ['academy', 'Academy'],
+    ];
+
+    for (const [id, label] of PARSE_TIME_CASES) {
+        test(`XACA-1030-029: lcars-dashboard.html?dashboard=${id} carries the right manifest href and title AT PARSE TIME`, async () => {
+            const res = await fetch(`${baseUrl}/lcars/lcars-dashboard.html?dashboard=${id}`);
+            assert.equal(res.status, 200);
+            const html = await res.text();
+
+            assert.ok(
+                html.includes(`<link rel="manifest" href="/appicons/fleet.webmanifest?dashboard=${id}&amp;ui=lcars">`),
+                `served HTML does not name the ${id} manifest -- Safari would fetch whatever it does name, and a home-screen bookmark from this page would open that dashboard instead`
+            );
+            assert.ok(
+                html.includes(`<meta name="apple-mobile-web-app-title" content="${label}">`),
+                `served HTML does not carry the "${label}" web-app title at parse time`
+            );
+            // And the manifest it names must itself resolve correctly.
+            const m = await (await fetch(`${baseUrl}/appicons/fleet.webmanifest?dashboard=${id}&ui=lcars`)).json();
+            assert.equal(m.short_name, label, 'short_name and the page title must agree');
+        });
+    }
+
+    test('XACA-1030-029: an unknown dashboard falls back to academy at parse time, and echoes nothing', async () => {
+        const hostile = '"><script>alert(1)</script>';
+        const res = await fetch(`${baseUrl}/lcars/lcars-dashboard.html?dashboard=${encodeURIComponent(hostile)}`);
+        assert.equal(res.status, 200);
+        const html = await res.text();
+        assert.ok(html.includes('<link rel="manifest" href="/appicons/fleet.webmanifest?dashboard=academy&amp;ui=lcars">'));
+        assert.ok(html.includes('<meta name="apple-mobile-web-app-title" content="Academy">'));
+        assert.ok(!html.includes('alert(1)'), 'the payload reached the served HTML');
+    });
+
+    test('XACA-1030-029: the route is registered BEFORE express.static, or the static file wins', async () => {
+        // The static file on disk names the academy variant. If this route did
+        // not run first, ?dashboard=all would come back naming academy -- which
+        // is precisely the state that shipped and produced the wrong iPad icon.
+        const res = await fetch(`${baseUrl}/lcars/lcars-dashboard.html?dashboard=all`);
+        const html = await res.text();
+        const onDisk = fs.readFileSync(path.join(PUBLIC_DIR, 'lcars', 'lcars-dashboard.html'), 'utf8');
+        assert.ok(onDisk.includes('content="Academy"'),
+            'this test assumes the on-disk fallback says Academy; if that changed, it no longer distinguishes the two');
+        assert.ok(html.includes('content="All Fleet"'),
+            'served HTML matched the on-disk fallback -- express.static answered, not the route');
+    });
 });

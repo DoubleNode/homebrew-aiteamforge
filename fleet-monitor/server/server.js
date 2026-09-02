@@ -792,6 +792,90 @@ app.get('/appicons/fleet.webmanifest', (req, res) => {
 
 
 // Disable directory redirect to allow explicit route handlers for /lcars
+/**
+ * GET /lcars/lcars-dashboard.html?dashboard=<id>
+ *
+ * XACA-1030-029: server-render this page's manifest link and web-app title.
+ *
+ * WHY THIS EXISTS, and why the inline head script in the page is not enough.
+ * This is the ONE page whose dashboard is chosen at runtime, and it is where
+ * nearly every real Add-to-Home-Screen happens -- /lcars/, /lcars/all,
+ * /lcars/mainevent and /lcars/doublenode all 302 here, and the root and
+ * lcars/ redirect stubs land here too.
+ *
+ * XACA-1030-004 handled it with an inline head script that rewrites
+ * link[rel=manifest] and the apple-mobile-web-app-title from location.search.
+ * That script is correct and demonstrably works: run the live page in a DOM
+ * with ?dashboard=all and both attributes come out as "All Fleet". It still
+ * produced the WRONG home-screen icon on a real iPad, which is the only test
+ * that could have caught this:
+ *
+ *   Safari parses the initial HTML, sees href="...?dashboard=academy&ui=lcars"
+ *   and fetches THAT manifest during load. Rewriting the href afterwards does
+ *   not make Safari re-fetch it. Add-to-Home-Screen then uses the manifest it
+ *   already has -- academy -- so a bookmark taken from the ALL FLEET dashboard
+ *   was labelled "Academy" and opened Academy. Exactly the defect XACA-1030
+ *   exists to fix, surviving in the one place that matters most.
+ *
+ * The parse-time values are therefore the only ones that count, and only the
+ * server can set them before Safari sees them. This route reads the file and
+ * substitutes both head elements with literal, allowlist-derived strings --
+ * no caller-supplied text is ever interpolated.
+ *
+ * Registered BEFORE express.static(public) for the same reason the manifest
+ * route is: after it, the static file wins and this never runs.
+ */
+app.get('/lcars/lcars-dashboard.html', (req, res, next) => {
+    const PAGE = path.join(__dirname, 'public', 'lcars', 'lcars-dashboard.html');
+
+    let html;
+    try {
+        html = fs.readFileSync(PAGE, 'utf8');
+    } catch (err) {
+        // Fall through to express.static rather than 500 -- a missing file is
+        // the static layer's problem to report, not this route's.
+        return next();
+    }
+
+    const config = loadDashboardConfig();
+    const dashboards = config.dashboards || [];
+    const validIds = new Set(dashboards.map((d) => d.id));
+
+    const rawDashboard = typeof req.query.dashboard === 'string' ? req.query.dashboard : '';
+    const dashboardId = validIds.has(rawDashboard) ? rawDashboard : MANIFEST_DEFAULT_DASHBOARD;
+
+    const entry = dashboards.find((d) => d.id === dashboardId);
+    const name = (entry && entry.name) || 'Academy';
+    const shortName = name.slice(0, MANIFEST_SHORT_NAME_MAX_LEN).trim();
+
+    // Both replacement values derive from dashboards.json plus a fixed
+    // template -- dashboardId has already been gated by validIds, so nothing
+    // a caller sent can reach the emitted HTML.
+    const manifestHref = `/appicons/fleet.webmanifest?dashboard=${dashboardId}&amp;ui=lcars`;
+
+    const LINK_RE = /<link rel="manifest" href="\/appicons\/fleet\.webmanifest\?dashboard=[a-z0-9-]+&amp;ui=lcars">/;
+    const TITLE_RE = /<meta name="apple-mobile-web-app-title" content="[^"]*">/;
+
+    // If either anchor is missing the page has been restructured; serve it
+    // unmodified rather than silently shipping a half-substituted head. The
+    // regression test asserts both anchors are present, so this cannot rot
+    // unnoticed.
+    if (!LINK_RE.test(html) || !TITLE_RE.test(html)) {
+        res.set('Cache-Control', 'no-cache, must-revalidate');
+        res.type('html').send(html);
+        return;
+    }
+
+    html = html
+        .replace(LINK_RE, `<link rel="manifest" href="${manifestHref}">`)
+        .replace(TITLE_RE, `<meta name="apple-mobile-web-app-title" content="${shortName}">`);
+
+    // Same no-cache posture as the other HTML routes in this file: a stale
+    // head here re-pins the wrong icon identity on someone's home screen.
+    res.set('Cache-Control', 'no-cache, must-revalidate');
+    res.type('html').send(html);
+});
+
 app.use(express.static(path.join(__dirname, 'public'), { redirect: false, setHeaders: setStaticCacheHeaders }));
 
 // Request logging

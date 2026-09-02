@@ -23,7 +23,18 @@
     <meta name="apple-mobile-web-app-title" content="Academy">
     <title>LCARS - Fleet Operations</title>
 
-    <!-- XACA-1030-004: lcars-dashboard.html is the ONE page under public/
+    <!-- XACA-1030-029 UPDATE: the manifest href and web-app title below are
+         now SERVER-RENDERED per ?dashboard= (see the /lcars/lcars-dashboard.html
+         route in server.js). That is what iOS actually reads: Safari fetches
+         the manifest named in the INITIAL HTML during parse, and rewriting the
+         href from script afterwards does not make it re-fetch -- which is why
+         a bookmark taken here from ALL FLEET was labelled "Academy" on a real
+         iPad even though the script below demonstrably works in a DOM. The
+         script is retained as a secondary path (it keeps the head consistent
+         if the dashboard is switched client-side), NOT as the mechanism that
+         makes Add-to-Home-Screen correct.
+
+         XACA-1030-004: lcars-dashboard.html is the ONE page under public/
          whose dashboard is chosen at RUNTIME via ?dashboard=<id>, not baked
          in at author time. Every other page (the 4 root pages + 7 lcars/
          redirect stubs, XACA-1030-002/005) is wired to a single hardcoded
