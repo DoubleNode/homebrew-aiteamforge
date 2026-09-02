@@ -407,54 +407,81 @@ test('XACA-1030-018: short_name is trimmed after the length cap', () => {
 
 test('XACA-1030-022: the handler copied into this file has not diverged from server.js', () => {
     // This suite duplicates manifestRouteHandler rather than importing it
-    // (server.js has no module.exports and listens at import time). The copy
-    // can silently drift from the original, which would make every contract
-    // test above assert against code that is no longer shipped. Pin the values
-    // that actually determine routing so a divergence fails here.
-    const src = fs.readFileSync(path.join(SERVER_DIR, 'server.js'), 'utf8');
-    for (const [id, expected] of Object.entries(MANIFEST_LCARS2_PATHS)) {
-        assert.ok(
-            src.includes(`${id}: '${expected}'`),
-            `server.js lcars2 map is missing "${id}: '${expected}'" -- this file's copy has diverged from the shipped handler`
-        );
-    }
-    assert.ok(src.includes(`MANIFEST_SHORT_NAME_MAX_LEN = ${MANIFEST_SHORT_NAME_MAX_LEN}`),
-        'short_name cap differs between server.js and this file');
-    assert.ok(src.includes(`MANIFEST_DEFAULT_DASHBOARD = '${MANIFEST_DEFAULT_DASHBOARD}'`),
-        'default dashboard differs between server.js and this file');
-
-    // XACA-1030 gate round 2: constants alone were NOT enough. The first
-    // version of this guard pinned exactly the three values above and passed
-    // green while the copy below still carried the PRE-FIX bare index and
-    // un-trimmed slice that the review round had just changed in server.js --
-    // the divergence it was named for, sitting undetected inside the detector.
-    // Pin the LOGIC that actually drifted, in BOTH files.
-    const selfSrc = fs.readFileSync(__filename, 'utf8');
-    const SHARED_LOGIC = [
-        'Object.prototype.hasOwnProperty.call(MANIFEST_LCARS2_PATHS, dashboardId)',
-        'name.slice(0, MANIFEST_SHORT_NAME_MAX_LEN).trim()',
-    ];
-    for (const marker of SHARED_LOGIC) {
-        assert.ok(src.includes(marker),
-            `server.js is missing "${marker}" -- either it regressed, or this guard's expectation is stale`);
-        assert.ok(selfSrc.includes(marker),
-            `this test file's COPY of the handler is missing "${marker}" -- it has diverged from the shipped code, so every contract test in this file is asserting against code that is not what ships`);
-    }
-    // And the pre-fix forms must not have come back on either side.
+    // (server.js has no module.exports and calls app.listen() at import time).
+    // The copy can silently drift from the original, which would make every
+    // contract test in this file assert against code that is not what ships.
     //
-    // These markers are ASSEMBLED from fragments rather than written as
-    // literals. The first draft of this check spelled them out, and every
-    // literal it searched for was therefore present in this file's own source
-    // -- so `selfSrc.includes(banned)` was trivially true and the assertion
-    // failed against a file that was actually correct. A guard that matches
-    // its own text is the grep-hits-its-own-comment trap in assertion form.
-    const BANNED = [
-        'MANIFEST_LCARS2_PATHS' + '[dashboardId])',
-        'MANIFEST_SHORT_NAME_MAX_LEN' + ');',
-    ];
-    for (const banned of BANNED) {
-        assert.ok(!src.includes(banned), `server.js regressed to the pre-fix form "${banned}"`);
-        assert.ok(!selfSrc.includes(banned), `this file's copy regressed to the pre-fix form "${banned}"`);
+    // THIS GUARD HAS BEEN DEFEATED TWICE. Both failures are worth recording,
+    // because both looked correct:
+    //
+    //   v1 pinned three CONSTANTS (the lcars2 map, the short_name cap, the
+    //   default dashboard) and nothing else. It passed green while the copy
+    //   still carried the pre-fix bare index and un-trimmed slice that the
+    //   review round had just changed in server.js -- the exact divergence it
+    //   is named for, sitting undetected inside the detector.
+    //
+    //   v2 pinned those two LOGIC lines as string markers, searched for in
+    //   `readFileSync(__filename)`. But the markers are string literals in
+    //   THIS function, so `selfSrc.includes(marker)` matched the guard's own
+    //   source and could never fail. Its companion banned-form check, which
+    //   pinned exact spellings, was dodged by inserting one space.
+    //
+    // Both failures share a root cause: matching TEXT somewhere in a FILE.
+    // v3 stops doing that. It extracts the two handler bodies, normalises
+    // them, and compares them whole -- so any drift fails, not only the
+    // spellings someone thought to enumerate, and the guard's own source is
+    // never in the searched region.
+    const serverSrc = fs.readFileSync(path.join(SERVER_DIR, 'server.js'), 'utf8');
+    const selfSrc = fs.readFileSync(__filename, 'utf8');
+
+    // Extract the {...} body that begins at the first '{' at or after `from`.
+    // Template-literal ${...} spans balance correctly under a brace count, so
+    // they need no special handling here.
+    function balancedBody(src, from, label) {
+        const open = src.indexOf('{', from);
+        assert.notEqual(open, -1, `could not find the opening brace of ${label}`);
+        let depth = 0;
+        for (let i = open; i < src.length; i++) {
+            if (src[i] === '{') depth++;
+            else if (src[i] === '}') {
+                depth--;
+                if (depth === 0) return src.slice(open + 1, i);
+            }
+        }
+        throw new Error(`unbalanced braces while extracting ${label}`);
+    }
+
+    function normalise(body) {
+        return body
+            .replace(/\/\*[\s\S]*?\*\//g, ' ')   // block comments
+            .replace(/^\s*\/\/.*$/gm, ' ')       // line comments
+            .replace(/\s+/g, ' ')                // all whitespace runs -> one space
+            .trim();
+    }
+
+    const serverAnchor = serverSrc.indexOf("app.get('/appicons/fleet.webmanifest'");
+    assert.notEqual(serverAnchor, -1,
+        'could not find the manifest route registration in server.js -- if it was renamed, update this guard IN THE SAME DIFF');
+    const selfAnchor = selfSrc.indexOf('function manifestRouteHandler(req, res)');
+    assert.notEqual(selfAnchor, -1,
+        "could not find this file's copy of manifestRouteHandler");
+
+    const shipped = normalise(balancedBody(serverSrc, serverAnchor, 'the server.js route handler'));
+    const copied = normalise(balancedBody(selfSrc, selfAnchor, "this file's manifestRouteHandler"));
+
+    assert.ok(shipped.length > 200, 'extracted server.js handler body is implausibly short -- the extraction is wrong, not the code');
+
+    if (shipped !== copied) {
+        // Point at the first divergence rather than dumping two long strings.
+        let i = 0;
+        while (i < Math.min(shipped.length, copied.length) && shipped[i] === copied[i]) i++;
+        const ctx = 90;
+        assert.fail(
+            "this file's COPY of the handler has diverged from server.js, so every contract test in this file is asserting against code that is not what ships.\n" +
+            `  first difference at normalised offset ${i}\n` +
+            `  server.js: ...${shipped.slice(Math.max(0, i - ctx), i + ctx)}...\n` +
+            `  this file: ...${copied.slice(Math.max(0, i - ctx), i + ctx)}...`
+        );
     }
 });
 
