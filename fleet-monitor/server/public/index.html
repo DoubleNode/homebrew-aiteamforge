@@ -20,11 +20,18 @@
     <link rel="apple-touch-icon" sizes="120x120" href="/appicons/apple-touch-icon-120.png">
     <link rel="icon" type="image/png" sizes="192x192" href="/appicons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/appicons/icon-512.png">
-    <link rel="manifest" href="/appicons/fleet.webmanifest?ui=root">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="manifest" href="/appicons/fleet.webmanifest?dashboard=academy&amp;ui=lcars">
+    <!-- XACA-1030-014 (XACA-0992-017 precedent): apple-mobile-web-app-capable /
+         mobile-web-app-capable are deliberately OMITTED here. Despite its title,
+         this page is a redirect stub like all.html — an unconditional
+         http-equiv="refresh" plus a window.location.href — and it chains TWO
+         hops (index.html -> lcars-index.html -> lcars-dashboard.html), making it
+         the worst case for the risk this policy exists to prevent. Standalone
+         mode only strips Safari chrome, so a failed redirect would strand the
+         user full-screen with no address bar and no back button. The
+         touch-icon/manifest links above still give a bookmark a proper icon. -->
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="Fleet">
+    <meta name="apple-mobile-web-app-title" content="Academy">
     <meta http-equiv="refresh" content="0; url=/lcars/lcars-index.html">
     <title>Fleet Monitor — AI ENGINES Registry</title>
     <style>

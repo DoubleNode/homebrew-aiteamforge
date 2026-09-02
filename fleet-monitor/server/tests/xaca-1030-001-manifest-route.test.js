@@ -328,3 +328,43 @@ test('shadowing proof (c): with the SAME handler registered AFTER express.static
 test('static file is still present on disk (deliberate belt-and-braces fallback, not deleted)', () => {
     assert.ok(fs.existsSync(STATIC_MANIFEST_FILE), 'public/appicons/fleet.webmanifest must remain in place');
 });
+
+// ============================================================================
+// XACA-1030 gate round: shadowing proof (d) -- the ONLY one that reads the
+// production file.
+//
+// Proofs (a), (b) and (c) above exercise a handler COPIED into this file and
+// apps BUILT in this file. They demonstrate that route-before-static is the
+// correct ordering, but they cannot detect a regression in server.js: the
+// code review for PR #806 deleted server.js outright, re-ran this suite, and
+// still got 15/15. A test that runs against a copy of the code is the same
+// failure class as a test that never runs -- which is exactly the defect this
+// ticket already hit twice at the CI-registration layer, reproduced one layer
+// down inside the thing that was supposed to guard it.
+//
+// This case asserts source order in the REAL server.js. It is deliberately a
+// textual check rather than an import: server.js has no module.exports and
+// calls app.listen() at import time, so requiring it here would bind a port.
+//
+// The indexOf !== -1 guards are load-bearing. Without them a rename makes
+// both lookups return -1, and `-1 < -1` is false... but `routeAt < staticAt`
+// with only ONE found silently inverts into a pass (e.g. routeAt = -1 against
+// a real staticAt is trivially "before" it). Not finding a marker must FAIL,
+// not quietly succeed -- an absent marker means this guard has stopped
+// guarding anything, which is precisely the state it exists to detect.
+// ============================================================================
+test('shadowing proof (d): server.js itself registers the route BEFORE express.static(public)', () => {
+    const SERVER_JS = path.join(SERVER_DIR, 'server.js');
+    assert.ok(fs.existsSync(SERVER_JS), 'server.js must exist -- this guard is meaningless without it');
+    const src = fs.readFileSync(SERVER_JS, 'utf8');
+
+    const routeAt = src.indexOf("app.get('/appicons/fleet.webmanifest'");
+    const staticAt = src.indexOf("app.use(express.static(path.join(__dirname, 'public')");
+
+    assert.notEqual(routeAt, -1,
+        "could not find the manifest route registration in server.js -- if it was renamed, update this guard IN THE SAME DIFF; a marker this guard cannot find is a guard that has silently stopped working");
+    assert.notEqual(staticAt, -1,
+        "could not find the express.static(public) mount in server.js -- same rule as above");
+    assert.ok(routeAt < staticAt,
+        `server.js registers express.static(public) at index ${staticAt} BEFORE the manifest route at index ${routeAt}. The static file then shadows the route and every Add-to-Home-Screen bookmark launches Academy again -- the exact XACA-1030 defect.`);
+});

@@ -16,7 +16,13 @@
     <link rel="apple-touch-icon" sizes="120x120" href="/appicons/apple-touch-icon-120.png">
     <link rel="icon" type="image/png" sizes="192x192" href="/appicons/icon-192.png">
     <link rel="icon" type="image/png" sizes="512x512" href="/appicons/icon-512.png">
-    <link rel="manifest" href="/appicons/fleet.webmanifest?ui=root">
+    <!-- XACA-1030-016: no <link rel="manifest"> here. This is a diagnostic/demo
+         surface, not a destination. XACA-0992s UX gate flagged inviting a
+         home-screen install on pages like this; dropping standalone mode
+         (above) only half-addressed it, because a manifest still advertises the
+         page as installable. The apple-touch-icon links above still give a
+         plain bookmark a proper icon, and the web-app-title below names it
+         distinctly so it cannot be confused with a real dashboard. -->
     <!-- XACA-0992-017: apple-mobile-web-app-capable / mobile-web-app-capable are
          deliberately OMITTED here. This is a diagnostic/test surface, not a
          real destination a user would rely on — standalone mode's only
@@ -25,7 +31,7 @@
          only removes the user's way back out. The touch-icon/manifest
          links above still give a bookmark of this page a proper icon. -->
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="Fleet">
+    <meta name="apple-mobile-web-app-title" content="LCARS2 Test">
     <title>LCARS Fleet Monitor - Framework Test</title>
 
     <!-- LCARS-003: Antonio Typography from Google Fonts -->
