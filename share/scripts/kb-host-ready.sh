@@ -346,23 +346,37 @@ workdir = os.environ["WORKDIR"]
 filter_team = os.environ.get("FILTERTEAM") or ""
 
 def _sanitize(v):
-    # One record per LINE, fields separated by \x1f. A raw newline (or \r) inside
-    # ANY field forks the record: bash's `read` gets a truncated line and the
-    # remainder is parsed as a bogus next record, silently losing the diagnostic
-    # text. BAD_CHARS rejects these in a team value, but a REJECTED entry is
-    # still reported and its raw team reaches this emit — so sanitize at the
-    # protocol boundary rather than trusting every caller (XACA-1066-018).
+    # One record per LINE, fields separated by \x1f. Any character that can end a
+    # line or a field must not survive INSIDE a field, or the record forks: bash's
+    # `read` gets a truncated line and the remainder parses as a bogus record.
+    # BAD_CHARS rejects these in a team value, but a REJECTED entry is still
+    # reported and its raw value reaches this emit, so the escape has to live at
+    # the protocol boundary rather than at each caller (XACA-1066-018).
     #
-    # ESCAPE ONLY \n AND \r. Do NOT touch \x1e: it is the args sub-delimiter
-    # INSIDE the args_packed field, and escaping it collapses a multi-argument
-    # team into one malformed argument (measured: freelance's two args arrived
-    # as the single token `p1\x1ep2`). Do NOT escape the backslash either — it
-    # would double every backslash in path-bearing diagnostics for no gain.
-    # Neither omission creates ambiguity: BAD_CHARS already rejects backslash,
-    # \x1e and \x1f in both team and args values, so a surviving "\n" here can
-    # only have come from this escape.
+    # ESCAPE: \n, \r (end the record) and \x1f (ends the field). \x1f is safe to
+    # escape because emit applies the separator AFTER this runs, so it has no
+    # legitimate in-field meaning.
+    #
+    # DO NOT ESCAPE \x1e. It is the args sub-delimiter INSIDE args_packed, and
+    # escaping it collapses a multi-argument team into one malformed argument
+    # (measured: freelance's two args arrived as the single token `p1\x1ep2`).
+    #
+    # THIS TRANSFORM IS ONE-WAY AND LOSSY, AND THAT IS THE POINT. A literal
+    # backslash-n in a value is indistinguishable in the output from an escaped
+    # real newline (verified: team "a\\nb" and team "a<LF>b" both emit "a\\nb").
+    # An earlier version of this comment claimed the escape was unambiguous
+    # because BAD_CHARS rejects the raw characters -- that reasoning is WRONG for
+    # exactly the reason BAD_CHARS alone did not fix the JSON break: rejecting a
+    # character does not remove it from the output, because the reject path emits
+    # the raw value. Backslashes also arrive here via cfg_path/script_path in
+    # diagnostics, which never pass through BAD_CHARS at all.
+    #
+    # Lossiness is acceptable ONLY because nothing downstream un-escapes or
+    # round-trips these fields -- they are split on \x1f and used for display and
+    # for comparisons already constrained by BAD_CHARS. If you ever add a decode
+    # step, make the escape reversible FIRST (escape the backslash too).
     v = str(v)
-    return v.replace("\n", "\\n").replace("\r", "\\r")
+    return v.replace("\n", "\\n").replace("\r", "\\r").replace("\x1f", "\\x1f")
 
 def emit(*fields):
     sys.stdout.write("\x1f".join(_sanitize(f) for f in fields) + "\n")
