@@ -18,7 +18,7 @@ _AITEAMFORGE_ENV_LOADED=1
 export AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
 
 #──────────────────────────────────────────────────────────────────────────────
-# Kanban Helper Functions (kb-add, kb-list, kb-done, kb-backlog, etc.)
+# Kanban Helper Functions (kb-backlog, kb-status, kb-done, kb-sweep, etc.)
 # Sourced from the full kanban-helpers.sh installed by install-kanban.sh
 #──────────────────────────────────────────────────────────────────────────────
 

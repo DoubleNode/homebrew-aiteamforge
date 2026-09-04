@@ -499,7 +499,7 @@ If you are asked to work on a kanban item from **another platform's board**:
 All kanban operations **MUST** be performed through the official API:
 
 **Allowed Methods:**
-- ✅ `kb-*` shell functions (kb-add, kb-update, kb-move, kb-list, etc.)
+- ✅ `kb-*` shell functions (kb-backlog, kb-status, kb-done, kb-sweep, etc.)
 - ✅ Kanban MCP server API calls
 - ✅ `/kanban` skill commands
 

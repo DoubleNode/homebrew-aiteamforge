@@ -529,11 +529,76 @@ _kb_resolve_explicit_env_context() {
     return 1
 }
 
+# Resolve context from env vars or .kb-team sentinel when tmux is unavailable.
+# Returns "team:terminal:window_index:window_name" on success, exit 1 on failure.
+#
+# XACA-1095 (targeted port from canonical kanban-helpers.sh, XACA-0454): a
+# tmux-less shell (subagent, CI runner, background script, or a plain Terminal
+# window with no tmux session at all) previously had NO fallback here — see
+# _kb_detect_context below, which used to go straight from "no tmux session
+# name" to a hard ERROR. This restores layer 3 of the four-layer resolution
+# chain documented in CLAUDE.md ("kanban-helpers context in non-tmux shells"):
+#   1. tmux pane ($TMUX_PANE or current pane)
+#   2. env override (KB_TEAM / LCARS_TEAM / AITEAMFORGE_TEAM) — delegated here
+#      to _kb_resolve_explicit_env_context so the honored-var list can never
+#      drift between the two call sites (mirrors canonical's XACA-0725 note).
+#   3. .kb-team sentinel walked up from $PWD
+#   4. hard error (unchanged, in _kb_detect_context)
+#
+# NOTE on .kb-team sentinel (XACA-0389 / F-08-009): it is an OPTIONAL,
+# per-machine, gitignored override file, absent by default. Its absence is
+# expected and not an error — inference via env vars or tmux is the canonical
+# default. When absent, this function returns 1 and _kb_detect_context emits
+# the hard error.
+_kb_resolve_context_fallback() {
+    local team terminal window_index window_name
+
+    # Layer: explicit env vars (KB_TEAM / LCARS_TEAM / AITEAMFORGE_TEAM).
+    # Delegated to the canonical resolver so this list stays in lockstep with
+    # the priority-1 check in _kb_detect_context.
+    if _kb_resolve_explicit_env_context; then
+        return 0
+    fi
+
+    # Layer: .kb-team sentinel walked up from $PWD.
+    # Format (one line): team[:terminal[:window_index[:window_name]]]
+    #   or (XACA-0628) freelance:<client>:<project>[:<terminal>] →
+    #   slug freelance-<client>-<project>, terminal default agent.
+    local search_dir="${PWD}"
+    while [[ -n "$search_dir" && "$search_dir" != "/" ]]; do
+        if [[ -f "${search_dir}/.kb-team" ]]; then
+            local sentinel_content
+            sentinel_content=$(head -n 1 "${search_dir}/.kb-team" 2>/dev/null | tr -d '[:space:]')
+            if [[ -n "$sentinel_content" ]]; then
+                if [[ "$sentinel_content" == freelance:*:* ]]; then
+                    local _fl_client _fl_project _fl_terminal _fl_rest
+                    IFS=':' read -r _ _fl_client _fl_project _fl_rest <<< "$sentinel_content"
+                    if [[ -n "$_fl_client" && -n "$_fl_project" ]]; then
+                        _fl_terminal="${_fl_rest:-agent}"
+                        echo "freelance-${_fl_client}-${_fl_project}:${_fl_terminal}:0:main"
+                        return 0
+                    fi
+                fi
+                IFS=':' read -r team terminal window_index window_name <<< "$sentinel_content"
+                if [[ -n "${team:-}" ]]; then
+                    echo "${team}:${terminal:-agent}:${window_index:-0}:${window_name:-main}"
+                    return 0
+                fi
+            fi
+        fi
+        search_dir="$(dirname "$search_dir")"
+    done
+
+    return 1
+}
+
 # Detect which team, terminal, and window we're in.
 # Priority (XACA-0725): an explicit env signal (KB_TEAM / LCARS_TEAM /
 # AITEAMFORGE_TEAM) outranks the ambient tmux session — a cross-team agent that
 # exported KB_TEAM=<other-team> inside another team's tmux pane was previously
 # mis-attributed to the session team. Normal panes set no such var → tmux wins.
+# XACA-1095: priority 3 (.kb-team sentinel, via _kb_resolve_context_fallback)
+# now runs before the hard error, matching canonical's four-layer chain.
 _kb_detect_context() {
     # Priority 1: explicit env signals outrank the ambient tmux session.
     if _kb_resolve_explicit_env_context; then
@@ -553,6 +618,12 @@ _kb_detect_context() {
     fi
 
     if [[ -z "$session_name" ]]; then
+        # XACA-1095: no explicit env (checked above) and no tmux session —
+        # fall back to the .kb-team sentinel before giving up. This is the
+        # layer that was previously entirely missing from the template.
+        if _kb_resolve_context_fallback; then
+            return 0
+        fi
         echo "ERROR:ERROR:0:unknown"
         return 1
     fi
@@ -570,6 +641,107 @@ _kb_detect_context() {
     team="${session_name%-*}"
 
     echo "${team}:${terminal}:${window_index}:${window_name}"
+}
+
+# kb-context-set: explicitly set kanban context for the current shell.
+# Useful for subagent shells, CI runners, and any process without a tmux pane.
+# Usage: kb-context-set <team> [<terminal>]
+#
+# XACA-1095: targeted port from canonical kanban-helpers.sh (XACA-0454) — the
+# template had no way to set context without tmux other than exporting
+# KB_TEAM/KB_TERMINAL by hand.
+kb-context-set() {
+    if [[ -z "${1-}" ]]; then
+        cat <<'USAGE'
+Usage: kb-context-set <team> [<terminal>]
+
+Exports KB_TEAM (and optional KB_TERMINAL) for the current shell so kanban
+helpers (kb-backlog, kb-sweep, kb-done) can resolve context without tmux.
+Persists for the lifetime of this shell only.
+
+Examples:
+  kb-context-set academy
+  kb-context-set ios bridge
+  kb-context-set freelance-doublenode-starwords engineering
+
+See also:
+  kb-context-show   diagnose current context resolution
+USAGE
+        return 1
+    fi
+
+    export KB_TEAM="${1-}"
+    if [[ -n "${2-}" ]]; then
+        export KB_TERMINAL="${2-}"
+    fi
+    echo "✓ Context set: KB_TEAM=${KB_TEAM} KB_TERMINAL=${KB_TERMINAL:-agent}"
+}
+
+# kb-context-show: diagnose what _kb_detect_context resolves to and why.
+# Reports which layer of the resolution chain produced the result.
+#
+# XACA-1095: targeted port from canonical kanban-helpers.sh (XACA-0454). Was
+# entirely absent from the template — a tmux-less shell that failed context
+# resolution had no diagnostic surfaced to it beyond a raw "ERROR:ERROR" tuple.
+kb-context-show() {
+    local context source
+
+    # Re-walk the chain to identify the producing layer (subshell calls below
+    # would not propagate state from _kb_detect_context). Order MUST match
+    # _kb_detect_context: explicit env, then tmux, then .kb-team sentinel.
+    #
+    # NOTE: this block intentionally re-lists the KB_TEAM/LCARS_TEAM/
+    # AITEAMFORGE_TEAM trio independently of the canonical
+    # _kb_resolve_explicit_env_context resolver — it cannot delegate because
+    # it must report WHICH specific var won (for diagnostics), not just the
+    # resolved context. If the honored-var list/precedence in
+    # _kb_resolve_explicit_env_context changes, update this trio (and its
+    # order) to match.
+    if [[ -n "${KB_TEAM:-}" ]]; then
+        source="env (KB_TEAM=$KB_TEAM)"
+    elif [[ -n "${LCARS_TEAM:-}" ]]; then
+        source="env (LCARS_TEAM=$LCARS_TEAM)"
+    elif [[ -n "${AITEAMFORGE_TEAM:-}" ]]; then
+        source="env (AITEAMFORGE_TEAM=$AITEAMFORGE_TEAM)"
+    elif [[ -n "${TMUX_PANE:-}" ]] && tmux display-message -t "$TMUX_PANE" -p '#S' &>/dev/null; then
+        source="tmux (TMUX_PANE=$TMUX_PANE)"
+    elif tmux display-message -p '#S' &>/dev/null 2>&1; then
+        source="tmux (current pane)"
+    else
+        local search_dir="${PWD}" sentinel_path=""
+        while [[ -n "$search_dir" && "$search_dir" != "/" ]]; do
+            if [[ -f "${search_dir}/.kb-team" ]]; then
+                sentinel_path="${search_dir}/.kb-team"
+                break
+            fi
+            search_dir="$(dirname "$search_dir")"
+        done
+        if [[ -n "$sentinel_path" ]]; then
+            source="sentinel ($sentinel_path)"
+        else
+            source="none (resolution will fail)"
+        fi
+    fi
+
+    context=$(_kb_detect_context)
+    echo "Context: ${context}"
+    echo "Source:  ${source}"
+
+    if [[ "$context" == "ERROR:ERROR:0:unknown" ]]; then
+        cat <<'HELP'
+
+✗ Context resolution failed. Fix one of:
+
+  kb-context-set <team> [<terminal>]      # set for this shell
+  export KB_TEAM=<team>                   # set env var directly
+  echo "<team>" > .kb-team                # sentinel file in project root
+
+Resolution chain (priority order):
+  1. KB_TEAM / LCARS_TEAM / AITEAMFORGE_TEAM env vars (explicit — outrank tmux)
+  2. tmux pane ($TMUX_PANE)
+  3. .kb-team sentinel walked up from $PWD
+HELP
+    fi
 }
 
 # Get current git worktree path
@@ -18860,6 +19032,784 @@ kb-help() {
     echo "  Todo Priority: low | medium | high | critical (default: medium)"
     echo ""
     echo "═════════════════════════════════════════════════════════════"
+}
+
+# ═════════════════════════════════════════════════════════════════════════
+# XACA-1095: functions restored from share/templates/aliases/kanban-aliases.sh
+# ═════════════════════════════════════════════════════════════════════════
+# Regression guard for the XACA-1095 install/upgrade source-preference flip
+# (install-kanban.sh / aiteamforge-upgrade.sh now render THIS file instead of
+# the tiny kanban-aliases.sh). Ten kb-*/​_kb_* functions existed only in
+# kanban-aliases.sh and were therefore already live on every consumer today;
+# flipping the preference without carrying them forward would silently
+# DELETE them from every install. Disposition, function by function:
+#
+#   PORTED here (still needed, no equivalent existed in this file):
+#     _kb_realpath        — path-resolution utility; used by kb-quarantine-stub.
+#     kb-quarantine-stub  — required by share/scripts/kb-init-team-guard.sh,
+#                           which does `command -v kb-quarantine-stub` and
+#                           delegates to it directly.
+#     kb-variance         — XACA-0630 estimate-vs-actual analytics reporter;
+#                           the LCARS variance panel's CLI counterpart.
+#     kb-merged           — one-line alias for kb-done (kept for muscle
+#                           memory; zero-risk pass-through, see below).
+#
+#   PROVEN OBSOLETE / SUPERSEDED (not ported — evidence below):
+#     _kb_check_jq   — byte-for-byte duplicate of this file's own
+#                      _kb_ensure_jq (both just `command -v jq` + install
+#                      hint). Nothing is lost; callers use _kb_ensure_jq.
+#     _kb_get_team   — read a standalone $KANBAN_TEAM env var. Neither
+#                      $KANBAN_TEAM nor $KB_CURRENT_ITEM (see kb-current
+#                      below) is referenced ANYWHERE else in this file
+#                      (verified: zero hits) — they were the private state
+#                      of a small, parallel, tmux-independent context model
+#                      that never integrated with this file's real one
+#                      (_kb_detect_context, ported/extended above). Superseded
+#                      by KB_TEAM / KB_TERMINAL (_kb_detect_context's own env
+#                      layer) and the .kb-team sentinel.
+#     kb-team        — `export KANBAN_TEAM=<name>` command-line front end for
+#                      the same dead $KANBAN_TEAM var. Superseded by
+#                      kb-context-set <team> [<terminal>] (ported above),
+#                      which sets KB_TEAM/KB_TERMINAL — the vars
+#                      _kb_detect_context actually reads.
+#     kb-current     — printed $KB_CURRENT_ITEM, a value only kb-set-worktree
+#                      (below) ever wrote. Superseded by kb-status (this
+#                      file), which tracks the working item per terminal in
+#                      board.json's activeWindows — durable across shells,
+#                      unlike a session-local env var.
+#     kb-list        — thin backlog-listing wrapper around _kb_get_team +
+#                      _kb_get_board_file + a hand-rolled jq query. Directly
+#                      superseded by kb-backlog list (alias: kb-backlog ls),
+#                      already in this file, which does the same job through
+#                      the real context/board resolution path.
+#     kb-set-worktree — extracted an item ID from `git branch --show-current`
+#                      into $KB_CURRENT_ITEM for kb-current to read. This
+#                      file's kb-pick / kb-work / kb-recover already do
+#                      branch-derived item resolution at multiple call sites
+#                      and persist the binding in board.json instead of a
+#                      throwaway shell variable.
+#
+#   Full investigation, evidence commands, and the install/upgrade
+#   source-preference fix itself: see XACA-1095 plan doc and CHANGELOG.md.
+# ═════════════════════════════════════════════════════════════════════════
+
+_kb_realpath() {
+    local p="${1-}"
+    [ -n "$p" ] || return 1
+    local out
+    # GNU-style readlink -f (Linux; macOS 12.3+)
+    if out=$(readlink -f -- "$p" 2>/dev/null) && [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    # realpath binary (coreutils via brew; most Linux distros)
+    if out=$(realpath -- "$p" 2>/dev/null) && [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    # python3 fallback — ships on every dev environment we support
+    if command -v python3 >/dev/null 2>&1; then
+        if out=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null) && [ -n "$out" ]; then
+            printf '%s\n' "$out"
+            return 0
+        fi
+    fi
+    # Degrade gracefully — return input unchanged so caller falls back to string compare
+    printf '%s\n' "$p"
+}
+
+kb-quarantine-stub() {
+    # ── Argument parsing ──────────────────────────────────────────────────────
+    local team=""
+    local flag_yes=0
+    local flag_dry_run=0
+    local flag_force=0
+    local flag_force_no_canonical=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                cat <<'HELP'
+kb-quarantine-stub — safely move a legacy stub board file to quarantine
+
+USAGE
+    kb-quarantine-stub <team> [--yes] [--dry-run] [--force] [--force-no-canonical]
+    kb-quarantine-stub --help | -h
+
+ARGUMENTS
+    team                Team name whose stub board to quarantine.
+                        Must be one of the known team keys
+                        (e.g. legal-coparenting, finance-personal, medical-general).
+
+FLAGS
+    --yes               Skip the confirmation prompt (for scripted use)
+    --dry-run           Print the plan and exit 0; nothing is moved or written
+    --force             Allow quarantine of a stub that contains items
+                        (default: refuse if item count > 0)
+    --force-no-canonical
+                        Allow quarantine even when no canonical board exists
+                        for the team (DANGEROUS: data may be lost if the stub
+                        is actually the only board)
+
+DESCRIPTION
+    When a legacy stub board file coexists with the canonical profile-scoped
+    board, LCARS may load the wrong board.  This command:
+      1. Locates the stub and canonical paths via the same map as the warning.
+      2. Verifies the stub is empty (or --force was given).
+      3. Verifies the canonical board exists (or --force-no-canonical was given).
+      4. Prompts for confirmation (skipped with --yes or --dry-run).
+      5. Moves the stub to:
+           <AITEAMFORGE_DIR>/quarantine/runtime-stub-stash/<YYYYMMDD-HHMMSS>-<team>/
+         with the filename matching the original path (slashes → underscores).
+      6. Writes a .meta.json sidecar alongside the moved file.
+      7. Rolls back on any error.
+
+EXAMPLES
+    kb-quarantine-stub legal-coparenting
+    kb-quarantine-stub finance-personal --yes
+    kb-quarantine-stub medical-general --force --yes
+    kb-quarantine-stub finance-personal --dry-run
+
+SEE ALSO
+    XACA-0460 — LCARS Import pre-flight refuses dual-board state
+HELP
+                return 0
+                ;;
+            --yes)
+                flag_yes=1
+                shift
+                ;;
+            --dry-run)
+                flag_dry_run=1
+                shift
+                ;;
+            --force)
+                flag_force=1
+                shift
+                ;;
+            --force-no-canonical)
+                flag_force_no_canonical=1
+                shift
+                ;;
+            -*)
+                echo "kb-quarantine-stub: unknown flag '$1'" >&2
+                echo "Run: kb-quarantine-stub --help" >&2
+                return 1
+                ;;
+            *)
+                if [ -n "$team" ]; then
+                    echo "kb-quarantine-stub: unexpected argument '$1' (team already set to '$team')" >&2
+                    return 1
+                fi
+                team="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$team" ]; then
+        echo "kb-quarantine-stub: team argument is required" >&2
+        echo "Run: kb-quarantine-stub --help" >&2
+        return 1
+    fi
+
+    # ── Resolve the stub path for this team ───────────────────────────────────
+    # Mirrors the _checks array used in the dual-board warning.  If the team is
+    # not in this map, there is no known stub path and we refuse early.
+    local stub_path=""
+    case "$team" in
+        legal-coparenting)
+            # This team has TWO known stub locations; pick the first that exists.
+            # Users can run the command twice if both are present.
+            if [ -f "${HOME}/legal/kanban/legal-board.json" ]; then
+                stub_path="${HOME}/legal/kanban/legal-board.json"
+            elif [ -f "${HOME}/legal/default/kanban/legal-default-board.json" ]; then
+                stub_path="${HOME}/legal/default/kanban/legal-default-board.json"
+            fi
+            ;;
+        medical-general)
+            stub_path="${HOME}/medical/kanban/medical-board.json"
+            ;;
+        finance-personal)
+            stub_path="${HOME}/finance/kanban/finance-board.json"
+            ;;
+        *)
+            echo "kb-quarantine-stub: team '$team' has no known stub path." >&2
+            echo "  Known teams: legal-coparenting, medical-general, finance-personal" >&2
+            echo "  If this is a new team, add it to the stub map in kb-quarantine-stub." >&2
+            return 1
+            ;;
+    esac
+
+    # ── Verify stub exists ────────────────────────────────────────────────────
+    if [ ! -f "$stub_path" ]; then
+        echo "kb-quarantine-stub: no stub found for team '$team'." >&2
+        echo "  Expected stub at: $stub_path" >&2
+        echo "  Either it was already quarantined, or this team has no stub to clean up." >&2
+        return 1
+    fi
+
+    # ── Safety: refuse to operate on paths outside known safe roots ───────────
+    # We only allow stubs inside $HOME; no arbitrary --path overrides.
+    local real_stub
+    real_stub=$(_kb_realpath "$stub_path")
+    local real_home
+    real_home=$(_kb_realpath "${HOME}")
+    case "$real_stub" in
+        "${real_home}/"*)
+            ;;  # safe
+        *)
+            echo "kb-quarantine-stub: stub path '$stub_path' resolves outside \$HOME — refusing to operate." >&2
+            return 1
+            ;;
+    esac
+
+    # ── Resolve canonical path ────────────────────────────────────────────────
+    # XACA-0862: _kb_get_board_file is EXISTENCE-GATED — it errors out (return 1)
+    # whenever the team's kanban directory does not exist yet, instead of
+    # returning the path a fresh setup would create. For a genuinely-not-yet-
+    # provisioned team (exactly the "no canonical board exists" scenario
+    # --force-no-canonical exists to handle) that collapsed the intended
+    # "Refusing to quarantine: no canonical board found" message below into a
+    # generic "could not resolve" error instead. Fix: compute canonical_path
+    # directly from the same deterministic per-team directories used for
+    # stub_path above, for the 3 unambiguous personal-org teams this function
+    # already knows about. This never requires the directory to pre-exist, so
+    # the existence check just below is what decides "no canonical board".
+    # Ported from kanban-helpers.sh (canonical); see that file for full detail.
+    local canonical_path=""
+    case "$team" in
+        legal-coparenting)
+            canonical_path="${HOME}/legal/coparenting/kanban/legal-coparenting-board.json"
+            ;;
+        medical-general)
+            canonical_path="${HOME}/medical/general/kanban/medical-general-board.json"
+            ;;
+        finance-personal)
+            canonical_path="${HOME}/finance/personal/kanban/finance-personal-board.json"
+            ;;
+        *)
+            canonical_path=$(_kb_get_board_file "$team" 2>/dev/null) || {
+                echo "kb-quarantine-stub: could not resolve canonical board path for team '$team'." >&2
+                return 1
+            }
+            ;;
+    esac
+
+    # ── Safety: canonical must exist (or --force-no-canonical) ───────────────
+    if [ ! -f "$canonical_path" ]; then
+        if [ "$flag_force_no_canonical" -eq 1 ]; then
+            echo "WARNING: No canonical board found for '$team' at $canonical_path" >&2
+            echo "  --force-no-canonical given — proceeding anyway.  Data may be at risk." >&2
+        else
+            echo "kb-quarantine-stub: Refusing to quarantine: no canonical board found for team '$team'." >&2
+            echo "  Expected canonical at: $canonical_path" >&2
+            echo "  If the stub IS the only board, use --force-no-canonical (understand the risk first)." >&2
+            return 1
+        fi
+    fi
+
+    # ── Safety: stub must not be the canonical board ──────────────────────────
+    if [ -f "$canonical_path" ]; then
+        local real_canonical
+        real_canonical=$(_kb_realpath "$canonical_path")
+        if [ "$real_stub" = "$real_canonical" ]; then
+            echo "kb-quarantine-stub: stub and canonical resolve to the same file ($real_stub)." >&2
+            echo "  Nothing to quarantine — they are the same board." >&2
+            return 0
+        fi
+    fi
+
+    # ── Count items in the stub ───────────────────────────────────────────────
+    local item_count=0
+    if command -v jq &>/dev/null; then
+        item_count=$(jq '(.backlog // []) | length' "$stub_path" 2>/dev/null) || item_count=0
+        # If jq couldn't parse it, treat as non-empty to be safe
+        if ! echo "$item_count" | grep -qE '^[0-9]+$'; then
+            item_count=1
+        fi
+    fi
+
+    if [ "$item_count" -gt 0 ] && [ "$flag_force" -eq 0 ]; then
+        echo "kb-quarantine-stub: stub '$stub_path' contains $item_count item(s)." >&2
+        echo "  Refusing to quarantine a non-empty stub — it may be a real board." >&2
+        echo "  If you are sure, use --force to override." >&2
+        return 1
+    fi
+
+    # ── Build quarantine destination ──────────────────────────────────────────
+    local timestamp_dir
+    timestamp_dir=$(date -u +"%Y%m%d-%H%M%S")
+    local quarantine_base="${AITEAMFORGE_DIR}/quarantine/runtime-stub-stash"
+    local quarantine_dir="${quarantine_base}/${timestamp_dir}-${team}"
+
+    # Derive a flat filename from the original path: replace / with _
+    local flat_name
+    flat_name=$(printf '%s' "$stub_path" | tr '/' '_' | sed 's/^_//')
+    local dest_file="${quarantine_dir}/${flat_name}"
+    local dest_meta="${quarantine_dir}/${flat_name}.meta.json"
+
+    # ── Compute SHA-256 of stub ───────────────────────────────────────────────
+    local sha256=""
+    if command -v shasum &>/dev/null; then
+        sha256=$(shasum -a 256 "$stub_path" 2>/dev/null | awk '{print $1}')
+    elif command -v sha256sum &>/dev/null; then
+        sha256=$(sha256sum "$stub_path" 2>/dev/null | awk '{print $1}')
+    fi
+
+    # ── mtime of stub ─────────────────────────────────────────────────────────
+    local mtime_iso=""
+    if command -v python3 &>/dev/null; then
+        mtime_iso=$(python3 -c '
+import os, sys, datetime
+st = os.stat(sys.argv[1])
+dt = datetime.datetime.utcfromtimestamp(st.st_mtime)
+print(dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
+' "$stub_path" 2>/dev/null)
+    fi
+
+    # ── size ──────────────────────────────────────────────────────────────────
+    local size_bytes=""
+    if command -v python3 &>/dev/null; then
+        size_bytes=$(python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$stub_path" 2>/dev/null)
+    fi
+
+    # ── Print plan ────────────────────────────────────────────────────────────
+    echo ""
+    echo "kb-quarantine-stub: Plan for team '$team'"
+    echo "─────────────────────────────────────────────────────────"
+    echo "  Stub:          $stub_path"
+    echo "  Item count:    $item_count"
+    echo "  SHA-256:       ${sha256:-<unavailable>}"
+    echo "  Size:          ${size_bytes:-<unknown>} bytes"
+    echo "  Canonical:     $canonical_path"
+    if [ ! -f "$canonical_path" ]; then
+        echo "  Canonical exists: NO (--force-no-canonical given)"
+    else
+        echo "  Canonical exists: YES"
+    fi
+    echo "  Quarantine to: $dest_file"
+    echo "  Sidecar:       $dest_meta"
+    echo "─────────────────────────────────────────────────────────"
+
+    if [ "$flag_force" -eq 1 ] && [ "$item_count" -gt 0 ]; then
+        echo "  WARNING: --force given; stub has $item_count item(s)"
+    fi
+    echo ""
+
+    # ── Dry-run exits here ────────────────────────────────────────────────────
+    if [ "$flag_dry_run" -eq 1 ]; then
+        echo "  [DRY RUN] Nothing moved. Exiting."
+        return 0
+    fi
+
+    # ── Confirmation prompt ───────────────────────────────────────────────────
+    if [ "$flag_yes" -eq 0 ]; then
+        printf "Continue? [y/N] "
+        local answer
+        read -r answer
+        case "$answer" in
+            [yY]|[yY][eE][sS])
+                ;;
+            *)
+                echo "Aborted."
+                return 1
+                ;;
+        esac
+    fi
+
+    # ── Execute move ──────────────────────────────────────────────────────────
+    local quarantine_at
+    quarantine_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Create quarantine directory
+    if ! mkdir -p "$quarantine_dir"; then
+        echo "kb-quarantine-stub: failed to create quarantine directory '$quarantine_dir'" >&2
+        return 1
+    fi
+
+    # Move the stub (atomic on same filesystem)
+    if ! mv "$stub_path" "$dest_file"; then
+        echo "kb-quarantine-stub: mv failed — '$stub_path' not moved." >&2
+        # No rollback needed if mv failed; stub is still in place
+        return 1
+    fi
+
+    # Write .meta.json sidecar — if this fails, roll back the move
+    if ! python3 -c '
+import json, sys
+data = {
+    "original_path":   sys.argv[1],
+    "canonical_path":  sys.argv[2],
+    "sha256":          sys.argv[3],
+    "size_bytes":      int(sys.argv[4]) if sys.argv[4] else None,
+    "mtime_iso":       sys.argv[5] if sys.argv[5] else None,
+    "item_count":      int(sys.argv[6]),
+    "quarantined_at":  sys.argv[7],
+    "quarantined_by":  "kb-quarantine-stub (XACA-0460)",
+    "user":            sys.argv[8],
+    "hostname":        sys.argv[9],
+    "reason":          "Stub board file coexisted with canonical board. Quarantined via kb-quarantine-stub.",
+}
+with open(sys.argv[10], "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+' "$stub_path" "$canonical_path" \
+    "${sha256:-}" \
+    "${size_bytes:-}" \
+    "${mtime_iso:-}" \
+    "$item_count" \
+    "$quarantine_at" \
+    "${USER:-unknown}" \
+    "$(hostname -s 2>/dev/null || echo unknown)" \
+    "$dest_meta" 2>/dev/null; then
+        echo "kb-quarantine-stub: WARNING: failed to write .meta.json sidecar at '$dest_meta'" >&2
+        echo "  The stub was moved successfully; please create the sidecar manually." >&2
+        # Do NOT roll back — the move succeeded; sidecar is non-critical
+    fi
+
+    echo "kb-quarantine-stub: Done."
+    echo "  Moved:   $stub_path"
+    echo "    -> $dest_file"
+    if [ -f "$dest_meta" ]; then
+        echo "  Sidecar: $dest_meta"
+    fi
+    echo ""
+    echo "  To verify: ls -la '$quarantine_dir'"
+    echo "  To restore (if needed): mv '$dest_file' '$stub_path'"
+}
+
+kb-variance() {
+    _kb_ensure_jq || return 1
+
+    # Parse arguments — declare all locals before any loop (zsh local-in-loop
+    # stdout-leak rule from memory: k501 / feedback_zsh_jq_bang_hist.md).
+    local emit_json=0
+    local board_file_override=""
+    local show_help=0
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --json)            emit_json=1; shift ;;
+            --board-file)
+                if [[ -z "${2-}" ]]; then
+                    echo "Error: --board-file requires a path argument" >&2
+                    return 2
+                fi
+                board_file_override="${2}"; shift 2
+                ;;
+            -h|--help)         show_help=1; shift ;;
+            *)
+                echo "Unknown argument: ${1-}" >&2
+                echo "Usage: kb-variance [--json] [--board-file <path>] [-h|--help]" >&2
+                return 2
+                ;;
+        esac
+    done
+
+    if [[ "$show_help" -eq 1 ]]; then
+        cat <<'USAGE'
+kb-variance — Estimate-vs-actual handicap analytics (XACA-0630)
+
+Usage: kb-variance [--json] [--board-file <path>] [-h|--help]
+
+Options:
+  --json              Emit the canonical §7 JSON payload to stdout only.
+                      Suitable for piping to jq or diffing against the server.
+  --board-file <path> Override the board file (default: team board via context).
+  -h, --help          Show this help.
+
+Output (default human mode):
+  Global weighted handicap + median, excluded item tallies, and a row per
+  size bucket (<=1h, 1-4h, 4-8h, >8h) with count, handicap, median, and
+  estimated/actual hour sums.
+
+  "handicap > 1.0" means work consistently takes longer than estimated.
+  "handicap < 1.0" means we tend to overestimate effort.
+
+Empty state: when no eligible (completed + both fields set) items exist,
+  human mode prints "Not enough tracked data yet"; --json emits the §7.3
+  null-filled payload.
+
+Spec: kanban/plans/XACA-0630/handicap-spec.md
+USAGE
+        return 0
+    fi
+
+    # ── Resolve board file ──────────────────────────────────────────────────
+    local board_file
+    if [[ -n "$board_file_override" ]]; then
+        board_file="$board_file_override"
+    else
+        local context team
+        context=$(_kb_detect_context)
+        if [[ "$context" == "ERROR:ERROR:0:unknown" ]]; then
+            echo "Error: cannot resolve kanban context." >&2
+            echo "Set KB_TEAM=<team> or run from a tmux session." >&2
+            return 1
+        fi
+        team="${context%%:*}"
+        board_file=$(_kb_get_board_file "$team")
+    fi
+
+    if [[ ! -f "$board_file" ]]; then
+        echo "Error: board file not found: $board_file" >&2
+        return 1
+    fi
+
+    # ── Derive team slug for the payload ───────────────────────────────────
+    # Extract from filename: <dir>/<team>-board.json → <team>
+    local team_slug
+    team_slug=$(basename "$board_file" "-board.json")
+
+    # ── Compute payload via jq ─────────────────────────────────────────────
+    # All math at full float precision; rounding to 2dp only at the final
+    # output stage.  Uses round() which is "round half away from zero" for
+    # positive values — matches spec §6 exactly.
+    #
+    # jq != filter avoidance (memory rule feedback_zsh_jq_bang_hist.md):
+    #   never use != in jq expressions called from kanban-helpers.sh;
+    #   use == with swapped if/else branches.
+    #
+    # Eligibility (spec §2):
+    #   status == "completed"
+    #   AND points != null AND (points|type)=="number" AND points > 0
+    #   AND timeWorkedMs != null AND (timeWorkedMs|type)=="number" AND timeWorkedMs > 0
+    #
+    # Exclusion buckets (only for status=="completed" items):
+    #   no_estimate:  timeWorkedMs > 0 AND (points is null/missing/<= 0)
+    #   no_time:      points > 0       AND (timeWorkedMs is null/missing/<= 0)
+    #   both_missing: both absent/null/<= 0
+    #
+    # Non-completed items are silently ignored (not counted in any exclusion bucket).
+    #
+    # Median (spec §4.2): sort ratios asc; odd n → middle; even n → mean of two middles.
+
+    local now_utc
+    now_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # ── Single-pass jq: full §7 payload ────────────────────────────────────
+    local payload
+    payload=$(jq \
+        --arg team "$team_slug" \
+        --arg generated_at "$now_utc" \
+        '
+        # ── helpers ─────────────────────────────────────────────────────────
+        # round2: "round half to even" (banker'"'"'s rounding) matching Python
+        # round(x, 2) semantics — the spec §6 example 1.125 → 1.12 proves this.
+        # Algorithm: scale by 100, compute floor; if fractional part is exactly
+        # 0.5 round to even (floor if floor is even, floor+1 if floor is odd);
+        # otherwise standard round-half-away-from-zero.
+        def round2:
+            . * 100 as $s |
+            ($s | floor) as $f |
+            ($s - $f) as $frac |
+            if $frac < 0.5 then $f / 100
+            elif $frac > 0.5 then ($f + 1) / 100
+            else
+                if (($f % 2) == 0) then $f / 100
+                else ($f + 1) / 100
+                end
+            end;
+
+        def sort_and_median:
+            sort as $s |
+            length as $n |
+            if $n == 0 then null
+            elif (($n % 2) == 1) then $s[($n / 2 | floor)]
+            else ($s[($n / 2) - 1] + $s[$n / 2]) / 2
+            end;
+
+        def is_pos_num: (. != null) and ((. | type) == "number") and (. > 0);
+
+        # ── collect completed top-level items ────────────────────────────────
+        [ .backlog[] ] as $all_items |
+        [ $all_items[] | select(.status == "completed") ] as $completed |
+
+        # ── eligible: completed + points>0 + timeWorkedMs>0 ─────────────────
+        [ $completed[] | select((.points | is_pos_num) and (.timeWorkedMs | is_pos_num)) ] as $eligible |
+
+        # ── exclusion counts ─────────────────────────────────────────────────
+        ($completed | map(
+            select(
+                ((.points | is_pos_num) | not) and
+                (.timeWorkedMs | is_pos_num)
+            )
+        ) | length) as $excl_no_estimate |
+
+        ($completed | map(
+            select(
+                (.points | is_pos_num) and
+                ((.timeWorkedMs | is_pos_num) | not)
+            )
+        ) | length) as $excl_no_time |
+
+        ($completed | map(
+            select(
+                ((.points | is_pos_num) | not) and
+                ((.timeWorkedMs | is_pos_num) | not)
+            )
+        ) | length) as $excl_both_missing |
+
+        # ── global aggregates ────────────────────────────────────────────────
+        ($eligible | length) as $n_eligible |
+        ($eligible | map(.points) | add // 0) as $sum_est |
+        ($eligible | map(.timeWorkedMs / 3600000) | add // 0) as $sum_act |
+        ([ $eligible[] | (.timeWorkedMs / 3600000) / .points ] | sort_and_median) as $global_median_raw |
+
+        # ── build payload ────────────────────────────────────────────────────
+        {
+            generatedAt: $generated_at,
+            team: $team,
+            eligible: $n_eligible,
+            excluded: {
+                no_estimate:  $excl_no_estimate,
+                no_time:      $excl_no_time,
+                both_missing: $excl_both_missing,
+                total:        ($excl_no_estimate + $excl_no_time + $excl_both_missing)
+            },
+            global: {
+                handicap:          (if $n_eligible == 0 then null else ($sum_act / $sum_est) | round2 end),
+                median:            (if $n_eligible == 0 then null else $global_median_raw | round2 end),
+                sumEstimatedHours: ($sum_est | round2),
+                sumActualHours:    ($sum_act | round2)
+            },
+            buckets: [
+                # Bucket 0: <=1h  (points > 0 and points <= 1)
+                (
+                    [ $eligible[] | select(.points > 0 and .points <= 1) ] as $b |
+                    ($b | length) as $bn |
+                    ($b | map(.points) | add // 0) as $be |
+                    ($b | map(.timeWorkedMs / 3600000) | add // 0) as $ba |
+                    {
+                        label: "<=1h", n: $bn,
+                        handicap:          (if $bn == 0 then null else ($ba / $be) | round2 end),
+                        median:            (if $bn == 0 then null else [ $b[] | (.timeWorkedMs / 3600000) / .points ] | sort_and_median | round2 end),
+                        sumEstimatedHours: ($be | round2),
+                        sumActualHours:    ($ba | round2)
+                    }
+                ),
+                # Bucket 1: 1-4h  (points > 1 and points <= 4)
+                (
+                    [ $eligible[] | select(.points > 1 and .points <= 4) ] as $b |
+                    ($b | length) as $bn |
+                    ($b | map(.points) | add // 0) as $be |
+                    ($b | map(.timeWorkedMs / 3600000) | add // 0) as $ba |
+                    {
+                        label: "1-4h", n: $bn,
+                        handicap:          (if $bn == 0 then null else ($ba / $be) | round2 end),
+                        median:            (if $bn == 0 then null else [ $b[] | (.timeWorkedMs / 3600000) / .points ] | sort_and_median | round2 end),
+                        sumEstimatedHours: ($be | round2),
+                        sumActualHours:    ($ba | round2)
+                    }
+                ),
+                # Bucket 2: 4-8h  (points > 4 and points <= 8)
+                (
+                    [ $eligible[] | select(.points > 4 and .points <= 8) ] as $b |
+                    ($b | length) as $bn |
+                    ($b | map(.points) | add // 0) as $be |
+                    ($b | map(.timeWorkedMs / 3600000) | add // 0) as $ba |
+                    {
+                        label: "4-8h", n: $bn,
+                        handicap:          (if $bn == 0 then null else ($ba / $be) | round2 end),
+                        median:            (if $bn == 0 then null else [ $b[] | (.timeWorkedMs / 3600000) / .points ] | sort_and_median | round2 end),
+                        sumEstimatedHours: ($be | round2),
+                        sumActualHours:    ($ba | round2)
+                    }
+                ),
+                # Bucket 3: >8h   (points > 8)
+                (
+                    [ $eligible[] | select(.points > 8) ] as $b |
+                    ($b | length) as $bn |
+                    ($b | map(.points) | add // 0) as $be |
+                    ($b | map(.timeWorkedMs / 3600000) | add // 0) as $ba |
+                    {
+                        label: ">8h", n: $bn,
+                        handicap:          (if $bn == 0 then null else ($ba / $be) | round2 end),
+                        median:            (if $bn == 0 then null else [ $b[] | (.timeWorkedMs / 3600000) / .points ] | sort_and_median | round2 end),
+                        sumEstimatedHours: ($be | round2),
+                        sumActualHours:    ($ba | round2)
+                    }
+                )
+            ]
+        }
+        ' "$board_file" 2>&1)
+
+    local jq_exit=$?
+    if [[ $jq_exit -ne 0 ]]; then
+        echo "Error: jq failed to parse board file: $board_file" >&2
+        echo "$payload" >&2
+        return 1
+    fi
+
+    # ── Emit ────────────────────────────────────────────────────────────────
+    if [[ "$emit_json" -eq 1 ]]; then
+        # --json mode: emit ONLY the payload, nothing else
+        printf '%s\n' "$payload"
+        return 0
+    fi
+
+    # ── Human-readable table ─────────────────────────────────────────────────
+    local n_eligible
+    n_eligible=$(printf '%s\n' "$payload" | jq -r '.eligible')
+
+    if [[ "$n_eligible" -eq 0 ]]; then
+        local team_display excl_total
+        team_display=$(printf '%s\n' "$payload" | jq -r '.team')
+        excl_total=$(printf '%s\n' "$payload" | jq -r '.excluded.total')
+        echo "kb-variance: Not enough tracked data yet (team: ${team_display})"
+        echo "─────────────────────────────────────────────────────────────"
+        echo "  No eligible items found — an item is eligible when it is"
+        echo "  completed AND has both an estimate (points) and tracked time."
+        if [[ "$excl_total" -gt 0 ]]; then
+            local ne nt bm
+            ne=$(printf '%s\n' "$payload" | jq -r '.excluded.no_estimate')
+            nt=$(printf '%s\n' "$payload" | jq -r '.excluded.no_time')
+            bm=$(printf '%s\n' "$payload" | jq -r '.excluded.both_missing')
+            echo ""
+            echo "  Completed items excluded ($excl_total total):"
+            echo "    no estimate (points missing):  $ne"
+            echo "    no time tracked:               $nt"
+            echo "    both missing:                  $bm"
+        fi
+        echo ""
+        echo "  Items become eligible as they are completed with both"
+        echo "  kb-backlog points <id> <hours> AND active time tracking."
+        return 0
+    fi
+
+    # Populated state — print the table
+    printf '%s\n' "$payload" | jq -r '
+        "kb-variance: Estimate-vs-Actual Handicap  (team: \(.team))",
+        "═══════════════════════════════════════════════════════",
+        "  Eligible items: \(.eligible)",
+        "  Excluded: no_estimate=\(.excluded.no_estimate)  no_time=\(.excluded.no_time)  both_missing=\(.excluded.both_missing)  total=\(.excluded.total)",
+        "",
+        "  Global weighted handicap : \(.global.handicap)    (>1.0 = under-estimated)",
+        "  Global median ratio      : \(.global.median)",
+        "  Sum estimated hours      : \(.global.sumEstimatedHours)h",
+        "  Sum actual hours         : \(.global.sumActualHours)h",
+        "",
+        "  ─── Per-bucket breakdown ────────────────────────────────",
+        ([ "Bucket", "n", "Handicap", "Median", "Est hrs", "Act hrs" ] | @tsv),
+        "  ─────────────────────────────────────────────────────────",
+        (.buckets[] |
+            [
+                .label,
+                (.n | tostring),
+                (if .handicap == null then "—" else (.handicap | tostring) end),
+                (if .median == null   then "—" else (.median   | tostring) end),
+                (.sumEstimatedHours | tostring) + "h",
+                (.sumActualHours    | tostring) + "h"
+            ] | @tsv
+        ),
+        "  ─────────────────────────────────────────────────────────",
+        "  Spec: kanban/plans/XACA-0630/handicap-spec.md"
+    '
+}
+
+kb-merged() {
+    kb-done "$@"
 }
 
 # === CR Lifecycle Helpers (XACA-0291) — kb-cr ===

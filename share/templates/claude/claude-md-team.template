@@ -34,8 +34,8 @@ This file contains team-specific overrides and additions to the global CLAUDE.md
 
 Access via:
 ```bash
-kb-list {{TEAM_NAME}}
-kb-board {{TEAM_NAME}}
+kb-backlog list
+kb-status
 ```
 
 ---

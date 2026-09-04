@@ -466,21 +466,37 @@ init_kanban_board() {
 
 # Install kanban-helpers.sh
 install_kanban_helpers() {
-    # Prefer the standalone kanban-aliases.sh (works without tmux/dev-team context)
-    # Fall back to the full kanban-helpers.template.sh if aliases not found
+    # XACA-1095: prefer the FULL kanban-helpers.template.sh (86-function parity
+    # target on canonical dev-team/kanban-helpers.sh; 61+ functions here,
+    # including kb-sweep/kb-epic/kb-release*/kb-run/kb-work/kb-pick/kb-recover
+    # — the whole PR-merge-gate and worktree-lifecycle family). Fall back to the
+    # tiny, standalone kanban-aliases.sh (20 functions; works without tmux/
+    # dev-team context) only if the full template is missing.
+    #
+    # Prior to XACA-1095 this preference was INVERTED — kanban-aliases.sh was
+    # preferred and the full template was the fallback. That was backwards: a
+    # real consumer install always has the full template available (it ships
+    # in the tap unconditionally), so the fallback branch was structurally
+    # unreachable in practice and every fresh install silently got the tiny
+    # 20-function surface instead of the real one. The very guard immediately
+    # below already knew this was wrong for a DEV checkout ("the sed-redirect
+    # would silently replace the full source-of-truth helpers with the tiny
+    # aliases template, dropping kb-sweep/kb-merge and breaking PR merge
+    # gates") — that guard is a no-op on a real install ($AITEAMFORGE_DIR is
+    # never a git repo there), so real consumers got exactly the breakage the
+    # guard's own comment warned about. See XACA-1095 for the full investigation.
     local template=""
-    if [ -f "$INSTALL_ROOT/share/templates/aliases/kanban-aliases.sh" ]; then
-        template="$INSTALL_ROOT/share/templates/aliases/kanban-aliases.sh"
-    elif [ -f "$INSTALL_ROOT/share/templates/kanban/kanban-helpers.template.sh" ]; then
+    if [ -f "$INSTALL_ROOT/share/templates/kanban/kanban-helpers.template.sh" ]; then
         template="$INSTALL_ROOT/share/templates/kanban/kanban-helpers.template.sh"
+    elif [ -f "$INSTALL_ROOT/share/templates/aliases/kanban-aliases.sh" ]; then
+        template="$INSTALL_ROOT/share/templates/aliases/kanban-aliases.sh"
     fi
     local target="$AITEAMFORGE_DIR/kanban-helpers.sh"
 
     # XACA-0559 / XACA-0564: refuse to overwrite a git-tracked kanban-helpers.sh.
     # On a real install $AITEAMFORGE_DIR is ~/.aiteamforge (never a git repo) so
     # this guard is a no-op.  On a dev checkout the sed-redirect would silently
-    # replace the full source-of-truth helpers with the tiny aliases template,
-    # dropping kb-sweep/kb-merge and breaking PR merge gates.
+    # replace the full source-of-truth helpers with a stale/different copy.
     # Set AITEAMFORGE_ALLOW_DEV_OVERWRITE=1 to override (sandboxed tests only).
     if command -v git >/dev/null 2>&1; then
         local _is_dev_repo=0
@@ -518,10 +534,21 @@ install_kanban_helpers() {
         return 0
     fi
 
-    info "Installing kanban helper functions"
+    info "Installing kanban helper functions (from $(basename "$template"))"
 
-    # Substitute AITEAMFORGE_DIR in template
+    # Substitute placeholders in template.
+    # XACA-1095: kanban-helpers.template.sh (now the preferred source) uses
+    # {{SHARED_DEV_ROOT}} / {{ORG_NAME}} in live executable code (default
+    # per-platform kanban-dir guesses for iOS/Android/Firebase-style teams —
+    # see _kb_get_kanban_dir's "well-known case arms"), unlike kanban-aliases.sh
+    # which never references either. Substituting only {{AITEAMFORGE_DIR}} (the
+    # pre-XACA-1095 behavior) left those two placeholders LITERALLY in the
+    # rendered file whenever the full template was selected. Mirrors the same
+    # three substitutions aiteamforge-upgrade.sh's update_shell_helpers already
+    # performs, with the same fallback defaults, so install and upgrade agree.
     sed -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+        -e "s|{{SHARED_DEV_ROOT}}|${SHARED_DEV_ROOT:-/Users/Shared/Development}|g" \
+        -e "s|{{ORG_NAME}}|${ORG_NAME:-}|g" \
         "$template" > "$target"
 
     chmod +x "$target"

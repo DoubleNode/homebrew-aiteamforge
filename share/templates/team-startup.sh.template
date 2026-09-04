@@ -676,7 +676,7 @@ echo "    1. Click an agent tab"
 echo "    2. Run: claude"
 echo "    3. Start working!"
 echo ""
-echo "  Kanban: kb-list | kb-add | kb-status"
+echo "  Kanban: kb-backlog list | kb-backlog add | kb-status"
 echo ""
 echo "  Remote attach (tmux -L ${TMUX_SOCKET}):"
 for agent in "${AGENTS[@]}"; do

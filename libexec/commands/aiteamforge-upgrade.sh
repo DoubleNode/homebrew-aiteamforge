@@ -2123,34 +2123,84 @@ update_shell_helpers() {
   tap_share="${FRAMEWORK_DIR}/share"
 
   # Update kanban-helpers.sh (root of WORKING_DIR).
-  # XACA-0649 / Finding 2: mirror install_kanban_helpers' source preference —
-  #   prefer kanban-aliases.sh (the standalone, tap-tested copy that fresh installs
-  #   use); fall back to kanban-helpers.template.sh if the aliases file is absent.
-  # Both files carry the same three-tier _kb_get_kanban_dir fix after XACA-0649.
-  # Keeping upgrade in sync with install prevents a future edit to kanban-aliases.sh
-  # from silently diverging from what upgrade ships.
-  local kanban_aliases_template="${tap_share}/templates/aliases/kanban-aliases.sh"
+  # XACA-1095: prefer the FULL kanban-helpers.template.sh (the 61+-function
+  # source-of-truth surface — kb-sweep/kb-epic/kb-release*/kb-run/kb-work/
+  # kb-pick/kb-recover and the rest of the PR-merge-gate + worktree lifecycle
+  # family). Fall back to the tiny, standalone kanban-aliases.sh (20 functions)
+  # only if the full template is absent. This INVERTS the pre-XACA-1095
+  # preference (which mirrored install_kanban_helpers' old, also-inverted,
+  # choice under the XACA-0649 "keep install/upgrade in sync" banner — the
+  # intent to keep the two in sync was correct, the chosen winner was not).
+  # See install_kanban_helpers in libexec/installers/install-kanban.sh for the
+  # parallel fix and full rationale; both still substitute the same three
+  # placeholders below, so install and upgrade keep agreeing.
   local kanban_template="${tap_share}/templates/kanban/kanban-helpers.template.sh"
+  local kanban_aliases_template="${tap_share}/templates/aliases/kanban-aliases.sh"
   local _kanban_src=""
-  if [ -f "$kanban_aliases_template" ]; then
-    _kanban_src="$kanban_aliases_template"
-  elif [ -f "$kanban_template" ]; then
+  if [ -f "$kanban_template" ]; then
     _kanban_src="$kanban_template"
+  elif [ -f "$kanban_aliases_template" ]; then
+    _kanban_src="$kanban_aliases_template"
   fi
   local kanban_target="${WORKING_DIR}/kanban-helpers.sh"
-  if [ -n "$_kanban_src" ] && [ -f "$kanban_target" ]; then
-    if [ "$_kanban_src" -nt "$kanban_target" ] || [ "$FORCE" = true ]; then
-      print_info "Updating kanban-helpers.sh (from $(basename "$_kanban_src"))..."
-      if [ "$DRY_RUN" = false ]; then
-        sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
-            -e "s|{{SHARED_DEV_ROOT}}|${SHARED_DEV_ROOT:-/Users/Shared/Development}|g" \
-            -e "s|{{ORG_NAME}}|${ORG_NAME:-}|g" \
-            "$_kanban_src" > "$kanban_target"
-        print_success "Updated kanban-helpers.sh"
+
+  if [ -z "$_kanban_src" ]; then
+    print_warning "No kanban-helpers source found under ${tap_share} (neither kanban-helpers.template.sh nor kanban-aliases.sh) — skipping kanban-helpers.sh refresh"
+  elif [ ! -f "$kanban_target" ]; then
+    # XACA-1095: previously this whole file-refresh block was gated on
+    # `[ -f "$kanban_target" ]`, so a MISSING kanban-helpers.sh on an
+    # otherwise-installed team produced no output at all — kb-sweep, kb-epic,
+    # kb-release*, kb-run/kb-work/kb-pick/kb-recover, and every other kb-*
+    # function would simply not exist, with nothing telling the operator why.
+    print_warning "kanban-helpers.sh not found at ${kanban_target} — every kb-* function is unavailable on this install."
+    print_warning "  Remediation: aiteamforge upgrade --force   (or re-run aiteamforge-setup)"
+  else
+    # XACA-1095 (Defect B/C root-cause fix): decide staleness by RENDERED
+    # CONTENT, never by mtime. `[ "$_kanban_src" -nt "$kanban_target" ]` (the
+    # prior check) is unsound against a git-sourced Cellar: `git checkout`
+    # only touches the mtime of files that actually changed between tags — a
+    # template file unmodified across several release tags keeps whatever
+    # mtime it had at its ORIGINAL checkout, which can easily predate (and
+    # therefore never be "-nt") a target that was rendered more recently. That
+    # silently wedges a consumer on a stale kanban-helpers.sh across every
+    # subsequent release with no way for the mtime check to ever self-correct.
+    # Measured: two consumer machines' ~/aiteamforge/.installed-version stuck
+    # at the 2026-08-18 render across four subsequent Cellar upgrades — see
+    # the XACA-1095 plan doc for the full trail. Comparing rendered content
+    # instead is correct regardless of either file's mtime and self-heals the
+    # moment the shipped template or the placeholder values actually change.
+    local _kanban_rendered=""
+    _kanban_rendered="$(mktemp "${TMPDIR:-/tmp}/kanban-helpers-rendered.XXXXXX" 2>/dev/null)" || _kanban_rendered=""
+    if [ -z "$_kanban_rendered" ]; then
+      print_warning "Could not create a temp file to compare kanban-helpers.sh against the shipped template — skipping refresh check this run"
+    else
+      sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
+          -e "s|{{SHARED_DEV_ROOT}}|${SHARED_DEV_ROOT:-/Users/Shared/Development}|g" \
+          -e "s|{{ORG_NAME}}|${ORG_NAME:-}|g" \
+          "$_kanban_src" > "$_kanban_rendered" 2>/dev/null
+
+      if [ "$FORCE" != true ] && cmp -s "$_kanban_rendered" "$kanban_target"; then
+        rm -f "$_kanban_rendered"
+        # Up to date — no output, matching this function's existing quiet
+        # convention for a no-op file (see the alias-file loop below).
+      elif [ "$DRY_RUN" = true ]; then
+        echo "Would update: kanban-helpers.sh (from $(basename "$_kanban_src")) — installed copy differs from the shipped template"
         updated=$((updated + 1))
+        rm -f "$_kanban_rendered"
       else
-        echo "Would update: kanban-helpers.sh (from $(basename "$_kanban_src"))"
-        updated=$((updated + 1))
+        print_info "Updating kanban-helpers.sh (from $(basename "$_kanban_src"))..."
+        if cat "$_kanban_rendered" > "$kanban_target" 2>/dev/null && chmod +x "$kanban_target" 2>/dev/null; then
+          print_success "Updated kanban-helpers.sh"
+          updated=$((updated + 1))
+        else
+          # XACA-1095 (Defect C): fail LOUDLY, and name the actual remediation
+          # — the doctor's `--fix` is an unimplemented placeholder today, so a
+          # message that just says "run doctor --fix" would send the operator
+          # nowhere. Give the literal command instead.
+          print_warning "Failed to write ${kanban_target} — installed kanban-helpers.sh may now be STALE or MISSING relative to the shipped template."
+          print_warning "  Manual remediation: sed -e 's|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g' -e 's|{{SHARED_DEV_ROOT}}|${SHARED_DEV_ROOT:-/Users/Shared/Development}|g' -e 's|{{ORG_NAME}}|${ORG_NAME:-}|g' \"${_kanban_src}\" > \"${kanban_target}\" && chmod +x \"${kanban_target}\""
+        fi
+        rm -f "$_kanban_rendered"
       fi
     fi
   fi

@@ -16,13 +16,26 @@ TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALLERS_DIR="$TAP_ROOT/libexec/installers"
 
 INSTALLER="$INSTALLERS_DIR/install-kanban.sh"
-TEMPLATE="$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"
+# XACA-1095: install_kanban_helpers now prefers the FULL
+# kanban-helpers.template.sh over kanban-aliases.sh (see that function's
+# header comment for the full rationale — the old preference order shipped
+# the 20-function aliases surface to every real consumer instead of the
+# 61+-function template, dropping kb-sweep/kb-epic/kb-release*/kb-run/
+# kb-work/kb-pick/kb-recover in the field).
+TEMPLATE="$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"
 
 # Sentinel content written into fixture kanban-helpers.sh files.
 SENTINEL="# SENTINEL-SOURCE-OF-TRUTH — must not be overwritten"
 
-# Known string that MUST appear in the rendered kanban-aliases.sh template.
-TEMPLATE_MARKER="kb-list"
+# Known string that MUST appear in the rendered kanban-helpers.template.sh
+# output. `kb-sweep` — not just present but exactly the function this
+# preference flip exists to restore — and, unlike the prior `kb-list` marker,
+# does NOT already appear incidentally in either file's prose/comments, so a
+# match here can't be a false positive off doc text. (`kb-list` doesn't exist
+# in kanban-helpers.template.sh at all — see that file's XACA-1095 disposition
+# comment — so it would have made a poor marker for the new preferred source
+# even before accounting for the comment-text collision.)
+TEMPLATE_MARKER="kb-sweep"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Standalone framework: provide no-op stubs when test-runner.sh has not exported

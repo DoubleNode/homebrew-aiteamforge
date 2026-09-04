@@ -76,6 +76,7 @@ Options:
 Components:
   dependencies    Check external dependencies
   framework       Check framework installation
+  helpers-drift   Installed kanban-helpers.sh function inventory vs shipped template (XACA-1095)
   config          Check configuration files
   services        Check running services
   permissions     Check file permissions
@@ -328,6 +329,99 @@ check_framework() {
     fi
   done
 
+  echo ""
+}
+
+# Check installed kanban-helpers.sh function inventory vs the shipped template
+# (XACA-1095). Mirrors libexec/commands/aiteamforge-doctor.sh's
+# check_kanban_helpers_inventory — kept in sync per XACA-0734's precedent that
+# these two doctor entry points must not contradict each other on the same
+# machine. See that function's header comment for the full rationale.
+#
+# check_framework (above) only checks that the TEMPLATE exists in the
+# framework dir; it never compares it against the INSTALLED copy in
+# AITEAMFORGE_DIR. A stale/truncated installed copy still passes that check
+# while missing whole kb-* commands (field-confirmed on two consumers: 20 of
+# 61 shipped kb-* commands present, 48 missing, including kb-sweep — the
+# protected-subitem PR merge gate). Severity is FAIL, not warn: this script's
+# own summary lets warnings `exit 0` ("should work but has minor issues"),
+# which is exactly the failure shape this check exists to not repeat when the
+# merge gate is unusable. `--fix` here remains the unimplemented placeholder
+# below (this check does not touch it) — the real remediation is
+# `aiteamforge upgrade --non-interactive`, named explicitly in the output.
+check_kanban_helpers_inventory() {
+  echo -e "${CYAN}Checking kanban-helpers.sh function inventory...${NC}"
+  echo ""
+
+  local template="${AITEAMFORGE_HOME}/share/templates/kanban/kanban-helpers.template.sh"
+  local installed="${AITEAMFORGE_DIR}/kanban-helpers.sh"
+
+  # Degrade honestly: an unreadable template is a packaging problem on this
+  # machine's tap install, not a signal about the installed copy.
+  if [ ! -f "$template" ] || [ ! -r "$template" ]; then
+    check_result warn "Cannot verify kanban-helpers.sh inventory — shipped template not found/readable: ${template}" \
+      "Packaging problem, not a drift signal. Run: brew reinstall aiteamforge"
+    echo ""
+    return
+  fi
+
+  # A missing installed file is worse than a drifted one — no kb-* commands
+  # at all are available in that shell.
+  if [ ! -f "$installed" ] || [ ! -r "$installed" ]; then
+    check_result fail "kanban-helpers.sh not found/readable at ${installed} — no kb-* commands available" \
+      "Run: aiteamforge upgrade --non-interactive   (or: aiteamforge setup --upgrade)"
+    echo ""
+    return
+  fi
+
+  local tmpl_funcs installed_funcs tmpl_count installed_count
+  tmpl_funcs=$(grep -oE '^[A-Za-z_][A-Za-z0-9_-]*\(\)' "$template" | sed 's/()//' | sort -u | grep '^kb-') || true
+  installed_funcs=$(grep -oE '^[A-Za-z_][A-Za-z0-9_-]*\(\)' "$installed" | sed 's/()//' | sort -u | grep '^kb-') || true
+
+  tmpl_count=$(printf '%s\n' "$tmpl_funcs" | grep -c . | head -1) || true
+  tmpl_count="${tmpl_count:-0}"
+  installed_count=$(printf '%s\n' "$installed_funcs" | grep -c . | head -1) || true
+  installed_count="${installed_count:-0}"
+
+  # Predicate self-check (feedback_malformed_check_returns_reassuring_result):
+  # the template just passed a readability check and is the single shipped
+  # source of every kb-* command. Zero matches here means the regex is
+  # broken, not that the install is clean — never let that read as a pass.
+  if [ "$tmpl_count" -eq 0 ]; then
+    check_result warn "kb-* extraction found 0 functions in the shipped template — extraction pattern likely broken, not evidence of a clean install" \
+      "Template checked: ${template}"
+    echo ""
+    return
+  fi
+
+  local missing_funcs missing_count
+  missing_funcs=$(comm -23 <(printf '%s\n' "$tmpl_funcs") <(printf '%s\n' "$installed_funcs")) || true
+  missing_count=$(printf '%s\n' "$missing_funcs" | grep -c . | head -1) || true
+  missing_count="${missing_count:-0}"
+
+  if [ "$missing_count" -eq 0 ]; then
+    check_result pass "kanban-helpers.sh has all ${tmpl_count} shipped kb-* commands"
+    echo ""
+    return
+  fi
+
+  local shown_limit=10
+  local shown more_note=""
+  shown=$(printf '%s\n' "$missing_funcs" | head -"$shown_limit" | paste -sd, -)
+  if [ "$missing_count" -gt "$shown_limit" ]; then
+    more_note=" …and $((missing_count - shown_limit)) more"
+  fi
+
+  check_result fail "kanban-helpers.sh is MISSING ${missing_count} of ${tmpl_count} shipped kb-* commands (installed exposes only ${installed_count}) — kb-sweep and other lifecycle commands may be unusable"
+  echo "    Missing (first ${shown_limit} of ${missing_count}): ${shown}${more_note}"
+  if [ "$VERBOSE" = true ]; then
+    echo "    Full list of missing kb-* commands:"
+    printf '%s\n' "$missing_funcs" | sed 's/^/      - /'
+  else
+    echo "    (run with --verbose for the full list of ${missing_count})"
+  fi
+  echo "    Remediation: run 'aiteamforge upgrade --non-interactive' to refresh kanban-helpers.sh from the shipped template."
+  echo "    (doctor --fix does not remediate this — the fix is the upgrade path above, not a doctor auto-fix.)"
   echo ""
 }
 
@@ -626,6 +720,9 @@ case "$CHECK_COMPONENT" in
   framework)
     check_framework
     ;;
+  helpers-drift)
+    check_kanban_helpers_inventory
+    ;;
   config)
     check_config
     ;;
@@ -641,6 +738,7 @@ case "$CHECK_COMPONENT" in
   all)
     check_dependencies
     check_framework
+    check_kanban_helpers_inventory
     check_config
     check_services
     check_permissions
