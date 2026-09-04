@@ -10,12 +10,17 @@
                       renderer as this directory's other siblings
                       (backup-plist.template, lcars-health-plist.template).
                       No new sed placeholder was added for this template;
-                      every {{TOKEN}} below is already resolved by that
+                      every placeholder below is already resolved by that
+                      (Token names appear WITHOUT the doubled braces on
+                      purpose: a "no surviving placeholder" render gate --
+                      the follow-up this ticket flags as missing -- would
+                      otherwise match this comment and fail on a correctly
+                      rendered plist.)
                       renderer's existing chain (USER_HOME, HOME_DIR,
                       AITEAMFORGE_DIR, LOG_DIR, ...). The script path is
-                      composed from {{AITEAMFORGE_DIR}} rather than via a new
-                      {{HOST_READY_SCRIPT}} token, the same way the renderer
-                      already composes {{AUTO_UPGRADE_SCRIPT}}'s sibling path.
+                      composed from the AITEAMFORGE_DIR placeholder rather than a new
+                      HOST_READY_SCRIPT token, the same way the renderer
+                      already composes the AUTO_UPGRADE_SCRIPT sibling path.
   Design doc:         kanban/plans/XACA-1066/XACA-1066-001-design.md §7
 
   ── WHY THIS FILE'S PROVENANCE DIVERGES FROM ITS share/templates/kanban/
@@ -77,7 +82,7 @@
   /var/folders/<hash>/T/ while every interactive session stays on /tmp, so
   a restored team would be INVISIBLE to the user's own <team>-connect.sh —
   the precise failure this literal prevents. (kb-ttyd-bridge.sh's
-  {{TMUX_TMPDIR}} placeholder resolves ${TMUX_TMPDIR:-/tmp}, which on this
+  TMUX_TMPDIR placeholder resolves ${TMUX_TMPDIR:-/tmp}, which on this
   fleet evaluates to /tmp — the same value, reached by a longer route.)
 
   Genuinely open: per-host confirmation that M4Mini and M1Pro also resolve

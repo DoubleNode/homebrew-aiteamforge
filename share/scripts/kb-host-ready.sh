@@ -185,7 +185,11 @@ _hr_loginwindow_start_epoch() {
     if [ -z "$pid" ]; then
         return 1
     fi
-    lstart=$(ps -o lstart= -p "$pid" 2>/dev/null)
+    # LC_ALL=C on the PROBE as well as on the date parse below: both guards read
+    # this single value and BOTH fail open when it is empty, so one locale
+    # difference in ps's output format removes the entire guard set at once. The
+    # launchd path pins LANG via the plist; the CLI path inherits the user's.
+    lstart=$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null)
     if [ -z "$lstart" ]; then
         return 1
     fi
@@ -224,6 +228,20 @@ except Exception:
 PY
 }
 
+# JSON-escape a bash string before splicing it into the hand-built summary
+# fragments. Only the double quote and the backslash need handling: the
+# resolver's BAD_CHARS already rejects every control character. Escaping HERE
+# is the actual fix, because a REJECTED entry's team is still summarised on the
+# skip path -- which is how a quoted team name produced invalid JSON, made the
+# state write fail, and thereby permanently disabled guard 1 (the login-session
+# stamp) on every subsequent run. BAD_CHARS is the second layer, not the fix.
+_hr_json_str() {
+    local v="$1"
+    v="${v//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    printf '%s' "$v"
+}
+
 _hr_write_state() {
     # $1=login_stamp_epoch $2=restore_json_summary $3=lock_status $4=lock_reason $5=exit_code
     local stamp="$1" restore_summary="$2" lock_status="$3" lock_reason="$4" exit_code="$5"
@@ -234,10 +252,23 @@ _hr_write_state() {
     STAMP="$stamp" RESTORE="$restore_summary" LOCKSTATUS="$lock_status" LOCKREASON="$lock_reason" \
         EXITCODE="$exit_code" NOW="$(date '+%Y-%m-%dT%H:%M:%S%z')" python3 - > "$tmp" <<'PY'
 import json, os
+
+def _restore_or_raw():
+    raw = os.getenv("RESTORE")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError as e:
+        return {"parse_error": str(e), "raw": raw[:2000]}
+
 doc = {
     "login_session_stamp": os.environ.get("STAMP") or None,
     "last_run_at": os.environ["NOW"],
-    "restore": json.loads(os.environ["RESTORE"]) if os.environ.get("RESTORE") else None,
+    # NEVER let a malformed restore summary cost us the stamp: guard 1 depends
+    # on this file existing, and a persistent write failure would disable it on
+    # every later run. Degrade the summary to a diagnostic, never abort the doc.
+    "restore": _restore_or_raw(),
     "lock": os.environ.get("LOCKSTATUS") or "NOT_ATTEMPTED",
     "lock_reason": os.environ.get("LOCKREASON") or None,
     "exit_code": int(os.environ.get("EXITCODE", "0")),
@@ -256,7 +287,7 @@ PY
 # ─────────────────────────────────────────────────────────────────────────────
 # Config resolver (§1, §1.4, §2, §3). ONE python3 pass does all the JSON-level
 # work (parsing, field validation, gate 1 + gate 2 per entry) and emits a
-# simple tab-delimited line protocol bash can parse without a second parser.
+# simple \x1f-delimited line protocol bash can parse without a second parser.
 #
 # Deliberately reads team-paths.json with a PLAIN, READ-ONLY json.load —
 # never via aiteamforge_paths.py::load_config(), whose three self-healing
@@ -265,7 +296,7 @@ PY
 # login-time job that runs before anyone could notice must not have that
 # power. (§2.3, R6)
 #
-# Output lines (tab-separated, one record type per line):
+# Output lines (\x1f-separated, one record type per line):
 #   STATE\t<absent|malformed_json|malformed_root|ok>\t<message>
 #   WARN\t<free text>                          (zero or more)
 #   LOCK\t<true|false>
@@ -274,7 +305,35 @@ PY
 #   ENTRY\t<index>\t<OK|SKIP>\t<team>\t<args_packed>\t<prefix>\t<gate1>\t<gate2>\t<reason>
 #     gate1 in {PASS,FAIL}; gate2 in {PASS,FAIL,SKIPPED}
 # ─────────────────────────────────────────────────────────────────────────────
+# Resolver indirection (XACA-1066-016).
+#
+# cmd_login used to resolve FOUR times — the STATE peek, cmd_restore, cmd_lock
+# and the WARN count — costing four python3 starts per login and opening a
+# TOCTOU window: the config could change between the peek that decides intent
+# and the step that acts on it.
+#
+# A memo cache INSIDE this function cannot fix that: every caller invokes it as
+# `resolved="$(_hr_resolve ...)"`, and command substitution runs in a SUBSHELL,
+# so any cache variable assigned here is discarded when that subshell exits.
+# (Measured: a memoised version still produced four resolver runs.) The handoff
+# therefore has to come from the CALLER's scope — cmd_login invokes cmd_restore
+# and cmd_lock directly, not in a subshell, so a variable it sets is visible to
+# them. cmd_login snapshots once into _HR_PRERESOLVED and every callee reuses it.
+#
+# _HR_PRERESOLVED_KEY guards correctness: `restore --team X` resolves a narrowed
+# view, so a snapshot taken with a different filter must never be substituted.
+_HR_PRERESOLVED=""
+_HR_PRERESOLVED_KEY="__unset__"
 _hr_resolve() {
+    local _key="${1:-}"
+    if [ -n "$_HR_PRERESOLVED" ] && [ "$_key" = "$_HR_PRERESOLVED_KEY" ]; then
+        printf '%s\n' "$_HR_PRERESOLVED"
+        return 0
+    fi
+    _hr_resolve_uncached "$_key"
+}
+
+_hr_resolve_uncached() {
     local filter_team="${1:-}"
     CFG="$KB_HOST_READY_CONFIG" TEAMPATHS="$KB_HOST_READY_TEAM_PATHS" \
         WORKDIR="$KB_HOST_READY_WORKING_DIR" FILTERTEAM="$filter_team" \
@@ -353,7 +412,14 @@ if registry_state != "ok":
                  f"cross-check) skipped for all entries; gate 1 alone decides validity (§3 'Gate 2 "
                  f"failing OPEN')")
 
-BAD_CHARS = set("\t\n\r\x1e\x1f")
+# Rejects the delimiter set AND the two characters that would break the
+# hand-built JSON fragments in cmd_restore's summary ('"' and backslash).
+# Without those two, a team name containing a double quote produced invalid
+# JSON, _hr_write_state's json.loads threw, NO state file was written, and
+# login_session_stamp was therefore never recorded — permanently disabling
+# guard 1 on every later run, from one typo. `team` also composes a filesystem
+# path and reaches an argv, so this is defense in depth, not cosmetics.
+BAD_CHARS = set("\t\n\r\x1e\x1f" + chr(34) + chr(92))
 
 for idx, entry in enumerate(autostart_raw):
     if not isinstance(entry, dict):
@@ -496,7 +562,15 @@ cmd_restore() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --dry-run) dry_run=1; shift ;;
-            --team) filter_team="${2:-}"; shift 2 ;;
+            --team)
+                # bash 3.2: `shift 2` with $#==1 FAILS and does not shift, so $1
+                # stays "--team" and this loop never terminates (measured: still
+                # running at 8s with zero output). Validate before shifting.
+                if [ $# -lt 2 ]; then
+                    err "restore: --team requires a value"
+                    return 2
+                fi
+                filter_team="$2"; shift 2 ;;
             *) err "restore: unknown argument '$1'"; return 2 ;;
         esac
     done
@@ -536,7 +610,7 @@ cmd_restore() {
                     err "restore: entry $idx ($team) SKIPPED — $reason"
                     overall_rc=1
                     skipped=$((skipped + 1))
-                    summary_entries="${summary_entries}{\"team\":\"${team}\",\"index\":${idx},\"outcome\":\"skipped\",\"reason\":\"invalid entry\"},"
+                    summary_entries="${summary_entries}{\"team\":\"$(_hr_json_str "$team")\",\"index\":${idx},\"outcome\":\"skipped\",\"reason\":\"invalid entry\"},"
                     continue
                 fi
 
@@ -552,14 +626,14 @@ cmd_restore() {
                 if [ "$budget_exceeded" -eq 1 ]; then
                     err "restore: skipping entry $idx ($team) — restore budget (${KB_HOST_READY_RESTORE_BUDGET}s) already exceeded"
                     overall_rc=1
-                    summary_entries="${summary_entries}{\"team\":\"${team}\",\"index\":${idx},\"outcome\":\"skipped\",\"reason\":\"budget exceeded\"},"
+                    summary_entries="${summary_entries}{\"team\":\"$(_hr_json_str "$team")\",\"index\":${idx},\"outcome\":\"skipped\",\"reason\":\"budget exceeded\"},"
                     continue
                 fi
 
                 if _hr_team_already_up "$tmux_bin" "$socket" "$prefix"; then
                     log "restore: $team (prefix=$prefix) already up — skipping"
                     already_up=$((already_up + 1))
-                    summary_entries="${summary_entries}{\"team\":\"${team}\",\"index\":${idx},\"outcome\":\"already_up\"},"
+                    summary_entries="${summary_entries}{\"team\":\"$(_hr_json_str "$team")\",\"index\":${idx},\"outcome\":\"already_up\"},"
                     continue
                 fi
 
@@ -572,7 +646,7 @@ cmd_restore() {
                 if [ ! -x "$script_path" ]; then
                     err "restore: $script_path is not executable — cannot start $team"
                     overall_rc=1
-                    summary_entries="${summary_entries}{\"team\":\"${team}\",\"index\":${idx},\"outcome\":\"failed\",\"reason\":\"not executable\"},"
+                    summary_entries="${summary_entries}{\"team\":\"$(_hr_json_str "$team")\",\"index\":${idx},\"outcome\":\"failed\",\"reason\":\"not executable\"},"
                     continue
                 fi
 
@@ -583,15 +657,31 @@ cmd_restore() {
                 # ALSO a login item racing us, and drive AppleScript at a
                 # window that isn't ready (R3). Headless (tmux sessions
                 # created, no tabs opened) satisfies "restore team sessions".
-                if AITF_NO_ITERM_GUI=1 _hr_run_with_deadline "$deadline_epoch" "$script_path" "${args[@]:-}"; then
+                # NOTE: do NOT write "${args[@]:-}" here. For an ARRAY that does
+                # NOT expand to zero words when empty — it substitutes the empty
+                # default as ONE word, so an argless team ("args": [], the
+                # documented default for all six of them) would invoke its startup
+                # script with a single empty argument. Harmless for the six that
+                # ignore argv, but finance/legal/medical/mainevent each guard with
+                # `if [ $# -lt 1 ]`, and $#==1 slips past that guard leaving
+                # PROJECTID="" — turning a self-diagnosing refusal into a silently
+                # wrong session, unattended, at login. Reachable as configured
+                # today: bare `mainevent` is a key in team-paths.json, so it passes
+                # gate 1 AND gate 2 and `check` reports all-clear. Branch on count.
+                local rc=0
+                if [ ${#args[@]} -gt 0 ]; then
+                    AITF_NO_ITERM_GUI=1 _hr_run_with_deadline "$deadline_epoch" "$script_path" "${args[@]}" || rc=$?
+                else
+                    AITF_NO_ITERM_GUI=1 _hr_run_with_deadline "$deadline_epoch" "$script_path" || rc=$?
+                fi
+                if [ "$rc" -eq 0 ]; then
                     log "restore: $team started"
                     started=$((started + 1))
-                    summary_entries="${summary_entries}{\"team\":\"${team}\",\"index\":${idx},\"outcome\":\"started\"},"
+                    summary_entries="${summary_entries}{\"team\":\"$(_hr_json_str "$team")\",\"index\":${idx},\"outcome\":\"started\"},"
                 else
-                    local rc=$?
                     err "restore: $team FAILED to start (exit $rc)"
                     overall_rc=1
-                    summary_entries="${summary_entries}{\"team\":\"${team}\",\"index\":${idx},\"outcome\":\"failed\",\"reason\":\"exit ${rc}\"},"
+                    summary_entries="${summary_entries}{\"team\":\"$(_hr_json_str "$team")\",\"index\":${idx},\"outcome\":\"failed\",\"reason\":\"exit ${rc}\"},"
                 fi
 
                 if [ "$(date +%s)" -ge "$deadline_epoch" ]; then
@@ -797,7 +887,13 @@ cmd_login() {
     # Peek at config state before doing anything else, so the absent case
     # can be a true no-op — no state file, no directory, nothing (§1.4).
     local resolved_state
-    resolved_state="$(_hr_resolve "" | awk -F$'\x1f' '$1=="STATE"{print $2; exit}')"
+    # ONE resolver run for the whole login (XACA-1066-016). Set in cmd_login's
+    # own scope so cmd_restore and cmd_lock — both called directly below, not in
+    # a subshell — reuse this exact snapshot. Also removes the TOCTOU window
+    # between deciding intent and acting on it.
+    _HR_PRERESOLVED="$(_hr_resolve_uncached "")"
+    _HR_PRERESOLVED_KEY=""
+    resolved_state="$(printf '%s\n' "$_HR_PRERESOLVED" | awk -F$'\x1f' '$1=="STATE"{print $2; exit}')"
     if [ "$resolved_state" = "absent" ]; then
         log "login: no config at ${KB_HOST_READY_CONFIG} — nothing to do, touching nothing"
         return 0
@@ -840,7 +936,7 @@ cmd_login() {
     # check here explicitly rather than silently missing it.
     if [ "$overall_rc" -eq 0 ]; then
         local warn_count
-        warn_count=$(_hr_resolve "" | awk -F$'\x1f' '$1=="WARN"' | wc -l | tr -d ' ')
+        warn_count=$(printf '%s\n' "$_HR_PRERESOLVED" | awk -F$'\x1f' '$1=="WARN"' | wc -l | tr -d ' ')
         if [ "${warn_count:-0}" -gt 0 ]; then
             warn "login: config has ${warn_count} field-level warning(s) (see above) — flagging as incomplete per §1.4 even though the affected step correctly no-op'd"
             overall_rc=1
@@ -921,6 +1017,17 @@ cmd_check() {
     local problems=0
     local resolved state="" lock_configured="false" registry_state=""
 
+    # A path that EXISTS but is not a regular file (classically a directory) is
+    # NOT "absent": _hr_resolve reports malformed_json for it and cmd_lock then
+    # refuses for want of recorded intent. `check` is the gate a human runs, so
+    # it must not print all-clear on a state the login path rejects — that is
+    # precisely the disagreement that makes a pre-flight check worthless.
+    # A broken symlink stays in the "absent" bucket, which matches the login
+    # path's own treatment of it.
+    if [ -e "$KB_HOST_READY_CONFIG" ] && [ ! -f "$KB_HOST_READY_CONFIG" ]; then
+        err "check: config path ${KB_HOST_READY_CONFIG} exists but is not a regular file — the login path treats this as malformed and will refuse to lock"
+        return 1
+    fi
     if [ ! -f "$KB_HOST_READY_CONFIG" ]; then
         log "check: no config at ${KB_HOST_READY_CONFIG} — nothing to validate (a host without this feature configured is healthy, not broken)"
         return 0
