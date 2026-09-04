@@ -1171,11 +1171,33 @@ _msg_default_machine_slug() {
 # (service com.aiteamforge.vault) or the ~/.aiteamforge/vault/<slug>.key
 # file fallback. No key => this box never ran vault-keygen => skip Tier 2
 # entirely, silently (most boxes, most of the time).
+#
+# XACA-1090: this predicate is PURELY LOCAL. It reads the Keychain and one file
+# path and NEVER contacts the server, so a false answer here says nothing
+# whatsoever about registration state on the relay. That distinction is the
+# whole ticket — see the guard-2 comment in pull_messages().
+#
+# It also publishes WHERE it looked, in MSG_VAULT_KEY_LOOKED_IN. The caller has
+# to describe the search in its skip record, and having the caller re-derive
+# that list would put two places in charge of one fact — the sibling-heuristic
+# drift that this tree has already been bitten by. The description is built by
+# the code that actually performs the lookups, so the two cannot disagree.
+#
+# NOTE: tests/bats/kb-msg-pull-status.bats extracts this function with
+# `awk '/^_msg_has_vault_key\(\)/,/^}/'`. Keep the opening line and the closing
+# brace at column 0 or that extraction silently yields a partial function.
 _msg_has_vault_key() {
     local slug="$1"
+    MSG_VAULT_KEY_LOOKED_IN=""
     [ -n "$slug" ] || return 1
     if [ "$(uname -s)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
+        MSG_VAULT_KEY_LOOKED_IN="macOS keychain service com.aiteamforge.vault, account '$slug'"
         security find-generic-password -s com.aiteamforge.vault -a "$slug" >/dev/null 2>&1 && return 0
+    fi
+    if [ -n "$MSG_VAULT_KEY_LOOKED_IN" ]; then
+        MSG_VAULT_KEY_LOOKED_IN="$MSG_VAULT_KEY_LOOKED_IN; and $HOME/.aiteamforge/vault/${slug}.key"
+    else
+        MSG_VAULT_KEY_LOOKED_IN="$HOME/.aiteamforge/vault/${slug}.key"
     fi
     [ -f "$HOME/.aiteamforge/vault/${slug}.key" ] && return 0
     return 1
@@ -1225,11 +1247,44 @@ pull_messages() {
     command -v python3 >/dev/null 2>&1 || { _msg_record_skip "no-python3"; return 0; }
     command -v node    >/dev/null 2>&1 || { _msg_record_skip "no-node"; return 0; }
 
-    # Guard 2: no vault key configured on this machine.
+    # Guard 2: no vault private key VISIBLE TO THIS PROCESS.
+    #
+    # ── XACA-1090: this record states an observation, not a diagnosis ────────
+    # The reason recorded here used to read "nothing registered for machine
+    # '<slug>' — run kb-msg-provision". Both halves of that were wrong.
+    #
+    # "nothing registered" overstated the evidence. _msg_has_vault_key is purely
+    # local: it reads the Keychain and one file path and never contacts the
+    # relay, so it cannot know what is or is not registered anywhere.
+    #
+    # "run kb-msg-provision" was an unrunnable instruction. MEASURED on
+    # darren-m3pro 2026-09-04: kb-msg-provision exits 0, leaves the routing map
+    # byte-identical, and the reason text is unchanged afterwards — because
+    # nothing was missing for it to create. An operator following the
+    # instruction loops forever and concludes they are doing it wrong.
+    #
+    # The actual cause, measured the same day: `security find-generic-password`
+    # for this slug SUCCEEDS from an interactive shell and from `env -i`, but
+    # under cron exits 44 — "SecKeychainSearchCopyNext: The specified item could
+    # not be found in the keychain". Cron has no user security session, so
+    # login.keychain-db is not in its keychain search list. The reporter is
+    # scheduled from cron on that box. The key was never absent; it was
+    # invisible to this process.
+    #
+    # Crucially, THIS CODE CANNOT TELL THOSE APART. The predicate returns the
+    # same value for "absent" and for "present but invisible to me", so any
+    # remedy named here would be a guess. It records what it checked and what it
+    # did not find, and stops. `kb-msg doctor` re-runs the identical predicate
+    # interactively and reports the DIFFERENCE between the two answers, which is
+    # the only place that comparison can actually be made.
+    #
+    # The `no-vault-key:` prefix is machine-readable and load-bearing — the
+    # doctor branches on it and the bats suite matches it. Reword the prose
+    # freely; do not change the prefix.
     local machine_slug
     machine_slug=$(_msg_default_machine_slug)
     _msg_has_vault_key "$machine_slug" || {
-        _msg_record_skip "no-vault-key: nothing registered for machine '$machine_slug' — run kb-msg-provision"
+        _msg_record_skip "no-vault-key: no vault private key for machine '$machine_slug' visible to this process (checked: ${MSG_VAULT_KEY_LOOKED_IN:-unknown locations})"
         return 0
     }
 
