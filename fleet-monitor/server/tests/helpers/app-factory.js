@@ -201,6 +201,61 @@ function calcBoardStats(teamId, board) {
     };
 }
 
+// XACA-1031-007: mirrored VERBATIM from server.js's isVersionOutdated() and
+// normalizeSystemBlock() (both pure, module-level -- no closure state) --
+// MUST stay in sync with the real implementation, same discipline as every
+// other function in this section. server.js's own doc comments (search
+// "isVersionOutdated" / "normalizeSystemBlock" there) carry the full
+// contract rationale; not repeated here to avoid drift between two copies
+// of the same prose. This pair, plus projectSystemBlock() (defined inside
+// createApp() below -- it is NOT pure, it reads the injectable
+// latest-tap-version cache), were absent from this mirror when XACA-1031
+// shipped server.js's real changes -- see the XACA-1031-007 test suite for
+// the regression coverage that gap would otherwise have left unexercised.
+function isVersionOutdated(current, latest) {
+    if (typeof current !== 'string' || typeof latest !== 'string' || !current.trim() || !latest.trim()) return null;
+
+    const parse = (v) => {
+        const stripped = v.trim().replace(/^v/i, '');
+        if (!stripped) return null;
+        const parts = stripped.split('.');
+        const nums = parts.map((p) => (/^\d+$/.test(p) ? Number(p) : NaN));
+        if (nums.some((n) => Number.isNaN(n))) return null;
+        return nums;
+    };
+
+    const currentParts = parse(current);
+    const latestParts = parse(latest);
+    if (!currentParts || !latestParts) return null;
+
+    const len = Math.max(currentParts.length, latestParts.length);
+    for (let i = 0; i < len; i++) {
+        const c = currentParts[i] || 0;
+        const l = latestParts[i] || 0;
+        if (c < l) return true;
+        if (c > l) return false;
+    }
+    return false; // equal versions -- not outdated
+}
+
+function normalizeSystemBlock(system) {
+    if (!system || typeof system !== 'object') return {}; // whole block absent
+
+    const out = {};
+    if (Number.isInteger(system.schema_version)) {
+        out.schema_version = system.schema_version;
+    }
+
+    const inVersions = (system.versions && typeof system.versions === 'object') ? system.versions : {};
+    const versions = {};
+    if (typeof inVersions.aiteamforge === 'string' && inVersions.aiteamforge) {
+        versions.aiteamforge = inVersions.aiteamforge; // omitted entirely otherwise
+    }
+    out.versions = versions;
+
+    return out;
+}
+
 // ============================================================================
 // APP FACTORY
 // ============================================================================
@@ -222,6 +277,57 @@ function createApp(opts = {}) {
     const pushedBoards = opts.pushedBoards || new Map();
     const pushedKnowledge = opts.pushedKnowledge || new Map();
     const tmpDir = opts.tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-test-'));
+
+    // XACA-1031-007: mirrors server.js's `latestTapVersion` module-level
+    // cache variable, but WITHOUT the real network fetch/TTL machinery --
+    // getLatestTapVersion() in server.js resolves from a background-refreshed
+    // cache and is deliberately fire-and-forget/never-throws, which makes its
+    // FAILURE mode (cache never populated, or last fetch failed) impossible
+    // to drive deterministically through a real network call in a test.
+    // This mutable box is that cache's test seam: seed it via
+    // opts.latestTapVersion (default null, matching the real cache's
+    // pre-first-fetch state), or mutate `state.latestTapVersionState.value`
+    // after createApp() to simulate a resolve/fail transition mid-test.
+    const latestTapVersionState = { value: opts.latestTapVersion !== undefined ? opts.latestTapVersion : null };
+    function getLatestTapVersion() {
+        return latestTapVersionState.value;
+    }
+
+    // Mirrored VERBATIM from server.js's projectSystemBlock() -- see
+    // server.js for the full contract rationale comment. Defined INSIDE
+    // createApp() (unlike isVersionOutdated/normalizeSystemBlock above,
+    // which are pure and module-level) because it closes over this
+    // factory instance's own getLatestTapVersion(), same reasoning as
+    // ensureRegisteredTeamBuckets closing over `registeredTeams` above.
+    function projectSystemBlock(storedSystem) {
+        const out = {};
+        if (storedSystem && Number.isInteger(storedSystem.schema_version)) {
+            out.schema_version = storedSystem.schema_version;
+        }
+
+        const hasStoredVersions = !!(storedSystem && storedSystem.versions && typeof storedSystem.versions === 'object');
+        if (!hasStoredVersions) return out; // whole-block-absent case -- stays `{}`
+
+        const storedAiteamforge = (typeof storedSystem.versions.aiteamforge === 'string' && storedSystem.versions.aiteamforge)
+            ? storedSystem.versions.aiteamforge
+            : null;
+
+        const versions = {};
+        if (storedAiteamforge) {
+            versions.aiteamforge = storedAiteamforge;
+            const latest = getLatestTapVersion(); // string or null; never throws, never blocks
+            if (latest) {
+                versions.latest = latest;
+                const outdated = isVersionOutdated(storedAiteamforge, latest);
+                if (outdated !== null) {
+                    versions.outdated = outdated; // explicit true/false -- a collected fact, not an absence
+                }
+            }
+        }
+        out.versions = versions;
+
+        return out;
+    }
 
     const activityLog = [];
     const MAX_ACTIVITY_LOG_ENTRIES = 20;
@@ -403,7 +509,13 @@ function createApp(opts = {}) {
                 last_seen: m.last_seen,
                 session_count: m.session_count,
                 sessions: m.sessions,
-                uptime_history: m.uptime_history || []
+                uptime_history: m.uptime_history || [],
+                // XACA-1031-007: mirrors server.js's machineList allowlist
+                // entry `system: projectSystemBlock(m.system)`. This is the
+                // step the shipped commit's real allowlist comment calls out
+                // as highest-risk -- a field stored via machines.set() but
+                // missing from THIS map() silently never reaches /api/fleet.
+                system: projectSystemBlock(m.system)
             }));
 
         return {
@@ -461,7 +573,7 @@ function createApp(opts = {}) {
     // POST /api/status
     app.post('/api/status', (req, res) => {
         try {
-            const { machine, sessions, backup_status, lcars_services } = req.body;
+            const { machine, sessions, backup_status, lcars_services, system } = req.body;
             if (!machine || !machine.hostname) {
                 return res.status(400).json({ error: 'Missing required field: machine.hostname' });
             }
@@ -491,7 +603,10 @@ function createApp(opts = {}) {
                 session_count: sessionCount,
                 uptime_history: uptimeHistory,
                 backup_status: backup_status || null,
-                lcars_services: Array.isArray(lcars_services) ? lcars_services : []
+                lcars_services: Array.isArray(lcars_services) ? lcars_services : [],
+                // XACA-1031-007: mirrors server.js's POST /api/status
+                // `system: normalizeSystemBlock(system)`.
+                system: normalizeSystemBlock(system)
             });
 
             res.status(200).json({
@@ -1140,7 +1255,7 @@ function createApp(opts = {}) {
 
     return {
         app,
-        state: { machines, registeredTeams, pushedBoards, pushedKnowledge, activityLog },
+        state: { machines, registeredTeams, pushedBoards, pushedKnowledge, activityLog, latestTapVersionState },
         tmpDir,
         // XACA-1002: exposed so a test can call the idle-bucket materializer
         // directly against a hand-built or fixture-derived `divisions` object
@@ -1148,7 +1263,12 @@ function createApp(opts = {}) {
         // seed it via opts.registeredTeams or state.registeredTeams before
         // calling this) without needing a full machine/session round trip.
         ensureRegisteredTeamBuckets,
-        parseFleetData
+        parseFleetData,
+        // XACA-1031-007: exposed for the same reason -- call directly
+        // against a hand-built `storedSystem` object without a full
+        // POST+GET round trip. state.latestTapVersionState.value is the
+        // deterministic test seam for the cache projectSystemBlock() reads.
+        projectSystemBlock
     };
 }
 
@@ -1171,6 +1291,12 @@ module.exports = {
         // see createApp()'s return value for that one).
         resolveDivisionKey,
         ensureTeamBucket,
-        resolveRegistryKey
+        resolveRegistryKey,
+        // XACA-1031-007: pure, module-level, no closure needed -- safe to
+        // export directly (unlike projectSystemBlock, which is
+        // per-createApp()-instance; see createApp()'s return value for that
+        // one).
+        isVersionOutdated,
+        normalizeSystemBlock
     }
 };

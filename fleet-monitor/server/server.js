@@ -65,6 +65,25 @@ const HISTORY_DIR = path.join(__dirname, 'data', 'history');
 const HISTORY_RETENTION_DAYS = 7;
 const HISTORY_PURGE_INTERVAL_MS = 60 * 60 * 1000; // Purge hourly
 
+// XACA-1031-003: latest published AITeamForge tap VERSION, resolved from
+// GitHub raw on a cached interval so /api/status and /api/fleet never pay a
+// network round-trip inline. The tap's VERSION file moves a few times a
+// month (see homebrew-tap/CHANGELOG.md) -- an hour-scale TTL is far tighter
+// than that release cadence needs, but still cheap: worst case a machine's
+// OUTDATED badge lags a fresh release by up to an hour, which is fine for a
+// fleet status dashboard (not a security gate). Repo + branch confirmed from
+// homebrew-tap's actual configured remote (.gitmodules + `git remote -v`),
+// not guessed: DoubleNode/homebrew-aiteamforge, default branch main.
+const TAP_VERSION_URL = 'https://raw.githubusercontent.com/DoubleNode/homebrew-aiteamforge/main/VERSION';
+const TAP_VERSION_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const TAP_VERSION_FETCH_TIMEOUT_MS = 5 * 1000; // 5s -- a hung connection must never block a status cycle
+// Failure-aware retry floor (XACA-1031-021, code review on PR #818): the
+// smallest gap allowed between two CONSECUTIVE-FAILURE retry attempts.
+// Doubles per consecutive failure (see _tapVersionRetryBackoffMs below),
+// capped at TAP_VERSION_CACHE_TTL_MS so an outage never retries less often
+// than a healthy cache would refresh anyway.
+const TAP_VERSION_FETCH_MIN_RETRY_MS = 60 * 1000; // 1 minute
+
 // Kanban Board Directories - DEPRECATED (backward compatibility only)
 // Teams now register dynamically via POST /api/team-register
 // This fallback will be removed once all teams are using push-based registration
@@ -1347,7 +1366,16 @@ function parseFleetData() {
             last_seen: m.last_seen,
             session_count: m.session_count,
             sessions: m.sessions,
-            uptime_history: m.uptime_history || []
+            uptime_history: m.uptime_history || [],
+            // XACA-1031-004: this map() is an EXPLICIT ALLOWLIST -- a field
+            // stored on the machine record but not listed here silently
+            // never reaches /api/fleet even though it is present in server
+            // memory (highest-risk step in this ticket -- see
+            // kb-backlog show XACA-1031-004). projectSystemBlock() defends
+            // against `m.system` itself being undefined (a machines.json
+            // record persisted by a pre-XACA-1031 server build, reloaded on
+            // restart) as well as computing latest/outdated fresh per read.
+            system: projectSystemBlock(m.system)
         }));
 
     return {
@@ -1382,6 +1410,259 @@ function formatUptime(seconds) {
 }
 
 // ============================================================================
+// TAP VERSION CACHE (XACA-1031-003)
+// ============================================================================
+//
+// Resolves the latest published AITeamForge tap VERSION on a cached interval
+// (TAP_VERSION_CACHE_TTL_MS) instead of once per report or once per
+// /api/fleet read. MUST fail safe: any network error, timeout, non-200, or
+// unparseable body leaves `latestTapVersion` at its previous value (null
+// until the first successful resolve) -- never throws, never crashes the
+// process, never blocks a POST /api/status or GET /api/fleet caller. A
+// failed fetch never poisons the cache: only a successful, well-formed 200
+// response ever updates `latestTapVersion`.
+let latestTapVersion = null;
+let latestTapVersionFetchedAt = 0; // epoch ms of the last SUCCESSFUL resolve
+
+// XACA-1031-021 (code review on PR #818): the cache-freshness clock above
+// (`latestTapVersionFetchedAt`) only ever advances on success, by design --
+// that is what makes `latest`/`outdated` correctly OMITTED for as long as an
+// outage lasts. But `getLatestTapVersion()` used to treat "stale AND nothing
+// in flight" as the sole trigger to fire another fetch, with no memory of a
+// recent FAILED attempt. During a GitHub raw outage the cache never looks
+// fresher, so every single /api/fleet read (there can be many concurrent
+// dashboard clients) kicked off its own fresh 5s-timeout network attempt the
+// instant the previous one's promise settled -- an unbounded retry storm
+// against an external host for the whole outage.
+//
+// Fix: track WHEN WE LAST TRIED (success or failure) and how many
+// CONSECUTIVE failures have piled up, separately from the success-only
+// freshness clock, and gate a retry on an exponential backoff of the retry
+// floor (TAP_VERSION_FETCH_MIN_RETRY_MS), capped at the steady-state cache
+// TTL so a prolonged outage never retries less often than a healthy cache
+// would refresh anyway. A recovered upstream is picked up automatically:
+// the very next attempt after the (bounded) backoff window elapses succeeds,
+// which resets `latestTapVersionFailureCount` to 0 and collapses the backoff
+// back to zero -- there is no separate "give up" state to get stuck in, and
+// the module-level `setInterval(getLatestTapVersion, TAP_VERSION_CACHE_TTL_MS)`
+// below guarantees a retry is attempted at least once an hour even with zero
+// dashboard traffic.
+let latestTapVersionLastAttemptAt = 0; // epoch ms of the last attempt, success OR failure
+let latestTapVersionFailureCount = 0; // consecutive failures since the last success (or process start)
+let latestTapVersionFetchInFlight = null; // de-dupes concurrent refreshes
+
+/**
+ * Pure backoff formula, extracted so it can be unit-tested without a real
+ * clock or network: 0 while there is no failure on record (retry as soon as
+ * the cache goes stale, today's behavior), doubling per consecutive failure
+ * thereafter, capped at TAP_VERSION_CACHE_TTL_MS.
+ */
+function _tapVersionRetryBackoffMs(failureCount) {
+    if (!Number.isFinite(failureCount) || failureCount <= 0) return 0;
+    return Math.min(TAP_VERSION_FETCH_MIN_RETRY_MS * (2 ** (failureCount - 1)), TAP_VERSION_CACHE_TTL_MS);
+}
+
+async function fetchLatestTapVersion() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TAP_VERSION_FETCH_TIMEOUT_MS);
+    try {
+        const response = await fetch(TAP_VERSION_URL, { signal: controller.signal });
+        if (!response.ok) {
+            console.error(`Tap version check: GitHub raw returned HTTP ${response.status}, leaving latest at previous value (${latestTapVersion})`);
+            latestTapVersionFailureCount += 1;
+            return;
+        }
+        const body = (await response.text()).trim();
+        // Sanity-check the body actually looks like a version string (digits
+        // and dots, optional leading 'v') before trusting it -- a redirect to
+        // an HTML error page or a truncated response must not poison the cache.
+        if (!/^v?\d+(\.\d+)*$/.test(body)) {
+            console.error(`Tap version check: unexpected VERSION content ${JSON.stringify(body.slice(0, 40))}, leaving latest at previous value (${latestTapVersion})`);
+            latestTapVersionFailureCount += 1;
+            return;
+        }
+        latestTapVersion = body;
+        latestTapVersionFetchedAt = Date.now();
+        latestTapVersionFailureCount = 0; // upstream recovered (or this is the first-ever success)
+    } catch (error) {
+        // Network error, timeout/abort, DNS failure, etc. -- fail safe, never
+        // throw out of a background refresh, never touch the cached value.
+        console.error(`Tap version check failed (${error.message}), leaving latest at previous value (${latestTapVersion})`);
+        latestTapVersionFailureCount += 1;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+/**
+ * Returns the cached latest tap version, kicking off a background refresh
+ * (fire-and-forget, never awaited by the caller) if the cache is stale or
+ * has never been populated AND the failure-aware backoff window (see
+ * _tapVersionRetryBackoffMs above) has elapsed since the last attempt.
+ * Callers -- the /api/status handler and parseFleetData -- always get the
+ * CURRENT cached value immediately; they never wait on the network.
+ */
+function getLatestTapVersion() {
+    const now = Date.now();
+    const isStale = (now - latestTapVersionFetchedAt) > TAP_VERSION_CACHE_TTL_MS;
+    const backoffMs = _tapVersionRetryBackoffMs(latestTapVersionFailureCount);
+    const readyToRetry = (now - latestTapVersionLastAttemptAt) >= backoffMs;
+    if (isStale && readyToRetry && !latestTapVersionFetchInFlight) {
+        latestTapVersionLastAttemptAt = now;
+        latestTapVersionFetchInFlight = fetchLatestTapVersion().finally(() => {
+            latestTapVersionFetchInFlight = null;
+        });
+    }
+    return latestTapVersion;
+}
+
+/**
+ * Compare two AITeamForge version strings NUMERICALLY, component by
+ * component -- never lexicographically. "0.20.3" < "0.9.0" as strings, but
+ * 0.20.3 is the newer release, and the tap is at 0.20.3 today, so this is a
+ * live bug class, not a hypothetical one. Strips a leading 'v' (matching the
+ * existing `sed 's/^v//'` convention elsewhere in this codebase). Unequal
+ * component counts are zero-padded on the shorter side (2.0 == 2.0.0). Any
+ * non-numeric component, or a missing/empty/non-string input on either side,
+ * returns null -- "cannot determine" is a distinct state from "equal" or
+ * "newer" and callers must not collapse it into a guess.
+ *
+ * @returns {boolean|null} true if `current` < `latest` (outdated), false if
+ *   current >= latest (current), null if either input is missing/malformed.
+ */
+function isVersionOutdated(current, latest) {
+    if (typeof current !== 'string' || typeof latest !== 'string' || !current.trim() || !latest.trim()) return null;
+
+    const parse = (v) => {
+        const stripped = v.trim().replace(/^v/i, '');
+        if (!stripped) return null;
+        const parts = stripped.split('.');
+        const nums = parts.map((p) => (/^\d+$/.test(p) ? Number(p) : NaN));
+        if (nums.some((n) => Number.isNaN(n))) return null;
+        return nums;
+    };
+
+    const currentParts = parse(current);
+    const latestParts = parse(latest);
+    if (!currentParts || !latestParts) return null;
+
+    const len = Math.max(currentParts.length, latestParts.length);
+    for (let i = 0; i < len; i++) {
+        const c = currentParts[i] || 0;
+        const l = latestParts[i] || 0;
+        if (c < l) return true;
+        if (c > l) return false;
+    }
+    return false; // equal versions -- not outdated
+}
+
+/**
+ * Normalize an inbound `system` block (POST /api/status body) to a stable
+ * STORAGE shape, per the frozen contract at
+ * kanban/plans/XACA-1091/CONTRACT-system-block.md §3 (XACA-1091-016,
+ * EPIC-0061 Design Decision 8):
+ *
+ *   1. Whole block absent (old reporter, predates XACA-1031) -- normalize to
+ *      `{}`, the XACA-0983 fix (b) `lcars_services` mixed-fleet precedent
+ *      applied to this block. Consumers see `{}`, never `undefined`.
+ *   2. A leaf field that could not be collected is OMITTED, never `null`
+ *      and never `""` -- an absent key IS the "unknown" encoding. This is
+ *      why `aiteamforge` is left off `versions` entirely rather than set to
+ *      null when the reporter couldn't read its own version.
+ *   3. `schema_version` (int, sibling of `versions` inside `system`) is
+ *      passed through UNCHANGED when the reporter sent one -- never
+ *      invented here if absent, never stripped if present. Still PROPOSED
+ *      (not yet ratified) per contract §7; XACA-1031 removes it from both
+ *      this function and fleet-reporter.sh if the user rejects it.
+ *
+ * Deliberately does NOT resolve `latest`/`outdated` here -- see
+ * projectSystemBlock() below, which computes those at /api/fleet READ time
+ * instead of freezing them into the record at the machine's last report
+ * time. That keeps every machine's outdated status current against the
+ * tap-version cache on every read, even for a machine that hasn't
+ * re-reported since the cache last refreshed.
+ */
+function normalizeSystemBlock(system) {
+    if (!system || typeof system !== 'object') return {}; // whole block absent
+
+    const out = {};
+    if (Number.isInteger(system.schema_version)) {
+        out.schema_version = system.schema_version;
+    }
+
+    const inVersions = (system.versions && typeof system.versions === 'object') ? system.versions : {};
+    const versions = {};
+    if (typeof inVersions.aiteamforge === 'string' && inVersions.aiteamforge) {
+        versions.aiteamforge = inVersions.aiteamforge; // omitted entirely otherwise
+    }
+    out.versions = versions;
+
+    return out;
+}
+
+/**
+ * Project a stored `system` block into the /api/fleet response shape, per
+ * the same frozen contract as normalizeSystemBlock() above:
+ *
+ *   - `schema_version` passes through unchanged when present in storage.
+ *   - `versions` is attached only when the stored record actually carried a
+ *     `system` block (i.e. not the whole-block-absent `{}` case) -- an old
+ *     reporter's machine keeps `system: {}` in the response, matching
+ *     normalizeSystemBlock()'s own "absent, not undefined" contract.
+ *   - `aiteamforge` is copied through only when known; if it is unknown,
+ *     `latest`/`outdated` are meaningless for THIS machine and are skipped
+ *     too, leaving `versions: {}` (contract example: a reporter that sent
+ *     `versions: {}` because it could not read its own version stays
+ *     `versions: {}` in the response -- `latest` is fleet-wide data, not
+ *     per-machine data, and is only useful paired with a known local
+ *     version).
+ *   - `latest` (the cached tap VERSION, resolved fresh on every call -- not
+ *     trusted from, or frozen at, the reporter's last POST, so a tap
+ *     release shows up on the very next /api/fleet read for every machine)
+ *     is included only when the cache has actually resolved a value; it is
+ *     OMITTED, never null, when the last fetch failed.
+ *   - `outdated` (numeric semver comparison, see isVersionOutdated) is
+ *     included -- explicitly, `true` OR `false` -- only when determinable.
+ *     `false` is a COLLECTED FACT ("confirmed up to date") and MUST be
+ *     emitted, never treated as an absence. It is OMITTED, never null, only
+ *     when undeterminable (missing/malformed input on either side).
+ *
+ * `storedSystem` is expected to already be in normalizeSystemBlock()'s
+ * shape, but this defends against a stale/pre-XACA-1031 record read back
+ * from disk (see the machineList allowlist comment at server.js ~1358)
+ * where `storedSystem` itself, or `.versions`, could be undefined.
+ */
+function projectSystemBlock(storedSystem) {
+    const out = {};
+    if (storedSystem && Number.isInteger(storedSystem.schema_version)) {
+        out.schema_version = storedSystem.schema_version;
+    }
+
+    const hasStoredVersions = !!(storedSystem && storedSystem.versions && typeof storedSystem.versions === 'object');
+    if (!hasStoredVersions) return out; // whole-block-absent case -- stays `{}` (or just schema_version, never happens together)
+
+    const storedAiteamforge = (typeof storedSystem.versions.aiteamforge === 'string' && storedSystem.versions.aiteamforge)
+        ? storedSystem.versions.aiteamforge
+        : null;
+
+    const versions = {};
+    if (storedAiteamforge) {
+        versions.aiteamforge = storedAiteamforge;
+        const latest = getLatestTapVersion(); // string or null; never throws, never blocks
+        if (latest) {
+            versions.latest = latest;
+            const outdated = isVersionOutdated(storedAiteamforge, latest);
+            if (outdated !== null) {
+                versions.outdated = outdated; // explicit true/false -- a collected fact, not an absence
+            }
+        }
+    }
+    out.versions = versions;
+
+    return out;
+}
+
+// ============================================================================
 // API ROUTES
 // ============================================================================
 
@@ -1391,7 +1672,7 @@ function formatUptime(seconds) {
  */
 app.post('/api/status', requireApiKey, (req, res) => {
     try {
-        const { machine, sessions, backup_status, lcars_services } = req.body;
+        const { machine, sessions, backup_status, lcars_services, system } = req.body;
 
         if (!machine || !machine.hostname) {
             return res.status(400).json({ error: 'Missing required field: machine.hostname' });
@@ -1463,7 +1744,16 @@ app.post('/api/status', requireApiKey, (req, res) => {
             // to re-check, and a mixed fleet of old/new reporters degrades
             // uniformly instead of some machines carrying the key and others
             // not.
-            lcars_services: Array.isArray(lcars_services) ? lcars_services : []
+            lcars_services: Array.isArray(lcars_services) ? lcars_services : [],
+            // XACA-1031-002: same mixed-fleet precedent as lcars_services
+            // above, applied to the machine-level `system` block (EPIC-0061
+            // Design Decision 8; frozen contract:
+            // kanban/plans/XACA-1091/CONTRACT-system-block.md). An old
+            // reporter never sends `system` at all -- normalizeSystemBlock()
+            // turns that `undefined` into a stable `{}`, so this record
+            // never carries `system` as undefined. A leaf that could not be
+            // collected (e.g. `versions.aiteamforge`) is OMITTED, not null.
+            system: normalizeSystemBlock(system)
         });
 
         // Log to activity log
@@ -3279,6 +3569,15 @@ setInterval(() => {
 setInterval(() => {
     savePushedKnowledge();
 }, SAVE_INTERVAL_MS);
+
+// XACA-1031-003: resolve the latest published tap VERSION now (fire-and-
+// forget -- a slow/failed first fetch must never delay server startup) and
+// keep it refreshed on the same cadence in the background. getLatestTapVersion()
+// itself is also called lazily from projectSystemBlock() on every /api/fleet
+// read, so a machine restarted after a long sleep still gets a fresh value
+// on first read rather than waiting a full TTL for this interval to fire.
+getLatestTapVersion();
+setInterval(getLatestTapVersion, TAP_VERSION_CACHE_TTL_MS);
 
 // ============================================================================
 // AUTH GATE STARTUP NOTICE (XACA-0395-005)

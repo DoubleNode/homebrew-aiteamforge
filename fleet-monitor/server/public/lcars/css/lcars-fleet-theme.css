@@ -3516,12 +3516,68 @@
 .machine-row.offline .machine-hostname,
 .machine-row.offline .machine-guid,
 .machine-row.offline .machine-meta,
-.machine-row.offline .machine-sessions {
+.machine-row.offline .machine-sessions,
+.machine-row.offline .machine-version-label {
     color: var(--lcars-black);
+}
+
+/* XACA-1031-015: the version feature added .machine-version-label/-value
+   after this override list existed and neither was added to it. The label
+   is fixed above alongside its siblings (plain inheritance, same as
+   .machine-meta-label/-value inheriting through .machine-meta -- no inline
+   style on the label, so a class-level color is enough).
+   .machine-version-value needs its OWN rule with !important: unlike its
+   siblings, it always carries an inline `style="color: ..."` (red/green/
+   amber, computed per version state in createMachineItem()), and an inline
+   style beats any class selector regardless of specificity -- inheritance
+   alone cannot reach it. Measured pre-fix on an offline row: outdated=true
+   is literal var(--lcars-alert-red) text on the row's own
+   var(--lcars-alert-red) background, i.e. 1:1 -- invisible; outdated=false
+   (green) measures 2.33:1; key-absent (amber) measures 1.89:1. All three
+   fail the 4.5:1 AA minimum for normal text. Forcing black here (same
+   swap already proven at ~7.34:1 for #000-on-#ff6666 by the XACA-0983-013
+   .lcars-offline precedent above) clears AA uniformly across all three
+   states.
+
+   .version-badge is deliberately NOT added to this list. Both
+   version-badge-outdated and version-badge-unknown already hardcode
+   `color: #000` on their OWN inline `background` (alert-red / amber
+   respectively), independent of .machine-row's state -- an override here
+   would be a no-op. The one real interaction: on an offline+outdated row,
+   the OUTDATED badge's inline background (--lcars-alert-red) now equals
+   the row's forced offline background (--lcars-alert-red), so the pill's
+   rounded outline optically disappears into the row while its bold black
+   text stays fully legible. Accepted as cosmetic, not a contrast bug --
+   the row is already red with black text, which reads as "problem" with
+   or without the pill shape, and inventing a third background color for
+   this one badge-on-offline combination to preserve its outline would be
+   a new mechanism the finding explicitly said not to invent. */
+.machine-row.offline .machine-version-value {
+    color: var(--lcars-black) !important;
 }
 
 .machine-row.warning {
     border-left-color: var(--lcars-yellow);
+}
+
+/* XACA-1031-017 (SHOULD-FIX): the OUTDATED signal -- the single most
+   actionable thing this whole ticket exists to surface -- had zero
+   card-level cue; it was only discoverable by reading a small 0.75em
+   badge several rows down inside each card, which does not scan on a
+   wall of many machine cards. Scope-limited per the finding: additive
+   only, no card reorder, no redesign -- this reuses the established
+   border-left-color state-tint mechanism directly above
+   (.online/.offline/.warning) rather than inventing a new mechanism.
+   Applied via a dedicated .machine-row-outdated class set in
+   createMachineItem() only when sysVersions.outdated === true (see
+   XACA-1031-005's existence-check comment there -- same guard, not a
+   new one). Placed after .warning so equal (2-class) specificity
+   resolves by source order and an online-but-outdated row's border
+   tints red instead of green. On an offline-and-outdated row this
+   just re-asserts the SAME var(--lcars-alert-red) .offline already
+   set two rules up -- a harmless no-op, not a second competing color. */
+.machine-row.machine-row-outdated {
+    border-left-color: var(--lcars-alert-red);
 }
 
 /* Top line: status dot + hostname + sessions */

@@ -371,6 +371,54 @@
     border-left-color: var(--lcars-yellow);
 }
 
+/* XACA-1031-016 (SHOULD-FIX): createMachineItem() (all 4 app files, see
+   the byte-identical function extent) puts a flex:1 hostname span next to
+   a white-space:nowrap version span inside this flex row, with nothing
+   here to shrink or clip either one -- a long hostname plus a long/
+   pre-release version string (e.g. "0.17.8-beta.wip.build.12345")
+   overflows the row unclipped. This extends the SAME min-width/
+   flex-shrink priority split already established for .session-value/
+   .session-label above (:2139-2313 in this file) rather than inventing a
+   new mechanism, adapted to this row's two DATA-driven children (neither
+   is a closed-vocabulary label, so neither gets an unconditional
+   flex-shrink:0 pin the way .session-label does):
+
+   .status-row-hostname (the growing, higher-priority-to-preserve value)
+   gets min-width:0 so it can actually shrink below its content width, plus
+   its own overflow/ellipsis so a shrunk hostname reads as truncated
+   rather than silently clipped by a parent.
+
+   .status-row-version is capped with a fixed max-width + flex-shrink:0:
+   pinning it un-shrinkable (like .session-label) is not enough on its own
+   here, because unlike a closed short-string label this value is
+   unbounded (a pre-release string can be arbitrarily long) -- flex-shrink:0
+   alone would just push the row wider instead of the hostname yielding.
+   The max-width caps its own footprint so hostname has a known amount of
+   room to yield into, and flex-shrink:0 keeps that footprint stable
+   instead of being squeezed to zero when both are competing for space.
+   Trade-off, accepted deliberately: this span's own text (version number
+   + OUTDATED/UNKNOWN suffix in one span, this skin's 18-line renderer
+   intentionally does not split it into separate elements -- see the
+   XACA-1031-006 comment in createMachineItem()) can itself be
+   ellipsis-truncated in the pathological long-string case, potentially
+   clipping the suffix word. Accepted over letting the row overflow
+   unclipped, which is strictly worse and is the defect this finding is
+   about; realistic version strings (semver plus a short suffix) fit
+   comfortably inside the cap. */
+.status-row .status-row-hostname {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.status-row .status-row-version {
+    flex-shrink: 0;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* -------------------------------------------------------------------------------
    LCARS-010: CANDY PILL COLOR SCHEMES
 

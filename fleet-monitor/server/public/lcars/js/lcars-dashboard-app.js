@@ -1847,6 +1847,75 @@
             }
         }
 
+        // XACA-1031-005 (EPIC-0061 Decision 8): version info lives at
+        // machine.system.versions.*, not machine.versions.*. An OLD reporter
+        // that predates this feature sends no `system` key at all (that is
+        // most of the fleet today, including this very machine) -- guard
+        // with optional chaining and render NO version row for that case
+        // rather than an "undefined" row.
+        //
+        // XACA-1031-005 BUGFIX: the frozen contract has the reporter ALWAYS
+        // emit the `versions` container, sending `versions: {}` when the
+        // version itself is unresolvable -- `{}` is truthy, so gating the
+        // whole row on `sysVersions` alone renders "Unknown" + an amber
+        // UNKNOWN badge on every card fleet-wide right now (this machine
+        // included). "no version reported" and "version known, staleness
+        // undetermined" are different facts and must render differently, so
+        // the row itself is now gated on `aiteamforge` PRESENCE, not on
+        // `sysVersions` truthiness -- see hasInstalledVersion below.
+        const sysVersions = machine.system && machine.system.versions;
+        const hasInstalledVersion = !!sysVersions && sysVersions.aiteamforge !== undefined && sysVersions.aiteamforge !== null;
+        let installedVersionText, versionColorStyle, versionBadgeType, outdated;
+        if (hasInstalledVersion) {
+            installedVersionText = String(sysVersions.aiteamforge);
+            // 'outdated' is an EXISTENCE check, not a null check: the key is
+            // OMITTED (not set to null) when the server could not determine
+            // it (version known, but its own latest-version fetch failed).
+            // A null-check here would silently render "unknown" as
+            // "confirmed current" -- the exact failure this ticket exists
+            // to prevent.
+            const hasOutdatedKey = Object.prototype.hasOwnProperty.call(sysVersions, 'outdated');
+            outdated = hasOutdatedKey ? sysVersions.outdated : undefined;
+
+            if (outdated === true) {
+                versionColorStyle = 'color: var(--lcars-alert-red);';
+                versionBadgeType = 'outdated';
+                // XACA-1031-017 (SHOULD-FIX): give OUTDATED a card-level cue
+                // (border-left tint, see lcars-fleet-theme.css
+                // .machine-row.machine-row-outdated) so it scans on a wall
+                // of cards, not only from the small badge built above.
+                item.classList.add('machine-row-outdated');
+            } else if (outdated === false) {
+                versionColorStyle = 'color: var(--lcars-green);';
+            } else {
+                // Key absent (or a non-boolean value slipped through) -- genuinely
+                // undetermined, and meaningful precisely BECAUSE we know what
+                // version is installed and simply couldn't determine staleness.
+                // Must NOT read as "confirmed current": render visibly distinct
+                // (amber + an explicit UNKNOWN badge).
+                versionColorStyle = 'color: var(--lcars-amber);';
+                versionBadgeType = 'unknown';
+            }
+            // XACA-1031-005/-018: installedVersionText comes from
+            // machine.system.versions.aiteamforge, the reporter's own
+            // self-reported version string POSTed to /api/status --
+            // untrusted, same trust class as machine.hostname/
+            // machine.nickname above. It is NOT interpolated into the
+            // innerHTML template below any more -- the version row is built
+            // with document.createElement()/textContent/setAttribute() and
+            // spliced into the DOM AFTER the item.innerHTML assignment (see
+            // the "hasInstalledVersion" insertBefore block further down),
+            // because innerHTML REPLACES all children and would destroy an
+            // element created before that assignment ran. textContent/
+            // setAttribute cannot be made to emit markup -- the browser
+            // handles the escaping structurally -- so there is deliberately
+            // no escapeHtml() call on installedVersionText anywhere any
+            // more, including for the new aria-label built alongside it.
+            // Reverting to a string-interpolated innerHTML row reintroduces
+            // that escaping obligation -- re-add escapeHtml() at every
+            // interpolation point if you do.
+        }
+
         const displayName = machine.nickname || machine.hostname;
         const hasNickname = !!machine.nickname;
         const isExpanded = expandedMachineId === machine.machine_id;
@@ -1901,6 +1970,57 @@
                 '</div>' +
                 '<div class="uptime-sparkline">' + sparklineHtml + '</div>' +
             '</div>';
+
+        // XACA-1031-018 ([UX] NICE-TO-HAVE): the version row is built via
+        // the DOM API (see the block above) rather than string-interpolated
+        // into item.innerHTML, so it must be spliced in AFTER the
+        // assignment above -- innerHTML replaces all children, and would
+        // have destroyed it had it been built earlier. Insert it right
+        // after the GUID row (its position before this fix), anchored on
+        // whatever element currently follows .machine-guid -- either the
+        // backup panel or the footer -- rather than a hardcoded index, so
+        // this stays correct regardless of whether backupHtml rendered.
+        // Do not reorder: XACA-1031-015/-017 both depend on this row
+        // staying exactly here.
+        if (hasInstalledVersion) {
+            var guidDiv = item.querySelector('.machine-guid');
+            var versionAnchor = guidDiv ? guidDiv.nextElementSibling : null;
+
+            var versionRow = document.createElement('div');
+            versionRow.className = 'machine-version-row';
+
+            var versionLabel = document.createElement('span');
+            versionLabel.className = 'machine-version-label';
+            versionLabel.textContent = 'Version:';
+            versionRow.appendChild(versionLabel);
+
+            var versionValue = document.createElement('span');
+            versionValue.className = 'machine-version-value';
+            versionValue.setAttribute('style', versionColorStyle);
+            versionValue.textContent = installedVersionText;
+            // XACA-1031-018: mirrors the FULL visible text (version + its
+            // outdated/up-to-date/unknown state) in the SAME phrasing used
+            // by lcars2/js/lcars-*-app.js's createMachineItem(), so the two
+            // surfaces announce consistently. No title= here -- unlike
+            // lcars2's compact span, this labelled row never carried one.
+            var versionStateText = outdated === true ? 'outdated' : outdated === false ? 'up to date' : 'update status unknown';
+            versionValue.setAttribute('aria-label', 'AITeamForge version ' + installedVersionText + ', ' + versionStateText);
+            versionRow.appendChild(versionValue);
+
+            if (versionBadgeType) {
+                var versionBadge = document.createElement('span');
+                versionBadge.className = 'version-badge version-badge-' + versionBadgeType;
+                versionBadge.setAttribute('style', 'margin-left: 8px; padding: 1px 6px; border-radius: 3px; background: ' + (versionBadgeType === 'outdated' ? 'var(--lcars-alert-red)' : 'var(--lcars-amber)') + '; color: #000; font-weight: bold; font-size: 0.75em; letter-spacing: 0.05em;');
+                versionBadge.textContent = versionBadgeType === 'outdated' ? 'OUTDATED' : 'UNKNOWN';
+                versionRow.appendChild(versionBadge);
+            }
+
+            if (versionAnchor) {
+                item.insertBefore(versionRow, versionAnchor);
+            } else {
+                item.appendChild(versionRow);
+            }
+        }
 
         var editBtn = item.querySelector('.nickname-edit-btn');
         if (editBtn) {

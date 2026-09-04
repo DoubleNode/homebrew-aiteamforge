@@ -982,6 +982,269 @@ get_lcars_services() {
     echo "[$joined]"
 }
 
+# ----------------------------------------------------------------------------
+# Machine-level "system" container (XACA-1031-001, EPIC-0061 Design Decision 8)
+#
+# Cached with a plain global + "_BUILT" guard flag, same shape as
+# _lcars_build_live_map above -- bash 3.2 (macOS /bin/bash) has no
+# associative arrays. NOTE: unlike _lcars_build_live_map, this guard buys
+# nothing ACROSS reporter invocations -- this script is a one-shot process
+# re-exec'd by cron/launchd every ~60s, so the global is reset to "" every
+# run regardless. It is kept anyway because (a) it matches the established
+# precedent so a future reader isn't left wondering why this one omits it,
+# and (b) it protects any future caller that invokes the getter more than
+# once WITHIN a single run, same as the live-map guard does for its sweep.
+#
+# Scope: this reports the WORKING-DIR installed AITeamForge version --
+# homebrew-tap's aiteamforge-doctor.sh calls this exact concept "working-dir
+# installed version" (its check_version_drift() function) and resolves it
+# from three sources in priority order, none of which invoke `brew` as a
+# subprocess (a `brew --prefix`/`brew list` fork means a Ruby VM startup
+# every ~60s on every consumer machine, forever -- ruled out deliberately):
+#
+#   1. `.installed-version` stamp -- post-upgrade truth: what
+#      aiteamforge-upgrade.sh actually wrote to the working dir the last
+#      time `aiteamforge upgrade` ran. Most accurate when present.
+#   2. Homebrew Cellar directory, read as a plain filesystem path (see
+#      _get_aiteamforge_cellar_version below) -- what brew installed. This
+#      is the ONLY source with a real answer on a machine that has
+#      installed AITeamForge but never once run `aiteamforge upgrade`:
+#      the stamp above is written EXCLUSIVELY by the upgrade flow, so a
+#      never-upgraded machine has no stamp at all. Those never-upgraded
+#      machines are exactly the most-drifted, least-monitored ones --
+#      the case this ticket exists to catch -- so skipping this source
+#      would make the feature blind on precisely the hosts it targets.
+#   3. Legacy `.aiteamforge-config` "version" field -- stamped once at
+#      install time and never updated by `brew upgrade` (XACA-0702); last
+#      resort only, per aiteamforge-doctor.sh's own "less reliable" note.
+#   4. None of the above resolve -- omit the "aiteamforge" key entirely.
+#
+# All reads are local files under $AITEAMFORGE_DIR (default ~/aiteamforge)
+# or the Cellar path -- no network, no `brew` invocation of any kind.
+#
+# On this dev machine (M3Pro) the AITeamForge tap must NEVER be installed
+# (see CLAUDE.md), so all three sources are expected to be absent here --
+# that is the correct, common case, not a bug. Absence must still produce
+# a valid "system" container -- "system" and "system.versions" are ALWAYS
+# present -- but the "aiteamforge" LEAF is OMITTED (not null, not empty
+# string) when it can't be read, per the single "uncollectable field is
+# omitted" convention XACA-1091 froze for every key in this shared block.
+# See build_payload() for where $_AITEAMFORGE_VERSION becomes `{}` vs
+# `{"aiteamforge":"..."}`.
+_AITEAMFORGE_VERSION=""
+_AITEAMFORGE_VERSION_BUILT=false
+
+# Compare two dot-separated version strings NUMERICALLY, component by
+# component. Returns 0 (true, shell success) if $1 > $2, 1 otherwise.
+#
+# Why this exists at all: brew keeps old kegs around, so
+# Cellar/aiteamforge/ can hold more than one version directory, and a
+# lexicographic pick is WRONG -- "0.20.3" sorts BEFORE "0.9.0" as a string
+# (the character '2' < '9'), which would silently report a downgrade at
+# the current live version. Comparing each dot-separated field as an
+# integer avoids that trap entirely.
+#
+# Bash 3.2 safe: indexed arrays (not associative), `read -ra`, and a
+# C-style `for` loop are all supported since bash 2.x.
+_version_gt() {
+    local a="$1" b="$2"
+    local -a a_parts b_parts
+    IFS='.' read -ra a_parts <<< "$a"
+    IFS='.' read -ra b_parts <<< "$b"
+
+    local len=${#a_parts[@]}
+    if [ ${#b_parts[@]} -gt "$len" ]; then
+        len=${#b_parts[@]}
+    fi
+
+    local i ai bi
+    for ((i = 0; i < len; i++)); do
+        ai="${a_parts[i]:-0}"
+        bi="${b_parts[i]:-0}"
+        # Strip any trailing non-digit content (brew revision suffixes like
+        # "3_1", pre-release tags) so the arithmetic comparison below never
+        # sees a non-numeric operand; an empty result after stripping (a
+        # component that was non-numeric start-to-finish) counts as 0.
+        ai="${ai%%[!0-9]*}"; [ -z "$ai" ] && ai=0
+        bi="${bi%%[!0-9]*}"; [ -z "$bi" ] && bi=0
+        if [ "$ai" -gt "$bi" ]; then
+            return 0
+        elif [ "$ai" -lt "$bi" ]; then
+            return 1
+        fi
+        # Equal in this component -- fall through to compare the next one.
+    done
+    return 1
+}
+
+# Normalize a Homebrew Cellar keg DIRECTORY NAME into the clean, dotted
+# numeric string the frozen contract requires for `versions.aiteamforge`
+# (kanban/plans/XACA-1091/CONTRACT-system-block.md: "semver, no leading v").
+#
+# Why this exists (XACA-1031-019, code review on PR #818): brew keg dirs are
+# not always a clean semver token. A revision bump names the dir
+# "0.20.3_1" (trailing "_1" is NOT part of the version), and a HEAD/
+# pre-release build can carry its own non-numeric suffix. _version_gt()
+# above ALREADY strips exactly this shape for ITS OWN numeric comparison
+# (`ai="${ai%%[!0-9]*}"`) -- the SELECTION of which keg is "best" was never
+# wrong. What was wrong is that the raw, unnormalized directory name was
+# then sent VERBATIM over the wire: the server's isVersionOutdated() does a
+# strict per-component digit parse and rejects a non-numeric component
+# (`3_1`) as unparseable, returning null -- which surfaces as a permanent
+# amber UNKNOWN badge for a machine whose version is perfectly well known.
+#
+# DECISION: normalize HERE, at the reporter, not server-side. The frozen
+# contract's ownership table lists `versions.aiteamforge` as an XACA-1031
+# (reporter-owned) field, with `latest`/`outdated` explicitly carved out as
+# the only SERVER-INJECTED leaves in this block -- i.e. the contract already
+# draws the line at "producer owns the raw field, server owns derived
+# fields". Stripping it server-side instead would blur that boundary and
+# require every current AND future producer of this field to duplicate the
+# same tolerance logic. A machine running an already-deployed, un-upgraded
+# reporter binary keeps sending the raw string until its reporter script is
+# refreshed -- exactly the same propagation path every other reporter-side
+# fix in this file takes (including the `local v` fix in this same PR); it
+# is not a gap unique to this fix.
+#
+# Applies _version_gt's own per-component rule -- strip from the first
+# non-digit character to the end of that dot-separated component, defaulting
+# a component that is non-numeric start-to-finish to "0" -- so the reported
+# string can never disagree with what the selection logic upstream already
+# treated it as. A HEAD/pre-release build's non-numeric leading token (e.g.
+# "abc1234") therefore collapses to "0"; this function does not invent a
+# richer answer than _version_gt's own comparator already gives that case.
+#
+# Bash 3.2 safe (same primitives as _version_gt: indexed arrays, `read -ra`,
+# a C-style `for` loop, `${var%%pattern}`).
+_normalize_aiteamforge_version() {
+    local raw="$1"
+    local -a parts
+    IFS='.' read -ra parts <<< "$raw"
+
+    local out="" i part clean
+    for ((i = 0; i < ${#parts[@]}; i++)); do
+        part="${parts[i]}"
+        clean="${part%%[!0-9]*}"
+        [ -z "$clean" ] && clean=0
+        if [ -z "$out" ]; then
+            out="$clean"
+        else
+            out="${out}.${clean}"
+        fi
+    done
+
+    printf '%s' "$out"
+}
+
+# Resolve the installed AITeamForge version from the Homebrew Cellar
+# directory as a plain filesystem read -- NEVER via `brew --prefix` or
+# `brew list`, both of which fork a Ruby VM (see the container-level
+# comment above for why that cost is unacceptable on a 60s cadence).
+#
+# Homebrew's install prefix is one of exactly two well-known locations
+# depending on CPU architecture (Apple Silicon vs Intel); a machine only
+# ever has ONE of these active, so probing both and stopping at the first
+# one containing a Cellar/aiteamforge directory is sufficient -- there is
+# no scenario where checking further would change the answer.
+#
+# AITEAMFORGE_CELLAR_PREFIXES (space-separated list) overrides the default
+# probe list -- this is the "overridable variable" tests point the probe
+# at a synthetic Cellar under a scratch directory with, instead of ever
+# touching a real /opt/homebrew or /usr/local.
+#
+# Prints the resolved version token on stdout, NORMALIZED per
+# _normalize_aiteamforge_version() above (XACA-1031-019) -- or nothing if no
+# Cellar directory was found on any probed prefix, or it was found but empty.
+# Only the final selected "best" is normalized; the internal tie-break loop
+# still compares raw directory names through _version_gt(), which already
+# tolerates the same suffixes on both operands and is left untouched.
+_get_aiteamforge_cellar_version() {
+    local prefixes prefix cellar_dir best d dname
+    prefixes="${AITEAMFORGE_CELLAR_PREFIXES:-/opt/homebrew /usr/local}"
+    best=""
+
+    for prefix in $prefixes; do
+        cellar_dir="${prefix}/Cellar/aiteamforge"
+        [ -d "$cellar_dir" ] || continue
+
+        # Unquoted glob is intentional and safe here: no nullglob in bash
+        # 3.2, so a no-match leaves the literal pattern, and `[ -d ... ]`
+        # below simply rejects it (mirrors the existing pgrep/ps `|| true`
+        # empty-result handling elsewhere in this file).
+        for d in "$cellar_dir"/*/; do
+            [ -d "$d" ] || continue
+            dname="$(basename "$d")"
+            [ -z "$dname" ] && continue
+            if [ -z "$best" ]; then
+                best="$dname"
+            elif _version_gt "$dname" "$best"; then
+                best="$dname"
+            fi
+        done
+
+        # Found a Cellar dir for aiteamforge on this prefix -- brew only
+        # ever installs to one prefix per machine, so this IS the answer
+        # (even an empty Cellar/aiteamforge/ means "found the prefix, no
+        # version kegs in it" -- checking the other prefix cannot help).
+        break
+    done
+
+    [ -z "$best" ] && return 0
+    printf '%s' "$(_normalize_aiteamforge_version "$best")"
+}
+
+_get_aiteamforge_version() {
+    if [ "$_AITEAMFORGE_VERSION_BUILT" = true ]; then
+        return 0
+    fi
+    _AITEAMFORGE_VERSION_BUILT=true
+    _AITEAMFORGE_VERSION=""
+
+    # v MUST be initialized, not merely declared: `local v` leaves it UNSET, and
+    # under this file's `set -u` the `[ -z "$v" ]` fallthrough below aborts
+    # build_payload() mid-emit when no stamp file exists -- producing truncated,
+    # invalid JSON. macOS /bin/bash 3.2 tolerates the bare declaration; bash 5.x
+    # (CI, and any host invoking this under a newer bash) does not, so the dev
+    # machine cannot reproduce it. Caught by CI on XACA-1031 (PR #818).
+    local working_dir stamp_file
+    local v=""
+    working_dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+    stamp_file="${working_dir}/.installed-version"
+
+    # Source 1: .installed-version stamp -- see container-level comment.
+    if [ -f "$stamp_file" ]; then
+        # `|| true` -- tr/read can fail on an unreadable file; `set -e` must
+        # not abort the reporter over a version string it can't get.
+        v="$(tr -d '[:space:]' < "$stamp_file" 2>/dev/null || true)"
+    fi
+
+    # Source 2: Homebrew Cellar directory -- the only source with a real
+    # answer on a never-upgraded machine. See container-level comment.
+    if [ -z "$v" ]; then
+        v="$(_get_aiteamforge_cellar_version)"
+    fi
+
+    # Source 3: legacy config "version" field -- last resort, unreliable.
+    if [ -z "$v" ]; then
+        local config_file
+        config_file="${working_dir}/.aiteamforge-config"
+        if [ -f "$config_file" ]; then
+            if command -v jq >/dev/null 2>&1; then
+                v="$(jq -r '.version // empty' "$config_file" 2>/dev/null || true)"
+            else
+                # Fallback mirrors homebrew-tap/libexec/lib/config.sh's
+                # get_config_value() non-jq branch.
+                v="$(grep '"version"' "$config_file" 2>/dev/null | sed -E 's/.*"version": *"?([^",}]+)"?.*/\1/' | head -n1 || true)"
+            fi
+        fi
+    fi
+
+    # Source 4 (implicit): nothing resolved -- $v stays empty, and
+    # build_payload() omits the "aiteamforge" key entirely on an empty
+    # _AITEAMFORGE_VERSION, per the XACA-1091 "omit, don't null" convention.
+    _AITEAMFORGE_VERSION="$v"
+}
+
 # Build status payload
 build_payload() {
     # Prime the live-process sweep in THIS scope so the two command
@@ -1021,6 +1284,21 @@ build_payload() {
         fleet_mode_json=",\"fleet_mode\":\"$(json_escape "$FLEET_MODE")\""
     fi
 
+    # Machine-level "system" container (XACA-1031-001, contract amended
+    # mid-implementation by the orchestrator to match the frozen convention
+    # sibling ticket XACA-1091 established for this same block: an
+    # uncollectable LEAF FIELD is OMITTED, never emitted as JSON null. The
+    # "system" and "versions" containers themselves are still ALWAYS present.
+    # "schema_version" is a sibling of "versions" inside "system" (not inside
+    # "versions") -- added now, while there is exactly one consumer, because
+    # retrofitting it after XACA-1091 adds ~15 more sibling keys is far more
+    # expensive than reserving the slot today.
+    _get_aiteamforge_version
+    local versions_json="{}"
+    if [ -n "$_AITEAMFORGE_VERSION" ]; then
+        versions_json="{\"aiteamforge\":\"$(json_escape "$_AITEAMFORGE_VERSION")\"}"
+    fi
+
     cat <<EOF
 {
   "machine": {
@@ -1032,7 +1310,11 @@ build_payload() {
   },
   "sessions": $sessions,
   "lcars_services": $lcars_services,
-  "backup_status": $backup_json
+  "backup_status": $backup_json,
+  "system": {
+    "schema_version": 1,
+    "versions": $versions_json
+  }
 }
 EOF
 }

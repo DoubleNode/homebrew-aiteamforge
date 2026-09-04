@@ -560,17 +560,107 @@
         const item = document.createElement('div');
         item.className = 'status-row ' + machine.status;
 
-        // XACA-0416-004: machine.hostname is stored verbatim from the POST
-        // /api/status body -- untrusted, ELEMENT CONTENT -> escapeHtml.
-        // machine.status is server-derived by updateMachineStatuses(), which only
-        // ever writes 'online'/'offline'/'warning', and machine.session_count is a
-        // computed integer; both stay unwrapped. No untrusted value reaches a
-        // quoted attribute in this file, so escapeAttr() is deliberately NOT
-        // defined here -- do not add a helper with no call site.
+        // XACA-1031-006 (EPIC-0061 Decision 8): version lives at
+        // machine.system.versions.*, not machine.versions.*. An OLD reporter
+        // that predates this feature sends no `system` key at all -- that is
+        // most of the fleet today, including this very machine -- so guard
+        // with optional chaining and render NO version indicator for that
+        // case rather than "undefined". Additive only: this is the 18-line
+        // minimal renderer, not the 196-line rich one in lcars/js -- no
+        // shared helper is being extracted here (see XACA-1031 plan doc).
+        //
+        // XACA-1031-006 BUGFIX: the frozen contract has the reporter ALWAYS
+        // emit the `versions` container, sending `versions: {}` when the
+        // version itself is unresolvable -- `{}` is truthy, so gating on
+        // `sysVersions` alone rendered "vUnknown UNKNOWN" on every card
+        // fleet-wide (this machine included -- the tap isn't installed here
+        // either). "no version reported" and "version known, staleness
+        // undetermined" are different facts and must render differently, so
+        // the whole indicator (including the 'v' prefix) is now gated on
+        // `aiteamforge` PRESENCE, not on `sysVersions` truthiness.
+        const sysVersions = machine.system && machine.system.versions;
+        const hasInstalledVersion = !!sysVersions && sysVersions.aiteamforge !== undefined && sysVersions.aiteamforge !== null;
+        let installedVersionText, versionColor, versionSuffix, outdated;
+        if (hasInstalledVersion) {
+            installedVersionText = String(sysVersions.aiteamforge);
+            // 'outdated' is an EXISTENCE check, not a null check: the key is
+            // OMITTED (not set to null) when the server could not determine
+            // it (version known, but its own latest-version fetch failed).
+            // A null-check here would silently render "unknown" as
+            // "confirmed current" -- the exact failure this ticket exists
+            // to prevent.
+            const hasOutdatedKey = Object.prototype.hasOwnProperty.call(sysVersions, 'outdated');
+            outdated = hasOutdatedKey ? sysVersions.outdated : undefined;
+
+            versionColor = 'var(--lcars-amber)';
+            versionSuffix = ' UNKNOWN';
+            if (outdated === true) {
+                versionColor = 'var(--lcars-alert-red)';
+                versionSuffix = ' OUTDATED';
+            } else if (outdated === false) {
+                versionColor = 'var(--lcars-green)';
+                versionSuffix = '';
+            }
+        }
+
+        // XACA-0416-004 UPDATE (XACA-1031-018): the version indicator is no
+        // longer built by string-interpolating installedVersionText into an
+        // innerHTML template -- it is built below with document.
+        // createElement()/textContent/setAttribute(), AFTER the
+        // item.innerHTML assignment (innerHTML REPLACES all children, so an
+        // element built before that assignment would be destroyed by it --
+        // that is why the insertBefore call is down in the `if
+        // (hasInstalledVersion)` block below, not up here). textContent and
+        // setAttribute cannot be made to produce markup -- the browser does
+        // the escaping structurally at the DOM-API boundary -- so there is
+        // deliberately no escapeHtml()/escapeAttr() call on
+        // installedVersionText anywhere in this function any more,
+        // including for the new aria-label. If you are reverting this back
+        // to a string-interpolated innerHTML template (the shape
+        // XACA-1031-006 originally shipped), you are reintroducing that
+        // escaping obligation for BOTH the visible text and the aria-label
+        // -- re-add escapeHtml()/escapeAttr() calls at every interpolation
+        // point when you do.
+        //
+        // XACA-0416-004 (unchanged): machine.hostname is stored verbatim
+        // from the POST /api/status body -- untrusted, ELEMENT CONTENT ->
+        // escapeHtml. machine.status is server-derived by
+        // updateMachineStatuses(), which only ever writes 'online'/
+        // 'offline'/'warning', and machine.session_count is a computed
+        // integer; both stay unwrapped. No untrusted value reaches a quoted
+        // attribute via string interpolation in this file, so escapeAttr()
+        // is deliberately NOT defined here -- do not add a helper with no
+        // call site.
         item.innerHTML =
             '<span class="status-indicator ' + machine.status + '"></span>' +
-            '<span class="lcars-text-sm" style="flex: 1;">' + escapeHtml(machine.hostname) + '</span>' +
+            '<span class="lcars-text-sm status-row-hostname" style="flex: 1;">' + escapeHtml(machine.hostname) + '</span>' +
             '<span class="lcars-text-xs" style="color: var(--lcars-tan);">' + machine.session_count + ' sessions</span>';
+
+        if (hasInstalledVersion) {
+            // XACA-1031-018 ([UX] NICE-TO-HAVE): a bare title="..." on a
+            // non-focusable span has weak/inconsistent screen-reader
+            // support. aria-label mirrors the FULL visible text (version
+            // number plus its outdated/up-to-date/unknown state) so
+            // assistive tech announces the same information a sighted user
+            // reads off the card. title= is kept as-is for the sighted
+            // mouse-hover tooltip -- the two are not in tension, aria-label
+            // simply gives the accessibility tree a reliable value.
+            const versionEl = document.createElement('span');
+            versionEl.className = 'lcars-text-xs status-row-version';
+            versionEl.setAttribute('style', 'color: ' + versionColor + '; white-space: nowrap;');
+            versionEl.setAttribute('title', 'aiteamforge version');
+            versionEl.textContent = 'v' + installedVersionText + versionSuffix;
+            const versionStateText = outdated === true ? 'outdated' : outdated === false ? 'up to date' : 'update status unknown';
+            versionEl.setAttribute('aria-label', 'AITeamForge version ' + installedVersionText + ', ' + versionStateText);
+            // Insert between the hostname span and the session-count span
+            // -- item.lastElementChild is the session-count span at this
+            // point (it is always the last child the innerHTML assignment
+            // above produces), which stays correct regardless of what else
+            // is or isn't a sibling. Do not reorder -- XACA-1031-016's
+            // overflow guard and this row's visual layout both depend on
+            // this exact position.
+            item.insertBefore(versionEl, item.lastElementChild);
+        }
 
         return item;
     }
