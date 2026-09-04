@@ -1551,9 +1551,42 @@ def _atomic_write_json(target: Path, data: dict) -> None:
     The tmp file is created in the resolved target's own directory — os.replace()
     is only atomic within a single filesystem.
 
+    XACA-1059-006 (write-side plausibility floor): mirrors the read-side floor
+    XACA-1029 established (``_MIN_PLAUSIBLE_REGISTRY_BYTES`` /
+    ``_file_looks_implausibly_short``, same threshold, same module). That floor
+    stops a READER from self-healing from a suspiciously-short file; this stops
+    a WRITER from ever producing one in the first place, regardless of which
+    caller or in-memory transform produced too-small a payload. Checked against
+    the SERIALIZED size actually about to be written — before any tmp file is
+    created and before the existing target is touched — so a refusal here can
+    never truncate, partially write, or otherwise disturb whatever is already
+    on disk. Fails CLOSED: raises, same as every other failure path in this
+    function, which every caller already treats as "degrade to an in-memory
+    transform, do not touch disk" (see _rewrite_config_on_disk).
+
     Raises on failure (callers degrade to an in-memory transform).
     """
     resolved = target.resolve()
+
+    serialized = json.dumps(data, indent=2)
+    serialized_bytes = len(serialized.encode("utf-8"))
+    if serialized_bytes < _MIN_PLAUSIBLE_REGISTRY_BYTES:
+        print(
+            f"[aiteamforge-paths] write-guard: REFUSING to write {resolved} — "
+            f"payload is only {serialized_bytes} bytes, below the "
+            f"{_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte plausibility floor for a "
+            f"real registry (XACA-1059-006, mirrors the XACA-1029 read-side "
+            f"floor — see _MIN_PLAUSIBLE_REGISTRY_BYTES). This would create "
+            f"exactly the kind of implausibly-short file XACA-1029 already "
+            f"refuses to self-heal from. No write performed; the file on "
+            f"disk (if any) is untouched.",
+            file=sys.stderr,
+        )
+        raise ValueError(
+            f"refusing to write {resolved}: payload ({serialized_bytes} bytes) "
+            f"is below the {_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte registry "
+            f"plausibility floor (XACA-1059-006)"
+        )
 
     # Capture the mode we must restore. A missing original is not fatal — we simply
     # have no mode to preserve and let the umask stand.
@@ -1567,7 +1600,7 @@ def _atomic_write_json(target: Path, data: dict) -> None:
     tmp_path = resolved.with_name(f"{resolved.name}.tmp.{os.getpid()}")
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+            f.write(serialized)
             f.flush()
             os.fsync(f.fileno())
         if orig_mode is not None:

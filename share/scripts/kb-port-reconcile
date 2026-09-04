@@ -1179,23 +1179,116 @@ PYEOF
 }
 
 # team-paths.json updater (writes the authoritative store; used when --prefer flips it)
+#
+# XACA-1059-005: this used to be `path.write_text(...)` straight onto the live
+# registry -- no tmp file, no fsync, no os.replace, no lock. write_text()
+# truncates the target on open and writes in one call; a crash/kill/exception
+# between truncation and write completion left a truncated/0-byte file with
+# no tmp-file fallback to recover from (XACA-1059 writer inventory, row 7).
+# Rewritten to match the tmp-in-same-dir + fsync + os.replace + fcntl.flock
+# convention kanban-hooks/aiteamforge_paths.py's _atomic_write_json /
+# _rewrite_config_on_disk established (XACA-0794-008/-009/-012):
+#   - tmp file lives in the SAME directory as the target (os.replace() is only
+#     atomic within one filesystem).
+#   - unique tmp name via tempfile.mkstemp(), not a PID-derived suffix -- PID
+#     reuse can collide (XACA-0871-037 hit this exact trap in a shell restore
+#     and was fixed by switching to mktemp-style naming; mkstemp() gives the
+#     same guarantee in Python).
+#   - original file mode is captured and re-applied to the tmp file BEFORE the
+#     replace, so the mode change is atomic with the content (a config
+#     silently widening from 0600 to the umask default is its own regression).
+#   - the lock file is opened with "a" (never truncated) and NEVER unlinked,
+#     and the config is re-read under the lock (TOCTOU defense) rather than
+#     trusting whatever the caller already had in memory -- unlinking a lock
+#     file while another process may still be blocked on it lets a third
+#     process acquire a lock on a fresh inode at the same path while the first
+#     holder still thinks it owns the old one (XACA-0794-012).
 _update_team_paths_json() {
     local team="$1" newport="$2"
     python3 - "$TEAM_PATHS_JSON" "$team" "$newport" <<'PYEOF'
-import sys, json
+import fcntl
+import json
+import os
+import stat
+import sys
+import tempfile
 from pathlib import Path
+
 path = Path(sys.argv[1]); team = sys.argv[2]; newport = int(sys.argv[3])
 if not path.exists():
     sys.exit(2)
-config = json.loads(path.read_text(encoding="utf-8"))
-teams = config.get("teams", {})
-if team not in teams:
-    sys.exit(2)
-if teams[team].get("lcars_port") == newport:
-    sys.exit(0)
-teams[team]["lcars_port"] = newport
-path.write_text(json.JSONEncoder(indent=2, sort_keys=True).encode(config) + "\n", encoding="utf-8")
-sys.exit(0)
+
+resolved = path.resolve()
+lock_path = resolved.with_name(f"{resolved.name}.lock")
+
+with open(lock_path, "a") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    try:
+        # Re-read under the lock -- TOCTOU defense against another writer
+        # (server.py's account handlers, aiteamforge_paths.py's self-heal
+        # passes) racing between our own earlier read and this write.
+        try:
+            config = json.loads(resolved.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"kb-port-reconcile: cannot re-read {resolved} under lock: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+        teams = config.get("teams", {})
+        if team not in teams:
+            sys.exit(2)
+        if teams[team].get("lcars_port") == newport:
+            sys.exit(0)
+        teams[team]["lcars_port"] = newport
+
+        # XACA-1059-006: write-side plausibility floor, mirroring the
+        # read-side floor XACA-1029 established in
+        # kanban-hooks/aiteamforge_paths.py (_MIN_PLAUSIBLE_REGISTRY_BYTES =
+        # 200; same threshold reproduced here rather than imported, since
+        # that name is module-private and this script does not otherwise
+        # depend on that module being importable). A single-team port bump
+        # can never legitimately shrink the whole registry below this floor
+        # -- if it would, something upstream is already broken, and writing
+        # the result would create exactly the implausibly-short file
+        # XACA-1029's reader refuses to self-heal from. Fail CLOSED: refuse
+        # and report loudly, before any tmp file is created.
+        serialized = json.JSONEncoder(indent=2, sort_keys=True).encode(config) + "\n"
+        serialized_bytes = len(serialized.encode("utf-8"))
+        _MIN_PLAUSIBLE_REGISTRY_BYTES = 200
+        if serialized_bytes < _MIN_PLAUSIBLE_REGISTRY_BYTES:
+            print(
+                f"kb-port-reconcile: REFUSING to write {resolved} -- payload is "
+                f"only {serialized_bytes} bytes, below the "
+                f"{_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte plausibility floor for a "
+                f"real registry (XACA-1059-006). No write performed; the file "
+                f"on disk is untouched.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        try:
+            orig_mode = stat.S_IMODE(os.stat(resolved).st_mode)
+        except OSError:
+            orig_mode = None
+
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f"{resolved.name}.tmp.", dir=str(resolved.parent)
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(serialized)
+                f.flush()
+                os.fsync(f.fileno())
+            if orig_mode is not None:
+                os.chmod(tmp_path, orig_mode)
+            os.replace(str(tmp_path), str(resolved))
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        sys.exit(0)
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        # Intentionally no lock_path.unlink() -- see XACA-0794-012 note above.
 PYEOF
 }
 

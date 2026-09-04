@@ -133,7 +133,93 @@ fi
 CONFIG_DIR="$(dirname "$CONFIG_PATH")"
 mkdir -p "$CONFIG_DIR"
 
-printf '%s\n' "$CONFIG_JSON" > "$CONFIG_PATH"
+# XACA-1059-005: this used to be `printf ... > "$CONFIG_PATH"` -- truncates the
+# target on open, single write call, no tmp file, no fsync, no lock. --force
+# makes this path reachable against a LIVE, already-populated registry (not
+# just a first-time bootstrap), so a crash/kill mid-write here could leave a
+# truncated/0-byte team-paths.json the same way scripts/kb-port-reconcile's
+# non-atomic writer could (XACA-1059 writer inventory). Bounced through a
+# throwaway tmp file rather than a bash heredoc-as-stdin because the Python
+# program below already needs stdin's usual role (`python3 -`) for the
+# program source itself; a second stdin stream for the payload would fight it.
+_json_src="$(mktemp -t aiteamforge-paths-init-json.XXXXXX)"
+trap 'rm -f "$_json_src"' EXIT
+printf '%s\n' "$CONFIG_JSON" > "$_json_src"
+
+# Same tmp-in-same-dir + fsync + os.replace + fcntl.flock convention this
+# ticket applied to scripts/kb-port-reconcile and that
+# kanban-hooks/aiteamforge_paths.py's _rewrite_config_on_disk already used
+# (XACA-0794-008/-009/-012): mode preserved across the replace, lock file
+# never truncated on open and never unlinked (a racing writer -- the LCARS
+# server's account/copyright handlers, or a self-heal pass -- must always
+# resolve the SAME lock inode as this process).
+python3 - "$_json_src" "$CONFIG_PATH" <<'PYEOF'
+import fcntl
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+json_src = Path(sys.argv[1])
+config_path = Path(sys.argv[2])
+payload = json_src.read_text(encoding="utf-8")
+
+resolved = config_path.resolve()
+lock_path = resolved.with_name(f"{resolved.name}.lock")
+
+# XACA-1059-006: write-side plausibility floor, mirroring the read-side floor
+# XACA-1029 established in kanban-hooks/aiteamforge_paths.py
+# (_MIN_PLAUSIBLE_REGISTRY_BYTES = 200; reproduced here rather than imported
+# -- that name is module-private and this script does not otherwise depend
+# on the module being importable). A rendered DEFAULT_TEAMS config is never
+# legitimately this small; if it ever were, something upstream (the loader
+# import, DEFAULT_TEAMS itself) is already broken. Fail CLOSED: refuse and
+# report loudly, before any tmp file is created, rather than writing a
+# short/placeholder file over a possibly-live registry.
+_MIN_PLAUSIBLE_REGISTRY_BYTES = 200
+_payload_bytes = len(payload.encode("utf-8"))
+if _payload_bytes < _MIN_PLAUSIBLE_REGISTRY_BYTES:
+    print(
+        f"aiteamforge-paths-init.sh: REFUSING to write {resolved} -- payload "
+        f"is only {_payload_bytes} bytes, below the "
+        f"{_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte plausibility floor for a real "
+        f"registry (XACA-1059-006). No write performed; the file on disk "
+        f"(if any) is untouched.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+with open(lock_path, "a") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    try:
+        try:
+            orig_mode = stat.S_IMODE(os.stat(resolved).st_mode)
+        except OSError:
+            orig_mode = None
+
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f"{resolved.name}.tmp.", dir=str(resolved.parent)
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            if orig_mode is not None:
+                os.chmod(tmp_path, orig_mode)
+            os.replace(str(tmp_path), str(resolved))
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        # Intentionally no lock_path.unlink() -- see XACA-0794-012 note above.
+PYEOF
+
+rm -f "$_json_src"
+trap - EXIT
 
 echo "Created: $CONFIG_PATH"
 echo "Teams:"

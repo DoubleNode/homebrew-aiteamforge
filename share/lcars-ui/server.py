@@ -14180,9 +14180,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         if not team_paths_file.exists():
             return f'team-paths.json not found at {team_paths_file}'
 
+        # XACA-1059-005: opened "a" (never truncate) and never unlinked -- see the
+        # finally block below and kanban-hooks/aiteamforge_paths.py's
+        # _rewrite_config_on_disk (XACA-0794-012) for why an unlinked-then-recreated
+        # lock file lets two processes both believe they hold mutual exclusion.
         lock_file = team_paths_file.with_suffix('.json.lock')
         try:
-            with open(lock_file, 'w') as lock:
+            with open(lock_file, 'a') as lock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                 try:
                     with open(team_paths_file, 'r') as f:
@@ -14222,9 +14226,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     return None
                 finally:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                    # XACA-0333-001: remove the advisory lock file after release — best-effort
-                    try: lock_file.unlink(missing_ok=True)
-                    except OSError: pass
+                    # XACA-1059-005: intentionally NOT unlinked (was XACA-0333-001's
+                    # "best-effort" removal). Unlinking here while another process might
+                    # already be blocked in open()+flock() on this same path lets a third
+                    # process create a FRESH inode at the same path and acquire a lock on
+                    # it while the first waiter still holds (or is about to be granted) the
+                    # OLD inode's lock -- two processes then both believe they hold mutual
+                    # exclusion on team-paths.json. This reproduced, in this file, the exact
+                    # anti-pattern kanban-hooks/aiteamforge_paths.py's own three self-heal
+                    # passes were fixed to stop doing (XACA-0794-012). The lock file is tiny
+                    # and persistent by design -- a lock's whole job is a stable identity.
         except Exception as e:
             print(f"[LCARS] ERROR writing copyright config for {team}: {e}")
             return str(e)
@@ -14391,9 +14402,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({'success': False, 'error': f'team-paths.json not found'}, status=500)
                 return
 
+            # XACA-1059-005: opened "a" (never truncate) and never unlinked -- see the
+            # finally block below and kanban-hooks/aiteamforge_paths.py's
+            # _rewrite_config_on_disk (XACA-0794-012) for why an unlinked-then-recreated
+            # lock file lets two processes both believe they hold mutual exclusion.
             lock_file = team_paths_file.with_suffix('.json.lock')
             try:
-                with open(lock_file, 'w') as lock:
+                with open(lock_file, 'a') as lock:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                     try:
                         with open(team_paths_file, 'r') as f:
@@ -14431,10 +14446,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         print(f"[LCARS] Account config saved for '{team}': account_id={account_id.strip()!r} env_var={env_var_name!r}")
                     finally:
                         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                        try:
-                            lock_file.unlink(missing_ok=True)
-                        except OSError:
-                            pass
+                        # XACA-1059-005: intentionally NOT unlinked -- see the matching
+                        # comment at _write_copyright_config's lock acquisition above
+                        # (XACA-0794-012). Unlinking here can let two processes both
+                        # believe they hold mutual exclusion on team-paths.json.
             except Exception:
                 raise
 
@@ -14857,9 +14872,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({'success': False, 'error': 'team-paths.json not found'}, status=500)
                 return
 
+            # XACA-1059-005: opened "a" (never truncate) and never unlinked -- see the
+            # finally block below and kanban-hooks/aiteamforge_paths.py's
+            # _rewrite_config_on_disk (XACA-0794-012) for why an unlinked-then-recreated
+            # lock file lets two processes both believe they hold mutual exclusion.
             lock_file = team_paths_file.with_suffix('.json.lock')
             try:
-                with open(lock_file, 'w') as lock:
+                with open(lock_file, 'a') as lock:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                     try:
                         with open(team_paths_file, 'r') as f:
@@ -14903,10 +14922,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         )
                     finally:
                         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                        try:
-                            lock_file.unlink(missing_ok=True)
-                        except OSError:
-                            pass
+                        # XACA-1059-005: intentionally NOT unlinked -- see the matching
+                        # comment at _write_copyright_config's lock acquisition above
+                        # (XACA-0794-012). Unlinking here can let two processes both
+                        # believe they hold mutual exclusion on team-paths.json.
             except Exception:
                 raise
 
