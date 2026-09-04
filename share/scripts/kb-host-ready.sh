@@ -235,6 +235,27 @@ PY
 # skip path -- which is how a quoted team name produced invalid JSON, made the
 # state write fail, and thereby permanently disabled guard 1 (the login-session
 # stamp) on every subsequent run. BAD_CHARS is the second layer, not the fix.
+# Was the resolver's record stream COMPLETE? (XACA-1066, fifth shape.)
+# The resolver ends every normal path with a bare "END" record. Its ABSENCE means
+# the resolver aborted mid-stream — an encoding error, an unhandled exception, a
+# killed interpreter, or python3 missing entirely — and a truncated stream is
+# otherwise indistinguishable from a finished one. Acting on a truncated stream is
+# what silently dropped a VALID team while reporting skipped=0 and exit 0, which
+# on a lock_after_login host would lock a machine whose teams never came up: this
+# ticket's own root incident, reproduced from a config typo.
+#
+# Deliberately NOT another BAD_CHARS entry. Four earlier rounds each ended with
+# "that was the last bad character" and each was wrong. A sentinel is
+# cause-agnostic and covers causes nobody has enumerated.
+#
+# Fail CLOSED: refuse to act on a partial stream rather than acting on part of it.
+_hr_stream_complete() {
+    case $'\n'"$1" in
+        *$'\n'"END") return 0 ;;
+    esac
+    return 1
+}
+
 _hr_json_str() {
     local v="$1"
     v="${v//\\/\\\\}"
@@ -378,30 +399,47 @@ def _sanitize(v):
     v = str(v)
     return v.replace("\n", "\\n").replace("\r", "\\r").replace("\x1f", "\\x1f")
 
+def _finish(code=0):
+    # COMPLETENESS SENTINEL (XACA-1066, fifth shape). The record stream had no
+    # way to say "I finished", so a consumer could not tell "resolver finished"
+    # from "resolver died mid-loop" — both look like the stream ending. An abort
+    # therefore dropped every remaining entry silently while cmd_restore reported
+    # skipped=0 and exit 0. Reproduced with an unpaired surrogate ("\ud800"):
+    # valid JSON that json.loads accepts but UTF-8 cannot encode, so emit() raised
+    # and a VALID later team never started. On a lock_after_login host that locks
+    # a machine whose teams never came up — this ticket's own root incident.
+    #
+    # Deliberately NOT another BAD_CHARS entry: four earlier rounds each ended
+    # with "that was the last bad character" and each was wrong. A sentinel is
+    # cause-agnostic and also covers "python3 missing, so no output at all".
+    sys.stdout.write("END\n")
+    sys.stdout.flush()
+    sys.exit(code)
+
 def emit(*fields):
     sys.stdout.write("\x1f".join(_sanitize(f) for f in fields) + "\n")
 
 # ── Load config ──────────────────────────────────────────────────────────
 if not os.path.exists(cfg_path):
     emit("STATE", "absent", f"no config at {cfg_path}")
-    sys.exit(0)
+    _finish(0)
 
 try:
     with open(cfg_path, "r") as fh:
         raw = fh.read()
 except OSError as e:
     emit("STATE", "malformed_json", f"could not read {cfg_path}: {e}")
-    sys.exit(0)
+    _finish(0)
 
 try:
     doc = json.loads(raw)
 except Exception as e:
     emit("STATE", "malformed_json", f"{cfg_path}: {e}")
-    sys.exit(0)
+    _finish(0)
 
 if not isinstance(doc, dict):
     emit("STATE", "malformed_root", f"{cfg_path}: root is {type(doc).__name__}, expected object")
-    sys.exit(0)
+    _finish(0)
 
 emit("STATE", "ok", cfg_path)
 
@@ -452,7 +490,13 @@ if registry_state != "ok":
 # login_session_stamp was therefore never recorded — permanently disabling
 # guard 1 on every later run, from one typo. `team` also composes a filesystem
 # path and reaches an argv, so this is defense in depth, not cosmetics.
-BAD_CHARS = set("\t\n\r\x1e\x1f" + chr(34) + chr(92))
+# \x00 is rejected for a different reason than the rest: it does not desync the
+# protocol, it is silently DELETED by bash's command substitution around
+# _hr_resolve, so `a<NUL>b` reaches the gates as `ab` — a corrupted identifier
+# that could match a different team than the one configured. No legitimate team
+# id or argument can contain it, and unlike the surrogate case there is nothing
+# to preserve, so rejecting at validation is the right layer here.
+BAD_CHARS = set("\t\n\r\x1e\x1f\x00" + chr(34) + chr(92))
 
 for idx, entry in enumerate(autostart_raw):
     if not isinstance(entry, dict):
@@ -498,6 +542,7 @@ for idx, entry in enumerate(autostart_raw):
         if gate2 == "FAIL":
             reason_bits.append(f"gate2 FAIL: derived prefix '{prefix}' not in team-paths.json .teams")
         emit("ENTRY", idx, "SKIP", team, args_packed, prefix, gate1, gate2, "; ".join(reason_bits))
+_finish(0)
 PY
 }
 
@@ -613,6 +658,10 @@ cmd_restore() {
 
     local resolved
     resolved="$(_hr_resolve "$filter_team")"
+    if ! _hr_stream_complete "$resolved"; then
+        err "restore: the config resolver did not run to completion (no END sentinel) — refusing to act on a truncated entry list, because the missing entries would look like they were never configured. Run: kb-host-ready.sh check"
+        return 1
+    fi
 
     local state=""
     local overall_rc=0
@@ -828,6 +877,11 @@ cmd_lock() {
 
     local resolved lock_configured="false" state=""
     resolved="$(_hr_resolve "")"
+    if ! _hr_stream_complete "$resolved"; then
+        err "lock: the config resolver did not run to completion (no END sentinel) — refusing, since intent to lock cannot be read from a truncated stream (§2.2)"
+        _HR_LAST_LOCK_REASON="resolver stream incomplete"
+        return 1
+    fi
     while IFS=$'\x1f' read -r rectype f1 f2; do
         case "$rectype" in
             STATE) state="$f1" ;;
@@ -926,6 +980,11 @@ cmd_login() {
     # between deciding intent and acting on it.
     _HR_PRERESOLVED="$(_hr_resolve_uncached "")"
     _HR_PRERESOLVED_KEY=""
+    if ! _hr_stream_complete "$_HR_PRERESOLVED"; then
+        err "login: the config resolver did not run to completion (no END sentinel) — doing NOTHING this run. Neither restoring a partial team list nor locking on unreadable intent is safe, and both would be silent. Run: kb-host-ready.sh check"
+        notify "kb-host-ready: config resolver failed to complete — no teams restored, no lock. Run: kb-host-ready.sh check"
+        return 1
+    fi
     resolved_state="$(printf '%s\n' "$_HR_PRERESOLVED" | awk -F$'\x1f' '$1=="STATE"{print $2; exit}')"
     if [ "$resolved_state" = "absent" ]; then
         log "login: no config at ${KB_HOST_READY_CONFIG} — nothing to do, touching nothing"
