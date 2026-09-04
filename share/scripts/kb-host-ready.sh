@@ -1055,6 +1055,15 @@ cmd_status() {
 
     local resolved state="" lock_configured="false" registry_state=""
     resolved="$(_hr_resolve "")"
+    # A truncated stream must NOT be rendered as a complete picture (XACA-1066,
+    # fifth shape). Without this, status printed a one-row table and
+    # "config state: ok" at rc=0 for a config whose resolver had died — a
+    # partial list shown as the whole truth, which is the quiet version of the
+    # same defect that made restore drop a valid team.
+    if ! _hr_stream_complete "$resolved"; then
+        err "status: the config resolver did not run to completion (no END sentinel) — the entry list below is TRUNCATED and must not be read as complete. Run: kb-host-ready.sh check"
+        return 1
+    fi
     local tmux_bin
     tmux_bin="$(_hr_resolve_tmux 2>/dev/null)"
 
@@ -1126,6 +1135,19 @@ cmd_check() {
     fi
 
     resolved="$(_hr_resolve "")"
+    # THE most important instance of this guard (XACA-1066, fifth shape).
+    # restore/lock/login all tell the operator to "Run: kb-host-ready.sh check",
+    # and the runbook calls check the reliable signal. Without this guard check
+    # reported "all clear" at rc=0 on the very config that had just made login
+    # refuse to do anything — the operator follows the instruction in the error
+    # message and is told nothing is wrong. Note that check may exit non-zero
+    # ANYWAY on such a config if a surviving entry happens to fail validation;
+    # that is coincidence, not detection, and it disappears when the aborting
+    # entry is last. This guard makes the detection explicit and unconditional.
+    if ! _hr_stream_complete "$resolved"; then
+        err "check: the config resolver did not run to completion (no END sentinel) — validation is INCOMPLETE and cannot be trusted. Some entries were never evaluated. Check ${KB_HOST_READY_CONFIG} for a value the resolver cannot encode (an unpaired surrogate such as \\ud800 is valid JSON but not valid UTF-8)."
+        return 1
+    fi
     while IFS=$'\x1f' read -r rectype f1 f2 f3 f4 f5 f6 f7 f8; do
         case "$rectype" in
             STATE)
