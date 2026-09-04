@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.20.4] - 2026-09-04
+
 - **XACA-1063-022 — `kb-msg-provision` now resolves team ownership from `primary_host`, not from local board-file presence.** A dormant board file left behind by a migration outranked an explicit ownership declaration, so this machine claimed two teams that had moved away and would have retargeted their cross-machine mail. Resolution is now tiered: alias/board-less entries are skipped, a declared `primary_host` wins outright, an existing routing-map entry is honoured when none is declared, and the old board-file check survives only as a bootstrap last resort that can never overrule either.
 - **XACA-1022 (follow-up) — bumps the Fleet Monitor dashboard's `lcars-sound.js` cache-buster, which XACA-1022 deliberately deferred.** `fleet-monitor/server/public/lcars/lcars-dashboard.html` goes `?v=1.0` -> `1.3`. XACA-1022 rebound the sound engine from pointer release to `pointerdown`, changing `fleet-monitor/server/public/lcars/js/lcars-sound.js` — but lcars assets are cached by their full `?v=` URL, so any returning client keeps serving the OLD engine until the token changes. The bump was backed out of XACA-1022 itself because this file was contended by XACA-1030's tap mirror at the time: editing it from that ticket made `sync-tap-drift` attribute the resulting drift as OWNED by PR #803 rather than INHERITED, blocking a gate on a difference that PR had not caused. XACA-1030 has since merged, canonical and tap agree on the rest of the file, and the line is no longer contended. `share/lcars-ui/index.html` already carries its own bump (`?v=2.3`) from XACA-1022 and is untouched here. **Consumers who have loaded the Fleet Monitor dashboard before will not hear the press-time fix until this ships.**
 
@@ -2523,7 +2525,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.3...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.4...HEAD
+[0.20.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.3...v0.20.4
 [0.20.3]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.2...v0.20.3
 [0.20.2]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.0...v0.20.1
