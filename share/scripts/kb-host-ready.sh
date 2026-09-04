@@ -345,8 +345,27 @@ team_paths_path = os.environ["TEAMPATHS"]
 workdir = os.environ["WORKDIR"]
 filter_team = os.environ.get("FILTERTEAM") or ""
 
+def _sanitize(v):
+    # One record per LINE, fields separated by \x1f. A raw newline (or \r) inside
+    # ANY field forks the record: bash's `read` gets a truncated line and the
+    # remainder is parsed as a bogus next record, silently losing the diagnostic
+    # text. BAD_CHARS rejects these in a team value, but a REJECTED entry is
+    # still reported and its raw team reaches this emit — so sanitize at the
+    # protocol boundary rather than trusting every caller (XACA-1066-018).
+    #
+    # ESCAPE ONLY \n AND \r. Do NOT touch \x1e: it is the args sub-delimiter
+    # INSIDE the args_packed field, and escaping it collapses a multi-argument
+    # team into one malformed argument (measured: freelance's two args arrived
+    # as the single token `p1\x1ep2`). Do NOT escape the backslash either — it
+    # would double every backslash in path-bearing diagnostics for no gain.
+    # Neither omission creates ambiguity: BAD_CHARS already rejects backslash,
+    # \x1e and \x1f in both team and args values, so a surviving "\n" here can
+    # only have come from this escape.
+    v = str(v)
+    return v.replace("\n", "\\n").replace("\r", "\\r")
+
 def emit(*fields):
-    sys.stdout.write("\x1f".join(str(f) for f in fields) + "\n")
+    sys.stdout.write("\x1f".join(_sanitize(f) for f in fields) + "\n")
 
 # ── Load config ──────────────────────────────────────────────────────────
 if not os.path.exists(cfg_path):
