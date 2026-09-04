@@ -760,6 +760,77 @@ install_kb_init_team_scripts() {
     fi
 }
 
+# XACA-1078-004: Provision the cross-machine kb-msg routing map
+# (~/.aiteamforge/team-machines.json) at install time. This is the consumer
+# install-side counterpart to XACA-1078-003's kb-init-team site — see
+# kanban/plans/XACA-1078/XACA-1078_msg_routing_provisioning.md, "The
+# Unattended-Write Contract".
+#
+# ADDITIVE-ONLY, NEVER FATAL. Placed right after install_kb_init_team_scripts
+# (this is "the point the other $AITEAMFORGE_DIR/scripts/ seeding happens" —
+# the same $AITEAMFORGE_DIR/scripts/ tree the two functions above populate).
+# kb-msg-provision itself is seeded earlier in the setup sequence by
+# install-shell.sh's install_helper_scripts() (aiteamforge-setup.sh sources
+# and calls install_shell_environment before install_kanban_system), so on a
+# normal fresh install the tool is already on disk by the time this runs; if
+# it is not (e.g. INSTALL_SHELL=no), this reports the gap rather than failing
+# silently or aborting the installer.
+#
+# Runs the FULL --unattended run (no --add-team): this call site is
+# authorised to speak for the WHOLE machine (Decision 1's scope table —
+# "Tap install / aiteamforge upgrade -> the machine's own residency -> whole
+# machine"), unlike kb-init-team's narrow single-team assertion. No --server
+# is passed: rule 9 permits it only from a value already recorded in
+# configuration or supplied by the installer's own operator input, and
+# neither is available at this call site — passing a guessed/hard-coded
+# default is exactly what rule 9 forbids.
+#
+# This script runs under `set -euo pipefail` (see top of file). Uses the same
+# `if VAR="$(cmd)"; then ... else ... fi` idiom as kb-init-team's own
+# XACA-1078-003 site rather than a bare failing assignment or `cmd && other`,
+# because either of those would abort the ENTIRE installer right here
+# (feedback_set_e_last_line_short_circuit.md). Exit 1 (declined) and exit 2
+# (environment problem) are treated IDENTICALLY — warn, continue, never
+# propagate, never suppress the reason (Decision 3 / rule 12).
+provision_msg_routing() {
+    local routing_script="$AITEAMFORGE_DIR/scripts/kb-msg-provision"
+
+    # Mirrors this file's own DRY_RUN convention (see _knowledge_dry_run
+    # above): a DRY_RUN=true outer run previews rather than writes.
+    if [ "${DRY_RUN:-false}" = "true" ]; then
+        info "[dry-run] would run: kb-msg-provision --unattended (machine routing map)"
+        return 0
+    fi
+
+    if [ ! -f "$routing_script" ]; then
+        warning "ROUTING: NOT PROVISIONED (kb-msg-provision not found at ${routing_script})"
+        warning "  Run by hand once available: kb-msg-provision --unattended"
+        return 0
+    fi
+
+    local routing_out routing_rc
+    # --quiet suppresses the tool's routine stdout report; its decline/
+    # environment messages always print to stderr regardless of --quiet
+    # (kb-msg-provision's `_notice`/`_die_env`), so `2>&1` here captures
+    # exactly the reason, nothing more, for verbatim disclosure below.
+    if routing_out="$(python3 "$routing_script" --unattended --quiet 2>&1)"; then
+        routing_rc=0
+    else
+        routing_rc=$?
+    fi
+
+    if [ "$routing_rc" -eq 0 ]; then
+        success "Machine routing map (kb-msg-provision --unattended)"
+    else
+        warning "ROUTING: NOT PROVISIONED (kb-msg-provision exited ${routing_rc})"
+        if [ -n "$routing_out" ]; then
+            echo "$routing_out" >&2
+        fi
+        warning "  Run by hand to resolve: kb-msg-provision --unattended"
+    fi
+    return 0
+}
+
 # Install kanban hooks
 install_kanban_hooks() {
     local hooks_src="$INSTALL_ROOT/share/kanban-hooks"
@@ -2700,6 +2771,12 @@ install_kanban_system() {
     install_lcars_remote_atf_resolve_script
     install_kb_init_team_scripts
     install_kanban_hooks
+
+    # XACA-1078-004: provision the cross-machine kb-msg routing map. Runs
+    # right after the scripts/ seeding above (see provision_msg_routing's
+    # header comment for why this is "the point the other scripts/ seeding
+    # happens"). ADDITIVE-ONLY, NEVER FATAL — never aborts install_kanban_system.
+    provision_msg_routing
 
     # Provision ~/knowledge. Repo clone FIRST (XACA-0747): turn an empty/absent/
     # husk ~/knowledge into a real clone of the canonical repo (auth-gated soft

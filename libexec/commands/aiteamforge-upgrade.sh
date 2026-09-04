@@ -1497,6 +1497,17 @@ PYEOF
 # "Copying framework files" step, which runs before install_kanban_system;
 # this list exists specifically for boxes that skip that step because they
 # are upgrading, not installing.
+# XACA-1078-004: kb-msg-provision is the SAME gap class as kb-api-key above —
+# it ships to fresh installs via install-shell.sh::install_helper_scripts(),
+# which (per the XACA-0395 note above) is only ever called from
+# aiteamforge-setup.sh, never from this upgrade command. Measured 2026-09-04:
+# it is absent from $AITEAMFORGE_DIR/scripts/ on BOTH consumer machines
+# (darren-m4-mini, darren-m1pro-mbp) today. Without this entry,
+# provision_msg_routing() below (the new unconditional upgrade-side call this
+# subitem adds) would find no tool to invoke on either box and could only
+# report the gap forever — never close it. It is extensionless like
+# kb-init-team and kb-api-key, so it also needs the explicit glob-sweep entry
+# below (the `*.sh`/`*.py` globs cannot match an extensionless name).
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -1508,6 +1519,7 @@ lcars-remote-atf-resolve.sh
 kb-api-key
 kb-ttyd-bridge.sh
 kb-host-ready.sh
+kb-msg-provision
 EOF
 }
 
@@ -1533,10 +1545,11 @@ update_runtime_helpers() {
 
   local updated=0
   local src name target
-  # Sweep shipped helpers. kb-init-team and kb-api-key are extensionless, so
-  # each is listed explicitly alongside the *.sh / *.py globs (XACA-0395: same
-  # gap class as kb-init-team — the glob cannot match an extensionless name).
-  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key; do
+  # Sweep shipped helpers. kb-init-team, kb-api-key, and kb-msg-provision are
+  # extensionless, so each is listed explicitly alongside the *.sh / *.py
+  # globs (XACA-0395: same gap class as kb-init-team — the glob cannot match
+  # an extensionless name; kb-msg-provision added under XACA-1078-004).
+  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision; do
     [ -f "$src" ] || continue
     name="$(basename "$src")"
     target="${scripts_dest}/${name}"
@@ -1621,6 +1634,85 @@ update_runtime_helpers() {
       echo "Would update: fleet-monitor/client/fleet-reporter.sh (operative copy)"
     fi
   fi
+}
+
+# XACA-1078-004: Provision the cross-machine kb-msg routing map
+# (~/.aiteamforge/team-machines.json) on EVERY upgrade, not just a fresh
+# install. install-kanban.sh's own site (XACA-1078-004's install-side
+# counterpart, called only from `aiteamforge setup`) never reaches a box that
+# only ever runs `brew upgrade` — the exact install-only-reaches-fresh-installs
+# bug class this repo has hit before (XACA-0747/0751/0814). Both consumer
+# machines measured 2026-09-04 have NEVER had team-machines.json written (the
+# map, its .pre-kb-msg-provision.bak, AND fleet-config.json are all absent) —
+# this is the site that closes that gap for them. See
+# kanban/plans/XACA-1078/XACA-1078_msg_routing_provisioning.md, "The
+# Unattended-Write Contract".
+#
+# Runs UNCONDITIONALLY: it is not gated on "already installed" or a version
+# check — a version-gated backfill would never fire on a box that has been on
+# a qualifying version since before this gate existed, which is precisely the
+# state both measured consumer machines are in.
+#
+# Placed AFTER update_runtime_helpers, which is what materialises
+# kb-msg-provision itself onto an already-installed box that never had it
+# (the _xaca0673_mandatory_materialize_basenames entry added alongside this
+# function) — calling this before it would find nothing to invoke on exactly
+# the machines that need it, same rationale as the ttyd-bridge reconcile
+# function immediately below.
+#
+# Runs the FULL --unattended run (no --add-team): this call site is
+# authorised to speak for the WHOLE machine (Decision 1's scope table — "Tap
+# install / aiteamforge upgrade -> the machine's own residency -> whole
+# machine"), unlike kb-init-team's narrow single-team assertion. No --server
+# is passed: rule 9 permits it only from a value already recorded in
+# configuration or supplied by the installer's own operator input, and
+# neither is available at this call site — passing a guessed/hard-coded
+# default is exactly what rule 9 forbids.
+#
+# This script runs under `set -eo pipefail` (see top of file). Uses the same
+# `if VAR="$(cmd)"; then ... else ... fi` idiom as kb-init-team's own
+# XACA-1078-003 site rather than a bare failing assignment or `cmd && other`,
+# because either would abort the ENTIRE upgrade right here
+# (feedback_set_e_last_line_short_circuit.md). Exit 1 (declined) and exit 2
+# (environment problem) are treated IDENTICALLY — warn, continue, never
+# propagate, never suppress the reason (Decision 3 / rule 12).
+provision_msg_routing() {
+  print_section "Machine Routing Map"
+
+  local routing_script="${WORKING_DIR}/scripts/kb-msg-provision"
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "Would run: kb-msg-provision --unattended (machine routing map)"
+    return 0
+  fi
+
+  if [ ! -f "$routing_script" ]; then
+    print_warning "ROUTING: NOT PROVISIONED (kb-msg-provision not found at ${routing_script})"
+    print_warning "  Run by hand once available: kb-msg-provision --unattended"
+    return 0
+  fi
+
+  local routing_out routing_rc
+  # --quiet suppresses the tool's routine stdout report; its decline/
+  # environment messages always print to stderr regardless of --quiet
+  # (kb-msg-provision's `_notice`/`_die_env`), so `2>&1` here captures
+  # exactly the reason, nothing more, for verbatim disclosure below.
+  if routing_out="$(python3 "$routing_script" --unattended --quiet 2>&1)"; then
+    routing_rc=0
+  else
+    routing_rc=$?
+  fi
+
+  if [ "$routing_rc" -eq 0 ]; then
+    print_success "Machine routing map (kb-msg-provision --unattended)"
+  else
+    print_warning "ROUTING: NOT PROVISIONED (kb-msg-provision exited ${routing_rc})"
+    if [ -n "$routing_out" ]; then
+      echo "$routing_out" >&2
+    fi
+    print_warning "  Run by hand to resolve: kb-msg-provision --unattended"
+  fi
+  return 0
 }
 
 # XACA-0161-002: reconcile the per-(team, terminal) ttyd terminal-bridge
@@ -2813,6 +2905,7 @@ update_aux_scripts
 update_team_scripts
 update_connect_scripts
 update_runtime_helpers
+provision_msg_routing
 update_ttyd_bridge
 update_imgcat
 update_shell_helpers
