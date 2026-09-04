@@ -844,14 +844,33 @@ def _write_defaults(config_path: Path) -> None:
     quarantine, no double backup. The actual write goes through
     _atomic_write_json (tmp file + os.replace + fsync) rather than a bare
     write_text (XACA-1029-003).
+
+    XACA-1059 (PR #817 review round): the write-side plausibility floor is
+    checked via _reject_if_below_write_floor BEFORE the quarantine step
+    above, not just inside _atomic_write_json after it. Quarantine MOVES
+    whatever currently exists at config_path aside; if the floor check ran
+    only inside _atomic_write_json, a refusal there would arrive AFTER the
+    existing registry was already moved out from under config_path, leaving
+    it ABSENT (contents only in the quarantine backup) rather than untouched
+    — exactly backwards from the fail-closed property this floor exists to
+    provide. Checking first means a refused write never reaches the
+    quarantine step at all. (In practice this payload is the constant-size
+    DEFAULT_TEAMS dict, always well above the floor, so this is currently
+    unreachable — but the ordering bug was real and this closes it
+    regardless of payload size.) ``except (OSError, ValueError)`` below is a
+    second, independent line of defense: even if some future change reorders
+    this function, a floor refusal can never again escape as an uncaught
+    exception.
     """
     try:
+        payload = _make_default_config()
+        _reject_if_below_write_floor(payload, resolved=config_path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         _quarantine_or_snapshot_existing(
             config_path, tag="pre-write-defaults", label="_write_defaults"
         )
-        _atomic_write_json(config_path, _make_default_config())
-    except OSError as exc:
+        _atomic_write_json(config_path, payload)
+    except (OSError, ValueError) as exc:
         print(
             f"[aiteamforge-paths] WARNING: could not write default config to "
             f"{config_path}: {exc}",
@@ -1533,6 +1552,53 @@ def diff_missing_anthropic_fields(config: dict) -> list[tuple[str, list[str]]]:
 # A fourth pass must reuse this driver rather than clone it.
 
 
+def _reject_if_below_write_floor(data: dict, *, resolved: Path | None = None) -> str:
+    """Serialize *data* and raise ValueError if it lands below the write-side
+    plausibility floor (``_MIN_PLAUSIBLE_REGISTRY_BYTES``).
+
+    XACA-1059 (PR #817 review round): factored out of ``_atomic_write_json`` so
+    callers that must do something IRREVERSIBLE before the write can check the
+    floor FIRST. ``_write_defaults`` and ``wizard_hook_create_config`` both call
+    ``_quarantine_or_snapshot_existing()`` — which MOVES the existing registry
+    aside — immediately before writing. Previously, a floor refusal there
+    raised ``ValueError`` past those two callers' ``except OSError`` handlers
+    (``ValueError`` is not an ``OSError``) AFTER the quarantine had already
+    happened, leaving ``team-paths.json`` ABSENT at the canonical path (its
+    contents surviving only in a ``.bak-*`` file) on top of an uncaught
+    exception. Checking the floor here, before either caller quarantines
+    anything, means a refusal is a true no-op: nothing on disk moves, nothing
+    is deleted, and the caller never reaches the quarantine step at all. See
+    ``_write_defaults`` / ``wizard_hook_create_config`` for the call sites, and
+    ``_atomic_write_json`` below, which still re-runs this same check itself,
+    immediately before it writes, as a backstop for any caller that calls it
+    directly without going through this pre-check.
+
+    Returns the serialized JSON string on success, so a caller that will need
+    it anyway (``_atomic_write_json``) does not have to serialize twice.
+    """
+    serialized = json.dumps(data, indent=2)
+    serialized_bytes = len(serialized.encode("utf-8"))
+    if serialized_bytes < _MIN_PLAUSIBLE_REGISTRY_BYTES:
+        target_desc = f" {resolved}" if resolved is not None else ""
+        print(
+            f"[aiteamforge-paths] write-guard: REFUSING to write{target_desc} — "
+            f"payload is only {serialized_bytes} bytes, below the "
+            f"{_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte plausibility floor for a "
+            f"real registry (XACA-1059-006, mirrors the XACA-1029 read-side "
+            f"floor — see _MIN_PLAUSIBLE_REGISTRY_BYTES). This would create "
+            f"exactly the kind of implausibly-short file XACA-1029 already "
+            f"refuses to self-heal from. No write performed; the file on "
+            f"disk (if any) is untouched.",
+            file=sys.stderr,
+        )
+        raise ValueError(
+            f"refusing to write{target_desc}: payload ({serialized_bytes} bytes) "
+            f"is below the {_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte registry "
+            f"plausibility floor (XACA-1059-006)"
+        )
+    return serialized
+
+
 def _atomic_write_json(target: Path, data: dict) -> None:
     """Atomically rewrite *target* with *data*, preserving file mode and symlink identity.
 
@@ -1561,32 +1627,27 @@ def _atomic_write_json(target: Path, data: dict) -> None:
     created and before the existing target is touched — so a refusal here can
     never truncate, partially write, or otherwise disturb whatever is already
     on disk. Fails CLOSED: raises, same as every other failure path in this
-    function, which every caller already treats as "degrade to an in-memory
-    transform, do not touch disk" (see _rewrite_config_on_disk).
+    function. Most callers treat a raised exception as "degrade to an
+    in-memory transform, do not touch disk" (see _rewrite_config_on_disk);
+    ``_write_defaults`` and ``wizard_hook_create_config`` additionally
+    pre-check via ``_reject_if_below_write_floor`` BEFORE they quarantine an
+    existing file, specifically so this floor is never the reason an existing
+    registry gets moved aside for a write that was always going to be refused
+    — see that function's docstring.
 
-    Raises on failure (callers degrade to an in-memory transform).
+    XACA-1059 (directory fsync): the file's own fsync above only makes its
+    CONTENTS durable; the os.replace() rename that makes those contents
+    visible at ``resolved``'s path is a separate directory-metadata change
+    that needs its own fsync to survive a power loss between the replace and
+    whatever unrelated event next syncs that directory.
+
+    Raises ValueError on the plausibility floor (see
+    ``_reject_if_below_write_floor``) or OSError on any I/O failure (callers
+    degrade to an in-memory transform).
     """
     resolved = target.resolve()
 
-    serialized = json.dumps(data, indent=2)
-    serialized_bytes = len(serialized.encode("utf-8"))
-    if serialized_bytes < _MIN_PLAUSIBLE_REGISTRY_BYTES:
-        print(
-            f"[aiteamforge-paths] write-guard: REFUSING to write {resolved} — "
-            f"payload is only {serialized_bytes} bytes, below the "
-            f"{_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte plausibility floor for a "
-            f"real registry (XACA-1059-006, mirrors the XACA-1029 read-side "
-            f"floor — see _MIN_PLAUSIBLE_REGISTRY_BYTES). This would create "
-            f"exactly the kind of implausibly-short file XACA-1029 already "
-            f"refuses to self-heal from. No write performed; the file on "
-            f"disk (if any) is untouched.",
-            file=sys.stderr,
-        )
-        raise ValueError(
-            f"refusing to write {resolved}: payload ({serialized_bytes} bytes) "
-            f"is below the {_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte registry "
-            f"plausibility floor (XACA-1059-006)"
-        )
+    serialized = _reject_if_below_write_floor(data, resolved=resolved)
 
     # Capture the mode we must restore. A missing original is not fatal — we simply
     # have no mode to preserve and let the umask stand.
@@ -1606,6 +1667,14 @@ def _atomic_write_json(target: Path, data: dict) -> None:
         if orig_mode is not None:
             os.chmod(tmp_path, orig_mode)
         os.replace(str(tmp_path), str(resolved))
+        try:
+            dir_fd = os.open(str(resolved.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass  # best-effort — the rename itself already succeeded
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -3108,6 +3177,15 @@ def wizard_hook_create_config(teams_dict: dict, force: bool = False) -> bool:
         "teams": teams_dict,
     }
     try:
+        # XACA-1059 (PR #817 review round): check the write-side plausibility
+        # floor BEFORE the quarantine step below — see _write_defaults's
+        # docstring for why the ordering matters (quarantine MOVES the
+        # existing registry aside; a refusal that only fired after that step
+        # would leave the registry ABSENT instead of untouched). Measured
+        # reachable here: an empty teams_dict serializes to 40 bytes, a
+        # single small team to 135 — both under the floor, and force=True
+        # makes this reachable against an already-populated live registry.
+        _reject_if_below_write_floor(config, resolved=config_path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # XACA-1029-003/-005: quarantine (MOVE, never read+copy) whatever
         # exists before overwriting, then write atomically. See
@@ -3121,7 +3199,7 @@ def wizard_hook_create_config(teams_dict: dict, force: bool = False) -> bool:
         _CONFIG_CACHE = None
         _CONFIG_PATH_AT_LOAD = None
         return True
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(
             f"[aiteamforge-paths] ERROR: could not write config: {exc}",
             file=sys.stderr,

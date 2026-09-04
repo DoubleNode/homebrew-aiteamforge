@@ -153,8 +153,18 @@ printf '%s\n' "$CONFIG_JSON" > "$_json_src"
 # never truncated on open and never unlinked (a racing writer -- the LCARS
 # server's account/copyright handlers, or a self-heal pass -- must always
 # resolve the SAME lock inode as this process).
-python3 - "$_json_src" "$CONFIG_PATH" <<'PYEOF'
+#
+# Exit code contract (XACA-1059, PR #817 review round -- matches
+# scripts/kb-port-reconcile's _update_team_paths_json convention, documented
+# there): 0 = wrote successfully. 2 = a write was attempted and refused for a
+# real reason (the plausibility floor below, or the lock file could not be
+# opened/created) -- this script's OTHER top-level errors (bad args, missing
+# loader, file exists without --force) stay at the generic 1 used throughout
+# the rest of this script; only a REFUSED WRITE gets the distinct code, so
+# a refusal is never confused with an ordinary usage error.
+python3 - "$_json_src" "$CONFIG_PATH" "$PYTHON_LOADER" <<'PYEOF'
 import fcntl
+import importlib.util
 import os
 import stat
 import sys
@@ -163,21 +173,38 @@ from pathlib import Path
 
 json_src = Path(sys.argv[1])
 config_path = Path(sys.argv[2])
+loader_path = sys.argv[3] if len(sys.argv) > 3 else ""
 payload = json_src.read_text(encoding="utf-8")
 
 resolved = config_path.resolve()
 lock_path = resolved.with_name(f"{resolved.name}.lock")
 
-# XACA-1059-006: write-side plausibility floor, mirroring the read-side floor
-# XACA-1029 established in kanban-hooks/aiteamforge_paths.py
-# (_MIN_PLAUSIBLE_REGISTRY_BYTES = 200; reproduced here rather than imported
-# -- that name is module-private and this script does not otherwise depend
-# on the module being importable). A rendered DEFAULT_TEAMS config is never
-# legitimately this small; if it ever were, something upstream (the loader
-# import, DEFAULT_TEAMS itself) is already broken. Fail CLOSED: refuse and
-# report loudly, before any tmp file is created, rather than writing a
-# short/placeholder file over a possibly-live registry.
+# XACA-1059: single-source the write-side plausibility floor from the
+# canonical module (this script already importlib.exec_module()s it above,
+# to read SUPPORTED_SCHEMA_VERSION/DEFAULT_TEAMS -- the "this script does not
+# otherwise depend on that module being importable" justification the review
+# flagged was false for exactly this file). Falls back to the known value if
+# the module can't be loaded, so this floor is never itself a hard
+# dependency.
 _MIN_PLAUSIBLE_REGISTRY_BYTES = 200
+if loader_path:
+    try:
+        _spec = importlib.util.spec_from_file_location("_aiteamforge_init_floor_mod", loader_path)
+        if _spec is not None and _spec.loader is not None:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            _MIN_PLAUSIBLE_REGISTRY_BYTES = getattr(
+                _mod, "_MIN_PLAUSIBLE_REGISTRY_BYTES", _MIN_PLAUSIBLE_REGISTRY_BYTES
+            )
+    except Exception:
+        pass  # keep the fallback
+
+# A rendered DEFAULT_TEAMS config is never legitimately this small; if it
+# ever were, something upstream (the loader import, DEFAULT_TEAMS itself) is
+# already broken. Fail CLOSED: refuse and report loudly, before any tmp file
+# is created, rather than writing a short/placeholder file over a possibly-
+# live registry (--force makes this reachable against a live, already-
+# populated registry, not just a first-time bootstrap).
 _payload_bytes = len(payload.encode("utf-8"))
 if _payload_bytes < _MIN_PLAUSIBLE_REGISTRY_BYTES:
     print(
@@ -188,9 +215,15 @@ if _payload_bytes < _MIN_PLAUSIBLE_REGISTRY_BYTES:
         f"(if any) is untouched.",
         file=sys.stderr,
     )
-    sys.exit(1)
+    sys.exit(2)
 
-with open(lock_path, "a") as lock:
+try:
+    lock = open(lock_path, "a")
+except OSError as exc:
+    print(f"aiteamforge-paths-init.sh: cannot create/open lock file {lock_path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+with lock:
     fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
     try:
         try:
@@ -209,10 +242,46 @@ with open(lock_path, "a") as lock:
                 os.fsync(f.fileno())
             if orig_mode is not None:
                 os.chmod(tmp_path, orig_mode)
+            else:
+                # XACA-1059: mkstemp() always creates at 0600 regardless of
+                # umask -- fine for a throwaway scratch file, wrong for a
+                # config meant to land at the conventional umask-respecting
+                # mode. This IS the first-time-bootstrap path (no pre-
+                # existing file to inherit a mode from is the common case
+                # here, unlike kb-port-reconcile's writer), so silently
+                # landing at 0600 instead of ~0644 is a real, easily-hit
+                # behaviour change, not a corner case. Compute what a plain
+                # open() would have produced under the CURRENT umask and
+                # apply that instead, matching every other writer in this
+                # codebase (they all use plain open(), which already
+                # respects umask automatically -- existing-file mode
+                # preservation above is unaffected by this branch).
+                _umask = os.umask(0o022)
+                os.umask(_umask)
+                os.chmod(tmp_path, 0o666 & ~_umask)
             os.replace(str(tmp_path), str(resolved))
+            try:
+                _dir_fd = os.open(str(resolved.parent), os.O_RDONLY)
+                try:
+                    os.fsync(_dir_fd)
+                finally:
+                    os.close(_dir_fd)
+            except OSError:
+                pass  # best-effort -- the rename itself already succeeded
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
+    except Exception as exc:
+        # XACA-1059 (PR #817 review round): a read-only target DIRECTORY (as
+        # opposed to the lock file itself, handled above) still let an
+        # unguarded step -- tempfile.mkstemp(), which needs to CREATE a new
+        # file, unlike the lock file open() above which only needs an
+        # EXISTING file to already be writable -- raise straight past every
+        # other handler here as a raw Python traceback instead of a clean,
+        # actionable message. Last-resort catch-all for any other
+        # unanticipated write failure too.
+        print(f"aiteamforge-paths-init.sh: write to {resolved} failed: {exc}", file=sys.stderr)
+        sys.exit(2)
     finally:
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         # Intentionally no lock_path.unlink() -- see XACA-0794-012 note above.

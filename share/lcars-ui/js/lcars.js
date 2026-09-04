@@ -20907,9 +20907,18 @@ async function saveTeamConfigCopyright() {
         // XACA-0333-005: server response now always includes saved copyright block (with is_placeholder)
         _populateCopyrightFields(result.teamConfig && result.teamConfig.copyright);
 
-        const msg = result.warning ? `Saved (${result.warning})` : 'Saved';
-        _setCopyrightStatus(statusEl, 'saved', msg);
-        setTimeout(() => _setCopyrightStatus(statusEl, '', ''), 3000);
+        if (result.warning) {
+            // Partial save: the fields were validated and applied in-memory, but the
+            // underlying write did not fully succeed (e.g. lock contention on
+            // team-paths.json — XACA-1059). Surface this as a distinct amber warning
+            // state rather than green "saved", and lead with the failure text instead
+            // of burying it in a parenthetical.
+            _setCopyrightStatus(statusEl, 'warning', `${result.warning} — changes may not be fully saved`);
+            setTimeout(() => _setCopyrightStatus(statusEl, '', ''), 6000);
+        } else {
+            _setCopyrightStatus(statusEl, 'saved', 'Saved');
+            setTimeout(() => _setCopyrightStatus(statusEl, '', ''), 3000);
+        }
 
     } catch (err) {
         console.error('[team-config] Copyright save failed:', err);
@@ -20921,6 +20930,12 @@ function _setCopyrightStatus(el, type, text) {
     if (!el) return;
     el.textContent = text;
     el.className = 'team-config-status' + (type ? ' ' + type : '');
+    // XACA-1059: no `.team-config-status.warning` rule exists in lcars.css yet, so the
+    // 'warning' type is colored inline (amber, matching the LCARS warning convention
+    // used for e.g. `.backup-stat .stat-value.status-warning`) rather than silently
+    // rendering with no distinguishing color. Cleared for every other type so it never
+    // leaks into a subsequent 'saved'/'error' state, which already have CSS-defined colors.
+    el.style.color = (type === 'warning') ? 'var(--lcars-amber, #ffcc00)' : '';
 }
 
 /**

@@ -89,6 +89,7 @@ try:
         build_import_path_maps as _aiteamforge_build_import_path_maps,
         teams_satisfy_canonical_guard,
         config_is_structurally_valid,
+        _MIN_PLAUSIBLE_REGISTRY_BYTES,
     )
     _AITEAMFORGE_PATHS_AVAILABLE = True
 except ImportError as e:
@@ -98,6 +99,11 @@ except ImportError as e:
         return {}
     def _aiteamforge_build_import_path_maps(_manifest: dict) -> list:  # type: ignore[no-redef]
         return []
+    # XACA-1059: aiteamforge_paths is the single source of truth for this
+    # constant (see its own module for the full rationale). This fallback
+    # only fires if that module is genuinely unimportable, matching every
+    # other name in this try/except's degrade-gracefully convention.
+    _MIN_PLAUSIBLE_REGISTRY_BYTES = 200
 
 # Import kanban activity logging from kanban-hooks
 try:
@@ -14167,6 +14173,87 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] ERROR updating team config: {e}")
             self._send_json_response({'success': False, 'error': str(e)}, status=500)
 
+    def _write_team_paths_registry(self, team_paths_file: Path, data: dict) -> None:
+        """Atomically write *data* as the team-paths.json registry at *team_paths_file*.
+
+        XACA-1059 (PR #817 review round): single-sources what used to be three
+        near-identical inline tmp-file + os.replace blocks in
+        _write_copyright_config, handle_team_account_save, and
+        handle_team_account_assign. Those three writers build the replacement
+        dict in-line rather than going through
+        kanban-hooks/aiteamforge_paths.py's _atomic_write_json, so XACA-1059-006's
+        write-side plausibility floor never covered them -- a caller bug that
+        emptied `data['teams']`, or any other bug that produced a too-small
+        payload, would previously have written a short-but-valid JSON file
+        straight over the live fleet registry with no guard at all. This
+        extends that floor (_MIN_PLAUSIBLE_REGISTRY_BYTES, imported from
+        aiteamforge_paths so the threshold has exactly one owner) to these
+        three call sites too.
+
+        Also fsyncs the containing directory after the os.replace(): the
+        file's own fsync (below) only durably persists its CONTENTS; the
+        rename that makes those contents visible at team_paths_file's path is
+        a separate piece of directory metadata that needs its own fsync to
+        survive a power loss between the replace and the next sync.
+
+        Callers are responsible for holding team-paths.json.lock (flock EX)
+        around this call, exactly as all three current callers already do --
+        this method only handles the write-floor check, mode preservation,
+        and the tmp-file/replace/fsync mechanics.
+
+        Raises ValueError if the serialized payload is below the plausibility
+        floor (no write performed, target left untouched). Raises OSError on
+        any I/O failure (tmp file removed, target left untouched). Every
+        current caller wraps this in a broad `except Exception` and reports
+        the message to the user/log rather than crashing.
+        """
+        serialized = json.dumps(data, indent=2)
+        serialized_bytes = len(serialized.encode('utf-8'))
+        if serialized_bytes < _MIN_PLAUSIBLE_REGISTRY_BYTES:
+            print(
+                f"[LCARS] write-guard: REFUSING to write {team_paths_file} — payload "
+                f"is only {serialized_bytes} bytes, below the "
+                f"{_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte plausibility floor for a real "
+                f"registry (XACA-1059, mirrors aiteamforge_paths._atomic_write_json's "
+                f"XACA-1059-006 floor). No write performed; the file on disk is "
+                f"untouched.",
+                file=sys.stderr,
+            )
+            raise ValueError(
+                f"refusing to write {team_paths_file}: payload ({serialized_bytes} "
+                f"bytes) is below the {_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte registry "
+                f"plausibility floor (XACA-1059-006)"
+            )
+
+        try:
+            orig_mode: int | None = stat.S_IMODE(os.stat(team_paths_file).st_mode)
+        except OSError:
+            orig_mode = None
+
+        tmp_path = team_paths_file.with_suffix(f'.json.tmp.{os.getpid()}')
+        try:
+            with open(tmp_path, 'w') as f:
+                f.write(serialized)
+                f.flush()
+                os.fsync(f.fileno())
+            if orig_mode is not None:
+                os.chmod(tmp_path, orig_mode)
+            os.replace(str(tmp_path), str(team_paths_file))
+            try:
+                dir_fd = os.open(str(team_paths_file.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass  # best-effort — the rename itself already succeeded
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
     def _write_copyright_config(self, team: str, copyright_fields: dict):
         """Write XACA-0332 copyright fields for `team` into ~/.aiteamforge/team-paths.json (schema v2).
 
@@ -14204,18 +14291,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     # Merge only the copyright fields; leave all other fields (kanban_dir, etc.) untouched
                     data['teams'][team].update(copyright_fields)
 
-                    # Atomic write via tmp file
-                    tmp_path = team_paths_file.with_suffix(f'.json.tmp.{os.getpid()}')
-                    try:
-                        with open(tmp_path, 'w') as f:
-                            json.dump(data, f, indent=2)
-                            f.flush()
-                            os.fsync(f.fileno())
-                        os.replace(str(tmp_path), str(team_paths_file))
-                    except Exception:
-                        if tmp_path.exists():
-                            tmp_path.unlink()
-                        raise
+                    # XACA-1059: atomic write via tmp file, with the write-side
+                    # plausibility floor + directory fsync — see
+                    # _write_team_paths_registry's docstring.
+                    self._write_team_paths_registry(team_paths_file, data)
 
                     # XACA-0333-002: invalidate the mtime cache so the next GET re-reads from disk.
                     # Do this BEFORE the success log and ONLY on successful write (not in except).
@@ -14424,20 +14503,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         data['teams'][team]['anthropic_account_nickname'] = account_nickname
                         data['teams'][team]['anthropic_api_key_env_var'] = env_var_name
 
-                        # Atomic write
-                        tmp_path = team_paths_file.with_suffix(f'.json.tmp.{os.getpid()}')
-                        try:
-                            with open(tmp_path, 'w') as f:
-                                json.dump(data, f, indent=2)
-                                f.flush()
-                                os.fsync(f.fileno())
-                            os.replace(str(tmp_path), str(team_paths_file))
-                        except Exception:
-                            try:
-                                tmp_path.unlink(missing_ok=True)
-                            except OSError:
-                                pass
-                            raise
+                        # XACA-1059: atomic write via tmp file, with the write-side
+                        # plausibility floor + directory fsync — see
+                        # _write_team_paths_registry's docstring.
+                        self._write_team_paths_registry(team_paths_file, data)
 
                         # Invalidate the mtime cache
                         with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
@@ -14897,20 +14966,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         tp_data['teams'][team]['anthropic_api_key_env_var'] = env_var_name
                         tp_data['teams'][team]['anthropic_account_ref'] = account_ref
 
-                        # Atomic write
-                        tmp_path = team_paths_file.with_suffix(f'.json.tmp.{os.getpid()}')
-                        try:
-                            with open(tmp_path, 'w') as f:
-                                json.dump(tp_data, f, indent=2)
-                                f.flush()
-                                os.fsync(f.fileno())
-                            os.replace(str(tmp_path), str(team_paths_file))
-                        except Exception:
-                            try:
-                                tmp_path.unlink(missing_ok=True)
-                            except OSError:
-                                pass
-                            raise
+                        # XACA-1059: atomic write via tmp file, with the write-side
+                        # plausibility floor + directory fsync — see
+                        # _write_team_paths_registry's docstring.
+                        self._write_team_paths_registry(team_paths_file, tp_data)
 
                         # Invalidate the mtime cache so next read sees the new data
                         with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
@@ -20577,17 +20636,58 @@ def _sweep_stale_locks() -> None:
       - ~/.aiteamforge/*.lock  (team-paths.json.lock and any siblings)
       - <board.json>.lock for every board reachable via TEAM_KANBAN_DIRS
 
-    A lock file is considered stale — and safe to remove — when BOTH:
-      1. Its mtime is older than 60 seconds (no live process is mid-write)
-      2. Its size is 0 bytes (server.py only ever opens lock files for 'w'
-         without writing content, so any real in-use lock is 0 bytes; files
-         written by other tools are preserved by the size guard)
+    XACA-1059 (PR #817 review round): a lock file is stale -- and safe to
+    remove -- exactly when a non-blocking exclusive flock() on it succeeds.
+    If the acquisition succeeds, no process currently holds the lock, so
+    it is safe to unlink; if it would block (reported as an OSError under
+    LOCK_NB), some process holds it RIGHT NOW and this sweep must leave it
+    alone, full stop -- regardless of its size or mtime.
 
-    Each unlink is best-effort; OSError is silently swallowed.
+    This replaces a prior "mtime >= 60s AND size == 0" heuristic. That
+    heuristic rested on a premise this docstring used to state outright:
+    "server.py only ever opens lock files for 'w' without writing content,
+    so any real in-use lock is 0 bytes." XACA-1059-005 invalidated that
+    premise for team-paths.json.lock specifically: it -- and every writer
+    that shares its inode (kanban-hooks/aiteamforge_paths.py's self-heal
+    passes, scripts/kb-port-reconcile, scripts/aiteamforge-paths-init.sh) --
+    now opens that lock 'a' and deliberately NEVER unlinks it, precisely so
+    its identity (inode) stays stable for as long as any process might still
+    be relying on it for mutual exclusion. A consequence nobody traced
+    through at the time: opening 'a' without writing leaves the file
+    permanently 0 bytes, and its mtime never advances merely from being
+    held (no write occurs) -- so a currently-HELD team-paths.json.lock
+    matched BOTH legs of the old heuristic forever. Every LCARS server
+    start was therefore eligible to unlink a lock a concurrent
+    kb-port-reconcile run (or a self-heal pass) was actively depending on,
+    hand a THIRD process a fresh inode at the same path, and reproduce --
+    through this very sweeper -- the exact lost-update race XACA-1059-005
+    exists to close. Confirmed empirically against a live held lock before
+    this fix (size=0, age=120s, old sweep criteria matched -> True).
+
+    A live flock probe is the correct staleness test for every kind of lock
+    file this sweep touches -- board locks included -- not a carve-out keyed
+    to team-paths.json.lock's name, and it needs no assumption about which
+    open-mode any particular writer happens to use.
+
+    Residual race (bounded, and far narrower than the bug this replaces):
+    the probe and the unlink are not a single step atomic against the rest
+    of the world. If some other process has already called open() on a
+    lock path but has not yet reached its own flock() call, this sweep's
+    non-blocking probe can still succeed (nobody holds the lock YET) and
+    go on to unlink the path out from under that in-flight opener. Every
+    writer's open()+flock() pair is two back-to-back statements with no
+    I/O in between, this sweep runs once at server startup rather than in
+    a busy loop, and the unlink happens while THIS process still holds the
+    just-acquired flock (so a genuinely concurrent flock() call from that
+    in-flight opener still resolves correctly against the old inode before
+    the path disappears) -- so the window is on the order of a scheduling
+    quantum, not the "permanently reproducible on every server start"
+    window this fix closes.
+
+    Each unlink is best-effort; a failure to unlink is silently swallowed
+    (the lock file survives to be re-evaluated on the next sweep).
     """
-    import time
-    now = time.time()
-    stale_age_secs = 60
+    import fcntl
 
     candidates: list[Path] = []
 
@@ -20604,17 +20704,30 @@ def _sweep_stale_locks() -> None:
     swept = 0
     for lock_path in candidates:
         try:
-            st = lock_path.stat()
+            fd = os.open(str(lock_path), os.O_RDONLY)
         except OSError:
             continue  # doesn't exist or no permission — skip
-        age = now - st.st_mtime
-        if age >= stale_age_secs and st.st_size == 0:
+
+        try:
+            acquired = False
             try:
-                lock_path.unlink(missing_ok=True)
-                swept += 1
-                print(f"[LCARS] Swept stale lock: {lock_path} (age {age:.0f}s)")
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
             except OSError:
-                pass  # best-effort
+                pass  # held right now — leave it alone, whatever its size/age
+
+            if acquired:
+                try:
+                    try:
+                        lock_path.unlink(missing_ok=True)
+                        swept += 1
+                        print(f"[LCARS] Swept stale lock: {lock_path}")
+                    except OSError:
+                        pass  # best-effort
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     if swept:
         print(f"[LCARS] Stale lock sweep complete — removed {swept} file(s).")

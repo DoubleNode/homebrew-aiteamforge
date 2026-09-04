@@ -1203,10 +1203,24 @@ PYEOF
 #     file while another process may still be blocked on it lets a third
 #     process acquire a lock on a fresh inode at the same path while the first
 #     holder still thinks it owns the old one (XACA-0794-012).
+#
+# Exit code contract (XACA-1059, PR #817 review round -- code 2 used to be
+# overloaded across BOTH the benign "nothing to do here" cases and the real
+# "we tried to write and had to refuse/fail" cases, so a caller could not
+# tell them apart):
+#   0 = wrote successfully, OR idempotent no-op (port already matches)
+#   1 = benign precondition not met -- registry missing, or team not present
+#       in it. Nothing was attempted; this is a skip, not a failure.
+#   2 = a write was attempted and refused/failed for a real reason -- the
+#       write-side plausibility floor, a re-read failure under the lock, or
+#       the lock file itself could not be opened/created. aiteamforge-paths-
+#       init.sh's floor-refusal path uses this same code for the same
+#       reason (see there).
 _update_team_paths_json() {
     local team="$1" newport="$2"
-    python3 - "$TEAM_PATHS_JSON" "$team" "$newport" <<'PYEOF'
+    python3 - "$TEAM_PATHS_JSON" "$team" "$newport" "$AITEAMFORGE_PATHS_PY" <<'PYEOF'
 import fcntl
+import importlib.util
 import json
 import os
 import stat
@@ -1215,13 +1229,39 @@ import tempfile
 from pathlib import Path
 
 path = Path(sys.argv[1]); team = sys.argv[2]; newport = int(sys.argv[3])
+paths_py = sys.argv[4] if len(sys.argv) > 4 else ""
 if not path.exists():
-    sys.exit(2)
+    sys.exit(1)
+
+# XACA-1059: single-source the write-side plausibility floor from the
+# canonical module (the same $AITEAMFORGE_PATHS_PY this script already
+# importlib.exec_module()s elsewhere -- e.g. _set_port_resolve above -- for
+# its band-allocation logic) instead of reproducing the literal. Falls back
+# to the known value if the module can't be loaded (e.g. an isolated test
+# fixture that doesn't define it), so this never becomes a hard dependency.
+_MIN_PLAUSIBLE_REGISTRY_BYTES = 200
+if paths_py:
+    try:
+        _spec = importlib.util.spec_from_file_location("_kb_pr_floor_mod", paths_py)
+        if _spec is not None and _spec.loader is not None:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            _MIN_PLAUSIBLE_REGISTRY_BYTES = getattr(
+                _mod, "_MIN_PLAUSIBLE_REGISTRY_BYTES", _MIN_PLAUSIBLE_REGISTRY_BYTES
+            )
+    except Exception:
+        pass  # keep the fallback -- this floor must never become the reason we can't run at all
 
 resolved = path.resolve()
 lock_path = resolved.with_name(f"{resolved.name}.lock")
 
-with open(lock_path, "a") as lock:
+try:
+    lock = open(lock_path, "a")
+except OSError as exc:
+    print(f"kb-port-reconcile: cannot create/open lock file {lock_path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+with lock:
     fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
     try:
         # Re-read under the lock -- TOCTOU defense against another writer
@@ -1235,25 +1275,21 @@ with open(lock_path, "a") as lock:
 
         teams = config.get("teams", {})
         if team not in teams:
-            sys.exit(2)
+            sys.exit(1)
         if teams[team].get("lcars_port") == newport:
             sys.exit(0)
         teams[team]["lcars_port"] = newport
 
         # XACA-1059-006: write-side plausibility floor, mirroring the
         # read-side floor XACA-1029 established in
-        # kanban-hooks/aiteamforge_paths.py (_MIN_PLAUSIBLE_REGISTRY_BYTES =
-        # 200; same threshold reproduced here rather than imported, since
-        # that name is module-private and this script does not otherwise
-        # depend on that module being importable). A single-team port bump
-        # can never legitimately shrink the whole registry below this floor
-        # -- if it would, something upstream is already broken, and writing
+        # kanban-hooks/aiteamforge_paths.py. A single-team port bump can
+        # never legitimately shrink the whole registry below this floor --
+        # if it would, something upstream is already broken, and writing
         # the result would create exactly the implausibly-short file
         # XACA-1029's reader refuses to self-heal from. Fail CLOSED: refuse
         # and report loudly, before any tmp file is created.
         serialized = json.JSONEncoder(indent=2, sort_keys=True).encode(config) + "\n"
         serialized_bytes = len(serialized.encode("utf-8"))
-        _MIN_PLAUSIBLE_REGISTRY_BYTES = 200
         if serialized_bytes < _MIN_PLAUSIBLE_REGISTRY_BYTES:
             print(
                 f"kb-port-reconcile: REFUSING to write {resolved} -- payload is "
@@ -1281,11 +1317,48 @@ with open(lock_path, "a") as lock:
                 os.fsync(f.fileno())
             if orig_mode is not None:
                 os.chmod(tmp_path, orig_mode)
+            else:
+                # XACA-1059: mkstemp() always creates at 0600 regardless of
+                # umask (it's designed for security-sensitive scratch files,
+                # not for files meant to end up world-readable-by-convention).
+                # With no pre-existing file to inherit a mode from -- a
+                # genuinely fresh bootstrap -- that 0600 would otherwise
+                # survive the replace and silently tighten team-paths.json
+                # from its conventional umask-respecting mode (typically
+                # 0644) to 0600. Compute what a plain open() would have
+                # produced under the CURRENT umask and apply that instead, so
+                # a fresh-bootstrap file's mode matches what every other
+                # writer in this codebase produces (they all use plain
+                # open(), which already respects umask automatically).
+                _umask = os.umask(0o022)
+                os.umask(_umask)
+                os.chmod(tmp_path, 0o666 & ~_umask)
             os.replace(str(tmp_path), str(resolved))
+            try:
+                _dir_fd = os.open(str(resolved.parent), os.O_RDONLY)
+                try:
+                    os.fsync(_dir_fd)
+                finally:
+                    os.close(_dir_fd)
+            except OSError:
+                pass  # best-effort -- the rename itself already succeeded
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
         sys.exit(0)
+    except Exception as exc:
+        # XACA-1059 (PR #817 review round): a read-only target DIRECTORY
+        # (as opposed to the lock file itself, handled above) still let an
+        # unguarded step -- tempfile.mkstemp(), which needs to CREATE a new
+        # file, unlike the lock file open() above which only needs an
+        # EXISTING file to already be writable -- raise straight past every
+        # other handler here as a raw Python traceback instead of a clean,
+        # actionable message. This is the last-resort catch-all: anything
+        # that reaches here is a real, unanticipated write failure (every
+        # DELIBERATE outcome above exits via sys.exit(), which raises
+        # SystemExit and is untouched by this `except Exception`).
+        print(f"kb-port-reconcile: write to {resolved} failed: {exc}", file=sys.stderr)
+        sys.exit(2)
     finally:
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         # Intentionally no lock_path.unlink() -- see XACA-0794-012 note above.
