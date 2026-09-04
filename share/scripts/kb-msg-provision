@@ -576,11 +576,79 @@ def with_aliases(teams):
 
 
 # ── Local team discovery ─────────────────────────────────────────────────────
-def local_teams():
-    """Teams this machine can speak for: those whose kanban_dir is present here.
+def local_teams(slug, routing_map):
+    """Teams this machine can speak for. Returns (local, unknown, foreign),
+    where `foreign` is a dict of {team: resolved_owner} for teams a positive
+    authority (tier 2 or 3 below) assigns to some OTHER machine.
 
-    Returns (local, unknown). `unknown` is NOT "remote" — it is "this machine
-    cannot tell", which is exactly why we refuse to write a mapping for them.
+    XACA-1063-022 REWRITE. The previous version gated purely on local BOARD
+    FILE presence and never looked at `primary_host` at all — that is the
+    bug: a dormant board file left behind by a migration outranked an
+    explicit declaration of who owns the team now, misclassifying
+    freelance-liquidstyle-agentbadges-{app,ios} as local on M3Pro months
+    after both moved to M4Mini (both carry `primary_host=darren-m4-mini`
+    in the live registry; their M3Pro trees are inert leftovers — 1
+    completed item each, no activity since 2026-03).
+
+    `primary_host` is measured (2026-09-03, full registry cross-referenced
+    against team-machines.json) to be a DEPARTURE marker, not a live
+    "who's online" field: all 15 teams that declare it point at
+    darren-m4-mini and NONE point at the origin machine — nothing has ever
+    migrated TO the origin, so it is never named there. Absence therefore
+    means "never migrated," not "unknown," and must not be treated as the
+    same thing.
+
+    Resolution order per team, each tier consulted only when the one above
+    has no opinion:
+
+      1. `board_less` / `alias_of` set -> not a real, ownable team. Skip
+         entirely (neither bucket). The registry's one such entry today,
+         "mainevent", is a board-less alias of "command" — nothing to
+         classify. Landing an unfixable name in `unknown` forever trains
+         an operator to stop reading the report (review correction,
+         XACA-1063-022): resolve ownership only for entries that can
+         actually own something.
+      2. `primary_host` present -> that is the owner, full stop. This is
+         the fix: no local artifact overrides an explicit declaration.
+      3. `primary_host` absent, but team-machines.json (the routing map
+         this tool itself maintains) already has an entry for the team ->
+         treat that recorded value as the owner. Deliberate inertia, not a
+         new heuristic: it is the last classification some authority
+         already committed, and reusing it avoids re-deriving from the
+         same flaky board-file signal that caused the original bug on
+         every subsequent run. Measured concordance where BOTH `primary_host`
+         and a routing-map entry exist for the same team: 15/15 agree.
+      4. Neither exists -> fall back to the pre-XACA-1063-022 board-file
+         check (bootstrap path). This is intentionally the LAST resort,
+         not removed outright: it is what lets a genuinely new team's
+         very first classification happen at all (team-machines.json
+         starts empty for a team that was never provisioned before, and
+         nothing else in the fleet records ownership until this tool — or
+         an operator — says so once). It can no longer overrule a
+         declared or previously-recorded owner, which is the only thing
+         that was ever wrong with it.
+
+    A team resolved in tier 2 or 3 whose owner does NOT match this
+    machine's `slug` is not ours — it goes to `foreign` (with the resolved
+    owner recorded), never `local` and never `unknown`.
+
+    REVIEW CORRECTION (XACA-1063-022, 2026-09-03): an earlier draft of this
+    fix folded "positively foreign" and "no authority has an opinion" into
+    one `unknown` bucket, matching the pre-existing function's docstring
+    ("`unknown` is NOT remote — it is 'this machine cannot tell'") but
+    defeating its own intent: on the CURRENT registry that made `unknown`
+    permanently non-empty (15 foreign teams every single run), which is
+    exactly the "always reports one outstanding item, so nobody reads it"
+    failure mode this ticket's own correction called out for the
+    mainevent-alias case. Splitting foreign out means `unknown` reverts to
+    meaning ONLY "no declared or recorded owner, refuse to guess" — which
+    is correctly the empty set on this machine today (every real,
+    non-alias team is covered by tier 2 or 3) — while `foreign` becomes a
+    genuine, informative, always-non-empty-when-true report of teams
+    positively known to live elsewhere. `merge_local` only ever touches
+    `local` entries, so a foreign-but-known team's existing routing-map row
+    is left alone either way — this split changes what gets REPORTED, not
+    what gets WRITTEN.
     """
     if not os.path.isfile(TEAM_PATHS):
         _die_env("%s not found — cannot determine which teams live here." % TEAM_PATHS)
@@ -589,27 +657,43 @@ def local_teams():
     except ValueError as exc:
         _die_env("%s is not valid JSON (%s)" % (TEAM_PATHS, exc))
     teams = data.get("teams") or {}
-    local, unknown = [], []
+    routing_map = routing_map or {}
+    slug_norm = (slug or "").strip().lower()
+
+    local, unknown, foreign = [], [], {}
     for name, cfg in teams.items():
-        kd = os.path.expanduser((cfg or {}).get("kanban_dir") or "")
-        # Gate on the BOARD FILE, not merely the directory.
-        #
-        # Directory existence is a bad proxy for "this team lives here": the
-        # framework's team-init guard auto-recreates an EMPTY kanban skeleton
-        # shortly after one is removed. Observed 2026-08-24 — legal-coparenting
-        # and finance-personal were archived and deleted after moving to M4Mini,
-        # and both directories were back (0 files, no board) 12 minutes later.
-        # A dir-only check called them local again and would have silently
-        # reverted their routing from darren-m4-mini back to this machine,
-        # sending their mail to a box that no longer holds them.
-        #
-        # A board file is what a team actually IS here; an empty skeleton is not.
-        # "*-board.json", not "*board*.json": the latter is an unanchored
-        # substring and matches dashboard.json, which is not a board at all
-        # (review finding, PR #764). Real boards are all "<team>-board.json".
+        cfg = cfg or {}
+
+        # Tier 1: not a real, ownable team.
+        if cfg.get("board_less") or cfg.get("alias_of"):
+            continue
+
+        # Tiers 2-3: an authority (declared or previously recorded) has an
+        # opinion. It wins outright, over any local filesystem state.
+        declared = (cfg.get("primary_host") or "").strip()
+        recorded = "" if declared else (routing_map.get(name) or "").strip()
+        owner = declared or recorded
+        if owner:
+            if owner.lower() == slug_norm:
+                local.append(name)
+            else:
+                foreign[name] = owner
+            continue
+
+        # Tier 4: bootstrap fallback — neither authority has ever recorded
+        # an owner for this team. Gate on the BOARD FILE, not merely the
+        # directory: the framework's team-init guard auto-recreates an
+        # EMPTY kanban skeleton shortly after one is removed (observed
+        # 2026-08-24 — legal-coparenting and finance-personal directories
+        # were back, 0 files, 12 minutes after being deleted post-move), so
+        # directory existence alone is not evidence of residency here
+        # either. "*-board.json", not "*board*.json": the latter is an
+        # unanchored substring that matches dashboard.json, which is not a
+        # board at all (review finding, PR #764).
+        kd = os.path.expanduser(cfg.get("kanban_dir") or "")
         has_board = bool(glob.glob(os.path.join(kd, "*-board.json"))) if kd else False
         (local if has_board else unknown).append(name)
-    return sorted(local), sorted(unknown)
+    return sorted(local), sorted(unknown), foreign
 
 
 # ── team-machines.json ───────────────────────────────────────────────────────
@@ -688,9 +772,14 @@ def main():
                 % (FLEET_CONFIG, "" if prev is None else " (was %s)" % prev))
     slug = machine_slug(keygen_js, args.machine_id)
     have_key = has_private_key(keygen_js, slug)
-    loc, unknown = local_teams()
-    loc = with_aliases(loc)   # template ids too, or kb-msg looks up a name we never wrote
+    # XACA-1063-022: load_map() moved ahead of local_teams() so tier 3 of its
+    # resolution order (an already-recorded team-machines.json entry, consulted
+    # only when primary_host is absent) can be handed the SAME parsed map
+    # main() goes on to merge into — one read, not two, and no risk of the two
+    # calls seeing different snapshots of a file that could change between them.
     existing, map_existed = load_map()
+    loc, unknown, foreign = local_teams(slug, existing)
+    loc = with_aliases(loc)   # template ids too, or kb-msg looks up a name we never wrote
     merged, added, retargeted = merge_local(existing, loc, slug)
 
     say("kb-msg provisioning")
@@ -700,7 +789,16 @@ def main():
     say("  local teams  : %d (%s)" % (len(loc), ", ".join(loc) or "none"))
     if unknown:
         say("  unmapped     : %d (%s)" % (len(unknown), ", ".join(unknown)))
-        say("                 not assumed remote — left untouched, see module docstring")
+        say("                 no declared or recorded owner — left untouched, see module docstring")
+    if foreign:
+        # XACA-1063-022: distinct from `unmapped` above — these teams DO have
+        # a positive owner, it just is not this machine. Printing the
+        # resolved owner inline is what makes this report (and a test
+        # driving this function directly) able to confirm WHICH machine,
+        # not just that the team was excluded.
+        foreign_desc = ", ".join("%s->%s" % (t, foreign[t]) for t in sorted(foreign))
+        say("  foreign      : %d (%s)" % (len(foreign), foreign_desc))
+        say("                 owned by another machine (XACA-1063 host-ownership authority) — left untouched")
     say("  routing map  : %s" % (TEAM_MACHINES if map_existed else "ABSENT"))
 
     if args.check:
