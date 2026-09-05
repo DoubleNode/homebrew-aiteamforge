@@ -19008,7 +19008,7 @@ kb-help() {
     echo ""
     echo "Context Resolution:"
     echo "  kb-context-show        Show resolved team/terminal and which layer produced it"
-    echo "  kb-context-set <team>[:<terminal>]      Set context for this shell"
+    echo "  kb-context-set <team> [<terminal>]      Set context for this shell"
     echo ""
     echo "Display:"
     echo "  kb-my-status           Show this window's status"

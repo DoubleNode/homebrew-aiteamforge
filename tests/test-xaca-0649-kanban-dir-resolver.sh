@@ -31,13 +31,33 @@ ALIASES_PATH="$TAP_ROOT/share/templates/aliases/kanban-aliases.sh"
 TEMPLATE_PATH="$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Minimal self-contained test framework
+# Minimal self-contained test framework.
+#
+# XACA-1095-018 fix: this file previously printed its OWN trailing "Results:
+# N passed, M failed" summary unconditionally, reading local _PASS/_FAIL
+# tallies that are only ever incremented by the FALLBACK test_start/test_pass/
+# test_fail defined below. Under test-runner.sh those three names are already
+# exported (see test-runner.sh's `export -f test_start test_pass test_fail
+# test_skip`), so the fallbacks here are skipped entirely and _PASS/_FAIL stay
+# at 0 even though every case ran and passed via the runner's own functions —
+# producing the vacuous "Results: 0 passed, 0 failed" line despite the
+# runner's own aggregate showing every case green. This is the identical
+# defect already fixed in test-xaca-0632-kb-variance.sh (XACA-1095-007); see
+# knowledge k070. Fixed the same way: track whether we're standalone with an
+# explicit flag, and gate the printed summary on that flag rather than on
+# whether the local counters are nonzero. (This file has no case-level
+# assert_contains-with-trailing-unconditional-test_pass guard pattern, so the
+# second-order _fail_count_now regression documented in k070 does not apply
+# here — the three fallback functions are the only thing incrementing
+# _PASS/_FAIL, and standalone mode is the only mode that ever calls them.)
 # ─────────────────────────────────────────────────────────────────────────────
+_STANDALONE=false
 _PASS=0
 _FAIL=0
 _CURRENT_TEST=""
 
 if ! declare -F test_start &>/dev/null; then
+    _STANDALONE=true
     test_start() { _CURRENT_TEST="$1"; }
 fi
 if ! declare -F test_pass &>/dev/null; then
@@ -433,8 +453,15 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Final summary
+# Final summary (standalone mode only — test-runner.sh tallies pass/fail from
+# its OWN exported functions' output; printing a second, locally-tallied
+# summary in that mode is exactly what produced the vacuous
+# "Results: 0 passed, 0 failed" line this revision fixes — see header
+# comment above the test-framework block).
 # ─────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "Results: $_PASS passed, $_FAIL failed"
-[ "$_FAIL" -eq 0 ] && exit 0 || exit 1
+if [ "$_STANDALONE" = true ]; then
+    echo ""
+    echo "Results: $_PASS passed, $_FAIL failed"
+    [ "$_FAIL" -eq 0 ] || exit 1
+fi
+exit 0

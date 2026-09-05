@@ -2170,16 +2170,42 @@ update_shell_helpers() {
     # instead is correct regardless of either file's mtime and self-heals the
     # moment the shipped template or the placeholder values actually change.
     local _kanban_rendered=""
-    _kanban_rendered="$(mktemp "${TMPDIR:-/tmp}/kanban-helpers-rendered.XXXXXX" 2>/dev/null)" || _kanban_rendered=""
+    # XACA-1095 [Review] (PR #820): the temp file is created as a SIBLING of the
+    # target, not under $TMPDIR, so the final install is an atomic same-filesystem
+    # rename. A cross-filesystem mv degrades to copy+unlink, which reintroduces
+    # exactly the torn-write window this is here to close.
+    _kanban_rendered="$(mktemp "${kanban_target}.XXXXXX" 2>/dev/null)" || _kanban_rendered=""
     if [ -z "$_kanban_rendered" ]; then
       print_warning "Could not create a temp file to compare kanban-helpers.sh against the shipped template — skipping refresh check this run"
     else
-      sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
-          -e "s|{{SHARED_DEV_ROOT}}|${SHARED_DEV_ROOT:-/Users/Shared/Development}|g" \
-          -e "s|{{ORG_NAME}}|${ORG_NAME:-}|g" \
-          "$_kanban_src" > "$_kanban_rendered" 2>/dev/null
+      # XACA-1095: validate the RENDER before it becomes eligible to be installed.
+      # Without this, a failed or short sed leaves an empty/partial temp file,
+      # `cmp -s` reports "differs", and the atomic rename below would install that
+      # truncated file over a working one -- a torn write wearing the costume of a
+      # successful rename, and the exact defect class this ticket exists to fix.
+      # The substitutions are pure `s|...|g`, so a good render is always
+      # line-for-line with its source; anything else is a failed render.
+      _kanban_render_ok=1
+      if ! sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
+               -e "s|{{SHARED_DEV_ROOT}}|${SHARED_DEV_ROOT:-/Users/Shared/Development}|g" \
+               -e "s|{{ORG_NAME}}|${ORG_NAME:-}|g" \
+               "$_kanban_src" > "$_kanban_rendered" 2>/dev/null; then
+        _kanban_render_ok=0
+      elif [ ! -s "$_kanban_rendered" ]; then
+        _kanban_render_ok=0
+      else
+        _kanban_src_lines="$(wc -l < "$_kanban_src" 2>/dev/null | tr -d '[:space:]')"
+        _kanban_out_lines="$(wc -l < "$_kanban_rendered" 2>/dev/null | tr -d '[:space:]')"
+        if [ -z "$_kanban_out_lines" ] || [ "$_kanban_src_lines" != "$_kanban_out_lines" ]; then
+          _kanban_render_ok=0
+        fi
+      fi
 
-      if [ "$FORCE" != true ] && cmp -s "$_kanban_rendered" "$kanban_target"; then
+      if [ "$_kanban_render_ok" -eq 0 ]; then
+        print_warning "Refusing to install kanban-helpers.sh: rendering $(basename "$_kanban_src") produced an incomplete file - leaving the existing copy untouched."
+        print_warning "  The installed copy may still be stale. Re-run: aiteamforge upgrade --non-interactive"
+        rm -f "$_kanban_rendered"
+      elif [ "$FORCE" != true ] && cmp -s "$_kanban_rendered" "$kanban_target"; then
         rm -f "$_kanban_rendered"
         # Up to date — no output, matching this function's existing quiet
         # convention for a no-op file (see the alias-file loop below).
@@ -2189,7 +2215,12 @@ update_shell_helpers() {
         rm -f "$_kanban_rendered"
       else
         print_info "Updating kanban-helpers.sh (from $(basename "$_kanban_src"))..."
-        if cat "$_kanban_rendered" > "$kanban_target" 2>/dev/null && chmod +x "$kanban_target" 2>/dev/null; then
+        # XACA-1095 [Review] (PR #820): install by atomic rename, NOT `cat > target`.
+        # `>` truncates the target before writing, so an interrupted or short write
+        # leaves a TRUNCATED kanban-helpers.sh on disk — which is the precise failure
+        # state this ticket exists to fix, and strictly worse than the stale-but-working
+        # file being replaced. chmod the temp first so the mode lands with the rename.
+        if chmod +x "$_kanban_rendered" 2>/dev/null && mv -f "$_kanban_rendered" "$kanban_target" 2>/dev/null; then
           print_success "Updated kanban-helpers.sh"
           updated=$((updated + 1))
         else

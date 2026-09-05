@@ -298,7 +298,13 @@ _run_shared_suite() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PART A — kanban-aliases.sh (PREFERRED installed file, _kb_get_team resolver)
+# PART A — kanban-aliases.sh (FALLBACK installed file as of XACA-1095; _kb_get_team
+#          resolver). Until XACA-1095 this file was PREFERRED by both
+#          install_kanban_helpers and update_shell_helpers; that preference is now
+#          inverted in favour of kanban-helpers.template.sh, and this file is
+#          selected only when the template is absent. The contract below is still
+#          worth testing — the file is still shipped — but it is no longer what a
+#          real consumer receives.
 # ═══════════════════════════════════════════════════════════════════════════
 _run_shared_suite "PartA(aliases)" "$A_RENDERED" "KANBAN_TEAM"
 

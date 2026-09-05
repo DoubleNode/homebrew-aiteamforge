@@ -412,7 +412,18 @@ check_kanban_helpers_inventory() {
     more_note=" …and $((missing_count - shown_limit)) more"
   fi
 
-  check_result fail "kanban-helpers.sh is MISSING ${missing_count} of ${tmpl_count} shipped kb-* commands (installed exposes only ${installed_count}) — kb-sweep and other lifecycle commands may be unusable"
+  # XACA-1095 [Test] (PR #820): name kb-sweep ONLY when it is genuinely missing.
+  # This sentence previously hardcoded it regardless of the actual missing set, which
+  # (a) misinforms an operator whose kb-sweep is present, and (b) let a test's
+  # `assert_contains "kb-sweep"` pass by coincidence even with the dynamic
+  # missing-list logic completely broken. A diagnostic that names a command it has
+  # not actually checked for is the same defect this ticket exists to fix, wearing
+  # the opposite costume.
+  local _gate_note=""
+  if printf '%s\n' "$missing_funcs" | grep -qx 'kb-sweep'; then
+    _gate_note=" — kb-sweep is among them, so the protected-subitem merge gate cannot run on this machine"
+  fi
+  check_result fail "kanban-helpers.sh is MISSING ${missing_count} of ${tmpl_count} shipped kb-* commands (installed exposes only ${installed_count})${_gate_note}"
   echo "    Missing (first ${shown_limit} of ${missing_count}): ${shown}${more_note}"
   if [ "$VERBOSE" = true ]; then
     echo "    Full list of missing kb-* commands:"
