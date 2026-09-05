@@ -217,7 +217,7 @@ _hr_read_state_field() {
     FIELD="$field" STATEFILE="$KB_HOST_READY_STATE_FILE" python3 - <<'PY' 2>/dev/null
 import json, os, sys
 try:
-    with open(os.environ["STATEFILE"]) as fh:
+    with open(os.environ["STATEFILE"], encoding="utf-8") as fh:
         doc = json.load(fh)
     val = doc.get(os.environ["FIELD"])
     if val is None:
@@ -438,12 +438,37 @@ def emit(*fields):
 # already need it -- see the PEP-383 comment above cfg_path/team_paths_path/
 # workdir for why those three variables specifically require this.
 def _hr_safe_repr(v):
-    # ASCII-safe stand-in for any string that might contain an unpaired
-    # surrogate (or anything else UTF-8 can't round-trip), for splicing
-    # into an emit() diagnostic without risking the UnicodeEncodeError
-    # described in the ALLOWLIST comment block below. `str(v)` first, so
-    # this also safely handles non-string values (ints, exceptions, ...).
-    return str(v).encode("utf-8", "backslashreplace").decode("utf-8", "replace")
+    # ASCII-safe stand-in for any string that might not survive encoding to
+    # THIS PROCESS'S stdout, for splicing into an emit() diagnostic without
+    # risking a UnicodeEncodeError. `str(v)` first, so this also safely
+    # handles non-string values (ints, exceptions, ...).
+    #
+    # ENCODE TO ascii, NOT utf-8, AND THAT DISTINCTION IS THE WHOLE POINT.
+    # An earlier version used utf-8, which made this function SURROGATE-safe
+    # but not ENCODING-safe: `backslashreplace` only escapes what the target
+    # codec cannot represent, and utf-8 represents all valid non-ASCII, so
+    # "cafeteam" with an e-acute passed through UNTOUCHED. stdout's encoding
+    # comes from the LOCALE, not from this function, so under a non-UTF-8
+    # locale that value then raised inside emit() anyway -- truncating the
+    # record stream and failing the WHOLE restore closed, siblings included.
+    # Measured (PR #821 review round 3): LC_ALL=en_US.US-ASCII, a team value
+    # with one accented character, resolver dead, valid sibling never started.
+    # PEP 538/540 coerce C/POSIX/unset to UTF-8, so this needs an explicitly
+    # non-UTF-8 locale -- low reachability, not zero, and the LaunchAgent
+    # environment is not ours to assume.
+    #
+    # ascii is the only codec that cannot be weaker than stdout's. It is the
+    # identity transform for all 128 ASCII codepoints (verified exhaustively,
+    # not sampled), so no message any inventoried value can produce changes;
+    # a legitimate non-ASCII path in a diagnostic now renders escaped rather
+    # than killing the run, which is the correct trade.
+    #
+    # THIS IS THE THIRD RECURRENCE OF ONE CLASS ON THIS BRANCH: the allowlist
+    # paths were made safe while the legacy branch ahead of them was not; then
+    # 8 env-derived emit() sites were found where 2 were reported; then this.
+    # If you are about to add a fourth exception, the fix is almost certainly
+    # at the protocol boundary (_sanitize/emit), not another call site.
+    return str(v).encode("ascii", "backslashreplace").decode("ascii", "replace")
 
 # ── Load config ──────────────────────────────────────────────────────────
 if not os.path.exists(cfg_path):
@@ -451,7 +476,14 @@ if not os.path.exists(cfg_path):
     _finish(0)
 
 try:
-    with open(cfg_path, "r") as fh:
+    # encoding="utf-8" is REQUIRED, not stylistic. open() otherwise decodes
+    # using the LOCALE's encoding, so under a non-UTF-8 locale a perfectly
+    # valid UTF-8 config raised UnicodeDecodeError HERE -- before validation
+    # ever ran -- truncating the record stream and failing the whole restore
+    # closed. JSON is defined as UTF-8 (RFC 8259), so the locale has no
+    # business deciding how it is read. Every json read in this file is
+    # pinned for the same reason; see _hr_safe_repr for the write half.
+    with open(cfg_path, "r", encoding="utf-8") as fh:
         raw = fh.read()
 except OSError as e:
     # str(e) on an OSError typically embeds the filename (cfg_path) in its
@@ -500,7 +532,7 @@ registry_teams = None
 registry_state = "missing"
 if os.path.exists(team_paths_path):
     try:
-        with open(team_paths_path, "r") as fh:
+        with open(team_paths_path, "r", encoding="utf-8") as fh:
             reg_doc = json.load(fh)
         teams = reg_doc.get("teams") if isinstance(reg_doc, dict) else None
         if isinstance(teams, dict):
@@ -1479,7 +1511,7 @@ if not os.path.exists(path):
     sys.exit(0)
 
 try:
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
 except Exception as e:
     sys.stderr.write(f"suggest: could not parse {path}: {e}\n")
