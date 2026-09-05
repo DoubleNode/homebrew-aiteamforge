@@ -6,6 +6,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1091: `share/scripts/fleet-reporter.sh` — wires the per-machine
+  telemetry collectors into `build_payload()`'s `system{}` block (the same
+  container XACA-1031 populates with `versions`), adding `os_version`,
+  `os_build`, `os_name`, `model`, `arch`, `cores`, `total_ram`, `boot_time`
+  (static, cached once per run) plus `memory{used,total,pressure_percent}`,
+  `swap_used_bytes`, `disk{used,free,percent}`, and `load_average` (volatile,
+  resampled every cycle via one combined `sysctl -n vm.swapusage vm.loadavg`
+  call, `vm_stat`, and `df -k /`). `schema_version` stays a sibling of
+  `versions` inside the one `system` object — never a second `system`
+  literal. Every leaf follows the absence convention: a getter that printed
+  nothing omits the key entirely (never `null`/`""`/`0`), so a real collected
+  zero (idle load average, an un-swapped `swap_used_bytes`) still emits.
+  `memory` and `disk` are nested objects omitted in full when nothing in
+  the group collected; `load_average` emits only when all three of
+  1m/5m/15m parsed, never a partial 1- or 2-element array. `swap_used_bytes`
+  is always ABSOLUTE BYTES, never a percentage — the swapfile grows on
+  demand, so a percentage would divide by a moving denominator. This mirror
+  ships the collector implementation only; XACA-1092 (above) mirrors the
+  Fleet Monitor UI that consumes this block.
 - XACA-1092: Fleet Monitor MACHINES cards now render per-machine system
   telemetry (macOS version/build, hardware model, memory, swap, disk, load
   average) and derive an AT RISK health badge, consuming the `system{}` block
