@@ -1118,6 +1118,17 @@ _version_gt() {
 # a C-style `for` loop, `${var%%pattern}`).
 _normalize_aiteamforge_version() {
     local raw="$1"
+    [ -n "$raw" ] || { printf ''; return 0; }
+
+    # Strip a leading "v" BEFORE component parsing. The contract specifies
+    # "semver, no leading v", and aiteamforge-doctor.sh:663 does `sed 's/^v//'`
+    # on this same stamp -- so a "v0.20.3" stamp is a real shape in this fleet,
+    # not a hypothetical. Without this, the leading-component check below sees
+    # "v0" -> strips to empty -> returns empty, turning a perfectly readable
+    # version into an omitted field. That would be a NEW false-UNKNOWN of
+    # exactly the class XACA-1031-019/023 exist to remove.
+    raw="${raw#v}"
+
     local -a parts
     IFS='.' read -ra parts <<< "$raw"
 
@@ -1125,7 +1136,24 @@ _normalize_aiteamforge_version() {
     for ((i = 0; i < ${#parts[@]}; i++)); do
         part="${parts[i]}"
         clean="${part%%[!0-9]*}"
-        [ -z "$clean" ] && clean=0
+
+        # XACA-1031-024: a LEADING component that strips to nothing means the
+        # token is not a version at all (a HEAD keg like "HEAD-abc1234").
+        # Returning "0" for it would be a confident lie: isVersionOutdated("0",
+        # "0.20.4") is TRUE, so the card renders "v0 OUTDATED" and tells the
+        # operator to upgrade a machine that is AHEAD of the release. Return
+        # empty instead -- empty flows into the existing omit path and the card
+        # renders an honest UNKNOWN, per this file's omit-don't-invent rule.
+        # Note "0" itself is a legitimate numeric component and is preserved:
+        # only an EMPTY strip result is rejected, not a zero one.
+        if [ -z "$clean" ]; then
+            if [ "$i" -eq 0 ]; then
+                printf ''
+                return 0
+            fi
+            clean=0
+        fi
+
         if [ -z "$out" ]; then
             out="$clean"
         else
@@ -1190,7 +1218,9 @@ _get_aiteamforge_cellar_version() {
     done
 
     [ -z "$best" ] && return 0
-    printf '%s' "$(_normalize_aiteamforge_version "$best")"
+    # Return the RAW keg name; normalization happens once for all three
+    # sources at the end of _get_aiteamforge_version() (XACA-1031-023).
+    printf '%s' "$best"
 }
 
 _get_aiteamforge_version() {
@@ -1242,7 +1272,17 @@ _get_aiteamforge_version() {
     # Source 4 (implicit): nothing resolved -- $v stays empty, and
     # build_payload() omits the "aiteamforge" key entirely on an empty
     # _AITEAMFORGE_VERSION, per the XACA-1091 "omit, don't null" convention.
-    _AITEAMFORGE_VERSION="$v"
+    # XACA-1031-023: normalize HERE, on the single shared exit path, so it
+    # covers ALL THREE sources. It previously sat on the last line of
+    # _get_aiteamforge_cellar_version() -- source 2 of 3 -- leaving the
+    # .installed-version stamp (source 1, the HIGHEST priority, present on
+    # every machine that has ever run `aiteamforge upgrade`) emitting raw brew
+    # keg names like "0.20.3_1". aiteamforge-upgrade.sh writes that stamp from
+    # `brew list --versions` verbatim, so the suffixed form is the NORMAL
+    # content of the dominant source, and isVersionOutdated("0.20.3_1", ...)
+    # returns null -- a permanent amber UNKNOWN, i.e. exactly the defect
+    # XACA-1031-019 was filed to remove, surviving on the path that matters most.
+    _AITEAMFORGE_VERSION="$(_normalize_aiteamforge_version "$v")"
 }
 
 # Build status payload
