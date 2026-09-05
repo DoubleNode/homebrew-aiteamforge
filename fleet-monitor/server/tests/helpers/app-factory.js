@@ -238,8 +238,33 @@ function isVersionOutdated(current, latest) {
     return false; // equal versions -- not outdated
 }
 
+// XACA-1091-018/019 review: mirrored VERBATIM from server.js -- see that
+// file's comment above these same four functions for the full rationale
+// (Number.isFinite alone admits negatives/absurd magnitudes; range checks
+// are the only numeric-leaf validation used below; out-of-range values are
+// OMITTED, never clamped; explicit >=/<= comparisons so a collected zero
+// survives).
+function isValidByteCount(n) {
+    return Number.isFinite(n) && n >= 0;
+}
+
+function isValidPercent(n) {
+    return Number.isFinite(n) && n >= 0 && n <= 100;
+}
+
+function isValidLoadAverageComponent(n) {
+    return Number.isFinite(n) && n >= 0;
+}
+
+function isValidPositiveInteger(n) {
+    return Number.isInteger(n) && n > 0;
+}
+
+// XACA-1091-005: telemetry leaves mirrored VERBATIM from server.js's own
+// extension of this function -- same drift-guard discipline as the
+// pre-existing pair above.
 function normalizeSystemBlock(system) {
-    if (!system || typeof system !== 'object') return {}; // whole block absent
+    if (!system || typeof system !== 'object' || Array.isArray(system)) return {}; // whole block absent (an array is not a valid system block, even though typeof [] === 'object')
 
     const out = {};
     if (Number.isInteger(system.schema_version)) {
@@ -252,6 +277,37 @@ function normalizeSystemBlock(system) {
         versions.aiteamforge = inVersions.aiteamforge; // omitted entirely otherwise
     }
     out.versions = versions;
+
+    if (typeof system.os_version === 'string' && system.os_version) out.os_version = system.os_version;
+    if (typeof system.os_build === 'string' && system.os_build) out.os_build = system.os_build;
+    if (typeof system.os_name === 'string' && system.os_name) out.os_name = system.os_name;
+    if (typeof system.model === 'string' && system.model) out.model = system.model;
+    if (typeof system.arch === 'string' && system.arch) out.arch = system.arch;
+    if (isValidPositiveInteger(system.cores)) out.cores = system.cores;
+    if (isValidByteCount(system.total_ram)) out.total_ram = system.total_ram;
+    if (isValidPositiveInteger(system.boot_time)) out.boot_time = system.boot_time;
+
+    if (system.memory && typeof system.memory === 'object') {
+        const memory = {};
+        if (isValidByteCount(system.memory.used)) memory.used = system.memory.used;
+        if (isValidByteCount(system.memory.total)) memory.total = system.memory.total;
+        if (isValidPercent(system.memory.pressure_percent)) memory.pressure_percent = system.memory.pressure_percent;
+        if (Object.keys(memory).length > 0) out.memory = memory;
+    }
+
+    if (isValidByteCount(system.swap_used_bytes)) out.swap_used_bytes = system.swap_used_bytes;
+
+    if (system.disk && typeof system.disk === 'object') {
+        const disk = {};
+        if (isValidByteCount(system.disk.used)) disk.used = system.disk.used;
+        if (isValidByteCount(system.disk.free)) disk.free = system.disk.free;
+        if (isValidPercent(system.disk.percent)) disk.percent = system.disk.percent;
+        if (Object.keys(disk).length > 0) out.disk = disk;
+    }
+
+    if (Array.isArray(system.load_average) && system.load_average.length === 3 && system.load_average.every((n) => isValidLoadAverageComponent(n))) {
+        out.load_average = system.load_average.slice();
+    }
 
     return out;
 }
@@ -299,32 +355,67 @@ function createApp(opts = {}) {
     // which are pure and module-level) because it closes over this
     // factory instance's own getLatestTapVersion(), same reasoning as
     // ensureRegisteredTeamBuckets closing over `registeredTeams` above.
+    // XACA-1091-006: telemetry leaves + early-return fix mirrored VERBATIM
+    // from server.js's own extension of this function.
     function projectSystemBlock(storedSystem) {
         const out = {};
-        if (storedSystem && Number.isInteger(storedSystem.schema_version)) {
+        if (!storedSystem || typeof storedSystem !== 'object' || Array.isArray(storedSystem)) return out; // whole-block-absent / pre-XACA-1031 record / corrupted non-object record
+
+        if (Number.isInteger(storedSystem.schema_version)) {
             out.schema_version = storedSystem.schema_version;
         }
 
-        const hasStoredVersions = !!(storedSystem && storedSystem.versions && typeof storedSystem.versions === 'object');
-        if (!hasStoredVersions) return out; // whole-block-absent case -- stays `{}`
+        const hasStoredVersions = !!(storedSystem.versions && typeof storedSystem.versions === 'object');
+        if (hasStoredVersions) {
+            const storedAiteamforge = (typeof storedSystem.versions.aiteamforge === 'string' && storedSystem.versions.aiteamforge)
+                ? storedSystem.versions.aiteamforge
+                : null;
 
-        const storedAiteamforge = (typeof storedSystem.versions.aiteamforge === 'string' && storedSystem.versions.aiteamforge)
-            ? storedSystem.versions.aiteamforge
-            : null;
-
-        const versions = {};
-        if (storedAiteamforge) {
-            versions.aiteamforge = storedAiteamforge;
-            const latest = getLatestTapVersion(); // string or null; never throws, never blocks
-            if (latest) {
-                versions.latest = latest;
-                const outdated = isVersionOutdated(storedAiteamforge, latest);
-                if (outdated !== null) {
-                    versions.outdated = outdated; // explicit true/false -- a collected fact, not an absence
+            const versions = {};
+            if (storedAiteamforge) {
+                versions.aiteamforge = storedAiteamforge;
+                const latest = getLatestTapVersion(); // string or null; never throws, never blocks
+                if (latest) {
+                    versions.latest = latest;
+                    const outdated = isVersionOutdated(storedAiteamforge, latest);
+                    if (outdated !== null) {
+                        versions.outdated = outdated; // explicit true/false -- a collected fact, not an absence
+                    }
                 }
             }
+            out.versions = versions;
         }
-        out.versions = versions;
+
+        if (typeof storedSystem.os_version === 'string' && storedSystem.os_version) out.os_version = storedSystem.os_version;
+        if (typeof storedSystem.os_build === 'string' && storedSystem.os_build) out.os_build = storedSystem.os_build;
+        if (typeof storedSystem.os_name === 'string' && storedSystem.os_name) out.os_name = storedSystem.os_name;
+        if (typeof storedSystem.model === 'string' && storedSystem.model) out.model = storedSystem.model;
+        if (typeof storedSystem.arch === 'string' && storedSystem.arch) out.arch = storedSystem.arch;
+        if (isValidPositiveInteger(storedSystem.cores)) out.cores = storedSystem.cores;
+        if (isValidByteCount(storedSystem.total_ram)) out.total_ram = storedSystem.total_ram;
+        if (isValidPositiveInteger(storedSystem.boot_time)) out.boot_time = storedSystem.boot_time;
+
+        if (storedSystem.memory && typeof storedSystem.memory === 'object') {
+            const memory = {};
+            if (isValidByteCount(storedSystem.memory.used)) memory.used = storedSystem.memory.used;
+            if (isValidByteCount(storedSystem.memory.total)) memory.total = storedSystem.memory.total;
+            if (isValidPercent(storedSystem.memory.pressure_percent)) memory.pressure_percent = storedSystem.memory.pressure_percent;
+            if (Object.keys(memory).length > 0) out.memory = memory;
+        }
+
+        if (isValidByteCount(storedSystem.swap_used_bytes)) out.swap_used_bytes = storedSystem.swap_used_bytes;
+
+        if (storedSystem.disk && typeof storedSystem.disk === 'object') {
+            const disk = {};
+            if (isValidByteCount(storedSystem.disk.used)) disk.used = storedSystem.disk.used;
+            if (isValidByteCount(storedSystem.disk.free)) disk.free = storedSystem.disk.free;
+            if (isValidPercent(storedSystem.disk.percent)) disk.percent = storedSystem.disk.percent;
+            if (Object.keys(disk).length > 0) out.disk = disk;
+        }
+
+        if (Array.isArray(storedSystem.load_average) && storedSystem.load_average.length === 3 && storedSystem.load_average.every((n) => isValidLoadAverageComponent(n))) {
+            out.load_average = storedSystem.load_average.slice();
+        }
 
         return out;
     }

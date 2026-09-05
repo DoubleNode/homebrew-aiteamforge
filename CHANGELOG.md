@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1091 (review round): mirrors the review-round hardening of the telemetry
+  rail. `share/scripts/fleet-reporter.sh` now binds the static `sysctl` reads by
+  KEY LABEL rather than by output line position (a host missing any one key
+  shifted every later value one slot, each still a plausible integer), and
+  validates `load_average` tokens numerically before emitting them into a bare
+  JSON array. `fleet-monitor/server/server.js` and its test-helper mirror gain
+  range bounds on every numeric leaf (non-negative bytes, percent 0-100) and
+  `Array.isArray` rejection, since `typeof [] === 'object'`; out-of-range values
+  are OMITTED, never clamped.
+
 - XACA-1091: `share/scripts/fleet-reporter.sh` — wires the per-machine
   telemetry collectors into `build_payload()`'s `system{}` block (the same
   container XACA-1031 populates with `versions`), adding `os_version`,

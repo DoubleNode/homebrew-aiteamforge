@@ -1394,23 +1394,46 @@ _SYSTEM_SWVERS_EOF
     # model, cores (LOGICAL -- hw.logicalcpu, not hw.physicalcpu; contract §5b:
     # vm.loadavg is a run-queue depth comparable to logical CPUs), total_ram
     # (bytes, hw.memsize already bytes), boot_time (epoch seconds).
-    # ONE combined `sysctl -n` call per FINDINGS-001, not four separate forks.
+    #
+    # ONE combined call per FINDINGS-001, not four separate forks -- but
+    # (XACA-1091-016) bound by KEY LABEL, not by line position. `sysctl -n`
+    # prints ONLY bare values, one per line, in request order -- if any one
+    # key is unavailable on a given host, `-n` silently emits ONE FEWER line
+    # and every value after it shifts up a slot (e.g. hw.memsize missing
+    # would make the logicalcpu value land in total_ram's slot: a wrong
+    # number that still looks like a plausible byte count, exactly the
+    # failure the contract forbids). Dropping `-n` makes sysctl print
+    # "key: value" pairs instead, so each value is parsed by its own label
+    # below -- a missing key just produces no matching line, and nothing
+    # after it moves. Measured (30-run local sample, this host): combined
+    # `-n` ~3.5ms, four separate `-n` calls ~14.7ms (4x, one fork per key),
+    # this labeled combined form ~8.6ms -- still ONE fork, so the label-safe
+    # form is preferred over both: correct AND cheaper than the
+    # per-key-call alternative. Affordable regardless because this is the
+    # STATIC tier, collected once per reporter run behind
+    # _SYSTEM_STATIC_BUILT, never per 60s cycle.
     if command -v sysctl >/dev/null 2>&1; then
-        local sc_out="" sc_model="" sc_mem="" sc_cpu="" sc_boot_raw="" sc_n=0 sc_line=""
-        sc_out="$(sysctl -n hw.model hw.memsize hw.logicalcpu kern.boottime 2>/dev/null || true)"
+        local sc_out="" sc_model="" sc_mem="" sc_cpu="" sc_boot_raw="" sc_line=""
+        sc_out="$(sysctl hw.model hw.memsize hw.logicalcpu kern.boottime 2>/dev/null || true)"
         if [ -n "$sc_out" ]; then
-            # `sysctl -n` with multiple keys prints one value per line in the
-            # order requested: model, memsize, logicalcpu, then kern.boottime's
-            # own struct line. Read the first three positionally; treat
-            # anything after as the boottime remainder (its value is one line
-            # in practice, but this does not assume that).
+            # Each line is "key: value" (kern.boottime's value itself
+            # contains a literal ": " inside its timestamp tail, e.g.
+            # "09:23:13" -- stripping only the fixed "kern.boottime:"
+            # prefix, never splitting generically on the first colon,
+            # keeps that intact).
             while IFS= read -r sc_line; do
-                sc_n=$((sc_n + 1))
-                case "$sc_n" in
-                    1) sc_model="$sc_line" ;;
-                    2) sc_mem="$sc_line" ;;
-                    3) sc_cpu="$sc_line" ;;
-                    *) sc_boot_raw="${sc_boot_raw}${sc_line}
+                case "$sc_line" in
+                    hw.model:*)
+                        sc_model="$(_system_trim "${sc_line#hw.model:}")"
+                        ;;
+                    hw.memsize:*)
+                        sc_mem="$(_system_trim "${sc_line#hw.memsize:}")"
+                        ;;
+                    hw.logicalcpu:*)
+                        sc_cpu="$(_system_trim "${sc_line#hw.logicalcpu:}")"
+                        ;;
+                    kern.boottime:*)
+                        sc_boot_raw="${sc_boot_raw}${sc_line#kern.boottime:}
 " ;;
                 esac
             done <<_SYSTEM_SYSCTL_EOF
@@ -1545,14 +1568,33 @@ _SYSTEM_VMSC_EOF
             # newline-delimited map splits on '=', not on whitespace, so
             # embedded spaces in the value are safe).
             if [ -n "$vs_load_line" ]; then
-                local vs_load_raw="" vs_l1="" vs_l2="" vs_l3=""
+                local vs_load_raw="" vs_l1="" vs_l2="" vs_l3="" vs_load_ok=true
                 vs_load_raw="${vs_load_line#\{}"
                 vs_load_raw="${vs_load_raw%\}}"
                 vs_load_raw="$(_system_trim "$vs_load_raw")"
                 read -r vs_l1 vs_l2 vs_l3 <<_SYSTEM_LOAD_EOF
 $vs_load_raw
 _SYSTEM_LOAD_EOF
-                if [ -n "$vs_l1" ] && [ -n "$vs_l2" ] && [ -n "$vs_l3" ]; then
+                # Validate each token is a plain decimal number BEFORE it is
+                # stored (XACA-1091-017) -- this is the only numeric leaf
+                # that lacked the guard every other field already has (same
+                # `*[!0-9.]*` char-class check as the swap "used" token
+                # above). load_average is emitted as a bare JSON array with
+                # no per-element quoting, so an unexpected sysctl output
+                # here would interpolate raw, unvalidated text straight into
+                # the payload -- and because build_payload emits ONE JSON
+                # document, that corrupts the WHOLE payload for this
+                # machine, not just this field. `read` folding a 4th
+                # (unexpected) token onto vs_l3 is also caught here: the
+                # embedded space between the two tokens fails the
+                # no-whitespace char class, so an over-long line is
+                # rejected the same as a non-numeric one. A collected
+                # 0.0 is valid data (contract §3) and passes this check --
+                # it rejects unexpected CHARACTERS, never the value zero.
+                case "$vs_l1" in ''|*[!0-9.]*) vs_load_ok=false ;; esac
+                case "$vs_l2" in ''|*[!0-9.]*) vs_load_ok=false ;; esac
+                case "$vs_l3" in ''|*[!0-9.]*) vs_load_ok=false ;; esac
+                if [ "$vs_load_ok" = true ]; then
                     _SYSTEM_VOLATILE_MAP="${_SYSTEM_VOLATILE_MAP}load_average=${vs_l1} ${vs_l2} ${vs_l3}
 "
                 fi
