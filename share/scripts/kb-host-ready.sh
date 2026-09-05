@@ -410,7 +410,49 @@ def _sanitize(v):
     # for comparisons already constrained by BAD_CHARS. If you ever add a decode
     # step, make the escape reversible FIRST (escape the backslash too).
     v = str(v)
-    return v.replace("\n", "\\n").replace("\r", "\\r").replace("\x1f", "\\x1f")
+    v = v.replace("\n", "\\n").replace("\r", "\\r").replace("\x1f", "\\x1f")
+    #
+    # ENCODING DEFENSE, MOVED HERE (XACA-1096, round 3 fix). THIS CLASS HAS
+    # RECURRED THREE TIMES ON THIS BRANCH, each time "closed" at a call site
+    # and each time reopened one door over:
+    #   1. The allowlist paths were made surrogate-safe (_hr_safe_repr) while
+    #      the legacy BAD_CHARS branch running AHEAD of them stayed raw.
+    #   2. Two unsafe env-derived emit() sites were reported fixed; auditing
+    #      every call site found eight.
+    #   3. _hr_safe_repr() itself encoded to utf-8 -- surrogate-safe, but not
+    #      ENCODING-safe: utf-8 represents all valid non-ASCII, so a
+    #      perfectly legitimate accented team name passed through untouched
+    #      and only raised later, inside emit(), under a non-UTF-8 stdout
+    #      locale -- moving the failure sideways rather than closing it.
+    #
+    # The fix each round applied more call-site discipline. That is exactly
+    # the shape of a class that keeps recurring: call-site discipline is an
+    # open set, and someone will eventually add a ninth emit() site (or a
+    # tenth) without having read this file's history. So the encode step
+    # that used to live only in _hr_safe_repr() -- ascii with
+    # backslashreplace, the only codec that cannot be weaker than any
+    # stdout encoding this process could have -- now ALSO runs here, at the
+    # one place every emit() field passes through regardless of which
+    # caller produced it. A future emit() call site needs no special
+    # handling any more: safe-repr'd already, or not, ASCII, or not, it
+    # leaves this function encoding-safe either way.
+    #
+    # This does not replace the per-site _hr_safe_repr() calls -- they stay,
+    # deliberately, as belt-and-braces: they run BEFORE a value is spliced
+    # into a hand-built diagnostic string, so a rejection message can still
+    # name the specific offending character with useful '<char>' (U+XXXX)
+    # detail instead of a flat backslash-escape. This function is the
+    # backstop underneath that, not a replacement for it.
+    #
+    # Composition is idempotent -- verified for plain, accented, surrogate,
+    # and tab inputs (safe(safe(x)) == safe(x)) -- so the two layers stack
+    # harmlessly rather than double-escaping. ascii is the identity
+    # transform for all 128 ASCII codepoints (verified exhaustively, not
+    # sampled), so this changes no message any all-ASCII config can
+    # produce, and does not touch \x1e (see above) or the tab character
+    # (ASCII, encodable as-is, and several existing diagnostics rely on it
+    # surviving here unescaped).
+    return v.encode("ascii", "backslashreplace").decode("ascii", "replace")
 
 def _finish(code=0):
     # COMPLETENESS SENTINEL (XACA-1066, fifth shape). The record stream had no
@@ -742,6 +784,21 @@ def _hr_describe_bad_chars(s):
             seen_set.add(c)
     return ", ".join(f"'{_hr_safe_repr(c)}' (U+{ord(c):04X})" for c in seen)
 
+def _hr_describe_chars_in(s, badset):
+    # Generalizes _hr_describe_bad_chars() above to an explicit character
+    # set rather than ALLOWED_CHARS-non-membership, so the legacy BAD_CHARS
+    # branch (XACA-1096-015) can report the SAME '<char>' (U+XXXX) style
+    # detail the allowlist branches already give, without depending on
+    # ALLOWED_CHARS at all. Same first-seen ordering / seen_set dedup
+    # rationale as _hr_describe_bad_chars.
+    seen = []
+    seen_set = set()
+    for c in s:
+        if c in badset and c not in seen_set:
+            seen.append(c)
+            seen_set.add(c)
+    return ", ".join(f"'{_hr_safe_repr(c)}' (U+{ord(c):04X})" for c in seen)
+
 for idx, entry in enumerate(autostart_raw):
     if not isinstance(entry, dict):
         emit("ENTRY", idx, "SKIP", "", "", "", "FAIL", "SKIPPED", f"entry {idx} is not an object")
@@ -774,8 +831,39 @@ for idx, entry in enumerate(autostart_raw):
     if filter_team and team != filter_team:
         continue
 
-    if not isinstance(args, list) or not all(isinstance(a, str) and a and not any(c in BAD_CHARS for c in a) for a in args):
+    if not isinstance(args, list):
         emit("ENTRY", idx, "SKIP", team, "", "", "FAIL", "SKIPPED", f"entry {idx} ({team}): 'args' must be an array of clean strings")
+        continue
+
+    # XACA-1096-015: this legacy BAD_CHARS branch used to report only "'args'
+    # must be an array of clean strings" -- naming neither the arg INDEX, nor
+    # its VALUE, nor the offending CHARACTER, unlike the allowlist branch
+    # further below (which names all three, and unlike the `team` BAD_CHARS
+    # branch above, whose offending value is at least visible via the
+    # `($team)` / ENTRY-row rendering downstream). Bring it to parity using
+    # the same surrogate-safe helpers (_hr_safe_repr / _hr_describe_chars_in)
+    # the allowlist branch already relies on. The ORIGINAL substring is kept
+    # verbatim and first, so nothing downstream that pins it breaks; the
+    # detail is appended after it.
+    _bad_char_arg = next(
+        (
+            (a_idx, a)
+            for a_idx, a in enumerate(args)
+            if not isinstance(a, str) or not a or any(c in BAD_CHARS for c in a)
+        ),
+        None,
+    )
+    if _bad_char_arg is not None:
+        a_idx, a_val = _bad_char_arg
+        if isinstance(a_val, str) and a_val:
+            emit("ENTRY", idx, "SKIP", team, "", "", "FAIL", "SKIPPED",
+                 f"entry {idx} ({team}): 'args' must be an array of clean strings: "
+                 f"args[{a_idx}] value '{_hr_safe_repr(a_val)}' contains disallowed "
+                 f"character(s) {_hr_describe_chars_in(a_val, BAD_CHARS)}")
+        else:
+            emit("ENTRY", idx, "SKIP", team, "", "", "FAIL", "SKIPPED",
+                 f"entry {idx} ({team}): 'args' must be an array of clean strings: "
+                 f"args[{a_idx}] is missing or not a clean string")
         continue
 
     _bad_arg = next(
@@ -1506,6 +1594,21 @@ import json, os, sys
 path = os.environ["TEAMMACHINES"]
 host = os.environ["HOSTNAME_LOWER"].lower()
 
+# XACA-1096-017: `path` is env-derived (PEP-383 surrogateescape -- same door
+# as cfg_path/team_paths_path/workdir in the resolver heredoc above, just a
+# separate python3 process, so it needs its own copy of the same helper) and
+# `e`'s message can embed it too. This heredoc is its OWN process, entirely
+# independent of the resolver's `_hr_safe_repr()` -- defining a matching
+# helper here is what closes this specific instance, since the resolver's
+# fix cannot reach across a process boundary. Not currently reachable on
+# APFS (os.path.exists() is always False for a surrogate-laden path, and
+# open() raises OSError "Illegal byte sequence" before reaching here) --
+# this is consistency work, not a live bug, but closing a known-open
+# instance now is how a future refactor or a non-APFS mount does not become
+# recurrence #4.
+def _suggest_safe_repr(v):
+    return str(v).encode("ascii", "backslashreplace").decode("ascii", "replace")
+
 if not os.path.exists(path):
     print(json.dumps({"schema_version": 1, "autostart": [], "lock_after_login": False}, indent=2))
     sys.exit(0)
@@ -1514,11 +1617,11 @@ try:
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
 except Exception as e:
-    sys.stderr.write(f"suggest: could not parse {path}: {e}\n")
+    sys.stderr.write(f"suggest: could not parse {_suggest_safe_repr(path)}: {_suggest_safe_repr(e)}\n")
     sys.exit(1)
 
 if not isinstance(doc, dict):
-    sys.stderr.write(f"suggest: {path} root is not an object\n")
+    sys.stderr.write(f"suggest: {_suggest_safe_repr(path)} root is not an object\n")
     sys.exit(1)
 
 # §0.2 shapes, by known team id.
