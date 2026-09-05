@@ -4283,3 +4283,201 @@
     white-space: nowrap;
     border: 0;
 }
+
+/* -------------------------------------------------------------------------------
+   XACA-1092-004/-005: Machine SYSTEM telemetry -- HEALTH/VERSION badges,
+   always-visible version line, and lcars2's FIRST click affordance (the
+   SYSTEM disclosure panel) on the MACHINES card. Per UX spec
+   (kanban/EPIC-0061_machine_health_telemetry.md lines 934-1401): new
+   MODIFIER classes on the existing .status-badge shape (§0/§4). The
+   disclosure mechanics mirror v1's .machine-backup-status/
+   .backup-expand-indicator/.backup-details-panel exactly (chevron rotation,
+   max-height transition) even though this tree has never had a toggle
+   before -- see §0's "reuses" table and §1's "not a new interaction idiom"
+   note. .machine-system-row is the SAME class name (and rule) v1's copy of
+   this stylesheet uses -- only the group CONTAINER class differs between
+   the two trees (.status-row-system-group here, .machine-system-group in
+   v1) per UX spec §3.
+   Appended at end-of-file rather than inlined near .status-row (defined 3x
+   in this file already, at lines 346/2566/3128), to keep this change a
+   single, clearly-delimited block during the XACA-1031 version-row merge
+   this PR is expected to collide with (see this ticket's dispatch brief,
+   "COLLISION WARNING") -- and to scope the one behavioural change to the
+   existing .status-row rule (flex-wrap) to the machines list only, via the
+   #machines-list id selector below, rather than touching any of the three
+   existing .status-row blocks that other listings on this page also use.
+   ------------------------------------------------------------------------------- */
+
+/* UX spec §4 "Layout note": 0-2 badge pills appended to a row that already
+   carries a full hostname must not truncate the hostname or force
+   horizontal scrolling on narrow viewports. Scoped to #machines-list (the
+   one container id shared by all 4 lcars2 dashboards) so the other
+   .status-row listings on this page (services, sessions) are untouched. */
+#machines-list .status-row {
+    flex-wrap: wrap;
+}
+
+/* HEALTH badge (AT RISK / CRITICAL) and VERSION badge (OUTDATED). Solid
+   fill + black text, matching .status-badge.online/.offline/.warning's
+   existing contrast-passing convention (UX spec §7) rather than
+   colored-text-on-dark, which would need separate verification. */
+.status-badge.health-warning,
+.status-badge.version-outdated {
+    background: var(--lcars-amber);
+    color: var(--lcars-black);
+}
+
+.status-badge.health-critical {
+    background: var(--lcars-alert-red);
+    color: var(--lcars-black);
+}
+
+/* Sibling block appended after the (unchanged) .status-row header --
+   see createMachineItem()'s DocumentFragment return. Default block display
+   is sufficient to stack it below the header; no flex/grid needed here. */
+.status-row-detail {
+    padding-left: 15px;
+}
+
+/* Always-visible version line (UX spec §6). Three states, one shared
+   "unknown" visual language with the absent-metric rows below -- the same
+   opacity/italic treatment used throughout this panel, not a new one. */
+.machine-version-line {
+    font-size: 11px;
+    margin: 2px 0 4px;
+}
+
+.machine-version-line-outdated {
+    color: var(--lcars-amber);
+}
+
+.machine-version-line-current {
+    color: var(--lcars-green);
+}
+
+.machine-version-line-unknown {
+    color: var(--lcars-tan);
+    opacity: 0.5;
+    font-style: italic;
+}
+
+/* SYSTEM disclosure toggle + panel -- lcars2's first click affordance
+   (UX spec §1), following v1's backup-toggle mechanics exactly (chevron
+   rotation via .expanded, max-height transition, whole-row click/tap
+   target per UX spec §7 "Touch targets"). */
+.status-row-system-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--lcars-lavender);
+}
+
+.status-row-system-toggle.clickable {
+    cursor: pointer;
+    padding: 4px 8px;
+    margin: -4px -8px;
+    border-radius: 4px;
+    transition: background-color 0.2s ease;
+}
+
+.status-row-system-toggle.clickable:hover {
+    background-color: rgba(153, 153, 255, 0.15);
+}
+
+.status-row-system-indicator {
+    color: var(--lcars-tan);
+    font-size: 8px;
+    transition: transform 0.2s ease;
+    display: inline-block;
+}
+
+.status-row-system-indicator.expanded {
+    transform: rotate(90deg);
+}
+
+.status-row-system-label {
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 500;
+}
+
+.status-row-system-panel {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out, padding 0.3s ease-out;
+    background: var(--lcars-darker);
+    border-left: 3px solid var(--lcars-purple);
+    margin-left: 6px;
+    margin-top: 0;
+    padding: 0 12px;
+}
+
+.status-row-system-panel.expanded {
+    max-height: 700px;
+    overflow-y: auto;
+    padding: 8px 12px;
+    margin-top: 8px;
+}
+
+/* Transitional "no data yet" line -- UX spec §5, the default production
+   state for every machine between XACA-1031 merging and XACA-1091
+   shipping. Blends the two reused wording conventions the spec names
+   (.kiosk-health-no-data-label's uppercase/letter-spacing, .history-empty's
+   muted/italic) rather than introducing a third. */
+.status-row-system-no-data {
+    color: var(--lcars-tan);
+    opacity: 0.6;
+    font-style: italic;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 10px;
+    padding: 4px 0;
+}
+
+/* Group label + label/value row. .machine-system-row/-label/-value/
+   -value-empty are the SAME class names (and rules) v1's copy of this
+   stylesheet uses -- only this group CONTAINER class differs between the
+   two trees, per UX spec §3. */
+.status-row-system-group {
+    margin: 6px 0;
+}
+
+.machine-system-group-label {
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 9px;
+    opacity: 0.6;
+    color: var(--lcars-tan);
+    margin-bottom: 2px;
+}
+
+.machine-system-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    padding: 1px 0;
+}
+
+.machine-system-row-label {
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    opacity: 0.7;
+    min-width: 90px;
+}
+
+.machine-system-row-value {
+    color: var(--lcars-lavender);
+}
+
+/* A collected zero is data, not absence (contract §3) -- rendered above at
+   full opacity via .machine-system-row-value. This modifier is reserved
+   for a field the reporter genuinely omitted or could not be safely
+   rendered, and must read as a full muted WORD, never a bare dash (UX
+   spec §5: "a lone dash ... can be misread as part of a number"). */
+.machine-system-row-value-empty {
+    color: var(--lcars-tan);
+    opacity: 0.5;
+    font-style: italic;
+}

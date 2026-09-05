@@ -1,0 +1,485 @@
+{
+    "fleet": {
+        "total_machines": 11,
+        "online_machines": 11,
+        "offline_machines": 0,
+        "total_sessions": 0,
+        "divisions": {},
+        "machines": [
+            {
+                "machine_id": "00000000-0000-4000-8000-000000000001",
+                "hostname": "fixture-healthy-baseline.example.test",
+                "nickname": "HealthyBaseline",
+                "ip": "192.0.2.10",
+                "os": "Darwin",
+                "status": "online",
+                "first_seen": "2026-01-15T00:00:00.000Z",
+                "last_seen": "2026-09-04T15:00:00.000Z",
+                "session_count": 0,
+                "sessions": [],
+                "uptime_history": [
+                    {
+                        "timestamp": "2026-09-04T15:00:00.000Z",
+                        "status": "online",
+                        "session_count": 0
+                    }
+                ],
+                "system": {
+                    "schema_version": 1,
+                    "versions": {
+                        "aiteamforge": "0.17.8",
+                        "latest": "0.17.9",
+                        "outdated": true
+                    },
+                    "os_version": "27.0",
+                    "os_build": "26A5388g",
+                    "os_name": "macOS",
+                    "model": "Mac15,6",
+                    "arch": "arm64",
+                    "cores": 11,
+                    "total_ram": 19327352832,
+                    "boot_time": 1788177600,
+                    "memory": {
+                        "used": 6442450944,
+                        "total": 19327352832,
+                        "pressure_percent": 34
+                    },
+                    "swap_used_bytes": 2147483648,
+                    "disk": {
+                        "used": 225485783040,
+                        "free": 311385128960,
+                        "percent": 42
+                    },
+                    "load_average": [
+                        2.1,
+                        1.8,
+                        1.5
+                    ]
+                }
+            },
+            {
+                "machine_id": "00000000-0000-4000-8000-000000000002",
+                "hostname": "fixture-idle-zero-healthy.example.test",
+                "nickname": "IdleZeroHealthy",
+                "ip": "192.0.2.11",
+                "os": "Darwin",
+                "status": "online",
+                "first_seen": "2026-01-15T00:00:00.000Z",
+                "last_seen": "2026-09-04T15:00:00.000Z",
+                "session_count": 0,
+                "sessions": [],
+                "uptime_history": [
+                    {
+                        "timestamp": "2026-09-04T15:00:00.000Z",
+                        "status": "online",
+                        "session_count": 0
+                    }
+                ],
+                "system": {
+                    "schema_version": 1,
+                    "versions": {
+                        "aiteamforge": "0.17.9",
+                        "latest": "0.17.9",
+                        "outdated": false
+                    },
+                    "os_version": "27.0",
+                    "os_build": "26A5388g",
+                    "os_name": "macOS",
+                    "model": "Mac15,6",
+                    "arch": "arm64",
+                    "cores": 11,
+                    "total_ram": 19327352832,
+                    "boot_time": 1788177600,
+                    "memory": {
+                        "used": 3221225472,
+                        "total": 19327352832,
+                        "pressure_percent": 0
+                    },
+                    "swap_used_bytes": 0,
+                    "disk": {
+                        "used": 64424509440,
+                        "free": 472446402560,
+                        "percent": 12
+                    },
+                    "load_average": [
+                        0.0,
+                        0.0,
+                        0.0
+                    ]
+                }
+            },
+            {
+                "machine_id": "00000000-0000-4000-8000-000000000003",
+                "hostname": "fixture-mixed-missing-and-zero.example.test",
+                "nickname": "MixedMissingOutdatedAndZeroSwap",
+                "ip": "192.0.2.12",
+                "os": "Darwin",
+                "status": "online",
+                "first_seen": "2026-01-15T00:00:00.000Z",
+                "last_seen": "2026-09-04T15:00:00.000Z",
+                "session_count": 0,
+                "sessions": [],
+                "uptime_history": [
+                    {
+                        "timestamp": "2026-09-04T15:00:00.000Z",
+                        "status": "online",
+                        "session_count": 0
+                    }
+                ],
+                "system": {
+                    "schema_version": 1,
+                    "versions": {
+                        "aiteamforge": "0.17.8",
+                        "latest": "0.17.9"
+                    },
+                    "os_version": "27.0",
+                    "os_build": "26A5388g",
+                    "os_name": "macOS",
+                    "model": "Mac15,6",
+                    "arch": "arm64",
+                    "cores": 11,
+                    "total_ram": 19327352832,
+                    "boot_time": 1788177600,
+                    "memory": {
+                        "used": 4294967296,
+                        "total": 19327352832,
+                        "pressure_percent": 22
+                    },
+                    "swap_used_bytes": 0,
+                    "load_average": [
+                        0.8,
+                        0.6,
+                        0.5
+                    ]
+                }
+            },
+            {
+                "machine_id": "00000000-0000-4000-8000-000000000004",
+                "hostname": "fixture-swap-warning-boundary.example.test",
+                "nickname": "SwapWarningBoundary",
+                "ip": "192.0.2.13",
+                "os": "Darwin",
+                "status": "online",
+                "first_seen": "2026-01-15T00:00:00.000Z",
+                "last_seen": "2026-09-04T15:00:00.000Z",
+                "session_count": 0,
+                "sessions": [],
+                "uptime_history": [
+                    {
+                        "timestamp": "2026-09-04T15:00:00.000Z",
+                        "status": "online",
+                        "session_count": 0
+                    }
+                ],
+                "system": {
+                    "schema_version": 1,
+                    "versions": {
+                        "aiteamforge": "0.17.9",
+                        "latest": "0.17.9",
+                        "outdated": false
+                    },
+                    "os_version": "27.0",
+                    "os_build": "26A5388g",
+                    "os_name": "macOS",
+                    "model": "Mac15,6",
+                    "arch": "arm64",
+                    "cores": 11,
+                    "total_ram": 19327352832,
+                    "boot_time": 1788177600,
+                    "memory": {
+                        "used": 8589934592,
+                        "total": 19327352832,
+                        "pressure_percent": 55
+                    },
+                    "swap_used_bytes": 16106127360,
+                    "disk": {
+                        "used": 187904819200,
+                        "free": 348966092800,
+                        "percent": 35
+                    },
+                    "load_average": [
+                        1.9,
+                        1.7,
+                        1.4
+                    ]
+                }
+            },
+            {
+                "machine_id": "00000000-0000-4000-8000-000000000005",
+                "hostname": "fixture-swap-critical-boundary.example.test",
+                "nickname": "SwapCriticalBoundary",
+                "ip": "192.0.2.14",
+                "os": "Darwin",
+                "status": "online",
+                "first_seen": "2026-01-15T00:00:00.000Z",
+                "last_seen": "2026-09-04T15:00:00.000Z",
+                "session_count": 0,
+                "sessions": [],
+                "uptime_history": [
+                    {
+                        "timestamp": "2026-09-04T15:00:00.000Z",
+                        "status": "online",
+                        "session_count": 0
+                    }
+                ],
+                "system": {
+                    "schema_version": 1,
+                    "versions": {
+                        "aiteamforge": "0.17.9",
+                        "latest": "0.17.9",
+                        "outdated": false
+                    },
+                    "os_version": "27.0",
+                    "os_build": "26A5388g",
+                    "os_name": "macOS",
+                    "model": "Mac15,6",
+                    "arch": "arm64",
+                    "cores": 11,
+                    "total_ram": 19327352832,
+                    "boot_time": 1788177600,
+                    "memory": {
+                        "used": 9663676416,
+                        "total": 19327352832,
+                        "pressure_percent": 61
+                    },
+                    "swap_used_bytes": 32212254720,
+                    "disk": {
+                        "used": 187904819200,
+                        "free": 348966092800,
+                        "percent": 35
+                    },
+                    "load_average": [
+                        1.9,
+                        1.7,
+                        1.4
+                    ]
+                }
+            },
+            {
+                "machine_id": "00000000-0000-4000-8000-000000000006",
+                "hostname": "fixture-disk-high.example.test",
+                "nickname": "DiskHighRepresentative",
+                "ip": "192.0.2.15",
+                "os": "Darwin",
+                "status": "online",
+                "first_seen": "2026-01-15T00:00:00.000Z",
+                "last_seen": "2026-09-04T15:00:00.000Z",
+                "session_count": 0,
+                "sessions": [],
+                "uptime_history": [
+                    {
+                        "timestamp": "2026-09-04T15:00:00.000Z",
+                        "status": "online",
+                        "session_count": 0
+                    }
+                ],
+                "system": {
+                    "schema_version": 1,
+                    "versions": {
+                        "aiteamforge": "0.17.9",
+                        "latest": "0.17.9",
+                        "outdated": false
+                    },
+                    "os_version": "27.0",
+                    "os_build": "26A5388g",
+                    "os_name": "macOS",
+                    "model": "Mac15,6",
+                    "arch": "arm64",
+                    "cores": 11,
+                    "total_ram": 19327352832,
+                    "boot_time": 1788177600,
+                    "memory": {
+                        "used": 7516192768,
+                        "total": 19327352832,
+                        "pressure_percent": 48
+                    },
+                    "swap_used_bytes": 1073741824,
+                    "disk": {
+                        "used": 493921239040,
+                        "free": 42949672960,
+                        "percent": 92
+                    },
+                    "load_average": [
+                        2.0,
+                        1.8,
+                        1.6
+                    ]
+                }
+            },
+            {
+                "machine_id": "00000000-0000-4000-8000-000000000007",
+                "hostname": "fixture-load-high.example.test",
+                "nickname": "LoadHighRepresentative",
+                "ip": "192.0.2.16",
+                "os": "Darwin",
+                "status": "online",
+                "first_seen": "2026-01-15T00:00:00.000Z",
+                "last_seen": "2026-09-04T15:00:00.000Z",
+                "session_count": 0,
+                "sessions": [],
+                "uptime_history": [
+                    {
+                        "timestamp": "2026-09-04T15:00:00.000Z",
+                        "status": "online",
+                        "session_count": 0
+                    }
+                ],
+                "system": {
+                    "schema_version": 1,
+                    "versions": {
+                        "aiteamforge": "0.17.9",
+                        "latest": "0.17.9",
+                        "outdated": false
+                    },
+                    "os_version": "27.0",
+                    "os_build": "26A5388g",
+                    "os_name": "macOS",
+                    "model": "Mac15,6",
+                    "arch": "arm64",
+                    "cores": 11,
+                    "total_ram": 19327352832,
+                    "boot_time": 1788177600,
+                    "memory": {
+                        "used": 8589934592,
+                        "total": 19327352832,
+                        "pressure_percent": 52
+                    },
+                    "swap_used_bytes": 1073741824,
+                    "disk": {
+                        "used": 268435456000,
+                        "free": 268435456000,
+                        "percent": 50
+                    },
+                    "load_average": [
+                        38.5,
+                        35.2,
+                        30.1
+                    ]
+                }
+            },
+            {
+                "machine_id": "00000000-0000-4000-8000-000000000008",
+                "hostname": "fixture-system-absent-old-reporter.example.test",
+                "nickname": "SystemBlockAbsentOldReporter",
+                "ip": "192.0.2.17",
+                "os": "Darwin",
+                "status": "online",
+                "first_seen": "2026-01-15T00:00:00.000Z",
+                "last_seen": "2026-09-04T15:00:00.000Z",
+                "session_count": 0,
+                "sessions": [],
+                "uptime_history": [
+                    {
+                        "timestamp": "2026-09-04T15:00:00.000Z",
+                        "status": "online",
+                        "session_count": 0
+                    }
+                ],
+                "system": {}
+            },
+            {
+                "machine_id": "00000000-0000-4000-8000-000000000009",
+                "hostname": "fixture-versions-only-day-one.example.test",
+                "nickname": "VersionsOnlyDayOne",
+                "ip": "192.0.2.18",
+                "os": "Darwin",
+                "status": "online",
+                "first_seen": "2026-01-15T00:00:00.000Z",
+                "last_seen": "2026-09-04T15:00:00.000Z",
+                "session_count": 0,
+                "sessions": [],
+                "uptime_history": [
+                    {
+                        "timestamp": "2026-09-04T15:00:00.000Z",
+                        "status": "online",
+                        "session_count": 0
+                    }
+                ],
+                "system": {
+                    "schema_version": 1,
+                    "versions": {
+                        "aiteamforge": "0.17.8",
+                        "latest": "0.17.9",
+                        "outdated": true
+                    }
+                }
+            },
+            {
+                "machine_id": "00000000-0000-4000-8000-000000000010",
+                "hostname": "fixture-non-macos-host.example.test",
+                "nickname": "NonMacOSHostVersionsOnly",
+                "ip": "192.0.2.19",
+                "os": "Linux",
+                "status": "online",
+                "first_seen": "2026-01-15T00:00:00.000Z",
+                "last_seen": "2026-09-04T15:00:00.000Z",
+                "session_count": 0,
+                "sessions": [],
+                "uptime_history": [
+                    {
+                        "timestamp": "2026-09-04T15:00:00.000Z",
+                        "status": "online",
+                        "session_count": 0
+                    }
+                ],
+                "system": {
+                    "schema_version": 1,
+                    "versions": {
+                        "aiteamforge": "0.17.9",
+                        "latest": "0.17.9",
+                        "outdated": false
+                    }
+                }
+            },
+            {
+                "machine_id": "00000000-0000-4000-8000-000000000011",
+                "hostname": "fixture-hostile-defensive.example.test",
+                "nickname": "HostileDefensive",
+                "ip": "192.0.2.20",
+                "os": "Darwin",
+                "status": "online",
+                "first_seen": "2026-01-15T00:00:00.000Z",
+                "last_seen": "2026-09-04T15:00:00.000Z",
+                "session_count": 0,
+                "sessions": [],
+                "uptime_history": [
+                    {
+                        "timestamp": "2026-09-04T15:00:00.000Z",
+                        "status": "online",
+                        "session_count": 0
+                    }
+                ],
+                "system": {
+                    "schema_version": 1,
+                    "versions": {
+                        "aiteamforge": "0.17.8",
+                        "latest": "0.17.9",
+                        "outdated": "yes"
+                    },
+                    "os_version": "27.0",
+                    "os_build": "26A5388g",
+                    "os_name": "macOS",
+                    "model": "Mac15,6",
+                    "arch": "arm64",
+                    "cores": "eleven",
+                    "total_ram": 19327352832,
+                    "boot_time": 1788177600,
+                    "memory": {
+                        "used": 6442450944,
+                        "total": 19327352832,
+                        "pressure_percent": -5
+                    },
+                    "swap_used_bytes": null,
+                    "disk": {
+                        "used": 100,
+                        "free": "lots",
+                        "percent": 25
+                    },
+                    "load_average": "high"
+                }
+            }
+        ]
+    },
+    "activityLog": [],
+    "last_update": "2026-09-04T15:00:00.000Z"
+}

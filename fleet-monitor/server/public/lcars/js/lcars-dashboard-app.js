@@ -48,6 +48,7 @@
     let cachedDivisions = null;
     let expandedMachineId = null;
     let expandedBackupMachineId = null;
+    let expandedSystemMachineId = null;  // XACA-1092-005: mirrors expandedBackupMachineId's mechanics for the new SYSTEM disclosure toggle.
     let backupStatus = null;
     let workingItems = null;
     let teamConfig = null;
@@ -1740,10 +1741,283 @@
         }
     }
 
+    // ============================================================================
+    // XACA-1092-004/-005: MACHINE SYSTEM TELEMETRY -- see the lcars2 copy of
+    // this same block (public/lcars2/js/lcars-*-app.js) for the shared
+    // rationale; duplicated here per XACA-1091-016 Design Decision 6
+    // ("superseded in part" -- no shared helper extraction across the 5
+    // createMachineItem copies). Group container class is
+    // `.machine-system-group` here (lcars2 uses `.status-row-system-group`)
+    // per UX spec §3's explicit per-tree naming; row/label/value classes are
+    // shared vocabulary between the two trees.
+    // ============================================================================
+
+    const SYSTEM_BYTES_PER_GB = 1024 * 1024 * 1024;
+
+    // Wire adapter (XACA-1092-005): maps the frozen system{} contract onto
+    // the normalized primitives deriveMachineHealth() expects. ALL wire-
+    // format coupling lives here -- if the contract is revised, this is the
+    // one place in this file that needs to change.
+    //
+    // Guards on the LEAF, never the container ('percent' in disk, not
+    // `if (system.disk)`) -- system{}/disk{}/memory{}/versions{} all ship
+    // as `{}` (truthy) rather than omitted when unresolvable (contract §3),
+    // so a container-level truthiness check would treat every unresolved
+    // machine as having real data. See XACA-1092-002 ADDENDUM.
+    function machineSystemToHealthInput(system) {
+        const sys = system || {};
+        const disk = sys.disk || {};
+        return {
+            diskPercentUsed: ('percent' in disk) ? disk.percent : undefined,
+            swapUsedBytes: ('swap_used_bytes' in sys) ? sys.swap_used_bytes : undefined,
+            loadAvg1: (Array.isArray(sys.load_average) && sys.load_average.length > 0) ? sys.load_average[0] : undefined,
+            coreCount: ('cores' in sys) ? sys.cores : undefined
+        };
+    }
+
+    // Byte formatter -- a COLLECTED ZERO IS DATA (contract §3): renders as
+    // the plain, non-italic "0 B", never "0.0 GB". Any non-finite-number
+    // input (missing, null, or a hostile non-numeric value -- see the
+    // HostileDefensive fixture case) returns null so the caller can render
+    // the same "not reported" treatment absence gets, rather than a literal
+    // "NaN GB" ever reaching the DOM. One decimal of precision (UX spec
+    // §3): a rounded/lossy figure is what hid the real state in the
+    // swap-percentage postmortem this spec cites.
+    function formatSystemBytes(value) {
+        if (typeof value !== 'number' || !isFinite(value)) {
+            return null;
+        }
+        if (value === 0) {
+            return '0 B';
+        }
+        return (value / SYSTEM_BYTES_PER_GB).toFixed(1) + ' GB';
+    }
+
+    function systemRowValue(label, valueHtml) {
+        return '<div class="machine-system-row"><span class="machine-system-row-label">' + label + '</span>' +
+            '<span class="machine-system-row-value">' + valueHtml + '</span></div>';
+    }
+
+    // UX spec §5: an omitted/unreportable leaf renders as a full muted word,
+    // never a bare dash -- "a lone dash on a small row, sitting next to
+    // numerals, is exactly the kind of subtle mark ... misread as part of a
+    // number at a glance."
+    function systemRowAbsent(label) {
+        return '<div class="machine-system-row"><span class="machine-system-row-label">' + label + '</span>' +
+            '<span class="machine-system-row-value machine-system-row-value-empty">not reported</span></div>';
+    }
+
+    function systemGroupHasAny(obj, keys) {
+        const source = obj || {};
+        for (let i = 0; i < keys.length; i++) {
+            if (keys[i] in source) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // PLATFORM group -- os_name/os_version/os_build combine into one OS row
+    // per UX spec §3's worked example ("OS  macOS 27.0 (26A5388g)").
+    // Reporter-supplied strings -> escapeHtml (element content), matching
+    // this file's existing XACA-0416-004 convention for machine.hostname.
+    function buildSystemOsRow(system) {
+        const hasName = 'os_name' in system;
+        const hasVersion = 'os_version' in system;
+        const hasBuild = 'os_build' in system;
+        if (!hasName && !hasVersion && !hasBuild) {
+            return systemRowAbsent('OS');
+        }
+        let text = hasName ? escapeHtml(String(system.os_name)) : 'Unknown';
+        if (hasVersion) {
+            text += ' ' + escapeHtml(String(system.os_version));
+        }
+        if (hasBuild) {
+            text += ' (' + escapeHtml(String(system.os_build)) + ')';
+        }
+        return systemRowValue('OS', text);
+    }
+
+    function buildPlatformGroupHtml(system) {
+        if (!systemGroupHasAny(system, ['os_name', 'os_version', 'os_build', 'model', 'arch', 'cores'])) {
+            return '';
+        }
+        let rows = buildSystemOsRow(system);
+        rows += ('model' in system) ? systemRowValue('MODEL', escapeHtml(String(system.model))) : systemRowAbsent('MODEL');
+        rows += ('arch' in system) ? systemRowValue('ARCH', escapeHtml(String(system.arch))) : systemRowAbsent('ARCH');
+        rows += ('cores' in system) ? systemRowValue('CORES', escapeHtml(String(system.cores))) : systemRowAbsent('CORES');
+        return '<div class="machine-system-group"><div class="machine-system-group-label">PLATFORM</div>' + rows + '</div>';
+    }
+
+    // MEMORY & SWAP group. memory.used/total combine into one MEMORY row;
+    // swap_used_bytes (sibling of `memory`, NOT nested in it -- contract §1)
+    // is its own row. NEVER a percentage -- see lcars-machine-health.js
+    // module header ("DISK vs SWAP -- INVERSE RULES").
+    function buildMemorySwapGroupHtml(system) {
+        const memory = system.memory || {};
+        const hasMemory = systemGroupHasAny(memory, ['used', 'total', 'pressure_percent']);
+        const hasSwap = 'swap_used_bytes' in system;
+        if (!hasMemory && !hasSwap) {
+            return '';
+        }
+
+        let memoryRowHtml;
+        if (!hasMemory) {
+            memoryRowHtml = systemRowAbsent('MEMORY');
+        } else {
+            const usedStr = formatSystemBytes(memory.used);
+            const totalStr = formatSystemBytes(memory.total);
+            let text = (usedStr !== null ? usedStr : 'not reported') + ' / ' + (totalStr !== null ? totalStr : 'not reported');
+            if ('pressure_percent' in memory) {
+                text += '&nbsp;&nbsp;(' + escapeHtml(String(memory.pressure_percent)) + '% pressure)';
+            }
+            memoryRowHtml = systemRowValue('MEMORY', text);
+        }
+
+        let swapRowHtml;
+        if (!hasSwap) {
+            swapRowHtml = systemRowAbsent('SWAP');
+        } else {
+            const swapStr = formatSystemBytes(system.swap_used_bytes);
+            swapRowHtml = systemRowValue('SWAP', swapStr !== null ? swapStr : 'not reported');
+        }
+
+        return '<div class="machine-system-group"><div class="machine-system-group-label">MEMORY &amp; SWAP</div>' + memoryRowHtml + swapRowHtml + '</div>';
+    }
+
+    // DISK group. `disk.percent` is rendered EXACTLY as sent -- NEVER
+    // recomputed from used/free (contract §5a: APFS df total is not
+    // used+free; see lcars-machine-health.js module header for the ~20x
+    // under-report this would otherwise silently produce).
+    function buildDiskGroupHtml(system) {
+        const disk = system.disk || {};
+        if (!systemGroupHasAny(disk, ['used', 'free', 'percent'])) {
+            return '';
+        }
+        const usedStr = formatSystemBytes(disk.used);
+        const usedRow = systemRowValue('USED', usedStr !== null ? usedStr : 'not reported');
+
+        const freeStr = formatSystemBytes(disk.free);
+        let freeText = freeStr !== null ? freeStr : 'not reported';
+        if ('percent' in disk) {
+            freeText += '&nbsp;&nbsp;(' + escapeHtml(String(disk.percent)) + '%)';
+        }
+        const freeRow = systemRowValue('FREE', freeText);
+
+        return '<div class="machine-system-group"><div class="machine-system-group-label">DISK</div>' + usedRow + freeRow + '</div>';
+    }
+
+    // LOAD group. Shows the raw triple AND the 1-minute figure normalized
+    // per core (UX spec §3: showing only the raw number "reads as a wildly
+    // overloaded box" without the per-core context). Never applies a
+    // threshold itself -- XACA-1092-003 owns that, and its two constants
+    // are under user review; this function only formats whatever
+    // load_average/cores the reporter sent.
+    function buildLoadGroupHtml(system) {
+        const load = system.load_average;
+        if (!Array.isArray(load) || load.length === 0) {
+            return '';
+        }
+        function fmtEntry(v) {
+            return (typeof v === 'number' && isFinite(v)) ? v.toFixed(2) : '?';
+        }
+        const triple = fmtEntry(load[0]) + ' / ' + fmtEntry(load[1]) + ' / ' + fmtEntry(load[2]);
+
+        let suffix = '';
+        const cores = system.cores;
+        if (typeof load[0] === 'number' && isFinite(load[0]) && typeof cores === 'number' && isFinite(cores) && cores > 0) {
+            suffix = '&nbsp;&nbsp;(' + (load[0] / cores).toFixed(2) + '× per core)';
+        }
+        return '<div class="machine-system-group"><div class="machine-system-group-label">LOAD</div>' +
+            systemRowValue('1 / 5 / 15 MIN', triple + suffix) + '</div>';
+    }
+
+    // Version line (UX spec §6) -- ALWAYS visible when the reporter has told
+    // us the installed version at all, independent of whether any health
+    // group has data (this is what makes the VersionsOnlyDayOne fixture
+    // case show a version line with zero SYSTEM groups). Three states, keyed
+    // off strict comparison against true/false, never off the truthiness of
+    // `outdated` itself -- `false` (confirmed current) must render
+    // differently from omitted (unknown), and a hostile non-boolean value
+    // (e.g. the string "yes") must fall safely into the "unknown" bucket
+    // rather than matching either branch.
+
+    // HEALTH badge (UX spec §4 + ADDENDUM): shown ONLY for 'at_risk' --
+    // 'healthy' and 'unknown' both render as NO badge (not the same fact,
+    // but the same silence -- see the ADDENDUM's "why not show unknown").
+    // deriveMachineHealth()'s overall state collapses warning+critical into
+    // a single 'at_risk', so the CRITICAL/AT RISK text choice is this
+    // renderer's own aggregation across the per-metric states, per the
+    // spec's explicit precedence rule ("if any metric is CRITICAL, show
+    // CRITICAL; else if any is WARNING, show AT RISK").
+    function buildHealthBadgeHtml(healthResult) {
+        if (!healthResult || healthResult.state !== 'at_risk') {
+            return '';
+        }
+        const metrics = healthResult.metrics || {};
+        const anyCritical = ['disk', 'swap', 'load'].some(function (key) {
+            return metrics[key] && metrics[key].state === 'critical';
+        });
+        return anyCritical
+            ? '<span class="status-badge health-critical">CRITICAL</span>'
+            : '<span class="status-badge health-warning">AT RISK</span>';
+    }
+
+    // VERSION badge -- shown ONLY for outdated === true (UX spec §4): never
+    // for false (confirmed current) or omitted (unknown), both of which are
+    // non-actionable at a glance and are differentiated instead on the
+    // always-visible version line.
+
+    // SYSTEM disclosure toggle + panel, or the static NO DATA line, or
+    // nothing -- UX spec §5's "two-tier presence signal":
+    //   - no `schema_version` at all (whole block absent, pre-XACA-1031
+    //     reporter) -> '' (nothing new, matches today's card exactly)
+    //   - `schema_version` present but zero health groups have any field
+    //     (the VersionsOnlyDayOne/NonMacOSHostVersionsOnly shape -- the
+    //     default production state for the entire window between XACA-1031
+    //     merging and XACA-1091 shipping, per XACA-1091-016's fixture note
+    //     "why case 9 is the most important one, not a rare edge") -> the
+    //     static "SYSTEM: NO DATA REPORTED" line, no chevron
+    //   - at least one group has at least one field -> the real interactive
+    //     toggle + panel, mirroring the existing backup toggle's mechanics
+    //     (QUOTED ATTRIBUTE -> escapeAttr, same as machine-backup-container's
+    //     own data-machine-id, per this file's XACA-0416-004 convention).
+    function buildSystemSectionHtml(machine, system, isExpanded) {
+        const groupsHtml = buildPlatformGroupHtml(system) + buildMemorySwapGroupHtml(system) +
+            buildDiskGroupHtml(system) + buildLoadGroupHtml(system);
+
+        if (groupsHtml !== '') {
+            return (
+                '<div class="machine-system-container" data-machine-id="' + escapeAttr(machine.machine_id) + '">' +
+                    '<div class="machine-system-status clickable">' +
+                        '<span class="system-expand-indicator' + (isExpanded ? ' expanded' : '') + '">▶</span>' +
+                        '<span class="system-label">SYSTEM</span>' +
+                    '</div>' +
+                    '<div class="machine-system-details-panel' + (isExpanded ? ' expanded' : '') + '">' + groupsHtml + '</div>' +
+                '</div>'
+            );
+        }
+
+        if ('schema_version' in system) {
+            return '<div class="machine-system-no-data">SYSTEM: NO DATA REPORTED</div>';
+        }
+
+        return '';
+    }
+
     function createMachineItem(machine) {
         const container = document.createElement('div');
         container.className = 'machine-item-container';
         container.setAttribute('data-machine-id', machine.machine_id);
+
+        // XACA-1092-004/-005: machine.system is always an object per the
+        // frozen contract (§3) -- `|| {}` here is belt-and-suspenders for
+        // any caller that predates that guarantee, not a sign the contract
+        // is doubted.
+        const system = machine.system || {};
+        const healthResult = (window.LCARS_MACHINE_HEALTH && window.LCARS_MACHINE_HEALTH.deriveMachineHealth)
+            ? window.LCARS_MACHINE_HEALTH.deriveMachineHealth(machineSystemToHealthInput(system))
+            : { state: 'unknown', metrics: {} };
 
         const item = document.createElement('div');
         item.className = 'machine-row ' + machine.status;
@@ -1934,12 +2208,22 @@
         // would double-escape their real tags. lastSeenRelative/firstSeenDate come
         // out of formatRelativeTime()/formatShortDate(), which emit only digits and
         // fixed words, so they carry nothing from the input string.
+        // XACA-1092-004/-005: the two trailing badge spans are new. Their
+        // own interpolations (reporter version strings) are escaped inside
+        // the builder functions above the class methods; healthResult/
+        // system-derived class names and text are fixed-set literals chosen
+        // by this file's own logic, matching machine.status/session_count's
+        // existing unwrapped treatment.
+        const isSystemExpanded = expandedSystemMachineId === machine.machine_id;
+        const systemSectionHtml = buildSystemSectionHtml(machine, system, isSystemExpanded);
+
         item.innerHTML =
             '<div class="machine-row-header">' +
                 '<span class="machine-expand-indicator' + (isExpanded ? ' expanded' : '') + '">▶</span>' +
                 '<span class="status-indicator ' + machine.status + '"></span>' +
                 '<span class="machine-hostname">' + escapeHtml(machine.hostname) + '</span>' +
                 '<span class="machine-sessions">' + machine.session_count + ' sessions</span>' +
+                buildHealthBadgeHtml(healthResult) +
             '</div>' +
             '<div class="machine-nickname-row">' +
                 '<span class="machine-nickname-label">Nickname:</span>' +
@@ -1954,6 +2238,7 @@
             '</div>' +
             '<div class="machine-guid">GUID: ' + escapeHtml(machineGuid) + '</div>' +
             backupHtml +
+            systemSectionHtml +
             '<div class="machine-row-footer">' +
                 '<div class="machine-meta">' +
                     '<div class="machine-meta-item">' +
@@ -2038,8 +2323,19 @@
             });
         }
 
+        // XACA-1092-005: own click handler, stopPropagation-guarded exactly
+        // like backupContainer above, so it does not collide with the row's
+        // history-panel click or the backup container's own click.
+        var systemContainer = item.querySelector('.machine-system-container');
+        if (systemContainer) {
+            systemContainer.addEventListener('click', function(e) {
+                e.stopPropagation();
+                toggleSystemPanel(machine.machine_id, systemContainer);
+            });
+        }
+
         item.addEventListener('click', function(e) {
-            if (e.target.closest('button') || e.target.closest('input') || e.target.closest('.machine-backup-container')) return;
+            if (e.target.closest('button') || e.target.closest('input') || e.target.closest('.machine-backup-container') || e.target.closest('.machine-system-container')) return;
             toggleHistoryPanel(machine.machine_id, container);
         });
 
@@ -2117,6 +2413,35 @@
             }
 
             expandedBackupMachineId = machineId;
+            if (panel) panel.classList.add('expanded');
+            if (indicator) indicator.classList.add('expanded');
+        }
+    }
+
+    // XACA-1092-005: mirrors toggleBackupPanel() above exactly -- same
+    // single-expansion-across-the-fleet mechanics, same CSS.escape() usage
+    // (see the XACA-0416 review-finding-2 comment on toggleHistoryPanel for
+    // why that call is required, not optional).
+    function toggleSystemPanel(machineId, container) {
+        var panel = container.querySelector('.machine-system-details-panel');
+        var indicator = container.querySelector('.system-expand-indicator');
+
+        if (expandedSystemMachineId === machineId) {
+            expandedSystemMachineId = null;
+            if (panel) panel.classList.remove('expanded');
+            if (indicator) indicator.classList.remove('expanded');
+        } else {
+            if (expandedSystemMachineId) {
+                var prevContainer = document.querySelector('.machine-system-container[data-machine-id="' + CSS.escape(expandedSystemMachineId) + '"]');
+                if (prevContainer) {
+                    var prevPanel = prevContainer.querySelector('.machine-system-details-panel');
+                    var prevIndicator = prevContainer.querySelector('.system-expand-indicator');
+                    if (prevPanel) prevPanel.classList.remove('expanded');
+                    if (prevIndicator) prevIndicator.classList.remove('expanded');
+                }
+            }
+
+            expandedSystemMachineId = machineId;
             if (panel) panel.classList.add('expanded');
             if (indicator) indicator.classList.add('expanded');
         }

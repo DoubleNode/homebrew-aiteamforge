@@ -6764,3 +6764,190 @@
     white-space: nowrap;
     border: 0;
 }
+
+/* -------------------------------------------------------------------------------
+   XACA-1092-004/-005: Machine SYSTEM telemetry -- HEALTH/VERSION badges,
+   always-visible version line, and the SYSTEM disclosure panel on the v1
+   MACHINES card. Per UX spec (kanban/EPIC-0061_machine_health_telemetry.md
+   lines 934-1401): new MODIFIER classes on the existing .status-badge shape
+   (§0/§4), .machine-system-container/.machine-system-status/
+   .system-expand-indicator/.machine-system-details-panel mirror
+   .machine-backup-container/.machine-backup-status/.backup-expand-indicator/
+   .backup-details-panel's mechanics 1:1 (same chevron rotation, same
+   max-height transition), and .machine-system-row mirrors
+   .machine-meta-item's label-over-value column pattern. No new shape, color,
+   or interaction idiom is introduced -- see §0's "reuses" table.
+   Appended at end-of-file rather than inlined near the rules it mirrors, to
+   keep this change a single, clearly-delimited block during the XACA-1031
+   version-row merge this PR is expected to collide with (see this ticket's
+   dispatch brief, "COLLISION WARNING").
+   ------------------------------------------------------------------------------- */
+
+/* UX spec §4 "Layout note": 0-2 badge pills appended to a row that already
+   carries a full hostname must not truncate the hostname or force
+   horizontal scrolling on narrow viewports. */
+.machine-row-header {
+    flex-wrap: wrap;
+}
+
+/* HEALTH badge (AT RISK / CRITICAL) and VERSION badge (OUTDATED). Solid
+   fill + black text, matching .status-badge.online/.offline/.warning's
+   existing contrast-passing convention (UX spec §7) rather than
+   colored-text-on-dark, which would need separate verification. */
+.status-badge.health-warning,
+.status-badge.version-outdated {
+    background: var(--lcars-amber);
+    color: var(--lcars-black);
+}
+
+.status-badge.health-critical {
+    background: var(--lcars-alert-red);
+    color: var(--lcars-black);
+}
+
+/* Always-visible version line (UX spec §6). Three states, one shared
+   "unknown" visual language with the absent-metric rows below --
+   .machine-nickname-value.empty's opacity/italic treatment, not a new one. */
+.machine-version-line {
+    font-size: 11px;
+    margin: 2px 0 4px;
+}
+
+.machine-version-line-outdated {
+    color: var(--lcars-amber);
+}
+
+.machine-version-line-current {
+    color: var(--lcars-green);
+}
+
+.machine-version-line-unknown {
+    color: var(--lcars-tan);
+    opacity: 0.5;
+    font-style: italic;
+}
+
+/* SYSTEM disclosure toggle + panel -- mirrors .machine-backup-status/
+   .machine-backup-container/.backup-expand-indicator/.backup-details-panel
+   mechanics exactly (chevron rotation via .expanded, max-height transition,
+   the whole row as the click/tap target per UX spec §7 "Touch targets"). */
+.machine-system-container {
+    margin: 4px 0;
+}
+
+.machine-system-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--lcars-lavender);
+}
+
+.machine-system-status.clickable {
+    cursor: pointer;
+    padding: 4px 8px;
+    margin: -4px -8px;
+    border-radius: 4px;
+    transition: background-color 0.2s ease;
+}
+
+.machine-system-status.clickable:hover {
+    background-color: rgba(153, 153, 255, 0.15);
+}
+
+.system-expand-indicator {
+    color: var(--lcars-tan);
+    font-size: 8px;
+    transition: transform 0.2s ease;
+    display: inline-block;
+}
+
+.system-expand-indicator.expanded {
+    transform: rotate(90deg);
+}
+
+.system-label {
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 500;
+}
+
+.machine-system-details-panel {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out, padding 0.3s ease-out;
+    background: var(--lcars-darker);
+    border-left: 3px solid var(--lcars-purple);
+    margin-left: 14px;
+    margin-top: 0;
+    padding: 0 12px;
+}
+
+.machine-system-details-panel.expanded {
+    max-height: 700px;
+    overflow-y: auto;
+    padding: 8px 12px;
+    margin-top: 8px;
+}
+
+/* Transitional "no data yet" line -- UX spec §5, the default production
+   state for every machine between XACA-1031 merging and XACA-1091
+   shipping. Blends the two reused wording conventions the spec names
+   (.kiosk-health-no-data-label's uppercase/letter-spacing, .history-empty's
+   muted/italic) rather than introducing a third. */
+.machine-system-no-data {
+    color: var(--lcars-tan);
+    opacity: 0.6;
+    font-style: italic;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 10px;
+    padding: 4px 0;
+}
+
+/* Group label + label/value row -- .machine-system-row mirrors
+   .machine-meta-item's existing label-over-value column pattern. Shared
+   class names with the lcars2 copy of this panel (only the group
+   CONTAINER class differs between the two trees, per UX spec §3). */
+.machine-system-group {
+    margin: 6px 0;
+}
+
+.machine-system-group-label {
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 9px;
+    opacity: 0.6;
+    color: var(--lcars-tan);
+    margin-bottom: 2px;
+}
+
+.machine-system-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    padding: 1px 0;
+}
+
+.machine-system-row-label {
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    opacity: 0.7;
+    min-width: 90px;
+}
+
+.machine-system-row-value {
+    color: var(--lcars-lavender);
+}
+
+/* A collected zero is data, not absence (contract §3) -- rendered above at
+   full opacity via .machine-system-row-value. This modifier is reserved
+   for a field the reporter genuinely omitted or could not be safely
+   rendered, and must read as a full muted WORD, never a bare dash (UX
+   spec §5: "a lone dash ... can be misread as part of a number"). */
+.machine-system-row-value-empty {
+    color: var(--lcars-tan);
+    opacity: 0.5;
+    font-style: italic;
+}

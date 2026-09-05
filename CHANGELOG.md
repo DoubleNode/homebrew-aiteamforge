@@ -6,6 +6,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1092: Fleet Monitor MACHINES cards now render per-machine system
+  telemetry (macOS version/build, hardware model, memory, swap, disk, load
+  average) and derive an AT RISK health badge, consuming the `system{}` block
+  nested at `machine.system.*`. Additive across all five `createMachineItem`
+  copies — no shared helper is extracted; the 5-way deduplication is a
+  follow-up. Version display belongs to XACA-1031 and is not duplicated here.
+  Thresholds are correct by construction per metric: swap in ABSOLUTE BYTES
+  (15/30 GiB, reused from the calibrated iterm2-memory-watchdog figures —
+  macOS grows the swapfile, so a percentage runs against an elastic
+  denominator), disk percent CONSUMED and never recomputed (on APFS `df`'s
+  total column is not used+free, and used/total under-reports a quarter-full
+  volume as ~1.3%), and load average rendered but deliberately EXCLUDED from
+  the badge because its thresholds are the only uncalibrated ones. Guards are
+  existence checks throughout, never truthiness: a falsy leaf (`0`, `false`)
+  is data, and a truthy empty container (`{}`) is not presence. `unknown`
+  renders no badge at all — until the reporter ships telemetry, every machine
+  is in that state, and a visible "unknown" pill would appear fleet-wide.
 - XACA-1096: `share/scripts/kb-host-ready.sh` — added a positive allowlist
   (`[A-Za-z0-9._-]`) as a second validation layer on the `team` and `args`
   config fields, alongside the retained `BAD_CHARS` denylist. Rejection

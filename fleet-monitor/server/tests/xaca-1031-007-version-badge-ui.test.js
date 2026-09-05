@@ -112,6 +112,28 @@ async function setupMinimalApp(relPath) {
     return { window, document, mod };
 }
 
+// XACA-1092 changed lcars2's createMachineItem() to return a
+// DocumentFragment containing [div.status-row, div.status-row-detail] (the
+// detail block must be a SIBLING of the row, not a child of it, because
+// .status-row is a single flex row also used by non-machine listings --
+// UX spec §1) instead of returning the div.status-row element directly, as
+// it did when this suite (XACA-1031-007) was written. The production call
+// site (`container.appendChild(createMachineItem(machine))`) handles a
+// fragment correctly; this suite predates that change and reaches for the
+// return value AS the row itself (`.innerHTML`, `.querySelectorAll('*')`
+// scoped to just the row's own children, etc.) -- none of which exist/mean
+// the same thing on a DocumentFragment. Unwrap here, once, so every
+// existing assertion below keeps running against the actual .status-row
+// element, completely unchanged in intent or strength.
+function unwrapStatusRow(node) {
+    if (node && node.nodeType === 11 /* Node.DOCUMENT_FRAGMENT_NODE */) {
+        const row = node.querySelector('.status-row');
+        if (!row) throw new Error('unwrapStatusRow: expected a .status-row descendant in the returned fragment');
+        return row;
+    }
+    return node;
+}
+
 // ============================================================================
 // Constraint #15: system absent entirely -- card renders cleanly, no
 // "undefined" anywhere in the constructed DOM.
@@ -120,7 +142,7 @@ async function setupMinimalApp(relPath) {
 test('createMachineItem: machine.system absent entirely renders no version indicator and no "undefined" text', async () => {
     const { mod } = await setupMinimalApp(ACADEMY_APP_REL_PATH);
     const machine = baseMachine(); // no `system` key at all
-    const item = mod.createMachineItem(machine);
+    const item = unwrapStatusRow(mod.createMachineItem(machine));
 
     assert.equal(item.querySelectorAll('[title="aiteamforge version"]').length, 0,
         'no version indicator element should be created when system is absent');
@@ -138,7 +160,7 @@ test('createMachineItem: machine.system absent entirely renders no version indic
 test('createMachineItem: machine.system.versions: {} (reporter could not resolve) renders NO version indicator (constraint #13, the shipped bug)', async () => {
     const { mod } = await setupMinimalApp(ACADEMY_APP_REL_PATH);
     const machine = baseMachine({ system: { schema_version: 1, versions: {} } });
-    const item = mod.createMachineItem(machine);
+    const item = unwrapStatusRow(mod.createMachineItem(machine));
 
     assert.equal(item.querySelectorAll('[title="aiteamforge version"]').length, 0,
         'versions: {} is truthy -- gating on container truthiness (the shipped bug) would render a badge here; gating on aiteamforge PRESENCE must not');
@@ -154,7 +176,7 @@ test('createMachineItem: machine.system.versions: {} (reporter could not resolve
 test('createMachineItem: outdated:true renders the OUTDATED indicator', async () => {
     const { mod } = await setupMinimalApp(ACADEMY_APP_REL_PATH);
     const machine = baseMachine({ system: { schema_version: 1, versions: { aiteamforge: '0.9.0', latest: '0.20.3', outdated: true } } });
-    const item = mod.createMachineItem(machine);
+    const item = unwrapStatusRow(mod.createMachineItem(machine));
 
     const indicator = item.querySelector('[title="aiteamforge version"]');
     assert.ok(indicator, 'expected a version indicator element');
@@ -165,7 +187,7 @@ test('createMachineItem: outdated:true renders the OUTDATED indicator', async ()
 test('createMachineItem: outdated:false renders confirmed-current with NO badge suffix', async () => {
     const { mod } = await setupMinimalApp(ACADEMY_APP_REL_PATH);
     const machine = baseMachine({ system: { schema_version: 1, versions: { aiteamforge: '0.20.3', latest: '0.20.3', outdated: false } } });
-    const item = mod.createMachineItem(machine);
+    const item = unwrapStatusRow(mod.createMachineItem(machine));
 
     const indicator = item.querySelector('[title="aiteamforge version"]');
     assert.ok(indicator);
@@ -179,7 +201,7 @@ test('createMachineItem: outdated key ABSENT (known version, undeterminable stal
 
     // Case A: key genuinely absent (the real shape the server ever sends).
     const machineAbsent = baseMachine({ system: { schema_version: 1, versions: { aiteamforge: '0.15.0' } } });
-    const itemAbsent = mod.createMachineItem(machineAbsent);
+    const itemAbsent = unwrapStatusRow(mod.createMachineItem(machineAbsent));
     const indicatorAbsent = itemAbsent.querySelector('[title="aiteamforge version"]');
     assert.ok(indicatorAbsent);
     assert.match(indicatorAbsent.textContent, /UNKNOWN/);
@@ -190,7 +212,7 @@ test('createMachineItem: outdated key ABSENT (known version, undeterminable stal
     // reads `outdated === false` explicitly, so null must fall through to the
     // UNKNOWN branch just like an absent key.
     const machineNull = baseMachine({ system: { schema_version: 1, versions: { aiteamforge: '0.15.0', outdated: null } } });
-    const itemNull = mod.createMachineItem(machineNull);
+    const itemNull = unwrapStatusRow(mod.createMachineItem(machineNull));
     const indicatorNull = itemNull.querySelector('[title="aiteamforge version"]');
     assert.ok(indicatorNull);
     assert.match(indicatorNull.textContent, /UNKNOWN/, 'outdated:null must render as UNKNOWN, never as confirmed-current');
@@ -206,7 +228,7 @@ test('createMachineItem: a version string containing a quote and an angle bracke
     const { mod } = await setupMinimalApp(ACADEMY_APP_REL_PATH);
     const payload = '"><img src=x onerror=alert(1)>';
     const machine = baseMachine({ system: { schema_version: 1, versions: { aiteamforge: payload } } });
-    const item = mod.createMachineItem(machine);
+    const item = unwrapStatusRow(mod.createMachineItem(machine));
 
     assert.equal(item.querySelectorAll('img').length, 0, 'the payload must not have been parsed into a real <img> element');
     assert.equal(item.querySelectorAll('[onerror]').length, 0, 'no element anywhere in the card may carry an onerror attribute');

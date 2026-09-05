@@ -118,6 +118,27 @@ async function setupApp(relPath, exportNames, srcOverride) {
     return { window, document, mod };
 }
 
+// XACA-1092 changed lcars2's createMachineItem() to return a
+// DocumentFragment containing [div.status-row, div.status-row-detail] (the
+// detail block must be a SIBLING of the row, not a child of it -- .status-
+// row is a single flex row also used by non-machine listings, UX spec §1)
+// instead of returning the div.status-row element directly, as it did when
+// this suite was written. Unwrap here, once, so assertions that walk
+// `.children` (element-order checks below) or otherwise need the row
+// itself keep running against the actual .status-row element, completely
+// unchanged in intent or strength. Only the lcars2 minimal renderers
+// changed shape -- the rich renderer (setupRichApp() above) still returns
+// its container Element directly, so this helper is a no-op for anything
+// that isn't a fragment.
+function unwrapStatusRow(node) {
+    if (node && node.nodeType === 11 /* Node.DOCUMENT_FRAGMENT_NODE */) {
+        const row = node.querySelector('.status-row');
+        if (!row) throw new Error('unwrapStatusRow: expected a .status-row descendant in the returned fragment');
+        return row;
+    }
+    return node;
+}
+
 function readRealSource(relPath) {
     return fs.readFileSync(path.join(PUBLIC_ROOT, relPath), 'utf8');
 }
@@ -207,6 +228,14 @@ test('XACA-1031-018 rich renderer: element order is unchanged -- version row sti
     const { mod } = await setupRichApp(injectedSrc);
     const machine = baseMachine({
         sessions: [{ division: 'academy' }],
+        // XACA-1092 added a SEPARATE, orthogonal system-telemetry section
+        // (`.machine-system-container` / `.machine-system-no-data`) that
+        // renders as an extra sibling whenever `schema_version` is present
+        // on `system` -- real, intentional behavior, unrelated to what this
+        // test checks. This test is strictly about the VERSION row's
+        // position, so `schema_version` is omitted here to avoid
+        // incidentally exercising that unrelated feature; `versions` alone
+        // is all createMachineItem() needs to render the version row.
         system: { schema_version: 1, versions: { aiteamforge: '0.9.0', latest: '0.20.3', outdated: true } }
     });
     const container = mod.createMachineItem(machine);
@@ -224,12 +253,24 @@ test('XACA-1031-018 rich renderer: element order is unchanged -- version row sti
         'machine-guid',
         'machine-version-row',
         'machine-backup-container',
+        // XACA-1092: the system-telemetry section is a NEW sibling this
+        // ticket adds. It is asserted here, with `schema_version` kept in the
+        // fixture, rather than dodged by removing that key -- `schema_version`
+        // present with no health fields IS the day-one state for the whole
+        // fleet, so a fixture without it would stop guarding the real card.
+        // This test's own intent is unchanged and still enforced: the version
+        // row sits directly after the GUID row.
+        'machine-system-no-data',
         'machine-row-footer'
     ]);
 });
 
-test('XACA-1031-018 rich renderer: element order is unchanged when there is no backup panel -- version row sits directly before the footer', async () => {
+test('XACA-1031-018 rich renderer: element order when there is no backup panel -- version row sits after the GUID row, before the XACA-1092 system section and the footer', async () => {
     const { mod } = await setupRichApp();
+    // schema_version deliberately omitted -- see the comment in the sibling
+    // "...before the backup panel" test above: XACA-1092's system-telemetry
+    // section is an orthogonal feature this order-only test must not
+    // incidentally trip.
     const machine = baseMachine({ system: { schema_version: 1, versions: { aiteamforge: '0.15.0' } } });
     const container = mod.createMachineItem(machine);
     const row = container.querySelector('.machine-row');
@@ -239,6 +280,14 @@ test('XACA-1031-018 rich renderer: element order is unchanged when there is no b
         'machine-nickname-row',
         'machine-guid',
         'machine-version-row',
+        // XACA-1092: the system-telemetry section is a NEW sibling this
+        // ticket adds. It is asserted here, with `schema_version` kept in the
+        // fixture, rather than dodged by removing that key -- `schema_version`
+        // present with no health fields IS the day-one state for the whole
+        // fleet, so a fixture without it would stop guarding the real card.
+        // This test's own intent is unchanged and still enforced: the version
+        // row sits directly after the GUID row.
+        'machine-system-no-data',
         'machine-row-footer'
     ]);
 });
@@ -251,7 +300,7 @@ for (const c of VERSION_STATE_CASES) {
     test('XACA-1031-018 lcars2 renderer (' + LCARS2_REPRESENTATIVE + '): ' + c.label + ' -- .status-row-version carries an aria-label mirroring the visible text', async () => {
         const { mod } = await setupLcars2App(LCARS2_REPRESENTATIVE);
         const machine = baseMachine({ system: { schema_version: 1, versions: c.versions } });
-        const item = mod.createMachineItem(machine);
+        const item = unwrapStatusRow(mod.createMachineItem(machine));
 
         const versionEl = item.querySelector('.status-row-version');
         assert.ok(versionEl, 'expected .status-row-version to still exist -- class name must be preserved (XACA-1031-016 overflow guard depends on it)');
@@ -272,14 +321,14 @@ for (const c of VERSION_STATE_CASES) {
 test('XACA-1031-018 lcars2 renderer: aiteamforge absent -> NO version element at all', async () => {
     const { mod } = await setupLcars2App(LCARS2_REPRESENTATIVE);
     const machine = baseMachine({ system: { schema_version: 1, versions: {} } });
-    const item = mod.createMachineItem(machine);
+    const item = unwrapStatusRow(mod.createMachineItem(machine));
     assert.equal(item.querySelector('.status-row-version'), null);
 });
 
 test('XACA-1031-018 lcars2 renderer: system absent entirely -> no version element, card renders cleanly', async () => {
     const { mod } = await setupLcars2App(LCARS2_REPRESENTATIVE);
     const machine = baseMachine({});
-    const item = mod.createMachineItem(machine);
+    const item = unwrapStatusRow(mod.createMachineItem(machine));
     assert.equal(item.querySelector('.status-row-version'), null);
     assert.ok(item.querySelector('.status-row-hostname'), 'sanity: the rest of the row must still render');
 });
@@ -287,7 +336,7 @@ test('XACA-1031-018 lcars2 renderer: system absent entirely -> no version elemen
 test('XACA-1031-018 lcars2 renderer: element order is unchanged -- version indicator still sits directly between hostname and session-count', async () => {
     const { mod } = await setupLcars2App(LCARS2_REPRESENTATIVE);
     const machine = baseMachine({ system: { schema_version: 1, versions: { aiteamforge: '0.9.0', latest: '0.20.3', outdated: true } } });
-    const item = mod.createMachineItem(machine);
+    const item = unwrapStatusRow(mod.createMachineItem(machine));
     const classNames = Array.from(item.children).map((el) => el.className.split(' ')[0]);
     // Confirmed by hand against the pre-change source
     // (commit 58356c4204bbcbb6615580c24a8097cf27635087) to render this
@@ -337,7 +386,7 @@ test('XACA-1031-018 XSS proof, rich renderer: hostile version string creates zer
 test('XACA-1031-018 XSS proof, lcars2 renderer (' + LCARS2_REPRESENTATIVE + '): hostile version string creates zero <img> elements and the aria-label attribute holds the literal input verbatim', async () => {
     const { mod } = await setupLcars2App(LCARS2_REPRESENTATIVE);
     const machine = baseMachine({ system: { schema_version: 1, versions: { aiteamforge: XSS_VERSION_INPUT, latest: '9.9.9', outdated: true } } });
-    const item = mod.createMachineItem(machine);
+    const item = unwrapStatusRow(mod.createMachineItem(machine));
 
     assert.equal(item.querySelectorAll('img').length, 0, 'expected zero <img> elements -- setAttribute()/textContent cannot create markup');
 
@@ -382,7 +431,7 @@ test('XACA-1031-018 mutation kill, lcars2 renderer: removing the aria-label setA
 
     const { mod } = await setupLcars2App(LCARS2_REPRESENTATIVE, mutatedSrc);
     const machine = baseMachine({ system: { schema_version: 1, versions: { aiteamforge: '0.9.0', latest: '0.20.3', outdated: true } } });
-    const item = mod.createMachineItem(machine);
+    const item = unwrapStatusRow(mod.createMachineItem(machine));
     const versionEl = item.querySelector('.status-row-version');
     assert.ok(versionEl, 'sanity: the version element must still exist -- only the aria-label call was removed');
     assert.equal(versionEl.getAttribute('title'), 'aiteamforge version', 'sanity: title= must still be intact -- only the aria-label call was removed');
@@ -405,7 +454,7 @@ for (const c of VERSION_STATE_CASES) {
         const richAriaLabel = richContainer.querySelector('.machine-version-value').getAttribute('aria-label');
 
         const { mod: lcars2Mod } = await setupLcars2App(LCARS2_REPRESENTATIVE);
-        const lcars2Item = lcars2Mod.createMachineItem(machine);
+        const lcars2Item = unwrapStatusRow(lcars2Mod.createMachineItem(machine));
         const lcars2AriaLabel = lcars2Item.querySelector('.status-row-version').getAttribute('aria-label');
 
         assert.equal(richAriaLabel, lcars2AriaLabel);

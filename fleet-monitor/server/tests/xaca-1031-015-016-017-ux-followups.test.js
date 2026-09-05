@@ -131,6 +131,27 @@ async function setupApp(relPath, exportNames) {
     return { window, document, mod };
 }
 
+// XACA-1092 changed lcars2's createMachineItem() to return a
+// DocumentFragment containing [div.status-row, div.status-row-detail] (the
+// detail block must be a SIBLING of the row, not a child of it -- .status-
+// row is a single flex row also used by non-machine listings, UX spec §1)
+// instead of returning the div.status-row element directly, as it did when
+// this suite's -016 loop below was written. Unwrap here, once, so the
+// existing overflow-guard assertions (which need `.outerHTML`, an
+// Element-only property the fragment doesn't have) keep running against
+// the actual .status-row element, completely unchanged in intent or
+// strength. Only the lcars2 minimal renderers changed shape -- the rich
+// renderer (setupRichApp() above) still returns its container Element
+// directly, so this helper is a no-op for anything that isn't a fragment.
+function unwrapStatusRow(node) {
+    if (node && node.nodeType === 11 /* Node.DOCUMENT_FRAGMENT_NODE */) {
+        const row = node.querySelector('.status-row');
+        if (!row) throw new Error('unwrapStatusRow: expected a .status-row descendant in the returned fragment');
+        return row;
+    }
+    return node;
+}
+
 async function setupRichApp() {
     return setupApp(RICH_APP_REL_PATH, ['createMachineItem', 'escapeHtml']);
 }
@@ -311,7 +332,7 @@ for (const relPath of LCARS2_MINIMAL_FILES) {
             status: 'online',
             system: { schema_version: 1, versions: { aiteamforge: longVersion, latest: '0.20.3', outdated: true } }
         });
-        const item = mod.createMachineItem(machine);
+        const item = unwrapStatusRow(mod.createMachineItem(machine));
 
         const hostnameEl = item.querySelector('.status-row-hostname');
         const versionEl = item.querySelector('[title="aiteamforge version"]');

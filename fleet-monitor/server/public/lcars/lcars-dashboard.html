@@ -100,7 +100,7 @@
     <!-- LCARS Kiosk Mode Styles (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-kiosk.css?v=20260825e">
     <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
-    <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20260901a">
+    <link rel="stylesheet" href="css/lcars-fleet-theme.css?v=20260904a">
     <!-- XACA-0989: collapsible divisions + compact session chips (shared) -->
     <link rel="stylesheet" href="../shared/css/lcars-division-collapse.css?v=20260827a">
     <!-- LCARS Kiosk Health & Status Screen Styles -->
@@ -824,7 +824,11 @@
     <!-- XACA-0989: collapsible divisions + compact session chips (shared).
          MUST load BEFORE the app script below, which calls into it. -->
     <script src="../shared/js/lcars-division-collapse.js?v=20260827a"></script>
-    <script src="js/lcars-dashboard-app.js?v=20260829b"></script>
+    <!-- XACA-1092-003/-005: machine health-state derivation (shared with the
+         lcars2 dashboards), loaded BEFORE the app script below, which calls
+         window.LCARS_MACHINE_HEALTH.deriveMachineHealth(). -->
+    <script src="../lcars2/js/lcars-machine-health.js?v=20260904a"></script>
+    <script src="js/lcars-dashboard-app.js?v=20260904a"></script>
     <!-- Dashboard Admin UI Module -->
     <script src="js/lcars-dashboards-ui.js"></script>
     <!-- LCARS Analytics: Knowledge Base Charts Module -->

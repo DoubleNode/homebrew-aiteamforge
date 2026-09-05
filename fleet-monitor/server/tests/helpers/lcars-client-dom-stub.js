@@ -377,6 +377,42 @@ class FakeElement {
         this.children.push(child);
         return child;
     }
+    // XACA-1092-006: added because the rebase onto XACA-1031 (28cd6829)
+    // brought in createMachineItem() code that calls
+    // `item.insertBefore(versionEl, item.lastElementChild)` (lcars2's
+    // compact version indicator, XACA-1031-018) -- this stub had neither
+    // method, so every case that reached that line threw
+    // "item.insertBefore is not a function" (TypeError), not a real
+    // assertion failure. `item` at that call site was always built via
+    // document.createElement() (a genuine FakeElement with a real
+    // `.children` array, never the synthesised/detached querySelector()
+    // nodes discussed above), so plain array semantics are correct and
+    // sufficient here: insertBefore(node, null) means "insert at the end"
+    // per the real DOM spec, and a refChild not present in `.children`
+    // (this stub never needs to support moving a node between parents)
+    // falls back to append rather than throwing.
+    insertBefore(newChild, refChild) {
+        if (refChild == null) {
+            this.children.push(newChild);
+            return newChild;
+        }
+        const idx = this.children.indexOf(refChild);
+        if (idx === -1) {
+            this.children.push(newChild);
+        } else {
+            this.children.splice(idx, 0, newChild);
+        }
+        return newChild;
+    }
+    // XACA-1092-006: `item.lastElementChild` companion to insertBefore()
+    // above -- both needed by the same XACA-1031-018 call site. Only
+    // `.children` (real appendChild()/insertBefore()-built nodes) is
+    // considered, never anything baked into the `.innerHTML` STRING --
+    // exactly the same real-vs-synthesised distinction querySelectorAll()
+    // already draws.
+    get lastElementChild() {
+        return this.children.length ? this.children[this.children.length - 1] : null;
+    }
     // XACA-1060: real, tree-based querySelectorAll -- walks this.children
     // (populated by appendChild(), i.e. actual createElement()-built nodes),
     // NEVER the innerHTML-string regex/synthesis path querySelector() below
@@ -455,6 +491,28 @@ class FakeElement {
     }
 }
 
+// XACA-1092-005: document.createDocumentFragment() -- createMachineItem()
+// now returns a real DocumentFragment (its content is a variable number of
+// top-level siblings: the always-present header row, plus an optional
+// version-line/SYSTEM-panel "detail" block), which is appended to the list
+// container with a single container.appendChild(fragment) call, exactly the
+// way a real DOM promotes a fragment's children to the parent and empties
+// the fragment. This stub models only what that call site needs: .children
+// (for a test to inspect what would have been appended) and .appendChild().
+// It never behaves like a *real* fragment when appended to a FakeElement
+// (see FakeElement.appendChild() below, which does not special-case it) --
+// no test in this repo appends a fragment INTO a FakeElement today, so that
+// gap is unexercised rather than silently wrong.
+class FakeDocumentFragment {
+    constructor() {
+        this.children = [];
+    }
+    appendChild(child) {
+        this.children.push(child);
+        return child;
+    }
+}
+
 // XACA-0416 (review finding: safeCssIdent validates syntax, not token existence).
 //
 // The client's cssTokenIsDefined() asks the DOM whether `--lcars-<ident>`
@@ -523,6 +581,9 @@ function createDomStub(options) {
     const documentStub = {
         createElement(tag) {
             return new FakeElement(tag);
+        },
+        createDocumentFragment() {
+            return new FakeDocumentFragment();
         },
         addEventListener() {
             // DOMContentLoaded etc. -- registered, never dispatched by
@@ -598,6 +659,27 @@ function loadSharedTerminalCardModule(ctx) {
     }
 }
 
+// XACA-1092-005: createMachineItem() in all 5 client app files calls
+// window.LCARS_MACHINE_HEALTH.deriveMachineHealth() (XACA-1092-003), loaded
+// via its own real <script> tag ahead of the app script in all 5 real HTML
+// pages (see lcars-index/-all/-doublenode/-mainevent.html and
+// lcars-dashboard.html). Same "actual shipped source, loaded into the same
+// ctx before the client app script" pattern as loadSharedTerminalCardModule
+// above -- the module lives under lcars2/js/ regardless of which tree is
+// under test (v1's own HTML pulls it via a relative "../lcars2/js/..." src),
+// so this loader always reads from that one real location.
+const MACHINE_HEALTH_MODULE_REL_PATH = 'lcars2/js/lcars-machine-health.js';
+
+function loadMachineHealthModule(ctx) {
+    const filePath = path.join(PUBLIC_ROOT, MACHINE_HEALTH_MODULE_REL_PATH);
+    const src = fs.readFileSync(filePath, 'utf8');
+    vm.runInContext(src, ctx, { filename: MACHINE_HEALTH_MODULE_REL_PATH });
+
+    if (!ctx.window || typeof ctx.window.LCARS_MACHINE_HEALTH !== 'object') {
+        throw new Error('lcars-client-dom-stub: LCARS_MACHINE_HEALTH failed to load from ' + MACHINE_HEALTH_MODULE_REL_PATH);
+    }
+}
+
 // Loads one of the 5 client app IIFEs and returns whatever functions it
 // stashed onto window.__lcarsTestExports. `relPath` is relative to
 // fleet-monitor/server/public/ (e.g. 'lcars2/js/lcars-academy-app.js').
@@ -625,6 +707,10 @@ function loadClientApp(relPath, ctx) {
         ' createServiceOnlyLcarsCard: createServiceOnlyLcarsCard,' +
         ' createTeamCard: createTeamCard,' +
         ' isLcarsTerminal: isLcarsTerminal,' +
+        // XACA-1092-004/-005: present in all 5 client app files (unlike the
+        // typeof-guarded exports below, which are v1-only), so exported
+        // unconditionally like the three above.
+        ' createMachineItem: createMachineItem,' +
         ' setWorkingItems: (typeof workingItems !== "undefined")' +
         '     ? function (v) { workingItems = v; } : null,' +
         // XACA-0416 (review finding: safeCssIdent validates syntax, not token
@@ -666,6 +752,7 @@ function loadClientApp(relPath, ctx) {
 
     vm.createContext(ctx);
     loadSharedTerminalCardModule(ctx);
+    loadMachineHealthModule(ctx);
     vm.runInContext(patched, ctx, { filename: relPath });
 
     const exports = ctx.window.__lcarsTestExports;
@@ -685,7 +772,9 @@ module.exports = {
     createDomStub,
     loadClientApp,
     loadSharedTerminalCardModule,
+    loadMachineHealthModule,
     textContentToInnerHtml,
     FakeElement,
-    FakeStyle
+    FakeStyle,
+    FakeDocumentFragment
 };

@@ -36,6 +36,7 @@
 
     let fleetData = null;
     let refreshTimer = null;
+    let expandedSystemMachineId = null;  // XACA-1092-005: DOM identity for the SYSTEM disclosure toggle -- string, not an element ref, so expand state survives renderMachines() rebuilding the list every refresh tick (mirrors v1's expandedBackupMachineId).
 
     // ============================================================================
     // INITIALIZATION
@@ -578,7 +579,314 @@
         });
     }
 
+    // ============================================================================
+    // XACA-1092-004/-005: MACHINE SYSTEM TELEMETRY -- adapter, formatting,
+    // badge/version-line/system-panel builders, and the SYSTEM disclosure
+    // toggle. See fleet-monitor/server/public/lcars2/js/lcars-machine-health.js
+    // (XACA-1092-003, do not modify) for the health-state derivation this
+    // code wires up, and kanban/plans/XACA-1091/CONTRACT-system-block.md for
+    // the frozen wire shape this adapter decouples from.
+    //
+    // Per XACA-1091-016 Design Decision 6 ("superseded in part"), no shared
+    // helper is extracted across the 5 createMachineItem copies -- this
+    // block is duplicated identically in all 4 lcars2 app files (byte-for-
+    // byte) and adapted (different group/toggle class names, no data-*
+    // string interpolation -- see below) in lcars-dashboard-app.js (v1).
+    // ============================================================================
+
+    const SYSTEM_BYTES_PER_GB = 1024 * 1024 * 1024;
+
+    // Wire adapter (XACA-1092-005): maps the frozen system{} contract onto
+    // the normalized primitives deriveMachineHealth() expects. ALL wire-
+    // format coupling lives here -- if the contract is revised, this is the
+    // one place in this file that needs to change.
+    //
+    // Guards on the LEAF, never the container ('percent' in disk, not
+    // `if (system.disk)`) -- system{}/disk{}/memory{}/versions{} all ship
+    // as `{}` (truthy) rather than omitted when unresolvable (contract §3),
+    // so a container-level truthiness check would treat every unresolved
+    // machine as having real data. See XACA-1092-002 ADDENDUM.
+    function machineSystemToHealthInput(system) {
+        const sys = system || {};
+        const disk = sys.disk || {};
+        return {
+            diskPercentUsed: ('percent' in disk) ? disk.percent : undefined,
+            swapUsedBytes: ('swap_used_bytes' in sys) ? sys.swap_used_bytes : undefined,
+            loadAvg1: (Array.isArray(sys.load_average) && sys.load_average.length > 0) ? sys.load_average[0] : undefined,
+            coreCount: ('cores' in sys) ? sys.cores : undefined
+        };
+    }
+
+    // Byte formatter -- a COLLECTED ZERO IS DATA (contract §3): renders as
+    // the plain, non-italic "0 B", never "0.0 GB". Any non-finite-number
+    // input (missing, null, or a hostile non-numeric value -- see the
+    // HostileDefensive fixture case) returns null so the caller can render
+    // the same "not reported" treatment absence gets, rather than a literal
+    // "NaN GB" ever reaching the DOM. One decimal of precision (UX spec
+    // §3): a rounded/lossy figure is what hid the real state in the
+    // swap-percentage postmortem this spec cites.
+    function formatSystemBytes(value) {
+        if (typeof value !== 'number' || !isFinite(value)) {
+            return null;
+        }
+        if (value === 0) {
+            return '0 B';
+        }
+        return (value / SYSTEM_BYTES_PER_GB).toFixed(1) + ' GB';
+    }
+
+    function systemRowValue(label, valueHtml) {
+        return '<div class="machine-system-row"><span class="machine-system-row-label">' + label + '</span>' +
+            '<span class="machine-system-row-value">' + valueHtml + '</span></div>';
+    }
+
+    // UX spec §5: an omitted/unreportable leaf renders as a full muted word,
+    // never a bare dash -- "a lone dash on a small row, sitting next to
+    // numerals, is exactly the kind of subtle mark ... misread as part of a
+    // number at a glance."
+    function systemRowAbsent(label) {
+        return '<div class="machine-system-row"><span class="machine-system-row-label">' + label + '</span>' +
+            '<span class="machine-system-row-value machine-system-row-value-empty">not reported</span></div>';
+    }
+
+    function systemGroupHasAny(obj, keys) {
+        const source = obj || {};
+        for (let i = 0; i < keys.length; i++) {
+            if (keys[i] in source) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // PLATFORM group -- os_name/os_version/os_build combine into one OS row
+    // per UX spec §3's worked example ("OS  macOS 27.0 (26A5388g)").
+    // Reporter-supplied strings -> escapeHtml (element content), matching
+    // this file's existing XACA-0416-004 convention for machine.hostname.
+    function buildSystemOsRow(system) {
+        const hasName = 'os_name' in system;
+        const hasVersion = 'os_version' in system;
+        const hasBuild = 'os_build' in system;
+        if (!hasName && !hasVersion && !hasBuild) {
+            return systemRowAbsent('OS');
+        }
+        let text = hasName ? escapeHtml(String(system.os_name)) : 'Unknown';
+        if (hasVersion) {
+            text += ' ' + escapeHtml(String(system.os_version));
+        }
+        if (hasBuild) {
+            text += ' (' + escapeHtml(String(system.os_build)) + ')';
+        }
+        return systemRowValue('OS', text);
+    }
+
+    function buildPlatformGroupHtml(system) {
+        if (!systemGroupHasAny(system, ['os_name', 'os_version', 'os_build', 'model', 'arch', 'cores'])) {
+            return '';
+        }
+        let rows = buildSystemOsRow(system);
+        rows += ('model' in system) ? systemRowValue('MODEL', escapeHtml(String(system.model))) : systemRowAbsent('MODEL');
+        rows += ('arch' in system) ? systemRowValue('ARCH', escapeHtml(String(system.arch))) : systemRowAbsent('ARCH');
+        rows += ('cores' in system) ? systemRowValue('CORES', escapeHtml(String(system.cores))) : systemRowAbsent('CORES');
+        return '<div class="status-row-system-group"><div class="machine-system-group-label">PLATFORM</div>' + rows + '</div>';
+    }
+
+    // MEMORY & SWAP group. memory.used/total combine into one MEMORY row;
+    // swap_used_bytes (sibling of `memory`, NOT nested in it -- contract §1)
+    // is its own row. NEVER a percentage -- see lcars-machine-health.js
+    // module header ("DISK vs SWAP -- INVERSE RULES").
+    function buildMemorySwapGroupHtml(system) {
+        const memory = system.memory || {};
+        const hasMemory = systemGroupHasAny(memory, ['used', 'total', 'pressure_percent']);
+        const hasSwap = 'swap_used_bytes' in system;
+        if (!hasMemory && !hasSwap) {
+            return '';
+        }
+
+        let memoryRowHtml;
+        if (!hasMemory) {
+            memoryRowHtml = systemRowAbsent('MEMORY');
+        } else {
+            const usedStr = formatSystemBytes(memory.used);
+            const totalStr = formatSystemBytes(memory.total);
+            let text = (usedStr !== null ? usedStr : 'not reported') + ' / ' + (totalStr !== null ? totalStr : 'not reported');
+            if ('pressure_percent' in memory) {
+                text += '&nbsp;&nbsp;(' + escapeHtml(String(memory.pressure_percent)) + '% pressure)';
+            }
+            memoryRowHtml = systemRowValue('MEMORY', text);
+        }
+
+        let swapRowHtml;
+        if (!hasSwap) {
+            swapRowHtml = systemRowAbsent('SWAP');
+        } else {
+            const swapStr = formatSystemBytes(system.swap_used_bytes);
+            swapRowHtml = systemRowValue('SWAP', swapStr !== null ? swapStr : 'not reported');
+        }
+
+        return '<div class="status-row-system-group"><div class="machine-system-group-label">MEMORY &amp; SWAP</div>' + memoryRowHtml + swapRowHtml + '</div>';
+    }
+
+    // DISK group. `disk.percent` is rendered EXACTLY as sent -- NEVER
+    // recomputed from used/free (contract §5a: APFS df total is not
+    // used+free; see lcars-machine-health.js module header for the ~20x
+    // under-report this would otherwise silently produce).
+    function buildDiskGroupHtml(system) {
+        const disk = system.disk || {};
+        if (!systemGroupHasAny(disk, ['used', 'free', 'percent'])) {
+            return '';
+        }
+        const usedStr = formatSystemBytes(disk.used);
+        const usedRow = systemRowValue('USED', usedStr !== null ? usedStr : 'not reported');
+
+        const freeStr = formatSystemBytes(disk.free);
+        let freeText = freeStr !== null ? freeStr : 'not reported';
+        if ('percent' in disk) {
+            freeText += '&nbsp;&nbsp;(' + escapeHtml(String(disk.percent)) + '%)';
+        }
+        const freeRow = systemRowValue('FREE', freeText);
+
+        return '<div class="status-row-system-group"><div class="machine-system-group-label">DISK</div>' + usedRow + freeRow + '</div>';
+    }
+
+    // LOAD group. Shows the raw triple AND the 1-minute figure normalized
+    // per core (UX spec §3: showing only the raw number "reads as a wildly
+    // overloaded box" without the per-core context). Never applies a
+    // threshold itself -- XACA-1092-003 owns that, and its two constants
+    // are under user review; this function only formats whatever
+    // load_average/cores the reporter sent.
+    function buildLoadGroupHtml(system) {
+        const load = system.load_average;
+        if (!Array.isArray(load) || load.length === 0) {
+            return '';
+        }
+        function fmtEntry(v) {
+            return (typeof v === 'number' && isFinite(v)) ? v.toFixed(2) : '?';
+        }
+        const triple = fmtEntry(load[0]) + ' / ' + fmtEntry(load[1]) + ' / ' + fmtEntry(load[2]);
+
+        let suffix = '';
+        const cores = system.cores;
+        if (typeof load[0] === 'number' && isFinite(load[0]) && typeof cores === 'number' && isFinite(cores) && cores > 0) {
+            suffix = '&nbsp;&nbsp;(' + (load[0] / cores).toFixed(2) + '× per core)';
+        }
+        return '<div class="status-row-system-group"><div class="machine-system-group-label">LOAD</div>' +
+            systemRowValue('1 / 5 / 15 MIN', triple + suffix) + '</div>';
+    }
+
+    // Version line (UX spec §6) -- ALWAYS visible when the reporter has told
+    // us the installed version at all, independent of whether any health
+    // group has data (this is what makes the VersionsOnlyDayOne fixture
+    // case show a version line with zero SYSTEM groups). Three states, keyed
+    // off `'outdated' in versions` via strict comparison against true/false,
+    // never off the truthiness of `outdated` itself -- `false` (confirmed
+    // current) must render differently from omitted (unknown), and a
+    // hostile non-boolean value (e.g. the string "yes") must fall safely
+    // into the "unknown" bucket rather than matching either branch.
+
+    // HEALTH badge (UX spec §4 + ADDENDUM): shown ONLY for 'at_risk' --
+    // 'healthy' and 'unknown' both render as NO badge (not the same fact,
+    // but the same silence -- see the ADDENDUM's "why not show unknown").
+    // deriveMachineHealth()'s overall state collapses warning+critical into
+    // a single 'at_risk', so the CRITICAL/AT RISK text choice is this
+    // renderer's own aggregation across the per-metric states, per the
+    // spec's explicit precedence rule ("if any metric is CRITICAL, show
+    // CRITICAL; else if any is WARNING, show AT RISK").
+    // Returns null when no badge should render, else {className, text}.
+    // Deliberately a SPEC rather than an HTML string: the badge is appended
+    // with the DOM API after XACA-1031-018's versionEl is in place, because
+    // extending item.innerHTML at that point would destroy versionEl.
+    function healthBadgeSpec(healthResult) {
+        if (!healthResult || healthResult.state !== 'at_risk') {
+            return null;
+        }
+        const metrics = healthResult.metrics || {};
+        const anyCritical = ['disk', 'swap', 'load'].some(function (key) {
+            return metrics[key] && metrics[key].state === 'critical';
+        });
+        return anyCritical
+            ? { className: 'status-badge health-critical', text: 'CRITICAL' }
+            : { className: 'status-badge health-warning', text: 'AT RISK' };
+    }
+
+    // VERSION badge -- shown ONLY for outdated === true (UX spec §4): never
+    // for false (confirmed current) or omitted (unknown), both of which are
+    // non-actionable at a glance and are differentiated instead on the
+    // always-visible version line.
+
+    // SYSTEM disclosure toggle + panel, or the static NO DATA line, or
+    // nothing -- UX spec §5's "two-tier presence signal":
+    //   - no `schema_version` at all (whole block absent, pre-XACA-1031
+    //     reporter) -> '' (nothing new, matches today's card exactly)
+    //   - `schema_version` present but zero health groups have any field
+    //     (the VersionsOnlyDayOne/NonMacOSHostVersionsOnly shape -- the
+    //     default production state for the entire window between XACA-1031
+    //     merging and XACA-1091 shipping, per XACA-1091-016's fixture note
+    //     "why case 9 is the most important one, not a rare edge") -> the
+    //     static "SYSTEM: NO DATA REPORTED" line, no chevron
+    //   - at least one group has at least one field -> the real interactive
+    //     toggle + panel
+    // Deliberately does NOT embed machine_id into this returned HTML string
+    // -- the toggle's data-machine-id is set via el.setAttribute() by the
+    // caller instead (an imperative DOM call, never HTML-string
+    // interpolation), so this file's existing "no untrusted value reaches a
+    // quoted attribute" invariant (XACA-0416-004) holds and escapeAttr()
+    // stays undefined here, matching the rest of this file.
+    function buildSystemSectionHtml(system, isExpanded) {
+        const groupsHtml = buildPlatformGroupHtml(system) + buildMemorySwapGroupHtml(system) +
+            buildDiskGroupHtml(system) + buildLoadGroupHtml(system);
+
+        if (groupsHtml !== '') {
+            return (
+                '<div class="status-row-system-toggle clickable">' +
+                    '<span class="status-row-system-indicator' + (isExpanded ? ' expanded' : '') + '">▶</span>' +
+                    '<span class="status-row-system-label">SYSTEM</span>' +
+                '</div>' +
+                '<div class="status-row-system-panel' + (isExpanded ? ' expanded' : '') + '">' + groupsHtml + '</div>'
+            );
+        }
+
+        if ('schema_version' in system) {
+            return '<div class="status-row-system-no-data">SYSTEM: NO DATA REPORTED</div>';
+        }
+
+        return '';
+    }
+
+    function toggleSystemPanel(machineId, detailEl) {
+        const panel = detailEl.querySelector('.status-row-system-panel');
+        const indicator = detailEl.querySelector('.status-row-system-indicator');
+        if (!panel) return;
+
+        if (expandedSystemMachineId === machineId) {
+            expandedSystemMachineId = null;
+            panel.classList.remove('expanded');
+            if (indicator) indicator.classList.remove('expanded');
+            return;
+        }
+
+        if (expandedSystemMachineId) {
+            const prevToggle = document.querySelector('.status-row-system-toggle[data-machine-id="' + CSS.escape(expandedSystemMachineId) + '"]');
+            if (prevToggle) {
+                const prevDetail = prevToggle.parentElement;
+                const prevPanel = prevDetail ? prevDetail.querySelector('.status-row-system-panel') : null;
+                const prevIndicator = prevDetail ? prevDetail.querySelector('.status-row-system-indicator') : null;
+                if (prevPanel) prevPanel.classList.remove('expanded');
+                if (prevIndicator) prevIndicator.classList.remove('expanded');
+            }
+        }
+
+        expandedSystemMachineId = machineId;
+        panel.classList.add('expanded');
+        if (indicator) indicator.classList.add('expanded');
+    }
+
     function createMachineItem(machine) {
+        const system = machine.system || {};
+        const healthResult = (window.LCARS_MACHINE_HEALTH && window.LCARS_MACHINE_HEALTH.deriveMachineHealth)
+            ? window.LCARS_MACHINE_HEALTH.deriveMachineHealth(machineSystemToHealthInput(system))
+            : { state: 'unknown', metrics: {} };
+
         const item = document.createElement('div');
         item.className = 'status-row ' + machine.status;
 
@@ -684,8 +992,67 @@
             item.insertBefore(versionEl, item.lastElementChild);
         }
 
-        return item;
-    }
+        // XACA-1092-005: the HEALTH badge is appended AFTER XACA-1031's
+        // version indicator is inserted above, and via the DOM API rather
+        // than by extending the innerHTML template. Both are deliberate.
+        // Appending to innerHTML here would destroy the versionEl built
+        // above (innerHTML REPLACES all children); and XACA-1031-018's
+        // insertBefore(versionEl, item.lastElementChild) is documented to
+        // rely on lastElementChild being the session-count span at that
+        // moment, which stops being true the instant this badge is added --
+        // so the badge must come after, never before. The badge class comes
+        // from a fixed literal set this file chooses (health-warning /
+        // health-critical), never from reporter data, so no escaping
+        // obligation is introduced; `unknown` and `healthy` render NO node
+        // at all (UX spec addendum 1) -- on a fleet where nothing reports
+        // system data yet, a visible "unknown" pill would appear on every
+        // card simultaneously.
+        const badgeSpec = healthBadgeSpec(healthResult);
+        if (badgeSpec) {
+            const badgeEl = document.createElement('span');
+            badgeEl.className = badgeSpec.className;
+            badgeEl.textContent = badgeSpec.text;
+            badgeEl.setAttribute('aria-label', 'machine health: ' + badgeSpec.text);
+            item.appendChild(badgeEl);
+        }
+
+        // XACA-1092-004/-005: lcars2's `.status-row` is today a single flex
+        // row (no vertical stacking) and is also used by other, non-machine
+        // listings on this page, so it is deliberately left alone -- the
+        // version line / SYSTEM toggle / SYSTEM panel are built as a
+        // SEPARATE sibling block ("detail") and returned together with
+        // `item` inside a DocumentFragment, the same way v1's
+        // createMachineItem() already returns its own `.machine-item-container`
+        // plus a sibling `.machine-history-panel`. This is lcars2's first
+        // click affordance (UX spec §1) -- following v1's backup-toggle
+        // mechanics (chevron + `.expanded` class, no async fetch; the panel
+        // content is already in the DOM from the initial render, unlike the
+        // history panel's fetch-driven "Loading history..." placeholder).
+        const fragment = document.createDocumentFragment();
+        fragment.appendChild(item);
+
+        const isSystemExpanded = expandedSystemMachineId === machine.machine_id;
+        const detailHtml = buildSystemSectionHtml(system, isSystemExpanded);
+        if (detailHtml !== '') {
+            const detail = document.createElement('div');
+            detail.className = 'status-row-detail';
+            detail.innerHTML = detailHtml;
+            fragment.appendChild(detail);
+
+            const toggle = detail.querySelector('.status-row-system-toggle');
+            if (toggle) {
+                // data-machine-id is set via the DOM API, not baked into the
+                // innerHTML string above -- see buildSystemSectionHtml()'s
+                // comment on why that keeps escapeAttr() unneeded here.
+                toggle.setAttribute('data-machine-id', machine.machine_id);
+                toggle.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    toggleSystemPanel(machine.machine_id, detail);
+                });
+            }
+        }
+
+        return fragment;    }
 
     // ============================================================================
     // DIVISION MAPPINGS
