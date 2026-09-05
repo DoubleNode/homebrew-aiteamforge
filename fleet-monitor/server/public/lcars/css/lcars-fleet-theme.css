@@ -6843,9 +6843,23 @@
     color: var(--lcars-lavender);
 }
 
+/* XACA-1092-026 ([UX] NICE-TO-HAVE): mirrors the same fix and rationale as
+   lcars2/css/lcars-fleet-theme.css's .status-row-system-toggle.clickable --
+   see that file's comment for the full computation and the reason the
+   vertical margin is deliberately NOT widened to match the new padding
+   (this row sits inside .machine-system-container, itself inside .machine-
+   row, so an unmatched, fully-invisible larger hit-region would be safer
+   here than in lcars2 -- no sibling machine card immediately follows within
+   the same row -- but the same honest, bounded +8px trade is applied for
+   consistency between the two renderers rather than two different
+   philosophies for the identical control). Pre-fix: ~20-24px effective
+   height (10px font-size line-box + 8px total padding). Post-fix: ~28-32px
+   (10px font-size line-box + 16px total padding), a real ~+8px growth in
+   this row's own document-flow height, still short of the 44px guideline
+   but a meaningful, tasteful improvement. */
 .machine-system-status.clickable {
     cursor: pointer;
-    padding: 4px 8px;
+    padding: 8px 8px;
     margin: -4px -8px;
     border-radius: 4px;
     transition: background-color 0.2s ease;

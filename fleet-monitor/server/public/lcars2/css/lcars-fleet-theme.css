@@ -4373,9 +4373,30 @@
     color: var(--lcars-lavender);
 }
 
+/* XACA-1092-026 ([UX] NICE-TO-HAVE): the pre-fix 4px/4px vertical padding,
+   fully canceled by an equal-and-opposite -4px/-4px margin, computed to a
+   ~20-24px effective click/tap height (10px font-size line-box + 8px total
+   padding) -- well under the 44px pointer-target guideline. Doubling the
+   vertical padding to 8px/8px while leaving the vertical margin at its
+   ORIGINAL -4px/-4px (deliberately NOT matched to the new padding) makes 4px
+   per side "real" -- i.e. an honest +8px total growth in this row's own
+   document-flow height -- rather than fully invisible. That is a deliberate
+   trade against reaching for a much larger margin.canceling padding
+   (e.g. 16px/16px, netting ~44px with ZERO layout growth): with no gap
+   at all between this SYSTEM-detail block and the NEXT machine's card
+   below it (`.status-row-detail` carries no margin/padding of its own on
+   that edge), a fully-canceled larger padding here would make the
+   invisible hit-region overhang directly into the following machine's
+   row -- functionally harmless today (`.status-row` has no click handler
+   of its own in lcars2 to steal from) but an unverifiable hover-highlight
+   bleed onto an unrelated card, and a foot-gun for whoever touches this
+   next. New effective height: ~10px font-size line-box + 16px total
+   padding =~ 28-32px -- short of 44px, but a real, honest, and bounded
+   improvement (~+8px card growth, only on rows that render a SYSTEM
+   toggle) with no risk of the hit-region reaching outside this card. */
 .status-row-system-toggle.clickable {
     cursor: pointer;
-    padding: 4px 8px;
+    padding: 8px 8px;
     margin: -4px -8px;
     border-radius: 4px;
     transition: background-color 0.2s ease;

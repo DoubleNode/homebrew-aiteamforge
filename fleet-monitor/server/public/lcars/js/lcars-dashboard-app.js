@@ -1959,17 +1959,28 @@
     // renderer's own aggregation across the per-metric states, per the
     // spec's explicit precedence rule ("if any metric is CRITICAL, show
     // CRITICAL; else if any is WARNING, show AT RISK").
-    function buildHealthBadgeHtml(healthResult) {
+    // Returns null when no badge should render, else {className, text}.
+    // XACA-1092-024 ([UX] SHOULD-FIX): was buildHealthBadgeHtml(), an HTML
+    // string baked into item.innerHTML's `.machine-row-header` block --
+    // that placed the badge far from XACA-1031's version indicator
+    // (separated by the nickname/GUID rows), unlike lcars2, which appends
+    // its badge right alongside the version text. Converted to a SPEC,
+    // mirroring lcars2/js/lcars-*-app.js's healthBadgeSpec() exactly, so
+    // this renderer can build and position the badge with the DOM API too
+    // -- see the insertion site right after the version-row block below,
+    // which is the ONLY thing that moved; XACA-1031's version row/indicator
+    // itself is untouched.
+    function healthBadgeSpec(healthResult) {
         if (!healthResult || healthResult.state !== 'at_risk') {
-            return '';
+            return null;
         }
         const metrics = healthResult.metrics || {};
         const anyCritical = ['disk', 'swap', 'load'].some(function (key) {
             return metrics[key] && metrics[key].state === 'critical';
         });
         return anyCritical
-            ? '<span class="status-badge health-critical">CRITICAL</span>'
-            : '<span class="status-badge health-warning">AT RISK</span>';
+            ? { className: 'status-badge health-critical', text: 'CRITICAL' }
+            : { className: 'status-badge health-warning', text: 'AT RISK' };
     }
 
     // VERSION badge -- shown ONLY for outdated === true (UX spec §4): never
@@ -2217,12 +2228,14 @@
         // would double-escape their real tags. lastSeenRelative/firstSeenDate come
         // out of formatRelativeTime()/formatShortDate(), which emit only digits and
         // fixed words, so they carry nothing from the input string.
-        // XACA-1092-004/-005: the two trailing badge spans are new. Their
-        // own interpolations (reporter version strings) are escaped inside
-        // the builder functions above the class methods; healthResult/
-        // system-derived class names and text are fixed-set literals chosen
-        // by this file's own logic, matching machine.status/session_count's
-        // existing unwrapped treatment.
+        // XACA-1092-004/-005: the SYSTEM section (systemSectionHtml, below)
+        // is new. Its own interpolations are escaped inside the builder
+        // functions above; healthResult-derived class names/text are
+        // fixed-set literals chosen by this file's own logic, matching
+        // machine.status/session_count's existing unwrapped treatment. The
+        // HEALTH badge is also new but is no longer part of this
+        // innerHTML template -- XACA-1092-024 moved it to a DOM-API
+        // insertion alongside the version row, below.
         const isSystemExpanded = expandedSystemMachineId === machine.machine_id;
         const systemSectionHtml = buildSystemSectionHtml(machine, system, isSystemExpanded);
 
@@ -2232,7 +2245,6 @@
                 '<span class="status-indicator ' + machine.status + '"></span>' +
                 '<span class="machine-hostname">' + escapeHtml(machine.hostname) + '</span>' +
                 '<span class="machine-sessions">' + machine.session_count + ' sessions</span>' +
-                buildHealthBadgeHtml(healthResult) +
             '</div>' +
             '<div class="machine-nickname-row">' +
                 '<span class="machine-nickname-label">Nickname:</span>' +
@@ -2313,6 +2325,49 @@
                 item.insertBefore(versionRow, versionAnchor);
             } else {
                 item.appendChild(versionRow);
+            }
+        }
+
+        // XACA-1092-024 ([UX] SHOULD-FIX): HEALTH badge insertion -- moved
+        // out of the item.innerHTML template above (where it lived inside
+        // .machine-row-header, separated from XACA-1031's version row by
+        // the nickname/GUID rows) so it renders adjacent to the version
+        // row instead, mirroring lcars2/js/lcars-*-app.js's placement
+        // (version text immediately followed by the health badge, in the
+        // same row). Built via the DOM API for the same reason versionRow
+        // above is: the insertion point must be computed AFTER the
+        // item.innerHTML assignment, or a later innerHTML write would
+        // destroy it. Only this badge moved -- XACA-1031's version row/
+        // indicator built above is untouched, per this subitem's
+        // constraint (only XACA-1092's own element may move).
+        var healthBadge = healthBadgeSpec(healthResult);
+        if (healthBadge) {
+            var healthBadgeEl = document.createElement('span');
+            healthBadgeEl.className = healthBadge.className;
+            healthBadgeEl.textContent = healthBadge.text;
+            healthBadgeEl.setAttribute('aria-label', 'machine health: ' + healthBadge.text);
+
+            if (typeof versionRow !== 'undefined' && versionRow) {
+                // Sits immediately after the version row -- same relative
+                // placement as lcars2's version-then-badge ordering.
+                if (versionRow.nextSibling) {
+                    item.insertBefore(healthBadgeEl, versionRow.nextSibling);
+                } else {
+                    item.appendChild(healthBadgeEl);
+                }
+            } else {
+                // No version row rendered (machine has no installed-version
+                // data) -- anchor on the same position the version row
+                // would have occupied, directly after the GUID row, so the
+                // badge still lands in one stable, predictable place
+                // regardless of whether version data happens to be present.
+                var guidDivForBadge = item.querySelector('.machine-guid');
+                var badgeAnchor = guidDivForBadge ? guidDivForBadge.nextElementSibling : null;
+                if (badgeAnchor) {
+                    item.insertBefore(healthBadgeEl, badgeAnchor);
+                } else {
+                    item.appendChild(healthBadgeEl);
+                }
             }
         }
 
