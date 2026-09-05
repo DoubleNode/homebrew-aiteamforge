@@ -29,10 +29,56 @@ registered-teams. That is a server change, tracked separately.
 Usage:
     kb-msg-provision [--check] [--dry-run] [--no-keygen]
                      [--server <url>] [--machine-id <slug>] [--quiet]
+    kb-msg-provision --add-team <team-id> [--unattended] [--quiet]
+    kb-msg-provision --unattended [--server <url>] [--quiet]
 
-Exit codes:
+UNATTENDED CALLERS (XACA-1078) — the contract in one place
+------------------------------------------------------------
+The two forms above exist for callers that are NOT an operator typing a
+command: `kb-init-team` at team birth, and the tap install/upgrade path at
+machine provisioning. Full contract:
+kanban/plans/XACA-1078/XACA-1078_msg_routing_provisioning.md, section
+"The Unattended-Write Contract".
+
+`--add-team <team-id>` — NARROW ADDITIVE single-team assertion. Bypasses the
+whole-registry local_teams() re-derivation entirely and resolves exactly the
+named team (plus its with_aliases() template/instance counterpart). Implies
+--unattended and --no-keygen; mutually exclusive with --server (an
+unattended team-birth site never mints machine identity or config — that is
+machine provisioning, not a side effect of adding one team). Preconditions
+(each a DECLINE — exit 1, nothing written — when unmet): the team is present
+in team-paths.json and is not board_less/alias_of; its primary_host, if
+declared, equals this machine's slug; a *-board.json exists under its
+kanban_dir on this machine. Write rule is add-only: an absent key is added,
+an already-correct key is a no-op, and a key naming another machine is
+declined with both values reported — never retargeted.
+
+`--unattended` — mode flag, valid with or without --add-team. Never reads
+stdin, never prompts. Its most important effect is a WRITE-SIDE invariant:
+the resulting map must be a pure superset of the map that was read. If the
+write would retarget even one existing key, the ENTIRE write is refused
+(exit 1) — not partially applied. This is validated at the write, not at
+classification, so it catches a bad classification from any tier, including
+one that does not exist yet. In a FULL run (no --add-team), it additionally
+excludes tier-4-only classifications (the board-file bootstrap fallback —
+inference about a team this run is not itself creating) from the write set
+and reports them under a `deferred:` heading, alongside the existing
+`unmapped:` and `foreign:` reports. Keypair generation, if attempted, runs
+non-interactively (stdin closed) or is skipped and reported — it never
+blocks.
+
+NAMING: this flag is deliberately NOT called --non-interactive, even though
+kb-init-team has a flag by that name. kb-init-team's --non-interactive means
+"fail instead of prompting" — prompt-suppression only. --unattended does
+that too, but it ALSO changes what this tool is permitted to WRITE (the
+superset invariant above). A reader who assumed the two names were
+synonyms would be wrong about the safety-critical half, so they stay
+distinct on purpose.
+
+Exit codes (unchanged in meaning for every invocation shape above):
     0  provisioned (or already provisioned) / --check found everything
-    1  --check found a gap, or provisioning failed
+    1  --check found a gap, or provisioning declined (retarget attempt,
+       --add-team precondition unmet, --add-team key conflict)
     2  environment problem (node missing, vault-keygen.js not found, unreadable map)
 """
 
@@ -576,6 +622,69 @@ def with_aliases(teams):
 
 
 # ── Local team discovery ─────────────────────────────────────────────────────
+def _load_teams_registry():
+    """The `teams` dict from team-paths.json, or a fail-closed exit-2 refusal.
+
+    Factored out of local_teams() (XACA-1078-003) so run_add_team() reads the
+    SAME registry the same way — one parse-and-refuse implementation, not two
+    that could drift on what counts as "unreadable".
+    """
+    if not os.path.isfile(TEAM_PATHS):
+        _die_env("%s not found — cannot determine which teams live here." % TEAM_PATHS)
+    try:
+        data = json.load(open(TEAM_PATHS))
+    except ValueError as exc:
+        _die_env("%s is not valid JSON (%s)" % (TEAM_PATHS, exc))
+    return data.get("teams") or {}
+
+
+def _classify_team(name, cfg, slug_norm, routing_map):
+    """Resolve ONE team's ownership. Returns (bucket, tier, owner):
+
+      bucket  "skip" | "local" | "unknown" | "foreign"
+      tier    1-4 (None for "skip") — see local_teams()'s docstring for what
+              each tier means; kept here so a caller can tell tier-4 (pure
+              board-file inference) apart from tier 2/3 (recorded authority)
+              within the "local" bucket, which local_teams()'s own 3-tuple
+              return cannot express without changing its signature.
+      owner   the resolved owning slug for tier 2/3 (declared or recorded),
+              else None.
+
+    THE SHARED CLASSIFIER (XACA-1078-003). local_teams() and
+    local_teams_by_tier() both call this and must never diverge in what they
+    call "local" — a future edit to the tiering rule lands here once, for
+    both callers, rather than being patched into one and silently left out
+    of the other (the exact drift class k501-sibling-heuristic-drift-pattern
+    documents).
+    """
+    cfg = cfg or {}
+
+    # Tier 1: not a real, ownable team.
+    if cfg.get("board_less") or cfg.get("alias_of"):
+        return "skip", None, None
+
+    # Tiers 2-3: an authority (declared or previously recorded) has an
+    # opinion. It wins outright, over any local filesystem state.
+    declared = (cfg.get("primary_host") or "").strip()
+    recorded = "" if declared else (routing_map.get(name) or "").strip()
+    owner = declared or recorded
+    if owner:
+        tier = 2 if declared else 3
+        if owner.lower() == slug_norm:
+            return "local", tier, owner
+        return "foreign", tier, owner
+
+    # Tier 4: bootstrap fallback — neither authority has ever recorded an
+    # owner. Gate on the BOARD FILE, not merely the directory (see
+    # local_teams()'s docstring for why directory existence alone is not
+    # evidence of residency).
+    kd = os.path.expanduser(cfg.get("kanban_dir") or "")
+    has_board = bool(glob.glob(os.path.join(kd, "*-board.json"))) if kd else False
+    if has_board:
+        return "local", 4, None
+    return "unknown", 4, None
+
+
 def local_teams(slug, routing_map):
     """Teams this machine can speak for. Returns (local, unknown, foreign),
     where `foreign` is a dict of {team: resolved_owner} for teams a positive
@@ -650,50 +759,62 @@ def local_teams(slug, routing_map):
     is left alone either way — this split changes what gets REPORTED, not
     what gets WRITTEN.
     """
-    if not os.path.isfile(TEAM_PATHS):
-        _die_env("%s not found — cannot determine which teams live here." % TEAM_PATHS)
-    try:
-        data = json.load(open(TEAM_PATHS))
-    except ValueError as exc:
-        _die_env("%s is not valid JSON (%s)" % (TEAM_PATHS, exc))
-    teams = data.get("teams") or {}
+    teams = _load_teams_registry()
     routing_map = routing_map or {}
     slug_norm = (slug or "").strip().lower()
 
     local, unknown, foreign = [], [], {}
     for name, cfg in teams.items():
-        cfg = cfg or {}
-
-        # Tier 1: not a real, ownable team.
-        if cfg.get("board_less") or cfg.get("alias_of"):
+        bucket, _tier, owner = _classify_team(name, cfg, slug_norm, routing_map)
+        if bucket == "skip":
             continue
-
-        # Tiers 2-3: an authority (declared or previously recorded) has an
-        # opinion. It wins outright, over any local filesystem state.
-        declared = (cfg.get("primary_host") or "").strip()
-        recorded = "" if declared else (routing_map.get(name) or "").strip()
-        owner = declared or recorded
-        if owner:
-            if owner.lower() == slug_norm:
-                local.append(name)
-            else:
-                foreign[name] = owner
-            continue
-
-        # Tier 4: bootstrap fallback — neither authority has ever recorded
-        # an owner for this team. Gate on the BOARD FILE, not merely the
-        # directory: the framework's team-init guard auto-recreates an
-        # EMPTY kanban skeleton shortly after one is removed (observed
-        # 2026-08-24 — legal-coparenting and finance-personal directories
-        # were back, 0 files, 12 minutes after being deleted post-move), so
-        # directory existence alone is not evidence of residency here
-        # either. "*-board.json", not "*board*.json": the latter is an
-        # unanchored substring that matches dashboard.json, which is not a
-        # board at all (review finding, PR #764).
-        kd = os.path.expanduser(cfg.get("kanban_dir") or "")
-        has_board = bool(glob.glob(os.path.join(kd, "*-board.json"))) if kd else False
-        (local if has_board else unknown).append(name)
+        elif bucket == "local":
+            local.append(name)
+        elif bucket == "unknown":
+            unknown.append(name)
+        elif bucket == "foreign":
+            foreign[name] = owner
     return sorted(local), sorted(unknown), foreign
+
+
+def local_teams_by_tier(slug, routing_map):
+    """Same classification as local_teams(), split so an --unattended full
+    run can tell tier-2/3 authority (`authoritative`) apart from the tier-4
+    board-file bootstrap guess (`tier4_only`) within what local_teams() would
+    lump together as one `local` list.
+
+    XACA-1078 Decision 1 / "Ruling on subitem 002's proposal": a full
+    unattended run must exclude tier-4-only classifications from the write
+    set and report them as `deferred`, because a stale regenerated board
+    stub can make a migrated-away team look resident (see local_teams()'s
+    own docstring, "primary_host" section) — a mistake only the FULL run can
+    make about a team it is NOT itself creating. --add-team is exempt: there,
+    tier 4 is a contemporaneous observation of the very team-creation call in
+    progress, not archaeology on someone else's leftovers.
+
+    Returns (authoritative, tier4_only, unknown, foreign) — `unknown` and
+    `foreign` are identical to local_teams()'s own buckets; deliberately NOT
+    used by a plain (non-unattended) run, which keeps calling local_teams()
+    unchanged so its behaviour for every existing caller (including this
+    file's own manual/default path and the ownership-gates test that imports
+    local_teams() directly) is untouched.
+    """
+    teams = _load_teams_registry()
+    routing_map = routing_map or {}
+    slug_norm = (slug or "").strip().lower()
+
+    authoritative, tier4_only, unknown, foreign = [], [], [], {}
+    for name, cfg in teams.items():
+        bucket, tier, owner = _classify_team(name, cfg, slug_norm, routing_map)
+        if bucket == "skip":
+            continue
+        elif bucket == "local":
+            (authoritative if tier in (2, 3) else tier4_only).append(name)
+        elif bucket == "unknown":
+            unknown.append(name)
+        elif bucket == "foreign":
+            foreign[name] = owner
+    return sorted(authoritative), sorted(tier4_only), sorted(unknown), foreign
 
 
 # ── team-machines.json ───────────────────────────────────────────────────────
@@ -743,6 +864,150 @@ def merge_local(existing, teams, slug):
     return merged, added, retargeted
 
 
+def _refuse_retarget_under_unattended(unattended, retargeted, slug, say):
+    """THE write-side superset invariant (XACA-1078 Decision 1, tier-agnostic
+    rule — see the module docstring's "UNATTENDED CALLERS" section).
+
+    Under --unattended, the resulting map must be a pure superset of the map
+    that was read. If `retargeted` is non-empty, the caller must not write
+    ANY of `merged` — not the non-conflicting keys either. This is
+    deliberately checked here, immediately before the point of write, rather
+    than upstream in local_teams()/local_teams_by_tier()'s classification:
+    an independent enforcement layer at the write catches a bad
+    classification from ANY tier — including a tier that does not exist yet
+    — where a read-side-only filter could only ever advise.
+
+    A manual (non-unattended) invocation is UNCHANGED: an operator running
+    the bare command still gets the pre-existing "~ team -> slug (was X)"
+    retarget behaviour, because a human reading the report is the safety
+    property this rule exists to substitute for when nobody is watching.
+
+    Returns True if the write may proceed, False if it was refused (message
+    already emitted via `say`, which the caller passes bound to stdout/stderr
+    as appropriate for its own --quiet handling).
+    """
+    if not unattended or not retargeted:
+        return True
+    say("\n  REFUSED: %d key(s) would be RETARGETED under --unattended — the entire "
+        "write is declined, not applied partially:" % len(retargeted))
+    for t, was in retargeted:
+        say("    ~ %s -> %s (was %s)" % (t, slug, was))
+    say("  An unattended process does not adjudicate between two operator-maintained "
+        "records. Nothing was written. Resolve by hand: kb-msg-provision")
+    return False
+
+
+def run_add_team(keygen_js, args, say):
+    """`--add-team <team-id>` — narrow additive single-team assertion.
+
+    XACA-1078 Decision 1/5: `kb-init-team` can honestly speak for exactly one
+    fact ("this team was created here, just now, by me"), never the whole
+    registry. This bypasses local_teams()'s whole-registry re-derivation
+    entirely and resolves only the named team (plus its with_aliases()
+    template/instance counterpart via INSTANCE_TO_TEMPLATE).
+
+    Never touches the keypair (args.no_keygen is forced True by the caller)
+    and never persists a relay URL (mutually exclusive with --server,
+    enforced by the caller before this is reached) — team-birth provisioning
+    never mints machine-level identity or config (Decision 2, rule 8).
+
+    Returns the process exit code (0 ok / 1 declined / 2 raised via
+    _die_env before this returns at all).
+    """
+    team_id = args.add_team
+    slug = machine_slug(keygen_js, args.machine_id)
+
+    teams = _load_teams_registry()
+    cfg = teams.get(team_id)
+
+    # Precondition 1: present, and not board_less/alias_of (not a real,
+    # ownable team — same tier-1 rule _classify_team applies, stated
+    # directly here since add-team never calls that shared classifier).
+    if cfg is None:
+        _notice("--add-team %r declined: not present in %s." % (team_id, TEAM_PATHS))
+        return 1
+    cfg = cfg or {}
+    if cfg.get("board_less") or cfg.get("alias_of"):
+        _notice("--add-team %r declined: it is board_less/alias_of, not an ownable team."
+                 % team_id)
+        return 1
+
+    # Precondition 2: a declared primary_host, if present, must name THIS
+    # machine. Never contradict a declared owner (Decision 2, rule 5).
+    declared = (cfg.get("primary_host") or "").strip()
+    if declared and declared.lower() != slug.lower():
+        _notice("--add-team %r declined: primary_host declares %r, this machine is %r."
+                 % (team_id, declared, slug))
+        return 1
+
+    # Precondition 3: a board file must exist HERE. Unlike local_teams()'s
+    # tier-4 fallback (which lands a board-less team in `unknown` and moves
+    # on), add-team has nothing else to fall back to — this IS its only
+    # evidence, and it is trustworthy here specifically because kb-init-team
+    # just created that board file, moments earlier, in this same process
+    # (Decision 1, "Tier 4 is correct by construction for the new team").
+    kd = os.path.expanduser(cfg.get("kanban_dir") or "")
+    has_board = bool(glob.glob(os.path.join(kd, "*-board.json"))) if kd else False
+    if not has_board:
+        _notice("--add-team %r declined: no *-board.json found under %r."
+                 % (team_id, kd or "(no kanban_dir declared)"))
+        return 1
+
+    names = with_aliases([team_id])
+    existing, map_existed = load_map()
+
+    # Write rule (Decision 1, "Write rule, add-only"): touches no key other
+    # than `team_id` and its alias form. Absent -> add. Already correct ->
+    # no-op. Names another machine -> decline the WHOLE call and report both
+    # values — this is the same superset invariant --unattended enforces on
+    # the full run, expressed directly since add-team's write set is already
+    # bounded to `names` and never needs merge_local()'s general machinery.
+    to_add, conflicts = [], []
+    for name in names:
+        cur = existing.get(name)
+        if cur is None:
+            to_add.append(name)
+        elif cur != slug:
+            conflicts.append((name, cur))
+        # cur == slug: already correct — nothing to do for this name.
+
+    say("kb-msg-provision --add-team %s" % team_id)
+    say("  machine slug : %s" % slug)
+    say("  names        : %s" % ", ".join(names))
+    say("  routing map  : %s" % (TEAM_MACHINES if map_existed else "ABSENT"))
+
+    if conflicts:
+        for name, cur in conflicts:
+            _notice("--add-team %r declined: %r already routes to %r (this machine is %r); "
+                     "refusing to retarget." % (team_id, name, cur, slug))
+        return 1
+
+    if not to_add:
+        say("  Already correct for %s and its alias(es) — no change." % team_id)
+        return 0
+
+    if args.check:
+        say("\n  GAP: %d name(s) not yet routed to this machine: %s"
+            % (len(to_add), ", ".join(to_add)))
+        return 1
+
+    if args.dry_run:
+        say("\n  [dry-run] would write %s" % TEAM_MACHINES)
+        for name in to_add:
+            say("    + %s -> %s" % (name, slug))
+        return 0
+
+    merged = dict(existing)
+    for name in to_add:
+        merged[name] = slug
+    write_map(merged)
+
+    say("\n  Wrote %s" % TEAM_MACHINES)
+    for name in to_add:
+        say("    + %s -> %s" % (name, slug))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--check", action="store_true", help="Report state; never write. Exit 1 on a gap.")
@@ -750,6 +1015,21 @@ def main():
     ap.add_argument("--no-keygen", action="store_true", help="Do not generate a keypair if absent.")
     ap.add_argument("--server", default=None, help="Fleet Monitor URL for key registration.")
     ap.add_argument("--machine-id", default=None, help="Override the machine slug.")
+    ap.add_argument("--add-team", metavar="TEAM_ID", default=None,
+                     help="Narrow additive single-team assertion (XACA-1078): add "
+                          "TEAM_ID (this machine) to the routing map if absent. "
+                          "Bypasses the whole-registry re-derivation. Implies "
+                          "--unattended and --no-keygen. Mutually exclusive with "
+                          "--server. See the module docstring for the full contract.")
+    ap.add_argument("--unattended", action="store_true",
+                     help="Never reads stdin or prompts (true today; guaranteed going "
+                          "forward). Enforces the additive-only superset invariant at "
+                          "the write: a write that would retarget any existing key is "
+                          "refused in FULL, not partially applied. In a full run "
+                          "(no --add-team), tier-4-only classifications are excluded "
+                          "from the write set and reported as 'deferred'. Deliberately "
+                          "NOT the same promise as kb-init-team's --non-interactive — "
+                          "see the module docstring's 'UNATTENDED CALLERS' section.")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -757,7 +1037,23 @@ def main():
         if not args.quiet:
             print(msg)
 
+    # ── --add-team implications and guards (Decision 1/5, rule 8) ──────────
+    if args.add_team and args.server:
+        _die_env(
+            "--add-team and --server are mutually exclusive.\n"
+            "  Team-birth provisioning never writes machine-level configuration "
+            "(fleet-config.json) or mints a vault keypair — that is machine "
+            "provisioning, not a side effect of adding one team."
+        )
+    if args.add_team:
+        args.unattended = True
+        args.no_keygen = True
+
     keygen_js = _locate_keygen()
+
+    if args.add_team:
+        return run_add_team(keygen_js, args, say)
+
     if args.server and (args.check or args.dry_run):
         # REVIEW-GATE FINDING XACA-0885-057. These modes skipped _relay_endpoint
         # entirely, so a credential-bearing or malformed --server passed silently
@@ -778,7 +1074,18 @@ def main():
     # main() goes on to merge into — one read, not two, and no risk of the two
     # calls seeing different snapshots of a file that could change between them.
     existing, map_existed = load_map()
-    loc, unknown, foreign = local_teams(slug, existing)
+    # XACA-1078-003: under --unattended, a full run must not write a route
+    # derived ONLY from tier-4 inference (Decision 2, rule 4) — that guess is
+    # trustworthy for a team this run is itself creating (--add-team), not
+    # for an arbitrary team elsewhere in the registry. local_teams_by_tier()
+    # is the ONLY thing that changes here; every other line in this function
+    # is unchanged from the always-has-been-manual invocation.
+    if args.unattended:
+        loc_authoritative, deferred, unknown, foreign = local_teams_by_tier(slug, existing)
+        loc = loc_authoritative
+    else:
+        loc, unknown, foreign = local_teams(slug, existing)
+        deferred = []
     loc = with_aliases(loc)   # template ids too, or kb-msg looks up a name we never wrote
     merged, added, retargeted = merge_local(existing, loc, slug)
 
@@ -799,6 +1106,14 @@ def main():
         foreign_desc = ", ".join("%s->%s" % (t, foreign[t]) for t in sorted(foreign))
         say("  foreign      : %d (%s)" % (len(foreign), foreign_desc))
         say("                 owned by another machine (XACA-1063 host-ownership authority) — left untouched")
+    if deferred:
+        # XACA-1078-003, Decision 1: tier-4-only (board-file bootstrap) teams
+        # a full --unattended run refuses to write a guessed route for. The
+        # first automatic run therefore writes only the tier-2/3-provable
+        # set (see the plan doc's "Consequence to accept explicitly") — this
+        # is the report that makes the remainder impossible to forget.
+        say("  deferred     : %d (%s)" % (len(deferred), ", ".join(deferred)))
+        say("                 tier-4-only inference — --unattended never writes a guessed route; run 'kb-msg-provision --add-team <id>' or a manual run to close")
     say("  routing map  : %s" % (TEAM_MACHINES if map_existed else "ABSENT"))
 
     if args.check:
@@ -827,7 +1142,11 @@ def main():
             cmd = ["node", keygen_js, "--machine-id", slug]
             if args.server:
                 cmd += ["--server", args.server]
-            rc = subprocess.run(cmd).returncode
+            # --unattended (Decision 2, rule 10 / Decision 5): closing stdin is
+            # structural insurance that this can never block waiting on input,
+            # on top of vault-keygen.js already never reading it today.
+            run_kwargs = {"stdin": subprocess.DEVNULL} if args.unattended else {}
+            rc = subprocess.run(cmd, **run_kwargs).returncode
             if rc != 0:
                 print("kb-msg-provision: vault-keygen failed (exit %d). Routing map not written."
                       % rc, file=sys.stderr)
@@ -840,6 +1159,16 @@ def main():
     if not added and not retargeted:
         say("  Routing map already correct for every local team — no change.")
         return 0
+
+    # THE superset invariant (XACA-1078-003, Decision 1) — the single most
+    # important line this subitem adds. Checked HERE, immediately before any
+    # write (including the dry-run preview, so a preview never promises a
+    # write this tool would actually refuse), not inside local_teams() /
+    # local_teams_by_tier() / merge_local()'s classification — this is an
+    # independent enforcement layer that catches a bad classification from
+    # ANY tier, including one that does not exist yet.
+    if not _refuse_retarget_under_unattended(args.unattended, retargeted, slug, say):
+        return 1
 
     if args.dry_run:
         say("\n  [dry-run] would write %s" % TEAM_MACHINES)
