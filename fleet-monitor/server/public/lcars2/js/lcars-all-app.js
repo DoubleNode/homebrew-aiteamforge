@@ -665,6 +665,11 @@
         let rows = buildSystemOsRow(system);
         rows += ('model' in system) ? systemRowValue('MODEL', escapeHtml(String(system.model))) : systemRowAbsent('MODEL');
         rows += ('arch' in system) ? systemRowValue('ARCH', escapeHtml(String(system.arch))) : systemRowAbsent('ARCH');
+        // XACA-1092-017: system.cores is normally a number, but the reporter
+        // contract does not enforce that at the wire boundary, so escapeHtml()
+        // stays here as defense-in-depth rather than relying on typeof --
+        // same reasoning applies to memory.pressure_percent and disk.percent
+        // below.
         rows += ('cores' in system) ? systemRowValue('CORES', escapeHtml(String(system.cores))) : systemRowAbsent('CORES');
         return '<div class="status-row-system-group"><div class="machine-system-group-label">PLATFORM</div>' + rows + '</div>';
     }
@@ -689,6 +694,8 @@
             const totalStr = formatSystemBytes(memory.total);
             let text = (usedStr !== null ? usedStr : 'not reported') + ' / ' + (totalStr !== null ? totalStr : 'not reported');
             if ('pressure_percent' in memory) {
+                // XACA-1092-017: normally numeric, escaped defensively --
+                // see the comment on CORES in buildPlatformGroupHtml().
                 text += '&nbsp;&nbsp;(' + escapeHtml(String(memory.pressure_percent)) + '% pressure)';
             }
             memoryRowHtml = systemRowValue('MEMORY', text);
@@ -720,6 +727,8 @@
         const freeStr = formatSystemBytes(disk.free);
         let freeText = freeStr !== null ? freeStr : 'not reported';
         if ('percent' in disk) {
+            // XACA-1092-017: normally numeric, escaped defensively -- see
+            // the comment on CORES in buildPlatformGroupHtml().
             freeText += '&nbsp;&nbsp;(' + escapeHtml(String(disk.percent)) + '%)';
         }
         const freeRow = systemRowValue('FREE', freeText);
@@ -834,12 +843,20 @@
     function toggleSystemPanel(machineId, detailEl) {
         const panel = detailEl.querySelector('.status-row-system-panel');
         const indicator = detailEl.querySelector('.status-row-system-indicator');
+        // XACA-1092-021 (WCAG 2.1.1): aria-expanded must track the SAME
+        // state transitions as the `.expanded` class below -- the "close
+        // myself" early-return path AND the "close whatever else was open"
+        // side-effect path -- or a stale aria-expanded becomes worse than
+        // none (a screen reader announcing "collapsed" on a panel that is
+        // visibly open, or vice versa).
+        const toggle = detailEl.querySelector('.status-row-system-toggle');
         if (!panel) return;
 
         if (expandedSystemMachineId === machineId) {
             expandedSystemMachineId = null;
             panel.classList.remove('expanded');
             if (indicator) indicator.classList.remove('expanded');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
             return;
         }
 
@@ -851,12 +868,14 @@
                 const prevIndicator = prevDetail ? prevDetail.querySelector('.status-row-system-indicator') : null;
                 if (prevPanel) prevPanel.classList.remove('expanded');
                 if (prevIndicator) prevIndicator.classList.remove('expanded');
+                prevToggle.setAttribute('aria-expanded', 'false');
             }
         }
 
         expandedSystemMachineId = machineId;
         panel.classList.add('expanded');
         if (indicator) indicator.classList.add('expanded');
+        if (toggle) toggle.setAttribute('aria-expanded', 'true');
     }
 
     function createMachineItem(machine) {
@@ -1023,14 +1042,50 @@
                 // innerHTML string above -- see buildSystemSectionHtml()'s
                 // comment on why that keeps escapeAttr() unneeded here.
                 toggle.setAttribute('data-machine-id', machine.machine_id);
+                // XACA-1092-021 (WCAG 2.1.1): this is lcars2's FIRST
+                // click affordance and shipped with no keyboard path at all
+                // -- give it the same tabindex/role/keydown shape the
+                // LCARS-terminal card above already uses (see the
+                // card.setAttribute('tabindex', '0') / keydown block near
+                // XACA-0983-014), applied via setAttribute rather than
+                // baked into the innerHTML template for the same reason
+                // data-machine-id is (see buildSystemSectionHtml()'s
+                // comment). aria-expanded is initialized to the real
+                // current state here and kept in sync by
+                // toggleSystemPanel() on every subsequent transition,
+                // including when a DIFFERENT machine's panel is closed as
+                // a side effect of opening this one.
+                toggle.setAttribute('tabindex', '0');
+                toggle.setAttribute('role', 'button');
+                toggle.setAttribute('aria-expanded', isSystemExpanded ? 'true' : 'false');
                 toggle.addEventListener('click', function (e) {
                     e.stopPropagation();
                     toggleSystemPanel(machine.machine_id, detail);
                 });
+                toggle.addEventListener('keydown', function (e) {
+                    // Enter and Space both activate, matching the
+                    // LCARS-terminal card's keydown handler above. Space
+                    // must be preventDefault()'d or the page scrolls --
+                    // the browser's default action for Space on a
+                    // non-native-button element with a keydown listener is
+                    // to scroll the viewport.
+                    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar' || e.keyCode === 13 || e.keyCode === 32) {
+                        // No stopPropagation() here, matching the
+                        // LCARS-terminal card's own keydown handler
+                        // precedent (XACA-0983-014) -- only the CLICK
+                        // handler above needs it (to stop a click from
+                        // also reaching a row-level click handler); no
+                        // parent keydown listener exists in this file for
+                        // Enter/Space to conflict with.
+                        e.preventDefault();
+                        toggleSystemPanel(machine.machine_id, detail);
+                    }
+                });
             }
         }
 
-        return fragment;    }
+        return fragment;
+    }
 
     // ============================================================================
     // DIVISION MAPPINGS

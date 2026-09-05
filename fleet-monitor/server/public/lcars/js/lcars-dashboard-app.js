@@ -1845,6 +1845,11 @@
         let rows = buildSystemOsRow(system);
         rows += ('model' in system) ? systemRowValue('MODEL', escapeHtml(String(system.model))) : systemRowAbsent('MODEL');
         rows += ('arch' in system) ? systemRowValue('ARCH', escapeHtml(String(system.arch))) : systemRowAbsent('ARCH');
+        // XACA-1092-017: system.cores is normally a number, but the reporter
+        // contract does not enforce that at the wire boundary, so escapeHtml()
+        // stays here as defense-in-depth rather than relying on typeof --
+        // same reasoning applies to memory.pressure_percent and disk.percent
+        // below.
         rows += ('cores' in system) ? systemRowValue('CORES', escapeHtml(String(system.cores))) : systemRowAbsent('CORES');
         return '<div class="machine-system-group"><div class="machine-system-group-label">PLATFORM</div>' + rows + '</div>';
     }
@@ -1869,6 +1874,8 @@
             const totalStr = formatSystemBytes(memory.total);
             let text = (usedStr !== null ? usedStr : 'not reported') + ' / ' + (totalStr !== null ? totalStr : 'not reported');
             if ('pressure_percent' in memory) {
+                // XACA-1092-017: normally numeric, escaped defensively --
+                // see the comment on CORES in buildPlatformGroupHtml().
                 text += '&nbsp;&nbsp;(' + escapeHtml(String(memory.pressure_percent)) + '% pressure)';
             }
             memoryRowHtml = systemRowValue('MEMORY', text);
@@ -1900,6 +1907,8 @@
         const freeStr = formatSystemBytes(disk.free);
         let freeText = freeStr !== null ? freeStr : 'not reported';
         if ('percent' in disk) {
+            // XACA-1092-017: normally numeric, escaped defensively -- see
+            // the comment on CORES in buildPlatformGroupHtml().
             freeText += '&nbsp;&nbsp;(' + escapeHtml(String(disk.percent)) + '%)';
         }
         const freeRow = systemRowValue('FREE', freeText);
@@ -2328,10 +2337,51 @@
         // history-panel click or the backup container's own click.
         var systemContainer = item.querySelector('.machine-system-container');
         if (systemContainer) {
+            // toggleSystemPanel() is called with `item` (not the narrower
+            // systemContainer) as its `container` argument -- querySelector()
+            // finds the same descendant either way in a real DOM, and this
+            // is the scope toggleSystemPanel()'s own panel/indicator/toggle
+            // lookups use below, so the two must agree.
             systemContainer.addEventListener('click', function(e) {
                 e.stopPropagation();
-                toggleSystemPanel(machine.machine_id, systemContainer);
+                toggleSystemPanel(machine.machine_id, item);
             });
+
+            // XACA-1092-021 (WCAG 2.1.1): the visible toggle heading, not the
+            // whole container (which also wraps the details panel), gets the
+            // keyboard treatment -- same tabindex/role/keydown shape as the
+            // LCARS-terminal card above (see the card.setAttribute('tabindex',
+            // '0') / keydown block near XACA-0983-014). aria-expanded is
+            // initialized to the real current state here and kept in sync by
+            // toggleSystemPanel() on every subsequent transition, including
+            // when a DIFFERENT machine's panel is closed as a side effect of
+            // opening this one. Queried from `item` rather than
+            // systemContainer for the same reason as the click handler above.
+            var systemToggle = item.querySelector('.machine-system-status');
+            if (systemToggle) {
+                systemToggle.setAttribute('tabindex', '0');
+                systemToggle.setAttribute('role', 'button');
+                systemToggle.setAttribute('aria-expanded', isSystemExpanded ? 'true' : 'false');
+                systemToggle.addEventListener('keydown', function(e) {
+                    // Enter and Space both activate, matching the
+                    // LCARS-terminal card's keydown handler above. Space must
+                    // be preventDefault()'d or the page scrolls -- the
+                    // browser's default action for Space on a
+                    // non-native-button element with a keydown listener is to
+                    // scroll the viewport.
+                    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar' || e.keyCode === 13 || e.keyCode === 32) {
+                        // No stopPropagation() here, matching the
+                        // LCARS-terminal card's own keydown handler
+                        // precedent (XACA-0983-014) -- only the CLICK
+                        // handler above needs it (to stop a click from
+                        // also reaching item's own history-panel click
+                        // handler); no parent keydown listener exists in
+                        // this file for Enter/Space to conflict with.
+                        e.preventDefault();
+                        toggleSystemPanel(machine.machine_id, item);
+                    }
+                });
+            }
         }
 
         item.addEventListener('click', function(e) {
@@ -2425,25 +2475,36 @@
     function toggleSystemPanel(machineId, container) {
         var panel = container.querySelector('.machine-system-details-panel');
         var indicator = container.querySelector('.system-expand-indicator');
+        // XACA-1092-021 (WCAG 2.1.1): aria-expanded must track the SAME state
+        // transitions as the `.expanded` class above -- both the "close
+        // myself" branch AND the "close whatever else was open" side-effect
+        // branch -- or a stale aria-expanded becomes worse than none (a
+        // screen reader announcing "collapsed" on a panel that is visibly
+        // open, or vice versa).
+        var toggle = container.querySelector('.machine-system-status');
 
         if (expandedSystemMachineId === machineId) {
             expandedSystemMachineId = null;
             if (panel) panel.classList.remove('expanded');
             if (indicator) indicator.classList.remove('expanded');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
         } else {
             if (expandedSystemMachineId) {
                 var prevContainer = document.querySelector('.machine-system-container[data-machine-id="' + CSS.escape(expandedSystemMachineId) + '"]');
                 if (prevContainer) {
                     var prevPanel = prevContainer.querySelector('.machine-system-details-panel');
                     var prevIndicator = prevContainer.querySelector('.system-expand-indicator');
+                    var prevToggle = prevContainer.querySelector('.machine-system-status');
                     if (prevPanel) prevPanel.classList.remove('expanded');
                     if (prevIndicator) prevIndicator.classList.remove('expanded');
+                    if (prevToggle) prevToggle.setAttribute('aria-expanded', 'false');
                 }
             }
 
             expandedSystemMachineId = machineId;
             if (panel) panel.classList.add('expanded');
             if (indicator) indicator.classList.add('expanded');
+            if (toggle) toggle.setAttribute('aria-expanded', 'true');
         }
     }
 

@@ -105,9 +105,12 @@
  * load, the same two-part evidence bar swap already cleared.
  *
  * ── ABSENT / ZERO INPUT -- THE SHIPPING PATH, NOT AN EDGE CASE ───────────
- * server.js's machineList projection (server.js:1337-1352) is an explicit
- * allowlist with no `system` entry as of this writing, so on day one EVERY
- * machine in the fleet hits the all-inputs-absent path. Every argument may
+ * server.js's machineList projection (the `machineList` allowlist inside
+ * parseFleetData() -- grep server.js for `system: projectSystemBlock(m.system)`
+ * to locate it directly rather than trusting a line number, which has
+ * already drifted once) is an explicit allowlist with no `system` entry as
+ * of this writing, so on day one EVERY machine in the fleet hits the
+ * all-inputs-absent path. Every argument may
  * be missing, undefined, null, a non-numeric string, or NaN -- all of those
  * are treated as "not evaluable", contributing NEITHER healthy NOR at-risk
  * evidence. If every metric is unevaluable, the overall verdict is the

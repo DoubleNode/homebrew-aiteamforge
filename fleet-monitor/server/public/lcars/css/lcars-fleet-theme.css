@@ -6894,10 +6894,26 @@
    state for every machine between XACA-1031 merging and XACA-1091
    shipping. Blends the two reused wording conventions the spec names
    (.kiosk-health-no-data-label's uppercase/letter-spacing, .history-empty's
-   muted/italic) rather than introducing a third. */
+   muted/italic) rather than introducing a third.
+   XACA-1092-022 (WCAG 1.4.3 AA): unlike lcars2's copy of this rule, this
+   line is baked directly into `.machine-row`'s innerHTML (no sibling
+   `.machine-system-container` wraps the no-data case -- see
+   buildSystemSectionHtml()), so it composites onto `.machine-row`'s own
+   background: var(--lcars-dark) (#1a1a2e), not the panel's
+   var(--lcars-darker) and not black. Computed against the shipped custom
+   properties (--lcars-tan #cc9966 on #1a1a2e): the previous opacity:0.6
+   blends to rgb(133,102,80) -> 3.26:1, below the 4.5:1 AA minimum for this
+   10px text. opacity:0.8 blends to rgb(168,128,91) -> 4.79:1, clearing
+   4.5:1 with margin (0.75 falls short here, at 4.36:1, because this
+   lighter background needs more opacity than the darker/black backgrounds
+   the sibling class below and lcars2's copy sit on). "SYSTEM: NO DATA
+   REPORTED" is the day-one state for the whole fleet (server.js's
+   machineList projection carries no `system` field until XACA-1091-006
+   ships -- see lcars-machine-health.js's module header), so this is the
+   primary reading experience, not an edge case. */
 .machine-system-no-data {
     color: var(--lcars-tan);
-    opacity: 0.6;
+    opacity: 0.8;
     font-style: italic;
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -6945,9 +6961,16 @@
    full opacity via .machine-system-row-value. This modifier is reserved
    for a field the reporter genuinely omitted or could not be safely
    rendered, and must read as a full muted WORD, never a bare dash (UX
-   spec §5: "a lone dash ... can be misread as part of a number"). */
+   spec §5: "a lone dash ... can be misread as part of a number").
+   XACA-1092-022 (WCAG 1.4.3 AA): this is rendered inside
+   .machine-system-details-panel, which sets background: var(--lcars-darker)
+   (#0d0d1a) -- same background lcars2's copy of this rule uses. Computed
+   against the shipped custom properties (--lcars-tan #cc9966 on #0d0d1a):
+   the previous opacity:0.5 blends to rgb(108,83,64) -> 2.71:1, below the
+   4.5:1 AA minimum for this 10px text. opacity:0.75 blends to
+   rgb(156,118,83) -> 4.71:1, clearing 4.5:1 with margin. */
 .machine-system-row-value-empty {
     color: var(--lcars-tan);
-    opacity: 0.5;
+    opacity: 0.75;
     font-style: italic;
 }
