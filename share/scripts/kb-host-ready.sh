@@ -483,6 +483,49 @@ if registry_state != "ok":
                  f"cross-check) skipped for all entries; gate 1 alone decides validity (§3 'Gate 2 "
                  f"failing OPEN')")
 
+# ─────────────────────────────────────────────────────────────────────────
+# VALIDATION: TWO LAYERS, TWO CLOSED REMITS (XACA-1096-005 — owner ruling)
+# ─────────────────────────────────────────────────────────────────────────
+# Subitem -004 proved subsumption exhaustively: all 8 characters in
+# BAD_CHARS (defined just below) are also rejected by ALLOWED_CHARS
+# (defined further below) — checked 8/8. But the relation is STRICT
+# CONTAINMENT, not equivalence: ALLOWED_CHARS additionally rejects 55 of
+# the other 120 ASCII codepoints (comma, space, and '/' among them) plus
+# effectively all non-ASCII. On that evidence alone, BAD_CHARS could be
+# deleted with zero change in accept/reject behavior for every input this
+# resolver has ever seen.
+#
+# The owner ruled to keep it anyway — and gave each layer its own closed
+# remit instead of a shared, growing one:
+#
+#   ALLOWED_CHARS = [A-Za-z0-9._-]  ->  the IDENTIFIER POLICY.
+#     Answers "what is a valid team id / arg?" It is legitimately open to
+#     revision if the fleet's naming conventions ever change — see its own
+#     comment block below for the inventory evidence that backs today's
+#     set, and re-run that inventory before touching it.
+#
+#   BAD_CHARS (below)  ->  PROTOCOL INTEGRITY.
+#     Answers "what breaks the \x1f/\x1e record protocol, or the
+#     hand-built JSON in cmd_restore's summary?" It is CLOSED. It must
+#     never grow a 9th character.
+#
+# THE GUARDRAIL THIS SUBITEM EXISTS TO INSTALL: if you are ever tempted to
+# add a 9th character to BAD_CHARS, that impulse is by definition an
+# ALLOWED_CHARS question, not a BAD_CHARS one. Doing an identifier
+# policy's job with a protocol-integrity denylist is exactly how BAD_CHARS
+# accreted one character per review round across five rounds — with four
+# straight rounds each wrongly declaring "that was the last one" (full
+# history in ALLOWED_CHARS's own comment block below). Take the new
+# character to ALLOWED_CHARS instead, and re-run the inventory that backs
+# it.
+#
+# Why not just delete BAD_CHARS, given the proven subsumption? Because
+# ALLOWED_CHARS is deliberately left open to widen if naming conventions
+# change, and BAD_CHARS is what still stands between the wire protocol and
+# a bad day if someone widens it carelessly. A closed backstop that can
+# never grow is cheap insurance against an open policy that is allowed to.
+# ─────────────────────────────────────────────────────────────────────────
+#
 # Rejects the delimiter set AND the two characters that would break the
 # hand-built JSON fragments in cmd_restore's summary ('"' and backslash).
 # Without those two, a team name containing a double quote produced invalid
@@ -498,6 +541,115 @@ if registry_state != "ok":
 # to preserve, so rejecting at validation is the right layer here.
 BAD_CHARS = set("\t\n\r\x1e\x1f\x00" + chr(34) + chr(92))
 
+# ─────────────────────────────────────────────────────────────────────────
+# ALLOWLIST (XACA-1096-003) — a SECOND, INDEPENDENT layer alongside
+# BAD_CHARS, not a replacement for it. BAD_CHARS is a DENYLIST, and this
+# file's own history is the argument against a denylist as the ONLY
+# defense: it has grown one character at a time across five review rounds
+# (\t \n \r \x1e \x1f \x00 '"' '\\'), and FOUR separate rounds each closed
+# with "that was the last bad character that can break this protocol" —
+# and each was wrong; the fifth shape (the surrogate that still gets
+# through today) is what opened this ticket. A denylist can only enumerate
+# failures somebody has already imagined. An allowlist bounds the INPUT
+# SPACE itself, so the next character nobody has thought of yet is
+# rejected by construction, not by being remembered.
+#
+# XACA-1096-001's inventory measured every value that legitimately reaches
+# `team`/`args` fleet-wide — 3 machines, ~46 files, 4+ months of backups:
+# 30 distinct team ids, 22 decomposed args, 24 distinct characters, ZERO
+# outside [A-Za-z0-9._-]. That set is also a superset of the stricter
+# ^[a-z0-9_]+$ already enforced independently by freelance-connect.sh and
+# install-team.sh, so it does not admit anything those scripts would
+# reject. Do not widen or narrow ALLOWED_CHARS without re-running that
+# inventory — it is the only evidence backing this pattern.
+#
+# PATH-COMPOSITION HARDENING: `team` composes `script_path` later in this
+# same resolver pass, at gate 1 (`os.path.join(workdir,
+# f"{team}-startup.sh")`) — and cmd_restore's bash counterpart composes
+# that same `<workdir>/<team>-startup.sh` shape again independently (its
+# own `script_path="${KB_HOST_READY_WORKING_DIR}/${team}-startup.sh"`) and
+# actually EXECUTES it via `_hr_run_with_deadline`. No BAD_CHARS character
+# was ever '/' — it was never in scope for the wire-protocol problem
+# BAD_CHARS was built to solve — so a `team` value like "../../tmp/evil"
+# passed BAD_CHARS clean and composed a script_path OUTSIDE this script's
+# working directory. ALLOWED_CHARS rejects '/' and closes that shape.
+# Scope this claim correctly: host-ready.json lives under the invoking
+# user's own ~/.aiteamforge/, so anyone able to write it already runs as
+# that user — this is defense in depth against a MISTAKEN or malformed
+# config, NOT a privilege-escalation fix, and must never be described as
+# one.
+#
+# RULING (XACA-1096-005): retirement of BAD_CHARS was fully evaluated, not
+# skipped — -004 proved the exhaustive 8/8 subsumption cited at the top of
+# this validation section — and the owner declined it anyway. Proven-
+# safe-to-remove and worth-removing are different questions; see the
+# "VALIDATION: TWO LAYERS, TWO CLOSED REMITS" block above this file's
+# validation section for why both layers stay, each with its own
+# closed/open remit. BAD_CHARS still owns the specific "does this byte
+# desync the \x1f/\x1e wire protocol" reasoning documented at its own
+# definition above (its \x00 case in particular — silently deleted by
+# bash's command substitution rather than rejected by either layer's
+# character test — is NOT something an allowlist alone would catch on its
+# own terms, since \x00 fails membership in ALLOWED_CHARS the same as any
+# other character, but the REASON it must be rejected is protocol-specific
+# and belongs to BAD_CHARS, permanently). ALLOWED_CHARS is not "defense in
+# depth on top of" BAD_CHARS the way an earlier draft of this comment
+# described it — the relationship is the other way round: ALLOWED_CHARS is
+# the primary, revisable identifier policy, and BAD_CHARS is the closed,
+# never-widen protocol-integrity backstop underneath it.
+#
+# THE SURROGATE TRAP — why the diagnostic itself has to be encoded before
+# it reaches emit(), not just the fact that it was rejected:
+#
+# An allowlist DETECTS an unpaired surrogate character-by-character (e.g.
+# "\ud800bad" fails membership immediately on its first character) — but
+# naively reporting *which* value or character failed by interpolating it
+# VERBATIM into the rejection message reintroduces the exact fifth shape
+# this ticket exists to close. Measured: emitting str(team) raw for a
+# value containing "\ud800" raises UnicodeEncodeError ("surrogates not
+# allowed") from INSIDE emit() itself, uncaught anywhere in this loop,
+# which aborts the python3 process mid-stream. That is indistinguishable
+# from the resolver dying for any other reason — _hr_stream_complete()
+# correctly fails closed on it — but a loud, DIAGNOSABLE rejection was the
+# entire point of adding this layer, and instead you get a truncated
+# stream and the root incident again, just wearing an allowlist's clothes.
+#
+# So every rejection diagnostic below routes the offending value AND any
+# per-character detail through _hr_safe_repr()/_hr_describe_bad_chars()
+# before it is spliced into an emit() call. `.encode("utf-8",
+# "backslashreplace").decode("utf-8", "replace")` round-trips every
+# legitimate Unicode character back to itself (verified: 'é' -> 'é', an
+# emoji -> itself) and turns ONLY an unencodable lone surrogate into a
+# literal, ASCII-safe backslash-u escape (verified: '\ud800' -> '\\ud800')
+# — so operator-facing diagnostics stay readable for real Unicode while
+# still never being able to raise. This is load-bearing, not cosmetic: an
+# allowlist whose own diagnostic can crash the resolver is not a fix, it's
+# a second way to trigger the same bug.
+ALLOWED_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789._-"
+)
+
+def _hr_safe_repr(v):
+    # ASCII-safe stand-in for any string that might contain an unpaired
+    # surrogate (or anything else UTF-8 can't round-trip), for splicing
+    # into an emit() diagnostic without risking the UnicodeEncodeError
+    # described above. See the ALLOWLIST comment block for why this exists
+    # and what it does and does not do to legitimate Unicode.
+    return str(v).encode("utf-8", "backslashreplace").decode("utf-8", "replace")
+
+def _hr_describe_bad_chars(s):
+    # Distinct disallowed characters in s, in first-seen order, each as
+    # 'char' (U+XXXX) with the character itself passed through
+    # _hr_safe_repr() first. Used to make a rejection name the SPECIFIC
+    # character(s) that failed, not just "rejected", per XACA-1096-003.
+    seen = []
+    for c in s:
+        if c not in ALLOWED_CHARS and c not in seen:
+            seen.append(c)
+    return ", ".join(f"'{_hr_safe_repr(c)}' (U+{ord(c):04X})" for c in seen)
+
 for idx, entry in enumerate(autostart_raw):
     if not isinstance(entry, dict):
         emit("ENTRY", idx, "SKIP", "", "", "", "FAIL", "SKIPPED", f"entry {idx} is not an object")
@@ -510,11 +662,28 @@ for idx, entry in enumerate(autostart_raw):
         emit("ENTRY", idx, "SKIP", str(team), "", "", "FAIL", "SKIPPED", f"entry {idx}: 'team' missing or not a clean string")
         continue
 
+    if any(c not in ALLOWED_CHARS for c in team):
+        emit("ENTRY", idx, "SKIP", _hr_safe_repr(team), "", "", "FAIL", "SKIPPED",
+             f"entry {idx}: 'team' value '{_hr_safe_repr(team)}' rejected by allowlist "
+             f"[A-Za-z0-9._-]: disallowed character(s) {_hr_describe_bad_chars(team)}")
+        continue
+
     if filter_team and team != filter_team:
         continue
 
     if not isinstance(args, list) or not all(isinstance(a, str) and a and not any(c in BAD_CHARS for c in a) for a in args):
         emit("ENTRY", idx, "SKIP", team, "", "", "FAIL", "SKIPPED", f"entry {idx} ({team}): 'args' must be an array of clean strings")
+        continue
+
+    _bad_arg = next(
+        ((a_idx, a) for a_idx, a in enumerate(args) if any(c not in ALLOWED_CHARS for c in a)),
+        None,
+    )
+    if _bad_arg is not None:
+        a_idx, a_val = _bad_arg
+        emit("ENTRY", idx, "SKIP", team, "", "", "FAIL", "SKIPPED",
+             f"entry {idx} ({team}): 'args[{a_idx}]' value '{_hr_safe_repr(a_val)}' rejected by "
+             f"allowlist [A-Za-z0-9._-]: disallowed character(s) {_hr_describe_bad_chars(a_val)}")
         continue
 
     args_packed = "\x1e".join(args)

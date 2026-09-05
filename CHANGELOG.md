@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1096: `share/scripts/kb-host-ready.sh` — added a positive allowlist
+  (`[A-Za-z0-9._-]`) as a second validation layer on the `team` and `args`
+  config fields, alongside the retained `BAD_CHARS` denylist. Rejection
+  diagnostics name the offending character and are surrogate-safe, so an
+  unpaired surrogate can no longer crash the resolver while reporting itself.
+  Two deliberate behavior changes: a rejected entry now SKIPs cleanly instead
+  of aborting the whole restore, and commas in `args` are now rejected.
 
 - **XACA-1031 — mirrors the machine-level `system` block that surfaces each host's installed AITeamForge version on the Fleet Monitor MACHINES cards.** Shipped files mirrored here: `share/scripts/fleet-reporter.sh`, `fleet-monitor/server/server.js`, `fleet-monitor/server/public/lcars/js/lcars-dashboard-app.js`, `fleet-monitor/server/public/lcars2/js/lcars-{academy,all}-app.js`, both `lcars-fleet-theme.css` files, `fleet-monitor/server/tests/helpers/app-factory.js`, `fleet-monitor/server/package.json`, and six new test suites.
 
