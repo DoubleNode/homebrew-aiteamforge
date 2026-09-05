@@ -2220,7 +2220,17 @@ update_shell_helpers() {
         # leaves a TRUNCATED kanban-helpers.sh on disk — which is the precise failure
         # state this ticket exists to fix, and strictly worse than the stale-but-working
         # file being replaced. chmod the temp first so the mode lands with the rename.
-        if chmod +x "$_kanban_rendered" 2>/dev/null && mv -f "$_kanban_rendered" "$kanban_target" 2>/dev/null; then
+        # XACA-1095 [Review] (PR #820): set the mode EXPLICITLY to 755, never
+        # symbolic `+x`. mktemp creates at 0600 regardless of umask, and symbolic
+        # `+x` on 0600 yields 0711 (rwx--x--x) — execute without read. Because
+        # `mv` preserves the source's mode across the rename, that mode would land
+        # on the installed file and silently strip group/other READ, which a shell
+        # script needs in order to be sourced at all. The old `cat > target` could
+        # not regress this because it wrote through the target's existing inode and
+        # only ever added +x. 755 is the canonical mode: it is what a fresh install
+        # produces (sed > target under a 022 umask, then chmod +x) and what the
+        # live consumers actually carry (-rwxr-xr-x, measured).
+        if chmod 755 "$_kanban_rendered" 2>/dev/null && mv -f "$_kanban_rendered" "$kanban_target" 2>/dev/null; then
           print_success "Updated kanban-helpers.sh"
           updated=$((updated + 1))
         else

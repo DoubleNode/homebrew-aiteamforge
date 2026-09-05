@@ -76,11 +76,24 @@ done
 _STANDALONE=false
 _PASS=0
 _FAIL=0
+_FAIL_AT_START=0
 _CURRENT_TEST=""
 if ! declare -F test_start &>/dev/null; then
     _STANDALONE=true
-    test_start() { _CURRENT_TEST="$1"; printf "TEST: %s\n" "$1"; }
-    test_pass()  { _PASS=$((_PASS + 1)); printf "  PASS: %s\n" "$_CURRENT_TEST"; }
+    # XACA-1095: test_pass must NOT be unconditional. assert_* records only on
+    # FAILURE, so an unconditional trailing test_pass makes a case that failed an
+    # assertion report BOTH a FAIL and a PASS — and makes _PASS equal the case
+    # count regardless of outcome, i.e. evidence of nothing. Demonstrated by
+    # negative control while building this suite: mutating the subject produced
+    # "PASS=16 FAIL=1" with the PASS total unchanged. The exit code stayed correct,
+    # but a pass total that cannot move is the same displayed-vs-actual divergence
+    # this whole ticket exists to close. Gate the pass on "no failure was recorded
+    # since this case started".
+    test_start() { _CURRENT_TEST="$1"; _FAIL_AT_START=$_FAIL; printf "TEST: %s\n" "$1"; }
+    test_pass()  {
+        if [ "${_FAIL:-0}" -ne "${_FAIL_AT_START:-0}" ]; then return 0; fi
+        _PASS=$((_PASS + 1)); printf "  PASS: %s\n" "$_CURRENT_TEST"
+    }
     test_fail()  { _FAIL=$((_FAIL + 1)); printf "  FAIL: %s — %s\n" "$_CURRENT_TEST" "${1:-}" >&2; }
 fi
 
@@ -129,13 +142,28 @@ _extract_fn_from_rev() {
     git -C "$TAP_ROOT" show "${rev}:${relpath}" 2>/dev/null | _extract_fn_from_content "$fn"
 }
 
+# XACA-1095-020: pin the PRE-HARDENING commit explicitly; do NOT use HEAD.
+# This negative control's whole value is running the OLD `cat > target` body and
+# showing it genuinely truncates. Resolving the baseline as HEAD worked only
+# while the hardening was uncommitted -- the moment it landed, HEAD contained
+# `mv -f`, the guard below flipped, and the proof case degraded to a permanent
+# SKIP. A negative control that can never execute again is not a control; it is
+# a comment that costs CI time. 75b3ef1 is the last tap commit before the
+# hardening (aaf3689) and is an ancestor of main, so it stays resolvable.
+_PRE_HARDENING_REV="75b3ef1"
 _PRE_HARDENING_AVAILABLE=true
-_PRE_HARDENING_SRC="$(_extract_fn_from_rev HEAD "libexec/commands/aiteamforge-upgrade.sh" "update_shell_helpers")"
-if [ -z "$_PRE_HARDENING_SRC" ] || printf '%s' "$_PRE_HARDENING_SRC" | grep -q 'mv -f'; then
-    # Either extraction failed, or HEAD already contains the hardening
-    # (i.e. it has since been committed) — the proof case degrades to SKIP
-    # rather than silently passing against the wrong baseline.
+_PRE_HARDENING_SRC="$(_extract_fn_from_rev "$_PRE_HARDENING_REV" "libexec/commands/aiteamforge-upgrade.sh" "update_shell_helpers")"
+if [ -z "$_PRE_HARDENING_SRC" ]; then
+    # The pinned rev is genuinely unreachable (shallow clone, or a consumer tap
+    # checkout without full history). Cannot prove what is not there -- skip,
+    # and say why.
     _PRE_HARDENING_AVAILABLE=false
+elif printf '%s' "$_PRE_HARDENING_SRC" | grep -q 'mv -f'; then
+    # Reachable but ALREADY hardened: the pin is wrong, not the environment.
+    # This must be loud. Silently skipping here is how the control rotted the
+    # first time.
+    echo "FATAL: _PRE_HARDENING_REV ($_PRE_HARDENING_REV) already contains the hardening -- the pin is stale. Update it to the commit before the atomic-install change." >&2
+    exit 1
 fi
 
 _build_framework_sandbox() {
@@ -202,6 +230,25 @@ test_start "T-A2: successful install leaves no stray sibling temp file (kanban-h
 _TA2_STRAY=$(find "$TA1_WORK" -maxdepth 1 -name 'kanban-helpers.sh.??????' 2>/dev/null)
 if [ -n "$_TA2_STRAY" ]; then
     test_fail "stray temp file(s) left behind after successful install: $_TA2_STRAY"
+else
+    test_pass
+fi
+
+test_start "T-A5: successful install leaves mode 755 — NOT 0711 (mktemp is 0600; symbolic +x on 0600 yields execute-without-read)"
+# XACA-1095 [Review] (PR #820): this case exists because the atomic-install fix
+# originally used `chmod +x` on the mktemp'd temp file. mktemp creates at 0600
+# regardless of umask, symbolic +x turns that into 0711, and `mv` carries that
+# mode onto the installed file — silently stripping group/other READ, which a
+# shell script needs in order to be sourced at all. The rest of this suite passed
+# green through that regression because nothing asserted permission bits.
+# 755 is the canonical mode: what a fresh install produces, and what the live
+# consumers measurably carry (-rwxr-xr-x).
+_TA5_MODE=$(stat -f '%Lp' "$TA1_WORK/kanban-helpers.sh" 2>/dev/null \
+            || stat -c '%a' "$TA1_WORK/kanban-helpers.sh" 2>/dev/null)
+if [ -z "$_TA5_MODE" ]; then
+    test_fail "could not stat installed kanban-helpers.sh to read its mode"
+elif [ "$_TA5_MODE" != "755" ]; then
+    test_fail "installed kanban-helpers.sh is mode ${_TA5_MODE}, expected 755 — a shell script needs READ, not just execute, to be sourced"
 else
     test_pass
 fi

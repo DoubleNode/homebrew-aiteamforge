@@ -64,12 +64,25 @@ LIBEXEC_DOCTOR="$TAP_ROOT/libexec/commands/aiteamforge-doctor.sh"
 _STANDALONE=false
 _PASS=0
 _FAIL=0
+_FAIL_AT_START=0
 _CURRENT_TEST=""
 
 if ! declare -F test_start &>/dev/null; then
     _STANDALONE=true
-    test_start() { _CURRENT_TEST="$1"; printf "TEST: %s\n" "$1"; }
-    test_pass()  { _PASS=$((_PASS + 1)); printf "  PASS: %s\n" "$_CURRENT_TEST"; }
+    # XACA-1095: test_pass must NOT be unconditional. assert_* records only on
+    # FAILURE, so an unconditional trailing test_pass makes a case that failed an
+    # assertion report BOTH a FAIL and a PASS — and makes _PASS equal the case
+    # count regardless of outcome, i.e. evidence of nothing. Demonstrated by
+    # negative control while building this suite: mutating the subject produced
+    # "PASS=16 FAIL=1" with the PASS total unchanged. The exit code stayed correct,
+    # but a pass total that cannot move is the same displayed-vs-actual divergence
+    # this whole ticket exists to close. Gate the pass on "no failure was recorded
+    # since this case started".
+    test_start() { _CURRENT_TEST="$1"; _FAIL_AT_START=$_FAIL; printf "TEST: %s\n" "$1"; }
+    test_pass()  {
+        if [ "${_FAIL:-0}" -ne "${_FAIL_AT_START:-0}" ]; then return 0; fi
+        _PASS=$((_PASS + 1)); printf "  PASS: %s\n" "$_CURRENT_TEST"
+    }
     test_fail()  { _FAIL=$((_FAIL + 1)); printf "  FAIL: %s — %s\n" "$_CURRENT_TEST" "${1:-}" >&2; }
 fi
 
@@ -157,6 +170,18 @@ _install_truncated() {
     cat > "$INSTALLED_FILE" <<'EOF'
 #!/bin/zsh
 kb-run() { :; }
+kb-pick() { :; }
+kb-help() { :; }
+EOF
+}
+
+_install_partial_keeping_sweep() {
+    # XACA-1095-019: drops kb-epic, kb-release, kb-run but KEEPS kb-sweep.
+    # Same missing COUNT as _install_truncated (3 of 6) so the only variable
+    # between the two fixtures is whether kb-sweep itself is in the missing set.
+    cat > "$INSTALLED_FILE" <<'EOF'
+#!/bin/zsh
+kb-sweep() { :; }
 kb-pick() { :; }
 kb-help() { :; }
 EOF
@@ -297,6 +322,52 @@ assert_contains "$_DOCTOR_OUT" "no kb-* commands available" \
 assert_not_contains "$_DOCTOR_OUT" "MISSING 3 of 6" \
     "A wholly-missing installed file must not be reported via the partial-drift MISSING-N-of-M message"
 assert_eq "$_DOCTOR_RC" "2" "libexec/: a failing (missing-installed) helpers-drift check must exit 2, got $_DOCTOR_RC"
+test_pass
+
+# ═════════════════════════════════════════════════════════════════════════════
+# XACA-1095-019 — the kb-sweep "honesty" clause must be CONDITIONAL.
+#
+# The FAIL message used to hardcode "kb-sweep and other lifecycle commands may
+# be unusable" as static boilerplate, printed whether or not kb-sweep was in
+# the missing set. That misinforms an operator whose kb-sweep is present, and
+# it let an assert_contains pass by coincidence. The fix emits the clause only
+# when kb-sweep is genuinely missing.
+#
+# Testing only the positive direction would NOT catch a regression to the
+# hardcoded form -- the clause would still be there. Both directions are the
+# test; either alone is decoration.
+# ═════════════════════════════════════════════════════════════════════════════
+
+test_start "bin/: gate note IS emitted when kb-sweep is genuinely missing"
+_install_truncated
+_run_doctor "$BIN_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR"
+assert_contains "$_DOCTOR_OUT" "kb-sweep is among them" \
+    "kb-sweep is missing, so the FAIL message must say so"
+test_pass
+
+test_start "bin/: gate note is NOT emitted when kb-sweep is present (regression guard for the hardcoded boilerplate)"
+_install_partial_keeping_sweep
+_run_doctor "$BIN_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR"
+assert_contains "$_DOCTOR_OUT" "MISSING 3 of 6 shipped kb-* commands" \
+    "Fixture must still trip the drift FAIL, otherwise the negative assertion below is vacuous"
+assert_not_contains "$_DOCTOR_OUT" "kb-sweep is among them" \
+    "kb-sweep is PRESENT -- naming it as missing misinforms the operator (the hardcoded-boilerplate regression)"
+test_pass
+
+test_start "libexec/: gate note IS emitted when kb-sweep is genuinely missing"
+_install_truncated
+_run_doctor "$LIBEXEC_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR"
+assert_contains "$_DOCTOR_OUT" "kb-sweep is among them" \
+    "kb-sweep is missing, so the FAIL message must say so"
+test_pass
+
+test_start "libexec/: gate note is NOT emitted when kb-sweep is present (regression guard for the hardcoded boilerplate)"
+_install_partial_keeping_sweep
+_run_doctor "$LIBEXEC_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR"
+assert_contains "$_DOCTOR_OUT" "MISSING 3 of 6 shipped kb-* commands" \
+    "Fixture must still trip the drift FAIL, otherwise the negative assertion below is vacuous"
+assert_not_contains "$_DOCTOR_OUT" "kb-sweep is among them" \
+    "kb-sweep is PRESENT -- naming it as missing misinforms the operator (the hardcoded-boilerplate regression)"
 test_pass
 
 # ─────────────────────────────────────────────────────────────────────────────
