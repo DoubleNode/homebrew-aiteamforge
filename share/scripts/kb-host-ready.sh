@@ -366,6 +366,19 @@ team_paths_path = os.environ["TEAMPATHS"]
 workdir = os.environ["WORKDIR"]
 filter_team = os.environ.get("FILTERTEAM") or ""
 
+# cfg_path, team_paths_path, and workdir all come from the process
+# environment (CFG/TEAMPATHS/WORKDIR above), and CPython decodes environ
+# values with PEP 383 "surrogateescape": any byte in there that isn't
+# valid UTF-8 becomes a lone surrogate codepoint in the resulting str
+# (e.g. a non-UTF-8 byte in $HOME on a misconfigured locale). That is the
+# SAME unencodable-lone-surrogate shape the ALLOWLIST comment block below
+# documents for JSON-sourced `team`/`args` values -- it just arrives via a
+# different door (the environment, not the config file) and reaches these
+# diagnostics BEFORE the config is even opened, so ALLOWED_CHARS/BAD_CHARS
+# (which only ever see `team`/`args`) cannot intercept it. Every emit()
+# call below that interpolates one of these three variables (or an
+# exception whose message may embed one of them) routes it through
+# _hr_safe_repr() first -- see each site (XACA-1096-014).
 def _sanitize(v):
     # One record per LINE, fields separated by \x1f. Any character that can end a
     # line or a field must not survive INSIDE a field, or the record forks: bash's
@@ -419,32 +432,52 @@ def _finish(code=0):
 def emit(*fields):
     sys.stdout.write("\x1f".join(_sanitize(f) for f in fields) + "\n")
 
+# Defined here (ahead of ALLOWED_CHARS/_hr_describe_bad_chars further down,
+# which need ALLOWED_CHARS to exist first) because the config-load emit()
+# calls immediately below run BEFORE ALLOWED_CHARS is ever reached and
+# already need it -- see the PEP-383 comment above cfg_path/team_paths_path/
+# workdir for why those three variables specifically require this.
+def _hr_safe_repr(v):
+    # ASCII-safe stand-in for any string that might contain an unpaired
+    # surrogate (or anything else UTF-8 can't round-trip), for splicing
+    # into an emit() diagnostic without risking the UnicodeEncodeError
+    # described in the ALLOWLIST comment block below. `str(v)` first, so
+    # this also safely handles non-string values (ints, exceptions, ...).
+    return str(v).encode("utf-8", "backslashreplace").decode("utf-8", "replace")
+
 # ── Load config ──────────────────────────────────────────────────────────
 if not os.path.exists(cfg_path):
-    emit("STATE", "absent", f"no config at {cfg_path}")
+    emit("STATE", "absent", f"no config at {_hr_safe_repr(cfg_path)}")
     _finish(0)
 
 try:
     with open(cfg_path, "r") as fh:
         raw = fh.read()
 except OSError as e:
-    emit("STATE", "malformed_json", f"could not read {cfg_path}: {e}")
+    # str(e) on an OSError typically embeds the filename (cfg_path) in its
+    # message (e.g. "[Errno 13] Permission denied: '<path>'"), so the
+    # exception text needs the same encoding as the bare path.
+    emit("STATE", "malformed_json", f"could not read {_hr_safe_repr(cfg_path)}: {_hr_safe_repr(e)}")
     _finish(0)
 
 try:
     doc = json.loads(raw)
 except Exception as e:
-    emit("STATE", "malformed_json", f"{cfg_path}: {e}")
+    emit("STATE", "malformed_json", f"{_hr_safe_repr(cfg_path)}: {_hr_safe_repr(e)}")
     _finish(0)
 
 if not isinstance(doc, dict):
-    emit("STATE", "malformed_root", f"{cfg_path}: root is {type(doc).__name__}, expected object")
+    emit("STATE", "malformed_root", f"{_hr_safe_repr(cfg_path)}: root is {type(doc).__name__}, expected object")
     _finish(0)
 
-emit("STATE", "ok", cfg_path)
+emit("STATE", "ok", _hr_safe_repr(cfg_path))
 
 schema_version = doc.get("schema_version", 1)
-emit("SCHEMA", schema_version)
+# schema_version is attacker/config-controlled JSON, not env-derived --
+# but json.loads happily decodes a "\ud800"-style escape into the same
+# kind of lone surrogate, so it needs the identical safe-repr treatment
+# even though the PEP-383 comment above doesn't apply to it directly.
+emit("SCHEMA", _hr_safe_repr(schema_version))
 
 # lock_after_login — must be a real boolean, else treated as absent -> false.
 lock_raw = doc.get("lock_after_login", False)
@@ -479,7 +512,9 @@ if os.path.exists(team_paths_path):
         registry_state = "unparseable"
 emit("REGISTRY", registry_state)
 if registry_state != "ok":
-    emit("WARN", f"team-paths.json ({team_paths_path}) is {registry_state} — gate 2 (runtime-id "
+    # team_paths_path is env-derived (PEP-383 surrogateescape) -- see the
+    # comment above cfg_path/team_paths_path/workdir.
+    emit("WARN", f"team-paths.json ({_hr_safe_repr(team_paths_path)}) is {registry_state} — gate 2 (runtime-id "
                  f"cross-check) skipped for all entries; gate 1 alone decides validity (§3 'Gate 2 "
                  f"failing OPEN')")
 
@@ -614,7 +649,9 @@ BAD_CHARS = set("\t\n\r\x1e\x1f\x00" + chr(34) + chr(92))
 # entire point of adding this layer, and instead you get a truncated
 # stream and the root incident again, just wearing an allowlist's clothes.
 #
-# So every rejection diagnostic below routes the offending value AND any
+# So every rejection diagnostic below -- INCLUDING the legacy BAD_CHARS branch,
+# which runs first and is therefore the one that actually had to be fixed --
+# routes the offending value AND any
 # per-character detail through _hr_safe_repr()/_hr_describe_bad_chars()
 # before it is spliced into an emit() call. `.encode("utf-8",
 # "backslashreplace").decode("utf-8", "replace")` round-trips every
@@ -631,23 +668,46 @@ ALLOWED_CHARS = set(
     "0123456789._-"
 )
 
-def _hr_safe_repr(v):
-    # ASCII-safe stand-in for any string that might contain an unpaired
-    # surrogate (or anything else UTF-8 can't round-trip), for splicing
-    # into an emit() diagnostic without risking the UnicodeEncodeError
-    # described above. See the ALLOWLIST comment block for why this exists
-    # and what it does and does not do to legitimate Unicode.
-    return str(v).encode("utf-8", "backslashreplace").decode("utf-8", "replace")
+# _hr_safe_repr() is defined earlier in this script (right after emit()),
+# because the config-load emit() calls above ALLOWED_CHARS also need it —
+# see the comment there.
+
+def _hr_is_allowed(c):
+    # THE one definition of ALLOWED_CHARS membership (XACA-1096-013). Three
+    # call sites each independently wrote `c not in ALLOWED_CHARS` — the
+    # `team` check, the `args` bad-value search, and this file's own
+    # _hr_describe_bad_chars scan below — so a future change to what
+    # ALLOWED_CHARS means could be applied to only two of the three. Route
+    # all three through this single predicate (directly, or via
+    # _hr_first_bad below) instead.
+    return c in ALLOWED_CHARS
+
+def _hr_first_bad(s):
+    # First character in s that fails _hr_is_allowed, or None if s is
+    # entirely clean. Used by the `team` check and the `args` bad-value
+    # search, which only need a yes/no answer — see _hr_is_allowed.
+    for c in s:
+        if not _hr_is_allowed(c):
+            return c
+    return None
 
 def _hr_describe_bad_chars(s):
     # Distinct disallowed characters in s, in first-seen order, each as
     # 'char' (U+XXXX) with the character itself passed through
     # _hr_safe_repr() first. Used to make a rejection name the SPECIFIC
     # character(s) that failed, not just "rejected", per XACA-1096-003.
+    #
+    # `seen` stays a list because the ORDER is deliberate (diagnostics
+    # report characters in the order first encountered); `seen_set` is a
+    # parallel set used ONLY for the membership test, so a pathological
+    # input with many distinct disallowed characters doesn't pay an O(n)
+    # list scan per character (XACA-1096-012). Both are updated together.
     seen = []
+    seen_set = set()
     for c in s:
-        if c not in ALLOWED_CHARS and c not in seen:
+        if not _hr_is_allowed(c) and c not in seen_set:
             seen.append(c)
+            seen_set.add(c)
     return ", ".join(f"'{_hr_safe_repr(c)}' (U+{ord(c):04X})" for c in seen)
 
 for idx, entry in enumerate(autostart_raw):
@@ -659,10 +719,21 @@ for idx, entry in enumerate(autostart_raw):
     args = entry.get("args", [])
 
     if not isinstance(team, str) or not team or any(c in BAD_CHARS for c in team):
-        emit("ENTRY", idx, "SKIP", str(team), "", "", "FAIL", "SKIPPED", f"entry {idx}: 'team' missing or not a clean string")
+        # XACA-1096 (PR #821, both gate bots, independently): this legacy branch
+        # runs BEFORE the allowlist check below, so it -- not the allowlist -- is
+        # the first emit any rejected `team` reaches. It emitted str(team) RAW,
+        # so a value carrying BOTH an unpaired surrogate AND any BAD_CHARS
+        # character (e.g. "a\ud800\tb") never reached the safe path: emit()
+        # raised UnicodeEncodeError, the stream truncated, and the END sentinel
+        # correctly failed the WHOLE restore closed -- taking unrelated sibling
+        # teams down with it. That is the XACA-1066 root incident, reachable
+        # through the one path the surrogate-safe work had not covered.
+        # _hr_safe_repr() is the identity transform for every ASCII value, so
+        # this changes no message any real config can produce.
+        emit("ENTRY", idx, "SKIP", _hr_safe_repr(team), "", "", "FAIL", "SKIPPED", f"entry {idx}: 'team' missing or not a clean string")
         continue
 
-    if any(c not in ALLOWED_CHARS for c in team):
+    if _hr_first_bad(team) is not None:
         emit("ENTRY", idx, "SKIP", _hr_safe_repr(team), "", "", "FAIL", "SKIPPED",
              f"entry {idx}: 'team' value '{_hr_safe_repr(team)}' rejected by allowlist "
              f"[A-Za-z0-9._-]: disallowed character(s) {_hr_describe_bad_chars(team)}")
@@ -676,7 +747,7 @@ for idx, entry in enumerate(autostart_raw):
         continue
 
     _bad_arg = next(
-        ((a_idx, a) for a_idx, a in enumerate(args) if any(c not in ALLOWED_CHARS for c in a)),
+        ((a_idx, a) for a_idx, a in enumerate(args) if _hr_first_bad(a) is not None),
         None,
     )
     if _bad_arg is not None:
@@ -707,7 +778,11 @@ for idx, entry in enumerate(autostart_raw):
     else:
         reason_bits = []
         if gate1 == "FAIL":
-            reason_bits.append(f"gate1 FAIL: {script_path} not found/readable")
+            # script_path embeds workdir, which is env-derived (PEP-383
+            # surrogateescape) -- see the comment above cfg_path/
+            # team_paths_path/workdir. `team` itself is already known safe
+            # here (it passed ALLOWED_CHARS above), but workdir is not.
+            reason_bits.append(f"gate1 FAIL: {_hr_safe_repr(script_path)} not found/readable")
         if gate2 == "FAIL":
             reason_bits.append(f"gate2 FAIL: derived prefix '{prefix}' not in team-paths.json .teams")
         emit("ENTRY", idx, "SKIP", team, args_packed, prefix, gate1, gate2, "; ".join(reason_bits))
