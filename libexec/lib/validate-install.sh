@@ -21,6 +21,15 @@ _atf_validate_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null 
 [ -f "$_atf_validate_script_dir/python-env.sh" ] && . "$_atf_validate_script_dir/python-env.sh" 2>/dev/null || true
 # shellcheck source=./common.sh
 [ -f "$_atf_validate_script_dir/common.sh" ] && . "$_atf_validate_script_dir/common.sh" 2>/dev/null || true
+# launchagents.sh: reachable from bin/aiteamforge-doctor.sh (sources it before
+# this file) but NOT from bin/aiteamforge-setup.sh (sources common.sh only) —
+# XACA-1097. Self-resolve it here too so _val_check_launchagents' load-verify
+# and disabled-detection helpers (_xaca0734_launchctl_is_loaded,
+# _xaca1097_launchctl_is_disabled) are available on both paths. Verified to
+# have no top-level side effects beyond its own double-source guard, so it is
+# safe to source unconditionally.
+# shellcheck source=./launchagents.sh
+[ -f "$_atf_validate_script_dir/launchagents.sh" ] && . "$_atf_validate_script_dir/launchagents.sh" 2>/dev/null || true
 unset _atf_validate_script_dir
 
 # ─── Colors (safe to redefine if not already set) ───────────────────────────
@@ -537,20 +546,61 @@ _val_check_launchagents() {
         "com.aiteamforge.cr-confluence-poller"
     )
 
+    # XACA-1097: `launchctl load` exits 0 even when launchd REJECTS the job
+    # (measured: a disabled agent's `load` prints "Load failed: 5: Input/output
+    # error" to stderr and still returns 0), so the exit code alone can never
+    # be trusted as proof the agent came up. Every branch below that used to
+    # take that exit code at face value now verifies the actual post-condition
+    # via the canonical _xaca0734_launchctl_is_loaded (exact-match on
+    # `launchctl list`, not a substring grep). A DISABLED service is detected
+    # up front via _xaca1097_launchctl_is_disabled and is never attempted —
+    # a disabled service cannot be loaded no matter how many times `load` is
+    # retried, so attempting it would just repeat the same lie.
+    local _val_la_uid
+    _val_la_uid="$(id -u 2>/dev/null)" || true
+
     for agent in "${agents[@]}"; do
         local plist="$HOME/Library/LaunchAgents/${agent}.plist"
         if [ ! -f "$plist" ]; then
             _val_warn "${agent} plist missing" \
                 "Run: aiteamforge setup --upgrade"
-        elif launchctl list 2>/dev/null | grep -q "$agent"; then
+        elif type _xaca0734_launchctl_is_loaded >/dev/null 2>&1 && _xaca0734_launchctl_is_loaded "$agent"; then
             _val_pass "${agent} loaded"
+        elif type _xaca1097_launchctl_is_disabled >/dev/null 2>&1 && _xaca1097_launchctl_is_disabled "$agent"; then
+            _val_warn "${agent} is disabled — cannot be auto-fixed (a disabled service can never be loaded)" \
+                "Run: launchctl enable gui/${_val_la_uid}/${agent}"
+        elif ! type _xaca0734_launchctl_is_loaded >/dev/null 2>&1; then
+            # launchagents.sh did not load (unexpected on either consumer
+            # path) — degrade to a clear warning rather than silently
+            # skipping load-verification or hitting "command not found".
+            _val_warn "${agent} plist exists but load-verify helpers unavailable" \
+                "Run: launchctl load '${plist}'"
         else
-            # Auto-fix: load the plist instead of just warning
-            if _aitf_launchctl load "$plist" 2>/dev/null; then
+            # Auto-fix: attempt the load, but NEVER trust its exit code —
+            # verify the post-condition with the same exact-match helper
+            # used above. Capture stderr instead of discarding it: it is the
+            # only signal (e.g. "Load failed: 5: Input/output error") that
+            # would otherwise expose why a "successful" load never registered.
+            # `|| true` is REQUIRED, not cosmetic: this file is sourced by
+            # both bin/aiteamforge-doctor.sh and bin/aiteamforge-setup.sh,
+            # both of which run under `set -eo pipefail` — a failing
+            # command-substitution assignment aborts the WHOLE caller script
+            # the instant `load` returns non-zero, before the `if` below ever
+            # runs (verified empirically; see feedback_pipefail_hides_exit_code.md
+            # and this codebase's own doctor.sh precedent at its REMEDIATION_LOG
+            # grep -c capture).
+            local _val_la_stderr
+            _val_la_stderr="$(_aitf_launchctl load "$plist" 2>&1 >/dev/null)" || true
+            if _xaca0734_launchctl_is_loaded "$agent"; then
                 _val_pass "${agent} loaded (was unloaded — auto-fixed)"
             else
-                _val_warn "${agent} plist exists but could not load" \
-                    "Run: launchctl load '${plist}'"
+                if [ -n "$_val_la_stderr" ]; then
+                    _val_warn "${agent} plist exists but could not load (${_val_la_stderr})" \
+                        "Run: launchctl load '${plist}'"
+                else
+                    _val_warn "${agent} plist exists but could not load" \
+                        "Run: launchctl load '${plist}'"
+                fi
             fi
         fi
     done

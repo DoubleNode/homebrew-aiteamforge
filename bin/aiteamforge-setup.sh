@@ -573,6 +573,16 @@ export AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1
 # Source common utilities (used by installer modules)
 source "${AITEAMFORGE_HOME}/libexec/lib/common.sh"
 
+# launchagents.sh provides the load-verify + disabled-detection helpers used
+# by the "Load LaunchAgents" block below (XACA-1097) — a bare `launchctl load`
+# exit code is not proof the agent registered. Sourced defensively at TOP
+# LEVEL (own include-guard, no top-level side effects) so it is available to
+# that block, which itself must run at top level, not in a subshell. The
+# block still guards each call with `type` so a missing lib degrades to a
+# clear warning instead of "command not found".
+# shellcheck source=../libexec/lib/launchagents.sh
+[ -f "${AITEAMFORGE_HOME}/libexec/lib/launchagents.sh" ] && source "${AITEAMFORGE_HOME}/libexec/lib/launchagents.sh" 2>/dev/null || true
+
 # XACA-0676: trust the Homebrew tap so the formula keeps loading after a Homebrew
 # upgrade flips on the tap-trust gate ($HOMEBREW_REQUIRE_TAP_TRUST). Without this,
 # `brew upgrade` / `brew postinstall aiteamforge` silently no-op and the box rots
@@ -1614,6 +1624,16 @@ fi
 if [ "$INSTALL_PROFILE" != "cockpit" ]; then
 echo -e "${BOLD}Loading LaunchAgents...${NC}"
 _loaded_agents=0
+# XACA-1097: `launchctl load` exits 0 even when launchd REJECTS the job (a
+# disabled agent's `load` prints "Load failed: 5: Input/output error" to
+# stderr and still returns 0), so the exit code alone is never proof the
+# agent registered — the unconditional `unload; load` below used to count
+# every attempt as a success on that exit code alone. Verify the actual
+# post-condition via the canonical _xaca0734_launchctl_is_loaded, and detect
+# DISABLED up front via _xaca1097_launchctl_is_disabled so a doomed
+# unload/load cycle is never attempted for a service that can never come up.
+_launchagents_helpers_ok=false
+type _xaca0734_launchctl_is_loaded >/dev/null 2>&1 && _launchagents_helpers_ok=true
 for _plist in \
     "$HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist" \
     "$HOME/Library/LaunchAgents/com.aiteamforge.kanban-backup.plist" \
@@ -1622,10 +1642,37 @@ for _plist in \
     "$HOME/Library/LaunchAgents/com.aiteamforge.fleet-monitor.plist"; do
     if [ -f "$_plist" ]; then
         _name=$(basename "$_plist" .plist)
+        if [ "$_launchagents_helpers_ok" != true ]; then
+            # launchagents.sh unavailable — degrade to the pre-XACA-1097
+            # trust-the-exit-code behavior rather than "command not found".
+            _aitf_launchctl unload "$_plist" 2>/dev/null || true
+            if _aitf_launchctl load "$_plist" 2>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} ${_name}"
+                _loaded_agents=$((_loaded_agents + 1))
+            else
+                echo -e "  ${YELLOW}⚠${NC} ${_name} (failed to load)"
+            fi
+            continue
+        fi
+        if type _xaca1097_launchctl_is_disabled >/dev/null 2>&1 && _xaca1097_launchctl_is_disabled "$_name"; then
+            echo -e "  ${YELLOW}⚠${NC} ${_name} is disabled — cannot be auto-fixed (a disabled service can never be loaded)"
+            echo -e "     Run: launchctl enable gui/$(id -u)/${_name}"
+            continue
+        fi
+        # Reset then reload so config/template changes take effect, but
+        # NEVER trust unload/load's exit code — verify the post-condition
+        # with the same exact-match helper used above.
         _aitf_launchctl unload "$_plist" 2>/dev/null || true
-        if _aitf_launchctl load "$_plist" 2>/dev/null; then
+        # `|| true` is REQUIRED under this script's `set -eo pipefail`
+        # (line 5) — a failing command-substitution assignment aborts the
+        # whole script the instant `load` returns non-zero, before the `if`
+        # below ever runs.
+        _agent_stderr="$(_aitf_launchctl load "$_plist" 2>&1 >/dev/null)" || true
+        if _xaca0734_launchctl_is_loaded "$_name"; then
             echo -e "  ${GREEN}✓${NC} ${_name}"
             _loaded_agents=$((_loaded_agents + 1))
+        elif [ -n "$_agent_stderr" ]; then
+            echo -e "  ${YELLOW}⚠${NC} ${_name} (failed to load: ${_agent_stderr})"
         else
             echo -e "  ${YELLOW}⚠${NC} ${_name} (failed to load)"
         fi

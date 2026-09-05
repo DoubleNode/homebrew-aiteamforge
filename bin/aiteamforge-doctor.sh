@@ -14,9 +14,21 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # Get framework location
+# XACA-1097 DEFECT 2: `command -v brew` only sees $PATH, which under a
+# non-login invocation (launchd, a bare `bash aiteamforge-doctor.sh`) can
+# exclude brew's own install dir even though brew is genuinely present.
+# Stock Homebrew only ever lives at one of two fixed prefixes depending on
+# CPU architecture (Apple Silicon vs Intel) — unlike node/gh/claude, it is
+# never relocated by a version manager — so an explicit two-prefix fallback
+# is proportionate here; the full login-shell resolution below (see
+# check_dependencies) is reserved for tools that genuinely move around.
 if [ -z "$AITEAMFORGE_HOME" ]; then
   if command -v brew &>/dev/null; then
     AITEAMFORGE_HOME="$(brew --prefix)/opt/aiteamforge/libexec"
+  elif [ -x "/opt/homebrew/bin/brew" ]; then
+    AITEAMFORGE_HOME="$(/opt/homebrew/bin/brew --prefix)/opt/aiteamforge/libexec"
+  elif [ -x "/usr/local/bin/brew" ]; then
+    AITEAMFORGE_HOME="$(/usr/local/bin/brew --prefix)/opt/aiteamforge/libexec"
   else
     echo -e "${RED}ERROR: AITEAMFORGE_HOME not set${NC}" >&2
     exit 1
@@ -159,6 +171,121 @@ check_result() {
   fi
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1097 DEFECT 2 (XACA-1097-016 follow-up): shared external-tool resolver,
+# FILE SCOPE. Used below by check_dependencies(); kept file-scope (not nested)
+# so it is exactly ONE resolver per doctor copy, symmetric with
+# libexec/commands/aiteamforge-doctor.sh — see that file's matching comment
+# for why the previous nested placement was itself a drift defect (dual-doctor
+# asymmetry: libexec had this nested PLUS a second, brew-only file-scope
+# helper; bin had only the nested one). tests/test-xaca-1097-doctor-phantom-deps.sh
+# extracts this function by name via its own sed range (in addition to
+# check_result()/check_dependencies()), so file-scope placement does not fall
+# outside the sandboxed extraction.
+#
+# Root cause: this script is routinely invoked under a non-login PATH
+# (launchd, a bare `bash aiteamforge-doctor.sh`, CI) that excludes wherever a
+# real login+interactive shell would find a tool. `command -v` alone under
+# that inherited PATH produced phantom "not found" verdicts for tools
+# demonstrably installed and in daily use (measured: node, gh, claude all
+# reported missing on M1Pro under a restricted PATH).
+#
+# Resolution order (see scratchpad/resolver-design-note.md for the measured
+# evidence this is built from):
+#   1. Ambient PATH (`command -v`) — fast path, already correct whenever
+#      this script happens to run with a full PATH.
+#   2. Login+INTERACTIVE shell PATH ($SHELL -ilc). On this machine (and any
+#      nvm/Herd-style setup) the PATH-mutating logic lives in ~/.zshrc,
+#      which only an INTERACTIVE shell sources — a login-only (-l, no -i)
+#      shell does NOT read it and resolves to a DIFFERENT, coincidentally-
+#      present install (measured: brew Cellar node v26, not the Herd/nvm
+#      v22 a real Terminal session actually runs). Using -l alone would
+#      silently report the tool a user does not use — a subtler version of
+#      the same lie this defect exists to fix. Memoized PROCESS-WIDE via the
+#      _X1097_LOGIN_PATH* globals below (set on first call — an unqualified
+#      assignment inside a bash function auto-globals) to ONE subshell spawn
+#      for the whole doctor run, not one per tool and not one per caller.
+#   3. Explicit prefix fallback (/opt/homebrew/bin, /usr/local/bin,
+#      ~/.local/bin) for the launchd/daemon case where $SHELL/profile
+#      startup itself is unavailable or fails.
+# Every candidate is executable-tested before being trusted. PATH entries are
+# split on ':' only (via `read -a`, never an unquoted word-split) so a
+# directory containing spaces (e.g. Herd's "Application Support" path, a real
+# measured case) resolves correctly instead of breaking apart.
+#
+# Usage: _x1097_resolve <tool-name>. Prints the resolved absolute path on
+# stdout and returns 0; prints nothing and returns 1 if not found anywhere.
+# ─────────────────────────────────────────────────────────────────────────────
+_x1097_resolve() {
+  local tool="$1" resolved dir
+
+  resolved="$(command -v -- "$tool" 2>/dev/null)"
+  if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+
+  if [ "${_X1097_LOGIN_PATH_READY:-false}" != true ]; then
+    _X1097_LOGIN_PATH=""
+    if [ -n "${SHELL:-}" ] && [ -x "${SHELL:-}" ]; then
+      # XACA-1097-017: bounded, bash-3.2-safe probe. Do NOT assume
+      # `timeout`/`gtimeout` exist -- macOS ships neither by default
+      # (`timeout(1)` isn't a stock macOS tool at all, and `gtimeout` is a
+      # coreutils add-on most boxes won't have). Without a bound, a
+      # pathological or merely slow ~/.zshrc/~/.bashrc stalls EVERY tool
+      # resolution below with no ceiling, in the exact tool people reach
+      # for when something is already broken. Measured 0.55s for a normal
+      # shell on this machine; the default below gives ~9x headroom before
+      # giving up and falling back to the static prefix list (stage 3)
+      # only. Poll granularity is 1s (`sleep 1`) so the bound is an upper
+      # limit, not exact to the second -- both are portable on bash 3.2.
+      local _x1097_probe_timeout="${AITEAMFORGE_LOGIN_PROBE_TIMEOUT_SECS:-5}"
+      local _x1097_probe_tmpfile _x1097_probe_pid _x1097_probe_elapsed=0
+      _x1097_probe_tmpfile="$(mktemp "${TMPDIR:-/tmp}/x1097-loginpath.XXXXXXXX" 2>/dev/null || true)"
+      if [ -n "$_x1097_probe_tmpfile" ]; then
+        ( "$SHELL" -ilc 'printf %s "$PATH"' >"$_x1097_probe_tmpfile" 2>/dev/null ) &
+        _x1097_probe_pid=$!
+        while [ "$_x1097_probe_elapsed" -lt "$_x1097_probe_timeout" ] && kill -0 "$_x1097_probe_pid" 2>/dev/null; do
+          sleep 1
+          _x1097_probe_elapsed=$((_x1097_probe_elapsed + 1))
+        done
+        if kill -0 "$_x1097_probe_pid" 2>/dev/null; then
+          # Still running past the bound: explicit fallback, never silent
+          # -- a stderr note so a stalled shell-startup file is visible
+          # instead of doctor just mysteriously "going slow".
+          kill "$_x1097_probe_pid" 2>/dev/null
+          wait "$_x1097_probe_pid" 2>/dev/null
+          echo "aiteamforge doctor: login-shell PATH probe (\$SHELL -ilc) exceeded ${_x1097_probe_timeout}s and was aborted -- falling back to the static prefix list only (/opt/homebrew/bin, /usr/local/bin, \$HOME/.local/bin). A tool installed elsewhere (nvm, Herd, a version manager) may be misreported as missing. Check \$SHELL's startup files (~/.zshrc, ~/.bashrc, etc.) for something slow or hanging." >&2
+        else
+          wait "$_x1097_probe_pid" 2>/dev/null
+          _X1097_LOGIN_PATH="$(cat "$_x1097_probe_tmpfile" 2>/dev/null)"
+        fi
+        rm -f "$_x1097_probe_tmpfile"
+      fi
+    fi
+    _X1097_LOGIN_PATH_READY=true
+  fi
+
+  if [ -n "${_X1097_LOGIN_PATH:-}" ]; then
+    local _dirs=()
+    IFS=':' read -r -a _dirs <<< "$_X1097_LOGIN_PATH"
+    for dir in "${_dirs[@]}"; do
+      if [ -n "$dir" ] && [ -x "$dir/$tool" ]; then
+        printf '%s' "$dir/$tool"
+        return 0
+      fi
+    done
+  fi
+
+  for dir in "/opt/homebrew/bin" "/usr/local/bin" "$HOME/.local/bin"; do
+    if [ -x "$dir/$tool" ]; then
+      printf '%s' "$dir/$tool"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Banner
 echo ""
 echo -e "${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
@@ -177,9 +304,14 @@ check_dependencies() {
   echo -e "${CYAN}Checking external dependencies...${NC}"
   echo ""
 
-  # Python — presence check (bare python3 from PATH)
-  if command -v python3 &>/dev/null; then
-    py_version=$(python3 --version 2>&1 | awk '{print $2}')
+  # XACA-1097 DEFECT 2: tool resolution goes through the shared, file-scope
+  # _x1097_resolve() helper defined above (see its comment for the full
+  # design rationale) rather than a bare `command -v`.
+
+  # Python
+  local _py_path
+  if _py_path="$(_x1097_resolve python3)"; then
+    py_version=$("$_py_path" --version 2>&1 | awk '{print $2}')
     check_result pass "Python 3 (${py_version})"
   else
     check_result fail "Python 3 not found" "Install: brew install python@3.13"
@@ -200,28 +332,31 @@ check_dependencies() {
   fi
 
   # Node.js
-  if command -v node &>/dev/null; then
-    node_version=$(node --version)
+  local _node_path
+  if _node_path="$(_x1097_resolve node)"; then
+    node_version=$("$_node_path" --version)
     check_result pass "Node.js (${node_version})"
   else
     check_result fail "Node.js not found" "Install: brew install node"
   fi
 
   # jq
-  if command -v jq &>/dev/null; then
-    jq_version=$(jq --version)
+  local _jq_path
+  if _jq_path="$(_x1097_resolve jq)"; then
+    jq_version=$("$_jq_path" --version)
     check_result pass "jq (${jq_version})"
   else
     check_result fail "jq not found" "Install: brew install jq"
   fi
 
   # GitHub CLI
-  if command -v gh &>/dev/null; then
-    gh_version=$(gh --version | head -n1)
+  local _gh_path
+  if _gh_path="$(_x1097_resolve gh)"; then
+    gh_version=$("$_gh_path" --version | head -n1)
     check_result pass "GitHub CLI (${gh_version})"
 
     # Check if authenticated
-    if gh auth status &>/dev/null; then
+    if "$_gh_path" auth status &>/dev/null; then
       check_result pass "GitHub CLI authenticated"
     else
       check_result warn "GitHub CLI not authenticated" "Run: gh auth login"
@@ -231,8 +366,9 @@ check_dependencies() {
   fi
 
   # Git
-  if command -v git &>/dev/null; then
-    git_version=$(git --version | awk '{print $3}')
+  local _git_path
+  if _git_path="$(_x1097_resolve git)"; then
+    git_version=$("$_git_path" --version | awk '{print $3}')
     check_result pass "Git (${git_version})"
   else
     check_result fail "Git not found" "Install: xcode-select --install"
@@ -246,8 +382,9 @@ check_dependencies() {
   fi
 
   # Claude Code
-  if command -v claude &>/dev/null; then
-    claude_version=$(claude --version 2>&1 || echo "unknown")
+  local _claude_path
+  if _claude_path="$(_x1097_resolve claude)"; then
+    claude_version=$("$_claude_path" --version 2>&1 || echo "unknown")
     check_result pass "Claude Code (${claude_version})"
 
     # Check if authenticated
@@ -260,11 +397,18 @@ check_dependencies() {
     check_result fail "Claude Code not found" "Install: npm install -g @anthropic-ai/claude-code"
   fi
 
-  # Optional: Tailscale (check CLI in PATH, Homebrew, and macOS app)
+  # Optional: Tailscale (check CLI in PATH, Homebrew, /usr/local, and macOS app)
+  # XACA-1097: the pre-existing reference block here was itself incomplete —
+  # it probed /opt/homebrew/bin but NOT /usr/local/bin, where tailscale
+  # actually lives on both machines this ticket was measured against (Intel
+  # brew prefix — /opt/homebrew/bin is Apple Silicon only). Fixed, not just
+  # copied.
   if command -v tailscale &>/dev/null; then
     check_result pass "Tailscale (CLI in PATH)"
   elif [ -x "/opt/homebrew/bin/tailscale" ]; then
     check_result pass "Tailscale (Homebrew)"
+  elif [ -x "/usr/local/bin/tailscale" ]; then
+    check_result pass "Tailscale (Homebrew, Intel prefix)"
   elif [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
     check_result pass "Tailscale (macOS app)"
   else
@@ -272,7 +416,7 @@ check_dependencies() {
   fi
 
   # Optional: ImageMagick
-  if command -v convert &>/dev/null; then
+  if _x1097_resolve convert >/dev/null; then
     check_result pass "ImageMagick (optional)"
   else
     check_result warn "ImageMagick not installed (optional)" "Install: brew install imagemagick"
@@ -631,6 +775,16 @@ check_services() {
       _label="${_agent%.plist}"
       if _xaca0734_launchctl_is_loaded "$_label"; then
         check_result pass "${_label} LaunchAgent"
+      elif type _xaca1097_launchctl_is_disabled >/dev/null 2>&1 && _xaca1097_launchctl_is_disabled "$_label"; then
+        # XACA-1097 subitem 003: present but explicitly DISABLED (launchctl
+        # print-disabled), not merely unloaded. `launchctl load` on a disabled
+        # agent exits 0 while the agent still never runs (M1Pro-confirmed:
+        # kanban-backup/lcars-health/knowledge-sync all had plists on disk,
+        # were disabled, and stayed un-loaded through the generic "not
+        # loaded" branch below — its `launchctl load` remediation cannot
+        # actually fix a disabled agent). Report distinctly with the
+        # remediation that actually works.
+        check_result warn "${_label} LaunchAgent DISABLED" "Enable: launchctl enable gui/$(id -u)/${_label}"
       elif [ -f "${_la_dir}/${_agent}" ]; then
         # Present but not loaded — a re-login or an explicit load fixes it.
         check_result warn "${_label} LaunchAgent not loaded" "Load: launchctl load ${_la_dir}/${_agent}"

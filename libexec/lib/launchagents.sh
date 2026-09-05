@@ -721,6 +721,50 @@ _xaca0734_launchctl_is_loaded() {
 }
 
 #──────────────────────────────────────────────────────────────────────────────
+# Disabled-service detection (XACA-1097)
+#──────────────────────────────────────────────────────────────────────────────
+# True (exit 0) when <label> is explicitly DISABLED in the caller's gui domain.
+#
+# `launchctl load`/`bootstrap` both exit 0 AND print "Load failed: 5: Input/output
+# error" to stderr when the target service is disabled — a disabled service can
+# never be brought up by a load call, no matter how many times it is retried.
+# XACA-1097 found four sites that branched on that lying exit code and recorded a
+# false PASS ("loaded (auto-fixed)") for a service `launchctl list` never actually
+# shows as running. This helper lets every call site check the ACTUAL disabled
+# state up front and skip the doomed load attempt entirely.
+#
+# `launchctl print-disabled "gui/<uid>"` emits one line per service with a known
+# disabled/enabled override, shaped like (verbatim, measured on M1Pro):
+#         "com.aiteamforge.kanban-backup" => disabled
+#         "com.aiteamforge.lcars-health" => disabled
+#         "com.aiteamforge.knowledge-sync" => disabled
+# Default whitespace-split fields land as $1=label (some emitters quote it,
+# some don't — normalize by stripping one leading/trailing `"` before
+# comparing), $2=`=>`, $3=`disabled`/`enabled`. Comparing the normalized field
+# to the raw label with `==` is an EXACT match on the whole label — never
+# substring-grep the raw blob, which would false-positive across
+# similarly-named labels (the same class of mistake
+# `_xaca0734_launchctl_is_loaded`'s header above already documents for `list`).
+#
+# Returns 1 (not disabled) for: explicitly enabled, no override recorded at all
+# (absent from the list — launchd's default is enabled), or launchctl/id being
+# unavailable. Never prints to stdout.
+_xaca1097_launchctl_is_disabled() {
+  local label="$1"
+  local uid
+  uid="$(id -u 2>/dev/null)" || return 1
+  launchctl print-disabled "gui/${uid}" 2>/dev/null \
+    | awk -v want="$label" '
+        {
+          field = $1
+          gsub(/^"|"$/, "", field)
+        }
+        field == want && $2 == "=>" && $3 == "disabled" { found = 1 }
+        END { exit found ? 0 : 1 }
+      '
+}
+
+#──────────────────────────────────────────────────────────────────────────────
 # Renderer (moved here from aiteamforge-upgrade.sh by XACA-0734)
 #──────────────────────────────────────────────────────────────────────────────
 # Render a LaunchAgent template to a destination path.

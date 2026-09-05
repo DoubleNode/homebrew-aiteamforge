@@ -22,6 +22,13 @@ source "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh"
 # mirroring aiteamforge-doctor.sh.
 # shellcheck source=../lib/kanban-paths.sh
 [ -f "${LIBEXEC_DIR}/lib/kanban-paths.sh" ] && source "${LIBEXEC_DIR}/lib/kanban-paths.sh" 2>/dev/null || true
+# launchagents.sh provides the load-verify + disabled-detection helpers used
+# by start_fleet's reporter check and start_agents (XACA-1097) — a bare
+# `launchctl load` exit code is not proof the agent registered. Sourced
+# defensively (own include-guard, no top-level side effects); each call site
+# still guards with `type` so a missing lib degrades to a clear warning.
+# shellcheck source=../lib/launchagents.sh
+[ -f "${LIBEXEC_DIR}/lib/launchagents.sh" ] && source "${LIBEXEC_DIR}/lib/launchagents.sh" 2>/dev/null || true
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -576,19 +583,55 @@ start_fleet() {
   fi
 
   # Ensure fleet reporter LaunchAgent is loaded (client mode)
+  #
+  # XACA-1097: `launchctl load` exits 0 even when launchd REJECTS the job
+  # (a disabled agent's `load` prints "Load failed: 5: Input/output error" to
+  # stderr and still returns 0), so the exit code alone is never proof the
+  # agent came up. Verify the post-condition via the canonical
+  # _xaca0734_launchctl_is_loaded (exact match on `launchctl list`, not the
+  # substring `grep -q` this used to do) and detect DISABLED up front via
+  # _xaca1097_launchctl_is_disabled — a disabled service can never be loaded,
+  # so attempting it would just repeat the same lie. Each helper call is
+  # guarded with `type` so a missing launchagents.sh degrades to a clear
+  # warning instead of "command not found".
   if [ "$has_reporter" = true ]; then
-    local reporter_plist="$HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist"
-    if launchctl list 2>/dev/null | grep -q "com.aiteamforge.fleet-reporter"; then
+    local reporter_label="com.aiteamforge.fleet-reporter"
+    local reporter_plist="$HOME/Library/LaunchAgents/${reporter_label}.plist"
+    if ! type _xaca0734_launchctl_is_loaded >/dev/null 2>&1; then
+      print_warning "Fleet reporter: load-verify helpers unavailable"
+      if launchctl list 2>/dev/null | grep -q "$reporter_label"; then
+        print_info "Fleet reporter already active"
+      elif [ -f "$reporter_plist" ]; then
+        print_info "Loading Fleet reporter LaunchAgent..."
+        if _aitf_launchctl load "$reporter_plist" 2>/dev/null; then
+          print_success "Fleet reporter started"
+        else
+          print_error "Failed to load Fleet reporter LaunchAgent"
+        fi
+      else
+        print_warning "Fleet reporter installed but LaunchAgent plist not found"
+      fi
+    elif _xaca0734_launchctl_is_loaded "$reporter_label"; then
       print_info "Fleet reporter already active"
-    elif [ -f "$reporter_plist" ]; then
+    elif [ ! -f "$reporter_plist" ]; then
+      print_warning "Fleet reporter installed but LaunchAgent plist not found"
+    elif type _xaca1097_launchctl_is_disabled >/dev/null 2>&1 && _xaca1097_launchctl_is_disabled "$reporter_label"; then
+      print_warning "Fleet reporter LaunchAgent is disabled — cannot be auto-fixed (a disabled service can never be loaded)"
+      print_info "Run: launchctl enable gui/$(id -u)/${reporter_label}"
+    else
       print_info "Loading Fleet reporter LaunchAgent..."
-      if _aitf_launchctl load "$reporter_plist" 2>/dev/null; then
+      local _reporter_stderr
+      # `|| true` is REQUIRED under this script's `set -eo pipefail` (line 6)
+      # — a failing command-substitution assignment aborts the whole script
+      # the instant `load` returns non-zero, before the `if` below ever runs.
+      _reporter_stderr="$(_aitf_launchctl load "$reporter_plist" 2>&1 >/dev/null)" || true
+      if _xaca0734_launchctl_is_loaded "$reporter_label"; then
         print_success "Fleet reporter started"
+      elif [ -n "$_reporter_stderr" ]; then
+        print_error "Failed to load Fleet reporter LaunchAgent (${_reporter_stderr})"
       else
         print_error "Failed to load Fleet reporter LaunchAgent"
       fi
-    else
-      print_warning "Fleet reporter installed but LaunchAgent plist not found"
     fi
   fi
 
@@ -606,26 +649,68 @@ start_agents() {
   )
 
   local loaded=0
+  local _launchagents_helpers_ok=false
+  type _xaca0734_launchctl_is_loaded >/dev/null 2>&1 && _launchagents_helpers_ok=true
 
   for agent in "${agents[@]}"; do
     local plist="$HOME/Library/LaunchAgents/${agent}"
+    local label="${agent%.plist}"
 
     if [ ! -f "$plist" ]; then
       print_warning "${agent} not found"
       continue
     fi
 
-    # Check if already loaded
-    if launchctl list 2>/dev/null | grep -q "${agent%.plist}"; then
+    if [ "$_launchagents_helpers_ok" != true ]; then
+      # launchagents.sh unavailable — degrade to the pre-XACA-1097 substring
+      # check + trust-the-exit-code behavior rather than "command not found".
+      print_warning "${agent}: load-verify helpers unavailable"
+      if launchctl list 2>/dev/null | grep -q "$label"; then
+        print_info "${agent} already loaded"
+        continue
+      fi
+      print_info "Loading ${agent}..."
+      if _aitf_launchctl load "$plist" 2>/dev/null; then
+        print_success "Loaded ${agent}"
+        loaded=$((loaded + 1))
+      else
+        print_error "Failed to load ${agent}"
+      fi
+      continue
+    fi
+
+    # Check if already loaded — exact match on `launchctl list`, not a
+    # substring grep (XACA-1097; mirrors the loose-grep fix in
+    # validate-install.sh).
+    if _xaca0734_launchctl_is_loaded "$label"; then
       print_info "${agent} already loaded"
       continue
     fi
 
-    # Load agent
+    # A disabled service can never be loaded — `load`/`bootstrap` both exit 0
+    # while failing (measured: "Load failed: 5: Input/output error" on
+    # stderr). Detect it up front instead of attempting a doomed load.
+    if type _xaca1097_launchctl_is_disabled >/dev/null 2>&1 && _xaca1097_launchctl_is_disabled "$label"; then
+      print_warning "${agent} is disabled — cannot be auto-fixed (a disabled service can never be loaded)"
+      print_info "Run: launchctl enable gui/$(id -u)/${label}"
+      continue
+    fi
+
+    # Load agent. NEVER trust `load`'s exit code (XACA-1097 — that is the
+    # defect this whole block exists to fix): verify the post-condition with
+    # the same exact-match helper used above, and only then increment the
+    # counter that gates the "Loaded N LaunchAgent(s)" summary below.
     print_info "Loading ${agent}..."
-    if _aitf_launchctl load "$plist" 2>/dev/null; then
+    local _agent_stderr
+    # `|| true` is REQUIRED under this script's `set -eo pipefail` (line 6) —
+    # a failing command-substitution assignment aborts the whole script the
+    # instant `load` returns non-zero, before the `if` below ever runs.
+    _agent_stderr="$(_aitf_launchctl load "$plist" 2>&1 >/dev/null)" || true
+    if _xaca0734_launchctl_is_loaded "$label"; then
       print_success "Loaded ${agent}"
       loaded=$((loaded + 1))
+    elif [ -n "$_agent_stderr" ]; then
+      print_error "Failed to load ${agent} (${_agent_stderr})"
     else
       print_error "Failed to load ${agent}"
     fi
