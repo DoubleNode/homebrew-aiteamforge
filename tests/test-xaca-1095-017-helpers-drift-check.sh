@@ -86,17 +86,46 @@ if ! declare -F test_start &>/dev/null; then
     test_fail()  { _FAIL=$((_FAIL + 1)); printf "  FAIL: %s — %s\n" "$_CURRENT_TEST" "${1:-}" >&2; }
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1095 [Review] (PR #820): case-level pass gating that works under BOTH
+# invocation paths.
+#
+# The first attempt at this redefined test_pass inside the
+# `if ! declare -F test_start` standalone shim. That is INERT under
+# test-runner.sh: the runner exports its own test_start/test_pass before
+# sourcing each file, so the shim never installs and a failing case still
+# reported a PASS in CI — the exact divergence the fix claimed to close, just
+# relocated to the path that actually matters.
+#
+# These wrappers are defined unconditionally and used at every call site, so
+# the gating holds whether test_pass comes from the local shim or from the
+# runner. _LOCAL_FAILS is our own tally; it is incremented by the assert_*
+# helpers below (which are also always locally defined) and by _t_fail.
+# ─────────────────────────────────────────────────────────────────────────────
+_LOCAL_FAILS=0
+_LOCAL_FAILS_AT_START=0
+_t_start() { _LOCAL_FAILS_AT_START="$_LOCAL_FAILS"; test_start "$@"; }
+_t_fail()  { _LOCAL_FAILS=$((_LOCAL_FAILS + 1)); test_fail "$@"; }
+_t_pass()  {
+    # NOTE: the call below MUST stay `test_pass` (the underlying harness
+    # function), never `_t_pass`. An earlier mechanical rewrite of call sites
+    # matched this very line and made this function call itself — infinite
+    # recursion, SIGSEGV (exit 139) on every run. Kept explicit as a warning.
+    if [ "$_LOCAL_FAILS" -ne "$_LOCAL_FAILS_AT_START" ]; then return 0; fi
+    test_pass
+}
+
 assert_eq() {
     local got="$1" expected="$2" msg="${3:-Expected '$2', got '$1'}"
-    [ "$got" = "$expected" ] || test_fail "$msg"
+    [ "$got" = "$expected" ] || _t_fail "$msg"
 }
 assert_contains() {
     local haystack="$1" needle="$2" msg="${3:-Expected to find '$2' in output}"
-    [[ "$haystack" == *"$needle"* ]] || test_fail "$msg"
+    [[ "$haystack" == *"$needle"* ]] || _t_fail "$msg"
 }
 assert_not_contains() {
     local haystack="$1" needle="$2" msg="${3:-Expected NOT to find '$2' in output}"
-    [[ "$haystack" != *"$needle"* ]] || test_fail "$msg"
+    [[ "$haystack" != *"$needle"* ]] || _t_fail "$msg"
 }
 
 # Pull out ONLY the dynamic "Missing (first N of M): a,b,c" line from a
@@ -208,43 +237,38 @@ _run_doctor() {
 # checks (services/network/disk/git) to succeed in a sandbox.
 # ═════════════════════════════════════════════════════════════════════════════
 
-test_start "Reachability: bin/aiteamforge-doctor.sh dispatches helpers-drift to check_kanban_helpers_inventory"
+_t_start "Reachability: bin/aiteamforge-doctor.sh dispatches helpers-drift to check_kanban_helpers_inventory"
 _BIN_CASE="$(awk '/^  helpers-drift\)/,/;;/' "$BIN_DOCTOR")"
 assert_contains "$_BIN_CASE" "check_kanban_helpers_inventory" \
     "bin/aiteamforge-doctor.sh's 'helpers-drift)' case must call check_kanban_helpers_inventory"
-test_pass
-
-test_start "Reachability: bin/aiteamforge-doctor.sh runs check_kanban_helpers_inventory under 'all'"
+_t_pass
+_t_start "Reachability: bin/aiteamforge-doctor.sh runs check_kanban_helpers_inventory under 'all'"
 _BIN_ALL_CASE="$(awk '/^  all\)/,/;;/' "$BIN_DOCTOR")"
 assert_contains "$_BIN_ALL_CASE" "check_kanban_helpers_inventory" \
     "bin/aiteamforge-doctor.sh's 'all)' case must call check_kanban_helpers_inventory"
-test_pass
-
-test_start "Reachability: libexec/commands/aiteamforge-doctor.sh dispatches helpers-drift to check_kanban_helpers_inventory"
+_t_pass
+_t_start "Reachability: libexec/commands/aiteamforge-doctor.sh dispatches helpers-drift to check_kanban_helpers_inventory"
 _LIB_CASE="$(awk '/^  helpers-drift\)/,/;;/' "$LIBEXEC_DOCTOR")"
 assert_contains "$_LIB_CASE" "check_kanban_helpers_inventory" \
     "libexec/commands/aiteamforge-doctor.sh's 'helpers-drift)' case must call check_kanban_helpers_inventory"
-test_pass
-
-test_start "Reachability: libexec/commands/aiteamforge-doctor.sh runs check_kanban_helpers_inventory under 'all'"
+_t_pass
+_t_start "Reachability: libexec/commands/aiteamforge-doctor.sh runs check_kanban_helpers_inventory under 'all'"
 _LIB_ALL_CASE="$(awk '/^  all\)/,/;;/' "$LIBEXEC_DOCTOR")"
 assert_contains "$_LIB_ALL_CASE" "check_kanban_helpers_inventory" \
     "libexec/commands/aiteamforge-doctor.sh's 'all)' case must call check_kanban_helpers_inventory"
-test_pass
-
+_t_pass
 # ═════════════════════════════════════════════════════════════════════════════
 # bin/aiteamforge-doctor.sh — warn exits 0, fail exits 1
 # ═════════════════════════════════════════════════════════════════════════════
 
-test_start "bin/: Behaviour 2 — passes cleanly when installed and shipped match (exit 0)"
+_t_start "bin/: Behaviour 2 — passes cleanly when installed and shipped match (exit 0)"
 _install_matching
 _run_doctor "$BIN_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR"
 assert_contains "$_DOCTOR_OUT" "kanban-helpers.sh has all 6 shipped kb-* commands" \
     "Expected a clean pass message naming the matched count"
 assert_eq "$_DOCTOR_RC" "0" "bin/: a passing helpers-drift check must exit 0, got $_DOCTOR_RC"
-test_pass
-
-test_start "bin/: Behaviour 1 — fires on a truncated installed helper, names kb-sweep, exit 1"
+_t_pass
+_t_start "bin/: Behaviour 1 — fires on a truncated installed helper, names kb-sweep, exit 1"
 _install_truncated
 _run_doctor "$BIN_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR" --verbose
 assert_contains "$_DOCTOR_OUT" "MISSING 3 of 6 shipped kb-* commands" \
@@ -254,9 +278,8 @@ _BIN_MISSING_LINE="$(_extract_missing_line "$_DOCTOR_OUT")"
 assert_contains "$_BIN_MISSING_LINE" "kb-sweep" \
     "Expected the DYNAMIC missing-commands line (not the static boilerplate sentence) to name kb-sweep"
 assert_eq "$_DOCTOR_RC" "1" "bin/: a failing helpers-drift check must exit 1, got $_DOCTOR_RC"
-test_pass
-
-test_start "bin/: Behaviour 3 — degrades honestly (warn, not pass) when the shipped template is missing/unreadable, exit 0"
+_t_pass
+_t_start "bin/: Behaviour 3 — degrades honestly (warn, not pass) when the shipped template is missing/unreadable, exit 0"
 _install_matching
 _run_doctor "$BIN_DOCTOR" "$SANDBOX/nonexistent-home" "$WORKING_DIR"
 assert_contains "$_DOCTOR_OUT" "shipped template not found/readable" \
@@ -264,9 +287,8 @@ assert_contains "$_DOCTOR_OUT" "shipped template not found/readable" \
 assert_not_contains "$_DOCTOR_OUT" "has all 6 shipped kb-* commands" \
     "A missing template must never read as a pass"
 assert_eq "$_DOCTOR_RC" "0" "bin/: a warn-only helpers-drift check must exit 0, got $_DOCTOR_RC"
-test_pass
-
-test_start "bin/: Behaviour 4 — degrades honestly (fail, distinct from partial drift) when the installed file is missing, exit 1"
+_t_pass
+_t_start "bin/: Behaviour 4 — degrades honestly (fail, distinct from partial drift) when the installed file is missing, exit 1"
 _run_doctor "$BIN_DOCTOR" "$FRAMEWORK_HOME" "$SANDBOX/no-such-atf-dir"
 assert_contains "$_DOCTOR_OUT" "kanban-helpers.sh not found/readable at" \
     "Expected an explicit fail naming the missing installed file"
@@ -275,23 +297,21 @@ assert_contains "$_DOCTOR_OUT" "no kb-* commands available" \
 assert_not_contains "$_DOCTOR_OUT" "MISSING 3 of 6" \
     "A wholly-missing installed file must not be reported via the partial-drift MISSING-N-of-M message"
 assert_eq "$_DOCTOR_RC" "1" "bin/: a failing (missing-installed) helpers-drift check must exit 1, got $_DOCTOR_RC"
-test_pass
-
+_t_pass
 # ═════════════════════════════════════════════════════════════════════════════
 # libexec/commands/aiteamforge-doctor.sh — warn exits 1, fail exits 2
 # (Deliberately different from bin/'s mapping above — this is the load-bearing
 # part of this coverage; see header comment.)
 # ═════════════════════════════════════════════════════════════════════════════
 
-test_start "libexec/: Behaviour 2 — passes cleanly when installed and shipped match (exit 0)"
+_t_start "libexec/: Behaviour 2 — passes cleanly when installed and shipped match (exit 0)"
 _install_matching
 _run_doctor "$LIBEXEC_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR"
 assert_contains "$_DOCTOR_OUT" "kanban-helpers.sh has all 6 shipped kb-* commands" \
     "Expected a clean pass message naming the matched count"
 assert_eq "$_DOCTOR_RC" "0" "libexec/: a passing helpers-drift check must exit 0, got $_DOCTOR_RC"
-test_pass
-
-test_start "libexec/: Behaviour 1 — fires on a truncated installed helper, names kb-sweep, exit 2"
+_t_pass
+_t_start "libexec/: Behaviour 1 — fires on a truncated installed helper, names kb-sweep, exit 2"
 _install_truncated
 _run_doctor "$LIBEXEC_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR" --verbose
 assert_contains "$_DOCTOR_OUT" "MISSING 3 of 6 shipped kb-* commands" \
@@ -301,9 +321,8 @@ _LIB_MISSING_LINE="$(_extract_missing_line "$_DOCTOR_OUT")"
 assert_contains "$_LIB_MISSING_LINE" "kb-sweep" \
     "Expected the DYNAMIC missing-commands line (not the static boilerplate sentence) to name kb-sweep"
 assert_eq "$_DOCTOR_RC" "2" "libexec/: a failing helpers-drift check must exit 2, got $_DOCTOR_RC"
-test_pass
-
-test_start "libexec/: Behaviour 3 — degrades honestly (warn, not pass) when the shipped template is missing/unreadable, exit 1"
+_t_pass
+_t_start "libexec/: Behaviour 3 — degrades honestly (warn, not pass) when the shipped template is missing/unreadable, exit 1"
 _install_matching
 _run_doctor "$LIBEXEC_DOCTOR" "$SANDBOX/nonexistent-home" "$WORKING_DIR"
 assert_contains "$_DOCTOR_OUT" "shipped template not found/readable" \
@@ -311,9 +330,8 @@ assert_contains "$_DOCTOR_OUT" "shipped template not found/readable" \
 assert_not_contains "$_DOCTOR_OUT" "has all 6 shipped kb-* commands" \
     "A missing template must never read as a pass"
 assert_eq "$_DOCTOR_RC" "1" "libexec/: a warn-only helpers-drift check must exit 1, got $_DOCTOR_RC"
-test_pass
-
-test_start "libexec/: Behaviour 4 — degrades honestly (fail, distinct from partial drift) when the installed file is missing, exit 2"
+_t_pass
+_t_start "libexec/: Behaviour 4 — degrades honestly (fail, distinct from partial drift) when the installed file is missing, exit 2"
 _run_doctor "$LIBEXEC_DOCTOR" "$FRAMEWORK_HOME" "$SANDBOX/no-such-atf-dir"
 assert_contains "$_DOCTOR_OUT" "kanban-helpers.sh not found/readable at" \
     "Expected an explicit fail naming the missing installed file"
@@ -322,8 +340,7 @@ assert_contains "$_DOCTOR_OUT" "no kb-* commands available" \
 assert_not_contains "$_DOCTOR_OUT" "MISSING 3 of 6" \
     "A wholly-missing installed file must not be reported via the partial-drift MISSING-N-of-M message"
 assert_eq "$_DOCTOR_RC" "2" "libexec/: a failing (missing-installed) helpers-drift check must exit 2, got $_DOCTOR_RC"
-test_pass
-
+_t_pass
 # ═════════════════════════════════════════════════════════════════════════════
 # XACA-1095-019 — the kb-sweep "honesty" clause must be CONDITIONAL.
 #
@@ -338,38 +355,34 @@ test_pass
 # test; either alone is decoration.
 # ═════════════════════════════════════════════════════════════════════════════
 
-test_start "bin/: gate note IS emitted when kb-sweep is genuinely missing"
+_t_start "bin/: gate note IS emitted when kb-sweep is genuinely missing"
 _install_truncated
 _run_doctor "$BIN_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR"
 assert_contains "$_DOCTOR_OUT" "kb-sweep is among them" \
     "kb-sweep is missing, so the FAIL message must say so"
-test_pass
-
-test_start "bin/: gate note is NOT emitted when kb-sweep is present (regression guard for the hardcoded boilerplate)"
+_t_pass
+_t_start "bin/: gate note is NOT emitted when kb-sweep is present (regression guard for the hardcoded boilerplate)"
 _install_partial_keeping_sweep
 _run_doctor "$BIN_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR"
 assert_contains "$_DOCTOR_OUT" "MISSING 3 of 6 shipped kb-* commands" \
     "Fixture must still trip the drift FAIL, otherwise the negative assertion below is vacuous"
 assert_not_contains "$_DOCTOR_OUT" "kb-sweep is among them" \
     "kb-sweep is PRESENT -- naming it as missing misinforms the operator (the hardcoded-boilerplate regression)"
-test_pass
-
-test_start "libexec/: gate note IS emitted when kb-sweep is genuinely missing"
+_t_pass
+_t_start "libexec/: gate note IS emitted when kb-sweep is genuinely missing"
 _install_truncated
 _run_doctor "$LIBEXEC_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR"
 assert_contains "$_DOCTOR_OUT" "kb-sweep is among them" \
     "kb-sweep is missing, so the FAIL message must say so"
-test_pass
-
-test_start "libexec/: gate note is NOT emitted when kb-sweep is present (regression guard for the hardcoded boilerplate)"
+_t_pass
+_t_start "libexec/: gate note is NOT emitted when kb-sweep is present (regression guard for the hardcoded boilerplate)"
 _install_partial_keeping_sweep
 _run_doctor "$LIBEXEC_DOCTOR" "$FRAMEWORK_HOME" "$WORKING_DIR"
 assert_contains "$_DOCTOR_OUT" "MISSING 3 of 6 shipped kb-* commands" \
     "Fixture must still trip the drift FAIL, otherwise the negative assertion below is vacuous"
 assert_not_contains "$_DOCTOR_OUT" "kb-sweep is among them" \
     "kb-sweep is PRESENT -- naming it as missing misinforms the operator (the hardcoded-boilerplate regression)"
-test_pass
-
+_t_pass
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone mode only — test-runner.sh tallies pass/fail from its
 # OWN exported functions' output).

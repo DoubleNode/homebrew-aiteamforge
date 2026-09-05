@@ -97,13 +97,42 @@ if ! declare -F test_start &>/dev/null; then
     test_fail()  { _FAIL=$((_FAIL + 1)); printf "  FAIL: %s — %s\n" "$_CURRENT_TEST" "${1:-}" >&2; }
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1095 [Review] (PR #820): case-level pass gating that works under BOTH
+# invocation paths.
+#
+# The first attempt at this redefined test_pass inside the
+# `if ! declare -F test_start` standalone shim. That is INERT under
+# test-runner.sh: the runner exports its own test_start/test_pass before
+# sourcing each file, so the shim never installs and a failing case still
+# reported a PASS in CI — the exact divergence the fix claimed to close, just
+# relocated to the path that actually matters.
+#
+# These wrappers are defined unconditionally and used at every call site, so
+# the gating holds whether test_pass comes from the local shim or from the
+# runner. _LOCAL_FAILS is our own tally; it is incremented by the assert_*
+# helpers below (which are also always locally defined) and by _t_fail.
+# ─────────────────────────────────────────────────────────────────────────────
+_LOCAL_FAILS=0
+_LOCAL_FAILS_AT_START=0
+_t_start() { _LOCAL_FAILS_AT_START="$_LOCAL_FAILS"; test_start "$@"; }
+_t_fail()  { _LOCAL_FAILS=$((_LOCAL_FAILS + 1)); test_fail "$@"; }
+_t_pass()  {
+    # NOTE: the call below MUST stay `test_pass` (the underlying harness
+    # function), never `_t_pass`. An earlier mechanical rewrite of call sites
+    # matched this very line and made this function call itself — infinite
+    # recursion, SIGSEGV (exit 139) on every run. Kept explicit as a warning.
+    if [ "$_LOCAL_FAILS" -ne "$_LOCAL_FAILS_AT_START" ]; then return 0; fi
+    test_pass
+}
+
 assert_eq() {
     local got="$1" expected="$2" msg="${3:-Expected '$2', got '$1'}"
-    [ "$got" = "$expected" ] || test_fail "$msg"
+    [ "$got" = "$expected" ] || _t_fail "$msg"
 }
 assert_contains() {
     local haystack="$1" needle="$2" msg="${3:-Expected to find '$2' in output}"
-    [[ "$haystack" == *"$needle"* ]] || test_fail "$msg"
+    [[ "$haystack" == *"$needle"* ]] || _t_fail "$msg"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +179,17 @@ _extract_fn_from_rev() {
 # SKIP. A negative control that can never execute again is not a control; it is
 # a comment that costs CI time. 75b3ef1 is the last tap commit before the
 # hardening (aaf3689) and is an ancestor of main, so it stays resolvable.
+# CI CAVEAT (known, deliberate): the tap's workflows use actions/checkout@v4
+# with no fetch-depth, i.e. a depth-1 shallow clone, so this rev is NOT
+# reachable in CI and this one case degrades to SKIP there. That is honest
+# skipping -- you cannot run history you do not have -- and the suite's other
+# cases, which test CURRENT behaviour, all still run. The control executes on
+# any full checkout (developer machines, and any job that sets fetch-depth: 0).
+# Embedding the 197-line historical function as a literal fixture was
+# considered and rejected: a frozen copy that large is its own maintenance
+# liability and would drift silently. Raising CI to a full clone for one
+# negative control is a workflow-wide change that belongs in its own ticket,
+# not in a bugfix PR.
 _PRE_HARDENING_REV="75b3ef1"
 _PRE_HARDENING_AVAILABLE=true
 _PRE_HARDENING_SRC="$(_extract_fn_from_rev "$_PRE_HARDENING_REV" "libexec/commands/aiteamforge-upgrade.sh" "update_shell_helpers")"
@@ -210,7 +250,7 @@ _run_update_shell_helpers() {
 # BEHAVIOUR 1 — Atomic install
 # ═══════════════════════════════════════════════════════════════════════════
 
-test_start "T-A1: successful install is never observed truncated and matches the rendered template line-for-line"
+_t_start "T-A1: successful install is never observed truncated and matches the rendered template line-for-line"
 TA1_FW="$(_next_sandbox)"; TA1_WORK="$(_next_sandbox)"
 _build_framework_sandbox "$TA1_FW"
 printf '#!/bin/zsh\n# stale placeholder\n' > "$TA1_WORK/kanban-helpers.sh"
@@ -219,22 +259,22 @@ _run_update_shell_helpers current "$TA1_FW" "$TA1_WORK" >/dev/null 2>&1
 _TA1_SRC_LINES=$(wc -l < "$REAL_TEMPLATE" | tr -d '[:space:]')
 _TA1_OUT_LINES=$(wc -l < "$TA1_WORK/kanban-helpers.sh" 2>/dev/null | tr -d '[:space:]')
 if [ ! -s "$TA1_WORK/kanban-helpers.sh" ]; then
-    test_fail "installed kanban-helpers.sh is empty after a successful update — this IS a truncation"
+    _t_fail "installed kanban-helpers.sh is empty after a successful update — this IS a truncation"
 elif [ "$_TA1_OUT_LINES" != "$_TA1_SRC_LINES" ]; then
-    test_fail "installed file has $_TA1_OUT_LINES lines, template has $_TA1_SRC_LINES — truncated or malformed"
+    _t_fail "installed file has $_TA1_OUT_LINES lines, template has $_TA1_SRC_LINES — truncated or malformed"
 else
-    test_pass
+    _t_pass
 fi
 
-test_start "T-A2: successful install leaves no stray sibling temp file (kanban-helpers.sh.XXXXXX)"
+_t_start "T-A2: successful install leaves no stray sibling temp file (kanban-helpers.sh.XXXXXX)"
 _TA2_STRAY=$(find "$TA1_WORK" -maxdepth 1 -name 'kanban-helpers.sh.??????' 2>/dev/null)
 if [ -n "$_TA2_STRAY" ]; then
-    test_fail "stray temp file(s) left behind after successful install: $_TA2_STRAY"
+    _t_fail "stray temp file(s) left behind after successful install: $_TA2_STRAY"
 else
-    test_pass
+    _t_pass
 fi
 
-test_start "T-A5: successful install leaves mode 755 — NOT 0711 (mktemp is 0600; symbolic +x on 0600 yields execute-without-read)"
+_t_start "T-A5: successful install leaves mode 755 — NOT 0711 (mktemp is 0600; symbolic +x on 0600 yields execute-without-read)"
 # XACA-1095 [Review] (PR #820): this case exists because the atomic-install fix
 # originally used `chmod +x` on the mktemp'd temp file. mktemp creates at 0600
 # regardless of umask, symbolic +x turns that into 0711, and `mv` carries that
@@ -246,14 +286,14 @@ test_start "T-A5: successful install leaves mode 755 — NOT 0711 (mktemp is 060
 _TA5_MODE=$(stat -f '%Lp' "$TA1_WORK/kanban-helpers.sh" 2>/dev/null \
             || stat -c '%a' "$TA1_WORK/kanban-helpers.sh" 2>/dev/null)
 if [ -z "$_TA5_MODE" ]; then
-    test_fail "could not stat installed kanban-helpers.sh to read its mode"
+    _t_fail "could not stat installed kanban-helpers.sh to read its mode"
 elif [ "$_TA5_MODE" != "755" ]; then
-    test_fail "installed kanban-helpers.sh is mode ${_TA5_MODE}, expected 755 — a shell script needs READ, not just execute, to be sourced"
+    _t_fail "installed kanban-helpers.sh is mode ${_TA5_MODE}, expected 755 — a shell script needs READ, not just execute, to be sourced"
 else
-    test_pass
+    _t_pass
 fi
 
-test_start "T-A3: a failed rename (mv stubbed to fail) leaves the OLD installed copy UNCHANGED, not truncated"
+_t_start "T-A3: a failed rename (mv stubbed to fail) leaves the OLD installed copy UNCHANGED, not truncated"
 TA3_FW="$(_next_sandbox)"; TA3_WORK="$(_next_sandbox)"
 _build_framework_sandbox "$TA3_FW"
 # NOTE: no trailing newline in this fixture string — `$(cat ...)` command
@@ -266,12 +306,12 @@ touch -t 200001010000 "$TA3_WORK/kanban-helpers.sh"
 _run_update_shell_helpers current "$TA3_FW" "$TA3_WORK" 'mv() { return 1; }' >/dev/null 2>&1
 _TA3_AFTER="$(cat "$TA3_WORK/kanban-helpers.sh" 2>/dev/null)"
 if [ "$_TA3_AFTER" != "$_TA3_OLD_CONTENT" ]; then
-    test_fail "target was modified despite a failed mv — expected byte-identical old content to survive a failed rename"
+    _t_fail "target was modified despite a failed mv — expected byte-identical old content to survive a failed rename"
 else
-    test_pass
+    _t_pass
 fi
 
-test_start "T-A4 (proof): PRE-HARDENING update_shell_helpers (cat > target) DOES truncate the target on a failed write"
+_t_start "T-A4 (proof): PRE-HARDENING update_shell_helpers (cat > target) DOES truncate the target on a failed write"
 if [ "$_PRE_HARDENING_AVAILABLE" != true ]; then
     echo "  SKIP: pre-hardening HEAD blob not available or already hardened — T-A1/T-A2/T-A3 above are unaffected"
 else
@@ -287,9 +327,9 @@ else
     _run_update_shell_helpers pre-hardening "$TA4_FW" "$TA4_WORK" 'cat() { return 1; }' >/dev/null 2>&1
     _TA4_AFTER="$(cat "$TA4_WORK/kanban-helpers.sh" 2>/dev/null)"
     if [ -z "$_TA4_AFTER" ] && [ "$_TA4_AFTER" != "$_TA4_OLD_CONTENT" ]; then
-        test_pass
+        _t_pass
     else
-        test_fail "expected the pre-hardening code path to leave the target TRUNCATED (empty) after a failed cat — got: '$_TA4_AFTER' — proof invalid, verify the extracted pre-hardening blob"
+        _t_fail "expected the pre-hardening code path to leave the target TRUNCATED (empty) after a failed cat — got: '$_TA4_AFTER' — proof invalid, verify the extracted pre-hardening blob"
     fi
 fi
 
@@ -302,7 +342,7 @@ fi
 
 _RG_OLD_CONTENT=$'#!/bin/zsh\nkb-run() { :; }\nkb-pick() { :; }'
 
-test_start "T-R1: sed exit failure — guard refuses to install, old copy untouched"
+_t_start "T-R1: sed exit failure — guard refuses to install, old copy untouched"
 TR1_FW="$(_next_sandbox)"; TR1_WORK="$(_next_sandbox)"
 _build_framework_sandbox "$TR1_FW"
 printf '%s' "$_RG_OLD_CONTENT" > "$TR1_WORK/kanban-helpers.sh"
@@ -311,12 +351,12 @@ _TR1_OUT="$(_run_update_shell_helpers current "$TR1_FW" "$TR1_WORK" 'sed() { ret
 _TR1_AFTER="$(cat "$TR1_WORK/kanban-helpers.sh" 2>/dev/null)"
 assert_contains "$_TR1_OUT" "Refusing to install" "Expected the render-integrity guard to fire and refuse install"
 if [ "$_TR1_AFTER" != "$_RG_OLD_CONTENT" ]; then
-    test_fail "old installed copy was modified after a sed-exit-failure render — guard must leave it untouched"
+    _t_fail "old installed copy was modified after a sed-exit-failure render — guard must leave it untouched"
 else
-    test_pass
+    _t_pass
 fi
 
-test_start "T-R2: sed produces empty output — guard refuses to install, old copy untouched (not clobbered with an empty file)"
+_t_start "T-R2: sed produces empty output — guard refuses to install, old copy untouched (not clobbered with an empty file)"
 TR2_FW="$(_next_sandbox)"; TR2_WORK="$(_next_sandbox)"
 _build_framework_sandbox "$TR2_FW"
 printf '%s' "$_RG_OLD_CONTENT" > "$TR2_WORK/kanban-helpers.sh"
@@ -325,12 +365,12 @@ _TR2_OUT="$(_run_update_shell_helpers current "$TR2_FW" "$TR2_WORK" 'sed() { ret
 _TR2_AFTER="$(cat "$TR2_WORK/kanban-helpers.sh" 2>/dev/null)"
 assert_contains "$_TR2_OUT" "Refusing to install" "Expected the render-integrity guard to fire and refuse install"
 if [ "$_TR2_AFTER" != "$_RG_OLD_CONTENT" ]; then
-    test_fail "old installed copy was modified/emptied after a sed-empty-output render — this is precisely the empty-file-clobber the guard exists to prevent"
+    _t_fail "old installed copy was modified/emptied after a sed-empty-output render — this is precisely the empty-file-clobber the guard exists to prevent"
 else
-    test_pass
+    _t_pass
 fi
 
-test_start "T-R3: sed produces a short/mismatched-line-count render — guard refuses to install, old copy untouched"
+_t_start "T-R3: sed produces a short/mismatched-line-count render — guard refuses to install, old copy untouched"
 TR3_FW="$(_next_sandbox)"; TR3_WORK="$(_next_sandbox)"
 _build_framework_sandbox "$TR3_FW"
 printf '%s' "$_RG_OLD_CONTENT" > "$TR3_WORK/kanban-helpers.sh"
@@ -342,12 +382,12 @@ _TR3_OUT="$(_run_update_shell_helpers current "$TR3_FW" "$TR3_WORK" 'sed() { ech
 _TR3_AFTER="$(cat "$TR3_WORK/kanban-helpers.sh" 2>/dev/null)"
 assert_contains "$_TR3_OUT" "Refusing to install" "Expected the render-integrity guard to fire on a line-count mismatch"
 if [ "$_TR3_AFTER" != "$_RG_OLD_CONTENT" ]; then
-    test_fail "old installed copy was modified after a truncated-render — guard must leave it untouched"
+    _t_fail "old installed copy was modified after a truncated-render — guard must leave it untouched"
 else
-    test_pass
+    _t_pass
 fi
 
-test_start "T-R4 (negative control): a GOOD render with matching line count is NOT blocked by the guard"
+_t_start "T-R4 (negative control): a GOOD render with matching line count is NOT blocked by the guard"
 TR4_FW="$(_next_sandbox)"; TR4_WORK="$(_next_sandbox)"
 _build_framework_sandbox "$TR4_FW"
 printf '%s' "$_RG_OLD_CONTENT" > "$TR4_WORK/kanban-helpers.sh"
@@ -356,11 +396,11 @@ _TR4_OUT="$(_run_update_shell_helpers current "$TR4_FW" "$TR4_WORK" 2>&1)"
 _TR4_AFTER_LINES=$(wc -l < "$TR4_WORK/kanban-helpers.sh" 2>/dev/null | tr -d '[:space:]')
 _TR4_SRC_LINES=$(wc -l < "$REAL_TEMPLATE" | tr -d '[:space:]')
 if printf '%s' "$_TR4_OUT" | grep -q "Refusing to install"; then
-    test_fail "the render-integrity guard fired on a genuinely GOOD render — false positive"
+    _t_fail "the render-integrity guard fired on a genuinely GOOD render — false positive"
 elif [ "$_TR4_AFTER_LINES" != "$_TR4_SRC_LINES" ]; then
-    test_fail "a real, unblocked install did not end up line-for-line with the template ($_TR4_AFTER_LINES vs $_TR4_SRC_LINES)"
+    _t_fail "a real, unblocked install did not end up line-for-line with the template ($_TR4_AFTER_LINES vs $_TR4_SRC_LINES)"
 else
-    test_pass
+    _t_pass
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

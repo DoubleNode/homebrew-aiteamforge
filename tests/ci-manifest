@@ -82,8 +82,8 @@ test-xaca-0704-positive.sh                      plain-shell
 test-xaca-0743-four-tier-knowledge.sh           plain-shell
 test-xaca-0746-kb-knowledge-in-tap.sh           plain-shell
 test-xaca-0747-knowledge-repo.sh                plain-shell
-test-xaca-0751-upgrade-knowledge-repo.sh        plain-shell
 test-xaca-0751-014-knowledge-url-resolution.sh  plain-shell
+test-xaca-0751-upgrade-knowledge-repo.sh        plain-shell
 test-xaca-0752-mktemp-template.sh               plain-shell
 test-xaca-0761-knowledge-sync-launchagent.sh    plain-shell
 test-xaca-0762-start-port-reconcile-yes.sh      plain-shell
@@ -101,5 +101,8 @@ test-xaca-0862-006-retire-legacy-connect.sh     plain-shell
 test-xaca-0862-022-runtime-resolver.sh          plain-shell
 test-xaca-0862-028-resolve-parametric-crash-guard.sh plain-shell
 test-xaca-0862-team-scoped-connect.sh           plain-shell
-test-xaca-0925-persona-refresh.sh               plain-shell
 test-xaca-0925-persona-parity-check.sh          plain-shell
+test-xaca-0925-persona-refresh.sh               plain-shell
+test-xaca-1095-017-helpers-drift-check.sh       plain-shell
+test-xaca-1095-atomic-install-and-render-guard.sh plain-shell
+test-xaca-1095-helpers-template-preference.sh   plain-shell
