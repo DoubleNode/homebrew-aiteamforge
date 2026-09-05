@@ -229,12 +229,39 @@ PY
 }
 
 # JSON-escape a bash string before splicing it into the hand-built summary
-# fragments. Only the double quote and the backslash need handling: the
-# resolver's BAD_CHARS already rejects every control character. Escaping HERE
-# is the actual fix, because a REJECTED entry's team is still summarised on the
-# skip path -- which is how a quoted team name produced invalid JSON, made the
-# state write fail, and thereby permanently disabled guard 1 (the login-session
-# stamp) on every subsequent run. BAD_CHARS is the second layer, not the fix.
+# fragments. Escaping HERE is the actual fix, because a REJECTED entry's team
+# is still summarised on the skip path -- which is how a quoted team name
+# produced invalid JSON, made the state write fail, and thereby permanently
+# disabled guard 1 (the login-session stamp) on every subsequent run (that
+# fallback -- _restore_or_raw() degrading to a parse_error/raw diagnostic
+# instead of losing the stamp -- is what keeps a still-imperfect escape from
+# being catastrophic; it is not a reason for the escape to stay imperfect).
+#
+# An earlier version of this comment claimed only `"` and `\` needed handling
+# because "the resolver's BAD_CHARS already rejects every control character."
+# THAT REASONING IS WRONG, and it is wrong for the exact same reason
+# _sanitize()'s own comment block (in the python resolver below) documents at
+# length: rejecting a character does not remove it from the output, because
+# the reject path still emits the raw value forward. Concretely: BAD_CHARS
+# rejects a tab in `team`, but the SKIP summary entry above still splices that
+# same raw team string in here -- and _sanitize() deliberately does NOT escape
+# a bare tab at the wire-protocol boundary (several free-text WARN/reason
+# diagnostics rely on it surviving unescaped), so a literal tab byte reaches
+# THIS function. JSON (RFC 8259) requires every control character
+# (U+0000-U+001F) inside a string to be escaped, and a literal tab is not
+# valid there -- demonstrated live (PR #821 review round 4) with a team named
+# `tab<TAB>here`, which broke the restore summary's JSON.
+#
+# Fix: escape every C0 control character, not just the two structural ASCII
+# characters. \b \f \n \r \t use JSON's short forms; anything else in
+# U+0000-U+001F gets \u00XX. Byte values are masked with `& 0xFF` before the
+# `-lt 32` test because bash 3.2's `printf '%d' "'$c"` sign-extends a
+# high-bit byte (e.g. the lead byte of a multi-byte UTF-8 character prints as
+# a NEGATIVE number) -- without the mask, a perfectly legitimate accented
+# team name would misfire this control-character branch and get mangled.
+# Masking makes this identity for all ASCII 0x20-0x7E and for every non-ASCII
+# byte (0x80-0xFF is never < 32 either way), so it changes no output any
+# existing config -- ASCII or otherwise -- was already producing correctly.
 # Was the resolver's record stream COMPLETE? (XACA-1066, fifth shape.)
 # The resolver ends every normal path with a bare "END" record. Its ABSENCE means
 # the resolver aborted mid-stream — an encoding error, an unhandled exception, a
@@ -257,10 +284,35 @@ _hr_stream_complete() {
 }
 
 _hr_json_str() {
-    local v="$1"
+    local v="$1" out="" n i c ord
     v="${v//\\/\\\\}"
     v="${v//\"/\\\"}"
-    printf '%s' "$v"
+    n=${#v}
+    i=0
+    while [ "$i" -lt "$n" ]; do
+        c="${v:$i:1}"
+        case "$c" in
+            $'\t') out="${out}\\t" ;;
+            $'\n') out="${out}\\n" ;;
+            $'\r') out="${out}\\r" ;;
+            $'\b') out="${out}\\b" ;;
+            $'\f') out="${out}\\f" ;;
+            *)
+                # `'$c` is bash's numeric-value-of-first-byte trick; masking
+                # with & 0xFF undoes bash 3.2's sign extension for bytes
+                # >=0x80 (see the function comment above) so this test only
+                # ever fires for the real C0 control range.
+                ord=$(( $(printf '%d' "'$c") & 0xFF ))
+                if [ "$ord" -lt 32 ]; then
+                    out="${out}$(printf '\\u%04x' "$ord")"
+                else
+                    out="${out}${c}"
+                fi
+                ;;
+        esac
+        i=$((i + 1))
+    done
+    printf '%s' "$out"
 }
 
 _hr_write_state() {
@@ -527,10 +579,18 @@ try:
     # pinned for the same reason; see _hr_safe_repr for the write half.
     with open(cfg_path, "r", encoding="utf-8") as fh:
         raw = fh.read()
-except OSError as e:
-    # str(e) on an OSError typically embeds the filename (cfg_path) in its
-    # message (e.g. "[Errno 13] Permission denied: '<path>'"), so the
-    # exception text needs the same encoding as the bare path.
+except (OSError, UnicodeDecodeError) as e:
+    # UnicodeDecodeError is NOT an OSError -- it subclasses ValueError -- so
+    # a config file containing byte-invalid UTF-8 (independent of, and just
+    # as reachable as, the locale mismatch the comment above already fixed)
+    # used to fall straight through this handler as an unhandled exception:
+    # raw traceback, no STATE record, no END sentinel, the whole restore
+    # failing closed exactly like every other instance of this ticket's
+    # class rather than landing on the clean "malformed_json" outcome this
+    # code already intends for a syntactically-invalid config (PR #821
+    # review round 4). str(e) on either exception type embeds the filename
+    # (cfg_path) or the raw offending bytes, so the message still needs
+    # _hr_safe_repr -- same as the OSError branch it replaces.
     emit("STATE", "malformed_json", f"could not read {_hr_safe_repr(cfg_path)}: {_hr_safe_repr(e)}")
     _finish(0)
 
