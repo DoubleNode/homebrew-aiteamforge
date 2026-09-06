@@ -66,23 +66,6 @@
 #           - agent:   $KB_KNOWLEDGE_GLOBAL_ROOT/agents/<persona>/INDEX.md (if missing)
 #         Global tiers skipped-with-warning when $KB_KNOWLEDGE_GLOBAL_ROOT absent.
 #
-#   MACHINE ROUTING (best-effort, ADDITIVE-ONLY, NEVER FATAL -- XACA-1078):
-#     15. Runs `kb-msg-provision --add-team <team-id>` after sites 1-14
-#         above complete, asserting this team's row in
-#         ~/.aiteamforge/team-machines.json (the cross-machine kb-msg
-#         routing map). This is the ONE fact a team-birth call can honestly
-#         speak for -- "this team was created HERE, just now, by me" --
-#         never a full re-derivation of the whole registry (see
-#         kb-msg-provision's own --help for why). A routing failure NEVER
-#         aborts team creation: it is disclosed (the tool's stderr,
-#         verbatim, plus one copyable remediation command) and surfaces as
-#         a `ROUTING: NOT PROVISIONED (<reason>)` line in the completion
-#         banner below -- it does not prompt, even though this script is
-#         otherwise interactive (the team already exists; there is
-#         nothing left to ask). Full contract:
-#         kanban/plans/XACA-1078/XACA-1078_msg_routing_provisioning.md,
-#         section "The Unattended-Write Contract".
-#
 #   DERIVES AUTOMATICALLY (no explicit insert needed after #1):
 #     - kanban_utils._TEAM_CODE_MAP — built from build_team_code_map() at import
 #     - server._ITEM_PREFIX_TO_TEAM — built from _build_item_prefix_to_team() at module load
@@ -270,12 +253,7 @@ NON_INTERACTIVE=0
 BACKFILL_TIERS=0
 
 usage() {
-    # XACA-1078-003: bumped from 60 -> 104 to actually surface the new
-    # "MACHINE ROUTING" site-15 doc block (and, as a side effect, sites
-    # 12-14 / IDEMPOTENCY / TAP MIRROR NOTE below it, which the old cutoff
-    # silently omitted from --help even though they were already in the
-    # header comment).
-    head -104 "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+    head -60 "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -2183,59 +2161,6 @@ sys.exit(0 if any(k.startswith('${TEAM_ID}-') for k in d) else 1)
         _ok "Directory tree (config/ activity/ plans/) + four-tier knowledge scaffolding"
     fi
 
-    # ── Site 15: machine routing (kb-msg-provision --add-team) ─────────────
-    # ADDITIVE-ONLY, NEVER FATAL (XACA-1078-003; contract:
-    # kanban/plans/XACA-1078/XACA-1078_msg_routing_provisioning.md, "The
-    # Unattended-Write Contract"). This asserts exactly the one fact this
-    # process can honestly speak for: "$TEAM_ID was created HERE, just now,
-    # by me" -- never a full re-derivation of the whole registry.
-    #
-    # Uses `if VAR="$(cmd)"; then ... else ...; fi`, NEVER `cmd && other` or
-    # a bare `VAR="$(cmd)"` followed by a separate `$?` check, as the
-    # sanctioned pattern under this script's `set -euo pipefail`: a plain
-    # failing assignment outside an `if`/`while`/`&&`/`||` context aborts the
-    # ENTIRE script right there, before any handling code runs
-    # (feedback_set_e_last_line_short_circuit.md). By this point team
-    # creation has already fully succeeded and must stay succeeded no matter
-    # what this step does.
-    local ROUTING_STATUS=""
-    local _routing_script="${SCRIPT_DIR}/kb-msg-provision"
-
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-        _dry "Would run: kb-msg-provision --add-team ${TEAM_ID} (machine routing map)"
-    elif [[ ! -f "$_routing_script" ]]; then
-        _warn "ROUTING: NOT PROVISIONED (kb-msg-provision not found at ${_routing_script})"
-        _warn "  Run by hand once available: kb-msg-provision --add-team ${TEAM_ID}"
-        ROUTING_STATUS="kb-msg-provision not found"
-    else
-        local _routing_out _routing_rc
-        # --quiet suppresses the tool's routine stdout report; its decline/
-        # environment messages always print to stderr regardless of --quiet
-        # (kb-msg-provision's `_notice`/`_die_env`), so `2>&1` here captures
-        # exactly the reason, nothing more, for verbatim disclosure below.
-        if _routing_out="$(python3 "$_routing_script" --add-team "$TEAM_ID" --quiet 2>&1)"; then
-            _routing_rc=0
-        else
-            _routing_rc=$?
-        fi
-        if [[ "$_routing_rc" -eq 0 ]]; then
-            _ok "Machine routing (kb-msg-provision --add-team ${TEAM_ID})"
-        else
-            # Contract Decision 3 / rule 12: exit 1 (declined) and exit 2
-            # (environment problem) are treated IDENTICALLY here -- warn,
-            # continue, never propagate, never suppress the reason. This
-            # does NOT prompt: the team already exists and the only
-            # available answers are "continue" and "continue" (disclose,
-            # don't ask).
-            _warn "ROUTING: NOT PROVISIONED (kb-msg-provision exited ${_routing_rc})"
-            if [[ -n "$_routing_out" ]]; then
-                echo "$_routing_out" >&2
-            fi
-            _warn "  Run by hand to resolve: kb-msg-provision --add-team ${TEAM_ID}"
-            ROUTING_STATUS="kb-msg-provision exited ${_routing_rc}"
-        fi
-    fi
-
     # ── Validation (FULL mode only — validates dev-source Python/shell files) ──
 
     if [[ "$DRY_RUN" -eq 0 && "$INIT_MODE" == "full" ]]; then
@@ -2293,9 +2218,6 @@ sys.exit(0 if any(k.startswith('${TEAM_ID}-') for k in d) else 1)
     if [[ "$INIT_MODE" == "full" ]]; then
         _info "Team '${TEAM_ID}' (${TEAM_CODE}) registration complete."
         _info "Port: ${LCARS_PORT} | Series: ${SERIES} | Asset dir: ${ASSET_DIR}"
-        if [[ -n "$ROUTING_STATUS" ]]; then
-            _warn "ROUTING: NOT PROVISIONED (${ROUTING_STATUS})"
-        fi
         echo ""
         _info "Next steps:"
         _info "  1. Run ./sync-tap.sh to sync canonical sources to homebrew-tap/share/"
@@ -2307,9 +2229,6 @@ sys.exit(0 if any(k.startswith('${TEAM_ID}-') for k in d) else 1)
         _info "Team '${TEAM_ID}' board and directory tree provisioned (local-only mode)."
         _info "Series: ${SERIES} | Kanban dir: ${KANBAN_DIR}"
         _info "Registration sites are product-managed — no dev-source files were modified."
-        if [[ -n "$ROUTING_STATUS" ]]; then
-            _warn "ROUTING: NOT PROVISIONED (${ROUTING_STATUS})"
-        fi
     fi
     echo ""
 }

@@ -1556,44 +1556,6 @@ function isVersionOutdated(current, latest) {
     return false; // equal versions -- not outdated
 }
 
-// XACA-1091-018/019 review: `Number.isFinite` alone admits negatives and
-// absurd magnitudes -- `-5` bytes or `percent: 9999` from a hostile or
-// buggy reporter would otherwise land straight on the dashboard. These four
-// range checks are the ONLY numeric-leaf validation used by
-// normalizeSystemBlock()/projectSystemBlock() below; out-of-range values are
-// OMITTED, never clamped (clamping would fabricate a plausible-looking
-// measurement, which is exactly what the contract forbids -- a wrong number
-// is worse than no number). Each uses an explicit `>=`/`<=` comparison,
-// never truthiness, so a COLLECTED ZERO (e.g. `swap_used_bytes: 0`,
-// `pressure_percent: 0`, `load_average: [0,0,0]`) survives -- `0` is falsy
-// but is DATA per contract §3.
-function isValidByteCount(n) {
-    // A byte count is a whole measurement -- never negative. No upper bound:
-    // unlike a percentage, there is no fixed ceiling a byte count must
-    // respect (a machine can legitimately have an arbitrarily large disk).
-    return Number.isFinite(n) && n >= 0;
-}
-
-function isValidPercent(n) {
-    // 0-100 inclusive. An out-of-range percentage (e.g. 9999, or negative)
-    // is a hostile/buggy reading, not a real measurement.
-    return Number.isFinite(n) && n >= 0 && n <= 100;
-}
-
-function isValidLoadAverageComponent(n) {
-    // A run-queue depth is never negative; unlike a percentage it has no
-    // fixed upper bound.
-    return Number.isFinite(n) && n >= 0;
-}
-
-function isValidPositiveInteger(n) {
-    // `cores` (logical CPU count) and `boot_time` (epoch seconds) are both
-    // whole, strictly-positive counts -- zero or negative is nonsensical for
-    // either (a machine cannot have 0 logical CPUs or have booted at or
-    // before the Unix epoch).
-    return Number.isInteger(n) && n > 0;
-}
-
 /**
  * Normalize an inbound `system` block (POST /api/status body) to a stable
  * STORAGE shape, per the frozen contract at
@@ -1619,22 +1581,9 @@ function isValidPositiveInteger(n) {
  * time. That keeps every machine's outdated status current against the
  * tap-version cache on every read, even for a machine that hasn't
  * re-reported since the cache last refreshed.
- *
- * XACA-1091-005: extends the SAME normalize step (EPIC-0061 Design Decision
- * 8 mandates exactly one -- this does not author a second) with the
- * telemetry leaves from CONTRACT-system-block.md §2. Static fields
- * (os_version/os_build/os_name/model/arch/cores/total_ram/boot_time) are
- * simple typed leaves -- OMITTED, never null/""/coerced, when absent or the
- * wrong type. `memory` and `disk` are COLLECTED GROUPS (contract §3 rule 3):
- * the whole nested object is omitted when nothing inside it validated,
- * never left present-but-empty. Every numeric check is existence/type
- * (`Number.isFinite`), NEVER bare truthiness -- a collected `0` (e.g.
- * `swap_used_bytes: 0`, `pressure_percent: 0`) is DATA and must survive; a
- * `if (!value)` guard would drop it as if it were missing (contract §3, the
- * `{}` IS TRUTHY / `0` IS FALSY rule).
  */
 function normalizeSystemBlock(system) {
-    if (!system || typeof system !== 'object' || Array.isArray(system)) return {}; // whole block absent (an array is not a valid system block, even though typeof [] === 'object')
+    if (!system || typeof system !== 'object') return {}; // whole block absent
 
     const out = {};
     if (Number.isInteger(system.schema_version)) {
@@ -1647,37 +1596,6 @@ function normalizeSystemBlock(system) {
         versions.aiteamforge = inVersions.aiteamforge; // omitted entirely otherwise
     }
     out.versions = versions;
-
-    if (typeof system.os_version === 'string' && system.os_version) out.os_version = system.os_version;
-    if (typeof system.os_build === 'string' && system.os_build) out.os_build = system.os_build;
-    if (typeof system.os_name === 'string' && system.os_name) out.os_name = system.os_name;
-    if (typeof system.model === 'string' && system.model) out.model = system.model;
-    if (typeof system.arch === 'string' && system.arch) out.arch = system.arch;
-    if (isValidPositiveInteger(system.cores)) out.cores = system.cores;
-    if (isValidByteCount(system.total_ram)) out.total_ram = system.total_ram;
-    if (isValidPositiveInteger(system.boot_time)) out.boot_time = system.boot_time;
-
-    if (system.memory && typeof system.memory === 'object') {
-        const memory = {};
-        if (isValidByteCount(system.memory.used)) memory.used = system.memory.used;
-        if (isValidByteCount(system.memory.total)) memory.total = system.memory.total;
-        if (isValidPercent(system.memory.pressure_percent)) memory.pressure_percent = system.memory.pressure_percent;
-        if (Object.keys(memory).length > 0) out.memory = memory;
-    }
-
-    if (isValidByteCount(system.swap_used_bytes)) out.swap_used_bytes = system.swap_used_bytes;
-
-    if (system.disk && typeof system.disk === 'object') {
-        const disk = {};
-        if (isValidByteCount(system.disk.used)) disk.used = system.disk.used;
-        if (isValidByteCount(system.disk.free)) disk.free = system.disk.free;
-        if (isValidPercent(system.disk.percent)) disk.percent = system.disk.percent;
-        if (Object.keys(disk).length > 0) out.disk = disk;
-    }
-
-    if (Array.isArray(system.load_average) && system.load_average.length === 3 && system.load_average.every((n) => isValidLoadAverageComponent(n))) {
-        out.load_average = system.load_average.slice();
-    }
 
     return out;
 }
@@ -1713,79 +1631,33 @@ function normalizeSystemBlock(system) {
  * shape, but this defends against a stale/pre-XACA-1031 record read back
  * from disk (see the machineList allowlist comment at server.js ~1358)
  * where `storedSystem` itself, or `.versions`, could be undefined.
- *
- * XACA-1091-006: extends this SAME projection (one allowlist, per Decision
- * 8) with the telemetry leaves. CRITICAL FIX carried in this change: the
- * pre-existing `if (!hasStoredVersions) return out;` early return sat BEFORE
- * every other field would have been added, so an old-but-post-XACA-1031
- * record with `versions` genuinely absent (not just empty) would have
- * dropped every telemetry key too, even though they have nothing to do with
- * versions. Telemetry projection below is now unconditional on
- * `hasStoredVersions` -- only the `versions` sub-object itself stays gated
- * on it. Same existence/type-check discipline as normalizeSystemBlock(): a
- * collected `0` or `false` ships, a malformed/missing value is omitted, and
- * `memory`/`disk` are omitted wholesale (never present-but-empty) when
- * nothing inside them validated.
  */
 function projectSystemBlock(storedSystem) {
     const out = {};
-    if (!storedSystem || typeof storedSystem !== 'object' || Array.isArray(storedSystem)) return out; // whole-block-absent / pre-XACA-1031 record / corrupted non-object record
-
-    if (Number.isInteger(storedSystem.schema_version)) {
+    if (storedSystem && Number.isInteger(storedSystem.schema_version)) {
         out.schema_version = storedSystem.schema_version;
     }
 
-    const hasStoredVersions = !!(storedSystem.versions && typeof storedSystem.versions === 'object');
-    if (hasStoredVersions) {
-        const storedAiteamforge = (typeof storedSystem.versions.aiteamforge === 'string' && storedSystem.versions.aiteamforge)
-            ? storedSystem.versions.aiteamforge
-            : null;
+    const hasStoredVersions = !!(storedSystem && storedSystem.versions && typeof storedSystem.versions === 'object');
+    if (!hasStoredVersions) return out; // whole-block-absent case -- stays `{}` (or just schema_version, never happens together)
 
-        const versions = {};
-        if (storedAiteamforge) {
-            versions.aiteamforge = storedAiteamforge;
-            const latest = getLatestTapVersion(); // string or null; never throws, never blocks
-            if (latest) {
-                versions.latest = latest;
-                const outdated = isVersionOutdated(storedAiteamforge, latest);
-                if (outdated !== null) {
-                    versions.outdated = outdated; // explicit true/false -- a collected fact, not an absence
-                }
+    const storedAiteamforge = (typeof storedSystem.versions.aiteamforge === 'string' && storedSystem.versions.aiteamforge)
+        ? storedSystem.versions.aiteamforge
+        : null;
+
+    const versions = {};
+    if (storedAiteamforge) {
+        versions.aiteamforge = storedAiteamforge;
+        const latest = getLatestTapVersion(); // string or null; never throws, never blocks
+        if (latest) {
+            versions.latest = latest;
+            const outdated = isVersionOutdated(storedAiteamforge, latest);
+            if (outdated !== null) {
+                versions.outdated = outdated; // explicit true/false -- a collected fact, not an absence
             }
         }
-        out.versions = versions;
     }
-
-    if (typeof storedSystem.os_version === 'string' && storedSystem.os_version) out.os_version = storedSystem.os_version;
-    if (typeof storedSystem.os_build === 'string' && storedSystem.os_build) out.os_build = storedSystem.os_build;
-    if (typeof storedSystem.os_name === 'string' && storedSystem.os_name) out.os_name = storedSystem.os_name;
-    if (typeof storedSystem.model === 'string' && storedSystem.model) out.model = storedSystem.model;
-    if (typeof storedSystem.arch === 'string' && storedSystem.arch) out.arch = storedSystem.arch;
-    if (isValidPositiveInteger(storedSystem.cores)) out.cores = storedSystem.cores;
-    if (isValidByteCount(storedSystem.total_ram)) out.total_ram = storedSystem.total_ram;
-    if (isValidPositiveInteger(storedSystem.boot_time)) out.boot_time = storedSystem.boot_time;
-
-    if (storedSystem.memory && typeof storedSystem.memory === 'object') {
-        const memory = {};
-        if (isValidByteCount(storedSystem.memory.used)) memory.used = storedSystem.memory.used;
-        if (isValidByteCount(storedSystem.memory.total)) memory.total = storedSystem.memory.total;
-        if (isValidPercent(storedSystem.memory.pressure_percent)) memory.pressure_percent = storedSystem.memory.pressure_percent;
-        if (Object.keys(memory).length > 0) out.memory = memory;
-    }
-
-    if (isValidByteCount(storedSystem.swap_used_bytes)) out.swap_used_bytes = storedSystem.swap_used_bytes;
-
-    if (storedSystem.disk && typeof storedSystem.disk === 'object') {
-        const disk = {};
-        if (isValidByteCount(storedSystem.disk.used)) disk.used = storedSystem.disk.used;
-        if (isValidByteCount(storedSystem.disk.free)) disk.free = storedSystem.disk.free;
-        if (isValidPercent(storedSystem.disk.percent)) disk.percent = storedSystem.disk.percent;
-        if (Object.keys(disk).length > 0) out.disk = disk;
-    }
-
-    if (Array.isArray(storedSystem.load_average) && storedSystem.load_average.length === 3 && storedSystem.load_average.every((n) => isValidLoadAverageComponent(n))) {
-        out.load_average = storedSystem.load_average.slice();
-    }
+    out.versions = versions;
 
     return out;
 }
