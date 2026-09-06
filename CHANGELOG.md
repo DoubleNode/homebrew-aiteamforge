@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1096: `share/scripts/kb-host-ready.sh` — added a positive allowlist
+  (`[A-Za-z0-9._-]`) as a second validation layer on the `team` and `args`
+  config fields, alongside the retained `BAD_CHARS` denylist. Rejection
+  diagnostics name the offending character and are surrogate-safe, so an
+  unpaired surrogate can no longer crash the resolver while reporting itself.
+  Two deliberate behavior changes: a rejected entry now SKIPs cleanly instead
+  of aborting the whole restore, and commas in `args` are now rejected.
+
 - **XACA-1078 — the kb-msg routing-map provisioning mirror, re-applied after it was reverted ahead of v0.20.5.** `share/scripts/kb-msg-provision` and `share/scripts/kb-init-team` carry the canonical side of PR #825: the `--unattended` / `--add-team` entry points, the pure-superset write invariant (a non-empty retarget set refuses the ENTIRE write), `_notice`-based disclosure of every failure reason, and case-insensitive ownership comparison. An earlier copy of this mirror was removed by `8c93ba3` ("restore canonical parity — revert 6 tap-ahead files to develop") — correctly at the time, since it had been published before its canonical PR merged and so read as tap-ahead drift. **NOTE:** the `[0.20.5]` section below lists XACA-1078, but that revert landed before the release was cut, so v0.20.5 does NOT actually contain these changes; they ship in the first release cut after PR #825 merges.
 
 - XACA-1091: `fleet-monitor/server/package.json` registers the telemetry
@@ -96,13 +104,6 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   is data, and a truthy empty container (`{}`) is not presence. `unknown`
   renders no badge at all — until the reporter ships telemetry, every machine
   is in that state, and a visible "unknown" pill would appear fleet-wide.
-- XACA-1096: `share/scripts/kb-host-ready.sh` — added a positive allowlist
-  (`[A-Za-z0-9._-]`) as a second validation layer on the `team` and `args`
-  config fields, alongside the retained `BAD_CHARS` denylist. Rejection
-  diagnostics name the offending character and are surrogate-safe, so an
-  unpaired surrogate can no longer crash the resolver while reporting itself.
-  Two deliberate behavior changes: a rejected entry now SKIPs cleanly instead
-  of aborting the whole restore, and commas in `args` are now rejected.
 
 - **XACA-1097 (subitems 004/005) — both `aiteamforge-doctor.sh` copies resolved external dependencies (node, jq, gh, git, claude, python3, brew, convert, tailscale) with a bare `command -v`, which only sees `$PATH` and produced phantom "not found" verdicts under any non-login invocation (launchd, a bare `bash aiteamforge-doctor.sh`, CI).** Measured on M1Pro: node, gh, and claude all reported MISSING while genuinely installed. Fixed in `bin/aiteamforge-doctor.sh` and `libexec/commands/aiteamforge-doctor.sh`.
 
