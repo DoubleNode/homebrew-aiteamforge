@@ -217,7 +217,7 @@ _hr_read_state_field() {
     FIELD="$field" STATEFILE="$KB_HOST_READY_STATE_FILE" python3 - <<'PY' 2>/dev/null
 import json, os, sys
 try:
-    with open(os.environ["STATEFILE"]) as fh:
+    with open(os.environ["STATEFILE"], encoding="utf-8") as fh:
         doc = json.load(fh)
     val = doc.get(os.environ["FIELD"])
     if val is None:
@@ -229,12 +229,64 @@ PY
 }
 
 # JSON-escape a bash string before splicing it into the hand-built summary
-# fragments. Only the double quote and the backslash need handling: the
-# resolver's BAD_CHARS already rejects every control character. Escaping HERE
-# is the actual fix, because a REJECTED entry's team is still summarised on the
-# skip path -- which is how a quoted team name produced invalid JSON, made the
-# state write fail, and thereby permanently disabled guard 1 (the login-session
-# stamp) on every subsequent run. BAD_CHARS is the second layer, not the fix.
+# fragments. Escaping HERE is the actual fix, because a REJECTED entry's team
+# is still summarised on the skip path -- which is how a quoted team name
+# produced invalid JSON, made the state write fail, and thereby permanently
+# disabled guard 1 (the login-session stamp) on every subsequent run (that
+# fallback -- _restore_or_raw() degrading to a parse_error/raw diagnostic
+# instead of losing the stamp -- is what keeps a still-imperfect escape from
+# being catastrophic; it is not a reason for the escape to stay imperfect).
+#
+# An earlier version of this comment claimed only `"` and `\` needed handling
+# because "the resolver's BAD_CHARS already rejects every control character."
+# THAT REASONING IS WRONG, and it is wrong for the exact same reason
+# _sanitize()'s own comment block (in the python resolver below) documents at
+# length: rejecting a character does not remove it from the output, because
+# the reject path still emits the raw value forward. Concretely: BAD_CHARS
+# rejects a tab in `team`, but the SKIP summary entry above still splices that
+# same raw team string in here -- and _sanitize() deliberately does NOT escape
+# a bare tab at the wire-protocol boundary (several free-text WARN/reason
+# diagnostics rely on it surviving unescaped), so a literal tab byte reaches
+# THIS function. JSON (RFC 8259) requires every control character
+# (U+0000-U+001F) inside a string to be escaped, and a literal tab is not
+# valid there -- demonstrated live (PR #821 review round 4) with a team named
+# `tab<TAB>here`, which broke the restore summary's JSON.
+#
+# Fix: escape every C0 control character, not just the two structural ASCII
+# characters. \b \f \n \r \t use JSON's short forms; anything else in
+# U+0000-U+001F gets \u00XX.
+#
+# Getting the numeric value of `c` right is version-sensitive, and an
+# earlier round of this fix got it right for only one interpreter. Bash's
+# notion of "one character" in `${v:$i:1}` is locale-dependent: bash 3.2 has
+# no multibyte awareness, so it is always exactly one BYTE; bash 4+ in a
+# UTF-8 locale (this machine's default) treats it as one CODEPOINT, which
+# can span several bytes. `printf '%d' "'$c"` follows the same split -- on
+# 3.2 it returns the byte's value, sign-extended to negative for anything
+# >=0x80 (e.g. -61 for a UTF-8 lead byte); on 4+ it returns the actual
+# Unicode codepoint (e.g. 256 for U+0100, 1040 for Cyrillic U+0410, 128512
+# for U+1F600 - measured live on this host's /opt/homebrew/bin/bash 5.3).
+# `& 0xFF` is the right fix for the 3.2 case (it undoes sign extension on a
+# byte) and the WRONG operation on a bash-4+ codepoint (it truncates the
+# high bits instead): U+0100 and U+1F600 both mask to 0, and U+0410 masks
+# to 16, so each misfires the control-character branch and gets mangled
+# into a bogus \u00XX escape. A prior version of this comment claimed
+# masking "changes no output ... ASCII or otherwise" -- that was only ever
+# true under 3.2; it is false under bash 4+.
+#
+# Fix for the fix: force `LC_ALL=C` for the scope of this function. That
+# collapses bash 4+'s codepoint-aware string handling back to the
+# single-byte-per-"character" behavior 3.2 has unconditionally, so
+# `${#v}`, `${v:$i:1}`, and `printf '%d' "'$c"` all walk `v` one byte at a
+# time and agree with 3.2 byte-for-byte (verified live: both interpreters
+# produce the identical sign-extended per-byte sequence for multi-byte
+# UTF-8 input once LC_ALL=C is forced). With that in place, `& 0xFF` is
+# undoing sign extension on a BYTE on both interpreters -- the job it was
+# always meant to do -- rather than truncating a codepoint on one of them.
+# This changes no output for ASCII 0x20-0x7E on either interpreter, and no
+# output for non-ASCII on bash 3.2 (which was already byte-wise); the only
+# behavior it changes is bash 4+'s non-ASCII handling, from wrong to
+# matching 3.2.
 # Was the resolver's record stream COMPLETE? (XACA-1066, fifth shape.)
 # The resolver ends every normal path with a bare "END" record. Its ABSENCE means
 # the resolver aborted mid-stream — an encoding error, an unhandled exception, a
@@ -257,10 +309,41 @@ _hr_stream_complete() {
 }
 
 _hr_json_str() {
-    local v="$1"
+    # LC_ALL=C forces byte semantics for the scope of this function on
+    # BOTH bash 3.2 and bash 4+ -- see the comment block above this
+    # function for the full explanation and live-verified numbers. Without
+    # it, bash 4+ in a UTF-8 locale walks `v` one codepoint at a time
+    # instead of one byte at a time, and the `& 0xFF` mask below stops
+    # meaning what it's supposed to mean.
+    local v="$1" out="" n i c ord LC_ALL=C
     v="${v//\\/\\\\}"
     v="${v//\"/\\\"}"
-    printf '%s' "$v"
+    n=${#v}
+    i=0
+    while [ "$i" -lt "$n" ]; do
+        c="${v:$i:1}"
+        case "$c" in
+            $'\t') out="${out}\\t" ;;
+            $'\n') out="${out}\\n" ;;
+            $'\r') out="${out}\\r" ;;
+            $'\b') out="${out}\\b" ;;
+            $'\f') out="${out}\\f" ;;
+            *)
+                # `'$c` is bash's numeric-value-of-first-byte trick; masking
+                # with & 0xFF undoes sign extension for bytes >=0x80 (see
+                # above) so this test only ever fires for the real C0
+                # control range, on both bash 3.2 and bash 4+.
+                ord=$(( $(printf '%d' "'$c") & 0xFF ))
+                if [ "$ord" -lt 32 ]; then
+                    out="${out}$(printf '\\u%04x' "$ord")"
+                else
+                    out="${out}${c}"
+                fi
+                ;;
+        esac
+        i=$((i + 1))
+    done
+    printf '%s' "$out"
 }
 
 _hr_write_state() {
@@ -366,6 +449,19 @@ team_paths_path = os.environ["TEAMPATHS"]
 workdir = os.environ["WORKDIR"]
 filter_team = os.environ.get("FILTERTEAM") or ""
 
+# cfg_path, team_paths_path, and workdir all come from the process
+# environment (CFG/TEAMPATHS/WORKDIR above), and CPython decodes environ
+# values with PEP 383 "surrogateescape": any byte in there that isn't
+# valid UTF-8 becomes a lone surrogate codepoint in the resulting str
+# (e.g. a non-UTF-8 byte in $HOME on a misconfigured locale). That is the
+# SAME unencodable-lone-surrogate shape the ALLOWLIST comment block below
+# documents for JSON-sourced `team`/`args` values -- it just arrives via a
+# different door (the environment, not the config file) and reaches these
+# diagnostics BEFORE the config is even opened, so ALLOWED_CHARS/BAD_CHARS
+# (which only ever see `team`/`args`) cannot intercept it. Every emit()
+# call below that interpolates one of these three variables (or an
+# exception whose message may embed one of them) routes it through
+# _hr_safe_repr() first -- see each site (XACA-1096-014).
 def _sanitize(v):
     # One record per LINE, fields separated by \x1f. Any character that can end a
     # line or a field must not survive INSIDE a field, or the record forks: bash's
@@ -397,7 +493,49 @@ def _sanitize(v):
     # for comparisons already constrained by BAD_CHARS. If you ever add a decode
     # step, make the escape reversible FIRST (escape the backslash too).
     v = str(v)
-    return v.replace("\n", "\\n").replace("\r", "\\r").replace("\x1f", "\\x1f")
+    v = v.replace("\n", "\\n").replace("\r", "\\r").replace("\x1f", "\\x1f")
+    #
+    # ENCODING DEFENSE, MOVED HERE (XACA-1096, round 3 fix). THIS CLASS HAS
+    # RECURRED THREE TIMES ON THIS BRANCH, each time "closed" at a call site
+    # and each time reopened one door over:
+    #   1. The allowlist paths were made surrogate-safe (_hr_safe_repr) while
+    #      the legacy BAD_CHARS branch running AHEAD of them stayed raw.
+    #   2. Two unsafe env-derived emit() sites were reported fixed; auditing
+    #      every call site found eight.
+    #   3. _hr_safe_repr() itself encoded to utf-8 -- surrogate-safe, but not
+    #      ENCODING-safe: utf-8 represents all valid non-ASCII, so a
+    #      perfectly legitimate accented team name passed through untouched
+    #      and only raised later, inside emit(), under a non-UTF-8 stdout
+    #      locale -- moving the failure sideways rather than closing it.
+    #
+    # The fix each round applied more call-site discipline. That is exactly
+    # the shape of a class that keeps recurring: call-site discipline is an
+    # open set, and someone will eventually add a ninth emit() site (or a
+    # tenth) without having read this file's history. So the encode step
+    # that used to live only in _hr_safe_repr() -- ascii with
+    # backslashreplace, the only codec that cannot be weaker than any
+    # stdout encoding this process could have -- now ALSO runs here, at the
+    # one place every emit() field passes through regardless of which
+    # caller produced it. A future emit() call site needs no special
+    # handling any more: safe-repr'd already, or not, ASCII, or not, it
+    # leaves this function encoding-safe either way.
+    #
+    # This does not replace the per-site _hr_safe_repr() calls -- they stay,
+    # deliberately, as belt-and-braces: they run BEFORE a value is spliced
+    # into a hand-built diagnostic string, so a rejection message can still
+    # name the specific offending character with useful '<char>' (U+XXXX)
+    # detail instead of a flat backslash-escape. This function is the
+    # backstop underneath that, not a replacement for it.
+    #
+    # Composition is idempotent -- verified for plain, accented, surrogate,
+    # and tab inputs (safe(safe(x)) == safe(x)) -- so the two layers stack
+    # harmlessly rather than double-escaping. ascii is the identity
+    # transform for all 128 ASCII codepoints (verified exhaustively, not
+    # sampled), so this changes no message any all-ASCII config can
+    # produce, and does not touch \x1e (see above) or the tab character
+    # (ASCII, encodable as-is, and several existing diagnostics rely on it
+    # surviving here unescaped).
+    return v.encode("ascii", "backslashreplace").decode("ascii", "replace")
 
 def _finish(code=0):
     # COMPLETENESS SENTINEL (XACA-1066, fifth shape). The record stream had no
@@ -419,32 +557,92 @@ def _finish(code=0):
 def emit(*fields):
     sys.stdout.write("\x1f".join(_sanitize(f) for f in fields) + "\n")
 
+# Defined here (ahead of ALLOWED_CHARS/_hr_describe_bad_chars further down,
+# which need ALLOWED_CHARS to exist first) because the config-load emit()
+# calls immediately below run BEFORE ALLOWED_CHARS is ever reached and
+# already need it -- see the PEP-383 comment above cfg_path/team_paths_path/
+# workdir for why those three variables specifically require this.
+def _hr_safe_repr(v):
+    # ASCII-safe stand-in for any string that might not survive encoding to
+    # THIS PROCESS'S stdout, for splicing into an emit() diagnostic without
+    # risking a UnicodeEncodeError. `str(v)` first, so this also safely
+    # handles non-string values (ints, exceptions, ...).
+    #
+    # ENCODE TO ascii, NOT utf-8, AND THAT DISTINCTION IS THE WHOLE POINT.
+    # An earlier version used utf-8, which made this function SURROGATE-safe
+    # but not ENCODING-safe: `backslashreplace` only escapes what the target
+    # codec cannot represent, and utf-8 represents all valid non-ASCII, so
+    # "cafeteam" with an e-acute passed through UNTOUCHED. stdout's encoding
+    # comes from the LOCALE, not from this function, so under a non-UTF-8
+    # locale that value then raised inside emit() anyway -- truncating the
+    # record stream and failing the WHOLE restore closed, siblings included.
+    # Measured (PR #821 review round 3): LC_ALL=en_US.US-ASCII, a team value
+    # with one accented character, resolver dead, valid sibling never started.
+    # PEP 538/540 coerce C/POSIX/unset to UTF-8, so this needs an explicitly
+    # non-UTF-8 locale -- low reachability, not zero, and the LaunchAgent
+    # environment is not ours to assume.
+    #
+    # ascii is the only codec that cannot be weaker than stdout's. It is the
+    # identity transform for all 128 ASCII codepoints (verified exhaustively,
+    # not sampled), so no message any inventoried value can produce changes;
+    # a legitimate non-ASCII path in a diagnostic now renders escaped rather
+    # than killing the run, which is the correct trade.
+    #
+    # THIS IS THE THIRD RECURRENCE OF ONE CLASS ON THIS BRANCH: the allowlist
+    # paths were made safe while the legacy branch ahead of them was not; then
+    # 8 env-derived emit() sites were found where 2 were reported; then this.
+    # If you are about to add a fourth exception, the fix is almost certainly
+    # at the protocol boundary (_sanitize/emit), not another call site.
+    return str(v).encode("ascii", "backslashreplace").decode("ascii", "replace")
+
 # ── Load config ──────────────────────────────────────────────────────────
 if not os.path.exists(cfg_path):
-    emit("STATE", "absent", f"no config at {cfg_path}")
+    emit("STATE", "absent", f"no config at {_hr_safe_repr(cfg_path)}")
     _finish(0)
 
 try:
-    with open(cfg_path, "r") as fh:
+    # encoding="utf-8" is REQUIRED, not stylistic. open() otherwise decodes
+    # using the LOCALE's encoding, so under a non-UTF-8 locale a perfectly
+    # valid UTF-8 config raised UnicodeDecodeError HERE -- before validation
+    # ever ran -- truncating the record stream and failing the whole restore
+    # closed. JSON is defined as UTF-8 (RFC 8259), so the locale has no
+    # business deciding how it is read. Every json read in this file is
+    # pinned for the same reason; see _hr_safe_repr for the write half.
+    with open(cfg_path, "r", encoding="utf-8") as fh:
         raw = fh.read()
-except OSError as e:
-    emit("STATE", "malformed_json", f"could not read {cfg_path}: {e}")
+except (OSError, UnicodeDecodeError) as e:
+    # UnicodeDecodeError is NOT an OSError -- it subclasses ValueError -- so
+    # a config file containing byte-invalid UTF-8 (independent of, and just
+    # as reachable as, the locale mismatch the comment above already fixed)
+    # used to fall straight through this handler as an unhandled exception:
+    # raw traceback, no STATE record, no END sentinel, the whole restore
+    # failing closed exactly like every other instance of this ticket's
+    # class rather than landing on the clean "malformed_json" outcome this
+    # code already intends for a syntactically-invalid config (PR #821
+    # review round 4). str(e) on either exception type embeds the filename
+    # (cfg_path) or the raw offending bytes, so the message still needs
+    # _hr_safe_repr -- same as the OSError branch it replaces.
+    emit("STATE", "malformed_json", f"could not read {_hr_safe_repr(cfg_path)}: {_hr_safe_repr(e)}")
     _finish(0)
 
 try:
     doc = json.loads(raw)
 except Exception as e:
-    emit("STATE", "malformed_json", f"{cfg_path}: {e}")
+    emit("STATE", "malformed_json", f"{_hr_safe_repr(cfg_path)}: {_hr_safe_repr(e)}")
     _finish(0)
 
 if not isinstance(doc, dict):
-    emit("STATE", "malformed_root", f"{cfg_path}: root is {type(doc).__name__}, expected object")
+    emit("STATE", "malformed_root", f"{_hr_safe_repr(cfg_path)}: root is {type(doc).__name__}, expected object")
     _finish(0)
 
-emit("STATE", "ok", cfg_path)
+emit("STATE", "ok", _hr_safe_repr(cfg_path))
 
 schema_version = doc.get("schema_version", 1)
-emit("SCHEMA", schema_version)
+# schema_version is attacker/config-controlled JSON, not env-derived --
+# but json.loads happily decodes a "\ud800"-style escape into the same
+# kind of lone surrogate, so it needs the identical safe-repr treatment
+# even though the PEP-383 comment above doesn't apply to it directly.
+emit("SCHEMA", _hr_safe_repr(schema_version))
 
 # lock_after_login — must be a real boolean, else treated as absent -> false.
 lock_raw = doc.get("lock_after_login", False)
@@ -467,7 +665,7 @@ registry_teams = None
 registry_state = "missing"
 if os.path.exists(team_paths_path):
     try:
-        with open(team_paths_path, "r") as fh:
+        with open(team_paths_path, "r", encoding="utf-8") as fh:
             reg_doc = json.load(fh)
         teams = reg_doc.get("teams") if isinstance(reg_doc, dict) else None
         if isinstance(teams, dict):
@@ -479,10 +677,55 @@ if os.path.exists(team_paths_path):
         registry_state = "unparseable"
 emit("REGISTRY", registry_state)
 if registry_state != "ok":
-    emit("WARN", f"team-paths.json ({team_paths_path}) is {registry_state} — gate 2 (runtime-id "
+    # team_paths_path is env-derived (PEP-383 surrogateescape) -- see the
+    # comment above cfg_path/team_paths_path/workdir.
+    emit("WARN", f"team-paths.json ({_hr_safe_repr(team_paths_path)}) is {registry_state} — gate 2 (runtime-id "
                  f"cross-check) skipped for all entries; gate 1 alone decides validity (§3 'Gate 2 "
                  f"failing OPEN')")
 
+# ─────────────────────────────────────────────────────────────────────────
+# VALIDATION: TWO LAYERS, TWO CLOSED REMITS (XACA-1096-005 — owner ruling)
+# ─────────────────────────────────────────────────────────────────────────
+# Subitem -004 proved subsumption exhaustively: all 8 characters in
+# BAD_CHARS (defined just below) are also rejected by ALLOWED_CHARS
+# (defined further below) — checked 8/8. But the relation is STRICT
+# CONTAINMENT, not equivalence: ALLOWED_CHARS additionally rejects 55 of
+# the other 120 ASCII codepoints (comma, space, and '/' among them) plus
+# effectively all non-ASCII. On that evidence alone, BAD_CHARS could be
+# deleted with zero change in accept/reject behavior for every input this
+# resolver has ever seen.
+#
+# The owner ruled to keep it anyway — and gave each layer its own closed
+# remit instead of a shared, growing one:
+#
+#   ALLOWED_CHARS = [A-Za-z0-9._-]  ->  the IDENTIFIER POLICY.
+#     Answers "what is a valid team id / arg?" It is legitimately open to
+#     revision if the fleet's naming conventions ever change — see its own
+#     comment block below for the inventory evidence that backs today's
+#     set, and re-run that inventory before touching it.
+#
+#   BAD_CHARS (below)  ->  PROTOCOL INTEGRITY.
+#     Answers "what breaks the \x1f/\x1e record protocol, or the
+#     hand-built JSON in cmd_restore's summary?" It is CLOSED. It must
+#     never grow a 9th character.
+#
+# THE GUARDRAIL THIS SUBITEM EXISTS TO INSTALL: if you are ever tempted to
+# add a 9th character to BAD_CHARS, that impulse is by definition an
+# ALLOWED_CHARS question, not a BAD_CHARS one. Doing an identifier
+# policy's job with a protocol-integrity denylist is exactly how BAD_CHARS
+# accreted one character per review round across five rounds — with four
+# straight rounds each wrongly declaring "that was the last one" (full
+# history in ALLOWED_CHARS's own comment block below). Take the new
+# character to ALLOWED_CHARS instead, and re-run the inventory that backs
+# it.
+#
+# Why not just delete BAD_CHARS, given the proven subsumption? Because
+# ALLOWED_CHARS is deliberately left open to widen if naming conventions
+# change, and BAD_CHARS is what still stands between the wire protocol and
+# a bad day if someone widens it carelessly. A closed backstop that can
+# never grow is cheap insurance against an open policy that is allowed to.
+# ─────────────────────────────────────────────────────────────────────────
+#
 # Rejects the delimiter set AND the two characters that would break the
 # hand-built JSON fragments in cmd_restore's summary ('"' and backslash).
 # Without those two, a team name containing a double quote produced invalid
@@ -498,6 +741,155 @@ if registry_state != "ok":
 # to preserve, so rejecting at validation is the right layer here.
 BAD_CHARS = set("\t\n\r\x1e\x1f\x00" + chr(34) + chr(92))
 
+# ─────────────────────────────────────────────────────────────────────────
+# ALLOWLIST (XACA-1096-003) — a SECOND, INDEPENDENT layer alongside
+# BAD_CHARS, not a replacement for it. BAD_CHARS is a DENYLIST, and this
+# file's own history is the argument against a denylist as the ONLY
+# defense: it has grown one character at a time across five review rounds
+# (\t \n \r \x1e \x1f \x00 '"' '\\'), and FOUR separate rounds each closed
+# with "that was the last bad character that can break this protocol" —
+# and each was wrong; the fifth shape (the surrogate that still gets
+# through today) is what opened this ticket. A denylist can only enumerate
+# failures somebody has already imagined. An allowlist bounds the INPUT
+# SPACE itself, so the next character nobody has thought of yet is
+# rejected by construction, not by being remembered.
+#
+# XACA-1096-001's inventory measured every value that legitimately reaches
+# `team`/`args` fleet-wide — 3 machines, ~46 files, 4+ months of backups:
+# 30 distinct team ids, 22 decomposed args, 24 distinct characters, ZERO
+# outside [A-Za-z0-9._-]. That set is also a superset of the stricter
+# ^[a-z0-9_]+$ already enforced independently by freelance-connect.sh and
+# install-team.sh, so it does not admit anything those scripts would
+# reject. Do not widen or narrow ALLOWED_CHARS without re-running that
+# inventory — it is the only evidence backing this pattern.
+#
+# PATH-COMPOSITION HARDENING: `team` composes `script_path` later in this
+# same resolver pass, at gate 1 (`os.path.join(workdir,
+# f"{team}-startup.sh")`) — and cmd_restore's bash counterpart composes
+# that same `<workdir>/<team>-startup.sh` shape again independently (its
+# own `script_path="${KB_HOST_READY_WORKING_DIR}/${team}-startup.sh"`) and
+# actually EXECUTES it via `_hr_run_with_deadline`. No BAD_CHARS character
+# was ever '/' — it was never in scope for the wire-protocol problem
+# BAD_CHARS was built to solve — so a `team` value like "../../tmp/evil"
+# passed BAD_CHARS clean and composed a script_path OUTSIDE this script's
+# working directory. ALLOWED_CHARS rejects '/' and closes that shape.
+# Scope this claim correctly: host-ready.json lives under the invoking
+# user's own ~/.aiteamforge/, so anyone able to write it already runs as
+# that user — this is defense in depth against a MISTAKEN or malformed
+# config, NOT a privilege-escalation fix, and must never be described as
+# one.
+#
+# RULING (XACA-1096-005): retirement of BAD_CHARS was fully evaluated, not
+# skipped — -004 proved the exhaustive 8/8 subsumption cited at the top of
+# this validation section — and the owner declined it anyway. Proven-
+# safe-to-remove and worth-removing are different questions; see the
+# "VALIDATION: TWO LAYERS, TWO CLOSED REMITS" block above this file's
+# validation section for why both layers stay, each with its own
+# closed/open remit. BAD_CHARS still owns the specific "does this byte
+# desync the \x1f/\x1e wire protocol" reasoning documented at its own
+# definition above (its \x00 case in particular — silently deleted by
+# bash's command substitution rather than rejected by either layer's
+# character test — is NOT something an allowlist alone would catch on its
+# own terms, since \x00 fails membership in ALLOWED_CHARS the same as any
+# other character, but the REASON it must be rejected is protocol-specific
+# and belongs to BAD_CHARS, permanently). ALLOWED_CHARS is not "defense in
+# depth on top of" BAD_CHARS the way an earlier draft of this comment
+# described it — the relationship is the other way round: ALLOWED_CHARS is
+# the primary, revisable identifier policy, and BAD_CHARS is the closed,
+# never-widen protocol-integrity backstop underneath it.
+#
+# THE SURROGATE TRAP — why the diagnostic itself has to be encoded before
+# it reaches emit(), not just the fact that it was rejected:
+#
+# An allowlist DETECTS an unpaired surrogate character-by-character (e.g.
+# "\ud800bad" fails membership immediately on its first character) — but
+# naively reporting *which* value or character failed by interpolating it
+# VERBATIM into the rejection message reintroduces the exact fifth shape
+# this ticket exists to close. Measured: emitting str(team) raw for a
+# value containing "\ud800" raises UnicodeEncodeError ("surrogates not
+# allowed") from INSIDE emit() itself, uncaught anywhere in this loop,
+# which aborts the python3 process mid-stream. That is indistinguishable
+# from the resolver dying for any other reason — _hr_stream_complete()
+# correctly fails closed on it — but a loud, DIAGNOSABLE rejection was the
+# entire point of adding this layer, and instead you get a truncated
+# stream and the root incident again, just wearing an allowlist's clothes.
+#
+# So every rejection diagnostic below -- INCLUDING the legacy BAD_CHARS branch,
+# which runs first and is therefore the one that actually had to be fixed --
+# routes the offending value AND any
+# per-character detail through _hr_safe_repr()/_hr_describe_bad_chars()
+# before it is spliced into an emit() call. `.encode("utf-8",
+# "backslashreplace").decode("utf-8", "replace")` round-trips every
+# legitimate Unicode character back to itself (verified: 'é' -> 'é', an
+# emoji -> itself) and turns ONLY an unencodable lone surrogate into a
+# literal, ASCII-safe backslash-u escape (verified: '\ud800' -> '\\ud800')
+# — so operator-facing diagnostics stay readable for real Unicode while
+# still never being able to raise. This is load-bearing, not cosmetic: an
+# allowlist whose own diagnostic can crash the resolver is not a fix, it's
+# a second way to trigger the same bug.
+ALLOWED_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789._-"
+)
+
+# _hr_safe_repr() is defined earlier in this script (right after emit()),
+# because the config-load emit() calls above ALLOWED_CHARS also need it —
+# see the comment there.
+
+def _hr_is_allowed(c):
+    # THE one definition of ALLOWED_CHARS membership (XACA-1096-013). Three
+    # call sites each independently wrote `c not in ALLOWED_CHARS` — the
+    # `team` check, the `args` bad-value search, and this file's own
+    # _hr_describe_bad_chars scan below — so a future change to what
+    # ALLOWED_CHARS means could be applied to only two of the three. Route
+    # all three through this single predicate (directly, or via
+    # _hr_first_bad below) instead.
+    return c in ALLOWED_CHARS
+
+def _hr_first_bad(s):
+    # First character in s that fails _hr_is_allowed, or None if s is
+    # entirely clean. Used by the `team` check and the `args` bad-value
+    # search, which only need a yes/no answer — see _hr_is_allowed.
+    for c in s:
+        if not _hr_is_allowed(c):
+            return c
+    return None
+
+def _hr_describe_bad_chars(s):
+    # Distinct disallowed characters in s, in first-seen order, each as
+    # 'char' (U+XXXX) with the character itself passed through
+    # _hr_safe_repr() first. Used to make a rejection name the SPECIFIC
+    # character(s) that failed, not just "rejected", per XACA-1096-003.
+    #
+    # `seen` stays a list because the ORDER is deliberate (diagnostics
+    # report characters in the order first encountered); `seen_set` is a
+    # parallel set used ONLY for the membership test, so a pathological
+    # input with many distinct disallowed characters doesn't pay an O(n)
+    # list scan per character (XACA-1096-012). Both are updated together.
+    seen = []
+    seen_set = set()
+    for c in s:
+        if not _hr_is_allowed(c) and c not in seen_set:
+            seen.append(c)
+            seen_set.add(c)
+    return ", ".join(f"'{_hr_safe_repr(c)}' (U+{ord(c):04X})" for c in seen)
+
+def _hr_describe_chars_in(s, badset):
+    # Generalizes _hr_describe_bad_chars() above to an explicit character
+    # set rather than ALLOWED_CHARS-non-membership, so the legacy BAD_CHARS
+    # branch (XACA-1096-015) can report the SAME '<char>' (U+XXXX) style
+    # detail the allowlist branches already give, without depending on
+    # ALLOWED_CHARS at all. Same first-seen ordering / seen_set dedup
+    # rationale as _hr_describe_bad_chars.
+    seen = []
+    seen_set = set()
+    for c in s:
+        if c in badset and c not in seen_set:
+            seen.append(c)
+            seen_set.add(c)
+    return ", ".join(f"'{_hr_safe_repr(c)}' (U+{ord(c):04X})" for c in seen)
+
 for idx, entry in enumerate(autostart_raw):
     if not isinstance(entry, dict):
         emit("ENTRY", idx, "SKIP", "", "", "", "FAIL", "SKIPPED", f"entry {idx} is not an object")
@@ -507,14 +899,73 @@ for idx, entry in enumerate(autostart_raw):
     args = entry.get("args", [])
 
     if not isinstance(team, str) or not team or any(c in BAD_CHARS for c in team):
-        emit("ENTRY", idx, "SKIP", str(team), "", "", "FAIL", "SKIPPED", f"entry {idx}: 'team' missing or not a clean string")
+        # XACA-1096 (PR #821, both gate bots, independently): this legacy branch
+        # runs BEFORE the allowlist check below, so it -- not the allowlist -- is
+        # the first emit any rejected `team` reaches. It emitted str(team) RAW,
+        # so a value carrying BOTH an unpaired surrogate AND any BAD_CHARS
+        # character (e.g. "a\ud800\tb") never reached the safe path: emit()
+        # raised UnicodeEncodeError, the stream truncated, and the END sentinel
+        # correctly failed the WHOLE restore closed -- taking unrelated sibling
+        # teams down with it. That is the XACA-1066 root incident, reachable
+        # through the one path the surrogate-safe work had not covered.
+        # _hr_safe_repr() is the identity transform for every ASCII value, so
+        # this changes no message any real config can produce.
+        emit("ENTRY", idx, "SKIP", _hr_safe_repr(team), "", "", "FAIL", "SKIPPED", f"entry {idx}: 'team' missing or not a clean string")
+        continue
+
+    if _hr_first_bad(team) is not None:
+        emit("ENTRY", idx, "SKIP", _hr_safe_repr(team), "", "", "FAIL", "SKIPPED",
+             f"entry {idx}: 'team' value '{_hr_safe_repr(team)}' rejected by allowlist "
+             f"[A-Za-z0-9._-]: disallowed character(s) {_hr_describe_bad_chars(team)}")
         continue
 
     if filter_team and team != filter_team:
         continue
 
-    if not isinstance(args, list) or not all(isinstance(a, str) and a and not any(c in BAD_CHARS for c in a) for a in args):
+    if not isinstance(args, list):
         emit("ENTRY", idx, "SKIP", team, "", "", "FAIL", "SKIPPED", f"entry {idx} ({team}): 'args' must be an array of clean strings")
+        continue
+
+    # XACA-1096-015: this legacy BAD_CHARS branch used to report only "'args'
+    # must be an array of clean strings" -- naming neither the arg INDEX, nor
+    # its VALUE, nor the offending CHARACTER, unlike the allowlist branch
+    # further below (which names all three, and unlike the `team` BAD_CHARS
+    # branch above, whose offending value is at least visible via the
+    # `($team)` / ENTRY-row rendering downstream). Bring it to parity using
+    # the same surrogate-safe helpers (_hr_safe_repr / _hr_describe_chars_in)
+    # the allowlist branch already relies on. The ORIGINAL substring is kept
+    # verbatim and first, so nothing downstream that pins it breaks; the
+    # detail is appended after it.
+    _bad_char_arg = next(
+        (
+            (a_idx, a)
+            for a_idx, a in enumerate(args)
+            if not isinstance(a, str) or not a or any(c in BAD_CHARS for c in a)
+        ),
+        None,
+    )
+    if _bad_char_arg is not None:
+        a_idx, a_val = _bad_char_arg
+        if isinstance(a_val, str) and a_val:
+            emit("ENTRY", idx, "SKIP", team, "", "", "FAIL", "SKIPPED",
+                 f"entry {idx} ({team}): 'args' must be an array of clean strings: "
+                 f"args[{a_idx}] value '{_hr_safe_repr(a_val)}' contains disallowed "
+                 f"character(s) {_hr_describe_chars_in(a_val, BAD_CHARS)}")
+        else:
+            emit("ENTRY", idx, "SKIP", team, "", "", "FAIL", "SKIPPED",
+                 f"entry {idx} ({team}): 'args' must be an array of clean strings: "
+                 f"args[{a_idx}] is missing or not a clean string")
+        continue
+
+    _bad_arg = next(
+        ((a_idx, a) for a_idx, a in enumerate(args) if _hr_first_bad(a) is not None),
+        None,
+    )
+    if _bad_arg is not None:
+        a_idx, a_val = _bad_arg
+        emit("ENTRY", idx, "SKIP", team, "", "", "FAIL", "SKIPPED",
+             f"entry {idx} ({team}): 'args[{a_idx}]' value '{_hr_safe_repr(a_val)}' rejected by "
+             f"allowlist [A-Za-z0-9._-]: disallowed character(s) {_hr_describe_bad_chars(a_val)}")
         continue
 
     args_packed = "\x1e".join(args)
@@ -538,7 +989,11 @@ for idx, entry in enumerate(autostart_raw):
     else:
         reason_bits = []
         if gate1 == "FAIL":
-            reason_bits.append(f"gate1 FAIL: {script_path} not found/readable")
+            # script_path embeds workdir, which is env-derived (PEP-383
+            # surrogateescape) -- see the comment above cfg_path/
+            # team_paths_path/workdir. `team` itself is already known safe
+            # here (it passed ALLOWED_CHARS above), but workdir is not.
+            reason_bits.append(f"gate1 FAIL: {_hr_safe_repr(script_path)} not found/readable")
         if gate2 == "FAIL":
             reason_bits.append(f"gate2 FAIL: derived prefix '{prefix}' not in team-paths.json .teams")
         emit("ENTRY", idx, "SKIP", team, args_packed, prefix, gate1, gate2, "; ".join(reason_bits))
@@ -1230,19 +1685,34 @@ import json, os, sys
 path = os.environ["TEAMMACHINES"]
 host = os.environ["HOSTNAME_LOWER"].lower()
 
+# XACA-1096-017: `path` is env-derived (PEP-383 surrogateescape -- same door
+# as cfg_path/team_paths_path/workdir in the resolver heredoc above, just a
+# separate python3 process, so it needs its own copy of the same helper) and
+# `e`'s message can embed it too. This heredoc is its OWN process, entirely
+# independent of the resolver's `_hr_safe_repr()` -- defining a matching
+# helper here is what closes this specific instance, since the resolver's
+# fix cannot reach across a process boundary. Not currently reachable on
+# APFS (os.path.exists() is always False for a surrogate-laden path, and
+# open() raises OSError "Illegal byte sequence" before reaching here) --
+# this is consistency work, not a live bug, but closing a known-open
+# instance now is how a future refactor or a non-APFS mount does not become
+# recurrence #4.
+def _suggest_safe_repr(v):
+    return str(v).encode("ascii", "backslashreplace").decode("ascii", "replace")
+
 if not os.path.exists(path):
     print(json.dumps({"schema_version": 1, "autostart": [], "lock_after_login": False}, indent=2))
     sys.exit(0)
 
 try:
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
 except Exception as e:
-    sys.stderr.write(f"suggest: could not parse {path}: {e}\n")
+    sys.stderr.write(f"suggest: could not parse {_suggest_safe_repr(path)}: {_suggest_safe_repr(e)}\n")
     sys.exit(1)
 
 if not isinstance(doc, dict):
-    sys.stderr.write(f"suggest: {path} root is not an object\n")
+    sys.stderr.write(f"suggest: {_suggest_safe_repr(path)} root is not an object\n")
     sys.exit(1)
 
 # §0.2 shapes, by known team id.
