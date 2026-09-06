@@ -106,3 +106,5 @@ test-xaca-0925-persona-refresh.sh               plain-shell
 test-xaca-1095-017-helpers-drift-check.sh       plain-shell
 test-xaca-1095-atomic-install-and-render-guard.sh plain-shell
 test-xaca-1095-helpers-template-preference.sh   plain-shell
+test-xaca-1097-doctor-phantom-deps.sh           plain-shell
+test-xaca-1097-launchagent-disabled-autofix.sh  plain-shell

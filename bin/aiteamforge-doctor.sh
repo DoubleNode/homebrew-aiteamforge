@@ -201,10 +201,14 @@ check_result() {
 #      present install (measured: brew Cellar node v26, not the Herd/nvm
 #      v22 a real Terminal session actually runs). Using -l alone would
 #      silently report the tool a user does not use — a subtler version of
-#      the same lie this defect exists to fix. Memoized PROCESS-WIDE via the
-#      _X1097_LOGIN_PATH* globals below (set on first call — an unqualified
-#      assignment inside a bash function auto-globals) to ONE subshell spawn
-#      for the whole doctor run, not one per tool and not one per caller.
+#      the same lie this defect exists to fix. Probed at most ONCE per run,
+#      but NOT by a first-call flag set inside this function: every call site
+#      is `var="$(_x1097_resolve tool)"`, and command substitution forks, so
+#      such a flag would die in the throwaway subshell (measured: 7 spawns).
+#      The priming is done EAGERLY IN PARENT SCOPE by
+#      _x1097_prime_login_path(), called directly as the first statement of
+#      check_dependencies(); the globals it sets are inherited by each
+#      capture subshell at fork time. See its own header block below.
 #   3. Explicit prefix fallback (/opt/homebrew/bin, /usr/local/bin,
 #      ~/.local/bin) for the launchd/daemon case where $SHELL/profile
 #      startup itself is unavailable or fails.
@@ -216,6 +220,116 @@ check_result() {
 # Usage: _x1097_resolve <tool-name>. Prints the resolved absolute path on
 # stdout and returns 0; prints nothing and returns 1 if not found anywhere.
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1097-019: eager, PARENT-SCOPE priming of the login-shell PATH probe.
+#
+# Every call site below is `var="$(_x1097_resolve tool)"` — command
+# substitution ALWAYS forks a subshell, so a readiness flag set *inside*
+# _x1097_resolve() only ever lands in that throwaway subshell and is
+# invisible to the parent and to every sibling call (each of which forks its
+# OWN fresh subshell). A comment on this function used to claim the probe
+# below was memoized "to ONE subshell spawn" — measured instead: 7 real
+# `$SHELL -ilc` spawns in a single check_dependencies() run (one per tool),
+# ~2.6s each here, ~18s added per doctor invocation. The comment described
+# behavior the code did not have.
+#
+# Fix: this function is called DIRECTLY (never via `$( )`) as the very first
+# statement of check_dependencies(), before any _x1097_resolve call. A
+# direct call runs in the CALLER's shell — check_dependencies() itself is
+# invoked as a plain statement from the top-level script/case block, never
+# inside a subshell — so the _X1097_LOGIN_PATH*/globals set here persist in
+# the main script process for the rest of the run. Every _x1097_resolve call
+# still forks its own subshell for its `$( )` capture, but each subshell
+# INHERITS the already-primed globals from the parent at fork time, so this
+# function's own readiness guard (below) sees them as ready and returns
+# immediately without spawning anything.
+#
+# A caller that reaches _x1097_resolve() without going through
+# check_dependencies() first still degrades safely: _x1097_resolve() calls
+# this function itself as a fallback, so the probe still runs — once,
+# inside that one subshell — rather than being silently skipped. (The
+# libexec/commands/ copy of this file has an extra such caller, its
+# standalone `--fix venv` remediation path, which bin/ does not define.)
+# ─────────────────────────────────────────────────────────────────────────────
+_x1097_prime_login_path() {
+  [ "${_X1097_LOGIN_PATH_READY:-false}" = true ] && return 0
+  _X1097_LOGIN_PATH=""
+  if [ -n "${SHELL:-}" ] && [ -x "${SHELL:-}" ]; then
+    # XACA-1097-017: bounded, bash-3.2-safe probe. Do NOT assume
+    # `timeout`/`gtimeout` exist -- macOS ships neither by default
+    # (`timeout(1)` isn't a stock macOS tool at all, and `gtimeout` is a
+    # coreutils add-on most boxes won't have). Without a bound, a
+    # pathological or merely slow ~/.zshrc/~/.bashrc stalls EVERY tool
+    # resolution below with no ceiling, in the exact tool people reach
+    # for when something is already broken. Measured 0.55s for a normal
+    # shell on this machine; the default below gives ~9x headroom before
+    # giving up and falling back to the static prefix list (stage 3)
+    # only. Poll granularity is 1s (`sleep 1`) so the bound is an upper
+    # limit, not exact to the second -- both are portable on bash 3.2.
+    local _x1097_probe_timeout="${AITEAMFORGE_LOGIN_PROBE_TIMEOUT_SECS:-5}"
+    local _x1097_probe_tmpfile _x1097_probe_pid _x1097_probe_elapsed=0
+    # XACA-1097-019: the probe's PATH payload is bracketed by a unique
+    # marker line; extraction below takes ONLY "the line immediately after
+    # the marker" — never "the first line" and never "the whole captured
+    # blob". The entire `$SHELL -ilc` invocation's stdout lands in this
+    # tmpfile, so a chatty ~/.zshrc/~/.bashrc that prints so much as one
+    # banner line during shell startup shares the file with the real PATH
+    # payload. The marker anchor makes that banner noise inert no matter
+    # how many lines it spans. (A prior version of this probe read the raw
+    # blob with `read`, which stops at the FIRST newline — a single banner
+    # line ahead of the payload silently discarded the ENTIRE real PATH,
+    # falling back to the static 3-prefix list with no indication anything
+    # was lost. Measured: quiet rc resolves correctly; one banner line ->
+    # MISS on every tool outside that static list.)
+    local _x1097_probe_marker="__AITEAMFORGE_X1097_PATH_$$__"
+    _x1097_probe_tmpfile="$(mktemp "${TMPDIR:-/tmp}/x1097-loginpath.XXXXXXXX" 2>/dev/null || true)"
+    if [ -n "$_x1097_probe_tmpfile" ]; then
+      # `set -m` puts the backgrounded subshell in its OWN process group
+      # (pgid == its own pid) instead of inheriting this script's pgid, so
+      # the timeout branch below can reap the ENTIRE group — not just the
+      # direct child — via `kill -- -PID`. Without this, a slow rc file
+      # that itself spawns children (a background job, a version-manager
+      # hook, a network probe) leaves those GRANDCHILDREN alive and
+      # reparented to PID 1 the moment only the direct child is killed
+      # (measured).
+      (
+        set -m
+        "$SHELL" -ilc "printf '%s\n' '$_x1097_probe_marker'; printf '%s' \"\$PATH\"" \
+          >"$_x1097_probe_tmpfile" 2>/dev/null
+      ) &
+      _x1097_probe_pid=$!
+      while [ "$_x1097_probe_elapsed" -lt "$_x1097_probe_timeout" ] && kill -0 "$_x1097_probe_pid" 2>/dev/null; do
+        sleep 1
+        _x1097_probe_elapsed=$((_x1097_probe_elapsed + 1))
+      done
+      if kill -0 "$_x1097_probe_pid" 2>/dev/null; then
+        # Still running past the bound: explicit fallback, never silent
+        # -- a stderr note so a stalled shell-startup file is visible
+        # instead of doctor just mysteriously "going slow". Kill the
+        # WHOLE process group (negative PID), then escalate to SIGKILL for
+        # anything that ignored SIGTERM -- see the `set -m` note above for
+        # why a bare `kill "$pid"` alone leaks grandchildren.
+        kill -TERM -- "-$_x1097_probe_pid" 2>/dev/null
+        sleep 0.2
+        kill -KILL -- "-$_x1097_probe_pid" 2>/dev/null
+        wait "$_x1097_probe_pid" 2>/dev/null
+        echo "aiteamforge doctor: login-shell PATH probe (\$SHELL -ilc) exceeded ${_x1097_probe_timeout}s and was aborted -- falling back to the static prefix list only (/opt/homebrew/bin, /usr/local/bin, \$HOME/.local/bin). A tool installed elsewhere (nvm, Herd, a version manager) may be misreported as missing. Check \$SHELL's startup files (~/.zshrc, ~/.bashrc, etc.) for something slow or hanging." >&2
+      else
+        wait "$_x1097_probe_pid" 2>/dev/null
+        # Extract ONLY the line immediately following the marker line (see
+        # the marker-anchoring note above). `awk`, not `read`/`cat` on the
+        # raw blob, so banner noise before OR after the marker is inert.
+        _X1097_LOGIN_PATH="$(awk -v marker="$_x1097_probe_marker" '
+            found { print; exit }
+            $0 == marker { found = 1 }
+          ' "$_x1097_probe_tmpfile" 2>/dev/null)"
+      fi
+      rm -f "$_x1097_probe_tmpfile"
+    fi
+  fi
+  _X1097_LOGIN_PATH_READY=true
+}
+
 _x1097_resolve() {
   local tool="$1" resolved dir
 
@@ -225,46 +339,7 @@ _x1097_resolve() {
     return 0
   fi
 
-  if [ "${_X1097_LOGIN_PATH_READY:-false}" != true ]; then
-    _X1097_LOGIN_PATH=""
-    if [ -n "${SHELL:-}" ] && [ -x "${SHELL:-}" ]; then
-      # XACA-1097-017: bounded, bash-3.2-safe probe. Do NOT assume
-      # `timeout`/`gtimeout` exist -- macOS ships neither by default
-      # (`timeout(1)` isn't a stock macOS tool at all, and `gtimeout` is a
-      # coreutils add-on most boxes won't have). Without a bound, a
-      # pathological or merely slow ~/.zshrc/~/.bashrc stalls EVERY tool
-      # resolution below with no ceiling, in the exact tool people reach
-      # for when something is already broken. Measured 0.55s for a normal
-      # shell on this machine; the default below gives ~9x headroom before
-      # giving up and falling back to the static prefix list (stage 3)
-      # only. Poll granularity is 1s (`sleep 1`) so the bound is an upper
-      # limit, not exact to the second -- both are portable on bash 3.2.
-      local _x1097_probe_timeout="${AITEAMFORGE_LOGIN_PROBE_TIMEOUT_SECS:-5}"
-      local _x1097_probe_tmpfile _x1097_probe_pid _x1097_probe_elapsed=0
-      _x1097_probe_tmpfile="$(mktemp "${TMPDIR:-/tmp}/x1097-loginpath.XXXXXXXX" 2>/dev/null || true)"
-      if [ -n "$_x1097_probe_tmpfile" ]; then
-        ( "$SHELL" -ilc 'printf %s "$PATH"' >"$_x1097_probe_tmpfile" 2>/dev/null ) &
-        _x1097_probe_pid=$!
-        while [ "$_x1097_probe_elapsed" -lt "$_x1097_probe_timeout" ] && kill -0 "$_x1097_probe_pid" 2>/dev/null; do
-          sleep 1
-          _x1097_probe_elapsed=$((_x1097_probe_elapsed + 1))
-        done
-        if kill -0 "$_x1097_probe_pid" 2>/dev/null; then
-          # Still running past the bound: explicit fallback, never silent
-          # -- a stderr note so a stalled shell-startup file is visible
-          # instead of doctor just mysteriously "going slow".
-          kill "$_x1097_probe_pid" 2>/dev/null
-          wait "$_x1097_probe_pid" 2>/dev/null
-          echo "aiteamforge doctor: login-shell PATH probe (\$SHELL -ilc) exceeded ${_x1097_probe_timeout}s and was aborted -- falling back to the static prefix list only (/opt/homebrew/bin, /usr/local/bin, \$HOME/.local/bin). A tool installed elsewhere (nvm, Herd, a version manager) may be misreported as missing. Check \$SHELL's startup files (~/.zshrc, ~/.bashrc, etc.) for something slow or hanging." >&2
-        else
-          wait "$_x1097_probe_pid" 2>/dev/null
-          _X1097_LOGIN_PATH="$(cat "$_x1097_probe_tmpfile" 2>/dev/null)"
-        fi
-        rm -f "$_x1097_probe_tmpfile"
-      fi
-    fi
-    _X1097_LOGIN_PATH_READY=true
-  fi
+  _x1097_prime_login_path
 
   if [ -n "${_X1097_LOGIN_PATH:-}" ]; then
     local _dirs=()
@@ -301,6 +376,12 @@ echo ""
 
 # Check dependencies
 check_dependencies() {
+  # XACA-1097-019: prime the login-shell PATH probe ONCE, here, as a direct
+  # (non-`$( )`) call in this function's own (parent) scope — see
+  # _x1097_prime_login_path()'s header comment for why this specific call
+  # site is what makes the memoization actually take effect process-wide.
+  _x1097_prime_login_path
+
   echo -e "${CYAN}Checking external dependencies...${NC}"
   echo ""
 

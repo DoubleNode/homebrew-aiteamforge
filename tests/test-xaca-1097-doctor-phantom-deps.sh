@@ -217,6 +217,14 @@ grep -q '^check_result()' "$BIN_DOCTOR" || _block_note_fail "bin/aiteamforge-doc
 # nesting it inside check_dependencies() is caught here rather than by the
 # extraction below silently going empty.
 grep -q '^_x1097_resolve()' "$BIN_DOCTOR" || _block_note_fail "bin/aiteamforge-doctor.sh no longer defines _x1097_resolve() at file scope — sed-range extraction below would go silently empty"
+# XACA-1097-019 hardening: the login-PATH probe was split out of
+# _x1097_resolve() into its own file-scope function, _x1097_prime_login_path(),
+# so it can be called EAGERLY (and directly, never via `$( )`) as the first
+# statement of check_dependencies() -- that is what makes the memoization
+# genuinely take effect process-wide instead of being reset every subshell.
+# It must stay at file scope (same rationale as _x1097_resolve() above) or
+# the sandboxed extraction below goes silently empty/undefined.
+grep -q '^_x1097_prime_login_path()' "$BIN_DOCTOR" || _block_note_fail "bin/aiteamforge-doctor.sh no longer defines _x1097_prime_login_path() at file scope — sed-range extraction below would go silently empty, and _x1097_resolve()/check_dependencies() would call an undefined function"
 for _marker in "Node.js" "GitHub CLI" "Claude Code" "Git (" "not found"; do
     grep -qF -- "$_marker" "$BIN_DOCTOR" || _block_note_fail "bin/aiteamforge-doctor.sh no longer contains marker [$_marker] this suite's assertions depend on"
 done
@@ -229,6 +237,10 @@ echo "    (informational, not asserted) libexec/commands/aiteamforge-doctor.sh: 
 grep -q '^check_dependencies()' "$LIBEXEC_DOCTOR" || _block_note_fail "libexec/commands/aiteamforge-doctor.sh no longer defines check_dependencies() — sed-range extraction below would go silently empty"
 grep -q '^check_result()' "$LIBEXEC_DOCTOR" || _block_note_fail "libexec/commands/aiteamforge-doctor.sh no longer defines check_result() — sed-range extraction below would go silently empty"
 grep -q '^_x1097_resolve()' "$LIBEXEC_DOCTOR" || _block_note_fail "libexec/commands/aiteamforge-doctor.sh no longer defines _x1097_resolve() at file scope — sed-range extraction below would go silently empty"
+# XACA-1097-019 hardening: see the matching bin/ grounding block above for
+# the full rationale -- the login-PATH probe now lives in its own file-scope
+# function so it can be primed eagerly, outside any `$( )` subshell.
+grep -q '^_x1097_prime_login_path()' "$LIBEXEC_DOCTOR" || _block_note_fail "libexec/commands/aiteamforge-doctor.sh no longer defines _x1097_prime_login_path() at file scope — sed-range extraction below would go silently empty, and _x1097_resolve()/check_dependencies() would call an undefined function"
 # XACA-1097-016 hardening: fail loudly if the OLD brew-only helper name
 # reappears (or a nested duplicate resolver is reintroduced) -- both would
 # be a regression back to the two-helpers-per-file drift this fix removed.
@@ -282,9 +294,20 @@ mkdir -p "$SANDBOX"
 # would call an undefined _x1097_resolve and crash -- exactly the failure
 # mode the file-scope-vs-nested design comment in both doctor copies warns
 # about.
+#
+# XACA-1097-019: _x1097_resolve() itself now delegates its login-PATH probe
+# to a SEPARATE file-scope function, _x1097_prime_login_path() (split out so
+# check_dependencies() can call it eagerly, directly, before any `$( )`
+# subshell -- see that function's header comment in both doctor copies for
+# why). It must be extracted here too, ordered BEFORE _x1097_resolve() (which
+# calls it) and BEFORE check_dependencies() (which also calls it directly as
+# its first statement) -- both would otherwise call an undefined function in
+# the sandboxed source.
 BIN_EXTRACT="$SANDBOX/bin-check-dependencies.sh"
 {
     sed -n '/^check_result()/,/^}/p' "$BIN_DOCTOR"
+    echo
+    sed -n '/^_x1097_prime_login_path()/,/^}/p' "$BIN_DOCTOR"
     echo
     sed -n '/^_x1097_resolve()/,/^}/p' "$BIN_DOCTOR"
     echo
@@ -294,6 +317,8 @@ BIN_EXTRACT="$SANDBOX/bin-check-dependencies.sh"
 LIBEXEC_EXTRACT="$SANDBOX/libexec-check-dependencies.sh"
 {
     sed -n '/^check_result()/,/^}/p' "$LIBEXEC_DOCTOR"
+    echo
+    sed -n '/^_x1097_prime_login_path()/,/^}/p' "$LIBEXEC_DOCTOR"
     echo
     sed -n '/^_x1097_resolve()/,/^}/p' "$LIBEXEC_DOCTOR"
     echo
@@ -318,25 +343,81 @@ REAL_NODE="$(command -v node 2>/dev/null || true)"
 REAL_GH="$(command -v gh 2>/dev/null || true)"
 REAL_CLAUDE="$(command -v claude 2>/dev/null || true)"
 
-_block_start "sanity: node/gh/claude genuinely exist on disk (ambient/login-shell resolution, not a hardcoded directory guess)"
-[ -n "$REAL_NODE" ] && [ -x "$REAL_NODE" ] || _block_note_fail "fixture broken: no real 'node' binary resolvable on this machine at all"
-[ -n "$REAL_GH" ] && [ -x "$REAL_GH" ] || _block_note_fail "fixture broken: no real 'gh' binary resolvable on this machine at all"
-[ -n "$REAL_CLAUDE" ] && [ -x "$REAL_CLAUDE" ] || _block_note_fail "fixture broken: no real 'claude' binary resolvable on this machine at all"
+# XACA-1097-019 hardening (CI portability, review finding on PR #824): the
+# original version of this block hard-REQUIRED all three of node/gh/claude
+# to exist on disk, and hard-REQUIRED the ambient node path specifically to
+# contain a space and sit outside three named directories. Both were true on
+# the M3Pro dev box this suite was drafted on, and NEITHER is guaranteed
+# elsewhere: `claude` is a niche third-party CLI the CI job's `brew install
+# jq bash tmux` step never installs, and a CI runner's node (however it got
+# there) has no particular reason to live under a space-containing path the
+# way this box's Herd/nvm install happens to.
+#
+# Every probe below is now CONDITIONAL: present -> assert against it;
+# absent -> print a loud, unambiguous SKIP line and make NO assertion for
+# that tool. A skip must never be able to masquerade as a pass -- these are
+# not `assert_*` calls returning true on an empty haystack, they are `echo`
+# lines that run INSTEAD of an assertion, so nothing is silently satisfied.
+# On THIS dev box all three tools are present and the space-containing case
+# is real, so every conditional below still fires and the suite still
+# DISCRIMINATES exactly as before (see the per-tool "must not report ...
+# missing" blocks below, which are the actual regression check and are
+# gated the same way).
+_x1097_test_present_tools=""
+[ -n "$REAL_NODE" ]   && _x1097_test_present_tools="${_x1097_test_present_tools}node "
+[ -n "$REAL_GH" ]     && _x1097_test_present_tools="${_x1097_test_present_tools}gh "
+[ -n "$REAL_CLAUDE" ] && _x1097_test_present_tools="${_x1097_test_present_tools}claude "
+
+_block_start "sanity: at least one of node/gh/claude genuinely exists on disk (ambient/login-shell resolution, not a hardcoded directory guess) -- per-tool checks below are conditional, not hard-required"
+if [ -n "$REAL_NODE" ]; then
+    [ -x "$REAL_NODE" ] || _block_note_fail "fixture broken: 'command -v node' resolved to ${REAL_NODE} but it is not executable"
+else
+    echo "    SKIP: node not resolvable on this machine/runner -- the phantom-missing assertion for node below will also skip"
+fi
+if [ -n "$REAL_GH" ]; then
+    [ -x "$REAL_GH" ] || _block_note_fail "fixture broken: 'command -v gh' resolved to ${REAL_GH} but it is not executable"
+else
+    echo "    SKIP: gh not resolvable on this machine/runner -- the phantom-missing assertion for gh below will also skip"
+fi
+if [ -n "$REAL_CLAUDE" ]; then
+    [ -x "$REAL_CLAUDE" ] || _block_note_fail "fixture broken: 'command -v claude' resolved to ${REAL_CLAUDE} but it is not executable"
+else
+    echo "    SKIP: claude not resolvable on this machine/runner (expected in CI -- it is a third-party CLI the test job never installs) -- the phantom-missing assertion for claude below will also skip"
+fi
+# A run where ALL THREE are absent tests nothing beyond the "Git (" marker
+# below -- that is a genuinely broken/pathological runner (git/jq/python3
+# are always present via Apple's /usr/bin stubs; node and gh ship on
+# GitHub's macos-latest image by default), not merely "no claude". Fail
+# loudly rather than let a fully-skipped run report success on assertions
+# it never made.
+[ -n "$_x1097_test_present_tools" ] || _block_note_fail "fixture provides ZERO phantom-deps candidates (node, gh, AND claude all unresolvable) -- this suite cannot exercise its core assertion on this runner at all; investigate the runner/PATH, this is not just 'claude is absent'"
 _block_end
 
-_block_start "widened requirement: ambient node path is evidence a fixed 3-directory candidate list is insufficient"
-case "$REAL_NODE" in
-    *" "*) : ;; # contains a space, as expected/measured — no action
-    *) echo "    (informational) ambient node path has no space on this run: $REAL_NODE" ;;
-esac
-assert_not_contains "$REAL_NODE" "/opt/homebrew/bin/" \
-    "expected the ambient-resolved node to sit OUTSIDE /opt/homebrew/bin on this machine (measured Herd/nvm path) — if this fails, this run's environment no longer demonstrates the widened case (a stock Homebrew-only node), re-verify before trusting the rest of this block"
-assert_not_contains "$REAL_NODE" "/usr/local/bin/" \
-    "expected the ambient-resolved node to sit OUTSIDE /usr/local/bin on this machine"
-assert_not_contains "$REAL_NODE" "$HOME/.local/bin/" \
-    "expected the ambient-resolved node to sit OUTSIDE ~/.local/bin on this machine"
-assert_contains "$REAL_NODE" " " \
-    "expected the ambient-resolved node path to contain a space (measured Herd 'Application Support' path) — a resolver that word-splits an unquoted path will break on this"
+_block_start "widened requirement: IF any probed tool's ambient path contains a space, the resolver must still be exercised against a candidate outside the 3 static directories"
+_X1097_SPACE_TOOL=""
+_X1097_SPACE_PATH=""
+for _x1097_pair in "node:$REAL_NODE" "gh:$REAL_GH" "claude:$REAL_CLAUDE"; do
+    _x1097_cand_name="${_x1097_pair%%:*}"
+    _x1097_cand_path="${_x1097_pair#*:}"
+    case "$_x1097_cand_path" in
+        *" "*)
+            _X1097_SPACE_TOOL="$_x1097_cand_name"
+            _X1097_SPACE_PATH="$_x1097_cand_path"
+            break
+            ;;
+    esac
+done
+if [ -z "$_X1097_SPACE_TOOL" ]; then
+    echo "    SKIP: no probed tool (node/gh/claude) resolves to a space-containing ambient path in this environment -- cannot demonstrate the widened (space-containing, off-the-3-static-dirs) case here. No assertion is being silently satisfied by an empty haystack: none is being made for this specific case at all. (Measured on the original dev box: Herd/nvm node contains a space; a CI runner's node/gh typically will not.)"
+else
+    echo "    (informational) demonstrating the widened case via: ${_X1097_SPACE_TOOL} -> ${_X1097_SPACE_PATH}"
+    assert_not_contains "$_X1097_SPACE_PATH" "/opt/homebrew/bin/" \
+        "expected the ambient-resolved ${_X1097_SPACE_TOOL} to sit OUTSIDE /opt/homebrew/bin on this machine — if this fails, this run's environment no longer demonstrates the widened case, re-verify before trusting the rest of this block"
+    assert_not_contains "$_X1097_SPACE_PATH" "/usr/local/bin/" \
+        "expected the ambient-resolved ${_X1097_SPACE_TOOL} to sit OUTSIDE /usr/local/bin on this machine"
+    assert_not_contains "$_X1097_SPACE_PATH" "$HOME/.local/bin/" \
+        "expected the ambient-resolved ${_X1097_SPACE_TOOL} to sit OUTSIDE ~/.local/bin on this machine"
+fi
 _block_end
 
 # Run the extracted, REAL check_dependencies() under the restricted PATH.
@@ -374,12 +455,28 @@ assert_not_empty "$BIN_OUTPUT" \
     "bin/aiteamforge-doctor.sh: check_dependencies() produced NO output at all — fixture is broken (sed extraction/source likely failed), every assert_not_contains below would otherwise pass vacuously"
 assert_contains "$BIN_OUTPUT" "Git (" \
     "bin/aiteamforge-doctor.sh: expected a real 'Git (' pass line (git is reachable even under the restricted PATH via /usr/bin/git) — its absence means check_dependencies() did not actually execute its real logic"
-assert_not_contains "$BIN_OUTPUT" "Node.js not found" \
-    "node exists at ${REAL_NODE:-<unresolved>} but was reported not found under a restricted PATH"
-assert_not_contains "$BIN_OUTPUT" "GitHub CLI not found" \
-    "gh exists at ${REAL_GH:-<unresolved>} but was reported not found under a restricted PATH"
-assert_not_contains "$BIN_OUTPUT" "Claude Code not found" \
-    "claude exists at ${REAL_CLAUDE:-<unresolved>} but was reported not found under a restricted PATH"
+# XACA-1097-019 hardening (CI portability): conditional on the tool actually
+# being resolvable in THIS environment (see the sanity block above) — never
+# hard-required. Absent tool -> loud SKIP, no assertion made (never a
+# vacuous pass). Present tool -> the real regression assertion, unchanged.
+if [ -n "$REAL_NODE" ]; then
+    assert_not_contains "$BIN_OUTPUT" "Node.js not found" \
+        "node exists at ${REAL_NODE} but was reported not found under a restricted PATH"
+else
+    echo "    SKIP: node not resolvable in this environment -- cannot assert non-phantom detection for a tool that doesn't exist here"
+fi
+if [ -n "$REAL_GH" ]; then
+    assert_not_contains "$BIN_OUTPUT" "GitHub CLI not found" \
+        "gh exists at ${REAL_GH} but was reported not found under a restricted PATH"
+else
+    echo "    SKIP: gh not resolvable in this environment -- cannot assert non-phantom detection for a tool that doesn't exist here"
+fi
+if [ -n "$REAL_CLAUDE" ]; then
+    assert_not_contains "$BIN_OUTPUT" "Claude Code not found" \
+        "claude exists at ${REAL_CLAUDE} but was reported not found under a restricted PATH"
+else
+    echo "    SKIP: claude not resolvable in this environment (expected in CI) -- cannot assert non-phantom detection for a tool that doesn't exist here"
+fi
 _block_end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -392,12 +489,27 @@ assert_not_empty "$LIBEXEC_OUTPUT" \
     "libexec/commands/aiteamforge-doctor.sh: check_dependencies() produced NO output at all — fixture is broken, every assert_not_contains below would otherwise pass vacuously"
 assert_contains "$LIBEXEC_OUTPUT" "Git (" \
     "libexec/commands/aiteamforge-doctor.sh: expected a real 'Git (' pass line (git is reachable even under the restricted PATH via /usr/bin/git) — its absence means check_dependencies() did not actually execute its real logic"
-assert_not_contains "$LIBEXEC_OUTPUT" "Node.js not found" \
-    "node exists at ${REAL_NODE:-<unresolved>} but was reported not found under a restricted PATH"
-assert_not_contains "$LIBEXEC_OUTPUT" "GitHub CLI not found" \
-    "gh exists at ${REAL_GH:-<unresolved>} but was reported not found under a restricted PATH"
-assert_not_contains "$LIBEXEC_OUTPUT" "Claude Code not found" \
-    "claude exists at ${REAL_CLAUDE:-<unresolved>} but was reported not found under a restricted PATH"
+# XACA-1097-019 hardening (CI portability) — see the matching bin/ block
+# above for the full rationale: conditional per tool, loud SKIP (never a
+# vacuous pass) when a tool is not resolvable in this environment.
+if [ -n "$REAL_NODE" ]; then
+    assert_not_contains "$LIBEXEC_OUTPUT" "Node.js not found" \
+        "node exists at ${REAL_NODE} but was reported not found under a restricted PATH"
+else
+    echo "    SKIP: node not resolvable in this environment -- cannot assert non-phantom detection for a tool that doesn't exist here"
+fi
+if [ -n "$REAL_GH" ]; then
+    assert_not_contains "$LIBEXEC_OUTPUT" "GitHub CLI not found" \
+        "gh exists at ${REAL_GH} but was reported not found under a restricted PATH"
+else
+    echo "    SKIP: gh not resolvable in this environment -- cannot assert non-phantom detection for a tool that doesn't exist here"
+fi
+if [ -n "$REAL_CLAUDE" ]; then
+    assert_not_contains "$LIBEXEC_OUTPUT" "Claude Code not found" \
+        "claude exists at ${REAL_CLAUDE} but was reported not found under a restricted PATH"
+else
+    echo "    SKIP: claude not resolvable in this environment (expected in CI) -- cannot assert non-phantom detection for a tool that doesn't exist here"
+fi
 _block_end
 
 # ─────────────────────────────────────────────────────────────────────────────

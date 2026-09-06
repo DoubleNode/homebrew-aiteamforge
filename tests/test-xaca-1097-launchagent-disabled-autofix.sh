@@ -117,6 +117,10 @@ assert_contains() {
     local haystack="$1" needle="$2" msg="${3:-Expected to find [$2] in output}"
     [[ "$haystack" == *"$needle"* ]] || _block_note_fail "$msg"
 }
+assert_not_contains() {
+    local haystack="$1" needle="$2" msg="${3:-Expected NOT to find [$2] in output}"
+    [[ "$haystack" != *"$needle"* ]] || _block_note_fail "$msg"
+}
 
 if [ ! -f "$VALIDATE_LIB" ]; then
     echo "FATAL: libexec/lib/validate-install.sh not found at: $VALIDATE_LIB" >&2
@@ -226,8 +230,20 @@ ACTUALLY_LOADED="$(PATH="$MOCK_BIN:/usr/bin:/bin" /bin/bash -c "launchctl list 2
 assert_eq "$ACTUALLY_LOADED" "0" \
     "sanity: fake launchctl must confirm the agent is still NOT in the loaded-jobs list (fixture broken if nonzero)"
 
-assert_contains "$CHECK_OUTPUT" "auto-fixed" \
-    "current code claims the auto-fix succeeded even though the service never registered"
+# XACA-1097-020 hardening (review finding on PR #824): a bare
+# `assert_contains "$CHECK_OUTPUT" "auto-fixed"` DISCRIMINATES NOTHING — the
+# fixed code's disabled-service warning message is literally "...cannot be
+# auto-fixed...", which contains "auto-fixed" as a substring just as
+# certainly as the ORIGINAL buggy code's false-pass message "...was
+# unloaded — auto-fixed". Both old and new code satisfy that assertion; it
+# would keep "passing" even if this suite's fix were reverted. Replaced with
+# two assertions that actually differ between the two: the fixed code must
+# emit the disabled-service warning verbatim, and must NOT emit the old
+# false-success phrase at all.
+assert_contains "$CHECK_OUTPUT" "cannot be auto-fixed" \
+    "expected the disabled-service warning (\"...is disabled — cannot be auto-fixed...\") -- current code did not classify the service as disabled before attempting to load it"
+assert_not_contains "$CHECK_OUTPUT" "was unloaded — auto-fixed" \
+    "current code claims the auto-fix succeeded (\"was unloaded — auto-fixed\") even though the service never registered -- this is the exact false-PASS phrase the original defect emitted"
 assert_eq "$PASS_COUNT" "0" \
     "must NOT record a _val_pass for an agent that launchctl load could not actually register (recorded ${PASS_COUNT})"
 
