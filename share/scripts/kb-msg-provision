@@ -972,14 +972,22 @@ def run_add_team(keygen_js, args, say):
     # values — this is the same superset invariant --unattended enforces on
     # the full run, expressed directly since add-team's write set is already
     # bounded to `names` and never needs merge_local()'s general machinery.
+    # XACA-1078-015 (PR #825 review): compare case-INSENSITIVELY, matching
+    # precondition 2 above (`declared.lower() != slug.lower()`) and
+    # local_teams()'s own ownership test (`owner.lower() == slug_norm`). Before
+    # this, one function held two comparisons with different case semantics: a
+    # map entry differing from `slug` only in case was declined as a CONFLICT
+    # against another machine, when it names this very machine. Equality is
+    # case-insensitive; the value written is always the canonical `slug`.
+    slug_norm = (slug or "").strip().lower()
     to_add, conflicts = [], []
     for name in names:
         cur = existing.get(name)
         if cur is None:
             to_add.append(name)
-        elif cur != slug:
+        elif (cur or "").strip().lower() != slug_norm:
             conflicts.append((name, cur))
-        # cur == slug: already correct — nothing to do for this name.
+        # cur names this machine (any casing): already correct — nothing to do.
 
     say("kb-msg-provision --add-team %s" % team_id)
     say("  machine slug : %s" % slug)
