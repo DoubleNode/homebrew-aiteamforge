@@ -21,7 +21,8 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: kb-tap-release {patch|minor|major} [--dry-run] [--no-push] [--help]
+Usage: kb-tap-release {patch|minor|major} [--dry-run] [--no-push]
+                       [--tap-ahead-release="<reason>"] [--help]
 
 Cut a release of the AITeamForge homebrew tap.
 
@@ -32,6 +33,20 @@ Flags:
   --dry-run     Print intended actions, write nothing, commit nothing, push nothing.
                 Runs all preconditions; exits 0 if they pass, nonzero if any fail.
   --no-push     Perform local commits + tags but skip both git push calls.
+  --tap-ahead-release="<reason>"
+                Waiver for preflight #9 when the ONLY drift is TAP-AHEAD (the
+                tap mirror already carries a newer, sanctioned mirror-ahead
+                push whose canonical half has not merged yet — XACA-1112).
+                Without this flag, preflight #9 BLOCKS on tap-ahead drift: a
+                release cut from tap main's current tip would ship that
+                unmerged content to consumers, which is exactly the near-miss
+                XACA-1112-007 investigated. A written reason is required (not
+                a bare "intentional") and is recorded as a 'Tap-Ahead-Release:'
+                trailer on BOTH the tap release commit and the outer pointer-
+                bump commit, so a waived release is auditable in git history.
+                Does NOT waive CANONICAL-AHEAD or DIVERGED drift — those still
+                hard-fail unconditionally; sync-tap.sh's remedy is CORRECT for
+                those two directions.
   -h, --help    Print this usage and exit 0.
 
 Environment:
@@ -48,7 +63,9 @@ Preconditions (all checked before any mutation, including --dry-run):
   6.  Tap inner branch is main.
   7.  Tap inner working tree is clean.
   8.  Tap inner is up-to-date with origin/main.
-  9.  sync-tap drift check passes (./sync-tap.sh --check).
+  9.  sync-tap drift is direction-classified (XACA-1112): CANONICAL-AHEAD or
+      DIVERGED drift always blocks. TAP-AHEAD-only drift also blocks UNLESS
+      --tap-ahead-release "<reason>" is given.
   10. CHANGELOG [Unreleased] section is non-empty.
   11. VERSION and Formula tag agree; standalone Formula version line is optional (per XACA-0394).
   12. Computed new version tag does not already exist.
@@ -85,6 +102,7 @@ EOF
 LEVEL=""
 DRY_RUN=0
 NO_PUSH=0
+TAP_AHEAD_RELEASE_REASON=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -96,6 +114,17 @@ for arg in "$@"; do
       ;;
     --no-push)
       NO_PUSH=1
+      ;;
+    --tap-ahead-release=*)
+      # =value syntax (not a separate positional token) — this loop iterates
+      # "$@" one token at a time and was never restructured into a shift-based
+      # while loop, so a two-token "--flag value" pair is not supported here.
+      TAP_AHEAD_RELEASE_REASON="${arg#--tap-ahead-release=}"
+      if [ -z "$TAP_AHEAD_RELEASE_REASON" ]; then
+        echo "Error: --tap-ahead-release requires a non-empty reason: --tap-ahead-release=\"...\"" >&2
+        usage >&2
+        exit 1
+      fi
       ;;
     -h|--help)
       usage
@@ -424,19 +453,74 @@ else
   check_fail "Tap origin/main check skipped (earlier check failed)."
 fi
 
-# 9. sync-tap drift check
+# 9. sync-tap drift check — DIRECTION-AWARE (XACA-1112)
+#
+# The scalar "any drift = block" version of this check was ALSO the version
+# that would have silently PASSED a release cut from tap main while it briefly
+# carried four open PRs' mirror-ahead content (XACA-1112-007) — its
+# check_fail's remedy ("run ./sync-tap.sh") is destructive for that direction
+# (it would copy older canonical OVER newer, sanctioned tap content), so a
+# releaser under release pressure had a real incentive to bypass it by hand.
+#
+# CANONICAL-AHEAD and DIVERGED still hard-fail unconditionally here — for
+# those two directions ./sync-tap.sh really is the correct, safe remedy, and
+# there is no legitimate reason to release while either is true.
+#
+# TAP-AHEAD is the highest-risk direction specifically at RELEASE time (unlike
+# the mainline push gate, which cannot un-ship a push that already happened,
+# this check runs BEFORE the tag is cut and can actually prevent shipping
+# someone else's still-open PR). It therefore still BLOCKS by default — not a
+# silent pass — and is waivable only via the explicit, reasoned
+# --tap-ahead-release="<reason>" flag, recorded as a commit trailer on both
+# release commits so a waived release is auditable (see Phase 2/3 below).
+TAP_AHEAD_WAIVED=0
 SYNCTAP_SCRIPT="${OUTER_DIR}/sync-tap.sh"
-if [ -x "$SYNCTAP_SCRIPT" ]; then
-  SYNCTAP_OUT="$("${SYNCTAP_SCRIPT}" --check 2>&1)" && SYNCTAP_EXIT=0 || SYNCTAP_EXIT=$?
+ATTRIB_SCRIPT="${OUTER_DIR}/scripts/attribute-tap-drift.sh"
+if [ -x "$SYNCTAP_SCRIPT" ] && [ -f "$ATTRIB_SCRIPT" ]; then
+  DRIFT_RECORDS_FILE="$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-drift.XXXXXX")"
+  SYNCTAP_OUT="$("${SYNCTAP_SCRIPT}" --check --porcelain 2>&1)" && SYNCTAP_EXIT=0 || SYNCTAP_EXIT=$?
+  printf '%s\n' "$SYNCTAP_OUT" > "$DRIFT_RECORDS_FILE"
+
   if [ "$SYNCTAP_EXIT" -eq 0 ]; then
-    check_pass "sync-tap drift check passed."
+    check_pass "sync-tap drift check passed (clean)."
   else
-    check_fail "Tap mirror is drifted from canonical. Run ./sync-tap.sh and commit the result first."
-    echo "    sync-tap.sh --check output:"
-    echo "$SYNCTAP_OUT" | sed 's/^/      /'
+    DIR_REPORT="$(REMOTE_NAME="$OUTER_REMOTE" TAP_DIR="$TAP_DIR" \
+      bash "$ATTRIB_SCRIPT" --classify-direction \
+        --records "$DRIFT_RECORDS_FILE" --sync-status "$SYNCTAP_EXIT" 2>&1)" \
+      && DIR_EXIT=0 || DIR_EXIT=$?
+    echo "    direction classification:"
+    echo "$DIR_REPORT" | sed 's/^/      /'
+
+    case "$DIR_EXIT" in
+      2)
+        check_fail "Drift direction could not be classified (environment problem, not a drift finding — see detail above)."
+        ;;
+      1)
+        check_fail "Tap mirror has CANONICAL-AHEAD, DIVERGED, or unmirrored (NEW) drift. Run ./sync-tap.sh and commit the result first (this remedy IS correct/safe for these directions)."
+        ;;
+      0)
+        if printf '%s\n' "$DIR_REPORT" | grep -qE '^[[:space:]]*TAP-AHEAD[[:space:]]'; then
+          if [ -n "$TAP_AHEAD_RELEASE_REASON" ]; then
+            TAP_AHEAD_WAIVED=1
+            check_pass "sync-tap drift is TAP-AHEAD only — WAIVED via --tap-ahead-release=\"${TAP_AHEAD_RELEASE_REASON}\" (recorded as a commit trailer below)."
+          else
+            check_fail "Tap mirror carries TAP-AHEAD drift: the tap already has a newer, sanctioned mirror-ahead push whose canonical half has NOT merged yet (see the ticket named above). Releasing NOW would ship that still-open PR's content to consumers. Fix: wait for that PR to merge (drift clears on its own), or revert the tap-ahead commit(s). If this is a deliberate pre-merge release, re-run with --tap-ahead-release=\"<reason>\" — do NOT run ./sync-tap.sh, it would destroy the newer tap content."
+          fi
+        else
+          check_pass "sync-tap drift check passed (clean)."
+        fi
+        ;;
+      *)
+        check_fail "attribute-tap-drift.sh --classify-direction returned an undefined exit code (${DIR_EXIT}). Its contract defines only 0, 1, 2 — refusing to interpret as a pass."
+        ;;
+    esac
   fi
 else
-  check_fail "sync-tap.sh not found or not executable at: $SYNCTAP_SCRIPT"
+  if [ ! -x "$SYNCTAP_SCRIPT" ]; then
+    check_fail "sync-tap.sh not found or not executable at: $SYNCTAP_SCRIPT"
+  else
+    check_fail "attribute-tap-drift.sh not found at: $ATTRIB_SCRIPT"
+  fi
 fi
 
 # 10. [Unreleased] block is non-empty (only if tap submodule is accessible)
@@ -651,7 +735,20 @@ if [ "$STAGED_OK" -eq 0 ]; then
   exit 1
 fi
 
-git -C "${TAP_DIR}" commit -m "chore: Release AITeamForge ${NEW_VERSION}"
+# XACA-1112: when preflight #9's TAP-AHEAD block was waived via
+# --tap-ahead-release, record it as a trailer on BOTH release commits — this
+# IS the decay detector the design calls for: waiver usage is only auditable
+# if it survives in git history, not just in a terminal that already scrolled
+# away. The gate-safe subject line itself is UNCHANGED (tap-changelog-
+# completeness's skip filter matches the subject only; the trailer lives in
+# the body and cannot break that match).
+if [ "$TAP_AHEAD_WAIVED" -eq 1 ]; then
+  git -C "${TAP_DIR}" commit \
+    -m "chore: Release AITeamForge ${NEW_VERSION}" \
+    -m "Tap-Ahead-Release: ${TAP_AHEAD_RELEASE_REASON}"
+else
+  git -C "${TAP_DIR}" commit -m "chore: Release AITeamForge ${NEW_VERSION}"
+fi
 TAP_COMMIT_SHA="$(git -C "${TAP_DIR}" rev-parse HEAD)"
 echo "  Committed: ${TAP_COMMIT_SHA} (chore: Release AITeamForge ${NEW_VERSION})"
 
@@ -688,7 +785,13 @@ else
   exit 1
 fi
 
-git commit -m "chore: Bump homebrew-tap submodule to v${NEW_VERSION}"
+if [ "$TAP_AHEAD_WAIVED" -eq 1 ]; then
+  git commit \
+    -m "chore: Bump homebrew-tap submodule to v${NEW_VERSION}" \
+    -m "Tap-Ahead-Release: ${TAP_AHEAD_RELEASE_REASON}"
+else
+  git commit -m "chore: Bump homebrew-tap submodule to v${NEW_VERSION}"
+fi
 OUTER_COMMIT_SHA="$(git rev-parse HEAD)"
 echo "  Committed: ${OUTER_COMMIT_SHA} (chore: Bump homebrew-tap submodule to v${NEW_VERSION})"
 

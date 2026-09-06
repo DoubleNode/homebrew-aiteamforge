@@ -7,6 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1112: `share/scripts/kb-tap-release` + `docs/LOCKSTEP-CHECK.md` — mirror of the
+  canonical direction-aware tap-drift work. Tap-mirror drift is no longer measured as a
+  directionless scalar: `attribute-tap-drift.sh` gains `--classify-direction`, which
+  separates CANONICAL-AHEAD (a real defect) from TAP-AHEAD (a sanctioned two-step mirror
+  ahead of its still-open PR, self-healing) using blob identity plus an ancestor-ordering
+  check, and fails closed to DIVERGED when either side round-trips backward. Preflight #9
+  in `kb-tap-release` is routed on that classification and gains
+  `--tap-ahead-release="<reason>"`, which records an auditable `Tap-Ahead-Release:` trailer;
+  tap-ahead still BLOCKS a release cut by default, because the release boundary is the last
+  point at which unmerged code can reach consumers.
+
 - XACA-1099: `share/templates/kanban/kanban-helpers.template.sh` — `kb-release-create`'s
   `http_code == 000` branch no longer asserts "LCARS server is not running" for
   every connection-phase curl failure. curl reports `%{http_code}=000` for
