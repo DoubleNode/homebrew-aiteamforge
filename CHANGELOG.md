@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1078 — the kb-msg routing-map provisioning mirror, re-applied after it was reverted ahead of v0.20.5.** `share/scripts/kb-msg-provision` and `share/scripts/kb-init-team` carry the canonical side of PR #825: the `--unattended` / `--add-team` entry points, the pure-superset write invariant (a non-empty retarget set refuses the ENTIRE write), `_notice`-based disclosure of every failure reason, and case-insensitive ownership comparison. An earlier copy of this mirror was removed by `8c93ba3` ("restore canonical parity — revert 6 tap-ahead files to develop") — correctly at the time, since it had been published before its canonical PR merged and so read as tap-ahead drift. **NOTE:** the `[0.20.5]` section below lists XACA-1078, but that revert landed before the release was cut, so v0.20.5 does NOT actually contain these changes; they ship in the first release cut after PR #825 merges.
+
 - XACA-1091: `fleet-monitor/server/package.json` registers the telemetry
   store/projection suite in the `test` script, and
   `tests/xaca-1031-007-mirror-drift-guard.test.js` extends the mirror-drift guard
