@@ -1642,6 +1642,15 @@
     font-style: italic;
 }
 
+/* XACA-1100-022: same empty-message idiom (centered, padded, italic block in
+   an otherwise-empty list container), but signals "the renderer is broken"
+   rather than "there is genuinely nothing to show" -- red instead of tan, via
+   the existing --lcars-red token (see .section-header.red above for the same
+   token used the same way), not a hardcoded color. */
+.empty-message.render-error {
+    color: var(--lcars-red);
+}
+
 /* -------------------------------------------------------------------------------
    Top Bar Status Buttons
    Full-height status indicators aligned with the MAIN CONTENT top bar

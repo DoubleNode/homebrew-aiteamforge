@@ -47,6 +47,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const { JSDOM } = require('jsdom');
+const { CREATE_MACHINE_ITEM_EXPORT_PROPERTY } = require('./helpers/lcars-client-dom-stub');
 
 const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
 
@@ -86,7 +87,7 @@ function baseMachine(overrides) {
 // through the identical jsdom harness, without writing to or reverting any
 // file on disk.
 // ============================================================================
-async function setupApp(relPath, exportNames, srcOverride) {
+async function setupApp(relPath, exportNames, srcOverride, coreSrcOverride) {
     const dom = new JSDOM('<!doctype html><html><body><div id="machine-status-list"></div></body></html>', {
         url: 'http://lcars-test.local/' + relPath,
         runScripts: 'outside-only',
@@ -101,12 +102,46 @@ async function setupApp(relPath, exportNames, srcOverride) {
     });
 
     const ctx = dom.getInternalVMContext();
+
+    // XACA-1100-002: createMachineItem() itself was extracted out of the 4
+    // lcars2 minimal renderers into window.LCARS_CORE.machines.createMachineItem
+    // (lcars-fleet-core.js). Load the real shipped core module into this same
+    // vm context, exactly the way a real HTML page's <script> tag would (and
+    // exactly the pattern tests/helpers/lcars-client-dom-stub.js's own
+    // loadFleetCoreModule() follows) -- otherwise the lcars2 branch of the
+    // createMachineItem export below throws "LCARS_CORE is undefined" the
+    // moment it's called. Harmless for RICH_APP_REL_PATH (v1 still has its
+    // own local createMachineItem() and never touches LCARS_CORE): the core
+    // module has no load-time side effects here (document.readyState is
+    // already 'complete' by this point, so its one top-level `if` is a
+    // no-op), it just adds an unused global.
+    // coreSrcOverride lets the lcars2 mutation-kill test below run a
+    // deliberately-broken in-memory copy of lcars-fleet-core.js through this
+    // same harness, the same way srcOverride does for the app file itself --
+    // the aria-label setAttribute call this suite mutates now lives in the
+    // core (XACA-1100-002), not in relPath's own source.
+    const coreSrc = coreSrcOverride !== undefined ? coreSrcOverride : fs.readFileSync(path.join(PUBLIC_ROOT, 'lcars2/js/lcars-fleet-core.js'), 'utf8');
+    vm.runInContext(coreSrc, ctx, { filename: 'lcars2/js/lcars-fleet-core.js' });
+
     const src = srcOverride !== undefined ? srcOverride : fs.readFileSync(path.join(PUBLIC_ROOT, relPath), 'utf8');
     const marker = '})();';
     const lastIdx = src.lastIndexOf(marker);
     if (lastIdx === -1) throw new Error('setupApp: closing "})();" not found in ' + relPath);
+    // createMachineItem: a real local function ONLY in RICH_APP_REL_PATH (v1)
+    // now -- `typeof createMachineItem !== "undefined"` is true only there, so
+    // it still gets its own unmodified local function. The 4 lcars2 files no
+    // longer define it locally (XACA-1100-002), so they fall through to a
+    // thin wrapper assembling the same `deps` object the real call site
+    // builds (see lcars-*-app.js) and forwarding to the core -- this keeps
+    // every `mod.createMachineItem(machine)` call below working unchanged.
     const exportStmt = '\n    window.__lcarsTestExports = { ' +
-        exportNames.map((name) => name + ': ' + name).join(', ') +
+        exportNames.map((name) => {
+            // XACA-1100-016: CREATE_MACHINE_ITEM_EXPORT_PROPERTY is hoisted
+            // to tests/helpers/lcars-client-dom-stub.js, shared by 5 test
+            // harnesses that each used to retype this string.
+            if (name !== 'createMachineItem') return name + ': ' + name;
+            return CREATE_MACHINE_ITEM_EXPORT_PROPERTY;
+        }).join(', ') +
         ' };\n';
     const patched = src.slice(0, lastIdx) + exportStmt + src.slice(lastIdx);
     vm.runInContext(patched, ctx, { filename: relPath });
@@ -147,8 +182,8 @@ async function setupRichApp(srcOverride) {
     return setupApp(RICH_APP_REL_PATH, ['createMachineItem', 'escapeHtml'], srcOverride);
 }
 
-async function setupLcars2App(relPath, srcOverride) {
-    return setupApp(relPath, ['createMachineItem', 'escapeHtml'], srcOverride);
+async function setupLcars2App(relPath, srcOverride, coreSrcOverride) {
+    return setupApp(relPath, ['createMachineItem', 'escapeHtml'], srcOverride, coreSrcOverride);
 }
 
 // Expected aria-label phrasing -- ONE function, used to build the expected
@@ -423,13 +458,18 @@ test('XACA-1031-018 mutation kill, rich renderer: removing the aria-label setAtt
 });
 
 test('XACA-1031-018 mutation kill, lcars2 renderer: removing the aria-label setAttribute call makes aria-label disappear (proves the positive test above is load-bearing)', async () => {
-    const realSrc = readRealSource(LCARS2_REPRESENTATIVE);
+    // XACA-1100-002: this setAttribute call now lives in the shared core
+    // (window.LCARS_CORE.machines.createMachineItem, lcars-fleet-core.js),
+    // not in LCARS2_REPRESENTATIVE's own source -- mutate the CORE source and
+    // pass it via coreSrcOverride instead, leaving the app file's own source
+    // untouched (it delegates to the core either way).
+    const realCoreSrc = readRealSource('lcars2/js/lcars-fleet-core.js');
     const needle = "versionEl.setAttribute('aria-label', 'AITeamForge version ' + installedVersionText + ', ' + versionStateText);\n";
-    assert.ok(realSrc.includes(needle), 'mutation setup: expected to find the exact aria-label setAttribute call in the real source -- if this fails, the source shape changed and the mutation string needs updating');
-    const mutatedSrc = realSrc.replace(needle, '');
-    assert.notEqual(mutatedSrc, realSrc);
+    assert.ok(realCoreSrc.includes(needle), 'mutation setup: expected to find the exact aria-label setAttribute call in the real core source -- if this fails, the source shape changed and the mutation string needs updating');
+    const mutatedCoreSrc = realCoreSrc.replace(needle, '');
+    assert.notEqual(mutatedCoreSrc, realCoreSrc);
 
-    const { mod } = await setupLcars2App(LCARS2_REPRESENTATIVE, mutatedSrc);
+    const { mod } = await setupLcars2App(LCARS2_REPRESENTATIVE, undefined, mutatedCoreSrc);
     const machine = baseMachine({ system: { schema_version: 1, versions: { aiteamforge: '0.9.0', latest: '0.20.3', outdated: true } } });
     const item = unwrapStatusRow(mod.createMachineItem(machine));
     const versionEl = item.querySelector('.status-row-version');

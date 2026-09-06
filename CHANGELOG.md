@@ -6,6 +6,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1100: extracts the `createMachineItem` renderer that was duplicated
+  byte-identically across the four lcars2 dashboard app files into a single
+  shared implementation on the lcars2 core, `LCARS.machines.createMachineItem
+  (machine, deps)`. Five app-local hooks (`machineSystemToHealthInput`,
+  `healthBadgeSpec`, `buildSystemSectionHtml`, `toggleSystemPanel`,
+  `isSystemExpanded`) thread through a `deps` object assembled at each call
+  site; a missing hook now throws naming the key rather than failing later and
+  further away. `escapeHtml` stays local to each app file (it has ~15 unrelated
+  call sites there) and the core gained `LCARS.utils.escapeHtml` for its own
+  use. Pure refactor: old and new renderers were driven with identical inputs
+  across a 16-fixture x collapsed/expanded matrix and produced 32/32 exact
+  serialized-DOM matches, XSS fixtures included. The `LCARS_CORE.machines`
+  call is now typeof-guarded once per render instead of once per machine, and
+  paints a visible "renderer unavailable" message rather than leaving the
+  container blank -- an empty machine list previously read as "no machines"
+  when it actually meant the renderer had failed to load. Of the four
+  consumers the tap ships only `lcars-academy-app.js` and `lcars-all-app.js`;
+  `lcars-doublenode-*` and `lcars-mainevent-*` are excluded by sync-tap
+  predicate. The 4-way unification of the app files themselves is deliberately
+  NOT done here -- it is tracked as XACA-1110.
+
 - **XACA-1078 (site 2/004) — `kb-msg-provision` had no caller at machine-provisioning time, so both consumer machines have never had `~/.aiteamforge/team-machines.json` written at all (map, `.pre-kb-msg-provision.bak`, and `fleet-config.json` all measured absent 2026-09-04 on `darren-m4-mini` and `darren-m1pro-mbp`).** `libexec/installers/install-kanban.sh` and `libexec/commands/aiteamforge-upgrade.sh` each gain a `provision_msg_routing()` function running the full `kb-msg-provision --unattended` (no `--add-team`, no `--server` — this call site speaks for the whole machine, per the plan's Decision 1 scope table). The upgrade-side call is unconditional — not gated on "already installed" — because an install-only fix never reaches a box that only ever runs `brew upgrade`, the same bug class XACA-0747/0751/0814 closed elsewhere. `kb-msg-provision` itself was found to share that gap (ships to fresh installs only via `install-shell.sh::install_helper_scripts()`, never via `aiteamforge upgrade`) and is added to `_xaca0673_mandatory_materialize_basenames` (plus its extensionless glob-sweep entry) so `update_runtime_helpers` — which runs immediately before the new call — materialises the tool first. Both sites treat exit 1 (declined) and exit 2 (environment problem) identically: warn, continue, never abort install/upgrade. See the canonical dev-team `CHANGELOG.md` entry under XACA-1078-004 for the full verification detail.
 
 - XACA-1091 (review round): mirrors the review-round hardening of the telemetry

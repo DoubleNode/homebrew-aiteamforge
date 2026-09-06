@@ -61,6 +61,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const { JSDOM } = require('jsdom');
+const { CREATE_MACHINE_ITEM_EXPORT_PROPERTY } = require('./helpers/lcars-client-dom-stub');
 
 const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
 
@@ -114,10 +115,15 @@ function interactiveMachine(idSuffix) {
 // document, patched with an additive test-export tail exposing
 // createMachineItem onto window.__lcarsTestExports. Mirrors
 // tests/xaca-1031-007-version-badge-ui.test.js's setupMinimalApp() exactly
-// (including why no shared module is preloaded: createMachineItem() only
-// reaches LCARS_TERMINAL_CARD/LCARS_MACHINE_HEALTH through guarded
+// (including why LCARS_TERMINAL_CARD/LCARS_MACHINE_HEALTH are still not
+// preloaded: createMachineItem() only reaches them through guarded
 // `typeof`/truthiness checks, never unconditionally, so their absence here
 // degrades the (unrelated) health badge to 'unknown' rather than throwing).
+// XACA-1100-002 UPDATE: createMachineItem() itself was extracted out of
+// these 4 files into window.LCARS_CORE.machines.createMachineItem
+// (lcars-fleet-core.js) -- THAT module IS now preloaded below, since the
+// export wrapper's fallback branch calls it unconditionally (not through a
+// guarded check the way the two modules above are reached).
 async function setupMinimalApp(relPath) {
     const dom = new JSDOM('<!doctype html><html><body><div id="machine-status-list"></div></body></html>', {
         url: 'http://lcars-test.local/' + relPath,
@@ -133,11 +139,22 @@ async function setupMinimalApp(relPath) {
     });
 
     const ctx = dom.getInternalVMContext();
+
+    const coreSrc = fs.readFileSync(path.join(PUBLIC_ROOT, 'lcars2/js/lcars-fleet-core.js'), 'utf8');
+    vm.runInContext(coreSrc, ctx, { filename: 'lcars2/js/lcars-fleet-core.js' });
+
     const src = fs.readFileSync(path.join(PUBLIC_ROOT, relPath), 'utf8');
     const marker = '})();';
     const lastIdx = src.lastIndexOf(marker);
     if (lastIdx === -1) throw new Error('setupMinimalApp: closing "})();" not found in ' + relPath);
-    const exportStmt = '\n    window.__lcarsTestExports = { createMachineItem: createMachineItem };\n';
+    // createMachineItem is no longer a local function in these 4 files
+    // (XACA-1100-002) -- CREATE_MACHINE_ITEM_EXPORT_PROPERTY (XACA-1100-016:
+    // hoisted to tests/helpers/lcars-client-dom-stub.js, shared by 5 test
+    // harnesses that each used to retype this string) assembles the same
+    // `deps` object the real call site builds (see lcars-*-app.js) and
+    // forwards to the shared core, so every `mod.createMachineItem(machine)`
+    // call in this suite keeps working unchanged.
+    const exportStmt = '\n    window.__lcarsTestExports = { ' + CREATE_MACHINE_ITEM_EXPORT_PROPERTY + ' };\n';
     const patched = src.slice(0, lastIdx) + exportStmt + src.slice(lastIdx);
     vm.runInContext(patched, ctx, { filename: relPath });
 

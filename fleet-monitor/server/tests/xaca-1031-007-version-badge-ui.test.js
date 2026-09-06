@@ -49,6 +49,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const { JSDOM } = require('jsdom');
+const { CREATE_MACHINE_ITEM_EXPORT_PROPERTY } = require('./helpers/lcars-client-dom-stub');
 
 const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
 const ACADEMY_APP_REL_PATH = 'lcars2/js/lcars-academy-app.js';
@@ -94,12 +95,32 @@ async function setupMinimalApp(relPath) {
     });
 
     const ctx = dom.getInternalVMContext();
+
+    // XACA-1100-002: createMachineItem() itself was extracted out of the 4
+    // lcars2 minimal renderers into window.LCARS_CORE.machines.createMachineItem
+    // (lcars-fleet-core.js). Load the real shipped core module into this same
+    // vm context first, exactly the way a real HTML page's <script> tag
+    // would -- otherwise the export wrapper below throws "LCARS_CORE is
+    // undefined" the moment it's called.
+    const coreSrc = fs.readFileSync(path.join(PUBLIC_ROOT, 'lcars2/js/lcars-fleet-core.js'), 'utf8');
+    vm.runInContext(coreSrc, ctx, { filename: 'lcars2/js/lcars-fleet-core.js' });
+
     const src = fs.readFileSync(path.join(PUBLIC_ROOT, relPath), 'utf8');
     const marker = '})();';
     const lastIdx = src.lastIndexOf(marker);
     if (lastIdx === -1) throw new Error('setupMinimalApp: closing "})();" not found in ' + relPath);
+    // createMachineItem is no longer a local function in the 4 lcars2 files
+    // this loader is used for (XACA-1100-002) -- CREATE_MACHINE_ITEM_EXPORT_PROPERTY
+    // (XACA-1100-016: hoisted to tests/helpers/lcars-client-dom-stub.js,
+    // shared by 5 test harnesses that each used to retype this string)
+    // assembles the same `deps` object the real call site builds (see
+    // lcars-*-app.js) and forwards to the shared core, so every
+    // `mod.createMachineItem(machine)` call in this suite keeps working
+    // unchanged. typeof-guarded (rather than assuming lcars2-only) so this
+    // loader stays safe if ever pointed at a file that still defines
+    // createMachineItem locally.
     const exportStmt = '\n    window.__lcarsTestExports = {' +
-        ' createMachineItem: createMachineItem,' +
+        ' ' + CREATE_MACHINE_ITEM_EXPORT_PROPERTY + ',' +
         ' escapeHtml: escapeHtml' +
         ' };\n';
     const patched = src.slice(0, lastIdx) + exportStmt + src.slice(lastIdx);
@@ -251,21 +272,33 @@ test('escapeHtml: the exact XSS payload used above round-trips to inert text (di
 });
 
 // ============================================================================
-// Cross-file consistency: the version-gating block must be textually
-// identical across the four lcars2 minimal renderers (additive-only, no
-// shared helper extracted -- so drift between copies is a real risk this
-// suite is the only thing that would catch).
+// Cross-file consistency (XACA-1100-002 UPDATE): the version-gating block
+// used to be duplicated identically across the four lcars2 minimal
+// renderers (additive-only, no shared helper extracted -- so drift between
+// copies was a real risk this suite was the only thing that would catch).
+// createMachineItem() itself -- including this gate line -- was extracted
+// into the single shared implementation
+// window.LCARS_CORE.machines.createMachineItem (lcars-fleet-core.js), so
+// there is now exactly ONE copy to check, and a NEW risk to guard against:
+// the gate line silently reappearing as a local re-duplication in one of
+// the 4 app files (which would mean that file stopped delegating to the
+// core for its version rendering).
 // ============================================================================
 
-test('cross-file consistency: the hasInstalledVersion gate is textually identical across every lcars2 minimal renderer', () => {
+const HAS_INSTALLED_VERSION_GATE_LINE = 'const hasInstalledVersion = !!sysVersions && sysVersions.aiteamforge !== undefined && sysVersions.aiteamforge !== null;';
+
+test('the hasInstalledVersion gate lives in the shared core (lcars-fleet-core.js), not duplicated locally in any lcars2 minimal renderer', () => {
     assert.ok(LCARS2_MINIMAL_FILES.length >= 3, 'expected at least 3 lcars2 minimal renderer files to exist on disk');
-    const GATE_LINE = 'const hasInstalledVersion = !!sysVersions && sysVersions.aiteamforge !== undefined && sysVersions.aiteamforge !== null;';
-    const missing = [];
+
+    const coreSrc = fs.readFileSync(path.join(PUBLIC_ROOT, 'lcars2/js/lcars-fleet-core.js'), 'utf8');
+    assert.ok(coreSrc.includes(HAS_INSTALLED_VERSION_GATE_LINE), 'lcars-fleet-core.js must gate on aiteamforge PRESENCE (XACA-1100-002 extraction)');
+
+    const reduplicated = [];
     for (const rel of LCARS2_MINIMAL_FILES) {
         const src = fs.readFileSync(path.join(PUBLIC_ROOT, rel), 'utf8');
-        if (!src.includes(GATE_LINE)) missing.push(rel);
+        if (src.includes(HAS_INSTALLED_VERSION_GATE_LINE)) reduplicated.push(rel);
     }
-    assert.deepEqual(missing, [], 'every lcars2 minimal renderer must gate on aiteamforge PRESENCE identically: ' + missing.join(', '));
+    assert.deepEqual(reduplicated, [], 'these files re-introduce a local hasInstalledVersion gate instead of delegating to the shared core: ' + reduplicated.join(', '));
 });
 
 test('cross-file consistency: the rich renderer (lcars/js/lcars-dashboard-app.js) gates on the same aiteamforge-presence rule (not container truthiness)', () => {

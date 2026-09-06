@@ -544,6 +544,31 @@
             return;
         }
 
+        // XACA-1100-022: hoisted OUT of the forEach that used to hold this
+        // check (see git blame). Inside the loop it re-evaluated -- and on
+        // failure re-logged -- once PER MACHINE on every refresh tick: ~120
+        // identical console.error calls/min for a ten-machine fleet on the
+        // 5s poll, burying every other diagnostic in the console. The
+        // condition does not depend on `machine`, so it only needs to run
+        // once per render. On failure this also now paints a VISIBLE message
+        // into the container (same idiom as the empty-state branch above)
+        // instead of leaving it silently blank: a blank machines list reads
+        // to an operator as "no machines detected", which is a false
+        // negative on an operator-facing fleet dashboard -- worse than a
+        // loud, explicit error. See the window.LCARS_CORE/LCARS_KIOSK/
+        // LCARS_DIVISIONS/LCARS_ORG guard idiom used throughout this file
+        // (getOrganizationGroup()/getGroupColor() etc.) -- loud-on-purpose,
+        // matching that pattern, rather than a bare optional-chaining no-op.
+        if (!window.LCARS_CORE || !window.LCARS_CORE.machines) {
+            console.error('[LCARS][machines] lcars2/js/lcars-fleet-core.js is not '
+                + 'loaded -- it must appear BEFORE this script. Skipping render for all '
+                + machines.length + ' machine(s).');
+            container.innerHTML = '<p class="empty-message render-error">'
+                + 'Machine renderer unavailable -- lcars-fleet-core.js failed to load. '
+                + 'Check the browser console.</p>';
+            return;
+        }
+
         const sortedMachines = machines.sort(function(a, b) {
             if (a.status !== b.status) {
                 return a.status === 'online' ? -1 : 1;
@@ -552,7 +577,25 @@
         });
 
         sortedMachines.forEach(function(machine) {
-            const item = createMachineItem(machine);
+            // XACA-1100-003: createMachineItem() itself now lives in the shared
+            // lcars2 core (lcars-fleet-core.js, extracted XACA-1100-002 from four
+            // byte-identical copies of this function). It runs OUTSIDE this file's
+            // closure, so it cannot see machineSystemToHealthInput/healthBadgeSpec/
+            // buildSystemSectionHtml/toggleSystemPanel/expandedSystemMachineId,
+            // which all remain owned HERE (per-dashboard state/logic, not
+            // duplicated) -- deps wires them in.
+            //
+            // XACA-1100-022: the window.LCARS_CORE/.machines guard that used to
+            // sit here was hoisted ABOVE this forEach (see there) so it runs
+            // once per render instead of once per machine -- this callback can
+            // now assume window.LCARS_CORE.machines is present.
+            const item = window.LCARS_CORE.machines.createMachineItem(machine, {
+                machineSystemToHealthInput: machineSystemToHealthInput,
+                healthBadgeSpec: healthBadgeSpec,
+                buildSystemSectionHtml: buildSystemSectionHtml,
+                toggleSystemPanel: toggleSystemPanel,
+                isSystemExpanded: expandedSystemMachineId === machine.machine_id
+            });
             container.appendChild(item);
         });
     }
@@ -565,11 +608,19 @@
     // code wires up, and kanban/plans/XACA-1091/CONTRACT-system-block.md for
     // the frozen wire shape this adapter decouples from.
     //
-    // Per XACA-1091-016 Design Decision 6 ("superseded in part"), no shared
-    // helper is extracted across the 5 createMachineItem copies -- this
-    // block is duplicated identically in all 4 lcars2 app files (byte-for-
-    // byte) and adapted (different group/toggle class names, no data-*
-    // string interpolation -- see below) in lcars-dashboard-app.js (v1).
+    // Per XACA-1091-016 Design Decision 6, no shared helper was originally
+    // extracted across the 5 createMachineItem copies -- that decision is now
+    // PARTIALLY superseded: XACA-1100-002 extracted createMachineItem() itself
+    // (the DOM-building renderer) into the shared lcars2 core
+    // (lcars-fleet-core.js, LCARS.machines.createMachineItem, called with a
+    // deps object above) because it was byte-identical across all 4 lcars2
+    // app files with no lcars2-specific logic of its own. The REST of this
+    // block -- the wire adapter, badge spec, system-panel-HTML builder, and
+    // the SYSTEM disclosure toggle below -- is still duplicated identically in
+    // all 4 lcars2 app files (byte-for-byte) and adapted (different
+    // group/toggle class names, no data-* string interpolation -- see below)
+    // in lcars-dashboard-app.js (v1); Design Decision 6 still applies to that
+    // part unless/until a later ticket revisits it.
     // ============================================================================
 
     const SYSTEM_BYTES_PER_GB = 1024 * 1024 * 1024;
@@ -876,215 +927,6 @@
         panel.classList.add('expanded');
         if (indicator) indicator.classList.add('expanded');
         if (toggle) toggle.setAttribute('aria-expanded', 'true');
-    }
-
-    function createMachineItem(machine) {
-        const system = machine.system || {};
-        const healthResult = (window.LCARS_MACHINE_HEALTH && window.LCARS_MACHINE_HEALTH.deriveMachineHealth)
-            ? window.LCARS_MACHINE_HEALTH.deriveMachineHealth(machineSystemToHealthInput(system))
-            : { state: 'unknown', metrics: {} };
-
-        const item = document.createElement('div');
-        item.className = 'status-row ' + machine.status;
-
-        // XACA-1031-006 (EPIC-0061 Decision 8): version lives at
-        // machine.system.versions.*, not machine.versions.*. An OLD reporter
-        // that predates this feature sends no `system` key at all -- that is
-        // most of the fleet today, including this very machine -- so guard
-        // with optional chaining and render NO version indicator for that
-        // case rather than "undefined". Additive only: this is the 18-line
-        // minimal renderer, not the 196-line rich one in lcars/js -- no
-        // shared helper is being extracted here (see XACA-1031 plan doc).
-        //
-        // XACA-1031-006 BUGFIX: the frozen contract has the reporter ALWAYS
-        // emit the `versions` container, sending `versions: {}` when the
-        // version itself is unresolvable -- `{}` is truthy, so gating on
-        // `sysVersions` alone rendered "vUnknown UNKNOWN" on every card
-        // fleet-wide (this machine included -- the tap isn't installed here
-        // either). "no version reported" and "version known, staleness
-        // undetermined" are different facts and must render differently, so
-        // the whole indicator (including the 'v' prefix) is now gated on
-        // `aiteamforge` PRESENCE, not on `sysVersions` truthiness.
-        const sysVersions = machine.system && machine.system.versions;
-        const hasInstalledVersion = !!sysVersions && sysVersions.aiteamforge !== undefined && sysVersions.aiteamforge !== null;
-        let installedVersionText, versionColor, versionSuffix, outdated;
-        if (hasInstalledVersion) {
-            installedVersionText = String(sysVersions.aiteamforge);
-            // 'outdated' is an EXISTENCE check, not a null check: the key is
-            // OMITTED (not set to null) when the server could not determine
-            // it (version known, but its own latest-version fetch failed).
-            // A null-check here would silently render "unknown" as
-            // "confirmed current" -- the exact failure this ticket exists
-            // to prevent.
-            const hasOutdatedKey = Object.prototype.hasOwnProperty.call(sysVersions, 'outdated');
-            outdated = hasOutdatedKey ? sysVersions.outdated : undefined;
-
-            versionColor = 'var(--lcars-amber)';
-            versionSuffix = ' UNKNOWN';
-            if (outdated === true) {
-                versionColor = 'var(--lcars-alert-red)';
-                versionSuffix = ' OUTDATED';
-            } else if (outdated === false) {
-                versionColor = 'var(--lcars-green)';
-                versionSuffix = '';
-            }
-        }
-
-        // XACA-0416-004 UPDATE (XACA-1031-018): the version indicator is no
-        // longer built by string-interpolating installedVersionText into an
-        // innerHTML template -- it is built below with document.
-        // createElement()/textContent/setAttribute(), AFTER the
-        // item.innerHTML assignment (innerHTML REPLACES all children, so an
-        // element built before that assignment would be destroyed by it --
-        // that is why the insertBefore call is down in the `if
-        // (hasInstalledVersion)` block below, not up here). textContent and
-        // setAttribute cannot be made to produce markup -- the browser does
-        // the escaping structurally at the DOM-API boundary -- so there is
-        // deliberately no escapeHtml()/escapeAttr() call on
-        // installedVersionText anywhere in this function any more,
-        // including for the new aria-label. If you are reverting this back
-        // to a string-interpolated innerHTML template (the shape
-        // XACA-1031-006 originally shipped), you are reintroducing that
-        // escaping obligation for BOTH the visible text and the aria-label
-        // -- re-add escapeHtml()/escapeAttr() calls at every interpolation
-        // point when you do.
-        //
-        // XACA-0416-004 (unchanged): machine.hostname is stored verbatim
-        // from the POST /api/status body -- untrusted, ELEMENT CONTENT ->
-        // escapeHtml. machine.status is server-derived by
-        // updateMachineStatuses(), which only ever writes 'online'/
-        // 'offline'/'warning', and machine.session_count is a computed
-        // integer; both stay unwrapped. No untrusted value reaches a quoted
-        // attribute via string interpolation in this file, so escapeAttr()
-        // is deliberately NOT defined here -- do not add a helper with no
-        // call site.
-        item.innerHTML =
-            '<span class="status-indicator ' + machine.status + '"></span>' +
-            '<span class="lcars-text-sm status-row-hostname" style="flex: 1;">' + escapeHtml(machine.hostname) + '</span>' +
-            '<span class="lcars-text-xs" style="color: var(--lcars-tan);">' + machine.session_count + ' sessions</span>';
-
-        if (hasInstalledVersion) {
-            // XACA-1031-018 ([UX] NICE-TO-HAVE): a bare title="..." on a
-            // non-focusable span has weak/inconsistent screen-reader
-            // support. aria-label mirrors the FULL visible text (version
-            // number plus its outdated/up-to-date/unknown state) so
-            // assistive tech announces the same information a sighted user
-            // reads off the card. title= is kept as-is for the sighted
-            // mouse-hover tooltip -- the two are not in tension, aria-label
-            // simply gives the accessibility tree a reliable value.
-            const versionEl = document.createElement('span');
-            versionEl.className = 'lcars-text-xs status-row-version';
-            versionEl.setAttribute('style', 'color: ' + versionColor + '; white-space: nowrap;');
-            versionEl.setAttribute('title', 'aiteamforge version');
-            versionEl.textContent = 'v' + installedVersionText + versionSuffix;
-            const versionStateText = outdated === true ? 'outdated' : outdated === false ? 'up to date' : 'update status unknown';
-            versionEl.setAttribute('aria-label', 'AITeamForge version ' + installedVersionText + ', ' + versionStateText);
-            // Insert between the hostname span and the session-count span
-            // -- item.lastElementChild is the session-count span at this
-            // point (it is always the last child the innerHTML assignment
-            // above produces), which stays correct regardless of what else
-            // is or isn't a sibling. Do not reorder -- XACA-1031-016's
-            // overflow guard and this row's visual layout both depend on
-            // this exact position.
-            item.insertBefore(versionEl, item.lastElementChild);
-        }
-
-        // XACA-1092-005: the HEALTH badge is appended AFTER XACA-1031's
-        // version indicator is inserted above, and via the DOM API rather
-        // than by extending the innerHTML template. Both are deliberate.
-        // Appending to innerHTML here would destroy the versionEl built
-        // above (innerHTML REPLACES all children); and XACA-1031-018's
-        // insertBefore(versionEl, item.lastElementChild) is documented to
-        // rely on lastElementChild being the session-count span at that
-        // moment, which stops being true the instant this badge is added --
-        // so the badge must come after, never before. The badge class comes
-        // from a fixed literal set this file chooses (health-warning /
-        // health-critical), never from reporter data, so no escaping
-        // obligation is introduced; `unknown` and `healthy` render NO node
-        // at all (UX spec addendum 1) -- on a fleet where nothing reports
-        // system data yet, a visible "unknown" pill would appear on every
-        // card simultaneously.
-        const badgeSpec = healthBadgeSpec(healthResult);
-        if (badgeSpec) {
-            const badgeEl = document.createElement('span');
-            badgeEl.className = badgeSpec.className;
-            badgeEl.textContent = badgeSpec.text;
-            badgeEl.setAttribute('aria-label', 'machine health: ' + badgeSpec.text);
-            item.appendChild(badgeEl);
-        }
-
-        // XACA-1092-004/-005: lcars2's `.status-row` is today a single flex
-        // row (no vertical stacking) and is also used by other, non-machine
-        // listings on this page, so it is deliberately left alone -- the
-        // version line / SYSTEM toggle / SYSTEM panel are built as a
-        // SEPARATE sibling block ("detail") and returned together with
-        // `item` inside a DocumentFragment, the same way v1's
-        // createMachineItem() already returns its own `.machine-item-container`
-        // plus a sibling `.machine-history-panel`. This is lcars2's first
-        // click affordance (UX spec §1) -- following v1's backup-toggle
-        // mechanics (chevron + `.expanded` class, no async fetch; the panel
-        // content is already in the DOM from the initial render, unlike the
-        // history panel's fetch-driven "Loading history..." placeholder).
-        const fragment = document.createDocumentFragment();
-        fragment.appendChild(item);
-
-        const isSystemExpanded = expandedSystemMachineId === machine.machine_id;
-        const detailHtml = buildSystemSectionHtml(system, isSystemExpanded);
-        if (detailHtml !== '') {
-            const detail = document.createElement('div');
-            detail.className = 'status-row-detail';
-            detail.innerHTML = detailHtml;
-            fragment.appendChild(detail);
-
-            const toggle = detail.querySelector('.status-row-system-toggle');
-            if (toggle) {
-                // data-machine-id is set via the DOM API, not baked into the
-                // innerHTML string above -- see buildSystemSectionHtml()'s
-                // comment on why that keeps escapeAttr() unneeded here.
-                toggle.setAttribute('data-machine-id', machine.machine_id);
-                // XACA-1092-021 (WCAG 2.1.1): this is lcars2's FIRST
-                // click affordance and shipped with no keyboard path at all
-                // -- give it the same tabindex/role/keydown shape the
-                // LCARS-terminal card above already uses (see the
-                // card.setAttribute('tabindex', '0') / keydown block near
-                // XACA-0983-014), applied via setAttribute rather than
-                // baked into the innerHTML template for the same reason
-                // data-machine-id is (see buildSystemSectionHtml()'s
-                // comment). aria-expanded is initialized to the real
-                // current state here and kept in sync by
-                // toggleSystemPanel() on every subsequent transition,
-                // including when a DIFFERENT machine's panel is closed as
-                // a side effect of opening this one.
-                toggle.setAttribute('tabindex', '0');
-                toggle.setAttribute('role', 'button');
-                toggle.setAttribute('aria-expanded', isSystemExpanded ? 'true' : 'false');
-                toggle.addEventListener('click', function (e) {
-                    e.stopPropagation();
-                    toggleSystemPanel(machine.machine_id, detail);
-                });
-                toggle.addEventListener('keydown', function (e) {
-                    // Enter and Space both activate, matching the
-                    // LCARS-terminal card's keydown handler above. Space
-                    // must be preventDefault()'d or the page scrolls --
-                    // the browser's default action for Space on a
-                    // non-native-button element with a keydown listener is
-                    // to scroll the viewport.
-                    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar' || e.keyCode === 13 || e.keyCode === 32) {
-                        // No stopPropagation() here, matching the
-                        // LCARS-terminal card's own keydown handler
-                        // precedent (XACA-0983-014) -- only the CLICK
-                        // handler above needs it (to stop a click from
-                        // also reaching a row-level click handler); no
-                        // parent keydown listener exists in this file for
-                        // Enter/Space to conflict with.
-                        e.preventDefault();
-                        toggleSystemPanel(machine.machine_id, detail);
-                    }
-                });
-            }
-        }
-
-        return fragment;
     }
 
     // ============================================================================

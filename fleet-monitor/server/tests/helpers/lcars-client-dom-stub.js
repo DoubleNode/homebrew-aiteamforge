@@ -680,6 +680,54 @@ function loadMachineHealthModule(ctx) {
     }
 }
 
+// XACA-1100-002: createMachineItem() itself was extracted out of the 4
+// lcars2 client app files into window.LCARS_CORE.machines.createMachineItem
+// (lcars-fleet-core.js), the same "actual shipped source, loaded into the
+// same ctx before the client app script" pattern as
+// loadSharedTerminalCardModule/loadMachineHealthModule above. v1
+// (lcars-dashboard-app.js) is untouched by XACA-1100 and keeps its own,
+// much larger, local createMachineItem() -- loading this module ahead of it
+// is harmless (lcars-fleet-core.js has no side effects at load time beyond
+// one `document.readyState === 'loading'` check, which this stub's
+// `documentStub.readyState` being undefined safely short-circuits) but is
+// only actually exercised by the 4 lcars2 files' createMachineItem export
+// below.
+const FLEET_CORE_MODULE_REL_PATH = 'lcars2/js/lcars-fleet-core.js';
+
+function loadFleetCoreModule(ctx) {
+    const filePath = path.join(PUBLIC_ROOT, FLEET_CORE_MODULE_REL_PATH);
+    const src = fs.readFileSync(filePath, 'utf8');
+    vm.runInContext(src, ctx, { filename: FLEET_CORE_MODULE_REL_PATH });
+
+    if (!ctx.window || typeof ctx.window.LCARS_CORE !== 'object' || typeof ctx.window.LCARS_CORE.machines !== 'object') {
+        throw new Error('lcars-client-dom-stub: LCARS_CORE.machines failed to load from ' + FLEET_CORE_MODULE_REL_PATH);
+    }
+}
+
+// XACA-1100-016: this `window.__lcarsTestExports.createMachineItem` property
+// -- assembling the same `deps` object the real lcars2 call site builds,
+// then forwarding to the shared core -- was duplicated (cosmetic whitespace
+// differences only) across THIS file's own loadClientApp() below AND 4
+// standalone test files that build their own vm.Context instead of calling
+// loadClientApp() (tests/xaca-1031-007-version-badge-ui.test.js,
+// tests/xaca-1031-015-016-017-ux-followups.test.js,
+// tests/xaca-1031-018-version-aria-label.test.js,
+// tests/xaca-1092-027-system-panel-sibling-close.test.js) -- 5 copies of
+// the same string literal, the exact irony a de-duplication PR (XACA-1100)
+// should not be introducing into its own test coverage. Hoisted here as the
+// one source; all 5 call sites now reference this constant instead of
+// retyping it. See XACA-1100-017's correction just above `deps`'s
+// optionality on this wrapper (it is NOT a per-hook override point).
+const CREATE_MACHINE_ITEM_EXPORT_PROPERTY =
+    'createMachineItem: (typeof createMachineItem !== "undefined") ? createMachineItem : ' +
+    'function (machine, deps) { deps = deps || { ' +
+    'machineSystemToHealthInput: machineSystemToHealthInput, ' +
+    'healthBadgeSpec: healthBadgeSpec, ' +
+    'buildSystemSectionHtml: buildSystemSectionHtml, ' +
+    'toggleSystemPanel: toggleSystemPanel, ' +
+    'isSystemExpanded: expandedSystemMachineId === machine.machine_id ' +
+    '}; return window.LCARS_CORE.machines.createMachineItem(machine, deps); }';
+
 // Loads one of the 5 client app IIFEs and returns whatever functions it
 // stashed onto window.__lcarsTestExports. `relPath` is relative to
 // fleet-monitor/server/public/ (e.g. 'lcars2/js/lcars-academy-app.js').
@@ -707,10 +755,34 @@ function loadClientApp(relPath, ctx) {
         ' createServiceOnlyLcarsCard: createServiceOnlyLcarsCard,' +
         ' createTeamCard: createTeamCard,' +
         ' isLcarsTerminal: isLcarsTerminal,' +
-        // XACA-1092-004/-005: present in all 5 client app files (unlike the
-        // typeof-guarded exports below, which are v1-only), so exported
-        // unconditionally like the three above.
-        ' createMachineItem: createMachineItem,' +
+        // XACA-1092-004/-005 / XACA-1100-002: createMachineItem() itself is a
+        // real local function ONLY in lcars-dashboard-app.js (v1) now --
+        // XACA-1100-002 extracted the 4 lcars2 files' byte-identical copy out
+        // into window.LCARS_CORE.machines.createMachineItem (loaded by
+        // loadFleetCoreModule() below), which needs a `deps` object of hooks
+        // this file's own closure supplies at the real call site (see
+        // lcars-*-app.js). `typeof createMachineItem !== "undefined"` is true
+        // only for v1, so it still gets its own unmodified local function;
+        // the 4 lcars2 files fall through to a thin wrapper that assembles
+        // the same `deps` object the real call site builds and forwards to
+        // the core, so `mod.createMachineItem(machine)` keeps working
+        // unchanged for every existing test.
+        //
+        // XACA-1100-017 CORRECTION: `deps` is optional on THIS wrapper only
+        // -- omit it and you get the wrapper's own hard-coded default deps
+        // object below, matching the real call site. It is NOT a way to
+        // override a single hook: `deps = deps || {...}` is all-or-nothing,
+        // so `mod.createMachineItem(machine, { toggleSystemPanel: spy })`
+        // would forward that partial object as-is and the core (which now
+        // requires every hook function to be present -- XACA-1100-014)
+        // throws naming the other three missing keys, rather than merging
+        // your one override on top of the defaults. A previous version of
+        // this comment claimed the opposite ("deps is optional precisely so
+        // a test can still override any one hook") -- no test in this repo
+        // actually does that, and it does not work; if partial-override
+        // support is ever needed, merge onto the default object here rather
+        // than relying on `deps || {...}`.
+        ' ' + CREATE_MACHINE_ITEM_EXPORT_PROPERTY + ',' +
         ' setWorkingItems: (typeof workingItems !== "undefined")' +
         '     ? function (v) { workingItems = v; } : null,' +
         // XACA-0416 (review finding: safeCssIdent validates syntax, not token
@@ -753,6 +825,7 @@ function loadClientApp(relPath, ctx) {
     vm.createContext(ctx);
     loadSharedTerminalCardModule(ctx);
     loadMachineHealthModule(ctx);
+    loadFleetCoreModule(ctx);
     vm.runInContext(patched, ctx, { filename: relPath });
 
     const exports = ctx.window.__lcarsTestExports;
@@ -773,7 +846,9 @@ module.exports = {
     loadClientApp,
     loadSharedTerminalCardModule,
     loadMachineHealthModule,
+    loadFleetCoreModule,
     textContentToInnerHtml,
+    CREATE_MACHINE_ITEM_EXPORT_PROPERTY,
     FakeElement,
     FakeStyle,
     FakeDocumentFragment

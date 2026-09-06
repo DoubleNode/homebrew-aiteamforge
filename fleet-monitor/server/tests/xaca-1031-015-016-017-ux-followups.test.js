@@ -63,6 +63,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const { JSDOM } = require('jsdom');
+const { CREATE_MACHINE_ITEM_EXPORT_PROPERTY } = require('./helpers/lcars-client-dom-stub');
 
 const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
 
@@ -114,12 +115,36 @@ async function setupApp(relPath, exportNames) {
     });
 
     const ctx = dom.getInternalVMContext();
+
+    // XACA-1100-002: createMachineItem() itself was extracted out of the 4
+    // lcars2 minimal renderers into window.LCARS_CORE.machines.createMachineItem
+    // (lcars-fleet-core.js). Load the real shipped core module into this same
+    // vm context first, exactly the way a real HTML page's <script> tag
+    // would -- otherwise the export wrapper below throws "LCARS_CORE is
+    // undefined" the moment it's called. Harmless for RICH_APP_REL_PATH (v1
+    // still has its own local createMachineItem() and never touches
+    // LCARS_CORE).
+    const coreSrc = fs.readFileSync(path.join(PUBLIC_ROOT, 'lcars2/js/lcars-fleet-core.js'), 'utf8');
+    vm.runInContext(coreSrc, ctx, { filename: 'lcars2/js/lcars-fleet-core.js' });
+
     const src = fs.readFileSync(path.join(PUBLIC_ROOT, relPath), 'utf8');
     const marker = '})();';
     const lastIdx = src.lastIndexOf(marker);
     if (lastIdx === -1) throw new Error('setupApp: closing "})();" not found in ' + relPath);
+    // createMachineItem: a real local function ONLY in RICH_APP_REL_PATH (v1)
+    // now -- `typeof createMachineItem !== "undefined"` is true only there, so
+    // it still gets its own unmodified local function. The 4 lcars2 files no
+    // longer define it locally (XACA-1100-002), so they fall through to a
+    // thin wrapper assembling the same `deps` object the real call site
+    // builds (see lcars-*-app.js) and forwarding to the core.
     const exportStmt = '\n    window.__lcarsTestExports = { ' +
-        exportNames.map((name) => name + ': ' + name).join(', ') +
+        exportNames.map((name) => {
+            // XACA-1100-016: CREATE_MACHINE_ITEM_EXPORT_PROPERTY is hoisted
+            // to tests/helpers/lcars-client-dom-stub.js, shared by 5 test
+            // harnesses that each used to retype this string.
+            if (name !== 'createMachineItem') return name + ': ' + name;
+            return CREATE_MACHINE_ITEM_EXPORT_PROPERTY;
+        }).join(', ') +
         ' };\n';
     const patched = src.slice(0, lastIdx) + exportStmt + src.slice(lastIdx);
     vm.runInContext(patched, ctx, { filename: relPath });
@@ -414,36 +439,71 @@ for (const notOutdatedCase of [
 }
 
 // ============================================================================
-// Cross-file byte-identity (lcars2's createMachineItem extent must stay
-// identical across all 4 minimal renderers -- the ticket's own explicit
-// constraint). Reproduces, as an automated regression, the same extraction
-// framing used to hand-verify this during development: from the line
-// `    function createMachineItem(machine) {` through the next line that is
-// exactly `    }` (4-space indent, closing the function).
+// Cross-file identity (XACA-1100-002 UPDATE): createMachineItem() itself was
+// extracted out of the 4 lcars2 minimal renderers into the single shared
+// implementation window.LCARS_CORE.machines.createMachineItem
+// (lcars2/js/lcars-fleet-core.js) -- there is now exactly ONE copy of the
+// function body, so a byte-identity comparison ACROSS the 4 app files no
+// longer has anything to compare (each no longer contains a local
+// `function createMachineItem(machine) {` at all). This test now asserts
+// the two invariants that replaced it:
+//   1. none of the 4 app files re-introduce a local copy of the function
+//      (a regression back to per-file duplication would defeat the
+//      extraction this ticket did);
+//   2. the 4 app files' own call sites into the shared core (the small
+//      `deps` object wiring each file's local health/panel/toggle hooks
+//      through) stay byte-identical to each other -- they must not drift
+//      apart, per the same reasoning the original test protected.
+// The extracted implementation living in the core is still the same code
+// this test's sibling assertions above already exercise end-to-end via
+// mod.createMachineItem(machine) (loadClientApp's export wrapper forwards
+// to the core), so no separate content check is needed here beyond the
+// core-side test coverage.
 // ============================================================================
 
-function extractCreateMachineItem(src) {
+const LOCAL_DEFINITION_MARKER = '    function createMachineItem(machine) {';
+const CORE_CALL_MARKER = 'window.LCARS_CORE.machines.createMachineItem(machine, {';
+
+function extractCoreCallSite(src) {
     const lines = src.split('\n');
-    const startIdx = lines.findIndex((l) => l === '    function createMachineItem(machine) {');
-    if (startIdx === -1) throw new Error('extractCreateMachineItem: start marker not found');
-    const endIdx = lines.findIndex((l, i) => i > startIdx && l === '    }');
-    if (endIdx === -1) throw new Error('extractCreateMachineItem: end marker not found');
+    const startIdx = lines.findIndex((l) => l.includes(CORE_CALL_MARKER));
+    if (startIdx === -1) throw new Error('extractCoreCallSite: call-site marker not found');
+    const endIdx = lines.findIndex((l, i) => i > startIdx && l.trim() === '});');
+    if (endIdx === -1) throw new Error('extractCoreCallSite: end marker not found');
     return lines.slice(startIdx, endIdx + 1).join('\n');
 }
 
-test('cross-file byte-identity: createMachineItem() (from "    function createMachineItem(machine) {" through the next "    }") is identical across every lcars2 minimal renderer', () => {
+test('createMachineItem() is NOT re-duplicated locally in any lcars2 minimal renderer (must stay extracted into lcars-fleet-core.js)', () => {
     assert.ok(LCARS2_MINIMAL_FILES.length >= 3, 'expected at least 3 lcars2 minimal renderer files to exist on disk');
-    const extents = LCARS2_MINIMAL_FILES.map((rel) => ({
-        rel,
-        text: extractCreateMachineItem(fs.readFileSync(path.join(PUBLIC_ROOT, rel), 'utf8'))
-    }));
-    const [first, ...rest] = extents;
-    for (const other of rest) {
-        assert.equal(other.text, first.text, 'createMachineItem() extent diverged between ' + first.rel + ' and ' + other.rel + ' -- lcars2 files must stay byte-identical over this extent');
+    for (const rel of LCARS2_MINIMAL_FILES) {
+        const src = fs.readFileSync(path.join(PUBLIC_ROOT, rel), 'utf8');
+        assert.ok(!src.includes(LOCAL_DEFINITION_MARKER), rel + ' re-introduces a local createMachineItem() definition -- it must delegate to window.LCARS_CORE.machines.createMachineItem instead (XACA-1100-002)');
     }
-    // Sanity: the extent actually contains this ticket's new classes, so a
-    // vacuous extraction (e.g. both markers not found, both empty strings
+});
+
+test('cross-file byte-identity: each lcars2 minimal renderer\'s call site into the shared core createMachineItem() is identical', () => {
+    assert.ok(LCARS2_MINIMAL_FILES.length >= 3, 'expected at least 3 lcars2 minimal renderer files to exist on disk');
+    const callSites = LCARS2_MINIMAL_FILES.map((rel) => ({
+        rel,
+        text: extractCoreCallSite(fs.readFileSync(path.join(PUBLIC_ROOT, rel), 'utf8'))
+    }));
+    const [first, ...rest] = callSites;
+    for (const other of rest) {
+        assert.equal(other.text, first.text, 'core call site diverged between ' + first.rel + ' and ' + other.rel + ' -- lcars2 files must stay byte-identical over this extent');
+    }
+    // Sanity: the call site actually wires all 5 documented deps, so a
+    // vacuous match (e.g. both markers not found, both empty strings
     // comparing equal) cannot pass this test silently.
-    assert.match(first.text, /status-row-hostname/);
-    assert.match(first.text, /status-row-version/);
+    assert.match(first.text, /machineSystemToHealthInput:/);
+    assert.match(first.text, /healthBadgeSpec:/);
+    assert.match(first.text, /buildSystemSectionHtml:/);
+    assert.match(first.text, /toggleSystemPanel:/);
+    assert.match(first.text, /isSystemExpanded:/);
+});
+
+test('the shared core implementation (lcars-fleet-core.js) still contains this ticket\'s classes -- a vacuous extraction cannot pass silently', () => {
+    const coreSrc = fs.readFileSync(path.join(PUBLIC_ROOT, 'lcars2/js/lcars-fleet-core.js'), 'utf8');
+    assert.match(coreSrc, /createMachineItem\s*:\s*function/, 'lcars-fleet-core.js must define LCARS.machines.createMachineItem');
+    assert.match(coreSrc, /status-row-hostname/);
+    assert.match(coreSrc, /status-row-version/);
 });
