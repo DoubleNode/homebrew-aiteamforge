@@ -7,6 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1099: `share/templates/kanban/kanban-helpers.template.sh` — `kb-release-create`'s
+  `http_code == 000` branch no longer asserts "LCARS server is not running" for
+  every connection-phase curl failure. curl reports `%{http_code}=000` for
+  refused, timed-out, DNS-failed, and reset connections alike; the new
+  `_kb_curl_failure_reason` helper decodes curl's own exit code (captured
+  immediately after the curl call, before the following command substitutions
+  clobber `$?`) into a specific cause and a cause-appropriate remedy — e.g. a
+  timeout (curl exit 28) now says the server may just be slow, instead of
+  telling the operator to restart it. `_kb_release_sync` also now captures
+  `curl_exit` for future use, but its own diagnostics are unaffected: it was
+  already designed to stay silent on `http_code=000` (a deliberately
+  best-effort, pre-existing divergence from canonical) and never asserted a
+  cause there, so it did not carry the misreport this ticket fixes.
+  `share/templates/aliases/kanban-aliases.sh` carries neither function and
+  needed no change.
+
 - XACA-1110: `fleet-monitor/server/public/lcars2/` — the four per-org dashboard
   app files were unified into one config-parameterized module,
   `js/lcars-fleet-dashboard-app.js`, driven by a per-org config script the host

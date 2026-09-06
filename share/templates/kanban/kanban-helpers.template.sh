@@ -898,9 +898,76 @@ _kb_fleet_auth_args() {
     _KB_FLEET_AUTH_STDIN=$(printf 'header = "Authorization: Bearer %s"\n' "$_kb_token_escaped")
 }
 
+# Decode a curl exit code into a human cause + remedy, so a connection-phase
+# failure (curl reports %{http_code}=000 for ALL of refused/timed-out/DNS/
+# reset) isn't asserted as a single cause ("server is not running") when it
+# could equally be a timeout, a DNS failure, or a reset (XACA-1099).
+# Usage: _kb_curl_failure_reason <curl_exit_code> [port]
+# The optional <port> is interpolated into the remedy so the operator gets a
+# copy-pasteable `lsof` command rather than a literal placeholder. Omit it and
+# the remedy degrades gracefully to the generic wording.
+# Prints exactly two lines to stdout: line 1 = cause phrase (includes the
+# raw "curl exit N" so an operator can look it up even if the mapping
+# above is wrong or incomplete), line 2 = remedy hint. Callers should
+# capture with command substitution (which strips the trailing newline)
+# and split on the first embedded newline, e.g.:
+#   local _kb_reason cause remedy
+#   _kb_reason=$(_kb_curl_failure_reason "$curl_exit" "$port")
+#   cause="${_kb_reason%%$'\n'*}"
+#   remedy="${_kb_reason#*$'\n'}"
+# Pure parameter-expansion split — no bash-4+ constructs — so this works
+# unchanged under /bin/bash 3.2 and zsh (this template is sourced on both).
+_kb_curl_failure_reason() {
+    local curl_exit="${1-}"
+    local _kb_port="${2-}"
+    local cause remedy _kb_lsof
+    # Degrade gracefully when no port was supplied.
+    if [[ -n "$_kb_port" ]]; then
+        _kb_lsof="lsof -nP -iTCP:${_kb_port} -sTCP:LISTEN"
+    else
+        _kb_lsof="lsof -nP -iTCP:<port> -sTCP:LISTEN"
+    fi
+
+    case "$curl_exit" in
+        7)
+            cause="connection refused (curl exit 7) — nothing accepted the connection on that port at that moment"
+            remedy="This could mean the server is down, OR it was mid-restart (on a shared team server, a concurrent session's kb-restart can produce this same signature and self-resolve). Verify current state first (${_kb_lsof}, or re-probe) before restarting — restarting a server another session just brought back up disrupts every session on that team."
+            ;;
+        28)
+            cause="request timed out after the curl budget (curl exit 28)"
+            remedy="The server may be up but slow to respond — do NOT assume it's down. Verify first (e.g. ${_kb_lsof}) before restarting it."
+            ;;
+        6)
+            cause="hostname resolution failed (curl exit 6)"
+            remedy="This is a DNS/hostname problem, not the server process — check name resolution, not the server."
+            ;;
+        56)
+            cause="connection reset by peer (curl exit 56)"
+            remedy="The connection was dropped mid-request — verify server state before restarting."
+            ;;
+        *)
+            cause="connection failed — refused, timed out, DNS failure, or reset (curl exit ${curl_exit:-unknown})"
+            remedy="Cause is ambiguous from this exit code alone — verify server state before restarting."
+            ;;
+    esac
+
+    printf '%s\n%s\n' "$cause" "$remedy"
+}
+
 # Sync an item to release manifests via LCARS server
 # Usage: _kb_release_sync <item_id>
-# Returns 0 (success) even if server is down - this is a best-effort sync
+# Returns 0 (success) even if server is down - this is a best-effort sync.
+#
+# XACA-1099 note: unlike canonical's _kb_release_sync (and this tap's own
+# kb-release-create below), this function does NOT assert a cause when curl
+# fails — it deliberately stays silent on http_code=000 (see the "Silently
+# succeed" comment a few lines down) precisely so a not-yet-started LCARS
+# server doesn't spam every kb-* invocation with a warning. Because it never
+# characterizes a curl-000 as "the server is not running" (or anything else),
+# it does not exhibit XACA-1099's misreport bug — there is no assertion here
+# to correct. curl_exit is still captured, immediately after the curl call,
+# so a future diagnostic path (or a deliberate design change to make this
+# loud, tracked separately) has it available without re-deriving it.
 _kb_release_sync() {
     local item_id="$1"
 
@@ -923,7 +990,7 @@ _kb_release_sync() {
 
     # Try to sync with LCARS server (2 second timeout)
     # Silent by default - only warn on unexpected errors
-    local response http_code
+    local response http_code curl_exit
     local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
     _kb_lcars_auth_args
     response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
@@ -933,6 +1000,9 @@ _kb_release_sync() {
         "${_KB_LCARS_AUTH_ARGS[@]}" \
         -d "{\"itemId\": \"$item_id\"}" \
         "http://localhost:${_lcars_port}/api/releases/sync-item" 2>/dev/null)
+    # Captured immediately — the http_code extraction below is itself a
+    # command substitution and would clobber $? before we could read it.
+    curl_exit=$?
 
     # Extract HTTP code from last line
     http_code=$(echo "$response" | tail -n1)
@@ -17543,7 +17613,7 @@ kb-release-create() {
         }')
 
     # Call LCARS server to create the release
-    local response http_code body
+    local response http_code body curl_exit
     local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
     _kb_lcars_auth_args
     response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
@@ -17553,6 +17623,9 @@ kb-release-create() {
         "${_KB_LCARS_AUTH_ARGS[@]}" \
         -d "$json_payload" \
         "http://localhost:${_lcars_port}/api/releases" 2>/dev/null)
+    # Captured immediately — the next two command substitutions would
+    # otherwise clobber $? before we could read curl's own exit status.
+    curl_exit=$?
 
     http_code=$(echo "$response" | tail -n1)
     body=$(echo "$response" | sed '$d')
@@ -17571,8 +17644,16 @@ kb-release-create() {
         echo "    kb-release assign <item-id> $release_id [platform]"
         echo "    kb-release list"
     elif [[ "$http_code" == "000" ]]; then
-        echo "Error: LCARS server is not running (http://localhost:${_lcars_port})"
-        echo "  Start it with: lcars-start (or check server status)"
+        # curl reports %{http_code}=000 for ANY connection-phase failure
+        # (refused, timed out, DNS, reset) — decode curl's own exit code
+        # instead of asserting a single cause for all of them (see
+        # _kb_curl_failure_reason above; XACA-1099).
+        local _kb_reason cause remedy
+        _kb_reason=$(_kb_curl_failure_reason "$curl_exit" "$_lcars_port")
+        cause="${_kb_reason%%$'\n'*}"
+        remedy="${_kb_reason#*$'\n'}"
+        echo "Error: LCARS server on port $_lcars_port — $cause."
+        echo "  $remedy"
         return 1
     else
         echo "Error: Failed to create release (HTTP $http_code)"
