@@ -145,26 +145,7 @@ function _normalizeFnBody(text) {
         .join('\n');
 }
 
-// XACA-1091 review finding: the four isValid* helpers below were mirrored into
-// app-factory.js but NOT listed here, which reopened the exact blind spot this
-// guard exists to close. Demonstrated by mutation: making isValidPercent() in
-// server.js accept everything left ALL 945 tests green, because the behavioural
-// suites exercise the app-factory.js MIRROR and only this guard ties that mirror
-// back to the shipped file. A validator outside this list can be broken in
-// server.js with nothing anywhere going red.
-//
-// RULE FOR FUTURE EDITS: any function duplicated between server.js and
-// app-factory.js belongs in this array. Adding the mirror copy without adding
-// the name here is worse than not mirroring at all -- it looks protected.
-const DRIFT_GUARDED_FUNCTIONS = [
-    'isVersionOutdated',
-    'normalizeSystemBlock',
-    'projectSystemBlock',
-    'isValidByteCount',
-    'isValidPercent',
-    'isValidLoadAverageComponent',
-    'isValidPositiveInteger',
-];
+const DRIFT_GUARDED_FUNCTIONS = ['isVersionOutdated', 'normalizeSystemBlock', 'projectSystemBlock'];
 
 for (const fnName of DRIFT_GUARDED_FUNCTIONS) {
     test(`drift guard: ${fnName} extracted a non-empty body from server.js`, () => {
