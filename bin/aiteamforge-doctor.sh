@@ -339,7 +339,23 @@ _x1097_prime_login_path() {
       "$SHELL" -ilc "printf '%s\n' '$_x1097_probe_marker'; printf '%s\n' \"\$PATH\"" \
         >"$_x1097_probe_tmpfile" 2>/dev/null &
       _x1097_probe_pid=$!
-      disown "$_x1097_probe_pid" 2>/dev/null
+      # XACA-1097 review round 3, finding 1: every bare statement below that
+      # can legitimately return nonzero is guarded with `|| true` (matching
+      # the existing convention at libexec ~1771/1802/2219) -- this whole
+      # function runs under the script's top-level `set -eo pipefail`
+      # (line 5). `disown` on a job that already finished, and `wait` on an
+      # already-reaped pid, are both real nonzero returns here, not just
+      # `kill`. Measured end-to-end against the real script with a hanging
+      # $SHELL: WITHOUT these guards the timeout branch's bare
+      # `kill -KILL -- -$pid` (rc=1, ESRCH -- SIGTERM just above it already
+      # reaped the whole group) aborted the ENTIRE SCRIPT right there --
+      # before the fallback warning, before `wait`, before a single
+      # dependency verdict -- exit 1, last output line "Install Profile:
+      # full", 0 warnings, 0 verdicts. The comment/warning below describing
+      # the static-prefix-list fallback was a fallback the code could never
+      # reach; this is arguably worse than the original defect (dies
+      # silently instead of lying).
+      disown "$_x1097_probe_pid" 2>/dev/null || true
       [ "$_x1097_probe_had_monitor" = true ] || set +m
       while [ "$_x1097_probe_elapsed" -lt "$_x1097_probe_timeout" ] && kill -0 "$_x1097_probe_pid" 2>/dev/null; do
         sleep 1
@@ -351,21 +367,30 @@ _x1097_prime_login_path() {
         # instead of doctor just mysteriously "going slow". Kill the
         # WHOLE process group (negative PID), then escalate to SIGKILL for
         # anything that ignored SIGTERM -- see the `set -m` note above for
-        # why a bare `kill "$pid"` alone leaks grandchildren.
-        kill -TERM -- "-$_x1097_probe_pid" 2>/dev/null
+        # why a bare `kill "$pid"` alone leaks grandchildren. `|| true` on
+        # both kills AND the wait -- see the XACA-1097 review round 3 note
+        # above for why a bare nonzero return here used to kill the whole
+        # script under `set -e`.
+        kill -TERM -- "-$_x1097_probe_pid" 2>/dev/null || true
         sleep 0.2
-        kill -KILL -- "-$_x1097_probe_pid" 2>/dev/null
-        wait "$_x1097_probe_pid" 2>/dev/null
+        kill -KILL -- "-$_x1097_probe_pid" 2>/dev/null || true
+        wait "$_x1097_probe_pid" 2>/dev/null || true
         echo "aiteamforge doctor: login-shell PATH probe (\$SHELL -ilc) exceeded ${_x1097_probe_timeout}s and was aborted -- falling back to the static prefix list only (/opt/homebrew/bin, /usr/local/bin, \$HOME/.local/bin). A tool installed elsewhere (nvm, Herd, a version manager) may be misreported as missing. Check \$SHELL's startup files (~/.zshrc, ~/.bashrc, etc.) for something slow or hanging." >&2
       else
-        wait "$_x1097_probe_pid" 2>/dev/null
+        # `|| true`: $SHELL exiting nonzero on the fast (non-timeout) path
+        # is unusual but not impossible, and this is a bare statement under
+        # `set -e` same as the timeout branch above.
+        wait "$_x1097_probe_pid" 2>/dev/null || true
         # Extract ONLY the line immediately following the marker line (see
         # the marker-anchoring note above). `awk`, not `read`/`cat` on the
         # raw blob, so banner noise before OR after the marker is inert.
+        # `|| true`: a bare assignment's exit status is the command
+        # substitution's (this is NOT a `local` declaration, which would
+        # already mask it) -- guard it like every other bare statement here.
         _X1097_LOGIN_PATH="$(awk -v marker="$_x1097_probe_marker" '
             found { print; exit }
             $0 == marker { found = 1 }
-          ' "$_x1097_probe_tmpfile" 2>/dev/null)"
+          ' "$_x1097_probe_tmpfile" 2>/dev/null)" || true
       fi
       rm -f "$_x1097_probe_tmpfile"
     fi

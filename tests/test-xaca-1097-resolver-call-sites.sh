@@ -158,7 +158,35 @@ if [ -z "${TEST_TMP_DIR:-}" ] || [ ! -d "${TEST_TMP_DIR:-}" ]; then
 else
     _OWN_TMP=false
 fi
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1097 review round 3, finding 2: a process-tracking reap list so that
+# ANY exit path (normal completion, an assertion path that never reaches its
+# own inline cleanup, Ctrl-C, or this whole script being killed by an outer
+# test-runner timeout) still kills every backgrounded wrapper/child/grandchild
+# this suite ever spawned. Appending to a plain bash array is not enough:
+# some of these pids are only known from INSIDE a `( ... ) &` subshell's own
+# fork bookkeeping in the parent (fine) but others (the fake hung shell's
+# child/grandchild) are discovered later by reading a pidfile the fixture
+# itself writes -- and a signal can land at any point in between. A flat
+# file that every tracking site appends to, drained unconditionally by
+# _cleanup(), is robust to being interrupted mid-block regardless of which
+# local variables happen to be in scope at signal time.
+_X1097_REAP_FILE="$(mktemp -t xaca1097-reap.XXXXXX 2>/dev/null || echo /tmp/xaca1097-reap.$$)"
+_reap_track() {
+    [ -n "${1:-}" ] && echo "$1" >> "$_X1097_REAP_FILE"
+}
 _cleanup() {
+    if [ -n "${_X1097_REAP_FILE:-}" ] && [ -f "$_X1097_REAP_FILE" ]; then
+        local _rp
+        while IFS= read -r _rp; do
+            [ -n "$_rp" ] && kill -TERM "$_rp" 2>/dev/null
+        done < "$_X1097_REAP_FILE"
+        sleep 0.2
+        while IFS= read -r _rp; do
+            [ -n "$_rp" ] && kill -KILL "$_rp" 2>/dev/null
+        done < "$_X1097_REAP_FILE"
+        rm -f "$_X1097_REAP_FILE"
+    fi
     if [ "${_OWN_TMP:-false}" = true ] && [ -n "${TEST_TMP_DIR:-}" ]; then
         rm -rf "$TEST_TMP_DIR"
     fi
@@ -777,26 +805,74 @@ _prime_elapsed_and_path() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # (a)+(b) POST-FIX: hung $SHELL is bounded, no child/grandchild survives.
+#
+# XACA-1097 review round 3, finding 2: this block used to invoke
+# _prime_elapsed_and_path SYNCHRONOUSLY (a bare `$( )` capture) with no outer
+# bound of its own -- it relied entirely on the function-under-test's OWN
+# timeout actually working. E2 immediately below has always had an outer
+# poll bound for exactly this reason (a genuinely broken bound is the actual
+# historical defect, so a test for it cannot assume the bound works). E1 was
+# testing the POST-FIX shape, but "should be fixed" is not a substitute for
+# an outer bound on a TEST that spawns a real hung child+grandchild --
+# measured: pointing $BIN_DOCTOR (and so $PRIME_POST_FN) at a still-broken
+# extraction left this block's synchronous call sitting for 4:49 and 2:47
+# against a 1s configured timeout, with no exit code and the sleep
+# child+grandchild both still alive. Mirrors E2's background+poll+reap
+# shape so a regression here fails in bounded time instead of hanging the
+# whole suite (and, by extension, whatever CI runner invoked it).
 # ─────────────────────────────────────────────────────────────────────────────
 _block_start "XACA-1097 defect 1 [POST-FIX]: hung \$SHELL is bounded within the configured timeout, and neither the child nor the GRANDCHILD survives it"
 E1_TIMEOUT=1
+E1_BOUND=$((E1_TIMEOUT * 4))
 E1_PREFIX="$PRIME_SANDBOX/e1"
-E1_OUT="$(X1097_HANG_PID_PREFIX="$E1_PREFIX" _prime_elapsed_and_path "$PRIME_POST_FN" "$FAKE_HANG_SHELL" "$E1_TIMEOUT" "/bin:/usr/bin" 2>/dev/null)"
-E1_ELAPSED="$(printf '%s\n' "$E1_OUT" | sed -n 's/^ELAPSED://p')"
-assert_not_empty "$E1_ELAPSED" "no ELAPSED marker captured -- fixture broken; got: $E1_OUT"
-if [ -n "$E1_ELAPSED" ] && [ "$E1_ELAPSED" -gt 6 ] 2>/dev/null; then
-    _block_note_fail "hung \$SHELL was NOT bounded -- prime() took ${E1_ELAPSED}s against a configured ${E1_TIMEOUT}s timeout; the wait bound is inoperative"
-fi
-sleep 0.5
-E1_CHILD_PID="$(cat "${E1_PREFIX}.child" 2>/dev/null || true)"
-E1_GRANDCHILD_PID="$(cat "${E1_PREFIX}.grandchild" 2>/dev/null || true)"
-assert_not_empty "$E1_CHILD_PID" "fixture did not record a child pid -- fixture broken, this block is not testing anything"
-assert_not_empty "$E1_GRANDCHILD_PID" "fixture did not record a grandchild pid -- fixture broken, this block is not testing anything"
-if [ -n "$E1_CHILD_PID" ] && kill -0 "$E1_CHILD_PID" 2>/dev/null; then
-    _block_note_fail "direct child (pid $E1_CHILD_PID) survived the timeout under the FIXED code"
-fi
-if [ -n "$E1_GRANDCHILD_PID" ] && kill -0 "$E1_GRANDCHILD_PID" 2>/dev/null; then
-    _block_note_fail "GRANDCHILD (pid $E1_GRANDCHILD_PID) survived the timeout under the FIXED code -- direct-child-only cleanup is not enough"
+( X1097_HANG_PID_PREFIX="$E1_PREFIX" _prime_elapsed_and_path "$PRIME_POST_FN" "$FAKE_HANG_SHELL" "$E1_TIMEOUT" "/bin:/usr/bin" \
+    > "$PRIME_SANDBOX/e1.out" 2>/dev/null ) &
+E1_WRAP_PID=$!
+_reap_track "$E1_WRAP_PID"
+E1_WAITED=0
+while [ "$E1_WAITED" -lt "$E1_BOUND" ] && kill -0 "$E1_WRAP_PID" 2>/dev/null; do
+    sleep 1
+    E1_WAITED=$((E1_WAITED + 1))
+done
+if kill -0 "$E1_WRAP_PID" 2>/dev/null; then
+    # Still alive past our OWN outer bound: the fixed code's timeout bound
+    # is inoperative (or has regressed). Fail loudly, in bounded time, and
+    # force-clean everything this block spawned -- never leave a stray
+    # sleep behind just because the thing under test hung.
+    E1_CHILD_PID="$(cat "${E1_PREFIX}.child" 2>/dev/null || true)"
+    E1_GRANDCHILD_PID="$(cat "${E1_PREFIX}.grandchild" 2>/dev/null || true)"
+    _reap_track "$E1_CHILD_PID"
+    _reap_track "$E1_GRANDCHILD_PID"
+    _block_note_fail "prime() (POST-FIX) did not return within the outer ${E1_BOUND}s bound (4x the configured ${E1_TIMEOUT}s probe timeout) -- the timeout bound is inoperative or has regressed"
+    for _p in "$E1_CHILD_PID" "$E1_GRANDCHILD_PID" "$E1_WRAP_PID"; do
+        [ -n "$_p" ] && kill -TERM "$_p" 2>/dev/null
+    done
+    sleep 0.3
+    for _p in "$E1_CHILD_PID" "$E1_GRANDCHILD_PID" "$E1_WRAP_PID"; do
+        [ -n "$_p" ] && kill -KILL "$_p" 2>/dev/null
+    done
+    wait "$E1_WRAP_PID" 2>/dev/null
+else
+    wait "$E1_WRAP_PID" 2>/dev/null
+    E1_OUT="$(cat "$PRIME_SANDBOX/e1.out" 2>/dev/null)"
+    E1_ELAPSED="$(printf '%s\n' "$E1_OUT" | sed -n 's/^ELAPSED://p')"
+    assert_not_empty "$E1_ELAPSED" "no ELAPSED marker captured -- fixture broken; got: $E1_OUT"
+    if [ -n "$E1_ELAPSED" ] && [ "$E1_ELAPSED" -gt 6 ] 2>/dev/null; then
+        _block_note_fail "hung \$SHELL was NOT bounded -- prime() took ${E1_ELAPSED}s against a configured ${E1_TIMEOUT}s timeout; the wait bound is inoperative"
+    fi
+    sleep 0.5
+    E1_CHILD_PID="$(cat "${E1_PREFIX}.child" 2>/dev/null || true)"
+    E1_GRANDCHILD_PID="$(cat "${E1_PREFIX}.grandchild" 2>/dev/null || true)"
+    _reap_track "$E1_CHILD_PID"
+    _reap_track "$E1_GRANDCHILD_PID"
+    assert_not_empty "$E1_CHILD_PID" "fixture did not record a child pid -- fixture broken, this block is not testing anything"
+    assert_not_empty "$E1_GRANDCHILD_PID" "fixture did not record a grandchild pid -- fixture broken, this block is not testing anything"
+    if [ -n "$E1_CHILD_PID" ] && kill -0 "$E1_CHILD_PID" 2>/dev/null; then
+        _block_note_fail "direct child (pid $E1_CHILD_PID) survived the timeout under the FIXED code"
+    fi
+    if [ -n "$E1_GRANDCHILD_PID" ] && kill -0 "$E1_GRANDCHILD_PID" 2>/dev/null; then
+        _block_note_fail "GRANDCHILD (pid $E1_GRANDCHILD_PID) survived the timeout under the FIXED code -- direct-child-only cleanup is not enough"
+    fi
 fi
 _block_end
 
@@ -816,6 +892,7 @@ if [ "$PRIME_PREFIX_AVAILABLE" = true ]; then
     ( X1097_HANG_PID_PREFIX="$E2_PREFIX" _prime_elapsed_and_path "$PRIME_PRE_FN" "$FAKE_HANG_SHELL" "$E2_TIMEOUT" "/bin:/usr/bin" \
         > "$PRIME_SANDBOX/e2.out" 2>/dev/null ) &
     E2_WRAP_PID=$!
+    _reap_track "$E2_WRAP_PID"
     E2_WAITED=0
     while [ "$E2_WAITED" -lt 4 ] && kill -0 "$E2_WRAP_PID" 2>/dev/null; do
         sleep 1
@@ -824,6 +901,8 @@ if [ "$PRIME_PREFIX_AVAILABLE" = true ]; then
     if kill -0 "$E2_WRAP_PID" 2>/dev/null; then
         E2_CHILD_PID="$(cat "${E2_PREFIX}.child" 2>/dev/null || true)"
         E2_GRANDCHILD_PID="$(cat "${E2_PREFIX}.grandchild" 2>/dev/null || true)"
+        _reap_track "$E2_CHILD_PID"
+        _reap_track "$E2_GRANDCHILD_PID"
         assert_not_empty "$E2_CHILD_PID" "pre-fix fixture did not record a child pid -- fixture broken"
         assert_not_empty "$E2_GRANDCHILD_PID" "pre-fix fixture did not record a grandchild pid -- fixture broken"
         if [ -n "$E2_CHILD_PID" ] && ! kill -0 "$E2_CHILD_PID" 2>/dev/null; then

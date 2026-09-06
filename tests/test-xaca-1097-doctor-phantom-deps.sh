@@ -273,7 +273,29 @@ else
     _OWN_TMP=false
 fi
 
+# XACA-1097 review round 3, finding 1b: a flat reap-pid file, drained
+# unconditionally by _cleanup(), so a hung-$SHELL fixture spawned later in
+# this file (the set -e hazard block) can never leak a stray process on
+# ANY exit path -- normal completion, an assertion that short-circuits the
+# block, Ctrl-C, or this whole script being killed by an outer runner
+# timeout. Matches the convention in test-xaca-1097-resolver-call-sites.sh
+# BLOCK E's own reap-tracking, added for the same finding.
+_X1097_REAP_FILE="$(mktemp -t xaca1097-deps-reap.XXXXXX 2>/dev/null || echo /tmp/xaca1097-deps-reap.$$)"
+_reap_track() {
+    [ -n "${1:-}" ] && echo "$1" >> "$_X1097_REAP_FILE"
+}
 _cleanup() {
+    if [ -n "${_X1097_REAP_FILE:-}" ] && [ -f "$_X1097_REAP_FILE" ]; then
+        local _rp
+        while IFS= read -r _rp; do
+            [ -n "$_rp" ] && kill -TERM "$_rp" 2>/dev/null
+        done < "$_X1097_REAP_FILE"
+        sleep 0.2
+        while IFS= read -r _rp; do
+            [ -n "$_rp" ] && kill -KILL "$_rp" 2>/dev/null
+        done < "$_X1097_REAP_FILE"
+        rm -f "$_X1097_REAP_FILE"
+    fi
     if [ "${_OWN_TMP:-false}" = true ] && [ -n "${TEST_TMP_DIR:-}" ]; then
         rm -rf "$TEST_TMP_DIR"
     fi
@@ -509,6 +531,191 @@ if [ -n "$REAL_CLAUDE" ]; then
         "claude exists at ${REAL_CLAUDE} but was reported not found under a restricted PATH"
 else
     echo "    SKIP: claude not resolvable in this environment (expected in CI) -- cannot assert non-phantom detection for a tool that doesn't exist here"
+fi
+_block_end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1097 review round 3, finding 1b: no existing suite EVER runs
+# check_dependencies()/_x1097_prime_login_path() under the shell options the
+# SHIPPED script actually uses. _run_check() above sources the extraction
+# under a bare `/bin/bash -c` with NO `set -eo pipefail` -- so a defect that
+# only manifests under `set -e` (round 3 finding 1: a bare `kill -KILL`
+# returning nonzero on an already-reaped pid aborted the ENTIRE script
+# before a single dependency verdict was printed -- measured end-to-end
+# against the real script: exit 1, last line "Install Profile: full", 0
+# warnings, 0 dependency verdicts) passed every existing test, including
+# this one, unchanged. This block closes that gap: it runs the SAME
+# extracted check_dependencies() under `set -eo pipefail` (matching
+# bin/aiteamforge-doctor.sh:5 / libexec/commands/aiteamforge-doctor.sh:6
+# exactly) with a $SHELL that hangs past the configured probe timeout, and
+# asserts the run actually COMPLETES, prints the fallback warning, AND
+# produces real dependency verdicts -- not merely "did not crash".
+#
+# PRE-FIX negative control: commit 513500a is the exact commit this
+# finding's fix sits on top of (review round 2's landing, immediately
+# before round 3) -- not a hand-typed guess, same convention as BLOCK E in
+# test-xaca-1097-resolver-call-sites.sh. Re-running this same harness
+# against that commit's doctor copies must reproduce the historical defect
+# (run aborts partway, 0 verdicts) -- proving this suite would have caught
+# it before it shipped.
+# ─────────────────────────────────────────────────────────────────────────────
+SETE_SANDBOX="$SANDBOX/sete-hazard"
+mkdir -p "$SETE_SANDBOX"
+X1097_SETE_PREFIX_COMMIT="513500a"
+
+FAKE_HANG_SHELL_SETE="$SETE_SANDBOX/fake-shell-hang.sh"
+cat > "$FAKE_HANG_SHELL_SETE" <<'FAKESHELL'
+#!/bin/bash
+# Simulates a stuck ~/.zshrc during "$SHELL -ilc ...": hangs well past any
+# configured probe timeout, and records its own pid first so this suite can
+# verify (and, if needed, force-clean) it afterward. Bash-3.2-safe: no
+# $BASHPID (bash 4+ only, measured silently empty under macOS's shipped
+# /bin/bash) -- $$ inside a real child process (not a `()` subshell) is
+# correct on 3.2.
+: "${X1097_SETE_HANG_PIDFILE:?X1097_SETE_HANG_PIDFILE must be set}"
+echo "$$" > "$X1097_SETE_HANG_PIDFILE"
+exec sleep 1000000
+FAKESHELL
+chmod +x "$FAKE_HANG_SHELL_SETE"
+
+# Runs the given extraction's check_dependencies() under set -eo pipefail
+# (matching the shipped script's own top-of-file option, not the bare
+# /bin/bash -c every OTHER block in this file uses), backgrounded with an
+# outer poll bound so a genuinely-unbounded regression fails this suite in
+# bounded time instead of hanging it. Prints "RC:<n>" then the raw
+# (ANSI-colored) combined stdout+stderr, capture-first -- never `cmd | tail`
+# (see feedback_pipefail_hides_exit_code.md).
+_run_check_sete() {
+    local extract="$1" fake_shell="$2" outfile="$3"; shift 3
+    local hang_pidfile="$SETE_SANDBOX/$$.hangpid"
+    rm -f "$hang_pidfile"
+    (
+        X1097_SETE_HANG_PIDFILE="$hang_pidfile" \
+        PATH="$RESTRICTED_PATH" SHELL="$fake_shell" \
+        AITEAMFORGE_LOGIN_PROBE_TIMEOUT_SECS=1 \
+        /bin/bash -c "
+            set -eo pipefail
+            TOTAL_CHECKS=0 PASSED_CHECKS=0 FAILED_CHECKS=0 WARNING_CHECKS=0 VERBOSE=false
+            RED='' GREEN='' YELLOW='' NC=''
+            unset AITEAMFORGE_PYTHON
+            $* 2>/dev/null
+            source '$extract'
+            check_dependencies
+            printf '__SETE_SUITE_COMPLETED__\n'
+        " > "$outfile" 2>&1
+        echo "$?" > "${outfile}.rc"
+    ) &
+    local wrap_pid=$!
+    _reap_track "$wrap_pid"
+    local waited=0
+    while [ "$waited" -lt 8 ] && kill -0 "$wrap_pid" 2>/dev/null; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$wrap_pid" 2>/dev/null; then
+        local hang_pid
+        hang_pid="$(cat "$hang_pidfile" 2>/dev/null || true)"
+        _reap_track "$hang_pid"
+        _reap_track "$wrap_pid"
+        kill -TERM "$wrap_pid" "$hang_pid" 2>/dev/null
+        sleep 0.3
+        kill -KILL "$wrap_pid" "$hang_pid" 2>/dev/null
+        wait "$wrap_pid" 2>/dev/null
+        echo "TIMEOUT" > "${outfile}.timedout"
+    else
+        wait "$wrap_pid" 2>/dev/null
+        local hang_pid
+        hang_pid="$(cat "$hang_pidfile" 2>/dev/null || true)"
+        # Force-clean defensively even on the fast path: if the fixed code's
+        # process-group kill worked, this is already dead; if not, don't
+        # leak it just because THIS block isn't the one testing that part.
+        [ -n "$hang_pid" ] && { kill -TERM "$hang_pid" 2>/dev/null; sleep 0.2; kill -KILL "$hang_pid" 2>/dev/null; }
+    fi
+}
+
+SETE_POST_OUT="$SETE_SANDBOX/post.out"
+_block_start "XACA-1097 defect [set -e hazard, POST-FIX]: bin/aiteamforge-doctor.sh's check_dependencies() completes, warns, and produces real verdicts under set -eo pipefail with a hung \$SHELL"
+_run_check_sete "$BIN_EXTRACT" "$FAKE_HANG_SHELL_SETE" "$SETE_POST_OUT"
+if [ -f "${SETE_POST_OUT}.timedout" ]; then
+    _block_note_fail "did not return within the 8s outer bound -- a hung \$SHELL under set -eo pipefail is not just aborting early, it is HANGING; this would have hung whatever CI job ran it"
+else
+    SETE_POST_RC="$(cat "${SETE_POST_OUT}.rc" 2>/dev/null || echo "")"
+    SETE_POST_TEXT="$(cat "$SETE_POST_OUT" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')"
+    assert_not_empty "$SETE_POST_TEXT" "fixture produced no output at all -- broken control"
+    assert_eq "$SETE_POST_RC" "0" \
+        "expected the FIXED extraction to exit 0 under set -eo pipefail with a hung \$SHELL; got rc=${SETE_POST_RC}, output: $SETE_POST_TEXT"
+    assert_contains "$SETE_POST_TEXT" "__SETE_SUITE_COMPLETED__" \
+        "check_dependencies() did not run to completion under set -eo pipefail -- the script aborted partway (this is the exact XACA-1097 round 3 finding 1 shape); output: $SETE_POST_TEXT"
+    assert_contains "$SETE_POST_TEXT" "exceeded" \
+        "expected the fallback warning ('...exceeded Ns and was aborted...') to print -- its absence means the timeout branch never ran or the script died before reaching it; output: $SETE_POST_TEXT"
+    assert_contains "$SETE_POST_TEXT" "Git (" \
+        "expected a REAL dependency verdict (git, reachable under the restricted PATH via /usr/bin/git) -- its absence means 0 verdicts were produced, matching the pre-fix symptom; output: $SETE_POST_TEXT"
+fi
+_block_end
+
+SETE_POST_LIB_OUT="$SETE_SANDBOX/post-lib.out"
+_block_start "XACA-1097 defect [set -e hazard, POST-FIX]: libexec/commands/aiteamforge-doctor.sh's check_dependencies() completes, warns, and produces real verdicts under set -eo pipefail with a hung \$SHELL"
+_run_check_sete "$LIBEXEC_EXTRACT" "$FAKE_HANG_SHELL_SETE" "$SETE_POST_LIB_OUT" "source '$COMMON_LIB'"
+if [ -f "${SETE_POST_LIB_OUT}.timedout" ]; then
+    _block_note_fail "did not return within the 8s outer bound -- a hung \$SHELL under set -eo pipefail is not just aborting early, it is HANGING; this would have hung whatever CI job ran it"
+else
+    SETE_POST_LIB_RC="$(cat "${SETE_POST_LIB_OUT}.rc" 2>/dev/null || echo "")"
+    SETE_POST_LIB_TEXT="$(cat "$SETE_POST_LIB_OUT" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')"
+    assert_not_empty "$SETE_POST_LIB_TEXT" "fixture produced no output at all -- broken control"
+    assert_eq "$SETE_POST_LIB_RC" "0" \
+        "expected the FIXED extraction to exit 0 under set -eo pipefail with a hung \$SHELL; got rc=${SETE_POST_LIB_RC}, output: $SETE_POST_LIB_TEXT"
+    assert_contains "$SETE_POST_LIB_TEXT" "__SETE_SUITE_COMPLETED__" \
+        "check_dependencies() did not run to completion under set -eo pipefail -- the script aborted partway; output: $SETE_POST_LIB_TEXT"
+    assert_contains "$SETE_POST_LIB_TEXT" "exceeded" \
+        "expected the fallback warning to print; output: $SETE_POST_LIB_TEXT"
+    assert_contains "$SETE_POST_LIB_TEXT" "Git (" \
+        "expected a REAL dependency verdict -- its absence means 0 verdicts were produced, matching the pre-fix symptom; output: $SETE_POST_LIB_TEXT"
+fi
+_block_end
+
+_block_start "XACA-1097 defect [set -e hazard, PRE-FIX negative control, commit $X1097_SETE_PREFIX_COMMIT]: reproduces the historical abort -- proves this suite would have caught it"
+SETE_PRE_FULL="$SETE_SANDBOX/pre-fix-full.sh"
+if git -C "$TAP_ROOT" cat-file -e "$X1097_SETE_PREFIX_COMMIT" 2>/dev/null && \
+   git -C "$TAP_ROOT" show "$X1097_SETE_PREFIX_COMMIT:bin/aiteamforge-doctor.sh" > "$SETE_PRE_FULL" 2>/dev/null; then
+    if grep -q '^check_dependencies()' "$SETE_PRE_FULL"; then
+        SETE_PRE_EXTRACT="$SETE_SANDBOX/pre-fix-extract.sh"
+        {
+            sed -n '/^check_result()/,/^}/p' "$SETE_PRE_FULL"
+            echo
+            sed -n '/^_x1097_prime_login_path()/,/^}/p' "$SETE_PRE_FULL"
+            echo
+            sed -n '/^_x1097_resolve()/,/^}/p' "$SETE_PRE_FULL"
+            echo
+            sed -n '/^check_dependencies()/,/^}/p' "$SETE_PRE_FULL"
+        } > "$SETE_PRE_EXTRACT"
+        assert_not_empty "$(cat "$SETE_PRE_EXTRACT")" "pre-fix extraction produced nothing -- fixture broken"
+        # Check the SPECIFIC kill -KILL line this finding is about, not a
+        # blanket "no '|| true' anywhere" scan -- _x1097_prime_login_path()
+        # already had an unrelated, legitimate `|| true` on its `mktemp`
+        # line at commit 513500a (pre-dating this finding entirely), so a
+        # blanket scan false-fails this grounding check every time.
+        assert_contains "$(cat "$SETE_PRE_EXTRACT")" 'kill -KILL -- "-$_x1097_probe_pid" 2>/dev/null' \
+            "pre-fix fixture (commit $X1097_SETE_PREFIX_COMMIT) does not contain the exact unguarded kill -KILL line this finding is about -- fixture selection is wrong"
+        assert_not_contains "$(cat "$SETE_PRE_EXTRACT")" 'kill -KILL -- "-$_x1097_probe_pid" 2>/dev/null || true' \
+            "pre-fix fixture (commit $X1097_SETE_PREFIX_COMMIT) already guards its kill -KILL with '|| true' -- this is not the pre-fix shape, fixture selection is wrong"
+        SETE_PRE_OUT="$SETE_SANDBOX/pre.out"
+        _run_check_sete "$SETE_PRE_EXTRACT" "$FAKE_HANG_SHELL_SETE" "$SETE_PRE_OUT"
+        if [ -f "${SETE_PRE_OUT}.timedout" ]; then
+            _block_note_fail "pre-fix (commit $X1097_SETE_PREFIX_COMMIT) fixture did not return within the 8s outer bound -- unexpected shape (finding 1 is a fast abort, not a hang); investigate before trusting this control"
+        else
+            SETE_PRE_RC="$(cat "${SETE_PRE_OUT}.rc" 2>/dev/null || echo "")"
+            SETE_PRE_TEXT="$(cat "$SETE_PRE_OUT" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')"
+            if [ "$SETE_PRE_RC" = "0" ] && [[ "$SETE_PRE_TEXT" == *"__SETE_SUITE_COMPLETED__"* ]]; then
+                _block_note_fail "expected the pre-fix code to ABORT partway under set -eo pipefail with a hung \$SHELL, but it completed normally (rc=0, completion marker present) -- this negative control did not reproduce the historical defect; output: $SETE_PRE_TEXT"
+            fi
+            assert_not_contains "$SETE_PRE_TEXT" "Git (" \
+                "expected the pre-fix code to produce ZERO dependency verdicts (aborted before reaching them, matching the measured real-script symptom), but a real verdict is present -- this negative control did not reproduce the historical defect; output: $SETE_PRE_TEXT"
+        fi
+    else
+        _block_note_fail "commit $X1097_SETE_PREFIX_COMMIT no longer defines check_dependencies() -- cannot build the pre-fix fixture"
+    fi
+else
+    echo "    SKIP: commit $X1097_SETE_PREFIX_COMMIT not resolvable in this checkout -- pre-fix negative control skipped; POST-FIX assertions above still run and still gate the suite"
 fi
 _block_end
 
