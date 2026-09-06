@@ -94,6 +94,12 @@ import tempfile
 import urllib.parse
 
 TEAM_PATHS = os.path.expanduser("~/.aiteamforge/team-paths.json")
+# SIBLING-DRIFT NOTE (XACA-1078-021, k501 pattern): this path is defined a
+# second time as `map_path` inside _kb_msg_doctor in kanban-helpers.sh. They
+# cannot share a constant — that side is zsh, this is python3 — so the coupling
+# is by comment, on the same footing as sync-tap.sh's SYNC_TAP_PATHS note. Move
+# the routing map and BOTH sites change, or the doctor silently inspects a file
+# this tool never writes.
 TEAM_MACHINES = os.path.expanduser("~/.aiteamforge/team-machines.json")
 BACKUP_SUFFIX = ".pre-kb-msg-provision.bak"
 
@@ -1005,8 +1011,10 @@ def run_add_team(keygen_js, args, say):
         return 0
 
     if args.check:
-        say("\n  GAP: %d name(s) not yet routed to this machine: %s"
-            % (len(to_add), ", ".join(to_add)))
+        # XACA-1078-017: same rule as the full --check path — the reason for
+        # exit 1 must survive --quiet.
+        _notice("GAP: %d name(s) not yet routed to this machine: %s"
+                % (len(to_add), ", ".join(to_add)))
         return 1
 
     if args.dry_run:
@@ -1144,9 +1152,15 @@ def main():
         if missing:
             gaps.append("%d local team(s) unmapped or mis-targeted: %s" % (len(missing), ", ".join(missing)))
         if gaps:
-            say("\n  GAPS:")
+            # XACA-1078-017 (PR #825 review round 2): a GAPS list is the REASON
+            # for a non-zero exit, so it goes to stderr via _notice and survives
+            # --quiet. Routed through `say` it produced `--check --quiet` -> exit
+            # 1 with ZERO bytes, which is the same defect U14 pinned for the
+            # refusal path: an exit code no one can act on. No caller passes this
+            # pair today; that is why it was latent rather than live.
+            _notice("GAPS:")
             for g in gaps:
-                say("    - %s" % g)
+                _notice("  - %s" % g)
             return 1
         say("\n  All Tier-2 provisioning present.")
         return 0
