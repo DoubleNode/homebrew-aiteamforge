@@ -684,9 +684,12 @@ check_config() {
     fi
 
     # Check installed_features field is present
-    if command -v jq &>/dev/null; then
+    # XACA-1097-022: was a bare `command -v jq` — see _x1097_resolve for why
+    # that misses jq under a non-login PATH (launchd, CI, bare script run).
+    local _jq_path
+    if _jq_path="$(_x1097_resolve jq)"; then
       local features_count
-      features_count=$(jq '.installed_features | length // 0' "${AITEAMFORGE_DIR}/.aiteamforge-config" 2>/dev/null || echo "0")
+      features_count=$("$_jq_path" '.installed_features | length // 0' "${AITEAMFORGE_DIR}/.aiteamforge-config" 2>/dev/null || echo "0")
       if [ "$features_count" -gt 0 ] 2>/dev/null; then
         check_result pass "installed_features field present (${features_count} feature(s))"
       else
@@ -695,7 +698,7 @@ check_config() {
 
       # Check fleet registration status
       local fleet_reg_status
-      fleet_reg_status=$(jq -r '.fleet_registration_status // "not_configured"' "${AITEAMFORGE_DIR}/.aiteamforge-config" 2>/dev/null || echo "not_configured")
+      fleet_reg_status=$("$_jq_path" -r '.fleet_registration_status // "not_configured"' "${AITEAMFORGE_DIR}/.aiteamforge-config" 2>/dev/null || echo "not_configured")
       case "$fleet_reg_status" in
         registered)
           check_result pass "Fleet registration: registered"

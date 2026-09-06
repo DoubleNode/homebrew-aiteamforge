@@ -1248,7 +1248,7 @@ check_board_resolution() {
   # ── Validate the board parses + has real structure ────────────────────────
   # Prefer the tap-owned Python (always present) for a JSON+structure check in
   # one shot; fall back to jq if Python is unavailable.
-  local board_status="" board_team="" board_count=""
+  local board_status="" board_team="" board_count="" _jq_path
   if [ -n "${AITEAMFORGE_PYTHON:-}" ]; then
     # Emit: "<status>\t<team>\t<backlog_count>" — status is ok|badjson|empty.
     local board_probe
@@ -1281,11 +1281,11 @@ PYEOF
     local _rest="${board_probe#*	}"
     board_team="${_rest%%	*}"
     board_count="${_rest##*	}"
-  elif command -v jq >/dev/null 2>&1; then
-    if jq empty "$board_file" >/dev/null 2>&1; then
+  elif _jq_path="$(_x1097_resolve jq)"; then
+    if "$_jq_path" empty "$board_file" >/dev/null 2>&1; then
       board_status="ok"
-      board_team=$(jq -r '.team.id // .team.name // (.team|strings) // ""' "$board_file" 2>/dev/null)
-      board_count=$(jq -r '(.backlog | length) // 0' "$board_file" 2>/dev/null)
+      board_team=$("$_jq_path" -r '.team.id // .team.name // (.team|strings) // ""' "$board_file" 2>/dev/null)
+      board_count=$("$_jq_path" -r '(.backlog | length) // 0' "$board_file" 2>/dev/null)
     else
       board_status="badjson"
     fi
@@ -1387,16 +1387,16 @@ PYEOF
 # delete files the box exists to provide.
 _connect_scripts_install_profile() {
   local _wd="$1"
-  local _p=""
+  local _p="" _py_path
 
   if [ -f "${_wd}/.install-profile" ] && [ -r "${_wd}/.install-profile" ]; then
     _p="$(tr -d '[:space:]' < "${_wd}/.install-profile" 2>/dev/null || true)"
   fi
 
-  if [ -z "$_p" ] && command -v python3 >/dev/null 2>&1; then
+  if [ -z "$_p" ] && _py_path="$(_x1097_resolve python3)"; then
     # NOTE FOR EDITORS: no apostrophes in the here-doc body (bash 3.2 does not
     # treat a here-doc nested inside $( ) as opaque). See XACA-0845.
-    _p="$(python3 - "${_wd}/.aiteamforge-config" <<'PYEOF' 2>/dev/null || true
+    _p="$("$_py_path" - "${_wd}/.aiteamforge-config" <<'PYEOF' 2>/dev/null || true
 import json, sys
 try:
     with open(sys.argv[1]) as fh:
@@ -1422,7 +1422,8 @@ check_connect_scripts() {
   _framework_dir="$(get_framework_dir)"
   local _install_config="${_working_dir}/.aiteamforge-config"
 
-  if ! command -v python3 >/dev/null 2>&1; then
+  local _py_path
+  if ! _py_path="$(_x1097_resolve python3)"; then
     check_result warn "python3 unavailable — cannot cross-check connect scripts against installed teams"
     return
   fi
@@ -1456,7 +1457,7 @@ check_connect_scripts() {
   # bash 3.2 a here-doc nested inside $( ) is NOT opaque, so one stray single
   # quote unterminates the whole file. See XACA-0845.
   local _installed
-  _installed="$(python3 - "$_install_config" "${_parametric_bases[@]}" <<'PYEOF' 2>/dev/null || true
+  _installed="$("$_py_path" - "$_install_config" "${_parametric_bases[@]}" <<'PYEOF' 2>/dev/null || true
 import json, sys
 
 # Compose the expected identifier EXACTLY as the install-team.sh renderer now
