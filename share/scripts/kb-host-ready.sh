@@ -254,14 +254,39 @@ PY
 #
 # Fix: escape every C0 control character, not just the two structural ASCII
 # characters. \b \f \n \r \t use JSON's short forms; anything else in
-# U+0000-U+001F gets \u00XX. Byte values are masked with `& 0xFF` before the
-# `-lt 32` test because bash 3.2's `printf '%d' "'$c"` sign-extends a
-# high-bit byte (e.g. the lead byte of a multi-byte UTF-8 character prints as
-# a NEGATIVE number) -- without the mask, a perfectly legitimate accented
-# team name would misfire this control-character branch and get mangled.
-# Masking makes this identity for all ASCII 0x20-0x7E and for every non-ASCII
-# byte (0x80-0xFF is never < 32 either way), so it changes no output any
-# existing config -- ASCII or otherwise -- was already producing correctly.
+# U+0000-U+001F gets \u00XX.
+#
+# Getting the numeric value of `c` right is version-sensitive, and an
+# earlier round of this fix got it right for only one interpreter. Bash's
+# notion of "one character" in `${v:$i:1}` is locale-dependent: bash 3.2 has
+# no multibyte awareness, so it is always exactly one BYTE; bash 4+ in a
+# UTF-8 locale (this machine's default) treats it as one CODEPOINT, which
+# can span several bytes. `printf '%d' "'$c"` follows the same split -- on
+# 3.2 it returns the byte's value, sign-extended to negative for anything
+# >=0x80 (e.g. -61 for a UTF-8 lead byte); on 4+ it returns the actual
+# Unicode codepoint (e.g. 256 for U+0100, 1040 for Cyrillic U+0410, 128512
+# for U+1F600 - measured live on this host's /opt/homebrew/bin/bash 5.3).
+# `& 0xFF` is the right fix for the 3.2 case (it undoes sign extension on a
+# byte) and the WRONG operation on a bash-4+ codepoint (it truncates the
+# high bits instead): U+0100 and U+1F600 both mask to 0, and U+0410 masks
+# to 16, so each misfires the control-character branch and gets mangled
+# into a bogus \u00XX escape. A prior version of this comment claimed
+# masking "changes no output ... ASCII or otherwise" -- that was only ever
+# true under 3.2; it is false under bash 4+.
+#
+# Fix for the fix: force `LC_ALL=C` for the scope of this function. That
+# collapses bash 4+'s codepoint-aware string handling back to the
+# single-byte-per-"character" behavior 3.2 has unconditionally, so
+# `${#v}`, `${v:$i:1}`, and `printf '%d' "'$c"` all walk `v` one byte at a
+# time and agree with 3.2 byte-for-byte (verified live: both interpreters
+# produce the identical sign-extended per-byte sequence for multi-byte
+# UTF-8 input once LC_ALL=C is forced). With that in place, `& 0xFF` is
+# undoing sign extension on a BYTE on both interpreters -- the job it was
+# always meant to do -- rather than truncating a codepoint on one of them.
+# This changes no output for ASCII 0x20-0x7E on either interpreter, and no
+# output for non-ASCII on bash 3.2 (which was already byte-wise); the only
+# behavior it changes is bash 4+'s non-ASCII handling, from wrong to
+# matching 3.2.
 # Was the resolver's record stream COMPLETE? (XACA-1066, fifth shape.)
 # The resolver ends every normal path with a bare "END" record. Its ABSENCE means
 # the resolver aborted mid-stream — an encoding error, an unhandled exception, a
@@ -284,7 +309,13 @@ _hr_stream_complete() {
 }
 
 _hr_json_str() {
-    local v="$1" out="" n i c ord
+    # LC_ALL=C forces byte semantics for the scope of this function on
+    # BOTH bash 3.2 and bash 4+ -- see the comment block above this
+    # function for the full explanation and live-verified numbers. Without
+    # it, bash 4+ in a UTF-8 locale walks `v` one codepoint at a time
+    # instead of one byte at a time, and the `& 0xFF` mask below stops
+    # meaning what it's supposed to mean.
+    local v="$1" out="" n i c ord LC_ALL=C
     v="${v//\\/\\\\}"
     v="${v//\"/\\\"}"
     n=${#v}
@@ -299,9 +330,9 @@ _hr_json_str() {
             $'\f') out="${out}\\f" ;;
             *)
                 # `'$c` is bash's numeric-value-of-first-byte trick; masking
-                # with & 0xFF undoes bash 3.2's sign extension for bytes
-                # >=0x80 (see the function comment above) so this test only
-                # ever fires for the real C0 control range.
+                # with & 0xFF undoes sign extension for bytes >=0x80 (see
+                # above) so this test only ever fires for the real C0
+                # control range, on both bash 3.2 and bash 4+.
                 ord=$(( $(printf '%d' "'$c") & 0xFF ))
                 if [ "$ord" -lt 32 ]; then
                     out="${out}$(printf '\\u%04x' "$ord")"
