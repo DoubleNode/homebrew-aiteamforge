@@ -45,20 +45,18 @@ const { createDomStub, loadClientApp } = require('./helpers/lcars-client-dom-stu
 
 const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
 
-// lcars-doublenode-app.js is NOT tap-mirrored (XACA-0139 debranding
-// exclusion -- sync-tap.sh explicitly filters "lcars-doublenode-*" out of
-// the fleet-monitor/server/ mirror), so it does not exist when this suite
-// runs from homebrew-tap/fleet-monitor/server/. Filtering to files that
-// actually exist on disk, rather than hard-coding all 5, keeps this suite
-// correct in BOTH the dev-team repo (5 files) and the tap (4 files) instead
-// of crashing with ENOENT in the tap. The vacuity-guard test below ensures
-// this filter cannot silently degrade to testing zero files in either repo.
+// XACA-1110-005/-009: the 4 former lcars2 app files collapsed into ONE
+// config-parameterized module, which ships identically to both dev-team
+// and the tap (it's required by academy + all, themselves tap-shipped --
+// design decision doc D5). So this suite's file set is now the same 2
+// files (v1 + the unified lcars2 module) in both repos -- filtering to
+// what exists on disk is still correct practice, just no longer needed to
+// bridge a dev-team/tap count difference for lcars2. The vacuity-guard
+// test below ensures this filter cannot silently degrade to testing zero
+// files in either repo.
 const ALL_CLIENT_FILES = [
     'lcars/js/lcars-dashboard-app.js',
-    'lcars2/js/lcars-academy-app.js',
-    'lcars2/js/lcars-all-app.js',
-    'lcars2/js/lcars-doublenode-app.js',
-    'lcars2/js/lcars-mainevent-app.js'
+    'lcars2/js/lcars-fleet-dashboard-app.js'
 ];
 const CLIENT_FILES = ALL_CLIENT_FILES.filter((relPath) => fs.existsSync(path.join(PUBLIC_ROOT, relPath)));
 
@@ -90,10 +88,11 @@ function onlineSessionData() {
 
 test('harness sanity: the tap-mirroring existence filter did not degrade to zero files', () => {
     // Guards the CLIENT_FILES/PAGES_AND_THEIR_CSS existence filters above:
-    // in dev-team this should be 5/5, in homebrew-tap 4/4 (doublenode
-    // excluded). Either way it must be nonzero, or every test below that
-    // loops over these arrays silently runs 0 iterations and reports a
-    // trivially green suite instead of a broken PUBLIC_ROOT path.
+    // in dev-team and the tap alike this should be 2/2 for CLIENT_FILES
+    // (unified under XACA-1110, D5). Either way it must be nonzero, or
+    // every test below that loops over these arrays silently runs 0
+    // iterations and reports a trivially green suite instead of a broken
+    // PUBLIC_ROOT path.
     assert.ok(CLIENT_FILES.length > 0, 'CLIENT_FILES resolved to zero files -- PUBLIC_ROOT is likely wrong: ' + PUBLIC_ROOT);
     assert.ok(CLIENT_FILES.length <= ALL_CLIENT_FILES.length, 'CLIENT_FILES somehow exceeds the known file list');
 });
@@ -282,9 +281,13 @@ const OFFLINE_RULE_SELECTOR = '.team-card.lcars-terminal.lcars-offline';
 
 const CSS_FILES_UNDER_TEST = ['lcars/css/lcars-fleet-theme.css', 'lcars2/css/lcars-fleet-theme.css'];
 
-// Same tap-mirroring caveat as CLIENT_FILES above: lcars2/lcars-doublenode.html
-// (and its app.js) are excluded from the homebrew-tap mirror, so this filters
-// to pages that actually exist on disk in whichever repo the suite runs in.
+// lcars2/lcars-doublenode.html itself is excluded from the homebrew-tap
+// mirror (its associated config script, lcars-doublenode-config.js, is what
+// sync-tap.sh's basename predicate excludes -- see design decision doc D5;
+// unlike that per-org config file, CLIENT_FILES' unified JS module ships
+// identically to both repos, so it carries no such caveat any more). This
+// filters to pages that actually exist on disk in whichever repo the suite
+// runs in.
 const ALL_PAGES_AND_THEIR_CSS = {
     'lcars/lcars-dashboard.html': ['lcars/css/lcars-fleet.css', 'lcars/css/lcars-fleet-theme.css'],
     'lcars2/lcars-index.html': ['lcars2/css/lcars-fleet.css', 'lcars2/css/lcars-fleet-theme.css'],

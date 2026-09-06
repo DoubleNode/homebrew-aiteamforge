@@ -1171,7 +1171,11 @@ window.LCARS_CORE = window.LCARS_CORE || {};
     // (lcars-academy-app.js, lcars-doublenode-app.js, lcars-mainevent-app.js,
     // lcars-all-app.js -- md5 3f6dc7d190b7db92f7c2fbb4d43ee4cf over the
     // function extent) with no lcars2-specific logic of its own, so it is
-    // extracted here as the single shared implementation. It does NOT touch
+    // extracted here as the single shared implementation. Those 4 files were
+    // later unified into this module's sibling lcars-fleet-dashboard-app.js
+    // under XACA-1110 and no longer exist as separate files -- this
+    // extraction (XACA-1100-002) predates and is unaffected by that
+    // unification. It does NOT touch
     // lcars-dashboard-app.js's own createMachineItem() (v1, lcars/js/) --
     // that is a genuinely different, much larger component (nickname editor,
     // backup panel, history panel, sparkline) that merely shares a name; see

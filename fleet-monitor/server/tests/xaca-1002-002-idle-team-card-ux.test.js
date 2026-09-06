@@ -29,17 +29,14 @@ const { createDomStub, loadSharedTerminalCardModule, loadClientApp } = require('
 const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
 const SHARED_MODULE_PATH = path.join(PUBLIC_ROOT, 'shared', 'js', 'lcars-terminal-card.js');
 
-// lcars-doublenode-app.js is NOT tap-mirrored (XACA-0139 debranding
-// exclusion) -- filtering to files that actually exist on disk keeps this
-// suite correct in both the dev-team repo (5 files) and the tap (4 files)
-// instead of crashing with ENOENT there. Mirrors
+// XACA-1110-005/-009: the 4 former lcars2 app files collapsed into ONE
+// config-parameterized module, which ships identically to both dev-team
+// and the tap (design decision doc D5) -- so this suite's file set is now
+// the same 2 files (v1 + the unified lcars2 module) in both repos. Mirrors
 // tests/xaca-0983-013-014-015-lcars-card-ux.test.js's CLIENT_FILES pattern.
 const ALL_CLIENT_FILES = [
     'lcars/js/lcars-dashboard-app.js',
-    'lcars2/js/lcars-academy-app.js',
-    'lcars2/js/lcars-all-app.js',
-    'lcars2/js/lcars-doublenode-app.js',
-    'lcars2/js/lcars-mainevent-app.js'
+    'lcars2/js/lcars-fleet-dashboard-app.js'
 ];
 const CLIENT_FILES = ALL_CLIENT_FILES.filter((relPath) => fs.existsSync(path.join(PUBLIC_ROOT, relPath)));
 

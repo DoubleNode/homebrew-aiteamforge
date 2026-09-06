@@ -65,14 +65,12 @@ const { CREATE_MACHINE_ITEM_EXPORT_PROPERTY } = require('./helpers/lcars-client-
 
 const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
 
+// XACA-1110-005/-009: the 4 former lcars2 minimal renderers collapsed into
+// ONE config-parameterized module. createMachineItem() itself lives in the
+// shared core (lcars-fleet-core.js) and does not depend on CONFIG.
 const LCARS2_APP_FILES_ALL = [
-    'lcars2/js/lcars-academy-app.js',
-    'lcars2/js/lcars-all-app.js',
-    'lcars2/js/lcars-doublenode-app.js',
-    'lcars2/js/lcars-mainevent-app.js'
+    'lcars2/js/lcars-fleet-dashboard-app.js'
 ];
-// lcars-doublenode-app.js is tap-excluded (XACA-0139 debranding) -- same
-// existence filter every other suite in this directory uses.
 const LCARS2_APP_FILES = LCARS2_APP_FILES_ALL.filter((rel) => fs.existsSync(path.join(PUBLIC_ROOT, rel)));
 
 const RICH_APP_FILE = 'lcars/js/lcars-dashboard-app.js';

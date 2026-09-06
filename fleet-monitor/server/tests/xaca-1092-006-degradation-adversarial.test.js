@@ -34,10 +34,13 @@
  * and why each is missing), then inspects the actual produced HTML/DOM
  * rather than trusting the source reading.
  *
- * lcars-doublenode-app.js is tap-excluded (XACA-0139 debranding) -- filtered
- * by existsSync exactly like tests/xaca-1002-002-idle-team-card-ux.test.js's
- * CLIENT_FILES pattern, so this suite is correct in both the dev-team repo
- * (5 files) and the tap (4 files).
+ * XACA-1110 later unified the former 4 per-org lcars2 app files named above
+ * into a single config-parameterized module,
+ * lcars2/js/lcars-fleet-dashboard-app.js, which ships to the tap unchanged
+ * (design decision doc D5) -- so ALL_CLIENT_FILES below is now the same
+ * 2 files (v1 + the unified lcars2 module) in both the dev-team repo and
+ * the tap, filtered by existsSync exactly like
+ * tests/xaca-1002-002-idle-team-card-ux.test.js's CLIENT_FILES pattern.
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -48,12 +51,13 @@ const { createDomStub, loadClientApp } = require('./helpers/lcars-client-dom-stu
 const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
 const FIXTURE_PATH = path.join(__dirname, 'fixtures', 'xaca-1092-system-block-cases.json');
 
+// XACA-1110-005/-009: the 4 former lcars2 app files collapsed into ONE
+// config-parameterized module, which ships identically to both dev-team
+// and the tap (design decision doc D5) -- so this suite's file set is now
+// the same 2 files (v1 + the unified lcars2 module) in both repos.
 const ALL_CLIENT_FILES = [
     'lcars/js/lcars-dashboard-app.js',
-    'lcars2/js/lcars-academy-app.js',
-    'lcars2/js/lcars-all-app.js',
-    'lcars2/js/lcars-doublenode-app.js',
-    'lcars2/js/lcars-mainevent-app.js'
+    'lcars2/js/lcars-fleet-dashboard-app.js'
 ];
 const CLIENT_FILES = ALL_CLIENT_FILES.filter((relPath) => fs.existsSync(path.join(PUBLIC_ROOT, relPath)));
 

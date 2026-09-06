@@ -71,14 +71,15 @@ const RICH_APP_REL_PATH = 'lcars/js/lcars-dashboard-app.js';
 const RICH_CSS_REL_PATH = 'lcars/css/lcars-fleet-theme.css';
 const LCARS2_CSS_REL_PATH = 'lcars2/css/lcars-fleet-theme.css';
 
+// XACA-1110-005/-009: the 4 former lcars2 minimal renderer files collapsed
+// into ONE config-parameterized module. createMachineItem() itself lives in
+// the shared core (lcars-fleet-core.js) and does not depend on CONFIG at
+// all, so there is only one file left to exercise here -- not 4 configs of
+// the same file, unlike the suites that actually touch CONFIG-driven
+// behavior (renderMachines()/renderDivisions()/getDivisionPriority()).
 const ALL_LCARS2_MINIMAL_FILES = [
-    'lcars2/js/lcars-academy-app.js',
-    'lcars2/js/lcars-all-app.js',
-    'lcars2/js/lcars-doublenode-app.js',
-    'lcars2/js/lcars-mainevent-app.js'
+    'lcars2/js/lcars-fleet-dashboard-app.js'
 ];
-// doublenode is NOT tap-mirrored (XACA-0139) -- same existence filter as
-// tests/xaca-1031-007-version-badge-ui.test.js's LCARS2_MINIMAL_FILES.
 const LCARS2_MINIMAL_FILES = ALL_LCARS2_MINIMAL_FILES.filter((rel) => fs.existsSync(path.join(PUBLIC_ROOT, rel)));
 
 function baseMachine(overrides) {
@@ -239,7 +240,9 @@ test('harness sanity: the CSS files this suite reads actually exist and are non-
     lcars2CssText = fs.readFileSync(path.join(PUBLIC_ROOT, LCARS2_CSS_REL_PATH), 'utf8');
     assert.ok(richCssText.length > 1000, RICH_CSS_REL_PATH + ' read unexpectedly small -- PUBLIC_ROOT likely wrong');
     assert.ok(lcars2CssText.length > 1000, LCARS2_CSS_REL_PATH + ' read unexpectedly small -- PUBLIC_ROOT likely wrong');
-    assert.ok(LCARS2_MINIMAL_FILES.length >= 3, 'expected at least 3 lcars2 minimal renderer files to exist on disk');
+    // XACA-1110: exactly 1 unified lcars2 renderer file now (was >= 3
+    // across the former 4 separate files) -- see ALL_LCARS2_MINIMAL_FILES.
+    assert.equal(LCARS2_MINIMAL_FILES.length, 1, 'expected exactly 1 unified lcars2 minimal renderer file to exist on disk');
 });
 
 // ============================================================================
@@ -439,66 +442,35 @@ for (const notOutdatedCase of [
 }
 
 // ============================================================================
-// Cross-file identity (XACA-1100-002 UPDATE): createMachineItem() itself was
-// extracted out of the 4 lcars2 minimal renderers into the single shared
-// implementation window.LCARS_CORE.machines.createMachineItem
-// (lcars2/js/lcars-fleet-core.js) -- there is now exactly ONE copy of the
-// function body, so a byte-identity comparison ACROSS the 4 app files no
-// longer has anything to compare (each no longer contains a local
-// `function createMachineItem(machine) {` at all). This test now asserts
-// the two invariants that replaced it:
-//   1. none of the 4 app files re-introduce a local copy of the function
-//      (a regression back to per-file duplication would defeat the
-//      extraction this ticket did);
-//   2. the 4 app files' own call sites into the shared core (the small
-//      `deps` object wiring each file's local health/panel/toggle hooks
-//      through) stay byte-identical to each other -- they must not drift
-//      apart, per the same reasoning the original test protected.
-// The extracted implementation living in the core is still the same code
-// this test's sibling assertions above already exercise end-to-end via
-// mod.createMachineItem(machine) (loadClientApp's export wrapper forwards
-// to the core), so no separate content check is needed here beyond the
-// core-side test coverage.
+// Cross-file identity (XACA-1110-005/-009 UPDATE): the 4 lcars2 minimal
+// renderers themselves collapsed into ONE unified module
+// (lcars2/js/lcars-fleet-dashboard-app.js), on top of createMachineItem()
+// itself already having been extracted (XACA-1100-002) into the single
+// shared implementation window.LCARS_CORE.machines.createMachineItem
+// (lcars2/js/lcars-fleet-core.js). The former "cross-file byte-identity:
+// each lcars2 minimal renderer's call site into the shared core
+// createMachineItem() is identical" test is DELETED, not weakened -- its
+// entire purpose was preventing byte-for-byte drift BETWEEN 4 separate
+// copies of that call site. With one copy there is nothing left to drift
+// apart from; the invariant it protected is now structural (there is
+// exactly one call site, full stop) rather than something that needs
+// asserting. See design decision doc D8, which calls this deletion out
+// explicitly as an invariant made unnecessary, not coverage lost.
+//
+// The remaining test below survives unweakened: it still proves
+// createMachineItem() has not been re-duplicated locally (a regression back
+// to per-file — now per-unified-module — duplication would defeat the
+// XACA-1100-002 extraction this ticket's unification builds on).
 // ============================================================================
 
 const LOCAL_DEFINITION_MARKER = '    function createMachineItem(machine) {';
-const CORE_CALL_MARKER = 'window.LCARS_CORE.machines.createMachineItem(machine, {';
 
-function extractCoreCallSite(src) {
-    const lines = src.split('\n');
-    const startIdx = lines.findIndex((l) => l.includes(CORE_CALL_MARKER));
-    if (startIdx === -1) throw new Error('extractCoreCallSite: call-site marker not found');
-    const endIdx = lines.findIndex((l, i) => i > startIdx && l.trim() === '});');
-    if (endIdx === -1) throw new Error('extractCoreCallSite: end marker not found');
-    return lines.slice(startIdx, endIdx + 1).join('\n');
-}
-
-test('createMachineItem() is NOT re-duplicated locally in any lcars2 minimal renderer (must stay extracted into lcars-fleet-core.js)', () => {
-    assert.ok(LCARS2_MINIMAL_FILES.length >= 3, 'expected at least 3 lcars2 minimal renderer files to exist on disk');
+test('createMachineItem() is NOT re-duplicated locally in the unified lcars2 minimal renderer (must stay extracted into lcars-fleet-core.js)', () => {
+    assert.equal(LCARS2_MINIMAL_FILES.length, 1, 'expected exactly 1 unified lcars2 minimal renderer file to exist on disk');
     for (const rel of LCARS2_MINIMAL_FILES) {
         const src = fs.readFileSync(path.join(PUBLIC_ROOT, rel), 'utf8');
         assert.ok(!src.includes(LOCAL_DEFINITION_MARKER), rel + ' re-introduces a local createMachineItem() definition -- it must delegate to window.LCARS_CORE.machines.createMachineItem instead (XACA-1100-002)');
     }
-});
-
-test('cross-file byte-identity: each lcars2 minimal renderer\'s call site into the shared core createMachineItem() is identical', () => {
-    assert.ok(LCARS2_MINIMAL_FILES.length >= 3, 'expected at least 3 lcars2 minimal renderer files to exist on disk');
-    const callSites = LCARS2_MINIMAL_FILES.map((rel) => ({
-        rel,
-        text: extractCoreCallSite(fs.readFileSync(path.join(PUBLIC_ROOT, rel), 'utf8'))
-    }));
-    const [first, ...rest] = callSites;
-    for (const other of rest) {
-        assert.equal(other.text, first.text, 'core call site diverged between ' + first.rel + ' and ' + other.rel + ' -- lcars2 files must stay byte-identical over this extent');
-    }
-    // Sanity: the call site actually wires all 5 documented deps, so a
-    // vacuous match (e.g. both markers not found, both empty strings
-    // comparing equal) cannot pass this test silently.
-    assert.match(first.text, /machineSystemToHealthInput:/);
-    assert.match(first.text, /healthBadgeSpec:/);
-    assert.match(first.text, /buildSystemSectionHtml:/);
-    assert.match(first.text, /toggleSystemPanel:/);
-    assert.match(first.text, /isSystemExpanded:/);
 });
 
 test('the shared core implementation (lcars-fleet-core.js) still contains this ticket\'s classes -- a vacuous extraction cannot pass silently', () => {

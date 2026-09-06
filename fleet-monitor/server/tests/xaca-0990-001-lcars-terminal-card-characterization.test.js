@@ -40,8 +40,9 @@
  *
  * This recomputes the full matrix against whatever files actually exist in
  * THIS checkout right now (see CLIENT_FILES in the matrix helper, which
- * existence-filters against disk -- 5 files in dev-team, 3 in the
- * homebrew-tap mirror; see identifyKnownFileSet()'s doc comment there) and
+ * existence-filters against disk -- 2 files, identically in both dev-team
+ * and the homebrew-tap mirror since XACA-1110 unified lcars2's app files;
+ * see identifyKnownFileSet()'s doc comment there) and
  * diffs the result, byte-for-byte on disk, against the golden-entries
  * subset of the checked-in golden file
  * tests/xaca-0990-001-lcars-terminal-card-baseline.json that corresponds to
@@ -56,12 +57,13 @@
  *
  * ── Correctness posture ───────────────────────────────────────────────────
  * - The discovered CLIENT_FILES set is itself an assertion (harness sanity
- *   test below, via identifyKnownFileSet()): it must equal EXACTLY one of
- *   two known-good sets -- the full 5 (dev-team) or the specific 3 (tap,
- *   XACA-0139 excludes doublenode + mainevent). Any other set -- including
- *   an accidental shrink in dev-team, or a tap mirror gaining/losing a file
- *   -- fails loudly, naming what's missing/unexpected, rather than silently
- *   adapting to whatever happens to exist on disk.
+ *   test below, via identifyKnownFileSet()): it must equal EXACTLY the one
+ *   known-good 2-file set (identical in dev-team and the tap post-XACA-1110
+ *   -- see the matrix helper's own comment for the pre-unification history,
+ *   where this used to be two DIFFERENT known-good sets, 5 files vs. 3).
+ *   Any other set -- including an accidental shrink in either repo -- fails
+ *   loudly, naming what's missing/unexpected, rather than silently adapting
+ *   to whatever happens to exist on disk.
  * - Every discovered file must have a corresponding entry in the golden
  *   baseline (harness sanity test below) -- a discovered file absent from
  *   the golden is a failure, not a skip.
@@ -74,10 +76,13 @@
  * - The primary comparison is a real on-disk byte diff (fs.writeFileSync
  *   the actual output, fs.readFileSync both files, string-compare) of the
  *   golden baseline RESTRICTED to the entries for files that actually exist
- *   here -- not the whole 5-key golden object, which would always fail in
- *   the tap's 3-file checkout -- and not solely an in-memory
- *   assert.deepStrictEqual that could be fooled by object identity/
- *   reference reuse.
+ *   here -- not solely an in-memory assert.deepStrictEqual that could be
+ *   fooled by object identity/reference reuse. (Pre-XACA-1110, this
+ *   restriction was load-bearing: the whole 5-key golden object would
+ *   always have failed in the tap's 3-file checkout. Post-unification the
+ *   golden file itself was re-keyed to the current 2-file shape, so the
+ *   restriction is now a narrowing rather than a repo-split workaround --
+ *   see identifyKnownFileSet()'s doc comment.)
  * - A permanent negative-control test (below) clones the parsed golden
  *   baseline, flips one leaf value, and asserts the comparison this suite
  *   uses actually detects that mutation -- proving the diff mechanism can
@@ -370,12 +375,12 @@ test('negative control: an unknown discovered file set is rejected loudly by ide
     assert.throws(
         () => identifyKnownFileSet(['lcars2/js/lcars-academy-app.js']),
         (err) => err instanceof Error && /matches NEITHER known-good/.test(err.message),
-        'a 1-file set (neither the 5-file nor the 3-file known-good set) must be rejected'
+        'a 1-file set (not the single 2-file known-good set) must be rejected'
     );
     assert.throws(
-        () => identifyKnownFileSet([...KNOWN_GOOD_FILE_SETS['dev-team (5 files)'], 'lcars2/js/unexpected-app.js']),
+        () => identifyKnownFileSet([...KNOWN_GOOD_FILE_SETS['dev-team + tap (2 files -- lcars2 unified post-XACA-1110)'], 'lcars2/js/unexpected-app.js']),
         (err) => err instanceof Error && /matches NEITHER known-good/.test(err.message),
-        'the 5-file set PLUS one unexpected extra file must be rejected'
+        'the known-good set PLUS one unexpected extra file must be rejected'
     );
 });
 

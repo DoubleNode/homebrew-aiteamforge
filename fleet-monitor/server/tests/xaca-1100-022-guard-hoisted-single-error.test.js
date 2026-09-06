@@ -53,15 +53,34 @@ const { JSDOM } = require('jsdom');
 
 const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
 
-const LCARS2_APP_FILES_ALL = [
-    'lcars2/js/lcars-academy-app.js',
-    'lcars2/js/lcars-all-app.js',
-    'lcars2/js/lcars-doublenode-app.js',
-    'lcars2/js/lcars-mainevent-app.js'
+// XACA-1110-005/-009: the 4 former lcars2 app files collapsed into ONE
+// config-parameterized module -- re-pointed at that module, parameterized
+// over the 4 per-org configs instead of 4 files, so the same 4 behavioral
+// variants keep being exercised (this suite's renderMachines()/LCARS_CORE
+// guard coverage does not actually depend on CONFIG, but every other
+// lcars2 suite in this directory follows this same shape, and dropping to
+// a single un-parameterized case would silently narrow coverage relative
+// to before unification).
+const UNIFIED_MODULE_REL_PATH = 'lcars2/js/lcars-fleet-dashboard-app.js';
+const LCARS2_APP_TARGETS_ALL = [
+    { label: 'academy', relPath: UNIFIED_MODULE_REL_PATH, configRelPath: 'lcars2/js/lcars-academy-config.js' },
+    { label: 'doublenode', relPath: UNIFIED_MODULE_REL_PATH, configRelPath: 'lcars2/js/lcars-doublenode-config.js' },
+    { label: 'mainevent', relPath: UNIFIED_MODULE_REL_PATH, configRelPath: 'lcars2/js/lcars-mainevent-config.js' },
+    { label: 'all', relPath: UNIFIED_MODULE_REL_PATH, configRelPath: 'lcars2/js/lcars-all-config.js' }
 ];
-// lcars-doublenode-app.js is tap-excluded (XACA-0139 debranding) -- same
-// existence filter every other suite in this directory uses.
-const LCARS2_APP_FILES = LCARS2_APP_FILES_ALL.filter((rel) => fs.existsSync(path.join(PUBLIC_ROOT, rel)));
+// doublenode/mainevent configs are tap-excluded (XACA-0139 debranding) --
+// same existence filter every other suite in this directory uses, now
+// applied to the CONFIG file rather than the (identical-everywhere) app
+// file.
+function loadConfigGlobalForTest(relPath) {
+    const sandbox = { window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(path.join(PUBLIC_ROOT, relPath), 'utf8'), sandbox, { filename: relPath });
+    return sandbox.window.LCARS_DASHBOARD_CONFIG;
+}
+const LCARS2_APP_FILES = LCARS2_APP_TARGETS_ALL
+    .filter((t) => fs.existsSync(path.join(PUBLIC_ROOT, t.configRelPath)))
+    .map((t) => Object.assign({}, t, { configGlobal: loadConfigGlobalForTest(t.configRelPath) }));
 
 // 5 machines -- enough to make "once per render" and "once per machine"
 // produce clearly different, unmistakable counts (1 vs 5) without
@@ -88,7 +107,8 @@ function fiveMachines() {
 // false reproduces the real-world "core failed to load" scenario this
 // guard exists to catch; true is the ordinary/happy-path load order every
 // real HTML page uses.
-async function setupApp(relPath, loadCore) {
+async function setupApp(target, loadCore) {
+    const relPath = target.relPath;
     const dom = new JSDOM('<!doctype html><html><body><div id="machines-list"></div></body></html>', {
         url: 'http://lcars-test.local/' + relPath,
         runScripts: 'outside-only',
@@ -110,6 +130,10 @@ async function setupApp(relPath, loadCore) {
     }
     // else: window.LCARS_CORE is left entirely undefined -- the failure
     // mode under test.
+
+    if (target.configGlobal) {
+        window.LCARS_DASHBOARD_CONFIG = target.configGlobal;
+    }
 
     const src = fs.readFileSync(path.join(PUBLIC_ROOT, relPath), 'utf8');
     const marker = '})();';
@@ -147,9 +171,9 @@ function withCapturedConsoleError(fn) {
 // Core absent: exactly ONE console.error per render, not one per machine.
 // ============================================================================
 
-LCARS2_APP_FILES.forEach((relPath) => {
-    test(`XACA-1100-022: renderMachines() with LCARS_CORE.machines absent logs exactly ONE console.error for a 5-machine render (${relPath})`, async () => {
-        const { mod } = await setupApp(relPath, false);
+LCARS2_APP_FILES.forEach((target) => {
+    test(`XACA-1100-022: renderMachines() with LCARS_CORE.machines absent logs exactly ONE console.error for a 5-machine render (${target.label}: ${target.relPath})`, async () => {
+        const { mod } = await setupApp(target, false);
 
         const { calls } = withCapturedConsoleError(() => {
             mod.renderMachines(fiveMachines());
@@ -162,8 +186,8 @@ LCARS2_APP_FILES.forEach((relPath) => {
             'the single console.error call must be the LCARS_CORE-missing diagnostic, not some other message');
     });
 
-    test(`XACA-1100-022: renderMachines() with LCARS_CORE.machines absent logs exactly ONE console.error across TWO successive renders (simulated refresh ticks) -- proves it re-evaluates once per CALL, not once ever (${relPath})`, async () => {
-        const { mod } = await setupApp(relPath, false);
+    test(`XACA-1100-022: renderMachines() with LCARS_CORE.machines absent logs exactly ONE console.error across TWO successive renders (simulated refresh ticks) -- proves it re-evaluates once per CALL, not once ever (${target.label}: ${target.relPath})`, async () => {
+        const { mod } = await setupApp(target, false);
 
         const { calls } = withCapturedConsoleError(() => {
             mod.renderMachines(fiveMachines());
@@ -180,9 +204,9 @@ LCARS2_APP_FILES.forEach((relPath) => {
 // Core absent: a VISIBLE error message is painted into the container.
 // ============================================================================
 
-LCARS2_APP_FILES.forEach((relPath) => {
-    test(`XACA-1100-022: renderMachines() with LCARS_CORE.machines absent paints a visible render-error message into #machines-list, not a blank container (${relPath})`, async () => {
-        const { document, mod } = await setupApp(relPath, false);
+LCARS2_APP_FILES.forEach((target) => {
+    test(`XACA-1100-022: renderMachines() with LCARS_CORE.machines absent paints a visible render-error message into #machines-list, not a blank container (${target.label}: ${target.relPath})`, async () => {
+        const { document, mod } = await setupApp(target, false);
 
         withCapturedConsoleError(() => {
             mod.renderMachines(fiveMachines());
@@ -215,9 +239,9 @@ LCARS2_APP_FILES.forEach((relPath) => {
 // render, no render-error message. Proves the hoist did not regress success.
 // ============================================================================
 
-LCARS2_APP_FILES.forEach((relPath) => {
-    test(`XACA-1100-022: renderMachines() with LCARS_CORE.machines present renders all 5 machines and logs NOTHING (${relPath})`, async () => {
-        const { document, mod } = await setupApp(relPath, true);
+LCARS2_APP_FILES.forEach((target) => {
+    test(`XACA-1100-022: renderMachines() with LCARS_CORE.machines present renders all 5 machines and logs NOTHING (${target.label}: ${target.relPath})`, async () => {
+        const { document, mod } = await setupApp(target, true);
 
         const { calls } = withCapturedConsoleError(() => {
             mod.renderMachines(fiveMachines());

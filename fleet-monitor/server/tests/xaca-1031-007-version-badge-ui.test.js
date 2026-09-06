@@ -11,10 +11,10 @@
  * coverage for createMachineItem()'s version row / OUTDATED badge, added to
  * all five dashboard app files by e77798e1.
  *
- * ── Why jsdom, and why lcars2/js/lcars-academy-app.js as the primary target
+ * ── Why jsdom, and why lcars2/js/lcars-fleet-dashboard-app.js as the primary target
  * ────────────────────────────────────────────────────────────────────────
  * The 5 LCARS client apps are plain browser IIFEs with no module.exports and
- * no bundler. lcars-academy-app.js's createMachineItem() (the 18-line
+ * no bundler. lcars-fleet-dashboard-app.js's createMachineItem() (the 18-line
  * "minimal" renderer per e77798e1's commit message) is the simplest of the
  * five and needs nothing beyond `document.createElement`/`.innerHTML` and
  * the file's own escapeHtml() -- so it is loaded here via jsdom (a REAL
@@ -52,14 +52,16 @@ const { JSDOM } = require('jsdom');
 const { CREATE_MACHINE_ITEM_EXPORT_PROPERTY } = require('./helpers/lcars-client-dom-stub');
 
 const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
-const ACADEMY_APP_REL_PATH = 'lcars2/js/lcars-academy-app.js';
+// XACA-1110-005/-009: the 4 former lcars2 minimal renderers collapsed into
+// ONE config-parameterized module. createMachineItem() itself lives in the
+// shared core (lcars-fleet-core.js) and does not depend on CONFIG, so the
+// "academy" name here is now just this suite's one remaining target, not a
+// choice among 4 near-identical files.
+const ACADEMY_APP_REL_PATH = 'lcars2/js/lcars-fleet-dashboard-app.js';
 
 const LCARS2_MINIMAL_FILES = [
-    'lcars2/js/lcars-academy-app.js',
-    'lcars2/js/lcars-all-app.js',
-    'lcars2/js/lcars-doublenode-app.js',
-    'lcars2/js/lcars-mainevent-app.js'
-].filter((rel) => fs.existsSync(path.join(PUBLIC_ROOT, rel))); // doublenode is NOT tap-mirrored (XACA-0139)
+    'lcars2/js/lcars-fleet-dashboard-app.js'
+].filter((rel) => fs.existsSync(path.join(PUBLIC_ROOT, rel)));
 
 const RICH_APP_REL_PATH = 'lcars/js/lcars-dashboard-app.js';
 
@@ -288,7 +290,7 @@ test('escapeHtml: the exact XSS payload used above round-trips to inert text (di
 const HAS_INSTALLED_VERSION_GATE_LINE = 'const hasInstalledVersion = !!sysVersions && sysVersions.aiteamforge !== undefined && sysVersions.aiteamforge !== null;';
 
 test('the hasInstalledVersion gate lives in the shared core (lcars-fleet-core.js), not duplicated locally in any lcars2 minimal renderer', () => {
-    assert.ok(LCARS2_MINIMAL_FILES.length >= 3, 'expected at least 3 lcars2 minimal renderer files to exist on disk');
+    assert.equal(LCARS2_MINIMAL_FILES.length, 1, 'expected exactly 1 unified lcars2 minimal renderer file to exist on disk');
 
     const coreSrc = fs.readFileSync(path.join(PUBLIC_ROOT, 'lcars2/js/lcars-fleet-core.js'), 'utf8');
     assert.ok(coreSrc.includes(HAS_INSTALLED_VERSION_GATE_LINE), 'lcars-fleet-core.js must gate on aiteamforge PRESENCE (XACA-1100-002 extraction)');

@@ -44,45 +44,33 @@ const { createDomStub, loadClientApp } = require('./lcars-client-dom-stub.js');
 
 const PUBLIC_ROOT = path.join(__dirname, '..', '..', 'public');
 
-// Same tap-mirroring existence filter XACA-0983-013/014/015 uses: 5 files in
-// dev-team, 3 in homebrew-tap. sync-tap.sh (XACA-0139 debranding, see its
-// "fleet-monitor/server/" section around line 602) excludes BOTH
-// lcars-doublenode-app.js and lcars-mainevent-app.js (and their HTML pages)
-// from the tap mirror -- not just doublenode. Filtering to what actually
-// exists on disk keeps this module correct in both repos instead of
-// throwing ENOENT in the tap.
+// XACA-1110-005/-009: the former 4 byte-near-identical lcars2 dashboard app
+// files collapsed into ONE config-parameterized module
+// (lcars2/js/lcars-fleet-dashboard-app.js), which ships to BOTH dev-team
+// and the tap identically (it is required by academy + all, which are
+// themselves tap-shipped -- see the design decision doc, D5). v1's
+// lcars/js/lcars-dashboard-app.js is untouched by this ticket. So this
+// suite's file set is now the SAME 2 files in both repos -- the
+// dev-team/tap split that used to exist here (5 files vs. 3) no longer
+// applies to lcars2 at all.
 const ALL_CLIENT_FILES = [
     'lcars/js/lcars-dashboard-app.js',
-    'lcars2/js/lcars-academy-app.js',
-    'lcars2/js/lcars-all-app.js',
-    'lcars2/js/lcars-doublenode-app.js',
-    'lcars2/js/lcars-mainevent-app.js'
+    'lcars2/js/lcars-fleet-dashboard-app.js'
 ];
 const CLIENT_FILES = ALL_CLIENT_FILES.filter((relPath) => fs.existsSync(path.join(PUBLIC_ROOT, relPath)));
 
-// The two -- and ONLY two -- file sets this suite may ever legitimately run
-// against. XACA-0990-gate-finding-1: the old existence-filter-only approach
-// let CLIENT_FILES silently resolve to whatever exists on disk, with no
-// check that the resulting set was actually one of the known-good shapes.
-// That is what made the suite unrunnable in the tap (3 files discovered,
-// golden baseline has 5 keys, byte-diff against the whole golden object can
-// never match) and, in the other direction, would let an accidental 5->4 (or
-// 5->3, 3->2, ...) shrink in dev-team pass silently as long as the count
-// stayed nonzero. identifyKnownFileSet() below turns "whatever exists" into
-// an assertion: the discovered set must equal one of these two literal
-// arrays exactly, or the suite fails loudly naming what's missing/unexpected.
+// The one -- and ONLY one -- file set this suite may ever legitimately run
+// against post-unification (see ALL_CLIENT_FILES comment above: dev-team
+// and the tap now carry the identical 2 files, so there is nothing left to
+// distinguish two entries by). identifyKnownFileSet() below turns "whatever
+// exists" into an assertion: the discovered set must equal this literal
+// array exactly, or the suite fails loudly naming what's missing/unexpected
+// -- same XACA-0990-gate-finding-1 protection as before unification, now
+// against a single known-good shape instead of two.
 const KNOWN_GOOD_FILE_SETS = {
-    'dev-team (5 files)': [
+    'dev-team + tap (2 files -- lcars2 unified post-XACA-1110)': [
         'lcars/js/lcars-dashboard-app.js',
-        'lcars2/js/lcars-academy-app.js',
-        'lcars2/js/lcars-all-app.js',
-        'lcars2/js/lcars-doublenode-app.js',
-        'lcars2/js/lcars-mainevent-app.js'
-    ],
-    'homebrew-tap (3 files -- XACA-0139 excludes doublenode + mainevent)': [
-        'lcars/js/lcars-dashboard-app.js',
-        'lcars2/js/lcars-academy-app.js',
-        'lcars2/js/lcars-all-app.js'
+        'lcars2/js/lcars-fleet-dashboard-app.js'
     ]
 };
 

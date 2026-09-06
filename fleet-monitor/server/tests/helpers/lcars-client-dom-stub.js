@@ -728,9 +728,10 @@ const CREATE_MACHINE_ITEM_EXPORT_PROPERTY =
     'isSystemExpanded: expandedSystemMachineId === machine.machine_id ' +
     '}; return window.LCARS_CORE.machines.createMachineItem(machine, deps); }';
 
-// Loads one of the 5 client app IIFEs and returns whatever functions it
-// stashed onto window.__lcarsTestExports. `relPath` is relative to
-// fleet-monitor/server/public/ (e.g. 'lcars2/js/lcars-academy-app.js').
+// Loads one of the client app IIFEs (v1's lcars/js/lcars-dashboard-app.js,
+// or the unified lcars2/js/lcars-fleet-dashboard-app.js post-XACA-1110) and
+// returns whatever functions it stashed onto window.__lcarsTestExports.
+// `relPath` is relative to fleet-monitor/server/public/.
 function loadClientApp(relPath, ctx) {
     const filePath = path.join(PUBLIC_ROOT, relPath);
     const src = fs.readFileSync(filePath, 'utf8');

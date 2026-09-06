@@ -1,15 +1,28 @@
 //
-//  lcars-academy-app.js
+//  lcars-fleet-dashboard-app.js
 //  DoubleNode Dev-Team Infrastructure (AITeamForge)
 //
 //  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
 //
 
 /**
- * LCARS Academy Dashboard Application
- * Filtered view showing only Academy division
+ * LCARS Unified Fleet Dashboard Application (XACA-1110)
  *
- * Divisions: academy
+ * Config-parameterized replacement for the 4 former byte-near-identical
+ * lcars2 dashboard app files (lcars-{academy,doublenode,mainevent,all}-app.js
+ * -- see git history / XACA-1110 for the originals). One module, driven by
+ * `window.LCARS_DASHBOARD_CONFIG` (set by whichever per-org config script
+ * the host page loads immediately before this one -- lcars-academy-config.js,
+ * lcars-doublenode-config.js, lcars-mainevent-config.js, or
+ * lcars-all-config.js). See
+ * ~/dev-team/kanban/plans/XACA-1110/XACA-1110-design-decision.md for the
+ * full rationale (D1-D8); do not reintroduce a per-org branch or registry
+ * here (D5 -- the unified module must contain NO org registry).
+ *
+ * The only structural fork in this file is the single derived predicate
+ * `isUnbounded` (D1), branching at exactly two call sites: whether
+ * fetchFleetData() filters the response, and whether DOMContentLoaded
+ * awaits fetchTeamConfig() before its first render.
  */
 
 (function() {
@@ -19,16 +32,53 @@
     // CONFIGURATION
     // ============================================================================
 
-    const CONFIG = {
+    // D5: config-via-global, set by whichever lcars-<org>-config.js the
+    // host page loaded immediately before this script. The three keys
+    // merged in here (apiBase/refreshInterval/stardateOffset) are
+    // byte-identical across all four former files and stay module-internal
+    // -- they are not config (design decision doc, "Consolidated config
+    // surface").
+    const CONFIG = Object.assign({
         apiBase: window.location.origin,
         refreshInterval: 60000,
-        stardateOffset: 41000,
-        divisions: ['academy'],
-        dashboardName: 'ACADEMY',
-        emptyMessage: 'No active Academy sessions detected'
-    };
+        stardateOffset: 41000
+    }, window.LCARS_DASHBOARD_CONFIG);
+
+    if (!window.LCARS_DASHBOARD_CONFIG) {
+        // Loud on purpose -- mirrors the window.LCARS_ORG guard idiom in
+        // getOrganizationGroup()/getGroupColor() below, and exists for the
+        // same reason: a missing dependency must not masquerade as valid
+        // state. Object.assign(target, undefined) above is a silent no-op,
+        // so without this guard CONFIG.divisions stays undefined,
+        // isUnbounded (below) resolves to (undefined === null) === false,
+        // filterData() then throws on CONFIG.divisions.includes(...), and
+        // fetchFleetData()'s catch swallows that TypeError into a generic
+        // "connection lost" -- misdiagnosing a deployment fault (the
+        // per-org config script 404ing, or its <script> tag loading after
+        // this one instead of before it, per D5/D6) as a network one.
+        console.error('[LCARS][config] window.LCARS_DASHBOARD_CONFIG is not set -- '
+            + 'the per-org config script (lcars-<org>-config.js) must be loaded '
+            + 'BEFORE this script. Falling back to an empty division list so the '
+            + 'dashboard fails visibly (no data rendered) instead of throwing.');
+        // Defaulted to [] rather than null (which would mean "unbounded" --
+        // render everything unfiltered): D5 forbids this module guessing at
+        // a per-org division list, and [] is enough to keep filterData()
+        // from throwing without silently rendering unfiltered fleet data
+        // under a dashboard name (CONFIG.dashboardName) that is itself
+        // undefined.
+        CONFIG.divisions = [];
+    }
 
     const LCARS_PORT = 8080;
+
+    // D1: the ONE derived predicate. `null` divisions means "unbounded" --
+    // render every division the API returns rather than filtering to a
+    // fixed set, and source division ordering/priority from a live team
+    // config fetch instead of a static map. Everything else in this file
+    // branches on this single boolean at exactly two call sites (see
+    // fetchFleetData() and the DOMContentLoaded handler below) -- no
+    // lifecycle hooks, no capability-flag triple.
+    const isUnbounded = (CONFIG.divisions === null);
 
     // ============================================================================
     // STATE
@@ -37,18 +87,26 @@
     let fleetData = null;
     let refreshTimer = null;
     let expandedSystemMachineId = null;  // XACA-1092-005: DOM identity for the SYSTEM disclosure toggle -- string, not an element ref, so expand state survives renderMachines() rebuilding the list every refresh tick (mirrors v1's expandedBackupMachineId).
+    let teamConfig = null;  // D1: always declared (even on filtered dashboards, where it stays null forever -- fetchTeamConfig() is never called for them). Dynamic team configuration from board files, used only when isUnbounded.
 
     // ============================================================================
     // INITIALIZATION
     // ============================================================================
 
-    document.addEventListener('DOMContentLoaded', function() {
-        console.log('[LCARS] Academy Dashboard initializing...');
+    // D1.4: this handler is `async` for ALL four dashboards (accepted
+    // non-change -- an async handler that never reaches its `await` on the
+    // taken path resolves in the same microtask, and the DOM discards a
+    // listener's return value, so nothing observes handler completion; the
+    // three filtered dashboards never reach the `await` below). Pinned by
+    // tests/xaca-1110-004-dashboard-differential-harness.test.js's D1.4
+    // checks against the pre-unification files.
+    document.addEventListener('DOMContentLoaded', async function() {
+        console.log('[LCARS] ' + CONFIG.dashboardName + ' Dashboard initializing...');
 
         // Initialize LCARS core
         if (window.LCARS_CORE) {
             LCARS_CORE.init({
-                candyOptions: { section: 'overview' }
+                candyOptions: { section: CONFIG.candySection }
             });
         }
 
@@ -68,6 +126,15 @@
             }
         }
 
+        // D1 call site 2: only the unbounded ('all') dashboard needs a
+        // runtime division source -- the three filtered dashboards already
+        // know their divisions statically (CONFIG.divisions) and issue zero
+        // extra network requests. Matches the original lcars-all-app.js
+        // ordering (team config fetched before the first fleet fetch).
+        if (isUnbounded) {
+            await fetchTeamConfig();
+        }
+
         // Initial data fetch
         fetchFleetData();
 
@@ -78,12 +145,31 @@
         updateStardate();
         setInterval(updateStardate, 1000);
 
-        console.log('[LCARS] Academy Dashboard initialized');
+        console.log('[LCARS] ' + CONFIG.dashboardName + ' Dashboard initialized');
     });
 
     // ============================================================================
     // DATA FETCHING
     // ============================================================================
+
+    // D1: fetchTeamConfig() is always defined so the module's shape does
+    // not depend on config -- it is only ever CALLED from the
+    // DOMContentLoaded branch above when isUnbounded.
+    /**
+     * Fetch team configuration for dynamic organization mapping
+     * Teams are auto-discovered from kanban board files
+     */
+    async function fetchTeamConfig() {
+        try {
+            const response = await fetch(CONFIG.apiBase + '/api/team-config');
+            if (response.ok) {
+                teamConfig = await response.json();
+                console.log('[LCARS] Team config loaded:', Object.keys(teamConfig.teams).length, 'teams');
+            }
+        } catch (error) {
+            console.warn('[LCARS] Could not fetch team config, using defaults:', error.message);
+        }
+    }
 
     async function fetchFleetData() {
         try {
@@ -92,8 +178,12 @@
                 throw new Error('HTTP ' + response.status + ': ' + response.statusText);
             }
             fleetData = await response.json();
-            const filteredData = filterData(fleetData);
-            renderDashboard(filteredData);
+            // D1 call site 1: the unbounded ('all') dashboard renders the
+            // raw response -- nothing to filter, every division is its own.
+            // The three filtered dashboards narrow to CONFIG.divisions via
+            // filterData(), which the ternary below only ever calls on
+            // that (non-unbounded) path.
+            renderDashboard(isUnbounded ? fleetData : filterData(fleetData));
             updateConnectionStatus(true);
         } catch (error) {
             console.error('[LCARS] Failed to fetch fleet data:', error);
@@ -101,45 +191,56 @@
         }
     }
 
-    function filterData(data) {
-        if (!data || !data.fleet) return data;
+    // D1: declared unconditionally so every filtered dashboard's call site
+    // above resolves the identifier the same way; assigned a real function
+    // ONLY when !isUnbounded (there is nothing to filter on an unbounded
+    // dashboard -- D1's rejected option (a) is exactly the no-op-filterData
+    // shape this avoids). `typeof filterData` therefore reads "undefined"
+    // for the 'all' config -- the exact contract
+    // tests/helpers/lcars-fleet-dashboard-jsdom-loader.js's loadDashboardModule()
+    // export bridge (and this ticket's differential harness) checks.
+    let filterData;
+    if (!isUnbounded) {
+        filterData = function(data) {
+            if (!data || !data.fleet) return data;
 
-        const fleet = data.fleet;
-        const filteredDivisions = {};
-        let filteredTotalSessions = 0;
+            const fleet = data.fleet;
+            const filteredDivisions = {};
+            let filteredTotalSessions = 0;
 
-        for (const divisionName in fleet.divisions || {}) {
-            if (CONFIG.divisions.includes(divisionName.toLowerCase())) {
-                filteredDivisions[divisionName] = fleet.divisions[divisionName];
-                filteredTotalSessions += fleet.divisions[divisionName].total_sessions || 0;
+            for (const divisionName in fleet.divisions || {}) {
+                if (CONFIG.divisions.includes(divisionName.toLowerCase())) {
+                    filteredDivisions[divisionName] = fleet.divisions[divisionName];
+                    filteredTotalSessions += fleet.divisions[divisionName].total_sessions || 0;
+                }
             }
-        }
 
-        const filteredMachines = (fleet.machines || []).map(function(machine) {
-            const filteredSessions = (machine.sessions || []).filter(function(session) {
-                return CONFIG.divisions.includes((session.division || '').toLowerCase());
+            const filteredMachines = (fleet.machines || []).map(function(machine) {
+                const filteredSessions = (machine.sessions || []).filter(function(session) {
+                    return CONFIG.divisions.includes((session.division || '').toLowerCase());
+                });
+                return Object.assign({}, machine, {
+                    sessions: filteredSessions,
+                    session_count: filteredSessions.length
+                });
+            }).filter(function(machine) {
+                return machine.session_count > 0;
             });
-            return Object.assign({}, machine, {
-                sessions: filteredSessions,
-                session_count: filteredSessions.length
-            });
-        }).filter(function(machine) {
-            return machine.session_count > 0;
-        });
 
-        const onlineMachines = filteredMachines.filter(function(m) { return m.status === 'online'; }).length;
-        const offlineMachines = filteredMachines.filter(function(m) { return m.status === 'offline'; }).length;
+            const onlineMachines = filteredMachines.filter(function(m) { return m.status === 'online'; }).length;
+            const offlineMachines = filteredMachines.filter(function(m) { return m.status === 'offline'; }).length;
 
-        return {
-            fleet: {
-                total_machines: filteredMachines.length,
-                online_machines: onlineMachines,
-                offline_machines: offlineMachines,
-                total_sessions: filteredTotalSessions,
-                divisions: filteredDivisions,
-                machines: filteredMachines
-            },
-            last_update: data.last_update
+            return {
+                fleet: {
+                    total_machines: filteredMachines.length,
+                    online_machines: onlineMachines,
+                    offline_machines: offlineMachines,
+                    total_sessions: filteredTotalSessions,
+                    divisions: filteredDivisions,
+                    machines: filteredMachines
+                },
+                last_update: data.last_update
+            };
         };
     }
 
@@ -562,7 +663,7 @@
         container.innerHTML = '';
 
         if (!machines || machines.length === 0) {
-            container.innerHTML = '<p class="empty-message">No machines detected</p>';
+            container.innerHTML = '<p class="empty-message">' + CONFIG.machinesEmptyMessage + '</p>';
             return;
         }
 
@@ -1004,12 +1105,43 @@
         if (!window.LCARS_ORG) {
             console.error('[LCARS][org] shared/js/lcars-org-resolution.js is not '
                 + 'loaded -- it must appear BEFORE this script.');
+            // XACA-1110 design decision B1: this guard returned the literal
+            // 'org-academy' identically in all four pre-unification files
+            // (never CONFIG.unmappedOrgColor below), so DoubleNode/Main
+            // Event/All-Fleet all silently mis-colored as Academy on this
+            // failure path. PRESERVED VERBATIM here -- fixing it changes
+            // observable behavior on doublenode/mainevent inside a
+            // behavior-preserving refactor and would defeat the
+            // differential harness's identity proof. Known-divergent,
+            // tracked by XACA-1116 -- do not "fix" this as an oversight.
             return 'org-academy';
         }
-        return window.LCARS_ORG.resolveColor(group);
+        // D3: unmappedOrgColor is ALWAYS passed -- resolveColor's own `||`
+        // chain already defaults to 'org-academy' when omitted, so academy
+        // and 'all' (whose config sets the same default explicitly) are
+        // unaffected; doublenode/mainevent override it via their own config.
+        return window.LCARS_ORG.resolveColor(group, CONFIG.unmappedOrgColor);
     }
 
+    // D2: adopted VERBATIM from the former lcars-all-app.js -- proven
+    // equivalent to the static three-file version when teamConfig === null
+    // (every filtered dashboard, forever): the prefix fallback below
+    // returns 100 for freelance-*/legal-* codes, and the static map's own
+    // `|| 100` default returns 100 for the exact same codes. No seam, no
+    // branch -- see design decision doc D2 for the full proof.
     function getDivisionPriority(divisionCode) {
+        const code = divisionCode.toLowerCase();
+
+        // Check dynamic team config first (auto-discovered from board files)
+        if (teamConfig && teamConfig.teams && teamConfig.teams[code]) {
+            return teamConfig.teams[code].priority || 100;
+        }
+
+        // Fallback: Handle freelance-* and legal-* divisions
+        if (code.startsWith('freelance') || code.startsWith('legal')) {
+            return 100;
+        }
+        // Fallback: Static mapping for backward compatibility
         const priorities = {
             'command': 1,
             'android': 2,
@@ -1021,7 +1153,7 @@
             'legal': 100,
             'legal-coparenting': 100
         };
-        return priorities[divisionCode.toLowerCase()] || 100;
+        return priorities[code] || 100;
     }
 
     // ============================================================================

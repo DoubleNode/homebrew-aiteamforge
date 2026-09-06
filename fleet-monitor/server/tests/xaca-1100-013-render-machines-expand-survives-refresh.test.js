@@ -90,15 +90,34 @@ const { JSDOM } = require('jsdom');
 
 const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
 
-const LCARS2_APP_FILES_ALL = [
-    'lcars2/js/lcars-academy-app.js',
-    'lcars2/js/lcars-all-app.js',
-    'lcars2/js/lcars-doublenode-app.js',
-    'lcars2/js/lcars-mainevent-app.js'
+// XACA-1110-005/-009: the 4 former lcars2 app files collapsed into ONE
+// config-parameterized module -- re-pointed at that module, parameterized
+// over the 4 per-org configs instead of 4 files, so the same 4 behavioral
+// variants keep being exercised (this suite's renderMachines()/
+// isSystemExpanded call-site wiring does not actually depend on CONFIG,
+// but every other lcars2 suite in this directory follows this same shape,
+// and dropping to a single un-parameterized case would silently narrow
+// coverage relative to before unification).
+const UNIFIED_MODULE_REL_PATH = 'lcars2/js/lcars-fleet-dashboard-app.js';
+const LCARS2_APP_TARGETS_ALL = [
+    { label: 'academy', relPath: UNIFIED_MODULE_REL_PATH, configRelPath: 'lcars2/js/lcars-academy-config.js' },
+    { label: 'doublenode', relPath: UNIFIED_MODULE_REL_PATH, configRelPath: 'lcars2/js/lcars-doublenode-config.js' },
+    { label: 'mainevent', relPath: UNIFIED_MODULE_REL_PATH, configRelPath: 'lcars2/js/lcars-mainevent-config.js' },
+    { label: 'all', relPath: UNIFIED_MODULE_REL_PATH, configRelPath: 'lcars2/js/lcars-all-config.js' }
 ];
-// lcars-doublenode-app.js is tap-excluded (XACA-0139 debranding) -- same
-// existence filter every other suite in this directory uses.
-const LCARS2_APP_FILES = LCARS2_APP_FILES_ALL.filter((rel) => fs.existsSync(path.join(PUBLIC_ROOT, rel)));
+// doublenode/mainevent configs are tap-excluded (XACA-0139 debranding) --
+// same existence filter every other suite in this directory uses, now
+// applied to the CONFIG file rather than the (identical-everywhere) app
+// file.
+function loadConfigGlobalForTest(relPath) {
+    const sandbox = { window: {} };
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(path.join(PUBLIC_ROOT, relPath), 'utf8'), sandbox, { filename: relPath });
+    return sandbox.window.LCARS_DASHBOARD_CONFIG;
+}
+const LCARS2_APP_FILES = LCARS2_APP_TARGETS_ALL
+    .filter((t) => fs.existsSync(path.join(PUBLIC_ROOT, t.configRelPath)))
+    .map((t) => Object.assign({}, t, { configGlobal: loadConfigGlobalForTest(t.configRelPath) }));
 
 // A machine with a fully-populated system{} block so buildSystemSectionHtml()
 // takes the "real interactive toggle" branch (never the static no-data
@@ -141,7 +160,8 @@ function interactiveMachine() {
 // mutated copy (used by the MUTATION KILL group below) -- same optional
 // param shape as tests/xaca-1031-018-version-aria-label.test.js's
 // setupApp().
-async function setupApp(relPath, srcOverride) {
+async function setupApp(target, srcOverride) {
+    const relPath = target.relPath;
     const dom = new JSDOM('<!doctype html><html><body><div id="machines-list"></div></body></html>', {
         url: 'http://lcars-test.local/' + relPath,
         runScripts: 'outside-only',
@@ -156,6 +176,10 @@ async function setupApp(relPath, srcOverride) {
     });
 
     const ctx = dom.getInternalVMContext();
+
+    if (target.configGlobal) {
+        window.LCARS_DASHBOARD_CONFIG = target.configGlobal;
+    }
 
     // The real shipped core, unmodified -- this file's mutations are always
     // to the APP file's call site, never to the core's createMachineItem().
@@ -231,9 +255,9 @@ function runExpandSurvivesRefreshScenario(window, document, mod, machine) {
 // POSITIVE: real call site, real toggle click, real second render.
 // ============================================================================
 
-LCARS2_APP_FILES.forEach((relPath) => {
-    test(`XACA-1100-013: renderMachines() wires isSystemExpanded so an opened SYSTEM panel survives a refresh-tick re-render (${relPath})`, async () => {
-        const { window, document, mod } = await setupApp(relPath);
+LCARS2_APP_FILES.forEach((target) => {
+    test(`XACA-1100-013: renderMachines() wires isSystemExpanded so an opened SYSTEM panel survives a refresh-tick re-render (${target.label}: ${target.relPath})`, async () => {
+        const { window, document, mod } = await setupApp(target);
         const survived = runExpandSurvivesRefreshScenario(window, document, mod, interactiveMachine());
         assert.equal(survived, true,
             'the SYSTEM panel opened by a real click must still show expanded (aria-expanded="true" plus both .expanded classes) ' +
@@ -253,24 +277,24 @@ LCARS2_APP_FILES.forEach((relPath) => {
 
 const CALL_SITE_NEEDLE = 'isSystemExpanded: expandedSystemMachineId === machine.machine_id';
 
-LCARS2_APP_FILES.forEach((relPath) => {
-    test(`XACA-1100-013 mutation kill (value), ${relPath}: hardcoding isSystemExpanded: false at the call site makes the SYSTEM panel collapse on refresh (proves the positive test above is load-bearing)`, async () => {
-        const realSrc = fs.readFileSync(path.join(PUBLIC_ROOT, relPath), 'utf8');
+LCARS2_APP_FILES.forEach((target) => {
+    test(`XACA-1100-013 mutation kill (value), ${target.label}: ${target.relPath}: hardcoding isSystemExpanded: false at the call site makes the SYSTEM panel collapse on refresh (proves the positive test above is load-bearing)`, async () => {
+        const realSrc = fs.readFileSync(path.join(PUBLIC_ROOT, target.relPath), 'utf8');
         assert.ok(realSrc.includes(CALL_SITE_NEEDLE),
             'mutation setup: expected to find the exact isSystemExpanded call-site wiring in the real source -- ' +
             'if this fails, the source shape changed and the mutation string needs updating');
         const mutatedSrc = realSrc.replace(CALL_SITE_NEEDLE, 'isSystemExpanded: false');
         assert.notEqual(mutatedSrc, realSrc);
 
-        const { window, document, mod } = await setupApp(relPath, mutatedSrc);
+        const { window, document, mod } = await setupApp(target, mutatedSrc);
         const survived = runExpandSurvivesRefreshScenario(window, document, mod, interactiveMachine());
         assert.equal(survived, false,
             'expected the value-mutated call site (isSystemExpanded: false) to fail to preserve expand state across a ' +
             'refresh -- if this now passes, the mutation stopped being effective and this kill test needs review');
     });
 
-    test(`XACA-1100-013 mutation kill (dropped key), ${relPath}: removing the isSystemExpanded key from the call site entirely also makes the SYSTEM panel collapse on refresh`, async () => {
-        const realSrc = fs.readFileSync(path.join(PUBLIC_ROOT, relPath), 'utf8');
+    test(`XACA-1100-013 mutation kill (dropped key), ${target.label}: ${target.relPath}: removing the isSystemExpanded key from the call site entirely also makes the SYSTEM panel collapse on refresh`, async () => {
+        const realSrc = fs.readFileSync(path.join(PUBLIC_ROOT, target.relPath), 'utf8');
         // Drop the whole line, including its preceding comma, so the object
         // literal stays syntactically valid with 4 keys instead of 5 -- an
         // OMITTED wire, not merely a wrong value.
@@ -281,7 +305,7 @@ LCARS2_APP_FILES.forEach((relPath) => {
         assert.notEqual(mutatedSrc, realSrc);
         assert.ok(!mutatedSrc.includes('isSystemExpanded'), 'mutation setup: isSystemExpanded must be entirely absent from the call site after this mutation');
 
-        const { window, document, mod } = await setupApp(relPath, mutatedSrc);
+        const { window, document, mod } = await setupApp(target, mutatedSrc);
         const survived = runExpandSurvivesRefreshScenario(window, document, mod, interactiveMachine());
         assert.equal(survived, false,
             'expected the dropped-key call site (no isSystemExpanded property at all -> deps.isSystemExpanded reads ' +

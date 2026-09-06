@@ -53,19 +53,18 @@ const PUBLIC_ROOT = path.join(__dirname, '..', 'public');
 
 const RICH_APP_REL_PATH = 'lcars/js/lcars-dashboard-app.js';
 
+// XACA-1110-005/-009: the 4 former lcars2 minimal renderers collapsed into
+// ONE config-parameterized module. createMachineItem() itself lives in the
+// shared core (lcars-fleet-core.js) and does not depend on CONFIG, so there
+// is now exactly one file here rather than a representative pick among 4.
 const ALL_LCARS2_MINIMAL_FILES = [
-    'lcars2/js/lcars-academy-app.js',
-    'lcars2/js/lcars-all-app.js',
-    'lcars2/js/lcars-doublenode-app.js',
-    'lcars2/js/lcars-mainevent-app.js'
+    'lcars2/js/lcars-fleet-dashboard-app.js'
 ];
-// doublenode is NOT tap-mirrored (XACA-0139) -- same existence filter as
-// the sibling XACA-1031 suites.
 const LCARS2_MINIMAL_FILES = ALL_LCARS2_MINIMAL_FILES.filter((rel) => fs.existsSync(path.join(PUBLIC_ROOT, rel)));
-// One representative lcars2 file for tests that don't need to run across
-// all four (the cross-file byte-identity test elsewhere already proves
-// they're identical over the createMachineItem() extent this ticket
-// touches, so re-running every assertion 4x here would be redundant).
+// The one lcars2 file this suite exercises (formerly "a representative
+// pick among 4, since the cross-file byte-identity test elsewhere already
+// proved they're identical" -- there is only one file now, so this is just
+// that file).
 const LCARS2_REPRESENTATIVE = LCARS2_MINIMAL_FILES[0];
 
 function baseMachine(overrides) {

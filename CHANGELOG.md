@@ -7,6 +7,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1110: `fleet-monitor/server/public/lcars2/` — the four per-org dashboard
+  app files were unified into one config-parameterized module,
+  `js/lcars-fleet-dashboard-app.js`, driven by a per-org config script the host
+  page loads immediately before it. The tap now ships that module plus
+  `js/lcars-academy-config.js` and `js/lcars-all-config.js`; the DoubleNode and
+  Main Event configs are named `lcars-doublenode-config.js` /
+  `lcars-mainevent-config.js` so the existing basename exclusion in
+  `sync-tap.sh` keeps them out of the tap with no predicate change, and the
+  shared module deliberately contains no org registry. The superseded
+  `js/lcars-academy-app.js` and `js/lcars-all-app.js` are REMOVED — `sync_dir()`
+  only copies from source and never deletes, so leaving them would have shipped
+  dead app JS that no page loads (the XACA-0971 defect class).
+
 - XACA-1096: `share/scripts/kb-host-ready.sh` — added a positive allowlist
   (`[A-Za-z0-9._-]`) as a second validation layer on the `team` and `args`
   config fields, alongside the retained `BAD_CHARS` denylist. Rejection

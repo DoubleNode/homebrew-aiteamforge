@@ -2239,15 +2239,16 @@
    an unbreakable token.
 
    WHY NOT ellipsis + white-space:nowrap -- and the premise is different in THIS
-   skin, but at the VALUE level, not the skin level. Its four app files
-   (lcars-academy-app.js:332, lcars-all-app.js:310, lcars-doublenode-app.js:332,
-   lcars-mainevent-app.js:332) emit the Machine value as a BARE
+   skin, but at the VALUE level, not the skin level. This skin's dashboard
+   module (lcars2/js/lcars-fleet-dashboard-app.js -- unified under XACA-1110
+   from four byte-near-identical per-org app files that all emitted this same
+   markup) emits the Machine value as a BARE
    <span class="session-value"> with no per-value title, where lcars puts
    title="<hostname>" on that span (lcars-dashboard-app.js:964). That per-value
    asymmetry is real and is what the argument rests on. What is NOT asymmetric:
    BOTH skins set a CARD-level tooltip through the DOM property -- card.title,
-   three variants (online / unavailable / misconfigured) at :353, :361, :366 in
-   this skin's academy app and the same three in each of the other three, plus
+   three variants (online / unavailable / misconfigured) in this skin's
+   dashboard module's card-rendering function, plus
    lcars-dashboard-app.js:985,993,998. Nothing is claimed here about title=
    presence at skin scope.
 
@@ -2278,9 +2279,10 @@
 
    WHY .session-info STAYS IN THIS SELECTOR LIST (XACA-0976-003) while the lcars
    copy drops it: this skin has no .session-info-with-avatar rule anywhere, and
-   the four app files above emit a bare .session-info, so this is its ONLY source
-   of min-width:0. lcars can drop it because a pre-existing avatar rule already
-   covers it there. The asymmetry is intentional -- do not "unify" the lists.
+   this skin's unified dashboard module (see above) emits a bare .session-info,
+   so this is its ONLY source of min-width:0. lcars can drop it because a
+   pre-existing avatar rule already covers it there. The asymmetry is
+   intentional -- do not "unify" the lists.
 
    CASCADE: these selectors are 0,2,0. Nothing below them competes -- the later
    base .session-info / .session-detail / .session-value rules are 0,1,0, and the
