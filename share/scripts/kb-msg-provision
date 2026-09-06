@@ -882,18 +882,28 @@ def _refuse_retarget_under_unattended(unattended, retargeted, slug, say):
     retarget behaviour, because a human reading the report is the safety
     property this rule exists to substitute for when nobody is watching.
 
-    Returns True if the write may proceed, False if it was refused (message
-    already emitted via `say`, which the caller passes bound to stdout/stderr
-    as appropriate for its own --quiet handling).
+    Returns True if the write may proceed, False if it was refused.
+
+    The refusal reason is emitted via `_notice` (stderr, UNCONDITIONAL), never
+    via `say` (stdout, suppressed by --quiet). This is not a style preference.
+    Both automatic call sites — the tap installer and `aiteamforge upgrade` —
+    invoke this tool as `--unattended --quiet`, and they disclose the reason to
+    the operator by capturing its output. Routing this block through `say` made
+    the refusal emit ZERO bytes under exactly that flag combination, so the
+    wrappers fell through their `if [ -n "$routing_out" ]` disclosure branch and
+    the operator saw only "exited 1" with no key named and no `was <machine>`.
+    Contract rule 12 is "never abort AND never suppress the reason" — a refusal
+    nobody can read is the silent failure this ticket exists to remove.
+    Caught in review of PR #825; regression-pinned by U14/U15.
     """
     if not unattended or not retargeted:
         return True
-    say("\n  REFUSED: %d key(s) would be RETARGETED under --unattended — the entire "
-        "write is declined, not applied partially:" % len(retargeted))
+    _notice("REFUSED: %d key(s) would be RETARGETED under --unattended — the entire "
+            "write is declined, not applied partially:" % len(retargeted))
     for t, was in retargeted:
-        say("    ~ %s -> %s (was %s)" % (t, slug, was))
-    say("  An unattended process does not adjudicate between two operator-maintained "
-        "records. Nothing was written. Resolve by hand: kb-msg-provision")
+        _notice("  ~ %s -> %s (was %s)" % (t, slug, was))
+    _notice("An unattended process does not adjudicate between two operator-maintained "
+            "records. Nothing was written. Resolve by hand: kb-msg-provision")
     return False
 
 
