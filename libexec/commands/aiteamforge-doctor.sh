@@ -273,37 +273,80 @@ _x1097_prime_login_path() {
     # only. Poll granularity is 1s (`sleep 1`) so the bound is an upper
     # limit, not exact to the second -- both are portable on bash 3.2.
     local _x1097_probe_timeout="${AITEAMFORGE_LOGIN_PROBE_TIMEOUT_SECS:-5}"
-    local _x1097_probe_tmpfile _x1097_probe_pid _x1097_probe_elapsed=0
+    local _x1097_probe_tmpfile _x1097_probe_pid _x1097_probe_elapsed=0 _x1097_probe_had_monitor
     # XACA-1097-019: the probe's PATH payload is bracketed by a unique
     # marker line; extraction below takes ONLY "the line immediately after
     # the marker" — never "the first line" and never "the whole captured
     # blob". The entire `$SHELL -ilc` invocation's stdout lands in this
     # tmpfile, so a chatty ~/.zshrc/~/.bashrc that prints so much as one
     # banner line during shell startup shares the file with the real PATH
-    # payload. The marker anchor makes that banner noise inert no matter
-    # how many lines it spans. (A prior version of this probe read the raw
-    # blob with `read`, which stops at the FIRST newline — a single banner
-    # line ahead of the payload silently discarded the ENTIRE real PATH,
-    # falling back to the static 3-prefix list with no indication anything
-    # was lost. Measured: quiet rc resolves correctly; one banner line ->
-    # MISS on every tool outside that static list.)
+    # payload. The marker anchor makes LEADING banner noise (anything
+    # BEFORE the marker line) inert no matter how many lines it spans. (A
+    # prior version of this probe read the raw blob with `read`, which
+    # stops at the FIRST newline — a single banner line ahead of the
+    # payload silently discarded the ENTIRE real PATH, falling back to the
+    # static 3-prefix list with no indication anything was lost. Measured:
+    # quiet rc resolves correctly; one banner line -> MISS on every tool
+    # outside that static list.)
+    #
+    # XACA-1097-023: TRAILING output is a SEPARATE hazard the marker anchor
+    # does not cover by itself. `$SHELL -ilc` is a LOGIN shell, which
+    # guarantees a logout-file pass (~/.zlogout et al.) AFTER the `-c`
+    # command's own output finishes, on the same stdout stream captured
+    # into this tmpfile. The PATH payload used to be written with
+    # `printf '%s'` — no trailing newline — so that logout-file output
+    # landed on the SAME LINE as the payload and corrupted the LAST PATH
+    # entry (measured: captured `...:/opt/homebrew/bin` followed
+    # immediately by `== goodbye from .zlogout ==` with no separator,
+    # corrupting the final PATH entry). Terminating the payload with
+    # `printf '%s\n'` gives any trailing noise its OWN line, which the
+    # `found { print; exit }` awk logic below already discards — it prints
+    # only the ONE line immediately after the marker, then stops, so
+    # anything on subsequent lines (leading OR trailing) is inert.
     local _x1097_probe_marker="__AITEAMFORGE_X1097_PATH_$$__"
     _x1097_probe_tmpfile="$(mktemp "${TMPDIR:-/tmp}/x1097-loginpath.XXXXXXXX" 2>/dev/null || true)"
     if [ -n "$_x1097_probe_tmpfile" ]; then
-      # `set -m` puts the backgrounded subshell in its OWN process group
-      # (pgid == its own pid) instead of inheriting this script's pgid, so
-      # the timeout branch below can reap the ENTIRE group — not just the
-      # direct child — via `kill -- -PID`. Without this, a slow rc file
-      # that itself spawns children (a background job, a version-manager
-      # hook, a network probe) leaves those GRANDCHILDREN alive and
-      # reparented to PID 1 the moment only the direct child is killed
-      # (measured).
-      (
-        set -m
-        "$SHELL" -ilc "printf '%s\n' '$_x1097_probe_marker'; printf '%s' \"\$PATH\"" \
-          >"$_x1097_probe_tmpfile" 2>/dev/null
-      ) &
+      # XACA-1097-023: `set -m` must be enabled in THIS shell (the parent)
+      # IMMEDIATELY BEFORE the `&` that backgrounds the job — that is the
+      # instant bash decides the job's process group, and job-control
+      # decisions happen in the shell that performs the fork, not in
+      # whatever the forked process itself does afterward. A prior version
+      # of this code put `set -m` INSIDE the backgrounded `( ... )`
+      # subshell, which is too late: process-group assignment already
+      # happened when the PARENT backgrounded that subshell (inheriting
+      # the parent's own pgid, since job control was off in the parent at
+      # that moment), so `set -m` running inside the child could not
+      # retroactively make itself a new group leader. Measured (bash
+      # 3.2.57): `( set -m; exec sleep 5 ) &` left the child's pgid EQUAL
+      # TO the parent script's pgid (inherited, not its own); `set -m` in
+      # the parent immediately before backgrounding `"$SHELL" -ilc ...`
+      # directly produces a child whose pgid EQUALS its own pid, as
+      # intended. With that fixed, the timeout branch below can reap the
+      # ENTIRE group — not just the direct child — via `kill -- -PID`.
+      # Without it, a slow rc file that itself spawns children (a
+      # background job, a version-manager hook, a network probe) leaves
+      # those GRANDCHILDREN alive and reparented to PID 1 the moment only
+      # the direct child is killed (measured).
+      #
+      # `set -m` is restored to whatever it was before this function ran
+      # (never unconditionally turned off) right after the fork, so every
+      # exit path below runs with the caller's original job-control
+      # setting. `disown` drops the job from this shell's job table
+      # immediately after capturing its pid so that a later `wait`/signal
+      # on it does not print bash's own "Terminated"/"Done" job-control
+      # notification to stderr — measured leaking onto stderr on a killed
+      # job even after `set +m`, once a job has been registered as
+      # monitored; `disown` before that happens prevents it outright.
+      case $- in
+        *m*) _x1097_probe_had_monitor=true ;;
+        *)   _x1097_probe_had_monitor=false ;;
+      esac
+      set -m
+      "$SHELL" -ilc "printf '%s\n' '$_x1097_probe_marker'; printf '%s\n' \"\$PATH\"" \
+        >"$_x1097_probe_tmpfile" 2>/dev/null &
       _x1097_probe_pid=$!
+      disown "$_x1097_probe_pid" 2>/dev/null
+      [ "$_x1097_probe_had_monitor" = true ] || set +m
       while [ "$_x1097_probe_elapsed" -lt "$_x1097_probe_timeout" ] && kill -0 "$_x1097_probe_pid" 2>/dev/null; do
         sleep 1
         _x1097_probe_elapsed=$((_x1097_probe_elapsed + 1))

@@ -636,6 +636,268 @@ fi
 _block_end
 
 # ─────────────────────────────────────────────────────────────────────────────
+# BLOCK E -- XACA-1097 review round: _x1097_prime_login_path() process-group/
+# timeout-bound + trailing-noise regression coverage.
+#
+# `grep -rE 'LOGIN_PROBE_TIMEOUT|orphan|grandchild|pgid' tests/` returned
+# NOTHING before this block -- the "orphan" hits elsewhere in THIS file are
+# CONNECT-SCRIPT orphans, an unrelated concept. Two defects shipped in the
+# review round specifically because no test exercised this path:
+#   Defect 1: `set -m` lived INSIDE the backgrounded `( ... )` subshell,
+#             where it cannot setpgid it -- pgid stayed INHERITED from the
+#             script, so the timeout branch's `kill -TERM -- -$pid` hit
+#             NOTHING (ESRCH), the bound was inoperative, and `wait "$pid"`
+#             blocked on the hung shell instead of the configured timeout.
+#   Defect 2: the PATH payload was written with `printf '%s'` -- no
+#             trailing newline -- so trailing rc output (a login shell's
+#             guaranteed ~/.zlogout pass) landed on the SAME LINE and
+#             corrupted the LAST PATH entry.
+#
+# Fixtures below are BASH-3.2-SAFE (no $BASHPID -- that is bash 4+ only and
+# was measured to silently return empty under macOS's shipped /bin/bash,
+# which would have made the grandchild-tracking pidfile below silently
+# blank instead of failing loudly).
+#
+# PRE-FIX fixture: _x1097_prime_login_path() extracted from commit
+# X1097_PRIME_PREFIX_COMMIT -- the actual commit this round's fix sits on
+# top of, not a hand-typed guess. Same convention as the
+# X1097_022_TEST_BIN_DOCTOR override documented near the top of this file.
+# ─────────────────────────────────────────────────────────────────────────────
+PRIME_SANDBOX="$SANDBOX/prime-loginpath"
+mkdir -p "$PRIME_SANDBOX"
+X1097_PRIME_PREFIX_COMMIT="5ff817f"
+
+PRIME_POST_FN="$PRIME_SANDBOX/prime-post-fix.sh"
+PRIME_PRE_FULL="$PRIME_SANDBOX/prime-pre-fix-full.sh"
+PRIME_PRE_FN="$PRIME_SANDBOX/prime-pre-fix.sh"
+PRIME_PREFIX_AVAILABLE=false
+
+_extract_fns "$BIN_DOCTOR" _x1097_prime_login_path > "$PRIME_POST_FN"
+
+_block_start "BLOCK E grounding: POST-FIX extraction is genuinely the fixed shape (parent-scope set -m + disown, trailing-newline PATH printf)"
+assert_not_empty "$(cat "$PRIME_POST_FN")" "extraction of _x1097_prime_login_path() from \$BIN_DOCTOR produced nothing"
+assert_contains "$(cat "$PRIME_POST_FN")" "disown" \
+    "live \$BIN_DOCTOR no longer disowns the probe job -- BLOCK E's POST-FIX assumptions are stale"
+PRIME_NEEDLE_TRAILING_NL="$(cat <<'NEEDLE'
+printf '%s\n' \"\$PATH\"
+NEEDLE
+)"
+assert_contains "$(cat "$PRIME_POST_FN")" "$PRIME_NEEDLE_TRAILING_NL" \
+    "live \$BIN_DOCTOR no longer terminates the PATH payload with a newline -- BLOCK E's POST-FIX assumptions are stale"
+_block_end
+
+_block_start "BLOCK E grounding: PRE-FIX fixture (commit $X1097_PRIME_PREFIX_COMMIT) is resolvable and is genuinely the buggy shape"
+if git -C "$TAP_ROOT" cat-file -e "$X1097_PRIME_PREFIX_COMMIT" 2>/dev/null && \
+   git -C "$TAP_ROOT" show "$X1097_PRIME_PREFIX_COMMIT:bin/aiteamforge-doctor.sh" > "$PRIME_PRE_FULL" 2>/dev/null; then
+    if grep -q '^_x1097_prime_login_path()' "$PRIME_PRE_FULL"; then
+        _extract_fns "$PRIME_PRE_FULL" _x1097_prime_login_path > "$PRIME_PRE_FN"
+        assert_not_empty "$(cat "$PRIME_PRE_FN")" "pre-fix extraction produced nothing"
+        assert_not_contains "$(cat "$PRIME_PRE_FN")" "disown" \
+            "pre-fix fixture (commit $X1097_PRIME_PREFIX_COMMIT) already disowns the probe job -- this is not the pre-fix shape, fixture selection is wrong"
+        assert_contains "$(cat "$PRIME_PRE_FN")" ") &" \
+            "pre-fix fixture (commit $X1097_PRIME_PREFIX_COMMIT) does not background a subshell wrapper -- not the shape defect 1 is about"
+        PRIME_PREFIX_AVAILABLE=true
+    else
+        _block_note_fail "commit $X1097_PRIME_PREFIX_COMMIT no longer defines _x1097_prime_login_path() at file scope"
+    fi
+else
+    echo "    SKIP: commit $X1097_PRIME_PREFIX_COMMIT not resolvable in this checkout -- PRE-FIX negative-control runs below will SKIP; POST-FIX assertions still run and still gate the suite"
+fi
+_block_end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fake $SHELL fixtures.
+# ─────────────────────────────────────────────────────────────────────────────
+FAKE_HANG_SHELL="$PRIME_SANDBOX/fake-shell-hang.sh"
+cat > "$FAKE_HANG_SHELL" <<'FAKESHELL'
+#!/bin/bash
+# Simulates a stuck ~/.zshrc during "$SHELL -ilc ...": forks a tracked
+# GRANDCHILD, then blocks itself -- so group-kill correctness can be
+# measured against a REAL grandchild, not just the direct child. Both
+# processes block on `exec sleep 1000000` (never returns on its own inside
+# this suite's timeouts) and record their OWN real pid to a file BEFORE
+# that exec -- exec preserves pid but replaces argv, so a `ps`/`pgrep`
+# command-line match on this script's own path would go stale the instant
+# `sleep` replaces it; the pidfile sidesteps that entirely. The grandchild
+# is a genuine NEW `/bin/bash -c '...'` process (not a `( ... )` subshell)
+# because `$BASHPID` is bash 4+ only and was measured to be silently EMPTY
+# under macOS's shipped bash 3.2 -- `$$` inside a real child process is
+# correct on 3.2, `$$` inside a `()` subshell is NOT (it stays the
+# parent's).
+: "${X1097_HANG_PID_PREFIX:?X1097_HANG_PID_PREFIX must be set}"
+/bin/bash -c 'echo "$$" > "'"$X1097_HANG_PID_PREFIX"'.grandchild"; exec sleep 1000000' &
+echo "$$" > "${X1097_HANG_PID_PREFIX}.child"
+exec sleep 1000000
+FAKESHELL
+chmod +x "$FAKE_HANG_SHELL"
+
+FAKE_TRAILING_SHELL="$PRIME_SANDBOX/fake-shell-trailing.sh"
+cat > "$FAKE_TRAILING_SHELL" <<'FAKESHELL'
+#!/bin/bash
+# Simulates a LOGIN shell's guaranteed logout-file pass (~/.zlogout et al.)
+# printing AFTER the probe's own -c command output finishes, on the SAME
+# stdout stream, with NO separating newline of its own -- the exact
+# XACA-1097 defect-2 shape (measured against a REAL ~/.zlogout during
+# triage, reproduced here without depending on the runner's actual rc
+# files).
+shift
+eval "$1"
+printf '%s' '== goodbye from .fake-zlogout =='
+FAKESHELL
+chmod +x "$FAKE_TRAILING_SHELL"
+
+FAKE_LEADING_SHELL="$PRIME_SANDBOX/fake-shell-leading.sh"
+cat > "$FAKE_LEADING_SHELL" <<'FAKESHELL'
+#!/bin/bash
+# Simulates a chatty ~/.zshrc printing a banner line BEFORE the marker+PATH
+# payload -- the ORIGINAL XACA-1097-019 leading-banner-noise case. This is
+# a "do not regress" guard for a DIFFERENT, already-fixed defect than the
+# trailing-noise one above; both must stay inert at once.
+echo '== hello from .fake-zshrc =='
+shift
+eval "$1"
+FAKESHELL
+chmod +x "$FAKE_LEADING_SHELL"
+
+_prime_elapsed_and_path() {
+    # Runs _x1097_prime_login_path() from $1 under $SHELL=$2, PATH=$4, with
+    # AITEAMFORGE_LOGIN_PROBE_TIMEOUT_SECS=$3, and prints "ELAPSED:n" then
+    # "CAPTURED:<path>" on stdout (stderr passed through separately by the
+    # caller via redirection if it wants it).
+    local fn_file="$1" fake_shell="$2" timeout_secs="$3" fixed_path="$4"
+    PATH="$fixed_path" SHELL="$fake_shell" AITEAMFORGE_LOGIN_PROBE_TIMEOUT_SECS="$timeout_secs" /bin/bash -c "
+        source '$fn_file'
+        _t0=\$(date +%s)
+        _x1097_prime_login_path
+        _t1=\$(date +%s)
+        printf 'ELAPSED:%s\n' \"\$((_t1 - _t0))\"
+        printf 'CAPTURED:%s\n' \"\$_X1097_LOGIN_PATH\"
+    "
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (a)+(b) POST-FIX: hung $SHELL is bounded, no child/grandchild survives.
+# ─────────────────────────────────────────────────────────────────────────────
+_block_start "XACA-1097 defect 1 [POST-FIX]: hung \$SHELL is bounded within the configured timeout, and neither the child nor the GRANDCHILD survives it"
+E1_TIMEOUT=1
+E1_PREFIX="$PRIME_SANDBOX/e1"
+E1_OUT="$(X1097_HANG_PID_PREFIX="$E1_PREFIX" _prime_elapsed_and_path "$PRIME_POST_FN" "$FAKE_HANG_SHELL" "$E1_TIMEOUT" "/bin:/usr/bin" 2>/dev/null)"
+E1_ELAPSED="$(printf '%s\n' "$E1_OUT" | sed -n 's/^ELAPSED://p')"
+assert_not_empty "$E1_ELAPSED" "no ELAPSED marker captured -- fixture broken; got: $E1_OUT"
+if [ -n "$E1_ELAPSED" ] && [ "$E1_ELAPSED" -gt 6 ] 2>/dev/null; then
+    _block_note_fail "hung \$SHELL was NOT bounded -- prime() took ${E1_ELAPSED}s against a configured ${E1_TIMEOUT}s timeout; the wait bound is inoperative"
+fi
+sleep 0.5
+E1_CHILD_PID="$(cat "${E1_PREFIX}.child" 2>/dev/null || true)"
+E1_GRANDCHILD_PID="$(cat "${E1_PREFIX}.grandchild" 2>/dev/null || true)"
+assert_not_empty "$E1_CHILD_PID" "fixture did not record a child pid -- fixture broken, this block is not testing anything"
+assert_not_empty "$E1_GRANDCHILD_PID" "fixture did not record a grandchild pid -- fixture broken, this block is not testing anything"
+if [ -n "$E1_CHILD_PID" ] && kill -0 "$E1_CHILD_PID" 2>/dev/null; then
+    _block_note_fail "direct child (pid $E1_CHILD_PID) survived the timeout under the FIXED code"
+fi
+if [ -n "$E1_GRANDCHILD_PID" ] && kill -0 "$E1_GRANDCHILD_PID" 2>/dev/null; then
+    _block_note_fail "GRANDCHILD (pid $E1_GRANDCHILD_PID) survived the timeout under the FIXED code -- direct-child-only cleanup is not enough"
+fi
+_block_end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (a)+(b) PRE-FIX negative control: proves this suite WOULD have caught the
+# shipped regression. Runs under OUR OWN outer bound (4x the configured
+# probe timeout) so a genuinely inoperative bound -- the actual historical
+# defect -- cannot hang this suite: if the wrapper is still alive at that
+# point, the historical defect has reproduced, and it does not confirm
+# ANYTHING further; we still explicitly force-clean every tracked pid so no
+# stray sleep survives this test run.
+# ─────────────────────────────────────────────────────────────────────────────
+_block_start "XACA-1097 defect 1 [PRE-FIX negative control, commit $X1097_PRIME_PREFIX_COMMIT]: timeout bound is inoperative, child+grandchild survive -- proves this suite would have caught the shipped regression"
+if [ "$PRIME_PREFIX_AVAILABLE" = true ]; then
+    E2_TIMEOUT=1
+    E2_PREFIX="$PRIME_SANDBOX/e2"
+    ( X1097_HANG_PID_PREFIX="$E2_PREFIX" _prime_elapsed_and_path "$PRIME_PRE_FN" "$FAKE_HANG_SHELL" "$E2_TIMEOUT" "/bin:/usr/bin" \
+        > "$PRIME_SANDBOX/e2.out" 2>/dev/null ) &
+    E2_WRAP_PID=$!
+    E2_WAITED=0
+    while [ "$E2_WAITED" -lt 4 ] && kill -0 "$E2_WRAP_PID" 2>/dev/null; do
+        sleep 1
+        E2_WAITED=$((E2_WAITED + 1))
+    done
+    if kill -0 "$E2_WRAP_PID" 2>/dev/null; then
+        E2_CHILD_PID="$(cat "${E2_PREFIX}.child" 2>/dev/null || true)"
+        E2_GRANDCHILD_PID="$(cat "${E2_PREFIX}.grandchild" 2>/dev/null || true)"
+        assert_not_empty "$E2_CHILD_PID" "pre-fix fixture did not record a child pid -- fixture broken"
+        assert_not_empty "$E2_GRANDCHILD_PID" "pre-fix fixture did not record a grandchild pid -- fixture broken"
+        if [ -n "$E2_CHILD_PID" ] && ! kill -0 "$E2_CHILD_PID" 2>/dev/null; then
+            _block_note_fail "expected the pre-fix child (pid $E2_CHILD_PID) to still be alive past its configured ${E2_TIMEOUT}s timeout -- this negative control did not reproduce the historical defect"
+        fi
+        if [ -n "$E2_GRANDCHILD_PID" ] && ! kill -0 "$E2_GRANDCHILD_PID" 2>/dev/null; then
+            _block_note_fail "expected the pre-fix GRANDCHILD (pid $E2_GRANDCHILD_PID) to still be alive past its configured ${E2_TIMEOUT}s timeout -- this negative control did not reproduce the historical defect"
+        fi
+        # Best-effort cleanup -- never leave a stray sleep/wrapper process
+        # behind for the rest of the CI run, regardless of assertion result.
+        for _p in "$E2_CHILD_PID" "$E2_GRANDCHILD_PID" "$E2_WRAP_PID"; do
+            [ -n "$_p" ] && kill -TERM "$_p" 2>/dev/null
+        done
+        sleep 0.3
+        for _p in "$E2_CHILD_PID" "$E2_GRANDCHILD_PID" "$E2_WRAP_PID"; do
+            [ -n "$_p" ] && kill -KILL "$_p" 2>/dev/null
+        done
+    else
+        _block_note_fail "pre-fix (commit $X1097_PRIME_PREFIX_COMMIT) fixture returned within ${E2_WAITED}s of a ${E2_TIMEOUT}s configured timeout -- this negative control no longer reproduces the historical defect (has the fixture drifted, or did upstream history change?)"
+    fi
+    wait "$E2_WRAP_PID" 2>/dev/null
+else
+    echo "    SKIP: pre-fix fixture unavailable (see grounding block above)"
+fi
+_block_end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (c) trailing rc noise must not corrupt the last PATH entry (POST-FIX
+# passes; PRE-FIX negative control proves the suite would have caught it).
+# ─────────────────────────────────────────────────────────────────────────────
+FIXED_PATH_FOR_NOISE="/bin:/usr/bin:/opt/homebrew/bin"
+EXPECTED_LAST_ENTRY="/opt/homebrew/bin"
+
+_block_start "XACA-1097 defect 2 [POST-FIX]: TRAILING rc output (a login shell's guaranteed logout-file pass) does not corrupt the last PATH entry"
+E3_OUT="$(_prime_elapsed_and_path "$PRIME_POST_FN" "$FAKE_TRAILING_SHELL" 5 "$FIXED_PATH_FOR_NOISE" 2>/dev/null)"
+E3_CAPTURED="$(printf '%s\n' "$E3_OUT" | sed -n 's/^CAPTURED://p')"
+assert_not_empty "$E3_CAPTURED" "no CAPTURED marker -- fixture broken; got: $E3_OUT"
+assert_eq "${E3_CAPTURED##*:}" "$EXPECTED_LAST_ENTRY" \
+    "trailing rc noise corrupted the last PATH entry under the FIXED code; full captured value: [$E3_CAPTURED]"
+assert_not_contains "$E3_CAPTURED" "goodbye" \
+    "captured PATH leaked trailing rc banner text under the FIXED code: [$E3_CAPTURED]"
+_block_end
+
+_block_start "XACA-1097 defect 2 [PRE-FIX negative control, commit $X1097_PRIME_PREFIX_COMMIT]: trailing rc noise DOES corrupt the last PATH entry -- proves this suite would have caught the shipped regression"
+if [ "$PRIME_PREFIX_AVAILABLE" = true ]; then
+    E4_OUT="$(_prime_elapsed_and_path "$PRIME_PRE_FN" "$FAKE_TRAILING_SHELL" 5 "$FIXED_PATH_FOR_NOISE" 2>/dev/null)"
+    E4_CAPTURED="$(printf '%s\n' "$E4_OUT" | sed -n 's/^CAPTURED://p')"
+    assert_not_empty "$E4_CAPTURED" "no CAPTURED marker -- fixture broken; got: $E4_OUT"
+    assert_contains "$E4_CAPTURED" "goodbye" \
+        "expected the pre-fix code to leak trailing rc banner text into the captured PATH, but it did not -- this negative control did not reproduce the historical defect: [$E4_CAPTURED]"
+    if [ "${E4_CAPTURED##*:}" = "$EXPECTED_LAST_ENTRY" ]; then
+        _block_note_fail "expected the pre-fix code's last PATH entry to be corrupted, but it matched the clean value -- this negative control did not reproduce the historical defect"
+    fi
+else
+    echo "    SKIP: pre-fix fixture unavailable (see grounding block above)"
+fi
+_block_end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (d) LEADING banner noise must still be inert -- regression guard for the
+# earlier (already-shipped) XACA-1097-019 fix, unaffected by defects 1/2.
+# ─────────────────────────────────────────────────────────────────────────────
+_block_start "XACA-1097 [regression guard]: LEADING rc banner noise still does not corrupt the captured PATH (must not regress the earlier XACA-1097-019 fix)"
+E5_OUT="$(_prime_elapsed_and_path "$PRIME_POST_FN" "$FAKE_LEADING_SHELL" 5 "$FIXED_PATH_FOR_NOISE" 2>/dev/null)"
+E5_CAPTURED="$(printf '%s\n' "$E5_OUT" | sed -n 's/^CAPTURED://p')"
+assert_not_empty "$E5_CAPTURED" "no CAPTURED marker -- fixture broken; got: $E5_OUT"
+assert_eq "$E5_CAPTURED" "$FIXED_PATH_FOR_NOISE" \
+    "leading rc banner noise corrupted the captured PATH; got: [$E5_CAPTURED]"
+assert_not_contains "$E5_CAPTURED" "hello" \
+    "captured PATH leaked leading rc banner text: [$E5_CAPTURED]"
+_block_end
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone mode only -- test-runner.sh tallies pass/fail from its
 # OWN exported functions' output).
 # ─────────────────────────────────────────────────────────────────────────────
