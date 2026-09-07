@@ -221,7 +221,7 @@ else
     _t_pass
 fi
 
-_t_start "T10: update_template_dirs never overwrites a directory that already exists"
+_t_start "T10: a local file NOT shipped in the source survives a refresh"
 printf 'local-edit\n' > "$FIELD_WD/templates/terminal-bridge/LOCAL_MARKER"
 /bin/bash -c '
     set -eo pipefail
@@ -233,6 +233,58 @@ printf 'local-edit\n' > "$FIELD_WD/templates/terminal-bridge/LOCAL_MARKER"
 ' _ "$FIELD_FW" "$FIELD_WD" "$UPG_SH" >/dev/null 2>&1
 if [ ! -f "$FIELD_WD/templates/terminal-bridge/LOCAL_MARKER" ]; then
     _t_fail "a second run clobbered an existing template directory — local edits are not safe"
+else
+    _t_pass
+fi
+
+# ─── Refresh semantics (XACA-1028 round 3) ───────────────────────────────────
+# Review finding, correct: the XACA-0673 convention that update_runtime_helpers
+# follows is "refresh every existing target AND materialise the mandatory ones
+# when absent" — NOT create-once-never-touch. An absent-only directory copy
+# would mean a future content fix to a shipped template never reaches a consumer
+# that already has the directory: a narrower instance of the very staleness bug
+# this ticket fixes. Both gates also flagged that an existence-only check cannot
+# self-heal a partial copy. Per-file, content-compared refresh fixes both.
+
+_run_materializer() {
+    /bin/bash -c '
+        set -eo pipefail
+        print_section(){ :; }; print_info(){ :; }; print_success(){ :; }; print_warning(){ :; }
+        DRY_RUN=false; FRAMEWORK_DIR="$1"; WORKING_DIR="$2"
+        eval "$(awk "/^_xaca1028_mandatory_template_dirs\(\)/,/^}/" "$3")"
+        eval "$(awk "/^update_template_dirs\(\)/,/^}/" "$3")"
+        update_template_dirs
+    ' _ "$1" "$2" "$UPG_SH" >/dev/null 2>&1
+}
+
+_t_start "T11: a CHANGED shipped template is refreshed onto a consumer that already has it"
+printf '<plist>v2-corrected</plist>\n' > "$FIELD_FW/share/templates/terminal-bridge/$PLIST_NAME"
+_run_materializer "$FIELD_FW" "$FIELD_WD"
+if ! grep -q 'v2-corrected' "$FIELD_WD/templates/terminal-bridge/$PLIST_NAME" 2>/dev/null; then
+    _t_fail "content fix did not reach the installed copy — absent-only staleness has returned"
+else
+    _t_pass
+fi
+
+_t_start "T12: a partially-copied directory self-heals (missing file restored on the next run)"
+rm -f "$FIELD_WD/templates/terminal-bridge/$PLIST_NAME"
+if [ ! -d "$FIELD_WD/templates/terminal-bridge" ]; then
+    _t_fail "fixture error: directory should still exist for this case to mean anything"
+else
+    _run_materializer "$FIELD_FW" "$FIELD_WD"
+    if [ ! -f "$FIELD_WD/templates/terminal-bridge/$PLIST_NAME" ]; then
+        _t_fail "a half-populated directory was treated as done — it can never self-heal"
+    else
+        _t_pass
+    fi
+fi
+
+_t_start "T13: an up-to-date tree is a genuine no-op (idempotent, no needless rewrite)"
+_T13_BEFORE="$(shasum -a 256 "$FIELD_WD/templates/terminal-bridge/$PLIST_NAME" | cut -d" " -f1)"
+_run_materializer "$FIELD_FW" "$FIELD_WD"
+_T13_AFTER="$(shasum -a 256 "$FIELD_WD/templates/terminal-bridge/$PLIST_NAME" | cut -d" " -f1)"
+if [ "$_T13_BEFORE" != "$_T13_AFTER" ]; then
+    _t_fail "content changed on a no-op run"
 else
     _t_pass
 fi

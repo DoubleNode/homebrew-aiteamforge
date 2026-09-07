@@ -1745,9 +1745,23 @@ provision_msg_routing() {
 # ~/aiteamforge/scripts and its correct candidate is ~/aiteamforge/templates/
 # terminal-bridge/ -- which has to exist. This materialises it.
 #
-# Deliberately materialise-if-absent only, mirroring the XACA-0673 convention
-# for scripts: a directory already present is left alone, so a local edit is
-# never clobbered by an upgrade.
+# Per-FILE refresh, matching the real XACA-0673 convention rather than the
+# absent-only shape a first cut used here.
+#
+# Review finding, and it was right: update_runtime_helpers refreshes every
+# target that already exists AND materialises the mandatory basenames when
+# absent. It is not "create once, never touch again". An absent-only directory
+# copy would mean a future content fix to a shipped template never reaches a
+# consumer that already has the directory -- a narrower instance of exactly the
+# staleness bug this ticket exists to fix. It also could not self-heal a partial
+# copy: a directory that exists but is half-populated would satisfy an
+# existence check forever.
+#
+# Refreshing per file fixes both: missing files are created (so a partial copy
+# heals on the next run), and changed files are updated. Content-compared with
+# `cmp -s` rather than mtime -- a git-sourced Cellar keeps checkout mtimes that
+# can predate the installed copy, which is the same unsound test XACA-1095 had
+# to remove from update_shell_helpers.
 _xaca1028_mandatory_template_dirs() {
   cat <<'EOF'
 terminal-bridge
@@ -1765,7 +1779,7 @@ update_template_dirs() {
     return 0
   fi
 
-  local created=0 d src dst
+  local touched=0 d src dst f rel target
   while IFS= read -r d; do
     [ -n "$d" ] || continue
     src="${src_root}/${d}"
@@ -1775,30 +1789,41 @@ update_template_dirs() {
       print_warning "Shipped template directory missing from framework: ${d} (expected ${src})"
       continue
     fi
-    if [ -d "$dst" ]; then
-      continue   # already present — never overwrite
-    fi
 
-    if [ "$DRY_RUN" = true ]; then
-      echo "Would materialize template directory: templates/${d}"
-      created=$((created + 1))
-      continue
-    fi
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      rel="${f#${src}/}"
+      target="${dst}/${rel}"
 
-    if mkdir -p "$dst_root" 2>/dev/null && cp -R "$src" "$dst" 2>/dev/null; then
-      print_success "Materialized templates/${d} (was missing)"
-      created=$((created + 1))
-    else
-      # Loud, not silent: the ttyd bridge step immediately after this depends on
-      # it, and a silent skip here is what produced the original six-phase abort.
-      print_warning "Failed to materialize templates/${d} from ${src} — dependent steps may fail"
-    fi
+      # Up to date? Compare CONTENT, never mtime.
+      if [ -f "$target" ] && cmp -s "$f" "$target"; then
+        continue
+      fi
+
+      if [ "$DRY_RUN" = true ]; then
+        echo "Would refresh template: templates/${d}/${rel}"
+        touched=$((touched + 1))
+        continue
+      fi
+
+      if mkdir -p "$(dirname "$target")" 2>/dev/null && cp "$f" "$target" 2>/dev/null; then
+        print_success "Refreshed templates/${d}/${rel}"
+        touched=$((touched + 1))
+      else
+        # Loud, not silent: update_ttyd_bridge runs immediately after this and
+        # depends on the result. A silent skip here is what produced the
+        # original six-phase abort.
+        print_warning "Failed to write ${target} from ${f} — dependent steps may fail"
+      fi
+    done <<INNER_EOF
+$(find "$src" -type f 2>/dev/null)
+INNER_EOF
   done <<EOF
 $(_xaca1028_mandatory_template_dirs)
 EOF
 
-  if [ "$created" -eq 0 ]; then
-    print_info "Template directories already present"
+  if [ "$touched" -eq 0 ]; then
+    print_info "Template directories already up to date"
   fi
   return 0
 }
