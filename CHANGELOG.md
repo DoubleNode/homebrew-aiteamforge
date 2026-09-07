@@ -7,6 +7,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1056 (review follow-up XACA-1056-010): the shebang-aware loop had softened the
+  MISSING-file case from the original hard fail to a warned skip, so a run with a core
+  install artifact absent could still report all checks passed. Restored to `_fail` +
+  `py_ok=0`. The visible SKIP now covers only the genuinely-unknowable case (chosen parser
+  not on PATH). Curing a validator that cried wolf by making one that stays silent would
+  have been strictly worse -- nobody investigates silence.
+
 - XACA-1056 (re-mirror): tap commit 7f7016a (`mirror share/scripts/kb-init-team`, XACA-1078
   site 15) was produced by running sync-tap.sh from a canonical that predated XACA-1056, so it
   reverted `share/scripts/kb-init-team`'s validator to the old hardcoded `bash -n` and silently

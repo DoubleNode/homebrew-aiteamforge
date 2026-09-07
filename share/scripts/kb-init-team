@@ -2264,9 +2264,18 @@ sys.exit(0 if any(k.startswith('${TEAM_ID}-') for k in d) else 1)
         # everything else keeps the original `bash -n`. A file whose parser
         # is unavailable is SKIPPED (visibly, via _warn) rather than passed
         # or failed — a skip must never read as a pass.
+        #
+        # A MISSING file is NOT the same case and is NOT skipped: these three
+        # paths are core install artifacts, so their absence IS the finding.
+        # The pre-XACA-1056 loop hard-failed on a missing file (bash -n on a
+        # nonexistent path exits nonzero -> _fail, py_ok=0) and that strictness
+        # is deliberately preserved here. Softening it would have cured a
+        # validator that cried wolf by making one that stays silent, which is
+        # strictly worse: nobody investigates silence.
         for sh_file in "${KANBAN_HELPERS}" "${STATUSLINE_SH}" "${AITEAMFORGE_PATHS_SH}"; do
             if [[ ! -f "$sh_file" ]]; then
-                _warn "syntax check SKIPPED (file not found): $sh_file"
+                _fail "syntax check FAILED (file not found): $sh_file"
+                py_ok=0
                 continue
             fi
             local shebang_line=""
