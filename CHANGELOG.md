@@ -7,6 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1056: `share/scripts/kb-init-team` — the team-init validator's syntax
+  check hardcoded `bash -n` for every shell file it validates, including
+  `kanban-helpers.sh`, which is a zsh script BY DESIGN (`#!/usr/bin/env zsh`).
+  Running bash's parser over a zsh-shebanged file failed on every single run
+  regardless of actual correctness, training operators to ignore the
+  validator's output entirely. The syntax-check loop now dispatches on each
+  file's own shebang — `zsh -n` for zsh-shebanged files, `bash -n` otherwise —
+  and SKIPS (with a visible warning, never a silent pass) a file whose chosen
+  parser is not on PATH. `kanban-helpers.sh` itself is unchanged and remains
+  intentionally zsh; this fixes the validator, not the script it checks.
+
 - XACA-1112: `share/scripts/kb-tap-release` + `docs/LOCKSTEP-CHECK.md` — mirror of the
   canonical direction-aware tap-drift work. Tap-mirror drift is no longer measured as a
   directionless scalar: `attribute-tap-drift.sh` gains `--classify-direction`, which
