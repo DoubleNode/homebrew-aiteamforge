@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1056 (re-mirror): tap commit 7f7016a (`mirror share/scripts/kb-init-team`, XACA-1078
+  site 15) was produced by running sync-tap.sh from a canonical that predated XACA-1056, so it
+  reverted `share/scripts/kb-init-team`'s validator to the old hardcoded `bash -n` and silently
+  dropped the shebang-aware dispatch shipped in 78ae970 + b5517d9. Both changes are compatible
+  and now coexist: canonical merged cleanly (site 15 and the validator touch different regions),
+  and this commit re-applies the merged canonical so the mirror is byte-identical again. No
+  XACA-1078 content was reverted in the process.
+
 - XACA-1112 (review round): `share/scripts/kb-tap-release` — `--tap-ahead-release="<reason>"`
   now rejects a whitespace-only reason. The flag exists for auditability; a blank reason
   satisfied the old non-empty check while providing no justification at all. Mirrors the

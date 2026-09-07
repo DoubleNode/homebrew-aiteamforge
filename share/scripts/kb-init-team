@@ -2255,13 +2255,57 @@ sys.exit(0 if any(k.startswith('${TEAM_ID}-') for k in d) else 1)
             fi
         done
 
-        # bash -n checks
+        # Syntax checks — shebang-aware (XACA-1056). kanban-helpers.sh is
+        # zsh BY DESIGN (`#!/usr/bin/env zsh`); running it through bash's
+        # parser was a false-negative that failed EVERY run regardless of
+        # actual correctness, training everyone to ignore this validator's
+        # output. Dispatch on the file's own shebang instead of hardcoding
+        # one parser for every file: zsh-shebanged files get `zsh -n`,
+        # everything else keeps the original `bash -n`. A file whose parser
+        # is unavailable is SKIPPED (visibly, via _warn) rather than passed
+        # or failed — a skip must never read as a pass.
         for sh_file in "${KANBAN_HELPERS}" "${STATUSLINE_SH}" "${AITEAMFORGE_PATHS_SH}"; do
-            if bash -n "$sh_file" 2>/dev/null; then
-                _ok "bash -n: $(basename $sh_file)"
+            if [[ ! -f "$sh_file" ]]; then
+                _warn "syntax check SKIPPED (file not found): $sh_file"
+                continue
+            fi
+            local shebang_line=""
+            shebang_line=$(head -n 1 -- "$sh_file" 2>/dev/null || true)
+            # Route on the interpreter BASENAME, exact match -- not a
+            # substring/suffix test against the whole line. `*zsh*` would
+            # misroute `#!/opt/notzsh/bin/bash` to zsh; a basename suffix
+            # glob (`${interp##*/} == *zsh`) would still misroute a real
+            # basename like `notzsh`. Handle the `env` indirection
+            # (`#!/usr/bin/env zsh` -> interpreter is the NEXT token) and
+            # ignore trailing interpreter args (`#!/bin/zsh -f`).
+            local interp_name=""
+            if [[ "$shebang_line" == "#!"* ]]; then
+                local -a shebang_tokens=()
+                read -r -a shebang_tokens <<< "${shebang_line:2}"
+                local interp_tok="${shebang_tokens[0]:-}"
+                if [[ "$(basename -- "$interp_tok" 2>/dev/null)" == "env" ]]; then
+                    interp_tok="${shebang_tokens[1]:-}"
+                fi
+                interp_name=$(basename -- "$interp_tok" 2>/dev/null || true)
+            fi
+            if [[ "$interp_name" == "zsh" ]]; then
+                if ! command -v zsh >/dev/null 2>&1; then
+                    _warn "syntax check SKIPPED (zsh not on PATH): $(basename "$sh_file")"
+                    continue
+                fi
+                if zsh -n "$sh_file" 2>/dev/null; then
+                    _ok "syntax (zsh -n): $(basename "$sh_file")"
+                else
+                    _fail "syntax (zsh -n) FAILED: $sh_file"
+                    py_ok=0
+                fi
             else
-                _fail "bash -n FAILED: $sh_file"
-                py_ok=0
+                if bash -n "$sh_file" 2>/dev/null; then
+                    _ok "syntax (bash -n): $(basename "$sh_file")"
+                else
+                    _fail "syntax (bash -n) FAILED: $sh_file"
+                    py_ok=0
+                fi
             fi
         done
 
