@@ -116,7 +116,7 @@ function validTeamPayload(overrides = {}) {
 function globalMachineEntry(overrides = {}) {
     return {
         machine_id: GUID_1,
-        hostname: 'darren-m3pro-mbp.tail4637d5.ts.net',
+        hostname: 'HOSTNAME-MUST-NOT-LEAK.invalid',
         nickname: 'M3 Pro <script>alert(1)</script>', // deliberately hostile -- must never leak into the response
         ip: '100.64.0.1',
         os: 'darwin',
@@ -231,7 +231,7 @@ test('SECURITY: Join A enrichment never surfaces hostname or nickname from the g
 
     const res = await request(app).get('/api/registered-teams');
     const raw = JSON.stringify(res.body);
-    assert.ok(!raw.includes('tail4637d5.ts.net'), 'hostname must never appear in the response');
+    assert.ok(!raw.includes('MUST-NOT-LEAK'), 'hostname must never appear in the response');
     assert.ok(!raw.includes('<script>'), 'nickname (hostile free text) must never appear in the response');
 
     const team = res.body.teams.find((t) => t.team === 'academy');
@@ -283,7 +283,7 @@ test('the live-fleet asymmetry in the OTHER direction: a global machine with a G
     // identity and no team ever asserting it. Nothing in this endpoint's
     // output should reference it.
     const JASONS_GUID = '7e1db15a-5fe7-43ea-b4c4-2e439922d152';
-    const seededMachines = new Map([[JASONS_GUID, globalMachineEntry({ machine_id: JASONS_GUID, hostname: 'jasons-mac-mini.tail4637d5.ts.net', nickname: null })]]);
+    const seededMachines = new Map([[JASONS_GUID, globalMachineEntry({ machine_id: JASONS_GUID, hostname: 'UNPAIRED-HOST-MUST-NOT-LEAK.invalid', nickname: null })]]);
     const { app } = createApp({ machines: seededMachines });
     await request(app).post('/api/team-register').send(validTeamPayload({ machineSlug: VALID_SLUG_1, machineId: GUID_1 }));
 
