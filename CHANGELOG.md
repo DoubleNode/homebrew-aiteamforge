@@ -24,6 +24,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   parser is not on PATH. `kanban-helpers.sh` itself is unchanged and remains
   intentionally zsh; this fixes the validator, not the script it checks.
 
+  Follow-up (same ticket): the shebang matcher initially substring-matched
+  the whole line (`"$shebang_line" == "#!"*zsh*`), which misrouted a file
+  like `#!/opt/notzsh/bin/bash` to `zsh -n`. It now parses the shebang into
+  tokens, resolves the `env` indirection (`#!/usr/bin/env zsh` -> next
+  token), strips trailing interpreter args (`#!/bin/zsh -f`), and compares
+  the interpreter's basename to `zsh` with an EXACT match — not a suffix
+  glob, which would still misroute a real basename like `notzsh`. Verified
+  against a 9-row matrix covering both traps plus no-shebang and
+  empty-file inputs.
+
 - XACA-1112: `share/scripts/kb-tap-release` + `docs/LOCKSTEP-CHECK.md` — mirror of the
   canonical direction-aware tap-drift work. Tap-mirror drift is no longer measured as a
   directionless scalar: `attribute-tap-drift.sh` gains `--classify-direction`, which
