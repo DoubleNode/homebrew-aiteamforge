@@ -18512,14 +18512,278 @@ _kb_init_fleet_monitor() {
 # Register team metadata with Fleet Monitor
 # POSTs team board metadata to the Fleet Monitor's /api/team-register endpoint
 # Runs in background to avoid blocking terminal startup
+# _kb_msg_slug_registered — is SLUG's public key registered server-side?
+#
+# XACA-1089-004: the pre-check the identity contract requires (§4/§8, kanban
+# knowledge doc XACA-1089-001-identity-contract.md) before _kb_register_team
+# asserts a machineSlug. GET /api/vault/machines is public (no auth) and is
+# MEASURED LIVE (contract §1) to already be correct for all three fleet
+# machines -- this just asks it, rather than assuming.
+#
+# The user's own design decision (contract §4, "option 1"): POST
+# /api/team-register's 400 on an unrecognized slug rejects the ENTIRE
+# registration, not just the machine field (XACA-1089-002). So this pre-check
+# exists to keep a bare machine (never ran vault-keygen) from losing team
+# registration altogether -- see _kb_register_team_impl below, which omits
+# machineSlug rather than risk the 400.
+#
+# Prints nothing; communicates ONLY via return code, so a caller can fail
+# open/closed differently for "confirmed absent" than for "could not confirm"
+# -- collapsing those two would be exactly the "malformed check returns the
+# reassuring result" trap (feedback_malformed_check_returns_reassuring_result.md):
+# "could not ask" is not evidence of "asked and it's absent".
+#
+# Returns:
+#   0  slug found in the vault registry -- safe to send
+#   1  asked successfully, slug genuinely NOT found -- this machine has no
+#      server-side vault identity (needs vault-keygen / key upload)
+#   2  could not ask at all (no jq, curl failure, empty/malformed response) --
+#      NOT the same finding as 1; never send on this outcome either, but never
+#      report it as "absent"
+_kb_msg_slug_registered() {
+    local relay="${1-}" slug="${2-}"
+    [[ -n "$relay" && -n "$slug" ]] || return 2
+    command -v jq >/dev/null 2>&1 || return 2
+    local body
+    body=$(curl -s -m 5 "${relay}/api/vault/machines" 2>/dev/null)
+    [[ -n "$body" ]] || return 2
+    local found
+    found=$(printf '%s' "$body" | jq -r --arg slug "$slug" \
+        'if (.machines | type) == "array"
+         then (any(.machines[]; .id == $slug) | tostring)
+         else "error" end' 2>/dev/null)
+    case "$found" in
+        true)  return 0 ;;
+        false) return 1 ;;
+        *)     return 2 ;;
+    esac
+}
+
+# _kb_msg_verify_registration — Q7 read-back: PROVE the server stored my
+# slug for this team, rather than assuming a 200/201 from the POST meant it
+# did (that is exactly the assumption XACA-1089 was filed to remove).
+#
+# Reads GET /api/registered-teams (public, no auth -- server.js:2003,
+# XACA-1089-003) and distinguishes what a bare "it returned data" cannot,
+# per contract §8's "three failure outcomes 004 must report distinctly":
+#
+#   team_not_found      the team never registered at all -- NOT an identity
+#                        problem; do not report it as one
+#   server_not_deployed the team IS present but its record has no `machines`
+#                        key at all -- an old, un-deployed server build.
+#                        fleet-monitor has no auto-deploy (merged is not
+#                        shipped), so this is the EXPECTED production state
+#                        today and is not a defect in this code
+#   not_stored          `machines` present but does not contain my slug --
+#                        another machine currently owns this team's
+#                        registration; never overwritten, only named
+#   registered          `machines` contains my slug -- proven, not assumed
+#   unreachable          could not even ask (no jq, empty/malformed response,
+#                        not the {teams:[...]} shape) -- distinct from
+#                        team_not_found: "no answer" is not "answered no"
+#
+# Also flags, informationally, when MORE THAN ONE slug asserts the SAME team
+# (contract §5/Q4): that is a hard-error-shaped fact to REPORT, never a case
+# to silently pick a winner from. This function only ever reads and names
+# it -- it writes nothing, anywhere, ever.
+#
+# Args: $1=relay url  $2=team id  $3=my slug (may be empty)
+# Prints ONE line "<outcome>|<detail>" to stdout.
+_kb_msg_verify_registration() {
+    local relay="${1-}" team="${2-}" slug="${3-}"
+    if [[ -z "$relay" || -z "$team" ]]; then
+        echo "unreachable|missing relay url or team id"
+        return 2
+    fi
+    command -v jq >/dev/null 2>&1 || { echo "unreachable|jq not available"; return 2; }
+
+    local body
+    body=$(curl -s -m 5 "${relay}/api/registered-teams" 2>/dev/null)
+    if [[ -z "$body" ]]; then
+        echo "unreachable|empty response from ${relay}/api/registered-teams"
+        return 2
+    fi
+
+    # Guard: not even the expected {teams:[...]} shape -> unreachable, NEVER
+    # misread as team_not_found -- that would claim a real, structured answer
+    # we do not actually have.
+    local teams_type
+    teams_type=$(printf '%s' "$body" | jq -r '.teams | type' 2>/dev/null)
+    if [[ "$teams_type" != "array" ]]; then
+        echo "unreachable|response is not the expected {teams:[...]} shape"
+        return 2
+    fi
+
+    local team_json
+    team_json=$(printf '%s' "$body" | jq -c --arg t "$team" '[.teams[] | select(.team == $t)] | first // empty' 2>/dev/null)
+    if [[ -z "$team_json" || "$team_json" == "null" ]]; then
+        echo "team_not_found|team '$team' is not in registered-teams at all -- not an identity problem"
+        return 1
+    fi
+
+    local machines_type
+    machines_type=$(printf '%s' "$team_json" | jq -r '.machines | type' 2>/dev/null)
+    if [[ "$machines_type" != "object" ]]; then
+        echo "server_not_deployed|registered-teams has no 'machines' field for '$team' -- old server build (fleet-monitor has no auto-deploy; merged is not shipped)"
+        return 1
+    fi
+
+    local slugs_csv count
+    slugs_csv=$(printf '%s' "$team_json" | jq -r '.machines | keys | join(",")' 2>/dev/null)
+    count=$(printf '%s' "$team_json" | jq -r '.machines | keys | length' 2>/dev/null)
+
+    local mine=1
+    if [[ -n "$slug" ]]; then
+        printf '%s' "$team_json" | jq -e --arg s "$slug" '.machines | has($s)' >/dev/null 2>&1 && mine=0
+    fi
+
+    # Contract §5/Q4: never picked, only named. Nothing downstream of this
+    # function may treat `slugs_csv` as "the owner" -- it is a report string.
+    local ambiguity=""
+    if [[ "${count:-0}" -gt 1 ]]; then
+        ambiguity=" [AMBIGUOUS: ${count} machines assert '$team' (${slugs_csv}) -- report only, no owner picked]"
+    fi
+
+    if [[ $mine -eq 0 ]]; then
+        echo "registered|machines for '$team': ${slugs_csv}${ambiguity}"
+        return 0
+    fi
+    echo "not_stored|machines for '$team' does not include '${slug:-<none>}' -- present: ${slugs_csv:-<none>}${ambiguity}"
+    return 1
+}
+
+# _kb_register_team_impl — the actual send + verify, factored out of
+# _kb_register_team so it can run either backgrounded (auto, on shell start)
+# or synchronously (kb-register, so a human gets an immediate, proven answer
+# instead of a fire-and-forget guess). Both callers pass their own auth args
+# by VALUE (not by re-deriving them here) so a background subshell fork sees
+# a consistent snapshot.
+#
+# Args: $1=team_metadata (JSON)  $2=fleet_url  $3=team_id  $4=verbose (0/1)
+#       $5..=auth args for curl (may be empty)
+# Writes ~/.aiteamforge/run/kb-team-register-status-<team> unconditionally
+# (best-effort) so a later `kb-msg doctor`-style check can read the LAST
+# proven outcome without re-asking the network. On verbose=1, also prints the
+# outcome to stdout for an interactive caller.
+_kb_register_team_impl() {
+    local team_metadata="${1-}" fleet_url="${2-}" team_id="${3-}" verbose="${4:-0}"
+    shift $(( $# > 4 ? 4 : $# )) 2>/dev/null || true
+    local -a auth_args=("$@")
+    local auth_stdin="${_KB_FLEET_AUTH_STDIN:-}"
+
+    # XACA-1089-004: thread a machine identity through, per the signed-off
+    # design (contract §4/§8). NEVER let anything in this block fail or
+    # delay team registration -- any failure (no slug resolvable, no
+    # jq/curl, unreachable relay) falls through to the exact pre-XACA-1089
+    # payload, untouched.
+    local payload="$team_metadata" slug="" pc_rc=2 pre_check_note=""
+    if slug=$(_kb_msg_this_machine 2>/dev/null) && [[ -n "$slug" ]]; then
+        _kb_msg_slug_registered "$fleet_url" "$slug"
+        pc_rc=$?
+        if [[ $pc_rc -eq 0 ]]; then
+            # machineId is optional and non-load-bearing (contract §7 caveat)
+            # -- included only when trivially available, never derived here.
+            local machine_id=""
+            if [[ -f "$HOME/.fleet-machine-id" ]]; then
+                machine_id=$(tr -d '[:space:]' < "$HOME/.fleet-machine-id" 2>/dev/null)
+            fi
+            if [[ -n "$machine_id" ]]; then
+                payload=$(printf '%s' "$team_metadata" | jq -c --arg s "$slug" --arg m "$machine_id" \
+                    '. + {machineSlug: $s, machineId: $m}' 2>/dev/null) || payload="$team_metadata"
+            else
+                payload=$(printf '%s' "$team_metadata" | jq -c --arg s "$slug" \
+                    '. + {machineSlug: $s}' 2>/dev/null) || payload="$team_metadata"
+            fi
+        elif [[ $pc_rc -eq 1 ]]; then
+            pre_check_note="no-vault-identity: machine slug '$slug' has no server-side vault registration -- run vault-keygen / upload a key first. Team registration sent WITHOUT a machine identity; team registration itself is unaffected."
+        else
+            pre_check_note="vault-registry pre-check unreachable at ${fleet_url}/api/vault/machines -- team registration sent WITHOUT a machine identity (this is NOT the same as 'no identity'; we simply could not ask). Team registration itself is unaffected."
+        fi
+    else
+        pre_check_note="could not resolve this machine's vault slug -- team registration sent WITHOUT a machine identity. Team registration itself is unaffected."
+    fi
+
+    local response
+    response=$(printf '%s' "$auth_stdin" | curl -s -m 5 -X POST \
+        -H "Content-Type: application/json" \
+        "${auth_args[@]}" \
+        -d "$payload" \
+        "${fleet_url}/api/team-register" 2>/dev/null)
+
+    local outcome="unknown" detail=""
+    if [[ -z "$slug" || $pc_rc -ne 0 ]]; then
+        outcome="no_identity_sent"
+        detail="$pre_check_note"
+    elif [[ -z "$response" ]]; then
+        outcome="unreachable"
+        detail="no response from POST ${fleet_url}/api/team-register"
+    else
+        # Q7's immediate detector: the POST response itself already
+        # distinguishes an old, un-deployed server from one that understood
+        # the field (contract §8) -- checked before spending a second round
+        # trip on the GET read-back.
+        local resp_has_machines
+        resp_has_machines=$(printf '%s' "$response" | jq -r 'if has("machines") then "yes" else "no" end' 2>/dev/null)
+        if [[ "$resp_has_machines" != "yes" ]]; then
+            outcome="server_not_deployed"
+            detail="POST response has no 'machines' key -- old server build (fleet-monitor has no auto-deploy; merged is not shipped)"
+        else
+            # The actual proof: read back independently rather than trust
+            # the POST's own echo alone.
+            local verify_line
+            verify_line=$(_kb_msg_verify_registration "$fleet_url" "$team_id" "$slug")
+            outcome="${verify_line%%|*}"
+            detail="${verify_line#*|}"
+        fi
+    fi
+
+    local status_dir="$HOME/.aiteamforge/run"
+    mkdir -p "$status_dir" 2>/dev/null
+    local status_file="$status_dir/kb-team-register-status-${team_id:-unknown}"
+    local status_tmp="${status_file}.tmp.$$"
+    # XACA-1089-014 ([Review], PR #832): the staging path carries $$ so two
+    # terminals registering the SAME team concurrently cannot write to one
+    # another's temp file. Without it both processes share
+    # "<status_file>.tmp": A truncates it while B is mid-write, and whichever
+    # rename lands second publishes a file the other process is still filling
+    # -- a torn record under a name readers treat as complete.
+    # The rename is already atomic within one directory, so a per-process temp
+    # name is the whole fix; last-writer-wins on the FINAL path is correct and
+    # intended (both processes are reporting the same team's outcome).
+    {
+        printf 'timestamp=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'team=%s\n' "${team_id:-unknown}"
+        printf 'slug=%s\n' "${slug:-<none>}"
+        printf 'outcome=%s\n' "$outcome"
+        printf 'detail=%s\n' "$detail"
+    } > "${status_tmp}" 2>/dev/null && mv -f "${status_tmp}" "$status_file" 2>/dev/null
+    # Never leave a stale per-PID temp behind when the write or rename failed.
+    # `unlink` on purpose: one named file, no flags, and it fails loudly rather
+    # than silently recursing if this path is ever somehow not a plain file.
+    [[ -e "${status_tmp}" ]] && unlink "${status_tmp}" 2>/dev/null
+
+    if [[ "$verbose" -eq 1 ]]; then
+        echo "kb-register: team '${team_id:-unknown}' -- ${outcome}"
+        echo "  ${detail}"
+    fi
+}
+
+# Register team metadata with Fleet Monitor
+# POSTs team board metadata to the Fleet Monitor's /api/team-register endpoint.
+# Runs in background to avoid blocking terminal startup, UNLESS $1 is
+# "--verify" (used by kb-register, the manual command), in which case it runs
+# synchronously and reports the proven outcome -- see _kb_register_team_impl.
 _kb_register_team() {
+    local verbose=0
+    [[ "${1:-}" == "--verify" ]] && verbose=1
+
     # Detect current team from session context
-    if [ -z "$SESSION_TYPE" ]; then
+    if [ -z "${SESSION_TYPE:-}" ]; then
         return  # Not in a team session, skip
     fi
 
     # Get board file for current team
-    local board_file=$(_kb_get_board_file "$SESSION_TYPE")
+    local board_file=$(_kb_get_board_file "${SESSION_TYPE:-}")
 
     if [ ! -f "$board_file" ]; then
         return  # Board file doesn't exist, skip
@@ -18541,33 +18805,34 @@ _kb_register_team() {
         return  # Failed to extract metadata
     fi
 
-    # POST team metadata to Fleet Monitor (background, silent, with timeout)
-    # Don't block if fleet monitor is down
+    local team_id
+    team_id=$(printf '%s' "$team_metadata" | jq -r '.team // empty' 2>/dev/null)
+
     # NOTE: "|| true" ensures exit 0 so zsh doesn't print noisy
     # "[N] + exit 7" background job notifications when Fleet Monitor is offline.
     # NOTE: "disown" detaches the job from zsh's job table so it won't print
     # "[N] + done" notifications when the background curl completes.
     local _KB_FLEET_AUTH_ARGS=() _KB_FLEET_AUTH_STDIN=""
     _kb_fleet_auth_args
-    (
-        printf '%s' "$_KB_FLEET_AUTH_STDIN" | curl -s -m 5 -X POST \
-            -H "Content-Type: application/json" \
-            "${_KB_FLEET_AUTH_ARGS[@]}" \
-            -d "$team_metadata" \
-            "${fleet_url}/api/team-register" \
-            >/dev/null 2>&1 || true
-    ) &
-    disown 2>/dev/null
+
+    if [[ $verbose -eq 1 ]]; then
+        _kb_register_team_impl "$team_metadata" "$fleet_url" "$team_id" 1 "${_KB_FLEET_AUTH_ARGS[@]}"
+    else
+        (
+            _kb_register_team_impl "$team_metadata" "$fleet_url" "$team_id" 0 "${_KB_FLEET_AUTH_ARGS[@]}" || true
+        ) &
+        disown 2>/dev/null
+    fi
 }
 
 _kb_push_board() {
     # Detect current team from session context
-    if [ -z "$SESSION_TYPE" ]; then
+    if [ -z "${SESSION_TYPE:-}" ]; then
         return  # Not in a team session, skip
     fi
 
     # Get board file for current team
-    local board_file=$(_kb_get_board_file "$SESSION_TYPE")
+    local board_file=$(_kb_get_board_file "${SESSION_TYPE:-}")
 
     if [ ! -f "$board_file" ]; then
         return  # Board file doesn't exist, skip
@@ -18604,9 +18869,16 @@ _kb_push_board() {
 }
 
 # User-facing command to manually trigger team registration
+#
+# XACA-1089-004: runs SYNCHRONOUSLY with --verify so the operator gets a
+# PROVEN outcome (read back from the server) rather than the old
+# fire-and-forget "sent" message, which was true only of the HTTP request and
+# said nothing about whether the server accepted or stored anything -- the
+# exact assumption this ticket exists to remove. The automatic per-terminal-
+# startup call in _kb_register_team (unchanged: still backgrounded/disowned,
+# still silent) still happens too; this is only the manual, interactive path.
 kb-register() {
-    _kb_register_team
-    echo "Team registration sent to Fleet Monitor"
+    _kb_register_team --verify
 }
 
 # Auto-initialize on source (when SESSION_TYPE is set)

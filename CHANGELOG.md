@@ -24,6 +24,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   at import time, so every test in that directory exercises the hand-mirrored
   `tests/helpers/app-factory.js` rather than the shipping file, previously with nothing
   enforcing that the two agree.
+  Also ports the CLIENT half into `share/templates/kanban/kanban-helpers.template.sh`, the copy consumer
+  machines actually run: `_kb_register_team` / `kb-register` plus the three new functions
+  (`_kb_msg_slug_registered`, `_kb_msg_verify_registration`, `_kb_register_team_impl`). Without this the
+  server could hold consumer machine identities while no consumer ever sent one -- the feature would have
+  shipped working on the dev box only, which is precisely the population it exists to serve. Caught by the
+  XACA-0810/0811 co-change gate, not by sync-tap drift: `sync-tap.sh` tracks direct file mirrors and does
+  not see this per-team TEMPLATE copy, so a drift check reported clean while the template sat unported.
+  The port also carries canonical's nounset-safe `${SESSION_TYPE:-}` form (XACA-0467 convention) into the
+  template, which still had the bare `$SESSION_TYPE` -- a latent `set -u` failure in the shipped copy.
 
 - XACA-1056 (review follow-up XACA-1056-010): the shebang-aware loop had softened the
   MISSING-file case from the original hard fail to a warned skip, so a run with a core
