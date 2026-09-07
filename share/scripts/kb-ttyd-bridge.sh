@@ -151,8 +151,30 @@ _resolve_template() {
         printf '%s\n' "$KB_TTYD_TEMPLATE"; return 0
     fi
     local c
+    # XACA-1028: the second candidate below is dead in BOTH layouts, and its
+    # absence from this list was the entire defect. On a tap install
+    # _KB_TTYD_SELF_DIR is already <libexec>/share/scripts, so
+    # "../share/templates/..." resolves to <libexec>/share/share/templates/ --
+    # the "double-share" miss. In the dev repo the same candidate resolves to
+    # <repo>/share/templates/, which does not exist either (dev keeps the
+    # template at <repo>/scripts/templates/, i.e. candidate 1). The real tap
+    # location is <libexec>/share/templates/terminal-bridge/, which is
+    # "../templates/..." relative to self -- added here, ahead of the two that
+    # cannot match, so a tap install resolves on the first candidate that can.
+    #
+    # Measured 2026-09-06 on both live consumers: with none of the original
+    # three matching, update_ttyd_bridge failed under `set -eo pipefail` and
+    # aborted `aiteamforge upgrade` at main-flow line 2909, so the SIX phases
+    # after it (imgcat, shell helpers, team personas, claude hooks, skills,
+    # launchagents) plus "Upgrade Complete" never ran on any consumer. That is
+    # why .installed-version sat at 0.20.0 while brew advanced to 0.20.5.
+    #
+    # The two unreachable candidates are kept rather than deleted: each costs a
+    # single stat, and they guard a layout not represented on the two machines
+    # measured. Removing them would be a guess dressed as a cleanup.
     for c in \
         "${_KB_TTYD_SELF_DIR}/templates/ttyd-bridge-launchagent.template.plist" \
+        "${_KB_TTYD_SELF_DIR}/../templates/terminal-bridge/ttyd-bridge-launchagent.template.plist" \
         "${_KB_TTYD_SELF_DIR}/../share/templates/terminal-bridge/ttyd-bridge-launchagent.template.plist" \
         "${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/templates/terminal-bridge/ttyd-bridge-launchagent.template.plist"
     do

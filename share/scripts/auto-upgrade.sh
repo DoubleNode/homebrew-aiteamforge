@@ -281,14 +281,37 @@ fi
 # this, `brew upgrade` only refreshes the Cellar — the LCARS watcher LaunchAgent
 # (WatchPaths on $AITEAMFORGE_DIR/lcars-ui) wouldn't see the file changes and
 # the running server would keep serving the OLD assets.
+# XACA-1028: track whether the working-dir refresh actually happened. Before
+# this, a failed refresh logged a WARNING and then fell through to the SUCCESS
+# block below, so the log's last word was "SUCCESS: upgraded aiteamforge to
+# <version>" and the exit code was 0 — while the installed files were untouched.
+# That is exactly what both consumers recorded: M4Mini's log ends
+# "SUCCESS: upgraded aiteamforge to 0.20.2" (2026-08-28) with its working dir
+# frozen at 0.20.0 and kanban-helpers.sh missing 46 kb-* commands. A log that
+# reports success over a failure is worse than no log: it is the reason nobody
+# looked for months.
+_ATF_REFRESH_FAILED=0
 if command -v aiteamforge &>/dev/null; then
     log "Refreshing working-dir copy: aiteamforge upgrade --non-interactive"
     if ! log_cmd_output aiteamforge upgrade --non-interactive; then
+        _ATF_REFRESH_FAILED=1
         log "WARNING: 'aiteamforge upgrade --non-interactive' failed — brew upgrade succeeded but working-dir copy may be stale"
         notify "Upgrade partial — see $LOG_FILE (brew succeeded, working-dir refresh failed)"
     fi
 else
+    _ATF_REFRESH_FAILED=1
     log "WARNING: 'aiteamforge' CLI not on PATH after brew upgrade — working-dir copy not refreshed"
+fi
+
+if [ "$_ATF_REFRESH_FAILED" -ne 0 ]; then
+    # Do NOT fall through to the SUCCESS block. The Cellar moved; the working
+    # directory did not. Say so, name the remediation, and exit non-zero so the
+    # scheduler records a failure instead of a clean run.
+    log "FAILED: brew advanced the Cellar${NEW_VERSION:+ to $NEW_VERSION}, but the working-dir refresh did NOT complete — installed files are STALE."
+    log "  Remediation: run 'aiteamforge upgrade --non-interactive' by hand and read its output; the failure is reported there, not here."
+    notify "aiteamforge upgrade INCOMPLETE — Cellar advanced, working dir stale (see $LOG_FILE)"
+    log "===== auto-upgrade complete (PARTIAL FAILURE — working dir NOT refreshed) ====="
+    exit 1
 fi
 
 if [ -n "$NEW_VERSION" ]; then
