@@ -164,6 +164,8 @@ Each gate has its own bypass vocabulary. **They are not interchangeable** — th
 
 **Trailer matching is exact by design.** Markers are anchored at start-of-line and shape-validated. A misspelling (`Tap-Only-Edits:`, `Tap-Mirror-Aheads:`) does **not** bypass, and a bare `Tap-Mirror-Ahead:` with no ticket and no PR number does not either. A bypass that matches loosely is a universal bypass.
 
+**Position matters too (XACA-1112-014).** `Tap-Gitlink-Behind:`, `Tap-Gitlink-Skip:`, and `Changelog-Skip:` are recognized only when they sit in a commit's ACTUAL trailer block — the message's trailing key:value paragraph, exactly as `git interpret-trailers --parse` defines one — not anywhere a line happens to match the pattern. A commit that merely *quotes* the bypass syntax in prose (documenting it, discussing this exact defect) does not bypass anything. Every commit in the PR's range is still checked, not just `HEAD` — a multi-commit PR where the trailer sits on the first commit still works.
+
 Trailers must sit on their own line, after the commit body:
 
 ```

@@ -120,8 +120,15 @@ for arg in "$@"; do
       # "$@" one token at a time and was never restructured into a shift-based
       # while loop, so a two-token "--flag value" pair is not supported here.
       TAP_AHEAD_RELEASE_REASON="${arg#--tap-ahead-release=}"
-      if [ -z "$TAP_AHEAD_RELEASE_REASON" ]; then
-        echo "Error: --tap-ahead-release requires a non-empty reason: --tap-ahead-release=\"...\"" >&2
+      # XACA-1112-017: `[ -z ... ]` alone accepts a whitespace-only reason
+      # (e.g. --tap-ahead-release=" "), because a string of spaces is not the
+      # EMPTY string. The whole point of this flag is auditability — a
+      # trailer that says only "Tap-Ahead-Release: " (or "  ") defeats that
+      # purpose exactly as completely as an empty one, while LOOKING like it
+      # was filled in. Require at least one non-whitespace character.
+      _tap_ahead_reason_trimmed="$(printf '%s' "$TAP_AHEAD_RELEASE_REASON" | tr -d '[:space:]')"
+      if [ -z "$TAP_AHEAD_RELEASE_REASON" ] || [ -z "$_tap_ahead_reason_trimmed" ]; then
+        echo "Error: --tap-ahead-release requires a reason with at least one non-whitespace character: --tap-ahead-release=\"...\"" >&2
         usage >&2
         exit 1
       fi

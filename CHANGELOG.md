@@ -7,6 +7,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1112 (review round): `share/scripts/kb-tap-release` — `--tap-ahead-release="<reason>"`
+  now rejects a whitespace-only reason. The flag exists for auditability; a blank reason
+  satisfied the old non-empty check while providing no justification at all. Mirrors the
+  canonical review-round batch that also hardened the shared commit-trailer bypass across
+  three gates (it now parses trailers via `git interpret-trailers` instead of grepping raw
+  commit bodies, so a commit that merely QUOTES the trailer syntax no longer waives a gate).
 - XACA-1056: `share/scripts/kb-init-team` — the team-init validator's syntax
   check hardcoded `bash -n` for every shell file it validates, including
   `kanban-helpers.sh`, which is a zsh script BY DESIGN (`#!/usr/bin/env zsh`).
