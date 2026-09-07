@@ -7,6 +7,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1089: thread a machine identity through Fleet Monitor's team registration.
+  `POST /api/team-register` now accepts optional `machineSlug` (the vault machine slug,
+  `SLUG_RE`-validated and checked against the vault registry) and an optional `machineId`
+  GUID, storing them as a per-team `machines: { <slug>: {machineId, lastSeen} }` SET rather
+  than a scalar -- two machines running one team both persist instead of silently stealing
+  each other's mail routing at terminal-startup rate. `GET /api/registered-teams` surfaces
+  `machines` + `machineCount`, always present (`{}` default) so a mixed fleet degrades
+  uniformly, with Join A enrichment that deliberately omits `hostname`/`nickname` (both
+  unconstrained, and this endpoint feeds `innerHTML` in five dashboards). The POST response
+  always echoes `machines`, so a client can distinguish "server not deployed" from
+  "deployed and rejected my slug" -- which matters because fleet-monitor has no auto-deploy.
+  Also corrects this file's sibling `share/scripts/kb-msg-provision` header, which stated the
+  server half was "tracked separately" when no such ticket existed.
+  Includes a mirror-drift guard: `server.js` has no `module.exports` and calls `app.listen()`
+  at import time, so every test in that directory exercises the hand-mirrored
+  `tests/helpers/app-factory.js` rather than the shipping file, previously with nothing
+  enforcing that the two agree.
+
 - XACA-1056 (review follow-up XACA-1056-010): the shebang-aware loop had softened the
   MISSING-file case from the original hard fail to a warned skip, so a run with a core
   install artifact absent could still report all checks passed. Restored to `_fail` +

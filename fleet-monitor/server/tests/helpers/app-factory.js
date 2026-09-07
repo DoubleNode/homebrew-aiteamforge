@@ -21,12 +21,24 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+// XACA-1089-002: the real vault-store module (not a mock) -- the mirrored
+// POST /api/team-register below needs vaultStore.findMachine/SLUG_RE/
+// MAX_SLUG_LEN to match server.js exactly. This resolves its VAULT_FILE
+// constant at require-time from FLEET_VAULT_FILE, so any suite that seeds a
+// vault registry for these tests MUST set that env var BEFORE requiring this
+// file (same pattern as vault-store.test.js / vault-routes.test.js).
+const vaultStore = require('../../lib/vault-store');
+
 // ============================================================================
 // PURE HELPER FUNCTIONS (mirrored from server.js — must stay in sync)
 // ============================================================================
 
 const OFFLINE_THRESHOLD_MS = 180 * 1000;
 const WARNING_THRESHOLD_MS = 120 * 1000;
+
+// Mirrored from server.js's MACHINE_ID_UUID_RE (XACA-1089-002) -- MUST stay
+// in sync with the real implementation.
+const MACHINE_ID_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function formatDuration(ms) {
     if (ms < 1000) return 'just now';
@@ -742,9 +754,15 @@ function createApp(opts = {}) {
     });
 
     // POST /api/team-register
+    // XACA-1089-002: mirrors server.js's real handler -- MUST stay in sync,
+    // same discipline as resolveDivisionKey/ensureTeamBucket/
+    // resolveRegistryKey/ensureRegisteredTeamBuckets above. See server.js's
+    // header comment on this route for the full Q1-Q7 rationale (identity
+    // contract XACA-1089-001); not repeated here to avoid drift between two
+    // copies of the same prose.
     app.post('/api/team-register', (req, res) => {
         try {
-            const { team, teamName, subtitle, ship, series, organization, orgColor, kanbanDir, fleetMonitorUrl, terminals } = req.body;
+            const { team, teamName, subtitle, ship, series, organization, orgColor, kanbanDir, fleetMonitorUrl, terminals, machineSlug, machineId } = req.body;
 
             if (!team || !organization || !kanbanDir || !terminals) {
                 return res.status(400).json({
@@ -761,8 +779,49 @@ function createApp(opts = {}) {
                 });
             }
 
+            if (machineSlug !== undefined && machineSlug !== null) {
+                if (
+                    typeof machineSlug !== 'string' ||
+                    !vaultStore.SLUG_RE.test(machineSlug) ||
+                    machineSlug.length > vaultStore.MAX_SLUG_LEN
+                ) {
+                    return res.status(400).json({
+                        error: 'Invalid machineSlug',
+                        code: 'INVALID_MACHINE_SLUG',
+                        message: `machineSlug must match ${vaultStore.SLUG_RE} and be <= ${vaultStore.MAX_SLUG_LEN} characters`
+                    });
+                }
+                if (!vaultStore.findMachine(machineSlug)) {
+                    return res.status(400).json({
+                        error: 'Unknown machineSlug',
+                        code: 'MACHINE_NOT_IN_VAULT_REGISTRY',
+                        message: `machineSlug '${machineSlug}' has no matching entry in the vault machine registry (run vault-keygen first)`
+                    });
+                }
+            }
+
+            if (machineId !== undefined && machineId !== null) {
+                if (typeof machineId !== 'string' || !MACHINE_ID_UUID_RE.test(machineId)) {
+                    return res.status(400).json({
+                        error: 'Invalid machineId',
+                        code: 'INVALID_MACHINE_ID',
+                        message: 'machineId must be a UUID string'
+                    });
+                }
+            }
+
             const now = new Date().toISOString();
             const existingTeam = registeredTeams.get(team);
+
+            const existingTeamMachines = (existingTeam && existingTeam.machines) || {};
+            const teamMachines = Object.assign({}, existingTeamMachines);
+            if (machineSlug) {
+                teamMachines[machineSlug] = {
+                    machineId: machineId || null,
+                    lastSeen: now
+                };
+            }
+
             const teamData = {
                 team,
                 teamName: teamName || team.toUpperCase(),
@@ -775,7 +834,8 @@ function createApp(opts = {}) {
                 fleetMonitorUrl: fleetMonitorUrl || 'http://localhost:3000',
                 terminals,
                 registeredAt: existingTeam?.registeredAt || now,
-                lastSeen: now
+                lastSeen: now,
+                machines: teamMachines
             };
 
             registeredTeams.set(team, teamData);
@@ -787,31 +847,65 @@ function createApp(opts = {}) {
                 message: `Team '${team}' ${action}`,
                 team: teamData.team,
                 organization: teamData.organization,
-                terminal_count: terminalCount
+                terminal_count: terminalCount,
+                machines: teamData.machines
             });
         } catch (error) {
             res.status(500).json({ error: 'Internal server error' });
         }
     });
 
+    // XACA-1089-003: mirrors server.js's real enrichTeamMachineEntry() --
+    // MUST stay in sync. See server.js's header comment on this function
+    // for the full Join-A-vs-Join-B rationale (contract §9.2) and the
+    // security note on why hostname/nickname are never surfaced here
+    // (XACA-0416/XACA-0989). Defined INSIDE createApp so it closes over
+    // this factory's injected `machines` Map, not server.js's global one.
+    function enrichTeamMachineEntry(entry) {
+        if (!entry || !entry.machineId) return entry;
+        const globalMachine = machines.get(entry.machineId);
+        if (!globalMachine) return entry;
+        return Object.assign({}, entry, {
+            machineInfo: {
+                online: globalMachine.status === 'online',
+                status: globalMachine.status,
+                lastHeartbeat: globalMachine.last_seen,
+                sessionCount: globalMachine.session_count
+            }
+        });
+    }
+
     // GET /api/registered-teams
+    // XACA-1089-003: mirrors server.js's real handler -- MUST stay in sync.
+    // Surfaces `machines` (always present, {} default) + derived
+    // `machineCount`, enriched via Join A (enrichTeamMachineEntry above).
     app.get('/api/registered-teams', (req, res) => {
         try {
-            const teams = Array.from(registeredTeams.values()).map(team => ({
-                team: team.team,
-                teamName: team.teamName,
-                subtitle: team.subtitle,
-                ship: team.ship,
-                series: team.series,
-                organization: team.organization,
-                orgColor: team.orgColor,
-                kanbanDir: team.kanbanDir,
-                fleetMonitorUrl: team.fleetMonitorUrl,
-                terminalCount: Object.keys(team.terminals).length,
-                terminals: team.terminals,
-                registeredAt: team.registeredAt,
-                lastSeen: team.lastSeen
-            })).sort((a, b) => a.team.localeCompare(b.team));
+            const teams = Array.from(registeredTeams.values()).map(team => {
+                const teamMachines = team.machines || {};
+                const enrichedMachines = {};
+                for (const [slug, entry] of Object.entries(teamMachines)) {
+                    enrichedMachines[slug] = enrichTeamMachineEntry(entry);
+                }
+
+                return {
+                    team: team.team,
+                    teamName: team.teamName,
+                    subtitle: team.subtitle,
+                    ship: team.ship,
+                    series: team.series,
+                    organization: team.organization,
+                    orgColor: team.orgColor,
+                    kanbanDir: team.kanbanDir,
+                    fleetMonitorUrl: team.fleetMonitorUrl,
+                    terminalCount: Object.keys(team.terminals).length,
+                    terminals: team.terminals,
+                    registeredAt: team.registeredAt,
+                    lastSeen: team.lastSeen,
+                    machines: enrichedMachines,
+                    machineCount: Object.keys(enrichedMachines).length
+                };
+            }).sort((a, b) => a.team.localeCompare(b.team));
             res.json({ teams, total: teams.length, timestamp: new Date().toISOString() });
         } catch (error) {
             res.status(500).json({ error: 'Internal server error' });

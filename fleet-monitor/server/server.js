@@ -1988,15 +1988,70 @@ app.get('/api/health', (req, res) => {
     });
 });
 
+// XACA-1089-002: matches a UUID string (any version/variant) -- the loose
+// bound the identity contract sets for `machineId` (>= 36 chars is really
+// "canonical 8-4-4-4-12 hex"). No stricter than that on purpose: `machineId`
+// is optional, dashboard-only material (contract §3/Q2), never load-bearing
+// for routing, so this just needs to keep non-UUID junk out of storage.
+const MACHINE_ID_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * POST /api/team-register
  * Register or update a team's metadata (push-based registration)
  * Teams POST their config when they start up or when board data changes
- * Body: { team, teamName, subtitle, ship, series, organization, orgColor, kanbanDir, fleetMonitorUrl, terminals }
+ * Body: { team, teamName, subtitle, ship, series, organization, orgColor, kanbanDir, fleetMonitorUrl, terminals, machineSlug, machineId }
+ *
+ * XACA-1089-002: machineSlug/machineId thread a machine identity through
+ * registration -- see kanban knowledge doc XACA-1089-001-identity-contract.md
+ * (the signed-off design) for the full rationale. Summary of the decisions
+ * this handler implements:
+ *
+ *   Q1/Q2 (identity + fields): `machineSlug` is the VAULT machine slug
+ *     (`defaultMachineSlug()` in client/vault-keygen.js), the only namespace
+ *     kb-msg/the relay actually consume. `machineId` is an optional GUID for
+ *     dashboard use only. Neither is derived from the other, and neither is
+ *     derived server-side -- the server's only other candidate material
+ *     (machine.hostname on the UNRELATED global `machines` Map below) is
+ *     measurably wrong 2 of 3 times on the live fleet (contract §3).
+ *
+ *   IMPORTANT: this handler's `machineSlug`/`machineId` and the resulting
+ *   per-team `machines` map are a COMPLETELY DIFFERENT thing from the
+ *   server's global `machines` Map declared near the top of this file
+ *   (keyed by `machine.machine_id || machine.hostname`, see POST /api/status
+ *   above). Do not conflate the two -- that conflation is exactly the error
+ *   the parent ticket inherited from kb-msg-provision's comments (contract
+ *   §9.1).
+ *
+ *   Q3 (trust): the slug is a client assertion, never authenticated (the
+ *   fleet API key is shared -- any holder can claim any slug for any team).
+ *   The one mitigation this endpoint applies is a vault-registry membership
+ *   check (vaultStore.findMachine) -- NOT authentication, just collapsing
+ *   the value space to "a machine that has actually run vault-keygen", and
+ *   failing loudly (400) instead of silently misrouting mail later.
+ *
+ *   Q4 (shape): a team carries a SET of machines, `{ [slug]: {machineId,
+ *   lastSeen} }`, never a scalar. `registeredTeams` stays keyed by team
+ *   alone (unchanged -- a keying change is XACA-1034's call, not this
+ *   endpoint's). A scalar would reproduce the exact last-writer-wins flap
+ *   this field exists to fix: `_kb_register_team` fires on every terminal
+ *   startup, and two machines running the same team would silently steal
+ *   each other's mail routing at whatever rate terminals start.
+ *
+ *   Q5 (back-compat): `machines` is ALWAYS present in storage and in this
+ *   response, `{}` when nothing has asserted -- never absent, never null,
+ *   never a sentinel string. A record persisted before this change (no
+ *   `machines` key at all) normalizes to `{}` on read here, same house
+ *   precedent as the XACA-0983 `lcars_services` normalization on POST
+ *   /api/status above.
+ *
+ *   Q7 (verifiability): the POST response always echoes `machines` so a
+ *   caller can tell "server not yet deployed" (no `machines` key at all --
+ *   fleet-monitor has no auto-deploy) from "server deployed and rejected my
+ *   slug" (`machines: {}` after sending one) from "accepted and stored".
  */
 app.post('/api/team-register', requireApiKey, (req, res) => {
     try {
-        const { team, teamName, subtitle, ship, series, organization, orgColor, kanbanDir, fleetMonitorUrl, terminals } = req.body;
+        const { team, teamName, subtitle, ship, series, organization, orgColor, kanbanDir, fleetMonitorUrl, terminals, machineSlug, machineId } = req.body;
 
         // Validate required fields
         if (!team || !organization || !kanbanDir || !terminals) {
@@ -2015,8 +2070,79 @@ app.post('/api/team-register', requireApiKey, (req, res) => {
             });
         }
 
+        // XACA-1089-002: machineSlug/machineId are ADDITIVE and OPTIONAL, so
+        // a client that sends neither (every client before this change)
+        // registers exactly as before -- these blocks only run when the
+        // field is present.
+        if (machineSlug !== undefined && machineSlug !== null) {
+            // Mandatory per contract §4: validate BEFORE storage, matching
+            // vault-store.js's own SLUG_RE + length limit. This endpoint's
+            // output feeds innerHTML in five dashboards (XACA-0416/
+            // XACA-0989) -- a SLUG_RE-constrained value is non-injectable by
+            // construction, so this closes the door before it opens rather
+            // than relying on a downstream escape.
+            if (
+                typeof machineSlug !== 'string' ||
+                !vaultStore.SLUG_RE.test(machineSlug) ||
+                machineSlug.length > vaultStore.MAX_SLUG_LEN
+            ) {
+                return res.status(400).json({
+                    error: 'Invalid machineSlug',
+                    code: 'INVALID_MACHINE_SLUG',
+                    message: `machineSlug must match ${vaultStore.SLUG_RE} and be <= ${vaultStore.MAX_SLUG_LEN} characters`
+                });
+            }
+
+            // Contract §4's one mitigation: reject a slug that never ran
+            // vault-keygen / registered a public key. Explicitly NOT
+            // authentication -- it doesn't prove the claimant IS that
+            // machine, only that the claimed identity exists at all. Turns
+            // silent, weeks-later mail misrouting into a loud 400 now.
+            if (!vaultStore.findMachine(machineSlug)) {
+                return res.status(400).json({
+                    error: 'Unknown machineSlug',
+                    code: 'MACHINE_NOT_IN_VAULT_REGISTRY',
+                    message: `machineSlug '${machineSlug}' has no matching entry in the vault machine registry (run vault-keygen first)`
+                });
+            }
+        }
+
+        if (machineId !== undefined && machineId !== null) {
+            if (typeof machineId !== 'string' || !MACHINE_ID_UUID_RE.test(machineId)) {
+                return res.status(400).json({
+                    error: 'Invalid machineId',
+                    code: 'INVALID_MACHINE_ID',
+                    message: 'machineId must be a UUID string'
+                });
+            }
+        }
+
         const now = new Date().toISOString();
         const existingTeam = registeredTeams.get(team);
+
+        // XACA-1089-002 (Q5): normalize to {} for a pre-change record that
+        // has no `machines` key at all, same reasoning as the XACA-0983
+        // lcars_services precedent -- a mixed fleet of old/new server
+        // records must degrade uniformly.
+        const existingTeamMachines = (existingTeam && existingTeam.machines) || {};
+
+        // XACA-1089-002 (Q4): a SET, never a scalar -- copy forward every
+        // machine that has previously asserted this team, then upsert only
+        // the slug (if any) asserted by THIS request. Named `teamMachines`
+        // (not `machines`) to avoid any confusion with the unrelated global
+        // `machines` Map declared near the top of this file.
+        const teamMachines = Object.assign({}, existingTeamMachines);
+        if (machineSlug) {
+            teamMachines[machineSlug] = {
+                machineId: machineId || null,
+                // "last asserted THIS pairing" -- deliberately distinct from
+                // the team-level `lastSeen` below, which already had to be
+                // relabelled "Last Registered" because it measured
+                // registration rather than activity (CHANGELOG:674). Do not
+                // conflate the two meanings.
+                lastSeen: now
+            };
+        }
 
         // Build team registration data
         const teamData = {
@@ -2031,7 +2157,8 @@ app.post('/api/team-register', requireApiKey, (req, res) => {
             fleetMonitorUrl: fleetMonitorUrl || 'http://localhost:3000',
             terminals,
             registeredAt: existingTeam?.registeredAt || now,
-            lastSeen: now
+            lastSeen: now,
+            machines: teamMachines
         };
 
         // Store team data (idempotent - updates if already exists)
@@ -2048,7 +2175,13 @@ app.post('/api/team-register', requireApiKey, (req, res) => {
             message: `Team '${team}' ${action}`,
             team: teamData.team,
             organization: teamData.organization,
-            terminal_count: terminalCount
+            terminal_count: terminalCount,
+            // XACA-1089-002 (Q7): ALWAYS echo `machines`, {} included -- this
+            // is the "merged is not shipped" detector across fleet-monitor's
+            // manual-deploy gap (contract §8). No key at all in the response
+            // means an old, un-deployed server build; `machines: {}` after
+            // sending a slug means a new server that rejected the value.
+            machines: teamData.machines
         });
     } catch (error) {
         console.error('Error processing team registration:', error);
@@ -2218,26 +2351,100 @@ app.get('/api/knowledge-stats', (req, res) => {
 });
 
 /**
+ * XACA-1089-003: enrich one per-team machine-slug entry (as stored by
+ * POST /api/team-register, contract §5/Q4 -- `{ machineId, lastSeen }`)
+ * with live status from the server's GLOBAL `machines` Map declared near
+ * the top of this file (keyed by `machine.machine_id || machine.hostname`,
+ * see POST /api/status above, `cleanupLegacyMachines()` at :985-1003).
+ *
+ * This is JOIN A from contract §9.2 -- a DASHBOARD ENRICHMENT ONLY ("is
+ * this machine online, what does the fleet monitor currently know about
+ * it"). It is a completely different thing from JOIN B (slug -> vault/relay
+ * registry), which is what actually unblocks cross-machine kb-msg receive
+ * and is already served correctly today by GET /api/vault/machines. Do not
+ * let a reviewer mistake this for that -- it does nothing for kb-msg.
+ *
+ * SECURITY (XACA-0416/XACA-0989): this endpoint's JSON is rendered via
+ * innerHTML in five dashboard apps. The per-team `machines` slug KEYS are
+ * SLUG_RE-constrained and therefore non-injectable by construction, but
+ * entries in the global `machines` Map are NOT -- `hostname` is an
+ * arbitrary client-supplied FQDN (POST /api/status performs no format
+ * check) and `nickname` is user-set free text (PUT
+ * /api/machine/:machineId/nickname). Neither is surfaced by this function,
+ * deliberately -- surfacing either here would add a twelfth injection site
+ * to that inventory. Only type-constrained values are exposed: a boolean,
+ * a small server-controlled status enum, an ISO timestamp the server
+ * itself generated, and a number. A future change that wants hostname or
+ * nickname in this response MUST escape them at this boundary first, not
+ * just copy them in.
+ *
+ * Degrades gracefully -- never throws, never drops the slug entry itself,
+ * just omits the `machineInfo` key -- for both asymmetric cases MEASURED
+ * LIVE in contract §3.2 (the fleet's global `machines` Map has 4 entries,
+ * the vault registry has 3; `jasons-mac-mini` has a GUID and no vault/slug
+ * identity at all):
+ *   - `entry.machineId` is null (client never sent one on this pairing)
+ *   - `entry.machineId` is a GUID absent from the global `machines` Map
+ *     (never reported via POST /api/status, or removed by
+ *     cleanupLegacyMachines() on startup)
+ *
+ * @param {{machineId: string|null, lastSeen: string}} entry
+ * @returns {object} entry, or entry + a non-enumerable-safe `machineInfo` key
+ */
+function enrichTeamMachineEntry(entry) {
+    if (!entry || !entry.machineId) return entry;
+    const globalMachine = machines.get(entry.machineId);
+    if (!globalMachine) return entry;
+    return Object.assign({}, entry, {
+        machineInfo: {
+            online: globalMachine.status === 'online',
+            status: globalMachine.status,
+            lastHeartbeat: globalMachine.last_seen,
+            sessionCount: globalMachine.session_count
+        }
+    });
+}
+
+/**
  * GET /api/registered-teams
  * Return all currently registered teams
+ *
+ * XACA-1089-003: surfaces the per-team `machines` map added by
+ * POST /api/team-register (contract §5/Q4) -- always present, `{}` when
+ * nothing has asserted this team, same Q5 posture as the write side.
+ * A team record persisted before XACA-1089-002 (no `machines` key at all)
+ * normalizes to `{}` here rather than `undefined`, same house precedent as
+ * the XACA-0983 `lcars_services` normalization on POST /api/status above.
+ * Also derives `machineCount` for cheap dashboard use (contract §6), and
+ * enriches each slug entry via Join A -- see enrichTeamMachineEntry() above.
  */
 app.get('/api/registered-teams', (req, res) => {
     try {
-        const teams = Array.from(registeredTeams.values()).map(team => ({
-            team: team.team,
-            teamName: team.teamName,
-            subtitle: team.subtitle,
-            ship: team.ship,
-            series: team.series,
-            organization: team.organization,
-            orgColor: team.orgColor,
-            kanbanDir: team.kanbanDir,
-            fleetMonitorUrl: team.fleetMonitorUrl,
-            terminalCount: Object.keys(team.terminals).length,
-            terminals: team.terminals,
-            registeredAt: team.registeredAt,
-            lastSeen: team.lastSeen
-        })).sort((a, b) => a.team.localeCompare(b.team));
+        const teams = Array.from(registeredTeams.values()).map(team => {
+            const teamMachines = team.machines || {};
+            const enrichedMachines = {};
+            for (const [slug, entry] of Object.entries(teamMachines)) {
+                enrichedMachines[slug] = enrichTeamMachineEntry(entry);
+            }
+
+            return {
+                team: team.team,
+                teamName: team.teamName,
+                subtitle: team.subtitle,
+                ship: team.ship,
+                series: team.series,
+                organization: team.organization,
+                orgColor: team.orgColor,
+                kanbanDir: team.kanbanDir,
+                fleetMonitorUrl: team.fleetMonitorUrl,
+                terminalCount: Object.keys(team.terminals).length,
+                terminals: team.terminals,
+                registeredAt: team.registeredAt,
+                lastSeen: team.lastSeen,
+                machines: enrichedMachines,
+                machineCount: Object.keys(enrichedMachines).length
+            };
+        }).sort((a, b) => a.team.localeCompare(b.team));
 
         res.json({
             teams,

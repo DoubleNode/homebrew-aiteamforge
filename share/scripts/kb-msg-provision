@@ -11,20 +11,37 @@ WHAT THIS DOES NOT DO — and why that is deliberate
 --------------------------------------------------
 It does not invent a team -> machine mapping for teams it cannot see.
 
-The subitem this implements says "generate team-machines.json from the fleet
-topology". There is no fleet topology to read. `POST /api/team-register` carries
-no machine identifier, `GET /api/registered-teams` returns none, and the server's
-`machines` map (keyed by hostname) is never joined to `registeredTeams`. The
-mapping has never existed anywhere in the system, locally or server-side.
+STATUS UPDATE (XACA-1089, 2026-09): the sentence that used to stand here said
+there is no fleet topology to read at all. That is no longer true and the
+claim is corrected rather than silently dropped, per this repo's own
+"a confident wrong attribution in a comment outlives whoever wrote it" lesson
+(see this file's later comments). As of XACA-1089-002/003, `POST
+/api/team-register` DOES carry an optional client-asserted machine identifier
+(`machineSlug` + `machineId`), and `GET /api/registered-teams` DOES surface it
+per team as a `machines: {slug: {machineId, lastSeen}}` set (never a scalar --
+contract §5/Q4). XACA-1089-004 wired the SENDER of that identifier -- but it
+is `_kb_register_team` in kanban-helpers.sh, the function that actually POSTs
+team-register, not this file. kb-msg-provision itself calls neither
+POST /api/team-register nor GET /api/registered-teams anywhere.
 
-What a machine CAN state authoritatively is which teams live on itself. So this
-maps every locally-present team to this machine and leaves every other entry
-exactly as found. A team we cannot see is recorded as unknown, never guessed:
-a wrong mapping routes mail to the wrong box and fails there, which is strictly
-worse than the current honest fail-closed error.
-
-Closing the remote half needs `machineId` threaded through team-register ->
-registered-teams. That is a server change, tracked separately.
+So the server-side mapping now genuinely exists for any team this machine has
+registered since that shipped and deployed (fleet-monitor has no auto-deploy;
+"merged" is not "shipped" -- confirm against the live endpoint, not this
+source tree). Consuming it here -- to populate team-machines.json entries for
+teams that live on OTHER machines -- is a real follow-on capability (FILED as
+XACA-1104, 2026-09-05; see XACA-1089-012 for the measurement of the
+consumer-side gap it closes) and is DELIBERATELY not done in this
+file: XACA-1078-001's
+contract permanently forbids a machine guessing where another machine's teams
+live, and a team the new server data shows asserted by MORE than one machine
+at once is a hard-error-shaped fact to name, never a case to pick a winner
+from. Until that follow-on lands, this function's authority stays exactly
+what it was: what a machine CAN state authoritatively is which teams live on
+itself. So this maps every locally-present team to this machine and leaves
+every other entry exactly as found. A team we cannot see is recorded as
+unknown, never guessed: a wrong mapping routes mail to the wrong box and
+fails there, which is strictly worse than the current honest fail-closed
+error.
 
 Usage:
     kb-msg-provision [--check] [--dry-run] [--no-keygen]
