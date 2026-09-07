@@ -1724,6 +1724,85 @@ provision_msg_routing() {
 # is the default, so this is safe to run unconditionally on every box. An
 # unwired reconciler is inert -- the XACA-0814 failure shape -- which is why
 # this call exists rather than living only in the installer.
+# XACA-1028: template SUBDIRECTORIES never reach an existing install.
+#
+# `aiteamforge setup` seeds the working dir once with
+#   cp -r <framework>/share/templates  ->  $WORKING_DIR/templates
+# (bin/aiteamforge-setup.sh). `aiteamforge upgrade` then never refreshes that
+# tree: update_templates() only walks *.template FILES and copies them into
+# $WORKING_DIR/config/. So a template subdirectory added to the tap AFTER a
+# machine last ran setup can never arrive on that machine.
+#
+# terminal-bridge/ is exactly that case. Measured 2026-09-06 on both consumers:
+# ~/aiteamforge/templates/ exists and holds aliases, claude, fleet-monitor,
+# kanban and migration -- but NOT terminal-bridge, while the Cellar carries
+# share/templates/terminal-bridge/ttyd-bridge-launchagent.template.plist. With
+# nothing on disk to find, kb-ttyd-bridge.sh's resolver failed, update_ttyd_bridge
+# aborted under `set -eo pipefail`, and the six phases after it never ran.
+#
+# Fixing the resolver alone does NOT fix that: update_ttyd_bridge invokes
+# ${WORKING_DIR}/scripts/kb-ttyd-bridge.sh, so the resolver's self-dir is
+# ~/aiteamforge/scripts and its correct candidate is ~/aiteamforge/templates/
+# terminal-bridge/ -- which has to exist. This materialises it.
+#
+# Deliberately materialise-if-absent only, mirroring the XACA-0673 convention
+# for scripts: a directory already present is left alone, so a local edit is
+# never clobbered by an upgrade.
+_xaca1028_mandatory_template_dirs() {
+  cat <<'EOF'
+terminal-bridge
+EOF
+}
+
+update_template_dirs() {
+  print_section "Materializing Template Directories"
+
+  local src_root="${FRAMEWORK_DIR}/share/templates"
+  local dst_root="${WORKING_DIR}/templates"
+
+  if [ ! -d "$src_root" ]; then
+    print_warning "Framework share/templates not found — skipping template-directory materialization"
+    return 0
+  fi
+
+  local created=0 d src dst
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    src="${src_root}/${d}"
+    dst="${dst_root}/${d}"
+
+    if [ ! -d "$src" ]; then
+      print_warning "Shipped template directory missing from framework: ${d} (expected ${src})"
+      continue
+    fi
+    if [ -d "$dst" ]; then
+      continue   # already present — never overwrite
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+      echo "Would materialize template directory: templates/${d}"
+      created=$((created + 1))
+      continue
+    fi
+
+    if mkdir -p "$dst_root" 2>/dev/null && cp -R "$src" "$dst" 2>/dev/null; then
+      print_success "Materialized templates/${d} (was missing)"
+      created=$((created + 1))
+    else
+      # Loud, not silent: the ttyd bridge step immediately after this depends on
+      # it, and a silent skip here is what produced the original six-phase abort.
+      print_warning "Failed to materialize templates/${d} from ${src} — dependent steps may fail"
+    fi
+  done <<EOF
+$(_xaca1028_mandatory_template_dirs)
+EOF
+
+  if [ "$created" -eq 0 ]; then
+    print_info "Template directories already present"
+  fi
+  return 0
+}
+
 update_ttyd_bridge() {
   print_section "Terminal Bridge"
   local s="${WORKING_DIR}/scripts/kb-ttyd-bridge.sh"
@@ -2906,6 +2985,7 @@ update_team_scripts
 update_connect_scripts
 update_runtime_helpers
 provision_msg_routing
+update_template_dirs
 update_ttyd_bridge
 update_imgcat
 update_shell_helpers

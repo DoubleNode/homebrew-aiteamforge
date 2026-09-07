@@ -153,13 +153,86 @@ else
     _t_pass
 fi
 
-_t_start "T6: AITEAMFORGE_DIR working-dir candidate resolves when populated"
+_t_start "T6: the \$AITEAMFORGE_DIR/share/templates candidate resolves when that exact shape exists"
+# NOTE (review finding): this exercises candidate 4 as WRITTEN. It is not the
+# layout `aiteamforge setup` actually produces — setup copies
+# share/templates -> $INSTALL_DIR/templates (no intermediate share/), which is
+# what T7-T9 below cover. Kept because candidate 4 is real code that should
+# behave predictably, but it is NOT evidence about the field.
 ATF_FX="$WORK_ROOT/atf"
 mkdir -p "$ATF_FX/share/templates/terminal-bridge"
 printf '<plist>atf-fixture</plist>\n' > "$ATF_FX/share/templates/terminal-bridge/$PLIST_NAME"
 _R6="$(_probe "$SCRIPT" "$EMPTY_FX/share/scripts" "" "$ATF_FX")"
 if [ -z "$_R6" ] || [ ! -f "$_R6" ]; then
     _t_fail "working-dir candidate did not resolve even when the template is present"
+else
+    _t_pass
+fi
+
+# ─── The FIELD layout (XACA-1028 round 2) ────────────────────────────────────
+# update_ttyd_bridge invokes ${WORKING_DIR}/scripts/kb-ttyd-bridge.sh, so the
+# resolver's self-dir is ~/aiteamforge/scripts and the template must live at
+# ~/aiteamforge/templates/terminal-bridge/. Measured on both consumers
+# 2026-09-06: templates/ exists (aliases, claude, fleet-monitor, kanban,
+# migration) but terminal-bridge is ABSENT, because `aiteamforge setup` seeds
+# that tree once and upgrade never refreshes it.
+#
+# T1 above uses a Cellar-shaped fixture; it is NOT the field case. These three
+# are. Written after a review round proved the resolver fix alone still failed
+# closed on a real consumer.
+UPG_SH="$_TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh"
+FIELD_FW="$WORK_ROOT/field-fw"
+FIELD_WD="$WORK_ROOT/field-wd"
+mkdir -p "$FIELD_FW/share/templates/terminal-bridge" \
+         "$FIELD_WD/scripts" "$FIELD_WD/templates/kanban" "$FIELD_WD/templates/aliases"
+printf '<plist>field</plist>\n' > "$FIELD_FW/share/templates/terminal-bridge/$PLIST_NAME"
+cp "$SCRIPT" "$FIELD_WD/scripts/kb-ttyd-bridge.sh"
+
+_field_resolve() { _probe "$FIELD_WD/scripts/kb-ttyd-bridge.sh" "$FIELD_WD/scripts" "" "$FIELD_WD"; }
+
+_t_start "T7 (field, pre-state): working-dir layout WITHOUT templates/terminal-bridge fails closed"
+_R7="$(_field_resolve)"
+if [ -n "$_R7" ]; then
+    _t_fail "resolved '$_R7' with no terminal-bridge on disk — fixture does not reproduce the consumer state"
+else
+    _t_pass
+fi
+
+_t_start "T8: update_template_dirs materializes the missing template directory"
+/bin/bash -c '
+    set -eo pipefail
+    print_section(){ :; }; print_info(){ :; }; print_success(){ :; }; print_warning(){ :; }
+    DRY_RUN=false; FRAMEWORK_DIR="$1"; WORKING_DIR="$2"
+    eval "$(awk "/^_xaca1028_mandatory_template_dirs\(\)/,/^}/" "$3")"
+    eval "$(awk "/^update_template_dirs\(\)/,/^}/" "$3")"
+    update_template_dirs
+' _ "$FIELD_FW" "$FIELD_WD" "$UPG_SH" >/dev/null 2>&1
+if [ ! -f "$FIELD_WD/templates/terminal-bridge/$PLIST_NAME" ]; then
+    _t_fail "update_template_dirs did not create templates/terminal-bridge/$PLIST_NAME"
+else
+    _t_pass
+fi
+
+_t_start "T9 (field, post-state): the SAME layout now resolves — the two halves together fix it"
+_R9="$(_field_resolve)"
+if [ -z "$_R9" ] || [ ! -f "$_R9" ]; then
+    _t_fail "still fails after materialization — resolver and materializer disagree on the path"
+else
+    _t_pass
+fi
+
+_t_start "T10: update_template_dirs never overwrites a directory that already exists"
+printf 'local-edit\n' > "$FIELD_WD/templates/terminal-bridge/LOCAL_MARKER"
+/bin/bash -c '
+    set -eo pipefail
+    print_section(){ :; }; print_info(){ :; }; print_success(){ :; }; print_warning(){ :; }
+    DRY_RUN=false; FRAMEWORK_DIR="$1"; WORKING_DIR="$2"
+    eval "$(awk "/^_xaca1028_mandatory_template_dirs\(\)/,/^}/" "$3")"
+    eval "$(awk "/^update_template_dirs\(\)/,/^}/" "$3")"
+    update_template_dirs
+' _ "$FIELD_FW" "$FIELD_WD" "$UPG_SH" >/dev/null 2>&1
+if [ ! -f "$FIELD_WD/templates/terminal-bridge/LOCAL_MARKER" ]; then
+    _t_fail "a second run clobbered an existing template directory — local edits are not safe"
 else
     _t_pass
 fi
