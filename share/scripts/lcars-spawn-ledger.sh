@@ -51,6 +51,21 @@
 # chain walked from the invoking shell so "who ultimately triggered this" is
 # answerable without guessing.
 #
+# XACA-1124-001: a SECOND write function, _lcars_ledger_write_exit, appends
+# event="server_exit" rows to this SAME file — the DEATH counterpart the
+# ledger never had. XACA-1099 shipped with root cause UNDETERMINED precisely
+# because nothing recorded a server's death: the per-team log (rotated on
+# every relaunch, XACA-0661) only ever showed its OWN successful startup, and
+# this ledger, until now, only ever recorded spawns. See
+# _lcars_ledger_write_exit's own header comment (below _lcars_ledger_write)
+# for the exit-record schema — it deliberately has a DIFFERENT, smaller fixed
+# arity than _lcars_ledger_write (skip_server_start/skip_attach make no sense
+# for a death record), not a repurposing of the same 11 positional slots.
+# XACA-1124-002 (log retention) and XACA-1124-003 (unobserved external-kill
+# detection) both build on this schema; 003 emits the same event with
+# reason="unobserved" and empty exit_status/signal for the SIGKILL-with-no-
+# live-waiter case this subitem's call sites cannot see.
+#
 # TEST ISOLATION: LCARS_SPAWN_LEDGER_PATH overrides the resolved path — used
 # by tests/test-xaca-0988-001-spawn-ledger.sh so test runs never touch the
 # real fleet's ledger file.
@@ -400,6 +415,176 @@ _lcars_ledger_write() {
         "${_e_argv}" \
         "${_e_skip_server_start}" \
         "${_e_skip_attach}" \
+        "${_e_ancestors}" \
+        >> "${_path}" 2>/dev/null || true
+
+    _lcars_ledger_maybe_warn_size "${_path}"
+}
+
+# ---------------------------------------------------------------------------
+# _lcars_decode_exit_signal <wait_status>
+#
+# XACA-1124-001: decodes a shell `wait`-style exit status (128 + signum, the
+# POSIX convention every caller in this repo already relies on informally —
+# see lcars-launch-helpers.sh's existing 143/129 special-casing) into a
+# signal NAME on stdout (e.g. "SIGTERM"). Prints an empty string when
+# <wait_status> is not signal-shaped (< 128, i.e. a normal exit code) or is
+# missing/non-numeric — never errors, matching every other helper in this
+# file.
+#
+# Covers the signals actually plausible for a killed server.py on this repo
+# (SIGHUP/SIGINT/SIGQUIT/SIGABRT/SIGKILL/SIGTERM — the ones this codebase's
+# own comments already discuss by name) and falls back to a generic "SIGnn"
+# label for anything else so a not-yet-enumerated signal is still visible
+# rather than silently dropped.
+#
+# Dual-shell portable: a `case` statement and integer arithmetic only, no
+# arrays/associative-arrays (bash 3.2 has neither).
+# ---------------------------------------------------------------------------
+_lcars_decode_exit_signal() {
+    local _status="${1:-}"
+    case "${_status}" in
+        ''|*[!0-9]*)
+            printf ''
+            return 0
+            ;;
+    esac
+    if [[ "${_status}" -lt 128 ]]; then
+        printf ''
+        return 0
+    fi
+    local _signum=$(( _status - 128 ))
+    case "${_signum}" in
+        1) printf 'SIGHUP' ;;
+        2) printf 'SIGINT' ;;
+        3) printf 'SIGQUIT' ;;
+        6) printf 'SIGABRT' ;;
+        9) printf 'SIGKILL' ;;
+        11) printf 'SIGSEGV' ;;
+        15) printf 'SIGTERM' ;;
+        *) printf 'SIG%d' "${_signum}" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# _lcars_ledger_write_exit <site> <launch_id> <team> <port> <session> \
+#                           <pid> <exit_status> <signal> <reason>
+#
+# XACA-1124-001: appends one JSON object (event="server_exit") to the SAME
+# append-only ledger _lcars_ledger_write writes to — the DEATH record that
+# never existed before. Never aborts the caller (`|| true` throughout,
+# matching _lcars_ledger_write's own contract): diagnostic instrumentation
+# must not fail a caller that is often ALREADY handling a failure.
+#
+# SCHEMA (deliberately a DIFFERENT, smaller fixed arity than
+# _lcars_ledger_write's 11 slots — skip_server_start/skip_attach describe a
+# SPAWN's ambient environment and have no meaning for a death record; reusing
+# those slots to smuggle in exit/signal data would make the JSON shape
+# ambiguous per-event, which is exactly what _lcars_ledger_write's own
+# "positional arity is fixed... to keep the JSON shape stable" contract
+# exists to prevent):
+#
+# <site>        which call path OBSERVED the death, or CAUSED it directly.
+#               Known values as of XACA-1124-001:
+#                 <ledger_site>_boot_poll  — start_lcars_server's own two
+#                                            `wait "${_server_pid}"` branches
+#                                            in its /api/status boot poll
+#                                            (<ledger_site> is whatever site
+#                                            tag reached start_lcars_server —
+#                                            "start_lcars_server" for a
+#                                            direct/master-startup-script
+#                                            call, "health_check_delegate"
+#                                            when reached via
+#                                            lcars-health-check.sh's
+#                                            _hc_start_lcars_server).
+#                 <ledger_site>_pkill      — start_lcars_server's own locked
+#                                            stale-port pkill, run just
+#                                            before launching a replacement.
+#                 health_check_wrong_port_kill — lcars-health-check.sh's
+#                                            _hc_heal_noncanonical_port
+#                                            killing a server bound to a
+#                                            non-canonical port.
+#               XACA-1124-003 will add further site values for its
+#               out-of-band (no live waiter) detector.
+# <launch_id>   shared with the spawn_attempt/spawn_result rows of the SAME
+#               launch, when known. Empty when the observer never had it —
+#               e.g. a pkill site killing a STALE process left over from a
+#               different, unrelated prior invocation whose launch_id was
+#               never in scope here. Empty means "genuinely unknown", not
+#               "omitted".
+# <team> <port> <session>  same meaning as in _lcars_ledger_write.
+# <pid>         the dead (or about-to-be-killed) process's PID. Populate
+#               whenever known.
+# <exit_status> the raw `wait`-decoded exit status as a plain decimal string
+#               (e.g. "143", "129", "0"). Empty when no `wait` was possible
+#               — the process was never this shell's child (a pkill target,
+#               always someone else's child) — or genuinely unobserved
+#               (XACA-1124-003's no-live-waiter case).
+# <signal>      decoded signal NAME. Either the output of
+#               _lcars_decode_exit_signal (when an <exit_status> was
+#               observed via `wait`) or the signal the OBSERVER ITSELF sent
+#               (e.g. "SIGTERM" for a pkill site, which never gets to `wait`
+#               on a process it doesn't own to read a status back — pkill's
+#               own default signal is known without needing one). Empty when
+#               truly unknown.
+# <reason>      free-text, human-readable context. XACA-1124-003 MUST use
+#               the exact literal "unobserved" for its no-live-waiter case so
+#               a ledger reader can grep that one token reliably; every other
+#               <reason> value here is descriptive prose, not a fixed
+#               vocabulary.
+#
+# Every field the caller doesn't have should be passed as an empty string,
+# never omitted — positional arity here is fixed at 9 to keep the JSON shape
+# stable across all sites (mirrors _lcars_ledger_write's own contract).
+# ---------------------------------------------------------------------------
+_lcars_ledger_write_exit() {
+    local _site="${1:-unknown}"
+    local _launch_id="${2:-}"
+    local _team="${3:-}"
+    local _port="${4:-}"
+    local _session="${5:-}"
+    local _pid="${6:-}"
+    local _exit_status="${7:-}"
+    local _signal="${8:-}"
+    local _reason="${9:-}"
+
+    local _path
+    _path="$(_lcars_ledger_path)"
+    local _dir
+    _dir="$(dirname "${_path}")"
+    mkdir -p "${_dir}" 2>/dev/null || true
+
+    local _ts
+    _ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    local _ancestors
+    _ancestors="$(_lcars_ancestor_chain "$$" 15)"
+
+    local _e_ts _e_site _e_launch_id _e_team _e_port _e_session
+    local _e_pid _e_exit_status _e_signal _e_reason _e_ancestors
+    _lcars_json_escape_var "${_ts}" _e_ts
+    _lcars_json_escape_var "${_site}" _e_site
+    _lcars_json_escape_var "${_launch_id}" _e_launch_id
+    _lcars_json_escape_var "${_team}" _e_team
+    _lcars_json_escape_var "${_port}" _e_port
+    _lcars_json_escape_var "${_session}" _e_session
+    _lcars_json_escape_var "${_pid}" _e_pid
+    _lcars_json_escape_var "${_exit_status}" _e_exit_status
+    _lcars_json_escape_var "${_signal}" _e_signal
+    _lcars_json_escape_var "${_reason}" _e_reason
+    _lcars_json_escape_var "${_ancestors}" _e_ancestors
+
+    printf '{"ts":"%s","site":"%s","event":"server_exit","launch_id":"%s","team":"%s","port":"%s","session":"%s","pid":"%s","exit_status":"%s","signal":"%s","reason":"%s","ancestors":"%s"}\n' \
+        "${_e_ts}" \
+        "${_e_site}" \
+        "${_e_launch_id}" \
+        "${_e_team}" \
+        "${_e_port}" \
+        "${_e_session}" \
+        "${_e_pid}" \
+        "${_e_exit_status}" \
+        "${_e_signal}" \
+        "${_e_reason}" \
         "${_e_ancestors}" \
         >> "${_path}" 2>/dev/null || true
 

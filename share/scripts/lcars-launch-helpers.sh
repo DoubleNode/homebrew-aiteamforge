@@ -1032,11 +1032,23 @@ ensure_lcars_tmux_session() {
 # _lcars_stamp_launch_banner <log_file> <launch_id> <fields>
 #
 # XACA-0988-006: appends one "=== LCARS-LAUNCH ... ===" banner line to
-# <log_file>. start_lcars_server calls this TWICE per launch:
+# <log_file>. start_lcars_server calls this TWICE ALWAYS, and a THIRD time
+# (XACA-1124-001) if and only if this launch's death is directly OBSERVED by
+# one of the two boot-poll `wait` branches:
 #   1. immediately after rotating the per-team log (phase=pre-spawn) —
 #      launch_id, team, port, and the invoking shell's PID;
 #   2. immediately after the server's PID is known (phase=spawned) —
-#      launch_id and spawned_pid.
+#      launch_id and spawned_pid;
+#   3. (XACA-1124-001, conditional) the instant start_lcars_server's own
+#      boot-poll `wait "${_server_pid}"` sees the process gone (phase=exited)
+#      — launch_id, pid, exit_status, decoded signal, and a human reason.
+#      This banner is a CONVENIENCE MIRROR for a human tailing this log —
+#      the DURABLE record of the same fact is the append-only ledger row
+#      _lcars_ledger_write_exit writes (this file rotates on the next
+#      launch; the ledger never does). A death this boot poll never
+#      observes (server killed after start_lcars_server has already
+#      returned, e.g. XACA-1124-003's external-kill/OOM case) gets NO third
+#      banner here — only a ledger row with reason="unobserved".
 #
 # WHY THIS EXISTS: start_lcars_server unconditionally rotates the per-team
 # log (`mv -f … .old`, XACA-0661) at the top of every invocation, so a fresh
@@ -1055,9 +1067,13 @@ ensure_lcars_tmux_session() {
 #
 # THE FIX: every line in a log is now bracketed by explicit banners. A reader
 # scans upward from ANY line for the nearest preceding "=== LCARS-LAUNCH"
-# banner (there are at most two per launch, and they are adjacent — nothing
+# banner (there are at most three per launch as of XACA-1124-001 — nothing
 # else writes banner-shaped lines into this file) to recover the launch_id
-# and, once the second banner has landed, the actual spawned PID. This holds
+# and, once the second banner has landed, the actual spawned PID. The first
+# two banners are adjacent (nothing is written to the log between rotation
+# and the PID becoming known); the third (phase=exited), when present, is
+# NOT adjacent to the second — server.py's own stderr lines land between
+# them for however long the process survived. This holds
 # even after N further rotations, because rotation is a `mv`, not a
 # truncation — the WHOLE file (banners included) moves intact to .old, and
 # that .old file's own banners are still correct for whatever process wrote
@@ -1082,6 +1098,234 @@ _lcars_stamp_launch_banner() {
         printf '=== LCARS-LAUNCH launch_id=%s ts=%s %s ===\n' \
             "${_lid}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_fields}"
     } >> "${_log_file}" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# _lcars_file_size <path>
+#
+# Portable byte-count probe used by log-retention size enforcement below.
+# `wc -c < path | tr -d whitespace` is already this codebase's established
+# idiom for a file's byte size (see lcars-spawn-ledger.sh's
+# _lcars_ledger_maybe_warn_size) — reused verbatim here rather than
+# reinventing a `stat -f/-c` dance, since `wc -c` needs no GNU/BSD branching
+# at all. Prints nothing (not "0") on any failure, so callers can distinguish
+# "empty file" from "could not read" via the same `case ''|*[!0-9]*)` guard
+# used everywhere else in this file.
+# ---------------------------------------------------------------------------
+_lcars_file_size() {
+    local _f="${1:-}"
+    if [[ -z "${_f}" ]] || [[ ! -f "${_f}" ]]; then
+        printf ''
+        return 0
+    fi
+    local _v
+    _v="$(wc -c < "${_f}" 2>/dev/null | tr -d '[:space:]')"
+    case "${_v}" in
+        ''|*[!0-9]*) printf '' ;;
+        *)           printf '%s' "${_v}" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# _lcars_rotate_server_log <log_file>
+#
+# XACA-1124-002: bounded N-generation rotation of the per-team server log,
+# replacing XACA-0661's single `.old` backup.
+#
+# THE DEFECT THIS FIXES: XACA-0661 kept exactly one backup generation
+# (`<log>.old`, via `mv -f`). Two back-to-back restarts of the same team —
+# which is exactly what a crash-diagnose-relaunch cycle looks like, and
+# exactly what XACA-1124's own investigation needed — completely erase the
+# evidence of the ORIGINAL crash: relaunch #1 moves the crashed log to
+# `.old`, and relaunch #2's rotation overwrites that `.old` with relaunch
+# #1's log, losing the original crash forever. Measured fleet-wide at the
+# time this ticket was filed: exactly 1 record in `.log` and 1 in `.log.old`
+# per team — i.e. every team was already sitting at this ceiling.
+#
+# THE FIX: keep LCARS_SERVER_LOG_MAX_GENERATIONS (default 5) prior launches
+# instead of 1, named `<log>.old` (generation 1, the most recent previous
+# launch — name UNCHANGED from XACA-0661 for backward compatibility, see
+# MIGRATION below), `<log>.old.2`, `<log>.old.3`, ... `<log>.old.N`
+# (generation N, the oldest retained launch). A crash now survives N-1
+# further restarts before its log is discarded, instead of 1.
+#
+# WHY 5: arbitrary but deliberate — big enough that a normal
+# "restart-to-clear-a-hang" operator loop (rarely more than 2-3 restarts in
+# a session) never outruns it, small enough that the secondary byte budget
+# below stays meaningful rather than nominal. Override via
+# LCARS_SERVER_LOG_MAX_GENERATIONS for a specific team/session if ever
+# needed; a non-positive or non-numeric override falls back to the default
+# rather than disabling rotation.
+#
+# ROTATION MECHANISM (never a truncation, per _lcars_stamp_launch_banner's
+# header comment above — the whole banner-attribution scheme depends on
+# rotation being a `mv` of the intact file, banners included): generations
+# are shifted OLDEST-DESTINATION-FIRST (N-1 -> N, N-2 -> N-1, ..., 1 -> 2),
+# so every `mv` reads a file before any later step could have overwritten
+# it, then the live log is moved into the now-vacated generation-1 slot.
+# Anything already sitting in the oldest slot is silently discarded by
+# `mv -f` — that is generation N reaching the end of its bounded lifetime,
+# not a bug.
+#
+# MIGRATION OF A PRE-EXISTING `.log.old` (real machines have one now — 25
+# `.log` / 13 `.log.old` measured fleet-wide): no special-cased migration
+# code is needed or written. The very first rotation under this scheme finds
+# the pre-fix `.log.old` sitting in the generation-1 slot like any other
+# generation-1 file, and the ordinary shift step (gen=2: "${log}.old" ->
+# "${log}.old.2") moves it into the generation-2 slot exactly as it would
+# for a file this scheme itself had created. The pre-fix backup is folded
+# into the new series, not orphaned, and not treated as suspect leftover to
+# be swept away.
+#
+# SHRINKING THE CAP: if LCARS_SERVER_LOG_MAX_GENERATIONS is lowered between
+# runs (e.g. 5 -> 3), generation files above the new cap (`.old.4`, `.old.5`,
+# ...) are NOT reachable by the shift loop above (it only walks 2..N) and
+# would otherwise linger forever. A second pass explicitly deletes every
+# `.old.<k>` for k > N so the cap is honored immediately, not just once
+# those slots would have aged out naturally.
+#
+# SIZE BUDGET: see _lcars_enforce_server_log_budget below, called at the end
+# of this function — generation COUNT and total BYTES are two independent
+# bounds (a spawn-loop is a bytes problem even when the launch count itself
+# is small: each crash can dump an arbitrarily large stderr/traceback).
+#
+# Never aborts the caller (soft-fail contract preserved from XACA-0661: an
+# `-f` guard plus `|| true`/`2>/dev/null` on every mv/rm below — log
+# retention must never be the reason a server fails to start).
+# ---------------------------------------------------------------------------
+_lcars_rotate_server_log() {
+    local _log="${1:?_lcars_rotate_server_log: log_file required}"
+    local _max_gen="${LCARS_SERVER_LOG_MAX_GENERATIONS:-5}"
+    local _max_bytes="${LCARS_SERVER_LOG_MAX_TOTAL_BYTES:-10485760}"
+    local _from _to _gen _extra
+
+    case "${_max_gen}" in
+        ''|*[!0-9]*) _max_gen=5 ;;
+    esac
+    if [[ "${_max_gen}" -lt 1 ]]; then
+        _max_gen=1
+    fi
+    case "${_max_bytes}" in
+        ''|*[!0-9]*) _max_bytes=10485760 ;;
+    esac
+
+    if [[ ! -f "${_log}" ]]; then
+        return 0
+    fi
+
+    # Shift generations 2..N, oldest destination first (see header above for
+    # why this order is load-bearing). _from/_to are declared once above the
+    # loop, never re-declared with `local` inside it — a bare `local NAME=value`
+    # as the first statement of a loop body is a known zsh hazard in this
+    # file (k130/p049, hit and fixed once already in XACA-1124-001).
+    _gen="${_max_gen}"
+    while [[ "${_gen}" -ge 2 ]]; do
+        if [[ "${_gen}" -eq 2 ]]; then
+            _from="${_log}.old"
+        else
+            _from="${_log}.old.$((_gen - 1))"
+        fi
+        _to="${_log}.old.${_gen}"
+        if [[ -f "${_from}" ]]; then
+            mv -f "${_from}" "${_to}" 2>/dev/null || true
+        fi
+        _gen=$((_gen - 1))
+    done
+
+    # Honor a cap that shrank since a prior run (see SHRINKING THE CAP above).
+    _extra=$((_max_gen + 1))
+    while [[ -f "${_log}.old.${_extra}" ]]; do
+        rm -f "${_log}.old.${_extra}" 2>/dev/null || true
+        _extra=$((_extra + 1))
+    done
+
+    # Finally, move the live log into the now-vacated generation-1 slot.
+    mv -f "${_log}" "${_log}.old" 2>/dev/null || true
+
+    _lcars_enforce_server_log_budget "${_log}" "${_max_gen}" "${_max_bytes}"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _lcars_enforce_server_log_budget <log_file> <max_generations> <max_bytes>
+#
+# XACA-1124-002: secondary, independent bound on top of generation-count
+# rotation (_lcars_rotate_server_log above). Rationale (from the ticket):
+# "the failure mode this ticket fixes is counted in launches, but a runaway
+# spawn-loop is counted in bytes, and N-generation alone does not defend
+# against that" — capping the number of retained files does nothing to cap
+# how large any ONE of them is, and a tight crash/relaunch loop can dump an
+# arbitrarily large traceback into a single generation before the next
+# rotation even happens.
+#
+# Sums the on-disk size of every EXISTING backup generation (`.log.old`
+# through `.log.old.<max_generations>` — the live, just-rotated current log
+# is excluded: it is fresh at this point in the call sequence and actively
+# about to receive this launch's own stderr, not evidence to be budgeted).
+# While the total exceeds LCARS_SERVER_LOG_MAX_TOTAL_BYTES (default 10 MiB),
+# deletes whole generation files starting from the OLDEST (highest suffix)
+# inward — a deletion, not a truncation; the "rotation must be a mv, never a
+# truncation" constraint governs how a file MOVES into a generation slot, it
+# does not forbid removing a whole generation once its slot's lifetime (by
+# count OR by budget) is over.
+#
+# Generation 1 (`.log.old`, the single most recent previous launch — the one
+# most likely relevant to "what just happened before this restart") is
+# NEVER deleted for size alone, even if it alone exceeds the budget. In that
+# case the budget is exceeded on purpose: destroying the newest evidence to
+# satisfy a byte cap would recreate this ticket's own defect (erasing the
+# crash that prompted the restart) in the name of fixing it.
+#
+# Never aborts the caller — same soft-fail contract as the rest of this
+# file. A malformed/non-numeric size probe is treated as "unknown, skip
+# this generation's contribution" rather than a fatal error.
+# ---------------------------------------------------------------------------
+_lcars_enforce_server_log_budget() {
+    local _log="${1:?_lcars_enforce_server_log_budget: log_file required}"
+    local _max_gen="${2:-5}"
+    local _max_bytes="${3:-10485760}"
+    local _gen _f _sz _total
+
+    case "${_max_gen}" in
+        ''|*[!0-9]*) _max_gen=5 ;;
+    esac
+    case "${_max_bytes}" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+
+    _total=0
+    _gen=1
+    while [[ "${_gen}" -le "${_max_gen}" ]]; do
+        if [[ "${_gen}" -eq 1 ]]; then
+            _f="${_log}.old"
+        else
+            _f="${_log}.old.${_gen}"
+        fi
+        _sz="$(_lcars_file_size "${_f}")"
+        case "${_sz}" in
+            ''|*[!0-9]*) : ;;
+            *) _total=$((_total + _sz)) ;;
+        esac
+        _gen=$((_gen + 1))
+    done
+
+    _gen="${_max_gen}"
+    while [[ "${_gen}" -ge 2 ]]; do
+        if [[ "${_total}" -le "${_max_bytes}" ]]; then
+            break
+        fi
+        _f="${_log}.old.${_gen}"
+        if [[ -f "${_f}" ]]; then
+            _sz="$(_lcars_file_size "${_f}")"
+            rm -f "${_f}" 2>/dev/null || true
+            case "${_sz}" in
+                ''|*[!0-9]*) : ;;
+                *) _total=$((_total - _sz)) ;;
+            esac
+        fi
+        _gen=$((_gen - 1))
+    done
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1371,8 +1615,39 @@ start_lcars_server() {
     # XACA-0661 (007): This pkill now runs UNDER the per-port lock above, so two
     # concurrent starts for the same port cannot interleave their pkill+launch
     # cycles and SIGTERM each other's freshly-started server.
+    #
+    # XACA-1124-001: capture which pid(s), if any, are about to be killed
+    # BEFORE the pkill below — pkill itself only reports success/failure,
+    # never which pid(s) it matched, so pgrep against the SAME pattern is
+    # the only way to know. This is a DELIBERATE death this code causes; a
+    # death with a KNOWN killer recorded here is exactly what distinguishes
+    # "we restarted it" from "something else killed it" later (the whole
+    # point of XACA-1124). Best-effort only — a failed pgrep just means no
+    # ledger row, never a blocked startup.
+    local _stale_pids=""
+    _stale_pids="$(pgrep -f "server\.py[[:space:]].*[[:space:]]${port}([[:space:]]|$)" 2>/dev/null)"
+    if [[ -z "${_stale_pids}" ]]; then
+        _stale_pids="$(pgrep -f "server\.py[[:space:]]${port}([[:space:]]|$)" 2>/dev/null)"
+    fi
+
     pkill -f "server\.py[[:space:]].*[[:space:]]${port}([[:space:]]|$)" 2>/dev/null || \
         pkill -f "server\.py[[:space:]]${port}([[:space:]]|$)" 2>/dev/null || true
+
+    # XACA-1124-001: record the kill(s) in the append-only ledger. One
+    # `while read` loop (not `for _p in ${_stale_pids}`) so this works
+    # identically under bash 3.2 and zsh — zsh does not word-split an
+    # unquoted expansion by default the way bash does, but both shells
+    # split a piped stream on newlines via `read` the same way, and pgrep
+    # already emits one pid per line.
+    if [[ -n "${_stale_pids}" ]] && typeset -f _lcars_ledger_write_exit >/dev/null 2>&1; then
+        printf '%s\n' "${_stale_pids}" | while IFS= read -r _sp; do
+            [[ -z "${_sp}" ]] && continue
+            _lcars_ledger_write_exit "${_ledger_site}_pkill" "" \
+                "${team}" "${port}" "${session_name}" "${_sp}" \
+                "" "SIGTERM" \
+                "stale server.py on port ${port} killed by start_lcars_server before launching a replacement"
+        done
+    fi
 
     # XACA-0486 / XACA-0562 / XACA-0563 / XACA-0614: Resolve the python that has
     # the LCARS runtime imports (pyzipper, requests, etc. from share/requirements.txt).
@@ -1430,17 +1705,20 @@ start_lcars_server() {
     # lines, making an unrelated historical FATAL masquerade as the current failure.
     #
     # FIX: unconditionally rotate the log before each launch.
-    #   - If a log exists (even tiny), back it up to .old before truncating so a
-    #     genuine just-crashed log from the immediately-preceding run is not lost.
+    #   - If a log exists (even tiny), back it up before truncating so a genuine
+    #     just-crashed log from the immediately-preceding run is not lost.
     #   - After rotation, the log file starts fresh; every tail only shows current-
     #     start stderr.
-    #   - The old size-based cap is preserved inside the rotation: if the outgoing
-    #     log is already over 256 KB it is still moved to .old (same as before); a
-    #     smaller log is also moved to .old so it is not silently discarded.
-    #   - Only one .old backup is kept (mv -f overwrites any prior .old).
-    if [[ -f "${_server_log}" ]]; then
-        mv -f "${_server_log}" "${_server_log}.old" 2>/dev/null || true
-    fi
+    #
+    # XACA-1124-002: a single `.old` backup (the original XACA-0661 behavior)
+    # meant two back-to-back restarts erased the ORIGINAL crash's evidence —
+    # exactly the failure this ticket was filed against. Rotation is now
+    # bounded-N-generation (default 5) plus an independent total-byte budget;
+    # see _lcars_rotate_server_log's header comment (above start_lcars_server)
+    # for the full scheme, the backward-compatible `.old` naming, and how a
+    # pre-existing `.log.old` is folded into the new series with no special
+    # migration code.
+    _lcars_rotate_server_log "${_server_log}"
 
     # XACA-0988-006: stamp a pre-spawn launch banner into the now-fresh log —
     # see _lcars_stamp_launch_banner's header comment (above start_lcars_server)
@@ -1543,6 +1821,23 @@ start_lcars_server() {
                 echo "    ❌ LCARS server for team '${team}' on port ${port} responded once then exited (status ${_rc}) — ${_reason}." >&2
                 echo "       Last lines of ${_server_log}:" >&2
                 tail -n 15 "${_server_log}" 2>/dev/null | sed 's/^/         /' >&2
+                # XACA-1124-001: record the death — this is the FIRST of the
+                # two boot-poll death branches this subitem targets. Both the
+                # ledger (durable, never rotated) and a phase=exited banner
+                # into the per-team log (convenience mirror for a human
+                # tailing that file — NOT the durable record; the log still
+                # rotates on the next launch).
+                local _sig=""
+                if typeset -f _lcars_decode_exit_signal >/dev/null 2>&1; then
+                    _sig="$(_lcars_decode_exit_signal "${_rc}")"
+                fi
+                _lcars_stamp_launch_banner "${_server_log}" "${_launch_id}" \
+                    "phase=exited pid=${_server_pid} exit_status=${_rc} signal=${_sig} reason=${_reason}"
+                if typeset -f _lcars_ledger_write_exit >/dev/null 2>&1; then
+                    _lcars_ledger_write_exit "${_ledger_site}_boot_poll" "${_launch_id}" \
+                        "${team}" "${port}" "${session_name}" "${_server_pid}" \
+                        "${_rc}" "${_sig}" "${_reason}"
+                fi
                 _lcars_start_lock_release
                 return 1  # ② momentary-truth / post-200 death
             fi
@@ -1562,6 +1857,21 @@ start_lcars_server() {
             echo "    ❌ LCARS server for team '${team}' on port ${port} exited (status ${_rc}) before becoming ready — ${_reason2}." >&2
             echo "       Last lines of ${_server_log}:" >&2
             tail -n 15 "${_server_log}" 2>/dev/null | sed 's/^/         /' >&2
+            # XACA-1124-001: record the death — SECOND boot-poll death branch
+            # (crashed before ever answering /api/status). Same dual write as
+            # the first branch above: ledger (durable) + phase=exited banner
+            # (convenience mirror only).
+            local _sig2=""
+            if typeset -f _lcars_decode_exit_signal >/dev/null 2>&1; then
+                _sig2="$(_lcars_decode_exit_signal "${_rc}")"
+            fi
+            _lcars_stamp_launch_banner "${_server_log}" "${_launch_id}" \
+                "phase=exited pid=${_server_pid} exit_status=${_rc} signal=${_sig2} reason=${_reason2}"
+            if typeset -f _lcars_ledger_write_exit >/dev/null 2>&1; then
+                _lcars_ledger_write_exit "${_ledger_site}_boot_poll" "${_launch_id}" \
+                    "${team}" "${port}" "${session_name}" "${_server_pid}" \
+                    "${_rc}" "${_sig2}" "${_reason2}"
+            fi
             _lcars_start_lock_release
             return 1  # ④ crashed before answering /api/status
         fi

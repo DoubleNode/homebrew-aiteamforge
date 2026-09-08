@@ -971,6 +971,17 @@ _hc_heal_noncanonical_port() {
 
     log "  Healing $team: live server bound to non-canonical port(s) [$wrong_ports], canonical=$canonical_port"
 
+    # XACA-1124-001: source the spawn ledger EARLY — before the wrong-port
+    # kill below, which is a DELIBERATE death this function causes and must
+    # record. _hc_start_lcars_server (step 3 below) sources this same file
+    # again indirectly via lcars-launch-helpers.sh's own source block;
+    # re-sourcing just redefines the same functions and is harmless.
+    local _ledger_helpers="${_SCRIPT_DIR}/scripts/lcars-spawn-ledger.sh"
+    if [[ -f "$_ledger_helpers" ]]; then
+        # shellcheck disable=SC1090
+        source "$_ledger_helpers" 2>/dev/null || true
+    fi
+
     # 1. Kill the team's <instance>-lcars tmux session ONLY (not other panes).
     #    The session name is the team's session_pattern with the leading ".*"
     #    glob stripped, matching how run_health_check derives it for restart.
@@ -991,12 +1002,43 @@ _hc_heal_noncanonical_port() {
 
     # 2. Kill the stale server.py process(es) on each wrong port. Anchor the
     #    port at a word boundary so "8427" cannot match "84270" (XACA-0661 idiom).
-    local _wp
+    # XACA-1124-001: _wpp is hoisted here (not declared bare inside the loop
+    # below) — a bare `local _wpp` re-declared on each outer-loop iteration
+    # would echo its PRIOR value to stdout in zsh once wrong_ports has more
+    # than one entry (k130 / p049: zsh's bare `local NAME` is `typeset NAME`,
+    # which prints an already-set variable instead of silently declaring it;
+    # bash's `local NAME` doesn't have this behavior, but this file is
+    # zsh-only). _wp_pids below already has a safe `=""` initializer.
+    local _wp _wpp
     for _wp in ${=wrong_ports}; do
         [[ "$_wp" == "$canonical_port" ]] && continue
         log "    Killing stale server.py on wrong port $_wp"
+
+        # XACA-1124-001: capture pid(s) about to die BEFORE the pkill —
+        # pkill itself never reports which pid(s) it matched. Best-effort:
+        # a failed pgrep just means no ledger row, never a blocked heal.
+        local _wp_pids=""
+        _wp_pids="$(pgrep -f "server\.py[[:space:]].*[[:space:]]${_wp}([[:space:]]|\$)" 2>/dev/null)"
+        if [[ -z "$_wp_pids" ]]; then
+            _wp_pids="$(pgrep -f "server\.py[[:space:]]${_wp}([[:space:]]|\$)" 2>/dev/null)"
+        fi
+
         pkill -f "server\.py[[:space:]].*[[:space:]]${_wp}([[:space:]]|\$)" 2>/dev/null || \
             pkill -f "server\.py[[:space:]]${_wp}([[:space:]]|\$)" 2>/dev/null || true
+
+        # XACA-1124-001: record the kill(s). ${(f)_wp_pids} is zsh's
+        # split-on-newline flag (this file is zsh-only) — pgrep emits one
+        # pid per line, matching detect_lcars_bound_ports's existing use of
+        # the same idiom above.
+        if [[ -n "$_wp_pids" ]] && typeset -f _lcars_ledger_write_exit >/dev/null 2>&1; then
+            for _wpp in ${(f)_wp_pids}; do
+                [[ -z "$_wpp" ]] && continue
+                _lcars_ledger_write_exit "health_check_wrong_port_kill" "" \
+                    "$team" "$_wp" "$session_name" "$_wpp" \
+                    "" "SIGTERM" \
+                    "non-canonical-port heal: server bound to wrong port $_wp (canonical=$canonical_port)"
+            done
+        fi
     done
     sleep 1
 
@@ -1005,6 +1047,305 @@ _hc_heal_noncanonical_port() {
     #    session we just killed above, on the same tmux server (XACA-0983).
     _hc_start_lcars_server "$canonical_port" "$team" "$session_name" "$tmux_socket"
     return $?
+}
+
+# ============================================================================
+# XACA-1124-003: Unobserved (external-kill / OOM) death detection
+# ============================================================================
+# WHY THIS EXISTS: a SIGKILL cannot be caught by anything in-process (see
+# lcars-ui/server.py) and, on a consumer machine, the shell that originally
+# launched the server has usually already exited by the time the kill
+# happens hours or days later — there is no live `wait` anywhere to observe
+# it. XACA-1124-001's boot-poll `wait "${_server_pid}"` branches only cover
+# the first ~15s of a launch's life (the boot window); a death after that
+# window is invisible to every mechanism this repo had before this section.
+#
+# THE FIX IS A PERIODIC SWEEP, NOT A CATCH. _hc_detect_unobserved_deaths
+# below reconstructs such deaths after the fact by walking the append-only
+# spawn ledger (scripts/lcars-spawn-ledger.sh) for a spawn_result row whose
+# recorded pid is no longer alive as the server.py it was launched as, with
+# no server_exit row already covering it — and files exactly that finding,
+# never more, as event="server_exit" reason="unobserved" (the schema slot
+# XACA-1124-001 reserved for this).
+#
+# WHERE IT RUNS: from inside run_health_check, which already executes every
+# 120s under com.devteam.lcars-health.plist's StartInterval (RunAtLoad too,
+# and also reachable via `--daemon`/cron for anyone running it that way).
+# That is exactly the "runs periodically and notices a server it expected to
+# be alive is gone" cadence this subitem calls for, with no new daemon or
+# plist to provision, monitor, or keep alive on its own — and it runs inside
+# the SAME run-lock (_hc_acquire_run_lock, above) the rest of a sweep already
+# uses, so two overlapping invocations can never race this detector against
+# itself either. An alternative dedicated daemon was considered and rejected:
+# it would duplicate this exact lock/schedule machinery for no added benefit.
+#
+# IDEMPOTENCY (the sharpest edge here): a dead pid must produce EXACTLY ONE
+# server_exit row, not one per sweep forever, into a ledger nothing is ever
+# allowed to rotate or prune. The detector's own idempotency check is
+# authoritative: before considering a spawn_result row a candidate at all,
+# it looks for ANY server_exit row already carrying that spawn's launch_id
+# (written by this detector on a prior sweep, or by any of the SYNCHRONOUS
+# XACA-1124-001 sites — boot-poll death, stale-port pkill, wrong-port heal,
+# or the XACA-1124-003 Part B operator-restart sites in kanban-helpers.sh).
+# Any one of those covering it is sufficient to skip it here.
+#
+# PID REUSE: `kill -0 <pid>` succeeding is NOT proof the LCARS server is
+# still alive — macOS recycles pids, and an unrelated process can inherit
+# one. The python helper below additionally verifies via `ps -o args=` that
+# the LIVE process at that pid is actually a server.py bound to the expected
+# port before concluding "still running"; a recycled pid running something
+# else counts as a death, not as life.
+#
+# BOUNDING: the ledger is unbounded and append-only by design (XACA-0988-016)
+# — a fresh sweep run for the first time against an old, already-large
+# ledger must not resurrect months of history as a burst of death records.
+# Two independent bounds enforce this: LCARS_LEDGER_DEATH_SCAN_MAX_LINES
+# (default 20000) caps how much of the ledger's TAIL is even read (a cheap,
+# reverse-chunked read from EOF, never the whole file), and
+# LCARS_LEDGER_DEATH_SCAN_MAX_AGE_SECONDS (default 172800 = 48h) additionally
+# refuses to EMIT a record for any spawn_result older than that, regardless
+# of whether it is found dead — an old, dead, never-recorded launch is
+# treated as pre-dating this detector's ability to say anything useful about
+# it, not as fresh news.
+#
+# FORENSICS: best-effort ONLY, per this subitem's explicit instruction never
+# to write a speculative cause into the record as if it were measured (the
+# entire reason this ticket exists is that XACA-1099 shipped with an
+# asserted root cause it could not actually distinguish). The python helper
+# makes one bounded-timeout attempt (LCARS_LEDGER_DEATH_FORENSICS_TIMEOUT
+# default 3s) to correlate the pid with macOS's own unified-log jetsam
+# record via `log show`; on timeout, error, or simply finding nothing (the
+# ONLY possible outcome against this subitem's own verification, which kills
+# a decoy process with a plain `kill -9` — never a real jetsam event), the
+# <reason> stays the bare literal "unobserved" the schema documents. A
+# finding, when one exists, is appended after a colon
+# ("unobserved: jetsam log match: ...") so `grep unobserved` still finds
+# every row this detector ever writes, whether or not forensics succeeded.
+# Set LCARS_LEDGER_DEATH_FORENSICS_ENABLED=0 to skip the attempt entirely.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# _hc_detect_unobserved_deaths
+#
+# See the section header directly above for the full design. Never aborts
+# the caller (every failure path below is a silent `return 0`) — this is
+# diagnostic instrumentation layered onto an already-running health sweep,
+# and it must never be the reason that sweep fails to restart anything.
+# ---------------------------------------------------------------------------
+_hc_detect_unobserved_deaths() {
+    command -v python3 >/dev/null 2>&1 || return 0
+
+    # Lazily source the ledger helpers, exactly like _hc_heal_noncanonical_port
+    # above — this file only sources scripts/lcars-spawn-ledger.sh on demand,
+    # never unconditionally at load time.
+    if ! typeset -f _lcars_ledger_write_exit >/dev/null 2>&1; then
+        local _ud_ledger_helpers="${_SCRIPT_DIR}/scripts/lcars-spawn-ledger.sh"
+        if [[ -f "${_ud_ledger_helpers}" ]]; then
+            # shellcheck disable=SC1090
+            source "${_ud_ledger_helpers}" 2>/dev/null || true
+        fi
+    fi
+    typeset -f _lcars_ledger_path >/dev/null 2>&1 || return 0
+    typeset -f _lcars_ledger_write_exit >/dev/null 2>&1 || return 0
+
+    local _ud_ledger_path
+    _ud_ledger_path="$(_lcars_ledger_path)"
+    [[ -f "${_ud_ledger_path}" ]] || return 0
+
+    # Env-overridable, non-numeric/empty falls back to the documented default
+    # rather than erroring — matches every other tunable in this file
+    # (HEALTH_CHECK_RETRY_DELAY above).
+    local _ud_max_lines="${LCARS_LEDGER_DEATH_SCAN_MAX_LINES:-20000}"
+    case "${_ud_max_lines}" in (''|*[!0-9]*) _ud_max_lines=20000 ;; esac
+
+    local _ud_max_age="${LCARS_LEDGER_DEATH_SCAN_MAX_AGE_SECONDS:-172800}"
+    case "${_ud_max_age}" in (''|*[!0-9]*) _ud_max_age=172800 ;; esac
+
+    local _ud_forensics_enabled="${LCARS_LEDGER_DEATH_FORENSICS_ENABLED:-1}"
+    case "${_ud_forensics_enabled}" in
+        0) _ud_forensics_enabled=0 ;;
+        *) _ud_forensics_enabled=1 ;;
+    esac
+
+    local _ud_forensics_timeout="${LCARS_LEDGER_DEATH_FORENSICS_TIMEOUT:-3}"
+    case "${_ud_forensics_timeout}" in (''|*[!0-9.]*) _ud_forensics_timeout=3 ;; esac
+
+    # The python helper does ALL of the JSON parsing, liveness/pid-reuse
+    # verification, and best-effort forensics — see the section header above
+    # for why each of those lives here rather than in shell. It never
+    # WRITES to the ledger itself; it only prints tab-separated candidate
+    # rows on stdout, one per confirmed unobserved death, and the actual
+    # ledger write below happens via _lcars_ledger_write_exit — the same
+    # shell-side function every other XACA-1124 call site uses. That keeps
+    # the durable record coming from the shell, never from python, exactly
+    # as this subitem requires (the parallel to server.py never being able
+    # to record its own SIGKILL).
+    local _ud_count=0
+    local _ud_launch_id _ud_team _ud_port _ud_session _ud_pid _ud_reason
+    while IFS=$'\t' read -r _ud_launch_id _ud_team _ud_port _ud_session _ud_pid _ud_reason; do
+        [[ -z "${_ud_launch_id}" ]] && continue
+        log "💀 ${_ud_team}:${_ud_port} - detected UNOBSERVED death (pid ${_ud_pid}, launch ${_ud_launch_id}) — recording server_exit (${_ud_reason})"
+        _lcars_ledger_write_exit "health_check_unobserved_detector" "${_ud_launch_id}" \
+            "${_ud_team}" "${_ud_port}" "${_ud_session}" "${_ud_pid}" \
+            "" "" "${_ud_reason}"
+        ((_ud_count++))
+    done < <(python3 -c '
+import sys, os, re, json, subprocess
+from datetime import datetime, timezone
+
+ledger_path = sys.argv[1]
+max_lines = int(sys.argv[2])
+max_age_seconds = int(sys.argv[3])
+forensics_enabled = sys.argv[4] == "1"
+forensics_timeout = float(sys.argv[5])
+
+
+def tail_lines(path, n):
+    # Reverse-chunked read from EOF -- never loads the whole (unbounded,
+    # append-only, never-rotated) ledger into memory just to look at its
+    # last N lines.
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            block = 65536
+            data = b""
+            pos = size
+            newline_count = 0
+            while pos > 0 and newline_count <= n:
+                read_size = min(block, pos)
+                pos -= read_size
+                f.seek(pos)
+                chunk = f.read(read_size)
+                data = chunk + data
+                newline_count += chunk.count(b"\n")
+            lines = data.split(b"\n")
+            if pos > 0 and lines:
+                lines = lines[1:]
+            out = [l.decode("utf-8", "replace") for l in lines if l.strip()]
+            return out[-n:]
+    except Exception:
+        return []
+
+
+rows = []
+for line in tail_lines(ledger_path, max_lines):
+    try:
+        rows.append(json.loads(line))
+    except Exception:
+        continue
+
+exited_launch_ids = set()
+spawn_results = []
+for row in rows:
+    event = row.get("event", "")
+    if event == "server_exit":
+        lid = row.get("launch_id", "")
+        if lid:
+            exited_launch_ids.add(lid)
+    elif event == "spawn_result":
+        spawn_results.append(row)
+
+now = datetime.now(timezone.utc)
+
+
+def parse_ts(ts):
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def check_liveness(pid, port):
+    # True = confirmed still running as the expected server.py. False =
+    # confirmed dead (process gone, OR a recycled pid now running something
+    # else -- XACA-1124-003s pid-reuse guard). None = could not determine
+    # either way (transient ps failure) -- caller must not guess.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "args=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2,
+        )
+        args = result.stdout.strip()
+    except Exception:
+        return None
+    if not args:
+        return False
+    port_str = re.escape(str(port))
+    pattern_a = re.compile(r"server\.py[ \t].*[ \t]" + port_str + r"([ \t]|$)")
+    pattern_b = re.compile(r"server\.py[ \t]" + port_str + r"([ \t]|$)")
+    if pattern_a.search(args) or pattern_b.search(args):
+        return True
+    return False
+
+
+def jetsam_forensics(pid, timeout_s):
+    # BEST-EFFORT ONLY -- see the shell-side section header for the full
+    # rationale. Absence of a finding is never upgraded into a claim.
+    if not forensics_enabled:
+        return ""
+    try:
+        predicate = (
+            "eventMessage CONTAINS \"" + str(pid) + "\""
+            " AND (eventMessage CONTAINS \"jetsam\""
+            " OR eventMessage CONTAINS \"memorystatus\")"
+        )
+        result = subprocess.run(
+            ["log", "show", "--style", "compact", "--last", "15m",
+             "--predicate", predicate],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        out = (result.stdout or "").strip()
+        if not out:
+            return ""
+        first_line = out.splitlines()[0].strip()
+        return "jetsam log match: " + first_line[:200]
+    except Exception:
+        return ""
+
+
+for row in spawn_results:
+    launch_id = row.get("launch_id", "")
+    if not launch_id or launch_id in exited_launch_ids:
+        continue
+    pid_str = row.get("pid", "")
+    if not pid_str or not pid_str.isdigit():
+        continue
+    pid = int(pid_str)
+    ts = parse_ts(row.get("ts", ""))
+    if ts is None:
+        continue
+    age = (now - ts).total_seconds()
+    if age < 0 or age > max_age_seconds:
+        continue
+    alive = check_liveness(pid, row.get("port", ""))
+    if alive is None or alive:
+        continue
+    forensic = jetsam_forensics(pid, forensics_timeout)
+    reason = "unobserved: " + forensic if forensic else "unobserved"
+    fields = [
+        launch_id,
+        row.get("team", ""),
+        row.get("port", ""),
+        row.get("session", ""),
+        str(pid),
+        reason,
+    ]
+    print("\t".join(f.replace("\t", " ").replace("\n", " ") for f in fields))
+' "${_ud_ledger_path}" "${_ud_max_lines}" "${_ud_max_age}" "${_ud_forensics_enabled}" "${_ud_forensics_timeout}" 2>/dev/null)
+
+    if (( _ud_count > 0 )); then
+        log "  Unobserved-death sweep: ${_ud_count} death(s) recorded (external-kill/OOM candidates)"
+    fi
+    return 0
 }
 
 # ============================================================================
@@ -1405,6 +1746,19 @@ run_health_check() {
     # bound port by team, so the loop can catch a server bound to the wrong port
     # (the XACA-0613 refresh-gap) before the registry-port health check masks it.
     detect_lcars_bound_ports
+
+    # XACA-1124-003: reconstruct any external-kill/OOM deaths no live waiter
+    # ever saw, BEFORE the per-team restart loop below. This is a ledger-wide
+    # sweep (not scoped to one team), runs unconditionally (including
+    # STATUS_ONLY — it only RECORDS, it never restarts or kills anything), and
+    # is safe to run every sweep by construction (see its own header comment
+    # for the idempotency guarantee). Ordering relative to the loop below does
+    # not matter for correctness (this only reads/appends to the ledger, the
+    # loop below only touches live processes/tmux), but running it first means
+    # a death this sweep is ABOUT to restart-and-thereby-obscure (the ordinary
+    # "not responding" path further down never records the OLD launch's death
+    # at all) still gets its historical record written first.
+    _hc_detect_unobserved_deaths
 
     for server_config in "${LCARS_SERVERS[@]}"; do
         # Parse config

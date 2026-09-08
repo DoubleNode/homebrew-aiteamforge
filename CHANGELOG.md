@@ -7,6 +7,29 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1124: an LCARS server death now leaves a record. Previously nothing logged a server's
+  exit or signal, and because `start_lcars_server` unconditionally rotates the per-team log at
+  the top of every launch with a single `.old` backup, retention was exactly two launches --
+  two restarts after a crash, the crash's evidence was gone. Three changes, mirrored here:
+  (1) `lcars-spawn-ledger.sh` gains a `server_exit` event (`_lcars_ledger_write_exit`,
+  `_lcars_decode_exit_signal`) recorded in the APPEND-ONLY ledger, which remains the durable
+  home for the death fact precisely because it is never rotated; `lcars-launch-helpers.sh`
+  adds a matching `phase=exited` log banner as a human-readable mirror, wired into both
+  boot-poll death branches and the stale-port pkill, and `lcars-health-check.sh` into its
+  wrong-port kill. (2) N-generation per-team log rotation replaces the single `.old` backup
+  (`LCARS_SERVER_LOG_MAX_GENERATIONS`, default 5, plus a `LCARS_SERVER_LOG_MAX_TOTAL_BYTES`
+  budget, default 10 MiB, because a spawn-loop is a bytes problem that a generation count
+  alone cannot bound); generation 1 keeps the name `.log.old`, so a pre-existing backup is
+  folded in rather than orphaned. (3) `lcars-health-check.sh` gains
+  `_hc_detect_unobserved_deaths`, a periodic sweep that reconstructs deaths nobody witnessed --
+  an OOM/jetsam SIGKILL bypasses every in-process handler in `server.py` by construction, and
+  on a consumer machine the launching shell has usually exited, so there may be no live `wait`
+  anywhere to observe it. The sweep verifies liveness by argv (`ps -o args=`) rather than bare
+  `kill -0`, since macOS recycles pids; bounds emission by age so an old ledger cannot
+  resurrect months of history; is idempotent across repeated sweeps; and leaves `reason` at the
+  bare literal `unobserved` when its best-effort jetsam correlation finds nothing, rather than
+  writing a speculative cause into the forensic record.
+
 ## [0.20.6] - 2026-09-07
 
 - XACA-1089: thread a machine identity through Fleet Monitor's team registration.
