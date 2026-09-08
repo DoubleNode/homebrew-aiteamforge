@@ -6,6 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1128 (round 5): the same defect reaches the AGENT PROMPTS, and this one is directly
+  reachable from text a user types. `echo "$prompt" | cc` x6 and `echo "$description" | fold`
+  pass a ticket's own title/description through zsh `echo`. Unlike the JSON cases there is no
+  serializer doubling backslashes in front of these, so ordinary content corrupts silently:
+  measured, a description reading `Build fails on C:\dev\team\build and regex \bword\b`
+  reaches the agent as `Build fails on C:\dev<TAB>eamuild and regex word`, and a `\c` anywhere
+  in the text TRUNCATES THE ENTIRE PROMPT from that point -- the agent silently receives half its
+  instructions. Windows paths, regexes and LaTeX in a ticket description are all ordinary content.
+  Converted to `printf '%s\n'` in `_kb_display_item_box` and the six kb-run-*/kb-work-* prompt
+  builders.
+  This was the FOURTH successive reach of one defect in this ticket: jq reads -> more jq reads ->
+  the `sed`/`tail` producers feeding them -> non-parser consumers of user text. Each round's scope
+  was set by grepping for the previous round's SHAPE, which is why each round found the next one
+  late. Scope by the VARIABLE and enumerate every consumer, rather than by the pipeline that
+  happened to break first.
 - XACA-1128 (round 4): the shipped template still carried the INERT-CONSUMER half of this bug.
   An earlier round converted `kb-release-create`'s jq READS to `printf` but left its PRODUCER --
   `body=$(echo "$response" | sed '$d')` -- as `echo`, so the document was corrupted before those

@@ -9173,7 +9173,7 @@ _kb_display_item_box() {
     # Show description if present
     if [[ -n "$description" ]]; then
         echo "║  Description:"
-        echo "$description" | fold -w 60 -s | while IFS= read -r line; do
+        printf '%s\n' "$description" | fold -w 60 -s | while IFS= read -r line; do
             echo "║    $line"
         done
         echo "║"
@@ -9395,7 +9395,7 @@ kb-run-review() {
     _kb_set_working_on "$item_id" "REVIEW"
 
     # Launch cc with the review prompt
-    echo "$prompt" | cc
+    printf '%s\n' "$prompt" | cc
 }
 
 # Review a PR for a kanban item in the current directory (no worktree switch)
@@ -9477,7 +9477,7 @@ kb-work-review() {
     _kb_set_working_on "$item_id" "REVIEW"
 
     # Launch cc with the review prompt
-    echo "$prompt" | cc
+    printf '%s\n' "$prompt" | cc
 }
 
 # Usage: _kb_build_test_prompt <item_id> <title> <description> <item_worktree_branch>
@@ -9649,7 +9649,7 @@ kb-run-test() {
     _kb_set_working_on "$item_id" "TEST"
 
     # Launch cc with the test prompt
-    echo "$prompt" | cc
+    printf '%s\n' "$prompt" | cc
 }
 
 # QA test a PR for a kanban item in the current directory (no worktree switch)
@@ -9731,7 +9731,7 @@ kb-work-test() {
     _kb_set_working_on "$item_id" "TEST"
 
     # Launch cc with the test prompt
-    echo "$prompt" | cc
+    printf '%s\n' "$prompt" | cc
 }
 
 # Internal helper: Build the debug/investigation prompt text
@@ -9958,7 +9958,7 @@ kb-run-debug() {
     _kb_set_working_on "$item_id" "DEBUG"
 
     # Launch cc with the debug prompt
-    echo "$prompt" | cc
+    printf '%s\n' "$prompt" | cc
 }
 
 # Debug a completed/cancelled kanban item in the current directory (no worktree switch)
@@ -10061,7 +10061,7 @@ kb-work-debug() {
     _kb_set_working_on "$item_id" "DEBUG"
 
     # Launch cc with the debug prompt
-    echo "$prompt" | cc
+    printf '%s\n' "$prompt" | cc
 }
 
 # ============================================================================
