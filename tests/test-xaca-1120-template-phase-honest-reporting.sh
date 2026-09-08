@@ -177,6 +177,35 @@ if command -v git >/dev/null 2>&1; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Second pre-fix revision, self-located the same way: PR #836 review round 2,
+# BLOCKING FIX 1. `cmp -s` (introduced by the FIRST self-located fix above)
+# made the templates-current gate go from "never fires against a git-sourced
+# Cellar" to "fires on every upgrade whose installed file differs from the
+# shipped template by even one byte" -- which a POPULATED secrets.env always
+# does the moment a real key replaces the placeholder. The never-overwrite
+# basename check is what stops that render from being installed. Anchored on
+# the function definition line, which exists in NO revision before this fix.
+# ─────────────────────────────────────────────────────────────────────────────
+_PRE_FIX_AVAILABLE_SECRETS=false
+PRE_FIX_REV_SECRETS=""
+if command -v git >/dev/null 2>&1; then
+    _fix_commit_secrets="$(git -C "$TAP_ROOT" log -S'_aitf_is_never_overwrite_basename() {' \
+        --format='%H' -1 -- libexec/commands/aiteamforge-upgrade.sh 2>/dev/null)"
+    if [ -n "$_fix_commit_secrets" ] && git -C "$TAP_ROOT" cat-file -e "${_fix_commit_secrets}^" 2>/dev/null; then
+        PRE_FIX_REV_SECRETS="${_fix_commit_secrets}^"
+        # Confirm the parent genuinely predates the fix: it must NOT yet
+        # define the guard function. Same pipefail hazard as above -- capture
+        # first, match in-shell, no pipeline.
+        _parent_blob_secrets="$(git -C "$TAP_ROOT" show "${PRE_FIX_REV_SECRETS}:libexec/commands/aiteamforge-upgrade.sh" 2>/dev/null)"
+        case "$_parent_blob_secrets" in
+            *'_aitf_is_never_overwrite_basename() {'*) : ;;   # already present -> not pre-fix, leave false
+            *) _PRE_FIX_AVAILABLE_SECRETS=true ;;
+        esac
+        unset _parent_blob_secrets
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Extraction helpers (mirrors test-xaca-1095's _extract_fn family).
 # ─────────────────────────────────────────────────────────────────────────────
 _extract_fn_from_content() {
@@ -201,6 +230,14 @@ _extract_aitf_helpers() {
     for _h in _aitf_sed_repl_escape _aitf_file_mode _aitf_render_template _aitf_install_rendered; do
         _extract_fn_from_file "$UPGRADE_SH" "$_h"
     done
+    # _aitf_is_never_overwrite_basename() (PR #836 review round 2, BLOCKING fix
+    # 1) reads a plain top-level variable assignment, not another function, so
+    # it does not fit the function-extraction loop above. Pull the assignment
+    # line verbatim, then the function. Grepped rather than hardcoded so this
+    # stays byte-for-byte in sync with the shipped list instead of silently
+    # drifting from it.
+    grep '^_AITF_NEVER_OVERWRITE_BASENAMES=' "$UPGRADE_SH"
+    _extract_fn_from_file "$UPGRADE_SH" "_aitf_is_never_overwrite_basename"
 }
 
 _extract_fn_from_rev() {
@@ -254,6 +291,68 @@ _run_update_templates() {
         eval "$fn_src"
         update_templates
     ) 2>&1
+}
+
+# Like _run_update_templates, but takes an explicit revision instead of
+# assuming the suite's ORIGINAL self-located PRE_FIX_REV. This suite now
+# self-locates TWO different fix commits (see the two self-location blocks
+# above); the original runner only knew about the first one.
+_run_update_templates_rev() {
+    local rev="$1" sbx="$2" force="${3:-false}" dry="${4:-false}"
+    local fn_src
+    if [ "$rev" = "current" ]; then
+        fn_src="$(_extract_fn_from_file "$UPGRADE_SH" "update_templates")"
+    else
+        fn_src="$(_extract_fn_from_rev "$rev" "libexec/commands/aiteamforge-upgrade.sh" "update_templates")"
+    fi
+    if [ -z "$fn_src" ]; then
+        echo "EXTRACT_FAILED: update_templates ($rev)" >&2
+        return 2
+    fi
+    (
+        print_section() { echo "== $* =="; }
+        print_info()    { echo "INFO: $*"; }
+        print_success() { echo "OK: $*"; }
+        print_warning() { echo "WARN: $*"; }
+        FRAMEWORK_DIR="$sbx/framework"
+        WORKING_DIR="$sbx/working"
+        SHARED_DEV_ROOT="/Sandbox/Shared"
+        ORG_NAME="SandboxOrg"
+        FORCE="$force"
+        DRY_RUN="$dry"
+        eval "$(_extract_aitf_helpers)"
+        eval "$fn_src"
+        update_templates
+    ) 2>&1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sandbox shaped like a real secrets.env deployment: a shipped
+# secrets.env.template (placeholder credentials) and a POPULATED
+# ${WORKING_DIR}/config/secrets.env carrying a marker that stands in for a
+# real ANTHROPIC_API_KEY/GITHUB_TOKEN, at the 600 mode installers elsewhere
+# deliberately create it at (install-kanban.sh:1565). The populated file's
+# content is byte-for-byte DIFFERENT from the rendered template -- exactly
+# the condition that flips the `cmp -s` staleness gate from "current" to
+# "differs" the instant a real key replaces the placeholder.
+# ─────────────────────────────────────────────────────────────────────────────
+_SECRETS_LIVE_MARKER='export ANTHROPIC_API_KEY="sk-ant-LIVE-MARKER-not-a-real-key"'
+_make_secrets_sandbox() {
+    local sbx="$1"
+    mkdir -p "$sbx/framework/share/templates"
+    mkdir -p "$sbx/working/config"
+    cat > "$sbx/framework/share/templates/secrets.env.template" <<'TPL'
+# AITeamForge Secrets Configuration Template
+export ANTHROPIC_API_KEY="your-api-key-here"
+export GITHUB_TOKEN="ghp_..."
+# org: {{ORG_NAME}} dir: {{AITEAMFORGE_DIR}} shared: {{SHARED_DEV_ROOT}}
+TPL
+    cat > "$sbx/working/config/secrets.env" <<EOF
+# populated by a real operator, not the installer
+${_SECRETS_LIVE_MARKER}
+export GITHUB_TOKEN="ghp_ALSO_A_LIVE_MARKER"
+EOF
+    chmod 600 "$sbx/working/config/secrets.env"
 }
 
 echo ""
@@ -452,6 +551,102 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CASE 5e — BLOCKING FIX 1 (PR #836 review round 2). A populated secrets.env
+# must survive update_templates with its content AND mode intact — not because
+# it happens to compare "current" (round 1 already covers that), but because
+# it is on the never-overwrite basename list and is refused BEFORE the
+# render/compare/backup machinery ever touches it. This sandbox's secrets.env
+# is deliberately NOT byte-identical to the rendered template (a live key
+# replacing a placeholder never is), which is exactly the case round 1's
+# `cmp -s` gate cannot protect on its own.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "a populated secrets.env survives update_templates with content and mode 600 intact"
+_sbx="$(_next_sandbox)"; _make_secrets_sandbox "$_sbx"
+_before_content="$(cat "$_sbx/working/config/secrets.env")"
+_out="$(_run_update_templates_rev current "$_sbx")"
+_after_content="$(cat "$_sbx/working/config/secrets.env")"
+_after_mode="$(_mode_of "$_sbx/working/config/secrets.env")"
+if [ "$_after_content" != "$_before_content" ]; then
+    test_fail "secrets.env content changed — a live credentials file was overwritten by the shipped template. Output: $_out"
+elif [ "$_after_mode" != "600" ]; then
+    test_fail "secrets.env mode changed from 600 to ${_after_mode}"
+elif ! echo "$_out" | grep -qi 'secrets.env'; then
+    test_fail "the skip was silent — no mention of secrets.env in the phase output: $_out"
+else
+    test_pass
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 5f — the protection is NOT an artifact of the ordinary staleness gate,
+# and --force must not bypass it either (the ticket's stated worry is the
+# UNATTENDED nightly auto-upgrade, which many fleets run with --force).
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "secrets.env is never overwritten even under --force"
+_sbx="$(_next_sandbox)"; _make_secrets_sandbox "$_sbx"
+_before_content="$(cat "$_sbx/working/config/secrets.env")"
+_run_update_templates_rev current "$_sbx" true >/dev/null 2>&1
+_after_content="$(cat "$_sbx/working/config/secrets.env")"
+if [ "$_after_content" = "$_before_content" ]; then
+    test_pass
+else
+    test_fail "--force overwrote a live secrets.env — the never-overwrite list must apply regardless of FORCE"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 5g — NEGATIVE CONTROL for 5e/5f. Prove the pre-fix update_templates
+# (round 1's `cmp -s` gate, WITHOUT the never-overwrite basename check) really
+# would install the rendered template over this exact populated secrets.env —
+# i.e. that BLOCKING FIX 1 closes a real hole, not a hypothetical one.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "NEGATIVE CONTROL: pre-fix update_templates overwrites a populated secrets.env"
+if [ "$_PRE_FIX_AVAILABLE_SECRETS" != true ]; then
+    # NOT a skip — same reasoning as the suite's other negative controls (see
+    # header comment). A SKIP here would let this file report all-green while
+    # its most consequential assertion never ran.
+    test_fail "pre-fix revision for BLOCKING FIX 1 could not be resolved, so this negative control cannot run. This is a FAILURE, not a skip: deepen the clone (fetch-depth: 0) or repair the git log -S anchor ('_aitf_is_never_overwrite_basename() {')."
+else
+    _sbx="$(_next_sandbox)"; _make_secrets_sandbox "$_sbx"
+    _before_content="$(cat "$_sbx/working/config/secrets.env")"
+    _out_old="$(_run_update_templates_rev "$PRE_FIX_REV_SECRETS" "$_sbx")"
+    _after_content="$(cat "$_sbx/working/config/secrets.env")"
+    if [ "$_after_content" != "$_before_content" ] && ! echo "$_after_content" | grep -q "$_SECRETS_LIVE_MARKER"; then
+        test_pass
+    else
+        test_fail "pre-fix update_templates left secrets.env unchanged in this sandbox — the negative control does not reproduce the vulnerability it exists to prove. Output: $_out_old"
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 5h — BLOCKING FIX 2 (PR #836 review round 2). A "preserve" install
+# request that cannot read the target's current mode must fail CLOSED, not
+# fall back to a guessed 644. Exercised directly on _aitf_install_rendered()
+# rather than through update_templates(), because the easiest way to make
+# _aitf_file_mode() legitimately return empty is a target that does not exist
+# at all -- no root/chmod tricks required, and it is the same code path a
+# real unreadable-mode failure would take. On refusal the temp render must be
+# left alone (never consumed) and the target must remain absent, not created
+# at a guessed mode.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "_aitf_install_rendered fails closed when the target's mode cannot be read"
+_tmp="$WORK_DIR/install-rendered-probe.tmp"
+printf 'rendered content\n' > "$_tmp"
+_missing_target="$WORK_DIR/does-not-exist/secrets.env"
+_rc=0
+(
+    eval "$(_extract_aitf_helpers)"
+    _aitf_install_rendered "$_tmp" "$_missing_target" preserve
+) >/dev/null 2>&1 || _rc=$?
+if [ "$_rc" -ne 2 ]; then
+    test_fail "expected return code 2 (refuse to install), got ${_rc}"
+elif [ -e "$_missing_target" ]; then
+    test_fail "target was created despite the mode being unreadable — fail-closed did not hold"
+elif [ ! -f "$_tmp" ]; then
+    test_fail "the temp render was consumed/removed on a refused install — caller can no longer distinguish this from a successful rename"
+else
+    test_pass
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CASE 6 — the anti-misdiagnosis guard. The phase must state, in operator-
 # visible output, that it does not cover kanban-helpers.sh. This is the line
 # whose absence cost a CRITICAL ticket filed against the wrong function.
@@ -573,11 +768,27 @@ if [ "$_STANDALONE" = true ]; then
     echo "  XACA-1120: PASS=$_PASS_COUNT FAIL=$_FAIL_COUNT SKIP=$_SKIP_COUNT"
     echo "───────────────────────────────────────────────────────────────────"
 fi
-# A SKIP is not a PASS (PR #836 review). The exit gate consults BOTH counters in
-# BOTH modes: a suite that skipped its way to zero failures has not established
-# anything, and the previous gate (_FAIL_COUNT only) would have exited 0 for it.
-# Kept outside the _STANDALONE guard so the status is correct under the runner
-# too, where the summary above is intentionally not printed.
+# A SKIP is not a PASS (PR #836 review). This gate consults BOTH local
+# counters, but that only has teeth in STANDALONE mode: a suite that skipped
+# its way to zero failures has not established anything, and the previous
+# gate (_FAIL_COUNT only) would have exited 0 for it.
+#
+# Corrected claim (subitem XACA-1120-032, PR #836 review round 2): this is
+# NOT true "in both standalone and runner modes" as an earlier version of
+# this comment claimed. Under the runner, test_start/test_pass/test_fail/
+# test_skip are the RUNNER's exported functions (test-runner.sh:456), not the
+# local wrappers defined a few lines above inside the `_STANDALONE` guard --
+# and that guard is precisely what round 1 fixed (this file must NOT
+# redefine test_skip when the runner already exported one, see the comment
+# there). So under the runner, _PASS_COUNT/_FAIL_COUNT/_SKIP_COUNT are never
+# touched by anything in this file and stay at 0 structurally, and this exit
+# gate always falls through to `exit 0` for THIS subprocess. That is not a
+# gap: the runner does its own, separate accounting by grepping SKIP:/FAIL:
+# markers out of TEST_RESULTS_FILE (test-runner.sh run_test_file, ~:465-475)
+# -- written by its own exported test_fail/test_skip -- and that is the
+# authoritative count the runner acts on. This gate is kept outside the
+# _STANDALONE guard only so a standalone invocation's exit code is correct;
+# under the runner it is inert by construction, not a redundant second check.
 if [ "$_FAIL_COUNT" -ne 0 ] || [ "$_SKIP_COUNT" -ne 0 ]; then
     exit 1
 fi
