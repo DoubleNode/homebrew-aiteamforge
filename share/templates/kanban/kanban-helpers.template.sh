@@ -4640,21 +4640,35 @@ kb-sweep() {
     done <<< "$subitem_lines"
 
     if $retro_subitem_completed; then
-        # Use kb-retro-path to check if the retrospective file exists
-        local retro_path
-        retro_path=$(kb-retro-path "$working_id" 2>/dev/null)
-        if [[ -n "$retro_path" ]]; then
-            if [[ -f "$retro_path" ]]; then
-                echo "  ✅ Retrospective file found: $(basename "$retro_path")"
-            else
-                echo "  🚫 BLOCKING: Retrospective subitem marked complete but file not found:"
-                echo "     Expected: $retro_path"
-                echo "     Run: kb-retro-path $working_id"
-                retro_blocking=true
-            fi
+        # Use _kb_find_existing_retro — plan-doc-independent detection.
+        # XACA-1135: capture rc on the line IMMEDIATELY after the assignment. `local` must
+        # stay on its own line — `local x=$(...)` would make $? always 0 and silently
+        # collapse every cause back to "file absent".
+        local retro_path retro_rc
+        retro_path=$(_kb_find_existing_retro "$working_id")
+        retro_rc=$?
+        # Defensive normalisation (XACA-1135): rc 0 with empty stdout is unreachable —
+        # the function only returns 0 after printing a path. Fold it into 1 ("absent")
+        # HERE rather than testing emptiness in the branch conditions below: under codes
+        # 2/3/4 stdout is ALSO empty, so an `|| [[ -z "$path" ]]` test would fire for
+        # them too and collapse every cause back to "not found" — the exact defect this
+        # ticket exists to fix. Branch on the code alone.
+        if [[ $retro_rc -eq 0 ]] && [[ -z "$retro_path" ]]; then
+            retro_rc=1
+        fi
+        if [[ $retro_rc -eq 0 ]]; then
+            echo "  ✅ Retrospective file found: $(basename "$retro_path")"
+        elif [[ $retro_rc -eq 1 ]]; then
+            echo "  🚫 BLOCKING: Retrospective subitem marked complete but file not found"
+            echo "     Expected: ${working_id}_*_RETROSPECTIVE.md"
+            echo "     Searched: kanban/plans/${working_id}/ and kanban/"
+            echo "     Run: kb-retro-path $working_id (to get canonical save path)"
+            retro_blocking=true
         else
-            echo "  🚫 BLOCKING: Could not resolve retrospective path for $working_id"
-            echo "     (No plan document found — cannot derive filename)"
+            # Codes 2/3/4: the lookup never searched, so "not found" would be a lie.
+            # Still blocks — fail-closed is unchanged; only the attribution improves.
+            echo "  🚫 BLOCKING: Could NOT DETERMINE whether a retrospective exists for $working_id"
+            _kb_retro_failure_lines "$retro_rc" "$working_id" "     "
             retro_blocking=true
         fi
 
@@ -5039,26 +5053,53 @@ kb-done() {
         local kb_item_lower
         kb_item_lower=$(echo "$working_id" | tr '[:upper:]' '[:lower:]')
 
-        # Search for retrospective file matching the item ID
-        local kb_retro_file=""
+        # Search for retrospective file matching the item ID.
+        # XACA-1135: rc captured immediately after the assignment (see the exit-code map
+        # on _kb_find_existing_retro). This block stays NON-BLOCKING in every branch.
+        local kb_retro_file="" kb_retro_rc=0
+        kb_retro_file=$(_kb_find_existing_retro "$working_id")
+        kb_retro_rc=$?
+        # Defensive normalisation (XACA-1135): rc 0 with empty stdout is unreachable —
+        # the function only returns 0 after printing a path. Fold it into 1 ("absent")
+        # HERE rather than testing emptiness in the branch conditions below: under codes
+        # 2/3/4 stdout is ALSO empty, so an `|| [[ -z "$path" ]]` test would fire for
+        # them too and collapse every cause back to "not found" — the exact defect this
+        # ticket exists to fix. Branch on the code alone.
+        if [[ $kb_retro_rc -eq 0 ]] && [[ -z "$kb_retro_file" ]]; then
+            kb_retro_rc=1
+        fi
 
-        # Primary: check kanban/ dir for ITEM_ID_*_RETROSPECTIVE.md (canonical location)
-        kb_retro_file=$(find "${kb_kanban_dir}" -maxdepth 1 -type f -name "${working_id}_*_RETROSPECTIVE.md" 2>/dev/null | head -1)
-
-        # Fallback: check knowledge directories
-        if [[ -z "$kb_retro_file" ]]; then
+        # Legacy loose fallback, preserved deliberately (XACA-1135): this template's
+        # pre-port reminder also matched any file under kanban/knowledge/ whose NAME
+        # merely contains the lowercased item id. _kb_find_existing_retro is stricter
+        # (it requires the <ID>_*_RETROSPECTIVE.md convention), so running it alone
+        # would make this reminder fire for items whose retro the old code did find.
+        # Only consulted under rc=1 ("searched, genuinely absent") — never under
+        # 2/3/4, where nothing was searched and a loose hit would launder an
+        # unresolved lookup into a false "found".
+        if [[ $kb_retro_rc -eq 1 ]]; then
             local kb_search_dirs=()
             [[ -d "${kb_kanban_dir}/knowledge" ]] && kb_search_dirs+=("${kb_kanban_dir}/knowledge")
             for kb_dir in "${kb_search_dirs[@]}"; do
                 if [[ -d "$kb_dir" ]]; then
                     kb_retro_file=$(find "$kb_dir" -maxdepth 3 -type f -name "*${kb_item_lower}*" 2>/dev/null | head -1)
-                    [[ -n "$kb_retro_file" ]] && break
+                    if [[ -n "$kb_retro_file" ]]; then
+                        kb_retro_rc=0
+                        break
+                    fi
                 fi
             done
         fi
 
-        if [[ -n "$kb_retro_file" ]]; then
+        if [[ $kb_retro_rc -eq 0 ]]; then
             echo "  Retrospective found for ${working_id}: $(basename "$kb_retro_file")"
+        elif [[ $kb_retro_rc -ne 1 ]]; then
+            # Codes 2/3/4: nothing was searched. Do not claim "no retrospective found".
+            echo ""
+            echo "  ℹ️  Could NOT DETERMINE whether a retrospective exists for ${working_id}."
+            _kb_retro_failure_lines "$kb_retro_rc" "$working_id" "      "
+            echo "      This is informational only — ${working_id} is still complete."
+            echo ""
         else
             echo ""
             echo "  ╔══════════════════════════════════════════════════════════╗"
@@ -6653,20 +6694,47 @@ kb-backlog() {
                     # If this is a Retrospective subitem, validate that the retro file AND
                     # at least one knowledge entry exist before allowing completion.
                     if [[ "$sub_title" == Retrospective* ]]; then
-                        local retro_parent_id retro_path retro_ok=true
+                        local retro_parent_id retro_path retro_rc retro_ok=true
                         retro_parent_id="${sub_id%-*}"
 
-                        retro_path=$(kb-retro-path "$retro_parent_id" 2>/dev/null)
-                        if [[ -z "$retro_path" ]] || [[ ! -f "$retro_path" ]]; then
+                        # XACA-1135: rc captured on the line IMMEDIATELY after the
+                        # assignment. `local` stays above — `local retro_path=$(...)`
+                        # would make $? always 0 and defeat the whole distinction.
+                        retro_path=$(_kb_find_existing_retro "$retro_parent_id")
+                        retro_rc=$?
+                        # Defensive normalisation (XACA-1135): rc 0 with empty stdout is
+                        # unreachable — the function only returns 0 after printing a path.
+                        # Fold it into 1 ("absent") HERE rather than testing emptiness in the
+                        # branch conditions below: under codes 2/3/4 stdout is ALSO empty, so
+                        # an `|| [[ -z "$path" ]]` test would fire for them too and collapse
+                        # every cause back to "not found" — the exact defect this ticket
+                        # exists to fix. Branch on the code alone.
+                        if [[ $retro_rc -eq 0 ]] && [[ -z "$retro_path" ]]; then
+                            retro_rc=1
+                        fi
+                        if [[ $retro_rc -ne 0 ]]; then
                             echo ""
-                            echo "🚫 BLOCKING: Retrospective file missing for $retro_parent_id"
-                            if [[ -n "$retro_path" ]]; then
-                                echo "   Expected: $retro_path"
+                            if [[ $retro_rc -eq 1 ]]; then
+                                echo "🚫 BLOCKING: Retrospective file missing for $retro_parent_id"
+                                echo "   Expected: ${retro_parent_id}_*_RETROSPECTIVE.md"
+                                echo "   Searched: kanban/plans/${retro_parent_id}/ and kanban/"
+                                echo "   Create the retrospective file before marking this subitem done."
+                                echo "   Run: kb-retro-path $retro_parent_id (to get canonical save path)"
+                                echo "   Template: ${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md"
                             else
-                                echo "   Could not resolve path (no plan document found)."
+                                # Codes 2/3/4: nothing was searched, so "missing" would be a lie.
+                                # Still blocks — fail-closed is unchanged.
+                                echo "🚫 BLOCKING: Could NOT DETERMINE whether a retrospective exists for $retro_parent_id"
+                                _kb_retro_failure_lines "$retro_rc" "$retro_parent_id" "   "
                             fi
-                            echo "   Create the retrospective file before marking this subitem done."
-                            echo "   Template: ${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md"
+                            # XACA-1135: the knowledge-entry check below runs only inside
+                            # `if $retro_ok`, so it is invisible until the retro gate clears.
+                            # Announce it here so the operator is not ambushed by a second,
+                            # unannounced block on the next attempt. Messaging only — the
+                            # gate order and control flow are deliberately unchanged.
+                            echo "   Note: a knowledge-entry check also runs after this one — at least"
+                            echo "         one knowledge entry referencing $retro_parent_id is required"
+                            echo "         before this subitem can complete."
                             retro_ok=false
                         fi
 
@@ -10128,7 +10196,11 @@ kb-retro-check() {
         return 0
     fi
 
-    local total_count has_retro_count=0
+    # XACA-1135: undetermined_count tracks items whose retro state could NOT be
+    # established (team code or kanban path unresolvable). They are reported
+    # separately and excluded from the percentage denominator — never counted as
+    # missing, because nothing was actually searched for them.
+    local total_count has_retro_count=0 undetermined_count=0
     total_count=$(printf '%s\n' "$completed_items" | jq 'length' 2>/dev/null || echo "0")
 
     # Print table header
@@ -10138,6 +10210,7 @@ kb-retro-check() {
     # Iterate each completed item
     local idx=0
     local item_id item_title completed_at completed_short item_lower retro_found matches
+    local retro_path_result retro_rc
     while IFS= read -r item_json; do
         item_id=$(printf '%s\n' "$item_json" | jq -r '.id // "unknown"' 2>/dev/null)
         item_title=$(printf '%s\n' "$item_json" | jq -r '.title // "unknown"' 2>/dev/null)
@@ -10151,56 +10224,236 @@ kb-retro-check() {
         # Extract short date from ISO timestamp
         completed_short="${completed_at:0:10}"
 
-        # Search for retrospective files matching the item ID
-        retro_found="No"
+        # Search for retrospective files matching the item ID.
+        # XACA-1135: rc captured immediately after the assignment. Without it, an
+        # unresolvable team code printed "No" for every item on the board and drove a
+        # bogus completion percentage.
         item_lower=$(echo "$item_id" | tr '[:upper:]' '[:lower:]')
-
-        # Primary: check kanban/ dir for ITEM_ID_*_RETROSPECTIVE.md (canonical location)
-        matches=$(find "${kanban_dir}" -maxdepth 1 -type f -name "${item_id}_*_RETROSPECTIVE.md" 2>/dev/null | head -1)
-        if [[ -n "$matches" ]]; then
-            retro_found="Yes"
+        retro_path_result=$(_kb_find_existing_retro "$item_id")
+        retro_rc=$?
+        # Defensive normalisation (XACA-1135): rc 0 with empty stdout is unreachable —
+        # the function only returns 0 after printing a path. Fold it into 1 ("absent")
+        # HERE rather than testing emptiness in the branch conditions below: under codes
+        # 2/3/4 stdout is ALSO empty, so an `|| [[ -z "$path" ]]` test would fire for
+        # them too and collapse every cause back to "not found" — the exact defect this
+        # ticket exists to fix. Branch on the code alone.
+        if [[ $retro_rc -eq 0 ]] && [[ -z "$retro_path_result" ]]; then
+            retro_rc=1
         fi
 
-        # Fallback: check knowledge directories for any file containing the item ID
-        if [[ "$retro_found" == "No" ]]; then
+        # Legacy loose fallback, preserved deliberately (XACA-1135): this audit also
+        # matched any file under the team's knowledge/kanban dirs whose NAME merely
+        # contains the lowercased item id. Only consulted under rc=1 ("searched,
+        # genuinely absent") — never under 2/3/4, where nothing was searched and a
+        # loose hit would launder an unresolved lookup into a false "Yes".
+        if [[ $retro_rc -eq 1 ]]; then
             for kdir in "${knowledge_dirs[@]}"; do
                 if [[ -d "$kdir" ]]; then
                     matches=$(find "$kdir" -maxdepth 3 -type f -name "*${item_lower}*" 2>/dev/null | head -1)
                     if [[ -n "$matches" ]]; then
-                        retro_found="Yes"
+                        retro_rc=0
                         break
                     fi
                 fi
             done
         fi
 
+        if [[ $retro_rc -eq 0 ]]; then
+            retro_found="Yes"
+        elif [[ $retro_rc -eq 1 ]]; then
+            retro_found="No"
+        else
+            # Codes 2/3/4 — nothing was searched; the retro may well exist.
+            retro_found="Unknown"
+        fi
+
         if [[ "$retro_found" == "Yes" ]]; then
             has_retro_count=$((has_retro_count + 1))
-            printf "  %-18s %-38s %-12s %-10s\n" "$item_id" "$item_title" "$completed_short" "Yes"
-        else
-            printf "  %-18s %-38s %-12s %-10s\n" "$item_id" "$item_title" "$completed_short" "No"
+        elif [[ "$retro_found" == "Unknown" ]]; then
+            undetermined_count=$((undetermined_count + 1))
         fi
+        printf "  %-18s %-38s %-12s %-10s\n" "$item_id" "$item_title" "$completed_short" "$retro_found"
 
         idx=$((idx + 1))
     done < <(printf '%s\n' "$completed_items" | jq -c '.[]' 2>/dev/null)
 
     echo ""
-    # Summary line
-    local pct=0
-    if [[ "$total_count" -gt 0 ]]; then
-        pct=$(( (has_retro_count * 100) / total_count ))
+    # Summary line — XACA-1135: the denominator is the DETERMINABLE population. Items
+    # whose retro state could not be established are reported separately, never folded
+    # into "missing".
+    local determined_count pct=0
+    determined_count=$(( total_count - undetermined_count ))
+    if [[ "$determined_count" -gt 0 ]]; then
+        pct=$(( (has_retro_count * 100) / determined_count ))
     fi
-    echo "  Summary: ${has_retro_count} of ${total_count} completed items have retrospectives (${pct}%)"
+    echo "  Summary: ${has_retro_count} of ${determined_count} determinable completed items have retrospectives (${pct}%)"
+    if [[ "$undetermined_count" -gt 0 ]]; then
+        echo ""
+        echo "  ${undetermined_count} item(s) shown as 'Unknown': the team code or kanban path could not be"
+        echo "  resolved on this machine, so nothing was searched. Their retrospectives may"
+        echo "  ALREADY EXIST — they are NOT counted as missing. Known causes: XACA-1058"
+        echo "  (shipped helpers do not read the team-paths overlay) and XACA-0822."
+    fi
     echo ""
 
-    if [[ "$has_retro_count" -lt "$total_count" ]]; then
-        local missing=$(( total_count - has_retro_count ))
+    if [[ "$has_retro_count" -lt "$determined_count" ]]; then
+        local missing=$(( determined_count - has_retro_count ))
         echo "  ${missing} item(s) missing retrospectives."
         echo "  Save retrospectives to: ${kanban_dir}/knowledge/TEAM/<item-id>-retro.md"
         echo "  Or agent dirs:          ${kanban_dir}/knowledge/<agent>/<entry>.md"
     fi
     echo "═══════════════════════════════════════════════════════════════════════════"
     echo ""
+}
+
+# Glob for an existing retrospective file by filename convention alone.
+# Usage: _kb_glob_existing_retro <ITEM-ID> <KANBAN-DIR>
+# Output: full path (stdout) + return 0 if found; empty + return 1 if not.
+#
+# Search order:
+#   1. Nested: <kanban>/plans/<ID>/<ID>_*_RETROSPECTIVE.md
+#   2. Flat:   <kanban>/<ID>_*_RETROSPECTIVE.md
+#
+# Deliberately does NOT consult plan docs and does NOT call kb-retro-path. This is the
+# shared, non-recursive core used by _kb_find_existing_retro (its tiers 2-3). It must
+# stay free of any call back into _kb_find_existing_retro: that function's tier 1 calls
+# kb-retro-path, so routing the other way would recurse infinitely.
+#
+# Uses `find -name` (NOT raw globs) so it is safe under zsh nomatch. Pattern carries the
+# EXACT uppercase item ID so it matches real filenames (find -name is case-sensitive).
+_kb_glob_existing_retro() {
+    local item_id="${1-}"
+    local kanban_dir="${2-}"
+    [[ -z "$item_id" || -z "$kanban_dir" ]] && return 1
+    [[ ! -d "$kanban_dir" ]] && return 1
+
+    local search_result
+
+    # Tier 1: nested kanban/plans/<ID>/<ID>_*_RETROSPECTIVE.md
+    if [[ -d "${kanban_dir}/plans/${item_id}" ]]; then
+        search_result=$(find "${kanban_dir}/plans/${item_id}" -maxdepth 1 \
+            -name "${item_id}_*_RETROSPECTIVE.md" -type f 2>/dev/null | sort | head -1)
+        if [[ -n "$search_result" ]] && [[ -f "$search_result" ]]; then
+            printf '%s\n' "$search_result"
+            return 0
+        fi
+    fi
+
+    # Tier 2: flat kanban/<ID>_*_RETROSPECTIVE.md
+    search_result=$(find "$kanban_dir" -maxdepth 1 \
+        -name "${item_id}_*_RETROSPECTIVE.md" -type f 2>/dev/null | sort | head -1)
+    if [[ -n "$search_result" ]] && [[ -f "$search_result" ]]; then
+        printf '%s\n' "$search_result"
+        return 0
+    fi
+
+    return 1
+}
+
+# Locate an existing retrospective file for a kanban item WITHOUT requiring a plan doc.
+# Usage: _kb_find_existing_retro <ITEM-ID>
+# Output: full path to the retro file (stdout) + return 0 if found; empty stdout otherwise.
+#
+# EXIT-CODE MAP (XACA-1135) — an empty stdout no longer means "the file is absent".
+# Callers MUST capture `rc=$?` on the line IMMEDIATELY after the assignment; any
+# intervening command destroys it. NEVER write `local path=$(_kb_find_existing_retro …)`
+# — in that form `$?` is `local`'s status, which is always 0, so every cause silently
+# collapses back to "file absent" and the check returns the reassuring answer.
+#
+#   0  success — resolved path printed on stdout
+#   1  retrospective file GENUINELY ABSENT (team + kanban dir resolved, searched, not there)
+#   2  item id empty or malformed (expected XABC-1234)
+#   3  TEAM CODE UNRESOLVABLE on this machine — _kb_get_team_from_code returned empty.
+#      Nothing was searched. The retrospective may well ALREADY EXIST; this is a
+#      team-registration failure, not a missing file. Known causes: XACA-1058 (shipped
+#      helpers do not read the team-paths overlay) and XACA-0822 (template drift behind
+#      it). Do NOT advise `kb-retro-path` under this code — that is the very command
+#      that cannot resolve, so the advice is circular.
+#   4  kanban directory for the resolved team does not exist on disk. Nothing was searched.
+#
+# 1 is deliberately reserved for "genuinely absent" so that callers which treat any
+# non-zero as "not found" keep their historical meaning. Every non-zero status still
+# FAILS CLOSED at the blocking call sites — this is an attribution change, not a
+# permissiveness change.
+#
+# Resolution order:
+#   1. Plan-doc-anchored: if kb-retro-path resolves AND that file exists, return it
+#      (preserves this template's previous behavior for items that DO have a plan doc —
+#      the pre-XACA-1135 call sites here used exactly that check, so there is no
+#      detection regression, only additional tiers below it).
+#   2. Nested glob: kanban/plans/<ID>/<ID>_*_RETROSPECTIVE.md
+#   3. Flat glob:   kanban/<ID>_*_RETROSPECTIVE.md
+_kb_find_existing_retro() {
+    local item_id="${1-}"
+    # Cause 2: empty or malformed id — nothing searched.
+    [[ -z "$item_id" ]] && return 2
+    if [[ ! "$item_id" =~ ^X[A-Z]{3}-[0-9]+$ ]]; then
+        return 2
+    fi
+
+    local team kanban_dir
+    team=$(_kb_get_team_from_code "$item_id")
+    # Cause 3: team code unresolvable on this machine — nothing searched.
+    [[ -z "$team" ]] && return 3
+    kanban_dir=$(_kb_get_kanban_dir "$team")
+    # Cause 4: team resolved but its kanban dir is not on disk — nothing searched.
+    [[ ! -d "$kanban_dir" ]] && return 4
+
+    # Tier 1: plan-doc-anchored (no regression for items with a plan doc)
+    local anchored_path
+    anchored_path=$(kb-retro-path "$item_id" 2>/dev/null)
+    if [[ -n "$anchored_path" ]] && [[ -f "$anchored_path" ]]; then
+        printf '%s\n' "$anchored_path"
+        return 0
+    fi
+
+    # Tiers 2-3: nested then flat glob (shared, non-recursive core).
+    # Returns 0 on hit, 1 on genuine absence — exactly the meaning of code 1 above.
+    _kb_glob_existing_retro "$item_id" "$kanban_dir"
+}
+
+# Explain a non-zero _kb_find_existing_retro status in operator-actionable terms (XACA-1135).
+# Usage: _kb_retro_failure_lines <rc> <ITEM-ID> [indent]
+# Prints an explanation block on stdout. Handles ONLY the "could not determine" statuses
+# (2, 3, 4); status 1 (genuinely absent) keeps each call site's own wording, because the
+# "run kb-retro-path" advice is correct there and circular only under status 3.
+# This function never blocks and never exits — the caller decides what a status means
+# for its own control flow.
+_kb_retro_failure_lines() {
+    local rc="${1-}"
+    local item_id="${2-}"
+    local pad="${3-   }"
+    local rf_team rf_dir
+
+    case "$rc" in
+        2)
+            echo "${pad}Cause: the item id is empty or malformed: '${item_id}'"
+            echo "${pad}Expected format: XABC-1234 (e.g. XACA-0111, XIOS-0562)."
+            echo "${pad}Nothing was searched — correct the id and re-run."
+            ;;
+        3)
+            echo "${pad}Cause: the team code could not be resolved on this machine."
+            echo "${pad}Nothing was searched. The retrospective may ALREADY EXIST — this is a"
+            echo "${pad}team-registration failure, not a missing file. Do NOT create a second"
+            echo "${pad}retrospective, and do NOT run kb-retro-path: that is the very command"
+            echo "${pad}that cannot resolve, so it will fail the same way."
+            echo "${pad}Known causes: XACA-1058 (shipped helpers do not read the team-paths"
+            echo "${pad}overlay) and XACA-0822 (template drift behind it)."
+            echo "${pad}Fix: register/repair this team on this machine, then re-run."
+            ;;
+        4)
+            rf_team=$(_kb_get_team_from_code "$item_id" 2>/dev/null)
+            rf_dir=$(_kb_get_kanban_dir "$rf_team" 2>/dev/null)
+            echo "${pad}Cause: the kanban directory for team '${rf_team:-<unknown>}' does not exist."
+            echo "${pad}Path: ${rf_dir:-<unresolved>}"
+            echo "${pad}Nothing was searched — the retrospective may exist on another machine or"
+            echo "${pad}under a different path. Repair this team's kanban path before concluding"
+            echo "${pad}the retrospective is missing."
+            ;;
+        *)
+            echo "${pad}Cause: unrecognized retro-lookup status ($rc). Treated as unresolved."
+            ;;
+    esac
 }
 
 # Resolve the correct retrospective file path for a kanban item

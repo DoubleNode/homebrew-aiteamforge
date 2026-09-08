@@ -6,6 +6,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1135: the retrospective gate told consumers a retrospective was MISSING when it had in
+  fact never looked. `_kb_find_existing_retro` returned an empty string for four different
+  conditions -- resolved-and-genuinely-absent, malformed item id, UNRESOLVABLE TEAM CODE, and a
+  kanban dir that is not on disk -- and every call site read that one empty string as "the file
+  is not there". Cause 3 (unresolvable team code) is overwhelmingly a CONSUMER condition: it is
+  what XACA-1058 (shipped helpers do not read the team-paths overlay) and XACA-0822 (template
+  drift behind it) produce on a real install. So the machines where this misreport actually
+  fires are precisely the ones this template ships to, and until now the shipped copy carried
+  the defect verbatim while the fix sat in canonical only.
+  This template previously had NO attribution machinery at all -- it called `kb-retro-path`
+  directly at both blocking sites and raw `find` at the two reporting sites. Ported in from
+  canonical: `_kb_glob_existing_retro`, `_kb_find_existing_retro` (distinct exit statuses
+  0=found / 1=genuinely absent / 2=malformed id / 3=team code unresolvable / 4=kanban dir
+  missing, documented in its header), and `_kb_retro_failure_lines` (renders per-cause operator
+  text). All four consuming sites now capture `rc=$?` on the line IMMEDIATELY after the
+  assignment and branch on the code.
+  FAIL-CLOSED IS UNCHANGED and was verified per cause in this copy: at both blocking sites
+  (`kb-sweep`'s retro gate, `kb-backlog sub done`'s gate) every non-zero status still blocks --
+  including an unrecognised one -- and rc=0 remains the only non-blocking result. This is an
+  attribution change, not a permissiveness change.
+  The operator text matters as much as the code. Under cause 3 the message no longer says the
+  file is missing; it says the state could not be DETERMINED, that the retrospective may ALREADY
+  EXIST, and it explicitly tells the operator NOT to create a second retrospective and NOT to run
+  `kb-retro-path` -- that being the very command that cannot resolve, so the old advice was
+  circular exactly when it was least affordable. `Run: kb-retro-path` survives only under cause 1,
+  where it is correct.
+  Two deliberate divergences from canonical, both to avoid a DETECTION regression in this copy.
+  The two reporting sites here (`kb-done`'s knowledge-capture reminder and `kb-retro-check`) used
+  a looser legacy search than canonical's -- any file under the team's knowledge/kanban dirs whose
+  NAME merely contains the lowercased item id. That fallback is retained, but is now consulted
+  ONLY under rc=1 ("searched, genuinely absent"), never under 2/3/4, where a loose hit would
+  launder an unresolved lookup into a false "found"/"Yes".
+  `kb-retro-check` additionally gains canonical's "Unknown" verdict (distinct from "No") and
+  divides by the DETERMINABLE population, so items whose state could not be established are
+  reported separately instead of being silently counted as missing and dragging the percentage
+  down.
+  `share/templates/aliases/kanban-aliases.sh` needed no change: its `kb-backlog` has no `sub`
+  subcommand and its `kb-done` is a 38-line status write with no retrospective gate and no
+  knowledge-capture reminder, so there is no retro lookup in that copy to attribute. Same
+  situation as the XACA-1119 entry below ("carries neither function and needed no change"); the
+  outer PR carries `Tap-Divergence:` trailers for the two function names, which collide by name
+  only. Note this copy is the INSTALL FALLBACK since XACA-1095 -- install and upgrade render the
+  full template first -- so the port above is what consumers actually receive.
+
 - XACA-1128 (round 5): the same defect reaches the AGENT PROMPTS, and this one is directly
   reachable from text a user types. `echo "$prompt" | cc` x6 and `echo "$description" | fold`
   pass a ticket's own title/description through zsh `echo`. Unlike the JSON cases there is no
