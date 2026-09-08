@@ -606,7 +606,10 @@ PYEOF
     local names_file="${LCARS_TMP}lcars-amb-names-${handle}.txt"
     printf '%s\n' "${badge_names[@]}" > "$names_file"
 
-    [[ ${#codepoints[@]} -eq 0 ]] && return
+    if [[ ${#codepoints[@]} -eq 0 ]]; then
+        _panel_debug "amb badges: SKIPPED — cache parsed but yielded ZERO codepoints for '${handle}' (badge data empty or unparseable)"
+        return
+    fi
 
     local circle_size=46    # Outer circle diameter
     local emoji_size=18     # Emoji size inside circle
@@ -648,7 +651,10 @@ PYEOF
         badge_files+=("$badge_file")
     done
 
-    [[ ${#badge_files[@]} -eq 0 ]] && return
+    if [[ ${#badge_files[@]} -eq 0 ]]; then
+        _panel_debug "amb badges: SKIPPED — ${#codepoints[@]} codepoint(s) resolved but ZERO badge images were built (twemoji fetch or magick composite failed)"
+        return
+    fi
 
     # Composite badges into row strips (up to 2 rows)
 
@@ -671,6 +677,11 @@ PYEOF
         if [[ $row_count -gt 0 ]]; then
             local strip_file="${LCARS_TMP}lcars-amb-strip-${handle}-r${row}.png"
             magick "${magick_args[@]}" +append PNG32:"$strip_file" 2>/dev/null
+            if [[ -f "$strip_file" ]]; then
+                _panel_debug "amb badges: row ${row} strip built (${row_count} badge(s)) -> $strip_file"
+            else
+                _panel_debug "amb badges: row ${row} strip NOT built — magick composite produced no output ($strip_file)"
+            fi
         fi
 
         (( idx += per_row ))
@@ -902,7 +913,7 @@ render_panel() {
     [[ ! -f "$avatar_file" ]] && avatar_file="${AVATARS_DIR}/${team}_${avatar}_avatar.png"
     # Guarded: the $(...) below would fork subshells on every poll otherwise.
     if _panel_debug_on; then
-        _panel_debug "avatar lookup: AVATARS_DIR='${AVATARS_DIR:-<empty>}' team='$team' avatar='$avatar' tried='$avatar_panel' found=$([[ -f "$avatar_file" ]] && echo "yes ($avatar_file)" || echo no) IMGCAT=$([[ -x "$IMGCAT" ]] && echo "${IMGCAT} (executable)" || echo "${IMGCAT:-<empty>} (not executable)")"
+        _panel_debug "avatar: lookup AVATARS_DIR='${AVATARS_DIR:-<empty>}' team='$team' avatar='$avatar' tried='$avatar_panel' found=$([[ -f "$avatar_file" ]] && echo "yes ($avatar_file)" || echo no) IMGCAT=$([[ -x "$IMGCAT" ]] && echo "${IMGCAT} (executable)" || echo "${IMGCAT:-<empty>} (not executable)")"
     fi
     # Tracks whether anything was actually painted, so the fallback below fires
     # for EVERY way this block can render nothing -- not just a missing file,
@@ -922,20 +933,20 @@ render_panel() {
                     PNG32:"$rounded_file" 2>/dev/null
             fi
             if [[ -f "$rounded_file" ]]; then
-                _panel_debug "imgcat: invoking on rounded avatar $rounded_file"
+                _panel_debug "avatar: imgcat invoking on rounded $rounded_file"
                 "$IMGCAT" -W 100% -H 12 "$rounded_file"
                 avatar_rendered=true
             else
-                _panel_debug "imgcat: SKIPPED — magick rounding produced no output file ($rounded_file)"
+                _panel_debug "avatar: imgcat SKIPPED — magick rounding produced no output file ($rounded_file)"
             fi
         else
-            _panel_debug "imgcat: invoking on raw avatar $avatar_file (no magick on PATH, skipping rounding)"
+            _panel_debug "avatar: imgcat invoking on raw $avatar_file (no magick on PATH, skipping rounding)"
             "$IMGCAT" -W 100% -H 12 "$avatar_file"
             avatar_rendered=true
         fi
     else
         if _panel_debug_on; then
-            _panel_debug "imgcat: SKIPPED entire avatar block — avatar_file exists=$([[ -f "$avatar_file" ]] && echo yes || echo no), IMGCAT executable=$([[ -x "$IMGCAT" ]] && echo yes || echo no)"
+            _panel_debug "avatar: imgcat SKIPPED entire block — avatar_file exists=$([[ -f "$avatar_file" ]] && echo yes || echo no), IMGCAT executable=$([[ -x "$IMGCAT" ]] && echo yes || echo no)"
         fi
     fi
     # Visible degraded state (XACA-1134, UX finding 1). Previously the panel
@@ -948,9 +959,15 @@ render_panel() {
     # applied to the crew strip or AMB badges, where absence is a legitimate
     # state (no other agents online; agent not registered with AMB) and a
     # placeholder would cry wolf on a healthy panel.
+    # Wording matches the file's existing degraded-state blocks exactly: two dim
+    # indented lines, no brackets. An earlier revision split "[avatar
+    # unavailable]" across the break, leaving an unclosed "[avatar" on its own
+    # line -- a punctuation style used nowhere else here, and not forced by
+    # width (TARGET_COLS=30, the phrase is 22 chars). On a component whose whole
+    # job is to signal a glitch, looking like one is a bad failure mode.
     if [[ "$avatar_rendered" != "true" ]]; then
-        echo "${DIM}  [avatar${RESET}"
-        echo "${DIM}  unavailable]${RESET}"
+        echo "${DIM}  Avatar${RESET}"
+        echo "${DIM}  unavailable${RESET}"
     fi
 
     echo ""
@@ -999,7 +1016,13 @@ render_panel() {
             for row_idx in 0 1; do
                 local row_strip="${LCARS_TMP}lcars-amb-strip-${amb_handle}-r${row_idx}.png"
                 if [[ -f "$row_strip" && -x "$IMGCAT" ]]; then
+                    _panel_debug "amb badges: row ${row_idx} imgcat invoking on $row_strip"
                     "$IMGCAT" -H 3 -W 100% "$row_strip"
+                elif _panel_debug_on; then
+                    # Row 1 legitimately absent when the agent has <=5 badges; the
+                    # message says which condition failed so that is distinguishable
+                    # from a genuine build failure.
+                    _panel_debug "amb badges: row ${row_idx} NOT displayed — strip exists=$([[ -f "$row_strip" ]] && echo yes || echo no), IMGCAT executable=$([[ -x "$IMGCAT" ]] && echo yes || echo no)"
                 fi
             done
             # List all badge names as individual lines below the images

@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1134 (PR #837 gate findings, round 2): `agent-panel-display.sh` — unified the avatar
+  surface onto a single `avatar:` debug prefix (it previously used two, so grepping by surface
+  name missed the paint lines); completed the AMB badge instrumentation (two further silent
+  returns, the row-strip composite write, and the previously-unlogged imgcat display loop in
+  render_panel — 3 debug lines to 9); and replaced the split-bracket `[avatar / unavailable]`
+  placeholder with two dim unbracketed lines matching the file's existing degraded-state
+  convention.
 - XACA-1134 (PR #837 gate findings): `agent-panel-display.sh` — visible `[avatar unavailable]`
   placeholder replacing the silent blank (fires for a failed `magick` rounding too, not just a
   missing file); reworded the `AVATARS_DIR` debug line to report directory EXISTENCE rather
