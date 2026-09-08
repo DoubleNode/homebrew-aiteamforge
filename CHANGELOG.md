@@ -25,6 +25,30 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   FUNCTION-granular, and `kb-release-create` already read `co-changed` from an earlier move in the
   same range, so a line-level omission inside an already-co-changed function passes silently.
   Function-level parity is not line-level parity.
+- XACA-1120 (PR #836 review round 5, final — four findings, all fixed, one closed as duplicate):
+  **-040** closed as a duplicate of XACA-1136, no code change here — it reported
+  `test-xaca-1095-helpers-template-preference.sh`'s hardcoded `PRE_FIX_REV=1d49bfb^` (an object
+  that does not exist in this repo, so its negative controls skip unconditionally); XACA-1136
+  already owns that pin. **-041** corrected the `{{ORG_SLUG}}` count this PR's own round-4
+  entries carried — "27 times / 27 occurrences in `cc-aliases.sh` alone" was `grep -c` (matching
+  LINES), not occurrences; re-measured with `grep -o | wc -l`: 44 occurrences in `cc-aliases.sh`,
+  63 total across 7 shipped template files (corrected in place in both earlier entries below).
+  **-042** `test-xaca-1120-template-phase-honest-reporting.sh`'s CASE 5i reimplemented
+  `_AITF_NEVER_OVERWRITE_BASENAMES` membership matching as newline-delimited `case` matching,
+  while the product's `_aitf_is_never_overwrite_basename()` word-splits it — the two only agreed
+  because the shipped list has exactly one entry. Fixed by calling the product function directly
+  (via the existing `_extract_aitf_helpers` extraction) instead of re-deriving its logic, plus a
+  new case proving the delegation correctly parses a synthetic multi-entry list. **-043** added
+  the missing regression test for subitem -037 (dry-run must not create `share/aliases/`):
+  XACA-0771's own T4 only ever asserted the alias FILE was absent under `--dry-run`, which passed
+  both before and after -037's fix, because the DIRECTORY was the actual regression. New case
+  (with a self-located `git log -S` negative control, not a hand-typed SHA) asserts
+  `share/aliases/` itself does not exist after a dry run that would otherwise create every
+  mandatory alias file. **-044** the cp-stub covering subitem -039's backup guard only ever drove
+  `cp`'s hard-failure branch (non-zero exit); it never proved the guard's `cmp -s` content check
+  independently, which exists specifically to catch a `cp` that reports success while writing a
+  truncated/partial file. Added a second stub where `cp` exits 0 but writes 4 truncated bytes,
+  proving the guard still aborts the install on content mismatch alone.
 - XACA-1058: both shipped copies DERIVED a team code instead of reading the authoritative
   `~/.aiteamforge/team-paths.json` overlay, returning wrong codes for live teams. Same
   authority-inversion class as XACA-0998 and XACA-1053: computing a value that already has a
@@ -209,10 +233,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `{{ORG_NAME}}` -- were installing with that placeholder left literal on every create/refresh;
   verified end to end in a sandbox (create + update paths, mode 755 on create, `{{ORG_NAME}}`
   resolved). **Correction (PR #836 review round 4, subitem XACA-1120-036):** the prior text here
-  claimed "zero placeholders remaining" -- false. `{{ORG_SLUG}}`, which `cc-aliases.sh` alone
-  carries 27 times, is not one of the three placeholders `_aitf_render_template` substitutes and
-  is left literal by this change too. Substituting it is XACA-1127's territory, not this
-  ticket's. Also: `update_shell_helpers`' own "Updated N helper(s)"
+  claimed "zero placeholders remaining" -- false. `{{ORG_SLUG}}`, which is not one of the three
+  placeholders `_aitf_render_template` substitutes, is left literal by this change too.
+  Substituting it is XACA-1127's territory, not this ticket's. **Further correction (subitem
+  XACA-1120-041):** an earlier version of this entry put the `{{ORG_SLUG}}` count at "27 times
+  ... alone" in `cc-aliases.sh` -- that was `grep -c` (matching LINES), not occurrences, and
+  wrongly implied `cc-aliases.sh` was the only carrier. Re-measured with `grep -o | wc -l`:
+  44 occurrences in `cc-aliases.sh`, 63 total across 7 shipped template files (see the round-4
+  entry below for the per-file breakdown). Also: `update_shell_helpers`' own "Updated N helper(s)"
   summary line had the same past-tense-under-`DRY_RUN` bug subitem -027 fixed in
   `update_templates` (the subitem explicitly named both sites); it now says "Would update" under
   `DRY_RUN` there too.
@@ -223,9 +251,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `find share/templates -name '*.template'` -- the real count is 8 `*.sh`, 4 launchd plists, 2
   CLAUDE.md renders, 2 JSON, and the secrets.env credentials file. **-036** a comment claiming
   `_aitf_render_template` "substitutes all three placeholders the shipped templates use" was also
-  false: the alias templates carry a fourth, `{{ORG_SLUG}}` (27 occurrences in `cc-aliases.sh`
-  alone), which nothing in the tap substitutes -- corrected in place above and left for
-  XACA-1127, which owns that placeholder. **-037** the aliases-loop rewrite had moved
+  false: the alias templates carry a fourth, `{{ORG_SLUG}}`, which nothing in the tap
+  substitutes -- corrected in place above and left for XACA-1127, which owns that placeholder.
+  **Correction (subitem XACA-1120-041):** this entry originally put the count at "27 occurrences
+  in `cc-aliases.sh` alone" -- `grep -c` (matching LINES), not `grep -o | wc -l` (occurrences),
+  and wrong that `cc-aliases.sh` was the only carrier. Verified counts: `{{ORG_SLUG}}` appears
+  63 times total across 7 shipped template files -- `agent-aliases.sh` 1, `cc-aliases.sh` 44,
+  `kanban-aliases.sh` 1, `claude-md-global.template` 9, `statusline-command.sh` 2,
+  `kanban-helpers.template.sh` 5, `secrets.env.template` 1. Non-blocking (nothing depended on
+  the wrong count here), but it could have under-scoped XACA-1127. **-037** the aliases-loop rewrite had moved
   `mkdir -p "$aliases_dir"` out of the `DRY_RUN=false` guard, so `--dry-run` was creating a live
   directory -- moved back behind the guard. **-038** `_AITF_NEVER_OVERWRITE_BASENAMES`'s own
   comment said "add future basenames here as they ship" with nothing enforcing it; new suite

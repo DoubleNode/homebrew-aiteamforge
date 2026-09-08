@@ -206,6 +206,40 @@ if command -v git >/dev/null 2>&1; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Third pre-fix revision, self-located the same way: subitem XACA-1120-037
+# (PR #836 review round 3). Before this fix, the "was missing" branch of the
+# share/aliases/ create loop ran `mkdir -p "$aliases_dir"` UNCONDITIONALLY,
+# ahead of the DRY_RUN check that picks the render placement -- so a
+# `--dry-run` upgrade materialized the live share/aliases/ directory on disk
+# even though its whole purpose is to touch nothing. XACA-0771's own T4 only
+# ever asserted the alias FILE was absent under DRY_RUN, which passed both
+# before and after this fix; the DIRECTORY was the actual regression and had
+# no coverage. Anchored on the line that only appears in the "was missing"
+# branch (`[ "$DRY_RUN" = true ] && _alias_placement="tmpdir"` also appears,
+# unchanged, in the sibling "refresh" branch a few lines below -- pickaxe
+# still finds this because the fix commit changes its total occurrence count
+# in the file from 2 to 1).
+# ─────────────────────────────────────────────────────────────────────────────
+_PRE_FIX_AVAILABLE_ALIASES_DIR=false
+PRE_FIX_REV_ALIASES_DIR=""
+if command -v git >/dev/null 2>&1; then
+    _fix_commit_aliases_dir="$(git -C "$TAP_ROOT" log -S'[ "$DRY_RUN" = true ] && _alias_placement="tmpdir"' \
+        --format='%H' -1 -- libexec/commands/aiteamforge-upgrade.sh 2>/dev/null)"
+    if [ -n "$_fix_commit_aliases_dir" ] && git -C "$TAP_ROOT" cat-file -e "${_fix_commit_aliases_dir}^" 2>/dev/null; then
+        PRE_FIX_REV_ALIASES_DIR="${_fix_commit_aliases_dir}^"
+        # Confirm the parent genuinely predates the fix: it must still carry
+        # the unconditional mkdir immediately after the "was missing" log
+        # line, with no DRY_RUN guard between them. Same pipefail hazard as
+        # above -- capture first, match in-shell, no pipeline.
+        _parent_blob_aliases_dir="$(git -C "$TAP_ROOT" show "${PRE_FIX_REV_ALIASES_DIR}:libexec/commands/aiteamforge-upgrade.sh" 2>/dev/null)"
+        case "$_parent_blob_aliases_dir" in
+            *'(was missing)..."'$'\n''      mkdir -p "$aliases_dir"'*) _PRE_FIX_AVAILABLE_ALIASES_DIR=true ;;
+        esac
+        unset _parent_blob_aliases_dir
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Extraction helpers (mirrors test-xaca-1095's _extract_fn family).
 # ─────────────────────────────────────────────────────────────────────────────
 _extract_fn_from_content() {
@@ -343,6 +377,50 @@ _run_update_templates_backup_fails() {
     fi
     (
         cp() { return 1; }
+        print_section() { echo "== $* =="; }
+        print_info()    { echo "INFO: $*"; }
+        print_success() { echo "OK: $*"; }
+        print_warning() { echo "WARN: $*"; }
+        FRAMEWORK_DIR="$sbx/framework"
+        WORKING_DIR="$sbx/working"
+        SHARED_DEV_ROOT="/Sandbox/Shared"
+        ORG_NAME="SandboxOrg"
+        FORCE="$force"
+        DRY_RUN="$dry"
+        eval "$(_extract_aitf_helpers)"
+        eval "$fn_src"
+        update_templates
+    ) 2>&1
+}
+
+# Like _run_update_templates_backup_fails, but `cp` "succeeds" (exit 0) while
+# writing a TRUNCATED backup instead of a real copy (subitem XACA-1120-044).
+# The prior stub only ever drove the guard's hard-failure branch (`cp`
+# returning non-zero); it never proved the guard's OTHER half has teeth: the
+# code at aiteamforge-upgrade.sh:607 reads
+#   `if ! cp -p "$target_file" "$_template_backup" 2>/dev/null || ! cmp -s "$target_file" "$_template_backup"; then`
+# -- the `cmp -s` half exists specifically to catch a `cp` that reports
+# success but produced a short/partial write (an interrupted copy, a full
+# disk that silently truncates, etc). A stub that only ever fails outright can
+# never distinguish "the guard checks cmp -s" from "the guard would have
+# passed on cp's exit status alone" -- exactly the coincidental-pass class
+# this suite exists to rule out. This stub writes the first 4 bytes of the
+# real source content, so the backup exists, `cp` returns 0, and the content
+# is provably short rather than merely different.
+_run_update_templates_backup_truncates() {
+    local sbx="$1" force="${2:-false}" dry="${3:-false}"
+    local fn_src
+    fn_src="$(_extract_fn_from_file "$UPGRADE_SH" "update_templates")"
+    if [ -z "$fn_src" ]; then
+        echo "EXTRACT_FAILED: update_templates (current)" >&2
+        return 2
+    fi
+    (
+        # $2/$3 here are cp's own positional args, not this function's --
+        # update_templates' one and only cp call site is the fixed shape
+        # `cp -p "$target_file" "$_template_backup"`, so $1=-p $2=source
+        # $3=dest. head -c4 truncates on purpose; exit 0 either way.
+        cp() { head -c 4 "$2" > "$3" 2>/dev/null; return 0; }
         print_section() { echo "== $* =="; }
         print_info()    { echo "INFO: $*"; }
         print_success() { echo "OK: $*"; }
@@ -500,6 +578,37 @@ elif [ "${_backup_count:-0}" -ne 0 ]; then
     test_fail "a backup file was left in config/ despite cp -p having failed -- orphaned artifact. Found: $_backup_count"
 elif ! echo "$_out" | grep -qi 'backup'; then
     test_fail "no output mentions the backup failure -- silent abort is exactly the class of unfalsifiable behavior this ticket exists to remove. Output: $_out"
+else
+    test_pass
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 4c (subitem XACA-1120-044) — the other half of case 4b's guard. `cp`
+# returning non-zero is only ONE of the two ways a backup can go wrong; the
+# guard at aiteamforge-upgrade.sh:607 also verifies the backup by CONTENT
+# (`cmp -s`), precisely because `cp` can report success (exit 0) while having
+# written a short/partial file -- an interrupted copy, a full disk that
+# truncates instead of erroring, etc. Case 4b's stub always returns 1, so it
+# can only prove the exit-status branch works; it says nothing about the
+# `cmp -s` branch. This case drives `cp` down the OTHER path: exit 0, content
+# truncated. Asserts the same three things as 4b (target untouched, no
+# orphaned backup, output mentions the failure) so a content-only regression
+# in the guard is caught exactly as an exit-status regression would be.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "cp exiting 0 but writing a truncated backup still aborts the install (content check has teeth independent of exit status)"
+_sbx="$(_next_sandbox)"; _make_sandbox "$_sbx"
+mkdir -p "$_sbx/working/config"
+printf '# stale\naiteamforge_dir=/old\nshared_dev_root=/old\norg_name=old\n' > "$_sbx/working/config/demo.conf"
+_stale_content="$(cat "$_sbx/working/config/demo.conf")"
+_out="$(_run_update_templates_backup_truncates "$_sbx")"
+_after_content="$(cat "$_sbx/working/config/demo.conf")"
+_backup_count="$(find "$_sbx/working/config" -name 'demo.conf.backup-*' 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$_after_content" != "$_stale_content" ]; then
+    test_fail "target was modified despite the backup being truncated -- install proceeded on a partial-write 'success'. Content: $_after_content"
+elif [ "${_backup_count:-0}" -ne 0 ]; then
+    test_fail "a backup file was left in config/ despite the backup being truncated -- orphaned artifact. Found: $_backup_count"
+elif ! echo "$_out" | grep -qi 'backup'; then
+    test_fail "no output mentions the backup failure for a cp-exit-0-but-truncated write -- the content check caught it silently or not at all. Output: $_out"
 else
     test_pass
 fi
@@ -738,22 +847,33 @@ _credential_marker_basenames() {
     done
 }
 
+# subitem XACA-1120-042 (PR #836 review round 4): this case USED TO reimplement
+# the allowlist match itself, as newline-delimited `case` matching. The
+# product's real matcher, _aitf_is_never_overwrite_basename(), word-splits
+# _AITF_NEVER_OVERWRITE_BASENAMES on unquoted `for entry in $...` (default
+# IFS: space/tab/newline) -- the test's newline-only matching only ever agreed
+# with it because the shipped list has exactly one entry, where the
+# distinction between "split on newline" and "split on whitespace" cannot show
+# up. Add a second, space-separated basename to the real list and the two
+# implementations diverge silently: the test would report BOTH entries
+# unprotected while the product correctly recognizes both. Two implementations
+# of one rule is what let that drift happen unnoticed. Fixed by calling the
+# PRODUCT FUNCTION directly (extracted via _extract_aitf_helpers, already used
+# for this exact purpose elsewhere in this file) instead of re-deriving its
+# logic -- the test can no longer disagree with the code it is testing.
 test_start "no shipped *.template carries a credential-shaped assignment outside _AITF_NEVER_OVERWRITE_BASENAMES"
 _allowlist_line="$(grep '^_AITF_NEVER_OVERWRITE_BASENAMES=' "$UPGRADE_SH")"
 if [ -z "$_allowlist_line" ]; then
     test_fail "could not find _AITF_NEVER_OVERWRITE_BASENAMES= in $UPGRADE_SH — extraction anchor drifted"
 else
-    # shellcheck disable=SC2086,SC1090
-    eval "$_allowlist_line"
     _unprotected=""
     _matched_any=false
     while IFS= read -r _basename; do
         [ -n "$_basename" ] || continue
         _matched_any=true
-        case $'\n'"${_AITF_NEVER_OVERWRITE_BASENAMES}"$'\n' in
-            *$'\n'"${_basename}"$'\n'*) : ;;   # on the list -- fine
-            *) _unprotected="${_unprotected}${_basename} " ;;
-        esac
+        if ! (eval "$(_extract_aitf_helpers)"; _aitf_is_never_overwrite_basename "$_basename"); then
+            _unprotected="${_unprotected}${_basename} "
+        fi
     done <<EOF
 $(_credential_marker_basenames "$TAP_ROOT/share/templates")
 EOF
@@ -768,6 +888,32 @@ EOF
     else
         test_pass
     fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 5i-2 (subitem XACA-1120-042) — proves the delegation above actually has
+# teeth against a MULTI-entry list, which the real shipped list (one entry)
+# cannot exercise. Calls the real product function with a synthetic
+# space-separated two-entry list and checks BOTH the matching and the
+# non-matching basename, directly reproducing the divergence a newline-only
+# reimplementation would have silently mismatched.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "_aitf_is_never_overwrite_basename word-splits a multi-entry allowlist correctly"
+_multi_out="$(
+    eval "$(_extract_fn_from_file "$UPGRADE_SH" "_aitf_is_never_overwrite_basename")"
+    _AITF_NEVER_OVERWRITE_BASENAMES="secrets.env other-secret.env"
+    if _aitf_is_never_overwrite_basename "secrets.env" && \
+       _aitf_is_never_overwrite_basename "other-secret.env" && \
+       ! _aitf_is_never_overwrite_basename "not-on-the-list.env"; then
+        echo OK
+    else
+        echo MISMATCH
+    fi
+)"
+if [ "$_multi_out" = "OK" ]; then
+    test_pass
+else
+    test_fail "product function mis-parsed a two-entry space-separated allowlist: $_multi_out"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -901,6 +1047,104 @@ if echo "$_out" | grep -q 'kanban-helpers.sh already current'; then
     test_pass
 else
     test_fail "a verified no-op render printed no attribution line. Got: $_out"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rev+DRY_RUN-aware runner for update_shell_helpers, for the aliases_dir cases
+# below (subitem XACA-1120-043). Distinct from _run_update_shell_helpers above
+# (which hardcodes DRY_RUN=false for the kanban-helpers.sh cases) because this
+# regression is specifically about what --dry-run does to the filesystem.
+# Mirrors _run_update_templates_rev's rev-selection shape.
+# ─────────────────────────────────────────────────────────────────────────────
+_run_update_shell_helpers_rev() {
+    local rev="$1" sbx="$2" dry="${3:-false}"
+    local fn_src
+    if [ "$rev" = "current" ]; then
+        fn_src="$(_extract_fn_from_file "$UPGRADE_SH" "update_shell_helpers")"
+    else
+        fn_src="$(_extract_fn_from_rev "$rev" "libexec/commands/aiteamforge-upgrade.sh" "update_shell_helpers")"
+    fi
+    if [ -z "$fn_src" ]; then
+        echo "EXTRACT_FAILED: update_shell_helpers ($rev)" >&2
+        return 2
+    fi
+    (
+        print_section() { echo "== $* =="; }
+        print_info()    { echo "INFO: $*"; }
+        print_success() { echo "OK: $*"; }
+        print_warning() { echo "WARN: $*"; }
+        FRAMEWORK_DIR="$sbx/framework"
+        WORKING_DIR="$sbx/working"
+        SHARED_DEV_ROOT="/Sandbox/Shared"
+        ORG_NAME="SandboxOrg"
+        FORCE=false
+        DRY_RUN="$dry"
+        eval "$(_extract_aitf_helpers)"
+        # update_shell_helpers' aliases loop calls _xaca0771_mandatory_alias_
+        # basenames() (defined separately, a few lines above update_shell_
+        # helpers in the source file) to decide which missing alias files get
+        # CREATED vs silently skipped as optional. Without it defined here,
+        # `command not found` makes that lookup return empty, every alias
+        # file is treated as optional, the "was missing" branch this test
+        # targets never runs for any of them, and the case would pass
+        # VACUOUSLY -- exactly the class of check this ticket exists to stop
+        # writing. Unchanged between the pre-037-fix revision and current
+        # (verified: diff of the extracted function body is empty), so pulling
+        # it from the current file is safe for either rev, matching the same
+        # convention _extract_aitf_helpers already uses.
+        eval "$(_extract_fn_from_file "$UPGRADE_SH" "_xaca0771_mandatory_alias_basenames")"
+        eval "$fn_src"
+        update_shell_helpers
+    ) 2>&1
+}
+
+# A sandbox carrying only the three MANDATORY alias source templates (see
+# _xaca0771_mandatory_alias_basenames), no working/share/aliases/ at all --
+# the exact precondition that drives every mandatory alias file down the
+# "was missing" creation branch, which is where the mkdir under test lives.
+# No kanban-helpers template is provided; update_shell_helpers prints a
+# warning and moves on to the aliases loop, which is all this case needs.
+_make_aliases_only_sandbox() {
+    local sbx="$1" _af
+    mkdir -p "$sbx/framework/share/templates/aliases"
+    mkdir -p "$sbx/working"
+    for _af in agent-aliases.sh cc-aliases.sh worktree-aliases.sh; do
+        printf '# %s fixture\n# dir: {{AITEAMFORGE_DIR}}\n# shared: {{SHARED_DEV_ROOT}}\n# org: {{ORG_NAME}}\n' "$_af" \
+            > "$sbx/framework/share/templates/aliases/$_af"
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 11 — subitem XACA-1120-043. A --dry-run that creates every mandatory
+# alias file (because none exist yet) must not materialize share/aliases/
+# itself. XACA-0771's own T4 only ever checked the alias FILE was absent under
+# DRY_RUN; that passed both before and after the -037 fix because it was
+# never the regression. The DIRECTORY was.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "dry-run creating missing mandatory alias files does not create share/aliases/ on disk"
+_sbx="$(_next_sandbox)"; _make_aliases_only_sandbox "$_sbx"
+_run_update_shell_helpers_rev current "$_sbx" true >/dev/null 2>&1
+if [ -e "$_sbx/working/share/aliases" ]; then
+    test_fail "share/aliases/ was created on disk during a --dry-run: $(find "$_sbx/working/share" 2>/dev/null)"
+else
+    test_pass
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 12 — NEGATIVE CONTROL for case 11. Prove the pre-037-fix function
+# really did create share/aliases/ under --dry-run in this exact sandbox.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "NEGATIVE CONTROL: pre-fix update_shell_helpers creates share/aliases/ even under --dry-run"
+if [ "$_PRE_FIX_AVAILABLE_ALIASES_DIR" != true ]; then
+    test_fail "pre-fix revision could not be resolved, so the negative control cannot run. This is a FAILURE, not a skip: deepen the clone (fetch-depth: 0) or repair the git log -S anchor."
+else
+    _sbx="$(_next_sandbox)"; _make_aliases_only_sandbox "$_sbx"
+    _run_update_shell_helpers_rev "$PRE_FIX_REV_ALIASES_DIR" "$_sbx" true >/dev/null 2>&1
+    if [ -e "$_sbx/working/share/aliases" ]; then
+        test_pass
+    else
+        test_fail "negative control did not reproduce the defect - the case-11 assertion proves nothing. share/aliases/ absent: $(find "$_sbx/working" 2>/dev/null)"
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

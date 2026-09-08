@@ -2807,12 +2807,25 @@ update_shell_helpers() {
   # also carry {{ORG_NAME}} -- were installing with that placeholder left
   # LITERAL on every create/refresh. _aitf_render_template substitutes the
   # three CANONICAL placeholders ({{AITEAMFORGE_DIR}}, {{SHARED_DEV_ROOT}},
-  # {{ORG_NAME}}) -- it does NOT substitute {{ORG_SLUG}}, which cc-aliases.sh
-  # alone carries 27 times (PR #836 review round 4, subitem XACA-1120-036: an
-  # earlier pass here claimed "all three placeholders the shipped templates
-  # use", which a grep for {{ORG_SLUG}} falsifies). That placeholder is left
-  # LITERAL by this change too, exactly like {{ORG_NAME}} was before it.
-  # Substituting {{ORG_SLUG}} is XACA-1127's territory, not this ticket's.
+  # {{ORG_NAME}}) -- it does NOT substitute {{ORG_SLUG}} (PR #836 review round
+  # 4, subitem XACA-1120-036: an earlier pass here claimed "all three
+  # placeholders the shipped templates use", which a grep for {{ORG_SLUG}}
+  # falsifies). That placeholder is left LITERAL by this change too, exactly
+  # like {{ORG_NAME}} was before it. Substituting {{ORG_SLUG}} is XACA-1127's
+  # territory, not this ticket's.
+  #
+  # Correction (subitem XACA-1120-041): the "27 times ... cc-aliases.sh alone"
+  # figure this comment previously carried was itself wrong, and wrong in the
+  # exact shape this ticket kept finding elsewhere -- `grep -c '{{ORG_SLUG}}'
+  # cc-aliases.sh` counts matching LINES (27), not occurrences. Re-measured
+  # with `grep -o '{{ORG_SLUG}}' cc-aliases.sh | wc -l`: 44 occurrences in
+  # cc-aliases.sh, and it is not "alone" -- {{ORG_SLUG}} appears in 7 shipped
+  # template files, 63 occurrences total (agent-aliases.sh 1, cc-aliases.sh
+  # 44, kanban-aliases.sh 1, claude-md-global.template 9,
+  # statusline-command.sh 2, kanban-helpers.template.sh 5,
+  # secrets.env.template 1). Non-blocking here (nothing in this function
+  # depends on the count), but an under-counted footprint could under-scope
+  # XACA-1127, which owns the actual substitution.
   local aliases_dir="${WORKING_DIR}/share/aliases"
   local templates_dir="${tap_share}/templates/aliases"
   local alias_files=(
