@@ -15234,6 +15234,17 @@ kb-knowledge-promote() {
         awk '/^---/{count++; if(count==2){found=1; next}} found{print}' "$source_file"
     } > "$target_file"
 
+    # XACA-0818 ([Review]): if the target write failed, the reserved placeholder
+    # is still 0 bytes. Remove it so it doesn't leak an NNN slot, and bail BEFORE
+    # the source is stubbed below (so a failed promotion never destroys the
+    # source). A successful write always emits the frontmatter header, so `-s`
+    # is a reliable success proxy.
+    if [[ ! -s "$target_file" ]]; then
+        rm -f "$target_file"
+        echo "Error: failed to write promoted content to ${target_file}; released reserved slot ${target_entry_id} (source left intact)" >&2
+        return 1
+    fi
+
     # 3. Replace source with stub
     local display_id
     display_id=$(basename "$source_file" .md | sed 's/-.*$//' | tr '[:lower:]' '[:upper:]')

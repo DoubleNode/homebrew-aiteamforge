@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-0822-002: `kb-knowledge-promote()` in this template was missing the reserved-slot
+  release guard that `kb-knowledge-add()` already had. If the promotion's target write failed
+  (produced an empty file), the reserved knowledge-entry id slot leaked permanently instead of
+  being released. Ported the 5-line guard from canonical verbatim: on an empty target file,
+  remove it and report the released slot id before the source is stubbed, so a failed promotion
+  never destroys the source and never leaks an id. Part of XACA-0822 (retire canonical-vs-tap
+  kb-* function drift).
 - XACA-1135: the retrospective gate told consumers a retrospective was MISSING when it had in
   fact never looked. `_kb_find_existing_retro` returned an empty string for four different
   conditions -- resolved-and-genuinely-absent, malformed item id, UNRESOLVABLE TEAM CODE, and a
