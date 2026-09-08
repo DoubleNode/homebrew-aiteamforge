@@ -45,6 +45,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   current-behaviour case with a negative control that extracts the SAME function from the
   pre-fix commit and runs it in an identical sandbox.
 
+- XACA-1134: `agent-panel-display.sh`'s avatar directory resolution missed the actual avatar
+  pool on a consumer host whose connect-script `AITEAMFORGE_DIR` resolves to a homebrew tap
+  path instead of `~/aiteamforge` (see `lcars-remote-atf-resolve.sh`'s candidate order: tap
+  before `~/aiteamforge`). Both `AITEAMFORGE_DIR`-derived candidates missed, the dev-team-only
+  fallback doesn't exist on a tap-only install, and the script fell all the way through with
+  `AVATARS_DIR` empty -- silently skipping the entire `imgcat` block with no output at all,
+  indistinguishable from an empty crew strip. Added two unconditional fallback candidates at
+  the standard per-user consumer install location (`$HOME/aiteamforge/avatars/` and its
+  fleet-monitor sibling), placed after the existing dev-team candidate so a dev machine's
+  resolution is unchanged. Also added an opt-in `LCARS_PANEL_DEBUG=1` diagnostic (stderr-only,
+  silent by default) reporting which `AVATARS_DIR` candidate won, whether the avatar file was
+  found, whether `imgcat` resolved, and whether it was actually invoked -- this class of silent
+  skip previously took a multi-day mechanism hunt to isolate.
 - XACA-1124: an LCARS server death now leaves a record. Previously nothing logged a server's
   exit or signal, and because `start_lcars_server` unconditionally rotates the per-team log at
   the top of every launch with a single `.old` backup, retention was exactly two launches --

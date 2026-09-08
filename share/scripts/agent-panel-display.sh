@@ -7,19 +7,73 @@
 # Example: agent-panel-display.sh firebase-ops
 
 SESSION_CODE="${1:?Usage: agent-panel-display.sh <session-code>}"
+
+# ═══════════════════════════════════════════════════════════════════════
+# OPT-IN DIAGNOSTICS (XACA-1134-005)
+# Set LCARS_PANEL_DEBUG=1 to report avatar/imgcat resolution decisions to
+# stderr. Silent by default and stderr-only, deliberately: this script
+# renders directly into a live terminal panel, and any stray STDOUT would
+# corrupt the display. Without this, a missing avatars dir was
+# indistinguishable from an empty crew strip -- both just rendered nothing,
+# and finding the actual cause (XACA-1134) took a multi-day mechanism hunt
+# across a remote connect-script env chain. This turns that into one run
+# with the flag set.
+# ═══════════════════════════════════════════════════════════════════════
+_panel_debug() {
+    [[ "$LCARS_PANEL_DEBUG" == "1" ]] && print -u2 -- "[panel-debug] $*"
+}
+
 # Resolve avatars directory (checked in priority order):
-#   1. Flat avatars pool created by install-team.sh ($AITEAMFORGE_DIR/avatars/)
-#   2. Fleet monitor avatars in installed env ($AITEAMFORGE_DIR/fleet-monitor/...)
-#   3. Dev-team source tree (development machines)
-#   4. Homebrew cellar (AITEAMFORGE_HOME)
+#   1. Flat avatars pool via explicit env override ($AITEAMFORGE_DIR/avatars/)
+#   2. Fleet monitor avatars via explicit env override
+#      ($AITEAMFORGE_DIR/fleet-monitor/server/public/avatars/)
+#   3. Dev-team source tree (development machines,
+#      $HOME/dev-team/fleet-monitor/server/public/avatars/) -- unconditional,
+#      kept ahead of the two candidates below so this change does not alter
+#      resolution on a dev machine where it already wins today.
+#   4. Flat avatars pool at the standard per-user consumer install location
+#      ($HOME/aiteamforge/avatars/) -- UNCONDITIONAL, does not depend on
+#      AITEAMFORGE_DIR resolving correctly. Added XACA-1134: on a consumer
+#      host where a connect script's AITEAMFORGE_DIR resolves to a homebrew
+#      tap path instead of ~/aiteamforge (see lcars-remote-atf-resolve.sh's
+#      candidate order: tap -> ~/aiteamforge -> ~/dev-team), candidates 1-2
+#      miss even though the real 300+ file avatar pool lives right here.
+#      Placed AFTER candidate 3 (dev-team) so it only fires once 1-3 have
+#      already missed -- it never overrides a dev machine's existing
+#      resolution, it only rescues the consumer-host case that had nothing.
+#   5. Fleet monitor avatars sibling at that same consumer install location
+#      ($HOME/aiteamforge/fleet-monitor/server/public/avatars/) -- added for
+#      symmetry with candidate 2/3's fleet-monitor shape; same reasoning and
+#      placement as candidate 4.
+#   6. Homebrew cellar (AITEAMFORGE_HOME)
 AVATARS_DIR=""
+_avatars_dir_candidate_labels=(
+    'AITEAMFORGE_DIR/avatars'
+    'AITEAMFORGE_DIR/fleet-monitor/server/public/avatars'
+    'HOME/dev-team/fleet-monitor/server/public/avatars'
+    'HOME/aiteamforge/avatars'
+    'HOME/aiteamforge/fleet-monitor/server/public/avatars'
+    'AITEAMFORGE_HOME/fleet-monitor/server/public/avatars'
+)
+_avatars_dir_candidate_idx=0
 for _candidate in \
     "${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/avatars}" \
     "${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/fleet-monitor/server/public/avatars}" \
     "$HOME/dev-team/fleet-monitor/server/public/avatars" \
+    "$HOME/aiteamforge/avatars" \
+    "$HOME/aiteamforge/fleet-monitor/server/public/avatars" \
     "${AITEAMFORGE_HOME:+$AITEAMFORGE_HOME/fleet-monitor/server/public/avatars}"; do
-    [[ -n "$_candidate" && -d "$_candidate" ]] && { AVATARS_DIR="$_candidate"; break; }
+    _avatars_dir_candidate_idx=$((_avatars_dir_candidate_idx + 1))
+    if [[ -n "$_candidate" && -d "$_candidate" ]]; then
+        AVATARS_DIR="$_candidate"
+        _panel_debug "AVATARS_DIR resolved via candidate ${_avatars_dir_candidate_idx} (${_avatars_dir_candidate_labels[$_avatars_dir_candidate_idx]}): $AVATARS_DIR"
+        break
+    fi
 done
+if [[ -z "$AVATARS_DIR" ]]; then
+    _panel_debug "AVATARS_DIR: NO CANDIDATE MATCHED -- AITEAMFORGE_DIR='${AITEAMFORGE_DIR:-<unset>}' AITEAMFORGE_HOME='${AITEAMFORGE_HOME:-<unset>}' HOME='$HOME'"
+fi
+
 # Resolve imgcat from multiple possible locations:
 #   1. iTerm2 shell integration (standard install path)
 #   2. System-installed imgcat (e.g., via homebrew or manual install)
@@ -31,6 +85,7 @@ elif command -v imgcat &>/dev/null; then
 else
     IMGCAT=""
 fi
+_panel_debug "IMGCAT resolved: ${IMGCAT:-<not found>}"
 SCRIPT_PATH="${0:A}"
 SCRIPT_DIR="${SCRIPT_PATH:h}"
 SCRIPT_MTIME=$(stat -f %m "$SCRIPT_PATH" 2>/dev/null)
@@ -796,6 +851,7 @@ render_panel() {
     local avatar_panel="${AVATARS_DIR}/${team}_${avatar}_avatar_panel.png"
     local avatar_file="${avatar_panel}"
     [[ ! -f "$avatar_file" ]] && avatar_file="${AVATARS_DIR}/${team}_${avatar}_avatar.png"
+    _panel_debug "avatar lookup: AVATARS_DIR='${AVATARS_DIR:-<empty>}' team='$team' avatar='$avatar' tried='$avatar_panel' found=$([[ -f "$avatar_file" ]] && echo "yes ($avatar_file)" || echo no) IMGCAT=$([[ -x "$IMGCAT" ]] && echo "${IMGCAT} (executable)" || echo "${IMGCAT:-<empty>} (not executable)")"
     if [[ -f "$avatar_file" && -x "$IMGCAT" ]]; then
         local rounded_file="${LCARS_TMP}lcars-avatar-${SESSION_CODE}-${avatar}-rounded.png"
         if command -v magick &>/dev/null; then
@@ -808,10 +864,18 @@ render_panel() {
                     -alpha off -compose CopyOpacity -composite \
                     PNG32:"$rounded_file" 2>/dev/null
             fi
-            [[ -f "$rounded_file" ]] && "$IMGCAT" -W 100% -H 12 "$rounded_file"
+            if [[ -f "$rounded_file" ]]; then
+                _panel_debug "imgcat: invoking on rounded avatar $rounded_file"
+                "$IMGCAT" -W 100% -H 12 "$rounded_file"
+            else
+                _panel_debug "imgcat: SKIPPED — magick rounding produced no output file ($rounded_file)"
+            fi
         else
+            _panel_debug "imgcat: invoking on raw avatar $avatar_file (no magick on PATH, skipping rounding)"
             "$IMGCAT" -W 100% -H 12 "$avatar_file"
         fi
+    else
+        _panel_debug "imgcat: SKIPPED entire avatar block — avatar_file exists=$([[ -f "$avatar_file" ]] && echo yes || echo no), IMGCAT executable=$([[ -x "$IMGCAT" ]] && echo yes || echo no)"
     fi
 
     echo ""
