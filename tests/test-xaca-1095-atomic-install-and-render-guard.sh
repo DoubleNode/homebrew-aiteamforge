@@ -176,7 +176,7 @@ _extract_fn_from_file() {
 # product defect that does not exist.
 _extract_aitf_helpers() {
     local _h
-    for _h in _aitf_sed_repl_escape _aitf_render_template _aitf_install_rendered; do
+    for _h in _aitf_sed_repl_escape _aitf_file_mode _aitf_render_template _aitf_install_rendered; do
         _extract_fn_from_file "$UPGRADE_SH" "$_h"
     done
 }

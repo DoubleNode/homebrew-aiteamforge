@@ -375,14 +375,40 @@ _aitf_render_template() {
 #            installed mode is whatever the temp carries, and mktemp creates at
 #            0600 regardless of umask. There is no single correct default
 #            across a heterogeneous target set.
+# Read a file's permission bits as an octal string, portably. Echoes empty if
+# it cannot be determined.
+#
+# DO NOT collapse this into `stat -f '%Lp' f || stat -c '%a' f`. That chain is
+# wrong on GNU, and wrong in the silent direction: GNU coreutils `stat -f` is a
+# VALID flag meaning "display filesystem status", so on Linux it EXITS 0 and
+# prints a multi-line block about the filesystem (Namelen, Block size, Inodes).
+# The `||` never fires, the caller's octal validation rejects the junk, and the
+# mode silently falls back to a default -- i.e. the mode-preservation fix
+# degrades into exactly the mode-clobbering bug it exists to prevent, on the one
+# platform where nobody was looking. Caught by CI on ubuntu-latest, not locally.
+#
+# So: try each form and VALIDATE ITS OUTPUT is octal, rather than trusting an
+# exit status to discriminate between the two implementations.
+_aitf_file_mode() {
+  local f="$1" m=""
+  m="$(stat -c '%a' "$f" 2>/dev/null)"          # GNU coreutils
+  case "$m" in ''|*[!0-7]*) m="" ;; esac
+  if [ -z "$m" ]; then
+    m="$(stat -f '%Lp' "$f" 2>/dev/null)"       # BSD / macOS
+    case "$m" in ''|*[!0-7]*) m="" ;; esac
+  fi
+  printf '%s' "$m"
+}
+
 _aitf_install_rendered() {
   local tmp="$1" target="$2" mode="${3:-preserve}"
   if [ "$mode" = "preserve" ]; then
-    mode="$(stat -f '%Lp' "$target" 2>/dev/null || stat -c '%a' "$target" 2>/dev/null || echo 644)"
-    case "$mode" in
-      ''|*[!0-7]*) mode=644 ;;
-    esac
+    mode="$(_aitf_file_mode "$target")"
+    [ -n "$mode" ] || mode=644
   fi
+  case "$mode" in
+    ''|*[!0-7]*) mode=644 ;;
+  esac
   chmod "$mode" "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$target" 2>/dev/null
 }

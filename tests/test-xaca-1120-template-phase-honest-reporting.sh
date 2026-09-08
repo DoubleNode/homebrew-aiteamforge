@@ -198,7 +198,7 @@ _extract_fn_from_file() { _extract_fn_from_content "$2" < "$1"; }
 # product defect that does not exist.
 _extract_aitf_helpers() {
     local _h
-    for _h in _aitf_sed_repl_escape _aitf_render_template _aitf_install_rendered; do
+    for _h in _aitf_sed_repl_escape _aitf_file_mode _aitf_render_template _aitf_install_rendered; do
         _extract_fn_from_file "$UPGRADE_SH" "$_h"
     done
 }
@@ -378,7 +378,27 @@ fi
 # secrets template renders an ANTHROPIC_API_KEY and a GitHub PAT slot, and
 # installers elsewhere deliberately create such files at 600.
 # ─────────────────────────────────────────────────────────────────────────────
-_mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null; }
+# Read permission bits as octal, portably -- and validate the OUTPUT rather than
+# trusting an exit status to tell the two `stat` implementations apart.
+#
+# `stat -f '%Lp' f || stat -c '%a' f` is WRONG on GNU: coreutils `stat -f` is a
+# valid flag meaning "display filesystem status", so on Linux it exits 0 and
+# prints a multi-line filesystem block (Namelen, Block size, Inodes). The `||`
+# never fires and the caller gets that block where it expected "600". This
+# helper had that bug and so did the code under test; CI on ubuntu-latest caught
+# both, having passed cleanly on macOS where `stat -f` happens to mean the
+# intended thing. A fallback chain that discriminates on exit status only works
+# when the wrong tool actually fails.
+_mode_of() {
+    local m=""
+    m="$(stat -c '%a' "$1" 2>/dev/null)"        # GNU coreutils
+    case "$m" in ''|*[!0-7]*) m="" ;; esac
+    if [ -z "$m" ]; then
+        m="$(stat -f '%Lp' "$1" 2>/dev/null)"   # BSD / macOS
+        case "$m" in ''|*[!0-7]*) m="" ;; esac
+    fi
+    printf '%s' "$m"
+}
 
 test_start "a 600 (credentials) target keeps mode 600 across an update"
 _sbx="$(_next_sandbox)"; _make_sandbox "$_sbx"
@@ -408,6 +428,27 @@ if [ "$_m" = "755" ]; then
     test_pass
 else
     test_fail "exec bit lost: mode became ${_m}, expected 755"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 5d — direct guard on the portability helper itself. 5b/5c catch a broken
+# mode end-to-end, but they cannot say WHY; this one localises the failure to
+# `_aitf_file_mode` returning something that is not an octal mode. It exists
+# because the first version of that helper used `stat -f` first, which is a
+# valid-but-unrelated GNU flag that exits 0 with filesystem information.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "_aitf_file_mode returns a plain octal mode on this platform"
+_probe="$WORK_DIR/mode-probe"
+printf 'x\n' > "$_probe"
+chmod 640 "$_probe"
+_got="$(
+    eval "$(_extract_aitf_helpers)"
+    _aitf_file_mode "$_probe"
+)"
+if [ "$_got" = "640" ]; then
+    test_pass
+else
+    test_fail "expected '640', got '$_got' — on GNU coreutils this is what a 'stat -f' first fallback chain returns (filesystem status, exit 0), which then silently degrades the install to a default mode"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
