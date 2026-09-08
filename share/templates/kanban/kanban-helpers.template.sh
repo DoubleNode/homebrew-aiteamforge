@@ -1005,7 +1005,7 @@ _kb_release_sync() {
     curl_exit=$?
 
     # Extract HTTP code from last line
-    http_code=$(echo "$response" | tail -n1)
+    http_code=$(printf '%s\n' "$response" | tail -n1)
 
     # Silently succeed if server isn't running or sync worked
     # Only warn on unexpected HTTP codes (not 200, 404, or connection failure)
@@ -17764,8 +17764,8 @@ kb-release-create() {
     # otherwise clobber $? before we could read curl's own exit status.
     curl_exit=$?
 
-    http_code=$(echo "$response" | tail -n1)
-    body=$(echo "$response" | sed '$d')
+    http_code=$(printf '%s\n' "$response" | tail -n1)
+    body=$(printf '%s\n' "$response" | sed '$d')
 
     if [[ "$http_code" == "201" ]]; then
         local release_id release_name
