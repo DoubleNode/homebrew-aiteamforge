@@ -134,10 +134,20 @@ if command -v git >/dev/null 2>&1; then
         # Confirm the parent really is pre-fix: it must still contain the
         # unfalsifiable emitter. Guards against -S landing on an unrelated
         # commit if history is ever rewritten.
-        if git -C "$TAP_ROOT" show "${PRE_FIX_REV}:libexec/commands/aiteamforge-upgrade.sh" 2>/dev/null \
-             | grep -q 'print_success "All templates up to date"'; then
-            _PRE_FIX_AVAILABLE=true
-        fi
+        #
+        # Deliberately NOT `git show ... | grep -q`. This file sets
+        # `set -o pipefail`, and the emitter sits ~340 lines into a 3100-line
+        # file: `grep -q` exits at the first match, `git show` takes SIGPIPE on
+        # its next write, and pipefail reports the whole pipeline as FAILED even
+        # though the string was found. That silently forced _PRE_FIX_AVAILABLE
+        # to false, which SKIPped both negative controls -- the suite still
+        # printed an all-green summary while its two most important assertions
+        # were inert. Capture first, match in-shell, no pipeline.
+        _parent_blob="$(git -C "$TAP_ROOT" show "${PRE_FIX_REV}:libexec/commands/aiteamforge-upgrade.sh" 2>/dev/null)"
+        case "$_parent_blob" in
+            *'print_success "All templates up to date"'*) _PRE_FIX_AVAILABLE=true ;;
+        esac
+        unset _parent_blob
     fi
 fi
 
