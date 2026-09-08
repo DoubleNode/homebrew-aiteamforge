@@ -7,6 +7,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-0822-010 ([Review] finding on PR #842): `tests/test-xaca-0822-template-canonical-parity.sh`
+  had no check that all of its cases actually ran, so a silently skipped block (an early
+  `return`/`exit` inside a stubbed helper, a case block accidentally deleted or commented out)
+  would report a smaller total and the suite would still exit 0 — a vacuous green. Added an
+  expected-assertion-count guard: a `test_start` wrapper (installed after the existing
+  `test-runner.sh`-vs-standalone fallback detection, so it works under either) increments a
+  file-local counter on every case, independent of `$_PASS`/`$_FAIL` — which under
+  `test-runner.sh` are the *runner's* shared counters across every suite it invokes that
+  session, not a reliable per-file count. A final case compares the observed count against the
+  expected 7 and fails if they differ. Verified: staged a scratch copy with one case block
+  wrapped in `if false; then ... fi` (simulating a silent skip) — the guard fired
+  ("observed 6" vs "expected 7") where the un-guarded suite would have read 6 passed / 0
+  failed and exited 0. Restored, reconfirmed 8/8 green (7 real cases + the guard itself). Part
+  of XACA-0822.
 - XACA-0822-009 ([Review] finding on PR #842): the XACA-0822-002 test case only grepped
   `kb-knowledge-promote()`'s source for the literal error string the reserved-slot-release
   guard prints — it never invoked the function and never forced a real target-write failure, so

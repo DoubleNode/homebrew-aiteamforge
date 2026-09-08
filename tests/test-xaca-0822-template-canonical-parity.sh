@@ -52,6 +52,27 @@ if ! declare -F test_fail &>/dev/null; then
     }
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Expected-assertion-count guard ([Review] finding — vacuous-green prevention):
+# without this, a case block silently skipped (an early `return`/`exit` inside
+# a stubbed helper, a block accidentally commented/deleted) reports a SMALLER
+# total and this script still exits 0. $_PASS/$_FAIL above are NOT a reliable
+# per-file case count to gate on: under test-runner.sh, test_start/test_pass/
+# test_fail are the RUNNER's own exported functions (this file's `if !
+# declare -F ...` fallbacks above never fire), so $_PASS/$_FAIL stay 0 for
+# this file's whole run — the runner keeps its own counters instead, shared
+# across every suite it invokes that session. $_CASES_RUN below is local to
+# THIS file: it wraps whichever test_start is active (the fallback just
+# defined above, or the runner's) so every case counts, in either mode.
+# ─────────────────────────────────────────────────────────────────────────────
+_EXPECTED_CASES=7
+_CASES_RUN=0
+eval "$(declare -f test_start | sed '1s/^test_start[[:space:]]*(/_kb_xaca0822_test_start_inner (/')"
+test_start() {
+    _CASES_RUN=$((_CASES_RUN + 1))
+    _kb_xaca0822_test_start_inner "$@"
+}
+
 if [ ! -f "$TEMPLATE_PATH" ]; then
     echo "FATAL: kanban-helpers.template.sh not found at: $TEMPLATE_PATH" >&2
     exit 1
@@ -351,6 +372,20 @@ else
     else
         test_fail "expected the real promotion to land at $_KP_RESERVED (slot s001 reused); it did not — ls: $(ls "$_KP_TARGET_DIR" 2>&1)"
     fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Expected-assertion-count guard: run as its own case, LAST, so a silent
+# skip anywhere above (rather than a genuine test_fail) is what this catches.
+# Snapshot $_CASES_RUN BEFORE this case's own test_start increments it, so
+# the comparison reflects only the 7 cases above, not this guard itself.
+# ─────────────────────────────────────────────────────────────────────────────
+_OBSERVED_CASES="$_CASES_RUN"
+test_start "XACA-0822: expected-assertion-count guard (${_EXPECTED_CASES} cases expected)"
+if [ "$_OBSERVED_CASES" -eq "$_EXPECTED_CASES" ]; then
+    test_pass
+else
+    test_fail "expected ${_EXPECTED_CASES} test cases to have run in $(basename "$0") before this guard; observed ${_OBSERVED_CASES} — a case was silently skipped"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
