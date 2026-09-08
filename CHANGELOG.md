@@ -6,6 +6,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1058: both shipped copies DERIVED a team code instead of reading the authoritative
+  `~/.aiteamforge/team-paths.json` overlay, returning wrong codes for live teams. Same
+  authority-inversion class as XACA-0998 and XACA-1053: computing a value that already has a
+  source of truth. The derivation (first letter of the first segment + 2 chars of the last) is
+  now DELETED rather than repaired in both files, and both read the overlay first.
+  MEASURED BLAST RADIUS, and it is wider than the ticket's own examples: 8 of the 26 registered
+  teams carry a team_code the shipped case tables cannot resolve --- BWA, BWD, FFT, MAA, MAF,
+  MAI, MDT, MWI. FIVE ARE MAINEVENT, NOT FREELANCE. That matters because canonical's overlay
+  branch is gated on `freelance-*`, so porting it verbatim (the obvious fix) would have repaired
+  3 of 8 while PASSING the ticket's own stated acceptance criteria, which name only
+  fleetterminal/bandwear-dashboard/agentbadges-ios. The gate is generalised here, not copied.
+  Worse than wrong, the derivation COLLIDES: `mainevent-maineventapp-ios` and
+  `mainevent-maineventwrapper-ios` both derive `MIO`, so two distinct teams shared one prefix.
+  BOTH DIRECTIONS, because the reverse was the live outage. `_kb_get_team_from_code` returning
+  empty for FFT is what broke `kb-retro-path`/`kb-plan-doc-path` and made every XFFT
+  Retrospective subitem unclosable; the slug-to-code half was latent (its only call site is the
+  else-branch of `_kb_generate_id`, skipped whenever a board carries a `series` field). A fix
+  verified only slug-to-code would have looked green with that blocker untouched.
+  THE TWO COPIES NEEDED DIFFERENT FIXES, which is why a fix verified against one would have
+  been misleading about the other: they carried DIFFERENT stale tables (aliases 6 freelance
+  arms, template 8), so `agentbadges-ios` already resolved correctly in one and wrongly in the
+  other. `kanban-helpers.template.sh` already sourced `aiteamforge-paths.sh` and simply never
+  called the loader --- it now does, plus a new `_kb_overlay_code_to_slug` ported from canonical
+  for the reverse direction. `kanban-aliases.sh` is deliberately self-contained (its own header
+  says it needs no external source), so it gets a self-contained overlay read and no loader
+  tier; its documented no-external-source property is preserved, and it correctly still has no
+  reverse function.
+  CALLER-SIDE GUARD, the load-bearing half. Returning non-zero from `_kb_get_team_code`
+  accomplishes nothing on its own because command substitution discards exit status, and an
+  empty code silently yields the bare prefix `X`. Deleting the derivation makes empty returns
+  legitimate, so `_kb_generate_id` and its `kb-backlog add` caller now check explicitly and
+  fail loudly rather than minting `X-0001` against a generic prefix that collides across every
+  unresolvable team. No per-team case arms were added anywhere --- per-team arms are the defect,
+  not the remedy.
 - XACA-1134 (PR #837 gate findings, round 2): `agent-panel-display.sh` — unified the avatar
   surface onto a single `avatar:` debug prefix (it previously used two, so grepping by surface
   name missed the paint lines); completed the AMB badge instrumentation (two further silent

@@ -1454,84 +1454,57 @@ _kb_clear_working_on() {
     fi
 }
 
-# Extract 2-letter code from compound word (e.g., starwords→SW, appplanning→AP)
-# Uses heuristic: find consonant cluster after vowel, split it to find word boundary
-_kb_extract_compound_code() {
-    local word
-    word=$(echo "$1" | tr '[:upper:]' '[:lower:]')  # zsh-compatible lowercase
-    local len=${#word}
-
-    # Check for camelCase first (e.g., StarWords → SW)
-    # Look for lowercase followed by uppercase
-    local camel_match
-    camel_match=$(echo "$1" | grep -oE '[a-z][A-Z]' | head -1)
-    if [[ -n "$camel_match" ]]; then
-        local upper_char="${camel_match:1:1}"
-        upper_char=$(echo "$upper_char" | tr '[:upper:]' '[:lower:]')
-        echo "${word:0:1}$upper_char"
-        return
-    fi
-
-    # Heuristic for compound words:
-    # Find consonant cluster of 2+ that:
-    # 1. Occurs after at least one vowel (not at word start)
-    # 2. Is followed by a vowel (not at word end)
-    # Then split the cluster - second half starts the new word
-    local vowels="aeiou"
-    local best_cluster_start=-1
-    local best_cluster_len=0
-    local cluster_start=-1
-    local cluster_len=0
-    local seen_vowel=false
-    local i=0
-
-    while [[ $i -lt $len ]]; do
-        local char="${word:$i:1}"
-
-        if [[ "$vowels" == *"$char"* ]]; then
-            # Vowel - mark that we've seen one, check if cluster just ended
-            seen_vowel=true
-            if [[ $cluster_len -ge 2 && $cluster_len -gt $best_cluster_len ]]; then
-                best_cluster_start=$cluster_start
-                best_cluster_len=$cluster_len
-            fi
-            cluster_start=-1
-            cluster_len=0
-        else
-            # Consonant - only track clusters after we've seen a vowel
-            if $seen_vowel; then
-                if [[ $cluster_start -lt 0 ]]; then
-                    cluster_start=$i
-                fi
-                cluster_len=$((cluster_len + 1))
-            fi
-        fi
-        i=$((i + 1))
-    done
-
-    if [[ $best_cluster_start -ge 0 && $best_cluster_len -ge 2 ]]; then
-        # Split the cluster - second half starts the new word
-        # e.g., "rw" in starwords → split at 'w', "rkst" in workstats → split at 's'
-        local split_char_pos=$((best_cluster_start + best_cluster_len / 2))
-        echo "${word:0:1}${word:$split_char_pos:1}"
-        return
-    fi
-
-    # Fallback: first two letters
-    echo "${word:0:2}"
-}
-
 # Get 3-letter team code for JIRA-style IDs
 # Format: X<TeamCode>-#### (e.g., XIOS-0001, XFRE-0042)
+#
+# XACA-1058: the team-paths.json overlay is the AUTHORITATIVE source for
+# team_code, not the hardcoded case table below. This file already sources
+# aiteamforge-paths.sh at the top (which defines aiteamforge_team_code) but
+# never called it — the case table below was the only lookup, and it can
+# never keep up with `kb-init-team` provisioning new per-client / per-app
+# instances at runtime (measured: 8 registered overlay slugs on a live
+# machine — 5 of them mainevent-*, not just freelance-* — carry a team_code
+# this table has no arm for). Resolution order now mirrors
+# dev-team/kanban-helpers.sh (the canonical sibling this must stay
+# behaviorally aligned with):
+#   1. team-paths.json overlay (_kb_overlay_lookup) — unconditional, any slug.
+#   2. aiteamforge_team_code loader (sourced at the top of this file) —
+#      covers every other registered team via the same overlay-or-defaults
+#      resolution, for the case the direct overlay read above didn't apply
+#      (e.g. AITEAMFORGE_CONFIG points somewhere the loader resolves
+#      differently) or python3 is unavailable.
+#   3. Built-in case table below — only the well-known teams this file has
+#      always shipped, as a last-resort fallback when both the overlay and
+#      the loader are unavailable. The freelance-* arms here are retained
+#      example entries from a specific install (xaca-0139:allowed markers);
+#      they are NOT extended for this ticket — new per-client codes belong
+#      in the overlay, not in this table (see XACA-0628/XACA-1058).
 _kb_get_team_code() {
     local team="$1"
+
+    local _ovl_code
+    if _ovl_code=$(_kb_overlay_lookup "$team" team_code) && [[ -n "$_ovl_code" ]]; then
+        echo "$_ovl_code" | tr '[:lower:]' '[:upper:]'
+        return 0
+    fi
+
+    if command -v aiteamforge_team_code &>/dev/null; then
+        local _atf_code
+        _atf_code=$(aiteamforge_team_code "$team" 2>/dev/null)
+        if [[ -n "$_atf_code" ]]; then
+            echo "$_atf_code"
+            return 0
+        fi
+    fi
+
     case "$team" in
         ios)                               echo "IOS" ;;
         android)                           echo "AND" ;;
         firebase)                          echo "FIR" ;;
         freelance)                         echo "FRE" ;;
         # NOTE: freelance-<client>-<project> entries below are examples of registered
-        # team IDs from a specific install. New installations register their own team IDs.
+        # team IDs from a specific install. New installations register their own team IDs
+        # via the overlay (step 1 above) — no new arms are added here (XACA-1058).
         freelance-doublenode-starwords)    echo "FSW" ;; # xaca-0139:allowed — stable team slug constant
         freelance-doublenode-workstats)    echo "FWS" ;; # xaca-0139:allowed — stable team slug constant
         freelance-doublenode-appplanning)  echo "FAP" ;; # xaca-0139:allowed — stable team slug constant
@@ -1551,18 +1524,18 @@ _kb_get_team_code() {
         medical-general)                   echo "MED" ;;
         finance-personal)                  echo "FIN" ;;
         *)
-            # Smart fallback for multi-segment names (e.g., freelance-<client>-<project>)
-            # Uses: first letter of first segment + 2-letter code from last segment
-            if [[ "$team" == *-* ]]; then
-                local first_segment="${team%%-*}"   # Everything before first dash
-                local last_segment="${team##*-}"    # Everything after last dash
-                local code="${first_segment:0:1}"   # First letter of first segment
-                code+=$(_kb_extract_compound_code "$last_segment")  # Smart 2-letter from last
-                echo "${code:0:3}" | tr '[:lower:]' '[:upper:]'
-            else
-                # Simple single-word name: first 3 chars
-                echo "${team:0:3}" | tr '[:lower:]' '[:upper:]'
-            fi
+            # XACA-1058: NO derivation fallback here (deliberately removed —
+            # this used to call a "smart" first-letter + compound-code
+            # heuristic that minted a plausible-looking code for ANY
+            # unrecognized slug, including ones registered in the overlay
+            # under a DIFFERENT code the heuristic could never reproduce, and
+            # ones that are simply unregistered. Either way a derived code is
+            # not the authoritative one. Overlay and loader are checked
+            # above; if neither resolved this team, it is genuinely
+            # unregistered — say so with empty, not a guess. Callers MUST
+            # check for empty (see _kb_generate_id below and its caller in
+            # kb-backlog add) rather than trusting this blindly.
+            echo ""
             ;;
     esac
 }
@@ -1571,6 +1544,13 @@ _kb_get_team_code() {
 # Format: X<TeamCode>-#### → team name (e.g., XFRE-0013 → freelance, XFSW-0013 → freelance-<client>-<project>)
 # Args: code (3-letter code like "FSW" or full ID like "XFSW-0013")
 # Returns: team name or empty string if not found
+#
+# XACA-1058: mirrors the resolution order added to _kb_get_team_code above —
+# overlay first (_kb_overlay_code_to_slug, unconditional), then the
+# aiteamforge_team_from_code loader, then the built-in case table. Both
+# directions must be fixed together: a slug->code-only fix leaves
+# kb-retro-path / kb-plan-doc-path (which resolve team FROM a code) broken
+# for the same overlay-only teams and looks green while it is not.
 _kb_get_team_from_code() {
     local input="$1"
     local code
@@ -1584,13 +1564,29 @@ _kb_get_team_from_code() {
         code="$input"
     fi
 
+    local _ovl_slug
+    if _ovl_slug=$(_kb_overlay_code_to_slug "$code") && [[ -n "$_ovl_slug" ]]; then
+        echo "$_ovl_slug"
+        return 0
+    fi
+
+    if command -v aiteamforge_team_from_code &>/dev/null; then
+        local _atf_team
+        _atf_team=$(aiteamforge_team_from_code "$code" 2>/dev/null)
+        if [[ -n "$_atf_team" ]]; then
+            echo "$_atf_team"
+            return 0
+        fi
+    fi
+
     case "$code" in
         IOS) echo "ios" ;;
         AND) echo "android" ;;
         FIR) echo "firebase" ;;
         FRE) echo "freelance" ;;
         # NOTE: FSW/FWS/FAP/FLB/VAN/FAS are example registered codes from a
-        # specific install. New installations register their own team codes.
+        # specific install. New installations register their own team codes
+        # via the overlay (step 1 above) — no new arms are added here (XACA-1058).
         FSW) echo "freelance-doublenode-starwords" ;; # xaca-0139:allowed — stable team slug constant
         FWS) echo "freelance-doublenode-workstats" ;; # xaca-0139:allowed — stable team slug constant
         FAP) echo "freelance-doublenode-appplanning" ;; # xaca-0139:allowed — stable team slug constant
@@ -1720,6 +1716,21 @@ _kb_generate_id() {
         # Fallback to derived team code
         local team_code
         team_code=$(_kb_get_team_code "$team")
+        # XACA-1058 CALLER-SIDE HAZARD: _kb_get_team_code can legitimately
+        # return empty now that its derivation fallback is gone (see that
+        # function). Command substitution above discards its exit status
+        # either way, so this MUST be checked explicitly: an unchecked empty
+        # team_code silently produces prefix="X" and mints ids like X-0001
+        # against a bare, generic prefix that collides across every
+        # unresolvable team. Fail loudly instead of minting a bad id.
+        if [[ -z "$team_code" ]]; then
+            echo "Error: could not resolve a team code for team '$team' (not in the" >&2
+            echo "team-paths.json overlay, the registry loader, or the built-in team" >&2
+            echo "table). Refusing to mint an id with a bare 'X' prefix." >&2
+            echo "Fix: register '$team' in ~/.aiteamforge/team-paths.json with a" >&2
+            echo "team_code, or use a known team slug." >&2
+            return 1
+        fi
         prefix="X$team_code"
     fi
 
@@ -5367,6 +5378,15 @@ kb-backlog() {
             local timestamp item_id
             timestamp=$(_kb_get_timestamp)
             item_id=$(_kb_generate_id "$board_file" "$team")
+            # XACA-1058: _kb_generate_id fails loudly (stderr + return 1,
+            # empty stdout) when the team code can't be resolved — but
+            # command substitution above discards that exit status, so it
+            # must be checked explicitly here too, or an empty item_id sails
+            # through into the jq filter below as `"id": ""`.
+            if [[ -z "$item_id" ]]; then
+                echo "Error: could not generate an item id for team '$team' — see above." >&2
+                return 1
+            fi
 
             # Build the backlog item with optional fields
             local jq_filter='.backlog += [{"id": $id, "title": $title, "priority": $priority, "addedAt": $timestamp'
@@ -17374,6 +17394,37 @@ val = entry.get(field)
 if val is None or val == "":
     sys.exit(1)
 print(val)
+PYEOF
+}
+
+# _kb_overlay_code_to_slug <CODE>
+# Reverse of _kb_overlay_lookup: prints the slug whose team_code == <CODE>
+# (case-insensitive) and returns 0, else 1 with no output. Ported from
+# dev-team/kanban-helpers.sh's function of the same name (XACA-1058) — this
+# template had the forward overlay lookup (_kb_overlay_lookup above) but no
+# reverse one, so _kb_get_team_from_code could never resolve an overlay-only
+# code back to its slug. That gap is what left kb-retro-path/kb-plan-doc-path
+# unable to resolve a kanban dir for an overlay-only team even after the
+# slug->code direction was fixed — both directions have to land together.
+_kb_overlay_code_to_slug() {
+    local code="${1-}"
+    [[ -z "$code" ]] && return 1
+    command -v python3 &>/dev/null || return 1
+    local cfg="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+    [[ -f "$cfg" ]] || return 1
+    python3 - "$cfg" "$code" <<'PYEOF'
+import json, sys
+cfg, code = sys.argv[1], sys.argv[2].upper()
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+for slug, entry in data.get("teams", {}).items():
+    if isinstance(entry, dict) and str(entry.get("team_code", "")).upper() == code:
+        print(slug)
+        sys.exit(0)
+sys.exit(1)
 PYEOF
 }
 

@@ -459,14 +459,36 @@ _kb_jq_read() {
 }
 
 # Get 3-letter team code for ID generation
+#
+# XACA-1058: the team-paths.json overlay is the AUTHORITATIVE source for
+# team_code, not the case table below. This file is deliberately
+# self-contained (no aiteamforge-paths.sh source — see the block comment near
+# the top), so unlike its siblings this has no registry-loader fallback tier;
+# it goes overlay (below, unconditional, any slug) -> built-in case table.
+# The prior version had ONLY the case table plus a cruder derivation
+# fallback, which could never keep up with `kb-init-team` provisioning new
+# per-client / per-app instances at runtime (measured: 8 registered overlay
+# slugs on a live machine — 5 of them mainevent-*, not freelance-* — carry a
+# team_code this table has no arm for; this file doesn't even have a
+# `mainevent` arm). _kb_overlay_lookup is defined later in this file
+# (function definition order doesn't matter for a sourced file — this only
+# needs it to exist by call time, not by definition time).
 _kb_get_team_code() {
     local team="$1"
+
+    local _ovl_code
+    if _ovl_code=$(_kb_overlay_lookup "$team" team_code) && [[ -n "$_ovl_code" ]]; then
+        echo "$_ovl_code" | tr '[:lower:]' '[:upper:]'
+        return 0
+    fi
+
     case "$team" in
         ios)                               echo "IOS" ;;
         android)                           echo "AND" ;;
         firebase)                          echo "FIR" ;;
         freelance)                         echo "FRE" ;;
         # NOTE: freelance-<client>-<project> entries below are stable registered team slugs; DoubleNode is a project-family dir constant # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+        # New per-client slugs register via the overlay (above) — no new arms added here (XACA-1058).
         freelance-doublenode-starwords)    echo "FSW" ;; # xaca-0139:allowed — stable team slug constant
         freelance-doublenode-workstats)    echo "FWS" ;; # xaca-0139:allowed — stable team slug constant
         freelance-doublenode-appplanning)  echo "FAP" ;; # xaca-0139:allowed — stable team slug constant
@@ -480,14 +502,17 @@ _kb_get_team_code() {
         medical-general)                   echo "MED" ;;
         finance-personal)                  echo "FIN" ;;
         *)
-            if [[ "$team" == *-* ]]; then
-                local first_seg="${team%%-*}"
-                local last_seg="${team##*-}"
-                local code="${first_seg:0:1}${last_seg:0:2}"
-                echo "${code:0:3}" | tr '[:lower:]' '[:upper:]'
-            else
-                echo "${team:0:3}" | tr '[:lower:]' '[:upper:]'
-            fi
+            # XACA-1058: NO derivation fallback here (deliberately removed —
+            # this used to build a code from first-letter + first-two-letters
+            # of the slug's segments, which minted a plausible-looking code
+            # for ANY unrecognized slug, including ones registered in the
+            # overlay above under a DIFFERENT code this heuristic could never
+            # reproduce, and ones that are simply unregistered. The overlay
+            # is checked above; if it didn't resolve this team, it is
+            # genuinely unregistered — say so with empty, not a guess.
+            # Callers MUST check for empty (see _kb_generate_id below and its
+            # caller in kb-backlog add) rather than trusting this blindly.
+            echo ""
             ;;
     esac
 }
@@ -536,6 +561,21 @@ _kb_generate_id() {
     else
         local team_code
         team_code=$(_kb_get_team_code "$team")
+        # XACA-1058 CALLER-SIDE HAZARD: _kb_get_team_code can legitimately
+        # return empty now that its derivation fallback is gone (see that
+        # function). Command substitution above discards its exit status
+        # either way, so this MUST be checked explicitly: an unchecked empty
+        # team_code silently produces prefix="X" and mints ids like X-0001
+        # against a bare, generic prefix that collides across every
+        # unresolvable team. Fail loudly instead of minting a bad id.
+        if [[ -z "$team_code" ]]; then
+            echo "Error: could not resolve a team code for team '$team' (not in the" >&2
+            echo "team-paths.json overlay or the built-in team table). Refusing to" >&2
+            echo "mint an id with a bare 'X' prefix." >&2
+            echo "Fix: register '$team' in ~/.aiteamforge/team-paths.json with a" >&2
+            echo "team_code, or use a known team slug." >&2
+            return 1
+        fi
         prefix="X${team_code}"
     fi
 
@@ -701,6 +741,15 @@ kb-backlog() {
             local ts item_id
             ts=$(_kb_get_timestamp)
             item_id=$(_kb_generate_id "$board_file" "$team")
+            # XACA-1058: _kb_generate_id fails loudly (stderr + return 1,
+            # empty stdout) when the team code can't be resolved — but
+            # command substitution above discards that exit status, so it
+            # must be checked explicitly here too, or an empty item_id sails
+            # through into the jq filter below as `"id": ""`.
+            if [[ -z "$item_id" ]]; then
+                echo "Error: could not generate an item id for team '$team' — see above." >&2
+                return 1
+            fi
 
             local jq_filter
             jq_filter='.backlog += [{"id": $id, "title": $title, "priority": $priority, "status": "backlog", "addedAt": $ts'
@@ -2065,6 +2114,46 @@ _kb_knowledge_global_root() {
 # Ported from dev-team/kanban-helpers.sh — HOME-based, no dev-team coupling.
 _kb_overlay_config_path() {
     printf '%s\n' "${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+}
+
+# _kb_overlay_lookup <slug> <field>
+# XACA-1058: self-contained overlay read, used by _kb_get_team_code above in
+# the file. This file deliberately does not source aiteamforge-paths.sh (see
+# the "needs no external aiteamforge-paths.sh source" block comment near the
+# top) so, unlike its siblings in dev-team/kanban-helpers.sh and
+# kanban-helpers.template.sh, there is no aiteamforge_team_code loader to
+# delegate to here — this reads team-paths.json directly via python3, gated
+# on the entry carrying its own team_code (the marker that distinguishes a
+# self-describing overlay registration from a legacy stub that still expects
+# the built-in case-arm fallback). Function definition order doesn't matter
+# for a sourced file — _kb_get_team_code only needs this to exist by the time
+# it's actually CALLED, well after the whole file has been sourced.
+_kb_overlay_lookup() {
+    local slug="${1-}" field="${2-}"
+    [[ -z "$slug" || -z "$field" ]] && return 1
+    command -v python3 &>/dev/null || return 1
+    local cfg
+    cfg=$(_kb_overlay_config_path)
+    [[ -f "$cfg" ]] || return 1
+    python3 - "$cfg" "$slug" "$field" <<'PYEOF'
+import json, sys
+cfg, slug, field = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+entry = data.get("teams", {}).get(slug)
+if not isinstance(entry, dict):
+    sys.exit(1)
+code = entry.get("team_code")
+if not code:
+    sys.exit(1)
+val = entry.get(field)
+if val is None or val == "":
+    sys.exit(1)
+print(val)
+PYEOF
 }
 
 # Internal: resolve the local (unsynced) knowledge root (honours KB_KNOWLEDGE_LOCAL_ROOT)
