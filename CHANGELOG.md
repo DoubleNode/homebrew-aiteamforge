@@ -9,11 +9,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 - XACA-1120: `aiteamforge upgrade`'s "Updating Templates" phase no longer reports success it did
   not earn, and now actually renders. Two silences composed into a misdiagnosis worth recording.
-  (1) `update_templates` printed `All templates up to date` unconditionally: nothing in the tap
-  ever creates `${WORKING_DIR}/config/` (the only non-test reference to that path was the read
-  inside the function itself), so all 17 shipped `*.template` files hit the `[ ! -f "$target_file" ]`
-  guard and `continue`d silently, `templates_updated` stayed 0, and control fell through to a
-  success line that could not fail. It now counts absent/current/updated separately and says which.
+  (1) `update_templates` printed `All templates up to date` unconditionally: all 17 shipped
+  `*.template` files hit the `[ ! -f "$target_file" ]` guard and `continue`d silently,
+  `templates_updated` stayed 0, and control fell through to a success line that could not fail.
+  It now counts absent/current/updated separately and says which. (Precision, corrected during
+  review: `${WORKING_DIR}/config/` is NOT absent -- `install-fleet-monitor.sh` creates it and
+  writes `fleet-config.json` + `machine-identity.json` into it. The true statement is narrower:
+  no shipped `*.template` basename has ever had an installed counterpart there, verified as an
+  empty overlap between the 17 basenames and that directory's occupants. The original claim came
+  from grepping only the braced `${AITEAMFORGE_DIR}/config` form while the fleet installer
+  writes the unbraced one -- an audit grep covering one quoting variant returns a clean,
+  confident, wrong answer.)
   (2) `update_shell_helpers` printed NOTHING when the `kanban-helpers.sh` render was a verified
   no-op, so "rendered and byte-identical", "never reached", and "skipped by a guard" were
   indistinguishable in a log; it now emits an affirmative already-current line. Because the only
@@ -28,7 +34,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   substitution set as `update_shell_helpers`, validates the render is line-for-line with its
   source before it becomes eligible to install, compares by rendered CONTENT rather than mtime
   (XACA-1095's lesson: a git-sourced Cellar keeps its original checkout mtime, so `-nt` can be
-  false forever), and installs by atomic rename. New suite
+  false forever), and installs by atomic rename while PRESERVING THE TARGET'S EXISTING MODE.
+  That last point is not incidental: the install is `mv`, which replaces the inode, so the mode
+  comes from the temp file (mktemp creates at 0600) rather than from the destination as `cp`
+  would. A hardcoded mode would silently chmod every target on every upgrade, and these 17
+  targets have no single correct mode -- 13 are `*.sh`, while `secrets.env.template` renders a
+  credentials file holding an `ANTHROPIC_API_KEY` and a GitHub PAT slot that installers
+  elsewhere deliberately create at 600. New suite
   `tests/test-xaca-1120-template-phase-honest-reporting.sh` covers all of it, pairing each
   current-behaviour case with a negative control that extracts the SAME function from the
   pre-fix commit and runs it in an identical sandbox.

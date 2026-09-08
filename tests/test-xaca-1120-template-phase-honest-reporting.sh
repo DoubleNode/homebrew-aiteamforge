@@ -22,12 +22,26 @@
 # omission, in opposite directions, and the two lies composed:
 #
 #   1. update_templates() printed "All templates up to date" unconditionally.
-#      Nothing in the tap ever creates ${WORKING_DIR}/config/ (verified: the
-#      only non-test reference to that path in the entire tap was the read
-#      inside update_templates itself). So every one of the 17 shipped
-#      templates hit `[ ! -f "$target_file" ]` and `continue`d silently,
-#      templates_updated stayed 0, and the function fell through to a success
-#      line that could not fail. A check that cannot fail is not a check.
+#      Every one of the 17 shipped templates hit `[ ! -f "$target_file" ]` and
+#      `continue`d silently, templates_updated stayed 0, and the function fell
+#      through to a success line that could not fail. A check that cannot fail
+#      is not a check.
+#
+#      PRECISION (PR #836 review corrected an earlier, sloppier claim here):
+#      it is NOT true that "nothing ever creates ${WORKING_DIR}/config/".
+#      install-fleet-monitor.sh does `mkdir -p "$AITEAMFORGE_DIR/config"` (:880)
+#      and writes fleet-config.json (:109) and machine-identity.json (:189)
+#      there, and get_working_dir() resolves to that same directory — so it
+#      exists fleet-wide. The true and narrower statement is that no shipped
+#      *.template BASENAME has ever had an installed counterpart in it: all 17
+#      basenames were compared against that directory's two occupants and the
+#      overlap is empty. Case 1 below is what actually pins the defect, and it
+#      does not depend on the directory being absent.
+#
+#      The original claim was reached by grepping only the BRACED form
+#      (`${AITEAMFORGE_DIR}/config`); the fleet installer writes the unbraced
+#      `$AITEAMFORGE_DIR/config`. An audit grep that covers one quoting variant
+#      returns a clean, confident, wrong answer.
 #
 #   2. update_shell_helpers() printed NOTHING when the kanban-helpers.sh
 #      render was a verified no-op, "matching this function's existing quiet
@@ -53,9 +67,12 @@
 #
 # The pre-fix revision is SELF-LOCATED via `git log -S` on the removed string
 # (never a hand-typed SHA -- a typed abbreviation resolves to whatever exists,
-# which is how fiction gets accepted). If that history is unavailable (shallow
-# clone), the negative controls SKIP; the current-behavior cases do not depend
-# on git and still run.
+# which is how fiction gets accepted). If that history is unavailable (a shallow
+# clone), the negative controls FAIL -- they do not skip. They are the suite's
+# reason to exist: without them the remaining cases assert only that the code
+# does what it currently does. A run that skipped its way to zero failures has
+# established nothing, so the exit gate consults the SKIP count as well as the
+# FAIL count, in both standalone and runner modes.
 #
 # All filesystem activity is sandboxed under TEST_TMP_DIR. NEVER touches the
 # real $HOME/.aiteamforge or ~/aiteamforge -- installer-test safety rule. This
@@ -94,8 +111,16 @@ if ! type -t test_start >/dev/null 2>&1; then
     test_start() { _CURRENT_TEST="$1"; echo "  >> $1"; }
     test_pass()  { _PASS_COUNT=$((_PASS_COUNT + 1)); echo "     PASS: $_CURRENT_TEST"; }
     test_fail()  { _FAIL_COUNT=$((_FAIL_COUNT + 1)); echo "     FAIL: $_CURRENT_TEST - $1" >&2; }
+    # PR #836 review: test_skip MUST be defined inside this standalone guard.
+    # test-runner.sh exports its own test_skip (:456) which writes a SKIP:
+    # marker to TEST_RESULTS_FILE and feeds SKIPPED_TESTS (:134, :493) --
+    # machinery added by XACA-0862-031 precisely so a skipped run cannot read
+    # as a covered one. Defining ours unconditionally clobbered that export, so
+    # under the runner a skip left NO marker, bumped a counter that is never
+    # printed (the summary is gated to _STANDALONE), and the file reported
+    # passes with zero skips.
+    test_skip() { _SKIP_COUNT=$((_SKIP_COUNT + 1)); echo "     SKIP: $_CURRENT_TEST - $1"; }
 fi
-test_skip() { _SKIP_COUNT=$((_SKIP_COUNT + 1)); echo "     SKIP: $_CURRENT_TEST - $1"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Temp directory (runner-supplied or our own).
@@ -163,6 +188,21 @@ _extract_fn_from_content() {
     '
 }
 _extract_fn_from_file() { _extract_fn_from_content "$2" < "$1"; }
+# PR #836: update_templates and update_shell_helpers now delegate
+# render+validate+install to shared _aitf_* helpers defined in the same file.
+# Any runner that extracts one of those functions in isolation MUST pull the
+# helpers in too -- otherwise the function under test dies with
+# "_aitf_render_template: command not found", which surfaces as a plausible
+# "render failed / incomplete file" RESULT rather than an obvious harness
+# error. That is a failure mode worth naming: the harness would be reporting a
+# product defect that does not exist.
+_extract_aitf_helpers() {
+    local _h
+    for _h in _aitf_sed_repl_escape _aitf_render_template _aitf_install_rendered; do
+        _extract_fn_from_file "$UPGRADE_SH" "$_h"
+    done
+}
+
 _extract_fn_from_rev() {
     git -C "$TAP_ROOT" show "${1}:${2}" 2>/dev/null | _extract_fn_from_content "$3"
 }
@@ -210,6 +250,7 @@ _run_update_templates() {
         ORG_NAME="SandboxOrg"
         FORCE="$force"
         DRY_RUN="$dry"
+        eval "$(_extract_aitf_helpers)"
         eval "$fn_src"
         update_templates
     ) 2>&1
@@ -241,7 +282,14 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 test_start "NEGATIVE CONTROL: pre-fix update_templates emits 'All templates up to date' with zero targets"
 if [ "$_PRE_FIX_AVAILABLE" != true ]; then
-    test_skip "pre-fix revision unavailable (shallow clone?)"
+    # NOT a skip (PR #836 review). These two controls are the suite's reason to
+    # exist: without them the current-behaviour cases assert only that the code
+    # does what it currently does. Degrading to SKIP would leave the suite
+    # exiting 0 with its only real evidence silently disarmed -- a strictly
+    # worse vacuous green than the pipefail bug this file already fixed once.
+    # If this fires in CI the cause is a shallow checkout; deepen it
+    # (fetch-depth: 0), do not tolerate the skip.
+    test_fail "pre-fix revision could not be resolved, so the negative controls cannot run. This is a FAILURE, not a skip: deepen the clone (fetch-depth: 0) or repair the git log -S anchor."
 else
     _sbx="$(_next_sandbox)"; _make_sandbox "$_sbx"
     _out_old="$(_run_update_templates old "$_sbx")"
@@ -298,7 +346,14 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 test_start "NEGATIVE CONTROL: pre-fix update_templates copies placeholders literally"
 if [ "$_PRE_FIX_AVAILABLE" != true ]; then
-    test_skip "pre-fix revision unavailable (shallow clone?)"
+    # NOT a skip (PR #836 review). These two controls are the suite's reason to
+    # exist: without them the current-behaviour cases assert only that the code
+    # does what it currently does. Degrading to SKIP would leave the suite
+    # exiting 0 with its only real evidence silently disarmed -- a strictly
+    # worse vacuous green than the pipefail bug this file already fixed once.
+    # If this fires in CI the cause is a shallow checkout; deepen it
+    # (fetch-depth: 0), do not tolerate the skip.
+    test_fail "pre-fix revision could not be resolved, so the negative controls cannot run. This is a FAILURE, not a skip: deepen the clone (fetch-depth: 0) or repair the git log -S anchor."
 else
     _sbx="$(_next_sandbox)"; _make_sandbox "$_sbx"
     mkdir -p "$_sbx/working/config"
@@ -313,6 +368,46 @@ else
     else
         test_fail "negative control did not reproduce the literal-placeholder copy - case 4 proves nothing. Content: $(cat "$_sbx/working/config/demo.conf" 2>/dev/null)"
     fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 5b — mode preservation on a CREDENTIALS-shaped target (PR #836 review).
+# The install is `mv`, which replaces the inode, so the installed mode is the
+# temp's. mktemp creates at 0600 and an explicit `chmod 644` would have silently
+# widened a rendered secrets file — which is a real target here: the shipped
+# secrets template renders an ANTHROPIC_API_KEY and a GitHub PAT slot, and
+# installers elsewhere deliberately create such files at 600.
+# ─────────────────────────────────────────────────────────────────────────────
+_mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null; }
+
+test_start "a 600 (credentials) target keeps mode 600 across an update"
+_sbx="$(_next_sandbox)"; _make_sandbox "$_sbx"
+mkdir -p "$_sbx/working/config"
+printf '# stale\n' > "$_sbx/working/config/demo.conf"
+chmod 600 "$_sbx/working/config/demo.conf"
+_run_update_templates current "$_sbx" >/dev/null 2>&1
+_m="$(_mode_of "$_sbx/working/config/demo.conf")"
+if [ "$_m" = "600" ]; then
+    test_pass
+else
+    test_fail "mode widened from 600 to ${_m} — a rendered credentials file would be exposed"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 5c — the other half: 13 of the 17 shipped targets are *.sh, so a flat
+# 644 would strip the exec bit instead of widening.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "a 755 (executable) target keeps mode 755 across an update"
+_sbx="$(_next_sandbox)"; _make_sandbox "$_sbx"
+mkdir -p "$_sbx/working/config"
+printf '# stale\n' > "$_sbx/working/config/demo.conf"
+chmod 755 "$_sbx/working/config/demo.conf"
+_run_update_templates current "$_sbx" >/dev/null 2>&1
+_m="$(_mode_of "$_sbx/working/config/demo.conf")"
+if [ "$_m" = "755" ]; then
+    test_pass
+else
+    test_fail "exec bit lost: mode became ${_m}, expected 755"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -367,6 +462,7 @@ _run_update_shell_helpers() {
         ORG_NAME="SandboxOrg"
         FORCE=false
         DRY_RUN=false
+        eval "$(_extract_aitf_helpers)"
         eval "$fn_src"
         update_shell_helpers
     ) 2>&1
@@ -435,6 +531,13 @@ if [ "$_STANDALONE" = true ]; then
     echo "───────────────────────────────────────────────────────────────────"
     echo "  XACA-1120: PASS=$_PASS_COUNT FAIL=$_FAIL_COUNT SKIP=$_SKIP_COUNT"
     echo "───────────────────────────────────────────────────────────────────"
-    [ "$_FAIL_COUNT" -eq 0 ] || exit 1
+fi
+# A SKIP is not a PASS (PR #836 review). The exit gate consults BOTH counters in
+# BOTH modes: a suite that skipped its way to zero failures has not established
+# anything, and the previous gate (_FAIL_COUNT only) would have exited 0 for it.
+# Kept outside the _STANDALONE guard so the status is correct under the runner
+# too, where the summary above is intentionally not printed.
+if [ "$_FAIL_COUNT" -ne 0 ] || [ "$_SKIP_COUNT" -ne 0 ]; then
+    exit 1
 fi
 exit 0

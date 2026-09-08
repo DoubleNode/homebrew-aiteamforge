@@ -281,6 +281,112 @@ check_brew_updates() {
 }
 
 # Update templates
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared template render core (PR #836 [Review]).
+#
+# update_templates and update_shell_helpers had independently grown the same
+# ~40-line sequence: substitute three placeholders, validate the render is
+# line-for-line with its source, compare by content, install by atomic rename.
+# That duplication was not a style problem -- it is what let the two sites
+# diverge on INSTALL MODE. One reasoned carefully about `mv` replacing the inode
+# and picked an explicit 755; the copy asserted a flat 644 across a set that
+# includes a rendered credentials file and 13 shell scripts, because the
+# reasoning lived in a comment rather than in shared code.
+#
+# The mode is therefore a REQUIRED ARGUMENT of the install helper: each call
+# site states its answer instead of re-deriving one.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Escape a value for safe use as the REPLACEMENT half of `s|...|<repl>|g`.
+# Order matters: backslashes first, or the escapes added below get re-escaped.
+# Without this, a `|` in any substituted value terminates the expression, and a
+# bare `&` silently expands to the entire match.
+_aitf_sed_repl_escape() {
+  local v="$1"
+  v="${v//\\/\\\\}"
+  v="${v//|/\\|}"
+  v="${v//&/\\&}"
+  printf '%s' "$v"
+}
+
+# Render <src> into a VALIDATED temp file. Echoes the temp path on success.
+#   $1 src        template to render
+#   $2 target     the file this render is destined for
+#   $3 placement  "sibling" (default) creates the temp beside $2 so the eventual
+#                 mv is an atomic same-filesystem rename -- a cross-filesystem
+#                 mv degrades to copy+unlink and reopens the torn-write window
+#                 (XACA-1095). "tmpdir" is for callers that will NEVER install
+#                 (DRY_RUN), so a dry run does not write into a live directory.
+# Returns 0 ok | 1 could not create temp | 2 render invalid | 3 unsafe value.
+_aitf_render_template() {
+  local src="$1" target="$2" placement="${3:-sibling}"
+  local tmp="" _v
+
+  # Fail CLOSED on a value that cannot be expressed in a one-line `s|...|g`.
+  # A newline in a substituted value would silently truncate the expression.
+  for _v in "${WORKING_DIR}" "${SHARED_DEV_ROOT:-/Users/Shared/Development}" "${ORG_NAME:-}"; do
+    case "$_v" in
+      *"
+"*) return 3 ;;
+    esac
+  done
+
+  if [ "$placement" = "tmpdir" ]; then
+    tmp="$(mktemp "${TMPDIR:-/tmp}/aitf-render.XXXXXX" 2>/dev/null)" || tmp=""
+  else
+    tmp="$(mktemp "${target}.XXXXXX" 2>/dev/null)" || tmp=""
+  fi
+  [ -n "$tmp" ] || return 1
+
+  local _wd _sdr _org
+  _wd="$(_aitf_sed_repl_escape "${WORKING_DIR}")"
+  _sdr="$(_aitf_sed_repl_escape "${SHARED_DEV_ROOT:-/Users/Shared/Development}")"
+  _org="$(_aitf_sed_repl_escape "${ORG_NAME:-}")"
+
+  if ! sed -e "s|{{AITEAMFORGE_DIR}}|${_wd}|g" \
+           -e "s|{{SHARED_DEV_ROOT}}|${_sdr}|g" \
+           -e "s|{{ORG_NAME}}|${_org}|g" \
+           "$src" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; return 2
+  fi
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp"; return 2
+  fi
+  # Substitutions are pure `s|...|g`, so a good render is line-for-line with its
+  # source. Anything else is a short/failed render and must never be installed
+  # over a working file -- a torn write wearing the costume of a successful
+  # rename is the exact defect class XACA-1095 exists to close.
+  local _a _b
+  _a="$(wc -l < "$src" 2>/dev/null | tr -d '[:space:]')"
+  _b="$(wc -l < "$tmp" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$_b" ] || [ "$_a" != "$_b" ]; then
+    rm -f "$tmp"; return 2
+  fi
+
+  printf '%s' "$tmp"
+  return 0
+}
+
+# Install a validated render over its target by atomic rename.
+#   $1 tmp   validated render (consumed on success)
+#   $2 target
+#   $3 mode  an octal mode, or "preserve" to keep the target's current mode.
+#            REQUIRED and explicit by design: `mv` replaces the inode, so the
+#            installed mode is whatever the temp carries, and mktemp creates at
+#            0600 regardless of umask. There is no single correct default
+#            across a heterogeneous target set.
+_aitf_install_rendered() {
+  local tmp="$1" target="$2" mode="${3:-preserve}"
+  if [ "$mode" = "preserve" ]; then
+    mode="$(stat -f '%Lp' "$target" 2>/dev/null || stat -c '%a' "$target" 2>/dev/null || echo 644)"
+    case "$mode" in
+      ''|*[!0-7]*) mode=644 ;;
+    esac
+  fi
+  chmod "$mode" "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$target" 2>/dev/null
+}
+
 update_templates() {
   print_section "Updating Templates"
 
@@ -297,6 +403,7 @@ update_templates() {
   local templates_updated=0
   local templates_current=0
   local templates_absent=0
+  local templates_failed=0
 
   if [ ! -d "${FRAMEWORK_DIR}/share/templates" ]; then
     print_warning "Templates directory not found in framework"
@@ -318,53 +425,54 @@ update_templates() {
     local target_file="${WORKING_DIR}/config/${template_name}"
 
     # Target not installed -> nothing to refresh. COUNT IT. Previously this
-    # `continue` was silent, so a machine with no config/ directory at all
-    # (which is every machine: nothing in the tap ever creates
-    # ${WORKING_DIR}/config/) skipped all N templates, left templates_updated
-    # at 0, and fell through to an unconditional "All templates up to date" --
-    # a success line that could not fail, reporting on work that structurally
-    # never happened.
+    # `continue` was silent, so every template skipped here left
+    # templates_updated at 0 and fell through to an unconditional
+    # "All templates up to date" -- a success line that could not fail.
+    #
+    # PRECISION MATTERS HERE (PR #836 review). The directory itself is NOT
+    # absent: install-fleet-monitor.sh does `mkdir -p "$AITEAMFORGE_DIR/config"`
+    # (:880) and writes fleet-config.json (:109) and machine-identity.json
+    # (:189) into it, and get_working_dir() resolves to that same
+    # ${AITEAMFORGE_DIR:-$HOME/aiteamforge}. So ${WORKING_DIR}/config/ exists
+    # fleet-wide. What is true, and what actually made the old success line
+    # unfalsifiable, is narrower: NO shipped *.template basename has ever had
+    # an installed counterpart in that directory. Verified by comparing all 17
+    # shipped basenames against the directory's two occupants -- zero overlap.
+    # The distinction is load-bearing: this render path is one added template
+    # basename away from going live, not one created directory away, which is
+    # exactly why the mode handling below is not a theoretical concern.
     if [ ! -f "$target_file" ]; then
       templates_absent=$((templates_absent + 1))
       continue
     fi
 
     # RENDER, don't `cp`. The prior implementation copied the raw template over
-    # the target with a "this would call template processor / for now, just
+    # the target under a "this would call template processor / for now, just
     # copy" comment, which would install literal {{AITEAMFORGE_DIR}} /
     # {{ORG_NAME}} / {{SHARED_DEV_ROOT}} placeholders into a live config file.
-    # Dead today only because no target ever exists; wrong the instant one does.
-    # Same substitution set as update_shell_helpers so install and upgrade agree.
-    local rendered=""
-    rendered="$(mktemp "${target_file}.XXXXXX" 2>/dev/null)" || rendered=""
-    if [ -z "$rendered" ]; then
+    # Dead today only because no target exists; wrong the instant one does.
+    #
+    # DRY_RUN renders into $TMPDIR rather than beside the target, so a dry run
+    # never writes into a live config directory. The sibling placement exists
+    # only to make the install an atomic same-filesystem rename, and a dry run
+    # does not install.
+    local _placement="sibling"
+    [ "$DRY_RUN" = true ] && _placement="tmpdir"
+
+    local rendered="" _rc=0
+    rendered="$(_aitf_render_template "$template" "$target_file" "$_placement")" || _rc=$?
+
+    if [ "$_rc" -eq 1 ]; then
       print_warning "Could not create a temp file to render ${template_name} - skipping this template"
+      templates_failed=$((templates_failed + 1))
       continue
-    fi
-
-    local render_ok=1
-    if ! sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
-             -e "s|{{SHARED_DEV_ROOT}}|${SHARED_DEV_ROOT:-/Users/Shared/Development}|g" \
-             -e "s|{{ORG_NAME}}|${ORG_NAME:-}|g" \
-             "$template" > "$rendered" 2>/dev/null; then
-      render_ok=0
-    elif [ ! -s "$rendered" ]; then
-      render_ok=0
-    else
-      # Substitutions are pure `s|...|g`, so a good render is line-for-line
-      # with its source. Anything else is a short/failed render and must never
-      # be installed over a working file (XACA-1095 torn-write lesson).
-      local src_lines out_lines
-      src_lines="$(wc -l < "$template" 2>/dev/null | tr -d '[:space:]')"
-      out_lines="$(wc -l < "$rendered" 2>/dev/null | tr -d '[:space:]')"
-      if [ -z "$out_lines" ] || [ "$src_lines" != "$out_lines" ]; then
-        render_ok=0
-      fi
-    fi
-
-    if [ "$render_ok" -eq 0 ]; then
+    elif [ "$_rc" -eq 3 ]; then
+      print_warning "Refusing to render ${template_name}: a substituted value contains a newline, which cannot be expressed safely in the substitution - leaving the existing copy untouched."
+      templates_failed=$((templates_failed + 1))
+      continue
+    elif [ "$_rc" -ne 0 ]; then
       print_warning "Refusing to install ${template_name}: rendering produced an incomplete file - leaving the existing copy untouched."
-      rm -f "$rendered"
+      templates_failed=$((templates_failed + 1))
       continue
     fi
 
@@ -378,7 +486,14 @@ update_templates() {
     fi
 
     if [ "$DRY_RUN" = true ]; then
-      echo "Would update: ${template_name} (installed copy differs from the shipped template)"
+      # Report the ACTUAL reason. Under FORCE the file may be byte-identical,
+      # and claiming it "differs" would be a small lie of exactly the kind this
+      # ticket exists to remove.
+      if cmp -s "$rendered" "$target_file"; then
+        echo "Would update: ${template_name} (unchanged; --force re-installs regardless)"
+      else
+        echo "Would update: ${template_name} (installed copy differs from the shipped template)"
+      fi
       templates_updated=$((templates_updated + 1))
       rm -f "$rendered"
       continue
@@ -386,26 +501,40 @@ update_templates() {
 
     print_info "Updating ${template_name}..."
     cp "$target_file" "${target_file}.backup-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-    chmod 644 "$rendered" 2>/dev/null || true
-    if mv -f "$rendered" "$target_file" 2>/dev/null; then
+
+    # PRESERVE the target's mode -- never assert one (PR #836 review). These 17
+    # targets have no single correct mode: 13 are *.sh (a flat 644 strips the
+    # exec bit), while secrets.env.template renders a credentials file carrying
+    # an ANTHROPIC_API_KEY and a GitHub PAT slot, which installers elsewhere
+    # deliberately create at 600 (install-kanban.sh:1565). Asserting 644 would
+    # silently widen that to world-readable on every upgrade.
+    if _aitf_install_rendered "$rendered" "$target_file" preserve; then
       print_success "Updated ${template_name}"
       templates_updated=$((templates_updated + 1))
     else
       print_warning "Could not install rendered ${template_name} - existing copy left in place"
+      templates_failed=$((templates_failed + 1))
       rm -f "$rendered"
     fi
   done <<< "$templates"
 
   # HONEST REPORT (XACA-1120 subitem -003): a line that prints on every run
-  # regardless of what happened is not a check. Report the three outcomes
-  # separately, and never claim "up to date" about files that are not installed.
+  # regardless of what happened is not a check. Report each outcome separately,
+  # and never claim "up to date" about files that are not installed.
   if [ "$templates_updated" -gt 0 ]; then
     print_success "Updated ${templates_updated} config template(s)"
   fi
   if [ "$templates_current" -gt 0 ]; then
     print_success "${templates_current} config template(s) already current"
   fi
-  if [ "$templates_updated" -eq 0 ] && [ "$templates_current" -eq 0 ]; then
+  if [ "$templates_failed" -gt 0 ]; then
+    print_warning "${templates_failed} config template(s) could not be rendered or installed"
+  fi
+  # Only claim "nothing to do" when nothing actually happened -- including no
+  # failures. A run dominated by render failures previously reported
+  # "${templates_absent} template(s) have no installed counterpart" with
+  # templates_absent at 0, which is both wrong and reassuring.
+  if [ "$templates_updated" -eq 0 ] && [ "$templates_current" -eq 0 ] && [ "$templates_failed" -eq 0 ]; then
     print_info "No config templates to update: ${templates_absent} shipped template(s) have no installed counterpart under ${WORKING_DIR}/config/"
   fi
   print_info "Note: this phase does not cover kanban-helpers.sh - see the \"Updating Shell Helpers\" section below."
@@ -2436,37 +2565,25 @@ update_shell_helpers() {
     # the XACA-1095 plan doc for the full trail. Comparing rendered content
     # instead is correct regardless of either file's mtime and self-heals the
     # moment the shipped template or the placeholder values actually change.
-    local _kanban_rendered=""
-    # XACA-1095 [Review] (PR #820): the temp file is created as a SIBLING of the
-    # target, not under $TMPDIR, so the final install is an atomic same-filesystem
-    # rename. A cross-filesystem mv degrades to copy+unlink, which reintroduces
-    # exactly the torn-write window this is here to close.
-    _kanban_rendered="$(mktemp "${kanban_target}.XXXXXX" 2>/dev/null)" || _kanban_rendered=""
-    if [ -z "$_kanban_rendered" ]; then
+    # PR #836 [Review]: render+validate now goes through the shared
+    # _aitf_render_template helper (defined above update_templates). Behaviour
+    # is unchanged and every XACA-1095 property is preserved BY the helper:
+    # the temp is created as a SIBLING of the target so the final install is an
+    # atomic same-filesystem rename (a cross-filesystem mv degrades to
+    # copy+unlink, reopening the torn-write window), and the render is
+    # validated line-for-line against its source before it becomes eligible to
+    # install, so a short/failed sed can never be renamed over a working file.
+    # Factoring it also fixed a real divergence: the copy of this block in
+    # update_templates had asserted a flat install mode over a heterogeneous
+    # target set. The helper additionally escapes the substituted values, which
+    # this site never did.
+    local _kanban_rendered="" _kanban_render_rc=0
+    _kanban_rendered="$(_aitf_render_template "$_kanban_src" "$kanban_target" sibling)" || _kanban_render_rc=$?
+    if [ "$_kanban_render_rc" -eq 1 ]; then
       print_warning "Could not create a temp file to compare kanban-helpers.sh against the shipped template — skipping refresh check this run"
     else
-      # XACA-1095: validate the RENDER before it becomes eligible to be installed.
-      # Without this, a failed or short sed leaves an empty/partial temp file,
-      # `cmp -s` reports "differs", and the atomic rename below would install that
-      # truncated file over a working one -- a torn write wearing the costume of a
-      # successful rename, and the exact defect class this ticket exists to fix.
-      # The substitutions are pure `s|...|g`, so a good render is always
-      # line-for-line with its source; anything else is a failed render.
       _kanban_render_ok=1
-      if ! sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
-               -e "s|{{SHARED_DEV_ROOT}}|${SHARED_DEV_ROOT:-/Users/Shared/Development}|g" \
-               -e "s|{{ORG_NAME}}|${ORG_NAME:-}|g" \
-               "$_kanban_src" > "$_kanban_rendered" 2>/dev/null; then
-        _kanban_render_ok=0
-      elif [ ! -s "$_kanban_rendered" ]; then
-        _kanban_render_ok=0
-      else
-        _kanban_src_lines="$(wc -l < "$_kanban_src" 2>/dev/null | tr -d '[:space:]')"
-        _kanban_out_lines="$(wc -l < "$_kanban_rendered" 2>/dev/null | tr -d '[:space:]')"
-        if [ -z "$_kanban_out_lines" ] || [ "$_kanban_src_lines" != "$_kanban_out_lines" ]; then
-          _kanban_render_ok=0
-        fi
-      fi
+      [ "$_kanban_render_rc" -eq 0 ] || _kanban_render_ok=0
 
       if [ "$_kanban_render_ok" -eq 0 ]; then
         print_warning "Refusing to install kanban-helpers.sh: rendering $(basename "$_kanban_src") produced an incomplete file - leaving the existing copy untouched."
@@ -2510,7 +2627,7 @@ update_shell_helpers() {
         # only ever added +x. 755 is the canonical mode: it is what a fresh install
         # produces (sed > target under a 022 umask, then chmod +x) and what the
         # live consumers actually carry (-rwxr-xr-x, measured).
-        if chmod 755 "$_kanban_rendered" 2>/dev/null && mv -f "$_kanban_rendered" "$kanban_target" 2>/dev/null; then
+        if _aitf_install_rendered "$_kanban_rendered" "$kanban_target" 755; then
           print_success "Updated kanban-helpers.sh"
           updated=$((updated + 1))
         else

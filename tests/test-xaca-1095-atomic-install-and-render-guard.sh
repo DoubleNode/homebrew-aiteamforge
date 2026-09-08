@@ -166,6 +166,21 @@ _extract_fn_from_file() {
     local file="$1" fn="$2"
     _extract_fn_from_content "$fn" < "$file"
 }
+# PR #836: update_templates and update_shell_helpers now delegate
+# render+validate+install to shared _aitf_* helpers defined in the same file.
+# Any runner that extracts one of those functions in isolation MUST pull the
+# helpers in too -- otherwise the function under test dies with
+# "_aitf_render_template: command not found", which surfaces as a plausible
+# "render failed / incomplete file" RESULT rather than an obvious harness
+# error. That is a failure mode worth naming: the harness would be reporting a
+# product defect that does not exist.
+_extract_aitf_helpers() {
+    local _h
+    for _h in _aitf_sed_repl_escape _aitf_render_template _aitf_install_rendered; do
+        _extract_fn_from_file "$UPGRADE_SH" "$_h"
+    done
+}
+
 _extract_fn_from_rev() {
     local rev="$1" relpath="$2" fn="$3"
     git -C "$TAP_ROOT" show "${rev}:${relpath}" 2>/dev/null | _extract_fn_from_content "$fn"
@@ -236,6 +251,7 @@ _run_update_shell_helpers() {
         for _p in print_section print_info print_success print_warning print_error; do
             eval "${_p}() { echo \"[\${FUNCNAME[0]:-msg}] \$*\"; }"
         done
+        eval "$(_extract_aitf_helpers)"
         eval "$alias_fn_src"
         eval "$fn_src"
         if [ -n "$extra_stub_src" ]; then
