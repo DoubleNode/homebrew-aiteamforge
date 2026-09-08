@@ -326,6 +326,39 @@ _run_update_templates_rev() {
     ) 2>&1
 }
 
+# Like _run_update_templates, but with `cp` stubbed to always fail (subitem
+# XACA-1120-039, PR #836 review round 4). update_templates' only `cp` call is
+# the pre-install backup (`cp -p "$target_file" "$_template_backup"`) --
+# _aitf_render_template uses `sed`, _aitf_install_rendered uses `mv` -- so this
+# stub isolates a backup failure without touching either the render or the
+# install machinery. Defined ONLY inside this subshell; never affects the
+# suite's own file operations.
+_run_update_templates_backup_fails() {
+    local sbx="$1" force="${2:-false}" dry="${3:-false}"
+    local fn_src
+    fn_src="$(_extract_fn_from_file "$UPGRADE_SH" "update_templates")"
+    if [ -z "$fn_src" ]; then
+        echo "EXTRACT_FAILED: update_templates (current)" >&2
+        return 2
+    fi
+    (
+        cp() { return 1; }
+        print_section() { echo "== $* =="; }
+        print_info()    { echo "INFO: $*"; }
+        print_success() { echo "OK: $*"; }
+        print_warning() { echo "WARN: $*"; }
+        FRAMEWORK_DIR="$sbx/framework"
+        WORKING_DIR="$sbx/working"
+        SHARED_DEV_ROOT="/Sandbox/Shared"
+        ORG_NAME="SandboxOrg"
+        FORCE="$force"
+        DRY_RUN="$dry"
+        eval "$(_extract_aitf_helpers)"
+        eval "$fn_src"
+        update_templates
+    ) 2>&1
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Sandbox shaped like a real secrets.env deployment: a shipped
 # secrets.env.template (placeholder credentials) and a POPULATED
@@ -437,6 +470,38 @@ elif grep -q "aiteamforge_dir=$_sbx/working" "$_sbx/working/config/demo.conf" \
     test_pass
 else
     test_fail "target not correctly rendered. Content: $(cat "$_sbx/working/config/demo.conf")"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 4b (PR #836 review round 4, subitem XACA-1120-039, BLOCKING) — a failed
+# pre-install backup must abort the install for that file, not proceed
+# unprotected. Before this fix, `cp -p ... || _template_backup=""` swallowed
+# the failure and _aitf_install_rendered still ran, leaving nothing to roll
+# back to if the subsequent rename went wrong. Asserts THREE things together:
+# the target is left completely untouched (still its stale content, proving
+# the install never ran), no stray backup file is left in config/, and the
+# operator-visible output actually says so (not silent).
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "a failed pre-install backup aborts the install (target untouched, no orphaned backup)"
+_sbx="$(_next_sandbox)"; _make_sandbox "$_sbx"
+mkdir -p "$_sbx/working/config"
+printf '# stale\naiteamforge_dir=/old\nshared_dev_root=/old\norg_name=old\n' > "$_sbx/working/config/demo.conf"
+# Capture via $(...) (strips trailing newlines) so the before/after comparison
+# is symmetric -- comparing against a hand-written literal with a different
+# trailing-newline shape than what `cat` reports back is a self-inflicted
+# false failure, not a real content change.
+_stale_content="$(cat "$_sbx/working/config/demo.conf")"
+_out="$(_run_update_templates_backup_fails "$_sbx")"
+_after_content="$(cat "$_sbx/working/config/demo.conf")"
+_backup_count="$(find "$_sbx/working/config" -name 'demo.conf.backup-*' 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$_after_content" != "$_stale_content" ]; then
+    test_fail "target was modified despite the backup failing -- install proceeded unprotected. Content: $_after_content"
+elif [ "${_backup_count:-0}" -ne 0 ]; then
+    test_fail "a backup file was left in config/ despite cp -p having failed -- orphaned artifact. Found: $_backup_count"
+elif ! echo "$_out" | grep -qi 'backup'; then
+    test_fail "no output mentions the backup failure -- silent abort is exactly the class of unfalsifiable behavior this ticket exists to remove. Output: $_out"
+else
+    test_pass
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -644,6 +709,85 @@ elif [ ! -f "$_tmp" ]; then
     test_fail "the temp render was consumed/removed on a refused install — caller can no longer distinguish this from a successful rename"
 else
     test_pass
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 5i/5j (PR #836 review round 4, subitem XACA-1120-038) —
+# _AITF_NEVER_OVERWRITE_BASENAMES cannot detect its own drift. Its comment says
+# "add future basenames here as they ship" and nothing enforced that; a
+# template that starts shipping a real credential could ship un-protected with
+# nothing failing. This turns the comment into a check.
+#
+# Marker pattern is an env/shell-style ASSIGNMENT to a variable whose name
+# contains KEY, TOKEN, SECRET, PASSWORD or CREDENTIAL -- not a bare keyword
+# grep. A keyword grep (`token|key|secret|password|credential` anywhere in the
+# file) was tried first and returned ELEVEN false-positive files: plist `<key>`
+# XML tags, "keystroke" AppleScript calls, and prose like "Review checklist:
+# ... no secrets/injection". None of those carry a rendered secret VALUE. The
+# assignment-shaped pattern below returns exactly secrets.env.template today —
+# matching the reviewer's own manual check ("zero hits across the other 16") —
+# and still catches the actual risk: a future template that RENDERS a
+# `SOME_API_KEY=...`-shaped line into a live file.
+# ─────────────────────────────────────────────────────────────────────────────
+_credential_marker_basenames() {
+    # $1 = directory to scan for *.template files
+    local _dir="$1" _f _hit
+    find "$_dir" -name '*.template' 2>/dev/null | while IFS= read -r _f; do
+        _hit="$(grep -inE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Za-z0-9_]*[[:space:]]*=' "$_f" 2>/dev/null)"
+        [ -n "$_hit" ] && basename "$_f" .template
+    done
+}
+
+test_start "no shipped *.template carries a credential-shaped assignment outside _AITF_NEVER_OVERWRITE_BASENAMES"
+_allowlist_line="$(grep '^_AITF_NEVER_OVERWRITE_BASENAMES=' "$UPGRADE_SH")"
+if [ -z "$_allowlist_line" ]; then
+    test_fail "could not find _AITF_NEVER_OVERWRITE_BASENAMES= in $UPGRADE_SH — extraction anchor drifted"
+else
+    # shellcheck disable=SC2086,SC1090
+    eval "$_allowlist_line"
+    _unprotected=""
+    _matched_any=false
+    while IFS= read -r _basename; do
+        [ -n "$_basename" ] || continue
+        _matched_any=true
+        case $'\n'"${_AITF_NEVER_OVERWRITE_BASENAMES}"$'\n' in
+            *$'\n'"${_basename}"$'\n'*) : ;;   # on the list -- fine
+            *) _unprotected="${_unprotected}${_basename} " ;;
+        esac
+    done <<EOF
+$(_credential_marker_basenames "$TAP_ROOT/share/templates")
+EOF
+    if [ "$_matched_any" != true ]; then
+        # Vacuous-green guard: a check that scans nothing and reports "clean"
+        # has established nothing. secrets.env.template MUST match, or the
+        # marker pattern itself has drifted from what secrets.env actually
+        # contains.
+        test_fail "credential-marker scan matched ZERO templates, not even secrets.env.template — the marker pattern itself is broken, not confirming the fleet is clean"
+    elif [ -n "$_unprotected" ]; then
+        test_fail "template(s) carrying a credential-shaped assignment are NOT in _AITF_NEVER_OVERWRITE_BASENAMES: ${_unprotected}-- add them to the allowlist in $UPGRADE_SH"
+    else
+        test_pass
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE 5j — proof the check above actually has teeth: a synthetic fixture with
+# a credential-shaped assignment in a basename NOT on the real allowlist must
+# be FLAGGED by the same detection logic. Without this, CASE 5i passing could
+# just mean the detection function never matches anything.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "SYNTHETIC: an undeclared template carrying a credential-shaped assignment IS flagged"
+_drift_sbx="$(_next_sandbox)"
+mkdir -p "$_drift_sbx/templates"
+cat > "$_drift_sbx/templates/rogue-service.env.template" <<'TPL'
+# a hypothetical future template that ships a real secret
+export ROGUE_SERVICE_API_KEY="{{ROGUE_KEY}}"
+TPL
+_drift_hits="$(_credential_marker_basenames "$_drift_sbx/templates")"
+if [ "$_drift_hits" = "rogue-service.env" ]; then
+    test_pass
+else
+    test_fail "expected the synthetic rogue-service.env.template to be flagged by name; got: '${_drift_hits}'"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

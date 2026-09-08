@@ -138,8 +138,23 @@ _extract_fn() {
 
 EXTRACTED="$WORK_DIR/extracted-functions.sh"
 : > "$EXTRACTED"
+# PR #836 [Review] (round 4, subitem XACA-1120 BLOCKING): update_shell_helpers'
+# alias loop now renders through the shared _aitf_render_template /
+# _aitf_install_rendered helpers (subitem XACA-1120-031) instead of its own
+# inline sed. Those helpers -- and the _aitf_sed_repl_escape / _aitf_file_mode
+# helpers they call internally -- live in aiteamforge-upgrade.sh but were not
+# in this suite's extraction list, so update_shell_helpers came back with
+# "_aitf_render_template: command not found" (rc 127), which this harness's
+# own _rc handling reads as "rendering produced an incomplete file" -- a
+# product-defect-shaped result for a harness gap. Verified against develop's
+# gitlink 65b8ae6 (pre-rewrite): 12/12. Against 41c613c (post-rewrite,
+# helpers unextracted): 10/12, T1 and T2 failing on exactly this symptom.
+# Extracting the four helpers here restores 12/12 -- the product code was
+# already correct; only the extraction list was stale.
 for _fn in _xaca0771_mandatory_alias_basenames update_shell_helpers \
-           _xaca0771_mandatory_hook_basenames update_claude_hooks; do
+           _xaca0771_mandatory_hook_basenames update_claude_hooks \
+           _aitf_sed_repl_escape _aitf_file_mode _aitf_render_template \
+           _aitf_install_rendered; do
     _src="$(_extract_fn "$_fn")"
     if [ -z "$_src" ]; then
         echo "FATAL: could not extract $_fn from $UPGRADE_SH" >&2
@@ -163,8 +178,12 @@ export _STUB_LOG
 
 # shellcheck disable=SC1090
 source "$EXTRACTED"
+# Same extraction list as above (must stay in sync) -- verify every function
+# the sourcing step was supposed to define actually came through.
 for _fn in _xaca0771_mandatory_alias_basenames update_shell_helpers \
-           _xaca0771_mandatory_hook_basenames update_claude_hooks; do
+           _xaca0771_mandatory_hook_basenames update_claude_hooks \
+           _aitf_sed_repl_escape _aitf_file_mode _aitf_render_template \
+           _aitf_install_rendered; do
     declare -f "$_fn" >/dev/null || { echo "FATAL: $_fn not defined after extraction"; exit 1; }
 done
 

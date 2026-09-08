@@ -82,7 +82,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   That last point is not incidental: the install is `mv`, which replaces the inode, so the mode
   comes from the temp file (mktemp creates at 0600) rather than from the destination as `cp`
   would. A hardcoded mode would silently chmod every target on every upgrade, and these 17
-  targets have no single correct mode -- 13 are `*.sh`, while `secrets.env.template` renders a
+  targets have no single correct mode -- COUNTED, not asserted (PR #836 review round 4,
+  subitem XACA-1120-035: an earlier pass here claimed "13 are `*.sh`" without running
+  `find share/templates -name '*.template'`; the real count is 8): 8 are `*.sh`, 4 are
+  launchd plists, 2 render CLAUDE.md, 2 are JSON, and `secrets.env.template` renders a
   credentials file holding an `ANTHROPIC_API_KEY` and a GitHub PAT slot that installers
   elsewhere deliberately create at 600. New suite
   `tests/test-xaca-1120-template-phase-honest-reporting.sh` covers all of it, pairing each
@@ -152,10 +155,45 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `{{AITEAMFORGE_DIR}}`, so `agent-aliases.sh` and `cc-aliases.sh` -- both of which also carry
   `{{ORG_NAME}}` -- were installing with that placeholder left literal on every create/refresh;
   verified end to end in a sandbox (create + update paths, mode 755 on create, `{{ORG_NAME}}`
-  resolved, zero placeholders remaining). Also: `update_shell_helpers`' own "Updated N helper(s)"
+  resolved). **Correction (PR #836 review round 4, subitem XACA-1120-036):** the prior text here
+  claimed "zero placeholders remaining" -- false. `{{ORG_SLUG}}`, which `cc-aliases.sh` alone
+  carries 27 times, is not one of the three placeholders `_aitf_render_template` substitutes and
+  is left literal by this change too. Substituting it is XACA-1127's territory, not this
+  ticket's. Also: `update_shell_helpers`' own "Updated N helper(s)"
   summary line had the same past-tense-under-`DRY_RUN` bug subitem -027 fixed in
   `update_templates` (the subitem explicitly named both sites); it now says "Would update" under
   `DRY_RUN` there too.
+
+- XACA-1120 (PR #836 review round 4 — five more findings, all fixed): **-035** two comments plus
+  this file's own round-2 entry above (both corrected in place, not duplicated here) had claimed
+  "13 are `*.sh`" among the 17 shipped `*.template` basenames without ever running
+  `find share/templates -name '*.template'` -- the real count is 8 `*.sh`, 4 launchd plists, 2
+  CLAUDE.md renders, 2 JSON, and the secrets.env credentials file. **-036** a comment claiming
+  `_aitf_render_template` "substitutes all three placeholders the shipped templates use" was also
+  false: the alias templates carry a fourth, `{{ORG_SLUG}}` (27 occurrences in `cc-aliases.sh`
+  alone), which nothing in the tap substitutes -- corrected in place above and left for
+  XACA-1127, which owns that placeholder. **-037** the aliases-loop rewrite had moved
+  `mkdir -p "$aliases_dir"` out of the `DRY_RUN=false` guard, so `--dry-run` was creating a live
+  directory -- moved back behind the guard. **-038** `_AITF_NEVER_OVERWRITE_BASENAMES`'s own
+  comment said "add future basenames here as they ship" with nothing enforcing it; new suite
+  coverage greps every shipped `*.template` for an env/shell-style assignment to a variable name
+  containing KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL and fails if a match isn't on the allowlist
+  (a bare keyword grep was tried first and returned 11 false positives -- plist `<key>` tags,
+  "keystroke", prose mentioning "credentials" -- the assignment-shaped pattern returns exactly
+  `secrets.env.template`, matching manual verification), plus a synthetic-fixture case proving
+  the check can actually fail. **-039** a failed (or partially-written) `cp -p` pre-install
+  backup used to blank the backup-path variable and let the install proceed anyway, unprotected;
+  it now verifies the backup by content (not just `cp`'s exit status) and aborts that file's
+  install on failure, cleaning up any partial artifact. Regression tests added/extended in
+  `tests/test-xaca-1120-template-phase-honest-reporting.sh` (17 -> 20 cases, all passing).
+  Also fixed a stale extraction list in `tests/test-xaca-0771-upgrade-materialize-missing.sh`
+  (unrelated harness gap surfaced by this round's tester run, not a product defect): that suite's
+  function extraction didn't pull in `_aitf_sed_repl_escape`/`_aitf_file_mode`/
+  `_aitf_render_template`/`_aitf_install_rendered`, which `update_shell_helpers`' alias loop now
+  calls (subitem -031, round 2) -- so `update_shell_helpers` in that harness died with
+  "command not found" (rc 127), read by the harness as "rendering produced an incomplete file",
+  a product-defect-shaped result for a harness gap. 10/12 -> 12/12 after extending the extraction
+  list; the product code under test was already correct.
 
 - XACA-1124: an LCARS server death now leaves a record. Previously nothing logged a server's
   exit or signal, and because `start_lcars_server` unconditionally rotates the per-team log at

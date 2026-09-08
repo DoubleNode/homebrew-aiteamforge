@@ -290,8 +290,10 @@ check_brew_updates() {
 # That duplication was not a style problem -- it is what let the two sites
 # diverge on INSTALL MODE. One reasoned carefully about `mv` replacing the inode
 # and picked an explicit 755; the copy asserted a flat 644 across a set that
-# includes a rendered credentials file and 13 shell scripts, because the
-# reasoning lived in a comment rather than in shared code.
+# includes a rendered credentials file and 8 shell scripts (of 17 shipped
+# templates total: 8 `*.sh`, 4 launchd plists, 2 CLAUDE.md renders, 2 JSON,
+# and the credentials file -- see the count at the mode-preserve comment
+# below), because the reasoning lived in a comment rather than in shared code.
 #
 # The mode is therefore a REQUIRED ARGUMENT of the install helper: each call
 # site states its answer instead of re-deriving one.
@@ -591,14 +593,36 @@ update_templates() {
     # any failure path here the backup is now removed -- there is nothing to
     # roll back to, because nothing was installed.
     local _template_backup="${target_file}.backup-$(date +%Y%m%d-%H%M%S)"
-    cp -p "$target_file" "$_template_backup" 2>/dev/null || _template_backup=""
+    # subitem XACA-1120-039 (PR #836 review round 4, BLOCKING): a failed --
+    # or partially-written -- backup used to blank _template_backup here and
+    # let the install proceed anyway, unprotected: if the subsequent atomic
+    # rename went wrong there was nothing left to roll back to, which defeats
+    # the entire point of taking a backup first. Verify the backup by
+    # CONTENT, not just cp's exit status -- a `cp -p` interrupted mid-write
+    # (disk full, killed process) can exit 0 with a short file on disk, which
+    # a bare `|| _template_backup=""` would never catch. On either failure,
+    # abort THIS file's install rather than installing over an unprotected
+    # target, and clean up any partial artifact so it doesn't linger in
+    # config/.
+    if ! cp -p "$target_file" "$_template_backup" 2>/dev/null || ! cmp -s "$target_file" "$_template_backup"; then
+      rm -f "$_template_backup"
+      print_warning "Refusing to install ${template_name}: could not create a verified backup of the existing file - existing copy left in place"
+      templates_failed=$((templates_failed + 1))
+      rm -f "$rendered"
+      continue
+    fi
 
     # PRESERVE the target's mode -- never assert one (PR #836 review). These 17
-    # targets have no single correct mode: 13 are *.sh (a flat 644 strips the
-    # exec bit). secrets.env is excluded from this loop entirely by the
-    # never-overwrite check above, so it never reaches this install call --
-    # but the preserve behavior stays fail-closed (see _aitf_install_rendered)
-    # for every other target that carries a non-default mode.
+    # targets have no single correct mode -- COUNTED, not asserted (PR #836
+    # review round 4, subitem XACA-1120-035: an earlier pass here claimed "13
+    # are *.sh" without running `find share/templates -name '*.template'`; the
+    # real count is 8): 8 are *.sh (a flat 644 strips the exec bit), 4 are
+    # launchd plists, 2 render CLAUDE.md, 2 are JSON, and 1 is the
+    # secrets.env credentials file. secrets.env is excluded from this loop
+    # entirely by the never-overwrite check above, so it never reaches this
+    # install call -- but the preserve behavior stays fail-closed (see
+    # _aitf_install_rendered) for every other target that carries a
+    # non-default mode.
     local _install_rc=0
     _aitf_install_rendered "$rendered" "$target_file" preserve || _install_rc=$?
     if [ "$_install_rc" -eq 0 ]; then
@@ -2781,8 +2805,14 @@ update_shell_helpers() {
   # a real latent bug as a side effect: the inline sed only ever substituted
   # {{AITEAMFORGE_DIR}}, so agent-aliases.sh and cc-aliases.sh -- both of which
   # also carry {{ORG_NAME}} -- were installing with that placeholder left
-  # LITERAL on every create/refresh. _aitf_render_template substitutes all
-  # three placeholders the shipped templates use.
+  # LITERAL on every create/refresh. _aitf_render_template substitutes the
+  # three CANONICAL placeholders ({{AITEAMFORGE_DIR}}, {{SHARED_DEV_ROOT}},
+  # {{ORG_NAME}}) -- it does NOT substitute {{ORG_SLUG}}, which cc-aliases.sh
+  # alone carries 27 times (PR #836 review round 4, subitem XACA-1120-036: an
+  # earlier pass here claimed "all three placeholders the shipped templates
+  # use", which a grep for {{ORG_SLUG}} falsifies). That placeholder is left
+  # LITERAL by this change too, exactly like {{ORG_NAME}} was before it.
+  # Substituting {{ORG_SLUG}} is XACA-1127's territory, not this ticket's.
   local aliases_dir="${WORKING_DIR}/share/aliases"
   local templates_dir="${tap_share}/templates/aliases"
   local alias_files=(
@@ -2817,9 +2847,17 @@ update_shell_helpers() {
       esac
 
       print_info "Creating share/aliases/${alias_file} (was missing)..."
-      mkdir -p "$aliases_dir"
+      # subitem XACA-1120-037 (PR #836 review round 3): this mkdir must NOT run
+      # under --dry-run. A dry run's placement is "tmpdir" (below) precisely so
+      # it never touches the live directory tree -- an unconditional mkdir here
+      # created aliases_dir on disk anyway, contradicting that rationale and
+      # mutating the filesystem on a run whose entire point is to not mutate it.
       local _alias_placement="sibling"
-      [ "$DRY_RUN" = true ] && _alias_placement="tmpdir"
+      if [ "$DRY_RUN" = true ]; then
+        _alias_placement="tmpdir"
+      else
+        mkdir -p "$aliases_dir"
+      fi
       local _alias_rendered="" _alias_rc=0
       _alias_rendered="$(_aitf_render_template "$source" "$target" "$_alias_placement")" || _alias_rc=$?
       if [ "$_alias_rc" -eq 1 ]; then
