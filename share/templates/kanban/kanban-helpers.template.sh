@@ -17827,8 +17827,12 @@ _kb_team_lcars_port() {
         # per-client slugs resolve via the overlay branch above, not here.
         freelance)  _port="8505" ;;
         command)    _port="8234" ;;
+        # XACA-0822-005: XACA-0727/XACA-0463 (canonical) established mainevent
+        # is a board-less alias on its OWN LCARS band (8400), NOT command's
+        # 8234 — the prior 8234 arm here was a stale collision left over from
+        # before that renumber (never ported into this template until now).
         # xaca-0139:allowed — "mainevent" is a legacy team slug constant (backward-compat alias, not user-facing org branding)
-        mainevent)  _port="8234" ;;
+        mainevent)  _port="8400" ;;
         *)          _port="" ;;
     esac
 
@@ -18014,9 +18018,6 @@ kb-release-create() {
     local project=""
     local target_date=""
     local short_title=""
-    # Determine LCARS port from config file or default
-    local _lcars_port="8080"
-    [[ -f "${AITEAMFORGE_DIR}/lcars-ui/.lcars-port" ]] && _lcars_port="$(cat "${AITEAMFORGE_DIR}/lcars-ui/.lcars-port" 2>/dev/null || echo "8080")"
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -18084,6 +18085,26 @@ kb-release-create() {
             return 1
             ;;
     esac
+
+    # XACA-0822-005: Detect caller's team and resolve the correct LCARS port
+    # via _kb_team_lcars_port (ported from canonical's XACA-0482 fix). This
+    # template previously read a single global lcars-ui/.lcars-port file,
+    # which does not exist for overlay-only freelance teams whose LCARS
+    # server runs on a team-specific port — kb-release-create failed with
+    # connection refused on every such team.
+    local context team _lcars_port
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+
+    if [[ -z "$team" || "$team" == "ERROR:"* ]]; then
+        echo "Error: Could not determine team context" >&2
+        return 1
+    fi
+
+    _lcars_port=$(_kb_team_lcars_port "$team") || {
+        echo "Warning: no LCARS port known for team '$team', falling back to 8080" >&2
+        _lcars_port="8080"
+    }
 
     # Build JSON payload
     local json_payload

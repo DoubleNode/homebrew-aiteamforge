@@ -6,6 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-0822-005: `kb-release-create()` in this template resolved the LCARS API port from a
+  single global `${AITEAMFORGE_DIR}/lcars-ui/.lcars-port` file defaulting to 8080, never from
+  the team overlay — breaking `kb-release create` on every overlay-only freelance team (a real
+  team's server answers on overlay port 8514; port 8080 refused every attempt with connection
+  refused). Canonical fixed this in XACA-0482 by extracting `_kb_team_lcars_port()` and calling
+  it; the template already defined that helper but `kb-release-create` never called it. Refactored
+  `kb-release-create` to detect the caller's team via `_kb_detect_context` and resolve the port
+  via `_kb_team_lcars_port "$team"`, matching canonical's call pattern and failure path
+  (`port=$(_kb_team_lcars_port "$team") || { fall back to 8080 with a warning }`).
+  While comparing the template's `_kb_team_lcars_port` against canonical's (per the ticket's
+  instruction to check whether it needed porting too) found it was materially wrong, not just
+  minimal: its `mainevent` arm resolved to 8234 — the SAME port as `command`, a stale collision
+  left over from before canonical's XACA-0727/XACA-0463 renumber to 8400. Ported that fix in too.
+  Two other global `.lcars-port` reads remain in this template (`kb-ui`, `kb-browser`) — out of
+  scope for this subitem, flagged as follow-up candidates. Part of XACA-0822.
 - XACA-0822-004: this template had THREE occurrences of a literal, never-expanded `~` inside
   a path — `${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md` — a path that
   can never exist because the tilde sits mid-string where the shell never expands it. Canonical
