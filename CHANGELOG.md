@@ -58,6 +58,45 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   silent by default) reporting which `AVATARS_DIR` candidate won, whether the avatar file was
   found, whether `imgcat` resolved, and whether it was actually invoked -- this class of silent
   skip previously took a multi-day mechanism hunt to isolate.
+- XACA-1120 (PR #836 review round 2): closes a credential-destruction path this PR's own
+  `cmp -s` staleness gate widened. The old `-nt` gate was effectively never true against a
+  git-sourced Cellar (XACA-1095), so it fired only under `--force`; `cmp -s` on rendered
+  content instead compares by byte content, and a live, operator-populated `secrets.env`
+  ALWAYS differs from the shipped placeholder template the moment a real
+  `ANTHROPIC_API_KEY`/`GITHUB_TOKEN` replaces it -- so the gate went from never-fires to
+  fires-on-every-upgrade, including the unattended nightly auto-upgrade, silently rendering
+  the placeholder template back over live credentials while reporting success.
+  `update_templates` now refuses on an explicit never-overwrite basename allowlist
+  (`_AITF_NEVER_OVERWRITE_BASENAMES`, currently just `secrets.env` -- all 17 shipped
+  `*.template` basenames were reviewed and it is the only one carrying live secrets in its
+  rendered output) checked BEFORE any render, compare, or backup work, and applies
+  regardless of `--force`; a skipped file is REPORTED (`templates_protected` counter +
+  operator-visible line), never silently passed over. Also fixes the pre-existing backup
+  `cp` (no `-p`) that left a permanent 644 copy of the API key/PAT beside the 600 original --
+  the exact mode-widening class the round-1 preserve fix addressed three lines above it --
+  and makes that backup conditional: a failed install now removes its own stray backup
+  rather than littering `config/` with a copy of an unchanged file (subitem XACA-1120-028).
+  Separately, `_aitf_install_rendered`'s `preserve` mode now fails CLOSED: if the target's
+  current mode cannot be read, it refuses to install and reports why, rather than falling
+  back to a guessed 644 in the widening direction. Also: `update_shell_helpers`'s
+  `_kanban_render_ok` is now `local` (subitem -029); its rc-3 (unsafe-newline) render
+  failures are now reported with the correct reason instead of the generic "incomplete
+  file" message, matching `update_templates`' own handling (subitem -030); the
+  `share/aliases/` refresh loop now escapes `${WORKING_DIR}` via `_aitf_sed_repl_escape`
+  before its `sed` substitution, the same bug this PR already fixed at two other call sites
+  (subitem -031); the DRY_RUN summary now says "Would update" rather than "Updated" for a
+  run that installed nothing (subitem -027); and a stale comment claiming the test suite's
+  exit gate "consults the SKIP count... in BOTH modes" is corrected -- under the runner,
+  `test_skip` is the runner's own exported function (by design, per round 1's fix), so this
+  suite's local `_SKIP_COUNT` is structurally always 0 there and the gate is inert under the
+  runner by construction, not a redundant second check (subitem -032). New regression
+  coverage in `tests/test-xaca-1120-template-phase-honest-reporting.sh` for the credentials
+  fix pairs a positive case (content + mode 600 survive, including under `--force`) with a
+  self-located negative control (`git log -S` on the guard function's definition line, never
+  a typed SHA) proving the pre-fix code really did overwrite a populated `secrets.env` in the
+  same sandbox, plus a direct unit test proving `_aitf_install_rendered` fails closed rather
+  than installing at a guessed mode when the target's mode cannot be read.
+
 - XACA-1124: an LCARS server death now leaves a record. Previously nothing logged a server's
   exit or signal, and because `start_lcars_server` unconditionally rotates the per-team log at
   the top of every launch with a single `.old` backup, retention was exactly two launches --

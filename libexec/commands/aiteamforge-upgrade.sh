@@ -404,13 +404,49 @@ _aitf_install_rendered() {
   local tmp="$1" target="$2" mode="${3:-preserve}"
   if [ "$mode" = "preserve" ]; then
     mode="$(_aitf_file_mode "$target")"
-    [ -n "$mode" ] || mode=644
+    if [ -z "$mode" ]; then
+      # Fail CLOSED (PR #836 review, BLOCKING). A "preserve" request that
+      # cannot read the target's current mode must not guess -- falling back
+      # to 644 answers an explicit keep-what's-there request with a widening
+      # default, on a target set that includes a 600 credentials file. Refuse
+      # the install; the caller (return 2, distinct from the generic mv
+      # failure below) reports why and leaves the existing file untouched.
+      return 2
+    fi
   fi
   case "$mode" in
     ''|*[!0-7]*) mode=644 ;;
   esac
   chmod "$mode" "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$target" 2>/dev/null
+}
+
+# NEVER-OVERWRITE basename list (PR #836 review, BLOCKING).
+#
+# The staleness gate below moved from `-nt` (XACA-1095: effectively never true
+# against a git-sourced Cellar, so it fired only under --force) to `cmp -s` on
+# rendered content. That is correct for ordinary templates, but it also means a
+# LIVE, user-populated credentials file -- which by definition differs from the
+# shipped template the moment a real key is pasted in -- now compares as
+# "differs" on every single upgrade run, INCLUDING the unattended nightly
+# auto-upgrade. Trying to make the content comparison smart enough to
+# recognize "still a placeholder" vs. "populated with a real secret" is not a
+# comparison this script should be trusted to get right in both directions.
+# An explicit basename allowlist is the honest fix: these targets are never
+# auto-overwritten by upgrade, full stop, regardless of --force.
+#
+# Reviewed all 17 shipped *.template basenames (find share/templates -name
+# '*.template'): only secrets.env carries live secrets in the rendered output
+# (ANTHROPIC_API_KEY, GITHUB_TOKEN). Add future basenames here as they ship --
+# do not try to infer this by content instead.
+_AITF_NEVER_OVERWRITE_BASENAMES="secrets.env"
+
+_aitf_is_never_overwrite_basename() {
+  local name="$1" entry
+  for entry in $_AITF_NEVER_OVERWRITE_BASENAMES; do
+    [ "$name" = "$entry" ] && return 0
+  done
+  return 1
 }
 
 update_templates() {
@@ -430,6 +466,7 @@ update_templates() {
   local templates_current=0
   local templates_absent=0
   local templates_failed=0
+  local templates_protected=0
 
   if [ ! -d "${FRAMEWORK_DIR}/share/templates" ]; then
     print_warning "Templates directory not found in framework"
@@ -469,6 +506,19 @@ update_templates() {
     # exactly why the mode handling below is not a theoretical concern.
     if [ ! -f "$target_file" ]; then
       templates_absent=$((templates_absent + 1))
+      continue
+    fi
+
+    # NEVER-OVERWRITE (PR #836 review, BLOCKING). Checked BEFORE any render or
+    # backup work -- this basename is never touched by upgrade at all, not even
+    # to the extent of writing a stray backup file beside it. REPORTED, not
+    # silently skipped: the whole point of this ticket is that a phase must
+    # not claim success (or quietly do nothing) about a file it did not
+    # actually handle. See _aitf_is_never_overwrite_basename() above for why
+    # this is a basename allowlist rather than a content heuristic.
+    if _aitf_is_never_overwrite_basename "$template_name"; then
+      print_warning "Skipping ${template_name}: contains live credentials and is never auto-overwritten by upgrade (not even under --force) - to pick up template changes, diff ${target_file} against the shipped template by hand"
+      templates_protected=$((templates_protected + 1))
       continue
     fi
 
@@ -526,21 +576,44 @@ update_templates() {
     fi
 
     print_info "Updating ${template_name}..."
-    cp "$target_file" "${target_file}.backup-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    # `cp -p`, not a bare `cp` (PR #836 review, BLOCKING). A bare cp creates the
+    # backup at the DEFAULT mode under umask (typically 644), which for a
+    # target that carries restricted-mode data leaves a permanent world- or
+    # group-readable copy sitting beside the 600 original -- the exact
+    # mode-widening class the preserve fix below exists to prevent, three
+    # lines away from where it is enforced on the primary file. `-p` copies
+    # the source's mode (and mtime) onto the backup instead of defaulting one.
+    #
+    # Captured in a variable, not re-globbed after the fact (subitem
+    # XACA-1120-028, PR #836 review): the backup used to be written
+    # unconditionally and left in place even when the install below never
+    # happened, littering config/ with a stray copy of an unchanged file. On
+    # any failure path here the backup is now removed -- there is nothing to
+    # roll back to, because nothing was installed.
+    local _template_backup="${target_file}.backup-$(date +%Y%m%d-%H%M%S)"
+    cp -p "$target_file" "$_template_backup" 2>/dev/null || _template_backup=""
 
     # PRESERVE the target's mode -- never assert one (PR #836 review). These 17
     # targets have no single correct mode: 13 are *.sh (a flat 644 strips the
-    # exec bit), while secrets.env.template renders a credentials file carrying
-    # an ANTHROPIC_API_KEY and a GitHub PAT slot, which installers elsewhere
-    # deliberately create at 600 (install-kanban.sh:1565). Asserting 644 would
-    # silently widen that to world-readable on every upgrade.
-    if _aitf_install_rendered "$rendered" "$target_file" preserve; then
+    # exec bit). secrets.env is excluded from this loop entirely by the
+    # never-overwrite check above, so it never reaches this install call --
+    # but the preserve behavior stays fail-closed (see _aitf_install_rendered)
+    # for every other target that carries a non-default mode.
+    local _install_rc=0
+    _aitf_install_rendered "$rendered" "$target_file" preserve || _install_rc=$?
+    if [ "$_install_rc" -eq 0 ]; then
       print_success "Updated ${template_name}"
       templates_updated=$((templates_updated + 1))
+    elif [ "$_install_rc" -eq 2 ]; then
+      print_warning "Refusing to install ${template_name}: could not determine the existing file's permission mode to preserve it - existing copy left in place"
+      templates_failed=$((templates_failed + 1))
+      rm -f "$rendered"
+      [ -n "$_template_backup" ] && rm -f "$_template_backup"
     else
       print_warning "Could not install rendered ${template_name} - existing copy left in place"
       templates_failed=$((templates_failed + 1))
       rm -f "$rendered"
+      [ -n "$_template_backup" ] && rm -f "$_template_backup"
     fi
   done <<< "$templates"
 
@@ -548,19 +621,30 @@ update_templates() {
   # regardless of what happened is not a check. Report each outcome separately,
   # and never claim "up to date" about files that are not installed.
   if [ "$templates_updated" -gt 0 ]; then
-    print_success "Updated ${templates_updated} config template(s)"
+    # DRY_RUN never installs anything -- templates_updated only counts what a
+    # real run WOULD update (subitem XACA-1120-027, PR #836 review). "Updated"
+    # is past tense for work that did not happen; say "Would update" instead.
+    if [ "$DRY_RUN" = true ]; then
+      print_success "Would update ${templates_updated} config template(s)"
+    else
+      print_success "Updated ${templates_updated} config template(s)"
+    fi
   fi
   if [ "$templates_current" -gt 0 ]; then
     print_success "${templates_current} config template(s) already current"
+  fi
+  if [ "$templates_protected" -gt 0 ]; then
+    print_warning "${templates_protected} config template(s) skipped - contain live credentials and are never auto-overwritten by upgrade"
   fi
   if [ "$templates_failed" -gt 0 ]; then
     print_warning "${templates_failed} config template(s) could not be rendered or installed"
   fi
   # Only claim "nothing to do" when nothing actually happened -- including no
-  # failures. A run dominated by render failures previously reported
-  # "${templates_absent} template(s) have no installed counterpart" with
-  # templates_absent at 0, which is both wrong and reassuring.
-  if [ "$templates_updated" -eq 0 ] && [ "$templates_current" -eq 0 ] && [ "$templates_failed" -eq 0 ]; then
+  # failures and no protected skips. A run dominated by render failures
+  # previously reported "${templates_absent} template(s) have no installed
+  # counterpart" with templates_absent at 0, which is both wrong and
+  # reassuring.
+  if [ "$templates_updated" -eq 0 ] && [ "$templates_current" -eq 0 ] && [ "$templates_failed" -eq 0 ] && [ "$templates_protected" -eq 0 ]; then
     print_info "No config templates to update: ${templates_absent} shipped template(s) have no installed counterpart under ${WORKING_DIR}/config/"
   fi
   print_info "Note: this phase does not cover kanban-helpers.sh - see the \"Updating Shell Helpers\" section below."
@@ -2607,8 +2691,19 @@ update_shell_helpers() {
     _kanban_rendered="$(_aitf_render_template "$_kanban_src" "$kanban_target" sibling)" || _kanban_render_rc=$?
     if [ "$_kanban_render_rc" -eq 1 ]; then
       print_warning "Could not create a temp file to compare kanban-helpers.sh against the shipped template — skipping refresh check this run"
+    elif [ "$_kanban_render_rc" -eq 3 ]; then
+      # subitem XACA-1120-030 (PR #836 review): rc 3 means a substituted value
+      # contains a newline (see _aitf_render_template) — a refusal-to-render
+      # safety check, not a short/failed render. update_templates() already
+      # reports these as distinct outcomes; this site was collapsing rc 3 into
+      # the generic "incomplete file" message below, which names the wrong
+      # reason.
+      print_warning "Refusing to render kanban-helpers.sh: a substituted value contains a newline, which cannot be expressed safely in the substitution - leaving the existing copy untouched."
     else
-      _kanban_render_ok=1
+      # PR #836 review (subitem XACA-1120-029): _kanban_render_ok was
+      # assigned WITHOUT `local`, leaking into global scope while its
+      # siblings _kanban_rendered/_kanban_render_rc are properly scoped above.
+      local _kanban_render_ok=1
       [ "$_kanban_render_rc" -eq 0 ] || _kanban_render_ok=0
 
       if [ "$_kanban_render_ok" -eq 0 ]; then
@@ -2677,6 +2772,16 @@ update_shell_helpers() {
     "cc-aliases.sh"
     "worktree-aliases.sh"
   )
+  # Escape WORKING_DIR for safe use as the REPLACEMENT half of `s|...|...|g`
+  # (subitem XACA-1120-031, PR #836 review). This loop was doing its own
+  # unescaped `s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g` -- the same defect this
+  # PR already fixed via _aitf_sed_repl_escape() at the update_templates and
+  # kanban-helpers render sites, missed here because this loop never went
+  # through the shared render helper. A `|` or `&` in WORKING_DIR would
+  # terminate the expression early or expand to the whole match, same as
+  # everywhere else that bug was fixed.
+  local _aliases_wd
+  _aliases_wd="$(_aitf_sed_repl_escape "${WORKING_DIR}")"
 
   for alias_file in "${alias_files[@]}"; do
     local source="${templates_dir}/${alias_file}"
@@ -2706,7 +2811,7 @@ update_shell_helpers() {
       print_info "Creating share/aliases/${alias_file} (was missing)..."
       if [ "$DRY_RUN" = false ]; then
         mkdir -p "$aliases_dir"
-        sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" "$source" > "$target"
+        sed -e "s|{{AITEAMFORGE_DIR}}|${_aliases_wd}|g" "$source" > "$target"
         chmod +x "$target" 2>/dev/null || true
         print_success "Created share/aliases/${alias_file}"
         updated=$((updated + 1))
@@ -2721,7 +2826,7 @@ update_shell_helpers() {
       print_info "Updating share/aliases/${alias_file}..."
 
       if [ "$DRY_RUN" = false ]; then
-        sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" "$source" > "$target"
+        sed -e "s|{{AITEAMFORGE_DIR}}|${_aliases_wd}|g" "$source" > "$target"
         print_success "Updated share/aliases/${alias_file}"
         updated=$((updated + 1))
       else
