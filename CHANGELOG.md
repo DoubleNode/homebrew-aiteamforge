@@ -6,6 +6,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1128 (round 4): the shipped template still carried the INERT-CONSUMER half of this bug.
+  An earlier round converted `kb-release-create`'s jq READS to `printf` but left its PRODUCER --
+  `body=$(echo "$response" | sed '$d')` -- as `echo`, so the document was corrupted before those
+  reads ever ran and the conversions could not work. Same defect one step upstream, in the copy
+  that actually ships. All 3 remaining `echo "$response"` sites converted: the `sed` producer in
+  `kb-release-create`, its `tail -n1` sibling, and the one in `_kb_release_sync`.
+  Why the `tail -n1` reads went too, having first been ruled exempt: the stated reason was that
+  `echo`'s expansion only ever INSERTS lines ahead of the final one, so a last-line read is safe.
+  That covers insertion and misses TRUNCATION -- zsh `echo` honours `\c`, which discards the rest
+  of the output including the newline and the http_code line. Measured: `echo` returns a body
+  fragment where `printf` returns `200`. A conformant JSON serializer doubles the backslash, so a
+  lone `\c` is unreachable from well-formed traffic and the practical risk is low; but the error
+  path handles NON-200 responses that need not be JSON at all, and a false universal in the
+  permanent record is the same wrong-causation trap this ticket's other entries warn about.
+  Converting was cheaper than defending the exemption.
+  Recorded because it will recur: the co-change guard structurally CANNOT catch this class. It is
+  FUNCTION-granular, and `kb-release-create` already read `co-changed` from an earlier move in the
+  same range, so a line-level omission inside an already-co-changed function passes silently.
+  Function-level parity is not line-level parity.
 - XACA-1058: both shipped copies DERIVED a team code instead of reading the authoritative
   `~/.aiteamforge/team-paths.json` overlay, returning wrong codes for live teams. Same
   authority-inversion class as XACA-0998 and XACA-1053: computing a value that already has a
