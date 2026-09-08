@@ -50,6 +50,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   only. Note this copy is the INSTALL FALLBACK since XACA-1095 -- install and upgrade render the
   full template first -- so the port above is what consumers actually receive.
 
+- XACA-1128 (round 6): the round-5 prompt fix was a NO-OP and this corrects it. The `| cc`
+  consumers had been converted to `printf`, but the `_kb_build_*_prompt` builders EMIT with
+  `echo -e "$prompt"` -- so the prompt was already corrupted before any consumer ran. Identical
+  producer/consumer trap to the `kb-release-create` one two entries above, missed again because
+  the round-5 grep required `echo` followed directly by `"$` and never matched the `-e` form.
+  `echo -e` is LOAD-BEARING here (the builders assemble text with the `prompt+="...\n"` idiom
+  across hundreds of lines and rely on `-e` expanding those separators), so the emit stays and
+  user text is escaped at the BOUNDARY instead: `var="${var//\\/\\\\}"`, which `echo -e`
+  collapses back to a literal. Applied to every board-data parameter of the builders, to
+  kb-run/kb-work's inline prompt, and to the blocker title in the blocked-soft-gate box.
+  In kb-run/kb-work the escape is applied to prompt-scoped COPIES, not in place: those variables
+  are reused afterwards for the terminal box, `kb-plan`, `CC_SESSION_NAME` and board writes, and
+  escaping in place would have corrupted all of them.
+  Also converted the 8 `$progress` sites, previously exempt. The exemption was correct on RISK
+  (`_kb_epic_progress` emits an all-integer object, verified repeatedly) and wrong on
+  MAINTENANCE: an exemption is a standing claim that nothing re-checks if the producer later
+  gains a string field. This ticket lost two exemptions already -- the `tail -n1` one was argued
+  just as carefully and was false. A zero-exception invariant is cheaper to enforce than to
+  re-argue every round.
 - XACA-1128 (round 5): the same defect reaches the AGENT PROMPTS, and this one is directly
   reachable from text a user types. `echo "$prompt" | cc` x6 and `echo "$description" | fold`
   pass a ticket's own title/description through zsh `echo`. Unlike the JSON cases there is no

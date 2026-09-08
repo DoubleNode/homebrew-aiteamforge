@@ -8429,6 +8429,11 @@ kb-run() {
                 blocker_title=$(_kb_jq_read "$board_file" \
                     '.backlog[] | select(.id == $bid) | .title // "Unknown"' \
                     --arg bid "$blocker_id" -r 2>/dev/null)
+                # XACA-1128: $blocker_title is user-authored board data and this
+                # whole block is later emitted via `echo -e "$incomplete_blockers"`,
+                # which expands backslash escapes — a literal `\bword\b` would be
+                # mangled and `\c` would truncate the rest. Escape here, at read.
+                blocker_title="${blocker_title//\\/\\\\}"
                 incomplete_blockers+="    ⛔ $blocker_id: $blocker_title [$blocker_status]\n"
             fi
         done <<< "$blocked_by_ids"
@@ -8512,20 +8517,36 @@ kb-run() {
     fi
 
     # Build the prompt
+    # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
+    # escapes in ANY text it's given — including user-authored board data
+    # interpolated below. A literal `\bword\b` or `C:\dev\team` gets mangled,
+    # and `\c` specifically TRUNCATES everything after it. Escape into
+    # separate _kb_prompt_* copies (NOT in place) so echo -e's expansion
+    # collapses each doubled backslash back to one literal backslash IN THE
+    # PROMPT ONLY — item_id/title/description/jira_id/github_issue stay
+    # unescaped for the non-prompt uses below (terminal echo, kb-plan window
+    # title, CC_SESSION_NAME, board writes), which must keep showing the
+    # user's literal text.
+    local _kb_prompt_item_id="${item_id//\\/\\\\}"
+    local _kb_prompt_title="${title//\\/\\\\}"
+    local _kb_prompt_description="${description//\\/\\\\}"
+    local _kb_prompt_jira_id="${jira_id//\\/\\\\}"
+    local _kb_prompt_github_issue="${github_issue//\\/\\\\}"
+
     local prompt="Build a todo list to accomplish this task:\n\n"
-    prompt+="## Task ID: $item_id\n"
-    prompt+="## Main Task\n$title\n"
+    prompt+="## Task ID: $_kb_prompt_item_id\n"
+    prompt+="## Main Task\n$_kb_prompt_title\n"
 
     if [[ -n "$description" ]]; then
-        prompt+="\n## Description\n$description\n"
+        prompt+="\n## Description\n$_kb_prompt_description\n"
     fi
 
     if [[ -n "$jira_id" ]]; then
-        prompt+="\n## JIRA: $jira_id"
+        prompt+="\n## JIRA: $_kb_prompt_jira_id"
     fi
 
     if [[ -n "$github_issue" ]]; then
-        prompt+="\n## GitHub: $github_issue"
+        prompt+="\n## GitHub: $_kb_prompt_github_issue"
     fi
 
     # Planning gate (XACA-0801): items with ZERO subitems have no Review/Test/UX merge
@@ -8542,6 +8563,10 @@ kb-run() {
         local subitems
         # Include subitem ID in the output
         subitems=$(printf '%s\n' "$item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)\(if .jiraKey then " (\(.jiraKey))" else "" end)"')
+        # XACA-1128: subitem titles are user-authored board data; echo -e later
+        # expands backslashes in them (see note above local prompt=). Escape in
+        # place — $subitems is used only for this prompt line.
+        subitems="${subitems//\\/\\\\}"
         prompt+="$subitems\n"
 
         prompt+="\n## CRITICAL: Subitem Delegation Requirements\n"
@@ -8551,11 +8576,11 @@ kb-run() {
         prompt+="Each subagent MUST run these bash commands:\n\n"
         prompt+="**Before Starting Work:**\n"
         prompt+="\`\`\`bash\n"
-        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub start ${item_id}-001\n"
+        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub start ${_kb_prompt_item_id}-001\n"
         prompt+="\`\`\`\n\n"
         prompt+="**After Completing Work:**\n"
         prompt+="\`\`\`bash\n"
-        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub done ${item_id}-001\n"
+        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub done ${_kb_prompt_item_id}-001\n"
         prompt+="\`\`\`\n\n"
         prompt+="### Delegation Workflow\n"
         prompt+="1. Review all subitems and understand the overall scope\n"
@@ -8581,7 +8606,7 @@ kb-run() {
         prompt+="### Retrospective Subitem — Special Delegation Rules\n"
         prompt+="**The 'Retrospective and Knowledge Capture' subitem MUST create a retrospective FILE.**\n"
         prompt+="When delegating this subitem, your prompt MUST include:\n"
-        prompt+="1. The retrospective file path: \`kb-retro-path ${item_id}\` (run this to get the exact path)\n"
+        prompt+="1. The retrospective file path: \`kb-retro-path ${_kb_prompt_item_id}\` (run this to get the exact path)\n"
         prompt+="2. The template to copy from: \`${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md\`\n"
         prompt+="3. Explicit instruction: 'You MUST create the retrospective file. Knowledge entries alone are NOT sufficient.'\n"
         prompt+="4. The \`kb-backlog sub done\` command will BLOCK completion if the retro file is missing.\n\n"
@@ -8773,6 +8798,11 @@ kb-work() {
                 blocker_title=$(_kb_jq_read "$board_file" \
                     '.backlog[] | select(.id == $bid) | .title // "Unknown"' \
                     --arg bid "$blocker_id" -r 2>/dev/null)
+                # XACA-1128: $blocker_title is user-authored board data and this
+                # whole block is later emitted via `echo -e "$incomplete_blockers"`,
+                # which expands backslash escapes — a literal `\bword\b` would be
+                # mangled and `\c` would truncate the rest. Escape here, at read.
+                blocker_title="${blocker_title//\\/\\\\}"
                 incomplete_blockers+="    ⛔ $blocker_id: $blocker_title [$blocker_status]\n"
             fi
         done <<< "$blocked_by_ids"
@@ -8808,20 +8838,35 @@ kb-work() {
     echo ""
 
     # Build the prompt (same as kb-run)
+    # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
+    # escapes in ANY text it's given — including user-authored board data
+    # interpolated below. A literal `\bword\b` or `C:\dev\team` gets mangled,
+    # and `\c` specifically TRUNCATES everything after it. Escape into
+    # separate _kb_prompt_* copies (NOT in place) so echo -e's expansion
+    # collapses each doubled backslash back to one literal backslash IN THE
+    # PROMPT ONLY — item_id/title/description/jira_id/github_issue stay
+    # unescaped for the non-prompt uses below (terminal echo, kb-plan window
+    # title, CC_SESSION_NAME), which must keep showing the user's literal text.
+    local _kb_prompt_item_id="${item_id//\\/\\\\}"
+    local _kb_prompt_title="${title//\\/\\\\}"
+    local _kb_prompt_description="${description//\\/\\\\}"
+    local _kb_prompt_jira_id="${jira_id//\\/\\\\}"
+    local _kb_prompt_github_issue="${github_issue//\\/\\\\}"
+
     local prompt="Build a todo list to accomplish this task:\n\n"
-    prompt+="## Task ID: $item_id\n"
-    prompt+="## Main Task\n$title\n"
+    prompt+="## Task ID: $_kb_prompt_item_id\n"
+    prompt+="## Main Task\n$_kb_prompt_title\n"
 
     if [[ -n "$description" ]]; then
-        prompt+="\n## Description\n$description\n"
+        prompt+="\n## Description\n$_kb_prompt_description\n"
     fi
 
     if [[ -n "$jira_id" ]]; then
-        prompt+="\n## JIRA: $jira_id"
+        prompt+="\n## JIRA: $_kb_prompt_jira_id"
     fi
 
     if [[ -n "$github_issue" ]]; then
-        prompt+="\n## GitHub: $github_issue"
+        prompt+="\n## GitHub: $_kb_prompt_github_issue"
     fi
 
     # Planning gate (XACA-0801): items with ZERO subitems have no Review/Test/UX merge
@@ -8837,6 +8882,10 @@ kb-work() {
         prompt+="\n\n## Subitems\n"
         local subitems
         subitems=$(printf '%s\n' "$item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)\(if .jiraKey then " (\(.jiraKey))" else "" end)"')
+        # XACA-1128: subitem titles are user-authored board data; echo -e later
+        # expands backslashes in them (see note above local prompt=). Escape in
+        # place — $subitems is used only for this prompt line.
+        subitems="${subitems//\\/\\\\}"
         prompt+="$subitems\n"
 
         prompt+="\n## CRITICAL: Subitem Delegation Requirements\n"
@@ -8846,11 +8895,11 @@ kb-work() {
         prompt+="Each subagent MUST run these bash commands:\n\n"
         prompt+="**Before Starting Work:**\n"
         prompt+="\`\`\`bash\n"
-        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub start ${item_id}-001\n"
+        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub start ${_kb_prompt_item_id}-001\n"
         prompt+="\`\`\`\n\n"
         prompt+="**After Completing Work:**\n"
         prompt+="\`\`\`bash\n"
-        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub done ${item_id}-001\n"
+        prompt+="source ${AITEAMFORGE_DIR}/kanban-helpers.sh && kb-backlog sub done ${_kb_prompt_item_id}-001\n"
         prompt+="\`\`\`\n\n"
         prompt+="### Delegation Workflow\n"
         prompt+="1. Review all subitems and understand the overall scope\n"
@@ -8876,7 +8925,7 @@ kb-work() {
         prompt+="### Retrospective Subitem — Special Delegation Rules\n"
         prompt+="**The 'Retrospective and Knowledge Capture' subitem MUST create a retrospective FILE.**\n"
         prompt+="When delegating this subitem, your prompt MUST include:\n"
-        prompt+="1. The retrospective file path: \`kb-retro-path ${item_id}\` (run this to get the exact path)\n"
+        prompt+="1. The retrospective file path: \`kb-retro-path ${_kb_prompt_item_id}\` (run this to get the exact path)\n"
         prompt+="2. The template to copy from: \`${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md\`\n"
         prompt+="3. Explicit instruction: 'You MUST create the retrospective file. Knowledge entries alone are NOT sufficient.'\n"
         prompt+="4. The \`kb-backlog sub done\` command will BLOCK completion if the retro file is missing.\n\n"
@@ -9303,6 +9352,19 @@ _kb_build_review_prompt() {
     local description="$3"
     local item_worktree_branch="$4"
 
+    # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
+    # escapes in ANY text it's given — including user-authored ticket text
+    # interpolated below. A literal `\bword\b` or `C:\dev\team` gets mangled,
+    # and `\c` specifically TRUNCATES everything after it. Double every
+    # backslash here so echo -e's expansion collapses each pair back to one
+    # literal backslash. Escape uniformly (not per-field) — a backslash-free
+    # value is unaffected. This builder's own `\n` separators are appended
+    # below, AFTER this point, so they are untouched and still expand.
+    item_id="${item_id//\\/\\\\}"
+    title="${title//\\/\\\\}"
+    description="${description//\\/\\\\}"
+    item_worktree_branch="${item_worktree_branch//\\/\\\\}"
+
     local prompt="You are reviewing a Pull Request for kanban item [$item_id].\n\n"
     prompt+="## Task Being Reviewed\n"
     prompt+="**Kanban Item:** $item_id\n"
@@ -9555,6 +9617,19 @@ _kb_build_test_prompt() {
     local title="$2"
     local description="$3"
     local item_worktree_branch="$4"
+
+    # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
+    # escapes in ANY text it's given — including user-authored ticket text
+    # interpolated below. A literal `\bword\b` or `C:\dev\team` gets mangled,
+    # and `\c` specifically TRUNCATES everything after it. Double every
+    # backslash here so echo -e's expansion collapses each pair back to one
+    # literal backslash. Escape uniformly (not per-field) — a backslash-free
+    # value is unaffected. This builder's own `\n` separators are appended
+    # below, AFTER this point, so they are untouched and still expand.
+    item_id="${item_id//\\/\\\\}"
+    title="${title//\\/\\\\}"
+    description="${description//\\/\\\\}"
+    item_worktree_branch="${item_worktree_branch//\\/\\\\}"
 
     local prompt="You are QA testing a Pull Request for kanban item [$item_id].\n\n"
     prompt+="## Task Being Tested\n"
@@ -9832,6 +9907,21 @@ _kb_build_debug_prompt() {
     if [[ ! "$subitem_count" =~ ^[0-9]+$ ]]; then
         subitem_count=0
     fi
+
+    # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
+    # escapes in ANY text it's given — including user-authored ticket/subitem
+    # text interpolated below. A literal `\bword\b` or `C:\dev\team` gets
+    # mangled, and `\c` specifically TRUNCATES everything after it. Double
+    # every backslash here so echo -e's expansion collapses each pair back to
+    # one literal backslash. Escape uniformly (not per-field) — a
+    # backslash-free value is unaffected. subitem_count is numeric and is not
+    # escaped. This builder's own `\n` separators are appended below, AFTER
+    # this point, so they are untouched and still expand.
+    item_id="${item_id//\\/\\\\}"
+    title="${title//\\/\\\\}"
+    description="${description//\\/\\\\}"
+    item_worktree_branch="${item_worktree_branch//\\/\\\\}"
+    subitems_text="${subitems_text//\\/\\\\}"
 
     local prompt="You are debugging a previously completed kanban item [$item_id].\n\n"
     prompt+="## Task Being Debugged\n"
@@ -18576,9 +18666,9 @@ kb-epic() {
             local progress
             progress=$(_kb_epic_progress "$board_file" "$epic_id")
             local total completed pct
-            total=$(echo "$progress" | jq -r '.totalItems // 0')
-            completed=$(echo "$progress" | jq -r '.completedItems // 0')
-            pct=$(echo "$progress" | jq -r '.percentComplete // 0')
+            total=$(printf '%s\n' "$progress" | jq -r '.totalItems // 0')
+            completed=$(printf '%s\n' "$progress" | jq -r '.completedItems // 0')
+            pct=$(printf '%s\n' "$progress" | jq -r '.percentComplete // 0')
 
             echo "║ PROGRESS: $completed/$total items ($pct%)"
             echo "╚═══════════════════════════════════════════════════════════╝"
@@ -18784,7 +18874,7 @@ kb-epic() {
 
             echo "Epic Progress: [$epic_id]"
             echo "─────────────────────────────────────"
-            echo "$progress" | jq -r '
+            printf '%s\n' "$progress" | jq -r '
                 "  Total Items:       \(.totalItems)",
                 "  Completed:         \(.completedItems)",
                 "  In Progress:       \(.inProgressItems)",
@@ -18830,10 +18920,10 @@ _kb_update_epic_status() {
     fi
 
     local total completed cancelled resolved in_progress
-    total=$(echo "$progress" | jq -r '.totalItems // 0')
-    completed=$(echo "$progress" | jq -r '.completedItems // 0')
-    cancelled=$(echo "$progress" | jq -r '.cancelledItems // 0')
-    in_progress=$(echo "$progress" | jq -r '.inProgressItems // 0')
+    total=$(printf '%s\n' "$progress" | jq -r '.totalItems // 0')
+    completed=$(printf '%s\n' "$progress" | jq -r '.completedItems // 0')
+    cancelled=$(printf '%s\n' "$progress" | jq -r '.cancelledItems // 0')
+    in_progress=$(printf '%s\n' "$progress" | jq -r '.inProgressItems // 0')
     resolved=$((completed + cancelled))
 
     local new_status
