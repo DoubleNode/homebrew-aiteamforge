@@ -6,6 +6,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1134 (PR #837 gate findings): `agent-panel-display.sh` — visible `[avatar unavailable]`
+  placeholder replacing the silent blank (fires for a failed `magick` rounding too, not just a
+  missing file); reworded the `AVATARS_DIR` debug line to report directory EXISTENCE rather
+  than implying the avatar was found; extended `LCARS_PANEL_DEBUG=1` coverage to the crew
+  strip, AMB badge strip and terminal-logo lookup (all three shared the same silent-skip mode,
+  and the crew strip was named explicitly in the ticket); paired candidate labels with their
+  paths in one list so the diagnostic cannot name the wrong candidate after a future edit; and
+  added a `_panel_debug_on` predicate so `$(...)` in debug arguments no longer forks subshells
+  on every render with the flag off.
 
 - XACA-1128: the shipped template never received canonical's 2026-04-04 echo-to-printf JSON fix
   (commit 0b7c48da), leaving 61 `echo "$VAR" | jq` sites that corrupt any kanban item containing a

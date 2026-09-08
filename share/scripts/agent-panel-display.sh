@@ -22,6 +22,15 @@ SESSION_CODE="${1:?Usage: agent-panel-display.sh <session-code>}"
 _panel_debug() {
     [[ "$LCARS_PANEL_DEBUG" == "1" ]] && print -u2 -- "[panel-debug] $*"
 }
+# Predicate form, for guarding call sites whose ARGUMENTS are expensive.
+# _panel_debug's own guard runs too late for those: zsh expands a call's
+# arguments before the function body decides whether to print, so any $(...)
+# inside a _panel_debug argument forks a subshell on EVERY render even with
+# the flag off. That matters here -- render_panel runs in a polling display
+# loop. Wrap those call sites in `if _panel_debug_on; then ... fi` instead.
+_panel_debug_on() {
+    [[ "$LCARS_PANEL_DEBUG" == "1" ]]
+}
 
 # Resolve avatars directory (checked in priority order):
 #   1. Flat avatars pool via explicit env override ($AITEAMFORGE_DIR/avatars/)
@@ -46,27 +55,37 @@ _panel_debug() {
 #      symmetry with candidate 2/3's fleet-monitor shape; same reasoning and
 #      placement as candidate 4.
 #   6. Homebrew cellar (AITEAMFORGE_HOME)
+#
+# Each entry below is "<label>|<path>" in ONE list, deliberately: an earlier
+# revision kept labels in a second parallel array indexed by position, which a
+# future edit could desync (add a candidate to one list, forget the other) and
+# the diagnostic would then confidently name the WRONG candidate. Given this
+# ticket exists because a check reported the reassuring answer against the
+# wrong input, a diagnostic that can lie is not acceptable here. Pairing label
+# and path in a single entry makes that class of drift impossible.
 AVATARS_DIR=""
-_avatars_dir_candidate_labels=(
-    'AITEAMFORGE_DIR/avatars'
-    'AITEAMFORGE_DIR/fleet-monitor/server/public/avatars'
-    'HOME/dev-team/fleet-monitor/server/public/avatars'
-    'HOME/aiteamforge/avatars'
-    'HOME/aiteamforge/fleet-monitor/server/public/avatars'
-    'AITEAMFORGE_HOME/fleet-monitor/server/public/avatars'
+_avatars_dir_candidates=(
+    "AITEAMFORGE_DIR/avatars|${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/avatars}"
+    "AITEAMFORGE_DIR/fleet-monitor/server/public/avatars|${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/fleet-monitor/server/public/avatars}"
+    "HOME/dev-team/fleet-monitor/server/public/avatars|$HOME/dev-team/fleet-monitor/server/public/avatars"
+    "HOME/aiteamforge/avatars|$HOME/aiteamforge/avatars"
+    "HOME/aiteamforge/fleet-monitor/server/public/avatars|$HOME/aiteamforge/fleet-monitor/server/public/avatars"
+    "AITEAMFORGE_HOME/fleet-monitor/server/public/avatars|${AITEAMFORGE_HOME:+$AITEAMFORGE_HOME/fleet-monitor/server/public/avatars}"
 )
 _avatars_dir_candidate_idx=0
-for _candidate in \
-    "${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/avatars}" \
-    "${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/fleet-monitor/server/public/avatars}" \
-    "$HOME/dev-team/fleet-monitor/server/public/avatars" \
-    "$HOME/aiteamforge/avatars" \
-    "$HOME/aiteamforge/fleet-monitor/server/public/avatars" \
-    "${AITEAMFORGE_HOME:+$AITEAMFORGE_HOME/fleet-monitor/server/public/avatars}"; do
+for _entry in "${_avatars_dir_candidates[@]}"; do
     _avatars_dir_candidate_idx=$((_avatars_dir_candidate_idx + 1))
+    _label="${_entry%%|*}"
+    _candidate="${_entry#*|}"
     if [[ -n "$_candidate" && -d "$_candidate" ]]; then
         AVATARS_DIR="$_candidate"
-        _panel_debug "AVATARS_DIR resolved via candidate ${_avatars_dir_candidate_idx} (${_avatars_dir_candidate_labels[$_avatars_dir_candidate_idx]}): $AVATARS_DIR"
+        # Wording is deliberate: this reports that the DIRECTORY EXISTS, which
+        # is all the -d test above established. It does NOT mean the avatar you
+        # are looking for is in it -- an existing-but-empty pool resolves here
+        # and still renders no image. Per-image outcomes are reported separately
+        # by the "avatar lookup"/"crew strip"/"terminal logo" lines below; read
+        # past this one before concluding anything.
+        _panel_debug "AVATARS_DIR: candidate ${_avatars_dir_candidate_idx} (${_label}) directory EXISTS -> $AVATARS_DIR (existence only; see per-image lines below)"
         break
     fi
 done
@@ -338,7 +357,16 @@ render_crew_strip() {
     local radius=8
     local spacing=6
 
-    command -v magick &>/dev/null || return
+    if ! command -v magick &>/dev/null; then
+        # Not a niche path: consumer hosts routinely lack ImageMagick, so the
+        # crew strip is unconditionally absent there for a reason that has
+        # nothing to do with avatars. Before this line that was invisible, and
+        # an empty strip looked identical to a broken AVATARS_DIR -- exactly the
+        # ambiguity XACA-1134-005 exists to remove.
+        _panel_debug "crew strip: SKIPPED — no magick on PATH (crew strip cannot render without it); ${#agents[@]} agent(s) requested"
+        return
+    fi
+    _panel_debug "crew strip: rendering ${#agents[@]} agent(s) from AVATARS_DIR='${AVATARS_DIR:-<empty>}'"
 
     # Clean up stale row strip files before regenerating.
     # Without this, shrinking the crew (e.g., 5→2 agents) leaves old r1.png on disk
@@ -357,7 +385,12 @@ render_crew_strip() {
             # Glob across all team prefixes for this agent's avatar (prefer _panel.png)
             local agent_files=(${AVATARS_DIR}/*_${agent}_avatar_panel.png(N))
             [[ ${#agent_files[@]} -eq 0 ]] && agent_files=(${AVATARS_DIR}/*_${agent}_avatar.png(N))
-            [[ ${#agent_files[@]} -eq 0 ]] && continue
+            if [[ ${#agent_files[@]} -eq 0 ]]; then
+                # The (N) nullglob makes this indistinguishable from "no crew"
+                # without a log line -- report each individual miss by name.
+                _panel_debug "crew strip: agent '${agent}' MISS — no *_${agent}_avatar[_panel].png under '${AVATARS_DIR:-<empty>}'"
+                continue
+            fi
             local agent_file="${agent_files[1]}"
             # Add spacer before each avatar after the first
             if (( row_count > 0 )); then
@@ -373,7 +406,12 @@ render_crew_strip() {
         if [[ $row_count -gt 0 ]]; then
             local crew_strip="${LCARS_TMP}lcars-crew-${SESSION_CODE}-r${row}.png"
             magick "${magick_args[@]}" +append PNG32:"$crew_strip" 2>/dev/null
-            [[ -f "$crew_strip" && -x "$IMGCAT" ]] && "$IMGCAT" -H 3 -W 100% "$crew_strip"
+            if [[ -f "$crew_strip" && -x "$IMGCAT" ]]; then
+                _panel_debug "crew strip: row ${row} imgcat invoking (${row_count} avatar(s)) on $crew_strip"
+                "$IMGCAT" -H 3 -W 100% "$crew_strip"
+            elif _panel_debug_on; then
+                _panel_debug "crew strip: row ${row} NOT displayed — strip exists=$([[ -f "$crew_strip" ]] && echo yes || echo no), IMGCAT executable=$([[ -x "$IMGCAT" ]] && echo yes || echo no)"
+            fi
         fi
 
         (( idx += per_row ))
@@ -522,10 +560,21 @@ get_amb_badges() {
 render_amb_badges() {
     local handle="$1"
     local cache_file="${LCARS_TMP}lcars-amb-${handle}.json"
-    [[ ! -f "$cache_file" ]] && return
-
-    command -v magick &>/dev/null || return
-    [[ ! -x "$IMGCAT" ]] && return
+    # Three separate silent returns below; each reports a DIFFERENT cause for
+    # the same visible outcome (no badge strip), which is why they are logged
+    # apart rather than as one message.
+    if [[ ! -f "$cache_file" ]]; then
+        _panel_debug "amb badges: SKIPPED — no cache file for handle '${handle}' ($cache_file)"
+        return
+    fi
+    if ! command -v magick &>/dev/null; then
+        _panel_debug "amb badges: SKIPPED — no magick on PATH (badge strip cannot render without it)"
+        return
+    fi
+    if [[ ! -x "$IMGCAT" ]]; then
+        _panel_debug "amb badges: SKIPPED — IMGCAT not executable ('${IMGCAT:-<empty>}')"
+        return
+    fi
 
     local twemoji_dir="/tmp/lcars-twemoji"
     local badge_dir="/tmp/lcars-twemoji/badges"
@@ -851,7 +900,15 @@ render_panel() {
     local avatar_panel="${AVATARS_DIR}/${team}_${avatar}_avatar_panel.png"
     local avatar_file="${avatar_panel}"
     [[ ! -f "$avatar_file" ]] && avatar_file="${AVATARS_DIR}/${team}_${avatar}_avatar.png"
-    _panel_debug "avatar lookup: AVATARS_DIR='${AVATARS_DIR:-<empty>}' team='$team' avatar='$avatar' tried='$avatar_panel' found=$([[ -f "$avatar_file" ]] && echo "yes ($avatar_file)" || echo no) IMGCAT=$([[ -x "$IMGCAT" ]] && echo "${IMGCAT} (executable)" || echo "${IMGCAT:-<empty>} (not executable)")"
+    # Guarded: the $(...) below would fork subshells on every poll otherwise.
+    if _panel_debug_on; then
+        _panel_debug "avatar lookup: AVATARS_DIR='${AVATARS_DIR:-<empty>}' team='$team' avatar='$avatar' tried='$avatar_panel' found=$([[ -f "$avatar_file" ]] && echo "yes ($avatar_file)" || echo no) IMGCAT=$([[ -x "$IMGCAT" ]] && echo "${IMGCAT} (executable)" || echo "${IMGCAT:-<empty>} (not executable)")"
+    fi
+    # Tracks whether anything was actually painted, so the fallback below fires
+    # for EVERY way this block can render nothing -- not just a missing file,
+    # but also a magick rounding that silently produced no output. Those failed
+    # identically to the user before: a blank hole where the avatar belongs.
+    local avatar_rendered=false
     if [[ -f "$avatar_file" && -x "$IMGCAT" ]]; then
         local rounded_file="${LCARS_TMP}lcars-avatar-${SESSION_CODE}-${avatar}-rounded.png"
         if command -v magick &>/dev/null; then
@@ -867,15 +924,33 @@ render_panel() {
             if [[ -f "$rounded_file" ]]; then
                 _panel_debug "imgcat: invoking on rounded avatar $rounded_file"
                 "$IMGCAT" -W 100% -H 12 "$rounded_file"
+                avatar_rendered=true
             else
                 _panel_debug "imgcat: SKIPPED — magick rounding produced no output file ($rounded_file)"
             fi
         else
             _panel_debug "imgcat: invoking on raw avatar $avatar_file (no magick on PATH, skipping rounding)"
             "$IMGCAT" -W 100% -H 12 "$avatar_file"
+            avatar_rendered=true
         fi
     else
-        _panel_debug "imgcat: SKIPPED entire avatar block — avatar_file exists=$([[ -f "$avatar_file" ]] && echo yes || echo no), IMGCAT executable=$([[ -x "$IMGCAT" ]] && echo yes || echo no)"
+        if _panel_debug_on; then
+            _panel_debug "imgcat: SKIPPED entire avatar block — avatar_file exists=$([[ -f "$avatar_file" ]] && echo yes || echo no), IMGCAT executable=$([[ -x "$IMGCAT" ]] && echo yes || echo no)"
+        fi
+    fi
+    # Visible degraded state (XACA-1134, UX finding 1). Previously the panel
+    # rendered NOTHING here -- a blank gap indistinguishable from a panel that
+    # simply has no avatar, which is how this defect survived unreported for
+    # months across all 11 teams. Matches the file's existing missing-data
+    # convention (the two-line ${DIM} "Awaiting"/"agent..." block above).
+    # Shown only where an image is genuinely EXPECTED: the avatar is the panel's
+    # primary identity affordance and every agent has one. Deliberately NOT
+    # applied to the crew strip or AMB badges, where absence is a legitimate
+    # state (no other agents online; agent not registered with AMB) and a
+    # placeholder would cry wolf on a healthy panel.
+    if [[ "$avatar_rendered" != "true" ]]; then
+        echo "${DIM}  [avatar${RESET}"
+        echo "${DIM}  unavailable]${RESET}"
     fi
 
     echo ""
@@ -976,6 +1051,11 @@ render_panel() {
             break
         fi
     done
+    # The loop above tries three name shapes across two suffixes and falls
+    # through silently when all six miss -- report which way it ended.
+    if _panel_debug_on; then
+        _panel_debug "terminal logo: AVATARS_DIR='${AVATARS_DIR:-<empty>}' session='$SESSION_CODE' -> $([[ -f "$logo_file" ]] && echo "matched $logo_file" || echo "NO MATCH (tried full/team+last/glob shapes for _logo_panel.png and _logo.png)")"
+    fi
     if [[ -f "$logo_file" && -x "$IMGCAT" ]]; then
         local rounded_logo="${LCARS_TMP}lcars-termlogo-${SESSION_CODE}-rounded.png"
         if command -v magick &>/dev/null; then
@@ -988,10 +1068,18 @@ render_panel() {
                     -alpha off -compose CopyOpacity -composite \
                     PNG32:"$rounded_logo" 2>/dev/null
             fi
-            [[ -f "$rounded_logo" ]] && "$IMGCAT" -W 100% -H 10 "$rounded_logo"
+            if [[ -f "$rounded_logo" ]]; then
+                _panel_debug "terminal logo: imgcat invoking on rounded logo $rounded_logo"
+                "$IMGCAT" -W 100% -H 10 "$rounded_logo"
+            else
+                _panel_debug "terminal logo: SKIPPED — magick rounding produced no output file ($rounded_logo)"
+            fi
         else
+            _panel_debug "terminal logo: imgcat invoking on raw logo $logo_file (no magick on PATH)"
             "$IMGCAT" -W 100% -H 10 "$logo_file"
         fi
+    elif _panel_debug_on; then
+        _panel_debug "terminal logo: NOT displayed — logo_file exists=$([[ -f "$logo_file" ]] && echo yes || echo no), IMGCAT executable=$([[ -x "$IMGCAT" ]] && echo yes || echo no)"
     fi
 
     echo ""
