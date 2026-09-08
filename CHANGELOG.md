@@ -7,6 +7,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-0822-007 ([Review] finding on PR #842): `_kb_release_sync()` in this template still
+  read the single global `${AITEAMFORGE_DIR}/lcars-ui/.lcars-port` file (default 8080) instead
+  of resolving the calling team's own port via `_kb_team_lcars_port`, the same defect
+  `kb-release-create` had before XACA-0822-005 fixed it — `kb-release` item sync stays broken
+  for every overlay-only freelance team even after -005 fixed the create path. Ported
+  canonical's port resolution, including its error path verbatim (unlike kb-release-create's
+  own fallback-to-8080-with-a-warning): an unresolvable team port is not a transient network
+  condition — there is no server to even attempt talking to — so this now returns 1 with a
+  loud warning naming the team, same as canonical, rather than guessing a port. The function's
+  existing best-effort "always return 0" behaviour for a curl failure against an
+  already-resolved port is unchanged (that is a deliberate, documented XACA-1099 design
+  choice in this template, not part of this defect). While here, checked whether any other
+  template function reads the global `.lcars-port` where canonical uses the team-resolved
+  port: only `kb-ui` and `kb-browser` remain, and canonical has no port-resolution line in
+  either of those (they are a different case, not this one — left unchanged, per the ticket's
+  own scoping). Part of XACA-0822.
+
 - XACA-1135: corrects a stale citation the retro-gate messages were shipping. Cause 3
   (team code unresolvable) named XACA-1058 — "shipped helpers do not read the team-paths
   overlay" — as a current known cause, in a template that now DOES read the overlay:

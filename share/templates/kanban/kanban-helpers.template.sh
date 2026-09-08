@@ -956,7 +956,11 @@ _kb_curl_failure_reason() {
 
 # Sync an item to release manifests via LCARS server
 # Usage: _kb_release_sync <item_id>
-# Returns 0 (success) even if server is down - this is a best-effort sync.
+# Returns 0 (success) even if the LCARS server itself is unreachable — this
+# is a best-effort sync against an already-resolved port. Returns 1 only
+# when the team's LCARS port cannot be resolved at all (XACA-0822-007,
+# ported from canonical) — see the port-resolution comment inside the
+# function below.
 #
 # XACA-1099 note: unlike canonical's _kb_release_sync (and this tap's own
 # kb-release-create below), this function does NOT assert a cause when curl
@@ -981,12 +985,30 @@ _kb_release_sync() {
         return 0
     fi
 
-    # Determine LCARS port from config file or default
-    local _lcars_port="8080"
-    local _port_file="${AITEAMFORGE_DIR}/lcars-ui/.lcars-port"
-    if [[ -f "$_port_file" ]]; then
-        _lcars_port="$(cat "$_port_file" 2>/dev/null || echo "8080")"
-    fi
+    # XACA-0822-007: resolve the calling team's OWN LCARS port via
+    # _kb_team_lcars_port instead of reading the single global
+    # lcars-ui/.lcars-port file (default 8080). That global file doesn't
+    # exist for overlay-only teams whose LCARS server runs on a
+    # team-specific port — the exact defect kb-release-create had, fixed
+    # under XACA-0822-005 (see its comment above, in kb-release for the
+    # `create` subcommand). Every release-manifest sync for those teams
+    # was silently targeting port 8080 (or whatever happened to be
+    # listening there), so `kb-release` item sync stayed broken for them
+    # even after -005 fixed the create path. Error path ported verbatim
+    # from canonical's _kb_release_sync (dev-team/kanban-helpers.sh):
+    # an unresolvable port is not a transient network condition — there
+    # is no server to even attempt talking to — so this returns 1 here,
+    # unlike the best-effort "always return 0" used below for a curl
+    # failure against an already-resolved port.
+    local context team _lcars_port
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+
+    _lcars_port=$(_kb_team_lcars_port "$team") || {
+        echo "⚠️  Release manifest sync skipped: no LCARS port known for team '$team'" >&2
+        echo "   Manifest for $item_id may now be out of sync with board." >&2
+        return 1
+    }
 
     # Try to sync with LCARS server (2 second timeout)
     # Silent by default - only warn on unexpected errors
