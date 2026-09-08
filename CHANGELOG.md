@@ -7,6 +7,34 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1128: the shipped template never received canonical's 2026-04-04 echo-to-printf JSON fix
+  (commit 0b7c48da), leaving 61 `echo "$VAR" | jq` sites that corrupt any kanban item containing a
+  newline. Under zsh `echo` expands backslash escapes, so a literal `\n` inside a JSON string
+  becomes a real 0x0A and jq aborts with "control characters from U+0000 through U+001F must be
+  escaped". Field-proven: `kb-run XFFT-0001` aborted and printed an empty ITEM DETAILS box, while
+  `printf` on the identical record succeeded. 53 sites converted to `printf '%s\n'` (38 item-JSON
+  across `_kb_display_item_box`/`kb-run`/`kb-work`/`kb-pick`/`kb-retro-check`, plus 15 covering
+  `window_info`, `assignment`, `server_status`, `completed_items` and `body`).
+  Two corrections to the ticket's own premises are worth recording, since both were believed and
+  both were wrong. (1) SEVERITY WAS UNDERSTATED, not overstated: 9 of these sites route stderr to
+  `2>/dev/null`, so they fail with no visible error at all. The worst is `kb-run`'s blocked-by read
+  --- on a multi-line item `echo` yields empty, the `[[ -n "$blocked_by_ids" ]]` gate sees nothing
+  to block on, and a BLOCKED ITEM RUNS ANYWAY. That fails OPEN, so an observable-breakage triage
+  ranks it COLD precisely because it is silent. Ranking here is by fail direction, not visibility.
+  (2) The emoji class does NOT raise the decode error the ticket describes: on jq 1.8.1 the
+  surrogate bytes are objectively invalid UTF-8 (CESU-8; strict decode confirms an invalid
+  continuation byte) but jq exits 0 and silently substitutes replacement glyphs. Silent corruption,
+  not a loud failure --- again the worse of the two modes.
+  The 8 `$progress` sites are deliberately NOT converted: they read `_kb_epic_progress`, whose jq
+  emits only integers (verified programmatically --- every output field types as `number`), so no
+  backslash can reach `echo`. The boundary is one line: can carry user text -> `printf`;
+  structurally numeric -> unchanged. Also corrected: this fix is NOT gated on XACA-1120. That
+  belief predates XACA-1095, which replaced `update_shell_helpers`' mtime staleness test with a
+  rendered-CONTENT compare plus atomic rename; XACA-1028 then fixed an unrelated `set -eo pipefail`
+  abort that was killing the upgrade before it reached that function. Verified live: M1Pro's
+  installed `kanban-helpers.sh` is a genuine upgrade-driven render at v0.20.6. Merging still is not
+  shipping --- a release must be cut --- but the delivery channel works.
+
 - XACA-1120: `aiteamforge upgrade`'s "Updating Templates" phase no longer reports success it did
   not earn, and now actually renders. Two silences composed into a misdiagnosis worth recording.
   (1) `update_templates` printed `All templates up to date` unconditionally: all 17 shipped

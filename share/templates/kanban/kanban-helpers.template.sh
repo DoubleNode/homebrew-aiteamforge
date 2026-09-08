@@ -7996,8 +7996,8 @@ kb-pick() {
     # Read the item
     local item_json item_id title
     item_json=$(_kb_jq_read "$board_file" ".backlog[$index] // empty")
-    item_id=$(echo "$item_json" | jq -r '.id // empty')
-    title=$(echo "$item_json" | jq -r '.title // empty')
+    item_id=$(printf '%s\n' "$item_json" | jq -r '.id // empty')
+    title=$(printf '%s\n' "$item_json" | jq -r '.title // empty')
 
     if [[ -z "$item_id" ]]; then
         echo "Error: Item not found: $selector"
@@ -8007,8 +8007,8 @@ kb-pick() {
     # Check if item is blocked (XACA-0020)
     local item_status blocked_by
     # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-pick).
-    item_status=$(echo "$item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
-    blocked_by=$(echo "$item_json" | jq -r '(.blockedBy // []) | join(", ")')
+    item_status=$(printf '%s\n' "$item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
+    blocked_by=$(printf '%s\n' "$item_json" | jq -r '(.blockedBy // []) | join(", ")')
     if [[ "$item_status" == "blocked" ]] || [[ -n "$blocked_by" ]]; then
         echo "─────────────────────────────────────"
         echo "⚠️  Cannot pick [$item_id]: Item is blocked"
@@ -8276,16 +8276,16 @@ kb-run() {
     # Extract only fields needed for blocked check; _kb_display_item_box extracts the rest
     local item_id title description jira_id github_issue priority item_status due_date tags
     local subitem_count item_worktree item_worktree_branch
-    item_id=$(echo "$item_json" | jq -r '.id // empty')
-    title=$(echo "$item_json" | jq -r '.title // empty')
-    priority=$(echo "$item_json" | jq -r '.priority // "medium"')
+    item_id=$(printf '%s\n' "$item_json" | jq -r '.id // empty')
+    title=$(printf '%s\n' "$item_json" | jq -r '.title // empty')
+    priority=$(printf '%s\n' "$item_json" | jq -r '.priority // "medium"')
     # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-run).
-    item_status=$(echo "$item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
+    item_status=$(printf '%s\n' "$item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
 
     # Check if item is blocked (XACA-0020)
     # Check status, priority, AND blockedBy array - any of these can indicate blocked state
     local blocked_by
-    blocked_by=$(echo "$item_json" | jq -r '(.blockedBy // []) | join(", ")')
+    blocked_by=$(printf '%s\n' "$item_json" | jq -r '(.blockedBy // []) | join(", ")')
     if [[ "$item_status" == "blocked" ]] || [[ "$priority" == "blocked" ]] || [[ -n "$blocked_by" ]]; then
         echo ""
         echo "╔══════════════════════════════════════════════════════════════════╗"
@@ -8319,7 +8319,7 @@ kb-run() {
 
     # Check if item is blocked by incomplete items
     local blocked_by_ids incomplete_blockers
-    blocked_by_ids=$(echo "$item_json" | jq -r '(.blockedBy // []) | .[]' 2>/dev/null)
+    blocked_by_ids=$(printf '%s\n' "$item_json" | jq -r '(.blockedBy // []) | .[]' 2>/dev/null)
 
     if [[ -n "$blocked_by_ids" ]]; then
         incomplete_blockers=""
@@ -8453,7 +8453,7 @@ kb-run() {
         prompt+="\n\n## Subitems\n"
         local subitems
         # Include subitem ID in the output
-        subitems=$(echo "$item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)\(if .jiraKey then " (\(.jiraKey))" else "" end)"')
+        subitems=$(printf '%s\n' "$item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)\(if .jiraKey then " (\(.jiraKey))" else "" end)"')
         prompt+="$subitems\n"
 
         prompt+="\n## CRITICAL: Subitem Delegation Requirements\n"
@@ -8622,15 +8622,15 @@ kb-work() {
     # Extract only fields needed for blocked check; _kb_display_item_box extracts the rest
     local item_id title description jira_id github_issue priority item_status due_date tags
     local subitem_count item_worktree item_worktree_branch
-    item_id=$(echo "$item_json" | jq -r '.id // empty')
-    title=$(echo "$item_json" | jq -r '.title // empty')
-    priority=$(echo "$item_json" | jq -r '.priority // "medium"')
+    item_id=$(printf '%s\n' "$item_json" | jq -r '.id // empty')
+    title=$(printf '%s\n' "$item_json" | jq -r '.title // empty')
+    priority=$(printf '%s\n' "$item_json" | jq -r '.priority // "medium"')
     # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-work).
-    item_status=$(echo "$item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
+    item_status=$(printf '%s\n' "$item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
 
     # Check if item is blocked
     local blocked_by
-    blocked_by=$(echo "$item_json" | jq -r '(.blockedBy // []) | join(", ")')
+    blocked_by=$(printf '%s\n' "$item_json" | jq -r '(.blockedBy // []) | join(", ")')
     if [[ "$item_status" == "blocked" ]] || [[ "$priority" == "blocked" ]] || [[ -n "$blocked_by" ]]; then
         echo ""
         echo "╔══════════════════════════════════════════════════════════════════╗"
@@ -8664,7 +8664,7 @@ kb-work() {
 
     # Check if item is blocked by incomplete items
     local blocked_by_ids incomplete_blockers
-    blocked_by_ids=$(echo "$item_json" | jq -r '(.blockedBy // []) | .[]' 2>/dev/null)
+    blocked_by_ids=$(printf '%s\n' "$item_json" | jq -r '(.blockedBy // []) | .[]' 2>/dev/null)
 
     if [[ -n "$blocked_by_ids" ]]; then
         incomplete_blockers=""
@@ -8748,7 +8748,7 @@ kb-work() {
     if [[ "$subitem_count" -gt 0 ]]; then
         prompt+="\n\n## Subitems\n"
         local subitems
-        subitems=$(echo "$item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)\(if .jiraKey then " (\(.jiraKey))" else "" end)"')
+        subitems=$(printf '%s\n' "$item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)\(if .jiraKey then " (\(.jiraKey))" else "" end)"')
         prompt+="$subitems\n"
 
         prompt+="\n## CRITICAL: Subitem Delegation Requirements\n"
@@ -9114,23 +9114,23 @@ _kb_display_item_box() {
 
     # Extract item details — these are set in the CALLER's scope (no local)
     # shellcheck disable=SC2034
-    item_id=$(echo "$_box_item_json" | jq -r '.id // empty')
-    title=$(echo "$_box_item_json" | jq -r '.title // empty')
-    description=$(echo "$_box_item_json" | jq -r '.description // empty')
-    jira_id=$(echo "$_box_item_json" | jq -r '.jiraId // empty')
-    github_issue=$(echo "$_box_item_json" | jq -r '.githubIssue // empty')
-    priority=$(echo "$_box_item_json" | jq -r '.priority // "medium"')
+    item_id=$(printf '%s\n' "$_box_item_json" | jq -r '.id // empty')
+    title=$(printf '%s\n' "$_box_item_json" | jq -r '.title // empty')
+    description=$(printf '%s\n' "$_box_item_json" | jq -r '.description // empty')
+    jira_id=$(printf '%s\n' "$_box_item_json" | jq -r '.jiraId // empty')
+    github_issue=$(printf '%s\n' "$_box_item_json" | jq -r '.githubIssue // empty')
+    priority=$(printf '%s\n' "$_box_item_json" | jq -r '.priority // "medium"')
     # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (_kb_display_item_box).
-    item_status=$(echo "$_box_item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
-    due_date=$(echo "$_box_item_json" | jq -r '.dueDate // empty')
-    tags=$(echo "$_box_item_json" | jq -r '(.tags // []) | join(", ")')
+    item_status=$(printf '%s\n' "$_box_item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
+    due_date=$(printf '%s\n' "$_box_item_json" | jq -r '.dueDate // empty')
+    tags=$(printf '%s\n' "$_box_item_json" | jq -r '(.tags // []) | join(", ")')
 
     # Get subitem count
-    subitem_count=$(echo "$_box_item_json" | jq '.subitems // [] | length')
+    subitem_count=$(printf '%s\n' "$_box_item_json" | jq '.subitems // [] | length')
 
     # Get worktree info
-    item_worktree=$(echo "$_box_item_json" | jq -r '.worktree // empty')
-    item_worktree_branch=$(echo "$_box_item_json" | jq -r '.worktreeBranch // empty')
+    item_worktree=$(printf '%s\n' "$_box_item_json" | jq -r '.worktree // empty')
+    item_worktree_branch=$(printf '%s\n' "$_box_item_json" | jq -r '.worktreeBranch // empty')
 
     # Render the box
     echo ""
@@ -9183,10 +9183,10 @@ _kb_display_item_box() {
     # Show subitems
     if [[ "$subitem_count" -gt 0 ]]; then
         local completed_count in_progress_count todo_count cancelled_count
-        completed_count=$(echo "$_box_item_json" | jq '[.subitems[] | select(.status == "completed")] | length')
-        in_progress_count=$(echo "$_box_item_json" | jq '[.subitems[] | select(.status == "in_progress")] | length')
-        todo_count=$(echo "$_box_item_json" | jq '[.subitems[] | select(.status == "todo")] | length')
-        cancelled_count=$(echo "$_box_item_json" | jq '[.subitems[] | select(.status == "cancelled")] | length')
+        completed_count=$(printf '%s\n' "$_box_item_json" | jq '[.subitems[] | select(.status == "completed")] | length')
+        in_progress_count=$(printf '%s\n' "$_box_item_json" | jq '[.subitems[] | select(.status == "in_progress")] | length')
+        todo_count=$(printf '%s\n' "$_box_item_json" | jq '[.subitems[] | select(.status == "todo")] | length')
+        cancelled_count=$(printf '%s\n' "$_box_item_json" | jq '[.subitems[] | select(.status == "cancelled")] | length')
 
         if [[ "$cancelled_count" -gt 0 ]]; then
             echo "║  Subitems: $subitem_count total ($completed_count done, $cancelled_count cancelled, $in_progress_count in progress, $todo_count todo)"
@@ -9197,7 +9197,7 @@ _kb_display_item_box() {
 
         # Show individual subitem rows with status icons if requested
         if [[ "$_box_flags" == *",subitem_detail,"* ]]; then
-            echo "$_box_item_json" | jq -r '.subitems[] | "║    [\(.status | if . == "completed" then "✓" elif . == "cancelled" then "✗" elif . == "in_progress" then "●" else "○" end)] \(.id): \(.title)"'
+            printf '%s\n' "$_box_item_json" | jq -r '.subitems[] | "║    [\(.status | if . == "completed" then "✓" elif . == "cancelled" then "✗" elif . == "in_progress" then "●" else "○" end)] \(.id): \(.title)"'
             echo "║"
         fi
     fi
@@ -10109,7 +10109,7 @@ kb-retro-check() {
     fi
 
     local total_count has_retro_count=0
-    total_count=$(echo "$completed_items" | jq 'length' 2>/dev/null || echo "0")
+    total_count=$(printf '%s\n' "$completed_items" | jq 'length' 2>/dev/null || echo "0")
 
     # Print table header
     printf "  %-18s %-38s %-12s %-10s\n" "Item ID" "Title" "Completed" "Has Retro?"
@@ -10119,9 +10119,9 @@ kb-retro-check() {
     local idx=0
     local item_id item_title completed_at completed_short item_lower retro_found matches
     while IFS= read -r item_json; do
-        item_id=$(echo "$item_json" | jq -r '.id // "unknown"' 2>/dev/null)
-        item_title=$(echo "$item_json" | jq -r '.title // "unknown"' 2>/dev/null)
-        completed_at=$(echo "$item_json" | jq -r '.completedAt // "unknown"' 2>/dev/null)
+        item_id=$(printf '%s\n' "$item_json" | jq -r '.id // "unknown"' 2>/dev/null)
+        item_title=$(printf '%s\n' "$item_json" | jq -r '.title // "unknown"' 2>/dev/null)
+        completed_at=$(printf '%s\n' "$item_json" | jq -r '.completedAt // "unknown"' 2>/dev/null)
 
         # Truncate title if too long
         if [[ ${#item_title} -gt 36 ]]; then
@@ -10162,7 +10162,7 @@ kb-retro-check() {
         fi
 
         idx=$((idx + 1))
-    done < <(echo "$completed_items" | jq -c '.[]' 2>/dev/null)
+    done < <(printf '%s\n' "$completed_items" | jq -c '.[]' 2>/dev/null)
 
     echo ""
     # Summary line
@@ -16806,10 +16806,10 @@ kb-my-status() {
 
     # Extract basic info (using win_ prefix to avoid readonly variable conflicts)
     local win_status win_task win_working_on win_started
-    win_status=$(echo "$window_info" | jq -r '.status // "unknown"')
-    win_task=$(echo "$window_info" | jq -r '.task // "None"')
-    win_working_on=$(echo "$window_info" | jq -r '.workingOnId // empty')
-    win_started=$(echo "$window_info" | jq -r '.startedAt // "N/A"')
+    win_status=$(printf '%s\n' "$window_info" | jq -r '.status // "unknown"')
+    win_task=$(printf '%s\n' "$window_info" | jq -r '.task // "None"')
+    win_working_on=$(printf '%s\n' "$window_info" | jq -r '.workingOnId // empty')
+    win_started=$(printf '%s\n' "$window_info" | jq -r '.startedAt // "N/A"')
 
     echo "Status: $win_status"
     echo "Task: $win_task"
@@ -16849,8 +16849,8 @@ kb-my-status() {
     # Show paused info if paused
     if [[ "$win_status" == "paused" ]]; then
         local win_paused_reason win_prev_status
-        win_paused_reason=$(echo "$window_info" | jq -r '.pausedReason // "No reason given"')
-        win_prev_status=$(echo "$window_info" | jq -r '.previousStatus // "unknown"')
+        win_paused_reason=$(printf '%s\n' "$window_info" | jq -r '.pausedReason // "No reason given"')
+        win_prev_status=$(printf '%s\n' "$window_info" | jq -r '.previousStatus // "unknown"')
         echo "─────────────────────────────────────"
         echo "⏸️  PAUSED: $win_paused_reason"
         echo "   (was: $win_prev_status)"
@@ -17219,8 +17219,8 @@ lcars-restart() {
                 # Query the running server to get its team config
                 local server_status=$(curl -s --max-time 2 "http://localhost:$port/api/status" 2>/dev/null)
                 if [[ -n "$server_status" ]]; then
-                    local team=$(echo "$server_status" | jq -r '.team // empty' 2>/dev/null)
-                    local session=$(echo "$server_status" | jq -r '.session_name // empty' 2>/dev/null)
+                    local team=$(printf '%s\n' "$server_status" | jq -r '.team // empty' 2>/dev/null)
+                    local session=$(printf '%s\n' "$server_status" | jq -r '.session_name // empty' 2>/dev/null)
                     if [[ -n "$team" ]]; then
                         echo "  Found: $team on port $port"
                         SERVERS+=("$port:$team:$session")
@@ -17718,8 +17718,8 @@ kb-release-create() {
 
     if [[ "$http_code" == "201" ]]; then
         local release_id release_name
-        release_id=$(echo "$body" | jq -r '.id // empty')
-        release_name=$(echo "$body" | jq -r '.name // empty')
+        release_id=$(printf '%s\n' "$body" | jq -r '.id // empty')
+        release_name=$(printf '%s\n' "$body" | jq -r '.name // empty')
         echo "✓ Created release: $release_name ($release_id)"
         echo "  Type: $rel_type"
         echo "  Platforms: $platforms"
@@ -17929,9 +17929,9 @@ kb-release-show() {
         return 0
     fi
 
-    local release_id=$(echo "$assignment" | jq -r '.releaseId')
-    local platform=$(echo "$assignment" | jq -r '.platform')
-    local assigned_at=$(echo "$assignment" | jq -r '.assignedAt')
+    local release_id=$(printf '%s\n' "$assignment" | jq -r '.releaseId')
+    local platform=$(printf '%s\n' "$assignment" | jq -r '.platform')
+    local assigned_at=$(printf '%s\n' "$assignment" | jq -r '.assignedAt')
     local release_name=$(_kb_release_name "$release_id")
 
     echo "$item_id Release Assignment:"
