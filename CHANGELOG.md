@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-0822-006: `kb-backlog` in this template had no `points` subcommand and no `--points`
+  flag on `add`, so no item on a consumer board could carry an effort estimate — even though an
+  estimate is mandatory before `kb-pick`/`kb-run` in the project's own workflow. Canonical had 8
+  `--points` occurrences (all within `kb-backlog add`'s flag parsing/validation/storage) and a
+  `points)` subcommand case arm (set/show/clear developer-hours estimates); the template had
+  zero of each. Ported both surgically — `--points` parsing and validation in `add`, the
+  `points)` case arm (set/clear/show, modeled on the existing `due|deadline)` arm) — without
+  wholesale-replacing the template's `kb-backlog`, which has drifted from canonical by roughly
+  784 unrelated, untriaged lines; a full replacement would have dragged all of that in and blown
+  the scope of this ticket. Also updated the `kb-backlog` help/usage text so `points` is
+  discoverable in the subcommand list. Added `tests/test-xaca-0822-template-canonical-parity.sh`
+  (registered in `tests/ci-manifest`), covering all four XACA-0822 subitems with 7 cases —
+  confirmed each case fails against the pre-fix template and passes against the fixed one.
+  Part of XACA-0822.
 - XACA-0822-005: `kb-release-create()` in this template resolved the LCARS API port from a
   single global `${AITEAMFORGE_DIR}/lcars-ui/.lcars-port` file defaulting to 8080, never from
   the team overlay — breaking `kb-release create` on every overlay-only freelance team (a real

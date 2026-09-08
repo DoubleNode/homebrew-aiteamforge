@@ -1,0 +1,286 @@
+#!/bin/bash
+# test-xaca-0822-template-canonical-parity.sh
+# Regression tests for XACA-0822 (retire canonical-vs-tap kb-* function drift):
+# ports four canonical fixes into kanban-helpers.template.sh that had drifted
+# out of sync. Covers XACA-0822-002, -005, -006 with functional assertions
+# (sourced and executed), and XACA-0822-004 with a static content assertion
+# (it fixes a literal string embedded in echo/prompt text, not control flow).
+#
+# NOTE ON SHELL: kanban-helpers.template.sh is #!/bin/zsh and uses zsh-only
+# constructs (e.g. brace-group command lists without a trailing `;`) starting
+# well before any of the functions under test here. `bash -n` on the whole
+# file reports a syntax error at a zsh-only construct that predates every
+# function this suite exercises, and sourcing the file under bash stops
+# parsing at that point — none of kb-backlog, _kb_team_lcars_port, or
+# kb-release-create ever get defined under bash. This suite therefore sources
+# the substituted template under zsh (its actual target shell), not bash.
+#
+# Designed to run standalone OR via test-runner.sh.
+# Exit 0 = all cases pass. Exit 1 = at least one case failed.
+#
+# Requires: zsh, jq
+
+set -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TEMPLATE_PATH="$TAP_ROOT/share/templates/kanban/kanban-helpers.template.sh"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Minimal self-contained test framework (mirrors test-xaca-0649's fallback
+# pattern: only define these if test-runner.sh hasn't already exported them).
+# ─────────────────────────────────────────────────────────────────────────────
+_STANDALONE=false
+_PASS=0
+_FAIL=0
+_CURRENT_TEST=""
+
+if ! declare -F test_start &>/dev/null; then
+    _STANDALONE=true
+    test_start() { _CURRENT_TEST="$1"; }
+fi
+if ! declare -F test_pass &>/dev/null; then
+    test_pass() {
+        _PASS=$((_PASS + 1))
+        printf "  PASS: %s\n" "$_CURRENT_TEST"
+    }
+fi
+if ! declare -F test_fail &>/dev/null; then
+    test_fail() {
+        _FAIL=$((_FAIL + 1))
+        printf "  FAIL: %s — %s\n" "$_CURRENT_TEST" "${1:-}" >&2
+    }
+fi
+
+if [ ! -f "$TEMPLATE_PATH" ]; then
+    echo "FATAL: kanban-helpers.template.sh not found at: $TEMPLATE_PATH" >&2
+    exit 1
+fi
+if ! command -v zsh >/dev/null 2>&1; then
+    echo "FATAL: zsh not found — required to source the template (see NOTE ON SHELL above)" >&2
+    exit 1
+fi
+
+_TEST_TMP=""
+_PROCESSED_TEMPLATE=""
+_STDOUT_FILE="/tmp/xaca0822-parity-stdout.$$"
+_STDERR_FILE="/tmp/xaca0822-parity-stderr.$$"
+_BOARD_FILE=""
+
+_setup_sandbox() {
+    _TEST_TMP=$(mktemp -d -t xaca0822-parity.XXXXXX)
+    _PROCESSED_TEMPLATE="$_TEST_TMP/kanban-helpers-template-substituted.sh"
+    sed "s|{{AITEAMFORGE_DIR}}|${_TEST_TMP}/aiteamforge|g; \
+         s|{{SHARED_DEV_ROOT}}|${_TEST_TMP}/shared|g; \
+         s|{{ORG_NAME}}|TestOrg|g" \
+        "$TEMPLATE_PATH" > "$_PROCESSED_TEMPLATE"
+
+    _BOARD_FILE="$_TEST_TMP/board.json"
+    cat > "$_BOARD_FILE" <<'EOF'
+{"backlog": [], "lastUpdated": "", "nextId": 1, "teamCode": "TST"}
+EOF
+}
+
+_teardown_sandbox() {
+    [ -n "$_TEST_TMP" ] && [ -d "$_TEST_TMP" ] && rm -rf "$_TEST_TMP"
+    _TEST_TMP=""
+    _PROCESSED_TEMPLATE=""
+    _BOARD_FILE=""
+}
+
+_cleanup() {
+    rm -f "$_STDOUT_FILE" "$_STDERR_FILE"
+    _teardown_sandbox
+}
+trap '_cleanup' EXIT INT TERM
+
+# Run a zsh snippet with the substituted template sourced and test doubles
+# for the environment functions (_kb_detect_context, board resolution, etc.)
+# stubbed out so we exercise only the logic under test, not live tmux/LCARS
+# state. $1 = zsh code to run after sourcing.
+_run_zsh() {
+    zsh --no-rcs -c "
+        source '$_PROCESSED_TEMPLATE' 2>/dev/null
+        # Isolation: on a machine that has the REAL aiteamforge-paths.sh loader
+        # installed (e.g. this dev box's own ~/dev-team checkout), the template's
+        # top-of-file loader block picks it up and defines a live
+        # aiteamforge_team_lcars_port() — which _kb_team_lcars_port prefers over
+        # its own built-in fallback table (by design, XACA-0168). That would
+        # mask a bug in the fallback table itself behind this host's real,
+        # correct answer. Neutralize it so tests exercise the fallback table.
+        unset -f aiteamforge_team_lcars_port aiteamforge_team_kanban_dir 2>/dev/null
+        $1
+    " >"$_STDOUT_FILE" 2>"$_STDERR_FILE"
+    return $?
+}
+
+_stdout() { cat "$_STDOUT_FILE" 2>/dev/null; }
+_stderr() { cat "$_STDERR_FILE" 2>/dev/null; }
+
+_setup_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0822-005a: _kb_team_lcars_port('mainevent') must be 8400, not 8234
+# (8234 collides with 'command' — stale pre-XACA-0727/XACA-0463 value).
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "XACA-0822-005: _kb_team_lcars_port mainevent resolves to 8400 (not command's 8234)"
+_run_zsh 'echo "$(_kb_team_lcars_port mainevent)"'
+got="$(_stdout | tail -1)"
+if [ "$got" = "8400" ]; then
+    test_pass
+else
+    test_fail "expected 8400, got '$got' (stderr: $(_stderr))"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0822-005b: kb-release-create resolves the port via _kb_team_lcars_port
+# for an overlay-only team, not the single global lcars-ui/.lcars-port file.
+# Stubs _kb_detect_context + _kb_overlay_lookup + curl so no network/tmux is
+# touched; asserts the curl call target embeds the overlay port (8514), not
+# the global default (8080).
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "XACA-0822-005: kb-release-create uses team-resolved port, not global .lcars-port default"
+_CURL_URL_FILE="$_TEST_TMP/curl-url-seen.txt"
+rm -f "$_CURL_URL_FILE"
+# NOTE: the template's own curl invocation ends with `2>/dev/null`, which
+# would swallow anything this stub writes to its stderr — so the stub
+# records the URL to a side file instead of echoing to &2.
+_run_zsh "
+_kb_detect_context() { echo 'freelance-testclient:agent'; }
+_kb_overlay_lookup() { [[ \"\$1\" == 'freelance-testclient' && \"\$2\" == 'lcars_port' ]] && { echo '8514'; return 0; }; return 1; }
+_kb_lcars_auth_args() { :; }
+curl() {
+    for a in \"\$@\"; do
+        case \"\$a\" in http://*) echo \"\$a\" >> '$_CURL_URL_FILE' ;; esac
+    done
+    echo -e '\n000'
+}
+kb-release-create 'Test Release' --type feature >/dev/null 2>/dev/null
+"
+seen="$(cat "$_CURL_URL_FILE" 2>/dev/null)"
+if [ "$seen" = "http://localhost:8514/api/releases" ]; then
+    test_pass
+elif [ "$seen" = "http://localhost:8080/api/releases" ]; then
+    test_fail "BUG REGRESSED: resolved global default port 8080 instead of team-overlay port 8514"
+else
+    test_fail "unexpected/missing curl URL: '$seen' (stderr: $(_stderr))"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0822-006a: kb-backlog add --points stores a numeric points field.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "XACA-0822-006: kb-backlog add --points stores points as a JSON number"
+_run_zsh "
+_kb_detect_context() { echo 'testteam:agent'; }
+_kb_get_board_file() { echo '$_BOARD_FILE'; }
+_kb_ensure_jq() { command -v jq >/dev/null; }
+_kb_generate_id() { echo 'TST-0001'; }
+_kb_increment_id() { :; }
+_kb_log_activity() { :; }
+kb-backlog add 'Task with points' medium '' '' '' --points 4.5
+"
+got="$(jq -r '.backlog[0].points' "$_BOARD_FILE" 2>/dev/null)"
+got_type="$(jq -r '.backlog[0].points | type' "$_BOARD_FILE" 2>/dev/null)"
+if [ "$got" = "4.5" ] && [ "$got_type" = "number" ]; then
+    test_pass
+else
+    test_fail "expected points=4.5 (number), got '$got' (type $got_type). stderr: $(_stderr)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0822-006b: kb-backlog add --points rejects non-numeric input.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "XACA-0822-006: kb-backlog add --points rejects non-numeric input"
+: > "$_BOARD_FILE"
+cat > "$_BOARD_FILE" <<'EOF'
+{"backlog": [], "lastUpdated": "", "nextId": 1, "teamCode": "TST"}
+EOF
+_run_zsh "
+_kb_detect_context() { echo 'testteam:agent'; }
+_kb_get_board_file() { echo '$_BOARD_FILE'; }
+_kb_ensure_jq() { command -v jq >/dev/null; }
+_kb_generate_id() { echo 'TST-0002'; }
+_kb_increment_id() { :; }
+_kb_log_activity() { :; }
+kb-backlog add 'Bad points task' medium '' '' '' --points notanumber
+"
+rc=$?
+count="$(jq '.backlog | length' "$_BOARD_FILE" 2>/dev/null)"
+if [ "$rc" -ne 0 ] && [ "$count" = "0" ]; then
+    test_pass
+else
+    test_fail "expected rejection (exit!=0, no item added); got rc=$rc count=$count"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0822-006c: kb-backlog points <id> <hours> sets, then kb-backlog points
+# <id> - clears, the points field on an existing item.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "XACA-0822-006: kb-backlog points set/clear round-trip"
+: > "$_BOARD_FILE"
+cat > "$_BOARD_FILE" <<'EOF'
+{"backlog": [{"id": "TST-0003", "title": "Existing item", "priority": "medium"}], "lastUpdated": "", "nextId": 4, "teamCode": "TST"}
+EOF
+_run_zsh "
+_kb_detect_context() { echo 'testteam:agent'; }
+_kb_get_board_file() { echo '$_BOARD_FILE'; }
+_kb_ensure_jq() { command -v jq >/dev/null; }
+_kb_resolve_selector() { echo 0; }
+_kb_log_activity() { :; }
+kb-backlog points TST-0003 8
+"
+set_val="$(jq -r '.backlog[0].points' "$_BOARD_FILE" 2>/dev/null)"
+_run_zsh "
+_kb_detect_context() { echo 'testteam:agent'; }
+_kb_get_board_file() { echo '$_BOARD_FILE'; }
+_kb_ensure_jq() { command -v jq >/dev/null; }
+_kb_resolve_selector() { echo 0; }
+_kb_log_activity() { :; }
+kb-backlog points TST-0003 -
+"
+cleared_val="$(jq -r 'if .backlog[0] | has("points") then "present" else "absent" end' "$_BOARD_FILE" 2>/dev/null)"
+if [ "$set_val" = "8" ] && [ "$cleared_val" = "absent" ]; then
+    test_pass
+else
+    test_fail "expected set=8 then cleared=absent; got set='$set_val' cleared='$cleared_val'"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0822-004: no literal unexpanded tilde remains in the retro-template
+# path (was: ${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md,
+# a path that can never exist). Static content assertion — this fix corrects
+# text embedded in echo/prompt strings, not control flow, so grepping the
+# shipped file is the direct and correct check (not a weaker substitute for
+# a functional test).
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "XACA-0822-004: no literal '/~/knowledge' path remains in the template"
+if grep -q '/~/knowledge' "$TEMPLATE_PATH"; then
+    test_fail "found literal unexpanded '/~/knowledge' path in $TEMPLATE_PATH"
+else
+    test_pass
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0822-002: kb-knowledge-promote releases the reserved id slot when the
+# target write fails empty (matches kb-knowledge-add's existing guard).
+# Static content assertion: the guard is a fixed 5-line block ported verbatim
+# from canonical; asserting its presence directly is simpler and just as
+# precise as reconstructing a filesystem failure to trigger it end-to-end.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "XACA-0822-002: kb-knowledge-promote has the reserved-slot release guard"
+promote_body="$(awk '/^kb-knowledge-promote\(\) \{/{f=1} f{print} f && /^}/{exit}' "$TEMPLATE_PATH")"
+if echo "$promote_body" | grep -q 'released reserved slot \${target_entry_id}'; then
+    test_pass
+else
+    test_fail "reserved-slot release guard not found in kb-knowledge-promote()"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Results
+# ─────────────────────────────────────────────────────────────────────────────
+if $_STANDALONE; then
+    echo ""
+    echo "Results: $_PASS passed, $_FAIL failed"
+    [ "$_FAIL" -eq 0 ]
+    exit $?
+fi

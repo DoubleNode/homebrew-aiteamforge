@@ -5372,6 +5372,31 @@ kb-backlog() {
 
     case "$cmd" in
         add)
+            # XACA-0822-006: parse --points out of args before positional
+            # parsing (ported from canonical, XACA-0624). This template's
+            # add) has no other flag-parsing loop (no --sub-repo support
+            # here — that drift is separate and out of scope), so this loop
+            # is scoped to --points only.
+            local points=""
+            local add_args=()
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --points)
+                        points="$2"
+                        shift 2
+                        ;;
+                    --points=*)
+                        points="${1#--points=}"
+                        shift
+                        ;;
+                    *)
+                        add_args+=("$1")
+                        shift
+                        ;;
+                esac
+            done
+            set -- "${add_args[@]}"
+
             local task="$1"
             local priority="${2:-medium}"
             local description="${3:-}"
@@ -5408,12 +5433,25 @@ kb-backlog() {
             fi
 
             if [[ -z "$task" ]]; then
-                echo "Usage: kb-backlog add \"task\" [priority] [\"description\"] [jira-id] [os]"
+                echo "Usage: kb-backlog add \"task\" [priority] [\"description\"] [jira-id] [os] [--points <hours>]"
                 echo "Priority: low | med | medium | high | crit | critical | block | blocked"
                 echo "Description: Optional multi-line description (max 5 lines displayed)"
                 echo "JIRA ID: Optional JIRA ticket ID (e.g., ME-123, PROJ-456)"
                 echo "OS: Optional platform - iOS | Android | Firebase"
+                echo "Points: Optional developer-hours estimate (e.g. 4, 0.5, 1.25)"
                 return 1
+            fi
+
+            # Validate --points value if provided (XACA-0624/XACA-0822-006)
+            # Use variable-form regex for patterns containing \. — inline \. in zsh =~ is
+            # treated as regex "." (any char), not a literal dot, due to shell quoting semantics.
+            if [[ -n "$points" ]]; then
+                local _pts_re_float="^[0-9]+\.[0-9]+$"
+                local _pts_re_leading_dot="^\.[0-9]+$"
+                if [[ ! "$points" =~ ^[0-9]+$ ]] && [[ ! "$points" =~ $_pts_re_float ]] && [[ ! "$points" =~ $_pts_re_leading_dot ]]; then
+                    echo "Error: --points must be a non-negative number of developer-hours (e.g. 4, 0.5, 1.25)"
+                    return 1
+                fi
             fi
 
             local timestamp item_id
@@ -5449,6 +5487,12 @@ kb-backlog() {
                 jq_args+=(--arg os "$normalized_os")
             fi
 
+            # Add points field if provided (XACA-0624/XACA-0822-006: --argjson so stored as JSON number)
+            if [[ -n "$points" ]]; then
+                jq_filter+=', "points": $points'
+                jq_args+=(--argjson points "$points")
+            fi
+
             jq_filter+='}] | .lastUpdated = $timestamp'
 
             # Add with exclusive locking and increment ID counter
@@ -5458,10 +5502,13 @@ kb-backlog() {
             echo "✓ Added [$item_id]: $task [$priority]"
             [[ -n "$jira_id" ]] && echo "  JIRA: $jira_id"
             [[ -n "$normalized_os" ]] && echo "  OS: $normalized_os"
+            [[ -n "$points" ]] && echo "  Points: ${points}h"
             [[ -n "$description" ]] && echo "  Description: ${description:0:50}..."
 
-            # Activity log: item created
-            _kb_log_activity "item_created" "$item_id" "item" "title" "" "$task" "priority=$priority"
+            # Activity log: item created (include points in context when set)
+            local _add_log_ctx="priority=$priority"
+            [[ -n "$points" ]] && _add_log_ctx="priority=$priority points=$points"
+            _kb_log_activity "item_created" "$item_id" "item" "title" "" "$task" "$_add_log_ctx"
             ;;
 
         list|ls)
@@ -6128,6 +6175,91 @@ kb-backlog() {
                     echo "  Due: $current_due"
                 else
                     echo "  (no due date)"
+                fi
+            fi
+            ;;
+
+        points)
+            # XACA-0822-006: developer-hours estimate setter/getter, ported
+            # from canonical (XACA-0624). Modeled on due|deadline) above.
+            #   kb-backlog points <id> <hours>   — set
+            #   kb-backlog points <id> -          — clear (back to unestimated)
+            #   kb-backlog points <id>             — show
+            local selector="$1"
+            local new_points="$2"
+
+            if [[ -z "$selector" ]]; then
+                echo "Usage: kb-backlog points <id> <hours>   Set developer-hours estimate (>=0, fractional OK)"
+                echo "       kb-backlog points <id> -         Clear the estimate (back to unestimated)"
+                echo "       kb-backlog points <id>           Show current estimate"
+                echo ""
+                echo "Examples:"
+                echo "  kb-backlog points XACA-0001 4"
+                echo "  kb-backlog points XACA-0001 0.5"
+                echo "  kb-backlog points XACA-0001 -"
+                return 1
+            fi
+
+            # Resolve selector to index
+            local index
+            index=$(_kb_resolve_selector "$board_file" "$selector")
+
+            if [[ "$index" == "-1" ]]; then
+                echo "Error: Item not found: $selector"
+                return 1
+            fi
+
+            # Read current title and id
+            local current_title item_id
+            current_title=$(_kb_jq_read "$board_file" ".backlog[$index].title // empty" -r)
+            item_id=$(_kb_jq_read "$board_file" ".backlog[$index].id // empty" -r)
+
+            if [[ -z "$current_title" ]]; then
+                echo "Error: Item not found: $selector"
+                return 1
+            fi
+
+            local timestamp
+            timestamp=$(_kb_get_timestamp)
+
+            if [[ "$new_points" == "-" ]]; then
+                # Clear: delete the points field
+                local old_points_val
+                old_points_val=$(_kb_jq_read "$board_file" ".backlog[$index].points // empty" -r)
+                _kb_jq_update "$board_file" \
+                    'del(.backlog[$idx].points) | .backlog[$idx].updatedAt = $ts | .lastUpdated = $ts' \
+                    --argjson idx "$index" \
+                    --arg ts "$timestamp"
+                echo "✓ Cleared points for [$item_id]: $current_title"
+                _kb_log_activity "field_update" "$item_id" "item" "points" "$old_points_val" "" "cleared"
+            elif [[ -n "$new_points" ]]; then
+                # Set: validate then store as JSON number via --argjson
+                # Use variable-form regex for patterns containing \. (zsh =~ inline \. gotcha)
+                local _pts_re_float="^[0-9]+\.[0-9]+$"
+                local _pts_re_leading_dot="^\.[0-9]+$"
+                if [[ ! "$new_points" =~ ^[0-9]+$ ]] && [[ ! "$new_points" =~ $_pts_re_float ]] && [[ ! "$new_points" =~ $_pts_re_leading_dot ]]; then
+                    echo "Error: points must be a non-negative number of developer-hours (e.g. 4, 0.5, 1.25)"
+                    return 1
+                fi
+                local old_points_val
+                old_points_val=$(_kb_jq_read "$board_file" ".backlog[$index].points // empty" -r)
+                _kb_jq_update "$board_file" \
+                    '.backlog[$idx].points = $pts | .backlog[$idx].updatedAt = $ts | .lastUpdated = $ts' \
+                    --argjson idx "$index" \
+                    --argjson pts "$new_points" \
+                    --arg ts "$timestamp"
+                echo "✓ Set points for [$item_id]: $current_title"
+                echo "  Points: ${new_points}h"
+                _kb_log_activity "field_update" "$item_id" "item" "points" "$old_points_val" "$new_points" ""
+            else
+                # Show current estimate
+                local cur_points
+                cur_points=$(_kb_jq_read "$board_file" ".backlog[$index].points // empty" -r)
+                echo "[$item_id] $current_title"
+                if [[ -n "$cur_points" ]]; then
+                    echo "  Points: ${cur_points}h"
+                else
+                    echo "  (no estimate)"
                 fi
             fi
             ;;
@@ -7869,7 +8001,7 @@ else:
             echo "Usage: kb-backlog <command> [args...]"
             echo ""
             echo "Commands:"
-            echo "  add \"task\" [pri] [\"desc\"] [jira] [os]  Add task with optional fields"
+            echo "  add \"task\" [pri] [\"desc\"] [jira] [os] [--points <hours>]  Add task with optional fields"
             echo "  list                               List all backlog items"
             echo "  show <id>                          Show detailed view of a single item"
             echo "  change <i> [\"title\"] [priority]   Update item title and/or priority"
@@ -7878,6 +8010,7 @@ else:
             echo "  github <i> [issue-ref]             Set/view/clear GitHub issue"
             echo "  tag <i> [add|rm|clear] [tags...]   Manage tags (clickable in LCARS)"
             echo "  due <i> [YYYY-MM-DD]               Set/view/clear due date"
+            echo "  points <i> [hours]                 Set/view/clear developer-hours estimate"
             echo "  remove <index>                     Remove item by index"
             echo "  unpick <index>                     Clear actively working flag"
             echo "  demote <id> [--reason \"..\"]        Move item back to todo (alias: todo)"
