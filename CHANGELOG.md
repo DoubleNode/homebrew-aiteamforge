@@ -97,6 +97,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   same sandbox, plus a direct unit test proving `_aitf_install_rendered` fails closed rather
   than installing at a guessed mode when the target's mode cannot be read.
 
+- XACA-1120 (PR #836 review round 2, follow-up on subitems -027/-031): the `share/aliases/`
+  refresh loop in `update_shell_helpers` now goes through the shared `_aitf_render_template` /
+  `_aitf_install_rendered` helpers instead of its own inline `sed ... > target`, closing all
+  three problems flagged in the same review comment at once: no `_aitf_sed_repl_escape` (the
+  same defect already fixed at two other sites in this PR), no render validation (a short/failed
+  render had nothing checking it before install), and a truncating `>` instead of the atomic
+  same-filesystem rename `kanban-helpers.sh` already gets. Routing through the shared helper also
+  fixes a real latent bug as a side effect: the inline sed only ever substituted
+  `{{AITEAMFORGE_DIR}}`, so `agent-aliases.sh` and `cc-aliases.sh` -- both of which also carry
+  `{{ORG_NAME}}` -- were installing with that placeholder left literal on every create/refresh;
+  verified end to end in a sandbox (create + update paths, mode 755 on create, `{{ORG_NAME}}`
+  resolved, zero placeholders remaining). Also: `update_shell_helpers`' own "Updated N helper(s)"
+  summary line had the same past-tense-under-`DRY_RUN` bug subitem -027 fixed in
+  `update_templates` (the subitem explicitly named both sites); it now says "Would update" under
+  `DRY_RUN` there too.
+
 - XACA-1124: an LCARS server death now leaves a record. Previously nothing logged a server's
   exit or signal, and because `start_lcars_server` unconditionally rotates the per-team log at
   the top of every launch with a single `.old` backup, retention was exactly two launches --

@@ -2765,6 +2765,24 @@ update_shell_helpers() {
   fi
 
   # Update alias files under share/aliases/
+  #
+  # Routed through the shared _aitf_render_template / _aitf_install_rendered
+  # helpers (subitem XACA-1120-031, PR #836 review). This loop used to do its
+  # own inline `sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" source > target`,
+  # which had every problem the shared helpers exist to close, all three
+  # flagged in the same review comment: (1) no _aitf_sed_repl_escape -- a `|`
+  # or `&` in WORKING_DIR would terminate the substitution early or expand to
+  # the whole match, the same bug this PR already fixed at the update_templates
+  # and kanban-helpers render sites; (2) no render validation -- a short/failed
+  # sed could install a truncated file with nothing checking it; (3) `>`
+  # truncates the target before writing, so an interrupted write leaves a
+  # TRUNCATED alias file on disk rather than the atomic same-filesystem rename
+  # kanban-helpers.sh already gets. Going through the shared helpers also fixes
+  # a real latent bug as a side effect: the inline sed only ever substituted
+  # {{AITEAMFORGE_DIR}}, so agent-aliases.sh and cc-aliases.sh -- both of which
+  # also carry {{ORG_NAME}} -- were installing with that placeholder left
+  # LITERAL on every create/refresh. _aitf_render_template substitutes all
+  # three placeholders the shipped templates use.
   local aliases_dir="${WORKING_DIR}/share/aliases"
   local templates_dir="${tap_share}/templates/aliases"
   local alias_files=(
@@ -2772,16 +2790,6 @@ update_shell_helpers() {
     "cc-aliases.sh"
     "worktree-aliases.sh"
   )
-  # Escape WORKING_DIR for safe use as the REPLACEMENT half of `s|...|...|g`
-  # (subitem XACA-1120-031, PR #836 review). This loop was doing its own
-  # unescaped `s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g` -- the same defect this
-  # PR already fixed via _aitf_sed_repl_escape() at the update_templates and
-  # kanban-helpers render sites, missed here because this loop never went
-  # through the shared render helper. A `|` or `&` in WORKING_DIR would
-  # terminate the expression early or expand to the whole match, same as
-  # everywhere else that bug was fixed.
-  local _aliases_wd
-  _aliases_wd="$(_aitf_sed_repl_escape "${WORKING_DIR}")"
 
   for alias_file in "${alias_files[@]}"; do
     local source="${templates_dir}/${alias_file}"
@@ -2809,15 +2817,31 @@ update_shell_helpers() {
       esac
 
       print_info "Creating share/aliases/${alias_file} (was missing)..."
-      if [ "$DRY_RUN" = false ]; then
-        mkdir -p "$aliases_dir"
-        sed -e "s|{{AITEAMFORGE_DIR}}|${_aliases_wd}|g" "$source" > "$target"
-        chmod +x "$target" 2>/dev/null || true
-        print_success "Created share/aliases/${alias_file}"
-        updated=$((updated + 1))
-      else
+      mkdir -p "$aliases_dir"
+      local _alias_placement="sibling"
+      [ "$DRY_RUN" = true ] && _alias_placement="tmpdir"
+      local _alias_rendered="" _alias_rc=0
+      _alias_rendered="$(_aitf_render_template "$source" "$target" "$_alias_placement")" || _alias_rc=$?
+      if [ "$_alias_rc" -eq 1 ]; then
+        print_warning "Could not create a temp file to render ${alias_file} - skipping"
+      elif [ "$_alias_rc" -eq 3 ]; then
+        print_warning "Refusing to render ${alias_file}: a substituted value contains a newline, which cannot be expressed safely in the substitution - not created"
+      elif [ "$_alias_rc" -ne 0 ]; then
+        print_warning "Refusing to create ${alias_file}: rendering produced an incomplete file"
+      elif [ "$DRY_RUN" = true ]; then
         echo "Would create: share/aliases/${alias_file} (was missing)"
         updated=$((updated + 1))
+        rm -f "$_alias_rendered"
+      else
+        # New file, nothing to preserve -- explicit 755, matching the prior
+        # `chmod +x` intent and kanban-helpers.sh's own create/refresh mode.
+        if _aitf_install_rendered "$_alias_rendered" "$target" 755; then
+          print_success "Created share/aliases/${alias_file}"
+          updated=$((updated + 1))
+        else
+          print_warning "Could not install rendered ${alias_file} - not created"
+          rm -f "$_alias_rendered"
+        fi
       fi
       continue
     fi
@@ -2825,13 +2849,30 @@ update_shell_helpers() {
     if [ "$source" -nt "$target" ] || [ "$FORCE" = true ]; then
       print_info "Updating share/aliases/${alias_file}..."
 
-      if [ "$DRY_RUN" = false ]; then
-        sed -e "s|{{AITEAMFORGE_DIR}}|${_aliases_wd}|g" "$source" > "$target"
-        print_success "Updated share/aliases/${alias_file}"
-        updated=$((updated + 1))
-      else
+      local _alias_placement="sibling"
+      [ "$DRY_RUN" = true ] && _alias_placement="tmpdir"
+      local _alias_rendered="" _alias_rc=0
+      _alias_rendered="$(_aitf_render_template "$source" "$target" "$_alias_placement")" || _alias_rc=$?
+      if [ "$_alias_rc" -eq 1 ]; then
+        print_warning "Could not create a temp file to render ${alias_file} - skipping refresh this run"
+      elif [ "$_alias_rc" -eq 3 ]; then
+        print_warning "Refusing to render ${alias_file}: a substituted value contains a newline, which cannot be expressed safely in the substitution - leaving the existing copy untouched"
+      elif [ "$_alias_rc" -ne 0 ]; then
+        print_warning "Refusing to install ${alias_file}: rendering produced an incomplete file - leaving the existing copy untouched"
+      elif [ "$DRY_RUN" = true ]; then
         echo "Would update: share/aliases/${alias_file}"
         updated=$((updated + 1))
+        rm -f "$_alias_rendered"
+      else
+        # PRESERVE the existing mode -- never assert one. Fails CLOSED (see
+        # _aitf_install_rendered) if the target's current mode can't be read.
+        if _aitf_install_rendered "$_alias_rendered" "$target" preserve; then
+          print_success "Updated share/aliases/${alias_file}"
+          updated=$((updated + 1))
+        else
+          print_warning "Could not install rendered ${alias_file} - existing copy left in place"
+          rm -f "$_alias_rendered"
+        fi
       fi
     fi
   done
@@ -2872,9 +2913,15 @@ update_shell_helpers() {
   if [ $updated -eq 0 ]; then
     print_success "All shell helpers up to date"
   else
-    print_success "Updated ${updated} helper(s)"
-
-    if [ "$DRY_RUN" = false ]; then
+    # DRY_RUN never installs anything -- `updated` is incremented by the
+    # "Would update"/"Would create" dry-run branches above too, so this line
+    # said "Updated" (past tense) for a run that installed nothing (subitem
+    # XACA-1120-027, PR #836 review -- the same pattern already fixed in
+    # update_templates' own summary).
+    if [ "$DRY_RUN" = true ]; then
+      print_success "Would update ${updated} helper(s)"
+    else
+      print_success "Updated ${updated} helper(s)"
       print_info "Reload shell or run: source ~/.zshrc"
     fi
   fi
