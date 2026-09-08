@@ -58,6 +58,38 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   either of those (they are a different case, not this one — left unchanged, per the ticket's
   own scoping). Part of XACA-0822.
 
+- XACA-1135: `kb-retro-check` got ~29x slower per item when it moved onto
+  `_kb_find_existing_retro`, and its "Unknown" footnote named the wrong cause. Measured on
+  the maintainer's board (752 completed items): 164 ms/item, 123.5 s for a full scan, versus
+  ~6 ms/item for the bare `find` it replaced. The cost was duplicate resolution — the helper
+  called `_kb_get_team_from_code` (25 ms) and `_kb_get_kanban_dir` (37 ms), then
+  `kb-retro-path` repeated the identical pair inside it (74 ms of which ~62 ms was that
+  repeat). Both now accept OPTIONAL pre-resolved `[TEAM] [KANBAN-DIR]` arguments, and
+  `_kb_find_existing_retro` passes its resolution down to `kb-retro-path` instead of letting
+  it re-derive them. `kb-retro-check` memoises the team -> kanban-dir lookup across its loop.
+  Now 57 ms/item, 42.8 s for the same scan (2.9x faster end-to-end; the isolated helper cost
+  fell 142 -> 44 ms/item). The item -> team lookup is deliberately NOT memoised: caching it
+  per 3-letter code would let one resolvable item supply the team for a sibling that cannot
+  resolve, reporting a genuine cause-3/cause-4 item as a plain "No" — the exact
+  mis-attribution this ticket exists to remove. An empty argument means "not supplied" and
+  falls back to resolving, so every existing caller is unaffected and all five statuses are
+  produced identically either way.
+- XACA-1135: the `kb-retro-check` "Unknown" footnote attributed every Unknown row to "the
+  team code or kanban path could not be resolved". Status 2 (malformed item id) also renders
+  Unknown and is a different cause entirely, so the footnote confidently misdirected a third
+  of the cases it explained — the same wrong-cause defect this ticket exists to fix. It now
+  enumerates all three statuses that produce Unknown (2 malformed id, 3 unresolvable team
+  code, 4 missing kanban directory) instead of asserting one.
+- XACA-1135: `_kb_retro_failure_lines` re-derived the team and kanban dir under status 4 by
+  calling `_kb_get_team_from_code` and `_kb_get_kanban_dir` again, so the path it named was a
+  fresh lookup rather than the one that actually failed — two extra subprocesses per failure,
+  and a message that could disagree with the state under test. It now takes them as optional
+  4th/5th arguments and all call sites pass the same values they gave the lookup.
+  `_kb_find_existing_retro` runs inside `$( )`, so it cannot return that state itself; the
+  caller owning the resolution is what makes the message describe reality. Both arguments are
+  optional and fall back to re-resolving, so older call shapes still work.
+  Fail-closed is unchanged in every branch: statuses 1/2/3/4 and an unrecognised 7 were each
+  re-verified to block at both blocking sites (`kb-sweep` and `kb-backlog sub done`).
 - XACA-1135: corrects a stale citation the retro-gate messages were shipping. Cause 3
   (team code unresolvable) named XACA-1058 — "shipped helpers do not read the team-paths
   overlay" — as a current known cause, in a template that now DOES read the overlay:
