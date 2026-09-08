@@ -1479,12 +1479,135 @@ _kb_clear_working_on() {
 #      example entries from a specific install (xaca-0139:allowed markers);
 #      they are NOT extended for this ticket — new per-client codes belong
 #      in the overlay, not in this table (see XACA-0628/XACA-1058).
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1058-013: in-process memo for _kb_get_team_code. See the identical
+# block comment in dev-team/kanban-helpers.sh's _kb_get_team_code for the
+# full rationale (measured cost, why the memo needs a calling-convention
+# change to be reachable at all, the delimiter-safety argument, and why
+# _kb_generate_id's own call site is the specific change that makes the
+# memo observable). Ported verbatim.
+_kb_team_code_memo_get() {
+    local team="$1" memo="${_KB_TEAM_CODE_MEMO:-}"
+    case "$memo" in
+        *":${team}="*) ;;
+        *) return 1 ;;
+    esac
+    local rest="${memo#*:${team}=}"
+    printf '%s\n' "${rest%%:*}"
+}
+
+_kb_team_code_memo_put() {
+    local team="$1" code="$2" origin="$3"
+    case "${_KB_TEAM_CODE_MEMO:-}" in
+        *":${team}="*) return 0 ;;   # already memoized -- never overwrite
+    esac
+    _KB_TEAM_CODE_MEMO="${_KB_TEAM_CODE_MEMO:-}:${team}=${code};${origin}:"
+}
+
+# XACA-1058-013: continues to echo its result (backward compatible with any
+# existing `$(...)` caller) AND sets KB_TEAM_CODE_RESULT as a global -- see
+# dev-team/kanban-helpers.sh's _kb_get_team_code for the full rationale.
 _kb_get_team_code() {
     local team="$1"
+    KB_TEAM_CODE_RESULT=""
 
-    local _ovl_code
-    if _ovl_code=$(_kb_overlay_lookup "$team" team_code) && [[ -n "$_ovl_code" ]]; then
-        echo "$_ovl_code" | tr '[:lower:]' '[:upper:]'
+    local _memo_usable=1
+    case "$team" in
+        ""|*:*|*=*|*\;*) _memo_usable=0 ;;
+    esac
+    if [[ $_memo_usable -eq 1 ]]; then
+        local _memo_hit
+        if _memo_hit=$(_kb_team_code_memo_get "$team"); then
+            local _memo_code="${_memo_hit%%;*}" _memo_origin="${_memo_hit#*;}"
+            if [[ "$_memo_origin" == "O" ]]; then
+                # Replay the core-team-mismatch warning on every hit -- see
+                # dev-team/kanban-helpers.sh's _kb_get_team_code for why.
+                local _builtin_code=""
+                case "$team" in
+                    academy)           _builtin_code="ACA" ;;
+                    ios)                _builtin_code="IOS" ;;
+                    android)            _builtin_code="AND" ;;
+                    firebase)           _builtin_code="FIR" ;;
+                    dns)                _builtin_code="DNS" ;;
+                    command)            _builtin_code="CMD" ;;
+                    mainevent)          _builtin_code="MEV" ;;
+                    legal-coparenting)  _builtin_code="LCP" ;;
+                    medical-general)    _builtin_code="MED" ;;
+                    finance-personal)   _builtin_code="FIN" ;;
+                esac
+                if [[ -n "$_builtin_code" && "$_memo_code" != "$_builtin_code" ]]; then
+                    echo "[overlay] WARNING: team-paths.json's team_code for core team '${team}' is '${_memo_code}', which disagrees with the built-in code '${_builtin_code}'. Using the overlay value (it is authoritative) -- check $(_kb_overlay_config_path) for a typo or a duplicated entry if this is unintended." >&2
+                fi
+            fi
+            KB_TEAM_CODE_RESULT="$_memo_code"
+            printf '%s\n' "$_memo_code"
+            return 0
+        fi
+    fi
+
+    # XACA-1058-013: stderr from this overlay call is captured to a temp
+    # file (never /dev/null) so it can be relayed unchanged AND inspected
+    # for _kb_overlay_retry_read's exhaustion phrase -- see
+    # dev-team/kanban-helpers.sh's _kb_get_team_code for the full rationale
+    # on why an exhausted refusal must never be memoized as authoritative.
+    local _ovl_code _ovl_exhausted=0 _ovl_errfile=""
+    local _ovl_tmpdir="${TMPDIR:-/tmp}"
+    if [[ -d "$_ovl_tmpdir" && -w "$_ovl_tmpdir" ]]; then
+        _ovl_errfile="${_ovl_tmpdir%/}/.kb_team_code_err.$$.${RANDOM}${RANDOM}"
+    fi
+    if [[ -n "$_ovl_errfile" ]]; then
+        _ovl_code=$(_kb_overlay_lookup "$team" team_code 2>"$_ovl_errfile")
+    else
+        _ovl_code=$(_kb_overlay_lookup "$team" team_code 2>/dev/null)
+        _ovl_exhausted=1
+    fi
+    if [[ -n "$_ovl_errfile" && -s "$_ovl_errfile" ]]; then
+        cat "$_ovl_errfile" >&2
+        grep -q "refusing rather than guessing a team_code" "$_ovl_errfile" 2>/dev/null && _ovl_exhausted=1
+    fi
+    [[ -n "$_ovl_errfile" ]] && rm -f "$_ovl_errfile" 2>/dev/null
+
+    if [[ -n "$_ovl_code" ]]; then
+        # XACA-1128-class fix: printf, not echo -- under zsh, echo expands
+        # backslash escapes, so a team_code containing a literal backslash
+        # (team-paths.json is installer- AND human-writable JSON; a
+        # well-formed code is 3 letters and can't trip this, but the value
+        # is not structurally guaranteed to be) would be silently mangled
+        # before reaching tr. printf has no such expansion. Ported from
+        # dev-team/kanban-helpers.sh's _kb_get_team_code (XACA-1058).
+        _ovl_code=$(printf '%s' "$_ovl_code" | tr '[:lower:]' '[:upper:]')
+
+        # XACA-1058 ITEM B: the overlay branch above is unconditional -- it
+        # outranks the built-in case table below for EVERY team, including
+        # the handful of well-known "core" teams this file has always
+        # shipped a case arm for. A typo'd or duplicated team_code in a
+        # hand-edited team-paths.json can therefore silently repoint a core
+        # team's ID prefix where the case arm used to win. WARN, never
+        # override -- the overlay stays authoritative (that is the entire
+        # point of this ticket); this is a disagreement signal for a human,
+        # not a veto. Silent in the overwhelmingly common case: no arm for
+        # this team, or the two values already agree. Ported from
+        # dev-team/kanban-helpers.sh's _kb_get_team_code (XACA-1058).
+        local _builtin_code=""
+        case "$team" in
+            academy)           _builtin_code="ACA" ;;
+            ios)                _builtin_code="IOS" ;;
+            android)            _builtin_code="AND" ;;
+            firebase)           _builtin_code="FIR" ;;
+            dns)                _builtin_code="DNS" ;;
+            command)            _builtin_code="CMD" ;;
+            mainevent)          _builtin_code="MEV" ;;
+            legal-coparenting)  _builtin_code="LCP" ;;
+            medical-general)    _builtin_code="MED" ;;
+            finance-personal)   _builtin_code="FIN" ;;
+        esac
+        if [[ -n "$_builtin_code" && "$_ovl_code" != "$_builtin_code" ]]; then
+            echo "[overlay] WARNING: team-paths.json's team_code for core team '${team}' is '${_ovl_code}', which disagrees with the built-in code '${_builtin_code}'. Using the overlay value (it is authoritative) -- check $(_kb_overlay_config_path) for a typo or a duplicated entry if this is unintended." >&2
+        fi
+
+        [[ $_memo_usable -eq 1 ]] && _kb_team_code_memo_put "$team" "$_ovl_code" "O"
+        KB_TEAM_CODE_RESULT="$_ovl_code"
+        printf '%s\n' "$_ovl_code"
         return 0
     fi
 
@@ -1492,37 +1615,40 @@ _kb_get_team_code() {
         local _atf_code
         _atf_code=$(aiteamforge_team_code "$team" 2>/dev/null)
         if [[ -n "$_atf_code" ]]; then
+            [[ $_memo_usable -eq 1 ]] && _kb_team_code_memo_put "$team" "$_atf_code" "N"
+            KB_TEAM_CODE_RESULT="$_atf_code"
             echo "$_atf_code"
             return 0
         fi
     fi
 
+    local _builtin=""
     case "$team" in
-        ios)                               echo "IOS" ;;
-        android)                           echo "AND" ;;
-        firebase)                          echo "FIR" ;;
-        freelance)                         echo "FRE" ;;
+        ios)                               _builtin="IOS" ;;
+        android)                           _builtin="AND" ;;
+        firebase)                          _builtin="FIR" ;;
+        freelance)                         _builtin="FRE" ;;
         # NOTE: freelance-<client>-<project> entries below are examples of registered
         # team IDs from a specific install. New installations register their own team IDs
         # via the overlay (step 1 above) — no new arms are added here (XACA-1058).
-        freelance-doublenode-starwords)    echo "FSW" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-doublenode-workstats)    echo "FWS" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-doublenode-appplanning)  echo "FAP" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-doublenode-lifeboard)    echo "FLB" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-doublenode-caravan)      echo "VAN" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-doublenode-awaysentry)   echo "FAS" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-liquidstyle-agentbadges-app) echo "FLA" ;;
-        freelance-liquidstyle-agentbadges-ios) echo "FLI" ;;
-        academy)                           echo "ACA" ;;
-        dns)                               echo "DNS" ;;
-        command)                           echo "CMD" ;;
+        freelance-doublenode-starwords)    _builtin="FSW" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-workstats)    _builtin="FWS" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-appplanning)  _builtin="FAP" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-lifeboard)    _builtin="FLB" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-caravan)      _builtin="VAN" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-awaysentry)   _builtin="FAS" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-liquidstyle-agentbadges-app) _builtin="FLA" ;;
+        freelance-liquidstyle-agentbadges-ios) _builtin="FLI" ;;
+        academy)                           _builtin="ACA" ;;
+        dns)                               _builtin="DNS" ;;
+        command)                           _builtin="CMD" ;;
         # NOTE: "mainevent" is a registered team slug example — xaca-0139:allowed (legacy slug constant, not org branding)
         # At install time, the org team slug ({{ORG_SLUG}}) would be registered instead.
         # xaca-0139:allowed — "mainevent" is a legacy team slug constant (backward-compat alias, not user-facing org branding)
-        mainevent)                         echo "MEV" ;;
-        legal-coparenting)                 echo "LCP" ;;
-        medical-general)                   echo "MED" ;;
-        finance-personal)                  echo "FIN" ;;
+        mainevent)                         _builtin="MEV" ;;
+        legal-coparenting)                 _builtin="LCP" ;;
+        medical-general)                   _builtin="MED" ;;
+        finance-personal)                  _builtin="FIN" ;;
         *)
             # XACA-1058: NO derivation fallback here (deliberately removed —
             # this used to call a "smart" first-letter + compound-code
@@ -1535,9 +1661,22 @@ _kb_get_team_code() {
             # unregistered — say so with empty, not a guess. Callers MUST
             # check for empty (see _kb_generate_id below and its caller in
             # kb-backlog add) rather than trusting this blindly.
-            echo ""
+            _builtin=""
             ;;
     esac
+
+    if [[ -n "$_builtin" ]]; then
+        [[ $_memo_usable -eq 1 ]] && _kb_team_code_memo_put "$team" "$_builtin" "N"
+        KB_TEAM_CODE_RESULT="$_builtin"
+        echo "$_builtin"
+        return 0
+    fi
+
+    if [[ $_ovl_exhausted -eq 0 && $_memo_usable -eq 1 ]]; then
+        _kb_team_code_memo_put "$team" "" "N"
+    fi
+    KB_TEAM_CODE_RESULT=""
+    echo ""
 }
 
 # Reverse lookup: get team name from 3-letter code
@@ -1714,12 +1853,19 @@ _kb_generate_id() {
         prefix="$series"
     else
         # Fallback to derived team code
+        #
+        # XACA-1058-013: called directly (not via `$(...)`) and read back off
+        # KB_TEAM_CODE_RESULT -- see dev-team/kanban-helpers.sh's
+        # _kb_generate_id for the full rationale (this is the one change
+        # that makes _kb_get_team_code's in-process memo reachable at all).
+        # stdout is discarded here because _kb_get_team_code still ALSO
+        # echoes for backward compatibility with other `$(...)` callers.
         local team_code
-        team_code=$(_kb_get_team_code "$team")
+        _kb_get_team_code "$team" >/dev/null
+        team_code="$KB_TEAM_CODE_RESULT"
         # XACA-1058 CALLER-SIDE HAZARD: _kb_get_team_code can legitimately
         # return empty now that its derivation fallback is gone (see that
-        # function). Command substitution above discards its exit status
-        # either way, so this MUST be checked explicitly: an unchecked empty
+        # function). This MUST be checked explicitly: an unchecked empty
         # team_code silently produces prefix="X" and mints ids like X-0001
         # against a bare, generic prefix that collides across every
         # unresolvable team. Fail loudly instead of minting a bad id.
@@ -17857,23 +18003,80 @@ lcars-restart() {
 # name: gated on the overlay entry carrying its own team_code, which is the
 # marker that distinguishes a generic-freelance registration (self-describing,
 # safe to trust) from a legacy stub that still expects the built-in fallback.
+#
+# _kb_overlay_retry_read (XACA-1058 FIX 3) — bounded retry-then-refuse for a
+# structurally-unsound overlay READ. Ported verbatim from dev-team/
+# kanban-helpers.sh's function of the same name — see that copy for the full
+# XACA-1059 rationale (a non-atomic writer observed leaving team-paths.json
+# at size=0 for one sample, valid on the very next; a persistent version of
+# the same fault minutes later, correctly requiring a human). NOT a cache:
+# no snapshot, no persisted state — it only re-reads the SAME authoritative
+# path a bounded number of times before refusing. A missing file (overlay
+# never configured — the common, legitimate case) is not retried here; the
+# `[[ -f "$cfg" ]] || return 1` guard at each call site handles that before
+# this is ever invoked, so that common path costs nothing extra.
+#
+# Contract for the wrapped command (invoked via "$@"): exit 0 = found
+# (stdout carries the answer); exit 1 = read was structurally fine, answer
+# genuinely absent (NOT retried); exit 2 = the read itself was structurally
+# unsound -- unreadable, 0-byte/whitespace-only, unparseable JSON, or a
+# missing/empty "teams" key (RETRIED). Exhausting all attempts refuses
+# loudly on stderr, naming the path and attempt count, and returns 1 --
+# never invents a code. Attempt budget: 3 reads, short backoff between
+# failures (0.05s, then 0.1s -- ~0.15s worst case). The happy path (first
+# attempt succeeds) issues no sleep at all.
+_kb_overlay_retry_read() {
+    local cfg="$1" label="$2"; shift 2
+    local max_attempts=3 attempt=1 rc out
+    while :; do
+        out=$("$@" 2>/dev/null)
+        rc=$?
+        if [[ $rc -eq 0 ]]; then
+            printf '%s\n' "$out"
+            return 0
+        fi
+        if [[ $rc -ne 2 ]]; then
+            return 1
+        fi
+        if [[ $attempt -ge $max_attempts ]]; then
+            echo "[overlay] WARNING: ${label} -- could not read a structurally valid overlay at '${cfg}' after ${attempt} attempt(s); refusing rather than guessing a team_code." >&2
+            return 1
+        fi
+        case "$attempt" in
+            1) sleep 0.05 ;;
+            *) sleep 0.1 ;;
+        esac
+        attempt=$((attempt + 1))
+    done
+}
+
 _kb_overlay_lookup() {
     local slug="${1-}" field="${2-}"
     [[ -z "$slug" || -z "$field" ]] && return 1
     command -v python3 &>/dev/null || return 1
     local cfg="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
     [[ -f "$cfg" ]] || return 1
-    python3 - "$cfg" "$slug" "$field" <<'PYEOF'
+    local _script
+    _script=$(cat <<'PYEOF'
 import json, sys
 cfg, slug, field = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     with open(cfg) as fh:
-        data = json.load(fh)
+        raw = fh.read()
 except Exception:
-    sys.exit(1)
-entry = data.get("teams", {}).get(slug)
+    sys.exit(2)  # unreadable -- retryable (transient race), not a hard miss
+if not raw.strip():
+    sys.exit(2)  # 0-byte / whitespace-only -- the XACA-1059 truncate-then-write shape
+try:
+    data = json.loads(raw)
+except Exception:
+    sys.exit(2)  # short/partial JSON -- mid-write snapshot
+teams = data.get("teams")
+if not isinstance(teams, dict) or not teams:
+    sys.exit(2)  # missing/empty "teams" is never a legitimate steady state here
+entry = teams.get(slug)
 if not isinstance(entry, dict):
-    sys.exit(1)
+    sys.exit(1)  # file is structurally sound; this slug genuinely is not registered
 code = entry.get("team_code")
 if not code:
     sys.exit(1)
@@ -17882,6 +18085,8 @@ if val is None or val == "":
     sys.exit(1)
 print(val)
 PYEOF
+)
+    _kb_overlay_retry_read "$cfg" "_kb_overlay_lookup(${slug},${field})" python3 -c "$_script" "$cfg" "$slug" "$field"
 }
 
 # _kb_overlay_code_to_slug <CODE>
@@ -17899,20 +18104,32 @@ _kb_overlay_code_to_slug() {
     command -v python3 &>/dev/null || return 1
     local cfg="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
     [[ -f "$cfg" ]] || return 1
-    python3 - "$cfg" "$code" <<'PYEOF'
+    local _script
+    _script=$(cat <<'PYEOF'
 import json, sys
 cfg, code = sys.argv[1], sys.argv[2].upper()
 try:
     with open(cfg) as fh:
-        data = json.load(fh)
+        raw = fh.read()
 except Exception:
-    sys.exit(1)
-for slug, entry in data.get("teams", {}).items():
+    sys.exit(2)
+if not raw.strip():
+    sys.exit(2)
+try:
+    data = json.loads(raw)
+except Exception:
+    sys.exit(2)
+teams = data.get("teams")
+if not isinstance(teams, dict) or not teams:
+    sys.exit(2)
+for slug, entry in teams.items():
     if isinstance(entry, dict) and str(entry.get("team_code", "")).upper() == code:
         print(slug)
         sys.exit(0)
 sys.exit(1)
 PYEOF
+)
+    _kb_overlay_retry_read "$cfg" "_kb_overlay_code_to_slug(${code})" python3 -c "$_script" "$cfg" "$code"
 }
 
 # _kb_team_lcars_port <team>

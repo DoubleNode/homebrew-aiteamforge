@@ -52,6 +52,37 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   remove it and report the released slot id before the source is stubbed, so a failed promotion
   never destroys the source and never leaks an id. Part of XACA-0822 (retire canonical-vs-tap
   kb-* function drift).
+- XACA-1058 (follow-up to the overlay-read fix): both shipped copies gain bounded
+  RETRY-THEN-REFUSE on overlay reads, plus the core-team disagreement warning and one
+  `echo`->`printf` conversion.
+  WHY RETRY AND NOT A CACHE, since the obvious instrument was considered and rejected. This fix
+  made the overlay the SOLE resolution path for 16 arm-less slugs, so a wiped or truncated
+  team-paths.json degrades to hard refusal. XACA-1059 (observed live 2026-09-01) is the incident
+  that decided the shape: its own log records `attempt1 size=0 parse FAIL / attempt2 size=14198
+  parse OK 26 teams / attempt3 OK` — a re-read resolves the transient race from the AUTHORITATIVE
+  source. Minutes later the same file pinned at 0 for 30/30 samples then 8/8 more, and the real
+  recovery was a human stopping 8 processes. A last-known-good cache was rejected on two grounds
+  from that same record: restoring from the newest backup would have REGRESSED the file (7 fields
+  backfilled that the snapshot lacked), and a fallback that keeps kb-* working through a wipe
+  suppresses the signal that prompts the investigation. The outage is the alarm.
+  Implementation: 3 attempts, 0.05s/0.1s backoff, ~0.15s worst case, re-reading the file fresh
+  each attempt. The lookup returns a tri-state so the retry only fires on the RETRYABLE shape
+  (0-byte, whitespace-only, unparseable JSON, missing-or-empty `teams`); a team that is
+  structurally fine but genuinely unregistered returns immediately and is never retried. Zero
+  sleeps and zero retries on the happy path. Exhaustion refuses loudly naming the path and
+  attempt count, and never invents a code. No cache, no persisted state anywhere.
+  CORE-TEAM DISAGREEMENT WARNING: because the overlay branch is unconditional, a typo'd or
+  duplicated team_code can silently repoint a core team's ID prefix where the built-in case arm
+  used to win. Warns without overriding. `kanban-aliases.sh` lists NINE core teams rather than
+  ten — its own case table has no `mainevent` arm, verified against that file rather than copied
+  from the template.
+  `echo "$_ovl_code" | tr` -> `printf '%s' ... | tr`: under zsh `echo` expands backslash escapes
+  and the value comes from installer-writable JSON. Found by applying XACA-1128's lesson that a
+  co-change guard reports a HALF-converted function as co-changed, so function-level parity
+  cannot see a lone surviving echo inside an otherwise-converted function.
+  `share/scripts/kb-init-team`: Sites 5/6 retired as numbered no-ops (see the outer CHANGELOG for
+  the reasoning). This file IS sync-tap mapped, so canonical was edited first and this copy
+  verified byte-identical.
 - XACA-1135: the retrospective gate told consumers a retrospective was MISSING when it had in
   fact never looked. `_kb_find_existing_retro` returned an empty string for four different
   conditions -- resolved-and-genuinely-absent, malformed item id, UNRESOLVABLE TEAM CODE, and a

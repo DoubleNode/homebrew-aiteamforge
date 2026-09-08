@@ -39,8 +39,19 @@
 #     4. ~/.aiteamforge/team-paths.json — live runtime overlay
 #
 #   FALLBACK INSURANCE (hardcoded case statements; must stay mirrored with registry):
-#     5.  kanban-helpers.sh _kb_get_team_code() case
-#     6.  kanban-helpers.sh _kb_get_team_from_code() case
+#     5.  RETIRED (XACA-1058): kanban-helpers.sh _kb_get_team_code() no longer
+#         carries a per-team case arm. XACA-1058 deleted the derivation
+#         heuristic these arms fed (a wrong-but-plausible code minted for any
+#         unrecognized slug) and made Site 4's overlay the sole authoritative
+#         source, read FIRST by _kb_get_team_code() ahead of any case
+#         statement — a per-team arm here would just be a redundant,
+#         driftable second copy of Site 4, which is exactly the defect this
+#         ticket removes. Kept as a numbered no-op (see Site 10's precedent)
+#         so the site numbering below doesn't shift.
+#     6.  RETIRED (XACA-1058): kanban-helpers.sh _kb_get_team_from_code() case
+#         — same rationale as Site 5, reverse direction. _kb_overlay_code_to_slug
+#         already resolves every overlay-registered team_code back to its slug
+#         from the same Site-4 entry, ahead of any case statement.
 #     7.  kanban-helpers.sh _kb_get_kanban_dir() case
 #     8.  kanban-helpers.sh _kb_team_lcars_port() case
 #     9.  claude/statusline-command.sh _get_team_kanban_dir() case
@@ -1550,18 +1561,16 @@ _run_check_only() {
         _check_site "~/.aiteamforge/team-paths.json" \
             _chk_json_team_in_teams "$TEAM_PATHS_JSON" "$TEAM_ID" || all_ok=1
 
-        # 5. kanban-helpers.sh _kb_get_team_code
-        # Scope to the function region and match team_id as a case label (before | or )).
-        # Pattern (^|[[:space:]|])TEAM[|)] handles:
-        #   - standard arm:            "    teamA)  ..."
-        #   - piped arm:               "    teamA|teamB)  ..."
-        #   - backslash-continued arm: "teamA|teamB)" on a continuation line (starts at col 0)
-        _check_site "kanban-helpers.sh _kb_get_team_code" \
-            _chk_case_label _kb_get_team_code "$KANBAN_HELPERS" "$TEAM_ID" || all_ok=1
-
-        # 6. kanban-helpers.sh _kb_get_team_from_code
-        _check_site "kanban-helpers.sh _kb_get_team_from_code" \
-            _chk_case_label _kb_get_team_from_code "$KANBAN_HELPERS" "$TEAM_CODE" || all_ok=1
+        # 5/6. RETIRED (XACA-1058) — see the doc comment near the top of this
+        # file. kanban-helpers.sh's _kb_get_team_code()/_kb_get_team_from_code()
+        # no longer carry per-team case arms at all: the overlay (Site 4) is
+        # now the sole and authoritative source, read FIRST in both
+        # directions, ahead of any case statement. A per-team arm would be a
+        # redundant, driftable mirror of Site 4 — exactly the defect XACA-1058
+        # removes — so checking for one here would only ever report a false
+        # failure going forward. No-op, informational.
+        echo -e "${CYAN}[SKIP]${NC} kanban-helpers.sh _kb_get_team_code — retired (XACA-1058, overlay is sole source now)"
+        echo -e "${CYAN}[SKIP]${NC} kanban-helpers.sh _kb_get_team_from_code — retired (XACA-1058, overlay is sole source now)"
 
         # 7. kanban-helpers.sh _kb_get_kanban_dir
         _check_site "kanban-helpers.sh _kb_get_kanban_dir" \
@@ -2007,37 +2016,46 @@ sys.exit(0 if '${TEAM_ID}' in d.get('teams', {}) else 1)
             fi
         fi
 
-        # ── Site 5: kanban-helpers.sh _kb_get_team_code ───────────────────
-
-        local code_arm="        ${TEAM_ID})                           echo \"${TEAM_CODE}\" ;;"
-        local code_sentinel="        *)
-            # Smart fallback"
+        # ── Site 5: RETIRED (XACA-1058) ────────────────────────────────────
+        #
+        # This used to insert a literal `${TEAM_ID}) echo "${TEAM_CODE}" ;;`
+        # case arm into kanban-helpers.sh's _kb_get_team_code(), anchored on
+        # the sentinel `        *)\n            # Smart fallback`. XACA-1058
+        # deleted that sentinel along with the derivation heuristic it fed (a
+        # wrong-but-plausible code minted for any unrecognized slug — the
+        # exact defect class this ticket exists to remove) — so the anchor
+        # this step searched for no longer exists in kanban-helpers.sh, and
+        # left wired in, this step would `_warn` "sentinel not found, manual
+        # edit needed" on every future team, forever. Site 4
+        # (~/.aiteamforge/team-paths.json) already writes team_code
+        # unconditionally for every team, and _kb_get_team_code() now reads
+        # that overlay FIRST, before any case statement — so a per-team arm
+        # here would be a redundant, driftable second copy of the same fact,
+        # which is precisely what XACA-1058 removes. Retired to a no-op
+        # instead of deleted outright so the site numbering below (and
+        # anything that references sites by number) doesn't shift — same
+        # precedent as Site 10.
         if [[ "$DRY_RUN" -eq 1 ]]; then
-            _dry "Would insert case arm for '${TEAM_ID}' in _kb_get_team_code()"
+            _dry "kanban-helpers.sh _kb_get_team_code — retired (XACA-1058), overlay (Site 4) is now the sole source"
         else
-            if grep -q "^[[:space:]]*${TEAM_ID})[[:space:]]" "${KANBAN_HELPERS}"; then
-                _skip "kanban-helpers.sh _kb_get_team_code"
-            else
-                _insert_case_arm "${KANBAN_HELPERS}" "_kb_get_team_code" \
-                    "$code_arm" "$code_sentinel" && _ok "kanban-helpers.sh _kb_get_team_code" \
-                    || _warn "kanban-helpers.sh _kb_get_team_code — sentinel not found, manual edit needed"
-            fi
+            echo -e "${CYAN}[SKIP]${NC} kanban-helpers.sh _kb_get_team_code — retired (XACA-1058, overlay is sole source now)"
         fi
 
-        # ── Site 6: kanban-helpers.sh _kb_get_team_from_code ─────────────
-
-        local from_code_arm="        ${TEAM_CODE}) echo \"${TEAM_ID}\" ;;"
-        local from_code_sentinel="        *)   echo \"\" ;;  # Unknown code"
+        # ── Site 6: RETIRED (XACA-1058) ────────────────────────────────────
+        #
+        # Same rationale as Site 5, reverse direction
+        # (_kb_get_team_from_code()). Unlike Site 5, this step's own sentinel
+        # (`        *)   echo "" ;;  # Unknown code`) is still intact and
+        # would still successfully insert an arm — but doing so would
+        # recreate the exact redundant-mirror defect XACA-1058 removes:
+        # _kb_overlay_code_to_slug (consulted by _kb_get_team_from_code ahead
+        # of any case statement) already resolves every overlay-registered
+        # team_code back to its slug from the same Site-4 entry. Retired for
+        # the same reason as Site 5, not because this anchor broke.
         if [[ "$DRY_RUN" -eq 1 ]]; then
-            _dry "Would insert case arm for '${TEAM_CODE}' in _kb_get_team_from_code()"
+            _dry "kanban-helpers.sh _kb_get_team_from_code — retired (XACA-1058), overlay (Site 4) is now the sole source"
         else
-            if grep -q "^[[:space:]]*${TEAM_CODE})[[:space:]]" "${KANBAN_HELPERS}"; then
-                _skip "kanban-helpers.sh _kb_get_team_from_code"
-            else
-                _insert_case_arm "${KANBAN_HELPERS}" "_kb_get_team_from_code" \
-                    "$from_code_arm" "$from_code_sentinel" && _ok "kanban-helpers.sh _kb_get_team_from_code" \
-                    || _warn "kanban-helpers.sh _kb_get_team_from_code — sentinel not found, manual edit needed"
-            fi
+            echo -e "${CYAN}[SKIP]${NC} kanban-helpers.sh _kb_get_team_from_code — retired (XACA-1058, overlay is sole source now)"
         fi
 
         # ── Site 7: kanban-helpers.sh _kb_get_kanban_dir ─────────────────
