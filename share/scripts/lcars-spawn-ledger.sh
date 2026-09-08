@@ -449,7 +449,14 @@ _lcars_decode_exit_signal() {
             return 0
             ;;
     esac
-    if [[ "${_status}" -lt 128 ]]; then
+    # XACA-1124 (PR #835 review): the bound is -le, not -lt. Status 128 would
+    # otherwise decode to signal 0 and print the literal "SIG0" -- but signal 0
+    # is the POSIX NULL signal (the one `kill -0` uses to test liveness without
+    # delivering anything). No process ever dies of it, so "SIG0" in a death
+    # record is a statement that cannot be true. In a ledger whose entire job is
+    # to say honestly how a server died, a plausible-looking impossible value is
+    # worse than an empty field.
+    if [[ "${_status}" -le 128 ]]; then
         printf ''
         return 0
     fi

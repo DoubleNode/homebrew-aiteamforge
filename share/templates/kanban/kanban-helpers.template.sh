@@ -17131,6 +17131,70 @@ lcars-logs() {
 
 # Force restart ALL LCARS servers (regardless of health)
 # Detects running servers and restarts them with their original LCARS_TEAM config
+# ---------------------------------------------------------------------------
+# _kb_lcars_record_restart_kill <team> <port> <session> <pids> <signal> <reason>
+#
+# XACA-1124-003 Part B: lcars-restart and kb-restart (below) each pkill a
+# live server.py directly, and this file does not source the shared spawn
+# ledger (scripts/lcars-spawn-ledger.sh) at all -- so neither restart path
+# has ever recorded that IT was the one that killed the server. That is not
+# merely a missing record: XACA-1124-003's out-of-band detector
+# (lcars-health-check.sh's _hc_detect_unobserved_deaths) walks the ledger
+# for a spawn_result whose pid died with no matching server_exit row, and
+# files exactly what it finds as event="server_exit" reason="unobserved" --
+# manufacturing false OOM/external-kill signal for what was actually just an
+# operator typing `kb-restart`, in the very record this ticket exists to
+# make trustworthy. Recording the deliberate kill here closes that gap.
+#
+# Sources scripts/lcars-spawn-ledger.sh GUARDEDLY (only if
+# _lcars_ledger_write_exit is not already a function in this shell) and only
+# LAZILY, from inside this function -- so kanban-helpers.sh's own load time,
+# and every shell that merely sources this file for unrelated kb-* commands,
+# pays nothing extra. Only a caller that actually restarts an LCARS server
+# pays this cost. Mirrors the identical lazy-source idiom
+# lcars-health-check.sh's own _hc_heal_noncanonical_port already uses for
+# the same file.
+#
+# <pids> is a NEWLINE-separated list (exactly what `pgrep -f ...` already
+# emits with no -l flag -- possibly empty, possibly multiple lines).
+# Iterated with `while read`, never `for p in $pids`: identical behavior
+# under bash 3.2 and zsh (zsh does not word-split an unquoted expansion the
+# way bash does by default; both shells split a piped stream on newlines via
+# `read` the same way) -- this file is sourced from both.
+#
+# Best-effort only, matching every other ledger call site in this repo:
+# never aborts the caller, never blocks or slows the actual restart.
+# ---------------------------------------------------------------------------
+_kb_lcars_record_restart_kill() {
+    local _team="${1:-}"
+    local _port="${2:-}"
+    local _session="${3:-}"
+    local _pids="${4:-}"
+    local _signal="${5:-SIGTERM}"
+    local _reason="${6:-operator restart}"
+
+    [[ -z "$_pids" ]] && return 0
+
+    if ! typeset -f _lcars_ledger_write_exit >/dev/null 2>&1; then
+        local _kb_ledger_helpers="${AITEAMFORGE_DIR:-$HOME/dev-team}/scripts/lcars-spawn-ledger.sh"
+        if [[ -f "$_kb_ledger_helpers" ]]; then
+            # shellcheck disable=SC1090
+            source "$_kb_ledger_helpers" 2>/dev/null || true
+        fi
+    fi
+
+    typeset -f _lcars_ledger_write_exit >/dev/null 2>&1 || return 0
+
+    local _p
+    printf '%s\n' "$_pids" | while IFS= read -r _p; do
+        [[ -z "$_p" ]] && continue
+        _lcars_ledger_write_exit "kb_operator_restart" "" \
+            "$_team" "$_port" "$_session" "$_p" \
+            "" "$_signal" "$_reason"
+    done
+    return 0
+}
+
 lcars-restart() {
     local DEV_TEAM_DIR="${AITEAMFORGE_DIR}"
     local LCARS_UI_DIR="${DEV_TEAM_DIR}/lcars-ui"
@@ -17182,10 +17246,19 @@ lcars-restart() {
     echo ""
     echo "Phase 2: Stopping servers..."
     echo "───────────────────────────────────────────────────────"
+    # XACA-1124-003: hoisted outside the loop (never a bare `local` inside a
+    # loop body -- k501-zsh-local-in-loop-gotcha), assigned inside without
+    # `local`.
+    local _lcr_pids
     for config in "${SERVERS[@]}"; do
         IFS=':' read -r port team session <<< "$config"
         echo "  Stopping $team (port $port)..."
+        # XACA-1124-003: capture the about-to-die pid(s) BEFORE the pkill --
+        # pkill itself never reports which pid(s) it matched.
+        _lcr_pids="$(pgrep -f "server.py.*$port" 2>/dev/null)"
         pkill -f "server.py.*$port" 2>/dev/null
+        _kb_lcars_record_restart_kill "$team" "$port" "$session" "$_lcr_pids" \
+            "SIGTERM" "operator restart via lcars-restart (bulk restart-all)"
         ((stopped++))
     done
 
@@ -17403,12 +17476,25 @@ kb-restart() {
 
     # Step 1: Kill existing server process
     echo "Stopping existing server..."
-    if pgrep -f "server.py.*$local_port" > /dev/null 2>&1; then
+    # XACA-1124-003: capture pid(s) BEFORE each pkill -- pkill itself never
+    # reports which pid(s) it matched, and this file does not source the
+    # shared spawn ledger, so without this the operator-initiated kill below
+    # would otherwise surface later as an "unobserved" (external-kill/OOM)
+    # death in lcars-health-check.sh's detector. Hoisted outside any loop
+    # (none here), so no k501-zsh-local-in-loop concern.
+    local _kbr_pids
+    _kbr_pids="$(pgrep -f "server.py.*$local_port" 2>/dev/null)"
+    if [[ -n "$_kbr_pids" ]]; then
         pkill -f "server.py.*$local_port" 2>/dev/null
+        _kb_lcars_record_restart_kill "$team" "$local_port" "$session_name" \
+            "$_kbr_pids" "SIGTERM" "operator restart via kb-restart (graceful stop)"
         sleep 2
         # Force kill if still running
-        if pgrep -f "server.py.*$local_port" > /dev/null 2>&1; then
+        _kbr_pids="$(pgrep -f "server.py.*$local_port" 2>/dev/null)"
+        if [[ -n "$_kbr_pids" ]]; then
             pkill -9 -f "server.py.*$local_port" 2>/dev/null
+            _kb_lcars_record_restart_kill "$team" "$local_port" "$session_name" \
+                "$_kbr_pids" "SIGKILL" "operator restart via kb-restart (forced kill after graceful stop failed)"
             sleep 1
         fi
         echo "  ✓ Server stopped"

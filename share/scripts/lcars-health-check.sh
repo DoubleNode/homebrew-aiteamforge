@@ -1236,6 +1236,27 @@ for line in tail_lines(ledger_path, max_lines):
         continue
 
 exited_launch_ids = set()
+# XACA-1124 (PR #835 review): a server_exit row is NOT always able to carry the
+# launch_id of the spawn it is ending. A recorder at a kill site knows the PID it
+# is about to kill (via pgrep) but has no way to know which launch produced it —
+# _kb_lcars_record_restart_kill in kanban-helpers.sh is exactly that case and
+# writes launch_id="". Keying suppression ONLY on launch_id equality therefore
+# silently fails to suppress every such row: the kill is correctly attributed AND
+# THEN re-recorded by this sweep as reason="unobserved", permanently, into a file
+# nothing is permitted to rotate. That turns every ordinary operator kb-restart
+# into fabricated OOM signal in the one record this whole ticket exists to make
+# trustworthy. Reproduced end-to-end before this fix.
+#
+# So suppression is keyed on EITHER identity:
+#   (a) launch_id equality, when the exit row carries one; or
+#   (b) (pid, port) equality, when it does not.
+# (b) is deliberately narrowed by timestamp — a matching exit row only suppresses
+# a spawn it could actually have ended, i.e. one recorded at or after that spawn
+# began. Without that guard, macOS pid reuse would let an ancient exit row for
+# pid 4242 silently suppress a genuine, unrelated death of a later pid 4242 —
+# trading a false positive for a false NEGATIVE, which is strictly worse here:
+# a fabricated death is visible and arguable, a swallowed one is invisible.
+exited_pid_port_ts = {}
 spawn_results = []
 for row in rows:
     event = row.get("event", "")
@@ -1243,6 +1264,15 @@ for row in rows:
         lid = row.get("launch_id", "")
         if lid:
             exited_launch_ids.add(lid)
+        else:
+            e_pid = row.get("pid", "")
+            e_port = row.get("port", "")
+            e_ts = parse_ts(row.get("ts", ""))
+            if e_pid and e_ts is not None:
+                key = (e_pid, e_port)
+                prev = exited_pid_port_ts.get(key)
+                if prev is None or e_ts > prev:
+                    exited_pid_port_ts[key] = e_ts
     elif event == "spawn_result":
         spawn_results.append(row)
 
@@ -1306,8 +1336,42 @@ def jetsam_forensics(pid, timeout_s):
         out = (result.stdout or "").strip()
         if not out:
             return ""
-        first_line = out.splitlines()[0].strip()
-        return "jetsam log match: " + first_line[:200]
+        # XACA-1124 (PR #835 QA): `log show` is NOT silent on a non-match. It
+        # unconditionally prints a "Timestamp Ty Process[PID:TID]" header, and
+        # -- far worse -- a self-referential preamble line recording the `log`
+        # invocation itself, whose argv ECHOES THE PREDICATE. That echoed
+        # predicate contains the pid AND the literal words "jetsam"/
+        # "memorystatus", so the command matches itself. Treating "stdout is
+        # non-empty" as "found something" therefore reported a jetsam match for
+        # EVERY death, fabricating exactly the speculative cause this ticket
+        # exists to keep out of the record -- the same failure as XACA-1099
+        # asserting a cause it could not distinguish, committed inside the fix
+        # for it. Verified by running the command with a nonsense token.
+        #
+        # So: discard the header and any line emitted by the `log` process
+        # itself, then require what remains to independently satisfy the
+        # the predicate own terms (pid AND a jetsam/memorystatus token). Nothing surviving means NO finding -- return
+        # "" and let the caller record the bare literal "unobserved".
+        pid_s = str(pid)
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("Timestamp"):
+                continue
+            # The self-referential invocation record emitted by the `log`
+            # tool itself. Identified by its PROCESS field (log[<pid>:<tid>]),
+            # never by matching its echoed argv: the argv test would need
+            # literal apostrophes, and this whole python program is embedded
+            # inside a SINGLE-QUOTED shell string, where an apostrophe
+            # terminates the string and breaks the parse (caught the hard way
+            # while writing this very fix).
+            if line.split("]", 1)[0].find("log[") != -1:
+                continue
+            low = line.lower()
+            if pid_s in line and ("jetsam" in low or "memorystatus" in low):
+                return "jetsam log match: " + line[:200]
+        return ""
     except Exception:
         return ""
 
@@ -1322,6 +1386,12 @@ for row in spawn_results:
     pid = int(pid_str)
     ts = parse_ts(row.get("ts", ""))
     if ts is None:
+        continue
+    # Identity (b): an exit row that carried no launch_id, but names this pid on
+    # this port and was recorded at or after this spawn began. See the comment on
+    # exited_pid_port_ts above for why the timestamp narrowing is load-bearing.
+    _exit_ts = exited_pid_port_ts.get((pid_str, row.get("port", "")))
+    if _exit_ts is not None and _exit_ts >= ts:
         continue
     age = (now - ts).total_seconds()
     if age < 0 or age > max_age_seconds:
