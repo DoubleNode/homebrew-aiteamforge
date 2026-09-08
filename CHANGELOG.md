@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-0822-004: this template had THREE occurrences of a literal, never-expanded `~` inside
+  a path — `${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md` — a path that
+  can never exist because the tilde sits mid-string where the shell never expands it. Canonical
+  has zero occurrences of this pattern. Two of the three sites build SUBAGENT PROMPTS, so the
+  broken path was handed to agents as an instruction, not merely printed (observed live in a
+  real task brief). Fixed by matching canonical's equivalent sites exactly, which use the plain
+  form `~/knowledge/templates/retrospective_template.md` with no `${AITEAMFORGE_DIR}` prefix —
+  confirmed by locating all four canonical occurrences (kb-done's knowledge-capture reminder,
+  kb-sweep's retro gate, and both subagent-prompt builders) and comparing surrounding context
+  line-for-line against the template's three sites. Part of XACA-0822.
 - XACA-0822-002: `kb-knowledge-promote()` in this template was missing the reserved-slot
   release guard that `kb-knowledge-add()` already had. If the promotion's target write failed
   (produced an empty file), the reserved knowledge-entry id slot leaked permanently instead of

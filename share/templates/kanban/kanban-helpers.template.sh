@@ -6720,7 +6720,7 @@ kb-backlog() {
                                 echo "   Searched: kanban/plans/${retro_parent_id}/ and kanban/"
                                 echo "   Create the retrospective file before marking this subitem done."
                                 echo "   Run: kb-retro-path $retro_parent_id (to get canonical save path)"
-                                echo "   Template: ${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md"
+                                echo "   Template: ~/knowledge/templates/retrospective_template.md"
                             else
                                 # Codes 2/3/4: nothing was searched, so "missing" would be a lie.
                                 # Still blocks — fail-closed is unchanged.
@@ -8607,7 +8607,7 @@ kb-run() {
         prompt+="**The 'Retrospective and Knowledge Capture' subitem MUST create a retrospective FILE.**\n"
         prompt+="When delegating this subitem, your prompt MUST include:\n"
         prompt+="1. The retrospective file path: \`kb-retro-path ${_kb_prompt_item_id}\` (run this to get the exact path)\n"
-        prompt+="2. The template to copy from: \`${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md\`\n"
+        prompt+="2. The template to copy from: \`~/knowledge/templates/retrospective_template.md\`\n"
         prompt+="3. Explicit instruction: 'You MUST create the retrospective file. Knowledge entries alone are NOT sufficient.'\n"
         prompt+="4. The \`kb-backlog sub done\` command will BLOCK completion if the retro file is missing.\n\n"
 
@@ -8926,7 +8926,7 @@ kb-work() {
         prompt+="**The 'Retrospective and Knowledge Capture' subitem MUST create a retrospective FILE.**\n"
         prompt+="When delegating this subitem, your prompt MUST include:\n"
         prompt+="1. The retrospective file path: \`kb-retro-path ${_kb_prompt_item_id}\` (run this to get the exact path)\n"
-        prompt+="2. The template to copy from: \`${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md\`\n"
+        prompt+="2. The template to copy from: \`~/knowledge/templates/retrospective_template.md\`\n"
         prompt+="3. Explicit instruction: 'You MUST create the retrospective file. Knowledge entries alone are NOT sufficient.'\n"
         prompt+="4. The \`kb-backlog sub done\` command will BLOCK completion if the retro file is missing.\n\n"
 
