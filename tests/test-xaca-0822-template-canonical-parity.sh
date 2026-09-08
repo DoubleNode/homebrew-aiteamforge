@@ -261,18 +261,96 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# XACA-0822-002: kb-knowledge-promote releases the reserved id slot when the
-# target write fails empty (matches kb-knowledge-add's existing guard).
-# Static content assertion: the guard is a fixed 5-line block ported verbatim
-# from canonical; asserting its presence directly is simpler and just as
-# precise as reconstructing a filesystem failure to trigger it end-to-end.
+# XACA-0822-002 ([Review] strengthened): actually EXERCISE the reserved-slot
+# release guard end-to-end instead of grepping for the fixed error string it
+# prints. The grep-only version below (kept as history in this comment) would
+# still pass if the guard's condition were inverted (e.g. `[[ -s "$target_
+# file" ]]`) or its `rm -f`/`return 1` were deleted outright — it never
+# invokes kb-knowledge-promote and never forces a real target-write failure:
+#   grep -q 'released reserved slot \${target_entry_id}' <promote_body>
+#
+# This version forces a REAL write failure and asserts on filesystem state:
+#   1. Let the REAL _kb_alloc_slot allocator reserve a genuine slot (so the
+#      scan/lock/tombstone-backstop machinery all runs for real) via a thin
+#      wrapper — a zsh `functions -c` copy, not a hand-reimplementation —
+#      that chmod 444's the placeholder FILE it returns (never the
+#      directory) so the content write immediately following it in
+#      kb-knowledge-promote gets EACCES and leaves the placeholder at 0
+#      bytes: the exact condition the guard exists to detect. `rm -f` only
+#      needs directory write permission, which this never touches, so the
+#      release step itself is not what's engineered here — only the trigger.
+#   2. Assert the call fails (rc != 0), the placeholder is actually GONE from
+#      disk afterward, the stderr names the release, and the source entry
+#      was left byte-for-byte unchanged (not turned into a promotion stub).
+#   3. Re-invoke kb-knowledge-promote in a FRESH zsh process (real, unwrapped
+#      _kb_alloc_slot) against the same still-unpromoted source. If the
+#      first call's slot were merely orphaned rather than genuinely
+#      released, the real allocator's next scan would see it and skip past
+#      it. Landing the real promotion on the SAME NNN (s001) the failed
+#      attempt used is the proof the slot came back, not just that a file
+#      vanished.
+#
+# Sandboxed: KB_KNOWLEDGE_GLOBAL_ROOT points at a dir under $_TEST_TMP for
+# both invocations below — this never reads or writes a real ~/knowledge
+# tree or a live kanban board.
 # ─────────────────────────────────────────────────────────────────────────────
-test_start "XACA-0822-002: kb-knowledge-promote has the reserved-slot release guard"
-promote_body="$(awk '/^kb-knowledge-promote\(\) \{/{f=1} f{print} f && /^}/{exit}' "$TEMPLATE_PATH")"
-if echo "$promote_body" | grep -q 'released reserved slot \${target_entry_id}'; then
-    test_pass
+test_start "XACA-0822-002: kb-knowledge-promote genuinely releases the reserved slot on a forced target-write failure (source left intact)"
+
+_KP_ROOT="$_TEST_TMP/knowledge-promote-002"
+mkdir -p "$_KP_ROOT/agents/emh"
+_KP_SOURCE="$_KP_ROOT/agents/emh/k042-test-entry.md"
+cat > "$_KP_SOURCE" <<'SRCEOF'
+---
+id: k042-test-entry
+tier: agent
+agent: emh
+date: 2026-09-01
+tags: test
+---
+
+Original source body — must survive an aborted promotion untouched.
+SRCEOF
+_KP_SOURCE_BEFORE="$(cat "$_KP_SOURCE")"
+_KP_TARGET_DIR="$_KP_ROOT/subjects/test-topic"
+_KP_RESERVED="$_KP_TARGET_DIR/s001-test-entry.md"
+
+_run_zsh "
+export KB_KNOWLEDGE_GLOBAL_ROOT='$_KP_ROOT'
+functions -c _kb_alloc_slot _kb_alloc_slot_real
+_kb_alloc_slot() {
+    local f
+    f=\$(_kb_alloc_slot_real \"\$@\") || return 1
+    chmod 444 \"\$f\"
+    printf '%s' \"\$f\"
+}
+kb-knowledge-promote 'agents:emh:k042' 'subjects:test-topic' --confirm
+"
+rc1=$?
+err1="$(_stderr)"
+
+if [ "$rc1" -eq 0 ]; then
+    test_fail "expected kb-knowledge-promote to FAIL on a forced write error; it returned 0. stdout: $(_stdout) stderr: $err1"
+elif [ -e "$_KP_RESERVED" ]; then
+    test_fail "reserved placeholder $_KP_RESERVED still exists after the guard should have released it"
+elif ! echo "$err1" | grep -q "released reserved slot s001-test-entry"; then
+    test_fail "expected release message naming s001-test-entry in stderr; got: $err1"
+elif [ "$(cat "$_KP_SOURCE" 2>/dev/null)" != "$_KP_SOURCE_BEFORE" ]; then
+    test_fail "source entry was modified despite the promotion failing — expected it left intact"
 else
-    test_fail "reserved-slot release guard not found in kb-knowledge-promote()"
+    # Slot genuinely free: a real (unstubbed) promotion in a FRESH zsh
+    # process must land on the SAME NNN (s001), not skip past a leftover.
+    _run_zsh "
+    export KB_KNOWLEDGE_GLOBAL_ROOT='$_KP_ROOT'
+    kb-knowledge-promote 'agents:emh:k042' 'subjects:test-topic' --confirm
+    "
+    rc2=$?
+    if [ "$rc2" -ne 0 ]; then
+        test_fail "real re-promotion after release failed (rc=$rc2): $(_stderr)"
+    elif [ -f "$_KP_RESERVED" ]; then
+        test_pass
+    else
+        test_fail "expected the real promotion to land at $_KP_RESERVED (slot s001 reused); it did not — ls: $(ls "$_KP_TARGET_DIR" 2>&1)"
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

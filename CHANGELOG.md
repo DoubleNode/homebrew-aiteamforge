@@ -7,6 +7,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-0822-009 ([Review] finding on PR #842): the XACA-0822-002 test case only grepped
+  `kb-knowledge-promote()`'s source for the literal error string the reserved-slot-release
+  guard prints — it never invoked the function and never forced a real target-write failure, so
+  it would still pass if the guard's condition were inverted (e.g. `[[ -s "$target_file" ]]`) or
+  the `rm -f`/`return 1` were deleted outright. Rewrote it to exercise the real behaviour in a
+  sandbox (`KB_KNOWLEDGE_GLOBAL_ROOT` under a `mktemp -d` tree — no real `~/knowledge` or live
+  kanban board touched): let the real `_kb_alloc_slot` allocator reserve a genuine slot (a zsh
+  `functions -c` copy wraps it to `chmod 444` the placeholder FILE it returns, never the
+  directory, so the immediately-following content write gets EACCES and the placeholder stays
+  0 bytes — the exact condition the guard exists to catch), then assert the call fails, the
+  placeholder is actually gone from disk, the source entry is byte-for-byte unchanged, and — the
+  proof the slot was genuinely released rather than merely orphaned — a real (unwrapped)
+  re-promotion in a fresh zsh process lands on the SAME NNN (`s001`) the failed attempt used.
+  Verified both directions: staged a scratch copy of the pre-XACA-0822-002 template (before the
+  guard existed at all, commit 344c062) — RED, and for the right reason (the old code wrote
+  the placeholder, hit the same permission error, but had no guard to check it, so it silently
+  stubbed the source and reported "Promotion complete" over an empty target). Staged a second
+  scratch copy of the *current, fixed* template with just the guard's condition inverted — only
+  this one case went RED, all 6 others (including the count guard) stayed green, confirming the
+  new case isolates this specific defect. Restored, reconfirmed 8/8 green. Part of XACA-0822.
 - XACA-0822-007 ([Review] finding on PR #842): `_kb_release_sync()` in this template still
   read the single global `${AITEAMFORGE_DIR}/lcars-ui/.lcars-port` file (default 8080) instead
   of resolving the calling team's own port via `_kb_team_lcars_port`, the same defect
