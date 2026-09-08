@@ -10660,8 +10660,10 @@ kb-retro-check() {
         echo ""
         echo "  ${undetermined_count} item(s) shown as 'Unknown': the team code or kanban path could not be"
         echo "  resolved on this machine, so nothing was searched. Their retrospectives may"
-        echo "  ALREADY EXIST — they are NOT counted as missing. Known causes: XACA-1058"
-        echo "  (shipped helpers do not read the team-paths overlay) and XACA-0822."
+        echo "  ALREADY EXIST — they are NOT counted as missing. Usual cause: the team is"
+        echo "  not registered on this machine (overlay, registry loader and built-in list"
+        echo "  all came back empty). See XACA-0822 for the template drift that can ship an"
+        echo "  older helper; the overlay-read gap itself (XACA-1058) is fixed."
     fi
     echo ""
 
@@ -10734,10 +10736,11 @@ _kb_glob_existing_retro() {
 #   2  item id empty or malformed (expected XABC-1234)
 #   3  TEAM CODE UNRESOLVABLE on this machine — _kb_get_team_from_code returned empty.
 #      Nothing was searched. The retrospective may well ALREADY EXIST; this is a
-#      team-registration failure, not a missing file. Known causes: XACA-1058 (shipped
-#      helpers do not read the team-paths overlay) and XACA-0822 (template drift behind
-#      it). Do NOT advise `kb-retro-path` under this code — that is the very command
-#      that cannot resolve, so the advice is circular.
+#      team-registration failure, not a missing file. Reaching it means the overlay,
+#      the registry loader AND the built-in code list all came back empty. (XACA-1058,
+#      the historical overlay-read gap, is fixed; XACA-0822 tracks the template drift
+#      that can still ship an older helper.) Do NOT advise `kb-retro-path` under this
+#      code — that is the very command that cannot resolve, so the advice is circular.
 #   4  kanban directory for the resolved team does not exist on disk. Nothing was searched.
 #
 # 1 is deliberately reserved for "genuinely absent" so that callers which treat any
@@ -10806,9 +10809,14 @@ _kb_retro_failure_lines() {
             echo "${pad}team-registration failure, not a missing file. Do NOT create a second"
             echo "${pad}retrospective, and do NOT run kb-retro-path: that is the very command"
             echo "${pad}that cannot resolve, so it will fail the same way."
-            echo "${pad}Known causes: XACA-1058 (shipped helpers do not read the team-paths"
-            echo "${pad}overlay) and XACA-0822 (template drift behind it)."
+            echo "${pad}The code is looked up in three places, in order: the team-paths"
+            echo "${pad}overlay, the registry loader, then the built-in code list. Reaching"
+            echo "${pad}here means all three came back empty — the team is not registered on"
+            echo "${pad}this machine."
             echo "${pad}Fix: register/repair this team on this machine, then re-run."
+            echo "${pad}(On installs predating XACA-1058 the helper could not read the overlay"
+            echo "${pad}even when the entry was present. That is fixed; XACA-0822 tracks the"
+            echo "${pad}template drift that can still ship an older helper.)"
             ;;
         4)
             rf_team=$(_kb_get_team_from_code "$item_id" 2>/dev/null)

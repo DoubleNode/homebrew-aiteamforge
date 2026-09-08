@@ -6,6 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+- XACA-1135: corrects a stale citation the retro-gate messages were shipping. Cause 3
+  (team code unresolvable) named XACA-1058 — "shipped helpers do not read the team-paths
+  overlay" — as a current known cause, in a template that now DOES read the overlay:
+  `_kb_get_team_from_code` resolves overlay first, then the registry loader, then the
+  built-in code list. An error message naming a fixed ticket as the live cause sends the
+  operator down a dead end, which is the same defect class this ticket exists to fix.
+  All three sites corrected (the cause-3 message, the kb-retro-check Unknown footnote and
+  the function's exit-map doc comment): they now state the real condition — all three
+  lookup tiers came back empty, so the team is not registered on this machine — and keep
+  XACA-1058 only as parenthetical history, with XACA-0822 named as the live cause that can
+  still ship an older helper. Message text only; no control flow, no exit codes changed.
 - XACA-0822-006: `kb-backlog` in this template had no `points` subcommand and no `--points`
   flag on `add`, so no item on a consumer board could carry an effort estimate — even though an
   estimate is mandatory before `kb-pick`/`kb-run` in the project's own workflow. Canonical had 8
