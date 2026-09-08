@@ -1256,6 +1256,21 @@ exited_launch_ids = set()
 # pid 4242 silently suppress a genuine, unrelated death of a later pid 4242 —
 # trading a false positive for a false NEGATIVE, which is strictly worse here:
 # a fabricated death is visible and arguable, a swallowed one is invisible.
+# parse_ts is DEFINED HERE, above its first use, deliberately.
+# This is top-level python executed sequentially: the pre-pass below calls
+# parse_ts, and when the def sat further down the file that call raised
+# NameError and the whole program exited 1. Its stderr is discarded, so the
+# failure was SILENT -- _hc_detect_unobserved_deaths simply produced no output,
+# which is indistinguishable from "nothing to report" and left the detector
+# permanently dead from the first attributed kill onward. Do not move this def
+# back below the pre-pass.
+def parse_ts(ts):
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
 exited_pid_port_ts = {}
 spawn_results = []
 for row in rows:
@@ -1269,21 +1284,44 @@ for row in rows:
             e_port = row.get("port", "")
             e_ts = parse_ts(row.get("ts", ""))
             if e_pid and e_ts is not None:
-                key = (e_pid, e_port)
-                prev = exited_pid_port_ts.get(key)
-                if prev is None or e_ts > prev:
-                    exited_pid_port_ts[key] = e_ts
+                exited_pid_port_ts.setdefault((e_pid, e_port), []).append(e_ts)
     elif event == "spawn_result":
         spawn_results.append(row)
 
+# XACA-1124 (PR #835 round-2 review): a (pid, port) key can be REUSED across
+# spawns -- macOS recycles pids and a port outlives the process bound to it. An
+# exit row must therefore only suppress the spawn GENERATION it falls inside,
+# i.e. [that spawn ts, the next spawn ts for the same key). Bounding only below
+# let one late exit row suppress every older spawn sharing the key, retroactively
+# swallowing an earlier genuinely-unobserved death -- a false NEGATIVE, which
+# this file argues (see above) is worse than the false positive it replaced.
+spawn_ts_by_key = {}
+for _r in spawn_results:
+    _k = (_r.get("pid", ""), _r.get("port", ""))
+    _t = parse_ts(_r.get("ts", ""))
+    if _t is not None:
+        spawn_ts_by_key.setdefault(_k, []).append(_t)
+for _k in spawn_ts_by_key:
+    spawn_ts_by_key[_k].sort()
+
+
+def next_spawn_ts(key, ts):
+    # The start of the NEXT generation for this key, or None if ts is the newest.
+    for _t in spawn_ts_by_key.get(key, []):
+        if _t > ts:
+            return _t
+    return None
+
+
+def suppressed_by_pid_port(key, ts):
+    _upper = next_spawn_ts(key, ts)
+    for _e in exited_pid_port_ts.get(key, []):
+        if _e >= ts and (_upper is None or _e < _upper):
+            return True
+    return False
+
+
 now = datetime.now(timezone.utc)
-
-
-def parse_ts(ts):
-    try:
-        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except Exception:
-        return None
 
 
 def check_liveness(pid, port):
@@ -1390,8 +1428,7 @@ for row in spawn_results:
     # Identity (b): an exit row that carried no launch_id, but names this pid on
     # this port and was recorded at or after this spawn began. See the comment on
     # exited_pid_port_ts above for why the timestamp narrowing is load-bearing.
-    _exit_ts = exited_pid_port_ts.get((pid_str, row.get("port", "")))
-    if _exit_ts is not None and _exit_ts >= ts:
+    if suppressed_by_pid_port((pid_str, row.get("port", "")), ts):
         continue
     age = (now - ts).total_seconds()
     if age < 0 or age > max_age_seconds:
