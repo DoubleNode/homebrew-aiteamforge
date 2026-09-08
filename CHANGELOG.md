@@ -7,6 +7,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1120: `aiteamforge upgrade`'s "Updating Templates" phase no longer reports success it did
+  not earn, and now actually renders. Two silences composed into a misdiagnosis worth recording.
+  (1) `update_templates` printed `All templates up to date` unconditionally: nothing in the tap
+  ever creates `${WORKING_DIR}/config/` (the only non-test reference to that path was the read
+  inside the function itself), so all 17 shipped `*.template` files hit the `[ ! -f "$target_file" ]`
+  guard and `continue`d silently, `templates_updated` stayed 0, and control fell through to a
+  success line that could not fail. It now counts absent/current/updated separately and says which.
+  (2) `update_shell_helpers` printed NOTHING when the `kanban-helpers.sh` render was a verified
+  no-op, so "rendered and byte-identical", "never reached", and "skipped by a guard" were
+  indistinguishable in a log; it now emits an affirmative already-current line. Because the only
+  templates-flavoured line in an upgrade log came from the phase that does NOT handle
+  `kanban-helpers.sh` (that file is rendered by `update_shell_helpers`; its name does not match
+  `update_templates`' `-name "*.template"` glob and its target is not under `config/`),
+  XACA-1120 was itself filed CRITICAL against the wrong function -- so the phase output now
+  explicitly disclaims that scope. Additionally, `update_templates` no longer installs templates
+  by raw `cp` under a "this would call template processor / for now, just copy" comment, which
+  would have written literal `{{AITEAMFORGE_DIR}}` / `{{ORG_NAME}}` / `{{SHARED_DEV_ROOT}}`
+  placeholders into a live config file the instant any target existed; it renders with the same
+  substitution set as `update_shell_helpers`, validates the render is line-for-line with its
+  source before it becomes eligible to install, compares by rendered CONTENT rather than mtime
+  (XACA-1095's lesson: a git-sourced Cellar keeps its original checkout mtime, so `-nt` can be
+  false forever), and installs by atomic rename. New suite
+  `tests/test-xaca-1120-template-phase-honest-reporting.sh` covers all of it, pairing each
+  current-behaviour case with a negative control that extracts the SAME function from the
+  pre-fix commit and runs it in an identical sandbox.
+
 - XACA-1124: an LCARS server death now leaves a record. Previously nothing logged a server's
   exit or signal, and because `start_lcars_server` unconditionally rotates the per-team log at
   the top of every launch with a single `.old` backup, retention was exactly two launches --

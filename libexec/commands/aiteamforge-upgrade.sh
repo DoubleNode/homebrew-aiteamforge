@@ -284,60 +284,131 @@ check_brew_updates() {
 update_templates() {
   print_section "Updating Templates"
 
+  # SCOPE (XACA-1120): this phase covers ONLY files literally named `*.template`
+  # under share/templates/, rendered into ${WORKING_DIR}/config/. It does NOT
+  # cover kanban-helpers.sh, which is rendered from kanban-helpers.template.sh
+  # by update_shell_helpers() -- a name that does not match the `*.template`
+  # glob below, and a target that is not under config/. That distinction is not
+  # cosmetic: XACA-1120 was filed as a CRITICAL ticket whose stated root cause
+  # was "the Updating Templates phase short-circuits before re-rendering
+  # kanban-helpers.sh". This phase cannot re-render kanban-helpers.sh, has
+  # never rendered it, and its success line was being read as though it had.
+  # Keep the scope note in the operator-visible output below, not just here.
   local templates_updated=0
+  local templates_current=0
+  local templates_absent=0
 
-  # Check if templates directory exists
   if [ ! -d "${FRAMEWORK_DIR}/share/templates" ]; then
     print_warning "Templates directory not found in framework"
     return
   fi
 
-  # Find all templates
   local templates
   templates=$(find "${FRAMEWORK_DIR}/share/templates" -name "*.template" 2>/dev/null)
 
   if [ -z "$templates" ]; then
-    print_info "No templates to update"
+    print_info "No config templates shipped in this release"
     return
   fi
 
-  # Process each template
   while IFS= read -r template; do
+    [ -n "$template" ] || continue
     local template_name
     template_name=$(basename "$template" .template)
     local target_file="${WORKING_DIR}/config/${template_name}"
 
-    # Skip if target doesn't exist (wasn't originally installed)
+    # Target not installed -> nothing to refresh. COUNT IT. Previously this
+    # `continue` was silent, so a machine with no config/ directory at all
+    # (which is every machine: nothing in the tap ever creates
+    # ${WORKING_DIR}/config/) skipped all N templates, left templates_updated
+    # at 0, and fell through to an unconditional "All templates up to date" --
+    # a success line that could not fail, reporting on work that structurally
+    # never happened.
     if [ ! -f "$target_file" ]; then
+      templates_absent=$((templates_absent + 1))
       continue
     fi
 
-    # Check if template is newer than target
-    if [ "$template" -nt "$target_file" ] || [ "$FORCE" = true ]; then
-      print_info "Updating ${template_name}..."
+    # RENDER, don't `cp`. The prior implementation copied the raw template over
+    # the target with a "this would call template processor / for now, just
+    # copy" comment, which would install literal {{AITEAMFORGE_DIR}} /
+    # {{ORG_NAME}} / {{SHARED_DEV_ROOT}} placeholders into a live config file.
+    # Dead today only because no target ever exists; wrong the instant one does.
+    # Same substitution set as update_shell_helpers so install and upgrade agree.
+    local rendered=""
+    rendered="$(mktemp "${target_file}.XXXXXX" 2>/dev/null)" || rendered=""
+    if [ -z "$rendered" ]; then
+      print_warning "Could not create a temp file to render ${template_name} - skipping this template"
+      continue
+    fi
 
-      if [ "$DRY_RUN" = false ]; then
-        # Back up existing file
-        cp "$target_file" "${target_file}.backup-$(date +%Y%m%d-%H%M%S)"
-
-        # Re-process template (this would call template processor)
-        # For now, just copy
-        cp "$template" "$target_file"
-
-        print_success "Updated ${template_name}"
-        templates_updated=$((templates_updated + 1))
-      else
-        echo "Would update: ${template_name}"
-        templates_updated=$((templates_updated + 1))
+    local render_ok=1
+    if ! sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
+             -e "s|{{SHARED_DEV_ROOT}}|${SHARED_DEV_ROOT:-/Users/Shared/Development}|g" \
+             -e "s|{{ORG_NAME}}|${ORG_NAME:-}|g" \
+             "$template" > "$rendered" 2>/dev/null; then
+      render_ok=0
+    elif [ ! -s "$rendered" ]; then
+      render_ok=0
+    else
+      # Substitutions are pure `s|...|g`, so a good render is line-for-line
+      # with its source. Anything else is a short/failed render and must never
+      # be installed over a working file (XACA-1095 torn-write lesson).
+      local src_lines out_lines
+      src_lines="$(wc -l < "$template" 2>/dev/null | tr -d '[:space:]')"
+      out_lines="$(wc -l < "$rendered" 2>/dev/null | tr -d '[:space:]')"
+      if [ -z "$out_lines" ] || [ "$src_lines" != "$out_lines" ]; then
+        render_ok=0
       fi
+    fi
+
+    if [ "$render_ok" -eq 0 ]; then
+      print_warning "Refusing to install ${template_name}: rendering produced an incomplete file - leaving the existing copy untouched."
+      rm -f "$rendered"
+      continue
+    fi
+
+    # Staleness by RENDERED CONTENT, never mtime (XACA-1095): a git-sourced
+    # Cellar keeps the original checkout mtime for files unchanged across
+    # release tags, so `-nt` can be false forever against a newer target.
+    if [ "$FORCE" != true ] && cmp -s "$rendered" "$target_file"; then
+      templates_current=$((templates_current + 1))
+      rm -f "$rendered"
+      continue
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+      echo "Would update: ${template_name} (installed copy differs from the shipped template)"
+      templates_updated=$((templates_updated + 1))
+      rm -f "$rendered"
+      continue
+    fi
+
+    print_info "Updating ${template_name}..."
+    cp "$target_file" "${target_file}.backup-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    chmod 644 "$rendered" 2>/dev/null || true
+    if mv -f "$rendered" "$target_file" 2>/dev/null; then
+      print_success "Updated ${template_name}"
+      templates_updated=$((templates_updated + 1))
+    else
+      print_warning "Could not install rendered ${template_name} - existing copy left in place"
+      rm -f "$rendered"
     fi
   done <<< "$templates"
 
-  if [ $templates_updated -eq 0 ]; then
-    print_success "All templates up to date"
-  else
-    print_success "Updated ${templates_updated} template(s)"
+  # HONEST REPORT (XACA-1120 subitem -003): a line that prints on every run
+  # regardless of what happened is not a check. Report the three outcomes
+  # separately, and never claim "up to date" about files that are not installed.
+  if [ "$templates_updated" -gt 0 ]; then
+    print_success "Updated ${templates_updated} config template(s)"
   fi
+  if [ "$templates_current" -gt 0 ]; then
+    print_success "${templates_current} config template(s) already current"
+  fi
+  if [ "$templates_updated" -eq 0 ] && [ "$templates_current" -eq 0 ]; then
+    print_info "No config templates to update: ${templates_absent} shipped template(s) have no installed counterpart under ${WORKING_DIR}/config/"
+  fi
+  print_info "Note: this phase does not cover kanban-helpers.sh - see the \"Updating Shell Helpers\" section below."
 }
 
 # Update LCARS UI
@@ -2403,8 +2474,21 @@ update_shell_helpers() {
         rm -f "$_kanban_rendered"
       elif [ "$FORCE" != true ] && cmp -s "$_kanban_rendered" "$kanban_target"; then
         rm -f "$_kanban_rendered"
-        # Up to date — no output, matching this function's existing quiet
-        # convention for a no-op file (see the alias-file loop below).
+        # XACA-1120: this branch used to print NOTHING, "matching this
+        # function's existing quiet convention for a no-op file". That silence
+        # is what made the defect unfalsifiable from a log. kanban-helpers.sh
+        # is the single highest-consequence rendered file in the product (it
+        # carries kb-sweep, the PR merge gate), and an operator reading an
+        # upgrade log could not distinguish these three states:
+        #   (a) rendered, verified byte-identical  -> nothing printed
+        #   (b) never reached this code path       -> nothing printed
+        #   (c) skipped by an earlier guard        -> nothing printed
+        # All three looked the same, and the only "templates" line in the whole
+        # log came from update_templates(), a phase that does not handle this
+        # file at all. XACA-1120 was filed against that phase as a result.
+        # An affirmative no-op line costs one line of output and makes the
+        # question "did the render actually run?" answerable.
+        print_success "kanban-helpers.sh already current (verified against $(basename "$_kanban_src"))"
       elif [ "$DRY_RUN" = true ]; then
         echo "Would update: kanban-helpers.sh (from $(basename "$_kanban_src")) — installed copy differs from the shipped template"
         updated=$((updated + 1))
