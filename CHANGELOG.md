@@ -103,6 +103,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Consumers WITHOUT ImageMagick are unaffected: that branch always displayed the raw image and
   is unchanged. Consumers WITH it stop losing the avatar and terminal logo on a rounding
   failure.
+- XACA-1146-001: the shipped `_kb_release_sync` was the pre-XACA-1099 shape — a one-argument
+  function that explicitly suppressed its warning on `http_code 000` (`[[ "$http_code" != "000" ]]`),
+  so a failed manifest sync was indistinguishable from a successful one. Canonical had already
+  replaced that with a loud, cause-decoded branch via `_kb_curl_failure_reason`; the template never
+  received it. Ported canonical's two-argument signature (`item_id`, `team_override`, the override
+  winning over `_kb_detect_context`), the loud-failure branch, and the `"team"` field the old
+  payload omitted entirely. Then ported the full canonical bodies of `kb-release-assign` (128 lines,
+  including the XACA-0686 platform resolver) and `kb-release-unassign` (48 lines), both of which
+  called `_kb_release_sync` ZERO times in the template against canonical's one apiece — the
+  XACA-0179 defect that let release membership reach the board but never the manifest.
+  ORDER WAS LOAD-BEARING: the signature had to land before the call sites, or `"$team"` would be
+  silently discarded by a one-argument function and reintroduce the wrong-port bug XACA-0822 fixed.
 
 ## [0.20.7] - 2026-09-08
 

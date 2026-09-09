@@ -955,88 +955,117 @@ _kb_curl_failure_reason() {
 }
 
 # Sync an item to release manifests via LCARS server
-# Usage: _kb_release_sync <item_id>
-# Returns 0 (success) even if the LCARS server itself is unreachable — this
-# is a best-effort sync against an already-resolved port. Returns 1 only
-# when the team's LCARS port cannot be resolved at all (XACA-0822-007,
-# ported from canonical) — see the port-resolution comment inside the
-# function below.
-#
-# XACA-1099 note: unlike canonical's _kb_release_sync (and this tap's own
-# kb-release-create below), this function does NOT assert a cause when curl
-# fails — it deliberately stays silent on http_code=000 (see the "Silently
-# succeed" comment a few lines down) precisely so a not-yet-started LCARS
-# server doesn't spam every kb-* invocation with a warning. Because it never
-# characterizes a curl-000 as "the server is not running" (or anything else),
-# it does not exhibit XACA-1099's misreport bug — there is no assertion here
-# to correct. curl_exit is still captured, immediately after the curl call,
-# so a future diagnostic path (or a deliberate design change to make this
-# loud, tracked separately) has it available without re-deriving it.
+# Usage: _kb_release_sync <item_id> [team_override]
+# Returns 0 on a successful sync, 1 on any failure (including an
+# unreachable/slow/misbehaving server, or an unresolvable team LCARS port).
+# XACA-1146: ported verbatim from canonical (dev-team/kanban-helpers.sh) —
+# this used to stay silent on curl http_code=000 (a not-yet-started LCARS
+# server) precisely so a cold-started team didn't spam every kb-* invocation
+# with a warning. XACA-1099 replaced that silence with a loud,
+# cause-decoded warning via _kb_curl_failure_reason (above) on canonical;
+# this port brings the template in line. "Silent drift was the original
+# bug" per canonical's own comment below.
 _kb_release_sync() {
-    local item_id="$1"
+    local item_id="${1-}"
+    local team_override="${2-}"
 
-    # Skip if no item_id provided
     [[ -z "$item_id" ]] && return 0
 
     # XACA-0182: Subitem IDs (e.g., XACA-0179-002) are not top-level board
-    # items. Release manifests track parent items only, so skip the round-trip
-    # to LCARS — the parent syncs separately when kb-done runs on it.
+    # items, so LCARS /api/releases/sync-item returns 404 for them and the
+    # loud-failure branch below emits a spurious warning on every sub done /
+    # sub cancel. Release manifests track parent items only — the parent gets
+    # synced separately when kb-done runs on it — so silently skip here.
     if [[ "$item_id" =~ ^X[A-Z]{2,4}-[0-9]+-[0-9]+$ ]]; then
         return 0
     fi
 
-    # XACA-0822-007: resolve the calling team's OWN LCARS port via
-    # _kb_team_lcars_port instead of reading the single global
-    # lcars-ui/.lcars-port file (default 8080). That global file doesn't
-    # exist for overlay-only teams whose LCARS server runs on a
-    # team-specific port — the exact defect kb-release-create had, fixed
-    # under XACA-0822-005 (see its comment above, in kb-release for the
-    # `create` subcommand). Every release-manifest sync for those teams
-    # was silently targeting port 8080 (or whatever happened to be
-    # listening there), so `kb-release` item sync stayed broken for them
-    # even after -005 fixed the create path. Error path ported verbatim
-    # from canonical's _kb_release_sync (dev-team/kanban-helpers.sh):
-    # an unresolvable port is not a transient network condition — there
-    # is no server to even attempt talking to — so this returns 1 here,
-    # unlike the best-effort "always return 0" used below for a curl
-    # failure against an already-resolved port.
-    local context team _lcars_port
-    context=$(_kb_detect_context 2>/dev/null)
-    team="${context%%:*}"
+    # Resolve team + port for the current context. Shell assigns/unassigns
+    # originate from a team terminal, so we must hit THAT team's LCARS server,
+    # not a globally-assumed port.
+    local team="$team_override"
+    if [[ -z "$team" ]]; then
+        local context
+        context=$(_kb_detect_context 2>/dev/null)
+        team="${context%%:*}"
+    fi
 
-    _lcars_port=$(_kb_team_lcars_port "$team") || {
+    local port
+    port=$(_kb_team_lcars_port "$team") || {
         echo "⚠️  Release manifest sync skipped: no LCARS port known for team '$team'" >&2
         echo "   Manifest for $item_id may now be out of sync with board." >&2
         return 1
     }
 
-    # Try to sync with LCARS server (2 second timeout)
-    # Silent by default - only warn on unexpected errors
     local response http_code curl_exit
     local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
     _kb_lcars_auth_args
+    # XACA-1099-004: 5s budget is intentional, not drift from the 30s used
+    # by kb-release-sync-board's sync-all call further below in this file.
+    # This is a single-item write; sync-all reconciles every release entry
+    # on the WHOLE board in one request and its cost scales with the total
+    # manifest, not with one write — so it legitimately needs more headroom
+    # than a single-item POST. (Counting note: academy's releases live in
+    # the BOARD, `jq '.releases|length' kanban/academy-board.json` = 26 on
+    # 2026-09-05; kanban/config/releases.json is config, and a bare
+    # `jq 'length'` on it returns 9 = its top-level KEY count, not a
+    # release count. Do not cite that number as releases.) Measured live
+    # against this exact call (n=30, academy server, 2026-09-05, board =
+    # 1103 backlog items / 26 releases / 6.2MB): min 61ms / median 144ms /
+    # mean 207ms / max 606ms, all 30 returned HTTP 200. 606ms is 8x under
+    # the 5s ceiling —
+    # raising it would target a hypothesis (a transient stall) that was
+    # never reproduced, not a measured need. Re-measure if board size
+    # grows by an order of magnitude.
     response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
-        --max-time 2 \
+        --max-time 5 \
         -X POST \
         -H "Content-Type: application/json" \
         "${_KB_LCARS_AUTH_ARGS[@]}" \
-        -d "{\"itemId\": \"$item_id\"}" \
-        "http://localhost:${_lcars_port}/api/releases/sync-item" 2>/dev/null)
-    # Captured immediately — the http_code extraction below is itself a
-    # command substitution and would clobber $? before we could read it.
+        -d "{\"itemId\": \"$item_id\", \"team\": \"$team\"}" \
+        "http://localhost:${port}/api/releases/sync-item" 2>/dev/null)
     curl_exit=$?
-
-    # Extract HTTP code from last line
     http_code=$(printf '%s\n' "$response" | tail -n1)
 
-    # Silently succeed if server isn't running or sync worked
-    # Only warn on unexpected HTTP codes (not 200, 404, or connection failure)
-    if [[ -n "$http_code" ]] && [[ "$http_code" != "200" ]] && [[ "$http_code" != "404" ]] && [[ "$http_code" != "000" ]]; then
-        echo "⚠️  Warning: Release manifest sync returned HTTP $http_code for $item_id" >&2
+    if [[ "$http_code" == "200" ]]; then
+        return 0
     fi
 
-    # Always return success - sync is best-effort
-    return 0
+    # Loud failure — silent drift was the original bug. curl reports
+    # %{http_code}=000 for ANY connection-phase failure (refused, timed
+    # out, DNS, reset) — decode curl's own exit code instead of asserting
+    # a single cause for all of them (see _kb_curl_failure_reason above;
+    # XACA-1099).
+    if [[ "$http_code" == "000" || ( -z "$http_code" && "$curl_exit" -ne 0 ) ]]; then
+        local _kb_reason cause remedy
+        _kb_reason=$(_kb_curl_failure_reason "$curl_exit" "$port")
+        cause="${_kb_reason%%$'\n'*}"
+        remedy="${_kb_reason#*$'\n'}"
+        echo "⚠️  Release manifest sync FAILED: LCARS server on port $port — $cause." >&2
+        echo "   $item_id assignment is written to the board but the release manifest was NOT updated." >&2
+        echo "   $remedy" >&2
+        echo "   Run 'kb-release-sync-board' to reconcile once resolved." >&2
+    elif [[ -z "$http_code" ]]; then
+        # DEFENSIVE-ONLY, and deliberately NOT propagated to the other
+        # five call sites (XACA-1099-013/-014). curl exited 0 (no
+        # connection-phase failure) yet wrote no %{http_code} at all.
+        # Manual probing with curl 8.7.1 could not trigger this: protocol
+        # violations return a NON-ZERO exit with http_code=000 and route
+        # through the branch above instead, so this may be unreachable in
+        # practice. It is kept because it costs nothing and fails safe if
+        # a future curl or a proxy ever produces that combination — but it
+        # is NOT propagated, because spreading a branch nobody has shown to
+        # be reachable to five more sites is how the sibling drift this
+        # ticket fixes got started. If you ever see this message fire,
+        # that is worth a ticket: it means the combination is real.
+        echo "⚠️  Release manifest sync FAILED: LCARS returned an empty/malformed response for $item_id (curl exit $curl_exit, connection succeeded)." >&2
+        echo "   $item_id assignment is written to the board but the release manifest was NOT updated." >&2
+        echo "   Run 'kb-release-sync-board' to reconcile once resolved." >&2
+    else
+        echo "⚠️  Release manifest sync FAILED: HTTP $http_code from LCARS for $item_id" >&2
+        echo "   Response: $(printf '%s\n' "$response" | sed '$d' | tr -d '\n')" >&2
+    fi
+    return 1
 }
 
 # Detect the main/development branch for the current repo
@@ -18943,15 +18972,27 @@ kb-release-list() {
 # Assign a kanban item to a release
 # Usage: kb-release-assign <item-id> <release-id> [platform]
 kb-release-assign() {
-    local item_id="$1"
-    local release_id="$2"
-    local platform="${3:-ios}"
+    local item_id="${1-}"
+    local release_id="${2-}"
+    local platform="${3-}"
+    # XACA-0691: normalize an explicit platform arg to lowercase so callers
+    # passing "iOS"/"Firebase" stamp the canonical lowercase value AND don't
+    # false-trigger the mismatch warning, which compares against the lowercase
+    # keys of the release's .platforms map. Tier 2/3 derived values are already
+    # lowercase, so only the explicit arg needs normalizing.
+    [[ -n "$platform" ]] && platform=$(echo "$platform" | tr '[:upper:]' '[:lower:]')
 
     if [[ -z "$item_id" || -z "$release_id" ]]; then
         echo "Usage: kb-release-assign <item-id> <release-id> [platform]"
         echo "  item-id:    Kanban item ID (e.g., XIOS-0042)"
         echo "  release-id: Release ID (e.g., REL-2026-Q1-001)"
-        echo "  platform:   ios, android, firebase (default: ios)"
+        echo "  platform:   ios, android, firebase (optional — see derivation below)"
+        echo ""
+        echo "  When [platform] is omitted it is DERIVED, never silently defaulted:"
+        echo "    1. the release's sole platform, if it declares exactly one; else"
+        echo "    2. the current team's platform, if the team is ios/android/firebase; else"
+        echo "    3. an error asking you to pass the platform explicitly."
+        echo "  A warning is shown if the resolved platform is not one the release declares."
         return 1
     fi
 
@@ -18975,8 +19016,10 @@ kb-release-assign() {
         return 1
     fi
 
-    # Verify release exists in current team's board
-    local release_name=$(_kb_release_name "$release_id")
+    # Verify release exists in current team's board; also read it for platform resolution below
+    local release_name release_obj
+    release_obj=$(jq -r --arg id "$release_id" '.releases[]? | select(.id == $id)' "$board_file" 2>/dev/null)
+    release_name=$(printf '%s' "$release_obj" | jq -r '.name // empty' 2>/dev/null)
     if [[ -z "$release_name" ]]; then
         echo "Error: Release not found: $release_id"
         echo "  Available releases:"
@@ -18984,29 +19027,83 @@ kb-release-assign() {
         return 1
     fi
 
-    # Update the kanban item with releaseAssignment
-    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    local jq_filter='.backlog |= map(if .id == $id then . + {releaseAssignment: {releaseId: $rel, platform: $plat, assignedAt: $ts}} else . end) | .lastUpdated = $ts'
+    # Four-tier platform resolver (XACA-0686):
+    #   Tier 1 — explicit arg: use $3 verbatim if non-empty.
+    #   Tier 2 — sole platform: if the release's .platforms map has exactly one key, use it.
+    #   Tier 3 — team slug: if the current team is ios, android, or firebase, use that.
+    #   Tier 4 — error: no platform could be derived; instruct user to pass one explicitly.
+    # Never silently default to "ios" — that was the footgun we're fixing.
+    local release_plat_keys release_plat_count
+    release_plat_keys=$(printf '%s' "$release_obj" | jq -r '.platforms // {} | keys[]' 2>/dev/null)
+    # Count non-empty key lines without the `grep -c . || echo 0` idiom, which on
+    # empty input emits BOTH grep's "0" and the fallback "0" → a two-line value
+    # that breaks the `-eq` arithmetic compare below. jq counts the keys directly.
+    release_plat_count=$(printf '%s' "$release_obj" | jq -r '.platforms // {} | keys | length' 2>/dev/null)
+    [[ "$release_plat_count" =~ ^[0-9]+$ ]] || release_plat_count=0
+
+    if [[ -n "$platform" ]]; then
+        : # Tier 1: explicit arg — already set, nothing to do
+    elif [[ "$release_plat_count" -eq 1 ]]; then
+        # Tier 2: release has exactly one platform key — derive from it
+        platform=$(printf '%s' "$release_plat_keys" | head -1)
+    elif [[ "$team" == "ios" || "$team" == "android" || "$team" == "firebase" ]]; then
+        # Tier 3: team slug is a known platform — use it
+        platform="$team"
+    else
+        # Tier 4: cannot derive — error with helpful guidance
+        echo "Error: No platform could be derived for release assignment." >&2
+        echo "  Release '$release_id' has ${release_plat_count} platform(s): $(printf '%s' "$release_plat_keys" | tr '\n' ' ')" >&2
+        echo "  Current team '$team' is not a platform-specific team (ios/android/firebase)." >&2
+        echo "  Pass an explicit platform: kb-release-assign $item_id $release_id <platform>" >&2
+        return 1
+    fi
+
+    # Mismatch warning (XACA-0686-002): warn if the resolved platform is not a key
+    # in the release's .platforms map. This is non-fatal — the user may be
+    # intentionally pre-assigning before the platform is registered on the release.
+    if [[ -n "$release_plat_keys" ]]; then
+        local plat_match
+        plat_match=$(printf '%s' "$release_plat_keys" | grep -Fx "$platform" 2>/dev/null || true)
+        if [[ -z "$plat_match" ]]; then
+            echo "⚠️  Warning: platform '$platform' is not among the release's declared platforms." >&2
+            echo "   Release '$release_id' declares: $(printf '%s' "$release_plat_keys" | tr '\n' ' ')" >&2
+        fi
+    fi
+
+    # Update the kanban item with releaseAssignment. Schema must match the
+    # LCARS server's handle_assign_item_to_release (_update_item_release_assignment)
+    # — including releaseName — so sync-item finds a complete record.
+    # Declare then assign separately so `date`'s exit status is not masked by
+    # `local`'s own (always-0) return under `set -e` (XACA-0686-010).
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local jq_filter='.backlog |= map(if .id == $id then . + {releaseAssignment: {releaseId: $rel, releaseName: $rname, platform: $plat, assignedAt: $ts}} else . end) | .lastUpdated = $ts'
 
     _kb_jq_update "$board_file" "$jq_filter" \
         --arg id "$item_id" \
         --arg rel "$release_id" \
+        --arg rname "$release_name" \
         --arg plat "$platform" \
         --arg ts "$timestamp"
 
-    if [[ $? -eq 0 ]]; then
-        echo "✓ Assigned $item_id to release: $release_name ($release_id)"
-        echo "  Platform: $platform"
-    else
+    if [[ $? -ne 0 ]]; then
         echo "Error: Failed to update item"
         return 1
     fi
+
+    echo "✓ Assigned $item_id to release: $release_name ($release_id)"
+    echo "  Platform: $platform"
+
+    # Push the board assignment into the release manifest via LCARS.
+    # _kb_release_sync is loud on failure so the user knows when the
+    # manifest has diverged from the board.
+    _kb_release_sync "$item_id" "$team"
 }
 
 # Unassign a kanban item from its release
 # Usage: kb-release-unassign <item-id>
 kb-release-unassign() {
-    local item_id="$1"
+    local item_id="${1-}"
 
     if [[ -z "$item_id" ]]; then
         echo "Usage: kb-release-unassign <item-id>"
@@ -19041,12 +19138,17 @@ kb-release-unassign() {
         --arg id "$item_id" \
         --arg ts "$timestamp"
 
-    if [[ $? -eq 0 ]]; then
-        echo "✓ Removed release assignment from $item_id"
-    else
+    if [[ $? -ne 0 ]]; then
         echo "Error: Failed to update item"
         return 1
     fi
+
+    echo "✓ Removed release assignment from $item_id"
+
+    # Ask LCARS to reconcile: since the item no longer has releaseAssignment,
+    # sync-item will scan every release in this team's board and remove the
+    # item from whichever manifest(s) still list it.
+    _kb_release_sync "$item_id" "$team"
 }
 
 # Show release assignment for an item
