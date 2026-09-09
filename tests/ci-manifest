@@ -114,3 +114,4 @@ test-xaca-1097-launchagent-disabled-autofix.sh  plain-shell
 test-xaca-1097-resolver-call-sites.sh           plain-shell
 test-xaca-1120-template-phase-honest-reporting.sh    plain-shell
 test-xaca-1143-worktree-helpers-materialize.sh       plain-shell
+test-xaca-1144-remote-indicator-delivery.sh     plain-shell

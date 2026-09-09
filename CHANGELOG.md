@@ -50,6 +50,35 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   registration still reported success. Based on `origin/main` (219dfb9),
   not the develop-pinned submodule checkout (553e000) — five commits behind
   at port time (XACA-1140/1144 tap content, disclosed not reverted).
+- XACA-1144-008: add `tests/test-xaca-1144-remote-indicator-delivery.sh` —
+  regression coverage for the "assert delivery, not presence" defect class
+  XACA-0214/0231/0223/1144-006 all shipped: a file correct in canonical that
+  reaches zero consumers. Asserts (A) delivery of `iterm2_badge_helper.sh`,
+  `scripts/iterm2_tab_title_prefix.py`, and `scripts/iterm2_claude_active_watch.py`
+  to a simulated consumer layout via every required wiring site, with the
+  root-vs-scripts/ split enforced as a hard, mutually-dependent invariant
+  (verified against real `update_aux_scripts`/`update_runtime_helpers`/
+  `install_helper_scripts`, extracted from source); (B) all six call sites
+  (the four the ticket named plus `scripts/onscreen-heal.sh` and
+  `scripts/xaca-0231-cleanup.sh`, absorbed as scope corrections) resolve the
+  delivered files on a consumer layout; (C) the OSC 1337 SetUserVar signal
+  path itself — `set_claude_active`/`clear_claude_active` through the REAL
+  `kanban-session-start.py`/`kanban-stop.py`/`iterm2_badge_helper.sh` — reaches
+  a real pty (never captured stdout, per DESIGN-DECISION-005's methodology
+  note), including the tmux DCS-passthrough wrapping the remote transport
+  depends on, and that the parametric connect/disconnect templates start/stop
+  the watcher under the same pidfile key. Every group carries a negative
+  control that reproduces BASELINE-001's exact pre-fix failure signature
+  (the documented "iterm2_badge_helper.sh not found; skipping claude_active
+  set" log line, or file absence) when the corresponding fix is subtracted —
+  verified additionally against the actual pre-fix blob (submodule commit
+  `e190873`), not just an in-test mutation. Also found and reports (not
+  fixed here, out of this subitem's wiring-site scope): the "fresh installs
+  are covered by `aiteamforge-setup.sh`'s bulk `share/scripts/*` copy" claim
+  in DESIGN-DECISION-005 and the XACA-1144(002/003) changelog entry above is
+  not accurate — no such bulk-copy mechanism exists anywhere in the tap; a
+  brand-new consumer only gets `iterm2_tab_title_prefix.py`/
+  `iterm2_claude_active_watch.py` after its first `aiteamforge upgrade`.
 - XACA-1144-006: ship `iterm2_claude_active_watch.py` — the window-scoped watcher
   that makes the "C " indicator work for REMOTE (connect-script) teams. Added to
   `share/scripts/` and to `_xaca0673_mandatory_materialize_basenames()` so UPGRADED
