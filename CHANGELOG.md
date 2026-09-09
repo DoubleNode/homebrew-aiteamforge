@@ -85,13 +85,27 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   (the documented "iterm2_badge_helper.sh not found; skipping claude_active
   set" log line, or file absence) when the corresponding fix is subtracted —
   verified additionally against the actual pre-fix blob (submodule commit
-  `e190873`), not just an in-test mutation. Also found and reports (not
-  fixed here, out of this subitem's wiring-site scope): the "fresh installs
-  are covered by `aiteamforge-setup.sh`'s bulk `share/scripts/*` copy" claim
-  in DESIGN-DECISION-005 and the XACA-1144(002/003) changelog entry above is
-  not accurate — no such bulk-copy mechanism exists anywhere in the tap; a
-  brand-new consumer only gets `iterm2_tab_title_prefix.py`/
-  `iterm2_claude_active_watch.py` after its first `aiteamforge upgrade`.
+  `e190873`), not just an in-test mutation.
+
+  RETRACTED (2026-09-09, same day): this entry originally claimed that the
+  "fresh installs are covered by a bulk `share/scripts/*` copy" statement in
+  DESIGN-DECISION-005 and in the XACA-1144(002/003) entry below was
+  inaccurate, and that no such mechanism existed anywhere in the tap. That
+  retraction was itself wrong and is withdrawn. The mechanism DOES exist, at
+  `bin/aiteamforge-setup.sh:1132-1134`:
+
+      if [ -d "${AITEAMFORGE_HOME}/share/scripts" ]; then
+        find "${AITEAMFORGE_HOME}/share/scripts" -maxdepth 1 -type f \
+          -exec cp {} "${INSTALL_DIR}/scripts/" \;
+
+  The original search covered `libexec/installers/*` and the Formula but not
+  `bin/`, then generalised the miss to "anywhere in the tap". A negative
+  claim is only as wide as the search behind it. Fresh installs DO receive
+  `iterm2_tab_title_prefix.py` and `iterm2_claude_active_watch.py`; no
+  follow-up ticket is warranted. Note the copy is scripts/-destined only,
+  which is precisely why the root-destined `iterm2_badge_helper.sh` still
+  needs its explicit `install-shell.sh` copy — the two facts are consistent,
+  not contradictory.
 - XACA-1144-006: ship `iterm2_claude_active_watch.py` — the window-scoped watcher
   that makes the "C " indicator work for REMOTE (connect-script) teams. Added to
   `share/scripts/` and to `_xaca0673_mandatory_materialize_basenames()` so UPGRADED
