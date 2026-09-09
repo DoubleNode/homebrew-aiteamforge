@@ -22,6 +22,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   image-usability check on the hot path: it costs ~49ms (six subprocesses) and the common
   valid-cache path was paying it twice per render site; it is now computed once and re-checked
   only when magick actually ran.
+- XACA-1119 (hand-ported from canonical dev-team/kanban-helpers.sh — this file and
+  `share/templates/aliases/kanban-aliases.sh` are NOT sync-tap.sh mirror-mapped): `kb-sweep`'s
+  global-tier knowledge probe stops treating any dirty `.md` under the global knowledge root as
+  an always-invoke trigger. New `_kb_val_global_sig` signature (version token + git HEAD sha +
+  full porcelain `.md` line set, INDEX.md included + content sha256 of every existing such path)
+  is consulted through the existing XACA-0991 cache primitives, unmodified. Fixes a standing
+  untracked-knowledge-file backlog permanently forcing the expensive `kb-knowledge-validate
+  --changed` branch on every `kb-sweep` call. `_kb_val_mtime_signature` (the project-tier
+  signature) is untouched — it is non-recursive by design and would silently under-sign the
+  much larger global root. `_kb_val_multi_file_hash` added alongside it.
 
 - XACA-1138 (follow-up): `_panel_image_usable` now also checks the PNG **IEND** terminator, and
   both rounded-image cache guards regenerate when the cached file fails it — a truncated file

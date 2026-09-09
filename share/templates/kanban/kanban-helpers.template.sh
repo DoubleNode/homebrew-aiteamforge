@@ -4930,22 +4930,48 @@ kb-sweep() {
     # returns zero lines regardless of real content.
     local kv_global_root kv_local_root kv_project_path kv_should_invoke=false
     local kv_project_needs_probe=false kv_project_sig=""
+    local kv_global_sig="" kv_global_needs_probe=false
     kv_global_root=$(_kb_knowledge_global_root 2>/dev/null)
     kv_local_root=$(_kb_knowledge_local_root 2>/dev/null)
 
     # GLOBAL: required. Absent or unreadable is an ERROR condition that
     # kb-knowledge-validate --changed itself must surface — invoke so it can.
+    #
+    # XACA-1119-003 (hand-ported from canonical — not sync-tap.sh
+    # mirror-mapped): this arm now consults the XACA-0991 cache primitives
+    # (unchanged, signature-agnostic) via a NEW global-tier signature,
+    # _kb_val_global_sig (above, near _kb_val_mtime_signature), replacing
+    # the bare "any dirty .md?" porcelain grep that made this an
+    # always-true trigger whenever the standing untracked-but-unmodified
+    # backlog under the global root was non-empty. Runs UNCONDITIONALLY,
+    # NOT wrapped in `if ! $kv_should_invoke` — that guard is exactly why
+    # the PROJECT tier's own cache read below is dead code; reproducing it
+    # here "for symmetry" would do the same to this arm.
     case "$(_kb_val_root_state "$kv_global_root")" in
         absent|unreadable) kv_should_invoke=true ;;
         *)
-            if git -C "$kv_global_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-                if git -C "$kv_global_root" status --porcelain --untracked-files=all -- . 2>/dev/null | grep -q '\.md$'; then
-                    kv_should_invoke=true
-                fi
-            else
-                # Can't cheaply diff a non-git root — same fail-OPEN
+            if ! git -C "$kv_global_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+               || _kb_val_root_is_ignored "$kv_global_root"; then
+                # Can't cheaply diff a non-git root, or the root itself is
+                # excluded from its own repo's tracking — same fail-OPEN
                 # reasoning kb-knowledge-validate --changed itself applies.
+                # No signature, no cache consult, no cache record.
                 kv_should_invoke=true
+            else
+                # Captured ONCE, before any invoke — separate statement
+                # from `local` so a failure's rc isn't swallowed by
+                # `local`'s own (always-0) return code. Threaded through
+                # unchanged to both the read below and the record call
+                # after the invoke further down (XACA-0991-019 TOCTOU
+                # contract — never recomputed at record time).
+                kv_global_sig=$(_kb_val_global_sig "$kv_global_root")
+                if [[ -z "$kv_global_sig" ]]; then
+                    kv_should_invoke=true
+                else
+                    kv_global_needs_probe=true
+                    _kb_val_mtime_probe_is_clean "$kv_global_root" "$kv_global_sig" \
+                        || kv_should_invoke=true
+                fi
             fi
             ;;
     esac
@@ -5050,6 +5076,12 @@ kb-sweep() {
             echo "     checked. NOT treated as a pass. Re-source kanban-helpers.sh and re-run"
             echo "     kb-sweep."
             echo ""
+            # XACA-1130 COORDINATION: sibling ticket XACA-1130 (subitem -003)
+            # plans to re-derive resolved_count/remaining_count via jq over
+            # the subitems array. If that lands and discards THIS increment,
+            # the knowledge gate silently stops blocking. Any refactor that
+            # re-derives remaining_count from the subitems array MUST
+            # preserve this increment.
             remaining_count=$((remaining_count + 1))
         else
             # Capture-first: read $? on the line directly after the command
@@ -5067,7 +5099,23 @@ kb-sweep() {
                 echo "${kv_output}" | grep -E '\[FAIL\]|VERDICT:' | sed 's/^/     /'
                 echo "     Full detail: kb-knowledge-validate --changed"
                 echo ""
+                # XACA-1130 COORDINATION: sibling ticket XACA-1130 (subitem
+                # -003) plans to re-derive resolved_count/remaining_count via
+                # jq over the subitems array. If that lands and discards
+                # THIS increment, the knowledge gate silently stops
+                # blocking. Any refactor that re-derives remaining_count
+                # from the subitems array MUST preserve this increment.
                 remaining_count=$((remaining_count + 1))
+            fi
+
+            # XACA-1119-003 (hand-ported from canonical): record this run's
+            # global-tier outcome against $kv_global_sig — captured ONCE,
+            # before this invoke ever started (see the capture site in the
+            # global `case` above), never a fresh recompute here. Same
+            # TOCTOU contract as the project-tier record call immediately
+            # below. Best-effort and silent.
+            if [[ -n "$kv_global_root" ]] && $kv_global_needs_probe && [[ -n "$kv_global_sig" ]]; then
+                _kb_val_mtime_probe_record "$kv_global_root" "$kv_rc" "$kv_global_sig"
             fi
 
             # XACA-0991-020 [Review] TOCTOU FIX (ported from canonical):
@@ -11315,6 +11363,74 @@ _kb_val_mtime_signature() {
     [[ -n "$lines" ]] || return 1
 
     printf '%s\n' "$lines" | sort | _kb_val_probe_hash
+}
+
+# XACA-1119-003 (hand-ported from canonical dev-team/kanban-helpers.sh —
+# not sync-tap.sh mirror-mapped, same "ported from canonical" convention
+# used above for XACA-0991-019/020): global-tier change-probe signature.
+# _kb_val_mtime_signature (above) is deliberately NON-RECURSIVE and would
+# sign ~2 files out of ~1675 on the global knowledge root — NOT reused or
+# modified here; this is a SEPARATE function for a SEPARATE tier. Echoes
+# one sha256 over (version token + HEAD sha + full `git status
+# --porcelain` line set for *.md, INDEX.md INCLUDED + sha256 content of
+# every such existing path), or returns 1 with empty stdout (uncomputable
+# -> invoke, never "clean"). Content-hashed (not size|mtime) because a
+# same-second, same-size, mtime-restored rewrite is otherwise invisible —
+# and unlike the project tier, git IS watching this root, so hashing its
+# own small dirty set is affordable (~100ms measured against 118 files).
+# No status-code filter and INDEX.md is not excluded — see canonical's
+# XACA-1119-002 decision doc for the full reasoning.
+_kb_val_global_sig() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local root="${1%/}"
+    local head_sha repo_top porc line p out mdlines=""
+    local -a files
+
+    git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+    _kb_val_root_is_ignored "$root" && return 1
+
+    head_sha=$(git -C "$root" rev-parse HEAD 2>/dev/null) || return 1
+    [[ -n "$head_sha" ]] || return 1
+
+    repo_top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || return 1
+    [[ -n "$repo_top" ]] || return 1
+
+    porc=$(git -C "$root" status --porcelain=v1 --untracked-files=all -- . 2>/dev/null) || return 1
+
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        p="${line:3}"
+        [[ "$p" == *" -> "* ]] && p="${p#* -> }"
+        [[ "$p" == *.md ]] || continue
+        mdlines+="${line}"$'\n'
+        [[ -f "${repo_top}/${p}" ]] && files+=("${repo_top}/${p}")
+    done <<< "$porc"
+
+    if (( ${#files[@]} )); then
+        out=$(print -rN -- "${files[@]}" | _kb_val_multi_file_hash) || return 1
+    else
+        out=""
+    fi
+
+    {
+        print -r -- "kbval-global-sig-v1"
+        print -r -- "HEAD=${head_sha}"
+        print -r -- "$mdlines"
+        print -r -- "$out" | LC_ALL=C sort
+    } | _kb_val_probe_hash
+}
+
+# _kb_val_multi_file_hash — reads NUL-separated paths on stdin, echoes
+# "<sha256>  <path>" per file. Two-tier fallback mirrors _kb_val_probe_hash.
+# Used only by _kb_val_global_sig, above.
+_kb_val_multi_file_hash() {
+    if command -v shasum >/dev/null 2>&1; then
+        xargs -0 shasum -a 256 2>/dev/null
+    elif command -v sha256sum >/dev/null 2>&1; then
+        xargs -0 sha256sum 2>/dev/null
+    else
+        return 1
+    fi
 }
 
 # _kb_val_probe_cache_dir — resolves the probe-state directory. Honors

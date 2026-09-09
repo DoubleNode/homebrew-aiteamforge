@@ -2490,6 +2490,73 @@ _kb_val_mtime_signature() {
     printf '%s\n' "$lines" | sort | _kb_val_probe_hash
 }
 
+# XACA-1119-003 (hand-ported from canonical dev-team/kanban-helpers.sh —
+# not sync-tap.sh mirror-mapped): global-tier change-probe signature.
+# _kb_val_mtime_signature (above) is deliberately NON-RECURSIVE and would
+# sign a small fraction of files on the global knowledge root — NOT
+# reused or modified here; this is a SEPARATE function for a SEPARATE
+# tier (there is no kb-sweep() in this file to wire it into — this
+# aliases file carries the _kb_val_* helper library only, ported here for
+# parity with kanban-helpers.template.sh). Echoes one sha256 over
+# (version token + HEAD sha + full `git status --porcelain` line set for
+# *.md, INDEX.md INCLUDED + sha256 content of every such existing path),
+# or returns 1 with empty stdout (uncomputable -> caller must invoke,
+# never treat as "clean"). Content-hashed, not size|mtime: a same-second,
+# same-size, mtime-restored rewrite is otherwise invisible, and git IS
+# watching this root, so hashing its own small dirty set is affordable.
+_kb_val_global_sig() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local root="${1%/}"
+    local head_sha repo_top porc line p out mdlines=""
+    local -a files
+
+    git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+    _kb_val_root_is_ignored "$root" && return 1
+
+    head_sha=$(git -C "$root" rev-parse HEAD 2>/dev/null) || return 1
+    [[ -n "$head_sha" ]] || return 1
+
+    repo_top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || return 1
+    [[ -n "$repo_top" ]] || return 1
+
+    porc=$(git -C "$root" status --porcelain=v1 --untracked-files=all -- . 2>/dev/null) || return 1
+
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        p="${line:3}"
+        [[ "$p" == *" -> "* ]] && p="${p#* -> }"
+        [[ "$p" == *.md ]] || continue
+        mdlines+="${line}"$'\n'
+        [[ -f "${repo_top}/${p}" ]] && files+=("${repo_top}/${p}")
+    done <<< "$porc"
+
+    if (( ${#files[@]} )); then
+        out=$(print -rN -- "${files[@]}" | _kb_val_multi_file_hash) || return 1
+    else
+        out=""
+    fi
+
+    {
+        print -r -- "kbval-global-sig-v1"
+        print -r -- "HEAD=${head_sha}"
+        print -r -- "$mdlines"
+        print -r -- "$out" | LC_ALL=C sort
+    } | _kb_val_probe_hash
+}
+
+# _kb_val_multi_file_hash — reads NUL-separated paths on stdin, echoes
+# "<sha256>  <path>" per file. Two-tier fallback mirrors _kb_val_probe_hash.
+# Used only by _kb_val_global_sig, above.
+_kb_val_multi_file_hash() {
+    if command -v shasum >/dev/null 2>&1; then
+        xargs -0 shasum -a 256 2>/dev/null
+    elif command -v sha256sum >/dev/null 2>&1; then
+        xargs -0 sha256sum 2>/dev/null
+    else
+        return 1
+    fi
+}
+
 # _kb_val_probe_cache_dir — resolves the probe-state directory. Honors
 # KB_VAL_PROBE_CACHE_DIR for test isolation.
 _kb_val_probe_cache_dir() {
