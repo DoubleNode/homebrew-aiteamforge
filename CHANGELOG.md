@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-0853 ([Review] finding, round 2, PR #846): dns shipped 7 personas and ZERO prompt files — the
+  only one of ten teams in that state; the other nine all ship both. Without a prompt file
+  `cc-aliases.sh`'s launcher falls through to plain `claude` and the agent runs with NO PERSONA:
+  generic assistant, no character, no team context. It warns loudly (XACA-0785 made sure of that),
+  but a team whose seven agents all launch persona-less is not actually provisioned — which is the
+  whole point of giving dns a conf, so this is completion of the deliverable rather than an
+  expansion of it. Ships the 7 canonical prompts to `share/personas/dns/prompts/` as tap-tracked
+  files, matching how the other nine teams carry theirs (prompts are a tap-only asset pipeline,
+  deliberately outside sync-tap — see the XACA-0671 note in sync-tap.sh). New T10 asserts every
+  `TEAM_AGENTS` entry has a prompt that is present AND non-empty, keyed off the conf so adding an
+  eighth agent without its prompt fails in CI rather than at a user's terminal. A 0-byte prompt is
+  checked separately because it produces a persona-less agent with none of the loud warnings —
+  strictly worse than a missing file.
 - XACA-0853: `dns` shipped no `share/teams/dns.conf`, so every code path that discovers teams by
   globbing that directory was structurally blind to it — the team was never a candidate, so nothing
   ever reported a failure and sweeps believed to be fleet-wide silently covered 9 of 10 teams. This

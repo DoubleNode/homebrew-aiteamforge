@@ -319,6 +319,44 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# T10 — every dns agent has a shipped prompt file.
+#
+# Without one, cc-aliases.sh's launcher falls through to plain `claude` and the
+# agent runs with NO PERSONA — generic assistant, no character, no team
+# context. It warns loudly (XACA-0785 made sure of that), but a team whose
+# seven agents all launch persona-less is not actually provisioned, which is
+# the whole point of giving dns a conf. dns was the ONLY one of ten teams
+# shipping personas with zero prompts; the other nine all ship both.
+#
+# Keyed off TEAM_AGENTS so adding an eighth agent without its prompt fails
+# here rather than at a user's terminal.
+# ---------------------------------------------------------------------------
+start_test "T10 every dns TEAM_AGENT has a shipped prompt file"
+_t10_dir="$TAP_ROOT/share/personas/dns/prompts"
+_t10_missing=""
+_t10_agents="$(. "$CONF" >/dev/null 2>&1; printf '%s ' "${TEAM_AGENTS[@]}")"
+if [ -z "$_t10_agents" ]; then
+    test_fail "TEAM_AGENTS empty — assertion would be vacuous"
+elif [ ! -d "$_t10_dir" ]; then
+    test_fail "no prompts directory shipped at share/personas/dns/prompts"
+else
+    for _a in $_t10_agents; do
+        [ -f "$_t10_dir/dns-${_a}-prompt.txt" ] || _t10_missing="$_t10_missing $_a"
+    done
+    if [ -n "$_t10_missing" ]; then
+        test_fail "agents with no shipped prompt:$_t10_missing"
+    else
+        # Non-empty as well as present — a 0-byte prompt is a persona-less agent
+        # with none of the loud warnings, which is strictly worse than missing.
+        _t10_empty=""
+        for _a in $_t10_agents; do
+            [ -s "$_t10_dir/dns-${_a}-prompt.txt" ] || _t10_empty="$_t10_empty $_a"
+        done
+        if [ -n "$_t10_empty" ]; then test_fail "empty prompt file(s):$_t10_empty"; else test_pass; fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 echo
 echo "RESULT: $_PASS_COUNT passed, $_FAIL_COUNT failed"
 [ "$_FAIL_COUNT" -eq 0 ] || exit 1
