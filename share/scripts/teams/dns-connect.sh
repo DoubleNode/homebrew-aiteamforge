@@ -154,7 +154,11 @@ if [[ -z "$LCARS_PORT" ]] && typeset -f resolve_lcars_port_fallback >/dev/null 2
     #     "dns-framework" 8180 20  -> 8180   <-- canonical, matches aiteamforge_paths.py
     #     "dns"           8180 10  -> 8187   <-- what "consistency" would produce
     # The mismatch with TEAM_ID and with the conf's range looks like a bug and is not.
-    # Changing either argument silently moves dns's LCARS port off 8180.
+    # PRECISELY: the INPUT STRING is what is load-bearing. cksum("dns-framework")
+    # = 2744192700, which is divisible by 20, 10 and 5 alike, so the range is
+    # currently INERT — swapping 20 for 10 still yields 8180. Do not read that as
+    # permission to "tidy" the range: it is inert only for this particular cksum,
+    # and changing the string is what actually moves the port (to 8187).
     LCARS_PORT="$(resolve_lcars_port_fallback "dns-framework" 8180 20)"
 fi
 
