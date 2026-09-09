@@ -997,15 +997,26 @@ render_panel() {
             # truncated/corrupt cached file satisfies -f, magick is skipped, and
             # the bad file is painted on EVERY render until the SOURCE mtime
             # changes -- it never self-heals.
-            if [[ ! -f "$rounded_file" || "$avatar_file" -nt "$rounded_file" ]] || ! _panel_image_usable "$rounded_file"; then
+            # Memoised (PR #843 review): the usable-check costs ~49ms (six
+            # subprocesses), so the common valid-cache path must pay it ONCE,
+            # not twice. Evaluate it here, reuse the verdict below, and re-check
+            # only when magick actually ran and changed the file.
+            local _rounded_ok=false
+            if [[ -f "$rounded_file" && ! "$avatar_file" -nt "$rounded_file" ]] && _panel_image_usable "$rounded_file"; then
+                _rounded_ok=true
+            fi
+            if [[ "${_rounded_ok}" != "true" ]]; then
                 _panel_magick "avatar" "$avatar_file" \
                     $([[ "$avatar_file" != *_panel.png ]] && echo "-resize 200x200") \
                     \( -size 200x200 xc:black -fill white \
                        -draw "roundrectangle 0,0,199,199,30,30" \) \
                     -alpha off -compose CopyOpacity -composite \
                     PNG32:"$rounded_file"
+                # magick ran and may have produced a new file -- this is the
+                # ONLY case that needs a second look.
+                _panel_image_usable "$rounded_file" && _rounded_ok=true
             fi
-            if _panel_image_usable "$rounded_file"; then
+            if [[ "${_rounded_ok}" == "true" ]]; then
                 _panel_debug "avatar: imgcat invoking on rounded $rounded_file"
                 "$IMGCAT" -W 100% -H 12 "$rounded_file"
                 avatar_rendered=true
@@ -1018,20 +1029,22 @@ render_panel() {
                 # Which causes actually land here, measured:
                 #   magick error / unwritable $LCARS_TMP -> no file at all, so
                 #     the fallback fires and paints the raw image. Fixed.
-                #   corrupt source PNG -> magick fails, so we DO reach here, but
-                #     the raw source is itself the broken file. _panel_image_usable
-                #     rejects the empty/not-a-PNG shapes so the placeholder still
-                #     fires; a truncated-but-valid-header PNG still slips past.
-                #   disk full -> does NOT reach here at all (see below).
+                #   corrupt source PNG -> magick fails, so we DO reach here,
+                #     but the raw source is itself the broken file.
+                #     _panel_image_usable rejects it and the placeholder fires
+                #     instead of imgcat painting garbage.
+                #   disk full -> magick leaves a TRUNCATED file (measured under
+                #     `ulimit -f 8`: rc=25, 4096 bytes, valid signature, no
+                #     IEND). The cache guard's usability check rejects it, so
+                #     magick RE-RUNS rather than the corrupt file being painted
+                #     forever; if the disk is still full the retry truncates
+                #     again, this arm is reached, and the raw source paints.
                 #
-                # NOT covered, deliberately: a disk-full write leaves a
-                # TRUNCATED file behind (measured under `ulimit -f 8`: rc=25,
-                # 4096 bytes), so the -f test above is TRUE and we never reach
-                # this arm -- imgcat gets the corrupt file instead, and the
-                # cache guard then suppresses regeneration until the SOURCE
-                # mtime changes. Pre-existing, not a regression, tracked
-                # separately. Closing it needs a content check (non-zero size
-                # or `magick identify`), not mere existence.
+                # Residual gap: the guard checks the PNG signature and the IEND
+                # terminator, so it catches truncation and wrong-type, but not
+                # arbitrary corruption in the MIDDLE of an otherwise
+                # well-formed file. `magick identify` would catch that and is
+                # too expensive for a polling render loop.
                 if _panel_image_usable "$avatar_file"; then
                     _panel_debug "avatar: magick rounding produced no output file ($rounded_file) — falling back to raw $avatar_file"
                     "$IMGCAT" -W 100% -H 12 "$avatar_file"
@@ -1060,18 +1073,19 @@ render_panel() {
     # rendered NOTHING here -- a blank gap indistinguishable from a panel that
     # simply has no avatar, which is how this defect survived unreported for
     # months across all 11 teams. Matches the file's existing missing-data
-    # convention (the two-line ${DIM} "Awaiting"/"agent..." block above).
+    # convention (the ${DIM} "Awaiting"/"agent..." block above).
     # Shown only where an image is genuinely EXPECTED: the avatar is the panel's
     # primary identity affordance and every agent has one. Deliberately NOT
     # applied to the crew strip or AMB badges, where absence is a legitimate
     # state (no other agents online; agent not registered with AMB) and a
     # placeholder would cry wolf on a healthy panel.
-    # Wording matches the file's existing degraded-state blocks exactly: two dim
-    # indented lines, no brackets. An earlier revision split "[avatar
-    # unavailable]" across the break, leaving an unclosed "[avatar" on its own
-    # line -- a punctuation style used nowhere else here, and not forced by
-    # width (TARGET_COLS=30, the phrase is 22 chars). On a component whose whole
-    # job is to signal a glitch, looking like one is a bad failure mode.
+    # One dim indented line, no brackets (XACA-1138-022: "Avatar unavailable"
+    # is 18 chars, 20 with the indent, so it fits TARGET_COLS=30 and the earlier
+    # two-line split needlessly separated the noun from its predicate). An
+    # earlier revision split "[avatar unavailable]" across a break, leaving an
+    # unclosed "[avatar" alone on a line -- punctuation used nowhere else here.
+    # On a component whose whole job is to signal a glitch, looking like one is
+    # a bad failure mode.
     if [[ "$avatar_rendered" != "true" ]]; then
         echo "${DIM}  Avatar unavailable${RESET}"
     fi
@@ -1203,15 +1217,26 @@ render_panel() {
             # truncated/corrupt cached file satisfies -f, magick is skipped, and
             # the bad file is painted on EVERY render until the SOURCE mtime
             # changes -- it never self-heals.
-            if [[ ! -f "$rounded_logo" || "$logo_file" -nt "$rounded_logo" ]] || ! _panel_image_usable "$rounded_logo"; then
+            # Memoised (PR #843 review): the usable-check costs ~49ms (six
+            # subprocesses), so the common valid-cache path must pay it ONCE,
+            # not twice. Evaluate it here, reuse the verdict below, and re-check
+            # only when magick actually ran and changed the file.
+            local _logo_ok=false
+            if [[ -f "$rounded_logo" && ! "$logo_file" -nt "$rounded_logo" ]] && _panel_image_usable "$rounded_logo"; then
+                _logo_ok=true
+            fi
+            if [[ "${_logo_ok}" != "true" ]]; then
                 _panel_magick "terminal logo" "$logo_file" \
                     $([[ "$logo_file" != *_panel.png ]] && echo "-resize 200x200") \
                     \( -size 200x200 xc:black -fill white \
                        -draw "circle 100,100 100,0" \) \
                     -alpha off -compose CopyOpacity -composite \
                     PNG32:"$rounded_logo"
+                # magick ran and may have produced a new file -- this is the
+                # ONLY case that needs a second look.
+                _panel_image_usable "$rounded_logo" && _logo_ok=true
             fi
-            if _panel_image_usable "$rounded_logo"; then
+            if [[ "${_logo_ok}" == "true" ]]; then
                 _panel_debug "terminal logo: imgcat invoking on rounded logo $rounded_logo"
                 "$IMGCAT" -W 100% -H 10 "$rounded_logo"
                 logo_rendered=true

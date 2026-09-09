@@ -7,6 +7,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1138 (round 2): corrected stale claims in `share/scripts/agent-panel-display.sh` — the
+  IEND check added earlier in the same change actually fixed the truncated/disk-full case, but
+  the comments written before that fix still said it was uncovered. Also memoised the
+  image-usability check on the hot path: it costs ~49ms (six subprocesses) and the common
+  valid-cache path was paying it twice per render site; it is now computed once and re-checked
+  only when magick actually ran.
+
 - XACA-1138 (follow-up): `_panel_image_usable` now also checks the PNG **IEND** terminator, and
   both rounded-image cache guards regenerate when the cached file fails it — a truncated file
   (the disk-full shape) used to satisfy `-f`, so magick was skipped and the corrupt file was
