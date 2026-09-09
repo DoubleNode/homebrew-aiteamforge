@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.20.7] - 2026-09-08
+
 - XACA-0822-008 ([Review] finding on PR #842): the tap shipped the `points` estimate
   setter/getter (XACA-0822-006) but no way to USE an estimate — no `unestimated` report, no
   `_kb_is_estimated` predicate, and no start-time gate in `kb-pick`/`kb-run`, leaving estimates
@@ -3483,7 +3485,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.6...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.7...HEAD
+[0.20.7]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.6...v0.20.7
 [0.20.6]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.5...v0.20.6
 [0.20.5]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.4...v0.20.5
 [0.20.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.3...v0.20.4
