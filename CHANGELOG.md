@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1135: fixes an output-corruption regression introduced by this ticket's own perf hoist.
+  `kb-retro-check`'s per-item loop declared `local this_team` with no assignment; zsh's typeset
+  PRINTS a parameter re-declared without a value (TYPESET_SILENT is unset interactively), so the
+  audit table gained one stray `this_team=<value>` line per item — 751 leaked lines measured on a
+  real 752-item board. One-line fix (`local this_team=""`), with the reason recorded inline so it
+  is not "tidied" back. Found by the QA gate agent, which correctly declined to fix it in the copy
+  it did not own. No Summary figure, Unknown classification or gate behaviour was affected.
+
 - XACA-0822-010 ([Review] finding on PR #842): `tests/test-xaca-0822-template-canonical-parity.sh`
   had no check that all of its cases actually ran, so a silently skipped block (an early
   `return`/`exit` inside a stubbed helper, a case block accidentally deleted or commented out)

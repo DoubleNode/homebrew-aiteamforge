@@ -10670,7 +10670,12 @@ kb-retro-check() {
         # passed with empty state so _kb_find_existing_retro still returns 2 for it, and
         # an unresolvable team is passed as empty so it still returns 3.
         if [[ "$item_id" =~ ^X[A-Z]{3}-[0-9]+$ ]]; then
-            local this_team
+            # NOTE: the ="" is load-bearing, not style. A bare `local this_team`
+            # re-declared each pass through this loop makes zsh's typeset PRINT the
+            # parameter (TYPESET_SILENT is unset interactively), leaking one
+            # `this_team=<value>` line per item into the audit table. Introduced by
+            # the XACA-1135 perf hoist; 751 leaked lines measured on a real board.
+            local this_team=""
             this_team=$(_kb_get_team_from_code "$item_id")
             if [[ -n "$this_team" ]]; then
                 if [[ "$this_team" != "$memo_team" ]]; then
