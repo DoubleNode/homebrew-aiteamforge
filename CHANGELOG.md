@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1113 (test, CI coverage): registered `tests/test-xaca-1113-012-msg-fail-closed.sh`
+  and `tests/test-xaca-1113-013-msg-this-machine-regression.sh` in
+  `tests/ci-manifest` as `plain-shell` (XACA-1113-005) — both files were
+  already committed and pushed to this repo but absent from the manifest, the
+  exact XACA-1095 defect class this ticket exists to close: a test that does
+  not run is indistinguishable from a test that passes. `ci-manifest-check.sh`
+  reports OK (88 entries). Verified under `/bin/bash` 3.2 (not PATH bash 5.x):
+  test-012 is 35/35 with node present and 30/30 (floor `MIN_EXPECTED=28`) with
+  node absent from PATH; test-013 is 10/10 with node present and 8/8 (mode 2
+  SKIPs, not fails) with node absent — matching the plain-shell CI job, which
+  installs only jq/bash/tmux, never node.
 - XACA-1113 (bugfix, found during port verification): `_kb_msg_client` in
   `share/templates/kanban/kanban-helpers.template.sh` resolved the Tier-2
   relay client to a single hardcoded path,
