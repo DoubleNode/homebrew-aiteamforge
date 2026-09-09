@@ -103,6 +103,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Consumers WITHOUT ImageMagick are unaffected: that branch always displayed the raw image and
   is unchanged. Consumers WITH it stop losing the avatar and terminal logo on a rounding
   failure.
+- XACA-1146-002: ported `kb-release-edit` (279 lines) and `kb-release-reschedule` (13 lines)
+  into the shipped template. Both are classified must-ship in
+  `tests/fixtures/xaca-0811/tap-omissions.manifest` and existed only in canonical, so a consumer
+  had no way to change a release's metadata or target date at all. `kb-release-reschedule` is a
+  thin wrapper over `kb-release-edit --target-date`, so edit landed first. Neither needed
+  adaptation: all four depth-1 callees (`_kb_curl_failure_reason`, `_kb_lcars_auth_args`,
+  `_kb_team_lcars_port`, `_kb_detect_context`) were already present in the template and neither
+  function contains a fleet-specific path. Both bodies verified byte-identical to canonical.
+  Dispatcher routing is deliberately NOT included here — see XACA-1146-005.
 - XACA-1146-001: the shipped `_kb_release_sync` was the pre-XACA-1099 shape — a one-argument
   function that explicitly suppressed its warning on `http_code 000` (`[[ "$http_code" != "000" ]]`),
   so a failed manifest sync was indistinguishable from a successful one. Canonical had already

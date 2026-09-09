@@ -19199,6 +19199,307 @@ kb-release-show() {
     echo "  Assigned: $assigned_at"
 }
 
+# Edit an existing release's metadata via PUT /api/releases/<id>
+# Usage: kb-release edit <release-id> [--name <s>] [--short-title <s>] [--target-date <YYYY-MM-DD>]
+#                                      [--status <s>] [--type feature|bugfix|hotfix|maintenance]
+#                                      [--project <s>] [--tags <a,b,c>]
+#                                      [--platform-version <plat>=<ver>] (repeatable)
+kb-release-edit() {
+    local release_id=""
+
+    # Track which fields were set by the caller (absent = do not include in payload)
+    local set_name=0 set_short_title=0 set_target_date=0 set_status=0
+    local set_type=0 set_project=0 set_tags=0
+    local val_name="" val_short_title="" val_target_date="" val_status=""
+    local val_type="" val_project="" val_tags=""
+    # Platform versions: accumulate as "plat=ver" entries, newline-separated
+    local platform_versions=""
+    # Platform build numbers: accumulate as "plat=num" entries, newline-separated
+    local platform_builds=""
+    # Loop-scoped vars declared up front: zsh emits "VAR=value" to stdout when
+    # `local` re-declares a var on the 2nd+ loop iteration (k501 gotcha), so we
+    # declare once here and assign without `local` inside the loops below.
+    local pv="" pv_entry="" plat="" ver="" pb="" pb_entry="" bnum=""
+    # k501: declare build-number validation temporaries before the arg-parse
+    # loop — `--platform-build` is repeatable, so a `local` re-declared inside
+    # the loop would leak `VAR=value` to stdout on the 2nd+ occurrence.
+    local _pb_num="" _pb_re='^[0-9]+$'
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --name)
+                val_name="${2-}"; set_name=1; shift 2
+                ;;
+            --short-title)
+                val_short_title="${2-}"; set_short_title=1; shift 2
+                ;;
+            --target-date)
+                val_target_date="${2-}"; set_target_date=1; shift 2
+                ;;
+            --status)
+                val_status="${2-}"; set_status=1; shift 2
+                ;;
+            --type)
+                val_type="${2-}"; set_type=1; shift 2
+                ;;
+            --project)
+                val_project="${2-}"; set_project=1; shift 2
+                ;;
+            --tags)
+                val_tags="${2-}"; set_tags=1; shift 2
+                ;;
+            --platform-version)
+                pv="${2-}"
+                if [[ -z "$pv" || "$pv" != *=* ]]; then
+                    echo "Error: --platform-version requires <platform>=<version> (e.g. ios=2.10.0)"
+                    return 1
+                fi
+                platform_versions="${platform_versions}${pv}"$'\n'
+                shift 2
+                ;;
+            --platform-build|--build-number|--version-code)
+                pb="${2-}"
+                if [[ -z "$pb" || "$pb" != *=* ]]; then
+                    echo "Error: ${1-} requires <platform>=<number> (e.g. ios=42 or android=103)"
+                    return 1
+                fi
+                # Validate that the right-hand side is a non-negative integer
+                # (vars declared before the loop — k501)
+                _pb_num="${pb#*=}"
+                if [[ ! "$_pb_num" =~ $_pb_re ]]; then
+                    echo "Error: build number must be a non-negative integer, got: '$_pb_num'"
+                    return 1
+                fi
+                platform_builds="${platform_builds}${pb}"$'\n'
+                shift 2
+                ;;
+            --help|-h)
+                echo "Usage: kb-release edit <release-id> [options]"
+                echo ""
+                echo "Options:"
+                echo "  --name <s>                       Release name"
+                echo "  --short-title <s>                Short display name for LCARS UI"
+                echo "                                   (auto-syncs platform versions when it contains vX.Y.Z)"
+                echo "  --target-date <YYYY-MM-DD>       Target date"
+                echo "  --status <s>                     Release status"
+                echo "  --type <type>                    feature|bugfix|hotfix|maintenance"
+                echo "  --project <name>                 Project name"
+                echo "  --tags <a,b,c>                   Comma-separated tags (replaces existing)"
+                echo "  --platform-version <plt>=<v>     Update version for an existing platform (repeatable)"
+                echo "  --platform-build <plt>=<num>     Update build number for a platform (repeatable)"
+                echo "  --build-number <plt>=<num>       Alias for --platform-build"
+                echo "  --version-code <plt>=<num>       Alias for --platform-build (Android versionCode)"
+                echo ""
+                echo "  --platform-version and --platform-build for the same platform are merged:"
+                echo "    --platform-version ios=2.10.0 --platform-build ios=42"
+                echo "    produces: {ios: {version: '2.10.0', buildNumber: 42}}"
+                echo ""
+                echo "Only fields explicitly passed are sent to the server (others are unchanged)."
+                echo ""
+                echo "Examples:"
+                echo "  kb-release edit REL-2026-Q1-001 --target-date 2026-04-01"
+                echo "  kb-release edit REL-2026-Q1-001 --name 'Q2 Release' --type bugfix"
+                echo "  kb-release edit REL-2026-Q1-001 --platform-version ios=2.10.0 --platform-version android=2.10.0"
+                echo "  kb-release edit REL-2026-Q1-001 --platform-build android=103"
+                echo "  kb-release edit REL-2026-Q1-001 --platform-version ios=2.10.0 --platform-build ios=42"
+                return 0
+                ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}"
+                    echo "Usage: kb-release edit <release-id> [options]"
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required"
+        echo "Usage: kb-release edit <release-id> [--name <s>] [--short-title <s>] [--target-date <YYYY-MM-DD>]"
+        echo "       [--status <s>] [--type feature|bugfix|hotfix|maintenance] [--project <s>]"
+        echo "       [--tags <a,b,c>] [--platform-version <plat>=<ver>]"
+        return 1
+    fi
+
+    # Require at least one field to edit
+    local any_field=$(( set_name + set_short_title + set_target_date + set_status + set_type + set_project + set_tags ))
+    local has_platforms=0
+    local has_builds=0
+    [[ -n "$platform_versions" ]] && has_platforms=1
+    [[ -n "$platform_builds" ]] && has_builds=1
+    if [[ $(( any_field + has_platforms + has_builds )) -eq 0 ]]; then
+        echo "Error: nothing to update — pass at least one field flag"
+        echo "Usage: kb-release edit <release-id> [--name <s>] [--short-title <s>] [--target-date <YYYY-MM-DD>]"
+        echo "       [--status <s>] [--type feature|bugfix|hotfix|maintenance] [--project <s>]"
+        echo "       [--tags <a,b,c>] [--platform-version <plat>=<ver>] [--platform-build <plat>=<num>]"
+        return 1
+    fi
+
+    # Validate type only if it was passed
+    if [[ $set_type -eq 1 ]]; then
+        case "$val_type" in
+            feature|bugfix|hotfix|maintenance) ;;
+            *)
+                echo "Error: Invalid release type: $val_type"
+                echo "  Valid types: feature, bugfix, hotfix, maintenance"
+                return 1
+                ;;
+        esac
+    fi
+
+    # Detect caller's team and resolve the correct LCARS port
+    local context team port
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+
+    if [[ -z "$team" || "$team" == "ERROR:"* ]]; then
+        echo "Error: Could not determine team context" >&2
+        return 1
+    fi
+
+    port=$(_kb_team_lcars_port "$team") || {
+        echo "Warning: no LCARS port known for team '$team', falling back to 8080" >&2
+        port="8080"
+    }
+
+    # Build JSON payload incrementally — only include fields that were explicitly set
+    local json_payload='{}'
+
+    [[ $set_name -eq 1 ]] && \
+        json_payload=$(printf '%s' "$json_payload" | jq --arg v "$val_name" '. + {name: $v}')
+    [[ $set_short_title -eq 1 ]] && \
+        json_payload=$(printf '%s' "$json_payload" | jq --arg v "$val_short_title" '. + {shortTitle: $v}')
+    [[ $set_target_date -eq 1 ]] && \
+        json_payload=$(printf '%s' "$json_payload" | jq --arg v "$val_target_date" '. + {targetDate: $v}')
+    [[ $set_status -eq 1 ]] && \
+        json_payload=$(printf '%s' "$json_payload" | jq --arg v "$val_status" '. + {status: $v}')
+    [[ $set_type -eq 1 ]] && \
+        json_payload=$(printf '%s' "$json_payload" | jq --arg v "$val_type" '. + {type: $v}')
+    [[ $set_project -eq 1 ]] && \
+        json_payload=$(printf '%s' "$json_payload" | jq --arg v "$val_project" '. + {project: $v}')
+
+    # Tags: split comma-separated string into a JSON array
+    if [[ $set_tags -eq 1 ]]; then
+        json_payload=$(printf '%s' "$json_payload" | jq --arg v "$val_tags" \
+            '. + {tags: ($v | split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")))}')
+    fi
+
+    # Platform versions + build numbers: build a merged platforms object.
+    # Both are optional; when both are provided for the same platform they are
+    # merged into one object e.g. {ios: {version: "2.10.0", buildNumber: 42}}.
+    if [[ $has_platforms -eq 1 || $has_builds -eq 1 ]]; then
+        local plat_obj='{}'
+        # First pass: version entries
+        while IFS= read -r pv_entry; do
+            [[ -z "$pv_entry" ]] && continue
+            plat="${pv_entry%%=*}"
+            ver="${pv_entry#*=}"
+            plat_obj=$(printf '%s' "$plat_obj" | jq --arg p "$plat" --arg v "$ver" \
+                'if has($p) then .[$p] += {version: $v} else . + {($p): {version: $v}} end')
+        done <<< "$platform_versions"
+        # Second pass: build number entries (merged into existing per-platform object)
+        while IFS= read -r pb_entry; do
+            [[ -z "$pb_entry" ]] && continue
+            plat="${pb_entry%%=*}"
+            bnum="${pb_entry#*=}"
+            plat_obj=$(printf '%s' "$plat_obj" | jq --arg p "$plat" --argjson b "$bnum" \
+                'if has($p) then .[$p] += {buildNumber: $b} else . + {($p): {buildNumber: $b}} end')
+        done <<< "$platform_builds"
+        json_payload=$(printf '%s' "$json_payload" | jq --argjson p "$plat_obj" '. + {platforms: $p}')
+    fi
+
+    # Call LCARS server to update the release
+    local response http_code body curl_exit
+    local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
+    _kb_lcars_auth_args
+    response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
+        --max-time 5 \
+        -X PUT \
+        -H "Content-Type: application/json" \
+        "${_KB_LCARS_AUTH_ARGS[@]}" \
+        -d "$json_payload" \
+        "http://localhost:${port}/api/releases/${release_id}" 2>/dev/null)
+    curl_exit=$?
+
+    http_code=$(printf '%s\n' "$response" | tail -n1)
+    body=$(printf '%s\n' "$response" | sed '$d')
+
+    if [[ "$http_code" == "200" ]]; then
+        # Read-back: print the PERSISTED record from the server response, not
+        # the raw args the caller typed.  This way the user sees what was actually saved.
+        # XACA-0948-006 audit: this is an LCARS /api/releases response body
+        # (releases entity), not a backlog item -- out of scope. Left as-is.
+        local rs_name rs_status rs_type rs_target_date
+        rs_name=$(printf '%s' "$body" | jq -r '.name // empty')
+        rs_status=$(printf '%s' "$body" | jq -r '.status // empty')
+        rs_type=$(printf '%s' "$body" | jq -r '.type // empty')
+        rs_target_date=$(printf '%s' "$body" | jq -r '.targetDate // empty')
+        echo "✓ Updated release: $rs_name ($release_id)"
+        echo "  Team: $team (LCARS port $port)"
+        [[ -n "$rs_status" ]]      && echo "  Status: $rs_status"
+        [[ -n "$rs_type" ]]        && echo "  Type: $rs_type"
+        [[ -n "$rs_target_date" ]] && echo "  Target date: $rs_target_date"
+        # Per-platform persisted state from response
+        local plat_keys plat_key plat_ver plat_build plat_env plat_line
+        plat_keys=$(printf '%s' "$body" | jq -r '.platforms // {} | keys[]' 2>/dev/null)
+        if [[ -n "$plat_keys" ]]; then
+            while IFS= read -r plat_key; do
+                [[ -z "$plat_key" ]] && continue
+                plat_ver=$(printf '%s' "$body" | jq -r --arg k "$plat_key" '.platforms[$k].version // empty')
+                plat_build=$(printf '%s' "$body" | jq -r --arg k "$plat_key" '.platforms[$k].buildNumber // empty')
+                plat_env=$(printf '%s' "$body" | jq -r --arg k "$plat_key" '.platforms[$k].environment // empty')
+                plat_line="  $plat_key:"
+                [[ -n "$plat_ver" ]]   && plat_line="${plat_line} version ${plat_ver},"
+                [[ -n "$plat_build" ]] && plat_line="${plat_line} build ${plat_build},"
+                [[ -n "$plat_env" ]]   && plat_line="${plat_line} env ${plat_env},"
+                # Strip trailing comma+space
+                plat_line="${plat_line%,}"
+                echo "$plat_line"
+            done <<< "$plat_keys"
+        fi
+    elif [[ "$http_code" == "404" ]]; then
+        echo "Error: Release not found: $release_id"
+        return 1
+    elif [[ "$http_code" == "000" ]]; then
+        # curl reports %{http_code}=000 for ANY connection-phase failure
+        # (refused, timed out, DNS, reset) — decode curl's own exit code
+        # instead of asserting a single cause for all of them (see
+        # _kb_curl_failure_reason; XACA-1099).
+        local _kb_reason cause remedy
+        _kb_reason=$(_kb_curl_failure_reason "$curl_exit" "$port")
+        cause="${_kb_reason%%$'\n'*}"
+        remedy="${_kb_reason#*$'\n'}"
+        echo "Error: LCARS server on port $port — $cause."
+        echo "  $remedy"
+        return 1
+    else
+        echo "Error: Failed to update release (HTTP $http_code)"
+        [[ -n "$body" ]] && echo "  $body"
+        return 1
+    fi
+}
+
+# Date-only shorthand for rescheduling a release
+# Usage: kb-release reschedule <release-id> <YYYY-MM-DD>
+kb-release-reschedule() {
+    local release_id="${1-}"
+    local date="${2-}"
+
+    if [[ -z "$release_id" || -z "$date" ]]; then
+        echo "Usage: kb-release reschedule <release-id> <YYYY-MM-DD>"
+        echo "  release-id: Release ID (e.g., REL-2026-Q1-001)"
+        echo "  date:       New target date in YYYY-MM-DD format"
+        return 1
+    fi
+
+    kb-release-edit "$release_id" --target-date "$date"
+}
+
 # Unified release command
 # Usage: kb-release <subcommand> [args...]
 kb-release() {
