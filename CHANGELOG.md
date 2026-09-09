@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1113 (bugfix, found during port verification): `_kb_msg_client` in
+  `share/templates/kanban/kanban-helpers.template.sh` resolved the Tier-2
+  relay client to a single hardcoded path,
+  `$AITEAMFORGE_DIR/fleet-monitor/client/msg-client.sh`, which this tap never
+  ships — `share/fleet-monitor/client/` does not exist here, only
+  `share/scripts/msg-client.sh`, installed to `scripts/msg-client.sh`. Every
+  consumer install's `kb-msg send` therefore failed unconditionally with
+  "Tier-2 client not found/executable". Fixed to mirror the sibling
+  `_kb_msg_this_machine`'s candidate-list pattern (dev tree, then `scripts/`,
+  then `$HOME/aiteamforge/scripts/`), landed identically in canonical
+  `kanban-helpers.sh` per XACA-0340. Verified by execution against a fake
+  consumer-shaped tree (`scripts/` only, no `fleet-monitor/`), reproducing the
+  pre-fix failure live before confirming the fix resolves it.
 - XACA-1145: ported the protected-subitem merge gate into the shipped
   `kb-sweep` (`share/templates/kanban/kanban-helpers.template.sh`). The shipped
   template emitted the `PROTECTED SUBITEMS UNRESOLVED (N)` marker NOWHERE, while

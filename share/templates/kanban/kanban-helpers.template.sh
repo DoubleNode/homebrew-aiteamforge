@@ -21327,8 +21327,29 @@ _kb_msg_store() {
 }
 
 # Resolve the Tier-2 sealed client wrapper.
+#
+# XACA-1113 follow-up: the dev tree ships this at fleet-monitor/client/, but
+# the tap has no fleet-monitor/client/ tree at all — it installs the same
+# script to scripts/msg-client.sh instead. A hardcoded single path meant every
+# consumer install failed "Tier-2 client not found/executable" unconditionally;
+# it went unnoticed here only because the dev-tree path genuinely exists on
+# this box. Mirrors _kb_msg_this_machine's candidate list below. Echoes the
+# first candidate that exists and is executable; if none do, still echoes the
+# primary (dev-tree) path so the caller's "not found" message names something
+# concrete rather than degrading into a blank path.
 _kb_msg_client() {
-    echo "${AITEAMFORGE_DIR:-$HOME/dev-team}/fleet-monitor/client/msg-client.sh"
+    local base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
+    local candidate
+    for candidate in "$base/fleet-monitor/client/msg-client.sh" \
+                      "$base/scripts/msg-client.sh" \
+                      "$HOME/aiteamforge/scripts/msg-client.sh"; do
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo "$base/fleet-monitor/client/msg-client.sh"
+    return 1
 }
 
 # Resolve the current session's identity as "team terminal" (space-separated).
