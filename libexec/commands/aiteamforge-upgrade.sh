@@ -930,6 +930,43 @@ _xaca0608_aux_scriptdir_basenames() {
   done < <(_xaca0608_aux_script_map)
 }
 
+# XACA-1143 (Architecture A, ratified 2026-09-09): mandatory-materialize set
+# for update_aux_scripts(), mirroring the _xaca0673_mandatory_materialize_basenames
+# pattern used by update_runtime_helpers() below — but that IS a different list
+# reached from a different loop. _xaca0673's set is consumed only inside
+# update_runtime_helpers(), whose destination is WORKING_DIR/scripts/*; it is
+# never read by update_aux_scripts(), whose entries (this map) can be
+# root-destined. Adding a basename to the wrong list refreshes a copy that
+# was never the problem and leaves the real gap untouched — that was the
+# ticket's original (corrected) prescription.
+#
+# Originating incident: share/templates/aiteamforge-env.sh sources
+# "$AITEAMFORGE_DIR/worktree-helpers.sh" behind an `[ -f ]` guard, and
+# worktree-aliases.sh prints "✓ Worktree helpers loaded" immediately before
+# that guarded source line — so a shell announces a load that silently never
+# happened. worktree-helpers.sh IS already in _xaca0608_aux_script_map
+# (root-destined), but update_aux_scripts()'s per-entry
+# "[ ! -f $target ] && continue" guard skips every entry that is not already
+# installed — so a machine that never had this file at the root (never
+# installed, or installed before XACA-0594 added the map entry) could never
+# get it from `aiteamforge upgrade`, no matter how many upgrades ran.
+#
+# Keep this set MINIMAL, same discipline as _xaca0673's: only add a basename
+# here when it is a genuinely always-required file whose absence has been
+# independently measured, not by inference from this file being broken. Only
+# worktree-helpers.sh has been measured (M4Mini) — the aux map's OTHER
+# root-destined entries (kanban-board-check.sh, kanban-restore-helper.sh,
+# kanban-backup.py, lcars-health-check.sh) are deliberately left on the
+# existing refresh-only-if-present path; sweeping them in here without
+# evidence would be scope creep beyond what this ticket verified.
+# Newline-delimited basenames; exact-line membership test (same idiom as
+# _xaca0673_mandatory_materialize_basenames).
+_xaca1143_aux_mandatory_materialize_basenames() {
+  cat <<'EOF'
+worktree-helpers.sh
+EOF
+}
+
 # Update standalone helper scripts that install-kanban.sh copies individually but
 # the upgrade path previously skipped (same bug class as kanban-hooks, XACA-0558).
 # Each entry is "source_filename|destination_path"; sources live under
@@ -972,10 +1009,21 @@ update_aux_scripts() {
       continue
     fi
 
+    # Refresh only what this machine already installed — EXCEPT mandatory
+    # entries, which must be materialised even when absent (XACA-1143; see
+    # _xaca1143_aux_mandatory_materialize_basenames above). Same idiom as
+    # update_runtime_helpers()'s absent-target check further down this file.
     if [ ! -f "$target" ]; then
-      continue
+      case $'\n'"$(_xaca1143_aux_mandatory_materialize_basenames)"$'\n' in
+        *$'\n'"${name}"$'\n'*) : ;;   # mandatory — materialise it
+        *) continue ;;                 # optional — skip if absent (unchanged)
+      esac
     fi
 
+    # [ "$source" -nt "$target" ] is true when $target does not exist (POSIX
+    # test semantics: file1 -nt file2 is true if file1 exists and file2 does
+    # not), so a mandatory entry that just cleared the absent-target check
+    # above falls straight through to the render below with no further change.
     if [ "$source" -nt "$target" ] || [ "$FORCE" = true ]; then
       print_info "Updating ${name}..."
       if [ "$DRY_RUN" = false ]; then

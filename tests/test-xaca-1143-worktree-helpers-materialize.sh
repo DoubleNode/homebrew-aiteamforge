@@ -125,7 +125,7 @@ _extract_fn() {
     ' "$UPGRADE_SH"
 }
 
-for _fn in _xaca0608_render_team_script _xaca0608_aux_script_map update_aux_scripts; do
+for _fn in _xaca0608_render_team_script _xaca0608_aux_script_map _xaca1143_aux_mandatory_materialize_basenames update_aux_scripts; do
     _src="$(_extract_fn "$_fn")"
     if [ -z "$_src" ]; then
         test_start "Sanity: can extract $_fn from upgrade.sh"

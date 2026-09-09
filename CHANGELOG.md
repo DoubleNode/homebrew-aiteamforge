@@ -52,6 +52,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   guards. The narrower range excluded the two slowest of four measurements, so the number
   shipping to consumers contradicted the measurements behind it. Comment-only.
 
+- XACA-1143-002/006: `update_aux_scripts()` (aiteamforge-upgrade.sh) could never CREATE
+  `$AITEAMFORGE_DIR/worktree-helpers.sh` on upgrade — only refresh it. The file is already
+  listed in `_xaca0608_aux_script_map` (root-destined), but the per-entry
+  `[ ! -f "$target" ] && continue` guard skips every entry not already installed, so a
+  machine that never had this file at the root (never installed, or installed before
+  XACA-0594 added the map entry) could never get it from `aiteamforge upgrade`, no matter
+  how many upgrades ran — `wt-dev` and every other `wt-*` function silently stayed
+  undefined, even though `worktree-aliases.sh` prints "✓ Worktree helpers loaded"
+  immediately before the guarded source line in `aiteamforge-env.sh` that never fires.
+  New `_xaca1143_aux_mandatory_materialize_basenames()` (mirrors the
+  `_xaca0673_mandatory_materialize_basenames` pattern used by `update_runtime_helpers()`,
+  but is its own list — that one is consumed only inside `update_runtime_helpers()`, whose
+  destination is `WORKING_DIR/scripts/*`, and is never read by `update_aux_scripts()`,
+  whose entries can be root-destined; adding a basename to the wrong list would have
+  refreshed an already-present `scripts/` copy and left the real gap untouched). Kept
+  deliberately minimal — only `worktree-helpers.sh`, the one basename actually measured
+  broken; the aux map's other root-destined entries are left on the existing
+  refresh-only-if-present path. New regression test
+  `tests/test-xaca-1143-worktree-helpers-materialize.sh` (6 assertions, including a real
+  `zsh -ic` shell-acceptance check via a sandboxed `ZDOTDIR` — deliberately not `zsh -lc`,
+  which never sources `.zshrc` and so can never fail regardless of what ships); confirmed
+  RED before the fix (2 passed / 4 failed) and GREEN after (6/6), under both `/bin/bash`
+  3.2.57 directly and `tests/test-runner.sh`. All 21 existing
+  `test-xaca-0608-team-script-refresh.sh` assertions still pass.
+
 - XACA-1143-005: `_xaca0608_render_team_script` (aiteamforge-upgrade.sh) and its lockstep
   sibling `_xaca0483_install_script` (install-team.sh) rewrote `~/dev-team`, `$HOME/dev-team`
   and `${HOME}/dev-team` but not an absolute `/Users/<user>/dev-team` literal baked into a
