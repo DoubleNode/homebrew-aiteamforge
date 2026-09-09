@@ -4827,6 +4827,35 @@ kb-sweep() {
     echo "  Legend: [✓] completed  [/] cancelled  [●] in_progress  [!] blocked  [ ] todo"
     echo ""
 
+    # XACA-0462, XACA-0703: Protected-subitem gate. Subitems titled "[Review] ...",
+    # "[Test] ...", or "[UX] ..." are filed by bots/agents in the PR auto-merge
+    # flow (CLAUDE.md). They MUST be resolved before merge — agents cannot cancel
+    # [Review]/[Test] without user approval, and [UX] only under narrow conditions
+    # (see cancel-guard below). We surface them as a distinct, explicit gate so the
+    # merge-monitor's grep has an unambiguous signal AND humans get a louder log
+    # line than the generic "N remaining".
+    local protected_unresolved=0
+    local protected_lines=""
+    while IFS="|" read -r ps_status ps_id ps_title; do
+        [[ -z "$ps_status" ]] && continue
+        if [[ "$ps_title" == \[Review\]* ]] || [[ "$ps_title" == \[Test\]* ]] || [[ "$ps_title" == \[UX\]* ]]; then
+            case "$ps_status" in
+                todo|in_progress|blocked)
+                    protected_unresolved=$((protected_unresolved + 1))
+                    protected_lines+="     • ${ps_id}: ${ps_title} [${ps_status}]"$'\n'
+                    ;;
+            esac
+        fi
+    done <<< "$subitem_lines"
+
+    if [[ "$protected_unresolved" -gt 0 ]]; then
+        echo "  🚫 PROTECTED SUBITEMS UNRESOLVED ($protected_unresolved):"
+        printf '%s' "$protected_lines"
+        echo "     [Review]/[Test]/[UX] subitems are merge-gating. Resolve them or"
+        echo "     ask the user to cancel — agents cannot cancel protected subitems."
+        echo ""
+    fi
+
     # Retrospective file validation (blocking — prevents kb-done if retro file is missing)
     # Check if there's a completed "Retrospective" subitem and validate the file exists
     local has_retro_subitem=false retro_subitem_completed=false retro_blocking=false
@@ -7313,10 +7342,36 @@ kb-backlog() {
                         return 1
                     fi
 
-                    # XACA-0113: Soft warning for [Review] and [Test] subitems
-                    if [[ "${sub_title:l}" == *"[review]"* ]] || [[ "${sub_title:l}" == *"[test]"* ]]; then
+                    # XACA-0113, XACA-0703: Soft warning for protected subitems ([Review], [Test], [UX]).
+                    #
+                    # [Review] and [Test]: ALWAYS warn — these are filed by bots and represent
+                    # concrete review/test work that must be done or explicitly waived by the user.
+                    # Agents may NEVER auto-cancel them.
+                    #
+                    # [UX]: Warn by default — a UX evaluation gate exists to catch unintended UI
+                    # regressions. HOWEVER, an agent MAY auto-cancel a [UX] subitem WITHOUT user
+                    # approval when the --reason explicitly indicates there is no UI surface in the
+                    # diff (reason substring "ux/ui surface" or "no ux"). This exception exists
+                    # because many backend/infra PRs have zero UI impact; forcing user approval for
+                    # every such cancellation is friction without safety benefit. The exception is
+                    # deliberately narrow: only [UX], only with that reason class, never for
+                    # [Review]/[Test]. Widening it without updating this comment violates the
+                    # "STOP precondition needs a why" rule (XACA-0703 / CLAUDE.md feedback).
+                    local _sub_title_lower="${sub_title:l}"
+                    if [[ "$_sub_title_lower" == *"[review]"* ]] || [[ "$_sub_title_lower" == *"[test]"* ]]; then
                         echo "⚠️  PROTECTED SUBITEM: '[Review]'/'[Test]' subitems require user approval to cancel."
                         echo "If you are an agent, STOP and ask the user for permission before proceeding."
+                    elif [[ "$_sub_title_lower" == *"[ux]"* ]]; then
+                        local _reason_lower="${reason:l}"
+                        if [[ "$_reason_lower" == *"ux/ui surface"* ]] || [[ "$_reason_lower" == *"no ux"* ]]; then
+                            # Principled exception: caller has declared no UI surface in this diff.
+                            # Allow silent cancel — no warning emitted. (XACA-0703)
+                            :
+                        else
+                            echo "⚠️  PROTECTED SUBITEM: '[UX]' subitems require user approval to cancel."
+                            echo "If you are an agent, STOP and ask the user for permission before proceeding."
+                            echo "Exception: pass --reason \"no ux/ui surface in diff\" to auto-cancel when no UI is affected."
+                        fi
                     fi
 
                     local timestamp

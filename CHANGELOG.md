@@ -6,6 +6,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1145: ported the protected-subitem merge gate into the shipped
+  `kb-sweep` (`share/templates/kanban/kanban-helpers.template.sh`). The shipped
+  template emitted the `PROTECTED SUBITEMS UNRESOLVED (N)` marker NOWHERE, while
+  canonical emits it and accumulates `protected_unresolved` in four places.
+  CLAUDE.md's three-gate PR merge flow keys Gate 3 on an ANCHORED grep of that
+  marker, so on every consumer box the pattern could never match and the gate
+  reported CLEAN regardless of open `[Review]`/`[Test]`/`[UX]` subitems — a merge
+  gate that fails OPEN, which is the structural form of the PR #435 incident that
+  merged through an open `[Review]`. Measured before the fix: non-comment emits
+  canonical 1 / template 0; `protected_unresolved` canonical 4 / template 0.
+  Also replaced the template's partial pre-XACA-0703 cancel-guard, which warned
+  on `[Review]`/`[Test]` but had NO `[UX]` branch at all — so a consumer agent
+  could silently cancel a `[UX]` subitem and walk past the gate this port
+  restores. The replacement carries XACA-0703's narrow reason-based exception
+  (`no ux/ui surface`) verbatim, so principled auto-cancels stay silent and
+  everything else warns. The marker string is byte-identical to canonical by
+  necessity: the monitor's grep is anchored to `PROTECTED SUBITEMS UNRESOLVED
+  \([0-9]+\)`, so any rewording breaks every team's merge gate at once.
+  Same never-shipped class as XACA-0214 / 0231 / 0223, in its most misleading
+  form — the shipped file carried FIVE separate comments and a `--help` line
+  describing a gate it did not implement, so reading the template suggested
+  consumers were protected when they were not. Regression coverage added at
+  `tests/test-xaca-1145-kb-sweep-tap-parity.zsh`; there was previously NO CI
+  parity gate for `kb-sweep` anywhere (`knowledge-helper-parity.yml` covers only
+  `_kb_knowledge_*` and `_kb_alloc_slot`), so nothing would have caught this and
+  nothing would have caught a regression of it.
 - XACA-1144-006: ship `iterm2_claude_active_watch.py` — the window-scoped watcher
   that makes the "C " indicator work for REMOTE (connect-script) teams. Added to
   `share/scripts/` and to `_xaca0673_mandatory_materialize_basenames()` so UPGRADED
