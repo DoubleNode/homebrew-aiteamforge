@@ -66,6 +66,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   runs clean and green under `/bin/bash` 3.2). No pre-existing manifest entry was changed or
   dropped; the diff is two additions.
 
+- XACA-1119 (hand-ported, [Review] follow-up): `_kb_val_global_sig` folds the FULL
+  `git status --porcelain` output into the signature, not only lines whose path ends
+  `.md`. The `*.md` test ran BEFORE the append, so a C-QUOTED path (any filename with a
+  space or non-ASCII byte) never entered the signature — measured, that produced a cache
+  SKIP while the validator exited 1 on a duplicate ID slot. Algorithm token bumped to
+  `kbval-global-sig-v2`, invalidating stale records. Applies to both this file and
+  `share/templates/aliases/kanban-aliases.sh`.
+
 - XACA-1138 (round 5): corrected the memoised image-check's cost figure in
   `share/scripts/agent-panel-display.sh` from 27-49ms to 27-124ms per call at both cache
   guards. The narrower range excluded the two slowest of four measurements, so the number

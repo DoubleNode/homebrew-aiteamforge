@@ -11426,12 +11426,26 @@ _kb_val_global_sig() {
 
     porc=$(git -C "$root" status --porcelain=v1 --untracked-files=all -- . 2>/dev/null) || return 1
 
+    # XACA-1119 [Review] FIX: fold the FULL porcelain, not only `.md` lines.
+    # The `*.md` test `continue`d BEFORE appending to $mdlines, so any line it
+    # rejected never entered the signature — a SILENT SKIP reachable in the
+    # ordinary case, because non-`-z` porcelain C-QUOTES a path containing a
+    # space or non-ASCII byte (`p` ends in `"`, so `*.md` is false). Measured:
+    # `?? "k001-beta copy.md"` left the signature byte-identical while the
+    # validator exited 1 on the duplicate ID slot it introduced. Not
+    # equal-blindness — the duplicate ID-slot check is a hard error over the
+    # FULL on-disk listing, independent of porcelain scope. Folding all of
+    # $porc does NOT reintroduce an always-true trigger: the predicate is
+    # "changed since last clean validate", so stable dirt stays skippable.
+    # $files still takes only unquoted `.md` paths — a C-quoted path cannot be
+    # `[[ -f ]]`-tested, and the validator's collector skips them identically.
+    mdlines="$porc"
+
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
         p="${line:3}"
         [[ "$p" == *" -> "* ]] && p="${p#* -> }"
         [[ "$p" == *.md ]] || continue
-        mdlines+="${line}"$'\n'
         [[ -f "${repo_top}/${p}" ]] && files+=("${repo_top}/${p}")
     done <<< "$porc"
 
@@ -11442,7 +11456,7 @@ _kb_val_global_sig() {
     fi
 
     {
-        print -r -- "kbval-global-sig-v1"
+        print -r -- "kbval-global-sig-v2"
         print -r -- "HEAD=${head_sha}"
         print -r -- "$mdlines"
         print -r -- "$out" | LC_ALL=C sort
