@@ -19,6 +19,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Silent no-op when the helper is absent (verified by sourcing under zsh, the
   file's actual shebang/sourcing shell). Scope deliberately narrow per user
   decision — the wider ~800-line divergence between the two files is untouched.
+  Hardening (same ticket): the `$DEV_TEAM_ROOT` probe is written
+  `${DEV_TEAM_ROOT:-}`, not `$DEV_TEAM_ROOT`. This file is sourced into every
+  interactive shell, and under `setopt nounset` a bare unset reference aborts
+  with "parameter not set" — which would break the terminal the two lines above
+  it promise never to break. Measured both forms under `/bin/zsh -c 'setopt
+  nounset'`. Note the canonical block does not reference `$DEV_TEAM_ROOT` at all,
+  so this override is new surface introduced here, not inherited.
 
 ## [0.20.8] - 2026-09-09
 - XACA-0853 (review round 3 follow-ups, PR #846): four review/test findings closed, two of which had

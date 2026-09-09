@@ -214,7 +214,7 @@ _cc_saved_session_label() {
 # interactive shell, so a missing helper must never break the terminal.
 _cc_clear_claude_active() {
     local _cc_badge_helper=""
-    if [[ -n "$DEV_TEAM_ROOT" && -f "$DEV_TEAM_ROOT/iterm2_badge_helper.sh" ]]; then
+    if [[ -n "${DEV_TEAM_ROOT:-}" && -f "${DEV_TEAM_ROOT}/iterm2_badge_helper.sh" ]]; then
         _cc_badge_helper="$DEV_TEAM_ROOT/iterm2_badge_helper.sh"
     elif [[ -f "$HOME/dev-team/iterm2_badge_helper.sh" ]]; then
         _cc_badge_helper="$HOME/dev-team/iterm2_badge_helper.sh"
