@@ -21298,6 +21298,1554 @@ _kb_msg_verify_registration() {
     return 1
 }
 
+# ============================================================================
+# kb-msg — Inter-Session & Inter-Team Comms Channel (XACA-0777)
+# ============================================================================
+#
+# A directed messaging channel so concurrent Claude Code chats can talk —
+# intra-team (academy:engineering → academy:chancellor) and inter-team across
+# the fleet (academy → ios). Addressing grammar is "<team>:<terminal>" (reuses
+# _kb_detect_context); "<team>" or "<team>:*" is a team broadcast.
+#
+# Two tiers, ONE local inbox — the CLI and surfacing hook are identical
+# regardless of a message's origin:
+#   * Tier 1 (same-machine): local JSONL via kanban-hooks/msg-store.py.
+#   * Tier 2 (cross-machine): SEAL the message to the recipient machine's public
+#     key, POST the opaque ciphertext to the fleet-monitor /api/msg relay; the
+#     recipient machine PULLS + sealOpens it into the SAME local inbox.
+#
+# PRIVACY (load-bearing): cross-machine traffic is sealed ciphertext the relay
+# cannot read (libsodium crypto_box_seal). NOTHING ever transits AMB
+# (dev.agentbadges.com) — that is a public plaintext test system.
+#
+# NOT A BOUNDARY VIOLATION: sending a message to another team is coordination,
+# not a code/kanban write into their repo. It is explicitly allowed.
+
+# Resolve the msg-store.py helper (host-local / tap-aware).
+_kb_msg_store() {
+    echo "${AITEAMFORGE_DIR:-$HOME/dev-team}/kanban-hooks/msg-store.py"
+}
+
+# Resolve the Tier-2 sealed client wrapper.
+_kb_msg_client() {
+    echo "${AITEAMFORGE_DIR:-$HOME/dev-team}/fleet-monitor/client/msg-client.sh"
+}
+
+# Resolve the current session's identity as "team terminal" (space-separated).
+# Falls back to KB_TEAM/KB_TERMINAL when context detection returns ERROR.
+_kb_msg_self() {
+    local ctx team terminal
+    ctx=$(_kb_detect_context 2>/dev/null)
+    team="${ctx%%:*}"
+    local rest="${ctx#*:}"
+    terminal="${rest%%:*}"
+    if [[ -z "$team" || "$team" == "ERROR" ]]; then
+        team="${KB_TEAM:-}"
+        terminal="${KB_TERMINAL:-agent}"
+    fi
+    [[ -z "$terminal" ]] && terminal="agent"
+    echo "$team $terminal"
+}
+
+# Resolve the destination machine slug for a cross-machine (Tier-2) send.
+# Layered, fail-closed (never a silent drop):
+#   1. $MSG_TARGET_MACHINE env override.
+#   2. ~/.aiteamforge/team-machines.json  { "<team>": "<machine-slug>", ... }
+#   3. hard error with remediation guidance.
+_kb_msg_resolve_machine() {
+    local team="$1"
+    if [[ -n "${MSG_TARGET_MACHINE:-}" ]]; then
+        echo "$MSG_TARGET_MACHINE"; return 0
+    fi
+    local map="$HOME/.aiteamforge/team-machines.json"
+    if [[ -f "$map" ]] && command -v jq &>/dev/null; then
+        local slug
+        slug=$(jq -r --arg t "$team" '.[$t] // empty' "$map" 2>/dev/null)
+        if [[ -n "$slug" && "$slug" != "null" ]]; then
+            echo "$slug"; return 0
+        fi
+    fi
+    return 1
+}
+
+# ── XACA-1090: result classes for `kb-msg doctor` ───────────────────────────
+#
+# The doctor used to have exactly one failure label, [GAP], and one counter. That
+# forced every finding into "the operator can fix this by running something",
+# which is how it came to print `run kb-msg-provision` under a row that
+# kb-msg-provision provably cannot close (measured 2026-09-04: exit 0, routing
+# map byte-identical, gap text unchanged). An operator following that instruction
+# loops forever and concludes they are doing it wrong. A diagnostic that names
+# the wrong remedy is worse than one that names none.
+#
+# Three classes now, each with its own counter:
+#
+#   [GAP]     operator-actionable. There is a command the operator can run that
+#             closes it. Drives the non-zero exit.
+#   [BLOCKED] a missing capability or environment constraint that no command
+#             available here can close. Printed and counted, but does NOT drive
+#             the exit code — failing a check nobody can fix only teaches people
+#             to ignore the check.
+#   [??]      indeterminate: the probe itself could not run or could not be read.
+#             Counted separately so it is visible as a BROKEN CHECK rather than a
+#             finding, but it DOES drive the exit code: a check that cannot run is
+#             itself something to fix, and treating it as benign is precisely the
+#             reassuring-wrong-answer failure this ticket exists to eliminate.
+#
+# NOTE ON [BLOCKED] BEING CURRENTLY UNUSED: as of XACA-1090 no row classifies as
+# BLOCKED. Every skip reason the reporter can record turned out to have a real,
+# verified remedy — including the vault-key row, which is why it is [GAP] below
+# and not [BLOCKED]. The class is implemented and unit-tested anyway, because the
+# alternative is what we just removed: when a genuinely-unclosable finding next
+# appears it would be labelled [GAP] and given an invented fix. Having the class
+# ready is what stops that. It is deliberately NOT justified by inventing a row.
+
+# _kb_msg_row / _kb_msg_cont — one place that owns the doctor's column widths.
+#
+# [BLOCKED] is 9 characters; the previous rows were hand-aligned against a
+# 5-character label with a hand-counted 24-space continuation indent. Deriving
+# both the row and its continuation lines from the same widths keeps the table
+# square the next time a label changes length, instead of leaving a row visually
+# shoved out of column and looking like a rendering bug.
+_kb_msg_row()  { printf '  %-9s %-14s %s\n' "$1" "$2" "$3"; }
+_kb_msg_cont() { printf '  %-9s %-14s %s\n' "" "" "$1"; }
+# Same geometry as above (2 + 9 + 1 + 14 + 1 = 27), for piping multi-line tool
+# output through sed. Kept adjacent to the format string so the two cannot drift.
+_KB_MSG_PAD='                           '
+
+# _kb_msg_probe_vault_key — is there a vault private credential for <slug> HERE?
+#
+# XACA-1090. Deliberately mirrors _msg_has_vault_key in
+# fleet-monitor/client/fleet-reporter.sh: same Keychain service, same account,
+# same file fallback, same order. The point is NOT to add another opinion about
+# where credentials live — it is to run the reporter's OWN predicate from an
+# interactive shell so the doctor can compare its answer with the one the
+# reporter recorded. When the two disagree, the credential exists but is
+# invisible to the context the reporter runs in, and that disagreement IS the
+# diagnosis.
+#
+# Returns 0 = found, 1 = not found. Prints nothing.
+_kb_msg_probe_vault_key() {
+    local slug="${1:-}"
+    [[ -n "$slug" ]] || return 1
+    if [[ "$(uname -s)" == "Darwin" ]] && command -v security >/dev/null 2>&1; then
+        if security find-generic-password -s com.aiteamforge.vault -a "$slug" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    if [[ -f "$HOME/.aiteamforge/vault/${slug}.key" ]]; then
+        return 0
+    fi
+    # Explicit `return 1` rather than letting the last conditional fall through:
+    # `[[ cond ]] && return 0` as a function's final line aborts the caller under
+    # `set -e` when the condition is false. This file is sourced into shells that
+    # set it.
+    return 1
+}
+
+# _kb_msg_is_epoch — is this string a bare epoch-seconds integer?
+#
+# Shared by the probes below. Portable `case`, not zsh's `<->` glob: this file is
+# sourced by non-zsh consumers, where a zsh-only pattern would silently never
+# match and every timestamp would be discarded as unreadable — the same class of
+# bug the mtime fallback chain in the doctor already had to be repaired for.
+_kb_msg_is_epoch() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+# _kb_msg_recorded_slug <state> — the machine slug the REPORTER recorded.
+#
+# XACA-1090 follow-up (PR #816 review). The doctor derives its slug from
+# vault-keygen.js; the reporter derives its own by shell hostname munging
+# (_msg_default_machine_slug in fleet-monitor/client/fleet-reporter.sh). Those
+# are two independent derivations, and the doctor's entire present-vs-absent
+# diagnosis is only meaningful if they agree — a doctor that probed a DIFFERENT
+# account than the one the reporter looked for would report "present but not
+# visible" about a credential the reporter was never looking for.
+#
+# The record already carries the reporter's answer, so nothing has to be
+# re-derived to compare them: both the current record shape
+#   no-vault-key: no vault private key for machine 'X' visible to this process ...
+# and the pre-XACA-1090 one still found on un-upgraded boxes
+#   no-vault-key: nothing registered for machine 'X' — run kb-msg-provision
+# quote the slug the same way. Prints nothing and returns 1 when the record does
+# not carry one — the caller must then skip the comparison rather than treat an
+# unparsed record as a mismatch.
+_kb_msg_recorded_slug() {
+    local state="${1:-}" s
+    s=$(printf '%s' "$state" | sed -n "s/.*machine '\([^']*\)'.*/\1/p" | head -1)
+    [[ -n "$s" ]] || return 1
+    printf '%s' "$s"
+    return 0
+}
+
+# _kb_msg_reporter_scheduler — HOW is fleet-reporter.sh actually started here?
+#
+# XACA-1090 follow-up (PR #816 review). The receive-path row used to assert
+# "(cron shares no login keychain search list)" unconditionally, while nothing in
+# the doctor ever looked at a scheduler. On a LaunchAgent-scheduled box — which,
+# per the fleet measurement in the row's own comment, is BOTH consumer machines —
+# that sentence blamed a mechanism that is not in use. Stating an unmeasured
+# cause is the exact defect this ticket exists to remove, so it is measured here
+# instead.
+#
+# Prints one of: cron | launchd | cron+launchd. Prints nothing and returns 1 when
+# it PROBED and found neither, and the caller must then say the scheduler is
+# UNIDENTIFIED rather than assuming one.
+#
+# XACA-1090 follow-up #2 (PR #816 review, subitem 17). "Found nothing" and "never
+# looked" were the same return value, and the caller's unidentified row then said
+# "no crontab entry and no ~/Library/LaunchAgents plist names it" — evidence
+# about probes that, in the second case, had not run. That is this ticket's own
+# defect one layer deeper, so there is now a THIRD state: prints `unprobed` and
+# returns 2 when the probe could not actually be carried out. Reachable in
+# practice, not hypothetically: `_kb_msg_probe_vault_key`'s ~/.aiteamforge/vault/
+# file fallback is not Darwin-gated, so a Linux box with no `crontab` on PATH and
+# no ~/Library/LaunchAgents reaches this row having looked at nothing.
+#
+# `crontab -l` is the hard case, because a user with no crontab legitimately
+# exits NON-ZERO on vixie-cron ("crontab: no crontab for <user>"). So the exit
+# code alone cannot separate "ran, nothing scheduled" from "could not run":
+#   * exit 0                       -> ran; grep decides.
+#   * non-zero + "no crontab for"  -> ran; this user genuinely has none. A result.
+#   * non-zero, anything else      -> AMBIGUOUS, and therefore `unprobed`.
+# The ambiguous case is deliberately resolved toward `unprobed` rather than
+# toward evidence: over-claiming evidence is the exact defect being fixed here,
+# and the verdict ("the cause is NOT established") is identical either way, so
+# nothing is lost by declining to conclude.
+#
+# A positive find still wins over an unprobeable sibling — a measured LaunchAgent
+# is a measured LaunchAgent whether or not `crontab` could be read — because that
+# branch's wording claims only what it found, never the absence of the other.
+#
+# Deliberate limits, so the output can be trusted for exactly what it claims:
+#   * `launchctl list` is not consulted — it prints labels, not program paths, so
+#     it cannot attribute a job to the reporter. The plists are the evidence.
+#   * only ~/Library/LaunchAgents is scanned. That is where AITeamForge installs
+#     its agents, and it is the only location a test can control; a system-wide
+#     scan would make this host-dependent and unpinnable.
+# A reporter started some third way (a login script, a tmux startup hook) reports
+# as unidentified, which is the honest answer, not a false "cron".
+_kb_msg_reporter_scheduler() {
+    local found="" hit unprobed="" cron_out="" cron_err="" cron_rc=0 errfile=""
+    if command -v crontab >/dev/null 2>&1; then
+        # stderr is captured, not discarded. Discarding it is what made the two
+        # non-zero cases indistinguishable in the first place.
+        errfile=$(mktemp 2>/dev/null) || errfile="${TMPDIR:-/tmp}/kb-msg-cron-err.$$"
+        # `|| cron_rc=$?` and not a bare assignment: under `set -e` a failing
+        # command substitution in an assignment aborts the calling shell, and
+        # this file is sourced into shells that set it.
+        cron_out=$(crontab -l 2>"$errfile") || cron_rc=$?
+        cron_err=$(cat "$errfile" 2>/dev/null || true)
+        rm -f "$errfile"
+        if [[ $cron_rc -eq 0 ]]; then
+            # Strip comment lines first: a commented-out entry is not a schedule.
+            if printf '%s\n' "$cron_out" | grep -v '^[[:space:]]*#' | grep -q 'fleet-reporter'; then
+                found="cron"
+            fi
+        elif printf '%s' "$cron_err" | grep -qi 'no crontab for'; then
+            : # Ran, and this user has no crontab. A real probe result, not a gap.
+        else
+            unprobed="yes"
+        fi
+    else
+        # No `crontab` on PATH at all — the Linux case named in subitem 17.
+        unprobed="yes"
+    fi
+    if [[ -d "$HOME/Library/LaunchAgents" && ! ( -r "$HOME/Library/LaunchAgents" && -x "$HOME/Library/LaunchAgents" ) ]]; then
+        # Present but not listable, so its contents are evidence in NEITHER
+        # direction. Distinct from absent-or-empty, which IS a real result: a
+        # directory that does not exist holds no plist, and one that exists and
+        # lists clean was genuinely searched.
+        unprobed="yes"
+    elif [[ -d "$HOME/Library/LaunchAgents" ]]; then
+        # `find ... -exec grep -l {} +`, deliberately NOT a `"$dir"/*.plist`
+        # loop. Under zsh an unmatched glob is a hard error, so on a box whose
+        # ~/Library/LaunchAgents exists but holds no plist the first draft
+        # printed `no matches found: .../*.plist` and, under `set -e`, took the
+        # calling shell down with it — and this file is sourced into shells that
+        # set it.
+        #
+        # Scope of that, stated exactly, because the first version of this
+        # comment overstated it and the test written from it could not fail:
+        # the doctor's OWN call site is `$(... 2>/dev/null || true)`, which
+        # swallows the message and yields the same "scheduler unidentified"
+        # verdict either way — measured by reinstating the glob and diffing the
+        # doctor's output, which came back identical. The hazard is to any
+        # OTHER caller, and to a `set -e` shell; `find` with `+` simply does not
+        # invoke grep when there are no files, on both shells, and needs no
+        # shell-specific nullglob/nomatch option.
+        hit=$(find "$HOME/Library/LaunchAgents" -maxdepth 1 -type f -name '*.plist' \
+                -exec grep -l 'fleet-reporter' {} + 2>/dev/null | head -1)
+        if [[ -n "$hit" ]]; then
+            if [[ -n "$found" ]]; then found="cron+launchd"; else found="launchd"; fi
+        fi
+    fi
+    # Explicit `if`s, not `[[ ... ]] && printf`: a short-circuiting test as a
+    # function's last line returns non-zero and aborts a `set -e` caller.
+    if [[ -n "$found" ]]; then
+        printf '%s' "$found"
+        return 0
+    fi
+    if [[ -n "$unprobed" ]]; then
+        printf '%s' "unprobed"
+        return 2
+    fi
+    return 1
+}
+
+# _kb_msg_vault_key_ctime <slug> — when was this credential created, in epoch s?
+#
+# XACA-1090 follow-up (PR #816 review). "The credential is here but the reporter
+# could not see it" is only sound if the credential existed WHEN the reporter
+# last ran. If it was created afterwards, the record is merely stale and nothing
+# is invisible at all — a different fault with a different remedy (re-run the
+# reporter), and the row must not assert invisibility over it.
+#
+# Same two backends as _kb_msg_probe_vault_key, in the same order, so the time
+# reported belongs to the credential the probe actually found:
+#   * Keychain: the item's own "cdat" attribute, a real creation timestamp.
+#   * file fallback: the key file's mtime, which is a proxy — the caller says
+#     "created or last written" rather than overstating it.
+# Prints nothing and returns 1 when it cannot be determined; the caller must then
+# say the comparison could not be made rather than assume the record is current.
+_kb_msg_vault_key_ctime() {
+    local slug="${1:-}" out ts epoch=""
+    [[ -n "$slug" ]] || return 1
+    if [[ "$(uname -s)" == "Darwin" ]] && command -v security >/dev/null 2>&1; then
+        out=$(security find-generic-password -s com.aiteamforge.vault -a "$slug" 2>/dev/null || true)
+        # Attribute line shape: "cdat"<timedate>=0x3230...  "20260825150845Z\000"
+        ts=$(printf '%s\n' "$out" | sed -n 's/.*"cdat"<timedate>=.*"\([0-9]\{14\}\)Z.*/\1/p' | head -1)
+        if [[ -n "$ts" ]]; then
+            # Darwin-only branch, so BSD `date -j -f` is the right tool here; the
+            # value is validated as an epoch regardless, because a tool that
+            # SUCCEEDS while printing something else is the failure mode this
+            # file has already been bitten by (GNU `stat -f`).
+            epoch=$(date -j -u -f '%Y%m%d%H%M%S' "$ts" +%s 2>/dev/null || true)
+            if _kb_msg_is_epoch "$epoch"; then
+                printf '%s' "$epoch"
+                return 0
+            fi
+        fi
+    fi
+    local kf="$HOME/.aiteamforge/vault/${slug}.key"
+    if [[ -f "$kf" ]]; then
+        epoch=""
+        if epoch=$(stat -c %Y "$kf" 2>/dev/null) && _kb_msg_is_epoch "$epoch"; then
+            :
+        elif epoch=$(stat -f %m "$kf" 2>/dev/null) && _kb_msg_is_epoch "$epoch"; then
+            :
+        else
+            epoch=""
+        fi
+        if [[ -n "$epoch" ]]; then
+            printf '%s' "$epoch"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# _kb_msg_ago <seconds> — render an age as "5m ago" / "3h ago" / "2d ago".
+#
+# One formatter, so the two ages the receive-path row compares (the credential's
+# and the record's) are always rendered in the same units and can be read against
+# each other. Negative input is clamped rather than printed: a negative age is a
+# clock artefact, and "-3m ago" would look like a finding.
+_kb_msg_ago() {
+    local s="${1:-0}"
+    case "$s" in ''|*[!0-9-]*) s=0 ;; esac
+    if (( s < 0 )); then s=0; fi
+    if (( s < 3600 )); then
+        printf '%dm ago' $(( s / 60 ))
+    elif (( s < 86400 )); then
+        printf '%dh ago' $(( s / 3600 ))
+    else
+        printf '%dd ago' $(( s / 86400 ))
+    fi
+}
+
+# _kb_msg_doctor_summary — the exit-code contract, in one testable place.
+#
+# XACA-1090-003. Factored out of _kb_msg_doctor so the contract can be exercised
+# directly for combinations that no live machine currently produces (notably
+# blocked-only, since no row classifies as BLOCKED today). A contract that can
+# only be tested by first arranging a real broken machine is a contract that does
+# not get tested.
+#
+# Args: <gaps> <blocked> <unknown> <strict:0|1>
+# Exit: 0 when there is nothing for the operator to act on; 1 otherwise.
+_kb_msg_doctor_summary() {
+    local gaps="${1:-0}" blocked="${2:-0}" unknown="${3:-0}" strict="${4:-0}"
+
+    if (( gaps == 0 && blocked == 0 && unknown == 0 )); then
+        echo "  No gaps. kb-msg is fully provisioned on this machine."
+        return 0
+    fi
+
+    printf '  %d actionable gap(s), %d blocked, %d indeterminate.\n' \
+        "$gaps" "$blocked" "$unknown"
+
+    if (( gaps > 0 || unknown > 0 )); then
+        echo "  Cross-machine mail is unreliable until the [GAP] rows are closed. A [??] row"
+        echo "  is a check that could not run, which is itself something to fix — both exit 1."
+        return 1
+    fi
+
+    # Blocked-only. Say plainly that the channel is still degraded — printing a
+    # reassuring "no gaps" here would be the same lie in the other direction.
+    echo "  The channel is still degraded, but nothing above can be closed by running a"
+    echo "  command on this machine — see the [BLOCKED] row(s)."
+    # The sentence about the exit code is emitted per BRANCH, not once above it.
+    # The first draft printed "Exiting 0 ..." unconditionally and then returned 1
+    # under --strict — a summary that stated the opposite of what it did. Caught
+    # by running both modes, not by reading them; it is the same defect class
+    # this whole ticket exists to remove, reproduced inside the fix for it.
+    if (( strict != 0 )); then
+        echo "  --strict: failing anyway, because at least one row above is not [ok]."
+        return 1
+    fi
+    echo "  Exiting 0: there is no operator action to take. Use --strict to fail on any"
+    echo "  non-ok row."
+    return 0
+}
+
+# _kb_msg_doctor — one command that answers "is kb-msg actually working here?"
+#
+# XACA-0885-004. Every provisioning gap this diagnoses was, until this ticket,
+# invisible by construction: the inbox hook was symlinked but never registered,
+# the vault keypair was never generated, the routing map was never written, and
+# the receive path skipped in total silence. Each piece reported success while
+# the channel was dead end to end, which is how 34 messages accumulated unread.
+#
+# This COMPOSES the --check modes of the tools that own each fact rather than
+# re-deriving any of them. That is deliberate: this tree already carries four
+# independent derivations of "the machine slug", and a doctor that reimplemented
+# a fifth would eventually disagree with the thing it is meant to diagnose and
+# report health that does not exist.
+#
+# XACA-1090 adds result classification (see the block above) and one genuinely
+# new capability: the doctor no longer merely reprints what the reporter
+# recorded. For the vault-credential skip it re-runs the reporter's own predicate
+# and reports the DIFFERENCE, which is a diagnosis the reporter structurally
+# cannot make about itself.
+_kb_msg_doctor() {
+    local base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
+
+    # --strict: exit non-zero on ANY non-ok row, including [BLOCKED]. Exists so a
+    # future CI gate can demand a fully clean board without the interactive
+    # default having to punish an operator for a condition they cannot close.
+    # The unread-mail row is deliberately NOT counted in either mode: having mail
+    # is the normal, healthy state of a working channel, and counting it would
+    # leave --strict permanently red on every box that is actually being used.
+    local strict=0 _a
+    for _a in "$@"; do
+        case "$_a" in
+            --strict) strict=1 ;;
+            # Handled explicitly so the rejection below cannot swallow it: an
+            # operator asking for help would otherwise get "unknown option:
+            # --help" and exit 2, which is a worse answer than the one this
+            # branch gives and would have been a regression introduced by the
+            # fix rather than by the bug.
+            -h|--help)
+                printf 'usage: kb-msg doctor [--strict]\n'
+                printf '  --strict  fail on ANY non-ok row, [BLOCKED] included (for CI).\n'
+                printf '  exit 0 = nothing to act on, 1 = gaps or indeterminate rows, 2 = bad usage.\n'
+                return 0
+                ;;
+            # Unknown flags are REJECTED, not ignored (PR #816 review). This loop
+            # had no default case, so `--strcit`, `-strict` and `--STRICT` all ran
+            # in DEFAULT mode and exited 0 without a word — measured, not assumed.
+            # A CI gate invoking a typo'd flag would therefore go green while
+            # asserting nothing: a false-green vector inside the very flag that
+            # was added so CI could be strict. Exit 2, distinct from 1, so the
+            # caller can tell "you invoked me wrongly" from "I found gaps".
+            *)
+                printf 'kb-msg doctor: unknown option: %s\n' "$_a" >&2
+                printf 'usage: kb-msg doctor [--strict]\n' >&2
+                return 2
+                ;;
+        esac
+    done
+
+    # Two layouts, and the doctor must find its tools in both or it reports
+    # "[??] cannot check" forever on exactly the machines that most need it.
+    # Dev keeps hooks under claude-hooks/; the tap FLATTENS everything into
+    # scripts/, so a claude-hooks/ path resolves on a dev box and nowhere else.
+    # Mirrors the same search _locate_keygen does in kb-msg-provision.
+    local reg="" prov="" _c
+    for _c in "$base/claude-hooks/register-claude-hook.py" \
+              "$base/scripts/register-claude-hook.py" \
+              "$HOME/aiteamforge/scripts/register-claude-hook.py"; do
+        [[ -f "$_c" ]] && { reg="$_c"; break; }
+    done
+    for _c in "$base/scripts/kb-msg-provision" \
+              "$HOME/aiteamforge/scripts/kb-msg-provision"; do
+        [[ -x "$_c" ]] && { prov="$_c"; break; }
+    done
+
+    local status_file="$HOME/.aiteamforge/run/kb-msg-pull-status"
+    local gaps=0 blocked=0 unknown=0
+
+    # The remediation lines below tell an operator to run setup-hooks.sh. That
+    # script symlinks hooks from wherever it is invoked, so running it out of a
+    # feature worktree points every hook in ~/.claude/hooks/ into a directory
+    # that is deleted when the worktree is removed — silently breaking ALL hooks,
+    # days later, with no connection to the change that caused it (XACA-0920).
+    # A diagnostic that emits a destructive instruction is worse than one that
+    # emits none, so the fix path is pinned to the main checkout and the worktree
+    # case is called out rather than papered over.
+    local fix_base="$base"
+    local wt_warning=""
+    if [[ "$base" == *"/worktrees/"* ]]; then
+        fix_base="$HOME/dev-team"
+        wt_warning="  NOTE: running from a worktree. Fix commands below deliberately name the
+        main checkout — running setup-hooks.sh from a worktree breaks every hook
+        when that worktree is removed (XACA-0920)."
+    fi
+
+    echo "kb-msg doctor"
+    [[ -n "$wt_warning" ]] && { echo; printf '%s\n' "$wt_warning"; }
+    echo
+
+    # ── 1. Inbox hook registration (Tier 1 + Tier 2 surfacing) ──────────────
+    # Without this, mail is delivered correctly and nobody is ever told.
+    local hook_cmd="bash $HOME/.claude/hooks/msg-inbox-check.sh"
+    if [[ -n "$reg" ]] && command -v python3 >/dev/null 2>&1; then
+        if python3 "$reg" --check --quiet --event SessionStart --event Stop \
+                   --command "$hook_cmd" >/dev/null 2>&1; then
+            _kb_msg_row "[ok]" "inbox hook" "registered on SessionStart + Stop"
+        else
+            # Genuinely operator-actionable: setup-hooks.sh closes it. Stays
+            # [GAP] — it is not reclassified merely to make the exit greener.
+            _kb_msg_row "[GAP]" "inbox hook" "NOT registered — mail arrives and is never surfaced"
+            _kb_msg_cont "fix: bash $fix_base/claude-hooks/setup-hooks.sh"
+            gaps=$((gaps + 1))
+        fi
+    else
+        _kb_msg_row "[??]" "inbox hook" "cannot check (register-claude-hook.py or python3 missing)"
+        unknown=$((unknown + 1))
+    fi
+
+    # ── 2 + 3. Vault keypair and routing map (Tier 2 send) ──────────────────
+    #
+    # XACA-1078-005 (24h-unattended-cadence observability). `--check`'s own
+    # "GAPS:" text folds an absent map into one line inside a combined
+    # per-team gap list, and reports NOTHING distinct for "map present but
+    # EMPTY" when this machine currently has zero local teams — an empty
+    # `{}` then makes `missing` (in kb-msg-provision main()) compute empty
+    # too, so `--check` exits 0, clean, on a genuinely empty map. At a nightly
+    # unattended cadence on a machine nobody logs into, that silent pass is
+    # indistinguishable from the failure this whole ticket was filed for
+    # (XACA-1078-001 Decision 3: "kb-msg doctor is the required substitute
+    # for the operator who is no longer watching").
+    #
+    # This does NOT re-derive routing/ownership logic (that would be the
+    # sibling-heuristic drift this repo is on record for — k501). Existence
+    # and top-level key COUNT are structural facts about the file, not a
+    # second implementation of local_teams()'s tier resolution, and `--check`
+    # (already invoked below) remains the sole source for everything that
+    # actually requires that resolution — vault-key presence and per-team gaps.
+    # SIBLING-DRIFT NOTE (XACA-1078-021, k501 pattern): this path is defined a
+    # second time as TEAM_MACHINES in scripts/kb-msg-provision. They cannot share
+    # a constant — one is zsh, the other python3 — so the coupling is by comment,
+    # deliberately, on the same footing as sync-tap.sh's SYNC_TAP_PATHS note.
+    # If you move the routing map, BOTH sites change or the doctor silently
+    # inspects a file the provisioner never writes.
+    local map_path="$HOME/.aiteamforge/team-machines.json"
+    local map_state="present"   # present | absent | empty | malformed | unknown
+    local map_keys
+    if [[ ! -f "$map_path" ]]; then
+        map_state="absent"
+    elif command -v jq &>/dev/null; then
+        # Both parsers emit the SAME vocabulary: a count, the token `notdict`,
+        # or nothing at all on a parse failure. Before this they disagreed —
+        # jq turned `[]` into 0 and reported EMPTY, while the python3 fallback
+        # computed -1 and then only tested `== "0"`, discarding it and going
+        # silent. A malformed map was therefore reported differently depending
+        # on which parser happened to be installed, and under python3 not at all.
+        map_keys=$(jq -r 'if type == "object" then (keys | length) else "notdict" end' "$map_path" 2>/dev/null)
+    elif command -v python3 &>/dev/null; then
+        # XACA-1078-012 (PR #825 review). jq is NOT guaranteed on a consumer
+        # machine, and with only the jq branch an EMPTY map fell through to the
+        # "present" default and was reported healthy — the precise silent-healthy
+        # reading this check was added to prevent. python3 is already a hard
+        # dependency at this call site: kb-msg-provision itself is a python3
+        # script, so if python3 is missing the tool could not have run either.
+        map_keys=$(python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+print(len(d) if isinstance(d, dict) else "notdict")' "$map_path" 2>/dev/null)
+    else
+        # Neither parser present. Say so rather than defaulting to "present":
+        # that default is an assertion about the map's contents that nothing
+        # here measured, and asserting health you did not measure is the exact
+        # failure mode this ticket exists to remove.
+        map_state="unknown"
+    fi
+
+    # Normalise whichever parser ran. An empty result means the parser failed
+    # outright (invalid JSON, unreadable file) — that is `malformed`, NOT the
+    # `present` default it used to silently fall through to.
+    if [[ "$map_state" == "present" ]]; then
+        case "$map_keys" in
+            "")        map_state="malformed" ;;
+            notdict)   map_state="malformed" ;;
+            0)         map_state="empty" ;;
+        esac
+    fi
+
+    # ── Routing map state: ONE independent row ───────────────────────────────
+    # XACA-1078-018/019/022 (PR #825 review round 2). The map's state is a
+    # STRUCTURAL fact about a file on disk. It does not depend on whether the
+    # provisioner exists, whether it could run, or what it concluded.
+    #
+    # It had accreted into FIVE branches — rc==0+empty, rc==0+unknown, rc==2,
+    # rc-other, and tool-absent — each independently deciding whether to mention
+    # the map, and therefore each an independent chance to MASK it. Two masking
+    # bugs were found and fixed one site at a time (rc==2, surfaced by CI; then
+    # tool-absent, surfaced in review) before it was clear the DUPLICATION was
+    # the defect rather than any individual branch. This is the k501
+    # sibling-heuristic-drift pattern inside a single function.
+    #
+    # Emitted once, here, before any prov_rc branch: no downstream branch can
+    # suppress it, and none has to remember to repeat it.
+    case "$map_state" in
+        absent)
+            _kb_msg_row "[GAP]" "routing map" "ABSENT — $map_path not found"
+            _kb_msg_cont "fix: $fix_base/scripts/kb-msg-provision"
+            gaps=$((gaps + 1))
+            ;;
+        empty)
+            _kb_msg_row "[GAP]" "routing map" "EMPTY — $map_path has zero entries"
+            _kb_msg_cont "fix: $fix_base/scripts/kb-msg-provision"
+            gaps=$((gaps + 1))
+            ;;
+        malformed)
+            # kb-msg-provision itself refuses to rewrite a malformed map (exit 2,
+            # deliberately — an operator-maintained remote mapping cannot be
+            # regenerated). The doctor must therefore NAME it, or the operator
+            # is left with a tool that refuses to run and no stated reason.
+            _kb_msg_row "[GAP]" "routing map" "MALFORMED — $map_path is not a JSON object"
+            _kb_msg_cont "fix by hand; kb-msg-provision deliberately refuses to rebuild it"
+            gaps=$((gaps + 1))
+            ;;
+        unknown)
+            _kb_msg_row "[??]" "routing map" "NOT INSPECTED — no jq or python3 to count entries"
+            _kb_msg_cont "an empty map is indistinguishable from a healthy one here"
+            unknown=$((unknown + 1))
+            ;;
+    esac
+
+    if [[ -n "$prov" ]]; then
+        local prov_out prov_rc
+        prov_out=$("$prov" --check 2>&1); prov_rc=$?
+        if [[ $prov_rc -eq 0 ]]; then
+            # XACA-1078-022: says only what rc==0 actually proves. It no longer
+            # claims "routing map present" — the map row above owns that, and
+            # conflating them is how an EMPTY map previously consumed this row
+            # entirely, losing the vault-key signal rc==0 does establish.
+            _kb_msg_row "[ok]" "tier-2 setup" "vault key present; provisioning reports no per-team gaps"
+        elif [[ $prov_rc -eq 2 ]]; then
+            _kb_msg_row "[GAP]" "tier-2 setup" "environment problem — see below"
+            printf '%s\n' "$prov_out" | sed "s/^/$_KB_MSG_PAD/"
+            gaps=$((gaps + 1))
+        else
+            # Stays [GAP]: kb-msg-provision demonstrably closes this one. It is
+            # the RECEIVE row below that it could not close, not this one — and
+            # conflating the two is what produced the contradictory pair of lines
+            # XACA-1090 was filed for.
+            #
+            # XACA-1078 (round-3 test gate): the map row above already states an
+            # absent/empty map, and `--check` lists that same fault in its own
+            # GAPS block. Emitting both printed the map's absence TWICE and
+            # counted it as two gaps (4 instead of 3 on a bare machine — the
+            # default path for exactly the never-provisioned box this ticket
+            # serves). Extract only the gap bullets, drop the one the map row
+            # already owns, and suppress this whole row when nothing else is
+            # left — otherwise it is a duplicate wearing a generic headline.
+            # The tool's gap lines arrive PREFIXED — `_notice` writes
+            # "kb-msg-provision: " ahead of every line, and XACA-1078-017 moved
+            # the GAPS list onto `_notice` so it survives --quiet. Strip that
+            # prefix BEFORE extracting bullets. Anchoring on "^[[:space:]]*- "
+            # alone matched nothing, so `_kb_other_gaps` was unconditionally
+            # empty on every rc==1 run and this whole row — with every real gap
+            # it carries, including a missing vault keypair — was silently
+            # swallowed. The doctor then reported FEWER gaps than `--check`
+            # itself did: the precise masking this check exists to prevent,
+            # reintroduced by the fix for the opposite defect (double-reporting).
+            local _kb_all_bullets _kb_other_gaps
+            _kb_all_bullets=$(printf '%s\n' "$prov_out" \
+                | sed 's/^kb-msg-provision: //' \
+                | sed -n 's/^[[:space:]]*- //p')
+            _kb_other_gaps=$(printf '%s\n' "$_kb_all_bullets" \
+                | grep -v -x -F "no $map_path" || true)
+            if [[ -z "$_kb_all_bullets" ]]; then
+                # XACA-1078 (round-5 review): a non-zero exit with NO parseable
+                # gap list means the tool could not RUN — a traceback from a
+                # corrupt team-paths.json (a documented incident in this repo:
+                # the vanished freelance-* teams), or exit 127 with no python3.
+                # Gating on the post-filter list conflated "ran and found gaps"
+                # with "could not run" and silenced the latter entirely: no row,
+                # no gap counted. That is the third instance of this fail-open
+                # shape in this one block, and it defeats the stated reason the
+                # `malformed` state exists — the operator must not be left with
+                # a tool that refuses to run and no stated reason.
+                #
+                # Gate on the PRE-filter list: "every bullet was deduped" and
+                # "there were never any bullets" are different facts.
+                _kb_msg_row "[??]" "tier-2 setup" "kb-msg-provision exited $prov_rc with no parseable gap list — see below"
+                printf '%s\n' "$prov_out" | sed "s/^/$_KB_MSG_PAD/"
+                unknown=$((unknown + 1))
+            elif [[ -n "$_kb_other_gaps" ]]; then
+                _kb_msg_row "[GAP]" "tier-2 setup" "incomplete — cross-machine send will fail closed"
+                printf '%s\n' "$_kb_other_gaps" | sed "s/^/${_KB_MSG_PAD}- /"
+                _kb_msg_cont "fix: $fix_base/scripts/kb-msg-provision"
+                gaps=$((gaps + 1))
+            fi
+        fi
+    else
+        _kb_msg_row "[??]" "tier-2 setup" "kb-msg-provision not found under $base or ~/aiteamforge"
+        _kb_msg_cont "fix: aiteamforge upgrade   (reinstalls missing scripts, then re-run kb-msg doctor)"
+        # Counter stays `unknown`, per XACA-1090: a missing tool means the check
+        # could not be made, which is not the same as a confirmed gap. Flipping
+        # this to `gaps` would silently change the doctor's exit semantics.
+        unknown=$((unknown + 1))
+    fi
+
+    # ── 4. Reporter liveness (Tier 2 RECEIVE) ───────────────────────────────
+    # Freshness of the status file is the proxy, not a process check: the
+    # reporter is scheduled differently across machines (launchd, cron, startup
+    # script), and a doctor that pinned one mechanism would report a false
+    # failure on the others. If the file is being written, something is running
+    # it; if it is stale, nothing is — regardless of how it was meant to run.
+    if [[ -f "$status_file" ]]; then
+        local age_s now mtime state
+        now=$(date +%s)
+        # Read the recorded state BEFORE the age probe: the unknown-age branch
+        # reports it too, and assigning it afterwards left that branch printing
+        # an empty "last state:" — caught by exercising the branch, not reading it.
+        state=$(head -1 "$status_file" 2>/dev/null || echo "(unreadable)")
+        # GNU form FIRST, and every result validated as an epoch integer.
+        #
+        # The original probe was `stat -f %m || stat -c %Y || echo 0`, which is
+        # correct on macOS and silently wrong on Linux: GNU stat's -f is
+        # --file-system, so `stat -f %m` there does NOT fail — it succeeds and
+        # prints something that is not this file's mtime. The `||` fallback
+        # therefore never fires, every status file computes as ancient, and the
+        # doctor reports "reporter is not running" on a box where it is running.
+        # Caught only by CI (Linux); no amount of local macOS testing could see
+        # it. A fallback chain guarded by exit status alone is unsafe whenever
+        # the wrong tool can succeed — validate the VALUE, not just the status.
+        # Portable digit check (case, not zsh's <-> glob): this file is sourced
+        # by non-zsh consumers too, and a zsh-only pattern would silently never
+        # match there — reintroducing the same class of bug in the guard itself.
+        _kb_is_epoch() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+        mtime=""
+        if mtime=$(stat -c %Y "$status_file" 2>/dev/null) && _kb_is_epoch "$mtime"; then
+            :
+        elif mtime=$(stat -f %m "$status_file" 2>/dev/null) && _kb_is_epoch "$mtime"; then
+            :
+        else
+            mtime=""
+        fi
+        unset -f _kb_is_epoch 2>/dev/null || true
+        if [[ -z "$mtime" ]]; then
+            # Unknown age is NOT "fresh" and NOT "stale" — say so, and STOP.
+            #
+            # REVIEW FINDING (PR #758): the first version of this branch printed
+            # the [??] line and then set mtime="$now" and fell through, so a
+            # machine whose mtime could not be read got "cannot read the age"
+            # immediately followed by "[ok] relay reached 0m ago", and the gap
+            # was counted twice. Handling the failed READ but not the control
+            # flow after it re-created, inside the guard against inventing a
+            # verdict, exactly the reassuring-wrong-answer bug the guard exists
+            # to prevent. Skip the age branches entirely instead.
+            _kb_msg_row "[??]" "receive path" "cannot read the age of $status_file"
+            _kb_msg_cont "last state: $state"
+            unknown=$((unknown + 1))
+        else
+        age_s=$(( now - mtime ))
+        if (( age_s > 3600 )); then
+            _kb_msg_row "[GAP]" "receive path" "last pull attempt was $(( age_s / 3600 ))h ago — reporter is not running"
+            _kb_msg_cont "last state: $state"
+            gaps=$((gaps + 1))
+        elif [[ "$state" == ok:* ]]; then
+            _kb_msg_row "[ok]" "receive path" "relay reached $(( age_s / 60 ))m ago"
+        elif [[ "$state" == no-vault-key:* ]]; then
+            # ── XACA-1090: diagnose, do not parrot ──────────────────────────
+            #
+            # The reporter can only record WHAT it failed to find. It structurally
+            # cannot tell "there is no credential on this box" apart from "the
+            # credential is here but my process cannot see it" — its predicate
+            # returns the same value in both cases. The doctor can, because it
+            # runs interactively: re-run the reporter's own predicate and report
+            # the DIFFERENCE between the two answers.
+            #
+            # MEASURED on darren-m3pro 2026-09-04, which is what this ticket was
+            # filed for. Interactive shell and `env -i`: FOUND. Under cron:
+            # `security` exits 44, "The specified item could not be found in the
+            # keychain." Cron has no user security session, so login.keychain-db
+            # is not in its keychain search list. Nothing was ever missing.
+            #
+            # The old text here reprinted the reporter's state verbatim, which
+            # ended `— run kb-msg-provision`. That command provably cannot close
+            # this (verified same day: exit 0, routing map byte-identical, gap
+            # text unchanged), because what it would generate already exists.
+            # Remediation belongs here, where the comparison is possible, not in
+            # a state record written by a process that cannot make it.
+            local vk_slug rec_slug
+            vk_slug=$(_kb_msg_this_machine 2>/dev/null || true)
+            rec_slug=$(_kb_msg_recorded_slug "$state" 2>/dev/null || true)
+            if [[ -z "$vk_slug" ]]; then
+                # Slug unresolvable => the comparison cannot be made at all.
+                # Guessing a slug would probe the wrong Keychain account and
+                # yield a confident verdict about something we never looked for.
+                _kb_msg_row "[??]" "receive path" "reporter found no vault credential, and this machine's slug"
+                _kb_msg_cont "could not be resolved (node or vault-keygen.js missing), so the"
+                _kb_msg_cont "check cannot be repeated here — the cause is undetermined"
+                _kb_msg_cont "last state: $state"
+                unknown=$((unknown + 1))
+            elif [[ -n "$rec_slug" && "$rec_slug" != "$vk_slug" ]]; then
+                # The two derivations disagree, so there is nothing to compare
+                # (PR #816 review). The reporter munges the hostname in shell;
+                # the doctor asks vault-keygen.js. They agreed across every
+                # hostname shape tested, but nothing PINS them, and this whole
+                # row rests on them agreeing: probing account A while the
+                # reporter looked for account B would report "present but not
+                # visible" about a credential the reporter never sought. That is
+                # its own condition with its own remedy, so it gets its own row
+                # rather than being allowed to masquerade as a visibility fault.
+                _kb_msg_row "[??]" "receive path" "machine-slug MISMATCH — the reporter recorded '$rec_slug' but"
+                _kb_msg_cont "this shell derives '$vk_slug' (vault-keygen.js). The two derivations"
+                _kb_msg_cont "are independent, and present-vs-absent only means anything when they"
+                _kb_msg_cont "agree, so no verdict is given here — reconcile them first."
+                _kb_msg_cont "last state: $state"
+                unknown=$((unknown + 1))
+            elif _kb_msg_probe_vault_key "$vk_slug"; then
+                # It IS here, and it is the same slug the reporter looked for.
+                #
+                # Two things still have to be true before "the reporter could not
+                # see it" is a sound conclusion, and both are now checked rather
+                # than assumed (PR #816 review):
+                #   * the credential must have EXISTED when the record was
+                #     written — otherwise the record is merely stale;
+                #   * any cause named for the invisibility must be measured, not
+                #     recited. The old text asserted "(cron shares no login
+                #     keychain search list)" unconditionally while nothing here
+                #     ever looked at a scheduler, which on a LaunchAgent box —
+                #     both consumer machines — blamed a mechanism not in use.
+                local key_ct sched
+                key_ct=$(_kb_msg_vault_key_ctime "$vk_slug" 2>/dev/null || true)
+                if [[ -n "$key_ct" ]] && (( key_ct > mtime )); then
+                    # STALE record: the credential postdates it, so the record
+                    # says nothing about whether the reporter can see it today.
+                    _kb_msg_row "[??]" "receive path" "the vault credential for '$vk_slug' is NEWER than this status"
+                    _kb_msg_cont "record (credential $(_kb_msg_ago $(( now - key_ct ))), record $(_kb_msg_ago "$age_s")), so the record"
+                    _kb_msg_cont "predates the credential and cannot show whether the reporter can see"
+                    _kb_msg_cont "it. Nothing is diagnosed as invisible on this evidence."
+                    _kb_msg_cont "fix: let the reporter run once more, then re-check"
+                    _kb_msg_cont "last state: $state"
+                    unknown=$((unknown + 1))
+                else
+                # Classified [GAP], not [BLOCKED]: measured across the fleet on
+                # 2026-09-04, the two consumer machines schedule the reporter from
+                # a LaunchAgent inside the user's login session and both report
+                # `ok: relay reachable`; this machine schedules it from cron and
+                # is the only one that fails. Same reporter code, two scheduling
+                # mechanisms, opposite outcomes — so a verified remedy exists,
+                # which is what makes this operator-actionable by definition.
+                #
+                # Both remedies are named and neither is chosen for the operator.
+                # That is not indecision: creating com.aiteamforge.* launchd jobs
+                # is prohibited on the dev machine this most often runs on, so a
+                # bare "create a LaunchAgent" instruction would be unfollowable on
+                # exactly the box that prints it — recreating this ticket's own
+                # defect in a new form. The file-backed fallback under
+                # ~/.aiteamforge/vault/ is readable from any context and carries
+                # no such constraint. Both stay valid whatever the scheduler is,
+                # which is why the scheduler probe below changes only the
+                # explanation, never the remedies.
+                sched=$(_kb_msg_reporter_scheduler 2>/dev/null || true)
+                _kb_msg_row "[GAP]" "receive path" "vault credential for '$vk_slug' exists here but was NOT visible"
+                case "$sched" in
+                    cron)
+                        _kb_msg_cont "to the reporter, which this box schedules from cron (measured: a"
+                        _kb_msg_cont "crontab entry running fleet-reporter). Cron runs outside your login"
+                        _kb_msg_cont "session and so does not carry the login keychain in its search"
+                        _kb_msg_cont "list — the likely explanation."
+                        ;;
+                    launchd)
+                        _kb_msg_cont "to the reporter, which this box schedules from a LaunchAgent"
+                        _kb_msg_cont "(measured: a ~/Library/LaunchAgents plist running fleet-reporter). A"
+                        _kb_msg_cont "login-session agent normally DOES share the login keychain search"
+                        _kb_msg_cont "list, so the cause is NOT established — check that agent's context."
+                        ;;
+                    cron+launchd)
+                        _kb_msg_cont "to the reporter, which this box schedules BOTH from cron and from a"
+                        _kb_msg_cont "LaunchAgent (both measured). Which of them wrote this record is not"
+                        _kb_msg_cont "known here; if it was the cron one, cron carries no login keychain"
+                        _kb_msg_cont "in its search list, which would explain it."
+                        ;;
+                    unprobed)
+                        # The probe could not be carried out, so this branch
+                        # states NO evidence about either mechanism — saying
+                        # "no crontab entry" here would be asserting the result
+                        # of a check that never ran, which is the whole defect
+                        # this ticket exists to remove. The verdict is the same
+                        # as the branch below, and correct for the same reason.
+                        _kb_msg_cont "to the reporter. The scheduler could NOT be PROBED on this box"
+                        _kb_msg_cont "(no runnable crontab, or an unreadable ~/Library/LaunchAgents), so"
+                        _kb_msg_cont "nothing is claimed here about crontab or LaunchAgents in either"
+                        _kb_msg_cont "direction — they were not successfully looked at. The cause is NOT"
+                        _kb_msg_cont "established, and no scheduler is named."
+                        ;;
+                    *)
+                        _kb_msg_cont "to the reporter. How the reporter is scheduled here could NOT be"
+                        _kb_msg_cont "determined (no crontab entry and no ~/Library/LaunchAgents plist"
+                        _kb_msg_cont "names it), so the cause is NOT established — the usual explanation"
+                        _kb_msg_cont "is a non-login-session scheduler such as cron, which does not share"
+                        _kb_msg_cont "the login keychain search list."
+                        ;;
+                esac
+                if [[ -n "$key_ct" ]]; then
+                    _kb_msg_cont "not a stale record: credential $(_kb_msg_ago $(( now - key_ct ))), record $(_kb_msg_ago "$age_s")"
+                else
+                    _kb_msg_cont "record written $(_kb_msg_ago "$age_s"); the credential's creation time could not be"
+                    _kb_msg_cont "read here, so a record that simply predates it is not ruled out"
+                fi
+                _kb_msg_cont "fix: run the reporter from your login session — the rest of the"
+                _kb_msg_cont "     fleet does, and reports ok — or use the file-backed fallback"
+                _kb_msg_cont "     under ~/.aiteamforge/vault/, readable from any context"
+                gaps=$((gaps + 1))
+                fi
+            else
+                # Genuinely absent. kb-msg-provision generates a keypair here:
+                # verified by reading scripts/kb-msg-provision, which on a missing
+                # credential and without --no-keygen runs `node vault-keygen.js
+                # --machine-id <slug>` and re-checks. This prescription was read
+                # out of the tool, not assumed from its name.
+                local vk_fix="$fix_base/scripts/kb-msg-provision"
+                if [[ -z "$prov" ]]; then
+                    vk_fix="kb-msg-provision — NOT FOUND on this box; install or upgrade aiteamforge"
+                fi
+                _kb_msg_row "[GAP]" "receive path" "no vault credential for '$vk_slug' here — Tier 2 receive is off"
+                _kb_msg_cont "fix: $vk_fix"
+                gaps=$((gaps + 1))
+            fi
+        else
+            # Every other skip reason the reporter can record (no-client,
+            # no-store, no-python3, no-node, no-relay) names a missing tool or an
+            # unset setting, all of which the operator can install or configure.
+            # Reprinted verbatim because in those cases the record IS the
+            # diagnosis — unlike no-vault-key, where it demonstrably was not.
+            _kb_msg_row "[GAP]" "receive path" "skipping: $state"
+            gaps=$((gaps + 1))
+        fi
+        fi
+    else
+        _kb_msg_row "[GAP]" "receive path" "never attempted a pull — no $status_file"
+        _kb_msg_cont "the fleet reporter has not run since this was installed"
+        gaps=$((gaps + 1))
+    fi
+
+    # ── 5. What is actually sitting in the mailbox right now ────────────────
+    # The point of the whole channel. Reported even when everything above is
+    # green, because a healthy pipeline with 30 unread messages is still a
+    # problem — and that combination is exactly what this ticket was filed for.
+    local unread
+    unread=$(kb-msg inbox 2>/dev/null | grep -c '^\*' || true)
+    if [[ "${unread:-0}" -gt 0 ]]; then
+        _kb_msg_row "[!]" "inbox" "$unread unread message(s) waiting — kb-msg inbox"
+    else
+        _kb_msg_row "[ok]" "inbox" "no unread mail"
+    fi
+
+    echo
+    _kb_msg_doctor_summary "$gaps" "$blocked" "$unknown" "$strict"
+}
+
+
+# _kb_msg_this_machine — this box's vault machine slug, from the AUTHORITY.
+#
+# Asks vault-keygen.js rather than deriving the slug again. There are already
+# four derivations of this value in the tree and one of them has drifted; a fifth
+# here would eventually disagree with the map it is compared against and produce
+# a confidently wrong verdict. Only ever called on an error path, so the node
+# startup cost does not matter.
+#
+# Prints nothing and returns 1 if it cannot be determined — callers MUST treat
+# empty as "unknown" and fall through to prior behaviour rather than assuming a
+# mismatch. Guessing here would mean suppressing a real cross-machine send.
+_kb_msg_this_machine() {
+    local base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
+    local kg
+    for kg in "$base/fleet-monitor/client/vault-keygen.js" \
+              "$base/scripts/vault-keygen.js" \
+              "$HOME/aiteamforge/scripts/vault-keygen.js"; do
+        [[ -f "$kg" ]] || continue
+        command -v node >/dev/null 2>&1 || return 1
+        node -e "process.stdout.write(require('$kg').defaultMachineSlug())" 2>/dev/null && return 0
+        return 1
+    done
+    return 1
+}
+
+# _kb_msg_relay_url — the Tier-2 relay base URL, resolved not guessed.
+#
+# XACA-0885 follow-up. msg-client.js:44 defaults to `http://localhost:3000` when
+# FLEET_MONITOR_URL is unset, and _kb_msg_send never passed --server. On a box
+# with no fleet-config.json that means every cross-machine send dies with a bare
+# "Error: fetch failed" — measured on M3Pro 2026-08-25, where the identical send
+# succeeded the moment the URL was supplied. A silent localhost fallback for a
+# FLEET service is the wrong default: it turns "not configured" into "connection
+# refused", which reads as a network fault rather than a missing setting.
+#
+# Order: explicit env override, then the same config key fleet-reporter reads
+# (.centralServer.apiEndpoint, with its /api/... suffix stripped exactly as
+# fleet-reporter does). Prints nothing and returns 1 when unresolvable, so the
+# caller can say so plainly instead of inheriting localhost.
+_kb_msg_relay_url() {
+    if [[ -n "${FLEET_MONITOR_URL:-}" ]]; then
+        printf '%s' "${FLEET_MONITOR_URL%%/}"
+        return 0
+    fi
+    local cfg
+    for cfg in "$HOME/.aiteamforge/fleet-config.json" "$HOME/.dev-team/fleet-config.json"; do
+        [[ -f "$cfg" ]] || continue
+        command -v jq >/dev/null 2>&1 || continue
+        local ep
+        # Require a STRING. jq -r renders a number as "3000" and an object as
+        # "{...}", either of which would sail through a non-empty check and be
+        # handed to msg-client as a URL (review finding, PR #764).
+        local eptype
+        eptype=$(jq -r '.centralServer.apiEndpoint | type' "$cfg" 2>/dev/null)
+        [[ "$eptype" == "string" ]] || continue
+        ep=$(jq -r '.centralServer.apiEndpoint // empty' "$cfg" 2>/dev/null)
+        [[ -n "$ep" && "$ep" != "null" ]] || continue
+        # Mirror fleet-reporter.sh's derivation: strip the trailing /api/... path.
+        # The documented shape is "<base>/api/status", which %/api/* handles. The
+        # bare "<base>/api" form does NOT match that pattern (it needs a slash
+        # AFTER /api), so strip it explicitly too rather than returning a URL
+        # with /api still attached — that silently produced a relay base of
+        # "https://host/api" during this fix and only surfaced in a test.
+        local base="${ep%/api/*}"
+        base="${base%/api}"
+        printf '%s' "$base"
+        return 0
+    done
+    return 1
+}
+
+# kb-msg — top-level dispatcher.
+kb-msg() {
+    local sub="${1:-}"
+    shift 2>/dev/null || true
+    local store; store=$(_kb_msg_store)
+
+    case "$sub" in
+        send)    _kb_msg_send "$@" ;;
+        inbox)   _kb_msg_inbox "$@" ;;
+        read)    _kb_msg_read "$@" ;;
+        reply)   _kb_msg_reply "$@" ;;
+        who)     python3 "$store" who "$@" ;;
+        doctor)  _kb_msg_doctor "$@" ;;
+        ""|-h|--help|help)
+            cat <<'USAGE'
+kb-msg — inter-session & inter-team comms (XACA-0777)
+
+Cross-team messaging is coordination, NOT a boundary violation — it is allowed.
+
+Usage:
+  kb-msg send <team>[:<terminal>] <message...>   Send a directed message or,
+                                                 with no :terminal (or :*), a
+                                                 team broadcast.
+  kb-msg inbox [--all]                           List your unread (or all) mail.
+  kb-msg read <id>                               Show a message + mark it read.
+  kb-msg reply <id> <message...>                 Reply to a message's sender.
+  kb-msg who                                     Live team:terminal sessions here.
+  kb-msg doctor [--strict]                       Check this machine's comms setup:
+                                                 inbox-hook registration, vault
+                                                 key, routing map, receive path,
+                                                 and unread count.
+
+Rows are classified by what YOU can do about them:
+  [ok]       working.
+  [GAP]      operator-actionable — a named command closes it.  -> exit 1
+  [BLOCKED]  no command available here can close it; reported,  -> exit 0
+             but it does not fail the run, because failing on
+             something nobody can fix just trains people to
+             ignore the check. The summary still says the
+             channel is degraded — it never reports "no gaps".
+  [??]       the check itself could not run.                    -> exit 1
+             That is a broken check, which IS worth fixing.
+  --strict   exit non-zero on ANY non-ok row, [BLOCKED] included.
+             For CI, which wants a fully clean board. Unread mail
+             is never counted in either mode — having mail is the
+             normal state of a channel that works.
+             An unrecognised option is a usage error,           -> exit 2
+             never a silent no-op: a CI gate that ran `--strcit`
+             would otherwise pass while asserting nothing.
+
+Examples:
+  kb-msg send academy:chancellor "build is green, merging"
+  kb-msg send academy "touching shared kanban-helpers.sh — hold writes"
+  kb-msg send ios "the LCARS port map changed — repull lcars-ports"
+
+Tier 1 (same machine) is instant. Tier 2 (another machine) is sealed ciphertext
+routed through our own fleet-monitor relay (never AMB) and pulled on the
+recipient's reporter cadence (~30-60s). Cross-machine requires a destination in
+~/.aiteamforge/team-machines.json or $MSG_TARGET_MACHINE, and each machine must
+have run vault-keygen.
+USAGE
+            ;;
+        *)
+            echo "kb-msg: unknown subcommand '$sub' (try: kb-msg --help)" >&2
+            return 1
+            ;;
+    esac
+}
+
+# kb-msg send <address> <message...>
+_kb_msg_send() {
+    # Optional leading "--thread <id>" flag (internal use, e.g. by _kb_msg_reply
+    # to continue the parent message's thread instead of starting a new one).
+    local thread=""
+    if [[ "${1:-}" == "--thread" ]]; then
+        thread="${2:-}"
+        shift 2 2>/dev/null || true
+    fi
+
+    local addr="${1:-}"; shift 2>/dev/null || true
+    local body="$*"
+    if [[ -z "$addr" || -z "$body" ]]; then
+        echo "Usage: kb-msg send <team>[:<terminal>] <message...>" >&2
+        return 1
+    fi
+
+    local self from_team from_terminal
+    self=$(_kb_msg_self)
+    from_team="${self%% *}"
+    from_terminal="${self##* }"
+    if [[ -z "$from_team" ]]; then
+        echo "kb-msg: cannot resolve your team context. Set KB_TEAM/KB_TERMINAL or run inside a team session." >&2
+        return 1
+    fi
+
+    local to_team="${addr%%:*}"
+    local store; store=$(_kb_msg_store)
+
+    # Tier decision: same team OR target live on THIS machine => Tier 1 (local).
+    local local_ok="no"
+    if [[ "$to_team" == "$from_team" ]]; then
+        local_ok="yes"
+    else
+        local_ok=$(python3 "$store" is-local --to "$addr" 2>/dev/null || echo "no")
+    fi
+
+    if [[ "$local_ok" == "yes" ]]; then
+        # ---- Tier 1: same-machine local delivery ----
+        local -a thread_args=()
+        [[ -n "$thread" ]] && thread_args=(--thread "$thread")
+        local out
+        out=$(python3 "$store" send \
+            --to "$addr" \
+            --from-team "$from_team" \
+            --from-terminal "$from_terminal" \
+            --body "$body" \
+            "${thread_args[@]}" 2>&1) || { echo "$out" >&2; return 1; }
+        local count
+        # printf '%s', not echo: under zsh, echo expands backslash escapes
+        # (literal \n, \uXXXX surrogate pairs) inside $out and corrupts the
+        # JSON before python ever sees it (XACA-0887).
+        count=$(printf '%s' "$out" | python3 -c "import sys,json;print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo "?")
+        echo "✓ Sent to $addr (Tier 1, local) — delivered to $count session(s)."
+        _kb_msg_toast "$addr" "$from_team" "$from_terminal" "$body"
+        return 0
+    fi
+
+    # ---- Tier 2: cross-machine sealed relay ----
+    local machine
+    if ! machine=$(_kb_msg_resolve_machine "$to_team"); then
+        cat >&2 <<EOF
+kb-msg: cannot resolve which machine team '$to_team' runs on (fail-closed, no silent drop).
+  Fix one of:
+    export MSG_TARGET_MACHINE=<machine-slug>
+    echo '{"$to_team":"<machine-slug>"}' > ~/.aiteamforge/team-machines.json
+  <machine-slug> is the vault machine id the recipient registered (see: vault-keygen).
+EOF
+        return 1
+    fi
+
+    # Reaching Tier 2 with the target resolved to THIS machine is incoherent:
+    # sealing a message to our own public key and round-tripping it through a
+    # remote relay cannot be what the sender meant. It happens because the
+    # Tier-1 gate keys on tmux LIVENESS rather than on whether the team lives
+    # here (XACA-0926) — so a registered, same-machine team with no live session
+    # falls through to a relay that then fails on some unrelated grounds.
+    #
+    # This does NOT reroute the message; the routing defect is XACA-0926's and
+    # is deliberately not fixed here. It replaces an opaque downstream failure
+    # ("Error: fetch failed") with the actual reason, which became reachable
+    # only once XACA-0885 wrote a routing map that resolves same-machine teams.
+    # Before that map existed this path died earlier, with a clearer message.
+    local this_machine=""
+    if [[ -f "$HOME/.aiteamforge/team-machines.json" ]]; then
+        this_machine=$(_kb_msg_this_machine 2>/dev/null || true)
+    fi
+    if [[ -n "$this_machine" && "$machine" == "$this_machine" ]]; then
+        cat >&2 <<EOF
+kb-msg: '$to_team' is registered on THIS machine ($this_machine), but no live
+  session matched '$addr', so the send fell through to the cross-machine relay —
+  which cannot deliver to the machine it is sent from.
+
+  Nothing was delivered and nothing was queued.
+
+  This is XACA-0926: the Tier-1 gate tests whether a tmux session is LIVE, not
+  whether the team lives here. Until that is fixed:
+    - address a live session directly     (kb-msg who lists them)
+    - or wait for the recipient to start a session and re-send.
+EOF
+        return 1
+    fi
+
+    local client; client=$(_kb_msg_client)
+    if [[ ! -x "$client" ]]; then
+        echo "kb-msg: Tier-2 client not found/executable at $client" >&2
+        return 1
+    fi
+    # Resolve the relay explicitly. Without --server the client silently falls
+    # back to localhost:3000 and the send fails as a network error rather than a
+    # configuration one (XACA-0885 follow-up).
+    local relay
+    if ! relay=$(_kb_msg_relay_url); then
+        cat >&2 <<EOF
+kb-msg: no Tier-2 relay URL configured, so a cross-machine send cannot be addressed.
+  Nothing was delivered and nothing was queued.
+  Fix one of:
+    export FLEET_MONITOR_URL=https://<your-fleet-monitor-host>
+    scripts/kb-msg-provision --server https://<your-fleet-monitor-host>   (persists it)
+  Without this the client would default to http://localhost:3000 and fail as
+  "fetch failed", which looks like a network fault rather than a missing setting.
+EOF
+        return 1
+    fi
+
+    local -a t2_thread_args=()
+    [[ -n "$thread" ]] && t2_thread_args=(--thread "$thread")
+    bash "$client" send \
+        --to "$addr" \
+        --machine "$machine" \
+        --server "$relay" \
+        --from-team "$from_team" \
+        --from-terminal "$from_terminal" \
+        --body "$body" \
+        "${t2_thread_args[@]}"
+}
+
+# kb-msg inbox [--all]
+_kb_msg_inbox() {
+    local self team terminal
+    self=$(_kb_msg_self)
+    team="${self%% *}"; terminal="${self##* }"
+    local store; store=$(_kb_msg_store)
+    python3 "$store" inbox --team "$team" --terminal "$terminal" "$@"
+}
+
+# kb-msg read <id>
+_kb_msg_read() {
+    local id="${1:-}"
+    if [[ -z "$id" ]]; then echo "Usage: kb-msg read <id>" >&2; return 1; fi
+    local self team terminal
+    self=$(_kb_msg_self)
+    team="${self%% *}"; terminal="${self##* }"
+    local store; store=$(_kb_msg_store)
+    python3 "$store" read --team "$team" --terminal "$terminal" --id "$id"
+}
+
+# kb-msg reply <id> <message...> — reply to the sender of message <id>.
+_kb_msg_reply() {
+    local id="${1:-}"; shift 2>/dev/null || true
+    local body="$*"
+    if [[ -z "$id" || -z "$body" ]]; then
+        echo "Usage: kb-msg reply <id> <message...>" >&2
+        return 1
+    fi
+    local self team terminal
+    self=$(_kb_msg_self)
+    team="${self%% *}"; terminal="${self##* }"
+    local store; store=$(_kb_msg_store)
+
+    # Look up the original message to find who to reply to (+ thread).
+    local orig
+    orig=$(python3 "$store" read --team "$team" --terminal "$terminal" --id "$id" --json 2>/dev/null) || {
+        echo "kb-msg: message '$id' not found in your inbox." >&2
+        return 1
+    }
+    # Single parse emitting all three fields (XACA-0887-001): the original
+    # three-call form piped the SAME stored JSON through three independent
+    # `echo "$orig" | python3` processes. Two defects compounded:
+    #   (a) under zsh, `echo` expands backslash escapes — a literal `\n` in a
+    #       stored body becomes a real control character (invalid inside a
+    #       JSON string => JSONDecodeError), and a `\uXXXX` half of a
+    #       surrogate pair becomes a mangled UTF-8 byte sequence
+    #       (UnicodeDecodeError). `printf '%s'` does not interpret escapes in
+    #       its argument, so the stored bytes reach python untouched.
+    #   (b) three independent parses meant three independent failure
+    #       surfaces (and 3x the process spawns) for one document. Collapsed
+    #       to one parse below; if it fails, the caller now gets an explicit
+    #       decode error instead of three silently-empty fields.
+    # rto/rterm/rtid are one-per-line on stdout: from_team/from_terminal are
+    # team/terminal identifiers and thread_id is uuid.uuid4().hex (msg-store.py).
+    # Newline-per-field is only safe because none of the three is ALLOWED to
+    # contain a newline — that invariant is enforced below (XACA-0887-015),
+    # not merely assumed. cmd_ingest (msg-store.py's Tier-2 relay path) stores
+    # a remote-supplied record verbatim with no validation, so a newline in
+    # one of these fields is valid JSON that would otherwise silently
+    # misalign this split and hand _kb_msg_send a wrong address.
+    local rto rterm rtid parse_out parse_status parse_err
+    # Stderr goes to its own tempfile (XACA-0887-016), never merged via
+    # 2>&1: incidental stderr output from a still-zero-exit python3 (a
+    # warning, a shim banner, a sitecustomize hook) would otherwise
+    # interleave into parse_out and corrupt the newline-per-field split
+    # undetected. The tempfile is read only on failure, then removed
+    # immediately — on every exit path below, success or failure — so
+    # nothing is leaked.
+    local stderr_file
+    stderr_file=$(mktemp "${TMPDIR:-/tmp}/kb-msg-reply-stderr.XXXXXX") || {
+        echo "kb-msg: could not create a temp file to parse the stored record for '$id'." >&2
+        return 1
+    }
+    # XACA-1141: the python body is built with a SINGLE-QUOTED heredoc
+    # delimiter (<<'PY'), not a double-quoted python3 -c "..." string. The
+    # shell processes a double-quoted string BEFORE python ever sees it, so a
+    # backtick in a python comment gets command-substituted and its contents
+    # executed as a shell command (observed live: four "command not found"
+    # errors on one kb-msg reply). A single-quoted heredoc passes the body
+    # through verbatim, and "$_script" below is a variable EXPANSION, which the
+    # shell does not re-scan for command substitution. Do NOT re-inline this
+    # into python3 -c "..." — and note the sibling _kb_overlay_* helpers build
+    # their scripts with a single-quoted STRING assignment, which is not usable
+    # here: this body is full of apostrophes.
+    local _script
+    _script=$(cat <<'PY'
+import sys, json, unicodedata
+
+try:
+    d = json.loads(sys.stdin.buffer.read().decode('utf-8'))
+except Exception as e:
+    print(f'{type(e).__name__}: {e}', file=sys.stderr)
+    sys.exit(1)
+
+# XACA-1141-019: the try/except above wraps ONLY the decode. d.get() below
+# sits outside it, and valid JSON that is not an OBJECT has no .get at all --
+# [1,2,3], null, 7, "str" and true each raised an uncaught AttributeError and
+# dumped a traceback, escaping the one-clean-line discipline every other
+# malformed input here obeys. Measured: 5 of 5 non-object shapes tracebacked.
+#
+# Not reachable today (cmd_read --json always serialises a dict), so this is
+# not a live-bug fix. It is here because the alternative -- a guard per input
+# somebody happened to try -- is how this family keeps producing members: the
+# lone surrogate (XACA-1141-017), this, and the control characters below were
+# all the SAME defect wearing different inputs.
+#
+# The message names the type it got, and stays DISTINCT from the decode error
+# above rather than being folded into it: "not JSON at all" and "JSON of the
+# wrong shape" are different faults with different fixes. This matches the
+# repo's own F4 precedent (isinstance(input_data, dict), refusing with a
+# message naming the type). null is called out there for the same reason it
+# matters here -- None is the one non-dict an isinstance check is most likely
+# to get "helpfully" special-cased into allowing.
+if not isinstance(d, dict):
+    print(f'stored record is not a JSON object (got {type(d).__name__})', file=sys.stderr)
+    sys.exit(1)
+
+# XACA-0887-017: d.get(name, '') returns None (not '') when the key is
+# PRESENT with an explicit JSON null — print(None) then emits the literal
+# string 'None', which is truthy and sails past the caller's [[ -z "$rto" ]]
+# blank check. Coercing both absence and explicit null to '' avoids that.
+fields = []
+for name in ('from_team', 'from_terminal', 'thread_id'):
+    # XACA-0887-019: test for None EXPLICITLY rather than leaning on the
+    # or-empty-string idiom. That idiom also blanks 0, False and empty
+    # collections. That is harmless for these three identifier fields, but it
+    # would silently blank a legitimately-falsy value if this loop is ever
+    # reused for another field. An explicit None test covers absence and
+    # explicit JSON null, and nothing else.
+    val = d.get(name)
+    if val is None:
+        val = ''
+    if not isinstance(val, str):
+        val = str(val)
+    # XACA-0887-015 rejected an embedded newline/CR, because either one
+    # misaligns the newline-per-field split the caller relies on.
+    #
+    # XACA-1141-020 GENERALISES that to every non-printable character, by
+    # UNICODE CATEGORY rather than by codepoint range. The two-character check
+    # left NINE control codepoints accepted -- measured: NUL, U+0001, BEL, BS,
+    # TAB, VT, FF, ESC and DEL all passed. A NUL reached the routing address
+    # intact (parse_status=0, address 'ac<NUL>ademy':'agent'), which is worse
+    # than a crash: it routes somewhere that looks right in a log and is not.
+    #
+    # WHY CATEGORY Cc+Cf AND NOT A RANGE. A first pass rejected C0 plus DEL,
+    # and its own comment argued DEL had to be included because excluding it
+    # "purely for sitting outside the C0 range" would recreate the
+    # enumerate-what-someone-tried pattern. That argument convicted the fix
+    # itself: U+0080-U+009F (the C1 controls) are the SAME Unicode category Cc
+    # as C0 and were excluded for exactly that reason, and U+202E RIGHT-TO-LEFT
+    # OVERRIDE stayed accepted while the same comment cited visual spoofing as
+    # grounds to reject TAB. A stated principle broader than the code's actual
+    # boundary is a disclosure that reads better than the truth -- the defect
+    # class this ticket exists to punish -- so the code was widened to match
+    # the principle rather than the principle narrowed to match the code.
+    #
+    # THE BOUNDARY IS EXACTLY Cc + Cf, AND NOTHING WIDER. Stated precisely
+    # because the previous wording here ("every non-printable character")
+    # overclaimed one iteration after this guard was widened to fix an
+    # overclaim -- and an overclaim in the comment written to fix an overclaim
+    # is the same defect, not a smaller one.
+    #
+    # Cc is every control character (C0, DEL and C1). Cf is every format
+    # character -- RLO/LRO (address spoofing), ZWSP, ZWJ, the soft hyphen and
+    # the BOM. REACHABLE, not hygiene: cmd_ingest stores a remote-supplied
+    # record verbatim with no validation, so a remote sender can put any of
+    # these in from_team today.
+    #
+    # DELIBERATELY OUTSIDE THE BOUNDARY, with reasons rather than by omission:
+    #   Cs (surrogates)  -- already refused, by the separate encodability
+    #                       check above. Not a gap, a different guard.
+    #   Zl / Zp          -- U+2028 LINE SEPARATOR and U+2029 PARAGRAPH
+    #                       SEPARATOR. They LOOK like the newline hazard and
+    #                       are not: measured under zsh, bash 5 AND /bin/bash
+    #                       3.2 through the real caller construct, both leave
+    #                       the field split INTACT, because the shell's `read`
+    #                       is not Unicode-aware even though Python's
+    #                       str.splitlines() is. They are category Z, the same
+    #                       group as an ordinary space, so rejecting them while
+    #                       accepting U+0020 would be the arbitrary line this
+    #                       guard exists to avoid drawing.
+    #   Co (private use) -- renders as whatever a font says; not non-printable
+    #                       in any checkable sense.
+    #   Cn (unassigned)  -- rejecting these would be ACTIVELY WRONG: a
+    #                       codepoint unassigned in this interpreter's Unicode
+    #                       tables may be assigned in a newer one, so the guard
+    #                       would refuse a future-valid identifier based on the
+    #                       age of the Python it happens to run under.
+    #
+    # This is NOT the same shape as the C1 gap that prompted the widening. C1
+    # was the SAME category as characters already rejected, split off by
+    # codepoint range -- arbitrary. Zl/Zp/Co/Cn are DIFFERENT categories with
+    # different semantics and, for Zl/Zp, a measured absence of hazard. The
+    # boundary was principled; only the sentence describing it was not.
+    #
+    # TAB IS REJECTED, DELIBERATELY. These three fields are identifiers -- a
+    # team slug, a terminal name, and a uuid4 hex thread id. No control or
+    # format character is legitimate in any of them, tab included; permitting
+    # one would leave a character that silently misaligns any tabular log or
+    # display and can visually spoof a routing address, while buying nothing.
+    # That argument covers Cc and Cf. It is NOT a claim about every character
+    # that could disrupt a layout -- see the boundary note above for what is
+    # deliberately outside, and why.
+    #
+    # ACCEPTED CONSEQUENCE: a ZWJ emoji SEQUENCE in one of these fields is now
+    # refused (ZWJ is Cf). A single emoji is category So and still passes.
+    # These are identifiers, not display names, so that is the intended
+    # reading rather than a regression -- recorded here as a decision, not
+    # left as a surprise.
+    #
+    # Widening only ADDS rejections, so it cannot weaken the property that no
+    # input can misalign the caller's newline-per-field split: U+000A is the
+    # only codepoint whose UTF-8 encoding contains byte 0x0A, and it was
+    # already rejected.
+    _bad = next((c for c in val if unicodedata.category(c) in ('Cc', 'Cf')), None)
+    if _bad is not None:
+        print(f'field {name!r} contains a non-printable character '
+              f'(U+{ord(_bad):04X}, Unicode category {unicodedata.category(_bad)})',
+              file=sys.stderr)
+        sys.exit(1)
+    # XACA-1141-017: reject an unpaired surrogate HERE, with the same
+    # one-line message and exit status as every other malformed input,
+    # rather than letting print() below raise UnicodeEncodeError and dump a
+    # raw traceback at the user. json.loads accepts a lone surrogate escape
+    # (e.g. "\ud800") and hands back a str that is not encodable as UTF-8, so
+    # the failure landed on print() -- outside the try/except above, which
+    # only wraps the decode/parse. The result was an error handler that
+    # itself crashed: every other bad input here produces a clean single line
+    # through the stderr tempfile, and this one produced 276 bytes of
+    # traceback. Encoding is tested rather than pattern-matched so a VALID
+    # surrogate PAIR (an ordinary emoji, which json.loads combines into one
+    # character) still passes.
+    try:
+        val.encode('utf-8')
+    except UnicodeEncodeError:
+        print(f'field {name!r} contains an unpaired surrogate and is not valid UTF-8', file=sys.stderr)
+        sys.exit(1)
+    fields.append(val)
+
+for val in fields:
+    print(val)
+PY
+)
+    parse_out=$(printf '%s' "$orig" | python3 -c "$_script" 2>"$stderr_file")
+    parse_status=$?
+    parse_err=$(cat "$stderr_file" 2>/dev/null)
+    rm -f "$stderr_file"
+    if [[ $parse_status -ne 0 ]]; then
+        # XACA-0887-018: this branch is also reached when python3 is
+        # entirely absent (exit 127), where nothing is corrupt — the old
+        # wording ("this is a data-corruption bug, not a missing sender")
+        # asserted a cause it had not established, which is exactly the
+        # defect class XACA-0887 exists to fix. Report only what is known —
+        # the parse failed, plus the underlying error — and call out the
+        # interpreter-missing case explicitly since it is cheaply
+        # distinguishable.
+        if [[ $parse_status -eq 127 ]] || ! command -v python3 &>/dev/null; then
+            echo "kb-msg: could not parse the stored record for '$id' — python3 appears to be unavailable (exit $parse_status): ${parse_err:-no output captured}." >&2
+        else
+            echo "kb-msg: could not parse the stored record for '$id' (exit $parse_status): ${parse_err:-no output captured}." >&2
+        fi
+        return 1
+    fi
+    { IFS= read -r rto; IFS= read -r rterm; IFS= read -r rtid; } <<<"$parse_out"
+    if [[ -z "$rto" ]]; then
+        echo "kb-msg: could not resolve the sender of '$id' to reply." >&2
+        return 1
+    fi
+    # Continue the parent's thread_id (if it has one) rather than starting a
+    # new thread — this is the whole point of "reply" vs. "send" (XACA-0777-015).
+    if [[ -n "$rtid" ]]; then
+        _kb_msg_send --thread "$rtid" "${rto}:${rterm}" "$body"
+    else
+        _kb_msg_send "${rto}:${rterm}" "$body"
+    fi
+}
+
+# Best-effort live tmux toast to a directed, live, same-machine recipient.
+# Guarded against the shared agent:main window hazard
+# (memory: feedback_context_kb_commands_hit_shared_agent_window): we NEVER target
+# a window literally named 'main' and use display-message (status-line only,
+# never send-keys into another session's pane).
+_kb_msg_toast() {
+    local addr="$1" from_team="$2" from_terminal="$3" body="$4"
+    command -v tmux &>/dev/null || return 0
+    # Only directed addresses have a concrete pane to toast.
+    [[ "$addr" == *:* ]] || return 0
+    local t_team="${addr%%:*}" t_term="${addr##*:}"
+    [[ "$t_term" == "*" || -z "$t_term" ]] && return 0
+    # HARD guard: never toast the shared agent:main window.
+    [[ "$t_term" == "main" ]] && return 0
+    local session="${t_team}-${t_term}"
+    local socket="/tmp/${t_team}"
+    local -a tmux_base
+    if [[ -S "$socket" ]]; then
+        tmux_base=(tmux -S "$socket")
+    else
+        tmux_base=(tmux)
+    fi
+    # Session must exist to receive the toast.
+    "${tmux_base[@]}" has-session -t "$session" 2>/dev/null || return 0
+    local snippet="${body:0:80}"
+    "${tmux_base[@]}" display-message -t "$session" \
+        "📨 kb-msg from ${from_team}:${from_terminal}: ${snippet}" 2>/dev/null || true
+}
+
 # _kb_register_team_impl — the actual send + verify, factored out of
 # _kb_register_team so it can run either backgrounded (auto, on shell start)
 # or synchronously (kb-register, so a human gets an immediate, proven answer

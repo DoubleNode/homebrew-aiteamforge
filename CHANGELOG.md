@@ -32,6 +32,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   parity gate for `kb-sweep` anywhere (`knowledge-helper-parity.yml` covers only
   `_kb_knowledge_*` and `_kb_alloc_slot`), so nothing would have caught this and
   nothing would have caught a regression of it.
+- XACA-1113-003: hand-ported the remaining 22 `kb-msg` inter-session comms
+  functions (`kb-msg` plus 21 `_kb_msg_*` helpers, `_kb_msg_doctor` included)
+  into `share/templates/kanban/kanban-helpers.template.sh`. The template
+  already shipped `_kb_msg_slug_registered` / `_kb_msg_verify_registration`
+  (XACA-0885); this closes the rest of the family so consumer boxes can
+  actually invoke the channel, not just the two identity-check helpers.
+  Ported byte-identical (verified via matching md5) from
+  `~/dev-team/kanban-helpers.sh` lines 28975-30521, inserted immediately
+  after `_kb_msg_verify_registration` and before `_kb_register_team_impl` —
+  its only external dependency (`_kb_detect_context`) was already present,
+  and its sole caller in that block (`_kb_msg_this_machine`, referenced at
+  `_kb_register_team_impl`) is now defined for the first time in the
+  template: previously that call resolved to nothing under `/bin/bash` 3.2
+  (exit 127, swallowed by `2>/dev/null`), so the entire XACA-1089
+  machine-identity block silently no-op'd on every consumer while
+  registration still reported success. Based on `origin/main` (219dfb9),
+  not the develop-pinned submodule checkout (553e000) — five commits behind
+  at port time (XACA-1140/1144 tap content, disclosed not reverted).
 - XACA-1144-006: ship `iterm2_claude_active_watch.py` — the window-scoped watcher
   that makes the "C " indicator work for REMOTE (connect-script) teams. Added to
   `share/scripts/` and to `_xaca0673_mandatory_materialize_basenames()` so UPGRADED
