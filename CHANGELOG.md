@@ -6,6 +6,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-0853: `dns` shipped no `share/teams/dns.conf`, so every code path that discovers teams by
+  globbing that directory was structurally blind to it — the team was never a candidate, so nothing
+  ever reported a failure and sweeps believed to be fleet-wide silently covered 9 of 10 teams. This
+  became load-bearing on 2026-09-02: dns's lifecycle scripts are hand-authored and committed to the
+  dev-team repo root, which worked for exactly one reason — dns ran on the dev-source machine, where
+  those files were simply present. The migration moved dns to a TAP CONSUMER with no dev-team
+  checkout. Measured there 2026-09-09: the 19GB umbrella tree, 7 personas and a live LCARS on :8180
+  were all present, and all four lifecycle scripts were absent; every other registered team had all
+  four. Adds `share/teams/dns.conf` with agent/window data TRANSCRIBED from the eight
+  `dns-framework/scripts/dns-<agent>-startup.sh` `TERMINAL_NAME=` lists, terminal slugs from persona
+  frontmatter, port band from `aiteamforge_paths.py` and colour from `dns-lcars.theme` — XACA-0862
+  warned that fabricating this file without the real data would ship broken tmux session names, so
+  no value in it was chosen. Adds the `dns` catalog entry to `share/teams/registry.json`
+  (`recommended: false`, matching command/freelance, since dns needs the shared umbrella checkout).
+  Ships all four dns lifecycle scripts plus the 8 station scripts under `share/scripts/teams/`.
+- XACA-0853: `install-team.sh` gains a hand-authored connect/disconnect install path. dns is
+  single-instance with a host-only connect signature and dynamic port discovery, so it fits neither
+  the flat nor the parametric connect template; its scripts ship whole and are installed through the
+  same `~/dev-team` → `$AITEAMFORGE_DIR` rewrite every startup script already gets. The opt-in is a
+  FILE-PRESENCE contract (`share/scripts/teams/<team>-connect.sh`), never a hardcoded team id, and
+  is evaluated BEFORE the parametric and flat branches so a team shipping its own scripts is never
+  silently overwritten by a template render. Required relocating `_xaca0483_install_script` to be
+  defined before `_render_connect_disconnect`: that function is called from the `--connect-only`
+  early exit, which runs long before the old definition site, so the new path would have died with
+  "command not found" on that path while working on the main install path — a split failure a
+  main-flow smoke test would not catch. Exactly one definition remains; a regression test asserts
+  both properties on resolved line numbers.
+- XACA-0853: new `tests/test-xaca-0853-dns-team-conf.sh` (8 assertions). Every structural assertion
+  resolves a line number or a count rather than "grep found something", and T0 is a negative control
+  that aborts loudly if the files under test cannot be located — so a moved or renamed installer can
+  never present as a green suite. All 8 were demonstrated to FAIL under 7 deliberate mutations
+  (conf removed, a window dropped from one agent, catalog entry removed, helper renamed, team id
+  hardcoded into the opt-in, branch order inverted, a station script deleted) before being accepted
+  as passing.
+- XACA-0853 (pre-existing, unrelated to this ticket's scope, fixed because it blocks every tap PR):
+  `tests/test-xaca-1120-template-phase-honest-reporting.sh` was committed by XACA-1120 but never
+  added to `tests/ci-manifest`, leaving the `ci-manifest-check` gate RED on tap main for everyone —
+  it is wired into CI at `tests.yml:182`. Registered as `plain-shell` (verified: no bash-4 syntax,
+  runs clean and green under `/bin/bash` 3.2). No pre-existing manifest entry was changed or
+  dropped; the diff is two additions.
 
 - XACA-1138 (round 5): corrected the memoised image-check's cost figure in
   `share/scripts/agent-panel-display.sh` from 27-49ms to 27-124ms per call at both cache

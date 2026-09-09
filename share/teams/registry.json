@@ -99,6 +99,17 @@
       "icon": "💰",
       "order": 9,
       "recommended": false
+    },
+    {
+      "id": "dns",
+      "name": "Star Trek: Lower Decks - DNS Framework",
+      "category": "platform",
+      "description": "DNSFramework suite development across iOS, Android and Firebase",
+      "color": "#FF9900",
+      "theme": "Star Trek: Lower Decks",
+      "icon": "🧬",
+      "order": 10,
+      "recommended": false
     }
   ],
   "categories": {

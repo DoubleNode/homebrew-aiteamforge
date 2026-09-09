@@ -98,6 +98,7 @@ test-xaca-0822-template-canonical-parity.sh     plain-shell
 test-xaca-0831-alloc-slot-atomicity.sh          plain-shell
 test-xaca-0834-connect-script-recovery.sh       plain-shell
 test-xaca-0845-connect-script-parametric-teams.sh plain-shell
+test-xaca-0853-dns-team-conf.sh                      plain-shell
 test-xaca-0862-006-retire-legacy-connect.sh     plain-shell
 test-xaca-0862-022-runtime-resolver.sh          plain-shell
 test-xaca-0862-028-resolve-parametric-crash-guard.sh plain-shell
@@ -111,3 +112,4 @@ test-xaca-1095-helpers-template-preference.sh   plain-shell
 test-xaca-1097-doctor-phantom-deps.sh           plain-shell
 test-xaca-1097-launchagent-disabled-autofix.sh  plain-shell
 test-xaca-1097-resolver-call-sites.sh           plain-shell
+test-xaca-1120-template-phase-honest-reporting.sh    plain-shell

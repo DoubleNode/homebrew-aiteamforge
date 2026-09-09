@@ -756,6 +756,45 @@ _resolve_parametric_defaults() {
     return 0
 }
 
+# XACA-0483 / XACA-0563: path-substitution install helper — rewrite ~/dev-team
+# and $HOME/dev-team references to $AITEAMFORGE_DIR. One special case: dev-team
+# has iterm2_window_manager.py at the top level, but the tap installs it under
+# scripts/. Handle that first.
+# XACA-0853: RELOCATED here from further down the file. It must be defined
+# before _render_connect_disconnect(), because that function is called from the
+# --connect-only early exit — which runs well before the old definition site.
+# Both install paths still share this ONE mechanism; there is no second copy.
+_xaca0483_install_script() {
+    local src="$1" dst="$2"
+    # The dev-team source uses ~/dev-team/iterm2_window_manager.py (top-level),
+    # but the tap installs iterm2_window_manager.py under scripts/. Rewrite
+    # that specific case first, then the general ~/dev-team → $AITEAMFORGE_DIR
+    # path mapping. Covers all three reference forms: ~, $HOME, ${HOME}.
+    sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+        -e "s|\${HOME}/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+        -e "s|~/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+        -e "s|\$HOME/dev-team|$AITEAMFORGE_DIR|g" \
+        -e "s|\${HOME}/dev-team|$AITEAMFORGE_DIR|g" \
+        -e "s|~/dev-team|$AITEAMFORGE_DIR|g" \
+        "$src" > "$dst"
+    chmod +x "$dst"
+}
+
+# XACA-0853: does this team ship HAND-AUTHORED connect/disconnect scripts?
+# Most teams render theirs from a template. dns cannot: it is single-instance
+# with a host-only connect signature and dynamic port discovery, so it fits
+# neither the flat nor the parametric template (documented in dev-team's
+# scripts/render-cockpit-scripts.sh). Its scripts are hand-authored and shipped
+# whole under share/scripts/teams/.
+#
+# Contract: presence of the file IS the opt-in. No team list is hardcoded here
+# — adding <team>-connect.sh to share/scripts/teams/ is what enables this path.
+# A hardcoded `[[ $TEAM_ID == dns ]]` would be exactly the sibling-heuristic
+# that has to be found and edited again for the next such team.
+_has_preauthored_connect() {
+    [[ -f "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-connect.sh" ]]
+}
+
 _render_connect_disconnect() {
     # XACA-0862: TEAM-scoped filenames — one connect/disconnect pair per
     # TEAM, not per instance. Rendering `finance --project personal` vs
@@ -774,6 +813,29 @@ _render_connect_disconnect() {
     local connect_script="$AITEAMFORGE_DIR/${TEAM_ID}-connect.sh"
     local disconnect_script="$AITEAMFORGE_DIR/${TEAM_ID}-disconnect.sh"
     local connect_template disconnect_template
+
+    # ---- XACA-0853: hand-authored connect/disconnect (checked FIRST) ----
+    # Installed verbatim through the same path-rewrite every startup script
+    # gets, NOT rendered from a template. Ordered ahead of the parametric and
+    # flat branches deliberately: a team that ships its own scripts must never
+    # have them silently overwritten by a template render.
+    if _has_preauthored_connect; then
+        _xaca0483_install_script \
+            "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-connect.sh" "$connect_script"
+        echo "  ✓ ${TEAM_ID}-connect.sh (hand-authored, XACA-0853)"
+
+        # The disconnect half is INDEPENDENT: warn rather than fail if a team
+        # ships only the connect script, so a half-shipped pair degrades to a
+        # missing disconnect instead of an install abort.
+        if [[ -f "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-disconnect.sh" ]]; then
+            _xaca0483_install_script \
+                "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-disconnect.sh" "$disconnect_script"
+            echo "  ✓ ${TEAM_ID}-disconnect.sh (hand-authored, XACA-0853)"
+        else
+            echo "  ⚠️  ${TEAM_ID} ships a hand-authored connect script but no matching disconnect script"
+        fi
+        return 0
+    fi
 
     if _is_parametric_team; then
         connect_template="$HOMEBREW_TAP_ROOT/share/templates/team-connect-parametric.sh.template"
@@ -1250,27 +1312,13 @@ if [[ ! -f "$SHUTDOWN_TEMPLATE" ]]; then
     SHUTDOWN_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-shutdown.sh.template"
 fi
 
-# XACA-0483 / XACA-0563: path-substitution install helper — rewrite ~/dev-team
-# and $HOME/dev-team references to $AITEAMFORGE_DIR. One special case: dev-team
-# has iterm2_window_manager.py at the top level, but the tap installs it under
-# scripts/. Handle that first. Defined here (outside the mode branch) because the
-# rendered-template path below (XACA-0563) also installs lcars-launch-helpers.sh
-# through it, so both install paths use one mechanism.
-_xaca0483_install_script() {
-    local src="$1" dst="$2"
-    # The dev-team source uses ~/dev-team/iterm2_window_manager.py (top-level),
-    # but the tap installs iterm2_window_manager.py under scripts/. Rewrite
-    # that specific case first, then the general ~/dev-team → $AITEAMFORGE_DIR
-    # path mapping. Covers all three reference forms: ~, $HOME, ${HOME}.
-    sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
-        -e "s|\${HOME}/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
-        -e "s|~/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
-        -e "s|\$HOME/dev-team|$AITEAMFORGE_DIR|g" \
-        -e "s|\${HOME}/dev-team|$AITEAMFORGE_DIR|g" \
-        -e "s|~/dev-team|$AITEAMFORGE_DIR|g" \
-        "$src" > "$dst"
-    chmod +x "$dst"
-}
+# XACA-0853: _xaca0483_install_script() was DEFINED HERE until 2026-09-09 and is
+# now defined above, immediately before _render_connect_disconnect(). It had to
+# move: _render_connect_disconnect is called from the --connect-only early exit,
+# which runs LONG before this line, so a pre-authored connect script installed
+# through this helper would have died with "command not found" on that path
+# while working fine on the main install path. Same single mechanism, defined
+# early enough for every caller. Do not re-add a second copy here.
 
 # XACA-0483: parametric mode — copy dev-team source scripts verbatim with
 # path substitution from ~/dev-team/* to $AITEAMFORGE_DIR/*. Skips template
