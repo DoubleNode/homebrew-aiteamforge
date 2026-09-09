@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1138 (follow-up): `_panel_image_usable` now also checks the PNG **IEND** terminator, and
+  both rounded-image cache guards regenerate when the cached file fails it — a truncated file
+  (the disk-full shape) used to satisfy `-f`, so magick was skipped and the corrupt file was
+  repainted on every render until the source mtime changed, never self-healing. The terminal
+  logo gains a `logo_rendered` flag and a `Logo unavailable` placeholder, gated on the logo
+  file existing so a legitimately logo-less session stays silent. The avatar placeholder now
+  fits one line.
+
 - XACA-1138 (review follow-up): corrected a code comment at the AMB row-display site that
   still asserted "<=5 badges" and that the message is self-distinguishing — both wrong, and
   both already corrected elsewhere. Also added `-r` to `_panel_debug`'s `print -u2`: this

@@ -77,6 +77,30 @@ _panel_magick() {
     return $_pm_rc
 }
 
+# _panel_image_usable <file> -- cheap plausibility check before painting a RAW
+# image as a fallback. imgcat exits 0 on a zero-byte file, a truncated PNG and a
+# valid PNG alike (measured), so its exit status can never tell us whether an
+# image actually appeared. Without this guard the XACA-1138 fallback would paint
+# garbage for a corrupt source AND set avatar_rendered=true, suppressing the
+# XACA-1134 placeholder -- strictly worse than before, for exactly the input
+# XACA-1134 was filed to make visible. Signature check only; this runs in a
+# polling render loop, so no magick identify.
+_panel_image_usable() {
+    [[ -s "$1" ]] || return 1
+    local _sig _end
+    # Head: the 8-byte PNG signature -- rejects not-a-PNG.
+    _sig=$(head -c 8 "$1" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+    [[ "$_sig" == "89504e470d0a1a0a" ]] || return 1
+    # Tail: the IEND chunk that terminates every complete PNG -- rejects a
+    # TRUNCATED file, which a signature check alone happily accepts. This is
+    # the disk-full shape: magick writes a valid header, hits the limit, and
+    # leaves a headed-but-unfinished file behind (measured under `ulimit -f 8`:
+    # rc=25, 4096 bytes, correct signature, no IEND). Two 8-byte reads, no
+    # `magick identify` -- this runs in a polling render loop.
+    _end=$(tail -c 8 "$1" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+    [[ "$_end" == "49454e44ae426082" ]]
+}
+
 # Resolve avatars directory (checked in priority order):
 #   1. Flat avatars pool via explicit env override ($AITEAMFORGE_DIR/avatars/)
 #   2. Fleet monitor avatars via explicit env override
@@ -969,7 +993,11 @@ render_panel() {
         local rounded_file="${LCARS_TMP}lcars-avatar-${SESSION_CODE}-${avatar}-rounded.png"
         if command -v magick &>/dev/null; then
             # Cache: only run magick if cached file doesn't exist or source is newer
-            if [[ ! -f "$rounded_file" || "$avatar_file" -nt "$rounded_file" ]]; then
+            # `! _panel_image_usable` is the XACA-1138 addition: without it a
+            # truncated/corrupt cached file satisfies -f, magick is skipped, and
+            # the bad file is painted on EVERY render until the SOURCE mtime
+            # changes -- it never self-heals.
+            if [[ ! -f "$rounded_file" || "$avatar_file" -nt "$rounded_file" ]] || ! _panel_image_usable "$rounded_file"; then
                 _panel_magick "avatar" "$avatar_file" \
                     $([[ "$avatar_file" != *_panel.png ]] && echo "-resize 200x200") \
                     \( -size 200x200 xc:black -fill white \
@@ -977,21 +1005,46 @@ render_panel() {
                     -alpha off -compose CopyOpacity -composite \
                     PNG32:"$rounded_file"
             fi
-            if [[ -f "$rounded_file" ]]; then
+            if _panel_image_usable "$rounded_file"; then
                 _panel_debug "avatar: imgcat invoking on rounded $rounded_file"
                 "$IMGCAT" -W 100% -H 12 "$rounded_file"
                 avatar_rendered=true
             else
-                # Rounding failed (magick error, unwritable $LCARS_TMP, disk
-                # full, corrupt source PNG). Before XACA-1138 this arm displayed
-                # NOTHING -- yet a perfectly displayable raw file is sitting
-                # right here, and the no-magick branch below proves it paints
-                # fine. Degrade to square corners rather than to a blank hole.
-                _panel_debug "avatar: magick rounding produced no output file ($rounded_file) — falling back to raw $avatar_file"
-                "$IMGCAT" -W 100% -H 12 "$avatar_file"
-                # Must be set here too, or the placeholder below prints
-                # UNDERNEATH the avatar we just successfully painted.
-                avatar_rendered=true
+                # Rounding produced NO OUTPUT FILE. Before XACA-1138 this arm
+                # displayed NOTHING -- yet a displayable raw file is often
+                # sitting right here, and the no-magick branch below proves it
+                # paints fine. Degrade to square corners, not to a blank hole.
+                #
+                # Which causes actually land here, measured:
+                #   magick error / unwritable $LCARS_TMP -> no file at all, so
+                #     the fallback fires and paints the raw image. Fixed.
+                #   corrupt source PNG -> magick fails, so we DO reach here, but
+                #     the raw source is itself the broken file. _panel_image_usable
+                #     rejects the empty/not-a-PNG shapes so the placeholder still
+                #     fires; a truncated-but-valid-header PNG still slips past.
+                #   disk full -> does NOT reach here at all (see below).
+                #
+                # NOT covered, deliberately: a disk-full write leaves a
+                # TRUNCATED file behind (measured under `ulimit -f 8`: rc=25,
+                # 4096 bytes), so the -f test above is TRUE and we never reach
+                # this arm -- imgcat gets the corrupt file instead, and the
+                # cache guard then suppresses regeneration until the SOURCE
+                # mtime changes. Pre-existing, not a regression, tracked
+                # separately. Closing it needs a content check (non-zero size
+                # or `magick identify`), not mere existence.
+                if _panel_image_usable "$avatar_file"; then
+                    _panel_debug "avatar: magick rounding produced no output file ($rounded_file) — falling back to raw $avatar_file"
+                    "$IMGCAT" -W 100% -H 12 "$avatar_file"
+                    # Must be set here too, or the placeholder below prints
+                    # UNDERNEATH the avatar we just successfully painted.
+                    avatar_rendered=true
+                else
+                    # Raw source is empty or not a PNG -- painting it would show
+                    # nothing while suppressing the placeholder. Leave
+                    # avatar_rendered=false so the operator gets the explicit
+                    # degraded state instead of an unexplained blank.
+                    _panel_debug "avatar: magick rounding produced no output file ($rounded_file) AND raw $avatar_file is empty/not-a-PNG — showing placeholder"
+                fi
             fi
         else
             _panel_debug "avatar: imgcat invoking on raw $avatar_file (no magick on PATH, skipping rounding)"
@@ -1020,8 +1073,7 @@ render_panel() {
     # width (TARGET_COLS=30, the phrase is 22 chars). On a component whose whole
     # job is to signal a glitch, looking like one is a bad failure mode.
     if [[ "$avatar_rendered" != "true" ]]; then
-        echo "${DIM}  Avatar${RESET}"
-        echo "${DIM}  unavailable${RESET}"
+        echo "${DIM}  Avatar unavailable${RESET}"
     fi
 
     echo ""
@@ -1138,11 +1190,20 @@ render_panel() {
     if _panel_debug_on; then
         _panel_debug "terminal logo: AVATARS_DIR='${AVATARS_DIR:-<empty>}' session='$SESSION_CODE' -> $([[ -f "$logo_file" ]] && echo "matched $logo_file" || echo "NO MATCH (tried full/team+last/glob shapes for _logo_panel.png and _logo.png)")"
     fi
+    # Mirrors avatar_rendered. Scoped deliberately: only a logo that was FOUND
+    # but could not be painted is worth reporting. A session with no logo is
+    # normal, and the terminal name/description print beneath either way, so a
+    # placeholder for the absent case would cry wolf (XACA-1138-021).
+    local logo_rendered=false
     if [[ -f "$logo_file" && -x "$IMGCAT" ]]; then
         local rounded_logo="${LCARS_TMP}lcars-termlogo-${SESSION_CODE}-rounded.png"
         if command -v magick &>/dev/null; then
             # Cache: only run magick if cached file doesn't exist or source is newer
-            if [[ ! -f "$rounded_logo" || "$logo_file" -nt "$rounded_logo" ]]; then
+            # `! _panel_image_usable` is the XACA-1138 addition: without it a
+            # truncated/corrupt cached file satisfies -f, magick is skipped, and
+            # the bad file is painted on EVERY render until the SOURCE mtime
+            # changes -- it never self-heals.
+            if [[ ! -f "$rounded_logo" || "$logo_file" -nt "$rounded_logo" ]] || ! _panel_image_usable "$rounded_logo"; then
                 _panel_magick "terminal logo" "$logo_file" \
                     $([[ "$logo_file" != *_panel.png ]] && echo "-resize 200x200") \
                     \( -size 200x200 xc:black -fill white \
@@ -1150,22 +1211,38 @@ render_panel() {
                     -alpha off -compose CopyOpacity -composite \
                     PNG32:"$rounded_logo"
             fi
-            if [[ -f "$rounded_logo" ]]; then
+            if _panel_image_usable "$rounded_logo"; then
                 _panel_debug "terminal logo: imgcat invoking on rounded logo $rounded_logo"
                 "$IMGCAT" -W 100% -H 10 "$rounded_logo"
+                logo_rendered=true
             else
                 # Same raw fallback as the avatar block above (XACA-1138). This
                 # site was the worse of the two: no rendered-flag and no
                 # placeholder, so a rounding failure degraded to total silence.
-                _panel_debug "terminal logo: magick rounding produced no output file ($rounded_logo) — falling back to raw logo $logo_file"
-                "$IMGCAT" -W 100% -H 10 "$logo_file"
+                if _panel_image_usable "$logo_file"; then
+                    _panel_debug "terminal logo: magick rounding produced no output file ($rounded_logo) — falling back to raw logo $logo_file"
+                    "$IMGCAT" -W 100% -H 10 "$logo_file"
+                    logo_rendered=true
+                else
+                    _panel_debug "terminal logo: magick rounding produced no output file ($rounded_logo) AND raw $logo_file is empty/not-a-PNG — nothing to paint"
+                fi
             fi
         else
             _panel_debug "terminal logo: imgcat invoking on raw logo $logo_file (no magick on PATH)"
             "$IMGCAT" -W 100% -H 10 "$logo_file"
+            logo_rendered=true
         fi
     elif _panel_debug_on; then
         _panel_debug "terminal logo: NOT displayed — logo_file exists=$([[ -f "$logo_file" ]] && echo yes || echo no), IMGCAT executable=$([[ -x "$IMGCAT" ]] && echo yes || echo no)"
+    fi
+    # Degraded state for the logo, deliberately narrower than the avatar's
+    # (XACA-1138-021). The guard is `-f "$logo_file"`, NOT just !logo_rendered:
+    # a session with no logo art is a perfectly normal state and must stay
+    # silent, or every logo-less terminal grows a permanent warning. This fires
+    # only when a logo WAS found and still could not be painted -- previously
+    # the one failure on this panel that produced no output of any kind.
+    if [[ "$logo_rendered" != "true" && -f "$logo_file" ]]; then
+        echo "${DIM}  Logo unavailable${RESET}"
     fi
 
     echo ""
