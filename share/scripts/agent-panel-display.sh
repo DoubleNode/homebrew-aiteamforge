@@ -997,10 +997,15 @@ render_panel() {
             # truncated/corrupt cached file satisfies -f, magick is skipped, and
             # the bad file is painted on EVERY render until the SOURCE mtime
             # changes -- it never self-heals.
-            # Memoised (PR #843 review): the usable-check costs ~49ms (six
-            # subprocesses), so the common valid-cache path must pay it ONCE,
-            # not twice. Evaluate it here, reuse the verdict below, and re-check
-            # only when magick actually ran and changed the file.
+            # Memoised (PR #843 review): the usable-check costs 27-49ms per
+            # call (six subprocesses -- head/tail each through od and tr; two
+            # independent measurements on this box differed by that much, so
+            # treat it as load-dependent, not a constant). The common
+            # valid-cache path used to pay it TWICE per site: with the logo
+            # block that is ~110-195ms of forking on every render. Evaluate it
+            # once here, reuse the verdict below, and re-check only when magick
+            # actually ran and could have changed the file -- measured 2 calls
+            # -> 1 per site on a warm valid cache.
             local _rounded_ok=false
             if [[ -f "$rounded_file" && ! "$avatar_file" -nt "$rounded_file" ]] && _panel_image_usable "$rounded_file"; then
                 _rounded_ok=true
@@ -1217,10 +1222,15 @@ render_panel() {
             # truncated/corrupt cached file satisfies -f, magick is skipped, and
             # the bad file is painted on EVERY render until the SOURCE mtime
             # changes -- it never self-heals.
-            # Memoised (PR #843 review): the usable-check costs ~49ms (six
-            # subprocesses), so the common valid-cache path must pay it ONCE,
-            # not twice. Evaluate it here, reuse the verdict below, and re-check
-            # only when magick actually ran and changed the file.
+            # Memoised (PR #843 review): the usable-check costs 27-49ms per
+            # call (six subprocesses -- head/tail each through od and tr; two
+            # independent measurements on this box differed by that much, so
+            # treat it as load-dependent, not a constant). The common
+            # valid-cache path used to pay it TWICE per site: with the logo
+            # block that is ~110-195ms of forking on every render. Evaluate it
+            # once here, reuse the verdict below, and re-check only when magick
+            # actually ran and could have changed the file -- measured 2 calls
+            # -> 1 per site on a warm valid cache.
             local _logo_ok=false
             if [[ -f "$rounded_logo" && ! "$logo_file" -nt "$rounded_logo" ]] && _panel_image_usable "$rounded_logo"; then
                 _logo_ok=true

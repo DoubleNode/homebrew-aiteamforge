@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1138 (round 3): documented the memoised image-check's measured per-render cost at both
+  cache guards in `share/scripts/agent-panel-display.sh` (27-49ms per call, load-dependent;
+  ~110-195ms per render before memoisation). Comment-only change to the shipped script.
+
 - XACA-1138 (round 2): corrected stale claims in `share/scripts/agent-panel-display.sh` — the
   IEND check added earlier in the same change actually fixed the truncated/disk-full case, but
   the comments written before that fix still said it was uncovered. Also memoised the
