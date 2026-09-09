@@ -141,20 +141,58 @@ print(sum(1 for t in d.get('teams',[]) if t.get('id')=='dns'))
 fi
 
 # ---------------------------------------------------------------------------
-# T4 — the tap actually ships the dns scripts. Provisioning cannot install a
-# file the tap does not carry, so this is the delivery half of the fix.
+# T4 — dns ships EXACTLY connect/disconnect, and deliberately NOT
+# startup/shutdown/stations.
+#
+# Both halves matter, and the negative half is the one with teeth. dns is a
+# FLAT team (TEAM_HAS_PROJECTS=false). Flat teams ship no startup/shutdown or
+# station scripts — academy, android, command, firebase and ios ship none —
+# because the installer renders the master from team-startup.sh.template and
+# GENERATES the stations from personas.
+#
+# An earlier revision of this ticket shipped them anyway. That installs
+# cleanly and breaks later, which is why it is asserted here permanently:
+# install-team.sh's copy block is gated on _is_parametric_team (false for dns)
+# so the files are never installed, but aiteamforge-upgrade.sh's
+# update_team_scripts() globs share/scripts/teams/*-startup.sh and refreshes
+# every target that already exists. dns joining that glob means the first
+# upgrade overwrites the correctly generated stations with dev-machine copies
+# pointing at the wrong layout — all seven sessions down, on a working install.
 # ---------------------------------------------------------------------------
-start_test "T4 tap ships all 4 dns lifecycle scripts and 8 station scripts"
+start_test "T4 dns ships connect/disconnect only — no startup/shutdown/stations (flat-team rule)"
 _t4_err=""
-for _f in dns-startup.sh dns-shutdown.sh dns-connect.sh dns-disconnect.sh; do
+for _f in dns-connect.sh dns-disconnect.sh; do
     [ -f "$TEAMS_SCRIPTS/$_f" ] || _t4_err="$_t4_err missing:$_f"
 done
-_t4_stations=0
+for _f in dns-startup.sh dns-shutdown.sh; do
+    [ ! -f "$TEAMS_SCRIPTS/$_f" ] || _t4_err="$_t4_err must-not-ship:$_f"
+done
 if [ -d "$TEAMS_SCRIPTS/dns/scripts" ]; then
-    _t4_stations="$(find "$TEAMS_SCRIPTS/dns/scripts" -name 'dns-*-startup.sh' -type f | wc -l | tr -d ' ')"
+    _t4_n="$(find "$TEAMS_SCRIPTS/dns/scripts" -type f | wc -l | tr -d ' ')"
+    _t4_err="$_t4_err must-not-ship:dns/scripts($_t4_n files)"
 fi
-[ "$_t4_stations" = "8" ] || _t4_err="$_t4_err station-count=$_t4_stations expected 8"
+# Cross-check the rule against a real flat peer, so this cannot pass by
+# asserting a rule that has silently stopped applying to anyone.
+if [ -f "$TEAMS_SCRIPTS/academy-startup.sh" ]; then
+    _t4_err="$_t4_err flat-rule-broken: academy now ships a startup script, re-derive this contract"
+fi
 if [ -z "$_t4_err" ]; then test_pass; else test_fail "$_t4_err"; fi
+
+# ---------------------------------------------------------------------------
+# T4b — nothing dns ships may carry a literal developer home path. The install
+# rewrite handles ~/dev-team, $HOME/dev-team and ${HOME}/dev-team; a literal
+# /Users/<name>/dev-team matches none of them and ships verbatim to a machine
+# that by definition has no such directory.
+# ---------------------------------------------------------------------------
+start_test "T4b shipped dns scripts carry no literal /Users/<user>/dev-team path"
+_t4b_hits=""
+for _f in "$TEAMS_SCRIPTS/dns-connect.sh" "$TEAMS_SCRIPTS/dns-disconnect.sh"; do
+    [ -f "$_f" ] || continue
+    if grep -qE '/Users/[A-Za-z0-9._-]+/dev-team' "$_f"; then
+        _t4b_hits="$_t4b_hits $(basename "$_f")"
+    fi
+done
+if [ -z "$_t4b_hits" ]; then test_pass; else test_fail "literal home path in:$_t4b_hits"; fi
 
 # ---------------------------------------------------------------------------
 # T5 — ORDERING GUARD. _render_connect_disconnect is called from the
@@ -219,6 +257,64 @@ else
         test_pass
     else
         test_fail "hand-authored branch at offset $_pre_off does not precede parametric at $_par_off"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# T8 — WHICH BRANCH dns TAKES, not merely what the tap carries.
+# (Review subitem 3.) Carriage and installation are different claims. dns must
+# take the FLAT path: TEAM_HAS_PROJECTS=false makes _is_parametric_team false,
+# which is exactly what keeps the parametric copy block from installing files
+# — and is why shipping startup/station scripts for dns is incoherent.
+# Asserted from both ends: the conf's value, and the gate the installer uses.
+# ---------------------------------------------------------------------------
+start_test "T8 dns takes the flat install path (TEAM_HAS_PROJECTS=false gates it out of the parametric copy)"
+_t8_err=""
+_t8_hasproj="$(unset TEAM_HAS_PROJECTS; . "$CONF" >/dev/null 2>&1; echo "${TEAM_HAS_PROJECTS:-}")"
+[ "$_t8_hasproj" = "false" ] || _t8_err="TEAM_HAS_PROJECTS='$_t8_hasproj', expected 'false'"
+_t8_fn="$(sed -n '/^_is_parametric_team() {/,/^}/p' "$INSTALLER")"
+if [ -z "$_t8_fn" ]; then
+    _t8_err="$_t8_err; _is_parametric_team not found — assertion would be vacuous"
+elif ! printf '%s' "$_t8_fn" | grep -q 'TEAM_HAS_PROJECTS'; then
+    _t8_err="$_t8_err; _is_parametric_team no longer keys on TEAM_HAS_PROJECTS — re-derive this contract"
+fi
+# The parametric copy block must remain gated on that predicate. If it ever
+# becomes unconditional, dns's shipped-file exclusion stops protecting anything.
+if ! grep -q '_PARAMETRIC_MODE" == "true"' "$INSTALLER"; then
+    _t8_err="$_t8_err; parametric copy block is no longer gated on _PARAMETRIC_MODE"
+fi
+if [ -z "$_t8_err" ]; then test_pass; else test_fail "$_t8_err"; fi
+
+# ---------------------------------------------------------------------------
+# T9 — CROSS-REPO PREDICATE AGREEMENT. (Review subitem 2.)
+# _has_preauthored_connect (tap install-team.sh) and _ships_handauthored_connect
+# (dev-team render-cockpit-scripts.sh) are one rule implemented twice, in two
+# repos. They read the same physical file, so they cannot disagree about its
+# CONTENTS — but the predicate can drift, and it fails in the quiet direction:
+# a green "rendered" that clobbers a hand-authored script. Assert both resolve
+# the same path shape.
+# SKIPPED (not failed) when the dev-team side is absent — this test also runs
+# from a consumer tap checkout, where ../scripts/ does not exist. A skip here is
+# reported, never silently counted as a pass.
+# ---------------------------------------------------------------------------
+start_test "T9 both hand-authored predicates key on the same share/scripts/teams/<team>-connect.sh path"
+_t9_render="$TAP_ROOT/../scripts/render-cockpit-scripts.sh"
+if [ ! -f "$_t9_render" ]; then
+    echo "     SKIP: dev-team side not present (consumer checkout) — cross-repo pair not checkable here"
+else
+    _t9_a="$(sed -n '/^_has_preauthored_connect() {/,/^}/p' "$INSTALLER" \
+             | grep -o 'share/scripts/teams/[^"]*connect\.sh' | head -1)"
+    _t9_b="$(sed -n '/^_ships_handauthored_connect() {/,/^}/p' "$_t9_render" \
+             | grep -o 'share/scripts/teams/[^"]*connect\.sh' | head -1)"
+    # Normalise the differing variable spellings for the team id.
+    _t9_an="$(printf '%s' "$_t9_a" | sed 's/\${TEAM_ID}/<team>/; s/\$TEAM_ID/<team>/')"
+    _t9_bn="$(printf '%s' "$_t9_b" | sed 's/\${_team_id}/<team>/; s/\$_team_id/<team>/')"
+    if [ -z "$_t9_an" ] || [ -z "$_t9_bn" ]; then
+        test_fail "could not extract a path from both predicates (tap='$_t9_a' devteam='$_t9_b') — assertion would be vacuous"
+    elif [ "$_t9_an" = "$_t9_bn" ]; then
+        test_pass
+    else
+        test_fail "predicates disagree: tap resolves '$_t9_an', dev-team resolves '$_t9_bn'"
     fi
 fi
 

@@ -20,7 +20,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   warned that fabricating this file without the real data would ship broken tmux session names, so
   no value in it was chosen. Adds the `dns` catalog entry to `share/teams/registry.json`
   (`recommended: false`, matching command/freelance, since dns needs the shared umbrella checkout).
-  Ships all four dns lifecycle scripts plus the 8 station scripts under `share/scripts/teams/`.
+  Ships ONLY `dns-connect.sh` / `dns-disconnect.sh` under `share/scripts/teams/`.
+- XACA-0853 (corrected during review, PR #846): an earlier revision also shipped `dns-startup.sh`,
+  `dns-shutdown.sh` and the 8 station scripts. That was wrong in a way that installs cleanly and
+  breaks later. dns is a FLAT team (`TEAM_HAS_PROJECTS=false`), and flat teams ship none of those —
+  academy/android/command/firebase/ios ship none either, because the installer renders the master
+  from `team-startup.sh.template` and GENERATES the stations from personas via
+  `generate_per_agent_startup_scripts()`, driven by the conf's TEAM_AGENTS / AGENT_WINDOWS_* /
+  AGENT_TERMINAL_* fields. Only the four `TEAM_HAS_PROJECTS=true` teams ship scripts whole.
+  Consequence had it merged: `install-team.sh`'s copy block is gated on `_is_parametric_team`
+  (false for dns) so the files would never be installed — but `aiteamforge-upgrade.sh`'s
+  `update_team_scripts()` globs `share/scripts/teams/*-startup.sh` and refreshes every target that
+  already exists. dns joining that glob means the FIRST upgrade overwrites the correctly generated
+  stations with dev-machine copies that look for stations at `dns-framework/scripts/` while the
+  installed layout is `dns/scripts/` — all seven sessions down on a previously working install.
+  Two of those station files also carried a literal `/Users/<developer>/dev-team` path that none of
+  `_xaca0483_install_script`'s six sed expressions match (it rewrites `~`, `$HOME`, `${HOME}` forms
+  only), and sourced a `dns-banner.sh` that was never shipped. Removing them resolves all three.
+  T4 now asserts the NEGATIVE (dns must ship no startup/shutdown/stations) and cross-checks the
+  flat-team rule against academy so it cannot pass by asserting a rule that stopped applying;
+  new T4b bans literal developer home paths in anything dns ships.
 - XACA-0853: `install-team.sh` gains a hand-authored connect/disconnect install path. dns is
   single-instance with a host-only connect signature and dynamic port discovery, so it fits neither
   the flat nor the parametric connect template; its scripts ship whole and are installed through the
