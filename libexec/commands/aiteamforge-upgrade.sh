@@ -1040,13 +1040,32 @@ _xaca0608_render_team_script() {
   # Mirror of install-team.sh::_xaca0483_install_script — keep these two sed
   # chains in lockstep (k501 sibling pair). The iterm2_window_manager.py special
   # case must come BEFORE the general ~/dev-team mapping.
+  #
+  # XACA-1143-005: source scripts can also carry an ABSOLUTE literal, e.g.
+  # /Users/darrenehlers/dev-team, baked in from whichever machine authored
+  # them (measured: share/scripts/worktree-helpers.sh's WT_ACADEMY_BASE).
+  # The ~/, $HOME/, ${HOME}/ forms above never match that literal string, so
+  # it survived the rewrite unchanged and shipped a nonexistent path to every
+  # other machine. Matched generically — no hardcoded username, and not
+  # /Users-only (a /home/<user> author box must work too) — via
+  # [^/]\{1,\} for the single path segment between the home root and
+  # /dev-team. That single-segment constraint is load-bearing: it is what
+  # keeps this from also matching WT_COMMAND_BASE's unrelated
+  # "/Users/Shared/Development/Main Event/dev-team" (a different team's repo
+  # that merely happens to end in the same basename) — [^/] cannot cross the
+  # extra "/" components in that deeper path, so only a true
+  # <home-root>/<user>/dev-team shape matches.
   local src="$1" dst="$2"
   sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
       -e "s|\${HOME}/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
       -e "s|~/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
+      -e "s|/Users/[^/]\{1,\}/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
+      -e "s|/home/[^/]\{1,\}/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
       -e "s|\$HOME/dev-team|${WORKING_DIR}|g" \
       -e "s|\${HOME}/dev-team|${WORKING_DIR}|g" \
       -e "s|~/dev-team|${WORKING_DIR}|g" \
+      -e "s|/Users/[^/]\{1,\}/dev-team|${WORKING_DIR}|g" \
+      -e "s|/home/[^/]\{1,\}/dev-team|${WORKING_DIR}|g" \
       "$src" > "$dst"
   chmod +x "$dst"
 }

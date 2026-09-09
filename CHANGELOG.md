@@ -52,6 +52,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   guards. The narrower range excluded the two slowest of four measurements, so the number
   shipping to consumers contradicted the measurements behind it. Comment-only.
 
+- XACA-1143-005: `_xaca0608_render_team_script` (aiteamforge-upgrade.sh) and its lockstep
+  sibling `_xaca0483_install_script` (install-team.sh) rewrote `~/dev-team`, `$HOME/dev-team`
+  and `${HOME}/dev-team` but not an absolute `/Users/<user>/dev-team` literal baked into a
+  source script by whichever machine authored it — measured on M4Mini, `scripts/worktree-helpers.sh`
+  still read `WT_ACADEMY_BASE="/Users/darrenehlers/dev-team"`, a path absent on that box. Both
+  sed chains extended with a single-path-segment match (`[^/]\{1,\}`, no hardcoded username,
+  covers both `/Users/*` and `/home/*` roots) that is deliberately narrow enough to skip
+  unrelated deeper paths like `WT_COMMAND_BASE`'s `/Users/Shared/Development/Main Event/dev-team`
+  (a different team's repo that happens to end in the same basename). Verified against the real
+  `worktree-helpers.sh` source and against `WT_COMMAND_BASE`/the iterm2 special case; all 21
+  existing `test-xaca-0608-team-script-refresh.sh` assertions still pass.
+
 - XACA-1138 (round 3): documented the memoised image-check's measured per-render cost at both
   cache guards in `share/scripts/agent-panel-display.sh` (27-49ms per call, load-dependent;
   ~110-195ms per render before memoisation). Comment-only change to the shipped script.

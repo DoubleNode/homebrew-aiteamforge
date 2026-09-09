@@ -770,12 +770,28 @@ _xaca0483_install_script() {
     # but the tap installs iterm2_window_manager.py under scripts/. Rewrite
     # that specific case first, then the general ~/dev-team → $AITEAMFORGE_DIR
     # path mapping. Covers all three reference forms: ~, $HOME, ${HOME}.
+    #
+    # XACA-1143-005 (mirror of aiteamforge-upgrade.sh::_xaca0608_render_team_script
+    # — keep in lockstep): a source script can also carry an ABSOLUTE literal,
+    # e.g. /Users/<user>/dev-team, baked in from whichever machine authored it
+    # (measured: share/scripts/worktree-helpers.sh's WT_ACADEMY_BASE). None of
+    # the ~/, $HOME/, ${HOME}/ forms match that literal string. Matched
+    # generically below — no hardcoded username, and not /Users-only — via
+    # [^/]\{1,\} for the single path segment between the home root and
+    # /dev-team. That single-segment constraint is load-bearing: it keeps this
+    # from also matching an unrelated deeper path like
+    # "/Users/Shared/Development/Main Event/dev-team" — [^/] cannot cross the
+    # extra "/" components in that path.
     sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
         -e "s|\${HOME}/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
         -e "s|~/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+        -e "s|/Users/[^/]\{1,\}/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+        -e "s|/home/[^/]\{1,\}/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
         -e "s|\$HOME/dev-team|$AITEAMFORGE_DIR|g" \
         -e "s|\${HOME}/dev-team|$AITEAMFORGE_DIR|g" \
         -e "s|~/dev-team|$AITEAMFORGE_DIR|g" \
+        -e "s|/Users/[^/]\{1,\}/dev-team|$AITEAMFORGE_DIR|g" \
+        -e "s|/home/[^/]\{1,\}/dev-team|$AITEAMFORGE_DIR|g" \
         "$src" > "$dst"
     chmod +x "$dst"
 }
