@@ -997,10 +997,11 @@ render_panel() {
             # truncated/corrupt cached file satisfies -f, magick is skipped, and
             # the bad file is painted on EVERY render until the SOURCE mtime
             # changes -- it never self-heals.
-            # Memoised (PR #843 review): the usable-check costs 27-49ms per
-            # call (six subprocesses -- head/tail each through od and tr; two
-            # independent measurements on this box differed by that much, so
-            # treat it as load-dependent, not a constant). The common
+            # Memoised (PR #843 review): the usable-check costs 27-124ms per
+            # call (six subprocesses -- head/tail each through od and tr; four
+            # independent measurements on this box spanned that range, so treat
+            # it as load-dependent, not a constant -- an earlier revision of
+            # this comment said 27-49ms, which excluded the slowest two). The common
             # valid-cache path used to pay it TWICE per site: with the logo
             # block that is ~110-195ms of forking on every render. Evaluate it
             # once here, reuse the verdict below, and re-check only when magick
@@ -1222,10 +1223,11 @@ render_panel() {
             # truncated/corrupt cached file satisfies -f, magick is skipped, and
             # the bad file is painted on EVERY render until the SOURCE mtime
             # changes -- it never self-heals.
-            # Memoised (PR #843 review): the usable-check costs 27-49ms per
-            # call (six subprocesses -- head/tail each through od and tr; two
-            # independent measurements on this box differed by that much, so
-            # treat it as load-dependent, not a constant). The common
+            # Memoised (PR #843 review): the usable-check costs 27-124ms per
+            # call (six subprocesses -- head/tail each through od and tr; four
+            # independent measurements on this box spanned that range, so treat
+            # it as load-dependent, not a constant -- an earlier revision of
+            # this comment said 27-49ms, which excluded the slowest two). The common
             # valid-cache path used to pay it TWICE per site: with the logo
             # block that is ~110-195ms of forking on every render. Evaluate it
             # once here, reuse the verdict below, and re-check only when magick

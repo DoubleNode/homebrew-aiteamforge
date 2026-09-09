@@ -7,6 +7,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1138 (round 5): corrected the memoised image-check's cost figure in
+  `share/scripts/agent-panel-display.sh` from 27-49ms to 27-124ms per call at both cache
+  guards. The narrower range excluded the two slowest of four measurements, so the number
+  shipping to consumers contradicted the measurements behind it. Comment-only.
+
 - XACA-1138 (round 3): documented the memoised image-check's measured per-render cost at both
   cache guards in `share/scripts/agent-panel-display.sh` (27-49ms per call, load-dependent;
   ~110-195ms per render before memoisation). Comment-only change to the shipped script.
