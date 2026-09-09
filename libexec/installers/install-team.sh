@@ -790,8 +790,10 @@ _xaca0483_install_script() {
         -e "s|\$HOME/dev-team|$AITEAMFORGE_DIR|g" \
         -e "s|\${HOME}/dev-team|$AITEAMFORGE_DIR|g" \
         -e "s|~/dev-team|$AITEAMFORGE_DIR|g" \
-        -e "s|/Users/[^/]\{1,\}/dev-team|$AITEAMFORGE_DIR|g" \
-        -e "s|/home/[^/]\{1,\}/dev-team|$AITEAMFORGE_DIR|g" \
+        -e "s|/Users/[^/]\{1,\}/dev-team\([^A-Za-z0-9_-]\)|$AITEAMFORGE_DIR\1|g" \
+        -e "s|/Users/[^/]\{1,\}/dev-team$|$AITEAMFORGE_DIR|g" \
+        -e "s|/home/[^/]\{1,\}/dev-team\([^A-Za-z0-9_-]\)|$AITEAMFORGE_DIR\1|g" \
+        -e "s|/home/[^/]\{1,\}/dev-team$|$AITEAMFORGE_DIR|g" \
         "$src" > "$dst"
     chmod +x "$dst"
 }

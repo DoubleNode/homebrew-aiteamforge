@@ -79,6 +79,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   guards. The narrower range excluded the two slowest of four measurements, so the number
   shipping to consumers contradicted the measurements behind it. Comment-only.
 
+- XACA-1143-009 (review round, PR #848): the suite's "no over-materialize" negative control was
+  VACUOUS. `update_aux_scripts()` is called exactly once, and the control's framework source file
+  was created AFTER that call, so the probed entry never reached the mandatory-check logic and the
+  assertion passed regardless of behaviour. Demonstrated by adding the probe to the mandatory list
+  — manufacturing the exact bug the control exists to catch — which still produced 6/6 GREEN. Setup
+  moved before the call; the control now fails (5 passed, 1 failed) with that bug injected and
+  passes without it. A control that cannot fail is not a control.
+- XACA-1143-009 (review round): the new absolute-path sed patterns were unanchored, so
+  `/Users/<user>/dev-team-backup/...` over-matched and became `$AITEAMFORGE_DIR-backup/...`. Now
+  guarded by a trailing non-identifier character or end-of-line, expressed as two POSIX BRE
+  expressions rather than a `\|` alternation, which BSD sed does not support. The pre-existing
+  `~/`, `$HOME/` and `${HOME}/` forms share this class and are deliberately NOT changed here: they
+  are long-standing behaviour whose real-world impact has not been measured, and altering them
+  belongs to a ticket that measures it first.
 - XACA-1143-006: registered `test-xaca-1143-worktree-helpers-materialize.sh` in
   `tests/ci-manifest` as `plain-shell`. Without a manifest entry the completeness gate
   (`ci-manifest-check.sh`) fails the build, and — more to the point — an unregistered

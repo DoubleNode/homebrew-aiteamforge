@@ -1112,8 +1112,10 @@ _xaca0608_render_team_script() {
       -e "s|\$HOME/dev-team|${WORKING_DIR}|g" \
       -e "s|\${HOME}/dev-team|${WORKING_DIR}|g" \
       -e "s|~/dev-team|${WORKING_DIR}|g" \
-      -e "s|/Users/[^/]\{1,\}/dev-team|${WORKING_DIR}|g" \
-      -e "s|/home/[^/]\{1,\}/dev-team|${WORKING_DIR}|g" \
+      -e "s|/Users/[^/]\{1,\}/dev-team\([^A-Za-z0-9_-]\)|${WORKING_DIR}\1|g" \
+        -e "s|/Users/[^/]\{1,\}/dev-team$|${WORKING_DIR}|g" \
+      -e "s|/home/[^/]\{1,\}/dev-team\([^A-Za-z0-9_-]\)|${WORKING_DIR}\1|g" \
+        -e "s|/home/[^/]\{1,\}/dev-team$|${WORKING_DIR}|g" \
       "$src" > "$dst"
   chmod +x "$dst"
 }

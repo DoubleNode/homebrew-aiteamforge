@@ -159,6 +159,15 @@ if [ -f "$FRAMEWORK_DIR/share/scripts/kb-cr.sh" ]; then :; else
 fi
 touch -t 203001010000 "$FRAMEWORK_DIR/share/scripts/kb-cr.sh" 2>/dev/null || true
 
+# XACA-1143-009 (review finding, PR #848): the negative control for assertion 5
+# MUST have its framework source in place BEFORE the single update_aux_scripts()
+# call below, or that entry never reaches the mandatory-check logic at all and
+# the assertion passes no matter what the fix does. Verified vacuous as
+# originally written: adding cellar-watch-trigger.sh to the mandatory list —
+# i.e. manufacturing the exact over-materialize bug assertion 5 exists to
+# catch — still produced 6/6 GREEN. A control that cannot fail is not a control.
+printf '#!/bin/bash\n# framework cellar-watch-trigger\n' > "$FRAMEWORK_DIR/share/scripts/cellar-watch-trigger.sh"
+
 WT_TARGET="$WORKING_DIR/worktree-helpers.sh"
 
 test_start "Sanity: sandbox precondition — $WT_TARGET is ABSENT before upgrade"
@@ -233,7 +242,6 @@ fi
 # mandatory-materialize list this fix adds. ──
 test_start "update_aux_scripts() still leaves an un-installed scripts/-destined aux entry absent (no over-materialize)"
 UNINSTALLED_PROBE="$WORKING_DIR/scripts/cellar-watch-trigger.sh"
-printf '#!/bin/bash\n# framework cellar-watch-trigger\n' > "$FRAMEWORK_DIR/share/scripts/cellar-watch-trigger.sh"
 if assert_file_not_exists "$UNINSTALLED_PROBE" \
     "cellar-watch-trigger.sh must stay absent — it was never installed on this sandboxed machine and is not on the mandatory-materialize allowlist"; then
     test_pass
