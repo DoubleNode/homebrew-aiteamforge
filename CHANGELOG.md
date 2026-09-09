@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1144 (FAULT C): ported the XACA-0223 deterministic clear of the iTerm2 tab
+  "C " prefix into shipped `cc-aliases.sh`. Canonical `claude_code_cc_aliases.sh`
+  and shipped `cc-aliases.sh` are independently maintained with no `sync-tap.sh`
+  entry between them (confirmed: `grep -n 'cc-aliases' sync-tap.sh` matches
+  nothing) — this is the documented XACA-0340 exception, not a canonical-rule
+  violation, since the tap template has no canonical mirror relationship to
+  patch first. Added shared helper `_cc_clear_claude_active()` (fallback chain:
+  `$DEV_TEAM_ROOT` override, then `~/dev-team`, then `~/aiteamforge`, matching
+  `kanban-session-start.py`/`kanban-stop.py`/`update_claude_agent.sh`) and
+  invoked it at all three post-`kb-clear` exit points in `_cc_launch`/`ccc`.
+  Silent no-op when the helper is absent (verified by sourcing under zsh, the
+  file's actual shebang/sourcing shell). Scope deliberately narrow per user
+  decision — the wider ~800-line divergence between the two files is untouched.
 
 ## [0.20.8] - 2026-09-09
 - XACA-0853 (review round 3 follow-ups, PR #846): four review/test findings closed, two of which had

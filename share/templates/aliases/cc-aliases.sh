@@ -201,6 +201,31 @@ _cc_saved_session_label() {
     printf '%s' "$saved_name"
 }
 
+# XACA-0223 (ported from canonical claude_code_cc_aliases.sh — see FAULT C,
+# XACA-1144): deterministic clear of the iTerm2 tab "C " prefix.
+# The stop-hook daemon (kanban-stop.py) is a heuristic that can miss slow
+# Claude shutdowns. Here we know `claude` has exited because its process
+# returned — fire clear_claude_active synchronously. Refcount semantics
+# still prevent over-clearing when multiple Claude sessions share a tab.
+# Fallback chain matches the other three call sites (kanban-session-start.py,
+# kanban-stop.py, update_claude_agent.sh): $DEV_TEAM_ROOT override first,
+# since ~/dev-team never exists on a consumer, then ~/aiteamforge.
+# Silent no-op when the helper is absent — this file is sourced into every
+# interactive shell, so a missing helper must never break the terminal.
+_cc_clear_claude_active() {
+    local _cc_badge_helper=""
+    if [[ -n "$DEV_TEAM_ROOT" && -f "$DEV_TEAM_ROOT/iterm2_badge_helper.sh" ]]; then
+        _cc_badge_helper="$DEV_TEAM_ROOT/iterm2_badge_helper.sh"
+    elif [[ -f "$HOME/dev-team/iterm2_badge_helper.sh" ]]; then
+        _cc_badge_helper="$HOME/dev-team/iterm2_badge_helper.sh"
+    elif [[ -f "$HOME/aiteamforge/iterm2_badge_helper.sh" ]]; then
+        _cc_badge_helper="$HOME/aiteamforge/iterm2_badge_helper.sh"
+    fi
+    if [[ -n "$_cc_badge_helper" ]]; then
+        source "$_cc_badge_helper" && clear_claude_active
+    fi
+}
+
 # Helper: launch Claude Code with a system prompt file
 # Uses direct argument passing (NOT stdin piping, which breaks in tmux)
 # Set CC_DEBUG=1 for preview only
@@ -273,6 +298,7 @@ _cc_launch() {
     if command -v kb-clear &> /dev/null; then
         kb-clear
     fi
+    _cc_clear_claude_active
 }
 
 # Context-aware cc command — detects terminal SESSION_TYPE/SESSION_NAME and
@@ -324,6 +350,7 @@ ccc() {
             if command -v kb-clear &> /dev/null; then
                 kb-clear
             fi
+            _cc_clear_claude_active
             return
         fi
     fi
@@ -333,6 +360,7 @@ ccc() {
     if command -v kb-clear &> /dev/null; then
         kb-clear
     fi
+    _cc_clear_claude_active
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
