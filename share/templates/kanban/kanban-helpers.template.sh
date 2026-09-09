@@ -19875,6 +19875,423 @@ kb-release-plan() {
     esac
 }
 
+# _kb_cr_write_manifest_crid <team> <rel_id> <cr_id>
+#
+# XACA-0669: Idempotently ensure <cr_id> is present in the release manifest's
+# crIds[] cache. Single source of truth for the manifest-side write, called from
+# BOTH the normal link flow (Site 3) and the already-linked self-heal branch —
+# so the jq/path logic is not duplicated (avoids re-introducing the very
+# sibling-drift this ticket fixes). Resolves the manifest path via the canonical
+# _kb_get_releases_dir. NON-FATAL by contract: warns and still returns 0 on a
+# missing/unwritable manifest, because the board link is authoritative and must
+# never be blocked by manifest-cache drift.
+_kb_cr_write_manifest_crid() {
+    local team="$1"
+    local rel_id="$2"
+    local cr_id="$3"
+
+    local releases_dir manifest_file tmp_manifest
+    releases_dir=$(_kb_get_releases_dir "$team")
+    manifest_file="${releases_dir}/${rel_id}/manifest.json"
+
+    if [[ -f "$manifest_file" ]]; then
+        tmp_manifest=$(mktemp "${TMPDIR:-/tmp}/kb-cr-link-manifest.XXXXXX") || return 0
+        # Append cr_id to crIds[] only if not already present (idempotent)
+        if jq --arg crid "$cr_id" \
+            '.crIds = ((.crIds // []) | if index($crid) then . else . + [$crid] end)' \
+            "$manifest_file" > "$tmp_manifest" 2>/dev/null; then
+            mv "$tmp_manifest" "$manifest_file"
+        else
+            rm -f "$tmp_manifest"
+            echo "kb-cr: WARNING — could not update manifest $manifest_file (non-fatal)" >&2
+        fi
+    else
+        echo "kb-cr: WARNING — manifest not found at $manifest_file; crIds not written (non-fatal)" >&2
+        echo "  Run 'kb-release sync' to reconcile manifest drift." >&2
+    fi
+    return 0
+}
+
+# _kb_cr_release_unlink <board_file> <team> <cr_id>
+#
+# Shared write function — unlinks a CR from its current release. Clears:
+#   1. CR.releaseAssignment  (deleted from the CR record)
+#   2. release.linkedCRs     (entry for this CR removed)
+#   3. manifest crIds[]      (cr_id removed from the manifest)
+#
+# No-op if the CR is not currently linked. Board file and team must be
+# resolved by the caller.
+_kb_cr_release_unlink() {
+    local board_file="$1"
+    local team="$2"
+    local cr_id="$3"
+
+    # -- Validate CR exists --
+    local cr_idx
+    cr_idx=$(jq -r --arg id "$cr_id" \
+        '(.crs // [] | to_entries[] | select(.value.id == $id) | .key) // -1' \
+        "$board_file" 2>/dev/null || echo "-1")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr: CR '$cr_id' not found on board '$team'." >&2
+        return 1
+    fi
+
+    # -- Read current link (may be absent) --
+    local current_rel_id
+    current_rel_id=$(jq -r --argjson cidx "$cr_idx" \
+        '.crs[$cidx].releaseAssignment.releaseId // empty' \
+        "$board_file" 2>/dev/null)
+
+    if [[ -z "$current_rel_id" ]]; then
+        echo "kb-cr: [$cr_id] not currently linked to any release — no change."
+        return 0
+    fi
+
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # -- Site 1: remove CR.releaseAssignment --
+    _kb_jq_update "$board_file" '
+        del(.crs[$cidx].releaseAssignment) |
+        .crs[$cidx].updatedAt = $ts |
+        .lastUpdated = $ts
+    ' \
+    --argjson cidx "$cr_idx" \
+    --arg     ts   "$ts" \
+    || return 1
+
+    # -- Site 2: remove entry from release.linkedCRs --
+    local rel_idx
+    rel_idx=$(jq -r --arg id "$current_rel_id" \
+        '(.releases // [] | to_entries[] | select(.value.id == $id) | .key) // -1' \
+        "$board_file" 2>/dev/null || echo "-1")
+    if [[ "$rel_idx" != "-1" ]]; then
+        _kb_jq_update "$board_file" '
+            .releases[$ridx].linkedCRs = (
+                (.releases[$ridx].linkedCRs // []) |
+                map(select(.crId != $crid))
+            ) |
+            .releases[$ridx].updatedAt = $ts |
+            .lastUpdated = $ts
+        ' \
+        --argjson ridx "$rel_idx" \
+        --arg     crid "$cr_id" \
+        --arg     ts   "$ts" \
+        || return 1
+    fi
+
+    # -- Site 3: remove cr_id from manifest --
+    # XACA-0657: manifest path uses subdirectory format to match server convention.
+    local releases_dir manifest_file
+    releases_dir=$(_kb_get_releases_dir "$team")
+    manifest_file="${releases_dir}/${current_rel_id}/manifest.json"
+
+    if [[ -f "$manifest_file" ]]; then
+        local tmp_manifest
+        tmp_manifest=$(mktemp "${TMPDIR:-/tmp}/kb-cr-unlink-manifest.XXXXXX") || return 1
+        if jq --arg crid "$cr_id" \
+            '.crIds = ((.crIds // []) | map(select(. != $crid)))' \
+            "$manifest_file" > "$tmp_manifest" 2>/dev/null; then
+            mv "$tmp_manifest" "$manifest_file"
+        else
+            rm -f "$tmp_manifest"
+            echo "kb-cr: WARNING — could not update manifest $manifest_file (non-fatal)" >&2
+        fi
+    fi
+    # Missing manifest is silently OK on unlink — nothing to remove from.
+
+    echo "kb-cr: [$cr_id] unlinked from release $current_rel_id"
+    return 0
+}
+
+# _kb_cr_release_link <board_file> <team> <cr_id> <rel_id>
+#
+# Shared write function — links a CR to a release. Writes all three sites:
+#   1. CR.releaseAssignment (snapshot of rel name at link time)
+#   2. release.linkedCRs   (snapshot of CR title at link time)
+#   3. manifest crIds[]    (appended to <kanban>/releases/<REL-ID>.json)
+#
+# If CR is already linked to a different release, unlinks it first (idempotent).
+# If CR is already linked to the SAME release, the board is already correct so
+# sites 1 & 2 are skipped — but the manifest crIds[] cache is still re-verified
+# and repaired (XACA-0669 self-heal), so re-running link-cr reconciles drift
+# rather than silently short-circuiting.
+# Board file and team must already be resolved by the caller (preamble done).
+_kb_cr_release_link() {
+    local board_file="$1"
+    local team="$2"
+    local cr_id="$3"
+    local rel_id="$4"
+
+    # -- Validate CR exists in .crs[] --
+    local cr_idx
+    cr_idx=$(jq -r --arg id "$cr_id" \
+        '(.crs // [] | to_entries[] | select(.value.id == $id) | .key) // -1' \
+        "$board_file" 2>/dev/null || echo "-1")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr: CR '$cr_id' not found on board '$team'." >&2
+        return 1
+    fi
+
+    # -- Validate release exists in .releases[] --
+    local rel_name
+    rel_name=$(jq -r --arg id "$rel_id" \
+        '.releases // [] | .[] | select(.id == $id) | .name // empty' \
+        "$board_file" 2>/dev/null)
+    if [[ -z "$rel_name" ]]; then
+        echo "kb-cr: Release '$rel_id' not found on board '$team'." >&2
+        return 1
+    fi
+
+    # -- Read current CR title for the linkedCRs snapshot --
+    local cr_title
+    cr_title=$(jq -r --argjson cidx "$cr_idx" \
+        '.crs[$cidx].title // ""' \
+        "$board_file" 2>/dev/null)
+
+    # -- Check if already linked somewhere --
+    local current_rel_id
+    current_rel_id=$(jq -r --argjson cidx "$cr_idx" \
+        '.crs[$cidx].releaseAssignment.releaseId // empty' \
+        "$board_file" 2>/dev/null)
+
+    if [[ "$current_rel_id" == "$rel_id" ]]; then
+        # XACA-0669: board is already linked, but the manifest crIds[] cache may
+        # be out of sync (written before the path-resolver fix, or never written
+        # at all). Re-verify and repair the manifest instead of short-circuiting
+        # silently — this is what makes re-running link-cr self-heal existing
+        # drift (acceptance criteria 3 & 4).
+        _kb_cr_write_manifest_crid "$team" "$rel_id" "$cr_id"
+        echo "kb-cr: [$cr_id] already linked to release $rel_id — manifest verified."
+        return 0
+    fi
+
+    # -- Unlink from old release first (if linked elsewhere) --
+    if [[ -n "$current_rel_id" ]]; then
+        echo "kb-cr: [$cr_id] re-linking from $current_rel_id → $rel_id" >&2
+        _kb_cr_release_unlink "$board_file" "$team" "$cr_id" || return 1
+    fi
+
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # -- Site 1: write CR.releaseAssignment --
+    _kb_jq_update "$board_file" '
+        .crs[$cidx].releaseAssignment = {
+            "releaseId":   $relid,
+            "releaseName": $relname,
+            "assignedAt":  $ts
+        } |
+        .crs[$cidx].updatedAt = $ts |
+        .lastUpdated = $ts
+    ' \
+    --argjson cidx    "$cr_idx" \
+    --arg     relid   "$rel_id" \
+    --arg     relname "$rel_name" \
+    --arg     ts      "$ts" \
+    || return 1
+
+    # -- Site 2: write release.linkedCRs entry --
+    # Resolve release index in .releases[]
+    local rel_idx
+    rel_idx=$(jq -r --arg id "$rel_id" \
+        '(.releases // [] | to_entries[] | select(.value.id == $id) | .key) // -1' \
+        "$board_file" 2>/dev/null || echo "-1")
+    if [[ "$rel_idx" != "-1" ]]; then
+        _kb_jq_update "$board_file" '
+            .releases[$ridx].linkedCRs = (
+                (.releases[$ridx].linkedCRs // []) +
+                [{ "crId": $crid, "crTitle": $crtitle, "linkedAt": $ts }]
+            ) |
+            .releases[$ridx].updatedAt = $ts |
+            .lastUpdated = $ts
+        ' \
+        --argjson ridx    "$rel_idx" \
+        --arg     crid    "$cr_id" \
+        --arg     crtitle "$cr_title" \
+        --arg     ts      "$ts" \
+        || return 1
+    fi
+
+    # -- Site 3: write manifest crIds[] --
+    # XACA-0657: manifest path uses subdirectory format <releases_dir>/<rel_id>/manifest.json
+    # to match the server's _save_release_manifest convention (PARITY: server.py:4179).
+    # XACA-0669: delegated to the shared _kb_cr_write_manifest_crid helper so the
+    # self-heal short-circuit and this normal flow use one identical writer.
+    _kb_cr_write_manifest_crid "$team" "$rel_id" "$cr_id"
+
+    echo "kb-cr: [$cr_id] linked to release $rel_id ($rel_name)"
+    return 0
+}
+
+# kb-release-link-cr <REL-ID> <CR-ID>
+# Entry point from the release side. Same effect as kb-cr assign-release.
+# Thin wrapper over _kb_cr_release_link — does NOT duplicate the write logic.
+kb-release-link-cr() {
+    local rel_id="${1-}"
+    local cr_id="${2-}"
+
+    if [[ -z "$rel_id" || -z "$cr_id" ]]; then
+        echo "Usage: kb-release link-cr <REL-ID> <CR-ID>" >&2
+        return 1
+    fi
+
+    local context team board_file
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+    if [[ -z "$team" || "$team" == "ERROR:"* ]]; then
+        echo "kb-release link-cr: could not determine team context" >&2
+        return 1
+    fi
+    board_file=$(_kb_get_board_file "$team")
+    if [[ ! -f "$board_file" ]]; then
+        echo "kb-release link-cr: no board found for team '$team'" >&2
+        return 1
+    fi
+
+    _kb_cr_release_link "$board_file" "$team" "$cr_id" "$rel_id"
+}
+
+# kb-release-unlink-cr <REL-ID> <CR-ID>
+# Entry point from the release side. Same effect as kb-cr unassign-release.
+# Thin wrapper over _kb_cr_release_unlink — does NOT duplicate the write logic.
+kb-release-unlink-cr() {
+    local rel_id="${1-}"
+    local cr_id="${2-}"
+
+    if [[ -z "$rel_id" || -z "$cr_id" ]]; then
+        echo "Usage: kb-release unlink-cr <REL-ID> <CR-ID>" >&2
+        return 1
+    fi
+
+    local context team board_file
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+    if [[ -z "$team" || "$team" == "ERROR:"* ]]; then
+        echo "kb-release unlink-cr: could not determine team context" >&2
+        return 1
+    fi
+    board_file=$(_kb_get_board_file "$team")
+    if [[ ! -f "$board_file" ]]; then
+        echo "kb-release unlink-cr: no board found for team '$team'" >&2
+        return 1
+    fi
+
+    # Verify that the cr_id is actually linked to this rel_id before unlinking
+    local cr_idx
+    cr_idx=$(jq -r --arg id "$cr_id" \
+        '(.crs // [] | to_entries[] | select(.value.id == $id) | .key) // -1' \
+        "$board_file" 2>/dev/null || echo "-1")
+    if [[ "$cr_idx" != "-1" ]]; then
+        local linked_rel
+        linked_rel=$(jq -r --argjson cidx "$cr_idx" \
+            '.crs[$cidx].releaseAssignment.releaseId // empty' \
+            "$board_file" 2>/dev/null)
+        if [[ -n "$linked_rel" && "$linked_rel" != "$rel_id" ]]; then
+            echo "kb-release unlink-cr: [$cr_id] is linked to '$linked_rel', not '$rel_id'." >&2
+            echo "  Use: kb-cr unassign-release $cr_id  (unconditional unlink)" >&2
+            return 1
+        fi
+    fi
+
+    _kb_cr_release_unlink "$board_file" "$team" "$cr_id"
+}
+
+# Reconcile every release manifest against the current team's board.
+# Use this to repair drift cases where assignments were made via the shell
+# before the kb-release-assign manifest sync was wired up, or when LCARS was
+# down at assignment time.
+#
+# Usage: kb-release-sync-board [team]
+#
+# Without args, reconciles the current team. With a team argument, reconciles
+# that team (useful for cross-team recovery from academy — requires the
+# target team's LCARS server to be running).
+kb-release-sync-board() {
+    local team_override="${1-}"
+
+    local context team port=""
+    if [[ -n "$team_override" ]]; then
+        team="$team_override"
+    else
+        context=$(_kb_detect_context 2>/dev/null)
+        team="${context%%:*}"
+    fi
+
+    if [[ -z "$team" || "$team" == "ERROR:"* ]]; then
+        echo "Error: Could not determine team context"
+        return 1
+    fi
+
+    port=$(_kb_team_lcars_port "$team") || {
+        echo "Error: no LCARS port known for team '$team'"
+        return 1
+    }
+
+    echo "Reconciling release manifests for team '$team' (port $port)..."
+    local response http_code body curl_exit
+    local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
+    _kb_lcars_auth_args
+    response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
+        --max-time 30 \
+        -X POST \
+        -H "Content-Type: application/json" \
+        "${_KB_LCARS_AUTH_ARGS[@]}" \
+        -d "{\"team\": \"$team\"}" \
+        "http://localhost:${port}/api/releases/sync-all" 2>/dev/null)
+    curl_exit=$?
+    http_code=$(printf '%s\n' "$response" | tail -n1)
+    body=$(printf '%s\n' "$response" | sed '$d')
+
+    if [[ "$http_code" != "200" ]]; then
+        if [[ "$http_code" == "000" || -z "$http_code" ]]; then
+            # curl reports %{http_code}=000 for ANY connection-phase failure
+            # (refused, timed out, DNS, reset) — decode curl's own exit code
+            # instead of asserting a single cause for all of them (see
+            # _kb_curl_failure_reason; XACA-1099). An empty http_code with a
+            # zero curl_exit (no connection-phase failure, just a malformed
+            # response) is a distinct case from the helper's remit, so name
+            # it separately rather than forcing it through the same mapping.
+            local _kb_reason cause remedy
+            if [[ "$curl_exit" -ne 0 ]]; then
+                _kb_reason=$(_kb_curl_failure_reason "$curl_exit" "$port")
+                cause="${_kb_reason%%$'\n'*}"
+                remedy="${_kb_reason#*$'\n'}"
+                echo "⚠️  LCARS server on port $port — $cause."
+                echo "   $remedy"
+            else
+                # DEFENSIVE-ONLY; see the note at _kb_release_sync's
+                # matching branch. curl exit 0 with an empty %{http_code}
+                # could not be triggered with curl 8.7.1, and this shape is
+                # deliberately not propagated to the remaining call sites.
+                echo "⚠️  LCARS on port $port returned an empty/malformed response (curl exit $curl_exit, connection succeeded)."
+                echo "   Re-run 'kb-release-sync-board' — if this persists, check the server logs."
+            fi
+        else
+            echo "⚠️  Sync failed: HTTP $http_code"
+            echo "   $body"
+        fi
+        return 1
+    fi
+
+    local added_count updated_count remove_count
+    added_count=$(printf '%s\n' "$body" | jq -r '.addedCount // 0')
+    updated_count=$(printf '%s\n' "$body" | jq -r '.updatedCount // 0')
+    remove_count=$(printf '%s\n' "$body" | jq -r '.removeCount // 0')
+    echo "✓ Reconciled $team: $added_count added, $updated_count refreshed, $remove_count stale entries removed"
+
+    if [[ "$added_count" -gt 0 ]]; then
+        echo ""
+        echo "Added to manifests (were missing — drift repaired):"
+        printf '%s\n' "$body" | jq -r '.added[] | "  + \(.itemId) → \(.releaseId)"'
+    fi
+    if [[ "$remove_count" -gt 0 ]]; then
+        echo ""
+        echo "Pruned from manifests (board no longer assigns):"
+        printf '%s\n' "$body" | jq -r '.removes[] | "  - \(.itemId) from \(.releaseId)"'
+    fi
+}
+
 # Unified release command
 # Usage: kb-release <subcommand> [args...]
 kb-release() {

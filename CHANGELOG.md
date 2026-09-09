@@ -103,6 +103,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Consumers WITHOUT ImageMagick are unaffected: that branch always displayed the raw image and
   is unchanged. Consumers WITH it stop losing the avatar and terminal logo on a rounding
   failure.
+- XACA-1146-004: ported the CR-link family and `kb-release-sync-board` into the shipped template
+  (6 functions, 363 canonical lines). The three `_kb_cr_*` helpers are named must-ship in
+  `tests/fixtures/xaca-0811/tap-omissions.manifest` in their own right, not incidental — the
+  ticket did not list them, and shipping `kb-release-link-cr`/`unlink-cr` without them would have
+  produced commands that fail at their first real call. Ported in dependency order
+  (`_kb_cr_write_manifest_crid` -> `_kb_cr_release_unlink` -> `_kb_cr_release_link`, which calls
+  both), then the two CR commands, then `kb-release-sync-board` (independent). No adaptation
+  needed; all six bodies verified byte-identical to canonical. Dispatcher routing follows in
+  XACA-1146-005.
 - XACA-1146-003: ported the `kb-release-promote` (277 lines) / `kb-release-plan` (83 lines)
   environment pair into the shipped template. Both are must-ship and existed only in canonical,
   so a consumer could create a release but never move it through DEV/QA/PROD, nor demote it back
