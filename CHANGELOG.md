@@ -7,6 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1138: `share/scripts/agent-panel-display.sh` — a failed ImageMagick rounding no longer
+  costs the image entirely. The avatar and terminal-logo blocks displayed ONLY the rounded
+  output, so when rounding produced no file (magick error, unwritable tmp dir, disk full,
+  corrupt source PNG) they painted NOTHING — while a displayable raw file sat right there, as
+  the sibling no-magick branch had always proved. Both now fall back to the raw source at the
+  same geometry, degrading to square corners rather than a blank hole; the avatar's fallback
+  also sets `avatar_rendered=true` so the XACA-1134 placeholder does not print underneath an
+  avatar that just rendered. Separately, all 5 magick invocations discarded stderr via
+  `2>/dev/null`, making a rounding failure unrecoverable; a `_panel_magick` wrapper now
+  surfaces it under `LCARS_PANEL_DEBUG`. With the flag off the call is byte-for-byte the old
+  behaviour — no subshell, no fork (measured 19.6 µs/call, 0.13% of one magick invocation) —
+  and stderr never reaches stdout, which matters because this paints a live terminal panel.
+  Consumers WITHOUT ImageMagick are unaffected: that branch always displayed the raw image and
+  is unchanged. Consumers WITH it stop losing the avatar and terminal logo on a rounding
+  failure.
+
 ## [0.20.7] - 2026-09-08
 
 - XACA-0822-008 ([Review] finding on PR #842): the tap shipped the `points` estimate

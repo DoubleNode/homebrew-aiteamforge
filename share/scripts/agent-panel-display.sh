@@ -32,6 +32,47 @@ _panel_debug_on() {
     [[ "$LCARS_PANEL_DEBUG" == "1" ]]
 }
 
+# magick wrapper (XACA-1138-002). Every magick call in this file discarded its
+# stderr via `2>/dev/null`, which made a rounding/composite failure
+# unrecoverable: the only evidence of WHY no output file appeared was the text
+# being thrown away. This restores that text -- but ONLY under
+# LCARS_PANEL_DEBUG, and only through _panel_debug (fd 2). It must never reach
+# stdout: this script paints a live terminal panel and stray stdout corrupts
+# the frame, which would be a worse bug than the one being diagnosed.
+#
+# With the flag OFF the call is byte-for-byte the old behaviour -- plain
+# `magick ... 2>/dev/null`, no subshell, no temp file. That matters: these run
+# in a polling render loop, and it is the same reason _panel_debug_on exists
+# (see the note above). The stderr-capturing form forks a subshell, so it is
+# kept strictly behind the flag.
+#
+# Usage: _panel_magick <label> <magick args...>
+# Returns magick's own exit status, so existing `|| continue` call sites work.
+_panel_magick() {
+    local _pm_label="$1"; shift
+    if ! _panel_debug_on; then
+        magick "$@" 2>/dev/null
+        return $?
+    fi
+    # `2>&1 >/dev/null` order is load-bearing: fd2 is pointed at the capture
+    # pipe FIRST, then fd1 is sent to /dev/null. That captures stderr only.
+    # Discarding stdout is safe here -- every call site writes its result to a
+    # PNG32:<file> target, so magick produces no stdout to lose.
+    local _pm_err _pm_rc
+    _pm_err=$(magick "$@" 2>&1 >/dev/null)
+    _pm_rc=$?
+    if (( _pm_rc != 0 )); then
+        _panel_debug "${_pm_label}: magick exited ${_pm_rc}"
+    fi
+    if [[ -n "$_pm_err" ]]; then
+        local _pm_line
+        while IFS= read -r _pm_line; do
+            [[ -n "$_pm_line" ]] && _panel_debug "${_pm_label}: magick stderr: ${_pm_line}"
+        done <<< "$_pm_err"
+    fi
+    return $_pm_rc
+}
+
 # Resolve avatars directory (checked in priority order):
 #   1. Flat avatars pool via explicit env override ($AITEAMFORGE_DIR/avatars/)
 #   2. Fleet monitor avatars via explicit env override
@@ -405,7 +446,7 @@ render_crew_strip() {
 
         if [[ $row_count -gt 0 ]]; then
             local crew_strip="${LCARS_TMP}lcars-crew-${SESSION_CODE}-r${row}.png"
-            magick "${magick_args[@]}" +append PNG32:"$crew_strip" 2>/dev/null
+            _panel_magick "crew strip" "${magick_args[@]}" +append PNG32:"$crew_strip"
             if [[ -f "$crew_strip" && -x "$IMGCAT" ]]; then
                 _panel_debug "crew strip: row ${row} imgcat invoking (${row_count} avatar(s)) on $crew_strip"
                 "$IMGCAT" -H 3 -W 100% "$crew_strip"
@@ -636,7 +677,7 @@ PYEOF
         # Create circular badge if not cached (or if source emoji PNG is newer)
         if [[ ! -f "$badge_file" || "$png_file" -nt "$badge_file" ]]; then
             local half=$((circle_size / 2))
-            magick \
+            _panel_magick "amb badges" \
                 \( -size ${circle_size}x${circle_size} xc:'#1a1a2e' \
                    -fill '#2a2a3e' -stroke '#3a3a5e' -strokewidth 1 \
                    -draw "circle ${half},${half} ${half},1" \) \
@@ -645,7 +686,7 @@ PYEOF
                 \( -size ${circle_size}x${circle_size} xc:black -fill white \
                    -draw "circle ${half},${half} ${half},0" \) \
                 -alpha off -compose CopyOpacity -composite \
-                PNG32:"$badge_file" 2>/dev/null || continue
+                PNG32:"$badge_file" || continue
         fi
 
         badge_files+=("$badge_file")
@@ -676,7 +717,7 @@ PYEOF
 
         if [[ $row_count -gt 0 ]]; then
             local strip_file="${LCARS_TMP}lcars-amb-strip-${handle}-r${row}.png"
-            magick "${magick_args[@]}" +append PNG32:"$strip_file" 2>/dev/null
+            _panel_magick "amb badges" "${magick_args[@]}" +append PNG32:"$strip_file"
             if [[ -f "$strip_file" ]]; then
                 _panel_debug "amb badges: row ${row} strip built (${row_count} badge(s)) -> $strip_file"
             else
@@ -925,19 +966,28 @@ render_panel() {
         if command -v magick &>/dev/null; then
             # Cache: only run magick if cached file doesn't exist or source is newer
             if [[ ! -f "$rounded_file" || "$avatar_file" -nt "$rounded_file" ]]; then
-                magick "$avatar_file" \
+                _panel_magick "avatar" "$avatar_file" \
                     $([[ "$avatar_file" != *_panel.png ]] && echo "-resize 200x200") \
                     \( -size 200x200 xc:black -fill white \
                        -draw "roundrectangle 0,0,199,199,30,30" \) \
                     -alpha off -compose CopyOpacity -composite \
-                    PNG32:"$rounded_file" 2>/dev/null
+                    PNG32:"$rounded_file"
             fi
             if [[ -f "$rounded_file" ]]; then
                 _panel_debug "avatar: imgcat invoking on rounded $rounded_file"
                 "$IMGCAT" -W 100% -H 12 "$rounded_file"
                 avatar_rendered=true
             else
-                _panel_debug "avatar: imgcat SKIPPED — magick rounding produced no output file ($rounded_file)"
+                # Rounding failed (magick error, unwritable $LCARS_TMP, disk
+                # full, corrupt source PNG). Before XACA-1138 this arm displayed
+                # NOTHING -- yet a perfectly displayable raw file is sitting
+                # right here, and the no-magick branch below proves it paints
+                # fine. Degrade to square corners rather than to a blank hole.
+                _panel_debug "avatar: magick rounding produced no output file ($rounded_file) — falling back to raw $avatar_file"
+                "$IMGCAT" -W 100% -H 12 "$avatar_file"
+                # Must be set here too, or the placeholder below prints
+                # UNDERNEATH the avatar we just successfully painted.
+                avatar_rendered=true
             fi
         else
             _panel_debug "avatar: imgcat invoking on raw $avatar_file (no magick on PATH, skipping rounding)"
@@ -976,7 +1026,7 @@ render_panel() {
 
     # AMB badges (optional — only for registered agents)
     # Renders as Twemoji circular badge strips via imgcat (terminal font lacks emoji glyphs)
-    # Up to 2 rows of 5 badges each, cached at 3 tiers (emoji PNG, badge circle, row strip)
+    # Up to 2 rows of 4 badges each (per_row=4), cached at 3 tiers (emoji PNG, badge circle, row strip)
     # PERF: API fetch (curl/jq/python3/magick) only runs every 5 min, not every render.
     if [[ -n "$amb_handle" ]]; then
         # Throttled fetch: only call the AMB API every 5 minutes per handle.
@@ -1084,18 +1134,22 @@ render_panel() {
         if command -v magick &>/dev/null; then
             # Cache: only run magick if cached file doesn't exist or source is newer
             if [[ ! -f "$rounded_logo" || "$logo_file" -nt "$rounded_logo" ]]; then
-                magick "$logo_file" \
+                _panel_magick "terminal logo" "$logo_file" \
                     $([[ "$logo_file" != *_panel.png ]] && echo "-resize 200x200") \
                     \( -size 200x200 xc:black -fill white \
                        -draw "circle 100,100 100,0" \) \
                     -alpha off -compose CopyOpacity -composite \
-                    PNG32:"$rounded_logo" 2>/dev/null
+                    PNG32:"$rounded_logo"
             fi
             if [[ -f "$rounded_logo" ]]; then
                 _panel_debug "terminal logo: imgcat invoking on rounded logo $rounded_logo"
                 "$IMGCAT" -W 100% -H 10 "$rounded_logo"
             else
-                _panel_debug "terminal logo: SKIPPED — magick rounding produced no output file ($rounded_logo)"
+                # Same raw fallback as the avatar block above (XACA-1138). This
+                # site was the worse of the two: no rendered-flag and no
+                # placeholder, so a rounding failure degraded to total silence.
+                _panel_debug "terminal logo: magick rounding produced no output file ($rounded_logo) — falling back to raw logo $logo_file"
+                "$IMGCAT" -W 100% -H 10 "$logo_file"
             fi
         else
             _panel_debug "terminal logo: imgcat invoking on raw logo $logo_file (no magick on PATH)"
