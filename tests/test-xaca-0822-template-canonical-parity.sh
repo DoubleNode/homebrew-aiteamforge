@@ -1,10 +1,11 @@
 #!/bin/bash
 # test-xaca-0822-template-canonical-parity.sh
 # Regression tests for XACA-0822 (retire canonical-vs-tap kb-* function drift):
-# ports four canonical fixes into kanban-helpers.template.sh that had drifted
-# out of sync. Covers XACA-0822-002, -005, -006 with functional assertions
-# (sourced and executed), and XACA-0822-004 with a static content assertion
-# (it fixes a literal string embedded in echo/prompt text, not control flow).
+# ports canonical fixes into kanban-helpers.template.sh that had drifted
+# out of sync. Covers XACA-0822-002, -005, -006, -008 with functional
+# assertions (sourced and executed), and XACA-0822-004 with a static content
+# assertion (it fixes a literal string embedded in echo/prompt text, not
+# control flow).
 #
 # NOTE ON SHELL: kanban-helpers.template.sh is #!/bin/zsh and uses zsh-only
 # constructs (e.g. brace-group command lists without a trailing `;`) starting
@@ -65,7 +66,7 @@ fi
 # THIS file: it wraps whichever test_start is active (the fallback just
 # defined above, or the runner's) so every case counts, in either mode.
 # ─────────────────────────────────────────────────────────────────────────────
-_EXPECTED_CASES=7
+_EXPECTED_CASES=10
 _CASES_RUN=0
 eval "$(declare -f test_start | sed '1s/^test_start[[:space:]]*(/_kb_xaca0822_test_start_inner (/')"
 test_start() {
@@ -264,6 +265,106 @@ if [ "$set_val" = "8" ] && [ "$cleared_val" = "absent" ]; then
     test_pass
 else
     test_fail "expected set=8 then cleared=absent; got set='$set_val' cleared='$cleared_val'"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0822-008a: kb-backlog unestimated lists only OPEN items without a
+# numeric points field — completed/cancelled items excluded even when they
+# also lack points. Ported from canonical (XACA-0624).
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "XACA-0822-008: kb-backlog unestimated reports open+unpointed items only"
+: > "$_BOARD_FILE"
+cat > "$_BOARD_FILE" <<'EOF'
+{"backlog": [
+  {"id": "TST-0001", "title": "No points", "priority": "medium", "status": "todo"},
+  {"id": "TST-0002", "title": "Has points", "priority": "medium", "status": "todo", "points": 3},
+  {"id": "TST-0003", "title": "Completed no points", "priority": "medium", "status": "completed"},
+  {"id": "TST-0004", "title": "Cancelled no points", "priority": "medium", "status": "cancelled"}
+], "lastUpdated": "", "nextId": 5, "teamCode": "TST"}
+EOF
+_run_zsh "
+_kb_detect_context() { echo 'testteam:agent'; }
+_kb_get_board_file() { echo '$_BOARD_FILE'; }
+kb-backlog unestimated
+"
+out="$(_stdout)"
+if printf '%s\n' "$out" | grep -q '(1 open without points)' \
+    && printf '%s\n' "$out" | grep -q 'TST-0001' \
+    && ! printf '%s\n' "$out" | grep -q 'TST-0002' \
+    && ! printf '%s\n' "$out" | grep -q 'TST-0003' \
+    && ! printf '%s\n' "$out" | grep -q 'TST-0004'; then
+    test_pass
+else
+    test_fail "expected only TST-0001 listed under '(1 open without points)'; got: $out"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0822-008b: kb-pick refuses to start an UNESTIMATED item (status stays
+# "todo", exit != 0) and succeeds once points are set. Ported from canonical
+# (XACA-0624) via _kb_require_points.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "XACA-0822-008: kb-pick gate blocks unestimated item, allows estimated item"
+: > "$_BOARD_FILE"
+cat > "$_BOARD_FILE" <<'EOF'
+{"backlog": [{"id": "TST-0011", "title": "Unestimated item", "priority": "medium", "status": "todo"}], "lastUpdated": "", "nextId": 12, "teamCode": "TST"}
+EOF
+_run_zsh "
+_kb_detect_context() { echo 'testteam:agent'; }
+_kb_get_board_file() { echo '$_BOARD_FILE'; }
+_kb_resolve_selector() { echo 0; }
+kb-pick TST-0011
+"
+rc_blocked=$?
+status_blocked="$(jq -r '.backlog[0].status' "$_BOARD_FILE" 2>/dev/null)"
+
+: > "$_BOARD_FILE"
+cat > "$_BOARD_FILE" <<'EOF'
+{"backlog": [{"id": "TST-0012", "title": "Estimated item", "priority": "medium", "status": "todo", "points": 4}], "lastUpdated": "", "nextId": 13, "teamCode": "TST"}
+EOF
+_run_zsh "
+_kb_detect_context() { echo 'testteam:agent'; }
+_kb_get_board_file() { echo '$_BOARD_FILE'; }
+_kb_resolve_selector() { echo 0; }
+_kb_release_sync() { :; }
+_kb_update_window() { :; }
+_kb_set_working_on() { :; }
+kb-pick TST-0012
+"
+rc_allowed=$?
+status_allowed="$(jq -r '.backlog[0].status' "$_BOARD_FILE" 2>/dev/null)"
+
+if [ "$rc_blocked" -ne 0 ] && [ "$status_blocked" = "todo" ] \
+    && [ "$rc_allowed" -eq 0 ] && [ "$status_allowed" = "in_progress" ]; then
+    test_pass
+else
+    test_fail "expected blocked(rc!=0,status=todo) and allowed(rc=0,status=in_progress); got blocked(rc=$rc_blocked,status=$status_blocked) allowed(rc=$rc_allowed,status=$status_allowed)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0822-008c: kb-run refuses to start an UNESTIMATED item — the gate must
+# fire AFTER the user confirms [Y] but BEFORE any worktree/status mutation.
+# Feeds "y" on stdin for the confirmation prompt; asserts exit != 0 and the
+# board status is untouched (kb-run's gate is a precondition check only —
+# kb-pick is the write site, per canonical XACA-0624).
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "XACA-0822-008: kb-run gate blocks unestimated item after confirmation, before any write"
+: > "$_BOARD_FILE"
+cat > "$_BOARD_FILE" <<'EOF'
+{"backlog": [{"id": "TST-0010", "title": "Unestimated item", "priority": "medium", "status": "todo"}], "lastUpdated": "", "nextId": 11, "teamCode": "TST"}
+EOF
+_run_zsh "
+_kb_detect_context() { echo 'testteam:agent'; }
+_kb_get_board_file() { echo '$_BOARD_FILE'; }
+_kb_resolve_selector() { echo 0; }
+echo y | kb-run TST-0010
+"
+rc="$?"
+status_after="$(jq -r '.backlog[0].status' "$_BOARD_FILE" 2>/dev/null)"
+out="$(_stdout)"
+if [ "$rc" -ne 0 ] && [ "$status_after" = "todo" ] && printf '%s\n' "$out" | grep -q 'Cannot start \[TST-0010\]: no effort estimate'; then
+    test_pass
+else
+    test_fail "expected blocked (rc!=0, status=todo, error message present); got rc=$rc status=$status_after. stdout: $out"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

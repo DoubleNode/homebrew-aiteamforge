@@ -6450,6 +6450,29 @@ kb-backlog() {
             fi
             ;;
 
+        unestimated)
+            # XACA-0822-008: list all open items that have no effort estimate,
+            # ported from canonical (XACA-0624). Read-only reporter — exit 0 always.
+            # Uses the canonical unestimated predicate from the schema contract.
+            local unest_count
+            unest_count=$(_kb_jq_read "$board_file" \
+                '[.backlog[] | select(.status != "completed" and .status != "cancelled") | select('"$_kb_estimated_jq"' | not)] | length' -r)
+
+            echo "Unestimated items for ${team}: ($unest_count open without points)"
+            echo "─────────────────────────────────────"
+            if [[ "$unest_count" -eq 0 ]]; then
+                echo "  (all open items have estimates)"
+            else
+                _kb_jq_read "$board_file" \
+                    '.backlog[]
+                    | select(.status != "completed" and .status != "cancelled")
+                    | select('"$_kb_estimated_jq"' | not)
+                    | "  [\(.id)] \(.priority | ascii_upcase | .[0:3]) \(.title)"' -r
+            fi
+            echo "─────────────────────────────────────"
+            echo "  Set an estimate: kb-backlog points <id> <hours>"
+            ;;
+
         toggle)
             local selector="$1"
 
@@ -8373,6 +8396,44 @@ kb-import() {
     python3 "$import_script" "${cmd_args[@]}"
 }
 
+# XACA-0822-008: canonical "estimated" predicate + start-time gate, ported
+# from canonical (XACA-0624). SINGLE SOURCE OF TRUTH — kept as a jq fragment
+# so the per-index gate (_kb_is_estimated), the kb-backlog unestimated
+# report, and the kb-pick/kb-run gates cannot drift apart (k501 sibling-drift
+# class).
+# An item is ESTIMATED iff `points` is a non-negative number; null/absent/
+# wrong-type = unestimated.
+_kb_estimated_jq='(.points != null and (.points | type) == "number" and .points >= 0)'
+
+# _kb_is_estimated <board_file> <index>
+# Returns 0 if the backlog item at <index> is estimated, 1 otherwise.
+_kb_is_estimated() {
+    local board_file="${1-}" index="${2-}" _est
+    _est=$(_kb_jq_read "$board_file" ".backlog[$index] | $_kb_estimated_jq" -r 2>/dev/null)
+    [[ "$_est" == "true" ]]
+}
+
+# _kb_require_points <board_file> <index> <item_id>
+# INVARIANT: no top-level item may hold status == "in_progress" while UNESTIMATED.
+# Enforced at start-time (XACA-0624). Sites: kb-pick, kb-run.
+# Creation is intentionally NOT gated.
+#
+# Returns 0 if the item is estimated (points present, numeric, >= 0).
+# Prints the canonical error box and returns 1 if unestimated.
+_kb_require_points() {
+    local board_file="${1-}" index="${2-}" item_id="${3-}"
+    if ! _kb_is_estimated "$board_file" "$index"; then
+        echo "─────────────────────────────────────"
+        echo "⛔ Cannot start [$item_id]: no effort estimate (points)."
+        echo "   Every item needs a developer-hours estimate before work begins."
+        echo "   Set one (realistic NORMAL-HUMAN dev hours, fractional OK), then retry:"
+        echo "     kb-backlog points $item_id <hours>     e.g. kb-backlog points $item_id 4"
+        echo "─────────────────────────────────────"
+        return 1
+    fi
+    return 0
+}
+
 # Pick a task from backlog and mark it as active (simple assignment)
 kb-pick() {
     _kb_ensure_jq || return 1
@@ -8433,6 +8494,11 @@ kb-pick() {
         echo "  kb-backlog unblock $item_id"
         return 1
     fi
+
+    # INVARIANT: no top-level item may hold status == "in_progress" while UNESTIMATED.
+    # Enforced at start-time via _kb_require_points (XACA-0822-008, ported from
+    # canonical XACA-0624).
+    _kb_require_points "$board_file" "$index" "$item_id" || return 1
 
     # Mark item as actively being worked on
     local timestamp
@@ -8792,6 +8858,11 @@ kb-run() {
     fi
 
     echo ""
+
+    # INVARIANT: no top-level item may hold status == "in_progress" while UNESTIMATED.
+    # Precondition check — does NOT write status; kb-pick is the write site.
+    # (XACA-0822-008, ported from canonical XACA-0624)
+    _kb_require_points "$board_file" "$index" "$item_id" || return 1
 
     # Check if we're in the main worktree - if so, create/use a worktree for this item
     if _kb_is_main_worktree; then

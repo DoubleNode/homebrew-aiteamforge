@@ -7,6 +7,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-0822-008 ([Review] finding on PR #842): the tap shipped the `points` estimate
+  setter/getter (XACA-0822-006) but no way to USE an estimate — no `unestimated` report, no
+  `_kb_is_estimated` predicate, and no start-time gate in `kb-pick`/`kb-run`, leaving estimates
+  write-only even though the stated rationale for porting `points` at all was "an estimate is
+  mandatory before kb-pick/kb-run". Ported the canonical XACA-0624 machinery into
+  `kanban-helpers.template.sh`: the `_kb_estimated_jq` single-source-of-truth predicate,
+  `_kb_is_estimated`, `_kb_require_points` (the canonical error box, unchanged), the
+  `kb-backlog unestimated` reporter, and gate calls in `kb-pick` (write site — blocks before
+  the item flips to `in_progress`) and `kb-run` (precondition check only, placed after the
+  `[Y/n]` confirmation and before worktree setup, mirroring canonical's "does NOT write status"
+  placement). `kb-work` and `_kb_reopen_item` were left ungated — out of this finding's stated
+  scope. Added three new functional cases to
+  `tests/test-xaca-0822-template-canonical-parity.sh` (unestimated report open/cancelled
+  filtering, kb-pick blocked-vs-allowed, kb-run blocked-after-confirm) and bumped the
+  expected-assertion-count guard 7 → 10. Verified red-then-green against the true pre-XACA-0822
+  parent (tap commit `344c062`, not `bdce087`): all three new cases failed for the right reason
+  (missing command / gate not enforced / wrong failure message) before the fix, 11/11 pass
+  after. Part of XACA-0822.
+
 - XACA-1135: fixes an output-corruption regression introduced by this ticket's own perf hoist.
   `kb-retro-check`'s per-item loop declared `local this_team` with no assignment; zsh's typeset
   PRINTS a parameter re-declared without a value (TYPESET_SILENT is unset interactively), so the
