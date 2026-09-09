@@ -3359,6 +3359,25 @@
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23ff4466' d='M6 8L0 0h12z'/%3E%3C/svg%3E");
 }
 
+/* -------------------------------------------------------------------------------
+   LCARS Checkbox
+   Theme-appropriate native checkbox for boolean preference toggles (XACA-1154).
+   Deliberately a real <input type="checkbox">, not a custom hidden-input + div
+   widget — keeps native keyboard focus/operation (Tab, Space) for free.
+   ------------------------------------------------------------------------------- */
+
+.lcars-checkbox {
+    width: 20px;
+    height: 20px;
+    accent-color: var(--lcars-cyan);
+    cursor: pointer;
+}
+
+.lcars-checkbox:focus-visible {
+    outline: 2px solid var(--lcars-blue);
+    outline-offset: 2px;
+}
+
 /* ===============================================================================
    LCARS ANIMATION LIBRARY
 

@@ -110,9 +110,28 @@
             });
         }
 
-        // Initialize Kiosk Mode (auto-rotation on idle)
-        if (window.LCARS_KIOSK) {
+        // Initialize Kiosk Mode (auto-rotation on idle) — gated on the
+        // persisted enabled/disabled preference. LCARS_KIOSK.init() already
+        // gates internally (XACA-1154-003, the fail-closed choke point),
+        // but the check is repeated here for legibility at the call site —
+        // defense in depth, not the source of truth.
+        if (window.LCARS_KIOSK && LCARS_KIOSK.isEnabled()) {
             LCARS_KIOSK.init();
+        }
+
+        // XACA-1154-003: bind the KIOSK MODE preferences toggle
+        // (#kiosk-mode-toggle, markup owned by subitem 004's PREFERENCES
+        // block). checked === true means kiosk enabled. The element may be
+        // absent (markup lands in a separate file not present in every
+        // context, e.g. lcars-test.html, deliberately excluded from this
+        // ticket) — a missing element or missing LCARS_KIOSK module must be
+        // a clean no-op, never a thrown error that aborts dashboard init.
+        var kioskModeToggle = document.getElementById('kiosk-mode-toggle');
+        if (kioskModeToggle && window.LCARS_KIOSK) {
+            kioskModeToggle.checked = LCARS_KIOSK.isEnabled();
+            kioskModeToggle.addEventListener('change', function() {
+                LCARS_KIOSK.setEnabled(kioskModeToggle.checked);
+            });
         }
 
         // XACA-0989: Expand All / Collapse All control for the divisions

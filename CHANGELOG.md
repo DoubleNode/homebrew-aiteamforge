@@ -146,6 +146,30 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   raised to fix it. Correct list verified: the file is scripts/-destined, so
   `_xaca0673` IS right here (contrast `iterm2_badge_helper.sh`, which is
   root-destined and uses the aux map + `_xaca1143` list).
+- XACA-1154: Fleet Monitor kiosk mode gains an off switch, and can be exited
+  without a physical click. Mirror of the canonical fix (see dev-team
+  CHANGELOG for the full analysis). Consumer-visible changes:
+  `shared/js/lcars-kiosk.js` gains `KIOSK_CONFIG.enabled`, a persisted
+  `lcars-kiosk-enabled` preference and `isEnabled()`/`setEnabled()` on
+  `window.LCARS_KIOSK`; `init()` now gates on that preference internally, so
+  kiosk no longer seizes a dashboard every 2.5 min of idle with no way to stop
+  it. A `Kiosk Auto-Start` checkbox is added to the PREFERENCES block of the
+  shipped dashboards (`lcars/lcars-dashboard.html`, `lcars2/lcars-index.html`,
+  `lcars2/lcars-all.html` — the `lcars-doublenode.*`/`lcars-mainevent.*`
+  variants are excluded from the tap by the existing XACA-0139 debrand filter
+  and are canonical-only).
+  The exit-event set grows from 4 events to 7 immediate plus 2 threshold-gated
+  movement events. This was driven by a measured event trace, not assumption:
+  on a Mac trackpad `touchstart`/`touchend` fire ZERO times (they are
+  touchscreen events), and a tap with "Tap to click" OFF emits no
+  `mousedown`/`pointerdown`/`click` at all — so the previous handler left a
+  physical button press or a keypress as the only way out.
+  `mousemove`/`pointermove` are gated behind a 10px cumulative-distance
+  threshold with a 250ms gap reset so cursor jitter cannot false-exit; `scroll`
+  is deliberately excluded as unreliable intent.
+  Default remains enabled, so consumer behaviour is unchanged until a user
+  opts out. Ships 2 new jsdom test files (tests/ is tap-shipped for Node CI per
+  XACA-0513); tap-side suite goes 877 -> 930 tests.
 - XACA-1140: hand-ported `_kb_val_local_sig` (a recursive, content-based
   change-probe signature over the LOCAL knowledge root, XACA-0754 PII-team
   knowledge) into both shipped tap copies —
