@@ -281,13 +281,24 @@ set_claude_active() {
 
         # Prepend "C " to the tab title when transitioning from 0 to active.
         if [ "$count" -eq 0 ]; then
-            _fire_claude_tab_prefix --activate
-            # XACA-1144: also fire the transport-level OSC so a remote
+            # XACA-1144: fire the transport-level OSC FIRST so a remote
             # viewing terminal's window-scoped watcher can mirror this
             # transition. Writes to this function's stdout — the caller
             # (kanban-session-start.py) redirects that to the pane's tty so
             # the escape reaches the terminal instead of being captured.
+            #
+            # ORDER IS LOAD-BEARING (XACA-1144-009). The callers wrap this in
+            # subprocess.run(..., timeout=2). _fire_claude_tab_prefix drives
+            # the LOCAL iTerm2 Python API and measures 1.17s warm / ~3.1s cold
+            # — up to the entire budget. On a REMOTE box it is also guaranteed
+            # useless, since the local iTerm2 it reaches is not the one anyone
+            # is looking at. Running it first meant a cold cache could burn the
+            # timeout before the one line remote teams actually depend on ever
+            # ran, silently dropping the signal. The OSC costs 0.032s; emitting
+            # it first makes the remote path independent of the local path's
+            # latency. Do not reorder these two.
             iterm2_set_user_var claude_active "1"
+            _fire_claude_tab_prefix --activate
         fi
 
         local new_count=$((count + 1))
@@ -348,8 +359,11 @@ clear_claude_active() {
 
         # If file doesn't exist, refcount is already 0 — ensure the tab prefix is clear.
         if [ ! -f "$refcount_file" ]; then
-            _fire_claude_tab_prefix --deactivate
+            # XACA-1144-009: OSC first — see the ordering note in
+            # set_claude_active. The local prefix call can consume the
+            # caller's whole 2s timeout budget; the OSC must not sit behind it.
             iterm2_set_user_var claude_active "0"
+            _fire_claude_tab_prefix --deactivate
             return 0
         fi
 
@@ -386,8 +400,11 @@ clear_claude_active() {
 
         if [ "$new_count" -eq 0 ]; then
             # Last session gone — strip the "C " prefix and remove the state file.
-            _fire_claude_tab_prefix --deactivate
+            # XACA-1144-009: OSC first — see the ordering note in
+            # set_claude_active. The local prefix call can consume the
+            # caller's whole 2s timeout budget; the OSC must not sit behind it.
             iterm2_set_user_var claude_active "0"
+            _fire_claude_tab_prefix --deactivate
             # Release lock before removing the file to avoid orphaned locks.
             if [ -n "$lock_fd" ]; then
                 exec 9>&-

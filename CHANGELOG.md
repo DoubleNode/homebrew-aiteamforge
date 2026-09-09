@@ -17,6 +17,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   node absent from PATH; test-013 is 10/10 with node present and 8/8 (mode 2
   SKIPs, not fails) with node absent — matching the plain-shell CI job, which
   installs only jq/bash/tmux, never node.
+- XACA-1144-009: reordered `set_claude_active`/`clear_claude_active` so the
+  OSC 1337 `claude_active` emission runs BEFORE `_fire_claude_tab_prefix`, at
+  all three refcount-transition sites. Callers wrap these in
+  `subprocess.run(..., timeout=2)`; the local prefix call drives the LOCAL
+  iTerm2 Python API and measures **1.17s warm / ~3.1s cold**, so on a cold
+  cache it could consume the entire budget before the OSC ever ran — silently
+  dropping the signal that remote (connect-script) teams depend on. On a
+  REMOTE box that prefix call is also guaranteed useless: the iTerm2 it
+  reaches is not the one anyone is looking at. The OSC costs 0.032s.
+  Proven by negative control, not argued: with `_fire_claude_tab_prefix`
+  stubbed to 3s, the pre-fix order times out with the OSC NOT delivered
+  (`False`); the fixed order times out with the OSC delivered (`True`). The
+  local path is unaffected — the prefix still fires, just second.
+  Found by the XACA-1144-008 test author while building Section C and flagged
+  rather than filed; the ordering is now load-bearing and commented as such.
 - XACA-1113 (bugfix, found during port verification): `_kb_msg_client` in
   `share/templates/kanban/kanban-helpers.template.sh` resolved the Tier-2
   relay client to a single hardcoded path,
