@@ -134,12 +134,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   DEFECT 1 (-017), the serious one. The overlay read was a BARE assignment from a command
   substitution. Under zsh with `set -e`, a non-zero exit there ABORTS THE WHOLE SHELL — and a
   non-zero is the ORDINARY "team not in the overlay" case, which must fall through to the
-  loader/case-arm tiers. Measured: bash survives, zsh does not, and these helpers run under zsh.
+  loader/case-arm tiers. CORRECTION, measured after the fact: this was first recorded as zsh-only. It is NOT --
+  `/bin/bash` 3.2 and zsh BOTH abort on `set -e; x=$(false)`, verified with a minimal repro
+  and with the real pre-fix function shape. The original "bash survives" reading came from a
+  test whose lookup SUCCEEDED, so nothing failed to trigger errexit -- a wrong-target
+  measurement, not a shell difference. Ordinary errexit behaviour in both shells.
   On a consumer with a sparse overlay this killed any `set -e` script resolving a case-table team.
-  Fixed with `|| true` and an 18-assertion regression suite (3 checks x 3 files x 2 shells) proven
+  Fixed by CAPTURING the status (`|| _ovl_rc=$?`), not discarding it -- a literal
+  `|| true` would have thrown away the exhaustion code that -019 below depends on, so the
+  obvious one-liner would have been wrong. Plus an 18-assertion regression suite (3 checks x 3 files x 2 shells) proven
   non-vacuous by reverting the fix and confirming exactly 3 failures reappear.
   DEFECT 2 (-018): the stderr capture used a predictable `$$`/`$RANDOM` path and `2>` follows
-  symlinks — a symlink-attack surface in a shared tmpdir. Now `mktemp`.
+  symlinks -- a symlink-attack surface in a shared tmpdir. First hardened to `mktemp`, then
+  SUPERSEDED: -019's exit-code signal removed the stderr capture entirely, so the temp file
+  no longer exists in any of the three copies rather than merely being created safely.
   NOT A DEFECT (-024), after disambiguation: the reviewer reported "missing `;` before `}`". There
   were genuinely TWO things at that spot. The missing semicolon is real, exists identically on
   develop, and is fixed. The `*(N)` glob the fix then exposed is a zsh glob qualifier, deliberate
