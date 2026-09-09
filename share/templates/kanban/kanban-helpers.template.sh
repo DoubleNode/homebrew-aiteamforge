@@ -20295,7 +20295,7 @@ kb-release-sync-board() {
 # Unified release command
 # Usage: kb-release <subcommand> [args...]
 kb-release() {
-    local subcmd="$1"
+    local subcmd="${1-}"
     shift
 
     case "$subcmd" in
@@ -20314,13 +20314,42 @@ kb-release() {
         show|status)
             kb-release-show "$@"
             ;;
+        sync|reconcile)
+            kb-release-sync-board "$@"
+            ;;
+        edit|update)
+            kb-release-edit "$@"
+            ;;
+        promote)
+            kb-release-promote "$@"
+            ;;
+        reschedule)
+            kb-release-reschedule "$@"
+            ;;
+        plan)
+            # XACA-0729: demote all platforms back to PLANNED holding state
+            kb-release-plan "$@"
+            ;;
+        link-cr)
+            kb-release-link-cr "$@"
+            ;;
+        unlink-cr)
+            kb-release-unlink-cr "$@"
+            ;;
         help|--help|-h|"")
             echo "Release Management Commands:"
-            echo "  kb-release create <name> [options]   Create a new release"
-            echo "  kb-release list                      List all releases"
-            echo "  kb-release assign <item> <rel> [plt] Assign item to release"
-            echo "  kb-release unassign <item>           Remove release assignment"
-            echo "  kb-release show <item>               Show item's release info"
+            echo "  kb-release create <name> [options]         Create a new release"
+            echo "  kb-release list                            List all releases"
+            echo "  kb-release assign <item> <rel> [plt]       Assign item to release"
+            echo "  kb-release unassign <item>                 Remove release assignment"
+            echo "  kb-release show <item|REL-ID>              Show item's release info, or release detail + linked CRs"
+            echo "  kb-release sync [team]                     Reconcile board ↔ manifests"
+            echo "  kb-release edit <id> [options]             Edit release metadata"
+            echo "  kb-release promote <id> --platform|--all   Promote environment (forward-only)"
+            echo "  kb-release plan <id>                       Demote all platforms back to PLANNED (XACA-0729)"
+            echo "  kb-release reschedule <id> <date>          Change target date"
+            echo "  kb-release link-cr <rel> <cr>              Link a CR to this release (XACA-0657)"
+            echo "  kb-release unlink-cr <rel> <cr>            Unlink a CR from this release (XACA-0657)"
             echo ""
             echo "Create options:"
             echo "  --type <type>        feature|bugfix|hotfix|maintenance (default: feature)"
@@ -20328,6 +20357,22 @@ kb-release() {
             echo "  --project <name>     Project name"
             echo "  --target-date <date> Target date (YYYY-MM-DD)"
             echo "  --short-title <str>  Short display name for LCARS UI"
+            echo ""
+            echo "Edit options:"
+            echo "  --name <s>                       Release name"
+            echo "  --short-title <s>                Short display name for LCARS UI"
+            echo "  --target-date <YYYY-MM-DD>       Target date"
+            echo "  --status <s>                     Release status"
+            echo "  --type <type>                    feature|bugfix|hotfix|maintenance"
+            echo "  --project <name>                 Project name"
+            echo "  --tags <a,b,c>                   Comma-separated tags (replaces existing)"
+            echo "  --platform-version <plt>=<v>     Update version for an existing platform (repeatable)"
+            echo "  --platform-build <plt>=<num>     Update build number (repeatable; aliases: --build-number, --version-code)"
+            echo ""
+            echo "Promote options:"
+            echo "  --platform <plat>  Promote a single platform"
+            echo "  --all              Promote all platforms"
+            echo "  --to <ENV>         Target environment (optional; auto-advances when omitted)"
             ;;
         *)
             echo "Unknown subcommand: $subcmd"

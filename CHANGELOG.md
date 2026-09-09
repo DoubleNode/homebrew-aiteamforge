@@ -103,6 +103,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Consumers WITHOUT ImageMagick are unaffected: that branch always displayed the raw image and
   is unchanged. Consumers WITH it stop losing the avatar and terminal logo on a rounding
   failure.
+- XACA-1146-005: wired the seven newly ported subcommands into the shipped `kb-release()`
+  dispatcher. Until this change all seven were DEAD CODE — measured 7 defined / 0 routed —
+  reachable only by typing the full function name, which no user does. That is the XACA-0297
+  failure mode (a new shell subcommand whose dispatcher line is never added), so it was tracked
+  as its own subitem rather than assumed to come along with each port. Added `sync|reconcile`,
+  `edit|update`, `promote`, `reschedule`, `plan`, `link-cr` and `unlink-cr` using canonical's
+  exact alias sets; replaced the stale 5-command help block with canonical's, minus the five
+  `doctor` lines; and hardened `local subcmd="$1"` to `"${1-}"` so a bare `kb-release` does not
+  trip `set -u`. The template dispatcher now routes 12 subcommands against canonical's 13 — the
+  sole difference is `kb-release-doctor`, deliberately unshipped as dev-only.
 - XACA-1146-004: ported the CR-link family and `kb-release-sync-board` into the shipped template
   (6 functions, 363 canonical lines). The three `_kb_cr_*` helpers are named must-ship in
   `tests/fixtures/xaca-0811/tap-omissions.manifest` in their own right, not incidental — the
