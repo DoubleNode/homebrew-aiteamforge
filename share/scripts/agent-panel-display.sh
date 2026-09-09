@@ -20,7 +20,11 @@ SESSION_CODE="${1:?Usage: agent-panel-display.sh <session-code>}"
 # with the flag set.
 # ═══════════════════════════════════════════════════════════════════════
 _panel_debug() {
-    [[ "$LCARS_PANEL_DEBUG" == "1" ]] && print -u2 -- "[panel-debug] $*"
+    # -r is load-bearing: without it zsh interprets backslash escapes, and since
+    # XACA-1138 this carries magick's OWN stderr -- external, uncontrolled text. A
+    # `\e` in it would become a real ESC byte, and in a tmux pane fd 2 paints the
+    # same terminal as fd 1, corrupting the frame this wrapper exists to protect.
+    [[ "$LCARS_PANEL_DEBUG" == "1" ]] && print -r -u2 -- "[panel-debug] $*"
 }
 # Predicate form, for guarding call sites whose ARGUMENTS are expensive.
 # _panel_debug's own guard runs too late for those: zsh expands a call's
@@ -1069,9 +1073,14 @@ render_panel() {
                     _panel_debug "amb badges: row ${row_idx} imgcat invoking on $row_strip"
                     "$IMGCAT" -H 3 -W 100% "$row_strip"
                 elif _panel_debug_on; then
-                    # Row 1 legitimately absent when the agent has <=5 badges; the
-                    # message says which condition failed so that is distinguishable
-                    # from a genuine build failure.
+                    # Row 1 is legitimately absent when the agent has <=4 badges
+                    # (per_row=4), and this message is BYTE-IDENTICAL in that case
+                    # and in a genuine build failure -- it reports only whether the
+                    # strip file and $IMGCAT were present, never which condition
+                    # failed. Telling them apart means noticing the ABSENCE of the
+                    # "row N strip NOT built" line from the build phase, which on a
+                    # cached render is never emitted either. Do not restate the old
+                    # claim that this is self-distinguishing (XACA-1138-010).
                     _panel_debug "amb badges: row ${row_idx} NOT displayed — strip exists=$([[ -f "$row_strip" ]] && echo yes || echo no), IMGCAT executable=$([[ -x "$IMGCAT" ]] && echo yes || echo no)"
                 fi
             done

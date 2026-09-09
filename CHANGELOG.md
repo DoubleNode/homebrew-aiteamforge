@@ -7,6 +7,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1138 (review follow-up): corrected a code comment at the AMB row-display site that
+  still asserted "<=5 badges" and that the message is self-distinguishing — both wrong, and
+  both already corrected elsewhere. Also added `-r` to `_panel_debug`'s `print -u2`: this
+  change routes magick's own stderr through it, and without `-r` zsh interprets backslash
+  escapes, so an `\e` in external error text becomes a real ESC byte — in a tmux pane fd 2
+  paints the same terminal as fd 1, corrupting the frame the wrapper exists to protect.
+
 - XACA-1138: `share/scripts/agent-panel-display.sh` — a failed ImageMagick rounding no longer
   costs the image entirely. The avatar and terminal-logo blocks displayed ONLY the rounded
   output, so when rounding produced no file (magick error, unwritable tmp dir, disk full,
