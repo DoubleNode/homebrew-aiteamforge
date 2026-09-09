@@ -541,27 +541,27 @@ _kb_get_team_code() {
         fi
     fi
 
-    # XACA-1058-013: stderr from this overlay call is captured to a temp
-    # file (never /dev/null) so it can be relayed unchanged AND inspected
-    # for _kb_overlay_retry_read's exhaustion phrase -- see
-    # dev-team/kanban-helpers.sh's _kb_get_team_code for the full rationale
-    # on why an exhausted refusal must never be memoized as authoritative.
-    local _ovl_code _ovl_exhausted=0 _ovl_errfile=""
-    local _ovl_tmpdir="${TMPDIR:-/tmp}"
-    if [[ -d "$_ovl_tmpdir" && -w "$_ovl_tmpdir" ]]; then
-        _ovl_errfile="${_ovl_tmpdir%/}/.kb_team_code_err.$$.${RANDOM}${RANDOM}"
-    fi
-    if [[ -n "$_ovl_errfile" ]]; then
-        _ovl_code=$(_kb_overlay_lookup "$team" team_code 2>"$_ovl_errfile")
-    else
-        _ovl_code=$(_kb_overlay_lookup "$team" team_code 2>/dev/null)
-        _ovl_exhausted=1
-    fi
-    if [[ -n "$_ovl_errfile" && -s "$_ovl_errfile" ]]; then
-        cat "$_ovl_errfile" >&2
-        grep -q "refusing rather than guessing a team_code" "$_ovl_errfile" 2>/dev/null && _ovl_exhausted=1
-    fi
-    [[ -n "$_ovl_errfile" ]] && rm -f "$_ovl_errfile" 2>/dev/null
+    # XACA-1058-019: exhaustion is a STRUCTURAL signal -- the distinct exit
+    # code 3 from _kb_overlay_retry_read (via _kb_overlay_lookup, whose last
+    # statement is the call to it) -- not a grep for a human-readable phrase
+    # out of captured stderr. See dev-team/kanban-helpers.sh's
+    # _kb_get_team_code for the full rationale on why an exhausted refusal
+    # must never be memoized as authoritative, and why this also retires
+    # the XACA-1058-018 temp-file/mktemp machinery entirely: the exit status
+    # crosses the $(...) subshell boundary on its own, so there is nothing
+    # left for that file to carry. `_kb_overlay_retry_read` already routes
+    # every python3 attempt's own stderr to /dev/null; its own refusal
+    # WARNING now reaches the real stderr directly by leaving this call
+    # unredirected, rather than deferred through a file and cat'd.
+    #
+    # `_ovl_rc=0; ... || _ovl_rc=$?` is XACA-1058-017's fix carried into this
+    # shape, not a reversion: `|| _ovl_rc=$?` is itself an assignment (always
+    # exits 0), so the compound statement's own exit status is always 0 and
+    # `set -e` never fires under zsh, while `_ovl_rc` still ends up holding
+    # the real code.
+    local _ovl_code _ovl_rc=0 _ovl_exhausted=0
+    _ovl_code=$(_kb_overlay_lookup "$team" team_code) || _ovl_rc=$?
+    [[ $_ovl_rc -eq 3 ]] && _ovl_exhausted=1
 
     if [[ -n "$_ovl_code" ]]; then
         # XACA-1128-class fix: printf, not echo -- under zsh, echo expands
@@ -2282,11 +2282,21 @@ _kb_overlay_config_path() {
 # (stdout carries the answer); exit 1 = read was structurally fine, answer
 # genuinely absent (NOT retried); exit 2 = the read itself was structurally
 # unsound -- unreadable, 0-byte/whitespace-only, unparseable JSON, or a
-# missing/empty "teams" key (RETRIED). Exhausting all attempts refuses
-# loudly on stderr, naming the path and attempt count, and returns 1 --
-# never invents a code. Attempt budget: 3 reads, short backoff between
-# failures (0.05s, then 0.1s -- ~0.15s worst case). The happy path (first
-# attempt succeeds) issues no sleep at all.
+# missing/empty "teams" key (RETRIED); exit 3 = every retry hit exit 2 --
+# refuses loudly on stderr, naming the path and attempt count, never invents
+# a code. Attempt budget: 3 reads, short backoff between failures (0.05s,
+# then 0.1s of THAT specific added latency; end-to-end wall time for a
+# persistently-unreadable overlay, three python3 forks included, measures
+# ~0.6s -- see dev-team/kanban-helpers.sh for the measured figure). The
+# happy path (first attempt succeeds) issues no sleep at all.
+#
+# XACA-1058-019: exit 1 (genuinely not registered) and exit 3 (retries
+# exhausted) are DISTINCT codes, not both folded into "return 1" -- see
+# dev-team/kanban-helpers.sh's copy of this function for the full rationale
+# (cross-file textual coupling via grep is exactly the defect class this
+# ticket retired at kb-init-team Site 5). An exit status survives a command
+# substitution, so 3 propagates cleanly to _kb_get_team_code through
+# _kb_overlay_lookup with no text matching and no temp file to carry it.
 _kb_overlay_retry_read() {
     local cfg="$1" label="$2"; shift 2
     local max_attempts=3 attempt=1 rc out
@@ -2302,7 +2312,7 @@ _kb_overlay_retry_read() {
         fi
         if [[ $attempt -ge $max_attempts ]]; then
             echo "[overlay] WARNING: ${label} -- could not read a structurally valid overlay at '${cfg}' after ${attempt} attempt(s); refusing rather than guessing a team_code." >&2
-            return 1
+            return 3
         fi
         case "$attempt" in
             1) sleep 0.05 ;;
@@ -2331,8 +2341,12 @@ _kb_overlay_lookup() {
     local cfg
     cfg=$(_kb_overlay_config_path)
     [[ -f "$cfg" ]] || return 1
-    local _script
-    _script=$(cat <<'PYEOF'
+    # XACA-1058-020: a plain single-quoted assignment, not `$(cat <<'PYEOF'
+    # ... PYEOF)` -- the heredoc-via-command-substitution form forks TWICE
+    # per call (the $(...) subshell, then `cat` exec'd inside it) just to
+    # copy a constant string into a variable. No single quotes in the body,
+    # so it is safe verbatim inside one.
+    local _script='
 import json, sys
 cfg, slug, field = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
@@ -2348,7 +2362,16 @@ except Exception:
     sys.exit(2)  # short/partial JSON -- mid-write snapshot
 teams = data.get("teams")
 if not isinstance(teams, dict) or not teams:
-    sys.exit(2)  # missing/empty "teams" is never a legitimate steady state here
+    # XACA-1058-023: {"teams": {}} is well-formed JSON but is treated as
+    # STRUCTURALLY UNSOUND (retried), not a legitimate "no teams registered
+    # yet" answer -- mirroring aiteamforge_paths.py, which owns the single source of
+    # truth, config_is_structurally_valid(), which classifies an empty teams
+    # dict as a corruption signature (XACA-0705 / k501: two sites must never
+    # independently redecide this; see dev-team/kanban-helpers.sh copy of
+    # this script for the full incident evidence). No installer persists
+    # this shape to the live team-paths.json -- every scaffold using it is
+    # an in-memory default replaced before the first write.
+    sys.exit(2)
 entry = teams.get(slug)
 if not isinstance(entry, dict):
     sys.exit(1)  # file is structurally sound; this slug genuinely is not registered
@@ -2359,8 +2382,7 @@ val = entry.get(field)
 if val is None or val == "":
     sys.exit(1)
 print(val)
-PYEOF
-)
+'
     _kb_overlay_retry_read "$cfg" "_kb_overlay_lookup(${slug},${field})" python3 -c "$_script" "$cfg" "$slug" "$field"
 }
 

@@ -128,6 +128,46 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   lookup tiers came back empty, so the team is not registered on this machine — and keep
   XACA-1058 only as parenthetical history, with XACA-0822 named as the live cause that can
   still ship an older helper. Message text only; no control flow, no exit codes changed.
+- XACA-1058 (PR #840 re-review round): both gate bots APPROVED, and the round still surfaced two
+  REAL defects plus one finding whose premise was wrong. Recording all three, because the split is
+  the useful part.
+  DEFECT 1 (-017), the serious one. The overlay read was a BARE assignment from a command
+  substitution. Under zsh with `set -e`, a non-zero exit there ABORTS THE WHOLE SHELL — and a
+  non-zero is the ORDINARY "team not in the overlay" case, which must fall through to the
+  loader/case-arm tiers. Measured: bash survives, zsh does not, and these helpers run under zsh.
+  On a consumer with a sparse overlay this killed any `set -e` script resolving a case-table team.
+  Fixed with `|| true` and an 18-assertion regression suite (3 checks x 3 files x 2 shells) proven
+  non-vacuous by reverting the fix and confirming exactly 3 failures reappear.
+  DEFECT 2 (-018): the stderr capture used a predictable `$$`/`$RANDOM` path and `2>` follows
+  symlinks — a symlink-attack surface in a shared tmpdir. Now `mktemp`.
+  NOT A DEFECT (-024), after disambiguation: the reviewer reported "missing `;` before `}`". There
+  were genuinely TWO things at that spot. The missing semicolon is real, exists identically on
+  develop, and is fixed. The `*(N)` glob the fix then exposed is a zsh glob qualifier, deliberate
+  per XACA-0737, and was correctly left alone — bash reports one syntax error and stops, so fixing
+  the first merely revealed the next. Rewriting a zsh glob to satisfy a linter that was never
+  meant to run on this zsh-shebanged file would trade a real regression for a cosmetic win.
+  -019 is the one worth reading twice: retry-exhaustion was detected by GREPPING a human-readable
+  phrase out of captured stderr — the same cross-file textual coupling this ticket had just
+  retired at kb-init-team Site 5, where an anchor on another file's comment text broke silently.
+  Shipping it would have contradicted the ticket's own argument. Replaced with a structural exit
+  code (3 = retries exhausted, 1 = genuinely unregistered, 0 = found), which survives command
+  substitution via `$?` where a shell variable cannot. That also removed the temp file and the
+  per-call `cat` fork (-020) outright rather than optimising them.
+  -023: `{"teams": {}}` stays classified structurally-unsound and retried, not accepted as a valid
+  "no teams yet" state — because `aiteamforge_paths.py`'s `config_is_structurally_valid()` already
+  treats it as a corruption signature, and diverging in the shell would recreate the two-site
+  drift class this repo keeps getting bitten by. Every `{"teams": {}}` scaffold found is in-memory
+  and gets its real entry before the first write. XACA-1029's "the file was VALID both times" cuts
+  AGAINST accepting it: "valid" there meant byte-parseable JSON, strictly weaker than
+  structurally-sound registry.
+  -022: the suite now PRINTS which tap it read and its SHA versus the repo's pinned gitlink, and
+  hard-fails when it silently took the HOME fallback and the SHAs disagree — the documented
+  sync-tap false-green shape, which matters more than usual on a ticket about false greens.
+  Proven by pointing HOME at a tap cloned at a different commit and confirming zero assertions run.
+  -021: doc drift corrected against MEASURED values, not the reviewer's or mine. The runbook said
+  the retry costs "0.15s worst case"; 8 samples against a persistently-0-byte overlay measured
+  ~525-635ms, because 0.15s only ever counted the backoff sleep and not the three python3 forks.
+  Now documented as ~0.55-0.65s. Suite 302 -> 320.
 - XACA-0822-006: `kb-backlog` in this template had no `points` subcommand and no `--points`
   flag on `add`, so no item on a consumer board could carry an effort estimate — even though an
   estimate is mandatory before `kb-pick`/`kb-run` in the project's own workflow. Canonical had 8
