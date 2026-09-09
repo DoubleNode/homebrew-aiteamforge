@@ -179,6 +179,26 @@ install_helper_scripts() {
         warning "update_claude_agent.sh not found at: $agent_script_src (skipping)"
     fi
 
+    # XACA-1144-002: iterm2_badge_helper.sh — same root-level shape as
+    # update_claude_agent.sh above (dev-team repo ROOT, mapped by sync-tap.sh
+    # into share/scripts/, then re-copied here to $AITEAMFORGE_DIR root).
+    # MUST land at root, not scripts/: all four canonical call sites
+    # (update_claude_agent.sh, claude_code_cc_aliases.sh, kanban-session-start.py,
+    # kanban-stop.py) probe ~/aiteamforge/iterm2_badge_helper.sh specifically.
+    # This is also what makes _fire_claude_tab_prefix()'s own
+    # `dirname "$0"`/scripts/iterm2_tab_title_prefix.py lookup resolve to
+    # $AITEAMFORGE_DIR/scripts/ — the scripts/-destined half below (covered for
+    # free by the bulk share/scripts/* copy in aiteamforge-setup.sh, which
+    # calls this function). Getting either half wrong strands the other.
+    local badge_helper_src="$scripts_src/iterm2_badge_helper.sh"
+    local badge_helper_dest="$AITEAMFORGE_DIR/iterm2_badge_helper.sh"
+    if [ -f "$badge_helper_src" ]; then
+        cp "$badge_helper_src" "$badge_helper_dest"
+        chmod +x "$badge_helper_dest"
+    else
+        warning "iterm2_badge_helper.sh not found at: $badge_helper_src (skipping)"
+    fi
+
     # Copy scripts/ directory so team startup scripts can find agent-panel-display.sh,
     # iterm2_window_manager.py, and other runtime helpers at $AITEAMFORGE_DIR/scripts/
     local scripts_dest="$AITEAMFORGE_DIR/scripts"

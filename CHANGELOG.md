@@ -20,6 +20,30 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   cost on every `kb-sweep`, unconditionally. These are hand-ported
   TEMPLATES (not `sync-tap.sh` mirrors) — same convention as XACA-1119-003's
   `_kb_val_global_sig` port.
+- XACA-1144 (002/003): shipped `iterm2_badge_helper.sh` and
+  `scripts/iterm2_tab_title_prefix.py` to the tap for the first time —
+  `find homebrew-tap` for either basename previously returned zero matches, so
+  every one of the six canonical call sites that probe
+  `~/aiteamforge/iterm2_badge_helper.sh` /
+  `~/aiteamforge/scripts/iterm2_tab_title_prefix.py` was dead on every
+  consumer box. Added both to the `sync-tap.sh` root→`share/scripts/` map
+  (same convention as `update_claude_agent.sh`/`iterm2_window_manager.py`).
+  Wired three delivery sites: (1) fresh install —
+  `install-shell.sh::install_helper_scripts()` gets an explicit root-level
+  copy for the badge helper (the prefix helper is covered for free by
+  `aiteamforge-setup.sh`'s bulk `share/scripts/*` copy); (2) upgrade —
+  `iterm2_tab_title_prefix.py` added to
+  `_xaca0673_mandatory_materialize_basenames()` (scripts/-destined, same
+  mechanism as its `iterm2_venv_bootstrap.py` sibling), `iterm2_badge_helper.sh`
+  added to `_xaca0608_aux_script_map()` + `_xaca1143_aux_mandatory_materialize_basenames()`
+  (root-destined, same mechanism as `worktree-helpers.sh` — deliberately NOT
+  the `_xaca0673` list, which would materialize it at the wrong destination).
+  Also synced the previously-deferred `update_claude_agent.sh` mirror
+  (XACA-1144-004, commit `e50b4b90`) now that the XACA-1146 submodule-pointer
+  negotiation has resolved. Landing paths are mutually dependent: the badge
+  helper at `$AITEAMFORGE_DIR` root is what makes its own
+  `dirname "$0"`/scripts/ lookup resolve to the prefix helper at
+  `$AITEAMFORGE_DIR/scripts/`.
 - XACA-1144 (FAULT C): ported the XACA-0223 deterministic clear of the iTerm2 tab
   "C " prefix into shipped `cc-aliases.sh`. Canonical `claude_code_cc_aliases.sh`
   and shipped `cc-aliases.sh` are independently maintained with no `sync-tap.sh`

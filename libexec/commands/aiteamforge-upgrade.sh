@@ -914,6 +914,7 @@ cellar-watch-trigger.sh|${WORKING_DIR}/scripts/cellar-watch-trigger.sh
 deploy-worktree-personas.sh|${WORKING_DIR}/scripts/deploy-worktree-personas.sh
 kb-port-reconcile|${WORKING_DIR}/scripts/kb-port-reconcile
 worktree-helpers.sh|${WORKING_DIR}/worktree-helpers.sh
+iterm2_badge_helper.sh|${WORKING_DIR}/iterm2_badge_helper.sh
 EOF
 }
 
@@ -961,9 +962,27 @@ _xaca0608_aux_scriptdir_basenames() {
 # evidence would be scope creep beyond what this ticket verified.
 # Newline-delimited basenames; exact-line membership test (same idiom as
 # _xaca0673_mandatory_materialize_basenames).
+#
+# XACA-1144-003: iterm2_badge_helper.sh — added under the same "genuinely
+# always-required, independently measured" discipline as worktree-helpers.sh
+# above, not by inference. Newly tap-shipped as of XACA-1144-002: `find
+# homebrew-tap -name iterm2_badge_helper.sh` returned ZERO matches before that
+# change, meaning it is a HARD ZERO on every existing consumer box, not merely
+# a sometimes-missing file behind a broken guard. It is root-destined
+# ($AITEAMFORGE_DIR/iterm2_badge_helper.sh — all four canonical call sites
+# probe exactly that path) and is now in _xaca0608_aux_script_map() above, so
+# without this entry update_aux_scripts()'s "[ ! -f $target ] && continue"
+# guard would skip every already-installed box forever, identical to the
+# worktree-helpers.sh gap this list exists to close. Deliberately NOT added to
+# _xaca0673_mandatory_materialize_basenames() — that list is consumed only by
+# update_runtime_helpers(), whose destination is WORKING_DIR/scripts/*; this
+# file lands at WORKING_DIR root, so that would be the wrong list (see the
+# XACA-1143 comment above this function for the failure mode of getting that
+# swap backwards).
 _xaca1143_aux_mandatory_materialize_basenames() {
   cat <<'EOF'
 worktree-helpers.sh
+iterm2_badge_helper.sh
 EOF
 }
 
@@ -1911,9 +1930,21 @@ PYEOF
 # report the gap forever — never close it. It is extensionless like
 # kb-init-team and kb-api-key, so it also needs the explicit glob-sweep entry
 # below (the `*.sh`/`*.py` globs cannot match an extensionless name).
+# XACA-1144-003: iterm2_tab_title_prefix.py — SAME gap class as
+# iterm2_venv_bootstrap.py above (it is in fact iterm2_venv_bootstrap.py's own
+# bootstrap CONSUMER, and ships to the exact same $AITEAMFORGE_DIR/scripts/
+# directory). Newly tap-shipped as of XACA-1144-002 — no consumer box has ever
+# had it on disk, so without this entry the *.py glob sweep in
+# update_runtime_helpers() below would refresh it forever-never on every
+# already-installed box (the sweep only refreshes targets already on disk; a
+# fresh install gets it for free via aiteamforge-setup.sh's bulk share/scripts/
+# copy, which this list does not gate). It already carries the .py extension,
+# so — unlike kb-init-team/kb-api-key/kb-msg-provision — it needs no additional
+# glob-sweep entry; being present in THIS list is sufficient.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
+iterm2_tab_title_prefix.py
 kb-init-team-guard.sh
 kb-init-team
 remote-tmux-attach.sh
