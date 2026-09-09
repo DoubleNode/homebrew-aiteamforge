@@ -103,6 +103,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Consumers WITHOUT ImageMagick are unaffected: that branch always displayed the raw image and
   is unchanged. Consumers WITH it stop losing the avatar and terminal logo on a rounding
   failure.
+- XACA-1146-003: ported the `kb-release-promote` (277 lines) / `kb-release-plan` (83 lines)
+  environment pair into the shipped template. Both are must-ship and existed only in canonical,
+  so a consumer could create a release but never move it through DEV/QA/PROD, nor demote it back
+  to the PLANNED holding state (`plan`, XACA-0729). No adaptation needed: both share the same four
+  depth-1 callees (`_kb_curl_failure_reason`, `_kb_lcars_auth_args`, `_kb_team_lcars_port`,
+  `_kb_detect_context`), all already present, and neither carries a fleet-specific path. Bodies
+  verified byte-identical to canonical. Dispatcher routing still deferred to XACA-1146-005.
 - XACA-1146-002: ported `kb-release-edit` (279 lines) and `kb-release-reschedule` (13 lines)
   into the shipped template. Both are classified must-ship in
   `tests/fixtures/xaca-0811/tap-omissions.manifest` and existed only in canonical, so a consumer

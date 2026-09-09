@@ -19500,6 +19500,381 @@ kb-release-reschedule() {
     kb-release-edit "$release_id" --target-date "$date"
 }
 
+# Promote one or all platforms of a release to the next (or a specified) environment.
+# Usage: kb-release promote <REL-ID> --platform <plat> | --all [--to <ENV>]
+#
+# FORWARD-ONLY: refuses to move a platform to an environment at or before its
+# current position in the enabled-environment ordering.  The server already
+# guards the auto-advance case; this CLI guard covers explicit --to overrides.
+kb-release-promote() {
+    local release_id=""
+    local opt_platform=""
+    local opt_all=0
+    local opt_to=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --platform|-p)
+                opt_platform="${2-}"
+                shift 2
+                ;;
+            --all|-a)
+                opt_all=1
+                shift
+                ;;
+            --to|-t)
+                opt_to="${2-}"
+                shift 2
+                ;;
+            --help|-h)
+                echo "Usage: kb-release promote <release-id> --platform <plat> | --all [--to <ENV>]"
+                echo ""
+                echo "Options:"
+                echo "  --platform <plat>  Promote a single platform (e.g. ios, android, firebase)"
+                echo "  --all              Promote every platform in the release"
+                echo "  --to <ENV>         Target environment (optional; server auto-advances when omitted)"
+                echo ""
+                echo "Exactly one of --platform or --all is required."
+                echo ""
+                echo "FORWARD-ONLY: refuses backward/no-op promotions."
+                echo "  Environment order is taken from the release's own 'environments' sequence."
+                echo "  Passing --to <ENV> that is at or before the platform's current environment"
+                echo "  is rejected with an error (disabled-stage targets are rejected by the server)."
+                echo ""
+                echo "Examples:"
+                echo "  kb-release promote REL-2026-Q1-001 --all"
+                echo "  kb-release promote REL-2026-Q1-001 --platform ios"
+                echo "  kb-release promote REL-2026-Q1-001 --platform android --to QA"
+                return 0
+                ;;
+            *)
+                if [[ -z "$release_id" ]]; then
+                    release_id="${1-}"
+                else
+                    echo "Error: Unexpected argument: ${1-}"
+                    echo "Usage: kb-release promote <release-id> --platform <plat> | --all [--to <ENV>]"
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$release_id" ]]; then
+        echo "Error: Release ID is required"
+        echo "Usage: kb-release promote <release-id> --platform <plat> | --all [--to <ENV>]"
+        return 1
+    fi
+
+    if [[ $opt_all -eq 0 && -z "$opt_platform" ]]; then
+        echo "Error: exactly one of --platform <plat> or --all is required"
+        return 1
+    fi
+
+    if [[ $opt_all -eq 1 && -n "$opt_platform" ]]; then
+        echo "Error: --platform and --all are mutually exclusive"
+        return 1
+    fi
+
+    # Detect caller's team and resolve the correct LCARS port
+    local context team port
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+
+    if [[ -z "$team" || "$team" == "ERROR:"* ]]; then
+        echo "Error: Could not determine team context" >&2
+        return 1
+    fi
+
+    port=$(_kb_team_lcars_port "$team") || {
+        echo "Warning: no LCARS port known for team '$team', falling back to 8080" >&2
+        port="8080"
+    }
+
+    # Fetch the release record to determine platform list and current environments.
+    # GET /api/releases returns the full list; we find ours by id.
+    local list_resp list_code list_body list_curl_exit release_json
+    # _kb_reason/cause/remedy are also consumed inside the per-platform
+    # promote loop further below (k501: declared once here, not re-declared
+    # inside the loop, to avoid the zsh local-in-loop stdout leak).
+    local _kb_reason cause remedy
+    list_resp=$(curl -s -w "\n%{http_code}" \
+        --max-time 5 \
+        "http://localhost:${port}/api/releases" 2>/dev/null)
+    list_curl_exit=$?
+    list_code=$(printf '%s' "$list_resp" | tail -n1)
+    list_body=$(printf '%s' "$list_resp" | sed '$d')
+
+    if [[ "$list_code" == "000" ]]; then
+        # curl reports %{http_code}=000 for ANY connection-phase failure
+        # (refused, timed out, DNS, reset) — decode curl's own exit code
+        # instead of asserting a single cause for all of them (see
+        # _kb_curl_failure_reason; XACA-1099).
+        _kb_reason=$(_kb_curl_failure_reason "$list_curl_exit" "$port")
+        cause="${_kb_reason%%$'\n'*}"
+        remedy="${_kb_reason#*$'\n'}"
+        echo "Error: LCARS server on port $port — $cause."
+        echo "  $remedy"
+        return 1
+    fi
+    if [[ "$list_code" != "200" ]]; then
+        echo "Error: Failed to fetch releases (HTTP $list_code)"
+        [[ -n "$list_body" ]] && echo "  $list_body"
+        return 1
+    fi
+
+    release_json=$(printf '%s' "$list_body" | jq --arg id "$release_id" \
+        '.releases[] | select(.id == $id)' 2>/dev/null)
+    if [[ -z "$release_json" ]]; then
+        echo "Error: Release not found: $release_id"
+        return 1
+    fi
+
+    # Derive the ordered environment sequence from the release's own
+    # `environments` array (set at create time, ordered).  NOTE: flowConfig
+    # lives at the top level of the releases config and is NOT exposed by the
+    # GET /api/releases list response, so we cannot replicate the server's
+    # enabled-stage filtering here.  We don't need to: for a forward/backward
+    # determination, index comparison within the full ordered `environments`
+    # array is correct — a disabled stage between current and target does not
+    # change their relative order, and the server independently rejects a `--to`
+    # that names a disabled stage with HTTP 400 ("Invalid or disabled
+    # environment").  Auto-advance (no --to) is always forward by server design.
+    local enabled_envs
+    enabled_envs=$(printf '%s' "$release_json" | jq -r \
+        '.environments // [] | .[]' \
+        2>/dev/null)
+
+    # Build the platforms list to promote
+    local platforms_to_promote
+    if [[ $opt_all -eq 1 ]]; then
+        platforms_to_promote=$(printf '%s' "$release_json" | jq -r \
+            '.platforms // {} | keys[]' 2>/dev/null)
+    else
+        platforms_to_promote="$opt_platform"
+    fi
+
+    if [[ -z "$platforms_to_promote" ]]; then
+        echo "Error: release has no platforms to promote"
+        return 1
+    fi
+
+    # Loop-scoped vars declared before the loop (k501: zsh local-in-loop stdout leak)
+    local promote_plat cur_env target_env cur_idx target_idx env_entry idx
+    local promote_response promote_code promote_body promote_curl_exit prev_env new_env
+    # k501: declared before the loop — re-declaring inside the per-platform
+    # loop would leak to stdout on the 2nd+ platform (--all / 400-path).
+    # (_kb_reason/cause/remedy, also consumed in the loop's 000 branch below,
+    # are already declared local earlier in this function — see the
+    # list_resp/list_code fetch above — so they are not re-declared here.)
+    local promote_payload err_msg
+    local any_promoted=0
+    local any_failed=0
+    # XACA-0395-006: same k501 rule — declare once before the loop.
+    local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
+
+    while IFS= read -r promote_plat; do
+        [[ -z "$promote_plat" ]] && continue
+
+        # Current environment for this platform
+        cur_env=$(printf '%s' "$release_json" | jq -r \
+            --arg p "$promote_plat" '.platforms[$p].environment // empty' 2>/dev/null)
+
+        # Determine target environment
+        if [[ -n "$opt_to" ]]; then
+            target_env="$opt_to"
+        else
+            # Auto: server will pick next enabled env; we just validate it's not
+            # already at the final position (server returns 400 in that case, we
+            # handle it below per-platform).
+            target_env=""
+        fi
+
+        # Forward-only check (only when --to is explicit AND we have enabled env list)
+        if [[ -n "$target_env" && -n "$enabled_envs" ]]; then
+            cur_idx=-1
+            target_idx=-1
+            idx=0
+            while IFS= read -r env_entry; do
+                [[ -z "$env_entry" ]] && continue
+                [[ "$env_entry" == "$cur_env" ]]    && cur_idx=$idx
+                [[ "$env_entry" == "$target_env" ]] && target_idx=$idx
+                idx=$(( idx + 1 ))
+            done <<< "$enabled_envs"
+
+            if [[ $target_idx -lt 0 ]]; then
+                echo "Error: '$target_env' is not an enabled environment for release $release_id"
+                any_failed=1
+                continue
+            fi
+            if [[ $cur_idx -ge 0 && $target_idx -le $cur_idx ]]; then
+                echo "Error: refusing backward/no-op promotion: $promote_plat is at $cur_env, cannot promote to $target_env"
+                any_failed=1
+                continue
+            fi
+        fi
+
+        # Build POST payload (promote_payload declared before the loop — k501)
+        if [[ -n "$target_env" ]]; then
+            promote_payload=$(jq -n \
+                --arg plat "$promote_plat" \
+                --arg env "$target_env" \
+                '{platform: $plat, targetEnvironment: $env}')
+        else
+            promote_payload=$(jq -n \
+                --arg plat "$promote_plat" \
+                '{platform: $plat}')
+        fi
+
+        # POST /api/releases/:id/promote
+        _kb_lcars_auth_args
+        promote_response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
+            --max-time 5 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "${_KB_LCARS_AUTH_ARGS[@]}" \
+            -d "$promote_payload" \
+            "http://localhost:${port}/api/releases/${release_id}/promote" 2>/dev/null)
+        promote_curl_exit=$?
+
+        promote_code=$(printf '%s' "$promote_response" | tail -n1)
+        promote_body=$(printf '%s' "$promote_response" | sed '$d')
+
+        if [[ "$promote_code" == "200" ]]; then
+            prev_env=$(printf '%s' "$promote_body" | jq -r '.previousEnvironment // empty')
+            new_env=$(printf '%s' "$promote_body" | jq -r '.newEnvironment // empty')
+            echo "  $promote_plat: $prev_env -> $new_env"
+            any_promoted=1
+        elif [[ "$promote_code" == "400" ]]; then
+            # Already at final env or other business-logic rejection
+            # (err_msg declared before the loop — k501)
+            err_msg=$(printf '%s' "$promote_body" | jq -r '.error // .message // empty' 2>/dev/null)
+            echo "  $promote_plat: skipped — ${err_msg:-HTTP 400}"
+            any_failed=1
+        elif [[ "$promote_code" == "404" ]]; then
+            echo "  $promote_plat: Error — Release or platform not found (HTTP 404)"
+            any_failed=1
+        elif [[ "$promote_code" == "000" ]]; then
+            # curl reports %{http_code}=000 for ANY connection-phase failure
+            # (refused, timed out, DNS, reset) — decode curl's own exit code
+            # instead of asserting a single cause for all of them (see
+            # _kb_curl_failure_reason; XACA-1099).
+            _kb_reason=$(_kb_curl_failure_reason "$promote_curl_exit" "$port")
+            cause="${_kb_reason%%$'\n'*}"
+            remedy="${_kb_reason#*$'\n'}"
+            echo "Error: LCARS server on port $port — $cause."
+            echo "  $remedy"
+            return 1
+        else
+            echo "  $promote_plat: Error — HTTP $promote_code"
+            [[ -n "$promote_body" ]] && echo "    $promote_body"
+            any_failed=1
+        fi
+    done <<< "$platforms_to_promote"
+
+    if [[ $any_promoted -eq 1 ]]; then
+        echo "✓ Promoted release: $release_id"
+        echo "  Team: $team (LCARS port $port)"
+    fi
+
+    if [[ $any_promoted -eq 0 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# XACA-0729: Demote all platforms of a release back to the PLANNED holding state.
+# Usage: kb-release-plan <release-id>
+#
+# Calls POST /api/releases/<id>/plan which resets every platform's environment
+# to "PLANNED" and appends an audit history entry.  Useful when a release was
+# accidentally created in an ACTIVE state (defaultEnvironments drift) or needs
+# to be pulled back to the holding queue before re-promotion begins.
+kb-release-plan() {
+    local release_id="${1-}"
+
+    case "${release_id-}" in
+        --help|-h|"")
+            echo "Usage: kb-release plan <release-id>"
+            echo ""
+            echo "Demote all platforms of a release back to the PLANNED holding state."
+            echo ""
+            echo "  release-id: Release ID (e.g., REL-2026-Q1-001)"
+            echo ""
+            echo "Example:"
+            echo "  kb-release plan REL-2026-Q1-007"
+            return 0
+            ;;
+    esac
+
+    # Resolve team context and LCARS port (mirrors kb-release-promote pattern)
+    local context team port
+    context=$(_kb_detect_context 2>/dev/null)
+    team="${context%%:*}"
+
+    if [[ -z "$team" || "$team" == "ERROR:"* ]]; then
+        echo "Error: Could not determine team context" >&2
+        return 1
+    fi
+
+    port=$(_kb_team_lcars_port "$team") || {
+        echo "Warning: no LCARS port known for team '$team', falling back to 8080" >&2
+        port="8080"
+    }
+
+    # POST /api/releases/<id>/plan — no body required
+    local response code body curl_exit
+    local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
+    _kb_lcars_auth_args
+    response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
+        --max-time 5 \
+        -X POST \
+        -H "Content-Type: application/json" \
+        "${_KB_LCARS_AUTH_ARGS[@]}" \
+        -d '{}' \
+        "http://localhost:${port}/api/releases/${release_id}/plan" 2>/dev/null)
+    curl_exit=$?
+    code=$(printf '%s' "$response" | tail -n1)
+    body=$(printf '%s' "$response" | sed '$d')
+
+    case "$code" in
+        200)
+            local platforms
+            platforms=$(printf '%s' "$body" | jq -r '.platforms // [] | join(", ")' 2>/dev/null)
+            echo "✓ Release $release_id reset to PLANNED"
+            echo "  Team: $team (LCARS port $port)"
+            [[ -n "$platforms" ]] && echo "  Platforms: $platforms"
+            return 0
+            ;;
+        000)
+            # curl reports %{http_code}=000 for ANY connection-phase failure
+            # (refused, --max-time expiry, DNS, reset) — decode curl's own
+            # exit code rather than asserting one of them (XACA-1099).
+            # NOTE: this site is a `case` label, not a [[ == "000" ]] test,
+            # so the quoted-string grep that inventoried the other six sites
+            # did not match it. Cover unquoted case labels when auditing.
+            local _kb_reason cause remedy
+            _kb_reason=$(_kb_curl_failure_reason "$curl_exit" "$port")
+            cause="${_kb_reason%%$'\n'*}"
+            remedy="${_kb_reason#*$'\n'}"
+            echo "Error: LCARS server on port $port — $cause"
+            echo "  $remedy"
+            return 1
+            ;;
+        404)
+            echo "Error: Release not found: $release_id (HTTP 404)"
+            [[ -n "$body" ]] && echo "  $body"
+            return 1
+            ;;
+        *)
+            echo "Error: HTTP $code"
+            [[ -n "$body" ]] && echo "  $body"
+            return 1
+            ;;
+    esac
+}
+
 # Unified release command
 # Usage: kb-release <subcommand> [args...]
 kb-release() {
