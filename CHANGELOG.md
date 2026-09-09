@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.8] - 2026-09-09
 - XACA-0853 (review round 3 follow-ups, PR #846): four review/test findings closed, two of which had
   a correction that is the OPPOSITE of the obvious one.
   * `cc-aliases.sh`'s 7 `cc-dns-*` shortcuts resolved `$AITEAMFORGE_DIR/dns-framework/scripts/prompts/`,
@@ -3750,7 +3752,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.7...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.8...HEAD
+[0.20.8]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.7...v0.20.8
 [0.20.7]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.6...v0.20.7
 [0.20.6]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.5...v0.20.6
 [0.20.5]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.4...v0.20.5
