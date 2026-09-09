@@ -1945,6 +1945,7 @@ _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
 iterm2_tab_title_prefix.py
+iterm2_claude_active_watch.py
 kb-init-team-guard.sh
 kb-init-team
 remote-tmux-attach.sh

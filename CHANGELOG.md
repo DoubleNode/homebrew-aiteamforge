@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1144-006: ship `iterm2_claude_active_watch.py` — the window-scoped watcher
+  that makes the "C " indicator work for REMOTE (connect-script) teams. Added to
+  `share/scripts/` and to `_xaca0673_mandatory_materialize_basenames()` so UPGRADED
+  boxes get it too (fresh installs are covered by the `share/scripts/*` bulk copy).
+  Caught in verification: the mechanism had been built and wired into the connect
+  templates, which invoke it as `$AITEAMFORGE_DIR/scripts/iterm2_claude_active_watch.py`,
+  but it was in NO delivery site — so on every consumer it resolved to a path that
+  could not exist and the whole remote feature was inert. The connect template
+  guards on `-f`, so it degraded silently rather than failing loudly, which is
+  precisely why it would not have been noticed. This is the same never-shipped
+  omission as XACA-0214 / 0231 / 0223, very nearly repeated inside the ticket
+  raised to fix it. Correct list verified: the file is scripts/-destined, so
+  `_xaca0673` IS right here (contrast `iterm2_badge_helper.sh`, which is
+  root-destined and uses the aux map + `_xaca1143` list).
 - XACA-1140: hand-ported `_kb_val_local_sig` (a recursive, content-based
   change-probe signature over the LOCAL knowledge root, XACA-0754 PII-team
   knowledge) into both shipped tap copies —
