@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1140: hand-ported `_kb_val_local_sig` (a recursive, content-based
+  change-probe signature over the LOCAL knowledge root, XACA-0754 PII-team
+  knowledge) into both shipped tap copies —
+  `share/templates/kanban/kanban-helpers.template.sh` (plus the `kb-sweep`
+  LOCAL-arm wiring that calls it and records its result) and
+  `share/templates/aliases/kanban-aliases.sh` (helper only, no `kb-sweep()`
+  in that file). Closes the XACA-0810/0811 co-change + roster-delta gate
+  drift the canonical fix introduced. The LOCAL knowledge root is never a
+  git repo, so canonical's `_kb_val_global_sig` porcelain-diff approach
+  cannot be reused there; without this port a consumer holding a
+  `~/knowledge-local` pays the full ~75s `kb-knowledge-validate --changed`
+  cost on every `kb-sweep`, unconditionally. These are hand-ported
+  TEMPLATES (not `sync-tap.sh` mirrors) — same convention as XACA-1119-003's
+  `_kb_val_global_sig` port.
 - XACA-1144 (FAULT C): ported the XACA-0223 deterministic clear of the iTerm2 tab
   "C " prefix into shipped `cc-aliases.sh`. Canonical `claude_code_cc_aliases.sh`
   and shipped `cc-aliases.sh` are independently maintained with no `sync-tap.sh`

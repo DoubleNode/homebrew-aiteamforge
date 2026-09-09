@@ -4960,6 +4960,7 @@ kb-sweep() {
     local kv_global_root kv_local_root kv_project_path kv_should_invoke=false
     local kv_project_needs_probe=false kv_project_sig=""
     local kv_global_sig="" kv_global_needs_probe=false
+    local kv_local_sig=""
     kv_global_root=$(_kb_knowledge_global_root 2>/dev/null)
     kv_local_root=$(_kb_knowledge_local_root 2>/dev/null)
 
@@ -5018,7 +5019,28 @@ kb-sweep() {
                         kv_should_invoke=true
                     fi
                 else
-                    kv_should_invoke=true
+                    # XACA-1140 (hand-ported from canonical — not
+                    # sync-tap.sh mirror-mapped): this used to be an
+                    # unconditional kv_should_invoke=true — the LOCAL
+                    # knowledge root is never a git repo on the fleet
+                    # (`git -C "$kv_local_root" rev-parse
+                    # --is-inside-work-tree` fails here unconditionally),
+                    # so this branch fired on every single kb-sweep,
+                    # forever, whenever the root existed and was
+                    # readable — the last remaining always-true trigger
+                    # for the ~77s kb-knowledge-validate --changed cost
+                    # (post-XACA-1119, which fixed the GLOBAL arm's
+                    # identical shape). _kb_val_local_sig (above, near
+                    # _kb_val_global_sig) is a recursive, content-based
+                    # signature over this root — captured ONCE here,
+                    # before the invoke ever runs, and threaded through
+                    # unchanged to the post-invoke record call below (the
+                    # same XACA-0991-019 TOCTOU contract the global/project
+                    # arms already follow: never recompute at record time).
+                    kv_local_sig=$(_kb_val_local_sig "$kv_local_root") || kv_local_sig=""
+                    if [[ -z "$kv_local_sig" ]] || ! _kb_val_mtime_probe_is_clean "$kv_local_root" "$kv_local_sig"; then
+                        kv_should_invoke=true
+                    fi
                 fi
                 ;;
         esac
@@ -5157,6 +5179,19 @@ kb-sweep() {
             # kb-sweep's verdict.
             if [[ -n "$kv_project_path" ]] && $kv_project_needs_probe && [[ -n "$kv_project_sig" ]]; then
                 _kb_val_mtime_probe_record "$kv_project_path" "$kv_rc" "$kv_project_sig"
+            fi
+
+            # XACA-1140 (hand-ported from canonical): record this run's
+            # local-tier outcome against $kv_local_sig — the signature
+            # captured ONCE, before this invoke ever started (see the
+            # capture site in the local `case` above), never a fresh
+            # recompute here. Same TOCTOU contract as the global- and
+            # project-tier record calls above. $kv_local_sig is only ever
+            # non-empty when the non-git branch above actually ran and
+            # computed one, so guarding on it alone (no separate
+            # "needs_probe" flag) is sufficient. Best-effort and silent.
+            if [[ -n "$kv_local_root" ]] && [[ -n "$kv_local_sig" ]]; then
+                _kb_val_mtime_probe_record "$kv_local_root" "$kv_rc" "$kv_local_sig"
             fi
         fi
     fi
@@ -11463,9 +11498,68 @@ _kb_val_global_sig() {
     } | _kb_val_probe_hash
 }
 
+# XACA-1140 (hand-ported from canonical dev-team/kanban-helpers.sh — not
+# sync-tap.sh mirror-mapped, same "ported from canonical" convention used
+# above for XACA-0991-019/020/XACA-1119-003): local-tier change-probe
+# signature. The LOCAL knowledge root (XACA-0754 PII-team knowledge) is
+# never a git repo, so _kb_val_global_sig (above) cannot be reused as-is —
+# there is no porcelain to lean on. _kb_val_mtime_signature (further above)
+# cannot be reused either: it globs top-level only and returns a hardcoded
+# EMPTY sentinel when that glob matches nothing, which on a root whose
+# content is entirely nested (measured: 0 top-level .md, 11 nested) would
+# cache EMPTY+result=0 forever — the exact always-"clean" trigger this
+# ticket exists to close. Neither primitive is reused, extended, or
+# modified; this is a SEPARATE function for a SEPARATE, non-git, recursive
+# tier.
+#
+# Echoes one sha256 over (version token + sha256 content of every *.md
+# file found ANYWHERE under <root>, INDEX.md included), or returns 1 with
+# empty stdout (uncomputable -> invoke, never "clean"). Content-hashed, not
+# size|mtime, for the same same-second-rewrite reason as the global-tier
+# signature. Symlinked *.md files are followed (matches the validator's
+# own `[[ -f ]]`-based entry collection); if a symlink resolving to a
+# DIRECTORY is found anywhere under <root>, this function returns 1
+# (uncertain -> invoke) rather than risk a silent blind spot — `**/` does
+# not descend into a symlinked directory, so simply following it would
+# leave the signature blind to whatever lives on the other side. See
+# canonical's XACA-1140 header comment (immediately above _kb_val_local_sig
+# there) for the full reasoning and the [Review]-round fixes this already
+# incorporates.
+_kb_val_local_sig() {
+    setopt LOCAL_OPTIONS NO_NOMATCH BARE_GLOB_QUAL
+    local root="${1%/}"
+    local out e
+    local -a allentries files
+
+    [[ -n "$root" && -d "$root" && -r "$root" ]] || return 1
+
+    allentries=("${root}"/**/*(N))
+
+    files=()
+    for e in "${allentries[@]}"; do
+        if [[ -L "$e" && -d "$e" ]]; then
+            return 1
+        fi
+        [[ -f "$e" ]] || continue
+        [[ "${e:t}" == *.md ]] || continue
+        files+=("$e")
+    done
+
+    if (( ${#files[@]} )); then
+        out=$(print -rN -- "${files[@]}" | _kb_val_multi_file_hash) || return 1
+    else
+        out=""
+    fi
+
+    {
+        print -r -- "kbval-local-sig-v1"
+        print -r -- "$out" | LC_ALL=C sort
+    } | _kb_val_probe_hash
+}
+
 # _kb_val_multi_file_hash — reads NUL-separated paths on stdin, echoes
 # "<sha256>  <path>" per file. Two-tier fallback mirrors _kb_val_probe_hash.
-# Used only by _kb_val_global_sig, above.
+# Used by _kb_val_global_sig and _kb_val_local_sig, above.
 _kb_val_multi_file_hash() {
     if command -v shasum >/dev/null 2>&1; then
         xargs -0 shasum -a 256 2>/dev/null
