@@ -52,6 +52,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   guards. The narrower range excluded the two slowest of four measurements, so the number
   shipping to consumers contradicted the measurements behind it. Comment-only.
 
+- XACA-1143-006: registered `test-xaca-1143-worktree-helpers-materialize.sh` in
+  `tests/ci-manifest` as `plain-shell`. Without a manifest entry the completeness gate
+  (`ci-manifest-check.sh`) fails the build, and — more to the point — an unregistered
+  test is never executed by the manifest-driven loop, which is indistinguishable from a
+  passing one. The suite runs on macos-latest, where `zsh` is present, so the
+  `zsh -ic` shell-acceptance assertion genuinely executes rather than being skipped.
 - XACA-1143-002/006: `update_aux_scripts()` (aiteamforge-upgrade.sh) could never CREATE
   `$AITEAMFORGE_DIR/worktree-helpers.sh` on upgrade — only refresh it. The file is already
   listed in `_xaca0608_aux_script_map` (root-destined), but the per-entry
