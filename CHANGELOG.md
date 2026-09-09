@@ -6,6 +6,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-0853 (review round 3 follow-ups, PR #846): four review/test findings closed, two of which had
+  a correction that is the OPPOSITE of the obvious one.
+  * `cc-aliases.sh`'s 7 `cc-dns-*` shortcuts resolved `$AITEAMFORGE_DIR/dns-framework/scripts/prompts/`,
+    but `install-team.sh` copies prompts to `$AITEAMFORGE_DIR/<team>/scripts/prompts/` — its own comment
+    at line 1202 states that contract. Pre-existing since 2025, and harmless while dns ran only on the
+    dev machine where that path existed; this ticket makes it reachable on a consumer, where all 7
+    shortcuts would have hit "prompt file not found" and launched persona-less. Repointed to match the
+    other nine teams; each of the 7 cross-checked against a shipped file.
+  * The shipped `dns-connect.sh`/`dns-disconnect.sh` call `resolve_lcars_port_fallback "dns-framework"
+    8180 20`, which contradicts `dns.conf`'s `TEAM_ID=dns` and `RANGE=10`. Flagged as two sources of
+    truth; it is not. The helper computes `base + cksum(input) % range`, so the input STRING and range
+    decide the port: `("dns-framework",8180,20)` -> **8180** (canonical), `("dns",8180,10)` -> **8187**.
+    The apparent inconsistency is LOAD-BEARING and harmonizing it would silently move dns's LCARS port.
+    Annotated both scripts with the measurement; new T11 recomputes the arithmetic from whatever the
+    shipped scripts actually pass, so the guard cannot decay into restating the constant.
+  * New T12 asserts dns's shipped prompts stay byte-identical to canonical, mitigating the fact that
+    dns's canonical prompts sit at `dns-framework/scripts/prompts/` while the other nine use
+    `<team-id>/scripts/prompts/` — a future mirror globbing the latter would silently skip dns.
+    Relocating canonical was rejected: `dns-startup.sh` and all 8 station scripts resolve under
+    `dns-framework/`. Measured while writing it: 5 prompts across ios/finance ARE currently drifted
+    between canonical and tap, which is the rot dns is now guarded against.
+  * Corrected the test header's CONTRACT item 4, which still described the reverted round-1 behaviour
+    and directly contradicted what T4 now asserts.
+  14 assertions, all green, each demonstrated to fail under deliberate mutation.
 - XACA-0853 ([Review] finding, round 2, PR #846): dns shipped 7 personas and ZERO prompt files — the
   only one of ten teams in that state; the other nine all ship both. Without a prompt file
   `cc-aliases.sh`'s launcher falls through to plain `claude` and the agent runs with NO PERSONA:

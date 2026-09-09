@@ -28,7 +28,11 @@
 #   2. It declares all 7 dns agents, each with a 4-window list — the data whose
 #      absence XACA-0862 warned would ship broken tmux session names.
 #   3. dns appears in share/teams/registry.json (the installable catalog).
-#   4. The tap ships all four dns lifecycle scripts plus the 8 station scripts.
+#   4. The tap ships dns-connect.sh / dns-disconnect.sh and NOTHING ELSE for dns.
+#      dns is a FLAT team, and flat teams ship no startup/shutdown/station
+#      scripts — those are rendered/generated at install time. An earlier
+#      revision of this ticket shipped them and would have broken dns on the
+#      first upgrade; T4 now asserts the negative permanently.
 #   5. _xaca0483_install_script is defined exactly ONCE, and BEFORE
 #      _render_connect_disconnect — the ordering bug that would have made a
 #      hand-authored connect script die with "command not found" on the
@@ -353,6 +357,84 @@ else
             [ -s "$_t10_dir/dns-${_a}-prompt.txt" ] || _t10_empty="$_t10_empty $_a"
         done
         if [ -n "$_t10_empty" ]; then test_fail "empty prompt file(s):$_t10_empty"; else test_pass; fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# T11 — the shipped connect/disconnect fallback must still resolve to dns's
+# canonical LCARS port, 8180.
+#
+# resolve_lcars_port_fallback computes base + cksum(input) % range, so the input
+# STRING and the range decide the port. dns passes ("dns-framework", 8180, 20),
+# which does NOT match dns.conf's TEAM_ID or its RANGE=10 — and that mismatch is
+# LOAD-BEARING, not a bug. Measured: ("dns-framework",8180,20) -> 8180 (correct);
+# ("dns",8180,10) -> 8187 (wrong). A reviewer reasonably flagged the two as
+# contradictory sources of truth; "harmonizing" them would silently move dns off
+# its canonical port. This test recomputes the arithmetic from whatever the
+# shipped scripts actually pass, so the guard cannot rot into a restatement.
+# ---------------------------------------------------------------------------
+start_test "T11 shipped dns connect/disconnect fallback still resolves to canonical port 8180"
+_t11_err=""
+for _f in "$TEAMS_SCRIPTS/dns-connect.sh" "$TEAMS_SCRIPTS/dns-disconnect.sh"; do
+    [ -f "$_f" ] || { _t11_err="$_t11_err missing:$(basename "$_f")"; continue; }
+    _t11_args="$(grep -o 'resolve_lcars_port_fallback "[^"]*" [0-9]* [0-9]*' "$_f" | head -1)"
+    if [ -z "$_t11_args" ]; then
+        _t11_err="$_t11_err no-fallback-call:$(basename "$_f")"
+        continue
+    fi
+    _t11_in="$(printf '%s' "$_t11_args" | sed -E 's/.*"([^"]*)".*/\1/')"
+    _t11_base="$(printf '%s' "$_t11_args" | awk '{print $(NF-1)}')"
+    _t11_range="$(printf '%s' "$_t11_args" | awk '{print $NF}')"
+    _t11_h="$(printf '%s\n' "$_t11_in" | cksum | cut -d' ' -f1)"
+    _t11_port=$(( _t11_base + _t11_h % _t11_range ))
+    [ "$_t11_port" = "8180" ] || \
+        _t11_err="$_t11_err $(basename "$_f") resolves to $_t11_port (input='$_t11_in' base=$_t11_base range=$_t11_range), expected 8180"
+done
+if [ -z "$_t11_err" ]; then test_pass; else test_fail "$_t11_err"; fi
+
+# ---------------------------------------------------------------------------
+# T12 — dns's shipped prompts must stay byte-identical to their canonical source.
+#
+# dns's canonical prompts live at dns-framework/scripts/prompts/ while the other
+# nine teams use <team-id>/scripts/prompts/. That divergence is real and is the
+# same enumeration-blindness class this whole ticket is about: a future mirror
+# that globs "<team>/scripts/prompts" would silently SKIP dns, and the tap copies
+# would rot with nothing reporting it. Relocating the canonical files was
+# considered and rejected here — dns-startup.sh and all 8 station scripts resolve
+# paths under dns-framework/, so a move is its own change with its own blast
+# radius, not a drive-by.
+#
+# This assertion is the mitigation that does fit: it converts "silently skipped"
+# into "loudly caught". If any future mirror misses dns, or someone edits one
+# side only, the copies diverge and this fails. Measured at authoring time: all
+# 7 are byte-identical. (For contrast, 5 prompts across ios/finance ARE currently
+# drifted between canonical and tap — the exact rot this guards dns against.)
+#
+# SKIPPED, reported, never silently passed, when the dev-team side is absent.
+# ---------------------------------------------------------------------------
+start_test "T12 dns shipped prompts are byte-identical to canonical dns-framework/scripts/prompts"
+_t12_canon="$TAP_ROOT/../dns-framework/scripts/prompts"
+if [ ! -d "$_t12_canon" ]; then
+    echo "     SKIP: dev-team side not present (consumer checkout) — canonical prompts not checkable here"
+else
+    _t12_err=""
+    _t12_n=0
+    for _f in "$TAP_ROOT/share/personas/dns/prompts/"*.txt; do
+        [ -e "$_f" ] || continue
+        _t12_n=$((_t12_n + 1))
+        _t12_b="$(basename "$_f")"
+        if [ ! -f "$_t12_canon/$_t12_b" ]; then
+            _t12_err="$_t12_err no-canonical:$_t12_b"
+        elif ! cmp -s "$_t12_canon/$_t12_b" "$_f"; then
+            _t12_err="$_t12_err DRIFTED:$_t12_b"
+        fi
+    done
+    if [ "$_t12_n" -eq 0 ]; then
+        test_fail "no shipped prompts found — assertion would be vacuous"
+    elif [ -n "$_t12_err" ]; then
+        test_fail "$_t12_err"
+    else
+        test_pass
     fi
 fi
 

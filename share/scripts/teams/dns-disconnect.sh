@@ -33,6 +33,14 @@ fi
 # cksum band fallback — shared resolve_lcars_port_fallback (XACA-0672) keeps this byte-
 # identical to dns-startup.sh / dns-connect.sh. In scope when the helper sourced above.
 if [[ -z "$LCARS_PORT" ]] && typeset -f resolve_lcars_port_fallback >/dev/null 2>&1; then
+    # XACA-0853: the literal "dns-framework" and range 20 below are LOAD-BEARING and
+    # must NOT be "harmonized" with dns.conf's TEAM_LCARS_PORT_BASE=8180 / RANGE=10.
+    # resolve_lcars_port_fallback computes base + cksum(input) % range, so the input
+    # STRING and the range determine the port, not just the base. Measured:
+    #     "dns-framework" 8180 20  -> 8180   <-- canonical, matches aiteamforge_paths.py
+    #     "dns"           8180 10  -> 8187   <-- what "consistency" would produce
+    # The mismatch with TEAM_ID and with the conf's range looks like a bug and is not.
+    # Changing either argument silently moves dns's LCARS port off 8180.
     LCARS_PORT="$(resolve_lcars_port_fallback "dns-framework" 8180 20)"
 fi
 

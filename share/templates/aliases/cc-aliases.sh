@@ -428,31 +428,31 @@ cc-{{ORG_SLUG}}-helm() {
 # ─────────────────────────────────────────────────────────────────────────────
 cc-dns-command() {
     export CLAUDE_DNS_THEME="LD-COMMAND"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-command-prompt.txt"
+    _cc_launch "$AITEAMFORGE_DIR/dns/scripts/prompts/dns-command-prompt.txt"
 }
 cc-dns-bugbay() {
     export CLAUDE_DNS_THEME="LD-BUGBAY"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-bugbay-prompt.txt"
+    _cc_launch "$AITEAMFORGE_DIR/dns/scripts/prompts/dns-bugbay-prompt.txt"
 }
 cc-dns-testing() {
     export CLAUDE_DNS_THEME="LD-TESTING"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-testing-prompt.txt"
+    _cc_launch "$AITEAMFORGE_DIR/dns/scripts/prompts/dns-testing-prompt.txt"
 }
 cc-dns-build() {
     export CLAUDE_DNS_THEME="LD-BUILD"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-build-prompt.txt"
+    _cc_launch "$AITEAMFORGE_DIR/dns/scripts/prompts/dns-build-prompt.txt"
 }
 cc-dns-refactor() {
     export CLAUDE_DNS_THEME="LD-REFACTOR"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-refactor-prompt.txt"
+    _cc_launch "$AITEAMFORGE_DIR/dns/scripts/prompts/dns-refactor-prompt.txt"
 }
 cc-dns-apidesign() {
     export CLAUDE_DNS_THEME="LD-APIDESIGN"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-apidesign-prompt.txt"
+    _cc_launch "$AITEAMFORGE_DIR/dns/scripts/prompts/dns-apidesign-prompt.txt"
 }
 cc-dns-docs() {
     export CLAUDE_DNS_THEME="LD-DOCS"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-docs-prompt.txt"
+    _cc_launch "$AITEAMFORGE_DIR/dns/scripts/prompts/dns-docs-prompt.txt"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
