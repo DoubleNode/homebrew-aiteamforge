@@ -21,6 +21,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   command. Same defect class as XACA-1090. Verified in a sandboxed fake
   `$HOME`/`$AITEAMFORGE_DIR` for both the consumer (`[BLOCKED]`) and dev
   (`[GAP]`, real fix path) cases.
+- XACA-1144-016/017/018/019 (PR #852 protected-gate findings): `share/scripts/iterm2_claude_active_watch.py`
+  and `share/templates/team-connect-parametric.sh.template` mirrors updated to
+  match the canonical fixes. (018) an unexpected exception in `_watch_session`
+  now discards the session from its tab's active-set instead of leaving the
+  "C " prefix stuck on. (017) a SIGTERM handler in `_main` now reverts every
+  prefixed tab before the process exits, covering a killed-outright watcher
+  (socket drop, sleep/wake) that 018 alone does not — the same stuck-on
+  failure family XACA-0223 fixed locally, now closed on the remote path too.
+  (016) `base_label` is re-derived from the tab's current `titleOverride` at
+  every 0->1 activation edge so a manual rename made while unprefixed is
+  picked up instead of lost. (019) the watcher-pidfile slug in the template
+  now rejects a `HOST` containing `/` before it becomes a filesystem path
+  component. See the canonical dev-team CHANGELOG for the full writeup and
+  the design rationale for why 019 does NOT reuse `_validate_ident` (charset
+  excludes `@`, present in every legitimate slug).
 - XACA-1144 (PR #852 `upgrade-suites` failure): renamed the connect/disconnect
   templates' `_watcher_key` variable to `_watcher_slug`. XACA-1120's guard
   scans shipped `*.template` files for credential-shaped assignments with a

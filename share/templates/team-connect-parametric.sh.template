@@ -992,6 +992,22 @@ if has_iterm_gui; then
     # ends with "_@_<host>" — the exact two predicates
     # {{TEAM_ID}}-disconnect.sh's AppleScript window matcher already uses.
     _watcher_slug=$(printf '%s' "$ITERM_WINDOW_NAME" | tr ' ' '_')
+    # XACA-1144-019: tr above only strips spaces. $ITERM_WINDOW_NAME embeds
+    # $HOST verbatim (see "${INSTANCE} @ ${HOST}" above), and HOST is a raw
+    # CLI arg that was never restricted to a safe charset — unlike
+    # GROUP/PROJECT, it was only ever used as an SSH/curl argument until
+    # this watcher started using it as a filesystem path component. NOTE:
+    # this is deliberately NOT routed through _validate_ident — that
+    # function's charset (letters/digits/'.'/'-'/'_') excludes '@', which
+    # every legitimate slug contains (the literal "_@_" from "<instance> @
+    # <host>"), so reusing it verbatim would reject every real connection.
+    # The one actual danger is '/' turning ".pid" from a filename suffix
+    # into a path escape out of $WATCHER_DIR (e.g. HOST="../../etc/foo");
+    # reject exactly that.
+    if [[ "$_watcher_slug" == */* ]]; then
+        echo "  ✗ Invalid host '${HOST}': must not contain '/' (would place the watcher pidfile outside \$WATCHER_DIR)." >&2
+        exit 2
+    fi
     WATCHER_PIDFILE="$WATCHER_DIR/${_watcher_slug}.pid"
     _watcher_already_running=false
     if [[ -f "$WATCHER_PIDFILE" ]]; then

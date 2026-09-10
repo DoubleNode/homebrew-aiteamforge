@@ -78,6 +78,8 @@ REAL_PREFIX_HELPER="$DEV_TEAM_ROOT_REAL/scripts/iterm2_tab_title_prefix.py"
 SHIPPED_BADGE_HELPER="$TAP_ROOT/share/scripts/iterm2_badge_helper.sh"
 SHIPPED_PREFIX_HELPER="$TAP_ROOT/share/scripts/iterm2_tab_title_prefix.py"
 SHIPPED_WATCHER="$TAP_ROOT/share/scripts/iterm2_claude_active_watch.py"
+REAL_WATCHER="$DEV_TEAM_ROOT_REAL/scripts/iterm2_claude_active_watch.py"
+REAL_WATCHER_DIR="$DEV_TEAM_ROOT_REAL/scripts"
 SHIPPED_UPDATE_CLAUDE_AGENT="$TAP_ROOT/share/scripts/update_claude_agent.sh"
 SHIPPED_CC_ALIASES="$TAP_ROOT/share/templates/aliases/cc-aliases.sh"
 KANBAN_SESSION_START="$DEV_TEAM_ROOT_REAL/kanban-hooks/kanban-session-start.py"
@@ -1098,6 +1100,521 @@ for _d_mode in activate clear-absent clear-to-zero; do
     fi
 done
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION E — XACA-1144-016/017/018/019: the four protected-gate findings from
+# PR #852 review (018 core defect, 017 the same failure family from the
+# process-death side, 016 a rename-loss defect, 019 a pidfile path-escape
+# hardening). Sections A-D2 cover DELIVERY and ordering; none of them exercise
+# these four behaviours, which live entirely inside iterm2_claude_active_watch.py's
+# internal coroutines and team-connect-parametric.sh.template's watcher-slug
+# construction. Every assertion here carries a RED proof: a scratch copy with
+# just that one fix mechanically reverted (via the "--- XACA-1144-0NN BEGIN/END
+# ---" markers in the watcher, or an exact marker-string removal in the
+# template) run through the IDENTICAL harness, which MUST reproduce the
+# original bug — proving the positive assertion can fail, not just pass by
+# construction (same discipline as Section D's line-swap RED proofs).
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── E: build the three watcher RED fixtures by mechanically stripping each
+#    fix's marked block from a scratch copy of the REAL (canonical) watcher.
+#    Deriving these from the live file (rather than a stored duplicate) means
+#    they can never silently go stale relative to the current source. ──
+mkdir -p "$TEST_TMP_DIR/e-red-018/scripts" "$TEST_TMP_DIR/e-red-016/scripts" "$TEST_TMP_DIR/e-red-017/scripts"
+cp "$REAL_WATCHER" "$TEST_TMP_DIR/e-red-018/scripts/iterm2_claude_active_watch.py"
+cp "$REAL_WATCHER" "$TEST_TMP_DIR/e-red-016/scripts/iterm2_claude_active_watch.py"
+cp "$REAL_WATCHER" "$TEST_TMP_DIR/e-red-017/scripts/iterm2_claude_active_watch.py"
+[ -f "$REAL_WATCHER_DIR/iterm2_venv_bootstrap.py" ] && cp "$REAL_WATCHER_DIR/iterm2_venv_bootstrap.py" "$TEST_TMP_DIR/e-red-018/scripts/" "$TEST_TMP_DIR/e-red-016/scripts/" "$TEST_TMP_DIR/e-red-017/scripts/" 2>/dev/null
+
+perl -0777 -pi -e 's/        # --- XACA-1144-018 BEGIN ---\n.*?        # --- XACA-1144-018 END ---\n        return\n/        return\n/s' "$TEST_TMP_DIR/e-red-018/scripts/iterm2_claude_active_watch.py"
+perl -0777 -pi -e 's/            # --- XACA-1144-016 BEGIN ---\n            state\["base_label"\] = await _derive_base_label\(state\["tab"\], state\["base_label"\]\)\n            # --- XACA-1144-016 END ---\n/            /s' "$TEST_TMP_DIR/e-red-016/scripts/iterm2_claude_active_watch.py"
+perl -0777 -pi -e 's/    # --- XACA-1144-017 BEGIN ---\n.*?    # --- XACA-1144-017 END ---\n/    await asyncio.gather(*watch_tasks, return_exceptions=True)\n/s' "$TEST_TMP_DIR/e-red-017/scripts/iterm2_claude_active_watch.py"
+
+test_start "E sanity: 018/016/017 marker blocks each stripped exactly once from the RED fixtures"
+_E_MARKERS_REMAINING=0
+for _n in 018 016 017; do
+    if grep -q "XACA-1144-${_n} BEGIN" "$TEST_TMP_DIR/e-red-${_n}/scripts/iterm2_claude_active_watch.py" 2>/dev/null; then
+        _E_MARKERS_REMAINING=$((_E_MARKERS_REMAINING + 1))
+    fi
+done
+if [ "$_E_MARKERS_REMAINING" -eq 0 ]; then
+    test_pass
+else
+    test_fail "${_E_MARKERS_REMAINING} of 3 RED fixtures still contain their marker block — the strip pattern is stale relative to the current source"
+fi
+
+for _n in 018 016 017; do
+    test_start "E sanity: RED fixture ${_n} still parses as valid Python after the strip"
+    if python3 -m py_compile "$TEST_TMP_DIR/e-red-${_n}/scripts/iterm2_claude_active_watch.py" 2>"$TEST_TMP_DIR/e-red-${_n}-compile.err"; then
+        test_pass
+    else
+        test_fail "py_compile failed: $(cat "$TEST_TMP_DIR/e-red-${_n}-compile.err")"
+    fi
+done
+
+# ── E1 (018) / E2 (016): direct coroutine-level tests. Stubs the whole
+#    `iterm2` module and calls the watcher's internal _apply_transition /
+#    _watch_session coroutines directly with fake Tab/Session objects — no
+#    real iTerm2, no real asyncio event surprises, full control over exactly
+#    which line raises. See the module docstring's "Termination and crash
+#    recovery" section for what each fix is supposed to guarantee. ──
+cat > "$TEST_TMP_DIR/e_direct_tests.py" <<'E1E2EOF'
+#!/usr/bin/env python3
+"""XACA-1144-016/018 direct coroutine tests. argv[1] = directory containing
+iterm2_claude_active_watch.py to test (canonical or a reverted scratch copy).
+Prints PASS/FAIL per assertion; exits 0 iff every assertion passed."""
+import asyncio
+import sys
+
+WATCH_DIR = sys.argv[1]
+sys.path.insert(0, WATCH_DIR)
+import iterm2_claude_active_watch as watcher  # noqa: E402
+
+failures = []
+
+
+def check(label, cond, detail=""):
+    status = "PASS" if cond else "FAIL"
+    print(f"{status}: {label}" + (f" — {detail}" if detail and not cond else ""))
+    if not cond:
+        failures.append(label)
+
+
+class FakeTab:
+    def __init__(self, title):
+        self._title = title
+
+    async def async_get_variable(self, name):
+        assert name == "titleOverride"
+        return self._title
+
+    async def async_set_title(self, new_title):
+        self._title = new_title
+
+
+class FakeSession:
+    def __init__(self, session_id, initial_value="1"):
+        self.session_id = session_id
+        self._initial_value = initial_value
+
+    async def async_get_variable(self, name):
+        # Seed value _watch_session reads before entering its while-loop.
+        # Must be ACTIVE_VALUE here so the seed transition is a harmless
+        # no-op re-add of a session already in the active-set — otherwise a
+        # missing/None seed would itself deactivate the session via the SEED
+        # path, making the exception-path test vacuous regardless of the fix.
+        return self._initial_value
+
+
+async def e1_exception_discard():
+    """XACA-1144-018: an unexpected exception from monitor.async_get() must
+    discard the session from its tab's active-set and revert the tab's
+    prefixed title, exactly as a real claude_active=0 would."""
+    tab = FakeTab("Team")
+    tab_state = {"tab1": {"tab": tab, "base_label": "Team", "active": set()}}
+    lock = asyncio.Lock()
+
+    await watcher._apply_transition(tab_state, lock, "tab1", "s1", True)
+    check("E1 setup: seeded activation writes 'C Team'", tab._title == "C Team")
+
+    class RaisingMonitor:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def async_get(self):
+            raise RuntimeError("simulated unexpected failure (socket error, etc.)")
+
+    class FakeVariableScopes:
+        SESSION = "session"
+
+    fake_iterm2 = type(sys)("iterm2")
+    fake_iterm2.VariableMonitor = RaisingMonitor
+    fake_iterm2.VariableScopes = FakeVariableScopes
+    sys.modules["iterm2"] = fake_iterm2
+
+    session = FakeSession("s1")
+    await watcher._watch_session(None, session, "tab1", tab_state, lock)
+
+    check(
+        "E1 (XACA-1144-018): session discarded from tab's active-set after unexpected exception",
+        "s1" not in tab_state["tab1"]["active"],
+        f"active-set still contains: {tab_state['tab1']['active']}",
+    )
+    check(
+        "E1 (XACA-1144-018): tab title reverted to base label after last-active session's exception exit",
+        tab._title == "Team",
+        f"title is still: {tab._title!r} (expected 'Team' — stuck-ON bug)",
+    )
+
+
+async def e2_rename_rederivation():
+    """XACA-1144-016: a manual rename made while a tab is unprefixed must be
+    picked up on the NEXT 0->1 activation edge, not overwritten by the label
+    cached at process startup."""
+    tab = FakeTab("Team2")
+    tab_state = {"tab2": {"tab": tab, "base_label": "Team2", "active": set()}}
+    lock = asyncio.Lock()
+
+    await watcher._apply_transition(tab_state, lock, "tab2", "s1", True)
+    check("E2 setup: first activation writes 'C Team2'", tab._title == "C Team2")
+
+    await watcher._apply_transition(tab_state, lock, "tab2", "s1", False)
+    check("E2 setup: deactivation reverts to 'Team2'", tab._title == "Team2")
+
+    tab._title = "Renamed"  # user manually renames the tab while unprefixed
+
+    await watcher._apply_transition(tab_state, lock, "tab2", "s1", True)
+    check(
+        "E2 (XACA-1144-016): re-activation after a manual rename picks up the NEW label",
+        tab._title == "C Renamed",
+        f"title is: {tab._title!r} (expected 'C Renamed' — rename was overwritten/lost)",
+    )
+
+
+async def main():
+    await e1_exception_discard()
+    await e2_rename_rederivation()
+    if failures:
+        print(f"\n{len(failures)} FAILURE(S): {failures}")
+        sys.exit(1)
+    print("\nALL PASS")
+    sys.exit(0)
+
+
+asyncio.run(main())
+E1E2EOF
+
+_e_run_direct() {
+    # $1 = watch-dir. Filters the one-time brew-probe stderr noise from
+    # iterm2_venv_bootstrap.py's fallback path (harmless: this dev box has
+    # no aiteamforge tap installed, which is the required state per this
+    # machine's standing policy — see CLAUDE.md "Dev Machine" section).
+    python3 "$TEST_TMP_DIR/e_direct_tests.py" "$1" 2>&1 | grep -v "No available formula"
+}
+
+_E_FIXED_OUT="$(_e_run_direct "$REAL_WATCHER_DIR")"
+test_start "E1: canonical watcher discards session + reverts title on unexpected exception"
+if assert_contains "$_E_FIXED_OUT" "PASS: E1 (XACA-1144-018): session discarded from tab's active-set after unexpected exception" \
+    "canonical watcher did not discard the session — see output: $_E_FIXED_OUT"; then
+    if assert_contains "$_E_FIXED_OUT" "PASS: E1 (XACA-1144-018): tab title reverted to base label after last-active session's exception exit"; then
+        test_pass
+    fi
+fi
+test_start "E2: canonical watcher re-derives base_label at the 0->1 edge after a manual rename"
+if assert_contains "$_E_FIXED_OUT" "PASS: E2 (XACA-1144-016): re-activation after a manual rename picks up the NEW label" \
+    "canonical watcher did not pick up the rename — see output: $_E_FIXED_OUT"; then
+    test_pass
+fi
+
+_E_RED018_OUT="$(_e_run_direct "$TEST_TMP_DIR/e-red-018/scripts")"
+test_start "E1 RED: 018-reverted watcher reproduces the stuck-active-set bug (proves E1 is not vacuous)"
+if assert_contains "$_E_RED018_OUT" "FAIL: E1 (XACA-1144-018): session discarded from tab's active-set after unexpected exception" \
+    "the 018-reverted fixture did NOT reproduce the bug — E1's positive assertion would not actually catch a regression: $_E_RED018_OUT"; then
+    test_pass
+fi
+test_start "E1 RED: 018-reverted watcher does NOT affect the 016 assertion (fixtures are isolated)"
+if assert_contains "$_E_RED018_OUT" "PASS: E2 (XACA-1144-016): re-activation after a manual rename picks up the NEW label" \
+    "016 behaviour regressed in the 018-only revert — the two fixes are not as independent as assumed: $_E_RED018_OUT"; then
+    test_pass
+fi
+
+_E_RED016_OUT="$(_e_run_direct "$TEST_TMP_DIR/e-red-016/scripts")"
+test_start "E2 RED: 016-reverted watcher reproduces the rename-loss bug (proves E2 is not vacuous)"
+if assert_contains "$_E_RED016_OUT" "FAIL: E2 (XACA-1144-016): re-activation after a manual rename picks up the NEW label" \
+    "the 016-reverted fixture did NOT reproduce the bug — E2's positive assertion would not actually catch a regression: $_E_RED016_OUT"; then
+    test_pass
+fi
+test_start "E2 RED: 016-reverted watcher does NOT affect the 018 assertion (fixtures are isolated)"
+if assert_contains "$_E_RED016_OUT" "PASS: E1 (XACA-1144-018): session discarded from tab's active-set after unexpected exception" \
+    "018 behaviour regressed in the 016-only revert — the two fixes are not as independent as assumed: $_E_RED016_OUT"; then
+    test_pass
+fi
+
+# ── E3 (017): a REAL SIGTERM sent to a REAL running _main() event loop, with
+#    a fully faked iterm2 module. Proves the actual signal wiring (not just
+#    an isolated cleanup helper) reverts an activated tab's title before the
+#    process exits — the literal, user-visible symptom of a killed watcher. ──
+cat > "$TEST_TMP_DIR/e3_sigterm_child.py" <<'E3EOF'
+#!/usr/bin/env python3
+"""XACA-1144-017 integration harness: runs the REAL _main() event loop
+(fully faked iterm2 module) against one activated tab, signals readiness via
+READY_FILE, then waits to be SIGTERM'd from outside. Writes the tab's final
+titleOverride to RESULT_FILE after _main() returns.
+argv: <watch-dir> <ready-file> <result-file>"""
+import asyncio
+import json
+import sys
+
+WATCH_DIR = sys.argv[1]
+READY_FILE = sys.argv[2]
+RESULT_FILE = sys.argv[3]
+sys.path.insert(0, WATCH_DIR)
+
+
+class FakeTab:
+    def __init__(self, tab_id, title, sessions):
+        self.tab_id = tab_id
+        self._title = title
+        self.sessions = sessions
+
+    async def async_get_variable(self, name):
+        assert name == "titleOverride"
+        return self._title
+
+    async def async_set_title(self, new_title):
+        self._title = new_title
+
+
+class FakeSession:
+    def __init__(self, session_id):
+        self.session_id = session_id
+        self.queue = asyncio.Queue()
+
+    async def async_get_variable(self, name):
+        return "0"  # not active at seed time
+
+    def push(self, value):
+        self.queue.put_nowait(value)
+
+
+class FakeVariableMonitor:
+    def __init__(self, connection, scope, name, session_id):
+        self.session_id = session_id
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def async_get(self):
+        return await _sessions_by_id[self.session_id].queue.get()
+
+
+class FakeVariableScopes:
+    SESSION = "session"
+
+
+class FakeWindow:
+    def __init__(self, title, tabs):
+        self._title = title
+        self.tabs = tabs
+
+    async def async_get_variable(self, name):
+        return self._title
+
+
+class FakeApp:
+    def __init__(self, windows):
+        self.windows = windows
+
+
+session = FakeSession("s1")
+tab = FakeTab("tab1", "MyTab", [session])
+window = FakeWindow("mywindow", [tab])
+_sessions_by_id = {"s1": session}
+
+fake_iterm2 = type(sys)("iterm2")
+fake_iterm2.VariableMonitor = FakeVariableMonitor
+fake_iterm2.VariableScopes = FakeVariableScopes
+
+
+async def async_get_app(connection):
+    return FakeApp([window])
+
+
+fake_iterm2.async_get_app = async_get_app
+sys.modules["iterm2"] = fake_iterm2
+
+import iterm2_claude_active_watch as watcher  # noqa: E402
+
+
+async def driver():
+    await asyncio.sleep(0.05)
+    session.push("1")
+    for _ in range(200):
+        if tab._title == "C MyTab":
+            break
+        await asyncio.sleep(0.02)
+    with open(READY_FILE, "w") as f:
+        f.write("ready")
+
+
+async def runner():
+    await asyncio.gather(watcher._main(object(), "mywindow"), driver())
+
+
+try:
+    asyncio.run(runner())
+except Exception as exc:  # noqa: BLE001 — capture whatever state exists regardless
+    with open(RESULT_FILE + ".exc", "w") as f:
+        f.write(repr(exc))
+
+with open(RESULT_FILE, "w") as f:
+    json.dump({"final_title": tab._title}, f)
+E3EOF
+
+_e3_run() {
+    # $1 = watch-dir  $2 = label (must be unique per call — no cleanup is
+    # done between calls, so ready/result files are named uniquely instead).
+    # Echoes the final title (or a NEVER_READY/NEVER_EXITED/NO_RESULT_FILE
+    # sentinel) on stdout; caller compares that string directly.
+    local watch_dir="$1" label="$2"
+    local ready="$TEST_TMP_DIR/e3-ready-$label"
+    local result="$TEST_TMP_DIR/e3-result-$label.json"
+
+    python3 "$TEST_TMP_DIR/e3_sigterm_child.py" "$watch_dir" "$ready" "$result" >/dev/null 2>&1 &
+    local child_pid=$!
+
+    local i
+    for i in $(seq 1 100); do
+        [ -f "$ready" ] && break
+        sleep 0.05
+    done
+    if [ ! -f "$ready" ]; then
+        echo "NEVER_READY"
+        kill -KILL "$child_pid" 2>/dev/null
+        wait "$child_pid" 2>/dev/null
+        return 1
+    fi
+
+    kill -TERM "$child_pid" 2>/dev/null
+
+    for i in $(seq 1 100); do
+        kill -0 "$child_pid" 2>/dev/null || break
+        sleep 0.05
+    done
+    if kill -0 "$child_pid" 2>/dev/null; then
+        echo "NEVER_EXITED"
+        kill -KILL "$child_pid" 2>/dev/null
+        wait "$child_pid" 2>/dev/null
+        return 1
+    fi
+    wait "$child_pid" 2>/dev/null
+
+    if [ ! -f "$result" ]; then
+        echo "NO_RESULT_FILE"
+        return 1
+    fi
+    python3 -c "import json; print(json.load(open('$result'))['final_title'])"
+}
+
+_E3_FIXED_TITLE="$(_e3_run "$REAL_WATCHER_DIR" e3fixed)"
+test_start "E3 (XACA-1144-017): a REAL SIGTERM to the running watcher reverts an activated tab's title"
+if [ "$_E3_FIXED_TITLE" = "MyTab" ]; then
+    test_pass
+else
+    test_fail "expected the tab to revert to 'MyTab' after SIGTERM, got: '$_E3_FIXED_TITLE'"
+fi
+
+_E3_RED_TITLE="$(_e3_run "$TEST_TMP_DIR/e-red-017/scripts" e3red017)"
+test_start "E3 RED: 017-reverted watcher (no SIGTERM handler) reproduces the stuck-ON bug (proves E3 is not vacuous)"
+if [ "$_E3_RED_TITLE" != "MyTab" ]; then
+    test_pass
+else
+    test_fail "the 017-reverted fixture unexpectedly reverted the title anyway ('$_E3_RED_TITLE') — E3's positive assertion would not actually catch a regression"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION E4 — XACA-1144-019: the watcher-slug path-escape guard in
+# team-connect-parametric.sh.template. Extracts the live slug-construction
+# block by ANCHOR PATTERN (not a hardcoded line range, which would silently
+# go stale on unrelated nearby edits) and executes it in isolation with a
+# controlled HOST, so this proves the guard's actual runtime behaviour rather
+# than merely grepping for its presence.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_e4_extract_block() {
+    # $1 = template file. Emits the contiguous region from _watcher_slug=...
+    # through WATCHER_PIDFILE=... (inclusive).
+    sed -n '/^    _watcher_slug=\$(printf/,/^    WATCHER_PIDFILE="\$WATCHER_DIR/p' "$1"
+}
+
+_E4_BLOCK="$(_e4_extract_block "$CONNECT_TEMPLATE")"
+test_start "E4 sanity: XACA-1144-019 slug-construction block extracted from team-connect-parametric.sh.template"
+if [[ -n "$_E4_BLOCK" ]] && [[ "$_E4_BLOCK" == *'_watcher_slug='* ]] && [[ "$_E4_BLOCK" == *'WATCHER_PIDFILE='* ]]; then
+    test_pass
+else
+    test_fail "extraction found nothing usable — the template's anchors may have changed; update this test's sed patterns"
+fi
+
+_e4_build_runner() {
+    # $1 = block text  $2 = output script path
+    {
+        echo '#!/bin/bash'
+        echo 'set -u'
+        echo 'ITERM_WINDOW_NAME="${INSTANCE} @ ${HOST}"'
+        printf '%s\n' "$1"
+        echo 'printf "EXIT_OK|%s\n" "$WATCHER_PIDFILE"'
+    } > "$2"
+}
+
+_e4_build_runner "$_E4_BLOCK" "$TEST_TMP_DIR/e4_runner_fixed.sh"
+
+_E4_MAL_OUT="$(INSTANCE="freelance-proj" HOST="evil/../../etc" WATCHER_DIR="/fake/watcher/dir" bash "$TEST_TMP_DIR/e4_runner_fixed.sh" 2>&1)"
+_E4_MAL_RC=$?
+test_start "E4: a HOST containing '/' is rejected (exit 2) before it can become a pidfile path"
+if [ "$_E4_MAL_RC" -eq 2 ]; then
+    test_pass
+else
+    test_fail "expected exit 2, got rc=$_E4_MAL_RC — output: $_E4_MAL_OUT"
+fi
+test_start "E4: the rejected path never reaches the WATCHER_PIDFILE assignment"
+if assert_not_contains "$_E4_MAL_OUT" "EXIT_OK|" "guard did not stop execution before the pidfile line ran — output: $_E4_MAL_OUT"; then
+    test_pass
+fi
+
+_E4_OK_OUT="$(INSTANCE="freelance-proj" HOST="darren-m4-mini.local" WATCHER_DIR="/fake/watcher/dir" bash "$TEST_TMP_DIR/e4_runner_fixed.sh" 2>&1)"
+_E4_OK_RC=$?
+test_start "E4: a normal HOST (no '/') is accepted and produces the expected pidfile path (no false positive)"
+if [ "$_E4_OK_RC" -eq 0 ] && [[ "$_E4_OK_OUT" == "EXIT_OK|/fake/watcher/dir/freelance-proj_@_darren-m4-mini.local.pid" ]]; then
+    test_pass
+else
+    test_fail "expected rc=0 and the normal pidfile path, got rc=$_E4_OK_RC output=$_E4_OK_OUT"
+fi
+
+# ── E4 RED: revert the guard on a scratch copy of the template (exact
+#    marker-string removal, not a hardcoded literal duplicate — so this can
+#    never silently drift from the real fix) and prove the SAME malicious
+#    HOST now succeeds and escapes $WATCHER_DIR — the pre-fix vulnerability.
+_E4_REVERTED_TEMPLATE="$TEST_TMP_DIR/team-connect-parametric.REVERTED.sh.template"
+python3 - "$CONNECT_TEMPLATE" "$_E4_REVERTED_TEMPLATE" <<'E4REDPY'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+content = open(src).read()
+marker_start = "    # XACA-1144-019: tr above only strips spaces."
+marker_end = "    fi\n    WATCHER_PIDFILE="
+start = content.index(marker_start)
+end = content.index(marker_end) + len("    fi\n")
+reverted = content[:start] + content[end:]
+open(dst, "w").write(reverted)
+E4REDPY
+
+test_start "E4 RED sanity: reverted template scratch copy no longer contains the guard"
+if ! grep -q '_watcher_slug" == \*/\*' "$_E4_REVERTED_TEMPLATE" 2>/dev/null; then
+    test_pass
+else
+    test_fail "the guard is still present after the revert — the marker-string removal did not match; update E4's markers"
+fi
+
+_E4_REVERTED_BLOCK="$(_e4_extract_block "$_E4_REVERTED_TEMPLATE")"
+_e4_build_runner "$_E4_REVERTED_BLOCK" "$TEST_TMP_DIR/e4_runner_reverted.sh"
+_E4_RED_OUT="$(INSTANCE="freelance-proj" HOST="evil/../../etc" WATCHER_DIR="/fake/watcher/dir" bash "$TEST_TMP_DIR/e4_runner_reverted.sh" 2>&1)"
+_E4_RED_RC=$?
+test_start "E4 RED: the pre-019 template lets the same malicious HOST escape \$WATCHER_DIR (proves E4 is not vacuous)"
+if [ "$_E4_RED_RC" -eq 0 ] && [[ "$_E4_RED_OUT" == *"/fake/watcher/dir/freelance-proj_@_evil/../../etc.pid"* ]]; then
+    test_pass
+else
+    test_fail "expected the reverted template to reproduce the path-escape (rc=0, pidfile containing the traversal), got rc=$_E4_RED_RC output=$_E4_RED_OUT — E4's positive assertion would not actually catch a regression"
+fi
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Summary
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1107,7 +1624,7 @@ if [ "$_STANDALONE" = true ]; then
     # Gate on a minimum assertion count too: a suite that skips or short-
     # circuits everything (e.g. zsh/tmux absent, an early `exit` swallowed
     # by a refactor) must never report a clean, fully-covered green run.
-    _MIN_EXPECTED=28
+    _MIN_EXPECTED=44
     _TOTAL=$((_PASS_COUNT + _FAIL_COUNT))
     if [ "$_TOTAL" -lt "$_MIN_EXPECTED" ]; then
         echo "ERROR: only ${_TOTAL} assertions ran (expected >= ${_MIN_EXPECTED}) — treating as FAILURE." >&2
