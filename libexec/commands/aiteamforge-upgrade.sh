@@ -2150,6 +2150,87 @@ provision_msg_routing() {
   return 0
 }
 
+# XACA-1162: Seed the per-host readiness config (~/.aiteamforge/host-ready.json)
+# on EVERY upgrade, not just a fresh install. XACA-1066 shipped
+# scripts/kb-host-ready.sh and com.aiteamforge.host-ready.plist through this
+# script's own mandatory sets (_xaca0673_mandatory_materialize_basenames /
+# _xaca0734_mandatory_launchagent_basenames in libexec/lib/launchagents.sh) —
+# both of which correctly reach an already-installed box — but nothing ever
+# wrote the CONFIG those two materialize around. Verified over SSH on both
+# consumer machines: the plist is installed and loaded, the script is on
+# disk, and ~/.aiteamforge/host-ready.json has never existed. The feature
+# shipped and does nothing anywhere, because "no config" and "no LaunchAgent"
+# both look identical from inside kb-host-ready.sh's own login-time no-op —
+# see kanban/plans/XACA-1162/XACA-1162-004-*.md for the full investigation.
+#
+# Modeled directly on provision_msg_routing() immediately above — same
+# shape, same reasoning, same placement constraint:
+#
+# Runs UNCONDITIONALLY: not gated on "already installed" or a version check.
+# A version-gated backfill would never fire on a box that has been on a
+# qualifying version since before this gate existed, which is exactly the
+# state both measured consumer machines are in.
+#
+# Placed AFTER update_runtime_helpers, which is what materializes
+# scripts/kb-host-ready.sh itself onto an already-installed box that never
+# had it — calling this before it would find nothing to invoke on exactly
+# the machines that need it. (com.aiteamforge.host-ready.plist's own
+# materialization, via update_launchagents' mandatory-launchagent-basenames
+# loop, runs much later in this file's run sequence; that is fine here
+# because both measured consumer machines already HAVE the plist installed
+# and loaded — this ordering constraint is about the SCRIPT, which
+# init-config's own opt-out/applicability checks do not depend on the
+# plist's presence to evaluate correctly.)
+#
+# One implementation, two call sites: `kb-host-ready.sh init-config` is the
+# SAME subcommand install-kanban.sh's install_host_ready_launchagent() calls
+# on a fresh install, so fresh-install and upgrade cannot drift
+# (feedback_install_time_provisioning_unreachable_from_upgrade.md). The
+# subcommand itself is write-if-absent and fail-soft by contract (never
+# aborts, always exits 0) — see its definition in scripts/kb-host-ready.sh
+# for the exact seed shape and the opt-out / applicability checks it
+# performs.
+#
+# This script runs under `set -eo pipefail` (see top of file). Uses the same
+# `if VAR="$(cmd)"; then ... else ... fi` idiom as provision_msg_routing
+# rather than a bare failing assignment or `cmd && other`, because either
+# would abort the ENTIRE upgrade right here
+# (feedback_set_e_last_line_short_circuit.md).
+provision_host_ready_config() {
+  print_section "Host-Ready Config"
+
+  local hr_script="${WORKING_DIR}/scripts/kb-host-ready.sh"
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "Would run: kb-host-ready.sh init-config (seed ~/.aiteamforge/host-ready.json, write-if-absent)"
+    return 0
+  fi
+
+  if [ ! -f "$hr_script" ]; then
+    print_warning "HOST-READY CONFIG: NOT PROVISIONED (kb-host-ready.sh not found at ${hr_script})"
+    print_warning "  Run by hand once available: kb-host-ready.sh init-config"
+    return 0
+  fi
+
+  local hr_out hr_rc
+  if hr_out="$(AITEAMFORGE_DIR="${WORKING_DIR}" bash "$hr_script" init-config --quiet 2>&1)"; then
+    hr_rc=0
+  else
+    hr_rc=$?
+  fi
+
+  if [ "$hr_rc" -eq 0 ]; then
+    print_success "Host-ready config (kb-host-ready.sh init-config)"
+  else
+    print_warning "HOST-READY CONFIG: NOT PROVISIONED (kb-host-ready.sh init-config exited ${hr_rc})"
+    if [ -n "$hr_out" ]; then
+      echo "$hr_out" >&2
+    fi
+    print_warning "  Run by hand to resolve: kb-host-ready.sh init-config"
+  fi
+  return 0
+}
+
 # XACA-0161-002: reconcile the per-(team, terminal) ttyd terminal-bridge
 # LaunchAgents. Placed AFTER update_runtime_helpers because that is what
 # materializes scripts/kb-ttyd-bridge.sh onto an already-installed box; calling
@@ -3637,6 +3718,7 @@ update_team_scripts
 update_connect_scripts
 update_runtime_helpers
 provision_msg_routing
+provision_host_ready_config
 update_template_dirs
 update_ttyd_bridge
 update_imgcat

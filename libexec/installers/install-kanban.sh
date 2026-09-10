@@ -2703,10 +2703,26 @@ install_host_ready_launchagent() {
         success "Host-ready LaunchAgent installed (runs at login)"
         info "Script:  $script_dest"
         info "Log:     $AITEAMFORGE_DIR/logs/host-ready.log"
-        info "Config:  ~/.aiteamforge/host-ready.json (absent = no-op; run 'kb-host-ready.sh suggest' for a starting point)"
+        info "Config:  ~/.aiteamforge/host-ready.json (seeded with an inert placeholder — run 'kb-host-ready.sh suggest' for a starting point)"
     else
         warning "Host-ready LaunchAgent installed but not loaded — activate with: launchctl load ${plist_dest}"
     fi
+
+    # XACA-1162: seed ~/.aiteamforge/host-ready.json write-if-absent. XACA-1066
+    # shipped the script and the plist through this installer (and, on an
+    # upgraded box, through the tap's mandatory-materialize / mandatory-
+    # launchagent sets) but never wrote this config anywhere — so the agent
+    # installed and loaded cleanly and did nothing, on every machine, because
+    # "no config" and "no LaunchAgent" both look identical from inside a
+    # login-time no-op. `init-config` is write-if-absent and fail-soft by
+    # contract (never aborts, always exits 0) — see that subcommand in
+    # scripts/kb-host-ready.sh for the exact seed shape and the opt-out /
+    # applicability checks it performs on its own. The upgrade path calls the
+    # SAME subcommand from provision_host_ready_config() in
+    # aiteamforge-upgrade.sh so fresh-install and upgrade share one
+    # implementation and cannot drift.
+    "$script_dest" init-config || true
+
     return 0
 }
 
