@@ -501,6 +501,23 @@
                 dx = e.movementX || 0;
                 dy = e.movementY || 0;
                 if (dx === 0 && dy === 0) return; // pure noise — contributes nothing, never exits alone, and must not refresh the gap clock (see KIOSK_MOVEMENT_GAP_RESET_MS)
+            } else if (!Number.isFinite(e.clientX) || !Number.isFinite(e.clientY)) {
+                // XACA-1154 (test gate, PR #851 round 2): neither movementX/Y nor clientX/Y are
+                // usable on this engine. Bail WITHOUT touching the accumulator or the baseline.
+                //
+                // The naive version of this fallback took clientX/clientY on trust. When they are
+                // absent, `e.clientX - _kioskMovePrevClientX` is NaN, and NaN survives the
+                // `dx === 0 && dy === 0` noise guard (NaN === 0 is false), so it reached
+                // `_kioskMoveAccumDist += Math.hypot(NaN, NaN)` and poisoned the accumulator to
+                // NaN for the rest of the window. Since `NaN >= threshold` is ALWAYS false, that
+                // silently disabled movement-exit entirely — including for a concurrently
+                // arriving, perfectly valid movementX event — until a >250ms gap happened to
+                // reset it. That is the exact "silently inert" failure class subitem 017 was
+                // written to close, reintroduced by 017's own fallback.
+                //
+                // Number.isFinite (not typeof) because `typeof NaN === 'number'` would let a NaN
+                // coordinate straight back through the hole this guard exists to close.
+                return;
             } else if (_kioskMovePrevClientX === null) {
                 // XACA-1154-017: movementX/movementY are genuinely absent on this engine (e.g.
                 // the cockpit WKWebView is an unverified surface for this) — the branch above

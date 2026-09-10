@@ -1011,3 +1011,64 @@ test('(k) REGRESSION GUARD: without the isKioskActive gate, setEnabled(true) re-
         assert.ok(getCount() > 0, 'without the gate, setEnabled(true) must re-arm idle listeners even while kiosk is active -- proving the test above is a real regression guard');
     } finally { teardown(k); }
 });
+
+// ============================================================================
+// XACA-1154 test gate, PR #851 round 2 — NaN poisoning of the movement accumulator
+//
+// The 017 clientX/clientY fallback originally took those coordinates on trust.
+// On an engine populating NEITHER movementX/Y NOR clientX/Y, the subtraction
+// yields NaN; NaN survives the `dx === 0 && dy === 0` noise guard (NaN === 0 is
+// false), so it reached Math.hypot and poisoned _kioskMoveAccumDist to NaN for
+// the rest of the accumulation window. `NaN >= threshold` is ALWAYS false, so
+// movement-exit went silently dead — including for a concurrently arriving,
+// perfectly valid movementX event. That is the exact failure class 017 was
+// written to close, reintroduced by 017's own fallback.
+// ============================================================================
+
+// Neither movementX/movementY nor clientX/clientY — a plain Event carries none
+// of them, which is precisely the engine shape this guards against.
+function coordinatelessMoveEvent(window, type) {
+    return new window.Event(type, { bubbles: true, cancelable: true });
+}
+
+test('(l) a coordinate-less movement event does not poison the accumulator for a later VALID move', async () => {
+    const inst = freshKiosk();
+    try {
+        inst.K.enter();
+        assert.equal(inst.K.isActive(), true, 'kiosk should have entered');
+        await wait(150); // exit listeners attach after a 100ms setTimeout
+
+        // Two coordinate-less events: the first would set a NaN baseline, the
+        // second would compute NaN - NaN and poison the accumulator.
+        inst.document.dispatchEvent(coordinatelessMoveEvent(inst.window, 'pointermove'));
+        inst.document.dispatchEvent(coordinatelessMoveEvent(inst.window, 'pointermove'));
+        assert.equal(inst.K.isActive(), true,
+            'coordinate-less events must never exit kiosk on their own');
+
+        // Now a genuine, unambiguous motion well past the 10px threshold. With a
+        // poisoned NaN accumulator this is swallowed and kiosk stays up forever.
+        inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', 40, 30)); // hypot = 50
+        assert.equal(inst.K.isActive(), false,
+            'a valid 50px move must still exit kiosk after coordinate-less events');
+    } finally {
+        teardown(inst);
+    }
+});
+
+test('(l) a NaN clientX is rejected too — typeof NaN === "number" would let it through', async () => {
+    const inst = freshKiosk();
+    try {
+        inst.K.enter();
+        await wait(150);
+
+        inst.document.dispatchEvent(clientMoveEvent(inst.window, 'pointermove', NaN, NaN));
+        inst.document.dispatchEvent(clientMoveEvent(inst.window, 'pointermove', NaN, NaN));
+        assert.equal(inst.K.isActive(), true, 'NaN coordinates must not exit kiosk');
+
+        inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', 40, 30));
+        assert.equal(inst.K.isActive(), false,
+            'a valid 50px move must still exit after NaN-coordinate events');
+    } finally {
+        teardown(inst);
+    }
+});
