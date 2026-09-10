@@ -139,6 +139,46 @@ else
     : "${SKIPPED_TESTS:=0}"
     : "${TEST_FAILED:=false}"
     : "${CURRENT_TEST_NAME:=}"
+    #
+    # XACA-1113-022: the six counters above are the whole gap in NON-VERBOSE
+    # mode, but test-runner.sh:456-462 also exports test_skip and the five
+    # print_* helpers, and every one of test_start/test_pass/test_fail/
+    # test_skip calls a print_* helper WHEN VERBOSE=true (test-runner.sh
+    # print_success/print_error/print_warning/print_verbose bodies). Those
+    # helpers dereference six more names — the `readonly` colour constants
+    # test-runner.sh:14-19 (RED, GREEN, YELLOW, BLUE, CYAN, NC) — which are
+    # `readonly` in the PARENT shell and therefore, like TOTAL_TESTS et al.,
+    # never `export`-ed (`readonly` is orthogonal to `export`; test-runner.sh
+    # sets neither `export RED` nor anything downstream of it). A child
+    # process only ever inherits exported state, so this test file's process
+    # (`bash "$test_file"` at test-runner.sh:466, a real fork+exec, not a
+    # `source`) starts with all six completely unset — not merely non-
+    # readonly-in-this-process, genuinely absent. Under `-u` that means
+    # `bash tests/test-runner.sh -v` on this suite aborts on the first
+    # verbose print with "CYAN: unbound variable" (print_verbose is the first
+    # of the four call sites reached, via test_start), one assertion into 35.
+    # CI runs the non-verbose default, so this was LATENT rather than live —
+    # but the seeding above already established that "doesn't fire in this
+    # one invocation" is not the bar; anyone running `-v` locally hits it.
+    #
+    # Seeded as EMPTY STRINGS, not the escape codes test-runner.sh assigns:
+    # this process has no `-v` output of its own to colour — it only prints
+    # through the inherited print_* helpers when the code inherited BOTH the
+    # functions and (via this seeding) enough state not to crash. A child
+    # that cannot see the parent's actual colour choice should render plain
+    # text, not invent formatting the parent never asked for. Readonly-
+    # collision is not a concern here: `readonly` does not export across the
+    # fork+exec boundary either, so this process never had these names
+    # readonly to begin with — confirmed by running this seeding live (both
+    # this file's own PASS/FAIL count and the runner's aggregate came back
+    # unchanged) rather than assumed from the export/readonly independence
+    # rule alone.
+    : "${RED:=}"
+    : "${GREEN:=}"
+    : "${YELLOW:=}"
+    : "${BLUE:=}"
+    : "${CYAN:=}"
+    : "${NC:=}"
 fi
 
 _M012_PASS=0

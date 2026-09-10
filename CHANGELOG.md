@@ -6,6 +6,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1113-022 (review, PR #853): the `test-xaca-1113-012-msg-fail-closed.sh`
+  seeding added for XACA-1113's `set -u` fix only covered the six counter
+  variables (`TOTAL_TESTS`, `PASSED_TESTS`, `FAILED_TESTS`, `SKIPPED_TESTS`,
+  `TEST_FAILED`, `CURRENT_TEST_NAME`) that `test-runner.sh`'s exported
+  `test_start`/`test_pass`/`test_fail`/`test_skip` dereference directly. Those
+  same functions also call `test-runner.sh`'s exported `print_success`/
+  `print_error`/`print_warning`/`print_verbose` helpers whenever `VERBOSE=true`,
+  and those helpers dereference six more names — the `readonly` colour
+  constants `RED`/`GREEN`/`YELLOW`/`BLUE`/`CYAN`/`NC` — which are just as
+  un-exported as the counters (`readonly` and `export` are independent
+  attributes; `test-runner.sh` sets neither for these). `bash
+  tests/test-runner.sh -v test-xaca-1113-012-msg-fail-closed.sh` aborted with
+  `CYAN: unbound variable` one assertion into 35; the non-verbose default CI
+  runs never hit it, so it was latent rather than live. Seeded all six as
+  empty strings (a child that cannot see the parent's colour choice should
+  print plain text, not invent its own escape codes), keeping `set -u` and
+  touching no other file. Verified standalone (35/35), under the runner
+  non-verbose (`Total Tests: 35`) and under `-v` (35/35, no abort — the case
+  the fix targets), plus a throwaway revert that reproduced the original
+  abort to confirm the assertion is live, and a re-run of
+  `test-xaca-1113-013-msg-this-machine-regression.sh` (12/12, undisturbed).
 - XACA-1113-016 (review, PR #853): `kb-msg doctor`'s inbox-hook row named
   `claude-hooks/setup-hooks.sh` as the fix on every install, but the tap ships
   no `claude-hooks/` directory and no `setup-hooks.sh` at all (`git ls-files`
