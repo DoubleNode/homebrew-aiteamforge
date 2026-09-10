@@ -3210,6 +3210,102 @@ update_claude_hooks() {
   return 0
 }
 
+# XACA-1159: ~/.claude/CLAUDE.md refresh on the UPGRADE path.
+#
+# The global CLAUDE.md, rendered by install_global_claude_md()
+# (libexec/installers/install-claude-config.sh) from
+# share/templates/claude/claude-md-global.template, had NO function anywhere
+# in the 20+ update_* run sequence that ever touched it again after a fresh
+# install -- same bug class, and the SAME PATTERN, as update_claude_hooks
+# (XACA-0771) / update_team_personas (XACA-0925) / update_knowledge_repo
+# (XACA-0751) / update_knowledge_sync (XACA-0761): install-time-only
+# provisioning the upgrade path never learned about. Measured on
+# darren-m4-mini: the installed CLAUDE.md still read the pre-rename kb-*
+# command list (mtime 2026-06-02), several releases stale, and
+# `update_templates()` -- the only other phase that touches *.template files
+# -- explicitly does not cover this one: its target path is
+# ${WORKING_DIR}/config/<name>, not ${CLAUDE_CONFIG_DIR}/CLAUDE.md.
+#
+# Unlike hooks/personas/knowledge-repo, this file's content is USER-FACING
+# prose the file itself invites customization of, so the naive
+# "reuse install_global_claude_md() verbatim" fix from those precedents is
+# actively wrong here -- it always overwrites (backing up first, but still
+# unconditionally). Doing that on every unattended nightly auto-upgrade would
+# silently clobber any hand edit a user ever made to their own CLAUDE.md. The
+# XACA-1159 fix is therefore the same REUSE idiom wrapped in a receipt-based
+# overwrite guard: reuse apply_template() (byte-for-byte identical rendering
+# to what a fresh install would produce) but only ever install the result
+# when the live file is PROVEN pristine first. See
+# _xaca1159_refresh_global_claude_md() in install-claude-config.sh for the
+# full three-provenance rationale (pristine / user-customized / hand-authored)
+# and the historical-bootstrap mechanism for boxes that predate the receipt.
+#
+# Runs in a SUBSHELL for the identical two reasons update_claude_hooks /
+# update_knowledge_repo / update_knowledge_sync document: (1)
+# install-claude-config.sh opens with `set -euo pipefail`; sourcing it
+# in-process would leak `set -u` into this script's `set -eo` (no -u) and
+# abort on the next unset variable, and (2) fail-soft -- the nightly
+# auto-upgrade LaunchAgent runs unattended, so a sourcing error or unexpected
+# non-zero exit here must never abort the parent upgrade.
+#
+# AITEAMFORGE_DIR / TEMPLATE_DIR are set explicitly inside the subshell from
+# this script's own WORKING_DIR / FRAMEWORK_DIR (neither is read from nor
+# exported by the rest of this script) -- identical to update_claude_hooks.
+# CLAUDE_CONFIG_DIR is deliberately NOT set here: install-claude-config.sh's
+# own top-of-file precedence (XACA-0773) honors a caller/test-exported
+# CLAUDE_CONFIG_DIR override verbatim (the sandbox/test seam), and otherwise
+# falls back to the real $HOME/.claude -- exactly what production
+# `aiteamforge upgrade` needs.
+#
+# Do NOT call install_claude_config() (the full installer entrypoint) -- that
+# would also touch settings.json, skills, personas, tmux.conf, etc. This
+# function's job is ONLY the global CLAUDE.md file, and only via the guarded
+# refresh helper -- never install_global_claude_md() itself, which has no
+# overwrite guard and is the fresh-install-only entrypoint.
+update_global_claude_md() {
+  print_section "Updating Global CLAUDE.md"
+
+  local installer="${LIBEXEC_DIR}/installers/install-claude-config.sh"
+  if [ ! -f "$installer" ]; then
+    print_warning "install-claude-config.sh not found ($installer) — skipping global CLAUDE.md refresh"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "Would check ~/.claude/CLAUDE.md against the shipped template (via its render receipt, or a historical-render bootstrap if no receipt exists yet) and refresh it only if proven pristine-but-stale; a customized or hand-authored file would be left untouched"
+    return 0
+  fi
+
+  print_info "Checking global CLAUDE.md against the shipped template (idempotent; fail-soft; never overwrites a customized file)..."
+
+  # Subshell isolates install-claude-config.sh's `set -u` (see rationale
+  # above); AITEAMFORGE_DIR / TEMPLATE_DIR are set here — not exported — so
+  # they apply only inside this subshell and never leak into the rest of the
+  # upgrade run. Any caller/test-exported CLAUDE_CONFIG_DIR is inherited
+  # unchanged (subshells inherit the parent's exported environment), and so
+  # is every function already defined in this script (e.g. _aitf_file_mode,
+  # used by _xaca1159_refresh_global_claude_md to preserve the live file's
+  # mode on refresh) — command substitution forks a child of THIS process.
+  local _xaca1159_result="" _xaca1159_rc=0
+  _xaca1159_result="$(
+      AITEAMFORGE_DIR="${WORKING_DIR}"
+      TEMPLATE_DIR="${FRAMEWORK_DIR}/share/templates"
+      export AITEAMFORGE_DIR TEMPLATE_DIR
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      _xaca1159_refresh_global_claude_md
+    )" && _xaca1159_rc=0 || _xaca1159_rc=$?
+
+  case "$_xaca1159_rc" in
+    0) print_success "${_xaca1159_result:-Global CLAUDE.md already current}" ;;
+    2) print_success "${_xaca1159_result:-Global CLAUDE.md refreshed from shipped template}" ;;
+    3) print_warning "${_xaca1159_result:-Global CLAUDE.md left untouched — differs from our records (user-customized or hand-authored)}" ;;
+    *) print_warning "${_xaca1159_result:-Global CLAUDE.md refresh skipped (non-fatal; upgrade continues)}" ;;
+  esac
+
+  return 0
+}
+
 # Update skills
 update_skills() {
   print_section "Updating Skills"
@@ -3547,6 +3643,7 @@ update_imgcat
 update_shell_helpers
 update_team_personas
 update_claude_hooks
+update_global_claude_md
 update_skills
 update_launchagents
 # XACA-0763-005: tear down the retired com.aiteamforge.lcars-runatload agent

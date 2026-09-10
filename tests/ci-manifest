@@ -117,3 +117,4 @@ test-xaca-1113-013-msg-this-machine-regression.sh plain-shell
 test-xaca-1120-template-phase-honest-reporting.sh    plain-shell
 test-xaca-1143-worktree-helpers-materialize.sh       plain-shell
 test-xaca-1144-remote-indicator-delivery.sh     plain-shell
+test-xaca-1159-global-claude-md-upgrade-registration.sh plain-shell

@@ -212,51 +212,24 @@ gh pr create \
 
 #### 5. PR Review Handoff & Monitoring
 
-Since all agents author PRs under the same GitHub account (`ehlersd`), agents **cannot** use `gh pr review` to approve their own PRs. Two separate GitHub Apps submit formal reviews from another terminal instead — **each covers a different gate, and they must never be conflated:**
+Since all agents author PRs under the same GitHub account (`ehlersd`), agents **cannot** use `gh pr review` to approve their own PRs. Instead, use the `gh-bot-review` tool (via the `ds9-security-review-bot` GitHub App) to submit formal reviews from another terminal.
 
-| Gate | Bot login (GitHub App) | Submitted via | Covers |
-|---|---|---|---|
-| Test | `ds9-tester-bot[bot]` | `gh-bot-test` | Build / lint / test results |
-| Review | `ai-security-review-bot[bot]` | `gh-bot-review` | Code review (security, architecture, quality) |
+**A. Generate Review Handoff Prompt**
 
-Both are GitHub Apps, so both show up as `.user.type == "Bot"` in the GitHub API — filtering by `.user.type` alone cannot tell them apart, and resolves to whichever bot reviewed most recently. That lets a tester APPROVE satisfy the review gate (or vice versa) on a single-signal merge. **Always filter by the exact `.user.login` string, never by `.user.type`.**
-
-**Both bot commands require `--repo owner/repo` explicitly.** They attempt to auto-detect the repo via `git remote get-url origin`, which fails whenever your remote isn't named `origin` (check with `git remote -v` first) — the command then exits 1 with "Could not auto-detect repository." **Also verify the exit code capture-first:** `gh-bot-test ... | tail` (or any pipe) reports the pipe's own exit status, not the command's — a failed submission can silently read as success. Capture the command's own exit code before piping its output anywhere.
-
-**A. Generate Review Handoff Prompts**
-
-After creating the PR, generate handoff prompts for BOTH gates so the user can copy/paste each into a separate terminal. Use this template (fill in actual values):
+After creating the PR, generate a concise prompt block the user can copy/paste into a reviewer agent's terminal. Use this template (fill in actual values):
 
 ```
-═══════════════════════════════════════════════════════════════════════════════
- PR TEST REQUEST - Paste this into a tester agent terminal
-═══════════════════════════════════════════════════════════════════════════════
-
- PR #<number>: <title>   |   URL: <pr_url>   |   Repo: <repo_path>   |   Kanban Item: <ITEM-ID>
-
- Summary: <2-3 sentence description of what changed and why>
-
- Quick Start:
-   cd <repo_path>
-   gh pr checkout <number>
-
- Run the platform lint/test commands (see Testing Guidelines below), exercise the affected
- features and edge/error paths, then submit:
-
-   gh-bot-test --pr <number> --repo <owner>/<repo> --event APPROVE --body "Tests pass - <summary>"
-   gh-bot-test --pr <number> --repo <owner>/<repo> --event REQUEST_CHANGES --body "<failures + repro steps>"
-   # Long output: write to /tmp/test-<number>.md first, then use --body-file
-
- ⚠️  DO NOT MERGE — the creating agent monitors both gates and merges after both approve.
-═══════════════════════════════════════════════════════════════════════════════
-
 ═══════════════════════════════════════════════════════════════════════════════
  PR REVIEW REQUEST - Paste this into a reviewer agent terminal
 ═══════════════════════════════════════════════════════════════════════════════
 
- PR #<number>: <title>   |   URL: <pr_url>   |   Repo: <repo_path>   |   Kanban Item: <ITEM-ID>
+ PR #<number>: <title>
+ URL: <pr_url>
+ Repo: <repo_path>
+ Kanban Item: <ITEM-ID>
 
  Summary: <2-3 sentence description of what changed and why>
+
  Files changed: <count>  |  Lines: +<additions> -<deletions>
 
  Quick Start:
@@ -264,186 +237,104 @@ After creating the PR, generate handoff prompts for BOTH gates so the user can c
    gh pr checkout <number>
    gh pr diff <number>
 
- Review using the standard checklist (Security, Architecture, Code Quality, Performance,
- Testing), then submit:
+ Review using the standard checklist (Security, Architecture,
+ Code Quality, Performance, Testing), then submit your review:
 
-   gh-bot-review --pr <number> --repo <owner>/<repo> --event APPROVE --body "LGTM - <summary>"
-   gh-bot-review --pr <number> --repo <owner>/<repo> --event REQUEST_CHANGES --body "<feedback>"
-   # Long reviews: write to /tmp/review-<number>.md first, then use --body-file
+   # To approve:
+   gh-bot-review --pr <number> --event APPROVE --body "LGTM - <summary>"
 
-   # Non-blocking suggestions become kanban subitems (NOT PR comments):
+   # To request changes:
+   gh-bot-review --pr <number> --event REQUEST_CHANGES --body "<feedback>"
+
+   # For long reviews, use --body-file:
+   # Write feedback to /tmp/review-<number>.md first, then:
+   gh-bot-review --pr <number> --event REQUEST_CHANGES --body-file /tmp/review-<number>.md
+
+   # For non-blocking suggestions, create kanban subitems (NOT PR comments):
    source {{AITEAMFORGE_DIR}}/kanban-helpers.sh
    kb-backlog sub add <ITEM-ID> "[Review] <suggestion> (PR #<number>)"
 
- ⚠️  DO NOT MERGE — the creating agent monitors both gates and merges after both approve.
+   # After submitting REQUEST_CHANGES, enter the reviewer monitoring loop
+   # (see "After Requesting Changes: Reviewer Monitoring Loop" in CLAUDE.md)
+
+ ⚠️  DO NOT MERGE — the creating agent monitors and merges after approval.
 ═══════════════════════════════════════════════════════════════════════════════
 ```
 
-**B. Four-Gate Monitoring Loop**
+**B. PR Approval Monitoring Loop**
 
-After generating both handoff prompts, the creating agent polls until ALL FOUR gates clear, then merges: (1) test, (2) review, (3) protected-subitem sweep, (4) branch freshness + mergeability.
+After generating the handoff prompt, the creating agent polls for approval.
 
-> **IMPORTANT:** Do NOT check `reviewDecision` — GitHub does not count GitHub App bot reviews toward `required_approving_review_count` on the Team plan. `reviewDecision` will always show `"REVIEW_REQUIRED"` even after both bots approve. Check the reviews list directly, keyed to each bot's own login.
+> **IMPORTANT:** Do NOT check `reviewDecision` — GitHub does not count GitHub App bot reviews
+> toward `required_approving_review_count` on the Team plan. `reviewDecision` will always show
+> `"REVIEW_REQUIRED"` even after bot approval. Instead, check the reviews list directly for
+> bot approval and merge with `--admin`.
 
 ```bash
-# ── Seed each gate's last-processed timestamp separately (skip pre-existing reviews) ──
-# --paginate is REQUIRED on every call to this endpoint: it pages at 30, so on a
-# long-running PR a bot's latest verdict can sit past page 1 and either look
-# "not detected", or — worse — let a stale page-1 APPROVED outrank a newer
-# CHANGES_REQUESTED once sorted. Never drop --paginate to "simplify" this.
-LAST_TEST_AT=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
-  --jq '[.[] | select(.user.login == "ds9-tester-bot[bot]")] | sort_by(.submitted_at) | last | .submitted_at // empty')
-LAST_REVIEW_AT=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
-  --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]")] | sort_by(.submitted_at) | last | .submitted_at // empty')
+# Set LAST_PROCESSED_AT before (re-)entering the loop to track the last review
+# we already handled. This prevents re-triggering on stale CHANGES_REQUESTED reviews.
+LAST_PROCESSED_AT=$(gh api repos/{owner}/{repo}/pulls/<number>/reviews \
+  --jq '[.[] | select(.user.type == "Bot")] | sort_by(.submitted_at) | last | .submitted_at // empty')
 
-TEST_OK="false"; REVIEW_OK="false"; MERGE_UNKNOWN_RETRIES=0; POLL_COUNT=0
-
+POLL_COUNT=0
 while true; do
   STATE=$(gh pr view <number> --json state --jq '.state')
+
   if [ "$STATE" = "CLOSED" ] || [ "$STATE" = "MERGED" ]; then
     echo "PR is $STATE — exiting monitor."
     break
   fi
 
+  # Status heartbeat every 5 polls (~5 min)
   POLL_COUNT=$((POLL_COUNT + 1))
   if [ $((POLL_COUNT % 5)) -eq 0 ]; then
-    echo "Still watching PR #<number>... (poll $POLL_COUNT, TEST=$TEST_OK REVIEW=$REVIEW_OK)"
+    echo "Still watching PR #<number>... (poll $POLL_COUNT)"
   fi
 
-  # Key both gates' verdicts to the CURRENT head SHA, not just to a newer timestamp — a
-  # review submitted against an older commit must never satisfy a gate for a newer push.
-  HEAD_SHA=$(gh pr view <number> --json headRefOid --jq '.headRefOid')
+  # Check latest bot review — single API call, pipe-delimited output split via bash param expansion
+  # (NEVER echo "$VAR" | jq — control chars break parsing; NEVER two calls when one will do)
+  LATEST_REVIEW=$(gh api repos/{owner}/{repo}/pulls/<number>/reviews \
+    --jq '[.[] | select(.user.type == "Bot")] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
+  LATEST_AT="${LATEST_REVIEW%|*}"
+  LATEST_STATE="${LATEST_REVIEW#*|}"
 
-  # ── Gate 1: Test (ds9-tester-bot[bot]) ──
-  L=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
-    --jq '[.[] | select(.user.login == "ds9-tester-bot[bot]" and .commit_id == "'"$HEAD_SHA"'")] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
-  AT="${L%|*}"; ST="${L#*|}"
-  if [ -n "$ST" ] && [ "$AT" != "$LAST_TEST_AT" ]; then
-    if [ "$ST" = "CHANGES_REQUESTED" ]; then
-      echo "Test failures reported — pausing monitor."
-      LAST_TEST_AT="$AT"
-      gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
-        --jq '[.[] | select(.user.login == "ds9-tester-bot[bot]" and .state == "CHANGES_REQUESTED")] | last | .body'
-      # Address feedback, push fixes, re-run the LAST_TEST_AT seed line, re-enter loop.
-      break
-    elif [ "$ST" = "APPROVED" ]; then
-      TEST_OK="true"; LAST_TEST_AT="$AT"; echo "✓ Test gate passed."
-    fi
-  fi
-
-  # ── Gate 2: Review (ai-security-review-bot[bot]) ──
-  L=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
-    --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]" and .commit_id == "'"$HEAD_SHA"'")] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
-  AT="${L%|*}"; ST="${L#*|}"
-  if [ -n "$ST" ] && [ "$AT" != "$LAST_REVIEW_AT" ]; then
-    if [ "$ST" = "CHANGES_REQUESTED" ]; then
-      echo "Review changes requested — pausing monitor."
-      LAST_REVIEW_AT="$AT"
-      gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
-        --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]" and .state == "CHANGES_REQUESTED")] | last | .body'
-      # Address feedback, push fixes, re-run the LAST_REVIEW_AT seed line, re-enter loop.
-      break
-    elif [ "$ST" = "APPROVED" ]; then
-      REVIEW_OK="true"; LAST_REVIEW_AT="$AT"; echo "✓ Review gate passed."
-    fi
-  fi
-
-  if [ "$TEST_OK" != "true" ] || [ "$REVIEW_OK" != "true" ]; then
+  # Skip reviews we already processed (stale review detection)
+  if [ "$LATEST_AT" = "$LAST_PROCESSED_AT" ] || [ -z "$LATEST_STATE" ]; then
     sleep 60
     continue
   fi
 
-  # ── Gate 3: Protected subitem sweep ──
-  # Gate on the literal marker in kb-sweep's OUTPUT — never its exit code (that
-  # over-blocks on framework subitems that legitimately complete AFTER merge), and
-  # never a homegrown board.json re-parse (a bypass that has merged a PR through an
-  # open [Review] subitem before).
-  source {{AITEAMFORGE_DIR}}/kanban-helpers.sh
-  SWEEP_OUTPUT=$(kb-sweep <ITEM-ID> 2>&1)
-  echo "$SWEEP_OUTPUT"
-  if echo "$SWEEP_OUTPUT" | grep -qE "PROTECTED SUBITEMS UNRESOLVED \([0-9]+\)"; then
-    echo "✗ Protected [Review]/[Test]/[UX] subitems are still open — agents cannot cancel"
-    echo "  them without user approval. Resolve them, push fixes if needed, re-enter the loop."
+  if [ "$LATEST_STATE" = "CHANGES_REQUESTED" ]; then
+    echo "Changes requested by bot — pausing monitor."
+    LAST_PROCESSED_AT="$LATEST_AT"
+    gh api repos/{owner}/{repo}/pulls/<number>/reviews \
+      --jq '[.[] | select(.user.type == "Bot" and .state == "CHANGES_REQUESTED")] | last | .body'
+    # Address feedback, push fixes, then re-run the pre-loop LAST_PROCESSED_AT line and re-enter
     break
   fi
 
-  # ── Gate 4: Branch freshness + mergeability ──
-  # Order matters. Check UNKNOWN FIRST, not last: GitHub computes `mergeable` and
-  # `mergeStateStatus` asynchronously, so either can read UNKNOWN for a moment right
-  # after a push. Testing for CONFLICTING while a field is still UNKNOWN makes that
-  # test false and lets a genuinely conflicted PR sail through.
-  MERGE_INFO=$(gh pr view <number> --json mergeable,mergeStateStatus --jq '"\(.mergeable)|\(.mergeStateStatus)"')
-  MERGEABLE="${MERGE_INFO%|*}"; MERGE_STATE="${MERGE_INFO#*|}"
-
-  if [ -z "$MERGEABLE" ] || [ -z "$MERGE_STATE" ] || [ "$MERGEABLE" = "UNKNOWN" ] || [ "$MERGE_STATE" = "UNKNOWN" ]; then
-    MERGE_UNKNOWN_RETRIES=$((MERGE_UNKNOWN_RETRIES + 1))
-    if [ "$MERGE_UNKNOWN_RETRIES" -ge 5 ]; then
-      echo "✗ Mergeability stuck at UNKNOWN after 5 polls — not safe to assume mergeable. Pausing for a human look."
-      break
-    fi
-    echo "Mergeability still UNKNOWN (poll $MERGE_UNKNOWN_RETRIES/5) — re-polling rather than proceeding."
-    sleep 10
-    continue
-  fi
-  MERGE_UNKNOWN_RETRIES=0
-
-  # A content conflict needs manual resolution — `gh pr update-branch` fixes staleness,
-  # never content conflicts. Never merge over this.
-  if [ "$MERGEABLE" = "CONFLICTING" ] || [ "$MERGE_STATE" = "DIRTY" ]; then
-    echo "✗ PR #<number> has merge conflicts (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE)."
-    echo "  Resolve manually: checkout the branch, merge/rebase the base branch in, resolve"
-    echo "  conflicts, push, then re-spawn BOTH bots, re-seed both LAST_*_AT, re-enter the loop."
+  if [ "$LATEST_STATE" = "APPROVED" ]; then
+    echo "Bot approved! Merging with admin flag..."
+    gh pr merge <number> --squash --delete-branch --admin
+    kb-done  # Update kanban status
     break
   fi
 
-  # Count staleness via the compare API's `behind_by` — never read it off
-  # `mergeStateStatus`. That field reports exactly one state, and a PR that's
-  # bot-approved-but-unmet-by-branch-protection can sit at BLOCKED permanently on a
-  # Team plan, which MASKS a genuine BEHIND state entirely. Fail closed if the count
-  # can't be read — an unreadable answer is not evidence of freshness.
-  BASE_REF=$(gh pr view <number> --json baseRefName --jq '.baseRefName')
-  BEHIND_BY=$(gh api "repos/<owner>/<repo>/compare/$BASE_REF...$HEAD_SHA" --jq '.behind_by' 2>/dev/null)
-  case "$BEHIND_BY" in ''|*[!0-9]*) BEHIND_BY="" ;; esac
-  if [ -z "$BEHIND_BY" ]; then
-    echo "✗ Could not determine how far behind $BASE_REF this PR is — not assuming fresh. Investigate before merging."
-    break
-  fi
-  if [ "$BEHIND_BY" -gt 0 ] || [ "$MERGE_STATE" = "BEHIND" ]; then
-    echo "Branch is $BEHIND_BY commit(s) behind $BASE_REF — running gh pr update-branch."
-    echo "Prior bot approvals are against a stale base; re-spawn BOTH bots, re-seed both"
-    echo "LAST_*_AT, re-enter the loop after this."
-    gh pr update-branch <number>
-    break
-  fi
-
-  # Allowlist, not denylist: `mergeStateStatus` is a vocabulary (CLEAN/BEHIND/DIRTY/
-  # BLOCKED/UNSTABLE/DRAFT/UNKNOWN), not a boolean — merge only on states verified safe
-  # here. BLOCKED is the normal steady state on a Team plan (bot reviews don't count
-  # toward the required-approval count), NOT an error — it carries no readiness signal
-  # in either direction, which is exactly why the merge below needs --admin.
-  if [ "$MERGE_STATE" != "CLEAN" ] && [ "$MERGE_STATE" != "UNSTABLE" ] && [ "$MERGE_STATE" != "BLOCKED" ]; then
-    echo "✗ mergeStateStatus=$MERGE_STATE is not on the merge allowlist (CLEAN, UNSTABLE, BLOCKED) — investigate before merging."
-    break
-  fi
-
-  echo "All gates passed + branch fresh (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE). Merging with --admin..."
-  gh pr merge <number> --squash --delete-branch --admin
-  kb-done
-  break
+  sleep 60
 done
 ```
 
 **Monitoring Behavior:**
-- Poll every **60 seconds**; a brief status line every 5 polls (~5 min) shows TEST/REVIEW state.
-- Both gates key their verdict to the PR's **current head SHA** (`commit_id`), not just to a newer timestamp — an approval from before the last push can't satisfy a gate for the new one.
-- On `CHANGES_REQUESTED` from either bot: pause, surface the review body, address feedback, push fixes, re-seed ONLY that gate's `LAST_*_AT`, re-enter the loop.
-- Gate 3 (subitem sweep) and Gate 4 (freshness/mergeability) only run once BOTH bot gates have passed — see the loop's ordering above.
-- On a stale branch (Gate 4): `gh pr update-branch` dismisses stale reviews — re-spawn BOTH bots and re-seed BOTH timestamps afterward.
-- On merge conflicts (Gate 4): halt, never merge — resolve manually, then re-spawn both bots.
-- `state: "CLOSED"` or `"MERGED"` → notify the user and exit the monitor.
-- **NEVER** use `echo "$VAR" | jq` — control characters break parsing; always use `gh api --jq`.
-- Uses `--admin` because the GitHub Team plan does not count bot reviews toward branch protection — `reviewDecision` always reads `REVIEW_REQUIRED` even after both approve.
-- **Do NOT** merge without all four gates clearing — the monitoring loop handles merge automatically.
+- Check bot reviews directly via `repos/{owner}/{repo}/pulls/{number}/reviews` API every **60 seconds**
+- Filter by `user.type == "Bot"` to find bot-specific reviews
+- Tracks `LAST_PROCESSED_AT` timestamp to skip already-processed reviews (stale review detection)
+- On latest bot review `APPROVED` → merge with `gh pr merge <N> --squash --delete-branch --admin`, then run `kb-done`
+- On latest bot review `CHANGES_REQUESTED` → notify user with review feedback, pause monitoring, address feedback, push fixes, then re-run `LAST_PROCESSED_AT` capture and re-enter loop
+- On `state: "CLOSED"` or `state: "MERGED"` → notify user and exit monitoring
+- Show a brief status message every **5 polls (~5 min)** so the user knows the agent is still watching
+- Uses `--admin` flag because GitHub Team plan does not count bot reviews for branch protection (see handoff doc)
+- Do **NOT** merge without bot approval — the monitoring loop handles merge automatically
+- **NEVER** use `echo "$VAR" | jq` — always use `gh api --jq` to avoid control character breakage
 
 ---
 
@@ -863,17 +754,16 @@ npm test                     # Unit tests
 3. **Review checklist:** Security (no secrets/injection), Architecture (follows patterns, DRY), Code Quality (no force unwraps, proper error handling), Performance (`[weak self]`, no main thread blocking), Testing (edge cases, error paths)
 4. **Submit review via `gh-bot-review`** (NOT `gh pr review`):
 ```bash
-gh-bot-review --pr <N> --repo <owner>/<repo> --event APPROVE --body "LGTM - <summary>"
-gh-bot-review --pr <N> --repo <owner>/<repo> --event REQUEST_CHANGES --body "<feedback>"
+gh-bot-review --pr <N> --event APPROVE --body "LGTM - <summary>"
+gh-bot-review --pr <N> --event REQUEST_CHANGES --body "<feedback>"
 # For long reviews: write to /tmp/review-<N>.md, then use --body-file
 ```
 
 ### **Critical Rules**
 - **USE `gh-bot-review`** — `gh pr review` cannot approve same-account PRs
-- **`--repo owner/repo` is required** — `gh-bot-review` auto-detects via `git remote get-url origin`, which fails whenever your remote isn't named `origin`
-- **DO NOT MERGE** — creating agent's monitoring loop handles merge after BOTH gates approve (see "PR Review Handoff & Monitoring")
+- **DO NOT MERGE** — creating agent's monitoring loop handles merge after bot approval
 - Use `--body-file` for detailed reviews (write to `/tmp/review-<N>.md` first)
-- `ai-security-review-bot[bot]` is the REVIEW gate's GitHub App — install it on your org(s) for bot review support. It is a DIFFERENT App from `ds9-tester-bot[bot]` (the TEST gate, submitted via `gh-bot-test`) — never conflate the two into one "review bot"
+- `ds9-security-review-bot` GitHub App — install on your org(s) for bot review support
 
 ### **Approval Criteria**
 - **Required:** CI passes, no security issues, no unjustified force unwraps, code follows patterns, PR description adequate
@@ -939,8 +829,8 @@ Rules:
 - Non-blocking subitems do NOT need to be addressed before merge
 
 ### **Merge**
-- **Creating agent** merges after ALL FOUR gates pass (test, review, subitem sweep, branch freshness) via the monitoring loop (PREFERRED) — see "PR Review Handoff & Monitoring"
-- Squash merge: `gh pr merge <N> --squash --delete-branch --admin` — `--admin` is required because the GitHub Team plan does not count bot reviews toward branch protection
+- **Creating agent** merges after bot approval via monitoring loop (PREFERRED)
+- Squash merge: `gh pr merge <N> --squash --delete-branch`
 - Post-merge: verify `develop` builds, update kanban items
 
 ---
@@ -994,22 +884,15 @@ After completing:
 - **Update from develop:** `git checkout feature/my-work && git merge develop`
 - **Accidentally committed to develop:** `git reset --soft HEAD~1`, then create feature branch and recommit
 - **PR conflicts:** merge develop into your feature branch, resolve conflicts, push
-- **Bot review not detected:** Check directly, filtered by the SPECIFIC bot's login (never `.user.type == "Bot"` — both gate bots are Apps, so that filter matches either one and can resolve to the wrong gate) and WITH `--paginate` (the endpoint pages at 30; without it, a bot's latest review on a long-running PR can sit past page 1 and look "not detected" when it was actually just never fetched):
-  ```bash
-  gh api --paginate repos/{owner}/{repo}/pulls/<N>/reviews --jq '.[] | select(.user.login == "ds9-tester-bot[bot]")'
-  gh api --paginate repos/{owner}/{repo}/pulls/<N>/reviews --jq '.[] | select(.user.login == "ai-security-review-bot[bot]")'
-  ```
-- **`reviewDecision` always shows `REVIEW_REQUIRED`:** This is expected — GitHub Team plan doesn't count bot reviews. Always check the reviews list directly (per-login, as above), never `reviewDecision`.
+- **Bot review not detected:** Check directly: `gh api repos/{owner}/{repo}/pulls/<N>/reviews --jq '.[] | select(.user.type == "Bot")'`
+- **`reviewDecision` always shows `REVIEW_REQUIRED`:** This is expected — GitHub Team plan doesn't count bot reviews. Always check reviews list directly, never `reviewDecision`.
 - **NEVER** store `gh api` JSON in shell variables then pipe through `echo | jq` — control characters break parsing. Always use `gh api --jq` instead.
-- **`$?` after a pipe (e.g. `gh-bot-test ... | tail`) reports the PIPE's exit code, not the command's** — a failed submission can silently read as success. Capture the command's own output/exit code before piping it anywhere.
-- **Manual merge after bot approval:** Verify APPROVED reviews exist from BOTH `ds9-tester-bot[bot]` AND `ai-security-review-bot[bot]` (per the queries above) and that `kb-sweep <ITEM-ID>` shows no `PROTECTED SUBITEMS UNRESOLVED`, then `gh pr merge <N> --squash --delete-branch --admin && kb-done`
-- **`gh pr merge --delete-branch` fails locally from a worktree even though the API merge succeeds** (git refuses to delete a branch checked out in another worktree): the merge itself still went through — verify with `gh pr view <N> --json state`, then clean up the remote branch manually if needed: `git push <remote> --delete <branch>`
-- **`gh-bot-review`/`gh-bot-test` errors:** If an alias isn't loaded, call the underlying script directly: `bash ~/.config/gh-review-bot/gh-bot-review.sh --pr <N> --repo <owner>/<repo> --event APPROVE --body "text"` or `bash ~/.config/gh-tester-bot/gh-bot-test.sh --pr <N> --repo <owner>/<repo> --event APPROVE --body "text"`. Both bots require org-specific GitHub App setup (private key + config at `~/.config/gh-review-bot/` and `~/.config/gh-tester-bot/` respectively) that this tap does not provision automatically — see your org's GitHub App setup docs.
-- **Either bot command exits 1 with `Could not auto-detect repository`:** you omitted `--repo owner/repo`. Both scripts try to auto-detect it via `git remote get-url origin`, which fails whenever your remote isn't named `origin`.
+- **Manual merge after bot approval:** Verify bot APPROVED review exists, then `gh pr merge <N> --squash --delete-branch --admin && kb-done`
+- **`gh-bot-review` errors:** If alias not loaded, call directly: `bash ~/.config/gh-review-bot/gh-bot-review.sh --pr <N> --event APPROVE --body "text"`. See your org's GitHub review bot setup docs.
 
 ---
 
-**Last Updated:** 2026-09-09 (XACA-1159 — fixed a fail-open merge gate: bot review filters now key on `.user.login` instead of `.user.type == "Bot"`, which resolved to whichever of the two gate bots reviewed most recently. Expanded the single-gate flow to four gates (test, review, protected-subitem sweep, branch freshness/mergeability); added `--paginate` to every reviews-API call; fixed a `ds9-security-review-bot` name conflation — the two real Apps are `ds9-tester-bot[bot]` and `ai-security-review-bot[bot]`.) Prior: 2026-02-18 (Added reviewer re-review monitoring loop, non-blocking subitems protocol, fixed stale review detection in creating agent monitoring loop, updated review handoff template with kanban item ID)
+**Last Updated:** 2026-02-18 (Added reviewer re-review monitoring loop, non-blocking subitems protocol, fixed stale review detection in creating agent monitoring loop, updated review handoff template with kanban item ID)
 **Maintained By:** Claude Code
 
 ---

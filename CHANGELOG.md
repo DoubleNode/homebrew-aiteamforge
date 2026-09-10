@@ -6,6 +6,99 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1159: fixed a fail-open merge gate documented in the shipped
+  `share/templates/claude/claude-md-global.template` (consumers' global
+  `CLAUDE.md`). The dual-gate PR flow filtered bot reviews by
+  `.user.type == "Bot"` — both `ds9-tester-bot[bot]` (test gate) and
+  `ai-security-review-bot[bot]` (review gate) are GitHub Apps, so that filter
+  matched EITHER one and resolved to whichever bot reviewed most recently: a
+  tester APPROVE satisfied the review gate, and vice versa, on a single-signal
+  `--admin` merge. Every filter now keys on the exact `.user.login` string.
+  The template also documented only a single gate; added Gate 1 (test, via
+  `gh-bot-test`), Gate 3 (protected-subitem sweep via `kb-sweep`, gated on the
+  literal `PROTECTED SUBITEMS UNRESOLVED (N)` marker in its OUTPUT — never its
+  exit code, never a homegrown board.json re-parse), and Gate 4 (branch
+  freshness + mergeability: UNKNOWN re-poll checked FIRST since `mergeable`
+  and `mergeStateStatus` settle asynchronously, then a DIRTY/CONFLICTING halt
+  since `gh pr update-branch` fixes staleness not content conflicts, then
+  staleness COUNTED via the compare API's `behind_by` rather than read off
+  `mergeStateStatus` since BLOCKED is a permanent steady state on a Team plan
+  that masks BEHIND entirely, failing closed if the count is unreadable, then
+  a CLEAN/UNSTABLE/BLOCKED merge allowlist). Added `--paginate` to every
+  `gh api .../reviews` call (the endpoint pages at 30; without it a bot's
+  latest verdict past page 1 reads as "not detected", or a stale page-1
+  APPROVED can outrank a newer CHANGES_REQUESTED once sorted) and a
+  capture-first warning for `cmd | tail` masking a failed submission's exit
+  code. Fixed a bot-name conflation (`ds9-security-review-bot`, an App that
+  does not exist — the two real bots' names welded together) at both sites
+  that had it, and named both real Apps with their distinct roles wherever
+  the doc discusses bot review. `kb-merge` was evaluated as the merge command
+  per the originating ticket, but is NOT present in this tap's shipped
+  `kanban-helpers.template.sh` (only the unrelated `kb-merged`, an alias for
+  `kb-done`, exists) — documenting it would have reproduced the exact class
+  of defect this ticket fixes, a doc pointing at a tool nobody has. Kept
+  `gh pr merge <N> --squash --delete-branch --admin` as the documented merge
+  command and added a Troubleshooting entry for the worktree-lock symptom
+  `kb-merge` would otherwise have papered over (the API merge succeeds locally
+  from a worktree even though the local branch-delete fails; clean up the
+  remote branch manually with `git push <remote> --delete <branch>`).
+  `gh-bot-test`'s packaging was also verified: its alias ships in
+  `cc-aliases.sh` (`alias gh-bot-test='bash ~/.config/gh-tester-bot/gh-bot-test.sh'`)
+  at parity with `gh-bot-review`'s alias — neither bot's backing script is
+  provisioned by this tap; both require the consuming org to install their own
+  GitHub App and populate `~/.config/gh-{review,tester}-bot/` by hand. This is
+  pre-existing, symmetric behavior for both bots, not a new gap introduced by
+  documenting `gh-bot-test` here. This template is tap-canonical (authored in
+  the tap, not a mirror of the dev-team-internal `claude/CLAUDE.md`) per prior
+  subitem XACA-1159-007 — no `sync_file` pairing was added.
+
+  XACA-1159-015/016/017: the corrected template above would never have
+  reached a single already-installed consumer. `~/.claude/CLAUDE.md` is
+  written ONLY by `install_global_claude_md()` (`install-claude-config.sh`),
+  whose only call site is the fresh-install entrypoint; none of the 20+
+  `update_*` functions in `aiteamforge upgrade`'s run sequence ever touched
+  it, and `update_templates()` does not cover it either (its target is
+  `${WORKING_DIR}/config/<name>`, not `${CLAUDE_CONFIG_DIR}/CLAUDE.md`).
+  Measured on darren-m4-mini: the installed file still read a pre-rename
+  `kb-*` command list, several releases stale. Added `update_global_claude_md()`
+  to the run sequence (registered right after `update_claude_hooks`, its
+  nearest sibling in idiom: subshell-isolated so `install-claude-config.sh`'s
+  `set -u` can't leak into upgrade's `set -eo`, fail-soft so an unattended
+  nightly auto-upgrade never aborts on this step, `--dry-run`-aware).
+  Unlike hooks/personas/knowledge-repo, this file is user-facing prose the
+  template itself invites hand-editing of, so the precedent tickets'
+  "reuse the install function verbatim" idiom is actively wrong here — it
+  always overwrites unconditionally (after a backup). `cmp` against the
+  CURRENT template also can't distinguish a stale-but-pristine render from a
+  user-customized or hand-authored file — both simply read as "differs" the
+  moment the template gains one line. Fixed with a render-receipt three-way
+  discriminator instead of either extreme: `install_global_claude_md()` now
+  writes a receipt (an exact copy of what it just rendered) via
+  `_xaca1159_write_claude_md_receipt`; the guarded upgrade-side helper
+  `_xaca1159_refresh_global_claude_md` compares the live file against that
+  receipt — a match means pristine-but-possibly-stale (safe to re-render), a
+  mismatch means customized or foreign (left untouched, loudly). On that
+  skip path the current shipped template is also rendered alongside the live
+  file as `CLAUDE.md.new` (via `_xaca1159_render_claude_md_sidecar`), so a
+  customized box has something concrete to diff against rather than keeping a
+  stale — possibly fail-open — `CLAUDE.md` indefinitely on the strength of one
+  warning line in an upgrade log. The sidecar is fail-soft and never converts a
+  safe skip into an error. Boxes that
+  predate the receipt bootstrap it via `_xaca1159_bootstrap_claude_md_provenance`:
+  this template has shipped in only a handful of commits ever, so newly-added
+  raw copies under `share/templates/claude/historical/` let the bootstrap
+  render every historical variant with the box's OWN current substitution
+  values and `cmp` each against the live file — an exact, enumerable check,
+  not a heuristic, that fails closed on the destructive axis (no match
+  anywhere in the set means "customized", never "safe"). Added
+  `test-xaca-1159-global-claude-md-upgrade-registration.sh`: a structural
+  suite (8 assertions) that would have caught the original bug — asserts the
+  function is not just defined but actually CALLED in the run sequence, and
+  separately asserts upgrade never calls the raw unguarded
+  `install_global_claude_md()` directly (the destructive wrong-fix this
+  design exists to prevent). Verified failing on purpose (call commented out
+  -> 2 of 8 assertions red) before confirming it passes with the call
+  restored.
 - XACA-1113-022 (review, PR #853): the `test-xaca-1113-012-msg-fail-closed.sh`
   seeding added for XACA-1113's `set -u` fix only covered the six counter
   variables (`TOTAL_TESTS`, `PASSED_TESTS`, `FAILED_TESTS`, `SKIPPED_TESTS`,

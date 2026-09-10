@@ -181,10 +181,253 @@ install_global_claude_md() {
     # Apply template
     if [[ -f "$template" ]]; then
         apply_template "$template" "$target"
+        # XACA-1159: write a render receipt -- an exact copy of the bytes we
+        # just installed -- so a LATER `aiteamforge upgrade` run can tell
+        # "pristine but stale" (live file still matches the receipt) apart
+        # from "user-customized or hand-authored" (it doesn't) without
+        # guessing from content alone. A fresh install always overwrites
+        # unconditionally (via backup_file above, exactly as before) --
+        # there is no prior customization to protect the first time this
+        # file is written. See _xaca1159_refresh_global_claude_md() below,
+        # the upgrade-side consumer of this receipt.
+        _xaca1159_write_claude_md_receipt "$target"
         log_success "Global CLAUDE.md installed"
     else
         log_warning "Template not found, skipping: $template"
     fi
+}
+
+#------------------------------------------------------------------------------
+# XACA-1159: global CLAUDE.md upgrade-side overwrite guard + receipt.
+#
+# `aiteamforge upgrade` never touched ~/.claude/CLAUDE.md at all before this
+# ticket -- same bug class as XACA-0751/XACA-0761/XACA-0771/XACA-0925:
+# install-time-only provisioning the upgrade run sequence never learned
+# about. See update_global_claude_md() in aiteamforge-upgrade.sh for the run
+# sequence wiring and the full measured evidence trail.
+#
+# The hard part isn't detecting staleness -- it's that ~/.claude/CLAUDE.md has
+# THREE possible provenances: (a) a pristine render of some past template,
+# (b) a pristine render the user has since hand-edited, (c) a file the user
+# authored from scratch and this project never wrote at all. `cmp` against
+# the CURRENT template cannot tell (a) apart from (b)/(c) -- all three simply
+# read as "differs" the moment the template gains a single new line.
+# Overwriting on any difference clobbers real user work (b, c); refusing to
+# overwrite on any difference means a stale-but-pristine box (a) never heals.
+#
+# The fix is a receipt: compare the live file against WHAT WE LAST WROTE, not
+# against what we would write today.
+#   live == receipt  -> pristine, only possibly stale -> safe to re-render
+#   live != receipt  -> customized or foreign          -> warn, skip, never touch
+#
+# Already-installed boxes predate the receipt. _xaca1159_bootstrap_claude_md_provenance
+# reconstructs provenance for them: this template has only ever shipped in a
+# handful of commits (see the historical variant list below), so rendering
+# each one with the box's OWN current substitution values and comparing is an
+# EXACT, enumerable check -- not a heuristic -- and it fails CLOSED on the
+# destructive axis: no match anywhere in that small set means "customized or
+# foreign", never "safe to overwrite".
+#------------------------------------------------------------------------------
+
+# Single source of truth for the receipt path. Deliberately lives under
+# AITEAMFORGE_DIR (our own state, e.g. alongside .installed-version /
+# .aiteamforge-config), NOT under CLAUDE_CONFIG_DIR -- ~/.claude is Claude
+# Code's own territory and a sidecar file there could be mistaken for
+# something Claude Code itself manages.
+_xaca1159_claude_md_receipt_path() {
+    printf '%s' "${AITEAMFORGE_DIR}/.claude-md-global.receipt"
+}
+
+# XACA-1159: on a SKIP (the live file is customized or hand-authored, so we
+# must not overwrite it), render the current shipped template alongside it as
+# CLAUDE.md.new, giving the user something concrete to diff against. Without
+# this, a customized box keeps a stale -- possibly fail-open -- CLAUDE.md
+# forever, and the only signal is a single warning line scrolling past in an
+# upgrade log. Fail-soft in every direction: this is a courtesy artifact, and
+# failing to produce it must never turn a safe skip into an error.
+_xaca1159_render_claude_md_sidecar() {
+    local target="$1" template="$2"
+    local sidecar="${target}.new"
+    [[ -f "$template" ]] || return 1
+    local tmp
+    tmp="$(mktemp "${target}.XXXXXX" 2>/dev/null)" || return 1
+    if ! apply_template "$template" "$tmp" >/dev/null 2>&1; then
+        command rm "$tmp" 2>/dev/null || true
+        return 1
+    fi
+    # Nothing worth offering if the sidecar would just duplicate what is there.
+    if cmp -s "$tmp" "$target"; then
+        command rm "$tmp" 2>/dev/null || true
+        return 1
+    fi
+    if mv "$tmp" "$sidecar" 2>/dev/null; then
+        chmod 644 "$sidecar" 2>/dev/null || true
+        printf '%s' "$sidecar"
+        return 0
+    fi
+    command rm "$tmp" 2>/dev/null || true
+    return 1
+}
+
+# Copy the exact bytes we just installed as the receipt. Best-effort /
+# fail-soft: a failed receipt write must never abort an install or upgrade --
+# worst case, the NEXT upgrade run falls back to the historical bootstrap.
+_xaca1159_write_claude_md_receipt() {
+    local rendered_target="$1"
+    local receipt _x1159_sidecar=""
+    receipt="$(_xaca1159_claude_md_receipt_path)"
+    mkdir -p "$(dirname "$receipt")" 2>/dev/null
+    cp "$rendered_target" "$receipt" 2>/dev/null
+}
+
+# Every historical shipped render of claude-md-global.template, oldest first,
+# paired with the placeholder token this project used for the "AITeamForge
+# working directory" concept AT THAT TIME. That token was renamed
+# DEV_TEAM_DIR -> AITEAMFORGE_DIR in commit d864622; every other
+# apply_template() substitution ({{HOME}}, {{CLAUDE_CONFIG_DIR}}, {{USER}})
+# has been byte-for-byte stable since the tap's first commit -- confirmed by
+# diffing apply_template() itself across all four pre-XACA-1159 commits that
+# ever touched this template (b99bf32, d864622, 322b99b, 51f6af4).
+# {{ORG_NAME}}/{{ORG_SLUG}}/{{SHARED_DEV_ROOT}} have NEVER been substituted
+# by apply_template() in any of those commits (the template's own
+# TODO(plugins/...) comment documents this as deliberate, pending a future
+# org-plugin system) -- they survive as literal text in every historical AND
+# current render alike, so their presence never interferes with the
+# comparison below. Fixing that gap is out of scope for XACA-1159.
+#
+# Source files live under share/templates/claude/historical/ -- raw
+# (unrendered) copies of this template as it existed at each commit, shipped
+# alongside the current template so this check needs no git access at
+# runtime (the installed Cellar payload is a plain file copy, not a git
+# checkout: the formula does `libexec.install Dir["*"]`, which excludes
+# `.git`).
+_xaca1159_claude_md_historical_variants() {
+    cat <<'EOF'
+claude-md-global.b99bf32.template|DEV_TEAM_DIR
+claude-md-global.d864622.template|AITEAMFORGE_DIR
+claude-md-global.322b99b.template|AITEAMFORGE_DIR
+claude-md-global.51f6af4.template|AITEAMFORGE_DIR
+EOF
+}
+
+# Try every historical shipped render against the live file at $1, using THIS
+# box's own current AITEAMFORGE_DIR/HOME/CLAUDE_CONFIG_DIR/USER. Returns 0 the
+# moment any historical render matches byte-for-byte (proving "pristine, just
+# stale"); returns 1 if none of them do (fail closed: "customized or foreign").
+_xaca1159_bootstrap_claude_md_provenance() {
+    local live="$1"
+    local hist_dir="${TEMPLATE_DIR}/claude/historical"
+    [[ -d "$hist_dir" ]] || return 1
+
+    local fname varname src tmp matched=1
+    while IFS='|' read -r fname varname; do
+        [[ -n "$fname" ]] || continue
+        src="${hist_dir}/${fname}"
+        [[ -f "$src" ]] || continue
+        tmp="$(mktemp "${AITEAMFORGE_DIR:-/tmp}/.claude-md-hist.XXXXXX" 2>/dev/null)" || continue
+        sed -e "s|{{${varname}}}|${AITEAMFORGE_DIR}|g" \
+            -e "s|{{HOME}}|${HOME}|g" \
+            -e "s|{{CLAUDE_CONFIG_DIR}}|${CLAUDE_CONFIG_DIR}|g" \
+            -e "s|{{USER}}|${USER}|g" \
+            "$src" > "$tmp" 2>/dev/null
+        if cmp -s "$tmp" "$live"; then
+            matched=0
+            rm -f "$tmp"
+            break
+        fi
+        rm -f "$tmp"
+    done <<< "$(_xaca1159_claude_md_historical_variants)"
+
+    return $matched
+}
+
+# The upgrade-side decision function -- called ONLY from update_global_claude_md
+# (aiteamforge-upgrade.sh), never from a fresh install. Prints a one-line
+# human-readable summary to stdout; the exit code tells the caller what
+# happened:
+#   0 = already current, nothing to do (receipt written/refreshed if needed)
+#   2 = refreshed from the shipped template
+#   3 = left untouched: customized, hand-authored, or no historical match
+#   1 = skipped for a soft reason (missing target/template, render/write failure)
+_xaca1159_refresh_global_claude_md() {
+    local target="${CLAUDE_CONFIG_DIR}/CLAUDE.md"
+    local template="${TEMPLATE_DIR}/claude/claude-md-global.template"
+    local receipt
+    receipt="$(_xaca1159_claude_md_receipt_path)"
+
+    if [[ ! -f "$target" ]]; then
+        echo "Global CLAUDE.md is not installed on this box (nothing to refresh) -- 'aiteamforge setup' installs it the first time"
+        return 1
+    fi
+    if [[ ! -f "$template" ]]; then
+        echo "Shipped claude-md-global.template not found -- skipping"
+        return 1
+    fi
+
+    if [[ -f "$receipt" ]]; then
+        if ! cmp -s "$target" "$receipt"; then
+            _x1159_sidecar="$(_xaca1159_render_claude_md_sidecar "$target" "$template")" || _x1159_sidecar=""
+            if [[ -n "$_x1159_sidecar" ]]; then
+                echo "Left untouched: live file differs from our last-known render (user-customized or hand-authored) -- see ${receipt}. Current shipped version written alongside it for comparison: ${_x1159_sidecar}"
+            else
+                echo "Left untouched: live file differs from our last-known render (user-customized or hand-authored) -- see ${receipt}"
+            fi
+            return 3
+        fi
+    else
+        if ! _xaca1159_bootstrap_claude_md_provenance "$target"; then
+            _x1159_sidecar="$(_xaca1159_render_claude_md_sidecar "$target" "$template")" || _x1159_sidecar=""
+            if [[ -n "$_x1159_sidecar" ]]; then
+                echo "Left untouched: no render receipt on file, and the live CLAUDE.md does not match any historically shipped render (user-customized or hand-authored). Current shipped version written alongside it for comparison: ${_x1159_sidecar}"
+            else
+                echo "Left untouched: no render receipt on file, and the live CLAUDE.md does not match any historically shipped render (user-customized or hand-authored)"
+            fi
+            return 3
+        fi
+    fi
+
+    # Live file is now KNOWN-pristine (verified against our own receipt, or
+    # proven via the historical bootstrap above) -- safe to compare against
+    # what we'd render TODAY and refresh only if that differs.
+    local candidate
+    candidate="$(mktemp "${target}.XXXXXX" 2>/dev/null)" || {
+        echo "Could not create a temp file to render the current template -- skipping this run"
+        return 1
+    }
+    if ! apply_template "$template" "$candidate" >/dev/null 2>&1; then
+        rm -f "$candidate"
+        echo "Rendering the current template failed -- leaving the existing file untouched"
+        return 1
+    fi
+
+    if cmp -s "$candidate" "$target"; then
+        rm -f "$candidate"
+        _xaca1159_write_claude_md_receipt "$target"   # self-heal a missing/stale receipt now that pristine-ness is verified
+        echo "Global CLAUDE.md already current"
+        return 0
+    fi
+
+    # Prefer preserving the live file's current mode (available when this
+    # runs inside aiteamforge-upgrade.sh, which defines _aitf_file_mode and
+    # is the only real caller); fall back to 644 -- what a fresh install
+    # produces via apply_template's plain `>` under a normal umask -- if that
+    # helper isn't in scope (e.g. a future standalone caller/test).
+    local _mode=""
+    if command -v _aitf_file_mode >/dev/null 2>&1; then
+        _mode="$(_aitf_file_mode "$target")"
+    fi
+    case "$_mode" in ''|*[!0-7]*) _mode=644 ;; esac
+    chmod "$_mode" "$candidate" 2>/dev/null || true
+
+    if mv -f "$candidate" "$target" 2>/dev/null; then
+        _xaca1159_write_claude_md_receipt "$target"
+        echo "Global CLAUDE.md refreshed from shipped template"
+        return 2
+    fi
+
+    rm -f "$candidate"
+    echo "Failed to install the refreshed CLAUDE.md -- existing file left in place"
+    return 1
 }
 
 # Install team-specific CLAUDE.md files
