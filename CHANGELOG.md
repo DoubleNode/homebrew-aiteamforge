@@ -6,6 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1113-016 (review, PR #853): `kb-msg doctor`'s inbox-hook row named
+  `claude-hooks/setup-hooks.sh` as the fix on every install, but the tap ships
+  no `claude-hooks/` directory and no `setup-hooks.sh` at all (`git ls-files`
+  confirms zero hits), and `msg-inbox-check.sh` — the script the hook would
+  invoke — isn't shipped either (`install-shell.sh`'s helper loop installs
+  only `kb-msg-provision` and `register-claude-hook.py`). So on every
+  consumer install that row was a permanently unclosable `[GAP]` pointing an
+  operator at a file that provably cannot exist there. Now probes for a real
+  `setup-hooks.sh` (mirroring the existing multi-path lookup for
+  `register-claude-hook.py`) and only reports `[GAP]` with that fix when one
+  is actually found (dev checkouts); otherwise reports `[BLOCKED]` — honest
+  that nothing on this install can register the hook, rather than an invented
+  command. Same defect class as XACA-1090. Verified in a sandboxed fake
+  `$HOME`/`$AITEAMFORGE_DIR` for both the consumer (`[BLOCKED]`) and dev
+  (`[GAP]`, real fix path) cases.
 - XACA-1144 (PR #852 `upgrade-suites` failure): renamed the connect/disconnect
   templates' `_watcher_key` variable to `_watcher_slug`. XACA-1120's guard
   scans shipped `*.template` files for credential-shaped assignments with a

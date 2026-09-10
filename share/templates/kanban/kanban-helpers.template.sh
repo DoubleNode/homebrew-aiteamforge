@@ -21413,13 +21413,16 @@ _kb_msg_resolve_machine() {
 #             itself something to fix, and treating it as benign is precisely the
 #             reassuring-wrong-answer failure this ticket exists to eliminate.
 #
-# NOTE ON [BLOCKED] BEING CURRENTLY UNUSED: as of XACA-1090 no row classifies as
-# BLOCKED. Every skip reason the reporter can record turned out to have a real,
-# verified remedy — including the vault-key row, which is why it is [GAP] below
-# and not [BLOCKED]. The class is implemented and unit-tested anyway, because the
-# alternative is what we just removed: when a genuinely-unclosable finding next
-# appears it would be labelled [GAP] and given an invented fix. Having the class
-# ready is what stops that. It is deliberately NOT justified by inventing a row.
+# NOTE ON [BLOCKED]: as of XACA-1090 no row classified as BLOCKED — every skip
+# reason the reporter could record turned out to have a real, verified remedy
+# (including the vault-key row, which is [GAP] below, not [BLOCKED]). The class
+# was implemented and unit-tested anyway so that when a genuinely-unclosable
+# finding next appeared it would not be labelled [GAP] with an invented fix.
+# XACA-1113-016 is that finding: on a tap consumer install, msg-inbox-check.sh
+# (the script the inbox hook would invoke) is not shipped at all, so no command
+# on that machine can register a working hook — the inbox-hook row is [BLOCKED]
+# there. It stays [GAP] on a dev checkout, where setup-hooks.sh and its target
+# script both exist and the fix is real.
 
 # _kb_msg_row / _kb_msg_cont — one place that owns the doctor's column widths.
 #
@@ -21829,17 +21832,47 @@ _kb_msg_doctor() {
 
     # ── 1. Inbox hook registration (Tier 1 + Tier 2 surfacing) ──────────────
     # Without this, mail is delivered correctly and nobody is ever told.
+    #
+    # XACA-1113-016: setup-hooks.sh is the fix for this only on a dev checkout.
+    # It lives at claude-hooks/setup-hooks.sh alongside its own source copy of
+    # msg-inbox-check.sh, and the tap ships NEITHER — `git ls-files` on
+    # homebrew-tap returns zero hits for both, and install-shell.sh's helper
+    # loop installs only kb-msg-provision and register-claude-hook.py, never
+    # msg-inbox-check.sh. So on a consumer install this is not "the operator
+    # hasn't run the right command yet" — no command on that machine can
+    # register a working hook, because the script the hook would invoke does
+    # not exist there to symlink or reference. Naming setup-hooks.sh as the fix
+    # unconditionally sent a consumer operator after a file that provably
+    # cannot be found (same defect class as XACA-1090). Probe for the setup
+    # script the same way $reg/$prov are probed above, and only call this
+    # [GAP] when a real fix command exists; otherwise it is [BLOCKED] — reported
+    # honestly, not papered over with an invented command.
+    local setup_script=""
+    for _c in "$fix_base/claude-hooks/setup-hooks.sh" \
+              "$base/scripts/setup-hooks.sh"; do
+        [[ -f "$_c" ]] && { setup_script="$_c"; break; }
+    done
     local hook_cmd="bash $HOME/.claude/hooks/msg-inbox-check.sh"
     if [[ -n "$reg" ]] && command -v python3 >/dev/null 2>&1; then
         if python3 "$reg" --check --quiet --event SessionStart --event Stop \
                    --command "$hook_cmd" >/dev/null 2>&1; then
             _kb_msg_row "[ok]" "inbox hook" "registered on SessionStart + Stop"
-        else
+        elif [[ -n "$setup_script" ]]; then
             # Genuinely operator-actionable: setup-hooks.sh closes it. Stays
             # [GAP] — it is not reclassified merely to make the exit greener.
             _kb_msg_row "[GAP]" "inbox hook" "NOT registered — mail arrives and is never surfaced"
-            _kb_msg_cont "fix: bash $fix_base/claude-hooks/setup-hooks.sh"
+            _kb_msg_cont "fix: bash $setup_script"
             gaps=$((gaps + 1))
+        else
+            # No setup-hooks.sh AND no msg-inbox-check.sh are shipped on this
+            # install (tap consumer) — there is no command here that can close
+            # this. Reported honestly rather than pointing at a path that does
+            # not exist; see the comment above this block.
+            _kb_msg_row "[BLOCKED]" "inbox hook" "NOT registered — mail arrives and is never surfaced"
+            _kb_msg_cont "cannot be fixed on this install: the inbox-surfacing hook"
+            _kb_msg_cont "(msg-inbox-check.sh) is not shipped on tap consumers,"
+            _kb_msg_cont "tracked separately (XACA-1113-016)"
+            blocked=$((blocked + 1))
         fi
     else
         _kb_msg_row "[??]" "inbox hook" "cannot check (register-claude-hook.py or python3 missing)"
