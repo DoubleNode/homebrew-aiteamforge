@@ -6,6 +6,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1163: `share/scripts/kb-init-team` — `board.json`'s `series` field now
+  stores the kanban item-ID prefix `X<TEAM_CODE>`, not the Star Trek series
+  code. The field was READ everywhere as the ID prefix (`kanban-helpers.sh`'s
+  `_kb_generate_id`, `import_issue.py`, `server.py`) but WRITTEN here as the
+  Trek series, defaulting to a hardcoded `ENT` — so every team this tool
+  provisioned was born minting `ENT-0001`, `ENT-0002`, … instead of
+  `X<CODE>-0001`, with the wrong prefix baked into every id from the first
+  item onward while the tool reported success. The Trek code remains a
+  provision-time input feeding `subtitle`/`ship`/`terminals` and is never
+  persisted. This converges `kb-init-team` onto the contract `kb-freelance`
+  has always implemented and documented. In local-only mode, where the team
+  code is a `LOC` placeholder, the key is now OMITTED entirely — never `""`,
+  `null`, or `XLOC`: only key-absence falls back correctly in both
+  ID-generating readers (`""` makes `import_issue.py` mint a silently corrupt
+  `-0001`). Existing boards are untouched and no already-minted item id is
+  ever rewritten.
 - XACA-1159 round-4 gate findings (PR #855), all three of the same class: a
   check reporting more confidence than it has. **XACA-1159-029:** Gate 3.5 in
   the shipped merge loop keyed on `state == "FAILURE"` alone, so it could not
