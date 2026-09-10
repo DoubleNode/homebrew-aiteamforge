@@ -6,6 +6,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1144 (PR #852 test-gate finding): mirrored the watcher wiring into
+  `share/templates/team-connect-parametric.sh.template` and its disconnect
+  pair. The canonical templates carried the start/stop blocks; the tap copies
+  carried ZERO references, so `iterm2_claude_active_watch.py` shipped to
+  consumers while the code that STARTS it did not — every consumer would have
+  rendered a connect script that never launches the watcher, and the remote
+  teams this ticket exists to fix would have seen no change at all.
+  This is the FIFTH instance of this ticket's own never-shipped pattern
+  (XACA-0214 / 0231 / 0223 / the watcher itself / now its invocation), and the
+  first one a gate caught rather than manual verification. Cause: the
+  implementing agent was forbidden from touching `homebrew-tap/` during an
+  active submodule-pointer contention, and the mirror step was never revisited
+  once that cleared.
+  Only these two files were mirrored — 9 other drifted `fleet-monitor/` paths
+  belong to concurrent sessions and were deliberately left alone rather than
+  swept in by a blanket `sync-tap.sh` write.
 - XACA-1144-009: added Section D to `test-xaca-1144-remote-indicator-delivery.sh`
   (55 -> 64 assertions) enforcing that the OSC 1337 `claude_active` emission
   precedes `_fire_claude_tab_prefix` at all three refcount-transition sites.

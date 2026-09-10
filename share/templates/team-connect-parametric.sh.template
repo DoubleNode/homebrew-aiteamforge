@@ -962,6 +962,58 @@ if has_iterm_gui; then
     fi
 
     # ------------------------------------------------------------------
+    # Remote-indicator watcher (XACA-1144 / DESIGN-DECISION-005).
+    #
+    # Every agent tab a remote Claude session runs in emits
+    # `OSC 1337 SetUserVar=claude_active=<1|0>` over ssh+tmux DCS passthrough
+    # (iterm2_set_user_var(), fired from set_claude_active/clear_claude_active
+    # in iterm2_badge_helper.sh at the same 0<->1 refcount transitions the
+    # LOCAL "C " tab-prefix mechanism already uses — that mechanism cannot
+    # work for a remote team because it drives the iTerm2 Python API on
+    # whichever machine Claude itself runs on).
+    #
+    # This LOCAL watcher is what turns that signal into a visible "C "
+    # prefix on the VIEWING machine. It is started here — after every agent
+    # tab AND panel above already exists, so its one-time tab/session
+    # enumeration sees the final window layout — and is window-scoped +
+    # lifecycle-bound to this connect invocation: {{TEAM_ID}}-disconnect.sh
+    # kills it by the same pidfile key. If the watcher script is missing
+    # (not yet materialized on this box) or the iTerm2 API is unreachable,
+    # it is a silent no-op and this window behaves exactly as it does today
+    # (correct tab labels, no "C " indicator) — see DESIGN-DECISION-005.md's
+    # failure-direction argument for why that degrade path was chosen.
+    # ------------------------------------------------------------------
+    WATCHER="$AITEAMFORGE_DIR/scripts/iterm2_claude_active_watch.py"
+    WATCHER_DIR="$HOME/.claude/.iterm_tab_refcount/watchers"
+    mkdir -p "$WATCHER_DIR" 2>/dev/null || true
+    # Sanitize the window name into a filesystem-safe, disconnect-matchable
+    # key: spaces -> underscores turns "<instance> @ <host>" into
+    # "<instance>_@_<host>", which still starts with "${TEAM_ID}-" and still
+    # ends with "_@_<host>" — the exact two predicates
+    # {{TEAM_ID}}-disconnect.sh's AppleScript window matcher already uses.
+    _watcher_key=$(printf '%s' "$ITERM_WINDOW_NAME" | tr ' ' '_')
+    WATCHER_PIDFILE="$WATCHER_DIR/${_watcher_key}.pid"
+    _watcher_already_running=false
+    if [[ -f "$WATCHER_PIDFILE" ]]; then
+        _existing_watcher_pid=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
+        if [[ -n "$_existing_watcher_pid" ]] && kill -0 "$_existing_watcher_pid" 2>/dev/null; then
+            _watcher_already_running=true
+        fi
+    fi
+    if [[ "$_watcher_already_running" == "true" ]]; then
+        echo "  Remote-indicator watcher already running (pid ${_existing_watcher_pid})"
+    elif [[ -f "$WATCHER" ]]; then
+        nohup "$VENV_PYTHON" "$WATCHER" --window-title "$ITERM_WINDOW_NAME" \
+            >> "$ITERM_CONNECT_LOG" 2>&1 &
+        disown
+        echo $! > "$WATCHER_PIDFILE"
+        echo "  Started remote-indicator watcher (pid $!)"
+    else
+        echo "  Note: remote-indicator watcher not found — skipping (indicator will not show; tab labels unaffected)." >&2
+        echo "  (Expected: $WATCHER)" >&2
+    fi
+
+    # ------------------------------------------------------------------
     # Final focus: switch to LCARS tab
     # ------------------------------------------------------------------
     echo ""

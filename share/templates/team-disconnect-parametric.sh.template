@@ -119,6 +119,42 @@ else
     echo "  iTerm2 not running — nothing to close"
 fi
 
+# ============================================================================
+# Stop remote-indicator watcher(s) (XACA-1144 / DESIGN-DECISION-005)
+# ============================================================================
+# {{TEAM_ID}}-connect.sh starts one window-scoped watcher per connect
+# invocation (scripts/iterm2_claude_active_watch.py) and writes its pid to
+# ~/.claude/.iterm_tab_refcount/watchers/<key>.pid, keyed by the SAME
+# sanitized "<instance>_@_<host>" string used as that window's title (spaces
+# -> underscores). That key starts with "${TEAM_ID}-" and ends with
+# "_@_<host>" — exactly the two predicates the AppleScript window matcher
+# above already uses — so globbing pidfiles by prefix (and, with a host
+# argument, by suffix) tears down precisely the watcher(s) for the window(s)
+# just closed. Best-effort: a missing dir/pidfile or an already-dead process
+# is not an error — the watcher is fail-safe by design (DESIGN-DECISION-005),
+# so a leftover process here would, worst case, just keep mirroring a signal
+# nobody's second-half hook fires into an ssh session that's already gone.
+WATCHER_DIR="$HOME/.claude/.iterm_tab_refcount/watchers"
+if [[ -d "$WATCHER_DIR" ]]; then
+    _stopped_watchers=0
+    for _watcher_pidfile in "$WATCHER_DIR/${TEAM_ID}-"*.pid; do
+        [[ -e "$_watcher_pidfile" ]] || continue
+        _watcher_key="$(basename "$_watcher_pidfile" .pid)"
+        if [[ -n "$HOST_FILTER" ]] && [[ "$_watcher_key" != *"_@_${HOST_FILTER}" ]]; then
+            continue
+        fi
+        _watcher_pid=$(cat "$_watcher_pidfile" 2>/dev/null || true)
+        if [[ -n "$_watcher_pid" ]] && kill -0 "$_watcher_pid" 2>/dev/null; then
+            kill "$_watcher_pid" 2>/dev/null || true
+            _stopped_watchers=$((_stopped_watchers + 1))
+        fi
+        rm -f "$_watcher_pidfile" 2>/dev/null || true
+    done
+    if [[ "$_stopped_watchers" -gt 0 ]]; then
+        echo "  Stopped ${_stopped_watchers} remote-indicator watcher(s)"
+    fi
+fi
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  ${TEAM_NAME} disconnected"
