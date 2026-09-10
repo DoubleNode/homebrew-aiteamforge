@@ -686,9 +686,58 @@ leak_guard_assert() {
     local new_entries
     new_entries=$(comm -13 "$LEAK_GUARD_STATE_DIR/tmproot.before" "$LEAK_GUARD_STATE_DIR/tmproot.after" 2>/dev/null || true)
     if [ -n "$new_entries" ]; then
-      tripped=true
-      print_error "LEAK [abandoned-sandbox] $CURRENT_TEST_FILE left temp dir(s) behind under $LEAK_GUARD_TMPROOT (highest-volume vector, XACA-0787 measured 2026-09-10):"
-      printf '%s\n' "$new_entries" | sed 's/^/    /' >&2
+      # PR #859 review finding 5: split vector 6 by ATTRIBUTABILITY, not just
+      # existence. Two risks were in tension: downgrading this vector
+      # wholesale would weaken the highest-volume leak check (measured
+      # 1,525 outstanding sandboxes, ~750/day regrowth); but treating every
+      # match as this suite's own leak is wrong too — bare "tmp.*" is
+      # mktemp -d's OWN DEFAULT prefix for ANY process on this box, and this
+      # snapshot is a diff over the ENTIRE shared $TMPDIR, not something
+      # scoped to this suite's children. Confirmed LIVE during this PR's own
+      # review: a from-scratch sandboxed run of test-lifecycle.sh here
+      # tripped on bare tmp.* AND on aiteamforge-0799.*/aiteamforge-
+      # allocator-test.*/xaca-1122-008.* dirs that this run never created —
+      # concurrent unrelated activity on the same shared machine, exactly
+      # the false-attribution shape the PR review body warned about.
+      #
+      # Resolution: entries whose basename carries a test/suite-identifiable
+      # prefix (aiteamforge*, xaca*, tap-test*) stay a HARD FAILURE — those
+      # ARE this suite's naming families (see _leak_guard_tmproot_snapshot's
+      # own filter, above) and downgrading them would weaken the deliverable.
+      # A bare "tmp.*" entry that matches NONE of those prefixes is reported
+      # LOUDLY, with full paths, but does NOT fail the run on its own —
+      # it cannot be attributed to $CURRENT_TEST_FILE specifically. This
+      # must stay loud and explicit, never silent: the defect class this
+      # whole ticket is about is a check that silently degrades to success,
+      # and a deliberate, visible severity split is a different thing —
+      # never let this be mistaken for that antipattern.
+      local attributable_entries="" bare_tmp_entries="" _lg_entry _lg_base
+      while IFS= read -r _lg_entry; do
+        [ -n "$_lg_entry" ] || continue
+        _lg_base=$(basename "$_lg_entry")
+        case "$_lg_base" in
+          *[Aa][Ii][Tt][Ee][Aa][Mm][Ff][Oo][Rr][Gg][Ee]*|[Xx][Aa][Cc][Aa]*|*[Tt][Aa][Pp]-[Tt][Ee][Ss][Tt]*)
+            attributable_entries="${attributable_entries}${_lg_entry}
+"
+            ;;
+          *)
+            bare_tmp_entries="${bare_tmp_entries}${_lg_entry}
+"
+            ;;
+        esac
+      done <<LEAK_GUARD_ENTRIES_EOF
+$new_entries
+LEAK_GUARD_ENTRIES_EOF
+
+      if [ -n "$bare_tmp_entries" ]; then
+        print_error "LEAK [abandoned-sandbox:unattributed] bare tmp.* dir(s) appeared under $LEAK_GUARD_TMPROOT during $CURRENT_TEST_FILE's run window, but carry no test/suite-identifiable prefix — NOT failing on these alone (PR #859 finding 5: not attributable to this suite specifically on a shared \$TMPDIR). Reported loudly, not silently, so a real pattern here stays visible:"
+        printf '%s\n' "$bare_tmp_entries" | sed '/^$/d;s/^/    /' >&2
+      fi
+      if [ -n "$attributable_entries" ]; then
+        tripped=true
+        print_error "LEAK [abandoned-sandbox] $CURRENT_TEST_FILE left temp dir(s) behind under $LEAK_GUARD_TMPROOT that ARE test/suite-identifiable by name (highest-volume vector, XACA-0787 measured 2026-09-10):"
+        printf '%s\n' "$attributable_entries" | sed '/^$/d;s/^/    /' >&2
+      fi
     fi
   fi
 
@@ -751,32 +800,37 @@ run_test_file() {
   export -f assert_empty assert_not_empty assert_valid_json assert_file_valid_json
   export -f print_success print_error print_warning print_info print_verbose
 
-  # XACA-0787-019: default every suite to AITEAMFORGE_SKIP_LAUNCHCTL=1 —
-  # prevention, not just detection. This makes libexec/lib/common.sh's
-  # _aitf_launchctl wrapper short-circuit before it ever touches the real
-  # launchctl, for any suite that never thought to set this itself. It is a
-  # DEFAULT, not a clobber (`:=` only fills an unset/empty var), so a suite
-  # that needs real pass-through against a MOCK launchctl on PATH — e.g.
-  # test-xaca-1097-launchagent-disabled-autofix.sh, which deliberately
-  # `unset`s this inside its own process to exercise the wrapper's
-  # pass-through path against a fake binary — still works exactly as
-  # designed: the unset happens in the child's own environment, after it
-  # already inherited this default, and does not propagate back here.
+  # XACA-0787-019 tried defaulting every suite to AITEAMFORGE_SKIP_LAUNCHCTL=1
+  # via `: "${AITEAMFORGE_SKIP_LAUNCHCTL:=1}"` here, as prevention on top of
+  # the leak_guard_assert bootout-by-label remediation below. REMOVED during
+  # PR #859 review (blocking finding 2): the `:=` claim was "does not
+  # clobber", which is true only for suites that explicitly `unset` it
+  # inside their own `bash -c`/subshell child (test-xaca-0683-skip-
+  # launchctl.sh, test-xaca-1097-launchagent-disabled-autofix.sh) — it is
+  # FALSE for a suite that neither sets nor unsets it and asserts on the
+  # wrapper's real pass-through behavior. test-tailscale.sh's "launchctl mock
+  # records load call against sandbox plist path" test does exactly that: it
+  # runs `_write_funnel_restore_script` in a bare subshell with no explicit
+  # AITEAMFORGE_SKIP_LAUNCHCTL handling, expecting _aitf_launchctl to reach
+  # its PATH-mocked `launchctl` and log the call. With this default filled in
+  # ahead of the subshell, the wrapper short-circuited before the mock was
+  # ever invoked and the assertion — which exists specifically to prove
+  # pass-through still works — failed. Measured: this suite's CI run
+  # regressed by exactly this defaulted-var, not by anything in the suite
+  # itself.
   #
-  # IMPORTANT: this is prevention, not the whole fix. HOME sandboxing stops
-  # the plist FILE from landing in the real ~/Library/LaunchAgents (most
-  # suites already sandbox HOME via setup_test_env-adjacent fixtures), but
-  # `launchctl` is per-USER, not per-HOME — a `launchctl load` of a
-  # HOME-sandboxed plist still registers a job with the REAL user's launchd.
-  # That is exactly how vector 3 (registered-but-no-plist-on-disk) arises
-  # even inside an otherwise-sandboxed suite. AITEAMFORGE_SKIP_LAUNCHCTL=1
-  # closes that gap by suppressing the registration itself; the
-  # leak_guard_assert bootout-by-label remediation below is the backstop
-  # for whatever gets through anyway (a suite that unsets this, a suite
-  # calling raw `launchctl`/`/bin/launchctl` instead of the wrapper, etc.).
-  # Neither one substitutes for the other.
-  : "${AITEAMFORGE_SKIP_LAUNCHCTL:=1}"
-  export AITEAMFORGE_SKIP_LAUNCHCTL
+  # Per XACA-0787 subitem 015 (validated, not assumed): HOME sandboxing alone
+  # is sufficient to contain the leak this default was trying to prevent —
+  # the plist FILE never lands under the real $HOME/Library/LaunchAgents once
+  # HOME is sandboxed (setup_test_env, above, already does this for every
+  # suite run through this runner). `launchctl` registration is per-USER not
+  # per-HOME, so a stray real registration (vector 3) can still occur even
+  # with HOME sandboxed — but that residual is exactly what
+  # leak_guard_assert's bootout-by-label remediation (below, after the suite
+  # exits) exists to catch and clear. That backstop does not depend on this
+  # default and is unaffected by its removal. A blanket ahead-of-time default
+  # that a well-behaved control test cannot see itself out of is not worth
+  # keeping for a gap the backstop already covers.
 
   # Run the test file
   local test_exit_code=0

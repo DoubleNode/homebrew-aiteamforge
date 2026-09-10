@@ -12,6 +12,30 @@ export AITEAMFORGE_DIR="$TEST_TMP_DIR/aiteamforge"
 export AITEAMFORGE_HOME="$TAP_ROOT"
 mkdir -p "$AITEAMFORGE_DIR"
 
+# ── XACA-0787 PR #859 review finding 3: $HOME sandbox ───────────────────────
+# This suite invokes the real lifecycle commands (doctor/status/start/stop/
+# upgrade/uninstall) via `bash "$COMMANDS_DIR/aiteamforge-*.sh" ...`.
+# AITEAMFORGE_DIR above only redirects the config/runtime dir those scripts
+# look for — it does NOT stop aiteamforge-start.sh's path from writing a real
+# LaunchAgent plist (install_lcars_health_launchagent in
+# libexec/installers/install-kanban.sh, which hardcodes
+# "$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist") into the
+# developer's REAL $HOME. Caught red-handed once CI actually exercised this
+# suite's start path (PR #859 CI run 34526847917, test-lifecycle.sh newly
+# failing vs. the db204a0 baseline).
+#
+# Sandbox HOME the same way test-tailscale.sh does (XACA-0682): redirect
+# $HOME into this run's TEST_TMP_DIR and pre-create the LaunchAgents dir so
+# any plist write has somewhere sandboxed to land. AITEAMFORGE_SKIP_LAUNCHCTL
+# is set explicitly (belt-and-suspenders, not relied on alone) rather than
+# inherited from a runner-level default — PR #859 finding 2 removed the
+# global `:=` default this suite used to pick up from test-runner.sh because
+# it silently broke a control test elsewhere that asserted on real
+# pass-through; every suite that needs the skip now sets it for itself.
+export HOME="$TEST_TMP_DIR/home"
+mkdir -p "$HOME/Library/LaunchAgents"
+export AITEAMFORGE_SKIP_LAUNCHCTL=1
+
 # Create minimal test config
 create_test_config() {
   cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'

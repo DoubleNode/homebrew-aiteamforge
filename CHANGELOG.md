@@ -22,6 +22,38 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   ID-generating readers (`""` makes `import_issue.py` mint a silently corrupt
   `-0001`). Existing boards are untouched and no already-minted item id is
   ever rewritten.
+- XACA-0787 round-2 (PR #859 review findings, all four blocking): (1) the new
+  `test-xaca-0787-012-claude-config-flag-guard.sh` was never enrolled in
+  `tests/ci-manifest`, so the headline 8-assertion suite had NEVER run in CI —
+  this turned `Manifest Completeness Guard (XACA-0707)` green->red and is
+  exactly this ticket's own defect class, a check that exists but never
+  executes. Now enrolled; manifest-check reports 92 entries. (2) The global
+  `: "${AITEAMFORGE_SKIP_LAUNCHCTL:=1}"` default-fill added in round 1 was
+  REMOVED from both runners. The "`:=` does not clobber" claim held for suites
+  that explicitly `unset` the var in a child, and was FALSE for
+  `test-tailscale.sh`, which neither sets nor unsets it and whose control test
+  asserts `_aitf_launchctl` still reaches its own mock — defaulting the var made
+  `libexec/lib/common.sh:21` short-circuit so the mock was never called.
+  Per XACA-0787-015, HOME sandboxing alone is sufficient; the bootout backstop
+  is unaffected. (3) `test-lifecycle.sh` — a file THIS PR edits — still leaked
+  `com.aiteamforge.lcars-health.plist` into the runner's real
+  `~/Library/LaunchAgents` from `install-kanban.sh:1187`, because it exported
+  only `AITEAMFORGE_HOME` and never `HOME`. The guard caught it in CI. Now
+  sandboxes HOME per the `test-tailscale.sh`/XACA-0682 pattern. (4) Vector 6
+  (abandoned-sandbox) split by ATTRIBUTABILITY: entries carrying a
+  test/suite-identifiable prefix stay a hard failure; bare `tmp.*` — the default
+  `mktemp -d` prefix for ANY process on the box — is reported loudly with full
+  paths but does not fail the run. Independently observed four times across two
+  agents: on a shared multi-agent machine a `$TMPDIR`-wide scan attributes other
+  sessions' temp dirs to whatever suite is running. A guard that fails on
+  unrelated concurrent activity gets disabled, and a disabled guard is how this
+  ticket recurred five times. Vectors 1-5 remain hard failures unconditionally.
+  KNOWN RESIDUAL: the attributable bucket's `xaca*` pattern can still match a
+  concurrent unrelated `xaca-NNNN` run on a shared dev box (observed once);
+  single-tenant CI is unaffected. Tracked on XACA-1169.
+  NOT FIXED HERE, pre-existing and out of scope: `test-xaca-0611-imgcat-provision.sh`,
+  `test-xaca-0792-team-instance-id.sh` and `test-xaca-0799-restart-symmetry.sh`
+  leak their own attributable sandboxes and stay red.
 - XACA-1159 round-4 gate findings (PR #855), all three of the same class: a
   check reporting more confidence than it has. **XACA-1159-029:** Gate 3.5 in
   the shipped merge loop keyed on `state == "FAILURE"` alone, so it could not
