@@ -6,6 +6,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-0787 round-3 (vector-6 attribution was still too broad): round 2 split
+  vector 6 by attributability but keyed the attributable side on naming FAMILIES
+  (`aiteamforge*`, `xaca*`, `tap-test*`), which match any OTHER concurrent
+  session's sandboxes and so reproduced the false positives the split existed to
+  stop. Observed twice on this shared machine, by two different agents: a stray
+  `xaca-1122-*` dir and an `aiteamforge-xaca1161-test.*` dir were each attributed
+  to an unrelated suite and hard-failed it — the second one killed a gate-bot run
+  mid-review. A family prefix answers "did some AITeamForge test make this",
+  which is not the question; the question is "did THIS suite make it".
+  `tests/test-runner.sh` now attributes on two things it actually knows: the dir
+  is (or is under) this runner's own `TEST_TMP_DIR`, or its basename carries the
+  running suite's own ticket token (`test-xaca-0611-*.sh` -> `0611`, which still
+  hard-fails that suite's real `xaca0611-sandbox.*` leftovers while ignoring
+  another ticket's). Both comparisons are guarded against an empty value, which
+  would otherwise turn the glob into `*""*` and match every entry — the exact
+  fail-open shape this ticket is about. A suite with no ticket token simply has
+  no attributable bucket, which is correct: no evidence ties a stray dir to it,
+  and its real leaks are still caught by vectors 1-5. Classification proven on
+  all seven cases including both observed false positives and the cross-ticket
+  case. Guard re-proven to still FIRE after the narrowing (deliberately-leaking
+  dummy through the runner: `LEAK [plist]`, remediation bootout, exit 1) — a fix
+  for false positives that stopped catching the real thing would be the worst
+  outcome available here. Vectors 1-5 remain hard failures unconditionally.
 - XACA-1163: `share/scripts/kb-init-team` — `board.json`'s `series` field now
   stores the kanban item-ID prefix `X<TEAM_CODE>`, not the Star Trek series
   code. The field was READ everywhere as the ID prefix (`kanban-helpers.sh`'s

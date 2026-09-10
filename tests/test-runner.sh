@@ -700,10 +700,26 @@ leak_guard_assert() {
       # concurrent unrelated activity on the same shared machine, exactly
       # the false-attribution shape the PR review body warned about.
       #
-      # Resolution: entries whose basename carries a test/suite-identifiable
-      # prefix (aiteamforge*, xaca*, tap-test*) stay a HARD FAILURE — those
-      # ARE this suite's naming families (see _leak_guard_tmproot_snapshot's
-      # own filter, above) and downgrading them would weaken the deliverable.
+      # Resolution: entries attributable to THE RUNNING SUITE stay a HARD
+      # FAILURE; everything else is reported loudly but does not fail.
+      #
+      # XACA-0787 round-3: the first cut of this keyed on the naming FAMILIES
+      # (aiteamforge*, xaca*, tap-test*), which was too broad and produced the
+      # very false positives it was added to stop. Those patterns match any
+      # OTHER concurrent session's sandboxes too. Observed twice on this shared
+      # machine: a stray `xaca-1122-*` dir and an `aiteamforge-xaca1161-test.*`
+      # dir were each attributed to an unrelated suite and hard-failed it.
+      # A family prefix says "some AITeamForge test made this", which is not
+      # the question; the question is "did THIS suite make it".
+      #
+      # So attribute on either of two things we actually know:
+      #   1. the dir is (or is under) this runner's OWN sandbox, TEST_TMP_DIR;
+      #   2. the basename carries this suite's own ticket token, e.g.
+      #      test-xaca-0611-*.sh -> "0611", which matches its xaca0611-sandbox.*
+      #      leftovers and nothing belonging to another ticket's run.
+      # A suite with no ticket token in its filename simply has no
+      # attributable bucket — correct, since we then have no evidence tying a
+      # stray dir to it, and its real leaks are still caught by vectors 1-5.
       # A bare "tmp.*" entry that matches NONE of those prefixes is reported
       # LOUDLY, with full paths, but does NOT fail the run on its own —
       # it cannot be attributed to $CURRENT_TEST_FILE specifically. This
@@ -711,26 +727,42 @@ leak_guard_assert() {
       # whole ticket is about is a check that silently degrades to success,
       # and a deliberate, visible severity split is a different thing —
       # never let this be mistaken for that antipattern.
-      local attributable_entries="" bare_tmp_entries="" _lg_entry _lg_base
+      local attributable_entries="" bare_tmp_entries="" _lg_entry _lg_base _lg_is_ours
+      local _lg_own_sandbox="" _lg_suite_token=""
+      [ -n "${TEST_TMP_DIR:-}" ] && _lg_own_sandbox=$(basename "$TEST_TMP_DIR")
+      # Ticket token from the running suite's filename: test-xaca-0611-*.sh -> 0611
+      _lg_suite_token=$(printf '%s' "${CURRENT_TEST_FILE##*/}" \
+        | sed -n 's/.*[Xx][Aa][Cc][Aa][-_]*\([0-9][0-9]*\).*/\1/p')
       while IFS= read -r _lg_entry; do
         [ -n "$_lg_entry" ] || continue
         _lg_base=$(basename "$_lg_entry")
-        case "$_lg_base" in
-          *[Aa][Ii][Tt][Ee][Aa][Mm][Ff][Oo][Rr][Gg][Ee]*|[Xx][Aa][Cc][Aa]*|*[Tt][Aa][Pp]-[Tt][Ee][Ss][Tt]*)
-            attributable_entries="${attributable_entries}${_lg_entry}
+        _lg_is_ours=false
+        # (1) our own runner sandbox. Guard against an empty value, which would
+        #     turn the glob into *""* and match every entry.
+        if [ -n "$_lg_own_sandbox" ]; then
+          case "$_lg_base" in
+            "$_lg_own_sandbox"|"$_lg_own_sandbox".*) _lg_is_ours=true ;;
+          esac
+        fi
+        # (2) this suite's own ticket token. Same empty-value guard.
+        if [ "$_lg_is_ours" = false ] && [ -n "$_lg_suite_token" ]; then
+          case "$_lg_base" in
+            *"$_lg_suite_token"*) _lg_is_ours=true ;;
+          esac
+        fi
+        if [ "$_lg_is_ours" = true ]; then
+          attributable_entries="${attributable_entries}${_lg_entry}
 "
-            ;;
-          *)
-            bare_tmp_entries="${bare_tmp_entries}${_lg_entry}
+        else
+          bare_tmp_entries="${bare_tmp_entries}${_lg_entry}
 "
-            ;;
-        esac
+        fi
       done <<LEAK_GUARD_ENTRIES_EOF
 $new_entries
 LEAK_GUARD_ENTRIES_EOF
 
       if [ -n "$bare_tmp_entries" ]; then
-        print_error "LEAK [abandoned-sandbox:unattributed] bare tmp.* dir(s) appeared under $LEAK_GUARD_TMPROOT during $CURRENT_TEST_FILE's run window, but carry no test/suite-identifiable prefix — NOT failing on these alone (PR #859 finding 5: not attributable to this suite specifically on a shared \$TMPDIR). Reported loudly, not silently, so a real pattern here stays visible:"
+        print_error "LEAK [abandoned-sandbox:unattributed] temp dir(s) appeared under $LEAK_GUARD_TMPROOT during $CURRENT_TEST_FILE's run window but are NOT attributable to it — they are neither this runner's own sandbox nor named for this suite's ticket. NOT failing on these alone: on a shared \$TMPDIR another concurrent session's dirs land in this window (observed twice). Reported loudly, not silently, so a real pattern here stays visible:"
         printf '%s\n' "$bare_tmp_entries" | sed '/^$/d;s/^/    /' >&2
       fi
       if [ -n "$attributable_entries" ]; then
