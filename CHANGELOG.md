@@ -36,6 +36,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   component. See the canonical dev-team CHANGELOG for the full writeup and
   the design rationale for why 019 does NOT reuse `_validate_ident` (charset
   excludes `@`, present in every legitimate slug).
+- XACA-1113 (review, PR #853, bats-gate fix): the `[BLOCKED]` inbox-hook
+  message added by XACA-1113-016 above said "not shipped on tap consumers,"
+  inferring an install TYPE from `setup-hooks.sh`'s absence at the two probed
+  paths. That inference is unsound: a dev checkout run from a worktree whose
+  main checkout is not locatable also hits this exact branch and is not a
+  tap consumer, so the message asserted a cause it never established — the
+  same defect class XACA-1090/XACA-1113-016 exist to remove. Reworded to
+  report only what was OBSERVED: `setup-hooks.sh not found at <path A> or
+  <path B> — cannot be fixed from here`, naming the two paths actually
+  checked instead of guessing why they were empty. Classification
+  (`[BLOCKED]`, non-fatal by default, fatal under `--strict`) is unchanged.
+  Added `tests/bats/kb-msg-doctor.bats` T37 asserting the message names both
+  paths and never says "tap consumer" or "not shipped," with a fixed T6 whose
+  fixture now plants `setup-hooks.sh` at the pinned main-checkout path so it
+  still reaches the `[GAP]` branch its XACA-0920 path-pinning assertions need.
 - XACA-1144 (PR #852 `upgrade-suites` failure): renamed the connect/disconnect
   templates' `_watcher_key` variable to `_watcher_slug`. XACA-1120's guard
   scans shipped `*.template` files for credential-shaped assignments with a

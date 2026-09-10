@@ -21864,14 +21864,20 @@ _kb_msg_doctor() {
             _kb_msg_cont "fix: bash $setup_script"
             gaps=$((gaps + 1))
         else
-            # No setup-hooks.sh AND no msg-inbox-check.sh are shipped on this
-            # install (tap consumer) — there is no command here that can close
-            # this. Reported honestly rather than pointing at a path that does
-            # not exist; see the comment above this block.
+            # setup-hooks.sh was not found at either probed path. Report only
+            # what was OBSERVED — absence at those two paths — never an
+            # INFERRED install type. An earlier version of this message said
+            # "not shipped on tap consumers", but that is only one possible
+            # cause of absence: a dev checkout run from a worktree whose main
+            # checkout the doctor cannot locate (e.g. an unusual $HOME) hits
+            # this exact branch too, and telling that operator they are on a
+            # tap consumer is a false diagnosis — the same defect class this
+            # branch exists to remove (XACA-1113 review). Name the two paths
+            # actually checked instead of guessing why they were empty.
             _kb_msg_row "[BLOCKED]" "inbox hook" "NOT registered — mail arrives and is never surfaced"
-            _kb_msg_cont "cannot be fixed on this install: the inbox-surfacing hook"
-            _kb_msg_cont "(msg-inbox-check.sh) is not shipped on tap consumers,"
-            _kb_msg_cont "tracked separately (XACA-1113-016)"
+            _kb_msg_cont "setup-hooks.sh not found at $fix_base/claude-hooks/setup-hooks.sh"
+            _kb_msg_cont "or $base/scripts/setup-hooks.sh — cannot be fixed from here"
+            _kb_msg_cont "(XACA-1113-016)"
             blocked=$((blocked + 1))
         fi
     else
