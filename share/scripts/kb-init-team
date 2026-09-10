@@ -14,7 +14,7 @@
 #   --org-color <hex>      Hex color for LCARS org badge, e.g. #2ECC71 (default: #888888)
 #   --kanban-dir <path>    Absolute path to kanban directory (required)
 #   --working-dir <path>   Absolute path to working/project dir (default: parent of kanban-dir)
-#   --series <SERIES>      Star Trek series for crew config: ENT|TNG|DS9|TOS|LD|VOY|MED|LEG|FER
+#   --series <SERIES>      Star Trek series for crew config: ENT|TNG|DS9|TOS|LD|VOY|MED|LEG|FER|SDK|SNW
 #                          (default: ENT)
 #   --asset-dir <dir>      Asset dir family name for image serving (default: derived from team-id)
 #   --lcars-port <port>    Explicit port number (default: auto-computed via port band)
@@ -539,6 +539,8 @@ _series_to_subtitle() {
         MED) echo "HOUSE, M.D." ;;
         LEG) echo "THE PRACTICE" ;;
         FER) echo "STAR TREK: FERENGI ALLIANCE" ;;
+        SDK) echo "STAR TREK: SPACE DOCK" ;;
+        SNW) echo "STAR TREK: STRANGE NEW WORLDS" ;;
         *)   echo "STAR TREK" ;;
     esac
 }
@@ -554,6 +556,8 @@ _series_to_ship() {
         MED) echo "Princeton-Plainsboro" ;;
         LEG) echo "Law Offices" ;;
         FER) echo "Tower of Commerce" ;;
+        SDK) echo "Earth Spacedock" ;;
+        SNW) echo "U.S.S. Enterprise NCC-1701 (Pike)" ;;
         *)   echo "Unknown Vessel" ;;
     esac
 }
@@ -643,6 +647,23 @@ bar:quark-fin
 vault:nog
 fca:brunt
 workshop:rom
+EOF
+            ;;
+        SDK) cat <<'EOF'
+dockmaster:sisko-sd
+repair:scotty-sd
+diagnostics:geordi-sd
+analysis:spock-sd
+EOF
+            ;;
+        SNW) cat <<'EOF'
+bridge:pike-snw
+firstofficer:una-snw
+science:spock-snw
+security:laan-snw
+comms:uhura-snw
+sickbay:mbenga-snw
+engineering:pelia-snw
 EOF
             ;;
         *) echo "command:unknown" ;;

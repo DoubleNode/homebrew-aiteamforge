@@ -425,6 +425,17 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "primary_host": "darren-m4-mini",
     },
 
+    "spacedock": {
+        "team_code": "SDK",
+        "kanban_dir": f"{_HOME}/.aiteamforge/spacedock/kanban",
+        "working_dir": f"{_HOME}/.aiteamforge/spacedock",
+        "lcars_port_base": 8380,
+        "lcars_port_range": 10,
+        "lcars_port": 8380,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "",
+    },
     # ── Aliases (backward-compat, mirrors kanban_utils.py) ────────────────
     # NOTE (XACA-0463): mainevent moves from 8234 → 8400 to resolve the existing
     # command/mainevent collision. 8234 is in command's band [8230, 8240);

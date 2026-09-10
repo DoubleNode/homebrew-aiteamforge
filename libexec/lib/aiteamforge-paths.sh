@@ -243,7 +243,7 @@ _AITEAMFORGE_DEFAULT_TEAMS_DATA() {
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "legal-coparenting"  "${HOME}/legal/coparenting/kanban"                     "${HOME}/legal/coparenting"          "8320" "8320" "10"  "LCP"
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "medical-general"    "${HOME}/medical/general/kanban"                       "${HOME}/medical/general"            "null" "8340" "10"  "MED"
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "finance-personal"   "${HOME}/finance/personal/kanban"                      "${HOME}/finance/personal"           "8360" "8360" "10"  "FIN"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "spacedock"     "/Users/darrenehlers/.aiteamforge/spacedock/kanban"     "/Users/darrenehlers/.aiteamforge/spacedock"     "8380"  "8380" "10" "SDK"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "spacedock"     "${HOME}/.aiteamforge/spacedock/kanban"     "${HOME}/.aiteamforge/spacedock"     "8380"  "8380" "10" "SDK"
         # Legacy alias kept for backward compatibility with pre-XACA-0139 installs.
         # The "mainevent" team ID was used before the org plugin system existed; # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
         # new installs use the "command" team or enable the primary org plugin.

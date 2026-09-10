@@ -185,6 +185,7 @@ PYEOF
         firebase)     echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Functions/kanban" ;;
         command)      echo "{{SHARED_DEV_ROOT}}/dev-team/kanban" ;;
         dns)          echo "/Users/Shared/Development/DNSFramework/kanban" ;;
+        spacedock)    echo "${HOME}/.aiteamforge/spacedock/kanban" ;;
         legal-*)
             local _suffix="${team#legal-}"
             echo "${HOME}/legal/${_suffix}/kanban"

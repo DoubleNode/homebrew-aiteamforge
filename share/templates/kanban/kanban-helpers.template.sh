@@ -215,6 +215,11 @@ PYEOF
             # TODO(installer): replace with org-specific DNS framework path if applicable
             echo "${HOME}/dns-framework/kanban"
             ;;
+        spacedock)
+            # XACA-1068: per-machine recovery team. Fixed location, never a repo,
+            # never git-tracked — deliberately NOT under $AITEAMFORGE_DIR.
+            echo "${HOME}/.aiteamforge/spacedock/kanban"
+            ;;
         legal-*)
             local _suffix="${team#legal-}"
             echo "${HOME}/legal/${_suffix}/kanban"
@@ -18756,6 +18761,7 @@ _kb_team_lcars_port() {
         # before that renumber (never ported into this template until now).
         # xaca-0139:allowed — "mainevent" is a legacy team slug constant (backward-compat alias, not user-facing org branding)
         mainevent)  _port="8400" ;;
+        spacedock)  _port="8380" ;;
         *)          _port="" ;;
     esac
 
