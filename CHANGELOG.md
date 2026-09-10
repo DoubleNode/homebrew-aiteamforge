@@ -57,6 +57,41 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   it resolves `REAL_BADGE_HELPER` exclusively and was not extended here,
   since it drives a real pty/tmux/production-hook harness rather than a
   simple two-function override and is not a trivial extension of this pass.
+- XACA-1113 (bugfix, PR #853 review): `test-xaca-1113-012-msg-fail-closed.sh`
+  ran ZERO of its 35 assertions under the real CI harness (`test-runner.sh`),
+  aborting immediately with `TOTAL_TESTS: unbound variable`. Root cause:
+  `test-runner.sh` exports the `test_start`/`test_pass`/`test_fail` FUNCTIONS
+  to child test files but never exports the counter variables they mutate
+  (`TOTAL_TESTS`, `PASSED_TESTS`, `FAILED_TESTS`, `TEST_FAILED`,
+  `CURRENT_TEST_NAME` are plain assignments in the parent, never `export`ed).
+  This suite's standalone-framework detection (`type -t test_start`) only
+  proves the function was inherited, not that its dependent state came with
+  it, so under this suite's `set -u` the inherited `test_start`'s first read
+  of the unset `TOTAL_TESTS` aborted the whole script before assertion #1.
+  Fixed by seeding the six variables the inherited functions dereference
+  (`: "${VAR:=default}"`) when the harness functions are detected as
+  inherited — `-u` was NOT removed (it is load-bearing for this suite's
+  sandbox-path construction elsewhere). `test-runner.sh` itself was not
+  touched (88 other suites depend on it); the export/unexported-state gap is
+  reported separately for its own ticket. Verified standalone (35/35, exit
+  0), under the real runner (35/35, no abort — previously 0/0), and via a
+  negative control reproducing the exact `TOTAL_TESTS: unbound variable`
+  abort with a throwaway pre-fix copy. `test-xaca-1113-013` (unaffected;
+  uses `set -o pipefail` without `-u`) reconfirmed at 12/12 under the runner
+  in the same pass.
+- XACA-1113-017 (hardening, PR #853 review, non-blocking): `test-xaca-1113-013`
+  assertions 3a/4a hardened against a vacuous pass. `_curl_block_for` returns
+  `""` when no `/api/team-register` call was logged at all, and both
+  assertions' `grep -qF '"machineSlug"' && echo 0 || echo 1` would then read
+  an empty block as "no machineSlug field" — indistinguishable from a call
+  that happened and genuinely omitted it. Not a live bug today (both fixtures
+  measured non-empty, 118 bytes), but the suite already applies this exact
+  grounding discipline to its awk function-body ranges and not to the
+  curl-block extraction. Added a `3a-precondition`/`4a-precondition` `ok()`
+  assertion (block is non-empty) alongside each, mirroring the existing
+  grounding-check pattern. Proved with a negative control: a throwaway copy
+  with `_curl_block_for` forced to always return empty fails both new
+  preconditions (9/12), while the real suite passes 12/12.
 - XACA-1113 (test, CI coverage): registered `tests/test-xaca-1113-012-msg-fail-closed.sh`
   and `tests/test-xaca-1113-013-msg-this-machine-regression.sh` in
   `tests/ci-manifest` as `plain-shell` (XACA-1113-005) — both files were

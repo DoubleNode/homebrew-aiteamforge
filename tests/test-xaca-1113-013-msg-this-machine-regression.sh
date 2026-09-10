@@ -355,6 +355,19 @@ CURL_STUB_FIXTURES="$WORK_DIR/fixtures" \
     > "$OUT_NEG" 2>&1
 
 REGISTER_BLOCK_NEG=$(_curl_block_for '/api/team-register')
+# XACA-1113-017: _curl_block_for returns "" when no /api/team-register call
+# was logged at all (e.g. the block stopped POSTing entirely — a real
+# regression). Without this precondition, 3a's own
+# `grep -qF '"machineSlug"' && echo 0 || echo 1` reads an EMPTY string as
+# "no machineSlug field" and passes vacuously — indistinguishable from the
+# genuine case where a call happened and simply omitted the field. Ground
+# it the same way the suite already grounds its awk function-body ranges
+# above: assert the extracted block is non-empty BEFORE trusting what it
+# does or doesn't contain.
+ok "3a-precondition: negative fixture actually captured a /api/team-register call (extracted block is non-empty)" \
+   "$([ -n "$REGISTER_BLOCK_NEG" ] && echo 1 || echo 0)" \
+   "_curl_block_for '/api/team-register' returned an EMPTY block — no team-register call was logged at all, so 3a's machineSlug-absence check would pass vacuously; raw log: $(cat "$CURL_LOG" 2>/dev/null | tr '\n' ' ')"
+
 ok "3a: negative fixture (no vault-keygen.js) — outgoing payload does NOT carry machineSlug" \
    "$(printf '%s' "$REGISTER_BLOCK_NEG" | grep -qF '"machineSlug"' && echo 0 || echo 1)" \
    "expected no machineSlug field; team-register call block: $(printf '%s' "$REGISTER_BLOCK_NEG" | tr '\n' ' ')"
@@ -381,6 +394,14 @@ CURL_STUB_FIXTURES="$WORK_DIR/fixtures" \
     > "$OUT_UNDEF" 2>&1
 
 REGISTER_BLOCK_UNDEF=$(_curl_block_for '/api/team-register')
+# XACA-1113-017: same grounding as 3a-precondition above, applied to the
+# defect-reproduction fixture — an empty extracted block here would let 4a
+# pass vacuously too (no call logged at all reads identically to "call
+# logged, machineSlug correctly absent").
+ok "4a-precondition [DEFECT REPRODUCTION]: undefined-function fixture actually captured a /api/team-register call (extracted block is non-empty)" \
+   "$([ -n "$REGISTER_BLOCK_UNDEF" ] && echo 1 || echo 0)" \
+   "_curl_block_for '/api/team-register' returned an EMPTY block — no team-register call was logged at all, so 4a's machineSlug-absence check would pass vacuously; raw log: $(cat "$CURL_LOG" 2>/dev/null | tr '\n' ' ')"
+
 ok "4a [DEFECT REPRODUCTION]: with _kb_msg_this_machine undefined, outgoing payload does NOT carry machineSlug" \
    "$(printf '%s' "$REGISTER_BLOCK_UNDEF" | grep -qF '"machineSlug"' && echo 0 || echo 1)" \
    "expected no machineSlug field with the function undefined; team-register call block: $(printf '%s' "$REGISTER_BLOCK_UNDEF" | tr '\n' ' ')"

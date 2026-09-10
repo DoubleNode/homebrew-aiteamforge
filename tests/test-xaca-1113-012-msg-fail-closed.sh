@@ -106,6 +106,39 @@ if ! type -t test_start >/dev/null 2>&1; then
     test_start() { _CURRENT_TEST="$1"; echo "  >> $1"; }
     test_pass()  { echo "     PASS: $_CURRENT_TEST"; }
     test_fail()  { echo "     FAIL: $_CURRENT_TEST — $1" >&2; }
+else
+    # XACA-1113: `type -t test_start` only proves the FUNCTION was inherited
+    # from test-runner.sh (it exports the functions at test-runner.sh:456);
+    # it says nothing about whether the STATE those functions mutate came
+    # with them. test-runner.sh:27-38 (TOTAL_TESTS, PASSED_TESTS,
+    # FAILED_TESTS, SKIPPED_TESTS, TEST_FAILED, CURRENT_TEST_NAME) are plain
+    # assignments in the parent shell, never `export`-ed, so a child process
+    # that inherits the *functions* still starts with those variables unset.
+    # Under this suite's `set -u` (above), the inherited test_start's first
+    # line — `TOTAL_TESTS=$((TOTAL_TESTS + 1))` — reads that unset variable
+    # and aborts the whole script before assertion #1 ever runs, printing
+    # only "TOTAL_TESTS: unbound variable" (reproduced standalone vs. under
+    # test-runner.sh — it only happens under the runner, because only there
+    # is test_start inherited rather than locally defined above).
+    #
+    # The fix is NOT to drop `-u` — it is load-bearing for the sandbox-path
+    # construction later in this file, and silencing it here would trade a
+    # loud failure for a quiet one, which is the exact defect class this
+    # whole ticket exists to eliminate. Instead, seed the variables the
+    # inherited functions actually dereference, satisfying `set -u` without
+    # touching test-runner.sh (88 other suites depend on it). This does NOT
+    # change what the runner itself tallies for this suite: run_test_file()
+    # aggregates by grepping TEST_RESULTS_FILE for START/PASS/FAIL: lines
+    # (test-runner.sh:471-476), which the inherited test_start/test_pass/
+    # test_fail already write regardless of these local seed values — the
+    # seeds exist purely to keep the inherited functions from crashing on
+    # first read.
+    : "${TOTAL_TESTS:=0}"
+    : "${PASSED_TESTS:=0}"
+    : "${FAILED_TESTS:=0}"
+    : "${SKIPPED_TESTS:=0}"
+    : "${TEST_FAILED:=false}"
+    : "${CURRENT_TEST_NAME:=}"
 fi
 
 _M012_PASS=0
