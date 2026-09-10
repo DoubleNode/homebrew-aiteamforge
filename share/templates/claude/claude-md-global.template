@@ -296,7 +296,7 @@ LAST_TEST_AT=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
 LAST_REVIEW_AT=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
   --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]")] | sort_by(.submitted_at) | last | .submitted_at // empty')
 
-TEST_OK="false"; REVIEW_OK="false"; MERGE_UNKNOWN_RETRIES=0; POLL_COUNT=0; PREV_HEAD_SHA=""; FORCE_PUSH_CUTOFF=""
+TEST_OK="false"; REVIEW_OK="false"; MERGE_UNKNOWN_RETRIES=0; NO_CHECKS_RETRIES=0; POLL_COUNT=0; PREV_HEAD_SHA=""; FORCE_PUSH_CUTOFF=""
 
 while true; do
   STATE=$(gh pr view <number> --json state --jq '.state')
@@ -326,7 +326,7 @@ while true; do
     echo "Head SHA changed ($PREV_HEAD_SHA -> $HEAD_SHA) since the last poll — a push landed."
     echo "Resetting both gate latches; a prior approval against the old head does not carry"
     echo "forward, each bot must re-approve the new head before this gate re-opens."
-    TEST_OK="false"; REVIEW_OK="false"
+    TEST_OK="false"; REVIEW_OK="false"; NO_CHECKS_RETRIES=0
 
     # ── Force-push / rebase detection (XACA-1159-030) ──────────────────────────────────
     # The committer-date guard below (kept, see its own comment) assumes the NEW head's
@@ -415,7 +415,13 @@ while true; do
   # forward, so an older force-push's cutoff can never wrongly exceed a newer one). Plain
   # string comparison is valid because both are the same ISO-8601 `Z` format/precision.
   EFFECTIVE_CUTOFF="$HEAD_COMMIT_DATE"
-  if [ -n "$FORCE_PUSH_CUTOFF" ] && [ "$FORCE_PUSH_CUTOFF" \> "$EFFECTIVE_CUTOFF" ]; then
+  # `[[ ]]`, NOT `[ ... \> ... ]`. zsh's `[` builtin REJECTS `>` as a string
+  # operator -- it errors with "condition expected: >" and the branch is simply
+  # not taken, so the force-push floor is never stamped and this silently
+  # reverts to the weaker committer-date-only behaviour. It FAILS OPEN, on the
+  # shell consumers actually run (zsh is the macOS default). bash accepts the
+  # escaped form, which is exactly why testing this under bash alone passes it.
+  if [[ -n "$FORCE_PUSH_CUTOFF" && "$FORCE_PUSH_CUTOFF" > "$EFFECTIVE_CUTOFF" ]]; then
     EFFECTIVE_CUTOFF="$FORCE_PUSH_CUTOFF"
   fi
 
@@ -463,9 +469,49 @@ while true; do
   # over-blocks on framework subitems that legitimately complete AFTER merge), and
   # never a homegrown board.json re-parse (a bypass that has merged a PR through an
   # open [Review] subitem before).
+  #
+  # ABSENCE OF THE MARKER IS NOT EVIDENCE OF A CLEAN SWEEP (XACA-1159-033): checking
+  # only "does the output contain PROTECTED SUBITEMS UNRESOLVED" proves the bad text
+  # isn't there — it says nothing about whether kb-sweep ever ran. A failed `source`
+  # leaves the `kb-sweep` shell function undefined; the next line then errors with
+  # something like "kb-sweep: command not found" (bash) or "command not found:
+  # kb-sweep" (zsh) and returns non-zero — output that plainly contains no marker
+  # text, which the old check read as a clean sweep. Same shape as XACA-1145's shipped
+  # kb-sweep, which had NO protected-subitem gate at all and failed open on every
+  # consumer box: a check that never runs and a check that never matches are
+  # indistinguishable from a passing one.
+  #
+  # Require POSITIVE evidence the sweep actually completed instead. kb-sweep always
+  # prints a "SUBITEM STATUS SWEEP: <id>" header right after it resolves the item,
+  # followed by either "No subitems found — ready to close." (zero-subitem items) or
+  # the "Legend:" line that only prints after the subitem table has been walked (items
+  # with subitems) — see kanban-helpers.sh. Neither line appears on any error path (bad
+  # context, item not found, undefined function). FAILS CLOSED: no header+completion
+  # pair found -> block, even though the PROTECTED SUBITEMS marker is also absent.
   source {{AITEAMFORGE_DIR}}/kanban-helpers.sh
+  SOURCE_RC=$?
   SWEEP_OUTPUT=$(kb-sweep <ITEM-ID> 2>&1)
+  SWEEP_RC=$?
   echo "$SWEEP_OUTPUT"
+  SWEEP_RAN_OK="false"
+  if echo "$SWEEP_OUTPUT" | grep -qE "SUBITEM STATUS SWEEP: <ITEM-ID>" \
+     && echo "$SWEEP_OUTPUT" | grep -qE "ready to close\.|^  Legend:"; then
+    SWEEP_RAN_OK="true"
+  fi
+  if [ "$SOURCE_RC" -ne 0 ] || [ "$SWEEP_RAN_OK" != "true" ]; then
+    echo "✗ kb-sweep did NOT positively confirm a completed sweep for <ITEM-ID>"
+    echo "  (source rc=$SOURCE_RC, kb-sweep rc=$SWEEP_RC). No 'SUBITEM STATUS SWEEP:"
+    echo "  <ITEM-ID>' header + completion line found in its output — the PROTECTED"
+    echo "  SUBITEMS marker being absent does NOT mean the sweep ran clean; it may not"
+    echo "  have run at all. Fix the source/invocation (check kanban-helpers.sh path,"
+    echo "  team context) before treating this gate as passed. Not merging."
+    break
+  fi
+  # kb-sweep's OWN exit code (SWEEP_RC) is deliberately NOT part of the pass/fail
+  # decision above or below — it is legitimately non-zero for reasons unrelated to
+  # protected subitems (e.g. a framework subitem that completes AFTER merge), which is
+  # exactly the documented over-blocking this gate must not reintroduce. It is captured
+  # only to make the diagnostic above concrete.
   if echo "$SWEEP_OUTPUT" | grep -qE "PROTECTED SUBITEMS UNRESOLVED \([0-9]+\)"; then
     echo "✗ Protected [Review]/[Test]/[UX] subitems are still open — agents cannot cancel"
     echo "  them without user approval. Resolve them, push fixes if needed, re-enter the loop."
@@ -512,12 +558,43 @@ while true; do
   # check list is genuinely empty (verified against gh's source), which is not a reason to
   # block forever. Any OTHER read failure fails closed — an unreadable answer is never
   # evidence of safety.
+  #
+  # "NO CHECKS REPORTED" IS ITSELF AMBIGUOUS (XACA-1159-034): gh prints this exact string
+  # in TWO genuinely different situations that look identical from one read — (a) this
+  # repo/branch has no CI configured at all, and (b) GitHub has not finished REGISTERING
+  # the checks that a just-landed push WILL trigger yet, a transient state that lasts a
+  # handful of seconds. Accepting (a)'s conclusion ("nothing to gate on, proceed") the
+  # first time this string appears means a PR can merge in the gap of case (b), before CI
+  # even exists to gate on. Neither case is distinguishable from a single read.
+  #
+  # Resolve it the same way Gate 4 resolves `mergeable=UNKNOWN` (an analogous GitHub
+  # eventual-consistency gap): bound a re-poll against the SAME head SHA rather than
+  # guessing on the first answer. NO_CHECKS_RETRIES counts consecutive "no checks
+  # reported" reads while HEAD_SHA is unchanged; it resets to 0 on a new push (a fresh
+  # head earns a fresh grace period — see the HEAD_SHA-change block above) and again
+  # below the moment `gh pr checks` reports real check data (case (a) is now
+  # unambiguously ruled out). Below the threshold this re-polls exactly like the
+  # PENDING_CHECKS branch two paragraphs down; only once the ambiguity has had multiple
+  # polls to resolve and STILL reads "no checks reported" is it accepted as case (a).
+  # Bounded, not indefinite: worst case is 5 * 10s = 50s, mirroring Gate 4's own
+  # MERGE_UNKNOWN_RETRIES bound rather than inventing a new shape for the same problem.
   CHECKS_OUT=$(gh pr checks <number> --repo <owner>/<repo> --json name,bucket \
     --jq '.[] | "\(.name)|\(.bucket)"' 2>&1)
   CHECKS_RC=$?
   if [ $CHECKS_RC -ne 0 ]; then
     if echo "$CHECKS_OUT" | grep -qi "no checks reported"; then
-      echo "No CI checks configured on PR #<number> — nothing to gate on here, proceeding."
+      NO_CHECKS_RETRIES=$((NO_CHECKS_RETRIES + 1))
+      if [ "$NO_CHECKS_RETRIES" -lt 5 ]; then
+        echo "gh reports 'no checks reported' for PR #<number> at $HEAD_SHA (poll"
+        echo "  $NO_CHECKS_RETRIES/5 since this head appeared) — could mean no CI is"
+        echo "  configured, or that GitHub hasn't registered checks for this push yet."
+        echo "  Not assuming either; re-polling before accepting this as a genuine pass."
+        sleep 10
+        continue
+      fi
+      echo "'no checks reported' persisted for $NO_CHECKS_RETRIES consecutive polls"
+      echo "  against the same head ($HEAD_SHA) — treating as genuinely no CI configured"
+      echo "  on this repo/branch, proceeding."
     else
       echo "✗ Could not read CI check status for PR #<number> (gh pr checks exited $CHECKS_RC):"
       echo "$CHECKS_OUT"
@@ -525,6 +602,7 @@ while true; do
       break
     fi
   else
+    NO_CHECKS_RETRIES=0   # real check data observed — case (a) is now unambiguously ruled out
     UNSAFE_CHECKS=""
     PENDING_CHECKS=""
     # A here-doc, NOT a pipe: a `while` on the right of a pipe runs in a subshell and the
@@ -627,7 +705,9 @@ done
   See the inline comments above Gate 1 and Troubleshooting § "rebase re-points commit_id" for the measured detail and the manual verification query.
 - On `CHANGES_REQUESTED` from either bot: pause, surface the review body, address feedback, push fixes, re-seed ONLY that gate's `LAST_*_AT`, re-enter the loop.
 - Gate 3 (subitem sweep), Gate 3.5 (CI check runs), and Gate 4 (freshness/mergeability) only run once BOTH bot gates have passed — see the loop's ordering above.
+- **Gate 3 requires POSITIVE evidence kb-sweep ran**, not merely the absence of the `PROTECTED SUBITEMS UNRESOLVED` marker: a failed `source` of kanban-helpers.sh (or any other error that stops kb-sweep from running) also produces output without that marker, and the old check read that silence as a clean sweep. The gate now requires the `SUBITEM STATUS SWEEP: <id>` header plus a completion line (`ready to close.` or `Legend:`) before it will trust the marker's absence at all — missing either fails closed, regardless of what the marker check would have said.
 - Gate 3.5 is an **allowlist**, not a denylist of one bad state: every check must land in gh's own `pass` or `skipping` bucket before merging — `fail` (FAILURE/ERROR/TIMED_OUT/ACTION_REQUIRED) or `cancel` (CANCELLED) blocks outright, and anything still `pending` (including a state gh doesn't recognise) re-polls rather than passing. `--admin` overrides the Team-plan review-count requirement, it does not and must not override a red, cancelled, or still-running CI run. `gh pr checks`'s own exit-code-8-on-pending behavior is documented for plain-text output only — in `--json` mode (used here) it returns success regardless of pending checks, so this gate inspects the `bucket` field directly rather than trusting the command's exit code.
+- **`gh pr checks`'s "no checks reported" is ambiguous, not a clean pass on first read**: it means either "no CI configured" or "GitHub hasn't registered this push's checks yet" — indistinguishable from one query. The gate re-polls (`NO_CHECKS_RETRIES`, bounded at 5 polls / 10s each, same shape as Gate 4's `MERGE_UNKNOWN_RETRIES`) against the unchanged head SHA before accepting it as a genuine "no CI here"; the counter resets on a new push and the moment real check data is observed.
 - On a stale branch (Gate 4): `gh pr update-branch` dismisses stale reviews — re-spawn BOTH bots and re-seed BOTH timestamps afterward.
 - On merge conflicts (Gate 4): halt, never merge — resolve manually, then re-spawn both bots.
 - `state: "CLOSED"` or `"MERGED"` → notify the user and exit the monitor.
@@ -1218,7 +1298,7 @@ After completing:
 
 ---
 
-**Last Updated:** 2026-09-10 (XACA-1159 — fixed two over-claiming checks in the merge loop. Gate 3.5 keyed only on `state == "FAILURE"`, which could not distinguish "not finished yet" from "passed" and let CANCELLED/TIMED_OUT/ACTION_REQUIRED/still-pending checks merge; rebuilt as an allowlist on `gh pr checks`'s own `bucket` classification (`pass`/`skipping` required, `fail`/`cancel` blocks, anything pending re-polls). The committer-date guard against rebase/force-push assumed the new head's committer date is always newer than any stale review, which fails for a force-push onto a pre-existing older commit; added a genuinely mechanical close via compare-API ancestry checking for a rewrite that happens while the loop is polling, and reworded the surrounding prose so the committer-date fallback is documented as a heuristic with a known gap rather than a "mechanical guarantee".) Prior: 2026-09-09 (XACA-1159 — fixed a fail-open merge gate: bot review filters now key on `.user.login` instead of `.user.type == "Bot"`, which resolved to whichever of the two gate bots reviewed most recently. Expanded the single-gate flow to four gates (test, review, protected-subitem sweep, branch freshness/mergeability); added `--paginate` to every reviews-API call; fixed a `ds9-security-review-bot` name conflation — the two real Apps are `ds9-tester-bot[bot]` and `ai-security-review-bot[bot]`.) Prior: 2026-02-18 (Added reviewer re-review monitoring loop, non-blocking subitems protocol, fixed stale review detection in creating agent monitoring loop, updated review handoff template with kanban item ID)
+**Last Updated:** 2026-09-10 (XACA-1159 — fixed two absence-reads-as-success defects in the merge loop, the class this ticket exists to eliminate. Gate 3 (protected-subitem sweep) accepted a missing `PROTECTED SUBITEMS UNRESOLVED` marker as a clean sweep even when kb-sweep never actually ran — e.g. a failed `source` of kanban-helpers.sh, same shape as XACA-1145's shipped kb-sweep that had no protected-subitem gate at all; now requires positive evidence of a completed run (the `SUBITEM STATUS SWEEP: <id>` header plus a completion line) before trusting the marker's absence, failing closed otherwise. Gate 3.5's `no checks reported` pass-through conflated "this repo has no CI" with "GitHub hasn't registered this push's checks yet" (a transient post-push state) and could merge before CI existed; now bounds a re-poll (`NO_CHECKS_RETRIES`, 5 * 10s, mirroring Gate 4's `MERGE_UNKNOWN_RETRIES` shape) against the unchanged head SHA before accepting it as genuine, resetting on a new push or on observing real check data. Also fixed two over-claiming checks in the same loop. Gate 3.5 keyed only on `state == "FAILURE"`, which could not distinguish "not finished yet" from "passed" and let CANCELLED/TIMED_OUT/ACTION_REQUIRED/still-pending checks merge; rebuilt as an allowlist on `gh pr checks`'s own `bucket` classification (`pass`/`skipping` required, `fail`/`cancel` blocks, anything pending re-polls). The committer-date guard against rebase/force-push assumed the new head's committer date is always newer than any stale review, which fails for a force-push onto a pre-existing older commit; added a genuinely mechanical close via compare-API ancestry checking for a rewrite that happens while the loop is polling, and reworded the surrounding prose so the committer-date fallback is documented as a heuristic with a known gap rather than a "mechanical guarantee".) Prior: 2026-09-09 (XACA-1159 — fixed a fail-open merge gate: bot review filters now key on `.user.login` instead of `.user.type == "Bot"`, which resolved to whichever of the two gate bots reviewed most recently. Expanded the single-gate flow to four gates (test, review, protected-subitem sweep, branch freshness/mergeability); added `--paginate` to every reviews-API call; fixed a `ds9-security-review-bot` name conflation — the two real Apps are `ds9-tester-bot[bot]` and `ai-security-review-bot[bot]`.) Prior: 2026-02-18 (Added reviewer re-review monitoring loop, non-blocking subitems protocol, fixed stale review detection in creating agent monitoring loop, updated review handoff template with kanban item ID)
 **Maintained By:** Claude Code
 
 ---

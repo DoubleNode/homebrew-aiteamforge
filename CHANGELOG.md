@@ -36,6 +36,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Dry-run now echoes the ID prefix the board would be born with (mirroring
   `kb-freelance`), so the next drift is visible at provision time rather than
   after the first item is minted.
+- XACA-1159 round-5 gate findings (PR #855). **XACA-1159-030 follow-up
+  (BLOCKING, caught by the review gate):** the force-push cutoff added in
+  round 4 was written `[ "$A" \> "$B" ]`. zsh's `[` builtin REJECTS `>` as a
+  string operator -- it errors with `condition expected: >` and the branch is
+  silently NOT taken, so `EFFECTIVE_CUTOFF` stayed at the committer date and
+  the guard reverted to its weaker pre-round-4 behaviour. It FAILED OPEN on the
+  shell consumers actually run (zsh is the macOS default), while both prose
+  copies claimed "Mechanically enforced". bash accepts the escaped form, which
+  is precisely why a fix verified under `/bin/bash` 3.2 -- this project's own
+  portability rule -- passed it. Measured side by side on one script: zsh
+  errors and skips the branch, bash takes it. Now `[[ ]]`, verified failing
+  then passing under BOTH shells, with a comment recording why the escaped form
+  must not return. **XACA-1159-033:** Gate 3 trusted the ABSENCE of the
+  `PROTECTED SUBITEMS UNRESOLVED` marker, so a failed `source` of
+  kanban-helpers.sh or a crashed `kb-sweep` produced marker-free output and
+  passed. It now requires positive evidence the sweep ran -- the
+  `SUBITEM STATUS SWEEP:` header AND a completion line -- before the marker's
+  absence means anything, and still does not gate on kb-sweep's exit code,
+  which is legitimately non-zero for framework subitems that complete after
+  merge. Verified against real `kb-sweep` output under both shells.
+  **XACA-1159-034:** Gate 3.5's "no checks reported" pass-through conflated "no
+  CI configured" with "GitHub has not registered the checks yet", letting a PR
+  merge in the window before its checks exist; now bounded at 5 re-polls before
+  that string is accepted as genuine, while an unrelated `gh` error still
+  blocks immediately.
+
 - XACA-1163: `share/scripts/kb-init-team` — `board.json`'s `series` field now
   stores the kanban item-ID prefix `X<TEAM_CODE>`, not the Star Trek series
   code. The field was READ everywhere as the ID prefix (`kanban-helpers.sh`'s
