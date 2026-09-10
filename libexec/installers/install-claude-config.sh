@@ -874,6 +874,34 @@ install_claude_config() {
     return 0
 }
 
+# Usage/help text (XACA-0787-012). Printed by -h/--help and on an
+# unrecognized flag. Kept in sync by hand with the flags actually parsed
+# in the entry-point block at the bottom of this file.
+usage() {
+    cat <<'EOF'
+Usage: install-claude-config.sh [OPTIONS] [TEAM...]
+
+Installs and configures Claude Code CLI settings, CLAUDE.md files,
+MCP servers, skills, hooks, and agent personas into CLAUDE_CONFIG_DIR
+(defaults to ~/.claude; see the CLAUDE_CONFIG_DIR precedence notes near
+the top of this file).
+
+Options:
+  -h, --help            Show this help message and exit. Does NOT install
+                         anything.
+  --restore TIMESTAMP   Restore a previous backup (format: YYYYMMDD-HHMMSS)
+                         from AITEAMFORGE_DIR/.backups/claude-config-<TIMESTAMP>
+                         instead of installing.
+
+TEAM arguments are optional positional args accepted for call-site
+compatibility (XACA-0285: personas are now deployed via kb-sync-personas
+instead of per-team writes from this script, so TEAM args currently have
+no effect).
+
+With no options, runs the full installer against CLAUDE_CONFIG_DIR.
+EOF
+}
+
 # Restore function for --restore flag
 restore_claude_config() {
     local backup_date="$1"
@@ -910,12 +938,49 @@ restore_claude_config() {
 # Wrapper to avoid name collision when sourced by setup wizard
 _run_claude_config_installer() { install_claude_config "$@"; }
 
-# If script is run directly (not sourced), execute main function
+# If script is run directly (not sourced), parse flags and execute.
+#
+# XACA-0787-012: this used to be a bare `install_claude_config "$@"` fallback
+# for anything that wasn't --restore — including -h/--help and any typo'd or
+# future flag. That meant an unrecognized flag fell straight through to a
+# FULL install (settings.json, hooks, skills, invoke_persona_sync, the
+# works) against CLAUDE_CONFIG_DIR/HOME instead of failing loudly. An
+# installer that fails OPEN on bad input is a trap for every future caller,
+# test or human. Now: -h/--help prints usage and exits 0 without installing;
+# an unrecognized `-`-prefixed flag prints an error and exits 1 without
+# installing; anything else is treated as a positional TEAM arg (kept for
+# call-site compatibility, see usage()) and passed through via "$@" — NOT
+# collected into a bash array first, because an empty array reference under
+# `set -u` throws "unbound variable" on bash < 4.4 (macOS ships 3.2 as
+# /bin/bash), and the normal production call site (aiteamforge-setup.sh)
+# passes zero args. See knowledge: verify under /bin/bash 3.2, not PATH
+# bash 5.x.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    # Check for --restore flag
-    if [[ "${1:-}" == "--restore" ]]; then
-        restore_claude_config "${2:-}"
-    else
-        install_claude_config "$@"
-    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --restore)
+                restore_claude_config "${2:-}"
+                exit $?
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                log_error "Unrecognized option: $1"
+                usage >&2
+                exit 1
+                ;;
+            *)
+                # First non-flag token: stop parsing, pass it and everything
+                # after it through unchanged (positional TEAM args).
+                break
+                ;;
+        esac
+    done
+    install_claude_config "$@"
 fi

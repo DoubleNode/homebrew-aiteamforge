@@ -198,6 +198,28 @@ _reset_mock_state() {
 # is_configured() checks for $AITEAMFORGE_DIR/.aiteamforge-config.
 # All update_* functions check for $FRAMEWORK_DIR/share/... and bail early
 # when absent — so no rsync/copy side-effects hit the real filesystem.
+#
+# XACA-0787-003/006: that bail-early claim was previously true only BY
+# ACCIDENT of get_framework_dir()'s fallback chain (config.sh): with
+# AITEAMFORGE_HOME unset it shells out to the MOCKED `brew --prefix` above
+# (which returns the real "/opt/homebrew"), so FRAMEWORK_DIR resolved to
+# /opt/homebrew/opt/aiteamforge/libexec — absent on a dev machine that has
+# never installed the tap (M3Pro), but PRESENT and share/-populated on any
+# machine where AITeamForge actually IS installed via brew, which is the
+# NORMAL state for every other machine in the fleet. On such a machine the
+# update_* functions do NOT bail: install_lcars_health_check_plist() and
+# install_knowledge_sync_launchagent() (libexec/installers/install-kanban.sh)
+# both hardcode their plist destination as "$HOME/Library/LaunchAgents/..."
+# — unconditionally, independent of AITEAMFORGE_DIR/AITEAMFORGE_HOME — and
+# this suite never sandboxed $HOME. That combination (real FRAMEWORK_DIR +
+# real $HOME) is the leak this ticket exists to close; it could never
+# reproduce on M3Pro specifically, which is why it kept recurring elsewhere
+# undetected here. Two independent, defense-in-depth fixes below: pin
+# AITEAMFORGE_HOME to an empty sandbox so the bail-early path is guaranteed
+# by DESIGN rather than by which machine happens to run the suite, AND
+# sandbox $HOME so a plist write can never reach the real LaunchAgents dir
+# even if a future code path bypasses the FRAMEWORK_DIR gate entirely
+# (subitem 015 validated $HOME sandboxing alone as sufficient).
 # ─────────────────────────────────────────────────────────────────────────────
 AITEAMFORGE_DIR="$TEST_TMP_DIR/aiteamforge"
 mkdir -p "$AITEAMFORGE_DIR"
@@ -206,6 +228,23 @@ mkdir -p "$AITEAMFORGE_DIR"
 touch "$AITEAMFORGE_DIR/.aiteamforge-config"
 
 export AITEAMFORGE_DIR
+
+# Deterministic bail-early: an AITEAMFORGE_HOME with no share/ tree means
+# every "$FRAMEWORK_DIR/share/..." guard in the update_* functions fails
+# closed on every machine, not just ones where brew never installed the tap.
+AITEAMFORGE_HOME="$TEST_TMP_DIR/framework"
+mkdir -p "$AITEAMFORGE_HOME"
+export AITEAMFORGE_HOME
+
+# $HOME sandbox (XACA-0682 pattern) — belt-and-suspenders in case any code
+# path ever writes to $HOME independent of the FRAMEWORK_DIR gate above.
+export REAL_HOME="$HOME"
+HOME="$TEST_TMP_DIR/home"
+mkdir -p "$HOME/Library/LaunchAgents"
+export HOME
+
+# Real GUI-domain launchctl calls should never fire from this suite either.
+export AITEAMFORGE_SKIP_LAUNCHCTL=1
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Run helper: run upgrade.sh in a clean subprocess with the mock on PATH.
@@ -222,7 +261,10 @@ _run_upgrade() {
     rm -f "$_UPGRADE_OUTPUT_FILE"
     UPGRADE_EXIT=0
     PATH="$MOCK_BIN:$PATH" \
+    HOME="$HOME" \
     AITEAMFORGE_DIR="$AITEAMFORGE_DIR" \
+    AITEAMFORGE_HOME="$AITEAMFORGE_HOME" \
+    AITEAMFORGE_SKIP_LAUNCHCTL=1 \
     bash "$UPGRADE_SH" "$@" < /dev/null > "$_UPGRADE_OUTPUT_FILE" 2>&1 || UPGRADE_EXIT=$?
     UPGRADE_OUTPUT="$(cat "$_UPGRADE_OUTPUT_FILE" 2>/dev/null || true)"
 }

@@ -137,8 +137,18 @@ test_pass
 test_start "Upgrade command supports --dry-run flag"
 create_test_config
 output=$(bash "$COMMANDS_DIR/aiteamforge-upgrade.sh" --dry-run 2>&1 || true)
-# Should preview without making changes
-assert_contains "$output" "dry" || assert_contains "$output" "preview" || true
+# XACA-0787-015: the trailing `|| true` here made this case vacuous — an OR-chain
+# of two assert_contains calls followed by `|| true` can never propagate a failure,
+# so the case passed regardless of $output. Replaced with a real assertion on the
+# one line aiteamforge-upgrade.sh unconditionally prints as soon as DRY_RUN=true is
+# parsed (before any feature-specific branching), verified live in a sandboxed
+# ($HOME/$AITEAMFORGE_DIR redirected to mktemp) run of this exact invocation:
+#   "DRY RUN MODE - No changes will be made"
+# The original fallback needle "preview" was dead code even before the `|| true`
+# neutered the case — that word appears only in --help/usage text, never in real
+# --dry-run execution output, so it never once matched here. Dropped rather than
+# carried forward as a second vacuous branch.
+assert_contains "$output" "DRY RUN MODE" "Expected --dry-run output to include the dry-run mode banner"
 test_pass
 
 test_start "Upgrade command has --help flag"

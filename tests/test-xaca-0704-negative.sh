@@ -134,6 +134,21 @@ mkdir -p "$_AITEAMFORGE_DIR" "$_AITEAMFORGE_HOME"
 # Presence = "configured". Content is irrelevant to the upgrade flow.
 touch "$_AITEAMFORGE_DIR/.aiteamforge-config"
 
+# XACA-0787-003/006: AITEAMFORGE_SKIP_LAUNCHCTL (already set below in
+# _run_upgrade) only gates the launchctl load/unload/bootstrap calls
+# (libexec/lib/common.sh::_aitf_launchctl) — it does NOT gate the plist
+# WRITE. install_lcars_health_check_plist() and
+# install_knowledge_sync_launchagent() (libexec/installers/install-kanban.sh)
+# both hardcode their destination as "$HOME/Library/LaunchAgents/..."
+# unconditionally, so this suite could still leak a plist FILE onto the real
+# machine (missing only the launchctl registration) even with the empty
+# _AITEAMFORGE_HOME bail-early guard above doing its job, on any machine
+# where that guard doesn't bail (see test-xaca-0704-positive.sh's longer
+# note on the same defect for how that happens). $HOME sandbox closes it.
+_REAL_HOME="$HOME"
+_TEST_HOME="$TEST_TMP_DIR/home"
+mkdir -p "$_TEST_HOME/Library/LaunchAgents"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Mock brew infrastructure
 #
@@ -275,6 +290,7 @@ _run_upgrade() {
     : > "$_UPGRADE_OUTPUT_FILE"
 
     env \
+        HOME="$_TEST_HOME" \
         AITEAMFORGE_DIR="$_AITEAMFORGE_DIR" \
         AITEAMFORGE_HOME="$_AITEAMFORGE_HOME" \
         WORKING_DIR="$_AITEAMFORGE_DIR" \

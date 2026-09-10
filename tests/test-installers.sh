@@ -29,6 +29,52 @@ run_assert_pass() {
   # If assert failed, test_fail was already called by the assert function
 }
 
+# Helper: run an installer script (a REAL installer, e.g. --help / probe
+# invocations below) with a throwaway, isolated $HOME so it can never write
+# into the real $HOME or install a real LaunchAgent.
+#
+# XACA-0787-012: this suite used to invoke installers directly —
+# `bash "$INSTALLERS_DIR/install-claude-config.sh" --help` — with neither
+# HOME nor CLAUDE_CONFIG_DIR overridden. install-claude-config.sh had NO
+# --help handling at the time, so the unrecognised flag fell straight
+# through to a FULL install against the real ~/.claude, including
+# invoke_persona_sync. install-fleet-monitor.sh has the identical
+# call-shape defect (its BASH_SOURCE[0]==$0 entry point doesn't even
+# forward "$@" — it runs install_fleet_monitor() unconditionally) and
+# additionally writes com.aiteamforge.*.plist LaunchAgents under
+# $HOME/Library/LaunchAgents/ and loads them via launchctl — exactly the
+# class of pollution the standing "AITeamForge must NEVER be installed on
+# M3Pro" rule exists to prevent (a prior instance of this same class was
+# found live on this machine — see knowledge:
+# project_m3pro_stray_aiteamforge_launchagents.md). Sandboxing HOME here
+# removes the leak vector regardless of whether the target installer's own
+# flag parsing is hardened.
+#
+# AITEAMFORGE_SKIP_LAUNCHCTL/AITF_LAUNCHAGENT_OPTOUT_FILE are the
+# established opt-outs (libexec/lib/common.sh) respected by
+# install-fleet-monitor.sh's launchctl wrapper; set defensively even
+# though HOME sandboxing alone already relocates any plist writes.
+#
+# Usage: run_installer_sandboxed <installer_path> [args...]
+# Prints combined stdout+stderr; never propagates the installer's exit
+# code (probes here care about output/side effects, not exit status).
+run_installer_sandboxed() {
+  local _installer="$1"; shift
+  local _sb_home
+  _sb_home=$(mktemp -d -t installer-probe-home.XXXXXX)
+  (
+    HOME="$_sb_home" \
+    AITEAMFORGE_DIR="$_sb_home/aiteamforge" \
+    AITEAMFORGE_SKIP_LAUNCHCTL=1 \
+    CLAUDE_CONFIG_DIR="$_sb_home/.claude" \
+    AITF_LAUNCHAGENT_OPTOUT_FILE="$_sb_home/.aiteamforge/launchagents.optout" \
+    bash "$_installer" "$@"
+  ) 2>&1
+  local _status=$?
+  rm -rf "$_sb_home"
+  return $_status
+}
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Tests
 # ═══════════════════════════════════════════════════════════════════════════
@@ -94,19 +140,35 @@ run_assert_pass assert_exit_success $([ "$output" -gt 0 ]; echo $?)
 test_start "Claude config installer exists"
 run_assert_pass assert_file_exists "$INSTALLERS_DIR/install-claude-config.sh"
 
-test_start "Claude config installer handles missing ~/.claude/"
-output=$(bash "$INSTALLERS_DIR/install-claude-config.sh" --help 2>&1 || true)
-# Either --help produces output, or the script mentions claude in its code
-if [ -z "$output" ]; then
-  output=$(grep -c "claude" "$INSTALLERS_DIR/install-claude-config.sh" 2>/dev/null || echo "0")
+test_start "Claude config installer --help prints usage and does not install"
+# XACA-0787-012: was `assert_not_empty "$output"` with a grep-the-script
+# fallback when output was empty — that passed whether or not --help
+# actually worked (a test that cannot fail), AND ran the real installer
+# unsandboxed against the real $HOME/.claude. Now sandboxed via
+# run_installer_sandboxed, and the assertion positively checks (a) real
+# usage text came back — not the vacuous fallback path — and (b) none of
+# the full-install markers appear, i.e. --help did not fall through to
+# installing anything.
+output=$(run_installer_sandboxed "$INSTALLERS_DIR/install-claude-config.sh" --help)
+if [[ "$output" == *"Usage: install-claude-config.sh"* ]] \
+  && [[ "$output" != *"Claude Code Configuration Complete"* ]] \
+  && [[ "$output" != *"Backups will be saved"* ]]; then
+  test_pass
+else
+  test_fail "Expected --help usage output with no install side effects, got: $output"
 fi
-run_assert_pass assert_not_empty "$output"
 
 test_start "Fleet monitor installer exists"
 run_assert_pass assert_file_exists "$INSTALLERS_DIR/install-fleet-monitor.sh"
 
 test_start "Fleet monitor installer handles missing Tailscale"
-output=$(bash "$INSTALLERS_DIR/install-fleet-monitor.sh" --help 2>&1 || true)
+# Sandboxed (XACA-0787-012): install-fleet-monitor.sh has the same
+# call-shape defect as install-claude-config.sh did (BASH_SOURCE[0]==$0
+# entry point ignores "$@" entirely and runs a full install, which writes
+# com.aiteamforge.*.plist LaunchAgents under $HOME/Library/LaunchAgents/).
+# Hardening its own flag parsing is out of scope here (tracked separately);
+# this call site must not run it against the real $HOME regardless.
+output=$(run_installer_sandboxed "$INSTALLERS_DIR/install-fleet-monitor.sh" --help)
 if [ -z "$output" ]; then
   output=$(grep -c "fleet\|monitor" "$INSTALLERS_DIR/install-fleet-monitor.sh" 2>/dev/null || echo "0")
 fi
@@ -116,7 +178,12 @@ test_start "Team installer exists"
 run_assert_pass assert_file_exists "$INSTALLERS_DIR/install-team.sh"
 
 test_start "Team installer handles unknown team ID gracefully"
-output=$(bash "$INSTALLERS_DIR/install-team.sh" invalid-team-id 2>&1 || true)
+# Sandboxed (XACA-0787-012): install-team.sh has no BASH_SOURCE[0]==$0
+# guard at all — it is a straight-line script that runs unconditionally
+# when executed directly, so an "invalid-team-id" probe here was running
+# the real team-install flow unsandboxed. Hardening the script itself is
+# out of scope here; this call site must not run it against the real $HOME.
+output=$(run_installer_sandboxed "$INSTALLERS_DIR/install-team.sh" invalid-team-id)
 output_lower=$(echo "$output" | tr '[:upper:]' '[:lower:]')
 if [[ "$output_lower" == *"error"* ]] || [[ "$output_lower" == *"unknown"* ]] || [[ "$output_lower" == *"invalid"* ]] || [[ "$output_lower" == *"not found"* ]]; then
   test_pass

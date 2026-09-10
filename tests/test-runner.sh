@@ -420,6 +420,289 @@ assert_file_valid_json() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
+# XACA-0787-003/006: Self-policing real-$HOME leak guard
+# ═══════════════════════════════════════════════════════════════════════════
+# Instance-by-instance remediation of tap-test $HOME leaks was tried FOUR
+# times (2026-07-12, 07-24, 08-13, 09-05/06) and the CLASS survived every
+# one, because nothing made a leaking test FAIL — it just silently wrote
+# into the developer's real $HOME and the run still reported green. This
+# guard closes the class at the harness level: it runs around EVERY suite
+# `run_test_file` executes, regardless of whether that suite itself
+# remembers to sandbox $HOME (the individual-suite fix subitem 015 proved
+# sufficient per-suite; this is the backstop for the suite that forgets).
+#
+# It brackets each suite with a snapshot-before / assert-after of the SIX
+# attested real-machine leak vectors:
+#   1. Plist CREATION under the real ~/Library/LaunchAgents/com.aiteamforge.*
+#   2. Plist REWRITE — same filename, changed mtime/size/content
+#   3. launchctl-registered jobs with NO plist on disk (invisible to `ls`)
+#   4. The opt-out sentinel ~/.aiteamforge/launchagents.optout appearing/changing
+#   5. ~/.claude/settings.json gaining a hook registration
+#   6. Abandoned sandbox directories left at the top of ${TMPDIR:-/tmp} —
+#      MEASURED the highest-volume vector of the six (orchestrator sweep,
+#      2026-09-10 13:56: 1,525 `tmp.*`-prefixed dirs outstanding, ~750/day
+#      regrowth after a manual cleanup), so this is weighted as the primary
+#      check, not an afterthought.
+#
+# IMPORTANT — this guard only brackets the run_test_file() path (i.e. `bash
+# test-runner.sh [file...]`, which is how both CI and the documented
+# workflow invoke every suite in this directory — see
+# .github/workflows/tap-installer-tests.yml). A suite executed standalone
+# (`bash homebrew-tap/tests/test-foo.sh` directly, bypassing test-runner.sh's
+# main()) is NOT bracketed by this guard — standalone mode only sources this
+# file for its assert/test_* functions, it never calls run_test_file(). That
+# is a known, documented gap, not a silent one.
+#
+# FAIL LOUD, NEVER SILENT (design constraint): every check below prefers a
+# false positive over a false negative. Bash 3.2 compatible (this fleet's
+# /bin/bash) — no associative arrays. `|| true` guards every command whose
+# natural "nothing found" exit status would otherwise trip `set -eo
+# pipefail` and abort the whole runner instead of reporting a clean gate.
+
+LEAK_GUARD_STATE_DIR=""
+LEAK_GUARD_TRIPPED=false
+# XACA-0787-019: the launchctl binary this guard's OWN detection/remediation
+# calls, as an indirection variable rather than a bare literal. Defaults to
+# the real absolute path — production behavior is UNCHANGED, every suite
+# still gets the real thing regardless of PATH tricks. The only reason this
+# is a variable at all is so this guard's own bootout-by-label remediation
+# logic can be exercised against a MOCK launchctl in a test of the guard
+# itself (record invocations to a file, assert the right labels/args),
+# without ever touching the real machine's launchd. Never override this
+# outside such a test.
+_LEAK_GUARD_LAUNCHCTL_BIN="${_LEAK_GUARD_LAUNCHCTL_BIN:-/bin/launchctl}"
+# LEAK_GUARD_TMPROOT is the temp root snapshotted for vector 6. It MUST be
+# captured before TEST_TMP_DIR exists (this function runs before
+# setup_test_env in run_test_file) so TEST_TMP_DIR's own directory doesn't
+# register as a false-positive "new" entry once the suite creates it.
+LEAK_GUARD_TMPROOT="${TMPDIR:-/tmp}"
+
+# Real (un-sandboxed) LaunchAgents plists for this product. run_test_file()
+# executes in the RUNNER's own process — only the child `bash "$test_file"`
+# subshell ever exports a sandboxed $HOME, and that export does not survive
+# back into this parent process — so plain $HOME here is always the real one.
+_leak_guard_plist_glob() {
+  ls -1 "$HOME/Library/LaunchAgents"/com.aiteamforge.*.plist 2>/dev/null || true
+}
+
+# Fingerprint every real plist as "path|mtime|size|md5". Content-sensitive
+# (not just mtime/size) so a rewrite that happens to land in the same second
+# with the same byte count is still caught.
+_leak_guard_plist_fingerprint() {
+  local p
+  for p in $(_leak_guard_plist_glob); do
+    [ -f "$p" ] || continue
+    local mtime size sum
+    mtime=$(stat -f '%m' "$p" 2>/dev/null || echo '?')
+    size=$(stat -f '%z' "$p" 2>/dev/null || echo '?')
+    sum=$(md5 -q "$p" 2>/dev/null || echo '?')
+    printf '%s|%s|%s|%s\n' "$p" "$mtime" "$size" "$sum"
+  done | sort
+}
+
+# Real launchctl jobs for this product, keyed by label only (never touches
+# the mock: this runs in the parent process, whose PATH a child's `export
+# PATH="$MOCK_BIN_DIR:$PATH"` cannot reach — and it uses the ABSOLUTE path
+# (via $_LEAK_GUARD_LAUNCHCTL_BIN, which defaults to it) defensively anyway,
+# exactly like the tailscale suite's own cleanup does).
+_leak_guard_launchctl_jobs() {
+  "$_LEAK_GUARD_LAUNCHCTL_BIN" list 2>/dev/null | awk '{print $3}' | grep '^com\.aiteamforge\.' | sort || true
+}
+
+_leak_guard_file_fingerprint() {
+  local f="$1"
+  if [ -f "$f" ]; then
+    md5 -q "$f" 2>/dev/null || echo '?'
+  else
+    echo '__absent__'
+  fi
+}
+
+# Vector 6: top-level entries under the temp root. Filtered to test-shaped
+# names (aiteamforge/xaca/tap-test naming families actually observed across
+# this suite's mktemp templates — see XACA-0787-003 census) so an unrelated
+# process creating/removing its own top-level temp dir in the same window
+# doesn't flap this gate; the filter is deliberately broad rather than an
+# exact enumeration, because the failure mode this guard exists to prevent
+# is a NEW template nobody thought to sandbox — an exact list would miss
+# exactly that case.
+_leak_guard_tmproot_snapshot() {
+  find "$LEAK_GUARD_TMPROOT" -maxdepth 1 -type d \
+    \( -iname '*aiteamforge*' -o -iname 'xaca*' -o -iname '*tap-test*' -o -iname 'tmp.*' \) \
+    2>/dev/null | sort || true
+}
+
+leak_guard_snapshot() {
+  LEAK_GUARD_STATE_DIR="$(mktemp -d -t aiteamforge-leakguard.XXXXXX)"
+  _leak_guard_plist_fingerprint > "$LEAK_GUARD_STATE_DIR/plists.before"
+  # XACA-0787-019: plain PATH list (not the fingerprint), kept separately so
+  # remediation can compute exactly which plists are NEW via `comm -13`
+  # against paths.after — the fingerprint file mixes "new" and "rewritten"
+  # together (both show up as a diff), and only "new" is safe to remediate.
+  # A pre-existing real plist that got REWRITTEN is still reported by the
+  # fingerprint diff below, but deliberately left untouched by remediation:
+  # auto-reverting a real, already-installed job's plist is a different and
+  # riskier operation than cleaning up something this run itself created,
+  # and is out of scope here.
+  _leak_guard_plist_glob > "$LEAK_GUARD_STATE_DIR/plist-paths.before"
+  _leak_guard_launchctl_jobs > "$LEAK_GUARD_STATE_DIR/launchctl.before"
+  _leak_guard_file_fingerprint "$HOME/.aiteamforge/launchagents.optout" > "$LEAK_GUARD_STATE_DIR/optout.before"
+  _leak_guard_file_fingerprint "$HOME/.claude/settings.json" > "$LEAK_GUARD_STATE_DIR/claude-settings.before"
+  _leak_guard_tmproot_snapshot > "$LEAK_GUARD_STATE_DIR/tmproot.before"
+}
+
+# XACA-0787-019: deregister ONE launchd job by LABEL. Never `unload -w
+# <path>` — that requires a plist file to read and fails with "Input/output
+# error" when the file is already gone (measured on M3Pro 2026-09-10), which
+# is exactly the vector-3 case (job registered, no plist on disk) this
+# exists to clear. `bootout` addresses the label directly; no file needed.
+#
+# Idempotent/backstop-safe by construction: bootout's own exit code is
+# NEVER trusted as proof of removal — a variety of real launchd outcomes
+# (including "already gone", which is the whole point) can report non-zero
+# here even though the end state is exactly what's wanted. The actual
+# post-condition — is the label still registered? — is re-queried directly
+# via `launchctl list` afterward. That is the only thing this function
+# believes.
+#
+# Returns 0 if the label is confirmed NOT registered afterward (whether
+# bootout did the work or it was already gone), 1 if it is STILL registered
+# — the caller must treat 1 as a loud failure, never swallow it.
+_leak_guard_bootout_label() {
+  local label="$1"
+  [ -n "$label" ] || return 0
+  "$_LEAK_GUARD_LAUNCHCTL_BIN" bootout "gui/$(id -u)/${label}" >/dev/null 2>&1 || true
+  if "$_LEAK_GUARD_LAUNCHCTL_BIN" list 2>/dev/null | awk '{print $3}' | grep -qx -- "$label"; then
+    return 1
+  fi
+  return 0
+}
+
+# Returns 0 clean, 1 tripped. Prints a precise report to stderr on trip —
+# never degrades a real diff into a pass (test-e2e-setup-launch.sh:616's
+# quoted-glob no-op is exactly the bug class this must not repeat).
+leak_guard_assert() {
+  if [ -z "$LEAK_GUARD_STATE_DIR" ] || [ ! -d "$LEAK_GUARD_STATE_DIR" ]; then
+    print_error "LEAK GUARD INTERNAL ERROR: assert called with no snapshot for $CURRENT_TEST_FILE — treating as a trip rather than silently passing."
+    return 1
+  fi
+
+  local tripped=false
+
+  _leak_guard_plist_fingerprint > "$LEAK_GUARD_STATE_DIR/plists.after"
+  if ! diff -q "$LEAK_GUARD_STATE_DIR/plists.before" "$LEAK_GUARD_STATE_DIR/plists.after" >/dev/null 2>&1; then
+    tripped=true
+    print_error "LEAK [plist] real ~/Library/LaunchAgents/com.aiteamforge.* changed during $CURRENT_TEST_FILE:"
+    diff -u "$LEAK_GUARD_STATE_DIR/plists.before" "$LEAK_GUARD_STATE_DIR/plists.after" 2>&1 | sed 's/^/    /' >&2 || true
+  fi
+
+  _leak_guard_launchctl_jobs > "$LEAK_GUARD_STATE_DIR/launchctl.after"
+  if ! diff -q "$LEAK_GUARD_STATE_DIR/launchctl.before" "$LEAK_GUARD_STATE_DIR/launchctl.after" >/dev/null 2>&1; then
+    tripped=true
+    print_error "LEAK [launchctl] real launchctl gained/lost a com.aiteamforge.* job during $CURRENT_TEST_FILE (no plist required for this vector):"
+    diff -u "$LEAK_GUARD_STATE_DIR/launchctl.before" "$LEAK_GUARD_STATE_DIR/launchctl.after" 2>&1 | sed 's/^/    /' >&2 || true
+  fi
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # XACA-0787-019: REMEDIATION — deregister by LABEL anything this suite
+  # newly registered, so a detected leak also gets cleared off the real
+  # machine, not just reported. Scoped strictly to what THIS run ADDED
+  # (comm -13 of the before/after snapshots) — never a blanket sweep of
+  # every com.aiteamforge.* job currently on the box. That distinction is
+  # the entire safety margin: a blanket `bootout` of every matching label
+  # would tear down a developer's or CI runner's own pre-existing,
+  # legitimately-installed AITeamForge jobs, which this guard must never
+  # touch. Anything already present in the "before" snapshot — including a
+  # pre-existing plist that got REWRITTEN (still flagged above as a [plist]
+  # leak) — is left completely alone here; auto-reverting a real job's
+  # plist is a different, riskier operation than clearing what this run
+  # itself created, and is out of scope.
+  _leak_guard_plist_glob > "$LEAK_GUARD_STATE_DIR/plist-paths.after"
+  local new_plist_paths new_launchctl_labels
+  new_plist_paths=$(comm -13 "$LEAK_GUARD_STATE_DIR/plist-paths.before" "$LEAK_GUARD_STATE_DIR/plist-paths.after" 2>/dev/null || true)
+  new_launchctl_labels=$(comm -13 "$LEAK_GUARD_STATE_DIR/launchctl.before" "$LEAK_GUARD_STATE_DIR/launchctl.after" 2>/dev/null || true)
+
+  local remediate_file="$LEAK_GUARD_STATE_DIR/remediate-labels"
+  {
+    if [ -n "$new_plist_paths" ]; then
+      printf '%s\n' "$new_plist_paths" | while IFS= read -r p; do
+        if [ -n "$p" ]; then
+          basename "$p" .plist
+        fi
+      done
+    fi
+    if [ -n "$new_launchctl_labels" ]; then
+      printf '%s\n' "$new_launchctl_labels"
+    fi
+  } | sed '/^$/d' | sort -u > "$remediate_file" 2>/dev/null || true
+
+  local remediation_failed=false
+  if [ -s "$remediate_file" ]; then
+    local label_count label
+    label_count=$(wc -l < "$remediate_file" 2>/dev/null | tr -d ' ' || echo '?')
+    print_error "LEAK REMEDIATION: booting out ${label_count:-?} label(s) $CURRENT_TEST_FILE newly registered, by LABEL — never 'unload -w <path>' (fails with Input/output error once the plist is already gone, which is exactly the vector-3 case this exists for):"
+    while IFS= read -r label; do
+      [ -n "$label" ] || continue
+      if _leak_guard_bootout_label "$label"; then
+        print_error "  cleared: $label"
+      else
+        remediation_failed=true
+        print_error "  STILL REGISTERED after bootout: $label — teardown could NOT clear this. Manual cleanup required: launchctl bootout gui/$(id -u)/$label"
+      fi
+    done < "$remediate_file"
+
+    # Only remove the leaked plist FILE once its label is confirmed clear —
+    # never the reverse order, so a job that's still registered doesn't
+    # also lose its only on-disk trace before a human can look at it.
+    if [ "$remediation_failed" = false ] && [ -n "$new_plist_paths" ]; then
+      printf '%s\n' "$new_plist_paths" | while IFS= read -r np; do
+        if [ -n "$np" ] && [ -f "$np" ]; then
+          rm -f -- "$np" 2>/dev/null || true
+        fi
+      done
+    fi
+  fi
+
+  if [ "$remediation_failed" = true ]; then
+    tripped=true
+    print_error "LEAK GUARD REMEDIATION FAILED for $CURRENT_TEST_FILE — see 'STILL REGISTERED' line(s) above. This is WORSE than a cleanly-remediated leak: the job is still live on the real machine after this run ended. Do not treat this run as clean."
+  fi
+  # ─────────────────────────────────────────────────────────────────────────
+
+  _leak_guard_file_fingerprint "$HOME/.aiteamforge/launchagents.optout" > "$LEAK_GUARD_STATE_DIR/optout.after"
+  if ! diff -q "$LEAK_GUARD_STATE_DIR/optout.before" "$LEAK_GUARD_STATE_DIR/optout.after" >/dev/null 2>&1; then
+    tripped=true
+    print_error "LEAK [optout] real ~/.aiteamforge/launchagents.optout appeared or changed during $CURRENT_TEST_FILE — on a real consumer box this permanently suppresses the auto-upgrade LaunchAgent."
+  fi
+
+  _leak_guard_file_fingerprint "$HOME/.claude/settings.json" > "$LEAK_GUARD_STATE_DIR/claude-settings.after"
+  if ! diff -q "$LEAK_GUARD_STATE_DIR/claude-settings.before" "$LEAK_GUARD_STATE_DIR/claude-settings.after" >/dev/null 2>&1; then
+    tripped=true
+    print_error "LEAK [claude-settings] real ~/.claude/settings.json changed during $CURRENT_TEST_FILE (possible hook registration pointing into a sandbox)."
+  fi
+
+  _leak_guard_tmproot_snapshot > "$LEAK_GUARD_STATE_DIR/tmproot.after"
+  if ! diff -q "$LEAK_GUARD_STATE_DIR/tmproot.before" "$LEAK_GUARD_STATE_DIR/tmproot.after" >/dev/null 2>&1; then
+    local new_entries
+    new_entries=$(comm -13 "$LEAK_GUARD_STATE_DIR/tmproot.before" "$LEAK_GUARD_STATE_DIR/tmproot.after" 2>/dev/null || true)
+    if [ -n "$new_entries" ]; then
+      tripped=true
+      print_error "LEAK [abandoned-sandbox] $CURRENT_TEST_FILE left temp dir(s) behind under $LEAK_GUARD_TMPROOT (highest-volume vector, XACA-0787 measured 2026-09-10):"
+      printf '%s\n' "$new_entries" | sed 's/^/    /' >&2
+    fi
+  fi
+
+  command rm -rf "$LEAK_GUARD_STATE_DIR" 2>/dev/null || true
+  LEAK_GUARD_STATE_DIR=""
+
+  if [ "$tripped" = true ]; then
+    LEAK_GUARD_TRIPPED=true
+    return 1
+  fi
+  return 0
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Test Discovery and Execution
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -448,6 +731,13 @@ run_test_file() {
 
   print_info "Running: $CURRENT_TEST_FILE"
 
+  # XACA-0787-003/006: snapshot the real $HOME leak vectors BEFORE the suite
+  # (and before setup_test_env creates this run's own TEST_TMP_DIR, so that
+  # tracked, properly-cleaned-up directory never counts as a false positive
+  # for vector 6 below). See the leak_guard_* functions' own header comment
+  # for the full rationale and the six vectors covered.
+  leak_guard_snapshot
+
   # Set up test environment
   setup_test_env
 
@@ -460,6 +750,33 @@ run_test_file() {
   export -f assert_success assert_failure assert_matches
   export -f assert_empty assert_not_empty assert_valid_json assert_file_valid_json
   export -f print_success print_error print_warning print_info print_verbose
+
+  # XACA-0787-019: default every suite to AITEAMFORGE_SKIP_LAUNCHCTL=1 —
+  # prevention, not just detection. This makes libexec/lib/common.sh's
+  # _aitf_launchctl wrapper short-circuit before it ever touches the real
+  # launchctl, for any suite that never thought to set this itself. It is a
+  # DEFAULT, not a clobber (`:=` only fills an unset/empty var), so a suite
+  # that needs real pass-through against a MOCK launchctl on PATH — e.g.
+  # test-xaca-1097-launchagent-disabled-autofix.sh, which deliberately
+  # `unset`s this inside its own process to exercise the wrapper's
+  # pass-through path against a fake binary — still works exactly as
+  # designed: the unset happens in the child's own environment, after it
+  # already inherited this default, and does not propagate back here.
+  #
+  # IMPORTANT: this is prevention, not the whole fix. HOME sandboxing stops
+  # the plist FILE from landing in the real ~/Library/LaunchAgents (most
+  # suites already sandbox HOME via setup_test_env-adjacent fixtures), but
+  # `launchctl` is per-USER, not per-HOME — a `launchctl load` of a
+  # HOME-sandboxed plist still registers a job with the REAL user's launchd.
+  # That is exactly how vector 3 (registered-but-no-plist-on-disk) arises
+  # even inside an otherwise-sandboxed suite. AITEAMFORGE_SKIP_LAUNCHCTL=1
+  # closes that gap by suppressing the registration itself; the
+  # leak_guard_assert bootout-by-label remediation below is the backstop
+  # for whatever gets through anyway (a suite that unsets this, a suite
+  # calling raw `launchctl`/`/bin/launchctl` instead of the wrapper, etc.).
+  # Neither one substitutes for the other.
+  : "${AITEAMFORGE_SKIP_LAUNCHCTL:=1}"
+  export AITEAMFORGE_SKIP_LAUNCHCTL
 
   # Run the test file
   local test_exit_code=0
@@ -519,6 +836,20 @@ run_test_file() {
 
   # Clean up test environment
   cleanup_test_env
+
+  # XACA-0787-003/006: assert AFTER cleanup_test_env removes this run's own
+  # TEST_TMP_DIR, so only genuinely abandoned/leaked state remains to trip
+  # the guard. Deliberately NOT `leak_guard_assert || true` — a real trip
+  # must flip this suite's result to failing, never pass through silently.
+  # It is intentionally evaluated separately from the fails/test_exit_code
+  # branch above (which already printed Completed:/Failed:/Crashed:) rather
+  # than folded into it, so a leak is reported as its own loud, unambiguous
+  # signal instead of being absorbed into — and possibly masked by — the
+  # suite's own pass/fail bookkeeping.
+  if ! leak_guard_assert; then
+    print_error "LEAK GUARD TRIPPED: $CURRENT_TEST_FILE touched the real \$HOME — see LEAK [...] lines above. Failing this run regardless of the suite's own pass/fail result."
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+  fi
 
   echo ""
 }

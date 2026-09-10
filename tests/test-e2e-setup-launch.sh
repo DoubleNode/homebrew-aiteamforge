@@ -612,8 +612,32 @@ write_minimal_config "iOS"
 setup_start_stop_mocks
 export PATH="$MOCK_BIN:$ORIG_PATH"
 
-# Ensure no plist files exist in mock home
-rm -f "$HOME/Library/LaunchAgents/com.aiteamforge.*.plist"
+# Ensure no plist files exist in mock home before this test runs. A stray
+# plist left behind by an earlier test case sharing this $HOME sandbox would
+# silently flip this test's precondition from "no plists" to "some plists"
+# without either test failing loudly.
+#
+# NOTE (XACA-0787-013): this MUST use an unquoted glob (or find, as below) —
+# the historical bug here quoted the pattern
+# (`rm -f "$HOME/Library/LaunchAgents/com.aiteamforge.*.plist"`), which makes
+# the shell search for a file LITERALLY named "com.aiteamforge.*.plist".
+# That file never exists, so `rm -f` always exited 0 having removed
+# nothing — a silent no-op that looked like successful cleanup on every run
+# and never once actually cleared a real plist.
+launchagents_dir="$HOME/Library/LaunchAgents"
+mkdir -p "$launchagents_dir"
+stray_plists=$(find "$launchagents_dir" -maxdepth 1 -name 'com.aiteamforge.*.plist' -print)
+if [ -n "$stray_plists" ]; then
+  print_verbose "Removing stray plist(s) before test: $stray_plists"
+  find "$launchagents_dir" -maxdepth 1 -name 'com.aiteamforge.*.plist' -delete
+fi
+# Assert the precondition this test actually depends on, instead of assuming
+# the cleanup above worked: no plists present in the mock home. This makes
+# "removed N plists" and "matched nothing" observably different outcomes —
+# either the cleanup above already made this true, or the test now fails
+# loudly instead of silently running against a dirty precondition.
+remaining_plists=$(find "$launchagents_dir" -maxdepth 1 -name 'com.aiteamforge.*.plist' -print)
+assert_empty "$remaining_plists" "Expected no plists in mock home before 'skips plists that don't exist' test, found: $remaining_plists"
 
 output=$(bash "$START_SCRIPT" agents 2>&1 || true)
 # Should warn about missing plists but not crash

@@ -224,6 +224,43 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   design exists to prevent). Verified failing on purpose (call commented out
   -> 2 of 8 assertions red) before confirming it passes with the call
   restored.
+- XACA-0787 (tap test-suite $HOME leak, five recurrences closed at the root):
+  the suites sandboxed `AITEAMFORGE_DIR` but not `HOME`, so every full-suite run
+  wrote live LaunchAgents into the real `~/Library/LaunchAgents`. ROOT CAUSE, and
+  the reason four prior instance-fixes all failed: every one of them reached for
+  `AITEAMFORGE_SKIP_LAUNCHCTL=1`, which exists only in `libexec/lib/common.sh`
+  inside the `_aitf_launchctl` wrapper and gates `load`/`unload`/`bootstrap`
+  ONLY. It appears nowhere in `install-kanban.sh`, where
+  `install_lcars_health_launchagent` (:1187) and the knowledge-sync installer
+  (:2558) — exactly the two attested leaking labels — write
+  `plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.<label>.plist"`
+  unconditionally via `sed "$plist_template" > "$plist_dest"`. The flag silenced
+  what `launchctl list` reported while the FILE kept landing. Note `launchctl` is
+  per-user, not per-HOME, so HOME-sandboxing and `SKIP_LAUNCHCTL` are both
+  required and neither substitutes for the other.
+  Changes in this tap: `tests/test-runner.sh` gains a six-vector self-policing
+  leak guard (plist creation, plist rewrite, launchctl-registered-with-no-plist,
+  opt-out sentinel, `~/.claude/settings.json`, abandoned sandboxes) plus
+  label-scoped remediation via `launchctl bootout gui/$(id -u)/<label>` — never
+  `unload -w <path>`, which fails `Input/output error` once the plist is gone —
+  tracked by set-difference against a pre-run snapshot so pre-existing jobs are
+  never touched; `AITEAMFORGE_SKIP_LAUNCHCTL=1` is now default-filled (`:=`, not
+  clobbered, so the suite that deliberately unsets it still exercises real
+  pass-through). `tests/test-installers.sh`: three unsandboxed real-installer
+  invocations sandboxed (not one — `install-fleet-monitor.sh` was the worst, its
+  entry point does not forward `"$@"` so ANY argument including `--help` ran a
+  full install that wrote and loaded real plists). `libexec/installers/install-claude-config.sh`
+  now has a real `usage()` and rejects unrecognised flags instead of falling
+  through to a full install. `tests/test-e2e-setup-launch.sh`: the cleanup at
+  :616 quoted its glob, so it searched for a file literally named
+  `com.aiteamforge.*.plist` and silently no-opped forever; now a real
+  `find -maxdepth 1 -name ... -delete` with an assertion on the precondition.
+  `tests/test-lifecycle.sh`: `assert_contains ... || true` followed by an
+  unconditional `test_pass` asserted nothing; replaced with a real assertion.
+  `tests/test-xaca-0704-{positive,negative}.sh` retrofitted with HOME sandboxes.
+  New `tests/test-xaca-0787-012-claude-config-flag-guard.sh` (8 assertions).
+  KNOWN GAP, filed as XACA-1169: the guard lives in the runners, so a suite
+  invoked standalone still bypasses it.
 - XACA-1113-022 (review, PR #853): the `test-xaca-1113-012-msg-fail-closed.sh`
   seeding added for XACA-1113's `set -u` fix only covered the six counter
   variables (`TOTAL_TESTS`, `PASSED_TESTS`, `FAILED_TESTS`, `SKIPPED_TESTS`,
