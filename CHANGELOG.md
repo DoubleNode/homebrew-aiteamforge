@@ -15,11 +15,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Non-vacuity proven two ways — the suite's own RED fixture (a line-swapped
   scratch helper reproduces the reversed order), and independently by swapping
   the real canonical helper, which takes the suite to exit 1 / 2 failed.
-  KNOWN GAP, tracked: Section D resolves `REAL_BADGE_HELPER` (canonical) only.
-  Swapping the SHIPPED `share/scripts/` copy leaves the suite green at 64/64 —
-  measured, not assumed. On a ticket whose subject is canonical/tap
-  divergence that is the blind spot the ticket exists to close; extending D
-  to `SHIPPED_BADGE_HELPER` is the follow-up.
+  GAP CLOSED (same subitem, follow-up pass): added Section D2, the identical
+  probe run against `SHIPPED_BADGE_HELPER` (`share/scripts/`) instead of
+  canonical — suite is now 64 -> 73 assertions. Non-vacuity measured directly:
+  swapping the ordering in the SHIPPED copy alone (canonical untouched) left
+  the pre-D2 suite green at 64/64 (the exact blind spot D2 exists to close);
+  with D2 present the identical swap now fails 4 assertions (69 passed / 4
+  failed, exit 1). Restored and confirmed byte-identical to the pre-swap
+  copy afterward. RESIDUAL, reported not fixed: Section C (the OSC
+  signal-path/content assertions) has the identical canonical-only shape —
+  it resolves `REAL_BADGE_HELPER` exclusively and was not extended here,
+  since it drives a real pty/tmux/production-hook harness rather than a
+  simple two-function override and is not a trivial extension of this pass.
 - XACA-1113 (test, CI coverage): registered `tests/test-xaca-1113-012-msg-fail-closed.sh`
   and `tests/test-xaca-1113-013-msg-this-machine-regression.sh` in
   `tests/ci-manifest` as `plain-shell` (XACA-1113-005) — both files were

@@ -1000,6 +1000,105 @@ for _d_mode in activate clear-absent clear-to-zero; do
 done
 
 # ═════════════════════════════════════════════════════════════════════════════
+# SECTION D2 — the SAME ordering guarantee, on the SHIPPED tap copy
+# (XACA-1144-009 gap closure)
+#
+# WHY THIS EXISTS: every assertion in Section D above resolves
+# $REAL_BADGE_HELPER — the dev-team CANONICAL file — exclusively. That is
+# precisely the "verified in canonical, never verified on a consumer" blind
+# spot this whole ticket exists to close everywhere else (see file header:
+# XACA-0214/XACA-0231/XACA-0223 all shipped nothing while looking fixed).
+# Measured directly while building this section: swapping the ordering in
+# $SHIPPED_BADGE_HELPER ALONE, leaving canonical untouched, left the original
+# Section D suite fully green (64/64) — the ordering guard this ticket is FOR
+# would not have caught the exact regression it exists to prevent, on the
+# file copy that actually reaches a consumer's disk. D2 runs the identical
+# probe, unmodified, against $SHIPPED_BADGE_HELPER to close that gap.
+#
+# This does not replace Section D — canonical is still the file every
+# consumer copy is SUPPOSED to be a mirror of, so both must independently
+# hold the invariant. It also does not fix the general "canonical-only"
+# pattern elsewhere in this file (Section C's OSC-content signal-path
+# assertions have the identical shape and are NOT extended here — see the
+# XACA-1144-009 completion report for why that one is left as a reported gap
+# rather than silently fixed alongside this one).
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── D2 sanity: the SHIPPED tap copy has exactly 3 OSC-then-prefix pairs too ──
+_D2_ORIG_COUNT="$(perl -0777 -ne '
+    $c = 0;
+    $c += () = /            iterm2_set_user_var claude_active "1"\n            _fire_claude_tab_prefix --activate\n/g;
+    $c += () = /            iterm2_set_user_var claude_active "0"\n            _fire_claude_tab_prefix --deactivate\n/g;
+    print $c;
+' "$SHIPPED_BADGE_HELPER")"
+test_start "D2 sanity: SHIPPED badge helper has exactly 3 OSC-then-prefix pairs to invert for the RED proof"
+if [ "$_D2_ORIG_COUNT" = "3" ]; then
+    test_pass
+else
+    test_fail "expected 3 matching two-line pairs in the SHIPPED copy, found $_D2_ORIG_COUNT — either the shipped copy has diverged from canonical in a way that breaks this proof's own pattern match, or sync-tap.sh has not re-mirrored it; the ordering guard cannot run against a copy it cannot parse"
+fi
+
+_D2_SWAPPED_HELPER="$TEST_TMP_DIR/iterm2_badge_helper.SHIPPED.SWAPPED.sh"
+perl -0777 -pe '
+    s/            iterm2_set_user_var claude_active "1"\n            _fire_claude_tab_prefix --activate\n/            _fire_claude_tab_prefix --activate\n            iterm2_set_user_var claude_active "1"\n/g;
+    s/            iterm2_set_user_var claude_active "0"\n            _fire_claude_tab_prefix --deactivate\n/            _fire_claude_tab_prefix --deactivate\n            iterm2_set_user_var claude_active "0"\n/g;
+' "$SHIPPED_BADGE_HELPER" > "$_D2_SWAPPED_HELPER"
+
+_D2_SWAPPED_REVERSED_COUNT="$(perl -0777 -ne '
+    $c = 0;
+    $c += () = /            _fire_claude_tab_prefix --activate\n            iterm2_set_user_var claude_active "1"\n/g;
+    $c += () = /            _fire_claude_tab_prefix --deactivate\n            iterm2_set_user_var claude_active "0"\n/g;
+    print $c;
+' "$_D2_SWAPPED_HELPER")"
+test_start "D2 sanity: shipped-copy scratch swap actually reversed all 3 sites (RED fixture is not vacuous)"
+if [ "$_D2_SWAPPED_REVERSED_COUNT" = "3" ]; then
+    test_pass
+else
+    test_fail "expected 3 reversed pairs in the shipped-copy scratch swap, found $_D2_SWAPPED_REVERSED_COUNT — the swap substitution silently failed to apply"
+fi
+
+_D2_SWAPPED_ORIG_REMAINING="$(perl -0777 -ne '
+    $c = 0;
+    $c += () = /            iterm2_set_user_var claude_active "1"\n            _fire_claude_tab_prefix --activate\n/g;
+    $c += () = /            iterm2_set_user_var claude_active "0"\n            _fire_claude_tab_prefix --deactivate\n/g;
+    print $c;
+' "$_D2_SWAPPED_HELPER")"
+test_start "D2 sanity: shipped-copy scratch swap left zero un-swapped original-order sites"
+if [ "$_D2_SWAPPED_ORIG_REMAINING" = "0" ]; then
+    test_pass
+else
+    test_fail "expected 0 remaining original-order pairs in the shipped-copy scratch copy, found $_D2_SWAPPED_ORIG_REMAINING"
+fi
+
+# ── D2: SHIPPED badge helper — OSC must fire before the local prefix call, all 3 sites ──
+for _d_mode in activate clear-absent clear-to-zero; do
+    _d_trace="$TEST_TMP_DIR/d2-trace-shipped-${_d_mode}.log"
+    bash "$TEST_TMP_DIR/d_order_probe.sh" "$SHIPPED_BADGE_HELPER" "$_d_mode" "$_d_trace" >/dev/null 2>&1
+    _d_result="$(_d_trace_order "$_d_trace")"
+    test_start "D2: SHIPPED badge helper emits OSC before local prefix call at the '${_d_mode}' transition"
+    if [ "$_d_result" = "OSC-FIRST" ]; then
+        test_pass
+    else
+        test_fail "expected OSC-FIRST, got ${_d_result} — trace: $(cat "$_d_trace" 2>/dev/null | tr '\n' ' ')"
+    fi
+done
+
+# ── D2 RED: the line-swapped SHIPPED scratch copy MUST reproduce the reversed
+# order — proving D2's positive assertion actually exercises the shipped
+# file's own bytes and is not passing by construction ──
+for _d_mode in activate clear-absent clear-to-zero; do
+    _d_trace="$TEST_TMP_DIR/d2-trace-shipped-swapped-${_d_mode}.log"
+    bash "$TEST_TMP_DIR/d_order_probe.sh" "$_D2_SWAPPED_HELPER" "$_d_mode" "$_d_trace" >/dev/null 2>&1
+    _d_result="$(_d_trace_order "$_d_trace")"
+    test_start "D2 RED: line-swapped SHIPPED helper reproduces PREFIX-before-OSC at the '${_d_mode}' transition (proves D2 is not vacuous)"
+    if [ "$_d_result" = "PREFIX-FIRST" ]; then
+        test_pass
+    else
+        test_fail "expected the swapped SHIPPED fixture to reproduce PREFIX-FIRST, got ${_d_result} — D2 would not actually catch a reordering regression in the shipped copy: trace: $(cat "$_d_trace" 2>/dev/null | tr '\n' ' ')"
+    fi
+done
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Summary
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$_STANDALONE" = true ]; then
