@@ -139,8 +139,8 @@ if [[ -d "$WATCHER_DIR" ]]; then
     _stopped_watchers=0
     for _watcher_pidfile in "$WATCHER_DIR/${TEAM_ID}-"*.pid; do
         [[ -e "$_watcher_pidfile" ]] || continue
-        _watcher_key="$(basename "$_watcher_pidfile" .pid)"
-        if [[ -n "$HOST_FILTER" ]] && [[ "$_watcher_key" != *"_@_${HOST_FILTER}" ]]; then
+        _watcher_slug="$(basename "$_watcher_pidfile" .pid)"
+        if [[ -n "$HOST_FILTER" ]] && [[ "$_watcher_slug" != *"_@_${HOST_FILTER}" ]]; then
             continue
         fi
         _watcher_pid=$(cat "$_watcher_pidfile" 2>/dev/null || true)

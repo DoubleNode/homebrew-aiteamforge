@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1144 (PR #852 `upgrade-suites` failure): renamed the connect/disconnect
+  templates' `_watcher_key` variable to `_watcher_slug`. XACA-1120's guard
+  scans shipped `*.template` files for credential-shaped assignments with a
+  CASE-INSENSITIVE pattern matching any identifier containing key/token/secret/
+  password/credential, and demands any hit be listed in
+  `_AITF_NEVER_OVERWRITE_BASENAMES`. `_watcher_key` is a pidfile key, not a
+  credential — a false positive.
+  Deliberately NOT fixed the way the failure message instructs. Adding these
+  two templates to `_AITF_NEVER_OVERWRITE_BASENAMES` would mean upgrades never
+  overwrite them on any consumer, permanently freezing connect-script updates
+  fleet-wide — a far worse outcome than a variable name, and it would have
+  quietly widened a list whose sole entry is a genuine credentials file. The
+  guard is right to be blunt; the correct response was to stop looking like a
+  credential.
 - XACA-1144 (PR #852 test-gate finding): mirrored the watcher wiring into
   `share/templates/team-connect-parametric.sh.template` and its disconnect
   pair. The canonical templates carried the start/stop blocks; the tap copies

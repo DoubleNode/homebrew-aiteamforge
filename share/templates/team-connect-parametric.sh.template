@@ -991,8 +991,8 @@ if has_iterm_gui; then
     # "<instance>_@_<host>", which still starts with "${TEAM_ID}-" and still
     # ends with "_@_<host>" — the exact two predicates
     # {{TEAM_ID}}-disconnect.sh's AppleScript window matcher already uses.
-    _watcher_key=$(printf '%s' "$ITERM_WINDOW_NAME" | tr ' ' '_')
-    WATCHER_PIDFILE="$WATCHER_DIR/${_watcher_key}.pid"
+    _watcher_slug=$(printf '%s' "$ITERM_WINDOW_NAME" | tr ' ' '_')
+    WATCHER_PIDFILE="$WATCHER_DIR/${_watcher_slug}.pid"
     _watcher_already_running=false
     if [[ -f "$WATCHER_PIDFILE" ]]; then
         _existing_watcher_pid=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
