@@ -189,10 +189,26 @@ install_global_claude_md() {
     #
     # This is intentionally the OPPOSITE choice from the upgrade path
     # (_xaca1159_refresh_global_claude_md), which leaves a symlink entirely
-    # alone. There we are protecting an established customization; here the
-    # function's whole purpose is to provision the file for the first time, and
-    # skipping would leave the box with no CLAUDE.md at all. The destination's
-    # previous content is already in BACKUP_DIR via backup_file above.
+    # alone. Justified on the case that ACTUALLY triggers it, which is not
+    # "first-time provisioning": this branch only runs when a symlink is
+    # already there, so by definition the box HAS a CLAUDE.md, reachable
+    # through the link. The real trigger is a RE-RUN of `aiteamforge setup`
+    # over an existing link.
+    #
+    # The two paths differ because their callers mean different things. Upgrade
+    # is unattended and periodic, so a symlink there is standing evidence of a
+    # deliberate arrangement it must not disturb. Setup is an explicit operator
+    # action requesting that this file be (re)provisioned, and its contract is
+    # to leave a real, tap-rendered CLAUDE.md behind; honouring the link instead
+    # would either write THROUGH it into the operator's own repo -- the bug this
+    # guard exists to stop -- or silently do nothing while reporting success.
+    # Replacing the link is the only option that keeps setup's promise without
+    # touching anything the operator owns.
+    #
+    # Nothing of the operator's is lost: backup_file above follows the link, so
+    # the DESTINATION's bytes are already in BACKUP_DIR, the destination file
+    # itself is never written, and the replacement is logged loudly rather than
+    # done silently.
     if [[ -L "$target" ]]; then
         log_warning "${target} is a symlink; replacing the link with a real file (its previous content was backed up). The symlink destination itself was NOT modified."
         command rm "$target" 2>/dev/null || true
@@ -395,15 +411,10 @@ _xaca1159_refresh_global_claude_md() {
     local receipt _x1159_sidecar=""
     receipt="$(_xaca1159_claude_md_receipt_path)"
 
-    if [[ ! -f "$target" ]]; then
-        echo "Global CLAUDE.md is not installed on this box (nothing to refresh) -- 'aiteamforge setup' installs it the first time"
-        return 1
-    fi
     if [[ ! -f "$template" ]]; then
         echo "Shipped claude-md-global.template not found -- skipping"
         return 1
     fi
-
     # A symlink is user-managed by definition -- never destroy it, and never
     # write through it into whatever it points at. Checked BEFORE the receipt
     # comparison on purpose: `cmp` follows symlinks, so a symlinked file whose
@@ -418,6 +429,15 @@ _xaca1159_refresh_global_claude_md() {
         fi
         return 3
     fi
+
+    # Checked AFTER the symlink branch on purpose: `-f` follows a symlink, so a
+    # DANGLING link has no regular file behind it and would otherwise be
+    # reported as "not installed" while a link is sitting right there.
+    if [[ ! -f "$target" ]]; then
+        echo "Global CLAUDE.md is not installed on this box (nothing to refresh) -- 'aiteamforge setup' installs it the first time"
+        return 1
+    fi
+
 
     if [[ -f "$receipt" ]]; then
         if ! cmp -s "$target" "$receipt"; then

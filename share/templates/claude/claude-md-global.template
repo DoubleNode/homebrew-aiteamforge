@@ -281,7 +281,7 @@ After creating the PR, generate handoff prompts for BOTH gates so the user can c
 
 **B. Four-Gate Monitoring Loop**
 
-After generating both handoff prompts, the creating agent polls until ALL FOUR gates clear, then merges: (1) test, (2) review, (3) protected-subitem sweep, (4) branch freshness + mergeability. Between gates 3 and 4 sits an additional CI check-runs catch-all (Gate 3.5) — it blocks the merge on any failing check regardless of what the four named gates report, so a red build can never slip through under `--admin`.
+After generating both handoff prompts, the creating agent polls until ALL FOUR gates clear, then merges: (1) test, (2) review, (3) protected-subitem sweep, (4) branch freshness + mergeability. Between gates 3 and 4 sits an additional CI check-runs allowlist (Gate 3.5) — it requires every check to have reached a positively-safe conclusion (`pass` or `skipping`, per `gh pr checks`'s own `bucket` classification) before merging; a failed/cancelled/timed-out check blocks outright, and a still-running check re-polls rather than passing, so neither a red build nor an unfinished one can slip through under `--admin`.
 
 > **IMPORTANT:** Do NOT check `reviewDecision` — GitHub does not count GitHub App bot reviews toward `required_approving_review_count` on the Team plan. `reviewDecision` will always show `"REVIEW_REQUIRED"` even after both bots approve. Check the reviews list directly, keyed to each bot's own login.
 
@@ -296,7 +296,7 @@ LAST_TEST_AT=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
 LAST_REVIEW_AT=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
   --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]")] | sort_by(.submitted_at) | last | .submitted_at // empty')
 
-TEST_OK="false"; REVIEW_OK="false"; MERGE_UNKNOWN_RETRIES=0; POLL_COUNT=0; PREV_HEAD_SHA=""
+TEST_OK="false"; REVIEW_OK="false"; MERGE_UNKNOWN_RETRIES=0; POLL_COUNT=0; PREV_HEAD_SHA=""; FORCE_PUSH_CUTOFF=""
 
 while true; do
   STATE=$(gh pr view <number> --json state --jq '.state')
@@ -327,11 +327,53 @@ while true; do
     echo "Resetting both gate latches; a prior approval against the old head does not carry"
     echo "forward, each bot must re-approve the new head before this gate re-opens."
     TEST_OK="false"; REVIEW_OK="false"
+
+    # ── Force-push / rebase detection (XACA-1159-030) ──────────────────────────────────
+    # The committer-date guard below (kept, see its own comment) assumes the NEW head's
+    # committer date is newer than any stale review pointed at it. That holds for an
+    # ORDINARY rebase — committer dates get rewritten to "now" — but NOT when a force-push
+    # re-points HEAD onto a PRE-EXISTING OLDER commit (drop the tip commit and force-push,
+    # or rebase with --committer-date-is-author-date): a review submitted after that old
+    # commit's original (old) committer date but before it was force-pushed back into place
+    # passes the committer-date check even though it never saw this content as HEAD.
+    #
+    # This is a genuinely different, mechanical check: whether the new head is even a
+    # descendant of the previous head at all. An ordinary push is always a fast-forward —
+    # PREV_HEAD_SHA remains an ancestor of HEAD_SHA. A force-push/rebase is not: history was
+    # rewritten, so PREV_HEAD_SHA is no longer reachable from HEAD_SHA. `compare/A...B`
+    # reports `status: "ahead"` exactly when A is an ancestor of B (B is A plus new commits);
+    # "diverged" or "behind" means it is not.
+    #
+    # VALIDATED against this repo's own PR #851 (XACA-1154) HeadRefForcePushedEvent history
+    # (`gh api graphql` on the PR's timelineItems), not asserted:
+    #   ordinary push   fa1a7598...53b23188 -> compare status="ahead"    (ahead_by=2, behind_by=0)
+    #   force-push      53b23188...3c23b5f5 -> compare status="diverged" (ahead_by=8, behind_by=7)
+    # (53b23188 was the `beforeCommit` and 3c23b5f5 the `afterCommit` of that PR's third
+    # HeadRefForcePushedEvent.) The ordinary push is a clean "ahead"; the force-push is not —
+    # exactly the discriminator this check needs.
+    #
+    # FAILS CLOSED: an unreadable compare result (empty/network error) is treated as a
+    # force-push, never as safe.
+    #
+    # THE ACTUAL MECHANICAL CLOSE: on a detected force-push, stamp the CURRENT wall-clock
+    # time as a floor no review can have been submitted before, and require every matching
+    # review this poll onward to clear that floor in addition to the commit's own committer
+    # date (below). A stale review re-pointed onto the rewritten head by GitHub was, by
+    # definition, submitted before this floor was stamped — it cannot pass regardless of
+    # what its own submitted_at or the commit's committer date say. A genuinely fresh
+    # re-review submitted after this poll clears it normally.
+    FF_STATUS=$(gh api "repos/<owner>/<repo>/compare/$PREV_HEAD_SHA...$HEAD_SHA" --jq '.status // empty' 2>/dev/null)
+    if [ "$FF_STATUS" != "ahead" ]; then
+      echo "⚠ Non-fast-forward change detected (compare status='${FF_STATUS:-<unreadable>}') —"
+      echo "  this looks like a force-push/rebase, not an ordinary push. Stamping a fresh"
+      echo "  cutoff: no review submitted before this moment can satisfy either gate, no"
+      echo "  matter what its commit_id or submitted_at claim."
+      FORCE_PUSH_CUTOFF=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    fi
   fi
   PREV_HEAD_SHA="$HEAD_SHA"
 
-  # ⚠️ THIS RESET DOES NOT FULLY CLOSE THE GAP FOR A REBASE / FORCE-PUSH BY ITSELF. On an
-  # ordinary push, a stale review keeps its OLD commit_id, so the per-poll filter below
+  # On an ordinary push, a stale review keeps its OLD commit_id, so the per-poll filter below
   # correctly fails to match it against the new HEAD_SHA and the freshly-reset latch stays
   # false until a real new review lands. On a REBASE, GitHub re-points the commit_id of
   # whatever reviews were current at rebase time onto the NEW head — so a filter that only
@@ -344,14 +386,20 @@ while true; do
   # A head-SHA-keyed APPROVED is proof the review is CURRENT, not proof the reviewer SAW the
   # current content, and those are the same thing only when the head moved by an ordinary push.
   #
-  # MECHANICAL GUARD, not just a warning: fetch the head commit's own committer date and
-  # require every matching review's `submitted_at` to be STRICTLY AFTER it (the extra jq
-  # clause on Gates 1 and 2 below). A review that predates the commit it is attributed to
-  # cannot have seen that commit's content — this is what actually rejects the re-pointed
-  # pair above while still accepting a genuine later re-review on the same head (PR #851 had
-  # one, at 13:35:41Z / 13:36:10Z, both after the committer date and correctly accepted).
+  # Fetch the head commit's own committer date and require every matching review's
+  # `submitted_at` to be STRICTLY AFTER it (the extra jq clause on Gates 1 and 2 below).
+  # A review that predates the commit it is attributed to cannot have seen that commit's
+  # content — this is what rejects the re-pointed pair above while still accepting a genuine
+  # later re-review on the same head (PR #851 had one, at 13:35:41Z / 13:36:10Z, both after
+  # the committer date and correctly accepted). This is a HEURISTIC, not a mechanical
+  # guarantee on its own — see the force-push block above for why (it catches an ordinary
+  # rebase, whose committer dates get rewritten to "now", but not a force-push onto a
+  # pre-existing older commit). The force-push block's wall-clock cutoff above is what
+  # actually closes that gap for a rewrite that happens WHILE this loop is running; this
+  # date-based check remains as defense-in-depth for a poll that never saw a PREV_HEAD_SHA
+  # baseline (the loop's very first poll) or a manual/ad-hoc check reproduced outside it.
   # ISO-8601 `Z` timestamps of equal precision sort correctly as plain strings, so no date
-  # parsing is needed — jq's string `>` does the right thing directly.
+  # parsing is needed — jq's/bash's string `>` does the right thing directly.
   # FAILS CLOSED: if the committer date can't be read, substitute a sentinel date that sorts
   # after every real timestamp, so no review can satisfy either gate until a real committer
   # date is read on a later poll — an unreadable date is never treated as a passing review.
@@ -362,9 +410,18 @@ while true; do
     HEAD_COMMIT_DATE="9999-99-99T99:99:99Z"   # sorts after any real ISO-8601 timestamp
   fi
 
+  # EFFECTIVE_CUTOFF is the LATER of the commit's own committer date and any force-push
+  # cutoff stamped above (sticky across polls once set — real wall-clock time only moves
+  # forward, so an older force-push's cutoff can never wrongly exceed a newer one). Plain
+  # string comparison is valid because both are the same ISO-8601 `Z` format/precision.
+  EFFECTIVE_CUTOFF="$HEAD_COMMIT_DATE"
+  if [ -n "$FORCE_PUSH_CUTOFF" ] && [ "$FORCE_PUSH_CUTOFF" \> "$EFFECTIVE_CUTOFF" ]; then
+    EFFECTIVE_CUTOFF="$FORCE_PUSH_CUTOFF"
+  fi
+
   # ── Gate 1: Test (ds9-tester-bot[bot]) ──
   L=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
-    --jq '[.[] | select(.user.login == "ds9-tester-bot[bot]" and .commit_id == "'"$HEAD_SHA"'" and ((.submitted_at // "") > "'"$HEAD_COMMIT_DATE"'"))] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
+    --jq '[.[] | select(.user.login == "ds9-tester-bot[bot]" and .commit_id == "'"$HEAD_SHA"'" and ((.submitted_at // "") > "'"$EFFECTIVE_CUTOFF"'"))] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
   AT="${L%|*}"; ST="${L#*|}"
   if [ -n "$ST" ] && [ "$AT" != "$LAST_TEST_AT" ]; then
     if [ "$ST" = "CHANGES_REQUESTED" ]; then
@@ -381,7 +438,7 @@ while true; do
 
   # ── Gate 2: Review (ai-security-review-bot[bot]) ──
   L=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
-    --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]" and .commit_id == "'"$HEAD_SHA"'" and ((.submitted_at // "") > "'"$HEAD_COMMIT_DATE"'"))] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
+    --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]" and .commit_id == "'"$HEAD_SHA"'" and ((.submitted_at // "") > "'"$EFFECTIVE_CUTOFF"'"))] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
   AT="${L%|*}"; ST="${L#*|}"
   if [ -n "$ST" ] && [ "$AT" != "$LAST_REVIEW_AT" ]; then
     if [ "$ST" = "CHANGES_REQUESTED" ]; then
@@ -415,21 +472,85 @@ while true; do
     break
   fi
 
-  # ── Gate 3.5: CI check runs — catch-all, not a list of known-bad checks ──
+  # ── Gate 3.5: CI check runs — allowlist of positively-safe conclusions, not a denylist
+  #    of one bad state ──
   # `--admin` bypasses branch-protection review counting, NOT CI results — a build/lint/test
-  # workflow that reports FAILURE on this PR must still block the merge. Do NOT rewrite this
-  # as a list of specific check names to watch for: an ENUMERATED list is a DENYLIST, and a
-  # denylist fails OPEN — any check not named on it sails straight through. Block on ANY check
-  # in the FAILURE state, full stop. If your repo has a check that is expected to fail under
-  # specific circumstances, that's a bypass rule to add explicitly (label/commit-trailer), not
-  # a reason to remove the check from this catch-all.
-  FAILED_CHECKS=$(gh pr checks <number> --repo <owner>/<repo> --json name,state \
-    --jq '[.[] | select(.state == "FAILURE") | .name] | unique | join(", ")' 2>/dev/null)
-  if [ -n "$FAILED_CHECKS" ]; then
-    echo "✗ Failing check(s) on PR #<number>: $FAILED_CHECKS"
-    echo "  Investigate before merging. Do NOT --admin past a red check — --admin bypasses the"
-    echo "  Team-plan review-count block, it is not a license to merge over a failing build."
-    break
+  # workflow that has not positively concluded safely must still block the merge.
+  #
+  # NOTE THE IRONY THIS REPLACES: the prior version of this gate keyed only on
+  # `state == "FAILURE"`, in a comment that itself warned against enumerated denylists —
+  # while doing exactly that with a single enumerated bad value. `state == "FAILURE"` cannot
+  # distinguish "hasn't failed YET (still running)" from "actually passed", and it does not
+  # match CANCELLED, TIMED_OUT, ACTION_REQUIRED, or STALE — none of those equal the string
+  # "FAILURE", so all of them sailed through under the old check. Measured on this repo's own
+  # PR #855: `shell-suite` alone took 5m38s (19:36:29Z -> 19:42:07Z) while the gate bots do
+  # not wait for GitHub CI to finish — a real, not hypothetical, unfinished-check race.
+  #
+  # `gh pr checks --json` exposes a `bucket` field precisely for this: gh's own source
+  # (pkg/cmd/pr/checks/aggregate.go, verified against upstream, not assumed) maps every
+  # check state/conclusion into exactly one of five buckets:
+  #   pass     = SUCCESS
+  #   skipping = SKIPPED, NEUTRAL
+  #   fail     = ERROR, FAILURE, TIMED_OUT, ACTION_REQUIRED
+  #   cancel   = CANCELLED
+  #   pending  = everything else (QUEUED, IN_PROGRESS, WAITING, EXPECTED, REQUESTED, STALE,
+  #              and any future/unrecognised state — this bucket is gh's own default case)
+  # Require every check to be `pass` or `skipping` before merging. `fail` or `cancel` blocks
+  # outright. Anything else — including a state gh doesn't recognise yet — lands in `pending`
+  # by construction and is treated as "not finished", which re-polls rather than merges; an
+  # unrecognised state is never treated as safe.
+  #
+  # ⚠️ VERIFIED, NOT ASSUMED: `gh pr checks --help` documents an "Additional exit codes: 8:
+  # Checks pending" — but that exit code is produced only by the plain-text output path; in
+  # `--json` mode (which this gate uses) the command writes JSON and returns success
+  # regardless of pending checks (confirmed against gh's own source, pkg/cmd/pr/checks/checks.go).
+  # Do NOT rely on `gh pr checks`'s own exit code here — inspect the `bucket` field values
+  # directly, exactly as this gate does.
+  #
+  # A PR with NO checks configured at all is a distinct case from an unreadable/failed API
+  # call: `gh pr checks` errors with "no checks reported on the '<branch>' branch" when the
+  # check list is genuinely empty (verified against gh's source), which is not a reason to
+  # block forever. Any OTHER read failure fails closed — an unreadable answer is never
+  # evidence of safety.
+  CHECKS_OUT=$(gh pr checks <number> --repo <owner>/<repo> --json name,bucket \
+    --jq '.[] | "\(.name)|\(.bucket)"' 2>&1)
+  CHECKS_RC=$?
+  if [ $CHECKS_RC -ne 0 ]; then
+    if echo "$CHECKS_OUT" | grep -qi "no checks reported"; then
+      echo "No CI checks configured on PR #<number> — nothing to gate on here, proceeding."
+    else
+      echo "✗ Could not read CI check status for PR #<number> (gh pr checks exited $CHECKS_RC):"
+      echo "$CHECKS_OUT"
+      echo "  Not assuming safe — investigate before merging."
+      break
+    fi
+  else
+    UNSAFE_CHECKS=""
+    PENDING_CHECKS=""
+    # A here-doc, NOT a pipe: a `while` on the right of a pipe runs in a subshell and the
+    # accumulator variables would not survive the loop.
+    while IFS='|' read -r C_NAME C_BUCKET; do
+      [ -n "$C_NAME" ] || continue
+      case "$C_BUCKET" in
+        pass|skipping) : ;;
+        fail|cancel) UNSAFE_CHECKS="${UNSAFE_CHECKS}${UNSAFE_CHECKS:+, }$C_NAME ($C_BUCKET)" ;;
+        *) PENDING_CHECKS="${PENDING_CHECKS}${PENDING_CHECKS:+, }$C_NAME (${C_BUCKET:-<unreadable>})" ;;
+      esac
+    done <<CHECKS_EOF
+$CHECKS_OUT
+CHECKS_EOF
+    if [ -n "$UNSAFE_CHECKS" ]; then
+      echo "✗ Failing/cancelled/timed-out check(s) on PR #<number>: $UNSAFE_CHECKS"
+      echo "  Investigate before merging. Do NOT --admin past this — --admin bypasses the"
+      echo "  Team-plan review-count block, it is not a license to merge over a failed CI run."
+      break
+    fi
+    if [ -n "$PENDING_CHECKS" ]; then
+      echo "CI still running on PR #<number>: $PENDING_CHECKS — re-polling rather than merging"
+      echo "  on an unfinished build."
+      sleep 60
+      continue
+    fi
   fi
 
   # ── Gate 4: Branch freshness + mergeability ──
@@ -500,10 +621,13 @@ done
 
 **Monitoring Behavior:**
 - Poll every **60 seconds**; a brief status line every 5 polls (~5 min) shows TEST/REVIEW state.
-- Both gates key their verdict to the PR's **current head SHA** (`commit_id`) — an approval from before an ordinary push can't satisfy a gate for the new one. **Head-SHA keying alone is NOT sufficient after a rebase or force-push**: GitHub re-points an existing review's `commit_id` onto the new head, so the same filter can match a review that predates the rebase and never saw the rebased content (measured on PR #851 — both bots' `commit_id` re-pointed within seconds of the force-push, with `submitted_at` timestamps *before* that commit's own committer date). The loop closes that gap with an additional mechanical check: it also requires each matching review's `submitted_at` to be strictly after the head commit's own `commit.committer.date`, and fails closed (no review can pass) if that date can't be read. See the inline comments above Gate 1 and Troubleshooting § "rebase re-points commit_id" for the measured detail and the manual verification query.
+- Both gates key their verdict to the PR's **current head SHA** (`commit_id`) — an approval from before an ordinary push can't satisfy a gate for the new one. **Head-SHA keying alone is NOT sufficient after a rebase or force-push**: GitHub re-points an existing review's `commit_id` onto the new head, so the same filter can match a review that predates the rebase and never saw the rebased content (measured on PR #851 — both bots' `commit_id` re-pointed within seconds of the force-push, with `submitted_at` timestamps *before* that commit's own committer date). Two layered checks close this, with different guarantees — **state the residual honestly rather than calling the combination bulletproof**:
+  - **Mechanically enforced** for a force-push/rebase that happens *while this loop instance is running*: each poll compares the new head against the previous poll's head via the compare API (`compare/PREV...NEW`); anything other than `status: "ahead"` (fast-forward) is treated as a rewrite regardless of what any review's `commit_id` or `submitted_at` claims, and stamps the current wall-clock time as a floor no review can have been submitted before. Fails closed if the compare call is unreadable. Verified against this repo's own PR #851 `HeadRefForcePushedEvent` history: an ordinary push compared `ahead` (2/0), the actual force-push compared `diverged` (8/7).
+  - **Heuristic, not mechanical**, for a rewrite that already happened *before the loop's first poll* (no previous-head baseline to compare against) or a manual/ad-hoc check outside the loop: falls back to requiring each matching review's `submitted_at` to be strictly after the head commit's own `commit.committer.date`. This catches an ordinary rebase (committer dates get rewritten to "now") but is known to miss a force-push that re-points HEAD onto a pre-existing *older* commit, since a stale review's `submitted_at` can still be later than that old commit's own committer date. That residual case still depends on the operator's judgment — treat any rebase/force-push as a fresh review round, re-spawn both bots, re-seed both `LAST_*_AT`, as a matter of course.
+  See the inline comments above Gate 1 and Troubleshooting § "rebase re-points commit_id" for the measured detail and the manual verification query.
 - On `CHANGES_REQUESTED` from either bot: pause, surface the review body, address feedback, push fixes, re-seed ONLY that gate's `LAST_*_AT`, re-enter the loop.
 - Gate 3 (subitem sweep), Gate 3.5 (CI check runs), and Gate 4 (freshness/mergeability) only run once BOTH bot gates have passed — see the loop's ordering above.
-- Gate 3.5 blocks on **any** check reporting `FAILURE`, with no exceptions list — `--admin` overrides the Team-plan review-count requirement, it does not and must not override a red CI run. If a check is legitimately allowed to fail in some case, add an explicit bypass (a label or commit-trailer your monitor checks for) rather than removing it from the catch-all — an enumerated allowlist of "checks that must pass" quietly becomes a denylist the moment anyone forgets to add a new check to it.
+- Gate 3.5 is an **allowlist**, not a denylist of one bad state: every check must land in gh's own `pass` or `skipping` bucket before merging — `fail` (FAILURE/ERROR/TIMED_OUT/ACTION_REQUIRED) or `cancel` (CANCELLED) blocks outright, and anything still `pending` (including a state gh doesn't recognise) re-polls rather than passing. `--admin` overrides the Team-plan review-count requirement, it does not and must not override a red, cancelled, or still-running CI run. `gh pr checks`'s own exit-code-8-on-pending behavior is documented for plain-text output only — in `--json` mode (used here) it returns success regardless of pending checks, so this gate inspects the `bucket` field directly rather than trusting the command's exit code.
 - On a stale branch (Gate 4): `gh pr update-branch` dismisses stale reviews — re-spawn BOTH bots and re-seed BOTH timestamps afterward.
 - On merge conflicts (Gate 4): halt, never merge — resolve manually, then re-spawn both bots.
 - `state: "CLOSED"` or `"MERGED"` → notify the user and exit the monitor.
@@ -1066,7 +1190,11 @@ After completing:
   gh api --paginate repos/{owner}/{repo}/pulls/<N>/reviews --jq '.[] | select(.user.login == "ai-security-review-bot[bot]")'
   ```
 - **`reviewDecision` always shows `REVIEW_REQUIRED`:** This is expected — GitHub Team plan doesn't count bot reviews. Always check the reviews list directly (per-login, as above), never `reviewDecision`.
-- **A rebase or force-push re-points an EXISTING review's `commit_id` onto the new head** — head-SHA keying alone does not survive this. On an ordinary push (no rebase), a stale review keeps its old `commit_id`, so filtering on `commit_id == <current HEAD>` correctly excludes it. On a rebase, GitHub re-associates whatever reviews were current at rebase time onto the rebased head, so that same filter can match a review that never saw the rebased content — an "APPROVED" that looks fresh by SHA but predates the content it's supposedly approving. **The Four-Gate Monitoring Loop above guards against this mechanically**, not just by documentation: each poll fetches the head commit's own `commit.committer.date` and rejects any matching review whose `submitted_at` is not strictly after it, failing closed (a sentinel date that sorts after everything real) if the committer date can't be read. That guard only runs inside the loop — if you're checking manually (e.g. before an ad-hoc merge), reproduce it by hand:
+- **A rebase or force-push re-points an EXISTING review's `commit_id` onto the new head** — head-SHA keying alone does not survive this. On an ordinary push (no rebase), a stale review keeps its old `commit_id`, so filtering on `commit_id == <current HEAD>` correctly excludes it. On a rebase, GitHub re-associates whatever reviews were current at rebase time onto the rebased head, so that same filter can match a review that never saw the rebased content — an "APPROVED" that looks fresh by SHA but predates the content it's supposedly approving. **Say precisely what is and isn't mechanically closed here — the two layers have different guarantees:**
+  - **Mechanically closed** for a rewrite that happens *while the loop is actively polling*: each poll diffs the new head against the previous poll's own head via `compare/PREV...NEW`. Only `status: "ahead"` (a true fast-forward) is treated as an ordinary push; `diverged`/`behind`/unreadable is treated as a rewrite unconditionally, regardless of any review's `commit_id` or `submitted_at`, and stamps the current wall-clock time as a floor no review can have been submitted before. Verified against this repo's own PR #851 `HeadRefForcePushedEvent` history (`gh api graphql` on the PR's `timelineItems`): the ordinary push in that history compared `ahead` (ahead_by=2, behind_by=0); the actual force-push compared `diverged` (ahead_by=8, behind_by=7) — a real, measured discriminator, not a hypothetical one.
+  - **Heuristic only, with a known gap**, for a rewrite that already happened *before the loop started polling* (no previous head to diff against) or when reproducing this by hand outside the loop: falls back to requiring each matching review's `submitted_at` to be strictly after the head commit's own `commit.committer.date`, failing closed (a sentinel date that sorts after everything real) if that date can't be read. This catches an ordinary rebase, where committer dates get rewritten to "now" — but it does **not** catch a force-push that re-points HEAD onto a pre-existing *older* commit (drop the tip commit and force-push, or `rebase --committer-date-is-author-date`): a stale review submitted after that old commit's own original committer date, but before it was force-pushed back into place, still clears this check even though it never saw the content as HEAD. Do not describe this fallback as a guarantee — it is a heuristic that narrows the window, not a proof.
+
+  Reproduce the heuristic layer by hand:
   ```bash
   HEAD_SHA=$(gh pr view <N> --json headRefOid --jq '.headRefOid')
   HEAD_COMMIT_DATE=$(gh api "repos/{owner}/{repo}/commits/$HEAD_SHA" --jq '.commit.committer.date')
@@ -1080,7 +1208,7 @@ After completing:
   FAKE="0000000000000000000000000000000000000000"
   gh api --paginate repos/{owner}/{repo}/pulls/<N>/reviews --jq '[.[] | select(.commit_id == "'"$FAKE"'")] | length'   # MUST be 0
   ```
-  Even with the guard in place, treat a rebase/force-push like a fresh review round as a matter of course: push, then re-spawn BOTH bots and re-seed both `LAST_*_AT`. The guard stops a stale approval from silently passing the gate; it doesn't substitute for getting fresh eyes on the rebased content.
+  Even with both layers in place, treat a rebase/force-push like a fresh review round as a matter of course: push, then re-spawn BOTH bots and re-seed both `LAST_*_AT`. The guards stop most stale approvals from silently passing the gate; they don't substitute for getting fresh eyes on the rewritten content, and the heuristic layer's known gap means an operator who skips the re-review is still exposed in that one case.
 - **NEVER** store `gh api` JSON in shell variables then pipe through `echo | jq` — control characters break parsing. Always use `gh api --jq` instead.
 - **`$?` after a pipe (e.g. `gh-bot-test ... | tail`) reports the PIPE's exit code, not the command's** — a failed submission can silently read as success. Capture the command's own output/exit code before piping it anywhere.
 - **Manual merge after bot approval:** Verify APPROVED reviews exist from BOTH `ds9-tester-bot[bot]` AND `ai-security-review-bot[bot]` (per the queries above) and that `kb-sweep <ITEM-ID>` shows no `PROTECTED SUBITEMS UNRESOLVED`, then `gh pr merge <N> --squash --delete-branch --admin && kb-done`
@@ -1090,7 +1218,7 @@ After completing:
 
 ---
 
-**Last Updated:** 2026-09-09 (XACA-1159 — fixed a fail-open merge gate: bot review filters now key on `.user.login` instead of `.user.type == "Bot"`, which resolved to whichever of the two gate bots reviewed most recently. Expanded the single-gate flow to four gates (test, review, protected-subitem sweep, branch freshness/mergeability); added `--paginate` to every reviews-API call; fixed a `ds9-security-review-bot` name conflation — the two real Apps are `ds9-tester-bot[bot]` and `ai-security-review-bot[bot]`.) Prior: 2026-02-18 (Added reviewer re-review monitoring loop, non-blocking subitems protocol, fixed stale review detection in creating agent monitoring loop, updated review handoff template with kanban item ID)
+**Last Updated:** 2026-09-10 (XACA-1159 — fixed two over-claiming checks in the merge loop. Gate 3.5 keyed only on `state == "FAILURE"`, which could not distinguish "not finished yet" from "passed" and let CANCELLED/TIMED_OUT/ACTION_REQUIRED/still-pending checks merge; rebuilt as an allowlist on `gh pr checks`'s own `bucket` classification (`pass`/`skipping` required, `fail`/`cancel` blocks, anything pending re-polls). The committer-date guard against rebase/force-push assumed the new head's committer date is always newer than any stale review, which fails for a force-push onto a pre-existing older commit; added a genuinely mechanical close via compare-API ancestry checking for a rewrite that happens while the loop is polling, and reworded the surrounding prose so the committer-date fallback is documented as a heuristic with a known gap rather than a "mechanical guarantee".) Prior: 2026-09-09 (XACA-1159 — fixed a fail-open merge gate: bot review filters now key on `.user.login` instead of `.user.type == "Bot"`, which resolved to whichever of the two gate bots reviewed most recently. Expanded the single-gate flow to four gates (test, review, protected-subitem sweep, branch freshness/mergeability); added `--paginate` to every reviews-API call; fixed a `ds9-security-review-bot` name conflation — the two real Apps are `ds9-tester-bot[bot]` and `ai-security-review-bot[bot]`.) Prior: 2026-02-18 (Added reviewer re-review monitoring loop, non-blocking subitems protocol, fixed stale review detection in creating agent monitoring loop, updated review handoff template with kanban item ID)
 **Maintained By:** Claude Code
 
 ---

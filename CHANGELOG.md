@@ -6,6 +6,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1159 round-4 gate findings (PR #855), all three of the same class: a
+  check reporting more confidence than it has. **XACA-1159-029:** Gate 3.5 in
+  the shipped merge loop keyed on `state == "FAILURE"` alone, so it could not
+  distinguish "no check has failed YET" from "all checks passed" -- a consumer
+  could merge on unfinished checks, or on CANCELLED / TIMED_OUT /
+  ACTION_REQUIRED. Rebuilt as an allowlist over `gh pr checks --json`'s own
+  `bucket` classification (mapping read from gh's source, not assumed):
+  `pass`/`skipping` proceed, `fail`/`cancel` block outright, and anything else
+  -- including `pending` and any future unrecognised state, which is gh's own
+  default bucket -- re-polls rather than passing. "No checks configured" is
+  handled as a distinct pass-through, separate from a genuine API failure,
+  which fails closed. Note the gate's own comment had warned against
+  enumerated denylists while itself keying on one state.
+  **XACA-1159-030:** the committer-date guard shipped in round 3 assumed the
+  head's committer date is newer than any stale review. That holds for an
+  ordinary rebase, where committer dates are rewritten to now, but NOT for a
+  force-push onto a pre-existing OLDER commit; such a review passes both the
+  `commit_id` and `submitted_at` checks. The prose called it a "MECHANICAL
+  GUARD, not just a warning", which was an over-claim -- the third instance of
+  this defect class inside its own fix. Added a real mechanical close: each
+  poll compares the new head against the PREVIOUS poll's head via the compare
+  API, treats only `status: "ahead"` as an ordinary push, and on anything else
+  (`diverged`, `behind`, or unreadable) stamps a wall-clock cutoff floor no
+  review can predate. Discriminator verified on this repo's own PR #851: the
+  real force-push compares `diverged` (ahead 8 / behind 7), an ordinary push in
+  the same history compares `ahead` (2 / 0). The residual is now documented as
+  "heuristic, not mechanical" in three places rather than overstated: with no
+  previous-head baseline -- a rewrite before the loop's first poll, or a
+  restarted loop -- detection falls back to the committer-date check, which
+  still misses the older-commit force-push case, and that case remains
+  operator-dependent. **XACA-1159-031:** the install-side symlink guard's
+  comment justified removing the link as "provisioning for the first time",
+  but the branch only fires when a symlink already exists, so it is by
+  definition not a first install and the box already has a CLAUDE.md through
+  the link. Rewritten to justify it on the real trigger -- a re-run of
+  `aiteamforge setup` over an existing link -- and on why setup and upgrade
+  legitimately differ. Behaviour unchanged.
+  **XACA-1159-028:** a DANGLING symlink tripped the `! -f "$target"` existence
+  check before the `-L` branch, because `-f` follows a link, so a broken link
+  was reported as "not installed on this box" while a symlink sat plainly in
+  place. Preconditions reordered to evaluate each predicate where it means
+  something: template present, then symlink (decided on the LINK, before
+  anything that follows it), then regular-file existence.
+
 - XACA-1159 round-3 gate findings (PR #855). **XACA-1159-024/025:** GitHub
   RE-POINTS an existing review's `commit_id` onto the new head after a rebase or
   force-push, so the `commit_id == HEAD_SHA` filter this ticket added can be
