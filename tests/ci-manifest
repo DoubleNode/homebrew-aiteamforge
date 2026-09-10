@@ -118,3 +118,5 @@ test-xaca-1120-template-phase-honest-reporting.sh    plain-shell
 test-xaca-1143-worktree-helpers-materialize.sh       plain-shell
 test-xaca-1144-remote-indicator-delivery.sh     plain-shell
 test-xaca-1159-global-claude-md-upgrade-registration.sh plain-shell
+test-xaca-1162-dry-run-is-read-only.sh          plain-shell
+test-xaca-1162-host-ready-config-upgrade-registration.sh plain-shell
