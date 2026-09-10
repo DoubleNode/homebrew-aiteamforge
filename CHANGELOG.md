@@ -29,6 +29,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   dummy through the runner: `LEAK [plist]`, remediation bootout, exit 1) — a fix
   for false positives that stopped catching the real thing would be the worst
   outcome available here. Vectors 1-5 remain hard failures unconditionally.
+- XACA-1163 (PR #860 review round): the omit branch is now keyed on whether a
+  real team code exists (`TEAM_CODE_IS_REAL`), not on the literal string `LOC` —
+  a team legitimately coded `LOC` was being treated as "no code supplied", the
+  same one-value-two-meanings bug this ticket exists to fix, one level down.
+  Dry-run now echoes the ID prefix the board would be born with (mirroring
+  `kb-freelance`), so the next drift is visible at provision time rather than
+  after the first item is minted.
 - XACA-1163: `share/scripts/kb-init-team` — `board.json`'s `series` field now
   stores the kanban item-ID prefix `X<TEAM_CODE>`, not the Star Trek series
   code. The field was READ everywhere as the ID prefix (`kanban-helpers.sh`'s

@@ -265,6 +265,12 @@ _dry()  { echo -e "${CYAN} [DRY]${NC} $*"; }
 
 TEAM_ID=""
 TEAM_CODE=""
+# XACA-1163: 1 = a real team code is available (supplied via --team-code,
+# prompted, or derived from the registry); 0 = only the "LOC" placeholder.
+# board.json's `series` key is written ONLY when this is 1 — see
+# _create_board_json. Do NOT re-derive this by comparing TEAM_CODE to "LOC":
+# that is a sentinel collision with a legitimate 3-letter code.
+TEAM_CODE_IS_REAL=1
 TEAM_NAME=""
 ORG_NAME=""
 ORG_COLOR="#888888"
@@ -1066,7 +1072,7 @@ board['ship'] = ship
 # mints a silently-corrupt "-0001" on "" and raises TypeError on null). The
 # template above seeds the literal placeholder string "{{TEAM_SERIES}}" for
 # this key, so it must be actively popped, not merely left unassigned.
-if team_code and team_code != 'LOC':
+if team_code:
     board['series'] = 'X' + team_code
 else:
     board.pop('series', None)
@@ -1852,11 +1858,19 @@ print(get_team_code('${TEAM_ID}'))
         # set a placeholder if absent so validation below is skipped cleanly.
         # If the caller supplied one we still validate and use it (idempotent).
         if [[ "$CHECK_ONLY" -eq 1 && -z "$TEAM_CODE" ]]; then
-            TEAM_CODE="LOC"  # placeholder — not written anywhere in local-only mode
+            # XACA-1163 (PR #860 review): TEAM_CODE_IS_REAL, not the literal
+            # string, is what decides whether board.json gets a `series` key.
+            # Keying on `!= "LOC"` conflated "no code was supplied" with "the
+            # supplied code happens to be LOC", so a team legitimately coded LOC
+            # would silently take the omit branch. Ruling 1 clause 1 says "if
+            # --team-code was supplied", and this records exactly that.
+            TEAM_CODE_IS_REAL=0
+            TEAM_CODE="LOC"  # placeholder — never written to board.json
         fi
         # In LOCAL-ONLY non-check-only mode: TEAM_CODE is not required.
         # If not supplied, set a placeholder; it is never written to any file.
         if [[ -z "$TEAM_CODE" ]]; then
+            TEAM_CODE_IS_REAL=0
             TEAM_CODE="LOC"
         fi
     fi
@@ -2199,14 +2213,24 @@ sys.exit(0 if any(k.startswith('${TEAM_ID}-') for k in d) else 1)
     # ── Site 12: board.json ───────────────────────────────────────────────
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        _dry "Would create ${KANBAN_DIR}/${TEAM_ID}-board.json"
+        # XACA-1163 (PR #860 review): echo the ID PREFIX the board would be born
+        # with, mirroring kb-freelance:774. The prefix is the single most
+        # consequential thing this command decides -- it is baked into every
+        # item id from the first one onward -- and a dry-run that does not show
+        # it cannot be used to catch the very defect this ticket fixed.
+        if [[ "$TEAM_CODE_IS_REAL" -eq 1 ]]; then
+            _dry "Would create ${KANBAN_DIR}/${TEAM_ID}-board.json (series/prefix=X${TEAM_CODE}; crew series=${SERIES})"
+        else
+            _dry "Would create ${KANBAN_DIR}/${TEAM_ID}-board.json (series/prefix OMITTED — no team code supplied; ids fall back to the derived team code; crew series=${SERIES})"
+        fi
     else
         if [[ -f "${KANBAN_DIR}/${TEAM_ID}-board.json" ]]; then
             _skip "board.json"
         else
             mkdir -p "$KANBAN_DIR"
             _create_board_json "$TEAM_ID" "$TEAM_NAME" "$ORG_NAME" "$ORG_COLOR" \
-                "$KANBAN_DIR" "$SERIES" "$TEAM_CODE"
+                "$KANBAN_DIR" "$SERIES" \
+                "$( [[ "$TEAM_CODE_IS_REAL" -eq 1 ]] && printf '%s' "$TEAM_CODE" )"
             _ok "board.json → ${KANBAN_DIR}/${TEAM_ID}-board.json"
         fi
     fi
