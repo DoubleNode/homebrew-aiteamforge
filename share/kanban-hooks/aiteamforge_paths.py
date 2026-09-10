@@ -425,6 +425,25 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "primary_host": "darren-m4-mini",
     },
 
+    # XACA-1068 — Space Dock: a DEFAULT team on EVERY AITeamForge install, and a
+    # LOCAL-ONLY, PER-MACHINE team on each of them. Same team id, many independent
+    # instances — unlike every other entry here, which names one team on one box.
+    #
+    # primary_host IS DELIBERATELY ABSENT. Do not add it.
+    #   * It declares the ONE host where a team's knowledge is authored (see the
+    #     field docs above). A team that exists on every machine has no such host.
+    #   * The three peer per-machine teams (legal-coparenting / medical-general /
+    #     finance-personal) DO set primary_host="darren-m4-mini" because each is a
+    #     SINGLE team living on ONE box. Space Dock is the opposite shape.
+    #   * Setting it would be actively harmful, not merely redundant: XACA-1063
+    #     made lcars-health-check.sh honour primary_host by SUPPRESSING a team's
+    #     LCARS server on every non-primary host. Declaring one would kill Space
+    #     Dock's LCARS on every machine but the named one — disabling the recovery
+    #     team precisely where recovery is needed, and silently.
+    #   * ABSENCE is the correct encoding: _kb_knowledge_host_affinity_guard fails
+    #     OPEN on absence, which is what a team-that-lives-everywhere requires.
+    # Raised as a review finding on PR #857 ("spacedock lacks primary_host") and
+    # rejected on these grounds. This comment exists so it is not re-raised.
     "spacedock": {
         "team_code": "SDK",
         "kanban_dir": f"{_HOME}/.aiteamforge/spacedock/kanban",
