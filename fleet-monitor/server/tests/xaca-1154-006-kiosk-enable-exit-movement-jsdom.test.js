@@ -125,6 +125,31 @@ function moveEvent(window, type, dx, dy) {
     return ev;
 }
 
+// XACA-1154-017: an engine that never populates movementX/movementY at all
+// (typeof !== 'number' -- the cockpit WKWebView is the unverified real-world
+// candidate). A plain window.Event carries neither property by default
+// (both read as `undefined`), which already matches that condition without
+// any extra work; only clientX/clientY need to be defined.
+function clientMoveEvent(window, type, clientX, clientY) {
+    const ev = new window.Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'clientX', { value: clientX, configurable: true });
+    Object.defineProperty(ev, 'clientY', { value: clientY, configurable: true });
+    return ev;
+}
+
+// XACA-1154-019: a real (same-window, manually dispatched) StorageEvent --
+// the native event only ever fires in OTHER same-origin documents, so a
+// single-window jsdom test simulating "another tab wrote this" has to
+// dispatch it itself, exactly like a real browser would deliver it TO this
+// tab (never causing it, by writing locally).
+function storageEvent(window, key, newValue) {
+    return new window.StorageEvent('storage', {
+        key: key,
+        newValue: newValue === undefined ? null : newValue,
+        storageArea: window.localStorage,
+    });
+}
+
 // jsdom's window.localStorage is Proxy-backed (confirmed empirically: shadowing
 // getItem/setItem via Object.defineProperty(window.localStorage, ...) reports
 // success but the override is silently discarded -- reads/writes keep hitting
@@ -201,16 +226,118 @@ function mutatePreFix4EventHandler(src) {
 }
 
 function mutateRemoveMovementLatch(src) {
-    const re = /if \(_kioskMoveAccumEventType === null\) \{[\s\S]*?\n(\s*)const now = Date\.now\(\);/;
+    // XACA-1154-017/018 reshaped the movement handler: the gap check (and
+    // its `const now = Date.now();`) moved to the TOP of the handler, ahead
+    // of the type-latch check, so it can self-heal a latch whose type
+    // stopped firing (see the XACA-1154-018 comment in the shipped
+    // source). The latch block itself is now immediately followed by
+    // `_kioskMoveAccumLastTime = now;` rather than by the now-relocated
+    // `const now = Date.now();` this regex used to anchor on.
+    const re = /if \(_kioskMoveAccumEventType === null\) \{[\s\S]*?\n(\s*)_kioskMoveAccumLastTime = now;/;
     const m = src.match(re);
     if (!m) throw new Error('mutateRemoveMovementLatch: latch code shape changed, update this test');
-    return src.replace(re, m[1] + 'const now = Date.now();');
+    return src.replace(re, m[1] + '_kioskMoveAccumLastTime = now;');
 }
 
 function mutateRemoveResurrectionGuard(src) {
     const needle = 'if (!(options && options.skipRestart) && isEnabled()) {';
     if (src.indexOf(needle) === -1) throw new Error('mutateRemoveResurrectionGuard: exitKioskMode restart condition changed, update this test');
     return src.replace(needle, 'if (!(options && options.skipRestart)) {');
+}
+
+// XACA-1154-016: reproduces the pre-hoist attach/remove drift by giving
+// stopIdleMonitoring() a DIVERGED inline copy of the idle event list, one
+// event ('scroll') short of what startIdleMonitoring() (still using the
+// real, hoisted KIOSK_IDLE_EVENTS) actually attached.
+function mutateDivergedStopIdleEvents(src) {
+    const needle = "function stopIdleMonitoring() {\n        if (_boundResetIdleTimer) {\n            KIOSK_IDLE_EVENTS.forEach(function(eventName) {";
+    if (src.indexOf(needle) === -1) throw new Error('mutateDivergedStopIdleEvents: stopIdleMonitoring() shape changed, update this test');
+    return src.replace(
+        needle,
+        "function stopIdleMonitoring() {\n        if (_boundResetIdleTimer) {\n            ['mousemove', 'mousedown', 'keypress', 'keydown', 'touchstart', 'click'].forEach(function(eventName) {"
+    );
+}
+
+// XACA-1154-020: strips 'scroll' from the shipped KIOSK_IDLE_EVENTS list,
+// reproducing what applying the EXIT set's noise evidence to the IDLE list
+// would have looked like -- the exact "fix" XACA-1154-020 explains why NOT
+// to make.
+function mutateIdleListWithoutScroll(src) {
+    const needle = "const KIOSK_IDLE_EVENTS = ['mousemove', 'mousedown', 'keypress', 'keydown', 'touchstart', 'scroll', 'click'];";
+    if (src.indexOf(needle) === -1) throw new Error('mutateIdleListWithoutScroll: KIOSK_IDLE_EVENTS shape changed, update this test');
+    return src.replace(needle, "const KIOSK_IDLE_EVENTS = ['mousemove', 'mousedown', 'keypress', 'keydown', 'touchstart', 'click'];");
+}
+
+// XACA-1154-017: removes the clientX/clientY fallback entirely, reverting
+// dx/dy determination to the pre-fix `e.movementX || 0` shape -- on an
+// engine that never populates movementX/movementY, this always reads 0/0
+// and every movement event hits the "pure noise" early return.
+function mutateRemoveClientFallback(src) {
+    const re = /let dx, dy;\n[\s\S]*?\n(\s*)\/\/ Latch onto the first movement event type/;
+    const m = src.match(re);
+    if (!m) throw new Error('mutateRemoveClientFallback: dx/dy determination shape changed, update this test');
+    const indent = m[1];
+    return src.replace(
+        re,
+        'let dx, dy;\n' +
+        indent + 'dx = e.movementX || 0;\n' +
+        indent + 'dy = e.movementY || 0;\n' +
+        indent + 'if (dx === 0 && dy === 0) return;\n\n' +
+        indent + '// Latch onto the first movement event type'
+    );
+}
+
+// XACA-1154-018: leaves the gap-reset zeroing the distance accumulator (and,
+// post-XACA-1154-017, the clientX/clientY fallback baseline) but stops it
+// from clearing the latched event type -- the exact pre-fix shape, where a
+// latch whose type stopped firing could never self-heal.
+function mutateGapResetDoesNotClearLatch(src) {
+    const needle =
+        'if (now - _kioskMoveAccumLastTime > KIOSK_MOVEMENT_GAP_RESET_MS) {\n' +
+        '                _kioskMoveAccumDist = 0;\n' +
+        '                _kioskMoveAccumEventType = null;\n' +
+        '                _kioskMovePrevClientX = null;\n' +
+        '                _kioskMovePrevClientY = null;\n' +
+        '            }';
+    if (src.indexOf(needle) === -1) throw new Error('mutateGapResetDoesNotClearLatch: gap-reset block shape changed, update this test');
+    return src.replace(
+        needle,
+        'if (now - _kioskMoveAccumLastTime > KIOSK_MOVEMENT_GAP_RESET_MS) {\n' +
+        '                _kioskMoveAccumDist = 0;\n' +
+        '                _kioskMovePrevClientX = null;\n' +
+        '                _kioskMovePrevClientY = null;\n' +
+        '            }'
+    );
+}
+
+// XACA-1154-019: strips the entire cross-tab 'storage' listener.
+function mutateRemoveStorageListener(src) {
+    const re = /\n {4}window\.addEventListener\('storage', function\(e\) \{[\s\S]*?\n {4}\}\);\n/;
+    if (!re.test(src)) throw new Error('mutateRemoveStorageListener: storage listener shape changed, update this test');
+    return src.replace(re, '\n');
+}
+
+// XACA-1154-021: removes the isKioskActive gate from _applyKioskEnabled(),
+// reverting setEnabled(true)/the storage listener's enable path to
+// unconditionally calling startIdleMonitoring() even while kiosk is active.
+function mutateRemoveSetEnabledGate(src) {
+    const needle =
+        '            if (!isKioskActive) {\n' +
+        '                startIdleMonitoring();\n' +
+        '            }\n' +
+        '        } else {\n' +
+        '            _disableKiosk();\n' +
+        '        }\n' +
+        '    }';
+    if (src.indexOf(needle) === -1) throw new Error('mutateRemoveSetEnabledGate: _applyKioskEnabled() shape changed, update this test');
+    return src.replace(
+        needle,
+        '            startIdleMonitoring();\n' +
+        '        } else {\n' +
+        '            _disableKiosk();\n' +
+        '        }\n' +
+        '    }'
+    );
 }
 
 // ============================================================================
@@ -596,5 +723,291 @@ test('(e) REGRESSION GUARD: without the isEnabled() term, a manual entry with th
         assert.equal(k.K.isActive(), false, 'setup: click must exit kiosk');
         await wait(80);
         assert.equal(k.K.isActive(), true, 'without the isEnabled() guard, idle monitoring resurrects and kiosk seizes the dashboard again -- proving the "off" test above is a real regression guard');
+    } finally { teardown(k); }
+});
+
+// ============================================================================
+// (f) XACA-1154-016 -- hoisted idle event list (KIOSK_IDLE_EVENTS)
+// ============================================================================
+
+test('(f) stopIdleMonitoring() removes every event startIdleMonitoring() attached, including "scroll"', async () => {
+    const k = freshKiosk();
+    try {
+        k.K.config.idleTimeout = 30;
+        k.K.setEnabled(true);
+        k.K.init();
+        await wait(10);
+        k.K.destroy(); // -> _disableKiosk() -> stopIdleMonitoring()
+
+        // If a "scroll" listener leaked (attach/remove list drift), this
+        // dispatch would call the still-attached resetIdleTimer and silently
+        // resurrect the idle timer even though monitoring was just stopped.
+        k.document.dispatchEvent(immediateEvent(k.window, 'scroll'));
+        await wait(80); // past idleTimeout, if a timer got resurrected it would fire here
+        assert.equal(k.K.isActive(), false, 'a "scroll" event after stopIdleMonitoring() must not resurrect idle monitoring / auto-activate kiosk');
+    } finally { teardown(k); }
+});
+
+test('(f) REGRESSION GUARD: a diverged stop-side event list leaks the "scroll" listener and resurrects idle monitoring', async () => {
+    const k = freshKiosk(mutateDivergedStopIdleEvents);
+    try {
+        k.K.config.idleTimeout = 30;
+        k.K.setEnabled(true);
+        k.K.init();
+        await wait(10);
+        k.K.destroy();
+
+        k.document.dispatchEvent(immediateEvent(k.window, 'scroll'));
+        await wait(80);
+        assert.equal(k.K.isActive(), true, 'with a diverged stop-side list missing "scroll", the leaked listener must resurrect idle monitoring -- proving the test above is a real regression guard for the attach/remove drift XACA-1154-016 eliminated');
+    } finally { teardown(k); }
+});
+
+// ============================================================================
+// (g) XACA-1154-017 -- clientX/clientY movement fallback
+// ============================================================================
+
+test('(g) clientX/clientY fallback lets movement exit kiosk when movementX/movementY are absent', async () => {
+    const k = freshKiosk();
+    try {
+        await enterAndArm(k);
+        k.document.dispatchEvent(clientMoveEvent(k.window, 'pointermove', 100, 100)); // first sample: baseline only
+        assert.equal(k.K.isActive(), true, 'the first fallback sample must establish the baseline only, not exit');
+        k.document.dispatchEvent(clientMoveEvent(k.window, 'pointermove', 115, 100)); // dx=15 -> hypot=15px >= 10px threshold
+        assert.equal(k.K.isActive(), false, 'a real clientX/clientY delta via the fallback must exit kiosk when movementX/Y are absent');
+    } finally { teardown(k); }
+});
+
+test('(g) the first fallback sample after a reset never contributes distance, regardless of the clientX/clientY value', async () => {
+    const k = freshKiosk();
+    try {
+        await enterAndArm(k);
+        k.document.dispatchEvent(clientMoveEvent(k.window, 'pointermove', 9999, 9999));
+        assert.equal(k.K.isActive(), true, 'a baseline-establishing sample must never exit no matter how large clientX/clientY are -- there is no previous point yet to diff against');
+    } finally { teardown(k); }
+});
+
+test('(g) real movementX/Y === 0 events are NOT diverted through the clientX/clientY fallback', async () => {
+    const k = freshKiosk();
+    try {
+        await enterAndArm(k);
+        // movementX/Y ARE present (real 0s) even though clientX/clientY are
+        // large -- the native branch must win; this must stay pure noise.
+        const ev = moveEvent(k.window, 'pointermove', 0, 0);
+        Object.defineProperty(ev, 'clientX', { value: 9999, configurable: true });
+        Object.defineProperty(ev, 'clientY', { value: 9999, configurable: true });
+        k.document.dispatchEvent(ev);
+        assert.equal(k.K.isActive(), true, 'movementX/Y === 0 must stay legitimate stationary noise even when clientX/Y are present and large');
+    } finally { teardown(k); }
+});
+
+test('(g) REGRESSION GUARD: without the clientX/clientY fallback, movement can never exit kiosk when movementX/movementY are absent', async () => {
+    const k = freshKiosk(mutateRemoveClientFallback);
+    try {
+        await enterAndArm(k);
+        k.document.dispatchEvent(clientMoveEvent(k.window, 'pointermove', 100, 100));
+        k.document.dispatchEvent(clientMoveEvent(k.window, 'pointermove', 400, 400)); // a huge, unmistakably real 424px move
+        assert.equal(k.K.isActive(), true, 'without the fallback, movementX/Y-absent engines must be permanently unable to exit kiosk via movement -- proving the tests above are real regression guards, and this is exactly the "load-bearing half silently inert" risk XACA-1154-017 exists to close');
+    } finally { teardown(k); }
+});
+
+// ============================================================================
+// (h) XACA-1154-018 -- self-healing latch on gap reset
+// ============================================================================
+
+test('(h) a latched type that stops firing self-heals via the gap reset instead of permanently blocking exit', async () => {
+    const k = freshKiosk();
+    try {
+        await enterAndArm(k);
+        // Latches onto 'pointermove' with a single noise-magnitude event
+        // (4.24px, below the 10px threshold alone).
+        k.document.dispatchEvent(moveEvent(k.window, 'pointermove', 3, 3));
+        assert.equal(k.K.isActive(), true, 'setup: single 4.24px event must not exit yet');
+
+        // 'pointermove' never fires again; only 'mousemove' arrives, after a
+        // gap exceeding KIOSK_MOVEMENT_GAP_RESET_MS (250ms).
+        await wait(300);
+        k.document.dispatchEvent(moveEvent(k.window, 'mousemove', 15, -2)); // ~15.1px, alone crosses the threshold
+        assert.equal(k.K.isActive(), false, 'a real "mousemove" event arriving >250ms after the latched "pointermove" type went quiet must self-heal the latch and exit kiosk');
+    } finally { teardown(k); }
+});
+
+test('(h) REGRESSION GUARD: without clearing the latch on a gap reset, a stale latch permanently blocks exit from the other type', async () => {
+    const k = freshKiosk(mutateGapResetDoesNotClearLatch);
+    try {
+        await enterAndArm(k);
+        k.document.dispatchEvent(moveEvent(k.window, 'pointermove', 3, 3));
+        assert.equal(k.K.isActive(), true, 'setup: latches onto "pointermove"');
+        await wait(300);
+        k.document.dispatchEvent(moveEvent(k.window, 'mousemove', 15, -2));
+        assert.equal(k.K.isActive(), true, 'without clearing the latch on the gap reset, "mousemove" must stay permanently rejected by the stale "pointermove" latch -- proving the test above is a real regression guard for the exact bug XACA-1154-018 describes');
+    } finally { teardown(k); }
+});
+
+// ============================================================================
+// (i) XACA-1154-019 -- cross-tab 'storage' preference sync
+// ============================================================================
+
+test('(i) a "storage" event to newValue "false" stops idle monitoring in this tab', async () => {
+    const k = freshKiosk();
+    try {
+        k.K.setEnabled(true);
+        k.K.config.idleTimeout = 30;
+        k.K.init();
+        await wait(80);
+        assert.equal(k.K.isActive(), true, 'setup: idle monitoring auto-activated kiosk');
+
+        // A same-window write never fires 'storage' locally -- only the event
+        // itself needs to be simulated, matching what the browser delivers
+        // FROM another tab's write (never caused by this tab's own write).
+        k.window.localStorage.setItem(KIOSK_ENABLED_STORAGE_KEY, 'false');
+        k.window.dispatchEvent(storageEvent(k.window, KIOSK_ENABLED_STORAGE_KEY, 'false'));
+
+        assert.equal(k.K.isActive(), false, 'a cross-tab disable via "storage" must stop/exit kiosk in this tab too');
+        await wait(80);
+        assert.equal(k.K.isActive(), false, 'idle monitoring must stay off after the cross-tab disable');
+    } finally { teardown(k); }
+});
+
+test('(i) a "storage" event to newValue "true" re-arms idle monitoring in this tab', async () => {
+    const k = freshKiosk();
+    try {
+        k.K.setEnabled(false);
+        k.K.config.idleTimeout = 30;
+
+        k.window.localStorage.setItem(KIOSK_ENABLED_STORAGE_KEY, 'true');
+        k.window.dispatchEvent(storageEvent(k.window, KIOSK_ENABLED_STORAGE_KEY, 'true'));
+
+        await wait(80);
+        assert.equal(k.K.isActive(), true, 'a cross-tab enable via "storage" must (re)arm idle monitoring in this tab');
+    } finally { teardown(k); }
+});
+
+test('(i) a "storage" event reflects onto #kiosk-mode-toggle when the element is present', () => {
+    const k = freshKiosk();
+    try {
+        const toggle = k.document.createElement('input');
+        toggle.type = 'checkbox';
+        toggle.id = 'kiosk-mode-toggle';
+        toggle.checked = true;
+        k.document.body.appendChild(toggle);
+
+        k.window.localStorage.setItem(KIOSK_ENABLED_STORAGE_KEY, 'false');
+        k.window.dispatchEvent(storageEvent(k.window, KIOSK_ENABLED_STORAGE_KEY, 'false'));
+
+        assert.equal(toggle.checked, false, 'the checkbox must be updated to reflect the cross-tab change');
+    } finally { teardown(k); }
+});
+
+test('(i) a "storage" event with no #kiosk-mode-toggle in the document is a clean no-op, not a throw', () => {
+    const k = freshKiosk();
+    try {
+        assert.equal(k.document.getElementById('kiosk-mode-toggle'), null, 'setup: no toggle present in this minimal DOM');
+        assert.doesNotThrow(() => {
+            k.window.localStorage.setItem(KIOSK_ENABLED_STORAGE_KEY, 'false');
+            k.window.dispatchEvent(storageEvent(k.window, KIOSK_ENABLED_STORAGE_KEY, 'false'));
+        }, 'a missing toggle element must never throw out of the storage handler');
+    } finally { teardown(k); }
+});
+
+test('(i) a "storage" event for an unrelated key is ignored', async () => {
+    const k = freshKiosk();
+    try {
+        k.K.setEnabled(true);
+        k.K.config.idleTimeout = 30;
+        k.K.init();
+        await wait(80);
+        assert.equal(k.K.isActive(), true, 'setup: kiosk auto-activated');
+
+        k.window.dispatchEvent(storageEvent(k.window, 'some-other-localstorage-key', 'false'));
+        assert.equal(k.K.isActive(), true, 'a storage event for an unrelated key must not affect kiosk state');
+    } finally { teardown(k); }
+});
+
+test('(i) REGRESSION GUARD: without the storage listener, a cross-tab preference change is never observed', async () => {
+    const k = freshKiosk(mutateRemoveStorageListener);
+    try {
+        k.K.setEnabled(true);
+        k.K.config.idleTimeout = 30;
+        k.K.init();
+        await wait(80);
+        assert.equal(k.K.isActive(), true, 'setup: kiosk auto-activated');
+
+        k.window.localStorage.setItem(KIOSK_ENABLED_STORAGE_KEY, 'false');
+        k.window.dispatchEvent(storageEvent(k.window, KIOSK_ENABLED_STORAGE_KEY, 'false'));
+
+        assert.equal(k.K.isActive(), true, 'without the storage listener, this tab must stay oblivious to the cross-tab change -- proving the tests above are real regression guards');
+    } finally { teardown(k); }
+});
+
+// ============================================================================
+// (j) XACA-1154-020 -- "scroll" stays on the idle list (asymmetry reasoning)
+// ============================================================================
+
+test('(j) "scroll" continues to reset the idle countdown, preventing kiosk activation while the user scrolls', async () => {
+    const k = freshKiosk();
+    try {
+        k.K.config.idleTimeout = 60;
+        k.K.setEnabled(true);
+        k.K.init();
+        for (let i = 0; i < 6; i++) {
+            await wait(20);
+            k.document.dispatchEvent(immediateEvent(k.window, 'scroll'));
+        }
+        assert.equal(k.K.isActive(), false, 'kiosk must not activate while "scroll" events keep resetting the idle countdown');
+    } finally { teardown(k); }
+});
+
+test('(j) REGRESSION GUARD: without "scroll" in the idle list, the countdown elapses and kiosk activates despite continuous scrolling', async () => {
+    const k = freshKiosk(mutateIdleListWithoutScroll);
+    try {
+        k.K.config.idleTimeout = 60;
+        k.K.setEnabled(true);
+        k.K.init();
+        for (let i = 0; i < 6; i++) {
+            await wait(20);
+            k.document.dispatchEvent(immediateEvent(k.window, 'scroll'));
+        }
+        assert.equal(k.K.isActive(), true, 'without "scroll" in the idle list, continuous scrolling must fail to prevent kiosk activation -- proving the test above is a real regression guard, and the empirical reason XACA-1154-020 keeps "scroll" in this list (see the code comment at KIOSK_IDLE_EVENTS)');
+    } finally { teardown(k); }
+});
+
+// ============================================================================
+// (k) XACA-1154-021 -- setEnabled(true) gated on !isKioskActive
+// ============================================================================
+
+// "keypress" is unique to KIOSK_IDLE_EVENTS -- neither KIOSK_EXIT_EVENTS_IMMEDIATE
+// nor KIOSK_EXIT_EVENTS_MOVEMENT ever attach it, so a document.addEventListener
+// call for it can only originate from startIdleMonitoring() (directly, or via
+// _applyKioskEnabled()/setEnabled()).
+function countKeypressAttaches(document) {
+    let count = 0;
+    const orig = document.addEventListener.bind(document);
+    document.addEventListener = function (type, listener, opts) {
+        if (type === 'keypress') count++;
+        return orig(type, listener, opts);
+    };
+    return () => count;
+}
+
+test('(k) setEnabled(true) does not re-arm idle-monitoring listeners while kiosk is currently active', async () => {
+    const k = freshKiosk();
+    try {
+        await enterAndArm(k);
+        const getCount = countKeypressAttaches(k.document);
+
+        k.K.setEnabled(true);
+        assert.equal(getCount(), 0, 'setEnabled(true) while kiosk is active must not re-arm idle-tracking listeners');
+    } finally { teardown(k); }
+});
+
+test('(k) REGRESSION GUARD: without the isKioskActive gate, setEnabled(true) re-arms idle-monitoring listeners even while kiosk is active', async () => {
+    const k = freshKiosk(mutateRemoveSetEnabledGate);
+    try {
+        await enterAndArm(k);
+        const getCount = countKeypressAttaches(k.document);
+
+        k.K.setEnabled(true);
+        assert.ok(getCount() > 0, 'without the gate, setEnabled(true) must re-arm idle listeners even while kiosk is active -- proving the test above is a real regression guard');
     } finally { teardown(k); }
 });

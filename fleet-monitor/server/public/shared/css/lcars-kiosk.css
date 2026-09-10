@@ -223,3 +223,50 @@ body.kiosk-active ~ .scanline {
     border-radius: 4px;
     box-shadow: 0 0 8px var(--lcars-cyan, #99CCFF);
 }
+
+/* ===============================================================================
+   KIOSK EXIT HINT (XACA-1154-015)
+
+   Transient pointer shown after LEAVING kiosk, telling the user where the
+   auto-start preference lives. Filed by the UX gate on PR #851: a user who has
+   just escaped kiosk still has to rediscover the PREFERENCES panel unaided.
+
+   Deliberately shown at most ONCE per page load, and only when kiosk is still
+   armed to recur (KIOSK auto-start on). A hint that reappears on every single
+   exit becomes its own undismissable nag — which is the defect class this whole
+   ticket exists to close, so it is not repeated here.
+
+   Unlike .kiosk-indicator this is pointer-events: auto — it is click-to-dismiss,
+   so it must be able to receive the click. It only ever exists AFTER the kiosk
+   exit handler has been removed, so it cannot race that handler.
+   =============================================================================== */
+
+.kiosk-exit-hint {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 10px 20px;
+    border-radius: 20px;
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    z-index: 9999;
+    background: rgba(0, 0, 0, 0.85);
+    color: var(--lcars-cyan);
+    border: 1px solid var(--lcars-cyan);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 300ms ease-in-out;
+}
+
+.kiosk-exit-hint.kiosk-exit-hint-visible {
+    opacity: 1;
+}
+
+/* Respect a reduced-motion preference: appear instantly rather than fading. */
+@media (prefers-reduced-motion: reduce) {
+    .kiosk-exit-hint {
+        transition: none;
+    }
+}

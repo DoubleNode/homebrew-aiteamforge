@@ -65,6 +65,36 @@
     let orgsScrollIndex = 0;
     let kioskMode = 'sections'; // 'sections' (legacy) or 'analytics' (new)
 
+    // XACA-1154-016: shared idle-tracking event list, used by BOTH
+    // startIdleMonitoring() and stopIdleMonitoring() so attach and remove can
+    // never drift apart. This is the exact same drift hazard XACA-1154-005
+    // eliminated for the exit set via KIOSK_EXIT_EVENTS_IMMEDIATE /
+    // KIOSK_EXIT_EVENTS_MOVEMENT below — each of those had one definition
+    // used by both add and remove; this list previously had two separate
+    // inline copies (one per function) that a future edit could update in
+    // one place and not the other.
+    //
+    // XACA-1154-020: 'scroll' stays on this list even though the same probe
+    // session that excluded it from the EXIT set below (6145 scroll events
+    // in 118s, largely self-inflicted by the page's own DOM updates)
+    // measured it here too. The IDLE list and the EXIT set have OPPOSITE
+    // risk polarity, so the same noise evidence does not imply the same
+    // fix: a false positive here (the page's own DOM churn resetting the
+    // idle countdown a bit more than necessary) is mildly wasteful at
+    // worst. A false NEGATIVE here — dropping 'scroll' and missing a
+    // genuine user scroll — lets the countdown expire while someone is
+    // actively scrolling a long list, and kiosk seizes the dashboard out
+    // from under them. That is not a theoretical risk: it is the
+    // ORIGINATING bug report this entire ticket exists to fix (kiosk
+    // seizing the dashboard roughly every 2.5 minutes), which is direct
+    // empirical evidence that idle activation fires in practice on a real,
+    // busy dashboard. Do not "fix" the scroll noise by removing it from
+    // this list — that trades a fixed bug for a worse one. If the
+    // self-inflicted DOM-churn noise ever needs addressing, do it by
+    // reducing the page's own scroll/update volume, not by blinding idle
+    // detection to real user scrolling.
+    const KIOSK_IDLE_EVENTS = ['mousemove', 'mousedown', 'keypress', 'keydown', 'touchstart', 'scroll', 'click'];
+
     // Stored reference to the kiosk exit interaction handlers so they can be removed cleanly.
     // Split in two: events in KIOSK_EXIT_EVENTS_IMMEDIATE are unambiguous intent and exit on
     // the first occurrence; events in KIOSK_EXIT_EVENTS_MOVEMENT (mousemove/pointermove) only
@@ -128,6 +158,19 @@
     // without latches mousemove, and neither can double-count the other.
     let _kioskMoveAccumEventType = null;
 
+    // XACA-1154-017: clientX/clientY fallback baseline, used ONLY when an engine never
+    // populates movementX/movementY at all (typeof !== 'number' — the cockpit WKWebView is an
+    // unverified surface and a real candidate). Without this fallback, dx/dy below would
+    // permanently read 0/0 on such an engine, every movement event would hit the "pure noise"
+    // early return, and the load-bearing half of this whole fix — the ability for cursor
+    // movement to exit kiosk without a click — would be silently inert. null means "no previous
+    // point yet"; the next fallback event establishes it without contributing distance. Reset
+    // alongside the rest of the accumulator state: kiosk entry (_setupKioskExitHandler), kiosk
+    // exit (_removeKioskExitHandler), and the >KIOSK_MOVEMENT_GAP_RESET_MS gap reset inside the
+    // movement handler itself (a stale point from before a gap is not a meaningful baseline).
+    let _kioskMovePrevClientX = null;
+    let _kioskMovePrevClientY = null;
+
     // =========================================================================
     // IDLE DETECTION
     // =========================================================================
@@ -159,8 +202,7 @@
 
         _boundResetIdleTimer = resetIdleTimer;
 
-        const events = ['mousemove', 'mousedown', 'keypress', 'keydown', 'touchstart', 'scroll', 'click'];
-        events.forEach(function(eventName) {
+        KIOSK_IDLE_EVENTS.forEach(function(eventName) {
             document.addEventListener(eventName, _boundResetIdleTimer, { passive: true });
         });
 
@@ -176,8 +218,7 @@
      */
     function stopIdleMonitoring() {
         if (_boundResetIdleTimer) {
-            const events = ['mousemove', 'mousedown', 'keypress', 'keydown', 'touchstart', 'scroll', 'click'];
-            events.forEach(function(eventName) {
+            KIOSK_IDLE_EVENTS.forEach(function(eventName) {
                 // Must match the capture value used in addEventListener (false/omitted).
                 // { passive: true } is NOT a valid removeEventListener option and is
                 // treated as truthy useCapture=true, which would never match the listener.
@@ -315,6 +356,9 @@
         // turned off. Restart only when kiosk is actually meant to be running.
         if (!(options && options.skipRestart) && isEnabled()) {
             startIdleMonitoring();
+            // XACA-1154-015: kiosk is armed to recur, so point the user at the control
+            // that stops it. Guarded internally to once per page load.
+            _showKioskExitHint();
         }
     }
 
@@ -361,6 +405,55 @@
      * cross KIOSK_MOVEMENT_EXIT_THRESHOLD_PX regardless of how soon after activation it fires.
      * No separate movement warm-up was added for the same reason — the threshold IS the guard.
      */
+    // XACA-1154-015 (UX gate, PR #851): a user who has just escaped kiosk still has to
+    // rediscover the PREFERENCES panel unaided in order to stop it happening again.
+    // Shown at most ONCE per page load, and only when kiosk is still armed to recur —
+    // a hint that reappears on every exit would be its own undismissable nag, which is
+    // precisely the defect class this ticket exists to close.
+    let _kioskExitHintShown = false;
+    let _kioskExitHintEl = null;
+    let _kioskExitHintTimer = null;
+
+    /** Tear down the exit hint and its timer. Safe to call when nothing is showing. */
+    function _removeKioskExitHint() {
+        clearTimeout(_kioskExitHintTimer);
+        _kioskExitHintTimer = null;
+        if (_kioskExitHintEl && _kioskExitHintEl.parentNode) {
+            _kioskExitHintEl.parentNode.removeChild(_kioskExitHintEl);
+        }
+        _kioskExitHintEl = null;
+    }
+
+    /**
+     * Show a transient, dismissible pointer to the auto-start preference.
+     * role="status" + aria-live="polite" so it is announced rather than seen only —
+     * this ticket is about a UI that could not be escaped, so a sighted-only
+     * affordance would miss the users most affected by it.
+     */
+    function _showKioskExitHint() {
+        if (_kioskExitHintShown) return;
+        _kioskExitHintShown = true;
+
+        _removeKioskExitHint();
+
+        var el = document.createElement('div');
+        el.className = 'kiosk-exit-hint';
+        el.setAttribute('role', 'status');
+        el.setAttribute('aria-live', 'polite');
+        el.textContent = 'Kiosk auto-start is on — turn it off under Preferences';
+        el.addEventListener('click', _removeKioskExitHint);
+        document.body.appendChild(el);
+        _kioskExitHintEl = el;
+
+        // Next frame, so the opacity transition actually runs rather than being
+        // collapsed into the initial paint.
+        setTimeout(function() {
+            if (_kioskExitHintEl === el) el.classList.add('kiosk-exit-hint-visible');
+        }, 20);
+
+        _kioskExitHintTimer = setTimeout(_removeKioskExitHint, 8000);
+    }
+
     function _setupKioskExitHandler() {
         // Defensive: clear any existing handler before attaching a new one
         _removeKioskExitHandler();
@@ -369,6 +462,8 @@
         _kioskMoveAccumDist = 0;
         _kioskMoveAccumLastTime = 0;
         _kioskMoveAccumEventType = null;
+        _kioskMovePrevClientX = null;
+        _kioskMovePrevClientY = null;
 
         _boundKioskExitHandlerImmediate = function(e) {
             // Arrow keys navigate kiosk pages instead of exiting
@@ -377,12 +472,61 @@
         };
 
         _boundKioskExitHandlerMovement = function(e) {
-            const dx = e.movementX || 0;
-            const dy = e.movementY || 0;
-            if (dx === 0 && dy === 0) return; // pure noise — contributes nothing, never exits alone
+            const now = Date.now();
+            const usingClientFallback = !(typeof e.movementX === 'number' && typeof e.movementY === 'number');
+
+            // XACA-1154-018: gap detection runs FIRST — before computing this event's delta and
+            // before the type-latch check below (previously it ran after both). A gap zeroes
+            // the distance accumulator, the latched event type, and (XACA-1154-017) the
+            // clientX/clientY fallback baseline — all three are meaningless once continuity is
+            // broken. Moving this earlier is what makes the latch self-healing: previously, once
+            // a type was latched, an event of the OTHER type hit the mismatch `return` below
+            // before ever reaching this gap check, so if the latched type's own events stopped
+            // arriving, _kioskMoveAccumLastTime was never touched again by ANYONE and the gap
+            // could never be observed — the latch was permanent and movement could no longer
+            // exit kiosk at all. Checking it here means: once >KIOSK_MOVEMENT_GAP_RESET_MS has
+            // passed since the last accumulating event (of the latched type), the very next real
+            // motion event of ANY type clears the accumulator and re-latches onto itself. This
+            // cannot reintroduce the intra-burst double-count the latch exists to prevent,
+            // because the accumulator is zeroed in the same reset.
+            if (now - _kioskMoveAccumLastTime > KIOSK_MOVEMENT_GAP_RESET_MS) {
+                _kioskMoveAccumDist = 0;
+                _kioskMoveAccumEventType = null;
+                _kioskMovePrevClientX = null;
+                _kioskMovePrevClientY = null;
+            }
+
+            let dx, dy;
+            if (!usingClientFallback) {
+                dx = e.movementX || 0;
+                dy = e.movementY || 0;
+                if (dx === 0 && dy === 0) return; // pure noise — contributes nothing, never exits alone, and must not refresh the gap clock (see KIOSK_MOVEMENT_GAP_RESET_MS)
+            } else if (_kioskMovePrevClientX === null) {
+                // XACA-1154-017: movementX/movementY are genuinely absent on this engine (e.g.
+                // the cockpit WKWebView is an unverified surface for this) — the branch above
+                // would otherwise always compute dx=dy=0 and this handler, the load-bearing half
+                // of the whole fix, would silently never exit kiosk on movement again. Fall back
+                // to a clientX/clientY delta against the previous point, tracked per kiosk
+                // session. This is the first fallback sample since a reset (session start or gap
+                // above), so there is no previous point to diff against — it can only establish
+                // the baseline, never contribute a (spurious) delta. It still marks this moment
+                // as the last-seen-activity time so the very next sample is compared against a
+                // fresh gap window rather than the stale pre-reset one, which would otherwise
+                // re-clear the baseline forever and distance could never accumulate.
+                _kioskMovePrevClientX = e.clientX;
+                _kioskMovePrevClientY = e.clientY;
+                _kioskMoveAccumLastTime = now;
+                return;
+            } else {
+                dx = e.clientX - _kioskMovePrevClientX;
+                dy = e.clientY - _kioskMovePrevClientY;
+                _kioskMovePrevClientX = e.clientX;
+                _kioskMovePrevClientY = e.clientY;
+                if (dx === 0 && dy === 0) return; // pure noise — contributes nothing, never exits alone, and must not refresh the gap clock
+            }
 
             // Latch onto the first movement event type that reports real motion, then ignore
-            // the other for the rest of this kiosk session. Without this, pointermove and
+            // the other for the rest of this accumulation window. Without this, pointermove and
             // mousemove — which a browser fires as a pair for one physical motion, carrying the
             // same deltas — each add to the accumulator and halve the effective threshold.
             // See _kioskMoveAccumEventType for the measured evidence.
@@ -392,14 +536,7 @@
                 return;
             }
 
-            const now = Date.now();
-            // A gap since the last movement event starts a fresh accumulation window — this is
-            // what stops slow drift over minutes from ever summing across the threshold.
-            if (now - _kioskMoveAccumLastTime > KIOSK_MOVEMENT_GAP_RESET_MS) {
-                _kioskMoveAccumDist = 0;
-            }
             _kioskMoveAccumLastTime = now;
-
             _kioskMoveAccumDist += Math.hypot(dx, dy);
             if (_kioskMoveAccumDist >= KIOSK_MOVEMENT_EXIT_THRESHOLD_PX) {
                 exitKioskMode();
@@ -448,6 +585,8 @@
             _kioskMoveAccumDist = 0;
             _kioskMoveAccumLastTime = 0;
             _kioskMoveAccumEventType = null;
+            _kioskMovePrevClientX = null;
+            _kioskMovePrevClientY = null;
             _log('[LCARS KIOSK] Exit handler removed.');
         }
     }
@@ -889,6 +1028,10 @@
             exitKioskMode({ skipRestart: true });
         }
         stopIdleMonitoring();
+        // XACA-1154-015: tear down any visible hint and, importantly, its pending
+        // timers. destroy() routes through here, so a test or a torn-down dashboard
+        // never leaves a stray timeout holding the event loop open.
+        _removeKioskExitHint();
     }
 
     /**
@@ -913,16 +1056,18 @@
      * is a pure no-op — it does not touch state, does not call
      * stopIdleMonitoring(), and does not throw.
      *
-     * Does NOT gate setEnabled(true): that function calls
-     * startIdleMonitoring() directly (see setEnabled below), not through
-     * init(). That is intentional — setEnabled(true) is the toggle-ON
-     * action itself, so it must start monitoring unconditionally rather
-     * than re-deriving "should I start?" from a preference read. Routing
-     * it through init() here would re-introduce a race: _lsSet() in
+     * Does NOT gate setEnabled(true) on the PREFERENCE: that function applies
+     * the change directly (see _applyKioskEnabled/setEnabled below), not
+     * through init(). That is intentional — setEnabled(true) is the
+     * toggle-ON action itself, so it must apply unconditionally rather than
+     * re-deriving "should I start?" from a preference read. Routing it
+     * through init() here would re-introduce a race: _lsSet() in
      * setEnabled() and the localStorage read in isEnabled() would need to
      * agree perfectly, and a storage write failure (see _lsSet) would
      * silently make setEnabled(true) a no-op instead of starting
-     * monitoring as the caller explicitly asked.
+     * monitoring as the caller explicitly asked. (It IS gated on kiosk
+     * ACTIVE state — see _applyKioskEnabled / XACA-1154-021 — which is an
+     * orthogonal, state-machine-safety concern, not a preference re-check.)
      */
     function init() {
         if (!isEnabled()) {
@@ -933,13 +1078,45 @@
     }
 
     /**
+     * Apply the enabled/disabled state: start or stop idle monitoring
+     * accordingly. Shared by setEnabled() (this tab's own toggle) and the
+     * XACA-1154-019 'storage' listener (another tab's toggle) so both apply
+     * the exact same rules — this function does NOT touch localStorage,
+     * callers are responsible for persisting first if needed.
+     *
+     * @param {boolean} enabled
+     */
+    function _applyKioskEnabled(enabled) {
+        if (enabled) {
+            // XACA-1154-021: don't start idle monitoring while kiosk is
+            // currently ACTIVE. enterKioskMode() stops idle monitoring for
+            // the duration of an active kiosk session (see its call to
+            // stopIdleMonitoring()) — that is the "monitoring off while
+            // kiosk active" invariant. Starting it here regardless would run
+            // idle monitoring concurrently with a running kiosk, breaking
+            // that invariant. Benign today (the idle timer would just fire
+            // into enterKioskMode()'s own isKioskActive early-return), but
+            // it's a state-machine inconsistency worth not introducing.
+            // Nothing is lost by skipping the start here: exitKioskMode()
+            // already restarts idle monitoring on exit when isEnabled() is
+            // true.
+            if (!isKioskActive) {
+                startIdleMonitoring();
+            }
+        } else {
+            _disableKiosk();
+        }
+    }
+
+    /**
      * Set the kiosk enabled/disabled preference and apply it immediately.
      * Persists to localStorage (best-effort — see _lsSet) and:
      *   - setEnabled(false): exits kiosk mode if active and stops idle
      *     monitoring, via the same pairing destroy() uses.
-     *   - setEnabled(true): (re)starts idle monitoring. startIdleMonitoring
-     *     already calls stopIdleMonitoring() first, so this is safe to call
-     *     even when monitoring is already running.
+     *   - setEnabled(true): (re)starts idle monitoring, unless kiosk is
+     *     currently active (XACA-1154-021 — see _applyKioskEnabled).
+     *     startIdleMonitoring already calls stopIdleMonitoring() first, so
+     *     this is safe to call even when monitoring is already running.
      * Idempotent in both directions — calling with the same value twice in
      * a row does not throw or double-remove listeners.
      *
@@ -948,15 +1125,43 @@
     function setEnabled(value) {
         var enabled = !!value;
         _lsSet(KIOSK_ENABLED_STORAGE_KEY, enabled ? 'true' : 'false');
-
-        if (enabled) {
-            startIdleMonitoring();
-        } else {
-            _disableKiosk();
-        }
-
+        _applyKioskEnabled(enabled);
         _log('[LCARS KIOSK] setEnabled(' + enabled + ')');
     }
+
+    /**
+     * XACA-1154-019: keep THIS tab's toggle and monitoring state in sync
+     * when the enabled/disabled preference changes elsewhere — another
+     * dashboard tab's toggle, the console, or another module calling
+     * localStorage.setItem directly. Without this, a tab's checkbox and its
+     * idle-monitoring state could silently diverge from the persisted
+     * preference until the next page load/init().
+     *
+     * The native 'storage' event fires only in OTHER same-origin documents,
+     * never in the document that performed the write — so this handler can
+     * never receive an event caused by THIS tab's own setEnabled() call,
+     * and cannot create a feedback loop on its own. It deliberately calls
+     * _applyKioskEnabled() directly rather than setEnabled() — applying the
+     * change without re-persisting a value that is already stored (and
+     * already the reason this handler is running).
+     */
+    window.addEventListener('storage', function(e) {
+        if (e.key !== KIOSK_ENABLED_STORAGE_KEY) return;
+
+        // Re-read via isEnabled() rather than trusting e.newValue directly —
+        // isEnabled() already encodes the 'true'/'false'/anything-else
+        // fallback rules (see its own doc comment), including the key
+        // having been removed entirely (e.newValue === null).
+        var enabled = isEnabled();
+
+        var toggle = document.getElementById('kiosk-mode-toggle');
+        if (toggle) {
+            toggle.checked = enabled;
+        }
+
+        _applyKioskEnabled(enabled);
+        _log('[LCARS KIOSK] storage sync: enabled=' + enabled);
+    });
 
     // =========================================================================
     // PUBLIC API

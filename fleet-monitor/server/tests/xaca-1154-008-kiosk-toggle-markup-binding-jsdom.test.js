@@ -280,6 +280,60 @@ for (const spec of DASHBOARDS) {
         } finally { teardown(inst); }
     });
 
+    // XACA-1154-019: cross-tab sync. A same-window localStorage write never
+    // fires a 'storage' event locally -- only the event itself is simulated
+    // here, exactly like the browser delivering another tab's write TO this
+    // tab (the write to inst.window.localStorage mirrors what that other
+    // tab's own write would have already left behind in the shared store).
+    test(`[${spec.label}] a real 'storage' event to 'false' unchecks the REAL checkbox and genuinely stops idle monitoring (cross-tab sync)`, async () => {
+        const inst = loadDashboard(spec);
+        try {
+            setStoredPreference(inst.window, 'true');
+            inst.K.config.idleTimeout = 30;
+            await boot(inst);
+
+            const toggle = getToggle(inst.document);
+            assert.equal(toggle.checked, true, 'setup: starts checked/enabled');
+            await wait(80);
+            assert.equal(inst.K.isActive(), true, 'setup: idle monitoring must have auto-activated kiosk -- if this fails, the rest of this test proves nothing');
+
+            inst.window.localStorage.setItem(STORAGE_KEY, 'false');
+            inst.window.dispatchEvent(new inst.window.StorageEvent('storage', {
+                key: STORAGE_KEY, newValue: 'false', storageArea: inst.window.localStorage,
+            }));
+
+            assert.equal(toggle.checked, false, 'the REAL checkbox must reflect the cross-tab change');
+            assert.equal(inst.K.isActive(), false, 'kiosk must exit on the cross-tab disable');
+
+            await wait(80);
+            assert.equal(inst.K.isActive(), false, 'idle monitoring must NOT have resurrected after the cross-tab disable');
+        } finally { teardown(inst); }
+    });
+
+    test(`[${spec.label}] a real 'storage' event to 'true' checks the REAL checkbox and genuinely re-arms idle monitoring (cross-tab sync)`, async () => {
+        const inst = loadDashboard(spec);
+        try {
+            setStoredPreference(inst.window, 'false');
+            inst.K.config.idleTimeout = 30;
+            await boot(inst);
+
+            const toggle = getToggle(inst.document);
+            assert.equal(toggle.checked, false, 'setup: starts unchecked/disabled');
+            await wait(80);
+            assert.equal(inst.K.isActive(), false, 'setup: kiosk must stay inactive while disabled');
+
+            inst.window.localStorage.setItem(STORAGE_KEY, 'true');
+            inst.window.dispatchEvent(new inst.window.StorageEvent('storage', {
+                key: STORAGE_KEY, newValue: 'true', storageArea: inst.window.localStorage,
+            }));
+
+            assert.equal(toggle.checked, true, 'the REAL checkbox must reflect the cross-tab change');
+
+            await wait(80);
+            assert.equal(inst.K.isActive(), true, 'idle monitoring must have (re)armed and auto-activated kiosk after the cross-tab enable');
+        } finally { teardown(inst); }
+    });
+
     test(`[${spec.label}] label/control association is real, and the control is keyboard-reachable`, async () => {
         const inst = loadDashboard(spec);
         try {
@@ -351,4 +405,109 @@ test('[lcars/lcars-dashboard.html] manual FAB entry while the preference is OFF 
         assert.equal(inst.K.isActive(), false, 'exiting a manually-entered kiosk while the preference is OFF must not resurrect idle monitoring -- the toggle must stay authoritative');
         assert.equal(toggle.checked, false, 'the toggle itself must still read OFF -- nothing in this path should have touched the stored preference');
     } finally { teardown(inst); }
+});
+
+// ============================================================================
+// XACA-1154-015 — kiosk exit hint
+//
+// Filed by the UX gate on PR #851: a user who has just escaped kiosk still has
+// to rediscover the PREFERENCES panel unaided in order to stop it recurring.
+// The hint is deliberately once-per-page-load and only when kiosk is still
+// armed — a hint on EVERY exit would be its own undismissable nag, which is
+// the defect class this whole ticket exists to close.
+// ============================================================================
+
+const HINT_SELECTOR = '.kiosk-exit-hint';
+
+function hintEl(document) {
+    return document.querySelector(HINT_SELECTOR);
+}
+
+test('(015) exiting kiosk with auto-start ON shows the hint pointing at Preferences', async () => {
+    const inst = loadDashboard(DASHBOARDS[1]);
+    try {
+        setStoredPreference(inst.window, 'true');
+        await boot(inst);
+
+        assert.equal(hintEl(inst.document), null, 'no hint before kiosk has ever run');
+
+        inst.K.enter();
+        assert.equal(inst.K.isActive(), true, 'kiosk should have entered');
+        await wait(150); // exit listeners attach after a 100ms setTimeout
+
+        inst.document.dispatchEvent(new inst.window.Event('click', { bubbles: true }));
+        assert.equal(inst.K.isActive(), false, 'a click must exit kiosk');
+
+        const el = hintEl(inst.document);
+        assert.ok(el, 'hint must be shown when kiosk is still armed to recur');
+        assert.match(el.textContent, /Preferences/i, 'hint must name where the control lives');
+        // Announced, not merely visible — this ticket is about an inescapable UI,
+        // so a sighted-only affordance would miss the users most affected.
+        assert.equal(el.getAttribute('role'), 'status');
+        assert.equal(el.getAttribute('aria-live'), 'polite');
+    } finally {
+        teardown(inst);
+    }
+});
+
+test('(015) the hint does NOT appear when auto-start is OFF (kiosk will not recur)', async () => {
+    const inst = loadDashboard(DASHBOARDS[1]);
+    try {
+        setStoredPreference(inst.window, 'false');
+        await boot(inst);
+
+        // Manual entry is deliberately ungated, so this is reachable with the
+        // preference off — and on exit there is nothing to warn about.
+        inst.K.enter();
+        await wait(150);
+        inst.document.dispatchEvent(new inst.window.Event('click', { bubbles: true }));
+        assert.equal(inst.K.isActive(), false, 'click must exit');
+
+        assert.equal(hintEl(inst.document), null,
+            'no hint when kiosk is disabled — there is nothing left to turn off');
+    } finally {
+        teardown(inst);
+    }
+});
+
+test('(015) the hint is shown at most once per page load, not on every exit', async () => {
+    const inst = loadDashboard(DASHBOARDS[1]);
+    try {
+        setStoredPreference(inst.window, 'true');
+        await boot(inst);
+
+        inst.K.enter();
+        await wait(150);
+        inst.document.dispatchEvent(new inst.window.Event('click', { bubbles: true }));
+        assert.ok(hintEl(inst.document), 'first exit shows the hint');
+
+        // Dismiss it, then go round again.
+        hintEl(inst.document).dispatchEvent(new inst.window.Event('click', { bubbles: true }));
+        assert.equal(hintEl(inst.document), null, 'clicking the hint dismisses it');
+
+        inst.K.enter();
+        await wait(150);
+        inst.document.dispatchEvent(new inst.window.Event('click', { bubbles: true }));
+        assert.equal(hintEl(inst.document), null,
+            'second exit must NOT re-show the hint — repeating it is the nag this ticket exists to prevent');
+    } finally {
+        teardown(inst);
+    }
+});
+
+test('(015) destroy() tears the hint down so no timer outlives the dashboard', async () => {
+    const inst = loadDashboard(DASHBOARDS[1]);
+    try {
+        setStoredPreference(inst.window, 'true');
+        await boot(inst);
+        inst.K.enter();
+        await wait(150);
+        inst.document.dispatchEvent(new inst.window.Event('click', { bubbles: true }));
+        assert.ok(hintEl(inst.document), 'hint present before destroy');
+
+        inst.K.destroy();
+        assert.equal(hintEl(inst.document), null, 'destroy() must remove the hint element');
+    } finally {
+        teardown(inst);
+    }
 });
