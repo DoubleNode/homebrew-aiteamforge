@@ -823,6 +823,183 @@ case "$_C3_KEY" in
 esac
 
 # ═════════════════════════════════════════════════════════════════════════════
+# SECTION D — OSC-before-prefix ordering is load-bearing at all 3 refcount-
+# transition sites (XACA-1144-009)
+#
+# WHY THIS EXISTS: the fix moved `iterm2_set_user_var claude_active ...` to run
+# BEFORE `_fire_claude_tab_prefix` at all three refcount-transition sites in
+# iterm2_badge_helper.sh (lines ~300-301, ~365-366, ~406-407) — see the
+# "ORDER IS LOAD-BEARING" comment at set_claude_active. _fire_claude_tab_prefix
+# drives the LOCAL iTerm2 Python API (measured 1.17s warm / ~3.1s cold) inside
+# the caller's `subprocess.run(..., timeout=2)`; on a REMOTE consumer that call
+# is also guaranteed useless (the local iTerm2 it reaches isn't the one anyone
+# is looking at). Emitting the OSC first makes the remote-facing signal
+# independent of the local call's latency. Nothing in Sections A-C enforces
+# this — every assertion there is agnostic to call ORDER, only call
+# occurrence/content. A future refactor could silently restore prefix-first
+# (Round-1's shape) and every existing assertion would still pass.
+#
+# METHOD: source the REAL badge helper, then override `iterm2_set_user_var`
+# and `_fire_claude_tab_prefix` (bash resolves function bodies by NAME at
+# call time, so redefining them after sourcing changes what
+# set_claude_active/clear_claude_active invoke) with tracers that append to a
+# file instead of doing real I/O. This isolates ORDER from CONTENT — Section C
+# already proves each call's own bytes/behavior; this section proves nothing
+# sits between them in the wrong sequence.
+#
+# RED PROOF: a scratch copy of the helper with both lines swapped at all three
+# sites (via exact two-line textual substitution, counted before AND after to
+# guard against the substitution itself going silently stale) is run through
+# the IDENTICAL harness and MUST reproduce the reversed order — proving this
+# assertion can fail, not just pass by construction.
+# ═════════════════════════════════════════════════════════════════════════════
+
+cat > "$TEST_TMP_DIR/d_order_probe.sh" <<'DEOF'
+#!/bin/bash
+# Traces call ORDER between iterm2_set_user_var and _fire_claude_tab_prefix at
+# one refcount transition. argv: <helper-path> <mode> <trace-file>
+#   mode: activate | clear-absent | clear-to-zero
+set -u
+HELPER="$1"
+MODE="$2"
+TRACE="$3"
+: > "$TRACE"
+
+ITERM_REFCOUNT_DIR="$(mktemp -d)"
+trap 'rm -rf "$ITERM_REFCOUNT_DIR"' EXIT
+unset TMUX
+unset TMUX_PANE
+export ITERM_SESSION_ID="d-ordering-test"
+
+# Clear positional params BEFORE sourcing: the helper's own
+# "Default behaviour when sourced" block calls `set_claude_badge "$@"` when
+# `$# -gt 0` and `$1 != test-refcount` — this script's own argv (helper/mode/
+# trace, $#=3) would otherwise wrongly trigger it during the `source` below.
+set --
+
+# shellcheck disable=SC1090
+source "$HELPER"
+
+# Override AFTER sourcing — set_claude_active/clear_claude_active (already
+# defined by the source above) look up these names again at CALL time, so
+# they will invoke these tracer bodies, not the real OSC/iTerm2-API ones.
+iterm2_set_user_var() { printf 'OSC:%s=%s\n' "$1" "$2" >> "$TRACE"; }
+_fire_claude_tab_prefix() { printf 'PREFIX:%s\n' "$1" >> "$TRACE"; }
+
+case "$MODE" in
+    activate)
+        # 0 -> 1 transition (iterm2_badge_helper.sh:300-301).
+        set_claude_active
+        ;;
+    clear-absent)
+        # refcount file never existed -> "already 0" short-circuit
+        # (iterm2_badge_helper.sh:365-366).
+        clear_claude_active
+        ;;
+    clear-to-zero)
+        # 1 -> 0 transition (iterm2_badge_helper.sh:406-407). Prime the
+        # refcount to 1 first, then discard that priming call's trace output
+        # so only the decrement-path's pair remains.
+        set_claude_active >/dev/null 2>&1
+        : > "$TRACE"
+        clear_claude_active
+        ;;
+    *)
+        echo "unknown mode: $MODE" >&2
+        exit 1
+        ;;
+esac
+DEOF
+
+_d_trace_order() {
+    # $1 = trace file. Echoes OSC-FIRST / PREFIX-FIRST / INCOMPLETE.
+    local trace="$1"
+    local first
+    first="$(grep -m1 -E '^(OSC|PREFIX):' "$trace" 2>/dev/null || true)"
+    case "$first" in
+        OSC:*)    echo "OSC-FIRST" ;;
+        PREFIX:*) echo "PREFIX-FIRST" ;;
+        *)        echo "INCOMPLETE" ;;
+    esac
+}
+
+# ── D sanity: the RED-proof swap targets exactly 3 sites, not fewer/more ──
+# Counted independently of the swap operation itself so a future rewording of
+# the surrounding comments (which the swap patterns deliberately ignore)
+# cannot make this guard pass vacuously.
+_D_ORIG_COUNT="$(perl -0777 -ne '
+    $c = 0;
+    $c += () = /            iterm2_set_user_var claude_active "1"\n            _fire_claude_tab_prefix --activate\n/g;
+    $c += () = /            iterm2_set_user_var claude_active "0"\n            _fire_claude_tab_prefix --deactivate\n/g;
+    print $c;
+' "$REAL_BADGE_HELPER")"
+test_start "D sanity: real badge helper has exactly 3 OSC-then-prefix pairs to invert for the RED proof"
+if [ "$_D_ORIG_COUNT" = "3" ]; then
+    test_pass
+else
+    test_fail "expected 3 matching two-line pairs, found $_D_ORIG_COUNT — the RED-proof substitution patterns below are stale relative to the current source and must be updated"
+fi
+
+_D_SWAPPED_HELPER="$TEST_TMP_DIR/iterm2_badge_helper.SWAPPED.sh"
+perl -0777 -pe '
+    s/            iterm2_set_user_var claude_active "1"\n            _fire_claude_tab_prefix --activate\n/            _fire_claude_tab_prefix --activate\n            iterm2_set_user_var claude_active "1"\n/g;
+    s/            iterm2_set_user_var claude_active "0"\n            _fire_claude_tab_prefix --deactivate\n/            _fire_claude_tab_prefix --deactivate\n            iterm2_set_user_var claude_active "0"\n/g;
+' "$REAL_BADGE_HELPER" > "$_D_SWAPPED_HELPER"
+
+_D_SWAPPED_REVERSED_COUNT="$(perl -0777 -ne '
+    $c = 0;
+    $c += () = /            _fire_claude_tab_prefix --activate\n            iterm2_set_user_var claude_active "1"\n/g;
+    $c += () = /            _fire_claude_tab_prefix --deactivate\n            iterm2_set_user_var claude_active "0"\n/g;
+    print $c;
+' "$_D_SWAPPED_HELPER")"
+test_start "D sanity: scratch swap actually reversed all 3 sites (RED fixture is not vacuous)"
+if [ "$_D_SWAPPED_REVERSED_COUNT" = "3" ]; then
+    test_pass
+else
+    test_fail "expected 3 reversed pairs in the scratch copy, found $_D_SWAPPED_REVERSED_COUNT — the swap substitution silently failed to apply"
+fi
+
+_D_SWAPPED_ORIG_REMAINING="$(perl -0777 -ne '
+    $c = 0;
+    $c += () = /            iterm2_set_user_var claude_active "1"\n            _fire_claude_tab_prefix --activate\n/g;
+    $c += () = /            iterm2_set_user_var claude_active "0"\n            _fire_claude_tab_prefix --deactivate\n/g;
+    print $c;
+' "$_D_SWAPPED_HELPER")"
+test_start "D sanity: scratch swap left zero un-swapped original-order sites"
+if [ "$_D_SWAPPED_ORIG_REMAINING" = "0" ]; then
+    test_pass
+else
+    test_fail "expected 0 remaining original-order pairs in the scratch copy, found $_D_SWAPPED_ORIG_REMAINING"
+fi
+
+# ── D: real helper — OSC must fire before the local prefix call, all 3 sites ──
+for _d_mode in activate clear-absent clear-to-zero; do
+    _d_trace="$TEST_TMP_DIR/d-trace-real-${_d_mode}.log"
+    bash "$TEST_TMP_DIR/d_order_probe.sh" "$REAL_BADGE_HELPER" "$_d_mode" "$_d_trace" >/dev/null 2>&1
+    _d_result="$(_d_trace_order "$_d_trace")"
+    test_start "D: real badge helper emits OSC before local prefix call at the '${_d_mode}' transition"
+    if [ "$_d_result" = "OSC-FIRST" ]; then
+        test_pass
+    else
+        test_fail "expected OSC-FIRST, got ${_d_result} — trace: $(cat "$_d_trace" 2>/dev/null | tr '\n' ' ')"
+    fi
+done
+
+# ── D RED: the line-swapped scratch copy MUST reproduce the reversed order —
+# proving the assertion above can fail, not just pass by construction ──
+for _d_mode in activate clear-absent clear-to-zero; do
+    _d_trace="$TEST_TMP_DIR/d-trace-swapped-${_d_mode}.log"
+    bash "$TEST_TMP_DIR/d_order_probe.sh" "$_D_SWAPPED_HELPER" "$_d_mode" "$_d_trace" >/dev/null 2>&1
+    _d_result="$(_d_trace_order "$_d_trace")"
+    test_start "D RED: line-swapped helper reproduces PREFIX-before-OSC at the '${_d_mode}' transition (proves the D assertion is not vacuous)"
+    if [ "$_d_result" = "PREFIX-FIRST" ]; then
+        test_pass
+    else
+        test_fail "expected the swapped fixture to reproduce PREFIX-FIRST, got ${_d_result} — the D assertion above would not actually catch a reordering regression: trace: $(cat "$_d_trace" 2>/dev/null | tr '\n' ' ')"
+    fi
+done
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Summary
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$_STANDALONE" = true ]; then

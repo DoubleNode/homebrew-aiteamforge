@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1144-009: added Section D to `test-xaca-1144-remote-indicator-delivery.sh`
+  (55 -> 64 assertions) enforcing that the OSC 1337 `claude_active` emission
+  precedes `_fire_claude_tab_prefix` at all three refcount-transition sites.
+  Nothing previously enforced that ordering: Sections A-C assert call
+  occurrence and content but are agnostic to call ORDER, so a refactor
+  restoring Round-1's prefix-first shape would have passed every assertion.
+  Non-vacuity proven two ways — the suite's own RED fixture (a line-swapped
+  scratch helper reproduces the reversed order), and independently by swapping
+  the real canonical helper, which takes the suite to exit 1 / 2 failed.
+  KNOWN GAP, tracked: Section D resolves `REAL_BADGE_HELPER` (canonical) only.
+  Swapping the SHIPPED `share/scripts/` copy leaves the suite green at 64/64 —
+  measured, not assumed. On a ticket whose subject is canonical/tap
+  divergence that is the blind spot the ticket exists to close; extending D
+  to `SHIPPED_BADGE_HELPER` is the follow-up.
 - XACA-1113 (test, CI coverage): registered `tests/test-xaca-1113-012-msg-fail-closed.sh`
   and `tests/test-xaca-1113-013-msg-this-machine-regression.sh` in
   `tests/ci-manifest` as `plain-shell` (XACA-1113-005) — both files were
