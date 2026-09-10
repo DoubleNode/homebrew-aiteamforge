@@ -281,7 +281,7 @@ After creating the PR, generate handoff prompts for BOTH gates so the user can c
 
 **B. Four-Gate Monitoring Loop**
 
-After generating both handoff prompts, the creating agent polls until ALL FOUR gates clear, then merges: (1) test, (2) review, (3) protected-subitem sweep, (4) branch freshness + mergeability.
+After generating both handoff prompts, the creating agent polls until ALL FOUR gates clear, then merges: (1) test, (2) review, (3) protected-subitem sweep, (4) branch freshness + mergeability. Between gates 3 and 4 sits an additional CI check-runs catch-all (Gate 3.5) — it blocks the merge on any failing check regardless of what the four named gates report, so a red build can never slip through under `--admin`.
 
 > **IMPORTANT:** Do NOT check `reviewDecision` — GitHub does not count GitHub App bot reviews toward `required_approving_review_count` on the Team plan. `reviewDecision` will always show `"REVIEW_REQUIRED"` even after both bots approve. Check the reviews list directly, keyed to each bot's own login.
 
@@ -296,7 +296,7 @@ LAST_TEST_AT=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
 LAST_REVIEW_AT=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
   --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]")] | sort_by(.submitted_at) | last | .submitted_at // empty')
 
-TEST_OK="false"; REVIEW_OK="false"; MERGE_UNKNOWN_RETRIES=0; POLL_COUNT=0
+TEST_OK="false"; REVIEW_OK="false"; MERGE_UNKNOWN_RETRIES=0; POLL_COUNT=0; PREV_HEAD_SHA=""
 
 while true; do
   STATE=$(gh pr view <number> --json state --jq '.state')
@@ -313,6 +313,40 @@ while true; do
   # Key both gates' verdicts to the CURRENT head SHA, not just to a newer timestamp — a
   # review submitted against an older commit must never satisfy a gate for a newer push.
   HEAD_SHA=$(gh pr view <number> --json headRefOid --jq '.headRefOid')
+
+  # TEST_OK/REVIEW_OK are latches — once a poll sets one true it stays true until this
+  # loop exits. That's fine for a HEAD that never moves, but if a push lands BETWEEN the
+  # two approvals (e.g. the tester approves commit X, then a fix or unrelated push moves
+  # HEAD to Y before the reviewer gets to it), the tester's latch stays true forever even
+  # though no bot has ever reviewed Y under that flag. The per-poll commit_id filter below
+  # only stops a STALE query result from setting a flag true — it does nothing to a flag
+  # that is ALREADY true from a prior HEAD. Reset both latches the moment HEAD_SHA itself
+  # changes, so every gate must be freshly re-earned against whatever HEAD is current now.
+  if [ -n "$PREV_HEAD_SHA" ] && [ "$HEAD_SHA" != "$PREV_HEAD_SHA" ]; then
+    echo "Head SHA changed ($PREV_HEAD_SHA -> $HEAD_SHA) since the last poll — a push landed."
+    echo "Resetting both gate latches; a prior approval against the old head does not carry"
+    echo "forward, each bot must re-approve the new head before this gate re-opens."
+    TEST_OK="false"; REVIEW_OK="false"
+  fi
+  PREV_HEAD_SHA="$HEAD_SHA"
+
+  # ⚠️ THIS RESET DOES NOT FULLY CLOSE THE GAP FOR A REBASE / FORCE-PUSH. On an ordinary
+  # push, a stale review keeps its OLD commit_id, so the per-poll filter below correctly
+  # fails to match it against the new HEAD_SHA and the freshly-reset latch stays false
+  # until a real new review lands. On a REBASE, GitHub re-points the commit_id of
+  # whatever reviews were current at rebase time onto the NEW head — so the very same
+  # filter query (commit_id == HEAD_SHA) can match a review that predates the rebase and
+  # never saw the rebased content, immediately re-setting the latch true on the next poll.
+  # Measured, not theoretical: PR #851 (XACA-1154) showed both bots' APPROVED reviews
+  # re-pointed from commit 53b23188 to the post-rebase head 3c23b5f5 within seconds of the
+  # force-push, with submitted_at timestamps that predate 3c23b5f5's own committer date. A
+  # head-SHA-keyed APPROVED is proof the review is CURRENT, not proof the reviewer SAW the
+  # current content, and those are the same thing only when the head moved by an ordinary
+  # push. After ANY rebase or force-push (not just an ordinary push), do not trust that this
+  # loop's automatic re-check is sufficient — manually re-spawn BOTH bots regardless of what
+  # the commit_id filter reports, or at minimum compare each APPROVED review's `submitted_at`
+  # against the force-push time and treat an older one as unverified against the new base.
+  # See Troubleshooting § "Rebase re-points commit_id" below for the verification query.
 
   # ── Gate 1: Test (ds9-tester-bot[bot]) ──
   L=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
@@ -364,6 +398,23 @@ while true; do
   if echo "$SWEEP_OUTPUT" | grep -qE "PROTECTED SUBITEMS UNRESOLVED \([0-9]+\)"; then
     echo "✗ Protected [Review]/[Test]/[UX] subitems are still open — agents cannot cancel"
     echo "  them without user approval. Resolve them, push fixes if needed, re-enter the loop."
+    break
+  fi
+
+  # ── Gate 3.5: CI check runs — catch-all, not a list of known-bad checks ──
+  # `--admin` bypasses branch-protection review counting, NOT CI results — a build/lint/test
+  # workflow that reports FAILURE on this PR must still block the merge. Do NOT rewrite this
+  # as a list of specific check names to watch for: an ENUMERATED list is a DENYLIST, and a
+  # denylist fails OPEN — any check not named on it sails straight through. Block on ANY check
+  # in the FAILURE state, full stop. If your repo has a check that is expected to fail under
+  # specific circumstances, that's a bypass rule to add explicitly (label/commit-trailer), not
+  # a reason to remove the check from this catch-all.
+  FAILED_CHECKS=$(gh pr checks <number> --repo <owner>/<repo> --json name,state \
+    --jq '[.[] | select(.state == "FAILURE") | .name] | unique | join(", ")' 2>/dev/null)
+  if [ -n "$FAILED_CHECKS" ]; then
+    echo "✗ Failing check(s) on PR #<number>: $FAILED_CHECKS"
+    echo "  Investigate before merging. Do NOT --admin past a red check — --admin bypasses the"
+    echo "  Team-plan review-count block, it is not a license to merge over a failing build."
     break
   fi
 
@@ -437,7 +488,8 @@ done
 - Poll every **60 seconds**; a brief status line every 5 polls (~5 min) shows TEST/REVIEW state.
 - Both gates key their verdict to the PR's **current head SHA** (`commit_id`), not just to a newer timestamp — an approval from before the last push can't satisfy a gate for the new one.
 - On `CHANGES_REQUESTED` from either bot: pause, surface the review body, address feedback, push fixes, re-seed ONLY that gate's `LAST_*_AT`, re-enter the loop.
-- Gate 3 (subitem sweep) and Gate 4 (freshness/mergeability) only run once BOTH bot gates have passed — see the loop's ordering above.
+- Gate 3 (subitem sweep), Gate 3.5 (CI check runs), and Gate 4 (freshness/mergeability) only run once BOTH bot gates have passed — see the loop's ordering above.
+- Gate 3.5 blocks on **any** check reporting `FAILURE`, with no exceptions list — `--admin` overrides the Team-plan review-count requirement, it does not and must not override a red CI run. If a check is legitimately allowed to fail in some case, add an explicit bypass (a label or commit-trailer your monitor checks for) rather than removing it from the catch-all — an enumerated allowlist of "checks that must pass" quietly becomes a denylist the moment anyone forgets to add a new check to it.
 - On a stale branch (Gate 4): `gh pr update-branch` dismisses stale reviews — re-spawn BOTH bots and re-seed BOTH timestamps afterward.
 - On merge conflicts (Gate 4): halt, never merge — resolve manually, then re-spawn both bots.
 - `state: "CLOSED"` or `"MERGED"` → notify the user and exit the monitor.
@@ -1000,6 +1052,12 @@ After completing:
   gh api --paginate repos/{owner}/{repo}/pulls/<N>/reviews --jq '.[] | select(.user.login == "ai-security-review-bot[bot]")'
   ```
 - **`reviewDecision` always shows `REVIEW_REQUIRED`:** This is expected — GitHub Team plan doesn't count bot reviews. Always check the reviews list directly (per-login, as above), never `reviewDecision`.
+- **A rebase or force-push re-points an EXISTING review's `commit_id` onto the new head** — head-SHA keying alone does not survive this. On an ordinary push (no rebase), a stale review keeps its old `commit_id`, so filtering on `commit_id == <current HEAD>` correctly excludes it. On a rebase, GitHub re-associates whatever reviews were current at rebase time onto the rebased head, so that same filter can match a review that never saw the rebased content — an "APPROVED" that looks fresh by SHA but predates the content it's supposedly approving. Confirm you're looking at this, don't assume: run a negative control (a filter for an all-zero fake SHA MUST return zero rows; if it doesn't, your filter isn't discriminating) and compare each matching review's `submitted_at` against the actual push time — a review timestamped before the force-push is re-associated, not fresh:
+  ```bash
+  FAKE="0000000000000000000000000000000000000000"
+  gh api --paginate repos/{owner}/{repo}/pulls/<N>/reviews --jq '[.[] | select(.commit_id == "'"$FAKE"'")] | length'   # MUST be 0
+  ```
+  After ANY rebase/force-push, treat it like a fresh review round regardless of what the commit_id filter reports: re-spawn BOTH bots and re-seed both `LAST_*_AT`. Do not rely on an existing APPROVED surviving the rebase just because its `commit_id` now matches.
 - **NEVER** store `gh api` JSON in shell variables then pipe through `echo | jq` — control characters break parsing. Always use `gh api --jq` instead.
 - **`$?` after a pipe (e.g. `gh-bot-test ... | tail`) reports the PIPE's exit code, not the command's** — a failed submission can silently read as success. Capture the command's own output/exit code before piping it anywhere.
 - **Manual merge after bot approval:** Verify APPROVED reviews exist from BOTH `ds9-tester-bot[bot]` AND `ai-security-review-bot[bot]` (per the queries above) and that `kb-sweep <ITEM-ID>` shows no `PROTECTED SUBITEMS UNRESOLVED`, then `gh pr merge <N> --squash --delete-branch --admin && kb-done`

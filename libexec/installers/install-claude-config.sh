@@ -190,7 +190,7 @@ install_global_claude_md() {
         # there is no prior customization to protect the first time this
         # file is written. See _xaca1159_refresh_global_claude_md() below,
         # the upgrade-side consumer of this receipt.
-        _xaca1159_write_claude_md_receipt "$target"
+        _xaca1159_write_claude_md_receipt "$target" || log_warning "Could not write the CLAUDE.md render receipt; upgrade will re-derive provenance by comparison"
         log_success "Global CLAUDE.md installed"
     else
         log_warning "Template not found, skipping: $template"
@@ -274,10 +274,13 @@ _xaca1159_render_claude_md_sidecar() {
 # worst case, the NEXT upgrade run falls back to the historical bootstrap.
 _xaca1159_write_claude_md_receipt() {
     local rendered_target="$1"
-    local receipt _x1159_sidecar=""
+    local receipt
     receipt="$(_xaca1159_claude_md_receipt_path)"
     mkdir -p "$(dirname "$receipt")" 2>/dev/null
-    cp "$rendered_target" "$receipt" 2>/dev/null
+    if ! cp "$rendered_target" "$receipt" 2>/dev/null; then
+        return 1
+    fi
+    return 0
 }
 
 # Every historical shipped render of claude-md-global.template, oldest first,
@@ -320,6 +323,23 @@ _xaca1159_bootstrap_claude_md_provenance() {
     [[ -d "$hist_dir" ]] || return 1
 
     local fname varname src tmp matched=1
+
+    # Try the CURRENT template first. Cheapest comparison, commonest case on a
+    # box that simply lost its receipt (deleted, or the file was copied from an
+    # already-updated machine). Rendered through apply_template -- the same path
+    # install_global_claude_md uses -- so the comparison is exact rather than an
+    # approximation of it.
+    local cur_tmp
+    cur_tmp="$(mktemp "${AITEAMFORGE_DIR:-/tmp}/.claude-md-cur.XXXXXX" 2>/dev/null)" || cur_tmp=""
+    if [[ -n "$cur_tmp" ]]; then
+        if apply_template "${TEMPLATE_DIR}/claude/claude-md-global.template" "$cur_tmp" >/dev/null 2>&1 \
+           && cmp -s "$cur_tmp" "$live"; then
+            command rm "$cur_tmp" 2>/dev/null || true
+            return 0
+        fi
+        command rm "$cur_tmp" 2>/dev/null || true
+    fi
+
     while IFS='|' read -r fname varname; do
         [[ -n "$fname" ]] || continue
         src="${hist_dir}/${fname}"
@@ -352,7 +372,7 @@ _xaca1159_bootstrap_claude_md_provenance() {
 _xaca1159_refresh_global_claude_md() {
     local target="${CLAUDE_CONFIG_DIR}/CLAUDE.md"
     local template="${TEMPLATE_DIR}/claude/claude-md-global.template"
-    local receipt
+    local receipt _x1159_sidecar=""
     receipt="$(_xaca1159_claude_md_receipt_path)"
 
     if [[ ! -f "$target" ]]; then
@@ -362,6 +382,21 @@ _xaca1159_refresh_global_claude_md() {
     if [[ ! -f "$template" ]]; then
         echo "Shipped claude-md-global.template not found -- skipping"
         return 1
+    fi
+
+    # A symlink is user-managed by definition -- never destroy it, and never
+    # write through it into whatever it points at. Checked BEFORE the receipt
+    # comparison on purpose: `cmp` follows symlinks, so a symlinked file whose
+    # bytes happen to match our receipt would otherwise read as pristine and
+    # be replaced by the `mv` below.
+    if [[ -L "$target" ]]; then
+        _x1159_sidecar="$(_xaca1159_render_claude_md_sidecar "$target" "$template")" || _x1159_sidecar=""
+        if [[ -n "$_x1159_sidecar" ]]; then
+            echo "Left untouched: ${target} is a symlink (user-managed -- dotfiles, or a prior deploy-to-production.sh run). Neither the link nor its destination was modified. Current shipped version written alongside it for comparison: ${_x1159_sidecar}"
+        else
+            echo "Left untouched: ${target} is a symlink (user-managed). Neither the link nor its destination was modified."
+        fi
+        return 3
     fi
 
     if [[ -f "$receipt" ]]; then
@@ -402,8 +437,13 @@ _xaca1159_refresh_global_claude_md() {
 
     if cmp -s "$candidate" "$target"; then
         rm -f "$candidate"
-        _xaca1159_write_claude_md_receipt "$target"   # self-heal a missing/stale receipt now that pristine-ness is verified
-        echo "Global CLAUDE.md already current"
+        # self-heal a missing/stale receipt now that pristine-ness is verified;
+        # checked so a failed copy cannot abort the caller under `set -e`.
+        if _xaca1159_write_claude_md_receipt "$target"; then
+            echo "Global CLAUDE.md already current"
+        else
+            echo "Global CLAUDE.md already current (render receipt could not be written; provenance will be re-derived next run)"
+        fi
         return 0
     fi
 
@@ -420,8 +460,14 @@ _xaca1159_refresh_global_claude_md() {
     chmod "$_mode" "$candidate" 2>/dev/null || true
 
     if mv -f "$candidate" "$target" 2>/dev/null; then
-        _xaca1159_write_claude_md_receipt "$target"
-        echo "Global CLAUDE.md refreshed from shipped template"
+        # Checked, never bare: an unchecked call would abort this subshell under
+        # the upgrade's `set -e` AFTER the file was already rewritten, reporting
+        # a skip for a refresh that happened.
+        if _xaca1159_write_claude_md_receipt "$target"; then
+            echo "Global CLAUDE.md refreshed from shipped template"
+        else
+            echo "Global CLAUDE.md refreshed from shipped template, but the render receipt could not be written -- the next upgrade will re-derive provenance by comparing against the shipped templates instead"
+        fi
         return 2
     fi
 

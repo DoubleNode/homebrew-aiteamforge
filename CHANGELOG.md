@@ -83,7 +83,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   customized box has something concrete to diff against rather than keeping a
   stale — possibly fail-open — `CLAUDE.md` indefinitely on the strength of one
   warning line in an upgrade log. The sidecar is fail-soft and never converts a
-  safe skip into an error. Boxes that
+  safe skip into an error.
+
+  Round-2 gate findings (PR #855). XACA-1159-019: the shipped four-gate loop
+  never called `gh pr checks`, and `UNSTABLE` sits on its merge allowlist, so a
+  red build merged under `--admin`. Added a Gate 3.5 catch-all that blocks on
+  ANY check in `FAILURE` -- a catch-all, not an enumerated list, because an
+  enumerated list is a denylist and every unnamed check sails through it.
+  XACA-1159-020: `TEST_OK`/`REVIEW_OK` latched once and never reset, so a push
+  landing between the two bot approvals left the earlier gate true for a commit
+  its bot never saw -- defeating the head-SHA keying this same ticket added.
+  Both latches now reset whenever the head SHA changes between polls. A
+  residual gap is documented rather than papered over: a rebase or force-push
+  RE-POINTS an existing review's `commit_id` onto the new head, so the
+  `commit_id` filter itself can be satisfied by a review of content neither bot
+  saw; consumers are told to re-spawn both bots after any rebase regardless of
+  what the filter reports. XACA-1159-021: `cp` was the last command in
+  `_xaca1159_write_claude_md_receipt`, making its status the function's, and
+  the function was called UNCHECKED under the upgrade's `set -e` -- so a failed
+  receipt write aborted the subshell immediately after a SUCCESSFUL `mv`,
+  reporting "refresh skipped" for a file that had in fact been rewritten and
+  leaving the box receipt-less. Reproduced: rc=1 with the file rewritten and no
+  failure reported. The receipt writer now returns explicitly and every call
+  site checks it and says so when the copy did not land. This is recoverable
+  rather than terminal only because of the XACA-1159-018 fix above -- the
+  bootstrap now also compares against the CURRENT template, so a box that
+  refreshed but lost its receipt matches on the next run and self-heals. Boxes that
   predate the receipt bootstrap it via `_xaca1159_bootstrap_claude_md_provenance`:
   this template has shipped in only a handful of commits ever, so newly-added
   raw copies under `share/templates/claude/historical/` let the bootstrap
