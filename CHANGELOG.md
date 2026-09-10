@@ -6,6 +6,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1159 round-3 gate findings (PR #855). **XACA-1159-024/025:** GitHub
+  RE-POINTS an existing review's `commit_id` onto the new head after a rebase or
+  force-push, so the `commit_id == HEAD_SHA` filter this ticket added can be
+  satisfied by a review of content neither bot ever saw. MEASURED on this repo's
+  PR #851: two APPROVED reviews carry the head's `commit_id` with `submitted_at`
+  of 13:26:48Z and 13:27:13Z against that commit's own committer date of
+  13:28:41Z -- approvals timestamped before the commit they are attributed to
+  existed, still reading APPROVED rather than DISMISSED. Round 2 judged
+  documenting this sufficient; that judgement was wrong. Each gate now
+  additionally requires `submitted_at` to be later than the head commit's
+  committer date. ISO-8601 strings are compared directly rather than parsed,
+  avoiding BSD/GNU `date` portability entirely, and an unreadable committer date
+  substitutes a `9999-99-99T99:99:99Z` sentinel so the filter admits nothing --
+  fail closed. Verified live against PR #851: rejects both re-pointed approvals,
+  keeps the two genuine later ones. The "Monitoring Behavior" bullet no longer
+  claims head-SHA keying alone makes stale approvals impossible -- over-claiming
+  coverage a check does not have is the same defect class this ticket exists to
+  fix. **XACA-1159-026:** `install_global_claude_md()` (the fresh-install path,
+  not the upgrade path) had no symlink guard, unlike `install_tmux_conf()` in
+  this same file. `apply_template` renders with a plain `>` redirect, which
+  FOLLOWS a link, so installing onto a symlinked `~/.claude/CLAUDE.md` wrote the
+  rendered template THROUGH the link into its destination; reproduced against a
+  simulated dotfiles repo, whose file was rewritten. Deliberately the OPPOSITE
+  remedy from the upgrade path: upgrade leaves a symlink alone because it
+  protects an established customization, whereas install exists to provision the
+  file and skipping would leave the box without one. Follows the tmux precedent
+  -- back up (`backup_file` follows the link, capturing the destination's
+  bytes), remove the LINK, render a plain file. The destination is never
+  written.
+
 - XACA-1162-002: `aiteamforge setup --dry-run` printed "DRY RUN MODE: No
   changes will be made" and then mutated the system anyway — only 2 of 17
   mutation sites in `bin/aiteamforge-setup.sh` were actually gated behind

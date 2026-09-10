@@ -175,8 +175,28 @@ install_global_claude_md() {
     local template="${TEMPLATE_DIR}/claude/claude-md-global.template"
     local target="${CLAUDE_CONFIG_DIR}/CLAUDE.md"
 
-    # Backup existing
+    # Backup existing. Note backup_file's `[[ -f ]]` follows a symlink, so for a
+    # symlinked target this copies the DESTINATION's bytes -- which is what we
+    # want before replacing the link below.
     backup_file "$target"
+
+    # XACA-1159-026: if the target is a symlink, remove the LINK before
+    # rendering. apply_template writes with a plain `>` redirect, which follows
+    # the link and would otherwise write the rendered template THROUGH it into
+    # whatever it points at -- typically a user's tracked dotfiles repo. Same
+    # hazard and same remedy as install_tmux_conf() below; that function has
+    # guarded this for years and this one did not inherit it.
+    #
+    # This is intentionally the OPPOSITE choice from the upgrade path
+    # (_xaca1159_refresh_global_claude_md), which leaves a symlink entirely
+    # alone. There we are protecting an established customization; here the
+    # function's whole purpose is to provision the file for the first time, and
+    # skipping would leave the box with no CLAUDE.md at all. The destination's
+    # previous content is already in BACKUP_DIR via backup_file above.
+    if [[ -L "$target" ]]; then
+        log_warning "${target} is a symlink; replacing the link with a real file (its previous content was backed up). The symlink destination itself was NOT modified."
+        command rm "$target" 2>/dev/null || true
+    fi
 
     # Apply template
     if [[ -f "$template" ]]; then

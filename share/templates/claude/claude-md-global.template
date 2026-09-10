@@ -330,27 +330,41 @@ while true; do
   fi
   PREV_HEAD_SHA="$HEAD_SHA"
 
-  # ⚠️ THIS RESET DOES NOT FULLY CLOSE THE GAP FOR A REBASE / FORCE-PUSH. On an ordinary
-  # push, a stale review keeps its OLD commit_id, so the per-poll filter below correctly
-  # fails to match it against the new HEAD_SHA and the freshly-reset latch stays false
-  # until a real new review lands. On a REBASE, GitHub re-points the commit_id of
-  # whatever reviews were current at rebase time onto the NEW head — so the very same
-  # filter query (commit_id == HEAD_SHA) can match a review that predates the rebase and
-  # never saw the rebased content, immediately re-setting the latch true on the next poll.
+  # ⚠️ THIS RESET DOES NOT FULLY CLOSE THE GAP FOR A REBASE / FORCE-PUSH BY ITSELF. On an
+  # ordinary push, a stale review keeps its OLD commit_id, so the per-poll filter below
+  # correctly fails to match it against the new HEAD_SHA and the freshly-reset latch stays
+  # false until a real new review lands. On a REBASE, GitHub re-points the commit_id of
+  # whatever reviews were current at rebase time onto the NEW head — so a filter that only
+  # checks `commit_id == HEAD_SHA` can match a review that predates the rebase and never
+  # saw the rebased content, immediately re-setting the latch true on the next poll.
   # Measured, not theoretical: PR #851 (XACA-1154) showed both bots' APPROVED reviews
-  # re-pointed from commit 53b23188 to the post-rebase head 3c23b5f5 within seconds of the
-  # force-push, with submitted_at timestamps that predate 3c23b5f5's own committer date. A
-  # head-SHA-keyed APPROVED is proof the review is CURRENT, not proof the reviewer SAW the
-  # current content, and those are the same thing only when the head moved by an ordinary
-  # push. After ANY rebase or force-push (not just an ordinary push), do not trust that this
-  # loop's automatic re-check is sufficient — manually re-spawn BOTH bots regardless of what
-  # the commit_id filter reports, or at minimum compare each APPROVED review's `submitted_at`
-  # against the force-push time and treat an older one as unverified against the new base.
-  # See Troubleshooting § "Rebase re-points commit_id" below for the verification query.
+  # re-pointed onto the post-rebase head 3c23b5f5 within seconds of the force-push, with
+  # submitted_at of 13:26:48Z and 13:27:13Z — both BEFORE 3c23b5f5's own committer date of
+  # 13:28:41Z (`gh api repos/{owner}/{repo}/commits/3c23b5f5... --jq '.commit.committer.date'`).
+  # A head-SHA-keyed APPROVED is proof the review is CURRENT, not proof the reviewer SAW the
+  # current content, and those are the same thing only when the head moved by an ordinary push.
+  #
+  # MECHANICAL GUARD, not just a warning: fetch the head commit's own committer date and
+  # require every matching review's `submitted_at` to be STRICTLY AFTER it (the extra jq
+  # clause on Gates 1 and 2 below). A review that predates the commit it is attributed to
+  # cannot have seen that commit's content — this is what actually rejects the re-pointed
+  # pair above while still accepting a genuine later re-review on the same head (PR #851 had
+  # one, at 13:35:41Z / 13:36:10Z, both after the committer date and correctly accepted).
+  # ISO-8601 `Z` timestamps of equal precision sort correctly as plain strings, so no date
+  # parsing is needed — jq's string `>` does the right thing directly.
+  # FAILS CLOSED: if the committer date can't be read, substitute a sentinel date that sorts
+  # after every real timestamp, so no review can satisfy either gate until a real committer
+  # date is read on a later poll — an unreadable date is never treated as a passing review.
+  HEAD_COMMIT_DATE=$(gh api "repos/<owner>/<repo>/commits/$HEAD_SHA" --jq '.commit.committer.date // empty' 2>/dev/null)
+  if [ -z "$HEAD_COMMIT_DATE" ]; then
+    echo "⚠ could not read committer date for head commit $HEAD_SHA — failing closed: no"
+    echo "  review can satisfy either gate this poll until a real committer date is read."
+    HEAD_COMMIT_DATE="9999-99-99T99:99:99Z"   # sorts after any real ISO-8601 timestamp
+  fi
 
   # ── Gate 1: Test (ds9-tester-bot[bot]) ──
   L=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
-    --jq '[.[] | select(.user.login == "ds9-tester-bot[bot]" and .commit_id == "'"$HEAD_SHA"'")] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
+    --jq '[.[] | select(.user.login == "ds9-tester-bot[bot]" and .commit_id == "'"$HEAD_SHA"'" and ((.submitted_at // "") > "'"$HEAD_COMMIT_DATE"'"))] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
   AT="${L%|*}"; ST="${L#*|}"
   if [ -n "$ST" ] && [ "$AT" != "$LAST_TEST_AT" ]; then
     if [ "$ST" = "CHANGES_REQUESTED" ]; then
@@ -367,7 +381,7 @@ while true; do
 
   # ── Gate 2: Review (ai-security-review-bot[bot]) ──
   L=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
-    --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]" and .commit_id == "'"$HEAD_SHA"'")] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
+    --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]" and .commit_id == "'"$HEAD_SHA"'" and ((.submitted_at // "") > "'"$HEAD_COMMIT_DATE"'"))] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
   AT="${L%|*}"; ST="${L#*|}"
   if [ -n "$ST" ] && [ "$AT" != "$LAST_REVIEW_AT" ]; then
     if [ "$ST" = "CHANGES_REQUESTED" ]; then
@@ -486,7 +500,7 @@ done
 
 **Monitoring Behavior:**
 - Poll every **60 seconds**; a brief status line every 5 polls (~5 min) shows TEST/REVIEW state.
-- Both gates key their verdict to the PR's **current head SHA** (`commit_id`), not just to a newer timestamp — an approval from before the last push can't satisfy a gate for the new one.
+- Both gates key their verdict to the PR's **current head SHA** (`commit_id`) — an approval from before an ordinary push can't satisfy a gate for the new one. **Head-SHA keying alone is NOT sufficient after a rebase or force-push**: GitHub re-points an existing review's `commit_id` onto the new head, so the same filter can match a review that predates the rebase and never saw the rebased content (measured on PR #851 — both bots' `commit_id` re-pointed within seconds of the force-push, with `submitted_at` timestamps *before* that commit's own committer date). The loop closes that gap with an additional mechanical check: it also requires each matching review's `submitted_at` to be strictly after the head commit's own `commit.committer.date`, and fails closed (no review can pass) if that date can't be read. See the inline comments above Gate 1 and Troubleshooting § "rebase re-points commit_id" for the measured detail and the manual verification query.
 - On `CHANGES_REQUESTED` from either bot: pause, surface the review body, address feedback, push fixes, re-seed ONLY that gate's `LAST_*_AT`, re-enter the loop.
 - Gate 3 (subitem sweep), Gate 3.5 (CI check runs), and Gate 4 (freshness/mergeability) only run once BOTH bot gates have passed — see the loop's ordering above.
 - Gate 3.5 blocks on **any** check reporting `FAILURE`, with no exceptions list — `--admin` overrides the Team-plan review-count requirement, it does not and must not override a red CI run. If a check is legitimately allowed to fail in some case, add an explicit bypass (a label or commit-trailer your monitor checks for) rather than removing it from the catch-all — an enumerated allowlist of "checks that must pass" quietly becomes a denylist the moment anyone forgets to add a new check to it.
@@ -1052,12 +1066,21 @@ After completing:
   gh api --paginate repos/{owner}/{repo}/pulls/<N>/reviews --jq '.[] | select(.user.login == "ai-security-review-bot[bot]")'
   ```
 - **`reviewDecision` always shows `REVIEW_REQUIRED`:** This is expected — GitHub Team plan doesn't count bot reviews. Always check the reviews list directly (per-login, as above), never `reviewDecision`.
-- **A rebase or force-push re-points an EXISTING review's `commit_id` onto the new head** — head-SHA keying alone does not survive this. On an ordinary push (no rebase), a stale review keeps its old `commit_id`, so filtering on `commit_id == <current HEAD>` correctly excludes it. On a rebase, GitHub re-associates whatever reviews were current at rebase time onto the rebased head, so that same filter can match a review that never saw the rebased content — an "APPROVED" that looks fresh by SHA but predates the content it's supposedly approving. Confirm you're looking at this, don't assume: run a negative control (a filter for an all-zero fake SHA MUST return zero rows; if it doesn't, your filter isn't discriminating) and compare each matching review's `submitted_at` against the actual push time — a review timestamped before the force-push is re-associated, not fresh:
+- **A rebase or force-push re-points an EXISTING review's `commit_id` onto the new head** — head-SHA keying alone does not survive this. On an ordinary push (no rebase), a stale review keeps its old `commit_id`, so filtering on `commit_id == <current HEAD>` correctly excludes it. On a rebase, GitHub re-associates whatever reviews were current at rebase time onto the rebased head, so that same filter can match a review that never saw the rebased content — an "APPROVED" that looks fresh by SHA but predates the content it's supposedly approving. **The Four-Gate Monitoring Loop above guards against this mechanically**, not just by documentation: each poll fetches the head commit's own `commit.committer.date` and rejects any matching review whose `submitted_at` is not strictly after it, failing closed (a sentinel date that sorts after everything real) if the committer date can't be read. That guard only runs inside the loop — if you're checking manually (e.g. before an ad-hoc merge), reproduce it by hand:
+  ```bash
+  HEAD_SHA=$(gh pr view <N> --json headRefOid --jq '.headRefOid')
+  HEAD_COMMIT_DATE=$(gh api "repos/{owner}/{repo}/commits/$HEAD_SHA" --jq '.commit.committer.date')
+  gh api --paginate repos/{owner}/{repo}/pulls/<N>/reviews \
+    --jq '[.[] | select(.commit_id == "'"$HEAD_SHA"'")] | .[] | "\(.user.login)|\(.submitted_at)|\(.state)"'
+  # Compare each submitted_at against $HEAD_COMMIT_DATE by hand: at-or-before it means that
+  # review was re-pointed by the rebase, not freshly submitted against this content.
+  ```
+  As a sanity check that your `commit_id` filter is discriminating at all, a negative control against an all-zero fake SHA must return zero rows:
   ```bash
   FAKE="0000000000000000000000000000000000000000"
   gh api --paginate repos/{owner}/{repo}/pulls/<N>/reviews --jq '[.[] | select(.commit_id == "'"$FAKE"'")] | length'   # MUST be 0
   ```
-  After ANY rebase/force-push, treat it like a fresh review round regardless of what the commit_id filter reports: re-spawn BOTH bots and re-seed both `LAST_*_AT`. Do not rely on an existing APPROVED surviving the rebase just because its `commit_id` now matches.
+  Even with the guard in place, treat a rebase/force-push like a fresh review round as a matter of course: push, then re-spawn BOTH bots and re-seed both `LAST_*_AT`. The guard stops a stale approval from silently passing the gate; it doesn't substitute for getting fresh eyes on the rebased content.
 - **NEVER** store `gh api` JSON in shell variables then pipe through `echo | jq` — control characters break parsing. Always use `gh api --jq` instead.
 - **`$?` after a pipe (e.g. `gh-bot-test ... | tail`) reports the PIPE's exit code, not the command's** — a failed submission can silently read as success. Capture the command's own output/exit code before piping it anywhere.
 - **Manual merge after bot approval:** Verify APPROVED reviews exist from BOTH `ds9-tester-bot[bot]` AND `ai-security-review-bot[bot]` (per the queries above) and that `kb-sweep <ITEM-ID>` shows no `PROTECTED SUBITEMS UNRESOLVED`, then `gh pr merge <N> --squash --delete-branch --admin && kb-done`
