@@ -440,10 +440,27 @@
         el.className = 'kiosk-exit-hint';
         el.setAttribute('role', 'status');
         el.setAttribute('aria-live', 'polite');
-        el.textContent = 'Kiosk auto-start is on — turn it off under Preferences';
         el.addEventListener('click', _removeKioskExitHint);
+
+        // XACA-1154 (review gate, PR #851 round 3): append the live region EMPTY, then
+        // fill it on a subsequent tick.
+        //
+        // An aria-live region announces MUTATIONS OBSERVED WHILE IT IS IN THE ACCESSIBILITY
+        // TREE. Appending a node that already carries its final text is not a mutation of a
+        // live region — it is the insertion of an already-complete subtree — and NVDA/JAWS
+        // commonly do not announce it. The region has to exist first, and the text has to
+        // arrive as a change to it. Setting textContent before appendChild made the
+        // role="status" announcement unreliable in exactly the screen readers it was added
+        // for, which is a silent no-op: the markup looks correct and audits clean.
         document.body.appendChild(el);
         _kioskExitHintEl = el;
+
+        setTimeout(function() {
+            // Guard: the hint may have been dismissed (click) or torn down
+            // (_disableKiosk / destroy) between the append and this tick.
+            if (_kioskExitHintEl !== el) return;
+            el.textContent = 'Kiosk auto-start is on — turn it off under Preferences';
+        }, 0);
 
         // Next frame, so the opacity transition actually runs rather than being
         // collapsed into the initial paint.
@@ -498,8 +515,26 @@
 
             let dx, dy;
             if (!usingClientFallback) {
-                dx = e.movementX || 0;
-                dy = e.movementY || 0;
+                // XACA-1154 (review gate, PR #851 round 3): guard this branch with
+                // Number.isFinite for SYMMETRY with the clientX/clientY branch below.
+                //
+                // NaN was already handled here, but only incidentally: `NaN || 0` is 0
+                // (NaN is falsy), so a NaN movementX collapsed to 0 and hit the noise
+                // return before Math.hypot. Correct, but by coincidence of `||` rather
+                // than by a stated rule — and the reader has to know NaN is falsy to see
+                // why the branch below needs an explicit guard while this one does not.
+                //
+                // Infinity was NOT handled: `Infinity || 0` is Infinity, Math.hypot(Infinity, 0)
+                // is Infinity, and `Infinity >= threshold` is true — so a single such event
+                // exited kiosk immediately, bypassing the distance threshold entirely. That
+                // fails in the SAFE direction (a spurious exit re-arms on the next idle cycle;
+                // the originating bug was an un-exitable kiosk), which is why it was filed
+                // non-blocking rather than as a defect. It is closed here anyway: an
+                // unbounded value is not a measurement, and treating it as one is the same
+                // "trust the coordinate" mistake the NaN guard below exists to correct.
+                if (!Number.isFinite(e.movementX) || !Number.isFinite(e.movementY)) return;
+                dx = e.movementX;
+                dy = e.movementY;
                 if (dx === 0 && dy === 0) return; // pure noise — contributes nothing, never exits alone, and must not refresh the gap clock (see KIOSK_MOVEMENT_GAP_RESET_MS)
             } else if (!Number.isFinite(e.clientX) || !Number.isFinite(e.clientY)) {
                 // XACA-1154 (test gate, PR #851 round 2): neither movementX/Y nor clientX/Y are
@@ -1142,8 +1177,33 @@
     function setEnabled(value) {
         var enabled = !!value;
         _lsSet(KIOSK_ENABLED_STORAGE_KEY, enabled ? 'true' : 'false');
+        _syncToggleUI(enabled);
         _applyKioskEnabled(enabled);
         _log('[LCARS KIOSK] setEnabled(' + enabled + ')');
+    }
+
+    /**
+     * XACA-1154 (review gate, PR #851 round 3): reflect the preference onto this
+     * document's checkbox.
+     *
+     * The cross-tab 'storage' handler below already did this, but the native
+     * 'storage' event fires ONLY in OTHER same-origin documents — never in the
+     * document that performed the write. So every tab EXCEPT the one that made
+     * the change stayed in sync, and the originating tab did not: a
+     * setEnabled() call from the console, or from any code path other than the
+     * checkbox's own change handler, left #kiosk-mode-toggle displaying the
+     * opposite of the preference actually in force. The checkbox handler
+     * happened to mask this because the box was already in the new state by the
+     * time it called setEnabled().
+     *
+     * Assigning `checked` does not fire a 'change' event, so this cannot
+     * re-enter setEnabled() via the checkbox's own listener.
+     */
+    function _syncToggleUI(enabled) {
+        var toggle = document.getElementById('kiosk-mode-toggle');
+        if (toggle) {
+            toggle.checked = enabled;
+        }
     }
 
     /**
@@ -1171,11 +1231,7 @@
         // having been removed entirely (e.newValue === null).
         var enabled = isEnabled();
 
-        var toggle = document.getElementById('kiosk-mode-toggle');
-        if (toggle) {
-            toggle.checked = enabled;
-        }
-
+        _syncToggleUI(enabled);
         _applyKioskEnabled(enabled);
         _log('[LCARS KIOSK] storage sync: enabled=' + enabled);
     });

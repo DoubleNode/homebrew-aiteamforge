@@ -83,7 +83,63 @@ const DASHBOARDS = [
         configJs: path.join(PUBLIC_ROOT, 'lcars2/js/lcars-academy-config.js'),
         appJs: path.join(PUBLIC_ROOT, 'lcars2/js/lcars-fleet-dashboard-app.js'),
     },
+    // XACA-1154 (test gate, PR #851 round 3): the remaining three production
+    // dashboards.
+    //
+    // This file previously covered 2 of the 5 dashboards that carry the toggle.
+    // The other three were verified BY HAND during the round-2 gate — identical
+    // markup, correct `label for=`, both scripts loaded — and that is precisely
+    // the problem: the markup is duplicated five times with no shared include,
+    // so it is free to drift silently and a hand check expires the moment
+    // someone edits one file. A per-dashboard entry here costs nothing (every
+    // test below is already written as a loop over this array) and converts a
+    // one-time manual observation into a standing assertion.
+    //
+    // These three differ from lcars-index only in their per-org config script,
+    // which sets window.LCARS_DASHBOARD_CONFIG; they share the same app JS.
+    {
+        label: 'lcars2/lcars-all.html',
+        html: path.join(PUBLIC_ROOT, 'lcars2/lcars-all.html'),
+        configJs: path.join(PUBLIC_ROOT, 'lcars2/js/lcars-all-config.js'),
+        appJs: path.join(PUBLIC_ROOT, 'lcars2/js/lcars-fleet-dashboard-app.js'),
+    },
+    {
+        label: 'lcars2/lcars-doublenode.html',
+        html: path.join(PUBLIC_ROOT, 'lcars2/lcars-doublenode.html'),
+        configJs: path.join(PUBLIC_ROOT, 'lcars2/js/lcars-doublenode-config.js'),
+        appJs: path.join(PUBLIC_ROOT, 'lcars2/js/lcars-fleet-dashboard-app.js'),
+    },
+    {
+        label: 'lcars2/lcars-mainevent.html',
+        html: path.join(PUBLIC_ROOT, 'lcars2/lcars-mainevent.html'),
+        configJs: path.join(PUBLIC_ROOT, 'lcars2/js/lcars-mainevent-config.js'),
+        appJs: path.join(PUBLIC_ROOT, 'lcars2/js/lcars-fleet-dashboard-app.js'),
+    },
 ];
+
+// Guard against this array silently falling out of step with the product.
+// If a sixth dashboard gains the toggle (or one loses it), this fails loudly
+// rather than leaving the new file uncovered the way three were before.
+test('[coverage] every production dashboard carrying #kiosk-mode-toggle is represented in DASHBOARDS', () => {
+    const candidates = [];
+    for (const dir of ['lcars', 'lcars2']) {
+        const abs = path.join(PUBLIC_ROOT, dir);
+        for (const name of fs.readdirSync(abs)) {
+            if (!name.endsWith('.html')) continue;
+            // lcars-test.html x2 are deliberately excluded from this feature.
+            if (name.includes('lcars-test')) continue;
+            const html = fs.readFileSync(path.join(abs, name), 'utf8');
+            if (html.includes('id="kiosk-mode-toggle"')) candidates.push(`${dir}/${name}`);
+        }
+    }
+    const covered = DASHBOARDS.map((d) => d.label).sort();
+    assert.deepEqual(
+        candidates.sort(),
+        covered,
+        'every dashboard shipping the kiosk toggle must have a DASHBOARDS entry'
+    );
+    assert.equal(covered.length, 5, 'expected exactly 5 production dashboards');
+});
 
 function wait(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -440,6 +496,12 @@ test('(015) exiting kiosk with auto-start ON shows the hint pointing at Preferen
 
         const el = hintEl(inst.document);
         assert.ok(el, 'hint must be shown when kiosk is still armed to recur');
+
+        // XACA-1154 round 3: the region is appended EMPTY and filled on the next
+        // tick, deliberately — an aria-live region announces mutations observed
+        // while it is already in the accessibility tree, so text arriving WITH
+        // the node is not announceable. Await that tick before asserting text.
+        await wait(20);
         assert.match(el.textContent, /Preferences/i, 'hint must name where the control lives');
         // Announced, not merely visible — this ticket is about an inescapable UI,
         // so a sighted-only affordance would miss the users most affected.

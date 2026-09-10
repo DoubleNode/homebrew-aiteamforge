@@ -1072,3 +1072,233 @@ test('(l) a NaN clientX is rejected too — typeof NaN === "number" would let it
         teardown(inst);
     }
 });
+
+// ============================================================================
+// XACA-1154 round 3 — gate follow-ups
+// ============================================================================
+
+test('(m) THREE worst-case noise events inside one window DO exit — the measured boundary, pinned', async () => {
+    // The 10px threshold was derived from a real 118s trace: idle micro-drift
+    // peaked at hypot(3,3) = 4.24px per event, deliberate moves measured
+    // 15.1-71px. Two worst-case noise events sum to 8.49px and correctly do
+    // NOT exit. THREE sum to 12.72px and DO.
+    //
+    // This is a genuine limit of a cumulative-distance design, not a defect,
+    // and it fails in the SAFE direction: the result is a spurious EXIT, which
+    // simply re-arms on the next idle cycle. The originating bug was the exact
+    // opposite — a kiosk that could not be exited at all. Pinning it means a
+    // future threshold or gap-window change has to confront the tradeoff
+    // deliberately instead of discovering it in production.
+    const inst = freshKiosk();
+    try {
+        inst.K.enter();
+        await wait(150);
+
+        // Two: 8.49px, under threshold.
+        inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', 3, 3));
+        inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', 3, 3));
+        assert.equal(inst.K.isActive(), true,
+            'two worst-case noise events (8.49px) must stay under the 10px threshold');
+
+        // Third: 12.72px cumulative, over threshold.
+        inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', 3, 3));
+        assert.equal(inst.K.isActive(), false,
+            'three worst-case noise events (12.72px) cross the threshold — documented, safe-direction limit');
+    } finally {
+        teardown(inst);
+    }
+});
+
+test('(n) a >250ms gap between noise events prevents them accumulating to an exit', async () => {
+    // The companion to (m): the gap reset is what keeps sparse drift from ever
+    // summing. Same three events, spread past KIOSK_MOVEMENT_GAP_RESET_MS.
+    const inst = freshKiosk();
+    try {
+        inst.K.enter();
+        await wait(150);
+
+        for (let i = 0; i < 3; i++) {
+            inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', 3, 3));
+            await wait(300); // > KIOSK_MOVEMENT_GAP_RESET_MS (250)
+        }
+        assert.equal(inst.K.isActive(), true,
+            'noise separated by >250ms must never accumulate into an exit');
+    } finally {
+        teardown(inst);
+    }
+});
+
+test('(o) Infinity in movementX does not exit kiosk — an unbounded value is not a measurement', async () => {
+    // Pre-fix: `Infinity || 0` is Infinity, Math.hypot(Infinity, 0) is Infinity,
+    // and `Infinity >= 10` is true — so ONE such event exited immediately,
+    // bypassing the distance threshold entirely.
+    const inst = freshKiosk();
+    try {
+        inst.K.enter();
+        await wait(150);
+
+        inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', Infinity, 0));
+        assert.equal(inst.K.isActive(), true,
+            'a non-finite movementX must be rejected, not treated as an infinite distance');
+
+        inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', -Infinity, 0));
+        assert.equal(inst.K.isActive(), true, '-Infinity likewise');
+
+        // The guard must not have broken normal operation.
+        inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', 40, 30));
+        assert.equal(inst.K.isActive(), false,
+            'a valid 50px move must still exit after non-finite events');
+    } finally {
+        teardown(inst);
+    }
+});
+
+test('(p) setEnabled() reflects onto this document\'s own checkbox, not just other tabs', async () => {
+    // The 'storage' event fires only in OTHER same-origin documents, so the
+    // cross-tab listener could never sync the tab that made the change. A
+    // setEnabled() call from anywhere but the checkbox handler left the box
+    // showing the opposite of the preference actually in force.
+    const inst = freshKiosk();
+    try {
+        const toggle = inst.document.createElement('input');
+        toggle.type = 'checkbox';
+        toggle.id = 'kiosk-mode-toggle';
+        toggle.checked = true;
+        inst.document.body.appendChild(toggle);
+
+        inst.K.setEnabled(false);
+        assert.equal(toggle.checked, false,
+            'setEnabled(false) must uncheck this document\'s toggle');
+        assert.equal(inst.K.isEnabled(), false, 'and the preference must actually be off');
+
+        inst.K.setEnabled(true);
+        assert.equal(toggle.checked, true,
+            'setEnabled(true) must re-check this document\'s toggle');
+    } finally {
+        teardown(inst);
+    }
+});
+
+test('(q) the exit-hint live region is appended EMPTY, then filled — so role="status" actually announces', async () => {
+    // An aria-live region announces mutations observed while it is in the
+    // accessibility tree. Appending a node that already carries its final text
+    // is an insertion of a complete subtree, not a mutation of a live region,
+    // and NVDA/JAWS commonly stay silent. Pre-fix the markup audited clean and
+    // announced nothing — a silent no-op in the exact readers it was added for.
+    const inst = freshKiosk();
+    try {
+        inst.K.enter();
+        await wait(150);
+
+        // Exit by movement while the preference is still ON — that is the path
+        // that shows the hint.
+        inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', 40, 30));
+        assert.equal(inst.K.isActive(), false, 'setup: movement must have exited kiosk');
+
+        const hint = inst.document.querySelector('.kiosk-exit-hint');
+        assert.ok(hint, 'the exit hint must be present after a movement exit');
+        assert.equal(hint.getAttribute('role'), 'status', 'must be a status live region');
+        assert.equal(hint.textContent, '',
+            'must be appended EMPTY — text arriving with the node is not an announceable mutation');
+
+        await wait(20);
+        assert.match(hint.textContent, /Preferences/,
+            'the text must arrive as a subsequent mutation of the already-live region');
+    } finally {
+        teardown(inst);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Negative controls for the round-3 fixes. Each mutator restores the exact
+// pre-fix shape; the paired assertion must FAIL against it, or the test above
+// proves nothing. Every mutator throws loudly if the code shape moved, rather
+// than silently matching nothing and leaving a vacuous control behind.
+// ---------------------------------------------------------------------------
+
+// Restores `dx = e.movementX || 0`, which lets Infinity straight through.
+function mutateMovementBranchWithoutFiniteGuard(src) {
+    const needle = 'if (!Number.isFinite(e.movementX) || !Number.isFinite(e.movementY)) return;\n' +
+        '                dx = e.movementX;\n' +
+        '                dy = e.movementY;';
+    if (!src.includes(needle)) {
+        throw new Error('mutateMovementBranchWithoutFiniteGuard: movementX branch shape changed, update this test');
+    }
+    return src.replace(needle, 'dx = e.movementX || 0;\n                dy = e.movementY || 0;');
+}
+
+// Restores setEnabled() without the same-document toggle reflection.
+function mutateSetEnabledWithoutToggleSync(src) {
+    const needle = '        _lsSet(KIOSK_ENABLED_STORAGE_KEY, enabled ? \'true\' : \'false\');\n' +
+        '        _syncToggleUI(enabled);';
+    if (!src.includes(needle)) {
+        throw new Error('mutateSetEnabledWithoutToggleSync: setEnabled shape changed, update this test');
+    }
+    return src.replace(needle, '        _lsSet(KIOSK_ENABLED_STORAGE_KEY, enabled ? \'true\' : \'false\');');
+}
+
+test('(o-neg) without the finite guard, ONE Infinity movement exits kiosk immediately', async () => {
+    const inst = freshKiosk(mutateMovementBranchWithoutFiniteGuard);
+    try {
+        inst.K.enter();
+        await wait(150);
+        inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', Infinity, 0));
+        assert.equal(inst.K.isActive(), false,
+            'NEGATIVE CONTROL: pre-fix code must exit on Infinity — if this passes, test (o) proves nothing');
+    } finally {
+        teardown(inst);
+    }
+});
+
+test('(p-neg) without the toggle sync, setEnabled() leaves this tab\'s checkbox stale', async () => {
+    const inst = freshKiosk(mutateSetEnabledWithoutToggleSync);
+    try {
+        const toggle = inst.document.createElement('input');
+        toggle.type = 'checkbox';
+        toggle.id = 'kiosk-mode-toggle';
+        toggle.checked = true;
+        inst.document.body.appendChild(toggle);
+
+        inst.K.setEnabled(false);
+        assert.equal(inst.K.isEnabled(), false, 'the preference itself must still have changed');
+        assert.equal(toggle.checked, true,
+            'NEGATIVE CONTROL: pre-fix code must leave the checkbox stale — if this fails, test (p) proves nothing');
+    } finally {
+        teardown(inst);
+    }
+});
+
+// Restores the pre-populated append: textContent set BEFORE appendChild, so the
+// node enters the a11y tree already complete and nothing announces.
+function mutateHintPrePopulated(src) {
+    const needle = "        el.addEventListener('click', _removeKioskExitHint);";
+    if (!src.includes(needle)) {
+        throw new Error('mutateHintPrePopulated: hint construction shape changed, update this test');
+    }
+    let out = src.replace(
+        needle,
+        needle + "\n        el.textContent = 'Kiosk auto-start is on — turn it off under Preferences';"
+    );
+    const deferred = /\n\s*setTimeout\(function\(\) \{\n\s*\/\/ Guard: the hint may have been dismissed[\s\S]*?\n\s*\}, 0\);/;
+    if (!deferred.test(out)) {
+        throw new Error('mutateHintPrePopulated: deferred fill shape changed, update this test');
+    }
+    return out.replace(deferred, '');
+}
+
+test('(q-neg) pre-populated append leaves the live region already full — nothing to announce', async () => {
+    const inst = freshKiosk(mutateHintPrePopulated);
+    try {
+        inst.K.enter();
+        await wait(150);
+        inst.document.dispatchEvent(moveEvent(inst.window, 'pointermove', 40, 30));
+        assert.equal(inst.K.isActive(), false, 'setup: movement must have exited kiosk');
+
+        const hint = inst.document.querySelector('.kiosk-exit-hint');
+        assert.ok(hint, 'setup: hint must exist');
+        assert.match(hint.textContent, /Preferences/,
+            'NEGATIVE CONTROL: pre-fix code populates before append — if this fails, test (q) proves nothing');
+    } finally {
+        teardown(inst);
+    }
+});
