@@ -6,6 +6,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1162-002: `aiteamforge setup --dry-run` printed "DRY RUN MODE: No
+  changes will be made" and then mutated the system anyway — only 2 of 17
+  mutation sites in `bin/aiteamforge-setup.sh` were actually gated behind
+  `DRY_RUN`. Added four block-level guards. Guard A (most severe, not in the
+  original ticket): `--uninstall --dry-run` really unloaded+removed both
+  `com.aiteamforge.*` LaunchAgents, rewrote `~/.zshrc` via a backup+sed+mv,
+  and could `rm -rf` the install dir — now short-circuits to a preview and
+  `exit 0` before any of that, and also skips the "Continue with uninstall?
+  (yes/no)" prompt entirely, since asking an operator to type "yes" during a
+  preview trains the wrong reflex. Guard B: the Fira Code Nerd Font
+  mkdir+cp/`brew install --cask` block (the originally-reported repro) — both
+  independent copy sites gated. Guard C: iTerm2 Python API enablement — TWO
+  separate `defaults write com.googlecode.iterm2 EnableAPIServer -bool true`
+  calls (non-interactive branch and interactive-after-prompt branch), both
+  gated by one guard at the top of the disabled-API branch. Guard D (largest
+  mutation surface, also not in the original ticket): the missing-dependency
+  auto-installer looped `bash -c "$install"` over queued `brew install
+  python@3.13|node|jq|gh|tmux`, `brew install --cask iterm2`, `npm install -g
+  @anthropic-ai/claude-code`, and `xcode-select --install` strings, then
+  `exec`'d the wizard to restart — now prints `[DRY RUN] Would install: ...`
+  per dep and falls through to continue the preview instead of installing,
+  re-exec'ing, or exiting 1 (the deps legitimately being absent in a dry run
+  is not a reason to stop the preview). DRY_RUN references went from 6 to 11.
+  No behavior changes when `DRY_RUN` is false. Execution testing (including
+  actually running `--dry-run`) is out of scope for this subitem — see
+  XACA-1162-003 for the sandboxed harness.
 - XACA-1159: fixed a fail-open merge gate documented in the shipped
   `share/templates/claude/claude-md-global.template` (consumers' global
   `CLAUDE.md`). The dual-gate PR flow filtered bot reviews by

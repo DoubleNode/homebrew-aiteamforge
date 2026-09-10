@@ -210,6 +210,23 @@ if [ "$MODE" = "uninstall" ]; then
   echo -e "${RED}Warning: This will NOT remove the Homebrew formula${NC}"
   echo "To fully remove aiteamforge, also run: brew uninstall aiteamforge"
   echo ""
+
+  # skipped in dry-run — every step below this point (LaunchAgent unload+rm,
+  # ~/.zshrc rewrite, working-directory rm -rf) is a disk-visible side effect
+  # that violates "preview without making changes". Also skip the
+  # destructive-confirmation prompt itself: asking an operator to type "yes"
+  # during a preview trains exactly the wrong reflex.
+  if [ "$DRY_RUN" = "true" ]; then
+    echo -e "${YELLOW}[DRY RUN]${NC} Would remove:"
+    echo -e "${YELLOW}[DRY RUN]${NC}   • LaunchAgent: com.aiteamforge.kanban-backup.plist (if present)"
+    echo -e "${YELLOW}[DRY RUN]${NC}   • LaunchAgent: com.aiteamforge.lcars-health.plist (if present)"
+    echo -e "${YELLOW}[DRY RUN]${NC}   • aiteamforge block from ~/.zshrc (a backup would be created first)"
+    echo -e "${YELLOW}[DRY RUN]${NC}   • Working directory ${INSTALL_DIR} (only if operator confirms interactively)"
+    echo ""
+    echo -e "${GREEN}AITeamForge uninstall preview complete — no changes made${NC}"
+    exit 0
+  fi
+
   read -rp "Continue with uninstall? (yes/no): " confirm
 
   if [ "$confirm" != "yes" ]; then
@@ -374,28 +391,41 @@ else
   if [ -n "$_caskroom_fonts" ]; then
     echo -e "${YELLOW}⚠${NC} Fira Code Nerd Font in Caskroom but not registered — copying to ~/Library/Fonts/"
     _cask_dir="$(dirname "$_caskroom_fonts")"
-    mkdir -p ~/Library/Fonts
-    cp "$_cask_dir"/FiraCodeNerdFont*.ttf ~/Library/Fonts/ 2>/dev/null || true
-    echo -e "${GREEN}✓${NC} Fira Code Nerd Font (copied to ~/Library/Fonts/)"
+    if [ "$DRY_RUN" = "true" ]; then
+      # skipped in dry-run — mkdir+cp into ~/Library/Fonts is a disk-visible
+      # side effect that violates "preview without making changes"
+      echo -e "${YELLOW}[DRY RUN]${NC} Would copy Fira Code Nerd Font from Caskroom to ~/Library/Fonts/"
+    else
+      mkdir -p ~/Library/Fonts
+      cp "$_cask_dir"/FiraCodeNerdFont*.ttf ~/Library/Fonts/ 2>/dev/null || true
+      echo -e "${GREEN}✓${NC} Fira Code Nerd Font (copied to ~/Library/Fonts/)"
+    fi
   else
     echo -e "${YELLOW}⚠${NC} Fira Code Nerd Font ${YELLOW}(not found — installing)${NC}"
-    brew install --cask font-fira-code-nerd-font 2>&1 | tail -3 || true
-    # Verify the install linked to ~/Library/Fonts; copy from Caskroom if not
-    if [ ! -f "$HOME/Library/Fonts/FiraCodeNerdFontMono-Light.ttf" ]; then
-      _cask_dir=""
-      if [ -d "${_brew_prefix}/Caskroom/font-fira-code-nerd-font" ]; then
-        _cask_dir="$(find "${_brew_prefix}/Caskroom/font-fira-code-nerd-font" -name "FiraCodeNerdFontMono-*.ttf" -exec dirname {} \; 2>/dev/null | head -1 || true)"
-      fi
-      if [ -n "$_cask_dir" ]; then
-        mkdir -p ~/Library/Fonts
-        cp "$_cask_dir"/FiraCodeNerdFont*.ttf ~/Library/Fonts/ 2>/dev/null || true
-        echo -e "${GREEN}✓${NC} Fira Code Nerd Font (installed + copied to ~/Library/Fonts/)"
-      else
-        echo -e "${YELLOW}⚠${NC} Could not install Fira Code Nerd Font"
-        echo -e "   Manual: ${CYAN}brew install --cask font-fira-code-nerd-font${NC}"
-      fi
+    if [ "$DRY_RUN" = "true" ]; then
+      # skipped in dry-run — brew install --cask and the verification
+      # mkdir+cp below it are both disk-visible side effects that violate
+      # "preview without making changes"
+      echo -e "${YELLOW}[DRY RUN]${NC} Would run: brew install --cask font-fira-code-nerd-font"
     else
-      echo -e "${GREEN}✓${NC} Fira Code Nerd Font (installed)"
+      brew install --cask font-fira-code-nerd-font 2>&1 | tail -3 || true
+      # Verify the install linked to ~/Library/Fonts; copy from Caskroom if not
+      if [ ! -f "$HOME/Library/Fonts/FiraCodeNerdFontMono-Light.ttf" ]; then
+        _cask_dir=""
+        if [ -d "${_brew_prefix}/Caskroom/font-fira-code-nerd-font" ]; then
+          _cask_dir="$(find "${_brew_prefix}/Caskroom/font-fira-code-nerd-font" -name "FiraCodeNerdFontMono-*.ttf" -exec dirname {} \; 2>/dev/null | head -1 || true)"
+        fi
+        if [ -n "$_cask_dir" ]; then
+          mkdir -p ~/Library/Fonts
+          cp "$_cask_dir"/FiraCodeNerdFont*.ttf ~/Library/Fonts/ 2>/dev/null || true
+          echo -e "${GREEN}✓${NC} Fira Code Nerd Font (installed + copied to ~/Library/Fonts/)"
+        else
+          echo -e "${YELLOW}⚠${NC} Could not install Fira Code Nerd Font"
+          echo -e "   Manual: ${CYAN}brew install --cask font-fira-code-nerd-font${NC}"
+        fi
+      else
+        echo -e "${GREEN}✓${NC} Fira Code Nerd Font (installed)"
+      fi
     fi
   fi
 fi
@@ -415,7 +445,13 @@ if [ -d "/Applications/iTerm.app" ]; then
     echo -e "${GREEN}✓${NC} iTerm2 Python API"
   else
     echo -e "${YELLOW}⚠${NC} iTerm2 Python API ${YELLOW}(disabled)${NC}"
-    if [ "$MODE" = "non-interactive" ]; then
+    # skipped in dry-run — `defaults write` is a disk-visible system-
+    # preference mutation regardless of which branch below would fire it;
+    # short-circuit here so neither the non-interactive nor the interactive
+    # path runs it.
+    if [ "$DRY_RUN" = "true" ]; then
+      echo -e "  ${YELLOW}[DRY RUN]${NC} Would enable iTerm2 Python API (defaults write com.googlecode.iterm2 EnableAPIServer -bool true)"
+    elif [ "$MODE" = "non-interactive" ]; then
       echo -e "  Enabling iTerm2 Python API..."
       defaults write com.googlecode.iterm2 EnableAPIServer -bool true
       echo -e "${GREEN}✓${NC} iTerm2 Python API (enabled)"
@@ -451,7 +487,18 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
   done
   echo ""
 
-  if [ "$MODE" = "non-interactive" ]; then
+  # skipped in dry-run — running the queued install commands, or re-exec'ing
+  # the wizard afterward, are both disk-visible side effects that violate
+  # "preview without making changes". Fall through to continue the preview
+  # rather than exiting: in a dry run the deps legitimately aren't there yet,
+  # and the operator still wants to see the rest of what setup would do.
+  if [ "$DRY_RUN" = "true" ]; then
+    for dep in "${MISSING_DEPS[@]}"; do
+      install="${dep#*:}"
+      echo -e "${YELLOW}[DRY RUN]${NC} Would install: $install"
+    done
+    echo ""
+  elif [ "$MODE" = "non-interactive" ]; then
     echo -e "${YELLOW}⚠ Skipping missing dependencies in non-interactive mode${NC}"
   else
     read -rp "Install missing dependencies now? (yes/no): " install_deps
