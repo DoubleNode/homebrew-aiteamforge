@@ -78,6 +78,7 @@ _get_team_kanban_dir() {
         firebase)                       echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Functions/kanban" ;;
         command|{{ORG_SLUG}})           echo "{{SHARED_DEV_ROOT}}/dev-team/kanban" ;;
         dns)                            echo "${HOME}/dns-framework/kanban" ;;
+        spacedock)                            echo "${HOME}/.aiteamforge/spacedock/kanban" ;;
         freelance)                      echo "${HOME}/dev-team/kanban" ;;
         # NOTE: Specific freelance-<client>-<project> team IDs are registered at
         # install time and resolved via aiteamforge_team_kanban_dir() above.
