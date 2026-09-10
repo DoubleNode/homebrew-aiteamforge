@@ -25,17 +25,29 @@
 #   kb-host-ready.sh suggest                Print a candidate config for THIS
 #                                           host, derived from
 #                                           team-machines.json. Writes nothing.
+#   kb-host-ready.sh init-config [--dry-run] [--quiet]
+#                                           Seed ~/.aiteamforge/host-ready.json
+#                                           write-if-absent (never overwrites)
+#                                           with an inert placeholder (empty
+#                                           autostart, lock_after_login=false,
+#                                           self-marked _seeded_unconfigured).
+#                                           Called by the installer and by
+#                                           every upgrade (XACA-1162) — never
+#                                           run this to "reset" a config; it
+#                                           is a no-op once a file exists.
 #   kb-host-ready.sh -h | --help | help     This text.
 #
 # EXIT CODES
-#   login    : 0 = everything asked for was done or already true, INCLUDING
-#              the absent-config no-op. 1 = something did not complete.
-#   restore  : 0 = all desired teams up. 1 = one or more not.
-#   lock     : 0 = login window reached or already there. 1 = refused,
-#              unavailable, or failed.
-#   status   : 0 always, unless it cannot read what it needs to report.
-#   check    : 0 = everything valid. 1 = any problem (one line each).
-#   suggest  : 0.
+#   login       : 0 = everything asked for was done or already true,
+#                 INCLUDING the absent-config no-op. 1 = something did not
+#                 complete.
+#   restore     : 0 = all desired teams up. 1 = one or more not.
+#   lock        : 0 = login window reached or already there. 1 = refused,
+#                 unavailable, or failed.
+#   status      : 0 always, unless it cannot read what it needs to report.
+#   check       : 0 = everything valid. 1 = any problem (one line each).
+#   suggest     : 0.
+#   init-config : 0 always — never fails the install/upgrade that calls it.
 #   usage error on any subcommand: 2.
 #
 # ─────────────────────────────────────────────────────────────────────────────
@@ -81,6 +93,19 @@
 # exit 0. This is a tested property (see subitem 005), not an assurance —
 # it is what licenses this agent joining the XACA-0734 mandatory set.
 #
+# XACA-1162: the installer and every upgrade now call `init-config` (below)
+# to seed this file WRITE-IF-ABSENT with an inert placeholder — empty
+# autostart, lock_after_login=false, self-marked with a top-level
+# "_seeded_unconfigured": true key so `check`/`status` can tell "never
+# customized" apart from "deliberately configured to do nothing". A seeded
+# file is NOT absent (see "Absent file ->" above) — it takes the `ok` path
+# below, which starts nothing and locks nothing but DOES write a state file
+# on `login` and turns `check` into a real (still-green) assertion instead
+# of a vacuous one. Deleting the file reverts to the absent no-op; deleting
+# only the `_seeded_unconfigured` key marks a config as deliberately
+# customized. See kanban/plans/XACA-1162/XACA-1162-004-*.md for the full
+# rationale and docs/host-ready-runbook.md for the operator-facing version.
+#
 # XACA-1066
 
 set -uo pipefail
@@ -117,6 +142,12 @@ KB_HOST_READY_LOCK_MECHANISM="${KB_HOST_READY_LOCK_MECHANISM:-}"
 # the dev source resolves to ~/dev-team; a tap-installed machine sets
 # AITEAMFORGE_DIR itself.
 KB_HOST_READY_WORKING_DIR="${AITEAMFORGE_DIR:-$HOME/dev-team}"
+
+# XACA-1162 init-config gates. Honours AITF_LAUNCHAGENT_OPTOUT_FILE if the
+# caller already set it (same var name the tap's launchagents.sh uses), so a
+# test or an upgrade run that exports it for the tap's own gate keeps both
+# gates pointed at the same sandboxed file.
+KB_HOST_READY_OPTOUT_FILE="${KB_HOST_READY_OPTOUT_FILE:-${AITF_LAUNCHAGENT_OPTOUT_FILE:-$HOME/.aiteamforge/launchagents.optout}}"
 
 # tmux resolution — PATH under launchd does NOT include /opt/homebrew/bin
 # (XACA-0713). Probe known absolute locations before falling back to PATH.
@@ -167,7 +198,7 @@ notify() {
 }
 
 usage() {
-    sed -n '2,40p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
+    sed -n '2,52p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1500,6 +1531,29 @@ cmd_login() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Seeded-but-never-customized NOTICE (XACA-1162, item 7 — severable, but
+# included: without it a seeded config is only marginally more discoverable
+# than the `suggest` hint the installer already prints at install time and
+# already goes unread — see Point 5 of the decision doc). Best-effort only:
+# never affects exit code either caller returns. A host that genuinely wants
+# nothing IS healthy; this exists to make that state visible, not to fail it.
+# ─────────────────────────────────────────────────────────────────────────────
+_hr_seeded_unconfigured_notice() {
+    [ -f "$KB_HOST_READY_CONFIG" ] || return 1
+    CFG="$KB_HOST_READY_CONFIG" python3 - <<'PY' 2>/dev/null
+import json, os, sys
+try:
+    with open(os.environ["CFG"], encoding="utf-8") as fh:
+        doc = json.load(fh)
+except Exception:
+    sys.exit(1)
+if not isinstance(doc, dict):
+    sys.exit(1)
+sys.exit(0 if doc.get("_seeded_unconfigured") is True and doc.get("autostart") == [] else 1)
+PY
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # status — read-only.
 # ─────────────────────────────────────────────────────────────────────────────
 cmd_status() {
@@ -1549,6 +1603,9 @@ cmd_status() {
 
     printf '\n'
     log "  config state:       ${state:-absent}"
+    if [ "$state" = "ok" ] && _hr_seeded_unconfigured_notice; then
+        log "  NOTICE:             seeded default, never customized; this host restores nothing and locks nothing. Run: kb-host-ready.sh suggest"
+    fi
     log "  registry state:     ${registry_state:-n/a}"
     log "  lock_after_login:   $lock_configured"
 
@@ -1652,6 +1709,10 @@ cmd_check() {
             err "check: FAIL — config exists but no LaunchAgent plist at $KB_HOST_READY_PLIST; this config will never run automatically (subitem 006/upgrade installs the mandatory-set plist)"
             problems=$((problems + 1))
         fi
+    fi
+
+    if [ "$state" = "ok" ] && _hr_seeded_unconfigured_notice; then
+        log "check: NOTICE — seeded default, never customized; this host restores nothing and locks nothing. Run: kb-host-ready.sh suggest"
     fi
 
     if [ "$problems" -eq 0 ]; then
@@ -1771,6 +1832,165 @@ PY
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# init-config (XACA-1162) — seed ${KB_HOST_READY_CONFIG} WRITE-IF-ABSENT with
+# an inert placeholder. This is what closes the gap this ticket exists to
+# fix: XACA-1066 shipped the script and the plist through the tap's
+# mandatory-materialize / mandatory-launchagent sets (both of which reach an
+# already-installed box on `aiteamforge upgrade`), but nothing ever wrote
+# ${KB_HOST_READY_CONFIG} itself — so the agent installed and loaded cleanly
+# everywhere and did nothing everywhere, because "no config" and "no
+# LaunchAgent" both look identical from inside a login-time no-op.
+#
+# Called from TWO sites, sharing this one implementation (no drift between
+# fresh-install and upgrade, per feedback_install_time_provisioning_
+# unreachable_from_upgrade.md):
+#   - install-kanban.sh :: install_host_ready_launchagent()   (fresh install)
+#   - aiteamforge-upgrade.sh :: provision_host_ready_config() (every upgrade,
+#     unconditional, registered right after update_runtime_helpers)
+#
+# See the "CONFIG" section above the resolver for the exact seed shape and
+# why `_seeded_unconfigured` MUST be present, and Point 4 of
+# kanban/plans/XACA-1162/XACA-1162-004-*.md for why write-if-absent (never
+# write-always, never merge) is the only safe contract for an unattended,
+# nightly-run seeder touching a file the operator may have hand-tuned.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# True (exit 0) when com.aiteamforge.host-ready.plist has a recorded
+# opt-out. LIGHTWEIGHT MIRROR of _xaca0734_normalize_optout_line /
+# _xaca0734_is_opted_out (homebrew-tap/libexec/lib/launchagents.sh) — not a
+# source of that file, deliberately: this script ships standalone into
+# ${AITEAMFORGE_DIR}/scripts on a consumer machine and also runs unmodified
+# from the dev-team source tree with no tap checkout anywhere nearby, so it
+# cannot assume FRAMEWORK_DIR/libexec/lib/launchagents.sh is reachable at
+# runtime. Handles the same hand-edited-file realities the tap file does
+# (CRLF, leading/trailing whitespace, blank lines, whole-line `#` comments)
+# so a hand-edited opt-out sentinel is honoured the same way here as there.
+_hr_init_config_opted_out() {
+    local f="$KB_HOST_READY_OPTOUT_FILE"
+    [ -f "$f" ] && [ -r "$f" ] || return 1
+    local line norm
+    while IFS= read -r line || [ -n "$line" ]; do
+        norm="${line%$'\r'}"
+        norm="${norm#"${norm%%[![:space:]]*}"}"
+        norm="${norm%"${norm##*[![:space:]]}"}"
+        [ -z "$norm" ] && continue
+        case "$norm" in
+            \#*) continue ;;
+        esac
+        if [ "$norm" = "com.aiteamforge.host-ready.plist" ]; then
+            return 0
+        fi
+    done < "$f"
+    return 1
+}
+
+# True (exit 0) when this install should have LaunchAgents at all — a
+# DELIBERATELY PARTIAL mirror of _xaca0734_launchagents_applicable's marker 1
+# (cockpit profile via WORKING_DIR/.install-profile). Marker 2 (the
+# jq-dependent "LCARS Kanban declined" check reading .aiteamforge-config) is
+# NOT mirrored: reproducing a fail-open, jq-gated JSON-key read a second time
+# risks getting the fail-open direction subtly wrong in the copy, and the
+# consequence of skipping it is low-severity either way — an unwanted seed is
+# an inert file (empty autostart, lock_after_login=false) that nothing ever
+# reads on a box with no LaunchAgents, not a functional defect. FAILS OPEN
+# on a missing/unreadable marker, matching the tap gate's own direction: a
+# false-close here would silently suppress seeding on a box that actually
+# needs it, with no symptom to notice.
+_hr_init_config_applicable() {
+    local wd="$KB_HOST_READY_WORKING_DIR"
+    local profile_file="${wd}/.install-profile"
+    if [ -f "$profile_file" ] && [ -r "$profile_file" ]; then
+        local profile
+        profile="$(tr -d '[:space:]' < "$profile_file" 2>/dev/null || true)"
+        if [ "$profile" = "cockpit" ]; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+cmd_init_config() {
+    local dry_run=false quiet=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run) dry_run=true; shift ;;
+            --quiet)   quiet=true; shift ;;
+            *)
+                err "init-config: unknown argument: $1"
+                return 2
+                ;;
+        esac
+    done
+
+    # Write-if-absent (Point 4 of the decision doc): the ONLY write
+    # condition. A file that already exists — seeded on a prior run, or
+    # hand-authored — is never touched again, seeded or not.
+    if [ -f "$KB_HOST_READY_CONFIG" ]; then
+        [ "$quiet" = true ] || log "init-config: ${KB_HOST_READY_CONFIG} already exists — leaving it untouched"
+        return 0
+    fi
+
+    # A path that EXISTS but is not a regular file (e.g. a directory) is
+    # malformed, not absent — mirrors cmd_check's identical guard above.
+    # Never "fix" it by clobbering; warn and move on.
+    if [ -e "$KB_HOST_READY_CONFIG" ]; then
+        warn "init-config: ${KB_HOST_READY_CONFIG} exists but is not a regular file — leaving it untouched"
+        return 0
+    fi
+
+    if _hr_init_config_opted_out; then
+        [ "$quiet" = true ] || log "init-config: com.aiteamforge.host-ready.plist is opted out (${KB_HOST_READY_OPTOUT_FILE}) — not seeding a config for a disabled agent (XACA-0734: intent is recorded, never inferred)"
+        return 0
+    fi
+
+    if ! _hr_init_config_applicable; then
+        [ "$quiet" = true ] || log "init-config: this install has no LaunchAgents (cockpit profile) — not seeding a config that could never run"
+        return 0
+    fi
+
+    if [ "$dry_run" = true ]; then
+        log "init-config: would seed ${KB_HOST_READY_CONFIG} (dry-run — writing nothing)"
+        return 0
+    fi
+
+    local dir tmp
+    dir="$(dirname "$KB_HOST_READY_CONFIG")"
+    mkdir -p "$dir" 2>/dev/null || { warn "init-config: could not create ${dir} — not seeding"; return 0; }
+
+    # Atomic write: mktemp in the SAME directory (so the final `mv` is a
+    # same-filesystem rename, not a copy) + mv. Same idiom as
+    # _hr_write_state above.
+    tmp="$(mktemp "${dir}/.host-ready.json.XXXXXX" 2>/dev/null)" || { warn "init-config: mktemp failed in ${dir} — not seeding"; return 0; }
+
+    cat > "$tmp" <<'SEED'
+{
+  "schema_version": 1,
+  "_comment": "Seeded by aiteamforge with an EMPTY autostart: this machine restores nothing and locks nothing. This is a placeholder, not a configured host. Run 'kb-host-ready.sh suggest' for candidate entries, then edit this file and delete the _seeded_unconfigured key.",
+  "_seeded_unconfigured": true,
+  "autostart": [],
+  "lock_after_login": false
+}
+SEED
+
+    if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        warn "init-config: seed write produced no output — not seeding"
+        return 0
+    fi
+
+    if mv "$tmp" "$KB_HOST_READY_CONFIG"; then
+        [ "$quiet" = true ] || log "init-config: seeded ${KB_HOST_READY_CONFIG} (empty autostart, lock_after_login=false — run 'kb-host-ready.sh suggest' to customize, then delete the _seeded_unconfigured key)"
+    else
+        rm -f "$tmp" 2>/dev/null
+        warn "init-config: mv failed writing ${KB_HOST_READY_CONFIG} — not seeded"
+    fi
+
+    # Never fails the caller — install and upgrade must never abort over a
+    # seeding hiccup (Point 4, guard 5).
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dispatch
 # ─────────────────────────────────────────────────────────────────────────────
 main() {
@@ -1784,6 +2004,7 @@ main() {
         status)              cmd_status "$@"; return $? ;;
         check)                cmd_check "$@"; return $? ;;
         suggest)            cmd_suggest "$@"; return $? ;;
+        init-config)  cmd_init_config "$@"; return $? ;;
         -h|--help|help|"")  usage; return 0 ;;
         *)
             err "unknown subcommand: $cmd"
