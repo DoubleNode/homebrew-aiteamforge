@@ -61,9 +61,32 @@ _ATF_MANDATORY_TEAMS_SH_LOADED=1
 # that is what makes it caller-location-independent in the first place.
 #
 # Priority:
-#   1. $AITEAMFORGE_HOME, when set (the Formula's bin stubs and the CLI set
-#      this to the installed libexec dir — see bin/aiteamforge-cli.sh,
-#      bin/aiteamforge-doctor.sh — so share/ is its sibling: ../share).
+#   1. $AITEAMFORGE_HOME, when set. PR #865 review, item 3: this used to
+#      guess "${AITEAMFORGE_HOME}/../share/teams/registry.json" on the
+#      theory that AITEAMFORGE_HOME is "the installed libexec dir" with
+#      share/ as its sibling. That is NOT how AITEAMFORGE_HOME actually
+#      behaves anywhere else in this codebase: bin/aiteamforge-doctor.sh
+#      (the real Formula bin stub) sets AITEAMFORGE_HOME to
+#      "$(brew --prefix)/opt/aiteamforge/libexec" and then reads
+#      "${AITEAMFORGE_HOME}/share/templates/...",
+#      "${AITEAMFORGE_HOME}/bin/aiteamforge-cli.sh", and
+#      "${AITEAMFORGE_HOME}/libexec/lib/validate-install.sh" — i.e. it
+#      treats AITEAMFORGE_HOME as the TAP ROOT (bin/, libexec/, share/ all
+#      direct children), the same way bin/aiteamforge-setup.sh's own
+#      self-location fallback does. The correct installed-layout guess is
+#      therefore "${AITEAMFORGE_HOME}/share/teams/registry.json" — no
+#      "..". The old guess was one directory too high; it happened to be
+#      harmless today only because it never matched and priority 2 (self-
+#      location) has always silently carried the real answer (see Section
+#      G8 in tests/test-xaca-1070-mandatory-install.sh) — but a future
+#      reorg that put a real "share/" one level above AITEAMFORGE_HOME
+#      (e.g. XACA-0340's canonical-source tree) would have made this
+#      branch silently select the WRONG registry instead of correctly
+#      missing. Fixed to match the rest of the codebase rather than
+#      removed: AITEAMFORGE_HOME is normally set on every real invocation
+#      (Formula bin stubs, CLI) and is a cheaper/more direct resolution
+#      than self-location, so keeping it as priority 1 — now pointed at
+#      the right path — is still worth doing.
 #   2. Self-location: this file lives at libexec/lib/mandatory-teams.sh, so
 #      two levels up from its own directory is the tap root, regardless of
 #      who sourced it or from where (mirrors install-team.sh's
@@ -71,9 +94,9 @@ _ATF_MANDATORY_TEAMS_SH_LOADED=1
 #      ITS OWN BASH_SOURCE[0], not the caller's).
 # ─────────────────────────────────────────────────────────────────────────────
 _atf_mandatory_teams_registry_path() {
-    # 1. AITEAMFORGE_HOME (installed layout: $AITEAMFORGE_HOME/../share/...)
-    if [ -n "${AITEAMFORGE_HOME:-}" ] && [ -f "${AITEAMFORGE_HOME}/../share/teams/registry.json" ]; then
-        echo "$(cd "${AITEAMFORGE_HOME}/.." 2>/dev/null && pwd)/share/teams/registry.json"
+    # 1. AITEAMFORGE_HOME (installed/tap-root layout: $AITEAMFORGE_HOME/share/...)
+    if [ -n "${AITEAMFORGE_HOME:-}" ] && [ -f "${AITEAMFORGE_HOME}/share/teams/registry.json" ]; then
+        echo "$(cd "${AITEAMFORGE_HOME}" 2>/dev/null && pwd)/share/teams/registry.json"
         return 0
     fi
 
@@ -129,35 +152,74 @@ atf_mandatory_teams() {
 
     # ── Try jq ────────────────────────────────────────────────────────────
     if command -v jq >/dev/null 2>&1; then
-        local out jq_rc
-        # -e's exit code is NOT a simple 0/1: 0 = last output truthy, 1 = last
-        # output was false/null, and — MEASURED here, not assumed — 4 = the
-        # filter produced NO output at all (an empty result set), which is
-        # exactly what "[.teams[]? | select(.mandatory == true)] | .[].id"
-        # returns today (zero mandatory teams). A check that only tolerated
-        # 0/1 misread that expected-empty steady state as a parse failure.
-        # rc 2 (jq usage/compile error) and 5 (bad --arg type etc.) are real
-        # errors and must NOT be treated as "just empty".
+        local out jq_rc bad_count
+        # PR #865 review, BLOCKING 2: the filter below used to be
+        # "[.teams[]? | select(.mandatory == true)] | sort_by(.order // 0) |
+        # .[].id" with no guard on `.id` at all. `jq -e`'s exit code is keyed
+        # to the LAST emitted value: 0 only when that last value is truthy.
+        # A registry with a valid mandatory entry (id present) PLUS one
+        # mandatory entry missing "id" emits a trailing `null` for the
+        # id-less entry (`.id` on an object with no "id" key is `null`, not
+        # an error) — `-e` sees that final `null`, exits 1, and the "valid
+        # JSON, filter just matched nothing" branch below then confirms
+        # `.teams` exists and returns 0 with EMPTY stdout, discarding the
+        # valid entry too. rc=0-with-empty-stdout is this function's OWN
+        # contract for "zero mandatory teams, all fine" (see the header
+        # comment above) — this is the exact conflation that contract
+        # exists to prevent, reached through a different door, inside the
+        # one function whose entire purpose is preventing it. Reproduced
+        # live: REG with a valid `alpha` (mandatory:true) + one mandatory
+        # entry with no "id" returned rc=0 / empty stdout, silently
+        # dropping `alpha`.
+        #
+        # Fix: exclude null/empty ids INSIDE the filter, before `.id` is
+        # ever the value `-e` inspects — `(.id // "") != ""` catches both a
+        # missing key (`.id` is `null`, `// ""` turns that into `""`) and an
+        # explicit `"id": ""`. A malformed sibling can no longer poison
+        # `-e`'s last-value check for the valid entries around it.
         out="$(jq -e -r '
-            [.teams[]? | select(.mandatory == true)]
+            [.teams[]? | select(.mandatory == true and (.id // "") != "")]
             | sort_by(.order // 0)
             | .[].id
         ' "$registry_path" 2>/dev/null)"
         jq_rc=$?
+        # -e's exit code is NOT a simple 0/1: 0 = last output truthy, 1 = last
+        # output was false/null, and — MEASURED here, not assumed — 4 = the
+        # filter produced NO output at all (an empty result set), which is
+        # exactly what happens when zero teams are mandatory (today's real
+        # state) OR every mandatory-flagged entry lacked a usable id (the
+        # fixed filter above now excludes all of them, correctly, rather
+        # than letting one poison the rest). rc 2 (jq usage/compile error)
+        # and 5 (bad --arg type etc.) are real errors and must NOT be
+        # treated as "just empty".
         if [ "$jq_rc" -eq 0 ]; then
             printf '%s\n' "$out" | sed '/^$/d'
-            return 0
         elif [ "$jq_rc" -eq 1 ] || [ "$jq_rc" -eq 4 ]; then
             # Valid JSON, filter just matched nothing (or the array itself is
             # empty) — confirm the document actually HAS a .teams array
             # before calling this "fine"; a registry with no .teams key at
             # all is still a malformed registry, not "zero mandatory teams".
             if jq -e '.teams' "$registry_path" >/dev/null 2>&1; then
-                return 0
+                :  # fall through to the malformed-entry surfacing below, then return 0
+            else
+                echo "mandatory-teams.sh: ${registry_path} is not valid JSON (or has no .teams array) — cannot determine mandatory teams (XACA-1070)" >&2
+                return 1
             fi
+        else
+            echo "mandatory-teams.sh: ${registry_path} is not valid JSON (or has no .teams array) — cannot determine mandatory teams (XACA-1070)" >&2
+            return 1
         fi
-        echo "mandatory-teams.sh: ${registry_path} is not valid JSON (or has no .teams array) — cannot determine mandatory teams (XACA-1070)" >&2
-        return 1
+
+        # Surface malformed siblings rather than dropping them silently — a
+        # missing "id" on a "mandatory": true entry is a real registry
+        # defect (someone will wonder why their team never got installed),
+        # even though this function's contract is to keep going with the
+        # entries that ARE valid rather than fail the whole read over it.
+        bad_count="$(jq '[.teams[]? | select(.mandatory == true and ((.id // "") == ""))] | length' "$registry_path" 2>/dev/null)"
+        if [ -n "$bad_count" ] && [ "$bad_count" != "0" ]; then
+            echo "mandatory-teams.sh: ${registry_path} has ${bad_count} \"mandatory\": true entr$( [ "$bad_count" = "1" ] && echo y || echo ies) with no usable \"id\" — skipped, not treated as an error (XACA-1070)" >&2
+        fi
+        return 0
     fi
 
     # ── Try python3 (jq unavailable) ────────────────────────────────────────
@@ -222,6 +284,51 @@ EOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# atf_team_has_board <team_id>
+#
+# Exit 0 when a real "*-board.json" file exists in team $1's kanban
+# directory, 1 otherwise (including "cannot even determine the kanban dir at
+# all" — a lookup failure is never treated as proof of absence, it is just
+# "cannot verify"). No stdout.
+#
+# XACA-1070-017: this glob used to be duplicated VERBATIM in two places —
+# atf_team_provisioned() immediately below, and
+# libexec/commands/aiteamforge-upgrade.sh's own
+# _xaca1070_mandatory_team_has_board(). Two independent definitions of "does
+# this team have a board on disk" is exactly the drift vector that produced
+# this ticket's worst defect: the upgrade backfill provisioning a board
+# `aiteamforge start` would never launch, because two components disagreed
+# about what "provisioned" meant (see XACA-1070's own "DEFECT FOUND IN THIS
+# TICKET'S OWN FIX" note). Factored out so there is exactly ONE definition
+# of the shared evidence primitive.
+#
+# Deliberately NOT the same predicate as atf_team_provisioned(): this
+# function does not check .aiteamforge-config membership. The two composite
+# checks built on top of this primitive need DIFFERENT policies —
+# atf_team_provisioned() additionally requires config-list membership,
+# while aiteamforge-upgrade.sh's backfill deliberately does not (gating the
+# backfill's skip-vs-provision decision on the full atf_team_provisioned()
+# predicate would re-invoke the installer on every mandatory team, every
+# upgrade, forever — see that call site's own header comment). Only the
+# board-evidence HALF is common to both; that is all this factors out.
+# ─────────────────────────────────────────────────────────────────────────────
+atf_team_has_board() {
+    local team_id="$1"
+    [ -n "$team_id" ] || return 1
+    command -v aiteamforge_team_kanban_dir >/dev/null 2>&1 || return 1
+
+    local kdir
+    kdir="$(aiteamforge_team_kanban_dir "$team_id" 2>/dev/null)" || return 1
+    [ -n "$kdir" ] && [ -d "$kdir" ] || return 1
+
+    local f
+    for f in "$kdir"/*-board.json; do
+        [ -f "$f" ] && return 0
+    done
+    return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # atf_team_provisioned <team_id>
 #
 # Exit 0 if team $1 appears provisioned on THIS host, 1 otherwise. No stdout.
@@ -237,7 +344,9 @@ EOF
 #      silently disagree with the doctor/upgrade about team membership.
 #   2. Its kanban board actually exists on disk: aiteamforge_team_kanban_dir()
 #      (libexec/lib/aiteamforge-paths.sh) resolves to a real directory that
-#      contains at least one "*-board.json" file.
+#      contains at least one "*-board.json" file — see atf_team_has_board()
+#      immediately above, the single shared definition of this half
+#      (XACA-1070-017).
 #
 # Membership in the config list alone is NOT sufficient — .aiteamforge-config
 # can list a team whose install was interrupted before the board was
@@ -275,20 +384,16 @@ atf_team_provisioned() {
     [ "$found" -eq 0 ] || return 1
 
     # Membership confirmed. Now require real on-disk evidence, when we have
-    # a way to look for it.
+    # a way to look for it. XACA-1070-017: the evidence check itself is
+    # atf_team_has_board() above — this is the ONLY caller-visible change
+    # from the factor-out; the outer `command -v aiteamforge_team_kanban_dir`
+    # guard is kept here (not inside atf_team_has_board) because it decides
+    # whether to skip the board requirement ENTIRELY when the paths lib
+    # isn't loaded (degrade to config-membership-only), which is a different
+    # decision than atf_team_has_board() correctly returning 1 for "cannot
+    # verify" when called directly by some other consumer.
     if command -v aiteamforge_team_kanban_dir >/dev/null 2>&1; then
-        local kdir
-        kdir="$(aiteamforge_team_kanban_dir "$team_id" 2>/dev/null)" || return 1
-        [ -n "$kdir" ] && [ -d "$kdir" ] || return 1
-
-        local board_found=1 f
-        for f in "$kdir"/*-board.json; do
-            if [ -f "$f" ]; then
-                board_found=0
-                break
-            fi
-        done
-        [ "$board_found" -eq 0 ] || return 1
+        atf_team_has_board "$team_id" || return 1
     fi
 
     return 0

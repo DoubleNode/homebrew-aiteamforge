@@ -1339,9 +1339,34 @@ update_team_scripts() {
 # never treated as proof of absence-and-therefore-safe-to-provision; it is
 # treated as "cannot verify", which correctly routes below to attempting the
 # installer, exactly as if the team had never been provisioned). No stdout.
+#
+# XACA-1070-017: delegates to mandatory-teams.sh's atf_team_has_board() —
+# the single shared definition of "does this team have a real board on
+# disk", factored out because this function used to duplicate that glob
+# verbatim, and two independent copies of the same evidence check is the
+# drift vector that produced this ticket's worst defect (see
+# atf_team_has_board()'s own header comment in libexec/lib/mandatory-teams.sh
+# for the full rationale). This function's own DIFFERENT policy — no
+# .aiteamforge-config membership check, unlike atf_team_provisioned() — is
+# unchanged; only the board-evidence primitive moved.
+#
+# Falls back to the original inline glob check if atf_team_has_board isn't
+# defined, mirroring this file's own `command -v` guard idiom at its other
+# mandatory-teams.sh call sites (e.g. update_mandatory_teams() above). In
+# normal operation this fallback is unreachable: update_mandatory_teams()
+# already refuses to call this function at all unless
+# `command -v atf_mandatory_teams` succeeds, and atf_team_has_board is
+# defined in the same file atf_mandatory_teams is. Kept anyway so this
+# function stays correct standalone, not just as-currently-called.
 _xaca1070_mandatory_team_has_board() {
   local team_id="$1"
   [ -n "$team_id" ] || return 1
+
+  if command -v atf_team_has_board >/dev/null 2>&1; then
+    atf_team_has_board "$team_id"
+    return $?
+  fi
+
   command -v aiteamforge_team_kanban_dir >/dev/null 2>&1 || return 1
 
   local kdir
@@ -1483,11 +1508,63 @@ if team_id in teams:
     print("already present in .teams[] -- no-op")
     sys.exit(0)
 
+# XACA-1070-019: the naive pattern.search() below used to return the FIRST
+# "teams": [...] occurrence anywhere in the raw text -- which could be a
+# NESTED key (e.g. an earlier {"metadata": {"teams": [...]}} block) rather
+# than the real root-level .teams[] this function is meant to edit. This was
+# never a corruption risk (the post-write re-parse-and-compare a few lines
+# below already catches a wrong target and aborts with the file untouched --
+# QA confirmed this in review), but a wrong target means the intended team
+# is silently never registered and the warning repeats every upgrade until
+# someone hand-fixes the config. container_depth_before() below answers
+# "how many JSON containers enclose this text position", string-and-escape
+# aware so a literal {, [, or "teams" appearing INSIDE a string value is
+# never miscounted as real structure. Depth 1 at the start of a "teams" key
+# match means it is a direct child of the root object (data is already
+# confirmed a dict above); anything deeper is nested and excluded. This
+# stays a text-span edit, not a JSON parse-and-redump -- it only changes
+# WHICH span the existing surgical replacement targets, so every other byte
+# of the file (installed_features, team_paths, etc.) is still left exactly
+# as bin/aiteamforge-setup.sh formatted it.
+def container_depth_before(text, pos):
+    depth = 0
+    in_string = False
+    escape = False
+    i = 0
+    while i < pos:
+        c = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == "\"":
+                in_string = False
+        else:
+            if c == "\"":
+                in_string = True
+            elif c in "{[":
+                depth += 1
+            elif c in "}]":
+                depth -= 1
+        i += 1
+    return depth
+
 pattern = re.compile("(\"teams\"\\s*:\\s*)\\[([^\\]]*)\\]")
-m = pattern.search(raw)
-if m is None:
-    print("json parsed .teams as a list but its literal text could not be located -- refusing to guess; leaving config untouched")
+top_level_matches = [
+    candidate
+    for candidate in pattern.finditer(raw)
+    if container_depth_before(raw, candidate.start()) == 1
+]
+
+if len(top_level_matches) == 0:
+    print("the top-level .teams key literal text could not be located (only nested/non-root occurrences found, or none at all) -- refusing to guess; leaving config untouched")
     sys.exit(3)
+if len(top_level_matches) > 1:
+    print("more than one top-level .teams key literal text was found -- refusing to guess which one is the real root key; leaving config untouched")
+    sys.exit(3)
+
+m = top_level_matches[0]
 
 prefix = m.group(1)
 inner = m.group(2)

@@ -54,6 +54,111 @@ fi
 # shellcheck source=/dev/null
 [ -f "$AITEAMFORGE_HOME/libexec/lib/mandatory-teams.sh" ] && . "$AITEAMFORGE_HOME/libexec/lib/mandatory-teams.sh"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-1070-002 / PR #865 review, BLOCKING 1: force-append mandatory teams
+# into SELECTED_TEAMS.
+#
+# Defined as a function (not an inline block) because it has to run from
+# TWO call sites, not one — see each call site's own comment for exactly
+# why. Originally this was a single inline block placed unconditionally
+# right before the kanban-install block (~line 1657 pre-fix), AFTER every
+# loop in this script that consumes SELECTED_TEAMS had already iterated it
+# (the per-team working-dir prompt at ~874, the persona/avatar copy at
+# ~1346, and — the one that actually matters — the install-team.sh loop at
+# ~1381). On a fresh interactive wizard install that meant a mandatory team
+# reached `.aiteamforge-config` and got a kanban board (install-kanban.sh
+# force-appends it independently on its own internal team list — see that
+# file's install_kanban_system()), but install-team.sh NEVER ran for it:
+# no port allocation, no team-paths.json entry, no connect/disconnect
+# scripts, no per-agent startup scripts, no personas. PR #865 review,
+# BLOCKING 1.
+#
+# Call site 1 (inside the interactive "Step 2" else-branch, immediately
+# after SELECTED_TEAMS is finalized from user/non-interactive input and
+# BEFORE the per-team working-dir loop — the FIRST loop in the file that
+# consumes SELECTED_TEAMS) is the fix for that bug: it guarantees a
+# mandatory team is present before ANY downstream consumer, including the
+# working-dir loop, the persona copy, and the install-team.sh loop.
+#
+# Call site 2 (immediately after the Step 2 if/elif/else closes) exists
+# because call site 1 is textually INSIDE the interactive branch only.
+# UPGRADE_HYDRATED and cockpit populate SELECTED_TEAMS through their own
+# branches of that same if/elif/else and never reach call site 1 at all —
+# call site 2 is their safety net, matching what the original single
+# (too-late) call site used to guarantee for them. It is a no-op on the
+# interactive path: the dedup check below skips an id already present, so
+# calling this function twice is always safe and never double-announces.
+#
+# Team-agnostic by design (XACA-1070): no team id is hard-coded anywhere in
+# this function. Zero teams carry "mandatory": true as of this writing, so
+# the loop below is a correctly-behaving no-op today — see
+# libexec/lib/mandatory-teams.sh's own header comment for why that empty
+# case matters.
+#
+# `set -eo pipefail` guard: `_mand_out="$(atf_mandatory_teams)"` alone would
+# propagate atf_mandatory_teams' exit code to the assignment and abort the
+# whole wizard — under errexit, `var=$(cmd)` fails the script the instant
+# cmd returns non-zero, and unlike an `if`/`&&` condition this assignment is
+# NOT exempt. `|| _mand_rc=$?` sidesteps that the same way the neighbouring
+# jq/python calls in mandatory-teams.sh do: the trailing assignment is
+# itself always "successful", so the list's overall exit status is 0 and
+# errexit never fires, while `_mand_rc` still captures the real code so the
+# empty-vs-unreadable distinction from the return-code contract isn't lost.
+# ═══════════════════════════════════════════════════════════════════════════
+_atf_apply_mandatory_teams() {
+  if command -v atf_mandatory_teams >/dev/null 2>&1; then
+    _mand_out="" ; _mand_rc=0
+    # XACA-1070 (PR #865 review, subitem -015): capture STDOUT ONLY. Merging
+    # stderr in here contaminated the very list this parses: the lib writes a
+    # non-fatal diagnostic to stderr when it skips a malformed entry, and with
+    # 2>&1 that sentence was read back as a team id and force-appended to
+    # SELECTED_TEAMS, then handed to install-team.sh and written into
+    # .aiteamforge-config. The diagnostic still reaches the user: it goes to
+    # the real stderr. This matches update_mandatory_teams() in
+    # libexec/commands/aiteamforge-upgrade.sh, which never merged it.
+    _mand_out="$(atf_mandatory_teams)" || _mand_rc=$?
+    if [ "$_mand_rc" -eq 0 ]; then
+      while IFS= read -r _mand_id; do
+        [ -n "$_mand_id" ] || continue
+        _mand_already=0
+        for _mand_existing in "${SELECTED_TEAMS[@]}"; do
+          if [ "$_mand_existing" = "$_mand_id" ]; then
+            _mand_already=1
+            break
+          fi
+        done
+        if [ "$_mand_already" -eq 0 ]; then
+          SELECTED_TEAMS+=("$_mand_id")
+          echo -e "${GREEN}✓${NC} Mandatory team added: ${_mand_id} (XACA-1070)"
+        fi
+      done <<EOF
+$_mand_out
+EOF
+    else
+      # Fail-closed on the ENFORCEMENT question, not on the install itself: an
+      # unreadable registry.json must be surfaced (per mandatory-teams.sh's
+      # return-code contract — this is the exit-1 fault case, never "no
+      # mandatory teams"), but aborting the whole setup wizard over it would
+      # be a worse outcome than continuing without mandatory-team enforcement
+      # for this one run.
+      echo -e "${YELLOW}⚠ Could not determine mandatory teams (registry.json missing/unparseable; see the stderr diagnostic above) — continuing without mandatory-team enforcement (XACA-1070)${NC}" >&2
+    fi
+  else
+    # XACA-1070-020: the outer `command -v atf_mandatory_teams` guard used to
+    # skip this whole function with ZERO console output when
+    # mandatory-teams.sh itself is missing entirely (as opposed to present-
+    # but-registry-unreadable, which the branch above already surfaces).
+    # aiteamforge-upgrade.sh's update_mandatory_teams() has always printed a
+    # warning for this exact condition ("mandatory-teams.sh not available —
+    # skipping mandatory-team backfill (XACA-1070)"); this wizard silently
+    # disabling the same enforcement with no indication at all is the
+    # precise "silently does nothing" failure mode this ticket exists to
+    # close one level up from the runtime feature itself. Non-fatal —
+    # informational only; the wizard must still complete the install.
+    echo -e "${YELLOW}⚠ mandatory-teams.sh not available — skipping mandatory-team enforcement (XACA-1070)${NC}" >&2
+  fi
+}
+
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "$AITEAMFORGE_HOME/../VERSION" "$AITEAMFORGE_HOME/VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
 VERSION="$(_find_version)"
@@ -802,10 +907,12 @@ for conf_file in "${TEAMS_DIR}"/*.conf; do
   tid="$(basename "$conf_file" .conf)"
 
   # XACA-1070-002: mandatory teams are never shown as a checkbox — they are
-  # force-appended into SELECTED_TEAMS unconditionally, right before
-  # install-kanban.sh is invoked (see the kanban-install block below). Skip
-  # adding this one to AVAILABLE_TEAMS/TEAM_LABELS so it can't be selected
-  # twice and never occupies a numbered slot in the printed menu.
+  # force-appended into SELECTED_TEAMS by _atf_apply_mandatory_teams (PR #865
+  # review, BLOCKING 1 fix: called right after selection is finalized below,
+  # BEFORE the working-dir loop — see that function's header comment near
+  # the top of this file). Skip adding this one to AVAILABLE_TEAMS/TEAM_LABELS
+  # so it can't be selected twice and never occupies a numbered slot in the
+  # printed menu.
   #
   # `atf_is_mandatory_team` is safe here even though this script runs under
   # `set -eo pipefail`: it's the condition of an `if`, and bash exempts
@@ -862,6 +969,16 @@ fi
 
 echo ""
 echo -e "${GREEN}✓${NC} Selected teams: ${SELECTED_TEAMS[*]}"
+
+# XACA-1070-002 / PR #865 review, BLOCKING 1 — CALL SITE 1: apply mandatory
+# teams here, BEFORE the per-team working-dir loop immediately below (the
+# first loop anywhere in this file that consumes SELECTED_TEAMS). This is
+# the fix: everything downstream of this point — the working-dir loop, the
+# persona/avatar copy, and the install-team.sh loop — now sees the
+# mandatory team as if the user had picked it. See the function's own
+# header comment (near the top of this file) for the full rationale and
+# why a second call site also exists further down.
+_atf_apply_mandatory_teams
 
 # -----------------------------------------------------------------------
 # For project-based teams, ask for ClientID and/or ProjectID
@@ -941,6 +1058,15 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
 done
 
 fi  # end: if INSTALL_PROFILE != cockpit (team selection block)
+
+# XACA-1070-002 / PR #865 review, BLOCKING 1 — CALL SITE 2: safety net for
+# the UPGRADE_HYDRATED and cockpit branches above. Both populate
+# SELECTED_TEAMS through their own arm of the if/elif/else that just
+# closed and never reach call site 1 (which lives textually inside the
+# interactive else-branch only). This call is a no-op on the interactive
+# path — the dedup check inside _atf_apply_mandatory_teams skips an id
+# that is already present, so it never double-adds or double-announces.
+_atf_apply_mandatory_teams
 
 # ═══════════════════════════════════════════════════════════════════════════
 # STEP 3: FEATURE SELECTION
@@ -1625,65 +1751,17 @@ if [ "$INSTALL_CLAUDE" = "yes" ]; then
 fi
 
 # -----------------------------------------------------------------------
-# XACA-1070-002: force-append mandatory teams into SELECTED_TEAMS.
-#
-# Placed here — unconditionally, before the kanban-install block below and
-# before every later read of SELECTED_TEAMS in this script (the config JSON
-# write, the install summary) — so a mandatory team lands in BOTH
-# SELECTED_TEAMS_STR and CR_ALL_SELECTED_TEAMS_STR (exported a few lines
-# down for install-kanban.sh) regardless of whether the user picked it,
-# whether this was an upgrade-hydrated run, or whether INSTALL_KANBAN itself
-# is "yes". Doing it this late (rather than back in Step 2 selection) is
-# deliberate: it also covers the UPGRADE_HYDRATED and cockpit paths, which
-# both skip the Step 2 selection block entirely and would otherwise never
-# see a newly-added mandatory team.
-#
-# Team-agnostic by design (XACA-1070): no team id is hard-coded anywhere in
-# this block. Zero teams carry "mandatory": true as of this writing, so the
-# loop below is a correctly-behaving no-op today — see
-# libexec/lib/mandatory-teams.sh's own header comment for why that empty
-# case matters.
-#
-# `set -eo pipefail` guard: `_mand_out="$(atf_mandatory_teams)"` alone would
-# propagate atf_mandatory_teams' exit code to the assignment and abort the
-# whole wizard — under errexit, `var=$(cmd)` fails the script the instant
-# cmd returns non-zero, and unlike an `if`/`&&` condition this assignment is
-# NOT exempt. `|| _mand_rc=$?` sidesteps that the same way the neighbouring
-# jq/python calls in mandatory-teams.sh do: the trailing assignment is
-# itself always "successful", so the list's overall exit status is 0 and
-# errexit never fires, while `_mand_rc` still captures the real code so the
-# empty-vs-unreadable distinction from the return-code contract isn't lost.
+# XACA-1070-002 / PR #865 review, BLOCKING 1: the force-append USED to live
+# here, unconditionally, right before the kanban-install block — which was
+# itself the bug (see _atf_apply_mandatory_teams' header comment near the
+# top of this file). It ran AFTER the working-dir loop, the persona/avatar
+# copy, and — the one that mattered — the install-team.sh loop had already
+# iterated SELECTED_TEAMS without the mandatory team present. It has been
+# moved to two earlier call sites (Step 2, both branches of the
+# selection if/elif/else) so every one of those loops sees the mandatory
+# team. SELECTED_TEAMS is already correct by the time control reaches here;
+# nothing further to do at this point.
 # -----------------------------------------------------------------------
-if command -v atf_mandatory_teams >/dev/null 2>&1; then
-  _mand_out="" ; _mand_rc=0
-  _mand_out="$(atf_mandatory_teams 2>&1)" || _mand_rc=$?
-  if [ "$_mand_rc" -eq 0 ]; then
-    while IFS= read -r _mand_id; do
-      [ -n "$_mand_id" ] || continue
-      _mand_already=0
-      for _mand_existing in "${SELECTED_TEAMS[@]}"; do
-        if [ "$_mand_existing" = "$_mand_id" ]; then
-          _mand_already=1
-          break
-        fi
-      done
-      if [ "$_mand_already" -eq 0 ]; then
-        SELECTED_TEAMS+=("$_mand_id")
-        echo -e "${GREEN}✓${NC} Mandatory team added: ${_mand_id} (XACA-1070)"
-      fi
-    done <<EOF
-$_mand_out
-EOF
-  else
-    # Fail-closed on the ENFORCEMENT question, not on the install itself: an
-    # unreadable registry.json must be surfaced (per mandatory-teams.sh's
-    # return-code contract — this is the exit-1 fault case, never "no
-    # mandatory teams"), but aborting the whole setup wizard over it would
-    # be a worse outcome than continuing without mandatory-team enforcement
-    # for this one run.
-    echo -e "${YELLOW}⚠ Could not determine mandatory teams (${_mand_out}) — continuing without mandatory-team enforcement (XACA-1070)${NC}" >&2
-  fi
-fi
 
 # -----------------------------------------------------------------------
 # Install LCARS Kanban System
@@ -1850,7 +1928,17 @@ cat > "${INSTALL_DIR}/.aiteamforge-config" <<EOF
     for _tid in "${SELECTED_TEAMS[@]}"; do
       [ -z "$_tid" ] && continue
       _pvar="_PROJECT_${_tid}"; _proj="${!_pvar:-}"
-      _wvar="_WORKDIR_${_tid}"; _wdir="${!_wvar:-}"
+      # PR #865 review, BLOCKING 1 (second symptom): fall back to
+      # ${INSTALL_DIR}/${_tid} exactly like the sibling _team_dirs
+      # serializer a few dozen lines up in the kanban-install block (and
+      # the install-team.sh loop's own team_work_dir fallback) — a team
+      # force-appended via _atf_apply_mandatory_teams' call site 2 (the
+      # UPGRADE_HYDRATED/cockpit safety net) never runs through the Step 2
+      # working-dir loop, so _WORKDIR_<team> is never set for it and this
+      # would otherwise serialize as "working_dir": "". Call site 1 (the
+      # interactive path) DOES run the working-dir loop for a
+      # newly-appended mandatory team, so this fallback is a no-op there.
+      _wvar="_WORKDIR_${_tid}"; _wdir="${!_wvar:-${INSTALL_DIR}/${_tid}}"
       _cvar="_CLIENT_${_tid}"; _client="${!_cvar:-}"
       if [ -n "$_client" ] && [ -n "$_proj" ]; then
         printf '"%s": {"working_dir": "%s", "client_id": "%s", "project_id": "%s"},' "$_tid" "$_wdir" "$_client" "$_proj"

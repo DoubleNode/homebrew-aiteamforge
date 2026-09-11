@@ -13,7 +13,21 @@ source "$SCRIPT_DIR/../lib/constants.sh"
 # 1070-002) needs its own enforcement: this file is invoked directly by
 # `aiteamforge upgrade` and by any non-interactive/CI install, neither of
 # which runs the wizard or ever sets SELECTED_TEAMS_STR.
-source "$SCRIPT_DIR/../lib/mandatory-teams.sh"
+#
+# PR #865 review, item 5: this used to be an UNGUARDED `source`, which under
+# this script's `set -euo pipefail` (line 5) means a missing file aborts the
+# ENTIRE installer immediately — contradicting install_kanban_system()'s own
+# design a few dozen lines down, which guards every call site with
+# `command -v atf_mandatory_teams` specifically so an absent lib degrades to
+# a warning (see that function's own comment: "a partially-upgraded install
+# missing this file degrades gracefully"). An unguarded source at the top
+# made that downstream guard unreachable-when-false — the script would
+# already be dead before it got there. Guarded here the same way every
+# other consumer of this lib does it (bin/aiteamforge-setup.sh's own
+# `[ -f ... ] && . "..."`, which is safe under `set -e`/`set -eo pipefail`:
+# a failing `[ -f ]` on the LEFT of `&&` does not trigger errexit, only a
+# failing LAST command in the list would).
+[ -f "$SCRIPT_DIR/../lib/mandatory-teams.sh" ] && source "$SCRIPT_DIR/../lib/mandatory-teams.sh"
 # XACA-0734: opt-out sentinel helpers. Each install_<x>_launchagent() below
 # CHECKS the sentinel and refuses to install when the user has opted out;
 # uninstall_<x>_launchagent() RECORDS an opt-out — but ONLY for a targeted,
@@ -2797,7 +2811,10 @@ install_kanban_system() {
     # atf_mandatory_teams' return-code contract isn't lost.
     if command -v atf_mandatory_teams >/dev/null 2>&1; then
         local _mand_out="" _mand_rc=0
-        _mand_out="$(atf_mandatory_teams 2>&1)" || _mand_rc=$?
+        # XACA-1070 (PR #865 review, subitem -015): STDOUT ONLY — see the
+        # matching comment in bin/aiteamforge-setup.sh. Merging stderr made
+        # the lib's own skipped-malformed-entry diagnostic parse as a team id.
+        _mand_out="$(atf_mandatory_teams)" || _mand_rc=$?
         if [ "$_mand_rc" -eq 0 ]; then
             local _mand_id _mand_already _mand_existing
             while IFS= read -r _mand_id; do
@@ -2829,8 +2846,23 @@ EOF
             # silently "no mandatory teams"), but aborting the whole kanban
             # installer over it would be worse than continuing without
             # mandatory-team enforcement for this one run.
-            warning "Could not determine mandatory teams (${_mand_out}) — continuing without mandatory-team enforcement (XACA-1070)"
+            warning "Could not determine mandatory teams (registry.json missing/unparseable; see the stderr diagnostic above) — continuing without mandatory-team enforcement (XACA-1070)"
         fi
+    else
+        # XACA-1070-020: this `command -v` guard used to skip the whole
+        # if-block with ZERO console output when mandatory-teams.sh itself
+        # is missing entirely (as opposed to present-but-unable-to-read-the-
+        # registry, which the branch above already surfaces via `warning`).
+        # aiteamforge-upgrade.sh's update_mandatory_teams() has always
+        # printed a warning for this exact condition
+        # ("mandatory-teams.sh not available — skipping mandatory-team
+        # backfill (XACA-1070)"); this installer silently disabling the same
+        # enforcement with no indication at all is the precise "silently
+        # does nothing" failure mode this ticket exists to close one level
+        # up from the runtime feature itself. Non-fatal — this is a WARNING
+        # that mandatory-team enforcement was skipped, not a reason to fail
+        # the install; the install must still succeed.
+        warning "mandatory-teams.sh not available — skipping mandatory-team enforcement (XACA-1070)"
     fi
 
     # XACA-0559: Shared components (helpers, hooks, LCARS UI, port mgmt, backup,

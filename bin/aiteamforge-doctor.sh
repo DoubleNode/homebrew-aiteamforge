@@ -1038,8 +1038,24 @@ check_mandatory_teams() {
   echo ""
 
   if [ "$_MANDATORY_TEAMS_LIB_OK" != true ] || ! command -v atf_mandatory_teams >/dev/null 2>&1; then
-    check_result warn "mandatory-teams.sh not available — cannot check mandatory team provisioning" \
-      "Expected: ${AITEAMFORGE_HOME}/libexec/lib/mandatory-teams.sh (XACA-1070)"
+    # PR #865 review, item 4 — see libexec/commands/aiteamforge-doctor.sh's
+    # copy of this same gate for the full rationale (Formula + git guarantee
+    # mandatory-teams.sh's presence in a real install, so "missing" is a
+    # genuine FAULT there, not a shrug; the two copies previously disagreed
+    # on this arm and now agree). Gated on the sibling common.sh existing
+    # under the SAME AITEAMFORGE_HOME/libexec/lib -- present -> a real,
+    # otherwise-populated install missing exactly this one file -> FAULT.
+    # Absent -> AITEAMFORGE_HOME itself doesn't look like a real framework
+    # root (the G5 test's deliberately unfaithful layout) -> degrade to WARN
+    # rather than pile a second, redundant fault onto whatever the
+    # framework-directory check already reported for that same root cause.
+    if [ -f "${AITEAMFORGE_HOME}/libexec/lib/common.sh" ]; then
+      check_result fail "mandatory-teams.sh not available even though this looks like a real install (common.sh is present) — cannot check mandatory team provisioning" \
+        "Expected: ${AITEAMFORGE_HOME}/libexec/lib/mandatory-teams.sh (XACA-1070). Run: aiteamforge setup --upgrade  (repairs a partial or corrupted install)"
+    else
+      check_result warn "mandatory-teams.sh not available — cannot check mandatory team provisioning" \
+        "Expected: ${AITEAMFORGE_HOME}/libexec/lib/mandatory-teams.sh (XACA-1070)"
+    fi
     echo ""
     return
   fi

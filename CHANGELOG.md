@@ -54,6 +54,115 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   it asserts on a bare runner. Enrolled in `ci-manifest` — completeness gate
   passes at 95 entries — because round 4's finding 1 was a new suite that was
   never enrolled and therefore never ran.
+- **XACA-1070 (PR #865 review) — two blocking fixes to the mandatory-team
+  feature, plus three non-blocking adjudications.** BLOCKING 1:
+  `bin/aiteamforge-setup.sh`'s mandatory-team force-append ran AFTER every
+  loop that consumes `SELECTED_TEAMS` (the working-dir prompt, the persona
+  copy, and — the one that mattered — the `install-team.sh` loop), so on a
+  fresh interactive wizard install a mandatory team reached
+  `.aiteamforge-config` and got a kanban board but never got a port, a
+  `team-paths.json` entry, connect/disconnect scripts, per-agent startup
+  scripts, or personas — the exact install/upgrade parity bug class this
+  ticket exists to fix, mirrored inside its own fix. Extracted the
+  force-append into `_atf_apply_mandatory_teams()`, called from two sites:
+  once inside the interactive Step 2 branch immediately BEFORE the
+  working-dir loop (the actual fix), and once after the Step 2 if/elif/else
+  as a safety net for the UPGRADE_HYDRATED/cockpit branches, which never
+  reach the first call site (idempotent — the dedup check makes the second
+  call a no-op wherever the first already ran). Also added the same
+  `${INSTALL_DIR}/${team}` working-dir fallback its sibling serializers
+  already use, so a mandatory team force-appended via the second call site
+  never serializes `"working_dir": ""` into `.aiteamforge-config`. BLOCKING
+  2: `libexec/lib/mandatory-teams.sh`'s `atf_mandatory_teams()` jq branch
+  relied on `jq -e`'s last-emitted-value exit code; a mandatory-flagged
+  registry entry missing `"id"` emits a trailing `null`, which made `-e`
+  exit 1 and the "just empty" fallback branch then silently returned
+  success with EMPTY stdout — discarding every valid mandatory team
+  alongside the malformed one. Reproduced live: a valid `alpha`
+  (`mandatory:true`) plus one mandatory entry with no `id` returned rc=0 /
+  empty stdout. Fixed by excluding null/empty ids inside the jq filter
+  itself (`(.id // "") != ""`) before `-e` ever inspects the last value, so
+  a malformed sibling can no longer poison the ones around it; a
+  non-blocking stderr diagnostic now also names how many malformed entries
+  were skipped. The python3 fallback was checked for the same hole and
+  does not have it (`if tid:` only skips printing the one bad entry; it
+  never aborts the loop or affects the others). Non-blocking: (3) the
+  `AITEAMFORGE_HOME` priority-1 registry-path guess
+  (`${AITEAMFORGE_HOME}/../share/teams/registry.json`) was one directory
+  too high for how `AITEAMFORGE_HOME` is used everywhere else in this
+  codebase (it is the tap root, not "the installed libexec dir with share/
+  as a sibling") — fixed to `${AITEAMFORGE_HOME}/share/teams/registry.json`
+  rather than removed, since `AITEAMFORGE_HOME` is normally set and this is
+  a cheaper direct hit than the self-location fallback that was silently
+  carrying the feature end-to-end until now. (4) `check_mandatory_teams()`
+  in both `aiteamforge-doctor.sh` copies escalated a WARN to a FAULT when
+  `mandatory-teams.sh` itself is unavailable — there is no healthy absent
+  state (git + the Formula both guarantee its presence) — but gated on a
+  sibling `common.sh` existing in the same `lib/` directory, so a
+  genuinely unfaithful `AITEAMFORGE_HOME`/`LIBEXEC_DIR` (pointed at
+  something that isn't a real tap install at all) still degrades to a WARN
+  instead of piling a second, redundant fault onto whatever the
+  framework-directory check already reported for that same root cause. (5)
+  `libexec/installers/install-kanban.sh`'s `source
+  .../lib/mandatory-teams.sh` was unguarded under this script's own `set
+  -euo pipefail`, so a missing lib aborted the entire installer before ever
+  reaching `install_kanban_system()`'s own `command -v` guard designed to
+  degrade gracefully for exactly that case — guarded to match every other
+  consumer's `[ -f ... ] && source ...` idiom.
+  `tests/test-xaca-1070-mandatory-install.sh` gained new C5/C6 (ordering,
+  not just effect — a functional regression driven only through the real
+  call site, plus a grep-based line-number ordering assertion), G7b-G7d
+  (WARN-vs-FAULT gating for both doctor copies), G8/G9 (rewritten to prove
+  the fixed registry-path priority-1 branch resolves directly rather than
+  merely documenting that it used to fall through), and H1-H3 (the guarded
+  `install-kanban.sh` source, with a negative control proving the old bare
+  `source` genuinely would have aborted). All 48 assertions pass under
+  `/bin/bash` 3.2.
+- **XACA-1070 (PR #865 review, round 2) — the three remaining non-blocking
+  findings, closed out.** (XACA-1070-017) `atf_team_provisioned()`
+  (`libexec/lib/mandatory-teams.sh`) and `aiteamforge-upgrade.sh`'s
+  `_xaca1070_mandatory_team_has_board()` independently duplicated the same
+  `"$kdir"/*-board.json` glob — two definitions of "does this team have a
+  board on disk" is exactly the drift vector that produced this ticket's
+  worst defect (the backfill provisioning a board `aiteamforge start` would
+  never launch). Factored the shared evidence half into a new
+  `atf_team_has_board()` in `mandatory-teams.sh`; both callers now delegate
+  to it, while each keeps its own different composite policy on top
+  (`atf_team_provisioned()` also requires `.aiteamforge-config` membership;
+  the upgrade backfill deliberately does not, to avoid re-invoking the
+  installer every upgrade forever). The upgrade-side caller retains an
+  inline fallback for the (normally unreachable) case where the lib itself
+  failed to load. (XACA-1070-019) `_xaca1070_add_team_to_config()`'s
+  text-span regex matched the FIRST literal `"teams": [...]` occurrence in
+  the raw config, which could be a nested key (e.g. an earlier
+  `{"metadata": {"teams": [...]}}` block) rather than the real root
+  `.teams[]`. This never corrupted anything — the existing post-write
+  re-parse-and-compare already caught a wrong target and aborted with the
+  file untouched — but the intended team silently never got registered.
+  Added a string/escape-aware `container_depth_before()` scan so the
+  rewrite now targets the `"teams"` key at container depth 1 (a direct
+  child of the root object) specifically; a config with no depth-1 match,
+  or more than one (a duplicate root key), now refuses to guess rather than
+  picking arbitrarily. Still a text-span edit, not a JSON parse-and-redump
+  — every other byte of the file is untouched, exactly as before. (XACA-1070-020)
+  `bin/aiteamforge-setup.sh`'s `_atf_apply_mandatory_teams()` and
+  `libexec/installers/install-kanban.sh`'s force-append block gave ZERO
+  console indication when `mandatory-teams.sh` itself is missing entirely
+  (the `command -v` guard just skipped the whole block), unlike
+  `aiteamforge-upgrade.sh`'s `update_mandatory_teams()`, which has always
+  warned in the same situation — a fresh install/CI provision with the lib
+  absent gave no indication mandatory-team enforcement was skipped until
+  `aiteamforge doctor` was run later. Both install-side sites now print a
+  matching non-fatal warning; the install itself still succeeds.
+  `tests/test-xaca-1070-mandatory-install.sh` gained E6 (overrides
+  `atf_team_has_board()` and proves, via a call-count sentinel, that BOTH
+  composites reach the same function object — not merely that both return
+  the right answer against a real fixture), F7/F8 (a nested-`teams`-key
+  fixture proves the rewrite targets the true root array and leaves the
+  decoy untouched; a duplicate-root-key fixture proves the ambiguous case
+  refuses to guess), and C7/D5 (mandatory-teams.sh never sourced at all —
+  both install-side call sites now warn on stderr instead of staying
+  silent). 53 assertions pass under `/bin/bash` 3.2 (up from 48).
 - **XACA-0931 / XACA-0865 — the new 34-test persona-deploy suite ships QUARANTINED, and
   while quarantined it gates nothing.** `tests/test-xaca-0931-persona-deploy-and-parity.sh`
   is reclassified in `tests/ci-manifest` from `plain-shell` to

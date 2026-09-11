@@ -206,12 +206,17 @@ grep -q '^atf_mandatory_teams() {' "$MANDATORY_TEAMS_SH" || _block_note_fail "ma
 grep -q '^atf_is_mandatory_team() {' "$MANDATORY_TEAMS_SH" || _block_note_fail "mandatory-teams.sh no longer defines atf_is_mandatory_team() at column 0"
 grep -q '^atf_team_provisioned() {' "$MANDATORY_TEAMS_SH" || _block_note_fail "mandatory-teams.sh no longer defines atf_team_provisioned() at column 0"
 grep -qF 'AVAILABLE_TEAMS=()' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the AVAILABLE_TEAMS=() anchor the wizard-suppression extraction depends on"
-grep -qF 'if command -v atf_mandatory_teams >/dev/null 2>&1; then' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the column-0 force-append if-anchor"
+grep -qF 'if command -v atf_mandatory_teams >/dev/null 2>&1; then' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the force-append if-anchor"
+grep -q '^_atf_apply_mandatory_teams() {' "$SETUP_SH" || _block_note_fail "setup.sh no longer defines _atf_apply_mandatory_teams() at column 0 (PR #865 BLOCKING 1 fix)"
+[ "$(grep -c '^_atf_apply_mandatory_teams$' "$SETUP_SH")" -ge 2 ] || _block_note_fail "setup.sh no longer calls _atf_apply_mandatory_teams from (at least) two call sites -- PR #865 BLOCKING 1 fix regressed"
 grep -qF '# Get selected teams from wizard env var, config file, or default' "$INSTALL_KANBAN_SH" || _block_note_fail "install-kanban.sh no longer contains the team-resolution anchor comment"
 grep -qF 'continuing without mandatory-team enforcement (XACA-1070)' "$INSTALL_KANBAN_SH" || _block_note_fail "install-kanban.sh no longer contains the fail-soft warning anchor"
+grep -qF 'skipping mandatory-team enforcement (XACA-1070)' "$INSTALL_KANBAN_SH" || _block_note_fail "install-kanban.sh no longer contains the XACA-1070-020 silent-when-absent warning anchor (Section D extraction end-of-block depends on this being unique)"
+grep -qF 'skipping mandatory-team enforcement (XACA-1070)' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the XACA-1070-020 silent-when-absent warning anchor"
 grep -q '^_xaca1070_mandatory_team_has_board() {' "$UPGRADE_SH" || _block_note_fail "upgrade.sh no longer defines _xaca1070_mandatory_team_has_board() at column 0"
 grep -q '^_xaca1070_add_team_to_config() {' "$UPGRADE_SH" || _block_note_fail "upgrade.sh no longer defines _xaca1070_add_team_to_config() at column 0"
 grep -q '^update_mandatory_teams() {' "$UPGRADE_SH" || _block_note_fail "upgrade.sh no longer defines update_mandatory_teams() at column 0"
+grep -q '^atf_team_has_board() {' "$MANDATORY_TEAMS_SH" || _block_note_fail "mandatory-teams.sh no longer defines atf_team_has_board() at column 0 (XACA-1070-017 factor-out)"
 grep -q '^check_mandatory_teams() {' "$DOCTOR_LIBEXEC_SH" || _block_note_fail "libexec/commands/aiteamforge-doctor.sh no longer defines check_mandatory_teams() at column 0"
 grep -q '^check_mandatory_teams() {' "$DOCTOR_BIN_SH" || _block_note_fail "bin/aiteamforge-doctor.sh no longer defines check_mandatory_teams() at column 0"
 grep -qF '_MANDATORY_TEAMS_LIB_OK=false' "$DOCTOR_BIN_SH" || _block_note_fail "bin/aiteamforge-doctor.sh no longer contains the _MANDATORY_TEAMS_LIB_OK preamble anchor"
@@ -415,23 +420,30 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION C -- Force-append (bin/aiteamforge-setup.sh): lands in BOTH
 # SELECTED_TEAMS_STR and CR_ALL_SELECTED_TEAMS_STR; idempotent.
+#
+# PR #865 review, BLOCKING 1 (post-fix): the force-append logic that used to
+# be a raw inline block at a single (too-late) location is now the function
+# _atf_apply_mandatory_teams(), called from TWO sites in setup.sh -- see that
+# function's own header comment. Extraction below now pulls the FUNCTION
+# itself (via the generic _extract_fn helper already used elsewhere in this
+# suite), not an ad hoc anchor-to-"fi" block -- a extraction technique that
+# is blind to WHERE the function is called from, which is exactly why the
+# original C1-C4 below caught the EFFECT (an isolated call appends the
+# team) but never the ordering defect (the call happened after every real
+# consumer had already iterated SELECTED_TEAMS). C5/C6 below close that gap
+# with assertions keyed to the actual call-site line numbers and to the
+# real Step-2-selection-plus-working-dir-loop source span, respectively --
+# both would fail if the call site regressed back to after line 970's
+# working-dir loop (i.e. reverted to the pre-PR-865 shape).
 # ═══════════════════════════════════════════════════════════════════════════
 
-_extract_force_append_block() {
-    awk '
-      $0=="if command -v atf_mandatory_teams >/dev/null 2>&1; then" {capture=1}
-      capture {print}
-      capture && $0=="fi" {exit}
-    ' "$SETUP_SH"
-}
-
-_force_append_snippet="$(_extract_force_append_block)"
+_force_append_snippet="$(_extract_fn "_atf_apply_mandatory_teams" "$SETUP_SH")"
 if [ -z "$_force_append_snippet" ]; then
-    test_start "SECTION C setup: extract setup.sh force-append block"
+    test_start "SECTION C setup: extract setup.sh _atf_apply_mandatory_teams()"
     test_fail "extraction produced no output -- cannot run Section C"
 else
-    eval "_x1070_force_append() { $_force_append_snippet
-    }"
+    eval "$_force_append_snippet"
+    _x1070_force_append() { _atf_apply_mandatory_teams; }
 
     # ── C1: empty SELECTED_TEAMS -> mandatory id appended + message printed ──
     _block_start "C1: force-append -- mandatory team added to an empty SELECTED_TEAMS, with the expected message"
@@ -496,6 +508,110 @@ else
     )"
     assert_eq "$_res" "$(printf 'SELECTED=alpha')" "an unreadable registry must not corrupt or clear SELECTED_TEAMS: $_res"
     _block_end
+
+    # ── C5: STRUCTURAL -- the call site precedes the first SELECTED_TEAMS
+    # consumer (PR #865 review, BLOCKING 1). This is the assertion the
+    # original C1-C4 above did NOT have: they proved the function appends
+    # correctly in ISOLATION, never where it is called from. The pre-fix
+    # bug was exactly this -- a single call site placed AFTER the per-team
+    # working-dir loop, the persona/avatar copy, and the install-team.sh
+    # loop had already iterated SELECTED_TEAMS without the mandatory team
+    # present. This grep-based check would fail immediately if a future
+    # edit moved (or removed) the early call site.
+    _block_start "C5: force-append -- call site precedes the first SELECTED_TEAMS-consuming loop (ordering, not just effect)"
+    _first_call_line="$(grep -n '^_atf_apply_mandatory_teams$' "$SETUP_SH" | head -1 | cut -d: -f1)"
+    _first_loop_line="$(grep -n '^for team_id in "\${SELECTED_TEAMS\[@\]}"; do' "$SETUP_SH" | head -1 | cut -d: -f1)"
+    assert_not_empty "$_first_call_line" "expected at least one bare call to _atf_apply_mandatory_teams in $SETUP_SH"
+    assert_not_empty "$_first_loop_line" "expected the per-team working-dir loop ('for team_id in \"\${SELECTED_TEAMS[@]}\"; do') in $SETUP_SH"
+    if [ -n "$_first_call_line" ] && [ -n "$_first_loop_line" ]; then
+        [ "$_first_call_line" -lt "$_first_loop_line" ] || _block_note_fail "force-append call site (line $_first_call_line) does not precede the first SELECTED_TEAMS-consuming loop (line $_first_loop_line) -- this is BLOCKING 1 regressing"
+    fi
+    _block_end
+
+    # ── C6: FUNCTIONAL / ordering-sensitive regression -- extract the REAL
+    # source span that runs "team_choices resolution -> empty check ->
+    # _atf_apply_mandatory_teams call site 1 -> per-team working-dir loop"
+    # verbatim from setup.sh (anchored on the unique `if [ "$team_choices" =
+    # "all" ]; then` line through the matching "fi  # end: if INSTALL_PROFILE
+    # != cockpit (team selection block)" sentinel) and actually RUN it with
+    # a mandatory team that the (fake) user never selected. Unlike C1-C4,
+    # which call _atf_apply_mandatory_teams directly, this drives it only
+    # through its real call site inside the real surrounding control flow --
+    # so if the call site were ever moved back to AFTER this span (the
+    # pre-PR-865 shape), 'widget' would be absent from SELECTED_TEAMS and
+    # _WORKDIR_widget would never be set, and this test would fail.
+    _extract_selection_and_workdir_span() {
+        awk '
+          $0=="if [ \"$team_choices\" = \"all\" ]; then" {capture=1}
+          capture && $0=="fi  # end: if INSTALL_PROFILE != cockpit (team selection block)" {exit}
+          capture {print}
+        ' "$SETUP_SH"
+    }
+    _selection_snippet="$(_extract_selection_and_workdir_span)"
+    _block_start "C6 setup: extract setup.sh team_choices-resolution-through-working-dir-loop span"
+    if [ -z "$_selection_snippet" ]; then
+        _block_note_fail "extraction produced no output -- cannot run C6"
+    else
+        test_pass
+    fi
+    if [ -n "$_selection_snippet" ]; then
+        eval "_x1070_selection_and_workdir() {
+$_selection_snippet
+}"
+        _c6_teams_dir="$SANDBOX/teamsdir-c6"
+        mkdir -p "$_c6_teams_dir"
+        # widget deliberately carries no TEAM_HAS_PROJECTS/TEAM_REQUIRES_CLIENT_ID
+        # (falls into the plain "else: eval _WORKDIR_<team>=working_dir" branch)
+        # so a MODE=non-interactive run never hits an interactive `read -rp`.
+        printf 'TEAM_NAME="Widget"\nTEAM_DESCRIPTION="Widget fleet team"\nTEAM_WORKING_DIR="$HOME/aiteamforge"\n' > "$_c6_teams_dir/widget.conf"
+        _c6_reg_dir="$(_x1070_mk_reg_sandbox c6-selection "$REG_ONE_TRUE")"
+        _c6_install_dir="$SANDBOX/c6-install-dir"
+        _res="$(
+            unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+            # shellcheck disable=SC1091
+            . "$_c6_reg_dir/libexec/lib/mandatory-teams.sh"
+            GREEN=""; NC=""; YELLOW=""; RED=""; CYAN=""
+            TEAMS_DIR="$_c6_teams_dir"
+            INSTALL_DIR="$_c6_install_dir"
+            MODE="non-interactive"
+            # The fake user picks NOTHING that resolves to widget -- only
+            # AVAILABLE_TEAMS[0] (alpha, a placeholder team_choices never
+            # references widget by name or number).
+            AVAILABLE_TEAMS=(alpha)
+            SELECTED_TEAMS=()
+            team_choices="1"
+            _x1070_selection_and_workdir
+            printf 'SELECTED=%s\n' "${SELECTED_TEAMS[*]}"
+            printf 'WORKDIR_WIDGET=%s\n' "${_WORKDIR_widget:-<UNSET>}"
+        )"
+        _block_start "C6: force-append call site 1 -- a mandatory team the (fake) user never picked still reaches the working-dir loop"
+        assert_contains "$_res" "SELECTED=alpha widget" "expected SELECTED_TEAMS to contain both the user's pick (alpha) and the force-appended mandatory team (widget), got: $_res"
+        assert_not_contains "$_res" "WORKDIR_WIDGET=<UNSET>" "expected _WORKDIR_widget to be set by the working-dir loop reached via call site 1 -- if this is UNSET, the force-append ran too late (or not at all) relative to that loop: $_res"
+        _block_end
+    fi
+
+    # ── C7 (XACA-1070-020): mandatory-teams.sh itself entirely ABSENT (never
+    # sourced at all -- distinct from C4, which covers "sourced fine but the
+    # registry it reads is unreadable"). Before this fix, the outer
+    # `command -v atf_mandatory_teams` guard skipped the whole function with
+    # ZERO console output; aiteamforge-upgrade.sh's update_mandatory_teams()
+    # has always warned in the same situation. Assert the wizard now does too.
+    _block_start "C7 (XACA-1070-020): _atf_apply_mandatory_teams warns when mandatory-teams.sh itself was never sourced (previously silent)"
+    _c7_err="$SANDBOX/c7-stderr.log"
+    _res="$(
+        exec 2>"$_c7_err"
+        unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+        # Deliberately do NOT source mandatory-teams.sh -- atf_mandatory_teams
+        # stays undefined, matching a real box with the lib missing entirely.
+        GREEN=""; NC=""; YELLOW=""
+        SELECTED_TEAMS=("alpha")
+        _x1070_force_append
+        printf 'SELECTED=%s\n' "${SELECTED_TEAMS[*]}"
+    )"
+    assert_eq "$_res" "$(printf 'SELECTED=alpha')" "SELECTED_TEAMS must be left untouched when the lib is absent (fail-soft, not fail-closed)"
+    assert_contains "$(cat "$_c7_err")" "mandatory-teams.sh not available" "expected an explicit warning on stderr when mandatory-teams.sh itself is missing entirely (XACA-1070-020) -- this used to be completely silent"
+    assert_contains "$(cat "$_c7_err")" "skipping mandatory-team enforcement" "expected the warning to name what was skipped"
+    _block_end
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -505,11 +621,19 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 
 _extract_installkanban_resolution() {
+    # XACA-1070-020: the extraction used to end 2 fixed lines after the
+    # "continuing without mandatory-team enforcement" warning (the two `fi`s
+    # closing, respectively, the rc==0 check and the outer `command -v
+    # atf_mandatory_teams` guard). Adding the silent-when-absent `else`
+    # branch (a new warning + its own trailing `fi`) moved the real end of
+    # the block later, so the anchor now keys off THAT new branch's warning
+    # text instead -- unique to this snippet, added by this same subitem --
+    # and captures exactly 1 trailing line: the final `fi` that closes the
+    # outer if/else.
     awk '
       index($0,"# Get selected teams from wizard env var, config file, or default")>0 {capture=1}
       capture {print}
-      capture && index($0,"continuing without mandatory-team enforcement (XACA-1070)")>0 {trail=2; next}
-      trail==2 {trail=1; next}
+      capture && index($0,"skipping mandatory-team enforcement (XACA-1070)")>0 {trail=1; next}
       trail==1 {trail=0; exit}
     ' "$INSTALL_KANBAN_SH"
 }
@@ -589,6 +713,31 @@ $_ik_snippet
     )"
     _widget_count=$(printf '%s\n' "$_out" | grep -c '^widget$')
     assert_eq "$_widget_count" "1" "expected exactly ONE 'widget' entry (no duplicate), got $_widget_count in: [$_out]"
+    _block_end
+
+    # ── D5 (XACA-1070-020): mandatory-teams.sh itself entirely ABSENT (never
+    # sourced at all -- distinct from any "sourced fine, registry unreadable"
+    # case elsewhere in this suite). Before this fix, the outer `command -v
+    # atf_mandatory_teams` guard skipped the whole block with ZERO console
+    # output; aiteamforge-upgrade.sh's update_mandatory_teams() has always
+    # warned in the same situation. Resolution of the user's OWN selection
+    # must still succeed (fail-soft) -- only mandatory-team enforcement is
+    # skipped, not the install.
+    _block_start "D5 (XACA-1070-020): install-kanban.sh warns when mandatory-teams.sh itself was never sourced (previously silent)"
+    _d5_dir="$SANDBOX/d5-dir"
+    mkdir -p "$_d5_dir"
+    _out="$(
+        unset AITEAMFORGE_HOME AITEAMFORGE_CONFIG
+        # Deliberately do NOT source mandatory-teams.sh -- atf_mandatory_teams
+        # stays undefined, matching a real box with the lib missing entirely.
+        info() { :; }; warning() { echo "WARN: $*"; }
+        AITEAMFORGE_DIR="$_d5_dir"
+        SELECTED_TEAMS_STR="alpha"
+        _x1070_resolve_teams
+    )"
+    assert_contains "$_out" "alpha" "expected the user's own selection (alpha) to still resolve when the lib is absent entirely (fail-soft, not fail-closed)"
+    assert_not_contains "$_out" "widget" "the mandatory team must NOT be force-appended when the lib is absent -- there is nothing to enforce it with"
+    assert_contains "$_out" "WARN: mandatory-teams.sh not available" "expected an explicit warning when mandatory-teams.sh itself is missing entirely (XACA-1070-020) -- this used to be completely silent"
     _block_end
 fi
 
@@ -727,6 +876,69 @@ EOF
     assert_eq "$_rc5" "0" "update_mandatory_teams must return 0 (fail-soft) even when the registry is unreadable, got $_rc5"
     assert_contains "$_out5" "Could not determine mandatory teams" "expected the fail-soft diagnostic message"
     _block_end
+
+    # ── E6 (XACA-1070-017): PROVE the shared definition, not just that both
+    # callers happen to return the right answer against a real fixture (E1-E5
+    # already do that implicitly, but a passing answer alone cannot
+    # distinguish "delegates to one shared function" from "two independently
+    # correct copies of the same glob" -- which is exactly the drift vector
+    # this subitem closes). Redefine atf_team_has_board() to something that
+    # provably runs (writes a sentinel line) and returns the OPPOSITE of
+    # reality (1, "no board") against a fixture that genuinely HAS a board on
+    # disk. If atf_team_provisioned() and upgrade.sh's
+    # _xaca1070_mandatory_team_has_board() truly call this one function
+    # rather than each carrying its own inline "*-board.json" glob, both
+    # MUST flip to "not provisioned" even though nothing on disk changed --
+    # and the sentinel must show the override was reached exactly twice.
+    _block_start "E6 (XACA-1070-017): atf_team_provisioned() and upgrade.sh's _xaca1070_mandatory_team_has_board() delegate to the SAME atf_team_has_board -- overriding it flips BOTH"
+    _e6_sentinel="$SANDBOX/e6-atf-team-has-board-calls.log"
+    rm -f "$_e6_sentinel"
+    _e6_dir="$SANDBOX/e6-dir"
+    mkdir -p "$_e6_dir/kanban/widget"
+    printf '{"teams":["widget"]}' > "$_e6_dir/.aiteamforge-config"
+    echo '{"real":"board"}' > "$_e6_dir/kanban/widget/widget-board.json"
+    _tp_e6="$(_x1070_mk_team_paths e6 widget "$_e6_dir/kanban/widget")"
+
+    # Sanity pass FIRST, no override: against this real fixture both must
+    # already agree "provisioned" / "has board" -- establishes the baseline
+    # the override below is expected to flip.
+    _e6_sanity="$(
+        unset AITEAMFORGE_HOME
+        AITEAMFORGE_DIR="$_e6_dir" AITEAMFORGE_CONFIG="$_tp_e6"
+        # shellcheck disable=SC1091
+        . "$MANDATORY_TEAMS_SH"
+        # shellcheck disable=SC1091
+        . "$CONFIG_SH"
+        # shellcheck disable=SC1091
+        . "$PATHS_SH"
+        eval "$_has_board_fn"
+        atf_team_provisioned widget; p1=$?
+        _xaca1070_mandatory_team_has_board widget; p2=$?
+        echo "PROV=$p1 HASBOARD=$p2"
+    )"
+    assert_contains "$_e6_sanity" "PROV=0" "sanity: atf_team_provisioned must report provisioned (0) against the real, unmodified fixture"
+    assert_contains "$_e6_sanity" "HASBOARD=0" "sanity: _xaca1070_mandatory_team_has_board must report has-board (0) against the real, unmodified fixture"
+
+    _e6_out="$(
+        unset AITEAMFORGE_HOME
+        AITEAMFORGE_DIR="$_e6_dir" AITEAMFORGE_CONFIG="$_tp_e6"
+        # shellcheck disable=SC1091
+        . "$MANDATORY_TEAMS_SH"
+        # shellcheck disable=SC1091
+        . "$CONFIG_SH"
+        # shellcheck disable=SC1091
+        . "$PATHS_SH"
+        eval "$_has_board_fn"
+        atf_team_has_board() { echo "OVERRIDE CALLED for $1" >> "$_e6_sentinel"; return 1; }
+        atf_team_provisioned widget; p1=$?
+        _xaca1070_mandatory_team_has_board widget; p2=$?
+        echo "PROV=$p1 HASBOARD=$p2"
+    )"
+    assert_contains "$_e6_out" "PROV=1" "atf_team_provisioned must flip to NOT PROVISIONED (1) once the shared atf_team_has_board is overridden -- the real board file on disk never changed, so this can only happen if it DELEGATES rather than re-implementing the glob itself"
+    assert_contains "$_e6_out" "HASBOARD=1" "_xaca1070_mandatory_team_has_board must ALSO flip to 1 once atf_team_has_board is overridden -- proves upgrade.sh calls the SAME shared function, not its own independent copy"
+    _e6_calls="$(grep -c 'OVERRIDE CALLED for widget' "$_e6_sentinel" 2>/dev/null || echo 0)"
+    assert_eq "$_e6_calls" "2" "expected the override to run exactly twice -- once from atf_team_provisioned, once from _xaca1070_mandatory_team_has_board -- proving both call sites resolve to the SAME function object (XACA-1070-017's actual requirement), got $_e6_calls"
+    _block_end
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -860,6 +1072,81 @@ EOF
     assert_ne "$_rc" "0" "absent .teams key must produce a non-zero return code, got $_rc"
     assert_eq "$_sha_after" "$_sha_before" "config with no .teams key must be left BYTE-IDENTICAL"
     _block_end
+
+    # ── F7 (XACA-1070-019): a NESTED "teams" key earlier in the raw text must
+    # not be mistaken for the root key. Before this fix, the naive
+    # pattern.search() returned the FIRST "teams": [...] occurrence in the
+    # file -- here that is {"metadata": {"teams": [...]}}, not the real
+    # root-level .teams[] several lines below it. This never corrupted
+    # anything (the post-write re-parse-and-compare already caught a wrong
+    # target and aborted, file untouched -- QA confirmed in review), but the
+    # real root .teams[] never got the team added. The fix must (a) target
+    # the ROOT key specifically, (b) leave the nested metadata.teams block
+    # byte-for-byte untouched, and (c) still pass the existing post-write
+    # verification.
+    _block_start "F7 (XACA-1070-019): a nested {\"metadata\":{\"teams\":[...]}} occurring BEFORE the real root .teams[] is not mistaken for it"
+    _f7_dir="$SANDBOX/f7-dir"
+    mkdir -p "$_f7_dir"
+    cat > "$_f7_dir/.aiteamforge-config" <<'EOF'
+{
+  "metadata": {
+    "teams": [
+      "decoy1",
+      "decoy2"
+    ]
+  },
+  "installed_features": ["kanban"],
+  "teams": [
+    "alpha",
+    "ios"
+  ]
+}
+EOF
+    _sha_before_f7="$(shasum -a 256 "$_f7_dir/.aiteamforge-config" | awk '{print $1}')"
+    _out="$(_run_add_to_config widget "$_f7_dir")"; _rc=$?
+    assert_eq "$_rc" "0" "expected successful registration against the ROOT .teams[] despite the earlier nested decoy, got rc=$_rc, out=[$_out]"
+    assert_contains "$_out" "OK: XACA-1070: registered 'widget'" "expected the registration success message"
+    _root_teams_f7="$(jq -c '.teams' "$_f7_dir/.aiteamforge-config" 2>/dev/null)"
+    assert_contains "$_root_teams_f7" "widget" "the ROOT .teams[] must now contain widget: $_root_teams_f7"
+    assert_contains "$_root_teams_f7" "alpha" "the ROOT .teams[] must still contain the pre-existing alpha: $_root_teams_f7"
+    assert_contains "$_root_teams_f7" "ios" "the ROOT .teams[] must still contain the pre-existing ios: $_root_teams_f7"
+    _nested_teams_f7="$(jq -c '.metadata.teams' "$_f7_dir/.aiteamforge-config" 2>/dev/null)"
+    assert_eq "$_nested_teams_f7" '["decoy1","decoy2"]' "the NESTED metadata.teams[] must be left completely untouched, got: $_nested_teams_f7"
+    assert_not_contains "$_nested_teams_f7" "widget" "widget must NEVER be added to the nested decoy array"
+    _sha_after_f7="$(shasum -a 256 "$_f7_dir/.aiteamforge-config" | awk '{print $1}')"
+    assert_ne "$_sha_after_f7" "$_sha_before_f7" "the file must actually have changed (root .teams[] grew) -- an unchanged sha would mean nothing was written at all"
+    _block_end
+
+    # ── F8 (XACA-1070-019 negative control): TWO depth-1 "teams" keys (a
+    # duplicate root key -- valid-ish raw text that json.loads silently
+    # resolves by keeping the LAST value, per the JSON spec's usual
+    # last-wins handling of duplicate keys) must refuse to guess which span
+    # is "the real one" rather than silently editing the first (or last)
+    # match -- warn, rc!=0, file untouched. Exercises the "more than one
+    # top-level match" arm added alongside the depth check; F7 already
+    # covers its "found exactly one, and it is the right one" sibling, and
+    # F6 already covers "no .teams key at the root at all".
+    _block_start "F8 (XACA-1070-019 negative control): duplicate depth-1 \"teams\" keys -> refuses to guess, warned, rc!=0, byte-identical"
+    _f8_dir="$SANDBOX/f8-dir"
+    mkdir -p "$_f8_dir"
+    cat > "$_f8_dir/.aiteamforge-config" <<'EOF'
+{
+  "teams": [
+    "alpha"
+  ],
+  "installed_features": ["kanban"],
+  "teams": [
+    "ios"
+  ]
+}
+EOF
+    _sha_before_f8="$(shasum -a 256 "$_f8_dir/.aiteamforge-config" | awk '{print $1}')"
+    _out_f8="$(_run_add_to_config widget "$_f8_dir")"; _rc_f8=$?
+    assert_ne "$_rc_f8" "0" "a duplicate top-level .teams key must produce a non-zero return code, got $_rc_f8"
+    assert_contains "$_out_f8" "WARN:" "expected a warning to be printed rather than a silent guess"
+    _sha_after_f8="$(shasum -a 256 "$_f8_dir/.aiteamforge-config" | awk '{print $1}')"
+    assert_eq "$_sha_after_f8" "$_sha_before_f8" "a config with an ambiguous duplicate root key must be left BYTE-IDENTICAL, never guessed at"
+    _block_end
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -990,19 +1277,156 @@ else
     assert_contains "$_out" "failed=1" "an unreadable registry must FAULT even though the lib loaded, got: $_out"
     _block_end
 
-    # ── G8 FINDING (documented, not a failing assertion): confirms the
-    # AITEAMFORGE_HOME priority-1 branch in mandatory-teams.sh is dead code
-    # under the REAL Homebrew-installed layout -- the feature only works
-    # because of the self-location fallback. See the file header comment
-    # and the test report for the full writeup. This assertion is designed
-    # to PASS today (documenting current, correct END-TO-END behavior via
-    # the fallback) while separately proving priority-1's own literal path
-    # guess does not exist in that layout.
-    _block_start "G8 (FINDING, non-blocking): faithful layout works end-to-end ONLY via self-location fallback -- AITEAMFORGE_HOME's own '../share' guess does not exist there"
-    assert_file_not_exists "$TAP_ROOT/../share/teams/registry.json" "documents that AITEAMFORGE_HOME=repo-root's own '../share/teams/registry.json' guess (mandatory-teams.sh priority 1) is NOT where the real file lives -- the feature works today only via the priority-2 self-location fallback (see file header FINDING writeup)"
-    assert_file_exists "$TAP_ROOT/share/teams/registry.json" "the real file lives INSIDE the repo root, one level shallower than priority 1 guesses"
+    # ── G7b/G7c (PR #865 review, item 4 -- WARN -> FAULT, gated): lib
+    # unavailable now FAULTs when the surrounding install otherwise looks
+    # real (a sibling common.sh is present -- git + the Formula both
+    # guarantee mandatory-teams.sh's own presence, so that specific file
+    # being the ONE thing missing is a genuine partial-install defect, not
+    # a shrug), but still WARNs -- never a hard failure -- when
+    # AITEAMFORGE_HOME/LIBEXEC_DIR itself doesn't look like a real
+    # framework root at all (G5 above already covers that second case for
+    # the bin/ copy; G7c below is its libexec/ copy counterpart).
+    _mk_libdir_with_common() {
+        local dir="$SANDBOX/libdir-$1"
+        mkdir -p "$dir/lib"
+        : > "$dir/lib/common.sh"
+        printf '%s' "$dir"
+    }
+
+    _run_doctor_libexec_check_custom_libexecdir() {
+        local reg_dir="$1" libexec_dir="$2"
+        ( unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+          # shellcheck disable=SC1091
+          . "$COMMON_SH"
+          if [ "$reg_dir" != "__NOLIB__" ]; then
+            # shellcheck disable=SC1091
+            . "$reg_dir/libexec/lib/mandatory-teams.sh"
+          fi
+          eval "$_check_result_libexec_fn"
+          eval "$_check_mand_libexec_fn"
+          TOTAL_CHECKS=0; PASSED_CHECKS=0; FAILED_CHECKS=0; WARNING_CHECKS=0; VERBOSE=false
+          LIBEXEC_DIR="$libexec_dir"
+          check_mandatory_teams
+          echo "COUNTERS total=$TOTAL_CHECKS passed=$PASSED_CHECKS failed=$FAILED_CHECKS warn=$WARNING_CHECKS"
+        ) 2>&1
+    }
+
+    _block_start "G7b (libexec copy): lib genuinely unavailable but common.sh present (looks like a real install) -> FAULT, not WARN"
+    _libdir_g7b="$(_mk_libdir_with_common g7b)"
+    _out="$(_run_doctor_libexec_check_custom_libexecdir "__NOLIB__" "$_libdir_g7b")"
+    assert_contains "$_out" "failed=1" "expected a FAULT: common.sh exists right next to the missing mandatory-teams.sh, so this looks like a genuine partial install, got: $_out"
+    assert_not_contains "$_out" "warn=1" "must not ALSO count as a warning: $_out"
+    _block_end
+
+    _block_start "G7c (libexec copy): lib unavailable AND common.sh also absent (unfaithful LIBEXEC_DIR, mirrors G5) -> WARN, never a hard failure"
+    _libdir_g7c="$SANDBOX/libdir-g7c-empty"; mkdir -p "$_libdir_g7c"
+    _out="$(_run_doctor_libexec_check_custom_libexecdir "__NOLIB__" "$_libdir_g7c")"
+    assert_contains "$_out" "warn=1" "expected a WARN: LIBEXEC_DIR doesn't look like a real framework root at all (no common.sh either), got: $_out"
+    assert_not_contains "$_out" "failed=1" "an unfaithful LIBEXEC_DIR must not become a hard failure here (already a different, more fundamental problem elsewhere): $_out"
+    _block_end
+
+    _block_start "G7d (bin copy): lib unavailable but common.sh present under AITEAMFORGE_HOME (looks like a real install) -> FAULT, not WARN"
+    _home_g7d="$(_mk_libdir_with_common g7d)"
+    mkdir -p "${_home_g7d}/libexec"
+    mv "${_home_g7d}/lib" "${_home_g7d}/libexec/lib"
+    # _run_doctor_bin_check sets AITEAMFORGE_HOME="$aitf_home" and sources the
+    # real preamble against it; the fixture above has NO
+    # libexec/lib/mandatory-teams.sh (only common.sh was moved in), so the
+    # preamble's own `[ -f ... ]` guard leaves _MANDATORY_TEAMS_LIB_OK=false
+    # exactly like G5 -- but common.sh IS present alongside it here.
+    _out="$(_run_doctor_bin_check "$_home_g7d" "$SANDBOX/g7d-work")"
+    assert_contains "$_out" "LIB_OK=false" "expected the lib to still fail to load (fixture has no mandatory-teams.sh): $_out"
+    assert_contains "$_out" "failed=1" "expected a FAULT: common.sh is present under this AITEAMFORGE_HOME, so it looks like a real install missing exactly one file, got: $_out"
+    assert_not_contains "$_out" "warn=1" "must not ALSO count as a warning: $_out"
+    _block_end
+
+    # ── G8 (PR #865 review, item 3 -- POST-FIX, was a "dead code" FINDING):
+    # this suite used to document (not assert against) that the
+    # AITEAMFORGE_HOME priority-1 branch guessed
+    # "${AITEAMFORGE_HOME}/../share/teams/registry.json", which does NOT
+    # exist under the real Homebrew-installed / dev-clone tap-root layout
+    # -- the feature only ever worked end-to-end because priority-2
+    # (self-location) silently carried it. That branch has now been fixed
+    # to guess "${AITEAMFORGE_HOME}/share/teams/registry.json" (no "..") --
+    # see _atf_mandatory_teams_registry_path's header comment for the full
+    # rationale (bin/aiteamforge-doctor.sh's own real preamble treats
+    # AITEAMFORGE_HOME as the tap root everywhere else it uses it, e.g.
+    # "${AITEAMFORGE_HOME}/share/templates/...").
+    #
+    # G8 below proves priority 1 now resolves the registry DIRECTLY --
+    # without falling through to self-location -- by giving the two
+    # priorities DIFFERENT, distinguishable answers: mandatory-teams.sh is
+    # sourced from sandbox A (so self-location's own tap-root guess is A),
+    # while AITEAMFORGE_HOME is pointed at an entirely separate sandbox B
+    # carrying a different mandatory-team list. If priority 1 is broken
+    # (the old "../share" guess, or removed entirely), resolution falls
+    # through to self-location and returns A's team ('gizmo'+'widget',
+    # sorted); with the fix, it returns B's ('widget') and the resolved
+    # path is exactly "$B/share/teams/registry.json" -- proving priority 1
+    # fired, not just that SOME priority eventually found a file.
+    _block_start "G8: AITEAMFORGE_HOME priority-1 branch resolves \${AITEAMFORGE_HOME}/share/teams/registry.json DIRECTLY (no '..', no fallback needed)"
+    _reg_g8_self="$(_x1070_mk_reg_sandbox g8-self "$REG_TWO_TRUE_ORDERED")"
+    _reg_g8_home="$(_x1070_mk_reg_sandbox g8-home "$REG_ONE_TRUE")"
+    _out="$(
+        unset AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+        # shellcheck disable=SC1091
+        . "$_reg_g8_self/libexec/lib/mandatory-teams.sh"
+        AITEAMFORGE_HOME="$_reg_g8_home"
+        printf 'RESOLVED=%s\n' "$(_atf_mandatory_teams_registry_path)"
+        printf 'TEAMS=%s\n' "$(atf_mandatory_teams | tr '\n' ',')"
+    )"
+    assert_contains "$_out" "RESOLVED=${_reg_g8_home}/share/teams/registry.json" "expected priority 1 to resolve AITEAMFORGE_HOME's OWN registry.json directly, got: $_out"
+    assert_not_contains "$_out" "RESOLVED=${_reg_g8_self}" "must NOT have fallen through to self-location's sandbox when AITEAMFORGE_HOME was set and valid: $_out"
+    assert_contains "$_out" "TEAMS=widget," "expected the AITEAMFORGE_HOME registry's mandatory team ('widget'), got: $_out"
+    assert_not_contains "$_out" "gizmo" "must NOT have read the self-location sandbox's registry ('gizmo'+'widget') when AITEAMFORGE_HOME pointed elsewhere: $_out"
+    _block_end
+
+    # ── G9 (sanity, documents the historical bug shape): the OLD "one level
+    # too high" guess must not accidentally exist in the real tap either --
+    # if it did, G8 above could pass for the wrong reason (both guesses
+    # resolving to the same fixture by coincidence in some future layout).
+    _block_start "G9: sanity -- the real tap's OWN registry.json is not ALSO reachable via the old (wrong) '\${AITEAMFORGE_HOME}/../share' guess"
+    assert_file_not_exists "$TAP_ROOT/../share/teams/registry.json" "if this ever starts existing, G8's distinguishing test above stops being conclusive and must be revisited"
+    assert_file_exists "$TAP_ROOT/share/teams/registry.json" "sanity: the real file is still exactly where the fixed priority-1 guess (no '..') expects it"
     _block_end
 fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION H -- install-kanban.sh's mandatory-teams.sh source is GUARDED
+# (PR #865 review, item 5).
+# ═══════════════════════════════════════════════════════════════════════════
+
+_block_start "H1: install-kanban.sh sources mandatory-teams.sh through a guarded [ -f ... ] && source, not a bare source"
+grep -qE '^\[ -f "\$SCRIPT_DIR/\.\./lib/mandatory-teams\.sh" \] && source "\$SCRIPT_DIR/\.\./lib/mandatory-teams\.sh"' "$INSTALL_KANBAN_SH" \
+    || _block_note_fail "install-kanban.sh no longer guards its mandatory-teams.sh source with [ -f ... ] && source -- item 5 regressed"
+grep -qE '^source "\$SCRIPT_DIR/\.\./lib/mandatory-teams\.sh"' "$INSTALL_KANBAN_SH" \
+    && _block_note_fail "install-kanban.sh STILL has a bare (unguarded) source of mandatory-teams.sh alongside the guarded one"
+_block_end
+
+_block_start "H2: FUNCTIONAL -- the exact guarded idiom does NOT abort under set -euo pipefail when the target is missing"
+_h2_out="$(
+    /bin/bash -c '
+        set -euo pipefail
+        SCRIPT_DIR="/no/such/tap/dir/libexec/installers"
+        [ -f "$SCRIPT_DIR/../lib/mandatory-teams.sh" ] && source "$SCRIPT_DIR/../lib/mandatory-teams.sh"
+        echo "REACHED_AFTER_GUARD"
+    '
+)"
+assert_contains "$_h2_out" "REACHED_AFTER_GUARD" "the guarded idiom must not abort the script under set -euo pipefail when mandatory-teams.sh is absent, got: $_h2_out"
+_block_end
+
+_block_start "H3: NEGATIVE CONTROL -- the OLD (unguarded) idiom DOES abort under set -euo pipefail, proving H2 exercises a real difference"
+_h3_out="$(
+    /bin/bash -c '
+        set -euo pipefail
+        SCRIPT_DIR="/no/such/tap/dir/libexec/installers"
+        source "$SCRIPT_DIR/../lib/mandatory-teams.sh"
+        echo "REACHED_AFTER_BARE_SOURCE"
+    ' 2>/dev/null
+)"; _h3_rc=$?
+assert_ne "$_h3_rc" "0" "the pre-fix bare 'source' must exit non-zero under set -euo pipefail when the file is missing (sanity check that H2 is testing something real)"
+assert_not_contains "$_h3_out" "REACHED_AFTER_BARE_SOURCE" "the pre-fix bare 'source' must abort BEFORE the next line runs, got: $_h3_out"
+_block_end
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone only).

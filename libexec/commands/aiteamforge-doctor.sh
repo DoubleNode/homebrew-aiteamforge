@@ -1707,8 +1707,32 @@ check_mandatory_teams() {
   print_section "Checking Mandatory Teams"
 
   if ! command -v atf_mandatory_teams >/dev/null 2>&1; then
-    check_result warn "mandatory-teams.sh not available — cannot check mandatory team provisioning" \
-      "Expected: ${LIBEXEC_DIR}/lib/mandatory-teams.sh (XACA-1070)"
+    # PR #865 review, item 4: this used to be an unconditional WARN. Reviewer's
+    # ruling (accepted): there is no healthy "absent" state for mandatory-
+    # teams.sh in a real install -- git tracks it and the Formula ships it, so
+    # its own sibling arm 12 lines below (registry.json unreadable) already
+    # treats "can't determine mandatory teams" as a FAULT, and the
+    # launchagents.sh precedent right above this file's own preamble degrades
+    # to a check that still asserts SOMETHING concrete (a legacy `launchctl
+    # list` fallback) -- there is no equivalent fallback here; "lib missing"
+    # just means "cannot check" outright, which is a worse, not equal,
+    # signal. Escalating unconditionally, though, would also turn a
+    # fundamentally-wrong LIBEXEC_DIR/AITEAMFORGE_HOME (pointed at something
+    # that isn't a real tap install at all) into a second, redundant fault on
+    # top of whatever the framework-directory check already reported for that
+    # same root cause. Gate on a sibling file (common.sh, the one piece of
+    # shared infrastructure every check in this doctor already depends on)
+    # existing in the SAME lib/ directory: present -> this looks like a real,
+    # otherwise-populated install with exactly one file missing -> genuine
+    # FAULT. Absent -> LIBEXEC_DIR itself doesn't look like a real framework
+    # root -> degrade to the original WARN rather than pile on.
+    if [ -f "${LIBEXEC_DIR}/lib/common.sh" ]; then
+      check_result fail "mandatory-teams.sh not available even though this looks like a real install (common.sh is present) — cannot check mandatory team provisioning" \
+        "Expected: ${LIBEXEC_DIR}/lib/mandatory-teams.sh (XACA-1070). Run: aiteamforge setup --upgrade  (repairs a partial or corrupted install)"
+    else
+      check_result warn "mandatory-teams.sh not available — cannot check mandatory team provisioning" \
+        "Expected: ${LIBEXEC_DIR}/lib/mandatory-teams.sh (XACA-1070)"
+    fi
     return
   fi
 
