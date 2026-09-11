@@ -110,6 +110,17 @@
       "icon": "🧬",
       "order": 10,
       "recommended": false
+    },
+    {
+      "id": "spacedock",
+      "name": "Space Dock",
+      "category": "infrastructure",
+      "description": "Per-machine emergency and recovery operations \u2014 LCARS/service recovery, stalled launchd jobs, orphaned kanban items, disk/log pressure, failed upgrades",
+      "color": "#9933FF",
+      "theme": "Starfleet Space Dock",
+      "icon": "\ud83d\udee0\ufe0f",
+      "order": 11,
+      "recommended": false
     }
   ],
   "categories": {

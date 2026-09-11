@@ -6,6 +6,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1069 (Space Dock 2/4 — crew): ships the Space Dock team's consumer-facing
+  surface. Adds `share/teams/spacedock.conf` (the tenth team conf, and the first
+  for a team with no git repository anywhere — its board and working dir are
+  per-machine under `~/.aiteamforge/spacedock`), the `spacedock` entry in
+  `share/teams/registry.json` (order 11, violet #9933FF, verified non-colliding
+  against all ten existing team colours), and `share/personas/spacedock/` with
+  four personas plus their four terminal prompts. The personas are suffixed
+  `-sd` (`sisko-sd`, `scotty-sd`, `geordi-sd`, `spock-sd`) because
+  `~/knowledge/agents/` is a flat fleet-global namespace where bare `sisko`,
+  `scotty`, `geordi` and `spock` are already owned by firebase/android/ios —
+  reusing them would cross-merge four teams' agent knowledge permanently and in
+  both directions. Follows the existing `janeway-me` / `paris-me` precedent.
+  Layout is four crew tabs at ONE window each, deliberately unlike academy's
+  four-windows-per-agent: a recovery session is short and single-threaded, and
+  sixteen unused panes would ship to every machine in the fleet. Prompts are
+  hand-committed here rather than mirrored, matching how `share/personas/dns/`
+  ships — `sync-tap.sh` deliberately does not sync prompts (five already differ
+  between canonical and tap; changing that is its own ticket). Item ids are
+  `XSDK-nnnn` and collide across machines BY DESIGN, since each host mints
+  independently on a board that never syncs; the prompts teach the
+  host-qualified `<hostname>/XSDK-nnnn` form for any reference that leaves the
+  box. Space Dock cannot be fully provisioned until XACA-1163 lands (board.json's
+  `series` field is overloaded as the item-id prefix), so these artifacts are
+  correct against the contract but not yet instantiable.
 - XACA-0787 round-3 (vector-6 attribution was still too broad): round 2 split
   vector 6 by attributability but keyed the attributable side on naming FAMILIES
   (`aiteamforge*`, `xaca*`, `tap-test*`), which match any OTHER concurrent
