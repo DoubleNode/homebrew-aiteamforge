@@ -10,6 +10,19 @@
 #                  sandboxed under TEST_TMP_DIR; no real $HOME mutation, no
 #                  network, no launchctl, no brew formula install.
 #
+#   NOTE — self-targeting suites (XACA-0931, pattern new to this codebase):
+#                  a plain-shell suite may re-exec ITSELF under /bin/bash at the
+#                  top of the file. This exists because run_test_file() invokes
+#                  suites as `bash "$test_file"` with an UNQUALIFIED bash
+#                  (test-runner.sh:869) while test-shell-homebrew-tap runs
+#                  `brew install bash` first — so CI's bash is 5.x even for a
+#                  suite that must verify /bin/bash 3.2 behaviour. The re-exec is
+#                  guarded against looping and falls through LOUDLY where no 3.x
+#                  /bin/bash exists, rather than skipping. It is a WORKAROUND for
+#                  the shell-laundering defect tracked by XACA-0865; when that
+#                  lands, the re-exec blocks should be removed, not copied into
+#                  new suites. See test-xaca-0931-persona-deploy-and-parity.sh.
+#
 #   brew-bash      Requires Homebrew bash 4+ (uses `declare -A` associative arrays
 #                  or other bash-4-only syntax). Must be invoked as:
 #                    "$(brew --prefix)/bin/bash" tests/test-runner.sh tests/<file>

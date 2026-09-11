@@ -1036,6 +1036,39 @@ else
     test_fail "expected BASH_VERSION major=3 (target /bin/bash 3.2); got BASH_VERSION=$BASH_VERSION -- this suite must be invoked as '/bin/bash tests/test-xaca-0931-...' not via a PATH bash"
 fi
 
+# TG1b (XACA-0931-014): the re-exec guard's FAIL-LOUD path. When no 3.x
+# /bin/bash is reachable, the suite must fall through and let TG1 fail rather
+# than silently skipping — an environment that cannot provide the target shell
+# should say so. Tested on the guard's own logic in a subshell rather than by
+# re-running this whole suite recursively.
+test_start "TG1b: re-exec guard does not loop, and falls through (does not skip) when no 3.x /bin/bash is reachable"
+_TG1B_DIR="$(_next_sandbox)"
+cat > "$_TG1B_DIR/guard.sh" <<'GUARDEOF'
+# Same shape as the suite's own guard at the top of this file.
+if [ -z "${XACA0931_REEXEC:-}" ] && [ "${BASH_VERSINFO[0]:-0}" != "3" ] && [ -x "$FAKE_BIN_BASH" ]; then
+    if "$FAKE_BIN_BASH" -c '[ "${BASH_VERSINFO[0]}" = "3" ]' 2>/dev/null; then
+        export XACA0931_REEXEC=1
+        echo "WOULD_REEXEC"
+        exit 0
+    fi
+fi
+echo "FELL_THROUGH"
+GUARDEOF
+# Case 1: guard already set -> must NOT re-exec (no loop), regardless of shell.
+_TG1B_A="$(XACA0931_REEXEC=1 FAKE_BIN_BASH=/bin/bash "${BASH:-/bin/bash}" "$_TG1B_DIR/guard.sh" 2>/dev/null)"
+# Case 2: no 3.x interpreter reachable (point it at a non-3.x shell) -> must
+# fall through rather than skip/exit-clean.
+_TG1B_FAKE="$_TG1B_DIR/not-three"
+printf '#!/bin/sh
+exit 1
+' > "$_TG1B_FAKE"; chmod +x "$_TG1B_FAKE"
+_TG1B_B="$(env -u XACA0931_REEXEC FAKE_BIN_BASH="$_TG1B_FAKE" /opt/homebrew/bin/bash "$_TG1B_DIR/guard.sh" 2>/dev/null || true)"
+if [ "$_TG1B_A" = "FELL_THROUGH" ] && [ "$_TG1B_B" = "FELL_THROUGH" ]; then
+    test_pass
+else
+    test_fail "expected both cases to fall through (no loop, no silent skip); got case1='$_TG1B_A' case2='$_TG1B_B'"
+fi
+
 test_start "TG2: pt_enumerate_targets's array usage (\${confs[@]}, \${#confs[@]}) behaves correctly under 3.2 with an empty array"
 T_FW="$(_next_sandbox)"
 mkdir -p "$T_FW/share/teams"
