@@ -30,6 +30,34 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   box. Space Dock cannot be fully provisioned until XACA-1163 lands (board.json's
   `series` field is overloaded as the item-id prefix), so these artifacts are
   correct against the contract but not yet instantiable.
+- XACA-0787 round-4 (nine protected gate subitems from PR #859). The most serious
+  was self-inflicted: the leak guard fingerprinted files with `stat -f` and
+  `md5 -q`, both BSD-only, so on Linux every one fell back to the literal `'?'`
+  and a plist fingerprint became `path|?|?|?` — two plists with entirely
+  different content fingerprinted identically, and the plist-rewrite and
+  `~/.claude/settings.json` vectors reported clean regardless of what happened.
+  `tests/bats/run.sh` runs on `ubuntu-latest`, so the guard was silently
+  non-functional on the only platform executing it. That is this ticket's own
+  defect class — a check that silently degrades to success — reproduced inside
+  the fix for it. Now probes once (`stat --version` GNU banner detection rather
+  than hoping BSD `-f` errors on GNU; `md5` -> `md5sum` -> `shasum -a 256`) and
+  **exits 97 loudly** if no usable tool exists, rather than degrading.
+  Also: vector-6's ticket-token match was an unanchored substring, so token
+  `0463` collided with an unrelated `xaca-10463-*` dir — now a digit-boundary
+  match. The vector-6 comment claimed token-less suites' leaks were "still caught
+  by vectors 1-5", which is FALSE (those cover plists/launchctl/optout/settings,
+  not abandoned temp dirs); re-measured live, **22 of 91** plain-shell suites
+  carry no ticket token and their abandoned dirs are caught by nothing — the
+  comment now says so and tells the reader how to re-count rather than trusting a
+  number that moves. The flag-guard suite gains T9, a zero-arg regression test for
+  the real production call shape, invoked via literal `/bin/bash` because the
+  defect class is bash-3.2-only and invisible under bash 5. A leak-guard trip now
+  increments TOTAL_TESTS alongside FAILED_TESTS so the summary stops printing
+  `Total: 58, Passed: 58, Failed: 6` (exit code and Failed line were always
+  correct; only the Total was misleading).
+  Guard re-proven to fire after all of this, with REAL fingerprints
+  (`...|1789087011|49|1d491862...`, not `?|?|?`): vectors 1 and 5 both tripped,
+  remediation cleared the label, exit 1.
 - XACA-0787 round-3 (vector-6 attribution was still too broad): round 2 split
   vector 6 by attributability but keyed the attributable side on naming FAMILIES
   (`aiteamforge*`, `xaca*`, `tap-test*`), which match any OTHER concurrent

@@ -219,6 +219,78 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# T9 — zero-arg (XACA-0787-027): the ACTUAL production call shape.
+# aiteamforge-setup.sh invokes this installer with NO arguments, and none of
+# T1-T8 exercises that shape — every one of them passes a flag, so the entry
+# point's `while [[ $# -gt 0 ]]` loop body never runs for any of them either;
+# zero args skips the loop entirely and falls straight to
+# `install_claude_config "$@"`. That is exactly the call shape this file's
+# own header comment names as the reason the entry point deliberately does
+# NOT collect args into a bash array first (an empty array reference under
+# `set -u` throws "unbound variable" on bash < 4.4, and this fleet's
+# /bin/bash IS 3.2) — a real regression test for that claim has to exercise
+# zero args, not a flag.
+#
+# Invoked via the REAL /bin/bash on this box, NOT `_run_sandboxed`'s ambient
+# `bash` (which resolves to a newer bash on a dev machine with Homebrew bash
+# on PATH) — per knowledge "verify under /bin/bash 3.2, not PATH bash 5.x"
+# (XACA-0845): bash 4.4+ does not have the empty-array unbound-variable bug
+# at all, so a test of this specific defect class run under a newer bash
+# could not fail even if the vulnerable pattern were reintroduced.
+#
+# ASSERTION SHAPE: cannot assert one fixed exit code. install_claude_config's
+# first real step is check_claude_installed(), which depends on whether the
+# `claude` CLI happens to be on PATH wherever this suite runs (present on a
+# dev machine, plausibly absent on a bare CI runner) — asserting rc==0
+# unconditionally would be flaky by ENVIRONMENT, not by defect. Both
+# outcomes are legitimate here: rc=0 (claude present, full install ran) or
+# rc=1 with check_claude_installed's own clean "Claude Code CLI not found"
+# message (claude absent). What must never appear in either case is bash's
+# own unbound-variable/bad-substitution crash signature — that is the actual
+# regression this test exists to catch, not which branch was taken.
+# ─────────────────────────────────────────────────────────────────────────────
+# LEAK SAFETY (found live while writing this test, XACA-0787-027): a bare
+# zero-arg run reaches install_claude_config()'s real invoke_persona_sync(),
+# which does `command -v kb-sync-personas` on WHATEVER ambient $PATH the
+# subshell inherits — completely independent of the HOME override above.
+# On any machine with ~/dev-team/scripts on PATH (this fleet's normal dev
+# setup), that resolves to the REAL kb-sync-personas and runs
+# `kb-sync-personas sync --all` against REAL team repos
+# (/Users/Shared/Development/..., DNSFramework, etc.) — confirmed live
+# during this ticket: it happened to report copied=0/replaced=0 (nothing
+# was out of sync that run) but nothing about this test's setup guaranteed
+# that outcome; a real persona drift at test-run time would have WRITTEN
+# real files outside the sandbox. This is exactly the class of leak this
+# entire ticket exists to eliminate, surfaced by exercising a call shape
+# (zero-arg) no earlier test in this file reaches. PATH is therefore pinned
+# to bare POSIX utility dirs so `command -v kb-sync-personas` and the
+# script's own `${HOME}/dev-team/scripts/kb-sync-personas` fallback both
+# correctly fail closed to the safe "not found, personas not deployed"
+# warning branch — never touching anything outside $SB5.
+SB5="$WORK_DIR/sb-zeroarg"
+mkdir -p "$SB5"
+OUTPUT5=$(
+    HOME="$SB5" \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    AITEAMFORGE_DIR="$SB5/aiteamforge" \
+    AITEAMFORGE_SKIP_LAUNCHCTL=1 \
+    CLAUDE_CONFIG_DIR="$SB5/.claude" \
+    AITF_LAUNCHAGENT_OPTOUT_FILE="$SB5/.aiteamforge/launchagents.optout" \
+    /bin/bash "$CLAUDE_INSTALLER" 2>&1
+)
+RC5=$?
+
+test_start "T9 ZERO-ARG-NO-CRASH: the real production call shape (no args) does not crash under /bin/bash 3.2"
+if { [ "$RC5" -eq 0 ] || [ "$RC5" -eq 1 ]; } \
+    && [[ "$OUTPUT5" != *"unbound variable"* ]] \
+    && [[ "$OUTPUT5" != *"bad substitution"* ]] \
+    && [[ "$OUTPUT5" != *"command not found"* ]]; then
+    test_pass
+else
+    test_fail "Expected a clean exit (0=full install ran, 1=check_claude_installed's own graceful failure) with no shell-crash signature, got rc=$RC5 output: $OUTPUT5"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Standalone summary
 # ─────────────────────────────────────────────────────────────────────────────
 if [ "$_STANDALONE" = true ]; then

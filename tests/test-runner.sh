@@ -477,6 +477,87 @@ _LEAK_GUARD_LAUNCHCTL_BIN="${_LEAK_GUARD_LAUNCHCTL_BIN:-/bin/launchctl}"
 # register as a false-positive "new" entry once the suite creates it.
 LEAK_GUARD_TMPROOT="${TMPDIR:-/tmp}"
 
+# ─────────────────────────────────────────────────────────────────────────
+# XACA-0787-021: portable stat/hash probing. `stat -f`/`md5 -q` are
+# BSD/macOS-only. This suite's sibling harness (tests/bats/run.sh) runs on
+# ubuntu-latest, where neither exists — every `|| echo '?'` fallback fires
+# for every file, so a plist fingerprint collapses to the literal
+# `path|?|?|?` REGARDLESS of actual mtime/size/content. Two plists with
+# entirely different content then fingerprint identically, and the
+# plist-rewrite + settings.json leak vectors report clean no matter what
+# happens — the exact "reassuring but wrong" defect class this whole ticket
+# exists to eliminate, reproduced inside the fix for it.
+#
+# Probed ONCE per process (memoized) and resolved via a definitive signal,
+# not an ambiguous flag guess: GNU coreutils' `stat --version` prints a
+# recognizable banner and exits 0; BSD/macOS `stat` has no `--version` and
+# exits non-zero treating it as a bad option. Checking that FIRST avoids
+# relying on `stat -f '%m'` erroring out on GNU — GNU's `-f` flag means
+# "filesystem status" with a DIFFERENT format-code vocabulary (%a %b %c %d
+# %f %i %l %n %s %S %t %T; no %m), and whether an invalid directive there
+# reliably fails is exactly the kind of assumption this ticket exists to
+# stop trusting untested.
+#
+# FAIL LOUD, NEVER FAIL OPEN: if no usable stat/hash tool is found, this
+# aborts the whole runner immediately (distinct exit code) rather than
+# continuing with fingerprinting silently degraded to a shared '?' — a
+# guard that can't tell two files apart is worse than no guard, because it
+# reports clean.
+_LEAK_GUARD_TOOLS_PROBED=false
+_LEAK_GUARD_STAT_FLAVOR=""
+_LEAK_GUARD_HASH_CMD=""
+
+_leak_guard_probe_tools() {
+  [ "$_LEAK_GUARD_TOOLS_PROBED" = true ] && return 0
+  _LEAK_GUARD_TOOLS_PROBED=true
+
+  if stat --version >/dev/null 2>&1 && stat --version 2>/dev/null | grep -qi 'GNU coreutils'; then
+    _LEAK_GUARD_STAT_FLAVOR="gnu"
+  elif stat -f '%m' . >/dev/null 2>&1; then
+    _LEAK_GUARD_STAT_FLAVOR="bsd"
+  else
+    print_error "LEAK GUARD FATAL (XACA-0787-021): no usable 'stat' found (tried GNU 'stat --version' banner detection and BSD 'stat -f'). Refusing to continue with fingerprinting silently degraded to '?' for every file — that would make the plist-rewrite and settings.json leak vectors report clean no matter what happens. Install a supported stat (coreutils or BSD) or run on a supported host."
+    exit 97
+  fi
+
+  if command -v md5 >/dev/null 2>&1; then
+    _LEAK_GUARD_HASH_CMD="md5"
+  elif command -v md5sum >/dev/null 2>&1; then
+    _LEAK_GUARD_HASH_CMD="md5sum"
+  elif command -v shasum >/dev/null 2>&1; then
+    _LEAK_GUARD_HASH_CMD="shasum"
+  else
+    print_error "LEAK GUARD FATAL (XACA-0787-021): none of 'md5', 'md5sum', 'shasum' is available. Refusing to continue with content fingerprinting silently degraded to '?' for every file — that would make the plist-rewrite and settings.json leak vectors report clean no matter what happens. Install one of these tools."
+    exit 97
+  fi
+}
+
+_leak_guard_stat_mtime() {
+  case "$_LEAK_GUARD_STAT_FLAVOR" in
+    bsd) stat -f '%m' "$1" 2>/dev/null ;;
+    gnu) stat -c '%Y' "$1" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+_leak_guard_stat_size() {
+  case "$_LEAK_GUARD_STAT_FLAVOR" in
+    bsd) stat -f '%z' "$1" 2>/dev/null ;;
+    gnu) stat -c '%s' "$1" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+_leak_guard_hash() {
+  case "$_LEAK_GUARD_HASH_CMD" in
+    md5) md5 -q "$1" 2>/dev/null ;;
+    md5sum) md5sum "$1" 2>/dev/null | awk '{print $1}' ;;
+    shasum) shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' ;;
+    *) return 1 ;;
+  esac
+}
+# ─────────────────────────────────────────────────────────────────────────
+
 # Real (un-sandboxed) LaunchAgents plists for this product. run_test_file()
 # executes in the RUNNER's own process — only the child `bash "$test_file"`
 # subshell ever exports a sandboxed $HOME, and that export does not survive
@@ -485,17 +566,19 @@ _leak_guard_plist_glob() {
   ls -1 "$HOME/Library/LaunchAgents"/com.aiteamforge.*.plist 2>/dev/null || true
 }
 
-# Fingerprint every real plist as "path|mtime|size|md5". Content-sensitive
+# Fingerprint every real plist as "path|mtime|size|hash". Content-sensitive
 # (not just mtime/size) so a rewrite that happens to land in the same second
-# with the same byte count is still caught.
+# with the same byte count is still caught. Portable across BSD/macOS and
+# GNU/Linux — see _leak_guard_probe_tools above (XACA-0787-021).
 _leak_guard_plist_fingerprint() {
+  _leak_guard_probe_tools
   local p
   for p in $(_leak_guard_plist_glob); do
     [ -f "$p" ] || continue
     local mtime size sum
-    mtime=$(stat -f '%m' "$p" 2>/dev/null || echo '?')
-    size=$(stat -f '%z' "$p" 2>/dev/null || echo '?')
-    sum=$(md5 -q "$p" 2>/dev/null || echo '?')
+    mtime=$(_leak_guard_stat_mtime "$p") || mtime='?'
+    size=$(_leak_guard_stat_size "$p") || size='?'
+    sum=$(_leak_guard_hash "$p") || sum='?'
     printf '%s|%s|%s|%s\n' "$p" "$mtime" "$size" "$sum"
   done | sort
 }
@@ -511,8 +594,9 @@ _leak_guard_launchctl_jobs() {
 
 _leak_guard_file_fingerprint() {
   local f="$1"
+  _leak_guard_probe_tools
   if [ -f "$f" ]; then
-    md5 -q "$f" 2>/dev/null || echo '?'
+    _leak_guard_hash "$f" || echo '?'
   else
     echo '__absent__'
   fi
@@ -719,7 +803,20 @@ leak_guard_assert() {
       #      leftovers and nothing belonging to another ticket's run.
       # A suite with no ticket token in its filename simply has no
       # attributable bucket — correct, since we then have no evidence tying a
-      # stray dir to it, and its real leaks are still caught by vectors 1-5.
+      # stray dir to it. XACA-0787-029: an earlier version of this comment
+      # claimed such a suite's abandoned-dir leaks are "still caught by
+      # vectors 1-5" — that is FALSE. Vectors 1-5 cover plists, launchctl
+      # jobs, the opt-out sentinel, and ~/.claude/settings.json; none of them
+      # observes a temp directory at all. RE-COUNTED against this suite's
+      # current roster (2026-09-10, `find . -maxdepth 1 -name "test-*.sh"
+      # -type f ! -name test-runner.sh | grep -vic xaca`): 22 of 91
+      # plain-shell suites carry no `xaca`/`XACA` ticket token in their
+      # filename, so an abandoned dir left by one of those 22 is caught by
+      # NOTHING in this guard — it is reported (loudly, via the unattributed
+      # bucket below) but does not fail the run. That is a real, known gap
+      # in vector 6's coverage, not a false one papered over by another
+      # vector. (The 22/91 figure will drift as suites are added — re-run
+      # the command above rather than trusting this comment's number.)
       # A bare "tmp.*" entry that matches NONE of those prefixes is reported
       # LOUDLY, with full paths, but does NOT fail the run on its own —
       # it cannot be attributed to $CURRENT_TEST_FILE specifically. This
@@ -745,10 +842,20 @@ leak_guard_assert() {
           esac
         fi
         # (2) this suite's own ticket token. Same empty-value guard.
+        # XACA-0787-030: this MUST be a digit-boundary match, not a bare
+        # glob substring — `*"$_lg_suite_token"*` matched "0463" INSIDE the
+        # unrelated digit run "10463" (e.g. a stray `xaca-10463-*` dir from
+        # a completely different ticket), hard-failing test-xaca-0463-*.sh
+        # on someone else's leftover. grep -E anchors the token on a
+        # non-digit (or string boundary) on both sides, so it matches
+        # "xaca0463-sandbox.*" / "test-xaca-0463-tmp.123" but rejects
+        # "xaca-10463-*" and "xaca-04630-*". Token is digits-only (from the
+        # sed capture above), so it carries no regex metacharacters that
+        # need escaping.
         if [ "$_lg_is_ours" = false ] && [ -n "$_lg_suite_token" ]; then
-          case "$_lg_base" in
-            *"$_lg_suite_token"*) _lg_is_ours=true ;;
-          esac
+          if printf '%s' "$_lg_base" | grep -Eq "(^|[^0-9])${_lg_suite_token}([^0-9]|\$)"; then
+            _lg_is_ours=true
+          fi
         fi
         if [ "$_lg_is_ours" = true ]; then
           attributable_entries="${attributable_entries}${_lg_entry}
@@ -934,6 +1041,17 @@ run_test_file() {
   # suite's own pass/fail bookkeeping.
   if ! leak_guard_assert; then
     print_error "LEAK GUARD TRIPPED: $CURRENT_TEST_FILE touched the real \$HOME — see LEAK [...] lines above. Failing this run regardless of the suite's own pass/fail result."
+    # XACA-0787-026: a trip is its own accounted-for result, not a suite-level
+    # test_start/test_pass/test_fail event — nothing upstream (the
+    # TEST_RESULTS_FILE aggregation above) ever counted it toward
+    # TOTAL_TESTS, so incrementing FAILED_TESTS alone breaks the
+    # Total == Passed + Failed + Skipped identity the summary implies (e.g.
+    # a printed "Total: 58, Passed: 58, Failed: 6"). Exit code and the
+    # Failed line were already correct — a nonzero FAILED_TESTS already
+    # fails the run below — this only fixes the arithmetic a log-scraper
+    # would otherwise be misled by. Bump TOTAL_TESTS in lockstep so the
+    # identity holds; PASSED_TESTS/SKIPPED_TESTS are deliberately untouched.
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
     FAILED_TESTS=$((FAILED_TESTS + 1))
   fi
 
