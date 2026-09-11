@@ -6,6 +6,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1071: ship `kb-spacedock`, Space Dock's host-recovery triage entrypoint —
+  and register it in BOTH upgrade allowlists, because one is not enough.**
+  `share/scripts/kb-spacedock` fronts the diagnostics that already exist rather
+  than adding a new diagnostic engine: `aiteamforge doctor` (the SUBCOMMAND form
+  — the standalone binstub is a different script with roughly half the checks,
+  see XACA-0807), `kb-recover`, `lcars-health-check.sh --status`,
+  `kb-sweep-stubs`, the auto-upgrade log, and this release's own
+  `atf_team_provisioned` predicate from XACA-1070. It reports, writes a JSON
+  findings file, and files findings as XSDK items on the per-machine spacedock
+  board only when that board already exists — it never creates one. Subcommands:
+  `triage`, `report` (never files), `verify-reboot` (the 2026-09-02
+  reboot-survivability harness, productized and ordered by lockout risk).
+  Delivery is the substance of this entry as much as the script is.
+  `kb-spacedock` is EXTENSIONLESS, so it needs the same PAIR of entries in
+  `libexec/commands/aiteamforge-upgrade.sh` that `kb-init-team`, `kb-api-key` and
+  `kb-msg-provision` each needed: the `_xaca0673_mandatory_materialize_basenames()`
+  list AND the explicit glob-sweep entry in `update_runtime_helpers()`. The
+  sweep's `*.sh`/`*.py` globs cannot match a bare name, so a materialize
+  basename that never reaches the sweep loop is never evaluated at all. Fresh
+  installs were already covered (setup bulk-copies `share/scripts/`); upgrades
+  onto already-installed boxes were not, and every machine in the fleet today is
+  in that second category — the XACA-0585 shape, where the tap installed a
+  LaunchAgent but never laid down the script it called.
+  Correctness property the script is built around: it never conflates "the tool
+  failed to run" with "the tool ran and found nothing wrong". A missing or broken
+  tool surfaces as `unknown`, never `ok` — a false green on a recovery tool is
+  worse than no tool. Exit code is the worst severity across the run (0 ok/skip,
+  1 warn, 2 fail/unknown).
 - XACA-1173: Mirror the 14 files where develop's canonical copy was newer than the tap, or
   missing from it. Direction was established from blob history, not timestamps: for each
   file, the tap's old copy appears in a commit already on develop. The files are

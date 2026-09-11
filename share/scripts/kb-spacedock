@@ -1,0 +1,1401 @@
+#!/bin/bash
+# kb-spacedock — Space Dock host-recovery triage entrypoint (XACA-1071-002)
+#
+# ============================================================================
+# WHAT THIS IS, AND — MORE IMPORTANTLY — WHAT IT IS NOT
+# ============================================================================
+# This is a thin FRONT END. It runs diagnostics that already exist elsewhere
+# in this codebase (aiteamforge doctor, kb-recover, lcars-health-check.sh,
+# kb-sweep-stubs, the auto-upgrade log, the mandatory-teams predicate),
+# interprets their EXISTING exit-code/output contracts, aggregates the
+# results, and — only when a spacedock board actually exists on this host —
+# files findings as XSDK items.
+#
+# It is explicitly NOT a new diagnostic engine. If you are about to add a
+# function here that decides "is this box healthy" from first principles
+# (parsing process tables, computing thresholds, deciding what counts as
+# broken), STOP — that judgement belongs in the tool being called, not here.
+# The one narrow exception is the auto-upgrade log (see CHECK 5 below): it is
+# a plain log file with a documented marker format, not a tool with its own
+# exit code, and docs/spacedock-diagnostic-inventory.md explicitly says
+# kb-spacedock is expected to be the first thing that reads that format.
+#
+# Full contract/trap reference: docs/spacedock-diagnostic-inventory.md
+# (read that file — not this comment — as the authority; if the two disagree,
+# the doc is right and this comment is stale).
+#
+# ============================================================================
+# THE EXIT-CODE TRAPS THIS SCRIPT EXISTS TO NOT FALL INTO
+# ============================================================================
+#   * `aiteamforge doctor` (the SUBCOMMAND — dispatches to the 16-check
+#     libexec script) is the ONLY doctor entrypoint this script calls.
+#     `aiteamforge-doctor` (the standalone binstub) is a DIFFERENT 7-check
+#     script with a DIFFERENT exit-code contract (0/1 there means the
+#     opposite severity split from 0/1/2 here) and silently omits 11 checks
+#     including launchagents and connect-scripts. Never call it "the doctor"
+#     as if there's only one.
+#   * `aiteamforge doctor --preflight` ALWAYS exits 0 regardless of findings
+#     and silently self-heals (`launchctl load`, SAFE auto-remediation).
+#     NEVER pass --preflight or --fix here — this script must stay read-only.
+#   * `lcars-health-check.sh` with no flags RESTARTS unhealthy servers.
+#     Only `--status` is read-only, and only under `--status` does exit 1
+#     mean "found problems" rather than "always 0, restarts happened
+#     silently". This script hard-codes `--status` and must never drop it.
+#     Also note: its shebang is `#!/usr/bin/env zsh` — it is a zsh script,
+#     not bash. Run it via its own shebang/executable bit, or `zsh`
+#     explicitly — never `bash lcars-health-check.sh`, which can break on
+#     its zsh-only syntax.
+#   * `kb-recover` exits 0 whether or not it found anything — 0 is "ran
+#     fine", NOT "clean". This script checks the JSON payload length, never
+#     the exit code, for the "did it find orphans" signal. (1 = jq missing,
+#     2 = usage/env error — both real "tool failed" conditions.)
+#   * `kb-sweep-stubs` has the cleanest contract (0/1/2 = none/found/usage-
+#     error) but is DEV-MACHINE-ONLY — not shipped to the tap at all. Its
+#     absence on a consumer box is correct scoping, not a finding; this
+#     script reports that as SKIP, never as UNKNOWN or FAIL.
+#   * The auto-upgrade log is a file to READ, never a script to invoke —
+#     invoking scripts/auto-upgrade.sh would trigger a real `brew upgrade`.
+#   * `kanban-helpers.sh` (the dev-team canonical file) is ZSH-ONLY — it
+#     cannot be sourced under bash (confirmed: scripts/kb-init-team's own
+#     header comment, "kb-init-team is bash; kanban-helpers.sh ... is zsh
+#     and cannot be sourced here"). Every place this script needs a
+#     kanban-helpers.sh function (kb-recover, kb-backlog for filing), it
+#     shells out to `zsh -c '...'` rather than sourcing in-process — this
+#     script itself stays plain bash 3.2 throughout.
+#
+# THE SINGLE MOST IMPORTANT CORRECTNESS PROPERTY (per the parent ticket):
+# a tool that is MISSING, UNINSTALLED, OR ERRORS OUT is reported as UNKNOWN.
+# It is NEVER folded into "pass" — an absent tool told us nothing, and
+# silently treating silence as health is exactly the failure mode this whole
+# script exists to avoid. A tool that is documented as CORRECTLY absent on
+# this host by design (kb-sweep-stubs on a tap consumer, the auto-upgrade
+# log on a box with no tap install, the mandatory-teams predicate before
+# XACA-1070 ships) gets its own SKIP bucket instead — still never "pass".
+#
+# ============================================================================
+# SEVERITY BUCKETS (used throughout; see _spd_emit)
+# ============================================================================
+#   ok      — the tool ran and found nothing wrong.
+#   warn    — the tool ran and found something worth a human's attention,
+#             but not urgent (or the underlying tool's OWN contract says
+#             "warnings", e.g. aiteamforge doctor exit 1).
+#   fail    — the tool ran and found a real problem (or the underlying
+#             tool's own contract says "failures", e.g. aiteamforge doctor
+#             exit 2).
+#   unknown — the tool could not be run, or an exit code came back that
+#             this script doesn't have a documented mapping for. This is a
+#             "we don't know" signal, not a health verdict either way.
+#   skip    — the tool is documented as correctly absent/inapplicable on
+#             this host by design. Never used to paper over a real gap.
+#
+# Aggregate script exit code (documented for any future caller/monitor):
+#   0 = every finding is ok/skip.  1 = worst finding is warn.
+#   2 = worst finding is fail or unknown (both are treated as "look at this
+#   now" for exit-code purposes, even though they're reported distinctly).
+#
+# ============================================================================
+# BOARD LOCATION, HOST-QUALIFIED IDS, AND GRACEFUL DEGRADATION
+# ============================================================================
+# Board path is fixed per docs/spacedock-board-hygiene.md:
+#   ~/.aiteamforge/spacedock/kanban/spacedock-board.json
+# (outside every git work tree — spacedock is not a container/kanban-inside-
+# repo team). Overridable via KB_SPACEDOCK_BOARD for testing only.
+#
+# The spacedock team/board does NOT exist yet as of this writing — XACA-1068
+# is provisioning it live in a sibling session. This script MUST NOT create,
+# register, or provision it. When the board file is absent, `triage` still
+# runs every diagnostic, still reports to stdout and a findings file, and
+# then says PLAINLY that XSDK filing is unavailable and names XACA-1068 —
+# it does not fail, and it does not pretend the run didn't happen.
+#
+# Every XSDK id this script prints is host-qualified as `<host>/XSDK-nnnn`
+# per docs/spacedock-board-hygiene.md § "Reference convention" — because
+# printed output is exactly what gets pasted into a cross-machine kb-msg or
+# escalation note, where a bare XSDK-nnnn is not fleet-unique. The host is
+# derived the same way kanban-helpers.sh's _kb_this_host_id/_kb_host_normalize
+# do it (scutil ComputerName, falling back to hostname -s, lowercased, with
+# a trailing .local stripped) — reimplemented locally rather than sourced,
+# for the same bash/zsh reason described above. Note this yields the
+# codebase's actual convention (e.g. "darren-m3pro", matching
+# ~/.aiteamforge/team-machines.json) rather than the shorter illustrative
+# form used in the hygiene doc's own examples ("m3pro") — subitem 004 owns
+# pinning the final exact syntax fleet-wide; if it lands on the shorter
+# form, adjust _spd_host_id() only, everything downstream keys off it.
+#
+# ============================================================================
+# CLI
+# ============================================================================
+#   kb-spacedock triage    Run every diagnostic surface, print a report, write
+#                          a findings file, and — only if a spacedock board
+#                          exists on this host — file warn/fail/unknown
+#                          findings as XSDK items. THE documented entrypoint.
+#   kb-spacedock report    Same diagnostics + report + findings file, but
+#                          NEVER files anything, even if a board exists.
+#                          Safe to run mid-incident as often as you like.
+#   kb-spacedock verify-reboot
+#                          Post-reboot invariant check, ordered by lockout
+#                          risk (4 tiers). Read-only; never files anything
+#                          (same posture as `report`). See the
+#                          "REBOOT-SURVIVABILITY CHECKS" header comment
+#                          further down for the full design + env vars.
+#   kb-spacedock help      This text.
+#
+# Read-only by default: `report` never writes anything but its own findings
+# file (under $TMPDIR, never under ~/.aiteamforge/spacedock/); `triage` is
+# read-only for every diagnostic surface and only ever WRITES via the
+# existing, audited `kb-backlog add` path, and only into a board that
+# XACA-1068 (not this script) created.
+#
+# KNOWN LIMITATION, left for sisko-sd/a follow-up (deliberately not solved
+# here — deciding "is this the same incident as last time" is exactly the
+# kind of judgement call this script is scoped to avoid making): `triage`
+# does not deduplicate against items it already filed. Running it twice in
+# a row files the same findings twice. Empirically confirmed live on the
+# board the moment it was created (see XACA-1071-002 completion notes).
+#
+# That same run confirmed XACA-1163 on a live board for the first time: a
+# freshly-provisioned board.json puts the COSMETIC series value into the
+# `series` field, which `_kb_generate_id()` reads as the ID PREFIX, so the
+# first three items ever filed came back `SDK-0001`..`SDK-0003` instead of
+# `XSDK-nnnn`. The board has since been hand-corrected to `series: XSDK`
+# and those items renumbered, so ids mint correctly TODAY — but the writer
+# is unchanged, and re-provisioning would reintroduce it.
+#
+# That is why the prefix NOTE below stays in (see _spd_file_findings): it
+# is a live tripwire for 1163 resurfacing, not a comment about a fixed
+# bug. This script does not paper over the condition and does not silently
+# reformat whatever id kb-backlog actually mints — reporting the real id is
+# the point.
+
+# ---------------------------------------------------------------------------
+# PORTABILITY GUARD — this script is bash-3.2-safe and MUST run under bash,
+# never zsh (see the bash/zsh split described above: kanban-helpers.sh is
+# zsh-only, this script deliberately stays plain bash throughout). On a
+# zsh-heavy fleet it is an easy operator mistake to type `zsh kb-spacedock
+# ...` out of habit instead of respecting the shebang. CONFIRMED (XACA-1071
+# testing, 2026-09-10): when this script is interpreted BY zsh, any check
+# that execs an `env`-shebanged helper directly from inside a shell function
+# (CHECK 3 lcars-health-check.sh, CHECK 4 kb-sweep-stubs — both use
+# `#!/usr/bin/env <shell>`) fails with a spurious "env: <shell>: No such
+# file or directory" (exit 127) even though that interpreter is genuinely
+# on PATH, and the PATH corruption can persist far enough to also break the
+# following `jq` call inside `_spd_emit` ("command not found: jq"). Both
+# failures are STILL correctly reported as `unknown`, never a false `ok` —
+# the core correctness property survives — but the diagnostic text is
+# actively misleading (reads as "zsh/jq missing on this host" when neither
+# is true) and safe under bash. Rather than let a misinvocation produce a
+# confusing report, self-correct by re-executing under bash.
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
+
+set -u
+
+# ---------------------------------------------------------------------------
+# Globals
+# ---------------------------------------------------------------------------
+SPD_ESC=$'\033'
+SPD_HOST=""
+SPD_BOARD="${KB_SPACEDOCK_BOARD:-$HOME/.aiteamforge/spacedock/kanban/spacedock-board.json}"
+SPD_FINDINGS_DIR="${KB_SPACEDOCK_FINDINGS_DIR:-${TMPDIR:-/tmp}/kb-spacedock}"
+SPD_FINDINGS=()   # accumulated JSON-object strings, one per finding (bash 3.2-safe indexed array)
+
+# ---------------------------------------------------------------------------
+# Small utilities
+# ---------------------------------------------------------------------------
+
+_spd_have() { command -v "$1" >/dev/null 2>&1; }
+
+# Strip ANSI SGR colour codes. Both aiteamforge-doctor scripts emit them
+# (bin/ directly, libexec/ via its sourced lib/common.sh); lcars-health-
+# check.sh emits none but running everything through this is harmless.
+_spd_strip_ansi() {
+    sed -E "s/${SPD_ESC}\[[0-9;]*m//g"
+}
+
+# Same algorithm as kanban-helpers.sh's _kb_this_host_id + _kb_host_normalize
+# (scutil ComputerName, fall back to hostname -s, lowercase, strip trailing
+# .local). Reimplemented rather than sourced — kanban-helpers.sh is zsh-only
+# and this script must stay bash-3.2-safe standalone.
+_spd_host_id() {
+    local id=""
+    if _spd_have scutil; then
+        id=$(scutil --get ComputerName 2>/dev/null)
+    fi
+    [ -z "$id" ] && id=$(hostname -s 2>/dev/null)
+    [ -z "$id" ] && id=$(hostname 2>/dev/null)
+    id=$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')
+    id="${id%.local}"
+    printf '%s\n' "${id:-unknown-host}"
+}
+
+# jq is a hard dependency for this script (as it is for kanban-helpers.sh
+# itself) — every finding is built and read back as JSON so filing/report
+# code never has to hand-parse ad hoc text.
+if ! _spd_have jq; then
+    echo "kb-spacedock: 'jq' is required and was not found on PATH. Cannot run." >&2
+    exit 2
+fi
+
+SPD_HOST=$(_spd_host_id)
+
+# Append one finding. Always call this instead of printing ad hoc — it's
+# the single place that shapes the JSON every downstream consumer (report,
+# findings file, filing) reads back.
+#   $1 surface   short stable name, e.g. "aiteamforge-doctor"
+#   $2 severity  ok|warn|fail|unknown|skip
+#   $3 summary   one line, human-readable
+#   $4 detail    optional longer text (raw tool output etc.) — may be empty
+#   $5 exit_code optional numeric exit code that produced this — may be empty
+_spd_emit() {
+    local surface="$1" severity="$2" summary="$3" detail="${4:-}" exit_code="${5:-}"
+    local ec_json="null"
+    case "$exit_code" in
+        ''|*[!0-9-]*) ec_json="null" ;;
+        *) ec_json="$exit_code" ;;
+    esac
+    local json
+    json=$(jq -nc \
+        --arg surface "$surface" \
+        --arg severity "$severity" \
+        --arg summary "$summary" \
+        --arg detail "$detail" \
+        --arg host "$SPD_HOST" \
+        --argjson exit_code "$ec_json" \
+        '{host:$host, surface:$surface, severity:$severity, summary:$summary, detail:$detail, exit_code:$exit_code}')
+    SPD_FINDINGS+=("$json")
+}
+
+# ---------------------------------------------------------------------------
+# Locating the tools this script fronts. Every resolver degrades to "not
+# found" (empty stdout, non-zero return) rather than guessing — a wrong
+# guess that happens to execute something is worse than a clean SKIP/UNKNOWN.
+# ---------------------------------------------------------------------------
+
+# dev-team's canonical kanban-helpers.sh is ZSH-ONLY (see header). A future
+# tap-shipped, bash-portable equivalent (share/templates/kanban/
+# kanban-helpers.template.sh, materialized per-team) is a DIFFERENT file —
+# XACA-1113 is actively porting functions into it. This resolver tries the
+# dev-team canonical first (this script's primary, testable environment),
+# then a plausible consumer per-team materialized copy. Override both the
+# path and which shell to run it under via env vars for testing or once
+# shipping wiring (owned elsewhere, not this ticket) settles the real
+# consumer path.
+_spd_find_kanban_helpers() {
+    if [ -n "${KB_SPACEDOCK_KANBAN_HELPERS:-}" ] && [ -f "${KB_SPACEDOCK_KANBAN_HELPERS}" ]; then
+        printf '%s\n' "$KB_SPACEDOCK_KANBAN_HELPERS"
+        return 0
+    fi
+    if [ -f "$HOME/dev-team/kanban-helpers.sh" ]; then
+        printf '%s\n' "$HOME/dev-team/kanban-helpers.sh"
+        return 0
+    fi
+    local atfd="${AITEAMFORGE_DIR:-$HOME/.aiteamforge}"
+    if [ -f "$atfd/spacedock/kanban/kanban-helpers.sh" ]; then
+        printf '%s\n' "$atfd/spacedock/kanban/kanban-helpers.sh"
+        return 0
+    fi
+    return 1
+}
+
+# Which interpreter a given kanban-helpers.sh resolution needs. The
+# dev-team canonical is zsh-only; a tap-ported template copy is expected to
+# be bash-portable (that's the whole point of the XACA-1113 port). Override
+# with KB_SPACEDOCK_KANBAN_HELPERS_SHELL when neither guess is right.
+_spd_kanban_helpers_shell() {
+    local path="$1"
+    if [ -n "${KB_SPACEDOCK_KANBAN_HELPERS_SHELL:-}" ]; then
+        printf '%s\n' "$KB_SPACEDOCK_KANBAN_HELPERS_SHELL"
+        return 0
+    fi
+    if [ "$path" = "$HOME/dev-team/kanban-helpers.sh" ]; then
+        printf '%s\n' "zsh"
+    else
+        printf '%s\n' "bash"
+    fi
+}
+
+# lcars-health-check.sh: canonical at dev-team repo root, mirrored to
+# homebrew-tap/share/scripts/ (materializes to $AITEAMFORGE_DIR/scripts/ on
+# a consumer, matching the pattern used by lcars-launch-helpers.sh and
+# kb-ttyd-bridge.sh). Its shebang is `#!/usr/bin/env zsh` — it is run
+# directly (respecting its shebang/x-bit), never wrapped in `bash`.
+_spd_find_lcars_health_check() {
+    if [ -n "${KB_SPACEDOCK_LCARS_HEALTH_CHECK:-}" ] && [ -f "${KB_SPACEDOCK_LCARS_HEALTH_CHECK}" ]; then
+        printf '%s\n' "$KB_SPACEDOCK_LCARS_HEALTH_CHECK"
+        return 0
+    fi
+    if [ -f "$HOME/dev-team/lcars-health-check.sh" ]; then
+        printf '%s\n' "$HOME/dev-team/lcars-health-check.sh"
+        return 0
+    fi
+    local atfd="${AITEAMFORGE_DIR:-$HOME/.aiteamforge}"
+    if [ -f "$atfd/scripts/lcars-health-check.sh" ]; then
+        printf '%s\n' "$atfd/scripts/lcars-health-check.sh"
+        return 0
+    fi
+    return 1
+}
+
+# kb-sweep-stubs: dev-team canonical only, deliberately NOT shipped to the
+# tap (it guards the dev machine against tap-stub pollution — a concern
+# that doesn't apply to a consumer box). Its shebang is POSIX sh.
+_spd_find_kb_sweep_stubs() {
+    if [ -n "${KB_SPACEDOCK_SWEEP_STUBS:-}" ] && [ -f "${KB_SPACEDOCK_SWEEP_STUBS}" ]; then
+        printf '%s\n' "$KB_SPACEDOCK_SWEEP_STUBS"
+        return 0
+    fi
+    if [ -f "$HOME/dev-team/kanban-hooks/kb-sweep-stubs" ]; then
+        printf '%s\n' "$HOME/dev-team/kanban-hooks/kb-sweep-stubs"
+        return 0
+    fi
+    if _spd_have kb-sweep-stubs; then
+        command -v kb-sweep-stubs
+        return 0
+    fi
+    return 1
+}
+
+# XACA-1070's mandatory-teams predicate library. NOT on disk at a stable
+# runtime path as of this writing (still on branch feature/xaca-1070,
+# uncommitted) — this resolver intentionally does NOT hard-code that
+# worktree path (per the task brief: read it there for the signature, never
+# depend on it at runtime). It tries plausible SHIPPED locations only, and
+# degrades to "predicate unavailable" (SKIP, not UNKNOWN — this is expected
+# until XACA-1070 ships) when none exist.
+_spd_find_mandatory_teams_lib() {
+    if [ -n "${KB_SPACEDOCK_MANDATORY_TEAMS_LIB:-}" ] && [ -f "${KB_SPACEDOCK_MANDATORY_TEAMS_LIB}" ]; then
+        printf '%s\n' "$KB_SPACEDOCK_MANDATORY_TEAMS_LIB"
+        return 0
+    fi
+    local atfh="${AITEAMFORGE_HOME:-}"
+    if [ -n "$atfh" ] && [ -f "$atfh/libexec/lib/mandatory-teams.sh" ]; then
+        printf '%s\n' "$atfh/libexec/lib/mandatory-teams.sh"
+        return 0
+    fi
+    local atfd="${AITEAMFORGE_DIR:-$HOME/.aiteamforge}"
+    if [ -f "$atfd/libexec/lib/mandatory-teams.sh" ]; then
+        printf '%s\n' "$atfd/libexec/lib/mandatory-teams.sh"
+        return 0
+    fi
+    return 1
+}
+
+# Thin wrappers over the real predicate (design requirement: swapping in
+# the shipped lib is a one-line change here once XACA-1070 lands it).
+#   _spd_atf_mandatory_teams  -> stdout: one team id per line. Exit 0 with
+#     empty stdout means "zero teams flagged today" (expected, NOT an
+#     error). Exit 1 means registry.json missing/unparseable — a real
+#     "tool failed" condition. These two must never be collapsed.
+#   _spd_atf_team_provisioned <team> -> exit 0 provisioned / 1 not, no stdout.
+_spd_atf_mandatory_teams() {
+    local lib="$1" shell="$2"
+    if [ "$shell" = "zsh" ]; then
+        env KB_SPD_LIB="$lib" zsh -c 'source "$KB_SPD_LIB" >/dev/null 2>&1 && atf_mandatory_teams'
+    else
+        env KB_SPD_LIB="$lib" bash -c 'source "$KB_SPD_LIB" >/dev/null 2>&1 && atf_mandatory_teams'
+    fi
+}
+_spd_atf_team_provisioned() {
+    local lib="$1" shell="$2" team="$3"
+    if [ "$shell" = "zsh" ]; then
+        env KB_SPD_LIB="$lib" KB_SPD_TEAM="$team" zsh -c 'source "$KB_SPD_LIB" >/dev/null 2>&1 && atf_team_provisioned "$KB_SPD_TEAM"'
+    else
+        env KB_SPD_LIB="$lib" KB_SPD_TEAM="$team" bash -c 'source "$KB_SPD_LIB" >/dev/null 2>&1 && atf_team_provisioned "$KB_SPD_TEAM"'
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# CHECK 1 — aiteamforge doctor (SUBCOMMAND form only; see header trap #1)
+# ---------------------------------------------------------------------------
+_spd_check_aiteamforge_doctor() {
+    if ! _spd_have aiteamforge; then
+        _spd_emit "aiteamforge-doctor" "unknown" \
+            "aiteamforge CLI not found on PATH — doctor diagnostics unavailable on this host" "" ""
+        return
+    fi
+    local raw rc clean
+    raw=$(aiteamforge doctor 2>&1)
+    rc=$?
+    clean=$(printf '%s\n' "$raw" | _spd_strip_ansi)
+    case "$rc" in
+        0) _spd_emit "aiteamforge-doctor" "ok" "clean — 0 warnings, 0 failures" "$clean" "$rc" ;;
+        1) _spd_emit "aiteamforge-doctor" "warn" "warnings only (0 failures)" "$clean" "$rc" ;;
+        2) _spd_emit "aiteamforge-doctor" "fail" "one or more failures found" "$clean" "$rc" ;;
+        *) _spd_emit "aiteamforge-doctor" "unknown" "unexpected exit code $rc — this script only understands 0/1/2 from the subcommand form" "$clean" "$rc" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# CHECK 2 — kb-recover (crash-recovery orphan scan; exit 0 means "ran", not
+# "clean" — see header trap)
+# ---------------------------------------------------------------------------
+_spd_check_kb_recover() {
+    local kh
+    kh=$(_spd_find_kanban_helpers) || {
+        _spd_emit "kb-recover" "unknown" "kanban-helpers.sh not found on this host — kb-recover unavailable" "" ""
+        return
+    }
+    local shell out rc
+    shell=$(_spd_kanban_helpers_shell "$kh")
+    if ! _spd_have "$shell"; then
+        _spd_emit "kb-recover" "unknown" "kanban-helpers.sh found but its required interpreter ('$shell') is not on PATH" "" ""
+        return
+    fi
+    out=$(env KB_SPD_KH="$kh" "$shell" -c 'source "$KB_SPD_KH" >/dev/null 2>&1 && kb-recover --all-teams --json' 2>&1)
+    rc=$?
+    case "$rc" in
+        0)
+            local total
+            total=$(printf '%s' "$out" | jq -r '([.[]] | flatten | length)' 2>/dev/null)
+            if [ -z "$total" ] || [ "$total" = "null" ]; then
+                _spd_emit "kb-recover" "unknown" "kb-recover exited 0 but its --json output could not be parsed" "$out" "$rc"
+            elif [ "$total" -gt 0 ] 2>/dev/null; then
+                _spd_emit "kb-recover" "warn" "$total orphaned in-progress item(s) found across teams" "$out" "$rc"
+            else
+                _spd_emit "kb-recover" "ok" "no orphaned in-progress items found" "$out" "$rc"
+            fi
+            ;;
+        1) _spd_emit "kb-recover" "unknown" "jq not available to kb-recover — could not run" "$out" "$rc" ;;
+        2) _spd_emit "kb-recover" "unknown" "usage/environment error (e.g. team-paths.json missing)" "$out" "$rc" ;;
+        *) _spd_emit "kb-recover" "unknown" "unexpected exit code $rc" "$out" "$rc" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# CHECK 3 — lcars-health-check.sh --status (READ-ONLY invocation ONLY; see
+# header trap #2 — never call this without --status)
+# ---------------------------------------------------------------------------
+_spd_check_lcars_health() {
+    local path
+    path=$(_spd_find_lcars_health_check) || {
+        _spd_emit "lcars-health-check" "unknown" "lcars-health-check.sh not found on this host" "" ""
+        return
+    }
+    local out rc
+    if [ -x "$path" ]; then
+        out=$("$path" --status 2>&1)
+    elif _spd_have zsh; then
+        out=$(zsh "$path" --status 2>&1)
+    else
+        _spd_emit "lcars-health-check" "unknown" "found lcars-health-check.sh but it is not executable and zsh is unavailable to run it" "" ""
+        return
+    fi
+    rc=$?
+    case "$rc" in
+        0) _spd_emit "lcars-health-check" "ok" "all servers healthy (--status)" "$out" "$rc" ;;
+        1) _spd_emit "lcars-health-check" "warn" "unhealthy or config-drifted server(s) found (--status)" "$out" "$rc" ;;
+        *) _spd_emit "lcars-health-check" "unknown" "unexpected exit code $rc from --status (its own contract only defines 0/1)" "$out" "$rc" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# CHECK 4 — kb-sweep-stubs (dev-machine-only by design; absence elsewhere is
+# SKIP, never UNKNOWN or FAIL — see header trap #3)
+# ---------------------------------------------------------------------------
+_spd_check_kb_sweep_stubs() {
+    local path
+    path=$(_spd_find_kb_sweep_stubs) || {
+        _spd_emit "kb-sweep-stubs" "skip" "not present on this host — expected on a tap consumer (dev-machine-only guard, not shipped by design)" "" ""
+        return
+    }
+    local out rc
+    out=$("$path" 2>&1)
+    rc=$?
+    case "$rc" in
+        0) _spd_emit "kb-sweep-stubs" "ok" "no stubs found" "$out" "$rc" ;;
+        1)
+            local total
+            total=$(printf '%s' "$out" | jq -r '.total // "unknown"' 2>/dev/null)
+            _spd_emit "kb-sweep-stubs" "warn" "$total stub(s) found" "$out" "$rc"
+            ;;
+        2) _spd_emit "kb-sweep-stubs" "unknown" "usage/environment error" "$out" "$rc" ;;
+        *) _spd_emit "kb-sweep-stubs" "unknown" "unexpected exit code $rc" "$out" "$rc" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# CHECK 5 — auto-upgrade log (READ the file; NEVER invoke auto-upgrade.sh
+# itself — see header trap #4). The "stalled" signal (an unmatched start
+# marker) is explicitly called out in docs/spacedock-diagnostic-inventory.md
+# as a check kb-spacedock is expected to be the first to implement — this is
+# reading a documented log format, not inventing a health judgement.
+# ---------------------------------------------------------------------------
+_spd_check_auto_upgrade_log() {
+    local log="${KB_SPACEDOCK_AUTO_UPGRADE_LOG:-${AITEAMFORGE_DIR:-$HOME/.aiteamforge}/logs/auto-upgrade.log}"
+    if [ ! -f "$log" ]; then
+        _spd_emit "auto-upgrade-log" "skip" "not present — no tap install / no upgrade runs recorded on this host" "" ""
+        return
+    fi
+    local last_start_line
+    last_start_line=$(grep -n '===== auto-upgrade start =====' "$log" 2>/dev/null | tail -1 | cut -d: -f1)
+    if [ -z "$last_start_line" ]; then
+        _spd_emit "auto-upgrade-log" "ok" "log present but no upgrade runs recorded yet" "" ""
+        return
+    fi
+    local after last_complete
+    after=$(tail -n "+${last_start_line}" "$log" 2>/dev/null)
+    if ! printf '%s\n' "$after" | grep -q '===== auto-upgrade complete'; then
+        _spd_emit "auto-upgrade-log" "warn" \
+            "last 'start' marker (line $last_start_line) has no matching 'complete' marker — run may be stalled" \
+            "$after" ""
+        return
+    fi
+    last_complete=$(printf '%s\n' "$after" | grep '===== auto-upgrade complete' | tail -1)
+    case "$last_complete" in
+        *FAILED*|*BLOCKED*)
+            _spd_emit "auto-upgrade-log" "warn" "last run ended: $last_complete" "$after" ""
+            ;;
+        *)
+            _spd_emit "auto-upgrade-log" "ok" "last run: $last_complete" "" ""
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# CHECK 6 — mandatory-teams provisioning (XACA-1070's atf_team_provisioned /
+# atf_mandatory_teams). Lib not shipped yet as of this writing -> SKIP, not
+# UNKNOWN (expected, not a finding about this host). Once it ships, this is
+# the one check that can legitimately flag "academy not provisioned" etc. on
+# a tap consumer that's missing a mandatory team.
+# ---------------------------------------------------------------------------
+_spd_check_mandatory_teams() {
+    local lib
+    lib=$(_spd_find_mandatory_teams_lib) || {
+        _spd_emit "mandatory-teams" "skip" "atf_team_provisioned predicate not available on this host yet (XACA-1070 not shipped) — skipping" "" ""
+        return
+    }
+    local shell="bash"
+    if ! _spd_have "$shell"; then shell="zsh"; fi
+    if ! _spd_have "$shell"; then
+        _spd_emit "mandatory-teams" "unknown" "found mandatory-teams.sh but no usable interpreter (bash/zsh) on PATH" "" ""
+        return
+    fi
+
+    local teams_out rc
+    teams_out=$(_spd_atf_mandatory_teams "$lib" "$shell" 2>/dev/null)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _spd_emit "mandatory-teams" "unknown" "atf_mandatory_teams failed (exit $rc) — registry.json missing/unparseable; this is NOT the same as 'zero teams flagged'" "" "$rc"
+        return
+    fi
+    if [ -z "$teams_out" ]; then
+        _spd_emit "mandatory-teams" "ok" "atf_mandatory_teams ran cleanly; zero teams currently flagged mandatory" "" "0"
+        return
+    fi
+
+    local missing="" team
+    while IFS= read -r team; do
+        [ -z "$team" ] && continue
+        if ! _spd_atf_team_provisioned "$lib" "$shell" "$team" >/dev/null 2>&1; then
+            missing="$missing $team"
+        fi
+    done <<SPD_TEAMS_EOF
+$teams_out
+SPD_TEAMS_EOF
+
+    if [ -n "$missing" ]; then
+        _spd_emit "mandatory-teams" "fail" "mandatory team(s) not provisioned on this host:$missing" "$teams_out" ""
+    else
+        _spd_emit "mandatory-teams" "ok" "all mandatory teams provisioned" "$teams_out" ""
+    fi
+}
+
+_spd_run_all_checks() {
+    _spd_check_aiteamforge_doctor
+    _spd_check_kb_recover
+    _spd_check_lcars_health
+    _spd_check_kb_sweep_stubs
+    _spd_check_auto_upgrade_log
+    _spd_check_mandatory_teams
+}
+
+# ===========================================================================
+# REBOOT-SURVIVABILITY CHECKS (`verify-reboot` subcommand) — XACA-1071-013
+# ===========================================================================
+# Productized from a working PROTOTYPE captured 2026-09-02 during a live
+# darren-m4-mini outage + macOS 27 upgrade:
+#   kanban/plans/XACA-1071/reboot-invariant-harness.prototype.sh
+# (main-repo path — this worktree's kanban/ is gitignored, so that file is not
+# on disk here; read it there if you need the original for comparison.)
+#
+# THE FOUR TIERS, ORDERED BY LOCKOUT RISK — THIS ORDERING IS THE WHOLE POINT,
+# preserved exactly from the prototype and MUST NOT be flattened into a plain
+# severity sort (that is what _spd_report/_spd_worst_severity already do for
+# `triage`/`report`; a lockout risk that only shows up after paging through
+# lower-risk findings defeats the reason this subcommand exists):
+#   Tier 1 — remote lockout risk (fix before you walk away from the machine)
+#   Tier 2 — remote control / recovery (ARD, screen sharing, autorestart)
+#   Tier 3 — the AITeamForge stack itself
+#   Tier 4 — per-team tmux sessions
+# _spd_reboot_report groups by tier (via a "reboot-t<N>-*" surface-name
+# prefix), but still uses the exact same _spd_emit JSON shape, severity
+# vocabulary, and findings-file writer as every other check in this script —
+# a second grouping axis on the same data, not a second reporting style.
+#
+# THE FOUR TRAPS THE PROTOTYPE ALREADY PAID FOR — preserved here verbatim,
+# do not reintroduce any of them:
+#   1. `pmset -g | grep autorestart` matches BOTH `autorestartatconnect` and
+#      `autorestart`; `head -1` picks the WRONG line. Word-anchored via awk
+#      on $1 in _spd_reboot_check_autorestart below — never grep+head here.
+#   2. Any remote/launchd invocation needs /opt/homebrew/bin on PATH first,
+#      or `tmux` silently reads as command-not-found (stderr is routinely
+#      redirected to /dev/null in these checks) and a healthy team reports
+#      as 0 sessions. _spd_reboot_run_all_checks exports PATH before running
+#      anything in this section.
+#   3. LCARS servers run as `python3` — check LISTENING PORTS for remote
+#      access services (sshd/ARD/screen-sharing), never process-name greps.
+#   4. Time Machine contents are not readable over SSH via the
+#      /Volumes/.timemachine/<uuid>/ snapshot path (use `tmutil
+#      machinedirectory` instead) — not exercised by any check below, noted
+#      here only because it lived in the same prototype header.
+#
+# DE-HARDCODING FROM THE PROTOTYPE (per the XACA-1071-013 task brief — a
+# check that only works on one machine is not a fleet tool):
+#   * Autologin/ARD-user expectation defaults to `id -un` (this session's
+#     actual user) instead of a literal "darrenehlers".
+#   * Tmux socket dir is `/tmp/tmux-$(id -u)` (computed), not a hardcoded
+#     uid-501 path.
+#   * The Tier 4 team list is DERIVED per-host from
+#     ~/.aiteamforge/team-machines.json (every team whose declared machine
+#     normalizes to this host's id) instead of a hardcoded
+#     finance/legal/medical/freelance literal — this is the same map
+#     kb-msg's cross-machine routing already treats as authoritative
+#     (_kb_msg_resolve_machine in kanban-helpers.sh).
+#   * The Tier 3 LaunchAgent set is DISCOVERED from whatever
+#     ~/Library/LaunchAgents/com.aiteamforge.*.plist files are actually
+#     installed, not a hardcoded 7-name array — this script fronts existing
+#     state (per its own charter above) rather than asserting from first
+#     principles what "the mandatory set" is; that judgement belongs to
+#     `aiteamforge doctor` / the tap's own upgrade machinery, not here.
+#
+# EXPECTED-VALUE BASELINES THAT DIFFER BY HOST (per the task brief — asserting
+# M4Mini's posture elsewhere produces confident false failures):
+#   * FileVault, the autologin username, and the ARD naprivs mask are all
+#     genuinely host-specific security POLICY, not universal invariants (see
+#     memory: FileVault-off is a SETTLED, deliberate exception specific to
+#     darren-m4-mini — most hosts should expect FileVault ON). Each has a
+#     KB_SPACEDOCK_REBOOT_EXPECT_* override; when unset, the check falls back
+#     to the darren-m4-mini 2026-09-02 baseline value AND SAYS SO LOUDLY in
+#     its summary, rather than silently asserting it as universal truth.
+#   * Whether a Tier 1/2 mismatch is a REAL lockout risk (fail) or merely "not
+#     confirmed as a problem on this host" (warn) depends on whether this
+#     host is even meant to survive an unattended reboot at all — an attended
+#     dev box (e.g. darren-m3pro) legitimately has Remote Login / autologin
+#     off by design. KB_SPACEDOCK_REBOOT_REMOTE_HOST=1 declares "yes, this
+#     host must survive an unattended reboot" and promotes those mismatches
+#     to fail; left unset, they report as warn with an explanation. See
+#     _spd_reboot_mismatch_sev/_spd_reboot_mismatch_note.
+#
+# Env var reference (all optional):
+#   KB_SPACEDOCK_REBOOT_REMOTE_HOST         "1" to treat this host as an
+#                                            unattended remote-recovery target
+#                                            (promotes Tier 1/2 mismatches to
+#                                            fail instead of warn).
+#   KB_SPACEDOCK_REBOOT_EXPECT_FILEVAULT    Expected `fdesetup status`
+#                                            posture word (default: "Off",
+#                                            the darren-m4-mini baseline).
+#   KB_SPACEDOCK_REBOOT_EXPECT_AUTOLOGIN_USER  Expected autoLoginUser
+#                                            (default: `id -un`).
+#   KB_SPACEDOCK_REBOOT_ARD_USER            User to read ARD naprivs for
+#                                            (default: `id -un`).
+#   KB_SPACEDOCK_REBOOT_EXPECT_NAPRIVS      Expected naprivs mask substring
+#                                            (default: "-1073741569", the ARD
+#                                            full-access constant).
+#   KB_SPACEDOCK_REBOOT_TAILSCALE_BIN       Path to the Tailscale CLI binary
+#                                            (default: the standard
+#                                            /Applications/Tailscale.app
+#                                            location).
+#
+# THIS SECTION IS READ-ONLY, same as every other check in this script: no
+# `launchctl load`, no `pmset` writes, no service start/stop. Repair is
+# scotty-sd's phase, not this subcommand's.
+
+# _spd_reboot_mismatch_sev / _spd_reboot_mismatch_note
+# The single lever that turns a Tier 1/2 "expected X, got Y" finding into
+# either a real "fail" or an advisory "warn" — see the env var reference
+# above. Both must be called together (sev decides the bucket, note explains
+# why in the summary) so a reader never sees a bare "warn" with no
+# indication that it could be a "fail" on a host where lockout truly matters.
+_spd_reboot_mismatch_sev() {
+    if [ "${KB_SPACEDOCK_REBOOT_REMOTE_HOST:-0}" = "1" ]; then
+        printf 'fail\n'
+    else
+        printf 'warn\n'
+    fi
+}
+_spd_reboot_mismatch_note() {
+    if [ "${KB_SPACEDOCK_REBOOT_REMOTE_HOST:-0}" != "1" ]; then
+        # XACA-1071-007: this clause fires on EVERY Tier 1/2 mismatch — up to 11
+        # lines in one run. The full explanation lives once in the report header
+        # (see _spd_reboot_report); repeating it per line adds scroll without
+        # adding information after the first read, and this tool is read at 2am
+        # on a broken box where scannability IS the feature. Short tag here,
+        # full text there.
+        printf ' [warn not fail — see NOTE above]'
+    fi
+}
+
+# Shared helper for the four simple "is anything listening on this port"
+# checks (trap #3 above: port-based, never process-name-based).
+#   $1 surface  $2 port  $3 human label
+_spd_reboot_check_port_listening() {
+    local surface="$1" port="$2" label="$3"
+    if ! _spd_have netstat; then
+        _spd_emit "$surface" "unknown" "netstat not found (non-macOS host?)" "" ""
+        return
+    fi
+    local out
+    out=$(netstat -an 2>/dev/null | grep -E "\\.${port} .*LISTEN")
+    if [ -n "$out" ]; then
+        _spd_emit "$surface" "ok" "$label listening on $port" "$out" ""
+        return
+    fi
+    local sev note
+    sev=$(_spd_reboot_mismatch_sev)
+    note=$(_spd_reboot_mismatch_note)
+    _spd_emit "$surface" "$sev" "$label not listening on $port$note" "" ""
+}
+
+# ---------------------------------------------------------------------------
+# TIER 1 — REMOTE LOCKOUT RISK
+# ---------------------------------------------------------------------------
+_spd_reboot_check_filevault() {
+    if ! _spd_have fdesetup; then
+        _spd_emit "reboot-t1-filevault" "unknown" "fdesetup not found (non-macOS host?)" "" ""
+        return
+    fi
+    local out expect
+    out=$(fdesetup status 2>&1)
+    expect="${KB_SPACEDOCK_REBOOT_EXPECT_FILEVAULT:-Off}"
+    if printf '%s' "$out" | grep -q "FileVault is $expect"; then
+        _spd_emit "reboot-t1-filevault" "ok" "FileVault is $expect (matches expected value)" "$out" ""
+        return
+    fi
+    local sev note
+    sev=$(_spd_reboot_mismatch_sev)
+    note=$(_spd_reboot_mismatch_note)
+    _spd_emit "reboot-t1-filevault" "$sev" \
+        "FileVault does not match expected '$expect' (got: $out).$note ASSUMED DEFAULT: '$expect' is the darren-m4-mini 2026-09-02 baseline, where FileVault-off is a deliberate, SETTLED exception — most hosts should expect 'On'. Override with KB_SPACEDOCK_REBOOT_EXPECT_FILEVAULT to this host's actual intended posture." \
+        "$out" ""
+}
+
+_spd_reboot_check_autologin() {
+    if ! _spd_have defaults; then
+        _spd_emit "reboot-t1-autologin" "unknown" "'defaults' not found (non-macOS host?)" "" ""
+        return
+    fi
+    local out rc expect
+    out=$(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>&1)
+    rc=$?
+    expect="${KB_SPACEDOCK_REBOOT_EXPECT_AUTOLOGIN_USER:-$(id -un)}"
+    if [ $rc -eq 0 ] && [ "$out" = "$expect" ]; then
+        _spd_emit "reboot-t1-autologin" "ok" "auto-login user set to '$expect'" "" ""
+        return
+    fi
+    local sev note
+    sev=$(_spd_reboot_mismatch_sev)
+    note=$(_spd_reboot_mismatch_note)
+    if [ $rc -ne 0 ]; then
+        _spd_emit "reboot-t1-autologin" "$sev" \
+            "no auto-login user configured (expected '$expect', defaulted to the current interactive user via 'id -un' — override KB_SPACEDOCK_REBOOT_EXPECT_AUTOLOGIN_USER if this host intends a different or no auto-login user at all).$note a headless reboot with no auto-login stalls at the login window." \
+            "$out" "$rc"
+    else
+        _spd_emit "reboot-t1-autologin" "$sev" "auto-login user is '$out', expected '$expect'.$note" "$out" "$rc"
+    fi
+}
+
+_spd_reboot_check_tailscale_sysext() {
+    if ! _spd_have systemextensionsctl; then
+        _spd_emit "reboot-t1-tailscale-sysext" "unknown" "systemextensionsctl not found (non-macOS host?)" "" ""
+        return
+    fi
+    local out
+    out=$(systemextensionsctl list 2>&1 | grep -i tailscale)
+    if [ -z "$out" ]; then
+        _spd_emit "reboot-t1-tailscale-sysext" "unknown" "no Tailscale system-extension entry found — Tailscale may not be installed on this host" "" ""
+        return
+    fi
+    if printf '%s' "$out" | grep -q "activated enabled"; then
+        _spd_emit "reboot-t1-tailscale-sysext" "ok" "Tailscale sysext activated" "$out" ""
+        return
+    fi
+    local sev note
+    sev=$(_spd_reboot_mismatch_sev)
+    note=$(_spd_reboot_mismatch_note)
+    _spd_emit "reboot-t1-tailscale-sysext" "$sev" "Tailscale sysext not activated/enabled.$note" "$out" ""
+}
+
+_spd_reboot_check_tailscale_tunnel() {
+    local bin="${KB_SPACEDOCK_REBOOT_TAILSCALE_BIN:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"
+    if [ ! -x "$bin" ]; then
+        _spd_emit "reboot-t1-tailscale-tunnel" "unknown" "Tailscale binary not found at $bin — Tailscale may not be installed on this host (override KB_SPACEDOCK_REBOOT_TAILSCALE_BIN if it lives elsewhere)" "" ""
+        return
+    fi
+    local out
+    out=$("$bin" status 2>&1 | head -1)
+    if printf '%s' "$out" | grep -q '^100\.'; then
+        _spd_emit "reboot-t1-tailscale-tunnel" "ok" "Tailscale tunnel up ($out)" "$out" ""
+        return
+    fi
+    local sev note
+    sev=$(_spd_reboot_mismatch_sev)
+    note=$(_spd_reboot_mismatch_note)
+    _spd_emit "reboot-t1-tailscale-tunnel" "$sev" "Tailscale tunnel not up (got: ${out:-<empty>}).$note" "$out" ""
+}
+
+_spd_reboot_check_sshd() {
+    _spd_reboot_check_port_listening "reboot-t1-sshd" 22 "sshd (Remote Login)"
+}
+
+_spd_reboot_check_tailscale_login() {
+    if ! _spd_have defaults; then
+        _spd_emit "reboot-t1-tailscale-login" "unknown" "'defaults' not found (non-macOS host?)" "" ""
+        return
+    fi
+    local out rc
+    out=$(defaults read io.tailscale.ipn.macsys TailscaleStartOnLogin 2>&1)
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        _spd_emit "reboot-t1-tailscale-login" "unknown" "TailscaleStartOnLogin key not set — Tailscale may not be installed via the macsys/standalone variant on this host" "$out" "$rc"
+        return
+    fi
+    if [ "$out" = "1" ]; then
+        _spd_emit "reboot-t1-tailscale-login" "ok" "Tailscale starts on login" "" ""
+        return
+    fi
+    local sev note
+    sev=$(_spd_reboot_mismatch_sev)
+    note=$(_spd_reboot_mismatch_note)
+    _spd_emit "reboot-t1-tailscale-login" "$sev" "Tailscale does not start on login (got: $out).$note" "$out" ""
+}
+
+# ---------------------------------------------------------------------------
+# TIER 2 — REMOTE CONTROL / RECOVERY
+# ---------------------------------------------------------------------------
+_spd_reboot_check_ard_mode() {
+    if ! _spd_have defaults; then
+        _spd_emit "reboot-t2-ard-mode" "unknown" "'defaults' not found (non-macOS host?)" "" ""
+        return
+    fi
+    local out rc
+    out=$(defaults read /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers 2>&1)
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        _spd_emit "reboot-t2-ard-mode" "unknown" "ARD_AllLocalUsers key not set — Remote Management may not be configured on this host" "$out" "$rc"
+        return
+    fi
+    if [ "$out" = "0" ]; then
+        _spd_emit "reboot-t2-ard-mode" "ok" "ARD specified-users mode" "" ""
+        return
+    fi
+    local sev note
+    sev=$(_spd_reboot_mismatch_sev)
+    note=$(_spd_reboot_mismatch_note)
+    _spd_emit "reboot-t2-ard-mode" "$sev" "ARD is in all-local-users mode (got: $out), expected specified-users (0) per fleet ARD posture.$note" "$out" ""
+}
+
+_spd_reboot_check_ard_naprivs() {
+    if ! _spd_have dscl; then
+        _spd_emit "reboot-t2-ard-naprivs" "unknown" "'dscl' not found (non-macOS host?)" "" ""
+        return
+    fi
+    local user expect out rc
+    user="${KB_SPACEDOCK_REBOOT_ARD_USER:-$(id -un)}"
+    expect="${KB_SPACEDOCK_REBOOT_EXPECT_NAPRIVS:--1073741569}"
+    out=$(dscl . -read "/Users/$user" naprivs 2>&1)
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        _spd_emit "reboot-t2-ard-naprivs" "unknown" "naprivs attribute not readable for user '$user' (dscl exit $rc) — ARD may not have been granted to this user yet" "$out" "$rc"
+        return
+    fi
+    if printf '%s' "$out" | grep -q -- "$expect"; then
+        _spd_emit "reboot-t2-ard-naprivs" "ok" "ARD naprivs mask for '$user' matches expected value" "$out" ""
+        return
+    fi
+    local sev note
+    sev=$(_spd_reboot_mismatch_sev)
+    note=$(_spd_reboot_mismatch_note)
+    _spd_emit "reboot-t2-ard-naprivs" "$sev" \
+        "ARD naprivs mask for '$user' is '$out', expected to contain '$expect' (the ARD full-access constant, from the darren-m4-mini baseline — override KB_SPACEDOCK_REBOOT_EXPECT_NAPRIVS if a narrower privilege set is intentional here).$note" \
+        "$out" ""
+}
+
+_spd_reboot_check_screensharing() {
+    _spd_reboot_check_port_listening "reboot-t2-screensharing" 5900 "Screen Sharing"
+}
+
+_spd_reboot_check_ard_agent() {
+    _spd_reboot_check_port_listening "reboot-t2-ard-agent" 3283 "ARD agent"
+}
+
+_spd_reboot_check_autorestart() {
+    if ! _spd_have pmset; then
+        _spd_emit "reboot-t2-autorestart" "unknown" "pmset not found (non-macOS host?)" "" ""
+        return
+    fi
+    # Trap #1: word-anchor on $1 via awk — `grep autorestart` also matches
+    # `autorestartatconnect` and a `head -1` on that output silently picks the
+    # wrong line (cost a false failure on 2026-09-02).
+    local raw val
+    raw=$(pmset -g 2>&1)
+    val=$(printf '%s\n' "$raw" | awk '$1=="autorestart"{print $2}')
+    if [ -z "$val" ]; then
+        _spd_emit "reboot-t2-autorestart" "unknown" "'autorestart' key not found in 'pmset -g' output (some Mac models/power sources don't expose it)" "$raw" ""
+        return
+    fi
+    if [ "$val" = "1" ]; then
+        _spd_emit "reboot-t2-autorestart" "ok" "autorestart after power failure enabled" "" ""
+        return
+    fi
+    local sev note
+    sev=$(_spd_reboot_mismatch_sev)
+    note=$(_spd_reboot_mismatch_note)
+    _spd_emit "reboot-t2-autorestart" "$sev" "autorestart after power failure disabled (got: $val).$note" "$raw" ""
+}
+
+# ---------------------------------------------------------------------------
+# TIER 3 — AITEAMFORGE STACK
+# ---------------------------------------------------------------------------
+_spd_reboot_check_homebrew() {
+    if ! _spd_have brew; then
+        _spd_emit "reboot-t3-homebrew" "unknown" "brew not found on PATH" "" ""
+        return
+    fi
+    local out
+    out=$(brew --version 2>&1 | head -1)
+    if printf '%s' "$out" | grep -q "^Homebrew"; then
+        _spd_emit "reboot-t3-homebrew" "ok" "$out" "" ""
+    else
+        _spd_emit "reboot-t3-homebrew" "unknown" "unexpected 'brew --version' output" "$out" ""
+    fi
+}
+
+_spd_reboot_check_aiteamforge_cli() {
+    if ! _spd_have aiteamforge; then
+        _spd_emit "reboot-t3-aiteamforge-cli" "unknown" \
+            "aiteamforge CLI not found on PATH — expected on a tap-installed consumer host; CORRECTLY absent on the dev-source machine by hard policy (AITeamForge must never be installed alongside dev-team — see this repo's CLAUDE.md)" "" ""
+        return
+    fi
+    local out
+    out=$(aiteamforge version 2>&1 | head -1)
+    if printf '%s' "$out" | grep -q "AITeamForge"; then
+        _spd_emit "reboot-t3-aiteamforge-cli" "ok" "$out" "" ""
+    else
+        _spd_emit "reboot-t3-aiteamforge-cli" "unknown" "unexpected 'aiteamforge version' output" "$out" ""
+    fi
+}
+
+_spd_reboot_check_clt() {
+    if ! _spd_have xcode-select; then
+        _spd_emit "reboot-t3-clt" "unknown" "xcode-select not found (non-macOS host?)" "" ""
+        return
+    fi
+    local out rc
+    out=$(xcode-select -p 2>&1)
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        _spd_emit "reboot-t3-clt" "fail" "developer command-line tools not found ($out)" "$out" "$rc"
+        return
+    fi
+    if printf '%s' "$out" | grep -q "CommandLineTools"; then
+        _spd_emit "reboot-t3-clt" "ok" "Command Line Tools present ($out)" "" ""
+    else
+        # A full Xcode install (common on iOS/Android team hosts) also
+        # satisfies "developer tools present" — CommandLineTools-only is the
+        # M4Mini-style consumer baseline, not a universal requirement.
+        _spd_emit "reboot-t3-clt" "ok" "developer tools present via a full Xcode install ($out), not the CommandLineTools-only path" "$out" ""
+    fi
+}
+
+_spd_reboot_check_python3() {
+    if ! _spd_have python3; then
+        _spd_emit "reboot-t3-python3" "fail" "python3 not found on PATH" "" ""
+        return
+    fi
+    local out
+    out=$(python3 -V 2>&1)
+    if printf '%s' "$out" | grep -q "^Python 3"; then
+        _spd_emit "reboot-t3-python3" "ok" "$out" "" ""
+    else
+        _spd_emit "reboot-t3-python3" "unknown" "unexpected 'python3 -V' output" "$out" ""
+    fi
+}
+
+# DE-HARDCODED: rather than assert a fixed list of "the mandatory 7"
+# LaunchAgents (host-specific, and this script's charter says never invent a
+# first-principles health judgement), this discovers whatever
+# com.aiteamforge.*.plist files are actually INSTALLED on this host and
+# checks only that each one is loaded. A host with zero such plists (e.g. the
+# dev-source machine, where AITeamForge is never installed) is SKIP, not
+# fail/unknown — that mirrors _spd_check_kb_sweep_stubs's dev-machine-only
+# handling above.
+_spd_reboot_check_launchagents() {
+    local dir="$HOME/Library/LaunchAgents"
+    if [ ! -d "$dir" ]; then
+        _spd_emit "reboot-t3-launchagents" "unknown" "LaunchAgents directory not found: $dir" "" ""
+        return
+    fi
+    local f label unloaded="" count=0
+    for f in "$dir"/com.aiteamforge.*.plist; do
+        [ -e "$f" ] || continue
+        count=$((count + 1))
+        label=$(basename "$f" .plist)
+        if ! launchctl list "$label" >/dev/null 2>&1; then
+            unloaded="$unloaded $label"
+        fi
+    done
+    if [ "$count" -eq 0 ]; then
+        _spd_emit "reboot-t3-launchagents" "skip" \
+            "no com.aiteamforge.* LaunchAgent plists installed on this host — expected where AITeamForge is not installed (e.g. the dev-source machine, by policy)" "" ""
+        return
+    fi
+    if [ -n "$unloaded" ]; then
+        _spd_emit "reboot-t3-launchagents" "fail" "installed but NOT loaded:$unloaded" "" ""
+    else
+        _spd_emit "reboot-t3-launchagents" "ok" "$count com.aiteamforge.* LaunchAgent(s) installed and loaded" "" ""
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# TIER 4 — TEAMS
+# ---------------------------------------------------------------------------
+# DE-HARDCODED: team list is derived from ~/.aiteamforge/team-machines.json
+# (every team whose declared machine normalizes to this host), not a
+# hardcoded finance/legal/medical/freelance literal. "No sessions" is
+# reported as warn (never fail) — same as the prototype's own DOWN/yellow
+# bucket, annotated "expected — no auto-restore exists yet" — because an
+# idle team after a reboot is the documented normal state, not a defect.
+_spd_reboot_check_teams() {
+    local map="$HOME/.aiteamforge/team-machines.json"
+    if [ ! -f "$map" ]; then
+        _spd_emit "reboot-t4-teams" "unknown" "team-machines.json not found at $map — cannot determine which teams belong to this host" "" ""
+        return
+    fi
+    local host_norm teams
+    host_norm=$(printf '%s' "$SPD_HOST" | tr '[:upper:]' '[:lower:]')
+    teams=$(jq -r --arg h "$host_norm" \
+        '. as $m | keys_unsorted[] | select(($m[.] | ascii_downcase | rtrimstr(".local")) == $h)' \
+        "$map" 2>/dev/null)
+    if [ -z "$teams" ]; then
+        _spd_emit "reboot-t4-teams" "skip" "no teams declared for this host ('$SPD_HOST') in team-machines.json — nothing to verify" "" ""
+        return
+    fi
+    local uid socket_dir team sessions n down="" up=0 total=0
+    uid=$(id -u)
+    socket_dir="/tmp/tmux-${uid}"
+    while IFS= read -r team; do
+        [ -z "$team" ] && continue
+        total=$((total + 1))
+        sessions=""
+        if [ -S "$socket_dir/$team" ]; then
+            sessions=$(tmux -S "$socket_dir/$team" list-sessions -F '#{session_name}' 2>/dev/null)
+        fi
+        if [ -z "$sessions" ]; then
+            sessions=$(tmux -L "$team" list-sessions -F '#{session_name}' 2>/dev/null)
+        fi
+        n=$(printf '%s\n' "$sessions" | grep -c .)
+        if [ "${n:-0}" -gt 0 ] 2>/dev/null; then
+            up=$((up + 1))
+        else
+            down="$down $team"
+        fi
+    done <<SPD_REBOOT_TEAMS_EOF
+$teams
+SPD_REBOOT_TEAMS_EOF
+    if [ -n "$down" ]; then
+        _spd_emit "reboot-t4-teams" "warn" \
+            "$up/$total team session(s) up for this host; down (expected — no auto-restore exists yet):$down" \
+            "$teams" ""
+    else
+        _spd_emit "reboot-t4-teams" "ok" "all $up/$total team session(s) for this host are up" "$teams" ""
+    fi
+}
+
+_spd_reboot_run_all_checks() {
+    # Trap #2: tmux/brew/etc. live under /opt/homebrew/bin, not guaranteed on
+    # PATH under launchd/cron/ssh invocation. Without this, tmux silently
+    # reads as command-not-found and every Tier 4 team reports "down" on an
+    # otherwise healthy host.
+    export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+    _spd_reboot_check_filevault
+    _spd_reboot_check_autologin
+    _spd_reboot_check_tailscale_sysext
+    _spd_reboot_check_tailscale_tunnel
+    _spd_reboot_check_sshd
+    _spd_reboot_check_tailscale_login
+
+    _spd_reboot_check_ard_mode
+    _spd_reboot_check_ard_naprivs
+    _spd_reboot_check_screensharing
+    _spd_reboot_check_ard_agent
+    _spd_reboot_check_autorestart
+
+    _spd_reboot_check_homebrew
+    _spd_reboot_check_aiteamforge_cli
+    _spd_reboot_check_clt
+    _spd_reboot_check_python3
+    _spd_reboot_check_launchagents
+
+    _spd_reboot_check_teams
+}
+
+# Tier-grouped report — same per-line format, severity vocabulary, and
+# findings-file writer as _spd_report, just grouped by tier (via the
+# "reboot-t<N>-*" surface prefix) INSTEAD of by severity, because tier order
+# (lockout risk) is the point of this subcommand. Never files findings —
+# `verify-reboot` is report-only, same posture as `report` (see CLI help).
+_spd_reboot_report() {
+    echo "==================================================================="
+    echo "kb-spacedock verify-reboot — host: $SPD_HOST — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "OS: $(sw_vers -productVersion 2>/dev/null || echo unknown) ($(sw_vers -buildVersion 2>/dev/null || echo unknown))"
+    echo "Ordered by LOCKOUT RISK — resolve Tier 1 failures BEFORE relying on"
+    echo "remote access or walking away from this machine."
+    if [ "${KB_SPACEDOCK_REBOOT_REMOTE_HOST:-0}" != "1" ]; then
+        echo
+        echo "NOTE: KB_SPACEDOCK_REBOOT_REMOTE_HOST is not set to 1 — this host has not"
+        echo "been declared a remote/unattended recovery target, so Tier 1/2 posture"
+        echo "mismatches below are reported as 'warn' rather than 'fail'. Set it to 1"
+        echo "on hosts like darren-m4-mini where lockout is a real operational risk."
+    fi
+    echo "==================================================================="
+
+    local tier label f surface sev summary
+    for tier in 1 2 3 4; do
+        case "$tier" in
+            1) label="TIER 1 -- REMOTE LOCKOUT RISK (fix before walking away)" ;;
+            2) label="TIER 2 -- REMOTE CONTROL / RECOVERY" ;;
+            3) label="TIER 3 -- AITEAMFORGE STACK" ;;
+            4) label="TIER 4 -- TEAMS" ;;
+        esac
+        echo
+        echo "-- $label --"
+        for f in "${SPD_FINDINGS[@]+"${SPD_FINDINGS[@]}"}"; do
+            surface=$(printf '%s' "$f" | jq -r '.surface')
+            case "$surface" in
+                reboot-t${tier}-*) ;;
+                *) continue ;;
+            esac
+            sev=$(printf '%s' "$f" | jq -r '.severity')
+            summary=$(printf '%s' "$f" | jq -r '.summary')
+            printf '  [%-7s] %-28s %s\n' "$sev" "$surface" "$summary"
+        done
+    done
+    echo "-------------------------------------------------------------------"
+    _spd_write_findings_file
+}
+
+# ---------------------------------------------------------------------------
+# Reporting — prints a human summary, worst-first, and writes the full
+# findings array to a JSON file. This file lives under $TMPDIR, deliberately
+# NEVER under ~/.aiteamforge/spacedock/ — writing findings must never look
+# like, or risk becoming, "creating the board".
+# ---------------------------------------------------------------------------
+_spd_worst_severity() {
+    local s has_fail=0 has_unknown=0 has_warn=0 f
+    for f in "${SPD_FINDINGS[@]+"${SPD_FINDINGS[@]}"}"; do
+        s=$(printf '%s' "$f" | jq -r '.severity')
+        case "$s" in
+            fail) has_fail=1 ;;
+            unknown) has_unknown=1 ;;
+            warn) has_warn=1 ;;
+        esac
+    done
+    if [ "$has_fail" -eq 1 ] || [ "$has_unknown" -eq 1 ]; then
+        printf '2\n'
+    elif [ "$has_warn" -eq 1 ]; then
+        printf '1\n'
+    else
+        printf '0\n'
+    fi
+}
+
+#   $1 cmd  the subcommand that invoked this report (e.g. "triage", "report")
+#           — shown verbatim in the header so `report`'s output never reads
+#           as if `triage` (which files findings) had run. Defaults to
+#           "triage" only as a defensive fallback if ever called without it.
+_spd_report() {
+    local cmd="${1:-triage}"
+    echo "==================================================================="
+    echo "kb-spacedock $cmd — host: $SPD_HOST — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "==================================================================="
+    local order sev f surface summary any
+    for order in fail unknown warn ok skip; do
+        any=0
+        for f in "${SPD_FINDINGS[@]+"${SPD_FINDINGS[@]}"}"; do
+            sev=$(printf '%s' "$f" | jq -r '.severity')
+            [ "$sev" = "$order" ] || continue
+            any=1
+            surface=$(printf '%s' "$f" | jq -r '.surface')
+            summary=$(printf '%s' "$f" | jq -r '.summary')
+            printf '  [%-7s] %-22s %s\n' "$order" "$surface" "$summary"
+        done
+    done
+    echo "-------------------------------------------------------------------"
+    _spd_write_findings_file
+}
+
+# Shared tail of every report path: write the accumulated SPD_FINDINGS array to
+# a JSON file under $TMPDIR (never under ~/.aiteamforge/spacedock/ — see the
+# header note on why findings-writing must never look like board creation).
+# Factored out so `report`/`triage` and `verify-reboot`'s tier-grouped report
+# emit byte-identical findings-file JSON rather than two divergent writers.
+_spd_write_findings_file() {
+    mkdir -p "$SPD_FINDINGS_DIR" 2>/dev/null
+    local ts findings_file
+    ts=$(date -u +%Y%m%dT%H%M%SZ)
+    findings_file="$SPD_FINDINGS_DIR/findings-${ts}.json"
+    printf '%s\n' "${SPD_FINDINGS[@]+"${SPD_FINDINGS[@]}"}" | jq -s \
+        --arg host "$SPD_HOST" --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{host: $host, generated_at: $generated_at, findings: .}' > "$findings_file" 2>/dev/null
+    echo "Findings written to: $findings_file"
+}
+
+# ---------------------------------------------------------------------------
+# Filing — the ONLY write path in this script. Gated entirely on the
+# spacedock board file actually existing; never creates it.
+# ---------------------------------------------------------------------------
+_spd_file_findings() {
+    if [ ! -f "$SPD_BOARD" ]; then
+        echo ""
+        echo "XSDK filing UNAVAILABLE — no spacedock board found at:"
+        echo "  $SPD_BOARD"
+        echo "The spacedock team/board does not exist on this host yet (XACA-1068 is"
+        echo "provisioning it). Every diagnostic above still ran and was reported in full;"
+        echo "nothing was filed. Do NOT create this board manually — re-run"
+        echo "'kb-spacedock triage' once XACA-1068 has landed it on this host."
+        return 0
+    fi
+
+    local kh
+    kh=$(_spd_find_kanban_helpers) || {
+        echo ""
+        echo "XSDK filing UNAVAILABLE — a spacedock board exists, but no kanban-helpers.sh"
+        echo "(or ported equivalent) could be located on this host to file through kb-backlog."
+        return 0
+    }
+    local shell
+    shell=$(_spd_kanban_helpers_shell "$kh")
+    if ! _spd_have "$shell"; then
+        echo ""
+        echo "XSDK filing UNAVAILABLE — found kanban-helpers.sh but its interpreter ('$shell') is not on PATH."
+        return 0
+    fi
+
+    echo ""
+    echo "Filing warn/fail/unknown findings to the spacedock board..."
+    local filed=0 f sev surface summary title priority out id
+    for f in "${SPD_FINDINGS[@]+"${SPD_FINDINGS[@]}"}"; do
+        sev=$(printf '%s' "$f" | jq -r '.severity')
+        case "$sev" in
+            warn) priority="medium" ;;
+            fail) priority="critical" ;;
+            unknown) priority="high" ;;
+            *) continue ;;
+        esac
+        surface=$(printf '%s' "$f" | jq -r '.surface')
+        summary=$(printf '%s' "$f" | jq -r '.summary')
+        title="[$surface] $summary"
+
+        out=$(env KB_TEAM=spacedock KB_TERMINAL=triage KB_SPD_KH="$kh" KB_SPD_TITLE="$title" KB_SPD_PRIORITY="$priority" \
+            "$shell" -c 'source "$KB_SPD_KH" >/dev/null 2>&1 && kb-backlog add "$KB_SPD_TITLE" "$KB_SPD_PRIORITY"' 2>&1)
+
+        id=$(printf '%s' "$out" | sed -nE 's/.*Added \[([A-Za-z0-9_-]+)\].*/\1/p' | head -1)
+        if [ -n "$id" ]; then
+            case "$id" in
+                XSDK-*) ;;
+                *) echo "  NOTE: minted id '$id' does not start with 'XSDK-' — possible series/prefix" \
+                        "provisioning bug (tracked as an open question against XACA-1068), not this script's doing." ;;
+            esac
+            echo "  Filed: ${SPD_HOST}/${id}  —  $title"
+            filed=$((filed + 1))
+        else
+            echo "  FAILED to file: $title"
+            printf '%s\n' "$out" | sed 's/^/    /'
+        fi
+    done
+    echo ""
+    echo "$filed finding(s) filed. Cite them cross-machine as <host>/XSDK-nnnn (docs/spacedock-board-hygiene.md)."
+}
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+_spd_usage() {
+    cat <<'USAGE'
+kb-spacedock — Space Dock host-recovery triage entrypoint
+
+Usage:
+  kb-spacedock triage    Run every diagnostic, report, write a findings file,
+                          and file warn/fail/unknown findings as XSDK items
+                          (only if a spacedock board already exists on this
+                          host — never creates one).
+  kb-spacedock report    Same diagnostics + report + findings file. Never
+                          files anything, even if a board exists. Safe to
+                          run repeatedly mid-incident.
+  kb-spacedock verify-reboot
+                          Post-reboot invariant check, ordered by LOCKOUT
+                          RISK (Tier 1: remote lockout risk — FileVault,
+                          autologin, Tailscale, sshd; Tier 2: remote
+                          control/recovery — ARD, screen sharing,
+                          autorestart; Tier 3: the AITeamForge stack; Tier 4:
+                          per-team tmux sessions). Read-only; never files
+                          anything, same as `report`. Productized from the
+                          2026-09-02 darren-m4-mini reboot-survivability
+                          harness (XACA-1071-013) — see the env var
+                          reference in this script's REBOOT-SURVIVABILITY
+                          CHECKS header comment for how to declare this host
+                          as an unattended remote-recovery target
+                          (KB_SPACEDOCK_REBOOT_REMOTE_HOST=1) and override
+                          host-specific expected-value baselines
+                          (FileVault/autologin/ARD naprivs).
+  kb-spacedock help      This text.
+
+Exit code reflects the WORST finding severity across all diagnostics run:
+  0 = all ok/skip   1 = worst is warn   2 = worst is fail or unknown
+
+This tool fronts existing diagnostics — it does not implement any health
+judgement of its own beyond interpreting their documented exit codes/output.
+See docs/spacedock-diagnostic-inventory.md for the full contract per surface.
+USAGE
+}
+
+main() {
+    local cmd="${1:-}"
+    case "$cmd" in
+        triage)
+            _spd_run_all_checks
+            _spd_report "$cmd"
+            _spd_file_findings
+            ;;
+        report)
+            _spd_run_all_checks
+            _spd_report "$cmd"
+            ;;
+        verify-reboot)
+            _spd_reboot_run_all_checks
+            _spd_reboot_report
+            ;;
+        help|-h|--help|"")
+            _spd_usage
+            [ -z "$cmd" ] && return 2
+            return 0
+            ;;
+        *)
+            echo "kb-spacedock: unknown command '$cmd'" >&2
+            _spd_usage >&2
+            return 2
+            ;;
+    esac
+    # NOTE: deliberately NOT `_spd_worst_severity | read code` — the last
+    # stage of a pipeline runs in a subshell under default bash (no
+    # `lastpipe`), so an `exit` there would only end the subshell and this
+    # script would fall through with whatever exit code main() naturally
+    # returns. Capture via command substitution instead, which runs in-shell.
+    local code
+    code=$(_spd_worst_severity)
+    exit "$code"
+}
+
+main "$@"

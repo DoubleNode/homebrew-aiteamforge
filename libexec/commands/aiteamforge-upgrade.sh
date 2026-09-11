@@ -2480,6 +2480,26 @@ PYEOF
 # copy, which this list does not gate). It already carries the .py extension,
 # so — unlike kb-init-team/kb-api-key/kb-msg-provision — it needs no additional
 # glob-sweep entry; being present in THIS list is sufficient.
+# XACA-1071: kb-spacedock is a BRAND-NEW EXTENSIONLESS file — the same gap class
+# as kb-init-team / kb-api-key / kb-msg-provision above, and it needs the SAME
+# PAIR of entries for the same reason. It is Space Dock's host-recovery triage
+# entrypoint: it fronts the diagnostics that already exist (aiteamforge doctor,
+# kb-recover, lcars-health-check.sh --status, kb-sweep-stubs, the auto-upgrade
+# log, and this release's own atf_team_provisioned predicate) and files findings
+# as XSDK items on the per-machine spacedock board. A recovery tool that never
+# reaches the machines that need recovering is worse than no tool at all, so the
+# delivery path matters more here than for most scripts.
+# A FRESH INSTALL gets it free: aiteamforge-setup.sh bulk-copies (and chmod +x's)
+# share/scripts/ wholesale in its "Copying framework files" step. An UPGRADE onto
+# an already-installed box does NOT — update_runtime_helpers()'s default rule is
+# "only refresh what's already there", and an absent target is skipped forever.
+# Every machine in the fleet today is in the second category, which is precisely
+# the XACA-0585 shape (tap installed the lcars-health LaunchAgent but never laid
+# down the script it called — exit 127).
+# THIS ENTRY ALONE IS NOT SUFFICIENT. Being extensionless, it also needs the
+# explicit glob-sweep entry below: the sweep's *.sh / *.py globs cannot match a
+# bare name, and a mandatory-materialize basename that never reaches the sweep
+# loop is never evaluated in the first place (see the XACA-0395 note above).
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -2494,6 +2514,7 @@ kb-api-key
 kb-ttyd-bridge.sh
 kb-host-ready.sh
 kb-msg-provision
+kb-spacedock
 EOF
 }
 
@@ -2519,11 +2540,12 @@ update_runtime_helpers() {
 
   local updated=0
   local src name target
-  # Sweep shipped helpers. kb-init-team, kb-api-key, and kb-msg-provision are
+  # Sweep shipped helpers. kb-init-team, kb-api-key, kb-msg-provision and
+  # kb-spacedock (XACA-1071) are
   # extensionless, so each is listed explicitly alongside the *.sh / *.py
   # globs (XACA-0395: same gap class as kb-init-team — the glob cannot match
   # an extensionless name; kb-msg-provision added under XACA-1078-004).
-  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision; do
+  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock; do
     [ -f "$src" ] || continue
     name="$(basename "$src")"
     target="${scripts_dest}/${name}"
