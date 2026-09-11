@@ -1024,6 +1024,31 @@ else
 fi
 
 echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FAILURE DETAIL DUMP (XACA-0931, round-4).
+#
+# Under tests/test-runner.sh the test_start/test_pass/test_fail helpers come
+# from the RUNNER, which renders progress as dots and records the assertion
+# text only into $TEST_RESULTS_FILE. The runner then reads that file for COUNTS
+# and never prints the messages. Net effect: a suite that fails only in CI is
+# structurally undiagnosable from the CI log — which is exactly what happened
+# on commit 2ab98fb (31/34 in GitHub Actions, 34/34 in four separate local
+# reproductions, with no way to see WHICH assertion tripped).
+#
+# run_test_file() invokes us as `bash "$test_file"` WITHOUT capturing stdout,
+# so anything echoed here reaches the job log. Print the recorded FAIL lines so
+# the next CI run is diagnosable. Best-effort and never fatal: this must not
+# change the suite's own pass/fail outcome.
+if [ "${_STANDALONE:-false}" != true ] && [ -n "${TEST_RESULTS_FILE:-}" ] && [ -f "${TEST_RESULTS_FILE}" ]; then
+    _xaca0931_fail_lines="$(grep '^FAIL:' "$TEST_RESULTS_FILE" 2>/dev/null || true)"
+    if [ -n "$_xaca0931_fail_lines" ]; then
+        echo "─── XACA-0931 failure detail (printed because the runner only reports counts) ───"
+        printf '%s\n' "$_xaca0931_fail_lines"
+        echo "─── end XACA-0931 failure detail ───"
+    fi
+fi
+
 if [ "$_STANDALONE" = true ]; then
     echo "Results: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed"
     [ "$_FAIL_COUNT" -eq 0 ]
