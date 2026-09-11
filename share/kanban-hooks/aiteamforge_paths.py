@@ -628,6 +628,7 @@ _A1_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0522)
 _CONTRACT_SCRUB_ATTEMPTED: bool = False  # once-per-process guard (XACA-0643)
 _BOARD_LESS_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0794)
 _PRIMARY_HOST_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0802)
+_SEED_CONVERGENCE_ATTEMPTED: bool = False  # once-per-process guard (XACA-1161-003)
 
 # XACA-1029 (003/004/005): corrupt-config self-heal safety constants. See the
 # "Bootstrap behaviour" section of the module docstring for the full contract.
@@ -1224,8 +1225,52 @@ def _reread_and_revalidate_once(config_path: Path) -> dict | None:
 # Public API — load_config and friends
 # ---------------------------------------------------------------------------
 
-def load_config() -> dict:
+def layer_default_teams(overlay_teams: dict) -> dict:
+    """Return the UNION team roster: overlay entries, plus DEFAULT_TEAMS-only teams.
+
+    XACA-1161-002. This is deliberately a **team-level** layering, NOT a
+    field-level merge:
+
+      * a team present in *overlay_teams* keeps its overlay entry VERBATIM;
+      * a team present only in DEFAULT_TEAMS is added (as a shallow copy).
+
+    It must stay team-level. Merging field-by-field here would bake a second,
+    dumber precedence rule into the loader — one with no notion of per-field
+    absence sentinels — competing with the resolver in
+    ``kanban-hooks/aiteamforge_registry.py``. Two implementations of the same
+    precedence question is precisely the sibling-heuristic drift (K501) that
+    XACA-1161 exists to remove. Field-level precedence has exactly one home:
+    ``aiteamforge_registry.declare_field()``.
+
+    Pure function: never mutates *overlay_teams*, never touches disk.
+    """
+    layered = dict(overlay_teams)
+    for team_id, entry in DEFAULT_TEAMS.items():
+        if team_id not in layered:
+            layered[team_id] = dict(entry) if isinstance(entry, dict) else entry
+    return layered
+
+
+def load_config(*, include_defaults: bool = False) -> dict:
     """Load, validate, and cache the team-paths config.
+
+    Args:
+        include_defaults: when True, return a NEW dict whose ``teams`` is the
+            union roster produced by :func:`layer_default_teams` (overlay
+            entries win wholesale; DEFAULT_TEAMS-only teams are added). The
+            cached config and the on-disk file are untouched — the union view
+            is built per call and never written back. Default False reproduces
+            the historical behaviour byte-for-byte, so every existing caller
+            (all of which pass no arguments) is unaffected.
+
+    NOTE for consumers: this keyword is a convenience for code that wants the
+    full roster in one dict. It is NOT the read path for individual fields —
+    use ``aiteamforge_registry`` for that, which layers the tiers itself rather
+    than asking this function to pre-layer them. That matters because much of
+    the test suite replaces ``load_config`` with
+    ``mock.patch.object(..., return_value=cfg)``, and a Mock silently accepts
+    and ignores keyword arguments: a resolver that depended on this flag would
+    lose its layering under those mocks with no test failing.
 
     On missing config: bootstraps (see _bootstrap) — write is opt-in only via
     AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1 (XACA-0804); read-only must not write.
@@ -1241,8 +1286,23 @@ def load_config() -> dict:
     Returns a dict with at least {"schema_version": int, "teams": dict}.
     Never raises.
     """
+    config = _load_config_impl()
+    if not include_defaults:
+        return config
+    return {**config, "teams": layer_default_teams(config.get("teams") or {})}
+
+
+def _load_config_impl() -> dict:
+    """The historical load_config() body: read, validate, self-heal, cache.
+
+    Split out by XACA-1161-002 so the public wrapper could grow the
+    ``include_defaults`` view without editing a 280-line function that owns
+    quarantine, bootstrap and the on-disk backfill passes. Behaviour is
+    unchanged; every caller still reaches it through ``load_config()``.
+    """
     global _CONFIG_CACHE, _CONFIG_PATH_AT_LOAD, _A1_BACKFILL_ATTEMPTED, _CONTRACT_SCRUB_ATTEMPTED
     global _BOARD_LESS_BACKFILL_ATTEMPTED, _PRIMARY_HOST_BACKFILL_ATTEMPTED
+    global _SEED_CONVERGENCE_ATTEMPTED
 
     config_path = get_config_path()
     config_path_str = str(config_path)
@@ -1261,7 +1321,7 @@ def load_config() -> dict:
     _path_existed_at_start = config_path.exists()
     # XACA-1029 part (c): set True only on the B2 refuse path (structurally-
     # invalid read whose reseed would remove known teams). Suppresses the
-    # unconditional _bootstrap() reseed AND the four on-disk self-heal
+    # unconditional _bootstrap() reseed AND the on-disk self-heal
     # backfill passes below — both would otherwise re-materialize a fresh
     # file at config_path, defeating "leave it quarantined for a human."
     _refused_team_loss = False
@@ -1445,7 +1505,7 @@ def load_config() -> dict:
         )
         config["teams"] = DEFAULT_TEAMS
 
-    # XACA-1029-004(c): none of the four self-heal passes below may run when
+    # XACA-1029-004(c): none of the self-heal passes below may run when
     # we just REFUSED to reseed a team-losing B2 corrupt file, OR refused a
     # B1 suspect (implausibly short) corrupt file. In the B2 case config_path
     # was quarantined (moved away); in the B1-suspect case it was left
@@ -1497,6 +1557,25 @@ def load_config() -> dict:
             maybe_hosted = _backfill_primary_host_on_disk(config_path, config)
             if maybe_hosted is not None:
                 config = maybe_hosted
+
+        # Seed convergence (XACA-1161-003) — the GENERAL case of the three
+        # field-specific backfills above: materialize into the overlay every
+        # field DEFAULT_TEAMS declares and the overlay entry omits, so the
+        # shell (which reads the overlay and never reads DEFAULT_TEAMS) sees
+        # what Python resolves. Runs LAST so it operates on the final team set
+        # and finds nothing the earlier passes already placed. Same
+        # once-per-process flag discipline, flipped BEFORE the call so a failed
+        # disk write cannot cause a second lock attempt in this process.
+        #
+        # Strictly additive and gated on key ABSENCE, never on value
+        # truthiness — see diff_unconverged_seed_fields() for why that is the
+        # load-bearing property (it is what leaves the `command` entry's
+        # canonical-and-wrong kanban_dir alone, XACA-0939 / K962).
+        if not _SEED_CONVERGENCE_ATTEMPTED:
+            _SEED_CONVERGENCE_ATTEMPTED = True
+            maybe_converged = _converge_seed_fields_on_disk(config_path, config)
+            if maybe_converged is not None:
+                config = maybe_converged
 
     _CONFIG_CACHE = config
     _CONFIG_PATH_AT_LOAD = config_path_str
@@ -1569,9 +1648,10 @@ def diff_missing_anthropic_fields(config: dict) -> list[tuple[str, list[str]]]:
 # Shared on-disk rewrite machinery (XACA-0794-008 / -009 / -012)
 # ---------------------------------------------------------------------------
 #
-# THREE self-healing passes rewrite team-paths.json during load_config():
-# the A.1 field backfill (XACA-0522), the contract scrub (XACA-0643), and the
-# board-less marker backfill (XACA-0794). Each was originally written by cloning
+# FIVE self-healing passes rewrite team-paths.json during load_config(): the
+# contract scrub (XACA-0643), the A.1 field backfill (XACA-0522), the board-less
+# marker backfill (XACA-0794), the primary_host backfill (XACA-0802), and the
+# seed convergence (XACA-1161-003). The first three were written by cloning
 # the previous one, so each carried its own copy of the same lock / TOCTOU /
 # backup / atomic-write skeleton — and therefore its own copy of the same three
 # defects. That is the k501 sibling-heuristic drift failure mode, and patching
@@ -1579,7 +1659,9 @@ def diff_missing_anthropic_fields(config: dict) -> list[tuple[str, list[str]]]:
 #
 # The skeleton now lives HERE, once. The passes below supply only what actually
 # differs between them: a predicate, a transform, a backup tag, and a log label.
-# A fourth pass must reuse this driver rather than clone it.
+# Any further pass must reuse this driver rather than clone it. Deliberately no
+# count is stated in the sentence above's place: an ordinal in a comment is a
+# number that goes stale silently, which is the failure class XACA-1161 is about.
 
 
 def _reject_if_below_write_floor(data: dict, *, resolved: Path | None = None) -> str:
@@ -2050,6 +2132,186 @@ def _backfill_primary_host_on_disk(config_path: Path, current: dict) -> dict | N
         ],
     )
 
+
+# ---------------------------------------------------------------------------
+# Read-time seed convergence (XACA-1161-003)
+# ---------------------------------------------------------------------------
+
+def _registry_field_rule():
+    """Return ``aiteamforge_registry.is_declared_value``, or None if unavailable.
+
+    Lazy, in-function import on purpose. ``aiteamforge_registry`` imports THIS
+    module at module scope, so a top-level import here would be a cycle. The
+    imported callable is pure (no I/O, no ``load_config()`` call), so calling it
+    from inside the loader cannot re-enter the loader.
+
+    Returns None — which the caller treats as "skip the migration entirely" —
+    when the resolver cannot be imported. That is the fail-CLOSED direction for
+    this particular pass: not converging leaves the overlay exactly as the user
+    has it, whereas converging under a guessed sentinel rule would write real
+    values where absences belong (and vice versa) on machines nobody is watching.
+    A local re-implementation of the rule would be the K501 drift this ticket
+    exists to remove, so there is deliberately no fallback rule here.
+    """
+    try:
+        import aiteamforge_registry
+        return aiteamforge_registry.is_declared_value
+    except Exception as exc:  # ImportError, or a broken module
+        print(
+            f"[aiteamforge-paths] seed convergence: aiteamforge_registry "
+            f"unavailable ({exc}) — skipping the migration. The overlay is left "
+            f"exactly as-is; no fallback sentinel rule is guessed (XACA-1161-003).",
+            file=sys.stderr,
+        )
+        return None
+
+
+def diff_unconverged_seed_fields(config: dict) -> list[tuple[str, list[str]]]:
+    """Return ``[(team_slug, [field, ...]), ...]`` for fields DEFAULT_TEAMS declares
+    and the overlay entry does not carry the KEY for.
+
+    The predicate half of the XACA-1161-003 read-time convergence migration.
+    Pure — never mutates, never touches disk, never raises. Empty list means
+    already converged (skip-fast: no lock, no backup, no write).
+
+    A field qualifies ONLY when all four hold:
+
+      1. the slug has an entry in BOTH the overlay and ``DEFAULT_TEAMS``
+         (a DEFAULT_TEAMS-only team is NOT added to the overlay — see below);
+      2. ``DEFAULT_TEAMS`` declares the field;
+      3. that declared value is a REAL value under *that field's own* sentinel
+         rule (``aiteamforge_registry.is_declared_value``) — a declared absence
+         is not propagated, because writing ``"null"`` into an overlay that
+         merely omits the key converts NOT_DECLARED into DECLARED_ABSENT and
+         stops the shell's own fallback chain one tier early;
+      4. the overlay entry does NOT already have the key — **key presence, never
+         value truthiness**. This is the strictly-additive guarantee and it is
+         what protects two live cases at once:
+
+           * the five overlay-only licence fields (``component_label``,
+             ``copyright_owner``, ``license_type``, ``notice_template``,
+             ``year_start``), which exist in NEITHER seed (finding F6) and so
+             are never a candidate to write and never a candidate to remove;
+           * the ``command`` entry, whose overlay ``kanban_dir``/``working_dir``
+             point at a pytest fixture under ``$TMPDIR`` while DEFAULT_TEAMS
+             holds the real path (MEASURED 2026-09-10). The overlay is the
+             canonical side AND the stale side simultaneously (K962). The keys
+             are PRESENT, so this pass leaves them completely alone. Repairing
+             them is XACA-0939's job, not a loader's — a migration that
+             "corrects" toward whichever tier looks healthier is a mechanism
+             for propagating stale data with full confidence, which is exactly
+             how XACA-0998 nearly caused an outage.
+
+    Why the roster is never grown: adding a DEFAULT_TEAMS-only team to the
+    overlay would be a ROSTER write, not a field convergence, and the roster is
+    host-dependent by construction (``primary_host``, the per-machine ``.port``
+    files). Callers that want the union view already have it —
+    :func:`load_config` ``(include_defaults=True)`` / :func:`layer_default_teams`
+    build it in memory without touching disk.
+    """
+    is_declared = _registry_field_rule()
+    if is_declared is None:
+        return []
+    result: list[tuple[str, list[str]]] = []
+    for slug, entry in sorted((config.get("teams") or {}).items()):
+        if not isinstance(entry, dict):
+            continue
+        seed = DEFAULT_TEAMS.get(slug)
+        if not isinstance(seed, dict):
+            continue
+        missing = [
+            field
+            for field, value in seed.items()
+            if field not in entry and is_declared(field, value)
+        ]
+        if missing:
+            result.append((slug, sorted(missing)))
+    return result
+
+
+def apply_seed_convergence(config: dict) -> dict:
+    """Return a copy of *config* with DEFAULT_TEAMS-declared fields materialized
+    into overlay entries that omit them (XACA-1161-003).
+
+    STRICTLY ADDITIVE, in the same shape as :func:`apply_board_less_markers` and
+    :func:`apply_primary_host`, of which this is the general case:
+
+      - adds ONLY keys the overlay entry does not already have;
+      - never removes a key, never rewrites an existing value (not even an
+        empty one, not even one that disagrees with DEFAULT_TEAMS);
+      - never adds a team, never removes a team;
+      - never derives: every value written is one ``DEFAULT_TEAMS`` literally
+        declares. Nothing is computed, inferred, or defaulted (K659).
+
+    IDEMPOTENT by construction — the predicate gates on key ABSENCE, so every
+    key this pass writes makes its own trigger false. A second pass finds
+    nothing and is a skip-fast no-op, which is why the on-disk file after two
+    runs is byte-identical rather than merely equivalent. Asserted empirically
+    by hash comparison in the tests, not by this argument.
+
+    The input config is never mutated; a deep copy is returned.
+    """
+    import copy
+    upgraded = copy.deepcopy(config)
+    teams = upgraded.get("teams") or {}
+    for slug, fields in diff_unconverged_seed_fields(config):
+        entry = teams.get(slug)
+        if not isinstance(entry, dict):
+            continue
+        seed = DEFAULT_TEAMS.get(slug) or {}
+        for field in fields:
+            if field in entry:
+                continue  # belt-and-braces: never overwrite
+            entry[field] = copy.deepcopy(seed[field])
+    return upgraded
+
+
+def _converge_seed_fields_on_disk(config_path: Path, current: dict) -> dict | None:
+    """Snapshot, lock, materialize DEFAULT_TEAMS-declared fields, atomically rewrite.
+
+    The XACA-1161-003 read-time convergence migration (K830). The shell side
+    reads the OVERLAY first and then its own positional 7-column table; it never
+    reads ``DEFAULT_TEAMS``. So a field the Python seed declares and the overlay
+    omits is a field Python resolves and shell cannot — the drift is invisible
+    until something disagrees. Materializing it into the overlay on first read
+    converges the two read paths without asking the two seeds to stay in
+    lockstep, which K830 records as unexecutable here: the shell table's column
+    count is a shipped parser contract and cannot grow to hold the 11 named
+    fields it has no slot for.
+
+    Returns the converged config when a change is made, or None when there is
+    nothing to do (skip-fast — no lock, no backup, no write). Never raises.
+
+    Backup and write mechanics live in :func:`_rewrite_config_on_disk`; this
+    pass owns NO copy of the lock / TOCTOU / backup / atomic-write skeleton.
+    Two properties of that driver matter enough to restate here:
+
+      * the backup is ``<name>.bak-pre-xaca-1161-converge-<YYYYmmdd-HHMMSS>``,
+        written with ``write_bytes`` (a fresh inode, a fresh mtime) rather than
+        ``copy2``/``cp -p``. ``copy2`` would stamp the backup with the SOURCE's
+        mtime, which INVERTS write attribution during later forensics — the
+        backup would look older or newer than the event that created it. The
+        ticket id and a real wall-clock timestamp are in the FILENAME, so the
+        backup's provenance never depends on its mtime.
+      * the write is tmp-file-in-the-same-directory, ``fsync``, then
+        ``os.replace`` — never truncate-in-place. A crash mid-write is exactly
+        how this registry collapsed into the zero-byte files XACA-1029 was
+        filed for.
+    """
+    return _rewrite_config_on_disk(
+        config_path,
+        current,
+        label="seed convergence",
+        backup_tag="xaca-1161-converge",
+        needs_change=diff_unconverged_seed_fields,
+        transform=apply_seed_convergence,
+        describe=lambda cfg: [
+            f"team={slug} fields={fields} (XACA-1161-003 — materialized from "
+            f"DEFAULT_TEAMS so the shell overlay read sees what Python resolves; "
+            f"existing keys were NOT touched)"
+            for slug, fields in diff_unconverged_seed_fields(cfg)
+        ],
+    )
 
 # ---------------------------------------------------------------------------
 # Team accessor functions

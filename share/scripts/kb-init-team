@@ -39,25 +39,92 @@
 #     4. ~/.aiteamforge/team-paths.json — live runtime overlay
 #
 #   FALLBACK INSURANCE (hardcoded case statements; must stay mirrored with registry):
-#     5.  RETIRED (XACA-1058): kanban-helpers.sh _kb_get_team_code() no longer
-#         carries a per-team case arm. XACA-1058 deleted the derivation
-#         heuristic these arms fed (a wrong-but-plausible code minted for any
-#         unrecognized slug) and made Site 4's overlay the sole authoritative
-#         source, read FIRST by _kb_get_team_code() ahead of any case
-#         statement — a per-team arm here would just be a redundant,
-#         driftable second copy of Site 4, which is exactly the defect this
-#         ticket removes. Kept as a numbered no-op (see Site 10's precedent)
-#         so the site numbering below doesn't shift.
-#     6.  RETIRED (XACA-1058): kanban-helpers.sh _kb_get_team_from_code() case
-#         — same rationale as Site 5, reverse direction. _kb_overlay_code_to_slug
-#         already resolves every overlay-registered team_code back to its slug
-#         from the same Site-4 entry, ahead of any case statement.
-#     7.  kanban-helpers.sh _kb_get_kanban_dir() case
-#     8.  kanban-helpers.sh _kb_team_lcars_port() case
-#     9.  claude/statusline-command.sh _get_team_kanban_dir() case
+#
+#     ┌─ READ vs WRITE — read this before touching sites 5-9 (XACA-1161) ─────┐
+#     │ "Retired" is ambiguous here and the ambiguity has already caused a    │
+#     │ real defect. A site has TWO paths:                                    │
+#     │                                                                       │
+#     │   WRITE path — does kb-init-team INSERT a case arm for a new team?    │
+#     │   READ  path — do the arms ALREADY THERE still resolve and return?    │
+#     │                                                                       │
+#     │ XACA-1058 retired the WRITE path of sites 5 and 6. It did NOT retire  │
+#     │ their READ path. Both still carry live case tables that return values │
+#     │ today. A previous revision of this header called sites 5, 6 and 10    │
+#     │ "RETIRED" without that qualifier; that claim was copied into the      │
+#     │ XACA-1161 ticket description and nearly into the XACA-1161-007 CI     │
+#     │ drift guard, which would have skipped two live read sites and         │
+#     │ inherited exactly the fail-open shape that guard exists to close.     │
+#     │                                                                       │
+#     │ MEASURED 2026-09-10 — ONLY SITE 10 IS FULLY RETIRED.                  │
+#     └───────────────────────────────────────────────────────────────────────┘
+#
+#     5.  WRITE PATH RETIRED (XACA-1058) / READ PATH LIVE.
+#         kanban-helpers.sh _kb_get_team_code().
+#         kb-init-team no longer inserts a per-team arm here: XACA-1058 deleted
+#         the derivation heuristic these arms fed (a wrong-but-plausible code
+#         minted for any unrecognized slug) and made Site 4's overlay the sole
+#         authoritative source, read FIRST ahead of any case statement. A new
+#         per-team arm would be a redundant, driftable second copy of Site 4.
+#         BUT THE EXISTING ARMS STILL RESOLVE. Verify before assuming otherwise:
+#           awk '/^_kb_get_team_code\(\)/,/^}/' kanban-helpers.sh \
+#             | grep -cE '^[[:space:]]*[a-z][a-z0-9-]*\)'      # -> 31 arm lines
+#         31 case-arm lines across THREE tables, 11 distinct slugs. Two tables
+#         are overlay/built-in disagreement warnings; the third is a live
+#         resolution fallback that RETURNS a team_code when the overlay misses
+#         AND the shell loader is unavailable — which is the normal state on
+#         every tap consumer (see the LOADER DISCOVERY note below).
+#     6.  WRITE PATH RETIRED (XACA-1058) / READ PATH LIVE.
+#         kanban-helpers.sh _kb_get_team_from_code() — same as Site 5, reverse
+#         direction. _kb_overlay_code_to_slug resolves overlay-registered codes
+#         ahead of the case statement, so no new arm is inserted; the existing
+#         CODE) -> slug table still fires when overlay reverse-lookup and the
+#         shell loader both miss.
+#           awk '/^_kb_get_team_from_code\(\)/,/^}/' kanban-helpers.sh \
+#             | grep -oE '^[[:space:]]*[A-Z]{3}\)'
+#         -> ACA AND CMD DNS FIN FIR FRE IOS LCP MED MEV  (11 live codes)
+#     7.  kanban-helpers.sh _kb_get_kanban_dir() case          (READ + WRITE live)
+#     8.  kanban-helpers.sh _kb_team_lcars_port() case         (READ + WRITE live)
+#     9.  claude/statusline-command.sh _get_team_kanban_dir()  (READ + WRITE live)
+#
+#     ── DO NOT TRUST THE "MUST EXACTLY MIRROR DEFAULT_TEAMS" COMMENTS ──
+#     Sites 5 and 6 each carry, directly above their table, a comment reading
+#     "MUST EXACTLY MIRROR DEFAULT_TEAMS team_code values in
+#     aiteamforge_paths.py" — sitting above an arm reading `freelance) "FRE"`.
+#     DEFAULT_TEAMS has no freelance entry (removed by XACA-0628); the SHELL
+#     seed does. Those comments name the wrong seed. Verify by importing the
+#     symbol, not by grepping the file (a literal "freelance": also appears in
+#     an unrelated port-band dict, so a naive grep answers "present"):
+#       python3 -c "import sys; sys.path.insert(0,'kanban-hooks'); \
+#         import aiteamforge_paths as P; print('freelance' in P.DEFAULT_TEAMS)"
+#       -> False
+#     Do not add a third comment of that shape.
+#
+#     ── LOADER DISCOVERY IS BROKEN ON CONSUMERS — why 5-9 cannot be retired ──
+#     XACA-1161 set out to retire these tables and DID NOT, because on a tap
+#     consumer they are the ONLY registry that exists. kanban-helpers.sh lines
+#     37-39 probe three paths for the shell loader; all three are dead there:
+#       1. ${HOME}/dev-team/homebrew-tap/... — the dev repo. M3Pro only.
+#       2. $(brew --prefix)/share/aiteamforge/... — a directory nothing in the
+#          tap ever creates (share/aiteamforge-env.sh is a FILE in share/, not
+#          a share/aiteamforge/ DIRECTORY — do not confuse them).
+#       3. ${HOME}/.aiteamforge/lib/... — a file nothing ever writes; all 8
+#          code references to that path are this candidate list itself.
+#     The formula does `libexec.install Dir["*"]`, so the loader installs to a
+#     DOUBLED path — $(brew --prefix)/opt/aiteamforge/libexec/libexec/lib/ —
+#     which the formula's own `test do` block asserts, and which matches none
+#     of the three candidates. On THIS machine candidate 1 resolves, so tests
+#     pass here and the breakage appears only on boxes nobody is watching.
+#     Fixing discovery is the prerequisite and is tracked on XACA-1133.
+#     Full evidence: docs/registry/xaca-1161-outcome.md section 3.
 #
 #   STATIC MAPS (not derivable from registry):
-#     10. RETIRED (XACA-0992): lcars-ui/server.py's per-team `team_dir_map`
+#     10. FULLY RETIRED (XACA-0992) — BOTH read and write paths. This is the
+#         ONLY site in this register for which the unqualified word "retired"
+#         is accurate; sites 5 and 6 above retired their WRITE path only.
+#         Re-verify with a control so a broken grep cannot read as "clean":
+#           grep -c 'team_dir_map'      lcars-ui/server.py   # -> 0 (gone)
+#           grep -c '_resolve_base_team' lcars-ui/server.py  # -> 8 (control)
+#         lcars-ui/server.py's per-team `team_dir_map`
 #         dict this site used to populate was replaced by the generic
 #         _resolve_base_team()/_split_team_id() rule (splits any team id on
 #         its first hyphen — no per-team registration needed at all). This
@@ -93,6 +160,32 @@
 #         nothing left to ask). Full contract:
 #         kanban/plans/XACA-1078/XACA-1078_msg_routing_provisioning.md,
 #         section "The Unattended-Write Contract".
+#
+#   REACHABILITY (not a value store — XACA-1161 addition; the original
+#   15-site register omitted it entirely):
+#     16. homebrew-tap/share/teams/registry.json — the installable-template
+#         catalog. It holds NO registry-schema fields at all; measured, the
+#         union of its entry keys is exactly:
+#           category, color, description, icon, id, name, order, recommended, theme
+#         Verify (and note the control, which prints NONE rather than nothing):
+#           python3 -c "import json; d=json.load(open('homebrew-tap/share/teams/registry.json')); \
+#             k=set().union(*(set(e) for e in d['teams'])); print(sorted(k)); \
+#             print(sorted(k & {'kanban_dir','working_dir','team_code','lcars_port', \
+#             'lcars_port_base','lcars_port_range','primary_host','alias_of','board_less'}) or 'NONE')"
+#         It is nonetheless a registration site, because it decides whether a
+#         seed row is REACHABLE: a team correctly registered in both seeds but
+#         absent from this catalog is not installable. Treat it as a
+#         REACHABILITY site, not a value site — never join it to a seed
+#         expecting field data.
+#         CAUTION: its ids are TEMPLATE ids, not runtime slugs, and they
+#         differ — it lists `legal`, `medical`, `finance`, `freelance` where
+#         the runtime slugs are `legal-coparenting`, `medical-general`,
+#         `finance-personal`, and per-project `freelance-<client>-<project>`.
+#         Anything joining this file to a seed on `id` must MAP, not match.
+#         The XACA-1161-007 drift guard asserts, via the real resolver rather
+#         than a re-implementation of it, that every template listed here still
+#         resolves a port band — which is what holds the load-bearing
+#         shell-only `freelance` seed row in place.
 #
 #   DERIVES AUTOMATICALLY (no explicit insert needed after #1):
 #     - kanban_utils._TEAM_CODE_MAP — built from build_team_code_map() at import
@@ -287,12 +380,22 @@ NON_INTERACTIVE=0
 BACKFILL_TIERS=0
 
 usage() {
-    # XACA-1078-003: bumped from 60 -> 104 to actually surface the new
-    # "MACHINE ROUTING" site-15 doc block (and, as a side effect, sites
-    # 12-14 / IDEMPOTENCY / TAP MIRROR NOTE below it, which the old cutoff
-    # silently omitted from --help even though they were already in the
-    # header comment).
-    head -104 "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+    # XACA-1161-008: NO hardcoded line count. This was `head -60`, then
+    # `head -104` (XACA-1078-003), and each time the header grew past the
+    # magic number --help silently truncated -- omitting documentation that
+    # WAS in the file, with no error and no visible sign anything was missing.
+    # That is the same fail-quiet shape this whole ticket is about: truncated
+    # output and complete output are indistinguishable to the reader. Adding
+    # the sites 5/6/10 read-vs-write correction and site 16 overran 104 and
+    # cut --help off mid-sentence, which is how it was found.
+    #
+    # Print the leading comment block by its STRUCTURE instead: everything
+    # from line 2 (past the shebang) up to the first line that is not a
+    # comment. Self-maintaining -- the header can grow or shrink freely and
+    # --help always shows exactly all of it.
+    awk 'NR == 1 { next }                  # skip shebang
+         /^#/    { sub(/^# ?/, ""); print; next }
+                 { exit }' "${BASH_SOURCE[0]}"
     exit 0
 }
 
