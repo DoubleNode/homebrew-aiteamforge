@@ -137,7 +137,31 @@ _mk_conf() {
 _mk_project_git_root() {
     local d="$1"
     mkdir -p "$d"
-    ( cd "$d" && git init -q . && git config user.email t@t.test && git config user.name t ) >/dev/null 2>&1
+    # XACA-0931 round-4: do NOT swallow failures here. A helper that silently
+    # yields a non-repo produces a fixture the enumerator correctly rejects,
+    # and the test then fails far away with a misleading message — which is
+    # exactly what happened on the GitHub macos-latest runner (TC1/TC4/TC7 all
+    # reported "nothing deployed" with no indication the fixture was the
+    # problem). Capture the output and assert the result is a real git root.
+    local _gi_out
+    if ! _gi_out=$( cd "$d" && git init -q . && git config user.email t@t.test && git config user.name t 2>&1 ); then
+        echo "FIXTURE ERROR: git init failed in ${d}: ${_gi_out}" >&2
+        return 1
+    fi
+    local _top
+    if ! _top=$( git -C "$d" rev-parse --show-toplevel 2>&1 ); then
+        echo "FIXTURE ERROR: ${d} is not a git root after init: ${_top}" >&2
+        return 1
+    fi
+    # The enumerator compares canonicalized paths, so a canonicalization
+    # mismatch here (e.g. /var vs /private/var on macOS) would make a
+    # perfectly-created repo invisible. Surface it rather than hiding it.
+    local _cd _ct
+    _cd=$( cd "$d" && pwd -P )
+    _ct=$( cd "$_top" && pwd -P )
+    if [ "$_cd" != "$_ct" ]; then
+        echo "FIXTURE WARN: canonicalized project dir (${_cd}) != canonicalized git toplevel (${_ct})" >&2
+    fi
 }
 
 # _mk_deployed_agents <project_dir> [with_marker]
