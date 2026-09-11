@@ -315,20 +315,40 @@ bump
 # Case 12 — the port map agrees with the forward lookup for every team it lists
 # (the XACA-0799 round-trip invariant, now structural rather than fill-loop).
 # ═══════════════════════════════════════════════════════════════════════════
+# XACA-1161 review finding: BOTH cases below are vacuous on an EMPTY map — the
+# while-loop body never runs and `grep -c` returns 0, so a totally broken emitter
+# (`return 0`) passes them. That is not hypothetical: this map genuinely returns
+# empty when the overlay file is absent (fresh install, CI sandbox), which is
+# precisely the state these cases exist to catch. Guard non-emptiness FIRST, so
+# the subsequent assertions can only pass for the right reason.
+_map_rows=$(aiteamforge_lcars_port_team_map | grep -c .)
+test_start "XACA-1161-004: the port->team map is NON-EMPTY (guards the two cases below from passing vacuously)"
+if [ "${_map_rows:-0}" -gt 0 ]; then
+    assert_equal "map_nonempty=yes" "map_nonempty=yes"
+else
+    assert_equal "map_nonempty=no(rows=${_map_rows})" "map_nonempty=yes"
+fi
+bump
+
 test_start "XACA-1161-004: every (port,team) the map emits round-trips through the forward lookup"
 _mismatch=""
+_seen=0
 while IFS=$'\t' read -r _p _t; do
     [ -z "$_p" ] && continue
+    _seen=$((_seen + 1))
     _fwd=$(aiteamforge_team_lcars_port "$_t" 2>/dev/null) || _fwd="<none>"
     [ "$_fwd" = "$_p" ] || _mismatch="${_mismatch} ${_t}(map=${_p},fwd=${_fwd})"
 done <<EOF
 $(aiteamforge_lcars_port_team_map)
 EOF
-assert_equal "mismatches=[${_mismatch}]" "mismatches=[]"
+# Assert we actually iterated something, so "no mismatches" cannot mean "no rows".
+assert_equal "iterated=$([ "$_seen" -gt 0 ] && echo yes || echo no) mismatches=[${_mismatch}]" "iterated=yes mismatches=[]"
 bump
 
 test_start "XACA-1161-004: a DECLARED-null port keeps the team out of the map"
-assert_equal "$(aiteamforge_lcars_port_team_map | grep -c 'x_seedless_nullport')" "0"
+# Paired with the non-emptiness guard above: absent that, grep -c on an empty
+# map returns 0 and this passes while proving nothing.
+assert_equal "rows_gt_0=$([ "${_map_rows:-0}" -gt 0 ] && echo yes || echo no) nullport_rows=$(aiteamforge_lcars_port_team_map | grep -c 'x_seedless_nullport')" "rows_gt_0=yes nullport_rows=0"
 bump
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -446,11 +466,11 @@ bump
 # Guard — a suite that silently stops asserting is indistinguishable from a
 # passing one. Pin the count. (Same guard shape as test-xaca-0822.)
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "XACA-1161-004: expected-assertion-count guard (26 cases expected)"
+test_start "XACA-1161-004: expected-assertion-count guard (27 cases expected)"
 # NOTE: this pin is a SUITE-SIZE pin, not a registry pin. It exists because a
 # suite that silently stops asserting is indistinguishable from a passing one.
 # It moves only when a case is deliberately added or removed here.
-assert_equal "$_ASSERTIONS" "26"
+assert_equal "$_ASSERTIONS" "27"
 
 if [ "$_STANDALONE" = true ]; then
     printf "\nResults: %d passed, %d failed\n" "$_PASS_COUNT" "$_FAIL_COUNT"
