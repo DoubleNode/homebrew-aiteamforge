@@ -1094,7 +1094,10 @@ echo ""
 # four separate local reproductions reported 34 of 34 — and the CI log gave no
 # way to see WHICH assertion tripped. Both figures are historical: the suite had
 # 34 tests at that commit, and stands at 35 today (TG1b was added afterwards).
-# Current count: `grep -c 'test_start "' <this file>`.
+# Current count: `grep -c '^test_start "' <this file>`. The ^ anchor is load-
+# bearing, not style: unanchored, the pattern matches THIS COMMENT LINE too and
+# reports one more than the real total — a self-verifying citation that verifies
+# itself into the wrong answer.
 #
 # run_test_file() invokes us as `bash "$test_file"` WITHOUT capturing stdout,
 # so anything echoed here reaches the job log. Print the recorded FAIL lines so
