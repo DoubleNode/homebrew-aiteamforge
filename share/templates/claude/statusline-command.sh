@@ -89,7 +89,19 @@ _get_team_kanban_dir() {
         legal-coparenting)              echo "${HOME}/legal/coparenting/kanban" ;;
         finance-personal)               echo "${HOME}/finance/personal/kanban" ;;
         medical|medical-general)        echo "${HOME}/medical/general/kanban" ;;
-        *)                              echo "${HOME}/dev-team/kanban" ;;
+        # XACA-1161: this default arm used to `echo "${HOME}/dev-team/kanban"`,
+        # so EVERY unregistered team — and the empty string, and a typo — silently
+        # resolved to Academy's board with rc=0. Callers then read and wrote another
+        # team's kanban. A wrong-but-plausible path is worse than an error here,
+        # because nothing downstream can tell it was wrong. Refuse loudly instead;
+        # site 7 (_kb_get_kanban_dir) was hardened against this same class in
+        # XACA-0383 and this copy never was.
+        #
+        # The arms ABOVE are deliberately retained: on a tap consumer the
+        # aiteamforge-paths loader is not discoverable at any of the paths this
+        # script probes, so they are the ONLY registry this function has. Do not
+        # retire them to resolver calls until loader discovery is fixed (XACA-1133).
+        *)                              return 1 ;;
     esac
 }
 
