@@ -16,6 +16,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   exists yet, so nothing uses the SNW assets until one is registered. This copies
   only XACA-1164's 68 files, one by one. It is not a full sync, because the tap has
   other tickets' unrelated drift that this commit leaves alone.
+- XACA-1164-018/019: Mirror the division colours and the Space Dock title fix.
+  `lcars-fleet-theme.css` gains `.div-spacedock` (`#cc66ff`) and `.div-snw` (`#cc9966`)
+  with matching border colours, `getDivisionColorClass()` maps both codes, and the
+  Space Dock title is now `STARFLEET SPACE DOCK` in both dashboards.
 - **XACA-0931 / XACA-0865 — the new persona-deploy suite (35 tests; `grep -c 'test_start "'`)
   ships QUARANTINED, and
   while quarantined it gates nothing.** `tests/test-xaca-0931-persona-deploy-and-parity.sh`

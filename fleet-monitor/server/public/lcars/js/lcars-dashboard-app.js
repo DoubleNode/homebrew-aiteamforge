@@ -3128,7 +3128,7 @@
             'medical': 'MEDICAL - HOUSE MD',
             'medical-general': 'MEDICAL - HOUSE MD',
             'snw': 'SNW - STAR TREK: STRANGE NEW WORLDS',
-            'spacedock': 'SPACE DOCK - STAR TREK: SPACE DOCK'
+            'spacedock': 'STARFLEET SPACE DOCK'
         };
         if (!titles[code] && code.startsWith('freelance')) {
             const suffix = code.replace('freelance-', '').toUpperCase();
@@ -3209,7 +3209,9 @@
             'freelance-doublenode-appplanning': 'div-freelance-doublenode-appplanning',
             'academy': 'div-academy',
             'medical': 'div-medical',
-            'medical-general': 'div-medical'
+            'medical-general': 'div-medical',
+            'snw': 'div-snw',
+            'spacedock': 'div-spacedock'
         };
         if (!colors[code] && code.startsWith('freelance')) {
             return 'div-freelance';

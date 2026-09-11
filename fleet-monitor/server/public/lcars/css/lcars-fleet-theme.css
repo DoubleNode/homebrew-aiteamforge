@@ -131,6 +131,12 @@
     /* Academy Division */
     --div-academy: var(--lcars-peach);        /* Academy - Peach */
 
+    /* Space Dock + Strange New Worlds (XACA-1164). Raw hex on purpose: the
+       purple/brass families are crowded, and these are the same values
+       lcars-ui/css/lcars.css (--div-spacedock) and the asset prompts chose. */
+    --div-spacedock: #cc66ff;                 /* Space Dock - Violet */
+    --div-snw: #cc9966;                       /* SNW - Brass */
+
     /* Personal Divisions */
     --div-legal: var(--lcars-green);          /* Legal - Green */
     --div-legal-coparenting: var(--lcars-green-dark);  /* Coparenting - Dark Green */
@@ -237,6 +243,8 @@
 .div-freelance-starwords { --div-color: var(--div-freelance-starwords); }
 .div-freelance-workstats { --div-color: var(--div-freelance-workstats); }
 .div-academy { --div-color: var(--div-academy); }
+.div-spacedock { --div-color: var(--div-spacedock); }
+.div-snw { --div-color: var(--div-snw); }
 
 /* Organization Panel Styling - L-frame border uses org color */
 .organization-panel {
@@ -3300,6 +3308,8 @@
 .team-terminal-logo.div-dns { border-color: var(--lcars-cyan); }
 .team-terminal-logo.div-mainevent { border-color: var(--lcars-crimson, #cc6666); }
 .team-terminal-logo.div-freelance { border-color: var(--lcars-teal, #66cccc); }
+.team-terminal-logo.div-spacedock { border-color: var(--div-spacedock); }
+.team-terminal-logo.div-snw { border-color: var(--div-snw); }
 
 /* Avatar image - rounded square, below terminal logo, same size */
 .team-avatar-stack .team-avatar {
@@ -3321,6 +3331,8 @@
 .team-avatar-stack .team-avatar.div-dns { border-color: var(--lcars-cyan); }
 .team-avatar-stack .team-avatar.div-mainevent { border-color: var(--lcars-crimson, #cc6666); }
 .team-avatar-stack .team-avatar.div-freelance { border-color: var(--lcars-teal, #66cccc); }
+.team-avatar-stack .team-avatar.div-spacedock { border-color: var(--div-spacedock); }
+.team-avatar-stack .team-avatar.div-snw { border-color: var(--div-snw); }
 
 /* Hover effects on the stack */
 .team-avatar-stack:hover .team-terminal-logo {

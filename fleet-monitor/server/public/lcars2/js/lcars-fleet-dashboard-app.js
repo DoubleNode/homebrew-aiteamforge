@@ -1088,7 +1088,7 @@
             'legal': 'COPARENTING',
             'legal-coparenting': 'COPARENTING',
             'snw': 'SNW - STAR TREK: STRANGE NEW WORLDS',
-            'spacedock': 'SPACE DOCK - STAR TREK: SPACE DOCK'
+            'spacedock': 'STARFLEET SPACE DOCK'
         };
         // Fallback for any legal-* variant
         if (!titles[code] && code.startsWith('legal')) {
