@@ -2774,6 +2774,26 @@ _xaca0925_refresh_team_personas() {
 # ---------------------------------------------------------------------------
 # _xaca0931_load_persona_targets
 #
+# DELIBERATELY CALLED TWICE PER UPGRADE RUN (once from update_team_personas,
+# once from deploy_team_personas_to_projects) — this is not an oversight, and
+# it should not be "optimised" into a single cached enumeration (raised and
+# considered as a review finding on PR #861).
+#
+# WHY: the two calls BRACKET the source-repair step. update_team_personas can
+# CREATE a team's working-dir persona source directory that did not exist when
+# the first enumeration ran (the dns/mainevent case in XACA-0925, and any
+# discovered-but-unconfigured team here). A cached first result is therefore a
+# pre-repair view of the filesystem, and acting on it in the deploy phase is a
+# stale-read bug in a function whose entire job is deciding what to overwrite.
+# Re-enumerating costs one git-root walk over a handful of project dirs; a
+# stale cache costs correctness on exactly the targets this ticket exists for.
+#
+# Secondary reason: this file's target-enumeration path already shipped one
+# subshell-visibility defect (a global assigned inside a process-substitution
+# subshell never reaching the caller — why pt_enumerate_targets communicates
+# its uninspectable count via a stdout trailer line instead of a variable).
+# Adding cache state shared across two top-level phases reopens that class.
+#
 # Call pt_enumerate_targets (lib/persona-targets.sh) and parse its output into
 # two globals: _XACA0931_TARGETS (array of "team<TAB>project_dir" elements)
 # and _XACA0931_TARGETS_UNINSPECTABLE (count).
