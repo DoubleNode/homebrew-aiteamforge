@@ -640,7 +640,7 @@ SPD_TEAMS_EOF
     # so reporting a confident `fail` list off it would be worse than saying so.
     if [ -n "$broken" ]; then
         _spd_emit "mandatory-teams" "unknown" \
-            "atf_team_provisioned returned an out-of-contract exit code for:$broken (contract is 0=provisioned, 1=not) — the predicate is broken, so provisioning state is UNKNOWN, not failed" \
+            "atf_team_provisioned returned an out-of-contract exit code for:$broken (contract is 0=provisioned, 1=not) — the predicate is broken, so provisioning state is UNKNOWN, not failed.${missing:+ Also reported not-provisioned (treat as unconfirmed while the predicate is broken):$missing}" \
             "$teams_out" ""
     elif [ -n "$missing" ]; then
         _spd_emit "mandatory-teams" "fail" "mandatory team(s) not provisioned on this host:$missing" "$teams_out" ""
@@ -831,16 +831,27 @@ _spd_reboot_check_filevault() {
     # a probe that never produced one. Note `2>&1` is deliberate here (fdesetup
     # writes useful text to stderr) — which is exactly why the rc must be read
     # separately rather than inferred from the output being non-empty.
+    # PR #869 review round 3 [Review]-019: PARSE FIRST, rc only as fallback.
+    # An earlier revision of this fix gated on rc BEFORE looking at the output.
+    # That was unsafe in a way this box cannot detect: `fdesetup status` on a
+    # FileVault-OFF host is UNMEASURED here (this machine is FileVault On), and
+    # if it exits non-zero when Off then every healthy M4Mini run — the one host
+    # whose declared baseline IS Off — would have flipped to `unknown`. That is
+    # over-correction: a false alarm on every healthy run of the exact host this
+    # check was written for.
+    # The OUTPUT is the authoritative signal here; rc is only meaningful when the
+    # output carries no recognisable verdict. So: if the text says On or Off,
+    # believe it whatever rc was. Only an unparseable answer is `unknown`.
     local out expect fv_rc
     out=$(fdesetup status 2>&1)
     fv_rc=$?
-    if [ "$fv_rc" -ne 0 ]; then
+    expect="${KB_SPACEDOCK_REBOOT_EXPECT_FILEVAULT:-Off}"
+    if ! printf '%s' "$out" | grep -qE 'FileVault is (On|Off)'; then
         _spd_emit "reboot-t1-filevault" "unknown" \
-            "fdesetup exited $fv_rc — could not read FileVault state, so it is UNKNOWN, not mismatched: $out" \
+            "fdesetup produced no recognisable FileVault verdict (exit $fv_rc) — state is UNKNOWN, not mismatched: $out" \
             "$out" "$fv_rc"
         return
     fi
-    expect="${KB_SPACEDOCK_REBOOT_EXPECT_FILEVAULT:-Off}"
     if printf '%s' "$out" | grep -q "FileVault is $expect"; then
         _spd_emit "reboot-t1-filevault" "ok" "FileVault is $expect (matches expected value)" "$out" ""
         return
