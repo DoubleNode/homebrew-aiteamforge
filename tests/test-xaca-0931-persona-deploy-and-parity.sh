@@ -1090,9 +1090,11 @@ echo ""
 # text only into $TEST_RESULTS_FILE. The runner then reads that file for COUNTS
 # and never prints the messages. Net effect: a suite that fails only in CI is
 # structurally undiagnosable from the CI log — which is exactly what happened
-# on commit 2ab98fb (31 of 34 in GitHub Actions, 34 of 34 in four separate local
-# reproductions — both counts are historical, taken before TG1b brought the suite to 35
-# reproductions, with no way to see WHICH assertion tripped).
+# on commit 2ab98fb. There, GitHub Actions reported 31 of 34 tests passing while
+# four separate local reproductions reported 34 of 34 — and the CI log gave no
+# way to see WHICH assertion tripped. Both figures are historical: the suite had
+# 34 tests at that commit, and stands at 35 today (TG1b was added afterwards).
+# Current count: `grep -c 'test_start "' <this file>`.
 #
 # run_test_file() invokes us as `bash "$test_file"` WITHOUT capturing stdout,
 # so anything echoed here reaches the job log. Print the recorded FAIL lines so
