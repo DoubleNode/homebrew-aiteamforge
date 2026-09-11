@@ -6723,99 +6723,68 @@ FRONTMATTER
     _kb_add_validate_output=$(kb-knowledge-validate --quiet --file "$new_file" 2>&1)
     if [[ $? -ne 0 ]]; then
         # XACA-1155-002: INVARIANT — a non-zero exit from kb-knowledge-add
-        # must leave NOTHING NEW on disk. The check above runs
-        # kb-knowledge-validate's three WHOLE-TREE structural checks
-        # (duplicate ID-slot, INDEX orphan, duplicate persona-dir) IN FULL
-        # on every call, regardless of --file scoping (that's documented,
-        # deliberate behavior — see kb-knowledge-validate --help). So a
-        # directory that already had, say, a duplicate ID slot BEFORE this
-        # call ever ran fails this check too, even when the entry we just
-        # wrote is itself perfectly fine — the previous code left that
-        # (possibly innocent) new file behind with an error saying "left on
-        # disk for inspection", which breaks the "non-zero means nothing
-        # written" contract every other early-return in this function
-        # already honors (see the empty-write cleanup just above).
+        # leaves NOTHING new on disk, and a zero exit keeps the entry. The
+        # check above runs kb-knowledge-validate's whole-tree structural checks
+        # (duplicate ID slot, INDEX orphan, duplicate persona dir) on every
+        # call regardless of --file, so a tree that already had a defect fails
+        # it even when the new entry is fine. The previous code returned 1 AND
+        # left the entry on disk ("left on disk for inspection"); operators
+        # retried, and every retry manufactured another duplicate.
         #
-        # Attribute the failure by moving the new file OUT of the target dir
-        # (not deleted yet) and re-validating with it absent:
-        #   - passes now            -> the new entry caused it; discard,
-        #                               return 1, nothing left anywhere.
-        #   - still fails           -> pre-existing defect in target_dir,
-        #                               unrelated to this write; restore the
-        #                               entry, warn loudly, continue (return
-        #                               0) exactly as a clean add would.
-        #
-        # Re-check scope: --file pointed at an EXISTING SIBLING entry in the
-        # same directory. That run repeats the first call exactly minus the
-        # new file — the same whole-tree structural checks, plus a content
-        # check of one entry that was already on disk — so the ONLY variable
-        # between the two runs is the new file's presence. A content defect in
-        # the new entry therefore attributes to the new entry, which a wider
-        # scope would blur (--changed also content-checks every uncommitted
-        # file in every knowledge root, so an unrelated dirty file elsewhere
-        # would make a bad new entry look "pre-existing"). --file on the moved
-        # new path is not an option: it hard-errors on a missing target.
-        # Fallback when the new entry was the directory's FIRST (no sibling
-        # exists): --changed, the narrowest remaining scope that still runs
-        # the structural checks.
-        # Chosen BEFORE the aside-move, so the new file itself must be skipped
-        # (matched by basename — target_dir and new_file may spell the same
-        # directory differently, e.g. /tmp vs /private/tmp).
-        local _kb_add_sibling="" _kb_add_cand
-        while IFS= read -r _kb_add_cand; do
-            [[ -n "$_kb_add_cand" && "${_kb_add_cand##*/}" != "${new_file##*/}" ]] || continue
-            _kb_add_sibling="$_kb_add_cand"
-            break
-        done < <(_kb_knowledge_entry_files "$target_dir" "$prefix" 2>/dev/null)
-        local _kb_add_aside
-        _kb_add_aside=$(mktemp "${TMPDIR:-/tmp}/kb-knowledge-add-aside.XXXXXX" 2>/dev/null)
-        if [[ -z "$_kb_add_aside" ]] || ! mv "$new_file" "$_kb_add_aside" 2>/dev/null; then
-            # Could not even attempt the aside-move (mktemp/mv failure). The
-            # invariant is "never non-zero while the file still sits in
-            # target_dir" — since we cannot prove the entry is at fault, and
-            # cannot safely remove it either, fail OPEN toward keeping the
-            # entry: same outcome as the "pre-existing defect" branch below,
-            # loudly disclosed, return 0. This does not weaken the
-            # invariant — it is never violated in EITHER direction (no
-            # non-zero exit with a lingering file, and no silent data loss).
-            echo "" >&2
-            echo "WARNING: ${new_file} was created, and its validate-on-write check failed, but the aside-move needed to determine whether THIS entry (vs. a pre-existing directory defect) is at fault could not be performed (mktemp/mv failure). Leaving it on disk rather than risk reporting failure while a file remains — inspect by hand:" >&2
-            echo "${_kb_add_validate_output}" >&2
-            _kb_knowledge_reindex_one "$target_dir" >/dev/null 2>&1 || true
-            return 0
-        fi
-
-        local _kb_add_recheck_output _kb_add_recheck_rc
-        if [[ -n "$_kb_add_sibling" ]]; then
-            _kb_add_recheck_output=$(kb-knowledge-validate --quiet --file "$_kb_add_sibling" 2>&1)
+        # Attribution happens WITHOUT moving the new file. The file IS the id
+        # reservation — _kb_alloc_slot's lock covers only scan+create — so
+        # moving it out of target_dir, even briefly (the re-check below takes
+        # minutes on a large tree), frees its slot for a concurrent writer and
+        # re-opens the XACA-0818 collision. Left in place, the filename-only
+        # structural checks see exactly what the first run saw, and the two
+        # runs differ only in whose CONTENT is validated:
+        #   1. A [FAIL] line from the first run names the new file (content
+        #      errors cite the path; duplicate-slot errors list the files):
+        #      the new entry is at fault.
+        #   2. Otherwise re-validate with --file on a DIFFERENT existing entry
+        #      (this directory first, then its sibling directories). Clean now:
+        #      the failure came from the new entry's content.
+        #   3. Still failing, or nothing to compare against: the defect is not
+        #      attributable to this write. Keep the entry, warn, return 0.
+        #      Discarding is reserved for an established fault.
+        local _kb_add_blame=false
+        if printf '%s\n' "$_kb_add_validate_output" | grep -F '[FAIL]' | grep -qF -- "${new_file:t}"; then
+            _kb_add_blame=true
         else
-            _kb_add_recheck_output=$(kb-knowledge-validate --quiet --changed 2>&1)
+            local _kb_add_ref="" _kb_add_dir _kb_add_cand
+            for _kb_add_dir in "$target_dir" "${target_dir:h}"/*; do
+                [[ -d "$_kb_add_dir" ]] || continue
+                for _kb_add_cand in "${(@f)$(_kb_knowledge_entry_files "$_kb_add_dir" "$prefix" 2>/dev/null)}"; do
+                    [[ -n "$_kb_add_cand" && "${_kb_add_cand:t}" != "${new_file:t}" ]] || continue
+                    _kb_add_ref="$_kb_add_cand"
+                    break 2
+                done
+            done
+            if [[ -n "$_kb_add_ref" ]]; then
+                local _kb_add_recheck_output
+                if _kb_add_recheck_output=$(kb-knowledge-validate --quiet --file "$_kb_add_ref" 2>&1); then
+                    _kb_add_blame=true
+                fi
+            fi
         fi
-        _kb_add_recheck_rc=$?
 
-        if [[ $_kb_add_recheck_rc -eq 0 ]]; then
-            # Clean with the new file gone -> this entry caused the failure.
-            # Complete the invariant: discard the aside copy too.
-            rm -f "$_kb_add_aside"
+        if [[ "$_kb_add_blame" == "true" ]]; then
+            command rm -f -- "$new_file" 2>/dev/null
+            if [[ ! -e "$new_file" ]]; then
+                echo "" >&2
+                echo "Error: NOTHING WAS WRITTEN — the new entry failed validation and was removed (id ${entry_id} is free again). This points at kb-knowledge-add's write path, not your input:" >&2
+                echo "${_kb_add_validate_output}" >&2
+                return 1
+            fi
+            # Could not remove it — a non-zero exit now would break the invariant.
             echo "" >&2
-            echo "Error: NOTHING WAS WRITTEN — the entry failed validation and has been discarded, not left on disk. This indicates a bug in kb-knowledge-add's write path (frontmatter composition, id/tier derivation), not in your input:" >&2
+            echo "WARNING: ${new_file} failed validation and could NOT be removed; it is still on disk. Inspect or delete it by hand:" >&2
             echo "${_kb_add_validate_output}" >&2
-            return 1
-        fi
-
-        # Still fails with the new file absent -> a PRE-EXISTING defect in
-        # target_dir, not something this write caused. Restore the entry and
-        # proceed normally (reindex etc., return 0) — refusing here would
-        # block every future add into this directory over someone else's
-        # unrelated problem.
-        if ! mv "$_kb_add_aside" "$new_file" 2>/dev/null; then
+        else
             echo "" >&2
-            echo "Error: determined the validation failure was PRE-EXISTING in ${target_dir} (unrelated to this entry), but could not restore ${new_file} from its aside copy. The entry content is safe at ${_kb_add_aside} — move it back by hand." >&2
-            return 1
+            echo "WARNING: created ${new_file}, but the knowledge tree has a validation problem that this entry did not cause:" >&2
+            echo "${_kb_add_validate_output}" >&2
         fi
-        echo "" >&2
-        echo "WARNING: ${new_file} was created, but ${target_dir} has a PRE-EXISTING validation problem unrelated to this entry (it still fails with the new entry absent):" >&2
-        echo "${_kb_add_recheck_output}" >&2
     fi
 
     # XACA-0263: scaffold INDEX.md immediately so a fresh tier dir is queryable
@@ -7300,7 +7269,7 @@ kb-knowledge-promote() {
 #   1. `[[...]]` is NOT a safe blanket target. The knowledge base is full of
 #      shell snippets like `[[ -d "$WORKTREE_ROOT/homebrew-tap/share" ]]` and
 #      `[[ $# -gt 0 ]]` (9+ real occurrences). The matcher therefore requires
-#      an id token IMMEDIATELY after `[[` (`[a-z]\d{3}`), so a space — which
+#      an id token IMMEDIATELY after `[[` (`[a-z]\d{3,}`), so a space — which
 #      every shell test has — excludes it.
 #
 #   2. Bare ids are AMBIGUOUS ACROSS PERSONAS. Nearly every persona dir has a
@@ -7453,7 +7422,7 @@ for my $file (@ARGV) {
         # the "no other id token between" test above depends on. The id token
         # must abut "[[" so shell test syntax ("[[ -d ... ]]") can never match.
         my @toks;
-        while ($line =~ m{\[\[([a-z]\d{3})((?:-[A-Za-z0-9._-]+)?)\]\]|\bK(\d{3})\b}g) {
+        while ($line =~ m{\[\[([a-z]\d{3,})((?:-[A-Za-z0-9._-]+)?)\]\]|\bK(\d{3,})\b}g) {
             my ($ws, $wr, $kn) = ($1, $2, $3);
             my %t = (start => $-[0], end => $+[0], text => substr($line, $-[0], $+[0] - $-[0]));
             if (defined $kn) { $t{kind} = "K"; $t{short} = "k$kn"; }

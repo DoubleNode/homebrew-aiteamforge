@@ -15,7 +15,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   helper for every zsh call site (reindex, destination-guard/tombstone-backstop
   presence checks, promote, merge, short-ref resolution), and hardened
   `kb-knowledge-add`'s validate-on-write path to discard only the entry that
-  actually caused a validation failure, never a pre-existing one.
+  actually caused a validation failure, never a pre-existing one — and to
+  decide that WITHOUT moving the file, which is its id reservation. Also
+  widened `kb-knowledge-merge`'s reference rewriter (`[[k1000]]`, `K1000`
+  citations were left stale) and `kb-knowledge-sync.sh` Guard 4's
+  duplicate-slot key, which could not see a k1000+ collision.
 - **XACA-1071: ship `kb-spacedock`, Space Dock's host-recovery triage entrypoint —
   and register it in BOTH upgrade allowlists, because one is not enough.**
   `share/scripts/kb-spacedock` fronts the diagnostics that already exist rather
