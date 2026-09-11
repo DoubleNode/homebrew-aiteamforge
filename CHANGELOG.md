@@ -227,6 +227,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `_aiteamforge_get_field`, which already fails for an unregistered team, so the
   guard is defence-in-depth against a future cheaper deriver, not load-bearing
   today.
+- XACA-0787 round-5 — RECURRENCE #4, a THIRD leak sink: tests writing the real
+  `~/.aiteamforge/team-paths.json`. Distinct from the `~/Library/LaunchAgents` and
+  `~/.claude/settings.json` sinks already fixed here; same class, different sink.
+  MEASURED: 91 `team-paths.json.bak-xaca0463-installer-*` files spanning
+  2026-09-04 21:45 -> 2026-09-10 19:50 — a week-long drip, not an isolated slip.
+  CALL SITE (one, not many): `tests/test-command-nested-workingdir.sh`'s
+  `run_install()` sandboxed `AITEAMFORGE_DIR` but never `HOME`/`AITEAMFORGE_CONFIG`,
+  so every install fell through to the real registry. Attribution is by
+  FINGERPRINT rather than inference: the live registry's `command` entry pointed
+  at `.../xaca0178-fake/monorepo`, that fixture's exact shape. Fixed by pinning
+  both, matching the reviewed pattern from XACA-0845-011. An audit of all ~100
+  suites for real-installer invocations found every other call site already
+  sandboxed — scope was NOT under-stated this time.
+  NO CALLEE DEFECT, contrary to the working hypothesis: `install-team.sh`,
+  `kb-port-fix.py` and `aiteamforge-team-paths-wizard.py` all resolve the registry
+  via `${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}`. `AITEAMFORGE_DIR`
+  is not wired to the registry BY DESIGN — the registry is machine-scoped across
+  every source tree a developer may have, not tree-scoped — and the correct
+  override already exists and works. This is not the `register-claude-hook.py`
+  shape of bug; it was checked rather than assumed, and no fix was forced.
+  VECTOR 7 added to both guards: fingerprints the real registry AND watches the
+  backup family for growth (either signal trips it). That the guard watched six
+  sinks and not this one is why a week-long drip went unnoticed.
+  THIS IS THE MISSING WRITER FOR XACA-0939, which is filed as "points at a
+  leftover installer-test temp dir" — it is not leftover residue, it is an active
+  writer, so cleaning 0939's value without this fix just gets overwritten.
 - XACA-1069 (Space Dock 2/4 — crew): ships the Space Dock team's consumer-facing
   surface. Adds `share/teams/spacedock.conf` (the tenth team conf, and the first
   for a team with no git repository anywhere — its board and working dir are

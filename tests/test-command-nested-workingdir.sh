@@ -114,8 +114,43 @@ build_fake_tap() {
 # (a nonexistent path, rc=0, no organization.yaml written, no prompts) — so a
 # placeholder path here is side-effect-free and irrelevant to what this test
 # actually exercises (the persona/personas-directory placement guard).
+#
+# XACA-0787 recurrence #4: AITEAMFORGE_DIR sandboxing above does NOT relocate
+# the XACA-0463 per-instance LCARS-port registry (~/.aiteamforge/team-paths.json)
+# — that path is resolved independently via `${AITEAMFORGE_CONFIG:-$HOME/
+# .aiteamforge/team-paths.json}` (install-team.sh ~lines 353/684/1907), the
+# same HOME-or-explicit-override contract as aiteamforge_config_path() in
+# aiteamforge-paths.sh. AITEAMFORGE_DIR and the registry are deliberately
+# independent knobs (a registry is machine-scoped across every AITEAMFORGE_DIR
+# a developer might use, not source-tree-scoped) — that is correct design,
+# not a callee defect; see aiteamforge_config_path()'s identical contract.
+# This run_install() sandboxed only AITEAMFORGE_DIR, so every "full install"
+# call here (this test never uses --connect-only) fell through to
+# $HOME/.aiteamforge/team-paths.json — the REAL registry on the host machine,
+# reached and mutated it live (confirmed: the real registry's "command"
+# entry was measured pointing at a vanished
+# aiteamforge-test.XXXXXX.*/xaca0178-fake/monorepo path from exactly this
+# fixture, and 91 team-paths.json.bak-xaca0463-installer-* backups accumulated
+# on this machine 2026-09-04 through 2026-09-10 — this call site was one of
+# the writers). Fix: sandbox HOME too (belt-and-suspenders, matching
+# test-xaca-0463-port-allocation.sh/test-xaca-0845-connect-script-parametric-
+# teams.sh/test-xaca-0862-team-scoped-connect.sh's already-reviewed pattern)
+# AND pin AITEAMFORGE_CONFIG explicitly — XACA-0845-011 established that
+# pinning it is required even with HOME sandboxed, because install-team.sh
+# consults AITEAMFORGE_CONFIG directly wherever it is set, so an ambient
+# exported value (from the caller's own environment) would otherwise outrank
+# the HOME sandbox. Nothing in this test depends on real $HOME: TEAM_WORKING_DIR
+# was already patched away from `$HOME/dev-team` to the literal $FAKE_MONOREPO
+# path in build_fake_tap()'s sed above, so the XACA-0498 TWD dev-source-tree
+# guard (keyed off `$HOME/dev-team/.aiteamforge-source-tree`) cannot fire
+# either way — $FAKE_MONOREPO is never a child of $HOME, sandboxed or real.
+FAKE_HOME="$FAKE_ROOT/home"
+
 run_install() {
-  AITEAMFORGE_DIR="$FAKE_MONOREPO" \
+  mkdir -p "$FAKE_HOME/.aiteamforge"
+  HOME="$FAKE_HOME" \
+    AITEAMFORGE_DIR="$FAKE_MONOREPO" \
+    AITEAMFORGE_CONFIG="$FAKE_HOME/.aiteamforge/team-paths.json" \
     AITEAMFORGE_ORG_CONFIG="$FAKE_ROOT/unused-org-config-override.yaml" \
     bash "$FAKE_INSTALLER" command \
       --install-dir "$FAKE_MONOREPO" \

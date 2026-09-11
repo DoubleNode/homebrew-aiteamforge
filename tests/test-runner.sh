@@ -431,7 +431,7 @@ assert_file_valid_json() {
 # remembers to sandbox $HOME (the individual-suite fix subitem 015 proved
 # sufficient per-suite; this is the backstop for the suite that forgets).
 #
-# It brackets each suite with a snapshot-before / assert-after of the SIX
+# It brackets each suite with a snapshot-before / assert-after of the SEVEN
 # attested real-machine leak vectors:
 #   1. Plist CREATION under the real ~/Library/LaunchAgents/com.aiteamforge.*
 #   2. Plist REWRITE — same filename, changed mtime/size/content
@@ -439,10 +439,23 @@ assert_file_valid_json() {
 #   4. The opt-out sentinel ~/.aiteamforge/launchagents.optout appearing/changing
 #   5. ~/.claude/settings.json gaining a hook registration
 #   6. Abandoned sandbox directories left at the top of ${TMPDIR:-/tmp} —
-#      MEASURED the highest-volume vector of the six (orchestrator sweep,
+#      MEASURED the highest-volume vector of the seven (orchestrator sweep,
 #      2026-09-10 13:56: 1,525 `tmp.*`-prefixed dirs outstanding, ~750/day
 #      regrowth after a manual cleanup), so this is weighted as the primary
 #      check, not an afterthought.
+#   7. XACA-0787 recurrence #4 (2026-09-10/11): the real per-instance LCARS
+#      port registry ~/.aiteamforge/team-paths.json changing content, and its
+#      install-team.sh-authored backup family
+#      (team-paths.json.bak-xaca0463-installer-*) growing. This is a
+#      DIFFERENT sink from vectors 1-6 (which all watch launchd/Claude-
+#      settings state) — a test that sandboxes AITEAMFORGE_DIR without also
+#      sandboxing HOME or pinning AITEAMFORGE_CONFIG falls through to
+#      $HOME/.aiteamforge/team-paths.json (install-team.sh's own fallback;
+#      see aiteamforge_config_path() in aiteamforge-paths.sh for the same
+#      contract) and mutates the REAL registry. MEASURED: 91
+#      team-paths.json.bak-xaca0463-installer-* backups accumulated on this
+#      machine 2026-09-04 through 2026-09-10 — a week-long drip vector 1-6
+#      could not have caught, and did not.
 #
 # IMPORTANT — this guard only brackets the run_test_file() path (i.e. `bash
 # test-runner.sh [file...]`, which is how both CI and the documented
@@ -616,6 +629,28 @@ _leak_guard_tmproot_snapshot() {
     2>/dev/null | sort || true
 }
 
+# Vector 7 (XACA-0787 recurrence #4): count of install-team.sh's own
+# XACA-0463 backup family for the REAL registry. install-team.sh writes one
+# of these (config_path.name + ".bak-xaca0463-installer-" + UTC timestamp)
+# every time it upserts an instance's lcars_port into an EXISTING
+# team-paths.json — see install-team.sh's python heredoc under "XACA-0463:
+# Persist per-instance lcars_port to team-paths.json". A growing count here
+# is the same fingerprint the finder used to first detect this recurrence:
+# 91 backups accumulated 2026-09-04 through 2026-09-10 on this machine.
+_leak_guard_team_paths_backup_count() {
+  # `find`, not `ls <glob>*` — under this file's `set -eo pipefail`, a
+  # non-matching `ls` glob (the common case: no backups exist yet) exits
+  # non-zero and pipefail surfaces that through the whole pipeline, which
+  # `set -e` then treats as this FUNCTION failing — and since both call
+  # sites invoke it as a bare statement (`... > file`), that would abort
+  # the entire runner mid-suite. `find` on a missing directory has the same
+  # failure shape, so the trailing `|| true` is required regardless of
+  # which tool is used — verified empirically both ways.
+  find "$HOME/.aiteamforge" -maxdepth 1 -type f \
+    -name 'team-paths.json.bak-xaca0463-installer-*' \
+    2>/dev/null | wc -l | tr -d ' ' || true
+}
+
 leak_guard_snapshot() {
   LEAK_GUARD_STATE_DIR="$(mktemp -d -t aiteamforge-leakguard.XXXXXX)"
   _leak_guard_plist_fingerprint > "$LEAK_GUARD_STATE_DIR/plists.before"
@@ -633,6 +668,9 @@ leak_guard_snapshot() {
   _leak_guard_file_fingerprint "$HOME/.aiteamforge/launchagents.optout" > "$LEAK_GUARD_STATE_DIR/optout.before"
   _leak_guard_file_fingerprint "$HOME/.claude/settings.json" > "$LEAK_GUARD_STATE_DIR/claude-settings.before"
   _leak_guard_tmproot_snapshot > "$LEAK_GUARD_STATE_DIR/tmproot.before"
+  # Vector 7: real team-paths.json content fingerprint + its backup-family count.
+  _leak_guard_file_fingerprint "$HOME/.aiteamforge/team-paths.json" > "$LEAK_GUARD_STATE_DIR/team-paths.before"
+  _leak_guard_team_paths_backup_count > "$LEAK_GUARD_STATE_DIR/team-paths-backups.before"
 }
 
 # XACA-0787-019: deregister ONE launchd job by LABEL. Never `unload -w
@@ -880,6 +918,40 @@ LEAK_GUARD_ENTRIES_EOF
     fi
   fi
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Vector 7 (XACA-0787 recurrence #4): the real XACA-0463 LCARS-port
+  # registry ~/.aiteamforge/team-paths.json. A DIFFERENT sink from vectors
+  # 1-6 (all launchd/Claude-settings state) — see the header comment above
+  # for why AITEAMFORGE_DIR sandboxing alone does not cover it. Two
+  # independent signals, either one alone sufficient to trip this vector:
+  #   (a) the file's content fingerprint changed at all, or
+  #   (b) install-team.sh's own timestamped backup family
+  #       (team-paths.json.bak-xaca0463-installer-*) grew — this is the
+  #       exact fingerprint the finder used to first detect this recurrence
+  #       (91 backups, 2026-09-04 through 2026-09-10 on this machine).
+  # Backup-count growth is checked even when the live fingerprint is
+  # unchanged: install-team.sh backs up the PRE-write file before every
+  # upsert, so a run that writes and then (coincidentally, or via a second
+  # write) restores the original content would still leave a new backup
+  # file behind — content-only fingerprinting would miss that.
+  # ─────────────────────────────────────────────────────────────────────────
+  _leak_guard_file_fingerprint "$HOME/.aiteamforge/team-paths.json" > "$LEAK_GUARD_STATE_DIR/team-paths.after"
+  if ! diff -q "$LEAK_GUARD_STATE_DIR/team-paths.before" "$LEAK_GUARD_STATE_DIR/team-paths.after" >/dev/null 2>&1; then
+    tripped=true
+    print_error "LEAK [team-paths] real ~/.aiteamforge/team-paths.json content changed during $CURRENT_TEST_FILE — this test drove a real installer/port-fixer without sandboxing HOME or pinning AITEAMFORGE_CONFIG. Before: $(cat "$LEAK_GUARD_STATE_DIR/team-paths.before" 2>/dev/null) After: $(cat "$LEAK_GUARD_STATE_DIR/team-paths.after" 2>/dev/null)"
+  fi
+
+  _leak_guard_team_paths_backup_count > "$LEAK_GUARD_STATE_DIR/team-paths-backups.after"
+  if ! diff -q "$LEAK_GUARD_STATE_DIR/team-paths-backups.before" "$LEAK_GUARD_STATE_DIR/team-paths-backups.after" >/dev/null 2>&1; then
+    local _lg_tp_before _lg_tp_after
+    _lg_tp_before=$(cat "$LEAK_GUARD_STATE_DIR/team-paths-backups.before" 2>/dev/null || echo '?')
+    _lg_tp_after=$(cat "$LEAK_GUARD_STATE_DIR/team-paths-backups.after" 2>/dev/null || echo '?')
+    if [ "${_lg_tp_after:-0}" -gt "${_lg_tp_before:-0}" ] 2>/dev/null; then
+      tripped=true
+      print_error "LEAK [team-paths-backup-growth] real ~/.aiteamforge/team-paths.json.bak-xaca0463-installer-* count grew from $_lg_tp_before to $_lg_tp_after during $CURRENT_TEST_FILE — install-team.sh's own XACA-0463 port-persist step wrote a backup of the REAL registry before mutating it."
+    fi
+  fi
+
   command rm -rf "$LEAK_GUARD_STATE_DIR" 2>/dev/null || true
   LEAK_GUARD_STATE_DIR=""
 
@@ -923,7 +995,7 @@ run_test_file() {
   # (and before setup_test_env creates this run's own TEST_TMP_DIR, so that
   # tracked, properly-cleaned-up directory never counts as a false positive
   # for vector 6 below). See the leak_guard_* functions' own header comment
-  # for the full rationale and the six vectors covered.
+  # for the full rationale and the seven vectors covered.
   leak_guard_snapshot
 
   # Set up test environment
