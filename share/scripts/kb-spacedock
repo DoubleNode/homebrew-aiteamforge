@@ -614,17 +614,35 @@ _spd_check_mandatory_teams() {
         return
     fi
 
-    local missing="" team
+    local missing="" broken="" team _atf_rc
     while IFS= read -r team; do
         [ -z "$team" ] && continue
-        if ! _spd_atf_team_provisioned "$lib" "$shell" "$team" >/dev/null 2>&1; then
+        # PR #869 review [Review]-015: `if ! ...` collapsed EVERY non-zero into
+        # "not provisioned". The predicate's contract is 0=provisioned,
+        # 1=not — anything else (127 undefined function, a source failure, a
+        # future rc) means the PREDICATE is broken, not that the team is
+        # missing. Emitting `fail` for that is the mirror of this script's
+        # stated property: it reports a tool failure as a real finding. Safe
+        # direction, but still a conflation. Split on the actual rc.
+        _spd_atf_team_provisioned "$lib" "$shell" "$team" >/dev/null 2>&1
+        _atf_rc=$?
+        if [ "$_atf_rc" -eq 1 ]; then
             missing="$missing $team"
+        elif [ "$_atf_rc" -ne 0 ]; then
+            broken="$broken $team(rc=$_atf_rc)"
         fi
     done <<SPD_TEAMS_EOF
 $teams_out
 SPD_TEAMS_EOF
 
-    if [ -n "$missing" ]; then
+    # A broken predicate is UNKNOWN and takes precedence: if the tool itself is
+    # unreliable, the provisioned/not verdict for every team is untrustworthy,
+    # so reporting a confident `fail` list off it would be worse than saying so.
+    if [ -n "$broken" ]; then
+        _spd_emit "mandatory-teams" "unknown" \
+            "atf_team_provisioned returned an out-of-contract exit code for:$broken (contract is 0=provisioned, 1=not) — the predicate is broken, so provisioning state is UNKNOWN, not failed" \
+            "$teams_out" ""
+    elif [ -n "$missing" ]; then
         _spd_emit "mandatory-teams" "fail" "mandatory team(s) not provisioned on this host:$missing" "$teams_out" ""
     else
         _spd_emit "mandatory-teams" "ok" "all mandatory teams provisioned" "$teams_out" ""
@@ -775,8 +793,21 @@ _spd_reboot_check_port_listening() {
         _spd_emit "$surface" "unknown" "netstat not found (non-macOS host?)" "" ""
         return
     fi
-    local out
-    out=$(netstat -an 2>/dev/null | grep -E "\\.${port} .*LISTEN")
+    # PR #869 review [Review]-016: the probe's OWN exit code was unchecked and
+    # its stderr suppressed, so a CRASHED netstat produced empty output and was
+    # reported as "not listening" — a confident mismatch derived from a tool
+    # that never ran. Capture netstat separately from the grep (grep's rc 1 just
+    # means "no match", which is a real answer) and fail to `unknown`.
+    local raw ns_rc out
+    raw=$(netstat -an 2>/dev/null)
+    ns_rc=$?
+    if [ "$ns_rc" -ne 0 ]; then
+        _spd_emit "$surface" "unknown" \
+            "netstat exited $ns_rc — could not read the listening-port table, so whether $label is listening on $port is UNKNOWN, not negative" \
+            "" "$ns_rc"
+        return
+    fi
+    out=$(printf '%s\n' "$raw" | grep -E "\\.${port} .*LISTEN")
     if [ -n "$out" ]; then
         _spd_emit "$surface" "ok" "$label listening on $port" "$out" ""
         return
@@ -795,8 +826,20 @@ _spd_reboot_check_filevault() {
         _spd_emit "reboot-t1-filevault" "unknown" "fdesetup not found (non-macOS host?)" "" ""
         return
     fi
-    local out expect
+    # PR #869 review [Review]-016: rc was unchecked, so a crashed fdesetup fell
+    # through to the mismatch arm and reported a confident posture verdict from
+    # a probe that never produced one. Note `2>&1` is deliberate here (fdesetup
+    # writes useful text to stderr) — which is exactly why the rc must be read
+    # separately rather than inferred from the output being non-empty.
+    local out expect fv_rc
     out=$(fdesetup status 2>&1)
+    fv_rc=$?
+    if [ "$fv_rc" -ne 0 ]; then
+        _spd_emit "reboot-t1-filevault" "unknown" \
+            "fdesetup exited $fv_rc — could not read FileVault state, so it is UNKNOWN, not mismatched: $out" \
+            "$out" "$fv_rc"
+        return
+    fi
     expect="${KB_SPACEDOCK_REBOOT_EXPECT_FILEVAULT:-Off}"
     if printf '%s' "$out" | grep -q "FileVault is $expect"; then
         _spd_emit "reboot-t1-filevault" "ok" "FileVault is $expect (matches expected value)" "$out" ""
@@ -1055,7 +1098,8 @@ _spd_reboot_check_python3() {
 # DE-HARDCODED: rather than assert a fixed list of "the mandatory 7"
 # LaunchAgents (host-specific, and this script's charter says never invent a
 # first-principles health judgement), this discovers whatever
-# com.aiteamforge.*.plist files are actually INSTALLED on this host and
+# com.aiteamforge.*.plist AND com.devteam.*.plist files are actually
+# INSTALLED on this host and
 # checks only that each one is loaded. A host with zero such plists (e.g. the
 # dev-source machine, where AITeamForge is never installed) is SKIP, not
 # fail/unknown — that mirrors _spd_check_kb_sweep_stubs's dev-machine-only
@@ -1066,8 +1110,17 @@ _spd_reboot_check_launchagents() {
         _spd_emit "reboot-t3-launchagents" "unknown" "LaunchAgents directory not found: $dir" "" ""
         return
     fi
+    # PR #869 review: this globbed ONLY com.aiteamforge.*.plist, which silently
+    # skipped every agent under the OTHER prefix this fleet uses. Measured:
+    # fleet-reporter's Label is `com.devteam.fleet-reporter`
+    # (share/templates/fleet-monitor/fleet-reporter-launchagent.template.plist:6),
+    # and the dev-machine kanban-backup / knowledge-sync agents are com.devteam.*
+    # too. A prefix-specific glob does not report those as unloaded — it does not
+    # see them AT ALL, so a missing agent reads as a clean run. Same false-green
+    # shape as the auto-upgrade marker defect in this same review.
+    # Glob BOTH prefixes. Do not narrow this back to one.
     local f label unloaded="" count=0
-    for f in "$dir"/com.aiteamforge.*.plist; do
+    for f in "$dir"/com.aiteamforge.*.plist "$dir"/com.devteam.*.plist; do
         [ -e "$f" ] || continue
         count=$((count + 1))
         label=$(basename "$f" .plist)
@@ -1077,13 +1130,13 @@ _spd_reboot_check_launchagents() {
     done
     if [ "$count" -eq 0 ]; then
         _spd_emit "reboot-t3-launchagents" "skip" \
-            "no com.aiteamforge.* LaunchAgent plists installed on this host — expected where AITeamForge is not installed (e.g. the dev-source machine, by policy)" "" ""
+            "no com.aiteamforge.* or com.devteam.* LaunchAgent plists installed on this host — expected where AITeamForge is not installed (e.g. the dev-source machine, by policy)" "" ""
         return
     fi
     if [ -n "$unloaded" ]; then
         _spd_emit "reboot-t3-launchagents" "fail" "installed but NOT loaded:$unloaded" "" ""
     else
-        _spd_emit "reboot-t3-launchagents" "ok" "$count com.aiteamforge.* LaunchAgent(s) installed and loaded" "" ""
+        _spd_emit "reboot-t3-launchagents" "ok" "$count AITeamForge LaunchAgent(s) (com.aiteamforge.* + com.devteam.*) installed and loaded" "" ""
     fi
 }
 
@@ -1104,9 +1157,22 @@ _spd_reboot_check_teams() {
     fi
     local host_norm teams
     host_norm=$(printf '%s' "$SPD_HOST" | tr '[:upper:]' '[:lower:]')
+    # PR #869 review [Review]-014: `2>/dev/null` plus an unchecked rc made a
+    # MALFORMED team-machines.json (jq parse error, exit 5) indistinguishable
+    # from a valid map that simply declares no teams for this host. The first is
+    # a broken tool; the second is a legitimate skip. Conflating them is the
+    # exact property this script exists to protect, so check rc BEFORE emptiness.
+    local jq_rc
     teams=$(jq -r --arg h "$host_norm" \
         '. as $m | keys_unsorted[] | select(($m[.] | ascii_downcase | rtrimstr(".local")) == $h)' \
         "$map" 2>/dev/null)
+    jq_rc=$?
+    if [ "$jq_rc" -ne 0 ]; then
+        _spd_emit "reboot-t4-teams" "unknown" \
+            "could not parse team-machines.json (jq exit $jq_rc) — the map is unreadable, so which teams belong to this host is UNKNOWN, not none: $map" \
+            "" "$jq_rc"
+        return
+    fi
     if [ -z "$teams" ]; then
         _spd_emit "reboot-t4-teams" "skip" "no teams declared for this host ('$SPD_HOST') in team-machines.json — nothing to verify" "" ""
         return
@@ -1246,10 +1312,11 @@ _spd_worst_severity() {
 #           as if `triage` (which files findings) had run. Defaults to
 #           "triage" only as a defensive fallback if ever called without it.
 _spd_report() {
-    # PR #869 review: default to the NON-filing label. Both call sites pass this
-    # explicitly today so the default is unreachable, but if one ever stops, a
-    # header reading "triage" on a run that filed nothing is the more misleading
-    # of the two errors.
+    # PR #869 review: default is "report", the NON-filing label. Both call sites
+    # pass it explicitly today so the default is unreachable, but if one ever
+    # stops, a header reading "triage" on a run that filed nothing is the more
+    # misleading of the two errors. (An earlier revision of this docblock still
+    # said the default was "triage" after the code had changed — [Review]-017.)
     local cmd="${1:-report}"
     echo "==================================================================="
     echo "kb-spacedock $cmd — host: $SPD_HOST — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
