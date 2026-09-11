@@ -20,6 +20,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `lcars-fleet-theme.css` gains `.div-spacedock` (`#cc66ff`) and `.div-snw` (`#cc9966`)
   with matching border colours, `getDivisionColorClass()` maps both codes, and the
   Space Dock title is now `STARFLEET SPACE DOCK` in both dashboards.
+- XACA-1164-020: SNW's fleet division colour `.div-snw` is now `#d4a017`. The old
+  `#cc9966` equals `--lcars-tan`, the dashboard's colour for any division without
+  one, so SNW looked like an unregistered team.
 - **XACA-0931 / XACA-0865 — the new persona-deploy suite (35 tests; `grep -c 'test_start "'`)
   ships QUARANTINED, and
 - XACA-0787 round-6 (PR #859 review, three vector-7 findings). Round 5 added

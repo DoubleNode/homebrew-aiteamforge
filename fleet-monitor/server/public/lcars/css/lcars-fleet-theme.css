@@ -132,10 +132,14 @@
     --div-academy: var(--lcars-peach);        /* Academy - Peach */
 
     /* Space Dock + Strange New Worlds (XACA-1164). Raw hex on purpose: the
-       purple/brass families are crowded, and these are the same values
-       lcars-ui/css/lcars.css (--div-spacedock) and the asset prompts chose. */
+       purple and brass families are crowded. Space Dock matches
+       lcars-ui/css/lcars.css (--div-spacedock). SNW is NOT the asset art's
+       #cc9966: that equals --lcars-tan, the var(--div-color, var(--lcars-tan))
+       fallback, so SNW would render exactly like an unmapped division
+       (XACA-1164-020). #d4a017 is a brass-gold at 7.2:1 on --lcars-dark,
+       RGB distance >= 66 from tan and from firebase's amber. */
     --div-spacedock: #cc66ff;                 /* Space Dock - Violet */
-    --div-snw: #cc9966;                       /* SNW - Brass */
+    --div-snw: #d4a017;                       /* SNW - Brass-gold */
 
     /* Personal Divisions */
     --div-legal: var(--lcars-green);          /* Legal - Green */
