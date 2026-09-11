@@ -30,6 +30,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   box. Space Dock cannot be fully provisioned until XACA-1163 lands (board.json's
   `series` field is overloaded as the item-id prefix), so these artifacts are
   correct against the contract but not yet instantiable.
+- XACA-1069 (UX gate, XACA-1069-013): the team colour moves #9933FF -> #CC66FF in
+  both `share/teams/spacedock.conf` and `share/teams/registry.json`. `lcars.css`
+  renders `--div-spacedock` as TEXT at `.lcars-avatar-tooltip .tooltip-name`
+  against a near-black ground, where #9933FF measured 4.03:1 against WCAG AA's
+  4.5:1 minimum — a regression unique to the new colour, since all ten existing
+  team div-colours clear that same site (lowest is command at 4.95:1). #CC66FF
+  measures 6.52:1 and is also the most separated option in an already-crowded
+  purple family (freelance #cc99ff, starwords #aa77dd, workstats #cc99cc,
+  appplanning #bb88ee, dns #ccccff are taken), so it must not be "simplified"
+  into an existing `--lcars-*` token.
 - XACA-0787 round-4 (nine protected gate subitems from PR #859). The most serious
   was self-inflicted: the leak guard fingerprinted files with `stat -f` and
   `md5 -q`, both BSD-only, so on Linux every one fell back to the literal `'?'`
