@@ -738,6 +738,177 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   by fixing SOURCE before DEPLOY, and confirms one target's failure does not
   abort the rest. See `kanban/plans/XACA-0931/XACA-0931-001_decision.md` §3
   and `XACA-0931_field-evidence_m4mini.md`.
+- XACA-1070-009 (follow-up): added a Formula test assertion that
+  `libexec/lib/mandatory-teams.sh` ships, alongside the existing assertions for
+  common.sh / config.sh / wizard-ui.sh / python-env.sh. Motivation is a
+  fail-open chain found while reviewing the test suite: every consumer of that
+  lib (wizard suppression, force-append, non-interactive installer, upgrade
+  backfill, both doctor copies) guards its use with `command -v atf_...`, so if
+  the file is ever absent nothing crashes — mandatory-team enforcement is
+  silently disabled everywhere at once. The doctor check that exists to report
+  exactly this degrades to a WARN rather than a fault, because it depends on the
+  same missing file. Absence is therefore invisible at runtime by construction,
+  which is the silent-no-op failure class this ticket was written to prevent,
+  one level up. The Formula already ships the file wholesale
+  (`libexec.install Dir["*"]`), so this is a guard against a future packaging
+  regression rather than a fix for a present defect. Left the runtime WARN
+  severity unchanged deliberately — raising it to a fault has fleet-wide blast
+  radius and the in-file precedent (a missing launchagents.sh degrades quietly)
+  points the other way, though not cleanly: that fallback still checks
+  something, whereas this one checks nothing. Flagged for the review gate rather
+  than decided unilaterally.
+- XACA-1070-001: added `libexec/lib/mandatory-teams.sh`, the single source of
+  truth for the new `"mandatory": true` flag on `share/teams/registry.json`
+  entries. A mandatory team is suppressed from the install wizard's selectable
+  list, force-appended to every install's selection, backfilled onto
+  already-installed machines by `aiteamforge upgrade`, and reported as a fault
+  by `aiteamforge doctor` when absent. The existing `"recommended"` key was
+  NOT reused: `grep -rn "recommended" libexec/ bin/` returns seven hits, every
+  one unrelated prose ("not recommended", "recommended for single machine") and
+  zero functional consumers — it is inert wizard-UI metadata, so a flag flip
+  would have shipped a change that looks done, passes review and does nothing.
+  Exposes `atf_mandatory_teams` (one id per line), `atf_is_mandatory_team <id>`
+  and `atf_team_provisioned <id>` (exit-code predicates, no stdout); XACA-1071's
+  `kb-spacedock` consumes the last of these directly rather than scraping
+  doctor's human-readable output, so the two cannot drift on what "provisioned"
+  means. Critically, the resolver distinguishes "zero teams carry the flag"
+  (exit 0, empty — the expected state today, since no team is flagged yet) from
+  "registry.json is missing or unparseable" (exit 1, empty stdout, diagnostic on
+  stderr). Collapsing those into one silent empty success would make the whole
+  feature quietly no-op the moment the registry went missing — the exact failure
+  class XACA-1070 exists to prevent. Verified under `/bin/bash` 3.2 (the shell
+  that actually runs on consumers, not a PATH bash 5.x): empty+0 against the
+  real registry, `spacedock` returned from a fixture carrying the flag,
+  `"mandatory": false` correctly excluded, and the corrupt-registry path
+  returning 1 with a diagnostic naming the file. No new dependency added. The
+  flag is documented in `share/teams/README.md`; no team carries it yet —
+  `spacedock` itself arrives with XACA-1068/1069.
+- XACA-1070-002/003: wired `libexec/lib/mandatory-teams.sh` into both install
+  entry points so a mandatory team enforces on every install shape, not just
+  the interactive wizard. `bin/aiteamforge-setup.sh`: mandatory teams are
+  skipped when building `AVAILABLE_TEAMS`/`TEAM_LABELS` in Step 2 (never a
+  selectable checkbox, never occupy a numbered menu slot), then
+  force-appended into `SELECTED_TEAMS` in one place — unconditionally, right
+  before the kanban-install block — so both `SELECTED_TEAMS_STR` and
+  `CR_ALL_SELECTED_TEAMS_STR` carry them, and so upgrade-hydrated and cockpit
+  runs (which both skip Step 2 entirely) still pick up a newly-flagged team.
+  `libexec/installers/install-kanban.sh`: `install_kanban_system()` never
+  runs the wizard at all under `aiteamforge upgrade` or a non-interactive/CI
+  install (`SELECTED_TEAMS_STR` is never exported there), so the same
+  force-append is duplicated inline against its local `teams` array — after
+  the existing `SELECTED_TEAMS_STR`/`.aiteamforge-config` resolution, and
+  covering the "resolved to nothing at all" case too. No pass-by-reference
+  helper: bash 3.2 has no `declare -n`. Both call sites guard the same
+  `set -e`/`set -euo pipefail` trap: `var="$(atf_mandatory_teams)"` alone
+  would propagate a non-zero exit straight to the assignment and abort the
+  installer; `|| rc=$?` neutralizes that while keeping the fault
+  distinguishable from "genuinely zero mandatory teams" per the lib's
+  return-code contract, and an unreadable registry degrades to a warning
+  rather than aborting either installer. Team-agnostic: no team id is
+  hard-coded in either file. Verified under `/bin/bash` 3.2 with a fixture
+  `registry.json` carrying `"mandatory": true` on a throwaway team id:
+  suppressed from the presented list, force-appended into both exported
+  `*_STR` vars, force-appended onto both the config-file-resolved and
+  fully-empty `install-kanban.sh` paths, and idempotent (no duplicate) when
+  already present. Against the real registry (zero teams flagged, today's
+  expected state) both call sites are confirmed no-ops — wizard and
+  installer behave exactly as before.
+- XACA-1070-007: added an `aiteamforge doctor` check (`check_mandatory_teams`)
+  that reports a missing or unprovisioned mandatory team as a fault, in BOTH
+  divergent doctor copies — `libexec/commands/aiteamforge-doctor.sh` (the
+  `aiteamforge doctor` subcommand) and `bin/aiteamforge-doctor.sh` (the
+  standalone `aiteamforge-doctor` binary; installed as
+  `libexec/bin/aiteamforge-doctor.sh` per `Formula/aiteamforge.rb`) — since
+  only 6 of 17/8 checks are shared between them and a check added to only one
+  is invisible to half of all invocations (XACA-0807, not fixed here by
+  design; each copy carries a comment citing it). Both copies now source
+  `libexec/lib/mandatory-teams.sh` defensively (same guarded
+  `[ -f ... ] && source ... || true` idiom already used for the libs beside
+  it) and register the new `--check mandatory-teams` component plus a call in
+  each file's `all` sequence. Behavior mirrors `atf_mandatory_teams`'s own
+  return-code contract: a registry that cannot be read/parsed (exit 1) is a
+  FAULT — never reported as "no mandatory teams" — zero mandatory teams
+  (exit 0, empty; the expected state today) is a clean PASS, and a mandatory
+  team present but not provisioned is a FAULT naming the team and pointing at
+  `aiteamforge upgrade` (the backfill that provisions it). Verified under
+  `/bin/bash` 3.2 against all three branches in both copies, plus confirmed
+  each copy's function is actually reached (both the named `--check
+  mandatory-teams` component and the `all` sequence) rather than merely
+  defined.
+- XACA-1070-004/005/006: added `update_mandatory_teams()` to
+  `libexec/commands/aiteamforge-upgrade.sh` — the upgrade-side backfill that
+  is the load-bearing half of this ticket. `aiteamforge doctor` (XACA-1070-007)
+  can only report a missing mandatory team; this is what actually provisions
+  it onto a machine that only ever runs `brew upgrade` (same bug class as
+  XACA-0747/0751/0814: install-time-only provisioning never reaches an
+  already-installed fleet, and every machine in the fleet already is). Reads
+  `atf_mandatory_teams()`, and for each team not yet on disk, delegates the
+  entire provision to `install-team.sh <team> --install-dir` as a full,
+  isolated subprocess — no second board-creation or connect-script-rendering
+  path is implemented here (board.json's `series` bug, XACA-1163, is
+  therefore inherited unfixed by design, not worked around). Idempotency
+  guard is deliberately NOT `atf_team_provisioned()`: that helper requires
+  membership in `get_configured_teams()`, which reads `.aiteamforge-config`'s
+  `.teams[]` — written exactly once, by the interactive setup wizard, and
+  never by `install-team.sh` — so a team provisioned purely by this backfill
+  could never satisfy it, and gating on it would re-invoke the installer on
+  every single upgrade forever instead of the required no-op. Instead this
+  checks the on-disk evidence directly (`aiteamforge_team_kanban_dir()` +
+  a real `*-board.json` file) — the same stronger half `atf_team_provisioned()`
+  itself checks — so a live board is never touched a second time regardless
+  of `.aiteamforge-config`'s state. Sequenced in the run list before
+  `update_connect_scripts` so a newly-backfilled team's team-paths.json entry
+  (written by install-team.sh's persist step) is already present when that
+  step's own "Source (c)" registry scan runs, picking up its connect/
+  disconnect scripts in the same upgrade pass. Fail-soft throughout: a
+  registry read failure is reported distinctly from "zero mandatory teams"
+  (never silently conflated — the exact failure XACA-1070 exists to
+  prevent) and a single team's provisioning failure never aborts the rest of
+  the upgrade or the sweep. Team-agnostic: no team id is hard-coded. Verified
+  under `/bin/bash` 3.2 with a stubbed `install-team.sh` in a sandbox: a
+  non-empty fixture mandatory set provisions on first run; a second run
+  against the same sandbox is a true no-op (installer not re-invoked); known
+  sentinel content seeded into the board file survives a third run
+  byte-identical (sha256-verified); `DRY_RUN=true` invokes nothing and
+  creates nothing; an unreadable-registry simulation produces the distinct
+  warning rather than the empty-set message; and the empty-mandatory-set case
+  against the real, unmodified `registry.json` (today's actual state) is a
+  clean no-op with the installer never invoked.
+- XACA-1070-009: added `tests/test-xaca-1070-mandatory-install.sh` (38
+  assertions), the sandboxed test suite for the mandatory-team feature. Since
+  zero teams carry `"mandatory": true` in the real `registry.json` today
+  (`spacedock`/XACA-1068/1069 hasn't shipped), every fixture is a synthetic
+  registry/config/team-paths.json built under `TEST_TMP_DIR` — the real
+  registry only ever exercises the trivial empty-set path. Covers: the
+  resolver's return-code contract (empty-and-exit-0 vs. unreadable-and-exit-1,
+  asserted side by side so they can never be conflated); `order`-based sort
+  across multiple mandatory teams; wizard suppression in
+  `bin/aiteamforge-setup.sh` (plus a negative control proving the guard fails
+  OPEN, not closed, when the lib is unavailable); the force-append block
+  landing in both `SELECTED_TEAMS_STR` and `CR_ALL_SELECTED_TEAMS_STR` and
+  staying idempotent; `install_kanban_system()`'s non-interactive team
+  resolution, including the fresh-box case where `teams` resolves to nothing
+  at all; `update_mandatory_teams()`'s provision-when-absent / no-op-on-
+  second-run / never-overwrite-a-board (sha256-verified) / `DRY_RUN` gate,
+  driven against a fake `install-team.sh` stub so the orchestration decision
+  is isolated from a real provisioning run; `_xaca1070_add_team_to_config()`'s
+  full round trip (registration is followed by both `get_configured_teams()`
+  and `atf_team_provisioned()` confirming it — the exact gap the
+  XACA-1070-005 amendment closed) plus its malformed/missing-config guards
+  (byte-identical via sha256, never guessed at); and both `aiteamforge doctor`
+  copies' `check_mandatory_teams` (pass / fault-unprovisioned /
+  fault-unreadable-registry). Verified under real `/bin/bash` 3.2, not a PATH
+  bash 5.x. FINDING (documented in the suite, not fixed — out of scope):
+  `mandatory-teams.sh`'s `$AITEAMFORGE_HOME/../share/teams/registry.json`
+  priority-1 lookup does not exist under the real Homebrew-installed layout
+  (`AITEAMFORGE_HOME` = the copied repo root, per `Formula/aiteamforge.rb`'s
+  `AITEAMFORGE_HOME="#{libexec}"` — the real file is one level shallower, at
+  `$AITEAMFORGE_HOME/share/teams/registry.json`); the feature only works
+  end-to-end today because the priority-2 self-location fallback silently
+  covers the gap. A test locks in that the fallback keeps the end-to-end
+  contract correct while separately proving priority-1's own path guess is
+  absent in that layout, so a future change to the self-location branch
+  would be caught here.
 - XACA-1113-022 (review, PR #853): the `test-xaca-1113-012-msg-fail-closed.sh`
   seeding added for XACA-1113's `set -u` fix only covered the six counter
   variables (`TOTAL_TESTS`, `PASSED_TESTS`, `FAILED_TESTS`, `SKIPPED_TESTS`,
@@ -1112,6 +1283,72 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   it promise never to break. Measured both forms under `/bin/zsh -c 'setopt
   nounset'`. Note the canonical block does not reference `$DEV_TEAM_ROOT` at all,
   so this override is new surface introduced here, not inherited.
+- XACA-1070-005 (amendment): the backfill added in XACA-1070-004/005/006 fixed
+  never-provisioned mandatory teams but left a second, silent parity gap on
+  every already-installed machine — the entire fleet. `.aiteamforge-config`'s
+  `.teams[]` is written exactly once, by `bin/aiteamforge-setup.sh`'s wizard,
+  from `SELECTED_TEAMS`; `install-team.sh` never touches it (confirmed by
+  grep — it only ever writes `team-paths.json`, a different file). But
+  `.teams[]` is the ONLY thing `aiteamforge start` (`get_configured_teams()`
+  at `libexec/lib/config.sh:102`, consulted at `aiteamforge-start.sh:295,371`)
+  and `atf_team_provisioned()` (`libexec/lib/mandatory-teams.sh:251`) consult.
+  Net effect: a mandatory team backfilled onto disk got a real board, then sat
+  there forever with `aiteamforge start` never launching its LCARS server or
+  crew, and the XACA-1070-007 doctor check reporting FAULT permanently for a
+  team that was actually present — the exact install/upgrade parity bug class
+  (XACA-0747/0751/0814) this whole ticket exists to fix, reproduced inside the
+  fix, reaching only the population the fix targets, and invisible on the
+  fresh-install test that validated it (fresh installs get `.teams[]` for
+  free via `SELECTED_TEAMS`).
+
+  Added `_xaca1070_add_team_to_config()` to
+  `libexec/commands/aiteamforge-upgrade.sh`, called from BOTH branches of
+  `update_mandatory_teams()`'s loop — immediately after a fresh
+  `install-team.sh` provision succeeds, AND on every run where
+  `_xaca1070_mandatory_team_has_board()` finds a board already on disk (a
+  team backfilled by a PRE-fix upgrade run needs the same healing, not just
+  newly-created ones). Deliberately does NOT relax `atf_team_provisioned()`'s
+  `.teams[]` membership requirement instead — that would make doctor report
+  healthy for a team `start` will never launch, strictly worse than a false
+  fault; parity with the install path is the fix, not a second definition of
+  "provisioned".
+
+  Safety, since this file holds every team's real install configuration and
+  corrupting it breaks `aiteamforge start` fleet-wide: read-modify-write is
+  atomic (`tempfile.mkstemp` + `os.replace`, the same pattern
+  `install-team.sh` already uses for `team-paths.json`); a missing or
+  unparseable config is warned-and-skipped, never created or overwritten; a
+  `.teams` key that is absent, or present but not a flat array of strings, is
+  also warned-and-skipped as presumably-hand-edited rather than guessed at;
+  and — rather than parse-and-redump the whole JSON document, which would
+  reformat `installed_features`/`team_paths` into a different style than
+  `bin/aiteamforge-setup.sh`'s compact printf-built arrays — the edit targets
+  only the literal `"teams": [...]` text span, so every other byte of the
+  file is provably untouched. The rewritten text is re-parsed and diff-checked
+  against the expected result before it is allowed near disk. `python3` (a
+  hard formula dependency, already relied on directly elsewhere in this same
+  file for `.aiteamforge-config` JSON work) does the edit rather than `jq`
+  (also a hard dependency): a targeted, validate-before-and-after text-span
+  replacement is a poor fit for `jq`'s reformat-on-output behavior. Guarded
+  with `command -v python3` regardless, matching this file's own convention
+  of never assuming a hard dependency is unbroken on every box, and degrades
+  to a warning rather than aborting the upgrade.
+
+  Verified under `/bin/bash` 3.2 (`bash -n` clean) via a sandboxed
+  `.aiteamforge-config` + `AITEAMFORGE_CONFIG`/`team-paths.json` fixture,
+  calling the shipped function directly (not a reimplementation): a config
+  lacking the team gets it added with every other byte byte-identical to the
+  original (diff shows only the `.teams` line changed); a second run against
+  the result changes zero bytes (true idempotency, not just "no error");
+  malformed JSON and a missing config file are both warned-and-skipped with
+  the file provably untouched/uncreated (diffed byte-identical, or confirmed
+  absent); a `.teams` key that is absent or the wrong shape is likewise
+  skipped without modification. Most importantly, the actual round trip:
+  before the fix, `atf_team_provisioned spacedock` returned 1 (not
+  provisioned) against a config lacking `spacedock` despite a real on-disk
+  board; after calling the shipped function, `get_configured_teams` returns
+  `spacedock` and `atf_team_provisioned spacedock` returns 0 — confirming
+  `aiteamforge start` will now actually launch it.
 
 ## [0.20.8] - 2026-09-09
 - XACA-0853 (review round 3 follow-ups, PR #846): four review/test findings closed, two of which had

@@ -174,6 +174,19 @@ class Aiteamforge < Formula
     assert_path_exists libexec/"libexec/lib/config.sh"
     assert_path_exists libexec/"libexec/lib/wizard-ui.sh"
 
+    # XACA-1070: mandatory-teams.sh is the SINGLE source of truth for the
+    # registry's "mandatory": true flag — read by the setup wizard's
+    # force-append, the non-interactive installer, the upgrade backfill and
+    # both doctor copies. Every one of those callers guards its use with
+    # `command -v atf_...`, so a MISSING lib does not crash anything: it
+    # silently disables mandatory-team enforcement everywhere at once, and the
+    # doctor check that would report it degrades to a warning precisely
+    # because it depends on this same file. Absence is therefore invisible at
+    # runtime by construction. Assert it here so a packaging regression fails
+    # the Formula test instead of shipping a feature that quietly does
+    # nothing on every consumer.
+    assert_path_exists libexec/"libexec/lib/mandatory-teams.sh"
+
     # Verify alias templates exist (must ship in released package for install-shell.sh)
     assert_path_exists libexec/"share/templates/aliases/agent-aliases.sh"
     assert_path_exists libexec/"share/templates/aliases/cc-aliases.sh"

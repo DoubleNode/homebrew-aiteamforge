@@ -8,6 +8,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
 source "$SCRIPT_DIR/../lib/constants.sh"
+# XACA-1070-003: mandatory-teams lib — see install_kanban_system() below for
+# why this path (rather than only bin/aiteamforge-setup.sh's wizard, XACA-
+# 1070-002) needs its own enforcement: this file is invoked directly by
+# `aiteamforge upgrade` and by any non-interactive/CI install, neither of
+# which runs the wizard or ever sets SELECTED_TEAMS_STR.
+source "$SCRIPT_DIR/../lib/mandatory-teams.sh"
 # XACA-0734: opt-out sentinel helpers. Each install_<x>_launchagent() below
 # CHECKS the sentinel and refuses to install when the user has opted out;
 # uninstall_<x>_launchagent() RECORDS an opt-out — but ONLY for a targeted,
@@ -2761,6 +2767,69 @@ install_kanban_system() {
             while IFS= read -r team; do
                 teams+=("$team")
             done < <(jq -r '.teams[]' "$AITEAMFORGE_DIR/.aiteamforge-config" 2>/dev/null)
+        fi
+    fi
+
+    # XACA-1070-003: force-append mandatory teams onto whichever path built
+    # `teams` above — including the "resolved to nothing at all" case (no
+    # SELECTED_TEAMS_STR, no .aiteamforge-config, or no jq to read it with).
+    # This is the path bin/aiteamforge-setup.sh's wizard (XACA-1070-002)
+    # does NOT cover: `aiteamforge upgrade` and any non-interactive/CI
+    # install call install_kanban_system directly, with the wizard never in
+    # the loop and SELECTED_TEAMS_STR never exported, so a mandatory team
+    # added to the registry after a machine's first install would otherwise
+    # never provision on that machine at all. Team-agnostic by design — no
+    # team id is hard-coded here (see mandatory-teams.sh's header comment);
+    # today's expected state is zero mandatory teams, so this is a
+    # correctly-behaving no-op until XACA-1068/1069 land.
+    #
+    # Bash 3.2 has no `declare -n`/nameref, so this is inlined against the
+    # local `teams` array rather than factored into a pass-by-reference
+    # helper shared with bin/aiteamforge-setup.sh's copy of this logic.
+    #
+    # `set -euo pipefail` guard: `_mand_out="$(atf_mandatory_teams)"` alone
+    # would propagate atf_mandatory_teams' exit code straight to the
+    # assignment and abort this installer under errexit — an assignment is
+    # not exempt from `set -e` the way an `if`/`&&` condition is. `||
+    # _mand_rc=$?` sidesteps that: the trailing assignment always
+    # "succeeds", so the list's own exit status is 0, while `_mand_rc` still
+    # captures the real code so the empty-vs-unreadable distinction from
+    # atf_mandatory_teams' return-code contract isn't lost.
+    if command -v atf_mandatory_teams >/dev/null 2>&1; then
+        local _mand_out="" _mand_rc=0
+        _mand_out="$(atf_mandatory_teams 2>&1)" || _mand_rc=$?
+        if [ "$_mand_rc" -eq 0 ]; then
+            local _mand_id _mand_already _mand_existing
+            while IFS= read -r _mand_id; do
+                [ -n "$_mand_id" ] || continue
+                _mand_already=0
+                # Guard for bash 3.2: iterating an empty array under `set -u`
+                # throws "unbound variable" on macOS /bin/bash (same bug
+                # class documented above on _TEAM_WORKING_DIRS/teams elsewhere
+                # in this file) — check the count before the `for` at all.
+                if [ ${#teams[@]} -gt 0 ]; then
+                    for _mand_existing in "${teams[@]}"; do
+                        if [ "$_mand_existing" = "$_mand_id" ]; then
+                            _mand_already=1
+                            break
+                        fi
+                    done
+                fi
+                if [ "$_mand_already" -eq 0 ]; then
+                    teams+=("$_mand_id")
+                    info "Mandatory team added: $_mand_id (XACA-1070)"
+                fi
+            done <<EOF
+$_mand_out
+EOF
+        else
+            # Fail-closed on the ENFORCEMENT question, not on the install
+            # itself: an unreadable registry.json must be surfaced (the
+            # exit-1 fault case in atf_mandatory_teams' contract — never
+            # silently "no mandatory teams"), but aborting the whole kanban
+            # installer over it would be worse than continuing without
+            # mandatory-team enforcement for this one run.
+            warning "Could not determine mandatory teams (${_mand_out}) — continuing without mandatory-team enforcement (XACA-1070)"
         fi
     fi
 

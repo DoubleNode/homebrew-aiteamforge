@@ -27,6 +27,20 @@ source "${LIBEXEC_DIR}/lib/launchagents.sh"
 # disagree about what counts as a target. See lib/persona-targets.sh header.
 source "${LIBEXEC_DIR}/lib/persona-targets.sh"
 
+# XACA-1070 (subitems 004-006): mandatory-fleet-team backfill support.
+# Guarded exactly like aiteamforge-doctor.sh's identical source line — a
+# missing file degrades update_mandatory_teams() to a single warning rather
+# than aborting the whole upgrade under this script's `set -eo pipefail`.
+# shellcheck source=../lib/mandatory-teams.sh
+[ -f "${LIBEXEC_DIR}/lib/mandatory-teams.sh" ] && source "${LIBEXEC_DIR}/lib/mandatory-teams.sh" 2>/dev/null || true
+# aiteamforge-paths.sh: provides aiteamforge_team_kanban_dir(), the on-disk
+# provisioned-evidence check update_mandatory_teams() uses in place of
+# atf_team_provisioned() (see that function's own header comment below for
+# why the two cannot share a check). Not sourced by anything else in this
+# file today; double-source-guarded, so safe even if that changes later.
+# shellcheck source=../lib/aiteamforge-paths.sh
+[ -f "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh" ] && source "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh" 2>/dev/null || true
+
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
 VERSION="$(_find_version)"
@@ -1223,6 +1237,437 @@ update_team_scripts() {
   else
     print_success "Updated ${updated} team script(s)"
   fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backfill mandatory-fleet teams onto ALREADY-INSTALLED machines
+# (XACA-1070, subitems 004-006).
+#
+# THE BUG CLASS THIS CLOSES — same shape as XACA-0747 / XACA-0751 / XACA-0814,
+# all cited elsewhere in this file (see update_knowledge_repo, update_knowledge_
+# sync, update_connect_scripts): install-time-only provisioning never reaches a
+# machine that only ever runs `brew upgrade`. A team gaining
+# `"mandatory": true` in share/teams/registry.json is force-appended into the
+# SETUP WIZARD's selection (bin/aiteamforge-setup.sh) and reported as a
+# doctor FAULT when absent (aiteamforge-doctor.sh's check_mandatory_teams) —
+# but neither of those reaches an existing install. EVERY machine in the
+# fleet is already installed, so without this function the feature
+# provisions on precisely zero real machines while testing green on a clean
+# box. This is the third leg: the upgrade-side backfill that actually
+# reaches them.
+#
+# SINGLE PROVISIONER, NOT A SECOND ONE. All board-creation logic (registry
+# branding lookup, port allocation, team-paths.json persistence,
+# connect/disconnect script rendering, persona copy, and — the part this
+# function's own guard depends on — "skip stub creation if a board already
+# exists") already lives in install-team.sh. This function's ONLY job is
+# deciding WHICH mandatory teams still need that call, then delegating the
+# entire provisioning act to install-team.sh as a full subprocess — the
+# exact invocation shape bin/aiteamforge-setup.sh's own team-provisioning
+# loop uses (`AITEAMFORGE_DIR="${INSTALL_DIR}" bash
+# "${INSTALLERS_DIR}/install-team.sh" "$team_id" --install-dir
+# "${INSTALL_DIR}"`). It deliberately does NOT reimplement board creation,
+# port allocation, or connect-script rendering itself.
+#
+# XACA-1163 (KNOWN UPSTREAM ISSUE, NOT FIXED HERE): board.json's `series`
+# field is read as the item-id prefix at runtime, but install-team.sh writes
+# the team's Trek-series abbreviation into it instead — a real, separate bug
+# in the shared provisioner. This function does not work around it by
+# hand-rolling board creation here; that would fork a second provisioner
+# that silently drifts from install-team.sh the next time either one
+# changes. It will simply become correct, for free, once XACA-1163 lands.
+#
+# IDEMPOTENCY / NEVER-CLOBBER GUARD (subitem 005) — WHY THIS DOES NOT CALL
+# atf_team_provisioned():
+#   atf_team_provisioned() (libexec/lib/mandatory-teams.sh) requires BOTH
+#   (1) membership in get_configured_teams() — which reads `.teams[]` from
+#   ${WORKING_DIR}/.aiteamforge-config, a file written EXACTLY ONCE, by
+#   bin/aiteamforge-setup.sh's interactive wizard run — AND (2) a real
+#   on-disk board file. install-team.sh itself NEVER writes `.teams[]`
+#   (only the wizard does), so a team provisioned purely by THIS backfill
+#   can never satisfy criterion (1) — atf_team_provisioned() would report
+#   "not provisioned" for it FOREVER, on every future upgrade, even
+#   immediately after this function successfully created its board. Gating
+#   the skip-vs-provision decision on that check would defeat subitem 005's
+#   entire purpose: instead of a no-op, every upgrade would re-invoke the
+#   full installer for every mandatory team, forever.
+#
+#   Rather than duplicate criterion (1), this function checks ONLY the
+#   on-disk-evidence half directly — mirroring atf_team_provisioned()'s own
+#   stronger criterion exactly (same helper, aiteamforge_team_kanban_dir(),
+#   same "does a real *-board.json file exist" evidence standard) but
+#   without the .aiteamforge-config membership test that this code path can
+#   never satisfy. That on-disk board file is also the ONLY guarantee that
+#   actually matters for "never overwrite a live board": it is checked
+#   BEFORE install-team.sh is ever invoked, and a real board found here
+#   means we never call the installer at all for that team on this run —
+#   the board that holds this host's only copy of its incident history is
+#   never touched a second time. (aiteamforge-doctor.sh's own
+#   check_mandatory_teams, and XACA-1071's kb-spacedock, still correctly use
+#   atf_team_provisioned() for their own purposes — this is not a claim
+#   that helper is wrong, only that its .aiteamforge-config half doesn't fit
+#   THIS call site's specific skip-vs-provision decision.)
+#
+# CONNECT-SCRIPT REGENERATION (subitem 006): install-team.sh's full
+# (non-`--connect-only`) path already renders `${TEAM_ID}-connect.sh` /
+# `-disconnect.sh` unconditionally as part of a normal install — so the
+# first time this function provisions a mandatory team, its connect script
+# is created in that same call, for free. Ongoing refreshes on every later
+# upgrade (e.g. after a future XACA-0814-style connect-script generator fix
+# ships) are then already handled by update_connect_scripts() further down
+# this run's call sequence, via its own "Source (c)" team-paths.json scan
+# (XACA-0862 subitem 005) — install-team.sh's persist step writes this
+# team's team-paths.json entry on the very same call, which is exactly what
+# that source scans for. This function is placed BEFORE update_connect_scripts
+# in the run sequence below specifically so a newly-backfilled team is
+# picked up in the SAME upgrade pass rather than lagging one run behind.
+# Per subitem 006's instruction, this function does NOT call
+# `install-team.sh --connect-only` itself and does NOT render any script
+# content directly — update_connect_scripts is already the single, tested
+# owner of that rendering path, and a second call here would just be a
+# redundant, competing invocation of the exact same delegation.
+#
+# FAIL-SOFT, LIKE EVERY OTHER update_* STEP IN THIS FILE: this runs
+# unattended under the nightly auto-upgrade LaunchAgent. A single team's
+# provisioning failure — or the registry being entirely unreadable — must
+# never abort the rest of the upgrade.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# _xaca1070_mandatory_team_has_board <team_id>
+# Exit 0 when a real "*-board.json" file already exists for $1, 1 otherwise
+# (including "cannot even determine the kanban dir" — a lookup failure is
+# never treated as proof of absence-and-therefore-safe-to-provision; it is
+# treated as "cannot verify", which correctly routes below to attempting the
+# installer, exactly as if the team had never been provisioned). No stdout.
+_xaca1070_mandatory_team_has_board() {
+  local team_id="$1"
+  [ -n "$team_id" ] || return 1
+  command -v aiteamforge_team_kanban_dir >/dev/null 2>&1 || return 1
+
+  local kdir
+  kdir="$(aiteamforge_team_kanban_dir "$team_id" 2>/dev/null)" || return 1
+  [ -n "$kdir" ] && [ -d "$kdir" ] || return 1
+
+  local f
+  for f in "$kdir"/*-board.json; do
+    [ -f "$f" ] && return 0
+  done
+  return 1
+}
+
+# _xaca1070_add_team_to_config <team_id>
+#
+# XACA-1070-005 (parity gap): _xaca1070_mandatory_team_has_board() proves a
+# team's BOARD exists on disk, but board evidence alone does not make
+# `aiteamforge start` launch it. `get_configured_teams()` (libexec/lib/config.sh)
+# — the ONLY thing `aiteamforge start` (aiteamforge-start.sh:295,371) and
+# `atf_team_provisioned()` (libexec/lib/mandatory-teams.sh:251) consult — reads
+# `.teams[]` from .aiteamforge-config, and that file is written EXACTLY ONCE,
+# by bin/aiteamforge-setup.sh's interactive wizard (line ~1801), from
+# SELECTED_TEAMS. install-team.sh (the installer THIS file's caller shells out
+# to) never touches it — confirmed by grep, it only ever writes team-paths.json,
+# a different file entirely. So on every already-installed machine — the whole
+# reason this backfill exists — a mandatory team backfilled onto disk still has
+# `aiteamforge start` skip it forever, and the doctor check this ticket adds
+# reports FAULT permanently for a team that is actually sitting on disk. This
+# is XACA-0747/0751/0814's exact install/upgrade parity bug class, reproduced
+# inside the fix meant to close it (see this file's own header comment on
+# update_mandatory_teams, and libexec/lib/common.sh:223's XACA-0799 citation).
+#
+# This function closes that gap: given a team id already confirmed provisioned
+# (board on disk — by either branch of update_mandatory_teams' loop, freshly
+# created THIS run or found already present from a prior run), add it to
+# .aiteamforge-config's `.teams[]` if it is not there already, so an upgraded
+# machine reaches the SAME end state a fresh install produces.
+#
+# NEVER RELAX atf_team_provisioned() INSTEAD. Dropping its .teams[] membership
+# check would make doctor report healthy for a team `start` will never launch —
+# strictly worse than a false fault. Parity with the install path is the fix;
+# it is not a second definition of "provisioned".
+#
+# SAFETY CONTRACT (this file holds every team's real install configuration —
+# corrupting it breaks `aiteamforge start` fleet-wide, which is far worse than
+# Space Dock alone staying dark):
+#   - Read-modify-write is ATOMIC (tempfile + os.replace), mirroring the exact
+#     pattern install-team.sh already uses for team-paths.json (XACA-0463).
+#   - Missing or unparseable config -> WARN AND SKIP. Never create, never
+#     overwrite. A team that stays unregistered this run is retried next
+#     upgrade (fail-soft, like every other update_* step in this file); a
+#     corrupted config is not recoverable the same way.
+#   - `.teams` key absent, or present but not a flat array of strings -> WARN
+#     AND SKIP. That shape does not match anything bin/aiteamforge-setup.sh or
+#     this function ever writes, so it reads as hand-edited; guessing the
+#     intended shape risks corrupting it, refusing to touch it does not.
+#   - Idempotent: if the team is already listed, this makes ZERO changes and
+#     performs NO rewrite (verified: byte-identical file after a second run).
+#   - Every other byte of the file is left untouched. Rather than parse+dump
+#     the whole JSON document (which would reformat `installed_features`,
+#     `team_paths`, etc. into a different style than bin/aiteamforge-setup.sh's
+#     compact printf-built arrays), this edits ONLY the literal `.teams[...]`
+#     text span in place. The rewritten text is re-parsed and diffed against
+#     the expected result before it is allowed near disk; any mismatch aborts
+#     with the original file untouched.
+#
+# python3 IS a hard formula dependency (Formula/aiteamforge.rb `depends_on
+# "python@3"`) and this exact file already leans on it directly for
+# .aiteamforge-config JSON work (see the .aiteamforge-config reader a few
+# hundred lines below, "Installed instances, read from .aiteamforge-config").
+# jq is ALSO a hard dependency, but is deliberately not used here: an
+# add-if-absent that must preserve every unrelated byte and never touch a file
+# it cannot fully validate is a poor fit for jq's own reformat-on-output
+# behavior, whereas python gives us surgical text-span replacement plus a
+# built-in JSON parser to validate before AND after. The `command -v python3`
+# guard below is still kept — matching this file's own established
+# convention of never assuming a hard dependency is unbroken on every box —
+# and degrades to a warning rather than aborting the upgrade.
+#
+# NOTE FOR EDITORS: no apostrophes anywhere in the here-doc body below. Under
+# bash 3.2 (every macOS consumer box) a here-doc nested inside $( ) is NOT
+# treated as opaque, so one stray single quote opens an unterminated quote and
+# the WHOLE file fails to parse — with the error reported hundreds of lines
+# later, nowhere near the real cause. See XACA-0845.
+_xaca1070_add_team_to_config() {
+  local team_id="$1"
+  [ -n "$team_id" ] || return 1
+
+  local config_file
+  config_file="$(get_config_file)"
+
+  if [ ! -f "$config_file" ]; then
+    print_warning "XACA-1070: .aiteamforge-config not found (${config_file}) — cannot register '${team_id}' in .teams[]; it will not be started by aiteamforge start until this is resolved. Not creating the file."
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    print_warning "XACA-1070: python3 not found — cannot safely update .teams[] for '${team_id}'; leaving ${config_file} untouched (will retry next upgrade)."
+    return 1
+  fi
+
+  local _xaca1070_out _xaca1070_rc=0
+  _xaca1070_out="$(python3 - "$config_file" "$team_id" <<'PYEOF' 2>&1
+import json
+import os
+import re
+import sys
+import tempfile
+
+config_path = sys.argv[1]
+team_id = sys.argv[2]
+
+try:
+    with open(config_path, "r", encoding="utf-8") as fh:
+        raw = fh.read()
+except OSError as exc:
+    print("could not read " + config_path + ": " + str(exc))
+    sys.exit(1)
+
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError as exc:
+    print(config_path + " is not valid JSON: " + str(exc))
+    sys.exit(1)
+
+if not isinstance(data, dict):
+    print(config_path + " root is not a JSON object -- refusing to touch it")
+    sys.exit(1)
+
+teams = data.get("teams")
+if teams is None:
+    print("the .teams key is absent -- refusing to guess the intended shape; leaving config untouched")
+    sys.exit(2)
+if not isinstance(teams, list) or not all(isinstance(t, str) for t in teams):
+    print("the .teams key is present but is not a flat array of strings -- refusing to touch it")
+    sys.exit(2)
+
+if team_id in teams:
+    print("already present in .teams[] -- no-op")
+    sys.exit(0)
+
+pattern = re.compile("(\"teams\"\\s*:\\s*)\\[([^\\]]*)\\]")
+m = pattern.search(raw)
+if m is None:
+    print("json parsed .teams as a list but its literal text could not be located -- refusing to guess; leaving config untouched")
+    sys.exit(3)
+
+prefix = m.group(1)
+inner = m.group(2)
+new_list = teams + [team_id]
+
+if "\n" in inner:
+    lines = inner.split("\n")
+    closing_indent = lines[-1] if lines and lines[-1].strip() == "" else "  "
+    indent = "  "
+    for line in reversed(lines):
+        stripped = line.strip()
+        if stripped.startswith("\""):
+            indent = line[: len(line) - len(line.lstrip(" "))]
+            break
+    body = (",\n").join(indent + "\"" + t + "\"" for t in new_list)
+    new_inner = "\n" + body + "\n" + closing_indent
+else:
+    parts = [p.strip() for p in inner.split(",") if p.strip()]
+    parts.append("\"" + team_id + "\"")
+    new_inner = ",".join(parts)
+
+new_array_text = prefix + "[" + new_inner + "]"
+new_raw = raw[: m.start()] + new_array_text + raw[m.end():]
+
+try:
+    check = json.loads(new_raw)
+except json.JSONDecodeError as exc:
+    print("internal error: rewritten config failed to re-parse (" + str(exc) + ") -- aborting, original left untouched")
+    sys.exit(1)
+
+if check.get("teams") != new_list:
+    print("internal error: rewritten .teams[] does not match the expected result -- aborting, original left untouched")
+    sys.exit(1)
+
+target_dir = os.path.dirname(os.path.abspath(config_path)) or "."
+tmp_fd, tmp_path = tempfile.mkstemp(prefix=".aiteamforge-config-xaca1070-", dir=target_dir)
+try:
+    with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+        f.write(new_raw)
+    try:
+        original_mode = os.stat(config_path).st_mode
+        os.chmod(tmp_path, original_mode & 0o7777)
+    except OSError:
+        pass
+    os.replace(tmp_path, config_path)
+except Exception as exc:
+    print("could not write " + config_path + ": " + str(exc))
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    sys.exit(1)
+
+print("added to .teams[] in " + config_path)
+sys.exit(0)
+PYEOF
+  )" || _xaca1070_rc=$?
+
+  if [ "$_xaca1070_rc" -eq 0 ]; then
+    case "$_xaca1070_out" in
+      *"no-op"*) ;;  # already registered — nothing worth logging
+      *) print_success "XACA-1070: registered '${team_id}' in .teams[] (${_xaca1070_out})" ;;
+    esac
+    return 0
+  fi
+
+  print_warning "XACA-1070: could not register '${team_id}' in ${config_file}'s .teams[] (${_xaca1070_out}). aiteamforge start will not launch it until this is resolved; config left untouched, will retry next upgrade."
+  return 1
+}
+
+update_mandatory_teams() {
+  print_section "Backfilling Mandatory Fleet Teams"
+
+  if ! command -v atf_mandatory_teams >/dev/null 2>&1; then
+    print_warning "mandatory-teams.sh not available — skipping mandatory-team backfill (XACA-1070)"
+    return 0
+  fi
+
+  # `|| _mand_rc=$?` (not a bare `local x=$(cmd)`, which always discards the
+  # command substitution's exit status) survives this script's `set -eo
+  # pipefail` without losing the real return code we need to branch on next.
+  local mandatory_teams _mand_rc=0
+  mandatory_teams="$(atf_mandatory_teams)" || _mand_rc=$?
+
+  if [ "$_mand_rc" -ne 0 ]; then
+    # registry.json unreadable/unparseable — a FAULT, not "nothing to
+    # backfill". atf_mandatory_teams() already wrote a diagnostic to stderr.
+    # Fail-soft here (like every other update_* step) so an unattended
+    # nightly upgrade never aborts on it — but say so loudly rather than
+    # silently collapsing this into the empty-mandatory-set case, which is
+    # the exact conflation XACA-1070 exists to prevent.
+    print_warning "Could not determine mandatory teams (registry.json missing/unparseable) — skipping backfill this run; see stderr diagnostic above. 'aiteamforge doctor' will also flag this."
+    return 0
+  fi
+
+  if [ -z "$mandatory_teams" ]; then
+    # Expected steady state today (XACA-1070-001): zero teams carry the flag
+    # until spacedock (XACA-1068/1069) ships. Clean no-op, not a warning.
+    print_success "No mandatory teams declared — nothing to backfill"
+    return 0
+  fi
+
+  local installer="${LIBEXEC_DIR}/installers/install-team.sh"
+  if [ ! -f "$installer" ]; then
+    print_warning "install-team.sh not found ($installer) — skipping mandatory-team backfill"
+    return 0
+  fi
+
+  local team provisioned=0 created=0 failed=0
+  while IFS= read -r team; do
+    [ -n "$team" ] || continue
+
+    if _xaca1070_mandatory_team_has_board "$team"; then
+      # Board already exists on disk — NO-OP. Never call install-team.sh for
+      # this team again; that is the entire non-clobber guarantee subitem
+      # 005 exists to provide (a real board is this host's only copy of its
+      # incident history and is not backed by git).
+      print_info "Mandatory team '${team}' already provisioned — skipping (no-op)"
+      provisioned=$((provisioned + 1))
+      # XACA-1070-005: a team can have a real on-disk board from a PRIOR
+      # backfill run (before this .teams[] registration existed) and still be
+      # missing from .aiteamforge-config — exactly the parity gap this
+      # subitem fixes. Check/register on every run, not only at creation
+      # time, so an already-provisioned-but-unregistered team is healed the
+      # very next upgrade rather than staying dark forever. Idempotent and
+      # fail-soft — never blocks the rest of this loop.
+      if [ "$DRY_RUN" != true ]; then
+        _xaca1070_add_team_to_config "$team" || true
+      fi
+      continue
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+      echo "Would provision mandatory team '${team}' (not yet present on this machine)"
+      created=$((created + 1))
+      continue
+    fi
+
+    print_info "Provisioning mandatory team '${team}' (not yet present on this machine)..."
+    # Full SUBPROCESS (not sourced) — install-team.sh runs under `set -euo
+    # pipefail`; a fresh interpreter fully isolates that from this script's
+    # `set -eo` (no -u, see top of file), same rationale as
+    # update_connect_scripts' installer invocation below. `</dev/null` keeps
+    # an unattended nightly-upgrade run from having a stray prompt silently
+    # swallow the rest of this loop's remaining teams (XACA-0845-012
+    # documents the identical hazard for the connect-script sweep).
+    if ( AITEAMFORGE_DIR="${WORKING_DIR}" bash "$installer" "$team" --install-dir "${WORKING_DIR}" </dev/null 2>&1 | sed 's/^/    /' ); then
+      print_success "Provisioned mandatory team '${team}'"
+      created=$((created + 1))
+      # XACA-1070-005: install-team.sh (just run above) never writes
+      # .aiteamforge-config's .teams[] — only bin/aiteamforge-setup.sh's
+      # wizard does, once, at original install time. Without this, a
+      # mandatory team backfilled onto an already-installed machine gets a
+      # real board but `aiteamforge start` never launches it (it gates on
+      # .teams[] — see this function's own header comment). Fail-soft: a
+      # registration failure here does not undo the successful provision or
+      # abort the loop; it retries next upgrade.
+      _xaca1070_add_team_to_config "$team" || true
+    else
+      print_warning "Failed to provision mandatory team '${team}' (continuing; non-fatal — will retry next upgrade)"
+      failed=$((failed + 1))
+    fi
+  done <<EOF
+$mandatory_teams
+EOF
+
+  if [ "$DRY_RUN" = true ]; then
+    if [ "$created" -eq 0 ]; then
+      print_success "All mandatory teams already provisioned"
+    else
+      print_success "Would provision ${created} mandatory team(s)"
+    fi
+  elif [ $((created + failed)) -eq 0 ]; then
+    print_success "All mandatory teams already provisioned (${provisioned} up to date)"
+  elif [ "$failed" -gt 0 ]; then
+    print_warning "Provisioned ${created} mandatory team(s); ${failed} failed (non-fatal)"
+  else
+    print_success "Provisioned ${created} mandatory team(s)"
+  fi
+  return 0
 }
 
 # Read a team conf's parameterisation flags (XACA-0834).
@@ -4010,6 +4455,16 @@ update_knowledge_repo
 update_knowledge_sync
 update_aux_scripts
 update_team_scripts
+# XACA-1070 (subitems 004-006): backfill mandatory-fleet teams onto this
+# already-installed machine. Deliberately sequenced BEFORE update_connect_scripts
+# — a newly-provisioned mandatory team's team-paths.json entry (written by
+# install-team.sh's persist step inside update_mandatory_teams) must exist
+# before update_connect_scripts' "Source (c)" registry scan runs, so a
+# brand-new team's connect/disconnect scripts get picked up in this SAME
+# upgrade pass rather than lagging one run behind. See update_mandatory_teams'
+# own header comment for the full rationale (why it does not call
+# atf_team_provisioned(), why it doesn't render connect scripts itself).
+update_mandatory_teams
 update_connect_scripts
 update_runtime_helpers
 provision_msg_routing

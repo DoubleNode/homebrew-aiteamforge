@@ -36,9 +36,57 @@ JSON metadata for team selection UI:
 - Categories
 - Icons
 - Recommendations
+- Mandatory-install flag
 - Themes
 
 **Used by:** Setup wizard, team selection interface
+
+#### The `"mandatory"` flag (XACA-1070)
+
+Each entry in `.teams[]` may carry an optional boolean `"mandatory"` key:
+
+```json
+{
+  "id": "example-team",
+  "...": "...",
+  "mandatory": true
+}
+```
+
+- **Omitting the key defaults to `false`.** Only a team explicitly marked
+  `"mandatory": true` is treated as mandatory — there is no implicit
+  mandatory team, and (as of XACA-1070-001) zero teams carry the flag. An
+  empty mandatory-teams list is the normal, expected state, not an error.
+- **A mandatory team is suppressed from the wizard's selectable list and
+  force-installed instead.** The install wizard (`bin/aiteamforge-setup.sh`)
+  does not present it as a checkbox choice — it is force-appended to every
+  install's selection regardless of what the user picks.
+- **It is backfilled on upgrade.** `aiteamforge upgrade`
+  (`libexec/commands/aiteamforge-upgrade.sh`) installs any mandatory team
+  that is missing from an already-provisioned machine, so existing installs
+  converge onto the same mandatory set as fresh ones.
+- **Its absence is a fault.** `aiteamforge doctor`
+  (`libexec/commands/aiteamforge-doctor.sh`) reports a mandatory team that
+  is not provisioned on the current host as a failing check, not a warning.
+- **Do not confuse this with `"recommended"`.** `"recommended"` is a
+  wizard-UI-only hint (pre-ticks a checkbox the user can still uncheck) with
+  no enforcement anywhere in the installer — confirmed by
+  `grep -rn "recommended" libexec/ bin/` returning zero functional
+  consumers (XACA-1070-001). `"mandatory"` is enforced: it removes the
+  choice rather than merely suggesting one.
+
+**Single source of truth for reading this flag:**
+`libexec/lib/mandatory-teams.sh` — every consumer (wizard, upgrade backfill,
+doctor check) sources this lib rather than re-parsing `registry.json`
+independently, so they cannot silently disagree about which teams are
+mandatory or what "provisioned on this host" means. See that file's header
+comment for the full contract (`atf_mandatory_teams`, `atf_is_mandatory_team`,
+`atf_team_provisioned`).
+
+**Adding a mandatory team:** set `"mandatory": true` on its `registry.json`
+entry. Do not hard-code the team's id anywhere else — every consumer of the
+mandatory set is expected to go through `mandatory-teams.sh` and treat the
+list as data, not as a known, enumerable set of ids.
 
 ## Usage
 

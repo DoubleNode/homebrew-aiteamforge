@@ -43,6 +43,17 @@ fi
 # shellcheck source=/dev/null
 [ -f "$AITEAMFORGE_HOME/libexec/lib/common.sh" ] && . "$AITEAMFORGE_HOME/libexec/lib/common.sh"
 
+# XACA-1070-002: source the mandatory-teams lib so the team-selection step can
+# suppress mandatory teams from the presented checklist and so they can be
+# force-appended into SELECTED_TEAMS later. Sourced early (same spot as
+# common.sh) so it's available to both the Step 2 selection block and the
+# later kanban-install block without re-sourcing. Degrades silently when
+# absent (dev checkout mid-merge, older tap layout) — every call site below
+# guards with `command -v atf_...` first, so a missing lib just means "no
+# mandatory-team enforcement this run," never a hard failure.
+# shellcheck source=/dev/null
+[ -f "$AITEAMFORGE_HOME/libexec/lib/mandatory-teams.sh" ] && . "$AITEAMFORGE_HOME/libexec/lib/mandatory-teams.sh"
+
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "$AITEAMFORGE_HOME/../VERSION" "$AITEAMFORGE_HOME/VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
 VERSION="$(_find_version)"
@@ -789,6 +800,24 @@ TEAM_LABELS=()
 for conf_file in "${TEAMS_DIR}"/*.conf; do
   [ -f "$conf_file" ] || continue
   tid="$(basename "$conf_file" .conf)"
+
+  # XACA-1070-002: mandatory teams are never shown as a checkbox — they are
+  # force-appended into SELECTED_TEAMS unconditionally, right before
+  # install-kanban.sh is invoked (see the kanban-install block below). Skip
+  # adding this one to AVAILABLE_TEAMS/TEAM_LABELS so it can't be selected
+  # twice and never occupies a numbered slot in the printed menu.
+  #
+  # `atf_is_mandatory_team` is safe here even though this script runs under
+  # `set -eo pipefail`: it's the condition of an `if`, and bash exempts
+  # if/while/until conditions from errexit entirely — including whatever
+  # non-zero exit happens inside the function it calls (an unreadable
+  # registry.json fails the function closed, per mandatory-teams.sh's
+  # contract, which here just means "don't suppress," not "abort the
+  # wizard"). The `command -v` guard makes the same true when the lib
+  # itself failed to source.
+  if command -v atf_is_mandatory_team >/dev/null 2>&1 && atf_is_mandatory_team "$tid"; then
+    continue
+  fi
 
   # Read team name and description from conf
   tname="$(grep '^TEAM_NAME=' "$conf_file" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
@@ -1593,6 +1622,67 @@ if [ "$INSTALL_CLAUDE" = "yes" ]; then
     echo -e "  ${YELLOW}⚠ Claude config installer not found (skipping)${NC}"
   fi
   echo ""
+fi
+
+# -----------------------------------------------------------------------
+# XACA-1070-002: force-append mandatory teams into SELECTED_TEAMS.
+#
+# Placed here — unconditionally, before the kanban-install block below and
+# before every later read of SELECTED_TEAMS in this script (the config JSON
+# write, the install summary) — so a mandatory team lands in BOTH
+# SELECTED_TEAMS_STR and CR_ALL_SELECTED_TEAMS_STR (exported a few lines
+# down for install-kanban.sh) regardless of whether the user picked it,
+# whether this was an upgrade-hydrated run, or whether INSTALL_KANBAN itself
+# is "yes". Doing it this late (rather than back in Step 2 selection) is
+# deliberate: it also covers the UPGRADE_HYDRATED and cockpit paths, which
+# both skip the Step 2 selection block entirely and would otherwise never
+# see a newly-added mandatory team.
+#
+# Team-agnostic by design (XACA-1070): no team id is hard-coded anywhere in
+# this block. Zero teams carry "mandatory": true as of this writing, so the
+# loop below is a correctly-behaving no-op today — see
+# libexec/lib/mandatory-teams.sh's own header comment for why that empty
+# case matters.
+#
+# `set -eo pipefail` guard: `_mand_out="$(atf_mandatory_teams)"` alone would
+# propagate atf_mandatory_teams' exit code to the assignment and abort the
+# whole wizard — under errexit, `var=$(cmd)` fails the script the instant
+# cmd returns non-zero, and unlike an `if`/`&&` condition this assignment is
+# NOT exempt. `|| _mand_rc=$?` sidesteps that the same way the neighbouring
+# jq/python calls in mandatory-teams.sh do: the trailing assignment is
+# itself always "successful", so the list's overall exit status is 0 and
+# errexit never fires, while `_mand_rc` still captures the real code so the
+# empty-vs-unreadable distinction from the return-code contract isn't lost.
+# -----------------------------------------------------------------------
+if command -v atf_mandatory_teams >/dev/null 2>&1; then
+  _mand_out="" ; _mand_rc=0
+  _mand_out="$(atf_mandatory_teams 2>&1)" || _mand_rc=$?
+  if [ "$_mand_rc" -eq 0 ]; then
+    while IFS= read -r _mand_id; do
+      [ -n "$_mand_id" ] || continue
+      _mand_already=0
+      for _mand_existing in "${SELECTED_TEAMS[@]}"; do
+        if [ "$_mand_existing" = "$_mand_id" ]; then
+          _mand_already=1
+          break
+        fi
+      done
+      if [ "$_mand_already" -eq 0 ]; then
+        SELECTED_TEAMS+=("$_mand_id")
+        echo -e "${GREEN}✓${NC} Mandatory team added: ${_mand_id} (XACA-1070)"
+      fi
+    done <<EOF
+$_mand_out
+EOF
+  else
+    # Fail-closed on the ENFORCEMENT question, not on the install itself: an
+    # unreadable registry.json must be surfaced (per mandatory-teams.sh's
+    # return-code contract — this is the exit-1 fault case, never "no
+    # mandatory teams"), but aborting the whole setup wizard over it would
+    # be a worse outcome than continuing without mandatory-team enforcement
+    # for this one run.
+    echo -e "${YELLOW}⚠ Could not determine mandatory teams (${_mand_out}) — continuing without mandatory-team enforcement (XACA-1070)${NC}" >&2
+  fi
 fi
 
 # -----------------------------------------------------------------------

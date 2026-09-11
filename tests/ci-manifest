@@ -136,3 +136,4 @@ test-xaca-1159-global-claude-md-upgrade-registration.sh plain-shell
 test-xaca-1161-004-read-path-convergence.sh     plain-shell
 test-xaca-1162-dry-run-is-read-only.sh          plain-shell
 test-xaca-1162-host-ready-config-upgrade-registration.sh plain-shell
+test-xaca-1070-mandatory-install.sh             plain-shell

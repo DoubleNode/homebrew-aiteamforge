@@ -57,6 +57,19 @@ if [ -f "$AITEAMFORGE_HOME/libexec/lib/launchagents.sh" ]; then
   . "$AITEAMFORGE_HOME/libexec/lib/launchagents.sh" && _LAUNCHAGENTS_LIB_OK=true
 fi
 
+# XACA-1070-007: mandatory-team vocabulary (atf_mandatory_teams/
+# atf_is_mandatory_team/atf_team_provisioned) — the SAME lib the setup
+# wizard's force-append and the upgrade backfill source, so check_config()'s
+# mandatory-teams check below can never silently disagree with them about
+# which teams are mandatory or what "provisioned" means. Sourced defensively,
+# same idiom as launchagents.sh immediately above: a partially-upgraded
+# install missing this file degrades that check to a single warning rather
+# than crashing this script under `set -eo pipefail` (line 5).
+_MANDATORY_TEAMS_LIB_OK=false
+if [ -f "$AITEAMFORGE_HOME/libexec/lib/mandatory-teams.sh" ]; then
+  . "$AITEAMFORGE_HOME/libexec/lib/mandatory-teams.sh" && _MANDATORY_TEAMS_LIB_OK=true
+fi
+
 # Working directory
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 
@@ -93,6 +106,7 @@ Components:
   services        Check running services
   permissions     Check file permissions
   install         Validate post-install structure (teams, scripts, LCARS, venv)
+  mandatory-teams Missing/unprovisioned mandatory team fleet install (XACA-1070)
   all             Run all checks (default)
 
 Examples:
@@ -991,6 +1005,85 @@ check_permissions() {
   echo ""
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Check: Mandatory Teams (XACA-1070-007)
+#
+# A "mandatory" team (share/teams/registry.json's "mandatory": true key —
+# libexec/lib/mandatory-teams.sh is the ONE place that reads it, shared with
+# the setup wizard's force-append and the upgrade backfill) is a team every
+# fleet machine is expected to carry. Missing or unprovisioned here means
+# force-append/backfill silently didn't run (or hasn't run yet on an
+# existing install) — a real fault, not a cosmetic gap.
+#
+# RETURN-CODE CONTRACT — mirrored deliberately from mandatory-teams.sh's own
+# header, do not collapse this: atf_mandatory_teams() exiting 1 means
+# "registry.json could not be found/parsed", a DIFFERENT condition than
+# "read it fine, zero teams are flagged mandatory" (exit 0, empty stdout).
+# Treating both the same would make an unreadable registry silently report
+# as "nothing to check" — exactly the failure shape XACA-1070 exists to
+# prevent (a check that passes because it could not read its own input).
+# Exit-0-empty is the CORRECT, EXPECTED state today: no team carries the
+# flag yet (spacedock/XACA-1068/1069 hasn't shipped), so this must PASS
+# cleanly on that, never warn/skip.
+#
+# XACA-0807: this check is duplicated (by necessity, not oversight) in
+# libexec/commands/aiteamforge-doctor.sh — `aiteamforge doctor` and the
+# standalone `aiteamforge-doctor` binary are two divergent, both-live copies
+# reached by different entrypoints (see XACA-0807 for the full measurement).
+# A check added to only one is invisible to half of all invocations; do not
+# "fix" the duplication here, that is explicitly out of scope for XACA-1070.
+# ─────────────────────────────────────────────────────────────────────────────
+check_mandatory_teams() {
+  echo -e "${CYAN}Checking mandatory teams...${NC}"
+  echo ""
+
+  if [ "$_MANDATORY_TEAMS_LIB_OK" != true ] || ! command -v atf_mandatory_teams >/dev/null 2>&1; then
+    check_result warn "mandatory-teams.sh not available — cannot check mandatory team provisioning" \
+      "Expected: ${AITEAMFORGE_HOME}/libexec/lib/mandatory-teams.sh (XACA-1070)"
+    echo ""
+    return
+  fi
+
+  # `|| _mand_rc=$?` (not a bare `local x=$(cmd)`, which always discards the
+  # command substitution's exit status) survives this script's `set -eo
+  # pipefail` (line 5) without losing the real return code we branch on below.
+  local _mand_teams _mand_rc=0
+  _mand_teams="$(atf_mandatory_teams)" || _mand_rc=$?
+
+  if [ "$_mand_rc" -ne 0 ]; then
+    # Registry unreadable/unparseable — a FAULT. atf_mandatory_teams() already
+    # wrote the specific diagnostic to stderr; this still needs its own
+    # check_result so it lands in TOTAL/FAILED_CHECKS and the exit code.
+    check_result fail "Could not determine mandatory teams — share/teams/registry.json is missing or unparseable" \
+      "Run: aiteamforge setup --upgrade  (re-provisions/repairs the tap's team registry; see the stderr diagnostic above for the exact parse failure) (XACA-1070)"
+    echo ""
+    return
+  fi
+
+  if [ -z "$_mand_teams" ]; then
+    # Expected steady state today (XACA-1070-001): zero teams are flagged
+    # mandatory until spacedock ships. Clean pass — not a warning, not a skip.
+    check_result pass "No mandatory teams declared (none yet — expected until spacedock/XACA-1068 ships)"
+    echo ""
+    return
+  fi
+
+  local _team
+  while IFS= read -r _team; do
+    [ -n "$_team" ] || continue
+    if atf_team_provisioned "$_team"; then
+      check_result pass "Mandatory team '${_team}' is provisioned"
+    else
+      check_result fail "Mandatory team '${_team}' is MISSING or not provisioned on this machine" \
+        "Run: aiteamforge upgrade  (the upgrade backfill provisions mandatory teams onto existing installs)"
+    fi
+  done <<EOF
+$_mand_teams
+EOF
+
+  echo ""
+}
+
 # Check post-install structure via validate-install library
 check_install() {
   echo -e "${CYAN}Checking post-install structure...${NC}"
@@ -1052,6 +1145,9 @@ case "$CHECK_COMPONENT" in
   install)
     check_install
     ;;
+  mandatory-teams)
+    check_mandatory_teams
+    ;;
   all)
     check_dependencies
     check_framework
@@ -1060,6 +1156,7 @@ case "$CHECK_COMPONENT" in
     check_services
     check_permissions
     check_install
+    check_mandatory_teams
     ;;
   *)
     echo -e "${RED}ERROR: Unknown component: ${CHECK_COMPONENT}${NC}" >&2
