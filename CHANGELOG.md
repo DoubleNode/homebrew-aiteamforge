@@ -6,6 +6,205 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1161-010 (second rebase): `tests/test-xaca-1161-004-read-path-convergence.sh`
+  reported `Total Tests: 27 / Passed: 0 / Failed: 0 / All tests passed!` when run
+  through `tests/test-runner.sh`. The runner ships its own `assert_equal()`,
+  which takes (expected, actual) — the reverse of this suite's convention — and
+  on success merely returns 0: it never calls `test_pass()`. This suite relied on
+  it, so nothing was ever tallied as a pass. MEASURED under `/bin/bash` 3.2.57;
+  the pre-existing `test-xaca-0463-allocator.sh` prints the same shape, so this
+  is a runner-convention trap rather than a defect unique to one suite. It was
+  UNDER-TALLYING, not fail-open — verified by mutation in an `rsync -aL` scratch
+  copy: flipping one expectation produced `Failed: 1` and exit 1, so real
+  failures were always caught. But a suite reporting "passed 0 of 27" as green is
+  indistinguishable from one whose 27 assertions all silently no-op'd, which is
+  the exact shape XACA-1161 exists to remove, so the suite no longer depends on
+  the runner's version: `assert_equal` is now defined unconditionally (not only
+  in the standalone bootstrap), which also pins the argument order so a failure
+  message stops printing expected and got swapped. After: 27/27 via the runner,
+  27 standalone, 26 passed / 1 failed under mutation.
+- XACA-1161-009 (rebase onto `origin/main`): re-applied XACA-1161's accessor
+  convergence and its two seed-cell reconciliations on top of the tap work that
+  landed mid-ticket, including XACA-1068's new `spacedock` row — which is
+  upstream's and is carried through untouched. The table is now **13 rows**; it
+  was 12. Nothing in this ticket pins that number, deliberately: a row count
+  pins the CONTENTS of a registry whose purpose is to grow, so every correct
+  team registration would read as a regression. What is pinned is the SHAPE.
+  `tests/test-xaca-1161-004-read-path-convergence.sh` gains two cases on that
+  basis (24 -> 26 assertions): team ids are UNIQUE (a duplicate slug silently
+  shadows a row — every tier-2 lookup stops at the first match, so the second
+  row becomes unreachable data that still passes a column-shape check), and the
+  emission order is DETERMINISTIC across repeated calls (consumers do first-match
+  prefix scans over this emission, so a non-deterministic order would make which
+  team wins a coin toss between runs). The runtime row count is printed as
+  evidence, never asserted. Both new cases were driven to failure before being
+  trusted: a duplicated slug and a coin-flipping emitter each turn the suite red,
+  and each names the right assertion.
+- XACA-1161: **the tap shipped two contradictory team registries in one
+  package, and the shell one had been carrying a port-band overlap for seven
+  weeks.** `libexec/lib/aiteamforge-paths.sh`'s `_AITEAMFORGE_DEFAULT_TEAMS_DATA`
+  is a tap-NATIVE 7-column seed with no canonical twin in `dev-team/`, and
+  `sync-tap.sh` writes only under `$TAP/share/` — so every canonical registry fix
+  since it was written mirrored into `share/kanban-hooks/aiteamforge_paths.py`
+  and this table received none of them. Measured today, the two seeds shipped
+  side by side disagreed on membership (13 shell rows vs 15 Python entries; the
+  shell side was 12 until XACA-1068 added `spacedock` mid-ticket) and on two values.
+  Reconciled the two value divergences, both with the Python seed authoritative
+  because it is the side that moved deliberately while this one never moved at
+  all: (1) `mainevent.lcars_port_range` **10 -> 1**. XACA-0806 (2026-07-23,
+  commit `6de2c049`) narrowed the board-less alias's band from `[8400,8410)` to
+  `[8400,8401)` specifically to remove its overlap with the per-project band
+  `_TEMPLATE_PORT_BANDS["mainevent"] = (8401, 19)` -> `[8401,8420)` (the same
+  span written inclusively as `[8401,8419]` elsewhere) on ports
+  8401-8409, a team-id-contract "bands MUST NOT overlap" violation; the tap
+  mirror commit `01700a93` touched only `share/`, so consumers kept the pre-fix
+  width. Demonstrated live rather than on paper: against an overlay where 8400
+  and 8401 are taken and which declares no band of its own (so the baked-in
+  table is the source), `aiteamforge_compute_instance_port mainevent` returned
+  **8402** — a port inside the per-project band — and now correctly refuses with
+  "Port band exhausted ... band [8400, 8401)", since a board-less alias binds
+  exactly its one fixed port. A band-overlap checker re-derived from the live
+  table output plus the Python seed reports 2 overlapping band pairs before and
+  **0** after (13 distinct bands collapse to 12 as the two seeds converge on one
+  `mainevent` band); the checker was negative-controlled against the pre-fix
+  table to prove it can fail. (2) `medical-general.lcars_port` **"null" -> 8340**.
+  XACA-0740 (2026-06-30, commit `eafdd6b1`) set this None -> 8340 to match the
+  band base and the overlay; same mirror gap. The shell row already carried base
+  8340, so the sentinel was the only thing out of step. **Parser contract
+  unchanged** — exactly 7 tab-separated columns on every row, in the
+  same order, same team ids in the same order; verified by executing the function
+  and histogramming `NF` (13 rows x 7 cols; the ROW count is reported, never
+  asserted — see below), and by round-tripping every row
+  through the positional `IFS=$'\t' read -r t kd wd lp lb lr tc` consumers use.
+  All verification run under `/bin/bash` 3.2.57 (the version consumers have),
+  not the 5.x on PATH. Three further divergences are documented in-file but
+  DELIBERATELY NOT changed, because deleting or adding a row this tap already
+  ships is an approval-gated change and not a value reconciliation: the bare
+  `freelance` row is load-bearing and must NOT be removed (it is the only
+  reachable declaration of the freelance 8500/100 band, and unlike Python this
+  shell has no `_TEMPLATE_PORT_BANDS` fallback — measured, deleting it makes
+  `install-team freelance` exit 1); the bare `medical` row should eventually go
+  (XACA-0643 removed it from the canonical seed as a bare-key contract
+  violation, it emits an empty `team_code`, and it duplicates
+  `medical-general`'s band) and removing it is measurably safe, since `medical`
+  still resolves to 8340 via the step-3 prefix scan exactly as `finance` and
+  `legal` already do; and the 5 `mainevent-<project>` entries XACA-0806 added to
+  the canonical seed are absent here by drift rather than by design, which is
+  why an unseeded `mainevent-<project>` still resolves to the bare alias's band
+  in this shell where Python gives it `[8401,8420)`.
+- XACA-1161: **the shell registry had five different opinions about what "no
+  value" means, and one of them handed callers a directory literally named
+  `null`.** `libexec/lib/aiteamforge-paths.sh` exposes 11 public accessors
+  (`grep -cE "^aiteamforge_(team|list|resolve|compute|lcars)"` -> 11). Four of
+  them — `aiteamforge_team_from_code`, `aiteamforge_lcars_port_team_map`,
+  `aiteamforge_compute_instance_port`, `aiteamforge_list_teams` — carried their
+  own jq/python3/seed chain instead of going through the single lookup
+  `_aiteamforge_get_field`, and that function in turn gated EVERY field on one
+  rule, `[ -n "$value" ] && [ "$value" != "null" ]`. All of it now resolves
+  through one chain that mirrors `kanban-hooks/aiteamforge_registry.py`:
+  **OVERLAY -> DEFAULT_TEAMS -> DERIVED -> ABSENT**, with the absence sentinels
+  declared PER FIELD (`_PATHISH` / `_NULLISH` / `_KEYONLY`) rather than once
+  globally, and with `absent_stops_chain` honoured so a declared absence is an
+  answer rather than a gap for a lower tier to fill. Fixed, each measured on
+  this host under `/bin/bash` 3.2.57 (not the 5.x on PATH):
+  (1) **`aiteamforge_team_kanban_dir mainevent` exited 0 and printed the literal
+  string `null` as the path**, because the shell-table arm gated on
+  `[ -n "$result" ]` and `null` is four non-empty characters — while the jq arm
+  rejected the same value. Consumers guard with exactly that test
+  (`share/scripts/lcars-tmp-dir.sh`), so a phantom relative directory sailed
+  through; it is now a clean failure with a message that says the team is
+  board-less rather than missing. (2) **`aiteamforge_team_from_code` had no
+  python3 arm at all** — only jq and a seed scan — so on a consumer without jq,
+  every overlay-only team code was unresolvable: 21 codes (`SDK`, `MDT`, `MAI`,
+  the `freelance-*` set …) went from "not found" to resolving. (3) its jq arm
+  upper-cased the needle but not the stored code, so a lower-case
+  `team_code` matched in the seed scan and not in the overlay. (4) the port map's
+  private jq filter, `select(.value.lcars_port != null and .value.lcars_port !=
+  "")`, did not know about the string `"null"` the positional table uses as its
+  in-band absence marker, so `"lcars_port": "null"` yielded a team owning a port
+  named `null`. (5) the python3 and jq arms disagreed on booleans — python3
+  printed Python's `True`/`False`, jq printed `true`/`false`. (6)
+  `aiteamforge_list_teams` returned the overlay's keys ONLY whenever a config
+  existed, which is narrower than the resolver's `registered_teams()` union;
+  the gap was already being papered over by hand at two call sites inside this
+  same file (XACA-0799-010 / -018), and those workarounds are now deleted rather
+  than triplicated. **Parser contract untouched**: exactly 7
+  tab-separated columns, verified by executing the table and histogramming `NF`,
+  and by round-tripping every row through the positional
+  `IFS=$'\t' read -r t kd wd lp lb lr tc` that consumers use. **Behaviour was
+  diffed, not asserted**: a 3,096-probe matrix over all 11 accessors x the
+  runtime team union x six tool/config scenarios (jq, python3-only, no config,
+  neither tool, plus a synthetic sentinel fixture) was captured before and after.
+  Every delta is accounted for and named in the subitem report; the large
+  majority are unregistered-team lookups moving from exit 1 to a new exit 2
+  (registered-but-absent stays 1) which no caller can observe because all of them
+  test only for nonzero. One delta was a genuine regression caught by the matrix
+  and fixed: port 8505 is claimed BOTH by `freelance-bandwear-android` in the
+  overlay and by the `freelance` template row in the seed, and a first cut of
+  this change iterated the union in name order, handing the reverse lookup to
+  `freelance` and inverting the tier precedence every per-team lookup obeys; the
+  map now buckets overlay-sourced entries ahead of seed-sourced ones so the
+  reverse index agrees with the forward chain. Re-measuring that case against a
+  frozen registry then turned up something the first pass had missed: **the two
+  arms did not agree with each other BEFORE this change either.** With jq
+  present, `aiteamforge_team_for_lcars_port 8505` resolved to
+  `freelance-bandwear-android` (the bulk jq pass emitted overlay teams first and
+  the fill loop appended seed teams last); with jq ABSENT it resolved to
+  `freelance`, because that arm walked a sorted union and `freelance` sorts
+  first. Same registry, same port, different answer depending on whether jq
+  happened to be installed on the consumer — and `aiteamforge restart` uses this
+  lookup to decide which team to bring back up on a port that is actually
+  serving. Both arms now return the overlay-declared owner. The duplicate itself
+  is a real registry defect and is reported as a finding rather than papered
+  over here. **Cost, measured rather than asserted, and reconciled
+  against an independent measurement that disagreed with the first one by ~15x.**
+  All figures interleaved BEFORE/AFTER in one script so both sides see identical
+  machine load, `/bin/bash` 3.2.57, medians over 6 rounds. The hot reverse index
+  `aiteamforge_lcars_port_team_map` got FASTER, because the fan-out accessors now
+  read one whole-tier row dump per call instead of forking per team - which is
+  what preserves the batching XACA-0799-004 introduced when per-team forks
+  measured 1.35 s on the `aiteamforge restart` path. `_aiteamforge_get_field` is
+  unchanged. `aiteamforge_team_from_code` is the one that costs more, and it
+  matters because it sits under `_kb_get_team_from_code` in the shipped kanban
+  helpers, so every `kb-*` command resolving an item prefix pays it:
+  **cold (fresh process, library re-sourced per call) 17 ms -> 25 ms; warm
+  (repeat calls in one sourced shell, where the seed memo pays) 9.3 ms ->
+  14.1 ms. Same ~1.5x either way, +5 to +8 ms absolute.** The two regimes are
+  what reconciled a 15.7x disagreement between two honest measurements: one
+  party was timing a fresh process per call while the other was timing repeats
+  in one process, and an intermediate revision of this work - a per-team loop
+  since replaced - genuinely did cost ~800 ms/call under load. Getting from
+  there to here took two fixes, both measured rather than guessed: (1) the
+  per-field sentinel classifier returned its answer through `$( ... )`, forking
+  a subshell FOR EVERY REGISTRY ROW - 130 ms of a 160 ms call, 79 rows x ~1.6 ms;
+  it now sets a global, and the rule itself is untouched and still lives in one
+  place. (2) the tier readers likewise returned rows through `$( ... )`, which
+  both cost a fork per call AND made memoization impossible, since anything
+  cached inside a subshell dies with it; they now set globals, and the
+  DEFAULT_TEAMS rows are memoized per process keyed `<field>|$HOME`. **The
+  overlay tier is deliberately NOT memoized**: `team-paths.json` is rewritten
+  mid-process by `kb-init-team`, `kb-port-reconcile` and the installers, so a
+  correct cache would have to key on mtime+size, and a `stat` fork measured
+  15 ms - the same as the jq fork it would save. Paying a fork to avoid an equal
+  fork buys nothing, and buys it at the price of a stale-registry failure mode,
+  which is the exact bug class this ticket exists to remove.
+ New suite
+  `tests/test-xaca-1161-004-read-path-convergence.sh` (21 assertions + a pinned
+  assertion-count guard) covers every rule above and was negative-controlled by a
+  mutation harness: 13 deliberate one-rule breakages, applied one at a time with
+  the file restored and md5-verified between each. **12 of 13 turn the suite
+  red.** The harness earned its keep — its FIRST run found the suite reporting
+  20/20 green while blind to FOUR of the mutations, because the fixture had no
+  string-`"null"` value (only JSON nulls), no `board_less: ""` (and `true`/
+  `false` cannot separate KEYONLY from PATHISH), and used a seedless team for the
+  stop-chain case, where stop and no-stop give the same answer because there is
+  nothing in tier 2 to fall through to. Those three gaps are now closed with real
+  fixture cases. The 13th mutation — deleting the `_ATF_TEAM_KNOWN` guard on the
+  deriver — stays green and is documented in the suite as legitimately
+  unobservable rather than papered over: the deriver reads `kanban_dir` through
+  `_aiteamforge_get_field`, which already fails for an unregistered team, so the
+  guard is defence-in-depth against a future cheaper deriver, not load-bearing
+  today.
 - XACA-1069 (Space Dock 2/4 — crew): ships the Space Dock team's consumer-facing
   surface. Adds `share/teams/spacedock.conf` (the tenth team conf, and the first
   for a team with no git repository anywhere — its board and working dir are
