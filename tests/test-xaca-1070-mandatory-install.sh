@@ -220,6 +220,13 @@ grep -q '^atf_team_has_board() {' "$MANDATORY_TEAMS_SH" || _block_note_fail "man
 grep -q '^check_mandatory_teams() {' "$DOCTOR_LIBEXEC_SH" || _block_note_fail "libexec/commands/aiteamforge-doctor.sh no longer defines check_mandatory_teams() at column 0"
 grep -q '^check_mandatory_teams() {' "$DOCTOR_BIN_SH" || _block_note_fail "bin/aiteamforge-doctor.sh no longer defines check_mandatory_teams() at column 0"
 grep -qF '_MANDATORY_TEAMS_LIB_OK=false' "$DOCTOR_BIN_SH" || _block_note_fail "bin/aiteamforge-doctor.sh no longer contains the _MANDATORY_TEAMS_LIB_OK preamble anchor"
+# XACA-1070 / PR #865 round 2 (Sections I-N) extraction anchors:
+grep -qF 'echo -e "${BOLD}Installing teams...${NC}"' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the 'Installing teams...' anchor Section I's team-install-loop extraction depends on"
+grep -qF 'if [ "$INSTALL_PROFILE" = "cockpit" ] && ! { command -v atf_is_mandatory_team >/dev/null 2>&1 && atf_is_mandatory_team "$team_id"; }; then' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the per-iteration cockpit-mandatory guard Section I/J assert on"
+grep -qF 'mkdir -p "${INSTALL_DIR}/avatars"' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the persona-loop anchor Section J's extraction depends on"
+grep -qF '_cockpit_has_mandatory_team="false"' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the LCARS carve-out start anchor Section K's extraction depends on"
+grep -qF 'fi  # end: cockpit mandatory-team LCARS instance (XACA-1070, PR #865 round 2)' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the LCARS carve-out end sentinel Section K's extraction depends on"
+grep -q '^_cockpit_mandatory_teams_str() {' "$SETUP_SH" || _block_note_fail "setup.sh no longer defines _cockpit_mandatory_teams_str() at column 0 (Section L)"
 _block_end
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1427,6 +1434,472 @@ _h3_out="$(
 assert_ne "$_h3_rc" "0" "the pre-fix bare 'source' must exit non-zero under set -euo pipefail when the file is missing (sanity check that H2 is testing something real)"
 assert_not_contains "$_h3_out" "REACHED_AFTER_BARE_SOURCE" "the pre-fix bare 'source' must abort BEFORE the next line runs, got: $_h3_out"
 _block_end
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTIONS I-N -- XACA-1070 / PR #865 round 2: cockpit had ZERO coverage
+# before this round (grep for "cockpit" in this file historically matched
+# only prose inside Section C's comments about the interactive selection
+# span) -- which is exactly why three review passes missed the original
+# defect: `aiteamforge setup --cockpit-only` never ran install-team.sh for
+# a mandatory team at all, and nothing here would have caught it.
+#
+# THE USER DECISION UNDER TEST: a mandatory team gets its FULL setup on
+# EVERY install, cockpit included -- team, board, config entry, personas,
+# kanban board (via install-team.sh, not the box-wide kanban SYSTEM), and
+# its LCARS server + tabs. Every section below maps to one of the four
+# carve-outs in bin/aiteamforge-setup.sh's own "Install selected teams" /
+# persona-loop / "Cockpit mandatory-team LCARS instance" / summary-text
+# header comments -- read those first if a test here fails, they explain
+# the WHY behind what each assertion checks.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION I -- Carve-out 1: the team-install loop's per-iteration cockpit
+# guard ("Install selected teams" header comment in setup.sh). Extracted by
+# anchoring on the unique "Installing teams..." echo immediately above the
+# loop through the loop's own terminating `done`.
+# ─────────────────────────────────────────────────────────────────────────────
+_extract_team_install_loop() {
+    awk '
+      $0=="echo -e \"${BOLD}Installing teams...${NC}\"" {capture=1}
+      capture {print}
+      capture && $0=="done" {exit}
+    ' "$SETUP_SH"
+}
+_team_loop_snippet="$(_extract_team_install_loop)"
+
+_block_start "SECTION I setup: extract the cockpit team-install-loop span from setup.sh"
+if [ -z "$_team_loop_snippet" ]; then
+    _block_note_fail "extraction produced no output -- cannot run Section I"
+fi
+_block_end
+
+if [ -n "$_team_loop_snippet" ]; then
+    eval "_x1070_team_install_loop() {
+$_team_loop_snippet
+}"
+
+    _i_installers_dir="$SANDBOX/i-installers"
+    mkdir -p "$_i_installers_dir"
+    cat > "$_i_installers_dir/install-team.sh" <<'STUB'
+#!/bin/bash
+echo "CALLED:$1" >> "$I_LOG_FILE"
+exit 0
+STUB
+    chmod +x "$_i_installers_dir/install-team.sh"
+    _i_reg="$(_x1070_mk_reg_sandbox section-i "$REG_ONE_TRUE")"
+
+    # Runs the extracted loop with SELECTED_TEAMS=("$@") under the given
+    # profile, against the stub install-team.sh above, and returns everything
+    # the stub logged (one "CALLED:<team_id>" line per real invocation).
+    _run_team_install_loop() {
+        local profile="$1"; shift
+        local log="$SANDBOX/i-log-$profile-$RANDOM.txt"
+        : > "$log"
+        ( unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+          # shellcheck disable=SC1091
+          . "$_i_reg/libexec/lib/mandatory-teams.sh"
+          BOLD=""; NC=""; BLUE=""; RED=""; GREEN=""
+          INSTALL_PROFILE="$profile"
+          INSTALLERS_DIR="$_i_installers_dir"
+          INSTALL_DIR="$SANDBOX/i-install-dir"
+          INSTALL_ERRORS=0
+          I_LOG_FILE="$log"; export I_LOG_FILE
+          SELECTED_TEAMS=("$@")
+          _x1070_team_install_loop
+        ) >/dev/null 2>&1
+        cat "$log" 2>/dev/null
+    }
+
+    _block_start "I1: cockpit + mandatory team ('widget') in SELECTED_TEAMS -> install-team.sh IS invoked"
+    _res="$(_run_team_install_loop cockpit widget)"
+    assert_contains "$_res" "CALLED:widget" "expected install-team.sh to be invoked for the mandatory team on cockpit, got: [$_res]"
+    _block_end
+
+    _block_start "I2: cockpit + a non-mandatory team ('alpha') in SELECTED_TEAMS (hypothetical upstream regression) -> install-team.sh is NOT invoked"
+    _res="$(_run_team_install_loop cockpit alpha)"
+    assert_not_contains "$_res" "CALLED:alpha" "the per-iteration cockpit guard must refuse a non-mandatory team even if it somehow reached SELECTED_TEAMS, got: [$_res]"
+    _block_end
+
+    _block_start "I3: cockpit + BOTH a mandatory and non-mandatory team present -> ONLY the mandatory one is installed"
+    _res="$(_run_team_install_loop cockpit alpha widget)"
+    assert_contains "$_res" "CALLED:widget" "mandatory team must still be installed alongside a non-mandatory one, got: [$_res]"
+    assert_not_contains "$_res" "CALLED:alpha" "non-mandatory team must be skipped even when a mandatory team is also present, got: [$_res]"
+    _block_end
+
+    _block_start "I4: full (non-cockpit) profile -- unaffected; both a mandatory and a non-mandatory team get installed normally"
+    _res="$(_run_team_install_loop full alpha widget)"
+    assert_contains "$_res" "CALLED:alpha" "full-profile install must be unaffected by the cockpit-only guard, got: [$_res]"
+    assert_contains "$_res" "CALLED:widget" "full-profile install must still install a (also-mandatory) team normally, got: [$_res]"
+    _block_end
+
+    _block_start "I5: cockpit + unreadable registry -> fails closed (installs nothing, never 'installs everything')"
+    _i_reg_bad="$(_x1070_mk_reg_sandbox section-i-bad "__MISSING__")"
+    _res="$(
+        local_log="$SANDBOX/i5-log.txt"; : > "$local_log"
+        ( unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+          # shellcheck disable=SC1091
+          . "$_i_reg_bad/libexec/lib/mandatory-teams.sh"
+          BOLD=""; NC=""; BLUE=""; RED=""; GREEN=""
+          INSTALL_PROFILE="cockpit"
+          INSTALLERS_DIR="$_i_installers_dir"
+          INSTALL_DIR="$SANDBOX/i5-install-dir"
+          INSTALL_ERRORS=0
+          I_LOG_FILE="$local_log"; export I_LOG_FILE
+          SELECTED_TEAMS=("widget")
+          _x1070_team_install_loop
+        ) >/dev/null 2>&1
+        cat "$local_log" 2>/dev/null
+    )"
+    assert_not_contains "$_res" "CALLED:widget" "an unreadable registry must fail CLOSED (install nothing on cockpit), never fail open, got: [$_res]"
+    _block_end
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION J -- Carve-out 2: the persona/avatar/logo copy loop. No explicit
+# cockpit gate existed before this round (the loop's old comment claimed it
+# was "skipped in cockpit mode" purely because SELECTED_TEAMS used to always
+# be empty there); this round adds the same belt-and-suspenders per-
+# iteration guard as Section I's loop, in case a future regression ever
+# lets a non-mandatory id reach SELECTED_TEAMS on cockpit.
+# ─────────────────────────────────────────────────────────────────────────────
+_extract_persona_loop() {
+    awk '
+      $0=="mkdir -p \"${INSTALL_DIR}/avatars\"" {capture=1}
+      capture {print}
+      capture && $0=="done" {exit}
+    ' "$SETUP_SH"
+}
+_persona_loop_snippet="$(_extract_persona_loop)"
+
+_block_start "SECTION J setup: extract the persona/avatar/logo copy loop span from setup.sh"
+if [ -z "$_persona_loop_snippet" ]; then
+    _block_note_fail "extraction produced no output -- cannot run Section J"
+fi
+_block_end
+
+if [ -n "$_persona_loop_snippet" ]; then
+    eval "_x1070_persona_loop() {
+$_persona_loop_snippet
+}"
+
+    _j_reg="$(_x1070_mk_reg_sandbox section-j "$REG_ONE_TRUE")"
+    _j_home="$SANDBOX/j-home"
+    for _jt in widget alpha; do
+        mkdir -p "$_j_home/share/personas/$_jt/agents" "$_j_home/share/personas/$_jt/avatars"
+        printf '# %s persona\n' "$_jt" > "$_j_home/share/personas/$_jt/agents/${_jt}_persona.md"
+        : > "$_j_home/share/personas/$_jt/avatars/${_jt}.png"
+    done
+
+    # Runs the extracted persona loop with SELECTED_TEAMS=("$@") under the
+    # given profile; returns the fresh INSTALL_DIR it copied into.
+    _run_persona_loop() {
+        local profile="$1"; shift
+        local install_dir="$SANDBOX/j-install-$profile-$RANDOM"
+        mkdir -p "$install_dir"
+        ( unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+          # shellcheck disable=SC1091
+          . "$_j_reg/libexec/lib/mandatory-teams.sh"
+          GREEN=""; NC=""
+          INSTALL_PROFILE="$profile"
+          AITEAMFORGE_HOME="$_j_home"
+          INSTALL_DIR="$install_dir"
+          SELECTED_TEAMS=("$@")
+          _x1070_persona_loop
+        ) >/dev/null 2>&1
+        printf '%s' "$install_dir"
+    }
+
+    _block_start "J1: cockpit + mandatory team ('widget') -> its personas/avatars ARE copied"
+    _dir="$(_run_persona_loop cockpit widget)"
+    assert_file_exists "$_dir/widget/personas/agents/widget_persona.md" "expected widget's persona file to be copied on cockpit"
+    assert_file_exists "$_dir/avatars/widget.png" "expected widget's avatar to also land in the flat avatars/ pool"
+    _block_end
+
+    _block_start "J2: cockpit + non-mandatory team ('alpha') (hypothetical regression) -> its personas are NOT copied"
+    _dir="$(_run_persona_loop cockpit alpha)"
+    assert_file_not_exists "$_dir/alpha/personas/agents/alpha_persona.md" "a non-mandatory team's personas must not leak onto a cockpit box even if it somehow reached SELECTED_TEAMS"
+    _block_end
+
+    _block_start "J3: full (non-cockpit) profile -- unaffected; both teams' personas are copied normally"
+    _dir="$(_run_persona_loop full alpha widget)"
+    assert_file_exists "$_dir/alpha/personas/agents/alpha_persona.md" "full-profile install must be unaffected by the cockpit-only guard"
+    assert_file_exists "$_dir/widget/personas/agents/widget_persona.md" "full-profile install must still copy a (also-mandatory) team's personas normally"
+    _block_end
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION K -- Carve-out 3: the "Cockpit mandatory-team LCARS instance"
+# block. Extracted by anchoring on its first statement through its own
+# trailing sentinel comment (same idiom this file already uses elsewhere,
+# e.g. "fi  # end: if INSTALL_PROFILE != cockpit (team selection block)").
+# ─────────────────────────────────────────────────────────────────────────────
+_extract_lcars_carveout() {
+    awk '
+      $0=="_cockpit_has_mandatory_team=\"false\"" {capture=1}
+      capture {print}
+      capture && $0=="fi  # end: cockpit mandatory-team LCARS instance (XACA-1070, PR #865 round 2)" {exit}
+    ' "$SETUP_SH"
+}
+_lcars_snippet="$(_extract_lcars_carveout)"
+
+_block_start "SECTION K setup: extract the cockpit mandatory-team LCARS instance block from setup.sh"
+if [ -z "$_lcars_snippet" ]; then
+    _block_note_fail "extraction produced no output -- cannot run Section K"
+fi
+_block_end
+
+if [ -n "$_lcars_snippet" ]; then
+    # ── K1-K3: FUNCTIONAL -- run the real block against the REAL tap's
+    # install-kanban.sh + share/lcars-ui, pointed at a sandbox AITEAMFORGE_DIR.
+    # install_lcars_ui / configure_lcars_port are pure static-file writers
+    # scoped entirely under AITEAMFORGE_DIR, so this is safe to run for real
+    # (XACA-0212: nothing here ever touches ~/aiteamforge, ~/.aiteamforge, or
+    # any real LaunchAgent).
+    eval "_x1070_lcars_carveout() {
+$_lcars_snippet
+}"
+
+    _run_lcars_carveout() {
+        local profile="$1" install_dir="$2"; shift 2
+        ( BOLD=""; NC=""; YELLOW=""
+          INSTALL_PROFILE="$profile"
+          INSTALLERS_DIR="$TAP_ROOT/libexec/installers"
+          AITEAMFORGE_HOME="$TAP_ROOT"
+          INSTALL_DIR="$install_dir"
+          INSTALL_ERRORS=0
+          SELECTED_TEAMS=("$@")
+          _x1070_lcars_carveout
+        ) >/dev/null 2>&1
+    }
+
+    _block_start "K1: cockpit + mandatory team present -> install_lcars_ui copies lcars-ui/server.py into AITEAMFORGE_DIR"
+    _k1_dir="$SANDBOX/k1-install-dir"; mkdir -p "$_k1_dir"
+    _run_lcars_carveout cockpit "$_k1_dir" widget
+    if [ -d "$TAP_ROOT/share/lcars-ui" ]; then
+        assert_file_exists "$_k1_dir/lcars-ui/server.py" "expected install_lcars_ui to copy server.py so a mandatory team's start_lcars_server has something to launch"
+    else
+        echo "     (skipped file-existence assertion -- this tap checkout has no share/lcars-ui; install_lcars_ui's own no-op guard is exercised instead)"
+    fi
+    _block_end
+
+    _block_start "K2: cockpit + mandatory team present -> configure_lcars_port writes the port config files"
+    if [ -d "$TAP_ROOT/share/lcars-ui" ]; then
+        assert_file_exists "$_k1_dir/lcars-ui/lcars-target.js" "expected configure_lcars_port to write lcars-target.js"
+        assert_file_exists "$_k1_dir/lcars-ui/.lcars-port" "expected configure_lcars_port to write .lcars-port"
+        assert_contains "$(cat "$_k1_dir/lcars-ui/.lcars-port" 2>/dev/null)" "8080" "expected the default LCARS port (8080) to be recorded"
+    else
+        echo "     (skipped -- no share/lcars-ui in this checkout, see K1)"
+    fi
+    _block_end
+
+    _block_start "K3: cockpit + ZERO mandatory teams selected (today's real state until spacedock ships) -> complete no-op, no lcars-ui/ created at all"
+    _k3_dir="$SANDBOX/k3-install-dir"; mkdir -p "$_k3_dir"
+    _run_lcars_carveout cockpit "$_k3_dir"
+    assert_file_not_exists "$_k3_dir/lcars-ui/server.py" "a cockpit box with no mandatory team must gain NOTHING from this block"
+    _block_end
+
+    _block_start "K4: STRUCTURAL -- the carve-out calls ONLY install_lcars_ui + configure_lcars_port, never install_kanban_system or any LaunchAgent installer, never touches INSTALL_KANBAN"
+    _lcars_code_only="$(printf '%s\n' "$_lcars_snippet" | grep -v '^[[:space:]]*#')"
+    assert_contains "$_lcars_code_only" "install_lcars_ui" "expected a real call to install_lcars_ui"
+    assert_contains "$_lcars_code_only" "configure_lcars_port" "expected a real call to configure_lcars_port"
+    assert_not_contains "$_lcars_code_only" "install_kanban_system" "must NOT call install_kanban_system -- that would flip on the backup system, port-mgmt templates, and every mandatory LaunchAgent box-wide (this is carve-out 3's whole point: narrow, not a wholesale INSTALL_KANBAN flip)"
+    assert_not_contains "$_lcars_code_only" "_launchagent" "must NOT reference any install_*_launchagent function (cockpit must gain zero LaunchAgents from this)"
+    assert_not_contains "$_lcars_code_only" "INSTALL_KANBAN=" "must NOT set/flip INSTALL_KANBAN as a side effect"
+    _block_end
+
+    _block_start "K5: full (non-cockpit) profile -- this block never runs at all, regardless of SELECTED_TEAMS (full mode's LCARS setup goes through install_kanban_system unchanged)"
+    _k5_dir="$SANDBOX/k5-install-dir"; mkdir -p "$_k5_dir"
+    _run_lcars_carveout full "$_k5_dir" widget
+    assert_file_not_exists "$_k5_dir/lcars-ui/server.py" "full-profile installs must not go through this cockpit-only carve-out at all"
+    _block_end
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION L -- Carve-out 4: the three cockpit "Teams:" display strings
+# (summary, dry-run preview, completion banner) that used to hardcode
+# "(none...)" regardless of SELECTED_TEAMS.
+# ─────────────────────────────────────────────────────────────────────────────
+_display_fn="$(_extract_fn "_cockpit_mandatory_teams_str" "$SETUP_SH")"
+
+_block_start "SECTION L setup: extract _cockpit_mandatory_teams_str() from setup.sh"
+if [ -z "$_display_fn" ]; then
+    _block_note_fail "extraction produced no output -- cannot run Section L"
+fi
+_block_end
+
+if [ -n "$_display_fn" ]; then
+    eval "$_display_fn"
+
+    _block_start "L1: one mandatory team selected -> its id is returned"
+    assert_eq "$( (SELECTED_TEAMS=("widget"); _cockpit_mandatory_teams_str) )" "widget" "expected 'widget' back"
+    _block_end
+
+    _block_start "L2: empty entries in SELECTED_TEAMS are skipped"
+    assert_eq "$( (SELECTED_TEAMS=("" "widget" ""); _cockpit_mandatory_teams_str) )" "widget" "expected empty array slots to be filtered out"
+    _block_end
+
+    _block_start "L3: zero mandatory teams (today's real state) -> empty string, never a placeholder"
+    assert_eq "$( (SELECTED_TEAMS=(); _cockpit_mandatory_teams_str) )" "" "expected an empty string when SELECTED_TEAMS is genuinely empty"
+    _block_end
+
+    _block_start "L4: STRUCTURAL -- all three cockpit 'Teams:' display sites (summary, dry-run, completion) now consult _cockpit_mandatory_teams_str instead of an unconditional '(none...)'"
+    _display_refs="$(grep -c '_cockpit_mandatory_teams_str' "$SETUP_SH")"
+    assert_eq "$_display_refs" "4" "expected exactly 4 references (1 definition + 3 call sites) to _cockpit_mandatory_teams_str, got $_display_refs -- if this grew or shrank, a display site was added/removed/reverted"
+    _block_end
+
+    _block_start "L5: STRUCTURAL -- the non-cockpit 'Teams: \${SELECTED_TEAMS[*]}' display lines are untouched (non-cockpit path unchanged)"
+    _non_cockpit_display_count="$(grep -c 'Teams:      \${SELECTED_TEAMS\[\*\]}' "$SETUP_SH")"
+    [ "$_non_cockpit_display_count" -ge 2 ] || _block_note_fail "expected at least 2 non-cockpit 'Teams: \${SELECTED_TEAMS[*]}' display lines (summary + completion) to remain, got $_non_cockpit_display_count"
+    _block_end
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION M -- Doctor PASS on a mandatory team that IS provisioned. Section G
+# already covers zero-mandatory PASS (G1/G4) and mandatory-but-unprovisioned
+# FAULT (G2/G6); this closes the round-2 test brief's explicit requirement:
+# "both doctor copies PASS on a provisioned cockpit box". check_mandatory_teams
+# does not read INSTALL_PROFILE at all -- only atf_team_provisioned's
+# config+board evidence -- so ".install-profile" = "cockpit" in the fixture
+# below documents the scenario without being load-bearing to the assertion.
+# ─────────────────────────────────────────────────────────────────────────────
+_check_result_libexec_fn_m="$(_extract_fn check_result "$DOCTOR_LIBEXEC_SH")"
+_check_mand_libexec_fn_m="$(_extract_fn check_mandatory_teams "$DOCTOR_LIBEXEC_SH")"
+_check_result_bin_fn_m="$(_extract_fn check_result "$DOCTOR_BIN_SH")"
+_check_mand_bin_fn_m="$(_extract_fn check_mandatory_teams "$DOCTOR_BIN_SH")"
+_doctor_bin_preamble_m="$(awk '
+      $0=="_MANDATORY_TEAMS_LIB_OK=false" {capture=1}
+      capture {print}
+      capture && $0=="fi" {exit}
+    ' "$DOCTOR_BIN_SH")"
+
+if [ -z "$_check_result_libexec_fn_m" ] || [ -z "$_check_mand_libexec_fn_m" ] || \
+   [ -z "$_check_result_bin_fn_m" ] || [ -z "$_check_mand_bin_fn_m" ] || [ -z "$_doctor_bin_preamble_m" ]; then
+    test_start "SECTION M setup: extract doctor functions from both copies"
+    test_fail "one or more extractions produced no output -- cannot run Section M"
+else
+    _m_dir="$SANDBOX/m-provisioned"
+    mkdir -p "$_m_dir/kanban/widget"
+    printf '{"teams":["widget"]}' > "$_m_dir/.aiteamforge-config"
+    printf 'cockpit\n' > "$_m_dir/.install-profile"
+    echo '{"real":"board"}' > "$_m_dir/kanban/widget/widget-board.json"
+    _tp_m="$SANDBOX/team-paths-m.json"
+    cat > "$_tp_m" <<EOF
+{"schema_version": 1, "teams": {"widget": {"kanban_dir": "$_m_dir/kanban/widget", "working_dir": "$_m_dir"}}}
+EOF
+    _reg_m="$(_x1070_mk_reg_sandbox doctor-m "$REG_ONE_TRUE" true)"
+
+    _block_start "M1 (libexec copy): check_mandatory_teams -- mandatory team IS provisioned on a cockpit-profiled box -> clean PASS"
+    _out_m1="$(
+        unset AITEAMFORGE_HOME
+        AITEAMFORGE_DIR="$_m_dir"; AITEAMFORGE_CONFIG="$_tp_m"
+        # shellcheck disable=SC1091
+        . "$COMMON_SH"
+        # shellcheck disable=SC1091
+        . "$_reg_m/libexec/lib/mandatory-teams.sh"
+        eval "$_check_result_libexec_fn_m"
+        eval "$_check_mand_libexec_fn_m"
+        TOTAL_CHECKS=0; PASSED_CHECKS=0; FAILED_CHECKS=0; WARNING_CHECKS=0; VERBOSE=false
+        check_mandatory_teams
+        echo "COUNTERS total=$TOTAL_CHECKS passed=$PASSED_CHECKS failed=$FAILED_CHECKS warn=$WARNING_CHECKS"
+    )" 2>&1
+    assert_contains "$_out_m1" "COUNTERS total=1 passed=1 failed=0 warn=0" "expected a clean PASS for the already-provisioned mandatory team, got: $_out_m1"
+    _block_end
+
+    _block_start "M2 (bin copy, FAITHFUL layout): check_mandatory_teams -- same provisioned cockpit box -> clean PASS"
+    _out_m2="$(
+        # shellcheck disable=SC1091
+        . "$COMMON_SH"
+        AITEAMFORGE_HOME="$_reg_m"
+        eval "$_doctor_bin_preamble_m"
+        eval "$_check_result_bin_fn_m"
+        eval "$_check_mand_bin_fn_m"
+        TOTAL_CHECKS=0; PASSED_CHECKS=0; FAILED_CHECKS=0; WARNING_CHECKS=0; VERBOSE=false
+        AITEAMFORGE_DIR="$_m_dir"; AITEAMFORGE_CONFIG="$_tp_m"
+        check_mandatory_teams
+        echo "LIB_OK=$_MANDATORY_TEAMS_LIB_OK COUNTERS total=$TOTAL_CHECKS passed=$PASSED_CHECKS failed=$FAILED_CHECKS warn=$WARNING_CHECKS"
+    )"
+    assert_contains "$_out_m2" "LIB_OK=true" "expected the lib to load under the faithful AITEAMFORGE_HOME layout"
+    assert_contains "$_out_m2" "passed=1 failed=0 warn=0" "expected a clean PASS for the bin copy against the same provisioned cockpit box, got: $_out_m2"
+    _block_end
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION N -- `aiteamforge upgrade` backfill on a cockpit layout.
+# update_mandatory_teams() (verified: zero references to INSTALL_PROFILE or
+# "cockpit" anywhere in its body) is profile-agnostic BY DESIGN -- it always
+# calls install-team.sh for an absent mandatory team regardless of what
+# .install-profile says. Section E already exhaustively tests the function
+# itself; this section explicitly names the cockpit-layout scenario the
+# round-2 test brief calls out, rather than leaving it as an inference from
+# Section E's profile-nonspecific fixtures.
+# ─────────────────────────────────────────────────────────────────────────────
+_has_board_fn_n="$(_extract_fn _xaca1070_mandatory_team_has_board "$UPGRADE_SH")"
+_update_mandatory_fn_n="$(_extract_fn update_mandatory_teams "$UPGRADE_SH")"
+_add_to_config_fn_n="$(_extract_fn _xaca1070_add_team_to_config "$UPGRADE_SH")"
+
+if [ -z "$_has_board_fn_n" ] || [ -z "$_update_mandatory_fn_n" ] || [ -z "$_add_to_config_fn_n" ]; then
+    test_start "SECTION N setup: extract upgrade.sh backfill functions"
+    test_fail "one or more extractions produced no output -- cannot run Section N"
+else
+    _block_start "N1: STRUCTURAL -- update_mandatory_teams() never references INSTALL_PROFILE or 'cockpit' (profile-agnostic by design, matches the round-2 brief: 'already correct under this direction (no profile gate)')"
+    assert_not_contains "$_update_mandatory_fn_n" "INSTALL_PROFILE" "update_mandatory_teams must not gate on INSTALL_PROFILE"
+    assert_not_contains "$_update_mandatory_fn_n" "cockpit" "update_mandatory_teams must not special-case cockpit by name"
+    _block_end
+
+    _n_libexec_dir="$SANDBOX/n-fake-libexec"
+    mkdir -p "$_n_libexec_dir/installers"
+    _n_sentinel="$SANDBOX/n-sentinel.log"
+    cat > "$_n_libexec_dir/installers/install-team.sh" <<EOF
+#!/bin/bash
+team_id="\$1"
+echo "FAKE INSTALLER CALLED for \$team_id" >> "$_n_sentinel"
+kdir="\$AITEAMFORGE_DIR/kanban/\$team_id"
+mkdir -p "\$kdir"
+echo '{"seed":"fresh"}' > "\$kdir/\${team_id}-board.json"
+exit 0
+EOF
+    chmod +x "$_n_libexec_dir/installers/install-team.sh"
+
+    # A cockpit-layout work dir: .install-profile = cockpit, matching what
+    # bin/aiteamforge-setup.sh's cockpit path actually writes (Step 4, WRITE
+    # CONFIGURATION FILE section, unconditional install_profile marker).
+    _n_work="$SANDBOX/n-cockpit-work"
+    mkdir -p "$_n_work"
+    printf 'cockpit\n' > "$_n_work/.install-profile"
+    _n_kdir="$_n_work/kanban/widget"
+    _n_tp="$SANDBOX/n-team-paths.json"
+    cat > "$_n_tp" <<EOF
+{"schema_version": 1, "teams": {"widget": {"kanban_dir": "$_n_kdir", "working_dir": "$_n_work/widget"}}}
+EOF
+    _n_reg="$(_x1070_mk_reg_sandbox section-n "$REG_ONE_TRUE" true)"
+
+    _block_start "N2: update_mandatory_teams -- backfills the mandatory team on a cockpit-layout work dir exactly as it would on any other layout"
+    _n_out="$(
+        unset AITEAMFORGE_HOME
+        # shellcheck disable=SC1091
+        . "$_n_reg/libexec/lib/mandatory-teams.sh"
+        # shellcheck disable=SC1091
+        . "$COMMON_SH"
+        # shellcheck disable=SC1091
+        . "$PATHS_SH"
+        # shellcheck disable=SC1091
+        . "$CONFIG_SH"
+        eval "$_has_board_fn_n"
+        eval "$_add_to_config_fn_n"
+        eval "$_update_mandatory_fn_n"
+        LIBEXEC_DIR="$_n_libexec_dir"
+        AITEAMFORGE_DIR="$_n_work"
+        AITEAMFORGE_CONFIG="$_n_tp"
+        DRY_RUN=false
+        WORKING_DIR="$_n_work"
+        update_mandatory_teams
+    )"
+    assert_file_exists "$_n_sentinel" "expected the (fake) installer to be invoked for the absent mandatory team on a cockpit-layout box"
+    assert_file_exists "$_n_kdir/widget-board.json" "expected a board to now exist on disk for 'widget' on the cockpit-layout box"
+    assert_contains "$_n_out" "Provisioned mandatory team 'widget'" "expected a provisioning success message"
+    _block_end
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone only).

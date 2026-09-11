@@ -1077,6 +1077,23 @@ _atf_apply_mandatory_teams
 # existing config (with INSTALL_KANBAN forced "yes") by the upgrade-hydration
 # block above (XACA-0559). Do NOT reset them here, or the refresh selection is
 # lost and the kanban refresh never runs.
+#
+# XACA-1070 / PR #865 round 2: INSTALL_KANBAN stays "no" for cockpit below
+# EVEN THOUGH a mandatory team now gets a full local install on cockpit
+# (see the "Install selected teams" header comment further down). This was
+# investigated, not overlooked: install-team.sh writes a mandatory team's
+# *-board.json itself, with zero reference to INSTALL_KANBAN anywhere in
+# that installer, and EPIC-0057 places the intended first mandatory team's
+# (spacedock) board at ~/.aiteamforge/spacedock/kanban/ — deliberately
+# OUTSIDE $AITEAMFORGE_DIR — precisely so it never depends on the kanban
+# system being installed. Flipping INSTALL_KANBAN="yes" here would turn on
+# the LCARS backup system, port-management templates, and every mandatory
+# LaunchAgent for the WHOLE BOX, which the user decision behind this ticket
+# never asked for. The one real gap this leaves (the mandatory team's LCARS
+# web server has nowhere to run from, since install_lcars_ui is normally
+# reached only through the INSTALL_KANBAN="yes" path) is closed narrowly,
+# without flipping this flag, by the "Cockpit mandatory-team LCARS
+# instance" block after the team-install loop below.
 # ═══════════════════════════════════════════════════════════════════════════
 
 if [ "$UPGRADE_HYDRATED" = "true" ]; then
@@ -1236,6 +1253,25 @@ fi
 # STEP 4: CONFIRM & INSTALL
 # ═══════════════════════════════════════════════════════════════════════════
 
+# XACA-1070 / PR #865 round 2, carve-out 4 of 4: SELECTED_TEAMS is no longer
+# guaranteed empty on cockpit — _atf_apply_mandatory_teams (Step 2 call site
+# 2) force-appends any mandatory team id into it before any of the three
+# cockpit summary/dry-run/completion messages below print. Telling a cockpit
+# user "Teams: (none...)" unconditionally would be actively wrong once a
+# mandatory team is force-appended: that team gets a full local install (see
+# the "Install selected teams" and "Cockpit mandatory-team LCARS instance"
+# blocks above), not just a connect script like every other cockpit team.
+# One shared helper, used at all three display sites, so they cannot drift
+# out of sync with each other the way three independent inline checks could.
+_cockpit_mandatory_teams_str() {
+  local _t _out=""
+  for _t in "${SELECTED_TEAMS[@]}"; do
+    [ -n "$_t" ] || continue
+    _out="${_out:+$_out }$_t"
+  done
+  printf '%s' "$_out"
+}
+
 echo ""
 echo -e "${BOLD}Installation Summary${NC}"
 echo ""
@@ -1243,7 +1279,12 @@ echo "  Machine:    ${MACHINE_NAME}"
 echo "  Directory:  ${INSTALL_DIR}"
 echo "  Profile:    ${INSTALL_PROFILE}"
 if [ "$INSTALL_PROFILE" = "cockpit" ]; then
-  echo "  Teams:      (none — cockpit mode renders connect scripts for all teams)"
+  _cockpit_mand_str="$(_cockpit_mandatory_teams_str)"
+  if [ -n "$_cockpit_mand_str" ]; then
+    echo "  Teams:      ${_cockpit_mand_str} (mandatory — full local install; every other team gets connect scripts only)"
+  else
+    echo "  Teams:      (none — cockpit mode renders connect scripts for all teams)"
+  fi
   echo "  Features:   iTerm2 scripts + dynamic profile + connect scripts"
 else
   echo "  Teams:      ${SELECTED_TEAMS[*]}"
@@ -1288,7 +1329,12 @@ if [ "$DRY_RUN" = "true" ]; then
   echo "  Framework version: ${VERSION}"
   echo "  Would install framework to: ${INSTALL_DIR}"
   if [ "$INSTALL_PROFILE" = "cockpit" ]; then
-    echo "  Would install cockpit profile (connect scripts for all teams)"
+    _cockpit_mand_str="$(_cockpit_mandatory_teams_str)"
+    if [ -n "$_cockpit_mand_str" ]; then
+      echo "  Would install cockpit profile (connect scripts for all teams; full local install for mandatory team(s): ${_cockpit_mand_str})"
+    else
+      echo "  Would install cockpit profile (connect scripts for all teams)"
+    fi
   else
     for _dry_team in "${SELECTED_TEAMS[@]}"; do
       echo "  Would install team: ${_dry_team}"
@@ -1465,12 +1511,39 @@ fi
 # Copy agent personas, avatars, and terminal logos for selected teams
 # Also populate the flat avatars/ pool so agent-panel-display.sh can find them
 # without needing fleet-monitor installed.
-# Skipped in cockpit mode — no team working dirs, no personas needed locally.
+#
+# XACA-1070 / PR #865 round 2, carve-out 1 of 4: this loop's comment used to
+# read "Skipped in cockpit mode — no team working dirs, no personas needed
+# locally", and that was true BEFORE this ticket: SELECTED_TEAMS was
+# unconditionally emptied for cockpit (Step 2 above) and nothing ever
+# refilled it, so this loop always iterated zero teams on a cockpit box.
+# That is no longer the whole story — _atf_apply_mandatory_teams (call site
+# 2, above) now force-appends any mandatory team id into SELECTED_TEAMS on
+# EVERY cockpit install, so by the time control reaches here SELECTED_TEAMS
+# already contains that team, and this loop — UNCHANGED — correctly copies
+# its personas as a side effect of that invariant alone. The EPIC-0057
+# decision behind this ticket (full setup for a mandatory team, cockpit
+# included) requires exactly this: a mandatory team's crew needs real
+# persona files on disk to populate its agent-panel avatars and terminal
+# banners, the same as any full-mode team.
+#
+# The per-iteration guard just inside the loop is the SAME belt-and-
+# suspenders check the team-install loop further down already applies (see
+# that loop's own header comment for the full rationale) — not because
+# SELECTED_TEAMS is expected to ever carry a non-mandatory id on cockpit
+# today, but so a future regression upstream can never leak a
+# non-mandatory team's personas onto a cockpit box through this loop
+# specifically. `atf_is_mandatory_team` fails closed (returns 1) on an
+# unreadable registry or a missing lib, matching every other mandatory-
+# team call site in this file.
 _personas_copied=0
 _logos_copied=0
 mkdir -p "${INSTALL_DIR}/avatars"
 for team_id in "${SELECTED_TEAMS[@]}"; do
   [ -z "$team_id" ] && continue
+  if [ "$INSTALL_PROFILE" = "cockpit" ] && ! { command -v atf_is_mandatory_team >/dev/null 2>&1 && atf_is_mandatory_team "$team_id"; }; then
+    continue
+  fi
   # Agent personas and avatar thumbnails
   if [ -d "${AITEAMFORGE_HOME}/share/personas/${team_id}" ]; then
     mkdir -p "${INSTALL_DIR}/${team_id}/personas/agents"
@@ -1495,17 +1568,74 @@ done
 echo ""
 
 # -----------------------------------------------------------------------
-# Install selected teams (full profile only)
-# In cockpit mode, no teams are installed locally. Connect scripts for ALL
-# teams are rendered in the cockpit connect-scripts pass below.
+# Install selected teams.
+#
+# XACA-1070 (PR #865 round 2, BLOCKING): this block used to be wrapped
+# whole in `if [ "$INSTALL_PROFILE" != "cockpit" ]`, so install-team.sh
+# NEVER ran on a cockpit install -- for anyone, including a mandatory team
+# that call site 2 of _atf_apply_mandatory_teams (above, ~line 1069) had
+# already force-appended into SELECTED_TEAMS. The config write further
+# down (WRITE CONFIGURATION FILE) does NOT gate on profile, so
+# .aiteamforge-config ended up listing a mandatory team that had no board
+# on disk at all. atf_team_provisioned() requires BOTH config-membership
+# AND a real on-disk board (mandatory-teams.sh's atf_team_has_board()), so
+# it returned false and `aiteamforge doctor` reported a permanent FAULT on
+# every cockpit box, forever -- no upgrade run could ever heal it, because
+# the wizard is what runs once at install time.
+#
+# WHY a mandatory team gets provisioned here even though cockpit
+# deliberately skips "teams, kanban, LCARS server, personas, shell
+# aliases" everywhere else (see the Step 2/Step 3 cockpit branches above,
+# and the LaunchAgents/shell-integration guards further down -- none of
+# those change): EPIC-0057 requires a mandatory team on every machine
+# AITeamForge is installed on, full stop, and a mandatory team's purpose
+# is LOCAL HOST RECOVERY (XACA-1070/1071's kb-spacedock) -- it needs a
+# real board + CLI on THIS machine, not a web UI. Cockpit's whole premise
+# ("connect to teams hosted elsewhere, install nothing locally") does not
+# apply to the one team whose job is recovering THIS host when nothing
+# elsewhere is reachable. This does NOT flip INSTALL_KANBAN back on, does
+# NOT load any LCARS LaunchAgent, and does NOT resurrect interactive team
+# selection for cockpit -- every other cockpit skip in this file is
+# unchanged; only this one team, on this one path, is exempted.
+#
+# THE FIX: the block no longer skips cockpit outright. Because
+# SELECTED_TEAMS is emptied for cockpit (Step 2, ~line 884-885) and from
+# then on is repopulated ONLY by _atf_apply_mandatory_teams, SELECTED_TEAMS
+# already contains ONLY mandatory team ids on a cockpit box by construction
+# -- but the per-iteration guard just inside the loop below is a second,
+# independent check rather than leaning on that alone. Even if some future
+# change ever put a non-mandatory id into SELECTED_TEAMS on a cockpit
+# install, this loop would still refuse to install-team.sh it. The loop
+# BODY itself (work-dir resolution, --project/--client flags,
+# install-team.sh invocation, error handling) is untouched and unduplicated
+# -- the same code now simply also runs, per-team-conditionally, for
+# cockpit. Two independent components silently disagreeing about what
+# "provisioned" means is this ticket's own worst defect (see
+# mandatory-teams.sh's atf_team_has_board() header comment,
+# XACA-1070-017) -- sharing this loop body rather than cloning a
+# mandatory-only copy of it is what keeps that from happening again here.
 # -----------------------------------------------------------------------
-if [ "$INSTALL_PROFILE" != "cockpit" ]; then
 
 echo -e "${BOLD}Installing teams...${NC}"
 echo ""
 
 for team_id in "${SELECTED_TEAMS[@]}"; do
   [ -z "$team_id" ] && continue  # skip empty entries from removed teams
+
+  # XACA-1070 / PR #865 round 2: on a cockpit install, SELECTED_TEAMS
+  # should only ever contain mandatory teams (see the block header comment
+  # above) -- this is the belt-and-suspenders per-iteration enforcement of
+  # that, so a future regression upstream can never install a non-mandatory
+  # team locally on a cockpit box through this loop. `atf_is_mandatory_team`
+  # fails closed (returns 1) on an unreadable registry or a missing lib, so
+  # an unreadable registry on a cockpit box means "install nothing here"
+  # rather than "install everything" -- consistent with this file's other
+  # mandatory-team call sites, which all fail closed on the enforcement
+  # question rather than aborting the wizard over it.
+  if [ "$INSTALL_PROFILE" = "cockpit" ] && ! { command -v atf_is_mandatory_team >/dev/null 2>&1 && atf_is_mandatory_team "$team_id"; }; then
+    continue
+  fi
+
   _wdir_var="_WORKDIR_${team_id}"
   _proj_var="_PROJECT_${team_id}"
   _client_var="_CLIENT_${team_id}"
@@ -1588,7 +1718,133 @@ if [ ${#_stale_teams[@]} -gt 0 ]; then
   echo ""
 fi
 
-fi  # end: if INSTALL_PROFILE != cockpit (team install + stale scripts block)
+# XACA-1070 / PR #865 round 2: this block used to close an
+# `if [ "$INSTALL_PROFILE" != "cockpit" ]` here (removed — see the "Install
+# selected teams" header comment above). No cockpit guard is needed for the
+# stale-script regen pass either: it scans directories that already exist
+# under ${INSTALL_DIR}, and on a cockpit box the only team directory that
+# can exist is the mandatory team's own (created by the loop just above) —
+# there is nothing else on disk for it to find.
+
+# -----------------------------------------------------------------------
+# Cockpit mandatory-team LCARS instance (XACA-1070 / PR #865 round 2,
+# carve-out 3 of 4).
+#
+# THE USER DECISION THIS SERVES: EPIC-0057 requires a mandatory team's
+# FULL setup on every AITeamForge install, cockpit included — "the
+# mandatory team's LCARS instance and its tabs must come up on a cockpit
+# box" is a settled requirement of this ticket's round-2 fix, not a
+# reinterpretation of cockpit mode generally. Cockpit's whole premise
+# ("connect to teams hosted elsewhere, install nothing locally") does not
+# apply to the one team whose purpose is recovering THIS host when nothing
+# elsewhere is reachable (XACA-1070/1071's kb-spacedock).
+#
+# WHAT WAS INVESTIGATED, so this reads as a deliberate narrow carve-out
+# and not a partial fix someone forgot to finish:
+#
+#   * The mandatory team's BOARD needs none of this — see the INSTALL_KANBAN
+#     comment in Step 3 above. install-team.sh (already invoked above,
+#     unconditionally for a mandatory team on cockpit) writes the
+#     *-board.json itself with zero reference to INSTALL_KANBAN anywhere in
+#     that installer. INSTALL_KANBAN stays "no" on cockpit, unchanged.
+#
+#   * The mandatory team's per-agent startup scripts (generated by
+#     install-team.sh's generate_per_agent_startup_scripts, also already
+#     unconditional) and its top-level <team>-startup.sh DO need one real
+#     thing that only install_kanban_system's install_lcars_ui provides:
+#     $AITEAMFORGE_DIR/lcars-ui/server.py. share/scripts/lcars-launch-
+#     helpers.sh — which defines start_lcars_server, called from every
+#     <team>-startup.sh template (e.g. share/scripts/teams/finance-startup.sh)
+#     — is already copied to $AITEAMFORGE_DIR/scripts/ on EVERY profile,
+#     cockpit included, by the unconditional "Copy scripts" block earlier
+#     in this file. But the server it launches lives under lcars-ui/,
+#     which is written ONLY by install_lcars_ui(), normally reached
+#     exclusively through install_kanban_system() (gated on
+#     INSTALL_KANBAN="yes"). On cockpit that function never runs, so
+#     $AITEAMFORGE_DIR/lcars-ui never exists and start_lcars_server has
+#     nothing to launch — the "instance" half of "LCARS instance and its
+#     tabs" would otherwise be permanently missing for a mandatory team on
+#     a cockpit box.
+#
+#   * The "tabs" half needs NO code here: the iTerm2 "LCARS Web" dynamic
+#     profile is created unconditionally for every profile (see the
+#     "Create LCARS Web profile in iTerm2" block earlier in this file,
+#     which carries no INSTALL_PROFILE guard at all), and the per-agent
+#     tmux tabs are generated by install-team.sh itself. Both already
+#     exist on cockpit before this block runs; only the server they point
+#     at was the gap.
+#
+# THE FIX — call ONLY install_lcars_ui + configure_lcars_port directly,
+# bypassing install_kanban_system() entirely, so nothing else that
+# function does (backup system, port-management template copy, and —
+# decisively — every install_*_launchagent call) runs on cockpit:
+#
+#   * Both functions are pure static-file writers under $AITEAMFORGE_DIR
+#     (copy lcars-ui/, write lcars-target.js + .lcars-port). No process is
+#     started, no LaunchAgent is touched, and no other team's data is read
+#     or written. install_lcars_ui's own "LCARS UI not found (skipping)"
+#     guard makes this a clean no-op on a tap checkout that lacks
+#     share/lcars-ui, matching every other non-fatal installer call in
+#     this file.
+#
+#   * LaunchAgents are DELIBERATELY excluded, including
+#     install_lcars_health_launchagent (auto-restart on crash). The "Load
+#     LaunchAgents" block further below still reads "Skipped in cockpit
+#     mode — no LaunchAgents are installed (no LCARS server, no kanban
+#     backup, no fleet reporter)", and that remains TRUE for cockpit as a
+#     whole after this change — this block does not create any plist for
+#     launchctl to (not) load. This also keeps
+#     libexec/lib/launchagents.sh's _xaca0734_launchagents_applicable()
+#     (consulted by aiteamforge-upgrade.sh's update_launchagents())
+#     correct as-is: that gate decides "mandatory LaunchAgents on this
+#     install should stay absent" from .install-profile / .aiteamforge-
+#     config's lcars_kanban flag — both untouched by this block — never
+#     from whether lcars-ui/ happens to exist on disk. Writing static
+#     LCARS UI files here therefore cannot flip that gate and cannot risk
+#     materializing a LaunchAgent pointed at a working_dir that does not
+#     otherwise exist on this box (the exact "vandalism" scenario that
+#     gate's own header comment in aiteamforge-upgrade.sh warns about). A
+#     crashed LCARS server on a cockpit box is therefore not auto-
+#     restarted — same as every other LaunchAgent-backed service on
+#     cockpit today. That is a deliberately narrower guarantee than "must
+#     come up" might suggest, but it matches the standard a full install
+#     is already held to by this same wizard, which never starts any
+#     process itself either (see the team-install loop above) — it only
+#     ever makes starting one possible.
+#
+#   * Narrowed to cockpit + at least one team actually selected, i.e. at
+#     least one mandatory team was force-appended (see the "Install
+#     selected teams" header comment for why SELECTED_TEAMS holds ONLY
+#     mandatory ids on cockpit by construction). On a cockpit box with
+#     zero mandatory teams declared (today's real state — spacedock has
+#     not shipped, XACA-1070-001), SELECTED_TEAMS is empty and this block
+#     is a complete no-op: no lcars-ui/ directory is created at all,
+#     matching cockpit's existing behavior for every box with no
+#     mandatory team.
+# -----------------------------------------------------------------------
+_cockpit_has_mandatory_team="false"
+for _clt in "${SELECTED_TEAMS[@]}"; do
+  [ -n "$_clt" ] && _cockpit_has_mandatory_team="true" && break
+done
+if [ "$INSTALL_PROFILE" = "cockpit" ] && [ "$_cockpit_has_mandatory_team" = "true" ]; then
+  echo -e "${BOLD}Installing LCARS instance for mandatory team(s) (cockpit mode)...${NC}"
+  if [ -f "${INSTALLERS_DIR}/install-kanban.sh" ]; then
+    (
+      export AITEAMFORGE_DIR="${INSTALL_DIR}"
+      export INSTALL_ROOT="${AITEAMFORGE_HOME}"
+      source "${AITEAMFORGE_HOME}/libexec/lib/common.sh"
+      source "${INSTALLERS_DIR}/install-kanban.sh"
+      install_lcars_ui
+      configure_lcars_port "$DEFAULT_LCARS_PORT"
+    ) 2>&1 | sed 's/^/  /' || {
+      echo -e "  ${YELLOW}⚠ LCARS instance setup had errors (continuing)${NC}"
+      INSTALL_ERRORS=$((INSTALL_ERRORS + 1))
+    }
+  else
+    echo -e "  ${YELLOW}⚠ Kanban installer not found — LCARS instance skipped${NC}"
+  fi
+  echo ""
+fi  # end: cockpit mandatory-team LCARS instance (XACA-1070, PR #865 round 2)
 
 # -----------------------------------------------------------------------
 # Full-mode post-selected-teams pass (XACA-0160, ported from libexec
@@ -1657,6 +1913,14 @@ fi
 # Render connect + disconnect scripts for EVERY team when in cockpit mode.
 # In full mode, install-team.sh handles connect scripts for selected teams
 # and the post-selected-teams pass above handles the rest.
+#
+# XACA-1070 / PR #865 round 2: verified this pass needs NO mandatory-team
+# carve-out. It iterates every "$_cockpit_teams_dir"/*.conf, which includes
+# a mandatory team's own <team>.conf — the resulting <team>-connect.sh /
+# <team>-disconnect.sh filenames are distinct from the <team>-startup.sh /
+# ${INSTANCE_ID}-startup.sh files the mandatory-team install loop above
+# already wrote, so this pass cannot clobber that team's real local
+# install. Change nothing here.
 # -----------------------------------------------------------------------
 if [ "$INSTALL_PROFILE" = "cockpit" ]; then
   echo -e "${BOLD}Rendering connect scripts for all teams (cockpit mode)...${NC}"
@@ -1989,7 +2253,12 @@ echo "  Machine:    ${MACHINE_NAME}"
 echo "  Directory:  ${INSTALL_DIR}"
 echo "  Profile:    ${INSTALL_PROFILE}"
 if [ "$INSTALL_PROFILE" = "cockpit" ]; then
-  echo "  Teams:      (cockpit — connect scripts for all teams installed)"
+  _cockpit_mand_str="$(_cockpit_mandatory_teams_str)"
+  if [ -n "$_cockpit_mand_str" ]; then
+    echo "  Teams:      ${_cockpit_mand_str} (mandatory, full local install) — connect scripts for all teams installed"
+  else
+    echo "  Teams:      (cockpit — connect scripts for all teams installed)"
+  fi
 else
   echo "  Teams:      ${SELECTED_TEAMS[*]}"
 fi

@@ -17,6 +17,67 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `share/scripts/lcars-launch-helpers.sh` and `deploy-worktree-personas.sh` (XACA-0931) and
   `share/scripts/register-claude-hook.py` (XACA-0787). The tap is ahead of develop for those,
   and their newer content exists only on unmerged PR branches.
+- **XACA-1070 (PR #865 round 2) — a mandatory team now gets its FULL setup on a
+  cockpit install (`aiteamforge setup --cockpit-only`), not a partial one.**
+  User decision behind this ticket: EPIC-0057 requires a mandatory team
+  "provisioned automatically on every machine with AITeamForge installed" —
+  cockpit included, and asked as full vs. minimal, the answer is full: team,
+  board, config entry, personas, kanban board, and its LCARS server + tabs.
+  Cockpit's own banner (`bin/aiteamforge-setup.sh:302`) still reads "Skipping:
+  teams, kanban, LCARS server, personas, shell aliases" for every OTHER team —
+  this carves a mandatory team narrowly out of four of those five, not a
+  general cockpit-mode change. `bin/aiteamforge-setup.sh`'s "Install selected
+  teams" loop already carried a per-iteration cockpit-mandatory guard from the
+  immediately preceding round-2 fix (so `install-team.sh` now runs for a
+  mandatory team on cockpit — carve-out 1 of 4); this round closes the
+  remaining three: (2) the persona/avatar/logo copy loop's stale "skipped in
+  cockpit mode" comment was replaced with the real story — the loop was
+  already unconditional, so it started copying a mandatory team's personas as
+  a side effect of `SELECTED_TEAMS` now holding that team's id on cockpit; it
+  gained the same per-iteration `atf_is_mandatory_team` belt-and-suspenders
+  guard as the team-install loop, for defense in depth against a future
+  regression leaking a non-mandatory team's personas onto a cockpit box.
+  (3) A new, narrowly-scoped "Cockpit mandatory-team LCARS instance" block
+  calls ONLY `install_lcars_ui` + `configure_lcars_port` (both pure
+  static-file writers under `$AITEAMFORGE_DIR`) directly, bypassing
+  `install_kanban_system()` entirely — so `INSTALL_KANBAN` stays `"no"` on
+  cockpit (investigated, not overlooked: `install-team.sh` already writes a
+  mandatory team's `*-board.json` with zero reference to `INSTALL_KANBAN`
+  anywhere in that installer, and EPIC-0057 places the intended first
+  mandatory team's (spacedock) board at `~/.aiteamforge/spacedock/kanban/` —
+  deliberately outside `$AITEAMFORGE_DIR` — precisely so it never depends on
+  the kanban system being installed) and no LaunchAgent (including the LCARS
+  health auto-restart agent) is ever installed on cockpit, keeping
+  `libexec/lib/launchagents.sh`'s `_xaca0734_launchagents_applicable()` gate
+  correct as-is (it keys off `.install-profile`/`lcars_kanban`, never off
+  whether `lcars-ui/` exists on disk). Without this, a mandatory team's
+  per-agent startup scripts and `<team>-startup.sh` (both already generated
+  unconditionally by `install-team.sh`) would call `start_lcars_server` with
+  nothing under `lcars-ui/` to launch — the iTerm2 "LCARS Web" profile and the
+  per-agent tmux tabs already exist on cockpit unconditionally, so only the
+  server they point at was the gap. (4) The summary/dry-run/completion
+  "Teams:" display text hardcoded "(none — cockpit mode renders connect
+  scripts for all teams)" regardless of `SELECTED_TEAMS`, which became
+  actively wrong once a mandatory team is force-appended; all three sites now
+  share one `_cockpit_mandatory_teams_str()` helper and name the team when
+  present. Verified needing no change: the cockpit connect-scripts pass
+  (renders `<team>-connect.sh`/`<team>-disconnect.sh` for every team,
+  filenames distinct from `<team>-startup.sh`, so it cannot clobber a
+  mandatory team's real local install) and `aiteamforge-upgrade.sh`'s
+  `update_mandatory_teams()`/both `check_mandatory_teams()` doctor copies
+  (already profile-agnostic by design — zero references to `INSTALL_PROFILE`
+  or "cockpit" anywhere in `update_mandatory_teams()`). `tests/test-xaca-1070-
+  mandatory-install.sh` grew from 53 to 79 assertions (new Sections I-N):
+  cockpit team-install-loop guard (mandatory installed, non-mandatory
+  refused, fails closed on an unreadable registry), the persona-loop guard,
+  the LCARS carve-out (functional file-copy assertions against the real tap's
+  `install-kanban.sh` + `share/lcars-ui` in a sandbox, a structural assertion
+  that it never calls `install_kanban_system` or any `_launchagent` function
+  or touches `INSTALL_KANBAN`, and a no-op check when zero mandatory teams
+  are selected), the display-text fix, doctor PASS on an already-provisioned
+  cockpit box (both copies — the missing opposite of the existing
+  unprovisioned-FAULT coverage), and an explicit cockpit-layout run of the
+  upgrade backfill. All 79 pass under `/bin/bash` 3.2.
 - XACA-1164: Mirror the Space Dock and Strange New Worlds (SNW) crew art. Under
   `fleet-monitor/server/public/avatars/`: the 5 Space Dock terminal logos and 8 SNW
   terminal logos (256px `_logo.png` plus 200px `_logo_panel.png` each), and the 4
