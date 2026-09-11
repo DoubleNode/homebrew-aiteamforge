@@ -489,6 +489,17 @@ _LEAK_GUARD_LAUNCHCTL_BIN="${_LEAK_GUARD_LAUNCHCTL_BIN:-/bin/launchctl}"
 # setup_test_env in run_test_file) so TEST_TMP_DIR's own directory doesn't
 # register as a false-positive "new" entry once the suite creates it.
 LEAK_GUARD_TMPROOT="${TMPDIR:-/tmp}"
+# XACA-0787-033: the directory vector 7 (team-paths.json + its backup
+# family) watches, as an indirection variable — same pattern as
+# _LEAK_GUARD_LAUNCHCTL_BIN above. Defaults to the real
+# $HOME/.aiteamforge — production behavior UNCHANGED. The only reason this
+# is a variable is so vector 7 itself can be proven to fire (and to NOT
+# fire) in an automated, CI-safe test: point it at a fixture directory that
+# exists regardless of whether a real registry does, so the assertion is
+# real on a bare CI runner where $HOME/.aiteamforge/team-paths.json is
+# always __absent__ before and after. Never override this outside such a
+# test of the guard itself.
+_LEAK_GUARD_AITEAMFORGE_DIR="${_LEAK_GUARD_AITEAMFORGE_DIR:-$HOME/.aiteamforge}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # XACA-0787-021: portable stat/hash probing. `stat -f`/`md5 -q` are
@@ -646,9 +657,42 @@ _leak_guard_team_paths_backup_count() {
   # the entire runner mid-suite. `find` on a missing directory has the same
   # failure shape, so the trailing `|| true` is required regardless of
   # which tool is used — verified empirically both ways.
-  find "$HOME/.aiteamforge" -maxdepth 1 -type f \
+  find "$_LEAK_GUARD_AITEAMFORGE_DIR" -maxdepth 1 -type f \
     -name 'team-paths.json.bak-xaca0463-installer-*' \
     2>/dev/null | wc -l | tr -d ' ' || true
+}
+
+# PR #859 round-6 review (XACA-0787-031): is a real team-paths.json write
+# attributable to $CURRENT_TEST_FILE at all? Vector 6 answers the analogous
+# question with two signals it actually has evidence for — its own
+# TEST_TMP_DIR, and a ticket token pulled from the suite's own filename.
+# Neither transfers here: team-paths.json is ONE well-known path, not a
+# family of differently-named entries, so there is no filename fragment of
+# the write itself to match against. The only evidence this guard actually
+# has is a DIFFERENT kind: does $CURRENT_TEST_FILE's own source even
+# reference an entry point capable of writing the real registry
+# (install-team.sh, kb-port-fix.py, or team-paths.json/port-reconcile by
+# name)? A suite that never mentions any of those cannot plausibly be the
+# cause — exactly the same "no evidence -> don't hard-fail" logic vector 6
+# applies to a bare unattributed tmp.* entry.
+#
+# This is a PLAUSIBILITY proxy, not proof — same as vector 6's ticket-token
+# match, which doesn't prove causation either, only that the suite is
+# capable of it. A suite that touches the registry only through an
+# indirect helper with none of these strings in its own source is a real,
+# known gap (mirrors vector 6's 22/91-suites-no-token gap) — reported
+# loudly via the non-attributable path below, never silently dropped.
+#
+# Returns 0 (attributable) / 1 (not). Fails closed on missing evidence: an
+# unset or unreadable $CURRENT_TEST_FILE is NOT attributable, never the
+# reverse — inventing attribution from nothing is exactly the "weak signal"
+# this must not do.
+_leak_guard_suite_touches_team_paths() {
+  local suite_path
+  [ -n "${TEST_DIR:-}" ] && [ -n "${CURRENT_TEST_FILE:-}" ] || return 1
+  suite_path="$TEST_DIR/$CURRENT_TEST_FILE"
+  [ -f "$suite_path" ] || return 1
+  grep -qE 'install-team\.sh|kb-port-fix|team-paths\.json|port-reconcile' "$suite_path" 2>/dev/null
 }
 
 leak_guard_snapshot() {
@@ -669,7 +713,7 @@ leak_guard_snapshot() {
   _leak_guard_file_fingerprint "$HOME/.claude/settings.json" > "$LEAK_GUARD_STATE_DIR/claude-settings.before"
   _leak_guard_tmproot_snapshot > "$LEAK_GUARD_STATE_DIR/tmproot.before"
   # Vector 7: real team-paths.json content fingerprint + its backup-family count.
-  _leak_guard_file_fingerprint "$HOME/.aiteamforge/team-paths.json" > "$LEAK_GUARD_STATE_DIR/team-paths.before"
+  _leak_guard_file_fingerprint "$_LEAK_GUARD_AITEAMFORGE_DIR/team-paths.json" > "$LEAK_GUARD_STATE_DIR/team-paths.before"
   _leak_guard_team_paths_backup_count > "$LEAK_GUARD_STATE_DIR/team-paths-backups.before"
 }
 
@@ -923,22 +967,56 @@ LEAK_GUARD_ENTRIES_EOF
   # registry ~/.aiteamforge/team-paths.json. A DIFFERENT sink from vectors
   # 1-6 (all launchd/Claude-settings state) — see the header comment above
   # for why AITEAMFORGE_DIR sandboxing alone does not cover it. Two
-  # independent signals, either one alone sufficient to trip this vector:
+  # independent signals:
   #   (a) the file's content fingerprint changed at all, or
   #   (b) install-team.sh's own timestamped backup family
-  #       (team-paths.json.bak-xaca0463-installer-*) grew — this is the
-  #       exact fingerprint the finder used to first detect this recurrence
-  #       (91 backups, 2026-09-04 through 2026-09-10 on this machine).
-  # Backup-count growth is checked even when the live fingerprint is
-  # unchanged: install-team.sh backs up the PRE-write file before every
-  # upsert, so a run that writes and then (coincidentally, or via a second
-  # write) restores the original content would still leave a new backup
-  # file behind — content-only fingerprinting would miss that.
+  #       (team-paths.json.bak-xaca0463-installer-*) changed count — this is
+  #       the exact fingerprint the finder used to first detect this
+  #       recurrence (91 backups, 2026-09-04 through 2026-09-10 on this
+  #       machine).
+  # Content-only fingerprinting can miss a write-then-restore: install-team.sh
+  # backs up the PRE-write file before every upsert, so a run that writes and
+  # then (coincidentally, or via a second write) restores the original
+  # content would still leave a new backup file behind — that's why (b) is
+  # checked independently of (a), not only as a fallback when (a) is silent.
+  #
+  # PR #859 round-6 review (XACA-0787-031): a real registry write during the
+  # bracketed window is NOT proof $CURRENT_TEST_FILE caused it — this is a
+  # SHARED machine, and another concurrent session's install-team.sh or
+  # kb-port-fix.py run lands in the same window just as validly as vector 6's
+  # shared-$TMPDIR problem did. _leak_guard_suite_touches_team_paths() is the
+  # best evidence available (does this suite's own source even reference an
+  # entry point capable of this write?) — same PLAUSIBILITY-not-proof
+  # standard vector 6's ticket-token match uses. Attributable -> hard
+  # failure. Not attributable -> reported loudly, never silently, but does
+  # NOT fail the run: inventing attribution where none exists is worse than
+  # admitting there isn't any.
+  #
+  # XACA-0787-032: a SHRINK in the backup count is handled separately from
+  # growth and is NEVER attribution-gated — no production code path prunes
+  # or deletes team-paths.json.bak-xaca0463-installer-* files (confirmed:
+  # only install-team.sh's upsert step ever creates one), so there is no
+  # legitimate concurrent-session explanation for a shrink the way there is
+  # for growth. A shrink means real backup history — the user's own
+  # recovery trail — was destroyed, which is worse than an unexpected write:
+  # a content change is at least still visible in the fingerprint diff,
+  # whereas a deleted backup is gone. It always trips, regardless of
+  # attribution.
   # ─────────────────────────────────────────────────────────────────────────
-  _leak_guard_file_fingerprint "$HOME/.aiteamforge/team-paths.json" > "$LEAK_GUARD_STATE_DIR/team-paths.after"
+  local _lg_tp_attributable=false
+  if _leak_guard_suite_touches_team_paths; then
+    _lg_tp_attributable=true
+  fi
+
+  _leak_guard_file_fingerprint "$_LEAK_GUARD_AITEAMFORGE_DIR/team-paths.json" > "$LEAK_GUARD_STATE_DIR/team-paths.after"
   if ! diff -q "$LEAK_GUARD_STATE_DIR/team-paths.before" "$LEAK_GUARD_STATE_DIR/team-paths.after" >/dev/null 2>&1; then
-    tripped=true
-    print_error "LEAK [team-paths] real ~/.aiteamforge/team-paths.json content changed during $CURRENT_TEST_FILE — this test drove a real installer/port-fixer without sandboxing HOME or pinning AITEAMFORGE_CONFIG. Before: $(cat "$LEAK_GUARD_STATE_DIR/team-paths.before" 2>/dev/null) After: $(cat "$LEAK_GUARD_STATE_DIR/team-paths.after" 2>/dev/null)"
+    local _lg_tp_content_msg="real ~/.aiteamforge/team-paths.json content changed during $CURRENT_TEST_FILE. Before: $(cat "$LEAK_GUARD_STATE_DIR/team-paths.before" 2>/dev/null) After: $(cat "$LEAK_GUARD_STATE_DIR/team-paths.after" 2>/dev/null)"
+    if [ "$_lg_tp_attributable" = true ]; then
+      tripped=true
+      print_error "LEAK [team-paths] $_lg_tp_content_msg — this test drove a real installer/port-fixer without sandboxing HOME or pinning AITEAMFORGE_CONFIG."
+    else
+      print_error "LEAK [team-paths:unattributed] $_lg_tp_content_msg — NOT failing on this alone: $CURRENT_TEST_FILE's own source names no entry point (install-team.sh / kb-port-fix.py / team-paths.json / port-reconcile) capable of this write, so it cannot be attributed to this suite on a shared machine. Reported loudly, not silently."
+    fi
   fi
 
   _leak_guard_team_paths_backup_count > "$LEAK_GUARD_STATE_DIR/team-paths-backups.after"
@@ -946,9 +1024,26 @@ LEAK_GUARD_ENTRIES_EOF
     local _lg_tp_before _lg_tp_after
     _lg_tp_before=$(cat "$LEAK_GUARD_STATE_DIR/team-paths-backups.before" 2>/dev/null || echo '?')
     _lg_tp_after=$(cat "$LEAK_GUARD_STATE_DIR/team-paths-backups.after" 2>/dev/null || echo '?')
-    if [ "${_lg_tp_after:-0}" -gt "${_lg_tp_before:-0}" ] 2>/dev/null; then
+    # Guard every comparison against a non-numeric/empty value (this
+    # ticket's own fail-open shape, XACA-0787-031) — `-gt`/`-lt` on '?' or
+    # '' would abort under `set -e` rather than silently mis-comparing, but
+    # either way that's the wrong failure mode; require both sides numeric
+    # before doing arithmetic, and treat an unreadable count as its own
+    # loud, non-fatal report rather than a guess in either direction.
+    case "$_lg_tp_before" in ''|*[!0-9]*) _lg_tp_before="" ;; esac
+    case "$_lg_tp_after" in ''|*[!0-9]*) _lg_tp_after="" ;; esac
+    if [ -z "$_lg_tp_before" ] || [ -z "$_lg_tp_after" ]; then
+      print_error "LEAK [team-paths-backup-count:unreadable] could not read a numeric backup count for $CURRENT_TEST_FILE (before='$(cat "$LEAK_GUARD_STATE_DIR/team-paths-backups.before" 2>/dev/null)', after='$(cat "$LEAK_GUARD_STATE_DIR/team-paths-backups.after" 2>/dev/null)') — reporting only, not assuming growth or shrink from an unreadable value."
+    elif [ "$_lg_tp_after" -gt "$_lg_tp_before" ]; then
+      if [ "$_lg_tp_attributable" = true ]; then
+        tripped=true
+        print_error "LEAK [team-paths-backup-growth] real ~/.aiteamforge/team-paths.json.bak-xaca0463-installer-* count grew from $_lg_tp_before to $_lg_tp_after during $CURRENT_TEST_FILE — install-team.sh's own XACA-0463 port-persist step wrote a backup of the REAL registry before mutating it."
+      else
+        print_error "LEAK [team-paths-backup-growth:unattributed] real ~/.aiteamforge/team-paths.json.bak-xaca0463-installer-* count grew from $_lg_tp_before to $_lg_tp_after during $CURRENT_TEST_FILE — NOT failing on this alone: $CURRENT_TEST_FILE's own source names no entry point capable of this write, so it cannot be attributed to this suite on a shared machine. Reported loudly, not silently."
+      fi
+    elif [ "$_lg_tp_after" -lt "$_lg_tp_before" ]; then
       tripped=true
-      print_error "LEAK [team-paths-backup-growth] real ~/.aiteamforge/team-paths.json.bak-xaca0463-installer-* count grew from $_lg_tp_before to $_lg_tp_after during $CURRENT_TEST_FILE — install-team.sh's own XACA-0463 port-persist step wrote a backup of the REAL registry before mutating it."
+      print_error "LEAK [team-paths-backup-shrink] real ~/.aiteamforge/team-paths.json.bak-xaca0463-installer-* count DROPPED from $_lg_tp_before to $_lg_tp_after during $CURRENT_TEST_FILE — real backup history was deleted. This ALWAYS fails, regardless of attribution: no production code path prunes this backup family, so there is no legitimate concurrent-session explanation for a shrink the way there is for growth, and destroyed backup history is worse than an unexpected write."
     fi
   fi
 

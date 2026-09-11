@@ -103,6 +103,7 @@ test-xaca-0762-start-port-reconcile-yes.sh      plain-shell
 test-xaca-0770-local-only-knowledge-in-tap.sh    plain-shell
 test-xaca-0771-upgrade-materialize-missing.sh   plain-shell
 test-xaca-0787-012-claude-config-flag-guard.sh  plain-shell
+test-xaca-0787-033-vector7-attribution.sh       plain-shell
 test-xaca-0788-crash-recovery-in-tap.sh         plain-shell
 test-xaca-0792-team-instance-id.sh              plain-shell
 test-xaca-0799-restart-symmetry.sh              plain-shell

@@ -22,6 +22,36 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Space Dock title is now `STARFLEET SPACE DOCK` in both dashboards.
 - **XACA-0931 / XACA-0865 — the new persona-deploy suite (35 tests; `grep -c 'test_start "'`)
   ships QUARANTINED, and
+- XACA-0787 round-6 (PR #859 review, three vector-7 findings). Round 5 added
+  vector 7 without applying the lesson vector 6 had taken two rounds to learn:
+  (1) it hard-failed with NO attributability split, so a concurrent unrelated
+  session's `install-team.sh` on a shared box would fail whatever suite happened
+  to be running — the exact false-positive shape vector 6 was split for. Now
+  attributed via `_leak_guard_suite_touches_team_paths()`, which greps the
+  running suite's own source for a registry entry point; attributable trips,
+  unattributable reports LOUDLY as `[team-paths:unattributed]` and does not fail.
+  Note the proxy differs from vector 6's deliberately — `team-paths.json` is one
+  well-known path with no filename family to match, so "does this suite's source
+  name an entry point" is the honest evidence, not a filename glob. Fails closed
+  when `CURRENT_TEST_FILE`/`TEST_DIR` are unset.
+  (2) A backup-count SHRINK was silently swallowed — the outer `diff -q` fired
+  but the inner comparison was `-gt` only, so a test DELETING real backups
+  produced no message and no trip. Shrink now always reports and always trips,
+  deliberately on a DIFFERENT policy from growth: growth has an innocent
+  concurrent-session explanation, shrink of an append-only backup family has
+  none, and destroyed backup history is irreversible. Numeric comparisons are
+  guarded against empty/non-numeric values — this ticket's own fail-open shape.
+  (3) NOTHING PROVED VECTOR 7 EVER FIRED, and it was unreachable in CI: runners
+  have no real registry, so both snapshots were `__absent__`. "Vector 7 fires"
+  was a local manual claim on a ticket whose defining lesson is that guards were
+  non-functional exactly where they execute. Added
+  `tests/test-xaca-0787-033-vector7-attribution.sh` (13 assertions), which drives
+  the REAL `test-runner.sh` end-to-end against fixtures via new
+  `_LEAK_GUARD_AITEAMFORGE_DIR` indirection (default unchanged in production), so
+  it asserts on a bare runner. Enrolled in `ci-manifest` — completeness gate
+  passes at 95 entries — because round 4's finding 1 was a new suite that was
+  never enrolled and therefore never ran.
+- **XACA-0931 / XACA-0865 — the new 34-test persona-deploy suite ships QUARANTINED, and
   while quarantined it gates nothing.** `tests/test-xaca-0931-persona-deploy-and-parity.sh`
   is reclassified in `tests/ci-manifest` from `plain-shell` to
   `excluded:xaca-0865-runner-only-failure`, which genuinely removes it from the CI
