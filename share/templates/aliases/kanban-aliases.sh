@@ -3548,6 +3548,72 @@ _kb_knowledge_pii_floor_matches() {
     _kb_local_only_teams_hardcoded | _kb_knowledge_suggest_from_list "$want"
 }
 
+# _kb_knowledge_entry_files <dir> <prefix> [--include-bare]
+# Every real knowledge entry inside <dir>, one absolute path per line, sorted
+# NUMERICALLY by id (never lexically — a lexical sort ranks "k1000" ahead of
+# "k101", since '1' < '9' in the second character). Prints nothing and returns
+# 1 when <dir> does not exist or holds no matching entries.
+#
+# XACA-1155: the shared grammar every site that enumerates
+# <prefix>NNN...-<slug>.md entries must use, so "how many digits count" and
+# "what sort order" can never drift between call sites again. Before this,
+# eight sibling sites each hardcoded an EXACTLY-3-DIGIT glob/regex
+# (`[0-9][0-9][0-9]-*`), so once any tier directory's allocator reached
+# id 1000 the 4-digit entries became invisible to every one of them —
+# reindex dropped them from INDEX.md, merge silently skipped them,
+# short-ref resolution (k1000) couldn't find them, and the destination-guard
+# /tombstone-backstop presence checks reported an established directory as
+# empty. The grammar here is prefix + THREE-OR-MORE digits + "-" + slug
+# + ".md" — k001..k999 remain valid, k1000+ are no longer invisible.
+#
+# --include-bare additionally matches the legacy no-slug form
+# <prefix>NNN...md (no dash) that ONLY kb-knowledge-merge still accepts;
+# every other caller passes nothing and gets slug-form entries only. The
+# digit-run is validated (not just glob-shaped) so a lookalike like
+# "k12x-foo.md" or "k1000x-foo.md" is correctly excluded rather than
+# silently mis-parsed.
+#
+# _kb_alloc_slot CANNOT call this: its scan runs inside `sh -c` under a
+# flock (POSIX sh, no zsh available there), so it carries its own
+# independent widened glob + digit-validation — see its header comment.
+# This helper is for every OTHER (zsh) site.
+_kb_knowledge_entry_files() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    # An EMPTY prefix is valid: _kb_knowledge_reindex_one maps an unrecognised
+    # tier to exp_prefix="" and has always globbed bare NNN-*.md in that case.
+    local dir="${1-}" prefix="${2-}" bare_flag="${3-}"
+    [[ -z "$dir" ]] && return 1
+    [[ -d "$dir" ]] || return 1
+
+    local f b num
+    local -a numbered
+    numbered=()
+    for f in "${dir}/${prefix}"[0-9][0-9][0-9]*-*.md; do
+        [[ -f "$f" ]] || continue
+        b="${f##*/}"
+        num="${b#"$prefix"}"
+        num="${num%%-*}"
+        [[ "$num" =~ ^[0-9]+$ ]] || continue
+        numbered+=("${num}|${f}")
+    done
+    if [[ "$bare_flag" == "--include-bare" ]]; then
+        for f in "${dir}/${prefix}"[0-9][0-9][0-9]*.md; do
+            [[ -f "$f" ]] || continue
+            b="${f##*/}"
+            num="${b#"$prefix"}"
+            num="${num%.md}"
+            # A slug-form file (e.g. "k1000-foo.md") also glob-matches this
+            # broader bare pattern; the digit-only check rejects it here
+            # since it was already counted (or excluded) by the loop above.
+            [[ "$num" =~ ^[0-9]+$ ]] || continue
+            numbered+=("${num}|${f}")
+        done
+    fi
+    (( ${#numbered[@]} == 0 )) && return 1
+    printf '%s\n' "${numbered[@]}" | sort -t'|' -k1,1n | cut -d'|' -f2-
+    return 0
+}
+
 # _kb_knowledge_tombstone_backstop <target_dir> <prefix>
 # Returns 1 (and explains) when <target_dir> is a RETIREMENT TOMBSTONE holding
 # zero real <prefix>NNN-*.md entries. Returns 0 otherwise, including when the
@@ -3575,11 +3641,13 @@ _kb_knowledge_tombstone_backstop() {
         return 0
     fi
 
-    local _kb_tb_f
-    for _kb_tb_f in "${target_dir}/${prefix}"[0-9][0-9][0-9]-*.md; do
-        [[ -f "$_kb_tb_f" ]] || continue
+    # XACA-1155: presence check via the shared helper, so "does this
+    # directory hold entries" agrees with every other site rather than
+    # separately hardcoding an exactly-3-digit glob that goes blind past id
+    # 999 (see _kb_knowledge_entry_files's header).
+    if _kb_knowledge_entry_files "$target_dir" "$prefix" >/dev/null 2>&1; then
         return 0
-    done
+    fi
 
     echo "Error: refusing to allocate an entry id in '${target_dir}' — its README.md declares the directory RETIRED and it holds no entries (XACA-0934-002)." >&2
     if [[ -n "$_kb_tb_into" ]]; then
@@ -3706,11 +3774,12 @@ _kb_knowledge_destination_guard() {
                 # authoring on every consumer host — the same trap XACA-0802
                 # avoided with its fail-open ruling on an undeclared
                 # primary_host. No roster, no opinion.
-                local _kb_dg_f
-                for _kb_dg_f in "${target_dir}"/k[0-9][0-9][0-9]-*.md; do
-                    [[ -f "$_kb_dg_f" ]] || continue
+                # XACA-1155: shared presence check — see
+                # _kb_knowledge_entry_files's header for why an inline
+                # exactly-3-digit glob here would go blind past id k999.
+                if _kb_knowledge_entry_files "$target_dir" "k" >/dev/null 2>&1; then
                     return 0
-                done
+                fi
 
                 local _kb_dg_roster _kb_dg_known=false _kb_dg_p
                 if ! _kb_dg_roster=$(_kb_knowledge_all_persona_slugs 2>/dev/null); then
@@ -3840,12 +3909,13 @@ _kb_knowledge_destination_guard() {
             # XACA-0934-018: shared join — see the agent arm above.
             local target_dir
             target_dir=$(_kb_knowledge_tier_dir team "$slug" "$write_root")
-            local f _kb_dg_established=false
-            for f in "${target_dir}"/t[0-9][0-9][0-9]-*.md; do
-                [[ -f "$f" ]] || continue
+            # XACA-1155: shared presence check — see
+            # _kb_knowledge_entry_files's header for why an inline
+            # exactly-3-digit glob here would go blind past id t999.
+            local _kb_dg_established=false
+            if _kb_knowledge_entry_files "$target_dir" "t" >/dev/null 2>&1; then
                 _kb_dg_established=true
-                break
-            done
+            fi
 
             if [[ "$_kb_dg_established" == "true" ]]; then
                 # XACA-0934-014: the escape stays — a clobbered registry must
@@ -4875,11 +4945,14 @@ _kb_knowledge_resolve_ref() {
     local remainder="${ref#*:}"
 
     # Helper: given a target_dir and entry_id, resolve to actual file path.
-    # Short 3-digit IDs (e.g. k001) glob-expand to k001-actual-slug.md.
+    # Short IDs (e.g. k001, k1000) glob-expand to <id>-actual-slug.md.
     _kb_resolve_entry_path() {
         local target_dir="${1-}" entry_id="${2-}"
-        # If it looks like a bare short ID (prefix + exactly 3 digits, no dash), glob-expand
-        if [[ "$entry_id" =~ ^[ktspmv][0-9][0-9][0-9]$ ]]; then
+        # XACA-1155: prefix + THREE-OR-MORE digits, no dash — was exactly 3
+        # digits, which made a short-ref like "k1000" fail to resolve at all
+        # (it fell through to the literal "${target_dir}/k1000.md" below,
+        # which never exists for a slug-form entry).
+        if [[ "$entry_id" =~ ^[ktspmv][0-9]{3,}$ ]]; then
             local -a glob_matches
             glob_matches=( "${target_dir}/${entry_id}-"*.md )
             if [[ ${#glob_matches[@]} -gt 0 ]] && [[ -e "${glob_matches[1]}" ]]; then
@@ -4994,14 +5067,19 @@ _kb_knowledge_reindex_one() {
         *)       exp_prefix="" ;;
     esac
 
-    # Collect all entry files, sorted by ID
+    # Collect all entry files, sorted NUMERICALLY by ID. XACA-1155: via the
+    # shared _kb_knowledge_entry_files helper — a literal exactly-3-digit
+    # glob here silently stopped seeing k1000+ once a dir's highest slot
+    # passed 999, which also DROPPED those entries from the generated
+    # INDEX.md entirely. Numeric sort matters too: `entries[-1]` below is
+    # read as "the highest id", and a lexical glob-order would have ranked
+    # "k1000" ahead of "k101".
     local -a entries
     local -a load_first_entries
     local ef
-    for ef in "${dir}/${exp_prefix}"[0-9][0-9][0-9]-*.md; do
-        [[ -f "$ef" ]] || continue
-        entries+=("$ef")
-    done
+    while IFS= read -r ef; do
+        [[ -n "$ef" ]] && entries+=("$ef")
+    done < <(_kb_knowledge_entry_files "$dir" "$exp_prefix" 2>/dev/null)
 
     if [[ ${#entries[@]} -eq 0 ]]; then
         echo "  [skip] No entries in ${dir}"
@@ -6089,6 +6167,25 @@ kb-knowledge-search() {
 # Args:   <target_dir> <prefix> <slug>   (target_dir must already exist)
 # Stdout: absolute path of the reserved (empty, 0-byte) placeholder file.
 # Returns non-zero (and prints nothing usable) on failure.
+#
+# XACA-1155: id grammar is prefix + THREE-OR-MORE digits (k001..k999,
+# k1000, k1001, ...). The scan glob below used to require EXACTLY 3 digits
+# (`[0-9][0-9][0-9]-*`), so every 4-digit entry was invisible to the scan:
+# with k997..k999 and k1000+ on disk, highest read back as 999 and EVERY call
+# handed out k1000 again, forever — deterministic and uncontended, not a race
+# (the defect that motivated this ticket; XACA-0818 fixed a different,
+# concurrent mechanism). Widened to match 3-OR-MORE digits; the extracted
+# numerator is then explicitly validated as digits-only BEFORE the
+# leading-zero strip, so a lookalike like "k12x-foo.md" or "k1000x-foo.md" is
+# rejected rather than silently mis-parsed as a number. `printf %03d` below
+# is unchanged — it pads to a MINIMUM of 3 digits and emits 1000 as "1000".
+#
+# This scan runs inside `sh -c` under the flock below — POSIX sh, so it
+# cannot call the zsh-only `_kb_knowledge_entry_files` helper that every
+# OTHER knowledge-tree site now shares; it keeps its own self-contained
+# widened-glob + digit-validation logic here instead. Its BODY is exact-diffed
+# against both homebrew-tap copies by tests/test-knowledge-helper-parity.sh
+# — keep any future change here minimal and deliberate.
 _kb_alloc_slot() {
     # Self-contained glob behaviour — see _kb_knowledge_all_persona_slugs. Matters here
     # because kb-knowledge-promote also calls this function and does not set
@@ -6159,11 +6256,14 @@ _kb_alloc_slot() {
     ' "$alloc_lock" sh -c '
         dir=$1; pfx=$2; slug=$3
         highest=0
-        for f in "$dir/$pfx"[0-9][0-9][0-9]-*.md; do
+        for f in "$dir/$pfx"[0-9][0-9][0-9]*-*.md; do
             [ -f "$f" ] || continue
             b=${f##*/}
             num=${b#"$pfx"}
             num=${num%%-*}
+            case "$num" in
+                ""|*[!0-9]*) continue ;;
+            esac
             num=$(printf %s "$num" | sed "s/^0*//")
             [ -z "$num" ] && num=0
             if [ "$num" -gt "$highest" ] 2>/dev/null; then highest=$num; fi
@@ -6622,12 +6722,100 @@ FRONTMATTER
     local _kb_add_validate_output
     _kb_add_validate_output=$(kb-knowledge-validate --quiet --file "$new_file" 2>&1)
     if [[ $? -ne 0 ]]; then
+        # XACA-1155-002: INVARIANT — a non-zero exit from kb-knowledge-add
+        # must leave NOTHING NEW on disk. The check above runs
+        # kb-knowledge-validate's three WHOLE-TREE structural checks
+        # (duplicate ID-slot, INDEX orphan, duplicate persona-dir) IN FULL
+        # on every call, regardless of --file scoping (that's documented,
+        # deliberate behavior — see kb-knowledge-validate --help). So a
+        # directory that already had, say, a duplicate ID slot BEFORE this
+        # call ever ran fails this check too, even when the entry we just
+        # wrote is itself perfectly fine — the previous code left that
+        # (possibly innocent) new file behind with an error saying "left on
+        # disk for inspection", which breaks the "non-zero means nothing
+        # written" contract every other early-return in this function
+        # already honors (see the empty-write cleanup just above).
+        #
+        # Attribute the failure by moving the new file OUT of the target dir
+        # (not deleted yet) and re-validating with it absent:
+        #   - passes now            -> the new entry caused it; discard,
+        #                               return 1, nothing left anywhere.
+        #   - still fails           -> pre-existing defect in target_dir,
+        #                               unrelated to this write; restore the
+        #                               entry, warn loudly, continue (return
+        #                               0) exactly as a clean add would.
+        #
+        # Re-check scope: --file pointed at an EXISTING SIBLING entry in the
+        # same directory. That run repeats the first call exactly minus the
+        # new file — the same whole-tree structural checks, plus a content
+        # check of one entry that was already on disk — so the ONLY variable
+        # between the two runs is the new file's presence. A content defect in
+        # the new entry therefore attributes to the new entry, which a wider
+        # scope would blur (--changed also content-checks every uncommitted
+        # file in every knowledge root, so an unrelated dirty file elsewhere
+        # would make a bad new entry look "pre-existing"). --file on the moved
+        # new path is not an option: it hard-errors on a missing target.
+        # Fallback when the new entry was the directory's FIRST (no sibling
+        # exists): --changed, the narrowest remaining scope that still runs
+        # the structural checks.
+        # Chosen BEFORE the aside-move, so the new file itself must be skipped
+        # (matched by basename — target_dir and new_file may spell the same
+        # directory differently, e.g. /tmp vs /private/tmp).
+        local _kb_add_sibling="" _kb_add_cand
+        while IFS= read -r _kb_add_cand; do
+            [[ -n "$_kb_add_cand" && "${_kb_add_cand##*/}" != "${new_file##*/}" ]] || continue
+            _kb_add_sibling="$_kb_add_cand"
+            break
+        done < <(_kb_knowledge_entry_files "$target_dir" "$prefix" 2>/dev/null)
+        local _kb_add_aside
+        _kb_add_aside=$(mktemp "${TMPDIR:-/tmp}/kb-knowledge-add-aside.XXXXXX" 2>/dev/null)
+        if [[ -z "$_kb_add_aside" ]] || ! mv "$new_file" "$_kb_add_aside" 2>/dev/null; then
+            # Could not even attempt the aside-move (mktemp/mv failure). The
+            # invariant is "never non-zero while the file still sits in
+            # target_dir" — since we cannot prove the entry is at fault, and
+            # cannot safely remove it either, fail OPEN toward keeping the
+            # entry: same outcome as the "pre-existing defect" branch below,
+            # loudly disclosed, return 0. This does not weaken the
+            # invariant — it is never violated in EITHER direction (no
+            # non-zero exit with a lingering file, and no silent data loss).
+            echo "" >&2
+            echo "WARNING: ${new_file} was created, and its validate-on-write check failed, but the aside-move needed to determine whether THIS entry (vs. a pre-existing directory defect) is at fault could not be performed (mktemp/mv failure). Leaving it on disk rather than risk reporting failure while a file remains — inspect by hand:" >&2
+            echo "${_kb_add_validate_output}" >&2
+            _kb_knowledge_reindex_one "$target_dir" >/dev/null 2>&1 || true
+            return 0
+        fi
+
+        local _kb_add_recheck_output _kb_add_recheck_rc
+        if [[ -n "$_kb_add_sibling" ]]; then
+            _kb_add_recheck_output=$(kb-knowledge-validate --quiet --file "$_kb_add_sibling" 2>&1)
+        else
+            _kb_add_recheck_output=$(kb-knowledge-validate --quiet --changed 2>&1)
+        fi
+        _kb_add_recheck_rc=$?
+
+        if [[ $_kb_add_recheck_rc -eq 0 ]]; then
+            # Clean with the new file gone -> this entry caused the failure.
+            # Complete the invariant: discard the aside copy too.
+            rm -f "$_kb_add_aside"
+            echo "" >&2
+            echo "Error: NOTHING WAS WRITTEN — the entry failed validation and has been discarded, not left on disk. This indicates a bug in kb-knowledge-add's write path (frontmatter composition, id/tier derivation), not in your input:" >&2
+            echo "${_kb_add_validate_output}" >&2
+            return 1
+        fi
+
+        # Still fails with the new file absent -> a PRE-EXISTING defect in
+        # target_dir, not something this write caused. Restore the entry and
+        # proceed normally (reindex etc., return 0) — refusing here would
+        # block every future add into this directory over someone else's
+        # unrelated problem.
+        if ! mv "$_kb_add_aside" "$new_file" 2>/dev/null; then
+            echo "" >&2
+            echo "Error: determined the validation failure was PRE-EXISTING in ${target_dir} (unrelated to this entry), but could not restore ${new_file} from its aside copy. The entry content is safe at ${_kb_add_aside} — move it back by hand." >&2
+            return 1
+        fi
         echo "" >&2
-        echo "Error: the entry just written failed validation — this indicates a bug in" >&2
-        echo "kb-knowledge-add itself (the write path above), not in your input. Left on" >&2
-        echo "disk for inspection: ${new_file}" >&2
-        echo "${_kb_add_validate_output}" >&2
-        return 1
+        echo "WARNING: ${new_file} was created, but ${target_dir} has a PRE-EXISTING validation problem unrelated to this entry (it still fails with the new entry absent):" >&2
+        echo "${_kb_add_recheck_output}" >&2
     fi
 
     # XACA-0263: scaffold INDEX.md immediately so a fresh tier dir is queryable
@@ -6925,20 +7113,20 @@ kb-knowledge-promote() {
         target_entry_id="$target_entry_part"
     else
         target_entry_auto=true
-        # Find next available NNN in target dir.
-        # Use `find` instead of a literal glob: zsh aborts the function with
-        # "no matches found" when the glob expands to nothing (and target_dir
-        # may not exist yet on the first promotion into a new subjects path).
+        # Find next available NNN in target dir. XACA-1155: enumerate via the
+        # shared _kb_knowledge_entry_files helper (3-OR-MORE digits; a literal
+        # exactly-3-digit find/glob here silently stopped seeing k1000+ once
+        # a dir's highest slot reached 999) — it already tolerates a
+        # not-yet-existing target_dir (first promotion into a new subjects
+        # path), same as the `find` it replaces.
         local highest_id=0
         local ef en
-        if [[ -d "$target_dir" ]]; then
-            while IFS= read -r ef; do
-                [[ -f "$ef" ]] || continue
-                en=$(basename "$ef" | grep -oE "^${target_prefix}[0-9]+" | tr -d "$target_prefix")
-                en="${en#0}"; en="${en:-0}"
-                [[ "$en" -gt "$highest_id" ]] && highest_id="$en"
-            done < <(find "$target_dir" -maxdepth 1 -type f -name "${target_prefix}[0-9][0-9][0-9]-*.md" 2>/dev/null)
-        fi
+        while IFS= read -r ef; do
+            [[ -f "$ef" ]] || continue
+            en=$(basename "$ef" | grep -oE "^${target_prefix}[0-9]+" | tr -d "$target_prefix")
+            en="${en#0}"; en="${en:-0}"
+            [[ "$en" -gt "$highest_id" ]] && highest_id="$en"
+        done < <(_kb_knowledge_entry_files "$target_dir" "$target_prefix" 2>/dev/null)
         local next_num=$(( highest_id + 1 ))
         local padded_num; printf -v padded_num "%03d" "$next_num"
         # Derive slug from source file basename
@@ -7504,14 +7692,20 @@ kb-knowledge-merge() {
     fi
 
     # ── Enumerate source entries ────────────────────────────────────────────────
-    # find, not a literal glob: zsh aborts the function on a no-match glob.
+    # XACA-1155: via the shared _kb_knowledge_entry_files helper (3-OR-MORE
+    # digits, --include-bare for the no-slug kNNN.md form this function alone
+    # still accepts), NUMERICALLY sorted. A literal `find -name` here — as
+    # before — silently required EXACTLY 3 digits, so it stopped seeing
+    # k1000+ once source_dir's highest slot passed 999; and the plain
+    # lexical `sort` behind it ranked "k1000" ahead of "k101" (mixing
+    # 4-digit and 3-digit ids), which would have renumbered them out of
+    # order once the glob was merely widened without also fixing the sort.
     local -a source_files
     local f
     while IFS= read -r f; do
         [[ -f "$f" ]] || continue
         source_files+=("$f")
-    done < <(find "$source_dir" -maxdepth 1 -type f \
-                \( -name 'k[0-9][0-9][0-9]-*.md' -o -name 'k[0-9][0-9][0-9].md' \) 2>/dev/null | sort)
+    done < <(_kb_knowledge_entry_files "$source_dir" "k" --include-bare 2>/dev/null)
 
     if [[ ${#source_files[@]} -eq 0 ]]; then
         echo "Error: no knowledge entries found in ${source_dir}" >&2
@@ -7527,8 +7721,7 @@ kb-knowledge-merge() {
         if [[ "$en" -gt "$highest" ]] 2>/dev/null; then
             highest="$en"
         fi
-    done < <(find "$target_dir" -maxdepth 1 -type f \
-                \( -name 'k[0-9][0-9][0-9]-*.md' -o -name 'k[0-9][0-9][0-9].md' \) 2>/dev/null)
+    done < <(_kb_knowledge_entry_files "$target_dir" "k" --include-bare 2>/dev/null)
 
     # ── Build the renumbering map ───────────────────────────────────────────────
     local tmpdir="${TMPDIR:-/tmp}/kb-knowledge-merge-$$"

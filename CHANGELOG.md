@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1155: fix the knowledge-entry id allocator (`_kb_alloc_slot` and eight
+  sibling enumeration sites) so it stops handing out `k1000` forever once a
+  directory's highest entry passes id 999. The scan glob required EXACTLY 3
+  digits, so 4-digit entries were invisible to it — deterministic, not a
+  race. Widened the glob to 3-or-more digits with an explicit digits-only
+  check on the extracted number, added a new shared `_kb_knowledge_entry_files`
+  helper for every zsh call site (reindex, destination-guard/tombstone-backstop
+  presence checks, promote, merge, short-ref resolution), and hardened
+  `kb-knowledge-add`'s validate-on-write path to discard only the entry that
+  actually caused a validation failure, never a pre-existing one.
 - **XACA-1071: ship `kb-spacedock`, Space Dock's host-recovery triage entrypoint —
   and register it in BOTH upgrade allowlists, because one is not enough.**
   `share/scripts/kb-spacedock` fronts the diagnostics that already exist rather

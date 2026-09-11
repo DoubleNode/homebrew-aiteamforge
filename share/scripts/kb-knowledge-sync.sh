@@ -289,8 +289,10 @@ _dup_slots="$(
     find "$REPO_DIR" -type f -name '*.md' ! -name 'INDEX.md' -not -path '*/.git/*' -print0 2>/dev/null \
     | while IFS= read -r -d '' _f; do
         _d="${_f%/*}"; _b="${_f##*/}"
-        # slot key = leading lowercase prefix + exactly 3 digits (k004, t001, …)
-        _slot="$(printf '%s\n' "$_b" | sed -n 's/^\([a-z][a-z]*[0-9][0-9][0-9]\)-.*\.md$/\1/p')"
+        # slot key = leading lowercase prefix + THREE-OR-MORE digits (k004, t001,
+        # k1000, …). XACA-1155: this was exactly 3 digits, so a cross-host
+        # collision on any slot past k999 was invisible here and got pushed.
+        _slot="$(printf '%s\n' "$_b" | sed -n 's/^\([a-z][a-z]*[0-9][0-9][0-9][0-9]*\)-.*\.md$/\1/p')"
         [ -n "$_slot" ] && printf '%s\t%s\t%s\n' "$_d" "$_slot" "$_b"
       done \
     | awk -F'\t' '{ key=$1 "\t" $2; c[key]++; if (c[key]==1) { first[key]=$3 } else { print $1 "  slot=" $2 "  collides: " first[key] " + " $3 } }'
