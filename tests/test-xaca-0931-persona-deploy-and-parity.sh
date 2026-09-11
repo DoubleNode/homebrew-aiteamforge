@@ -1,6 +1,35 @@
 #!/bin/bash
 # test-xaca-0931-persona-deploy-and-parity.sh
 #
+# SELF-TARGETING RE-EXEC (XACA-0931, round-3 review finding) — must stay at the
+# very top, before any state is set up.
+#
+# This suite exists to verify behaviour under Apple's stock /bin/bash 3.2,
+# which is the shell the shipped code actually runs under on a consumer. But
+# tests/test-runner.sh invokes each plain-shell suite as `bash "$test_file"`
+# with an UNQUALIFIED bash (test-runner.sh:869), and the CI job that drives it
+# (test-shell-homebrew-tap, macos-latest) runs `brew install bash` first — so
+# PATH bash there is Homebrew 5.x. Hand-validation used /bin/bash and passed
+# 34/34; CI would have run the same file under 5.x and failed TG1, which
+# asserts the interpreter is 3.x.
+#
+# Deleting TG1 would "fix" that by removing the only assertion that the suite
+# ran under its target shell — turning a real signal into a vacuous green, the
+# exact defect class this ticket is about. Instead we re-exec ourselves under
+# /bin/bash when it is genuinely 3.x, so CI tests what it is supposed to test.
+#
+# Guards: XACA0931_REEXEC prevents an exec loop; we only re-exec when /bin/bash
+# actually reports major version 3, so on a platform without a 3.x /bin/bash
+# (e.g. Linux) we fall through and TG1 fails LOUDLY rather than silently
+# skipping — an environment that cannot provide the target shell should say so,
+# not report success. No CI job currently runs these suites on Linux.
+if [ -z "${XACA0931_REEXEC:-}" ] && [ "${BASH_VERSINFO[0]:-0}" != "3" ] && [ -x /bin/bash ]; then
+    if /bin/bash -c '[ "${BASH_VERSINFO[0]}" = "3" ]' 2>/dev/null; then
+        export XACA0931_REEXEC=1
+        exec /bin/bash "$0" "$@"
+    fi
+fi
+#
 # XACA-0931-005 (Testing & Debugging): failure-mode / edge-case coverage for
 # the five files built under XACA-0931-002/003 — deliberately NOT a
 # happy-path re-verification (that is XACA-0931-004's job; see the parent

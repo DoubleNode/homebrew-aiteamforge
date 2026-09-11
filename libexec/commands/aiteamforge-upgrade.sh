@@ -3022,6 +3022,11 @@ deploy_team_personas_to_projects() {
     print_warning "Could not read .aiteamforge-config — the .teams[] cross-check below is skipped for all targets (config missing/unreadable, not necessarily empty)"
   fi
 
+  # SECOND enumeration of the run, deliberately NOT a cached reuse of the one
+  # in update_team_personas (~line 2872). update_team_personas can CREATE a
+  # persona source dir between the two calls, so a cached result would be a
+  # pre-repair view of the filesystem used to decide what to overwrite. Full
+  # rationale on the function's own doc comment (~line 2775).
   _xaca0931_load_persona_targets
   local target_uninspectable="${_XACA0931_TARGETS_UNINSPECTABLE:-0}"
 
