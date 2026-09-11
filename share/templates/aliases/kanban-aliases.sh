@@ -6750,16 +6750,31 @@ FRONTMATTER
         #   3. Still failing, or nothing to compare against: the defect is not
         #      attributable to this write. Keep the entry, warn, return 0.
         #      Discarding is reserved for an established fault.
-        local _kb_add_blame=false _kb_add_line _kb_add_d _kb_add_files
+        local _kb_add_blame=false _kb_add_line _kb_add_d _kb_add_files _kb_add_s
+        local -a _kb_add_selves _kb_add_dirs
+        # kb-knowledge-validate globs "${root}/agents"/*/, so the REAL output
+        # prints directories with a trailing slash ("<dir>/ — files: ...") and
+        # entry paths with a doubled one ("<dir>//k006-x.md"). Both sides are
+        # normalised — runs of "/" collapsed, the slash before " — files: "
+        # dropped — or neither match below ever fires on real output (PR #870
+        # round-3 review). Two spellings of the entry: new_file carries the
+        # allocator's `cd && pwd` form, target_dir the caller's.
+        for _kb_add_s in "$new_file" "${target_dir%/}/${new_file:t}"; do
+            while [[ "$_kb_add_s" == *//* ]]; do _kb_add_s="${_kb_add_s//\/\///}"; done
+            _kb_add_selves+=("$_kb_add_s")
+            _kb_add_dirs+=("${_kb_add_s:h}")
+        done
         for _kb_add_line in "${(@f)_kb_add_validate_output}"; do
             [[ "$_kb_add_line" == *"[FAIL]"* ]] || continue
-            if [[ "$_kb_add_line" == *"${new_file}"* ]]; then
-                _kb_add_blame=true
-                break
-            fi
-            # Both spellings of the directory: new_file carries the allocator's
-            # `cd && pwd` form, target_dir the caller's.
-            for _kb_add_d in "${new_file:h}" "${target_dir%/}"; do
+            while [[ "$_kb_add_line" == *//* ]]; do _kb_add_line="${_kb_add_line//\/\///}"; done
+            _kb_add_line="${_kb_add_line//\/ — files: / — files: }"
+            for _kb_add_s in "${_kb_add_selves[@]}"; do
+                if [[ "$_kb_add_line" == *"${_kb_add_s}"* ]]; then
+                    _kb_add_blame=true
+                    break 2
+                fi
+            done
+            for _kb_add_d in "${_kb_add_dirs[@]}"; do
                 [[ "$_kb_add_line" == *" in ${_kb_add_d} — files: "* ]] || continue
                 _kb_add_files=" ${_kb_add_line##* — files: } "
                 if [[ "$_kb_add_files" == *" ${new_file:t} "* ]]; then
@@ -6790,7 +6805,7 @@ FRONTMATTER
             command rm -f -- "$new_file" 2>/dev/null
             if [[ ! -e "$new_file" ]]; then
                 echo "" >&2
-                echo "Error: NOTHING WAS WRITTEN — the new entry failed validation and was removed (id ${entry_id} is free again). This points at kb-knowledge-add's write path, not your input:" >&2
+                echo "Error: NOTHING WAS WRITTEN — the new entry failed validation and was removed (slot ${prefix}${padded_id} is free again). The validation output below says why; a slot collision clears on retry, a content error does not:" >&2
                 echo "${_kb_add_validate_output}" >&2
                 return 1
             fi
