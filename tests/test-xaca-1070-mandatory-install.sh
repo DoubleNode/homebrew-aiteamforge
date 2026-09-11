@@ -239,7 +239,12 @@ grep -q '^_cockpit_mandatory_teams_str() {' "$SETUP_SH" || _block_note_fail "set
 # XACA-1070-021/022/023 (PR #865 round 3) extraction anchors:
 grep -qF '# For project-based teams, ask for ClientID and/or ProjectID' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the Client-ID-prompt loop anchor comment Section O's extraction depends on"
 grep -qF 'is a mandatory team and cannot be skipped by leaving Client ID blank' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the XACA-1070-021 mandatory-team-refuses-drop message Section O asserts on"
-grep -qF "mandatory.sort(key=lambda t: t.get('order') or 0)" "$MANDATORY_TEAMS_SH" || _block_note_fail "mandatory-teams.sh's python3 fallback no longer uses the XACA-1070-022 null-safe sort key"
+# XACA-1070-025 (PR #865 round 3): the null-safe lambda sort key was
+# replaced by a named _order_sort_key() helper that additionally ranks by
+# JSON type (see that subitem's fix) -- update this anchor to match rather
+# than pin the superseded one-liner, which no longer exists verbatim.
+grep -qF "def _order_sort_key(t):" "$MANDATORY_TEAMS_SH" || _block_note_fail "mandatory-teams.sh's python3 fallback no longer defines the XACA-1070-025 type-ranked sort key helper"
+grep -qF "mandatory.sort(key=_order_sort_key)" "$MANDATORY_TEAMS_SH" || _block_note_fail "mandatory-teams.sh's python3 fallback no longer calls the XACA-1070-025 sort key helper"
 grep -qF 'XACA1070_BAD_COUNT' "$MANDATORY_TEAMS_SH" || _block_note_fail "mandatory-teams.sh's python3 fallback no longer emits the XACA-1070-022 malformed-entry sentinel Section P asserts on"
 _block_end
 
@@ -771,8 +776,13 @@ fi
 _has_board_fn="$(_extract_fn _xaca1070_mandatory_team_has_board "$UPGRADE_SH")"
 _update_mandatory_fn="$(_extract_fn update_mandatory_teams "$UPGRADE_SH")"
 _add_to_config_fn_for_e="$(_extract_fn _xaca1070_add_team_to_config "$UPGRADE_SH")"
+# BLOCKING A (second symptom): see Section N's identical comment -- extract
+# this too, or the eval'd update_mandatory_teams below calls an undefined
+# function (non-fatal via its own `|| true`, but a spurious "command not
+# found" pollutes captured output).
+_add_wd_to_config_fn_for_e="$(_extract_fn _xaca1070_add_team_working_dir_to_config "$UPGRADE_SH")"
 
-if [ -z "$_has_board_fn" ] || [ -z "$_update_mandatory_fn" ] || [ -z "$_add_to_config_fn_for_e" ]; then
+if [ -z "$_has_board_fn" ] || [ -z "$_update_mandatory_fn" ] || [ -z "$_add_to_config_fn_for_e" ] || [ -z "$_add_wd_to_config_fn_for_e" ]; then
     test_start "SECTION E setup: extract upgrade.sh backfill functions"
     test_fail "one or more extractions produced no output -- cannot run Section E"
 else
@@ -820,6 +830,7 @@ EOF
           . "$CONFIG_SH"
           eval "$_has_board_fn"
           eval "$_add_to_config_fn_for_e"
+          eval "$_add_wd_to_config_fn_for_e"
           eval "$_update_mandatory_fn"
           LIBEXEC_DIR="$libexec_dir"
           AITEAMFORGE_CONFIG="$team_paths"
@@ -1674,6 +1685,22 @@ if [ -n "$_lcars_snippet" ]; then
 $_lcars_snippet
 }"
 
+    # XACA-1070-027 (PR #865 round 3 review): the carve-out now gates on
+    # `atf_is_mandatory_team` (matching carve-outs 1 and 2) instead of
+    # `[ -n "$_clt" ]`, so this harness must provide that function. It
+    # cannot reuse _x1070_mk_reg_sandbox's AITEAMFORGE_HOME-pointed registry
+    # trick the way Section J's harness does: this subshell ALSO needs
+    # AITEAMFORGE_HOME="$TAP_ROOT" so install-kanban.sh/share/lcars-ui
+    # resolve against the REAL tap checkout, and the real tap's own
+    # share/teams/registry.json would then win priority 1 of
+    # _atf_mandatory_teams_registry_path over any sandboxed one -- making
+    # this test depend on whatever the checkout's live registry.json
+    # happens to say. A minimal inline stub isolates exactly what this
+    # section means to test (does the carve-out correctly call and gate on
+    # atf_is_mandatory_team) from registry resolution, which Section A
+    # already covers on its own.
+    atf_is_mandatory_team() { [ "$1" = "widget" ]; }
+
     _run_lcars_carveout() {
         local profile="$1" install_dir="$2"; shift 2
         ( BOLD=""; NC=""; YELLOW=""
@@ -1726,6 +1753,25 @@ $_lcars_snippet
     _k5_dir="$SANDBOX/k5-install-dir"; mkdir -p "$_k5_dir"
     _run_lcars_carveout full "$_k5_dir" widget
     assert_file_not_exists "$_k5_dir/lcars-ui/server.py" "full-profile installs must not go through this cockpit-only carve-out at all"
+    _block_end
+
+    # XACA-1070-027 (PR #865 round 3 review): this
+    # carve-out used to gate on `[ -n "$_clt" ]` -- "is this slot
+    # non-empty" -- instead of `atf_is_mandatory_team`, unlike carve-outs 1
+    # (persona/avatar copy, Section J) and 2 (team-install loop, per-
+    # iteration guard). K1-K5 above all pass "widget" (which THIS
+    # harness's atf_is_mandatory_team stub recognizes as mandatory), so
+    # none of them can distinguish the old `[ -n ]` gate from the fixed
+    # `atf_is_mandatory_team` gate -- both agree on "widget". K6 uses
+    # "alpha", which the SAME stub does NOT recognize as mandatory, to
+    # actually separate the two: pre-fix, `[ -n "$_clt" ]` is true for
+    # "alpha" too (any non-empty string) and an LCARS instance would be
+    # created for a non-mandatory team on cockpit; post-fix,
+    # atf_is_mandatory_team alpha is false and nothing is created.
+    _block_start "K6: cockpit + a NON-mandatory but non-empty team ('alpha') in SELECTED_TEAMS (hypothetical upstream regression) -> LCARS instance is NOT created (XACA-1070-027)"
+    _k6_dir="$SANDBOX/k6-install-dir"; mkdir -p "$_k6_dir"
+    _run_lcars_carveout cockpit "$_k6_dir" alpha
+    assert_file_not_exists "$_k6_dir/lcars-ui/server.py" "a non-mandatory team reaching SELECTED_TEAMS on cockpit must gain NOTHING from this carve-out, even though the slot is non-empty (pre-fix: [ -n \"\$_clt\" ] alone would have created one)"
     _block_end
 fi
 
@@ -1851,8 +1897,15 @@ fi
 _has_board_fn_n="$(_extract_fn _xaca1070_mandatory_team_has_board "$UPGRADE_SH")"
 _update_mandatory_fn_n="$(_extract_fn update_mandatory_teams "$UPGRADE_SH")"
 _add_to_config_fn_n="$(_extract_fn _xaca1070_add_team_to_config "$UPGRADE_SH")"
+# BLOCKING A (second symptom): update_mandatory_teams() now also calls
+# _xaca1070_add_team_working_dir_to_config -- extract it too, or this
+# section's eval'd copy of update_mandatory_teams calls an undefined
+# function (caught by its own `|| true`, so non-fatal, but it pollutes
+# $_n_out with a spurious "command not found" and leaves .team_paths
+# unbackfilled where N3 below expects it).
+_add_wd_to_config_fn_n="$(_extract_fn _xaca1070_add_team_working_dir_to_config "$UPGRADE_SH")"
 
-if [ -z "$_has_board_fn_n" ] || [ -z "$_update_mandatory_fn_n" ] || [ -z "$_add_to_config_fn_n" ]; then
+if [ -z "$_has_board_fn_n" ] || [ -z "$_update_mandatory_fn_n" ] || [ -z "$_add_to_config_fn_n" ] || [ -z "$_add_wd_to_config_fn_n" ]; then
     test_start "SECTION N setup: extract upgrade.sh backfill functions"
     test_fail "one or more extractions produced no output -- cannot run Section N"
 else
@@ -1901,6 +1954,7 @@ EOF
         . "$CONFIG_SH"
         eval "$_has_board_fn_n"
         eval "$_add_to_config_fn_n"
+        eval "$_add_wd_to_config_fn_n"
         eval "$_update_mandatory_fn_n"
         LIBEXEC_DIR="$_n_libexec_dir"
         AITEAMFORGE_DIR="$_n_work"
@@ -2193,6 +2247,91 @@ assert_eq "$_out_jq_p2" "widget" "sanity: jq branch expected exactly 'widget' (t
 assert_eq "$_out_py_p2" "widget" "python3 fallback expected exactly 'widget' too, got: $_out_py_p2"
 assert_contains "$(cat "$_err_jq_p2")" 'has 1 "mandatory": true entry with no usable "id"' "sanity: jq branch expected the malformed-entry diagnostic wording"
 assert_contains "$(cat "$_err_py_p2")" 'has 1 "mandatory": true entry with no usable "id"' "python3 fallback expected the SAME malformed-entry diagnostic wording (pre-fix: silent, no diagnostic at all), got: $(cat "$_err_py_p2")"
+_block_end
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION Q -- XACA-1070-025 (PR #865 round 3 review): mixed "order" TYPES
+# (a string on one mandatory entry, a number on another) must not diverge
+# between the jq and python3 branches the way -022's null/null case did.
+#
+# THE BUG (pre-fix): `t.get('order') or 0` (the -022 fix) only substitutes
+# 0 for None/absent/falsy -- a present, non-falsy "order" of a DIFFERENT
+# type on each of two mandatory entries reaches list.sort() with a str key
+# on one and an int key on the other. Python 3 raises TypeError comparing
+# str/int with no default ordering, caught by the same blanket
+# `except Exception: sys.exit(2)`, and misreported as "not valid JSON" --
+# the exact same failure SHAPE -022 fixed, reached through a type -022's
+# fix does not cover. jq's `sort_by` does not have this problem: jq's type
+# ordering places numbers before strings regardless of value (MEASURED
+# directly against this repo's jq: order:"1" (string) vs order:2 (number)
+# sorts the NUMBER entry first).
+# ═══════════════════════════════════════════════════════════════════════════
+
+REG_MIXED_ORDER_TYPES='{"version":"1.0.0","teams":[{"id":"gizmo","name":"Gizmo","order":"1","mandatory":true},{"id":"widget","name":"Widget","order":2,"mandatory":true},{"id":"alpha","name":"Alpha","order":9}]}'
+
+_block_start "Q1: atf_mandatory_teams -- order:\"1\" (string) vs order:2 (number) on two mandatory entries -- python3 fallback matches jq's type-ranked ordering (XACA-1070-025)"
+_reg_dir_q1="$(_x1070_mk_reg_sandbox mixed-order-q1 "$REG_MIXED_ORDER_TYPES")"
+_err_jq_q1="$SANDBOX/q1-jq.err"
+_out_jq_q1="$(_x1070_run_resolver "$_reg_dir_q1" atf_mandatory_teams 2>"$_err_jq_q1")"; _rc_jq_q1=$?
+_err_py_q1="$SANDBOX/q1-py.err"
+_out_py_q1="$(
+    {
+        PATH="$_jqfree_bin"
+        export PATH
+        unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+        # shellcheck disable=SC1091
+        . "$_reg_dir_q1/libexec/lib/mandatory-teams.sh"
+        atf_mandatory_teams
+    } 2>"$_err_py_q1"
+)"; _rc_py_q1=$?
+assert_eq "$_rc_jq_q1" "0" "sanity: jq branch expected exit 0, got $_rc_jq_q1 (stderr: $(cat "$_err_jq_q1"))"
+assert_eq "$_out_jq_q1" "$(printf 'widget\ngizmo')" "sanity: jq ranks a NUMBER order before a STRING order regardless of value -- expected widget (order:2, number) then gizmo (order:\"1\", string), got: $_out_jq_q1"
+assert_eq "$_rc_py_q1" "0" "python3 fallback expected exit 0 (pre-fix this was 2 -- a TypeError comparing a str order key against an int order key, misreported as 'not valid JSON'), got $_rc_py_q1 (stderr: $(cat "$_err_py_q1"))"
+assert_eq "$_out_py_q1" "$_out_jq_q1" "python3 fallback must produce the IDENTICAL id list (same ids, same type-ranked order) as the jq branch on this registry, got: $_out_py_q1"
+assert_empty "$(cat "$_err_py_q1")" "no malformed entries in this fixture -- python3 fallback must NOT emit a bad-id diagnostic here, got: $(cat "$_err_py_q1")"
+_block_end
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION R -- XACA-1070-029 (PR #865 round 3 review): atf_team_has_board()
+# must check for the SPECIFIC team's own board file, never any "*-board.json"
+# in the directory.
+#
+# THE BUG (pre-fix): the glob `"$kdir"/*-board.json` returns 0 (true) the
+# moment ANY file matching that pattern exists, regardless of which team it
+# belongs to. Two teams sharing a kanban_dir (multiple teams under one
+# working dir, or a mis-resolved kanban_dir) makes atf_team_has_board
+# report "has a board" for a team that has none of its own, as long as
+# SOME *-board.json sits in that directory. REPRODUCED directly below:
+# with only "academy-board.json" present, atf_team_has_board for "widget"
+# must be FALSE.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_block_start "R1: atf_team_has_board -- another team's board in the SAME directory must NOT satisfy this team's check (XACA-1070-029)"
+_r1_kdir="$SANDBOX/r1-kanban"
+mkdir -p "$_r1_kdir"
+: > "$_r1_kdir/academy-board.json"
+_r1_reg="$(_x1070_mk_reg_sandbox board-glob-r1 "$REG_EMPTY" true)"
+_r1_res="$(
+    ( unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+      # shellcheck disable=SC1091
+      . "$_r1_reg/libexec/lib/mandatory-teams.sh"
+      aiteamforge_team_kanban_dir() { [ -n "$1" ] && printf '%s' "$_r1_kdir"; }
+      if atf_team_has_board widget; then echo "TRUE"; else echo "FALSE"; fi
+    )
+)"
+assert_eq "$_r1_res" "FALSE" "atf_team_has_board widget must be FALSE when only academy-board.json exists in the shared directory (pre-fix: the *-board.json glob matched it and returned TRUE), got: $_r1_res"
+_block_end
+
+_block_start "R2 (negative control): atf_team_has_board -- the team's OWN board file still satisfies the check"
+_r2_res="$(
+    ( unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+      # shellcheck disable=SC1091
+      . "$_r1_reg/libexec/lib/mandatory-teams.sh"
+      aiteamforge_team_kanban_dir() { [ -n "$1" ] && printf '%s' "$_r1_kdir"; }
+      if atf_team_has_board academy; then echo "TRUE"; else echo "FALSE"; fi
+    )
+)"
+assert_eq "$_r2_res" "TRUE" "atf_team_has_board academy must still be TRUE for its own academy-board.json -- the fix must not break the true-positive case, got: $_r2_res"
 _block_end
 
 # ─────────────────────────────────────────────────────────────────────────────

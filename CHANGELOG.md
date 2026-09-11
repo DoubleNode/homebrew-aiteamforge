@@ -6,6 +6,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1070 (PR #865 review, round 3)** — one blocking defect and five findings
+  from both gate bots.
+  **BLOCKING: two rails disagreed about where a mandatory team lives.** Root cause
+  was in `install-team.sh`: `_read_conf` re-emits whatever the team conf hardcodes
+  for `TEAM_WORKING_DIR`, silently discarding a caller's env override the instant
+  its `eval` runs. Measured — `/tmp/FAKE/spacedock` passed in, the conf's own
+  `$HOME/.aiteamforge/spacedock` came back out. Combined with the Step-2 working-dir
+  loop sitting inside the `!= cockpit` block, `aiteamforge_team_kanban_dir`
+  (team-paths.json rail, used by this ticket's doctor check and backfill) returned
+  the correct path while `get_kanban_dir` (`.aiteamforge-config` rail, used by the
+  doctor, the kanban-helpers template, statusline, kb-init-team, board-check and
+  restore-helper) returned a NONEXISTENT one with rc=0 — never falling through to
+  its default. On the non-cockpit path `_xaca1070_add_team_to_config` wrote
+  `.teams[]` but never `.team_paths`, so upgrade-backfilled boxes hit a hard
+  `validate-install` FAIL whose suggested remedy does not fix it. Fixed by
+  capturing the caller override before the eval, plus a new
+  `_xaca1070_add_team_working_dir_to_config()` that records `.team_paths` without
+  ever overwriting an existing entry. This is the same class as the parity defect
+  this ticket already fixed once — two components with different answers to "where
+  is this team."
+  **XACA-1070-025:** jq/python3 still diverged when `order` was a string on one
+  entry and a number on another — `t.get('order') or 0` leaves a string untouched,
+  Python's sort raises `TypeError` on `str`/`int`, and it was caught and
+  misreported as "not valid JSON". The identical shape XACA-1070-022 was written
+  to close, on a type that fix missed. Verified against a genuinely jq-free PATH
+  (a complete symlinked toolset, with `command -v jq` asserted empty inside the
+  test): both branches now return `rc=0 [gizmo widget]`.
+  **XACA-1070-026:** the cockpit and `UPGRADE_HYDRATED` branches both skip the
+  working-dir loop, reaching XACA-1070-021's half-configured state through two
+  doors its tests did not cover. Folded into the blocking fix.
+  **XACA-1070-027:** the cockpit LCARS carve-out gated on `[ -n "$_clt" ]` — "is
+  this slot non-empty" — rather than `atf_is_mandatory_team`, unlike the other two
+  carve-outs. A non-empty slot is not the same fact as "mandatory". Now matches
+  both, including their fail-closed behaviour: an unreadable registry on a cockpit
+  box means "no LCARS instance", never "install one for everything".
+  **XACA-1070-028:** `validate-install.sh`'s cockpit arm asserted three passes that
+  became false once cockpit started provisioning a mandatory team, and skipped that
+  team's board check.
+  **XACA-1070-029:** `atf_team_has_board` globbed `*-board.json`, so ANY team's
+  board satisfied ANY team's check — verified: with only `academy-board.json`
+  present, `atf_team_has_board widget` returned true. This is the primitive
+  extracted precisely so two callers could not disagree; sharing made them
+  consistent, not correct, and both were then wrong identically.
+  Tests 84 -> 88. Verified under `/bin/bash` 3.2.57.
 - XACA-1155: fix the knowledge-entry id allocator (`_kb_alloc_slot` and eight
   sibling enumeration sites) so it stops handing out `k1000` forever once a
   directory's highest entry passes id 999. The scan glob required EXACTLY 3

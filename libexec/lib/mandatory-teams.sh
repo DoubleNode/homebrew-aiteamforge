@@ -254,6 +254,34 @@ atf_mandatory_teams() {
     # stable (Timsort), matching jq's `sort_by` stability, so two entries
     # that tie at 0 keep their original registry order in BOTH branches.
     #
+    # XACA-1070-025 (PR #865 round 3 review): Bug 1's `or 0` fix above only
+    # handles the null/absent case — it leaves a NON-null, NON-falsy "order"
+    # untouched, whatever its type. A registry with "order" a STRING on one
+    # mandatory entry and a NUMBER on another (both valid JSON, both
+    # genuinely present) survives `or 0` unchanged and reaches
+    # `list.sort()` with a str key on one entry and an int key on the
+    # other — Python 3 raises TypeError comparing str/int with no default
+    # ordering, caught by the SAME blanket `except Exception: sys.exit(2)`
+    # below, and misreported as "not valid JSON" exactly like Bug 1's
+    # None/None case (REPRODUCED: rc=1 + the false diagnostic under a
+    # jq-free PATH; jq itself succeeds on the identical registry, printing
+    # both ids). Same failure shape -022 fixed, reached through the type
+    # -022 did not cover.
+    #
+    # Fix: rank by JSON TYPE first, value second — jq's `sort_by` does this
+    # implicitly (jq's type ordering places numbers before strings,
+    # regardless of value; MEASURED: {"order":"1"} vs {"order":2} sorts the
+    # number-order entry FIRST, i.e. "2" before "1" as a STRING would read —
+    # jq is comparing types, not numeric/lexical value). `_order_sort_key`
+    # below reproduces that: rank 0 for numbers (None/absent already
+    # coalesced to the number 0 by `or 0`), rank 1 for strings, rank 2 for
+    # anything else (list/dict — no realistic registry produces these, but
+    # a rank is still owed so sort() never sees mixed incomparable types
+    # again). Two entries in the SAME rank compare their raw values exactly
+    # as before (numeric compare for numbers, lexical for strings) —
+    # unchanged for every registry that was already working correctly
+    # under both branches.
+    #
     # Bug 2 — malformed-entry diagnostic: the jq branch (above) separately
     # counts "mandatory": true entries with no usable "id" and warns to
     # stderr; this branch had no equivalent, so the exact same malformed
@@ -277,7 +305,27 @@ try:
     # XACA-1070-022: `or 0` -- not `.get('order', 0)` -- so a present-but-
     # null "order" ties at 0 exactly like jq's `.order // 0`, instead of
     # staying None and blowing up list.sort()'s pairwise comparison.
-    mandatory.sort(key=lambda t: t.get('order') or 0)
+    #
+    # XACA-1070-025: `or 0` alone still leaves a present, non-falsy "order"
+    # untouched -- a STRING on one mandatory entry and a NUMBER on another
+    # (both valid) reach sort() with incomparable key types and raise
+    # TypeError. Rank by JSON type first (numbers before strings, matching
+    # the type ordering jq itself already applies -- MEASURED), raw value
+    # second, so two entries of the SAME type still compare exactly as
+    # before.
+    def _order_sort_key(t):
+        order = t.get('order') or 0
+        if isinstance(order, bool):
+            # jq: false < true, both before numbers/strings.
+            return (0, int(order))
+        if isinstance(order, (int, float)):
+            return (1, order)
+        if isinstance(order, str):
+            return (2, order)
+        # list/dict or anything else -- no realistic registry produces this,
+        # but still needs a rank so sort() never sees mixed types again.
+        return (3, str(order))
+    mandatory.sort(key=_order_sort_key)
     bad = 0
     for t in mandatory:
         tid = t.get('id')
@@ -371,6 +419,22 @@ EOF
 # predicate would re-invoke the installer on every mandatory team, every
 # upgrade, forever — see that call site's own header comment). Only the
 # board-evidence HALF is common to both; that is all this factors out.
+#
+# XACA-1070-029 (PR #865 round 3 review): this used to glob "$kdir"/*-board.json
+# and return 0 on ANY match — so a team whose kanban_dir happens to be a
+# directory SHARED with other teams' boards (e.g. multiple teams installed
+# under one working dir, or a mis-resolved kanban_dir from BLOCKING A/-026)
+# reports "has a board" for a team that has none of its own, as long as
+# SOME *-board.json sits in that directory. REPRODUCED: with only
+# "academy-board.json" present in $kdir, `atf_team_has_board widget`
+# returned 0 (true). This primitive was factored out (XACA-1070-017)
+# precisely so atf_team_provisioned() and the upgrade backfill could not
+# disagree about "does this team have a board" — a glob that answers for
+# the WRONG team defeats that purpose identically in both callers: sharing
+# the primitive made them consistent, not correct, and now both would be
+# wrong in the same way. Fixed to check for the SPECIFIC team's own board
+# file by exact name, never a wildcard match against whatever else the
+# directory contains.
 # ─────────────────────────────────────────────────────────────────────────────
 atf_team_has_board() {
     local team_id="$1"
@@ -381,11 +445,7 @@ atf_team_has_board() {
     kdir="$(aiteamforge_team_kanban_dir "$team_id" 2>/dev/null)" || return 1
     [ -n "$kdir" ] && [ -d "$kdir" ] || return 1
 
-    local f
-    for f in "$kdir"/*-board.json; do
-        [ -f "$f" ] && return 0
-    done
-    return 1
+    [ -f "${kdir}/${team_id}-board.json" ]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -105,6 +105,89 @@ fi
 # errexit never fires, while `_mand_rc` still captures the real code so the
 # empty-vs-unreadable distinction from the return-code contract isn't lost.
 # ═══════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════
+# _atf_resolve_team_defaults <team_id>  (XACA-1070-021/026, PR #865 round 3
+# review, BLOCKING A + subitem -026)
+#
+# BLOCKING A / -026: cockpit and UPGRADE_HYDRATED both populate SELECTED_TEAMS
+# through branches of the Step 2 if/elif/else that never reach the per-team
+# working-dir/project/client prompt loop (that loop lives textually INSIDE
+# the interactive `else` only — see the loop's own header comment and the
+# "fi  # end: if INSTALL_PROFILE != cockpit (team selection block)" line that
+# closes it). A mandatory team force-appended into either branch by
+# _atf_apply_mandatory_teams' CALL SITE 2 (the UPGRADE_HYDRATED/cockpit
+# safety net) therefore reaches every downstream consumer with NONE of
+# _WORKDIR_<team>, _PROJECT_<team>, _CLIENT_<team> set.
+#
+# Every one of those consumers used to paper over the gap with its own copy
+# of the SAME wrong guess, `${INSTALL_DIR}/${team_id}` — wrong because it
+# ignores the team's own conf-declared TEAM_WORKING_DIR entirely. Every team
+# conf in share/teams/*.conf hardcodes an absolute, install-dir-independent
+# TEAM_WORKING_DIR (e.g. spacedock.conf: "$HOME/.aiteamforge/spacedock" —
+# deliberately per-machine, not per-install; academy.conf: "$HOME/academy").
+# install-team.sh's own _read_conf() (PR #865 round 3 review, BLOCKING A)
+# re-sources that SAME conf file and — for an unparameterized team — ends up
+# right back at the conf's own TEAM_WORKING_DIR regardless of what env value
+# a caller passed in. So the `${INSTALL_DIR}/${team_id}` guess used here
+# NEVER matched what install-team.sh actually decided, and neither did the
+# `.aiteamforge-config` team_paths entry serialized from that same guess —
+# two independent computations of "where does this team live," silently
+# disagreeing, which is this ticket's own recurring defect shape (see
+# mandatory-teams.sh's atf_team_has_board() header comment, XACA-1070-017).
+#
+# THE FIX: single-source the guess. Read the SAME conf file install-team.sh
+# itself will read, so both sides derive the working dir from ONE place
+# instead of two. For a project/client-requiring team with none captured,
+# fall back to TEAM_DEFAULT_PROJECT and the literal "default-client" — the
+# EXACT convention XACA-1070-021 already established for the interactive
+# blank-Client-ID case a mandatory team cannot be skipped by (see that
+# subitem's comment a few hundred lines below) — reused here rather than
+# invented a second time, so cockpit/UPGRADE_HYDRATED and "user pressed
+# enter through every prompt" produce identical instance ids. Without this,
+# a future TEAM_HAS_PROJECTS=true/TEAM_REQUIRES_CLIENT_ID=true mandatory team
+# reaching install-team.sh via either of these two doors with no --project/
+# --client flags and no TTY to prompt on hard-`exit 1`s at
+# compute_instance_id()'s own validation (install-team.sh's client/project
+# resolution) — confirmed by reading that function; O1 (cockpit) and O2
+# (UPGRADE_HYDRATED) are exactly the two doors that skip the loop which
+# would otherwise have supplied those flags.
+#
+# Sets three globals (no stdout — safe to call inside a `$( )` command
+# substitution without capturing stray output): _ATF_RESOLVED_WORKDIR
+# (always set), _ATF_RESOLVED_PROJECT and _ATF_RESOLVED_CLIENT (empty when
+# not applicable to this team's conf).
+# ═══════════════════════════════════════════════════════════════════════════
+_atf_resolve_team_defaults() {
+    local team_id="$1"
+    local conf_file="${TEAMS_DIR}/${team_id}.conf"
+    _ATF_RESOLVED_WORKDIR="${INSTALL_DIR}/${team_id}"
+    _ATF_RESOLVED_PROJECT=""
+    _ATF_RESOLVED_CLIENT=""
+    [ -f "$conf_file" ] || return 0
+
+    local has_projects requires_client working_dir default_project
+    has_projects="$(grep '^TEAM_HAS_PROJECTS=' "$conf_file" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+    requires_client="$(grep '^TEAM_REQUIRES_CLIENT_ID=' "$conf_file" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+    working_dir="$(grep '^TEAM_WORKING_DIR=' "$conf_file" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+    working_dir="${working_dir/\$HOME/$HOME}"
+    [ -n "$working_dir" ] || working_dir="${INSTALL_DIR}/${team_id}"
+
+    if [ "$requires_client" = "true" ]; then
+        default_project="$(grep '^TEAM_DEFAULT_PROJECT=' "$conf_file" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+        _ATF_RESOLVED_CLIENT="default-client"
+        _ATF_RESOLVED_PROJECT="${default_project}"
+        _ATF_RESOLVED_WORKDIR="${working_dir}/${_ATF_RESOLVED_CLIENT}/${_ATF_RESOLVED_PROJECT}"
+    elif [ "$has_projects" = "true" ]; then
+        default_project="$(grep '^TEAM_DEFAULT_PROJECT=' "$conf_file" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+        _ATF_RESOLVED_PROJECT="${default_project}"
+        _ATF_RESOLVED_WORKDIR="${working_dir}/${_ATF_RESOLVED_PROJECT}"
+    else
+        _ATF_RESOLVED_WORKDIR="$working_dir"
+    fi
+    return 0
+}
+
 _atf_apply_mandatory_teams() {
   if command -v atf_mandatory_teams >/dev/null 2>&1; then
     _mand_out="" ; _mand_rc=0
@@ -1685,9 +1768,21 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
   _wdir_var="_WORKDIR_${team_id}"
   _proj_var="_PROJECT_${team_id}"
   _client_var="_CLIENT_${team_id}"
-  team_work_dir="${!_wdir_var:-${INSTALL_DIR}/${team_id}}"
-  team_project="${!_proj_var:-}"
-  team_client="${!_client_var:-}"
+  # BLOCKING A / XACA-1070-026: when the Step 2 working-dir loop never ran
+  # for this team (cockpit / UPGRADE_HYDRATED — see _atf_resolve_team_defaults'
+  # own header comment above), fall back to the SAME conf-derived defaults
+  # install-team.sh itself will independently arrive at, instead of the old
+  # install-dir-relative guess that always disagreed with it.
+  if [ -z "${!_wdir_var:-}" ]; then
+    _atf_resolve_team_defaults "$team_id"
+    team_work_dir="$_ATF_RESOLVED_WORKDIR"
+    team_project="${!_proj_var:-$_ATF_RESOLVED_PROJECT}"
+    team_client="${!_client_var:-$_ATF_RESOLVED_CLIENT}"
+  else
+    team_work_dir="${!_wdir_var}"
+    team_project="${!_proj_var:-}"
+    team_client="${!_client_var:-}"
+  fi
   # XACA-0643: forward the project/client captured during team selection to
   # install-team.sh. Without --project, parameterized templates (finance,
   # legal, medical, freelance) silently fall back to TEAM_DEFAULT_PROJECT and
@@ -1742,19 +1837,32 @@ if [ ${#_stale_teams[@]} -gt 0 ]; then
   echo -e "  Regenerating from current templates (v${_CURRENT_TAP_VERSION})..."
   for _stale_team in "${_stale_teams[@]}"; do
     _wdir_var="_WORKDIR_${_stale_team}"
-    _stale_wdir="${!_wdir_var:-${INSTALL_DIR}/${_stale_team}}"
+    _proj_var="_PROJECT_${_stale_team}"
+    _client_var="_CLIENT_${_stale_team}"
     # XACA-0845: forward project/client here too. XACA-0643 fixed only the
     # SELECTED_TEAMS install loop above; this regeneration pass still called
     # install-team.sh bare, so a parameterised team silently fell back to
     # TEAM_DEFAULT_PROJECT and regenerated the WRONG instance (legal-default
     # rather than the live legal-coparenting) — one of the ways stray
-    # "-default" instances got manufactured. Flags are appended ONLY when set,
+    # "-default" instances got manufactured.
+    # BLOCKING A / XACA-1070-026: same conf-derived fallback as the
+    # SELECTED_TEAMS install loop above, for a mandatory team whose
+    # _WORKDIR_/_PROJECT_/_CLIENT_ were never set (cockpit / UPGRADE_HYDRATED
+    # skip the Step 2 loop entirely). Flags are appended ONLY when non-empty,
     # because install-team.sh REJECTS them for TEAM_HAS_PROJECTS=false teams.
-    _proj_var="_PROJECT_${_stale_team}"
-    _client_var="_CLIENT_${_stale_team}"
+    if [ -z "${!_wdir_var:-}" ]; then
+      _atf_resolve_team_defaults "$_stale_team"
+      _stale_wdir="$_ATF_RESOLVED_WORKDIR"
+      _stale_proj="${!_proj_var:-$_ATF_RESOLVED_PROJECT}"
+      _stale_client="${!_client_var:-$_ATF_RESOLVED_CLIENT}"
+    else
+      _stale_wdir="${!_wdir_var}"
+      _stale_proj="${!_proj_var:-}"
+      _stale_client="${!_client_var:-}"
+    fi
     _stale_param_flags=()
-    [ -n "${!_proj_var:-}" ]   && _stale_param_flags+=(--project "${!_proj_var}")
-    [ -n "${!_client_var:-}" ] && _stale_param_flags+=(--client "${!_client_var}")
+    [ -n "$_stale_proj" ]   && _stale_param_flags+=(--project "$_stale_proj")
+    [ -n "$_stale_client" ] && _stale_param_flags+=(--client "$_stale_client")
     if [ -x "${INSTALLERS_DIR}/install-team.sh" ]; then
       echo -e "  ${CYAN}Regenerating: ${_stale_team}${NC}"
       AITEAMFORGE_DIR="${INSTALL_DIR}" TEAM_WORKING_DIR="${_stale_wdir}" \
@@ -1867,10 +1975,30 @@ fi
 #     is a complete no-op: no lcars-ui/ directory is created at all,
 #     matching cockpit's existing behavior for every box with no
 #     mandatory team.
+#
+#   * XACA-1070-027 (PR #865 round 3 review): this carve-out used to gate
+#     on `[ -n "$_clt" ]` — "is this slot non-empty" — instead of
+#     `atf_is_mandatory_team`, unlike carve-outs 1 (persona/avatar copy,
+#     ~line 1590) and 2 (team-install loop, ~line 1681), both of which
+#     explicitly re-verify mandatory-team membership per iteration as
+#     belt-and-suspenders against a future regression, rather than leaning
+#     solely on "SELECTED_TEAMS holds ONLY mandatory ids on cockpit by
+#     construction" above. A non-empty slot is not the same fact as
+#     "mandatory" — relying on it here made this the one carve-out of the
+#     three that would silently install an LCARS instance for a
+#     non-mandatory id if that invariant were ever violated upstream.
+#     Fixed to match carve-outs 1 and 2 exactly, including their fail-
+#     closed behavior: `atf_is_mandatory_team` returns 1 (false) on an
+#     unreadable registry, so an unreadable registry on a cockpit box
+#     means "no LCARS instance," never "install one for everything."
 # -----------------------------------------------------------------------
 _cockpit_has_mandatory_team="false"
 for _clt in "${SELECTED_TEAMS[@]}"; do
-  [ -n "$_clt" ] && _cockpit_has_mandatory_team="true" && break
+  [ -n "$_clt" ] || continue
+  if command -v atf_is_mandatory_team >/dev/null 2>&1 && atf_is_mandatory_team "$_clt"; then
+    _cockpit_has_mandatory_team="true"
+    break
+  fi
 done
 if [ "$INSTALL_PROFILE" = "cockpit" ] && [ "$_cockpit_has_mandatory_team" = "true" ]; then
   echo -e "${BOLD}Installing LCARS instance for mandatory team(s) (cockpit mode)...${NC}"
@@ -2083,7 +2211,18 @@ if [ "$INSTALL_KANBAN" = "yes" ]; then
     _team_dirs=""
     for _tid in "${SELECTED_TEAMS[@]}"; do
       [ -z "$_tid" ] && continue
-      _twvar="_WORKDIR_${_tid}"; _tw="${!_twvar:-${INSTALL_DIR}/${_tid}}"
+      _twvar="_WORKDIR_${_tid}"
+      # BLOCKING A / XACA-1070-026: conf-derived fallback, not the old
+      # install-dir-relative guess (see _atf_resolve_team_defaults' header
+      # comment) — reached on UPGRADE_HYDRATED for a mandatory team with no
+      # _WORKDIR_ set (cockpit never reaches this block: INSTALL_KANBAN
+      # stays "no" there).
+      if [ -z "${!_twvar:-}" ]; then
+        _atf_resolve_team_defaults "$_tid"
+        _tw="$_ATF_RESOLVED_WORKDIR"
+      else
+        _tw="${!_twvar}"
+      fi
       _team_dirs="${_team_dirs}${_tid}:${_tw} "
     done
     (
@@ -2237,19 +2376,37 @@ cat > "${INSTALL_DIR}/.aiteamforge-config" <<EOF
   "team_paths": {$(
     for _tid in "${SELECTED_TEAMS[@]}"; do
       [ -z "$_tid" ] && continue
-      _pvar="_PROJECT_${_tid}"; _proj="${!_pvar:-}"
-      # PR #865 review, BLOCKING 1 (second symptom): fall back to
-      # ${INSTALL_DIR}/${_tid} exactly like the sibling _team_dirs
-      # serializer a few dozen lines up in the kanban-install block (and
-      # the install-team.sh loop's own team_work_dir fallback) — a team
-      # force-appended via _atf_apply_mandatory_teams' call site 2 (the
-      # UPGRADE_HYDRATED/cockpit safety net) never runs through the Step 2
-      # working-dir loop, so _WORKDIR_<team> is never set for it and this
-      # would otherwise serialize as "working_dir": "". Call site 1 (the
-      # interactive path) DOES run the working-dir loop for a
-      # newly-appended mandatory team, so this fallback is a no-op there.
-      _wvar="_WORKDIR_${_tid}"; _wdir="${!_wvar:-${INSTALL_DIR}/${_tid}}"
-      _cvar="_CLIENT_${_tid}"; _client="${!_cvar:-}"
+      _pvar="_PROJECT_${_tid}"
+      _wvar="_WORKDIR_${_tid}"
+      _cvar="_CLIENT_${_tid}"
+      # PR #865 review, BLOCKING A (round 3) / -026: a team force-appended via
+      # _atf_apply_mandatory_teams' call site 2 (the UPGRADE_HYDRATED/cockpit
+      # safety net) never runs through the Step 2 working-dir loop, so
+      # _WORKDIR_<team> (and _PROJECT_/_CLIENT_) are never set for it. This
+      # USED to fall back to "${INSTALL_DIR}/${_tid}" here — an
+      # install-dir-relative guess that disagrees with what install-team.sh
+      # itself independently derives from the team's own conf file (every
+      # conf hardcodes an absolute, install-dir-independent TEAM_WORKING_DIR;
+      # see spacedock.conf's "per-machine, not per-install" comment), so
+      # .aiteamforge-config's team_paths entry and the real on-disk board
+      # location silently disagreed — exactly the "two rails" defect PR #865
+      # round 3 review flagged (BLOCKING A). Fixed by deriving from the SAME
+      # conf file via _atf_resolve_team_defaults (see its own header comment,
+      # defined near the top of this file), single-sourcing the guess instead
+      # of maintaining a second, independent one here. Call site 1 (the
+      # interactive path) DOES run the working-dir loop for a newly-appended
+      # mandatory team, so this fallback is a no-op there (the `-z` guard
+      # below never fires).
+      if [ -z "${!_wvar:-}" ]; then
+        _atf_resolve_team_defaults "$_tid"
+        _wdir="$_ATF_RESOLVED_WORKDIR"
+        _proj="${!_pvar:-$_ATF_RESOLVED_PROJECT}"
+        _client="${!_cvar:-$_ATF_RESOLVED_CLIENT}"
+      else
+        _wdir="${!_wvar}"
+        _proj="${!_pvar:-}"
+        _client="${!_cvar:-}"
+      fi
       if [ -n "$_client" ] && [ -n "$_proj" ]; then
         printf '"%s": {"working_dir": "%s", "client_id": "%s", "project_id": "%s"},' "$_tid" "$_wdir" "$_client" "$_proj"
       elif [ -n "$_proj" ]; then

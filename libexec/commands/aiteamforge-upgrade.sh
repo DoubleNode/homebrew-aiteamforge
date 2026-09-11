@@ -1373,11 +1373,15 @@ _xaca1070_mandatory_team_has_board() {
   kdir="$(aiteamforge_team_kanban_dir "$team_id" 2>/dev/null)" || return 1
   [ -n "$kdir" ] && [ -d "$kdir" ] || return 1
 
-  local f
-  for f in "$kdir"/*-board.json; do
-    [ -f "$f" ] && return 0
-  done
-  return 1
+  # XACA-1070-029: exact-match the SPECIFIC team's own board file, mirroring
+  # the fix to the primary atf_team_has_board() copy this fallback exists
+  # alongside (see that function's own header comment in
+  # libexec/lib/mandatory-teams.sh) -- a "*-board.json" glob here would
+  # report true for ANY team sharing this directory's board files, not just
+  # this one. In normal operation this whole fallback is unreachable (see
+  # this function's own header comment above); kept correct anyway so it
+  # cannot silently reintroduce the bug it was written alongside a fix for.
+  [ -f "${kdir}/${team_id}-board.json" ]
 }
 
 # _xaca1070_add_team_to_config <team_id>
@@ -1635,6 +1639,267 @@ PYEOF
   return 1
 }
 
+# _xaca1070_add_team_working_dir_to_config <team_id>
+#
+# PR #865 round 3 review, BLOCKING A (second symptom): _xaca1070_add_team_to_config
+# above registers a backfilled mandatory team in .teams[] but has NEVER
+# touched .team_paths (deliberately -- see that function's own header
+# comment: it is a narrow, single-key surgical edit by design, and stays
+# that way here rather than being widened). Without a .team_paths entry,
+# get_kanban_dir() (libexec/lib/kanban-paths.sh) -- the .aiteamforge-config
+# rail every non-Academy consumer of a team's kanban dir reads (doctor's
+# board-resolution check, the kanban-helpers.sh template, statusline,
+# kb-init-team, board-check, restore-helper) -- falls all the way through
+# its candidate chain to the SHARED install-dir default
+# (${HOME}/aiteamforge/kanban), which is not this team's board at all. The
+# OTHER rail, aiteamforge_team_kanban_dir() (aiteamforge-paths.sh, backing
+# atf_team_has_board() and this ticket's own doctor check), already
+# resolves correctly for a backfilled team via its OVERLAY/DEFAULT_TEAMS
+# tiers -- so this is the single source of truth to backfill FROM, not a
+# third independent computation of "where does this team live" alongside
+# the two BLOCKING A already found disagreeing.
+#
+# This is therefore intentionally a SEPARATE, equally narrow function
+# rather than an expansion of _xaca1070_add_team_to_config: one function
+# per top-level config key it edits, matching that function's own stated
+# rationale for staying narrow, and keeping each edit's blast radius (and
+# this file's diff, if either is ever reverted) independent of the other.
+#
+# SAFETY CONTRACT (identical to _xaca1070_add_team_to_config's, see its
+# header comment for the full rationale -- repeated only where it differs):
+#   - NEVER overwrites an existing .team_paths.<team_id> entry -- if the
+#     key is already present (however it got there), this is a no-op. Only
+#     a TRULY ABSENT entry is backfilled.
+#   - Missing/unparseable config, missing python3, absent-or-malformed
+#     .team_paths key (not a JSON object), or a working dir that could not
+#     be resolved from aiteamforge_team_working_dir() -> WARN AND SKIP,
+#     never create/guess/overwrite.
+#   - Atomic (tempfile + os.replace), re-parsed and diffed against the
+#     expected result before it is allowed near disk; any mismatch aborts
+#     with the original file untouched.
+#   - A depth-aware (string-and-escape-aware) scan locates the top-level
+#     "team_paths": {...} object's exact span -- same container_depth_before()
+#     technique _xaca1070_add_team_to_config uses for "teams", extended
+#     here to find a matching CLOSING BRACE (an object, not a flat array)
+#     rather than a closing bracket. Every other byte of the file,
+#     including every OTHER team's .team_paths entry and the .teams[]
+#     array's own formatting, is left untouched -- this only ever appends
+#     one new key into that one object's existing text.
+#
+# NOTE FOR EDITORS: no apostrophes anywhere in the here-doc body below (see
+# _xaca1070_add_team_to_config's own note above this one -- XACA-0845: a
+# here-doc nested inside $( ) is NOT opaque under bash 3.2, so one stray
+# single quote breaks the WHOLE file's parse, reported nowhere near here).
+_xaca1070_add_team_working_dir_to_config() {
+  local team_id="$1"
+  [ -n "$team_id" ] || return 1
+
+  local config_file
+  config_file="$(get_config_file)"
+
+  if [ ! -f "$config_file" ]; then
+    print_warning "XACA-1070: .aiteamforge-config not found (${config_file}) -- cannot register a team_paths working_dir for '${team_id}'."
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    print_warning "XACA-1070: python3 not found -- cannot safely update .team_paths for '${team_id}'; leaving ${config_file} untouched (will retry next upgrade)."
+    return 1
+  fi
+
+  if ! command -v aiteamforge_team_working_dir >/dev/null 2>&1; then
+    print_warning "XACA-1070: aiteamforge_team_working_dir() unavailable -- cannot determine a working_dir to backfill for '${team_id}'; leaving .team_paths untouched (will retry next upgrade)."
+    return 1
+  fi
+
+  local working_dir
+  working_dir="$(aiteamforge_team_working_dir "$team_id" 2>/dev/null)" || working_dir=""
+  if [ -z "$working_dir" ]; then
+    print_warning "XACA-1070: could not resolve a working_dir for '${team_id}' via aiteamforge_team_working_dir() -- leaving .team_paths untouched (will retry next upgrade)."
+    return 1
+  fi
+
+  local _xaca1070wd_out _xaca1070wd_rc=0
+  _xaca1070wd_out="$(python3 - "$config_file" "$team_id" "$working_dir" <<'PYEOF' 2>&1
+import json
+import os
+import re
+import sys
+import tempfile
+
+config_path = sys.argv[1]
+team_id = sys.argv[2]
+working_dir = sys.argv[3]
+
+try:
+    with open(config_path, "r", encoding="utf-8") as fh:
+        raw = fh.read()
+except OSError as exc:
+    print("could not read " + config_path + ": " + str(exc))
+    sys.exit(1)
+
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError as exc:
+    print(config_path + " is not valid JSON: " + str(exc))
+    sys.exit(1)
+
+if not isinstance(data, dict):
+    print(config_path + " root is not a JSON object -- refusing to touch it")
+    sys.exit(1)
+
+team_paths = data.get("team_paths")
+if team_paths is None:
+    print("the .team_paths key is absent -- refusing to guess the intended shape; leaving config untouched")
+    sys.exit(2)
+if not isinstance(team_paths, dict):
+    print("the .team_paths key is present but is not a JSON object -- refusing to touch it")
+    sys.exit(2)
+
+if team_id in team_paths:
+    print("already present in .team_paths -- no-op")
+    sys.exit(0)
+
+def container_depth_before(text, pos):
+    depth = 0
+    in_string = False
+    escape = False
+    i = 0
+    while i < pos:
+        c = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif c == chr(92):
+                escape = True
+            elif c == chr(34):
+                in_string = False
+        else:
+            if c == chr(34):
+                in_string = True
+            elif c in "{[":
+                depth += 1
+            elif c in "}]":
+                depth -= 1
+        i += 1
+    return depth
+
+pattern = re.compile("(" + chr(34) + "team_paths" + chr(34) + "\\s*:\\s*)\\{")
+top_level_matches = [
+    candidate
+    for candidate in pattern.finditer(raw)
+    if container_depth_before(raw, candidate.start()) == 1
+]
+
+if len(top_level_matches) == 0:
+    print("the top-level .team_paths key literal text could not be located -- refusing to guess; leaving config untouched")
+    sys.exit(3)
+if len(top_level_matches) > 1:
+    print("more than one top-level .team_paths key literal text was found -- refusing to guess which one is real; leaving config untouched")
+    sys.exit(3)
+
+m = top_level_matches[0]
+start_brace = m.end() - 1
+
+depth = 0
+in_string = False
+escape = False
+i = start_brace
+end_brace = None
+while i < len(raw):
+    c = raw[i]
+    if in_string:
+        if escape:
+            escape = False
+        elif c == chr(92):
+            escape = True
+        elif c == chr(34):
+            in_string = False
+    else:
+        if c == chr(34):
+            in_string = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end_brace = i
+                break
+    i += 1
+
+if end_brace is None:
+    print("could not find the matching closing brace for .team_paths -- refusing to guess; leaving config untouched")
+    sys.exit(3)
+
+inner = raw[start_brace + 1:end_brace]
+new_entry = json.dumps(team_id) + ": {" + json.dumps("working_dir") + ": " + json.dumps(working_dir) + "}"
+
+if inner.strip() == "":
+    new_inner = new_entry
+else:
+    new_inner = inner.rstrip() + "," + new_entry
+
+new_raw = raw[:start_brace + 1] + new_inner + raw[end_brace:]
+
+try:
+    check = json.loads(new_raw)
+except json.JSONDecodeError as exc:
+    print("internal error: rewritten config failed to re-parse (" + str(exc) + ") -- aborting, original left untouched")
+    sys.exit(1)
+
+check_tp = check.get("team_paths") or {}
+if check_tp.get(team_id, {}).get("working_dir") != working_dir:
+    print("internal error: rewritten .team_paths entry does not match the expected result -- aborting, original left untouched")
+    sys.exit(1)
+
+other_before = {k: v for k, v in data.items() if k != "team_paths"}
+other_after = {k: v for k, v in check.items() if k != "team_paths"}
+if other_before != other_after:
+    print("internal error: rewrite changed a key outside .team_paths -- aborting, original left untouched")
+    sys.exit(1)
+
+tp_before = {k: v for k, v in team_paths.items() if k != team_id}
+tp_after = {k: v for k, v in check_tp.items() if k != team_id}
+if tp_before != tp_after:
+    print("internal error: rewrite changed an existing .team_paths entry -- aborting, original left untouched")
+    sys.exit(1)
+
+target_dir = os.path.dirname(os.path.abspath(config_path)) or "."
+tmp_fd, tmp_path = tempfile.mkstemp(prefix=".aiteamforge-config-xaca1070wd-", dir=target_dir)
+try:
+    with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+        f.write(new_raw)
+    try:
+        original_mode = os.stat(config_path).st_mode
+        os.chmod(tmp_path, original_mode & 0o7777)
+    except OSError:
+        pass
+    os.replace(tmp_path, config_path)
+except Exception as exc:
+    print("could not write " + config_path + ": " + str(exc))
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    sys.exit(1)
+
+print("added team_paths." + team_id + ".working_dir=" + working_dir + " to " + config_path)
+sys.exit(0)
+PYEOF
+  )" || _xaca1070wd_rc=$?
+
+  if [ "$_xaca1070wd_rc" -eq 0 ]; then
+    case "$_xaca1070wd_out" in
+      *"no-op"*) ;;  # already registered — nothing worth logging
+      *) print_success "XACA-1070: ${_xaca1070wd_out}" ;;
+    esac
+    return 0
+  fi
+
+  print_warning "XACA-1070: could not register a .team_paths working_dir for '${team_id}' (${_xaca1070wd_out}). get_kanban_dir() will fall back to the shared install-dir default until this is resolved; will retry next upgrade."
+  return 1
+}
+
 update_mandatory_teams() {
   print_section "Backfilling Mandatory Fleet Teams"
 
@@ -1693,6 +1958,12 @@ update_mandatory_teams() {
       # fail-soft — never blocks the rest of this loop.
       if [ "$DRY_RUN" != true ]; then
         _xaca1070_add_team_to_config "$team" || true
+        # BLOCKING A (second symptom): same idempotent healing as .teams[]
+        # above, for .team_paths -- a team backfilled before this function
+        # existed (or on an earlier tap version) can be missing its
+        # working_dir entry indefinitely otherwise. Never overwrites an
+        # existing entry (see that function's own header comment).
+        _xaca1070_add_team_working_dir_to_config "$team" || true
       fi
       continue
     fi
@@ -1723,6 +1994,16 @@ update_mandatory_teams() {
       # registration failure here does not undo the successful provision or
       # abort the loop; it retries next upgrade.
       _xaca1070_add_team_to_config "$team" || true
+      # BLOCKING A (second symptom): install-team.sh (just run above) also
+      # never writes .aiteamforge-config's .team_paths -- only
+      # bin/aiteamforge-setup.sh's wizard does, once, at original install
+      # time. Without this, get_kanban_dir() (the .aiteamforge-config rail
+      # every non-Academy consumer reads) falls through to the shared
+      # install-dir default instead of this team's real board, exactly the
+      # "two rails disagree" defect this ticket's PR #865 round 3 review
+      # found. Sourced from aiteamforge_team_working_dir() -- the rail that
+      # already resolves correctly for this team -- not re-derived here.
+      _xaca1070_add_team_working_dir_to_config "$team" || true
     else
       print_warning "Failed to provision mandatory team '${team}' (continuing; non-fatal — will retry next upgrade)"
       failed=$((failed + 1))

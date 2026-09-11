@@ -188,6 +188,27 @@ _read_conf() {
     )
 }
 
+# PR #865 round 3 review, BLOCKING A: capture any CALLER-supplied
+# TEAM_WORKING_DIR env override BEFORE the eval below clobbers it.
+# `_read_conf` sources the team conf in a subshell and its own `printf
+# 'TEAM_WORKING_DIR=%q\n' "${TEAM_WORKING_DIR:-}"` line always re-emits
+# whatever the CONF FILE ITSELF sets (every share/teams/*.conf hardcodes an
+# absolute TEAM_WORKING_DIR unconditionally) — silently discarding a
+# caller's env override the instant that line's own `eval` below runs.
+# Measured: TEAM_WORKING_DIR=/tmp/FAKE/spacedock passed in, but
+# $HOME/.aiteamforge/spacedock (spacedock.conf's own hardcoded value) came
+# back out, regardless of what the caller asked for.
+#
+# This was invisible for TEAM_HAS_PROJECTS=true teams only because XACA-0485
+# (below, ~line 1050) already works around it independently for THEM by
+# re-deriving the project/client-augmented working dir from --project/
+# --client CLI args rather than trusting this env var at all. Unparameterized
+# teams (has_projects=false — every mandatory team today, and most ordinary
+# teams) had no equivalent workaround: a caller-supplied override was simply
+# unreachable for them.
+# ATF_ENV_TEAM_WORKING_DIR is that caller intent, preserved across the eval.
+ATF_ENV_TEAM_WORKING_DIR="${TEAM_WORKING_DIR:-}"
+
 # Import conf values into the current shell via eval.
 eval "$(_read_conf "$TEAM_CONF")"
 
@@ -1027,8 +1048,22 @@ if [[ "$TEAM_HAS_PROJECTS" == "true" ]]; then
         TEAM_WORKING_DIR="${TEAM_BASE_WORKING_DIR}/${_XACA0485_RESOLVED_PROJECT}"
     fi
 else
-    # Unparameterized teams: just normalize the conf value with $HOME expansion.
-    TEAM_WORKING_DIR="$TEAM_BASE_WORKING_DIR"
+    # PR #865 round 3 review, BLOCKING A: unparameterized teams get the same
+    # "explicit caller intent wins" contract XACA-0485 above already gives
+    # parametric teams via --project/--client — here via the env override
+    # captured into ATF_ENV_TEAM_WORKING_DIR before _read_conf's eval
+    # clobbered TEAM_WORKING_DIR (see that capture's own header comment).
+    # Falls back to the conf's own value when no override was given, which is
+    # every call site as of this writing (bin/aiteamforge-setup.sh now derives
+    # its env value from this SAME conf file via _atf_resolve_team_defaults,
+    # so the two agree either way) — this closes the mechanism gap for any
+    # caller that legitimately needs to differ (e.g. a sandboxed
+    # TEST_TMP_DIR-relative install) rather than silently discarding it.
+    if [[ -n "$ATF_ENV_TEAM_WORKING_DIR" ]]; then
+        TEAM_WORKING_DIR="${ATF_ENV_TEAM_WORKING_DIR/\$HOME/$HOME}"
+    else
+        TEAM_WORKING_DIR="$TEAM_BASE_WORKING_DIR"
+    fi
 fi
 
 # ============================================================================

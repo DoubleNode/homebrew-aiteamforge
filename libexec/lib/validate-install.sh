@@ -638,11 +638,42 @@ validate_installation() {
         # Cockpit profile: skip team dirs, LCARS server, shell integration,
         # fleet monitor, and LaunchAgents — they are not installed by design.
         # Instead validate cockpit-critical components.
-        _val_section "Teams"
-        _val_pass "Team directories (not installed — cockpit profile)"
+        #
+        # XACA-1070-028 (PR #865 round 3 review): that used to be an
+        # unconditional truth for EVERY cockpit install. Since XACA-1070's
+        # "Cockpit mandatory-team LCARS instance" carve-out
+        # (bin/aiteamforge-setup.sh), a cockpit box with a mandatory team
+        # actually DOES get that team's directory (install-team.sh runs
+        # unconditionally for it) and an LCARS UI instance (install_lcars_ui
+        # + configure_lcars_port, narrowed to "cockpit + a mandatory team was
+        # force-appended") — so the two blind `_val_pass` lines below became
+        # false for exactly that case, and this branch never checked the
+        # mandatory team's board at all. Route to the SAME real check
+        # functions the non-cockpit branch below already uses whenever there
+        # is actually something on disk to check; only fall back to the
+        # blind pass when there genuinely is nothing (today's real state
+        # until a mandatory team ships, and any cockpit box with none
+        # declared). `_val_check_teams` reads .teams[] itself, which on
+        # cockpit can only ever contain mandatory ids by construction — no
+        # separate mandatory-team lookup is needed here to decide whether to
+        # route; the presence of ANY team in .teams[] already answers it.
+        local _val_cockpit_team_count=0
+        if command -v jq &>/dev/null && [ -f "${install_dir}/.aiteamforge-config" ]; then
+            _val_cockpit_team_count="$(jq '[.teams[]? // empty] | length' "${install_dir}/.aiteamforge-config" 2>/dev/null || echo 0)"
+        fi
+        if [ "${_val_cockpit_team_count:-0}" -gt 0 ]; then
+            _val_check_teams "$install_dir"   # prints its own "Team Directories" section
+        else
+            _val_section "Teams"
+            _val_pass "Team directories (not installed — cockpit profile, no mandatory team declared)"
+        fi
 
-        _val_section "LCARS Kanban UI"
-        _val_pass "LCARS server (not installed — cockpit profile; runs on remote host)"
+        if [ -d "${install_dir}/lcars-ui" ]; then
+            _val_check_lcars "$install_dir"   # prints its own "LCARS Kanban UI" section
+        else
+            _val_section "LCARS Kanban UI"
+            _val_pass "LCARS server (not installed — cockpit profile; runs on remote host)"
+        fi
 
         _val_check_python_venv "$install_dir"
 
