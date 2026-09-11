@@ -505,8 +505,14 @@ _spd_check_kb_sweep_stubs() {
     case "$rc" in
         0) _spd_emit "kb-sweep-stubs" "ok" "no stubs found" "$out" "$rc" ;;
         1)
+            # PR #869 review: `// "unknown"` only covers a MISSING key. If the
+            # payload is not parseable JSON at all, jq fails, $total is EMPTY,
+            # and the summary renders as " stub(s) found" with a blank count.
+            # Fall back explicitly so the finding always states a count or says
+            # it could not read one.
             local total
             total=$(printf '%s' "$out" | jq -r '.total // "unknown"' 2>/dev/null)
+            [ -n "$total" ] || total="an unreported number of"
             _spd_emit "kb-sweep-stubs" "warn" "$total stub(s) found" "$out" "$rc"
             ;;
         2) _spd_emit "kb-sweep-stubs" "unknown" "usage/environment error" "$out" "$rc" ;;
@@ -542,12 +548,36 @@ _spd_check_auto_upgrade_log() {
         return
     fi
     last_complete=$(printf '%s\n' "$after" | grep '===== auto-upgrade complete' | tail -1)
+    # XACA-1071 PR #869 review (BLOCKING fix): the failure arm previously read
+    # `*FAILED*|*BLOCKED*`, which does NOT match `(PARTIAL FAILURE -- working dir
+    # NOT refreshed)` -- "FAILURE" does not contain the substring "FAILED". That
+    # marker is auto-upgrade.sh's deliberate `exit 1` path for "the Cellar moved
+    # but the installed files did NOT refresh", i.e. a box running STALE CODE and
+    # not knowing it. Reporting that as `ok` is exactly the false green this whole
+    # script exists to prevent, and the same class as XACA-0585.
+    #
+    # The `unknown` default matters MORE than adding *FAILURE*. auto-upgrade.sh
+    # can grow an eighth marker at any time, and an unrecognised marker must fail
+    # toward "look at this", never toward "healthy" -- the posture the rest of
+    # this script takes everywhere. Enumerate the KNOWN-GOOD markers positively
+    # and let everything else fall to unknown; do not re-invert this into a
+    # denylist of bad ones.
+    #
+    # The marker list is a CONTRACT with scripts/auto-upgrade.sh, mirrored in
+    # docs/spacedock-diagnostic-inventory.md and
+    # docs/spacedock-incidents/02-stalled-auto-upgrade.md. If they disagree, the
+    # docs are right and this code is stale (see this file's header rule).
     case "$last_complete" in
-        *FAILED*|*BLOCKED*)
+        *FAILED*|*FAILURE*|*BLOCKED*)
             _spd_emit "auto-upgrade-log" "warn" "last run ended: $last_complete" "$after" ""
             ;;
-        *)
+        *'complete ====='|*'(no-op)'*|*'(held by pin'*|*'(SKIPPED'*)
             _spd_emit "auto-upgrade-log" "ok" "last run: $last_complete" "" ""
+            ;;
+        *)
+            _spd_emit "auto-upgrade-log" "unknown" \
+                "unrecognised completion marker (not in the known-good set) -- inspect it: $last_complete" \
+                "$after" ""
             ;;
     esac
 }
@@ -1216,7 +1246,11 @@ _spd_worst_severity() {
 #           as if `triage` (which files findings) had run. Defaults to
 #           "triage" only as a defensive fallback if ever called without it.
 _spd_report() {
-    local cmd="${1:-triage}"
+    # PR #869 review: default to the NON-filing label. Both call sites pass this
+    # explicitly today so the default is unreachable, but if one ever stops, a
+    # header reading "triage" on a run that filed nothing is the more misleading
+    # of the two errors.
+    local cmd="${1:-report}"
     echo "==================================================================="
     echo "kb-spacedock $cmd — host: $SPD_HOST — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "==================================================================="
