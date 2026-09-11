@@ -6738,19 +6738,37 @@ FRONTMATTER
         # re-opens the XACA-0818 collision. Left in place, the filename-only
         # structural checks see exactly what the first run saw, and the two
         # runs differ only in whose CONTENT is validated:
-        #   1. A [FAIL] line from the first run names the new file (content
-        #      errors cite the path; duplicate-slot errors list the files):
-        #      the new entry is at fault.
+        #   1. A [FAIL] line from the first run cites the new file: content
+        #      errors by its full path, duplicate-slot errors by "in <its own
+        #      directory> — files: ... <its name> ...". Matching the bare name
+        #      alone is NOT enough — the output covers the whole tree, and a
+        #      same-named file in ANOTHER directory's duplicate group would blame
+        #      (and delete) a valid entry. The new entry is at fault.
         #   2. Otherwise re-validate with --file on a DIFFERENT existing entry
         #      (this directory first, then its sibling directories). Clean now:
         #      the failure came from the new entry's content.
         #   3. Still failing, or nothing to compare against: the defect is not
         #      attributable to this write. Keep the entry, warn, return 0.
         #      Discarding is reserved for an established fault.
-        local _kb_add_blame=false
-        if printf '%s\n' "$_kb_add_validate_output" | grep -F '[FAIL]' | grep -qF -- "${new_file:t}"; then
-            _kb_add_blame=true
-        else
+        local _kb_add_blame=false _kb_add_line _kb_add_d _kb_add_files
+        for _kb_add_line in "${(@f)_kb_add_validate_output}"; do
+            [[ "$_kb_add_line" == *"[FAIL]"* ]] || continue
+            if [[ "$_kb_add_line" == *"${new_file}"* ]]; then
+                _kb_add_blame=true
+                break
+            fi
+            # Both spellings of the directory: new_file carries the allocator's
+            # `cd && pwd` form, target_dir the caller's.
+            for _kb_add_d in "${new_file:h}" "${target_dir%/}"; do
+                [[ "$_kb_add_line" == *" in ${_kb_add_d} — files: "* ]] || continue
+                _kb_add_files=" ${_kb_add_line##* — files: } "
+                if [[ "$_kb_add_files" == *" ${new_file:t} "* ]]; then
+                    _kb_add_blame=true
+                    break 2
+                fi
+            done
+        done
+        if [[ "$_kb_add_blame" != "true" ]]; then
             local _kb_add_ref="" _kb_add_dir _kb_add_cand
             for _kb_add_dir in "$target_dir" "${target_dir:h}"/*; do
                 [[ -d "$_kb_add_dir" ]] || continue
@@ -6795,6 +6813,10 @@ FRONTMATTER
     if [[ "${KB_KNOWLEDGE_OPEN_AFTER_ADD:-0}" == "1" ]] && [[ -n "${EDITOR:-}" ]]; then
         "${EDITOR}" "$new_file"
     fi
+    # XACA-1155: the entry exists at this point, so the function must report
+    # success — without this, a non-zero $EDITOR exit (or any future trailing
+    # command) became the function's status, breaking "rc!=0 => nothing new".
+    return 0
 }
 
 # Promote a knowledge entry from one tier to another
