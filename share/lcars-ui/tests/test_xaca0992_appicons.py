@@ -1076,6 +1076,12 @@ class TestPathPrefixesMembership(unittest.TestCase):
     EXPECTED_FIXED_PREFIXES = {
         '/academy', '/firebase', '/dns', '/command', '/ios', '/android',
         '/mainevent', '/legal-coparenting', '/medical-general', '/finance-personal',
+        # XACA-1069: Space Dock. This set is a hand-maintained MIRROR of
+        # server.LCARSHandler.PATH_PREFIXES — one fact with two writers, which is
+        # exactly what this test exists to catch. Adding a fixed prefix there
+        # without adding it here fails this test by design; that is the gate
+        # working, not a broken test. Keep the two in lockstep.
+        '/spacedock',
     }
 
     def test_fixed_prefixes_match_exactly(self):

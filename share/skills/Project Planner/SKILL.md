@@ -344,7 +344,7 @@ grep -rl "<pattern>" <dir> | wc -l
 
 Then state the number **and** how you got it, so a reader can re-run it:
 
-> 69 personas (`find .claude/agents-master -name '*.md' | wc -l`)
+> 80 personas (`find .claude/agents-master -name '*.md' | wc -l`)
 
 **Why this is mandatory.** An asserted count is a *grounding* failure, not a reasoning failure — it is not fixed by more thinking or a bigger model, only by looking. It is also self-concealing: a plausible number attracts no scrutiny, propagates into subitems, verification checklists, and the docs those subitems rewrite, and surfaces only when someone finally counts.
 

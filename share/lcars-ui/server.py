@@ -255,6 +255,12 @@ def _hardcoded_team_kanban_dirs() -> dict:
         "legal-coparenting": _home / "legal" / "coparenting" / "kanban",
         "medical-general": _home / "medical" / "general" / "kanban",
         "finance-personal": _home / "finance" / "personal" / "kanban",
+        # XACA-1069: Space Dock is a fixed, single-instance team (like academy/
+        # command/dns), but its kanban dir is per-machine and repo-less (like
+        # the personal templates above) rather than living under a git repo —
+        # see docs/architecture/team-id-contract.md. Not parameterized, so it
+        # is NOT in _PARAMETERIZED_TEMPLATES and needs no instance suffix.
+        "spacedock": _home / ".aiteamforge" / "spacedock" / "kanban",
     }
 
 
@@ -398,6 +404,12 @@ def _build_item_prefix_to_team() -> dict:
         'XDNS': 'dns',
         'XMEV': 'mainevent',
         'XMED': 'medical-general',
+        # XACA-1069: fixed single-instance team, same tier as XACA/XCMD/XDNS.
+        # Mirrors aiteamforge_paths.py's DEFAULT_TEAMS entry (XACA-1068) so this
+        # fallback — reached only when aiteamforge_paths is unavailable — still
+        # resolves XSDK-prefixed ids. ONE entry only: XACA-1068 and XACA-1069 each
+        # added one at a different line, which git merged CLEANLY into two entries
+        # in this same dict. Python silently keeps the last. Do not re-add.
         'XSDK': 'spacedock',
         # Freelance per-client/project prefixes (XFSW/XFAP/.../XBWA/XBWD) are NOT
         # listed here — they live only in the per-machine overlay (XACA-0628). The
@@ -1791,6 +1803,7 @@ _BASE_BRAND_SHORT_NAMES = {
     'finance': 'Finance',
     'mainevent': 'MainEvent',
     'freelance': 'Freelance',
+    'spacedock': 'Space Dock',
 }
 
 # XACA-0992: hard cap enforced on the FALLBACK path only (a base brand not
@@ -3818,7 +3831,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # hardcoded subset. The strip loop is order-independent (startswith match).
     PATH_PREFIXES = (
         ['/academy', '/firebase', '/dns', '/command', '/ios', '/android',
-         '/mainevent', '/legal-coparenting', '/medical-general', '/finance-personal']
+         '/mainevent', '/legal-coparenting', '/medical-general', '/finance-personal',
+         '/spacedock']
         + sorted(
             '/' + _t for _t in TEAM_KANBAN_DIRS
             if _t.startswith('freelance-')
@@ -6713,6 +6727,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         main_event_base = Path("/Users/Shared/Development/Main Event")
 
         # Static team base paths (Main Event platform teams and infrastructure)
+        # XACA-1069: spacedock is deliberately NOT added here, matching the
+        # existing precedent of finance-personal/legal-coparenting/
+        # medical-general (also absent). This dict is only reached at
+        # PRIORITY 3, below, for a team NOT already resolved by
+        # TEAM_KANBAN_DIRS at PRIORITY 1 — and spacedock IS in
+        # TEAM_KANBAN_DIRS (via _hardcoded_team_kanban_dirs() above, or
+        # dynamically once XACA-1068 registers it in DEFAULT_TEAMS), so
+        # PRIORITY 1 always wins for it first. Adding it here would be dead
+        # code with no reachable caller.
         team_base_paths = {
             'academy': Path.home() / "dev-team" / "kanban",
             'ios': main_event_base / "MainEventApp-iOS" / "DEV" / "dev-team" / "kanban",
@@ -9372,6 +9395,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # XACA-0628: per-client/project freelance slugs are NOT listed here — they
     # resolve via the registry/overlay-derived _TEAM_TO_CODE map in
     # _get_team_code(). Only the generic 'freelance' (FRE) stays.
+    # XACA-1069: spacedock deliberately NOT added here, matching the existing
+    # precedent of finance-personal/legal-coparenting/medical-general (also
+    # absent). _get_team_code() below falls through to _TEAM_TO_CODE before
+    # ever reaching the multi-segment heuristic, so this hardcoded table needs
+    # no entry for it.
+    #
+    # NOTE the two distinct "registries" — do not conflate them (they were
+    # conflated in an earlier draft of this comment). _TEAM_TO_CODE is built by
+    # build_team_code_map() in kanban-hooks/aiteamforge_paths.py, which merges
+    # DEFAULT_TEAMS team_codes with the team-paths.json overlay. It does NOT
+    # read homebrew-tap/share/teams/registry.json, which carries no `code`
+    # field on any entry at all. spacedock resolves to SDK because XACA-1068
+    # registered it in DEFAULT_TEAMS and the overlay — not because of anything
+    # this ticket adds to registry.json.
     TEAM_CODES = {
         "ios": "IOS",
         "android": "AND",

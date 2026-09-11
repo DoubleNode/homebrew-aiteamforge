@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1173: Mirror the 14 files where develop's canonical copy was newer than the tap, or
+  missing from it. Direction was established from blob history, not timestamps: for each
+  file, the tap's old copy appears in a commit already on develop. The files are
+  XACA-1069's `share/lcars-ui/` changes (`server.py`, `index.html`, `css/lcars.css`,
+  `js/lcars.js`, `tests/test_xaca0992_appicons.py`), the 7 Space Dock app icons under
+  `share/lcars-ui/images/appicons/spacedock/`, and XACA-1122's `share/scripts/kb-tap-release`
+  and `docs/LOCKSTEP-CHECK.md`. Also mirrors `share/skills/Project Planner/SKILL.md`, whose
+  worked example now counts 80 personas. Three drifted files are intentionally left alone:
+  `share/scripts/lcars-launch-helpers.sh` and `deploy-worktree-personas.sh` (XACA-0931) and
+  `share/scripts/register-claude-hook.py` (XACA-0787). The tap is ahead of develop for those,
+  and their newer content exists only on unmerged PR branches.
 - XACA-1164: Mirror the Space Dock and Strange New Worlds (SNW) crew art. Under
   `fleet-monitor/server/public/avatars/`: the 5 Space Dock terminal logos and 8 SNW
   terminal logos (256px `_logo.png` plus 200px `_logo_panel.png` each), and the 4

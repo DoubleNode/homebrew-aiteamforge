@@ -41,7 +41,7 @@ function getBasePath() {
         '/freelance-doublenode-workstats', '/freelance-doublenode-starwords',
         '/freelance-appplanning', '/freelance-doublenode-appplanning',
         '/command', '/ios', '/android', '/mainevent',
-        '/legal', '/legal-coparenting'
+        '/legal', '/legal-coparenting', '/spacedock'
     ];
 
     for (const prefix of knownPrefixes) {
@@ -1966,7 +1966,7 @@ function renderShipInfo() {
     // Priority 2: Legacy fallback logic for teams without these fields
     if (!displayGroupName) {
         const mainEventTeams = ['command', 'ios', 'android', 'firebase', 'mainevent'];
-        const academyTeams = ['academy'];
+        const academyTeams = ['academy', 'spacedock'];
 
         if (CONFIG.team === 'freelance' && CONFIG.sessionName) {
             const parts = CONFIG.sessionName.split('-');
@@ -6559,7 +6559,8 @@ function getJiraUrl(jiraId) {
 const GITHUB_TEAM_REPOS = {
     academy: 'doublenode/dev-team',
     dns: 'doublenode/dns-framework',
-    freelance: 'doublenode/dev-team'  // Default, can be overridden with full format
+    freelance: 'doublenode/dev-team',  // Default, can be overridden with full format
+    spacedock: 'doublenode/dev-team'  // XACA-1069: Space Dock's personas/scripts/conf all live in dev-team
 };
 
 // Parse GitHub issue and generate URL
@@ -12019,6 +12020,7 @@ const ITEM_PREFIX_TO_TEAM = {
     'XDNS': 'dns',
     'XFRE': 'freelance',
     'XMEV': 'mainevent',
+    'XSDK': 'spacedock',
 };
 
 /**
@@ -18439,7 +18441,8 @@ function applyTeamTheme() {
         'freelance-doublenode-appplanning': { org: '#9999ff', div: '#bb88ee' },  // blue / light violet
 
         // DevTeam Organization (cyan) teams
-        'academy':  { org: '#99ccff', div: '#ffcc99' }   // cyan / peach
+        'academy':   { org: '#99ccff', div: '#ffcc99' },  // cyan / peach
+        'spacedock': { org: '#99ccff', div: '#cc66ff' }   // cyan / violet (XACA-1069). div lightened from #9933ff: it renders as TEXT in the avatar tooltip and #9933ff measured 4.03:1 vs WCAG AA 4.5:1. See the lcars.css --div-spacedock comment.
     };
 
     const team = CONFIG.team || 'ios';
@@ -18454,7 +18457,8 @@ function applyTeamTheme() {
     container.classList.remove(
         'team-ios', 'team-android', 'team-firebase', 'team-command',
         'team-dns', 'team-freelance', 'team-freelance-doublenode-starwords',
-        'team-freelance-doublenode-workstats', 'team-freelance-doublenode-appplanning', 'team-academy'
+        'team-freelance-doublenode-workstats', 'team-freelance-doublenode-appplanning', 'team-academy',
+        'team-spacedock'
     );
     const teamClass = `team-${team}`;
     container.classList.add(teamClass);

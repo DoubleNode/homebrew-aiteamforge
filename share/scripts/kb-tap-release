@@ -4,9 +4,16 @@
 # Usage: kb-tap-release {patch|minor|major} [--dry-run] [--no-push] [--help]
 #
 # Cuts a release of the AITeamForge homebrew tap:
+#   Phase 0: Acquire the tap-writer lock (XACA-1122-008; skipped by --dry-run
+#            and --no-push, which write to no remote). Released on every exit.
 #   Phase 1: Compute new version, edit CHANGELOG.md / VERSION / Formula
 #   Phase 2: Tap inner commit + tag + push (origin main)
 #   Phase 3: Outer pointer bump commit + push (<outer-remote>/develop)
+#
+# This script is one of exactly TWO writers to tap `main`; the other is the
+# post-merge publisher workflow. They serialize against each other through
+# refs/locks/tap-writer in the tap repo — see scripts/kb-tap-lock.sh. A GitHub
+# `concurrency:` group cannot do this job, because it cannot reach a laptop.
 #
 # Outer-remote name: defaults via auto-detect (prefer "origin", fall back to
 # "dev-team") so this works on both standard clones and on the dev-team source
@@ -33,6 +40,8 @@ Flags:
   --dry-run     Print intended actions, write nothing, commit nothing, push nothing.
                 Runs all preconditions; exits 0 if they pass, nonzero if any fail.
   --no-push     Perform local commits + tags but skip both git push calls.
+                Takes NO tap-writer lock (nothing is pushed) — so the manual
+                push you run afterwards is not serialized against the publisher.
   --tap-ahead-release="<reason>"
                 Waiver for preflight #9 when the ONLY drift is TAP-AHEAD (the
                 tap mirror already carries a newer, sanctioned mirror-ahead
@@ -50,6 +59,9 @@ Flags:
   -h, --help    Print this usage and exit 0.
 
 Environment:
+  KB_TAP_RELEASE_LOCK_WAIT      Seconds to wait for the tap-writer lock before
+                                giving up. Default 0 (fail immediately, loudly).
+                                Inspect the lock with scripts/kb-tap-lock.sh status.
   KB_TAP_RELEASE_OUTER_REMOTE   Outer-repo remote name (default: auto-detect —
                                  prefer "origin", fall back to "dev-team").
                                  Tap inner remote is always "origin".
@@ -247,7 +259,42 @@ EOF
 # fresh, properly-randomized temp file.
 rm -f /tmp/kb-tap-release-footer.XXXXXX.py
 FOOTER_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-footer.XXXXXX")
-trap 'rm -f "$FOOTER_SCRIPT"' EXIT INT TERM
+
+# XACA-1122-008: this trap now has TWO jobs. It is the `always()`-equivalent
+# release path for the tap-writer lock — the lock must come off on every exit,
+# including a preflight failure, a mid-phase abort, and Ctrl-C. A lock that is
+# only released on the success path is a lock that wedges the next release cut
+# and the next publisher run the first time anything goes wrong.
+#
+# KB_TAP_LOCK_ACQUIRED is guarded with :- because this trap is installed ~100
+# lines BEFORE that variable exists, and `set -u` is active.
+_kb_tap_release_cleanup() {
+  _cleanup_rc=$?
+  rm -f "$FOOTER_SCRIPT"
+  if [ "${KB_TAP_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+    KB_TAP_LOCK_ACQUIRED=0
+    _rel_rc=0
+    kb_tap_lock_release || _rel_rc=$?
+    if [ "$_rel_rc" -ne 0 ]; then
+      # Do not swallow this. A failed release leaves a lock nobody owns, and the
+      # only thing worse than a stuck lock is a stuck lock nobody was told about.
+      echo "" >&2
+      echo "kb-tap-release: FAILED TO RELEASE THE TAP-WRITER LOCK (exit ${_rel_rc})." >&2
+      echo "kb-tap-release: it will block the next release cut and the next publisher run." >&2
+      echo "kb-tap-release: inspect with 'scripts/kb-tap-lock.sh status' and clear it deliberately." >&2
+      # `if`, not `[ ... ] && ...` — `set -e` is active and a short-circuited
+      # && as a bare statement aborts the trap before it can exit properly
+      # (feedback_set_e_last_line_short_circuit.md).
+      if [ "$_cleanup_rc" -eq 0 ]; then
+        _cleanup_rc="$_rel_rc"
+      fi
+    fi
+  fi
+  # Preserve the original exit status; a trap's own last command must not
+  # become the script's verdict.
+  exit "$_cleanup_rc"
+}
+trap _kb_tap_release_cleanup EXIT INT TERM
 
 cat > "$FOOTER_SCRIPT" <<'PYEOF'
 #!/usr/bin/env python3
@@ -343,6 +390,128 @@ PYEOF
 
 OUTER_DIR="$(pwd)"
 TAP_DIR="${OUTER_DIR}/homebrew-tap"
+
+# ─── tap-writer lock (XACA-1122-008) ─────────────────────────────────────────
+#
+# This script is the SECOND writer to tap `main`. The first is the post-merge
+# publisher workflow (XACA-1122). A GitHub `concurrency:` group cannot serialize
+# the two, because concurrency groups are an Actions-runtime construct and this
+# script runs on a laptop that never enters that runtime. Both writers therefore
+# take the same lock ref in the tap itself. See scripts/kb-tap-lock.sh and
+# design §5.4 / O-8.
+#
+# WHY HERE, BEFORE PREFLIGHT AND NOT JUST BEFORE THE FIRST PUSH: the preflight
+# below asks the remote for facts the release then depends on — the tap
+# drift/direction classification, the tag-collision check against origin, the
+# develop-vs-remote comparison. Those verdicts are only sound while nothing else
+# is writing. Acquiring after them would leave a window in which they went stale
+# between the answer and the act, which is precisely the check-not-a-lock failure
+# this ticket exists to close. The cost is that a run which fails preflight still
+# briefly took the lock; it is released on every exit path by the trap below.
+#
+# --dry-run and --no-push do NOT take the lock: neither writes to any remote.
+# For --no-push that leaves the LATER manual push unprotected — called out loudly
+# at the end of this block rather than papered over, because taking a lock here
+# and releasing it at exit would imply a protection that does not extend to a
+# push a human runs minutes later.
+
+# WHERE kb-tap-lock.sh COMES FROM, AND WHY IT IS NOT SHIPPED (XACA-1122-047).
+#
+# It is resolved from the OUTER DEV CHECKOUT (${OUTER_DIR}/scripts/), with the
+# directory holding this script as a fallback. It is deliberately in NEITHER
+# sync-tap.sh's mirror roster NOR install-kanban.sh, even though THIS script is
+# in both. That is not an oversight; it is the same disposition sync-tap.sh
+# itself and scripts/attribute-tap-drift.sh already have — two other outer-repo
+# files this script reads (preflight #9) that no consumer receives.
+#
+# The reason it costs nothing: a release cut REQUIRES an outer dev checkout by
+# construction. Preconditions 1-5 demand cwd be the outer repo, on develop,
+# clean, up-to-date, with homebrew-tap initialized. Every such tree carries
+# scripts/kb-tap-lock.sh as a tracked file at the same commit as this script,
+# so the dependency is satisfied exactly whenever the release can succeed.
+# Shipping it would satisfy only the fallback branch, and only in trees where
+# the release must fail anyway — while handing every read-only consumer
+# `kb-tap-lock.sh break --force`, whose own banner describes letting a second
+# writer into tap main.
+#
+# What the absence DID cost, until this block was rewritten, was the DIAGNOSIS:
+# this check runs BEFORE preflight (see above), so a consumer copy invoked
+# outside a dev checkout died naming a lock library instead of naming the
+# missing checkout. The branch below reports the cause it can actually
+# establish. It changes no success path — both arms already exit 1 — and it
+# duplicates no preflight CHECK, only preflight's wording.
+LOCK_LIB="${OUTER_DIR}/scripts/kb-tap-lock.sh"
+if [ ! -f "$LOCK_LIB" ]; then
+  LOCK_LIB="$(cd "$(dirname -- "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P)/kb-tap-lock.sh"
+fi
+
+KB_TAP_LOCK_ACQUIRED=0
+
+if [ "$DRY_RUN" -eq 0 ] && [ "$NO_PUSH" -eq 0 ]; then
+  if [ ! -f "$LOCK_LIB" ]; then
+    # Same fact preflight #5 tests, read the same way: a gitlink is a FILE, so
+    # -e rather than -d.
+    if [ ! -e "${TAP_DIR}/.git" ]; then
+      echo "Error: ${OUTER_DIR} is not an initialized outer dev-team checkout" >&2
+      echo "       (no ${TAP_DIR}/.git), so this is not a tree a release can be cut from." >&2
+      echo "       That, not the lock library, is what is missing here. kb-tap-release must be" >&2
+      echo "       run from the outer repo with the homebrew-tap submodule initialized" >&2
+      echo "       (preconditions 1 and 5 — see --help)." >&2
+      echo "       kb-tap-lock.sh is resolved from that checkout's scripts/ and is deliberately" >&2
+      echo "       not installed alongside this script; a release can only be cut from an outer" >&2
+      echo "       dev checkout, which is the same thing preconditions 1 and 5 require." >&2
+    else
+      echo "Error: cannot find kb-tap-lock.sh (looked in ${OUTER_DIR}/scripts/ and next to this script)." >&2
+      echo "       ${TAP_DIR}/.git exists, so this looks like an outer dev-team checkout with a" >&2
+      echo "       tracked file missing. Restore it: git checkout -- scripts/kb-tap-lock.sh" >&2
+    fi
+    echo "       Refusing to release without the tap-writer lock — a release cut that skips it can" >&2
+    echo "       interleave with the post-merge publisher and roll the gitlink backward." >&2
+    exit 1
+  fi
+  # shellcheck source=scripts/kb-tap-lock.sh
+  . "$LOCK_LIB"
+
+  KB_TAP_LOCK_TAP_DIR="$TAP_DIR"
+  export KB_TAP_LOCK_TAP_DIR
+
+  echo ""
+  echo "=== Acquiring the tap-writer lock ==="
+  # `|| LOCK_RC=$?` is required: `set -e` is active and a bare call returning 10
+  # would abort the script before the diagnostics below could print.
+  LOCK_RC=0
+  kb_tap_lock_acquire \
+    "kb-tap-release ${LEVEL} — $(id -un 2>/dev/null || echo unknown)@$(hostname -s 2>/dev/null || echo unknown)" \
+    "${KB_TAP_RELEASE_LOCK_WAIT:-0}" || LOCK_RC=$?
+
+  case "$LOCK_RC" in
+    0)
+      KB_TAP_LOCK_ACQUIRED=1
+      echo "  Held: ${KB_TAP_LOCK_REF} (${KB_TAP_LOCK_HELD_SHA})"
+      echo ""
+      ;;
+    10)
+      echo "" >&2
+      echo "Refusing to release: another writer holds the tap-writer lock (details above)." >&2
+      echo "" >&2
+      echo "  If that is a publisher run, wait for it to finish and re-run — it is short." >&2
+      echo "  To wait automatically instead of failing:" >&2
+      echo "      KB_TAP_RELEASE_LOCK_WAIT=600 kb-tap-release ${LEVEL}" >&2
+      echo "  To inspect the holder at any time:" >&2
+      echo "      scripts/kb-tap-lock.sh status" >&2
+      echo "" >&2
+      exit 1
+      ;;
+    *)
+      echo "" >&2
+      echo "Refusing to release: could not determine the tap-writer lock state (exit ${LOCK_RC})." >&2
+      echo "  This is an environment problem, not a contention finding. Do NOT work around it by" >&2
+      echo "  skipping the lock — an unknown lock state is exactly when an interleave is possible." >&2
+      echo "" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 # ─── preflight ────────────────────────────────────────────────────────────────
 
@@ -627,6 +796,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   if [ "$NO_PUSH" -eq 1 ]; then
     echo "[DRY-RUN] Would push:    (skipped — --no-push)"
   else
+    echo "[DRY-RUN] Would take:    tap-writer lock ${KB_TAP_LOCK_REF:-refs/locks/tap-writer} (released on exit)"
     echo "[DRY-RUN] Would push:    homebrew-tap  origin main + tag v${NEW_VERSION}"
     echo "[DRY-RUN] Would commit:  outer         \"chore: Bump homebrew-tap submodule to v${NEW_VERSION}\""
     echo "[DRY-RUN] Would push:    outer         ${OUTER_REMOTE} develop"
@@ -820,6 +990,14 @@ if [ "$NO_PUSH" -eq 0 ]; then
   PUSHED_NOTE="pushed"
 else
   PUSHED_NOTE="local only (--no-push)"
+  # XACA-1122-008: --no-push writes nothing to any remote, so it takes no lock.
+  # Say so, because the human push that follows is NOT covered by one and can
+  # interleave with a publisher run.
+  echo ""
+  echo "  NOTE: --no-push took no tap-writer lock (nothing was pushed)."
+  echo "        The manual push you run next is NOT serialized against the"
+  echo "        post-merge publisher. Check first:"
+  echo "            scripts/kb-tap-lock.sh status"
 fi
 
 echo "Released v${NEW_VERSION}"

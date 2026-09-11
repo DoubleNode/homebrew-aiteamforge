@@ -6,6 +6,13 @@
 >
 > The filename is retained for now because `docs/homebrew-tap/**` is tap-mirrored and renaming a mirrored file complicates the mirror. The content is current.
 
+> **XACA-1122 — read this before acting on anything below.** The manual **two-step tap cycle is retired for routine content changes.** You no longer run `./sync-tap.sh`, no longer commit inside `homebrew-tap/`, and no longer stage a gitlink bump on a feature branch. A serialized post-merge publisher does all three on every push to `develop`. Two things follow for this page:
+>
+> - Every remedy below that reads "run `./sync-tap.sh` and push the two commits" is a **legacy remedy**. If one of these gates blocks your feature PR, the first question is no longer "how do I mirror this?" but **"why is my feature PR touching the tap at all?"** — under the decouple it should not be.
+> - The gates themselves are unchanged and still authoritative, as are all bypass trailers and labels. What changed is who is expected to satisfy them.
+>
+> The paths this does **not** cover, where the guidance below still applies verbatim: `kb-tap-release` (release cuts), and any deliberate hand push to tap `main`. ⚠️ **PENDING:** tap `main` is not yet protected — `gh api repos/DoubleNode/homebrew-aiteamforge/branches/main/protection` → **404 (branch not protected)**, MEASURED 2026-09-09 — so "only the publisher writes the tap" is a convention, not an enforced guarantee, until XACA-1122-023 lands.
+
 ---
 
 ## Table of Contents
@@ -37,7 +44,7 @@ Find the line in your CI log that matches, then do the thing in the last column.
 | `FAIL: N drifted file(s) COULD NOT BE ATTRIBUTED` | A drifted file's introducing tap commit has no `XACA-NNNN` in its **subject line**. | Fix that commit's subject if it is yours, or apply the `Tap-Only-Edit: intentional` bypass. This is fail-closed on purpose. |
 | `attribute-tap-drift.sh exited 2` | **Environment problem, not a claim about your mirror.** Unresolvable base ref, uninitialized tap checkout, or no `XACA-NNNN` on your branch name or any commit subject. | Read the specific cause in the job log. Usually: put the ticket id in your branch name or a commit subject. |
 | `gitlink <sha> is NOT reachable from the tap's origin/main` | Your `homebrew-tap` pointer is on an unmerged side branch. Merging would pin `develop` to a commit consumers cannot fetch. | Merge that tap branch into tap `main` and push, re-run `./sync-tap.sh`, bump the gitlink to the merged SHA. The error names the containing branches for you. |
-| `gitlink <sha> does not exist in the tap remote` | Step 1 of the two-step cycle was skipped — the inner commit was never pushed. | `cd homebrew-tap && git push origin main`, then re-push the outer pointer commit. |
+| `gitlink <sha> does not exist in the tap remote` | An inner tap commit was never pushed. Post-XACA-1122 this should not arise from a feature PR — if it does, you have a hand-made gitlink bump that does not belong on the branch; drop it. For a release cut or a deliberate hand push, step 1 was skipped. | Feature PR: remove the gitlink bump from your branch. Release/hand push: `cd homebrew-tap && git push origin main`, then re-push the outer pointer commit. |
 | `tap-changelog-completeness` exited 2, "Cannot resolve the inner-tap commit range" | The gate could not see the commits it validates. It refuses to report "nothing to check". | Re-run the job. If it persists, the tap checkout is shallow or the fetch is stale. |
 | `[tap-pre-push] ... REFUSED` on `git push` inside `homebrew-tap/` | You are pushing mirrored content to tap `main` whose canonical is not yet on `develop`, and you did not declare it. | Add the trailer: `git commit --amend --trailer 'Tap-Mirror-Ahead: XACA-NNNN (PR #N)'`. See [the ordering rule](#the-ordering-rule-mirroring-ahead-of-canonical). |
 | `sync-tap drift on the mainline (CANONICAL-AHEAD / DIVERGED / unmirrored)` on a `push: [develop]` | A push landed drift where canonical moved and the tap did not, a file is unmirrored, or the two sides share no derivable history. | Run `./sync-tap.sh`, commit **inside** `homebrew-tap/` and push it, then commit the outer gitlink bump — correct/safe for these three shapes specifically. |
@@ -51,7 +58,7 @@ Find the line in your CI log that matches, then do the thing in the last column.
 
 ## The one thing worth knowing: INHERITED is not a block
 
-The two-step tap workflow lets a session push its inner `homebrew-tap` commit to tap `main` **before** its canonical dev-team change merges to `develop`. From that instant, the tap is legitimately ahead of canonical.
+The legacy two-step tap workflow let a session push its inner `homebrew-tap` commit to tap `main` **before** its canonical dev-team change merged to `develop`. From that instant, the tap was legitimately ahead of canonical. (XACA-1122 removes the cause: the publisher mirrors strictly *after* merge, so under the decouple the tap should never be ahead. This section remains live because `kb-tap-release` and hand pushes can still produce the condition.)
 
 Before XACA-0848, that made every other open PR that advanced the submodule pointer fail `sync-tap-drift` — naming files the PR never touched, with no self-remedy available. The gate detected a real symptom and blamed the wrong PR.
 
@@ -118,7 +125,7 @@ A gitlink (mode `160000`) is a promise that consumers can fetch that tap commit.
 - **Runs on both `pull_request` and `push: [develop]`** — it reads the gitlink from HEAD's own tree, so it needs no base branch. The push trigger is the safety net for the Academy direct-commit-to-`develop` path, which bypasses PR gates entirely.
 - **Skips when the pointer is unchanged**, so PRs that merely touch a mirrored canonical file are never affected.
 - **Exit codes:** `0` pass or bypassed · `1` verdict FAIL (unreachable, or absent from the tap remote after a proven-complete fetch) · `2` cannot render a verdict (tap uninitialized, no gitlink at that path, fetch failed). `2` is deliberately distinct from `1` so "could not judge" is never mistaken for "judged bad". All three are non-zero in CI.
-- The two failure modes are never conflated: *present but off-mainline* names the containing side branches; *absent entirely* gets its own wording, because that means the inner half of the two-step cycle was never pushed.
+- The two failure modes are never conflated: *present but off-mainline* names the containing side branches; *absent entirely* gets its own wording, because that means an inner tap commit was never pushed (legacy two-step, a release cut, or a hand-made gitlink bump that should not be on a feature branch at all post-XACA-1122).
 
 ### 3. `tap-gitlink-recency` (CI) — is the pointer at or ahead of the last release? (XACA-1112)
 
@@ -228,7 +235,7 @@ The declaration is strictly additive. Absent or malformed, the report reads exac
 TAP_MIRROR_ALLOW_AHEAD=1 git push
 ```
 
-Precedent: `SKIP_SYNC_TAP_CHECK=1` on the outer hook. It prints a loud warning.
+(The outer hook's `SKIP_SYNC_TAP_CHECK=1` used to be the precedent here. **XACA-1122 removed it** — the outer guard it bypassed no longer blocks, so the variable is inert; do not reach for it.) `TAP_MIRROR_ALLOW_AHEAD=1` prints a loud warning.
 
 Legitimate uses are narrow:
 
@@ -355,7 +362,7 @@ Broad strokes, for orientation only — `--porcelain` is the truth:
 
 - `lcars-ui/`, `kanban-hooks/`, `fleet-monitor/server/` — directory mirrors
 - `docs/homebrew-tap/` → `homebrew-tap/docs/` — **including this file**
-- `scripts/` — mirrored **file-by-file**, not as a tree. A new `scripts/*.sh` is *not* automatically mirrored and needs no two-step tap commit.
+- `scripts/` — mirrored **file-by-file**, not as a tree. A new `scripts/*.sh` is *not* automatically mirrored: until it is added to the map in `sync-tap.sh`, the publisher will not ship it, silently.
 - `iterm2_window_manager.py`, `kanban-backup.py`, `claude/tmux.conf` — individual files
 
 `sync-tap.sh` itself is **not** mirrored into the tap.
@@ -390,7 +397,7 @@ REMOTE_NAME=dev-team TAP_DIR=~/dev-team/homebrew-tap \
 
 ## Related documentation
 
-- **`CONTRIBUTING.md` § "Shared scripts and the canonical source"** — the canonical-source rule, the two-step tap cycle, and the ordering rule in workflow form
+- **`CONTRIBUTING.md` § "Shared scripts and the canonical source"** — the canonical-source rule (unchanged and still load-bearing), the post-XACA-1122 contributor workflow, and the ordering rule
 - **`docs/homebrew-tap/EDIT-SHARED-WORKFLOW.md`** — `kb-edit-shared`, which makes the correct workflow the easy one
 - **`sync-tap.sh`** — the authoritative mirror map and the differ
 - **`scripts/attribute-tap-drift.sh`**, **`scripts/check-tap-gitlink-reachable.sh`**, **`scripts/check-tap-gitlink-recency.sh`**, **`.githooks/tap-pre-push`** — each carries a long header explaining its own reasoning and failure modes

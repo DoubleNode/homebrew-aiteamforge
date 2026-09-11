@@ -162,6 +162,7 @@
     --div-academy: var(--lcars-peach);
     --div-legal: var(--lcars-green);
     --div-legal-coparenting: var(--lcars-green-dark);
+    --div-spacedock: #cc66ff;         /* Space Dock - Violet (XACA-1069). LIGHTNESS IS DELIBERATE: this var is used as TEXT at .lcars-avatar-tooltip .tooltip-name against a near-black ground, so it must clear WCAG AA 4.5:1 there. #9933ff measured 4.03:1 and FAILED (every other team div-color passes; lowest is command at 4.95:1). #cc66ff measures 6.52:1. It is also the most separated choice in a CROWDED purple family — freelance #cc99ff, starwords #aa77dd, workstats #cc99cc, appplanning #bb88ee, dns #ccccff are all taken, so do not "simplify" this to an existing --lcars-* token; #cc99ff and #aa77dd are already owned. Do not darken it back for punch. */
 
     /* Current Team Colors (defaults to iOS team) */
     --current-org-color: var(--org-mainevent);
@@ -231,6 +232,11 @@
 .team-academy {
     --current-org-color: var(--org-devteam);
     --current-div-color: var(--div-academy);
+}
+/* Space Dock (under DevTeam organization, XACA-1069) */
+.team-spacedock {
+    --current-org-color: var(--org-devteam);
+    --current-div-color: var(--div-spacedock);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
