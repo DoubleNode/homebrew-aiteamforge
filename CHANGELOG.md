@@ -6,15 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
-- **XACA-0931 / XACA-0865 — the new 34-test persona-deploy suite ships QUARANTINED, and
+- **XACA-0931 / XACA-0865 — the new persona-deploy suite (35 tests; `grep -c 'test_start "'`)
+  ships QUARANTINED, and
   while quarantined it gates nothing.** `tests/test-xaca-0931-persona-deploy-and-parity.sh`
   is reclassified in `tests/ci-manifest` from `plain-shell` to
   `excluded:xaca-0865-runner-only-failure`, which genuinely removes it from the CI
   plain-shell loop rather than merely labelling it. It passes 35/35 in five distinct local
   reproductions (direct `/bin/bash` 3.2; via `test-runner.sh`; scrubbed `$HOME`; a
   standalone tap checkout matching CI's file resolution; and via Homebrew bash 5.x, where
-  its self-targeting re-exec lands it on 3.2) but reported **31/34 on the GitHub
-  macos-latest runner**, failing TC1/TC4/TC7 — the three tests requiring a genuinely
+  its self-targeting re-exec lands it on 3.2) but reported **31 of 34 on the GitHub
+  macos-latest runner** — that measurement was taken at 34 tests, before TG1b was added;
+  the suite is 35 tests as it now stands — failing TC1/TC4/TC7 — the three tests requiring a genuinely
   successful deploy. CI's own failure-detail dump (added in this range, because
   `test-runner.sh` reports only counts and records assertion text solely to
   `$TEST_RESULTS_FILE`) shows nothing deploys there: the enumerator returns no targets.
