@@ -1018,10 +1018,56 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
       client_id="$(_sanitize_id "$client_id")"
     fi
     if [ -z "$client_id" ]; then
-      echo -e "  ${RED}Client ID is required. Skipping ${team_id}.${NC}"
-      # Remove from selected teams
-      SELECTED_TEAMS=("${SELECTED_TEAMS[@]/$team_id}")
-      continue
+      # ═════════════════════════════════════════════════════════════════
+      # XACA-1070-021 (PR #865 round 3): a MANDATORY team cannot be
+      # dropped here by leaving Client ID blank.
+      #
+      # Why this branch has to exist at all: the "drop" path below does
+      # `SELECTED_TEAMS=("${SELECTED_TEAMS[@]/$team_id}")`, which is a
+      # bash pattern-substitution on every array element, not a filter —
+      # it turns the matching element into the EMPTY STRING, it does not
+      # remove the slot. For an ordinary team that is harmless: every
+      # downstream consumer of SELECTED_TEAMS already guards with
+      # `[ -z "$team_id" ] && continue` (see the loops at the team-install,
+      # persona-copy, and config-serialization sites below).
+      #
+      # For a MANDATORY team it is not harmless, because of what happens
+      # one function-call away from here. This same loop only runs on the
+      # interactive path, textually inside _atf_apply_mandatory_teams'
+      # CALL SITE 1 (top of this file) ... call site 2 (the
+      # UPGRADE_HYDRATED/cockpit safety net, right after this whole Step 2
+      # block closes). Call site 2's dedup scan compares the mandatory id
+      # against every CURRENT element of SELECTED_TEAMS looking for an
+      # exact string match. A blanked slot is "", not the mandatory id, so
+      # the scan finds no match and re-appends the id — but by then this
+      # working-dir loop has already finished, so _WORKDIR_<team>/
+      # _CLIENT_<team>/_PROJECT_<team> are never set for that second,
+      # metadata-less append. The team then reaches install-team.sh (and
+      # .aiteamforge-config's team_paths serialization) with no working
+      # directory the user chose and, for a client/project team, no
+      # client or project id — a broken install for a team the wizard
+      # was never supposed to let the user opt out of in the first place.
+      #
+      # Chosen semantic: refuse the drop, not "restore metadata after the
+      # fact". A mandatory team is mandatory — the prompt should not
+      # produce a state where it silently vanishes AND silently
+      # reappears half-configured a few lines later. Falling back to the
+      # same "default-client" the non-interactive path already uses (a
+      # few lines up in this same branch) keeps this a ONE-PLACE fix:
+      # client_id becomes non-empty here, so this iteration's own
+      # eval-assignments a few lines below run exactly as they would for
+      # any other team, SELECTED_TEAMS is never blanked, and call site 2
+      # stays the no-op safety net its own header comment says it is.
+      # ═════════════════════════════════════════════════════════════════
+      if command -v atf_is_mandatory_team >/dev/null 2>&1 && atf_is_mandatory_team "$team_id"; then
+        echo -e "  ${YELLOW}⚠${NC} ${team_id} is a mandatory team and cannot be skipped by leaving Client ID blank — using default Client ID 'default-client' (XACA-1070-021)."
+        client_id="default-client"
+      else
+        echo -e "  ${RED}Client ID is required. Skipping ${team_id}.${NC}"
+        # Remove from selected teams
+        SELECTED_TEAMS=("${SELECTED_TEAMS[@]/$team_id}")
+        continue
+      fi
     fi
     if [ "$MODE" = "non-interactive" ]; then
       project_id="${default_project}"

@@ -24,20 +24,29 @@
 # TEST_TMP_DIR, never the tap's real share/teams/registry.json.
 #
 # FIXTURE TECHNIQUE — "faithful sandbox root": mandatory-teams.sh resolves
-# registry.json two ways: (1) $AITEAMFORGE_HOME/../share/teams/registry.json
+# registry.json two ways: (1) ${AITEAMFORGE_HOME}/share/teams/registry.json
 # when AITEAMFORGE_HOME is set and that file exists, else (2) self-location
 # from mandatory-teams.sh's OWN on-disk path (two directories up from
-# wherever the sourced copy actually lives). MEASURED empirically against
-# this repo (see the retro/report): under the REAL Homebrew-installed
-# layout (AITEAMFORGE_HOME = the copied repo root, exactly as the Formula's
-# bin stubs set it — see Formula/aiteamforge.rb's `AITEAMFORGE_HOME="#{libexec}"`)
-# branch (1)'s own "${AITEAMFORGE_HOME}/../share/teams/registry.json" guess
-# does NOT exist (that path is one directory ABOVE the copied repo root;
-# the real file lives INSIDE it, at "$AITEAMFORGE_HOME/share/teams/registry.json").
-# The feature still works end-to-end ONLY because branch (2)'s
-# self-location fallback silently saves it. This is flagged as an explicit
-# FINDING in the test report — not fixed here (out of scope; "do NOT modify
-# the implementation").
+# wherever the sourced copy actually lives).
+#
+# XACA-1070-023 (doc drift, PR #865 round 3): this comment block used to
+# document branch (1) as "${AITEAMFORGE_HOME}/../share/teams/registry.json"
+# — one directory too high — and flagged that as an open, unfixed FINDING,
+# explicitly out of scope for this test file ("do NOT modify the
+# implementation"). That was an accurate description of the code WHEN
+# WRITTEN, but PR #865 review, item 3 subsequently fixed branch (1) in
+# libexec/lib/mandatory-teams.sh itself to
+# "${AITEAMFORGE_HOME}/share/teams/registry.json" (no ".."), matching how
+# AITEAMFORGE_HOME is used as the tap root everywhere else in this codebase
+# (see that file's own header comment, above _atf_mandatory_teams_registry_path,
+# for the full before/after rationale). Leaving the OLD wording here after
+# the fix landed left this comment block flatly contradicting G8/G9 a few
+# hundred lines below, which exist specifically to PROVE the fix: G8 shows
+# branch (1) now resolves the registry DIRECTLY, with no self-location
+# fallback needed, and G9 is a sanity check that the OLD "one level up"
+# guess is NOT also incidentally reachable (which would let G8 pass for the
+# wrong reason). Corrected here in the comment only — no test behavior or
+# assertion changes; G8/G9 themselves were already correct.
 #
 # Because of that, every fixture in this suite that needs a CONTROLLED
 # registry.json copies mandatory-teams.sh (plus its lazy-loaded siblings
@@ -227,6 +236,11 @@ grep -qF 'mkdir -p "${INSTALL_DIR}/avatars"' "$SETUP_SH" || _block_note_fail "se
 grep -qF '_cockpit_has_mandatory_team="false"' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the LCARS carve-out start anchor Section K's extraction depends on"
 grep -qF 'fi  # end: cockpit mandatory-team LCARS instance (XACA-1070, PR #865 round 2)' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the LCARS carve-out end sentinel Section K's extraction depends on"
 grep -q '^_cockpit_mandatory_teams_str() {' "$SETUP_SH" || _block_note_fail "setup.sh no longer defines _cockpit_mandatory_teams_str() at column 0 (Section L)"
+# XACA-1070-021/022/023 (PR #865 round 3) extraction anchors:
+grep -qF '# For project-based teams, ask for ClientID and/or ProjectID' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the Client-ID-prompt loop anchor comment Section O's extraction depends on"
+grep -qF 'is a mandatory team and cannot be skipped by leaving Client ID blank' "$SETUP_SH" || _block_note_fail "setup.sh no longer contains the XACA-1070-021 mandatory-team-refuses-drop message Section O asserts on"
+grep -qF "mandatory.sort(key=lambda t: t.get('order') or 0)" "$MANDATORY_TEAMS_SH" || _block_note_fail "mandatory-teams.sh's python3 fallback no longer uses the XACA-1070-022 null-safe sort key"
+grep -qF 'XACA1070_BAD_COUNT' "$MANDATORY_TEAMS_SH" || _block_note_fail "mandatory-teams.sh's python3 fallback no longer emits the XACA-1070-022 malformed-entry sentinel Section P asserts on"
 _block_end
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1900,6 +1914,286 @@ EOF
     assert_contains "$_n_out" "Provisioned mandatory team 'widget'" "expected a provisioning success message"
     _block_end
 fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION O -- XACA-1070-021: a mandatory team dropped at the Client-ID
+# prompt must not end up provisioned with missing metadata (PR #865 round 3).
+#
+# THE BUG (pre-fix): bin/aiteamforge-setup.sh's Client-ID-prompt loop drops
+# a team from SELECTED_TEAMS on an empty Client ID via
+# `SELECTED_TEAMS=("${SELECTED_TEAMS[@]/$team_id}")` -- a pattern
+# SUBSTITUTION over every array element, not a filter. It turns the
+# matching slot into the EMPTY STRING; it does not remove it. For an
+# ordinary team every downstream consumer already guards with
+# `[ -z "$team_id" ] && continue`, so that's harmless. For a MANDATORY
+# team it is not: _atf_apply_mandatory_teams' call site 2 (the
+# UPGRADE_HYDRATED/cockpit safety net, a no-op on the interactive path
+# ONLY as long as the mandatory id is still literally present in
+# SELECTED_TEAMS) dedup-scans for an EXACT STRING MATCH against the
+# mandatory id. A blanked slot is "", not the id, so the scan finds no
+# match and re-appends the id -- but this working-dir loop has already
+# finished by the time call site 2 runs, so _WORKDIR_<team>/_CLIENT_<team>/
+# _PROJECT_<team> are never set for that second, metadata-less append.
+#
+# THE FIX (this section proves it): a mandatory team's Client-ID prompt
+# refuses to drop it. An empty Client ID falls back to the same
+# "default-client" the non-interactive path already uses a few lines up in
+# the same branch, so the assignment loop below finishes normally, the
+# team is never blanked, and call site 2 stays the true no-op its own
+# header comment says it is.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_extract_client_id_loop() {
+    awk '
+      $0=="for team_id in \"${SELECTED_TEAMS[@]}\"; do" && !started {started=1; capture=1}
+      capture {print}
+      capture && $0=="done" {exit}
+    ' "$SETUP_SH"
+}
+
+_x1070_mk_client_teams_dir() {
+    local dir="$SANDBOX/teamsdir-clientid-$1"
+    mkdir -p "$dir"
+    # "widget" mirrors Sections A-N's mandatory-team fixture id; requires a
+    # Client ID + falls back to a ProjectID default, matching a real
+    # freelance-shaped team's .conf (TEAM_REQUIRES_CLIENT_ID="true").
+    cat > "$dir/widget.conf" <<'EOF'
+TEAM_NAME="Widget"
+TEAM_DESCRIPTION="Widget fleet team"
+TEAM_CATEGORY="infrastructure"
+TEAM_REQUIRES_CLIENT_ID="true"
+TEAM_HAS_PROJECTS="false"
+TEAM_DEFAULT_PROJECT="mobile-app"
+TEAM_WORKING_DIR="$HOME/aiteamforge"
+EOF
+    printf '%s' "$dir"
+}
+
+_client_id_snippet="$(_extract_client_id_loop)"
+if [ -z "$_client_id_snippet" ]; then
+    test_start "SECTION O setup: extract setup.sh Client-ID-prompt loop"
+    test_fail "extraction produced no output -- cannot run Section O"
+else
+    eval "_x1070_client_id_loop() { $_client_id_snippet
+    }"
+    # The loop body calls _sanitize_id (defined much earlier in setup.sh,
+    # outside the extracted span) -- redefine the same one-liner here
+    # rather than pull in unrelated lines via a second extraction.
+    _sanitize_id() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9._-]//g'; }
+
+    # ── O1: MANDATORY team, blank Client ID -- must NOT be dropped, must
+    # get full metadata (the regression this subitem exists to catch;
+    # FAILS against pre-fix code with an empty _WORKDIR_widget and widget
+    # blanked out of SELECTED_TEAMS). ──
+    _block_start "O1: Client-ID loop -- a MANDATORY team with a blank Client ID is NOT dropped and gets full metadata (XACA-1070-021)"
+    _reg_dir_o="$(_x1070_mk_reg_sandbox client-id-o1 "$REG_ONE_TRUE")"
+    _teams_dir_o="$(_x1070_mk_client_teams_dir o1)"
+    # Two empty lines on stdin below simulate the user pressing Enter at
+    # both the Client ID prompt with nothing typed (the drop scenario
+    # under test) and the Project ID prompt this same requires_client arm
+    # also issues right after (falls back to the conf default).
+    #
+    # NOTE: no apostrophes in comments INSIDE the "$( ... )" block below --
+    # an odd/unpaired single-quote character in a comment there can throw
+    # off bash quote-balance tracking while it looks for the substitution
+    # closing paren, producing a spurious "unexpected EOF while looking
+    # for matching `'" parse error at the END of the file, nowhere near
+    # the actual offending comment. MEASURED while writing this test: a
+    # single stray apostrophe in a comment here was enough to break
+    # `bash -n` on the entire file (see git history for the exact case).
+    #
+    # Process substitution below, NOT a pipe: piping into the function
+    # would run it on the RIGHT of a pipe in its OWN subshell (bash
+    # default, absent "lastpipe"), and every evaluated
+    # _WORKDIR_/_CLIENT_/_PROJECT_ assignment plus every SELECTED_TEAMS
+    # mutation made inside it would vanish the instant that subshell
+    # exits, never reaching the assertions below. Redirecting stdin with
+    # a process substitution instead runs the function in THIS shell.
+    _res_o1="$(
+        unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+        # shellcheck disable=SC1091
+        . "$_reg_dir_o/libexec/lib/mandatory-teams.sh"
+        GREEN=""; RED=""; YELLOW=""; CYAN=""; NC=""
+        TEAMS_DIR="$_teams_dir_o"
+        INSTALL_DIR="$HOME/aiteamforge"
+        MODE="interactive"
+        SELECTED_TEAMS=("widget")
+        _x1070_client_id_loop < <(printf '\n\n')
+        printf 'SELECTED=%s\n' "${SELECTED_TEAMS[*]}"
+        printf 'WORKDIR=%s\n' "${_WORKDIR_widget:-}"
+        printf 'CLIENT=%s\n' "${_CLIENT_widget:-}"
+        printf 'PROJECT=%s\n' "${_PROJECT_widget:-}"
+    )"
+    assert_contains "$_res_o1" "cannot be skipped by leaving Client ID blank" "expected the mandatory-team refusal message, got: $_res_o1"
+    # Exact-match the SELECTED= line (value + trailing newline from the
+    # printf above): a surviving blank sibling slot would join as
+    # "widget " or " widget" (IFS-space-joined array), which this exact
+    # substring would NOT match -- catches both "still blanked" and
+    # "duplicated" in one assertion.
+    assert_contains "$_res_o1" $'SELECTED=widget\n' "SELECTED_TEAMS must contain EXACTLY 'widget' (no blank or duplicate sibling slot), got: $_res_o1"
+    assert_contains "$_res_o1" "CLIENT=default-client" "expected the default-client fallback to have been applied, got: $_res_o1"
+    # Same exact-match technique: an EMPTY _WORKDIR_widget prints as
+    # "WORKDIR=" immediately followed by newline -- this is precisely the
+    # metadata the pre-fix bug leaves unset.
+    assert_not_contains "$_res_o1" $'WORKDIR=\n' "_WORKDIR_widget must be non-empty, got: $_res_o1"
+    assert_contains "$_res_o1" "PROJECT=mobile-app" "expected the conf's default project id to have been applied, got: $_res_o1"
+    _block_end
+
+    # ── O2 (negative control): a NON-mandatory team with a blank Client ID
+    # keeps the pre-existing drop behavior -- this fix must not make every
+    # team un-droppable, only mandatory ones. ──
+    _block_start "O2 (negative control): Client-ID loop -- a NON-mandatory team with a blank Client ID is still dropped as before"
+    _teams_dir_o2="$(_x1070_mk_client_teams_dir o2)"
+    # 'alpha' carries no mandatory flag in REG_ONE_TRUE (only 'widget' does).
+    cat > "$_teams_dir_o2/alpha.conf" <<'EOF'
+TEAM_NAME="Alpha"
+TEAM_DESCRIPTION="Alpha team"
+TEAM_CATEGORY="platform"
+TEAM_REQUIRES_CLIENT_ID="true"
+TEAM_HAS_PROJECTS="false"
+TEAM_DEFAULT_PROJECT="mobile-app"
+TEAM_WORKING_DIR="$HOME/aiteamforge"
+EOF
+    _res_o2="$(
+        unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+        # shellcheck disable=SC1091
+        . "$_reg_dir_o/libexec/lib/mandatory-teams.sh"
+        GREEN=""; RED=""; YELLOW=""; CYAN=""; NC=""
+        TEAMS_DIR="$_teams_dir_o2"
+        INSTALL_DIR="$HOME/aiteamforge"
+        MODE="interactive"
+        SELECTED_TEAMS=("alpha")
+        _x1070_client_id_loop < <(printf '\n')
+        printf 'SELECTED=[%s]\n' "${SELECTED_TEAMS[*]}"
+    )"
+    assert_contains "$_res_o2" "Client ID is required. Skipping alpha." "expected the ordinary (non-mandatory) drop message, got: $_res_o2"
+    assert_not_contains "$_res_o2" "cannot be skipped" "a non-mandatory team must never see the mandatory-team refusal wording, got: $_res_o2"
+    assert_contains "$_res_o2" "SELECTED=[]" "a dropped non-mandatory team's slot is blanked (existing, pre-fix-unchanged behavior), got: $_res_o2"
+    _block_end
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION P -- XACA-1070-022: atf_mandatory_teams' jq and python3 branches
+# must agree on a registry with 2+ mandatory teams carrying `"order": null`,
+# and the malformed-entry ("mandatory": true, no usable "id") diagnostic
+# must appear on BOTH branches, not just jq's (PR #865 round 3).
+#
+# THE BUG (pre-fix): the python3 fallback's sort key was
+# `t.get('order', 0)`, which only substitutes the default when the "order"
+# KEY IS ABSENT. A present-but-null "order" returns `None` unchanged, and
+# `list.sort()` compares keys pairwise even when they turn out equal --
+# Python 3's `None` has no `__lt__`, so comparing `None < None` (two
+# mandatory teams that both have `"order": null`) raises `TypeError` on
+# its own. That was swallowed by the branch's blanket
+# `except Exception: sys.exit(2)`, so rc=2 failed the `rc -eq 0` check and
+# the registry was reported as "not valid JSON" -- a false fault on a
+# registry the jq branch reads fine (jq's `.order // 0` already treats
+# null as 0). Separately, the jq branch's "N entries with no usable id"
+# diagnostic had no python3 equivalent at all.
+#
+# WHY A GENUINELY JQ-FREE PATH: this dev machine has jq at /usr/bin/jq
+# AND /opt/homebrew/bin/jq -- both of those same directories also carry
+# essential coreutils (grep, sed, mktemp, cut, rm) the python3 branch and
+# this test's own harness need. Simply removing "the directory jq lives
+# in" from PATH would ALSO remove those coreutils. Instead, a private
+# bin dir is populated with symlinks to exactly the commands needed,
+# resolved via `command -v` BEFORE PATH is restricted, and PATH is then
+# set to ONLY that directory for the call under test -- proven jq-free
+# by asserting `command -v jq` fails from INSIDE that restricted PATH,
+# not by inference from what was left out.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_x1070_mk_jqfree_bin() {
+    local dir="$SANDBOX/jqfree-bin" cmd real
+    mkdir -p "$dir"
+    for cmd in bash sh python3 mktemp grep cut rm sed cat dirname basename mkdir env tail wc head; do
+        real="$(command -v "$cmd" 2>/dev/null || true)"
+        case "$real" in
+            /*) [ -e "$dir/$cmd" ] || ln -sf "$real" "$dir/$cmd" ;;
+        esac
+    done
+    printf '%s' "$dir"
+}
+
+REG_TWO_NULL_ORDER='{"version":"1.0.0","teams":[{"id":"widget","name":"Widget","order":null,"mandatory":true},{"id":"gizmo","name":"Gizmo","order":null,"mandatory":true},{"id":"alpha","name":"Alpha","order":2}]}'
+REG_NULL_ORDER_PLUS_BAD_ID='{"version":"1.0.0","teams":[{"id":"widget","order":null,"mandatory":true},{"order":null,"mandatory":true},{"id":"alpha","order":1}]}'
+
+_jqfree_bin="$(_x1070_mk_jqfree_bin)"
+
+# ── P0 (proof, not a finding): the restricted PATH built above is
+# genuinely jq-free -- if this ever stops being true, P1/P2 below would
+# silently start exercising the jq branch instead of the python3 one. ──
+_block_start "P0: proof -- the jqfree-bin PATH constructed for this section truly cannot find jq"
+_p0_res="$(PATH="$_jqfree_bin" command -v jq >/dev/null 2>&1 && echo "FOUND" || echo "unreachable")"
+assert_eq "$_p0_res" "unreachable" "command -v jq must fail from inside the restricted PATH, got: $_p0_res"
+_block_end
+
+# ── P1: 2+ mandatory teams, both "order": null -- python3 fallback (under
+# the proven jq-free PATH) must return exit 0 with BOTH ids, in the SAME
+# order the jq branch (run here under the normal, jq-present PATH)
+# returns them. FAILS against pre-fix code: pre-fix python3 exits 2 /
+# empty stdout while jq exits 0 / "widget\ngizmo". ──
+_block_start "P1: atf_mandatory_teams -- 2 mandatory teams with order:null -- python3 fallback matches jq (XACA-1070-022)"
+_reg_dir_p1="$(_x1070_mk_reg_sandbox order-null-p1 "$REG_TWO_NULL_ORDER")"
+_err_jq_p1="$SANDBOX/p1-jq.err"
+_out_jq_p1="$(_x1070_run_resolver "$_reg_dir_p1" atf_mandatory_teams 2>"$_err_jq_p1")"; _rc_jq_p1=$?
+_err_py_p1="$SANDBOX/p1-py.err"
+# NOTE: the "2>" below binds to the inner "{ ... }" group, not to the
+# outer var=$(...) assignment. "var=$(cmd) 2>file" does NOT reliably
+# redirect cmd's stderr into file -- the command substitution is expanded
+# as part of computing the assignment value, and MEASURED here (while
+# writing this test) to still write to the real stderr, bypassing the
+# outer redirect entirely, silently emptying the diagnostic this
+# assertion depends on. Wrapping the body in its own group and redirecting
+# that closes the gap.
+_out_py_p1="$(
+    {
+        PATH="$_jqfree_bin"
+        export PATH
+        unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+        # shellcheck disable=SC1091
+        . "$_reg_dir_p1/libexec/lib/mandatory-teams.sh"
+        atf_mandatory_teams
+    } 2>"$_err_py_p1"
+)"; _rc_py_p1=$?
+assert_eq "$_rc_jq_p1" "0" "sanity: jq branch expected exit 0, got $_rc_jq_p1 (stderr: $(cat "$_err_jq_p1"))"
+assert_eq "$_rc_py_p1" "0" "python3 fallback expected exit 0 (pre-fix this was 2 -- a TypeError from sorting two None order keys, caught and misreported as 'not valid JSON'), got $_rc_py_p1 (stderr: $(cat "$_err_py_p1"))"
+assert_eq "$_out_jq_p1" "$(printf 'widget\ngizmo')" "sanity: jq branch expected widget-then-gizmo (registry order, both tie at order 0), got: $_out_jq_p1"
+assert_eq "$_out_py_p1" "$_out_jq_p1" "python3 fallback must produce the IDENTICAL id list (same ids, same order) as the jq branch on this registry, got: $_out_py_p1"
+assert_empty "$(cat "$_err_py_p1")" "no malformed entries in this fixture -- python3 fallback must NOT emit a bad-id diagnostic here, got: $(cat "$_err_py_p1")"
+_block_end
+
+# ── P2: as P1, plus one id-less "mandatory": true entry -- BOTH branches
+# must (a) still return the one valid id and (b) print the SAME
+# malformed-entry diagnostic wording. FAILS against pre-fix code: pre-fix
+# python3 has no equivalent diagnostic at all (silently drops the bad
+# entry with no trace), and separately still trips the order:null
+# TypeError this fixture also carries. ──
+_block_start "P2: atf_mandatory_teams -- order:null + one id-less mandatory entry -- malformed-entry diagnostic on BOTH branches (XACA-1070-022)"
+_reg_dir_p2="$(_x1070_mk_reg_sandbox order-null-p2 "$REG_NULL_ORDER_PLUS_BAD_ID")"
+_err_jq_p2="$SANDBOX/p2-jq.err"
+_out_jq_p2="$(_x1070_run_resolver "$_reg_dir_p2" atf_mandatory_teams 2>"$_err_jq_p2")"; _rc_jq_p2=$?
+_err_py_p2="$SANDBOX/p2-py.err"
+# Same "{ ... } 2>file" grouping as P1 above, and for the same reason:
+# redirecting the outer var=$(...) assignment does not reliably capture
+# this call's stderr.
+_out_py_p2="$(
+    {
+        PATH="$_jqfree_bin"
+        export PATH
+        unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+        # shellcheck disable=SC1091
+        . "$_reg_dir_p2/libexec/lib/mandatory-teams.sh"
+        atf_mandatory_teams
+    } 2>"$_err_py_p2"
+)"; _rc_py_p2=$?
+assert_eq "$_rc_jq_p2" "0" "sanity: jq branch expected exit 0 (malformed sibling is skipped, not fatal), got $_rc_jq_p2"
+assert_eq "$_rc_py_p2" "0" "python3 fallback expected exit 0, got $_rc_py_p2 (stderr: $(cat "$_err_py_p2"))"
+assert_eq "$_out_jq_p2" "widget" "sanity: jq branch expected exactly 'widget' (the id-less entry is skipped), got: $_out_jq_p2"
+assert_eq "$_out_py_p2" "widget" "python3 fallback expected exactly 'widget' too, got: $_out_py_p2"
+assert_contains "$(cat "$_err_jq_p2")" 'has 1 "mandatory": true entry with no usable "id"' "sanity: jq branch expected the malformed-entry diagnostic wording"
+assert_contains "$(cat "$_err_py_p2")" 'has 1 "mandatory": true entry with no usable "id"' "python3 fallback expected the SAME malformed-entry diagnostic wording (pre-fix: silent, no diagnostic at all), got: $(cat "$_err_py_p2")"
+_block_end
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone only).

@@ -48,6 +48,53 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   tool surfaces as `unknown`, never `ok` — a false green on a recovery tool is
   worse than no tool. Exit code is the worst severity across the run (0 ok/skip,
   1 warn, 2 fail/unknown).
+- **XACA-1070 (PR #865 round 3) — three protected merge-gate subitems: a
+  mandatory team could still be dropped and re-provisioned half-configured,
+  the mandatory-teams python3 fallback disagreed with jq on a valid
+  registry, and a stale test-file finding contradicted its own tests.**
+  (XACA-1070-021) `bin/aiteamforge-setup.sh`'s Client-ID-prompt loop dropped
+  a team from `SELECTED_TEAMS` on an empty Client ID via
+  `SELECTED_TEAMS=("${SELECTED_TEAMS[@]/$team_id}")`, a pattern
+  SUBSTITUTION over every array element that blanks the matching slot to
+  `""` rather than removing it. Harmless for an ordinary team (every
+  downstream consumer already guards on `[ -z "$team_id" ] && continue`),
+  but for a MANDATORY team it let `_atf_apply_mandatory_teams`' call site 2
+  (the UPGRADE_HYDRATED/cockpit safety net) re-append the id a second time
+  with no `_WORKDIR_`/`_CLIENT_`/`_PROJECT_` set, since its dedup scan
+  compares against the literal id and a blanked `""` slot never matches.
+  Fixed by refusing the drop for a mandatory team instead: an empty Client
+  ID now falls back to the same "default-client" default the
+  non-interactive path already uses, so the team is never blanked and call
+  site 2 stays the true no-op its own header comment describes.
+  (XACA-1070-022) `libexec/lib/mandatory-teams.sh`'s python3 fallback
+  sorted mandatory teams with `t.get('order', 0)`, whose default only
+  applies when the "order" key is ABSENT — a present-but-null `"order":
+  null` returns `None` unchanged, and comparing two `None` sort keys
+  raises `TypeError`, silently converted by the branch's blanket
+  `except Exception: sys.exit(2)` into a false "not valid JSON" report on
+  a registry the jq branch reads fine (`.order // 0` already treats null
+  as 0). Separately, the jq branch's "N entries with no usable id"
+  diagnostic had no python3 equivalent, so the same malformed sibling jq
+  reports was silently dropped under python3 without a trace. Fixed both:
+  the sort key is now `t.get('order') or 0` (matching jq's null-coalescing
+  behavior and its stability guarantee), and the python3 branch now
+  relays its own bad-entry count back through a stderr sentinel line the
+  shell side re-announces in the SAME wording as the jq branch, so a
+  caller cannot tell (or need to know) which parser produced it.
+  (XACA-1070-023) `tests/test-xaca-1070-mandatory-install.sh`'s header
+  still documented the pre-PR-865-review-item-3 `${AITEAMFORGE_HOME}/../share`
+  registry guess as an open, unfixed finding, explicitly out of scope for
+  that file — contradicting tests G8/G9 a few hundred lines below, which
+  exist specifically to prove that guess WAS fixed (to
+  `${AITEAMFORGE_HOME}/share/teams/registry.json`, no `..`). Corrected the
+  comment to match the code and cross-reference G8/G9; no test behavior
+  changed. Added regression coverage for both real defects (Section O:
+  the Client-ID-prompt drop, with a non-mandatory-team negative control;
+  Section P: jq/python3 parity on a registry with 2+ `"order": null`
+  mandatory teams plus a malformed-id entry, exercised under a genuinely
+  jq-free `PATH` built from symlinks to only the commands needed and
+  proven jq-free by asserting `command -v jq` fails inside it) — suite
+  grows from 79 to 84.
 - XACA-1173: Mirror the 14 files where develop's canonical copy was newer than the tap, or
   missing from it. Direction was established from blob history, not timestamps: for each
   file, the tap's old copy appears in a commit already on develop. The files are

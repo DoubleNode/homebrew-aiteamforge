@@ -223,9 +223,50 @@ atf_mandatory_teams() {
     fi
 
     # ── Try python3 (jq unavailable) ────────────────────────────────────────
+    #
+    # XACA-1070-022 (PR #865 round 3): the two branches must AGREE — a
+    # registry that reads fine under jq must read the same way here, not
+    # get misreported as corrupt.
+    #
+    # Bug 1 — sort key: `t.get('order', 0)` only substitutes the default
+    # 0 when the "order" KEY IS ABSENT. A present-but-null "order" (valid
+    # JSON — someone wrote `"order": null` instead of omitting the key
+    # entirely) returns `None` unchanged, not 0. `list.sort()` compares
+    # keys pairwise even when they turn out equal, and Python 3's `None`
+    # has no `__lt__` — comparing `None < None` (two mandatory teams that
+    # both have `"order": null`) raises `TypeError` on its own, with no
+    # third value needed. That TypeError was swallowed by the blanket
+    # `except Exception: sys.exit(2)` below, so it never "crashed" this
+    # script, but rc=2 fails the `rc -eq 0` check a few lines down and the
+    # registry gets reported as "not valid JSON" even though it parsed
+    # fine and every entry was well-formed — a false fault on a valid
+    # registry, and a real disagreement with the jq branch, which treats
+    # `.order // 0` (jq's null-coalescing operator) as 0 for exactly this
+    # case and returns both ids successfully (MEASURED: reproduced this
+    # exact TypeError with a 2-mandatory/both-null-order fixture, jq
+    # exit 0 vs python3 exit 2 on the identical registry).
+    #
+    # Fix: `t.get('order') or 0` collapses BOTH "key absent" (None) and
+    # "key present but null" (also None) to 0, the same tiebreak value
+    # jq's `.order // 0` already uses for both cases — `or 0` is safe here
+    # specifically because "order" is a rank number and the only falsy
+    # number, 0, already maps to the same 0 default. Python's sort is
+    # stable (Timsort), matching jq's `sort_by` stability, so two entries
+    # that tie at 0 keep their original registry order in BOTH branches.
+    #
+    # Bug 2 — malformed-entry diagnostic: the jq branch (above) separately
+    # counts "mandatory": true entries with no usable "id" and warns to
+    # stderr; this branch had no equivalent, so the exact same malformed
+    # sibling that jq reports was silently dropped here without a trace.
+    # Fixed by counting id-less mandatory entries in Python too and
+    # relaying the count back through a stderr sentinel line
+    # (`XACA1070_BAD_COUNT=<n>`) that the shell side below parses and
+    # re-announces in the SAME wording the jq branch uses, so a caller
+    # cannot tell — and does not need to know — which parser produced it.
     if command -v python3 >/dev/null 2>&1; then
-        local out rc
-        out="$("${AITEAMFORGE_PYTHON:-python3}" - "$registry_path" <<'PYEOF' 2>/dev/null
+        local out rc err_file bad_count
+        err_file="$(mktemp "${TMPDIR:-/tmp}/atf-mandatory-teams-py.XXXXXX" 2>/dev/null || echo "${TMPDIR:-/tmp}/atf-mandatory-teams-py.$$")"
+        out="$("${AITEAMFORGE_PYTHON:-python3}" - "$registry_path" <<'PYEOF' 2>"$err_file"
 import sys, json
 path = sys.argv[1]
 try:
@@ -233,18 +274,37 @@ try:
         data = json.load(f)
     teams = data['teams']
     mandatory = [t for t in teams if t.get('mandatory') is True]
-    mandatory.sort(key=lambda t: t.get('order', 0))
+    # XACA-1070-022: `or 0` -- not `.get('order', 0)` -- so a present-but-
+    # null "order" ties at 0 exactly like jq's `.order // 0`, instead of
+    # staying None and blowing up list.sort()'s pairwise comparison.
+    mandatory.sort(key=lambda t: t.get('order') or 0)
+    bad = 0
     for t in mandatory:
         tid = t.get('id')
         if tid:
             print(tid)
+        else:
+            bad += 1
+    if bad:
+        # Sentinel line on stderr only -- never mixed into the id list on
+        # stdout. The shell side parses this back out below.
+        print('XACA1070_BAD_COUNT=%d' % bad, file=sys.stderr)
 except Exception:
     sys.exit(2)
 PYEOF
 )"
         rc=$?
+        bad_count="$(grep -o 'XACA1070_BAD_COUNT=[0-9]*' "$err_file" 2>/dev/null | tail -1 | cut -d= -f2)"
+        rm -f "$err_file" 2>/dev/null
         if [ "$rc" -eq 0 ]; then
             printf '%s\n' "$out" | sed '/^$/d'
+            # Mirror the jq branch's malformed-entry diagnostic verbatim
+            # (same wording) so the two parsers never silently disagree
+            # about whether a corrupt "mandatory": true entry (no usable
+            # id) was noticed.
+            if [ -n "$bad_count" ] && [ "$bad_count" != "0" ]; then
+                echo "mandatory-teams.sh: ${registry_path} has ${bad_count} \"mandatory\": true entr$( [ "$bad_count" = "1" ] && echo y || echo ies) with no usable \"id\" — skipped, not treated as an error (XACA-1070)" >&2
+            fi
             return 0
         fi
         echo "mandatory-teams.sh: ${registry_path} is not valid JSON (or has no .teams array) — cannot determine mandatory teams (XACA-1070)" >&2
