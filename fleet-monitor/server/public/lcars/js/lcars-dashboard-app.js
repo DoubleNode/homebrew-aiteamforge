@@ -3126,7 +3126,9 @@
             'legal': 'COPARENTING',
             'legal-coparenting': 'COPARENTING',
             'medical': 'MEDICAL - HOUSE MD',
-            'medical-general': 'MEDICAL - HOUSE MD'
+            'medical-general': 'MEDICAL - HOUSE MD',
+            'snw': 'SNW - STAR TREK: STRANGE NEW WORLDS',
+            'spacedock': 'SPACE DOCK - STAR TREK: SPACE DOCK'
         };
         if (!titles[code] && code.startsWith('freelance')) {
             const suffix = code.replace('freelance-', '').toUpperCase();

@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1164: Mirror the Space Dock and Strange New Worlds (SNW) crew art. Under
+  `fleet-monitor/server/public/avatars/`: the 5 Space Dock terminal logos and 8 SNW
+  terminal logos (256px `_logo.png` plus 200px `_logo_panel.png` each), and the 4
+  Space Dock and 7 SNW crew avatars (400px avatar, 100px thumb, 200px panel each).
+  Also `share/lcars-ui/images/appicons/snw/` (7 home-screen icons generated from
+  the SNW team logo) and `snw`/`spacedock` division titles in both fleet dashboards
+  (`lcars-dashboard-app.js`, `lcars2/lcars-fleet-dashboard-app.js`). No SNW team
+  exists yet, so nothing uses the SNW assets until one is registered. This copies
+  only XACA-1164's 68 files, one by one. It is not a full sync, because the tap has
+  other tickets' unrelated drift that this commit leaves alone.
 - **XACA-0931 / XACA-0865 — the new persona-deploy suite (35 tests; `grep -c 'test_start "'`)
   ships QUARANTINED, and
   while quarantined it gates nothing.** `tests/test-xaca-0931-persona-deploy-and-parity.sh`

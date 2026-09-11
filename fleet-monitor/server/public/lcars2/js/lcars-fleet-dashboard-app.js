@@ -1086,7 +1086,9 @@
             'freelance': 'FREELANCE - STAR TREK: ENT',
             'ios': 'IOS - STAR TREK: TNG',
             'legal': 'COPARENTING',
-            'legal-coparenting': 'COPARENTING'
+            'legal-coparenting': 'COPARENTING',
+            'snw': 'SNW - STAR TREK: STRANGE NEW WORLDS',
+            'spacedock': 'SPACE DOCK - STAR TREK: SPACE DOCK'
         };
         // Fallback for any legal-* variant
         if (!titles[code] && code.startsWith('legal')) {
