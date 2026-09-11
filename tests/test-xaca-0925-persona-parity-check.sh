@@ -101,6 +101,25 @@ _next_sandbox() { mktemp -d "$WORK_DIR/sbx-XXXXXX"; }
 _seed_framework_team() {
     local fw="$1" team="$2"; shift 2
     mkdir -p "${fw}/share/personas/${team}/agents"
+    # XACA-0931: a real framework dir ALWAYS ships share/teams/ (the team conf
+    # dir). The S3 deploy-target enumerator added by XACA-0931 reads it, and
+    # correctly reports "cannot determine targets" -> fail closed when it is
+    # absent. These fixtures previously modelled an install that cannot exist,
+    # so they tripped that (correct) guard. Create it so the fixture models a
+    # real install; individual tests may seed confs into it as needed.
+    mkdir -p "${fw}/share/teams"
+    # A framework dir with a share/teams/ containing ZERO *.conf files is also
+    # "cannot determine targets" (a real install ships one conf per team), so
+    # seed a minimal FLAT-team conf: TEAM_HAS_PROJECTS=false means this team
+    # has no nested per-project deploy targets, which is true of every team
+    # these fixtures use (academy/ios/ghostteam). Result: zero S3 targets and
+    # zero uninspectable — the S1<->S2 assertions below are unaffected.
+    if [ ! -f "${fw}/share/teams/${team}.conf" ]; then
+        {
+            printf 'TEAM_ID="%s"\n' "$team"
+            printf 'TEAM_HAS_PROJECTS="false"\n'
+        } > "${fw}/share/teams/${team}.conf"
+    fi
     while [ $# -ge 2 ]; do
         printf '%s\n' "$2" > "${fw}/share/personas/${team}/agents/$1"
         shift 2

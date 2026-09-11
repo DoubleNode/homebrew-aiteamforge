@@ -21,6 +21,11 @@ source "${LIBEXEC_DIR}/lib/imgcat-provision.sh"
 # renderer moved out (it was about to become a fourth copy).
 # Must come after common.sh (print_* helpers) and constants.sh (KANBAN_BACKUP_INTERVAL_DEFAULT).
 source "${LIBEXEC_DIR}/lib/launchagents.sh"
+# XACA-0931: shared nested-project persona deploy-target enumerator — the
+# SAME enumerator aiteamforge-persona-parity-check.sh's S3 surface uses
+# (XACA-0931-003), so the upgrade-path fixer and the drift detector can never
+# disagree about what counts as a target. See lib/persona-targets.sh header.
+source "${LIBEXEC_DIR}/lib/persona-targets.sh"
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -46,6 +51,18 @@ UPGRADE_VIA_BREW=false
 # Used to stamp .installed-version accurately so doctor/status drift detection is
 # not fooled into thinking the box advanced when brew never did.
 UPGRADE_BREW_VERSION=""
+
+# XACA-0931-002: deferred-warning state for deploy_team_personas_to_projects().
+# Per-target deploy failures are NON-FATAL and the step never aborts the
+# upgrade (XACA-0931-001 §3.7) — but a failed/uninspectable target must not
+# be swallowed by an unqualified "upgraded successfully!" at the end of the
+# run (XACA-1028 precedent: a nightly LaunchAgent log reading SUCCESS over a
+# real failure is exactly the bug class this guards against). The final
+# summary block reads these; the upgrade's exit status is NOT affected by
+# them — escalating to a non-zero exit here would recreate XACA-1028's
+# cascade in the opposite direction.
+UPGRADE_PERSONA_DEPLOY_HAD_WARNINGS=false
+UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY=""
 
 # Usage
 usage() {
@@ -2754,6 +2771,40 @@ _xaca0925_refresh_team_personas() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# _xaca0931_load_persona_targets
+#
+# Call pt_enumerate_targets (lib/persona-targets.sh) and parse its output into
+# two globals: _XACA0931_TARGETS (array of "team<TAB>project_dir" elements)
+# and _XACA0931_TARGETS_UNINSPECTABLE (count).
+#
+# WHY THIS PARSING LIVES HERE AND NOT INSIDE THE LIB: pt_enumerate_targets is
+# invoked via `< <(pt_enumerate_targets ...)` (process substitution) so it can
+# stream — but that means it runs in a SUBSHELL, and any global variable it
+# assigned internally would never be visible to this shell (see
+# persona-targets.sh's header for the full explanation). It multiplexes its
+# uninspectable count onto stdout instead, as a final "#UNINSPECTABLE\t<N>"
+# line. This helper is the single place in this file that un-multiplexes it,
+# so update_team_personas() and deploy_team_personas_to_projects() (both
+# XACA-0931-002) don't each carry their own copy of that parsing.
+# ---------------------------------------------------------------------------
+_xaca0931_load_persona_targets() {
+  _XACA0931_TARGETS=()
+  _XACA0931_TARGETS_UNINSPECTABLE=0
+  local _key _val
+  while IFS=$'\t' read -r _key _val; do
+    [ -n "$_key" ] || continue
+    if [ "$_key" = "#UNINSPECTABLE" ]; then
+      case "$_val" in
+        ''|*[!0-9]*) _XACA0931_TARGETS_UNINSPECTABLE=0 ;;
+        *)           _XACA0931_TARGETS_UNINSPECTABLE="$_val" ;;
+      esac
+      continue
+    fi
+    _XACA0931_TARGETS+=("${_key}"$'\t'"${_val}")
+  done < <(pt_enumerate_targets "$FRAMEWORK_DIR")
+}
+
 update_team_personas() {
   print_section "Updating Team Personas"
 
@@ -2774,8 +2825,75 @@ update_team_personas() {
     read -ra teams <<< "$teams_str"
   fi
 
+  # XACA-0931: `.teams[]` alone makes this refresh a proven no-op on a box
+  # whose config is stale/incomplete — measured on darren-m4-mini,
+  # `.teams[]` == ["finance"] while legal+medical personas are demonstrably
+  # deployed and in active use (XACA-0931 field evidence §4). Extend the
+  # enumeration to the UNION of configured teams and every team that already
+  # has an on-disk nested-project deploy target (pt_enumerate_targets,
+  # lib/persona-targets.sh) — a deployed persona dir is conclusive evidence
+  # the team is installed, independent of what the config says
+  # (XACA-0931-001 §2.4/§3.4). This union is still REFRESH-ONLY:
+  # _xaca0925_refresh_team_personas only ever writes into a dir it creates
+  # fresh from the Cellar or one that's already there — it can never bring a
+  # team the box never had personas for into being, so the anti-glob
+  # invariant (upgrade never MATERIALISES a new team) holds structurally
+  # rather than by the config filter.
+  #
+  # ORDERING: this function runs BEFORE deploy_team_personas_to_projects in
+  # the run sequence (see the call site below update_team_personas). That is
+  # a correctness requirement, not a preference — deploying stale SOURCE over
+  # a currently-correct DEPLOYED copy is an active regression, not a no-op.
+  # Measured on darren-m4-mini's `medical` target: deployed content already
+  # matched the Cellar while working-dir source did not (XACA-0931 field
+  # evidence §3) — pushing source -> deployed there, before refreshing
+  # source from the Cellar, would have overwritten current content with
+  # stale content.
+  _xaca0931_load_persona_targets
+  if [ "${_XACA0931_TARGETS_UNINSPECTABLE:-0}" -gt 0 ]; then
+    print_warning "Could not fully determine deployed persona targets (${_XACA0931_TARGETS_UNINSPECTABLE} uninspectable) — the .teams[] union below may be incomplete; see warnings above"
+  fi
+
+  local -a _xaca0931_discovered_teams=()
+  local _pt_line _pt_team _pt_dir _already_known _known
+  for _pt_line in "${_XACA0931_TARGETS[@]:-}"; do
+    [ -n "$_pt_line" ] || continue
+    IFS=$'\t' read -r _pt_team _pt_dir <<< "$_pt_line"
+    [ -n "$_pt_team" ] || continue
+    _already_known=false
+    for _known in "${_xaca0931_discovered_teams[@]:-}"; do
+      [ "$_known" = "$_pt_team" ] && { _already_known=true; break; }
+    done
+    [ "$_already_known" = true ] || _xaca0931_discovered_teams+=("$_pt_team")
+  done
+
+  local _dt _ct _team_in_configured _dest_precheck
+  for _dt in "${_xaca0931_discovered_teams[@]:-}"; do
+    [ -n "$_dt" ] || continue
+    _team_in_configured=false
+    for _ct in "${teams[@]:-}"; do
+      [ "$_ct" = "$_dt" ] && { _team_in_configured=true; break; }
+    done
+    if [ "$_team_in_configured" = false ]; then
+      _dest_precheck="${WORKING_DIR}/${_dt}/personas/agents"
+      if [ ! -d "$_dest_precheck" ]; then
+        # XACA-0931-001 §3.4 (branch ii): a deployed target exists for this
+        # team but its working-dir SOURCE never has. Repairing it from the
+        # Cellar is a first-time REPAIR, not a routine refresh — log it as
+        # such rather than folding it silently into the loop below.
+        # (_xaca0925_refresh_team_personas creates $_dest_precheck fresh from
+        # the Cellar when it does not yet exist — no special-casing needed
+        # beyond including this team in the loop.)
+        print_warning "[${_dt}] SOURCE persona dir ${_dest_precheck} does not exist yet, but this team has a deployed (.claude/agents) target on disk — repairing from the Cellar. '${_dt}' is missing from .aiteamforge-config .teams[]; that config is incomplete."
+      else
+        print_warning "[${_dt}] deployed persona target(s) found on disk but '${_dt}' is not listed in .aiteamforge-config .teams[] — refreshing its SOURCE anyway; the config is incomplete."
+      fi
+      teams+=("$_dt")
+    fi
+  done
+
   if [ ${#teams[@]} -eq 0 ]; then
-    print_warning "No configured teams found in .aiteamforge-config — skipping persona refresh"
+    print_warning "No configured or discovered teams found — skipping persona refresh"
     return 0
   fi
 
@@ -2807,6 +2925,158 @@ update_team_personas() {
   else
     print_success "Updated ${total_updated} persona file(s) across configured teams"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# deploy_team_personas_to_projects
+#
+# XACA-0931-002: closes the loop the parent ticket is named for. Upgrade
+# refreshed the SOURCE just above (update_team_personas) — this pushes that
+# content out to every already-deployed nested-project target on this box
+# (S2 -> S3, XACA-0931-001's vocabulary). Restores, on the unattended
+# upgrade path, the self-healing behaviour a team-session start was assumed
+# (wrongly, on the tap-consumer branch — see the deploy_team_personas
+# --force fix in scripts/lcars-launch-helpers.sh, same ticket, separate
+# commit) to already provide.
+#
+# NAMED deploy_team_personas_to_projects, deliberately NOT deploy_team_personas
+# (XACA-0931-001 §3.5): that name belongs to a function in
+# scripts/lcars-launch-helpers.sh — canonical in dev-team AND mirrored into
+# homebrew-tap/share/scripts/. This file is tap-native with no dev-team
+# canonical; sharing a name with a mirrored helper is a collision waiting to
+# happen the moment anything sources both into one process.
+#
+# Invokes deploy-worktree-personas.sh directly, as a SUBPROCESS, rather than
+# routing through deploy_team_personas, for five reasons (full detail in
+# XACA-0931-001 §3.5): (1) dependency direction — a tap-native upgrade must
+# not depend on a mirrored file's freshness to do its job; (2)
+# deploy_team_personas branches on kb-sync-personas presence, a dev-machine
+# concept meaningless during a tap upgrade; (3) it swallows all output and
+# cannot report per-target counts; (4) it passes no --force, so against an
+# already-deployed target it is a marker no-op (see the field evidence's §5 —
+# `.synced-from-tap` present is a permanent skip without --force); (5)
+# update_aux_scripts (earlier in this run) already owns
+# ${WORKING_DIR}/scripts/deploy-worktree-personas.sh, so this dependency is
+# already tap-internal and already current by the time this runs.
+#
+# --force is safe unconditionally here: deployed persona files are ephemeral
+# synced copies kept untracked via the target repo's .git/info/exclude
+# (_deploy_nested_main_root writes that exclude itself) — an unconditional
+# rewrite of a handful of small files per target is cheap and idempotent, and
+# risks no user content.
+#
+# Failure semantics (XACA-0931-001 §3.7) — read before changing this
+# function: a per-target failure is NON-FATAL (warn, count, continue); the
+# step as a WHOLE never aborts the upgrade (matches update_team_personas'
+# fail-soft convention); a summary line prints on every run, including a
+# genuine "0 target(s)" run; "no targets" and "could not determine targets"
+# are never allowed to collapse into the same signal; and F>0/U>0 survive to
+# the end-of-run summary via UPGRADE_PERSONA_DEPLOY_HAD_WARNINGS, without
+# changing the upgrade's exit status.
+# ---------------------------------------------------------------------------
+deploy_team_personas_to_projects() {
+  print_section "Deploying Personas to Project Directories"
+
+  local deployer="${WORKING_DIR}/scripts/deploy-worktree-personas.sh"
+  if [ ! -f "$deployer" ]; then
+    print_warning "deploy-worktree-personas.sh not found at ${deployer} (expected to already be refreshed by update_aux_scripts earlier in this run) — skipping deploy-to-projects step"
+    UPGRADE_PERSONA_DEPLOY_HAD_WARNINGS=true
+    UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY="deployer script missing at ${deployer}"
+    return 0
+  fi
+
+  # .teams[] cross-check state (XACA-0931-001 §3.3) — informational only,
+  # never a gate. Distinguish "config says no teams" from "config could not
+  # be read at all": the latter must not silently suppress every cross-check
+  # warning below (a missing/unreadable config is itself notable, not a
+  # reason to go quiet).
+  local teams_str=""
+  teams_str=$(get_configured_teams 2>/dev/null) || true
+  local -a configured_teams=()
+  if [ -n "$teams_str" ]; then
+    read -ra configured_teams <<< "$teams_str"
+  fi
+  local configured_lookup_failed=false
+  if [ ! -f "$(get_config_file)" ]; then
+    configured_lookup_failed=true
+    print_warning "Could not read .aiteamforge-config — the .teams[] cross-check below is skipped for all targets (config missing/unreadable, not necessarily empty)"
+  fi
+
+  _xaca0931_load_persona_targets
+  local target_uninspectable="${_XACA0931_TARGETS_UNINSPECTABLE:-0}"
+
+  local -a dry_run_args=()
+  [ "$DRY_RUN" = true ] && dry_run_args=(--dry-run)
+
+  local refreshed=0 skipped=0 failed=0
+  local any_target=false
+  local line team project_dir in_configured ct deploy_rc
+
+  for line in "${_XACA0931_TARGETS[@]:-}"; do
+    [ -n "$line" ] || continue
+    IFS=$'\t' read -r team project_dir <<< "$line"
+    [ -n "$team" ] && [ -n "$project_dir" ] || continue
+    any_target=true
+
+    # Defense-in-depth path-safety guard (matches _xaca0925_valid_team_id) —
+    # team ids here come from tap-shipped share/teams/*.conf basenames, not
+    # arbitrary user config, so this should never fire in practice; kept for
+    # the same reason the SOURCE-refresh path keeps it.
+    if ! _xaca0925_valid_team_id "$team"; then
+      print_warning "[${team}] Team id contains characters outside [A-Za-z0-9_-] — skipping deploy for ${project_dir} (path-safety guard)"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    # .teams[] cross-check (XACA-0931-001 §3.3): refresh anyway either way —
+    # a deployed persona dir on disk is conclusive evidence the team is
+    # installed, regardless of what the config says. This only decides
+    # whether to also surface a warning that the config itself is incomplete.
+    if [ "$configured_lookup_failed" = false ]; then
+      in_configured=false
+      for ct in "${configured_teams[@]:-}"; do
+        [ "$ct" = "$team" ] && { in_configured=true; break; }
+      done
+      if [ "$in_configured" = false ]; then
+        print_warning "[${team}] deployed personas found at ${project_dir} but '${team}' is not listed in .aiteamforge-config .teams[] — refreshing anyway; the config is incomplete. Its SOURCE was already refreshed earlier this run (update_team_personas unions .teams[] with on-disk deploy targets), so this deploy is publishing current content, not stale content."
+      fi
+    fi
+
+    deploy_rc=0
+    "$deployer" --nested-main-root "$project_dir" "$team" --force "${dry_run_args[@]}" || deploy_rc=$?
+    if [ "$deploy_rc" -eq 0 ]; then
+      refreshed=$((refreshed + 1))
+    else
+      failed=$((failed + 1))
+      print_warning "[${team}] Deploy to ${project_dir} failed (exit ${deploy_rc}) — continuing with remaining targets (fail-soft)"
+    fi
+  done
+
+  local summary="Deployed personas: ${refreshed} target(s) refreshed, ${skipped} skipped, ${failed} failed, ${target_uninspectable} uninspectable"
+
+  # "No targets" and "could not determine targets" must never collapse into
+  # the same signal (XACA-0931-001 §3.7 point 4 — a live near-miss during
+  # this ticket's own field probe: a non-login-shell PATH artifact made
+  # `brew: NONE` / `teams: <empty>` read exactly like the benign case).
+  if [ "$any_target" = false ]; then
+    if [ "$target_uninspectable" -gt 0 ]; then
+      print_warning "Could not determine persona deploy targets (${target_uninspectable} uninspectable) — see warnings above"
+    else
+      print_info "No nested-project persona deploy targets found on this box"
+    fi
+  fi
+
+  # A run that finds nothing prints "0 target(s)" rather than nothing —
+  # absence of output must never be indistinguishable from success.
+  if [ "$failed" -eq 0 ] && [ "$target_uninspectable" -eq 0 ]; then
+    print_success "$summary"
+  else
+    print_warning "$summary"
+    UPGRADE_PERSONA_DEPLOY_HAD_WARNINGS=true
+    UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY="$summary"
+  fi
+
+  return 0
 }
 
 # XACA-0771: Mandatory shared alias files. install_aliases() (install-shell.sh)
@@ -3724,6 +3994,15 @@ update_ttyd_bridge
 update_imgcat
 update_shell_helpers
 update_team_personas
+# XACA-0931-002: MUST run immediately after update_team_personas, not before
+# update_claude_hooks arbitrarily moved — ordering is a correctness
+# requirement (XACA-0931-001 §3.6). After update_aux_scripts (already
+# satisfied — it owns deploy-worktree-personas.sh, the tool this step
+# invokes) and after update_team_personas (the SOURCE must be fresh before
+# it is deployed, or this step pushes the previous release's content over a
+# currently-correct deployed copy — measured regression on darren-m4-mini's
+# `medical` target, XACA-0931 field evidence §3).
+deploy_team_personas_to_projects
 update_claude_hooks
 update_global_claude_md
 update_skills
@@ -3806,6 +4085,15 @@ elif [ "$UPGRADE_BREW_FAILED" = true ]; then
   print_error "Then re-run the health check: aiteamforge doctor"
   exit 1
 else
+  # XACA-0931-002: deferred persona-deploy warning. Per §3.7's ruling this
+  # must NOT change the exit status (that would recreate XACA-1028's cascade
+  # in the opposite direction) — it exists purely so a nightly LaunchAgent
+  # log cannot read an unqualified SUCCESS over a failed/uninspectable
+  # persona deploy target.
+  if [ "$UPGRADE_PERSONA_DEPLOY_HAD_WARNINGS" = true ]; then
+    print_warning "Completed with warnings: ${UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY}"
+    print_warning "See the 'Deploying Personas to Project Directories' section above for detail."
+  fi
   print_success "Dev-team has been upgraded successfully!"
   echo ""
   print_info "Next steps:"

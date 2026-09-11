@@ -365,6 +365,70 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   New `tests/test-xaca-0787-012-claude-config-flag-guard.sh` (8 assertions).
   KNOWN GAP, filed as XACA-1169: the guard lives in the runners, so a suite
   invoked standalone still bypasses it.
+- XACA-0931-003 (`aiteamforge-persona-parity-check.sh`): added a third
+  comparison surface — deployed (S3, `<project_dir>/.claude/agents/*.md`) vs
+  working-dir source (S2) — alongside the existing S1(Cellar)<->S2 check.
+  Deployed target enumeration is git-root-based (never a `~/<team>/*/` glob,
+  never keyed on the `.synced-from-tap` marker — a real, currently-drifted
+  target can have no marker at all) via the new shared
+  `libexec/lib/persona-targets.sh` (`pt_enumerate_targets`), the SAME
+  enumerator XACA-0931-002's upgrade-path fixer uses, so the checker can
+  never look at a smaller target set than the fixer writes to. Comparison is
+  against the EXPECTED TRANSFORM of S2 (via
+  `deploy-worktree-personas.sh emit-transformed`), never raw S2 — a raw `cmp`
+  reports drift on every file, always, because the deployer rewrites the
+  frontmatter `name:` line on every file by design. Fails CLOSED (exit 1) on
+  an unreadable deployed dir, an undeterminable target set, or a failed/
+  unavailable transform (verified against a genuine python3-absent `PATH`,
+  never falling back to a raw comparison); an orphaned deployed file with no
+  source counterpart is a WARN, not drift. Exit-code contract unchanged
+  (`0` clean / `1` drift-or-uninspectable / `2` bad args) — no new flag, no
+  new entry point — so XACA-0927's future doctor-arm wiring picks this
+  surface up for free. Validated end-to-end against a fixture reproducing
+  darren-m4-mini's measured field data (`legal/coparenting`: stale source,
+  deployed faithfully mirrors it -> S2<->S3 reports CLEAN; `medical/general`:
+  stale source, deployed is CURRENT and has no `.synced-from-tap` marker ->
+  S2<->S3 reports DRIFT) — the two-sided fixture that catches a
+  marker-keyed implementation, which would wrongly report 0 drift for
+  medical. Also corrected this script's own header, which (via XACA-0927)
+  claimed to exist "only inside the tap checkout" — it ships in every
+  consumer's Cellar. See `kanban/plans/XACA-0931/XACA-0931-001_decision.md`
+  §4 and `XACA-0931_field-evidence_m4mini.md`.
+- XACA-0931-002 (`aiteamforge-upgrade.sh` + new `libexec/lib/persona-targets.sh`,
+  both tap-native): closes the loop the parent ticket is named for — upgrade
+  now pushes refreshed personas out to every already-deployed nested-project
+  target, not just the Cellar-to-working-dir SOURCE refresh it already did.
+  New `deploy_team_personas_to_projects()`, inserted immediately after
+  `update_team_personas` in the run sequence (ordering is a correctness
+  requirement: source must be fresh before it is deployed, or this step
+  regresses a currently-correct deployed copy — measured on darren-m4-mini's
+  `medical` target, where deployed content matched the Cellar while
+  working-dir source did not). Invokes
+  `deploy-worktree-personas.sh --nested-main-root <dir> <team> --force`
+  directly as a subprocess (not the mirrored `deploy_team_personas` helper —
+  see that function's own XACA-0931 entry in the dev-team CHANGELOG for why
+  it needed a separate fix). `update_team_personas()` itself is extended to
+  refresh/repair a team's SOURCE from the Cellar whenever a deployed target
+  exists for it, even when `.teams[]` omits that team (measured on
+  darren-m4-mini: `.teams[]` == `["finance"]` while legal+medical personas
+  are demonstrably deployed). Both steps share ONE target enumerator
+  (`persona-targets.sh`'s `pt_enumerate_targets`, git-root resolution, never
+  a `~/<team>/*/` glob, never keyed on `.synced-from-tap`) — the SAME
+  enumerator XACA-0931-003's parity checker consumes above, so the fixer and
+  the detector can never disagree about what counts as a target. Failure
+  semantics: per-target failures are non-fatal, the step never aborts the
+  upgrade, a summary line prints on every run (including a genuine
+  "0 target(s)"), "no targets" is never conflated with "could not determine
+  targets", and failed/uninspectable counts survive to a deferred warning at
+  the end-of-run summary without changing the upgrade's exit status (XACA-1028
+  precedent: a nightly log must never read SUCCESS over a real failure).
+  Verified end-to-end under `/bin/bash` 3.2 against a fixture reproducing
+  darren-m4-mini's measured field data, using the REAL
+  `deploy-worktree-personas.sh` (not a stub) — confirms `--force` defeats a
+  pre-existing stale marker, confirms the medical-regression trap is avoided
+  by fixing SOURCE before DEPLOY, and confirms one target's failure does not
+  abort the rest. See `kanban/plans/XACA-0931/XACA-0931-001_decision.md` §3
+  and `XACA-0931_field-evidence_m4mini.md`.
 - XACA-1113-022 (review, PR #853): the `test-xaca-1113-012-msg-fail-closed.sh`
   seeding added for XACA-1113's `set -u` fix only covered the six counter
   variables (`TOTAL_TESTS`, `PASSED_TESTS`, `FAILED_TESTS`, `SKIPPED_TESTS`,

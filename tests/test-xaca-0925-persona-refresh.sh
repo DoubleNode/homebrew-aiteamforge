@@ -211,7 +211,14 @@ else
             esac
             # Only pull it in if something already extracted actually calls it
             # (a bare word, not part of a longer identifier).
-            if printf '%s\n' "$_COMBINED_SRC" | grep -qE "(^|[^A-Za-z0-9_])${_cand}([^A-Za-z0-9_(]|\$)"; then
+            # XACA-0931: strip FULL-LINE comments before call-detection. Prose
+            # that merely NAMES another function in English is not a call, and
+            # treating it as one transitively vacuums in unrelated functions
+            # (observed: a new comment in update_team_personas mentioning
+            # update_aux_scripts dragged that whole function in, failing T12).
+            # Only whole-line comments are removed — stripping from any '#'
+            # would corrupt lines using ${var#prefix} and cause false NEGATIVES.
+            if printf '%s\n' "$_COMBINED_SRC" | sed -E '/^[[:space:]]*#/d' | grep -qE "(^|[^A-Za-z0-9_])${_cand}([^A-Za-z0-9_(]|\$)"; then
                 _helper_src="$(_extract_fn "$_cand")"
                 [ -z "$_helper_src" ] && continue
                 _COMBINED_SRC="${_helper_src}"$'\n\n'"${_COMBINED_SRC}"
