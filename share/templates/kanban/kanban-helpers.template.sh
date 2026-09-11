@@ -15811,7 +15811,7 @@ FRONTMATTER
             command rm -f -- "$new_file" 2>/dev/null
             if [[ ! -e "$new_file" ]]; then
                 echo "" >&2
-                echo "Error: NOTHING WAS WRITTEN — the new entry failed validation and was removed (slot ${prefix}${padded_id} is free again). The validation output below says why; a slot collision clears on retry, a content error does not:" >&2
+                echo "Error: NOTHING WAS WRITTEN — the new entry (allocated slot ${prefix}${padded_id}) failed validation and was removed. The validation output below says why; a slot collision clears on retry, a content error does not:" >&2
                 echo "${_kb_add_validate_output}" >&2
                 return 1
             fi
