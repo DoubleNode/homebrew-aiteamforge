@@ -166,30 +166,50 @@ except:
         worktree_info=$(wt-current short 2>/dev/null || echo "develop")
     fi
 
-    # XACA-0279: Resolve Anthropic account identity for the agent panel JSON.
+    # XACA-0279: Resolve the AI account identity for the agent panel JSON.
     # Prefer env vars set by _cc_export_account_credentials (cc/ccc/kb-run entry points).
-    # Fall back to team-paths.json so banner-fresh terminals (before cc is invoked)
+    # Fall back to the team registry so banner-fresh terminals (before cc is invoked)
     # still carry account context. Downstream consumers (agent-panel.html, fleet-monitor)
     # treat empty strings as "no account configured — using default OAuth".
+    #
+    # XACA-1184-002: the fallback now reads teams.<slug>.ai.credential through the
+    # shared resolver in scripts/team-account-display.sh (which delegates to
+    # kanban-hooks/aiteamforge_registry.ai_credential) rather than parsing
+    # team-paths.json inline for the retired anthropic_* trio. Only a routed
+    # account ("set") populates the fields; undeclared, declared-none and an
+    # unresolvable slug all leave them empty, which is the same JSON payload the
+    # legacy read produced for those cases.
+    #
+    # NOTE: this file SHIPS to the tap (share/scripts/), so the resolver has to be
+    # reachable on a consumer too. If it is not, this degrades to empty strings —
+    # the documented "no account configured" payload — never an error.
     local account_id="${CLAUDE_ACTIVE_ACCOUNT_ID:-}"
     local account_nickname="${CLAUDE_ACTIVE_ACCOUNT_NICKNAME:-}"
-    if [[ ( -z "$account_nickname" || -z "$account_id" ) && -f "$HOME/.aiteamforge/team-paths.json" ]] && command -v python3 >/dev/null 2>&1; then
-        local _account_pair
-        _account_pair=$(python3 -c "
-import json
-try:
-    with open('$HOME/.aiteamforge/team-paths.json') as f:
-        cfg = json.load(f)
-    t = cfg.get('teams', {}).get('${team}', {})
-    print(t.get('anthropic_account_id', '') + '|' + t.get('anthropic_account_nickname', ''))
-except Exception:
-    print('|')
-" 2>/dev/null)
-        if [[ -z "$account_id" ]]; then
-            account_id="${_account_pair%%|*}"
+    if [[ -z "$account_nickname" || -z "$account_id" ]]; then
+        if ! command -v atf_team_account_fields >/dev/null 2>&1; then
+            local _daa_helper
+            for _daa_helper in "${AITEAMFORGE_DIR:-}/scripts/team-account-display.sh" \
+                               "${HOME}/dev-team/scripts/team-account-display.sh" \
+                               "${HOME}/aiteamforge/scripts/team-account-display.sh"; do
+                if [[ -n "$_daa_helper" && -f "$_daa_helper" ]]; then
+                    source "$_daa_helper"
+                    break
+                fi
+            done
         fi
-        if [[ -z "$account_nickname" ]]; then
-            account_nickname="${_account_pair##*|}"
+        if command -v atf_team_account_fields >/dev/null 2>&1; then
+            local _account_fields
+            _account_fields=$(atf_team_account_fields "$team" 2>/dev/null)
+            if [[ "$_account_fields" == set\|* ]]; then
+                local _daa_rest="${_account_fields#*|}"   # account_id|nickname|env_var
+                if [[ -z "$account_id" ]]; then
+                    account_id="${_daa_rest%%|*}"
+                fi
+                local _daa_nick="${_daa_rest#*|}"         # nickname|env_var
+                if [[ -z "$account_nickname" ]]; then
+                    account_nickname="${_daa_nick%%|*}"
+                fi
+            fi
         fi
     fi
 

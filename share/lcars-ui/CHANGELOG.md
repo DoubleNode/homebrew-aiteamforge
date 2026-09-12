@@ -11,6 +11,28 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+- **XACA-1184-003: the legacy `anthropic_*` projection is retired from `server.py` — write side
+  and read side.** `_set_team_ai_credential()` now writes `ai.credential` and nothing else; the
+  three derived `anthropic_account_id` / `anthropic_account_nickname` / `anthropic_api_key_env_var`
+  assignments added for the XACA-1178 compat window are gone, their ~13 readers having moved to
+  `aiteamforge_registry.ai_credential()` in subitem 002.
+  - `serve_team_account_current()` drops the legacy fallback branch. Its three-state response
+    contract is preserved exactly: `credential` dict -> `config_source: "ai"` populated;
+    `credential: null` -> `config_source: "ai"` all-empty (a declared "no team credential");
+    no `credential` key -> `config_source: "legacy"` all-empty (genuine non-declaration). The two
+    all-empty states are distinguishable ONLY by `config_source`, so `"legacy"` is retained as a
+    frozen wire value naming the third state rather than renamed.
+  - The TEST CONNECTION path stops falling back to `anthropic_api_key_env_var`. Since nothing
+    writes that field any more, the fallback could only resolve a variable name staler than the
+    credential beside it and probe the previous account. Unresolvable returns the pre-existing
+    `400 No env_var_name could be resolved`.
+  - `team_block.pop('anthropic_account_ref', None)` is deliberately KEPT — it clears actively
+    misleading data (never read, stopped being written by XACA-1178, names the previous account),
+    not a projection with readers. On-disk deletion of the trio remains subitem 009's, user-gated.
+  - The XACA-1178-016/017/024 coercion and its `[LCARS] WARNING` are preserved; only the warning
+    text changed, since there is no longer a fallback to describe.
+  - Docstrings and comments at the save/assign endpoints updated — none may keep describing a
+    projection the code no longer performs.
 - **XACA-1178-007: `ai.credential` replaces the planned flat `anthropic_auth_type` field.**
   This subitem's original plan said to write a flat `anthropic_auth_type` field into
   `team-paths.json`. That was superseded mid-ticket by the merged XACA-0282-012 decision (PR

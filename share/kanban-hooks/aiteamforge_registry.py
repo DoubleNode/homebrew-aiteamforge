@@ -69,9 +69,10 @@ For a field F on team T, tiers are consulted in this order:
 
   2. **DEFAULT_TEAMS** — the baked-in Python seed. This is the
      MIGRATION-TOLERANCE tier, and that is its whole justification: an overlay
-     written before a field existed (a v1/v2 config with no ``anthropic_*``
-     keys, or any overlay predating ``primary_host``) must still resolve. It is
-     NOT a "more correct" tier and must never be treated as one.
+     written before a field existed (an overlay predating ``primary_host``,
+     or — measured 2026-09-12, all 27 teams on the authoring host — one
+     predating the ``ai`` block) must still resolve. It is NOT a "more
+     correct" tier and must never be treated as one.
 
   3. **DERIVED** — only for fields with an explicitly registered deriver, and
      only when tiers 1 and 2 did not declare the field at all. Exactly ONE
@@ -116,8 +117,10 @@ prescription, and this codebase already requires it, in both directions:
     deliberately NOT overridden by ``DEFAULT_TEAMS`` — XACA-0802-004 documents
     that a blanket ``if not host`` fallback made Python and shell disagree
     about the identical overlay entry.
-  * ``anthropic_account_id``: ``""`` is the ordinary declared value on all 15
-    seed teams.
+  * ``ai``: a present ``ai`` block whose ``credential`` is JSON ``null`` is a
+    DECLARED decision ("no team credential; the CLI uses its own login"),
+    while ``ai: null`` on the outer key is genuine absence. Two nulls, one
+    level apart, meaning opposite things — see :func:`ai_credential`.
   * ``board_less``: ``False`` is DATA. Only a missing key is absence.
 
 A single global sentinel tuple cannot serve those four rules at once, which is
@@ -139,6 +142,7 @@ consulted lazily, inside the call. (Verified by test.)
 from __future__ import annotations
 
 import enum
+import sys
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
@@ -152,10 +156,8 @@ __all__ = [
     "FieldState",
     "Source",
     "UnknownTeamError",
+    "ai_credential",
     "alias_of",
-    "anthropic_account_id",
-    "anthropic_account_nickname",
-    "anthropic_api_key_env_var",
     "component_label",
     "copyright_owner",
     "declare_field",
@@ -321,7 +323,10 @@ _PATHISH_SENTINELS: tuple = (None, "", "null")
 # _NULLISH: "" is a DECLARED value (an operator saying "unowned"/"none
 #   configured"), so it is NOT a sentinel. XACA-0802-004 for primary_host.
 _NULLISH_SENTINELS: tuple = (None, "null")
-# _KEYONLY: only a missing key is absence. For booleans, where False is data.
+# _KEYONLY: only a missing key or an explicit null is absence. For fields whose
+#   other falsy spellings are DATA (board_less, where False is a real value) or
+#   CORRUPTION the accessor must see rather than swallow (ai, a structured
+#   block — see its spec).
 _KEYONLY_SENTINELS: tuple = (None,)
 
 
@@ -395,19 +400,30 @@ _FIELD_SPECS: dict[str, FieldSpec] = {
         "through to DEFAULT_TEAMS — XACA-0802-004 records that doing so made "
         "Python and shell disagree about the identical overlay entry.",
     ),
-    # --- Anthropic account routing (XACA-0279) ----------------------------
-    "anthropic_account_id": FieldSpec(
-        "anthropic_account_id", _NULLISH_SENTINELS, True, None,
-        "Per-team Anthropic account id. '' is the ordinary declared value on "
-        "all 15 seed teams, so it is DATA, not absence.",
-    ),
-    "anthropic_account_nickname": FieldSpec(
-        "anthropic_account_nickname", _NULLISH_SENTINELS, True, None,
-        "Human label for the account. '' is a declared value.",
-    ),
-    "anthropic_api_key_env_var": FieldSpec(
-        "anthropic_api_key_env_var", _NULLISH_SENTINELS, True, None,
-        "Env var holding the failover API key. '' is a declared value.",
+    # --- AI credential routing (XACA-1184; retires the XACA-0279 trio) ----
+    "ai": FieldSpec(
+        "ai", _KEYONLY_SENTINELS, True, None,
+        "The team's AI block. The routed account lives one level in, at "
+        "ai.credential (XACA-1178-007 / XACA-0282-012 2.4); read it through "
+        "ai_credential(), which is the ONLY place the unwrap is implemented. "
+        "It replaces anthropic_account_id / anthropic_account_nickname / "
+        "anthropic_api_key_env_var, which this table carried until XACA-1184. "
+        "SENTINELS ARE _KEYONLY DELIBERATELY, and this is the one field where "
+        "copying primary_host's _NULLISH tuple would be actively WRONG. Two "
+        "different nulls live here, one level apart, meaning opposite things: "
+        "`ai: null` (this key) is NO BLOCK and is absence; `ai.credential: "
+        "null` is a DECLARED decision — 'no team credential, the CLI falls "
+        "back to its own login'. Only the OUTER null is a sentinel; keeping "
+        "the inner one out of this tuple is what stops the resolver flattening "
+        "a recorded decision into a gap (S002). '' and the string 'null' are "
+        "NOT sentinels either: `ai` is a structured block, not a path, so "
+        "those spellings are CORRUPTION rather than a positional-table "
+        "in-band absence (XACA-0727's case) — and the accessor has to SEE them "
+        "to warn, because swallowing them here is the self-heal-without-a-trace "
+        "shape XACA-1178-024 called out. absent_stops_chain=True: credentials "
+        "are per-MACHINE, so an overlay declaring no block must not inherit one "
+        "from the baked seed. NO DERIVER — an invented credential is the "
+        "phantom-identity shape K659 forbids, with a live account behind it.",
     ),
     # --- overlay-only licence/NOTICE block (finding F6) -------------------
     # These five live in the overlay and in NEITHER seed. They have no source of
@@ -770,19 +786,81 @@ def primary_host(team: str, *, config: dict | None = None) -> str:
     return _coerced_str(team, "primary_host", config)
 
 
-def anthropic_account_id(team: str, *, config: dict | None = None) -> str:
-    """Return the team's Anthropic account id, or ``""`` (XACA-0279)."""
-    return _coerced_str(team, "anthropic_account_id", config)
+def ai_credential(team: str, *, config: dict | None = None) -> dict[str, Any] | None | _Absent:
+    """Return the team's routed AI credential (XACA-1184). THREE-STATE.
 
+    This accessor deliberately does NOT collapse to one not-found shape the
+    way ``lcars_port`` does, because ``ai.credential`` genuinely carries three
+    different answers and the middle one is a decision somebody recorded:
 
-def anthropic_account_nickname(team: str, *, config: dict | None = None) -> str:
-    """Return the human label for the team's Anthropic account, or ``""``."""
-    return _coerced_str(team, "anthropic_account_nickname", config)
+      * :data:`ABSENT` — **undeclared.** No ``ai`` block, or a block with no
+        ``credential`` key. Nothing has been decided for this team. Test with
+        ``x is ABSENT`` / :func:`is_absent`; never truthiness — ``bool(ABSENT)``
+        raises on purpose.
+      * ``None`` — **declared "no team credential".** The CLI intentionally
+        falls back to its own login. A real recorded decision, NOT absence.
+      * ``dict`` — an account is routed. Keys: ``account_id``, ``nickname``,
+        ``env_var_name``, ``engine_slug``, ``account_slug``, and optionally
+        ``auth_type`` (``oauth_token`` | ``api_key`` | ``gateway_token``).
 
+    The writer is ``lcars-ui/server.py``'s ``_set_team_ai_credential``, which
+    replaces the credential as a WHOLE OBJECT. Callers must do the same: never
+    patch one key of the dict returned here and write it back (invariant I2 of
+    ``docs/xaca-0282/research/012-credential-config-shape.md`` §1.3 — violating
+    it is exactly how ``anthropic_account_ref`` went stale).
 
-def anthropic_api_key_env_var(team: str, *, config: dict | None = None) -> str:
-    """Return the env var holding the team's failover API key, or ``""``."""
-    return _coerced_str(team, "anthropic_api_key_env_var", config)
+    MALFORMED INPUT RESOLVES TO ABSENT, LOUDLY. A hand-edited ``ai`` or
+    ``ai.credential`` holding a string/list/int is corruption: it is not a
+    routed account and it is not a declared "none" either, so the honest answer
+    is "undeclared", and a warning goes to stderr rather than the block being
+    silently self-healed (XACA-1178-016/017/024, the same guards server.py
+    applies on the write path). It must not raise — 13 call sites would get an
+    opaque ``TypeError`` from a typo in a JSON file.
+
+    NO LEGACY FALLBACK, DELIBERATELY. Promoting the retired
+    ``anthropic_account_id`` / ``anthropic_account_nickname`` /
+    ``anthropic_api_key_env_var`` trio into ``ai.credential`` is a ONE-TIME
+    on-disk migration in ``aiteamforge_paths.py`` (XACA-1184-004). Reading the
+    trio here too would make that migration unobservable — every team would
+    answer correctly whether or not it ever ran — and the retirement would
+    silently never complete.
+
+    Returns a SHALLOW COPY. ``load_config()`` caches, so the resolved value is
+    a live reference into a process-wide dict; every other accessor in this
+    module returns an immutable (str/int/Path) and so has never had to care.
+    A caller mutating this one in place would rewrite the credential for every
+    later reader in the process. The credential is flat scalars, so a shallow
+    copy is sufficient.
+
+    Raises:
+        UnknownTeamError: if *team* is registered in no tier.
+    """
+    block = resolve_field(team, "ai", default=ABSENT, config=config)
+    if block is ABSENT:
+        return ABSENT
+    if not isinstance(block, dict):
+        print(
+            f"[aiteamforge-registry] WARNING: team-paths 'ai' block for team "
+            f"{team!r} is {type(block).__name__}, not a dict — treating the "
+            f"credential as undeclared (XACA-1178-016/024).",
+            file=sys.stderr,
+        )
+        return ABSENT
+    if "credential" not in block:
+        # A block that exists but has never recorded a credential decision.
+        return ABSENT
+    credential = block["credential"]
+    if credential is None:
+        return None
+    if not isinstance(credential, dict):
+        print(
+            f"[aiteamforge-registry] WARNING: team-paths ai.credential for team "
+            f"{team!r} is {type(credential).__name__}, not a dict or null — "
+            f"treating as undeclared (XACA-1178-017/024).",
+            file=sys.stderr,
+        )
+        return ABSENT
+    return dict(credential)
 
 
 def component_label(team: str, *, config: dict | None = None) -> str:

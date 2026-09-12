@@ -2799,6 +2799,18 @@ PYEOF
 # kb-msg-provision / kb-spacedock — the *.sh glob sweep below already reaches
 # them once present; being in THIS list is sufficient and no extra explicit
 # glob-sweep entry is needed.
+#
+# ── XACA-1184-002/-008: team-account-display.sh ─────────────────
+# The shared resolver for a team's routed ai.credential, sourced by
+# display-agent-avatar.sh and by the nine team banners. It reaches this list for
+# exactly the reason the gh-bot pair above does, and it is a NEW file, so the
+# "refresh only what this machine already installed" default would skip it on
+# every existing box without fail — no consumer has ever had it. It is also
+# worse than a missing executable when absent: the callers guard on
+# `command -v atf_team_account_fields`, so a box that never materialises it
+# silently renders EMPTY account labels instead of erroring, and the upgrade
+# looks clean. Carries .sh, so — as above — this list is sufficient and no
+# extra glob-sweep entry is needed.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -2816,6 +2828,7 @@ kb-msg-provision
 kb-spacedock
 gh-bot-review.sh
 gh-bot-test.sh
+team-account-display.sh
 EOF
 }
 

@@ -197,6 +197,16 @@ _val_check_scripts() {
         # both must be present AND executable for the relay to run at all.
         "fleet-reporter.sh"
         "msg-client.sh"
+        # XACA-1184-008: the ai.credential resolver sourced by
+        # display-agent-avatar.sh (listed above) and the nine team banners.
+        # Checked here for precisely the reason the XACA-0796 note below gives:
+        # this is a transitive SIBLING, and an entrypoint-only check cannot see
+        # it go missing — display-agent-avatar.sh is present and passes while
+        # the helper it sources is absent. Its callers guard on
+        # `command -v atf_team_account_fields`, so the live symptom is an empty
+        # account label, never an error. Executable, like the other sourced *.sh
+        # libraries the installer chmod +x's.
+        "team-account-display.sh"
     )
 
     for script in "${required_scripts[@]}"; do

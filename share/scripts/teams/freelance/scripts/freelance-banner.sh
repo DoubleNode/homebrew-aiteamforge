@@ -100,18 +100,30 @@ print -P "${WHITE}${BOLD}    Role: ${SESSION_ROLE}${RESET}"
 _saved=$(_cc_saved_session_label 2>/dev/null)
 [[ -n "$_saved" ]] && print -P "${WHITE}${BOLD}    Saved Session: ${RESET}${WHITE}${_saved}${RESET}"
 unset _saved
-# Active account display (XACA-0279)
+# Active account display (XACA-0279).
+# XACA-1184-002: reads teams.<slug>.ai.credential through the shared resolver in
+# scripts/team-account-display.sh, which delegates to the one sanctioned reader
+# (kanban-hooks/aiteamforge_registry.ai_credential). This replaced nine
+# byte-identical inline team-paths parsers parked in nine banners.
+#
+# NOTE (XACA-1184-002, behaviour deliberately UNCHANGED): the slug below is the
+# bare "freelance", which is a parameterized-template contract violation that
+# aiteamforge_paths.py's contract scrub deletes from the overlay — real teams
+# are freelance-<instance> (MEASURED: 11 of them on this machine, bare
+# "freelance" absent). So this lookup could never match before and cannot now;
+# it resolves "unknown-team" and renders "(default OAuth)", exactly as the
+# legacy read resolved "" and rendered "(default OAuth)". Left as-is on purpose:
+# making it resolve a real instance is a semantic change, not a field rename.
 _active_nickname=""
-if [[ -f "$HOME/.aiteamforge/team-paths.json" ]] && command -v python3 >/dev/null 2>&1; then
-    _active_nickname=$(python3 -c "
-import json, sys
-try:
-    with open('$HOME/.aiteamforge/team-paths.json') as f:
-        cfg = json.load(f)
-    print(cfg.get('teams', {}).get('freelance', {}).get('anthropic_account_nickname', ''))
-except Exception:
-    pass
-" 2>/dev/null)
+if [[ -n "${AITEAMFORGE_DIR:-}" && -f "${AITEAMFORGE_DIR}/scripts/team-account-display.sh" ]]; then
+    source "${AITEAMFORGE_DIR}/scripts/team-account-display.sh"
+elif [[ -f "${HOME}/dev-team/scripts/team-account-display.sh" ]]; then
+    source "${HOME}/dev-team/scripts/team-account-display.sh"
+elif [[ -f "${HOME}/aiteamforge/scripts/team-account-display.sh" ]]; then
+    source "${HOME}/aiteamforge/scripts/team-account-display.sh"
+fi
+if command -v atf_team_account_nickname >/dev/null 2>&1; then
+    _active_nickname=$(atf_team_account_nickname 'freelance' 2>/dev/null)
 fi
 if [[ -n "$_active_nickname" ]]; then
     print -P "${WHITE}${BOLD}    Active Account: ${RESET}${WHITE}${_active_nickname}${RESET}"

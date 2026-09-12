@@ -874,9 +874,6 @@ new_entry = f'''    "{team_id}": {{
         "lcars_port_base": {port_base},
         "lcars_port_range": {port_range},
         "lcars_port": {port_value},
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "",
     }},'''
 
 # Insert before the closing "# ── Aliases" comment or before the final closing }
@@ -1205,9 +1202,6 @@ with lock:
             "lcars_port": lcars_port,
             "lcars_port_base": int(port_base_str),
             "lcars_port_range": int(port_range_str),
-            "anthropic_account_id": "",
-            "anthropic_account_nickname": "",
-            "anthropic_api_key_env_var": "",
         }
 
         after_ids = set(config["teams"].keys())

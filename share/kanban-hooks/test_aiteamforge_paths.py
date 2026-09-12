@@ -489,7 +489,7 @@ def _reset_module_cache():
     performs a fresh read on the next call."""
     aiteamforge_paths._CONFIG_CACHE = None
     aiteamforge_paths._CONFIG_PATH_AT_LOAD = None
-    aiteamforge_paths._A1_BACKFILL_ATTEMPTED = False
+    aiteamforge_paths._LEGACY_CREDENTIAL_LIFT_ATTEMPTED = False  # XACA-1184-004 (replaced _A1_BACKFILL_ATTEMPTED)
     aiteamforge_paths._CONTRACT_SCRUB_ATTEMPTED = False
     aiteamforge_paths._BOARD_LESS_BACKFILL_ATTEMPTED = False  # XACA-0794
 
@@ -500,9 +500,6 @@ def _minimal_team_entry(slug: str) -> dict:
         "kanban_dir": f"/tmp/{slug}/kanban",
         "working_dir": f"/tmp/{slug}",
         "lcars_port": 9000,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": f"TEAM_{slug.upper().replace('-', '_')}_API_KEY",
     }
 
 
@@ -1144,9 +1141,6 @@ class TestBoardLessLegacyFallback(unittest.TestCase):
             "kanban_dir": shape,
             "working_dir": shape,
             "lcars_port": 8400,
-            "anthropic_account_id": "",
-            "anthropic_account_nickname": "",
-            "anthropic_api_key_env_var": "TEAM_MAINEVENT_API_KEY",
             # Deliberately NO board_less / alias_of keys.
         }
 
@@ -1353,16 +1347,27 @@ class TestKanbanBackupSkipsBoardLess(unittest.TestCase):
 def _customized_mainevent_entry() -> dict:
     """A mainevent entry with several fields customized away from
     DEFAULT_TEAMS, simulating a real per-machine overlay a user has hand-tuned
-    (custom port, custom Anthropic account, custom copyright-style extra
-    fields the backfill has never heard of)."""
+    (custom port, custom routed AI credential, custom copyright-style extra
+    fields the backfill has never heard of).
+
+    XACA-1184: the customized account was three flat anthropic_* keys until the
+    trio was retired; it is now the nested ai.credential block that replaced
+    them. Keeping a customized credential here is the point of the fixture —
+    and the nesting strengthens it, since a structured block is the shape a
+    naive "copy the scalars across" backfill would flatten or drop."""
     return {
         "team_code": "MEV",
         "kanban_dir": None,
         "working_dir": None,
         "lcars_port": 8499,  # customized away from the 8400 default
-        "anthropic_account_id": "custom-acct-id-123",
-        "anthropic_account_nickname": "Custom MainEvent Account",
-        "anthropic_api_key_env_var": "TEAM_MAINEVENT_API_KEY",
+        "ai": {
+            "credential": {
+                "engine_slug": "anthropic",
+                "account_id": "custom-acct-id-123",
+                "nickname": "Custom MainEvent Account",
+                "env_var_name": "TEAM_MAINEVENT_API_KEY",
+            },
+        },
         "copyright_holder": "Custom Holder LLC",  # arbitrary unknown-to-backfill field
         "copyright_year_start": 2024,
         # Deliberately NO board_less / alias_of — pre-XACA-0794 shape.

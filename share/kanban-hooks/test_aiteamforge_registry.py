@@ -28,7 +28,9 @@ module exists to prevent. The fixtures below are hand-authored to contain
 exactly those cases.
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -194,11 +196,30 @@ class ExplicitNullVersusAbsentTests(unittest.TestCase):
         with mock.patch.object(aiteamforge_paths, "DEFAULT_TEAMS", defaults):
             self.assertEqual(reg.primary_host("alpha", config=cfg), "Darren-M3Pro")
 
-    def test_anthropic_empty_string_is_a_declared_value(self):
-        cfg = _cfg({"alpha": {"anthropic_account_id": ""}})
-        defaults = {"alpha": {"anthropic_account_id": "acct-from-seed"}}
+    def test_ai_empty_string_is_a_declared_value_and_stops_the_chain(self):
+        """XACA-1184: the ``ai`` block replaced the ``anthropic_*`` trio, and it
+        does NOT inherit that trio's sentinel vocabulary.
+
+        The retired ``anthropic_account_id`` was _NULLISH — a present ``""``
+        meant "declared, deliberately blank" and stopped the chain. ``ai`` is
+        _KEYONLY, so ``""`` is not a sentinel for a DIFFERENT reason: it is
+        CORRUPTION in a field that is supposed to hold a structured block. Both
+        rules produce DECLARED here, so this test pins the consequence that
+        actually distinguishes them — the accessor must SEE the corruption and
+        warn rather than silently falling through to the seed's real block,
+        which would resolve a live credential for a team whose overlay says
+        something is wrong (XACA-1178-016/024).
+        """
+        cfg = _cfg({"alpha": {"ai": ""}})
+        defaults = {"alpha": {"ai": {"credential": {"account_id": "acct-from-seed"}}}}
         with mock.patch.object(aiteamforge_paths, "DEFAULT_TEAMS", defaults):
-            self.assertEqual(reg.anthropic_account_id("alpha", config=cfg), "")
+            d = reg.declare_field("alpha", "ai", config=cfg)
+            self.assertIs(d.state, reg.FieldState.DECLARED)
+            self.assertEqual(d.value, "")
+            self.assertIs(d.source, reg.Source.OVERLAY)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertIs(reg.ai_credential("alpha", config=cfg), reg.ABSENT)
+        self.assertIn("not a dict", err.getvalue())
 
     def test_pathish_empty_string_IS_absence_and_stops_the_chain(self):
         cfg = _cfg({"alpha": {"kanban_dir": ""}})
@@ -218,8 +239,24 @@ class ExplicitNullVersusAbsentTests(unittest.TestCase):
         """
         self.assertIn("", reg.spec_for("kanban_dir").absent_sentinels)
         self.assertNotIn("", reg.spec_for("primary_host").absent_sentinels)
-        self.assertNotIn("", reg.spec_for("anthropic_account_id").absent_sentinels)
         self.assertEqual(reg.spec_for("board_less").absent_sentinels, (None,))
+        # XACA-1184: `ai` replaced anthropic_account_id in this meta-test, and
+        # it is the sharpest case in the table — three DISTINCT vocabularies
+        # have to be visible here or the test is not doing its job.
+        self.assertEqual(reg.spec_for("ai").absent_sentinels, (None,))
+        self.assertNotIn("null", reg.spec_for("ai").absent_sentinels)
+        self.assertIn("null", reg.spec_for("primary_host").absent_sentinels)
+        self.assertNotEqual(
+            reg.spec_for("ai").absent_sentinels,
+            reg.spec_for("primary_host").absent_sentinels,
+            "ai must not inherit primary_host's _NULLISH tuple — the string "
+            "'null' in a structured block is corruption to warn about, not an "
+            "in-band absence to swallow",
+        )
+        self.assertNotEqual(
+            reg.spec_for("ai").absent_sentinels,
+            reg.spec_for("kanban_dir").absent_sentinels,
+        )
 
     def test_sentinel_matcher_is_type_strict(self):
         """Meta-test: `==` coercion between bool and int must not fire.
@@ -611,6 +648,238 @@ class LiveParityWithLegacyAccessorsTests(unittest.TestCase):
                 except KeyError:
                     new = None
                 self.assertEqual(new, legacy)
+
+
+# ---------------------------------------------------------------------------
+# XACA-1184 — ai_credential()'s THREE states
+# ---------------------------------------------------------------------------
+
+def _captured_stderr():
+    """Return a (contextmanager, buffer) pair for asserting on warnings."""
+    buf = io.StringIO()
+    return contextlib.redirect_stderr(buf), buf
+
+
+class AiCredentialThreeStateTests(unittest.TestCase):
+    """XACA-1184: ``ai_credential()`` resolves THREE answers, never two.
+
+    The whole point of the accessor is that it refuses to collapse
+    "nobody decided" into "decided: none". Every test here asserts a state is
+    DISTINGUISHABLE from the other two, not merely that it is falsy — an
+    assertion phrased as ``assertFalse(...)`` would pass for all three and
+    prove nothing (registry S002).
+    """
+
+    def _resolve(self, entry, defaults=None):
+        cfg = _cfg({"alpha": entry})
+        with mock.patch.object(aiteamforge_paths, "DEFAULT_TEAMS", defaults or {}):
+            return reg.ai_credential("alpha", config=cfg)
+
+    # -- state 1: undeclared -------------------------------------------------
+
+    def test_no_ai_block_at_all_is_absent(self):
+        self.assertIs(self._resolve({"team_code": "ALP"}), reg.ABSENT)
+
+    def test_ai_block_without_a_credential_key_is_absent(self):
+        """A block exists (a future `cli` key, say) but records no decision."""
+        self.assertIs(self._resolve({"ai": {"cli": "claude"}}), reg.ABSENT)
+
+    def test_explicit_outer_null_ai_is_absent_and_stops_the_chain(self):
+        """`ai: null` is the OUTER null — no block. It must NOT inherit the
+        seed's block: credentials are per-machine (absent_stops_chain=True)."""
+        result = self._resolve(
+            {"ai": None},
+            defaults={"alpha": {"ai": {"credential": {"account_id": "from-seed"}}}},
+        )
+        self.assertIs(result, reg.ABSENT)
+
+    # -- state 2: declared "no team credential" ------------------------------
+
+    def test_inner_null_credential_is_none_not_absent(self):
+        """`ai.credential: null` is a RECORDED DECISION, not a gap.
+
+        This is the assertion the whole _KEYONLY sentinel choice exists to
+        make possible: if `ai`'s tuple had copied primary_host's _NULLISH, the
+        resolver would still return the block here (the inner null is not the
+        one being matched) — but the pair of tests below is what proves the
+        two nulls stay one level apart and mean opposite things.
+        """
+        result = self._resolve({"ai": {"credential": None}})
+        self.assertIsNone(result)
+        self.assertIsNot(result, reg.ABSENT)
+
+    def test_the_two_nulls_are_one_level_apart_and_resolve_differently(self):
+        """The single most important distinction in this accessor."""
+        outer = self._resolve({"ai": None})
+        inner = self._resolve({"ai": {"credential": None}})
+        self.assertIs(outer, reg.ABSENT)
+        self.assertIsNone(inner)
+        self.assertIsNot(outer, inner)
+
+    def test_a_declared_none_does_not_fall_through_to_the_seed(self):
+        """An operator who recorded "no team credential" must not silently get
+        the baked seed's account instead."""
+        result = self._resolve(
+            {"ai": {"credential": None}},
+            defaults={"alpha": {"ai": {"credential": {"account_id": "from-seed"}}}},
+        )
+        self.assertIsNone(result)
+
+    # -- state 3: a routed account ------------------------------------------
+
+    def test_dict_credential_returns_the_recorded_keys(self):
+        credential = {
+            "engine_slug": "anthropic",
+            "account_slug": "max-me2",
+            "account_id": "acct-1",
+            "nickname": "ME (Max)",
+            "env_var_name": "TEAM_ALPHA_API_KEY",
+            "auth_type": "oauth_token",
+        }
+        result = self._resolve({"ai": {"credential": credential}})
+        self.assertEqual(result, credential)
+
+    def test_the_returned_dict_is_a_copy_the_caller_cannot_poison(self):
+        """load_config() caches, so a live reference would let one caller
+        rewrite the credential for every later reader in the process."""
+        cfg = _cfg({"alpha": {"ai": {"credential": {"account_id": "acct-1"}}}})
+        with mock.patch.object(aiteamforge_paths, "DEFAULT_TEAMS", {}):
+            first = reg.ai_credential("alpha", config=cfg)
+            first["account_id"] = "MUTATED"
+            second = reg.ai_credential("alpha", config=cfg)
+        self.assertEqual(second["account_id"], "acct-1")
+        self.assertEqual(cfg["teams"]["alpha"]["ai"]["credential"]["account_id"], "acct-1")
+
+    def test_an_empty_dict_credential_is_a_dict_not_absence(self):
+        """`{}` is a (degenerate) routed record, not a non-declaration. It must
+        stay tellable apart from both other states."""
+        result = self._resolve({"ai": {"credential": {}}})
+        self.assertEqual(result, {})
+        self.assertIsNotNone(result)
+        self.assertIsNot(result, reg.ABSENT)
+
+    # -- corruption: warns, reads as ABSENT, never raises --------------------
+
+    def test_non_dict_ai_block_warns_and_reads_as_absent(self):
+        for bogus in ("", "null", "some-string", 42, [], ["a"], 0, False, True):
+            with self.subTest(ai=repr(bogus)):
+                redirect, buf = _captured_stderr()
+                with redirect:
+                    result = self._resolve({"ai": bogus})
+                if bogus is None:
+                    continue
+                self.assertIs(result, reg.ABSENT)
+                self.assertIn("not a dict", buf.getvalue(),
+                              f"a {type(bogus).__name__} 'ai' block must WARN, "
+                              "not self-heal without a trace (XACA-1178-024)")
+
+    def test_non_dict_non_null_credential_warns_and_reads_as_absent(self):
+        for bogus in ("", "null", "acct-1", 42, [], ["a"], 0, False, True):
+            with self.subTest(credential=repr(bogus)):
+                redirect, buf = _captured_stderr()
+                with redirect:
+                    result = self._resolve({"ai": {"credential": bogus}})
+                self.assertIs(result, reg.ABSENT)
+                self.assertIn("not a dict or null", buf.getvalue())
+
+    def test_corrupt_input_never_raises(self):
+        """13 call sites would get an opaque TypeError from a JSON typo."""
+        for entry in ({"ai": "x"}, {"ai": 1}, {"ai": []},
+                      {"ai": {"credential": "x"}}, {"ai": {"credential": []}},
+                      {"ai": {"credential": 0}}):
+            with self.subTest(entry=repr(entry)):
+                redirect, _buf = _captured_stderr()
+                with redirect:
+                    try:
+                        self._resolve(entry)
+                    except Exception as exc:  # noqa: BLE001 — that is the point
+                        self.fail(f"ai_credential raised {exc!r} on {entry!r}")
+
+    def test_an_unknown_team_still_raises(self):
+        """Corruption resolves to ABSENT; an unregistered team is a real error
+        and must NOT be flattened into the same answer."""
+        with mock.patch.object(aiteamforge_paths, "DEFAULT_TEAMS", {}):
+            with self.assertRaises(reg.UnknownTeamError):
+                reg.ai_credential("no-such-team", config=_cfg({"alpha": {}}))
+
+    # -- the sentinel itself -------------------------------------------------
+
+    def test_absent_is_not_usable_as_a_boolean(self):
+        """`if ai_credential(t):` must be a hard error, not a silent false —
+        it is the exact shape that flattens the three states into two."""
+        with self.assertRaises(TypeError):
+            bool(self._resolve({"team_code": "ALP"}))
+
+    def test_is_absent_helper_agrees_with_identity(self):
+        self.assertTrue(reg.is_absent(self._resolve({"team_code": "ALP"})))
+        self.assertFalse(reg.is_absent(self._resolve({"ai": {"credential": None}})))
+        self.assertFalse(reg.is_absent(self._resolve({"ai": {"credential": {"a": 1}}})))
+
+    # -- no legacy fallback --------------------------------------------------
+
+    def test_the_legacy_trio_is_NOT_read_as_a_fallback(self):
+        """XACA-1184: reading the trio here would make the one-time on-disk
+        lift unobservable — every team would answer correctly whether or not
+        the migration ever ran, and the retirement would silently never
+        complete. The lift is aiteamforge_paths', not this module's."""
+        result = self._resolve({
+            "anthropic_account_id": "acct-legacy",
+            "anthropic_account_nickname": "Legacy Nick",
+            "anthropic_api_key_env_var": "TEAM_ALPHA_API_KEY",
+        })
+        self.assertIs(result, reg.ABSENT)
+
+    def test_the_legacy_trio_does_not_leak_into_a_lifted_credential(self):
+        """Belt and braces: even beside a real `ai.credential`, the trio must
+        contribute nothing — the returned dict is the block's, verbatim."""
+        result = self._resolve({
+            "anthropic_account_id": "acct-legacy",
+            "anthropic_api_key_env_var": "STALE_VAR",
+            "ai": {"credential": {"account_id": "acct-current"}},
+        })
+        self.assertEqual(result, {"account_id": "acct-current"})
+
+
+class RetiredLegacyAccessorTests(unittest.TestCase):
+    """XACA-1184: the trio is gone from the registry's PUBLIC surface.
+
+    Asserted as a test rather than as a grep somebody ran once — a
+    reintroduced accessor is exactly the regression this ticket is retiring,
+    and a one-off grep cannot notice it coming back.
+    """
+
+    RETIRED = (
+        "anthropic_account_id",
+        "anthropic_account_nickname",
+        "anthropic_api_key_env_var",
+    )
+
+    def test_no_retired_accessor_functions_remain(self):
+        for name in self.RETIRED:
+            with self.subTest(name=name):
+                self.assertFalse(
+                    hasattr(reg, name),
+                    f"aiteamforge_registry.{name}() was retired by XACA-1184; "
+                    "readers use ai_credential()",
+                )
+
+    def test_no_retired_field_specs_remain(self):
+        registered = reg.field_names()
+        for name in self.RETIRED:
+            with self.subTest(name=name):
+                self.assertNotIn(name, registered)
+
+    def test_the_ai_field_replaced_them_in_the_spec_table(self):
+        """Negative control: proves the assertions above are not vacuously
+        green because the spec table itself failed to load."""
+        self.assertIn("ai", reg.field_names())
+        self.assertGreater(len(reg.field_names()), 10)
+
+    def test_ai_credential_is_exported(self):
+        self.assertIn("ai_credential", reg.__all__)
+        for name in self.RETIRED:
+            with self.subTest(name=name):
+                self.assertNotIn(name, reg.__all__)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1184** — retires the legacy `anthropic_account_id` /
+  `anthropic_account_nickname` / `anthropic_api_key_env_var` trio in favour of a single
+  `ai` block whose routed account lives at `ai.credential`. Mirrors the canonical reader
+  switch (`aiteamforge_registry.py`, `aiteamforge_paths.py`, `kb-init-team`,
+  `display-agent-avatar.sh`, `ccusage_collector.py`, `server.py`, `index.html`,
+  `freelance-banner.sh`) plus their tests. **The reader switch and the seed/backfill
+  removal ship in the SAME tap release deliberately** (XACA-0282-012 §3.1): split across
+  two, a consumer would run new readers against an old seed, or the reverse, and resolve
+  a credential that is not there.
+  Ships the new shared resolver `share/scripts/team-account-display.sh`, which replaces
+  eleven hand-rolled copies of the same `python3` heredoc (nine team banners,
+  `cc-whoami`, the avatar payload) with one reader — the k501 sibling-heuristic-drift
+  shape. It is a transitive SIBLING rather than an entrypoint, so it needed three
+  separate wirings, not just a mirror: a `sync_file` pairing, an
+  `install_helper_scripts()` entry for fresh installs, and an
+  `aiteamforge-upgrade.sh` mandatory-materialize entry for already-installed boxes —
+  install-time-only provisioning never reaches an existing consumer (the same gap
+  XACA-1160 records). Missing it fails SILENTLY in a way an error would not: the callers
+  guard on `command -v atf_team_account_fields`, so an absent helper renders EMPTY
+  account labels and the upgrade still looks clean. `aiteamforge doctor` now checks for
+  it for that reason.
+  Also brings `libexec/lib/aiteamforge-paths.sh`'s `_aiteamforge_field_sentinel_class()`
+  back into agreement with the Python `FieldSpec` table — `libexec/` is NOT written by
+  `sync-tap.sh`, so a canonical-only edit would not have reached it. `ai` is KEYONLY, not
+  NULLISH: two different nulls live one level apart and mean opposite things (`ai: null`
+  is no block; `ai.credential: null` is a DECLARED "no team credential, fall back to the
+  CLI's own login"), and flattening the inner one into a gap would erase a recorded
+  decision. The retired trio is no longer declared on either side and now resolves
+  PATHISH via the default rule on both. Verified 12/12 fields identical across the shell
+  and Python implementations.
 - XACA-1159-040: `kb-sweep` printed the same `No subitems found — ready to close.`
   completion line for a genuine zero-subitem item AND for an EMPTY subitem count,
   i.e. a failed board read — one `if [[ -z "$subitem_count" ]] || [[ "$subitem_count"

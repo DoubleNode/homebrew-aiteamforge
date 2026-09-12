@@ -14476,8 +14476,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _AUTH_TYPE_VALUES = ('oauth_token', 'api_key', 'gateway_token')
 
     def _set_team_ai_credential(self, team_block: dict, credential: dict | None, team: str = None) -> None:
-        """Replace ``team_block['ai']['credential']`` as a whole unit, and derive
-        the legacy ``anthropic_*`` projection from it.
+        """Replace ``team_block['ai']['credential']`` as a whole unit.
 
         ``credential`` is either ``None`` -- declares "no team credential"
         (``ai.credential`` becomes JSON ``null``; the CLI falls back to its own
@@ -14490,14 +14489,31 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         ``anthropic_account_ref`` went stale before this helper existed (that
         doc's F5).
 
-        Writes the legacy trio (``anthropic_account_id``,
-        ``anthropic_account_nickname``, ``anthropic_api_key_env_var``) as a
-        DERIVED PROJECTION of ``credential`` so the ~13 existing legacy readers
-        (9 team banners, ``cc-whoami``, the avatar script, ``ccusage_collector``,
-        the vault migrator) keep working unmodified during the XACA-1178 compat
-        window -- see that doc's §3. Also deletes the stale
-        ``anthropic_account_ref`` key: ``engine_slug``/``account_slug`` inside
-        ``credential`` supersede it, and nothing may write it going forward.
+        ``ai.credential`` is the ONLY field this helper writes. XACA-1184-003
+        retired the derived legacy projection: ``anthropic_account_id``,
+        ``anthropic_account_nickname`` and ``anthropic_api_key_env_var`` are no
+        longer written here. They existed only for the XACA-1178 compat window,
+        so the ~13 pre-1178 readers (9 team banners, ``cc-whoami``, the avatar
+        script, ``ccusage_collector``, the vault migrator) kept working
+        unmodified; XACA-1184-002 moved every one of them onto
+        ``aiteamforge_registry.ai_credential()``, leaving the projection with no
+        readers to serve.
+
+        This helper deliberately does NOT delete a trio already on disk. A
+        record written before this change keeps its (now unmaintained, and after
+        the next save, stale) legacy keys until XACA-1184-004's one-time lift
+        migration or XACA-1184-009's deletion pass -- the latter gated on the
+        user. Popping them opportunistically from one write path is exactly the
+        partial, spread-out mutation that invariant I2 exists to prevent.
+
+        The stale ``anthropic_account_ref`` key IS still popped, and that is a
+        deliberate exception rather than a leftover of the retirement: nothing
+        has ever read it, XACA-1178 stopped writing it, and what survives on
+        disk names the PREVIOUS account (that doc's F5). It is misleading data
+        rather than a superseded field with readers, so clearing it on the one
+        path that already replaces the whole credential can desync nothing.
+        ``engine_slug``/``account_slug`` inside ``credential`` are the
+        reference now.
 
         Any other key already present under ``ai`` (the future ``cli``,
         ``provider_config``) is left untouched.
@@ -14518,7 +14534,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         trace. Log a warning when that happens so a corrupt team-paths.json
         is visible in server logs instead of silently self-healing.
 
-        XACA-1178-007 / XACA-0282-012 §2.4.
+        XACA-1178-007 / XACA-1184-003 / XACA-0282-012 §2.4.
         """
         ai_block = team_block.get('ai')
         if not isinstance(ai_block, dict):
@@ -14530,13 +14546,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             team_block['ai'] = ai_block
         ai_block['credential'] = credential
 
-        team_block['anthropic_account_id'] = (credential or {}).get('account_id') or ''
-        team_block['anthropic_account_nickname'] = (credential or {}).get('nickname') or ''
-        team_block['anthropic_api_key_env_var'] = (credential or {}).get('env_var_name') or ''
-
         # XACA-0282-012 F5: assign wrote this and nothing ever read it, so a
         # save that didn't also touch it left it naming the PREVIOUS account.
         # engine_slug/account_slug inside ai.credential are the reference now.
+        # XACA-1184-003 KEEPS this pop on purpose -- it clears misleading data,
+        # it is not a projection of the retired trio. See the docstring.
         team_block.pop('anthropic_account_ref', None)
 
     def _load_account_validation_cache(self):
@@ -14600,14 +14614,30 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         NEVER returns the actual key value — has_credentials is a bool derived from
         bool(os.environ.get(env_var_name)).
 
-        Reads ai.credential when the team declares it (config_source: "ai"),
-        including when it is explicitly null (cleared -- every field reads as
-        empty, same as an unconfigured team). Falls back to the legacy
-        anthropic_* trio (config_source: "legacy") only when the team has no
-        'credential' key under 'ai' at all -- true for every team today, since
-        XACA-1178-007 is what starts writing it. XACA-0282-012 §1.2/§2.4.
+        ai.credential is the only source read. XACA-1184-003 dropped the legacy
+        anthropic_* fallback that used to serve the undeclared case; nothing
+        writes those fields any more (see _set_team_ai_credential), so reading
+        them could only ever return a value staler than the credential sitting
+        beside it.
 
-        XACA-0281-003 / XACA-1178-007
+        Three states, kept distinct in the response -- absence is NOT falsiness
+        (aiteamforge_registry's S002 contract, mirrored on the wire here):
+
+          * 'credential' present and a dict -> config_source "ai", fields
+            populated from it.
+          * 'credential' present and explicitly null -> config_source "ai",
+            every field empty. This is a DECLARED decision ("no team
+            credential; the CLI uses its own login"), not an absence.
+          * no 'credential' key under 'ai' at all -> config_source "legacy",
+            every field empty. Genuine non-declaration.
+
+        config_source "legacy" is now a FROZEN WIRE VALUE naming the third
+        state, not a claim that anything legacy was read. It is kept verbatim
+        so the two empty-field states stay tellable apart by a client that
+        already string-compares it; renaming it is an API change and belongs to
+        whoever retires the on-disk keys, not here. XACA-0282-012 §1.2/§2.4.
+
+        XACA-0281-003 / XACA-1178-007 / XACA-1184-003
         """
         try:
             params = parse_qs(query_string) if query_string else {}
@@ -14649,10 +14679,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 engine_slug = credential.get('engine_slug') or ''
                 account_slug = credential.get('account_slug') or ''
             else:
+                # Team has never declared ai.credential. XACA-1184-003: this
+                # used to read the anthropic_* trio; that projection is retired,
+                # so there is nothing left to fall back TO and every field is
+                # empty. config_source stays the literal 'legacy' so this state
+                # remains distinguishable from an explicitly-null credential,
+                # which is also all-empty but is a declared decision.
                 config_source = 'legacy'
-                account_id = team_block.get('anthropic_account_id') or ''
-                account_nickname = team_block.get('anthropic_account_nickname') or ''
-                env_var_name = team_block.get('anthropic_api_key_env_var') or ''
+                account_id = ''
+                account_nickname = ''
+                env_var_name = ''
                 auth_type = ''
                 engine_slug = ''
                 account_slug = ''
@@ -14685,9 +14721,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         Body: {team, account_id, account_nickname, env_var_name, auth_type?,
         engine_slug?, account_slug?}
         Writes a whole-object ai.credential snapshot into ~/.aiteamforge/team-paths.json
-        for the specified team via _set_team_ai_credential(), which also derives the
-        legacy anthropic_* projection (XACA-0282-012 §2.4). Uses fcntl file-lock +
-        atomic rename. NEVER stores or echoes the actual key value.
+        for the specified team via _set_team_ai_credential() (XACA-0282-012 §2.4).
+        XACA-1184-003: ai.credential is all that gets written -- the derived
+        legacy anthropic_* projection is retired. Uses fcntl file-lock + atomic
+        rename. NEVER stores or echoes the actual key value.
 
         XACA-1178-016: engine_slug and account_slug have no field in the manual
         edit modal today -- a save from that UI never sends either. Before this
@@ -14903,35 +14940,36 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     self._send_json_response({'ok': False, 'error': err}, status=500)
                     return
                 team_block = data.get('teams', {}).get(team) or {}
-                # XACA-1178-018: read ai.credential.env_var_name FIRST -- the
-                # legacy anthropic_api_key_env_var field is only a DERIVED
-                # projection of it (see _set_team_ai_credential), and XACA-1184
-                # is slated to retire the legacy trio outright. Reading the
-                # legacy field only, as this did before, means TEST CONNECTION
-                # silently breaks the day that field stops being written, even
-                # though the real value has been available under ai.credential
-                # the whole time. Coerce defensively (XACA-1178-017): a non-dict
-                # 'ai' or 'credential' falls through to the legacy fallback
-                # rather than raising.
-                # XACA-1178-024: warn when the fallback is actually triggered by
-                # corruption (not by a team simply having no 'ai'/'credential'
-                # key yet, which is the ordinary unconfigured state).
+                # XACA-1178-018 / XACA-1184-003: the credential's own
+                # env_var_name is now the ONLY source. The legacy
+                # anthropic_api_key_env_var field was a derived projection of it
+                # and is no longer written (see _set_team_ai_credential), so the
+                # fallback that used to live here could only ever resolve a name
+                # staler than the credential beside it -- pointing TEST
+                # CONNECTION at the previous account's variable. Unresolvable
+                # now means the 400 below, the same answer this path already
+                # gave a team with neither field set.
+                # Coerce defensively (XACA-1178-016/017): a non-dict 'ai' or
+                # 'credential' resolves to "no credential" rather than raising.
+                # XACA-1178-024: warn when that coercion actually fires, so a
+                # corrupt team-paths.json is visible in the logs instead of
+                # silently self-healing. A team simply having no 'ai' or no
+                # 'credential' key yet is the ordinary unconfigured state and
+                # stays silent.
                 ai_block = team_block.get('ai')
                 if ai_block is not None and not isinstance(ai_block, dict):
                     print(f"[LCARS] WARNING: team-paths.json 'ai' block for team {team!r} "
-                          f"was {type(ai_block).__name__!s}, not a dict -- falling back to "
-                          f"legacy anthropic_api_key_env_var (XACA-1178-016/024)")
+                          f"was {type(ai_block).__name__!s}, not a dict -- treating as no "
+                          f"credential (XACA-1178-016/024)")
                     ai_block = None
                 ai_credential = ai_block.get('credential') if isinstance(ai_block, dict) else None
                 if ai_credential is not None and not isinstance(ai_credential, dict):
                     print(f"[LCARS] WARNING: team-paths.json ai.credential for team {team!r} "
-                          f"was {type(ai_credential).__name__!s}, not a dict -- falling back "
-                          f"to legacy anthropic_api_key_env_var (XACA-1178-017/024)")
+                          f"was {type(ai_credential).__name__!s}, not a dict -- treating as "
+                          f"no credential (XACA-1178-017/024)")
                     ai_credential = None
                 if isinstance(ai_credential, dict):
                     env_var_name = ai_credential.get('env_var_name') or ''
-                if not env_var_name:
-                    env_var_name = team_block.get('anthropic_api_key_env_var', '')
 
             if not env_var_name:
                 self._send_json_response({'ok': False, 'error': 'No env_var_name could be resolved'}, status=400)
@@ -15319,10 +15357,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         Copy-on-select: looks up the named account in the engines registry and
         writes it into team-paths.json as a whole-object ai.credential snapshot
-        (XACA-0282-012 §1.1) via _set_team_ai_credential(), which also derives
-        the legacy anthropic_* projection so XACA-0279 Phase A.1's resolver and
-        the ~13 other legacy readers keep working unmodified during the 1178
-        compat window, and drops the stale anthropic_account_ref key (F5) --
+        (XACA-0282-012 §1.1) via _set_team_ai_credential(). XACA-1184-003 ended
+        the legacy anthropic_* projection that used to be derived here for the
+        1178 compat window -- XACA-0279 Phase A.1's resolver and the other
+        pre-1178 readers now go through aiteamforge_registry.ai_credential().
+        The helper still drops the stale anthropic_account_ref key (F5) --
         engine_slug/account_slug inside ai.credential supersede it.
 
         ai.credential fields written: engine_slug, account_slug, account_id,
@@ -15432,8 +15471,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                         # XACA-1178-007 / XACA-0282-012 §2.4: build the whole-object
                         # ai.credential snapshot fresh (invariant I2) and let the
-                        # helper derive the legacy projection + drop the stale
-                        # anthropic_account_ref (F5). auth_type is copied only when
+                        # helper write it and drop the stale anthropic_account_ref
+                        # (F5). XACA-1184-003: no legacy projection is derived any
+                        # more. auth_type is copied only when
                         # the registry account actually has one (XACA-1178-004);
                         # its absence means "infer from the token prefix" downstream.
                         credential = {

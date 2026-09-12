@@ -794,8 +794,13 @@
                     <div class="team-config-form">
                         <!-- XACA-0281: AI Engine Account Routing subsection -->
                         <!-- NOTE: "Anthropic" removed from label — future engines (other providers, multiple
-                             accounts per engine) will appear here. Technical field names
-                             (anthropic_account_id, etc.) are contract from A.1 and unchanged. -->
+                             accounts per engine) will appear here. XACA-1184 retired the flat
+                             anthropic_* trio from team-paths.json; a team's credential is now the
+                             nested teams.<team>.ai.credential object, written as a WHOLE OBJECT by
+                             server.py's _set_team_ai_credential and read via
+                             aiteamforge_registry.ai_credential(). The /api endpoints this tab talks
+                             to keep their own flatter field names (account_id, account_nickname,
+                             env_var_name) — that is the API contract, not the storage shape. -->
                         <div class="team-config-row team-config-row-header" id="team-account-routing-header">
                             <div class="team-config-row-left">
                                 <label class="team-config-label">AI Engine Account Routing</label>
@@ -815,9 +820,11 @@
                             Row template: instantiated by JS for each team entry.
                             Data attributes on the rendered row:
                               data-team="<team_slug>"
-                              data-account-id="<anthropic_account_id>"
-                              data-nickname="<anthropic_account_nickname>"
-                              data-env-var="<anthropic_api_key_env_var>"
+                              data-account-id="<account_id from the API's currentConfig>"
+                              data-nickname="<account_nickname from the API's currentConfig>"
+                              data-env-var="<env_var_name from the API's currentConfig>"
+                              (all three are served from teams.<team>.ai.credential; the
+                               retired anthropic_* fields no longer feed them — XACA-1184)
                               data-credential-status="ok|missing|unvalidated"
                         -->
                         <template id="team-account-row-template">

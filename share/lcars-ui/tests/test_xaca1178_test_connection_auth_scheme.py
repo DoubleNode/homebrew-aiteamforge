@@ -371,13 +371,24 @@ class TestConnectionAuthSchemeTests(unittest.TestCase):
 
 
 class TestConnectionResolvesEnvVarFromAiCredentialTests(unittest.TestCase):
-    """XACA-1178-018: when the request gives {team} (not env_var_name
-    directly), the env var name must be resolved from ai.credential first,
-    falling back to the legacy anthropic_api_key_env_var projection only when
-    ai.credential is absent/empty. Before this fix, only the legacy field was
-    ever read here -- silently wrong the moment XACA-1184 stops writing it,
-    even though the real value has been available under ai.credential since
-    XACA-1178-007.
+    """XACA-1178-018, as amended by XACA-1184-003: when the request gives
+    {team} (not env_var_name directly), the env var name is resolved from
+    ai.credential -- and from NOTHING ELSE.
+
+    XACA-1178-018 added ai.credential as the PRIMARY source while keeping the
+    legacy anthropic_api_key_env_var as a fallback, because during that compat
+    window the trio was still being written. XACA-1184-003 removed the fallback
+    along with the projection that fed it, so several tests in this class now
+    assert the INVERSE of what they asserted when written: a legacy-only team
+    resolves nothing.
+
+    That is the intended outcome, not a regression, and "resolves nothing" is
+    the SAFE failure here. The alternative is worse than an error: a team whose
+    ai.credential was deliberately changed would keep testing green against a
+    stale env var the projection stopped maintaining -- a passing connection
+    test for an account nobody is using. Machines carrying a real legacy account
+    are migrated once by XACA-1184-004's lift, which puts the value under
+    ai.credential where this resolver reads it.
 
     Mirrors test_xaca1178_team_ai_credential.py's _TeamPathsFixtureMixin
     (kept self-contained here rather than importing across test modules, per
@@ -438,9 +449,11 @@ class TestConnectionResolvesEnvVarFromAiCredentialTests(unittest.TestCase):
         self.assertTrue(response["ok"], response)
 
     def test_ai_credential_takes_priority_over_stale_legacy_field(self):
-        """A team with BOTH fields set disagreeing must resolve from
-        ai.credential, not the legacy projection -- ai.credential is the
-        source of truth; the legacy trio is a derived projection of it."""
+        """A team with BOTH set and disagreeing must resolve from
+        ai.credential. Retained after XACA-1184-003 as a REGRESSION GUARD: it is
+        the one test here that would still pass if the fallback came back in the
+        wrong precedence order, so it pins the priority independently of the
+        tests that pin the fallback's absence."""
         self._write_team_paths({
             "team_code": "X1178C",
             "anthropic_api_key_env_var": "STALE_LEGACY_VAR",
@@ -462,9 +475,14 @@ class TestConnectionResolvesEnvVarFromAiCredentialTests(unittest.TestCase):
         headers = {k.lower(): v for k, v in called_request.headers.items()}
         self.assertEqual(headers["x-api-key"], "sk-ant-api03-" + "f" * 90)
 
-    def test_falls_back_to_legacy_field_when_ai_credential_absent(self):
-        """A team that predates XACA-1178-007 has no 'ai' key at all -- must
-        still resolve via the legacy field, unchanged from before this fix."""
+    def test_a_legacy_only_team_resolves_NOTHING_and_probes_no_endpoint(self):
+        """XACA-1184-003 removed this fallback. A team carrying only the retired
+        trio now resolves no env var -- and must not silently succeed.
+
+        The assertion that no HTTP call was made is the load-bearing half. An
+        `ok: False` alone would also be produced by a probe that ran and failed;
+        what must be true here is that the resolver declined to name a variable
+        at all, so nothing was ever sent."""
         self._write_team_paths({
             "team_code": "X1178C",
             "anthropic_api_key_env_var": "LEGACY_ONLY_VAR",
@@ -479,12 +497,21 @@ class TestConnectionResolvesEnvVarFromAiCredentialTests(unittest.TestCase):
             handler.handle_team_account_test_connection()
 
         response = _response_json(buf)
-        self.assertTrue(response["ok"], response)
+        self.assertFalse(response["ok"], response)
+        self.assertIn("env_var_name", response["error"])
+        mock_urlopen.assert_not_called()
+        self.assertNotEqual(handler._response_code, 500)
 
-    def test_falls_back_to_legacy_field_when_ai_credential_env_var_empty(self):
-        """ai.credential exists but its env_var_name is empty/absent (e.g. an
-        OAuth-fallback credential with no explicit key) -- must fall back to
-        the legacy field rather than resolving to nothing."""
+    def test_a_credential_without_an_env_var_does_not_borrow_the_legacy_one(self):
+        """ai.credential exists but names no env var (an OAuth credential with
+        no explicit key). Before XACA-1184-003 this fell back to the legacy
+        field; now it resolves nothing.
+
+        This is the sharpest case in the class, because the two values are
+        semantically DIFFERENT rather than merely out of date: a credential that
+        deliberately records no env var is describing an OAuth account, and
+        reaching past it for a leftover API-key variable tests something the
+        operator did not configure."""
         self._write_team_paths({
             "team_code": "X1178C",
             "anthropic_api_key_env_var": "LEGACY_FALLBACK_VAR",
@@ -500,11 +527,15 @@ class TestConnectionResolvesEnvVarFromAiCredentialTests(unittest.TestCase):
             handler.handle_team_account_test_connection()
 
         response = _response_json(buf)
-        self.assertTrue(response["ok"], response)
+        self.assertFalse(response["ok"], response)
+        mock_urlopen.assert_not_called()
 
-    def test_non_dict_ai_or_credential_falls_back_to_legacy_without_crashing(self):
+    def test_non_dict_ai_or_credential_resolves_nothing_without_crashing(self):
         """XACA-1178-017 coercion applies here too: a non-dict 'ai' or
-        'credential' must fall through to the legacy field, never raise."""
+        'credential' must never raise. Post-XACA-1184-003 there is nothing to
+        fall through TO, so the outcome is a clean refusal rather than a 500 --
+        corruption degrades to "undeclared", loudly (the warning is asserted in
+        the next test), and never to an opaque server error."""
         env_patch = patch.dict(os.environ, {"LEGACY_COERCE_VAR": "sk-ant-api03-" + "j" * 90})
         env_patch.start()
         self.addCleanup(env_patch.stop)
@@ -525,7 +556,8 @@ class TestConnectionResolvesEnvVarFromAiCredentialTests(unittest.TestCase):
 
             self.assertNotEqual(handler._response_code, 500, f"bogus_ai={bogus_ai!r}")
             response = _response_json(buf)
-            self.assertTrue(response["ok"], response)
+            self.assertFalse(response["ok"], response)
+            self.assertIn("env_var_name", response["error"])
 
     def test_non_dict_ai_or_credential_logs_warning(self):
         """XACA-1178-024: the fourth of the four XACA-1178-017 coercion sites
@@ -559,8 +591,13 @@ class TestConnectionResolvesEnvVarFromAiCredentialTests(unittest.TestCase):
             self.assertEqual(len(matches), 1, f"bogus_ai={bogus_ai!r} printed={warnings!r}")
 
     def test_absent_ai_block_logs_no_warning(self):
-        """A team predating XACA-1178-007 (no 'ai' key at all) is the
-        ordinary case, not corruption -- must stay silent."""
+        """A team with no 'ai' key at all is an ORDINARY undeclared team, not
+        corruption -- it must resolve nothing SILENTLY.
+
+        The contrast with the test above is the point: both end in "no env var
+        resolved", but only one of them is a damaged file worth a warning.
+        Warning on this one would nag every unconfigured team on every probe,
+        which is how a real warning gets tuned out."""
         env_patch = patch.dict(os.environ, {"LEGACY_ONLY_VAR2": "sk-ant-api03-" + "l" * 90})
         env_patch.start()
         self.addCleanup(env_patch.stop)

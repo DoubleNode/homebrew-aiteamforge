@@ -59,7 +59,7 @@ Cache schema (v4):
   "weekly_error": str | null,  // set when weekly collection fails
   "accounts": {
     "<account_id>": {
-      "nickname": str,         // from team-paths.json anthropic_account_nickname
+      "nickname": str,         // from team-paths.json ai.credential.nickname
       "today_tokens": int,
       "today_cost_usd": float,
       "last_7d_tokens": int,
@@ -160,6 +160,21 @@ import subprocess
 import sys
 import time
 from typing import Any, List, Optional
+
+# XACA-1184-002: the per-team AI credential lives at teams.<slug>.ai.credential
+# and the only sanctioned reader is kanban-hooks/aiteamforge_registry. Same
+# sys.path idiom as lcars-ui/server.py (kanban-hooks is a sibling of lcars-ui in
+# both the dev tree and the shipped tap layout, share/kanban-hooks/).
+_KANBAN_HOOKS_DIR = str(pathlib.Path(__file__).resolve().parent.parent / "kanban-hooks")
+if _KANBAN_HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _KANBAN_HOOKS_DIR)
+try:
+    import aiteamforge_registry as _registry
+except Exception:  # pragma: no cover - collector must never die on an import
+    # This is a long-lived daemon; an unimportable registry degrades every team
+    # to the "default-oauth" bucket, which is exactly what an unset credential
+    # already produced. It must never take the collector down.
+    _registry = None
 
 TEAM_PATHS_JSON = pathlib.Path("~/.aiteamforge/team-paths.json").expanduser()
 SESSION_ACCOUNT_MAP_JSONL = pathlib.Path("~/.claude/.session-account-map.jsonl").expanduser()
@@ -679,8 +694,25 @@ def build_accounts(
         if not wdir:
             continue
         encoded = _encode_path_as_session_id(wdir)
-        account_id = tdata.get("anthropic_account_id") or "default-oauth"
-        nickname = tdata.get("anthropic_account_nickname") or account_id
+        # XACA-1184-002: read ai.credential via the registry accessor. The
+        # `or` defaults below are UNCHANGED — an unset credential still buckets
+        # as "default-oauth" and still falls back to the id for a display
+        # label. ai_credential() returns ABSENT (undeclared), None (declared
+        # "no team credential") or a dict; only the dict carries fields, and
+        # all three of the other outcomes collapse into the same defaults the
+        # legacy empty-string read produced.
+        cred = None
+        if _registry is not None:
+            try:
+                cred = _registry.ai_credential(_slug, config=team_paths)
+            except Exception:
+                # UnknownTeamError for a slug present in the file but in no
+                # registry tier, or any registry-side failure. Not fatal here.
+                cred = None
+        if not isinstance(cred, dict):
+            cred = {}
+        account_id = cred.get("account_id") or "default-oauth"
+        nickname = cred.get("nickname") or account_id
         team_encodings.append((encoded, account_id, nickname))
 
     # Sort longest-prefix-first so most-specific match wins.

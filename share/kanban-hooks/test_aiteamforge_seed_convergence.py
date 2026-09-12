@@ -90,7 +90,7 @@ class _SandboxedOverlayTest(unittest.TestCase):
     def _reset_module_state():
         ap._CONFIG_CACHE = None
         ap._CONFIG_PATH_AT_LOAD = None
-        ap._A1_BACKFILL_ATTEMPTED = False
+        ap._LEGACY_CREDENTIAL_LIFT_ATTEMPTED = False  # XACA-1184-004 (replaced _A1_BACKFILL_ATTEMPTED)
         ap._CONTRACT_SCRUB_ATTEMPTED = False
         ap._BOARD_LESS_BACKFILL_ATTEMPTED = False
         ap._PRIMARY_HOST_BACKFILL_ATTEMPTED = False
@@ -517,10 +517,7 @@ class LoadConfigIntegrationTests(_SandboxedOverlayTest):
         self.write_overlay({slug: {"team_code": seed.get("team_code", "TST")},
                             "filler-team": {"team_code": "FIL",
                                             "kanban_dir": "/tmp/filler",
-                                            "working_dir": "/tmp",
-                                            "anthropic_account_id": "",
-                                            "anthropic_account_nickname": "",
-                                            "anthropic_api_key_env_var": "X"}})
+                                            "working_dir": "/tmp"}})
         before = _sha256(self.config_path)
 
         cfg = ap.load_config()

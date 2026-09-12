@@ -18,20 +18,33 @@ teams.<team>.ai.credential, a whole-object snapshot of one Fleet Monitor
 account (engine_slug, account_slug, account_id, nickname, auth_type,
 env_var_name). There is never a flat anthropic_auth_type field.
 
-The legacy anthropic_account_id / anthropic_account_nickname /
-anthropic_api_key_env_var fields are FROZEN, not deleted: one helper
-(_set_team_ai_credential) writes them as a derived projection of
-ai.credential so the ~13 existing legacy readers keep working unmodified.
-anthropic_account_ref is dropped -- nothing read it, and it went stale the
-moment a save didn't also touch it (decision doc F5).
+XACA-1184-003 UPDATE -- THE PROJECTION IS GONE. This file originally locked the
+opposite contract, and several tests here now assert the inverse of what they
+asserted when written. During the XACA-1178 compat window,
+_set_team_ai_credential ALSO wrote anthropic_account_id /
+anthropic_account_nickname / anthropic_api_key_env_var as a derived projection
+of ai.credential, so the ~13 pre-1178 readers kept working unmodified.
+XACA-1184-002 moved every one of those readers onto
+aiteamforge_registry.ai_credential(), leaving the projection with no readers to
+serve -- and an unread second copy of a credential is not free: it goes stale
+the moment anything writes one and not the other, which is precisely how
+anthropic_account_ref failed (decision doc F5).
+
+Two distinctions this file's tests are careful about:
+  * STOPPED WRITING is not DELETED. A trio already on disk is left exactly as
+    it is; its removal is XACA-1184-009, gated on the user, so a machine can be
+    rolled back to the legacy readers without data loss.
+  * anthropic_account_ref is STILL dropped on write. That pop survives the
+    retirement deliberately -- it is misleading data nothing ever read, not a
+    superseded field with readers.
 
 Covers:
-  - _set_team_ai_credential() unit behavior (whole-object replace, legacy
-    projection, ai.credential = null clearing, other ai keys preserved,
-    anthropic_account_ref dropped).
-  - handle_team_account_assign() writes the ai.credential snapshot + legacy
-    projection from a matched Fleet Monitor account, auth_type included only
-    when the registry account has one.
+  - _set_team_ai_credential() unit behavior (whole-object replace, ai.credential
+    = null clearing, other ai keys preserved, anthropic_account_ref dropped, NO
+    legacy projection written, an existing trio left in place).
+  - handle_team_account_assign() writes the ai.credential snapshot from a
+    matched Fleet Monitor account, auth_type included only when the registry
+    account has one.
   - handle_team_account_save() (MANUAL path): builds ai.credential from the
     request body, validates auth_type, all-empty body clears to null.
   - serve_team_account_current(): returns the new shape; a team whose entry
@@ -85,6 +98,15 @@ import server  # noqa: E402  (module-level import after path manipulation)
 from server import LCARSHandler  # noqa: E402
 
 TEST_TEAM = "xaca1178testteam"
+
+# XACA-1184-003 retired these three. They are named here so the assertions that
+# they are NOT written read as one contract rather than as scattered literals —
+# and so a fourth legacy field, if one is ever discovered, has one place to go.
+LEGACY_TRIO = (
+    "anthropic_account_id",
+    "anthropic_account_nickname",
+    "anthropic_api_key_env_var",
+)
 
 
 def _make_handler(path="/", method="POST", body=b""):
@@ -215,7 +237,17 @@ class SetTeamAiCredentialHelperTests(unittest.TestCase):
         with patch.object(LCARSHandler, "__init__", lambda self, *a, **kw: None):
             return LCARSHandler.__new__(LCARSHandler)
 
-    def test_whole_object_replace_writes_credential_and_projection(self):
+    def test_whole_object_replace_writes_credential_and_projects_nothing(self):
+        """XACA-1184-003: ai.credential is now the ONLY field this helper writes.
+
+        The derived legacy projection existed solely for the XACA-1178 compat
+        window, so the ~13 pre-1178 readers kept working unmodified while the
+        new shape landed. XACA-1184-002 moved every one of them onto
+        ``aiteamforge_registry.ai_credential()``, leaving the projection with no
+        readers to serve — and an unread projection is not free: it is a second
+        copy of a credential that goes stale the moment anything writes one and
+        not the other.
+        """
         handler = self._handler()
         team_block = {"team_code": "ACA"}
         credential = {
@@ -230,12 +262,47 @@ class SetTeamAiCredentialHelperTests(unittest.TestCase):
         handler._set_team_ai_credential(team_block, credential)
 
         self.assertEqual(team_block["ai"]["credential"], credential)
-        self.assertEqual(team_block["anthropic_account_id"], "acct-me")
-        self.assertEqual(team_block["anthropic_account_nickname"], "ME (Max)")
-        self.assertEqual(team_block["anthropic_api_key_env_var"], "CLAUDE_ACCT_ME_TOKEN")
+        for retired in LEGACY_TRIO:
+            self.assertNotIn(retired, team_block,
+                             f"{retired} was retired by XACA-1184-003 and must not be minted")
         self.assertNotIn("anthropic_account_ref", team_block)
 
-    def test_none_credential_writes_null_and_clears_projection(self):
+    def test_a_trio_ALREADY_on_disk_is_left_in_place_not_deleted(self):
+        """The helper stops WRITING the trio; it deliberately does not DELETE one.
+
+        A record written before this change keeps its (now unmaintained, and
+        after the next save, stale) legacy keys until XACA-1184-004's one-time
+        lift or XACA-1184-009's deletion pass — the latter gated on the user, so
+        a machine can be rolled back to the legacy readers without data loss.
+        Popping them opportunistically from one write path is exactly the
+        partial, spread-out mutation that invariant I2 exists to prevent.
+        """
+        handler = self._handler()
+        team_block = {
+            "team_code": "ACA",
+            "anthropic_account_id": "old",
+            "anthropic_account_nickname": "Old Nick",
+            "anthropic_api_key_env_var": "OLD_VAR",
+        }
+
+        handler._set_team_ai_credential(team_block, {
+            "engine_slug": "anthropic", "account_id": "new", "nickname": "New",
+        })
+
+        self.assertEqual(team_block["anthropic_account_id"], "old")
+        self.assertEqual(team_block["anthropic_account_nickname"], "Old Nick")
+        self.assertEqual(team_block["anthropic_api_key_env_var"], "OLD_VAR")
+        self.assertEqual(team_block["ai"]["credential"]["account_id"], "new")
+
+    def test_none_credential_writes_null_and_still_drops_the_stale_ref(self):
+        """`ai.credential: null` declares "no team credential". The stale
+        ``anthropic_account_ref`` pop survives the retirement DELIBERATELY: it is
+        not a projection of the trio. Nothing has ever read it, XACA-1178 stopped
+        writing it, and what survives on disk names the PREVIOUS account (F5) —
+        misleading data rather than a superseded field with readers, so clearing
+        it on the one path that already replaces the whole credential can desync
+        nothing.
+        """
         handler = self._handler()
         team_block = {
             "team_code": "ACA",
@@ -249,10 +316,13 @@ class SetTeamAiCredentialHelperTests(unittest.TestCase):
         handler._set_team_ai_credential(team_block, None)
 
         self.assertIsNone(team_block["ai"]["credential"])
-        self.assertEqual(team_block["anthropic_account_id"], "")
-        self.assertEqual(team_block["anthropic_account_nickname"], "")
-        self.assertEqual(team_block["anthropic_api_key_env_var"], "")
         self.assertNotIn("anthropic_account_ref", team_block)
+        # ... but the trio is untouched: this helper no longer maintains it in
+        # EITHER direction, so blanking it here would be just as much of an
+        # unowned write as populating it.
+        self.assertEqual(team_block["anthropic_account_id"], "old")
+        self.assertEqual(team_block["anthropic_account_nickname"], "Old Nick")
+        self.assertEqual(team_block["anthropic_api_key_env_var"], "OLD_VAR")
 
     def test_stale_account_ref_dropped_on_replace(self):
         handler = self._handler()
@@ -282,18 +352,31 @@ class SetTeamAiCredentialHelperTests(unittest.TestCase):
         self.assertEqual(team_block["ai"]["provider_config"], {"claude": {"foo": "bar"}})
         self.assertEqual(team_block["ai"]["credential"]["account_id"], "acct-x")
 
-    def test_missing_optional_fields_project_as_empty_string_not_none(self):
+    def test_a_sparse_credential_is_stored_verbatim_and_invents_no_keys(self):
+        """A bare manual account_id save (no nickname, no env_var_name).
+
+        This test used to assert the opposite of what it asserts now, and the
+        inversion is the point. It pinned that the projection filled the two
+        absent fields with ``""`` rather than the literal ``None``, because some
+        legacy readers did ``str(team_block.get('anthropic_account_nickname'))``
+        with no ``or ''`` guard. With no projection and no legacy readers, the
+        correct behaviour is the opposite: store exactly what was given and
+        invent nothing. A key that is absent is ABSENT — the registry
+        distinguishes that from a declared empty, and manufacturing a ``""``
+        here would erase the difference at the point of writing.
+        """
         handler = self._handler()
         team_block = {}
-        # A credential with no nickname/env_var_name at all (e.g. a bare manual
-        # account_id save) must still project clean empty strings, not the
-        # literal None, into the legacy trio -- some legacy readers do
-        # `str(team_block.get('anthropic_account_nickname'))` without an
-        # `or ''` guard of their own.
-        handler._set_team_ai_credential(team_block, {"engine_slug": "anthropic", "account_id": "only-id"})
 
-        self.assertEqual(team_block["anthropic_account_nickname"], "")
-        self.assertEqual(team_block["anthropic_api_key_env_var"], "")
+        handler._set_team_ai_credential(
+            team_block, {"engine_slug": "anthropic", "account_id": "only-id"})
+
+        self.assertEqual(team_block["ai"]["credential"],
+                         {"engine_slug": "anthropic", "account_id": "only-id"})
+        self.assertNotIn("nickname", team_block["ai"]["credential"])
+        self.assertNotIn("env_var_name", team_block["ai"]["credential"])
+        for retired in LEGACY_TRIO:
+            self.assertNotIn(retired, team_block)
 
     def test_non_dict_ai_block_is_coerced_not_typeerror(self):
         """XACA-1178-017: a stray non-dict 'ai' key (hand-edited team-paths.json,
@@ -368,7 +451,7 @@ class HandleTeamAccountAssignAiCredentialTests(_TeamPathsFixtureMixin, unittest.
             account["auth_type"] = auth_type
         return {"engines": [{"slug": "anthropic", "accounts": [account]}]}
 
-    def test_assign_writes_ai_credential_snapshot_and_legacy_projection(self):
+    def test_assign_writes_the_ai_credential_snapshot_and_no_projection(self):
         handler, buf = self._post({
             "team": TEST_TEAM,
             "engine_slug": "anthropic",
@@ -393,9 +476,9 @@ class HandleTeamAccountAssignAiCredentialTests(_TeamPathsFixtureMixin, unittest.
             "env_var_name": "CLAUDE_ACCT_ME_TOKEN",
             "auth_type": "oauth_token",
         })
-        self.assertEqual(team_block["anthropic_account_id"], "acct-me")
-        self.assertEqual(team_block["anthropic_account_nickname"], "ME (Max)")
-        self.assertEqual(team_block["anthropic_api_key_env_var"], "CLAUDE_ACCT_ME_TOKEN")
+        for retired in LEGACY_TRIO:
+            self.assertNotIn(retired, team_block,
+                             f"XACA-1184-003 retired {retired}; assign must not write it")
         self.assertNotIn("anthropic_account_ref", team_block)
 
         # The sibling team's block must be untouched.
@@ -508,7 +591,7 @@ class HandleTeamAccountSaveAiCredentialTests(_TeamPathsFixtureMixin, unittest.Te
         handler.handle_team_account_save()
         return handler, buf
 
-    def test_save_validates_and_writes_credential_and_projection(self):
+    def test_save_validates_and_writes_the_credential_only(self):
         handler, buf = self._save({
             "team": TEST_TEAM,
             "account_id": "acct-console",
@@ -530,7 +613,9 @@ class HandleTeamAccountSaveAiCredentialTests(_TeamPathsFixtureMixin, unittest.Te
             "env_var_name": "TEAM_X1178_API_KEY",
             "auth_type": "api_key",
         })
-        self.assertEqual(on_disk["teams"][TEST_TEAM]["anthropic_api_key_env_var"], "TEAM_X1178_API_KEY")
+        for retired in LEGACY_TRIO:
+            self.assertNotIn(retired, on_disk["teams"][TEST_TEAM],
+                             f"XACA-1184-003 retired {retired}; save must not write it")
 
     def test_save_defaults_engine_slug_to_anthropic(self):
         self._save({
@@ -576,9 +661,11 @@ class HandleTeamAccountSaveAiCredentialTests(_TeamPathsFixtureMixin, unittest.Te
         on_disk = self._read_team_paths()
         team_block = on_disk["teams"][TEST_TEAM]
         self.assertIsNone(team_block["ai"]["credential"])
-        self.assertEqual(team_block["anthropic_account_id"], "")
-        self.assertEqual(team_block["anthropic_account_nickname"], "")
-        self.assertEqual(team_block["anthropic_api_key_env_var"], "")
+        # XACA-1184-003: clearing writes ai.credential = null and nothing else.
+        # The trio is neither populated nor blanked -- this path stopped
+        # maintaining it in either direction.
+        for retired in LEGACY_TRIO:
+            self.assertNotIn(retired, team_block)
 
     def test_invalid_auth_type_rejected_with_400(self):
         handler, buf = self._save({
@@ -771,14 +858,26 @@ class ServeTeamAccountCurrentAiCredentialTests(_TeamPathsFixtureMixin, unittest.
         self.assertEqual(resp["auth_type"], "api_key")
         self.assertEqual(resp["engine_slug"], "anthropic")
 
-    def test_team_with_no_ai_key_reads_as_legacy_without_crashing(self):
-        """Every team today (27 of 27 per the decision doc's F1) has no 'ai'
-        block at all. current() must read that team without crashing and
-        report config_source: legacy."""
+    def test_team_with_no_ai_key_reads_as_undeclared_and_the_trio_is_NOT_read(self):
+        """A team with no 'ai' block reads without crashing and reports every
+        field EMPTY -- including when a legacy trio is sitting right beside it.
+
+        XACA-1184-003 removed both server-side legacy read fallbacks, so this
+        test now asserts the OPPOSITE of what it asserted during the XACA-1178
+        compat window, where the same fixture was expected to surface
+        'legacy-acct'. Reading the trio here would make XACA-1184-004's one-time
+        lift unobservable: a team would show the right account whether or not
+        the migration had ever run, and the retirement would silently never
+        complete.
+
+        config_source stays the literal "legacy" -- a FROZEN WIRE VALUE naming
+        the third state (nothing declared), not a claim that anything legacy was
+        read. Renaming it would be a client-visible break for no gain; the test
+        below is what keeps the two empty-field states tellable apart.
+        """
         data = self._read_team_paths()
-        data["teams"][TEST_TEAM]["anthropic_account_id"] = "legacy-acct"
-        data["teams"][TEST_TEAM]["anthropic_account_nickname"] = "Legacy Nick"
-        data["teams"][TEST_TEAM]["anthropic_api_key_env_var"] = "TEAM_X1178_API_KEY"
+        for retired in LEGACY_TRIO:
+            data["teams"][TEST_TEAM][retired] = f"legacy-{retired}"
         self._write_team_paths(data)
         with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
             LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
@@ -787,12 +886,38 @@ class ServeTeamAccountCurrentAiCredentialTests(_TeamPathsFixtureMixin, unittest.
         resp = _response_json(buf)
 
         self.assertEqual(resp["config_source"], "legacy")
-        self.assertEqual(resp["account_id"], "legacy-acct")
-        self.assertEqual(resp["account_nickname"], "Legacy Nick")
-        self.assertEqual(resp["env_var_name"], "TEAM_X1178_API_KEY")
-        self.assertEqual(resp["auth_type"], "")
-        self.assertEqual(resp["engine_slug"], "")
-        self.assertEqual(resp["account_slug"], "")
+        for field in ("account_id", "account_nickname", "env_var_name",
+                      "auth_type", "engine_slug", "account_slug"):
+            self.assertEqual(resp[field], "",
+                             f"{field} was populated from the retired trio")
+
+    def test_the_two_empty_field_states_stay_tellable_apart(self):
+        """Both report every field empty, so config_source is the ONLY thing
+        distinguishing "an operator declared no team credential" from "nobody
+        ever decided". Collapsing them is the S002 violation this wire value
+        exists to prevent, and a client rendering both as "not configured"
+        would lose a deliberate choice."""
+        data = self._read_team_paths()
+        data["teams"][TEST_TEAM]["ai"] = {"credential": None}
+        self._write_team_paths(data)
+        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+            LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
+        _, buf = self._get()
+        declared_none = _response_json(buf)
+
+        data = self._read_team_paths()
+        data["teams"][TEST_TEAM].pop("ai", None)
+        self._write_team_paths(data)
+        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+            LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
+        _, buf = self._get()
+        undeclared = _response_json(buf)
+
+        self.assertEqual(declared_none["account_id"], "")
+        self.assertEqual(undeclared["account_id"], "")
+        self.assertEqual(declared_none["config_source"], "ai")
+        self.assertEqual(undeclared["config_source"], "legacy")
+        self.assertNotEqual(declared_none["config_source"], undeclared["config_source"])
 
     def test_explicit_null_credential_reads_as_ai_source_with_empty_fields(self):
         data = self._read_team_paths()

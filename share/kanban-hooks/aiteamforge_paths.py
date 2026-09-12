@@ -307,9 +307,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8200,
         "lcars_port_range": 10,
         "lcars_port": 8203,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_ACADEMY_API_KEY",
     },
     "ios": {
         "team_code": "IOS",
@@ -318,9 +315,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8260,
         "lcars_port_range": 10,
         "lcars_port": 8260,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_IOS_API_KEY",
     },
     "android": {
         "team_code": "AND",
@@ -329,9 +323,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8280,
         "lcars_port_range": 10,
         "lcars_port": 8280,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_ANDROID_API_KEY",
     },
     "firebase": {
         "team_code": "FIR",
@@ -340,9 +331,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8240,
         "lcars_port_range": 10,
         "lcars_port": 8240,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FIREBASE_API_KEY",
     },
     "command": {
         "team_code": "CMD",
@@ -351,9 +339,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8230,
         "lcars_port_range": 10,
         "lcars_port": 8234,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_COMMAND_API_KEY",
     },
     "dns": {
         "team_code": "DNS",
@@ -362,9 +347,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8180,
         "lcars_port_range": 10,
         "lcars_port": 8180,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_DNS_API_KEY",
     },
 
     # ── Freelance — per-client/project entries (overlay-only, XACA-0628) ──
@@ -388,9 +370,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8320,
         "lcars_port_range": 10,
         "lcars_port": 8320,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_LEGAL_COPARENTING_API_KEY",
         # XACA-0802: PII team — authored on the M4 Mini, nowhere else.
         "primary_host": "darren-m4-mini",
     },
@@ -403,9 +382,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8340,
         "lcars_port_range": 10,
         "lcars_port": 8340,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_MEDICAL_GENERAL_API_KEY",
         # XACA-0802: PII team — authored on the M4 Mini, nowhere else.
         "primary_host": "darren-m4-mini",
     },
@@ -418,9 +394,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8360,
         "lcars_port_range": 10,
         "lcars_port": 8360,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FINANCE_PERSONAL_API_KEY",
         # XACA-0802: PII team — authored on the M4 Mini, nowhere else.
         "primary_host": "darren-m4-mini",
     },
@@ -451,9 +424,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8380,
         "lcars_port_range": 10,
         "lcars_port": 8380,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "",
     },
     # ── Aliases (backward-compat, mirrors kanban_utils.py) ────────────────
     # NOTE (XACA-0463): mainevent moves from 8234 → 8400 to resolve the existing
@@ -501,9 +471,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         # overlap; inert in practice (nothing allocated in the old 8401-8409 tail).
         "lcars_port_range": 1,
         "lcars_port": 8400,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_MAINEVENT_API_KEY",
     },
 
     # ── MainEvent per-project crew instances (XACA-0806) ──────────────────
@@ -542,9 +509,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8401,
         "lcars_port_range": 19,
         "lcars_port": 8401,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_MAINEVENT_DEV_TEAM_API_KEY",
     },
     "mainevent-maineventapp-ios": {
         # Same working_dir/kanban_dir as team "ios".
@@ -554,9 +518,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8401,
         "lcars_port_range": 19,
         "lcars_port": 8402,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_MAINEVENT_MAINEVENTAPP_IOS_API_KEY",
     },
     "mainevent-maineventapp-android": {
         # Same working_dir/kanban_dir as team "android". Project uses a
@@ -570,9 +531,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8401,
         "lcars_port_range": 19,
         "lcars_port": 8403,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_MAINEVENT_MAINEVENTAPP_ANDROID_API_KEY",
     },
     "mainevent-maineventapp-functions": {
         # Same working_dir/kanban_dir as team "firebase". Also has a /develop
@@ -584,9 +542,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8401,
         "lcars_port_range": 19,
         "lcars_port": 8404,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_MAINEVENT_MAINEVENTAPP_FUNCTIONS_API_KEY",
     },
     "mainevent-maineventwrapper-ios": {
         # No existing "ios"-style team owns this dir — MainEventWrapper-iOS is a
@@ -601,9 +556,6 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8401,
         "lcars_port_range": 19,
         "lcars_port": 8405,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_MAINEVENT_MAINEVENTWRAPPER_IOS_API_KEY",
     },
 
     # XACA-0643: bare "medical" and "freelance" aliases REMOVED. They are
@@ -624,7 +576,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
 
 _CONFIG_CACHE: dict | None = None
 _CONFIG_PATH_AT_LOAD: str | None = None  # detect $AITEAMFORGE_CONFIG changes
-_A1_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0522)
+_LEGACY_CREDENTIAL_LIFT_ATTEMPTED: bool = False  # once-per-process guard (XACA-1184-004)
 _CONTRACT_SCRUB_ATTEMPTED: bool = False  # once-per-process guard (XACA-0643)
 _BOARD_LESS_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0794)
 _PRIMARY_HOST_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0802)
@@ -1300,9 +1252,9 @@ def _load_config_impl() -> dict:
     quarantine, bootstrap and the on-disk backfill passes. Behaviour is
     unchanged; every caller still reaches it through ``load_config()``.
     """
-    global _CONFIG_CACHE, _CONFIG_PATH_AT_LOAD, _A1_BACKFILL_ATTEMPTED, _CONTRACT_SCRUB_ATTEMPTED
+    global _CONFIG_CACHE, _CONFIG_PATH_AT_LOAD, _CONTRACT_SCRUB_ATTEMPTED
     global _BOARD_LESS_BACKFILL_ATTEMPTED, _PRIMARY_HOST_BACKFILL_ATTEMPTED
-    global _SEED_CONVERGENCE_ATTEMPTED
+    global _SEED_CONVERGENCE_ATTEMPTED, _LEGACY_CREDENTIAL_LIFT_ATTEMPTED
 
     config_path = get_config_path()
     config_path_str = str(config_path)
@@ -1521,22 +1473,14 @@ def _load_config_impl() -> dict:
         # which seeded bare parameterized-template keys ("medical", "freelance").
         # Those keys are contract violations that lcars-ui/server.py drops with a
         # loud warning on every read; removing them here stops the noise on existing
-        # machines. Flag-flipped BEFORE the call (same once-per-process discipline
-        # as the A.1 backfill below). Runs first so the backfill operates on the
-        # already-cleaned team set.
+        # machines. Flag-flipped BEFORE the call (the same once-per-process
+        # discipline every pass below uses). Runs first so the later passes
+        # operate on the already-cleaned team set.
         if not _CONTRACT_SCRUB_ATTEMPTED:
             _CONTRACT_SCRUB_ATTEMPTED = True
             maybe_scrubbed = _scrub_contract_violating_keys_on_disk(config_path, config)
             if maybe_scrubbed is not None:
                 config = maybe_scrubbed
-
-        # A.1 backfill (XACA-0522) — flag-flipped BEFORE the call so even a failed
-        # disk write doesn't cause a second lock attempt within the same process.
-        if not _A1_BACKFILL_ATTEMPTED:
-            _A1_BACKFILL_ATTEMPTED = True
-            maybe_upgraded = _backfill_a1_fields_on_disk(config_path, config)
-            if maybe_upgraded is not None:
-                config = maybe_upgraded
 
         # Board-less marker backfill (XACA-0794) — self-heal overlays whose board-less
         # teams carry a bare `"kanban_dir": null` with no explanation. Runs LAST so it
@@ -1577,85 +1521,49 @@ def _load_config_impl() -> dict:
             if maybe_converged is not None:
                 config = maybe_converged
 
+        # Legacy credential lift (XACA-1184-004) — promote a GENUINELY configured
+        # anthropic_* trio into ai.credential, once. This is what makes retiring
+        # the anthropic_* seed safe: XACA-1184-002 points the readers at
+        # ai_credential(), which has no legacy fallback by design, so without
+        # this pass the one real account on a machine would stop resolving.
+        # Runs LAST — it reads only fields already on disk, and no pass above
+        # writes them any more. Same once-per-process flag discipline, flipped
+        # BEFORE the call so a failed disk write cannot cause a second lock
+        # attempt in this process.
+        #
+        # Narrow BY DESIGN: it fires only on evidence of a real account
+        # (non-empty account_id or nickname), never on the presence of an
+        # anthropic_api_key_env_var — 26 of this machine's 27 were invented by
+        # the retired backfill with nothing behind them, so lifting on those
+        # would fabricate credentials. See diff_liftable_legacy_credentials().
+        if not _LEGACY_CREDENTIAL_LIFT_ATTEMPTED:
+            _LEGACY_CREDENTIAL_LIFT_ATTEMPTED = True
+            maybe_lifted = _lift_legacy_credentials_on_disk(config_path, config)
+            if maybe_lifted is not None:
+                config = maybe_lifted
+
     _CONFIG_CACHE = config
     _CONFIG_PATH_AT_LOAD = config_path_str
     return _CONFIG_CACHE
-
-
-def upgrade_config_to_v3(config: dict) -> dict:
-    """Return a copy of *config* with v3 Anthropic account fields back-filled.
-
-    Takes an existing v1 or v2 config dict (or any config missing the three
-    new fields) and returns a new dict with:
-      - schema_version bumped to 3
-      - anthropic_account_id: "" (empty; user fills this in via wizard)
-      - anthropic_account_nickname: "" (empty; user fills this in via wizard)
-      - anthropic_api_key_env_var: "TEAM_<SLUG_UPPER>_API_KEY" derived from
-        the team slug (hyphens replaced with underscores, uppercased)
-
-    This function is a pure transformer — it never touches disk.  It IS now
-    called automatically from ``load_config()`` (XACA-0522) via the
-    ``_backfill_a1_fields_on_disk`` wrapper, which adds the disk-write half.
-    The pure half remains here for unit-testability and for any future
-    explicit-invocation path.
-
-    The input config is never mutated; a deep copy is returned.
-
-    Example::
-
-        import copy
-        old = load_config()
-        new = upgrade_config_to_v3(copy.deepcopy(old))
-        # inspect new, then write to disk if user approves
-    """
-    import copy
-    upgraded = copy.deepcopy(config)
-    upgraded["schema_version"] = 3
-
-    for slug, entry in upgraded.get("teams", {}).items():
-        if "anthropic_account_id" not in entry:
-            entry["anthropic_account_id"] = ""
-        if "anthropic_account_nickname" not in entry:
-            entry["anthropic_account_nickname"] = ""
-        if "anthropic_api_key_env_var" not in entry:
-            env_var = f"TEAM_{slug.upper().replace('-', '_')}_API_KEY"
-            entry["anthropic_api_key_env_var"] = env_var
-
-    return upgraded
-
-
-def diff_missing_anthropic_fields(config: dict) -> list[tuple[str, list[str]]]:
-    """Return [(team_slug, [missing_field_names, ...]), ...] for teams needing backfill.
-
-    Empty list means no migration needed (skip-fast).  The three fields checked
-    are ``anthropic_account_id``, ``anthropic_account_nickname``, and
-    ``anthropic_api_key_env_var``.
-
-    A field is considered missing only when the KEY is absent from the team
-    entry.  An empty-string value is NOT missing and is preserved as-is by the
-    subsequent upgrade.
-    """
-    _FIELDS = ("anthropic_account_id", "anthropic_account_nickname", "anthropic_api_key_env_var")
-    result = []
-    for slug, entry in sorted(config.get("teams", {}).items()):
-        missing = [f for f in _FIELDS if f not in entry]
-        if missing:
-            result.append((slug, missing))
-    return result
 
 
 # ---------------------------------------------------------------------------
 # Shared on-disk rewrite machinery (XACA-0794-008 / -009 / -012)
 # ---------------------------------------------------------------------------
 #
-# FIVE self-healing passes rewrite team-paths.json during load_config(): the
-# contract scrub (XACA-0643), the A.1 field backfill (XACA-0522), the board-less
-# marker backfill (XACA-0794), the primary_host backfill (XACA-0802), and the
-# seed convergence (XACA-1161-003). The first three were written by cloning
-# the previous one, so each carried its own copy of the same lock / TOCTOU /
-# backup / atomic-write skeleton — and therefore its own copy of the same three
-# defects. That is the k501 sibling-heuristic drift failure mode, and patching
-# three copies would only have seeded a fourth.
+# Several self-healing passes rewrite team-paths.json during load_config(): the
+# contract scrub (XACA-0643), the board-less marker backfill (XACA-0794), the
+# primary_host backfill (XACA-0802), the seed convergence (XACA-1161-003), and
+# the legacy credential lift (XACA-1184-004). The earliest of them were written
+# by cloning the previous one, so each carried its own copy of the same lock /
+# TOCTOU / backup / atomic-write skeleton — and therefore its own copy of the
+# same three defects. That is the k501 sibling-heuristic drift failure mode, and
+# patching those copies would only have seeded another.
+#
+# (The A.1 anthropic_* backfill, XACA-0522, was the other founding member of that
+# cloned set. XACA-1184-004 removed it: it seeded a credential projection the
+# ticket retires, and it INVENTED the TEAM_<SLUG>_API_KEY names it wrote. The
+# credential lift that replaced it reuses this driver rather than its carcass.)
 #
 # The skeleton now lives HERE, once. The passes below supply only what actually
 # differs between them: a predicate, a transform, a backup tag, and a log label.
@@ -1884,7 +1792,7 @@ def _rewrite_config_on_disk(
     """Snapshot, lock, transform, and atomically rewrite the config. Never raises.
 
     The single owner of the self-heal write path. Parameters:
-      label        — human name for log lines ("A.1 backfill").
+      label        — human name for log lines ("primary-host affinity").
       backup_tag   — backup filename infix ("a1-backfill").
       needs_change — (cfg) -> truthy when this pass has work to do. Called on the
                      in-memory config for skip-fast AND on the re-read config for
@@ -1964,27 +1872,6 @@ def _rewrite_config_on_disk(
             file=sys.stderr,
         )
         return transform(current)
-
-
-def _backfill_a1_fields_on_disk(config_path: Path, current: dict) -> dict | None:
-    """Snapshot, lock, upgrade, and atomically write the config if any team lacks A.1 fields.
-
-    Returns the upgraded config dict on success (disk write or in-memory fallback).
-    Returns None only when no fields are missing (skip-fast — no lock, no backup, no write).
-    Never raises. Write mechanics live in _rewrite_config_on_disk.
-    """
-    return _rewrite_config_on_disk(
-        config_path,
-        current,
-        label="A.1 backfill",
-        backup_tag="a1-backfill",
-        needs_change=diff_missing_anthropic_fields,
-        transform=upgrade_config_to_v3,
-        describe=lambda cfg: [
-            f"team={slug} fields={fields}"
-            for slug, fields in diff_missing_anthropic_fields(cfg)
-        ],
-    )
 
 
 def _find_contract_violating_keys(config: dict) -> list[str]:
@@ -2391,6 +2278,242 @@ def _converge_seed_fields_on_disk(config_path: Path, current: dict) -> dict | No
             for slug, fields in diff_unconverged_seed_fields(cfg)
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# One-time legacy credential lift (XACA-1184-004)
+# ---------------------------------------------------------------------------
+
+def diff_liftable_legacy_credentials(config: dict) -> list[tuple[str, str]]:
+    """Return ``[(team_slug, evidence_field), ...]`` for teams whose legacy
+    ``anthropic_*`` trio records a GENUINELY CONFIGURED account that has not yet
+    been promoted into ``ai.credential`` (XACA-1184-004).
+
+    Pure predicate — never mutates, never touches disk, never raises. Empty list
+    means nothing to lift (skip-fast: no lock, no backup, no write).
+
+    WHY THIS PREDICATE IS NARROW, AND WHY THE NARROWNESS IS THE WHOLE POINT
+    ----------------------------------------------------------------------
+    The obvious predicate — "the team has legacy keys, lift them" — would
+    FABRICATE CREDENTIALS, which is strictly worse than the projection this
+    ticket retires. MEASURED on the M3Pro overlay 2026-09-12, 27 teams:
+
+        teams carrying the legacy keys ............... 27
+        non-empty ``anthropic_api_key_env_var`` ...... 26
+        non-empty ``anthropic_account_id`` ............ 1  (academy)
+        teams with ``ai.credential`` populated ........ 0
+
+    Those 26 env-var names are not credentials. They are the RETIRED BACKFILL'S
+    OWN INVENTION: ``upgrade_config_to_v3`` (removed by this same subitem)
+    derived ``TEAM_<SLUG>_API_KEY`` for every team that lacked the key, and
+    XACA-0282-012 F2 measured NO VALUE behind any of them. Lifting on their
+    presence would mint 26 credential records for accounts that do not exist.
+
+    THE DISCRIMINATOR IS PROVENANCE, NOT A NAME PATTERN. A team qualifies only
+    when ``anthropic_account_id`` or ``anthropic_account_nickname`` is a
+    non-empty string. That test is decisive because of how the retired backfill
+    was written: for those two fields it could only ever write ``""`` — it had
+    no derivation for either. So a non-empty value in either field CANNOT have
+    been authored by the backfill; it came from a human or from
+    ``lcars-ui/server.py``'s writer. Non-emptiness there is therefore evidence,
+    not a heuristic.
+
+    ``anthropic_api_key_env_var`` is the mirror image and is DELIBERATELY NOT a
+    trigger: the backfill ALWAYS invented a value for it, so its non-emptiness
+    carries no information at all. It is copied INTO a lifted credential (it is
+    part of a genuinely-configured team's record) but never used to decide that
+    a lift should happen.
+
+    REJECTED: "an OFF-PATTERN env var alone should qualify" — i.e. treating
+    ``env_var != TEAM_<SLUG>_API_KEY`` as a hand-configured signal. Rejected on
+    two grounds. First, it requires keeping the retired backfill's derivation
+    formula alive as a classifier, which is the K501 sibling-heuristic drift
+    this ticket exists to remove. Second, it misfires in the FABRICATING
+    direction: a team renamed since the backfill ran (real here — see the
+    finance/medical/legal naming drift and the ``freelance-*`` instance keys)
+    carries a stale ``TEAM_OLDSLUG_API_KEY`` that no longer matches its current
+    slug, so a pure placeholder would be classified as genuine and a credential
+    invented for it.
+
+    A team whose legacy keys are ALL EMPTY is left undeclared — no ``ai`` block,
+    no ``credential`` key, nothing written. Absence is the honest answer: no
+    account was ever configured, and ``ai_credential()`` returning ``ABSENT``
+    says exactly that (registry S002).
+
+    IDEMPOTENT: a team is skipped when ``ai.credential`` is already present in
+    ANY state — a dict, or an explicit JSON ``null``. ``null`` is a RECORDED
+    DECISION ("no team credential; the CLI falls back to its own login"), not a
+    gap, so overwriting it would silently reverse an operator's choice. Key
+    presence is the marker, never truthiness.
+    """
+    result: list[tuple[str, str]] = []
+    for slug, entry in sorted((config.get("teams") or {}).items()):
+        if not isinstance(entry, dict):
+            continue
+
+        # Never overwrite an existing decision — dict OR explicit null.
+        ai_block = entry.get("ai")
+        if isinstance(ai_block, dict) and "credential" in ai_block:
+            continue
+
+        evidence = ""
+        for field in ("anthropic_account_id", "anthropic_account_nickname"):
+            value = entry.get(field)
+            if isinstance(value, str) and value.strip():
+                evidence = field
+                break
+        if evidence:
+            result.append((slug, evidence))
+    return result
+
+
+def _build_lifted_credential(entry: dict) -> dict:
+    """Build a FRESH ``ai.credential`` dict from a team entry's legacy trio.
+
+    Whole-object construction, per invariant I2 of
+    ``docs/xaca-0282/research/012-credential-config-shape.md`` §1.3: a writer
+    replaces ``ai.credential`` as a unit and never patches individual keys.
+    Patching is exactly how ``anthropic_account_ref`` went stale (that doc's F5).
+
+    THE LIFT COPIES ONLY WHAT WAS ACTUALLY RECORDED. IT INVENTS NOTHING.
+    That single rule decides all three of the fields the legacy trio has no
+    answer for, and it is why the shape below matches — deliberately — the one
+    ``lcars-ui/server.py`` already writes for a hand-entered account with no
+    Fleet Monitor record behind it (its manual-modal path: ``engine_slug`` present,
+    ``account_slug`` and ``auth_type`` omitted when unknown):
+
+      * ``engine_slug`` = ``"anthropic"``. Not a guess. The source fields are
+        literally named ``anthropic_*`` — an Anthropic account is what they can
+        record — and server.py's own manual path defaults this same literal.
+      * ``account_slug`` OMITTED. Per invariant I4, ``engine_slug`` +
+        ``account_slug`` are a REFERENCE to a Fleet Monitor account record, and
+        a legacy-only credential points at no such record. Writing one would
+        manufacture a dangling foreign key. This matters concretely: XACA-1184-005
+        makes the launcher's vault key ``<engine_slug>/<account_slug>``, so a
+        wrong ``account_slug`` fetches ANOTHER ACCOUNT'S secret while looking
+        entirely correct. An absent one cannot form a key at all, so the launcher
+        falls through to the env-var tier — which is the documented, never-retired
+        failover tier, and ``env_var_name`` below is exactly such a key. Degraded
+        and visible beats confident and wrong.
+      * ``auth_type`` OMITTED. The legacy trio does not record it. Inferring
+        ``oauth_token`` from an env-var NAME would be a guess about how a live
+        secret is presented to an API; the field is optional precisely so that
+        "unknown" is expressible.
+
+    REJECTED: deriving ``account_slug`` from ``anthropic_account_ref``, which on
+    this machine holds ``"anthropic/max-me2"`` — exactly the ``engine/account``
+    shape wanted. It is a trap. XACA-0282-012 F5 MEASURED that field going
+    stale: it was written on assign and read by nothing, so any save that did
+    not also touch it left it naming the PREVIOUS account. ``server.py``'s
+    ``_set_team_ai_credential`` deletes it on every write for that reason. Its
+    shape is right and its content is untrustworthy, which is the worst possible
+    combination for a value that becomes a vault lookup key.
+    """
+    def _text(field: str) -> str:
+        value = entry.get(field)
+        return value.strip() if isinstance(value, str) else ""
+
+    return {
+        "engine_slug": "anthropic",
+        "account_id": _text("anthropic_account_id"),
+        "nickname": _text("anthropic_account_nickname"),
+        "env_var_name": _text("anthropic_api_key_env_var"),
+    }
+
+
+def apply_legacy_credential_lift(config: dict) -> dict:
+    """Return a copy of *config* with genuine legacy credentials promoted into
+    ``ai.credential`` (XACA-1184-004).
+
+    STRICTLY ADDITIVE, in the same shape as :func:`apply_primary_host` and
+    :func:`apply_seed_convergence`:
+
+      - writes ONLY ``ai.credential``, and ONLY for teams
+        :func:`diff_liftable_legacy_credentials` qualifies;
+      - NEVER removes the legacy ``anthropic_*`` keys. Retiring them from disk is
+        XACA-1184-009, deliberately last and gated on the user, so that a machine
+        can be rolled back to the legacy readers without data loss;
+      - never overwrites an existing ``ai.credential`` (dict or explicit null);
+      - preserves any other key already under ``ai`` (a future ``cli``,
+        ``provider_config``), mirroring ``_set_team_ai_credential``;
+      - never adds or removes a team.
+
+    IDEMPOTENT by construction: every credential written makes its own trigger
+    false (the predicate gates on ``"credential" in ai``), so a second run is a
+    skip-fast no-op and the on-disk bytes after two runs are identical.
+
+    SCHEMA_VERSION IS DELIBERATELY NOT BUMPED. The retired
+    ``upgrade_config_to_v3`` bumped it to 3, so bumping to 4 here is the reflex —
+    and it would be wrong twice over. Nothing branches on this field: the only
+    reader is ``load_config``'s own recognition check, whose
+    ``_READABLE_SCHEMA_VERSIONS`` is ``{1, 2, 3}``, so a 4 would print an
+    "unrecognized schema_version" warning on every read on every machine in the
+    fleet and change no behaviour whatsoever. (``fleet-monitor``'s
+    ``schema_version`` is an unrelated field inside its ``system`` telemetry
+    block, and ``kb-host-ready.sh``'s belongs to ``host-ready.json``.) And
+    semantically this pass POPULATES an already-supported field rather than
+    defining a new shape — ``ai.credential`` is what server.py has been writing
+    and what the registry's ``ai`` FieldSpec already governs. The change that
+    would genuinely break the read contract is XACA-1184-009's REMOVAL of the
+    legacy keys; that is the place to weigh a bump, with a user in the loop.
+
+    The input config is never mutated; a deep copy is returned.
+    """
+    import copy
+    upgraded = copy.deepcopy(config)
+    teams = upgraded.get("teams") or {}
+    for slug, _evidence in diff_liftable_legacy_credentials(config):
+        entry = teams.get(slug)
+        if not isinstance(entry, dict):
+            continue
+        ai_block = entry.get("ai")
+        if not isinstance(ai_block, dict):
+            # Absent, null, or corrupt — replace with a fresh block. A non-dict
+            # `ai` is corruption that the registry accessor already warns about
+            # (XACA-1178-016); it holds no credential to preserve.
+            ai_block = {}
+            entry["ai"] = ai_block
+        if "credential" in ai_block:
+            continue  # belt-and-braces: never overwrite a recorded decision
+        ai_block["credential"] = _build_lifted_credential(entry)
+    return upgraded
+
+
+def _lift_legacy_credentials_on_disk(config_path: Path, current: dict) -> dict | None:
+    """Snapshot, lock, promote genuine legacy credentials, atomically rewrite.
+
+    The one-time XACA-1184-004 migration. It is the reason retiring the
+    ``anthropic_*`` seed is safe: XACA-1184-002 switches the readers over to
+    ``ai_credential()``, and ``ai_credential()`` has NO legacy fallback by
+    design (reading the trio there would make this migration unobservable —
+    every team would answer correctly whether or not it ever ran). Without this
+    pass, the one genuinely configured account on this machine would simply
+    stop resolving.
+
+    Returns the lifted config when a change is made, or None when there is
+    nothing to lift (skip-fast — no lock, no backup, no write). Never raises.
+
+    Backup and write mechanics live in :func:`_rewrite_config_on_disk`; this
+    pass owns NO copy of the lock / TOCTOU / backup / atomic-write skeleton.
+    Adding a hand-rolled sixth copy is what the comment above that driver
+    forbids — the first three passes were built by cloning each other and each
+    inherited the same lock/TOCTOU/backup defects (the K501 drift pattern).
+    """
+    return _rewrite_config_on_disk(
+        config_path,
+        current,
+        label="legacy credential lift",
+        backup_tag="xaca-1184-credential-lift",
+        needs_change=diff_liftable_legacy_credentials,
+        transform=apply_legacy_credential_lift,
+        describe=lambda cfg: [
+            f"team={slug} evidence={evidence} (XACA-1184-004 — promoted the "
+            f"legacy anthropic_* trio into ai.credential; the legacy keys were "
+            f"LEFT IN PLACE, their removal is XACA-1184-009)"
+            for slug, evidence in diff_liftable_legacy_credentials(cfg)
+        ],
+    )
+
 
 # ---------------------------------------------------------------------------
 # Team accessor functions

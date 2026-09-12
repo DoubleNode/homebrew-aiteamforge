@@ -209,10 +209,21 @@ install_helper_scripts() {
     # ./vault-keygen.js, so that sibling has to land too, or node dies on
     # MODULE_NOT_FOUND inside a swallowed `2>/dev/null || true` — a silent crash
     # every reporter cycle. Ship the whole require chain, not just entrypoints.
+    # team-account-display.sh (XACA-1184-002) is the same transitive-sibling
+    # shape as the msg-client chain above, one layer up: display-agent-avatar.sh
+    # in this very loop SOURCES it to resolve the team's routed ai.credential,
+    # and so do the nine team banners. Copying only the entrypoint leaves the
+    # helper unresolvable, and the caller then degrades to EMPTY STRINGS instead
+    # of failing (it guards on `command -v atf_team_account_fields`), so the gap
+    # never surfaces as an error. EXECUTABLE like worktree-helpers.sh and the
+    # other sourced *.sh libraries — not a 644 datafile: it carries a shebang,
+    # and aiteamforge-upgrade.sh's _xaca0608_render_team_script sets the exec bit
+    # when it refreshes the same file, so installing it 644 here would make
+    # install and upgrade disagree about the mode on every box.
     for helper in agent-panel-display.sh display-agent-avatar.sh iterm2_window_manager.py \
                   set-lcars-profile-browser.py create-lcars-profile.py lcars-tmp-dir.sh \
                   kanban-backup.py fleet-reporter.sh init-agent-panel-json.py \
-                  msg-client.sh kb-api-key; do
+                  msg-client.sh kb-api-key team-account-display.sh; do
         if [ -f "$scripts_src/$helper" ]; then
             cp "$scripts_src/$helper" "$scripts_dest/$helper"
             chmod +x "$scripts_dest/$helper"

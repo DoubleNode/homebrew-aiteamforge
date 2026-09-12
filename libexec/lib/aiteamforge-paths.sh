@@ -470,9 +470,9 @@ PYEOF
 # the return mechanism moved. Callers read $_ATF_SENTINEL_CLASS.
 _aiteamforge_field_sentinel_class() {
     case "$1" in
-        primary_host|anthropic_account_id|anthropic_account_nickname|anthropic_api_key_env_var)
+        primary_host)
             _ATF_SENTINEL_CLASS="NULLISH" ;;
-        board_less)
+        board_less|ai)
             _ATF_SENTINEL_CLASS="KEYONLY" ;;
         *)
             _ATF_SENTINEL_CLASS="PATHISH" ;;
@@ -492,8 +492,26 @@ _aiteamforge_field_sentinel_class() {
 #            "none configured" and must NOT fall through to the seed.
 #            XACA-0802-004 records that a blanket `if not host` fallback made
 #            Python and shell disagree about the identical overlay entry.
+#            primary_host is now the ONLY member. XACA-1184 retired the
+#            anthropic_account_id / anthropic_account_nickname /
+#            anthropic_api_key_env_var trio that used to sit here; they are no
+#            longer declared in Python either, so they resolve through
+#            _default_spec() — PATHISH — on BOTH sides via the `*` arm below.
+#            Leaving them listed here would have been a silent divergence: the
+#            field is gone, but the rule for it would have disagreed.
 #   KEYONLY  (None,)             — only a JSON null is absence. `board_less:
-#            false` is DATA. This is the one class where <json_type> carries
+#            false` is DATA, and so is `ai.credential: null`. On `ai` this
+#            class is load-bearing rather than incidental: TWO different nulls
+#            live one level apart meaning opposite things. `ai: null` (the key
+#            this function is asked about) is NO BLOCK and is absence;
+#            `ai.credential: null` one level in is a DECLARED decision — "no
+#            team credential, the CLI falls back to its own login". Only the
+#            OUTER null is a sentinel. Copying primary_host's NULLISH tuple
+#            onto `ai` would be actively WRONG, and PATHISH doubly so: "" and
+#            the string "null" are CORRUPTION on a structured block, not an
+#            in-band absence, and the accessor has to SEE them to warn.
+#            Mirrors the `ai` FieldSpec's own note in aiteamforge_registry.py.
+#            This is the one class where <json_type> carries
 #            information the text cannot: jq renders both JSON null and the
 #            JSON string "null" as the bare text `null`, so the type is what
 #            separates them.
