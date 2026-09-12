@@ -6,6 +6,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-0787 round-9 — DELIVERY FIX, caught by the review gate re-verifying from
+  scratch rather than trusting its own round-8 approval. `share/scripts/register-claude-hook.py`
+  had reverted to its PRE-FIX state (8209 bytes, zero HOME-guard markers) while
+  canonical carried the full XACA-0787-017 guard (13556 bytes). Cause: rounds 7-8
+  corrected the gitlink by taking develop's pointer — which dissolved the tap
+  forward-carry, and with it discarded the tap commit carrying the mirrored fix.
+  CONSEQUENCE, and it is the real point: consumers would have received every
+  call-site fix in this ticket and NOT the callee guard — the one whose own
+  docstring calls it "the backstop for every OTHER caller." The durable half of
+  the fix would have silently not shipped. It would also have redded `develop`:
+  the drift VERDICT step is skipped on `pull_request` by design and runs on push,
+  where the classifier returns BLOCK on diverged=1.
+  Forward-carried; verified byte-identical to canonical, and all 54 literal
+  `sync_file` mirror pairs re-checked — zero drift.
+  **The lesson worth keeping: "gitlink matches develop" answers the MERGE-CONFLICT
+  question, not the DELIVERY question.** The two dissolved together in the framing
+  and not in fact, and a green `sync-tap-drift` on a PR says nothing about either,
+  because the deciding step does not run on that event.
 - XACA-0787 round-7 (PR #859 round-6 review): VACUITY FLOOR on
   `tests/test-xaca-0787-033-vector7-attribution.sh`. It tracked its own
   PASS/FAIL counters and exited 0 whenever FAIL was 0 — so a run in which NO
