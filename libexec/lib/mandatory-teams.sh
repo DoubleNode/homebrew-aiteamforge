@@ -236,7 +236,26 @@ _atf_mandatory_teams_reject_parameterized() {
     while IFS= read -r _id; do
         [ -n "$_id" ] || continue
         _conf="${_teams_dir}/${_id}.conf"
-        if [ -f "$_conf" ] && grep -qE '^[[:space:]]*TEAM_(HAS_PROJECTS|REQUIRES_CLIENT_ID)="true"' "$_conf" 2>/dev/null; then
+        # XACA-1070-034 (PR #865 round 5 review): match every quoting and
+        # invocation variant, not just the one the shipped confs happen to use.
+        # The narrow form ('...="true"') missed `=true`, `='true'`, and
+        # `export TEAM_HAS_PROJECTS="true"` — so a parameterized team written in
+        # any of those styles would pass this filter as UNPARAMETERIZED and be
+        # force-installed with a manufactured instance id, which is precisely
+        # the failure this filter exists to prevent. All 11 shipped confs use
+        # the double-quoted form today, so this is hardening rather than a live
+        # fix — but nothing tells a future conf author that the quoting style
+        # is load-bearing, and an audit grep that only matches the form you were
+        # shown is not an audit.
+        #
+        # KNOWN REMAINING GAP, deliberately not closed here: a conf that sets
+        # the flag indirectly (via `source`, or computed in a conditional) still
+        # evades a text grep. Closing that means SOURCING the conf, which is a
+        # different trust model and diverges from the grep-based convention used
+        # by aiteamforge-doctor.sh, aiteamforge-migrate.sh and
+        # aiteamforge-setup.sh. That belongs in its own ticket covering all four
+        # sites, not a one-off divergence here.
+        if [ -f "$_conf" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?TEAM_(HAS_PROJECTS|REQUIRES_CLIENT_ID)[[:space:]]*=[[:space:]]*("true"|'"'"'true'"'"'|true)[[:space:]]*(#.*)?$' "$_conf" 2>/dev/null; then
             echo "mandatory-teams.sh: \"${_id}\" is flagged \"mandatory\": true in ${_registry_path} but ${_conf} declares TEAM_HAS_PROJECTS/TEAM_REQUIRES_CLIENT_ID=\"true\" (parameterized) — mandatory + parameterized is not supported (no fleet-wide-correct instance id can be derived; see this function's own header comment in mandatory-teams.sh). Skipping this team from mandatory enforcement — fix the registry (unset \"mandatory\") or make the team unparameterized (XACA-1070-030)." >&2
             continue
         fi
