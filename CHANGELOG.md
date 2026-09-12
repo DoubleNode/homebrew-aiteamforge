@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-1159-040: `kb-sweep` printed the same `No subitems found — ready to close.`
+  completion line for a genuine zero-subitem item AND for an EMPTY subitem count,
+  i.e. a failed board read — one `if [[ -z "$subitem_count" ]] || [[ "$subitem_count"
+  -eq 0 ]]` branch served both. Gate 3 keys its positive-execution evidence on that
+  exact line, so a read failure could be accepted as a clean sweep: the
+  empty-vs-zero conflation this ticket exists to remove, sitting inside the emitter
+  the gate trusts. Split the branches — an unreadable count now says so explicitly,
+  does NOT print the completion line, and returns non-zero, so both a human reading
+  the output and the gate parsing it fail closed instead of inferring readiness that
+  was never established. Verified: pre-fix the gate's own grep matched a completion
+  line on a failed read and the function returned 0; post-fix it matches nothing and
+  returns 1, while a genuine zero still reports ready and an item with subitems is
+  unaffected (8/8 under zsh, the target shell).
+
 - **XACA-1080** — mirrors the knowledge-validator performance work from dev-team.
   `kb-knowledge-validate`'s INDEX.md orphan-scan replaced its per-LINE fork loop
   (`echo|grep -qE` per line, then `echo|grep -oE|tr|head` per match — ~35,000-49,000 forks

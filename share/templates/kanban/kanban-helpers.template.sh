@@ -4792,7 +4792,24 @@ kb-sweep() {
     echo "  SUBITEM STATUS SWEEP: $working_id"
     echo "═══════════════════════════════════════════════════════"
 
-    if [[ -z "$subitem_count" ]] || [[ "$subitem_count" -eq 0 ]]; then
+    # XACA-1159-040: an EMPTY subitem_count means the jq read FAILED; it does
+    # not mean "zero subitems". These were conflated into one branch, so a read
+    # failure printed the same "ready to close." completion line as a genuine
+    # empty item. Gate 3 keys its positive-execution evidence on that exact
+    # line, so a failed read could be accepted as a clean sweep -- the
+    # empty-vs-zero conflation this ticket exists to remove, inside the very
+    # emitter the gate trusts. Split them, and make the failure path say so and
+    # return non-zero rather than reporting readiness it never established.
+    if [[ -z "$subitem_count" ]]; then
+        echo "  ✗ Could not read the subitem count for $working_id — the board"
+        echo "    query returned nothing. This is NOT the same as 'no subitems';"
+        echo "    nothing about this item's readiness has been established."
+        echo "═══════════════════════════════════════════════════════"
+        echo ""
+        return 1
+    fi
+
+    if [[ "$subitem_count" -eq 0 ]]; then
         echo "  No subitems found — ready to close."
         echo "═══════════════════════════════════════════════════════"
         echo ""
