@@ -279,8 +279,6 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - XACA-1164-020: SNW's fleet division colour `.div-snw` is now `#d4a017`. The old
   `#cc9966` equals `--lcars-tan`, the dashboard's colour for any division without
   one, so SNW looked like an unregistered team.
-- **XACA-0931 / XACA-0865 — the new persona-deploy suite (35 tests; `grep -c 'test_start "'`)
-  ships QUARANTINED, and
 - XACA-0787 round-6 (PR #859 review, three vector-7 findings). Round 5 added
   vector 7 without applying the lesson vector 6 had taken two rounds to learn:
   (1) it hard-failed with NO attributability split, so a concurrent unrelated
@@ -419,8 +417,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   refuses to guess), and C7/D5 (mandatory-teams.sh never sourced at all —
   both install-side call sites now warn on stderr instead of staying
   silent). 53 assertions pass under `/bin/bash` 3.2 (up from 48).
-- **XACA-0931 / XACA-0865 — the new 34-test persona-deploy suite ships QUARANTINED, and
-  while quarantined it gates nothing.** `tests/test-xaca-0931-persona-deploy-and-parity.sh`
+- **XACA-0931 / XACA-0865 — the new persona-deploy suite (35 tests; count with
+  `grep -c '^test_start "'` — the `^` matters, unanchored it also matches prose citing
+  the pattern) ships QUARANTINED, and while quarantined it gates nothing.** `tests/test-xaca-0931-persona-deploy-and-parity.sh`
   is reclassified in `tests/ci-manifest` from `plain-shell` to
   `excluded:xaca-0865-runner-only-failure`, which genuinely removes it from the CI
   plain-shell loop rather than merely labelling it. It passes 35/35 in five distinct local
