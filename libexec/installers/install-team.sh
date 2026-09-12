@@ -2120,6 +2120,16 @@ with lock:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(config, f, indent=2)
                 f.write("\n")
+                # XACA-1187-014 (PR #875 review): flush + fsync before the
+                # rename, matching every other site hardened in this ticket
+                # (kb-init-team, kb-freelance, the wizard, kb-port-fix.py).
+                # Without this, a crash between os.fdopen's implicit close
+                # and the eventual page-cache writeback could leave the tmp
+                # file's content unpersisted even though os.replace() below
+                # already made the rename itself atomic and immediately
+                # visible to other readers via the buffer cache.
+                f.flush()
+                os.fsync(f.fileno())
             # XACA-0463 subitem 016: stat existing file for mode; fall back to 0o644 for new.
             try:
                 original_mode = os.stat(str(resolved)).st_mode

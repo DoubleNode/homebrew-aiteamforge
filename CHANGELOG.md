@@ -88,6 +88,37 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `scripts/aiteamforge-team-paths-wizard.py`,
   `scripts/migrate-freelance-overlay-codes.sh`) that this tap-side entry
   does not duplicate.
+- **XACA-1187, PR #875 gate-bot review round** — three follow-ups on the
+  tap-native sites above:
+  - `kb-port-fix.py:_atomic_write`'s docstring wrongly claimed its
+    `ValueError` propagates uncaught; `cmd_apply`'s existing
+    `except (OSError, ValueError)` two lines below its call already catches
+    it and reports a clean `ERROR:` line. Comment-only fix, no behavior
+    change.
+  - `install-team.sh`'s hardened write block gained `f.flush()` +
+    `os.fsync(f.fileno())` before `os.replace()`, matching every other site
+    this ticket hardened (`kb-init-team`, `kb-freelance`, the wizard,
+    `kb-port-fix.py` all already had it) — a durability consistency fix,
+    not a correctness regression in the lost-update guard itself.
+  - **`kb-port-fix.py --apply`'s stale-plan guard (XACA-1187-017)**: the
+    XACA-1187-005 id-set guard does not catch a concurrent writer changing
+    a *field* (not an id) on an instance this tool's plan is about to
+    overwrite, during the operator's think-time at the interactive
+    `Apply these changes? [y/N]` prompt — which necessarily happens BEFORE
+    the lock is acquired (holding a file lock across human think-time would
+    be worse than the race). `cmd_apply` now freezes a deep copy of the
+    config as read, before the prompt, plus the exact instance-id set the
+    plan is about to touch; `_atomic_write` compares that frozen snapshot
+    against a fresh re-read taken under the lock, for exactly those ids,
+    and refuses (fail-closed, naming the changed id) if anything differs
+    since the operator approved the plan. Verified directly both ways by
+    running `cmd_apply()` against the real, unmodified function with only
+    `input()`/`isatty()` replaced at the caller level (never the code under
+    test) to inject a concurrent field edit at the exact prompt moment: a
+    clean apply still succeeds and renumbers correctly; a concurrent edit
+    during think-time now aborts and the concurrent writer's change
+    survives untouched, where it was previously silently clobbered.
+    Regression test: `tests/test-xaca-1187-017-kb-port-fix-stale-plan-guard.sh`.
 
 
 ## [0.20.9] - 2026-09-11

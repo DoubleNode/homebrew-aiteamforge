@@ -9,6 +9,7 @@ using compute_instance_port from aiteamforge_paths.
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
 import json
 import os
@@ -411,7 +412,13 @@ def _print_json_report(config_path: Path, plan: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _atomic_write(data: dict, target: Path) -> None:
+def _atomic_write(
+    data: dict,
+    target: Path,
+    *,
+    prompt_snapshot: dict | None = None,
+    touched_ids: set | None = None,
+) -> None:
     """Write data as JSON to target atomically (tmp + os.replace), under the
     shared team-paths.json.lock (XACA-1187-003).
 
@@ -425,16 +432,36 @@ def _atomic_write(data: dict, target: Path) -> None:
     back wholesale.
 
     XACA-1187-005: re-reads the file under the lock immediately before
-    writing and refuses (raising, so the caller's existing
-    ``except OSError`` handling in cmd_apply does NOT catch this -- a
-    ``ValueError`` is deliberately allowed to propagate as an uncaught,
-    non-zero-exit failure) if any team id present in that fresh read would
-    be absent from *data*. This tool only ever mutates ``lcars_port`` on
-    entries already present in the plan it computed, so a lost id here means
-    the registry changed under it since cmd_apply's earlier read -- fail
-    closed and ask the operator to re-run (idempotent: `--check` again,
-    then `--apply` again) against the current state, rather than silently
-    overwrite the concurrent change.
+    writing and refuses (raises ``ValueError``) if any team id present in
+    that fresh read would be absent from *data*. This tool only ever
+    mutates ``lcars_port`` on entries already present in the plan it
+    computed, so a lost id here means the registry changed under it since
+    cmd_apply's earlier read -- fail closed and ask the operator to re-run
+    (idempotent: `--check` again, then `--apply` again) against the current
+    state, rather than silently overwrite the concurrent change.
+
+    XACA-1187-017 (PR #875 review, subitem 16): the id-set guard above does
+    NOT catch a concurrent writer changing a FIELD on an id this tool is
+    about to mutate -- e.g. someone else's port-reassignment landing on the
+    exact instance this plan is renumbering, during the operator's
+    think-time at cmd_apply's "Apply these changes? [y/N]" prompt (which
+    necessarily happens BEFORE this lock is acquired -- holding a file lock
+    across human think-time would be worse than the bug). *prompt_snapshot*
+    is the full team-paths dict as it looked when that plan was computed
+    and shown to the operator; *touched_ids* is exactly the instance ids
+    the plan is about to overwrite. If any of those ids' entries differ
+    between *prompt_snapshot* and this fresh re-read, something changed
+    after the operator approved the plan and before this write -- abort
+    (fail closed) rather than silently clobber it, and tell the operator to
+    re-run. Both are optional (default None -- no comparison performed) so
+    other, non-interactive callers of this function are unaffected.
+
+    NOTE: this ``ValueError`` does NOT propagate uncaught -- cmd_apply's
+    ``except (OSError, ValueError)`` two lines below its call to this
+    function catches it and reports it as a single-line ``ERROR: Failed to
+    write ...`` message (return code 1), the same clean treatment as an
+    ``OSError`` from the write itself. It is a deliberate, handled
+    non-zero-exit failure, not an uncaught traceback.
     """
     resolved = target.resolve()
     lock_path = resolved.with_name(f"{resolved.name}.lock")
@@ -448,6 +475,7 @@ def _atomic_write(data: dict, target: Path) -> None:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
             before_ids: set = set()
+            existing: dict = {}
             if resolved.exists():
                 try:
                     existing = json.loads(resolved.read_text(encoding="utf-8"))
@@ -467,6 +495,39 @@ def _atomic_write(data: dict, target: Path) -> None:
                 before_ids, after_ids, allow_removal=False, resolved=resolved,
                 context="kb-port-fix --apply",
             )
+
+            # XACA-1187-017: field-level conflict check, scoped to exactly
+            # the ids this plan touches. Not run at all when the caller
+            # doesn't opt in (prompt_snapshot/touched_ids both None) --
+            # e.g. a future non-interactive caller with nothing to compare
+            # against a "shown to a human" moment.
+            if prompt_snapshot is not None and touched_ids:
+                prompt_teams = (
+                    prompt_snapshot.get("teams", {})
+                    if isinstance(prompt_snapshot.get("teams"), dict)
+                    else {}
+                )
+                existing_teams = (
+                    existing.get("teams", {})
+                    if isinstance(existing.get("teams"), dict)
+                    else {}
+                )
+                changed_ids = sorted(
+                    iid
+                    for iid in touched_ids
+                    if existing_teams.get(iid) != prompt_teams.get(iid)
+                )
+                if changed_ids:
+                    raise ValueError(
+                        f"registry entr{'y' if len(changed_ids) == 1 else 'ies'} "
+                        f"changed after the plan was shown and confirmed, before "
+                        f"this write: {', '.join(changed_ids)} (XACA-1187-017). "
+                        f"The approved plan was computed from data that is no "
+                        f"longer current -- refusing to overwrite whatever "
+                        f"changed with the stale plan. Re-run `kb-port-fix "
+                        f"--check` then `--apply` again against the current "
+                        f"state."
+                    )
 
             target_dir = str(resolved.parent)
             tmp_fd, tmp_path = tempfile.mkstemp(prefix="team-paths-", dir=target_dir)
@@ -565,6 +626,14 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
     data = _load_team_paths(config_path)
 
+    # XACA-1187-017 (PR #875 review, subitem 16): freeze the exact state the
+    # operator is about to be shown and asked to confirm, BEFORE anything
+    # below mutates `data` in place. This is compared against a fresh
+    # re-read taken under the lock at write time -- see _atomic_write's
+    # docstring for why the comparison happens there (after the prompt,
+    # never by holding the lock across it) and not here.
+    prompt_snapshot = copy.deepcopy(data)
+
     # Compute full plan with actual new ports
     try:
         plan = _compute_plan_with_new_ports(data)
@@ -575,6 +644,16 @@ def cmd_apply(args: argparse.Namespace) -> int:
     if not plan["needs_work"]:
         print("No changes needed. All instances have unique, non-null lcars_port values.")
         return 0
+
+    # Exactly the instance ids this plan is about to overwrite -- the set
+    # _atomic_write's XACA-1187-017 conflict check compares against the
+    # fresh re-read. Computed from the plan, not re-derived at write time,
+    # so it always matches what was actually shown to the operator below.
+    touched_ids = {
+        entry["instance_id"]
+        for group in plan["collisions"]
+        for entry in group["renumber"]
+    } | {entry["instance_id"] for entry in plan["null_ports"]}
 
     _print_report(config_path, plan, include_new_ports=True)
 
@@ -628,11 +707,12 @@ def cmd_apply(args: argparse.Namespace) -> int:
     # (see its internal try/except); we only need to convert the re-raised
     # exception into an actionable message here.
     try:
-        _atomic_write(data, config_path)
+        _atomic_write(data, config_path, prompt_snapshot=prompt_snapshot, touched_ids=touched_ids)
     except (OSError, ValueError) as exc:
-        # ValueError covers the XACA-1187-005 loss-guard refusal and the
-        # XACA-1187-004 unreadable-re-read case -- both raised deliberately
-        # by _atomic_write and reported the same clean way as an OSError,
+        # ValueError covers the XACA-1187-005 loss-guard refusal, the
+        # XACA-1187-004 unreadable-re-read case, and the XACA-1187-017
+        # stale-plan/field-conflict refusal -- all raised deliberately by
+        # _atomic_write and reported the same clean way as an OSError,
         # rather than propagating as an uncaught traceback.
         print(
             f"ERROR: Failed to write {config_path}: {exc}",
