@@ -323,8 +323,22 @@ else
 fi
 echo ""
 
+# XACA-0787-033 (PR #859 round-6 review): VACUITY FLOOR. Without this, a run in
+# which no check executed at all leaves PASS=0 and FAIL=0 and falls into the
+# success branch below — green on zero verification, which is precisely the
+# defect class this entire ticket exists to eliminate. A suite that verifies
+# nothing must never report success. EXPECTED_CHECKS is asserted rather than
+# merely floored so that silently DROPPING a case is caught too, not just
+# dropping all of them.
+EXPECTED_CHECKS=13
+if [ "$(( PASS + FAIL ))" -ne "$EXPECTED_CHECKS" ]; then
+  echo -e "${RED}${BOLD}✗ VACUITY: ran $(( PASS + FAIL )) check(s), expected ${EXPECTED_CHECKS}. Either a case was dropped or the suite aborted early — refusing to report a result on an incomplete run.${NC}"
+  echo ""
+  exit 1
+fi
+
 if [ "$FAIL" -eq 0 ]; then
-  echo -e "${GREEN}${BOLD}✓ All XACA-0787-033 vector-7 attribution checks passed.${NC}"
+  echo -e "${GREEN}${BOLD}✓ All ${EXPECTED_CHECKS} XACA-0787-033 vector-7 attribution checks passed.${NC}"
   echo ""
   exit 0
 else

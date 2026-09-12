@@ -306,7 +306,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   the REAL `test-runner.sh` end-to-end against fixtures via new
   `_LEAK_GUARD_AITEAMFORGE_DIR` indirection (default unchanged in production), so
   it asserts on a bare runner. Enrolled in `ci-manifest` — completeness gate
-  passes at 95 entries — because round 4's finding 1 was a new suite that was
+  passes at 96 entries (counted, not asserted: `bash tests/ci-manifest-check.sh`) — because round 4's finding 1 was a new suite that was
   never enrolled and therefore never ran.
 - **XACA-1070 (PR #865 review) — two blocking fixes to the mandatory-team
   feature, plus three non-blocking adjudications.** BLOCKING 1:
