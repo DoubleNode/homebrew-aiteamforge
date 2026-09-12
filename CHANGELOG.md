@@ -119,6 +119,39 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     during think-time now aborts and the concurrent writer's change
     survives untouched, where it was previously silently clobbered.
     Regression test: `tests/test-xaca-1187-017-kb-port-fix-stale-plan-guard.sh`.
+- **XACA-1187, PR #875 round-2 review — BLOCKING regression: lock opened
+  before its parent directory is guaranteed to exist.** Every site the
+  round-1 fix hardened opened the shared `team-paths.json.lock` sidecar
+  BEFORE creating the directory it lives in. On a genuinely first-time
+  machine — `~/.aiteamforge/` not created yet, precisely the scenario
+  `install-team.sh` exists to serve — that `open()` fails with `ENOENT`
+  and the installer always exits non-zero. CI caught this live on the
+  dev-team PR's head; `develop` passed the identical assertion under the
+  same bash version, confirming it was a regression this ticket shipped,
+  not a pre-existing condition. Fixed at both tap-native sites:
+  `install-team.sh`'s team-paths write now creates the directory
+  (`parents=True, exist_ok=True`, in its own `try`/`except` reporting the
+  path by name so a directory failure never reads as a lock failure)
+  BEFORE opening the lock, unconditionally rather than only on the
+  file-didn't-exist branch it previously ran on. `kb-port-fix.py:
+  _atomic_write` gained the identical mkdir-before-lock ordering too, for
+  consistency with every other hardened site — its one caller
+  (`cmd_apply`) already guarantees the parent exists via an earlier
+  `_load_team_paths()` existence gate, so this specific path is not
+  reachable today, but a future caller that skips that gate will not
+  silently reintroduce the regression. Verified both directions: extracted
+  this branch's own pre-round-2 bodies (still directly reachable, no
+  reflog needed) and confirmed they fail `ENOENT` against a genuinely
+  absent parent directory the same way CI observed; confirmed the fixed
+  bodies succeed against the identical scenario. New coverage:
+  `tests/test-xaca-1187-absent-parent-directory.sh` (both tap-native
+  sites; see `CHANGELOG.md` (dev-team) for the corresponding
+  fully-discriminating fixture-based coverage against `kb-init-team` /
+  `kb-freelance`, the two canonical-repo sites CI directly caught this
+  on). Also resolved a stale `[Review]` subitem: the header comment on
+  `tests/test-xaca-1187-017-kb-port-fix-stale-plan-guard.sh` pointed a
+  future reader at a "CASE 3" that had been deliberately removed and never
+  replaced — corrected to describe what actually happened and why.
 
 
 ## [0.20.9] - 2026-09-11

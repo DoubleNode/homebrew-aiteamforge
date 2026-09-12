@@ -2009,6 +2009,21 @@ if paths_py:
 resolved = config_path.resolve()
 lock_path = resolved.with_name(f"{resolved.name}.lock")
 
+# XACA-1187 regression fix (PR #875 round-2 review): the parent directory
+# must exist BEFORE the lock file can be created inside it. On a
+# genuinely first-time machine -- ~/.aiteamforge/ not created yet, exactly
+# the case install-team.sh exists to serve -- opening the lock file first
+# fails with ENOENT and this always exits 1, before ever reaching the
+# conditional mkdir that used to run later in this function (only on the
+# resolved.exists()-is-False branch). Create the directory here,
+# unconditionally and idempotently, reported distinctly from a lock-open
+# failure, so a directory problem never reads as a lock problem.
+try:
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+except OSError as exc:
+    print(f"  ERROR: XACA-1187 cannot create directory {resolved.parent}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
 # XACA-1059-005 lock-identity convention: open 'a' (never truncate) and
 # NEVER unlink. lcars-ui/server.py's _sweep_stale_locks() is the only thing
 # that ever removes this file, and only when a non-blocking flock probe
@@ -2061,7 +2076,8 @@ with lock:
                 sys.exit(1)
         else:
             config = {"schema_version": 1, "teams": {}}
-            resolved.parent.mkdir(parents=True, exist_ok=True)
+            # (directory already created above, before the lock was
+            # opened -- XACA-1187 regression fix)
 
         # XACA-0463 subitem 015: _safe_teams-normalize parsed-but-malformed
         # root/teams value. Mirrors the _safe_teams guard added to

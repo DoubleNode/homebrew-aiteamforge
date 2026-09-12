@@ -273,6 +273,19 @@ def _atomic_write(config_path: Path, data: dict) -> bool:
     resolved = config_path.resolve()
     lock_path = resolved.with_name(f"{resolved.name}.lock")
 
+    # XACA-1187 regression fix (PR #875 round-2 review): the parent
+    # directory must exist BEFORE the lock file can be created inside it.
+    # On a genuinely first-time machine -- ~/.aiteamforge/ not created yet
+    # -- opening the lock file first fails with ENOENT, before ever
+    # reaching the mkdir that used to run later in this function. Create
+    # the directory here, reported distinctly from a lock-open failure, so
+    # a directory problem never reads as a lock problem.
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"ERROR: cannot create directory {resolved.parent}: {exc}", file=sys.stderr)
+        return False
+
     # XACA-1059-005 lock-identity convention: open 'a' (never truncate),
     # never unlink. Only lcars-ui/server.py's _sweep_stale_locks() removes
     # this file, and only when a non-blocking flock probe proves nobody
@@ -336,7 +349,8 @@ def _atomic_write(config_path: Path, data: dict) -> bool:
 
             tmp_fd, tmp_name = None, None
             try:
-                resolved.parent.mkdir(parents=True, exist_ok=True)
+                # (directory already created above, before the lock was
+                # opened -- XACA-1187 regression fix)
                 tmp_fd, tmp_name = tempfile.mkstemp(prefix=f"{resolved.name}.tmp.", dir=str(resolved.parent))
                 tmp_path = Path(tmp_name)
                 with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:

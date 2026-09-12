@@ -1129,6 +1129,20 @@ if paths_py:
 resolved = path.resolve()
 lock_path = resolved.with_name(f"{resolved.name}.lock")
 
+# XACA-1187 regression fix (PR #875 round-2 review): the parent directory
+# must exist BEFORE the lock file can be created inside it. On a
+# genuinely first-time machine -- ~/.aiteamforge/ not created yet, exactly
+# the case kb-init-team exists to serve -- opening the lock file first
+# fails with ENOENT and this always exits 2, before ever reaching the
+# mkdir that used to run later in this function. Create the directory
+# here, reported distinctly from a lock-open failure, so a directory
+# problem never reads as a lock problem.
+try:
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+except OSError as exc:
+    print(f"kb-init-team: cannot create directory {resolved.parent}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
 # XACA-1059-005 lock-identity convention: open 'a' (never truncate) and
 # NEVER unlink. lcars-ui/server.py's _sweep_stale_locks() is the only thing
 # that ever removes this file, and only when a non-blocking flock probe
@@ -1211,7 +1225,8 @@ with lock:
         except ValueError:
             sys.exit(2)
 
-        resolved.parent.mkdir(parents=True, exist_ok=True)
+        # (directory already created above, before the lock was opened --
+        # XACA-1187 regression fix)
         serialized = json.dumps(config, indent=2, sort_keys=True) + "\n"
 
         try:

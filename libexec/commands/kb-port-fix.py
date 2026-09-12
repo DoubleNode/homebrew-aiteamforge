@@ -466,6 +466,22 @@ def _atomic_write(
     resolved = target.resolve()
     lock_path = resolved.with_name(f"{resolved.name}.lock")
 
+    # XACA-1187 regression fix (PR #875 round-2 review): the parent
+    # directory must exist BEFORE the lock file can be created inside it,
+    # or the open() below fails with ENOENT and reads as a lock problem
+    # when it is really a directory problem. In THIS tool's one call path
+    # (cmd_apply), _load_team_paths() already exits 3 earlier if
+    # *target* doesn't exist -- so *target*'s parent is always guaranteed
+    # to exist by the time we get here, and this branch is currently
+    # unreachable in practice. Added anyway, unconditionally and
+    # idempotently, for consistency with every other hardened site in this
+    # ticket and so a future caller that skips that earlier existence
+    # check doesn't silently reintroduce the same regression.
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"cannot create directory {resolved.parent}: {exc}") from exc
+
     # XACA-1059-005 lock-identity convention: open 'a' (never truncate),
     # never unlink. Only lcars-ui/server.py's _sweep_stale_locks() removes
     # this file, and only when a non-blocking flock probe proves nobody

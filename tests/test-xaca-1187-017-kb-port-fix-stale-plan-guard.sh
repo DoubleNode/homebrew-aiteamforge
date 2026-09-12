@@ -29,11 +29,18 @@
 # human, then returns "y"). Not one line of kb-port-fix.py's own logic is
 # modified or bypassed by this harness.
 #
-# Cross-checked to discriminate: run identically against the PRE-fix
-# version of this file (git show HEAD:libexec/commands/kb-port-fix.py from
-# before this ticket's subitem-16 commit), the same conflict scenario is
-# silently clobbered (exit 0, concurrent edit discarded) instead of
-# refused -- see CASE 3.
+# Discriminating power was cross-checked BY HAND while writing this suite
+# (not as a committed case here): run identically against the pre-fix
+# version of kb-port-fix.py, the same conflict scenario was silently
+# clobbered (exit 0, concurrent edit discarded) instead of refused. That
+# contrast was originally a CASE 3 in this file, pulling the pre-fix body
+# via `git show HEAD:libexec/commands/kb-port-fix.py` -- deliberately
+# removed (see the NOTE below, in place of where CASE 3 used to be) for
+# the same durability reason as the XACA-1187-007 test in the outer
+# dev-team repo: this repo squash-merges, so a git-history lookup resolved
+# at test-write time can stop existing the moment the enclosing PR merges.
+# CASE 1 and CASE 2 below fully prove the fix on their own, directly
+# against the current, real, unmodified kb-port-fix.py.
 #
 # Sandboxing: every registry lives under mktemp -d; AITEAMFORGE_CONFIG
 # points there. The real ~/.aiteamforge/team-paths.json is never read or
