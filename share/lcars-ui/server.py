@@ -1507,6 +1507,36 @@ def _resolve_fleet_monitor_url():
 
     return None
 
+
+def _sanitize_url_for_display(url):
+    """Strip userinfo (user:pass@) from a URL before it is echoed back to a
+    client or rendered into UI text.
+
+    _resolve_fleet_monitor_url()'s result is operator-configured (env var or
+    a local JSON file) and is never validated against a fixed host allowlist.
+    It rides along in the /api/engines/list response as `_fleet_monitor_url`
+    (XACA-1178-006) purely so the "+ ADD NEW" toast can point at the right
+    host -- that use has no need for embedded credentials, so if a configured
+    URL ever carries them (e.g. `https://user:token@host/...`, a copy-paste
+    from a reverse-proxy setup with basic auth), returning it verbatim would
+    leak them into an API response and onto the operator's own screen. Only
+    the netloc's userinfo is touched; a URL with none round-trips unchanged.
+    """
+    if not url:
+        return url
+    try:
+        parts = urlparse(url)
+        if not parts.username and not parts.password:
+            return url
+        netloc = parts.hostname or ''
+        if parts.port:
+            netloc = f'{netloc}:{parts.port}'
+        return parts._replace(netloc=netloc).geturl()
+    except Exception:
+        # Fail closed on the side of NOT leaking: an unparseable URL is
+        # replaced rather than returned as-is.
+        return None
+
 # ccusage collector cache (XACA-0243-001 daemon writes this file atomically).
 # Paths resolved from ccusage_paths (XACA-0385: moved from world-writable /tmp).
 # The callable-None sentinel on _ccusage_ensure_runtime_dir carries import-success
@@ -14470,9 +14500,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         Callers MUST hold team-paths.json's flock (LOCK_EX) around this call,
         exactly as they do around ``_write_team_paths_registry``.
 
+        XACA-1178-016: ``team_block['ai']`` is COERCED to a dict when it
+        exists but holds something else (a stray string/list/int -- hand
+        edits to team-paths.json, or a future schema migration gone wrong).
+        Before this guard, ``ai_block['credential'] = credential`` raised an
+        opaque ``TypeError`` on a non-dict ``ai`` (e.g. "'str' object does
+        not support item assignment"), surfacing as an unexplained 500 to
+        callers instead of self-healing the block.
+
         XACA-1178-007 / XACA-0282-012 §2.4.
         """
-        ai_block = team_block.setdefault('ai', {})
+        ai_block = team_block.get('ai')
+        if not isinstance(ai_block, dict):
+            ai_block = {}
+            team_block['ai'] = ai_block
         ai_block['credential'] = credential
 
         team_block['anthropic_account_id'] = (credential or {}).get('account_id') or ''
@@ -14572,7 +14613,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             if isinstance(ai_block, dict) and 'credential' in ai_block:
                 config_source = 'ai'
-                credential = ai_block.get('credential') or {}
+                credential = ai_block.get('credential')
+                # XACA-1178-017: coerce a non-dict credential (stray string/list/int)
+                # to {} instead of letting credential.get(...) raise AttributeError
+                # below -- same "opaque 500 on malformed ai" class as
+                # _set_team_ai_credential's ai-block guard above.
+                if not isinstance(credential, dict):
+                    credential = {}
                 account_id = credential.get('account_id') or ''
                 account_nickname = credential.get('nickname') or ''
                 env_var_name = credential.get('env_var_name') or ''
@@ -14613,11 +14660,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def handle_team_account_save(self):
         """POST /api/team-config/account/save
 
-        Body: {team, account_id, account_nickname, env_var_name, auth_type?, engine_slug?}
+        Body: {team, account_id, account_nickname, env_var_name, auth_type?,
+        engine_slug?, account_slug?}
         Writes a whole-object ai.credential snapshot into ~/.aiteamforge/team-paths.json
         for the specified team via _set_team_ai_credential(), which also derives the
         legacy anthropic_* projection (XACA-0282-012 §2.4). Uses fcntl file-lock +
         atomic rename. NEVER stores or echoes the actual key value.
+
+        XACA-1178-016: engine_slug and account_slug have no field in the manual
+        edit modal today -- a save from that UI never sends either. Before this
+        fix, the credential built here unconditionally defaulted engine_slug to
+        'anthropic' and never carried account_slug at all, so a plain nickname/
+        auth_type edit AFTER a registry assign silently wiped both -- the exact
+        F5 "two write paths disagreeing about one object" shape documented in
+        docs/xaca-0282/research/012-credential-config-shape.md, just moved from
+        anthropic_account_ref onto ai.credential's own slugs. Both now fall back
+        to the EXISTING credential's value when the request omits them, so the
+        manual path round-trips slugs it isn't editing; an explicit value in the
+        body (future API callers) still wins.
 
         XACA-0281-004 / XACA-1178-007
         """
@@ -14636,6 +14696,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             env_var_name = body.get('env_var_name', '')
             auth_type = body.get('auth_type', '')
             engine_slug = body.get('engine_slug', '')
+            account_slug = body.get('account_slug', '')
 
             # Type-check first; then strip; then content-validate the trimmed value
             # so whitespace-padded input is normalized before the regex guard sees it.
@@ -14664,12 +14725,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if not isinstance(engine_slug, str):
                 self._send_json_response({'success': False, 'error': 'engine_slug must be a string'}, status=400)
                 return
+            if not isinstance(account_slug, str):
+                self._send_json_response({'success': False, 'error': 'account_slug must be a string'}, status=400)
+                return
 
             account_id = account_id.strip()
             account_nickname = account_nickname.strip()
             env_var_name = env_var_name.strip()
             auth_type = auth_type.strip()
             engine_slug = engine_slug.strip()
+            account_slug = account_slug.strip()
 
             if env_var_name and not self._ENV_VAR_NAME_RE.match(env_var_name):
                 self._send_json_response({'success': False, 'error': 'env_var_name must match ^[A-Z][A-Z0-9_]*$ when set'}, status=400)
@@ -14709,13 +14774,29 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         # the whole-object snapshot fresh (invariant I2) and let the
                         # helper derive the legacy projection. Values are already
                         # stripped above — no redundant .strip() here.
+                        #
+                        # XACA-1178-016: engine_slug/account_slug fall back to the
+                        # PRE-EXISTING credential's value when the request doesn't
+                        # supply one -- the manual modal has no field for either, so
+                        # "not supplied" is the normal case, not an instruction to
+                        # reset/drop them. Read defensively: an existing 'ai' or
+                        # 'credential' that isn't a dict (XACA-1178-017) coerces to
+                        # {} rather than raising.
+                        existing_ai = data['teams'][team].get('ai')
+                        existing_credential = existing_ai.get('credential') if isinstance(existing_ai, dict) else None
+                        if not isinstance(existing_credential, dict):
+                            existing_credential = {}
+
                         if account_id or account_nickname or env_var_name:
                             credential = {
-                                'engine_slug': engine_slug or 'anthropic',
+                                'engine_slug': engine_slug or existing_credential.get('engine_slug') or 'anthropic',
                                 'account_id': account_id,
                                 'nickname': account_nickname,
                                 'env_var_name': env_var_name,
                             }
+                            resolved_account_slug = account_slug or existing_credential.get('account_slug') or ''
+                            if resolved_account_slug:
+                                credential['account_slug'] = resolved_account_slug
                             if auth_type:
                                 credential['auth_type'] = auth_type
                         else:
@@ -14785,7 +14866,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if err:
                     self._send_json_response({'ok': False, 'error': err}, status=500)
                     return
-                env_var_name = (data.get('teams', {}).get(team) or {}).get('anthropic_api_key_env_var', '')
+                team_block = data.get('teams', {}).get(team) or {}
+                # XACA-1178-018: read ai.credential.env_var_name FIRST -- the
+                # legacy anthropic_api_key_env_var field is only a DERIVED
+                # projection of it (see _set_team_ai_credential), and XACA-1184
+                # is slated to retire the legacy trio outright. Reading the
+                # legacy field only, as this did before, means TEST CONNECTION
+                # silently breaks the day that field stops being written, even
+                # though the real value has been available under ai.credential
+                # the whole time. Coerce defensively (XACA-1178-017): a non-dict
+                # 'ai' or 'credential' falls through to the legacy fallback
+                # rather than raising.
+                ai_block = team_block.get('ai')
+                ai_credential = ai_block.get('credential') if isinstance(ai_block, dict) else None
+                if isinstance(ai_credential, dict):
+                    env_var_name = ai_credential.get('env_var_name') or ''
+                if not env_var_name:
+                    env_var_name = team_block.get('anthropic_api_key_env_var', '')
 
             if not env_var_name:
                 self._send_json_response({'ok': False, 'error': 'No env_var_name could be resolved'}, status=400)
@@ -14833,7 +14930,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     'probed': False,
                     'account_fingerprint': account_fingerprint,
                     'model_access': None,
-                    'error': 'Token present — not probed (unrecognized credential prefix)',
+                    # Worded to not read as a credential-format ERROR: a
+                    # deliberately-configured gateway_token (proxy/LiteLLM) has
+                    # no sk-ant- prefix by design, so "unrecognized credential
+                    # prefix" reads as "your credential is malformed" to an
+                    # operator who set that up on purpose. This heuristic only
+                    # inspects the token's own prefix (auth_type is not read
+                    # here -- see the comment above), so "not recognized from
+                    # the token prefix" is the accurate claim either way.
+                    'error': 'Token present — not probed (auth scheme not recognized from token prefix)',
                 })
                 return
 
@@ -14875,10 +14980,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     resp_body = json.loads(resp.read().decode('utf-8'))
-                    # A 200 response with a message object means credentials are valid
-                    if resp_body.get('type') in ('message', 'error'):
+                    # Only an actual `message` object on a 200 means credentials
+                    # are valid. Anthropic reports failures via HTTP error status
+                    # (caught below), so a 200 body typed "error" is anomalous,
+                    # not a success -- treating it as `ok=True` (as this used to)
+                    # would report a broken credential as validated.
+                    if resp_body.get('type') == 'message':
                         ok = True
                         model_access = resp_body.get('model')
+                    else:
+                        ok = False
+                        error_msg = f"Unexpected response type from Anthropic API: {resp_body.get('type')!r}"
             except urllib.error.HTTPError as http_err:
                 raw = http_err.read().decode('utf-8', errors='replace')
                 try:
@@ -14893,6 +15005,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 ok = False
             except Exception as e:
                 error_msg = str(e)
+                # Same redaction as the HTTPError branch above: a generic
+                # exception (e.g. a URL error whose message happens to embed
+                # the request) must not be allowed to leak the key value.
+                if api_key and api_key in error_msg:
+                    error_msg = error_msg.replace(api_key, '[REDACTED]')
                 ok = False
 
             # On success, cache the validation timestamp
@@ -14984,7 +15101,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # Local cache path for engines registry (written on each successful Fleet Monitor fetch)
     _ENGINES_CACHE_PATH = Path.home() / '.aiteamforge' / 'engines-cache.json'
 
-    def _fetch_engines_from_fleet_monitor(self):
+    def _fetch_engines_from_fleet_monitor(self, fleet_monitor_url=None):
         """Try to fetch /api/engines from Fleet Monitor. Returns (data_dict, error_str).
 
         On success returns the parsed JSON dict and None error.
@@ -14992,8 +15109,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         Resolved at CALL TIME (XACA-1178-006) — no localhost fallback; when the
         URL can't be resolved this returns "not configured" rather than making
         a request that would read as a network fault.
+
+        `fleet_monitor_url` lets a caller that already resolved the URL for its
+        own purposes (serve_engines_list echoing it in the response) pass it in
+        rather than triggering a second resolution -- resolving reads an env
+        var and up to two JSON config files, so calling it twice per request is
+        needless I/O, not just redundant. Passing None (the default) resolves
+        it here exactly as before.
         """
-        fleet_monitor_url = _resolve_fleet_monitor_url()
+        if fleet_monitor_url is None:
+            fleet_monitor_url = _resolve_fleet_monitor_url()
         if not fleet_monitor_url:
             return None, "Fleet Monitor URL not configured"
         try:
@@ -15045,12 +15170,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             return None, None, f"Error reading engines cache: {e}"
 
-    def _get_engines_registry(self, force_refresh: bool = False):
+    def _get_engines_registry(self, force_refresh: bool = False, fleet_monitor_url=None):
         """Return engines registry data, populating/updating cache as needed.
 
         Returns (data_dict, source_str, cache_age_or_None, error_str_or_None).
         source is one of: 'fleet_monitor', 'local_cache', 'empty'.
         Never raises — always returns a usable result.
+
+        `fleet_monitor_url`: see _fetch_engines_from_fleet_monitor — pass a
+        pre-resolved URL to avoid a second resolution when the caller already
+        has one (serve_engines_list). None resolves it only if/when the
+        Fleet Monitor fetch actually happens (the cache-fresh fast path below
+        never needs it at all).
         """
         _CACHE_TTL_SECONDS = 300  # 5 minutes
 
@@ -15066,7 +15197,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return cached, 'local_cache', cache_age, None
 
         # Cache stale/missing or force_refresh=True: try Fleet Monitor first
-        data, fetch_err = self._fetch_engines_from_fleet_monitor()
+        data, fetch_err = self._fetch_engines_from_fleet_monitor(fleet_monitor_url=fleet_monitor_url)
         if data is not None:
             # Success: refresh local cache and return fleet_monitor result
             self._write_engines_cache(data)
@@ -15098,7 +15229,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             params = parse_qs(query_string) if query_string else {}
             force_refresh = params.get('refresh', [''])[0].lower() in ('1', 'true', 'yes')
 
-            data, source, cache_age, error = self._get_engines_registry(force_refresh=force_refresh)
+            # Resolve ONCE per request and thread it through: _get_engines_registry
+            # only needs it on an actual Fleet Monitor fetch, but this call site
+            # also needs it below to echo _fleet_monitor_url, and resolution does
+            # real I/O (an env-var read plus up to two JSON config files) — a
+            # second independent call here was pure waste on every request that
+            # skipped the fast cache path.
+            resolved_fleet_url = _resolve_fleet_monitor_url()
+
+            data, source, cache_age, error = self._get_engines_registry(
+                force_refresh=force_refresh, fleet_monitor_url=resolved_fleet_url)
 
             response = dict(data)  # shallow copy — don't mutate the cache
             response['_source'] = source
@@ -15108,8 +15248,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 response['_error'] = error
             # XACA-1178-006: resolved URL (or None when unconfigured) so the
             # "+ ADD NEW" picker toast can point at the real Fleet Monitor host
-            # instead of guessing ":8080" (E12).
-            response['_fleet_monitor_url'] = _resolve_fleet_monitor_url()
+            # instead of guessing ":8080" (E12). Sanitized before it leaves the
+            # process — see _sanitize_url_for_display's docstring for why an
+            # operator-configured URL can't be trusted to be credential-free.
+            response['_fleet_monitor_url'] = _sanitize_url_for_display(resolved_fleet_url)
 
             self._send_json_response(response)
         except Exception as e:

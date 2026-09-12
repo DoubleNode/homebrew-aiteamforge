@@ -2530,16 +2530,25 @@
 
                 <!-- XACA-1178-007: ai.credential.auth_type (XACA-0282-012 §1.2). Optional:
                      left on "(not set...)", the server infers the scheme from the token's
-                     own prefix (sk-ant-oat... vs sk-ant-api...). -->
+                     own prefix (sk-ant-oat... vs sk-ant-api...).
+                     XACA-1178-019/020: option wording converged with Fleet Monitor's
+                     Engines UI (the same auth_type enum, edited from a second admin
+                     surface — engines-add-auth-type / engines-edit-auth-type in
+                     fleet-monitor/server/public/{lcars,lcars2}/*.html) so an operator
+                     working across both sees identical choices. The help text below no
+                     longer claims this field disambiguates TEST CONNECTION — it doesn't:
+                     handle_team_account_test_connection() resolves the auth scheme from
+                     the token's own prefix only and never reads this persisted field
+                     (by design, pending XACA-0283). -->
                 <div class="form-group">
                     <label for="team-account-edit-auth-type">Auth Type</label>
                     <select id="team-account-edit-auth-type">
                         <option value="">(not set — infer from token)</option>
-                        <option value="oauth_token">OAuth Token (Claude Max)</option>
-                        <option value="api_key">API Key (Console)</option>
-                        <option value="gateway_token">Gateway Token (proxy)</option>
+                        <option value="oauth_token">OAuth Token (Claude Max / setup-token)</option>
+                        <option value="api_key">API Key (Anthropic Console)</option>
+                        <option value="gateway_token">Gateway Token (proxy / LiteLLM)</option>
                     </select>
-                    <small class="form-hint">How the env var's value authenticates. Leave unset unless TEST CONNECTION needs it disambiguated — the token's own prefix usually tells LCARS which scheme to probe with.</small>
+                    <small class="form-hint">How the env var's value authenticates. Informational only right now — TEST CONNECTION resolves the auth scheme from the token's own prefix and does not read this field (wiring planned under XACA-0283).</small>
                 </div>
 
                 <div id="team-account-test-status" role="status" aria-live="polite"></div>

@@ -612,8 +612,12 @@
             return '<span class="engine-auth-type-badge" title="' + escHtml(account.auth_type) + '">' +
                 escHtml(AUTH_TYPE_LABELS[account.auth_type]) + '</span>';
         }
+        // XACA-1178-019: spell the unset state out (AUTH: not set), matching the
+        // sibling vaultBadge()'s convention below (VAULT: not provisioned) — a bare
+        // "—" with no label forces an operator to hover for the tooltip to learn
+        // what column they're even looking at.
         return '<span class="engine-auth-type-badge engine-auth-type-badge--none" ' +
-            'title="Not set — inferred from the token prefix at launch">—</span>';
+            'title="Not set — inferred from the token prefix at launch">AUTH: not set</span>';
     }
 
     /**

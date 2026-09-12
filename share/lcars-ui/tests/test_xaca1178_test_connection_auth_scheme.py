@@ -41,7 +41,9 @@ Run with:
 
 import io
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -276,6 +278,164 @@ class TestConnectionAuthSchemeTests(unittest.TestCase):
         response = _response_json(buf)
         self.assertFalse(response["ok"])
         mock_save.assert_not_called()
+
+
+class TestConnectionResolvesEnvVarFromAiCredentialTests(unittest.TestCase):
+    """XACA-1178-018: when the request gives {team} (not env_var_name
+    directly), the env var name must be resolved from ai.credential first,
+    falling back to the legacy anthropic_api_key_env_var projection only when
+    ai.credential is absent/empty. Before this fix, only the legacy field was
+    ever read here -- silently wrong the moment XACA-1184 stops writing it,
+    even though the real value has been available under ai.credential since
+    XACA-1178-007.
+
+    Mirrors test_xaca1178_team_ai_credential.py's _TeamPathsFixtureMixin
+    (kept self-contained here rather than importing across test modules, per
+    this suite's existing per-file duplication pattern)."""
+
+    TEST_TEAM = "xaca1178testconnteam"
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.home = self._tmpdir.name
+        (Path(self.home) / ".aiteamforge").mkdir(parents=True, exist_ok=True)
+        self.team_paths_file = Path(self.home) / ".aiteamforge" / "team-paths.json"
+
+        env_patch = patch.dict(os.environ, {"HOME": self.home}, clear=False)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+        team_dirs_patch = patch.dict(
+            server.TEAM_KANBAN_DIRS, {self.TEST_TEAM: "/tmp/x1178conn/kanban"}, clear=False
+        )
+        team_dirs_patch.start()
+        self.addCleanup(team_dirs_patch.stop)
+
+        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+            LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
+
+    def tearDown(self):
+        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+            LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
+
+    def _write_team_paths(self, team_block):
+        with open(self.team_paths_file, "w") as f:
+            json.dump({"teams": {self.TEST_TEAM: team_block}}, f)
+
+    def _post_team(self):
+        body = json.dumps({"team": self.TEST_TEAM}).encode()
+        return _make_handler(path="/api/team-config/account/test-connection", body=body)
+
+    def test_resolves_env_var_from_ai_credential_when_legacy_field_absent(self):
+        """The realistic post-XACA-1184 shape: no legacy trio at all, only
+        ai.credential.env_var_name."""
+        self._write_team_paths({
+            "team_code": "X1178C",
+            "ai": {"credential": {"engine_slug": "anthropic", "env_var_name": "TEST_AI_CRED_VAR"}},
+        })
+        env_patch = patch.dict(os.environ, {"TEST_AI_CRED_VAR": "sk-ant-api03-" + "e" * 90})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+        with patch("server.urllib.request.urlopen", return_value=_fake_urlopen_success()) as mock_urlopen, \
+             patch.object(LCARSHandler, "_save_account_validation_cache"):
+            handler, buf = self._post_team()
+            handler.handle_team_account_test_connection()
+
+        mock_urlopen.assert_called_once()
+        response = _response_json(buf)
+        self.assertTrue(response["ok"], response)
+
+    def test_ai_credential_takes_priority_over_stale_legacy_field(self):
+        """A team with BOTH fields set disagreeing must resolve from
+        ai.credential, not the legacy projection -- ai.credential is the
+        source of truth; the legacy trio is a derived projection of it."""
+        self._write_team_paths({
+            "team_code": "X1178C",
+            "anthropic_api_key_env_var": "STALE_LEGACY_VAR",
+            "ai": {"credential": {"engine_slug": "anthropic", "env_var_name": "CURRENT_AI_CRED_VAR"}},
+        })
+        env_patch = patch.dict(os.environ, {
+            "CURRENT_AI_CRED_VAR": "sk-ant-api03-" + "f" * 90,
+            "STALE_LEGACY_VAR": "sk-ant-api03-" + "g" * 90,
+        })
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+        with patch("server.urllib.request.urlopen", return_value=_fake_urlopen_success()) as mock_urlopen, \
+             patch.object(LCARSHandler, "_save_account_validation_cache"):
+            handler, buf = self._post_team()
+            handler.handle_team_account_test_connection()
+
+        called_request = mock_urlopen.call_args[0][0]
+        headers = {k.lower(): v for k, v in called_request.headers.items()}
+        self.assertEqual(headers["x-api-key"], "sk-ant-api03-" + "f" * 90)
+
+    def test_falls_back_to_legacy_field_when_ai_credential_absent(self):
+        """A team that predates XACA-1178-007 has no 'ai' key at all -- must
+        still resolve via the legacy field, unchanged from before this fix."""
+        self._write_team_paths({
+            "team_code": "X1178C",
+            "anthropic_api_key_env_var": "LEGACY_ONLY_VAR",
+        })
+        env_patch = patch.dict(os.environ, {"LEGACY_ONLY_VAR": "sk-ant-api03-" + "h" * 90})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+        with patch("server.urllib.request.urlopen", return_value=_fake_urlopen_success()) as mock_urlopen, \
+             patch.object(LCARSHandler, "_save_account_validation_cache"):
+            handler, buf = self._post_team()
+            handler.handle_team_account_test_connection()
+
+        response = _response_json(buf)
+        self.assertTrue(response["ok"], response)
+
+    def test_falls_back_to_legacy_field_when_ai_credential_env_var_empty(self):
+        """ai.credential exists but its env_var_name is empty/absent (e.g. an
+        OAuth-fallback credential with no explicit key) -- must fall back to
+        the legacy field rather than resolving to nothing."""
+        self._write_team_paths({
+            "team_code": "X1178C",
+            "anthropic_api_key_env_var": "LEGACY_FALLBACK_VAR",
+            "ai": {"credential": {"engine_slug": "anthropic", "account_id": "acct-x"}},
+        })
+        env_patch = patch.dict(os.environ, {"LEGACY_FALLBACK_VAR": "sk-ant-api03-" + "i" * 90})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+        with patch("server.urllib.request.urlopen", return_value=_fake_urlopen_success()) as mock_urlopen, \
+             patch.object(LCARSHandler, "_save_account_validation_cache"):
+            handler, buf = self._post_team()
+            handler.handle_team_account_test_connection()
+
+        response = _response_json(buf)
+        self.assertTrue(response["ok"], response)
+
+    def test_non_dict_ai_or_credential_falls_back_to_legacy_without_crashing(self):
+        """XACA-1178-017 coercion applies here too: a non-dict 'ai' or
+        'credential' must fall through to the legacy field, never raise."""
+        env_patch = patch.dict(os.environ, {"LEGACY_COERCE_VAR": "sk-ant-api03-" + "j" * 90})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+        for bogus_ai in ("not-a-dict", {"credential": ["also", "not", "a", "dict"]}):
+            self._write_team_paths({
+                "team_code": "X1178C",
+                "anthropic_api_key_env_var": "LEGACY_COERCE_VAR",
+                "ai": bogus_ai,
+            })
+            with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+                LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
+
+            with patch("server.urllib.request.urlopen", return_value=_fake_urlopen_success()), \
+                 patch.object(LCARSHandler, "_save_account_validation_cache"):
+                handler, buf = self._post_team()
+                handler.handle_team_account_test_connection()
+
+            self.assertNotEqual(handler._response_code, 500, f"bogus_ai={bogus_ai!r}")
+            response = _response_json(buf)
+            self.assertTrue(response["ok"], response)
 
 
 if __name__ == "__main__":

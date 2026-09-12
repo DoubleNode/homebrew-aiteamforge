@@ -68,7 +68,7 @@ for _mod_name, _stub in _stub_modules.items():
         sys.modules[_mod_name] = _stub
 
 import server  # noqa: E402  (module-level import after path manipulation)
-from server import LCARSHandler, _resolve_fleet_monitor_url  # noqa: E402
+from server import LCARSHandler, _resolve_fleet_monitor_url, _sanitize_url_for_display  # noqa: E402
 
 
 def _write_fleet_config(home_dir, subdir, endpoint):
@@ -282,6 +282,105 @@ class EnginesListNoLocalhostFallbackTests(unittest.TestCase):
         self.assertEqual(response.get("_source"), "fleet_monitor")
         self.assertEqual(response.get("_fleet_monitor_url"), "https://example.test")
         self.assertNotIn("_error", response)
+
+    def test_resolves_url_exactly_once_per_request(self):
+        """The reviewer's finding on PR #872: serve_engines_list() used to
+        call _resolve_fleet_monitor_url() a second, independent time just to
+        populate _fleet_monitor_url in the response, even on the path that
+        already resolved it once inside _get_engines_registry() ->
+        _fetch_engines_from_fleet_monitor(). Resolution does real I/O (an env
+        var plus up to two JSON file reads) -- wasteful on every request, and
+        a second read is also a second chance to observe a config file mid-
+        edit differently from the first. Must resolve exactly once now."""
+        _write_fleet_config(self.home, ".aiteamforge", "https://example.test/api/status")
+
+        fake_resp = MagicMock()
+        fake_resp.status = 200
+        fake_resp.read.return_value = json.dumps({"version": 1, "engines": []}).encode()
+        fake_resp.__enter__ = MagicMock(return_value=fake_resp)
+        fake_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("server.urllib.request.urlopen", return_value=fake_resp), \
+             patch("server._resolve_fleet_monitor_url", wraps=_resolve_fleet_monitor_url) as spy_resolve:
+            handler, buf = _make_handler(path="/api/engines/list")
+            # force_refresh=true so the cache-fresh fast path (which never
+            # resolves at all) doesn't mask a would-be double-resolution.
+            handler.serve_engines_list("refresh=true")
+
+        spy_resolve.assert_called_once()
+        response = _response_json(buf)
+        self.assertEqual(response.get("_fleet_monitor_url"), "https://example.test")
+
+    def test_userinfo_stripped_from_url_echoed_in_response(self):
+        """A configured Fleet Monitor URL can carry userinfo (copy-pasted from
+        a reverse-proxy setup using HTTP basic auth, e.g.
+        'https://admin:s3cr3t@fleet.example.test'). _fleet_monitor_url rides
+        into a JSON API response AND gets rendered verbatim into an on-screen
+        toast (lcars-team-account.js onAccountPickerChange) purely to tell an
+        operator which host to open -- that purpose has no need for embedded
+        credentials, so echoing them back would leak a real secret through
+        both channels. The host must still resolve correctly for the actual
+        outbound Fleet Monitor request, which is unaffected by this."""
+        _write_fleet_config(self.home, ".aiteamforge", "https://admin:s3cr3t@fleet.example.test/api/status")
+
+        fake_resp = MagicMock()
+        fake_resp.status = 200
+        fake_resp.read.return_value = json.dumps({"version": 1, "engines": []}).encode()
+        fake_resp.__enter__ = MagicMock(return_value=fake_resp)
+        fake_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("server.urllib.request.urlopen", return_value=fake_resp) as mock_urlopen:
+            handler, buf = _make_handler(path="/api/engines/list")
+            handler.serve_engines_list("")
+
+        # The actual outbound request must still hit the real (credentialed) host.
+        called_request = mock_urlopen.call_args[0][0]
+        self.assertEqual(called_request.full_url, "https://admin:s3cr3t@fleet.example.test/api/engines")
+
+        # But nothing echoed back to the client carries the credentials.
+        response = _response_json(buf)
+        echoed = response.get("_fleet_monitor_url")
+        self.assertEqual(echoed, "https://fleet.example.test")
+        self.assertNotIn("admin", echoed)
+        self.assertNotIn("s3cr3t", echoed)
+
+
+class SanitizeUrlForDisplayTests(unittest.TestCase):
+    """Direct unit tests of _sanitize_url_for_display()."""
+
+    def test_no_userinfo_round_trips_unchanged(self):
+        self.assertEqual(
+            _sanitize_url_for_display("https://fleet.example.test:9090"),
+            "https://fleet.example.test:9090",
+        )
+
+    def test_username_and_password_stripped(self):
+        self.assertEqual(
+            _sanitize_url_for_display("https://admin:s3cr3t@fleet.example.test"),
+            "https://fleet.example.test",
+        )
+
+    def test_username_only_stripped(self):
+        self.assertEqual(
+            _sanitize_url_for_display("https://admin@fleet.example.test"),
+            "https://fleet.example.test",
+        )
+
+    def test_port_preserved_after_stripping_userinfo(self):
+        self.assertEqual(
+            _sanitize_url_for_display("https://admin:s3cr3t@fleet.example.test:9090"),
+            "https://fleet.example.test:9090",
+        )
+
+    def test_path_preserved_after_stripping_userinfo(self):
+        self.assertEqual(
+            _sanitize_url_for_display("https://admin:s3cr3t@fleet.example.test/some/path"),
+            "https://fleet.example.test/some/path",
+        )
+
+    def test_none_and_empty_pass_through(self):
+        self.assertIsNone(_sanitize_url_for_display(None))
+        self.assertEqual(_sanitize_url_for_display(""), "")
 
 
 if __name__ == "__main__":
