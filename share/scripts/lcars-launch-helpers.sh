@@ -2112,11 +2112,29 @@ deploy_team_personas() {
         # <project_dir>/.claude/agents/ and writes .git/info/exclude so they
         # stay untracked. Non-fatal: a failure emits a warning but never aborts
         # startup.
+        #
+        # XACA-0931 (§3.8): --force is REQUIRED here, not optional. Without
+        # it, _deploy_core (deploy-worktree-personas.sh) treats a present
+        # .synced-from-tap marker as "already deployed" and returns 0 without
+        # touching a single file — so on a tap-consumer machine every session
+        # start AFTER THE FIRST is a marker no-op, regardless of whether the
+        # working-dir source has since changed. Measured on darren-m4-mini:
+        # legal/coparenting carried a marker dated 2026-08-12 while 6/6
+        # deployed files differed from source — this branch had been silently
+        # doing nothing on every startup since that date. This is the SECOND,
+        # independent mechanism behind XACA-0931 (the parent ticket's
+        # "destination refresh runs only at team-session startup" framing
+        # implied startup would self-heal; it would not have, without this).
+        # --force is safe unconditionally: deployed persona files are
+        # ephemeral synced copies kept untracked via .git/info/exclude
+        # (written by _deploy_nested_main_root itself), so an unconditional
+        # rewrite of a handful of small files on every session start is cheap
+        # and idempotent — no user content at risk.
         local _tap_deploy="${_atf_base}/scripts/deploy-worktree-personas.sh"
         if [ -x "$_tap_deploy" ]; then
             echo "   Deploying ${label} tap personas into project dir..."
-            "$_tap_deploy" --nested-main-root "$project_dir" "$team" >/dev/null 2>&1 \
-                || echo "   ⚠️  Tap persona deploy skipped (non-fatal; run deploy-worktree-personas.sh --nested-main-root \$project_dir ${team})"
+            "$_tap_deploy" --nested-main-root "$project_dir" "$team" --force >/dev/null 2>&1 \
+                || echo "   ⚠️  Tap persona deploy skipped (non-fatal; run deploy-worktree-personas.sh --nested-main-root \$project_dir ${team} --force)"
         fi
     fi
 }

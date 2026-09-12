@@ -5,7 +5,14 @@
 # Usage:
 #   deploy-worktree-personas.sh <worktree_path> <team> [--dry-run] [--force] [--verbose]
 #   deploy-worktree-personas.sh --all <team> [<main_repo_path>] [--dry-run] [--force] [--verbose]
+#   deploy-worktree-personas.sh emit-transformed <src_file> [<char_name>]
 #   deploy-worktree-personas.sh selftest
+#
+# emit-transformed (XACA-0931-003): read-only. Prints to stdout the EXACT
+# transform _deploy_core would write for <src_file> -- the single authority
+# aiteamforge-persona-parity-check.sh's deployed-vs-source surface compares
+# against, so nothing outside this file reimplements the `name:` frontmatter
+# rewrite. Never deploys, never writes.
 #
 # Single-worktree mode:
 #   Deploys personas from the tap install path into one worktree's .claude/agents/.
@@ -1325,6 +1332,7 @@ main() {
     printf 'Usage: %s <worktree_path> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
     printf '       %s --all <team> [<main_repo_path>] [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
     printf '       %s --nested-main-root <project_dir> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
+    printf '       %s emit-transformed <src_file> [<char_name>]\n' "$PROG" >&2
     printf '       %s selftest\n' "$PROG" >&2
     exit 1
   fi
@@ -1332,6 +1340,73 @@ main() {
   if [ "$1" = "selftest" ]; then
     _selftest
     return
+  fi
+
+  # emit-transformed (XACA-0931-003): read-only, single-authority mode. Prints
+  # the EXPECTED transform output of one source file to stdout -- exactly
+  # what _deploy_core would write to a deployed target, without deploying
+  # anything. Exists so aiteamforge-persona-parity-check.sh's deployed-vs-
+  # source (S2<->S3) surface can compare against the real transform instead
+  # of reimplementing the `name:` frontmatter rewrite (XACA-0931-001_decision
+  # §4.2: "textbook k501 sibling-heuristic drift ... the checker's copy
+  # silently deciding what correct means"). Purely additive: does not touch
+  # OPT_DRY_RUN/OPT_FORCE/OPT_VERBOSE, does not write anywhere, and does not
+  # alter any existing mode's exit codes.
+  #
+  # <char_name> is optional -- when omitted it is derived from <src_file>'s
+  # basename via _char_from_filename(), the same derivation _deploy_core uses
+  # for every real deployment. The override exists only so a caller (or a
+  # test) can ask "what would this transform to as team X's <char>" without
+  # needing a file whose name already encodes that character.
+  #
+  # Exit codes (independent of the main deploy exit-code table above --
+  # this mode never deploys, so 1/2 there do not apply):
+  #   0 = transform computed successfully (this also covers the two cases
+  #       _deploy_core itself treats as non-fatal "copy verbatim" --
+  #       no frontmatter, or frontmatter with no name: line -- because in
+  #       BOTH cases the verbatim content IS the expected deployed output;
+  #       reporting them as a failure here would make the checker flag a
+  #       byte-for-byte-correct deploy as drift).
+  #   1 = <src_file> does not exist, or is not a regular file.
+  #   2 = the transform itself failed for a reason other than the two
+  #       verbatim-copy cases above (e.g. python3 unavailable/errored) --
+  #       the caller must treat this as UNINSPECTABLE, never as "clean" and
+  #       never by falling back to a raw `cmp` against the untransformed
+  #       source (XACA-0931-001_decision §4.2 forbids exactly that fallback).
+  if [ "$1" = "emit-transformed" ]; then
+    shift
+    if [ $# -lt 1 ]; then
+      printf 'Usage: %s emit-transformed <src_file> [<char_name>]\n' "$PROG" >&2
+      exit 1
+    fi
+    local et_src="$1"
+    local et_char="${2:-}"
+
+    if [ ! -f "$et_src" ]; then
+      _err "emit-transformed: source file not found: ${et_src}"
+      exit 1
+    fi
+
+    if [ -z "$et_char" ]; then
+      et_char=$(_char_from_filename "$(basename "$et_src")")
+    fi
+
+    local et_out et_rc=0
+    et_out=$(_transform_persona "$et_src" "$et_char") || et_rc=$?
+
+    case "$et_rc" in
+      0|2|3)
+        # 0: name: rewritten. 2: no frontmatter, verbatim IS expected output.
+        # 3: no name: in frontmatter, verbatim IS expected output. All three
+        # are what a real deploy would actually write -- see exit-code note above.
+        printf '%s\n' "$et_out"
+        exit 0
+        ;;
+      *)
+        _err "emit-transformed: transform failed (rc=${et_rc}) for ${et_src}"
+        exit 2
+        ;;
+    esac
   fi
 
   OPT_DRY_RUN=false
