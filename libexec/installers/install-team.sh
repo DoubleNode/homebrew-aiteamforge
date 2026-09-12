@@ -1937,13 +1937,34 @@ mkdir -p "$KANBAN_DIR"
 #
 # If team-paths.json does not exist yet, the Python script initialises it with
 # {"schema_version": 1, "teams": {}} before adding this entry.
+#
+# XACA-1187-003/-004/-005: this IS the writer the incident's own backup
+# evidence directly implicates -- its pre-write backup held 27 teams
+# including spacedock, and the file it then wrote held 26. It was already
+# atomic (tempfile + os.replace), but held NO LOCK, so a concurrent writer
+# (a self-heal pass, kb-port-reconcile, an LCARS account save, a
+# kb-init-team/kb-freelance run, or a second install-team.sh) completing its
+# own read-modify-write in the window between this read and this write had
+# its change silently discarded -- atomicity alone never defended against
+# that. Hardened to flock the shared team-paths.json.lock sidecar and
+# RE-READ the file under that lock before mutating, matching the proven
+# pattern at kanban-hooks/aiteamforge_paths.py:_rewrite_config_on_disk and
+# scripts/kb-port-reconcile:_update_team_paths_json. Also closes a separate,
+# independent fail-open (XACA-1187-004): an unparseable EXISTING file used
+# to be silently treated as an empty registry and written back, which would
+# deregister every other team on one bad read; it is tap-native (no
+# canonical dev-team counterpart) and no such hardening had ever been
+# written here to begin with.
 echo "  ✓ XACA-0463: persisting lcars_port=$TEAM_LCARS_PORT for instance $INSTANCE_ID to team-paths.json..."
 python3 - "$INSTANCE_ID" "$TEAM_ID" "$KANBAN_DIR" "$TEAM_WORKING_DIR" "$TEAM_LCARS_PORT" \
-    "${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}" <<'TEAM_PATHS_PYEOF'
-import sys
+    "${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}" \
+    "${HOMEBREW_TAP_ROOT}/share/kanban-hooks/aiteamforge_paths.py" <<'TEAM_PATHS_PYEOF'
+import fcntl
+import importlib.util
 import json
 import os
 import shutil
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1954,74 +1975,169 @@ kanban_dir   = sys.argv[3]
 working_dir  = sys.argv[4]
 lcars_port   = int(sys.argv[5])
 config_path  = Path(sys.argv[6])
+paths_py     = sys.argv[7] if len(sys.argv) > 7 else ""
 
-# XACA-0463 subitem 013: backup snapshot before write (parity with kb-port-fix --apply).
-# Skipped on first install when config_path does not yet exist.
-if config_path.exists():
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    backup_path = config_path.parent / (config_path.name + ".bak-xaca0463-installer-" + ts)
-    shutil.copy2(str(config_path), str(backup_path))
+# XACA-1187-005: single-source the fail-closed no-team-loss guard from the
+# canonical module (mirrored into the tap at share/kanban-hooks/) via the
+# same importlib pattern kb-port-reconcile already uses for its write-side
+# byte floor. Falls back to an inline reimplementation if the module can't
+# be loaded (e.g. a partial/older tap install) -- must never become a hard
+# dependency for an installer.
+def _fallback_reject_if_team_ids_lost(before_ids, after_ids, *, allow_removal=False, resolved=None, context=""):
+    lost = sorted(set(before_ids) - set(after_ids))
+    if lost and not allow_removal:
+        print(
+            f"  install-team: REFUSING to write {resolved} -- {context}: this "
+            f"write would drop {len(lost)} team id(s) already in the registry: "
+            f"{', '.join(lost)} (XACA-1187-005). No write performed.",
+            file=sys.stderr,
+        )
+        raise ValueError(f"refusing to write: would drop team id(s): {', '.join(lost)}")
+    return lost
 
-# Load existing config, or start fresh.
-if config_path.exists():
+_reject_if_team_ids_lost = _fallback_reject_if_team_ids_lost
+if paths_py:
     try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        print(f"  Warning: could not parse {config_path}: {exc} — starting with empty config", file=sys.stderr)
-        config = {"schema_version": 1, "teams": {}}
-else:
-    config = {"schema_version": 1, "teams": {}}
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+        _spec = importlib.util.spec_from_file_location("_install_team_loss_guard_mod", paths_py)
+        if _spec is not None and _spec.loader is not None:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            _reject_if_team_ids_lost = getattr(_mod, "_reject_if_team_ids_lost", _fallback_reject_if_team_ids_lost)
+    except Exception:
+        pass  # keep the fallback -- the guard must never become the reason install fails
 
-# XACA-0463 subitem 015: _safe_teams-normalize parsed-but-malformed root/teams value.
-# Mirrors the _safe_teams guard added to kb-port-fix.py in XACA-0463-013.
-# Without this, a malformed team-paths.json (null root, [], or "teams": null)
-# would crash at config["teams"][instance_id] = entry.
-if not isinstance(config, dict):
-    config = {}
-if not isinstance(config.get("teams"), dict):
-    config["teams"] = {}
+resolved = config_path.resolve()
+lock_path = resolved.with_name(f"{resolved.name}.lock")
 
-teams = config.setdefault("teams", {})
-
-# Upsert: preserve any existing fields; update or add lcars_port, kanban_dir, working_dir.
-entry = teams.get(instance_id, {})
-entry["kanban_dir"]  = kanban_dir
-entry["working_dir"] = working_dir
-entry["lcars_port"]  = lcars_port
-# Preserve band metadata if already present (written by kb-port-fix or prior installs).
-# Do not overwrite lcars_port_base / lcars_port_range — those come from DEFAULT_TEAMS,
-# not from the installer; the reader falls back to DEFAULT_TEAMS for band queries.
-teams[instance_id] = entry
-
-# XACA-0463 subitem 014: concurrency-safe atomic write via tempfile.mkstemp + os.replace.
-# mkstemp generates a unique name even if two installers race; os.replace is atomic on
-# the same filesystem. Replaces the previous write_text + fixed-suffix .tmp approach.
-#
-# XACA-0463 subitem 016: preserve target file's mode bits across the atomic rename.
-# mkstemp defaults to 0600; we carry over the original mode (or 0o644 for new files)
-# before os.replace clobbers the target's permissions.
-target_dir = str(config_path.parent)
-tmp_fd, tmp_path = tempfile.mkstemp(prefix="team-paths-", dir=target_dir)
+# XACA-1059-005 lock-identity convention: open 'a' (never truncate) and
+# NEVER unlink. lcars-ui/server.py's _sweep_stale_locks() is the only thing
+# that ever removes this file, and only when a non-blocking flock probe
+# proves nobody currently holds it -- do not "clean up" this lock file here,
+# and do not assume it exists ahead of time (it legitimately often will not).
 try:
-    with os.fdopen(tmp_fd, "w") as f:
-        json.dump(config, f, indent=2)
-        f.write("\n")
-    # XACA-0463 subitem 016: stat existing file for mode; fall back to 0o644 for new.
+    lock = open(lock_path, "a")
+except OSError as exc:
+    print(f"  Warning: XACA-1187-003 cannot create/open lock file {lock_path}: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+with lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
     try:
-        original_mode = os.stat(str(config_path)).st_mode
-    except FileNotFoundError:
-        original_mode = 0o644
-    os.chmod(tmp_path, original_mode & 0o7777)
-    os.replace(tmp_path, str(config_path))
-    print(f"  ✓ XACA-0463: team-paths.json updated — {instance_id}.lcars_port={lcars_port}")
-except Exception as exc:
-    print(f"  Warning: XACA-0463 could not write {config_path}: {exc}", file=sys.stderr)
-    try:
-        os.unlink(tmp_path)
-    except FileNotFoundError:
-        pass
-    raise
+        # Backup snapshot under the lock (XACA-0463 subitem 013), so the
+        # snapshot reflects exactly what this process is about to
+        # read-modify-write, not a pre-lock stale read.
+        if resolved.exists():
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            backup_path = resolved.parent / (resolved.name + ".bak-xaca0463-installer-" + ts)
+            shutil.copy2(str(resolved), str(backup_path))
+
+        # Re-read under the lock -- TOCTOU defense against another writer
+        # racing between whatever was read earlier in this installer run
+        # (there is no earlier read in this script, but other invocations
+        # of this same installer, or any other writer, may have mutated the
+        # file since this process started) and this write.
+        #
+        # XACA-1187-004: a parse failure on an EXISTING file must never be
+        # silently reinterpreted as an empty registry -- that is the exact
+        # fail-open this subitem exists to close: it would both (a)
+        # deregister every OTHER team on this write, and (b) feed the loss
+        # guard below a fabricated before_ids=set() that can never detect
+        # anything as lost, defeating XACA-1187-005 outright. Fail CLOSED:
+        # abort loudly, naming the file, before any write is attempted.
+        # Only a genuinely ABSENT file (first-ever bootstrap -- nothing to
+        # lose) legitimately starts from {"schema_version": 1, "teams": {}}.
+        if resolved.exists():
+            try:
+                config = json.loads(resolved.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                print(
+                    f"  ERROR: XACA-1187-004 cannot re-read {resolved}: {exc} -- "
+                    f"refusing to write; the registry is unreadable and this "
+                    f"installer will NOT substitute an empty one (that would "
+                    f"deregister every existing team). No write performed; the "
+                    f"file on disk is untouched. Investigate {resolved} by hand.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        else:
+            config = {"schema_version": 1, "teams": {}}
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+
+        # XACA-0463 subitem 015: _safe_teams-normalize parsed-but-malformed
+        # root/teams value. Mirrors the _safe_teams guard added to
+        # kb-port-fix.py in XACA-0463-013. Without this, a malformed
+        # team-paths.json (null root, [], or "teams": null) would crash at
+        # config["teams"][instance_id] = entry.
+        if not isinstance(config, dict):
+            print(
+                f"  ERROR: XACA-1187-004 {resolved} does not contain a JSON "
+                f"object at its root -- refusing to write.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not isinstance(config.get("teams"), dict):
+            config["teams"] = {}
+
+        teams = config.setdefault("teams", {})
+        before_ids = set(teams.keys())
+
+        # Upsert: preserve any existing fields; update or add lcars_port, kanban_dir, working_dir.
+        entry = teams.get(instance_id, {})
+        entry["kanban_dir"]  = kanban_dir
+        entry["working_dir"] = working_dir
+        entry["lcars_port"]  = lcars_port
+        # Preserve band metadata if already present (written by kb-port-fix or prior installs).
+        # Do not overwrite lcars_port_base / lcars_port_range — those come from DEFAULT_TEAMS,
+        # not from the installer; the reader falls back to DEFAULT_TEAMS for band queries.
+        teams[instance_id] = entry
+
+        after_ids = set(teams.keys())
+
+        # XACA-1187-005: fail-closed invariant guard. This call site only
+        # ever ADDS/UPDATES one instance's entry -- before_ids must always
+        # be a subset of after_ids. Any lost id here means something
+        # upstream corrupted the in-memory config between the re-read and
+        # this point, never a legitimate removal -- never pass
+        # allow_removal=True from this call site.
+        try:
+            _reject_if_team_ids_lost(
+                before_ids, after_ids, allow_removal=False, resolved=resolved,
+                context="install-team.sh instance upsert",
+            )
+        except ValueError:
+            sys.exit(1)
+
+        # XACA-0463 subitem 014: concurrency-safe atomic write via tempfile.mkstemp + os.replace.
+        # mkstemp generates a unique name even if two installers race; os.replace is atomic on
+        # the same filesystem. Replaces the previous write_text + fixed-suffix .tmp approach.
+        #
+        # XACA-0463 subitem 016: preserve target file's mode bits across the atomic rename.
+        # mkstemp defaults to 0600; we carry over the original mode (or 0o644 for new files)
+        # before os.replace clobbers the target's permissions.
+        target_dir = str(resolved.parent)
+        tmp_fd, tmp_path = tempfile.mkstemp(prefix="team-paths-", dir=target_dir)
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(config, f, indent=2)
+                f.write("\n")
+            # XACA-0463 subitem 016: stat existing file for mode; fall back to 0o644 for new.
+            try:
+                original_mode = os.stat(str(resolved)).st_mode
+            except FileNotFoundError:
+                original_mode = 0o644
+            os.chmod(tmp_path, original_mode & 0o7777)
+            os.replace(tmp_path, str(resolved))
+            print(f"  ✓ XACA-0463: team-paths.json updated — {instance_id}.lcars_port={lcars_port}")
+        except Exception as exc:
+            print(f"  Warning: XACA-0463 could not write {resolved}: {exc}", file=sys.stderr)
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+            raise
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        # Intentionally NO unlink -- see XACA-1059-005 note above.
 TEAM_PATHS_PYEOF
 
 # Board filename uses INSTANCE_ID (not template id) — contract §6, invariant 8.

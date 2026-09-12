@@ -1711,6 +1711,85 @@ def _reject_if_below_write_floor(data: dict, *, resolved: Path | None = None) ->
     return serialized
 
 
+class TeamRegistryLossError(ValueError):
+    """Raised when a registry write would silently drop team ids present in
+    a prior snapshot (XACA-1187-005).
+
+    Subclasses ``ValueError`` so every existing ``except (OSError, ValueError)``
+    handler in this module (and in callers that copy that convention) catches
+    it without changes; catch this subclass directly where a caller wants to
+    react to loss specifically (e.g. to log every lost id) rather than to a
+    floor refusal.
+    """
+
+
+def team_registry_lost_ids(before_ids, after_ids) -> list:
+    """Return the SORTED list of team ids present in *before_ids* but absent
+    from *after_ids*.
+
+    Deliberately a SET DIFFERENCE, never a count comparison (XACA-1029 R10,
+    and the incident this exists to catch — XACA-1187/spacedock). The
+    reproduced XACA-1029 incident took the registry from 12 teams to 15
+    while destroying 100% of the overlay-only data: the COUNT WENT UP while
+    real teams were being lost. A count-based alarm is silent on exactly
+    that shape, so this function (and every caller of it) must never be
+    replaced with `len(before) > len(after)` or similar.
+
+    See also ``scripts/kb-team-registry-loss-check.py``, an independent
+    detection-only implementation of the same set-difference principle for
+    periodic/background alarms. This function is the write-TIME guard
+    version: called synchronously, inside the write lock, immediately
+    before a write is allowed to proceed — see ``_reject_if_team_ids_lost``.
+    """
+    return sorted(set(before_ids) - set(after_ids))
+
+
+def _reject_if_team_ids_lost(
+    before_ids,
+    after_ids,
+    *,
+    allow_removal: bool = False,
+    resolved: "Path | None" = None,
+    context: str = "",
+) -> list:
+    """Refuse (raise) a write that would drop team ids already in the
+    registry, unless the caller explicitly declares the removal deliberate
+    via ``allow_removal=True``.
+
+    FAIL-CLOSED CONTRACT: *before_ids* must be the id set read under the
+    SAME LOCK the write is about to happen under — this guard is only as
+    trustworthy as the freshness of *before_ids*. A stale or fabricated
+    *before_ids* (e.g. substituting `{}` after a parse failure) makes this
+    check vacuous, not merely weaker; callers must never do that. A caller
+    that cannot establish a locked, freshly-read *before_ids* (for example,
+    because the existing file failed to parse) must abort the write
+    entirely rather than call this function with an empty or guessed set.
+
+    Returns the sorted lost-id list (possibly empty) on success — including
+    when ``allow_removal=True`` and ids WERE lost, so a deliberate removal
+    still gets logged by the caller. Raises ``TeamRegistryLossError``,
+    naming every lost id individually (never a bare count — XACA-1029 R10),
+    when ``allow_removal`` is False and the set is non-empty.
+    """
+    lost = team_registry_lost_ids(before_ids, after_ids)
+    if lost and not allow_removal:
+        target_desc = f" {resolved}" if resolved is not None else ""
+        ctx_desc = f"{context}: " if context else ""
+        print(
+            f"[aiteamforge-paths] write-guard: REFUSING to write{target_desc} -- "
+            f"{ctx_desc}this write would drop {len(lost)} team id(s) already in "
+            f"the registry: {', '.join(lost)} (XACA-1187-005). No write "
+            f"performed; the file on disk is untouched. If this removal is "
+            f"deliberate, the caller must pass allow_removal=True explicitly.",
+            file=sys.stderr,
+        )
+        raise TeamRegistryLossError(
+            f"{ctx_desc}refusing to write: would drop team id(s) already in "
+            f"the registry: {', '.join(lost)} (XACA-1187-005)"
+        )
+    return lost
+
+
 def _atomic_write_json(target: Path, data: dict) -> None:
     """Atomically rewrite *target* with *data*, preserving file mode and symlink identity.
 

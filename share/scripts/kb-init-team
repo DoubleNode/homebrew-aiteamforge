@@ -1063,45 +1063,198 @@ _insert_team_paths_json() {
     local team_id="$1" team_code="$2" kanban_dir="$3" working_dir="$4"
     local lcars_port="$5" port_base="$6" port_range="$7"
 
+    # XACA-1187-003/-004/-005: this is the new-team REGISTRATION writer --
+    # the exact path `spacedock` went through. The old body did a single
+    # unlocked read, mutated an in-memory dict, and called a bare
+    # `write_text()` -- no lock (so a concurrent self-heal pass / LCARS
+    # account save / kb-port-reconcile run / another kb-init-team or
+    # kb-freelance run completing its own read-modify-write in the window
+    # between our read and our write had its change silently discarded --
+    # the lost-update mechanism XACA-1187 forensics reproduced), and no
+    # `os.replace()` (so a concurrent reader could observe a truncated file
+    # mid-write). Rebuilt to match the proven pattern already shipped at
+    # kanban-hooks/aiteamforge_paths.py:_rewrite_config_on_disk and
+    # scripts/kb-port-reconcile:_update_team_paths_json: flock the shared
+    # `team-paths.json.lock` sidecar, RE-READ the file under that lock
+    # before mutating (the part that actually defeats the lost update --
+    # atomicity alone does not), then tmp-in-same-dir + fsync + os.replace.
     python3 - "${TEAM_PATHS_JSON}" \
         "$team_id" "$team_code" "$kanban_dir" "$working_dir" \
-        "$lcars_port" "$port_base" "$port_range" <<'PYEOF'
-import sys, json
+        "$lcars_port" "$port_base" "$port_range" "${AITEAMFORGE_PATHS_PY}" <<'PYEOF'
+import fcntl
+import importlib.util
+import json
+import os
+import stat
+import sys
+import tempfile
 from pathlib import Path
 
 path = Path(sys.argv[1])
 team_id, team_code, kanban_dir, working_dir = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 lcars_port_str, port_base_str, port_range_str = sys.argv[6], sys.argv[7], sys.argv[8]
+paths_py = sys.argv[9] if len(sys.argv) > 9 else ""
 
 lcars_port = None if lcars_port_str in ("None", "null", "") else int(lcars_port_str)
 
-config = {"teams": {}}
-if path.exists():
+# XACA-1187-005: single-source the fail-closed no-team-loss guard from the
+# canonical module via the same importlib pattern kb-port-reconcile already
+# uses for its write-side byte floor, rather than reproducing the
+# set-difference logic here. Falls back to an inline reimplementation if the
+# module can't be loaded (must never become a hard dependency -- same
+# convention as kb-port-reconcile's _MIN_PLAUSIBLE_REGISTRY_BYTES fallback).
+def _fallback_reject_if_team_ids_lost(before_ids, after_ids, *, allow_removal=False, resolved=None, context=""):
+    lost = sorted(set(before_ids) - set(after_ids))
+    if lost and not allow_removal:
+        print(
+            f"kb-init-team: REFUSING to write {resolved} -- {context}: this write "
+            f"would drop {len(lost)} team id(s) already in the registry: "
+            f"{', '.join(lost)} (XACA-1187-005). No write performed.",
+            file=sys.stderr,
+        )
+        raise ValueError(f"refusing to write: would drop team id(s): {', '.join(lost)}")
+    return lost
+
+_reject_if_team_ids_lost = _fallback_reject_if_team_ids_lost
+if paths_py:
     try:
-        config = json.loads(path.read_text(encoding="utf-8"))
+        _spec = importlib.util.spec_from_file_location("_kb_init_team_loss_guard_mod", paths_py)
+        if _spec is not None and _spec.loader is not None:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            _reject_if_team_ids_lost = getattr(_mod, "_reject_if_team_ids_lost", _fallback_reject_if_team_ids_lost)
     except Exception:
-        config = {"teams": {}}
+        pass  # keep the fallback -- the guard must never become the reason we can't run at all
 
-if team_id in config.get("teams", {}):
-    sys.exit(0)  # Already present
+resolved = path.resolve()
+lock_path = resolved.with_name(f"{resolved.name}.lock")
 
-if "teams" not in config:
-    config["teams"] = {}
+# XACA-1059-005 lock-identity convention: open 'a' (never truncate) and
+# NEVER unlink. lcars-ui/server.py's _sweep_stale_locks() is the only thing
+# that ever removes this file, and only when a non-blocking flock probe
+# proves nobody holds it -- do not "clean up" this lock file here.
+try:
+    lock = open(lock_path, "a")
+except OSError as exc:
+    print(f"kb-init-team: cannot create/open lock file {lock_path}: {exc}", file=sys.stderr)
+    sys.exit(2)
 
-config["teams"][team_id] = {
-    "team_code": team_code,
-    "kanban_dir": kanban_dir,
-    "working_dir": working_dir,
-    "lcars_port": lcars_port,
-    "lcars_port_base": int(port_base_str),
-    "lcars_port_range": int(port_range_str),
-    "anthropic_account_id": "",
-    "anthropic_account_nickname": "",
-    "anthropic_api_key_env_var": "",
-}
+with lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    try:
+        # Re-read under the lock -- TOCTOU defense against another writer
+        # racing between whatever this process read earlier (if anything)
+        # and this write.
+        #
+        # XACA-1187-004: a parse failure on an EXISTING file must never be
+        # silently reinterpreted as an empty registry -- that would both
+        # (a) make the write below deregister every other team, and (b)
+        # feed the loss guard a fabricated before_ids={} that can never
+        # detect anything as lost, defeating XACA-1187-005 outright. Fail
+        # CLOSED: abort loudly, naming the file, before any write is
+        # attempted. Only a genuinely ABSENT file (first-ever bootstrap --
+        # nothing to lose) legitimately starts from {"teams": {}}.
+        if resolved.exists():
+            try:
+                config = json.loads(resolved.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                print(
+                    f"kb-init-team: cannot re-read {resolved} under lock: {exc} -- "
+                    f"refusing to register '{team_id}' against an unreadable "
+                    f"registry (XACA-1187-004). No write performed; the file on "
+                    f"disk is untouched.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        else:
+            config = {"teams": {}}
 
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(config, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        if not isinstance(config, dict):
+            print(
+                f"kb-init-team: {resolved} does not contain a JSON object at "
+                f"its root -- refusing to register '{team_id}' (XACA-1187-004).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if not isinstance(config.get("teams"), dict):
+            config["teams"] = {}
+
+        before_ids = set(config["teams"].keys())
+
+        if team_id in config["teams"]:
+            sys.exit(0)  # Already present -- another writer won the race, or a re-run.
+
+        config["teams"][team_id] = {
+            "team_code": team_code,
+            "kanban_dir": kanban_dir,
+            "working_dir": working_dir,
+            "lcars_port": lcars_port,
+            "lcars_port_base": int(port_base_str),
+            "lcars_port_range": int(port_range_str),
+            "anthropic_account_id": "",
+            "anthropic_account_nickname": "",
+            "anthropic_api_key_env_var": "",
+        }
+
+        after_ids = set(config["teams"].keys())
+
+        # XACA-1187-005: fail-closed invariant guard. This call site is a
+        # pure ADD -- before_ids must always be a subset of after_ids. Any
+        # lost id here means something upstream corrupted the in-memory
+        # config between the re-read and this point, never a legitimate
+        # removal -- this call site must never pass allow_removal=True.
+        try:
+            _reject_if_team_ids_lost(
+                before_ids, after_ids, allow_removal=False, resolved=resolved,
+                context="kb-init-team registration",
+            )
+        except ValueError:
+            sys.exit(2)
+
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        serialized = json.dumps(config, indent=2, sort_keys=True) + "\n"
+
+        try:
+            orig_mode = stat.S_IMODE(os.stat(resolved).st_mode)
+        except OSError:
+            orig_mode = None
+
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{resolved.name}.tmp.", dir=str(resolved.parent))
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(serialized)
+                f.flush()
+                os.fsync(f.fileno())
+            if orig_mode is not None:
+                os.chmod(tmp_path, orig_mode)
+            else:
+                # mkstemp() always creates at 0600 regardless of umask. With
+                # no pre-existing file to inherit a mode from (a genuinely
+                # fresh bootstrap), compute what a plain open() would have
+                # produced under the current umask instead, so a
+                # fresh-bootstrap file's mode matches every other writer in
+                # this codebase (they all use plain open(), which already
+                # respects umask automatically).
+                _umask = os.umask(0o022)
+                os.umask(_umask)
+                os.chmod(tmp_path, 0o666 & ~_umask)
+            os.replace(str(tmp_path), str(resolved))
+            try:
+                dir_fd = os.open(str(resolved.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass  # best-effort -- the rename itself already succeeded
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        sys.exit(0)
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        # Intentionally NO unlink -- see XACA-1059-005 note above.
 PYEOF
 }
 
@@ -2168,9 +2321,17 @@ sys.exit(0 if '${TEAM_ID}' in d.get('teams', {}) else 1)
 " 2>/dev/null; then
                 _skip "~/.aiteamforge/team-paths.json"
             else
-                _insert_team_paths_json "$TEAM_ID" "$TEAM_CODE" "$KANBAN_DIR" "$WORKING_DIR" \
-                    "$LCARS_PORT" "$PORT_BAND_BASE" "$PORT_BAND_RANGE"
-                _ok "~/.aiteamforge/team-paths.json"
+                # XACA-1187-003/-005: the writer can now legitimately refuse
+                # (lock/re-read failure, unreadable registry, or the
+                # no-team-loss guard) -- surface that instead of printing
+                # _ok over a write that never happened.
+                if _insert_team_paths_json "$TEAM_ID" "$TEAM_CODE" "$KANBAN_DIR" "$WORKING_DIR" \
+                    "$LCARS_PORT" "$PORT_BAND_BASE" "$PORT_BAND_RANGE"; then
+                    _ok "~/.aiteamforge/team-paths.json"
+                else
+                    echo "ERROR: failed to register '${TEAM_ID}' in ~/.aiteamforge/team-paths.json (see stderr above)" >&2
+                    return 1
+                fi
             fi
         fi
 

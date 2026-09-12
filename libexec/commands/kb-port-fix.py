@@ -9,6 +9,7 @@ using compute_instance_port from aiteamforge_paths.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -66,6 +67,25 @@ try:
 except ImportError as exc:
     print(f"ERROR: Failed to import aiteamforge_paths: {exc}", file=sys.stderr)
     sys.exit(1)
+
+# XACA-1187-005: the fail-closed no-team-loss guard. Import if available;
+# fall back to an inline reimplementation so an older mirrored
+# aiteamforge_paths (pre-XACA-1187) doesn't break this tool -- the guard
+# must never become a hard dependency.
+try:
+    from aiteamforge_paths import _reject_if_team_ids_lost  # type: ignore[import]
+except ImportError:
+    def _reject_if_team_ids_lost(before_ids, after_ids, *, allow_removal=False, resolved=None, context=""):
+        lost = sorted(set(before_ids) - set(after_ids))
+        if lost and not allow_removal:
+            print(
+                f"kb-port-fix: REFUSING to write {resolved} -- {context}: this "
+                f"write would drop {len(lost)} team id(s) already in the "
+                f"registry: {', '.join(lost)} (XACA-1187-005). No write performed.",
+                file=sys.stderr,
+            )
+            raise ValueError(f"refusing to write: would drop team id(s): {', '.join(lost)}")
+        return lost
 
 # Parameterized templates whose BARE key (template == instance) violates the
 # team-id contract. Import if available; fall back to a literal so an older
@@ -392,20 +412,80 @@ def _print_json_report(config_path: Path, plan: dict) -> None:
 
 
 def _atomic_write(data: dict, target: Path) -> None:
-    """Write data as JSON to target atomically (tmp + os.replace)."""
-    target_dir = str(target.parent)
-    tmp_fd, tmp_path = tempfile.mkstemp(prefix="team-paths-", dir=target_dir)
-    try:
-        with os.fdopen(tmp_fd, "w") as f:
-            json.dump(data, f, indent=2, sort_keys=False)
-            f.write("\n")
-        os.replace(tmp_path, str(target))
-    except Exception:
+    """Write data as JSON to target atomically (tmp + os.replace), under the
+    shared team-paths.json.lock (XACA-1187-003).
+
+    Was already atomic (mkstemp + os.replace, no truncation window) but held
+    no lock, so it was "atomic, not exclusion-safe" per the XACA-1187 audit:
+    nothing stopped a self-heal pass, kb-port-reconcile, an LCARS account
+    save, or a kb-init-team/kb-freelance registration from completing its
+    own read-modify-write in the window between this tool's earlier read
+    (in cmd_apply, via _load_team_paths) and this write, silently discarding
+    that other change when *data* (the stale in-memory snapshot) was written
+    back wholesale.
+
+    XACA-1187-005: re-reads the file under the lock immediately before
+    writing and refuses (raising, so the caller's existing
+    ``except OSError`` handling in cmd_apply does NOT catch this -- a
+    ``ValueError`` is deliberately allowed to propagate as an uncaught,
+    non-zero-exit failure) if any team id present in that fresh read would
+    be absent from *data*. This tool only ever mutates ``lcars_port`` on
+    entries already present in the plan it computed, so a lost id here means
+    the registry changed under it since cmd_apply's earlier read -- fail
+    closed and ask the operator to re-run (idempotent: `--check` again,
+    then `--apply` again) against the current state, rather than silently
+    overwrite the concurrent change.
+    """
+    resolved = target.resolve()
+    lock_path = resolved.with_name(f"{resolved.name}.lock")
+
+    # XACA-1059-005 lock-identity convention: open 'a' (never truncate),
+    # never unlink. Only lcars-ui/server.py's _sweep_stale_locks() removes
+    # this file, and only when a non-blocking flock probe proves nobody
+    # holds it -- do not assume it exists ahead of time.
+    lock = open(lock_path, "a")
+    with lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            before_ids: set = set()
+            if resolved.exists():
+                try:
+                    existing = json.loads(resolved.read_text(encoding="utf-8"))
+                    if isinstance(existing, dict) and isinstance(existing.get("teams"), dict):
+                        before_ids = set(existing["teams"].keys())
+                except (OSError, json.JSONDecodeError) as exc:
+                    # XACA-1187-004: an unreadable re-read must never be
+                    # treated as "nothing to lose" -- that would defeat the
+                    # loss guard below outright. Fail closed.
+                    raise ValueError(
+                        f"cannot re-read {resolved} under lock: {exc} -- refusing "
+                        f"to write against an unreadable registry (XACA-1187-004)"
+                    ) from exc
+
+            after_ids = set(data.get("teams", {}).keys()) if isinstance(data.get("teams"), dict) else set()
+            _reject_if_team_ids_lost(
+                before_ids, after_ids, allow_removal=False, resolved=resolved,
+                context="kb-port-fix --apply",
+            )
+
+            target_dir = str(resolved.parent)
+            tmp_fd, tmp_path = tempfile.mkstemp(prefix="team-paths-", dir=target_dir)
+            try:
+                with os.fdopen(tmp_fd, "w") as f:
+                    json.dump(data, f, indent=2, sort_keys=False)
+                    f.write("\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, str(resolved))
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            # Intentionally NO unlink -- see XACA-1059-005 note above.
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +629,11 @@ def cmd_apply(args: argparse.Namespace) -> int:
     # exception into an actionable message here.
     try:
         _atomic_write(data, config_path)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError covers the XACA-1187-005 loss-guard refusal and the
+        # XACA-1187-004 unreadable-re-read case -- both raised deliberately
+        # by _atomic_write and reported the same clean way as an OSError,
+        # rather than propagating as an uncaught traceback.
         print(
             f"ERROR: Failed to write {config_path}: {exc}",
             file=sys.stderr,

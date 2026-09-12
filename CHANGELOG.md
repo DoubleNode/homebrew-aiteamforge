@@ -35,6 +35,41 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   passing with nothing on the branch changing — this is the in-flight mirror hazard of a
   shared tap while the canonical side is unmerged, which XACA-1122's serialized publisher
   is designed to eliminate.
+- **XACA-1187** — hardened the tap-native team-*registration* writers of
+  `~/.aiteamforge/team-paths.json` against the lost-update race that
+  silently dropped the `spacedock` team from the registry on 2026-09-11
+  (reproduced in a sandbox: two processes read the same file, both write
+  back, the slower one's stale snapshot discards the other's new key —
+  atomicity via `os.replace()` never defended against this; only a
+  flock + re-read-under-the-lock does).
+  `homebrew-tap/libexec/installers/install-team.sh` (the writer the
+  incident's own backup evidence directly implicates — its pre-write backup
+  held 27 teams including spacedock, the file it then wrote held 26) and
+  `homebrew-tap/libexec/commands/kb-port-fix.py:_atomic_write` (already
+  atomic, was missing only the lock) now flock the shared
+  `team-paths.json.lock` sidecar and re-read the file under that lock
+  immediately before mutating, matching the pattern already shipped at
+  `kanban-hooks/aiteamforge_paths.py:_rewrite_config_on_disk` /
+  `scripts/kb-port-reconcile:_update_team_paths_json`. Both sites also gained
+  a fail-closed, set-difference no-team-loss guard
+  (`_reject_if_team_ids_lost`, mirrored into
+  `share/kanban-hooks/aiteamforge_paths.py` from the canonical dev-team
+  source and imported via the same importlib-with-inline-fallback pattern
+  `kb-port-reconcile` already uses for its write-side byte floor — never a
+  count comparison; XACA-1029 R10 already proved a count guard is unsound
+  here) that refuses a write and names every lost team id individually
+  rather than silently discarding it. `install-team.sh` also closes an
+  independent fail-open: an unparseable existing registry used to be
+  silently reinterpreted as an empty one and written back (which would have
+  both deregistered every other team and made the loss guard vacuous); it
+  now aborts loudly, naming the file, with no write attempted. Lock
+  discipline follows XACA-1059-005: every lock is opened `'a'` (never
+  truncated) and never unlinked. See `CHANGELOG.md` (dev-team) for the full
+  per-subitem detail and the sites fixed on the dev-team side
+  (`scripts/kb-init-team`, `scripts/kb-freelance`,
+  `scripts/aiteamforge-team-paths-wizard.py`,
+  `scripts/migrate-freelance-overlay-codes.sh`) that this tap-side entry
+  does not duplicate.
 
 
 ## [0.20.9] - 2026-09-11

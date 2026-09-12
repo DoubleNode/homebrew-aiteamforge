@@ -32,11 +32,13 @@ Design notes:
 
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -229,25 +231,131 @@ def _backup_existing(config_path: Path) -> None:
         print(f"WARNING: Could not create backup: {exc}", file=sys.stderr)
 
 
-def _atomic_write(config_path: Path, data: dict) -> bool:
-    """Write data as JSON to config_path atomically via a .tmp file."""
-    tmp_path = config_path.parent / (config_path.name + ".tmp")
-    try:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(
-            json.dumps(data, indent=2, sort_keys=False) + "\n",
-            encoding="utf-8",
+def _reject_if_team_ids_lost_fallback(before_ids, after_ids, *, allow_removal=False, resolved=None, context=""):
+    """Inline fallback matching aiteamforge_paths._reject_if_team_ids_lost,
+    used only if that module can't be loaded (XACA-1187-005). See the
+    importlib attempt in _atomic_write below."""
+    lost = sorted(set(before_ids) - set(after_ids))
+    if lost and not allow_removal:
+        print(
+            f"REFUSING to write {resolved} -- {context}: this write would drop "
+            f"{len(lost)} team id(s) already in the registry: {', '.join(lost)} "
+            f"(XACA-1187-005). No write performed.",
+            file=sys.stderr,
         )
-        os.replace(tmp_path, config_path)
-        return True
+        raise ValueError(f"refusing to write: would drop team id(s): {', '.join(lost)}")
+    return lost
+
+
+def _atomic_write(config_path: Path, data: dict) -> bool:
+    """Write data as JSON to config_path atomically via a tmp file, under
+    the shared team-paths.json.lock (XACA-1187-003) so this whole-file
+    replace cannot race a concurrent field-mutation writer (a self-heal
+    pass, kb-port-reconcile, an LCARS account save, kb-init-team/kb-freelance
+    registering a NEW team) and clobber it. Previously this used a
+    fixed-name `.tmp` sibling with no lock at all -- exclusion-safe only by
+    the accident of this being an interactive, one-human-at-a-time tool.
+
+    XACA-1187-005: this wizard is a DELIBERATE whole-registry replace by
+    design (run_interactive builds `configured_teams` from DEFAULT_TEAMS and
+    prompts, not from the current overlay -- it has never merged in
+    overlay-only teams such as freelance-* instances). Hard-refusing on any
+    loss here would make the wizard unusable for exactly the installs most
+    likely to have overlay-only teams. So the guard here does not block:
+    it is called with allow_removal=True and used only to REPORT every
+    id that is about to be dropped, loudly, immediately before the write
+    that drops it -- detect and report, consistent with every other guard
+    in this repo, adapted (not weakened) for a site whose whole purpose is
+    replacement rather than merge. A caller wanting hard protection should
+    not point this tool at a registry with overlay-only teams it does not
+    want to lose.
+    """
+    resolved = config_path.resolve()
+    lock_path = resolved.with_name(f"{resolved.name}.lock")
+
+    # XACA-1059-005 lock-identity convention: open 'a' (never truncate),
+    # never unlink. Only lcars-ui/server.py's _sweep_stale_locks() removes
+    # this file, and only when a non-blocking flock probe proves nobody
+    # holds it.
+    try:
+        lock = open(lock_path, "a")
     except OSError as exc:
-        print(f"ERROR: Could not write config: {exc}", file=sys.stderr)
-        # Clean up tmp if it exists
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        print(f"ERROR: cannot create/open lock file {lock_path}: {exc}", file=sys.stderr)
         return False
+
+    reject_if_team_ids_lost = _reject_if_team_ids_lost_fallback
+    try:
+        mod = _load_aiteamforge_paths_module()
+        reject_if_team_ids_lost = getattr(mod, "_reject_if_team_ids_lost", _reject_if_team_ids_lost_fallback)
+    except SystemExit:
+        pass  # keep the fallback -- the guard must never become a hard dependency
+
+    with lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            # Re-read under the lock -- TOCTOU-safe view of what is about to
+            # be replaced (not merged from -- see docstring above).
+            before_ids: set[str] = set()
+            if resolved.exists():
+                try:
+                    existing = json.loads(resolved.read_text(encoding="utf-8"))
+                    if isinstance(existing, dict) and isinstance(existing.get("teams"), dict):
+                        before_ids = set(existing["teams"].keys())
+                except (OSError, json.JSONDecodeError) as exc:
+                    print(
+                        f"WARNING: could not re-read existing {resolved} to check for "
+                        f"team loss ({exc}) -- proceeding with the write anyway since "
+                        f"this wizard replaces the whole file by design, but the "
+                        f"before/after comparison below is skipped.",
+                        file=sys.stderr,
+                    )
+
+            after_ids = set(data.get("teams", {}).keys()) if isinstance(data.get("teams"), dict) else set()
+            if before_ids:
+                # allow_removal=True means reject_if_team_ids_lost() never
+                # raises AND never prints (its own print is gated on "not
+                # allow_removal") -- so the report has to happen here, not
+                # rely on the shared helper's refusal-path print. Never a
+                # bare count (XACA-1029 R10): every lost id, by name.
+                lost = reject_if_team_ids_lost(
+                    before_ids, after_ids, allow_removal=True, resolved=resolved,
+                    context="aiteamforge-team-paths-wizard replace",
+                )
+                if lost:
+                    print(
+                        f"WARNING (XACA-1187-005): this write REPLACES the whole "
+                        f"registry and is about to DROP {len(lost)} existing team "
+                        f"id(s) not present in this wizard's selection: "
+                        f"{', '.join(lost)}. This wizard does not merge in "
+                        f"overlay-only teams (e.g. freelance-* instances) -- if any "
+                        f"of these should have been kept, restore them afterward "
+                        f"from the timestamped backup this run just wrote, or use "
+                        f"kb-freelance / kb-port-fix instead of this wizard next time.",
+                        file=sys.stderr,
+                    )
+
+            tmp_fd, tmp_name = None, None
+            try:
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                tmp_fd, tmp_name = tempfile.mkstemp(prefix=f"{resolved.name}.tmp.", dir=str(resolved.parent))
+                tmp_path = Path(tmp_name)
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(data, indent=2, sort_keys=False) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, resolved)
+                return True
+            except OSError as exc:
+                print(f"ERROR: Could not write config: {exc}", file=sys.stderr)
+                if tmp_name is not None:
+                    try:
+                        Path(tmp_name).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                return False
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            # Intentionally NO unlink -- see XACA-1059-005 note above.
 
 
 # ---------------------------------------------------------------------------
