@@ -1529,6 +1529,11 @@ def _sanitize_url_for_display(url):
         if not parts.username and not parts.password:
             return url
         netloc = parts.hostname or ''
+        # parts.hostname strips the [] brackets IPv6 literals require in a URL
+        # netloc -- re-add them here or the rebuilt URL is malformed
+        # (`https://::1:3000/x` instead of `https://[::1]:3000/x`).
+        if ':' in netloc:
+            netloc = f'[{netloc}]'
         if parts.port:
             netloc = f'{netloc}:{parts.port}'
         return parts._replace(netloc=netloc).geturl()
@@ -14470,7 +14475,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # optional, which is that ticket's job, not this one's.
     _AUTH_TYPE_VALUES = ('oauth_token', 'api_key', 'gateway_token')
 
-    def _set_team_ai_credential(self, team_block: dict, credential: dict | None) -> None:
+    def _set_team_ai_credential(self, team_block: dict, credential: dict | None, team: str = None) -> None:
         """Replace ``team_block['ai']['credential']`` as a whole unit, and derive
         the legacy ``anthropic_*`` projection from it.
 
@@ -14508,10 +14513,19 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         not support item assignment"), surfacing as an unexplained 500 to
         callers instead of self-healing the block.
 
+        XACA-1178-024: the coercion below REPLACES the corrupt ``ai`` block
+        wholesale -- whatever it held (short of a dict) is discarded with no
+        trace. Log a warning when that happens so a corrupt team-paths.json
+        is visible in server logs instead of silently self-healing.
+
         XACA-1178-007 / XACA-0282-012 §2.4.
         """
         ai_block = team_block.get('ai')
         if not isinstance(ai_block, dict):
+            if ai_block is not None:
+                print(f"[LCARS] WARNING: team-paths.json 'ai' block for team {team!r} "
+                      f"was {type(ai_block).__name__!s}, not a dict -- replacing with {{}} "
+                      f"(XACA-1178-016/024)")
             ai_block = {}
             team_block['ai'] = ai_block
         ai_block['credential'] = credential
@@ -14618,7 +14632,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # to {} instead of letting credential.get(...) raise AttributeError
                 # below -- same "opaque 500 on malformed ai" class as
                 # _set_team_ai_credential's ai-block guard above.
+                # XACA-1178-024: warn when this actually fires -- `credential`
+                # being explicitly None is the legitimate "no team credential"
+                # state (see docstring above) and stays silent; anything else
+                # non-dict is corruption worth surfacing.
                 if not isinstance(credential, dict):
+                    if credential is not None:
+                        print(f"[LCARS] WARNING: team-paths.json ai.credential for team "
+                              f"{team!r} was {type(credential).__name__!s}, not a dict -- "
+                              f"treating as empty (XACA-1178-017/024)")
                     credential = {}
                 account_id = credential.get('account_id') or ''
                 account_nickname = credential.get('nickname') or ''
@@ -14782,8 +14804,22 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         # reset/drop them. Read defensively: an existing 'ai' or
                         # 'credential' that isn't a dict (XACA-1178-017) coerces to
                         # {} rather than raising.
+                        # XACA-1178-024: warn only on genuine corruption -- 'ai'
+                        # or 'credential' being absent/None is the ordinary
+                        # "no credential configured yet" state and stays silent.
                         existing_ai = data['teams'][team].get('ai')
+                        if existing_ai is not None and not isinstance(existing_ai, dict):
+                            print(f"[LCARS] WARNING: team-paths.json 'ai' block for team "
+                                  f"{team!r} was {type(existing_ai).__name__!s}, not a dict -- "
+                                  f"ignoring existing engine_slug/account_slug (XACA-1178-016/024)")
+                            existing_ai = None
                         existing_credential = existing_ai.get('credential') if isinstance(existing_ai, dict) else None
+                        if existing_credential is not None and not isinstance(existing_credential, dict):
+                            print(f"[LCARS] WARNING: team-paths.json ai.credential for team "
+                                  f"{team!r} was {type(existing_credential).__name__!s}, not a "
+                                  f"dict -- ignoring existing engine_slug/account_slug "
+                                  f"(XACA-1178-017/024)")
+                            existing_credential = None
                         if not isinstance(existing_credential, dict):
                             existing_credential = {}
 
@@ -14802,7 +14838,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         else:
                             credential = None
 
-                        self._set_team_ai_credential(data['teams'][team], credential)
+                        self._set_team_ai_credential(data['teams'][team], credential, team=team)
 
                         # XACA-1059: atomic write via tmp file, with the write-side
                         # plausibility floor + directory fsync — see
@@ -14877,8 +14913,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # the whole time. Coerce defensively (XACA-1178-017): a non-dict
                 # 'ai' or 'credential' falls through to the legacy fallback
                 # rather than raising.
+                # XACA-1178-024: warn when the fallback is actually triggered by
+                # corruption (not by a team simply having no 'ai'/'credential'
+                # key yet, which is the ordinary unconfigured state).
                 ai_block = team_block.get('ai')
+                if ai_block is not None and not isinstance(ai_block, dict):
+                    print(f"[LCARS] WARNING: team-paths.json 'ai' block for team {team!r} "
+                          f"was {type(ai_block).__name__!s}, not a dict -- falling back to "
+                          f"legacy anthropic_api_key_env_var (XACA-1178-016/024)")
+                    ai_block = None
                 ai_credential = ai_block.get('credential') if isinstance(ai_block, dict) else None
+                if ai_credential is not None and not isinstance(ai_credential, dict):
+                    print(f"[LCARS] WARNING: team-paths.json ai.credential for team {team!r} "
+                          f"was {type(ai_credential).__name__!s}, not a dict -- falling back "
+                          f"to legacy anthropic_api_key_env_var (XACA-1178-017/024)")
+                    ai_credential = None
                 if isinstance(ai_credential, dict):
                     env_var_name = ai_credential.get('env_var_name') or ''
                 if not env_var_name:
@@ -15397,7 +15446,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         matched_auth_type = matched_account.get('auth_type')
                         if matched_auth_type:
                             credential['auth_type'] = matched_auth_type
-                        self._set_team_ai_credential(tp_data['teams'][team], credential)
+                        self._set_team_ai_credential(tp_data['teams'][team], credential, team=team)
 
                         # XACA-1059: atomic write via tmp file, with the write-side
                         # plausibility floor + directory fsync — see

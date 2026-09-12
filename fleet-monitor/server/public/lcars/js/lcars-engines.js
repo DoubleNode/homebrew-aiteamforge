@@ -608,9 +608,14 @@
      */
     function authTypeBadge(account) {
         var AUTH_TYPE_LABELS = { oauth_token: 'OAUTH', api_key: 'API KEY', gateway_token: 'GATEWAY' };
+        // XACA-1178-022: prefix BOTH states with "AUTH: ", matching the sibling
+        // vaultBadge()'s convention below (VAULT: N machines / VAULT: not
+        // provisioned) exactly — before this fix only the unset state carried
+        // the prefix, so the two states in the same column read inconsistently
+        // ("AUTH: not set" next to a bare "OAUTH").
         if (account && account.auth_type && AUTH_TYPE_LABELS[account.auth_type]) {
             return '<span class="engine-auth-type-badge" title="' + escHtml(account.auth_type) + '">' +
-                escHtml(AUTH_TYPE_LABELS[account.auth_type]) + '</span>';
+                'AUTH: ' + escHtml(AUTH_TYPE_LABELS[account.auth_type]) + '</span>';
         }
         // XACA-1178-019: spell the unset state out (AUTH: not set), matching the
         // sibling vaultBadge()'s convention below (VAULT: not provisioned) — a bare

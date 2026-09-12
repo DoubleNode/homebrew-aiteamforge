@@ -382,6 +382,42 @@ class SanitizeUrlForDisplayTests(unittest.TestCase):
         self.assertIsNone(_sanitize_url_for_display(None))
         self.assertEqual(_sanitize_url_for_display(""), "")
 
+    def test_ipv6_brackets_preserved_with_userinfo_and_port(self):
+        # XACA-1178-025: parts.hostname strips the [] an IPv6 netloc requires,
+        # and the rebuild never restored them -- 'https://u:p@[::1]:3000/x'
+        # used to come back as the malformed 'https://::1:3000/x'.
+        self.assertEqual(
+            _sanitize_url_for_display("https://admin:s3cr3t@[::1]:3000/x"),
+            "https://[::1]:3000/x",
+        )
+
+    def test_ipv6_brackets_preserved_with_userinfo_no_port(self):
+        self.assertEqual(
+            _sanitize_url_for_display("https://admin:s3cr3t@[2001:db8::1]/path"),
+            "https://[2001:db8::1]/path",
+        )
+
+    def test_ipv4_and_hostnames_unaffected_by_bracket_logic(self):
+        # Guard against a regression that brackets everything: only a
+        # colon-bearing (IPv6) hostname should ever gain brackets.
+        self.assertEqual(
+            _sanitize_url_for_display("https://admin:s3cr3t@192.168.1.1:9090/x"),
+            "https://192.168.1.1:9090/x",
+        )
+        self.assertEqual(
+            _sanitize_url_for_display("https://admin:s3cr3t@fleet.example.test:9090/x"),
+            "https://fleet.example.test:9090/x",
+        )
+
+    def test_bad_port_value_error_still_fails_closed_to_none(self):
+        # The function's fail-closed contract (an unparseable URL -> None,
+        # never the raw un-sanitized URL) must survive the bracket fix --
+        # accessing parts.port on a non-numeric port raises ValueError,
+        # which is still inside the try/except that returns None.
+        self.assertIsNone(
+            _sanitize_url_for_display("https://admin:s3cr3t@fleet.example.test:notaport/x")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

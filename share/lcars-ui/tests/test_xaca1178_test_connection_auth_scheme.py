@@ -279,6 +279,96 @@ class TestConnectionAuthSchemeTests(unittest.TestCase):
         self.assertFalse(response["ok"])
         mock_save.assert_not_called()
 
+    def test_200_response_with_error_type_body_reports_ok_false(self):
+        """XACA-1178-020/026: Anthropic reports failures via HTTP error
+        status (covered by the HTTPError branch above). A 200 response whose
+        BODY is nonetheless typed 'error' -- not 'message' -- is anomalous,
+        not a success. Before this fix this branch reported ok=True for any
+        200, which would validate a broken credential as working."""
+        self._set_env("TEST_ANOMALOUS_200_VAR", "sk-ant-api03-" + "m" * 90)
+
+        fake_resp = MagicMock()
+        fake_resp.status = 200
+        fake_resp.read.return_value = json.dumps(
+            {"type": "error", "error": {"message": "overloaded_error"}}
+        ).encode()
+        fake_resp.__enter__ = MagicMock(return_value=fake_resp)
+        fake_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("server.urllib.request.urlopen", return_value=fake_resp) as mock_urlopen, \
+             patch.object(LCARSHandler, "_save_account_validation_cache") as mock_save:
+            handler, buf = self._post("TEST_ANOMALOUS_200_VAR")
+            handler.handle_team_account_test_connection()
+
+        mock_urlopen.assert_called_once()
+        response = _response_json(buf)
+        self.assertFalse(response["ok"], response)
+        self.assertIn("error", response["error"].lower())
+        # A 200-but-typed-error probe must never be reported as validated.
+        mock_save.assert_not_called()
+
+    def test_200_response_with_message_type_still_reports_ok_true(self):
+        """Companion to the above: the ordinary success shape (type=message)
+        must be unaffected by the new anomalous-200 branch."""
+        self._set_env("TEST_NORMAL_200_VAR", "sk-ant-api03-" + "n" * 90)
+
+        with patch("server.urllib.request.urlopen", return_value=_fake_urlopen_success()) as mock_urlopen, \
+             patch.object(LCARSHandler, "_save_account_validation_cache") as mock_save:
+            handler, buf = self._post("TEST_NORMAL_200_VAR")
+            handler.handle_team_account_test_connection()
+
+        mock_urlopen.assert_called_once()
+        response = _response_json(buf)
+        self.assertTrue(response["ok"], response)
+        mock_save.assert_called_once()
+
+    def test_generic_exception_redacts_key_from_error_message(self):
+        """XACA-1178-026: the generic `except Exception` branch (a URLError,
+        a socket timeout, etc. -- distinct from the HTTPError branch, which
+        already had its own redaction and its own test coverage) must apply
+        the SAME key-redaction as the HTTPError branch. Before this fix, a
+        generic exception whose message happened to embed the request
+        (as some urllib transport errors do) could leak the raw key value
+        into the JSON response."""
+        api_key = "sk-ant-api03-" + "p" * 90
+        self._set_env("TEST_GENERIC_EXC_VAR", api_key)
+
+        with patch(
+            "server.urllib.request.urlopen",
+            side_effect=RuntimeError(f"connection failed while sending {api_key} to host"),
+        ) as mock_urlopen, patch.object(
+            LCARSHandler, "_save_account_validation_cache"
+        ) as mock_save:
+            handler, buf = self._post("TEST_GENERIC_EXC_VAR")
+            handler.handle_team_account_test_connection()
+
+        mock_urlopen.assert_called_once()
+        response = _response_json(buf)
+        self.assertFalse(response["ok"], response)
+        self.assertNotIn(api_key, response["error"])
+        self.assertIn("[REDACTED]", response["error"])
+        mock_save.assert_not_called()
+
+    def test_generic_exception_without_key_in_message_passes_through_unredacted(self):
+        """The redaction must not corrupt an ordinary error message that
+        never contained the key in the first place."""
+        self._set_env("TEST_GENERIC_EXC_NOKEY_VAR", "sk-ant-api03-" + "q" * 90)
+
+        with patch(
+            "server.urllib.request.urlopen",
+            side_effect=RuntimeError("Temporary failure in name resolution"),
+        ) as mock_urlopen, patch.object(
+            LCARSHandler, "_save_account_validation_cache"
+        ) as mock_save:
+            handler, buf = self._post("TEST_GENERIC_EXC_NOKEY_VAR")
+            handler.handle_team_account_test_connection()
+
+        mock_urlopen.assert_called_once()
+        response = _response_json(buf)
+        self.assertFalse(response["ok"], response)
+        self.assertEqual(response["error"], "Temporary failure in name resolution")
+        mock_save.assert_not_called()
+
 
 class TestConnectionResolvesEnvVarFromAiCredentialTests(unittest.TestCase):
     """XACA-1178-018: when the request gives {team} (not env_var_name
@@ -436,6 +526,58 @@ class TestConnectionResolvesEnvVarFromAiCredentialTests(unittest.TestCase):
             self.assertNotEqual(handler._response_code, 500, f"bogus_ai={bogus_ai!r}")
             response = _response_json(buf)
             self.assertTrue(response["ok"], response)
+
+    def test_non_dict_ai_or_credential_logs_warning(self):
+        """XACA-1178-024: the fourth of the four XACA-1178-017 coercion sites
+        -- this one falls back to the legacy env var silently. Must warn,
+        naming the team and the bogus value's type, when it actually fires."""
+        env_patch = patch.dict(os.environ, {"LEGACY_COERCE_VAR2": "sk-ant-api03-" + "k" * 90})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+        cases = [
+            ("not-a-dict", "str"),
+            ({"credential": ["also", "not", "a", "dict"]}, "list"),
+        ]
+        for bogus_ai, expected_type in cases:
+            self._write_team_paths({
+                "team_code": "X1178C",
+                "anthropic_api_key_env_var": "LEGACY_COERCE_VAR2",
+                "ai": bogus_ai,
+            })
+            with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+                LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
+
+            with patch("server.urllib.request.urlopen", return_value=_fake_urlopen_success()), \
+                 patch.object(LCARSHandler, "_save_account_validation_cache"), \
+                 patch("builtins.print") as mock_print:
+                handler, buf = self._post_team()
+                handler.handle_team_account_test_connection()
+
+            warnings = [c.args[0] for c in mock_print.call_args_list if c.args and "WARNING" in c.args[0]]
+            matches = [w for w in warnings if self.TEST_TEAM in w and expected_type in w]
+            self.assertEqual(len(matches), 1, f"bogus_ai={bogus_ai!r} printed={warnings!r}")
+
+    def test_absent_ai_block_logs_no_warning(self):
+        """A team predating XACA-1178-007 (no 'ai' key at all) is the
+        ordinary case, not corruption -- must stay silent."""
+        env_patch = patch.dict(os.environ, {"LEGACY_ONLY_VAR2": "sk-ant-api03-" + "l" * 90})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+        self._write_team_paths({
+            "team_code": "X1178C",
+            "anthropic_api_key_env_var": "LEGACY_ONLY_VAR2",
+        })
+
+        with patch("server.urllib.request.urlopen", return_value=_fake_urlopen_success()), \
+             patch.object(LCARSHandler, "_save_account_validation_cache"), \
+             patch("builtins.print") as mock_print:
+            handler, buf = self._post_team()
+            handler.handle_team_account_test_connection()
+
+        warnings = [c.args[0] for c in mock_print.call_args_list if c.args and "WARNING" in c.args[0]]
+        self.assertEqual(warnings, [])
 
 
 if __name__ == "__main__":

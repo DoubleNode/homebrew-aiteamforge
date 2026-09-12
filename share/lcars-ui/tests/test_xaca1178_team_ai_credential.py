@@ -312,6 +312,42 @@ class SetTeamAiCredentialHelperTests(unittest.TestCase):
             self.assertIsInstance(team_block["ai"], dict, f"bogus_ai={bogus_ai!r}")
             self.assertEqual(team_block["ai"]["credential"]["account_id"], "acct-x")
 
+    def test_non_dict_ai_block_logs_warning_naming_team_and_type(self):
+        """XACA-1178-024: the XACA-1178-016 coercion above REPLACES a corrupt
+        'ai' block wholesale with no trace of what it held. A log line must
+        make that visible, naming both the team and the bogus value's type
+        (so an operator can tell a str got clobbered from a list)."""
+        handler = self._handler()
+        for bogus_ai in ("not-a-dict", ["also", "not", "a", "dict"], 42):
+            team_block = {"ai": bogus_ai}
+            with patch("builtins.print") as mock_print:
+                handler._set_team_ai_credential(team_block, {
+                    "engine_slug": "anthropic",
+                    "account_id": "acct-x",
+                    "nickname": "X",
+                    "env_var_name": "TEAM_X_API_KEY",
+                }, team="warnteam")
+            warnings = [c.args[0] for c in mock_print.call_args_list if c.args]
+            matches = [w for w in warnings if "WARNING" in w and "warnteam" in w]
+            self.assertEqual(len(matches), 1, f"bogus_ai={bogus_ai!r} printed={warnings!r}")
+            self.assertIn(type(bogus_ai).__name__, matches[0])
+
+    def test_missing_ai_block_does_not_log_warning(self):
+        """A team with no 'ai' key at all (every team before XACA-1178-007)
+        is the ORDINARY unconfigured state, not corruption -- must stay
+        silent, not fire the XACA-1178-024 warning on every normal save."""
+        handler = self._handler()
+        team_block = {"team_code": "ACA"}
+        with patch("builtins.print") as mock_print:
+            handler._set_team_ai_credential(team_block, {
+                "engine_slug": "anthropic",
+                "account_id": "acct-x",
+                "nickname": "X",
+                "env_var_name": "TEAM_X_API_KEY",
+            }, team="silentteam")
+        warnings = [c.args[0] for c in mock_print.call_args_list if c.args and "WARNING" in c.args[0]]
+        self.assertEqual(warnings, [])
+
 
 class HandleTeamAccountAssignAiCredentialTests(_TeamPathsFixtureMixin, unittest.TestCase):
     """handle_team_account_assign() end-to-end through the real file, mocking
@@ -642,6 +678,65 @@ class HandleTeamAccountSaveAiCredentialTests(_TeamPathsFixtureMixin, unittest.Te
         on_disk = self._read_team_paths()
         self.assertEqual(on_disk["teams"][TEST_TEAM]["ai"]["credential"]["account_id"], "acct-recovered")
 
+    def test_non_dict_ai_block_on_disk_logs_warning(self):
+        """XACA-1178-024: the defensive read of the EXISTING 'ai' block here
+        (XACA-1178-016) must also warn when it discards a corrupt value, not
+        just _set_team_ai_credential's own coercion on the NEW block. A
+        corrupt top-level 'ai' block is independently observed by BOTH
+        coercion sites in one save request (this handler's own defensive
+        read, then _set_team_ai_credential's), so two matching warnings is
+        the correct outcome here, not a bug -- each site is a real
+        occurrence of that site's coercion firing."""
+        data = self._read_team_paths()
+        data["teams"][TEST_TEAM]["ai"] = "not-a-dict-either"
+        self._write_team_paths(data)
+        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+            LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
+
+        with patch("builtins.print") as mock_print:
+            self._save({
+                "team": TEST_TEAM,
+                "account_id": "acct-recovered",
+                "account_nickname": "Recovered",
+                "env_var_name": "TEAM_X1178_API_KEY",
+            })
+        warnings = [c.args[0] for c in mock_print.call_args_list if c.args and "WARNING" in c.args[0]]
+        matches = [w for w in warnings if TEST_TEAM in w and "str" in w]
+        self.assertGreaterEqual(len(matches), 1, f"printed={warnings!r}")
+
+    def test_non_dict_existing_credential_on_disk_logs_warning(self):
+        """Same as above, but the 'ai' block itself is fine and it's the
+        nested 'credential' value that is corrupt."""
+        data = self._read_team_paths()
+        data["teams"][TEST_TEAM]["ai"] = {"credential": ["also", "not", "a", "dict"]}
+        self._write_team_paths(data)
+        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+            LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
+
+        with patch("builtins.print") as mock_print:
+            self._save({
+                "team": TEST_TEAM,
+                "account_id": "acct-recovered",
+                "account_nickname": "Recovered",
+                "env_var_name": "TEAM_X1178_API_KEY",
+            })
+        warnings = [c.args[0] for c in mock_print.call_args_list if c.args and "WARNING" in c.args[0]]
+        matches = [w for w in warnings if TEST_TEAM in w and "list" in w]
+        self.assertEqual(len(matches), 1, f"printed={warnings!r}")
+
+    def test_save_with_no_prior_ai_block_logs_no_warning(self):
+        """The ordinary first-ever save (no 'ai' key on disk at all) must
+        stay silent -- it is not corruption."""
+        with patch("builtins.print") as mock_print:
+            self._save({
+                "team": TEST_TEAM,
+                "account_id": "acct-console",
+                "account_nickname": "Console Key",
+                "env_var_name": "TEAM_X1178_API_KEY",
+            })
+        warnings = [c.args[0] for c in mock_print.call_args_list if c.args and "WARNING" in c.args[0]]
+        self.assertEqual(warnings, [])
+
 
 class ServeTeamAccountCurrentAiCredentialTests(_TeamPathsFixtureMixin, unittest.TestCase):
 
@@ -736,6 +831,39 @@ class ServeTeamAccountCurrentAiCredentialTests(_TeamPathsFixtureMixin, unittest.
             self.assertEqual(resp["config_source"], "ai")
             self.assertEqual(resp["account_id"], "")
             self.assertFalse(resp["has_credentials"])
+
+    def test_non_dict_credential_value_logs_warning(self):
+        """XACA-1178-024: the coercion in serve_team_account_current() must
+        also warn on genuine corruption, naming the team and the bogus
+        type -- but stay silent for an explicit null credential (the
+        legitimate 'no team credential' state), covered separately below."""
+        data = self._read_team_paths()
+        for bogus_credential in ("not-a-dict", ["also", "not"], 7):
+            data["teams"][TEST_TEAM]["ai"] = {"credential": bogus_credential}
+            self._write_team_paths(data)
+            with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+                LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
+
+            with patch("builtins.print") as mock_print:
+                self._get()
+            warnings = [c.args[0] for c in mock_print.call_args_list if c.args and "WARNING" in c.args[0]]
+            matches = [w for w in warnings if TEST_TEAM in w and type(bogus_credential).__name__ in w]
+            self.assertEqual(len(matches), 1, f"bogus_credential={bogus_credential!r} printed={warnings!r}")
+
+    def test_explicit_null_credential_logs_no_warning(self):
+        """ai.credential explicitly set to null is the legitimate 'no team
+        credential configured' state (OAuth fallback) -- must not be
+        reported as corruption."""
+        data = self._read_team_paths()
+        data["teams"][TEST_TEAM]["ai"] = {"credential": None}
+        self._write_team_paths(data)
+        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+            LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
+
+        with patch("builtins.print") as mock_print:
+            self._get()
+        warnings = [c.args[0] for c in mock_print.call_args_list if c.args and "WARNING" in c.args[0]]
+        self.assertEqual(warnings, [])
 
 
 if __name__ == "__main__":
