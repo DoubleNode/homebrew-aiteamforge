@@ -247,6 +247,24 @@ install_helper_scripts() {
         fi
     done
 
+    # XACA-1160: GitHub App PR-gate bots. The tap has shipped the gh-bot-review
+    # / gh-bot-test ALIASES for a long time while shipping NEITHER script, so
+    # every consumer box had two aliases resolving to "No such file or
+    # directory" and an unusable three-gate merge flow (observed on M1Pro).
+    # EXECUTABLE, not datafiles: both are invoked directly by the aliases in
+    # cc-aliases.sh, which now point at $AITEAMFORGE_DIR/scripts/. Their own
+    # scoped loop rather than an entry appended to a loop above, per XACA-0885 —
+    # each loop's comment documents one scope, and diluting it loses the reason.
+    # SECRETS: only the SCRIPT moves here. Both resolve the App private key at
+    # RUNTIME from ~/.config/gh-{review,tester}-bot/ and that location is
+    # unchanged; no key material is copied, and none lives in the tap.
+    for helper in gh-bot-review.sh gh-bot-test.sh; do
+        if [ -f "$scripts_src/$helper" ]; then
+            cp "$scripts_src/$helper" "$scripts_dest/$helper"
+            chmod +x "$scripts_dest/$helper"
+        fi
+    done
+
     for datafile in msg-client.js vault-keygen.js package.json package-lock.json; do
         if [ -f "$scripts_src/$datafile" ]; then
             cp "$scripts_src/$datafile" "$scripts_dest/$datafile"

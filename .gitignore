@@ -38,3 +38,36 @@ venv/
 # `--commit` run's `git add -A` would otherwise sweep this local runtime blob
 # into a tap commit (found during XACA-0395 tap-sync assessment).
 fleet-monitor/server/data/pushed-knowledge.json
+
+# ─────────────────────────────────────────────────────────────────
+# Key material — NEVER commit (XACA-1160)
+# ─────────────────────────────────────────────────────────────────
+# This is a PUBLIC repository, and as of XACA-1160 it ships key-READING
+# scripts (share/scripts/gh-bot-review.sh, share/scripts/gh-bot-test.sh).
+# Those resolve a GitHub App private key at RUNTIME from
+# ~/.config/gh-{review,tester}-bot/ — outside any repo — so nothing secret
+# is in the shipped files themselves. But until this block existed there
+# was NO pattern here that would catch a private key accidentally dropped
+# into a working copy and staged, while the canonical dev-team .gitignore
+# has carried exactly these since XACA-0338. An absent guard and a passing
+# one are indistinguishable right up until the day they are not.
+# Mirrors the canonical dev-team .gitignore key-material patterns.
+# Verified when added: ZERO currently-tracked tap files match any pattern
+# below, so this adds a guard without masking anything already shipped.
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+*.keystore
+*.ppk
+*-key.json
+# SSH private keys (public *.pub keys are deliberately unaffected)
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*_rsa
+*_dsa
+*_ecdsa
+*_ed25519

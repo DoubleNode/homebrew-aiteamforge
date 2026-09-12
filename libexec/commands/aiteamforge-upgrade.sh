@@ -2781,6 +2781,24 @@ PYEOF
 # explicit glob-sweep entry below: the sweep's *.sh / *.py globs cannot match a
 # bare name, and a mandatory-materialize basename that never reaches the sweep
 # loop is never evaluated in the first place (see the XACA-0395 note above).
+# XACA-1160: gh-bot-review.sh / gh-bot-test.sh are BRAND-NEW tap-shipped files
+# (this release), and the SAME gap class as kb-host-ready.sh above. The tap has
+# shipped the gh-bot-review / gh-bot-test ALIASES for a long time while shipping
+# NEITHER script — measured on darren-m1pro-mbp, which has both aliases and
+# neither file, so both PR gates are unusable there. install-shell.sh's
+# install_helper_scripts() now copies them, but that function is only ever
+# reached from aiteamforge-setup.sh, never from this upgrade command (the same
+# verification the XACA-0395 note above records), so a fresh install is covered
+# and an ALREADY-INSTALLED box is not. Without this entry update_runtime_helpers'
+# default "only refresh what's already there" rule applies to a target that has
+# never existed on any consumer box, and the aliases repointed at
+# $AITEAMFORGE_DIR/scripts/ in cc-aliases.sh would resolve to a file the upgrade
+# declined to create — trading one broken path for another.
+# Both carry the .sh extension, so — like kb-host-ready.sh and
+# iterm2_tab_title_prefix.py, and UNLIKE kb-init-team / kb-api-key /
+# kb-msg-provision / kb-spacedock — the *.sh glob sweep below already reaches
+# them once present; being in THIS list is sufficient and no extra explicit
+# glob-sweep entry is needed.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -2796,6 +2814,8 @@ kb-ttyd-bridge.sh
 kb-host-ready.sh
 kb-msg-provision
 kb-spacedock
+gh-bot-review.sh
+gh-bot-test.sh
 EOF
 }
 

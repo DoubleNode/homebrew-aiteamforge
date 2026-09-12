@@ -554,8 +554,12 @@ cc-finance-workshop() {
 # ─────────────────────────────────────────────────────────────────────────────
 # GitHub Bot Tools
 # ─────────────────────────────────────────────────────────────────────────────
-alias gh-bot-review='bash ~/.config/gh-review-bot/gh-bot-review.sh'
-alias gh-bot-test='bash ~/.config/gh-tester-bot/gh-bot-test.sh'
+# XACA-1160: the scripts are tap-owned and installed to $AITEAMFORGE_DIR/scripts/
+# by install-shell.sh::install_helper_scripts(). Only the SCRIPT location moved —
+# each still resolves its App private key at RUNTIME from
+# ~/.config/gh-{review,tester}-bot/, which is unchanged and never ships here.
+alias gh-bot-review='bash "$AITEAMFORGE_DIR/scripts/gh-bot-review.sh"'
+alias gh-bot-test='bash "$AITEAMFORGE_DIR/scripts/gh-bot-test.sh"'
 
 echo "✓ CC aliases loaded (use 'cc-help' for list)"
 

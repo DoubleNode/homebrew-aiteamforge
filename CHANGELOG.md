@@ -20,6 +20,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   returns 1, while a genuine zero still reports ready and an item with subitems is
   unaffected (8/8 under zsh, the target shell).
 
+- **XACA-1160** — ships `gh-bot-review.sh` and `gh-bot-test.sh`, the two PR-gate bot
+  scripts. The tap has shipped the *aliases* for both since `cc-aliases.sh` while shipping
+  NEITHER script, so every consumer box had two aliases resolving to "No such file or
+  directory" and the three-gate merge flow was unusable there (observed on
+  darren-m1pro-mbp: aliases present at installed lines 529-530, both targets absent).
+  Adds both to `install_helper_scripts()` as a scoped executable loop (`chmod +x`, never
+  the 644 datafile loop), repoints both aliases at the tap-owned path, and adds them to
+  `aiteamforge-upgrade.sh`'s materialize list — install-time-only provisioning never
+  reaches an already-installed consumer, which is the actual reason M1Pro had the aliases
+  and neither script.
+  SECRETS: the GitHub App private keys stay at `~/.config/gh-{review,tester}-bot/` and are
+  resolved at RUNTIME; nothing secret is in these files. The mapping is deliberately two
+  explicit `sync_file` pairings and **never** a `sync_dir` over those config directories,
+  which would mirror the private keys into this PUBLIC tap. Key resolution honours
+  `GH_BOT_*_KEY`, then `config.json`'s `privateKeyPath`, then candidate filenames — the
+  key filename differs per machine, so a single hardcoded default fails on some boxes.
+  Also hardens this repo's `.gitignore`, which carried NO key-material exclusions while
+  the canonical repo has had them for months — the guard that would catch an accidentally
+  committed key was simply absent on a public repo.
 - **XACA-1080** — mirrors the knowledge-validator performance work from dev-team.
   `kb-knowledge-validate`'s INDEX.md orphan-scan replaced its per-LINE fork loop
   (`echo|grep -qE` per line, then `echo|grep -oE|tr|head` per match — ~35,000-49,000 forks
