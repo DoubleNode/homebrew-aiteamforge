@@ -120,7 +120,8 @@
       "theme": "Starfleet Space Dock",
       "icon": "\ud83d\udee0\ufe0f",
       "order": 11,
-      "recommended": false
+      "recommended": false,
+      "mandatory": true
     }
   ],
   "categories": {

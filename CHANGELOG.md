@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1070** — declare `spacedock` mandatory in `share/teams/registry.json`. This is the one
+  field that activates the mandatory-team machinery this ticket already shipped:
+  `atf_mandatory_teams()` selects on `.mandatory == true`, **no team in the registry carried that
+  flag**, so it returned EMPTY and all three consumers were inert — install-side enforcement
+  (`bin/aiteamforge-setup.sh::_atf_apply_mandatory_teams`), the upgrade-side backfill onto existing
+  machines (`libexec/commands/aiteamforge-upgrade.sh::update_mandatory_teams`), and
+  `aiteamforge-doctor.sh::check_mandatory_teams`. Measured before this change: v0.20.9 delivered
+  every Space Dock file to all three fleet consumers (37 / 36 / 36) and provisioned the team on
+  **none** — absent from `team-paths.json`, no working dir, no board, zero launchers,
+  `kb-spacedock` not on PATH. The backfill had an empty set to iterate. Space Dock is the
+  per-machine emergency and recovery team, so files without a provisioned team provide no recovery.
+  Verified: `atf_mandatory_teams()` returns `spacedock` against the edited registry where it
+  previously returned nothing. One field, no logic change.
 - **XACA-1184** — retires the legacy `anthropic_account_id` /
   `anthropic_account_nickname` / `anthropic_api_key_env_var` trio in favour of a single
   `ai` block whose routed account lives at `ai.credential`. Mirrors the canonical reader
