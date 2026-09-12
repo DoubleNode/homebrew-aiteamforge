@@ -1700,7 +1700,9 @@ PYEOF
 # registry silently report as "nothing to check, all good" — exactly the
 # failure shape XACA-1070 exists to prevent (a check that passes because it
 # could not read its own input). Exit-0-empty is the CORRECT, EXPECTED state
-# today: no team carries the flag yet (spacedock/XACA-1068/1069 hasn't
+# whenever no registry entry carries the flag (reachable on a consumer pinned
+# before XACA-1070's activation declared `spacedock`, or a downstream-edited
+# registry; formerly also true of every box, when nothing was yet declared
 # shipped), so this check must PASS cleanly on that, never warn/skip.
 # ─────────────────────────────────────────────────────────────────────────────
 check_mandatory_teams() {
@@ -1754,9 +1756,11 @@ check_mandatory_teams() {
   fi
 
   if [ -z "$_mand_teams" ]; then
-    # Expected steady state today (XACA-1070-001): zero teams are flagged
-    # mandatory until spacedock ships. Clean pass — not a warning, not a skip.
-    check_result pass "No mandatory teams declared (none yet — expected until spacedock/XACA-1068 ships)"
+    # A registry with no mandatory-flagged entry is a legitimate state, not a
+    # fault: clean pass, not a warning, not a skip. Reachable on a consumer
+    # pinned before XACA-1070 declared `spacedock`, or a downstream-edited
+    # registry. Do NOT name a specific team in the message — membership is data.
+    check_result pass "No mandatory teams declared in this registry"
     return
   fi
 

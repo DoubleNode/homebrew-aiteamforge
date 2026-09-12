@@ -1022,9 +1022,11 @@ check_permissions() {
 # Treating both the same would make an unreadable registry silently report
 # as "nothing to check" — exactly the failure shape XACA-1070 exists to
 # prevent (a check that passes because it could not read its own input).
-# Exit-0-empty is the CORRECT, EXPECTED state today: no team carries the
-# flag yet (spacedock/XACA-1068/1069 hasn't shipped), so this must PASS
-# cleanly on that, never warn/skip.
+# Exit-0-empty is a CORRECT, EXPECTED state whenever no registry entry
+# carries the flag, so this must PASS cleanly on it, never warn/skip. That
+# state is reachable on any consumer pinned to a formula tag cut before
+# XACA-1070's activation commit declared `spacedock`, on a downstream-edited
+# registry, or if a future release retires the last mandatory team.
 #
 # XACA-0807: this check is duplicated (by necessity, not oversight) in
 # libexec/commands/aiteamforge-doctor.sh — `aiteamforge doctor` and the
@@ -1077,9 +1079,11 @@ check_mandatory_teams() {
   fi
 
   if [ -z "$_mand_teams" ]; then
-    # Expected steady state today (XACA-1070-001): zero teams are flagged
-    # mandatory until spacedock ships. Clean pass — not a warning, not a skip.
-    check_result pass "No mandatory teams declared (none yet — expected until spacedock/XACA-1068 ships)"
+    # A registry with no mandatory-flagged entry is a legitimate state, not a
+    # fault: clean pass, not a warning, not a skip. Reachable on a consumer
+    # pinned before XACA-1070 declared `spacedock`, or a downstream-edited
+    # registry. Do NOT name a specific team in the message — membership is data.
+    check_result pass "No mandatory teams declared in this registry"
     echo ""
     return
   fi

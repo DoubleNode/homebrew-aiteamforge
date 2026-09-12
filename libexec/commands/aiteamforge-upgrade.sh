@@ -1926,8 +1926,9 @@ update_mandatory_teams() {
   fi
 
   if [ -z "$mandatory_teams" ]; then
-    # Expected steady state today (XACA-1070-001): zero teams carry the flag
-    # until spacedock (XACA-1068/1069) ships. Clean no-op, not a warning.
+    # A registry with no mandatory-flagged entry is a legitimate state, not a
+    # fault: clean no-op, not a warning. Reachable on a consumer pinned to a
+    # formula tag cut before XACA-1070's activation declared `spacedock`.
     print_success "No mandatory teams declared — nothing to backfill"
     return 0
   fi

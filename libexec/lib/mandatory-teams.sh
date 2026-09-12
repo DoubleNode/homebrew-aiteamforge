@@ -349,8 +349,8 @@ atf_mandatory_teams() {
         # -e's exit code is NOT a simple 0/1: 0 = last output truthy, 1 = last
         # output was false/null, and — MEASURED here, not assumed — 4 = the
         # filter produced NO output at all (an empty result set), which is
-        # exactly what happens when zero teams are mandatory (today's real
-        # state) OR every mandatory-flagged entry lacked a usable id (the
+        # exactly what happens when zero teams are mandatory OR every
+        # mandatory-flagged entry lacked a usable id (the
         # fixed filter above now excludes all of them, correctly, rather
         # than letting one poison the rest). rc 2 (jq usage/compile error)
         # and 5 (bad --arg type etc.) are real errors and must NOT be

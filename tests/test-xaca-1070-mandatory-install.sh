@@ -6,17 +6,22 @@
 #
 # THE CONTRACT UNDER TEST (this is the whole point of the ticket):
 # atf_mandatory_teams() must return exit 0 + empty stdout when zero teams
-# are flagged (today's real state — no team carries "mandatory": true
-# anywhere in share/teams/registry.json yet; spacedock/XACA-1068/1069 has
-# not shipped), and exit 1 + a stderr diagnostic when registry.json is
+# are flagged — a state reachable on any consumer whose registry carries no
+# `"mandatory": true` entry, e.g. one pinned to a formula tag cut before
+# XACA-1070's activation commit declared `spacedock` — and exit 1 + a
+# stderr diagnostic when registry.json is
 # missing/unparseable. Conflating those two into "empty means fine" is the
 # defect this ticket exists to prevent, and every fixture below that
 # exercises the resolver keeps the two cases side by side rather than
 # testing them in isolation.
 #
-# WHY FIXTURES, NOT THE REAL REGISTRY: zero teams carry "mandatory": true
-# in share/teams/registry.json today (spacedock hasn't landed). A suite
-# that only ever drove this feature against the real registry would never
+# WHY FIXTURES, NOT THE REAL REGISTRY: the real registry declares exactly
+# one mandatory team (`spacedock`, as of XACA-1070's activation), so a suite
+# driven only against it would never exercise the ZERO-mandatory branch of
+# the five call sites — nor multi-team ordering, nor the malformed-entry
+# paths. Fixtures cover every branch regardless of what the shipped registry
+# happens to declare, which is also what keeps this suite from going stale
+# the next time that declaration changes. It would otherwise never
 # exercise the "a team IS mandatory" branch of ANY of the five call sites
 # under test — it would prove only the already-trivial empty-set path.
 # Every fixture below is therefore a synthetic registry.json (or a
@@ -1734,7 +1739,7 @@ $_lcars_snippet
     fi
     _block_end
 
-    _block_start "K3: cockpit + ZERO mandatory teams selected (today's real state until spacedock ships) -> complete no-op, no lcars-ui/ created at all"
+    _block_start "K3: cockpit + ZERO mandatory teams selected (registry declaring none) -> complete no-op, no lcars-ui/ created at all"
     _k3_dir="$SANDBOX/k3-install-dir"; mkdir -p "$_k3_dir"
     _run_lcars_carveout cockpit "$_k3_dir"
     assert_file_not_exists "$_k3_dir/lcars-ui/server.py" "a cockpit box with no mandatory team must gain NOTHING from this block"
@@ -1799,7 +1804,7 @@ if [ -n "$_display_fn" ]; then
     assert_eq "$( (SELECTED_TEAMS=("" "widget" ""); _cockpit_mandatory_teams_str) )" "widget" "expected empty array slots to be filtered out"
     _block_end
 
-    _block_start "L3: zero mandatory teams (today's real state) -> empty string, never a placeholder"
+    _block_start "L3: zero mandatory teams (registry declaring none) -> empty string, never a placeholder"
     assert_eq "$( (SELECTED_TEAMS=(); _cockpit_mandatory_teams_str) )" "" "expected an empty string when SELECTED_TEAMS is genuinely empty"
     _block_end
 

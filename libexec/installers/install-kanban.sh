@@ -2794,8 +2794,8 @@ install_kanban_system() {
     # added to the registry after a machine's first install would otherwise
     # never provision on that machine at all. Team-agnostic by design — no
     # team id is hard-coded here (see mandatory-teams.sh's header comment);
-    # today's expected state is zero mandatory teams, so this is a
-    # correctly-behaving no-op until XACA-1068/1069 land.
+    # a registry with no mandatory-flagged entry is a legitimate state, so
+    # this is a correctly-behaving no-op whenever that is the case.
     #
     # Bash 3.2 has no `declare -n`/nameref, so this is inlined against the
     # local `teams` array rather than factored into a pass-by-reference

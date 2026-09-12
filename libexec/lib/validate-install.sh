@@ -661,9 +661,8 @@ validate_installation() {
         # mandatory team's board at all. Route to the SAME real check
         # functions the non-cockpit branch below already uses whenever there
         # is actually something on disk to check; only fall back to the
-        # blind pass when there genuinely is nothing (today's real state
-        # until a mandatory team ships, and any cockpit box with none
-        # declared). `_val_check_teams` reads .teams[] itself, which on
+        # blind pass when there genuinely is nothing (any cockpit box with no
+        # mandatory team declared in its registry). `_val_check_teams` reads .teams[] itself, which on
         # cockpit can only ever contain mandatory ids by construction — no
         # separate mandatory-team lookup is needed here to decide whether to
         # route; the presence of ANY team in .teams[] already answers it.
