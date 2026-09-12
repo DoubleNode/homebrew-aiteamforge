@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- XACA-0787 round-7 (PR #859 round-6 review): VACUITY FLOOR on
+  `tests/test-xaca-0787-033-vector7-attribution.sh`. It tracked its own
+  PASS/FAIL counters and exited 0 whenever FAIL was 0 — so a run in which NO
+  check executed at all (PASS=0, FAIL=0) fell straight into the success branch.
+  Green on zero verification, inside the very suite added to prove the leak
+  guard works. Now asserts PASS+FAIL equals an expected count rather than merely
+  flooring at one, so a silently DROPPED case is caught too and not just the
+  all-dropped case. Proven to fire: with the count perturbed the suite refuses
+  to report a result and the outer runner marks it Failed.
+  Also corrected the round-6 note's "95 entries" to the counted 96, with the
+  command that produces it — same discipline round 4 applied after "19 of 86"
+  turned out to be 22 of 91. Counts move; assertions about them go stale.
+  (Entries for rounds 1-6 are in the 0.20.9 section below, moved there by the
+  release cut while this PR was still in review.)
 
 ## [0.20.9] - 2026-09-11
 - **XACA-1178** — mirrors the Claude Max / `auth_type` account-routing work from dev-team:
