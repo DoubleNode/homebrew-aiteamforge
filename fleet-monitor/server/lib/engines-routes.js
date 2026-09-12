@@ -46,9 +46,20 @@ const ENV_VAR_NAME_RE    = /^[A-Z][A-Z0-9_]*$/;
 const MAX_FIELD_LEN      = 200;
 const MAX_SLUG_LEN       = 64;
 
+/**
+ * Valid values for the optional `auth_type` account field (XACA-1178-004).
+ * Describes how the token behind `env_var_name` authenticates — set per
+ * account, never per team (XACA-0282-012 §2.1: an account's token type is
+ * fixed when it is minted, not by who uses it).
+ * `none` is reserved for XACA-0283 (keyless endpoints) and is deliberately
+ * not accepted here — it only makes sense once `env_var_name` becomes
+ * optional, which is out of scope for this ticket.
+ */
+const VALID_AUTH_TYPES = ['oauth_token', 'api_key', 'gateway_token'];
+
 function validateAccountBody(body) {
     const errors = [];
-    const { slug, account_id, nickname, env_var_name } = body;
+    const { slug, account_id, nickname, env_var_name, auth_type } = body;
 
     if (!slug || typeof slug !== 'string') {
         errors.push('slug is required');
@@ -76,6 +87,15 @@ function validateAccountBody(body) {
         errors.push('env_var_name must match ^[A-Z][A-Z0-9_]*$');
     } else if (env_var_name.length > MAX_FIELD_LEN) {
         errors.push(`env_var_name max length is ${MAX_FIELD_LEN}`);
+    }
+
+    // auth_type is optional: absent or null is valid (POST omits the key;
+    // PUT treats null as "remove the key" — see the PUT handler below).
+    // Anything else provided must be one of the three enum values.
+    if (auth_type !== undefined && auth_type !== null) {
+        if (typeof auth_type !== 'string' || !VALID_AUTH_TYPES.includes(auth_type)) {
+            errors.push(`auth_type must be one of: ${VALID_AUTH_TYPES.join(', ')}`);
+        }
     }
 
     return errors;
@@ -167,7 +187,10 @@ function registerEnginesRoutes(app) {
     /**
      * POST /api/engines/:engineSlug/accounts
      * Add a new account to an engine.
-     * Body: { slug, account_id, nickname, env_var_name }
+     * Body: { slug, account_id, nickname, env_var_name, auth_type? }
+     * `auth_type` (XACA-1178-004) is optional: oauth_token | api_key | gateway_token.
+     * When provided it is validated and stored verbatim; when absent the key is
+     * omitted from the stored account entirely (never stored as null).
      * Returns 201 + new account on success.
      * Returns 404 if engineSlug unknown, 409 on slug collision, 400 on validation failure.
      */
@@ -185,7 +208,7 @@ function registerEnginesRoutes(app) {
                 return res.status(400).json({ error: 'Validation failed', details: errors });
             }
 
-            const { slug, account_id, nickname, env_var_name } = req.body;
+            const { slug, account_id, nickname, env_var_name, auth_type } = req.body;
             const engine = registry.engines[engineIdx];
 
             // 409 on slug collision
@@ -199,6 +222,9 @@ function registerEnginesRoutes(app) {
                 account_id: account_id.trim(),
                 nickname: nickname.trim(),
                 env_var_name,
+                // Include auth_type only when provided (never store null) —
+                // XACA-1178-004 / XACA-0282-012 §2.2.
+                ...(auth_type !== undefined && auth_type !== null ? { auth_type } : {}),
                 created_at: now,
                 updated_at: now,
                 last_validated_at: null
@@ -222,7 +248,9 @@ function registerEnginesRoutes(app) {
 
     /**
      * PUT /api/engines/:engineSlug/accounts/:accountSlug
-     * Update an existing account (account_id, nickname, env_var_name are mutable; slug is immutable).
+     * Update an existing account (account_id, nickname, env_var_name, auth_type are mutable; slug is immutable).
+     * `auth_type` (XACA-1178-004): absent in the body keeps the existing value, `null` removes the
+     * key entirely, and anything else is validated against the enum.
      * Returns the updated account; 404 if engine or account missing; 400 on validation failure.
      */
     app.put('/api/engines/:engineSlug/accounts/:accountSlug', requireApiKey, (req, res) => {
@@ -240,13 +268,17 @@ function registerEnginesRoutes(app) {
                 return res.status(404).json({ error: `Account '${accountSlug}' not found in engine '${engineSlug}'` });
             }
 
-            // Validate only the fields provided — build a merged candidate for validation
+            // Validate only the fields provided — build a merged candidate for validation.
+            // auth_type has three-way semantics (absent/null/value), not the plain
+            // "provided overrides existing" merge the other fields use — see the PUT
+            // doc comment above and XACA-0282-012 §2.2.
             const existing = engine.accounts[accountIdx];
             const candidate = {
                 slug: accountSlug, // slug is immutable
                 account_id:   req.body.account_id  !== undefined ? req.body.account_id  : existing.account_id,
                 nickname:     req.body.nickname     !== undefined ? req.body.nickname     : existing.nickname,
-                env_var_name: req.body.env_var_name !== undefined ? req.body.env_var_name : existing.env_var_name
+                env_var_name: req.body.env_var_name !== undefined ? req.body.env_var_name : existing.env_var_name,
+                auth_type:    req.body.auth_type    !== undefined ? req.body.auth_type    : existing.auth_type
             };
 
             const errors = validateAccountBody(candidate);
@@ -255,13 +287,23 @@ function registerEnginesRoutes(app) {
             }
 
             const now = new Date().toISOString();
-            engine.accounts[accountIdx] = {
+            const updatedAccount = {
                 ...existing,
                 account_id:   candidate.account_id.trim(),
                 nickname:     candidate.nickname.trim(),
                 env_var_name: candidate.env_var_name,
                 updated_at:   now
             };
+
+            if (req.body.auth_type === null) {
+                delete updatedAccount.auth_type;
+            } else if (req.body.auth_type !== undefined) {
+                updatedAccount.auth_type = req.body.auth_type;
+            }
+            // else: absent from the body — existing.auth_type (or its absence) is
+            // already carried forward via the `...existing` spread above.
+
+            engine.accounts[accountIdx] = updatedAccount;
             engine.updated_at = now;
             registry.updated_at = now;
 

@@ -6,6 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1178** — mirrors the Claude Max / `auth_type` account-routing work from dev-team:
+  Fleet Monitor engine accounts accept an optional `auth_type` (`oauth_token` | `api_key` |
+  `gateway_token`) with a matching selector in both the `lcars/` and `lcars2/` Engines UI
+  (XACA-1178-004/005); `lcars-ui/server.py` gains `teams.<team>.ai.credential` (replacing the
+  originally planned flat `anthropic_auth_type` field, per XACA-0282-012) plus its
+  `_set_team_ai_credential()` helper and legacy-trio projection (XACA-1178-007); LCARS TEST
+  CONNECTION resolves the auth scheme from the token prefix instead of always sending
+  `x-api-key` (XACA-1178-008); and the Fleet Monitor URL is resolved at call time
+  (env → `~/.aiteamforge/fleet-config.json` → `~/.dev-team/fleet-config.json`) with no
+  `localhost:8080` fallback (XACA-1178-006). `docs/account-isolation-runbook.md` and
+  `home-scripts/.zshrc.secrets.template` (XACA-1178-009, not tap-mirrored) are the source of
+  the human-facing explanation. See `CHANGELOG.md` (dev-team) for the full per-subitem detail.
 - **XACA-1070 (PR #865 review, round 3)** — one blocking defect and five findings
   from both gate bots.
   **BLOCKING: two rails disagreed about where a mandatory team lives.** Root cause

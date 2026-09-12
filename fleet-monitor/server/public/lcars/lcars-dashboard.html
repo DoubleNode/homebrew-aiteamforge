@@ -667,12 +667,29 @@
                                 <div class="form-group">
                                     <label class="form-label" for="engines-add-env-var">Env Var Name *</label>
                                     <input class="form-input" type="text" id="engines-add-env-var"
-                                        placeholder="e.g. ANTHROPIC_API_KEY_DARREN"
+                                        placeholder="e.g. ANTHROPIC_API_KEY_DARREN or CLAUDE_ACCT_ME_TOKEN"
                                         autocomplete="off" spellcheck="false" style="font-family: monospace;">
                                     <div class="form-error" id="engines-add-env-var-err" style="display:none;"></div>
                                     <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
                                         Failover env var: must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code>
-                                        on machines without the vault secret.
+                                        on machines without the vault secret. Not necessarily a Console key — a Claude Max
+                                        OAuth token works the same way.
+                                    </div>
+                                </div>
+
+                                <!-- Auth type (XACA-1178-005): optional, describes how env_var_name authenticates -->
+                                <div class="form-group">
+                                    <label class="form-label" for="engines-add-auth-type">Auth Type</label>
+                                    <select class="form-input" id="engines-add-auth-type">
+                                        <option value="">(not set — infer from token)</option>
+                                        <option value="oauth_token">OAuth Token (Claude Max / setup-token)</option>
+                                        <option value="api_key">API Key (Anthropic Console)</option>
+                                        <option value="gateway_token">Gateway Token (proxy / LiteLLM)</option>
+                                    </select>
+                                    <div class="form-error" id="engines-add-auth-type-err" style="display:none;"></div>
+                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
+                                        How the token behind Env Var Name authenticates. Leave unset to infer from the
+                                        token prefix (sk-ant-oat... = OAuth, sk-ant-api... = API Key).
                                     </div>
                                 </div>
 
@@ -736,7 +753,24 @@
                                     <div class="form-error" id="engines-edit-env-var-err" style="display:none;"></div>
                                     <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
                                         Failover env var: must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code>
-                                        on machines without the vault secret.
+                                        on machines without the vault secret. Not necessarily a Console key — a Claude Max
+                                        OAuth token works the same way.
+                                    </div>
+                                </div>
+
+                                <!-- Auth type (XACA-1178-005): optional, describes how env_var_name authenticates -->
+                                <div class="form-group">
+                                    <label class="form-label" for="engines-edit-auth-type">Auth Type</label>
+                                    <select class="form-input" id="engines-edit-auth-type">
+                                        <option value="">(not set — infer from token)</option>
+                                        <option value="oauth_token">OAuth Token (Claude Max / setup-token)</option>
+                                        <option value="api_key">API Key (Anthropic Console)</option>
+                                        <option value="gateway_token">Gateway Token (proxy / LiteLLM)</option>
+                                    </select>
+                                    <div class="form-error" id="engines-edit-auth-type-err" style="display:none;"></div>
+                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
+                                        How the token behind Env Var Name authenticates. Selecting "(not set)" clears a
+                                        previously stored type; the launcher then infers it from the token prefix.
                                     </div>
                                 </div>
 

@@ -38,7 +38,7 @@
     <link rel="stylesheet" href="css/lcars-fleet.css">
     <link rel="stylesheet" href="css/lcars-fleet-theme.css">
     <!-- KanBan-specific overrides (Division/Org color coordination) -->
-    <link rel="stylesheet" href="css/lcars.css?v=32.34">
+    <link rel="stylesheet" href="css/lcars.css?v=32.35">
     <!-- Activity Timeline Panel -->
     <link rel="stylesheet" href="css/lcars-activity.css">
     <!-- Claude Usage Indicator widget (XACA-0243-004/005) -->
@@ -2528,6 +2528,20 @@
                     <small class="form-hint">Uppercase env var name sourced from ~/.zshrc.secrets. Pattern: <code>TEAM_&lt;TEAM&gt;_API_KEY</code>. Must match <code>^[A-Z][A-Z0-9_]*$</code>.</small>
                 </div>
 
+                <!-- XACA-1178-007: ai.credential.auth_type (XACA-0282-012 §1.2). Optional:
+                     left on "(not set...)", the server infers the scheme from the token's
+                     own prefix (sk-ant-oat... vs sk-ant-api...). -->
+                <div class="form-group">
+                    <label for="team-account-edit-auth-type">Auth Type</label>
+                    <select id="team-account-edit-auth-type">
+                        <option value="">(not set — infer from token)</option>
+                        <option value="oauth_token">OAuth Token (Claude Max)</option>
+                        <option value="api_key">API Key (Console)</option>
+                        <option value="gateway_token">Gateway Token (proxy)</option>
+                    </select>
+                    <small class="form-hint">How the env var's value authenticates. Leave unset unless TEST CONNECTION needs it disambiguated — the token's own prefix usually tells LCARS which scheme to probe with.</small>
+                </div>
+
                 <div id="team-account-test-status" role="status" aria-live="polite"></div>
             </div>
             <div class="lcars-modal-footer">
@@ -2567,8 +2581,10 @@
                 <!-- Dynamic content injected by openRunningSessionsModal() -->
                 <p id="team-account-sessions-summary" class="team-account-sessions-summary"></p>
                 <p class="team-config-hint">
-                    Claude only reads <code>ANTHROPIC_AUTH_TOKEN</code> at startup. These sessions
-                    will continue using the old account until they exit and restart.
+                    Claude reads its auth credential once at startup — whichever of
+                    <code>ANTHROPIC_AUTH_TOKEN</code>, <code>ANTHROPIC_API_KEY</code>, or
+                    <code>CLAUDE_CODE_OAUTH_TOKEN</code> was set for that session (XACA-1178-001).
+                    These sessions will continue using the old account until they exit and restart.
                 </p>
                 <div id="team-account-sessions-list" class="team-account-sessions-list">
                     <!-- One .team-account-session-item per session, rendered by JS -->
@@ -2663,10 +2679,12 @@
 
     <!--
         XACA-0281-022: Fleet Monitor URL for picker "ADD NEW" affordance.
-        NOTE: serve_file() does not template HTML, so the meta tag below was
-        never substituted. Removed — lcars-team-account.js uses the :8080
-        heuristic as the canonical path (see getFleetMonitorUrl()).
-        TODO XACA-0281 follow-up: dynamic Fleet Monitor URL discovery.
+        NOTE: serve_file() does not template HTML, so a meta tag here would
+        never be substituted. XACA-1178-006 replaced the old same-host :8080
+        heuristic (getFleetMonitorUrl(), removed) with a server-side resolver
+        (_resolve_fleet_monitor_url() in server.py) whose result rides along
+        in the /api/engines/list response as _fleet_monitor_url — read by
+        onAccountPickerChange() in lcars-team-account.js.
     -->
 
     <!-- LCARS Sound Manager — must load before lcars.js -->
@@ -2707,7 +2725,7 @@
 <script src="js/daily-overview.js?v=1.1"></script>
 <!-- XACA-0281-022: Per-team account picker dropdown — must load after lcars.js (needs apiUrl, showToast, CONFIG) -->
 <!-- XACA-0395: cache-buster ADDED (previously unversioned) — same reason as daily-overview.js. -->
-<script src="js/lcars-team-account.js?v=1.1"></script>
+<script src="js/lcars-team-account.js?v=1.4"></script>
 <!-- XACA-0630: Estimation Accuracy carousel panel — must load after lcars.js (depends on currentHomePanel, escapeHtml) -->
 <script src="js/lcars-estimates.js?v=1.0"></script>
 

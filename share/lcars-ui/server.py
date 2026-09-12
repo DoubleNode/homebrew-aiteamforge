@@ -1438,7 +1438,74 @@ def _secrets_job_compare_and_set_status(jobs_dict, job_id, expected_statuses, fi
 
 
 # XACA-0281 Phase A.3: Fleet Monitor sidecar URL (proxy + cache for engines registry)
-FLEET_MONITOR_URL = os.environ.get('FLEET_MONITOR_URL', 'http://localhost:8080')
+#
+# XACA-1178-006: resolved at CALL TIME via _resolve_fleet_monitor_url(), not as a
+# module-level constant — editing the config must not require an LCARS restart
+# (D6). This mirrors _kb_msg_relay_url() in kanban-helpers.sh (XACA-0885), which
+# solved this exact resolution problem for kb-msg: same order, same string-type
+# guard, same /api/* and bare /api suffix stripping. Do NOT diverge — a second
+# implementation of the same resolution is the sibling-heuristic drift pattern
+# this fleet has 24+ datapoints on (see MEMORY.md k501).
+#
+# Deliberately NO localhost fallback. Before this fix the module-level constant
+# below defaulted to 'http://localhost:8080' with nothing ever setting it or
+# listening there (measured E6/E7, 2026-09-11: 5 LCARS servers running, every
+# one reporting "Fleet Monitor unreachable: [Errno 61] Connection refused").
+# A localhost default turns "not configured" into "connection refused", which
+# reads as a network fault — that exact confusion is what XACA-0885 removed
+# from kb-msg. Do not reintroduce it here.
+def _resolve_fleet_monitor_url():
+    """Resolve the Fleet Monitor base URL. Returns the base URL string, or None
+    when nothing resolves (callers must report "not configured", never fall
+    back to a guessed host).
+
+    Order:
+      1. FLEET_MONITOR_URL from the environment
+      2. ~/.aiteamforge/fleet-config.json .centralServer.apiEndpoint
+      3. ~/.dev-team/fleet-config.json, same key
+    """
+    env_url = os.environ.get('FLEET_MONITOR_URL', '').strip()
+    if env_url:
+        return env_url.rstrip('/')
+
+    for cfg_path in (
+        Path.home() / '.aiteamforge' / 'fleet-config.json',
+        Path.home() / '.dev-team' / 'fleet-config.json',
+    ):
+        try:
+            if not cfg_path.is_file():
+                continue
+            with open(cfg_path, 'r') as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            continue
+
+        endpoint = None
+        if isinstance(cfg, dict):
+            central = cfg.get('centralServer')
+            if isinstance(central, dict):
+                endpoint = central.get('apiEndpoint')
+
+        # Require a STRING (mirrors _kb_msg_relay_url's eptype guard, PR #764
+        # finding): a number or object must not sail through as a URL.
+        if not isinstance(endpoint, str) or not endpoint:
+            continue
+
+        # Mirror fleet-reporter.sh's / _kb_msg_relay_url's derivation: strip a
+        # trailing /api/... path, then a bare trailing /api (no slash after it)
+        # explicitly — the bare form doesn't match the first pattern and would
+        # otherwise be returned with /api still attached.
+        base = endpoint
+        idx = base.rfind('/api/')
+        if idx != -1:
+            base = base[:idx]
+        elif base.endswith('/api'):
+            base = base[:-len('/api')]
+
+        if base:
+            return base
+
+    return None
 
 # ccusage collector cache (XACA-0243-001 daemon writes this file atomically).
 # Paths resolved from ccusage_paths (XACA-0385: moved from world-writable /tmp).
@@ -14367,6 +14434,56 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # Env-var name regex: must start with uppercase letter, only uppercase + digits + underscore
     _ENV_VAR_NAME_RE = re.compile(r'^[A-Z][A-Z0-9_]*$')
 
+    # Valid values for ai.credential.auth_type (XACA-0282-012 §1.2 / §2.2).
+    # "none" is reserved for XACA-0283 (keyless endpoints) and is deliberately
+    # NOT accepted here -- it only makes sense once env_var_name becomes
+    # optional, which is that ticket's job, not this one's.
+    _AUTH_TYPE_VALUES = ('oauth_token', 'api_key', 'gateway_token')
+
+    def _set_team_ai_credential(self, team_block: dict, credential: dict | None) -> None:
+        """Replace ``team_block['ai']['credential']`` as a whole unit, and derive
+        the legacy ``anthropic_*`` projection from it.
+
+        ``credential`` is either ``None`` -- declares "no team credential"
+        (``ai.credential`` becomes JSON ``null``; the CLI falls back to its own
+        login, same as today's OAuth-fallback behavior) -- or a dict that the
+        caller must build FRESH, as a whole object (invariant I2 in
+        `docs/xaca-0282/research/012-credential-config-shape.md` §1.3). Callers
+        must never patch individual keys of an existing credential: that
+        whole-object-replace discipline is what keeps a field from surviving
+        stale across an unrelated edit, which is exactly how
+        ``anthropic_account_ref`` went stale before this helper existed (that
+        doc's F5).
+
+        Writes the legacy trio (``anthropic_account_id``,
+        ``anthropic_account_nickname``, ``anthropic_api_key_env_var``) as a
+        DERIVED PROJECTION of ``credential`` so the ~13 existing legacy readers
+        (9 team banners, ``cc-whoami``, the avatar script, ``ccusage_collector``,
+        the vault migrator) keep working unmodified during the XACA-1178 compat
+        window -- see that doc's §3. Also deletes the stale
+        ``anthropic_account_ref`` key: ``engine_slug``/``account_slug`` inside
+        ``credential`` supersede it, and nothing may write it going forward.
+
+        Any other key already present under ``ai`` (the future ``cli``,
+        ``provider_config``) is left untouched.
+
+        Callers MUST hold team-paths.json's flock (LOCK_EX) around this call,
+        exactly as they do around ``_write_team_paths_registry``.
+
+        XACA-1178-007 / XACA-0282-012 §2.4.
+        """
+        ai_block = team_block.setdefault('ai', {})
+        ai_block['credential'] = credential
+
+        team_block['anthropic_account_id'] = (credential or {}).get('account_id') or ''
+        team_block['anthropic_account_nickname'] = (credential or {}).get('nickname') or ''
+        team_block['anthropic_api_key_env_var'] = (credential or {}).get('env_var_name') or ''
+
+        # XACA-0282-012 F5: assign wrote this and nothing ever read it, so a
+        # save that didn't also touch it left it naming the PREVIOUS account.
+        # engine_slug/account_slug inside ai.credential are the reference now.
+        team_block.pop('anthropic_account_ref', None)
+
     def _load_account_validation_cache(self):
         """Load the account validation timestamp cache from disk.
 
@@ -14423,11 +14540,19 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def serve_team_account_current(self, query_string: str):
         """GET /api/team-config/account/current?team=<id>
 
-        Returns {account_id, account_nickname, env_var_name, has_credentials, last_validated_at}.
+        Returns {account_id, account_nickname, env_var_name, has_credentials,
+        last_validated_at, auth_type, engine_slug, account_slug, config_source}.
         NEVER returns the actual key value — has_credentials is a bool derived from
         bool(os.environ.get(env_var_name)).
 
-        XACA-0281-003
+        Reads ai.credential when the team declares it (config_source: "ai"),
+        including when it is explicitly null (cleared -- every field reads as
+        empty, same as an unconfigured team). Falls back to the legacy
+        anthropic_* trio (config_source: "legacy") only when the team has no
+        'credential' key under 'ai' at all -- true for every team today, since
+        XACA-1178-007 is what starts writing it. XACA-0282-012 §1.2/§2.4.
+
+        XACA-0281-003 / XACA-1178-007
         """
         try:
             params = parse_qs(query_string) if query_string else {}
@@ -14443,9 +14568,25 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             team_block = data.get('teams', {}).get(team) or {}
-            account_id = team_block.get('anthropic_account_id') or ''
-            account_nickname = team_block.get('anthropic_account_nickname') or ''
-            env_var_name = team_block.get('anthropic_api_key_env_var') or ''
+            ai_block = team_block.get('ai')
+
+            if isinstance(ai_block, dict) and 'credential' in ai_block:
+                config_source = 'ai'
+                credential = ai_block.get('credential') or {}
+                account_id = credential.get('account_id') or ''
+                account_nickname = credential.get('nickname') or ''
+                env_var_name = credential.get('env_var_name') or ''
+                auth_type = credential.get('auth_type') or ''
+                engine_slug = credential.get('engine_slug') or ''
+                account_slug = credential.get('account_slug') or ''
+            else:
+                config_source = 'legacy'
+                account_id = team_block.get('anthropic_account_id') or ''
+                account_nickname = team_block.get('anthropic_account_nickname') or ''
+                env_var_name = team_block.get('anthropic_api_key_env_var') or ''
+                auth_type = ''
+                engine_slug = ''
+                account_slug = ''
 
             # Derive has_credentials without ever touching the key value
             has_credentials = bool(env_var_name and os.environ.get(env_var_name))
@@ -14460,6 +14601,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 'env_var_name': env_var_name,
                 'has_credentials': has_credentials,
                 'last_validated_at': last_validated_at,
+                'auth_type': auth_type,
+                'engine_slug': engine_slug,
+                'account_slug': account_slug,
+                'config_source': config_source,
             })
         except Exception as e:
             print(f"[LCARS] ERROR in serve_team_account_current: {e}")
@@ -14468,12 +14613,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def handle_team_account_save(self):
         """POST /api/team-config/account/save
 
-        Body: {team, account_id, account_nickname, env_var_name}
-        Writes the three schema-v2 account fields into ~/.aiteamforge/team-paths.json
-        for the specified team. Uses fcntl file-lock + atomic rename.
-        NEVER stores or echoes the actual key value.
+        Body: {team, account_id, account_nickname, env_var_name, auth_type?, engine_slug?}
+        Writes a whole-object ai.credential snapshot into ~/.aiteamforge/team-paths.json
+        for the specified team via _set_team_ai_credential(), which also derives the
+        legacy anthropic_* projection (XACA-0282-012 §2.4). Uses fcntl file-lock +
+        atomic rename. NEVER stores or echoes the actual key value.
 
-        XACA-0281-004
+        XACA-0281-004 / XACA-1178-007
         """
         import fcntl
         try:
@@ -14488,13 +14634,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             account_id = body.get('account_id', '')
             account_nickname = body.get('account_nickname', '')
             env_var_name = body.get('env_var_name', '')
+            auth_type = body.get('auth_type', '')
+            engine_slug = body.get('engine_slug', '')
 
             # Type-check first; then strip; then content-validate the trimmed value
             # so whitespace-padded input is normalized before the regex guard sees it.
             # account_id and account_nickname are OPTIONAL (empty = OAuth fallback,
             # pre-XACA-0279 behavior). env_var_name is also optional, but if non-empty
-            # after stripping it must match the standard env-var pattern. All three
-            # empty = clear the manual config and revert the team to the OAuth fallback.
+            # after stripping it must match the standard env-var pattern. auth_type is
+            # also optional, but if non-empty after stripping it must be one of the
+            # three accepted values (XACA-0282-012 §1.2) -- "" counts as absent, not
+            # a fourth value. engine_slug defaults to "anthropic" (below) when a
+            # credential is actually written. account_id, account_nickname and
+            # env_var_name ALL empty clears the manual config to ai.credential = null
+            # and reverts the team to its CLI's own login (OAuth fallback),
+            # regardless of what auth_type/engine_slug were sent.
             if not isinstance(account_id, str):
                 self._send_json_response({'success': False, 'error': 'account_id must be a string'}, status=400)
                 return
@@ -14504,13 +14658,28 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if not isinstance(env_var_name, str):
                 self._send_json_response({'success': False, 'error': 'env_var_name must be a string'}, status=400)
                 return
+            if not isinstance(auth_type, str):
+                self._send_json_response({'success': False, 'error': 'auth_type must be a string'}, status=400)
+                return
+            if not isinstance(engine_slug, str):
+                self._send_json_response({'success': False, 'error': 'engine_slug must be a string'}, status=400)
+                return
 
             account_id = account_id.strip()
             account_nickname = account_nickname.strip()
             env_var_name = env_var_name.strip()
+            auth_type = auth_type.strip()
+            engine_slug = engine_slug.strip()
 
             if env_var_name and not self._ENV_VAR_NAME_RE.match(env_var_name):
                 self._send_json_response({'success': False, 'error': 'env_var_name must match ^[A-Z][A-Z0-9_]*$ when set'}, status=400)
+                return
+
+            if auth_type and auth_type not in self._AUTH_TYPE_VALUES:
+                self._send_json_response({
+                    'success': False,
+                    'error': f"auth_type must be one of {', '.join(self._AUTH_TYPE_VALUES)} when set",
+                }, status=400)
                 return
 
             # Write to team-paths.json via fcntl lock + atomic rename
@@ -14535,11 +14704,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             self._send_json_response({'success': False, 'error': f"Team '{team}' not found in team-paths.json"}, status=400)
                             return
 
-                        # Merge only the three account fields; all other fields untouched.
-                        # Values are already stripped above — no redundant .strip() here.
-                        data['teams'][team]['anthropic_account_id'] = account_id
-                        data['teams'][team]['anthropic_account_nickname'] = account_nickname
-                        data['teams'][team]['anthropic_api_key_env_var'] = env_var_name
+                        # XACA-0282-012 §2.4: an all-empty legacy trio declares "no
+                        # team credential" (ai.credential = null); otherwise build
+                        # the whole-object snapshot fresh (invariant I2) and let the
+                        # helper derive the legacy projection. Values are already
+                        # stripped above — no redundant .strip() here.
+                        if account_id or account_nickname or env_var_name:
+                            credential = {
+                                'engine_slug': engine_slug or 'anthropic',
+                                'account_id': account_id,
+                                'nickname': account_nickname,
+                                'env_var_name': env_var_name,
+                            }
+                            if auth_type:
+                                credential['auth_type'] = auth_type
+                        else:
+                            credential = None
+
+                        self._set_team_ai_credential(data['teams'][team], credential)
 
                         # XACA-1059: atomic write via tmp file, with the write-side
                         # plausibility floor + directory fsync — see
@@ -14550,7 +14732,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
                             LCARSHandler._TEAM_PATHS_CACHE = {'mtime_ns': None, 'data': None}
 
-                        print(f"[LCARS] Account config saved for '{team}': account_id={account_id.strip()!r} env_var={env_var_name!r}")
+                        print(f"[LCARS] Account config saved for '{team}': account_id={account_id.strip()!r} env_var={env_var_name!r} auth_type={auth_type!r}")
                     finally:
                         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
                         # XACA-1059-005: intentionally NOT unlinked -- see the matching
@@ -14565,6 +14747,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 'team': team,
                 'account_id': account_id.strip(),
                 'env_var_name': env_var_name,
+                'auth_type': auth_type,
             })
         except Exception as e:
             print(f"[LCARS] ERROR in handle_team_account_save: {e}")
@@ -14626,6 +14809,34 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 account_fingerprint = '****…' + api_key[-4:] if len(api_key) >= 4 else '****'
 
+            # XACA-1178-008: resolve the auth scheme from the TOKEN PREFIX ONLY.
+            # D3's persisted `anthropic_auth_type` field (team-paths.json / request
+            # body) is PAUSED pending XACA-0282 -> XACA-0283 — do NOT read it here.
+            # This is written as its own resolution step, ahead of the probe, so a
+            # persisted-field lookup has an obvious seam to slot in above the prefix
+            # check later without restructuring anything below.
+            if api_key.startswith('sk-ant-oat'):
+                auth_scheme = 'oauth_token'
+            elif api_key.startswith('sk-ant-api'):
+                auth_scheme = 'api_key'
+            else:
+                auth_scheme = None  # unrecognized prefix — never probe it (D7)
+
+            if auth_scheme is None:
+                # D7: TEST CONNECTION fails toward "not validated", never toward
+                # green. An unrecognized credential shape is not probed at all, and
+                # last_validated_at is never written for it — a status dot that
+                # turns green without an actual check is worse than one that stays
+                # grey, because it launders an unknown into a reassurance.
+                self._send_json_response({
+                    'ok': False,
+                    'probed': False,
+                    'account_fingerprint': account_fingerprint,
+                    'model_access': None,
+                    'error': 'Token present — not probed (unrecognized credential prefix)',
+                })
+                return
+
             # Probe Anthropic API — smallest valid payload
             probe_payload = json.dumps({
                 'model': 'claude-haiku-4-5',
@@ -14633,14 +14844,28 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 'messages': [{'role': 'user', 'content': 'ping'}],
             }).encode('utf-8')
 
-            req = urllib.request.Request(
-                'https://api.anthropic.com/v1/messages',
-                data=probe_payload,
-                headers={
+            # XACA-1178-008 (spike XACA-1178-001, measured 2026-09-11): an
+            # sk-ant-oat-prefixed token authenticates via `Authorization: Bearer`
+            # (200 + real completion); the SAME token sent as `x-api-key` (the
+            # Console-key scheme) returns 401 "API key is invalid." Only the auth
+            # header changes — same endpoint, same api version, same payload shape.
+            if auth_scheme == 'oauth_token':
+                probe_headers = {
+                    'Authorization': f'Bearer {api_key}',
+                    'anthropic-version': '2023-06-01',
+                    'content-type': 'application/json',
+                }
+            else:
+                probe_headers = {
                     'x-api-key': api_key,
                     'anthropic-version': '2023-06-01',
                     'content-type': 'application/json',
-                },
+                }
+
+            req = urllib.request.Request(
+                'https://api.anthropic.com/v1/messages',
+                data=probe_payload,
+                headers=probe_headers,
                 method='POST',
             )
 
@@ -14680,6 +14905,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             response = {
                 'ok': ok,
+                'probed': True,
                 'account_fingerprint': account_fingerprint if ok else None,
                 'model_access': model_access,
                 'error': error_msg,
@@ -14763,9 +14989,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         On success returns the parsed JSON dict and None error.
         On any failure (timeout, refused, non-200, parse error) returns (None, description).
+        Resolved at CALL TIME (XACA-1178-006) — no localhost fallback; when the
+        URL can't be resolved this returns "not configured" rather than making
+        a request that would read as a network fault.
         """
+        fleet_monitor_url = _resolve_fleet_monitor_url()
+        if not fleet_monitor_url:
+            return None, "Fleet Monitor URL not configured"
         try:
-            url = f"{FLEET_MONITOR_URL}/api/engines"
+            url = f"{fleet_monitor_url}/api/engines"
             req = urllib.request.Request(url, headers={'Accept': 'application/json'})
             with urllib.request.urlopen(req, timeout=2) as resp:
                 if resp.status != 200:
@@ -14874,6 +15106,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 response['_cache_age_seconds'] = cache_age
             if error:
                 response['_error'] = error
+            # XACA-1178-006: resolved URL (or None when unconfigured) so the
+            # "+ ADD NEW" picker toast can point at the real Fleet Monitor host
+            # instead of guessing ":8080" (E12).
+            response['_fleet_monitor_url'] = _resolve_fleet_monitor_url()
 
             self._send_json_response(response)
         except Exception as e:
@@ -14890,20 +15126,22 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         Body: {team, engine_slug, account_slug}
 
-        Copy-on-select: looks up the named account in the engines registry and mirrors
-        its fields into team-paths.json so XACA-0279 Phase A.1's resolver continues
-        to work without modification.
+        Copy-on-select: looks up the named account in the engines registry and
+        writes it into team-paths.json as a whole-object ai.credential snapshot
+        (XACA-0282-012 §1.1) via _set_team_ai_credential(), which also derives
+        the legacy anthropic_* projection so XACA-0279 Phase A.1's resolver and
+        the ~13 other legacy readers keep working unmodified during the 1178
+        compat window, and drops the stale anthropic_account_ref key (F5) --
+        engine_slug/account_slug inside ai.credential supersede it.
 
-        Writes these team-paths.json fields:
-          anthropic_account_id       ← registry account.account_id
-          anthropic_account_nickname ← registry account.nickname
-          anthropic_api_key_env_var  ← registry account.env_var_name
-          anthropic_account_ref      ← "{engine_slug}/{account_slug}" (drift pointer)
+        ai.credential fields written: engine_slug, account_slug, account_id,
+        nickname, env_var_name, and auth_type (only when the registry account
+        has one -- XACA-1178-004).
 
         Response: {success, team, engine_slug, account_slug, mirrored: {...}, has_credentials}
         NEVER returns the actual key value.
 
-        XACA-0281-022
+        XACA-0281-022 / XACA-1178-007
         """
         import fcntl
         try:
@@ -14971,6 +15209,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             account_id = matched_account.get('account_id', '')
             account_nickname = matched_account.get('nickname', '')
             env_var_name = matched_account.get('env_var_name', '')
+            # Log-only now (XACA-0282-012 F5): engine_slug/account_slug inside
+            # ai.credential are the persisted reference; this string is never
+            # written to disk.
             account_ref = f"{engine_slug}/{account_slug}"
 
             # --- Write to team-paths.json (fcntl lock + atomic rename) ---
@@ -14998,11 +15239,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             }, status=400)
                             return
 
-                        # Mirror account fields; preserve all other fields untouched
-                        tp_data['teams'][team]['anthropic_account_id'] = account_id
-                        tp_data['teams'][team]['anthropic_account_nickname'] = account_nickname
-                        tp_data['teams'][team]['anthropic_api_key_env_var'] = env_var_name
-                        tp_data['teams'][team]['anthropic_account_ref'] = account_ref
+                        # XACA-1178-007 / XACA-0282-012 §2.4: build the whole-object
+                        # ai.credential snapshot fresh (invariant I2) and let the
+                        # helper derive the legacy projection + drop the stale
+                        # anthropic_account_ref (F5). auth_type is copied only when
+                        # the registry account actually has one (XACA-1178-004);
+                        # its absence means "infer from the token prefix" downstream.
+                        credential = {
+                            'engine_slug': engine_slug,
+                            'account_slug': account_slug,
+                            'account_id': account_id,
+                            'nickname': account_nickname,
+                            'env_var_name': env_var_name,
+                        }
+                        matched_auth_type = matched_account.get('auth_type')
+                        if matched_auth_type:
+                            credential['auth_type'] = matched_auth_type
+                        self._set_team_ai_credential(tp_data['teams'][team], credential)
 
                         # XACA-1059: atomic write via tmp file, with the write-side
                         # plausibility floor + directory fsync — see
@@ -15039,6 +15292,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     'account_id': account_id,
                     'account_nickname': account_nickname,
                     'env_var_name': env_var_name,
+                    'auth_type': matched_account.get('auth_type') or '',
                 },
                 'has_credentials': has_credentials,
             })

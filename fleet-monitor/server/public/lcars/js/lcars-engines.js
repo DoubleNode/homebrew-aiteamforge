@@ -136,6 +136,7 @@
                 '<th>NICKNAME</th>' +
                 '<th>ACCOUNT ID</th>' +
                 '<th>ENV VAR</th>' +
+                '<th>AUTH TYPE</th>' +
                 '<th>VAULT</th>' +
                 '<th>CREATED</th>' +
                 '<th>LAST VALIDATED</th>' +
@@ -156,7 +157,7 @@
         /**
          * Build one table row for an account.
          * @param {string} engineSlug
-         * @param {object} account - { slug, account_id, nickname, env_var_name, created_at, last_validated_at }
+         * @param {object} account - { slug, account_id, nickname, env_var_name, auth_type, created_at, last_validated_at }
          * @returns {HTMLTableRowElement}
          */
         renderAccountRow(engineSlug, account) {
@@ -172,6 +173,7 @@
                 '<td class="engine-col-account-id" title="' + escHtml(account.account_id || '') + '">' +
                     '<code>' + escHtml(accountIdDisplay) + '</code></td>',
                 '<td class="engine-col-env-var"><code>' + escHtml(account.env_var_name || '—') + '</code></td>',
+                '<td class="engine-col-auth-type">' + authTypeBadge(account) + '</td>',
                 '<td class="engine-col-vault">' + vaultBadge(account) + '</td>',
                 '<td class="engine-col-created">' + fmtDate(account.created_at) + '</td>',
                 '<td class="engine-col-validated">' + fmtDate(account.last_validated_at) + '</td>',
@@ -213,6 +215,10 @@
             document.getElementById('engines-add-account-id').value   = '';
             document.getElementById('engines-add-nickname').value     = '';
             document.getElementById('engines-add-env-var').value      = '';
+            // Auth type (XACA-1178-005): default to "(not set)" — the server infers from
+            // the token prefix when this is omitted. See XACA-0282-012 §2.2.
+            var addAuthType = document.getElementById('engines-add-auth-type');
+            if (addAuthType) addAuthType.value = '';
             // Write-only secret field: always start empty (never echoed back). XACA-0538-001.
             var addSecret = document.getElementById('engines-add-secret');
             if (addSecret) addSecret.value = '';
@@ -233,6 +239,11 @@
             document.getElementById('engines-edit-account-id').value = account.account_id  || '';
             document.getElementById('engines-edit-nickname').value   = account.nickname    || '';
             document.getElementById('engines-edit-env-var').value    = account.env_var_name || '';
+            // Auth type (XACA-1178-005): preselect the stored value, or "(not set)" when
+            // the account has no auth_type key. Saving with "(not set)" sends auth_type:
+            // null, which explicitly clears it (PUT semantics — XACA-0282-012 §2.2).
+            var editAuthType = document.getElementById('engines-edit-auth-type');
+            if (editAuthType) editAuthType.value = account.auth_type || '';
             // Write-only secret field: MUST open EMPTY on edit — the plaintext is never
             // available to echo. Empty on save = leave the existing sealed secret unchanged.
             // XACA-0538-001.
@@ -304,6 +315,10 @@
             var accountId = (document.getElementById('engines-add-account-id').value || '').trim();
             var nickname  = (document.getElementById('engines-add-nickname').value || '').trim();
             var envVar    = (document.getElementById('engines-add-env-var').value || '').trim();
+            // Auth type (XACA-1178-005): '' means "(not set)" — omit the field entirely
+            // on POST so the server/launcher infer it from the token prefix.
+            var authTypeEl = document.getElementById('engines-add-auth-type');
+            var authType   = authTypeEl ? (authTypeEl.value || '') : '';
             // Secret value is NOT trimmed — a secret may legitimately contain whitespace.
             var secretEl  = document.getElementById('engines-add-secret');
             var secret    = secretEl ? (secretEl.value || '') : '';
@@ -342,7 +357,7 @@
                 showFieldError('engines-add-env-var-err', 'Env var name is required.');
                 valid = false;
             } else if (!ENV_VAR_RE.test(envVar)) {
-                showFieldError('engines-add-env-var-err', 'Must match ^[A-Z][A-Z0-9_]*$ (e.g. ANTHROPIC_API_KEY_DARREN).');
+                showFieldError('engines-add-env-var-err', 'Must match ^[A-Z][A-Z0-9_]*$ (e.g. ANTHROPIC_API_KEY_DARREN or CLAUDE_ACCT_ME_TOKEN — Max tokens are not Console keys).');
                 valid = false;
             }
 
@@ -352,13 +367,19 @@
             saveBtn.disabled = true;
             saveBtn.textContent = 'SAVING...';
 
+            // auth_type is optional on POST (XACA-1178-004/005): include the key only
+            // when a type was explicitly selected. Omitting it — never sending null —
+            // lets the server/launcher infer the type from the token prefix.
+            var addBody = { slug: slug, account_id: accountId, nickname: nickname, env_var_name: envVar };
+            if (authType) addBody.auth_type = authType;
+
             try {
                 var resp = await fetch(
                     ENGINES_API + '/' + encodeURIComponent(_activeEngineSlug) + '/accounts',
                     {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ slug: slug, account_id: accountId, nickname: nickname, env_var_name: envVar })
+                        body: JSON.stringify(addBody)
                     }
                 );
                 var data = await resp.json();
@@ -423,6 +444,11 @@
             var accountId = (document.getElementById('engines-edit-account-id').value || '').trim();
             var nickname  = (document.getElementById('engines-edit-nickname').value || '').trim();
             var envVar    = (document.getElementById('engines-edit-env-var').value || '').trim();
+            // Auth type (XACA-1178-005): '' means "(not set)" was selected, which sends
+            // auth_type: null to EXPLICITLY clear the field on PUT — distinct from
+            // omitting the key (which would leave the existing value untouched).
+            var authTypeEl = document.getElementById('engines-edit-auth-type');
+            var authType   = authTypeEl ? (authTypeEl.value || '') : '';
             // Secret value is NOT trimmed. Empty == leave the existing sealed secret
             // unchanged (write-only field; plaintext is never echoed). XACA-0538-001.
             var secretEl  = document.getElementById('engines-edit-secret');
@@ -451,7 +477,7 @@
                 showFieldError('engines-edit-env-var-err', 'Env var name is required.');
                 valid = false;
             } else if (!ENV_VAR_RE.test(envVar)) {
-                showFieldError('engines-edit-env-var-err', 'Must match ^[A-Z][A-Z0-9_]*$ (e.g. ANTHROPIC_API_KEY_DARREN).');
+                showFieldError('engines-edit-env-var-err', 'Must match ^[A-Z][A-Z0-9_]*$ (e.g. ANTHROPIC_API_KEY_DARREN or CLAUDE_ACCT_ME_TOKEN — Max tokens are not Console keys).');
                 valid = false;
             }
 
@@ -468,7 +494,11 @@
                     {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ account_id: accountId, nickname: nickname, env_var_name: envVar })
+                        // auth_type is always sent on PUT: an explicit enum value to set it,
+                        // or null to clear it. Never omitted, since the modal always has a
+                        // selection (XACA-1178-004 PUT semantics: absent keeps the existing
+                        // value, which would silently ignore a user's "(not set)" choice).
+                        body: JSON.stringify({ account_id: accountId, nickname: nickname, env_var_name: envVar, auth_type: authType ? authType : null })
                     }
                 );
                 var data = await resp.json();
@@ -566,6 +596,24 @@
         var d = new Date(iso);
         if (isNaN(d.getTime())) return '—';
         return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    /**
+     * Render the auth-type badge for an account (XACA-1178-005). auth_type is
+     * optional server-side (XACA-1178-004) — an absent key means "not set", and the
+     * launcher infers the type from the token prefix at launch time (XACA-0282-012
+     * §1.2). Read-only display only.
+     * @param {object} account
+     * @returns {string} HTML for the badge cell content
+     */
+    function authTypeBadge(account) {
+        var AUTH_TYPE_LABELS = { oauth_token: 'OAUTH', api_key: 'API KEY', gateway_token: 'GATEWAY' };
+        if (account && account.auth_type && AUTH_TYPE_LABELS[account.auth_type]) {
+            return '<span class="engine-auth-type-badge" title="' + escHtml(account.auth_type) + '">' +
+                escHtml(AUTH_TYPE_LABELS[account.auth_type]) + '</span>';
+        }
+        return '<span class="engine-auth-type-badge engine-auth-type-badge--none" ' +
+            'title="Not set — inferred from the token prefix at launch">—</span>';
     }
 
     /**

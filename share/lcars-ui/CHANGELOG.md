@@ -11,6 +11,103 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+- **XACA-1178-007: `ai.credential` replaces the planned flat `anthropic_auth_type` field.**
+  This subitem's original plan said to write a flat `anthropic_auth_type` field into
+  `team-paths.json`. That was superseded mid-ticket by the merged XACA-0282-012 decision (PR
+  #871, `docs/xaca-0282/research/012-credential-config-shape.md`): there is never a flat
+  `anthropic_auth_type` field. Every team's AI credential now lives under one nested key,
+  `teams.<team>.ai.credential` — a whole-object snapshot of one Fleet Monitor account
+  (`engine_slug`, `account_slug`, `account_id`, `nickname`, `auth_type`, `env_var_name`).
+  - New `_set_team_ai_credential()` in `server.py` replaces `ai.credential` as a unit
+    (invariant I2 — no per-key patching, which is how the old `anthropic_account_ref` field went
+    stale, XACA-0282-012 F5) and derives the legacy `anthropic_account_id` /
+    `anthropic_account_nickname` / `anthropic_api_key_env_var` trio from it as a projection, so
+    the ~13 existing legacy readers (9 team banners, `cc-whoami`, the avatar script,
+    `ccusage_collector`, the vault migrator) keep working unmodified during the 1178 compat
+    window. It also drops the stale `anthropic_account_ref` key going forward.
+  - `handle_team_account_assign()` builds the snapshot from the matched Fleet Monitor account,
+    including `auth_type` only when the registry account has one (XACA-1178-004).
+  - `handle_team_account_save()` (the MANUAL modal) accepts an optional `auth_type` — validated
+    against `oauth_token` | `api_key` | `gateway_token` (`"none"` stays reserved for XACA-0283)
+    — and an optional `engine_slug` (defaults to `anthropic`). An all-empty legacy trio now
+    writes `ai.credential = null` (declares "no team credential"; the CLI falls back to its own
+    login), not just three cleared strings.
+  - `serve_team_account_current()` returns `auth_type`, `engine_slug`, `account_slug`, and a new
+    `config_source: "ai" | "legacy"` — falling back to the legacy trio only when a team has no
+    `ai.credential` key at all (every team today).
+  - `index.html`'s MANUAL edit modal gains an Auth Type selector; `js/lcars-team-account.js`'s
+    `_fillModalFields()` / `saveTeamAccountConfig()` fill and send it. Cache-buster bumped:
+    `js/lcars-team-account.js?v=1.3 → 1.4`.
+  - `kanban-hooks/aiteamforge_paths.py` is deliberately untouched (XACA-0282-012 §6.1 — no
+    additional tap-mirrored file enters this release). `ai` never appears in `DEFAULT_TEAMS`, so
+    `scripts/check-registry-seed-drift.py` (which only ever compares `DEFAULT_TEAMS` against the
+    tap's shell seed) is structurally unaffected by this change — verified `VERDICT: CLEAN (0)`.
+  - New `lcars-ui/tests/test_xaca1178_team_ai_credential.py`: whole-object replace + legacy
+    projection + `anthropic_account_ref` removal (direct helper tests); assign writes the
+    snapshot and omits `auth_type` when the registry account has none; assign-then-save-without-
+    a-type leaves no stale `auth_type` (F5, made concrete); save validates `auth_type`, defaults
+    and honors `engine_slug`, and clears to `null` on an all-empty body; `current` returns the
+    new shape and falls back cleanly for a team with no `ai` key at all.
+  - Scoped to `lcars-ui/` only: `fleet-monitor/`, `_resolve_fleet_monitor_url()`, and
+    `handle_team_account_test_connection()` are untouched (owned by 004/005 and already-verified
+    006/008, respectively); no tap sync (subitem 009 owns it); no legacy-field retirement (a
+    separate contract ticket, XACA-0282-012 §3/§6.2).
+
+- **XACA-1178-008: TEST CONNECTION no longer sends a Claude Max token as an `x-api-key`.**
+  `handle_team_account_test_connection()` probed `api.anthropic.com/v1/messages` with an
+  `x-api-key` header for every credential — the Console-key scheme. Spike XACA-1178-001 measured
+  a real `sk-ant-oat01-` (Max) token directly against that endpoint: `Authorization: Bearer` →
+  `200` with a genuine completion; the identical token as `x-api-key` → `401
+  {"type":"authentication_error","message":"API key is invalid."}`. A valid Max token read as a
+  broken connection purely because of the header scheme.
+  - The handler now resolves the probe's auth scheme from the **token prefix only**:
+    `sk-ant-oat` → `Authorization: Bearer <token>`, `sk-ant-api` → `x-api-key` (unchanged). D3's
+    persisted `anthropic_auth_type` field (`team-paths.json` / request body) stays **paused**
+    pending XACA-0282 → XACA-0283 and is deliberately not read here — the branch is written so a
+    persisted-field lookup has an obvious seam to slot in ahead of the prefix check later.
+  - A prefix matching neither is **never probed at all**, and `last_validated_at` is never written
+    for it — D7's "TEST CONNECTION fails toward not-validated, never toward green": a status dot
+    that turns green without an actual check would launder an unknown into a reassurance. The
+    response carries a new `probed: false` field, and `js/lcars-team-account.js`'s
+    `testTeamAccountConnection()` renders that state as a distinct amber `status-warning` (new CSS
+    rule in `css/lcars.css`), never `status-ok` or `status-error`.
+  - Corrects the running-sessions modal's `index.html` hint, which claimed "Claude only reads
+    `ANTHROPIC_AUTH_TOKEN` at startup" — spike XACA-1178-001 measured the real CLI reading
+    whichever of `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` carries a
+    credential, in that documented precedence order, not a single fixed variable.
+  - Cache-busters bumped: `js/lcars-team-account.js?v=1.2 → 1.3`, `css/lcars.css?v=32.34 → 32.35`.
+  - New `lcars-ui/tests/test_xaca1178_test_connection_auth_scheme.py`: an oauth-prefixed token
+    never reaches the probe with an `x-api-key` header (and vice versa for an api-key-prefixed
+    token), an unrecognized prefix makes no outbound request and never writes the validation
+    cache, and a failed probe of either scheme never writes it either.
+  - Scoped to XACA-1178-008 only: no `auth_type` field read from body or `team-paths.json`
+    (subitems 004/005/007 held on the paused D3 schema decision), no launcher changes, no tap sync
+    (subitem 009 owns it).
+
+- **XACA-1178-006: Fleet Monitor URL is resolved at call time, with no `localhost:8080` fallback.**
+  `FLEET_MONITOR_URL` used to be a module-level constant defaulting to `http://localhost:8080`,
+  with no launch path anywhere setting it. Measured 2026-09-11 on M3Pro: 5 running LCARS servers,
+  every one reporting `Fleet Monitor unreachable: [Errno 61] Connection refused` from
+  `/api/engines/list`, and the LCARS Team Config account picker permanently empty as a result —
+  this was the actual blocker of XACA-1178's account-routing work, not the launcher defect the
+  ticket was originally filed against (see the ticket's post-spike plan revision).
+  - New `_resolve_fleet_monitor_url()` in `server.py`, called fresh on every `/api/engines/list`
+    request instead of read once at import: env `FLEET_MONITOR_URL` → `~/.aiteamforge/fleet-config.json`
+    `.centralServer.apiEndpoint` → `~/.dev-team/fleet-config.json`, same key. Mirrors
+    `_kb_msg_relay_url()` (`kanban-helpers.sh`, XACA-0885) exactly, including its guard against a
+    non-string config value and its `/api/*` + bare `/api` suffix stripping — a second divergent
+    implementation of the same resolution was judged not worth the drift risk.
+  - Deliberately **no localhost fallback**: when nothing resolves, `/api/engines/list` now reports
+    `_error: "Fleet Monitor URL not configured"` and makes no network request at all, instead of a
+    `Connection refused` that reads as a transient network fault rather than a missing setting.
+  - `serve_engines_list()`'s response gains `_fleet_monitor_url` (the resolved URL, or `null`).
+    `lcars-team-account.js`'s `onAccountPickerChange()` reads it from the `/api/engines/list`
+    payload for the "+ ADD NEW" picker toast; the old same-hostname `:8080` heuristic,
+    `getFleetMonitorUrl()`, is deleted along with its stale `index.html` comment.
+  - New `lcars-ui/tests/test_xaca1178_fleet_monitor_url.py` covers the resolution order, the
+    non-string-value guard, suffix stripping, and — the requirement this ticket exists to satisfy —
+    that no request reaches `localhost:8080` when nothing is configured.
+
 - **XACA-0948 (PR #761 review + UX round) — a sixth manifest-writing engine, an unguarded board read, two divergent team-less paths, and a status pill whose accessibility cue never rendered.**
   - `lcars-ui/sync_release_manifests.py` (distinct from `scripts/sync-release-manifests.py`) still re-persisted `items[].status`; it now writes none. Its `if board_status` guard also left a stale value in place for unrecorded items — the "refreshed without reconciling" shape this ticket was filed over.
   - `_resolve_release_items`' board `open()`/`json.load()` were unguarded and could 500 `GET /api/releases/<id>/items` and `GET /api/items/by-release/<id>`; a new shared `_load_board_items_by_id` helper degrades to `statusResolution: "unresolved"` instead. The same helper converges the team-less-row behaviour that previously differed between `_calculate_release_progress` and `_resolve_release_items`, and replaces an O(rows × backlog) rescan with one `{id: item}` index per team.

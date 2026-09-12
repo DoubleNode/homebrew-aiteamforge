@@ -16234,6 +16234,13 @@ body {
     opacity: 0.8;
 }
 
+/* XACA-1178-008: unrecognized credential prefix — never probed, never
+   last_validated_at. Distinct from both status-ok and status-error so the
+   text doesn't read as "checked and broken". */
+#team-account-test-status.status-warning {
+    color: var(--lcars-amber, #ffcc00);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    EXPORT / IMPORT — Per-team archive UI (import-specific elements)
    ═══════════════════════════════════════════════════════════════════════════ */

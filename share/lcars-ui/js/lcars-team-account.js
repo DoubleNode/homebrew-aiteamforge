@@ -18,16 +18,13 @@
     // ─────────────────────────────────────────────────────────────
     // Fleet Monitor URL discovery
     //
-    // Canonical path: same-hostname heuristic on port 8080.
-    // The meta-tag approach was removed (XACA-0281-027) because serve_file()
-    // does not template HTML, so {{FLEET_MONITOR_URL}} was never substituted.
-    // TODO XACA-0281 follow-up: dynamic Fleet Monitor URL discovery.
+    // XACA-1178-006: the old same-hostname :8080 heuristic (getFleetMonitorUrl(),
+    // removed) is gone. The URL is now resolved server-side by
+    // _resolve_fleet_monitor_url() in server.py (env var → ~/.aiteamforge/
+    // fleet-config.json → ~/.dev-team/fleet-config.json, no localhost fallback)
+    // and rides along as _fleet_monitor_url in the /api/engines/list response —
+    // see onAccountPickerChange() below, which reads it from _fetchEngines().
     // ─────────────────────────────────────────────────────────────
-    function getFleetMonitorUrl() {
-        // Heuristic: assume Fleet Monitor runs on port 8080 of the same host.
-        // TODO XACA-0281 follow-up: dynamic Fleet Monitor URL discovery.
-        return window.location.protocol + '//' + window.location.hostname + ':8080';
-    }
 
     // ─────────────────────────────────────────────────────────────
     // Module-level cache (per page load; invalidated on demand)
@@ -276,15 +273,32 @@
         // "+ ADD NEW" sentinel.
         if (value.startsWith('__add_new__/')) {
             var engineSlug = value.slice('__add_new__/'.length);
-            var fleetUrl = getFleetMonitorUrl();
+            // XACA-1178-006: read the server-resolved URL from the /api/engines/list
+            // response instead of guessing "<page-host>:8080" (E12) — that guess is
+            // wrong whenever Fleet Monitor isn't colocated with LCARS, which is the
+            // normal case (the real base is a remote fleet-monitor.fly.dev host).
+            var fleetUrl = null;
+            try {
+                var enginesForUrl = await _fetchEngines();
+                fleetUrl = enginesForUrl && enginesForUrl._fleet_monitor_url;
+            } catch (_) { /* non-fatal — falls through to the "not configured" toast */ }
             // Show a non-blocking toast with a clickable URL rather than a
             // blocking alert(), so it fits the LCARS UX pattern.
-            _showToast(
-                'Add accounts in Fleet Monitor: ' + fleetUrl +
-                    ' — navigate to AI ENGINES → ' + engineSlug.toUpperCase() + ' → Add Account',
-                'info',
-                8000
-            );
+            if (fleetUrl) {
+                _showToast(
+                    'Add accounts in Fleet Monitor: ' + fleetUrl +
+                        ' — navigate to AI ENGINES → ' + engineSlug.toUpperCase() + ' → Add Account',
+                    'info',
+                    8000
+                );
+            } else {
+                _showToast(
+                    'Fleet Monitor URL not configured — set FLEET_MONITOR_URL or ' +
+                        '~/.aiteamforge/fleet-config.json to add accounts.',
+                    'warning',
+                    8000
+                );
+            }
             // Reset the picker by re-rendering the full row from current config.
             _refreshTeamRow(teamSlug).catch(function () {});
             return;
@@ -445,6 +459,13 @@
                 var fingerprint = data.account_fingerprint ? ' — ' + data.account_fingerprint : '';
                 testStatusEl.textContent = 'Connection OK' + fingerprint;
                 testStatusEl.className = 'status-ok';
+            } else if (data.probed === false) {
+                // XACA-1178-008: an unrecognized credential prefix is never probed,
+                // and the server never wrote last_validated_at for it — render this
+                // distinctly from both success and an actual failed probe, so the
+                // status text doesn't read as "we checked and it's broken".
+                testStatusEl.textContent = data.error || 'Token present — not probed';
+                testStatusEl.className = 'status-warning';
             } else {
                 testStatusEl.textContent = 'Failed: ' + (data.error || 'Unknown error');
                 testStatusEl.className = 'status-error';
@@ -471,6 +492,7 @@
         var acctIdInput = document.getElementById('team-account-edit-account-id');
         var nickInput = document.getElementById('team-account-edit-nickname');
         var envVarInput = document.getElementById('team-account-edit-env-var');
+        var authTypeInput = document.getElementById('team-account-edit-auth-type');
         var saveBtn = document.getElementById('team-account-save-btn');
         var testStatusEl = document.getElementById('team-account-test-status');
 
@@ -484,7 +506,10 @@
             team: teamSlug,
             account_id: newAccountId,
             account_nickname: nickInput ? nickInput.value.trim() : '',
-            env_var_name: envVarInput ? envVarInput.value.trim() : ''
+            env_var_name: envVarInput ? envVarInput.value.trim() : '',
+            // XACA-1178-007: "" means not set -- server infers auth scheme
+            // from the token prefix (XACA-0282-012 §1.2).
+            auth_type: authTypeInput ? authTypeInput.value.trim() : ''
         };
 
         // XACA-0281-007: Pre-save running-sessions guard.
@@ -907,10 +932,15 @@
         var acctIdInput = document.getElementById('team-account-edit-account-id');
         var nickInput = document.getElementById('team-account-edit-nickname');
         var envVarInput = document.getElementById('team-account-edit-env-var');
+        var authTypeInput = document.getElementById('team-account-edit-auth-type');
 
         if (acctIdInput) acctIdInput.value = (cfg && cfg.account_id) ? cfg.account_id : '';
         if (nickInput) nickInput.value = (cfg && cfg.account_nickname) ? cfg.account_nickname : '';
         if (envVarInput) envVarInput.value = (cfg && cfg.env_var_name) ? cfg.env_var_name : '';
+        // XACA-1178-007: auth_type is optional -- "" selects the "(not set,
+        // infer from token)" option, matching the server's prefix-inference
+        // fallback (XACA-0282-012 §1.2).
+        if (authTypeInput) authTypeInput.value = (cfg && cfg.auth_type) ? cfg.auth_type : '';
     }
 
     /**

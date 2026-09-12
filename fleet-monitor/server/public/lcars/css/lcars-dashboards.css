@@ -1171,6 +1171,31 @@
     margin-right: 6px;
 }
 
+/* Auth-type badge (XACA-1178-005) */
+.engine-col-auth-type {
+    white-space: nowrap;
+}
+
+.engine-auth-type-badge {
+    display: inline-block;
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 10px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+    color: var(--lcars-cyan);
+    background: rgba(153, 204, 255, 0.08);
+}
+
+.engine-auth-type-badge--none {
+    color: var(--lcars-tan);
+    background: rgba(255, 204, 153, 0.06);
+}
+
 /* Vault-provisioned status badge (XACA-0538-006) */
 .engine-col-vault {
     white-space: nowrap;
