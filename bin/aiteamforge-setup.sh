@@ -90,8 +90,11 @@ fi
 # calling this function twice is always safe and never double-announces.
 #
 # Team-agnostic by design (XACA-1070): no team id is hard-coded anywhere in
-# this function. Zero teams carry "mandatory": true as of this writing, so
-# the loop below is a correctly-behaving no-op today — see
+# this function. `spacedock` is the first team declared "mandatory": true in
+# share/teams/registry.json (XACA-1070's activation commit), but the loop
+# below must never assume a non-empty list: it is a correctly-behaving no-op
+# whenever no registry entry carries the flag — e.g. a consumer pinned to a
+# formula tag cut before that activation. See
 # libexec/lib/mandatory-teams.sh's own header comment for why that empty
 # case matters.
 #
@@ -2000,9 +2003,8 @@ fi
 #   * Narrowed to cockpit + at least one team actually selected, i.e. at
 #     least one mandatory team was force-appended (see the "Install
 #     selected teams" header comment for why SELECTED_TEAMS holds ONLY
-#     mandatory ids on cockpit by construction). On a cockpit box with
-#     zero mandatory teams declared (today's real state — spacedock has
-#     not shipped, XACA-1070-001), SELECTED_TEAMS is empty and this block
+#     mandatory ids on cockpit by construction). On a cockpit box where NO
+#     mandatory team is declared, SELECTED_TEAMS is empty and this block
 #     is a complete no-op: no lcars-ui/ directory is created at all,
 #     matching cockpit's existing behavior for every box with no
 #     mandatory team.

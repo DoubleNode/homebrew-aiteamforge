@@ -21,12 +21,24 @@
 # "mandatory" gets its own real key and its own real consumer (this file),
 # not a repurposed alias of "recommended".
 #
-# IMPORTANT — team-agnostic by design: the intended first mandatory team
-# (`spacedock`, XACA-1068/1069) does not exist yet as of this writing. Zero
-# teams carry `"mandatory": true` today. atf_mandatory_teams() returning
-# empty with exit 0 is the CORRECT, EXPECTED result right now — every
-# consumer of this lib must treat an empty list as "nothing to do", never as
-# an error. Do not hard-code any team id anywhere in this file.
+# IMPORTANT — team-agnostic by design. `spacedock` (XACA-1068/1069) is the
+# first team declared `"mandatory": true` in share/teams/registry.json, as of
+# XACA-1070's activation commit. Do not hard-code that id — or any id —
+# anywhere in this file; the whole point of the separate `mandatory` key is
+# that membership is data, not code.
+#
+# An EMPTY list with exit 0 remains CORRECT and EXPECTED, and every consumer
+# must still treat it as "nothing to do", never as an error. It is reachable
+# whenever no registry entry carries the flag — a consumer pinned to a
+# formula tag cut before the activation, a registry edited downstream, or a
+# future release that retires the last mandatory team. Do not "simplify" the
+# empty case away on the assumption that there is always at least one.
+#
+# (This comment previously asserted that zero teams carried the flag "today".
+# That was true when written and was falsified by the activation itself —
+# XACA-1070-036. A comment describing present state as though it were an
+# invariant is a predictable trap for any ticket that ships a mechanism and
+# its activation in two parts, which this one did.)
 #
 # SHELL COMPATIBILITY: consumer machines run /bin/bash 3.2. No `declare -A`,
 # no `mapfile`/`readarray`, no `${var^^}`. Verified under /bin/bash directly
