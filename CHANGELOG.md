@@ -20,6 +20,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   turned out to be 22 of 91. Counts move; assertions about them go stale.
   (Entries for rounds 1-6 are in the 0.20.9 section below, moved there by the
   release cut while this PR was still in review.)
+- **XACA-0931 — restore the two mirrored scripts a concurrent tap sync reverted.**
+  `c2cbd57` (XACA-1178's tap sync) ran `sync-tap.sh` from a checkout whose canonical
+  copies predated XACA-0931's still-unmerged changes and pushed the result over tap
+  `main`, reverting `emit-transformed` out of `share/scripts/deploy-worktree-personas.sh`
+  and the `--force` block out of `share/scripts/lcars-launch-helpers.sh` — both added in
+  `3349cee` and released in 0.20.9. This was not cosmetic: `aiteamforge-persona-parity-check.sh`
+  invokes `deploy-worktree-personas.sh emit-transformed`, so with the mirror reverted that
+  call fails on every consumer and the checker fails CLOSED, reporting drift on every file
+  of every target; and the upgrade-path fix would have lost `--force`, restoring the
+  `.synced-from-tap` marker no-op XACA-0931 exists to close. Re-mirrored via `sync-tap.sh`
+  scoped to the working tree; exactly 2 files synced and byte parity re-confirmed. Caught
+  by a canonical/tap parity check that had passed in earlier review rounds and stopped
+  passing with nothing on the branch changing — this is the in-flight mirror hazard of a
+  shared tap while the canonical side is unmerged, which XACA-1122's serialized publisher
+  is designed to eliminate.
+
 
 ## [0.20.9] - 2026-09-11
 - **XACA-1178** — mirrors the Claude Max / `auth_type` account-routing work from dev-team:
