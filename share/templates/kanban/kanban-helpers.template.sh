@@ -17329,8 +17329,12 @@ kb-knowledge-validate() {
                 echo "             untracked (git status --porcelain --untracked-files=all across"
                 echo "             every root), instead of the whole tree. The three whole-tree"
                 echo "             structural checks (duplicate ID-slot, INDEX orphan, duplicate"
-                echo "             persona-dir) still run in full every time — they only read"
-                echo "             directory/filename listings and are cheap regardless of scope."
+                echo "             persona-dir) still run in full every time and do NOT scope."
+                echo "             They are NOT cheap: the INDEX-orphan scan was MEASURED at"
+                echo "             89.5% of this command's wall time (94s of 105s, XACA-1080-001)"
+                echo "             before XACA-1080-002 replaced its per-line fork loop with one"
+                echo "             awk pass per INDEX file. Re-measure before trusting any figure"
+                echo "             here; see kb-knowledge-add's validate-on-write comment."
                 echo "             A root that is not a git repo (e.g. ~/knowledge-local, XACA-0754)"
                 echo "             can't be diffed, so it fails OPEN: every entry under it is"
                 echo "             validated every run rather than silently skipped. A missing"
@@ -17361,9 +17365,9 @@ kb-knowledge-validate() {
     local pass_count=0
     # Pre-declare loop variables at function top to avoid zsh local-A trace leaks on re-declaration
     local val_dir expected_tier cur_root dir_label exp_prefix index_file ef fname lc_fname
-    local dup_slots dup_slot dup_files root_label
+    local dup_slots dup_slot dup_files root_label fname_stem
     local has_id has_tier has_date has_tags has_agent has_team file_id file_tier xref_line xref resolved_xref resolver_rc idx_id idx_file
-    local xref_frontmatter
+    local xref_frontmatter index_ids_raw
     # XACA-0991-004: per-file error flag. Reset at the top of each entry_files
     # iteration; _kb_val_error sets it via zsh dynamic scoping (same mechanism
     # error_count already relies on). Lets the end of the loop skip _kb_val_pass
@@ -17797,15 +17801,25 @@ kb-knowledge-validate() {
         # zero warnings (XACA-0795). Two files claiming one slot means one of
         # them will be silently clobbered by any merge or migration, so this is
         # an ERROR, not a warning. Applies to both roots.
+        #
+        # XACA-1080-002: swapped the per-file `basename "$ef" .md | sed ...`
+        # pipe (2 forks x every file in the directory) for zsh's native
+        # ${ef:t:r} basename/strip-extension modifiers plus a builtin `=~`
+        # regex match — zero forks per file. Same anti-pattern as the
+        # orphan-scan fix below (fork-per-item instead of one pass), smaller
+        # in absolute cost (~4s measured of the 105s baseline) but free to fix
+        # in the same hunk. `sort`/`uniq -d` below still fork — one pair per
+        # directory, not per file — left as-is, that was never the cost.
         if [[ ${#entry_files[@]} -gt 0 ]]; then
             dup_slots=$(for ef in "${entry_files[@]}"; do
-                             basename "$ef" .md | sed -n 's/^\([a-zA-Z][0-9][0-9]*\)-.*$/\1/p'
+                             fname_stem="${ef:t:r}"
+                             [[ "$fname_stem" =~ '^([a-zA-Z][0-9]+)-' ]] && print -r -- "${match[1]}"
                          done | sort | uniq -d)
             if [[ -n "$dup_slots" ]]; then
                 while IFS= read -r dup_slot; do
                     [[ -n "$dup_slot" ]] || continue
                     dup_files=$(for ef in "${entry_files[@]}"; do
-                                    fname=$(basename "$ef" .md)
+                                    fname="${ef:t:r}"
                                     case "$fname" in
                                         "${dup_slot}"-*) printf '%s.md ' "$fname" ;;
                                     esac
@@ -17824,13 +17838,31 @@ kb-knowledge-validate() {
                 echo "    Auto-fixed: regenerated INDEX.md"
             fi
         else
-            # Collect IDs mentioned in INDEX.md
-            while IFS= read -r line; do
-                if echo "$line" | grep -qE '`([ktspmv][0-9]+-[^`]+)`'; then
-                    idx_id=$(echo "$line" | grep -oE '`[ktspmv][0-9]+-[^`]+`' | tr -d '`' | head -1)
-                    [[ -n "$idx_id" ]] && index_ids+=("$idx_id")
-                fi
-            done < "$index_file"
+            # Collect IDs mentioned in INDEX.md.
+            #
+            # XACA-1080-002: this used to be a per-LINE `while read` loop that
+            # forked `echo|grep -qE` to test EVERY line, then a second
+            # `echo|grep -oE|tr|head` pipeline for every matching line —
+            # MEASURED 89.5% of this command's total wall time (94s of 105s)
+            # at current tree size (173 INDEX.md files / 17,372 lines, ~35-49k
+            # forks total). Orphan detection is inherently a whole-INDEX
+            # property (an id is orphaned RELATIVE TO an index), so this is an
+            # algorithmic fix, not a scoping one — it still reads the whole
+            # file, just once per FILE (one awk fork) instead of once per
+            # LINE.
+            #
+            # awk's match() reports the LEFTMOST match on a line, same as the
+            # old `grep -oE ... | head -1` — so a line carrying more than one
+            # backtick-quoted id still yields only its first, preserving the
+            # original extraction rule exactly, not just its common-case
+            # output. (No INDEX.md in the live tree currently has such a
+            # line — the only observed difference is fork count.)
+            index_ids_raw=$(awk '
+                match($0, /`[ktspmv][0-9]+-[^`]+`/) {
+                    print substr($0, RSTART + 1, RLENGTH - 2)
+                }
+            ' "$index_file" 2>/dev/null)
+            [[ -n "$index_ids_raw" ]] && index_ids=("${(@f)index_ids_raw}")
         fi
 
         # Validate each entry file. XACA-0991-003: iterates entry_files_scoped

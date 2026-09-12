@@ -6,6 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1080** — mirrors the knowledge-validator performance work from dev-team.
+  `kb-knowledge-validate`'s INDEX.md orphan-scan replaced its per-LINE fork loop
+  (`echo|grep -qE` per line, then `echo|grep -oE|tr|head` per match — ~35,000-49,000 forks
+  at 184 INDEX.md files / ~17,600 lines) with a single `awk` pass per INDEX file, and the
+  duplicate-ID-slot check swapped `basename|sed` for zsh-native `${ef:t:r}` + `=~`
+  (XACA-1080-002). MEASURED 89.5% of the command's total wall time sat in that one scan
+  (94s of 105s, XACA-1080-001 profile); `--file` went 105s -> 9.83s (~10.7x) and a
+  real-scale `kb-knowledge-add` 250s+ -> 12.3-15.8s, clearing the 120s agent tool timeout
+  that had forced every agent to background the call. Behaviourally identical: stdout,
+  stderr and exit code byte-for-byte equal, with both rewritten extractions verified
+  against every INDEX.md (184) and entry file (1,936) in the live tree at zero differences.
+  The `--help` text's matching "cheap regardless of scope" claim was corrected in the same
+  region. Ported verbatim into both tap copies to satisfy the `knowledge-region-parity`
+  guard, which covers `kb-knowledge-validate` in full. See `CHANGELOG.md` (dev-team) for
+  the full per-subitem detail.
 - XACA-0787 round-9 — DELIVERY FIX, caught by the review gate re-verifying from
   scratch rather than trusting its own round-8 approval. `share/scripts/register-claude-hook.py`
   had reverted to its PRE-FIX state (8209 bytes, zero HOME-guard markers) while
