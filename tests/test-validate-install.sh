@@ -77,6 +77,10 @@ _write_scripts() {
         # XACA-0796: kb-msg relay entrypoints — checked for presence AND +x
         "fleet-reporter.sh"
         "msg-client.sh"
+        # XACA-1184-008: the ai.credential resolver sourced by
+        # display-agent-avatar.sh and the nine banners. Executable, like the
+        # other sourced *.sh libraries the installer chmod +x's.
+        "team-account-display.sh"
     )
     for s in "${names[@]}"; do
         touch "$scripts_dir/$s"
@@ -438,10 +442,10 @@ cp "$install_dir/scripts/iterm2_window_manager.py" "$install_dir/iterm2_window_m
 _val_check_scripts "$install_dir" >/dev/null 2>&1
 assert_equal "0" "$_VAL_FAIL"
 assert_equal "0" "$_VAL_WARN"
-# 7 required executables (5 original + XACA-0796 fleet-reporter.sh, msg-client.sh)
-# + 4 relay data files (msg-client.js, vault-keygen.js, package.json,
-# package-lock.json) + root copy = 12 passes
-assert_equal "12" "$_VAL_PASS"
+# 8 required executables (5 original + XACA-0796 fleet-reporter.sh, msg-client.sh
+# + XACA-1184-008 team-account-display.sh) + 4 relay data files (msg-client.js,
+# vault-keygen.js, package.json, package-lock.json) + root copy = 13 passes
+assert_equal "13" "$_VAL_PASS"
 test_pass
 
 test_start "_val_check_scripts: warns for missing script file"
