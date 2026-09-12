@@ -124,11 +124,143 @@ _atf_mandatory_teams_registry_path() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# _atf_mandatory_teams_reject_parameterized <newline-separated candidate ids> <registry_path>
+#
+# XACA-1070-030 (PR #865 round 4 review, "the feature assumes
+# template_id == instance_id"): this is the THIRD iteration of one bug —
+# read this header before touching it again.
+#
+# atf_mandatory_teams() yields REGISTRY/TEMPLATE ids (share/teams/registry.json
+# keys them by template — "finance", "legal", "freelance"), but
+# install-team.sh:2028 names the on-disk board by INSTANCE_ID, not the
+# template id ("contract §6, invariant 8"), and team-paths.json is keyed by
+# instance id too, with no template back-link. For an UNPARAMETERIZED team
+# (TEAM_HAS_PROJECTS != "true") template == instance, so every downstream
+# consumer of atf_mandatory_teams()'s output — atf_team_has_board() (×2,
+# this file + aiteamforge-upgrade.sh's _xaca1070_mandatory_team_has_board
+# fallback) and the team-paths.json lookup inside
+# aiteamforge-upgrade.sh's _xaca1070_add_team_working_dir_to_config() (via
+# aiteamforge_team_working_dir()) — happens to resolve correctly by
+# coincidence. For a PARAMETERIZED team (finance/legal/medical/freelance-
+# shaped: TEAM_HAS_PROJECTS="true", optionally TEAM_REQUIRES_CLIENT_ID=
+# "true" too) they diverge, and all three sites read the wrong (template)
+# key forever — the upgrade backfill would then re-attempt provisioning
+# that team on EVERY upgrade, exactly the outcome atf_team_has_board() was
+# factored out to prevent (see that function's own header comment).
+#
+# TWO WAYS TO CLOSE THIS GAP — EVIDENCE FOR THE ONE CHOSEN:
+#
+#   (a) Auto-resolve the instance id before checking. REJECTED. Investigated
+#       whether the mapping already exists rather than inventing one:
+#       install-team.sh's own compute_instance_id() (and
+#       bin/aiteamforge-setup.sh's _atf_resolve_team_defaults(), added in
+#       THIS SAME PR for the cockpit/UPGRADE_HYDRATED workdir gap,
+#       XACA-1070-021/026) DOES compute a deterministic default —
+#       "<template>-<TEAM_DEFAULT_PROJECT>", or
+#       "<template>-default-client-<TEAM_DEFAULT_PROJECT>" when
+#       TEAM_REQUIRES_CLIENT_ID="true" too. But that default does not even
+#       agree with THIS fleet's real deployed instances: legal.conf's own
+#       TEAM_DEFAULT_PROJECT is "default" (confirmed by reading
+#       share/teams/legal.conf), not "coparenting" — the instance this
+#       machine's owner actually uses (get_board_id() in kanban-paths.sh
+#       hard-codes finance→finance-personal, legal→legal-coparenting,
+#       medical→medical-general as THIS repo's own already-chosen
+#       instances, not a convention a fresh fleet machine could derive).
+#       A deterministic backfill would therefore silently create
+#       "legal-default" — a second, empty, WRONG board sitting next to the
+#       real one — not detect the real one. And TEAM_REQUIRES_CLIENT_ID=
+#       "true" (freelance) has no default client at all:
+#       compute_instance_id() hard-`exit 1`s without one, so "deterministic"
+#       isn't even reachable for that shape when update_mandatory_teams()
+#       invokes install-team.sh with no --client (confirmed by reading its
+#       call site: no --project/--client flags are passed there at all).
+#       Manufacturing a plausible-looking but wrong instance is a WORSE
+#       failure than a loud rejection — it is indistinguishable from a
+#       correctly-provisioned team until a human notices the board is empty.
+#
+#   (b) Reject mandatory+parameterized loudly at the source. CHOSEN. "mandatory"
+#       means every machine in the fleet gets this EXACT team with NO human
+#       input (see this file's own header comment + the setup wizard's
+#       _atf_apply_mandatory_teams). A parameterized team is the opposite of
+#       that by design: its real instance encodes a PERSON's own
+#       client/project/case, which nothing can choose automatically. Filtering
+#       here — the single choke point EVERY consumer (wizard force-append,
+#       upgrade backfill, doctor fault check) already reads through — means
+#       the three affected call sites above never see a parameterized id in
+#       the first place, so they need no individual patching and cannot
+#       independently drift again.
+#
+# NOT A WHOLE-FUNCTION FAILURE: mirrors the existing no-usable-"id" malformed-
+# entry handling immediately below in atf_mandatory_teams() — a rejected
+# entry is skipped (with a loud stderr diagnostic naming it and why) and
+# atf_mandatory_teams() still returns 0 with every OTHER, valid mandatory
+# team's enforcement intact. One bad registry entry must not poison the rest,
+# the exact rule the id-less-entry fix above this one already established.
+#
+# _atf_resolve_team_defaults() in bin/aiteamforge-setup.sh is NOT removed by
+# this fix. Its TEAM_HAS_PROJECTS/TEAM_REQUIRES_CLIENT_ID branches exist
+# solely to fill in _WORKDIR_/_PROJECT_/_CLIENT_ for a team that reached the
+# cockpit/UPGRADE_HYDRATED branches WITHOUT running the interactive Step 2
+# working-dir loop — which, by inspection of that function's own four call
+# sites, only ever happens for a team force-appended by
+# _atf_apply_mandatory_teams(). Once THIS filter guarantees a parameterized
+# id can never reach SELECTED_TEAMS through that door, those two branches
+# are UNREACHABLE BY DESIGN (documented at the function itself, not removed —
+# see its header comment) rather than dead weight silently rotting.
+#
+# HOW: looks up each candidate id's conf at
+# "$(dirname "$registry_path")/<id>.conf" — share/teams/ holds registry.json
+# and every *.conf side by side, confirmed by `ls share/teams/`. Greps for an
+# uncommented TEAM_HAS_PROJECTS="true" or TEAM_REQUIRES_CLIENT_ID="true" line
+# — the SAME two flags install-team.sh's compute_instance_id() itself
+# branches on, so this can never disagree with what the installer would
+# actually do. A team with no conf file at all, or neither flag set to
+# "true", is treated as unparameterized — fail-OPEN on "no evidence of
+# parameterization found", not fail-closed, because an absent/unreadable
+# conf is a different, pre-existing failure this file does not otherwise
+# treat as fatal (install-team.sh's own conf validation is where a
+# genuinely missing conf gets caught).
+#
+# Prints the filtered id list, one per line, order preserved. Always
+# "succeeds" (no return-code contract of its own) — the caller's rc already
+# reflects whether the REGISTRY itself was readable; this step only ever
+# operates on an already-successfully-parsed candidate list.
+# ─────────────────────────────────────────────────────────────────────────────
+_atf_mandatory_teams_reject_parameterized() {
+    local _candidates="$1"
+    local _registry_path="$2"
+    local _teams_dir
+    _teams_dir="$(dirname "$_registry_path")"
+
+    local _id _conf
+    while IFS= read -r _id; do
+        [ -n "$_id" ] || continue
+        _conf="${_teams_dir}/${_id}.conf"
+        if [ -f "$_conf" ] && grep -qE '^[[:space:]]*TEAM_(HAS_PROJECTS|REQUIRES_CLIENT_ID)="true"' "$_conf" 2>/dev/null; then
+            echo "mandatory-teams.sh: \"${_id}\" is flagged \"mandatory\": true in ${_registry_path} but ${_conf} declares TEAM_HAS_PROJECTS/TEAM_REQUIRES_CLIENT_ID=\"true\" (parameterized) — mandatory + parameterized is not supported (no fleet-wide-correct instance id can be derived; see this function's own header comment in mandatory-teams.sh). Skipping this team from mandatory enforcement — fix the registry (unset \"mandatory\") or make the team unparameterized (XACA-1070-030)." >&2
+            continue
+        fi
+        echo "$_id"
+    done <<EOF
+$_candidates
+EOF
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # atf_mandatory_teams
 #
 # Echoes one mandatory team id per line, read from share/teams/registry.json
 # (every entry where "mandatory" is boolean true). Order follows the
 # registry's own "order" field, same as the wizard's selection list.
+#
+# XACA-1070-030: an entry whose OWN conf declares it parameterized
+# (TEAM_HAS_PROJECTS/TEAM_REQUIRES_CLIENT_ID="true") is silently excluded
+# from this list — see _atf_mandatory_teams_reject_parameterized()'s header
+# comment (immediately above this function) for why "mandatory" +
+# "parameterized" is unsupported by design, not a bug to auto-resolve. This
+# does not change the return-code contract below: a rejected entry is
+# treated exactly like the existing no-usable-"id" malformed-entry case —
+# skipped, with a loud stderr diagnostic, never a whole-function failure.
 #
 # Return codes distinguish "genuinely zero mandatory teams" from "could not
 # read the registry at all" — collapsing those two into the same silent
@@ -193,6 +325,12 @@ atf_mandatory_teams() {
         # and 5 (bad --arg type etc.) are real errors and must NOT be
         # treated as "just empty".
         if [ "$jq_rc" -eq 0 ]; then
+            # XACA-1070-030: filter out any candidate whose OWN conf declares
+            # it parameterized before ever emitting it — see
+            # _atf_mandatory_teams_reject_parameterized's header comment
+            # (immediately above this function) for the full rationale.
+            out="$(printf '%s\n' "$out" | sed '/^$/d')"
+            out="$(_atf_mandatory_teams_reject_parameterized "$out" "$registry_path")"
             printf '%s\n' "$out" | sed '/^$/d'
         elif [ "$jq_rc" -eq 1 ] || [ "$jq_rc" -eq 4 ]; then
             # Valid JSON, filter just matched nothing (or the array itself is
@@ -314,7 +452,22 @@ try:
     # second, so two entries of the SAME type still compare exactly as
     # before.
     def _order_sort_key(t):
-        order = t.get('order') or 0
+        # XACA-1070-030 (prose finding, PR #865 round 4 review, third
+        # iteration of this exact shape): `or 0` collapses EVERY
+        # Python-falsy value -- not just None/False -- into the default,
+        # but jqs `//` operator only substitutes on `null`/`false`. An
+        # order value of empty string (or an empty object/array) is
+        # falsy in Python and truthy in jq, so `or 0` silently
+        # reassigned it to 0 here while the jq branch kept the original
+        # value and ranked it as a string (or object/array) instead --
+        # ordering-only divergence (mandatory membership itself is
+        # unaffected), but a real, avoidable disagreement between the
+        # two branches. Coalesce ONLY on the two values jqs `//` treats
+        # as absent -- None (JSON null) and False (JSON false) -- so a
+        # present-but-Python-falsy order value survives untouched,
+        # matching the jq branch exactly for ANY value type.
+        _raw_order = t.get('order')
+        order = 0 if (_raw_order is None or _raw_order is False) else _raw_order
         if isinstance(order, bool):
             # jq: false < true, both before numbers/strings.
             return (0, int(order))
@@ -345,6 +498,13 @@ PYEOF
         bad_count="$(grep -o 'XACA1070_BAD_COUNT=[0-9]*' "$err_file" 2>/dev/null | tail -1 | cut -d= -f2)"
         rm -f "$err_file" 2>/dev/null
         if [ "$rc" -eq 0 ]; then
+            # XACA-1070-030: same shared filter the jq branch calls above —
+            # ONE implementation, applied identically to both parsers' raw
+            # output, so they cannot independently disagree about which
+            # candidates are parameterized (see
+            # _atf_mandatory_teams_reject_parameterized's header comment).
+            out="$(printf '%s\n' "$out" | sed '/^$/d')"
+            out="$(_atf_mandatory_teams_reject_parameterized "$out" "$registry_path")"
             printf '%s\n' "$out" | sed '/^$/d'
             # Mirror the jq branch's malformed-entry diagnostic verbatim
             # (same wording) so the two parsers never silently disagree

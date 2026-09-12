@@ -2334,6 +2334,241 @@ _r2_res="$(
 assert_eq "$_r2_res" "TRUE" "atf_team_has_board academy must still be TRUE for its own academy-board.json -- the fix must not break the true-positive case, got: $_r2_res"
 _block_end
 
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION S -- XACA-1070-030 (PR #865 round 4 review): "the feature assumes
+# template_id == instance_id". A "mandatory": true registry entry whose OWN
+# conf declares it parameterized (TEAM_HAS_PROJECTS / TEAM_REQUIRES_CLIENT_ID
+# = "true") must be excluded from atf_mandatory_teams()'s output -- with a
+# loud stderr diagnostic naming it -- rather than silently reaching
+# atf_team_has_board() (or the team-paths.json lookup inside
+# aiteamforge-upgrade.sh's _xaca1070_add_team_working_dir_to_config()) under
+# the WRONG (template, not instance) key forever. See
+# _atf_mandatory_teams_reject_parameterized()'s own header comment in
+# libexec/lib/mandatory-teams.sh for the full evidence and the two options
+# weighed (auto-resolve vs. reject loudly; reject was chosen).
+#
+# Fixture: 6 registry entries --
+#   spacedock  mandatory:true, order 1, NO conf file at all (fail-OPEN on
+#              "no evidence of parameterization" -- an absent conf is a
+#              different, pre-existing failure this filter does not treat
+#              as fatal)
+#   gizmo      mandatory:true, order 2, conf present but
+#              TEAM_HAS_PROJECTS="false" (explicit negative -- must survive)
+#   freelance  mandatory:true, order 3, TEAM_REQUIRES_CLIENT_ID="true"
+#              (rejected)
+#   finance    mandatory:true, order 4, TEAM_HAS_PROJECTS="true" alone,
+#              no client requirement (rejected -- proves HAS_PROJECTS alone
+#              is sufficient, not just REQUIRES_CLIENT_ID)
+#   legal      mandatory:true, order 5, TEAM_HAS_PROJECTS="true" (rejected,
+#              second HAS_PROJECTS-alone case so S1 cannot pass by fluke on
+#              a single sample)
+#   alpha      NOT mandatory (negative control, unrelated to this filter)
+# ═══════════════════════════════════════════════════════════════════════════
+
+REG_S_MANDATORY_PARAM='{"version":"1.0.0","teams":[{"id":"spacedock","name":"Space Dock","order":1,"mandatory":true},{"id":"gizmo","name":"Gizmo","order":2,"mandatory":true},{"id":"freelance","name":"Freelance","order":3,"mandatory":true},{"id":"finance","name":"Finance","order":4,"mandatory":true},{"id":"legal","name":"Legal","order":5,"mandatory":true},{"id":"alpha","name":"Alpha","order":6}]}'
+
+_x1070_mk_s_fixture() {
+    local dir
+    dir="$(_x1070_mk_reg_sandbox "$1" "$REG_S_MANDATORY_PARAM")"
+    printf 'TEAM_HAS_PROJECTS="false"\n' > "$dir/share/teams/gizmo.conf"
+    printf 'TEAM_HAS_PROJECTS="true"\nTEAM_REQUIRES_CLIENT_ID="true"\nTEAM_DEFAULT_PROJECT="default"\n' > "$dir/share/teams/freelance.conf"
+    printf 'TEAM_HAS_PROJECTS="true"\nTEAM_DEFAULT_PROJECT="personal"\n' > "$dir/share/teams/finance.conf"
+    printf 'TEAM_HAS_PROJECTS="true"\nTEAM_DEFAULT_PROJECT="default"\n' > "$dir/share/teams/legal.conf"
+    # spacedock deliberately gets NO conf file -- see S1's absent-conf assertion.
+    printf '%s' "$dir"
+}
+
+# ── S1: parameterized entries excluded; unparameterized (incl. no-conf-at-all)
+# entries survive, in registry 'order' ──
+_block_start "S1: atf_mandatory_teams -- parameterized mandatory entries (TEAM_HAS_PROJECTS/TEAM_REQUIRES_CLIENT_ID) excluded, unparameterized survive (XACA-1070-030)"
+_s1_dir="$(_x1070_mk_s_fixture s1)"
+_s1_err="$SANDBOX/s1.err"
+_s1_out="$(_x1070_run_resolver "$_s1_dir" atf_mandatory_teams 2>"$_s1_err")"; _s1_rc=$?
+assert_eq "$_s1_rc" "0" "one bad (parameterized) entry must not fail the whole read -- expected exit 0, got $_s1_rc"
+assert_eq "$_s1_out" "$(printf 'spacedock\ngizmo')" "expected exactly spacedock (no conf at all -- fail-open) then gizmo (TEAM_HAS_PROJECTS=false), in order; freelance/finance/legal must be excluded, got: [$_s1_out]"
+assert_not_contains "$_s1_out" "freelance" "TEAM_REQUIRES_CLIENT_ID=true team must never reach the emitted list"
+assert_not_contains "$_s1_out" "finance" "TEAM_HAS_PROJECTS=true (alone, no client requirement) must still be rejected"
+assert_not_contains "$_s1_out" "legal" "a second TEAM_HAS_PROJECTS=true-alone entry must also be rejected (proves S1 is not passing on a single sample)"
+_block_end
+
+# ── S2: the rejection is LOUD -- a distinct stderr diagnostic names each
+# rejected id and cites XACA-1070-030, never a silent drop ──
+_block_start "S2: atf_mandatory_teams -- rejected parameterized entries each get a named stderr diagnostic (XACA-1070-030)"
+_s2_dir="$(_x1070_mk_s_fixture s2)"
+_s2_err="$SANDBOX/s2.err"
+_x1070_run_resolver "$_s2_dir" atf_mandatory_teams >/dev/null 2>"$_s2_err"
+_s2_err_body="$(cat "$_s2_err")"
+assert_contains "$_s2_err_body" '"freelance" is flagged "mandatory": true' "expected a diagnostic naming freelance"
+assert_contains "$_s2_err_body" '"finance" is flagged "mandatory": true' "expected a diagnostic naming finance"
+assert_contains "$_s2_err_body" '"legal" is flagged "mandatory": true' "expected a diagnostic naming legal"
+assert_contains "$_s2_err_body" "XACA-1070-030" "expected the diagnostic to cite XACA-1070-030"
+assert_not_contains "$_s2_err_body" '"spacedock" is flagged' "spacedock (no conf, fail-open) must NOT be reported as rejected"
+assert_not_contains "$_s2_err_body" '"gizmo" is flagged' "gizmo (TEAM_HAS_PROJECTS=false) must NOT be reported as rejected"
+_block_end
+
+# ── S3: atf_is_mandatory_team's membership predicate reflects the SAME
+# filter -- it delegates to atf_mandatory_teams() rather than re-reading the
+# registry itself, so it cannot independently disagree ──
+_block_start "S3: atf_is_mandatory_team -- membership predicate reflects the parameterized-team rejection too (XACA-1070-030)"
+_s3_dir="$(_x1070_mk_s_fixture s3)"
+( _x1070_run_resolver "$_s3_dir" atf_is_mandatory_team spacedock ) 2>/dev/null; assert_eq "$?" "0" "spacedock (survives the filter) must be a mandatory-team member"
+( _x1070_run_resolver "$_s3_dir" atf_is_mandatory_team gizmo ) 2>/dev/null; assert_eq "$?" "0" "gizmo (survives the filter) must be a mandatory-team member"
+( _x1070_run_resolver "$_s3_dir" atf_is_mandatory_team freelance ) 2>/dev/null; assert_eq "$?" "1" "freelance is flagged mandatory:true in the registry but REJECTED by the filter -- membership must be 1 (not mandatory), never independently re-derived as 0"
+( _x1070_run_resolver "$_s3_dir" atf_is_mandatory_team finance ) 2>/dev/null; assert_eq "$?" "1" "finance must likewise read as not-mandatory once rejected"
+_block_end
+
+# ── S4: jq and python3 branches AGREE on the parameterized-rejection filter
+# (same technique as Section P) -- the filter is ONE shared shell function
+# applied identically after either parser produces its raw candidate list,
+# so this is really a proof that the shared-function wiring is correct in
+# BOTH call sites, not a second independent implementation to keep in sync ──
+_block_start "S4: atf_mandatory_teams -- jq and python3 branches agree on the parameterized-rejection filter (XACA-1070-030)"
+_s4_dir="$(_x1070_mk_s_fixture s4)"
+_s4_err_jq="$SANDBOX/s4-jq.err"
+_s4_out_jq="$(_x1070_run_resolver "$_s4_dir" atf_mandatory_teams 2>"$_s4_err_jq")"; _s4_rc_jq=$?
+_s4_err_py="$SANDBOX/s4-py.err"
+_s4_out_py="$(
+    {
+        PATH="$_jqfree_bin"
+        export PATH
+        unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+        # shellcheck disable=SC1091
+        . "$_s4_dir/libexec/lib/mandatory-teams.sh"
+        atf_mandatory_teams
+    } 2>"$_s4_err_py"
+)"; _s4_rc_py=$?
+assert_eq "$_s4_rc_jq" "0" "sanity: jq branch expected exit 0, got $_s4_rc_jq"
+assert_eq "$_s4_rc_py" "0" "python3 fallback expected exit 0, got $_s4_rc_py (stderr: $(cat "$_s4_err_py"))"
+assert_eq "$_s4_out_jq" "$(printf 'spacedock\ngizmo')" "sanity: jq branch expected spacedock,gizmo"
+assert_eq "$_s4_out_py" "$_s4_out_jq" "python3 fallback must produce the IDENTICAL filtered id list as the jq branch, got: $_s4_out_py"
+assert_contains "$(cat "$_s4_err_py")" "XACA-1070-030" "python3 fallback path must ALSO surface the rejection diagnostic (proves the shared filter runs on both branches, not just jq's)"
+_block_end
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION T -- XACA-1070-031: install-team.sh's ATF_ENV_TEAM_WORKING_DIR
+# override (captured from the caller-supplied TEAM_WORKING_DIR env var
+# BEFORE _read_conf's eval clobbers it, applied only for UNPARAMETERIZED
+# teams -- see install-team.sh's own header comment on that block) shipped
+# with ZERO test coverage: every existing install-team.sh test in this repo
+# uses a STUB installer, and nothing referenced the variable. Runs the REAL
+# install-team.sh end-to-end against the "academy" team (real conf, real
+# persona templates, TEAM_HAS_PROJECTS=false -- confirmed by
+# `grep TEAM_HAS_PROJECTS share/teams/academy.conf`) in a fully sandboxed
+# HOME/AITEAMFORGE_DIR, mirroring test-xaca-0498-twd-guard.sh's own
+# real-install-team.sh technique (Branch C: no dev-source sentinel, a
+# minimal organization.yaml so the org check passes non-interactively).
+#
+# OBSERABLE SIDE EFFECT USED AS THE ASSERTION: install-team.sh copies
+# academy's persona templates into "$TEAM_WORKING_DIR/personas/" (confirmed
+# by reading that code path) whenever the resolved working dir differs from
+# AITEAMFORGE_DIR/academy and is not already a git work tree -- both true
+# for a fresh sandboxed HOME. A known persona file
+# (academy_emh_documentation_persona.md, confirmed present under
+# share/personas/academy/agents/) landing under the EXPECTED working dir
+# (and NOT under the unused one) is a reliable, real-behavior proof of which
+# TEAM_WORKING_DIR actually won -- more reliable than grepping stdout, which
+# has no dedicated "resolved working dir" line.
+#
+# BOTH PATHS MATTER, PER THE TICKET: T1 (no override) is the behaviour every
+# current caller relies on and must stay behaviour-neutral; T2 (override
+# given) is the new mechanism this subitem exists to cover.
+# ═══════════════════════════════════════════════════════════════════════════
+
+INSTALL_TEAM_SH="$TAP_ROOT/libexec/installers/install-team.sh"
+ORG_YAML_EXAMPLE="$TAP_ROOT/share/config/organization.yaml.example"
+_X1070T_MARKER="personas/agents/academy_emh_documentation_persona.md"
+
+_x1070t_write_org_config() {
+    mkdir -p "$1/.aiteamforge"
+    cp "$ORG_YAML_EXAMPLE" "$1/.aiteamforge/organization.yaml"
+}
+
+# ── T0: preflight -- confirm academy really is unparameterized (this suite's
+# fixture assumption), so T1/T2 exercise the ATF_ENV_TEAM_WORKING_DIR branch
+# and not the parametric (XACA-0485) one ──
+_block_start "T0 preflight: academy.conf is unparameterized (TEAM_HAS_PROJECTS != true) -- required for T1/T2 to exercise the ATF_ENV_TEAM_WORKING_DIR branch"
+if grep -qE '^TEAM_HAS_PROJECTS="true"' "$TAP_ROOT/share/teams/academy.conf" 2>/dev/null; then
+    _block_note_fail "academy.conf now declares TEAM_HAS_PROJECTS=true -- T1/T2 below need a different unparameterized fixture team"
+fi
+_block_end
+
+# ── T1: NO override -- TEAM_WORKING_DIR env unset -- behaviour-neutral,
+# resolves to the conf default ($HOME/academy) ──
+_block_start "T1: install-team.sh -- NO ATF_ENV_TEAM_WORKING_DIR override -- resolves to the conf default (XACA-1070-031, no-override path)"
+_t1_home="$SANDBOX/t1-home"
+_t1_aitf="$SANDBOX/t1-aitf"
+mkdir -p "$_t1_home" "$_t1_aitf"
+_x1070t_write_org_config "$_t1_home"
+_t1_stdout="$SANDBOX/t1-stdout.txt"
+_t1_stderr="$SANDBOX/t1-stderr.txt"
+_t1_rc=0
+HOME="$_t1_home" AITEAMFORGE_DIR="$_t1_aitf" \
+    bash "$INSTALL_TEAM_SH" academy >"$_t1_stdout" 2>"$_t1_stderr" || _t1_rc=$?
+assert_eq "$_t1_rc" "0" "expected a clean install, got exit $_t1_rc (stderr: $(cat "$_t1_stderr"))"
+assert_file_exists "$_t1_home/academy/$_X1070T_MARKER" "with no override, personas must land under the conf default \$HOME/academy -- got nothing there (stdout: $(cat "$_t1_stdout"))"
+_block_end
+
+# ── T2: override GIVEN -- TEAM_WORKING_DIR env pre-set -- ATF_ENV_TEAM_WORKING_DIR
+# wins over the conf default, and the conf default is NEVER populated ──
+_block_start "T2: install-team.sh -- ATF_ENV_TEAM_WORKING_DIR override GIVEN -- wins over the conf default (XACA-1070-031, override-given path)"
+_t2_home="$SANDBOX/t2-home"
+_t2_aitf="$SANDBOX/t2-aitf"
+_t2_custom="$SANDBOX/t2-custom-workdir"
+mkdir -p "$_t2_home" "$_t2_aitf" "$_t2_custom"
+_x1070t_write_org_config "$_t2_home"
+_t2_stdout="$SANDBOX/t2-stdout.txt"
+_t2_stderr="$SANDBOX/t2-stderr.txt"
+_t2_rc=0
+HOME="$_t2_home" AITEAMFORGE_DIR="$_t2_aitf" TEAM_WORKING_DIR="$_t2_custom" \
+    bash "$INSTALL_TEAM_SH" academy >"$_t2_stdout" 2>"$_t2_stderr" || _t2_rc=$?
+assert_eq "$_t2_rc" "0" "expected a clean install, got exit $_t2_rc (stderr: $(cat "$_t2_stderr"))"
+assert_file_exists "$_t2_custom/$_X1070T_MARKER" "the ATF_ENV_TEAM_WORKING_DIR override must win -- personas must land under the caller-supplied dir (stdout: $(cat "$_t2_stdout"))"
+assert_file_not_exists "$_t2_home/academy/$_X1070T_MARKER" "with an override given, the conf default (\$HOME/academy) must NEVER be populated -- both cannot win"
+_block_end
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION U -- prose finding closed while touching this file (PR #865 round
+# 4 review, "the third iteration of the same shape"): the -025 fix's
+# `t.get('order') or 0` still coalesces any Python-falsy NON-number
+# ("" / {} / [] / a bare falsy string does not exist, but an EMPTY one
+# does) into the numeric rank, diverging from jq's `//` operator, which
+# only substitutes on `null`/`false` -- every other value, however
+# Python-falsy, is truthy in jq and is kept as-is. Ordering-only
+# divergence (mandatory membership itself was never affected), but a real
+# and avoidable jq/python3 disagreement. Fixed to coalesce ONLY on
+# None/False, matching jq's `//` for ANY value type -- not just the ones
+# shown in the review.
+# ═══════════════════════════════════════════════════════════════════════════
+
+REG_U_ORDER_TYPES='{"version":"1.0.0","teams":[{"id":"e_empty","order":"","mandatory":true},{"id":"e_obj","order":{},"mandatory":true},{"id":"e_arr","order":[],"mandatory":true},{"id":"e_str","order":"z","mandatory":true},{"id":"e_num","order":1,"mandatory":true}]}'
+
+# ── U1: jq and python3 branches agree on ordering for "" / {} / [] / a
+# bare string / a number, all on the SAME registry (XACA-1070-030 prose
+# finding) -- FAILS against the pre-fix `t.get('order') or 0`, which
+# silently reassigns "", {} and [] to rank 0 (tying with real numeric
+# order 0) instead of ranking them by jq's own type order (numbers, then
+# strings, then everything else) ──
+_block_start "U1: atf_mandatory_teams -- jq/python3 order-key parity for \"\" / {} / [] / a bare string / a number (XACA-1070-030 prose finding)"
+_u1_dir="$(_x1070_mk_reg_sandbox order-types-u1 "$REG_U_ORDER_TYPES")"
+_u1_err_jq="$SANDBOX/u1-jq.err"
+_u1_out_jq="$(_x1070_run_resolver "$_u1_dir" atf_mandatory_teams 2>"$_u1_err_jq")"; _u1_rc_jq=$?
+_u1_err_py="$SANDBOX/u1-py.err"
+_u1_out_py="$(
+    {
+        PATH="$_jqfree_bin"
+        export PATH
+        unset AITEAMFORGE_HOME AITEAMFORGE_DIR AITEAMFORGE_CONFIG
+        # shellcheck disable=SC1091
+        . "$_u1_dir/libexec/lib/mandatory-teams.sh"
+        atf_mandatory_teams
+    } 2>"$_u1_err_py"
+)"; _u1_rc_py=$?
+assert_eq "$_u1_rc_jq" "0" "sanity: jq branch expected exit 0, got $_u1_rc_jq (stderr: $(cat "$_u1_err_jq"))"
+assert_eq "$_u1_rc_py" "0" "python3 fallback expected exit 0, got $_u1_rc_py (stderr: $(cat "$_u1_err_py"))"
+assert_eq "$_u1_out_jq" "$(printf 'e_num\ne_empty\ne_str\ne_arr\ne_obj')" "sanity: jq's own type ordering -- number first, then the string-typed entries in registry order (empty string before \"z\"), then object/array last -- got: $_u1_out_jq"
+assert_eq "$_u1_out_py" "$_u1_out_jq" "python3 fallback must produce the IDENTICAL order as the jq branch -- pre-fix, \"\"/{}/[] all silently ranked as 0 and tied with e_num, diverging from jq -- got: $_u1_out_py"
+_block_end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone only).
 # ─────────────────────────────────────────────────────────────────────────────

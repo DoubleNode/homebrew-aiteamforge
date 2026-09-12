@@ -62,6 +62,43 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   extracted precisely so two callers could not disagree; sharing made them
   consistent, not correct, and both were then wrong identically.
   Tests 84 -> 88. Verified under `/bin/bash` 3.2.57.
+  **XACA-1070-030 (round 4 review, "the feature assumes template_id ==
+  instance_id"):** `atf_mandatory_teams()` yields registry/template ids, but
+  `install-team.sh` names a parameterized team's on-disk board by INSTANCE id
+  (`<template>-<project>`, or `<template>-<client>-<project>` when a client
+  is required too), and team-paths.json is keyed by instance id with no
+  template back-link. `atf_team_has_board` (both copies) and the
+  team-paths.json lookup inside `_xaca1070_add_team_working_dir_to_config`
+  therefore read the WRONG key forever for a parameterized mandatory team,
+  re-attempting the backfill on every upgrade. Investigated auto-resolving
+  the instance id instead — `install-team.sh`'s own `compute_instance_id`
+  (via this ticket's `_atf_resolve_team_defaults`) already computes a
+  deterministic default — and rejected it: `legal.conf`'s own
+  `TEAM_DEFAULT_PROJECT` is "default", not "coparenting" (the instance this
+  fleet actually uses), so a deterministic backfill would silently create a
+  second, empty, wrong board next to the real one, and a
+  `TEAM_REQUIRES_CLIENT_ID` team (freelance) has no default client at all —
+  `compute_instance_id` hard-errors without one. Fixed at the single choke
+  point instead: a `"mandatory": true` entry whose own conf declares
+  `TEAM_HAS_PROJECTS`/`TEAM_REQUIRES_CLIENT_ID="true"` is now excluded from
+  `atf_mandatory_teams()`'s output — a loud stderr diagnostic, the same
+  treatment as the existing no-usable-"id" malformed-entry case, so one bad
+  entry does not poison the rest — meaning all three affected call sites
+  never see a parameterized id in the first place. `_atf_resolve_team_defaults`'s
+  parameterized branches are now unreachable via the mandatory door by
+  construction; documented as such, not removed (defense in depth).
+  **XACA-1070-031:** `install-team.sh`'s `ATF_ENV_TEAM_WORKING_DIR` override
+  shipped with zero test coverage — every existing test used a stub
+  installer. Added regression coverage against the real installer for both
+  the override-given and no-override paths.
+  Also closed a round-4 review prose finding while here: the -025 fix's
+  `t.get('order') or 0` still coalesced any Python-falsy non-number
+  (`""`, `{}`, `[]`) into the numeric rank, diverging from jq's `//`
+  operator, which substitutes only on `null`/`false`. Ordering-only
+  (mandatory membership itself was unaffected). Fixed to coalesce only on
+  `None`/`False`, matching jq's `//` for any value type; added a parity
+  assertion covering `""`, `{}`, `[]`, and a bare string.
+  Tests 88 -> 96. Verified under `/bin/bash` 3.2.57.
 - XACA-1155: fix the knowledge-entry id allocator (`_kb_alloc_slot` and eight
   sibling enumeration sites) so it stops handing out `k1000` forever once a
   directory's highest entry passes id 999. The scan glob required EXACTLY 3

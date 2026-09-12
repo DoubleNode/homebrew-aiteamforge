@@ -157,6 +157,37 @@ fi
 # substitution without capturing stray output): _ATF_RESOLVED_WORKDIR
 # (always set), _ATF_RESOLVED_PROJECT and _ATF_RESOLVED_CLIENT (empty when
 # not applicable to this team's conf).
+#
+# RECONCILIATION WITH XACA-1070-030 ("mandatory + parameterized" is
+# unsupported by design — see _atf_mandatory_teams_reject_parameterized()'s
+# header comment in libexec/lib/mandatory-teams.sh for the full evidence
+# and the two options weighed). That fix guarantees atf_mandatory_teams()
+# can never emit a team id whose conf declares TEAM_HAS_PROJECTS or
+# TEAM_REQUIRES_CLIENT_ID "true" — such an entry is filtered out (with a
+# loud stderr diagnostic) before _atf_apply_mandatory_teams() ever
+# force-appends it into SELECTED_TEAMS.
+#
+# This function's four call sites (grep this file for
+# "_atf_resolve_team_defaults") are ALL guarded on
+# `[ -z "${!_wvar:-}" ]` — "the Step 2 interactive working-dir loop never
+# set _WORKDIR_<team> for this id" — which, by inspection, only happens for
+# a team that reached SELECTED_TEAMS via _atf_apply_mandatory_teams'
+# force-append rather than the interactive loop (see this function's own
+# BLOCKING A / -026 header comment above). Combined with the XACA-1070-030
+# guarantee above, that means the `has_projects`/`requires_client` branches
+# below — which exist only to synthesize a default project/client for a
+# team the interactive loop never asked about — are UNREACHABLE BY DESIGN
+# for every mandatory team from this point forward: a mandatory id reaching
+# this function is now, by construction, always unparameterized, so
+# `has_projects` is always "false" and control always falls to the final
+# `else` branch. NOT a claim that this function's ONLY caller class is
+# mandatory teams (it is; see the four call sites' own comments), and NOT
+# removed here: kept as a second, independent line of defense (matching
+# this codebase's existing preference for belt-and-suspenders checks over
+# blind trust in a single upstream guarantee — e.g. the cockpit loop's own
+# redundant `atf_is_mandatory_team` recheck above) should a future call
+# site ever invoke this function for a non-mandatory reason, or should the
+# XACA-1070-030 filter itself ever regress.
 # ═══════════════════════════════════════════════════════════════════════════
 _atf_resolve_team_defaults() {
     local team_id="$1"
