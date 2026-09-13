@@ -16681,7 +16681,10 @@ FRONTMATTER
     # XACA-0263: scaffold INDEX.md immediately so a fresh tier dir is queryable
     # without a follow-up `kb-knowledge-reindex` call. Silent on success;
     # failure here doesn't block entry creation (file is already on disk).
-    _kb_knowledge_reindex_one "$target_dir" >/dev/null 2>&1 || true
+    # XACA-1195: stdout stays quiet, but stderr is NOT discarded — a refused
+    # regeneration ([FAIL]) or a byte-semantics re-read ([WARN]) must reach
+    # the user instead of leaving a stale INDEX.md with no explanation.
+    _kb_knowledge_reindex_one "$target_dir" >/dev/null || true
 
     if [[ "${KB_KNOWLEDGE_OPEN_AFTER_ADD:-0}" == "1" ]] && [[ -n "${EDITOR:-}" ]]; then
         "${EDITOR}" "$new_file"
@@ -17142,8 +17145,9 @@ kb-knowledge-promote() {
     echo "  Wrote stub:    ${source_file}"
 
     # 4. Reindex both affected directories
-    kb-knowledge-reindex --dir "$(dirname "$source_file")" 2>/dev/null && echo "  Reindexed: $(dirname "$source_file")"
-    kb-knowledge-reindex --dir "$target_dir" 2>/dev/null && echo "  Reindexed: ${target_dir}"
+    # XACA-1195: stderr left visible so a refused regeneration ([FAIL]) is reported.
+    kb-knowledge-reindex --dir "$(dirname "$source_file")" && echo "  Reindexed: $(dirname "$source_file")"
+    kb-knowledge-reindex --dir "$target_dir" && echo "  Reindexed: ${target_dir}"
 
     echo ""
     echo "Promotion complete."
@@ -17806,7 +17810,8 @@ kb-knowledge-merge() {
     suppressed_count=$(printf '%s\n' "$exec_out" | awk -F'\t' '$1=="SUPPR"{n++} END{print n+0}')
 
     # Rebuild the target index from the merged entry set.
-    _kb_knowledge_reindex_one "$target_dir" >/dev/null 2>&1 || true
+    # XACA-1195: stdout quiet, stderr visible — [FAIL]/[WARN] must reach the user.
+    _kb_knowledge_reindex_one "$target_dir" >/dev/null || true
 
     rm -f "$mapfile"
     rmdir "$tmpdir" 2>/dev/null
@@ -18686,8 +18691,14 @@ kb-knowledge-validate() {
         if [[ ! -f "$index_file" ]]; then
             _kb_val_warn "No INDEX.md in ${val_dir}"
             if $flag_fix; then
-                kb-knowledge-reindex --dir "$val_dir" 2>/dev/null
-                echo "    Auto-fixed: regenerated INDEX.md"
+                # XACA-1195: rc-checked, stderr left visible — the reindex can
+                # now refuse (unreadable entry → [FAIL], INDEX not written), and
+                # an unconditional "Auto-fixed" line reported success anyway.
+                if kb-knowledge-reindex --dir "$val_dir"; then
+                    echo "    Auto-fixed: regenerated INDEX.md"
+                else
+                    _kb_val_error "Auto-fix failed: could not regenerate INDEX.md in ${val_dir} (see [FAIL] above)"
+                fi
             fi
         else
             # Collect IDs mentioned in INDEX.md.
@@ -18809,9 +18820,12 @@ kb-knowledge-validate() {
             # code samples, prose discussions, or quoted text (see XACA-0222 review subitem 014).
             # XACA-1195: rc-checked with an LC_ALL=C retry (same pattern as the
             # INDEX-orphan scan above) so an invalid-UTF-8 byte can't silently
-            # truncate the scanned frontmatter. `head -50` moved INTO awk: the
-            # old `awk | head -50` measured rc 141 (SIGPIPE) on a VALID 50+-line
-            # file, and a pipeline's rc is head's — output proven identical.
+            # truncate the scanned frontmatter. `head -50` moved INTO awk because
+            # awk's rc was unusable through the pipe: without pipefail, `$?` of
+            # `x=$(awk … | head -50)` is head's status (0), so awk's rc=2 abort
+            # was INVISIBLE; and awk's own status (pipestatus) can read 141
+            # (SIGPIPE) on a VALID 50+-line file. The in-awk cap gives awk's
+            # real rc — output proven identical.
             local _kb_xref_prog='/^---$/{if(found){exit}; found=1; next} found{if(++n>50){exit}; print}' _kb_xref_rc=0
             xref_frontmatter=$(awk "$_kb_xref_prog" "$ef" 2>/dev/null)
             _kb_xref_rc=$?
@@ -19029,20 +19043,25 @@ kb-knowledge-reindex() {
         return $?
     fi
 
-    # Rebuild all: collect all tier directories
-    local rebuilt=0 skipped=0
+    # Rebuild all: collect all tier directories.
+    # XACA-1195: _kb_knowledge_reindex_one returns non-zero ONLY on failure
+    # ([FAIL] unreadable entry/section, [error] install failure) — success,
+    # [unchanged] and an empty-dir [skip] all return 0. So the `||` arm below
+    # counts FAILURES; it used to be labelled "skipped" and the function
+    # returned 0 regardless, hiding a refused regeneration from automation.
+    local rebuilt=0 failed=0
     local rdir
 
     # Agent dirs
     for rdir in "${global_root}/agents"/*/; do
         [[ -d "$rdir" ]] || continue
-        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || failed=$((failed + 1))
     done
 
     # Team dirs
     for rdir in "${global_root}/teams"/*/; do
         [[ -d "$rdir" ]] || continue
-        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || failed=$((failed + 1))
     done
 
     # XACA-0754/XACA-0754-013 (ported XACA-0770): local root's agent/team
@@ -19050,11 +19069,11 @@ kb-knowledge-reindex() {
     # path).
     for rdir in "${local_root}/agents"/*/; do
         [[ -d "$rdir" ]] || continue
-        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || failed=$((failed + 1))
     done
     for rdir in "${local_root}/teams"/*/; do
         [[ -d "$rdir" ]] || continue
-        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || failed=$((failed + 1))
     done
 
     # Subject dirs (recursive)
@@ -19063,7 +19082,7 @@ kb-knowledge-reindex() {
         local sdir
         for sdir in "${base}"/*/; do
             [[ -d "$sdir" ]] || continue
-            _kb_knowledge_reindex_one "$sdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+            _kb_knowledge_reindex_one "$sdir" && rebuilt=$((rebuilt + 1)) || failed=$((failed + 1))
             _kb_reindex_subjects "$sdir"
         done
     }
@@ -19074,13 +19093,13 @@ kb-knowledge-reindex() {
     local pdir
     for pdir in "${global_root}/projects"/*/; do
         [[ -d "$pdir" ]] || continue
-        _kb_knowledge_reindex_one "$pdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+        _kb_knowledge_reindex_one "$pdir" && rebuilt=$((rebuilt + 1)) || failed=$((failed + 1))
     done
     # XACA-0754-013 (ported XACA-0770): same glob-walk under local_root/projects
     # (a local-only session's named-project or local-redirected bare-project entries).
     for pdir in "${local_root}/projects"/*/; do
         [[ -d "$pdir" ]] || continue
-        _kb_knowledge_reindex_one "$pdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+        _kb_knowledge_reindex_one "$pdir" && rebuilt=$((rebuilt + 1)) || failed=$((failed + 1))
     done
     # Also reindex the resolved project_path ONLY if it lives outside BOTH
     # glob-walked roots above (in-repo layout: .knowledge-config.yml /
@@ -19089,12 +19108,19 @@ kb-knowledge-reindex() {
     if [[ -d "$project_path" ]] \
         && [[ "$project_path" != "${global_root}/projects/"* ]] \
         && [[ "$project_path" != "${local_root}/projects/"* ]]; then
-        _kb_knowledge_reindex_one "$project_path" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+        _kb_knowledge_reindex_one "$project_path" && rebuilt=$((rebuilt + 1)) || failed=$((failed + 1))
     fi
 
     echo ""
-    echo "  INDEX.md regeneration complete: ${rebuilt} rebuilt, ${skipped} skipped."
+    echo "  INDEX.md regeneration complete: ${rebuilt} rebuilt, ${failed} failed."
     echo ""
+    if (( failed > 0 )); then
+        local _kb_reidx_noun="directories"
+        (( failed == 1 )) && _kb_reidx_noun="directory"
+        echo "  [FAIL] ${failed} INDEX.md ${_kb_reidx_noun} NOT regenerated — see the [FAIL]/[error] lines above" >&2
+        return 1
+    fi
+    return 0
 }
 
 # Show current window's status

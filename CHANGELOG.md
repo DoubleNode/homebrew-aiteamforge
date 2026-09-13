@@ -9,15 +9,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **XACA-1195** — `kb-knowledge-validate` in both `share/templates/kanban/kanban-helpers.template.sh`
   and `share/templates/aliases/kanban-aliases.sh` no longer silently loses data on
   invalid UTF-8. macOS BSD awk aborts (rc=2) on the first invalid byte under a
-  UTF-8 locale. The INDEX-orphan scan used to drop every id after that line, so
-  their orphan checks never ran and the result read as a pass. The cross-ref
-  frontmatter read truncated the same way. Both now re-run the unchanged awk
-  program under `LC_ALL=C` with a loud `[WARN] Invalid UTF-8 in <file>` when rc≠0,
-  and `[FAIL]` if the retry also fails. The cross-ref 50-line cap moved into awk,
-  since `awk | head -50` exited 141 (SIGPIPE) on valid input. Output on valid input
-  is unchanged. This is a verbatim mirror of canonical for region parity. The tap's
-  older `_kb_knowledge_reindex_one` and the merge/search/promote copies are
-  tracked as XACA-1200.
+  UTF-8 locale. The INDEX-orphan scan used to drop every id after that line and
+  report a pass. The cross-ref frontmatter read truncated the same way. Both now
+  re-run the unchanged program under `LC_ALL=C` with a loud
+  `[WARN] Invalid UTF-8 in <file>` when rc≠0, and emit `[FAIL]` if the retry also
+  fails. The cross-ref 50-line cap moved into awk: in `x=$(awk … | head -50)`,
+  `$?` is head's status, so awk's abort was invisible. Round 1 also propagated
+  failures to the callers. Whole-tree `kb-knowledge-reindex` now counts refused
+  directories as `failed` (it used to say "skipped") and returns 1.
+  `kb-knowledge-validate --fix` prints "Auto-fixed" only on success.
+  `kb-knowledge-add`, `-merge` and `-promote` no longer discard reindex stderr.
+  Every change is a hunk-for-hunk mirror of canonical. The tap's older
+  `_kb_knowledge_reindex_one` and the merge/search/promote awk sites are tracked
+  as XACA-1200.
 - **XACA-1199** — `kb-sweep` in `share/templates/kanban/kanban-helpers.template.sh`
   now emits an advisory `RESIDUAL OPEN SUBITEMS (N) — advisory, not merge-gating`
   block. It lists open subitems that are neither `[Review]`/`[Test]`/`[UX]` nor
