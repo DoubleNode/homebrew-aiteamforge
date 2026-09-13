@@ -795,6 +795,17 @@ CHECKS_EOF
     esac
   elif printf '%s\n' "$SWEEP_OUTPUT" | grep -Fq "No subitems found — ready to close."; then
     echo "Residual subitems: n/a (item has no subitems)."
+  elif printf '%s\n' "$SWEEP_OUTPUT" | awk '
+      $0 ~ /^  [^ \[]/ && /RESIDUAL OPEN SUBITEMS:/ && /residual report unavailable/ && /board read failed\.$/ { found=1 }
+      END { exit !found }
+    '; then
+    # kb-sweep's OWN "residual report unavailable — board read failed" line
+    # (a failed dedicated re-query, distinct from "no subitems" and from
+    # "older kb-sweep, no RESIDUAL support at all") used to fall through to
+    # the generic else below and get misdiagnosed as an older kb-sweep. Name
+    # the real cause instead. Print-only — never breaks/continues/exits; the
+    # merge proceeds exactly as before.
+    echo "⚠ kb-sweep could not read the board for its residual report (board read failed) — residual subitems were NOT checked this round; read the full sweep output above for open untagged subitems before this ticket closes."
   else
     echo "⚠ kb-sweep emitted no RESIDUAL report (older kb-sweep?) — read the full sweep output above for open untagged subitems before this ticket closes."
   fi
