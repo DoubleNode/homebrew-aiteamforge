@@ -4748,6 +4748,72 @@ kb-resume() {
     fi
 }
 
+# XACA-1199: helpers for kb-sweep's advisory RESIDUAL OPEN SUBITEMS block.
+# Kept as free functions (not inlined) so they are independently testable and
+# so a future caller (e.g. a kb-pr-time preview, see the plan's follow-up
+# note) can reuse the same classification without re-deriving it.
+
+# Is this subitem title one of the planner's mandatory trailing subitems
+# (or the [Debug] variant)? These are never residual — they are always
+# expected to be open until the very end of the ticket's lifecycle.
+_kb_sweep_is_framework_title() {
+    local title="$1"
+    [[ "$title" == "Testing & Debugging"* ]] && return 0
+    [[ "$title" == "PR Creation & Test Handoff"* ]] && return 0
+    [[ "$title" == "QA Testing & Code Review"* ]] && return 0
+    [[ "$title" == "Retrospective"* ]] && return 0
+    [[ "$title" == "Sync Local Develop Branch"* ]] && return 0
+    [[ "$title" == "[Debug] Sync Local Develop Branch"* ]] && return 0
+    return 1
+}
+
+# S2 signal (XACA-1199 plan D4): does the title cite a DIFFERENT ticket's id?
+# Scans whitespace-delimited "words" (not a raw substring scan) so the match
+# is a whole token, trims common surrounding punctuation, then tests each
+# candidate against the team-generic ticket-id shape. A candidate equal to
+# the parent id, or prefixed "<parent-id>-" (the parent's OWN subitem ids),
+# is never foreign — e.g. "XACA-1186-013" on parent XACA-1186 is not foreign.
+# Prints the first foreign id found and returns 0; returns 1 if none.
+_kb_sweep_first_foreign_id() {
+    local title="$1" parent_id="$2"
+    local remain="$title" cand pre
+    # Scan left-to-right for non-overlapping matches of the id shape (zsh's
+    # `[[ =~ ]]` finds the FIRST match in $remain, not necessarily anchored
+    # at position 1; $MATCH/$MBEGIN/$MEND report what it found — same
+    # mechanism the file already uses at line ~3456/~4580/~21312). This is a
+    # deliberate SUBSTRING scan, not a whole-word match: an id can appear
+    # inside a longer subitem-id chain like "XACA-1186-013" (which reduces
+    # to matching just "XACA-1186", the base id, since the pattern allows
+    # only one dash) — the equality/prefix exclusions below are what
+    # actually decide whether THAT reduced match counts as foreign, so they
+    # must run on every candidate reachable by the scan, not be pre-empted
+    # by requiring the whole word to match.
+    while [[ -n "$remain" ]]; do
+        if [[ "$remain" =~ "[A-Z][A-Z0-9]{1,7}-[0-9]{3,5}" ]]; then
+            cand="$MATCH"
+            # Word-boundary guard: reject a match whose immediately
+            # preceding character is itself alphanumeric, so an id-shaped
+            # tail embedded mid-word (e.g. "FOOXACA-1185") is not treated
+            # as a standalone citation.
+            if (( MBEGIN > 1 )); then
+                pre="${remain[$((MBEGIN - 1))]}"
+            else
+                pre=""
+            fi
+            if [[ -z "$pre" ]] || [[ "$pre" != [A-Za-z0-9] ]]; then
+                if [[ "$cand" != "$parent_id" ]] && [[ "$cand" != "${parent_id}-"* ]]; then
+                    printf '%s' "$cand"
+                    return 0
+                fi
+            fi
+            remain="${remain[$((MEND + 1)),-1]}"
+        else
+            remain=""
+        fi
+    done
+    return 1
+}
+
 # Review all subitems for the current active kanban item and report their statuses
 # Usage: kb-sweep [item-id]
 # If item-id is provided, reviews subitems for that item
@@ -4848,13 +4914,15 @@ kb-sweep() {
     local completed_count=0 cancelled_count=0 in_progress_count=0 todo_count=0 blocked_count=0
     local icon sub_status sub_id sub_title
 
-    # Read subitems as newline-delimited lines: STATUS|ID|TITLE
+    # Read subitems as newline-delimited lines: STATUS|ID|ADDEDAT|TITLE
+    # XACA-1199: addedAt was added BEFORE title (not appended) so that a "|"
+    # inside a title still lands entirely in the last IFS="|" read field.
     local subitem_lines
     subitem_lines=$(_kb_jq_read "$board_file" \
-        '.backlog[$idx].subitems[] | "\(.status)|\(.id)|\(.title)"' \
+        '.backlog[$idx].subitems[] | "\(.status)|\(.id)|\(.addedAt // "")|\(.title)"' \
         --argjson idx "$item_idx" -r 2>/dev/null)
 
-    while IFS="|" read -r sub_status sub_id sub_title; do
+    while IFS="|" read -r sub_status sub_id _sub_added sub_title; do
         [[ -z "$sub_status" ]] && continue
         case "$sub_status" in
             completed)  icon="[✓]" ; completed_count=$((completed_count + 1)) ;;
@@ -4884,7 +4952,7 @@ kb-sweep() {
     # line than the generic "N remaining".
     local protected_unresolved=0
     local protected_lines=""
-    while IFS="|" read -r ps_status ps_id ps_title; do
+    while IFS="|" read -r ps_status ps_id _ps_added ps_title; do
         [[ -z "$ps_status" ]] && continue
         if [[ "$ps_title" == \[Review\]* ]] || [[ "$ps_title" == \[Test\]* ]] || [[ "$ps_title" == \[UX\]* ]]; then
             case "$ps_status" in
@@ -4904,10 +4972,105 @@ kb-sweep() {
         echo ""
     fi
 
+    # XACA-1199: advisory-only "RESIDUAL OPEN SUBITEMS" report. The PR
+    # merge loop reads kb-sweep ONLY for the "PROTECTED SUBITEMS UNRESOLVED"
+    # marker above, so an open subitem that is neither protected
+    # ([Review]/[Test]/[UX]) nor a mandatory framework trailing subitem
+    # merges completely unseen — XACA-1186/PR #874 shipped six such parked
+    # subitems and they surfaced only at kb-done. This block makes them
+    # visible at merge time. It is deliberately a DISTINCT marker, never
+    # folded into "PROTECTED SUBITEMS UNRESOLVED (N)" — the same
+    # non-overload reasoning the XACA-0991-003 knowledge gate below uses its
+    # own marker for: the merge loop's Gate 3 greps that exact protected
+    # string, and an overloaded marker risks a false match or, worse, a
+    # residual line being read as merge-gating when it must never be.
+    # This block NEVER touches remaining_count or kb-sweep's exit code —
+    # it is pure reporting, computed from data already read above.
+    local residual_count=0
+    local residual_flagged_lines="" residual_plain_lines=""
+    local fw_anchor=""
+    local fw_status fw_id fw_added fw_title
+    while IFS="|" read -r fw_status fw_id fw_added fw_title; do
+        [[ -z "$fw_status" ]] && continue
+        if _kb_sweep_is_framework_title "$fw_title"; then
+            # ISO-8601 "Z" timestamps of equal precision compare correctly
+            # as plain strings — no date parsing needed (same reasoning the
+            # PR-monitor loop in CLAUDE.md uses for EFFECTIVE_CUTOFF).
+            if [[ -n "$fw_added" ]] && { [[ -z "$fw_anchor" ]] || [[ "$fw_added" > "$fw_anchor" ]]; }; then
+                fw_anchor="$fw_added"
+            fi
+        fi
+    done <<< "$subitem_lines"
+
+    local r_status r_id r_added r_title
+    while IFS="|" read -r r_status r_id r_added r_title; do
+        [[ -z "$r_status" ]] && continue
+        case "$r_status" in
+            todo|in_progress|blocked) ;;
+            *) continue ;;
+        esac
+        if [[ "$r_title" == \[Review\]* ]] || [[ "$r_title" == \[Test\]* ]] || [[ "$r_title" == \[UX\]* ]]; then
+            continue
+        fi
+        _kb_sweep_is_framework_title "$r_title" && continue
+
+        residual_count=$((residual_count + 1))
+
+        local r_foreign="" r_reasons="" r_s2=false r_s4=false
+        if r_foreign=$(_kb_sweep_first_foreign_id "$r_title" "$working_id"); then
+            r_s2=true
+            r_reasons="cites ${r_foreign}"
+        fi
+        if [[ -n "$fw_anchor" ]] && [[ -n "$r_added" ]] && [[ "$r_added" > "$fw_anchor" ]]; then
+            r_s4=true
+            if [[ -n "$r_reasons" ]]; then
+                r_reasons="${r_reasons}; added after planning batch"
+            else
+                r_reasons="added after planning batch"
+            fi
+        fi
+
+        # Tagging precedence: S4 decides whenever a planning anchor exists; S2
+        # (foreign id in the title) is only the FALLBACK for items with no
+        # framework subitems. Measured 2026-09-12 over 268 open-at-merge
+        # residual lines: where an anchor existed, S2-without-S4 fired on 11
+        # lines and every sampled one was a PLANNED step merely citing context
+        # ("Tap two-step…", "Verify the XACA-0852 gate…"); S4 alone still
+        # catches all 6 XACA-1186 parked lines. A tag that cries wolf on
+        # planned work gets ignored, so a cited id on an in-batch line is
+        # still SHOWN ("cites X") but does not earn "likely parked".
+        local r_parked=false
+        if [[ -n "$fw_anchor" ]]; then
+            $r_s4 && r_parked=true
+        else
+            $r_s2 && r_parked=true
+        fi
+
+        if $r_parked; then
+            residual_flagged_lines+="     ⚠ likely parked • ${r_id}: ${r_title} [${r_status}] (${r_reasons})"$'\n'
+        elif [[ -n "$r_reasons" ]]; then
+            residual_plain_lines+="     • ${r_id}: ${r_title} [${r_status}] (${r_reasons})"$'\n'
+        else
+            residual_plain_lines+="     • ${r_id}: ${r_title} [${r_status}]"$'\n'
+        fi
+    done <<< "$subitem_lines"
+
+    if [[ "$residual_count" -gt 0 ]]; then
+        echo "  ℹ️  RESIDUAL OPEN SUBITEMS ($residual_count) — advisory, not merge-gating:"
+        printf '%s' "$residual_flagged_lines"
+        printf '%s' "$residual_plain_lines"
+        echo "     Not [Review]/[Test]/[UX] and not framework subitems. They do NOT block the merge —"
+        echo "     tick, cancel, or re-home them to the ticket that owns the work before kb-done."
+        echo ""
+    else
+        echo "  ℹ️  RESIDUAL OPEN SUBITEMS (0) — advisory, not merge-gating."
+        echo ""
+    fi
+
     # Retrospective file validation (blocking — prevents kb-done if retro file is missing)
     # Check if there's a completed "Retrospective" subitem and validate the file exists
     local has_retro_subitem=false retro_subitem_completed=false retro_blocking=false
-    while IFS="|" read -r rs_status rs_id rs_title; do
+    while IFS="|" read -r rs_status rs_id _rs_added rs_title; do
         [[ -z "$rs_status" ]] && continue
         # Match the standard "Retrospective and Knowledge Capture" subitem
         # Must start with "Retrospective" to avoid matching subitems that merely mention retros

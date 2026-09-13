@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1199** — `kb-sweep` in `share/templates/kanban/kanban-helpers.template.sh`
+  now emits an advisory `RESIDUAL OPEN SUBITEMS (N) — advisory, not merge-gating`
+  block. It lists open subitems that are neither `[Review]`/`[Test]`/`[UX]` nor
+  framework trailing subitems, tagged `likely parked` when they were added after
+  the item's planning batch. A foreign ticket id in the title is the tag's
+  fallback when there is no batch anchor. The block prints `(0)` when clean, so a
+  missing report is detectable. Ported from canonical with two new helpers
+  (`_kb_sweep_is_framework_title`, `_kb_sweep_first_foreign_id`). Exit code, the
+  PROTECTED marker, and the sweep header/Legend lines are unchanged: parity was
+  verified against this template's pre-port revision.
+  `share/templates/claude/claude-md-global.template` "PR Review Handoff &
+  Monitoring" re-prints that block as a non-blocking banner right before
+  `gh pr merge`. An absent block produces an explicit notice, never silence.
+  The merge still proceeds.
 - **XACA-0886** — mirror the canonical `kb-cancel` hardening into
   `share/templates/kanban/kanban-helpers.template.sh`: a new shared
   `_kb_protected_cancel_guard()` hard-refuses cancelling a protected

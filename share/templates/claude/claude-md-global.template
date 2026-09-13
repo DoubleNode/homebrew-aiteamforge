@@ -690,6 +690,84 @@ CHECKS_EOF
     break
   fi
 
+  # ── Pre-merge RESIDUAL advisory banner ──────────────────────────────────
+  # kb-sweep's Gate 3 output ($SWEEP_OUTPUT, already captured earlier THIS
+  # iteration) may carry a distinct advisory block — literal header
+  # `RESIDUAL OPEN SUBITEMS (N) — advisory, not merge-gating:` — listing
+  # open subitems that are neither protected ([Review]/[Test]/[UX], already
+  # gated at Gate 3) nor one of the mandatory trailing framework subitems.
+  # Ordinary implementation subitems must NOT gate a merge — that would
+  # reintroduce the over-blocking Gate 3's own exit-code note already
+  # rejects — so this step is print-only: it NEVER `break`s, `continue`s,
+  # or makes the merge conditional. It reuses $SWEEP_OUTPUT rather than
+  # re-running kb-sweep or re-parsing board.json — the latter is the same
+  # forbidden escape hatch Gate 3 already calls out.
+  #
+  # WHY THIS EXISTS: a PR merged with six parked subitems (five citing a
+  # different ticket id in their titles) that surfaced only at kb-done,
+  # after the PR — and the ticket that shipped it — had already closed. A
+  # replay of hundreds of merged PR-to-item pairs found roughly one in six
+  # merges (16.2%) still carries at least one such residual line open at
+  # merge time, median 1 line when non-zero, max 15 — rare enough that
+  # gating would be wrong (explicit non-goal), common enough that silent
+  # loss is a real, recurring gap worth one banner.
+  #
+  # ABSENCE IS REPORTED, NEVER READ AS "NONE": a kb-sweep predating this
+  # banner emits no RESIDUAL header at all, and printing nothing in that
+  # case would look identical to a genuinely clean sweep. Three cases are
+  # distinguished explicitly instead of collapsed into one: header present
+  # with N>0, header present with N=0 (kb-sweep ran and found nothing), and
+  # header absent (older kb-sweep, or a zero-subitem item) — the absent
+  # case gets its own loud notice, never silence.
+  #
+  # Portable across BSD awk (macOS) and gawk: no gawk-only 3-arg match(),
+  # anchored on the ASCII header text (never any emoji/glyph, which is not
+  # reliably matchable across awk implementations). `printf '%s\n' "$VAR"`
+  # is used instead of `echo "$VAR"` throughout since a captured subitem
+  # title could start with `-`. No `[ a \> b ]` string comparisons, no
+  # bash-4-only constructs, no top-level `local` — this whole loop already
+  # targets zsh + bash 3.2 (see the FORCE_PUSH_CUTOFF note above); this
+  # block is verified under both.
+  RESIDUAL_BLOCK=$(printf '%s\n' "$SWEEP_OUTPUT" | awk '
+    !found && /RESIDUAL OPEN SUBITEMS \([0-9]+\)/ { found=1 }
+    found {
+      if ($0 == "") { exit }
+      print
+    }
+  ')
+
+  if [ -n "$RESIDUAL_BLOCK" ]; then
+    RESIDUAL_HEADER_LINE=$(printf '%s\n' "$RESIDUAL_BLOCK" | awk 'NR==1')
+    RESIDUAL_COUNT=$(printf '%s\n' "$RESIDUAL_HEADER_LINE" | awk '
+      {
+        n = match($0, /RESIDUAL OPEN SUBITEMS \([0-9]+\)/)
+        if (n > 0) {
+          s = substr($0, RSTART, RLENGTH)
+          gsub(/[^0-9]/, "", s)
+          print s
+        }
+      }
+    ')
+    case "$RESIDUAL_COUNT" in
+      ''|*[!0-9]*)
+        echo "⚠ Could not parse a residual count from kb-sweep's RESIDUAL header — treating as non-zero to be safe:"
+        printf '%s\n' "$RESIDUAL_BLOCK"
+        ;;
+      0)
+        echo "Residual subitems: none."
+        ;;
+      *)
+        echo "━━ RESIDUAL (non-blocking) — merging anyway ━━"
+        printf '%s\n' "$RESIDUAL_BLOCK"
+        echo "These will surface again at kb-done — re-home them to the ticket that owns the work before this ticket closes."
+        ;;
+    esac
+  elif printf '%s\n' "$SWEEP_OUTPUT" | grep -Fq "No subitems found — ready to close."; then
+    echo "Residual subitems: n/a (item has no subitems)."
+  else
+    echo "⚠ kb-sweep emitted no RESIDUAL report (older kb-sweep?) — read the full sweep output above for open untagged subitems before this ticket closes."
+  fi
+
   echo "All gates passed + branch fresh (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE). Merging with --admin..."
   gh pr merge <number> --squash --delete-branch --admin
   kb-done
@@ -706,6 +784,7 @@ done
 - On `CHANGES_REQUESTED` from either bot: pause, surface the review body, address feedback, push fixes, re-seed ONLY that gate's `LAST_*_AT`, re-enter the loop.
 - Gate 3 (subitem sweep), Gate 3.5 (CI check runs), and Gate 4 (freshness/mergeability) only run once BOTH bot gates have passed — see the loop's ordering above.
 - **Gate 3 requires POSITIVE evidence kb-sweep ran**, not merely the absence of the `PROTECTED SUBITEMS UNRESOLVED` marker: a failed `source` of kanban-helpers.sh (or any other error that stops kb-sweep from running) also produces output without that marker, and the old check read that silence as a clean sweep. The gate now requires the `SUBITEM STATUS SWEEP: <id>` header plus a completion line (`ready to close.` or `Legend:`) before it will trust the marker's absence at all — missing either fails closed, regardless of what the marker check would have said.
+- **Pre-merge RESIDUAL advisory banner**: immediately before the merge, the loop re-extracts kb-sweep's advisory `RESIDUAL OPEN SUBITEMS (N) — advisory, not merge-gating:` block from `$SWEEP_OUTPUT` (the same variable Gate 3 already captured this iteration — never a re-run of `kb-sweep`, never a board.json re-parse) and prints it as a banner. This is **purely observational** — it never `break`s, `continue`s, or otherwise makes the merge conditional; ordinary untagged subitems remain explicitly non-gating (only `[Review]`/`[Test]`/`[UX]` and framework subitems gate, at Gate 3). It exists because a PR once merged with six parked subitems that surfaced only at `kb-done`, after both the PR and its ticket had closed; a replay of merged PR-to-item pairs found roughly 16.2% still print at least one residual line at merge time (median 1, max 15) — too rare to gate on, too common to keep silent. Absence of the RESIDUAL header is reported explicitly, never treated as "none": an older `kb-sweep` prints no header at all, which must not read the same as a genuinely empty residual list.
 - Gate 3.5 is an **allowlist**, not a denylist of one bad state: every check must land in gh's own `pass` or `skipping` bucket before merging — `fail` (FAILURE/ERROR/TIMED_OUT/ACTION_REQUIRED) or `cancel` (CANCELLED) blocks outright, and anything still `pending` (including a state gh doesn't recognise) re-polls rather than passing. `--admin` overrides the Team-plan review-count requirement, it does not and must not override a red, cancelled, or still-running CI run. `gh pr checks`'s own exit-code-8-on-pending behavior is documented for plain-text output only — in `--json` mode (used here) it returns success regardless of pending checks, so this gate inspects the `bucket` field directly rather than trusting the command's exit code.
 - **`gh pr checks`'s "no checks reported" is ambiguous, not a clean pass on first read**: it means either "no CI configured" or "GitHub hasn't registered this push's checks yet" — indistinguishable from one query. The gate re-polls (`NO_CHECKS_RETRIES`, bounded at 5 polls / 10s each, same shape as Gate 4's `MERGE_UNKNOWN_RETRIES`) against the unchanged head SHA before accepting it as a genuine "no CI here"; the counter resets on a new push and the moment real check data is observed.
 - On a stale branch (Gate 4): `gh pr update-branch` dismisses stale reviews — re-spawn BOTH bots and re-seed BOTH timestamps afterward.
@@ -1298,7 +1377,7 @@ After completing:
 
 ---
 
-**Last Updated:** 2026-09-10 (XACA-1159 — fixed two absence-reads-as-success defects in the merge loop, the class this ticket exists to eliminate. Gate 3 (protected-subitem sweep) accepted a missing `PROTECTED SUBITEMS UNRESOLVED` marker as a clean sweep even when kb-sweep never actually ran — e.g. a failed `source` of kanban-helpers.sh, same shape as XACA-1145's shipped kb-sweep that had no protected-subitem gate at all; now requires positive evidence of a completed run (the `SUBITEM STATUS SWEEP: <id>` header plus a completion line) before trusting the marker's absence, failing closed otherwise. Gate 3.5's `no checks reported` pass-through conflated "this repo has no CI" with "GitHub hasn't registered this push's checks yet" (a transient post-push state) and could merge before CI existed; now bounds a re-poll (`NO_CHECKS_RETRIES`, 5 * 10s, mirroring Gate 4's `MERGE_UNKNOWN_RETRIES` shape) against the unchanged head SHA before accepting it as genuine, resetting on a new push or on observing real check data. Also fixed two over-claiming checks in the same loop. Gate 3.5 keyed only on `state == "FAILURE"`, which could not distinguish "not finished yet" from "passed" and let CANCELLED/TIMED_OUT/ACTION_REQUIRED/still-pending checks merge; rebuilt as an allowlist on `gh pr checks`'s own `bucket` classification (`pass`/`skipping` required, `fail`/`cancel` blocks, anything pending re-polls). The committer-date guard against rebase/force-push assumed the new head's committer date is always newer than any stale review, which fails for a force-push onto a pre-existing older commit; added a genuinely mechanical close via compare-API ancestry checking for a rewrite that happens while the loop is polling, and reworded the surrounding prose so the committer-date fallback is documented as a heuristic with a known gap rather than a "mechanical guarantee".) Prior: 2026-09-09 (XACA-1159 — fixed a fail-open merge gate: bot review filters now key on `.user.login` instead of `.user.type == "Bot"`, which resolved to whichever of the two gate bots reviewed most recently. Expanded the single-gate flow to four gates (test, review, protected-subitem sweep, branch freshness/mergeability); added `--paginate` to every reviews-API call; fixed a `ds9-security-review-bot` name conflation — the two real Apps are `ds9-tester-bot[bot]` and `ai-security-review-bot[bot]`.) Prior: 2026-02-18 (Added reviewer re-review monitoring loop, non-blocking subitems protocol, fixed stale review detection in creating agent monitoring loop, updated review handoff template with kanban item ID)
+**Last Updated:** 2026-09-12 (XACA-1199 — Added a pre-merge, purely-advisory RESIDUAL banner immediately before the merge: it re-extracts kb-sweep's new `RESIDUAL OPEN SUBITEMS (N)` block from `$SWEEP_OUTPUT` (Gate 3's own output, reused — never a re-run or a board.json re-parse) and prints it so parked/untagged open subitems are seen before the ticket closes, without ever gating the merge. Motivated by a PR that shipped with six parked subitems undiscovered until `kb-done`. Added the matching "Critical notes" bullet.) Prior: 2026-09-10 (XACA-1159 — fixed two absence-reads-as-success defects in the merge loop, the class this ticket exists to eliminate. Gate 3 (protected-subitem sweep) accepted a missing `PROTECTED SUBITEMS UNRESOLVED` marker as a clean sweep even when kb-sweep never actually ran — e.g. a failed `source` of kanban-helpers.sh, same shape as XACA-1145's shipped kb-sweep that had no protected-subitem gate at all; now requires positive evidence of a completed run (the `SUBITEM STATUS SWEEP: <id>` header plus a completion line) before trusting the marker's absence, failing closed otherwise. Gate 3.5's `no checks reported` pass-through conflated "this repo has no CI" with "GitHub hasn't registered this push's checks yet" (a transient post-push state) and could merge before CI existed; now bounds a re-poll (`NO_CHECKS_RETRIES`, 5 * 10s, mirroring Gate 4's `MERGE_UNKNOWN_RETRIES` shape) against the unchanged head SHA before accepting it as genuine, resetting on a new push or on observing real check data. Also fixed two over-claiming checks in the same loop. Gate 3.5 keyed only on `state == "FAILURE"`, which could not distinguish "not finished yet" from "passed" and let CANCELLED/TIMED_OUT/ACTION_REQUIRED/still-pending checks merge; rebuilt as an allowlist on `gh pr checks`'s own `bucket` classification (`pass`/`skipping` required, `fail`/`cancel` blocks, anything pending re-polls). The committer-date guard against rebase/force-push assumed the new head's committer date is always newer than any stale review, which fails for a force-push onto a pre-existing older commit; added a genuinely mechanical close via compare-API ancestry checking for a rewrite that happens while the loop is polling, and reworded the surrounding prose so the committer-date fallback is documented as a heuristic with a known gap rather than a "mechanical guarantee".) Prior: 2026-09-09 (XACA-1159 — fixed a fail-open merge gate: bot review filters now key on `.user.login` instead of `.user.type == "Bot"`, which resolved to whichever of the two gate bots reviewed most recently. Expanded the single-gate flow to four gates (test, review, protected-subitem sweep, branch freshness/mergeability); added `--paginate` to every reviews-API call; fixed a `ds9-security-review-bot` name conflation — the two real Apps are `ds9-tester-bot[bot]` and `ai-security-review-bot[bot]`.) Prior: 2026-02-18 (Added reviewer re-review monitoring loop, non-blocking subitems protocol, fixed stale review detection in creating agent monitoring loop, updated review handoff template with kanban item ID)
 **Maintained By:** Claude Code
 
 ---
