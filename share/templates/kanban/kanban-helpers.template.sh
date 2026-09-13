@@ -976,6 +976,15 @@ _kb_release_sync() {
 
     [[ -z "$item_id" ]] && return 0
 
+    # XACA-0886-024: test/CI escape hatch — skip the network call to the
+    # team's LCARS server entirely, rather than making every sandboxed test
+    # suite that calls kb-cancel/kb-done/etc. stand up (or accidentally hit
+    # a REAL, already-running) LCARS instance. Opt-in only; default
+    # (unset) behavior is unchanged.
+    if [[ "${KB_SKIP_RELEASE_SYNC:-0}" == "1" ]]; then
+        return 0
+    fi
+
     # XACA-0182: Subitem IDs (e.g., XACA-0179-002) are not top-level board
     # items, so LCARS /api/releases/sync-item returns 404 for them and the
     # loud-failure branch below emits a spurious warning on every sub done /
@@ -2454,6 +2463,23 @@ _kb_item_id_to_team() {
 # Returns: absolute path to the activity/ directory, or empty string on failure
 _kb_get_activity_dir() {
     local item_id="$1"
+
+    # XACA-0886-024: sandboxed-test override. When set, ALL activity logging
+    # goes here instead of the real team's kanban/activity dir — added so a
+    # test suite exercising kb-cancel/kb-backlog-sub-cancel against a
+    # disposable board does not also write activity JSON into the LIVE
+    # kanban/activity directory just because its fixture IDs happen to use a
+    # real team's ID prefix (KB_BOARD_FILE only overrides the board
+    # read/write path, not this). Defaults to the pre-existing team-derived
+    # behavior — unset by default, so nothing changes for real usage.
+    if [[ -n "${KB_ACTIVITY_DIR:-}" ]]; then
+        mkdir -p "$KB_ACTIVITY_DIR" 2>/dev/null || {
+            echo "Warning: _kb_get_activity_dir: could not create KB_ACTIVITY_DIR '$KB_ACTIVITY_DIR'" >&2
+            return 1
+        }
+        echo "$KB_ACTIVITY_DIR"
+        return 0
+    fi
 
     local team
     team=$(_kb_item_id_to_team "$item_id")
@@ -5515,22 +5541,52 @@ kb-done() {
 # alongside `cancelledReason` on the subitem as an audit trail. It is set to
 # "false" for every other allowed case (untagged subitem, or the sanctioned
 # [UX] auto-cancel exception below), where no such marker should be written.
+
+# _kb_protected_tag_of (XACA-0886-022): single source of truth for which
+# protected tag (if any) a subitem title carries. Extracted out of
+# _kb_protected_cancel_guard so the `sub remove`/`sub rename` bypass checks
+# below can reuse the EXACT same tag-detection rule — two independent
+# lowercase-substring checks would inevitably drift (e.g. one adding a new
+# tag, or tightening the match, without the other).
+# Usage: _kb_protected_tag_of <title>
+# Prints "[Review]" / "[Test]" / "[UX]" / "" (empty string = not protected).
+_kb_protected_tag_of() {
+    local title="${1-}"
+    local title_lower="${title:l}"
+    if [[ "$title_lower" == *"[review]"* ]]; then
+        echo "[Review]"
+    elif [[ "$title_lower" == *"[test]"* ]]; then
+        echo "[Test]"
+    elif [[ "$title_lower" == *"[ux]"* ]]; then
+        echo "[UX]"
+    else
+        echo ""
+    fi
+}
+
+# _kb_looks_like_flag (XACA-0886-026): true if $1 is one of the flags
+# recognized by kb-cancel / kb-backlog sub cancel|remove|rename. Used at every
+# `--reason` parse site so `--reason --force` (or any other known flag) is
+# refused as a missing value instead of silently being swallowed as the
+# reason text. `--` is deliberately excluded — it is handled as
+# end-of-options by each parser's own loop, not as a flag value here.
+_kb_looks_like_flag() {
+    case "${1-}" in
+        --force|--user-approved|--reason|-h|--help) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 _kb_protected_cancel_guard() {
     local sub_title="${1-}" reason="${2-}" user_approved="${3-}" sub_id="${4-}" cmd_hint="${5-}"
     typeset -g _KB_CANCEL_GUARD_AUDIT=false
 
     # Tag match kept IDENTICAL to the pre-existing advisory check this
     # replaces (XACA-0113/XACA-0703): lowercase substring match on the
-    # subitem title, in this priority order.
-    local title_lower="${sub_title:l}"
-    local tag=""
-    if [[ "$title_lower" == *"[review]"* ]]; then
-        tag="[Review]"
-    elif [[ "$title_lower" == *"[test]"* ]]; then
-        tag="[Test]"
-    elif [[ "$title_lower" == *"[ux]"* ]]; then
-        tag="[UX]"
-    fi
+    # subitem title, in this priority order. Delegated to _kb_protected_tag_of
+    # (XACA-0886-022) so this and the remove/rename checks can never drift.
+    local tag
+    tag=$(_kb_protected_tag_of "$sub_title")
 
     # Not a protected tag at all — nothing to guard.
     if [[ -z "$tag" ]]; then
@@ -5594,7 +5650,7 @@ kb-cancel() {
     local working_id="" reason="" positional_reason="" reason_flag_seen=false
     local force_cancel=false user_approved=false
     local -a _kbc_positional=()
-    local _kbc_usage="Usage: kb-cancel <ID> [\"reason text\"] [--reason \"text\"] [--force] [--user-approved]"
+    local _kbc_usage="Usage: kb-cancel <ID> [\"reason text\"] [--reason \"text\"] [--force] [--user-approved] [-- \"positional reason starting with --\"]"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -5614,10 +5670,13 @@ kb-cancel() {
                 echo "  --user-approved     User-only: required (together with a reason) to cancel a"
                 echo "                      protected [Review]/[Test]/[UX] subitem. Same rule as"
                 echo "                      kb-done --force — agents must never pass this flag."
+                echo "  --                  End of options. Everything after this is positional,"
+                echo "                      even if it starts with '--' (e.g. a reason that itself"
+                echo "                      begins with dashes): kb-cancel ID -- \"--weird reason\""
                 return 0
                 ;;
             --reason)
-                if [[ -z "${2-}" ]]; then
+                if [[ -z "${2-}" ]] || _kb_looks_like_flag "${2-}"; then
                     echo "Error: --reason requires a value" >&2
                     echo "$_kbc_usage" >&2
                     return 1
@@ -5638,6 +5697,17 @@ kb-cancel() {
             --user-approved)
                 user_approved=true
                 shift
+                ;;
+            --)
+                # XACA-0886-026: end-of-options. Everything after this is
+                # positional, even if it starts with "--" (e.g. a reason
+                # text of "--weird reason"). Example: kb-cancel ID -- "--x".
+                shift
+                while [[ $# -gt 0 ]]; do
+                    _kbc_positional+=("$1")
+                    shift
+                done
+                break
                 ;;
             --*)
                 echo "Error: unknown flag '$1'" >&2
@@ -5687,11 +5757,20 @@ kb-cancel() {
     fi
 
     # --force warning parity with kb-done --force (XACA-0886-020).
+    # XACA-0886-025: reworded — --force only ever bypassed the plain
+    # unresolved-subitem check; it never bypassed the protected-subitem
+    # guard for cancelling a subitem directly, and now (below) it ALSO does
+    # not bypass the refusal to cancel an ITEM that still has an OPEN
+    # protected [Review]/[Test]/[UX] subitem. Every sentence here must stay
+    # true under that behavior.
     if [[ "$force_cancel" == "true" ]]; then
-        echo "WARNING: --force bypasses the unresolved-subitem check on an ITEM."
+        echo "WARNING: --force bypasses the unresolved-subitem check on an ITEM (non-protected"
+        echo "WARNING: subitems only)."
         echo "WARNING: This flag is reserved for the user only. Agents must NOT use --force."
         echo "WARNING: --force does NOT bypass the protected [Review]/[Test]/[UX] subitem guard —"
-        echo "WARNING: only --user-approved (with a reason) can cancel a protected subitem."
+        echo "WARNING: an item with an OPEN protected subitem is refused even with --force, and"
+        echo "WARNING: cancelling a protected subitem directly is refused even with --force."
+        echo "WARNING: Only --user-approved (with a reason) can proceed in either case."
         echo "WARNING: Proceeding with force..."
         echo ""
     fi
@@ -5706,12 +5785,25 @@ kb-cancel() {
         local parent_idx
         parent_idx=$(_kb_find_by_id "$board_file" "$parent_id")
         if [[ "$parent_idx" -ge 0 ]]; then
-            # XACA-0886: hard-block guard for protected [Review]/[Test]/[UX]
-            # subitems, BEFORE any board write.
+            # XACA-0886-023: reads by ID (select(.id == $subId)), never by raw
+            # array index — but a select() that matches NOTHING (subitem ID
+            # does not exist under this parent) used to leave cancel_sub_title
+            # empty and fall through: the guard sees an empty/untagged title
+            # and allows it, then the `if .id == $subId then ... end` update
+            # matches nothing either, so this printed "Task cancelled!" for an
+            # ID that was never touched (false success). Refuse explicitly.
             local cancel_sub_title
             cancel_sub_title=$(_kb_jq_read "$board_file" \
                 '.backlog[$pidx].subitems[]? | select(.id == $subId) | .title // empty' \
                 --argjson pidx "$parent_idx" --arg subId "$working_id" -r)
+
+            if [[ -z "$cancel_sub_title" ]]; then
+                echo "Error: Subitem not found: $working_id" >&2
+                return 1
+            fi
+
+            # XACA-0886: hard-block guard for protected [Review]/[Test]/[UX]
+            # subitems, BEFORE any board write.
             if ! _kb_protected_cancel_guard "$cancel_sub_title" "$reason" "$user_approved" "$working_id" "kb-cancel"; then
                 return 1
             fi
@@ -5749,6 +5841,64 @@ kb-cancel() {
         local item_idx
         item_idx=$(_kb_find_by_id "$board_file" "$working_id")
         if [[ "$item_idx" -ge 0 ]]; then
+            # XACA-0886-025: cancelling an ITEM (with or WITHOUT --force) is
+            # refused while any of its subitems is an OPEN protected
+            # [Review]/[Test]/[UX] subitem — a missing status is treated as
+            # open, same as everywhere else that defaults an absent status
+            # to "todo". This is a SEPARATE check from the plain
+            # unresolved-subitem sweep below: --force bypasses only that
+            # one. Reuses _kb_protected_tag_of (XACA-0886-022) so tag
+            # semantics can never drift from the cancel/remove/rename guards.
+            local -a _kbc_open_protected=()
+            local _kbc_item_sub_count
+            _kbc_item_sub_count=$(_kb_jq_read "$board_file" ".backlog[$item_idx].subitems // [] | length" -r)
+            [[ -z "$_kbc_item_sub_count" ]] && _kbc_item_sub_count=0
+            # XACA-0886-025: these locals are declared ONCE, outside the loop —
+            # zsh's `local name` (no assignment) on an ALREADY-local name acts
+            # as a print/display, not a no-op re-declaration. Declaring them
+            # fresh on every iteration (2nd and later) was dumping their
+            # previous-iteration values to stdout as visible noise ahead of
+            # the refusal message.
+            local _kbc_si _kbc_si_title _kbc_si_tag _kbc_si_status _kbc_si_id
+            for (( _kbc_si = 0; _kbc_si < _kbc_item_sub_count; _kbc_si++ )); do
+                _kbc_si_title=$(_kb_jq_read "$board_file" ".backlog[$item_idx].subitems[$_kbc_si].title // empty" -r)
+                _kbc_si_tag=$(_kb_protected_tag_of "$_kbc_si_title")
+                [[ -z "$_kbc_si_tag" ]] && continue
+                _kbc_si_status=$(_kb_jq_read "$board_file" ".backlog[$item_idx].subitems[$_kbc_si].status // empty" -r)
+                if [[ "$_kbc_si_status" == "completed" ]] || [[ "$_kbc_si_status" == "cancelled" ]]; then
+                    continue
+                fi
+                _kbc_si_id=$(_kb_jq_read "$board_file" ".backlog[$item_idx].subitems[$_kbc_si].id // empty" -r)
+                _kbc_open_protected+=("${_kbc_si_id:-index $_kbc_si}: ${_kbc_si_tag} ${_kbc_si_title}")
+            done
+
+            local item_cancel_user_approved=false
+            if [[ ${#_kbc_open_protected[@]} -gt 0 ]]; then
+                if [[ "$user_approved" != "true" ]]; then
+                    echo "❌ REFUSED: cannot cancel $working_id — it has ${#_kbc_open_protected[@]} OPEN" >&2
+                    echo "   protected [Review]/[Test]/[UX] subitem(s), a merge gate (CLAUDE.md" >&2
+                    echo "   Three-Gate PR Merge System). --force does NOT bypass this check." >&2
+                    for _kbc_line in "${_kbc_open_protected[@]}"; do
+                        echo "     - ${_kbc_line}" >&2
+                    done
+                    echo "   The user can override with:" >&2
+                    echo "     kb-cancel $working_id --user-approved --reason \"<why this is being cancelled>\"" >&2
+                    echo "   --user-approved is reserved for the user only, same rule as kb-done --force." >&2
+                    return 1
+                fi
+                if [[ -z "$reason" ]]; then
+                    echo "❌ Refused: --user-approved requires a --reason explaining why $working_id is being" >&2
+                    echo "   cancelled while it still has open protected subitem(s)." >&2
+                    return 1
+                fi
+                echo "⚠️  Item $working_id cancelled with OPEN protected subitem(s) under EXPLICIT USER APPROVAL."
+                for _kbc_line in "${_kbc_open_protected[@]}"; do
+                    echo "    - ${_kbc_line}"
+                done
+                echo "    Reason: ${reason}"
+                item_cancel_user_approved=true
+            fi
+
             # Check if all subitems are resolved (unless --force is used)
             # kb-sweep handles the full status sweep and returns 1 if any remain
             if [[ "$force_cancel" == "false" ]]; then
@@ -5770,6 +5920,9 @@ kb-cancel() {
                 del(.backlog[$idx].worktreeWindowId)'
             if [[ -n "$reason" ]]; then
                 update_jq="$update_jq | .backlog[\$idx].cancelledReason = \$reason"
+            fi
+            if [[ "$item_cancel_user_approved" == "true" ]]; then
+                update_jq="$update_jq | .backlog[\$idx].cancelledUserApproved = true"
             fi
             update_jq="$update_jq | .lastUpdated = \$ts"
 
@@ -7254,19 +7407,101 @@ kb-backlog() {
                     ;;
 
                 remove|rm)
-                    local parent_idx="$1"
-                    local sub_idx="$2"
+                    # ── Argument parsing (XACA-0886-022) ────────────────
+                    # Positional <parent-index> <subitem-index> as before, plus the
+                    # same --reason/--user-approved/-- machinery as kb-cancel so a
+                    # protected [Review]/[Test]/[UX] subitem can't be deleted out
+                    # from under the merge gate without going through the guard.
+                    local parent_idx sub_idx reason="" user_approved=false reason_flag_seen=false
+                    local -a _kbsr_positional=()
+                    local _kbsr_usage="Usage: kb-backlog sub remove <parent-index> <subitem-index> [--reason \"text\"] [--user-approved]"
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --reason)
+                                if [[ -z "${2-}" ]] || _kb_looks_like_flag "${2-}"; then
+                                    echo "Error: --reason requires a value" >&2
+                                    echo "$_kbsr_usage" >&2
+                                    return 1
+                                fi
+                                if [[ "$reason_flag_seen" == "true" ]]; then
+                                    echo "Error: --reason given more than once" >&2
+                                    echo "$_kbsr_usage" >&2
+                                    return 1
+                                fi
+                                reason_flag_seen=true
+                                reason="$2"
+                                shift 2
+                                ;;
+                            --user-approved)
+                                user_approved=true
+                                shift
+                                ;;
+                            -h|--help)
+                                echo "$_kbsr_usage"
+                                echo "Removes a subitem by its parent/sub array index (see 'sub list' for indices)."
+                                echo "Protected [Review]/[Test]/[UX] subitems are a merge gate and are REFUSED"
+                                echo "unless --user-approved is given together with --reason (user-only, same"
+                                echo "rule as kb-done --force). The reason is written to the activity log —"
+                                echo "the subitem itself is deleted, so that log entry is the only remaining"
+                                echo "record of why a protected item was removed."
+                                echo "--  End of options; everything after is positional."
+                                return 0
+                                ;;
+                            --)
+                                shift
+                                while [[ $# -gt 0 ]]; do
+                                    _kbsr_positional+=("$1")
+                                    shift
+                                done
+                                break
+                                ;;
+                            --*)
+                                echo "Error: unknown flag '$1'" >&2
+                                echo "$_kbsr_usage" >&2
+                                return 1
+                                ;;
+                            *)
+                                _kbsr_positional+=("$1")
+                                shift
+                                ;;
+                        esac
+                    done
 
-                    if [[ -z "$parent_idx" ]] || [[ ! "$parent_idx" =~ ^[0-9]+$ ]] || [[ -z "$sub_idx" ]] || [[ ! "$sub_idx" =~ ^[0-9]+$ ]]; then
-                        echo "Usage: kb-backlog sub remove <parent-index> <subitem-index>"
+                    if [[ ${#_kbsr_positional[@]} -eq 1 ]]; then
+                        parent_idx="${_kbsr_positional[1]}"
+                    elif [[ ${#_kbsr_positional[@]} -ge 2 ]]; then
+                        parent_idx="${_kbsr_positional[1]}"
+                        sub_idx="${_kbsr_positional[2]}"
+                    fi
+                    if [[ ${#_kbsr_positional[@]} -gt 2 ]]; then
+                        echo "Error: too many positional arguments" >&2
+                        echo "$_kbsr_usage" >&2
                         return 1
                     fi
 
-                    local sub_title
+                    if [[ -z "$parent_idx" ]] || [[ ! "$parent_idx" =~ ^[0-9]+$ ]] || [[ -z "$sub_idx" ]] || [[ ! "$sub_idx" =~ ^[0-9]+$ ]]; then
+                        echo "$_kbsr_usage"
+                        return 1
+                    fi
+
+                    local sub_title sub_id
                     sub_title=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].title // empty" -r)
                     if [[ -z "$sub_title" ]]; then
                         echo "Error: No subitem at index $sub_idx in item $parent_idx"
                         return 1
+                    fi
+                    sub_id=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].id // empty" -r)
+
+                    # XACA-0886-022: protected [Review]/[Test]/[UX] subitems are a merge
+                    # gate; removal is at least as destructive as cancellation (it also
+                    # destroys the audit trail a cancel would have left behind), so it
+                    # goes through the SAME guard via the shared tag detector.
+                    local sub_remove_tag
+                    sub_remove_tag=$(_kb_protected_tag_of "$sub_title")
+                    if [[ -n "$sub_remove_tag" ]]; then
+                        if ! _kb_protected_cancel_guard "$sub_title" "$reason" "$user_approved" "$parent_idx $sub_idx" "kb-backlog sub remove"; then
+                            return 1
+                        fi
                     fi
 
                     local timestamp
@@ -7277,6 +7512,15 @@ kb-backlog() {
                        --argjson pidx "$parent_idx" \
                        --argjson sidx "$sub_idx" \
                        --arg ts "$timestamp"
+
+                    # XACA-0886-022: the subitem is now gone, so if this was a
+                    # user-approved protected removal, log it for an audit trail —
+                    # this activity-log entry becomes the only remaining record.
+                    if [[ "$_KB_CANCEL_GUARD_AUDIT" == "true" ]]; then
+                        _kb_log_activity "subitem_removed" "${sub_id:-$parent_idx-$sub_idx}" "subitem" "title" "$sub_title" "" \
+                            "USER-APPROVED removal of protected ${sub_remove_tag} subitem: ${reason}"
+                    fi
+
                     echo "✓ Removed subitem: $sub_title"
                     ;;
 
@@ -7485,16 +7729,22 @@ kb-backlog() {
 
                 cancel)
                     # ── Argument parsing (XACA-0886) ────────────────────
-                    local parent_idx sub_idx reason="" user_approved=false
-                    local _kbsc_id="" _kbsc_usage="Usage: kb-backlog sub cancel <subitem-id> [--reason \"text\"] [--user-approved]"
+                    local parent_idx sub_idx reason="" user_approved=false reason_flag_seen=false
+                    local _kbsc_id="" _kbsc_usage="Usage: kb-backlog sub cancel <subitem-id> [--reason \"text\"] [--user-approved] [-- \"positional reason starting with --\"]"
                     while [[ $# -gt 0 ]]; do
                         case "$1" in
                             --reason)
-                                if [[ -z "${2-}" ]]; then
+                                if [[ -z "${2-}" ]] || _kb_looks_like_flag "${2-}"; then
                                     echo "Error: --reason requires a value" >&2
                                     echo "$_kbsc_usage" >&2
                                     return 1
                                 fi
+                                if [[ "$reason_flag_seen" == "true" ]]; then
+                                    echo "Error: --reason given more than once" >&2
+                                    echo "$_kbsc_usage" >&2
+                                    return 1
+                                fi
+                                reason_flag_seen=true
                                 reason="$2"
                                 shift 2
                                 ;;
@@ -7509,7 +7759,27 @@ kb-backlog() {
                                 echo "Protected [Review]/[Test]/[UX] subitems are a merge gate and are REFUSED"
                                 echo "unless --user-approved is given together with --reason (user-only, same"
                                 echo "rule as kb-done --force)."
+                                echo "--  End of options; everything after is positional (e.g. a reason"
+                                echo "    starting with '--')."
                                 return 0
+                                ;;
+                            --)
+                                shift
+                                if [[ -n "${1-}" ]]; then
+                                    if [[ -n "$_kbsc_id" ]]; then
+                                        echo "Error: unexpected extra argument '$1'" >&2
+                                        echo "$_kbsc_usage" >&2
+                                        return 1
+                                    fi
+                                    _kbsc_id="$1"
+                                    shift
+                                fi
+                                if [[ $# -gt 0 ]]; then
+                                    echo "Error: unexpected extra argument '$1'" >&2
+                                    echo "$_kbsc_usage" >&2
+                                    return 1
+                                fi
+                                break
                                 ;;
                             --*)
                                 echo "Error: unknown flag '$1'" >&2
@@ -8172,7 +8442,11 @@ kb-backlog() {
                     echo "Subitem Commands:"
                     echo "  add <parent-idx> \"title\" [jira] [os]  Add subitem to backlog item"
                     echo "  list <parent-idx>                   List subitems"
-                    echo "  remove <parent-idx> <sub-idx>       Remove subitem"
+                    echo "  remove <parent-idx> <sub-idx> [--reason \"text\"] [--user-approved]"
+                    echo "                                      Remove subitem. Protected [Review]/[Test]/[UX]"
+                    echo "                                      subitems are a merge gate and are REFUSED unless"
+                    echo "                                      --user-approved is given together with --reason"
+                    echo "                                      (user-only, same rule as kb-done --force)."
                     echo "  done <parent-idx> <sub-idx>         Mark subitem completed"
                     echo "  cancel <subitem-id> [--reason \"text\"] [--user-approved]"
                     echo "                                      Mark subitem cancelled. Takes a SUBITEM-ID"
