@@ -32,6 +32,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Monitoring" re-prints that block as a non-blocking banner right before
   `gh pr merge`. An absent block produces an explicit notice, never silence.
   The merge still proceeds.
+- **XACA-0886 (PR #881 review round 5)** — `kb-cancel`'s item-level bypass hint prints
+  the reason with `print -r --` and `${(q)}` quoting, so a pasted hint cannot mangle or
+  execute the reason text.
 - **XACA-0886 (PR #881 review round 4)** — template guard paths now refuse when the
   `_kb_protected_tag_of` lookup fails (an undefined helper previously left a stale
   global answer in place), the helper returns 0 explicitly, and refusal hints print

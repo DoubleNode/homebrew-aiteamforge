@@ -6152,7 +6152,7 @@ kb-cancel() {
                         # XACA-0886-029: an open protected subitem always fails this
                         # sweep too — --force is REQUIRED here in addition to
                         # --user-approved + --reason, not an alternative to them.
-                        echo "   To bypass (user only): kb-cancel $working_id --user-approved --force --reason \"${reason}\""
+                        print -r -- "   To bypass (user only): kb-cancel $working_id --user-approved --force --reason ${(q)reason}"
                     else
                         echo "   To bypass (user only): kb-cancel $working_id --force"
                     fi
