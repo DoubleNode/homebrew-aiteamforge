@@ -1068,6 +1068,23 @@ def _file_looks_implausibly_short(config_path: Path) -> bool:
         return False
 
 
+def _stderr_note(message: str) -> None:
+    """Write a diagnostic line to stderr; never raise (XACA-1192 review round 4).
+
+    Every stderr write that peek_config() can reach goes through here: the
+    transient-read retry notices below and _peek_emit_once(). An unwritable
+    stderr (closed, broken pipe) used to raise out of the retry loop before its
+    first sleep, so a briefly-unparseable file was declared unreadable without
+    being retried. The only behaviour this changes on load_config()'s path is
+    the same broken-stderr case, where a diagnostic that cannot be delivered is
+    now dropped instead of aborting the read.
+    """
+    try:
+        print(message, file=sys.stderr)
+    except Exception:  # noqa: BLE001 - deliberate: a diagnostic must never break a read
+        pass
+
+
 def _read_config_with_transient_retry(config_path: Path) -> tuple[dict | None, bool]:
     """Read+parse config_path; on failure, retry with bounded backoff before
     declaring it corrupt.
@@ -1119,28 +1136,25 @@ def _read_config_with_transient_retry(config_path: Path) -> tuple[dict | None, b
     last_err = err
     total_attempts = len(_CORRUPT_READ_RETRY_BACKOFF_SECONDS) + 1
     for i, delay in enumerate(_CORRUPT_READ_RETRY_BACKOFF_SECONDS, start=2):
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] transient-read suspect at {config_path} "
             f"({last_err}) — retrying (attempt {i}/{total_attempts}) after "
-            f"{delay}s before declaring corrupt",
-            file=sys.stderr,
+            f"{delay}s before declaring corrupt"
         )
         time.sleep(delay)
         cfg, err = _attempt()
         if err is None:
-            print(
+            _stderr_note(
                 f"[aiteamforge-paths] retry succeeded at {config_path} "
                 f"(attempt {i}/{total_attempts}) — transient race, not "
-                f"corruption; proceeding with the re-read config",
-                file=sys.stderr,
+                f"corruption; proceeding with the re-read config"
             )
             return cfg, False
         last_err = err
 
-    print(
+    _stderr_note(
         f"[aiteamforge-paths] all {total_attempts} attempts failed to parse "
-        f"{config_path} ({last_err}) — confirmed corrupt",
-        file=sys.stderr,
+        f"{config_path} ({last_err}) — confirmed corrupt"
     )
     return None, True
 
@@ -1603,20 +1617,19 @@ _PEEK_DIAGNOSTICS_EMITTED: set[tuple[str, str]] = set()
 def _peek_emit_once(path_str: str, status: str, message: str) -> None:
     """Print *message* to stderr at most once per (path_str, status) per process.
 
-    Never raises (XACA-1192 review round 3): this is the only stderr write on
-    peek_config()'s path, including inside its outermost safety net, so an
-    unwritable stderr (closed, broken pipe, replaced by an object with no
-    usable write) must not break the "Never raises" promise. A diagnostic that
-    cannot be delivered is dropped; the returned status still carries the state.
+    Never raises (XACA-1192 review rounds 3-4): peek_config()'s own
+    diagnostics, including those inside its outermost safety net, are written
+    through _stderr_note(), as are the transient-read retry notices it reaches
+    via _read_config_with_transient_retry(). An unwritable stderr (closed,
+    broken pipe) therefore cannot break the "Never raises" promise or cut the
+    retry short. A diagnostic that cannot be delivered is dropped; the returned
+    status still carries the state.
     """
     key = (path_str, status)
     if key in _PEEK_DIAGNOSTICS_EMITTED:
         return
     _PEEK_DIAGNOSTICS_EMITTED.add(key)
-    try:
-        print(message, file=sys.stderr)
-    except Exception:  # noqa: BLE001 - deliberate: the contract is "never raises"
-        pass
+    _stderr_note(message)
 
 
 def peek_config() -> ConfigPeek:

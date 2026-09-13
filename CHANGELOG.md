@@ -15,6 +15,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   diagnostics when `ATF_ACCOUNT_DIAGNOSTICS=1` (cc-whoami); banners stay silent.
   Review round 2: `peek_config()` no longer raises on an unresolvable `AITEAMFORGE_CONFIG` path.
   Review round 3: it also never raises when stderr cannot be written.
+  Review round 4: an unwritable stderr no longer cuts its transient-read retry short.
 - **XACA-1195** — `kb-knowledge-validate` in both `share/templates/kanban/kanban-helpers.template.sh`
   and `share/templates/aliases/kanban-aliases.sh` no longer silently loses data on
   invalid UTF-8. macOS BSD awk aborts (rc=2) on the first invalid byte under a
