@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1192** — `share/kanban-hooks/aiteamforge_paths.py` gains `peek_config()`, a
+  non-mutating reader of `team-paths.json` (no quarantine, reseed, backfill, `.lock` or
+  `.bak-*`; unhealthy states reported on stderr), and `share/kanban-hooks/aiteamforge_registry.py`
+  routes `_overlay_teams()`/`ai_credential()` through it. A banner or credential read can no
+  longer quarantine the operator's config. Mirror of dev-team PR #889.
 - **XACA-1195** — `kb-knowledge-validate` in both `share/templates/kanban/kanban-helpers.template.sh`
   and `share/templates/aliases/kanban-aliases.sh` no longer silently loses data on
   invalid UTF-8. macOS BSD awk aborts (rc=2) on the first invalid byte under a

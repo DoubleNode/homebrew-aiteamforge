@@ -509,18 +509,39 @@ def is_declared_value(field: str, value: Any) -> bool:
 def _overlay_teams(config: dict | None) -> dict:
     """Tier 1 — the per-machine overlay's team map.
 
-    Calls ``load_config()`` with NO arguments on purpose: many existing tests
-    replace it with ``mock.patch.object(..., return_value=cfg)``, and a mock
-    silently ignores keyword arguments. Asking it for pre-layered data would
-    make the layering vanish under those mocks without any test failing — a
-    malformed check returning the reassuring answer. The layering is done HERE,
-    in code that cannot be mocked away.
+    READ-PATH CONTRACT (XACA-1192): when *config* is None this reads via
+    ``aiteamforge_paths.peek_config()``, NEVER ``load_config()``. Every public
+    accessor in this module funnels through here (directly or via
+    :func:`_require_entries`), so this is the ONE place that decides whether a
+    credential/display read can mutate the operator's ``team-paths.json``. Per
+    the plan doc's Decision (a)/(b), a read must never quarantine, reseed,
+    backfill, or write a ``.lock``/``.bak-*``/cache entry — ``peek_config()``
+    guarantees exactly that and reports every non-healthy state on stderr
+    itself, so no additional diagnostic is needed here.
+
+    Calls it with NO arguments on purpose: many existing tests replace
+    ``load_config`` with ``mock.patch.object(..., return_value=cfg)``, and a
+    mock silently ignores keyword arguments. Asking it for pre-layered data
+    would make the layering vanish under those mocks without any test
+    failing — a malformed check returning the reassuring answer. The layering
+    is done HERE, in code that cannot be mocked away. The same hazard runs the
+    other direction post-XACA-1192: a test that mocks ``load_config`` and
+    expects this function to still consult it would now silently see the REAL
+    on-disk registry via ``peek_config()`` instead of the mock — see
+    ``tests/test_xaca1192_registry_wiring.py`` for the pinning test that
+    patches ``load_config`` with a raising side effect and proves this
+    function (and ``ai_credential()``) never touches it.
+
+    ``peek.config`` is used only when it is a dict (status ``"ok"`` or
+    ``"invalid"`` both carry the parsed dict as read from disk, per
+    ``peek_config()``'s Decision (b) table); every other status (``missing``,
+    ``unreadable``, ``quarantined``) carries ``None``, so ``{}`` is
+    substituted — matching the old bare ``except Exception: return {}``
+    fallback for an unreadable/absent config.
     """
     if config is None:
-        try:
-            config = aiteamforge_paths.load_config()
-        except Exception:
-            return {}
+        peek = aiteamforge_paths.peek_config()
+        config = peek.config if isinstance(peek.config, dict) else {}
     teams = config.get("teams")
     return teams if isinstance(teams, dict) else {}
 
@@ -786,6 +807,49 @@ def primary_host(team: str, *, config: dict | None = None) -> str:
     return _coerced_str(team, "primary_host", config)
 
 
+# Per-process, in-memory dedupe for the legacy-lift note below — mirrors
+# aiteamforge_paths.py's _PEEK_DIAGNOSTICS_EMITTED pattern. Deliberately NOT
+# persisted to disk (a read must never write) and keyed on team alone, so a
+# resolver asking for the same team's credential N times in one process
+# prints once, and a new process always prints again.
+_LEGACY_LIFT_NOTE_EMITTED: set[str] = set()
+
+
+def _note_if_legacy_credential_unlifted(team: str, config: dict | None) -> None:
+    """Print a one-line stderr note when *team* resolves ABSENT but still
+    carries an un-lifted legacy ``anthropic_*`` credential on disk.
+
+    Decision (c) of the plan doc: on ``1184``, ``ai_credential()`` has no
+    legacy fallback by design (see that function's "NO LEGACY FALLBACK"
+    section) — a freshly upgraded box that has not yet run a MUTATING load
+    (which alone runs ``_lift_legacy_credentials_on_disk``) resolves ABSENT
+    for a team a human genuinely configured. The lift is deliberately not
+    applied in memory here (that would make the migration unobservable,
+    exactly what the ``1184`` docstring forbids); instead this stays loud and
+    bounded on stderr, never stdout (shell resolvers capture stdout), at most
+    once per process per team.
+
+    Never raises, never mutates: only reads the already-resolved overlay
+    entry via ``_overlay_teams(config)`` (itself now read-safe, XACA-1192)
+    and asks ``aiteamforge_paths.team_entry_needs_legacy_lift()`` — the one
+    allowed reader of the retired trio — whether it still needs lifting.
+    """
+    if team in _LEGACY_LIFT_NOTE_EMITTED:
+        return
+    entry = _entry(_overlay_teams(config), team)
+    evidence = aiteamforge_paths.team_entry_needs_legacy_lift(entry)
+    if not evidence:
+        return
+    _LEGACY_LIFT_NOTE_EMITTED.add(team)
+    print(
+        f"[aiteamforge-registry] NOTE: team {team!r} has a legacy "
+        f"{evidence!r} credential on disk that has not yet been lifted into "
+        f"ai.credential — a mutating load (e.g. team startup) will lift it; "
+        f"until then this read resolves ABSENT (XACA-1192).",
+        file=sys.stderr,
+    )
+
+
 def ai_credential(team: str, *, config: dict | None = None) -> dict[str, Any] | None | _Absent:
     """Return the team's routed AI credential (XACA-1184). THREE-STATE.
 
@@ -823,7 +887,11 @@ def ai_credential(team: str, *, config: dict | None = None) -> dict[str, Any] | 
     on-disk migration in ``aiteamforge_paths.py`` (XACA-1184-004). Reading the
     trio here too would make that migration unobservable — every team would
     answer correctly whether or not it ever ran — and the retirement would
-    silently never complete.
+    silently never complete. XACA-1192 Decision (c): when this resolves
+    ABSENT for a team whose on-disk entry still carries an un-lifted legacy
+    credential, a one-line NOTE goes to stderr via
+    :func:`_note_if_legacy_credential_unlifted` — the gap stays loud and
+    bounded without the read applying the lift itself.
 
     Returns a SHALLOW COPY. ``load_config()`` caches, so the resolved value is
     a live reference into a process-wide dict; every other accessor in this
@@ -837,6 +905,7 @@ def ai_credential(team: str, *, config: dict | None = None) -> dict[str, Any] | 
     """
     block = resolve_field(team, "ai", default=ABSENT, config=config)
     if block is ABSENT:
+        _note_if_legacy_credential_unlifted(team, config)
         return ABSENT
     if not isinstance(block, dict):
         print(
@@ -848,6 +917,7 @@ def ai_credential(team: str, *, config: dict | None = None) -> dict[str, Any] | 
         return ABSENT
     if "credential" not in block:
         # A block that exists but has never recorded a credential decision.
+        _note_if_legacy_credential_unlifted(team, config)
         return ABSENT
     credential = block["credential"]
     if credential is None:

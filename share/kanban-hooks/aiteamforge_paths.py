@@ -244,7 +244,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 # ---------------------------------------------------------------------------
 # Config path
@@ -670,11 +670,13 @@ def config_is_structurally_valid(teams_keys, has_schema: bool) -> bool:
       {academy, ios, ...}            → VALID  (normal dev box)
       missing schema_version         → corrupt
 
-    SIBLING-DRIFT NOTE: this function is called in EXACTLY TWO places:
+    SIBLING-DRIFT NOTE: this function is called in EXACTLY THREE places:
       1. kanban-hooks/aiteamforge_paths.py — load_config()
       2. lcars-ui/server.py — _build_team_kanban_dirs()
-    Both sites import this function. If you add a third call site, update this
-    comment. Never inline the validity logic at a call site. (XACA-0705 / k501)
+      3. kanban-hooks/aiteamforge_paths.py — peek_config() (XACA-1192, the
+         non-mutating reader; reuses this predicate rather than re-inlining it)
+    All three import/call this function. If you add a fourth call site, update
+    this comment. Never inline the validity logic at a call site. (XACA-0705 / k501)
     """
     _, has_non_required = teams_satisfy_canonical_guard(teams_keys)
     return has_schema and has_non_required
@@ -1548,6 +1550,215 @@ def _load_config_impl() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Non-mutating reader (XACA-1192)
+# ---------------------------------------------------------------------------
+#
+# XACA-1192: XACA-1184 routed a *read* (ai_credential(), via
+# aiteamforge_registry._overlay_teams()) through load_config(), which carries
+# the XACA-1029 self-heal contract above — quarantine, reseed, on-disk
+# backfill. That contract is correct where load_config() already lived
+# (install/upgrade, team startup, the LCARS server); it is NOT correct for a
+# banner or a credential lookup that just wants to know what's on disk. A
+# terminal open should never be able to move the operator's config file.
+#
+# peek_config() is a SEPARATE function, not a load_config() kwarg — see the
+# XACA-1192 plan doc, Decision (d). load_config()'s own docstring records why
+# a kwarg is the wrong shape: much of the test suite replaces load_config
+# with mock.patch.object(..., return_value=cfg), and a Mock silently accepts
+# and drops any keyword it isn't told to expect. A new mode added as a kwarg
+# would vanish under every one of those mocks with no test failing — the
+# exact "malformed check returns the reassuring answer" shape XACA-1192's own
+# plan doc warns about. A same-named sibling function cannot be shadowed that
+# way: a caller that forgets to patch it gets the REAL implementation, not a
+# silently-absent feature.
+#
+# Rule (decided 2026-09-12, XACA-1192-001 "Decision: read-path mutation
+# contract"): a read never mutates, and a read never hides. No display,
+# credential, hook, or config *read* may create, rename, rewrite, or lock
+# anything — no quarantine, reseed, backfill, .lock, .bak-*, tmp file,
+# _CONFIG_CACHE write, or _*_ATTEMPTED flag flip. Every non-healthy state it
+# meets is reported on stderr (never stdout — shell resolvers capture
+# stdout), naming the path, the state, and that no self-heal was performed by
+# this read. The quarantine itself is unchanged and still the loud response
+# where it already lives (load_config()); peek_config() only stops a *read*
+# from being able to trigger it.
+class ConfigPeek(NamedTuple):
+    """Result of peek_config() — see that function's docstring for the
+    contract. `config` is the parsed dict, exactly as on disk, for `"ok"` and
+    `"invalid"`; it is None for `"unreadable"`, `"missing"` and `"quarantined"`.
+    """
+    status: str  # "ok" | "invalid" | "unreadable" | "missing" | "quarantined"
+    config: dict | None
+    path: Path
+
+
+# Per-process, in-memory dedupe so a resolver asking for N fields in one
+# process doesn't print N copies of the same diagnostic. Deliberately NOT
+# persisted to disk (that would itself be a read-path write) and deliberately
+# separate from _CONFIG_CACHE (peek_config() must never read or write that
+# cache — see the docstring below). A new process always prints again.
+_PEEK_DIAGNOSTICS_EMITTED: set[tuple[str, str]] = set()
+
+
+def _peek_emit_once(path_str: str, status: str, message: str) -> None:
+    """Print *message* to stderr at most once per (path_str, status) per process."""
+    key = (path_str, status)
+    if key in _PEEK_DIAGNOSTICS_EMITTED:
+        return
+    _PEEK_DIAGNOSTICS_EMITTED.add(key)
+    print(message, file=sys.stderr)
+
+
+def peek_config() -> ConfigPeek:
+    """Read team-paths.json WITHOUT mutating anything. Never raises.
+
+    Unlike load_config(), this function performs no self-heal: it never
+    quarantines, reseeds, backfills, writes a .lock/.bak-* file, touches
+    _CONFIG_CACHE (read OR write), or flips any of the module's
+    once-per-process _*_ATTEMPTED flags. Calling it any number of times, in
+    any order relative to load_config(), leaves the filesystem exactly as it
+    was found. It is safe to call from a banner, a credential lookup, or any
+    other path that must not be able to move the operator's config file.
+
+    It DOES reuse the read-only retry/backoff helpers
+    (_read_config_with_transient_retry, _reread_and_revalidate_once) — both
+    only read, sleep, and print; neither writes. Keeping the retry means a
+    read racing a concurrent atomic replace doesn't briefly report a wrong
+    credential. Cost: about 0.85s, and only on a file that is actually
+    failing to parse or validate — the happy path pays nothing extra.
+
+    Returns a ConfigPeek(status, config, path):
+
+        ok           — parses and config_is_structurally_valid(). `config` is
+                        the dict exactly as read from disk: no backfill, no
+                        in-memory schema_version injection, no DEFAULT_TEAMS
+                        substitution. Silent (no stderr).
+        invalid      — parses, but fails config_is_structurally_valid() (no
+                        schema_version, or "teams" is empty/academy-alone)
+                        even after the bounded re-read/re-validate retry.
+                        `config` is the parsed dict, unmodified. WARNING on
+                        stderr.
+        unreadable   — every retry attempt failed to read or parse the file
+                        (confirmed corrupt, XACA-1029 branch B1). `config` is
+                        None. CRITICAL on stderr, naming the size when the
+                        file is below the plausibility floor.
+        missing      — no file exists at the resolved path, and no
+                        REFUSED-teamloss quarantine sibling sits beside it.
+                        `config` is None. Same as XACA-0804: a TTY-only hint,
+                        silent otherwise (a read must never write, and must
+                        not spam non-interactive callers either).
+        quarantined  — no file exists at the resolved path, but a
+                        `<name>.bak-*REFUSED-teamloss-*` sibling does (see
+                        _quarantine_or_snapshot_existing's naming and
+                        load_config()'s B2-refuse branch). This is the
+                        incident's second half: after a B2 refusal nothing is
+                        left at the original path, so a plain "missing" read
+                        would otherwise be silent about an active refusal.
+                        `config` is None. CRITICAL on stderr, naming the
+                        sibling. Listing a directory is not a mutation.
+
+    Uses config_is_structurally_valid() as the single source of truth for
+    validity (see that function's SIBLING-DRIFT NOTE) rather than re-inlining
+    the check — this makes a third call site; that docstring's call-site list
+    has been updated accordingly.
+    """
+    config_path = get_config_path()
+    config_path_str = str(config_path)
+
+    if not config_path.exists():
+        # A read must never write — but listing a directory is not a write.
+        # Check for the one sibling shape a B2 REFUSED-teamloss refusal
+        # leaves behind (module docstring / _quarantine_or_snapshot_existing):
+        # nothing at config_path, but a quarantine copy beside it. Without
+        # this check a plain "missing" read would be silent about an active
+        # refusal that a human still needs to act on.
+        try:
+            resolved = config_path.resolve()
+        except OSError:
+            resolved = config_path
+        quarantine_siblings: list[Path] = []
+        if resolved.parent.exists():
+            try:
+                quarantine_siblings = sorted(
+                    resolved.parent.glob(f"{resolved.name}.bak-*REFUSED-teamloss-*")
+                )
+            except OSError:
+                quarantine_siblings = []
+
+        if quarantine_siblings:
+            extra = (
+                f" (+{len(quarantine_siblings) - 1} more)"
+                if len(quarantine_siblings) > 1
+                else ""
+            )
+            message = (
+                f"[aiteamforge-paths] CRITICAL: peek_config: no config at "
+                f"{config_path}, but a quarantine sibling exists — "
+                f"{quarantine_siblings[0].name}{extra}. This is a prior "
+                f"corrupt-config refusal (XACA-1029 B2, REFUSED-teamloss): "
+                f"the original was preserved and nothing was reseeded — no "
+                f"self-heal was performed by this read; a human must "
+                f"restore or repair the config manually."
+            )
+            _peek_emit_once(config_path_str, "quarantined", message)
+            return ConfigPeek("quarantined", None, config_path)
+
+        if _interactive_tty():
+            message = (
+                f"[aiteamforge-paths] peek_config: no config found at "
+                f"{config_path} — no self-heal was performed by this read."
+            )
+            _peek_emit_once(config_path_str, "missing", message)
+        return ConfigPeek("missing", None, config_path)
+
+    config, confirmed_corrupt_b1 = _read_config_with_transient_retry(config_path)
+    if config is None and confirmed_corrupt_b1:
+        try:
+            actual_size = config_path.stat().st_size
+        except OSError:
+            actual_size = -1
+        size_note = ""
+        if 0 <= actual_size < _MIN_PLAUSIBLE_REGISTRY_BYTES:
+            size_note = (
+                f" ({actual_size} bytes — below the "
+                f"{_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte plausibility floor for "
+                f"a real registry)"
+            )
+        message = (
+            f"[aiteamforge-paths] CRITICAL: peek_config: {config_path} is "
+            f"unparseable/unreadable{size_note} — no self-heal was performed "
+            f"by this read; the file on disk is unchanged."
+        )
+        _peek_emit_once(config_path_str, "unreadable", message)
+        return ConfigPeek("unreadable", None, config_path)
+
+    has_schema = "schema_version" in config
+    teams_keys = set(config.get("teams", {}).keys())
+    if config_is_structurally_valid(teams_keys, has_schema):
+        return ConfigPeek("ok", config, config_path)
+
+    # Structurally invalid but parseable (B2). Mirror load_config()'s bounded
+    # re-read/re-validate retry (defense against a non-atomic writer outside
+    # this module catching us mid-write) — it only reads, sleeps, and
+    # returns; it never writes. A successful retry means this was a
+    # transient race, not corruption: report healthy.
+    retried = _reread_and_revalidate_once(config_path)
+    if retried is not None:
+        return ConfigPeek("ok", retried, config_path)
+
+    missing_required, has_non_required = teams_satisfy_canonical_guard(teams_keys)
+    message = (
+        f"[aiteamforge-paths] WARNING: peek_config: {config_path} is "
+        f"structurally invalid (has_schema_version={has_schema}, "
+        f"missing_required={sorted(missing_required)}, "
+        f"has_non_required_team={has_non_required}) — no self-heal was "
+        f"performed by this read; the config on disk is unchanged."
+    )
+    _peek_emit_once(config_path_str, "invalid", message)
+    return ConfigPeek("invalid", config, config_path)
+
+
+# ---------------------------------------------------------------------------
 # Shared on-disk rewrite machinery (XACA-0794-008 / -009 / -012)
 # ---------------------------------------------------------------------------
 #
@@ -2348,23 +2559,56 @@ def diff_liftable_legacy_credentials(config: dict) -> list[tuple[str, str]]:
     """
     result: list[tuple[str, str]] = []
     for slug, entry in sorted((config.get("teams") or {}).items()):
-        if not isinstance(entry, dict):
-            continue
-
-        # Never overwrite an existing decision — dict OR explicit null.
-        ai_block = entry.get("ai")
-        if isinstance(ai_block, dict) and "credential" in ai_block:
-            continue
-
-        evidence = ""
-        for field in ("anthropic_account_id", "anthropic_account_nickname"):
-            value = entry.get(field)
-            if isinstance(value, str) and value.strip():
-                evidence = field
-                break
+        evidence = team_entry_needs_legacy_lift(entry)
         if evidence:
             result.append((slug, evidence))
     return result
+
+
+def team_entry_needs_legacy_lift(entry: dict | None) -> str:
+    """Return the evidence field name if *entry* still carries a legacy
+    ``anthropic_*`` credential that has not been lifted into ``ai.credential``,
+    else ``""``.
+
+    Extracted from :func:`diff_liftable_legacy_credentials`'s per-team check
+    (that function now delegates here) so a SINGLE-team caller can ask the
+    identical question without re-deriving the evidence rule.
+
+    WHY THIS EXISTS (XACA-1192-003): ``aiteamforge_registry.ai_credential()``
+    wants to tell an operator "your legacy credential has not been lifted yet"
+    when it resolves ``ABSENT`` for a team that still has one on disk (Decision
+    (c), plan doc). It cannot check the retired trio itself —
+    ``tests/test_xaca1184_no_legacy_readers.py`` allows exactly ONE Python file
+    to hold an executable reference to ``anthropic_account_id`` /
+    ``anthropic_account_nickname`` / ``anthropic_api_key_env_var``, and that
+    file is this one (``kanban-hooks/aiteamforge_paths.py``, the one-time
+    lift). A second reader in ``aiteamforge_registry.py`` would fail that
+    guard's check 2 (AST scan for executable references) even though the
+    module is already on the allowlist for PROSE mentions — check 2 is a
+    stricter, separate gate. So the question is answered HERE and the caller
+    is handed only the answer (a field name or ""), never the field values.
+
+    Pure: no I/O, never raises. Mirrors ``diff_liftable_legacy_credentials``'s
+    "ai.credential already decided" skip (a dict OR explicit ``null`` both
+    count as a recorded decision — key presence is the marker, never
+    truthiness) and its provenance-only evidence test — see that function's
+    docstring for why ``anthropic_api_key_env_var`` is deliberately excluded
+    as a trigger.
+    """
+    if not isinstance(entry, dict):
+        return ""
+
+    # Never treat an already-decided team as needing a lift — dict OR
+    # explicit null are both a recorded decision, not a gap.
+    ai_block = entry.get("ai")
+    if isinstance(ai_block, dict) and "credential" in ai_block:
+        return ""
+
+    for field in ("anthropic_account_id", "anthropic_account_nickname"):
+        value = entry.get(field)
+        if isinstance(value, str) and value.strip():
+            return field
+    return ""
 
 
 def _build_lifted_credential(entry: dict) -> dict:
