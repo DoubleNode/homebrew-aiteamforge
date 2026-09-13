@@ -5579,6 +5579,7 @@ _kb_looks_like_flag() {
 
 _kb_protected_cancel_guard() {
     local sub_title="${1-}" reason="${2-}" user_approved="${3-}" sub_id="${4-}" cmd_hint="${5-}"
+    local mode="${6:-cancel}"
     typeset -g _KB_CANCEL_GUARD_AUDIT=false
 
     # Tag match kept IDENTICAL to the pre-existing advisory check this
@@ -5588,39 +5589,64 @@ _kb_protected_cancel_guard() {
     local tag
     tag=$(_kb_protected_tag_of "$sub_title")
 
-    # Not a protected tag at all — nothing to guard.
+    # Not a protected tag at all — nothing to guard. This is also the
+    # UNCONDITIONAL-CALL contract every call site relies on (XACA-0886-029,
+    # round-2 review nounset finding): a caller may invoke this guard for
+    # EVERY subitem regardless of whether its title looks tagged, and get a
+    # cheap, side-effect-free "proceed" back with _KB_CANCEL_GUARD_AUDIT
+    # always freshly initialized to false above — never left unset from a
+    # prior call, and never skipped entirely because some caller tried to
+    # optimize by checking the tag itself first before deciding whether to
+    # call this function at all.
     if [[ -z "$tag" ]]; then
         return 0
     fi
 
-    # Sanctioned [UX] auto-cancel exception (XACA-0703): a caller (typically
-    # the Project Planner, filing a ticket with no UI surface in the diff)
-    # may auto-cancel [UX] WITHOUT user approval when the reason explicitly
-    # declares that. Kept to the EXACT rule the prior advisory used — never
-    # widen to [Review]/[Test], and never widen the reason match without
-    # updating this comment (the "STOP precondition needs a why" rule).
-    if [[ "$tag" == "[UX]" ]]; then
+    # Sanctioned [UX] auto-cancel exception (XACA-0703), CANCEL MODE ONLY
+    # (XACA-0886-028): a caller (typically the Project Planner, filing a
+    # ticket with no UI surface in the diff) may auto-cancel [UX] WITHOUT
+    # user approval when the reason explicitly declares that. Kept to the
+    # EXACT rule the prior advisory used — never widen to [Review]/[Test],
+    # never widen the reason match, and never let it apply outside
+    # mode=cancel, without updating this comment (the "STOP precondition
+    # needs a why" rule).
+    if [[ "$tag" == "[UX]" ]] && [[ "$mode" == "cancel" ]]; then
         local reason_lower="${reason:l}"
         if [[ "$reason_lower" == *"ux/ui surface"* ]] || [[ "$reason_lower" == *"no ux"* ]]; then
             return 0
         fi
     fi
 
+    # Mode-specific verb text (XACA-0886-029, round-2 review "Additional
+    # observations"): the messages below used to hardcode "cancel"/
+    # "cancelled" regardless of which caller invoked the guard, so a `sub
+    # remove` or `sub rename` refusal told the user to "cancel" a subitem
+    # that command doesn't cancel. `cmd_hint` was already right; only the
+    # prose verb was wrong. "cancel"/"remove"/"rename" are all valid base
+    # verb forms on their own (used as-is where an imperative fits), plus
+    # matching -ing/-ed forms for the two sentences that need them.
+    local verb_ing verb_past
+    case "$mode" in
+        remove) verb_ing="removing"; verb_past="removed" ;;
+        rename) verb_ing="renaming (dropping the protected tag from)"; verb_past="renamed (with its protected tag dropped)" ;;
+        *)      verb_ing="cancelling"; verb_past="cancelled" ;;
+    esac
+
     if [[ "$user_approved" == "true" ]]; then
         if [[ -z "$reason" ]]; then
-            echo "❌ Refused: --user-approved requires a --reason explaining why this protected ${tag} subitem is being cancelled." >&2
+            echo "❌ Refused: --user-approved requires a --reason explaining why this protected ${tag} subitem is being ${verb_ing}." >&2
             return 1
         fi
-        echo "⚠️  Protected ${tag} subitem cancelled under EXPLICIT USER APPROVAL (${sub_id})."
+        echo "⚠️  Protected ${tag} subitem ${verb_past} under EXPLICIT USER APPROVAL (${sub_id})."
         echo "    Reason: ${reason}"
         typeset -g _KB_CANCEL_GUARD_AUDIT=true
         return 0
     fi
 
     echo "❌ REFUSED: '${tag}' subitems are a protected merge gate (CLAUDE.md Three-Gate PR Merge" >&2
-    echo "   System). Agents must NOT cancel them — resolve the underlying work instead." >&2
+    echo "   System). Agents must NOT ${mode} them — resolve the underlying work instead." >&2
     echo "   The user can override with:" >&2
-    echo "     ${cmd_hint} ${sub_id} --user-approved --reason \"<why this is being cancelled>\"" >&2
+    echo "     ${cmd_hint} ${sub_id} --user-approved --reason \"<why this is being ${verb_past}>\"" >&2
     echo "   --user-approved is reserved for the user only, same rule as kb-done --force." >&2
     return 1
 }
@@ -5804,7 +5830,7 @@ kb-cancel() {
 
             # XACA-0886: hard-block guard for protected [Review]/[Test]/[UX]
             # subitems, BEFORE any board write.
-            if ! _kb_protected_cancel_guard "$cancel_sub_title" "$reason" "$user_approved" "$working_id" "kb-cancel"; then
+            if ! _kb_protected_cancel_guard "$cancel_sub_title" "$reason" "$user_approved" "$working_id" "kb-cancel" "cancel"; then
                 return 1
             fi
 
@@ -5817,7 +5843,12 @@ kb-cancel() {
             if [[ -n "$reason" ]]; then
                 update_jq="$update_jq | .cancelledReason = \$reason"
             fi
-            if [[ "$_KB_CANCEL_GUARD_AUDIT" == "true" ]]; then
+            # XACA-0886-029: defensive ${VAR:-false} default — the guard call above
+            # (mode "cancel") is unconditional so this is always freshly set by the
+            # time we get here, but every reader of this global now takes the same
+            # defensive shape so no future call-site refactor can reopen a nounset
+            # abort on a bare read.
+            if [[ "${_KB_CANCEL_GUARD_AUDIT:-false}" == "true" ]]; then
                 update_jq="$update_jq | .cancelledUserApproved = true"
             fi
             update_jq="$update_jq else . end
@@ -5859,7 +5890,7 @@ kb-cancel() {
             # fresh on every iteration (2nd and later) was dumping their
             # previous-iteration values to stdout as visible noise ahead of
             # the refusal message.
-            local _kbc_si _kbc_si_title _kbc_si_tag _kbc_si_status _kbc_si_id
+            local _kbc_si _kbc_si_title _kbc_si_tag _kbc_si_status _kbc_si_id _kbc_line
             for (( _kbc_si = 0; _kbc_si < _kbc_item_sub_count; _kbc_si++ )); do
                 _kbc_si_title=$(_kb_jq_read "$board_file" ".backlog[$item_idx].subitems[$_kbc_si].title // empty" -r)
                 _kbc_si_tag=$(_kb_protected_tag_of "$_kbc_si_title")
@@ -5869,9 +5900,21 @@ kb-cancel() {
                     continue
                 fi
                 _kbc_si_id=$(_kb_jq_read "$board_file" ".backlog[$item_idx].subitems[$_kbc_si].id // empty" -r)
-                _kbc_open_protected+=("${_kbc_si_id:-index $_kbc_si}: ${_kbc_si_tag} ${_kbc_si_title}")
+                # XACA-0886-029 (round-2 review, "Additional observations"): do NOT
+                # prepend ${_kbc_si_tag} here — ${_kbc_si_title} already STARTS WITH
+                # that same tag (that's how _kbc_si_tag was derived from it), so the
+                # old "${_kbc_si_tag} ${_kbc_si_title}" form printed it twice, e.g.
+                # "XACA-8850-002: [Test] [Test] gate two".
+                _kbc_open_protected+=("${_kbc_si_id:-index $_kbc_si}: ${_kbc_si_title}")
             done
 
+            # XACA-0886-029 (round-2 review, BLOCKING hint bug): an item with an OPEN
+            # protected subitem ALWAYS also fails the plain unresolved-subitem sweep
+            # below — that same open subitem counts toward kb-sweep's own
+            # remaining_count, regardless of tag — so --user-approved alone can never
+            # be sufficient here; --force is unconditionally also required. The old
+            # hint below omitted --force, so following it verbatim always hit the
+            # second refusal. Both hints in this block now say so.
             local item_cancel_user_approved=false
             if [[ ${#_kbc_open_protected[@]} -gt 0 ]]; then
                 if [[ "$user_approved" != "true" ]]; then
@@ -5882,7 +5925,7 @@ kb-cancel() {
                         echo "     - ${_kbc_line}" >&2
                     done
                     echo "   The user can override with:" >&2
-                    echo "     kb-cancel $working_id --user-approved --reason \"<why this is being cancelled>\"" >&2
+                    echo "     kb-cancel $working_id --user-approved --force --reason \"<why this is being cancelled>\"" >&2
                     echo "   --user-approved is reserved for the user only, same rule as kb-done --force." >&2
                     return 1
                 fi
@@ -5891,11 +5934,15 @@ kb-cancel() {
                     echo "   cancelled while it still has open protected subitem(s)." >&2
                     return 1
                 fi
-                echo "⚠️  Item $working_id cancelled with OPEN protected subitem(s) under EXPLICIT USER APPROVAL."
-                for _kbc_line in "${_kbc_open_protected[@]}"; do
-                    echo "    - ${_kbc_line}"
-                done
-                echo "    Reason: ${reason}"
+                # XACA-0886-029 (round-2 review, BLOCKING "premature approval notice"):
+                # do NOT print the "cancelled ... under EXPLICIT USER APPROVAL" banner
+                # here. Only the open-protected-subitem check has passed at this point —
+                # the plain unresolved-subitem sweep just below still has to pass too
+                # (and, per the comment above, ALWAYS additionally needs --force when
+                # this branch is reached), so printing the approval banner now announced
+                # a cancellation that could still be refused one check later with no
+                # board write at all. Defer the banner to immediately before the actual
+                # write, once every check has passed — see below.
                 item_cancel_user_approved=true
             fi
 
@@ -5905,9 +5952,27 @@ kb-cancel() {
                 if ! kb-sweep "$working_id" 2>/dev/null; then
                     echo "❌ Cannot cancel: unresolved subitems detected."
                     echo "   Resolve all subitems above before cancelling."
-                    echo "   To bypass (user only): kb-cancel $working_id --force"
+                    if [[ "$item_cancel_user_approved" == "true" ]]; then
+                        # XACA-0886-029: an open protected subitem always fails this
+                        # sweep too — --force is REQUIRED here in addition to
+                        # --user-approved + --reason, not an alternative to them.
+                        echo "   To bypass (user only): kb-cancel $working_id --user-approved --force --reason \"${reason}\""
+                    else
+                        echo "   To bypass (user only): kb-cancel $working_id --force"
+                    fi
                     return 1
                 fi
+            fi
+
+            # XACA-0886-029: every check has now passed — this is the first point at
+            # which the cancellation is actually going to happen. Announce the
+            # user-approved override here, not earlier (see the comment above).
+            if [[ "$item_cancel_user_approved" == "true" ]]; then
+                echo "⚠️  Item $working_id cancelled with OPEN protected subitem(s) under EXPLICIT USER APPROVAL."
+                for _kbc_line in "${_kbc_open_protected[@]}"; do
+                    echo "    - ${_kbc_line}"
+                done
+                echo "    Reason: ${reason}"
             fi
 
             local update_jq='.backlog[$idx].status = "cancelled" |
@@ -7492,16 +7557,35 @@ kb-backlog() {
                     fi
                     sub_id=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].id // empty" -r)
 
-                    # XACA-0886-022: protected [Review]/[Test]/[UX] subitems are a merge
-                    # gate; removal is at least as destructive as cancellation (it also
-                    # destroys the audit trail a cancel would have left behind), so it
-                    # goes through the SAME guard via the shared tag detector.
+                    # XACA-0886-022/-028/-029: protected [Review]/[Test]/[UX] subitems are
+                    # a merge gate; removal is at least as destructive as cancellation (it
+                    # also destroys the audit trail a cancel would have left behind), so it
+                    # goes through the SAME guard via the shared tag detector, in "remove"
+                    # mode. XACA-0886-028 (round-2 review, blocking): "remove" mode disables
+                    # the [UX] auto-cancel exception — that exception is sanctioned only for
+                    # an actual cancel, where the subitem survives as status=cancelled for
+                    # the Layer-2 UX backstop to find; a deleted subitem leaves nothing for
+                    # it to find. See the guard's own header comment for the full rationale.
+                    #
+                    # XACA-0886-029 (round-2 review, tester-bot BLOCKING finding): this call
+                    # is now UNCONDITIONAL, not gated behind `[[ -n "$sub_remove_tag" ]]` as
+                    # round 1 shipped it. The guard itself already returns 0 immediately for
+                    # an untagged title (see its own header) — the conditional wrapper here
+                    # bought nothing except skipping the one thing that mattered: it never
+                    # initialized _KB_CANCEL_GUARD_AUDIT for a NON-protected subitem, so in a
+                    # fresh shell (or any nounset-enforcing caller — e.g. the PR auto-merge
+                    # monitoring loop) the unconditional read below aborted with "parameter
+                    # not set" AFTER `_kb_jq_update` had already deleted the subitem —
+                    # reproduced live: `kb-backlog sub remove` on a plain subitem in a fresh
+                    # nounset shell mutated the board, then aborted before printing the
+                    # confirmation, rc=1 reported for what was actually a completed write.
+                    # Calling unconditionally means _KB_CANCEL_GUARD_AUDIT is ALWAYS reset to
+                    # false by the guard's own first line before it returns, tag or no tag,
+                    # so the read below is always well-defined.
                     local sub_remove_tag
                     sub_remove_tag=$(_kb_protected_tag_of "$sub_title")
-                    if [[ -n "$sub_remove_tag" ]]; then
-                        if ! _kb_protected_cancel_guard "$sub_title" "$reason" "$user_approved" "$parent_idx $sub_idx" "kb-backlog sub remove"; then
-                            return 1
-                        fi
+                    if ! _kb_protected_cancel_guard "$sub_title" "$reason" "$user_approved" "${sub_id:-$parent_idx $sub_idx}" "kb-backlog sub remove" "remove"; then
+                        return 1
                     fi
 
                     local timestamp
@@ -7513,11 +7597,34 @@ kb-backlog() {
                        --argjson sidx "$sub_idx" \
                        --arg ts "$timestamp"
 
-                    # XACA-0886-022: the subitem is now gone, so if this was a
-                    # user-approved protected removal, log it for an audit trail —
-                    # this activity-log entry becomes the only remaining record.
-                    if [[ "$_KB_CANCEL_GUARD_AUDIT" == "true" ]]; then
-                        _kb_log_activity "subitem_removed" "${sub_id:-$parent_idx-$sub_idx}" "subitem" "title" "$sub_title" "" \
+                    # XACA-0886-022/-029: the subitem is now gone, so if this was a
+                    # user-approved protected removal, log it for an audit trail — this
+                    # activity-log entry becomes the only remaining record.
+                    #
+                    # ${_KB_CANCEL_GUARD_AUDIT:-false} (XACA-0886-029): defensive default on
+                    # every reader of this global, not just this one — the guard call above
+                    # is unconditional now so this is always freshly set by the time we get
+                    # here, but a future refactor that reintroduces a conditional call site
+                    # elsewhere must not be able to reopen the same nounset abort here too.
+                    #
+                    # Log-target fallback (XACA-0886-029, reviewer "Additional
+                    # observations"): round 1 fell back to the bare board-index pair
+                    # "$parent_idx-$sub_idx" when the subitem had no `id` — that string
+                    # cannot resolve to a team activity directory, so the write silently
+                    # failed with just a warning and the "only remaining record" this
+                    # comment promises was dropped. Fall back to the PARENT item's own id
+                    # (never just its array index) plus a clearly-labelled "#<sub-idx>"
+                    # suffix instead: resolvable, and unambiguous about what it names.
+                    if [[ "${_KB_CANCEL_GUARD_AUDIT:-false}" == "true" ]]; then
+                        local sub_remove_log_target
+                        if [[ -n "$sub_id" ]]; then
+                            sub_remove_log_target="$sub_id"
+                        else
+                            local sub_remove_parent_id
+                            sub_remove_parent_id=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].id // empty" -r)
+                            sub_remove_log_target="${sub_remove_parent_id:-idx$parent_idx}#${sub_idx}"
+                        fi
+                        _kb_log_activity "subitem_removed" "$sub_remove_log_target" "subitem" "title" "$sub_title" "" \
                             "USER-APPROVED removal of protected ${sub_remove_tag} subitem: ${reason}"
                     fi
 
@@ -7836,7 +7943,7 @@ kb-backlog() {
                     # XACA-0703 advisory-only warning that used to live here — see
                     # _kb_protected_cancel_guard's own header comment for the full
                     # rationale and the exact tag/exception rules preserved from it.
-                    if ! _kb_protected_cancel_guard "$sub_title" "$reason" "$user_approved" "$sub_id" "kb-backlog sub cancel"; then
+                    if ! _kb_protected_cancel_guard "$sub_title" "$reason" "$user_approved" "$sub_id" "kb-backlog sub cancel" "cancel"; then
                         return 1
                     fi
 
@@ -7855,7 +7962,9 @@ kb-backlog() {
                     if [[ -n "$reason" ]]; then
                         update_jq="$update_jq | .backlog[\$pidx].subitems[\$sidx].cancelledReason = \$reason"
                     fi
-                    if [[ "$_KB_CANCEL_GUARD_AUDIT" == "true" ]]; then
+                    # XACA-0886-029: defensive ${VAR:-false} default, same reasoning as
+                    # the sibling reader in kb-cancel's subitem branch above.
+                    if [[ "${_KB_CANCEL_GUARD_AUDIT:-false}" == "true" ]]; then
                         update_jq="$update_jq | .backlog[\$pidx].subitems[\$sidx].cancelledUserApproved = true"
                     fi
                     update_jq="$update_jq | .lastUpdated = \$ts"

@@ -25,6 +25,35 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   template). Content mirror only — no `kb-tap-release`, no VERSION bump, no
   tag. `TAP_PUBLISHER_ENABLED` re-checked and still unset, so the manual
   two-step is the only working mechanism.
+
+  **Round 2 (PR #881 review):** `_kb_protected_cancel_guard()` gained a
+  `mode` parameter (`cancel`/`remove`/`rename`, default `cancel`) so the
+  sanctioned `[UX]` "no ux/ui surface" auto-cancel exception applies ONLY to
+  an actual cancel — `kb-backlog sub remove` deletes the subitem outright,
+  leaving nothing for the Layer-2 UX backstop to re-open, so that exception
+  no longer applies there; every protected tag now needs `--user-approved` +
+  `--reason` to be removed. `sub remove`'s guard call is now UNCONDITIONAL
+  (previously gated on the subitem's title carrying a protected tag), fixing
+  a nounset abort on a NON-protected subitem: the guard was the only thing
+  that initialized `_KB_CANCEL_GUARD_AUDIT`, and skipping it left an
+  unconditional read further down erroring under `nounset` AFTER the board
+  write had already happened. Every reader of that global is now defensively
+  `${_KB_CANCEL_GUARD_AUDIT:-false}`. `sub remove`'s activity-log fallback
+  target (when the subitem has no `id`) is now the parent item's own id plus
+  a labelled `#<sub-idx>` suffix, not the unresolvable bare index pair it
+  used to fall back to. In `kb-cancel`'s item-cancel path: the
+  "cancelled ... under EXPLICIT USER APPROVAL" banner now prints only once
+  every check (including the plain unresolved-subitem sweep, which an open
+  protected subitem always also fails) has passed, not before — the
+  refusal-hint and bypass-hint text now correctly include `--force` alongside
+  `--user-approved`; the open-protected-subitem listing no longer prints the
+  subitem's tag twice; and the list's loop variable is now declared `local`.
+  Guard refusal/approval messages now use mode-appropriate verb text
+  ("removing"/"removed" for `sub remove`) instead of always saying
+  "cancel"/"cancelled". `sub rename` is canonical-only (XACA-0543) and is
+  NOT present in this template, so the round-2 rename-specific fix (B1) does
+  not apply here. Content mirror only — no `kb-tap-release`, no VERSION
+  bump, no tag.
 - **XACA-1070** — declare `spacedock` mandatory in `share/teams/registry.json`. This is the one
   field that activates the mandatory-team machinery this ticket already shipped:
   `atf_mandatory_teams()` selects on `.mandatory == true`, **no team in the registry carried that
