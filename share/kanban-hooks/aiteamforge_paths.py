@@ -1601,12 +1601,22 @@ _PEEK_DIAGNOSTICS_EMITTED: set[tuple[str, str]] = set()
 
 
 def _peek_emit_once(path_str: str, status: str, message: str) -> None:
-    """Print *message* to stderr at most once per (path_str, status) per process."""
+    """Print *message* to stderr at most once per (path_str, status) per process.
+
+    Never raises (XACA-1192 review round 3): this is the only stderr write on
+    peek_config()'s path, including inside its outermost safety net, so an
+    unwritable stderr (closed, broken pipe, replaced by an object with no
+    usable write) must not break the "Never raises" promise. A diagnostic that
+    cannot be delivered is dropped; the returned status still carries the state.
+    """
     key = (path_str, status)
     if key in _PEEK_DIAGNOSTICS_EMITTED:
         return
     _PEEK_DIAGNOSTICS_EMITTED.add(key)
-    print(message, file=sys.stderr)
+    try:
+        print(message, file=sys.stderr)
+    except Exception:  # noqa: BLE001 - deliberate: the contract is "never raises"
+        pass
 
 
 def peek_config() -> ConfigPeek:
