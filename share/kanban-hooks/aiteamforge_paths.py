@@ -2421,7 +2421,7 @@ def _build_lifted_credential(entry: dict) -> dict:
     }
 
 
-def apply_legacy_credential_lift(config: dict) -> dict:
+def apply_legacy_credential_lift(config: dict, _warned: set | None = None) -> dict:
     """Return a copy of *config* with genuine legacy credentials promoted into
     ``ai.credential`` (XACA-1184-004).
 
@@ -2441,22 +2441,56 @@ def apply_legacy_credential_lift(config: dict) -> dict:
     ONE EXCEPTION TO "STRICTLY ADDITIVE", AND IT IS LOUD (XACA-1184-023). When a
     qualifying team's ``ai`` value is a CORRUPT NON-DICT — a string, list, or int
     from a hand edit — there is no block to add a key to, so the lift replaces it
-    with a fresh ``{}``. That discards whatever the corrupt value held. It is
-    recoverable (the driver snapshots before writing) but it is still an
-    overwrite, so it prints a WARNING to stderr naming the team and the discarded
-    type, matching ``lcars-ui/server.py``'s ``_set_team_ai_credential``. An
-    absent ``ai`` key or an explicit ``null`` is NOT corruption and warns nothing.
+    with a fresh ``{}``. That discards whatever the corrupt value held, so it
+    prints a WARNING to stderr naming the team and the discarded type, matching
+    ``lcars-ui/server.py``'s ``_set_team_ai_credential``. An absent ``ai`` key or
+    an explicit ``null`` is NOT corruption and warns nothing.
+
+    THE WARNING DOES NOT PROMISE A SNAPSHOT (XACA-1184-025). Its first wording
+    said the overwrite was "recoverable (the driver snapshots before writing)".
+    That is true on some paths and false on others, and the paragraph below
+    exists because the same class of mistake — asserting a driver behaviour that
+    only holds on the happy path — is exactly what XACA-1184-023 fixed. Every
+    path in ``_rewrite_config_on_disk`` that reaches ``transform`` (this
+    function), and whether a backup exists by the time it does:
+
+      1. needs_change(current) false ...... transform NOT called (skip-fast).
+      2. lost race, `not needs_change(reread)` .. transform(current). NO backup.
+      3. snapshot write failed ............ transform(current). NO backup.
+      4. happy path ....................... transform(reread). BACKUP EXISTS.
+      5. write/other failure after 4 ...... transform(current) AGAIN, from the
+         outer ``except``. A backup exists (taken at 4) but the on-disk file was
+         never modified, so there is nothing to recover.
+      6. failure BEFORE the backup (resolve, lock open, flock) .. transform(
+         current). NO backup.
+
+    So a backup is present on 4 and 5 and absent on 2, 3 and 6, and this function
+    cannot tell which path invoked it. The message therefore states only what is
+    certain — the team, the discarded type, and that the value is gone — and
+    points the operator at the driver's own ``snapshot=`` log line, which is
+    printed if and only if a snapshot was actually taken (path 4).
+
+    AND IT WARNS ONCE PER LIFT, NOT ONCE PER ``transform`` CALL. Path 5 invokes
+    ``transform`` a second time for ONE logical overwrite; unsuppressed that
+    reads as two separate corrupt blocks. The second call is legitimate — it
+    re-derives the in-memory shape the caller must still see — so the *transform*
+    is not suppressed, only the duplicate *warning*. The dedupe set is created
+    fresh by ``_lift_legacy_credentials_on_disk`` per on-disk lift and passed in;
+    it is deliberately NOT a module-level "already warned" flag, which would leak
+    across lifts in one process and silence the second real corruption — the leak
+    class XACA-1184-007 found in the once-per-process ``_*_ATTEMPTED`` guards.
+    A direct in-memory caller passes nothing and warns on every call, unchanged.
 
     THE WARNING LIVES HERE, NOT IN ``describe()``, DELIBERATELY. The
     ``_rewrite_config_on_disk`` skeleton calls ``describe(current)`` — the
     in-memory config — while ``transform`` runs on ``reread``, the copy taken
     under the lock. A ``describe()``-based warning would therefore report the
     PRE-RACE value, not the one actually overwritten. Worse, ``describe`` is
-    invoked only on the successful-write path: on the lost-race, snapshot-failure
-    and write-failure paths the skeleton still calls ``transform`` (so the
-    in-memory config still loses the corrupt value) and never calls ``describe``
-    at all. Warning at the point of overwrite is the only placement that reports
-    the value actually discarded, on every path that discards one.
+    invoked only on the successful-write path (4 above): on paths 2, 3, 5 and 6
+    the skeleton still calls ``transform`` (so the in-memory config still loses
+    the corrupt value) and never calls ``describe`` at all. Warning at the point
+    of overwrite is the only placement that reports the value actually
+    discarded, on every path that discards one.
 
     IDEMPOTENT by construction: every credential written makes its own trigger
     false (the predicate gates on ``"credential" in ai``), so a second run is a
@@ -2495,13 +2529,23 @@ def apply_legacy_credential_lift(config: dict) -> dict:
             # exists to prevent, so say so. Same wording as server.py's
             # _set_team_ai_credential (XACA-1178-016/024, XACA-1184-023).
             if ai_block is not None:
-                print(
-                    f"[aiteamforge-paths] WARNING: team-paths.json 'ai' block for "
-                    f"team {slug!r} was {type(ai_block).__name__!s}, not a dict -- "
-                    f"replacing with {{}} (XACA-1178-016/024; the original value is "
-                    f"in the pre-lift snapshot)",
-                    file=sys.stderr,
-                )
+                # Dedupe per lift, not per transform() call — see the path table
+                # in this function's docstring (path 5 calls transform twice for
+                # one overwrite). `_warned` is None for direct in-memory callers,
+                # who then warn on every call as before.
+                key = (slug, type(ai_block).__name__)
+                if _warned is None or key not in _warned:
+                    if _warned is not None:
+                        _warned.add(key)
+                    print(
+                        f"[aiteamforge-paths] WARNING: team-paths.json 'ai' block for "
+                        f"team {slug!r} was {type(ai_block).__name__!s}, not a dict -- "
+                        f"replacing with {{}} (XACA-1178-016/024). The original value "
+                        f"is DISCARDED; a pre-lift snapshot exists only if this run "
+                        f"reaches the disk write, so look for a 'legacy credential "
+                        f"lift: snapshot=' line below",
+                        file=sys.stderr,
+                    )
             ai_block = {}
             entry["ai"] = ai_block
         if "credential" in ai_block:
@@ -2530,13 +2574,18 @@ def _lift_legacy_credentials_on_disk(config_path: Path, current: dict) -> dict |
     forbids — the first three passes were built by cloning each other and each
     inherited the same lock/TOCTOU/backup defects (the K501 drift pattern).
     """
+    # Fresh per on-disk lift (NOT module-level): dedupes the corrupt-`ai` warning
+    # across the skeleton's repeated transform() calls without leaking the
+    # suppression into a later lift in the same process (XACA-1184-025; the leak
+    # class XACA-1184-007 found in the once-per-process _*_ATTEMPTED guards).
+    warned: set = set()
     return _rewrite_config_on_disk(
         config_path,
         current,
         label="legacy credential lift",
         backup_tag="xaca-1184-credential-lift",
         needs_change=diff_liftable_legacy_credentials,
-        transform=apply_legacy_credential_lift,
+        transform=lambda cfg: apply_legacy_credential_lift(cfg, warned),
         describe=lambda cfg: [
             f"team={slug} evidence={evidence} (XACA-1184-004 — promoted the "
             f"legacy anthropic_* trio into ai.credential; the legacy keys were "
