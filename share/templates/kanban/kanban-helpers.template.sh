@@ -5488,8 +5488,92 @@ kb-done() {
     _kb_remove_window
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_protected_cancel_guard (XACA-0886): the ONE hard-block guard for
+# cancelling a protected [Review]/[Test]/[UX] subitem. These tags are a merge
+# gate (CLAUDE.md "Three-Gate PR Merge System" / kb-sweep's protected-subitem
+# sweep) — an agent cancelling one out from under the gate is functionally
+# indistinguishable from bypassing the gate. XACA-0113/XACA-0703 added an
+# ADVISORY warning at the two call sites below, but it never refused the
+# write; XACA-0886 replaces that with an actual refusal, called from BOTH
+# `kb-cancel` and `kb-backlog sub cancel` BEFORE any board write.
+#
+# Usage: _kb_protected_cancel_guard <subitem_title> <reason> <user_approved> <subitem_id> <command_hint>
+#   subitem_title  - the subitem's title text (tag match is case-insensitive)
+#   reason         - the --reason text, if any (may be empty)
+#   user_approved  - "true" if the caller passed --user-approved, else "false"
+#   subitem_id     - the subitem's id, for the refusal message's example command
+#   command_hint   - the command name to show in the refusal's example, e.g.
+#                    "kb-cancel" or "kb-backlog sub cancel"
+#
+# Returns 0 if the cancellation may proceed, 1 if refused (caller MUST NOT
+# write to the board on a non-zero return).
+#
+# Side effect: sets the global _KB_CANCEL_GUARD_AUDIT to "true" when the
+# cancellation was allowed SPECIFICALLY because of an explicit --user-approved
+# bypass — the caller should then persist `cancelledUserApproved: true`
+# alongside `cancelledReason` on the subitem as an audit trail. It is set to
+# "false" for every other allowed case (untagged subitem, or the sanctioned
+# [UX] auto-cancel exception below), where no such marker should be written.
+_kb_protected_cancel_guard() {
+    local sub_title="${1-}" reason="${2-}" user_approved="${3-}" sub_id="${4-}" cmd_hint="${5-}"
+    typeset -g _KB_CANCEL_GUARD_AUDIT=false
+
+    # Tag match kept IDENTICAL to the pre-existing advisory check this
+    # replaces (XACA-0113/XACA-0703): lowercase substring match on the
+    # subitem title, in this priority order.
+    local title_lower="${sub_title:l}"
+    local tag=""
+    if [[ "$title_lower" == *"[review]"* ]]; then
+        tag="[Review]"
+    elif [[ "$title_lower" == *"[test]"* ]]; then
+        tag="[Test]"
+    elif [[ "$title_lower" == *"[ux]"* ]]; then
+        tag="[UX]"
+    fi
+
+    # Not a protected tag at all — nothing to guard.
+    if [[ -z "$tag" ]]; then
+        return 0
+    fi
+
+    # Sanctioned [UX] auto-cancel exception (XACA-0703): a caller (typically
+    # the Project Planner, filing a ticket with no UI surface in the diff)
+    # may auto-cancel [UX] WITHOUT user approval when the reason explicitly
+    # declares that. Kept to the EXACT rule the prior advisory used — never
+    # widen to [Review]/[Test], and never widen the reason match without
+    # updating this comment (the "STOP precondition needs a why" rule).
+    if [[ "$tag" == "[UX]" ]]; then
+        local reason_lower="${reason:l}"
+        if [[ "$reason_lower" == *"ux/ui surface"* ]] || [[ "$reason_lower" == *"no ux"* ]]; then
+            return 0
+        fi
+    fi
+
+    if [[ "$user_approved" == "true" ]]; then
+        if [[ -z "$reason" ]]; then
+            echo "❌ Refused: --user-approved requires a --reason explaining why this protected ${tag} subitem is being cancelled." >&2
+            return 1
+        fi
+        echo "⚠️  Protected ${tag} subitem cancelled under EXPLICIT USER APPROVAL (${sub_id})."
+        echo "    Reason: ${reason}"
+        typeset -g _KB_CANCEL_GUARD_AUDIT=true
+        return 0
+    fi
+
+    echo "❌ REFUSED: '${tag}' subitems are a protected merge gate (CLAUDE.md Three-Gate PR Merge" >&2
+    echo "   System). Agents must NOT cancel them — resolve the underlying work instead." >&2
+    echo "   The user can override with:" >&2
+    echo "     ${cmd_hint} ${sub_id} --user-approved --reason \"<why this is being cancelled>\"" >&2
+    echo "   --user-approved is reserved for the user only, same rule as kb-done --force." >&2
+    return 1
+}
+
 # Cancel the current item/subitem without completing it
-# Usage: kb-cancel [item-id] [--reason "text"]
+# Usage: kb-cancel <ID> ["reason text"] [--reason "text"] [--force] [--user-approved]
+# A bare `kb-cancel` with no ID is refused (XACA-0886-016) — it NEVER infers
+# the target from activeWindows the way kb-done still does (that behaviour
+# change for kb-done is a separate ticket, XACA-0933; do not touch it here).
 kb-cancel() {
     local context team terminal window_name board_file window_id
     context=$(_kb_detect_context)
@@ -5501,43 +5585,115 @@ kb-cancel() {
     board_file=$(_kb_get_board_file "$team")
     window_id=$(_kb_get_window_id "$terminal" "$window_name")
 
-    # Get working_id from argument or from activeWindows
-    local working_id explicit_id_provided=false reason=""
-    if [[ -n "$1" ]] && [[ "$1" != "--reason" ]]; then
-        # Use provided item ID
-        working_id="$1"
-        explicit_id_provided=true
-        shift
+    # ── Argument parsing (XACA-0886) ────────────────────────────────────
+    # A proper flag/positional loop, replacing the old fixed-position
+    # $1/$2/$3 reads that (a) silently dropped a positional reason given
+    # alongside --force/--user-approved in certain slot combinations, and
+    # (b) fell back to inferring the target from activeWindows on a bare
+    # call. Flags may appear before or after the ID, in any order.
+    local working_id="" reason="" positional_reason="" reason_flag_seen=false
+    local force_cancel=false user_approved=false
+    local -a _kbc_positional=()
+    local _kbc_usage="Usage: kb-cancel <ID> [\"reason text\"] [--reason \"text\"] [--force] [--user-approved]"
 
-        # When explicit ID is provided, derive correct board file from ID prefix
-        local id_team
-        id_team=$(_kb_get_team_from_code "$working_id")
-        if [[ -n "$id_team" ]]; then
-            board_file=$(_kb_get_board_file "$id_team")
-        fi
-    else
-        # Get current workingOnId from activeWindows
-        working_id=$(_kb_jq_read "$board_file" \
-            '.activeWindows[] | select(.id == $wid) | .workingOnId // empty' \
-            --arg wid "$window_id" -r)
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                echo "$_kbc_usage"
+                echo ""
+                echo "Cancels the given item or subitem without completing it."
+                echo "A bare 'kb-cancel' with no ID is always refused — it never infers the"
+                echo "target from the active window (that ambiguity is what caused accidental"
+                echo "cancellations of the wrong item)."
+                echo ""
+                echo "  \"reason text\"      Reason for cancellation, given positionally after the ID."
+                echo "  --reason \"text\"     Same as above, as a flag. Give the reason ONE way, not both."
+                echo "  --force             User-only: bypass the unresolved-subitem check on an ITEM."
+                echo "                      Does NOT bypass the protected [Review]/[Test]/[UX] subitem"
+                echo "                      guard below — only --user-approved does that."
+                echo "  --user-approved     User-only: required (together with a reason) to cancel a"
+                echo "                      protected [Review]/[Test]/[UX] subitem. Same rule as"
+                echo "                      kb-done --force — agents must never pass this flag."
+                return 0
+                ;;
+            --reason)
+                if [[ -z "${2-}" ]]; then
+                    echo "Error: --reason requires a value" >&2
+                    echo "$_kbc_usage" >&2
+                    return 1
+                fi
+                if [[ "$reason_flag_seen" == "true" ]]; then
+                    echo "Error: --reason given more than once" >&2
+                    echo "$_kbc_usage" >&2
+                    return 1
+                fi
+                reason_flag_seen=true
+                reason="$2"
+                shift 2
+                ;;
+            --force)
+                force_cancel=true
+                shift
+                ;;
+            --user-approved)
+                user_approved=true
+                shift
+                ;;
+            --*)
+                echo "Error: unknown flag '$1'" >&2
+                echo "$_kbc_usage" >&2
+                return 1
+                ;;
+            *)
+                _kbc_positional+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if [[ ${#_kbc_positional[@]} -ge 1 ]]; then
+        working_id="${_kbc_positional[1]}"
     fi
-
-    # Parse --reason flag
-    if [[ "$1" == "--reason" ]]; then
-        reason="$2"
-    elif [[ "$2" == "--reason" ]]; then
-        reason="$3"
+    if [[ ${#_kbc_positional[@]} -ge 2 ]]; then
+        positional_reason="${_kbc_positional[2]}"
     fi
-
-    if [[ -z "$working_id" ]]; then
-        echo "Error: No item ID provided and not currently working on any item"
+    if [[ ${#_kbc_positional[@]} -ge 3 ]]; then
+        echo "Error: too many positional arguments" >&2
+        echo "$_kbc_usage" >&2
         return 1
     fi
 
-    # Check for --force flag (allows cancelling items with incomplete subitems)
-    local force_cancel=false
-    if [[ "$1" == "--force" ]] || [[ "$2" == "--force" ]] || [[ "$3" == "--force" ]]; then
-        force_cancel=true
+    if [[ -n "$positional_reason" ]]; then
+        if [[ "$reason_flag_seen" == "true" ]]; then
+            echo "Error: reason given twice — both a positional reason and --reason. Provide it once." >&2
+            echo "$_kbc_usage" >&2
+            return 1
+        fi
+        reason="$positional_reason"
+    fi
+
+    # XACA-0886-016: a bare call NEVER infers the target from activeWindows.
+    if [[ -z "$working_id" ]]; then
+        echo "Error: No item ID provided." >&2
+        echo "$_kbc_usage" >&2
+        return 1
+    fi
+
+    # When explicit ID is provided, derive correct board file from ID prefix
+    local id_team
+    id_team=$(_kb_get_team_from_code "$working_id")
+    if [[ -n "$id_team" ]]; then
+        board_file=$(_kb_get_board_file "$id_team")
+    fi
+
+    # --force warning parity with kb-done --force (XACA-0886-020).
+    if [[ "$force_cancel" == "true" ]]; then
+        echo "WARNING: --force bypasses the unresolved-subitem check on an ITEM."
+        echo "WARNING: This flag is reserved for the user only. Agents must NOT use --force."
+        echo "WARNING: --force does NOT bypass the protected [Review]/[Test]/[UX] subitem guard —"
+        echo "WARNING: only --user-approved (with a reason) can cancel a protected subitem."
+        echo "WARNING: Proceeding with force..."
+        echo ""
     fi
 
     local timestamp item_found=false
@@ -5550,6 +5706,16 @@ kb-cancel() {
         local parent_idx
         parent_idx=$(_kb_find_by_id "$board_file" "$parent_id")
         if [[ "$parent_idx" -ge 0 ]]; then
+            # XACA-0886: hard-block guard for protected [Review]/[Test]/[UX]
+            # subitems, BEFORE any board write.
+            local cancel_sub_title
+            cancel_sub_title=$(_kb_jq_read "$board_file" \
+                '.backlog[$pidx].subitems[]? | select(.id == $subId) | .title // empty' \
+                --argjson pidx "$parent_idx" --arg subId "$working_id" -r)
+            if ! _kb_protected_cancel_guard "$cancel_sub_title" "$reason" "$user_approved" "$working_id" "kb-cancel"; then
+                return 1
+            fi
+
             local update_jq='.backlog[$pidx].subitems = [.backlog[$pidx].subitems[] |
                 if .id == $subId then
                     .status = "cancelled" |
@@ -5558,6 +5724,9 @@ kb-cancel() {
                     del(.activelyWorking, .workStartedAt, .worktree, .worktreeBranch, .worktreeWindowId)'
             if [[ -n "$reason" ]]; then
                 update_jq="$update_jq | .cancelledReason = \$reason"
+            fi
+            if [[ "$_KB_CANCEL_GUARD_AUDIT" == "true" ]]; then
+                update_jq="$update_jq | .cancelledUserApproved = true"
             fi
             update_jq="$update_jq else . end
             ] |
@@ -7315,41 +7484,69 @@ kb-backlog() {
                     ;;
 
                 cancel)
-                    local arg1="$1"
-                    local arg2="$2"
-                    local arg3="$3"
-                    local parent_idx sub_idx reason=""
+                    # ── Argument parsing (XACA-0886) ────────────────────
+                    local parent_idx sub_idx reason="" user_approved=false
+                    local _kbsc_id="" _kbsc_usage="Usage: kb-backlog sub cancel <subitem-id> [--reason \"text\"] [--user-approved]"
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --reason)
+                                if [[ -z "${2-}" ]]; then
+                                    echo "Error: --reason requires a value" >&2
+                                    echo "$_kbsc_usage" >&2
+                                    return 1
+                                fi
+                                reason="$2"
+                                shift 2
+                                ;;
+                            --user-approved)
+                                user_approved=true
+                                shift
+                                ;;
+                            -h|--help)
+                                echo "$_kbsc_usage"
+                                echo "Marks subitem as cancelled. Unlike done/todo/start/due/priority (which take"
+                                echo "<parent-idx> <sub-idx>), this takes a SUBITEM-ID (e.g. XACA-0001-003)."
+                                echo "Protected [Review]/[Test]/[UX] subitems are a merge gate and are REFUSED"
+                                echo "unless --user-approved is given together with --reason (user-only, same"
+                                echo "rule as kb-done --force)."
+                                return 0
+                                ;;
+                            --*)
+                                echo "Error: unknown flag '$1'" >&2
+                                echo "$_kbsc_usage" >&2
+                                return 1
+                                ;;
+                            *)
+                                if [[ -n "$_kbsc_id" ]]; then
+                                    echo "Error: unexpected extra argument '$1'" >&2
+                                    echo "$_kbsc_usage" >&2
+                                    return 1
+                                fi
+                                _kbsc_id="$1"
+                                shift
+                                ;;
+                        esac
+                    done
 
-                    # Parse --reason flag
-                    if [[ "$arg1" == "--reason" ]]; then
-                        reason="$arg2"
-                        arg1="$arg3"
-                        arg2=""
-                    elif [[ "$arg2" == "--reason" ]]; then
-                        reason="$arg3"
-                        arg2=""
-                    fi
-
-                    if [[ -z "$arg1" ]]; then
-                        echo "Usage: kb-backlog sub cancel <subitem-id> [--reason \"text\"]"
+                    if [[ -z "$_kbsc_id" ]]; then
+                        echo "$_kbsc_usage"
                         echo "Marks subitem as cancelled."
                         return 1
                     fi
 
-                    # Check if it's a single subitem ID (e.g., XFRE-0001-001)
-                    if [[ -z "$arg2" ]] && [[ "$arg1" =~ ^X[A-Z]{2,4}-[0-9]+-[0-9]+$ ]]; then
-                        # Single argument: subitem ID
+                    # Must be a single subitem ID (e.g., XFRE-0001-001)
+                    if [[ "$_kbsc_id" =~ ^X[A-Z]{2,4}-[0-9]+-[0-9]+$ ]]; then
                         local resolved
-                        resolved=$(_kb_resolve_subitem_id "$board_file" "$arg1")
+                        resolved=$(_kb_resolve_subitem_id "$board_file" "$_kbsc_id")
                         parent_idx="${resolved%%:*}"
                         sub_idx="${resolved##*:}"
 
                         if [[ "$parent_idx" == "-1" ]]; then
-                            echo "Error: Subitem not found: $arg1"
+                            echo "Error: Subitem not found: $_kbsc_id"
                             return 1
                         fi
                     else
-                        echo "Usage: kb-backlog sub cancel <subitem-id> [--reason \"text\"]"
+                        echo "$_kbsc_usage"
                         return 1
                     fi
 
@@ -7364,36 +7561,13 @@ kb-backlog() {
                         return 1
                     fi
 
-                    # XACA-0113, XACA-0703: Soft warning for protected subitems ([Review], [Test], [UX]).
-                    #
-                    # [Review] and [Test]: ALWAYS warn — these are filed by bots and represent
-                    # concrete review/test work that must be done or explicitly waived by the user.
-                    # Agents may NEVER auto-cancel them.
-                    #
-                    # [UX]: Warn by default — a UX evaluation gate exists to catch unintended UI
-                    # regressions. HOWEVER, an agent MAY auto-cancel a [UX] subitem WITHOUT user
-                    # approval when the --reason explicitly indicates there is no UI surface in the
-                    # diff (reason substring "ux/ui surface" or "no ux"). This exception exists
-                    # because many backend/infra PRs have zero UI impact; forcing user approval for
-                    # every such cancellation is friction without safety benefit. The exception is
-                    # deliberately narrow: only [UX], only with that reason class, never for
-                    # [Review]/[Test]. Widening it without updating this comment violates the
-                    # "STOP precondition needs a why" rule (XACA-0703 / CLAUDE.md feedback).
-                    local _sub_title_lower="${sub_title:l}"
-                    if [[ "$_sub_title_lower" == *"[review]"* ]] || [[ "$_sub_title_lower" == *"[test]"* ]]; then
-                        echo "⚠️  PROTECTED SUBITEM: '[Review]'/'[Test]' subitems require user approval to cancel."
-                        echo "If you are an agent, STOP and ask the user for permission before proceeding."
-                    elif [[ "$_sub_title_lower" == *"[ux]"* ]]; then
-                        local _reason_lower="${reason:l}"
-                        if [[ "$_reason_lower" == *"ux/ui surface"* ]] || [[ "$_reason_lower" == *"no ux"* ]]; then
-                            # Principled exception: caller has declared no UI surface in this diff.
-                            # Allow silent cancel — no warning emitted. (XACA-0703)
-                            :
-                        else
-                            echo "⚠️  PROTECTED SUBITEM: '[UX]' subitems require user approval to cancel."
-                            echo "If you are an agent, STOP and ask the user for permission before proceeding."
-                            echo "Exception: pass --reason \"no ux/ui surface in diff\" to auto-cancel when no UI is affected."
-                        fi
+                    # XACA-0886: hard-block guard for protected [Review]/[Test]/[UX]
+                    # subitems, BEFORE any board write. Replaces the XACA-0113/
+                    # XACA-0703 advisory-only warning that used to live here — see
+                    # _kb_protected_cancel_guard's own header comment for the full
+                    # rationale and the exact tag/exception rules preserved from it.
+                    if ! _kb_protected_cancel_guard "$sub_title" "$reason" "$user_approved" "$sub_id" "kb-backlog sub cancel"; then
+                        return 1
                     fi
 
                     local timestamp
@@ -7410,6 +7584,9 @@ kb-backlog() {
                        del(.backlog[$pidx].subitems[$sidx].worktreeWindowId)'
                     if [[ -n "$reason" ]]; then
                         update_jq="$update_jq | .backlog[\$pidx].subitems[\$sidx].cancelledReason = \$reason"
+                    fi
+                    if [[ "$_KB_CANCEL_GUARD_AUDIT" == "true" ]]; then
+                        update_jq="$update_jq | .backlog[\$pidx].subitems[\$sidx].cancelledUserApproved = true"
                     fi
                     update_jq="$update_jq | .lastUpdated = \$ts"
 
@@ -7997,6 +8174,14 @@ kb-backlog() {
                     echo "  list <parent-idx>                   List subitems"
                     echo "  remove <parent-idx> <sub-idx>       Remove subitem"
                     echo "  done <parent-idx> <sub-idx>         Mark subitem completed"
+                    echo "  cancel <subitem-id> [--reason \"text\"] [--user-approved]"
+                    echo "                                      Mark subitem cancelled. Takes a SUBITEM-ID"
+                    echo "                                      (e.g. XACA-0001-003), NOT <parent-idx> <sub-idx>"
+                    echo "                                      like the commands above/below. Protected"
+                    echo "                                      [Review]/[Test]/[UX] subitems are a merge gate"
+                    echo "                                      and are REFUSED unless --user-approved is given"
+                    echo "                                      together with --reason (user-only, same rule as"
+                    echo "                                      kb-done --force)."
                     echo "  todo <parent-idx> <sub-idx>         Reset subitem to todo"
                     echo "  jira <parent-idx> <sub-idx> [id]    Set/view/clear JIRA ID"
                     echo "  github <parent-idx> <sub-idx> [ref] Set/view/clear GitHub issue"
@@ -23790,7 +23975,10 @@ kb-help() {
     echo "  kb-unblock             (deprecated alias for kb-resume)"
     echo "  kb-done [item-id]      Complete and remove from board"
     echo "  kb-merged [item-id]    Alias for kb-done"
-    echo "  kb-cancel [item-id] [--reason \"text\"]   Cancel item/subitem without completing"
+    echo "  kb-cancel <item-id> [\"reason\"|--reason \"text\"] [--force] [--user-approved]"
+    echo "                          Cancel item/subitem without completing. Bare call (no ID)"
+    echo "                          is refused. Protected [Review]/[Test]/[UX] subitems need"
+    echo "                          --user-approved + a reason (user-only, see kb-cancel --help)."
     echo "  kb-clear               Remove window from board"
     echo ""
     echo "Task Management:"
@@ -23832,7 +24020,7 @@ kb-help() {
     echo "  kb-backlog sub remove <id> <idx>        Remove subitem"
     echo "  kb-backlog sub start <subitem-id>       Start working on subitem"
     echo "  kb-backlog sub done <subitem-id>        Mark subitem completed"
-    echo "  kb-backlog sub cancel <subitem-id> [--reason \"text\"]   Cancel subitem"
+    echo "  kb-backlog sub cancel <subitem-id> [--reason \"text\"] [--user-approved]   Cancel subitem"
     echo "  kb-backlog sub stop <id> <idx>          Stop working on subitem"
     echo "  kb-backlog sub todo <id> <idx>          Mark subitem as todo"
     echo "  kb-backlog sub jira <id> <idx> [ticket] Set subitem JIRA"

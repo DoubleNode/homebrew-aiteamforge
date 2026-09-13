@@ -6,6 +6,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-0886** — mirror the canonical `kb-cancel` hardening into
+  `share/templates/kanban/kanban-helpers.template.sh`: a new shared
+  `_kb_protected_cancel_guard()` hard-refuses cancelling a protected
+  `[Review]`/`[Test]`/`[UX]` subitem (no board write) unless `--user-approved`
+  is given together with `--reason`, replacing the prior advisory-only
+  warning that printed a STOP message and cancelled anyway. Wired into both
+  `kb-cancel` and `kb-backlog sub cancel`, before any board write. The
+  sanctioned `[UX]` "no ux/ui surface in diff" auto-cancel exception is
+  preserved unchanged. `kb-cancel`'s argument parsing is rewritten as a
+  proper flag/positional loop (flags may appear before or after the ID in
+  any order; a positional reason now persists reliably); a bare `kb-cancel`
+  with no ID is always refused (it no longer infers the target from the
+  active window). A user-approved bypass persists an audit marker,
+  `cancelledUserApproved: true`, alongside `cancelledReason`. Updated the
+  `kb-backlog sub` help listing and `kb-help`'s `kb-cancel` line to document
+  the new argument shapes and `sub cancel` (previously undocumented in this
+  template). Content mirror only — no `kb-tap-release`, no VERSION bump, no
+  tag. `TAP_PUBLISHER_ENABLED` re-checked and still unset, so the manual
+  two-step is the only working mechanism.
 - **XACA-1070** — declare `spacedock` mandatory in `share/teams/registry.json`. This is the one
   field that activates the mandatory-team machinery this ticket already shipped:
   `atf_mandatory_teams()` selects on `.mandatory == true`, **no team in the registry carried that
