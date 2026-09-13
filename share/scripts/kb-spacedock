@@ -69,8 +69,9 @@
 # silently treating silence as health is exactly the failure mode this whole
 # script exists to avoid. A tool that is documented as CORRECTLY absent on
 # this host by design (kb-sweep-stubs on a tap consumer, the auto-upgrade
-# log on a box with no tap install, the mandatory-teams predicate before
-# XACA-1070 ships) gets its own SKIP bucket instead — still never "pass".
+# log on a box with no tap install, the mandatory-teams predicate on a host
+# whose version predates it) gets its own SKIP bucket instead — still never
+# "pass".
 #
 # ============================================================================
 # SEVERITY BUCKETS (used throughout; see _spd_emit)
@@ -101,9 +102,10 @@
 # (outside every git work tree — spacedock is not a container/kanban-inside-
 # repo team). Overridable via KB_SPACEDOCK_BOARD for testing only.
 #
-# The spacedock team/board does NOT exist yet as of this writing — XACA-1068
-# is provisioning it live in a sibling session. This script MUST NOT create,
-# register, or provision it. When the board file is absent, `triage` still
+# The spacedock board may or may not exist on a given host. XACA-1070's
+# activation declares `spacedock` mandatory, so install and upgrade provision
+# it; a host pinned to a pre-activation formula tag will not have it. Either
+# way this script MUST NOT create, register, or provision it. When the board file is absent, `triage` still
 # runs every diagnostic, still reports to stdout and a findings file, and
 # then says PLAINLY that XSDK filing is unavailable and names XACA-1068 —
 # it does not fail, and it does not pretend the run didn't happen.
@@ -356,13 +358,12 @@ _spd_find_kb_sweep_stubs() {
     return 1
 }
 
-# XACA-1070's mandatory-teams predicate library. NOT on disk at a stable
-# runtime path as of this writing (still on branch feature/xaca-1070,
-# uncommitted) — this resolver intentionally does NOT hard-code that
-# worktree path (per the task brief: read it there for the signature, never
-# depend on it at runtime). It tries plausible SHIPPED locations only, and
-# degrades to "predicate unavailable" (SKIP, not UNKNOWN — this is expected
-# until XACA-1070 ships) when none exist.
+# XACA-1070's mandatory-teams predicate library, shipped at
+# libexec/lib/mandatory-teams.sh. This resolver still does NOT hard-code any
+# single path: a host may run a version that predates the lib, and dev-mode
+# clones lay it out differently. It tries plausible SHIPPED locations only,
+# and degrades to "predicate unavailable" (SKIP, not UNKNOWN — a fact about
+# the host's version, not a finding about its health) when none exist.
 _spd_find_mandatory_teams_lib() {
     if [ -n "${KB_SPACEDOCK_MANDATORY_TEAMS_LIB:-}" ] && [ -f "${KB_SPACEDOCK_MANDATORY_TEAMS_LIB}" ]; then
         printf '%s\n' "$KB_SPACEDOCK_MANDATORY_TEAMS_LIB"
@@ -382,9 +383,9 @@ _spd_find_mandatory_teams_lib() {
 }
 
 # Thin wrappers over the real predicate (design requirement: swapping in
-# the shipped lib is a one-line change here once XACA-1070 lands it).
+# the shipped lib stays a one-line change here).
 #   _spd_atf_mandatory_teams  -> stdout: one team id per line. Exit 0 with
-#     empty stdout means "zero teams flagged today" (expected, NOT an
+#     empty stdout means "zero teams flagged in this registry" (expected, NOT an
 #     error). Exit 1 means registry.json missing/unparseable — a real
 #     "tool failed" condition. These two must never be collapsed.
 #   _spd_atf_team_provisioned <team> -> exit 0 provisioned / 1 not, no stdout.
@@ -584,15 +585,16 @@ _spd_check_auto_upgrade_log() {
 
 # ---------------------------------------------------------------------------
 # CHECK 6 — mandatory-teams provisioning (XACA-1070's atf_team_provisioned /
-# atf_mandatory_teams). Lib not shipped yet as of this writing -> SKIP, not
-# UNKNOWN (expected, not a finding about this host). Once it ships, this is
-# the one check that can legitimately flag "academy not provisioned" etc. on
-# a tap consumer that's missing a mandatory team.
+# atf_mandatory_teams). When the lib cannot be resolved on this host -> SKIP,
+# not UNKNOWN (a fact about the host's version, not a finding about its
+# health). When it IS resolvable, this is the one check that can legitimately
+# flag "spacedock not provisioned" etc. on a tap consumer missing a
+# mandatory team.
 # ---------------------------------------------------------------------------
 _spd_check_mandatory_teams() {
     local lib
     lib=$(_spd_find_mandatory_teams_lib) || {
-        _spd_emit "mandatory-teams" "skip" "atf_team_provisioned predicate not available on this host yet (XACA-1070 not shipped) — skipping" "" ""
+        _spd_emit "mandatory-teams" "skip" "atf_team_provisioned predicate not available on this host — mandatory-teams.sh not found (host version may predate it); skipping" "" ""
         return
     }
     local shell="bash"
@@ -1373,10 +1375,11 @@ _spd_file_findings() {
         echo ""
         echo "XSDK filing UNAVAILABLE — no spacedock board found at:"
         echo "  $SPD_BOARD"
-        echo "The spacedock team/board does not exist on this host yet (XACA-1068 is"
-        echo "provisioning it). Every diagnostic above still ran and was reported in full;"
-        echo "nothing was filed. Do NOT create this board manually — re-run"
-        echo "'kb-spacedock triage' once XACA-1068 has landed it on this host."
+        echo "The spacedock team/board is not provisioned on this host. It is a"
+        echo "mandatory team, so install and upgrade provision it automatically on a"
+        echo "current version; a host predating that will not have it. Every diagnostic"
+        echo "above still ran and was reported in full; nothing was filed. Do NOT create"
+        echo "this board manually — upgrade, then re-run 'kb-spacedock triage'."
         return 0
     fi
 

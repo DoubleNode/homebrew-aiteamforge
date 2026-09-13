@@ -55,8 +55,10 @@ Each entry in `.teams[]` may carry an optional boolean `"mandatory"` key:
 
 - **Omitting the key defaults to `false`.** Only a team explicitly marked
   `"mandatory": true` is treated as mandatory — there is no implicit
-  mandatory team, and (as of XACA-1070-001) zero teams carry the flag. An
-  empty mandatory-teams list is the normal, expected state, not an error.
+  mandatory team. `spacedock` is the first team to carry the flag, as of
+  XACA-1070's activation commit. An empty mandatory-teams list remains a
+  normal, expected state rather than an error — reachable on any consumer
+  whose registry declares none.
 - **A mandatory team is suppressed from the wizard's selectable list and
   force-installed instead.** The install wizard (`bin/aiteamforge-setup.sh`)
   does not present it as a checkbox choice — it is force-appended to every
