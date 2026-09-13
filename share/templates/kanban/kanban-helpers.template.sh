@@ -976,15 +976,6 @@ _kb_release_sync() {
 
     [[ -z "$item_id" ]] && return 0
 
-    # XACA-0886-024: test/CI escape hatch — skip the network call to the
-    # team's LCARS server entirely, rather than making every sandboxed test
-    # suite that calls kb-cancel/kb-done/etc. stand up (or accidentally hit
-    # a REAL, already-running) LCARS instance. Opt-in only; default
-    # (unset) behavior is unchanged.
-    if [[ "${KB_SKIP_RELEASE_SYNC:-0}" == "1" ]]; then
-        return 0
-    fi
-
     # XACA-0182: Subitem IDs (e.g., XACA-0179-002) are not top-level board
     # items, so LCARS /api/releases/sync-item returns 404 for them and the
     # loud-failure branch below emits a spurious warning on every sub done /

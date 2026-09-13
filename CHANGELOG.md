@@ -37,6 +37,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   detection matches `(X<code>|EPIC)-NNNN[NN]` case-insensitively with word
   boundaries (no more ISO-8601/SHA-256 false hits; 6-digit ids reported
   whole). A late `[Debug] Sync` subitem no longer moves the planning anchor.
+- **XACA-0886 (PR #881 CI)** — removed the `KB_SKIP_RELEASE_SYNC` switch from
+  `_kb_release_sync` again. It made the function differ from develop's canonical and
+  failed the XACA-1146 release parity check; tests now shadow the function instead.
 - **XACA-0886 (PR #881 review round 5)** — `kb-cancel`'s item-level bypass hint prints
   the reason with `print -r --` and `${(q)}` quoting, so a pasted hint cannot mangle or
   execute the reason text.
