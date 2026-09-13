@@ -4767,46 +4767,96 @@ _kb_sweep_is_framework_title() {
     return 1
 }
 
-# S2 signal (XACA-1199 plan D4): does the title cite a DIFFERENT ticket's id?
-# Scans whitespace-delimited "words" (not a raw substring scan) so the match
-# is a whole token, trims common surrounding punctuation, then tests each
-# candidate against the team-generic ticket-id shape. A candidate equal to
-# the parent id, or prefixed "<parent-id>-" (the parent's OWN subitem ids),
-# is never foreign — e.g. "XACA-1186-013" on parent XACA-1186 is not foreign.
-# Prints the first foreign id found and returns 0; returns 1 if none.
+# S2 signal (XACA-1199 plan D4; contract TIGHTENED in review round 1,
+# XACA-1199-013): does the title cite a DIFFERENT ticket's id?
+#
+# Match shape: a team-registry ticket id `(X[A-Z]{3}|EPIC)-[0-9]{4,6}`,
+# case-INSENSITIVELY, with a leading boundary (the preceding character, if
+# any, is not alphanumeric — so "FOOXACA-1185" does NOT match on the
+# embedded "XACA-1185") and a trailing boundary (the character immediately
+# after the match, if any, is not alphanumeric). A `-NNN` (1-3 digit)
+# subitem suffix immediately following the base match is consumed as part
+# of the same token before the trailing-boundary check runs, and is NOT
+# part of the id compared against the parent — e.g. "XACA-1186-013" reduces
+# to base id "XACA-1186" for the parent-equality test below, so it is not
+# foreign on parent XACA-1186. All candidates are normalised to UPPERCASE
+# before being compared or printed. Verified examples (see
+# tests/test-xaca-1199-kb-sweep-residual.zsh and the prototype this
+# docstring was checked against): "XACA-9102-005 follow-up work" on parent
+# XACA-9102 -> not foreign; "xaca-1185" on parent XACA-1186 -> foreign,
+# reports "XACA-1185"; "XACA-123456" -> foreign (unless it IS the parent),
+# reports "XACA-123456" in full; "ISO-8601 timestamp", "SHA-256 hash",
+# "RFC-3339 format", "CWE-79 vulnerability", "PEP-8 style", and
+# "FOOXACA-1185 edge case" all report nothing (return 1).
+#
+# The previous contract's `${parent_id}-"*` prefix check was UNREACHABLE:
+# the old pattern allowed only a single dash, so $cand could never itself
+# contain a second dash for that comparison to fire on. This version
+# replaces it with an explicit subitem-suffix consumption step, so the
+# exclusion is actually reachable (see mutation A in the regression test).
+#
+# Prints the first foreign id found (uppercased) and returns 0; returns 1
+# if none.
 _kb_sweep_first_foreign_id() {
+    # XACA-0934-021-style self-containment: this function indexes strings
+    # 1-based throughout (${remain[$idx]}, $MBEGIN/$MEND semantics) — the
+    # house style already used elsewhere in this file (~L3456/~L4580/
+    # ~L21312, and the NO_KSH_ARRAYS precedent at _kb_knowledge_destination_
+    # guard). A caller with KSH_ARRAYS set would otherwise silently shift
+    # every subscript by one and corrupt both the boundary checks and the
+    # printed candidate. LOCAL_OPTIONS restores the caller's setting on
+    # return, so this is invisible outside the function.
+    setopt LOCAL_OPTIONS NO_KSH_ARRAYS
+
     local title="$1" parent_id="$2"
-    local remain="$title" cand pre
-    # Scan left-to-right for non-overlapping matches of the id shape (zsh's
-    # `[[ =~ ]]` finds the FIRST match in $remain, not necessarily anchored
-    # at position 1; $MATCH/$MBEGIN/$MEND report what it found — same
-    # mechanism the file already uses at line ~3456/~4580/~21312). This is a
-    # deliberate SUBSTRING scan, not a whole-word match: an id can appear
-    # inside a longer subitem-id chain like "XACA-1186-013" (which reduces
-    # to matching just "XACA-1186", the base id, since the pattern allows
-    # only one dash) — the equality/prefix exclusions below are what
-    # actually decide whether THAT reduced match counts as foreign, so they
-    # must run on every candidate reachable by the scan, not be pre-empted
-    # by requiring the whole word to match.
+    local remain="$title" lower cand pre after trailing_char
+    local parent_upper="${(U)parent_id}"
+    local mbegin mend base_end
+    # Case-insensitivity is achieved by matching against a LOWERCASED COPY
+    # of $remain with an all-lowercase pattern, then slicing the ORIGINAL
+    # $remain by index for the boundary characters (lowercasing never
+    # changes a string's length, so indices computed on the lowercased copy
+    # are valid on the original) — deliberately NOT `setopt no_case_match`
+    # or the `(#i)` glob qualifier, either of which would make this
+    # function's own behaviour depend on an ambient option a caller could
+    # have set differently.
     while [[ -n "$remain" ]]; do
-        if [[ "$remain" =~ "[A-Z][A-Z0-9]{1,7}-[0-9]{3,5}" ]]; then
-            cand="$MATCH"
-            # Word-boundary guard: reject a match whose immediately
+        lower="${(L)remain}"
+        if [[ "$lower" =~ "(x[a-z]{3}|epic)-[0-9]{4,6}" ]]; then
+            mbegin=$MBEGIN
+            mend=$MEND
+            cand="${(U)MATCH}"
+            # Leading boundary guard: reject a match whose immediately
             # preceding character is itself alphanumeric, so an id-shaped
             # tail embedded mid-word (e.g. "FOOXACA-1185") is not treated
             # as a standalone citation.
-            if (( MBEGIN > 1 )); then
-                pre="${remain[$((MBEGIN - 1))]}"
+            if (( mbegin > 1 )); then
+                pre="${remain[$((mbegin - 1))]}"
             else
                 pre=""
             fi
-            if [[ -z "$pre" ]] || [[ "$pre" != [A-Za-z0-9] ]]; then
-                if [[ "$cand" != "$parent_id" ]] && [[ "$cand" != "${parent_id}-"* ]]; then
+            # Consume an optional "-NNN" (1-3 digit) subitem suffix
+            # immediately following the base match as part of the same
+            # token, so it participates in the trailing-boundary check
+            # below but is excluded from the parent-equality comparison
+            # (cand/parent_upper are compared using the BASE match only).
+            base_end=$mend
+            if (( base_end < ${#remain} )); then
+                after="${remain[$((mend + 1)),-1]}"
+                if [[ "$after" =~ "^-[0-9]{1,3}" ]]; then
+                    base_end=$((mend + ${#MATCH}))
+                fi
+            fi
+            trailing_char=""
+            (( base_end < ${#remain} )) && trailing_char="${remain[$((base_end + 1))]}"
+            if { [[ -z "$pre" ]] || [[ "$pre" != [A-Za-z0-9] ]]; } \
+               && { [[ -z "$trailing_char" ]] || [[ "$trailing_char" != [A-Za-z0-9] ]]; }; then
+                if [[ "$cand" != "$parent_upper" ]]; then
                     printf '%s' "$cand"
                     return 0
                 fi
             fi
-            remain="${remain[$((MEND + 1)),-1]}"
+            remain="${remain[$((base_end + 1)),-1]}"
         else
             remain=""
         fi
@@ -4912,7 +4962,7 @@ kb-sweep() {
 
     # Print each subitem with status icon
     local completed_count=0 cancelled_count=0 in_progress_count=0 todo_count=0 blocked_count=0
-    local icon sub_status sub_id sub_title
+    local icon sub_status sub_id _sub_added sub_title
 
     # Read subitems as newline-delimited lines: STATUS|ID|ADDEDAT|TITLE
     # XACA-1199: addedAt was added BEFORE title (not appended) so that a "|"
@@ -4952,6 +5002,7 @@ kb-sweep() {
     # line than the generic "N remaining".
     local protected_unresolved=0
     local protected_lines=""
+    local _ps_added
     while IFS="|" read -r ps_status ps_id _ps_added ps_title; do
         [[ -z "$ps_status" ]] && continue
         if [[ "$ps_title" == \[Review\]* ]] || [[ "$ps_title" == \[Test\]* ]] || [[ "$ps_title" == \[UX\]* ]]; then
@@ -4993,10 +5044,21 @@ kb-sweep() {
     while IFS="|" read -r fw_status fw_id fw_added fw_title; do
         [[ -z "$fw_status" ]] && continue
         if _kb_sweep_is_framework_title "$fw_title"; then
+            # XACA-1199 review round 1 (E1): "[Debug] Sync Local Develop
+            # Branch" is added by kb-debug LATE — well after the real
+            # planning batch, sometimes after genuinely parked work was
+            # already added. It stays framework (excluded from the
+            # RESIDUAL list itself, same as every other framework title
+            # via the `_kb_sweep_is_framework_title` check above), but it
+            # must NEVER be allowed to advance fw_anchor: doing so would
+            # drag the S4 anchor past its own late addition and silently
+            # untag lines that were genuinely parked before it existed.
+            if [[ "$fw_title" == \[Debug\]* ]]; then
+                :
             # ISO-8601 "Z" timestamps of equal precision compare correctly
             # as plain strings — no date parsing needed (same reasoning the
             # PR-monitor loop in CLAUDE.md uses for EFFECTIVE_CUTOFF).
-            if [[ -n "$fw_added" ]] && { [[ -z "$fw_anchor" ]] || [[ "$fw_added" > "$fw_anchor" ]]; }; then
+            elif [[ -n "$fw_added" ]] && { [[ -z "$fw_anchor" ]] || [[ "$fw_added" > "$fw_anchor" ]]; }; then
                 fw_anchor="$fw_added"
             fi
         fi
@@ -5070,6 +5132,7 @@ kb-sweep() {
     # Retrospective file validation (blocking — prevents kb-done if retro file is missing)
     # Check if there's a completed "Retrospective" subitem and validate the file exists
     local has_retro_subitem=false retro_subitem_completed=false retro_blocking=false
+    local _rs_added
     while IFS="|" read -r rs_status rs_id _rs_added rs_title; do
         [[ -z "$rs_status" ]] && continue
         # Match the standard "Retrospective and Knowledge Capture" subitem

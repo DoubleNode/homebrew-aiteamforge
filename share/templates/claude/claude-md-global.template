@@ -728,8 +728,34 @@ CHECKS_EOF
   # bash-4-only constructs, no top-level `local` — this whole loop already
   # targets zsh + bash 3.2 (see the FORCE_PUSH_CUTOFF note above); this
   # block is verified under both.
+  #
+  # XACA-1199-012 (review round 1): the naive "first line matching
+  # /RESIDUAL OPEN SUBITEMS \([0-9]+\)/" is HIJACKABLE — a status-table row
+  # is itself a subitem TITLE, and nothing stops a title from containing
+  # that exact literal text. A hijacked match would extract a fake block
+  # (or none at all) instead of kb-sweep's real header + body. Anchor on
+  # the header's own printed SHAPE instead of the bare marker text:
+  #   * the real header (kb-sweep) is printed as exactly two leading
+  #     spaces, then a glyph that is NOT a space and NOT "[";
+  #   * a status-table row is printed as two leading spaces then "[" (an
+  #     icon: "[✓]"/"[ ]"/etc) — excluded by the same rule;
+  #   * a PROTECTED/RESIDUAL body line is printed with FIVE leading spaces
+  #     (a bullet) — excluded because it does not have exactly two.
+  # The em dash before "advisory" is a multibyte UTF-8 literal that is not
+  # reliably matchable across awk implementations (same reasoning as the
+  # glyph note above), so the trailing anchor below deliberately matches
+  # the ASCII text "advisory, not merge-gating" followed by ':' or '.' at
+  # END OF LINE instead of the em dash itself — this is the literal closing
+  # punctuation kb-sweep always emits (':' when N>0, '.' when N==0), and no
+  # table/body line ends there. Verified against BSD awk (macOS) with a
+  # title-collision fixture (tests/test-xaca-1199-merge-banner.zsh case
+  # (e)); re-verify under gawk/mawk if this anchor is ever revised.
   RESIDUAL_BLOCK=$(printf '%s\n' "$SWEEP_OUTPUT" | awk '
-    !found && /RESIDUAL OPEN SUBITEMS \([0-9]+\)/ { found=1 }
+    !found {
+      if ($0 ~ /^  [^ \[]/ && $0 ~ /RESIDUAL OPEN SUBITEMS \([0-9]+\)/ && $0 ~ /advisory, not merge-gating[:.]$/) {
+        found=1
+      }
+    }
     found {
       if ($0 == "") { exit }
       print
@@ -738,8 +764,13 @@ CHECKS_EOF
 
   if [ -n "$RESIDUAL_BLOCK" ]; then
     RESIDUAL_HEADER_LINE=$(printf '%s\n' "$RESIDUAL_BLOCK" | awk 'NR==1')
+    # Same anchoring applied to the count parse (XACA-1199-012): even
+    # though RESIDUAL_HEADER_LINE is, by construction above, already the
+    # correctly-identified header line, this re-asserts the shape before
+    # trusting it — defense in depth against a future refactor that feeds
+    # this a differently-sourced line.
     RESIDUAL_COUNT=$(printf '%s\n' "$RESIDUAL_HEADER_LINE" | awk '
-      {
+      $0 ~ /^  [^ \[]/ && /RESIDUAL OPEN SUBITEMS \([0-9]+\)/ && /advisory, not merge-gating[:.]$/ {
         n = match($0, /RESIDUAL OPEN SUBITEMS \([0-9]+\)/)
         if (n > 0) {
           s = substr($0, RSTART, RLENGTH)

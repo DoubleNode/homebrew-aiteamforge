@@ -32,6 +32,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Monitoring" re-prints that block as a non-blocking banner right before
   `gh pr merge`. An absent block produces an explicit notice, never silence.
   The merge still proceeds.
+  Review round 1 (PR #886): the banner now anchors on kb-sweep's exact header
+  shape, so a subitem title quoting the header cannot hijack it. Foreign-id
+  detection matches `(X<code>|EPIC)-NNNN[NN]` case-insensitively with word
+  boundaries (no more ISO-8601/SHA-256 false hits; 6-digit ids reported
+  whole). A late `[Debug] Sync` subitem no longer moves the planning anchor.
 - **XACA-0886 (PR #881 review round 5)** — `kb-cancel`'s item-level bypass hint prints
   the reason with `print -r --` and `${(q)}` quoting, so a pasted hint cannot mangle or
   execute the reason text.
