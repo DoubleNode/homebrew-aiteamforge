@@ -19,7 +19,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   directories as `failed` (it used to say "skipped") and returns 1.
   `kb-knowledge-validate --fix` prints "Auto-fixed" only on success.
   `kb-knowledge-add`, `-merge` and `-promote` no longer discard reindex stderr.
-  Every change is a hunk-for-hunk mirror of canonical. The tap's older
+  Every change is a hunk-for-hunk mirror of canonical. **In the tap these caller
+  changes are inert today.** The tap still ships the older
+  `_kb_knowledge_reindex_one`, which never returns non-zero and has no
+  `[WARN]`/`[FAIL]` output, so consumers see no new failure reporting from
+  reindex until XACA-1200 ports the canonical helper. The `kb-knowledge-validate`
+  hardening IS live in the tap. The tap's older
   `_kb_knowledge_reindex_one` and the merge/search/promote awk sites are tracked
   as XACA-1200.
 - **XACA-1199** — `kb-sweep` in `share/templates/kanban/kanban-helpers.template.sh`

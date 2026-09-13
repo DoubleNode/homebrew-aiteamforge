@@ -9180,6 +9180,11 @@ kb-knowledge-reindex() {
     # [unchanged] and an empty-dir [skip] all return 0. So the `||` arm below
     # counts FAILURES; it used to be labelled "skipped" and the function
     # returned 0 regardless, hiding a refused regeneration from automation.
+    # TAP NOTE (XACA-1195-016): this tap template still ships the OLDER
+    # _kb_knowledge_reindex_one, which has no failure return (every path is
+    # `return 0`), so in the tap `failed` stays 0 and this propagation is
+    # INERT. It becomes live when XACA-1200 ports the canonical helper.
+    # Mirrored here so the two callers stay in lockstep.
     local rebuilt=0 failed=0
     local rdir
 
