@@ -818,11 +818,19 @@
 
                         <!--
                             Row template: instantiated by JS for each team entry.
+
+                            NOTE: keep the angle-bracket placeholders below free of
+                            apostrophes. The JS test suite parser reads any <...> token
+                            as an open tag, so a lone apostrophe inside one desyncs its
+                            quote tracking and breaks the ancestor walk for the next
+                            <label for=> it encounters (XACA-1184). Write "the API
+                            currentConfig", never "the API" + apostrophe + "s".
+
                             Data attributes on the rendered row:
                               data-team="<team_slug>"
-                              data-account-id="<account_id from the API's currentConfig>"
-                              data-nickname="<account_nickname from the API's currentConfig>"
-                              data-env-var="<env_var_name from the API's currentConfig>"
+                              data-account-id="<account_id from the API currentConfig>"
+                              data-nickname="<account_nickname from the API currentConfig>"
+                              data-env-var="<env_var_name from the API currentConfig>"
                               (all three are served from teams.<team>.ai.credential; the
                                retired anthropic_* fields no longer feed them — XACA-1184)
                               data-credential-status="ok|missing|unvalidated"
