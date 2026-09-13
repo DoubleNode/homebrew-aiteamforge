@@ -989,9 +989,11 @@ def ai_credential(team: str, *, config: dict | None = None) -> dict[str, Any] | 
     answer correctly whether or not it ever ran — and the retirement would
     silently never complete. XACA-1192 Decision (c): when this resolves
     ABSENT for a team whose on-disk entry still carries an un-lifted legacy
-    credential, a one-line NOTE goes to stderr via
-    :func:`_note_if_legacy_credential_unlifted` — the gap stays loud and
-    bounded without the read applying the lift itself.
+    credential, a one-line WARNING (XACA-1192-015, review round 1: "NOTE" ->
+    "WARNING", same wording otherwise — it names a real diagnosable gap, not
+    FYI chatter) goes to stderr via :func:`_note_if_legacy_credential_unlifted`
+    — the gap stays loud and bounded without the read applying the lift
+    itself.
 
     Returns a SHALLOW COPY. ``load_config()`` caches, so the resolved value is
     a live reference into a process-wide dict; every other accessor in this

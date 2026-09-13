@@ -1669,11 +1669,36 @@ def peek_config() -> ConfigPeek:
     explicitly, with its own status and diagnostic, inside that function. This
     wrapper exists for whatever is NOT yet known — belt and braces, not a
     substitute for handling shapes explicitly.
+
+    XACA-1192 review round 2 (reviewer body observation): get_config_path()
+    ITSELF can raise — e.g. AITEAMFORGE_CONFIG="~nosuchuser/..." makes
+    Path.expanduser() raise RuntimeError for a user that doesn't exist. The
+    round-1 except handler above called get_config_path() a SECOND time to
+    build its own diagnostic message, so exactly the input that most needs
+    the "never raises" safety net could make the safety net itself raise.
+    Fixed by resolving the path ONCE, guarded, before _peek_config_impl() is
+    ever called — neither except handler below depends on a call that can
+    fail.
     """
+    try:
+        config_path = get_config_path()
+    except Exception as exc:  # noqa: BLE001 - deliberate: the contract is "never raises"
+        raw = os.environ.get("AITEAMFORGE_CONFIG", "")
+        placeholder = Path(raw) if raw else Path("<unresolvable-config-path>")
+        message = (
+            f"[aiteamforge-paths] CRITICAL: peek_config: could not resolve "
+            f"the config path ({type(exc).__name__}: {exc}) from "
+            f"AITEAMFORGE_CONFIG={raw!r} — no self-heal was performed by "
+            f"this read; nothing on disk was touched. This is the outermost "
+            f"safety net (XACA-1192 review round 2): the docstring's "
+            f"\"Never raises\" promise holds regardless."
+        )
+        _peek_emit_once(str(placeholder), "unreadable", message)
+        return ConfigPeek("unreadable", None, placeholder)
+
     try:
         return _peek_config_impl()
     except Exception as exc:  # noqa: BLE001 - deliberate: the contract is "never raises"
-        config_path = get_config_path()
         message = (
             f"[aiteamforge-paths] CRITICAL: peek_config: unexpected "
             f"{type(exc).__name__} ({exc}) reading {config_path} — no "

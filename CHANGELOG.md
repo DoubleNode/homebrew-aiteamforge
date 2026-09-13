@@ -13,6 +13,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   longer quarantine the operator's config. Mirror of dev-team PR #889. Review round 1: `peek_config()`
   never raises on malformed JSON shapes, and `share/scripts/team-account-display.sh` only surfaces its
   diagnostics when `ATF_ACCOUNT_DIAGNOSTICS=1` (cc-whoami); banners stay silent.
+  Review round 2: `peek_config()` no longer raises on an unresolvable `AITEAMFORGE_CONFIG` path.
 - **XACA-1195** — `kb-knowledge-validate` in both `share/templates/kanban/kanban-helpers.template.sh`
   and `share/templates/aliases/kanban-aliases.sh` no longer silently loses data on
   invalid UTF-8. macOS BSD awk aborts (rc=2) on the first invalid byte under a
