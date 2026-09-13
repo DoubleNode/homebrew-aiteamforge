@@ -2438,6 +2438,26 @@ def apply_legacy_credential_lift(config: dict) -> dict:
         ``provider_config``), mirroring ``_set_team_ai_credential``;
       - never adds or removes a team.
 
+    ONE EXCEPTION TO "STRICTLY ADDITIVE", AND IT IS LOUD (XACA-1184-023). When a
+    qualifying team's ``ai`` value is a CORRUPT NON-DICT — a string, list, or int
+    from a hand edit — there is no block to add a key to, so the lift replaces it
+    with a fresh ``{}``. That discards whatever the corrupt value held. It is
+    recoverable (the driver snapshots before writing) but it is still an
+    overwrite, so it prints a WARNING to stderr naming the team and the discarded
+    type, matching ``lcars-ui/server.py``'s ``_set_team_ai_credential``. An
+    absent ``ai`` key or an explicit ``null`` is NOT corruption and warns nothing.
+
+    THE WARNING LIVES HERE, NOT IN ``describe()``, DELIBERATELY. The
+    ``_rewrite_config_on_disk`` skeleton calls ``describe(current)`` — the
+    in-memory config — while ``transform`` runs on ``reread``, the copy taken
+    under the lock. A ``describe()``-based warning would therefore report the
+    PRE-RACE value, not the one actually overwritten. Worse, ``describe`` is
+    invoked only on the successful-write path: on the lost-race, snapshot-failure
+    and write-failure paths the skeleton still calls ``transform`` (so the
+    in-memory config still loses the corrupt value) and never calls ``describe``
+    at all. Warning at the point of overwrite is the only placement that reports
+    the value actually discarded, on every path that discards one.
+
     IDEMPOTENT by construction: every credential written makes its own trigger
     false (the predicate gates on ``"credential" in ai``), so a second run is a
     skip-fast no-op and the on-disk bytes after two runs are identical.
@@ -2468,9 +2488,20 @@ def apply_legacy_credential_lift(config: dict) -> dict:
             continue
         ai_block = entry.get("ai")
         if not isinstance(ai_block, dict):
-            # Absent, null, or corrupt — replace with a fresh block. A non-dict
-            # `ai` is corruption that the registry accessor already warns about
-            # (XACA-1178-016); it holds no credential to preserve.
+            # Absent, null, or corrupt — replace with a fresh block. Absent and
+            # null are the normal shapes and are silent. A non-dict VALUE is
+            # corruption: it holds no credential to preserve, but discarding it
+            # without a trace is the self-heal-invisibly shape XACA-1178-024
+            # exists to prevent, so say so. Same wording as server.py's
+            # _set_team_ai_credential (XACA-1178-016/024, XACA-1184-023).
+            if ai_block is not None:
+                print(
+                    f"[aiteamforge-paths] WARNING: team-paths.json 'ai' block for "
+                    f"team {slug!r} was {type(ai_block).__name__!s}, not a dict -- "
+                    f"replacing with {{}} (XACA-1178-016/024; the original value is "
+                    f"in the pre-lift snapshot)",
+                    file=sys.stderr,
+                )
             ai_block = {}
             entry["ai"] = ai_block
         if "credential" in ai_block:
