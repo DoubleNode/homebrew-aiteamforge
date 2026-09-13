@@ -20,6 +20,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Monitoring" re-prints that block as a non-blocking banner right before
   `gh pr merge`. An absent block produces an explicit notice, never silence.
   The merge still proceeds.
+- **XACA-0886 (PR #881 review round 4)** — template guard paths now refuse when the
+  `_kb_protected_tag_of` lookup fails (an undefined helper previously left a stale
+  global answer in place), the helper returns 0 explicitly, and refusal hints print
+  with `print -r --` so backslashes survive.
 - **XACA-0886** — mirror the canonical `kb-cancel` hardening into
   `share/templates/kanban/kanban-helpers.template.sh`: a new shared
   `_kb_protected_cancel_guard()` hard-refuses cancelling a protected

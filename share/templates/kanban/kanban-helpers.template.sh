@@ -5739,6 +5739,7 @@ _kb_protected_tag_of() {
     elif [[ "$title_lower" == *"[ux]"* ]]; then
         _KB_PROTECTED_TAG="[UX]"
     fi
+    return 0
 }
 
 # _kb_looks_like_flag (XACA-0886-026): true if $1 is one of the flags
@@ -5775,7 +5776,7 @@ _kb_protected_cancel_guard() {
     # in this file; it must never be reachable via a code path a fork
     # failure could silently corrupt.
     local tag
-    _kb_protected_tag_of "$sub_title"
+    _kb_protected_tag_of "$sub_title" || { echo "❌ REFUSED: protected-tag lookup failed (helper unavailable) — refusing rather than guessing (XACA-0886-033)." >&2; return 1; }
     tag="$_KB_PROTECTED_TAG"
 
     # Not a protected tag at all — nothing to guard. This is also the
@@ -5838,7 +5839,7 @@ _kb_protected_cancel_guard() {
     # XACA-0886-031 (round-3 review, ported): hint_target lets "remove" print
     # a command that actually WORKS when run verbatim — it takes index pairs,
     # not an ID. See this function's own header comment.
-    echo "     ${cmd_hint} ${hint_target} --user-approved --reason \"<why this is being ${verb_past}>\"" >&2
+    print -r -- "     ${cmd_hint} ${hint_target} --user-approved --reason \"<why this is being ${verb_past}>\"" >&2
     echo "   --user-approved is reserved for the user only, same rule as kb-done --force." >&2
     return 1
 }
@@ -6087,7 +6088,7 @@ kb-cancel() {
                 _kbc_si_title=$(_kb_jq_read "$board_file" ".backlog[$item_idx].subitems[$_kbc_si].title // empty" -r)
                 # XACA-0886-030 (ported): direct call, not $(...) — a fork
                 # failure here fed straight into the `continue` below.
-                _kb_protected_tag_of "$_kbc_si_title"
+                _kb_protected_tag_of "$_kbc_si_title" || { echo "❌ REFUSED: protected-tag lookup failed (helper unavailable) — refusing rather than guessing (XACA-0886-033)." >&2; return 1; }
                 _kbc_si_tag="$_KB_PROTECTED_TAG"
                 [[ -z "$_kbc_si_tag" ]] && continue
                 _kbc_si_status=$(_kb_jq_read "$board_file" ".backlog[$item_idx].subitems[$_kbc_si].status // empty" -r)
@@ -7780,7 +7781,7 @@ kb-backlog() {
                     # XACA-0886-030 (ported): direct call, not $(...) — this
                     # value is log-message text only.
                     local sub_remove_tag
-                    _kb_protected_tag_of "$sub_title"
+                    _kb_protected_tag_of "$sub_title" || { echo "❌ REFUSED: protected-tag lookup failed (helper unavailable) — refusing rather than guessing (XACA-0886-033)." >&2; return 1; }
                     sub_remove_tag="$_KB_PROTECTED_TAG"
                     # XACA-0886-031 (round-3 review, ported): hint_target is
                     # ALWAYS "$parent_idx $sub_idx" here, never $sub_id —
