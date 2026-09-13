@@ -4978,17 +4978,15 @@ kb-sweep() {
 
     # Print each subitem with status icon
     local completed_count=0 cancelled_count=0 in_progress_count=0 todo_count=0 blocked_count=0
-    local icon sub_status sub_id _sub_added sub_title
+    local icon sub_status sub_id sub_title
 
-    # Read subitems as newline-delimited lines: STATUS|ID|ADDEDAT|TITLE
-    # XACA-1199: addedAt was added BEFORE title (not appended) so that a "|"
-    # inside a title still lands entirely in the last IFS="|" read field.
+    # Read subitems as newline-delimited lines: STATUS|ID|TITLE
     local subitem_lines
     subitem_lines=$(_kb_jq_read "$board_file" \
-        '.backlog[$idx].subitems[] | "\(.status)|\(.id)|\(.addedAt // "")|\(.title)"' \
+        '.backlog[$idx].subitems[] | "\(.status)|\(.id)|\(.title)"' \
         --argjson idx "$item_idx" -r 2>/dev/null)
 
-    while IFS="|" read -r sub_status sub_id _sub_added sub_title; do
+    while IFS="|" read -r sub_status sub_id sub_title; do
         [[ -z "$sub_status" ]] && continue
         case "$sub_status" in
             completed)  icon="[✓]" ; completed_count=$((completed_count + 1)) ;;
@@ -5018,8 +5016,7 @@ kb-sweep() {
     # line than the generic "N remaining".
     local protected_unresolved=0
     local protected_lines=""
-    local _ps_added
-    while IFS="|" read -r ps_status ps_id _ps_added ps_title; do
+    while IFS="|" read -r ps_status ps_id ps_title; do
         [[ -z "$ps_status" ]] && continue
         if [[ "$ps_title" == \[Review\]* ]] || [[ "$ps_title" == \[Test\]* ]] || [[ "$ps_title" == \[UX\]* ]]; then
             case "$ps_status" in
@@ -5052,7 +5049,20 @@ kb-sweep() {
     # string, and an overloaded marker risks a false match or, worse, a
     # residual line being read as merge-gating when it must never be.
     # This block NEVER touches remaining_count or kb-sweep's exit code —
-    # it is pure reporting, computed from data already read above.
+    # it is pure reporting.
+    #
+    # XACA-1199: dedicated 4-field read (STATUS|ID|ADDEDAT|TITLE) for this
+    # block only. Block A's shared `subitem_lines` read and its three
+    # original loops above are kept byte-identical to canonical/pre-XACA-1199
+    # shape so tests/test-xaca-1145-kb-sweep-tap-parity.zsh's Block A parity
+    # check is unaffected by this feature. addedAt is added BEFORE title
+    # (not appended) so a "|" inside a title still lands entirely in the
+    # last IFS="|" read field.
+    local residual_lines
+    residual_lines=$(_kb_jq_read "$board_file" \
+        '.backlog[$idx].subitems[] | "\(.status)|\(.id)|\(.addedAt // "")|\(.title)"' \
+        --argjson idx "$item_idx" -r 2>/dev/null)
+
     local residual_count=0
     local residual_flagged_lines="" residual_plain_lines=""
     local fw_anchor=""
@@ -5078,7 +5088,7 @@ kb-sweep() {
                 fw_anchor="$fw_added"
             fi
         fi
-    done <<< "$subitem_lines"
+    done <<< "$residual_lines"
 
     local r_status r_id r_added r_title
     while IFS="|" read -r r_status r_id r_added r_title; do
@@ -5131,9 +5141,16 @@ kb-sweep() {
         else
             residual_plain_lines+="     • ${r_id}: ${r_title} [${r_status}]"$'\n'
         fi
-    done <<< "$subitem_lines"
+    done <<< "$residual_lines"
 
-    if [[ "$residual_count" -gt 0 ]]; then
+    if [[ -z "$residual_lines" ]]; then
+        # subitem_count -gt 0 was already established above (the function
+        # returns early at subitem_count -eq 0), so an empty read HERE is a
+        # FAILED board read for this dedicated query, not "no residual
+        # subitems". Never let a failed read look like a clean "(0)" report.
+        echo "  ℹ️  RESIDUAL OPEN SUBITEMS: residual report unavailable — board read failed."
+        echo ""
+    elif [[ "$residual_count" -gt 0 ]]; then
         echo "  ℹ️  RESIDUAL OPEN SUBITEMS ($residual_count) — advisory, not merge-gating:"
         printf '%s' "$residual_flagged_lines"
         printf '%s' "$residual_plain_lines"
@@ -5148,8 +5165,7 @@ kb-sweep() {
     # Retrospective file validation (blocking — prevents kb-done if retro file is missing)
     # Check if there's a completed "Retrospective" subitem and validate the file exists
     local has_retro_subitem=false retro_subitem_completed=false retro_blocking=false
-    local _rs_added
-    while IFS="|" read -r rs_status rs_id _rs_added rs_title; do
+    while IFS="|" read -r rs_status rs_id rs_title; do
         [[ -z "$rs_status" ]] && continue
         # Match the standard "Retrospective and Knowledge Capture" subitem
         # Must start with "Retrospective" to avoid matching subitems that merely mention retros
