@@ -54,6 +54,35 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   NOT present in this template, so the round-2 rename-specific fix (B1) does
   not apply here. Content mirror only — no `kb-tap-release`, no VERSION
   bump, no tag.
+
+  **Round 3 (PR #881 round-3 review):** `_kb_protected_tag_of()` now sets a
+  global `$_KB_PROTECTED_TAG` instead of `echo`ing a result for a caller to
+  capture via `$(...)`. A command substitution forks a subshell; a failed
+  fork is fatal in zsh, and on this guard predicate a failure could silently
+  read as "not protected, proceed" at exactly the point deciding whether a
+  merge-gating subitem can be cancelled/removed out from under the gate.
+  Every call site (`_kb_protected_cancel_guard`'s own tag lookup, the
+  item-cancel open-protected-subitem loop, and `sub remove`'s log-message
+  tag lookup) now calls the function directly and reads the global — no
+  fork on any of these paths. Separately, `_kb_protected_cancel_guard`'s
+  REFUSED override hint for `sub remove` printed the subitem's ID (or an
+  `idx N idx M` fallback) as the command's target; `kb-backlog sub remove`
+  only accepts `<parent-index> <subitem-index>`, so following that hint
+  verbatim failed with Usage/rc=1. The guard gained a `hint_target`
+  parameter (defaults to the existing 4th positional, unchanged for
+  `kb-cancel`/`sub cancel`) and `sub remove`'s call site now passes
+  `"$parent_idx $sub_idx"` explicitly. Also: a removed subitem with no `id`
+  used to log its audit entry under a `<parent-id>#<sub-idx>` target
+  string — `_kb_log_activity` derives the ACTIVITY FILE PATH from that same
+  string, which doesn't match a subitem-ID pattern, so it silently created
+  a brand-new `<parent-id>#<sub-idx>.json` file instead of an entry inside
+  the parent's own activity log. Now logs to the bare parent id (correct
+  file) with the `#<sub-idx>` marker moved into the context text instead.
+  `sub rename` remains canonical-only (XACA-0543) and is NOT present in
+  this template, so the round-3 rename-specific fixes (the stale
+  `_KB_CANCEL_GUARD_AUDIT` audit flag, and the rename hint's missing
+  new-title positional) have no tap counterpart. Content mirror only — no
+  `kb-tap-release`, no VERSION bump, no tag.
 - **XACA-1070** — declare `spacedock` mandatory in `share/teams/registry.json`. This is the one
   field that activates the mandatory-team machinery this ticket already shipped:
   `atf_mandatory_teams()` selects on `.mandatory == true`, **no team in the registry carried that

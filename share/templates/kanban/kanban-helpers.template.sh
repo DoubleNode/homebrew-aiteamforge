@@ -5548,19 +5548,33 @@ kb-done() {
 # below can reuse the EXACT same tag-detection rule — two independent
 # lowercase-substring checks would inevitably drift (e.g. one adding a new
 # tag, or tightening the match, without the other).
+# XACA-0886-030 (round-3 review B1, ported): sets the global
+# $_KB_PROTECTED_TAG instead of echoing for a caller to capture via $(...).
+# This is a GUARD predicate — its most important caller,
+# _kb_protected_cancel_guard, treats an empty answer as "not protected,
+# proceed" (`[[ -z "$tag" ]] && return 0`). A command substitution forks a
+# subshell to capture output; a failed fork is fatal in zsh and can abort
+# execution before the assignment completes, silently turning "protected"
+# into "not protected" at exactly the point that decides whether a
+# merge-gating subitem can be cancelled/removed out from under the gate. A
+# direct function call needs no fork, so this class of failure cannot
+# happen here. Every call site in this file calls this function directly
+# and reads $_KB_PROTECTED_TAG, not `$(_kb_protected_tag_of ...)`.
+#
 # Usage: _kb_protected_tag_of <title>
-# Prints "[Review]" / "[Test]" / "[UX]" / "" (empty string = not protected).
+# Sets $_KB_PROTECTED_TAG to "[Review]" / "[Test]" / "[UX]" / "" (empty
+# string = not protected). Always resets it first, so a caller never reads
+# a stale value from a previous, unrelated call.
 _kb_protected_tag_of() {
     local title="${1-}"
     local title_lower="${title:l}"
+    typeset -g _KB_PROTECTED_TAG=""
     if [[ "$title_lower" == *"[review]"* ]]; then
-        echo "[Review]"
+        _KB_PROTECTED_TAG="[Review]"
     elif [[ "$title_lower" == *"[test]"* ]]; then
-        echo "[Test]"
+        _KB_PROTECTED_TAG="[Test]"
     elif [[ "$title_lower" == *"[ux]"* ]]; then
-        echo "[UX]"
-    else
-        echo ""
+        _KB_PROTECTED_TAG="[UX]"
     fi
 }
 
@@ -5577,17 +5591,29 @@ _kb_looks_like_flag() {
     esac
 }
 
+# hint_target - (XACA-0886-031, round-3 review, ported) the identifier
+#          printed in the REFUSED override hint immediately after
+#          <command_hint>. Defaults to <subitem_id> — correct for "cancel"
+#          (kb-cancel and `kb-backlog sub cancel` both take a subitem/item
+#          ID as their target) but WRONG for "remove": `kb-backlog sub
+#          remove` takes `<parent-index> <subitem-index>`, never an ID, so a
+#          caller in "remove" mode MUST pass the index pair explicitly here
+#          (the approval banner below still uses <subitem_id> — an ID there
+#          is fine, it is only ever echoed back for a human to read, never
+#          fed to a command).
 _kb_protected_cancel_guard() {
     local sub_title="${1-}" reason="${2-}" user_approved="${3-}" sub_id="${4-}" cmd_hint="${5-}"
     local mode="${6:-cancel}"
+    local hint_target="${7:-$sub_id}"
     typeset -g _KB_CANCEL_GUARD_AUDIT=false
 
-    # Tag match kept IDENTICAL to the pre-existing advisory check this
-    # replaces (XACA-0113/XACA-0703): lowercase substring match on the
-    # subitem title, in this priority order. Delegated to _kb_protected_tag_of
-    # (XACA-0886-022) so this and the remove/rename checks can never drift.
+    # XACA-0886-030 (ported): direct call, not $(...) — this decision
+    # (empty tag == "proceed") is the single most important guard-path read
+    # in this file; it must never be reachable via a code path a fork
+    # failure could silently corrupt.
     local tag
-    tag=$(_kb_protected_tag_of "$sub_title")
+    _kb_protected_tag_of "$sub_title"
+    tag="$_KB_PROTECTED_TAG"
 
     # Not a protected tag at all — nothing to guard. This is also the
     # UNCONDITIONAL-CALL contract every call site relies on (XACA-0886-029,
@@ -5646,7 +5672,10 @@ _kb_protected_cancel_guard() {
     echo "❌ REFUSED: '${tag}' subitems are a protected merge gate (CLAUDE.md Three-Gate PR Merge" >&2
     echo "   System). Agents must NOT ${mode} them — resolve the underlying work instead." >&2
     echo "   The user can override with:" >&2
-    echo "     ${cmd_hint} ${sub_id} --user-approved --reason \"<why this is being ${verb_past}>\"" >&2
+    # XACA-0886-031 (round-3 review, ported): hint_target lets "remove" print
+    # a command that actually WORKS when run verbatim — it takes index pairs,
+    # not an ID. See this function's own header comment.
+    echo "     ${cmd_hint} ${hint_target} --user-approved --reason \"<why this is being ${verb_past}>\"" >&2
     echo "   --user-approved is reserved for the user only, same rule as kb-done --force." >&2
     return 1
 }
@@ -5893,7 +5922,10 @@ kb-cancel() {
             local _kbc_si _kbc_si_title _kbc_si_tag _kbc_si_status _kbc_si_id _kbc_line
             for (( _kbc_si = 0; _kbc_si < _kbc_item_sub_count; _kbc_si++ )); do
                 _kbc_si_title=$(_kb_jq_read "$board_file" ".backlog[$item_idx].subitems[$_kbc_si].title // empty" -r)
-                _kbc_si_tag=$(_kb_protected_tag_of "$_kbc_si_title")
+                # XACA-0886-030 (ported): direct call, not $(...) — a fork
+                # failure here fed straight into the `continue` below.
+                _kb_protected_tag_of "$_kbc_si_title"
+                _kbc_si_tag="$_KB_PROTECTED_TAG"
                 [[ -z "$_kbc_si_tag" ]] && continue
                 _kbc_si_status=$(_kb_jq_read "$board_file" ".backlog[$item_idx].subitems[$_kbc_si].status // empty" -r)
                 if [[ "$_kbc_si_status" == "completed" ]] || [[ "$_kbc_si_status" == "cancelled" ]]; then
@@ -7582,9 +7614,17 @@ kb-backlog() {
                     # Calling unconditionally means _KB_CANCEL_GUARD_AUDIT is ALWAYS reset to
                     # false by the guard's own first line before it returns, tag or no tag,
                     # so the read below is always well-defined.
+                    # XACA-0886-030 (ported): direct call, not $(...) — this
+                    # value is log-message text only.
                     local sub_remove_tag
-                    sub_remove_tag=$(_kb_protected_tag_of "$sub_title")
-                    if ! _kb_protected_cancel_guard "$sub_title" "$reason" "$user_approved" "${sub_id:-$parent_idx $sub_idx}" "kb-backlog sub remove" "remove"; then
+                    _kb_protected_tag_of "$sub_title"
+                    sub_remove_tag="$_KB_PROTECTED_TAG"
+                    # XACA-0886-031 (round-3 review, ported): hint_target is
+                    # ALWAYS "$parent_idx $sub_idx" here, never $sub_id —
+                    # `kb-backlog sub remove` only accepts the index pair.
+                    # $sub_id (with its index-pair fallback) is kept as the
+                    # 4th positional purely for the approval-banner label.
+                    if ! _kb_protected_cancel_guard "$sub_title" "$reason" "$user_approved" "${sub_id:-$parent_idx $sub_idx}" "kb-backlog sub remove" "remove" "$parent_idx $sub_idx"; then
                         return 1
                     fi
 
@@ -7612,20 +7652,29 @@ kb-backlog() {
                     # "$parent_idx-$sub_idx" when the subitem had no `id` — that string
                     # cannot resolve to a team activity directory, so the write silently
                     # failed with just a warning and the "only remaining record" this
-                    # comment promises was dropped. Fall back to the PARENT item's own id
-                    # (never just its array index) plus a clearly-labelled "#<sub-idx>"
-                    # suffix instead: resolvable, and unambiguous about what it names.
+                    # comment promises was dropped. Round 2 fixed the resolution failure
+                    # by falling back to "<parent-id>#<sub-idx>", but _kb_log_activity
+                    # derives the ACTIVITY FILE PATH from this same string, which doesn't
+                    # match a subitem-ID pattern, so it resolved to a brand-new
+                    # "<parent-id>#<sub-idx>.json" file instead of an entry inside the
+                    # parent's own "<parent-id>.json" (round-3 review, ported).
+                    #
+                    # XACA-0886-031/round-3 (ported): pass the bare PARENT id as
+                    # target_id (so the file resolves correctly to the parent's own
+                    # activity log) and put the "#<sub-idx>" marker in the CONTEXT
+                    # text instead, alongside the existing user-approval note.
                     if [[ "${_KB_CANCEL_GUARD_AUDIT:-false}" == "true" ]]; then
-                        local sub_remove_log_target
+                        local sub_remove_log_target sub_remove_log_note=""
                         if [[ -n "$sub_id" ]]; then
                             sub_remove_log_target="$sub_id"
                         else
                             local sub_remove_parent_id
                             sub_remove_parent_id=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].id // empty" -r)
-                            sub_remove_log_target="${sub_remove_parent_id:-idx$parent_idx}#${sub_idx}"
+                            sub_remove_log_target="${sub_remove_parent_id:-idx$parent_idx}"
+                            sub_remove_log_note=" (subitem #${sub_idx}, no id)"
                         fi
                         _kb_log_activity "subitem_removed" "$sub_remove_log_target" "subitem" "title" "$sub_title" "" \
-                            "USER-APPROVED removal of protected ${sub_remove_tag} subitem: ${reason}"
+                            "USER-APPROVED removal of protected ${sub_remove_tag} subitem${sub_remove_log_note}: ${reason}"
                     fi
 
                     echo "✓ Removed subitem: $sub_title"
