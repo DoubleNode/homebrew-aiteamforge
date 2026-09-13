@@ -114,7 +114,7 @@ unset _saved
 # it resolves "unknown-team" and renders "(default OAuth)", exactly as the
 # legacy read resolved "" and rendered "(default OAuth)". Left as-is on purpose:
 # making it resolve a real instance is a semantic change, not a field rename.
-_active_nickname=""
+_active_account=""
 if [[ -n "${AITEAMFORGE_DIR:-}" && -f "${AITEAMFORGE_DIR}/scripts/team-account-display.sh" ]]; then
     source "${AITEAMFORGE_DIR}/scripts/team-account-display.sh"
 elif [[ -f "${HOME}/dev-team/scripts/team-account-display.sh" ]]; then
@@ -122,15 +122,33 @@ elif [[ -f "${HOME}/dev-team/scripts/team-account-display.sh" ]]; then
 elif [[ -f "${HOME}/aiteamforge/scripts/team-account-display.sh" ]]; then
     source "${HOME}/aiteamforge/scripts/team-account-display.sh"
 fi
-if command -v atf_team_account_nickname >/dev/null 2>&1; then
+# XACA-1184-019/020: the resolver now returns "<kind>|<label>" and owns the
+# whole decision, including the two states this banner used to get wrong. It
+# rendered "(default OAuth)" both when a routed credential had a blank nickname
+# and when the resolver answered "unavailable" (we could not tell) -- in each
+# case a positively false claim about which account the session bills, and one
+# that contradicted cc-whoami reading the same credential. The banner now only
+# styles what the resolver decided; it never invents an affordance of its own.
+if command -v atf_team_account_display >/dev/null 2>&1; then
+    _active_account=$(atf_team_account_display 'freelance' 2>/dev/null)
+elif command -v atf_team_account_nickname >/dev/null 2>&1; then
+    # Installed resolver predates atf_team_account_display (a half-applied
+    # upgrade: banners and resolver ship together, but not atomically). Degrade
+    # to the old nickname-or-nothing contract rather than rendering a blank.
     _active_nickname=$(atf_team_account_nickname 'freelance' 2>/dev/null)
+    [[ -n "$_active_nickname" ]] && _active_account="account|${_active_nickname}"
+    unset _active_nickname
 fi
-if [[ -n "$_active_nickname" ]]; then
-    print -P "${WHITE}${BOLD}    Active Account: ${RESET}${WHITE}${_active_nickname}${RESET}"
+# An unreadable/absent resolver is itself "we do not know", but this banner
+# predates the distinction on such boxes; keep the historical affordance rather
+# than newly alarming an install that never had the resolver at all.
+[[ -z "$_active_account" ]] && _active_account="default|(default OAuth)"
+if [[ "${_active_account%%|*}" == "account" ]]; then
+    print -P "${WHITE}${BOLD}    Active Account: ${RESET}${WHITE}${_active_account#*|}${RESET}"
 else
-    print -P "${WHITE}    Active Account: ${RESET}\e[2m(default OAuth)\e[0m"
+    print -P "${WHITE}    Active Account: ${RESET}\e[2m${_active_account#*|}\e[0m"
 fi
-unset _active_nickname
+unset _active_account
 print -P "${WHITE}${BOLD}    Worktree: $(wt-project status-name) - $(wt-project status-code)${RESET}"
 print -P "${WHITE}${BOLD}              $(wt-current short)${RESET}"
 print -P "${WHITE}              $(wt-project status-short)${RESET}"
