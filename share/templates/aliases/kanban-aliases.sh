@@ -8840,11 +8840,33 @@ kb-knowledge-validate() {
             # original extraction rule exactly, not just its common-case
             # output. (No INDEX.md in the live tree currently has such a
             # line — the only observed difference is fork count.)
-            index_ids_raw=$(awk '
+            #
+            # XACA-1195: macOS BSD awk ABORTS (towc, rc=2) on the first
+            # invalid-UTF-8 byte under a UTF-8 locale, keeping only the ids
+            # printed before it — every orphan after that line vanished
+            # SILENTLY. rc is now checked: on rc≠0 the SAME program is re-run
+            # under LC_ALL=C (byte semantics) with a loud WARN; if that fails
+            # too, FAIL — never a silent partial id list. Not LC_ALL=C always:
+            # that changes [[:space:]] on valid NBSP input (see the -002
+            # decision doc). The retry runs only on rc≠0, so valid input keeps
+            # exactly one fork.
+            local _kb_idx_prog='
                 match($0, /`[ktspmv][0-9]+-[^`]+`/) {
                     print substr($0, RSTART + 1, RLENGTH - 2)
                 }
-            ' "$index_file" 2>/dev/null)
+            ' _kb_idx_rc=0
+            index_ids_raw=$(awk "$_kb_idx_prog" "$index_file" 2>/dev/null)
+            _kb_idx_rc=$?
+            if (( _kb_idx_rc != 0 )); then
+                index_ids_raw=$(LC_ALL=C awk "$_kb_idx_prog" "$index_file")
+                _kb_idx_rc=$?
+                if (( _kb_idx_rc != 0 )); then
+                    index_ids_raw=""
+                    _kb_val_error "INDEX-orphan scan could not read ${index_file} (awk rc=${_kb_idx_rc}) — orphan check NOT performed for ${val_dir}"
+                else
+                    _kb_val_warn "Invalid UTF-8 in ${index_file} — awk aborted under the current locale; ids re-extracted with byte semantics (LC_ALL=C)"
+                fi
+            fi
             [[ -n "$index_ids_raw" ]] && index_ids=("${(@f)index_ids_raw}")
         fi
 
@@ -8916,7 +8938,24 @@ kb-knowledge-validate() {
             # Validate cross-references — scan YAML frontmatter only (between the two ^---$ lines).
             # Scanning the full file body causes false positives when cross-ref tokens appear in
             # code samples, prose discussions, or quoted text (see XACA-0222 review subitem 014).
-            xref_frontmatter=$(awk '/^---$/{if(found){exit}; found=1; next} found{print}' "$ef" 2>/dev/null | head -50)
+            # XACA-1195: rc-checked with an LC_ALL=C retry (same pattern as the
+            # INDEX-orphan scan above) so an invalid-UTF-8 byte can't silently
+            # truncate the scanned frontmatter. `head -50` moved INTO awk: the
+            # old `awk | head -50` measured rc 141 (SIGPIPE) on a VALID 50+-line
+            # file, and a pipeline's rc is head's — output proven identical.
+            local _kb_xref_prog='/^---$/{if(found){exit}; found=1; next} found{if(++n>50){exit}; print}' _kb_xref_rc=0
+            xref_frontmatter=$(awk "$_kb_xref_prog" "$ef" 2>/dev/null)
+            _kb_xref_rc=$?
+            if (( _kb_xref_rc != 0 )); then
+                xref_frontmatter=$(LC_ALL=C awk "$_kb_xref_prog" "$ef")
+                _kb_xref_rc=$?
+                if (( _kb_xref_rc != 0 )); then
+                    xref_frontmatter=""
+                    _kb_val_error "Cannot read frontmatter of ${ef} (awk rc=${_kb_xref_rc}) — cross-refs NOT checked"
+                else
+                    _kb_val_warn "Invalid UTF-8 in ${ef} — frontmatter re-read with byte semantics (LC_ALL=C) for the cross-ref check"
+                fi
+            fi
             # XACA-0991-018 [Review] fix: $cur_root is now the val_dir's own
             # literal directory (see the project_path tagging fix above), which
             # for the standalone project_path fallback is a single project's
