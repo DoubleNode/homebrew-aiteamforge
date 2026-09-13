@@ -4797,12 +4797,27 @@ _kb_sweep_first_foreign_id() {
     # every subscript by one and corrupt both the boundary checks and the
     # printed candidate. LOCAL_OPTIONS restores the caller's setting on
     # return, so this is invisible outside the function.
-    setopt LOCAL_OPTIONS NO_KSH_ARRAYS
+    #
+    # XACA-1199-019: NO_BASH_REMATCH is REQUIRED here, not optional. Under a
+    # caller's `setopt BASH_REMATCH`, `[[ $lower =~ ... ]]` populates
+    # $BASH_REMATCH instead of $MATCH/$MBEGIN/$MEND — so $mbegin/$mend below
+    # read STALE (or unset, i.e. 0) values on every iteration. mend=0 forces
+    # base_end=0, and the shrink line `remain="${remain[$((base_end+1)),-1]}"`
+    # then collapses to `${remain[1,-1]}` — the WHOLE string, unchanged — so
+    # `remain` never shrinks and the while loop never terminates. Reproduced:
+    # under `setopt BASH_REMATCH` the old version was killed after a 5s
+    # alarm; without it, it returns normally. NO_RE_MATCH_PCRE and
+    # NO_CASE_MATCH are pinned alongside it for the same self-containment
+    # reason this function's docstring already claims (round-1 review found
+    # today's callers happen not to set either, so this is defense-in-depth,
+    # not a behavior change) — LOCAL_OPTIONS makes forcing all three free.
+    setopt LOCAL_OPTIONS NO_KSH_ARRAYS NO_BASH_REMATCH NO_RE_MATCH_PCRE NO_CASE_MATCH
 
     local title="$1" parent_id="$2"
     local remain="$title" lower cand pre after trailing_char
     local parent_upper="${(U)parent_id}"
     local mbegin mend base_end
+    local remain_len_before
     # Case-insensitivity is achieved by matching against a LOWERCASED COPY
     # of $remain with an all-lowercase pattern, then slicing the ORIGINAL
     # $remain by index for the boundary characters (lowercasing never
@@ -4812,6 +4827,7 @@ _kb_sweep_first_foreign_id() {
     # function's own behaviour depend on an ambient option a caller could
     # have set differently.
     while [[ -n "$remain" ]]; do
+        remain_len_before=${#remain}
         lower="${(L)remain}"
         if [[ "$lower" =~ "(x[a-z]{3}|epic)-[0-9]{4,6}" ]]; then
             mbegin=$MBEGIN
@@ -4848,6 +4864,15 @@ _kb_sweep_first_foreign_id() {
                 fi
             fi
             remain="${remain[$((base_end + 1)),-1]}"
+            # XACA-1199-019 progress guard: defense-in-depth. If consuming
+            # this match somehow failed to shrink $remain (e.g. a future
+            # caller option this function doesn't yet pin against), stop
+            # scanning and report "no foreign id found" rather than loop
+            # forever — a hang here wedges kb-sweep, kb-done, and the PR
+            # merge loop's Gate 3.
+            if (( ${#remain} >= remain_len_before )); then
+                return 1
+            fi
         else
             remain=""
         fi
