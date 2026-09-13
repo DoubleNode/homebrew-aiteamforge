@@ -538,12 +538,64 @@ def _overlay_teams(config: dict | None) -> dict:
     ``unreadable``, ``quarantined``) carries ``None``, so ``{}`` is
     substituted — matching the old bare ``except Exception: return {}``
     fallback for an unreadable/absent config.
+
+    XACA-1192 review round 1 (B1): resolution itself is delegated to
+    :func:`_resolve_config`, which wraps the ``peek_config()`` call in its own
+    ``except Exception: return {}`` — restoring the resilience this function
+    had before XACA-1192 (the bare ``try: load_config() except Exception:
+    return {}`` this PR's earlier commit removed with nothing in its place).
+    Belt and braces: ``peek_config()`` is independently documented "Never
+    raises" (B1's own fix), but a credential/display read must not depend on
+    that promise holding for every future shape.
     """
-    if config is None:
-        peek = aiteamforge_paths.peek_config()
-        config = peek.config if isinstance(peek.config, dict) else {}
+    return _teams_from_config(_resolve_config(config))
+
+
+def _teams_from_config(config: dict) -> dict:
+    """Extract the ``"teams"`` dict from an already-resolved *config*."""
     teams = config.get("teams")
     return teams if isinstance(teams, dict) else {}
+
+
+def _resolve_config(config: dict | None) -> dict:
+    """Resolve *config* to a dict, peeking the on-disk registry AT MOST ONCE.
+
+    XACA-1192-016 (review round 1): every public accessor in this module
+    calls this at its OWN top before doing any internal work — including
+    accessors that themselves call other accessors or :func:`declare_field`
+    multiple times (e.g. ``is_board_less()``, ``kanban_dir()``,
+    ``working_dir()`` and its ``working_dir`` deriver, ``resolve_team()``,
+    ``ai_credential()``). Once *config* is resolved to a dict here, every
+    downstream call receives that SAME dict rather than ``None``, and
+    :func:`_overlay_teams` only calls ``peek_config()`` when ``config is
+    None`` — so a single top-level resolution collapses what would otherwise
+    be N independent peeks (one per nested call) into exactly one. Measured
+    before this fix: ``ai_credential()``'s ABSENT path alone peeked twice
+    (once via ``resolve_field`` -> ``declare_field`` -> ``_require_entries``,
+    once via ``_note_if_legacy_credential_unlifted``), paying the retry
+    backoff schedule twice on a failing file and printing (before
+    ``_PEEK_DIAGNOSTICS_EMITTED`` dedupe) duplicate stderr lines.
+
+    A no-op when *config* is already a dict — including a caller-supplied
+    value or a test's mock return — never re-peeks, never second-guesses what
+    was handed in. This is also why ``_overlay_teams()``'s own ``if config is
+    None`` check stays in place via this helper rather than being removed:
+    a caller that reaches ``_overlay_teams()`` directly (bypassing every
+    accessor above it) still gets the same one-peek behaviour.
+
+    Wrapped in ``except Exception: return {}`` as a defensive backstop
+    (XACA-1192 review round 1, B1) — ``peek_config()`` is documented "Never
+    raises", but this restores the resilience ``_overlay_teams()`` had before
+    XACA-1192 (a bare ``try: load_config() except Exception: return {}``)
+    rather than assuming a promise elsewhere always holds.
+    """
+    if config is not None:
+        return config
+    try:
+        peek = aiteamforge_paths.peek_config()
+    except Exception:
+        return {}
+    return peek.config if isinstance(peek.config, dict) else {}
 
 
 def _default_teams() -> dict:
@@ -582,11 +634,19 @@ def _require_entries(team: str, config: dict | None) -> tuple[dict | None, dict 
     RAISES rather than deriving (K659). A phantom-derived team is worse than a
     KeyError: callers go on to mint item IDs against a code nothing else in the
     fleet recognizes, and the damage outlives the lookup that caused it.
+
+    XACA-1192-016 (review round 1): resolves *config* once via
+    :func:`_resolve_config` and reuses that SAME overlay dict for both the
+    entry lookup and the unknown-team error's "Known" preview, rather than
+    calling :func:`registered_teams` (which would independently re-resolve
+    and re-peek) on the raise path.
     """
-    overlay_entry = _entry(_overlay_teams(config), team)
+    config = _resolve_config(config)
+    overlay = _overlay_teams(config)
+    overlay_entry = _entry(overlay, team)
     default_entry = _entry(_default_teams(), team)
     if overlay_entry is None and default_entry is None:
-        known = registered_teams(config=config)
+        known = sorted(set(overlay) | set(_default_teams()))
         preview = ", ".join(known[:8]) + (" ..." if len(known) > 8 else "")
         raise UnknownTeamError(
             f"Team '{team}' is registered in no Python tier (neither "
@@ -610,9 +670,17 @@ def declare_field(team: str, field: str, *, config: dict | None = None) -> Field
     precedence chain is implemented. See the module docstring for the tier
     order and its rationale.
 
+    XACA-1192-016 (review round 1): resolves *config* once via
+    :func:`_resolve_config` before doing anything else, so a DERIVED field
+    (``spec.deriver`` below, e.g. ``working_dir`` deriving from ``kanban_dir``
+    via a NESTED ``declare_field`` call) passes the already-resolved dict
+    onward instead of the original ``None`` — collapsing what would
+    otherwise be a second independent peek inside the deriver into zero.
+
     Raises:
         UnknownTeamError: if *team* is registered in no tier.
     """
+    config = _resolve_config(config)
     spec = spec_for(field)
     overlay_entry, default_entry = _require_entries(team, config)
 
@@ -674,9 +742,15 @@ def resolve_team(team: str, *, config: dict | None = None) -> dict[str, Any]:
     value" from "declared None" by key presence, the S002 rule. Use
     :func:`declare_field` for the state of a specific field.
 
+    XACA-1192-016 (review round 1): resolves *config* once via
+    :func:`_resolve_config` before the loop below, so its N calls to
+    :func:`declare_field` (one per key) all receive the same already-resolved
+    dict instead of independently peeking N times.
+
     Raises:
         UnknownTeamError: if *team* is registered in no tier.
     """
+    config = _resolve_config(config)
     overlay_entry, default_entry = _require_entries(team, config)
     keys: set[str] = set()
     for entry in (overlay_entry, default_entry):
@@ -735,7 +809,12 @@ def is_board_less(team: str, *, config: dict | None = None) -> bool:
     Marker first (XACA-0794), then the legacy sentinel inference on
     ``kanban_dir`` (XACA-0727) so un-migrated overlays — which carry a bare
     null and no marker — still answer correctly.
+
+    XACA-1192-016 (review round 1): resolves *config* once via
+    :func:`_resolve_config` so its two :func:`declare_field` calls below
+    share one peek instead of each independently resolving ``None``.
     """
+    config = _resolve_config(config)
     marker = declare_field(team, "board_less", config=config)
     if marker.declared:
         return marker.value is True
@@ -754,10 +833,16 @@ def _board_less_error(team: str, field: str, config: dict | None) -> BoardLessTe
 def kanban_dir(team: str, *, config: dict | None = None) -> Path:
     """Return the team's kanban directory.
 
+    XACA-1192-016 (review round 1): resolves *config* once via
+    :func:`_resolve_config` so the :func:`declare_field` call and the
+    :func:`is_board_less` call below (itself two more ``declare_field``
+    calls) all share one peek instead of independently resolving ``None``.
+
     Raises:
         UnknownTeamError: team registered in no tier.
         BoardLessTeamError: team is a board-less alias.
     """
+    config = _resolve_config(config)
     declaration = declare_field(team, "kanban_dir", config=config)
     if not declaration.declared or is_board_less(team, config=config):
         raise _board_less_error(team, "kanban_dir", config)
@@ -767,10 +852,20 @@ def kanban_dir(team: str, *, config: dict | None = None) -> Path:
 def working_dir(team: str, *, config: dict | None = None) -> Path:
     """Return the team's working (project root) directory.
 
+    XACA-1192-016 (review round 1): resolves *config* once via
+    :func:`_resolve_config`. Matters more here than most accessors: when
+    ``working_dir`` isn't declared directly, its deriver
+    (:func:`_derive_working_dir`) makes a NESTED ``declare_field(team,
+    "kanban_dir", config=config)`` call — without this, that nested call
+    would independently re-resolve ``None`` and peek a second time, on top
+    of the ``is_board_less()`` call below (itself up to two more
+    ``declare_field`` calls).
+
     Raises:
         UnknownTeamError: team registered in no tier.
         BoardLessTeamError: team is a board-less alias.
     """
+    config = _resolve_config(config)
     declaration = declare_field(team, "working_dir", config=config)
     if not declaration.declared or is_board_less(team, config=config):
         raise _board_less_error(team, "working_dir", config)
@@ -841,8 +936,13 @@ def _note_if_legacy_credential_unlifted(team: str, config: dict | None) -> None:
     if not evidence:
         return
     _LEGACY_LIFT_NOTE_EMITTED.add(team)
+    # XACA-1192-015 (review round 1): "NOTE" -> "WARNING" (same wording
+    # otherwise) — this IS a diagnosable gap (a legacy credential sitting
+    # un-lifted), not mere FYI chatter, and every sibling diagnostic in this
+    # PR (peek_config()'s own invalid/unreadable/quarantined messages) uses
+    # WARNING/CRITICAL rather than NOTE.
     print(
-        f"[aiteamforge-registry] NOTE: team {team!r} has a legacy "
+        f"[aiteamforge-registry] WARNING: team {team!r} has a legacy "
         f"{evidence!r} credential on disk that has not yet been lifted into "
         f"ai.credential — a mutating load (e.g. team startup) will lift it; "
         f"until then this read resolves ABSENT (XACA-1192).",
@@ -900,9 +1000,20 @@ def ai_credential(team: str, *, config: dict | None = None) -> dict[str, Any] | 
     later reader in the process. The credential is flat scalars, so a shallow
     copy is sufficient.
 
+    XACA-1192-016 (review round 1): resolves *config* once via
+    :func:`_resolve_config` at the very top, before ``resolve_field()`` and
+    ``_note_if_legacy_credential_unlifted()`` below. Before this fix the
+    ABSENT path peeked twice — once inside ``resolve_field()`` ->
+    ``declare_field()`` -> ``_require_entries()``, once inside
+    ``_note_if_legacy_credential_unlifted()``'s own ``_overlay_teams(config)``
+    call — paying the retry backoff schedule twice on a failing file.
+    Resolving here means both downstream calls receive the same dict, never
+    ``None``, so neither re-peeks.
+
     Raises:
         UnknownTeamError: if *team* is registered in no tier.
     """
+    config = _resolve_config(config)
     block = resolve_field(team, "ai", default=ABSENT, config=config)
     if block is ABSENT:
         _note_if_legacy_credential_unlifted(team, config)

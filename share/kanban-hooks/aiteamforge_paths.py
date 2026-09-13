@@ -1661,6 +1661,38 @@ def peek_config() -> ConfigPeek:
     validity (see that function's SIBLING-DRIFT NOTE) rather than re-inlining
     the check — this makes a third call site; that docstring's call-site list
     has been updated accordingly.
+
+    XACA-1192 review round 1 (B1): this is a thin try/except wrapper around
+    _peek_config_impl() — the outermost safety net for the "Never raises"
+    promise above. Everything _peek_config_impl() is KNOWN to encounter
+    (invalid UTF-8, a non-dict top level, a non-dict "teams") is handled
+    explicitly, with its own status and diagnostic, inside that function. This
+    wrapper exists for whatever is NOT yet known — belt and braces, not a
+    substitute for handling shapes explicitly.
+    """
+    try:
+        return _peek_config_impl()
+    except Exception as exc:  # noqa: BLE001 - deliberate: the contract is "never raises"
+        config_path = get_config_path()
+        message = (
+            f"[aiteamforge-paths] CRITICAL: peek_config: unexpected "
+            f"{type(exc).__name__} ({exc}) reading {config_path} — no "
+            f"self-heal was performed by this read; the file on disk is "
+            f"unchanged. This is the outermost safety net (XACA-1192 review "
+            f"round 1, B1): every shape this function is known to encounter "
+            f"is handled explicitly above it; reaching here means something "
+            f"more exotic, and the docstring's \"Never raises\" promise "
+            f"holds regardless."
+        )
+        _peek_emit_once(str(config_path), "unreadable", message)
+        return ConfigPeek("unreadable", None, config_path)
+
+
+def _peek_config_impl() -> ConfigPeek:
+    """Implementation of peek_config() — see that function's docstring for
+    the full contract. Split out so peek_config() can wrap it in one
+    outermost try/except (B1 safety net) without re-indenting this entire
+    body.
     """
     config_path = get_config_path()
     config_path_str = str(config_path)
@@ -1704,14 +1736,44 @@ def peek_config() -> ConfigPeek:
             return ConfigPeek("quarantined", None, config_path)
 
         if _interactive_tty():
+            # XACA-1192-014 (review round 1): reuse _bootstrap()'s own
+            # missing-file remediation hint verbatim ("Run: aiteamforge-paths
+            # init") so a human seeing this from a read path gets the same
+            # next step as load_config()'s own interactive-missing message —
+            # this read just doesn't ALSO write the defaults _bootstrap()
+            # would. TTY gating is unchanged (XACA-0804: never spam a
+            # non-interactive caller).
             message = (
                 f"[aiteamforge-paths] peek_config: no config found at "
-                f"{config_path} — no self-heal was performed by this read."
+                f"{config_path} — no self-heal was performed by this read.\n"
+                f"  Run: aiteamforge-paths init"
             )
             _peek_emit_once(config_path_str, "missing", message)
         return ConfigPeek("missing", None, config_path)
 
-    config, confirmed_corrupt_b1 = _read_config_with_transient_retry(config_path)
+    try:
+        config, confirmed_corrupt_b1 = _read_config_with_transient_retry(config_path)
+    except (UnicodeDecodeError, ValueError) as exc:
+        # XACA-1192 review round 1 (B1): _read_config_with_transient_retry's
+        # own _attempt() only catches OSError/json.JSONDecodeError — invalid
+        # UTF-8 bytes raise UnicodeDecodeError (a ValueError subclass)
+        # straight through it, on the first attempt or any retry, and it was
+        # UNCAUGHT here before this fix. Deliberately NOT fixed inside
+        # _read_config_with_transient_retry itself: that helper is shared
+        # with load_config()'s mutating path, and changing its observable
+        # behaviour is out of scope for a read-path fix (existing
+        # load_config() tests must stay green). Treat it exactly like a
+        # confirmed-corrupt B1 read: no self-heal, disk unchanged (this
+        # helper never writes before raising).
+        message = (
+            f"[aiteamforge-paths] CRITICAL: peek_config: {config_path} is "
+            f"unparseable/unreadable ({type(exc).__name__}: {exc}) — no "
+            f"self-heal was performed by this read; the file on disk is "
+            f"unchanged."
+        )
+        _peek_emit_once(config_path_str, "unreadable", message)
+        return ConfigPeek("unreadable", None, config_path)
+
     if config is None and confirmed_corrupt_b1:
         try:
             actual_size = config_path.stat().st_size
@@ -1732,8 +1794,51 @@ def peek_config() -> ConfigPeek:
         _peek_emit_once(config_path_str, "unreadable", message)
         return ConfigPeek("unreadable", None, config_path)
 
+    if not isinstance(config, dict):
+        # XACA-1192 review round 1 (B1): a top-level JSON value that parses
+        # fine but isn't an object — null, a list, a number, a bare string.
+        # None of these are confirmed_corrupt_b1 (that flag means the
+        # READ/PARSE itself failed; json.loads("null") succeeds and returns
+        # None with no exception at all — same story for `[]`/`1`/`"x"`), so
+        # without this check they fall through to this function's dict-only
+        # assumptions below (`"schema_version" in config`,
+        # `config.get("teams", …)`) and raise AttributeError/TypeError —
+        # exactly what "Never raises" forbids. DECIDED (review round 1):
+        # every non-dict top level is unreadable — whatever is on disk is not
+        # a usable registry, whether or not it happens to be valid JSON of
+        # SOME kind.
+        message = (
+            f"[aiteamforge-paths] CRITICAL: peek_config: {config_path} "
+            f"parses as JSON but its top level is a "
+            f"{type(config).__name__ if config is not None else 'null'}, "
+            f"not an object — no self-heal was performed by this read; the "
+            f"file on disk is unchanged."
+        )
+        _peek_emit_once(config_path_str, "unreadable", message)
+        return ConfigPeek("unreadable", None, config_path)
+
     has_schema = "schema_version" in config
-    teams_keys = set(config.get("teams", {}).keys())
+    teams = config.get("teams", {})
+    if not isinstance(teams, dict):
+        # XACA-1192 review round 1 (B1): "teams" present but not a dict
+        # (null/list/int/string). The top level IS a dict here (the check
+        # above already ruled out anything else), so this is corruption
+        # WITHIN an otherwise-parseable config, not an unreadable file —
+        # config_is_structurally_valid()/teams_satisfy_canonical_guard() both
+        # assume teams_keys came from `.keys()` on a dict, and handing them a
+        # non-dict raises the same class of exception this PR exists to
+        # close. Report "invalid" with the parsed dict returned AS-IS — never
+        # substituted or coerced — matching every other "invalid" case below.
+        message = (
+            f"[aiteamforge-paths] WARNING: peek_config: {config_path} has a "
+            f"'teams' value that is a {type(teams).__name__}, not an object "
+            f"— no self-heal was performed by this read; the config on disk "
+            f"is unchanged."
+        )
+        _peek_emit_once(config_path_str, "invalid", message)
+        return ConfigPeek("invalid", config, config_path)
+
+    teams_keys = set(teams.keys())
     if config_is_structurally_valid(teams_keys, has_schema):
         return ConfigPeek("ok", config, config_path)
 

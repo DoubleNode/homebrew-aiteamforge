@@ -25,10 +25,24 @@
 #   atf_team_account_fields academy      # -> set|claude-max-me2|Darren Max (me2)|CLAUDE_ACCT_ME2_TOKEN
 #   atf_team_account_nickname academy    # -> Darren Max (me2)
 #
-# Failure contract: SILENT, and never a traceback. Account display is UI
-# decoration; it must never break a banner, a shell or a diagnostic. Every
-# failure path resolves to the "unavailable" state with empty value fields,
-# which every caller renders exactly as it renders "no credential".
+# Failure contract: SILENT BY DEFAULT, and never a traceback. Account display
+# is UI decoration; it must never break a banner, a shell or a diagnostic.
+# Every failure path resolves to the "unavailable" state with empty value
+# fields, which every caller renders exactly as it renders "no credential".
+#
+# XACA-1192-013/017 (review round 1): "silent" is this file's OWN default,
+# not an unconditional swallow anymore. Every banner already wraps its own
+# call to atf_team_account_display/atf_team_account_nickname in its own
+# `2>/dev/null` at the call site (see e.g. academy/scripts/academy-banner.sh)
+# — that keeps banners silent regardless of what this file does internally.
+# `cc-whoami` is a deliberate diagnostic, not decoration: it must SHOW the
+# underlying peek_config() WARNING/CRITICAL a stale or corrupt team-paths.json
+# produces, on stderr, without corrupting its own stdout parsing. Set
+# ATF_ACCOUNT_DIAGNOSTICS=1 in the environment (or as a one-shot prefix on
+# the call, e.g. `ATF_ACCOUNT_DIAGNOSTICS=1 atf_team_account_fields academy`)
+# to let this file's own internal stderr through; the default (unset, or any
+# other value) keeps swallowing it, so a caller that does nothing extra sees
+# exactly the old behaviour.
 #
 # Designed to work in both sh and zsh (banners are zsh, cc-whoami is zsh).
 
@@ -102,10 +116,40 @@ atf_team_account_fields() {
         return 0
     }
 
+    # XACA-1192-013/017: the heredoc body lives in ONE place
+    # (_atf_run_credential_reader) so the stderr-suppress-or-not decision
+    # below is a redirect on the FUNCTION CALL, never a second copy of the
+    # python program (which would drift the two copies apart, k501-shape).
+    if [ "${ATF_ACCOUNT_DIAGNOSTICS:-}" = "1" ]; then
+        _atf_out=$(_atf_run_credential_reader "${_atf_team}" "${_atf_hooks}")
+    else
+        _atf_out=$(_atf_run_credential_reader "${_atf_team}" "${_atf_hooks}" 2>/dev/null)
+    fi
+
+    case "${_atf_out}" in
+        set\|*|none\|*|absent\|*|unknown-team\|*|unavailable\|*)
+            printf '%s\n' "${_atf_out}" ;;
+        *)
+            # Empty or unrecognised — a python3 that died before emitting.
+            printf 'unavailable|||\n' ;;
+    esac
+    unset _atf_team _atf_hooks _atf_out
+}
+
+# ---------------------------------------------------------------------------
+# _atf_run_credential_reader <team> <hooks_dir>
+#
+# The actual python3 reader, factored out of atf_team_account_fields() so its
+# caller can decide — via a redirect on the CALL, not a second copy of this
+# heredoc — whether the reader's own stderr (peek_config()'s WARNING/CRITICAL
+# diagnostics, XACA-1192) reaches the terminal. See ATF_ACCOUNT_DIAGNOSTICS
+# above the file's usage comment.
+# ---------------------------------------------------------------------------
+_atf_run_credential_reader() {
     # Slug and hooks dir are passed as ARGV, never interpolated into the
     # program text: the readers this replaces spliced the slug straight into
     # a python string literal, which a quote in a team name would have broken.
-    _atf_out=$(python3 - "${_atf_team}" "${_atf_hooks}" <<'ATF_PY' 2>/dev/null
+    python3 - "$1" "$2" <<'ATF_PY'
 import sys
 
 team, hooks_dir = sys.argv[1], sys.argv[2]
@@ -147,16 +191,6 @@ elif isinstance(cred, dict):
 else:
     emit("unavailable")
 ATF_PY
-    )
-
-    case "${_atf_out}" in
-        set\|*|none\|*|absent\|*|unknown-team\|*|unavailable\|*)
-            printf '%s\n' "${_atf_out}" ;;
-        *)
-            # Empty or unrecognised — a python3 that died before emitting.
-            printf 'unavailable|||\n' ;;
-    esac
-    unset _atf_team _atf_hooks _atf_out
 }
 
 # ---------------------------------------------------------------------------

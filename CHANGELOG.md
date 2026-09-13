@@ -10,7 +10,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   non-mutating reader of `team-paths.json` (no quarantine, reseed, backfill, `.lock` or
   `.bak-*`; unhealthy states reported on stderr), and `share/kanban-hooks/aiteamforge_registry.py`
   routes `_overlay_teams()`/`ai_credential()` through it. A banner or credential read can no
-  longer quarantine the operator's config. Mirror of dev-team PR #889.
+  longer quarantine the operator's config. Mirror of dev-team PR #889. Review round 1: `peek_config()`
+  never raises on malformed JSON shapes, and `share/scripts/team-account-display.sh` only surfaces its
+  diagnostics when `ATF_ACCOUNT_DIAGNOSTICS=1` (cc-whoami); banners stay silent.
 - **XACA-1195** — `kb-knowledge-validate` in both `share/templates/kanban/kanban-helpers.template.sh`
   and `share/templates/aliases/kanban-aliases.sh` no longer silently loses data on
   invalid UTF-8. macOS BSD awk aborts (rc=2) on the first invalid byte under a
