@@ -8356,6 +8356,11 @@ kb-knowledge-validate() {
     local dup_slots dup_slot dup_files root_label fname_stem
     local has_id has_tier has_date has_tags has_agent has_team file_id file_tier xref_line xref resolved_xref resolver_rc idx_id idx_file
     local xref_frontmatter index_ids_raw
+    # XACA-1191: state for the zero-fork content scan (_kb_val_scan_entry
+    # below). Declared here, never inside the loop: zsh prints `name=value`
+    # when a bare `local name` re-declares an already-set local.
+    local _kb_val_c _kb_val_fast _kb_val_id_legacy _kb_val_tier_legacy _kb_val_name_hit
+    local -a _kb_val_fm_lines _kb_val_toks _kb_val_xrefs
     # XACA-0991-004: per-file error flag. Reset at the top of each entry_files
     # iteration; _kb_val_error sets it via zsh dynamic scoping (same mechanism
     # error_count already relies on). Lets the end of the loop skip _kb_val_pass
@@ -8379,6 +8384,119 @@ kb-knowledge-validate() {
     _kb_val_error()   { echo "  [FAIL] $*" >&2; error_count=$((error_count + 1)); file_had_error=1; }
     _kb_val_warn()    { echo "  [WARN] $*" >&2; warning_count=$((warning_count + 1)); }
     _kb_val_pass()    { $flag_quiet || echo "  [OK]   $*"; pass_count=$((pass_count + 1)); }
+
+    # XACA-1191: the per-entry content loop below used to fork ~22 external
+    # tools per entry (basename, echo|grep casing tests, one grep -c per
+    # required field, _kb_knowledge_yaml_field's grep|sed|tr twice, and an
+    # echo|grep per FRONTMATTER LINE for cross-refs) — the XACA-1080
+    # fork-per-item class, one level down. MEASURED (XACA-1191-001): those
+    # phases were ~99% of whole-tree wall time. These helpers read each entry
+    # ONCE with zsh's fork-free $(<file) and derive the same facts natively.
+    #
+    # WHY NOT one awk pass per entry (XACA-1080's shape): /usr/bin/awk
+    # (onetrue 20200816) in a UTF-8 locale ABORTS at the first invalid-UTF-8
+    # record ("towc: multibyte conversion failure", rc=2) and loses every
+    # later line, where grep carried on. An awk extractor would turn such a
+    # file into spurious "Missing" errors. See XACA-1191-002 design §3.1.
+    #
+    # EXACTNESS CONTRACT: output (stdout, stderr, interleave, exit code) must
+    # stay byte-identical to the pre-XACA-1191 code. Every input the native
+    # path cannot reproduce EXACTLY is routed to the original commands,
+    # unchanged, at the original sequence point:
+    #   - unreadable/vanished file, NUL byte, invalid/incomplete multibyte
+    #     text (UTF-8 locales)           -> whole entry uses the old commands
+    #   - an id:/tier: line that is not printable ASCII (+ \t\r\v\f)
+    #     -> the real _kb_knowledge_yaml_field (sed/tr [[:space:]] and
+    #        illegal-byte behaviour are locale-dependent)
+    #   - a frontmatter line or filename containing a backslash (zsh `echo`
+    #     interprets escapes, so the old regex saw the ESCAPED text) or a
+    #     newline                         -> the old echo|grep / basename
+    # The two pure helpers use `emulate -LR zsh` so user options
+    # (NO_CASE_MATCH, BASH_REMATCH, KSH_ARRAYS, NO_MULTIBYTE, ...) cannot
+    # change what they match. The -R is load-bearing: plain `emulate -L zsh`
+    # only resets emulation-relevant options, and VERIFIED it leaves
+    # NO_CASE_MATCH (=~ went case-insensitive: agents:AB:k1 became a token),
+    # NO_MULTIBYTE and BASH_REMATCH (MATCH/MEND unset -> the token loop never
+    # advanced and hung) in force. Anything that calls `echo` stays OUTSIDE them,
+    # so a user BSD_ECHO affects old and new code identically.
+    #
+    # _kb_val_scan_entry <file>: sets the CALLER's locals by dynamic scope —
+    # _kb_val_fast (0 = use the old commands for this entry), has_* (0/1;
+    # only ever compared -eq 0 / -gt 0), file_id/file_tier,
+    # _kb_val_id_legacy/_kb_val_tier_legacy, _kb_val_fm_lines. Do NOT
+    # typeset/local those names in here: that would create helper-locals and
+    # the caller would never see the values.
+    _kb_val_scan_entry() {
+        emulate -LR zsh
+        local f="${1-}" nl=$'\n' x r s
+        local -a L
+        local -i found=0 n=0
+        _kb_val_fast=0 _kb_val_id_legacy=0 _kb_val_tier_legacy=0
+        # Brace-group redirect keeps $(<file) fork-free AND silences zsh's
+        # own "permission denied"; a 2>/dev/null inside the $() would fork.
+        { _kb_val_c=$(<"$f"); } 2>/dev/null || return 0
+        [[ $_kb_val_c == *$'\0'* || $_kb_val_c == *[[:INVALID:]]* \
+           || $_kb_val_c == *[[:INCOMPLETE:]]* ]] && return 0
+        _kb_val_fast=1
+        x=$nl$_kb_val_c
+        has_id=0 has_tier=0 has_date=0 has_tags=0 has_agent=0 has_team=0 file_id= file_tier=
+        # grep -c '^field:' counts WHOLE-FILE lines (body included), so these
+        # test the whole content too, not just the frontmatter.
+        [[ $x == *${nl}id:* ]]    && has_id=1
+        [[ $x == *${nl}tier:* ]]  && has_tier=1
+        [[ $x == *${nl}date:* ]]  && has_date=1
+        [[ $x == *${nl}tags:* ]]  && has_tags=1
+        [[ $x == *${nl}agent:* ]] && has_agent=1
+        [[ $x == *${nl}team:* ]]  && has_team=1
+        # _kb_knowledge_yaml_field semantics: FIRST ^field: line in the whole
+        # file; strip leading [[:space:]]*; delete every " and '; keep
+        # trailing whitespace/\r.
+        if (( has_id )); then
+            r=${x#*${nl}id:}; r=${r%%${nl}*}
+            if [[ $r == *[^\ -~$'\t\r\v\f']* ]]; then _kb_val_id_legacy=1
+            else s=$r; while [[ $s == [[:space:]]* ]]; do s=${s:1}; done; file_id=${s//[\"\']/}; fi
+        fi
+        if (( has_tier )); then
+            r=${x#*${nl}tier:}; r=${r%%${nl}*}
+            if [[ $r == *[^\ -~$'\t\r\v\f']* ]]; then _kb_val_tier_legacy=1
+            else s=$r; while [[ $s == [[:space:]]* ]]; do s=${s:1}; done; file_tier=${s//[\"\']/}; fi
+        fi
+        # Old frontmatter awk: lines after the first line that is EXACTLY
+        # `---`, up to the next such line (or EOF), capped at 50 by head.
+        _kb_val_fm_lines=()
+        L=("${(@f)_kb_val_c}")
+        for s in "${L[@]}"; do
+            if [[ $s == --- ]]; then (( found )) && break; found=1; continue; fi
+            (( found )) || continue
+            (( n++ < 50 )) || break
+            _kb_val_fm_lines+=("$s")
+        done
+        return 0
+    }
+
+    # _kb_val_xref_tokens <line>: fills _kb_val_toks with every
+    # non-overlapping leftmost-longest match, in order — what
+    # `grep -oE '(agents|teams|subjects|project):[a-z0-9/:_-]+'` printed.
+    _kb_val_xref_tokens() {
+        emulate -LR zsh
+        # `=~` writes MATCH/MBEGIN/MEND/match/mbegin/mend into the nearest
+        # scope that has them — globals otherwise. Keep them local: the
+        # dup-slot check reads ${match[1]}, and under a user BASH_REMATCH a
+        # leaked capture ('agents'/'teams') was VERIFIED to surface there as
+        # a bogus "Duplicate ID slot" error the old grep never produced.
+        local MATCH MBEGIN MEND
+        local -a match mbegin mend
+        local rest="${1-}"
+        _kb_val_toks=()
+        [[ $rest == *:* ]] || return 0
+        while [[ $rest =~ '(agents|teams|subjects|project):[a-z0-9/:_-]+' ]]; do
+            # Termination backstop only: under -LR a successful match always
+            # sets MEND >= 1. Never let a regex-state surprise become a hang.
+            (( ${MEND:-0} > 0 )) || break
+            _kb_val_toks+=("$MATCH"); rest=${rest[MEND+1,-1]}
+        done
+        return 0
+    }
 
     # Internal: collect one root's changed/untracked *.md entry files into
     # _kb_val_scope_files. Paths from `git status --porcelain` are relative to
@@ -8490,7 +8608,7 @@ kb-knowledge-validate() {
                 gs_path="${gs_path#* -> }"
             fi
             [[ "$gs_path" == *.md ]] || continue
-            [[ "$(basename "$gs_path")" == "INDEX.md" ]] && continue
+            [[ "${gs_path:t}" == "INDEX.md" ]] && continue   # XACA-1191: was $(basename) — a fork per line
             local abs="${repo_top}/${gs_path}"
             [[ -f "$abs" ]] || continue   # deletes have nothing on disk to validate
             # XACA-0991-003: key on the :A-normalized (collapsed-slash,
@@ -8723,7 +8841,7 @@ kb-knowledge-validate() {
         index_ids=()
         for ef in "${val_dir}"/*.md; do
             [[ -f "$ef" ]] || continue
-            [[ "$(basename "$ef")" == "INDEX.md" ]] && continue
+            [[ "${ef:t}" == "INDEX.md" ]] && continue   # XACA-1191: was $(basename) — a fork per file
             entry_files+=("$ef")
         done
 
@@ -8885,14 +9003,29 @@ kb-knowledge-validate() {
         # (== entry_files in whole-tree mode; the --changed/--file subset
         # otherwise) — see the computation above.
         for ef in "${entry_files_scoped[@]}"; do
-            fname=$(basename "$ef" .md)
+            # XACA-1191: ${ef:t:r} instead of $(basename "$ef" .md). The two
+            # differ only for a path containing a newline ($() strips a
+            # trailing one) or a file literally named `.md` (basename keeps
+            # it, :r empties it) — those keep the original command.
+            if [[ "$ef" == *$'\n'* || "${ef:t}" == ".md" ]]; then
+                fname=$(basename "$ef" .md)
+            else
+                fname="${ef:t:r}"
+            fi
             # XACA-0991-004: reset per-file. See declaration comment above —
             # without this reset every file after the first FAIL would inherit
             # the previous file's error state.
             file_had_error=0
 
-            # Casing check
-            if echo "$fname" | grep -qE '^[KTSPMV]'; then
+            # Casing check. XACA-1191: native pattern test; a name with a
+            # backslash or newline keeps the original echo|grep (zsh echo
+            # interprets escapes, so grep saw the escaped text).
+            if [[ "$fname" == *[\\$'\n']* ]]; then
+                echo "$fname" | grep -qE '^[KTSPMV]' && _kb_val_name_hit=1 || _kb_val_name_hit=0
+            else
+                [[ "$fname" == [KTSPMV]* ]] && _kb_val_name_hit=1 || _kb_val_name_hit=0
+            fi
+            if (( _kb_val_name_hit )); then
                 _kb_val_warn "Uppercase prefix in ${ef}"
                 if $flag_fix; then
                     lc_fname=$(echo "$fname" | tr '[:upper:]' '[:lower:]')
@@ -8903,16 +9036,30 @@ kb-knowledge-validate() {
 
             # Prefix check
             if [[ -n "$exp_prefix" ]]; then
-                if ! echo "$fname" | grep -qE "^${exp_prefix}[0-9]+"; then
+                if [[ "$fname" == *[\\$'\n']* ]]; then
+                    echo "$fname" | grep -qE "^${exp_prefix}[0-9]+" && _kb_val_name_hit=1 || _kb_val_name_hit=0
+                else
+                    [[ "$fname" == ${exp_prefix}[0-9]* ]] && _kb_val_name_hit=1 || _kb_val_name_hit=0
+                fi
+                if (( ! _kb_val_name_hit )); then
                     _kb_val_warn "File ${fname}.md does not start with expected prefix '${exp_prefix}' for tier '${expected_tier}'"
                 fi
             fi
 
+            # XACA-1191: read the entry ONCE, here — exactly where the old
+            # code first opened it. It must stay AFTER the casing block: under
+            # --fix that block may have renamed $ef away, and the old greps
+            # then read the gone path (the read fails -> old commands -> same
+            # output).
+            _kb_val_scan_entry "$ef"
+
             # Required frontmatter fields
-            has_id=$(grep -c '^id:' "$ef" 2>/dev/null || true)
-            has_tier=$(grep -c '^tier:' "$ef" 2>/dev/null || true)
-            has_date=$(grep -c '^date:' "$ef" 2>/dev/null || true)
-            has_tags=$(grep -c '^tags:' "$ef" 2>/dev/null || true)
+            if (( ! _kb_val_fast )); then
+                has_id=$(grep -c '^id:' "$ef" 2>/dev/null || true)
+                has_tier=$(grep -c '^tier:' "$ef" 2>/dev/null || true)
+                has_date=$(grep -c '^date:' "$ef" 2>/dev/null || true)
+                has_tags=$(grep -c '^tags:' "$ef" 2>/dev/null || true)
+            fi
 
             [[ "$has_id" -eq 0 ]]   && _kb_val_error "Missing 'id:' in ${ef}"
             [[ "$has_tier" -eq 0 ]] && _kb_val_error "Missing 'tier:' in ${ef}"
@@ -8921,17 +9068,23 @@ kb-knowledge-validate() {
 
             # Tier-specific required fields (per SPEC.md §3)
             if [[ "$expected_tier" == "agent" ]]; then
-                has_agent=$(grep -c '^agent:' "$ef" 2>/dev/null || true)
+                (( _kb_val_fast )) || has_agent=$(grep -c '^agent:' "$ef" 2>/dev/null || true)
                 [[ "$has_agent" -eq 0 ]] && _kb_val_error "Missing 'agent:' in ${ef} (required for tier 'agent')"
             fi
             if [[ "$expected_tier" == "team" ]]; then
-                has_team=$(grep -c '^team:' "$ef" 2>/dev/null || true)
+                (( _kb_val_fast )) || has_team=$(grep -c '^team:' "$ef" 2>/dev/null || true)
                 [[ "$has_team" -eq 0 ]] && _kb_val_error "Missing 'team:' in ${ef} (required for tier 'team')"
             fi
 
             # id field matches filename
             if [[ "$has_id" -gt 0 ]]; then
-                file_id=$(_kb_knowledge_yaml_field "$ef" "id")
+                # XACA-1191: the helper still runs HERE (its original sequence
+                # point) whenever the native value is not provably exact — its
+                # sed/tr can write to stderr, and that line must land between
+                # the same [FAIL] lines it always did.
+                if (( ! _kb_val_fast || _kb_val_id_legacy )); then
+                    file_id=$(_kb_knowledge_yaml_field "$ef" "id")
+                fi
                 # id may be "kNNN-slug" and fname is same — strip .md
                 if [[ "$file_id" != "$fname" ]]; then
                     _kb_val_error "id mismatch: file='${fname}', id field='${file_id}' in ${ef}"
@@ -8940,7 +9093,9 @@ kb-knowledge-validate() {
 
             # tier matches directory
             if [[ "$has_tier" -gt 0 ]]; then
-                file_tier=$(_kb_knowledge_yaml_field "$ef" "tier")
+                if (( ! _kb_val_fast || _kb_val_tier_legacy )); then
+                    file_tier=$(_kb_knowledge_yaml_field "$ef" "tier")
+                fi
                 if [[ "$file_tier" != "$expected_tier" ]]; then
                     _kb_val_error "Tier mismatch: file in '${expected_tier}' dir but tier='${file_tier}' in ${ef}"
                 fi
@@ -8949,27 +9104,6 @@ kb-knowledge-validate() {
             # Validate cross-references — scan YAML frontmatter only (between the two ^---$ lines).
             # Scanning the full file body causes false positives when cross-ref tokens appear in
             # code samples, prose discussions, or quoted text (see XACA-0222 review subitem 014).
-            # XACA-1195: rc-checked with an LC_ALL=C retry (same pattern as the
-            # INDEX-orphan scan above) so an invalid-UTF-8 byte can't silently
-            # truncate the scanned frontmatter. `head -50` moved INTO awk because
-            # awk's rc was unusable through the pipe: without pipefail, `$?` of
-            # `x=$(awk … | head -50)` is head's status (0), so awk's rc=2 abort
-            # was INVISIBLE; and awk's own status (pipestatus) can read 141
-            # (SIGPIPE) on a VALID 50+-line file. The in-awk cap gives awk's
-            # real rc — output proven identical.
-            local _kb_xref_prog='/^---$/{if(found){exit}; found=1; next} found{if(++n>50){exit}; print}' _kb_xref_rc=0
-            xref_frontmatter=$(awk "$_kb_xref_prog" "$ef" 2>/dev/null)
-            _kb_xref_rc=$?
-            if (( _kb_xref_rc != 0 )); then
-                xref_frontmatter=$(LC_ALL=C awk "$_kb_xref_prog" "$ef")
-                _kb_xref_rc=$?
-                if (( _kb_xref_rc != 0 )); then
-                    xref_frontmatter=""
-                    _kb_val_error "Cannot read frontmatter of ${ef} (awk rc=${_kb_xref_rc}) — cross-refs NOT checked"
-                else
-                    _kb_val_warn "Invalid UTF-8 in ${ef} — frontmatter re-read with byte semantics (LC_ALL=C) for the cross-ref check"
-                fi
-            fi
             # XACA-0991-018 [Review] fix: $cur_root is now the val_dir's own
             # literal directory (see the project_path tagging fix above), which
             # for the standalone project_path fallback is a single project's
@@ -8992,22 +9126,71 @@ kb-knowledge-validate() {
             if [[ "${cur_root%/}" != "${global_root%/}" && "${cur_root%/}" != "${local_root%/}" ]]; then
                 _kb_val_xref_root="$global_root"
             fi
-            while IFS= read -r xref_line; do
-                # Extract bare cross-refs (tokens like agents:*, subjects:*, project:*, teams:*)
-                while read -r xref; do
-                    # XACA-0802: resolve against the entry's OWN root — a
-                    # local-only entry's refs point at siblings under
-                    # ~/knowledge-local, and resolving those against the global
-                    # root would report every one of them as broken.
-                    resolved_xref=$(_kb_knowledge_resolve_ref "$xref" "$_kb_val_xref_root" 2>/dev/null)
-                    resolver_rc=$?
-                    if [[ $resolver_rc -ne 0 ]]; then
-                        _kb_val_error "Broken cross-ref '${xref}' in ${ef} (resolver rejected — invalid format)"
-                    elif [[ -n "$resolved_xref" ]] && [[ ! -f "$resolved_xref" ]]; then
-                        _kb_val_error "Broken cross-ref '${xref}' in ${ef}"
+            # Extract bare cross-refs (tokens like agents:*, subjects:*, project:*, teams:*)
+            # XACA-1191: collect the entry's tokens first, from the frontmatter
+            # lines _kb_val_scan_entry already split out — no awk|head per
+            # entry, no echo|grep per line. A line containing a backslash keeps
+            # the original echo|grep (escapes); an entry the scan could not
+            # read exactly keeps the original awk|head + echo|grep entirely.
+            # Extraction writes nothing to stdout/stderr, so resolving the
+            # collected tokens afterwards, in the same order, emits the
+            # identical sequence. The per-token body below is the original,
+            # verbatim and still inline: moving it into a helper function was
+            # VERIFIED to add "set in enclosing scope" lines under a user
+            # WARN_NESTED_VAR.
+            _kb_val_xrefs=()
+            if (( _kb_val_fast )); then
+                for xref_line in "${_kb_val_fm_lines[@]}"; do
+                    if [[ "$xref_line" == *\\* ]]; then
+                        while read -r xref; do
+                            _kb_val_xrefs+=("$xref")
+                        done < <(echo "$xref_line" | grep -oE '(agents|teams|subjects|project):[a-z0-9/:_-]+')
+                    else
+                        _kb_val_xref_tokens "$xref_line"
+                        _kb_val_xrefs+=("${_kb_val_toks[@]}")
                     fi
-                done < <(echo "$xref_line" | grep -oE '(agents|teams|subjects|project):[a-z0-9/:_-]+')
-            done <<< "$xref_frontmatter"
+                done
+            else
+                # XACA-1195 (ported by XACA-1191 into this legacy path): rc-checked with an LC_ALL=C retry (same pattern as the
+                # INDEX-orphan scan above) so an invalid-UTF-8 byte can't silently
+                # truncate the scanned frontmatter. `head -50` moved INTO awk because
+                # awk's rc was unusable through the pipe: without pipefail, `$?` of
+                # `x=$(awk … | head -50)` is head's status (0), so awk's rc=2 abort
+                # was INVISIBLE; and awk's own status (pipestatus) can read 141
+                # (SIGPIPE) on a VALID 50+-line file. The in-awk cap gives awk's
+                # real rc — output proven identical.
+                local _kb_xref_prog='/^---$/{if(found){exit}; found=1; next} found{if(++n>50){exit}; print}' _kb_xref_rc=0
+                xref_frontmatter=$(awk "$_kb_xref_prog" "$ef" 2>/dev/null)
+                _kb_xref_rc=$?
+                if (( _kb_xref_rc != 0 )); then
+                    xref_frontmatter=$(LC_ALL=C awk "$_kb_xref_prog" "$ef")
+                    _kb_xref_rc=$?
+                    if (( _kb_xref_rc != 0 )); then
+                        xref_frontmatter=""
+                        _kb_val_error "Cannot read frontmatter of ${ef} (awk rc=${_kb_xref_rc}) — cross-refs NOT checked"
+                    else
+                        _kb_val_warn "Invalid UTF-8 in ${ef} — frontmatter re-read with byte semantics (LC_ALL=C) for the cross-ref check"
+                    fi
+                fi
+                while IFS= read -r xref_line; do
+                    while read -r xref; do
+                        _kb_val_xrefs+=("$xref")
+                    done < <(echo "$xref_line" | grep -oE '(agents|teams|subjects|project):[a-z0-9/:_-]+')
+                done <<< "$xref_frontmatter"
+            fi
+            for xref in "${_kb_val_xrefs[@]}"; do
+                # XACA-0802: resolve against the entry's OWN root — a
+                # local-only entry's refs point at siblings under
+                # ~/knowledge-local, and resolving those against the global
+                # root would report every one of them as broken.
+                resolved_xref=$(_kb_knowledge_resolve_ref "$xref" "$_kb_val_xref_root" 2>/dev/null)
+                resolver_rc=$?
+                if [[ $resolver_rc -ne 0 ]]; then
+                    _kb_val_error "Broken cross-ref '${xref}' in ${ef} (resolver rejected — invalid format)"
+                elif [[ -n "$resolved_xref" ]] && [[ ! -f "$resolved_xref" ]]; then
+                    _kb_val_error "Broken cross-ref '${xref}' in ${ef}"
+                fi
+            done
 
             # XACA-0991-004 (Defect A): a file that raised one or more errors
             # this iteration must NOT also be reported/counted as passing — the
@@ -9020,7 +9203,7 @@ kb-knowledge-validate() {
             # thing that was misleading was FAIL immediately followed by OK
             # for the identical entity, not WARN followed by OK.
             if [[ "$file_had_error" -eq 0 ]]; then
-                _kb_val_pass "$(basename "$ef")"
+                _kb_val_pass "${ef:t}"   # XACA-1191: was $(basename "$ef"); exact for any *.md path
             fi
         done
 

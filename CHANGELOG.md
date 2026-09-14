@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1191** — mirror the fork-free `kb-knowledge-validate()` into
+  `share/templates/kanban/kanban-helpers.template.sh` and
+  `share/templates/aliases/kanban-aliases.sh`. Whole-tree validate drops from
+  ~95s (156–334s under load, over the 120s agent tool timeout) to ~3s by reading
+  each entry once and checking it natively in zsh. Entries it cannot scan exactly
+  (NUL, invalid UTF-8, unreadable) keep the original commands, including
+  XACA-1195's rc-checked `LC_ALL=C` retry. Output is byte-identical to the
+  previous version (92-cell matrix; region parity 133/0).
 
 ## [0.20.11] - 2026-09-14
 
