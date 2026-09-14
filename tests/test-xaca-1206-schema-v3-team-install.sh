@@ -28,11 +28,22 @@
 # AITEAMFORGE_CONFIG and the allocator's explicit path argument. Nothing reads
 # or writes the real ~/.aiteamforge. Runs under /bin/bash 3.2 and bash 5.
 
+# Harness detection keys on the harness FUNCTIONS, not on TEST_TMP_DIR
+# (XACA-1206-011). The inherited pattern (`[ -z "$TEST_TMP_DIR" ]`) treats a
+# caller-exported TEST_TMP_DIR as "running under test-runner.sh" — so a bare
+# invocation from a sandboxed shell defined no test_pass/test_fail, every
+# assertion died with "command not found", and the suite exited 0 having
+# asserted nothing. A pre-set TEST_TMP_DIR is honoured as the scratch root;
+# only the absence of test_pass decides standalone mode.
 _STANDALONE=false
-if [ -z "${TEST_TMP_DIR:-}" ]; then
+if ! type test_pass >/dev/null 2>&1; then
     _STANDALONE=true
-    TEST_TMP_DIR=$(mktemp -d -t aiteamforge-xaca1206-test.XXXXXX)
-    trap 'rm -rf "$TEST_TMP_DIR"' EXIT INT TERM
+    if [ -z "${TEST_TMP_DIR:-}" ]; then
+        TEST_TMP_DIR=$(mktemp -d -t aiteamforge-xaca1206-test.XXXXXX)
+        trap 'rm -rf "$TEST_TMP_DIR"' EXIT INT TERM
+    else
+        mkdir -p "$TEST_TMP_DIR" || { echo "cannot create TEST_TMP_DIR=$TEST_TMP_DIR" >&2; exit 1; }
+    fi
     _PASS_COUNT=0
     _FAIL_COUNT=0
     test_start() { _CURRENT_TEST="$1"; }
@@ -195,4 +206,6 @@ check "G1: assertion-count pin ($expected expected, $_ASSERTIONS ran)" "$r" "ass
 if [ "$_STANDALONE" = true ]; then
     printf "\nResults: %d passed, %d failed\n" "$_PASS_COUNT" "$_FAIL_COUNT"
     [ "$_FAIL_COUNT" -eq 0 ] || exit 1
+    # A run that recorded no passes asserted nothing — that is not a green.
+    [ "$_PASS_COUNT" -gt 0 ] || { echo "no assertions passed — refusing to report success" >&2; exit 1; }
 fi

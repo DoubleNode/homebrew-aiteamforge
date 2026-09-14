@@ -16,7 +16,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   backfill reported "Provisioned 0 mandatory team(s); 1 failed". Fixes: both allowlists accept 3
   (unknown versions still warn); the allocator is captured stdout-only; a non-integer port fails
   closed before any template is rendered. New `tests/test-xaca-1206-schema-v3-team-install.sh`
-  (14 cases, bash 3.2 + 5), each fix mutation-checked.
+  (14 cases, bash 3.2 + 5), each fix mutation-checked. Review round 1 (XACA-1206-011): the test's
+  standalone detection keyed on `TEST_TMP_DIR` being unset, so running it bare from a shell that had
+  already exported `TEST_TMP_DIR` defined no assertion helpers and exited 0 having asserted nothing.
+  It now keys on the harness functions themselves and refuses to report success with zero passes.
 ## [0.20.10] - 2026-09-13
 - **XACA-0886 (skill mirror)** — `share/skills/Kanban Manager/SKILL.md` now documents the
   protected-subitem refusal on `kb-backlog sub cancel` / `kb-cancel` (`--user-approved` is
