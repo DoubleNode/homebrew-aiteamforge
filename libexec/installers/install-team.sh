@@ -2007,6 +2007,33 @@ fi
 # ============================================================================
 # XACA-1216: DEPLOY PERSONAS INTO A NON-GIT WORKING DIR (flat-dir)
 # ============================================================================
+# The ONE reading of TEAM_PERSONA_DEPLOY_MODE for this install (XACA-1216-017).
+# Same verdict as the upgrade's _xaca1216_team_persona_deploy_mode and the
+# startup template's case arm:
+#   ""        -> no flat-dir deploy (every unflagged team), silent
+#   flat-dir  -> deploy, but ONLY for a non-project team: flat-dir targets the
+#                team's single TEAM_WORKING_DIR, which project teams do not have
+#                (theirs is per-project). flat-dir + TEAM_HAS_PROJECTS=true is
+#                a conf error: loud warning, no deploy.
+#   anything  -> invalid: loud error naming the conf and the value (printf %q,
+#   else         so a newline or control char is visible), treated as unset.
+# The EFFECTIVE value is what both the deploy block below and the startup sed
+# render see, so an invalid value can never reach the sed replacement (where
+# `|`, `&`, `\` or a newline would corrupt or inject into the render).
+case "${TEAM_PERSONA_DEPLOY_MODE:-}" in
+    "") TEAM_PERSONA_DEPLOY_MODE="" ;;
+    flat-dir)
+        if [[ "$TEAM_HAS_PROJECTS" == "true" ]]; then
+            echo "  🚨 $TEAM_CONF sets TEAM_PERSONA_DEPLOY_MODE=flat-dir on a project team (TEAM_HAS_PROJECTS=true) — flat-dir is for non-project teams only; NOT deploying, treated as unset" >&2
+            TEAM_PERSONA_DEPLOY_MODE=""
+        fi
+        ;;
+    *)
+        echo "  🚨 invalid TEAM_PERSONA_DEPLOY_MODE=$(printf '%q' "$TEAM_PERSONA_DEPLOY_MODE") in $TEAM_CONF (allowed: flat-dir or empty) — treated as unset; no flat-dir persona deploy" >&2
+        TEAM_PERSONA_DEPLOY_MODE=""
+        ;;
+esac
+
 # Gated by the team conf's TEAM_PERSONA_DEPLOY_MODE="flat-dir" (spacedock
 # today). The git-aware deploy modes never reach a working dir that is not a
 # git work tree, so without this the team's crew sessions start with no
@@ -2037,7 +2064,7 @@ _xaca1216_persona_rc_meaning() {
         *)   echo "unexpected exit" ;;
     esac
 }
-if [[ "${TEAM_PERSONA_DEPLOY_MODE:-}" == "flat-dir" && "$TEAM_HAS_PROJECTS" != "true" ]]; then
+if [[ "$TEAM_PERSONA_DEPLOY_MODE" == "flat-dir" ]]; then
     echo "👤 Deploying crew personas into the team working directory (flat-dir)..."
     _XACA1216_WD="${TEAM_WORKING_DIR:-}"
     _XACA1216_WD="${_XACA1216_WD/\$HOME/$HOME}"
@@ -2053,14 +2080,45 @@ if [[ "${TEAM_PERSONA_DEPLOY_MODE:-}" == "flat-dir" && "$TEAM_HAS_PROJECTS" != "
         AITEAMFORGE_DIR="$AITEAMFORGE_DIR" bash "$_XACA1216_DEPLOYER" \
             --flat-dir "$_XACA1216_WD" "$TEAM_ID" --force 2>&1 | sed 's/^/    /' || _xaca1216_rc=$?
     fi
+    # rc 0 is the deployer's word, not evidence (XACA-1216-016): a DEFERRED
+    # (dev machine), no-op or stubbed deployer exits 0 having written nothing.
+    # Success needs every source *.md basename present in the target — the
+    # same test as the startup template's "Personas" health row. Deliberately
+    # a local check, NOT a deployer subcommand: evidence the deployer reports
+    # about itself is exactly what a stubbed/no-op deployer would fake.
+    _xaca1216_why=""
     if [[ "$_xaca1216_rc" -eq 0 ]]; then
-        echo "  ✓ Personas deployed to $_XACA1216_WD/.claude/agents"
+        _XACA1216_SRC="$AITEAMFORGE_DIR/$TEAM_ID/personas/agents"
+        _xaca1216_src_n=0
+        _xaca1216_missing=""
+        _xaca1216_missing_n=0
+        if [[ -d "$_XACA1216_SRC" ]]; then
+            while IFS= read -r _xaca1216_f; do
+                [[ -n "$_xaca1216_f" ]] || continue
+                _xaca1216_src_n=$((_xaca1216_src_n + 1))
+                if [[ ! -f "$_XACA1216_WD/.claude/agents/${_xaca1216_f##*/}" ]]; then
+                    _xaca1216_missing_n=$((_xaca1216_missing_n + 1))
+                    _xaca1216_missing="$_xaca1216_missing ${_xaca1216_f##*/}"
+                fi
+            done < <(find "$_XACA1216_SRC" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
+        fi
+        if [[ "$_xaca1216_src_n" -eq 0 ]]; then
+            _xaca1216_why="deployer returned 0 but there are no persona source files in $_XACA1216_SRC, so nothing proves a deploy"
+        elif [[ "$_xaca1216_missing_n" -gt 0 ]]; then
+            _xaca1216_why="deployer returned 0 but $_xaca1216_missing_n of $_xaca1216_src_n persona(s) missing from $_XACA1216_WD/.claude/agents:$_xaca1216_missing — DEFERRED, no-op or stubbed deployer?"
+        fi
+        unset _XACA1216_SRC _xaca1216_src_n _xaca1216_missing _xaca1216_missing_n _xaca1216_f
     else
-        echo "  🚨 persona deploy FAILED for $TEAM_ID — exit $_xaca1216_rc ($(_xaca1216_persona_rc_meaning "$_xaca1216_rc")); target: ${_XACA1216_WD:-<unset>}" >&2
+        _xaca1216_why="exit $_xaca1216_rc ($(_xaca1216_persona_rc_meaning "$_xaca1216_rc"))"
+    fi
+    if [[ -z "$_xaca1216_why" ]]; then
+        echo "  ✓ Personas deployed to $_XACA1216_WD/.claude/agents (every source persona present)"
+    else
+        echo "  🚨 persona deploy FAILED for $TEAM_ID — $_xaca1216_why; target: ${_XACA1216_WD:-<unset>}" >&2
         echo "  🚨 Install continuing — crew sessions will start WITHOUT personas until this is fixed. The startup 'Personas' health check and the next 'aiteamforge upgrade' retry the deploy." >&2
     fi
     echo ""
-    unset _XACA1216_WD _XACA1216_DEPLOYER _xaca1216_rc
+    unset _XACA1216_WD _XACA1216_DEPLOYER _xaca1216_rc _xaca1216_why
 fi
 
 # ============================================================================

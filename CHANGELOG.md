@@ -75,6 +75,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   the startup render substitutes it (`""` for unflagged teams). New
   `tests/test-xaca-1216-flat-persona-deploy.sh` (29 cases; bash 3.2 + 5, template snippet under
   `zsh -f`, negative control against pre-change copies), registered in `tests/ci-manifest`.
+  Review round 1 (XACA-1216-015/016/017): `install-team.sh` no longer prints ✓ on deployer exit 0
+  alone — a DEFERRED/no-op deploy exits 0 having written nothing, so success now also needs every
+  source persona present in the target, else a 🚨 naming the missing count (install still exits 0).
+  `TEAM_PERSONA_DEPLOY_MODE` gets one verdict at all three sites: `""` = no deploy, `flat-dir` =
+  deploy only for a non-project team (flat-dir on `TEAM_HAS_PROJECTS=true` now warns and skips at
+  upgrade too, not just install), anything else = invalid, treated as unset with a loud error naming
+  the conf and the `%q`-quoted value. Install validates before the startup sed render, so `|`, `&`,
+  `\` or a newline can no longer corrupt the render (the pre-fix install exited 1 on one); the
+  template warns and adds a Personas FAIL row on an unknown rendered value; upgrade counts it
+  uninspectable. Deployer mirror carries the canonical selftest fix (Tests 29–31 assert refusal
+  text). Suite 29 → 34 cases; all 5 new cases fail against the round-0 files.
 
 ## [0.20.13] - 2026-09-14
 

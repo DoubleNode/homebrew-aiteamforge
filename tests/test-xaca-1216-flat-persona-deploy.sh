@@ -380,6 +380,18 @@ _b_assert_cases() {
         test_fail "rc=$rc claude_exists=$([ -e "$wd/.claude" ] && echo yes || echo no) out: $(tr '\n' '|' < "$out")"
     fi
 
+    # XACA-1216-017: an unknown rendered value is treated as unset (no deploy)
+    # but never silently — warning line + Personas FAIL row.
+    out="$WORK_DIR/${pfx}7.out"; r="$(_b_run "$harness" good-stub 'flat-dir|&x' "$out")"; rc="${r%%	*}"; wd="${r#*	}"
+    test_start "${pfx}7: invalid mode value -> deployer never runs, visible warning, Personas FAIL (invalid), _HEALTH_ERRORS++"
+    if [ "$rc" = "0" ] && [ ! -e "$wd/.claude" ] && grep -q 'invalid TEAM_PERSONA_DEPLOY_MODE=.*treated as unset' "$out" \
+        && grep -q 'Personas *FAIL *invalid TEAM_PERSONA_DEPLOY_MODE' "$out" && ! grep -q 'Personas *OK' "$out" \
+        && grep -q '^HEALTH_ERRORS=1$' "$out" && grep -q SNIPPET_COMPLETED "$out"; then
+        test_pass
+    else
+        test_fail "rc=$rc claude_exists=$([ -e "$wd/.claude" ] && echo yes || echo no) out: $(tr '\n' '|' < "$out")"
+    fi
+
     test_start "${pfx}6: happy path with the REAL deployer (--flat-dir) -> Personas OK"
     if [ "$FLAT_DIR_SUPPORTED" != true ]; then
         test_fail "PENDING: $DEPLOYER_SRC has no --flat-dir yet (XACA-1216-003) — not faked"
@@ -443,6 +455,44 @@ if [ "$C5_RC" = "0" ] && grep -q '🚨.*persona deploy FAILED.*exit 2' "$WORK_DI
     test_pass
 else
     test_fail "rc=$C5_RC stderr: $(grep -n 'persona' "$WORK_DIR/c5.err" | head -3)"
+fi
+
+test_start "C6: install with a deployer that exits 0 but writes nothing (DEFERRED/no-op) -> 🚨 naming the missing personas, no ✓, install still exits 0"
+# XACA-1216-016: rc 0 is the deployer's word, not evidence.
+C6_TAP="$WORK_DIR/tap-c6"
+cp -R "$POST_TAP" "$C6_TAP"
+printf '#!/bin/bash\necho "DEFERRED: dev machine — kb-sync-personas owns this target"\nexit 0\n' > "$C6_TAP/share/scripts/deploy-worktree-personas.sh"
+C6_HOME="$(_next_sandbox)/home"; C6_AITF="$(dirname "$C6_HOME")/aiteamforge"
+C6_RC="$(_run_install "$C6_TAP" spacedock "$C6_HOME" "$C6_AITF" "$WORK_DIR/c6.out" "$WORK_DIR/c6.err")"
+if [ "$C6_RC" = "0" ] && [ -f "$C6_AITF/spacedock-startup.sh" ] \
+    && grep -q "🚨.*persona deploy FAILED.*deployer returned 0 but $EXPECTED_PERSONA_COUNT of $EXPECTED_PERSONA_COUNT persona(s) missing" "$WORK_DIR/c6.err" \
+    && ! grep -q '✓ Personas deployed' "$WORK_DIR/c6.out" "$WORK_DIR/c6.err"; then
+    test_pass
+else
+    test_fail "rc=$C6_RC out/err: $(grep -hn 'ersona' "$WORK_DIR/c6.out" "$WORK_DIR/c6.err" | head -5)"
+fi
+
+test_start "C7: conf with an invalid TEAM_PERSONA_DEPLOY_MODE (| & \\ newline) -> loud 🚨 naming conf + value, rendered as \"\", no deploy, clean render, install exits 0"
+# XACA-1216-017: validated BEFORE the sed render, so the value can never
+# inject into / corrupt the rendered startup script.
+C7_TAP="$WORK_DIR/tap-c7"
+cp -R "$POST_TAP" "$C7_TAP"
+printf '%s\n' "TEAM_PERSONA_DEPLOY_MODE=\$'flat-dir|x&y\\\\z\\nTEAM_ID=pwned'" >> "$C7_TAP/$SPACEDOCK_CONF_REL"
+C7_HOME="$(_next_sandbox)/home"; C7_AITF="$(dirname "$C7_HOME")/aiteamforge"
+C7_RC="$(_run_install "$C7_TAP" spacedock "$C7_HOME" "$C7_AITF" "$WORK_DIR/c7.out" "$WORK_DIR/c7.err")"
+C7_STARTUP="$C7_AITF/spacedock-startup.sh"
+_left7="$(grep -n '{{[A-Z_]*}}' "$C7_STARTUP" 2>/dev/null)"
+if [ "$C7_RC" = "0" ] && [ -f "$C7_STARTUP" ] \
+    && grep -qF "🚨 invalid TEAM_PERSONA_DEPLOY_MODE=" "$WORK_DIR/c7.err" \
+    && grep -F "🚨 invalid TEAM_PERSONA_DEPLOY_MODE=" "$WORK_DIR/c7.err" | grep -qF "$C7_TAP/$SPACEDOCK_CONF_REL" \
+    && grep -F "🚨 invalid TEAM_PERSONA_DEPLOY_MODE=" "$WORK_DIR/c7.err" | grep -qF 'flat-dir|x&y' \
+    && grep -F "🚨 invalid TEAM_PERSONA_DEPLOY_MODE=" "$WORK_DIR/c7.err" | grep -qF '\nTEAM_ID=pwned' \
+    && grep -qx 'TEAM_PERSONA_DEPLOY_MODE=""' "$C7_STARTUP" && ! grep -q 'pwned' "$C7_STARTUP" \
+    && [ -z "$_left7" ] && zsh -n "$C7_STARTUP" 2>/dev/null \
+    && [ ! -e "$C7_HOME/.aiteamforge/spacedock/.claude" ] && ! grep -q 'Deploying crew personas' "$WORK_DIR/c7.out"; then
+    test_pass
+else
+    test_fail "rc=$C7_RC mode_line=[$(grep -n 'TEAM_PERSONA_DEPLOY_MODE' "$C7_STARTUP" 2>/dev/null | head -3 | tr '\n' '|')] leftovers=[$_left7] err: $(grep -n 'PERSONA_DEPLOY_MODE' "$WORK_DIR/c7.err" | head -3)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -572,6 +622,32 @@ _d_assert_cases() {
     if [ "$rc" = "0" ] && grep -q '0 target(s): 0 refreshed, 0 refused, 0 failed, 0 uninspectable' "$out" \
         && grep -q '^HAD_WARNINGS=false$' "$out" && [ ! -e "$root/home/.aiteamforge/spacedock/.claude" ] \
         && [ ! -e "$root/aiteamforge/spacedock" ]; then
+        test_pass
+    else
+        test_fail "rc=$rc out: $(tr '\n' '|' < "$out")"
+    fi
+
+    # XACA-1216-017: the upgrade reads the flag with the same verdict as install.
+    root="$(_d_fixture)"
+    printf '%s\n' "TEAM_PERSONA_DEPLOY_MODE='flat-dir|&x'" >> "$root/fw/share/teams/spacedock.conf"
+    out="$WORK_DIR/${pfx}6.out"; rc="$(_d_run "$fns" "$root" "$out")"
+    test_start "${pfx}6: conf with an invalid TEAM_PERSONA_DEPLOY_MODE -> not deployed, warning names the value + conf, counted uninspectable, HAD_WARNINGS=true"
+    if [ "$rc" = "0" ] && grep -q '^FN_RC=0$' "$out" \
+        && grep -q "invalid TEAM_PERSONA_DEPLOY_MODE=flat-dir.*x in $root/fw/share/teams/spacedock.conf" "$out" \
+        && grep -q '0 target(s): 0 refreshed, 0 refused, 0 failed, 1 uninspectable' "$out" \
+        && grep -q '^HAD_WARNINGS=true$' "$out" && [ ! -e "$root/home/.aiteamforge/spacedock/.claude" ]; then
+        test_pass
+    else
+        test_fail "rc=$rc out: $(tr '\n' '|' < "$out")"
+    fi
+
+    root="$(_d_fixture)"
+    printf '%s\n' 'TEAM_HAS_PROJECTS="true"' >> "$root/fw/share/teams/spacedock.conf"
+    out="$WORK_DIR/${pfx}7.out"; rc="$(_d_run "$fns" "$root" "$out")"
+    test_start "${pfx}7: flat-dir on a TEAM_HAS_PROJECTS=true conf -> not deployed (same gate as install), warned, uninspectable, HAD_WARNINGS=true"
+    if [ "$rc" = "0" ] && grep -q '^FN_RC=0$' "$out" && grep -q 'project team (TEAM_HAS_PROJECTS=true)' "$out" \
+        && grep -q '0 target(s): 0 refreshed, 0 refused, 0 failed, 1 uninspectable' "$out" \
+        && grep -q '^HAD_WARNINGS=true$' "$out" && [ ! -e "$root/home/.aiteamforge/spacedock/.claude" ]; then
         test_pass
     else
         test_fail "rc=$rc out: $(tr '\n' '|' < "$out")"

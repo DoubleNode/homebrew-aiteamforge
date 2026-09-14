@@ -4204,7 +4204,7 @@ deploy_team_personas_to_projects() {
 # ---------------------------------------------------------------------------
 # _xaca1216_team_persona_deploy_mode <conf>
 #
-# XACA-1216: print a team conf's TEAM_PERSONA_DEPLOY_MODE ("" when unset).
+# XACA-1216: print a team conf's persona-deploy VERDICT.
 # Same subshell-isolation contract as _connect_script_team_flags: the conf is
 # sourced in a SUBSHELL so none of its assignments leak into the upgrade, and
 # `set +eo pipefail` keeps a malformed conf from aborting it. Unlike that
@@ -4212,17 +4212,37 @@ deploy_team_personas_to_projects() {
 # — it prints the sentinel "#UNREADABLE" so the caller can count it as
 # uninspectable instead of silently treating a possibly-flagged team as
 # unflagged. (Every shipped conf sources with rc 0, measured 2026-09-14.)
+#
+# Same verdict as install-team.sh and the startup template (XACA-1216-017):
+#   ""                      TEAM_PERSONA_DEPLOY_MODE unset/empty — no deploy
+#   flat-dir                flat-dir on a non-project team — deploy
+#   #PROJECTS               flat-dir with TEAM_HAS_PROJECTS=true — no deploy
+#                           (flat-dir targets a non-project team's single
+#                           working dir)
+#   #INVALID <%q value>     any other value — no deploy
+#   #UNREADABLE             the conf failed to source
 # ---------------------------------------------------------------------------
 _xaca1216_team_persona_deploy_mode() {
   (
     set +eo pipefail
     TEAM_PERSONA_DEPLOY_MODE=""
+    TEAM_HAS_PROJECTS=""
     # shellcheck disable=SC1090
     if ! . "$1" >/dev/null 2>&1; then
       printf '%s' '#UNREADABLE'
       exit 0
     fi
-    printf '%s' "${TEAM_PERSONA_DEPLOY_MODE:-}"
+    case "${TEAM_PERSONA_DEPLOY_MODE:-}" in
+      "") ;;
+      flat-dir)
+        if [ "${TEAM_HAS_PROJECTS:-}" = "true" ]; then
+          printf '%s' '#PROJECTS'
+        else
+          printf '%s' 'flat-dir'
+        fi
+        ;;
+      *) printf '#INVALID %q' "$TEAM_PERSONA_DEPLOY_MODE" ;;
+    esac
   ) || printf '%s' '#UNREADABLE'
 }
 
@@ -4254,8 +4274,10 @@ _xaca1216_team_persona_deploy_mode() {
 #     resets it on dev machines, and the deployer reads its source from it.
 #   • Counters: refreshed / refused (deployer rc 4 — target is inside a git
 #     work tree, left to the git-aware modes) / failed (any other nonzero) /
-#     uninspectable (unreadable conf, unresolvable or absent working dir,
-#     resolver unavailable). A summary line ALWAYS prints, including
+#     uninspectable (unreadable conf, invalid TEAM_PERSONA_DEPLOY_MODE value,
+#     flat-dir on a TEAM_HAS_PROJECTS=true team, unresolvable or absent
+#     working dir, resolver unavailable). Invalid/project-team verdicts warn
+#     whether or not the team is provisioned here — they are conf defects. A summary line ALWAYS prints, including
 #     "0 target(s)", so "nothing to do" is never indistinguishable from "did
 #     not run".
 #   • Fail-soft: never aborts the upgrade, never changes its exit status. Any
@@ -4290,7 +4312,23 @@ deploy_flat_team_personas() {
           uninspectable=$((uninspectable + 1))
           continue
           ;;
-        *) continue ;;
+        '#PROJECTS')
+          print_warning "[${team}] ${conf} sets TEAM_PERSONA_DEPLOY_MODE=flat-dir on a project team (TEAM_HAS_PROJECTS=true) — flat-dir is for non-project teams only; not deploying (uninspectable)"
+          uninspectable=$((uninspectable + 1))
+          continue
+          ;;
+        '#INVALID '*)
+          print_warning "[${team}] invalid TEAM_PERSONA_DEPLOY_MODE=${mode#\#INVALID } in ${conf} (allowed: flat-dir or empty) — treated as unset; no flat-dir persona deploy (uninspectable)"
+          uninspectable=$((uninspectable + 1))
+          continue
+          ;;
+        '') continue ;;
+        *)
+          # Unreachable by construction; fail visible rather than silent.
+          print_warning "[${team}] unrecognised persona-deploy verdict for ${conf} — not deploying (uninspectable)"
+          uninspectable=$((uninspectable + 1))
+          continue
+          ;;
       esac
 
       if ! _xaca0925_valid_team_id "$team"; then

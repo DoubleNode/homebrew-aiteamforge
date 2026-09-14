@@ -1797,35 +1797,47 @@ PERSONA
   fi
 
   # -----------------------------------------------------------------------
-  # Test 29: target == sandbox $HOME → rc 1, $HOME/.claude/agents absent;
+  # Test 29: target == sandbox $HOME → rc 1, $HOME/.claude absent;
   # target == / → rc 1.
+  # rc 1 alone is NOT evidence (XACA-1216-015): a script with no --flat-dir
+  # also exits 1 (usage error), so this passed against the pre-change script.
+  # Each case must print ITS guard's refusal text, and nothing may be written.
   # -----------------------------------------------------------------------
   printf '[selftest] Test 29: --flat-dir refuses target == HOME and / (rc 1)...\n'
   local log29="${fl}/t29.log" t29_rc=0 log29b="${fl}/t29b.log" t29b_rc=0
   _fd "$log29" -- "$fhome" fteam --force || t29_rc=$?
   _fd "$log29b" -- "/" fteam --force || t29b_rc=$?
-  if [ "$t29_rc" -eq 1 ] && [ "$t29b_rc" -eq 1 ] && [ ! -e "${fhome}/.claude/agents" ]; then
-    _pass "Test 29 (--flat-dir target \$HOME → rc 1 + no ~/.claude/agents; target / → rc 1)"
+  if [ "$t29_rc" -eq 1 ] && [ "$t29b_rc" -eq 1 ] && [ ! -e "${fhome}/.claude" ] \
+     && grep -qF -- '--flat-dir: refusing target == $HOME (' "$log29" \
+     && grep -qF -- "--flat-dir: refusing target '/'" "$log29b"; then
+    _pass "Test 29 (--flat-dir target \$HOME → rc 1 + \$HOME refusal text + no ~/.claude; target / → rc 1 + / refusal text)"
   else
-    _fail "Test 29 — HOME rc=${t29_rc} /-rc=${t29b_rc} (want 1/1). out: $(cat "$log29" "$log29b" 2>/dev/null)"
+    _fail "Test 29 — HOME rc=${t29_rc} /-rc=${t29b_rc} (want 1/1 + guard refusal text) .claude=$([ -e "${fhome}/.claude" ] && echo PRESENT || echo absent). out: $(cat "$log29" "$log29b" 2>/dev/null)"
   fi
 
   # -----------------------------------------------------------------------
   # Test 30: nonexistent target → rc 1; invalid team id → rc 1; missing args → rc 1
+  # Same rule as Tests 29/31 (XACA-1216-015): each arm must print its own
+  # refusal text — the pre-change script's usage error is also rc 1.
   # -----------------------------------------------------------------------
   printf '[selftest] Test 30: --flat-dir nonexistent target / bad team id / missing args (rc 1)...\n'
   local log30="${fl}/t30.log" t30_rc=0 t30b_rc=0 t30c_rc=0
   _fd "$log30" -- "${fl}/does-not-exist" fteam --force || t30_rc=$?
   _fd "${fl}/t30b.log" -- "$wd24" 'bad/team' --force || t30b_rc=$?
   _fd "${fl}/t30c.log" -- "$wd24" || t30c_rc=$?
-  if [ "$t30_rc" -eq 1 ] && [ "$t30b_rc" -eq 1 ] && [ "$t30c_rc" -eq 1 ] && [ ! -e "${fl}/does-not-exist" ]; then
-    _pass "Test 30 (--flat-dir nonexistent target / bad team id / missing args → rc 1)"
+  if [ "$t30_rc" -eq 1 ] && [ "$t30b_rc" -eq 1 ] && [ "$t30c_rc" -eq 1 ] && [ ! -e "${fl}/does-not-exist" ] \
+     && grep -qF -- '--flat-dir: target does not exist or is not a directory' "$log30" \
+     && grep -qF -- "[flat-dir] invalid team id 'bad/team'" "${fl}/t30b.log" \
+     && grep -qF -- '--flat-dir <target_dir> <team>' "${fl}/t30c.log"; then
+    _pass "Test 30 (--flat-dir nonexistent target / bad team id / missing args → rc 1 + each arm's refusal text)"
   else
-    _fail "Test 30 — nonexistent rc=${t30_rc} badteam rc=${t30b_rc} noargs rc=${t30c_rc} (want 1/1/1)"
+    _fail "Test 30 — nonexistent rc=${t30_rc} badteam rc=${t30b_rc} noargs rc=${t30c_rc} (want 1/1/1 + refusal text). out: $(cat "$log30" "${fl}/t30b.log" "${fl}/t30c.log" 2>/dev/null)"
   fi
 
   # -----------------------------------------------------------------------
   # Test 31: symlinked .claude / .claude/agents escaping → rc 1, nothing written
+  # Asserts the symlink guard's refusal text per case, not just rc 1 — the
+  # pre-change script's usage error is also rc 1 (XACA-1216-015).
   # -----------------------------------------------------------------------
   printf '[selftest] Test 31: --flat-dir refuses symlinked .claude / .claude/agents (rc 1)...\n'
   local wd31="${fl}/wd31" else31="${fl}/elsewhere31"
@@ -1841,13 +1853,18 @@ PERSONA
   ln -s "${fl}/dangling-nowhere" "${wd31c}/.claude"
   local t31c_rc=0
   _fd "${fl}/t31c.log" -- "$wd31c" fteam --force || t31c_rc=$?
-  local t31_leak
-  t31_leak=$(find "$else31" "$else31b" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$t31a_rc" -eq 1 ] && [ "$t31b_rc" -eq 1 ] && [ "$t31c_rc" -eq 1 ] \
+  local t31_leak t31_msg=0 t31_log
+  # Any FILE (persona or marker) under the symlink destinations is a leak.
+  t31_leak=$(find "$else31" "$else31b" -type f 2>/dev/null | wc -l | tr -d ' ')
+  for t31_log in "${fl}/t31a.log" "${fl}/t31b.log" "${fl}/t31c.log"; do
+    grep -qF -- '--flat-dir: .claude or .claude/agents is a symlink resolving outside' "$t31_log" \
+      && t31_msg=$((t31_msg + 1))
+  done
+  if [ "$t31a_rc" -eq 1 ] && [ "$t31b_rc" -eq 1 ] && [ "$t31c_rc" -eq 1 ] && [ "$t31_msg" -eq 3 ] \
      && [ "$t31_leak" = "0" ] && [ ! -e "${fl}/dangling-nowhere" ]; then
-    _pass "Test 31 (--flat-dir symlinked .claude / .claude/agents / dangling .claude → rc 1, nothing written)"
+    _pass "Test 31 (--flat-dir symlinked .claude / .claude/agents / dangling .claude → rc 1 + symlink refusal text x3, nothing written)"
   else
-    _fail "Test 31 — rc .claude=${t31a_rc} agents=${t31b_rc} dangling=${t31c_rc} (want 1/1/1) leaked=${t31_leak}"
+    _fail "Test 31 — rc .claude=${t31a_rc} agents=${t31b_rc} dangling=${t31c_rc} (want 1/1/1) refusal-text=${t31_msg}/3 leaked=${t31_leak}. out: $(cat "${fl}/t31a.log" "${fl}/t31b.log" "${fl}/t31c.log" 2>/dev/null)"
   fi
 
   # -----------------------------------------------------------------------

@@ -325,6 +325,15 @@ _persona_deploy_rc_meaning() {
     esac
 }
 _PERSONA_DEPLOY_STATE=""   # "" = not gated -> no health row
+# Same verdict as install-team.sh and the upgrade (XACA-1216-017): "" = no
+# deploy; flat-dir = deploy; anything else = invalid -> NO deploy, a visible
+# warning here, and a Personas FAIL row below. The project-team gate is applied
+# by install-team.sh before rendering (flat-dir + TEAM_HAS_PROJECTS=true is
+# rendered as ""), so the rendered value already carries it.
+if [[ -n "$TEAM_PERSONA_DEPLOY_MODE" && "$TEAM_PERSONA_DEPLOY_MODE" != "flat-dir" ]]; then
+    _PERSONA_DEPLOY_STATE="invalid"
+    echo "  ⚠️  invalid TEAM_PERSONA_DEPLOY_MODE=$(printf '%q' "$TEAM_PERSONA_DEPLOY_MODE") in this startup script (allowed: flat-dir or empty) — treated as unset; NO persona deploy"
+fi
 if [[ "$TEAM_PERSONA_DEPLOY_MODE" == "flat-dir" ]]; then
     _PERSONA_DEPLOY_STATE="ran"
     _PERSONA_DEPLOY_LOG="/tmp/${TEAM_ID}-persona-deploy-$(date +%Y%m%d-%H%M%S).log"
@@ -727,7 +736,10 @@ fi
 #    persona source is present in $TEAM_WORKING_DIR/.claude/agents. An exit 0
 #    alone is not enough — a deployer that DEFERRED (dev machine), no-op'd, or
 #    was stubbed can exit 0 having written nothing.
-if [[ -n "$_PERSONA_DEPLOY_STATE" ]]; then
+if [[ "$_PERSONA_DEPLOY_STATE" == "invalid" ]]; then
+    echo "    Personas        FAIL  invalid TEAM_PERSONA_DEPLOY_MODE=$(printf '%q' "$TEAM_PERSONA_DEPLOY_MODE") (allowed: flat-dir or empty) — no deploy was attempted; re-run the team install"
+    _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
+elif [[ -n "$_PERSONA_DEPLOY_STATE" ]]; then
     _PERSONA_SRC="$AITEAMFORGE_DIR/$TEAM_ID/personas/agents"
     _PERSONA_DST="$TEAM_WORKING_DIR/.claude/agents"
     _PERSONA_SRC_COUNT=0
