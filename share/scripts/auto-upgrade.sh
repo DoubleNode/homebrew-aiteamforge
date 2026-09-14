@@ -115,10 +115,19 @@ log_cmd_output() {
 _au_exit_backstop() {
     local rc=$?
     if [ "$_AU_COMPLETE_LOGGED" != "1" ]; then
+        # XACA-1175-016: a marker-less exit is never a success, so never let it
+        # REPORT one. /bin/bash 3.2 (what the LaunchAgent runs) hands an EXIT
+        # trap $?=0 after a `set -u` abort; left alone, launchd would record a
+        # failed run as a clean exit. Force 0 -> 1 and re-exit explicitly so the
+        # logged code and the process exit code always agree. Signal exits
+        # arrive here as 129/130/143 via the HUP/INT/TERM traps installed below.
+        if [ "$rc" -eq 0 ]; then
+            rc=1
+        fi
         log "===== auto-upgrade complete (FAILED: exited $rc without a completion marker) =====" 2>/dev/null || true
+        exit "$rc"
     fi
-    # Deliberately no `exit` here — the trap must not alter the script's own
-    # exit status.
+    # A completion marker was already logged: leave the exit status untouched.
 }
 
 # ── Notification helper ───────────────────────────────────────────────────────
@@ -195,6 +204,13 @@ log "===== auto-upgrade start ====="
 # logged — an exit before the start marker (e.g. during log-dir setup) must
 # not fabricate a completion marker for a run that never really started.
 trap _au_exit_backstop EXIT
+# XACA-1175-016: convert catchable termination signals into explicit exits so
+# the backstop above sees the conventional 128+N code (a launchd stop, logout
+# or reboot mid-`brew upgrade`) instead of a misleading 0. SIGKILL cannot be
+# trapped and still leaves an unmatched start marker — that IS a stall signal.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # XACA-0571-016: surface any deferred error from the env-source step now that
 # the log file exists.

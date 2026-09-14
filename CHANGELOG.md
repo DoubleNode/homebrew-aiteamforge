@@ -14,7 +14,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   for any future marker-less exit. The tap and untrusted-tap checks no longer pipe `brew` into
   `grep -q` under pipefail (a SIGPIPE could misread a present tap as missing). `kb-spacedock` CHECK 5
   now warns on a SKIPPED run when the `com.aiteamforge.auto-upgrade` LaunchAgent is still present
-  (orphaned agent) and reports ok otherwise.
+  (orphaned agent) and reports ok otherwise. The backstop re-exits with the code it logs, never reports a
+  marker-less exit as 0, and a SIGTERM/SIGINT/SIGHUP stop logs and exits 143/130/129.
 
 - **XACA-1215** — generated per-agent startup scripts now open in the team's real working directory.
   `install-team.sh generate_per_agent_startup_scripts()` hardcoded `SESSION_DIRECTORY="$HOME/<team>"`
