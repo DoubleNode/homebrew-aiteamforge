@@ -1057,7 +1057,7 @@ for i in "${!TEAM_LABELS[@]}"; do
   echo "  $((i + 1))) ${TEAM_LABELS[$i]}"
 done
 echo ""
-echo "Enter team numbers separated by spaces (e.g., '1 3 5'), or 'all' for everything."
+echo "Enter team numbers separated by spaces (e.g., '1 3 5'), 'all' for everything, or 'none' for only the mandatory team(s)."
 echo ""
 
 if [ "$MODE" = "non-interactive" ]; then
@@ -1069,6 +1069,14 @@ fi
 
 if [ "$team_choices" = "all" ]; then
   SELECTED_TEAMS=("${AVAILABLE_TEAMS[@]}")
+elif [ "$team_choices" = "none" ]; then
+  # XACA-1211: explicit zero OPTIONAL teams. Mandatory teams (spacedock) are
+  # still appended by _atf_apply_mandatory_teams below, so this is how a
+  # machine is provisioned with only its recovery team. Deliberately a token,
+  # not "empty means none": `${AITEAMFORGE_TEAMS:-all}` already turns an empty
+  # value into `all`, and changing that would silently change what existing
+  # automation installs.
+  SELECTED_TEAMS=()
 else
   for choice in $team_choices; do
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#AVAILABLE_TEAMS[@]} ]; then
@@ -1079,14 +1087,6 @@ else
   done
 fi
 
-if [ ${#SELECTED_TEAMS[@]} -eq 0 ]; then
-  echo -e "${RED}No teams selected. At least one team is required.${NC}"
-  exit 1
-fi
-
-echo ""
-echo -e "${GREEN}✓${NC} Selected teams: ${SELECTED_TEAMS[*]}"
-
 # XACA-1070-002 / PR #865 review, BLOCKING 1 — CALL SITE 1: apply mandatory
 # teams here, BEFORE the per-team working-dir loop immediately below (the
 # first loop anywhere in this file that consumes SELECTED_TEAMS). This is
@@ -1096,6 +1096,19 @@ echo -e "${GREEN}✓${NC} Selected teams: ${SELECTED_TEAMS[*]}"
 # header comment (near the top of this file) for the full rationale and
 # why a second call site also exists further down.
 _atf_apply_mandatory_teams
+
+# XACA-1211: the "at least one team" guard runs AFTER mandatory application.
+# It used to run before it, so a mandatory team never counted and a machine
+# could not be provisioned with only Space Dock (measured on M1Mini, v0.20.11:
+# `AITEAMFORGE_TEAMS=none ... setup --non-interactive` exited 1 here). It still
+# exits 1 when nothing was selected AND the registry declares no mandatory team.
+if [ ${#SELECTED_TEAMS[@]} -eq 0 ]; then
+  echo -e "${RED}No teams selected. At least one team is required.${NC}"
+  exit 1
+fi
+
+echo ""
+echo -e "${GREEN}✓${NC} Selected teams: ${SELECTED_TEAMS[*]}"
 
 # -----------------------------------------------------------------------
 # For project-based teams, ask for ClientID and/or ProjectID

@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1211** — `aiteamforge setup` can now provision a machine with only its mandatory team(s).
+  The "No teams selected. At least one team is required." guard ran before
+  `_atf_apply_mandatory_teams`, so Space Dock never counted, and non-interactive mode had no way to
+  ask for zero optional teams (`${AITEAMFORGE_TEAMS:-all}` turns empty into `all`; `none` was an
+  invalid choice). Measured on M1Mini with v0.20.11: `AITEAMFORGE_TEAMS=none aiteamforge setup
+  --non-interactive` exited 1. Now `none` (env or prompt) selects zero optional teams, and the guard
+  runs after mandatory application, so it still exits 1 when the registry declares no mandatory team.
+  Unset `AITEAMFORGE_TEAMS` still means `all`. New `tests/test-xaca-1211-setup-mandatory-only.sh`
+  (11 cases, bash 3.2 + 5, extracted production block); red on the pre-fix setup, and each half of the
+  fix mutation-checked on its own.
 - **XACA-1191** — mirror the fork-free `kb-knowledge-validate()` into
   `share/templates/kanban/kanban-helpers.template.sh` and
   `share/templates/aliases/kanban-aliases.sh`. Whole-tree validate drops from
