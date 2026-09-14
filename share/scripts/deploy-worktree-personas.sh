@@ -5,8 +5,23 @@
 # Usage:
 #   deploy-worktree-personas.sh <worktree_path> <team> [--dry-run] [--force] [--verbose]
 #   deploy-worktree-personas.sh --all <team> [<main_repo_path>] [--dry-run] [--force] [--verbose]
+#   deploy-worktree-personas.sh --nested-main-root <project_dir> <team> [--dry-run] [--force] [--verbose]
+#   deploy-worktree-personas.sh --flat-dir <target_dir> <team> [--dry-run] [--force] [--verbose]
 #   deploy-worktree-personas.sh emit-transformed <src_file> [<char_name>]
 #   deploy-worktree-personas.sh selftest
+#
+# --flat-dir (XACA-1216): deploy into <target_dir>/.claude/agents/ of a NON-GIT
+#   team working dir (e.g. ~/.aiteamforge/spacedock on a tap consumer). Never
+#   runs `git init`, never writes .git/info/exclude, never writes outside
+#   <target_dir>/.claude/agents/. REFUSES (rc 4) any target inside a git work
+#   tree -- those belong to the git-aware modes. Validation order: team id ->
+#   target (exists, not / or $HOME, no .claude symlink escape) -> git refusal
+#   -> source -> deploy -> prune. Callers should always pass --force.
+#   Prune: a file is deleted ONLY if it is listed as `deployed_file:` in the
+#   PRIOR .synced-from-tap marker, is absent from the current source, AND its
+#   basename matches ^<team>_[^/]*_persona\.md$. Everything else is reported
+#   `ORPHAN (not ours — left in place)`. Dotfiles are never touched.
+#   Design: kanban/plans/XACA-1216/XACA-1216-design.md §1-§3.
 #
 # emit-transformed (XACA-0931-003): read-only. Prints to stdout the EXACT
 # transform _deploy_core would write for <src_file> -- the single authority
@@ -48,6 +63,19 @@
 #   1 — guard failure (invalid worktree target)
 #   2 — copy/write failure
 #
+# --flat-dir exit codes (0-2 keep their meaning; 3 and 4 exist ONLY in this mode):
+#   0 — deployed/refreshed; also --dry-run, already-deployed without --force,
+#       and DEFERRED on a dev machine (primary source absent, agents-master present)
+#   1 — guard/usage failure: bad team id (^[A-Za-z0-9_-]+$), target missing or
+#       not a dir, canonicalization failure, target is / or canonical $HOME,
+#       .claude or .claude/agents (or a destination file/marker) is a symlink
+#   2 — write/copy/prune failure, OR a partial deploy (any file skipped by the
+#       transform) -- a partial deploy never prunes
+#   3 — no persona source: primary dir absent (and no dev-machine deferral), or
+#       it holds 0 *.md files. The other modes' warn+exit-0 path is NOT used.
+#   4 — REFUSED, git territory: target is inside a git work tree (rev-parse
+#       with GIT_* unset says so, OR a structural walk to / finds a .git entry)
+#
 # Canonical source: dev-team/scripts/deploy-worktree-personas.sh
 # Tap mirror:       homebrew-tap/share/scripts/deploy-worktree-personas.sh (via sync-tap)
 # SIBLING-DRIFT NOTE: this script is mirrored to homebrew-tap/share/scripts/ by sync-tap.sh.
@@ -56,6 +84,15 @@
 set -euo pipefail
 
 PROG="deploy-worktree-personas"
+
+# XACA-1216: additive side-channel out of _deploy_core / into _write_marker.
+# _DWP_DEPLOYED_FILES — basenames _deploy_core actually wrote this run.
+# _DWP_SKIPPED        — count of files _deploy_core skipped (transform error).
+# _DWP_MARKER_MODE    — when non-empty, _write_marker emits `mode: <value>`.
+# No existing mode reads these; they only add marker lines.
+_DWP_DEPLOYED_FILES=()
+_DWP_SKIPPED=0
+_DWP_MARKER_MODE=""
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -387,11 +424,22 @@ _write_marker() {
   local aiteamforge_dir="$4"
   local marker="${target_dir}/.synced-from-tap"
 
+  local df
   {
     printf 'synced_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'team: %s\n' "$team"
     printf 'source_path: %s\n' "$source_path"
     printf 'aiteamforge_dir: %s\n' "$aiteamforge_dir"
+    # XACA-1216: additive keys. `mode:` only when a mode sets it (flat-dir);
+    # one `deployed_file:` line per file written -- line-per-entry so the
+    # prune reader stays bash-3.2-safe with plain read/case. No reader of the
+    # four keys above is affected.
+    if [ -n "${_DWP_MARKER_MODE:-}" ]; then
+      printf 'mode: %s\n' "$_DWP_MARKER_MODE"
+    fi
+    for df in ${_DWP_DEPLOYED_FILES[@]+"${_DWP_DEPLOYED_FILES[@]}"}; do
+      printf 'deployed_file: %s\n' "$df"
+    done
   } > "$marker"
 }
 
@@ -409,6 +457,11 @@ _deploy_core() {
   local aiteamforge_dir="$4"
 
   local marker="${canon_target}/.synced-from-tap"
+
+  # XACA-1216: reset the additive side-channel before ANY return path so a
+  # caller never reads a previous call's list (e.g. _deploy_all's loop).
+  _DWP_DEPLOYED_FILES=()
+  _DWP_SKIPPED=0
 
   # --- Idempotency check ---
   if [ "${OPT_FORCE:-false}" != "true" ] && [ -f "$marker" ]; then
@@ -472,6 +525,7 @@ _deploy_core() {
         }
         _info "[${team}] transform+copy ${bname} (name: ${old_name} → ${char_name})"
         deployed=$((deployed + 1))
+        _DWP_DEPLOYED_FILES+=("$bname")
         ;;
       2)
         # No frontmatter — copy verbatim
@@ -481,6 +535,7 @@ _deploy_core() {
           return 2
         }
         deployed=$((deployed + 1))
+        _DWP_DEPLOYED_FILES+=("$bname")
         ;;
       3)
         # No name: in frontmatter — copy verbatim
@@ -490,6 +545,7 @@ _deploy_core() {
           return 2
         }
         deployed=$((deployed + 1))
+        _DWP_DEPLOYED_FILES+=("$bname")
         ;;
       *)
         _warn "[${team}] ${bname}: transform error (rc=${transform_rc}) — skipping"
@@ -497,6 +553,7 @@ _deploy_core() {
         ;;
     esac
   done
+  _DWP_SKIPPED=$skipped
 
   # --- Write marker ---
   if [ "${OPT_DRY_RUN:-false}" != "true" ]; then
@@ -646,6 +703,314 @@ _deploy_nested_main_root() {
 
   # --- Deploy personas via shared core ---
   _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Flat-dir deployment (XACA-1216): deploy tap personas into
+# <target_dir>/.claude/agents/ of a NON-GIT team working dir.
+#
+# Why a separate mode rather than a fallback inside --nested-main-root: that
+# mode's contract is "must be a git root". Keying a fallback on "rev-parse
+# failed" would turn every misclassification (dubious ownership, git missing,
+# GIT_DIR leak) from a refusal into a write. This mode inverts it: it REFUSES
+# git territory (rc 4) and only ever writes into a dir proven non-git.
+#
+# Validation order (design §1) -- target checks come first, so a git repo
+# gets rc 4 even on a dev machine:
+#   1 team id  2 target  3 git refusal  4 source  5 prior marker
+#   6 _deploy_core  7 skipped>0 -> rc 2, no prune  8 prune + marker rewrite
+#
+# The wrapper exists so _DWP_MARKER_MODE is reset on EVERY return path. Note
+# that `|| rc=$?` disables errexit inside the impl; the impl therefore checks
+# every command explicitly and behaves identically from the CLI and selftest.
+#
+# Arguments: target_dir team
+# Returns: 0/1/2/3/4 per the --flat-dir exit-code table in the header.
+# ---------------------------------------------------------------------------
+
+# Newline-delimited list membership (bash 3.2: no associative arrays).
+# Arguments: list(each entry newline-terminated) item
+_dwp_in_list() {
+  case $'\n'"$1" in
+    *$'\n'"$2"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
+
+# Is <basename> a name this mode is allowed to have written, and therefore to
+# prune? ^<team>_[^/]*_persona\.md$ -- plus: no '/', not a dotfile.
+_dwp_flat_owned_name_ok() {
+  local team="$1"
+  local b="$2"
+  case "$b" in
+    ''|*/*|.*) return 1 ;;
+  esac
+  case "$b" in
+    "${team}"_*_persona.md) return 0 ;;
+  esac
+  return 1
+}
+
+_deploy_flat_dir() {
+  local rc=0
+  _deploy_flat_dir_impl "$@" || rc=$?
+  _DWP_MARKER_MODE=""
+  return "$rc"
+}
+
+_deploy_flat_dir_impl() {
+  local target="$1"
+  local team="$2"
+  local dry="${OPT_DRY_RUN:-false}"
+
+  # --- 1. Team id ---
+  local team_re='^[A-Za-z0-9_-]+$'
+  if ! [[ "$team" =~ $team_re ]]; then
+    _err "[flat-dir] invalid team id '${team}' (must match ${team_re})"
+    return 1
+  fi
+
+  # --- 2. Target ---
+  if [ -z "$target" ]; then
+    _err "[${team}] --flat-dir: empty target_dir"
+    return 1
+  fi
+  local canon=""
+  canon=$(_canon_path "$target") || canon=""
+  if [ -z "$canon" ]; then
+    _err "[${team}] --flat-dir: cannot canonicalize target: ${target}"
+    return 1
+  fi
+  if [ ! -d "$canon" ]; then
+    _err "[${team}] --flat-dir: target does not exist or is not a directory: ${canon}"
+    return 1
+  fi
+  if [ "$canon" = "/" ]; then
+    _err "[${team}] --flat-dir: refusing target '/'"
+    return 1
+  fi
+  # Target == $HOME would deploy into USER-LEVEL ~/.claude/agents, leaking the
+  # crew into every session on the machine. Compare canonical AND literal so a
+  # canonicalization failure on $HOME cannot open this guard.
+  if [ -n "${HOME:-}" ]; then
+    local canon_home=""
+    canon_home=$(_canon_path "$HOME") || canon_home=""
+    if [ "$canon" = "$HOME" ] || { [ -n "$canon_home" ] && [ "$canon" = "$canon_home" ]; }; then
+      _err "[${team}] --flat-dir: refusing target == \$HOME (${canon}) — that is user-level ~/.claude/agents"
+      return 1
+    fi
+  fi
+  local canon_target="${canon}/.claude/agents"
+  # Symlink escape. Any symlink at .claude or .claude/agents necessarily
+  # resolves outside <canon>/.claude/agents (the only way to resolve back to it
+  # is a self-loop), so -L alone is decisive; the realpath comparison is kept
+  # as a second, independent signal. -L also catches DANGLING links, which the
+  # non-python _canon_path fallback would silently walk past.
+  local resolved_target=""
+  resolved_target=$(_canon_path "$canon_target") || resolved_target=""
+  if [ -L "${canon}/.claude" ] || [ -L "$canon_target" ] || [ "$resolved_target" != "$canon_target" ]; then
+    _err "[${team}] --flat-dir: .claude or .claude/agents is a symlink resolving outside ${canon_target} (resolves to: ${resolved_target:-<unresolvable>})"
+    return 1
+  fi
+
+  # --- 3. Git refusal: BOTH signals run; either one refuses ---
+  local git_why=""
+  # (i) rev-parse with the env that could redirect it scrubbed. A leaked
+  # GIT_DIR makes rev-parse print `true` for a plain non-git dir (measured),
+  # and GIT_CEILING_DIRECTORIES can hide a real ancestor repo.
+  if command -v git >/dev/null 2>&1; then
+    local rp_out=""
+    rp_out=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_CEILING_DIRECTORIES
+             git -C "$canon" rev-parse --is-inside-work-tree 2>/dev/null) || rp_out=""
+    if [ "$rp_out" = "true" ]; then
+      local rp_top=""
+      rp_top=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_CEILING_DIRECTORIES
+               git -C "$canon" rev-parse --show-toplevel 2>/dev/null) || rp_top=""
+      git_why="git rev-parse reports a work tree (toplevel: ${rp_top:-<unknown>})"
+    fi
+  fi
+  # (ii) Structural walk to / for a .git entry (file or dir). Covers git
+  # missing, "dubious ownership" making rev-parse fail over a real repo, and a
+  # bare `.git` dir git itself does not recognise. An unsearchable ancestor
+  # cannot be ruled out, so it refuses too (fail closed).
+  local walk="$canon"
+  while :; do
+    if [ ! -x "$walk" ]; then
+      git_why="${git_why:+${git_why}; }cannot search ${walk} to rule out a .git entry"
+      break
+    fi
+    if [ -e "${walk}/.git" ] || [ -L "${walk}/.git" ]; then
+      git_why="${git_why:+${git_why}; }.git entry found at ${walk}/.git"
+      break
+    fi
+    if [ "$walk" = "/" ]; then
+      break
+    fi
+    walk=$(dirname "$walk")
+  done
+  if [ -n "$git_why" ]; then
+    _err "[${team}] --flat-dir: REFUSED (git territory) for ${canon}: ${git_why}. Use the git-aware modes (<worktree>, --all, --nested-main-root)."
+    return 4
+  fi
+
+  # --- 4. Source ---
+  local aiteamforge_dir="${AITEAMFORGE_DIR:-${HOME:-}/aiteamforge}"
+  local primary_src="${aiteamforge_dir}/${team}/personas/agents"
+  local devmachine_fallback="${HOME:-}/dev-team/.claude/agents-master/${team}"
+  if [ ! -d "$primary_src" ]; then
+    if [ -n "${HOME:-}" ] && [ -d "$devmachine_fallback" ]; then
+      _info "[${team}] DEFERRED: dev machine — kb-sync-personas owns this target (${canon})"
+      return 0
+    fi
+    _err "[${team}] --flat-dir: no persona source at ${primary_src}"
+    return 3
+  fi
+  local src_names=""
+  local src_count=0
+  local f b
+  while IFS= read -r -d '' f; do
+    b="${f##*/}"
+    src_names="${src_names}${b}"$'\n'
+    src_count=$((src_count + 1))
+  done < <(find "$primary_src" -maxdepth 1 -name '*.md' -type f -print0 2>/dev/null | sort -z)
+  if [ "$src_count" -eq 0 ]; then
+    _err "[${team}] --flat-dir: persona source has 0 *.md files: ${primary_src}"
+    return 3
+  fi
+
+  # --- 5. Prior marker's ownership set (read BEFORE _deploy_core rewrites it) ---
+  local marker="${canon_target}/.synced-from-tap"
+  if [ -L "$marker" ]; then
+    _err "[${team}] --flat-dir: marker is a symlink, refusing to write through it: ${marker}"
+    return 1
+  fi
+  local prior_owned=""
+  local line pb
+  if [ -f "$marker" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        'deployed_file: '*) pb="${line#deployed_file: }" ;;
+        *) continue ;;
+      esac
+      if _dwp_flat_owned_name_ok "$team" "$pb" && ! _dwp_in_list "$prior_owned" "$pb"; then
+        prior_owned="${prior_owned}${pb}"$'\n'
+      fi
+    done < "$marker"
+  fi
+  # A destination that is a symlink would make _deploy_core write THROUGH it,
+  # outside .claude/agents. Refuse rather than follow.
+  while IFS= read -r b; do
+    if [ -n "$b" ] && [ -L "${canon_target}/${b}" ]; then
+      _err "[${team}] --flat-dir: destination is a symlink, refusing to write through it: ${canon_target}/${b}"
+      return 1
+    fi
+  done <<SRC_EOF
+$src_names
+SRC_EOF
+
+  # --- 6. Deploy via the shared core ---
+  if [ "${OPT_FORCE:-false}" != "true" ] && [ -f "$marker" ]; then
+    # Already-deployed no-op: core writes nothing, so neither prune nor rewrite
+    # the marker (that would drop the ownership list).
+    _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir" || return 2
+    return 0
+  fi
+  _DWP_MARKER_MODE="flat-dir"
+  local core_rc=0
+  _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir" || core_rc=$?
+  if [ "$core_rc" -ne 0 ]; then
+    _err "[${team}] --flat-dir: deploy failed (core rc=${core_rc}) — not pruning"
+    return 2
+  fi
+
+  # --- 7. Partial deploy is a failure in this mode ---
+  local partial=false
+  if [ "${_DWP_SKIPPED:-0}" -gt 0 ]; then
+    partial=true
+    _err "[${team}] --flat-dir: partial deploy — ${_DWP_SKIPPED} file(s) skipped; NOT pruning"
+  fi
+
+  # --- 8. Prune (design §2) ---
+  local pruned=0
+  local prune_fail=0
+  if [ "$partial" != true ]; then
+    while IFS= read -r pb; do
+      if [ -z "$pb" ] || _dwp_in_list "$src_names" "$pb"; then
+        continue
+      fi
+      if [ ! -e "${canon_target}/${pb}" ] && [ ! -L "${canon_target}/${pb}" ]; then
+        continue
+      fi
+      # Re-assert the invariant at the point of deletion, not just at parse.
+      if ! _dwp_flat_owned_name_ok "$team" "$pb"; then
+        continue
+      fi
+      if [ "$dry" = "true" ]; then
+        _info "[${team}] WOULD PRUNE ${pb} (listed in prior marker, absent from source)"
+      elif rm -f -- "${canon_target}/${pb}"; then
+        _info "[${team}] PRUNED ${pb} (listed in prior marker, absent from source)"
+        pruned=$((pruned + 1))
+      else
+        _err "[${team}] --flat-dir: failed to prune ${canon_target}/${pb}"
+        prune_fail=$((prune_fail + 1))
+      fi
+    done <<PRIOR_EOF
+$prior_owned
+PRIOR_EOF
+  fi
+
+  # Orphans: *.md in the target that is neither in source nor ours by marker.
+  local orphans=0
+  if [ -d "$canon_target" ]; then
+    while IFS= read -r -d '' f; do
+      b="${f##*/}"
+      if _dwp_in_list "$src_names" "$b" || _dwp_in_list "$prior_owned" "$b"; then
+        continue
+      fi
+      _info "[${team}] ORPHAN (not ours — left in place): ${b}"
+      orphans=$((orphans + 1))
+    done < <(find "$canon_target" -maxdepth 1 -name '*.md' ! -name '.*' -print0 2>/dev/null | sort -z)
+  fi
+
+  # Marker rewrite. Ownership = files written this run PLUS prior-owned files
+  # that still exist (skipped on a partial deploy, or a failed prune) -- so a
+  # file we wrote never silently becomes an unowned ORPHAN that can no longer
+  # be pruned once its source is gone.
+  if [ "$dry" != "true" ]; then
+    local final_list=""
+    local df
+    for df in ${_DWP_DEPLOYED_FILES[@]+"${_DWP_DEPLOYED_FILES[@]}"}; do
+      if ! _dwp_in_list "$final_list" "$df"; then
+        final_list="${final_list}${df}"$'\n'
+      fi
+    done
+    while IFS= read -r pb; do
+      if [ -n "$pb" ] && ! _dwp_in_list "$final_list" "$pb" \
+         && { [ -e "${canon_target}/${pb}" ] || [ -L "${canon_target}/${pb}" ]; }; then
+        final_list="${final_list}${pb}"$'\n'
+      fi
+    done <<OWN_EOF
+$prior_owned
+OWN_EOF
+    _DWP_DEPLOYED_FILES=()
+    while IFS= read -r df; do
+      if [ -n "$df" ]; then
+        _DWP_DEPLOYED_FILES+=("$df")
+      fi
+    done <<FINAL_EOF
+$final_list
+FINAL_EOF
+    if ! _write_marker "$canon_target" "$team" "$primary_src" "$aiteamforge_dir"; then
+      _err "[${team}] --flat-dir: failed to rewrite marker at ${marker}"
+      return 2
+    fi
+  fi
+
+  _info "[${team}] flat-dir: ${pruned} pruned, ${orphans} orphan(s) left in place."
+  if [ "$partial" = true ] || [ "$prune_fail" -gt 0 ]; then
+    return 2
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1292,6 +1657,359 @@ PERSONA
     _fail "Test 23 — rc=${t23_rc} expected 1 occurrence in exclude, got ${t23_count}"
   fi
 
+  # =======================================================================
+  # --flat-dir (XACA-1216) — Tests 24-38.
+  #
+  # Every case runs the CLI as a SUBPROCESS ("$BASH" <subject> --flat-dir ...)
+  # so exit codes are the real ones main() produces under set -e, and the
+  # selftest's own interpreter is the one under test (/bin/bash 3.2 or 5.x).
+  #
+  # SANDBOX: HOME is a sandbox dir for every case, so the dev-machine DEFERRED
+  # branch can never see the real ~/dev-team/.claude/agents-master, and the
+  # $HOME guard is exercised against a sandbox home. TMUX/TMUX_PANE unset.
+  #
+  # DWP_SELFTEST_SUBJECT (test-only): the script the flat cases exec. Defaults
+  # to this file. Point it at a pre-change copy to run the NEGATIVE CONTROL —
+  # these cases must fail against a script that lacks --flat-dir.
+  # =======================================================================
+  local fd_subject="${DWP_SELFTEST_SUBJECT:-}"
+  if [ -z "$fd_subject" ]; then
+    fd_subject=$(_canon_path "${BASH_SOURCE[0]}") || fd_subject="${BASH_SOURCE[0]}"
+  fi
+  local fl="${tmp}/flat"
+  local fhome="${fl}/home"
+  local faitf="${fl}/aitf"
+  local fsrc="${faitf}/fteam/personas/agents"
+  mkdir -p "$fhome" "$fsrc"
+  cat > "${fsrc}/fteam_alpha_engineer_persona.md" <<'PERSONA'
+---
+name: engineering
+description: Alpha engineer (flat-dir).
+---
+
+# Alpha flat body
+PERSONA
+  cat > "${fsrc}/fteam_bravo_tester_persona.md" <<'PERSONA'
+---
+name: holodeck
+description: Bravo tester (flat-dir).
+---
+
+# Bravo flat body
+PERSONA
+
+  # _fd <log> [VAR=val ...] -- <flat-dir args...>   → returns the CLI's rc.
+  # Extra VAR=val entries come AFTER the sandbox defaults, so they override.
+  _fd() {
+    local log="$1"; shift
+    local envs=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
+    if [ $# -gt 0 ]; then shift; fi
+    env -u TMUX -u TMUX_PANE HOME="$fhome" AITEAMFORGE_DIR="$faitf" \
+      ${envs[@]+"${envs[@]}"} "$BASH" "$fd_subject" --flat-dir "$@" >"$log" 2>&1
+  }
+  _fd_name() { awk '/^---/{f++} f==1 && /^name[[:space:]]*:/{print; exit}' "$1" 2>/dev/null; }
+
+  # A plain git repo used by several refusal cases.
+  local frepo="${fl}/repo"
+  mkdir -p "${frepo}/sub/deeper"
+  git -C "$frepo" init -q
+  git -C "$frepo" commit -q --allow-empty -m "init"
+
+  # -----------------------------------------------------------------------
+  # Test 24: non-git happy path
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 24: --flat-dir non-git happy path...\n'
+  local wd24="${fl}/wd24"; mkdir -p "$wd24"
+  local log24="${fl}/t24.log" t24_rc=0
+  _fd "$log24" -- "$wd24" fteam --force || t24_rc=$?
+  local a24="${wd24}/.claude/agents"
+  local t24_df t24_mode
+  t24_df=$(grep -c '^deployed_file: ' "${a24}/.synced-from-tap" 2>/dev/null || true)
+  t24_mode=$(grep -c '^mode: flat-dir$' "${a24}/.synced-from-tap" 2>/dev/null || true)
+  if [ "$t24_rc" -eq 0 ] \
+     && [ "$(_fd_name "${a24}/fteam_alpha_engineer_persona.md")" = "name: alpha" ] \
+     && [ "$(_fd_name "${a24}/fteam_bravo_tester_persona.md")" = "name: bravo" ] \
+     && [ "${t24_mode:-0}" -eq 1 ] && [ "${t24_df:-0}" -eq 2 ] \
+     && [ ! -e "${wd24}/.git" ] && [ ! -e "${fhome}/.claude" ]; then
+    _pass "Test 24 (--flat-dir happy path: files + name: rewritten + mode/deployed_file marker + no .git, rc 0)"
+  else
+    _fail "Test 24 — rc=${t24_rc} mode=${t24_mode} deployed_file=${t24_df} git=$([ -e "${wd24}/.git" ] && echo PRESENT || echo absent). out: $(cat "$log24" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 25: repo root → rc 4, no .claude created
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 25: --flat-dir refuses a git repo root (rc 4)...\n'
+  local log25="${fl}/t25.log" t25_rc=0
+  _fd "$log25" -- "$frepo" fteam --force || t25_rc=$?
+  if [ "$t25_rc" -eq 4 ] && [ ! -e "${frepo}/.claude" ] && grep -q 'REFUSED (git territory)' "$log25"; then
+    _pass "Test 25 (--flat-dir repo root → rc 4, no .claude)"
+  else
+    _fail "Test 25 — rc=${t25_rc} (want 4) .claude=$([ -e "${frepo}/.claude" ] && echo PRESENT || echo absent). out: $(cat "$log25" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 26: subdir of a repo → rc 4
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 26: --flat-dir refuses a subdir of a git repo (rc 4)...\n'
+  local log26="${fl}/t26.log" t26_rc=0
+  _fd "$log26" -- "${frepo}/sub/deeper" fteam --force || t26_rc=$?
+  if [ "$t26_rc" -eq 4 ] && [ ! -e "${frepo}/sub/deeper/.claude" ]; then
+    _pass "Test 26 (--flat-dir repo subdir → rc 4)"
+  else
+    _fail "Test 26 — rc=${t26_rc} (want 4). out: $(cat "$log26" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 27: git unusable (PATH stub failing like "dubious ownership") over a
+  # real repo → rc 4 via the structural walk; and a bare `.git` dir that git
+  # itself does not recognise as a repo → rc 4 (walk only).
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 27: --flat-dir refuses when git is unusable / .git unrecognised (rc 4)...\n'
+  local stub27="${fl}/stubbin"; mkdir -p "$stub27"
+  printf '#!/bin/sh\necho "fatal: detected dubious ownership in repository" >&2\nexit 128\n' > "${stub27}/git"
+  chmod +x "${stub27}/git"
+  local log27a="${fl}/t27a.log" t27a_rc=0
+  _fd "$log27a" "PATH=${stub27}:${PATH}" -- "${frepo}/sub" fteam --force || t27a_rc=$?
+  local fake27="${fl}/fakegit"; mkdir -p "${fake27}/.git" "${fake27}/wd"
+  local log27b="${fl}/t27b.log" t27b_rc=0
+  _fd "$log27b" -- "${fake27}/wd" fteam --force || t27b_rc=$?
+  if [ "$t27a_rc" -eq 4 ] && [ "$t27b_rc" -eq 4 ] \
+     && [ ! -e "${frepo}/sub/.claude" ] && [ ! -e "${fake27}/wd/.claude" ]; then
+    _pass "Test 27 (--flat-dir git stub failing over repo → rc 4; unrecognised ancestor .git → rc 4)"
+  else
+    _fail "Test 27 — stub rc=${t27a_rc} fake-.git rc=${t27b_rc} (want 4/4). out: $(cat "$log27a" "$log27b" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 28: GIT_DIR exported to an unrelated repo changes neither verdict.
+  # (Measured: a leaked GIT_DIR makes rev-parse print `true` in a non-git dir.)
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 28: --flat-dir verdicts immune to a leaked GIT_DIR...\n'
+  local log28a="${fl}/t28a.log" t28a_rc=0 log28b="${fl}/t28b.log" t28b_rc=0
+  _fd "$log28a" "GIT_DIR=${frepo}/.git" -- "$wd24" fteam --force || t28a_rc=$?
+  _fd "$log28b" "GIT_DIR=${frepo}/.git" -- "${frepo}/sub/deeper" fteam --force || t28b_rc=$?
+  if [ "$t28a_rc" -eq 0 ] && [ "$t28b_rc" -eq 4 ]; then
+    _pass "Test 28 (--flat-dir GIT_DIR leak: non-git still rc 0, repo subdir still rc 4)"
+  else
+    _fail "Test 28 — non-git rc=${t28a_rc} (want 0), subdir rc=${t28b_rc} (want 4). out: $(cat "$log28a" "$log28b" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 29: target == sandbox $HOME → rc 1, $HOME/.claude/agents absent;
+  # target == / → rc 1.
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 29: --flat-dir refuses target == HOME and / (rc 1)...\n'
+  local log29="${fl}/t29.log" t29_rc=0 log29b="${fl}/t29b.log" t29b_rc=0
+  _fd "$log29" -- "$fhome" fteam --force || t29_rc=$?
+  _fd "$log29b" -- "/" fteam --force || t29b_rc=$?
+  if [ "$t29_rc" -eq 1 ] && [ "$t29b_rc" -eq 1 ] && [ ! -e "${fhome}/.claude/agents" ]; then
+    _pass "Test 29 (--flat-dir target \$HOME → rc 1 + no ~/.claude/agents; target / → rc 1)"
+  else
+    _fail "Test 29 — HOME rc=${t29_rc} /-rc=${t29b_rc} (want 1/1). out: $(cat "$log29" "$log29b" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 30: nonexistent target → rc 1; invalid team id → rc 1; missing args → rc 1
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 30: --flat-dir nonexistent target / bad team id / missing args (rc 1)...\n'
+  local log30="${fl}/t30.log" t30_rc=0 t30b_rc=0 t30c_rc=0
+  _fd "$log30" -- "${fl}/does-not-exist" fteam --force || t30_rc=$?
+  _fd "${fl}/t30b.log" -- "$wd24" 'bad/team' --force || t30b_rc=$?
+  _fd "${fl}/t30c.log" -- "$wd24" || t30c_rc=$?
+  if [ "$t30_rc" -eq 1 ] && [ "$t30b_rc" -eq 1 ] && [ "$t30c_rc" -eq 1 ] && [ ! -e "${fl}/does-not-exist" ]; then
+    _pass "Test 30 (--flat-dir nonexistent target / bad team id / missing args → rc 1)"
+  else
+    _fail "Test 30 — nonexistent rc=${t30_rc} badteam rc=${t30b_rc} noargs rc=${t30c_rc} (want 1/1/1)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 31: symlinked .claude / .claude/agents escaping → rc 1, nothing written
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 31: --flat-dir refuses symlinked .claude / .claude/agents (rc 1)...\n'
+  local wd31="${fl}/wd31" else31="${fl}/elsewhere31"
+  mkdir -p "$wd31" "${else31}/agents"
+  ln -s "$else31" "${wd31}/.claude"
+  local t31a_rc=0 t31b_rc=0
+  _fd "${fl}/t31a.log" -- "$wd31" fteam --force || t31a_rc=$?
+  local wd31b="${fl}/wd31b" else31b="${fl}/elsewhere31b"
+  mkdir -p "${wd31b}/.claude" "$else31b"
+  ln -s "$else31b" "${wd31b}/.claude/agents"
+  _fd "${fl}/t31b.log" -- "$wd31b" fteam --force || t31b_rc=$?
+  local wd31c="${fl}/wd31c"; mkdir -p "$wd31c"
+  ln -s "${fl}/dangling-nowhere" "${wd31c}/.claude"
+  local t31c_rc=0
+  _fd "${fl}/t31c.log" -- "$wd31c" fteam --force || t31c_rc=$?
+  local t31_leak
+  t31_leak=$(find "$else31" "$else31b" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$t31a_rc" -eq 1 ] && [ "$t31b_rc" -eq 1 ] && [ "$t31c_rc" -eq 1 ] \
+     && [ "$t31_leak" = "0" ] && [ ! -e "${fl}/dangling-nowhere" ]; then
+    _pass "Test 31 (--flat-dir symlinked .claude / .claude/agents / dangling .claude → rc 1, nothing written)"
+  else
+    _fail "Test 31 — rc .claude=${t31a_rc} agents=${t31b_rc} dangling=${t31c_rc} (want 1/1/1) leaked=${t31_leak}"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 32: source absent → rc 3; empty source → rc 3 (never warn+0)
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 32: --flat-dir no persona source / empty source (rc 3)...\n'
+  local wd32="${fl}/wd32"; mkdir -p "$wd32"
+  local aitf32e="${fl}/aitf32-empty"; mkdir -p "${aitf32e}/fteam/personas/agents"
+  touch "${aitf32e}/fteam/personas/agents/README.txt"
+  local t32a_rc=0 t32b_rc=0
+  _fd "${fl}/t32a.log" "AITEAMFORGE_DIR=${fl}/aitf32-absent" -- "$wd32" fteam --force || t32a_rc=$?
+  _fd "${fl}/t32b.log" "AITEAMFORGE_DIR=${aitf32e}" -- "$wd32" fteam --force || t32b_rc=$?
+  if [ "$t32a_rc" -eq 3 ] && [ "$t32b_rc" -eq 3 ] && [ ! -e "${wd32}/.claude" ]; then
+    _pass "Test 32 (--flat-dir source absent → rc 3; 0 *.md → rc 3; nothing created)"
+  else
+    _fail "Test 32 — absent rc=${t32a_rc} empty rc=${t32b_rc} (want 3/3). out: $(cat "${fl}/t32a.log" "${fl}/t32b.log" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 33: --force re-run → byte-identical persona files, rc 0
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 33: --flat-dir --force re-run is byte-identical...\n'
+  local snap33="${fl}/snap33"; mkdir -p "$snap33"
+  # Setup steps from here on tolerate a missing deploy (|| true, mkdir -p) so
+  # a script WITHOUT --flat-dir reports FAIL instead of aborting under set -e.
+  cp "${a24}/"*.md "$snap33/" 2>/dev/null || true
+  local t33_rc=0
+  _fd "${fl}/t33.log" -- "$wd24" fteam --force || t33_rc=$?
+  local t33_same=true f33 t33_n=0
+  for f33 in "$snap33"/*.md; do
+    [ -f "$f33" ] || continue
+    t33_n=$((t33_n + 1))
+    cmp -s "$f33" "${a24}/${f33##*/}" || t33_same=false
+  done
+  if [ "$t33_rc" -eq 0 ] && [ "$t33_same" = true ] && [ "$t33_n" -eq 2 ]; then
+    _pass "Test 33 (--flat-dir --force re-run: byte-identical, rc 0)"
+  else
+    _fail "Test 33 — rc=${t33_rc} identical=${t33_same} compared=${t33_n} (want 2)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 34: prune — only marker-listed, source-absent, pattern-matching files
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 34: --flat-dir prune policy...\n'
+  local aitf34="${fl}/aitf34" wd34="${fl}/wd34"
+  mkdir -p "${aitf34}/fteam/personas/agents" "$wd34"
+  cp "${fsrc}/"*.md "${aitf34}/fteam/personas/agents/"
+  printf -- '---\nname: ops\n---\n# charlie\n' > "${aitf34}/fteam/personas/agents/fteam_charlie_ops_persona.md"
+  local t34a_rc=0
+  _fd "${fl}/t34a.log" "AITEAMFORGE_DIR=${aitf34}" -- "$wd34" fteam --force || t34a_rc=$?
+  local a34="${wd34}/.claude/agents"
+  mkdir -p "$a34"
+  printf 'mine\n' > "${a34}/my_notes.md"
+  printf 'master marker\n' > "${a34}/.synced-from-master"
+  printf 'other writer\n' > "${a34}/fteam_x_y_persona.md"
+  # Tampered ownership claims that must NOT be honoured: a non-pattern name
+  # and a path-traversal name.
+  printf 'deployed_file: my_notes.md\ndeployed_file: ../fteam_evil_persona.md\n' >> "${a34}/.synced-from-tap"
+  printf 'outside\n' > "${wd34}/.claude/fteam_evil_persona.md"
+  rm -f "${aitf34}/fteam/personas/agents/fteam_charlie_ops_persona.md"
+  local t34b_rc=0
+  _fd "${fl}/t34b.log" "AITEAMFORGE_DIR=${aitf34}" -- "$wd34" fteam --force || t34b_rc=$?
+  if [ "$t34a_rc" -eq 0 ] && [ "$t34b_rc" -eq 0 ] \
+     && [ ! -e "${a34}/fteam_charlie_ops_persona.md" ] \
+     && [ -f "${a34}/my_notes.md" ] && [ -f "${a34}/.synced-from-master" ] \
+     && [ -f "${a34}/fteam_x_y_persona.md" ] && [ -f "${wd34}/.claude/fteam_evil_persona.md" ] \
+     && [ -f "${a34}/fteam_alpha_engineer_persona.md" ] \
+     && grep -q 'ORPHAN (not ours — left in place): fteam_x_y_persona.md' "${fl}/t34b.log" \
+     && ! grep -q 'fteam_charlie_ops_persona.md' "${a34}/.synced-from-tap"; then
+    _pass "Test 34 (--flat-dir prune: removed source file deleted; my_notes.md/.synced-from-master/unlisted persona kept + ORPHAN; tampered claims ignored)"
+  else
+    _fail "Test 34 — rc=${t34a_rc}/${t34b_rc} charlie=$([ -e "${a34}/fteam_charlie_ops_persona.md" ] && echo PRESENT || echo gone) notes=$([ -f "${a34}/my_notes.md" ] && echo kept || echo GONE) master=$([ -f "${a34}/.synced-from-master" ] && echo kept || echo GONE) xy=$([ -f "${a34}/fteam_x_y_persona.md" ] && echo kept || echo GONE). out: $(cat "${fl}/t34b.log" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 35: first deploy over a pre-populated dir WITHOUT a marker deletes nothing
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 35: --flat-dir first deploy over pre-populated dir deletes nothing...\n'
+  local wd35="${fl}/wd35"; mkdir -p "${wd35}/.claude/agents"
+  printf 'old\n' > "${wd35}/.claude/agents/fteam_old_gone_persona.md"
+  printf 'notes\n' > "${wd35}/.claude/agents/notes.md"
+  local t35_rc=0
+  _fd "${fl}/t35.log" -- "$wd35" fteam --force || t35_rc=$?
+  if [ "$t35_rc" -eq 0 ] && [ -f "${wd35}/.claude/agents/fteam_old_gone_persona.md" ] \
+     && [ -f "${wd35}/.claude/agents/notes.md" ] \
+     && [ -f "${wd35}/.claude/agents/fteam_alpha_engineer_persona.md" ]; then
+    _pass "Test 35 (--flat-dir first deploy, no prior marker: nothing deleted, rc 0)"
+  else
+    _fail "Test 35 — rc=${t35_rc}. out: $(cat "${fl}/t35.log" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 36: --dry-run → no writes, WOULD PRUNE printed, rc 0
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 36: --flat-dir --dry-run writes nothing, prints WOULD PRUNE...\n'
+  local aitf36="${fl}/aitf36" wd36="${fl}/wd36"
+  mkdir -p "${aitf36}/fteam/personas/agents" "$wd36"
+  cp "${fsrc}/"*.md "${aitf36}/fteam/personas/agents/"
+  local t36a_rc=0
+  _fd "${fl}/t36a.log" "AITEAMFORGE_DIR=${aitf36}" -- "$wd36" fteam --force || t36a_rc=$?
+  rm -f "${aitf36}/fteam/personas/agents/fteam_bravo_tester_persona.md"
+  printf -- '---\nname: x\n---\n# changed alpha\n' > "${aitf36}/fteam/personas/agents/fteam_alpha_engineer_persona.md"
+  mkdir -p "${wd36}/.claude/agents"
+  local sum36_before="" sum36_after=""
+  sum36_before=$(cd "${wd36}/.claude/agents" 2>/dev/null && cksum .synced-from-tap ./*.md 2>/dev/null) || true
+  local t36_rc=0
+  _fd "${fl}/t36.log" "AITEAMFORGE_DIR=${aitf36}" -- "$wd36" fteam --force --dry-run || t36_rc=$?
+  sum36_after=$(cd "${wd36}/.claude/agents" 2>/dev/null && cksum .synced-from-tap ./*.md 2>/dev/null) || true
+  local wd36f="${fl}/wd36fresh"; mkdir -p "$wd36f"
+  local t36f_rc=0
+  _fd "${fl}/t36f.log" -- "$wd36f" fteam --force --dry-run || t36f_rc=$?
+  if [ "$t36a_rc" -eq 0 ] && [ "$t36_rc" -eq 0 ] && [ "$t36f_rc" -eq 0 ] \
+     && [ -n "$sum36_before" ] && [ "$sum36_before" = "$sum36_after" ] \
+     && grep -q 'WOULD PRUNE fteam_bravo_tester_persona.md' "${fl}/t36.log" \
+     && [ ! -e "${wd36f}/.claude" ]; then
+    _pass "Test 36 (--flat-dir --dry-run: no writes, WOULD PRUNE printed, rc 0)"
+  else
+    _fail "Test 36 — rc=${t36a_rc}/${t36_rc}/${t36f_rc} unchanged=$([ "$sum36_before" = "$sum36_after" ] && echo yes || echo NO). out: $(cat "${fl}/t36.log" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 37: dev-machine DEFERRED — sandbox agents-master present, primary
+  # absent → rc 0 + DEFERRED line + nothing written. Validation order: a git
+  # target on the same "dev machine" is still rc 4, not DEFERRED.
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 37: --flat-dir dev-machine DEFERRED (rc 0) and git check precedes it...\n'
+  local home37="${fl}/home37" wd37="${fl}/wd37"
+  mkdir -p "${home37}/dev-team/.claude/agents-master/fteam" "$wd37"
+  local t37_rc=0 t37b_rc=0
+  _fd "${fl}/t37.log" "HOME=${home37}" "AITEAMFORGE_DIR=${fl}/aitf37-absent" -- "$wd37" fteam --force || t37_rc=$?
+  _fd "${fl}/t37b.log" "HOME=${home37}" "AITEAMFORGE_DIR=${fl}/aitf37-absent" -- "$frepo" fteam --force || t37b_rc=$?
+  if [ "$t37_rc" -eq 0 ] && grep -q 'DEFERRED: dev machine — kb-sync-personas owns this target' "${fl}/t37.log" \
+     && [ ! -e "${wd37}/.claude" ] && [ "$t37b_rc" -eq 4 ]; then
+    _pass "Test 37 (--flat-dir DEFERRED on sandbox dev machine → rc 0; git target still rc 4)"
+  else
+    _fail "Test 37 — rc=${t37_rc} (want 0) git rc=${t37b_rc} (want 4). out: $(cat "${fl}/t37.log" "${fl}/t37b.log" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 38: partial deploy (transform skips a file) → rc 2 and NO prune;
+  # the unpruned file keeps its ownership in the rewritten marker.
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 38: --flat-dir partial deploy → rc 2, no prune...\n'
+  local aitf38="${fl}/aitf38" wd38="${fl}/wd38"
+  mkdir -p "${aitf38}/fteam/personas/agents" "$wd38"
+  cp "${fsrc}/"*.md "${aitf38}/fteam/personas/agents/"
+  local t38a_rc=0
+  _fd "${fl}/t38a.log" "AITEAMFORGE_DIR=${aitf38}" -- "$wd38" fteam --force || t38a_rc=$?
+  rm -f "${aitf38}/fteam/personas/agents/fteam_bravo_tester_persona.md"
+  printf -- '---\nname: u\n---\n' > "${aitf38}/fteam/personas/agents/fteam_unreadable_x_persona.md"
+  chmod 000 "${aitf38}/fteam/personas/agents/fteam_unreadable_x_persona.md"
+  local t38_rc=0
+  _fd "${fl}/t38.log" "AITEAMFORGE_DIR=${aitf38}" -- "$wd38" fteam --force || t38_rc=$?
+  chmod 644 "${aitf38}/fteam/personas/agents/fteam_unreadable_x_persona.md"
+  if [ "$t38a_rc" -eq 0 ] && [ "$t38_rc" -eq 2 ] \
+     && [ -f "${wd38}/.claude/agents/fteam_bravo_tester_persona.md" ] \
+     && grep -q '^deployed_file: fteam_bravo_tester_persona.md$' "${wd38}/.claude/agents/.synced-from-tap" 2>/dev/null; then
+    _pass "Test 38 (--flat-dir partial deploy → rc 2, no prune, ownership retained)"
+  else
+    _fail "Test 38 — rc=${t38a_rc}/${t38_rc} (want 0/2) bravo=$([ -f "${wd38}/.claude/agents/fteam_bravo_tester_persona.md" ] && echo kept || echo GONE). out: $(cat "${fl}/t38.log" 2>/dev/null)"
+  fi
+
   # -----------------------------------------------------------------------
   # Summary
   # -----------------------------------------------------------------------
@@ -1332,6 +2050,7 @@ main() {
     printf 'Usage: %s <worktree_path> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
     printf '       %s --all <team> [<main_repo_path>] [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
     printf '       %s --nested-main-root <project_dir> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
+    printf '       %s --flat-dir <target_dir> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
     printf '       %s emit-transformed <src_file> [<char_name>]\n' "$PROG" >&2
     printf '       %s selftest\n' "$PROG" >&2
     exit 1
@@ -1412,6 +2131,35 @@ main() {
   OPT_DRY_RUN=false
   OPT_FORCE=false
   OPT_VERBOSE=false
+
+  # --flat-dir mode (XACA-1216): deploy personas into a NON-GIT team working
+  # dir's .claude/agents/. Refuses git territory with rc 4; see header table.
+  if [ "$1" = "--flat-dir" ]; then
+    shift
+    if [ $# -lt 2 ]; then
+      printf 'Usage: %s --flat-dir <target_dir> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
+      exit 1
+    fi
+    local fd_target="$1"
+    local fd_team="$2"
+    shift 2
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --dry-run)  OPT_DRY_RUN=true  ;;
+        --force)    OPT_FORCE=true    ;;
+        --verbose)  OPT_VERBOSE=true  ;;
+        *)
+          _err "Unknown option: $1"
+          exit 1
+          ;;
+      esac
+      shift
+    done
+    export OPT_DRY_RUN OPT_FORCE OPT_VERBOSE
+    local fd_rc=0
+    _deploy_flat_dir "$fd_target" "$fd_team" || fd_rc=$?
+    exit "$fd_rc"
+  fi
 
   # --nested-main-root mode: deploy personas into a nested git repo root
   # (used by deploy_team_personas fallback in lcars-launch-helpers.sh on
