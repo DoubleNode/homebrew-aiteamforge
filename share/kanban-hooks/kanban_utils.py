@@ -35,7 +35,27 @@ KANBAN_DIR = os.path.expanduser("~/dev-team/kanban")
 # Initialize Team skill which handles all downstream registrations).
 # ---------------------------------------------------------------------------
 
-def _build_team_kanban_dirs() -> dict:
+def _resolve_import_time_config_view():
+    """Resolve read_config_view() ONCE for both import-time builders.
+
+    XACA-1193 review round 1 (018): TEAM_KANBAN_DIRS and _TEAM_CODE_MAP are
+    both built at import, and each used to call read_config_view() itself. On
+    a corrupt or refused registry every peek pays the ~0.85s transient-read
+    retry schedule, so every hook process paid it TWICE (measured 1.76s
+    import). The module now resolves one view here and hands it to both.
+
+    Returns the view dict, or None when aiteamforge_paths cannot be imported
+    or the read fails. None makes each builder resolve on its own, so each
+    keeps its existing fallback and warning unchanged.
+    """
+    try:
+        from aiteamforge_paths import read_config_view  # noqa: PLC0415
+        return read_config_view()
+    except Exception:  # noqa: BLE001 - the builders own the fallback + warning
+        return None
+
+
+def _build_team_kanban_dirs(view=None) -> dict:
     """Build TEAM_KANBAN_DIRS from the aiteamforge_paths registry.
 
     XACA-0628: enumerate teams via the registry (list_teams() +
@@ -55,6 +75,9 @@ def _build_team_kanban_dirs() -> dict:
     whole team enumeration instead of N reads. The mutating self-heal owners
     (lcars_ports.py, kanban-backup.py) are unaffected; they still call these
     accessors with their default (``config=None`` -> load_config()).
+
+    *view*: an already-resolved read_config_view() result. The module passes
+    the one it resolved at import (018); None resolves a fresh one here.
     """
     try:
         # kanban-hooks/ is always on sys.path when this module is imported
@@ -64,7 +87,8 @@ def _build_team_kanban_dirs() -> dict:
             read_config_view,
             DEFAULT_TEAMS,
         )
-        view = read_config_view()
+        if view is None:
+            view = read_config_view()
         teams = list_teams(config=view)
         if teams:
             result = {}
@@ -114,7 +138,10 @@ def _build_team_kanban_dirs() -> dict:
             "freelance":  _h / "dev-team" / "kanban",
         }
 
-TEAM_KANBAN_DIRS: dict = _build_team_kanban_dirs()
+# ONE registry read for both import-time builders (018); released below, once
+# _TEAM_CODE_MAP is built, so no later code can read a stale import snapshot.
+_IMPORT_TIME_CONFIG_VIEW = _resolve_import_time_config_view()
+TEAM_KANBAN_DIRS: dict = _build_team_kanban_dirs(_IMPORT_TIME_CONFIG_VIEW)
 
 
 def _overlay_kanban_dir(team: str):
@@ -403,7 +430,7 @@ def update_board_safely(board_file, update_func):
 # so the registry (DEFAULT_TEAMS + team-paths.json) is the single source of
 # truth.  The hardcoded fallback below is retained ONLY as a safety net for
 # environments where aiteamforge_paths is unavailable (CI, bootstrap).
-def _build_team_code_map() -> dict:
+def _build_team_code_map(view=None) -> dict:
     """Build _TEAM_CODE_MAP from aiteamforge_paths registry.
 
     XACA-1193-003: resolves read_config_view() once (never load_config()'s
@@ -414,13 +441,17 @@ def _build_team_code_map() -> dict:
     healthy-but-unconverged file is dropped by read_config_view() itself
     (contract-scrub parity, XACA-1193 review follow-up), so this map and every
     other migrated reader see the same scrubbed team set load_config() returns.
+
+    *view*: as for _build_team_kanban_dirs() — the import-time view (018), or
+    None to resolve a fresh one here.
     """
     try:
         from aiteamforge_paths import (  # noqa: PLC0415
             build_team_code_map,
             read_config_view,
         )
-        view = read_config_view()
+        if view is None:
+            view = read_config_view()
         result = build_team_code_map(config=view)
         if result:
             return result
@@ -449,7 +480,8 @@ def _build_team_code_map() -> dict:
         "FIN": "finance-personal",
     }
 
-_TEAM_CODE_MAP: dict = _build_team_code_map()
+_TEAM_CODE_MAP: dict = _build_team_code_map(_IMPORT_TIME_CONFIG_VIEW)
+del _IMPORT_TIME_CONFIG_VIEW
 
 
 def get_parent_item_id(item_or_subitem_id: str) -> str:

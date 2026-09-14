@@ -16,7 +16,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   (port drift guard), `scripts/kb-release-version-bump`, and `lcars-ui/` `sync_release_manifests.py`,
   `secrets_export_lib.py`, `integrations/manager.py`, `rag_engines/manager.py`, `team_transfer/manifest.py`.
   The two unattended self-heal owners, `lcars_ports.py` (lcars-health agent) and `kanban-backup.py`, are
-  unchanged and still converge configs.
+  unchanged and still converge configs. Review round 1: `kanban_utils` resolves the view once per import
+  (a corrupt registry no longer pays the retry delay twice per hook call); tiny (<200-byte) non-object
+  configs are left in place with a CRITICAL like tiny unparseable ones; the read path now surfaces the
+  unrecognised-`schema_version` warning.
 
 - **XACA-1206** — team install no longer fails on `schema_version: 3` configs, which is every
   current consumer. The shell path library (`libexec/lib/aiteamforge-paths.sh`) accepted only schema

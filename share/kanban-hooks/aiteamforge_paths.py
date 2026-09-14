@@ -616,6 +616,33 @@ _QUARANTINE_SEQ = itertools.count()
 
 SUPPORTED_SCHEMA_VERSION = 3
 
+# schema_version values every reader accepts silently. v1/v2/v3 all load
+# cleanly; anything else is warned about but still used. Module-level (it used
+# to be a local inside load_config()) so load_config() and read_config_view()
+# share ONE set and ONE message (XACA-1193 review round 1, C1).
+_READABLE_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
+
+
+def _schema_version_is_readable(version: object) -> bool:
+    """True iff *version* is in _READABLE_SCHEMA_VERSIONS. Never raises: an
+    unhashable value (a hand-edited list/object) is simply not readable, where
+    a bare ``in frozenset`` would raise TypeError out of a "never raises" read."""
+    try:
+        return version in _READABLE_SCHEMA_VERSIONS
+    except TypeError:
+        return False
+
+
+def _unrecognized_schema_version_message(version: object) -> str:
+    """The stderr WARNING for a schema_version outside _READABLE_SCHEMA_VERSIONS.
+
+    Shared by load_config() and read_config_view() so the owner and the view
+    cannot drift on wording (k501)."""
+    return (
+        f"[aiteamforge-paths] WARNING: schema_version={version!r} is not "
+        f"recognized (readable: {sorted(_READABLE_SCHEMA_VERSIONS)}). Proceeding anyway."
+    )
+
 # Teams that MUST appear in any valid config.  If any are absent the config is
 # considered corrupt and load_config() falls back to _bootstrap().  (XACA-0457)
 CANONICAL_REQUIRED_TEAMS: frozenset[str] = frozenset({"academy"})
@@ -1335,6 +1362,10 @@ def _load_config_impl() -> dict:
     # replacing it with a schema-valid DEFAULT_TEAMS file would hide a LOUD,
     # visibly-broken registry behind a healthy-looking one.
     _b1_suspect_no_reseed = False
+    # XACA-1193-019: the JSON type name of a top level that PARSED but is not
+    # an object (null, list, number, string, bool), else None. Set only on a
+    # successful parse, so it never overlaps a confirmed-corrupt B1 read.
+    _non_object_top_level: str | None = None
 
     if config_path.exists():
         # XACA-1029-004(a)/R1 branch B1: a hard parse failure gets a bounded
@@ -1382,22 +1413,46 @@ def _load_config_impl() -> dict:
                 # attempt is a no-op — no double-quarantine, no double backup.
                 # The manual-recovery-from-quarantine rationale genuinely
                 # holds here: the file was at least plausibly-sized.
+        elif not isinstance(config, dict):
+            # json.loads("null") returns None with no error, which is why
+            # `null` must be caught HERE: below, `config is None` means "no
+            # usable config" and would take the corrupt bootstrap directly.
+            _non_object_top_level = "null" if config is None else type(config).__name__
 
-    # XACA-1193-017: a top level that parses but is not an object (a list, a
-    # number, a string) used to raise TypeError/AttributeError below, breaking
-    # "Never raises". Route it through the path a top-level `null` already
-    # takes (json.loads returns None -> `config is None` -> corrupt bootstrap:
-    # _write_defaults quarantines by move, SUSPECT-tagged under the byte floor,
-    # then reseeds). No team set is knowable from such a file, so there is
-    # nothing for the B2 team-loss refusal to protect. peek_config() reports
-    # the same shape "unreadable", and read_config_view() returns defaults.
-    if config is not None and not isinstance(config, dict):
-        _stderr_note(
-            f"[aiteamforge-paths] WARNING: {config_path} parses as JSON but its "
-            f"top level is a {type(config).__name__}, not an object — treating "
-            f"it as corrupt",
-        )
-        config = None
+    # XACA-1193-017/-019: a top level that parses but is not an object (null,
+    # a list, a number, a string) carries no team set, so it is corrupt in the
+    # same way an unparseable file is, and peek_config() already reports both
+    # "unreadable". It now follows B1's size rule rather than a rule of its own:
+    #   * below _MIN_PLAUSIBLE_REGISTRY_BYTES -> the B1-suspect refusal: the
+    #     file is left EXACTLY as-is (no quarantine, no reseed), CRITICAL on
+    #     stderr, DEFAULT_TEAMS in memory for this process only.
+    #   * at or above the floor -> unchanged from 017: config = None, so the
+    #     corrupt bootstrap quarantines by move (`pre-write-defaults`) and
+    #     reseeds.
+    # Before 019 a tiny `[]`/`1`/`"x"` (and, on develop, a tiny `null`) was
+    # quarantined SUSPECT and reseeded, while an equally tiny unparseable file
+    # was left in place. See the plan doc's "XACA-1193-017 decision".
+    if _non_object_top_level is not None:
+        if _file_looks_implausibly_short(config_path):
+            _stderr_note(
+                f"[aiteamforge-paths] CRITICAL: {config_path} parses as JSON "
+                f"but its top level is a {_non_object_top_level}, not an "
+                f"object, AND it is implausibly short "
+                f"(< {_MIN_PLAUSIBLE_REGISTRY_BYTES} bytes) — refusing to "
+                f"quarantine or reseed (the B1-suspect rule). Returning "
+                f"DEFAULT_TEAMS in memory for THIS process only — no disk "
+                f"write. The file is left untouched at {config_path}; a human "
+                f"must inspect and restore it manually.",
+            )
+            config = _make_default_config()
+            _b1_suspect_no_reseed = True
+        else:
+            _stderr_note(
+                f"[aiteamforge-paths] WARNING: {config_path} parses as JSON but its "
+                f"top level is a {_non_object_top_level}, not an object — treating "
+                f"it as corrupt",
+            )
+            config = None
 
     # Schema-integrity check (XACA-0457) — catch partial-write corruption where
     # JSON is technically valid but the config is missing required teams or the
@@ -1527,13 +1582,9 @@ def _load_config_impl() -> dict:
     # unknown/future versions.  Missing new fields (v1/v2 configs lacking the
     # anthropic_* keys added in v3) are tolerated; downstream consumers that
     # need those fields should use .get() with empty-string defaults.
-    _READABLE_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
     version = config.get("schema_version")
-    if version not in _READABLE_SCHEMA_VERSIONS:
-        _stderr_note(
-            f"[aiteamforge-paths] WARNING: schema_version={version!r} is not "
-            f"recognized (readable: {sorted(_READABLE_SCHEMA_VERSIONS)}). Proceeding anyway.",
-        )
+    if not _schema_version_is_readable(version):
+        _stderr_note(_unrecognized_schema_version_message(version))
 
     # Ensure "teams" is populated — catches both missing key AND empty dict,
     # the latter being the failure mode that produced a silently-empty team map
@@ -2163,8 +2214,26 @@ def read_config_view() -> dict:
 
     The returned dict is never the module's DEFAULT_TEAMS object; a caller
     may mutate it without corrupting this module's defaults.
+
+    XACA-1193 review round 1 (C1): an unrecognized ``schema_version`` on the
+    returned view prints the same WARNING load_config() prints for the same
+    state (shared message builder), through _stderr_note, at most once per
+    process per (path, version). peek_config() itself stays silent on it — its
+    "ok is silent" contract (XACA-1192) is unchanged.
     """
-    return _config_view_from_peek(peek_config())
+    peek = peek_config()
+    view = _config_view_from_peek(peek)
+    try:
+        version = view.get("schema_version")
+        if not _schema_version_is_readable(version):
+            _peek_emit_once(
+                str(peek.path),
+                f"schema_version-unrecognized:{version!r}",
+                _unrecognized_schema_version_message(version),
+            )
+    except Exception:  # noqa: BLE001 - a diagnostic must never break a read
+        pass
+    return view
 
 
 # ---------------------------------------------------------------------------
