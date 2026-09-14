@@ -7,6 +7,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1175** — `auto-upgrade.sh`'s brew-not-found and tap-not-installed exit paths now log a
+  completion marker (`FAILED: brew not found` / `SKIPPED: tap not installed`) before returning. The
+  script previously exited on those paths with no marker-less-exit handling, so `kb-spacedock`
+  read the run as still-in-progress and reported a permanent false stall instead of the real
+  terminal state.
+
 ## [0.20.13] - 2026-09-14
 
 - **XACA-1212** — a fresh `aiteamforge setup` no longer aborts silently at the persona/logo copy

@@ -5,7 +5,8 @@
 # Safe to run manually: ./auto-upgrade.sh
 #
 # Behaviour:
-#   1. Verify brew + aiteamforge tap are installed; bail with warning if not.
+#   1. Verify brew + aiteamforge tap are installed; bail with warning if not
+#      (each bail path logs its own completion marker before exiting).
 #   2. Run `brew update`.
 #   3. Check if aiteamforge is outdated.
 #   4. If outdated: check version-pin sentinel (~/.aiteamforge/version-pin).
@@ -170,6 +171,10 @@ fi
 if ! command -v brew &>/dev/null; then
     log "ERROR: brew not found on PATH ($PATH) — cannot run auto-upgrade"
     notify "Auto-upgrade FAILED — see $LOG_FILE"
+    # XACA-1175: every exit after the start marker must emit exactly one
+    # completion marker, or stall detectors (kb-spacedock CHECK 5) see a
+    # start with no matching complete and report a permanent false stall.
+    log "===== auto-upgrade complete (FAILED: brew not found) ====="
     exit 1
 fi
 
@@ -179,6 +184,10 @@ log "brew: $BREW"
 # Step 2: verify aiteamforge tap is installed
 if ! brew tap 2>/dev/null | grep -qi "doublenode/aiteamforge"; then
     log "WARNING: doublenode/aiteamforge tap not found — skipping upgrade"
+    # XACA-1175: same rationale as the brew-not-found exit above — this is
+    # a normal skip (exit 0), not a failure, so it emits a SKIPPED marker
+    # rather than FAILED; without it the run looks stalled forever.
+    log "===== auto-upgrade complete (SKIPPED: tap not installed) ====="
     exit 0
 fi
 
