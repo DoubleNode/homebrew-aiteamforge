@@ -1459,6 +1459,20 @@ SESSION_LOCATION="{location}"
 SESSION_DEVELOPER="{developer}"
 SESSION_ROLE="{role}"
 SESSION_DIRECTORY="{session_directory}"
+# XACA-1215-015: pre-quote SESSION_DIRECTORY ONCE for re-parsing by the
+# pane's own interactive shell. `send-keys` types its argument into the
+# pane like a user would -- a double-quoted "cd \"$SESSION_DIRECTORY\""
+# only protects the ASSIGNMENT above; once retyped into the pane, that
+# same double-quoted context lets the pane's shell (zsh) re-evaluate any
+# $(...), backticks or $ the path contains a SECOND time. `printf %q`
+# produces a single backslash-escaped token that both bash and zsh parse
+# back to the literal value with no quoting/expansion hazard -- verified
+# in a sandbox against bash 3.2's own %q output (space, $(touch X),
+# backtick, ", ', and a literal backslash all round-tripped byte-for-byte
+# under both `zsh -fc` and `/bin/bash -c`, with no side-effect file ever
+# created). Computed once here since SESSION_DIRECTORY never changes
+# across the four setup_window() calls below.
+_SESSION_DIRECTORY_Q=$(printf '%q' "$SESSION_DIRECTORY")
 THEME_COLOR="{team_color}"
 
 SESSION_CODE="${{SESSION_TYPE}}-${{SESSION_NAME}}"
@@ -1502,7 +1516,7 @@ KANBAN_HELPERS="$AITEAMFORGE_DIR/kanban-helpers.sh"
 
 setup_window() {{
     sleep 0.1
-    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER "cd \\"$SESSION_DIRECTORY\\"" C-m
+    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER "cd $_SESSION_DIRECTORY_Q" C-m
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". ~/.zshrc_${{SESSION_TYPE}}_${{SESSION_NAME}}" C-m
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $KANBAN_HELPERS" C-m
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $AITEAMFORGE_DIR/$SESSION_TYPE/scripts/$SESSION_TYPE-banner.sh \\"$SESSION_THEME\\" \\"$SESSION_TYPE\\" \\"$SESSION_NAME\\" \\"$TERMINAL_NUMBER\\" \\"$TERMINAL_NAME\\" \\"$SESSION_DESCRIPTION\\" \\"$SESSION_LOCATION\\" \\"$SESSION_DEVELOPER\\" \\"$SESSION_ROLE\\" \\"$TERMINAL_DESCRIPTION\\"" C-m

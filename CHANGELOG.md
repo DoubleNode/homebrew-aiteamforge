@@ -42,6 +42,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - New `tests/test-xaca-1215-session-directory.sh`, with an opt-in `--negative-control <ref>` mode
     that proves the assertions fail on the pre-fix installer.
 
+  Review round 1 (XACA-1215-015/016/017): the generated `cd "$SESSION_DIRECTORY"` sent via
+  `tmux send-keys` gets re-parsed by the pane's own interactive shell, so a quoted value could still
+  trigger `$(...)`/backtick expansion a second time on that hop — 015 pre-quotes with `printf '%q'`
+  once per script and sends a bare `cd <token>`, verified round-tripping under both `/bin/bash` and
+  `zsh` for space/`$(...)`/backtick/backslash/quote payloads with no side effect. 016 adds
+  `tests/test-xaca-1215-session-directory.sh` Case G (hostile `TEAM_WORKING_DIR` round-trip: quote,
+  command substitution, backtick, backslash, space, a `$HOME`-sibling prefix, and exactly `$HOME`) and
+  Case G8 (drives the real generated script's captured `send-keys` argument through `zsh -fc` and
+  `/bin/bash -c`, skipping only the zsh sub-assertion when zsh is absent). 017 makes
+  `team-startup.sh.template`'s retry loop capture each agent's own retry output to an isolated
+  scratch file (not the shared, interleaved session log) and print it indented when an agent is still
+  missing after retry, so the real cause (e.g. a missing working directory) reaches the terminal
+  instead of only a log-file pointer; Case H exercises the extracted retry block with two
+  concurrently-failing fake agents and asserts no cross-contamination between their causes.
+
 ## [0.20.13] - 2026-09-14
 
 - **XACA-1212** — a fresh `aiteamforge setup` no longer aborts silently at the persona/logo copy

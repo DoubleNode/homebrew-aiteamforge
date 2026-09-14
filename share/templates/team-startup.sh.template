@@ -353,13 +353,26 @@ if [[ ${#_missing_agents[@]} -gt 0 ]]; then
     for _agent in "${_missing_agents[@]}"; do
         _agent_script="$AITEAMFORGE_DIR/${TEAM_ID}/scripts/${TEAM_ID}-${_agent}-startup.sh"
         echo "    Retrying ${TEAM_ID}-${_agent}..."
-        SKIP_ATTACH=1 SKIP_SERVER_START=1 TMUX_SOCKET="$TMUX_SOCKET" \
-            bash "$_agent_script" >>"$_SESSION_LOG" 2>&1
+        # XACA-1215-017: capture THIS agent's retry output to its own buffer
+        # (not just the shared, interleaved $_SESSION_LOG) so a failure can
+        # print its real cause without risking another agent's lines.
+        # mktemp, not a predictable /tmp name: a pre-planted symlink must not
+        # redirect this write. If mktemp fails, fall back to the log-only path.
+        _agent_retry_log=$(mktemp "/tmp/.${TEAM_ID}-${_agent}-retry.XXXXXX" 2>/dev/null) || _agent_retry_log=""
+        if [[ -n "$_agent_retry_log" ]]; then
+            SKIP_ATTACH=1 SKIP_SERVER_START=1 TMUX_SOCKET="$TMUX_SOCKET" \
+                bash "$_agent_script" 2>&1 | tee -a "$_SESSION_LOG" >"$_agent_retry_log"
+        else
+            SKIP_ATTACH=1 SKIP_SERVER_START=1 TMUX_SOCKET="$TMUX_SOCKET" \
+                bash "$_agent_script" >>"$_SESSION_LOG" 2>&1
+        fi
         if tmux -L "$TMUX_SOCKET" has-session -t "${TEAM_ID}-${_agent}" 2>/dev/null; then
             echo "    ✓ ${TEAM_ID}-${_agent} created on retry"
         else
             echo "    ❌ ${TEAM_ID}-${_agent} still missing (see $_SESSION_LOG)"
+            [[ -n "$_agent_retry_log" && -s "$_agent_retry_log" ]] && sed 's/^/       /' "$_agent_retry_log"
         fi
+        [[ -n "$_agent_retry_log" ]] && rm -f "$_agent_retry_log"
     done
 fi
 

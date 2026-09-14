@@ -925,6 +925,372 @@ else
     test_fail "Case F cannot run without a valid update_generated_agent_scripts extraction"
 fi
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CASE G — hostile SESSION_DIRECTORY round-trip (XACA-1215-016), plus the
+# pane-shell second-hop re-evaluation fix (XACA-1215-015, reviewer-filed
+# non-blocking finding on PR #897).
+#
+# G1-G7: render a per-agent script from a TEAM_WORKING_DIR containing a
+# hostile character/sequence, then:
+#   - bash -n on the generated script must pass;
+#   - the SESSION_DIRECTORY="..." assignment line, eval'd in a subshell with
+#     HOME set to the same sandbox HOME used at render time, must reproduce
+#     the literal raw TEAM_WORKING_DIR byte-for-byte (an over-escape or an
+#     under-escape both show up here);
+#   - no PWNED sentinel file must ever appear (proves the eval never
+#     executed the hostile payload as a command).
+#
+# G8: drives the ACTUAL generated script's send-keys pane input through the
+# real pane shells (zsh, then /bin/bash) to prove the XACA-1215-015 fix (the
+# printf %q re-quote) survives the SECOND parse a pane's interactive shell
+# performs on typed text.
+# ═══════════════════════════════════════════════════════════════════════════
+
+G_PWNED_SENTINEL="$TEST_TMP_DIR/case-g-PWNED"
+
+# Round-trip harness: $1 = label (letters/hyphens only — used verbatim in a
+# sandbox dir name), $2 = raw TEAM_WORKING_DIR, $3 = expect $HOME-contracted
+# form ("true") vs literal-absolute form ("false").
+_g_case() {
+    local label="$1" raw="$2" expect_home_contracted="$3"
+    rm -f "$G_PWNED_SENTINEL"
+    local g_atf="$TEST_TMP_DIR/case-g-atf-$label"
+    _run_generator "$g_atf" "$raw"
+    local g_file
+    g_file="$(find "$g_atf/spacedock/scripts" -maxdepth 1 -name 'spacedock-*-startup.sh' 2>/dev/null | head -1)"
+
+    test_start "G ($label): generated script exists and passes bash -n"
+    if [ -n "$g_file" ] && [ -f "$g_file" ] && bash -n "$g_file" 2>"$TEST_TMP_DIR/g-syn.err"; then
+        test_pass
+    else
+        test_fail "bash -n failed or file missing for '$label': $(cat "$TEST_TMP_DIR/g-syn.err" 2>/dev/null)"
+        return
+    fi
+
+    local g_line
+    g_line="$(grep '^SESSION_DIRECTORY=' "$g_file" 2>/dev/null)"
+
+    test_start "G ($label): SESSION_DIRECTORY= line uses the expected \$HOME contraction form"
+    case "$g_line" in
+        'SESSION_DIRECTORY="$HOME'*)
+            if [ "$expect_home_contracted" = true ]; then test_pass; else test_fail "Got contracted form but expected literal-absolute: $g_line"; fi ;;
+        *)
+            if [ "$expect_home_contracted" = false ]; then test_pass; else test_fail "Got literal-absolute form but expected \$HOME contraction: $g_line"; fi ;;
+    esac
+
+    # Eval the captured assignment line in a real subshell (own script file,
+    # not an inline -c string, to sidestep quoting-within-quoting entirely)
+    # with the SAME sandbox HOME used at render time, then read back the
+    # variable — this is the actual round-trip proof.
+    local g_eval_script="$TEST_TMP_DIR/g-eval-script.sh"
+    {
+        printf '%s\n' "$g_line"
+        printf 'echo "$SESSION_DIRECTORY"\n'
+    } > "$g_eval_script"
+    local g_evaled
+    g_evaled="$(HOME="$HOME" bash "$g_eval_script" 2>"$TEST_TMP_DIR/g-eval.err")"
+
+    test_start "G ($label): eval'd SESSION_DIRECTORY round-trips to the literal raw input"
+    if [ "$g_evaled" = "$raw" ]; then
+        test_pass
+    else
+        test_fail "raw='$raw' evaled='$g_evaled' line='$g_line' stderr=$(cat "$TEST_TMP_DIR/g-eval.err" 2>/dev/null)"
+    fi
+
+    test_start "G ($label): no PWNED sentinel appeared (hostile payload never executed)"
+    if [ ! -e "$G_PWNED_SENTINEL" ]; then
+        test_pass
+    else
+        test_fail "PWNED sentinel file was created — hostile input was executed: $G_PWNED_SENTINEL"
+        rm -f "$G_PWNED_SENTINEL"
+    fi
+}
+
+# G1: double quote
+_g_case 'double-quote' "$HOME/g-quo\"te" true
+# G2: command substitution
+_g_case 'cmd-subst' "$HOME/g-cs-\$(touch ${G_PWNED_SENTINEL})x" true
+# G3: backtick
+_g_case 'backtick' "$HOME/g-bt-\`touch ${G_PWNED_SENTINEL}\`x" true
+# G4: backslash
+_g_case 'backslash' "$HOME/g-bs-a\\b" true
+# G5: space
+_g_case 'space' "$HOME/g sp ace" true
+# G6: HOME-sibling prefix (must stay absolute, NOT contracted — the boundary
+# check is `== "$HOME"/*`, so a sibling like "${HOME}xy/..." must not match)
+_g_case 'home-sibling' "${HOME}xy/g-sibling" false
+# G7: exactly $HOME (no subdir)
+_g_case 'exactly-home' "$HOME" true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# G8: XACA-1215-015 second-hop — drive the REAL generated script's stub-tmux
+# send-keys "cd ..." argument through the pane's own shells (zsh, then bash).
+# Uses a PURPOSE-BUILT, argv-preserving stub tmux (one arg per line, an
+# explicit end-of-call marker) so the exact "keys" argument sent to
+# send-keys can be recovered byte-for-byte — the shared STUB_BIN/tmux used
+# by Cases A-F logs `echo "$@"`, which space-joins args and cannot
+# distinguish an argument boundary from a space WITHIN an argument (exactly
+# the kind of value a hostile path produces). Scoped to this case only via
+# an explicit PATH override on the single `env` invocation below; it never
+# touches the shared STUB_BIN or global PATH.
+# ─────────────────────────────────────────────────────────────────────────────
+G8_STUB_BIN="$TEST_TMP_DIR/g8-stub-bin"
+mkdir -p "$G8_STUB_BIN"
+cat > "$G8_STUB_BIN/tmux" <<'G8STUBEOF'
+#!/bin/sh
+LOG="${TMUX_STUB_LOG:?TMUX_STUB_LOG not set}"
+{
+    for a in "$@"; do
+        printf '%s\n' "$a"
+    done
+    printf '===END===\n'
+} >> "$LOG"
+for arg in "$@"; do
+    case "$arg" in
+        has-session) exit 1 ;;
+    esac
+done
+exit 0
+G8STUBEOF
+chmod +x "$G8_STUB_BIN/tmux"
+
+G8_HOME="$TEST_TMP_DIR/case-g8-home"
+G8_ATF="$TEST_TMP_DIR/case-g8-atf"
+mkdir -p "$G8_HOME"
+G8_PWNED="$TEST_TMP_DIR/case-g8-PWNED"
+rm -f "$G8_PWNED"
+# A REAL, EXISTING directory (so the missing-dir guard never engages and
+# setup_window actually runs) whose name embeds a space, a live-looking
+# command substitution, a backtick, and a double quote in one string —
+# maximum second-hop coverage in a single generated script.
+G8_DIR="$G8_HOME/g8 dir \$(touch ${G8_PWNED})x \`touch ${G8_PWNED}\` \"q"
+mkdir -p "$G8_DIR"
+_run_generator "$G8_ATF" "$G8_DIR"
+G8_SCRIPT="$(find "$G8_ATF/spacedock/scripts" -maxdepth 1 -name 'spacedock-*-startup.sh' 2>/dev/null | head -1)"
+
+G8_LOG="$TEST_TMP_DIR/case-g8-tmux.log"
+_assert_sandboxed "$G8_LOG"
+: > "$G8_LOG"
+G8_EXIT=0
+if [ -n "$G8_SCRIPT" ] && [ -f "$G8_SCRIPT" ]; then
+    env -u TMUX -u TMUX_PANE -u TMUX_SOCKET \
+        HOME="$G8_HOME" AITEAMFORGE_DIR="$G8_ATF" PATH="$G8_STUB_BIN:$PATH" \
+        TMUX_STUB_LOG="$G8_LOG" SKIP_ATTACH=1 \
+        bash "$G8_SCRIPT" >"$TEST_TMP_DIR/g8-stdout.log" 2>"$TEST_TMP_DIR/g8-stderr.log" || G8_EXIT=$?
+else
+    G8_EXIT=127
+fi
+
+test_start "G8 preflight: generated script ran cleanly against the real (existing) hostile dir"
+if [ "$G8_EXIT" -eq 0 ]; then
+    test_pass
+else
+    test_fail "exit=$G8_EXIT stderr: $(cat "$TEST_TMP_DIR/g8-stderr.log" 2>/dev/null)"
+fi
+
+test_start "G8 preflight: no PWNED sentinel from the generated script's OWN run (before any pane re-parse)"
+if [ ! -e "$G8_PWNED" ]; then
+    test_pass
+else
+    test_fail "PWNED sentinel appeared just from running the generated script — bug is in install-team.sh itself, not the second hop"
+fi
+
+# Recover the exact "keys" argument of the first send-keys call: a block is
+# ["send-keys","-t",<target>,<keys>,"C-m"] followed by the "===END===" line.
+G8_CD_LINE="$(python3 - "$G8_LOG" <<'G8PYEOF'
+import sys
+with open(sys.argv[1]) as f:
+    content = f.read()
+for block in content.split("===END===\n"):
+    lines = block.split("\n")
+    while lines and lines[-1] == "":
+        lines.pop()
+    if len(lines) >= 4 and lines[0] == "send-keys":
+        print(lines[3])
+        break
+G8PYEOF
+)"
+
+test_start "G8 preflight: a 'cd ...' send-keys line was captured from the argv-preserving stub log"
+case "$G8_CD_LINE" in
+    cd\ *) test_pass ;;
+    *) test_fail "Expected the captured keys arg to start with 'cd ', got: '$G8_CD_LINE' (log: $(cat "$G8_LOG" 2>/dev/null))" ;;
+esac
+
+test_start "G8 (XACA-1215-015): captured pane input carries no stray outer double-quotes (the second-hop bug shape)"
+case "$G8_CD_LINE" in
+    'cd "'*) test_fail "Outer double-quotes reached the pane verbatim — this is the pre-fix second-hop shape: $G8_CD_LINE" ;;
+    *) test_pass ;;
+esac
+
+for _g8_shell in zsh bash; do
+    if [ "$_g8_shell" = zsh ] && ! command -v zsh >/dev/null 2>&1; then
+        test_start "G8 (XACA-1215-015): pane-shell re-parse under zsh"
+        echo "     SKIP: zsh not found on PATH (expected on CI ubuntu runners) — the bash sub-assertion below still runs and is not skipped"
+        continue
+    fi
+    rm -f "$G8_PWNED"
+    G8_ELSEWHERE="$TEST_TMP_DIR/case-g8-elsewhere-$_g8_shell"
+    mkdir -p "$G8_ELSEWHERE"
+    if [ "$_g8_shell" = zsh ]; then
+        G8_PANE_PWD="$(cd "$G8_ELSEWHERE" && HOME="$G8_HOME" zsh -fc "$G8_CD_LINE && pwd" 2>"$TEST_TMP_DIR/g8-zsh.err")"
+    else
+        G8_PANE_PWD="$(cd "$G8_ELSEWHERE" && HOME="$G8_HOME" /bin/bash -c "$G8_CD_LINE && pwd" 2>"$TEST_TMP_DIR/g8-bash.err")"
+    fi
+    test_start "G8 (XACA-1215-015): pane-shell re-parse under $_g8_shell lands in the literal dir"
+    if [ "$G8_PANE_PWD" = "$G8_DIR" ]; then
+        test_pass
+    else
+        test_fail "expected='$G8_DIR' got='$G8_PANE_PWD' cd_line='$G8_CD_LINE' stderr=$(cat "$TEST_TMP_DIR/g8-$_g8_shell.err" 2>/dev/null)"
+    fi
+    test_start "G8 (XACA-1215-015): no PWNED sentinel under $_g8_shell (hostile payload never executed by the pane shell)"
+    if [ ! -e "$G8_PWNED" ]; then
+        test_pass
+    else
+        test_fail "PWNED sentinel created by the pane shell's re-parse of the typed 'cd' text: $G8_PWNED"
+    fi
+done
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CASE H — XACA-1215-017: the master template's retry-loop surfaces the REAL
+# per-agent failure cause on the terminal, not just a pointer to the shared
+# session log. Drives the actual session-verify/retry block extracted
+# verbatim from team-startup.sh.template with fake per-agent scripts that
+# fail exactly the way the XACA-1215-004 missing-directory guard does.
+# ═══════════════════════════════════════════════════════════════════════════
+H_TEMPLATE="$TAP_ROOT/share/templates/team-startup.sh.template"
+
+test_start "H preflight: team-startup.sh.template exists"
+if [ -f "$H_TEMPLATE" ]; then test_pass; else test_fail "Not found: $H_TEMPLATE"; fi
+
+# Extract the session-verify/retry block by text anchor (not fixed line
+# numbers — XACA-1216 is concurrently editing other regions of this same
+# template). No {{...}} template placeholders appear inside this block (they
+# only appear in the config header further up), so it is valid bash as-is.
+_extract_session_loop_block() {
+    awk '
+        /^_SESSION_LOG="\/tmp\// { capture = 1 }
+        capture && /^echo "  All sessions initialized"$/ { exit }
+        capture { print }
+    ' "$1"
+}
+
+H_EXTRACTED="$TEST_TMP_DIR/case-h-extracted.sh"
+{
+    echo '_run_h_session_loop() {'
+    _extract_session_loop_block "$H_TEMPLATE"
+    echo '}'
+} > "$H_EXTRACTED"
+
+test_start "H preflight: session-verify/retry block extracts to valid bash"
+if [ -s "$H_EXTRACTED" ] && bash -n "$H_EXTRACTED" 2>"$TEST_TMP_DIR/h-syn.err"; then
+    test_pass
+else
+    test_fail "Extraction empty or invalid: $(cat "$TEST_TMP_DIR/h-syn.err" 2>/dev/null)"
+fi
+# shellcheck source=/dev/null
+source "$H_EXTRACTED"
+
+# Stub tmux: `has-session` ALWAYS reports missing (exit 1) regardless of
+# target — forces every fake per-agent script to actually run, and forces
+# BOTH the initial verify and the post-retry verify to fail, landing
+# deterministically on the "still missing" branch every time.
+H_STUB_BIN="$TEST_TMP_DIR/h-stub-bin"
+mkdir -p "$H_STUB_BIN"
+cat > "$H_STUB_BIN/tmux" <<'HSTUBEOF'
+#!/bin/sh
+for arg in "$@"; do
+    case "$arg" in
+        has-session) exit 1 ;;
+    esac
+done
+exit 0
+HSTUBEOF
+chmod +x "$H_STUB_BIN/tmux"
+
+H_HOME="$TEST_TMP_DIR/case-h-home"
+H_ATF="$TEST_TMP_DIR/case-h-atf"
+mkdir -p "$H_HOME" "$H_ATF/spacedock/scripts"
+
+# Two fake per-agent scripts, each shaped like the real XACA-1215-004
+# missing-directory guard's failure, with DIFFERENT cause text — proves the
+# fix shows each agent's OWN cause with no cross-contamination even though
+# the initial (parallel/backgrounded) launch phase interleaves both in the
+# shared $_SESSION_LOG.
+cat > "$H_ATF/spacedock/scripts/spacedock-flaky-startup.sh" <<'HFAKEEOF'
+#!/bin/bash
+echo "Initializing Spacedock Flaky..."
+echo "Error: working directory does not exist: /fake/not-cloned-repo" >&2
+echo "       (resolved from TEAM_WORKING_DIR for team 'spacedock' — check the team .conf, an" >&2
+echo "       env override, or that the repo/project directory has actually been cloned)" >&2
+exit 1
+HFAKEEOF
+chmod +x "$H_ATF/spacedock/scripts/spacedock-flaky-startup.sh"
+
+cat > "$H_ATF/spacedock/scripts/spacedock-flaky2-startup.sh" <<'HFAKE2EOF'
+#!/bin/bash
+echo "Initializing Spacedock Flaky2..."
+echo "Error: working directory does not exist: /fake/OTHER-repo" >&2
+exit 1
+HFAKE2EOF
+chmod +x "$H_ATF/spacedock/scripts/spacedock-flaky2-startup.sh"
+
+H_STDOUT="$TEST_TMP_DIR/case-h-stdout.log"
+(
+    TEAM_ID="spacedock"
+    AITEAMFORGE_DIR="$H_ATF"
+    TMUX_SOCKET="h-test-socket"
+    export TEAM_ID AITEAMFORGE_DIR TMUX_SOCKET
+    unset TMUX TMUX_PANE TMUX_SOCKET_REAL 2>/dev/null
+    TMUX_SOCKET="h-test-socket"
+    export PATH="$H_STUB_BIN:$PATH"
+    _run_h_session_loop
+) >"$H_STDOUT" 2>&1
+
+test_start "H: retry loop reports BOTH agents as still missing"
+if grep -q "spacedock-flaky still missing" "$H_STDOUT" 2>/dev/null && grep -q "spacedock-flaky2 still missing" "$H_STDOUT" 2>/dev/null; then
+    test_pass
+else
+    test_fail "Expected both 'still missing' lines not found: $(cat "$H_STDOUT" 2>/dev/null)"
+fi
+
+test_start "H (XACA-1215-017): the REAL cause reaches stdout (not just the log pointer)"
+if grep -q "Error: working directory does not exist: /fake/not-cloned-repo" "$H_STDOUT" 2>/dev/null \
+   && grep -q "Error: working directory does not exist: /fake/OTHER-repo" "$H_STDOUT" 2>/dev/null; then
+    test_pass
+else
+    test_fail "Cause text missing from stdout — only the log pointer was shown: $(cat "$H_STDOUT" 2>/dev/null)"
+fi
+
+test_start "H: cause lines are indented (visually distinct follow-up, not another top-level line)"
+if grep -qE '^       Error: working directory does not exist' "$H_STDOUT" 2>/dev/null; then
+    test_pass
+else
+    test_fail "Cause line not indented as expected: $(cat "$H_STDOUT" 2>/dev/null)"
+fi
+
+test_start "H: each agent's cause block shows ONLY its own cause (no cross-contamination)"
+H_BLOCK1="$(grep -A4 'spacedock-flaky still missing' "$H_STDOUT" 2>/dev/null)"
+H_BLOCK2="$(grep -A4 'spacedock-flaky2 still missing' "$H_STDOUT" 2>/dev/null)"
+if echo "$H_BLOCK1" | grep -q "not-cloned-repo" && ! echo "$H_BLOCK1" | grep -q "OTHER-repo" \
+   && echo "$H_BLOCK2" | grep -q "OTHER-repo" && ! echo "$H_BLOCK2" | grep -q "not-cloned-repo"; then
+    test_pass
+else
+    test_fail "Cross-contamination or missing cause detected. block1=[$H_BLOCK1] block2=[$H_BLOCK2]"
+fi
+
+test_start "H: per-agent retry scratch files are cleaned up (no leaked /tmp/.spacedock-flaky*-retry.*)"
+H_LEAKED=$(find /tmp/ -maxdepth 1 -name '.spacedock-flaky*-retry.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "${H_LEAKED:-0}" -eq 0 ]; then
+    test_pass
+else
+    test_fail "Leaked retry scratch file(s) under /tmp: $(find /tmp/ -maxdepth 1 -name '.spacedock-flaky*-retry.*' 2>/dev/null)"
+fi
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
