@@ -400,12 +400,27 @@ if [[ -n "$_xaca0463_existing_port" ]]; then
 elif command -v aiteamforge_compute_instance_port >/dev/null 2>&1; then
     unset _xaca0463_existing_port
     _xaca0463_allocated=""
-    if ! _xaca0463_allocated=$(aiteamforge_compute_instance_port "$TEAM_ID" "$_xaca0463_team_paths" 2>&1); then
-        echo "❌ XACA-0463 port allocator failed for template '$TEAM_ID':" >&2
-        echo "   $_xaca0463_allocated" >&2
+    # XACA-1206: capture STDOUT ONLY. The allocator's contract is "stdout: the
+    # port; stderr: diagnostics". This used to be `2>&1`, which folded any stderr
+    # line into the port value — measured on a schema_version 3 consumer, the
+    # accessor's "[aiteamforge-paths] WARNING: schema_version=3 unsupported"
+    # became part of TEAM_LCARS_PORT and the startup-script sed died with
+    # "unescaped newline inside substitute pattern". stderr now reaches the
+    # terminal directly, where it is still visible on failure.
+    if ! _xaca0463_allocated=$(aiteamforge_compute_instance_port "$TEAM_ID" "$_xaca0463_team_paths"); then
+        echo "❌ XACA-0463 port allocator failed for template '$TEAM_ID' (see the message above)." >&2
         echo "   See docs/architecture/team-id-contract.md §4.1 (Port allocation rule)." >&2
         exit 1
     fi
+    # XACA-1206: fail closed on anything but a bare positive integer. An exit-0
+    # allocator whose stdout is not a port must never reach the sed templates.
+    case "$_xaca0463_allocated" in
+        ''|*[!0-9]*|0)
+            echo "❌ XACA-0463 port allocator for template '$TEAM_ID' returned a non-port value: [$_xaca0463_allocated]" >&2
+            echo "   Refusing to render startup/connect scripts with it." >&2
+            exit 1
+            ;;
+    esac
     TEAM_LCARS_PORT="$_xaca0463_allocated"
     unset _xaca0463_allocated
     echo "  ✓ XACA-0463: allocated port $TEAM_LCARS_PORT for instance $INSTANCE_ID (template $TEAM_ID band)"

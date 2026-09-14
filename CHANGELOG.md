@@ -7,6 +7,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1206** — team install no longer fails on `schema_version: 3` configs, which is every
+  current consumer. The shell path library (`libexec/lib/aiteamforge-paths.sh`) accepted only schema
+  0/1/2 at both its jq filter and its python fallback, while the Python reader has written 3 since
+  XACA-0279; every accessor warned `schema_version=3 unsupported` on stderr. `install-team.sh`
+  captured the port allocator with `2>&1`, so that warning became part of `TEAM_LCARS_PORT` and the
+  startup-script `sed` died. Measured on M4Mini upgrading to v0.20.10: the XACA-1070 Space Dock
+  backfill reported "Provisioned 0 mandatory team(s); 1 failed". Fixes: both allowlists accept 3
+  (unknown versions still warn); the allocator is captured stdout-only; a non-integer port fails
+  closed before any template is rendered. New `tests/test-xaca-1206-schema-v3-team-install.sh`
+  (14 cases, bash 3.2 + 5), each fix mutation-checked.
 ## [0.20.10] - 2026-09-13
 - **XACA-0886 (skill mirror)** — `share/skills/Kanban Manager/SKILL.md` now documents the
   protected-subitem refusal on `kb-backlog sub cancel` / `kb-cancel` (`--user-approved` is

@@ -580,10 +580,12 @@ _aiteamforge_overlay_rows() {
     [ -z "$_config_path" ] && _config_path=$(aiteamforge_config_path)
     [ -f "$_config_path" ] || return 0
 
+    # XACA-1206: the schema allowlist in this filter and in the python fallback
+    # below must match the Python reader's readable set {1,2,3} (0 = absent).
     if command -v jq >/dev/null 2>&1; then
         jq -r --arg f "$_field" '
             ((.schema_version // 0) | tostring) as $sv
-            | (if ($sv == "0" or $sv == "1" or $sv == "2") then empty
+            | (if ($sv == "0" or $sv == "1" or $sv == "2" or $sv == "3") then empty
                else ("__SCHEMA__\tSCHEMA\t" + $sv + "\t") end),
               (if ((.teams // {}) | type) == "object"
                then (.teams | to_entries[]
@@ -613,7 +615,11 @@ if not isinstance(config, dict):
     raise SystemExit(0)
 
 version = str(config.get('schema_version', 0))
-if version not in ('0', '1', '2'):
+# XACA-1206: must match the Python reader's _READABLE_SCHEMA_VERSIONS {1,2,3}
+# (kanban-hooks/aiteamforge_paths.py). Python has WRITTEN schema 3 since
+# XACA-0279, so omitting 3 here warned on every current consumer config — and
+# install-team.sh used to capture that warning as the LCARS port.
+if version not in ('0', '1', '2', '3'):
     print("__SCHEMA__\tSCHEMA\t%s\t" % version)
 
 teams = config.get('teams')
