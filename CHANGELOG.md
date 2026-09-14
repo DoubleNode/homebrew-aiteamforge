@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.20.13] - 2026-09-14
+
 - **XACA-1212** — a fresh `aiteamforge setup` no longer aborts silently at the persona/logo copy
   step. The setup script runs under `set -eo pipefail`, and that loop copied
   `share/personas/<team>/avatars/*.png` (and terminal logos) with an unguarded glob and stderr
@@ -5958,7 +5960,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.12...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.13...HEAD
+[0.20.13]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.12...v0.20.13
 [0.20.12]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.11...v0.20.12
 [0.20.11]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.10...v0.20.11
 [0.20.10]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.9...v0.20.10
