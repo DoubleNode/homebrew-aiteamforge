@@ -11,6 +11,9 @@ TEAM_NAME="{{TEAM_NAME}}"
 TEAM_THEME="{{TEAM_THEME}}"
 AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
 TEAM_WORKING_DIR="{{TEAM_WORKING_DIR}}"
+# XACA-1216: "flat-dir" = deploy crew personas into the NON-GIT TEAM_WORKING_DIR
+# at startup (from the team conf; "" for every team that does not set it).
+TEAM_PERSONA_DEPLOY_MODE="{{TEAM_PERSONA_DEPLOY_MODE}}"
 TMUX_SOCKET="{{TEAM_TMUX_SOCKET}}"
 LCARS_PORT="{{TEAM_LCARS_PORT}}"
 ITERM_WINDOW_NAME="${TEAM_NAME}"
@@ -295,6 +298,58 @@ if [[ -f "$_PANEL_JSON_SCRIPT" ]]; then
     KANBAN_TMP_DIR="$_KANBAN_TMP" python3 "$_PANEL_JSON_SCRIPT" "$TEAM_ID" "$AITEAMFORGE_DIR" 2>/dev/null \
         || echo "  Warning: Agent panel JSON init failed (banner will use fallback values)"
 fi
+
+# >>> XACA-1216 persona-deploy (begin) — extracted verbatim by tests/test-xaca-1216-flat-persona-deploy.sh
+# ============================================================================
+# Crew persona deploy into a NON-GIT working dir (XACA-1216)
+# ============================================================================
+# Gated by the team conf's TEAM_PERSONA_DEPLOY_MODE="flat-dir". The git-aware
+# deploy modes never reach a working dir that is not a git work tree, so
+# without this the crew sessions created below start with no .claude/agents.
+# Runs BEFORE the async tmux init so every session sees the refreshed crew.
+#
+# Never aborts startup, and never reports success on the deployer's word
+# alone: the exit code is recorded here and judged in health check
+# "Personas" below, which also demands positive evidence on disk. There is
+# deliberately no `|| echo` arm that turns a failure into a warning line.
+_persona_deploy_rc_meaning() {
+    case "$1" in
+        0)   print -r -- "ok" ;;
+        1)   print -r -- "guard/usage refusal: bad team id, missing target, target is \$HOME or /, or a symlink escape" ;;
+        2)   print -r -- "write/prune failure, or a persona file was skipped" ;;
+        3)   print -r -- "no persona source at $AITEAMFORGE_DIR/$TEAM_ID/personas/agents" ;;
+        4)   print -r -- "refused: the working dir is inside a git work tree" ;;
+        90)  print -r -- "working dir unset or unsafe (empty, \$AITEAMFORGE_DIR, or \$HOME): '${TEAM_WORKING_DIR}'" ;;
+        127) print -r -- "deployer missing or not executable: $_DWP" ;;
+        *)   print -r -- "unexpected exit" ;;
+    esac
+}
+_PERSONA_DEPLOY_STATE=""   # "" = not gated -> no health row
+if [[ "$TEAM_PERSONA_DEPLOY_MODE" == "flat-dir" ]]; then
+    _PERSONA_DEPLOY_STATE="ran"
+    _PERSONA_DEPLOY_LOG="/tmp/${TEAM_ID}-persona-deploy-$(date +%Y%m%d-%H%M%S).log"
+    _DWP="$AITEAMFORGE_DIR/scripts/deploy-worktree-personas.sh"
+    _PERSONA_DEPLOY_RC=0
+    if [[ -z "$TEAM_WORKING_DIR" || "$TEAM_WORKING_DIR" == "$AITEAMFORGE_DIR" || "$TEAM_WORKING_DIR" == "$HOME" ]]; then
+        _PERSONA_DEPLOY_RC=90
+    elif [[ ! -x "$_DWP" ]]; then
+        _PERSONA_DEPLOY_RC=127
+    else
+        AITEAMFORGE_DIR="$AITEAMFORGE_DIR" "$_DWP" --flat-dir "$TEAM_WORKING_DIR" "$TEAM_ID" --force \
+            >"$_PERSONA_DEPLOY_LOG" 2>&1 || _PERSONA_DEPLOY_RC=$?
+    fi
+    if [[ "$_PERSONA_DEPLOY_RC" -ne 0 && "$_PERSONA_DEPLOY_RC" -ne 1 && "$_PERSONA_DEPLOY_RC" -ne 2 && "$_PERSONA_DEPLOY_RC" -ne 3 && "$_PERSONA_DEPLOY_RC" -ne 4 ]]; then
+        # The deployer never ran (or died oddly): record why, so the log the
+        # health check names always exists and says something.
+        print -r -- "persona deploy exit ${_PERSONA_DEPLOY_RC}: $(_persona_deploy_rc_meaning "$_PERSONA_DEPLOY_RC")" >>"$_PERSONA_DEPLOY_LOG" 2>/dev/null
+    fi
+    if [[ "$_PERSONA_DEPLOY_RC" -eq 0 ]]; then
+        echo "  Crew personas deployed to $TEAM_WORKING_DIR/.claude/agents (verified in health checks)"
+    else
+        echo "  ⚠️  Crew persona deploy FAILED — exit $_PERSONA_DEPLOY_RC ($(_persona_deploy_rc_meaning "$_PERSONA_DEPLOY_RC")) — see $_PERSONA_DEPLOY_LOG"
+    fi
+fi
+# <<< XACA-1216 persona-deploy (end)
 
 
 # ============================================================================
@@ -665,6 +720,39 @@ else
     echo "    tmux sessions   FAIL  missing: ${_MISSING_SESSIONS[*]}"
     _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
 fi
+
+# >>> XACA-1216 persona-health (begin) — extracted verbatim by tests/test-xaca-1216-flat-persona-deploy.sh
+# 5. Personas — only for teams gated into the flat-dir deploy above.
+#    OK needs POSITIVE evidence: the deploy exited 0 AND every *.md in the
+#    persona source is present in $TEAM_WORKING_DIR/.claude/agents. An exit 0
+#    alone is not enough — a deployer that DEFERRED (dev machine), no-op'd, or
+#    was stubbed can exit 0 having written nothing.
+if [[ -n "$_PERSONA_DEPLOY_STATE" ]]; then
+    _PERSONA_SRC="$AITEAMFORGE_DIR/$TEAM_ID/personas/agents"
+    _PERSONA_DST="$TEAM_WORKING_DIR/.claude/agents"
+    _PERSONA_SRC_COUNT=0
+    _PERSONA_MISSING=()
+    if [[ -d "$_PERSONA_SRC" ]]; then
+        while IFS= read -r _persona_src_file; do
+            [[ -n "$_persona_src_file" ]] || continue
+            _PERSONA_SRC_COUNT=$((_PERSONA_SRC_COUNT + 1))
+            [[ -f "$_PERSONA_DST/${_persona_src_file##*/}" ]] || _PERSONA_MISSING+=("${_persona_src_file##*/}")
+        done < <(find "$_PERSONA_SRC" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
+    fi
+    if [[ "$_PERSONA_DEPLOY_RC" -ne 0 ]]; then
+        echo "    Personas        FAIL  exit $_PERSONA_DEPLOY_RC ($(_persona_deploy_rc_meaning "$_PERSONA_DEPLOY_RC")) — see $_PERSONA_DEPLOY_LOG"
+        _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
+    elif [[ $_PERSONA_SRC_COUNT -eq 0 ]]; then
+        echo "    Personas        FAIL  exit 0 but no persona source files in $_PERSONA_SRC, so nothing proves a deploy — see $_PERSONA_DEPLOY_LOG"
+        _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
+    elif [[ ${#_PERSONA_MISSING[@]} -gt 0 ]]; then
+        echo "    Personas        FAIL  exit 0 but ${#_PERSONA_MISSING[@]} of $_PERSONA_SRC_COUNT persona file(s) missing from $_PERSONA_DST: ${_PERSONA_MISSING[*]} — see $_PERSONA_DEPLOY_LOG"
+        _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
+    else
+        echo "    Personas        OK  $_PERSONA_SRC_COUNT crew persona(s) in $_PERSONA_DST"
+    fi
+fi
+# <<< XACA-1216 persona-health (end)
 
 if [[ $_HEALTH_ERRORS -gt 0 ]]; then
     echo ""

@@ -4201,6 +4201,176 @@ deploy_team_personas_to_projects() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# _xaca1216_team_persona_deploy_mode <conf>
+#
+# XACA-1216: print a team conf's TEAM_PERSONA_DEPLOY_MODE ("" when unset).
+# Same subshell-isolation contract as _connect_script_team_flags: the conf is
+# sourced in a SUBSHELL so none of its assignments leak into the upgrade, and
+# `set +eo pipefail` keeps a malformed conf from aborting it. Unlike that
+# helper, a conf that fails to source is NOT collapsed into the benign default
+# — it prints the sentinel "#UNREADABLE" so the caller can count it as
+# uninspectable instead of silently treating a possibly-flagged team as
+# unflagged. (Every shipped conf sources with rc 0, measured 2026-09-14.)
+# ---------------------------------------------------------------------------
+_xaca1216_team_persona_deploy_mode() {
+  (
+    set +eo pipefail
+    TEAM_PERSONA_DEPLOY_MODE=""
+    # shellcheck disable=SC1090
+    if ! . "$1" >/dev/null 2>&1; then
+      printf '%s' '#UNREADABLE'
+      exit 0
+    fi
+    printf '%s' "${TEAM_PERSONA_DEPLOY_MODE:-}"
+  ) || printf '%s' '#UNREADABLE'
+}
+
+# ---------------------------------------------------------------------------
+# deploy_flat_team_personas
+#
+# XACA-1216: the upgrade-path half of the flat-dir persona deploy. Teams whose
+# conf sets TEAM_PERSONA_DEPLOY_MODE="flat-dir" (spacedock today) keep their
+# crew in a working dir that is NOT a git work tree, which
+# deploy_team_personas_to_projects (git project roots only) can never reach.
+#
+# WHY UPGRADE HAS TO DO THIS AT ALL: the rendered <team>-startup.sh deploys
+# on every startup, but `aiteamforge upgrade` never regenerates that master
+# startup script (update_templates renders only into config/). A host
+# provisioned before XACA-1216 therefore has a startup with no deploy step,
+# and this function is the only thing that reaches it.
+#
+# Contract:
+#   • Sequenced IMMEDIATELY after deploy_team_personas_to_projects, i.e. after
+#     update_team_personas has refreshed the S2 source. It must NOT move into
+#     update_mandatory_teams: that runs before update_team_personas and would
+#     publish the previous release's personas (XACA-0931-001 §3.6 regression).
+#   • REFRESH-ONLY. A team is a target only when its S2 source
+#     ${WORKING_DIR}/<team>/personas/agents already exists; this never
+#     materializes a team, and never creates a working dir. The working dir is
+#     the REGISTERED one (aiteamforge_team_working_dir — the resolver XACA-1070
+#     uses), not re-derived from the conf.
+#   • AITEAMFORGE_DIR is passed explicitly as $WORKING_DIR: kanban-helpers
+#     resets it on dev machines, and the deployer reads its source from it.
+#   • Counters: refreshed / refused (deployer rc 4 — target is inside a git
+#     work tree, left to the git-aware modes) / failed (any other nonzero) /
+#     uninspectable (unreadable conf, unresolvable or absent working dir,
+#     resolver unavailable). A summary line ALWAYS prints, including
+#     "0 target(s)", so "nothing to do" is never indistinguishable from "did
+#     not run".
+#   • Fail-soft: never aborts the upgrade, never changes its exit status. Any
+#     refusal/failure/uninspectable sets UPGRADE_PERSONA_DEPLOY_HAD_WARNINGS
+#     and APPENDS to UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY (the previous step
+#     may already have written one — overwriting it would hide that warning).
+#   • Honours --dry-run by forwarding --dry-run to the deployer.
+# ---------------------------------------------------------------------------
+deploy_flat_team_personas() {
+  print_section "Deploying Personas to Flat Team Working Directories"
+
+  local deployer="${WORKING_DIR}/scripts/deploy-worktree-personas.sh"
+  local teams_dir="${FRAMEWORK_DIR}/share/teams"
+  local -a dry_run_args=()
+  [ "$DRY_RUN" = true ] && dry_run_args=(--dry-run)
+
+  local targets=0 refreshed=0 refused=0 failed=0 uninspectable=0
+  local conf team mode wd deploy_rc
+
+  if [ ! -d "$teams_dir" ]; then
+    print_warning "Team conf directory not found at ${teams_dir} — cannot determine flat-dir persona deploy targets"
+    uninspectable=$((uninspectable + 1))
+  else
+    for conf in "$teams_dir"/*.conf; do
+      [ -f "$conf" ] || continue
+      team="$(basename "$conf" .conf)"
+      mode="$(_xaca1216_team_persona_deploy_mode "$conf")"
+      case "$mode" in
+        flat-dir) ;;
+        '#UNREADABLE')
+          print_warning "[${team}] ${conf} failed to source — cannot tell whether it is a flat-dir persona deploy team (uninspectable)"
+          uninspectable=$((uninspectable + 1))
+          continue
+          ;;
+        *) continue ;;
+      esac
+
+      if ! _xaca0925_valid_team_id "$team"; then
+        print_warning "[${team}] Team id contains characters outside [A-Za-z0-9_-] — skipping flat-dir persona deploy (path-safety guard)"
+        uninspectable=$((uninspectable + 1))
+        continue
+      fi
+
+      # Refresh-only: no S2 source on this box means the team is not
+      # provisioned here. Not a target, not a warning.
+      if [ ! -d "${WORKING_DIR}/${team}/personas/agents" ]; then
+        print_info "[${team}] flat-dir persona deploy team not provisioned on this machine (no ${WORKING_DIR}/${team}/personas/agents) — nothing to refresh"
+        continue
+      fi
+      targets=$((targets + 1))
+
+      if ! command -v aiteamforge_team_working_dir >/dev/null 2>&1; then
+        print_warning "[${team}] aiteamforge_team_working_dir() unavailable (aiteamforge-paths.sh not sourced) — cannot resolve the working dir to deploy into (uninspectable)"
+        uninspectable=$((uninspectable + 1))
+        continue
+      fi
+      wd="$(aiteamforge_team_working_dir "$team" 2>/dev/null)" || wd=""
+      if [ -z "$wd" ]; then
+        print_warning "[${team}] could not resolve a registered working dir — flat-dir persona deploy skipped (uninspectable)"
+        uninspectable=$((uninspectable + 1))
+        continue
+      fi
+      if [ ! -d "$wd" ]; then
+        print_warning "[${team}] registered working dir ${wd} does not exist — flat-dir persona deploy skipped; upgrade never creates it (uninspectable)"
+        uninspectable=$((uninspectable + 1))
+        continue
+      fi
+
+      if [ ! -f "$deployer" ]; then
+        print_warning "[${team}] deploy-worktree-personas.sh not found at ${deployer} (expected from update_aux_scripts earlier in this run) — flat-dir persona deploy failed"
+        failed=$((failed + 1))
+        continue
+      fi
+
+      deploy_rc=0
+      AITEAMFORGE_DIR="$WORKING_DIR" "$deployer" --flat-dir "$wd" "$team" --force "${dry_run_args[@]}" || deploy_rc=$?
+      case "$deploy_rc" in
+        0)
+          refreshed=$((refreshed + 1))
+          ;;
+        4)
+          refused=$((refused + 1))
+          print_warning "[${team}] Deploy into ${wd} REFUSED (exit 4): the working dir is inside a git work tree — left to the git-aware deploy modes; this team's crew has no flat-dir personas here"
+          ;;
+        *)
+          failed=$((failed + 1))
+          print_warning "[${team}] Deploy into ${wd} failed (exit ${deploy_rc}) — continuing (fail-soft)"
+          ;;
+      esac
+    done
+  fi
+
+  local summary_prefix="Flat-dir persona deploy"
+  [ "$DRY_RUN" = true ] && summary_prefix="Flat-dir persona deploy (dry run)"
+  local summary="${summary_prefix}: ${targets} target(s): ${refreshed} refreshed, ${refused} refused, ${failed} failed, ${uninspectable} uninspectable"
+
+  if [ "$targets" -eq 0 ] && [ "$uninspectable" -eq 0 ]; then
+    print_info "No provisioned flat-dir persona deploy teams on this box"
+  fi
+
+  if [ "$refused" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$uninspectable" -eq 0 ]; then
+    print_success "$summary"
+  else
+    print_warning "$summary"
+    UPGRADE_PERSONA_DEPLOY_HAD_WARNINGS=true
+    if [ -n "$UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY" ]; then
+      UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY="${UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY}; ${summary}"
+    else
+      UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY="$summary"
+    fi
+  fi
+
+  return 0
+}
+
 # XACA-0771: Mandatory shared alias files. install_aliases() (install-shell.sh)
 # lays down all three of these unconditionally on every fresh install — there
 # is no "optional alias file" today. Kept as its own function (mirrors the
@@ -5144,7 +5314,11 @@ update_team_personas
 # it is deployed, or this step pushes the previous release's content over a
 # currently-correct deployed copy — measured regression on darren-m4-mini's
 # `medical` target, XACA-0931 field evidence §3).
+# XACA-1216: deploy_flat_team_personas is bound by the SAME ordering rule
+# (fresh S2 first) and follows directly — non-git flat-dir working dirs
+# (spacedock) that the project-root step above cannot reach.
 deploy_team_personas_to_projects
+deploy_flat_team_personas
 update_claude_hooks
 update_global_claude_md
 update_skills
@@ -5234,7 +5408,7 @@ else
   # persona deploy target.
   if [ "$UPGRADE_PERSONA_DEPLOY_HAD_WARNINGS" = true ]; then
     print_warning "Completed with warnings: ${UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY}"
-    print_warning "See the 'Deploying Personas to Project Directories' section above for detail."
+    print_warning "See the 'Deploying Personas to Project Directories' and 'Deploying Personas to Flat Team Working Directories' sections above for detail."
   fi
   print_success "Dev-team has been upgraded successfully!"
   echo ""

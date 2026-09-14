@@ -57,6 +57,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   instead of only a log-file pointer; Case H exercises the extracted retry block with two
   concurrently-failing fake agents and asserts no cross-contamination between their causes.
 
+- **XACA-1216** — Space Dock's crew sessions now get their personas. Its working dir
+  (`~/.aiteamforge/spacedock`) is not a git work tree, so none of the git-aware persona deploy
+  modes ever reached it and every crew session started with no `.claude/agents`. A new conf flag,
+  `TEAM_PERSONA_DEPLOY_MODE="flat-dir"` (set only in `share/teams/spacedock.conf`; XACA-1218 widens
+  it), gates `deploy-worktree-personas.sh --flat-dir` at three sites. (1) `install-team.sh` deploys
+  after the persona copy and prints a loud 🚨 with the exit meaning on failure, but the install
+  continues. (2) The rendered `<team>-startup.sh` deploys before tmux session creation and adds a
+  **Personas** health check. OK requires positive evidence (exit 0 **and** every source persona
+  present in the target). A failure names the exit meaning and log path, counts toward the health
+  errors, and never aborts startup. (3) `aiteamforge upgrade` gains `deploy_flat_team_personas`
+  immediately after `deploy_team_personas_to_projects`. It is refresh-only (never materializes a
+  team or creates a working dir), resolves the registered working dir, counts refreshed / refused /
+  failed / uninspectable, always prints a summary, and appends to the end-of-run warning without
+  changing the exit status. Upgrade does not regenerate the master startup script, so this step is
+  what reaches already-provisioned hosts. `install-team.sh`'s `_read_conf` now emits the flag and
+  the startup render substitutes it (`""` for unflagged teams). New
+  `tests/test-xaca-1216-flat-persona-deploy.sh` (29 cases; bash 3.2 + 5, template snippet under
+  `zsh -f`, negative control against pre-change copies), registered in `tests/ci-manifest`.
+
 ## [0.20.13] - 2026-09-14
 
 - **XACA-1212** — a fresh `aiteamforge setup` no longer aborts silently at the persona/logo copy

@@ -175,6 +175,9 @@ _read_conf() {
         printf 'TEAM_REQUIRES_CLIENT_ID=%q\n' "${TEAM_REQUIRES_CLIENT_ID:-false}"
         printf 'TEAM_DEFAULT_PROJECT=%q\n' "${TEAM_DEFAULT_PROJECT:-}"
         printf 'TEAM_ORGANIZATION=%q\n' "${TEAM_ORGANIZATION:-}"
+        # XACA-1216: must be emitted here or the flag is lost at the eval below
+        # and neither the flat-dir deploy block nor the startup render sees it.
+        printf 'TEAM_PERSONA_DEPLOY_MODE=%q\n' "${TEAM_PERSONA_DEPLOY_MODE:-}"
 
         # Emit arrays as bash array declarations so they survive the eval.
         printf 'TEAM_AGENTS=('
@@ -2002,6 +2005,65 @@ if [[ -d "$PERSONAS_TEMPLATE_DIR" ]]; then
 fi
 
 # ============================================================================
+# XACA-1216: DEPLOY PERSONAS INTO A NON-GIT WORKING DIR (flat-dir)
+# ============================================================================
+# Gated by the team conf's TEAM_PERSONA_DEPLOY_MODE="flat-dir" (spacedock
+# today). The git-aware deploy modes never reach a working dir that is not a
+# git work tree, so without this the team's crew sessions start with no
+# .claude/agents. Deliberately OUTSIDE the PERSONAS_TEMPLATE_DIR guard above:
+# a flagged team that shipped no personas must fail loudly (deployer rc 3),
+# not be skipped in silence.
+#
+# Invokes the TAP copy of the deployer (not $AITEAMFORGE_DIR/scripts/...), so
+# this block has no ordering dependency on install-kanban having laid the
+# runtime copy down yet. AITEAMFORGE_DIR is passed explicitly: the deployer's
+# persona source is ${AITEAMFORGE_DIR}/<team>/personas/agents, which the block
+# above just populated.
+#
+# Fail-soft, never silent (XACA-0785-009 precedent): a nonzero deploy prints a
+# 🚨 naming the exit code and its meaning, and the install continues — the
+# rendered startup's "Personas" health check and the next `aiteamforge
+# upgrade` both retry it. `|| _xaca1216_rc=$?` keeps `set -euo pipefail` from
+# aborting the install on a failed deploy.
+_xaca1216_persona_rc_meaning() {
+    case "$1" in
+        1)   echo "guard/usage refusal: bad team id, missing target, target is \$HOME or /, or a symlink escape" ;;
+        2)   echo "write/prune failure, or a persona file was skipped" ;;
+        3)   echo "no persona source at $AITEAMFORGE_DIR/$TEAM_ID/personas/agents" ;;
+        4)   echo "refused: the working dir is inside a git work tree" ;;
+        90)  echo "working dir unset or unsafe (empty, \$AITEAMFORGE_DIR, or \$HOME)" ;;
+        91)  echo "could not create the working dir" ;;
+        127) echo "deployer not found" ;;
+        *)   echo "unexpected exit" ;;
+    esac
+}
+if [[ "${TEAM_PERSONA_DEPLOY_MODE:-}" == "flat-dir" && "$TEAM_HAS_PROJECTS" != "true" ]]; then
+    echo "👤 Deploying crew personas into the team working directory (flat-dir)..."
+    _XACA1216_WD="${TEAM_WORKING_DIR:-}"
+    _XACA1216_WD="${_XACA1216_WD/\$HOME/$HOME}"
+    _XACA1216_DEPLOYER="$HOMEBREW_TAP_ROOT/share/scripts/deploy-worktree-personas.sh"
+    _xaca1216_rc=0
+    if [[ -z "$_XACA1216_WD" || "$_XACA1216_WD" == "$AITEAMFORGE_DIR" || "$_XACA1216_WD" == "$HOME" ]]; then
+        _xaca1216_rc=90
+    elif [[ ! -f "$_XACA1216_DEPLOYER" ]]; then
+        _xaca1216_rc=127
+    elif ! mkdir -p "$_XACA1216_WD"; then
+        _xaca1216_rc=91
+    else
+        AITEAMFORGE_DIR="$AITEAMFORGE_DIR" bash "$_XACA1216_DEPLOYER" \
+            --flat-dir "$_XACA1216_WD" "$TEAM_ID" --force 2>&1 | sed 's/^/    /' || _xaca1216_rc=$?
+    fi
+    if [[ "$_xaca1216_rc" -eq 0 ]]; then
+        echo "  ✓ Personas deployed to $_XACA1216_WD/.claude/agents"
+    else
+        echo "  🚨 persona deploy FAILED for $TEAM_ID — exit $_xaca1216_rc ($(_xaca1216_persona_rc_meaning "$_xaca1216_rc")); target: ${_XACA1216_WD:-<unset>}" >&2
+        echo "  🚨 Install continuing — crew sessions will start WITHOUT personas until this is fixed. The startup 'Personas' health check and the next 'aiteamforge upgrade' retry the deploy." >&2
+    fi
+    echo ""
+    unset _XACA1216_WD _XACA1216_DEPLOYER _xaca1216_rc
+fi
+
+# ============================================================================
 # CREATE STARTUP/SHUTDOWN SCRIPTS FROM TEMPLATES
 # ============================================================================
 
@@ -2182,6 +2244,7 @@ elif [[ -f "$STARTUP_TEMPLATE" ]]; then
         -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
         -e "s|{{TEAM_WORKING_DIR}}|${_TEAM_WORKING_DIR_RESOLVED}|g" \
         -e "s|{{TEAM_REQUIRES_CLIENT}}|${REQUIRES_CLIENT}|g" \
+        -e "s|{{TEAM_PERSONA_DEPLOY_MODE}}|${TEAM_PERSONA_DEPLOY_MODE:-}|g" \
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
         "$STARTUP_TEMPLATE" > "${STARTUP_SCRIPT}.tmp"
 
