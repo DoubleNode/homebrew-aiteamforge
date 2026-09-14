@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.20.11] - 2026-09-14
+
 - **XACA-1193** — read-only consumers of `team-paths.json` no longer reach `load_config()`'s self-heal
   (quarantine / reseed / backfill with `.lock` + `.bak-pre-*` + rewrite). Mirrors
   `kanban-hooks/aiteamforge_paths.py` (new non-mutating `read_config_view()`, keyword-only `config=` on
@@ -5916,7 +5918,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.10...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.11...HEAD
+[0.20.11]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.10...v0.20.11
 [0.20.10]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.9...v0.20.10
 [0.20.9]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.8...v0.20.9
 [0.20.8]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.7...v0.20.8
