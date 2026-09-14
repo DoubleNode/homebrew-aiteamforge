@@ -16,6 +16,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Unset `AITEAMFORGE_TEAMS` still means `all`. New `tests/test-xaca-1211-setup-mandatory-only.sh`
   (11 cases, bash 3.2 + 5, extracted production block); red on the pre-fix setup, and each half of the
   fix mutation-checked on its own.
+  Review round 1 (XACA-1211-010): registered both `test-xaca-1211-setup-mandatory-only.sh` and
+  XACA-1206's `test-xaca-1206-schema-v3-team-install.sh` in `tests/ci-manifest` as `plain-shell`
+  (`tests/ci-manifest-check.sh` had flagged both; the two XACA-1187 files it also flags are left to
+  that ticket).
 - **XACA-1191** — mirror the fork-free `kb-knowledge-validate()` into
   `share/templates/kanban/kanban-helpers.template.sh` and
   `share/templates/aliases/kanban-aliases.sh`. Whole-tree validate drops from
