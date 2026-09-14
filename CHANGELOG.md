@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.12] - 2026-09-14
 - **XACA-1211** — `aiteamforge setup` can now provision a machine with only its mandatory team(s).
   The "No teams selected. At least one team is required." guard ran before
   `_atf_apply_mandatory_teams`, so Space Dock never counted, and non-interactive mode had no way to
@@ -5940,7 +5942,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.11...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.12...HEAD
+[0.20.12]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.11...v0.20.12
 [0.20.11]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.10...v0.20.11
 [0.20.10]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.9...v0.20.10
 [0.20.9]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.8...v0.20.9
