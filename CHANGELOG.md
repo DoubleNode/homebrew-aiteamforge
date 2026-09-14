@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-0886 (skill mirror)** — `share/skills/Kanban Manager/SKILL.md` now documents the
+  protected-subitem refusal on `kb-backlog sub cancel` / `kb-cancel` (`--user-approved` is
+  user-only). The canonical half landed with PR #881 but the skill mirror was never synced; this
+  was the only drift `sync-tap.sh --check` reported before cutting v0.20.10. Docs-only.
 - **XACA-1192** — `share/kanban-hooks/aiteamforge_paths.py` gains `peek_config()`, a
   non-mutating reader of `team-paths.json` (no quarantine, reseed, backfill, `.lock` or
   `.bak-*`; unhealthy states reported on stderr), and `share/kanban-hooks/aiteamforge_registry.py`
