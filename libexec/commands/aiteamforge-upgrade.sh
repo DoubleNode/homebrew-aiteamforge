@@ -2627,6 +2627,244 @@ PYEOF
   return 0
 }
 
+# Regenerate per-agent startup scripts (SESSION_DIRECTORY fix, XACA-1215) on
+# ALREADY-PROVISIONED teams.
+#
+# WHY THIS STEP EXISTS: update_mandatory_teams() below skips any team that
+# already has a board on disk — that IS its entire non-clobber guarantee
+# (XACA-1215-001 §2c) — so it never re-invokes install-team.sh for an
+# already-provisioned team, and the SESSION_DIRECTORY generator fix shipped
+# in install-team.sh (XACA-1215-003/004) would otherwise never reach a
+# machine that was set up BEFORE this fix landed. Left unaddressed, the bug
+# (agent panes silently launching in the wrong directory) persists
+# indefinitely on every already-installed box (measured live on M4Mini for
+# command/dns/spacedock, XACA-1215-001 §3). This step closes that gap by
+# delegating to install-team.sh --agent-scripts-only (XACA-1215-005a), which
+# resolves TEAM_WORKING_DIR through the EXACT same code path a full install
+# uses (conf default, --project/--client + XACA-0485 augmentation, the
+# ATF_ENV_TEAM_WORKING_DIR override) and performs no other install side
+# effect — no board, registry, team-paths.json, LCARS, zshrc, or persona
+# writes.
+#
+# DISCOVERY mirrors update_connect_scripts' philosophy directly above: never
+# glob or guess an instance into existence, act only on concrete evidence
+# already on disk. Here that evidence is narrower and simpler than the
+# connect-script sweep's three-source union needs to be, because
+# generate_per_agent_startup_scripts() (install-team.sh) writes into
+# $AITEAMFORGE_DIR/$TEAM_ID/scripts — keyed by the BASE TEMPLATE id, never
+# the instance id, even for a parametric team (XACA-1215-001 §2a) — so a
+# team is a candidate for THIS step only when its scripts dir already
+# contains at least one *-startup.sh carrying our own
+# "AITEAMFORGE_GENERATED_VERSION" marker, i.e. a file this generator itself
+# previously wrote. A team with ONLY hand-authored scripts (the XACA-0484
+# parametric copies the generator has never touched) is left alone here —
+# and even if this discovery were ever loosened, the generator's own
+# marker guard (XACA-1215-005b) independently refuses to overwrite any
+# marker-less file it finds.
+#
+# RESOLVING TEAM_WORKING_DIR:
+#   flat team (TEAM_HAS_PROJECTS=false, at most one instance, keyed by the
+#   team id itself): pass the REGISTERED working_dir on record in
+#   team-paths.json, when one exists, as a TEAM_WORKING_DIR env override —
+#   the exact variable XACA-1215-003 reads via ATF_ENV_TEAM_WORKING_DIR.
+#   When no registry entry exists for this team (measured true for BOTH
+#   command and dns on M4Mini, XACA-1215-001 §3 — neither appears in
+#   `.teams[]` there despite having live, buggy scripts), no override is
+#   passed and install-team.sh falls back to the conf's own
+#   TEAM_WORKING_DIR — which, after XACA-1215-003, is already the CORRECT
+#   value for exactly this case. The registry override is a refinement for
+#   a box whose registered path has drifted from the shipped conf, not a
+#   requirement for the base fix to reach command/dns.
+#
+#   parametric team (TEAM_HAS_PROJECTS=true): recover --project/--client
+#   the same way update_connect_scripts recovers them — decompose a
+#   registered team-paths.json instance key into <team>[-<client>]-<project>
+#   using the template's own TEAM_REQUIRES_CLIENT_ID flag, read via the
+#   SAME _connect_script_team_flags() helper update_connect_scripts uses.
+#   One install-team.sh call per matching registered instance — so a
+#   template with two live instances (e.g. two finance projects) gets its
+#   shared per-team scripts dir rendered once per instance, last call wins,
+#   exactly the same "team-scoped shared render target" behaviour
+#   update_connect_scripts already has for its own team-scoped connect
+#   script (XACA-1215-001 §2b — a pre-existing property of the shared-
+#   scripts-dir design, not something this step introduces or is scoped to
+#   fix). A parametric team with NO recoverable registered instance still
+#   gets exactly one call with no --project/--client, so install-team.sh's
+#   own TEAM_DEFAULT_PROJECT fallback (XACA-0485) resolves it rather than
+#   this step silently doing nothing for that team.
+update_generated_agent_scripts() {
+  print_section "Regenerating Per-Agent Startup Scripts (SESSION_DIRECTORY fix, XACA-1215)"
+
+  local teams_conf_dir="${FRAMEWORK_DIR}/share/teams"
+  local installer="${LIBEXEC_DIR}/installers/install-team.sh"
+
+  if [ ! -d "$teams_conf_dir" ]; then
+    print_warning "Team configs not found ($teams_conf_dir) — skipping per-agent script regen"
+    return 0
+  fi
+  if [ ! -f "$installer" ]; then
+    print_warning "install-team.sh not found ($installer) — skipping per-agent script regen"
+    return 0
+  fi
+
+  local updated=0 failed=0 skipped=0
+  local team_dir team_id conf scripts_dir f flags has_projects requires_client
+  local has_marker reg_working_dir instances instance_id remainder client project
+  local -a install_args
+  local _tp_reg_file="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+
+  for team_dir in "${WORKING_DIR}"/*/; do
+    [ -d "$team_dir" ] || continue
+    team_id="$(basename "$team_dir")"
+    scripts_dir="${team_dir}scripts"
+    [ -d "$scripts_dir" ] || continue
+
+    conf="${teams_conf_dir}/${team_id}.conf"
+    [ -f "$conf" ] || continue
+
+    # Candidate ONLY if at least one *-startup.sh in this team's scripts dir
+    # already carries our own marker (see discovery note above).
+    has_marker=false
+    for f in "$scripts_dir/${team_id}-"*-startup.sh; do
+      [ -f "$f" ] || continue
+      if grep -q "AITEAMFORGE_GENERATED_VERSION" "$f" 2>/dev/null; then
+        has_marker=true
+        break
+      fi
+    done
+    [ "$has_marker" = true ] || continue
+
+    flags="$(_connect_script_team_flags "$conf")"
+    has_projects="${flags%%|*}"
+    requires_client="${flags##*|}"
+
+    if [ "$has_projects" != "true" ]; then
+      # Flat team — at most one instance, keyed by team_id itself.
+      reg_working_dir=""
+      if [ -f "$_tp_reg_file" ] && command -v python3 >/dev/null 2>&1; then
+        reg_working_dir="$(python3 - "$_tp_reg_file" "$team_id" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        cfg = json.load(fh)
+    entry = (cfg.get("teams", {}) or {}).get(sys.argv[2]) or {}
+    wd = entry.get("working_dir")
+    if wd and isinstance(wd, str):
+        print(wd)
+except Exception:
+    pass
+PYEOF
+)"
+      fi
+
+      if [ "$DRY_RUN" = true ]; then
+        if [ -n "$reg_working_dir" ]; then
+          echo "Would regenerate ${team_id} per-agent startup scripts (TEAM_WORKING_DIR=${reg_working_dir})"
+        else
+          echo "Would regenerate ${team_id} per-agent startup scripts (conf default working dir)"
+        fi
+        updated=$((updated + 1))
+        continue
+      fi
+
+      print_info "Regenerating ${team_id} per-agent startup scripts..."
+      if ( AITEAMFORGE_DIR="${WORKING_DIR}" TEAM_WORKING_DIR="${reg_working_dir}" \
+           bash "$installer" "$team_id" --install-dir "${WORKING_DIR}" --agent-scripts-only \
+           </dev/null 2>&1 | sed 's/^/    /' ); then
+        print_success "Regenerated ${team_id} per-agent startup scripts"
+        updated=$((updated + 1))
+      else
+        print_warning "Failed to regenerate ${team_id} per-agent startup scripts (continuing)"
+        failed=$((failed + 1))
+      fi
+      continue
+    fi
+
+    # Parametric team — recover client/project the same way
+    # update_connect_scripts does: decompose registered team-paths.json
+    # instance keys whose prefix matches this team_id.
+    instances=""
+    if [ -f "$_tp_reg_file" ] && command -v python3 >/dev/null 2>&1; then
+      instances="$(python3 - "$_tp_reg_file" "$team_id" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        cfg = json.load(fh)
+    team_id = sys.argv[2]
+    teams = cfg.get("teams", {}) or {}
+    for instance_id in teams.keys():
+        instance_id = str(instance_id)
+        if instance_id == team_id or instance_id.startswith(team_id + "-"):
+            print(instance_id)
+except Exception:
+    pass
+PYEOF
+)"
+    fi
+
+    if [ -z "$instances" ]; then
+      # No registered instance recoverable — one call with no --project/
+      # --client, so install-team.sh's own TEAM_DEFAULT_PROJECT fallback
+      # (XACA-0485) resolves it rather than silently skipping the team.
+      instances="$team_id"
+    fi
+
+    while IFS= read -r instance_id; do
+      [ -n "$instance_id" ] || continue
+      remainder="${instance_id#"$team_id"}"
+      remainder="${remainder#-}"
+      client=""
+      project=""
+      if [ -n "$remainder" ]; then
+        if [ "$requires_client" = "true" ]; then
+          client="${remainder%%-*}"
+          project="${remainder#*-}"
+          if [ -z "$client" ] || [ -z "$project" ] || [ "$client" = "$remainder" ]; then
+            print_warning "Skipping instance '${instance_id}' — cannot split '${remainder}' into <client>-<project> for template '${team_id}'"
+            skipped=$((skipped + 1))
+            continue
+          fi
+        else
+          project="$remainder"
+        fi
+      fi
+
+      install_args=( "$team_id" --install-dir "${WORKING_DIR}" --agent-scripts-only )
+      [ -n "$client" ] && install_args+=( --client "$client" )
+      [ -n "$project" ] && install_args+=( --project "$project" )
+
+      if [ "$DRY_RUN" = true ]; then
+        echo "Would regenerate ${instance_id} per-agent startup scripts (template ${team_id})"
+        updated=$((updated + 1))
+        continue
+      fi
+
+      print_info "Regenerating ${instance_id} per-agent startup scripts..."
+      if ( AITEAMFORGE_DIR="${WORKING_DIR}" bash "$installer" "${install_args[@]}" </dev/null 2>&1 | sed 's/^/    /' ); then
+        print_success "Regenerated ${instance_id} per-agent startup scripts"
+        updated=$((updated + 1))
+      else
+        print_warning "Failed to regenerate ${instance_id} per-agent startup scripts (continuing)"
+        failed=$((failed + 1))
+      fi
+    done <<< "$instances"
+  done
+
+  if [ $((updated + failed)) -eq 0 ]; then
+    print_success "No installed team per-agent startup scripts to regenerate"
+  elif [ "$DRY_RUN" = true ]; then
+    print_success "Would regenerate ${updated} team's per-agent startup script(s)"
+  elif [ "$failed" -gt 0 ]; then
+    print_warning "Regenerated ${updated} team's per-agent startup script(s); ${failed} failed (non-fatal)"
+  else
+    print_success "Regenerated ${updated} team's per-agent startup script(s)"
+  fi
+  if [ "$skipped" -gt 0 ]; then
+    print_warning "Skipped ${skipped} unrecognised instance(s) (non-fatal)"
+  fi
+  return 0
+}
+
 # Update top-level runtime helpers laid into WORKING_DIR/scripts/ (XACA-0608, extended).
 #
 # BUGFIX XACA-0608 (extended scope): the install path lays a set of top-level
@@ -4869,6 +5107,16 @@ update_knowledge_repo
 update_knowledge_sync
 update_aux_scripts
 update_team_scripts
+# XACA-1215-005c: regenerate per-agent startup scripts (SESSION_DIRECTORY
+# fix) on already-provisioned teams — see update_generated_agent_scripts'
+# own header comment for the full rationale. Wired next to update_team_scripts
+# (same "refresh what a prior install already rendered" family of step).
+# Deliberately BEFORE update_mandatory_teams/update_connect_scripts below:
+# unlike update_connect_scripts' registry scan, this step tolerates a team
+# having no team-paths.json entry yet (falls back to the conf's own
+# TEAM_WORKING_DIR, already correct post-XACA-1215-003) — so it does not
+# need to wait for update_mandatory_teams to have registered anything first.
+update_generated_agent_scripts
 # XACA-1070 (subitems 004-006): backfill mandatory-fleet teams onto this
 # already-installed machine. Deliberately sequenced BEFORE update_connect_scripts
 # — a newly-provisioned mandatory team's team-paths.json entry (written by

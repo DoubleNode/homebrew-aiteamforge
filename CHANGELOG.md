@@ -16,6 +16,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   now warns on a SKIPPED run when the `com.aiteamforge.auto-upgrade` LaunchAgent is still present
   (orphaned agent) and reports ok otherwise.
 
+- **XACA-1215** — generated per-agent startup scripts now open in the team's real working directory.
+  `install-team.sh generate_per_agent_startup_scripts()` hardcoded `SESSION_DIRECTORY="$HOME/<team>"`
+  and ignored the team conf's `TEAM_WORKING_DIR`, and `tmux new-session -c <missing dir>` exits 0 and
+  drops the pane into `$HOME`, so the failure was silent. Measured on M4Mini (0.20.11): the spacedock
+  and command scripts pointed at nonexistent `~/spacedock` and `~/command`, while the real
+  `~/.aiteamforge/spacedock` and `~/dev-team` existed. Flat teams affected by conf: command, dns,
+  spacedock. Fix:
+  - `SESSION_DIRECTORY` comes from the final resolved `TEAM_WORKING_DIR`, including XACA-0485
+    project/client augmentation and the `TEAM_WORKING_DIR` env override. It is written as `$HOME/...`
+    when under HOME, otherwise as an absolute path, and is shell-escaped. The pane `cd` is quoted.
+  - Generated scripts check the directory before creating the session. A missing per-machine dir
+    (under `~/.aiteamforge/` or `$AITEAMFORGE_DIR`) is created; any other missing dir is a stderr error
+    and `exit 1`, so an uncloned repo is never masked.
+  - New `install-team.sh --agent-scripts-only` renders only the per-agent startup scripts. The
+    generator function moved earlier in the file, verbatim apart from the changes above, so this
+    early exit could call it; review with `git diff --color-moved`.
+  - The generator no longer overwrites a target lacking the `AITEAMFORGE_GENERATED_VERSION` marker.
+    This also stops it clobbering the hand-authored XACA-0484 parametric-team scripts (finance et al.),
+    which the pre-fix installer was measured doing in a sandbox.
+  - New upgrade step `update_generated_agent_scripts` regenerates marker-bearing per-agent scripts for
+    already-provisioned teams. Before this, the mandatory-team backfill skipped them and a generator fix
+    never reached an existing host.
+  - New `tests/test-xaca-1215-session-directory.sh`, with an opt-in `--negative-control <ref>` mode
+    that proves the assertions fail on the pre-fix installer.
+
 ## [0.20.13] - 2026-09-14
 
 - **XACA-1212** — a fresh `aiteamforge setup` no longer aborts silently at the persona/logo copy

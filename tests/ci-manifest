@@ -141,3 +141,4 @@ test-xaca-1070-mandatory-install.sh             plain-shell
 test-xaca-1206-schema-v3-team-install.sh        plain-shell
 test-xaca-1211-setup-mandatory-only.sh          plain-shell
 test-xaca-1212-setup-missing-avatars.sh         plain-shell
+test-xaca-1215-session-directory.sh             plain-shell

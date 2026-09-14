@@ -41,6 +41,15 @@ AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 
 TEAM_ID=""
 CONNECT_ONLY=false
+# XACA-1215-005: renders ONLY the per-agent startup scripts (via
+# generate_per_agent_startup_scripts) then exits — no board, registry,
+# team-paths.json, .aiteamforge-config, LCARS, zshrc, or persona writes.
+# Resolves TEAM_WORKING_DIR through the SAME code path as a full install
+# (XACA-0485 project/client augmentation, ATF_ENV_TEAM_WORKING_DIR override)
+# so it can never drift from what a full install would have computed. Lets
+# `aiteamforge upgrade` backfill the SESSION_DIRECTORY fix (XACA-1215-003/004)
+# onto already-provisioned teams without re-running the whole installer.
+AGENT_SCRIPTS_ONLY=false
 ARG_PROJECT=""
 ARG_CLIENT=""
 # XACA-0862-024: direct "caller synthesized this --project/--client argument"
@@ -67,6 +76,10 @@ while [[ $# -gt 0 ]]; do
             CONNECT_ONLY=true
             shift
             ;;
+        --agent-scripts-only)
+            AGENT_SCRIPTS_ONLY=true
+            shift
+            ;;
         --project)
             ARG_PROJECT="$2"
             shift 2
@@ -88,7 +101,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TEAM_ID" ]]; then
-    echo "Usage: install-team.sh <team-id> [--install-dir <path>] [--connect-only]"
+    echo "Usage: install-team.sh <team-id> [--install-dir <path>] [--connect-only] [--agent-scripts-only]"
     echo ""
     echo "Available teams:"
     for conf in "$TEAMS_DIR"/*.conf; do
@@ -1035,6 +1048,677 @@ if [[ "$CONNECT_ONLY" == "true" ]]; then
     exit 0
 fi
 
+# ============================================================================
+# XACA-1215-005: generate_per_agent_startup_scripts() is defined HERE (much
+# earlier than its original location further down the file, where the
+# unconditional full-install call to it still lives unchanged) so that the
+# --agent-scripts-only early exit below (after the XACA-0498 dev-source
+# guard) can call it having performed NO other install side effects yet —
+# no team directory scaffolding, no persona copy, no board/registry/
+# team-paths/LCARS/zshrc writes. A bash function definition has no runtime
+# dependency on where in the file it appears (only on being defined before
+# it is CALLED), and this function is self-contained — it only reads
+# TEAM_ID/AITEAMFORGE_DIR/TEAM_COLOR/TEAM_CONF/HOMEBREW_TAP_ROOT/
+# TEAM_WORKING_DIR, all already resolved by the time this point is reached
+# (TEAM_COLOR from the conf eval near the top; TEAM_WORKING_DIR by the end
+# of the XACA-0485 block directly above) — so moving the definition here
+# changes nothing about how it behaves on the ORIGINAL call site below.
+# ============================================================================
+# ============================================================================
+# GENERATE PER-AGENT STARTUP SCRIPTS
+# ============================================================================
+# Creates individual startup scripts for each agent persona found in the team's
+# personas directory.  Scripts are named <team>-<slug>-startup.sh and
+# follow the android-bridge-startup.sh pattern: hardcoded persona variables,
+# a setup_window() function, 4 named tmux windows, status-line theming, and a
+# SKIP_ATTACH guard.
+#
+# The generator is driven by persona .md files (not TEAM_AGENTS). The
+# frontmatter 'name:' field (e.g. "reno") is the Claude agent's CHARACTER
+# identity, NOT the terminal slug (e.g. "engineering") — those are two
+# different namespaces that happen to collide on some teams (Academy) and
+# diverge sharply on others (Finance: zek -> nagus). The slug is resolved
+# via the AGENT_TERMINAL_<character> map in the team .conf (XACA-0785) and
+# drives every filesystem/tmux identifier: the startup script filename,
+# SESSION_NAME/SESSION_CODE, and therefore <team>-<slug>-prompt.txt
+# resolution. Personas with no AGENT_TERMINAL_ entry are subagent-only
+# (never launched as a persistent terminal) and are skipped entirely.
+# AGENT_WINDOWS_* / AGENT_TERMINAL_* variables are both read directly from
+# the raw conf text because the _read_conf() loader only serialises
+# arrays/vars for agents whose names appear in TEAM_AGENTS, and character
+# names (reno, emh, thok, zek) often differ from the TEAM_AGENTS role
+# labels (engineering, medical, training, nagus) that AGENT_WINDOWS_*/
+# AGENT_TERMINAL_* target values are keyed by.
+# ============================================================================
+
+generate_per_agent_startup_scripts() {
+    local personas_dir="$AITEAMFORGE_DIR/$TEAM_ID/personas/agents"
+    # Fall back to the homebrew-tap share layout if installed layout is absent
+    if [[ ! -d "$personas_dir" ]]; then
+        personas_dir="$HOMEBREW_TAP_ROOT/share/personas/$TEAM_ID/agents"
+    fi
+    if [[ ! -d "$personas_dir" ]]; then
+        echo "  ⚠️  No personas directory found for $TEAM_ID — skipping per-agent startup scripts"
+        return 0
+    fi
+
+    local scripts_dir="$AITEAMFORGE_DIR/$TEAM_ID/scripts"
+    mkdir -p "$scripts_dir"
+
+    # Read all AGENT_WINDOWS_* values directly from the raw conf text so that
+    # slug-named keys (e.g. AGENT_WINDOWS_engineering) are found even when the
+    # TEAM_AGENTS array uses role labels (e.g. "engineering").
+    local raw_conf_text
+    raw_conf_text=$(grep '^AGENT_WINDOWS_' "$TEAM_CONF" 2>/dev/null || true)
+
+    # Read all AGENT_TERMINAL_* values (character -> terminal slug map, XACA-0785)
+    # the same way, for the same reason.
+    local raw_terminal_text
+    raw_terminal_text=$(grep '^AGENT_TERMINAL_' "$TEAM_CONF" 2>/dev/null || true)
+
+    local tap_version
+    tap_version="$(cat "$HOMEBREW_TAP_ROOT/VERSION" 2>/dev/null || echo "unknown")"
+
+    # XACA-1215: SESSION_DIRECTORY source. Use the FINAL resolved
+    # TEAM_WORKING_DIR (set well before this function runs — see the
+    # XACA-0485 block / ATF_ENV_TEAM_WORKING_DIR override above, ~line
+    # 1041-1082) rather than re-deriving it here, so this generator can never
+    # drift from the value every other consumer (team-paths.json, LCARS,
+    # .aiteamforge-config) already agrees on. Falls back to
+    # $AITEAMFORGE_DIR/$TEAM_ID only if somehow empty (should not happen by
+    # the time this function runs, but a generator must never emit an empty
+    # SESSION_DIRECTORY).
+    local _xaca1215_working_dir="${TEAM_WORKING_DIR:-}"
+    if [[ -z "$_xaca1215_working_dir" ]]; then
+        _xaca1215_working_dir="$AITEAMFORGE_DIR/$TEAM_ID"
+    fi
+
+    # Contract to the portable "$HOME/..." literal form when the resolved dir
+    # IS $HOME or lies under it (matches the pre-fix hardcode's shape and
+    # keeps generated scripts relocatable across users) — otherwise emit the
+    # absolute path. This is the ONLY place $HOME is compared/substituted;
+    # the python renderer below treats the result as opaque text to escape,
+    # never re-deriving or re-expanding it (Decision 1, rejected alternative
+    # "re-read TEAM_WORKING_DIR inside python").
+    local _xaca1215_session_directory_src="$_xaca1215_working_dir"
+    if [[ "$_xaca1215_session_directory_src" == "$HOME" ]]; then
+        _xaca1215_session_directory_src='$HOME'
+    elif [[ "$_xaca1215_session_directory_src" == "$HOME"/* ]]; then
+        _xaca1215_session_directory_src="\$HOME${_xaca1215_session_directory_src#"$HOME"}"
+    fi
+
+    python3 - "$personas_dir" "$scripts_dir" "$TEAM_ID" \
+              "$AITEAMFORGE_DIR" "$TEAM_COLOR" "$raw_conf_text" "$tap_version" "$raw_terminal_text" \
+              "$_xaca1215_session_directory_src" <<'PYEOF'
+import re
+import sys
+import os
+from pathlib import Path
+
+# ---- Arguments ----
+personas_dir  = Path(sys.argv[1])
+scripts_dir   = Path(sys.argv[2])
+team_id       = sys.argv[3]
+atf_dir       = sys.argv[4]
+team_color    = sys.argv[5]          # hex e.g. "#0099CC"
+raw_conf_text = sys.argv[6]          # raw AGENT_WINDOWS_* lines from conf
+tap_version   = sys.argv[7] if len(sys.argv) > 7 else "unknown"
+raw_terminal_text = sys.argv[8] if len(sys.argv) > 8 else ""   # raw AGENT_TERMINAL_* lines
+# XACA-1215: pre-contracted SESSION_DIRECTORY source text from the bash
+# caller — either a literal "$HOME/..." (or bare "$HOME") shell-expansion
+# prefix, or an absolute path with no $HOME involvement. Treated as opaque
+# text here: escaped for safe embedding, never re-derived or re-expanded.
+session_directory_src = sys.argv[9] if len(sys.argv) > 9 else ""
+
+# ---- Parse AGENT_WINDOWS from raw conf text ----
+# Each line looks like:  AGENT_WINDOWS_engineering="win0 win1 win2 win3"
+# NOTE: keyed by terminal SLUG (not character) — same namespace as AGENT_TERMINAL_*
+# target values below.
+agent_windows = {}
+for line in raw_conf_text.splitlines():
+    m = re.match(r'^AGENT_WINDOWS_(\w+)="([^"]*)"', line.strip())
+    if m:
+        agent_windows[m.group(1).lower()] = m.group(2).split()
+
+# ---- Parse AGENT_TERMINAL_<character> -> <slug> map from raw conf text (XACA-0785) ----
+# Each line looks like:  AGENT_TERMINAL_zek="nagus"
+# The variable-name segment normalizes '-' to '_' (e.g. persona "quark-fin" ->
+# AGENT_TERMINAL_quark_fin), matching the AGENT_WINDOWS_* convention.
+#
+# XACA-0785-006/007: the slug VALUE flows straight into generated filenames and
+# into double-quoted shell in the generated zshrc (SESSION_NAME="{terminal_id}"),
+# so a typo'd or hostile value (e.g. containing '../' or '$(...)') would produce
+# a garbage path or command substitution. parse_agent_terminal_map() rejects
+# malformed slugs and duplicate slug targets instead of letting them flow
+# through — same "warn loudly, never silent" bar this ticket exists to enforce.
+_AGENT_TERMINAL_SLUG_RE = re.compile(r'^[a-z0-9][a-z0-9_-]*$')
+
+
+def parse_agent_terminal_map(raw_text, team_id):
+    """Parse AGENT_TERMINAL_<character>="<slug>" lines into a char_key -> slug map.
+
+    Returns (agent_terminal, quarantined):
+      agent_terminal: char_key -> slug (slug is "" for an explicit empty value —
+        XACA-0785-008 needs "no entry" and "empty entry" distinguishable by callers).
+      quarantined: char_key set that HAD a raw entry but was rejected (malformed
+        slug format, or a slug value already claimed by another character) — a
+        loud warning was already printed here. Callers must treat these as
+        "already handled", NOT as "no entry" (which would print the misleading
+        subagent-only-persona message for what is actually a config bug).
+    """
+    agent_terminal = {}
+    slug_owner = {}
+    quarantined = set()
+    for line in raw_text.splitlines():
+        m = re.match(r'^AGENT_TERMINAL_(\w+)="([^"]*)"', line.strip())
+        if not m:
+            continue
+        char_key = m.group(1).lower()
+        slug = m.group(2).strip()
+        if not slug:
+            # Empty value is a distinct case from "no entry at all" — retain it
+            # (not quarantined) so the per-persona loop can tell them apart.
+            agent_terminal[char_key] = ""
+            continue
+        if not _AGENT_TERMINAL_SLUG_RE.match(slug):
+            print(f"  ⚠️  {team_id}/{char_key}: AGENT_TERMINAL_{char_key}=\"{slug}\" is not a valid "
+                  f"terminal slug (must match ^[a-z0-9][a-z0-9_-]*$) — skipping this persona's terminal "
+                  f"generation rather than risk a corrupted path or shell injection (XACA-0785-006)",
+                  file=sys.stderr)
+            quarantined.add(char_key)
+            continue
+        if slug in slug_owner and slug_owner[slug] != char_key:
+            print(f"  ⚠️  {team_id}: AGENT_TERMINAL_{char_key}=\"{slug}\" collides with "
+                  f"AGENT_TERMINAL_{slug_owner[slug]}=\"{slug}\" — two characters mapped to the same "
+                  f"terminal slug would silently overwrite each other's generated startup "
+                  f"script/zshrc (last-writer-wins). Keeping AGENT_TERMINAL_{slug_owner[slug]}; "
+                  f"AGENT_TERMINAL_{char_key} is IGNORED. Fix the .conf so each persona has a unique "
+                  f"slug (XACA-0785-007)", file=sys.stderr)
+            quarantined.add(char_key)
+            continue
+        slug_owner[slug] = char_key
+        agent_terminal[char_key] = slug
+    return agent_terminal, quarantined
+
+
+agent_terminal, _quarantined_terminal_chars = parse_agent_terminal_map(raw_terminal_text, team_id)
+
+# ---- Frontmatter parser ----
+def parse_frontmatter(text):
+    result = {}
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return result
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if ":" in stripped:
+            key, _, val = stripped.partition(":")
+            val = val.strip().strip('"').strip("'")
+            if key.strip() not in result:
+                result[key.strip()] = val
+    return result
+
+# ---- Bold-field extractor (matches ## Core Identity section) ----
+def parse_core_identity(text):
+    result = {"developer": "", "role": "", "location": "", "theme": ""}
+    for header_pattern in (r"^##\s+Core Identity", r"^##\s+Your Identity"):
+        m = re.search(header_pattern, text, re.MULTILINE)
+        if m:
+            rest = text[m.end():]
+            ns = re.search(r"^##\s+", rest, re.MULTILINE)
+            section = rest[:ns.start()] if ns else rest
+            break
+    else:
+        return result
+
+    def find_field(field, text):
+        pat = rf"\*\*{re.escape(field)}\*\*:?\s*(.+)"
+        m = re.search(pat, text)
+        if m:
+            return m.group(1).strip().rstrip("\\").strip()
+        pat2 = rf"\*\*{re.escape(field)}:\*\*\s*(.+)"
+        m2 = re.search(pat2, text)
+        if m2:
+            return m2.group(1).strip().rstrip("\\").strip()
+        return ""
+
+    result["developer"] = find_field("Name", section) or find_field("Character", section)
+    result["role"]      = find_field("Role", section)
+    result["location"]  = find_field("Location", section)
+    theme_raw           = find_field("Uniform Color", section)
+    if theme_raw:
+        result["theme"] = theme_raw.upper()
+    return result
+
+# ---- Uniform-color → tmux colour codes ----
+# Format: (bg_code, accent_code)
+# Derived from proven dev-team per-agent startup scripts.
+# These are default values; teams can override via THEME_COLORS_<THEME> in .conf.
+THEME_COLORS = {
+    "COMMAND":    (124, 160),
+    "OPERATIONS": (136, 178),
+    "SCIENCES":   (25,  33),
+    "SCIENCE":    (30,  37),
+    "SECURITY":   (236, 240),
+    "PROMENADE":  (94,  214),
+    "MEDICAL":    (25,  33),
+    "INCIDENT":   (52,  160),
+    "ENGINEERING":(94,  172),
+    "OBSERVATION":(60,  99),
+    "HELM":       (136, 220),
+    "NAVIGATION": (58,  220),
+    "COMMUNICATIONS": (124, 196),
+}
+DEFAULT_THEME_COLORS = (240, 250)
+
+# ---- Session description builder ----
+def make_session_desc(team_id, terminal_id, frontmatter_desc):
+    team_upper     = team_id.upper().replace("-", " ")
+    terminal_upper = terminal_id.upper().replace("-", " ")
+    base = f"{team_upper} {terminal_upper}"
+    if frontmatter_desc and " - " in frontmatter_desc:
+        after_dash = frontmatter_desc.split(" - ", 1)[1].strip()
+        suffix = re.split(r"[,.]", after_dash)[0].strip()
+        if suffix:
+            return f"{base} - {suffix.upper()}"
+    return base
+
+# ---- Location formatter ----
+def make_location(team_id, parsed_location):
+    if parsed_location and " - " in parsed_location:
+        parts = parsed_location.split(" - ", 1)
+        short_team = parts[0].strip().split()[-1] if parts[0].strip().split() else parts[0].strip()
+        return f"{short_team}: {parts[1].strip()}"
+    return parsed_location or team_id.title()
+
+# ---- Window description helper ----
+def window_desc(win_name, terminal_id, win_index):
+    """Derive a TERMINAL_DESCRIPTION for a window name.
+    Window 0 is always '<Division> Command Center' to match dev-team pattern.
+    Subsequent windows use the window name in title case."""
+    if win_index == 0:
+        return f"{terminal_id.replace('-', ' ').title()} Command Center"
+    # Subsequent windows: capitalise the window name
+    return win_name.replace("-", " ").title()
+
+# ---- SESSION_DIRECTORY renderer (XACA-1215) ----
+# session_directory_src is pre-contracted by the bash caller: either a
+# literal "$HOME" / "$HOME/..." prefix (the one live shell expansion we
+# intentionally preserve) or an absolute path with no $HOME involvement.
+# This function only ESCAPES it for safe embedding inside the generated
+# script's double-quoted `SESSION_DIRECTORY="..."` assignment — it never
+# re-derives or re-expands the path (that would reopen the two-resolver
+# drift this ticket exists to close).
+_SESSION_DIR_HOME_PREFIX = "$HOME"
+
+def render_session_directory(raw, team_id):
+    """Escape `raw` for embedding in SESSION_DIRECTORY="...", preserving a
+    literal leading "$HOME" (inserted by the bash caller, never by us) as
+    the one live shell expansion. Returns the escaped string, or None if the
+    value must be refused (empty, or containing newline/control characters —
+    a raw byte like that could break the generated script or worse)."""
+    if not raw:
+        print(f"  ⚠️  {team_id}: no working directory resolved for SESSION_DIRECTORY — "
+              f"refusing to generate per-agent startup scripts rather than emit an empty "
+              f"or wrong session directory (XACA-1215)", file=sys.stderr)
+        return None
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
+        print(f"  ⚠️  {team_id}: resolved working directory contains newline/control "
+              f"characters — refusing to generate per-agent startup scripts rather than "
+              f"emit an unsafe SESSION_DIRECTORY (XACA-1215)", file=sys.stderr)
+        return None
+
+    home_literal = raw.startswith(_SESSION_DIR_HOME_PREFIX)
+    rest = raw[len(_SESSION_DIR_HOME_PREFIX):] if home_literal else raw
+
+    # Escape backslash FIRST so the backslashes we add for the other
+    # characters don't themselves get re-escaped on a later pass.
+    escaped_rest = (
+        rest.replace('\\', '\\\\')
+            .replace('"', '\\"')
+            .replace('`', '\\`')
+            .replace('$', '\\$')
+    )
+    return (_SESSION_DIR_HOME_PREFIX + escaped_rest) if home_literal else escaped_rest
+
+
+# Computed ONCE — the working directory is per-team, not per-persona, so a
+# refusal here means no per-agent startup script can be safely generated for
+# this run at all (there is no persona-specific fallback to skip down to).
+_session_directory = render_session_directory(session_directory_src, team_id)
+if _session_directory is None:
+    sys.exit(0)
+
+# ---- Script generator ----
+# terminal_id: the resolved SLUG (AGENT_TERMINAL_<character>) — drives file naming,
+#              SESSION_NAME/SESSION_CODE, and prompt-file resolution.
+# character:   the raw persona frontmatter 'name:' — the Claude agent identity — drives
+#              @claude_agent (and, via `identity["developer"]`, SESSION_DEVELOPER/@developer).
+def generate_script(terminal_id, character, identity, windows, frontmatter, session_desc, location, aiteamforge_dir, session_directory):
+    developer = identity["developer"]
+    role      = identity["role"]
+    theme     = identity["theme"] or "OPERATIONS"
+
+    bg_code, accent_code = THEME_COLORS.get(theme, DEFAULT_THEME_COLORS)
+
+    # Ensure we have at least 4 windows; pad with generic names if needed
+    base_windows = list(windows) if windows else [f"{terminal_id}-cmd", "monitor", "scratch", "debug"]
+    while len(base_windows) < 4:
+        base_windows.append(f"window-{len(base_windows)}")
+    win_names = base_windows[:4]
+
+    # Build set_window_metadata case branches (reused by panel-regen loop
+    # and session-creation loop below).
+    metadata_cases = []
+    for i, wname in enumerate(win_names):
+        wdesc = window_desc(wname, terminal_id, i)
+        metadata_cases.append(
+            f'        {i}) TERMINAL_NUMBER={i}; TERMINAL_NAME="{wname}"; TERMINAL_DESCRIPTION="{wdesc}" ;;'
+        )
+    window_metadata_section = "\n".join(metadata_cases)
+
+    # Build 4-window block — now uses set_window_metadata instead of inlining
+    window_blocks = []
+    for i, wname in enumerate(win_names):
+        if i == 0:
+            window_blocks.append(
+                f'    # Window 0: Primary\n'
+                f'    set_window_metadata 0\n'
+                f'    echo -n "- Connecting to $TERMINAL_DESCRIPTION..."\n'
+                f'    $TMUX_CMD new-session -d -s $SESSION_CODE -n $TERMINAL_NAME -c "$SESSION_DIRECTORY"\n'
+                f'    setup_window\n'
+                f'    sleep 0.2\n'
+                f'    echo "CONNECTED"'
+            )
+        else:
+            window_blocks.append(
+                f'    # Window {i}\n'
+                f'    set_window_metadata {i}\n'
+                f'    echo -n "- Connecting to $TERMINAL_DESCRIPTION..."\n'
+                f'    $TMUX_CMD new-window -t $SESSION_CODE:$TERMINAL_NUMBER -n $TERMINAL_NAME\n'
+                f'    setup_window\n'
+                f'    sleep 0.2\n'
+                f'    echo "CONNECTED"'
+            )
+
+    window_section = "\n\n".join(window_blocks)
+
+    script = f'''#!/bin/bash
+set +x
+# {team_id.title()} {terminal_id.title()} Terminal Startup
+# Auto-generated by aiteamforge installer (install-team.sh generate_per_agent_startup_scripts)
+# AITEAMFORGE_GENERATED_VERSION={tap_version}
+
+SESSION_THEME="{theme}"
+SESSION_TYPE="{team_id}"
+SESSION_NAME="{terminal_id}"
+SESSION_DESCRIPTION="{session_desc}"
+SESSION_LOCATION="{location}"
+SESSION_DEVELOPER="{developer}"
+SESSION_ROLE="{role}"
+SESSION_DIRECTORY="{session_directory}"
+THEME_COLOR="{team_color}"
+
+SESSION_CODE="${{SESSION_TYPE}}-${{SESSION_NAME}}"
+
+AITEAMFORGE_DIR="{aiteamforge_dir}"
+
+# Theme color file directory for fleet-monitor integration
+THEME_PORTS_DIR="$AITEAMFORGE_DIR/lcars-ports"
+
+# Use team-specific tmux socket if set, otherwise use default server
+TMUX_CMD="tmux${{TMUX_SOCKET:+ -L $TMUX_SOCKET}}"
+
+# Resolve display hostname for tmux status-right.
+# Prefers Tailscale machine name (consistent across Macs, matches the
+# host argument passed to team-connect.sh on the client side) and falls
+# back to `hostname -s` if the resolver is missing or tailscaled is down.
+_HOSTNAME_RESOLVER="$AITEAMFORGE_DIR/scripts/aiteamforge-resolve-hostname.sh"
+if [ -x "$_HOSTNAME_RESOLVER" ]; then
+    DISPLAY_HOST=$("$_HOSTNAME_RESOLVER" 2>/dev/null)
+fi
+if [ -z "${{DISPLAY_HOST:-}}" ]; then
+    DISPLAY_HOST=$(hostname -s 2>/dev/null | sed 's/\\.local$//')
+fi
+
+# ============================================================================
+# Function: set_window_metadata
+# Sets TERMINAL_NUMBER / TERMINAL_NAME / TERMINAL_DESCRIPTION for a window.
+# Factored out so the panel-regen loop AND session-creation loop can reuse it.
+# ============================================================================
+set_window_metadata() {{
+    case "$1" in
+{window_metadata_section}
+    esac
+}}
+
+# ============================================================================
+# Function: setup_window
+# Executes the common setup commands for each tmux window
+# ============================================================================
+KANBAN_HELPERS="$AITEAMFORGE_DIR/kanban-helpers.sh"
+
+setup_window() {{
+    sleep 0.1
+    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER "cd \\"$SESSION_DIRECTORY\\"" C-m
+    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". ~/.zshrc_${{SESSION_TYPE}}_${{SESSION_NAME}}" C-m
+    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $KANBAN_HELPERS" C-m
+    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $AITEAMFORGE_DIR/$SESSION_TYPE/scripts/$SESSION_TYPE-banner.sh \\"$SESSION_THEME\\" \\"$SESSION_TYPE\\" \\"$SESSION_NAME\\" \\"$TERMINAL_NUMBER\\" \\"$TERMINAL_NAME\\" \\"$SESSION_DESCRIPTION\\" \\"$SESSION_LOCATION\\" \\"$SESSION_DEVELOPER\\" \\"$SESSION_ROLE\\" \\"$TERMINAL_DESCRIPTION\\"" C-m
+}}
+
+# ============================================================================
+# Refresh agent panel JSON for every window — UNCONDITIONAL.
+# The has-session block below only fires on first tmux session creation;
+# the banner that writes panel JSON via display_agent_avatar only runs then.
+# Panel JSON lives outside tmux, so we regenerate it on every invocation of
+# this script — protects against iTerm restarts, tmux socket reboots, and
+# infrastructure upgrades leaving panels stuck on "Awaiting agent...".
+#
+# Replaces an earlier init-agent-panel-json.py call that wrote persona-named
+# files (e.g. lcars-agent-legal-advocate.json) which the display panels
+# (keyed on session names like lcars-agent-legal-coparenting-chambers.json)
+# never read.
+# ============================================================================
+_AVATAR_HELPER="$AITEAMFORGE_DIR/scripts/display-agent-avatar.sh"
+[ ! -f "$_AVATAR_HELPER" ] && _AVATAR_HELPER="$AITEAMFORGE_DIR/share/scripts/display-agent-avatar.sh"
+if [ -f "$_AVATAR_HELPER" ]; then
+    source "$_AVATAR_HELPER"
+    for _i in 0 1 2 3; do
+        set_window_metadata "$_i"
+        export SESSION_THEME SESSION_DESCRIPTION SESSION_LOCATION SESSION_ROLE
+        export SESSION_CODE TERMINAL_NUMBER TERMINAL_NAME TERMINAL_DESCRIPTION
+        display_agent_avatar "$SESSION_TYPE" "$SESSION_DEVELOPER" >/dev/null 2>&1
+    done
+fi
+
+$TMUX_CMD has-session -t $SESSION_CODE
+
+if [ $? != 0 ]; then
+    clear
+    echo "Initializing {team_id.title()} {terminal_id.title()}..."
+
+    # XACA-1215: fail loud, not silent. `tmux new-session -c <missing-dir>`
+    # does NOT error — it silently starts the session in tmux's own default
+    # cwd (typically $HOME), leaving the agent quietly parked in the wrong
+    # place with no indication anything went wrong. Check first.
+    #
+    # Per-machine / installer-owned state directories (under $HOME/.aiteamforge/
+    # or under $AITEAMFORGE_DIR) are legitimately created lazily on first run
+    # (e.g. spacedock's $HOME/.aiteamforge/spacedock) — mkdir -p those.
+    # Anything else is repo-backed (a team's real working tree: ~/dev-team,
+    # DNSFramework, a project dir) and silently mkdir-ing it would mask an
+    # uncloned/missing repo instead of surfacing the real problem — hard
+    # error instead, before any tmux session is created.
+    #
+    # Trailing-slash containment match (not a bare prefix match), so a
+    # sibling directory like $HOME/.aiteamforge-old never false-positives as
+    # "under $HOME/.aiteamforge". Only runs on this create-session path — an
+    # already-running session's directory is left untouched.
+    if [ ! -d "$SESSION_DIRECTORY" ]; then
+        _xaca1215_home_atf="$HOME/.aiteamforge"
+        _xaca1215_under_state_dir="false"
+        case "$SESSION_DIRECTORY/" in
+            "$_xaca1215_home_atf/"*) _xaca1215_under_state_dir="true" ;;
+        esac
+        if [ "$_xaca1215_under_state_dir" = "false" ] && [ -n "$AITEAMFORGE_DIR" ]; then
+            case "$SESSION_DIRECTORY/" in
+                "$AITEAMFORGE_DIR/"*) _xaca1215_under_state_dir="true" ;;
+            esac
+        fi
+        if [ "$_xaca1215_under_state_dir" = "true" ]; then
+            mkdir -p "$SESSION_DIRECTORY"
+            echo "--> Created per-machine working directory: $SESSION_DIRECTORY"
+        else
+            echo "Error: working directory does not exist: $SESSION_DIRECTORY" >&2
+            echo "       (resolved from TEAM_WORKING_DIR for team '$SESSION_TYPE' — check the team .conf, an" >&2
+            echo "       env override, or that the repo/project directory has actually been cloned)" >&2
+            exit 1
+        fi
+        unset _xaca1215_home_atf _xaca1215_under_state_dir
+    fi
+
+{window_section}
+
+    # Configure tmux for iTerm2 compatibility (must be AFTER new-session creates the server)
+    # allow-passthrough: Required for imgcat inline images through tmux panes
+    # mouse: Enables clicking on tmux window tabs and pane borders
+    $TMUX_CMD set -g allow-passthrough on 2>/dev/null
+    $TMUX_CMD set -g mouse on 2>/dev/null
+    $TMUX_CMD set-option -g allow-rename off 2>/dev/null
+    $TMUX_CMD set-window-option -g automatic-rename off 2>/dev/null
+
+    # Configure tmux status line - {theme} theme
+    $TMUX_CMD set -t $SESSION_CODE status-left-length 15
+    $TMUX_CMD set -t $SESSION_CODE status-left "  $SESSION_NAME "
+    # Set session-specific variables for dynamic status-right
+    $TMUX_CMD set -t $SESSION_CODE @developer "$SESSION_DEVELOPER"
+    $TMUX_CMD set -t $SESSION_CODE @claude_agent "{character}"
+    $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | 🖥  $DISPLAY_HOST  "
+    $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour{bg_code},fg=colour255"
+    $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour{accent_code},fg=colour255,bold"
+    $TMUX_CMD set -t $SESSION_CODE status-right-style "bg=colour{bg_code},fg=colour255"
+    $TMUX_CMD set -t $SESSION_CODE window-status-style "bg=colour{bg_code},fg=colour255"
+    $TMUX_CMD set -t $SESSION_CODE window-status-current-style "bg=colour{accent_code},fg=colour255,bold"
+    $TMUX_CMD set -t $SESSION_CODE pane-border-style "fg=colour{bg_code}"
+    $TMUX_CMD set -t $SESSION_CODE pane-active-border-style "fg=colour{accent_code}"
+
+    sleep 0.5
+    $TMUX_CMD select-window -t $SESSION_CODE:0
+
+    # Write theme color file for fleet-monitor integration
+    mkdir -p "$THEME_PORTS_DIR"
+    echo "$THEME_COLOR" > "$THEME_PORTS_DIR/${{SESSION_CODE}}.theme"
+
+    echo "{team_id.title()} {terminal_id.title()} initialized"
+    echo ""
+    echo "--> {len(win_names)} command stations active"
+    echo "--> {developer} reporting for duty"
+    echo ""
+    sleep 1
+fi
+
+# Only attach if not being launched by master startup script
+if [ -z "$SKIP_ATTACH" ]; then
+    $TMUX_CMD attach-session -t $SESSION_CODE
+fi
+'''
+    return script
+
+# ---- Main loop over persona files ----
+persona_files = sorted(personas_dir.glob("*_persona.md"))
+if not persona_files:
+    print(f"  Warning: no persona files found in {personas_dir}", file=sys.stderr)
+    sys.exit(0)
+
+generated = 0
+for pfile in persona_files:
+    try:
+        content = pfile.read_text()
+    except Exception as e:
+        print(f"  Warning: cannot read {pfile}: {e}", file=sys.stderr)
+        continue
+
+    frontmatter = parse_frontmatter(content)
+    character = frontmatter.get("name", "").strip()
+    if not character:
+        print(f"  Warning: no 'name' field in {pfile.name} — skipping", file=sys.stderr)
+        continue
+
+    # Resolve the terminal slug via the AGENT_TERMINAL_<character> map (XACA-0785).
+    # Personas with no mapping are subagent-only (e.g. Academy's 'lal', the UX
+    # evaluator) — never launched as a persistent terminal, so generate nothing.
+    char_key = character.lower().replace("-", "_")
+    if char_key in _quarantined_terminal_chars:
+        # Already warned during AGENT_TERMINAL_* parsing above (malformed slug
+        # format or duplicate slug target) — skip silently here so we don't ALSO
+        # print the misleading "subagent-only persona" message (XACA-0785-006/007).
+        continue
+    if char_key not in agent_terminal:
+        print(f"  ℹ️  {team_id}/{character}: subagent-only persona (no terminal slug) — skipping")
+        continue
+    terminal_id = agent_terminal[char_key]
+    if not terminal_id:
+        # AGENT_TERMINAL_<char>="" — an explicit EMPTY value is a config bug,
+        # not a legitimate subagent-only persona. Distinguishing this from "no
+        # entry at all" is the point of XACA-0785-008 — the old code folded
+        # both into the same falsy branch and printed the friendly skip
+        # message for what is actually a broken .conf entry.
+        print(f"  ⚠️  {team_id}/{character}: AGENT_TERMINAL_{char_key} is set but EMPTY in the team "
+              f".conf — this is a config bug, not a subagent-only persona. Fix the .conf entry or "
+              f"remove it entirely to mark {character} as subagent-only (XACA-0785-008)", file=sys.stderr)
+        continue
+
+    identity = parse_core_identity(content)
+    frontmatter_desc = frontmatter.get("description", "")
+    session_desc     = make_session_desc(team_id, terminal_id, frontmatter_desc)
+    location         = make_location(team_id, identity["location"])
+
+    # Window names are keyed by terminal SLUG (AGENT_WINDOWS_* is slug-keyed
+    # fleet-wide as of XACA-0785).
+    windows = agent_windows.get(terminal_id) or []
+
+    script_text = generate_script(terminal_id, character, identity, windows, frontmatter, session_desc, location, atf_dir, _session_directory)
+
+    out_path = scripts_dir / f"{team_id}-{terminal_id}-startup.sh"
+
+    # XACA-1215-005b: never overwrite an existing target that lacks our own
+    # marker. A hand-authored script (the XACA-0484 parametric-team copies
+    # under share/scripts/teams/<team>/scripts/*.sh — e.g. finance's
+    # SESSION_DIRECTORY="$FINANCE_PROJECT_DIR" runtime-resolved variant — or
+    # any file a user has since edited by hand carries NO
+    # "# AITEAMFORGE_GENERATED_VERSION=..." line. Clobbering one of those
+    # with this generator's hardcoded-team-dir output is the parametric-team
+    # clobber risk flagged (code-read, not live-reproduced) in the
+    # XACA-1215-001 measurement — this guard closes it regardless of whether
+    # it has ever actually fired. Only a file we generated ourselves
+    # (marker present, any version) is eligible to be regenerated.
+    if out_path.exists():
+        try:
+            existing_text = out_path.read_text()
+        except Exception as e:
+            print(f"  ⚠️  {out_path.name}: cannot read existing file to check for the "
+                  f"generated-script marker ({e}) — skipping rather than risk overwriting "
+                  f"a hand-authored script (XACA-1215)", file=sys.stderr)
+            continue
+        if "AITEAMFORGE_GENERATED_VERSION" not in existing_text:
+            print(f"  ⏭  {out_path.name}: existing file has no AITEAMFORGE_GENERATED_VERSION "
+                  f"marker (hand-authored or user-edited) — skipping, not overwriting")
+            continue
+
+    try:
+        out_path.write_text(script_text)
+        out_path.chmod(0o755)
+        print(f"  ✓ {out_path.name}")
+        generated += 1
+    except Exception as e:
+        print(f"  Warning: cannot write {out_path}: {e}", file=sys.stderr)
+
+print(f"  Generated {generated} per-agent startup script(s) in {scripts_dir}")
+PYEOF
+}
+
 # Save the base working dir from conf (before env override or XACA-0485 augmentation).
 # For project-based teams, this is the parent dir (e.g., ~/medical) — used for
 # template-substitution defaults and other branding-time lookups.
@@ -1139,6 +1823,26 @@ if [[ -f "$HOME/dev-team/.aiteamforge-source-tree" ]]; then
     fi
 
     unset _TWD_EXPANDED _TWD_PARENT _TWD_REAL _AITF_REAL
+fi
+
+# ============================================================================
+# AGENT-SCRIPTS-ONLY EARLY EXIT (XACA-1215-005)
+# ============================================================================
+# Renders ONLY the per-agent startup scripts and exits — no team directory
+# scaffolding, no persona copy, no board/registry/team-paths.json/
+# .aiteamforge-config/LCARS/zshrc writes. Everything above this point (conf
+# load, --project/--client + XACA-0485 TEAM_WORKING_DIR resolution, the
+# ATF_ENV_TEAM_WORKING_DIR override, and BOTH dev-source guards — XACA-0497
+# at the top of this file and XACA-0498 directly above) has already run, so
+# this mode resolves TEAM_WORKING_DIR through the exact same code path a
+# full install uses and is protected by the exact same guards. This is what
+# lets `aiteamforge upgrade` (XACA-1215-005c, update_generated_agent_scripts)
+# backfill the SESSION_DIRECTORY fix onto an ALREADY-PROVISIONED team without
+# re-running the rest of the installer and its side effects.
+if [[ "$AGENT_SCRIPTS_ONLY" == "true" ]]; then
+    echo "📜 Rendering per-agent startup scripts for $INSTANCE_ID (agent-scripts-only mode)..."
+    generate_per_agent_startup_scripts
+    exit 0
 fi
 
 echo "Team Name: $TEAM_NAME"
@@ -2351,514 +3055,6 @@ done
 
 echo "  ✓ Port assignments created"
 echo ""
-
-# ============================================================================
-# GENERATE PER-AGENT STARTUP SCRIPTS
-# ============================================================================
-# Creates individual startup scripts for each agent persona found in the team's
-# personas directory.  Scripts are named <team>-<slug>-startup.sh and
-# follow the android-bridge-startup.sh pattern: hardcoded persona variables,
-# a setup_window() function, 4 named tmux windows, status-line theming, and a
-# SKIP_ATTACH guard.
-#
-# The generator is driven by persona .md files (not TEAM_AGENTS). The
-# frontmatter 'name:' field (e.g. "reno") is the Claude agent's CHARACTER
-# identity, NOT the terminal slug (e.g. "engineering") — those are two
-# different namespaces that happen to collide on some teams (Academy) and
-# diverge sharply on others (Finance: zek -> nagus). The slug is resolved
-# via the AGENT_TERMINAL_<character> map in the team .conf (XACA-0785) and
-# drives every filesystem/tmux identifier: the startup script filename,
-# SESSION_NAME/SESSION_CODE, and therefore <team>-<slug>-prompt.txt
-# resolution. Personas with no AGENT_TERMINAL_ entry are subagent-only
-# (never launched as a persistent terminal) and are skipped entirely.
-# AGENT_WINDOWS_* / AGENT_TERMINAL_* variables are both read directly from
-# the raw conf text because the _read_conf() loader only serialises
-# arrays/vars for agents whose names appear in TEAM_AGENTS, and character
-# names (reno, emh, thok, zek) often differ from the TEAM_AGENTS role
-# labels (engineering, medical, training, nagus) that AGENT_WINDOWS_*/
-# AGENT_TERMINAL_* target values are keyed by.
-# ============================================================================
-
-generate_per_agent_startup_scripts() {
-    local personas_dir="$AITEAMFORGE_DIR/$TEAM_ID/personas/agents"
-    # Fall back to the homebrew-tap share layout if installed layout is absent
-    if [[ ! -d "$personas_dir" ]]; then
-        personas_dir="$HOMEBREW_TAP_ROOT/share/personas/$TEAM_ID/agents"
-    fi
-    if [[ ! -d "$personas_dir" ]]; then
-        echo "  ⚠️  No personas directory found for $TEAM_ID — skipping per-agent startup scripts"
-        return 0
-    fi
-
-    local scripts_dir="$AITEAMFORGE_DIR/$TEAM_ID/scripts"
-    mkdir -p "$scripts_dir"
-
-    # Read all AGENT_WINDOWS_* values directly from the raw conf text so that
-    # slug-named keys (e.g. AGENT_WINDOWS_engineering) are found even when the
-    # TEAM_AGENTS array uses role labels (e.g. "engineering").
-    local raw_conf_text
-    raw_conf_text=$(grep '^AGENT_WINDOWS_' "$TEAM_CONF" 2>/dev/null || true)
-
-    # Read all AGENT_TERMINAL_* values (character -> terminal slug map, XACA-0785)
-    # the same way, for the same reason.
-    local raw_terminal_text
-    raw_terminal_text=$(grep '^AGENT_TERMINAL_' "$TEAM_CONF" 2>/dev/null || true)
-
-    local tap_version
-    tap_version="$(cat "$HOMEBREW_TAP_ROOT/VERSION" 2>/dev/null || echo "unknown")"
-
-    python3 - "$personas_dir" "$scripts_dir" "$TEAM_ID" \
-              "$AITEAMFORGE_DIR" "$TEAM_COLOR" "$raw_conf_text" "$tap_version" "$raw_terminal_text" <<'PYEOF'
-import re
-import sys
-import os
-from pathlib import Path
-
-# ---- Arguments ----
-personas_dir  = Path(sys.argv[1])
-scripts_dir   = Path(sys.argv[2])
-team_id       = sys.argv[3]
-atf_dir       = sys.argv[4]
-team_color    = sys.argv[5]          # hex e.g. "#0099CC"
-raw_conf_text = sys.argv[6]          # raw AGENT_WINDOWS_* lines from conf
-tap_version   = sys.argv[7] if len(sys.argv) > 7 else "unknown"
-raw_terminal_text = sys.argv[8] if len(sys.argv) > 8 else ""   # raw AGENT_TERMINAL_* lines
-
-# ---- Parse AGENT_WINDOWS from raw conf text ----
-# Each line looks like:  AGENT_WINDOWS_engineering="win0 win1 win2 win3"
-# NOTE: keyed by terminal SLUG (not character) — same namespace as AGENT_TERMINAL_*
-# target values below.
-agent_windows = {}
-for line in raw_conf_text.splitlines():
-    m = re.match(r'^AGENT_WINDOWS_(\w+)="([^"]*)"', line.strip())
-    if m:
-        agent_windows[m.group(1).lower()] = m.group(2).split()
-
-# ---- Parse AGENT_TERMINAL_<character> -> <slug> map from raw conf text (XACA-0785) ----
-# Each line looks like:  AGENT_TERMINAL_zek="nagus"
-# The variable-name segment normalizes '-' to '_' (e.g. persona "quark-fin" ->
-# AGENT_TERMINAL_quark_fin), matching the AGENT_WINDOWS_* convention.
-#
-# XACA-0785-006/007: the slug VALUE flows straight into generated filenames and
-# into double-quoted shell in the generated zshrc (SESSION_NAME="{terminal_id}"),
-# so a typo'd or hostile value (e.g. containing '../' or '$(...)') would produce
-# a garbage path or command substitution. parse_agent_terminal_map() rejects
-# malformed slugs and duplicate slug targets instead of letting them flow
-# through — same "warn loudly, never silent" bar this ticket exists to enforce.
-_AGENT_TERMINAL_SLUG_RE = re.compile(r'^[a-z0-9][a-z0-9_-]*$')
-
-
-def parse_agent_terminal_map(raw_text, team_id):
-    """Parse AGENT_TERMINAL_<character>="<slug>" lines into a char_key -> slug map.
-
-    Returns (agent_terminal, quarantined):
-      agent_terminal: char_key -> slug (slug is "" for an explicit empty value —
-        XACA-0785-008 needs "no entry" and "empty entry" distinguishable by callers).
-      quarantined: char_key set that HAD a raw entry but was rejected (malformed
-        slug format, or a slug value already claimed by another character) — a
-        loud warning was already printed here. Callers must treat these as
-        "already handled", NOT as "no entry" (which would print the misleading
-        subagent-only-persona message for what is actually a config bug).
-    """
-    agent_terminal = {}
-    slug_owner = {}
-    quarantined = set()
-    for line in raw_text.splitlines():
-        m = re.match(r'^AGENT_TERMINAL_(\w+)="([^"]*)"', line.strip())
-        if not m:
-            continue
-        char_key = m.group(1).lower()
-        slug = m.group(2).strip()
-        if not slug:
-            # Empty value is a distinct case from "no entry at all" — retain it
-            # (not quarantined) so the per-persona loop can tell them apart.
-            agent_terminal[char_key] = ""
-            continue
-        if not _AGENT_TERMINAL_SLUG_RE.match(slug):
-            print(f"  ⚠️  {team_id}/{char_key}: AGENT_TERMINAL_{char_key}=\"{slug}\" is not a valid "
-                  f"terminal slug (must match ^[a-z0-9][a-z0-9_-]*$) — skipping this persona's terminal "
-                  f"generation rather than risk a corrupted path or shell injection (XACA-0785-006)",
-                  file=sys.stderr)
-            quarantined.add(char_key)
-            continue
-        if slug in slug_owner and slug_owner[slug] != char_key:
-            print(f"  ⚠️  {team_id}: AGENT_TERMINAL_{char_key}=\"{slug}\" collides with "
-                  f"AGENT_TERMINAL_{slug_owner[slug]}=\"{slug}\" — two characters mapped to the same "
-                  f"terminal slug would silently overwrite each other's generated startup "
-                  f"script/zshrc (last-writer-wins). Keeping AGENT_TERMINAL_{slug_owner[slug]}; "
-                  f"AGENT_TERMINAL_{char_key} is IGNORED. Fix the .conf so each persona has a unique "
-                  f"slug (XACA-0785-007)", file=sys.stderr)
-            quarantined.add(char_key)
-            continue
-        slug_owner[slug] = char_key
-        agent_terminal[char_key] = slug
-    return agent_terminal, quarantined
-
-
-agent_terminal, _quarantined_terminal_chars = parse_agent_terminal_map(raw_terminal_text, team_id)
-
-# ---- Frontmatter parser ----
-def parse_frontmatter(text):
-    result = {}
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return result
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped == "---":
-            break
-        if ":" in stripped:
-            key, _, val = stripped.partition(":")
-            val = val.strip().strip('"').strip("'")
-            if key.strip() not in result:
-                result[key.strip()] = val
-    return result
-
-# ---- Bold-field extractor (matches ## Core Identity section) ----
-def parse_core_identity(text):
-    result = {"developer": "", "role": "", "location": "", "theme": ""}
-    for header_pattern in (r"^##\s+Core Identity", r"^##\s+Your Identity"):
-        m = re.search(header_pattern, text, re.MULTILINE)
-        if m:
-            rest = text[m.end():]
-            ns = re.search(r"^##\s+", rest, re.MULTILINE)
-            section = rest[:ns.start()] if ns else rest
-            break
-    else:
-        return result
-
-    def find_field(field, text):
-        pat = rf"\*\*{re.escape(field)}\*\*:?\s*(.+)"
-        m = re.search(pat, text)
-        if m:
-            return m.group(1).strip().rstrip("\\").strip()
-        pat2 = rf"\*\*{re.escape(field)}:\*\*\s*(.+)"
-        m2 = re.search(pat2, text)
-        if m2:
-            return m2.group(1).strip().rstrip("\\").strip()
-        return ""
-
-    result["developer"] = find_field("Name", section) or find_field("Character", section)
-    result["role"]      = find_field("Role", section)
-    result["location"]  = find_field("Location", section)
-    theme_raw           = find_field("Uniform Color", section)
-    if theme_raw:
-        result["theme"] = theme_raw.upper()
-    return result
-
-# ---- Uniform-color → tmux colour codes ----
-# Format: (bg_code, accent_code)
-# Derived from proven dev-team per-agent startup scripts.
-# These are default values; teams can override via THEME_COLORS_<THEME> in .conf.
-THEME_COLORS = {
-    "COMMAND":    (124, 160),
-    "OPERATIONS": (136, 178),
-    "SCIENCES":   (25,  33),
-    "SCIENCE":    (30,  37),
-    "SECURITY":   (236, 240),
-    "PROMENADE":  (94,  214),
-    "MEDICAL":    (25,  33),
-    "INCIDENT":   (52,  160),
-    "ENGINEERING":(94,  172),
-    "OBSERVATION":(60,  99),
-    "HELM":       (136, 220),
-    "NAVIGATION": (58,  220),
-    "COMMUNICATIONS": (124, 196),
-}
-DEFAULT_THEME_COLORS = (240, 250)
-
-# ---- Session description builder ----
-def make_session_desc(team_id, terminal_id, frontmatter_desc):
-    team_upper     = team_id.upper().replace("-", " ")
-    terminal_upper = terminal_id.upper().replace("-", " ")
-    base = f"{team_upper} {terminal_upper}"
-    if frontmatter_desc and " - " in frontmatter_desc:
-        after_dash = frontmatter_desc.split(" - ", 1)[1].strip()
-        suffix = re.split(r"[,.]", after_dash)[0].strip()
-        if suffix:
-            return f"{base} - {suffix.upper()}"
-    return base
-
-# ---- Location formatter ----
-def make_location(team_id, parsed_location):
-    if parsed_location and " - " in parsed_location:
-        parts = parsed_location.split(" - ", 1)
-        short_team = parts[0].strip().split()[-1] if parts[0].strip().split() else parts[0].strip()
-        return f"{short_team}: {parts[1].strip()}"
-    return parsed_location or team_id.title()
-
-# ---- Window description helper ----
-def window_desc(win_name, terminal_id, win_index):
-    """Derive a TERMINAL_DESCRIPTION for a window name.
-    Window 0 is always '<Division> Command Center' to match dev-team pattern.
-    Subsequent windows use the window name in title case."""
-    if win_index == 0:
-        return f"{terminal_id.replace('-', ' ').title()} Command Center"
-    # Subsequent windows: capitalise the window name
-    return win_name.replace("-", " ").title()
-
-# ---- Script generator ----
-# terminal_id: the resolved SLUG (AGENT_TERMINAL_<character>) — drives file naming,
-#              SESSION_NAME/SESSION_CODE, and prompt-file resolution.
-# character:   the raw persona frontmatter 'name:' — the Claude agent identity — drives
-#              @claude_agent (and, via `identity["developer"]`, SESSION_DEVELOPER/@developer).
-def generate_script(terminal_id, character, identity, windows, frontmatter, session_desc, location, aiteamforge_dir):
-    developer = identity["developer"]
-    role      = identity["role"]
-    theme     = identity["theme"] or "OPERATIONS"
-
-    bg_code, accent_code = THEME_COLORS.get(theme, DEFAULT_THEME_COLORS)
-
-    # Ensure we have at least 4 windows; pad with generic names if needed
-    base_windows = list(windows) if windows else [f"{terminal_id}-cmd", "monitor", "scratch", "debug"]
-    while len(base_windows) < 4:
-        base_windows.append(f"window-{len(base_windows)}")
-    win_names = base_windows[:4]
-
-    # Build set_window_metadata case branches (reused by panel-regen loop
-    # and session-creation loop below).
-    metadata_cases = []
-    for i, wname in enumerate(win_names):
-        wdesc = window_desc(wname, terminal_id, i)
-        metadata_cases.append(
-            f'        {i}) TERMINAL_NUMBER={i}; TERMINAL_NAME="{wname}"; TERMINAL_DESCRIPTION="{wdesc}" ;;'
-        )
-    window_metadata_section = "\n".join(metadata_cases)
-
-    # Build 4-window block — now uses set_window_metadata instead of inlining
-    window_blocks = []
-    for i, wname in enumerate(win_names):
-        if i == 0:
-            window_blocks.append(
-                f'    # Window 0: Primary\n'
-                f'    set_window_metadata 0\n'
-                f'    echo -n "- Connecting to $TERMINAL_DESCRIPTION..."\n'
-                f'    $TMUX_CMD new-session -d -s $SESSION_CODE -n $TERMINAL_NAME -c "$SESSION_DIRECTORY"\n'
-                f'    setup_window\n'
-                f'    sleep 0.2\n'
-                f'    echo "CONNECTED"'
-            )
-        else:
-            window_blocks.append(
-                f'    # Window {i}\n'
-                f'    set_window_metadata {i}\n'
-                f'    echo -n "- Connecting to $TERMINAL_DESCRIPTION..."\n'
-                f'    $TMUX_CMD new-window -t $SESSION_CODE:$TERMINAL_NUMBER -n $TERMINAL_NAME\n'
-                f'    setup_window\n'
-                f'    sleep 0.2\n'
-                f'    echo "CONNECTED"'
-            )
-
-    window_section = "\n\n".join(window_blocks)
-
-    script = f'''#!/bin/bash
-set +x
-# {team_id.title()} {terminal_id.title()} Terminal Startup
-# Auto-generated by aiteamforge installer (install-team.sh generate_per_agent_startup_scripts)
-# AITEAMFORGE_GENERATED_VERSION={tap_version}
-
-SESSION_THEME="{theme}"
-SESSION_TYPE="{team_id}"
-SESSION_NAME="{terminal_id}"
-SESSION_DESCRIPTION="{session_desc}"
-SESSION_LOCATION="{location}"
-SESSION_DEVELOPER="{developer}"
-SESSION_ROLE="{role}"
-SESSION_DIRECTORY="$HOME/{team_id}"
-THEME_COLOR="{team_color}"
-
-SESSION_CODE="${{SESSION_TYPE}}-${{SESSION_NAME}}"
-
-AITEAMFORGE_DIR="{aiteamforge_dir}"
-
-# Theme color file directory for fleet-monitor integration
-THEME_PORTS_DIR="$AITEAMFORGE_DIR/lcars-ports"
-
-# Use team-specific tmux socket if set, otherwise use default server
-TMUX_CMD="tmux${{TMUX_SOCKET:+ -L $TMUX_SOCKET}}"
-
-# Resolve display hostname for tmux status-right.
-# Prefers Tailscale machine name (consistent across Macs, matches the
-# host argument passed to team-connect.sh on the client side) and falls
-# back to `hostname -s` if the resolver is missing or tailscaled is down.
-_HOSTNAME_RESOLVER="$AITEAMFORGE_DIR/scripts/aiteamforge-resolve-hostname.sh"
-if [ -x "$_HOSTNAME_RESOLVER" ]; then
-    DISPLAY_HOST=$("$_HOSTNAME_RESOLVER" 2>/dev/null)
-fi
-if [ -z "${{DISPLAY_HOST:-}}" ]; then
-    DISPLAY_HOST=$(hostname -s 2>/dev/null | sed 's/\\.local$//')
-fi
-
-# ============================================================================
-# Function: set_window_metadata
-# Sets TERMINAL_NUMBER / TERMINAL_NAME / TERMINAL_DESCRIPTION for a window.
-# Factored out so the panel-regen loop AND session-creation loop can reuse it.
-# ============================================================================
-set_window_metadata() {{
-    case "$1" in
-{window_metadata_section}
-    esac
-}}
-
-# ============================================================================
-# Function: setup_window
-# Executes the common setup commands for each tmux window
-# ============================================================================
-KANBAN_HELPERS="$AITEAMFORGE_DIR/kanban-helpers.sh"
-
-setup_window() {{
-    sleep 0.1
-    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER "cd $SESSION_DIRECTORY" C-m
-    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". ~/.zshrc_${{SESSION_TYPE}}_${{SESSION_NAME}}" C-m
-    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $KANBAN_HELPERS" C-m
-    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $AITEAMFORGE_DIR/$SESSION_TYPE/scripts/$SESSION_TYPE-banner.sh \\"$SESSION_THEME\\" \\"$SESSION_TYPE\\" \\"$SESSION_NAME\\" \\"$TERMINAL_NUMBER\\" \\"$TERMINAL_NAME\\" \\"$SESSION_DESCRIPTION\\" \\"$SESSION_LOCATION\\" \\"$SESSION_DEVELOPER\\" \\"$SESSION_ROLE\\" \\"$TERMINAL_DESCRIPTION\\"" C-m
-}}
-
-# ============================================================================
-# Refresh agent panel JSON for every window — UNCONDITIONAL.
-# The has-session block below only fires on first tmux session creation;
-# the banner that writes panel JSON via display_agent_avatar only runs then.
-# Panel JSON lives outside tmux, so we regenerate it on every invocation of
-# this script — protects against iTerm restarts, tmux socket reboots, and
-# infrastructure upgrades leaving panels stuck on "Awaiting agent...".
-#
-# Replaces an earlier init-agent-panel-json.py call that wrote persona-named
-# files (e.g. lcars-agent-legal-advocate.json) which the display panels
-# (keyed on session names like lcars-agent-legal-coparenting-chambers.json)
-# never read.
-# ============================================================================
-_AVATAR_HELPER="$AITEAMFORGE_DIR/scripts/display-agent-avatar.sh"
-[ ! -f "$_AVATAR_HELPER" ] && _AVATAR_HELPER="$AITEAMFORGE_DIR/share/scripts/display-agent-avatar.sh"
-if [ -f "$_AVATAR_HELPER" ]; then
-    source "$_AVATAR_HELPER"
-    for _i in 0 1 2 3; do
-        set_window_metadata "$_i"
-        export SESSION_THEME SESSION_DESCRIPTION SESSION_LOCATION SESSION_ROLE
-        export SESSION_CODE TERMINAL_NUMBER TERMINAL_NAME TERMINAL_DESCRIPTION
-        display_agent_avatar "$SESSION_TYPE" "$SESSION_DEVELOPER" >/dev/null 2>&1
-    done
-fi
-
-$TMUX_CMD has-session -t $SESSION_CODE
-
-if [ $? != 0 ]; then
-    clear
-    echo "Initializing {team_id.title()} {terminal_id.title()}..."
-
-{window_section}
-
-    # Configure tmux for iTerm2 compatibility (must be AFTER new-session creates the server)
-    # allow-passthrough: Required for imgcat inline images through tmux panes
-    # mouse: Enables clicking on tmux window tabs and pane borders
-    $TMUX_CMD set -g allow-passthrough on 2>/dev/null
-    $TMUX_CMD set -g mouse on 2>/dev/null
-    $TMUX_CMD set-option -g allow-rename off 2>/dev/null
-    $TMUX_CMD set-window-option -g automatic-rename off 2>/dev/null
-
-    # Configure tmux status line - {theme} theme
-    $TMUX_CMD set -t $SESSION_CODE status-left-length 15
-    $TMUX_CMD set -t $SESSION_CODE status-left "  $SESSION_NAME "
-    # Set session-specific variables for dynamic status-right
-    $TMUX_CMD set -t $SESSION_CODE @developer "$SESSION_DEVELOPER"
-    $TMUX_CMD set -t $SESSION_CODE @claude_agent "{character}"
-    $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | 🖥  $DISPLAY_HOST  "
-    $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour{bg_code},fg=colour255"
-    $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour{accent_code},fg=colour255,bold"
-    $TMUX_CMD set -t $SESSION_CODE status-right-style "bg=colour{bg_code},fg=colour255"
-    $TMUX_CMD set -t $SESSION_CODE window-status-style "bg=colour{bg_code},fg=colour255"
-    $TMUX_CMD set -t $SESSION_CODE window-status-current-style "bg=colour{accent_code},fg=colour255,bold"
-    $TMUX_CMD set -t $SESSION_CODE pane-border-style "fg=colour{bg_code}"
-    $TMUX_CMD set -t $SESSION_CODE pane-active-border-style "fg=colour{accent_code}"
-
-    sleep 0.5
-    $TMUX_CMD select-window -t $SESSION_CODE:0
-
-    # Write theme color file for fleet-monitor integration
-    mkdir -p "$THEME_PORTS_DIR"
-    echo "$THEME_COLOR" > "$THEME_PORTS_DIR/${{SESSION_CODE}}.theme"
-
-    echo "{team_id.title()} {terminal_id.title()} initialized"
-    echo ""
-    echo "--> {len(win_names)} command stations active"
-    echo "--> {developer} reporting for duty"
-    echo ""
-    sleep 1
-fi
-
-# Only attach if not being launched by master startup script
-if [ -z "$SKIP_ATTACH" ]; then
-    $TMUX_CMD attach-session -t $SESSION_CODE
-fi
-'''
-    return script
-
-# ---- Main loop over persona files ----
-persona_files = sorted(personas_dir.glob("*_persona.md"))
-if not persona_files:
-    print(f"  Warning: no persona files found in {personas_dir}", file=sys.stderr)
-    sys.exit(0)
-
-generated = 0
-for pfile in persona_files:
-    try:
-        content = pfile.read_text()
-    except Exception as e:
-        print(f"  Warning: cannot read {pfile}: {e}", file=sys.stderr)
-        continue
-
-    frontmatter = parse_frontmatter(content)
-    character = frontmatter.get("name", "").strip()
-    if not character:
-        print(f"  Warning: no 'name' field in {pfile.name} — skipping", file=sys.stderr)
-        continue
-
-    # Resolve the terminal slug via the AGENT_TERMINAL_<character> map (XACA-0785).
-    # Personas with no mapping are subagent-only (e.g. Academy's 'lal', the UX
-    # evaluator) — never launched as a persistent terminal, so generate nothing.
-    char_key = character.lower().replace("-", "_")
-    if char_key in _quarantined_terminal_chars:
-        # Already warned during AGENT_TERMINAL_* parsing above (malformed slug
-        # format or duplicate slug target) — skip silently here so we don't ALSO
-        # print the misleading "subagent-only persona" message (XACA-0785-006/007).
-        continue
-    if char_key not in agent_terminal:
-        print(f"  ℹ️  {team_id}/{character}: subagent-only persona (no terminal slug) — skipping")
-        continue
-    terminal_id = agent_terminal[char_key]
-    if not terminal_id:
-        # AGENT_TERMINAL_<char>="" — an explicit EMPTY value is a config bug,
-        # not a legitimate subagent-only persona. Distinguishing this from "no
-        # entry at all" is the point of XACA-0785-008 — the old code folded
-        # both into the same falsy branch and printed the friendly skip
-        # message for what is actually a broken .conf entry.
-        print(f"  ⚠️  {team_id}/{character}: AGENT_TERMINAL_{char_key} is set but EMPTY in the team "
-              f".conf — this is a config bug, not a subagent-only persona. Fix the .conf entry or "
-              f"remove it entirely to mark {character} as subagent-only (XACA-0785-008)", file=sys.stderr)
-        continue
-
-    identity = parse_core_identity(content)
-    frontmatter_desc = frontmatter.get("description", "")
-    session_desc     = make_session_desc(team_id, terminal_id, frontmatter_desc)
-    location         = make_location(team_id, identity["location"])
-
-    # Window names are keyed by terminal SLUG (AGENT_WINDOWS_* is slug-keyed
-    # fleet-wide as of XACA-0785).
-    windows = agent_windows.get(terminal_id) or []
-
-    script_text = generate_script(terminal_id, character, identity, windows, frontmatter, session_desc, location, atf_dir)
-
-    out_path = scripts_dir / f"{team_id}-{terminal_id}-startup.sh"
-    try:
-        out_path.write_text(script_text)
-        out_path.chmod(0o755)
-        print(f"  ✓ {out_path.name}")
-        generated += 1
-    except Exception as e:
-        print(f"  Warning: cannot write {out_path}: {e}", file=sys.stderr)
-
-print(f"  Generated {generated} per-agent startup script(s) in {scripts_dir}")
-PYEOF
-}
 
 echo "📜 Generating per-agent startup scripts..."
 generate_per_agent_startup_scripts
