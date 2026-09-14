@@ -18,7 +18,10 @@
 #   noassets    — agents only, no avatars/ dir contents, no terminals/ dir
 #   hasassets   — agents, avatars, logos
 #   emptylogos  — agents, avatars, and an EMPTY terminals/<team>/logos/ dir
-# The loop must complete, and hasassets' files must land in both destinations.
+#   emptypersonas — personas dir with EMPTY agents/ and avatars/ (XACA-1212-011)
+# The loop must complete, hasassets' files must land in both destinations, and
+# the "copied" counters must count only teams where a copy actually succeeded
+# (personas=3: noassets, hasassets, emptylogos; logos=1: hasassets).
 #
 # Pre-fix proof: SETUP_SH=/path/to/old/aiteamforge-setup.sh bash <this file>
 # Nothing is installed; everything lives under TEST_TMP_DIR.
@@ -78,7 +81,8 @@ mkdir -p "$H/share/personas/noassets/agents" \
          "$H/share/personas/hasassets/agents" "$H/share/personas/hasassets/avatars" \
          "$H/share/terminals/hasassets/logos" \
          "$H/share/personas/emptylogos/agents" "$H/share/personas/emptylogos/avatars" \
-         "$H/share/terminals/emptylogos/logos" "$I"
+         "$H/share/terminals/emptylogos/logos" \
+         "$H/share/personas/emptypersonas/agents" "$H/share/personas/emptypersonas/avatars" "$I"
 printf 'x\n' > "$H/share/personas/noassets/agents/noassets_a.md"
 printf 'x\n' > "$H/share/personas/hasassets/agents/hasassets_a.md"
 printf 'png\n' > "$H/share/personas/hasassets/avatars/hasassets_a_avatar.png"
@@ -90,7 +94,7 @@ printf 'png\n' > "$H/share/personas/emptylogos/avatars/emptylogos_a_avatar.png"
     set -eo pipefail
     AITEAMFORGE_HOME="$1"; INSTALL_DIR="$2"; INSTALL_PROFILE=full
     GREEN=""; NC=""
-    SELECTED_TEAMS=(noassets hasassets emptylogos)
+    SELECTED_TEAMS=(noassets hasassets emptylogos emptypersonas)
     . "$3"
     echo "LOOP_COMPLETED personas=$_personas_copied logos=$_logos_copied"
 ' _ "$H" "$I" "$LOOP" > "$TEST_TMP_DIR/run.out" 2>&1
@@ -100,8 +104,8 @@ OUT=$(cat "$TEST_TMP_DIR/run.out")
 # ── A: the loop survives teams without assets ────────────────────────────────
 [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'LOOP_COMPLETED'; r=$?
 check "A1: loop completes under set -eo pipefail with a team lacking avatars and an empty logos dir" "$r" "rc=$RC out=[$OUT]"
-printf '%s' "$OUT" | grep -q 'LOOP_COMPLETED personas=3 logos=2'; r=$?
-check "A2: every team with a personas dir was processed (personas=3, logos=2)" "$r" "out=[$OUT]"
+printf '%s' "$OUT" | grep -q 'LOOP_COMPLETED personas=3 logos=1'; r=$?
+check "A2: counters count only teams where a copy succeeded (personas=3, logos=1; empty dirs not counted)" "$r" "out=[$OUT]"
 
 # ── B: teams with assets still get them ──────────────────────────────────────
 [ -f "$I/hasassets/personas/avatars/hasassets_a_avatar.png" ] && [ -f "$I/avatars/hasassets_a_avatar.png" ]; r=$?

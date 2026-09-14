@@ -1731,19 +1731,32 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
   if [ -d "${AITEAMFORGE_HOME}/share/personas/${team_id}" ]; then
     mkdir -p "${INSTALL_DIR}/${team_id}/personas/agents"
     mkdir -p "${INSTALL_DIR}/${team_id}/personas/avatars"
-    cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/agents/"*.md "${INSTALL_DIR}/${team_id}/personas/agents/" 2>/dev/null || true
-    cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/avatars/"*.png "${INSTALL_DIR}/${team_id}/personas/avatars/" 2>/dev/null || true
+    # XACA-1212-011: count a team only when something was actually copied.
+    # The counter used to increment on directory existence alone, so with the
+    # copies now best-effort a team whose personas dir is empty would be
+    # reported as "copied". `if` (not `cmd && x=1`) so the success test can
+    # never be an errexit trigger itself.
+    _team_personas_ok=0
+    if cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/agents/"*.md "${INSTALL_DIR}/${team_id}/personas/agents/" 2>/dev/null; then
+      _team_personas_ok=1
+    fi
+    if cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/avatars/"*.png "${INSTALL_DIR}/${team_id}/personas/avatars/" 2>/dev/null; then
+      _team_personas_ok=1
+    fi
     # Also copy into flat avatars/ pool for agent-panel-display.sh path resolution
     cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/avatars/"*.png "${INSTALL_DIR}/avatars/" 2>/dev/null || true
-    _personas_copied=$((_personas_copied + 1))
+    if [ "$_team_personas_ok" -eq 1 ]; then
+      _personas_copied=$((_personas_copied + 1))
+    fi
   fi
   # Terminal logos (for iTerm2 profiles)
   if [ -d "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos" ]; then
     mkdir -p "${INSTALL_DIR}/${team_id}/terminals/logos"
-    cp "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos/"*.png "${INSTALL_DIR}/${team_id}/terminals/logos/" 2>/dev/null || true
+    if cp "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos/"*.png "${INSTALL_DIR}/${team_id}/terminals/logos/" 2>/dev/null; then
+      _logos_copied=$((_logos_copied + 1))
+    fi
     # Also copy logos into flat avatars/ pool
     cp "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos/"*.png "${INSTALL_DIR}/avatars/" 2>/dev/null || true
-    _logos_copied=$((_logos_copied + 1))
   fi
 done
 [ $_personas_copied -gt 0 ] && echo -e "${GREEN}✓${NC} Agent personas and avatars (${_personas_copied} teams)"

@@ -19,6 +19,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `share/personas/spacedock/avatars/` and `share/terminals/spacedock/logos/`, byte-identical to
   canonical. New `tests/test-xaca-1212-setup-missing-avatars.sh` (8 cases, bash 3.2 + 5; red on the
   pre-fix loop), registered in `tests/ci-manifest`.
+  Review round 1 (XACA-1212-011): the "Agent personas and avatars (N teams)" / "Terminal logos (N
+  teams)" counters incremented on directory existence, so with best-effort copies an empty assets
+  dir was reported as copied. They now count a team only when a copy actually succeeded (tested with
+  an empty-personas fixture team).
 ## [0.20.12] - 2026-09-14
 - **XACA-1211** — `aiteamforge setup` can now provision a machine with only its mandatory team(s).
   The "No teams selected. At least one team is required." guard ran before
