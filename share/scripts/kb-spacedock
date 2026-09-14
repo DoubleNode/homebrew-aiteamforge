@@ -557,12 +557,14 @@ _spd_check_auto_upgrade_log() {
     # not knowing it. Reporting that as `ok` is exactly the false green this whole
     # script exists to prevent, and the same class as XACA-0585.
     #
-    # The `unknown` default matters MORE than adding *FAILURE*. auto-upgrade.sh
-    # can grow an eighth marker at any time, and an unrecognised marker must fail
-    # toward "look at this", never toward "healthy" -- the posture the rest of
-    # this script takes everywhere. Enumerate the KNOWN-GOOD markers positively
-    # and let everything else fall to unknown; do not re-invert this into a
-    # denylist of bad ones.
+    # The `unknown` default matters MORE than adding *FAILURE*. auto-upgrade.sh's
+    # marker set is now nine explicit markers plus a templated EXIT-trap backstop
+    # marker (`(FAILED: exited N without a completion marker)`, itself covered by
+    # the `*FAILED*` arm below) that can appear on any future marker-less exit —
+    # in all cases an unrecognised marker must fail toward "look at this", never
+    # toward "healthy" -- the posture the rest of this script takes everywhere.
+    # Enumerate the KNOWN-GOOD markers positively and let everything else fall to
+    # unknown; do not re-invert this into a denylist of bad ones.
     #
     # The marker list is a CONTRACT with scripts/auto-upgrade.sh, mirrored in
     # docs/spacedock-diagnostic-inventory.md and
@@ -572,7 +574,34 @@ _spd_check_auto_upgrade_log() {
         *FAILED*|*FAILURE*|*BLOCKED*)
             _spd_emit "auto-upgrade-log" "warn" "last run ended: $last_complete" "$after" ""
             ;;
-        *'complete ====='|*'(no-op)'*|*'(held by pin'*|*'(SKIPPED'*)
+        *'(SKIPPED'*)
+            # XACA-1175-015: SKIPPED means auto-upgrade.sh found no
+            # doublenode/aiteamforge tap installed and exited 0 without
+            # touching anything — usually fine (tap genuinely absent). But if
+            # the com.aiteamforge.auto-upgrade LaunchAgent is STILL
+            # installed/loaded, this is an orphaned agent: install residue
+            # from a tap that was later removed, still firing daily against
+            # nothing. Read-only check — never launchctl load/unload/remove;
+            # report it and let a human decide.
+            local la_dir la_plist orphaned=0
+            la_dir="${KB_SPACEDOCK_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+            la_plist="$la_dir/com.aiteamforge.auto-upgrade.plist"
+            if [ -e "$la_plist" ]; then
+                orphaned=1
+            elif command -v launchctl >/dev/null 2>&1 && launchctl list com.aiteamforge.auto-upgrade >/dev/null 2>&1; then
+                orphaned=1
+            fi
+            if [ "$orphaned" -eq 1 ]; then
+                _spd_emit "auto-upgrade-log" "warn" \
+                    "last run: $last_complete — but the com.aiteamforge.auto-upgrade LaunchAgent is still installed/loaded with no tap behind it (orphaned agent / install residue) — report it, do not auto-remove" \
+                    "$after" ""
+            else
+                _spd_emit "auto-upgrade-log" "ok" \
+                    "last run: $last_complete (tap not installed; no auto-upgrade LaunchAgent present — stale log from a manual run)" \
+                    "" ""
+            fi
+            ;;
+        *'complete ====='|*'(no-op)'*|*'(held by pin'*)
             _spd_emit "auto-upgrade-log" "ok" "last run: $last_complete" "" ""
             ;;
         *)
@@ -1118,7 +1147,10 @@ _spd_reboot_check_python3() {
 # fail/unknown — that mirrors _spd_check_kb_sweep_stubs's dev-machine-only
 # handling above.
 _spd_reboot_check_launchagents() {
-    local dir="$HOME/Library/LaunchAgents"
+    # XACA-1175-015: same override name as the auto-upgrade orphaned-agent
+    # check above (_spd_check_auto_upgrade_log) — one override point for both
+    # LaunchAgents-directory reads in this script.
+    local dir="${KB_SPACEDOCK_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
     if [ ! -d "$dir" ]; then
         _spd_emit "reboot-t3-launchagents" "unknown" "LaunchAgents directory not found: $dir" "" ""
         return

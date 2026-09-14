@@ -40,6 +40,10 @@ LOG_MAX_BYTES=5242880  # 5 MB
 PIN_FILE="$AITEAMFORGE_DIR/version-pin"
 ENV_FILE="$AITEAMFORGE_DIR/auto-upgrade.env"
 
+# XACA-1175: tracks whether `log` has ever written a completion marker this
+# run. Read by the EXIT-trap backstop below — see its own comment for why.
+_AU_COMPLETE_LOGGED=0
+
 # ── Optional env override file ────────────────────────────────────────────────
 
 # Source the env file before any logic so AITEAMFORGE_AUTO_UPGRADE_QUIET can be
@@ -82,6 +86,12 @@ _rotate_log() {
 # (brew update + brew upgrade + aiteamforge upgrade) show per-step timestamps
 # rather than the frozen script-start time.
 log() {
+    # XACA-1175: bash-3.2-safe detection of a completion-marker write (no
+    # `[[ =~ ]]`/`${*:0:N}` needed — a plain `case` glob on "$*" works on both
+    # bash 3.2 and bash 5). Read by the EXIT-trap backstop below.
+    case "$*" in
+        '===== auto-upgrade complete'*) _AU_COMPLETE_LOGGED=1 ;;
+    esac
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
 }
 
@@ -89,6 +99,26 @@ log_cmd_output() {
     # Runs a command; appends all output (stdout+stderr) to the log.
     # Returns the command's exit code.
     "$@" >> "$LOG_FILE" 2>&1
+}
+
+# XACA-1175: EXIT-trap backstop. Every deliberate exit path above already
+# logs its own completion marker before exiting (see the comments on those
+# lines), so in the normal case this handler is a no-op — $_AU_COMPLETE_LOGGED
+# is already 1 by the time it runs. It exists for whatever ISN'T deliberate:
+# a future `cmd || exit`, a helper-function exit, a `set -e` abort on some
+# untested line, or any other marker-less exit. Without it, kb-spacedock's
+# stalled-run detector (CHECK 5) sees a start marker with no matching complete
+# and reports a permanent false stall for a run that actually finished (just
+# without saying so). The templated marker below routes to kb-spacedock's
+# `*FAILED*` warn arm automatically — no classifier change needed.
+# shellcheck disable=SC2329  # invoked indirectly via `trap _au_exit_backstop EXIT` below
+_au_exit_backstop() {
+    local rc=$?
+    if [ "$_AU_COMPLETE_LOGGED" != "1" ]; then
+        log "===== auto-upgrade complete (FAILED: exited $rc without a completion marker) =====" 2>/dev/null || true
+    fi
+    # Deliberately no `exit` here — the trap must not alter the script's own
+    # exit status.
 }
 
 # ── Notification helper ───────────────────────────────────────────────────────
@@ -161,6 +191,11 @@ _rotate_log
 
 log "===== auto-upgrade start ====="
 
+# XACA-1175: install the EXIT-trap backstop only AFTER the start marker is
+# logged — an exit before the start marker (e.g. during log-dir setup) must
+# not fabricate a completion marker for a run that never really started.
+trap _au_exit_backstop EXIT
+
 # XACA-0571-016: surface any deferred error from the env-source step now that
 # the log file exists.
 if [ -n "$_ENV_SOURCE_ERROR" ]; then
@@ -182,7 +217,14 @@ BREW=$(command -v brew)
 log "brew: $BREW"
 
 # Step 2: verify aiteamforge tap is installed
-if ! brew tap 2>/dev/null | grep -qi "doublenode/aiteamforge"; then
+# XACA-1175-014: capture-then-match instead of piping into `grep -q`. Under
+# `set -o pipefail` (active via the script-level `set -euo pipefail`), `grep
+# -q` can exit (and SIGPIPE the writer) before brew finishes writing, making
+# the pipeline's exit status reflect the SIGPIPE rather than whether the tap
+# was actually present — a false "tap not found" that now silently routes to
+# the SKIPPED (exit 0) marker above instead of the real answer.
+_TAP_LIST=$("$BREW" tap 2>/dev/null || true)
+if ! grep -qi "doublenode/aiteamforge" <<<"$_TAP_LIST"; then
     log "WARNING: doublenode/aiteamforge tap not found — skipping upgrade"
     # XACA-1175: same rationale as the brew-not-found exit above — this is
     # a normal skip (exit 0), not a failure, so it emits a SKIPPED marker
@@ -204,7 +246,11 @@ fi
 # Detect: is the formula STILL refused after trusting? If so, warn LOUDLY and bail
 # with a non-zero exit + operator notification — never report a clean no-op while
 # upgrades are actually blocked.
-if "$BREW" info aiteamforge 2>&1 | grep -qiE "untrusted tap|refus(e|ing) to load"; then
+# XACA-1175-014: same capture-then-match fix as the tap-list check above —
+# piping `brew info` into `grep -q` under pipefail risks a SIGPIPE-induced
+# false negative that would skip the BLOCKED arm and fail open.
+_TAP_INFO=$("$BREW" info aiteamforge 2>&1 || true)
+if grep -qiE "untrusted tap|refus(e|ing) to load" <<<"$_TAP_INFO"; then
     log "ERROR: doublenode/aiteamforge tap is UNTRUSTED — Homebrew is REFUSING to load the formula."
     log "       Upgrades are BLOCKED; this box will stay on the OLD version."
     log "       Remediation: brew trust --tap doublenode/aiteamforge"

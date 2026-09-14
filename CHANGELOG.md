@@ -7,11 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-- **XACA-1175** — `auto-upgrade.sh`'s brew-not-found and tap-not-installed exit paths now log a
-  completion marker (`FAILED: brew not found` / `SKIPPED: tap not installed`) before returning. The
-  script previously exited on those paths with no marker-less-exit handling, so `kb-spacedock`
-  read the run as still-in-progress and reported a permanent false stall instead of the real
-  terminal state.
+- **XACA-1175** — `auto-upgrade.sh`'s brew-not-found and tap-not-installed exits now log a completion
+  marker (`FAILED: brew not found` / `SKIPPED: tap not installed`) before exiting. Previously they
+  exited with no marker, so `kb-spacedock` saw a start with no matching complete and reported a
+  permanent false stall. An EXIT-trap backstop now logs `FAILED: exited N without a completion marker`
+  for any future marker-less exit. The tap and untrusted-tap checks no longer pipe `brew` into
+  `grep -q` under pipefail (a SIGPIPE could misread a present tap as missing). `kb-spacedock` CHECK 5
+  now warns on a SKIPPED run when the `com.aiteamforge.auto-upgrade` LaunchAgent is still present
+  (orphaned agent) and reports ok otherwise.
 
 ## [0.20.13] - 2026-09-14
 
