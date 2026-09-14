@@ -185,8 +185,13 @@ def new_manifest() -> Manifest:
         _hooks = _P(__file__).resolve().parent.parent.parent / "kanban-hooks"
         if str(_hooks) not in _sys.path:
             _sys.path.insert(0, str(_hooks))
-        from aiteamforge_paths import load_config as _load_config
-        cfg = _load_config()
+        # XACA-1193-005: read-only — read_config_view() never mutates,
+        # quarantines or reseeds the registry (unlike load_config()). This
+        # matters here specifically because these tests call new_manifest()
+        # with no AITEAMFORGE_CONFIG sandbox, so pre-migration this was a
+        # live-registry-mutating read on every test run.
+        from aiteamforge_paths import read_config_view
+        cfg = read_config_view()
         for slug, entry in (cfg.get("teams") or {}).items():
             wd = (entry or {}).get("working_dir", "")
             if wd:

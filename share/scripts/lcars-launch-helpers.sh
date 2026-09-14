@@ -393,7 +393,7 @@ _lcars_port_drift_guard() {
 import sys
 sys.path.insert(0, sys.argv[1])
 try:
-    from aiteamforge_paths import DEFAULT_TEAMS, _resolve_template_band, load_config
+    from aiteamforge_paths import DEFAULT_TEAMS, _resolve_template_band, read_config_view
 except Exception:
     print("|||")
     sys.exit(0)
@@ -423,9 +423,16 @@ except Exception:
 # precedence lcars_ports.py uses -- the live team-paths.json overlay first,
 # DEFAULT_TEAMS as fallback -- so Check 1 reports the same value the canonical
 # resolver would, without a second python3 invocation.
+#
+# XACA-1193-004: this whole block is a REPORT-ONLY guard (see the function
+# header) -- it must never be able to reach load_configs quarantine /
+# reseed / backfill self-heal. read_config_view() is the non-mutating peek
+# with load_config-equivalent fallback behaviour; the owner named in
+# XACA-1193-001 (lcars_ports.py via lcars-health-check.sh) still heals the
+# on-disk file on its own cadence.
 registry_port = ""
 try:
-    entry = (load_config().get("teams", {}) or {}).get(team) or DEFAULT_TEAMS.get(team)
+    entry = (read_config_view().get("teams", {}) or {}).get(team) or DEFAULT_TEAMS.get(team)
     if entry:
         p = entry.get("lcars_port")
         if p:

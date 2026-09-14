@@ -7,6 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1193** — read-only consumers of `team-paths.json` no longer reach `load_config()`'s self-heal
+  (quarantine / reseed / backfill with `.lock` + `.bak-pre-*` + rewrite). Mirrors
+  `kanban-hooks/aiteamforge_paths.py` (new non-mutating `read_config_view()`, keyword-only `config=` on
+  the 13 accessors with an unchanged default, `UnicodeDecodeError` retry, non-object `teams` handled),
+  `kanban-hooks/kanban_utils.py` (the import-time team map that the every-tool-call PostToolUse hook
+  builds now reads the view), `kanban-hooks/timepad-track.py` and its test, `scripts/lcars-launch-helpers.sh`
+  (port drift guard), `scripts/kb-release-version-bump`, and `lcars-ui/` `sync_release_manifests.py`,
+  `secrets_export_lib.py`, `integrations/manager.py`, `rag_engines/manager.py`, `team_transfer/manifest.py`.
+  The two unattended self-heal owners, `lcars_ports.py` (lcars-health agent) and `kanban-backup.py`, are
+  unchanged and still converge configs.
+
 - **XACA-1206** — team install no longer fails on `schema_version: 3` configs, which is every
   current consumer. The shell path library (`libexec/lib/aiteamforge-paths.sh`) accepted only schema
   0/1/2 at both its jq filter and its python fallback, while the Python reader has written 3 since

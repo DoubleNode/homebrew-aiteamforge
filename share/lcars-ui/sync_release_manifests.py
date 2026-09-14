@@ -30,7 +30,7 @@ if _KANBAN_HOOKS_DIR not in sys.path:
     sys.path.insert(0, _KANBAN_HOOKS_DIR)
 
 try:
-    from aiteamforge_paths import get_team_kanban_dir, list_teams
+    from aiteamforge_paths import get_team_kanban_dir, list_teams, read_config_view
     _AITEAMFORGE_PATHS_AVAILABLE = True
 except ImportError:
     _AITEAMFORGE_PATHS_AVAILABLE = False
@@ -42,14 +42,19 @@ KANBAN_DIR = Path.home() / "dev-team" / "kanban"
 def _build_team_kanban_dirs() -> dict:
     if _AITEAMFORGE_PATHS_AVAILABLE:
         try:
+            # XACA-1193-005: read-only — resolve the registry once via
+            # read_config_view() (never mutates/quarantines/reseeds) and pass
+            # it through explicitly so list_teams()/get_team_kanban_dir() do
+            # not each fall through to a mutating load_config().
+            _view = read_config_view()
             # XACA-0727: skip board-less alias teams (e.g. "mainevent") per-item.
             # A bare comprehension would let one KeyError escape to the except
             # below and collapse the WHOLE map to the hardcoded subset (dropping
             # per-machine freelance slugs). Mirrors server.py / kanban_utils.py.
             _dirs = {}
-            for team in list_teams():
+            for team in list_teams(config=_view):
                 try:
-                    _dirs[team] = get_team_kanban_dir(team)
+                    _dirs[team] = get_team_kanban_dir(team, config=_view)
                 except KeyError:
                     continue
             return _dirs

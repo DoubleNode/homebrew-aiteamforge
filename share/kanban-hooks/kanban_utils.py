@@ -46,20 +46,31 @@ def _build_team_kanban_dirs() -> dict:
     old DEFAULT_TEAMS-only build would silently drop them and route their
     boards/tmp dirs to the academy default. Mirrors server.py's
     _build_team_kanban_dirs(), which already used the registry path.
+
+    XACA-1193-003: this runs at import time on EVERY tool-call hook process
+    (kanban-hook.py, kanban-session-start.py, kanban-stop.py,
+    subagent-track.py, kanban-reset.py all import kanban_utils), so it must
+    never reach load_config()'s self-heal. Resolves read_config_view() once
+    and forwards it as ``config=`` to both accessors — one peek covers the
+    whole team enumeration instead of N reads. The mutating self-heal owners
+    (lcars_ports.py, kanban-backup.py) are unaffected; they still call these
+    accessors with their default (``config=None`` -> load_config()).
     """
     try:
         # kanban-hooks/ is always on sys.path when this module is imported
         from aiteamforge_paths import (  # noqa: PLC0415
             list_teams,
             get_team_kanban_dir,
+            read_config_view,
             DEFAULT_TEAMS,
         )
-        teams = list_teams()
+        view = read_config_view()
+        teams = list_teams(config=view)
         if teams:
             result = {}
             for team in teams:
                 try:
-                    result[team] = Path(get_team_kanban_dir(team)).expanduser()
+                    result[team] = Path(get_team_kanban_dir(team, config=view)).expanduser()
                 except Exception:
                     # Skip a single malformed entry rather than losing the map.
                     continue
@@ -393,10 +404,24 @@ def update_board_safely(board_file, update_func):
 # truth.  The hardcoded fallback below is retained ONLY as a safety net for
 # environments where aiteamforge_paths is unavailable (CI, bootstrap).
 def _build_team_code_map() -> dict:
-    """Build _TEAM_CODE_MAP from aiteamforge_paths registry."""
+    """Build _TEAM_CODE_MAP from aiteamforge_paths registry.
+
+    XACA-1193-003: resolves read_config_view() once (never load_config()'s
+    mutating self-heal — see the cadence note above this function) and
+    forwards it as ``config=`` to build_team_code_map().
+
+    A legacy bare parameterized-template key ("medical", "freelance") in a
+    healthy-but-unconverged file is dropped by read_config_view() itself
+    (contract-scrub parity, XACA-1193 review follow-up), so this map and every
+    other migrated reader see the same scrubbed team set load_config() returns.
+    """
     try:
-        from aiteamforge_paths import build_team_code_map  # noqa: PLC0415
-        result = build_team_code_map()
+        from aiteamforge_paths import (  # noqa: PLC0415
+            build_team_code_map,
+            read_config_view,
+        )
+        view = read_config_view()
+        result = build_team_code_map(config=view)
         if result:
             return result
     except Exception as _exc:

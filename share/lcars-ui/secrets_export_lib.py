@@ -186,8 +186,11 @@ def _get_team_project_root(team_id: str) -> Path | None:
     # aiteamforge_paths lives in kanban-hooks/, which server.py prepends to sys.path.
     # We rely on the same setup rather than duplicating path wiring.
     try:
-        from aiteamforge_paths import get_team_working_dir
-        return get_team_working_dir(team_id)
+        # XACA-1193-005: read-only — resolve via read_config_view() (never
+        # mutates/quarantines/reseeds the registry) instead of the default
+        # mutating load_config().
+        from aiteamforge_paths import get_team_working_dir, read_config_view
+        return get_team_working_dir(team_id, config=read_config_view())
     except Exception:
         return None
 

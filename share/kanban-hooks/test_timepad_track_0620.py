@@ -74,8 +74,8 @@ def test_d1_longest_prefix_wins():
         os.makedirs(repo)
         wd = {"outer_team": outer, "inner_team": inner}
         with _Restore(
-            list_teams=lambda: list(wd.keys()),
-            get_team_working_dir=lambda t: wd[t],
+            list_teams=lambda *, config=None: list(wd.keys()),
+            get_team_working_dir=lambda t, *, config=None: wd[t],
             is_timepad_enabled=lambda t: True,
         ):
             assert tt.resolve_team(repo) == "inner_team"
@@ -90,8 +90,8 @@ def test_d1_no_match_returns_none():
         other = os.path.join(root, "elsewhere")
         os.makedirs(other)
         with _Restore(
-            list_teams=lambda: list(wd.keys()),
-            get_team_working_dir=lambda t: wd[t],
+            list_teams=lambda *, config=None: list(wd.keys()),
+            get_team_working_dir=lambda t, *, config=None: wd[t],
             is_timepad_enabled=lambda t: True,
         ):
             assert tt.resolve_team(other) is None
@@ -116,8 +116,8 @@ def test_d2_disabled_team_skipped_in_resolution():
         repo = os.path.join(wd["only_team"], "repo")
         os.makedirs(repo)
         with _Restore(
-            list_teams=lambda: list(wd.keys()),
-            get_team_working_dir=lambda t: wd[t],
+            list_teams=lambda *, config=None: list(wd.keys()),
+            get_team_working_dir=lambda t, *, config=None: wd[t],
             is_timepad_enabled=lambda t: False,  # disabled
         ):
             assert tt.resolve_team(repo) is None
@@ -139,7 +139,7 @@ def test_d2_main_noop_when_no_enabled_team():
     with _Restore(
         ACTION="start",
         resolve_repo_root=lambda: "/tmp/does-not-matter",
-        resolve_team=lambda _r: None,
+        resolve_team=lambda _r, _c=None: None,
         get_timepad_team_config=_cfg,
         resolve_timepad_token=_token,
     ):
@@ -163,7 +163,7 @@ def test_d3_placeholder_blocks_token_and_api():
     with _Restore(
         ACTION="start",
         resolve_repo_root=lambda: "/tmp/repo",
-        resolve_team=lambda _r: "academy",
+        resolve_team=lambda _r, _c=None: "academy",
         get_timepad_team_config=lambda _t: {
             "apiBaseUrl": "https://timepad.io/api",
             "tokenRef": "TIMEPAD_API_KEY",
@@ -197,7 +197,7 @@ def test_d4_describe_resolves_board_title():
         with open(os.path.join(kd, "demo-board.json"), "w") as f:
             json.dump(board, f)
         os.environ["TT_BRANCH"] = "feature/foo-42"
-        with _Restore(get_team_kanban_dir=lambda _t: kd):
+        with _Restore(get_team_kanban_dir=lambda _t, *, config=None: kd):
             desc, coordination = tt.describe("demo")
         assert desc == "[FOO-0042] The Answer", desc
         assert coordination is False

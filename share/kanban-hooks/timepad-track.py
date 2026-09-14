@@ -55,6 +55,7 @@ from aiteamforge_paths import (
     get_timepad_team_config,
     is_timepad_enabled,
     timepad_team_has_placeholders,
+    read_config_view,
 )
 from timepad_config import resolve_timepad_token, TimePadTokenResolutionError
 
@@ -89,12 +90,27 @@ def resolve_repo_root():
         return ""
 
 
-def resolve_team(repo_root):
+def resolve_team(repo_root, config=None):
     """First ENABLED team whose working_dir is a prefix of repo_root.
 
     Longest-prefix wins so a nested working_dir beats a shorter ancestor.
     Disabled teams are skipped entirely (the enable gate is the master switch).
     Returns the team slug, or None.
+
+    XACA-1193-004: ``config`` is the caller's single ``read_config_view()``
+    result, threaded through to ``list_teams``/``get_team_working_dir`` so
+    this read-only dispatcher never reaches ``load_config()``'s self-heal.
+    ``is_timepad_enabled()`` gets the same ``config`` (XACA-1193 review
+    follow-up) — but only when one was supplied: with ``config=None`` it is
+    called with the team alone, exactly as before, because existing tests
+    replace ``is_timepad_enabled`` with a one-argument lambda.
+
+    ``config=None`` (the default) mirrors the accessors' own contract: it
+    means "resolve via ``load_config()``", i.e. mutating. Production's only
+    caller (``main()``) always passes its own ``read_config_view()`` result
+    explicitly; the default exists only so unit tests that monkeypatch
+    ``list_teams``/``get_team_working_dir`` outright can keep calling this
+    with one positional argument.
     """
     if not repo_root:
         return None
@@ -103,13 +119,17 @@ def resolve_team(repo_root):
     except Exception:
         return None
     best = None  # (team_slug, matched_prefix_len)
-    for team in list_teams():
+    for team in list_teams(config=config):
         try:
-            wd = os.path.realpath(str(get_team_working_dir(team)))
+            wd = os.path.realpath(str(get_team_working_dir(team, config=config)))
         except Exception:
             continue
         if rr == wd or rr.startswith(wd + os.sep):
-            if not is_timepad_enabled(team):
+            enabled = (
+                is_timepad_enabled(team) if config is None
+                else is_timepad_enabled(team, config=config)
+            )
+            if not enabled:
                 continue
             if best is None or len(wd) > best[1]:
                 best = (team, len(wd))
@@ -131,18 +151,18 @@ def _parse_ticket(s):
     return m.group(1).upper(), int(m.group(2))
 
 
-def _board_path(team):
-    return os.path.join(str(get_team_kanban_dir(team)), f"{team}-board.json")
+def _board_path(team, config=None):
+    return os.path.join(str(get_team_kanban_dir(team, config=config)), f"{team}-board.json")
 
 
-def item_title(team, prefix, num):
+def item_title(team, prefix, num, config=None):
     """Look up a kanban item's title in the team board (read-only).
 
     Padding-insensitive: matches on (PREFIX, integer) so feature/xaca-620 and
     XACA-0620 resolve to the same item. Returns (title, canonical_id) or
     (None, None).
     """
-    path = _board_path(team)
+    path = _board_path(team, config)
     try:
         with open(path) as f:
             board = json.load(f)
@@ -156,7 +176,7 @@ def item_title(team, prefix, num):
     return None, None
 
 
-def describe(team):
+def describe(team, config=None):
     """Build the timer description + whether this is a coordination session.
 
     Returns (description, is_coordination). A branch carrying a ticket id ->
@@ -167,7 +187,7 @@ def describe(team):
     parsed = _parse_ticket(branch)
     if parsed:
         prefix, num = parsed
-        title, canon = item_title(team, prefix, num)
+        title, canon = item_title(team, prefix, num, config)
         ident = canon or f"{prefix}-{num:04d}"
         return (f"[{ident}] {title}" if title else f"[{ident}] {team}"), False
     return (f"{team} — {branch}" if branch else team), True
@@ -206,7 +226,10 @@ def main():
         return
 
     repo_root = resolve_repo_root()
-    team = resolve_team(repo_root)
+    # XACA-1193-004: resolve the registry once, read-only, and thread it
+    # through every migrated accessor call below.
+    view = read_config_view()
+    team = resolve_team(repo_root, view)
     if not team:
         # No enabled TimePad team owns this repo — the common case. Silent no-op.
         return
@@ -223,7 +246,7 @@ def main():
     try:
         token = resolve_timepad_token(
             team,
-            team_code=get_team_code(team),
+            team_code=get_team_code(team, config=view),
             token_ref=cfg.get("tokenRef"),
         )
     except TimePadTokenResolutionError:
@@ -248,7 +271,7 @@ def main():
             else:
                 log(f"{team}: timer already running (elapsed={elapsed}s) — not starting a second one")
                 return
-        desc, coordination = describe(team)
+        desc, coordination = describe(team, view)
         names = classify_names(desc, coordination=coordination)
         body = {"projectId": project, "description": desc, "tagIds": tag_ids}
         code, res = call("POST", "/timer/start", body)

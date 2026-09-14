@@ -229,7 +229,11 @@ team   = sys.argv[2]
 sys.path.insert(0, py_dir)
 import aiteamforge_paths
 try:
-    wd = aiteamforge_paths.get_team_working_dir(team)
+    # XACA-1193-005: read-only — resolve via read_config_view() (never
+    # mutates/quarantines/reseeds the registry) instead of the default
+    # mutating load_config().
+    view = aiteamforge_paths.read_config_view()
+    wd = aiteamforge_paths.get_team_working_dir(team, config=view)
     print(str(wd))
 except Exception as exc:
     print(f"ERROR:{exc}", end="")
@@ -253,7 +257,11 @@ team      = sys.argv[2]
 platform  = sys.argv[3]  # may be empty
 sys.path.insert(0, py_dir)
 import aiteamforge_paths
-sources = aiteamforge_paths.get_team_version_sources(team, platform=platform if platform else None)
+# XACA-1193-005: read-only — resolve via read_config_view() (never
+# mutates/quarantines/reseeds the registry) instead of the default
+# mutating load_config().
+view = aiteamforge_paths.read_config_view()
+sources = aiteamforge_paths.get_team_version_sources(team, platform=platform if platform else None, config=view)
 print(json.dumps(sources))
 PYEOF
 ) || { echo "ERROR: failed to load version_sources config." >&2; exit 1; }

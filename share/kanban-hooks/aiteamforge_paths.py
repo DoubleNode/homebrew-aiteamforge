@@ -235,6 +235,7 @@ migrate to this module (Wave 3, XACA-0168-006 onwards).  For now both exist.
 
 from __future__ import annotations
 
+import copy
 import fcntl
 import itertools
 import json
@@ -856,10 +857,9 @@ def _write_defaults(config_path: Path) -> None:
         )
         _atomic_write_json(config_path, payload)
     except (OSError, ValueError) as exc:
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] WARNING: could not write default config to "
             f"{config_path}: {exc}",
-            file=sys.stderr,
         )
 
 
@@ -915,25 +915,22 @@ def _bootstrap(config_path: Path, corrupt: bool = False) -> dict:
         # a B2 reseed that provably loses nothing. The test suites that
         # exercise this path now assert THAT (data-preserving-or-refused)
         # contract, not "unconditional" in the pre-XACA-1029 sense.
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] Config corrupt at {config_path} — writing defaults (auto-heal)",
-            file=sys.stderr,
         )
         _write_defaults(config_path)
         return _make_default_config()
 
     # MISSING: read-only must not write; opt-in only (XACA-0804).
     if _interactive_tty():
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] Config not found at {config_path}.\n"
             f"  Run: aiteamforge-paths init\n"
             f"  Falling back to built-in defaults.",
-            file=sys.stderr,
         )
     elif _bootstrap_write_allowed():
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] Config missing — writing defaults to {config_path}",
-            file=sys.stderr,
         )
         _write_defaults(config_path)
     # else: non-interactive with no opt-in — silent fallback to DEFAULT_TEAMS,
@@ -1026,27 +1023,24 @@ def _quarantine_or_snapshot_existing(config_path: Path, *, tag: str, label: str)
     try:
         os.replace(str(resolved), str(quarantine_path))
     except OSError as exc:
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] {label}: WARNING: failed to quarantine "
             f"{resolved} to {quarantine_path}: {exc} — proceeding without "
             f"a snapshot",
-            file=sys.stderr,
         )
         return None
 
     if suspect:
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] {label}: quarantined {config_path} -> "
             f"{quarantine_path} (SUSPECT: only {size} bytes — below the "
             f"{_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte plausibility floor for a "
             f"real registry; likely itself a transient/partial read that the "
             f"retry in (a) did not happen to resolve, per XACA-1029 part d)",
-            file=sys.stderr,
         )
     else:
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] {label}: quarantined {config_path} -> {quarantine_path}",
-            file=sys.stderr,
         )
     return quarantine_path
 
@@ -1075,9 +1069,17 @@ def _stderr_note(message: str) -> None:
     transient-read retry notices below and _peek_emit_once(). An unwritable
     stderr (closed, broken pipe) used to raise out of the retry loop before its
     first sleep, so a briefly-unparseable file was declared unreadable without
-    being retried. The only behaviour this changes on load_config()'s path is
-    the same broken-stderr case, where a diagnostic that cannot be delivered is
-    now dropped instead of aborting the read.
+    being retried.
+
+    XACA-1193-015: every stderr write on load_config()'s self-heal path goes
+    through here too (_load_config_impl, _quarantine_or_snapshot_existing,
+    _bootstrap, _write_defaults, _rewrite_config_on_disk, the two write-guard
+    refusals, _registry_field_rule and apply_legacy_credential_lift). A stderr
+    that cannot be written can therefore no longer abort a heal half-way: the
+    quarantine helper used to print AFTER its os.replace(), so an unwritable
+    stderr raised between the quarantine move and the reseed and left no file
+    at the config path until the next load. The message text is unchanged; a
+    diagnostic that cannot be delivered is dropped, never raised.
     """
     try:
         print(message, file=sys.stderr)
@@ -1119,14 +1121,27 @@ def _read_config_with_transient_retry(config_path: Path) -> tuple[dict | None, b
                           and the module docstring's B1 suspect carve-out).
                           Part (c) cannot apply on B1 either way.
     """
+    # XACA-1193-016: UnicodeDecodeError is treated exactly like
+    # json.JSONDecodeError — a failed attempt that is retried on the backoff
+    # schedule. A file caught mid-write can end in a PARTIAL multibyte
+    # sequence, which read_text() rejects while decoding (before json.loads is
+    # ever reached); that is the same transient race a truncated ASCII read is,
+    # and used to skip the retry entirely and raise straight out of
+    # load_config() (breaking its "Never raises" promise). The two exception
+    # types are listed explicitly and deliberately NOT widened to ValueError.
+    # Consequence on load_config()'s path, pinned by tests: a PERSISTENT
+    # invalid-UTF-8 file is now confirmed-corrupt B1 like any unparseable file —
+    # at or above _MIN_PLAUSIBLE_REGISTRY_BYTES it is quarantined by move (bytes
+    # preserved) and reseeded; below it, the B1-suspect refusal leaves it
+    # untouched. peek_config() reports it "unreadable" and never writes.
     def _attempt() -> tuple[dict | None, Exception | None]:
         try:
             raw = config_path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             return None, exc
         try:
             return json.loads(raw), None
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             return None, exc
 
     cfg, err = _attempt()
@@ -1174,13 +1189,22 @@ def _reread_and_revalidate_once(config_path: Path) -> dict | None:
     Returns the freshly re-read config dict from the FIRST attempt in the
     schedule that both parses AND passes the structural check, else None
     once the whole schedule is exhausted (confirmed corrupt — B2).
+
+    XACA-1193-017: an attempt that hits invalid UTF-8 (UnicodeDecodeError),
+    or that parses to a non-object top level or a non-object ``teams``, is a
+    failed attempt like a JSON parse error — it moves on to the next one. It
+    used to raise straight out of load_config() (UnicodeDecodeError from
+    read_text, AttributeError from ``.get``/``.keys()``), the same class of
+    defect XACA-1193-016 closed in _read_config_with_transient_retry.
     """
     for delay in _CORRUPT_READ_RETRY_BACKOFF_SECONDS:
         time.sleep(delay)
         try:
             raw = config_path.read_text(encoding="utf-8")
             cfg = json.loads(raw)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(cfg, dict) or not isinstance(cfg.get("teams", {}), dict):
             continue
         has_schema = "schema_version" in cfg
         teams_keys = set(cfg.get("teams", {}).keys())
@@ -1250,6 +1274,17 @@ def load_config(*, include_defaults: bool = False) -> dict:
     carve-out), and on B2 ONLY, refuse the reseed entirely if it would
     remove a team not present in DEFAULT_TEAMS (a set-difference check,
     never a count comparison).
+
+    Concurrency (XACA-1193-001 decision record): only the on-disk rewrite
+    passes (_rewrite_config_on_disk) are serialized, by flock on the
+    ``<resolved>.lock`` sibling. Quarantine (_quarantine_or_snapshot_existing)
+    and reseed (_write_defaults) take NO lock; they are race-tolerant by
+    construction instead (quarantine is a uniquely-named os.replace move,
+    reseed is an atomic replace), so a racing loser at worst quarantines the
+    winner's fresh defaults — redundant, never data-losing.
+
+    Read-only callers should not use this function: see read_config_view()
+    (XACA-1193), which never writes.
 
     Returns a dict with at least {"schema_version": int, "teams": dict}.
     Never raises.
@@ -1323,7 +1358,7 @@ def _load_config_impl() -> dict:
                 # keeps screaming "broken" at the next human or tool that
                 # looks at it, and hand this process DEFAULT_TEAMS in memory
                 # only, so it keeps functioning without touching disk.
-                print(
+                _stderr_note(
                     f"[aiteamforge-paths] CRITICAL: {config_path} is confirmed "
                     f"corrupt AND implausibly short "
                     f"(< {_MIN_PLAUSIBLE_REGISTRY_BYTES} bytes) — refusing to "
@@ -1334,7 +1369,6 @@ def _load_config_impl() -> dict:
                     f"process only — no disk write. The file is left "
                     f"untouched at {config_path}; a human must inspect and "
                     f"restore it manually.",
-                    file=sys.stderr,
                 )
                 config = _make_default_config()
                 _b1_suspect_no_reseed = True
@@ -1349,13 +1383,34 @@ def _load_config_impl() -> dict:
                 # The manual-recovery-from-quarantine rationale genuinely
                 # holds here: the file was at least plausibly-sized.
 
+    # XACA-1193-017: a top level that parses but is not an object (a list, a
+    # number, a string) used to raise TypeError/AttributeError below, breaking
+    # "Never raises". Route it through the path a top-level `null` already
+    # takes (json.loads returns None -> `config is None` -> corrupt bootstrap:
+    # _write_defaults quarantines by move, SUSPECT-tagged under the byte floor,
+    # then reseeds). No team set is knowable from such a file, so there is
+    # nothing for the B2 team-loss refusal to protect. peek_config() reports
+    # the same shape "unreadable", and read_config_view() returns defaults.
+    if config is not None and not isinstance(config, dict):
+        _stderr_note(
+            f"[aiteamforge-paths] WARNING: {config_path} parses as JSON but its "
+            f"top level is a {type(config).__name__}, not an object — treating "
+            f"it as corrupt",
+        )
+        config = None
+
     # Schema-integrity check (XACA-0457) — catch partial-write corruption where
     # JSON is technically valid but the config is missing required teams or the
     # schema_version field.  Must run BEFORE the `if config is None` branch so
     # a corrupted-but-parseable file triggers bootstrap, not silent degradation.
     if config is not None:
         has_schema = "schema_version" in config
-        teams_keys = set(config.get("teams", {}).keys())
+        # XACA-1193-017: a non-object "teams" (null, list, string, number) used
+        # to raise AttributeError here. It carries no team ids, so it is an
+        # empty team set: structurally invalid, B2, with nothing the team-loss
+        # refusal could lose -> quarantine + reseed like `"teams": {}`.
+        teams_value = config.get("teams", {})
+        teams_keys = set(teams_value.keys()) if isinstance(teams_value, dict) else set()
         # XACA-0705: validity rule lives in config_is_structurally_valid() — the
         # single source of truth shared with lcars-ui/server.py (ends k501 drift).
         # Valid iff schema_version present AND at least one non-academy team exists.
@@ -1370,19 +1425,17 @@ def _load_config_impl() -> dict:
             # declaring corrupt.
             retried = _reread_and_revalidate_once(config_path)
             if retried is not None:
-                print(
+                _stderr_note(
                     f"[aiteamforge-paths] retry succeeded at {config_path} — "
                     f"transient structural-invalid read, not corruption; "
                     f"proceeding with the re-read config",
-                    file=sys.stderr,
                 )
                 config = retried
             else:
-                print(
+                _stderr_note(
                     f"[aiteamforge-paths] WARNING: {config_path} appears corrupt "
                     f"(has_schema_version={has_schema}, missing_required={sorted(missing_required)}, "
                     f"has_non_required_team={has_non_required}) — bootstrapping defaults",
-                    file=sys.stderr,
                 )
 
                 # XACA-1029-004(c)/R1/R10: on B2 the parsed team set IS known —
@@ -1397,7 +1450,7 @@ def _load_config_impl() -> dict:
                         tag="REFUSED-teamloss",
                         label="corrupt-config (B2, refused)",
                     )
-                    print(
+                    _stderr_note(
                         f"[aiteamforge-paths] CRITICAL: refusing to reseed "
                         f"{config_path} — doing so would permanently remove "
                         f"{len(reseed_would_lose)} team(s) not present in "
@@ -1405,7 +1458,6 @@ def _load_config_impl() -> dict:
                         f"quarantined at {quarantine_path}. A human must "
                         f"restore or repair the config manually — no reseed "
                         f"was written.",
-                        file=sys.stderr,
                     )
                     _refused_team_loss = True
                     # `config` already holds the parsed (structurally-invalid
@@ -1429,14 +1481,13 @@ def _load_config_impl() -> dict:
                     # destroy) is untouched by this.
                     if "schema_version" not in config:
                         config["schema_version"] = SUPPORTED_SCHEMA_VERSION
-                        print(
+                        _stderr_note(
                             f"[aiteamforge-paths] corrupt-config (B2, refused): "
                             f"the preserved config had no schema_version — "
                             f"back-filling {SUPPORTED_SCHEMA_VERSION} IN MEMORY "
                             f"ONLY so the documented return contract holds. "
                             f"{config_path} on disk is unchanged (quarantined); "
                             f"this does not repair the file.",
-                            file=sys.stderr,
                         )
                 else:
                     _quarantine_or_snapshot_existing(
@@ -1445,6 +1496,28 @@ def _load_config_impl() -> dict:
                     config = None
 
     if config is None and not (_refused_team_loss or _b1_suspect_no_reseed):
+        if not _path_existed_at_start:
+            # XACA-1193-002 / XACA-1192 Decision (f) item 6: after a B2
+            # REFUSED-teamloss quarantine there is NO file at config_path, so
+            # this looked like an ordinary missing config and was silent on
+            # every non-interactive load — an active refusal a human still
+            # has to act on went unreported. Emit the same CRITICAL
+            # peek_config() emits for this shape (shared detector, so the two
+            # cannot drift). Report only: the bootstrap decision below is
+            # unchanged (still opt-in via AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE).
+            try:
+                refused_siblings = _refused_teamloss_siblings(config_path)
+            except Exception:  # noqa: BLE001 - a diagnostic must never break a load
+                refused_siblings = []
+            if refused_siblings:
+                _stderr_note(
+                    _refused_teamloss_sibling_message(
+                        "load_config",
+                        config_path,
+                        refused_siblings,
+                        "this load is falling back to DEFAULT_TEAMS",
+                    )
+                )
         # XACA-0804: corrupt (file existed, failed to load/validate) always
         # self-heals; missing (no file ever existed) is opt-in only. See
         # _bootstrap()'s docstring for the full rationale.
@@ -1457,19 +1530,17 @@ def _load_config_impl() -> dict:
     _READABLE_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
     version = config.get("schema_version")
     if version not in _READABLE_SCHEMA_VERSIONS:
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] WARNING: schema_version={version!r} is not "
             f"recognized (readable: {sorted(_READABLE_SCHEMA_VERSIONS)}). Proceeding anyway.",
-            file=sys.stderr,
         )
 
     # Ensure "teams" is populated — catches both missing key AND empty dict,
     # the latter being the failure mode that produced a silently-empty team map
     # (bug found on 2026-04-22 when corrupt config made every team lookup 404).
     if not config.get("teams"):
-        print(
+        _stderr_note(
             "[aiteamforge-paths] WARNING: config has no populated 'teams' — using defaults",
-            file=sys.stderr,
         )
         config["teams"] = DEFAULT_TEAMS
 
@@ -1632,6 +1703,49 @@ def _peek_emit_once(path_str: str, status: str, message: str) -> None:
     _stderr_note(message)
 
 
+def _refused_teamloss_siblings(config_path: Path) -> list[Path]:
+    """Return the sorted ``<name>.bak-*REFUSED-teamloss-*`` siblings of config_path.
+
+    XACA-1193-002: the single detector for "nothing at the config path, but a
+    prior XACA-1029 B2 refusal quarantined the original beside it". Shared by
+    peek_config() (status "quarantined") and load_config()'s own missing-path
+    branch (XACA-1192 Decision (f) item 6), so the two readers cannot drift on
+    what counts as a refusal sibling (k501). Listing a directory is not a
+    mutation. An unlistable parent yields [].
+    """
+    try:
+        resolved = config_path.resolve()
+    except OSError:
+        resolved = config_path
+    if not resolved.parent.exists():
+        return []
+    try:
+        return sorted(resolved.parent.glob(f"{resolved.name}.bak-*REFUSED-teamloss-*"))
+    except OSError:
+        return []
+
+
+def _refused_teamloss_sibling_message(
+    reader: str, config_path: Path, siblings: list[Path], consequence: str
+) -> str:
+    """Build the REFUSED-teamloss-sibling CRITICAL line (XACA-1193-002).
+
+    *reader* names the function reporting it; *consequence* says what THIS
+    call did about it. peek_config()'s wording is byte-identical to the
+    XACA-1192 original; load_config() reuses the same sentence.
+    """
+    extra = f" (+{len(siblings) - 1} more)" if len(siblings) > 1 else ""
+    return (
+        f"[aiteamforge-paths] CRITICAL: {reader}: no config at "
+        f"{config_path}, but a quarantine sibling exists — "
+        f"{siblings[0].name}{extra}. This is a prior "
+        f"corrupt-config refusal (XACA-1029 B2, REFUSED-teamloss): "
+        f"the original was preserved and nothing was reseeded — "
+        f"{consequence}; a human must "
+        f"restore or repair the config manually."
+    )
+
+
 def peek_config() -> ConfigPeek:
     """Read team-paths.json WITHOUT mutating anything. Never raises.
 
@@ -1752,33 +1866,14 @@ def _peek_config_impl() -> ConfigPeek:
         # nothing at config_path, but a quarantine copy beside it. Without
         # this check a plain "missing" read would be silent about an active
         # refusal that a human still needs to act on.
-        try:
-            resolved = config_path.resolve()
-        except OSError:
-            resolved = config_path
-        quarantine_siblings: list[Path] = []
-        if resolved.parent.exists():
-            try:
-                quarantine_siblings = sorted(
-                    resolved.parent.glob(f"{resolved.name}.bak-*REFUSED-teamloss-*")
-                )
-            except OSError:
-                quarantine_siblings = []
+        quarantine_siblings = _refused_teamloss_siblings(config_path)
 
         if quarantine_siblings:
-            extra = (
-                f" (+{len(quarantine_siblings) - 1} more)"
-                if len(quarantine_siblings) > 1
-                else ""
-            )
-            message = (
-                f"[aiteamforge-paths] CRITICAL: peek_config: no config at "
-                f"{config_path}, but a quarantine sibling exists — "
-                f"{quarantine_siblings[0].name}{extra}. This is a prior "
-                f"corrupt-config refusal (XACA-1029 B2, REFUSED-teamloss): "
-                f"the original was preserved and nothing was reseeded — no "
-                f"self-heal was performed by this read; a human must "
-                f"restore or repair the config manually."
+            message = _refused_teamloss_sibling_message(
+                "peek_config",
+                config_path,
+                quarantine_siblings,
+                "no self-heal was performed by this read",
             )
             _peek_emit_once(config_path_str, "quarantined", message)
             return ConfigPeek("quarantined", None, config_path)
@@ -1802,15 +1897,14 @@ def _peek_config_impl() -> ConfigPeek:
     try:
         config, confirmed_corrupt_b1 = _read_config_with_transient_retry(config_path)
     except (UnicodeDecodeError, ValueError) as exc:
-        # XACA-1192 review round 1 (B1): _read_config_with_transient_retry's
-        # own _attempt() only catches OSError/json.JSONDecodeError — invalid
-        # UTF-8 bytes raise UnicodeDecodeError (a ValueError subclass)
-        # straight through it, on the first attempt or any retry, and it was
-        # UNCAUGHT here before this fix. Deliberately NOT fixed inside
-        # _read_config_with_transient_retry itself: that helper is shared
-        # with load_config()'s mutating path, and changing its observable
-        # behaviour is out of scope for a read-path fix (existing
-        # load_config() tests must stay green). Treat it exactly like a
+        # XACA-1192 review round 1 (B1) added this handler when
+        # _read_config_with_transient_retry's _attempt() caught only
+        # OSError/json.JSONDecodeError, so invalid UTF-8 raised
+        # UnicodeDecodeError (a ValueError subclass) straight through it.
+        # XACA-1193-016 has since fixed that inside _attempt() itself (invalid
+        # UTF-8 is now retried and reported as confirmed-corrupt B1 below), so
+        # this handler is defense in depth for any other ValueError the helper
+        # might raise. Kept deliberately. Treat it exactly like a
         # confirmed-corrupt B1 read: no self-heal, disk unchanged (this
         # helper never writes before raising).
         message = (
@@ -1912,6 +2006,168 @@ def _peek_config_impl() -> ConfigPeek:
 
 
 # ---------------------------------------------------------------------------
+# Read-only config view (XACA-1193-002)
+# ---------------------------------------------------------------------------
+
+class _AlreadyWarned(set):
+    """A warned-set that reports every key as already warned.
+
+    apply_legacy_credential_lift() prints its corrupt-``ai`` warning only for
+    a key absent from the ``_warned`` set it is given. Passing this set keeps
+    the transform exactly as the owner runs it and drops only the message.
+    """
+
+    def __contains__(self, key: object) -> bool:
+        return True
+
+
+def _self_heal_passes() -> tuple:
+    """(label, predicate, transform) for each load_config() self-heal pass,
+    in load_config()'s order. Every entry is the same pure pair its
+    ``*_on_disk`` wrapper hands to _rewrite_config_on_disk."""
+    return (
+        ("contract scrub", _find_contract_violating_keys, _drop_contract_violating_keys),
+        ("board-less markers", diff_missing_board_less_markers, apply_board_less_markers),
+        ("primary_host", diff_missing_primary_host, apply_primary_host),
+        ("seed convergence", diff_unconverged_seed_fields, apply_seed_convergence),
+        (
+            "legacy credential lift",
+            diff_liftable_legacy_credentials,
+            lambda cfg: apply_legacy_credential_lift(cfg, _AlreadyWarned()),
+        ),
+    )
+
+
+def _apply_self_heal_transforms(config: dict) -> dict:
+    """Return what load_config()'s self-heal passes would make of *config*,
+    in memory only. No file write, no lock, never mutates *config*. Returns
+    *config* itself when no pass has work (the driver's skip-fast)."""
+    out = config
+    for _label, needs_change, transform in _self_heal_passes():
+        if needs_change(out):
+            out = transform(out)
+    return out
+
+
+def _config_view_from_peek(peek: ConfigPeek) -> dict:
+    """Map a ConfigPeek onto the config dict load_config() would RETURN.
+
+    XACA-1193-001 decision record, section B ("D3 parity rule, corrected by
+    measurement"). Never writes, never locks, never mutates *peek.config*.
+    Its only possible stderr is seed convergence's "aiteamforge_registry
+    unavailable" note, which load_config() prints in the same state.
+
+      ok                                 -> the parsed dict after the
+                                            self-heal transforms (below).
+      missing / unreadable / quarantined -> a fresh DEFAULT_TEAMS config.
+      invalid, and ``teams`` is a dict holding a team absent from
+      DEFAULT_TEAMS                      -> the parsed dict (load_config's
+                                            B2-REFUSED parity), shallow-copied,
+                                            with schema_version back-filled in
+                                            memory exactly as load_config()
+                                            back-fills it on that branch.
+      any other invalid (academy-alone, empty teams, schema-less with only
+      default teams, non-dict teams)     -> a fresh DEFAULT_TEAMS config
+                                            (load_config's reseed parity).
+
+    Returning the parsed dict for every ``invalid`` (the plan's original D3)
+    was measured to shrink list_teams() from 16 to 1 or 0 on the three
+    reseed shapes; that is why the rule keys on team loss, the same set
+    difference load_config()'s B2 branch uses.
+
+    Per-pass parity on ``ok``. load_config() applies five self-heal passes to
+    the dict it RETURNS. Each on-disk pass is a thin wrapper that hands a pure
+    predicate and a pure transform to _rewrite_config_on_disk, and every exit
+    of that driver except skip-fast hands back ``transform(...)`` (success,
+    lost race, snapshot failure, write failure). So what load_config() returns
+    is fixed by the transforms alone, whether or not the disk write happened.
+    The view applies the SAME functions, in the SAME order, under the same
+    gate (see _apply_self_heal_transforms). There is no second copy of any
+    pass: add a sixth pass to load_config() and it must be added to that
+    tuple too, which test_view_pass_table_matches_load_config pins.
+
+    Measured 2026-09-13, load_config() in one sandbox against this view in
+    another, comparing the returned dict and all 13 accessors for every team:
+
+      contract scrub (XACA-0643)       MATCHES (_drop_contract_violating_keys)
+      board-less markers (XACA-0794)   MATCHES (apply_board_less_markers)
+      primary_host (XACA-0802)         MATCHES (apply_primary_host)
+                                       Both fields are also DEFAULT_TEAMS
+                                       seed fields, so seed convergence adds
+                                       them anyway when aiteamforge_registry
+                                       imports. These two passes decide the
+                                       answer only when it does not (seed
+                                       convergence is then skip-fast on both
+                                       sides); parity is tested in both states.
+      seed convergence (XACA-1161-003) MATCHES (apply_seed_convergence). This
+                                       was the one accessor-visible gap:
+                                       get_team_lcars_port 8260 vs None,
+                                       get_team_working_dir/_memory_dir value
+                                       vs KeyError, on an overlay entry that
+                                       omits a seeded field.
+      legacy credential lift           MATCHES in the dict
+      (XACA-1184-004)                  (apply_legacy_credential_lift). Its
+                                       corrupt-``ai`` WARNING is suppressed
+                                       here: it says the value "is DISCARDED",
+                                       which is true of the owner's write and
+                                       false of a read. The owner still prints
+                                       it when it discards.
+
+    Every transform is gated on its predicate, exactly as the driver's
+    skip-fast is, so a converged file costs five predicates and no copy, and
+    the returned dict is *peek.config* itself. The once-per-process
+    ``_*_ATTEMPTED`` flags are NOT mirrored: they bound disk writes, and they
+    only change load_config()'s answer when its cache is dropped and it
+    reloads in the same process, which is not a state a per-call view has.
+
+    On ``invalid`` no pass runs in load_config() either: the B2-refused branch
+    suppresses them all, so the parsed dict returned below is unfiltered on
+    both sides. The defaults branches need no pass: every predicate is empty
+    on _make_default_config() (pinned by a test), so load_config()'s passes
+    after a bootstrap are skip-fast.
+    """
+    if peek.status == "ok" and isinstance(peek.config, dict):
+        return _apply_self_heal_transforms(peek.config)
+    if peek.status == "invalid" and isinstance(peek.config, dict):
+        teams = peek.config.get("teams")
+        if isinstance(teams, dict) and (set(teams) - set(DEFAULT_TEAMS)):
+            view = dict(peek.config)
+            view.setdefault("schema_version", SUPPORTED_SCHEMA_VERSION)
+            return view
+    return copy.deepcopy(_make_default_config())
+
+
+def read_config_view() -> dict:
+    """Return the team-paths config for a READ-ONLY caller. Never writes. Never raises.
+
+    XACA-1193-002. Calls peek_config() exactly once and returns the same
+    config dict load_config() would return for that on-disk state (see
+    _config_view_from_peek for the per-status rule), so a migrated reader
+    behaves as it does today — without being able to reach quarantine,
+    reseed, backfill, a lock or backup sibling, _CONFIG_CACHE, or any
+    ``_*_ATTEMPTED`` flag.
+
+    It never hides either: every non-healthy state is reported on stderr by
+    peek_config() itself (once per process per (path, status)).
+
+    Intended use — resolve once, pass it through::
+
+        view = read_config_view()
+        for team in list_teams(config=view): ...
+
+    Every accessor's ``config=`` keyword defaults to None, which still means
+    load_config() — the mutating self-heal owners (lcars_ports.py,
+    kanban-backup.py) depend on that default. The name deliberately does not
+    contain ``load_config``, so ``patch.object(ap, "load_config")`` never
+    shadows it.
+
+    The returned dict is never the module's DEFAULT_TEAMS object; a caller
+    may mutate it without corrupting this module's defaults.
+    """
+    return _config_view_from_peek(peek_config())
+
+
+# ---------------------------------------------------------------------------
 # Shared on-disk rewrite machinery (XACA-0794-008 / -009 / -012)
 # ---------------------------------------------------------------------------
 #
@@ -1964,7 +2220,7 @@ def _reject_if_below_write_floor(data: dict, *, resolved: Path | None = None) ->
     serialized_bytes = len(serialized.encode("utf-8"))
     if serialized_bytes < _MIN_PLAUSIBLE_REGISTRY_BYTES:
         target_desc = f" {resolved}" if resolved is not None else ""
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] write-guard: REFUSING to write{target_desc} — "
             f"payload is only {serialized_bytes} bytes, below the "
             f"{_MIN_PLAUSIBLE_REGISTRY_BYTES}-byte plausibility floor for a "
@@ -1973,7 +2229,6 @@ def _reject_if_below_write_floor(data: dict, *, resolved: Path | None = None) ->
             f"exactly the kind of implausibly-short file XACA-1029 already "
             f"refuses to self-heal from. No write performed; the file on "
             f"disk (if any) is untouched.",
-            file=sys.stderr,
         )
         raise ValueError(
             f"refusing to write{target_desc}: payload ({serialized_bytes} bytes) "
@@ -2047,13 +2302,12 @@ def _reject_if_team_ids_lost(
     if lost and not allow_removal:
         target_desc = f" {resolved}" if resolved is not None else ""
         ctx_desc = f"{context}: " if context else ""
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] write-guard: REFUSING to write{target_desc} -- "
             f"{ctx_desc}this write would drop {len(lost)} team id(s) already in "
             f"the registry: {', '.join(lost)} (XACA-1187-005). No write "
             f"performed; the file on disk is untouched. If this removal is "
             f"deliberate, the caller must pass allow_removal=True explicitly.",
-            file=sys.stderr,
         )
         raise TeamRegistryLossError(
             f"{ctx_desc}refusing to write: would drop team id(s) already in "
@@ -2209,9 +2463,8 @@ def _rewrite_config_on_disk(
                 try:
                     backup_path.write_bytes(resolved.read_bytes())
                 except OSError as exc:
-                    print(
+                    _stderr_note(
                         f"[aiteamforge-paths] {label}: snapshot failed ({exc}) — aborting disk write",
-                        file=sys.stderr,
                     )
                     return transform(current)
 
@@ -2220,20 +2473,18 @@ def _rewrite_config_on_disk(
 
                 if describe is not None:
                     for line in describe(current):
-                        print(f"[aiteamforge-paths] {label}: {line}", file=sys.stderr)
-                print(
+                        _stderr_note(f"[aiteamforge-paths] {label}: {line}")
+                _stderr_note(
                     f"[aiteamforge-paths] {label}: snapshot={backup_path}",
-                    file=sys.stderr,
                 )
                 return transformed
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
                 # Intentionally NO unlink — see XACA-0794-012 note above.
     except Exception as exc:
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] {label}: disk write failed ({exc}) — "
             f"degrading to in-memory transform",
-            file=sys.stderr,
         )
         return transform(current)
 
@@ -2254,6 +2505,21 @@ def _find_contract_violating_keys(config: dict) -> list[str]:
     return out
 
 
+def _drop_contract_violating_keys(cfg: dict) -> dict:
+    """Return a deep COPY of *cfg* without its bare parameterized-template keys.
+
+    The single transform for the XACA-0643 contract scrub. Pure — never mutates
+    *cfg*, never touches disk. Shared by the mutating on-disk scrub below and by
+    the read-only view (_config_view_from_peek, XACA-1193 review follow-up) so
+    the two cannot drift: one function decides what the scrub removes.
+    """
+    out = copy.deepcopy(cfg)
+    teams = out.get("teams", {})
+    for k in _find_contract_violating_keys(cfg):
+        teams.pop(k, None)
+    return out
+
+
 def _scrub_contract_violating_keys_on_disk(config_path: Path, current: dict) -> dict | None:
     """Snapshot, lock, drop bare parameterized-template keys, atomically rewrite.
 
@@ -2262,21 +2528,13 @@ def _scrub_contract_violating_keys_on_disk(config_path: Path, current: dict) -> 
     when there is nothing to scrub (skip-fast — no lock, no backup, no write).
     Never raises. Write mechanics live in _rewrite_config_on_disk.
     """
-    def _clean(cfg: dict) -> dict:
-        import copy
-        out = copy.deepcopy(cfg)
-        teams = out.get("teams", {})
-        for k in _find_contract_violating_keys(cfg):
-            teams.pop(k, None)
-        return out
-
     return _rewrite_config_on_disk(
         config_path,
         current,
         label="contract scrub",
         backup_tag="contract-scrub",
         needs_change=_find_contract_violating_keys,
-        transform=_clean,
+        transform=_drop_contract_violating_keys,
         describe=lambda cfg: [
             f"removed bare parameterized-template keys "
             f"{sorted(_find_contract_violating_keys(cfg))} from {config_path} "
@@ -2487,11 +2745,10 @@ def _registry_field_rule():
         import aiteamforge_registry
         return aiteamforge_registry.is_declared_value
     except Exception as exc:  # ImportError, or a broken module
-        print(
+        _stderr_note(
             f"[aiteamforge-paths] seed convergence: aiteamforge_registry "
             f"unavailable ({exc}) — skipping the migration. The overlay is left "
             f"exactly as-is; no fallback sentinel rule is guessed (XACA-1161-003).",
-            file=sys.stderr,
         )
         return None
 
@@ -2934,14 +3191,13 @@ def apply_legacy_credential_lift(config: dict, _warned: set | None = None) -> di
                 if _warned is None or key not in _warned:
                     if _warned is not None:
                         _warned.add(key)
-                    print(
+                    _stderr_note(
                         f"[aiteamforge-paths] WARNING: team-paths.json 'ai' block for "
                         f"team {slug!r} was {type(ai_block).__name__!s}, not a dict -- "
                         f"replacing with {{}} (XACA-1178-016/024). The original value "
                         f"is DISCARDED; a pre-lift snapshot exists only if this run "
                         f"reaches the disk write, so look for a 'legacy credential "
                         f"lift: snapshot=' line below",
-                        file=sys.stderr,
                     )
             ai_block = {}
             entry["ai"] = ai_block
@@ -2995,14 +3251,23 @@ def _lift_legacy_credentials_on_disk(config_path: Path, current: dict) -> dict |
 # ---------------------------------------------------------------------------
 # Team accessor functions
 # ---------------------------------------------------------------------------
+#
+# XACA-1193-002: every accessor below that reads the registry takes an
+# optional keyword-only ``config=``. None (the default) means load_config(),
+# exactly as before — the self-heal owners and every existing test mock rely
+# on that. A read-only caller resolves once with read_config_view() and passes
+# the dict through (``list_teams(config=view)``), which never writes. The
+# default is deliberately NOT peek-backed: see the XACA-1193-001 decision
+# record, section B, option (2).
 
-def list_teams() -> list[str]:
+def list_teams(*, config: dict | None = None) -> list[str]:
     """Return all team IDs defined in the config."""
-    config = load_config()
+    # XACA-1193-002: config=None keeps the historical mutating load.
+    config = load_config() if config is None else config
     return list(config["teams"].keys())
 
 
-def get_team_kanban_dir(team: str) -> Path:
+def get_team_kanban_dir(team: str, *, config: dict | None = None) -> Path:
     """Return the kanban directory Path for the given team.
 
     Raises KeyError with a helpful message if the team is not found, or if the
@@ -3010,7 +3275,8 @@ def get_team_kanban_dir(team: str) -> Path:
     kanban board of its own; use "command" for Main Event coordination).
     Team-iterating consumers catch this KeyError and skip the team.
     """
-    config = load_config()
+    # XACA-1193-002: config=None keeps the historical mutating load.
+    config = load_config() if config is None else config
     entry = config["teams"].get(team)
     if entry is None:
         hint = _available_teams_hint(config)
@@ -3030,7 +3296,7 @@ def get_team_kanban_dir(team: str) -> Path:
     return Path(_kd).expanduser()
 
 
-def get_team_memory_dir(team: str) -> Path | None:
+def get_team_memory_dir(team: str, *, config: dict | None = None) -> Path | None:
     """Return the Claude auto-memory directory for the given team, or None.
 
     Claude Code encodes the project working directory as a directory name
@@ -3069,7 +3335,8 @@ def get_team_memory_dir(team: str) -> Path | None:
     Returns:
         Path to the memory directory, or ``None`` if it does not exist.
     """
-    config = load_config()
+    # XACA-1193-002: config=None keeps the historical mutating load.
+    config = load_config() if config is None else config
     entry = config["teams"].get(team)
     if entry is None:
         hint = _available_teams_hint(config)
@@ -3118,7 +3385,7 @@ def get_team_memory_dir(team: str) -> Path | None:
     return None
 
 
-def get_team_working_dir(team: str) -> Path:
+def get_team_working_dir(team: str, *, config: dict | None = None) -> Path:
     """Return the working directory Path for the given team.
 
     The working_dir is the parent of kanban_dir (the project root).
@@ -3127,7 +3394,8 @@ def get_team_working_dir(team: str) -> Path:
     team is a board-less alias (e.g. "mainevent" — XACA-0727 — which has no
     working_dir of its own). Team-iterating consumers catch this and skip.
     """
-    config = load_config()
+    # XACA-1193-002: config=None keeps the historical mutating load.
+    config = load_config() if config is None else config
     entry = config["teams"].get(team)
     if entry is None:
         hint = _available_teams_hint(config)
@@ -3142,12 +3410,13 @@ def get_team_working_dir(team: str) -> Path:
     return Path(_wd).expanduser()
 
 
-def get_team_lcars_port(team: str) -> int | None:
+def get_team_lcars_port(team: str, *, config: dict | None = None) -> int | None:
     """Return the LCARS port for the given team, or None if not applicable.
 
     Raises KeyError with a helpful message if the team is not found.
     """
-    config = load_config()
+    # XACA-1193-002: config=None keeps the historical mutating load.
+    config = load_config() if config is None else config
     entry = config["teams"].get(team)
     if entry is None:
         hint = _available_teams_hint(config)
@@ -3159,7 +3428,7 @@ def get_team_lcars_port(team: str) -> int | None:
     return int(port) if port is not None else None
 
 
-def get_team_primary_host(team: str) -> str:
+def get_team_primary_host(team: str, *, config: dict | None = None) -> str:
     """Return the team's declared primary host, or "" when none is declared (XACA-0802).
 
     "" means "unowned / not yet declared", which every consumer must treat as
@@ -3182,7 +3451,8 @@ def get_team_primary_host(team: str) -> str:
 
     Raises KeyError with a helpful message if the team is not found.
     """
-    config = load_config()
+    # XACA-1193-002: config=None keeps the historical mutating load.
+    config = load_config() if config is None else config
     entry = config["teams"].get(team)
     if entry is None:
         hint = _available_teams_hint(config)
@@ -3209,7 +3479,7 @@ def get_team_primary_host(team: str) -> str:
 # reverse-lookup to avoid ambiguous code→team resolution.
 
 
-def get_team_code(team: str) -> str:
+def get_team_code(team: str, *, config: dict | None = None) -> str:
     """Return the 3-letter team code for the given team id, or "" if unknown.
 
     Lookup strategy (in priority order):
@@ -3220,7 +3490,8 @@ def get_team_code(team: str) -> str:
     """
     # 1. Live config
     try:
-        config = load_config()
+        # XACA-1193-002: config=None keeps the historical mutating load.
+        config = load_config() if config is None else config
         entry = config["teams"].get(team)
         if entry is not None:
             code = entry.get("team_code", "")
@@ -3235,7 +3506,7 @@ def get_team_code(team: str) -> str:
     return ""
 
 
-def get_team_from_code(code: str) -> str:
+def get_team_from_code(code: str, *, config: dict | None = None) -> str:
     """Return the team id for the given 3-letter code, or "" if unknown.
 
     Lookup strategy (in priority order):
@@ -3247,7 +3518,8 @@ def get_team_from_code(code: str) -> str:
     code_upper = code.upper()
     # 1. Live config
     try:
-        config = load_config()
+        # XACA-1193-002: config=None keeps the historical mutating load.
+        config = load_config() if config is None else config
         for team_id, entry in config["teams"].items():
             if entry.get("team_code", "").upper() == code_upper:
                 return team_id
@@ -3260,7 +3532,7 @@ def get_team_from_code(code: str) -> str:
     return ""
 
 
-def build_team_code_map() -> dict[str, str]:
+def build_team_code_map(*, config: dict | None = None) -> dict[str, str]:
     """Return a mapping of {3-letter-code: team-id} derived from the registry.
 
     Merge strategy (team-paths.json overlaid on DEFAULT_TEAMS — XACA-0628):
@@ -3295,7 +3567,8 @@ def build_team_code_map() -> dict[str, str]:
     # 2. Overlay: live-config team_codes on top (live wins on conflict; adds
     #    overlay-only per-project slugs that have no DEFAULT_TEAMS entry).
     try:
-        config = load_config()
+        # XACA-1193-002: config=None keeps the historical mutating load.
+        config = load_config() if config is None else config
         for team_id, entry in config["teams"].items():
             code = entry.get("team_code", "")
             if code:
@@ -3462,7 +3735,7 @@ _TAP_SUBDIR = "aiteamforge"
 _DEV_SUBDIR = "dev-team"
 
 
-def build_import_path_maps(manifest: dict) -> list[str]:
+def build_import_path_maps(manifest: dict, *, config: dict | None = None) -> list[str]:
     """Derive --path-map SRC=DST strings for the import-preflight verifier.
 
     The verifier runs on the *destination* machine against a manifest generated
@@ -3542,7 +3815,9 @@ def build_import_path_maps(manifest: dict) -> list[str]:
         dst_aiteamforge_root = dst_home + "/" + _TAP_SUBDIR
         src_devteam_root = src_home + "/" + _DEV_SUBDIR
 
-        config = load_config()
+        # XACA-1193-002: config=None keeps the historical mutating load.
+
+        config = load_config() if config is None else config
 
         # Tap-install detection: check for the canonical tap install root, which
         # exists IFF this machine has the homebrew tap installed.  Team working_dirs
@@ -3657,7 +3932,9 @@ def is_excluded_from_export(filepath: "Path") -> bool:  # type: ignore[name-defi
 # ---------------------------------------------------------------------------
 
 
-def get_team_version_sources(team_id: str, platform: str | None = None) -> list[dict]:
+def get_team_version_sources(
+    team_id: str, platform: str | None = None, *, config: dict | None = None
+) -> list[dict]:
     """Return the version_sources list for *team_id*, optionally filtered by platform.
 
     Args:
@@ -3672,7 +3949,8 @@ def get_team_version_sources(team_id: str, platform: str | None = None) -> list[
 
     Never raises — missing team or missing key returns an empty list.
     """
-    config = load_config()
+    # XACA-1193-002: config=None keeps the historical mutating load.
+    config = load_config() if config is None else config
     entry = config.get("teams", {}).get(team_id, {})
     sources = entry.get("version_sources", [])
     if not isinstance(sources, list):
@@ -3682,7 +3960,7 @@ def get_team_version_sources(team_id: str, platform: str | None = None) -> list[
     return [s for s in sources if isinstance(s, dict)]
 
 
-def get_team_branch_env_map(team_id: str) -> dict:
+def get_team_branch_env_map(team_id: str, *, config: dict | None = None) -> dict:
     """Return the raw branch_env_map for *team_id*.
 
     The map values are either strings (all-platforms shorthand) or dicts
@@ -3694,7 +3972,8 @@ def get_team_branch_env_map(team_id: str) -> dict:
 
     Never raises — missing team or missing key returns an empty dict.
     """
-    config = load_config()
+    # XACA-1193-002: config=None keeps the historical mutating load.
+    config = load_config() if config is None else config
     entry = config.get("teams", {}).get(team_id, {})
     raw = entry.get("branch_env_map", {})
     if not isinstance(raw, dict):
@@ -3702,7 +3981,9 @@ def get_team_branch_env_map(team_id: str) -> dict:
     return raw
 
 
-def get_team_relnotes_sources(team_id: str, platform: str | None = None) -> list[dict]:
+def get_team_relnotes_sources(
+    team_id: str, platform: str | None = None, *, config: dict | None = None
+) -> list[dict]:
     """Return the relnotes_sources list for *team_id*, optionally filtered by platform.
 
     Args:
@@ -3715,7 +3996,8 @@ def get_team_relnotes_sources(team_id: str, platform: str | None = None) -> list
 
     Never raises — missing team or missing key returns an empty list.
     """
-    config = load_config()
+    # XACA-1193-002: config=None keeps the historical mutating load.
+    config = load_config() if config is None else config
     entry = config.get("teams", {}).get(team_id, {})
     sources = entry.get("relnotes_sources", [])
     if not isinstance(sources, list):
@@ -4080,7 +4362,7 @@ def get_timepad_team_config(team_slug: str) -> dict:
     return get_timepad_team_config_raw(team_slug)
 
 
-def is_timepad_enabled(team_slug: str) -> bool:
+def is_timepad_enabled(team_slug: str, *, config: dict | None = None) -> bool:
     """Return True iff TimePad is enabled for the given team.
 
     Reads ``teamConfig.timepadSupport.enabled`` from the team's board JSON
@@ -4097,13 +4379,22 @@ def is_timepad_enabled(team_slug: str) -> bool:
 
     Args:
         team_slug: Canonical team slug (e.g. "academy", "mainevent").
+        config: XACA-1193 review follow-up. A read-only caller passes its
+            ``read_config_view()`` result so the kanban_dir lookup never
+            reaches load_config()'s self-heal. None (the default) calls
+            ``get_team_kanban_dir(team_slug)`` with NO keyword, exactly as
+            before — existing tests replace ``get_team_kanban_dir`` with a
+            one-argument lambda, which a forwarded ``config=None`` would break.
 
     Returns:
         True if the board JSON declares timepadSupport.enabled = true,
         False in all other cases (key absent, board missing, parse error, etc.).
     """
     try:
-        kanban_dir = get_team_kanban_dir(team_slug)
+        if config is None:
+            kanban_dir = get_team_kanban_dir(team_slug)
+        else:
+            kanban_dir = get_team_kanban_dir(team_slug, config=config)
         board_file = kanban_dir / f"{team_slug}-board.json"
         if not board_file.exists():
             return False

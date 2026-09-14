@@ -33,7 +33,7 @@ if _KANBAN_HOOKS_DIR not in sys.path:
     sys.path.insert(0, _KANBAN_HOOKS_DIR)
 
 try:
-    from aiteamforge_paths import get_team_kanban_dir
+    from aiteamforge_paths import get_team_kanban_dir, read_config_view
     _AITEAMFORGE_PATHS_AVAILABLE = True
 except ImportError:
     _AITEAMFORGE_PATHS_AVAILABLE = False
@@ -43,7 +43,10 @@ def _get_team_kanban_dir(team: str, default: Path) -> Path:
     """Resolve team kanban dir via shared module, falling back to default."""
     if _AITEAMFORGE_PATHS_AVAILABLE:
         try:
-            return get_team_kanban_dir(team)
+            # XACA-1193-005: read-only — resolve via read_config_view()
+            # (never mutates/quarantines/reseeds the registry) instead of
+            # the default mutating load_config().
+            return get_team_kanban_dir(team, config=read_config_view())
         except KeyError:
             pass
     return default
