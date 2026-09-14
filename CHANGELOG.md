@@ -7,6 +7,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1212** — a fresh `aiteamforge setup` no longer aborts silently at the persona/logo copy
+  step. The setup script runs under `set -eo pipefail`, and that loop copied
+  `share/personas/<team>/avatars/*.png` (and terminal logos) with an unguarded glob and stderr
+  discarded; for a team with no PNGs the glob does not expand, the copy exits 1, and the whole
+  installer stopped with no message. Space Dock ships no avatars and has been mandatory since
+  v0.20.10, so every fresh setup since then died there (measured on M1Mini, v0.20.12: exit 1 right
+  after "Skills"). Upgrades take a different path and were unaffected. All 5 glob copy sites in the
+  loop are now best-effort (`|| true`). Space Dock's 8 avatar PNGs and 5 terminal logo PNGs (canonical
+  in dev-team since XACA-1164, never added to the tap) now ship under
+  `share/personas/spacedock/avatars/` and `share/terminals/spacedock/logos/`, byte-identical to
+  canonical. New `tests/test-xaca-1212-setup-missing-avatars.sh` (8 cases, bash 3.2 + 5; red on the
+  pre-fix loop), registered in `tests/ci-manifest`.
 ## [0.20.12] - 2026-09-14
 - **XACA-1211** — `aiteamforge setup` can now provision a machine with only its mandatory team(s).
   The "No teams selected. At least one team is required." guard ran before

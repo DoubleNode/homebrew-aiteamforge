@@ -1712,6 +1712,13 @@ fi
 # specifically. `atf_is_mandatory_team` fails closed (returns 1) on an
 # unreadable registry or a missing lib, matching every other mandatory-
 # team call site in this file.
+# XACA-1212: every glob copy below ends in `|| true`. This file runs under
+# `set -eo pipefail`, and a glob that matches nothing (a team with no avatar or
+# logo PNGs) makes the copy exit 1 — which ABORTED THE WHOLE INSTALLER with no
+# message, because stderr is discarded here. Space Dock ships no avatars in the
+# tap and is mandatory, so every fresh setup since v0.20.10 died at this loop.
+# These assets are cosmetic and best-effort; a missing one must never stop an
+# install.
 _personas_copied=0
 _logos_copied=0
 mkdir -p "${INSTALL_DIR}/avatars"
@@ -1724,18 +1731,18 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
   if [ -d "${AITEAMFORGE_HOME}/share/personas/${team_id}" ]; then
     mkdir -p "${INSTALL_DIR}/${team_id}/personas/agents"
     mkdir -p "${INSTALL_DIR}/${team_id}/personas/avatars"
-    cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/agents/"*.md "${INSTALL_DIR}/${team_id}/personas/agents/" 2>/dev/null
-    cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/avatars/"*.png "${INSTALL_DIR}/${team_id}/personas/avatars/" 2>/dev/null
+    cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/agents/"*.md "${INSTALL_DIR}/${team_id}/personas/agents/" 2>/dev/null || true
+    cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/avatars/"*.png "${INSTALL_DIR}/${team_id}/personas/avatars/" 2>/dev/null || true
     # Also copy into flat avatars/ pool for agent-panel-display.sh path resolution
-    cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/avatars/"*.png "${INSTALL_DIR}/avatars/" 2>/dev/null
+    cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/avatars/"*.png "${INSTALL_DIR}/avatars/" 2>/dev/null || true
     _personas_copied=$((_personas_copied + 1))
   fi
   # Terminal logos (for iTerm2 profiles)
   if [ -d "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos" ]; then
     mkdir -p "${INSTALL_DIR}/${team_id}/terminals/logos"
-    cp "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos/"*.png "${INSTALL_DIR}/${team_id}/terminals/logos/" 2>/dev/null
+    cp "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos/"*.png "${INSTALL_DIR}/${team_id}/terminals/logos/" 2>/dev/null || true
     # Also copy logos into flat avatars/ pool
-    cp "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos/"*.png "${INSTALL_DIR}/avatars/" 2>/dev/null
+    cp "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos/"*.png "${INSTALL_DIR}/avatars/" 2>/dev/null || true
     _logos_copied=$((_logos_copied + 1))
   fi
 done
