@@ -16814,6 +16814,60 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return None
         return candidate
 
+    @staticmethod
+    def _image_candidate_roots():
+        """Return the ordered, de-duplicated list of root dirs to search for
+        team logos/avatars (XACA-1221 Decision 1).
+
+        Order and why:
+          1. UI_DIR.absolute().parent — the server's own on-disk install
+             location. Checked FIRST because it is a physical fact, whereas
+             $AITEAMFORGE_DIR can be a LEAKED TEST SANDBOX: the tester
+             protocol exports AITEAMFORGE_DIR=$TEST_TMP_DIR/aiteamforge in
+             the launching shell, and the spawn helper inherits the whole
+             environment — env-first would then serve stub PNGs ahead of
+             the real tree on a dev machine. `.absolute()`, not
+             `.resolve()`: resolve() would follow a symlinked lcars-ui into
+             the Cellar share/, whose layout is share/personas/<team>/
+             avatars, not <team>/personas/avatars.
+          2. $AITEAMFORGE_DIR, if set and non-empty — covers a server
+             running from outside the install tree (a symlinked/relocated
+             lcars-ui) when the env var names the real install. Costs
+             nothing when it duplicates root 1; de-duplication removes it.
+          3. Path.home() / "dev-team" — legacy fallback, kept so a
+             worktree-launched dev server serves the branch's tracked
+             assets first and falls back to ~/dev-team for untracked ones.
+
+        UI_DIR and Path.home() are both read HERE, at call time (via the
+        module global and a fresh Path.home() call respectively), not
+        cached at import/class-definition time, so tests can patch
+        server.UI_DIR / Path.home() per-case.
+
+        De-duplication compares str(root.resolve()) (falling back to
+        str(root.absolute()) if resolve() raises OSError — e.g. a
+        not-yet-existing path); the UNRESOLVED root is what's appended to
+        the returned list, so downstream containment checks still operate
+        on the original, un-followed path.
+        """
+        candidates = [UI_DIR.absolute().parent]
+        env_dir = os.environ.get("AITEAMFORGE_DIR")
+        if env_dir:
+            candidates.append(Path(env_dir).expanduser())
+        candidates.append(Path.home() / "dev-team")
+
+        roots = []
+        seen = set()
+        for root in candidates:
+            try:
+                key = str(root.resolve())
+            except OSError:
+                key = str(root.absolute())
+            if key in seen:
+                continue
+            seen.add(key)
+            roots.append(root)
+        return roots
+
     def serve_image(self, path, head_only=False):
         """Serve team logos and avatars from their respective directories.
 
@@ -16829,6 +16883,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         it, so a '../' (or a symlink escape) can never resolve to a path
         outside the intended root. See _resolve_contained_path's docstring
         for the vulnerability this closes.
+
+        XACA-1221: the team/name/type lookup below tries EACH root from
+        _image_candidate_roots() in order (installed layout first, then
+        $AITEAMFORGE_DIR, then ~/dev-team as a legacy fallback — see that
+        method's docstring), so an installed AITeamForge no longer has to
+        find its own logos/avatars under a developer's ~/dev-team checkout.
         """
         filename = path.replace('/images/', '')
 
@@ -16861,11 +16921,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
         # Expected format: /images/{team}_{name}_{type}.png
-        # type is either 'logo' or 'avatar'
+        # type is 'logo', 'avatar', or 'avatar_thumb' (agent-panel.html's
+        # fallback thumbnail — XACA-1221 Decision 2; resolves through the
+        # same avatars dir as 'avatar', it's a filename suffix, not a
+        # different asset class. Alternation, not a free `(_thumb)?` group,
+        # so a 'logo_thumb' form stays unmatched.)
         # name is either terminal name (for logos) or avatar codename (for avatars)
 
         # Parse the filename: team_name_type.png
-        match = re.match(r'^([a-z-]+)_([a-z_]+)_(logo|avatar)\.png$', filename)
+        match = re.match(r'^([a-z-]+)_([a-z_]+)_(logo|avatar|avatar_thumb)\.png$', filename)
         if not match:
             self.send_error(404, f"Invalid image path: {path}")
             return
@@ -16884,63 +16948,86 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         if team_dir == 'dns':
             team_dir = 'dns-framework'
 
-        # Build the actual file path
-        dev_team_dir = Path.home() / "dev-team"
         if img_type == 'logo':
             # Logos: {team}/terminals/logos/{team}_{terminal}_logo.png
-            base_dir = dev_team_dir / team_dir / "terminals" / "logos"
+            sub = ("terminals", "logos")
         else:
             # Avatars: {team}/personas/avatars/{team}_{avatar}_avatar.png
-            base_dir = dev_team_dir / team_dir / "personas" / "avatars"
+            # (and ..._avatar_thumb.png)
+            sub = ("personas", "avatars")
 
         # If team was mapped (e.g., legal-coparenting -> legal), also try
         # filenames with the mapped team prefix (e.g., legal_crane_avatar.png)
         alt_filename = None
         if team_dir != team:
             alt_filename = filename.replace(team + '_', team_dir + '_', 1)
+        names = [filename] + ([alt_filename] if alt_filename else [])
 
-        # Try PNG first (if valid), then SVG as fallback.
+        # XACA-1221: try each candidate root in turn (installed layout,
+        # then $AITEAMFORGE_DIR, then ~/dev-team — see
+        # _image_candidate_roots()'s docstring). Within a root, preserve
+        # today's exact semantics: PNG candidates are tried filename-then-
+        # alt (first one that EXISTS wins, regardless of validity), and
+        # only if that candidate's magic bytes are invalid — or no PNG
+        # candidate exists at all — do we fall to the SVG candidates
+        # (same filename-then-alt order). The first root that produces
+        # EITHER a valid PNG or an existing SVG wins outright; a root with
+        # only an invalid-magic PNG and no SVG falls through to the next
+        # root, exactly as it fell through to SVG before this ticket.
         #
-        # XACA-0992 SECURITY: `filename` is already traversal-free by
-        # construction here — it matched the `^([a-z-]+)_([a-z_]+)_(logo|avatar)\.png$`
-        # regex above, whose character classes admit no '.' or '/', so no
-        # '../' or absolute-path component can occur. These joins are
-        # additionally routed through _resolve_contained_path() anyway (the
-        # same helper serve_image's local-images lookup above and
+        # XACA-0992 SECURITY: `filename`/`alt_filename` are already
+        # traversal-free by construction — they matched the
+        # `^([a-z-]+)_([a-z_]+)_(logo|avatar|avatar_thumb)\.png$` regex
+        # above, whose character classes admit no '.' or '/'. Every join is
+        # still routed through _resolve_contained_path() anyway (the same
+        # helper serve_image's local-images lookup above and
         # serve_appicon() below both use) rather than a bare `base_dir /
         # filename` — belt and suspenders against the regex ever being
         # loosened later, and one fewer place doing the join a different way.
-        svg_filename = filename.replace('.png', '.svg')
-        png_path = self._resolve_contained_path(base_dir, filename)
-        svg_path = self._resolve_contained_path(base_dir, svg_filename)
+        file_path = None
+        content_type = None
+        for root in self._image_candidate_roots():
+            base_dir = root.joinpath(team_dir, *sub)
 
-        # Also try alternate filenames with mapped team prefix
-        if alt_filename:
-            alt_png_path = self._resolve_contained_path(base_dir, alt_filename)
-            alt_svg_path = self._resolve_contained_path(
-                base_dir, alt_filename.replace('.png', '.svg')
-            )
-            if (png_path is None or not png_path.exists()) and alt_png_path is not None and alt_png_path.exists():
-                png_path = alt_png_path
-            if (svg_path is None or not svg_path.exists()) and alt_svg_path is not None and alt_svg_path.exists():
-                svg_path = alt_svg_path
+            # is_file(), not exists(): a DIRECTORY named like the image used
+            # to reach the magic-byte open() below and raise an uncaught
+            # IsADirectoryError (pre-existing, found in XACA-1221-005). A
+            # non-file now falls through exactly like a missing one.
+            png_path = None
+            for n in names:
+                candidate = self._resolve_contained_path(base_dir, n)
+                if candidate is not None and candidate.is_file():
+                    png_path = candidate
+                    break
 
-        # Check if PNG exists and is a valid PNG (starts with PNG magic bytes)
-        png_valid = False
-        if png_path is not None and png_path.exists():
-            with open(png_path, 'rb') as f:
-                header = f.read(8)
-                # PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
-                png_valid = header[:4] == b'\x89PNG'
+            if png_path is not None:
+                with open(png_path, 'rb') as f:
+                    header = f.read(8)
+                    # PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
+                    if header[:4] == b'\x89PNG':
+                        file_path = png_path
+                        content_type = 'image/png'
+                        break
 
-        if png_valid:
-            file_path = png_path
-            content_type = 'image/png'
-        elif svg_path is not None and svg_path.exists():
-            file_path = svg_path
-            content_type = 'image/svg+xml'
-        else:
-            self.send_error(404, f"Image not found: {png_path} or {svg_path}")
+            svg_path = None
+            for n in names:
+                candidate = self._resolve_contained_path(base_dir, n[:-4] + '.svg')
+                if candidate is not None and candidate.is_file():
+                    svg_path = candidate
+                    break
+
+            if svg_path is not None:
+                file_path = svg_path
+                content_type = 'image/svg+xml'
+                break
+
+        if file_path is None:
+            # XACA-1221: no resolved filesystem paths in the 404 body — it
+            # used to echo png_path/svg_path (absolute paths, disclosing the
+            # home directory over tailnet); with several candidate roots
+            # that would leak more of them. `filename` is safe to echo — it
+            # already passed the regex above.
+            self.send_error(404, f"Image not found: {filename}")
             return
 
         try:

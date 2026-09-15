@@ -4431,6 +4431,139 @@ deploy_flat_team_personas() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# update_team_image_assets
+#
+# XACA-1221 (subitem 004): refresh team logos/avatars on an ALREADY-PROVISIONED
+# machine. Two gaps left these assets stuck at whatever a team's fresh
+# `aiteamforge setup` happened to ship:
+#   • install-team.sh copies avatars (`share/personas/<t>/avatars`) but never
+#     logos (`share/terminals/<t>/logos`) — logos have never had ANY upgrade
+#     path, ever.
+#   • aiteamforge-setup.sh copies both, but ONLY on a fresh install. A team
+#     provisioned before its avatar/logo PNGs existed in the tap — e.g. Space
+#     Dock, backfilled on M4Mini 0.20.11 before XACA-1212 added its avatars
+#     and logos — never receives them, and any team
+#     whose PNGs are later updated in a tap release never sees the update
+#     either. `aiteamforge upgrade` is the only step that runs on every
+#     already-provisioned box, so it is the only place this can be fixed.
+#
+# Targets: the union of team ids that ship `share/personas/<t>/avatars/*.png`
+# or `share/terminals/<t>/logos/*.png` in THIS release, filtered to teams that
+# pass `_xaca0925_valid_team_id` (path-safety) AND already have a
+# `${WORKING_DIR}/<t>` dir. REFRESH-ONLY — a team dir that does not exist yet
+# is never created here (that is `update_mandatory_teams`' job, which runs
+# earlier in the sequence so a freshly-backfilled team's dir exists by the
+# time this runs). `.aiteamforge-config`'s `.teams` list is deliberately NOT
+# used as the filter — measured stale on M4Mini (XACA-0931 finding, still
+# true here) while 9 team dirs on that box hold setup-delivered assets.
+#
+# Mirrors aiteamforge-setup.sh's two destinations per asset: the per-team dir
+# (`<t>/personas/avatars` or `<t>/terminals/logos`, read by LCARS `serve_image`)
+# AND the flat `${WORKING_DIR}/avatars/` pool (read by agent-panel-display.sh).
+#
+# Semantics:
+#   • Per shipped `*.png`: `cmp -s` against the destination copy. Identical ->
+#     "current". Missing or different -> `cp` over it ("written"). NEVER
+#     deletes an extra file a user may have added — globs are `*.png` only
+#     (so `originals/` subdirs and non-PNG files are untouched) and every glob
+#     iteration uses `[ -f ] || continue`, never a bare `cp <glob>` (the
+#     XACA-1212 errexit-abort class: a glob matching nothing left unquoted in
+#     a `cp` argument list aborts the whole upgrade under this script's
+#     `set -eo pipefail`, silently, because stderr is discarded at the call
+#     site — see aiteamforge-setup.sh's own XACA-1212 comment above its
+#     avatar/logo loop).
+#   • --dry-run: still does the `cmp` and counts what WOULD be written, but no
+#     `mkdir`/`cp` runs; the summary line gets a "(dry run)" suffix.
+#   • Fail-soft: a per-file `mkdir -p`/`cp` failure increments `failed`,
+#     prints a `print_warning`, and the loop continues to the next file/team.
+#     This function ALWAYS returns 0 and ALWAYS prints its summary line
+#     (including the "0 target(s)" case) — same house convention as
+#     `deploy_flat_team_personas` above, so "nothing to refresh" is never
+#     indistinguishable from "did not run". It deliberately does NOT touch
+#     `UPGRADE_PERSONA_DEPLOY_*` — those globals belong to the persona-deploy
+#     family of steps; these assets are cosmetic and their own warnings would
+#     otherwise get folded into an unrelated section's summary.
+#   • Every glob-derived loop variable is guarded with `[ -f "$f" ] || continue`
+#     before use, so a team that ships a `logos/` or `avatars/` dir with zero
+#     PNGs (or none at all — the outer per-`kind` `[ -d "$src" ] || continue`
+#     handles that) cannot abort the run under `set -eo pipefail`, matching
+#     the fix aiteamforge-setup.sh already applies at its own copy loop.
+#
+# Canonical-source note: this file (aiteamforge-upgrade.sh) is tap-native —
+# edit it here in the submodule and push the inner commit directly; there is
+# no dev-team canonical copy to keep in sync (unlike lcars-ui/server.py,
+# which IS canonical in dev-team and only mirrored into
+# homebrew-tap/share/lcars-ui/).
+# ---------------------------------------------------------------------------
+update_team_image_assets() {
+  print_section "Refreshing Team Logos and Avatars"
+
+  local share="${FRAMEWORK_DIR}/share" pool="${WORKING_DIR}/avatars"
+  local targets=0 written=0 current=0 failed=0
+  local t kind src dst f base d
+
+  # Team ids that ship avatars or logos in this release. `ls -d ... || true`
+  # (not a bare glob) so "nothing ships either" cannot trip `set -eo pipefail`;
+  # `2>/dev/null` swallows the "no such file" noise from whichever of the two
+  # globs is empty. The team id is the second-to-last path segment for BOTH
+  # glob shapes (`share/personas/<t>/avatars` and `share/terminals/<t>/logos`),
+  # so one `awk -F/ '{print $(NF-1)}'` covers both — verified under /bin/bash
+  # 3.2 and Homebrew bash 5 (both ship a POSIX-compatible `awk` NF/field
+  # semantics; nothing bash-version-specific here, it's pure awk).
+  local teams
+  teams="$( { ls -d "$share"/personas/*/avatars "$share"/terminals/*/logos 2>/dev/null || true; } \
+      | awk -F/ '{print $(NF-1)}' | sort -u )"
+
+  for t in $teams; do
+    if ! _xaca0925_valid_team_id "$t"; then
+      print_warning "[${t}] Team id contains characters outside [A-Za-z0-9_-] — skipping image asset refresh (path-safety guard)"
+      continue
+    fi
+    # Refresh-only: a team dir that does not exist yet is never created here.
+    [ -d "${WORKING_DIR}/${t}" ] || continue
+    targets=$((targets + 1))
+
+    for kind in "personas/avatars" "terminals/logos"; do
+      src="$share/${kind%%/*}/$t/${kind##*/}"
+      dst="${WORKING_DIR}/$t/$kind"
+      [ -d "$src" ] || continue
+      for f in "$src"/*.png; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        for d in "$dst" "$pool"; do
+          if cmp -s "$f" "$d/$base" 2>/dev/null; then
+            current=$((current + 1))
+            continue
+          fi
+          if [ "$DRY_RUN" = true ]; then
+            written=$((written + 1))
+            continue
+          fi
+          if mkdir -p "$d" && cp "$f" "$d/$base"; then
+            written=$((written + 1))
+          else
+            failed=$((failed + 1))
+            print_warning "[${t}] could not write ${d}/${base}"
+          fi
+        done
+      done
+    done
+  done
+
+  local summary_prefix="Team image assets"
+  [ "$DRY_RUN" = true ] && summary_prefix="Team image assets (dry run)"
+  local summary="${summary_prefix}: ${targets} team(s): ${written} written, ${current} current, ${failed} failed"
+
+  if [ "$failed" -eq 0 ]; then
+    print_success "$summary"
+  else
+    print_warning "$summary"
+  fi
+
+  return 0
+}
+
 # XACA-0771: Mandatory shared alias files. install_aliases() (install-shell.sh)
 # lays down all three of these unconditionally on every fresh install — there
 # is no "optional alias file" today. Kept as its own function (mirrors the
@@ -5379,6 +5512,13 @@ update_team_personas
 # (spacedock) that the project-root step above cannot reach.
 deploy_team_personas_to_projects
 deploy_flat_team_personas
+# XACA-1221: refresh team logos/avatars on already-provisioned teams. Must run
+# after update_mandatory_teams (a backfilled team's dir has to exist first —
+# this step is refresh-only and never materializes a team) and must not sit
+# between update_team_personas and deploy_team_personas_to_projects, which the
+# XACA-0931 ordering rule binds together. See update_team_image_assets' own
+# header comment for the full rationale.
+update_team_image_assets
 update_claude_hooks
 update_global_claude_md
 update_skills

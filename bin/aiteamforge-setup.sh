@@ -1715,10 +1715,14 @@ fi
 # XACA-1212: every glob copy below ends in `|| true`. This file runs under
 # `set -eo pipefail`, and a glob that matches nothing (a team with no avatar or
 # logo PNGs) makes the copy exit 1 — which ABORTED THE WHOLE INSTALLER with no
-# message, because stderr is discarded here. Space Dock ships no avatars in the
-# tap and is mandatory, so every fresh setup since v0.20.10 died at this loop.
-# These assets are cosmetic and best-effort; a missing one must never stop an
-# install.
+# message, because stderr is discarded here. Space Dock shipped no avatars in
+# the tap at the time and is mandatory, so every fresh setup since v0.20.10
+# died at this loop. (Space Dock's avatars and logos both shipped in the tap
+# as of XACA-1212 — this loop now copies them like any other
+# mandatory team — but the `|| true` guard stays: it protects every team, not
+# just Space Dock, against a future team shipping with one asset kind
+# missing.) These assets are cosmetic and best-effort; a missing one must
+# never stop an install.
 _personas_copied=0
 _logos_copied=0
 mkdir -p "${INSTALL_DIR}/avatars"

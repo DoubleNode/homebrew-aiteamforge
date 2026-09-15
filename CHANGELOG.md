@@ -7,6 +7,28 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1221** — LCARS team logos and avatars are now resolved and refreshed correctly on an
+  installed (non-dev) box:
+  - `lcars-ui/server.py`'s `serve_image()` used to resolve `<team>/terminals/logos` and
+    `<team>/personas/avatars` only under `Path.home()/"dev-team"`, so any consumer install (which has
+    no `~/dev-team`) could never serve a logo or avatar image — a 404 on every request. It now tries,
+    in order, `UI_DIR.absolute().parent` (the server's own on-disk install root), `$AITEAMFORGE_DIR`
+    (if set), then `~/dev-team` as a legacy fallback for worktree-launched dev servers, de-duplicated
+    and each tried with the existing png/svg + `dns`→`dns-framework` mapping logic. Also recognizes
+    `..._avatar_thumb.png` (previously unmatched by the filename regex, 404 on every agent-panel
+    fallback thumbnail), and the 404 body no longer echoes resolved absolute paths (path-disclosure
+    fix). (Canonical source is dev-team `lcars-ui/server.py`; mirrored into `share/lcars-ui/`.)
+  - `aiteamforge-upgrade.sh` gained `update_team_image_assets`, a new refresh-only upgrade step
+    (wired immediately after `deploy_flat_team_personas`, before `update_claude_hooks`) that mirrors
+    every shipped `share/personas/<team>/avatars/*.png` and `share/terminals/<team>/logos/*.png` into
+    the corresponding already-provisioned team's install dir AND the flat `avatars/` pool. Until now,
+    NO upgrade path ever delivered logos at all, and an already-provisioned team never received a
+    new or changed avatar/logo PNG from a later tap release (e.g. Space Dock, backfilled on
+    darren-m4-mini's 0.20.11 before its avatars/logos existed in the tap). Never deletes extra files,
+    never creates a team's working dir, fails soft per file, honors `--dry-run`.
+  - Corrected a stale comment in `aiteamforge-setup.sh` claiming "Space Dock ships no avatars in the
+    tap" — true when written, false since XACA-1212 added Space Dock's avatars and logos.
+
 - **XACA-1220** — `display-agent-avatar.sh` mirror: Space Dock avatar arms and unmapped agent pairs
   now write panel JSON with an empty avatar and warn on stderr instead of silently exiting.
 
