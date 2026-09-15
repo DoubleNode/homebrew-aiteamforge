@@ -103,6 +103,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     after <suite> — stopping here") instead of running the remaining suites against the real brew.
   - Review round 2 [XACA-1222-015]: `run_test_file` exports `CURRENT_TEST_FILE`, so a BLOCKED line names
     the offending suite instead of `test_file=unset`. Guard suite: 48 assertions (ABORT, NAME, ENV added).
+  - Review round 3 [XACA-1222-016]: `test-runner.sh`'s top-level variable block keeps an inherited
+    `CURRENT_TEST_FILE`, so suites that `source` the runner also get named (NAME2; 49 assertions).
 
 - **XACA-1220** — `display-agent-avatar.sh` mirror: Space Dock avatar arms and unmapped agent pairs
   now write panel JSON with an empty avatar and warn on stderr instead of silently exiting.

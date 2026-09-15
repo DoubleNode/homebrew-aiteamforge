@@ -995,6 +995,32 @@ $(_tail "$NEG_LOG")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PR #902 review round 3 — NAME2: same, for a suite that `source`s
+# test-runner.sh (42 suites do). The runner's top-level variable block used
+# to reset the exported CURRENT_TEST_FILE, so the line read test_file=unset.
+# ═══════════════════════════════════════════════════════════════════════════
+NAME2_DIR="$WORK_DIR/sbx-name2"
+mkdir -p "$NAME2_DIR"
+{
+  printf '#!/bin/bash\n'
+  printf 'source %q\n' "$RUNNER_PATH"
+  printf 'brew install xaca-1222-name2-nonexistent || true\n'
+  printf 'exit 0\n'
+} > "$NAME2_DIR/test-xaca-1222-ctrl-sources-runner.sh"
+chmod +x "$NAME2_DIR/test-xaca-1222-ctrl-sources-runner.sh"
+
+NAME2_LOG="$WORK_DIR/nested-name2.log"
+run_nested "$NAME2_DIR" "$NAME2_LOG"
+
+test_start "NAME2: a suite that sources test-runner.sh still gets its own name on the BLOCKED line"
+if grep -F -q -- "test_file=test-xaca-1222-ctrl-sources-runner.sh" "$NAME2_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected test_file=test-xaca-1222-ctrl-sources-runner.sh in the nested log. Log tail:
+$(_tail "$NAME2_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 # PR #902 review round 2 — ENV1-2: what a passed-through call sees. It must
 # have auto-update off, and must NOT have HOMEBREW_NO_INSTALL_FROM_API (which
 # turns an unknown-name lookup into a homebrew-core git clone).

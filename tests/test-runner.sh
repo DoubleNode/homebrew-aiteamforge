@@ -50,7 +50,10 @@ FAILED_TESTS=0
 # PASSED_TESTS, so PASSED_TESTS < TOTAL_TESTS whenever anything skipped —
 # a suite can no longer look fully covered by skipping.
 SKIPPED_TESTS=0
-CURRENT_TEST_FILE=""
+# XACA-1222: keep an inherited value. run_test_file() exports the suite's name
+# before launching it, and a suite that `source`s this file would otherwise
+# blank it here — leaving the brew-guard shim's BLOCKED line at test_file=unset.
+CURRENT_TEST_FILE="${CURRENT_TEST_FILE:-}"
 CURRENT_TEST_NAME=""
 TEST_FAILED=false
 
