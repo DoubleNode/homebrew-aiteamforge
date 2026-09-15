@@ -241,12 +241,24 @@ sources the runner does **not**; run suites through the runner.
 
 The shim passes a small allowlist of **read-only** calls through to the real brew
 (`--prefix`, `--version`, `list`, `info`, `outdated`, `deps`, a bare `brew tap`, ...),
-with `HOMEBREW_NO_AUTO_UPDATE=1` so even those stay off the network. It **blocks
-everything else**: every mutating subcommand, `brew tap <name>`, and anything it does not
-recognise. Unknown is treated as mutating. A blocked call prints a loud
-`XACA-1222 BREW GUARD` line, exits 97, and appends to a marker file the runner checks
-after each suite (`brew_guard_assert`). A suite whose code swallows brew's exit code
-(`brew install "$dep" || { warn ...; }`, as `install-team.sh` does) therefore still fails.
+with `HOMEBREW_NO_AUTO_UPDATE=1`, `HOMEBREW_NO_ANALYTICS=1`, and
+`HOMEBREW_NO_INSTALL_FROM_API=1` set so even those stay off the network. It **blocks
+everything else**: every mutating subcommand, `brew tap <name>` (any argument at all —
+only the bare form is read-only), and anything it does not recognise. Unknown is treated
+as mutating. Even an otherwise-allowlisted subcommand is blocked if it carries one of a
+small set of flags that change what it actually does: `--github` and `--analytics` (both
+reach the network), `--fetch-HEAD` (forces a live git fetch), and `--search` (`brew desc
+--search` scans every formula's description, a much heavier operation than a plain
+lookup) — see `tests/lib/brew-guard.sh` for the exact, commented list. A blocked call
+prints a loud `XACA-1222 BREW GUARD` line, exits 97, and appends to a marker file the
+runner checks after each suite (`brew_guard_assert`). A suite whose code swallows brew's
+exit code (`brew install "$dep" || { warn ...; }`, as `install-team.sh` does) therefore
+still fails.
+
+The shim only protects calls that go through `PATH` resolution (a bare `brew ...`).
+Code under test that invokes brew by its **absolute path** (e.g. `$(brew --prefix)/bin/
+brew ...`) bypasses any PATH-based shim entirely, guard or suite-local alike — the only
+shipped callers that do this today use it for `--prefix` and bare `tap`, both read-only.
 
 On a host with **no** brew on `PATH` (the ubuntu CI runner) the guard installs nothing:
 an unstubbed `brew install` already fails there, and a shim would make `command -v brew`
@@ -256,12 +268,19 @@ This exists because `test-xaca-0463-port-allocation.sh` reached a real
 `brew install --cask android-studio` during a full `test-runner.sh` run, from a suite
 `ci-manifest` classifies `plain-shell`.
 
-If your suite drives code that installs brew packages, stub `brew` yourself (see
-`test-xaca-0463-port-allocation.sh` or `test-xaca-1216-flat-persona-deploy.sh`). A
-suite-local stub prepended to `PATH` sits in front of the guard and wins. If a suite
-legitimately needs a read-only call the guard does not allow, extend the allowlist in
-`tests/lib/brew-guard.sh`; do not add an opt-out. `test-xaca-1222-brew-guard.sh` is the
-guard's own regression suite.
+If your suite drives code that installs brew packages, stub `brew` yourself. For a suite
+that needs a specific, controlled fixture (e.g. "every dep reports already installed"),
+the recommended way is the shared `tests/lib/brew-stub.sh` helper (`brew_stub_install
+<bin-dir> <log-file>` / `brew_stub_violations <log-file>`) — see that file's header
+comment for the full contract, and `test-xaca-0463-port-allocation.sh` or
+`test-xaca-1070-mandatory-install.sh` (SECTION T) for worked examples. A suite that just
+needs to PREVENT a real brew mutation, with no need to fake specific output, is already
+covered by the systemic guard above with zero per-suite code. Either way, a suite-local
+stub prepended to `PATH` sits in front of the guard and wins (PATH is a stack) — see also
+`test-xaca-1216-flat-persona-deploy.sh` for a stub written by hand rather than via the
+shared helper. If a suite legitimately needs a read-only call the guard does not allow,
+extend the allowlist in `tests/lib/brew-guard.sh`; do not add an opt-out.
+`test-xaca-1222-brew-guard.sh` is the guard's own regression suite.
 
 ## Test Coverage
 

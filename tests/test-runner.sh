@@ -117,7 +117,37 @@ _runner_exit_cleanup() {
   cleanup_test_env
   brew_guard_cleanup
 }
-trap _runner_exit_cleanup EXIT INT TERM
+trap _runner_exit_cleanup EXIT
+
+# XACA-1222 BLOCKING fix: INT/TERM used to share the SAME trap as EXIT
+# (`trap _runner_exit_cleanup EXIT INT TERM`). A trap handler that does not
+# itself exit lets bash RESUME whatever it was doing once the handler
+# returns — for an async signal caught mid-`wait` on a foreground suite,
+# that means the `for test_file in ...` loop in main() below continues to
+# the NEXT suite. That is exactly the incident scenario this ticket exists
+# to close: a suite hangs on what should have been a stubbed `brew` call,
+# a human Ctrl-Cs it, the old shared trap ran cleanup (deleting the
+# brew-guard shim dir along with the test temp dir) and then execution fell
+# straight through to the next suite in the loop with `brew` now resolving
+# to the REAL, unstubbed brew on PATH — and brew_guard_assert had nothing
+# to report, because the guard that would have caught it was the very thing
+# cleanup just removed.
+#
+# INT/TERM now get their OWN handler that prints a one-line notice and
+# exits immediately with the conventional 128+signal code (130 for INT, 143
+# for TERM) — never returning control to resume the loop. The EXIT trap set
+# above still fires during that exit (bash always runs the EXIT trap when a
+# script exits, including via an explicit `exit` from another trap), so
+# cleanup is unchanged; only the "keep going afterward" behavior is gone.
+_runner_interrupt() {
+  local _sig="$1"
+  local _code=130
+  [ "$_sig" = "TERM" ] && _code=143
+  print_error "test-runner.sh interrupted (SIG${_sig}) — stopping now rather than continuing to the next suite with a possibly-lost brew guard. Cleaning up and exiting ${_code}."
+  exit "$_code"
+}
+trap '_runner_interrupt INT' INT
+trap '_runner_interrupt TERM' TERM
 
 # Start a new test
 test_start() {
@@ -1256,8 +1286,18 @@ run_test_file() {
   # wrote independently of that exit code. Same accounting shape as the leak
   # guard above (own TOTAL_TESTS/FAILED_TESTS bump, since this never went
   # through a test_start/test_pass/test_fail event of its own).
-  if ! brew_guard_assert; then
-    print_error "BREW GUARD TRIPPED: $CURRENT_TEST_FILE reached a real, unstubbed, mutating/unrecognized brew invocation — see the XACA-1222 BREW GUARD lines above. Failing this run regardless of the suite's own pass/fail result."
+  # XACA-1222 BLOCKING fix: --strict additionally verifies the guard ITSELF
+  # is still intact after this suite ran (dir/shim executable/marker all
+  # present, and 'brew' in THIS shell still resolves to the shim) — a
+  # backstop independent of the trap-ordering fix above, for any other way
+  # the guard could go missing mid-run. Only this call site passes
+  # --strict; test-xaca-1222-brew-guard.sh's own control fixtures call
+  # brew_guard_assert directly (never --strict) since some of them
+  # deliberately produce guard states that are correct by design (no shim
+  # on a no-brew host, a suite's own stub winning the PATH race inside its
+  # own child process), not a lost guard.
+  if ! brew_guard_assert --strict; then
+    print_error "BREW GUARD TRIPPED: $CURRENT_TEST_FILE reached a real, unstubbed, mutating/unrecognized brew invocation, OR the guard itself was lost mid-run — see the XACA-1222 BREW GUARD lines above. Failing this run regardless of the suite's own pass/fail result."
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
     FAILED_TESTS=$((FAILED_TESTS + 1))
   fi

@@ -52,6 +52,52 @@
 # `bash`/`source`, never zsh, but is written defensively anyway).
 
 # ─────────────────────────────────────────────────────────────────────────
+# _brew_guard_sweep_stale_dirs — XACA-1222-013: standalone-mode leak sweep.
+#
+# Three suites in this directory (test-tailscale.sh, test-xaca-0650-doctor-
+# venv.sh, test-doctor-fix.sh) `source` test-runner.sh directly and then
+# install their OWN `trap ... EXIT` — test-xaca-0650-doctor-venv.sh and
+# test-doctor-fix.sh replace test-runner.sh's `_runner_exit_cleanup`
+# outright (a later `trap ... EXIT` simply overwrites the earlier one, it
+# does not chain), so `brew_guard_cleanup` never runs when either of those
+# two is invoked standalone; test-tailscale.sh chains onto whatever EXIT
+# trap it captures via `trap -p EXIT` at that point in its own script,
+# which is only as reliable as exactly when that capture happens to run.
+# Either way, cleanup of the shim dir must not depend on an EXIT trap
+# actually being wired up in these processes by the time they exit.
+#
+# Fix: every brew_guard_install() call sweeps its OWN family of sibling
+# dirs under the temp root FIRST, before creating a new one, removing any
+# whose embedded PID (parsed from the dir NAME itself — never trusted from
+# anywhere else) is no longer alive. `kill -0 <pid>` is the standard
+# liveness probe (sends no signal, only checks the process exists and is
+# signalable) — a dead PID can never come back to use or clean up its own
+# dir, so removing it is safe. A dir whose PID IS alive, or whose name does
+# not parse as this exact naming shape, is left strictly alone: this must
+# never sweep something it cannot positively attribute to a dead brew-guard
+# instance of its own.
+# ─────────────────────────────────────────────────────────────────────────
+_brew_guard_sweep_stale_dirs() {
+  local _root="${TMPDIR:-/tmp}"
+  local _d _base _pid
+  # A literal, non-matching glob (no `aiteamforge-brewguard.*` dirs present)
+  # expands to itself under bash 3.2's default (non-nullglob) globbing —
+  # the `[ -d "$_d" ] || continue` guard below filters that case out
+  # without depending on `shopt -s nullglob`, which this file avoids since
+  # it is sourced into callers' shells and must not change their glob
+  # behavior as a side effect.
+  for _d in "$_root"/aiteamforge-brewguard.*; do
+    [ -d "$_d" ] || continue
+    _base="$(basename "$_d")"
+    _pid="$(printf '%s' "$_base" | sed -n 's/^aiteamforge-brewguard\.\([0-9][0-9]*\)\..*/\1/p')"
+    [ -n "$_pid" ] || continue
+    if ! kill -0 "$_pid" 2>/dev/null; then
+      rm -rf "$_d" 2>/dev/null || true
+    fi
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────────────
 # brew_guard_install — idempotent. Creates the shim + prepends it to PATH.
 # Safe to call multiple times (e.g. once from test-runner.sh's own top-level
 # code, and again when a suite `source`s test-runner.sh) — every call after
@@ -87,8 +133,23 @@ brew_guard_install() {
     return 0
   fi
 
+  # XACA-1222-013: sweep any sibling dirs left behind by a DEAD prior
+  # instance before creating our own — see _brew_guard_sweep_stale_dirs's
+  # own header comment for why this cannot rely on a trap having run.
+  _brew_guard_sweep_stale_dirs
+
+  # XACA-1222-013: a full path template (not `-t PREFIX`) so BSD/macOS
+  # mktemp expands the trailing XXXXXX correctly. `-t PREFIX` on BSD/macOS
+  # treats the ENTIRE argument as a filename prefix and appends its own
+  # random suffix — the literal characters "XXXXXX" are NOT treated as a
+  # template there (same gotcha test-runner.sh's own setup_test_env
+  # documents for TEST_TMP_DIR), so the old `-t aiteamforge-brewguard.XXXXXX`
+  # form produced dirs literally named ...XXXXXX.<random> on macOS. The
+  # embedded "$$" here is the CURRENT process's PID at creation time — this
+  # is what makes the created dir attributable to a specific process for
+  # the sweep above, on the NEXT brew_guard_install() call anywhere.
   local _dir
-  _dir="$(mktemp -d -t aiteamforge-brewguard.XXXXXX)" || {
+  _dir="$(mktemp -d "${TMPDIR:-/tmp}/aiteamforge-brewguard.$$.XXXXXX")" || {
     echo "XACA-1222 BREW GUARD: mktemp -d failed — cannot install the brew guard. Refusing to continue without it (fail closed)." >&2
     return 1
   }
@@ -116,7 +177,7 @@ _readonly=0
 case "$_sub" in
   --prefix|--version|--cellar|--repository|--repo|--cache|--caskroom|--env|\
   list|ls|info|abv|outdated|deps|uses|leaves|desc|options|\
-  config|shellenv|formulae|casks|--help|-h|help)
+  config|formulae|casks|--help|-h|help)
     _readonly=1
     ;;
   tap)
@@ -135,6 +196,36 @@ esac
 # browser), `doctor`/`audit`/`readall`/`command`/`commands` (can load
 # taps/cmds and run arbitrary Ruby). No production path under test calls any
 # of them; they fall through to BLOCK like any other unknown.
+#
+# XACA-1222-012: `shellenv` was removed from the allowlist above. Passing it
+# through to the real brew is actively dangerous under test — code under
+# test that ran `eval "$(brew shellenv)"` would put the REAL brew's bin dir
+# ahead of this shim on PATH for the rest of that process, defeating the
+# guard for everything after. A tree-wide grep (libexec/, bin/, share/)
+# found no shipped caller of `brew shellenv`, so removing it is
+# behavior-neutral for production code; unknown now falls through to BLOCK
+# like any other unrecognized subcommand.
+
+# XACA-1222-012: even an ALLOWLISTED subcommand must not reach the network
+# or the browser via a flag that changes what it actually does. Checked
+# only when the subcommand itself was otherwise allowlisted above — this is
+# a narrowing of the allowlist, never a way to allow something new.
+#   --github      info/related flags that fetch GitHub API data
+#   --analytics   info --analytics fetches installation analytics over the network
+#   --fetch-HEAD  outdated/info --fetch-HEAD forces a live git fetch
+#   --search      desc --search scans/searches EVERY formula's description —
+#                 a materially heavier, different operation than a plain
+#                 `brew desc <formula>` lookup
+if [ "$_readonly" -eq 1 ]; then
+  for _flag_arg in "$@"; do
+    case "$_flag_arg" in
+      --github|--analytics|--fetch-HEAD|--search)
+        _readonly=0
+        break
+        ;;
+    esac
+  done
+fi
 
 # Even an allowlisted subcommand must not reach the network or rewrite the
 # Homebrew repo: `outdated` and `info` both trigger brew's auto-update.
@@ -191,24 +282,89 @@ SHIM_EOF
 # ─────────────────────────────────────────────────────────────────────────
 brew_guard_reset() {
   if [ -n "${AITEAMFORGE_BREW_GUARD_MARKER:-}" ]; then
-    : > "$AITEAMFORGE_BREW_GUARD_MARKER" 2>/dev/null || true
+    # XACA-1222 BLOCKING fix: `: > "$m" 2>/dev/null` applies the redirects
+    # left-to-right — if `> "$m"` itself fails to open (e.g. its directory
+    # was already removed, exactly the "guard lost" scenario this ticket's
+    # other fix addresses), bash's own "cannot create" diagnostic is
+    # written to the CURRENT (still unredirected) stderr, because the
+    # `2>/dev/null` that was meant to silence it is applied AFTER the
+    # failing redirect in that same left-to-right list, and a failed
+    # redirect aborts the command before the later ones take effect. Group
+    # the truncation itself so `2>/dev/null` wraps the WHOLE group,
+    # including any redirection failure inside it. brew_guard_assert is
+    # what reports a lost guard loudly and on purpose; this function must
+    # stay silent either way.
+    { : > "$AITEAMFORGE_BREW_GUARD_MARKER"; } 2>/dev/null || true
   fi
   return 0
 }
 
 # ─────────────────────────────────────────────────────────────────────────
-# brew_guard_assert — returns 1 (and prints the violation log) if the current
-# suite tripped the guard since the last brew_guard_reset. Mirrors the shape
-# of test-runner.sh's own leak_guard_assert so callers can treat a trip as
-# its own independent, unambiguous failure signal rather than trusting the
-# suite's own (possibly swallowed) exit code or pass/fail bookkeeping.
+# brew_guard_assert [--strict] — returns 1 (and prints the violation log) if
+# the current suite tripped the guard since the last brew_guard_reset.
+# Mirrors the shape of test-runner.sh's own leak_guard_assert so callers can
+# treat a trip as its own independent, unambiguous failure signal rather
+# than trusting the suite's own (possibly swallowed) exit code or pass/fail
+# bookkeeping.
+#
+# --strict (XACA-1222 BLOCKING fix): additionally verify the guard ITSELF is
+# still intact — a "guard lost" detector, independent of (and a backstop
+# for) test-runner.sh's own split EXIT/INT/TERM traps. Without this, a
+# suite that deletes shared test infrastructure (accidentally or via a
+# stray `rm -rf`), or any other way the shim dir/executable/marker go
+# missing mid-run, leaves brew_guard_assert with nothing to check — no
+# marker file means "nothing tripped it" even though the guard is gone and
+# every REMAINING suite is now running with a real, unstubbed `brew` on
+# PATH. Only run_test_file() passes --strict, exactly once per suite, from
+# the OWNER process, after the suite's child `bash` has already exited.
+# test-xaca-1222-brew-guard.sh's own positive/negative CONTROL fixtures
+# (no-brew-host, suite-owns-its-own-stub, etc.) must NEVER pass --strict —
+# those deliberately produce guard states (no shim installed at all, or a
+# suite-local override winning the PATH race) that are correct by design,
+# not a lost guard.
+#
+# The resolution check ("brew" in the CALLING shell still resolves to the
+# guard's own shim) only makes sense in the runner's OWN shell: a suite can
+# legitimately prepend its own stub ahead of the guard inside its OWN child
+# `bash "$test_file"` process (see brew_guard_install's header comment,
+# point 3) — but that process has already exited by the time run_test_file()
+# calls this, and the runner's own shell never carries such an override. So
+# in the runner, a mismatch can only mean the guard's position on PATH was
+# disturbed, never a suite's legitimate choice.
 # ─────────────────────────────────────────────────────────────────────────
 brew_guard_assert() {
+  local _strict=false
+  if [ "${1:-}" = "--strict" ]; then
+    _strict=true
+    shift
+  fi
+
   local _marker="${AITEAMFORGE_BREW_GUARD_MARKER:-}"
+
+  if [ "$_strict" = true ] && [ -n "${AITEAMFORGE_BREW_GUARD_DIR:-}" ]; then
+    if [ ! -d "$AITEAMFORGE_BREW_GUARD_DIR" ] \
+       || [ ! -x "$AITEAMFORGE_BREW_GUARD_DIR/brew" ] \
+       || [ -z "$_marker" ] \
+       || [ ! -f "$_marker" ]; then
+      echo "XACA-1222 BREW GUARD: guard lost — $AITEAMFORGE_BREW_GUARD_DIR (its shim executable or marker file) no longer exists after this suite ran. A suite that deletes shared test infrastructure, or any interruption that skips cleanup ordering, can leave every REMAINING suite unprotected against a real brew mutation. Failing closed." >&2
+      return 1
+    fi
+
+    local _resolved
+    _resolved="$(command -v brew 2>/dev/null || true)"
+    if [ -n "$_resolved" ] && [ "$_resolved" != "$AITEAMFORGE_BREW_GUARD_DIR/brew" ]; then
+      echo "XACA-1222 BREW GUARD: guard lost — 'brew' in the runner's own shell now resolves to '$_resolved', not the guard shim '$AITEAMFORGE_BREW_GUARD_DIR/brew'. The runner's own PATH never carries a suite-local override (only a suite's own already-exited child process can add one), so this can only mean the guard's position on PATH was disturbed. Failing closed." >&2
+      return 1
+    fi
+  fi
+
   if [ -z "$_marker" ] || [ ! -f "$_marker" ]; then
     # Guard not installed / marker missing — nothing to assert. This is not
     # itself a failure: callers that care whether the guard is active check
-    # AITEAMFORGE_BREW_GUARD_ACTIVE separately.
+    # AITEAMFORGE_BREW_GUARD_ACTIVE separately. (When --strict applies and
+    # the guard WAS installed, the block above already turned a missing
+    # marker into a hard failure; this remaining branch covers the
+    # legitimate "guard never installed at all" no-brew-host case.)
     return 0
   fi
   if [ -s "$_marker" ]; then

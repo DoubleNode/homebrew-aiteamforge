@@ -573,6 +573,361 @@ $(_tail "$CLEANUP_LOG")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+# XACA-1222 BLOCKING FIX regression: SIG1-4 — a signal mid-suite must stop
+# the runner outright, never let it resume the for-loop with a possibly-
+# lost guard (the exact incident scenario: a hung suite gets Ctrl-C'd,
+# cleanup deletes the shim dir, and the OLD shared EXIT/INT/TERM trap let
+# execution fall through to the next suite with a real, unstubbed brew on
+# PATH and nothing left to notice).
+#
+# Two fixtures, discovered in order by test-runner.sh's own `sort` (A before
+# B): A sends SIGTERM to its own parent (the nested runner — run_test_file()
+# invokes each suite as a direct child `bash "$test_file"`, so $PPID there
+# IS the runner's PID) and then sleeps, so a regression that resumes the
+# loop has a real window in which B could still run before A's own sleep
+# ends; B just writes a marker file to prove whether it ran at all.
+# ═══════════════════════════════════════════════════════════════════════════
+SIG_DIR="$WORK_DIR/sbx-sig"
+mkdir -p "$SIG_DIR"
+SIG_B_MARKER="$WORK_DIR/sig-b-ran.marker"
+rm -f "$SIG_B_MARKER"
+export XACA1222_SIG_B_MARKER="$SIG_B_MARKER"
+
+cat > "$SIG_DIR/test-xaca-1222-sigterm-a.sh" <<'FIXTURE_EOF'
+#!/bin/bash
+# Sorts before sigterm-b.sh. Sends TERM to the runner (its own $PPID, since
+# run_test_file() runs `bash "$test_file"` directly, no intermediate fork)
+# then sleeps -- if the fix regresses and the runner resumes its for-loop
+# instead of exiting, this window gives sigterm-b.sh a real chance to run
+# before this process itself wakes back up.
+echo "fixture SIG-A: sending TERM to runner pid $PPID"
+kill -TERM "$PPID" 2>/dev/null || true
+sleep 2
+echo "fixture SIG-A: woke up after sleep"
+exit 0
+FIXTURE_EOF
+chmod +x "$SIG_DIR/test-xaca-1222-sigterm-a.sh"
+
+cat > "$SIG_DIR/test-xaca-1222-sigterm-b.sh" <<'FIXTURE_EOF'
+#!/bin/bash
+: > "${XACA1222_SIG_B_MARKER:?marker path not set}"
+echo "fixture SIG-B: ran, marker written"
+exit 0
+FIXTURE_EOF
+chmod +x "$SIG_DIR/test-xaca-1222-sigterm-b.sh"
+
+SIG_LOG="$WORK_DIR/nested-sig.log"
+: > "$SIG_LOG"
+# Manual background+watchdog timeout (no dependency on GNU coreutils
+# timeout/gtimeout, not guaranteed present on a bare macOS runner --
+# same idiom as test-xaca-1162-dry-run-is-read-only.sh's run_case()). This
+# is purely a backstop in case the fix under test is badly broken (e.g. the
+# runner hangs instead of exiting); the primary mechanism is the direct
+# SIGTERM sent by fixture A above, which should make the nested runner
+# exit almost immediately.
+VERBOSE=true run_nested "$SIG_DIR" "$SIG_LOG" &
+SIG_PID=$!
+( sleep 20; kill -9 "$SIG_PID" 2>/dev/null ) &
+SIG_WATCHER=$!
+wait "$SIG_PID" 2>/dev/null
+SIG_RC=$?
+kill "$SIG_WATCHER" 2>/dev/null
+wait "$SIG_WATCHER" 2>/dev/null
+
+test_start "SIG1: nested runner exits non-zero when TERM'd mid-suite (does not silently swallow the signal)"
+if [ "$SIG_RC" -ne 0 ]; then
+  test_pass
+else
+  test_fail "nested run exited 0 after receiving TERM mid-suite. Log tail:
+$(_tail "$SIG_LOG")"
+fi
+
+test_start "SIG2: suite B (sorts after A) never ran after the runner was TERM'd mid-A -- its marker was never written"
+if [ ! -f "$SIG_B_MARKER" ]; then
+  test_pass
+else
+  test_fail "SIG-B's marker exists -- the runner resumed its for-loop after being interrupted instead of exiting (the XACA-1222 BLOCKING incident shape). Log tail:
+$(_tail "$SIG_LOG")"
+fi
+
+test_start "SIG3: nested output shows the runner's OWN interrupt handler fired (not just killed from outside)"
+if grep -F -q -- "interrupted (SIGTERM)" "$SIG_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected an 'interrupted (SIGTERM)' notice in nested output. Log tail:
+$(_tail "$SIG_LOG")"
+fi
+
+test_start "SIG4: the nested runner's own shim dir was still cleaned up despite exiting via the TERM handler (EXIT trap still ran)"
+_sig_shim_dir="$(sed -n 's/.*shim=\(.*\)\/brew,.*/\1/p' "$SIG_LOG" 2>/dev/null | head -1)"
+if [ -z "$_sig_shim_dir" ]; then
+  test_fail "could not extract a shim dir from the nested (-v) log -- cannot check its removal. Log tail:
+$(_tail "$SIG_LOG")"
+elif [ ! -d "$_sig_shim_dir" ]; then
+  test_pass
+else
+  test_fail "shim dir $_sig_shim_dir still exists after the TERM'd nested runner exited -- the EXIT trap did not run cleanup"
+fi
+
+unset XACA1222_SIG_B_MARKER
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-1222 BLOCKING FIX regression: LOST1-5 — brew_guard_assert --strict
+# must fail closed ("guard lost") whenever the guard's OWN shim
+# dir/executable/marker go missing mid-run, or 'brew' in the calling
+# (runner's own) shell no longer resolves to the shim -- independent of
+# whether anything was ever logged as a blocked call. Plain (non-strict)
+# brew_guard_assert has no way to see any of this (LOST3 demonstrates the
+# gap directly), which is exactly why only run_test_file() passes --strict.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# LOST1/2/3: whole shim dir removed.
+LOST_LOG="$WORK_DIR/lost-unit.log"
+(
+  unset AITEAMFORGE_BREW_GUARD_ACTIVE AITEAMFORGE_BREW_GUARD_DIR \
+        AITEAMFORGE_BREW_GUARD_MARKER AITEAMFORGE_BREW_GUARD_OWNER_PID \
+        AITEAMFORGE_BREW_GUARD_REAL_BREW
+  export PATH="$FAKE_BREW_BIN_DIR:$PATH"
+  # shellcheck disable=SC1091
+  source "$LIB_PATH"
+  brew_guard_install
+  echo "SHIM_DIR=${AITEAMFORGE_BREW_GUARD_DIR:-}"
+  rm -rf "${AITEAMFORGE_BREW_GUARD_DIR:-/nonexistent-xaca1222-lost}"
+  if brew_guard_assert --strict; then
+    echo "STRICT_ASSERT_RC=0"
+  else
+    echo "STRICT_ASSERT_RC=1"
+  fi
+  if brew_guard_assert; then
+    echo "PLAIN_ASSERT_RC=0"
+  else
+    echo "PLAIN_ASSERT_RC=1"
+  fi
+) >"$LOST_LOG" 2>&1
+
+test_start "LOST1: brew_guard_assert --strict returns non-zero when the whole shim dir was deleted mid-run"
+if grep -F -q -- "STRICT_ASSERT_RC=1" "$LOST_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected STRICT_ASSERT_RC=1. Log tail:
+$(_tail "$LOST_LOG")"
+fi
+
+test_start "LOST2: brew_guard_assert --strict prints a loud message naming XACA-1222 and 'guard lost'"
+if grep -F -q -- "XACA-1222" "$LOST_LOG" 2>/dev/null && grep -F -q -- "guard lost" "$LOST_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected both 'XACA-1222' and 'guard lost' in output. Log tail:
+$(_tail "$LOST_LOG")"
+fi
+
+test_start "LOST3: brew_guard_assert WITHOUT --strict silently returns 0 on the SAME lost guard (the exact gap --strict exists to close)"
+if grep -F -q -- "PLAIN_ASSERT_RC=0" "$LOST_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected PLAIN_ASSERT_RC=0 -- a non-strict caller has no marker file left to inspect once the whole dir is gone, so it cannot see a lost guard at all; that blind spot is why only --strict is safe to use as a merge-affecting gate. Log tail:
+$(_tail "$LOST_LOG")"
+fi
+
+# LOST4: only the shim EXECUTABLE removed (dir + marker survive).
+LOST4_LOG="$WORK_DIR/lost4-unit.log"
+(
+  unset AITEAMFORGE_BREW_GUARD_ACTIVE AITEAMFORGE_BREW_GUARD_DIR \
+        AITEAMFORGE_BREW_GUARD_MARKER AITEAMFORGE_BREW_GUARD_OWNER_PID \
+        AITEAMFORGE_BREW_GUARD_REAL_BREW
+  export PATH="$FAKE_BREW_BIN_DIR:$PATH"
+  # shellcheck disable=SC1091
+  source "$LIB_PATH"
+  brew_guard_install
+  rm -f "${AITEAMFORGE_BREW_GUARD_DIR:-/nonexistent-xaca1222-lost4}/brew"
+  if brew_guard_assert --strict; then
+    echo "STRICT_ASSERT_RC=0"
+  else
+    echo "STRICT_ASSERT_RC=1"
+  fi
+  # Tidy up: this subshell's own $$ (bash preserves the enclosing script's
+  # PID inside a plain "(...)" subshell) matches AITEAMFORGE_BREW_GUARD_OWNER_PID,
+  # so this is the legitimate owner cleanup, not a no-op inherited-guard call.
+  # Without it, this dir would sit under the REAL $TMPDIR until some LATER
+  # brew_guard_install() call (from an unrelated future run) happens to sweep
+  # it as a dead-pid sibling -- avoidable litter this suite can clean up now.
+  brew_guard_cleanup
+) >"$LOST4_LOG" 2>&1
+
+test_start "LOST4: brew_guard_assert --strict returns non-zero when only the shim EXECUTABLE (not the whole dir) was removed"
+if grep -F -q -- "STRICT_ASSERT_RC=1" "$LOST4_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected STRICT_ASSERT_RC=1. Log tail:
+$(_tail "$LOST4_LOG")"
+fi
+
+# LOST5: dir/executable/marker all intact, but 'brew' no longer resolves to
+# the shim in the calling (runner's own) shell -- simulated by prepending
+# another 'brew' ahead of it on PATH in THIS same process, never inside a
+# suite's own already-exited child (which is the only place a legitimate
+# override is allowed to happen -- see brew_guard_install's own comment).
+LOST5_LOG="$WORK_DIR/lost5-unit.log"
+(
+  unset AITEAMFORGE_BREW_GUARD_ACTIVE AITEAMFORGE_BREW_GUARD_DIR \
+        AITEAMFORGE_BREW_GUARD_MARKER AITEAMFORGE_BREW_GUARD_OWNER_PID \
+        AITEAMFORGE_BREW_GUARD_REAL_BREW
+  export PATH="$FAKE_BREW_BIN_DIR:$PATH"
+  # shellcheck disable=SC1091
+  source "$LIB_PATH"
+  brew_guard_install
+  export PATH="$FAKE_BREW_BIN_DIR:$PATH"
+  if brew_guard_assert --strict; then
+    echo "STRICT_ASSERT_RC=0"
+  else
+    echo "STRICT_ASSERT_RC=1"
+  fi
+  # Tidy up (see LOST4's identical comment above for why this is the
+  # legitimate owner, not an inherited-guard no-op).
+  brew_guard_cleanup
+) >"$LOST5_LOG" 2>&1
+
+test_start "LOST5: brew_guard_assert --strict returns non-zero when 'brew' no longer resolves to the guard shim in the runner's own shell"
+if grep -F -q -- "STRICT_ASSERT_RC=1" "$LOST5_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected STRICT_ASSERT_RC=1. Log tail:
+$(_tail "$LOST5_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# [Review] XACA-1222-012 regression: flag hardening on otherwise-allowlisted
+# subcommands, and the `shellenv` removal. Invokes the generated shim
+# EXECUTABLE directly (no need for a full nested test-runner.sh) since this
+# is purely about the shim's own per-call decision.
+# ═══════════════════════════════════════════════════════════════════════════
+FLAG_LOG="$WORK_DIR/flag-unit.log"
+(
+  unset AITEAMFORGE_BREW_GUARD_ACTIVE AITEAMFORGE_BREW_GUARD_DIR \
+        AITEAMFORGE_BREW_GUARD_MARKER AITEAMFORGE_BREW_GUARD_OWNER_PID \
+        AITEAMFORGE_BREW_GUARD_REAL_BREW
+  export PATH="$FAKE_BREW_BIN_DIR:$PATH"
+  # shellcheck disable=SC1091
+  source "$LIB_PATH"
+  brew_guard_install
+  _shim="$AITEAMFORGE_BREW_GUARD_DIR/brew"
+
+  "$_shim" info --github foo >"$WORK_DIR/flag-info-github.out" 2>&1
+  echo "INFO_GITHUB_RC=$?"
+
+  brew_guard_reset
+  "$_shim" outdated --fetch-HEAD >"$WORK_DIR/flag-outdated-fetchhead.out" 2>&1
+  echo "OUTDATED_FETCHHEAD_RC=$?"
+
+  brew_guard_reset
+  "$_shim" info foo >"$WORK_DIR/flag-info-plain.out" 2>&1
+  echo "INFO_PLAIN_RC=$?"
+
+  brew_guard_reset
+  "$_shim" shellenv >"$WORK_DIR/flag-shellenv.out" 2>&1
+  echo "SHELLENV_RC=$?"
+
+  # Tidy up (see LOST4's identical comment above for why this is the
+  # legitimate owner, not an inherited-guard no-op).
+  brew_guard_cleanup
+) >"$FLAG_LOG" 2>&1
+
+test_start "FLAG1: 'brew info --github foo' is BLOCKED (the --github flag reaches the network on an otherwise-allowlisted subcommand)"
+if grep -F -q -- "INFO_GITHUB_RC=97" "$FLAG_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected INFO_GITHUB_RC=97. Log tail:
+$(_tail "$FLAG_LOG")
+$(_tail "$WORK_DIR/flag-info-github.out")"
+fi
+
+test_start "FLAG2: 'brew outdated --fetch-HEAD' is BLOCKED (forces a live git fetch on an otherwise-allowlisted subcommand)"
+if grep -F -q -- "OUTDATED_FETCHHEAD_RC=97" "$FLAG_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected OUTDATED_FETCHHEAD_RC=97. Log tail:
+$(_tail "$FLAG_LOG")
+$(_tail "$WORK_DIR/flag-outdated-fetchhead.out")"
+fi
+
+test_start "FLAG3: 'brew info foo' (no blocked flag) still passes through as read-only"
+if grep -F -q -- "INFO_PLAIN_RC=0" "$FLAG_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected INFO_PLAIN_RC=0 -- the flag check must not affect a plain allowlisted call with no blocked flag. Log tail:
+$(_tail "$FLAG_LOG")
+$(_tail "$WORK_DIR/flag-info-plain.out")"
+fi
+
+test_start "FLAG4: 'brew shellenv' is BLOCKED (removed from the allowlist -- would put the real brew ahead of this shim on PATH)"
+if grep -F -q -- "SHELLENV_RC=97" "$FLAG_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected SHELLENV_RC=97. Log tail:
+$(_tail "$FLAG_LOG")
+$(_tail "$WORK_DIR/flag-shellenv.out")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# [Review] XACA-1222-013 regression: brew_guard_install sweeps a sibling dir
+# whose embedded PID is dead, and leaves a live-PID sibling strictly alone.
+# Fully sandboxed via a private TMPDIR -- never the real $TMPDIR.
+# ═══════════════════════════════════════════════════════════════════════════
+SWEEP_ROOT="$WORK_DIR/sweep-tmproot"
+mkdir -p "$SWEEP_ROOT"
+
+# A guaranteed-dead PID: this child has already printed its own $$ and
+# exited by the time command substitution returns.
+_sweep_dead_pid="$(bash -c 'echo $$')"
+# A guaranteed-live PID for the duration of this test: this very script's
+# own PID, which is still running everything below.
+_sweep_live_pid="$$"
+
+_sweep_dead_dir="$SWEEP_ROOT/aiteamforge-brewguard.${_sweep_dead_pid}.deadstub"
+_sweep_live_dir="$SWEEP_ROOT/aiteamforge-brewguard.${_sweep_live_pid}.livestub"
+# A name that does not parse as our naming shape at all -- must be left
+# alone too (never swept on a guess).
+_sweep_garbage_dir="$SWEEP_ROOT/aiteamforge-brewguard.not-a-pid-at-all"
+mkdir -p "$_sweep_dead_dir" "$_sweep_live_dir" "$_sweep_garbage_dir"
+
+SWEEP_LOG="$WORK_DIR/sweep-unit.log"
+(
+  unset AITEAMFORGE_BREW_GUARD_ACTIVE AITEAMFORGE_BREW_GUARD_DIR \
+        AITEAMFORGE_BREW_GUARD_MARKER AITEAMFORGE_BREW_GUARD_OWNER_PID \
+        AITEAMFORGE_BREW_GUARD_REAL_BREW
+  export TMPDIR="$SWEEP_ROOT"
+  export PATH="$FAKE_BREW_BIN_DIR:$PATH"
+  # shellcheck disable=SC1091
+  source "$LIB_PATH"
+  brew_guard_install
+  echo "NEW_SHIM_DIR=${AITEAMFORGE_BREW_GUARD_DIR:-}"
+) >"$SWEEP_LOG" 2>&1
+
+test_start "SWEEP1: brew_guard_install sweeps a sibling dir named for a DEAD pid"
+if [ ! -d "$_sweep_dead_dir" ]; then
+  test_pass
+else
+  test_fail "stale dead-pid dir $_sweep_dead_dir was NOT swept. Log tail:
+$(_tail "$SWEEP_LOG")"
+fi
+
+test_start "SWEEP2: brew_guard_install leaves a sibling dir named for a LIVE pid alone"
+if [ -d "$_sweep_live_dir" ]; then
+  test_pass
+else
+  test_fail "live-pid dir $_sweep_live_dir was incorrectly swept. Log tail:
+$(_tail "$SWEEP_LOG")"
+fi
+
+test_start "SWEEP3: brew_guard_install leaves a dir whose name does not parse as a pid alone"
+if [ -d "$_sweep_garbage_dir" ]; then
+  test_pass
+else
+  test_fail "unparseable-name dir $_sweep_garbage_dir was incorrectly swept -- never sweep on a guess. Log tail:
+$(_tail "$SWEEP_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 if [ "${_STANDALONE:-false}" != true ] && [ -n "${TEST_RESULTS_FILE:-}" ] && [ -f "${TEST_RESULTS_FILE}" ]; then
   _x1222_fail_lines="$(grep '^FAIL:' "$TEST_RESULTS_FILE" 2>/dev/null || true)"
   if [ -n "$_x1222_fail_lines" ]; then

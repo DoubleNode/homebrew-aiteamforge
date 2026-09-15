@@ -25,6 +25,11 @@ TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_TEAM="$TAP_ROOT/libexec/installers/install-team.sh"
 ORG_EXAMPLE="$TAP_ROOT/share/config/organization.yaml.example"
 
+# XACA-1222-011: shared brew stub helper (was a hand-rolled inline copy;
+# see tests/lib/brew-stub.sh for the full rationale and contract).
+# shellcheck source=lib/brew-stub.sh
+source "$SCRIPT_DIR/lib/brew-stub.sh"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Standalone framework: provide minimal stubs when the test-runner has not
 # exported the real functions, and manage our own pass/fail counters.
@@ -81,63 +86,21 @@ trap _cleanup EXIT INT TERM
 # (not just Case 2's) so a future conf change can't silently reintroduce a
 # real brew invocation here.
 #
-# Pattern lifted from tests/test-xaca-1216-flat-persona-deploy.sh's brew
-# stub (`brew list` reports "installed", everything else refuses loudly),
-# extended with: full-argv logging (so the "nothing mutating happened"
-# claim is verified, not assumed — see the assertion after Case 2 and the
-# suite-wide one near the end), and an explicit mutating-subcommand refusal
-# list rather than a single install|else split.
+# XACA-1222-011: the stub itself (full-argv logging, `list` "installed",
+# everything else refuses loudly) now comes from the shared
+# tests/lib/brew-stub.sh helper — see that file for the full behavior
+# contract — rather than a hand-rolled copy kept in sync by hand with
+# test-xaca-1070-mandatory-install.sh's near-identical one.
 # ─────────────────────────────────────────────────────────────────────────────
 STUB_BIN="$TEST_TMP_DIR/stub-bin"
-mkdir -p "$STUB_BIN"
 BREW_STUB_LOG="$TEST_TMP_DIR/brew-stub.log"
-: > "$BREW_STUB_LOG"
+brew_stub_install "$STUB_BIN" "$BREW_STUB_LOG"
 
-cat > "$STUB_BIN/brew" <<'BREWSTUBEOF'
-#!/bin/sh
-# XACA-1222 test stub for test-xaca-0463-port-allocation.sh.
-# Logs every invocation (full argv) to $_BREW_STUB_LOG, then:
-#   - `brew list ...`    → exit 0 ("already installed"), so install-team.sh
-#                           takes its already-installed branch and never
-#                           calls `brew install` for a dep that happens to
-#                           already be on the runner (real or otherwise).
-#   - `brew --prefix`    → not currently called by install-team.sh (grepped
-#                           for XACA-1222), but handled defensively: prints a
-#                           nonexistent path, never a real host prefix.
-#   - anything mutating/network (install/upgrade/tap/untap/reinstall/
-#     uninstall/update/services) → refuse loudly, non-zero exit.
-#   - anything else       → refuse loudly too (fail closed on the unknown).
-{
-    printf '%s' "brew"
-    for _a in "$@"; do printf ' %s' "$_a"; done
-    printf '\n'
-} >> "${_BREW_STUB_LOG:-/dev/null}"
-
-case "$1" in
-    list)
-        exit 0
-        ;;
-    --prefix)
-        printf '%s\n' "/nonexistent-xaca-1222-brew-prefix"
-        exit 0
-        ;;
-    install|upgrade|tap|untap|reinstall|uninstall|update|services)
-        echo "brew stub: refusing mutating/network subcommand '$*' inside XACA-0463 port-allocation sandbox (XACA-1222)" >&2
-        exit 1
-        ;;
-    *)
-        echo "brew stub: refusing unrecognised subcommand '$*' inside XACA-0463 port-allocation sandbox (XACA-1222)" >&2
-        exit 1
-        ;;
-esac
-BREWSTUBEOF
-chmod +x "$STUB_BIN/brew"
-
-# find_brew_violations <logfile> — mutating/network brew subcommands present
-# in a stub log. Anchored on line-start "brew <subcommand>" so it cannot
-# false-match a dep NAMED "install" etc. appearing as an argument.
+# find_brew_violations <logfile> — thin wrapper kept for this file's own
+# existing call sites; see tests/lib/brew-stub.sh's brew_stub_violations
+# for the actual (line-anchored, tap-argument-aware) implementation.
 find_brew_violations() {
-    grep -E '^brew (install|upgrade|tap|untap|reinstall|uninstall|update|services)\b' "$1" 2>/dev/null || true
+    brew_stub_violations "$1"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,13 +143,15 @@ run_install() {
 
     # XACA-1222: PATH-prepend the brew stub so install-team.sh's dependency
     # step (real for freelance, see Case 2) can never reach the network or
-    # mutate the host. _BREW_STUB_LOG is the suite-wide log; every case's
-    # brew invocations accumulate into it for the assertions below.
+    # mutate the host. AITEAMFORGE_TEST_BREW_STUB_LOG is the suite-wide log
+    # (XACA-1222-011: shared env var name read by tests/lib/brew-stub.sh's
+    # generated stub); every case's brew invocations accumulate into it for
+    # the assertions below.
     HOME="$_SB_HOME" \
     AITEAMFORGE_DIR="$_SB_AITF" \
     AITEAMFORGE_CONFIG="$_SB_CONFIG" \
     PATH="$STUB_BIN:$PATH" \
-    _BREW_STUB_LOG="$BREW_STUB_LOG" \
+    AITEAMFORGE_TEST_BREW_STUB_LOG="$BREW_STUB_LOG" \
         bash "$INSTALL_TEAM" "$team" "$@" \
         >"$out_file" 2>"$err_file" || rc=$?
 

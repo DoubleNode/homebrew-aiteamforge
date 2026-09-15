@@ -56,6 +56,40 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   does. On a host with no brew (the ubuntu CI runner) the guard installs nothing, so `command -v brew`
   still fails there. `test-xaca-1222-brew-guard.sh` is the negative control (a fake "real brew", never
   the host's).
+  - Review round 1 BLOCKING: `test-runner.sh`'s `EXIT INT TERM` trap shared one handler that ran
+    cleanup but never exited, so a signal mid-suite (e.g. Ctrl-C on a hung suite) resumed the
+    `for test_file in ...` loop with the just-deleted brew-guard shim gone and every remaining suite
+    running against a real, unstubbed `brew` — the exact incident this ticket exists to prevent, now
+    reachable via the guard's own cleanup path. INT/TERM now get their own handler that prints a
+    notice and exits immediately (130/143); the EXIT trap still runs cleanup on the way out, it just
+    never resumes the loop afterward. `brew_guard_assert` gained a `--strict` mode (used only by
+    `run_test_file()`) that fails closed — "guard lost" — when the shim dir, its executable, or its
+    marker file go missing after a suite ran, or when `brew` in the runner's own shell no longer
+    resolves to the shim; plain (non-strict) `brew_guard_assert` has no way to see any of this once the
+    marker file itself is gone, which is why only the strict caller is safe to gate on. Also fixed
+    `brew_guard_reset`'s redirect order so a missing marker directory no longer leaks a raw shell error
+    past its own `2>/dev/null`. New `SIG1-4`/`LOST1-5` regression cases in `test-xaca-1222-brew-guard.sh`.
+  - Review round 1 [XACA-1222-011]: extracted the near-identical inline `brew` stub duplicated between
+    `test-xaca-0463-port-allocation.sh` and `test-xaca-1070-mandatory-install.sh` (SECTION T) into a
+    shared `tests/lib/brew-stub.sh` (`brew_stub_install` / `brew_stub_violations`); both suites now
+    call it instead of carrying their own copy, so a future guard-semantics change (e.g. the flag
+    hardening below) only needs to land once.
+  - Review round 1 [XACA-1222-012]: the shim's allowlist now also blocks an otherwise-read-only
+    subcommand when it carries `--github`, `--analytics`, `--fetch-HEAD`, or `--search` (each reaches
+    the network, or — for `desc --search` — scans every formula's description instead of one). Removed
+    `shellenv` from the allowlist: `eval "$(brew shellenv)"` would put the real brew ahead of this shim
+    on `PATH` for the rest of that process, and a tree-wide grep found no shipped caller. README's
+    "Brew Guard" section now documents `HOMEBREW_NO_INSTALL_FROM_API`/`HOMEBREW_NO_ANALYTICS` alongside
+    `HOMEBREW_NO_AUTO_UPDATE`, the blocked flags, and that an absolute-path `brew` call bypasses any
+    PATH-based shim.
+  - Review round 1 [XACA-1222-013]: `tests/lib/brew-guard.sh`'s shim directory no longer depends on a
+    trap to get cleaned up — three suites (`test-tailscale.sh`, `test-xaca-0650-doctor-venv.sh`,
+    `test-doctor-fix.sh`) `source` `test-runner.sh` directly and then install their own `EXIT` trap,
+    which replaces (or, for `test-tailscale.sh`, only conditionally chains onto) `test-runner.sh`'s own
+    cleanup, leaking the shim directory on every standalone run. `brew_guard_install` now names its
+    directory `aiteamforge-brewguard.$$.XXXXXX` (also fixing BSD `mktemp -t`, which left a literal
+    `XXXXXX` in the name) and sweeps sibling directories whose embedded PID is no longer alive before
+    creating a new one — self-healing regardless of whether any trap fires.
 
 - **XACA-1220** — `display-agent-avatar.sh` mirror: Space Dock avatar arms and unmapped agent pairs
   now write panel JSON with an empty avatar and warn on stderr instead of silently exiting.
