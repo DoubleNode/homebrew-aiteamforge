@@ -434,7 +434,48 @@ if [[ ${#_missing_agents[@]} -gt 0 ]]; then
             echo "    ✓ ${TEAM_ID}-${_agent} created on retry"
         else
             echo "    ❌ ${TEAM_ID}-${_agent} still missing (see $_SESSION_LOG)"
-            [[ -n "$_agent_retry_log" && -s "$_agent_retry_log" ]] && sed 's/^/       /' "$_agent_retry_log"
+            # XACA-1215-018: the generated per-agent script runs an
+            # unconditional `clear` (no `[[ -t 1 ]]` guard) before this
+            # failure path, so the raw capture above contains real terminal
+            # control sequences (CSI clear/home e.g. ESC[3J ESC[H ESC[2J,
+            # OSC title sets, lone-ESC resets like `ESC c`, and bare `\r`).
+            # `sed 's/^/       /'` used to replay those bytes verbatim onto
+            # THIS terminal, wiping the screen/scrollback — including the
+            # "still missing" line just printed and any earlier agents'
+            # causes. $_SESSION_LOG itself is left untouched (still the raw
+            # capture, for post-mortem debugging); only the indented
+            # re-print to the live terminal is filtered.
+            #
+            # LC_ALL=C awk chosen over perl: awk is guaranteed present (this
+            # is the same tool the rest of the tap install path already
+            # depends on), while perl, though present on stock macOS, is not
+            # guaranteed on every consumer box this template targets.
+            # Verified against BSD awk ("one true awk" 20200816, macOS
+            # default /usr/bin/awk) AND gawk. LC_ALL=C avoids UTF-8
+            # multibyte mis-splits of the raw escape bytes we're matching
+            # against; it's scoped to this one command only.
+            #
+            # Stripped, in order (each gsub only sees what the prior one
+            # left behind, so a lone-ESC pattern can't re-match inside an
+            # already-removed CSI/OSC run):
+            #   1. CSI  -- ESC [ params(0x30-0x3F) intermediates(0x20-0x2F) final(0x40-0x7E)
+            #   2. OSC  -- ESC ] ... terminated by BEL (\007) or ST (ESC \)
+            #   3. lone ESC + one char -- covers ESC c (RIS/full reset),
+            #      ESC 7 / ESC 8 (save/restore cursor), ESC = / ESC > etc.
+            #   4. bare \r
+            # Lines that are empty AFTER stripping are dropped entirely
+            # (a clear-only line would otherwise print as a bare indent).
+            if [[ -n "$_agent_retry_log" && -s "$_agent_retry_log" ]]; then
+                LC_ALL=C awk '
+                    {
+                        gsub(/\033\[[0-?]*[ -\/]*[@-~]/, "")
+                        gsub(/\033\][^\007\033]*(\007|\033\\)/, "")
+                        gsub(/\033[@-Z\\-_]/, "")
+                        gsub(/\r/, "")
+                        if ($0 != "") print "       " $0
+                    }
+                ' "$_agent_retry_log"
+            fi
         fi
         [[ -n "$_agent_retry_log" ]] && rm -f "$_agent_retry_log"
     done

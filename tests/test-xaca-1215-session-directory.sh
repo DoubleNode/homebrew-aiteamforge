@@ -1152,16 +1152,273 @@ for _g8_shell in zsh bash; do
     fi
 done
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CASE G9 — XACA-1215-019: non-ASCII SESSION_DIRECTORY under a REAL
+# interactive pty. G8 above only re-parses the captured `cd ...` line
+# non-interactively (`zsh -fc` / `/bin/bash -c`), which CANNOT see this bug:
+# the mangling happens in ZLE while a real terminal session is typing the
+# bytes in, not while a non-interactive shell is parsing an argv string.
+# Bare `printf %q` under bash 3.2 renders a multibyte char's bytes as a mix
+# of raw bytes and octal escapes for the 0x80-0x9F range, and a real
+# interactive zsh reading that back garbles it and the `cd` silently lands
+# nowhere useful. Drives an actual `zsh -i` through a python pty.fork()
+# harness (portable to Linux CI, unlike macOS-only `script`), typing the
+# generated `cd ...` line the way a real terminal would, then reads back
+# `pwd`.
+# ─────────────────────────────────────────────────────────────────────────────
+if ! command -v zsh >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    test_start "G9 (XACA-1215-019): non-ASCII SESSION_DIRECTORY round-trip under a real interactive pty"
+    echo "     SKIP: zsh and/or python3 not found on PATH — the pty harness requires both"
+else
+    G9_HOME="$TEST_TMP_DIR/case-g9-home"
+    G9_ZDOTDIR="$TEST_TMP_DIR/case-g9-zdotdir"
+    mkdir -p "$G9_HOME" "$G9_ZDOTDIR"
+
+    # Minimal pty harness: spawn `zsh -i` on a real pty (ZDOTDIR points at an
+    # empty sandbox so no rc files slow startup or interfere), type the
+    # given command line + Enter, then `pwd > <outfile>` + Enter, then exit.
+    # LANG/LC_ALL=en_US.UTF-8 is forced on the spawned session itself so ZLE
+    # is UTF-8-aware (matching a real user's terminal) regardless of the
+    # runner's own ambient locale. os.fsencode() (not .encode("utf-8")) is
+    # required to replay a pre-fix %q's mixed raw/octal bytes verbatim: Python
+    # surrogateescape-decodes invalid-UTF-8 argv bytes on the way in, and only
+    # fsencode() reverses that back to the exact original bytes instead of
+    # raising on the surrogate codepoints.
+    G9_HARNESS="$TEST_TMP_DIR/case-g9-pty-harness.py"
+    cat > "$G9_HARNESS" <<'G9PYEOF'
+import os, sys, pty, select, time, signal
+
+def drain(fd, timeout, idle_gap=0.15):
+    end = time.time() + timeout
+    buf = b""
+    last = time.time()
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if fd in r:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            last = time.time()
+        else:
+            if buf and (time.time() - last) > idle_gap:
+                break
+    return buf
+
+def main():
+    zdotdir, home, cmd_line, outfile = sys.argv[1:5]
+    env = dict(os.environ)
+    env["ZDOTDIR"] = zdotdir
+    env["HOME"] = home
+    env["LANG"] = "en_US.UTF-8"
+    env["LC_ALL"] = "en_US.UTF-8"
+    env["TERM"] = "xterm"
+    env["PS1"] = "PTYG9$ "
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(home)
+        os.execvpe("zsh", ["zsh", "-i"], env)
+        os._exit(127)
+
+    def send(s):
+        os.write(fd, os.fsencode(s))
+
+    drain(fd, 1.5)
+    send(cmd_line + "\n")
+    drain(fd, 1.5)
+    send("pwd > " + outfile + "\n")
+    drain(fd, 1.5)
+    send("exit\n")
+
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        try:
+            wpid, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if wpid == pid:
+            break
+        time.sleep(0.1)
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+if __name__ == "__main__":
+    main()
+G9PYEOF
+
+    # NEGATIVE-CONTROL form only: the pre-fix bare `printf %q` shape, run
+    # under the SAME /bin/bash 3.2 that ships on macOS. This is a
+    # hand-constructed comparison (install-team.sh itself only ever emits
+    # the FIXED form now, so there is no live code path left that produces
+    # this) — its only job is to prove the pty harness actually reproduces
+    # the ZLE-mangling bug at all, so a pass on the positive cases below
+    # isn't just the harness being vacuously lenient. LANG/LC_ALL=en_US.UTF-8
+    # is forced on the computing process so the bug reproduces regardless of
+    # the runner's own ambient locale.
+    _g9_old_q() {
+        env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 /bin/bash -c 'printf %q "$1"' _ "$1"
+    }
+    _g9_pty_pwd() {
+        # $1 = full command line to type (e.g. "cd ..."), $2 = output file
+        python3 "$G9_HARNESS" "$G9_ZDOTDIR" "$G9_HOME" "$1" "$2"
+        cat "$2" 2>/dev/null
+    }
+
+    # Recover the exact "keys" argument of the first send-keys call — same
+    # shape/contract as G8's extraction, factored out so G9 can call it once
+    # per case. A block is ["send-keys","-t",<target>,<keys>,"C-m"] followed
+    # by the "===END===" line.
+    _g9_extract_cd_line() {
+        python3 - "$1" <<'G9EXTPYEOF'
+import sys
+with open(sys.argv[1]) as f:
+    content = f.read()
+for block in content.split("===END===\n"):
+    lines = block.split("\n")
+    while lines and lines[-1] == "":
+        lines.pop()
+    if len(lines) >= 4 and lines[0] == "send-keys":
+        print(lines[3])
+        break
+G9EXTPYEOF
+    }
+
+    # THE ACTUAL FIX UNDER TEST: render a REAL per-agent script via
+    # install-team.sh's own generator (the same `_run_generator` /
+    # `gen_current` G8 uses above) for a REAL, EXISTING hostile-named
+    # directory, run it under the same argv-preserving stub tmux (G8_STUB_BIN,
+    # already built above), and recover the exact "cd ..." line it sent to
+    # send-keys. This exercises install-team.sh's actual
+    # `_SESSION_DIRECTORY_Q=$(LC_ALL=C /bin/bash -c ...)` line — a
+    # hand-rolled duplicate of that line in this test file would keep
+    # passing even if the real fix regressed back to the ineffective
+    # in-process `LC_ALL=C printf %q` form.
+    _g9_real_cd_line() {
+        local dir="$1" label="$2"
+        local atf="$TEST_TMP_DIR/case-g9-atf-$label"
+        _run_generator "$atf" "$dir"
+        local script
+        script="$(find "$atf/spacedock/scripts" -maxdepth 1 -name 'spacedock-*-startup.sh' 2>/dev/null | head -1)"
+        [ -z "$script" ] && return 1
+        local log="$TEST_TMP_DIR/case-g9-tmux-$label.log"
+        : > "$log"
+        # LANG/LC_ALL=en_US.UTF-8 here (not just inside install-team.sh's own
+        # fixed line) matters for MUTATION-SENSITIVITY: the fixed form forces
+        # its own subprocess's locale regardless of this ambient value, but a
+        # regression back to the ineffective in-process `LC_ALL=C printf %q`
+        # builtin form inherits ITS classification from whatever locale THIS
+        # generated script process itself started under — without forcing
+        # UTF-8 here, that regression would go undetected if the runner's own
+        # ambient locale happens not to be UTF-8.
+        #
+        # Explicit /bin/bash, NOT PATH-resolved `bash` — MEASURED this
+        # matters: on a machine where Homebrew bash 5 sits ahead of
+        # /bin/bash on PATH, running the generated script under bash 5
+        # masks the in-process `LC_ALL=C printf %q` regression entirely
+        # (bash 5's %q is locale-correct either way), so a bare `bash
+        # "$script"` here would make this whole case mutation-BLIND on
+        # exactly the machines most likely to run it. install-team.sh's own
+        # fix hardcodes /bin/bash for the same reason (its output must not
+        # depend on PATH ordering); this harness has to match that to
+        # actually exercise the failure mode the fix targets.
+        env -u TMUX -u TMUX_PANE -u TMUX_SOCKET \
+            LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+            HOME="$G9_HOME" AITEAMFORGE_DIR="$atf" PATH="$G8_STUB_BIN:$PATH" \
+            TMUX_STUB_LOG="$log" SKIP_ATTACH=1 \
+            /bin/bash "$script" >/dev/null 2>&1
+        _g9_extract_cd_line "$log"
+    }
+
+    # ---- Negative control: the pre-fix form fails for 日本 under the pty,
+    # proving the harness actually reproduces the bug (not just a vacuous
+    # pass) ----
+    G9_JP_DIR="$G9_HOME/g9-jp-日本"
+    mkdir -p "$G9_JP_DIR"
+    G9_JP_OLD_Q="$(_g9_old_q "$G9_JP_DIR")"
+    G9_JP_OLD_PWD="$(_g9_pty_pwd "cd $G9_JP_OLD_Q" "$TEST_TMP_DIR/g9-jp-old-out")"
+
+    test_start "G9 (negative control): pre-fix plain printf %q FAILS the pty round-trip for 日本"
+    if [ "$G9_JP_OLD_PWD" != "$G9_JP_DIR" ]; then
+        test_pass
+    else
+        test_fail "Pre-fix form unexpectedly succeeded — the negative control no longer reproduces the bug; the positive assertions below cannot be trusted until this is understood. got=[$G9_JP_OLD_PWD]"
+    fi
+
+    # ---- Positive: install-team.sh's REAL generated `cd ...` line passes
+    # for 日本, é, emoji, and the round-1 hostile set, with no PWNED
+    # execution ----
+    _g9_case() {
+        local label="$1" suffix="$2" check_pwned="$3"
+        local dir pwned cd_line out got
+        pwned="$TEST_TMP_DIR/g9-pwned-$label"
+        suffix="${suffix//__PWNED__/$pwned}"
+        dir="$G9_HOME/$suffix"
+        mkdir -p "$dir" 2>/dev/null
+        cd_line="$(_g9_real_cd_line "$dir" "$label")"
+        out="$TEST_TMP_DIR/g9-out-$label"
+        got="$(_g9_pty_pwd "$cd_line" "$out")"
+
+        test_start "G9 ($label): real generated cd-line round-trips correctly under the pty"
+        if [ -n "$cd_line" ] && [ "$got" = "$dir" ]; then
+            test_pass
+        else
+            test_fail "expected=[$dir] got=[$got] cd_line=[$cd_line]"
+        fi
+
+        if [ "$check_pwned" = true ]; then
+            test_start "G9 ($label): no PWNED sentinel created (hostile payload never executed)"
+            if [ ! -e "$pwned" ]; then
+                test_pass
+            else
+                test_fail "PWNED sentinel file was created: $pwned"
+            fi
+        fi
+    }
+
+    _g9_case 'japanese'  'g9-jp-日本'                       false
+    _g9_case 'accent'    'g9-accent-é'                      false
+    _g9_case 'emoji'     'g9-emoji-😀'                       false
+    _g9_case 'space'     'g9 space'                          false
+    _g9_case 'cmd-subst' 'g9-cs-$(touch __PWNED__)x'         true
+    _g9_case 'backtick'  'g9-bt-`touch __PWNED__`x'          true
+    _g9_case 'dquote'    'g9-dq-"q'                          false
+    _g9_case 'squote'    "g9-sq-'q"                          false
+    _g9_case 'backslash' 'g9-bs-a\b'                         false
+    _g9_case 'bang'      'g9-bang-!x'                        false
+fi
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CASE H — XACA-1215-017: the master template's retry-loop surfaces the REAL
-# per-agent failure cause on the terminal, not just a pointer to the shared
-# session log. Drives the actual session-verify/retry block extracted
-# verbatim from team-startup.sh.template with fake per-agent scripts that
-# fail exactly the way the XACA-1215-004 missing-directory guard does.
+# CASE H — XACA-1215-017/018/020: the master template's retry-loop surfaces
+# the REAL per-agent failure cause on the terminal, not just a pointer to
+# the shared session log (017); the printed cause carries no raw terminal
+# control bytes (018); and this test's own hygiene never touches a real
+# team name or real /tmp (020). Drives the actual session-verify/retry
+# block extracted verbatim from team-startup.sh.template with fake
+# per-agent scripts that fail exactly the way the XACA-1215-004
+# missing-directory guard does, under BOTH bash and zsh (the template's own
+# shebang is #!/bin/zsh).
 # ═══════════════════════════════════════════════════════════════════════════
 H_TEMPLATE="$TAP_ROOT/share/templates/team-startup.sh.template"
+
+# XACA-1215-020: a fake team id that cannot collide with any real team.conf
+# (command/ios/android/firebase/dns/academy/medical/legal/finance/freelance/
+# spacedock) — Case H used to hardcode "spacedock" throughout, which meant
+# every run wrote a real /tmp/spacedock-startup-sessions-<ts>.log using a
+# LIVE team's log name.
+H_FAKE_TEAM="xaca1215caseh"
 
 test_start "H preflight: team-startup.sh.template exists"
 if [ -f "$H_TEMPLATE" ]; then test_pass; else test_fail "Not found: $H_TEMPLATE"; fi
@@ -1169,7 +1426,7 @@ if [ -f "$H_TEMPLATE" ]; then test_pass; else test_fail "Not found: $H_TEMPLATE"
 # Extract the session-verify/retry block by text anchor (not fixed line
 # numbers — XACA-1216 is concurrently editing other regions of this same
 # template). No {{...}} template placeholders appear inside this block (they
-# only appear in the config header further up), so it is valid bash as-is.
+# only appear in the config header further up), so it is valid bash/zsh as-is.
 _extract_session_loop_block() {
     awk '
         /^_SESSION_LOG="\/tmp\// { capture = 1 }
@@ -1178,10 +1435,33 @@ _extract_session_loop_block() {
     ' "$1"
 }
 
+H_EXTRACTED_RAW="$TEST_TMP_DIR/case-h-extracted-raw.sh"
+_extract_session_loop_block "$H_TEMPLATE" > "$H_EXTRACTED_RAW"
+
+# XACA-1215-020: relocate the block's own /tmp writes into TEST_TMP_DIR
+# before running it — both the shared per-run session log and the
+# per-agent mktemp scratch file — so this test never touches real /tmp.
+# Textual substitution on the EXTRACTED COPY only; the live template ships
+# unmodified (verify with `git diff` that this test file is the only
+# thing touched by this transform).
+H_BODY="$TEST_TMP_DIR/case-h-body.sh"
+sed \
+    -e "s#^_SESSION_LOG=\"/tmp/#_SESSION_LOG=\"${TEST_TMP_DIR}/#" \
+    -e "s#mktemp \"/tmp/\.#mktemp \"${TEST_TMP_DIR}/.#" \
+    "$H_EXTRACTED_RAW" > "$H_BODY"
+
+test_start "H preflight: /tmp relocation sed matched both target lines (else this test would still touch real /tmp)"
+if grep -q "^_SESSION_LOG=\"${TEST_TMP_DIR}/" "$H_BODY" 2>/dev/null \
+   && grep -q "mktemp \"${TEST_TMP_DIR}/\." "$H_BODY" 2>/dev/null; then
+    test_pass
+else
+    test_fail "sed did not relocate one or both /tmp writes — template shape may have drifted: $(cat "$H_BODY" 2>/dev/null | head -40)"
+fi
+
 H_EXTRACTED="$TEST_TMP_DIR/case-h-extracted.sh"
 {
     echo '_run_h_session_loop() {'
-    _extract_session_loop_block "$H_TEMPLATE"
+    cat "$H_BODY"
     echo '}'
 } > "$H_EXTRACTED"
 
@@ -1191,8 +1471,25 @@ if [ -s "$H_EXTRACTED" ] && bash -n "$H_EXTRACTED" 2>"$TEST_TMP_DIR/h-syn.err"; 
 else
     test_fail "Extraction empty or invalid: $(cat "$TEST_TMP_DIR/h-syn.err" 2>/dev/null)"
 fi
-# shellcheck source=/dev/null
-source "$H_EXTRACTED"
+
+if command -v zsh >/dev/null 2>&1; then
+    test_start "H preflight: session-verify/retry block also parses under zsh -n"
+    if zsh -n "$H_EXTRACTED" 2>"$TEST_TMP_DIR/h-syn-zsh.err"; then
+        test_pass
+    else
+        test_fail "zsh -n rejected the extracted block: $(cat "$TEST_TMP_DIR/h-syn-zsh.err" 2>/dev/null)"
+    fi
+fi
+
+# XACA-1215-020: run the extracted block under its own process for each
+# shell (never `source`d into this test script's own bash process) — a
+# runner file that sources+calls it, invoked as `bash "$H_RUNNER"` and,
+# when present, `zsh -f "$H_RUNNER"`.
+H_RUNNER="$TEST_TMP_DIR/case-h-runner.sh"
+{
+    printf '. %q\n' "$H_EXTRACTED"
+    echo '_run_h_session_loop'
+} > "$H_RUNNER"
 
 # Stub tmux: `has-session` ALWAYS reports missing (exit 1) regardless of
 # target — forces every fake per-agent script to actually run, and forces
@@ -1213,81 +1510,121 @@ chmod +x "$H_STUB_BIN/tmux"
 
 H_HOME="$TEST_TMP_DIR/case-h-home"
 H_ATF="$TEST_TMP_DIR/case-h-atf"
-mkdir -p "$H_HOME" "$H_ATF/spacedock/scripts"
+mkdir -p "$H_HOME" "$H_ATF/$H_FAKE_TEAM/scripts"
 
 # Two fake per-agent scripts, each shaped like the real XACA-1215-004
 # missing-directory guard's failure, with DIFFERENT cause text — proves the
 # fix shows each agent's OWN cause with no cross-contamination even though
 # the initial (parallel/backgrounded) launch phase interleaves both in the
-# shared $_SESSION_LOG.
-cat > "$H_ATF/spacedock/scripts/spacedock-flaky-startup.sh" <<'HFAKEEOF'
+# shared $_SESSION_LOG. XACA-1215-018 extension: each ALSO emits a real
+# `clear`-equivalent control sequence first — exactly what the actual
+# generated per-agent script does unconditionally (install-team.sh's
+# generate_script(), no `[[ -t 1 ]]` guard) before this same failure path
+# — so the retry capture genuinely contains raw ESC bytes, and the
+# assertions below prove the template's printing step (018) strips them
+# rather than the test simply never having produced any.
+cat > "$H_ATF/$H_FAKE_TEAM/scripts/${H_FAKE_TEAM}-flaky-startup.sh" <<'HFAKEEOF'
 #!/bin/bash
-echo "Initializing Spacedock Flaky..."
+printf '\033[3J\033[H\033[2J'
+echo "Initializing Xaca1215caseh Flaky..."
 echo "Error: working directory does not exist: /fake/not-cloned-repo" >&2
-echo "       (resolved from TEAM_WORKING_DIR for team 'spacedock' — check the team .conf, an" >&2
+echo "       (resolved from TEAM_WORKING_DIR for team 'xaca1215caseh' — check the team .conf, an" >&2
 echo "       env override, or that the repo/project directory has actually been cloned)" >&2
 exit 1
 HFAKEEOF
-chmod +x "$H_ATF/spacedock/scripts/spacedock-flaky-startup.sh"
+chmod +x "$H_ATF/$H_FAKE_TEAM/scripts/${H_FAKE_TEAM}-flaky-startup.sh"
 
-cat > "$H_ATF/spacedock/scripts/spacedock-flaky2-startup.sh" <<'HFAKE2EOF'
+cat > "$H_ATF/$H_FAKE_TEAM/scripts/${H_FAKE_TEAM}-flaky2-startup.sh" <<'HFAKE2EOF'
 #!/bin/bash
-echo "Initializing Spacedock Flaky2..."
+printf '\033[3J\033[H\033[2J'
+echo "Initializing Xaca1215caseh Flaky2..."
 echo "Error: working directory does not exist: /fake/OTHER-repo" >&2
 exit 1
 HFAKE2EOF
-chmod +x "$H_ATF/spacedock/scripts/spacedock-flaky2-startup.sh"
+chmod +x "$H_ATF/$H_FAKE_TEAM/scripts/${H_FAKE_TEAM}-flaky2-startup.sh"
 
-H_STDOUT="$TEST_TMP_DIR/case-h-stdout.log"
-(
-    TEAM_ID="spacedock"
-    AITEAMFORGE_DIR="$H_ATF"
-    TMUX_SOCKET="h-test-socket"
-    export TEAM_ID AITEAMFORGE_DIR TMUX_SOCKET
-    unset TMUX TMUX_PANE TMUX_SOCKET_REAL 2>/dev/null
-    TMUX_SOCKET="h-test-socket"
-    export PATH="$H_STUB_BIN:$PATH"
-    _run_h_session_loop
-) >"$H_STDOUT" 2>&1
+# Shared assertion set, run once per shell that executed the block.
+_case_h_assert() {
+    local _label="$1" _out="$2"
 
-test_start "H: retry loop reports BOTH agents as still missing"
-if grep -q "spacedock-flaky still missing" "$H_STDOUT" 2>/dev/null && grep -q "spacedock-flaky2 still missing" "$H_STDOUT" 2>/dev/null; then
-    test_pass
-else
-    test_fail "Expected both 'still missing' lines not found: $(cat "$H_STDOUT" 2>/dev/null)"
-fi
+    test_start "H ($_label): retry loop reports BOTH agents as still missing"
+    if grep -q "${H_FAKE_TEAM}-flaky still missing" "$_out" 2>/dev/null && grep -q "${H_FAKE_TEAM}-flaky2 still missing" "$_out" 2>/dev/null; then
+        test_pass
+    else
+        test_fail "Expected both 'still missing' lines not found ($_label): $(cat "$_out" 2>/dev/null)"
+    fi
 
-test_start "H (XACA-1215-017): the REAL cause reaches stdout (not just the log pointer)"
-if grep -q "Error: working directory does not exist: /fake/not-cloned-repo" "$H_STDOUT" 2>/dev/null \
-   && grep -q "Error: working directory does not exist: /fake/OTHER-repo" "$H_STDOUT" 2>/dev/null; then
-    test_pass
-else
-    test_fail "Cause text missing from stdout — only the log pointer was shown: $(cat "$H_STDOUT" 2>/dev/null)"
-fi
+    test_start "H ($_label) (XACA-1215-017): the REAL cause reaches stdout (not just the log pointer)"
+    if grep -q "Error: working directory does not exist: /fake/not-cloned-repo" "$_out" 2>/dev/null \
+       && grep -q "Error: working directory does not exist: /fake/OTHER-repo" "$_out" 2>/dev/null; then
+        test_pass
+    else
+        test_fail "Cause text missing from stdout ($_label) — only the log pointer was shown: $(cat "$_out" 2>/dev/null)"
+    fi
 
-test_start "H: cause lines are indented (visually distinct follow-up, not another top-level line)"
-if grep -qE '^       Error: working directory does not exist' "$H_STDOUT" 2>/dev/null; then
-    test_pass
-else
-    test_fail "Cause line not indented as expected: $(cat "$H_STDOUT" 2>/dev/null)"
-fi
+    test_start "H ($_label): cause lines are indented (visually distinct follow-up, not another top-level line)"
+    if grep -qE '^       Error: working directory does not exist' "$_out" 2>/dev/null; then
+        test_pass
+    else
+        test_fail "Cause line not indented as expected ($_label): $(cat "$_out" 2>/dev/null)"
+    fi
 
-test_start "H: each agent's cause block shows ONLY its own cause (no cross-contamination)"
-H_BLOCK1="$(grep -A4 'spacedock-flaky still missing' "$H_STDOUT" 2>/dev/null)"
-H_BLOCK2="$(grep -A4 'spacedock-flaky2 still missing' "$H_STDOUT" 2>/dev/null)"
-if echo "$H_BLOCK1" | grep -q "not-cloned-repo" && ! echo "$H_BLOCK1" | grep -q "OTHER-repo" \
-   && echo "$H_BLOCK2" | grep -q "OTHER-repo" && ! echo "$H_BLOCK2" | grep -q "not-cloned-repo"; then
-    test_pass
-else
-    test_fail "Cross-contamination or missing cause detected. block1=[$H_BLOCK1] block2=[$H_BLOCK2]"
-fi
+    test_start "H ($_label): each agent's cause block shows ONLY its own cause (no cross-contamination)"
+    local _b1 _b2
+    _b1="$(grep -A6 "${H_FAKE_TEAM}-flaky still missing" "$_out" 2>/dev/null)"
+    _b2="$(grep -A6 "${H_FAKE_TEAM}-flaky2 still missing" "$_out" 2>/dev/null)"
+    if echo "$_b1" | grep -q "not-cloned-repo" && ! echo "$_b1" | grep -q "OTHER-repo" \
+       && echo "$_b2" | grep -q "OTHER-repo" && ! echo "$_b2" | grep -q "not-cloned-repo"; then
+        test_pass
+    else
+        test_fail "Cross-contamination or missing cause detected ($_label). block1=[$_b1] block2=[$_b2]"
+    fi
 
-test_start "H: per-agent retry scratch files are cleaned up (no leaked /tmp/.spacedock-flaky*-retry.*)"
-H_LEAKED=$(find /tmp/ -maxdepth 1 -name '.spacedock-flaky*-retry.*' 2>/dev/null | wc -l | tr -d ' ')
+    test_start "H ($_label) (XACA-1215-018): no raw terminal control (ESC) bytes reach stdout"
+    local _esc_count
+    _esc_count=$(LC_ALL=C grep -ac $'\033' "$_out" 2>/dev/null)
+    if [ "${_esc_count:-0}" -eq 0 ]; then
+        test_pass
+    else
+        test_fail "$_esc_count line(s) with a raw ESC byte reached stdout ($_label) — the fake agents' clear sequence leaked through the retry printing step: $(od -c "$_out" 2>/dev/null | head -8)"
+    fi
+}
+
+for _h_shell in bash zsh; do
+    if [ "$_h_shell" = zsh ] && ! command -v zsh >/dev/null 2>&1; then
+        test_start "H (zsh): session-verify/retry block run"
+        echo "     SKIP: zsh not found on PATH (expected on CI ubuntu runners) — the bash run is not skipped"
+        continue
+    fi
+
+    H_STDOUT="$TEST_TMP_DIR/case-h-stdout-$_h_shell.log"
+    (
+        TEAM_ID="$H_FAKE_TEAM"
+        AITEAMFORGE_DIR="$H_ATF"
+        TMUX_SOCKET="h-test-socket"
+        export TEAM_ID AITEAMFORGE_DIR TMUX_SOCKET
+        unset TMUX TMUX_PANE TMUX_SOCKET_REAL 2>/dev/null
+        export PATH="$H_STUB_BIN:$PATH"
+        if [ "$_h_shell" = zsh ]; then
+            zsh -f "$H_RUNNER"
+        else
+            bash "$H_RUNNER"
+        fi
+    ) >"$H_STDOUT" 2>&1
+
+    _case_h_assert "$_h_shell" "$H_STDOUT"
+done
+
+# XACA-1215-020: no file anywhere under /tmp (real /tmp, trailing slash —
+# not TEST_TMP_DIR) should ever mention the fake team id, across EITHER
+# shell run. Catches a leaked mktemp scratch file (cleanup regression) AND
+# a leaked _SESSION_LOG (relocation regression) in one assertion.
+test_start "H: no leaked /tmp/ files for the fake team, across both shell runs"
+H_LEAKED=$(find /tmp/ -maxdepth 1 -iname "*${H_FAKE_TEAM}*" 2>/dev/null | wc -l | tr -d ' ')
 if [ "${H_LEAKED:-0}" -eq 0 ]; then
     test_pass
 else
-    test_fail "Leaked retry scratch file(s) under /tmp: $(find /tmp/ -maxdepth 1 -name '.spacedock-flaky*-retry.*' 2>/dev/null)"
+    test_fail "Leaked file(s) under /tmp/ matching the fake team id: $(find /tmp/ -maxdepth 1 -iname "*${H_FAKE_TEAM}*" 2>/dev/null)"
 fi
 
 

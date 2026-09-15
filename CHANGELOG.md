@@ -68,6 +68,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   instead of only a log-file pointer; Case H exercises the extracted retry block with two
   concurrently-failing fake agents and asserts no cross-contamination between their causes.
 
+  Review round 2 (XACA-1215-018/019/020): 018 strips terminal control sequences (CSI/OSC/lone-ESC/CR)
+  from the retry loop's indented re-print of a failed agent's scratch capture — the generated per-agent
+  script runs an unconditional `clear` with no `[[ -t 1 ]]` guard before the missing-directory check, so
+  the raw capture contains a real clear-screen sequence that `sed` used to replay onto the live
+  terminal, wiping the "still missing" line itself; `$_SESSION_LOG` is left untouched. 019 fixes 015's
+  `printf %q` for non-ASCII `SESSION_DIRECTORY` values: under a UTF-8 locale, `/bin/bash` 3.2's builtin
+  `%q` mis-encodes multibyte characters as a mix of raw bytes and octal escapes, and a real interactive
+  zsh (not just a non-interactive re-parse) garbles that on `cd`; `LC_ALL=C` only takes effect when set
+  on a genuinely new `/bin/bash -c` subprocess, not merely prefixed onto the builtin in the
+  already-running script (measured byte-identical output either way on macOS's bundled bash 3.2, since
+  its locale tables resolve once at process startup). Verified via a python `pty.fork()`-driven
+  interactive zsh harness (Case G9) against install-team.sh's own generated `cd` line for 日本, é, an
+  emoji, and the round-1 hostile set, with a negative control proving the harness reproduces the
+  pre-fix failure. 020 hardens Case H's own hygiene: it now runs under a fake team id instead of a live
+  team's name, relocates the extracted retry block's `_SESSION_LOG`/`mktemp` writes into the sandbox
+  instead of real `/tmp`, runs under both bash and zsh, and asserts no `/tmp/` file for the fake team id
+  survives either run.
+
 - **XACA-1216** — Space Dock's crew sessions now get their personas. Its working dir
   (`~/.aiteamforge/spacedock`) is not a git work tree, so none of the git-aware persona deploy
   modes ever reached it and every crew session started with no `.claude/agents`. A new conf flag,

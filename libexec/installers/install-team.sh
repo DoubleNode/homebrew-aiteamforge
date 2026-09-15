@@ -1475,7 +1475,42 @@ SESSION_DIRECTORY="{session_directory}"
 # under both `zsh -fc` and `/bin/bash -c`, with no side-effect file ever
 # created). Computed once here since SESSION_DIRECTORY never changes
 # across the four setup_window() calls below.
-_SESSION_DIRECTORY_Q=$(printf '%q' "$SESSION_DIRECTORY")
+# XACA-1215-019: LC_ALL=C, not the ambient (UTF-8) locale -- AND it must
+# be set on a genuinely NEW bash process, not merely prefixed onto the
+# builtin call. Under a UTF-8 locale, /bin/bash 3.2's `printf %q`
+# mis-encodes multibyte characters (e.g. a team dir containing "日本") as
+# a mix of raw bytes and octal escapes -- an interactive zsh reading that
+# back through send-keys/ZLE then fails the `cd`.
+#
+# `LC_ALL=C printf %q "..."` run as a plain builtin call (no subshell/exec)
+# does NOT fix this on macOS's bundled bash 3.2 -- MEASURED byte-for-byte
+# IDENTICAL output with and without that prefix. bash resolves its
+# ctype/locale tables via setlocale() once at process startup; `VAR=val
+# builtin` only exports VAR into that already-running process's builtin
+# call, which does not re-trigger setlocale(). `LC_ALL=C` only takes
+# effect when it is part of the environment a bash PROCESS is execve()'d
+# into -- confirmed via `env LC_ALL=C /bin/bash -c 'printf %q ...'`
+# (whole new process) producing a clean octal escape per byte (three
+# octal digits each, all six bytes of 日本 escaped uniformly), versus the
+# in-process prefix form reproducing the exact same mixed raw/octal bytes
+# as no prefix at all.
+#
+# Fix: force the exec via an explicit `/bin/bash -c` subprocess so LC_ALL=C
+# is present in ITS environment from process start. `/usr/bin/printf` (the
+# external, non-bash printf) has no %q at all ("illegal format character
+# q"), so this must stay a bash builtin call -- just in a freshly exec'd
+# bash. Verified via a pty-driven interactive zsh harness (python
+# pty.fork(), ZDOTDIR pointed at an empty sandbox, LANG/LC_ALL=en_US.UTF-8
+# on the pty session) typing the resulting `cd ...` line and reading back
+# `pwd`: the pre-fix form (plain `printf %q`) lands at the PARENT dir (cd
+# silently failed -- ZLE garbled the mixed raw/octal bytes and bash never
+# saw a valid path), this fixed form lands in the literal target dir for
+# 日本, é and an emoji, plus the round-1 hostile set (space, $(touch
+# PWNED), backtick, ", ', \, !) -- not just a non-interactive `zsh -fc`
+# re-parse, which cannot see the ZLE-level mangling this fixes at all (it
+# reads the bytes as a literal argv string, no terminal-input layer
+# involved).
+_SESSION_DIRECTORY_Q=$(LC_ALL=C /bin/bash -c 'printf %q "$1"' _ "$SESSION_DIRECTORY")
 THEME_COLOR="{team_color}"
 
 SESSION_CODE="${{SESSION_TYPE}}-${{SESSION_NAME}}"
