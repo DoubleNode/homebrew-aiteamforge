@@ -7,6 +7,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1224** (SECURITY) — `share/scripts/vault-keygen.js` and `share/kanban-hooks/integrations/keychain.py`
+  no longer pass the vault private key / credential-store passphrase on `security`'s command line (it was
+  printed in a failed-command error and visible via `ps`). The command is now sent to `security -i` on stdin,
+  and failures are reported as fixed messages by type (locked Keychain, duplicate, cancelled, and so on),
+  never raw argv or stderr. Mirror of dev-team canonical; `share/scripts/package.json` test list updated.
+
 ## [0.20.14] - 2026-09-15
 
 - **XACA-1217** — three tap-only test suites no longer orphan helper processes or resume after a signal

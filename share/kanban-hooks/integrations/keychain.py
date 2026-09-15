@@ -41,6 +41,17 @@ logger = logging.getLogger(__name__)
 KEYCHAIN_SERVICE = "dev-team.credential-store"
 KEYCHAIN_ACCOUNT = "master-passphrase"
 
+# Characters that cannot be represented on a single `security -i` command
+# line at all (it is a line-oriented reader: a raw newline/CR ends the
+# command early, and a NUL cannot round-trip through a text pipe). Verified
+# empirically: an embedded newline splits the fed command into two lines,
+# the add fails cleanly (nonzero exit, no item written), and nothing else
+# in this module can make that safe -- so it is rejected up front instead
+# of being attempted. Every other character tested (spaces, `"`, `\`, `$`,
+# backtick, `'`, a leading `-`, empty string, non-ASCII) round-trips
+# correctly through _quote_for_security_stdin below.
+_UNSAFE_SECRET_CHARS = ("\n", "\r", "\x00")
+
 
 class KeychainError(Exception):
     """Raised when a keychain operation fails."""
@@ -50,6 +61,38 @@ class KeychainError(Exception):
 class KeychainNotAvailableError(KeychainError):
     """Raised when keychain is not available (non-macOS)."""
     pass
+
+
+def _reject_unsafe_secret_chars(value: str) -> None:
+    """
+    Refuse a passphrase that cannot be safely represented on a single
+    `security -i` command line, with a fixed message that never includes
+    the value itself.
+    """
+    if any(ch in value for ch in _UNSAFE_SECRET_CHARS):
+        raise KeychainError(
+            "Passphrase contains characters (newline, carriage return, or "
+            "NUL) that cannot be safely stored via this keychain channel"
+        )
+
+
+def _quote_for_security_stdin(value: str) -> str:
+    """
+    Quote a value for embedding in a `security -i` command line.
+
+    `security -i` reads commands from stdin and tokenizes each line with a
+    simple shell-like reader: an unquoted run of characters is one token,
+    and inside a double-quoted token the only two characters that need
+    escaping are backslash and the double-quote itself. Verified
+    empirically on this Mac against a throwaway keychain (never the real
+    login keychain, never a real secret) -- round-tripped correctly:
+    spaces, `"`, `\\`, `$`, backtick, `'`, punctuation, a leading `-`,
+    the empty string, and non-ASCII/Unicode content. A raw newline/CR/NUL
+    cannot be represented this way at all -- see _reject_unsafe_secret_chars,
+    which every caller of this function runs first for secret values.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + escaped + '"'
 
 
 class KeychainManager:
@@ -122,36 +165,83 @@ class KeychainManager:
         if not self.is_available():
             raise KeychainNotAvailableError("macOS Keychain not available")
 
+        # Never put the passphrase on argv: `security add-generic-password
+        # -w <value>` places <value> directly on the child process's
+        # command line, which any other local process can read for the
+        # life of the call (e.g. `ps -ef` / /proc). Reject anything that
+        # cannot be safely carried over the replacement channel before
+        # attempting it.
+        _reject_unsafe_secret_chars(passphrase)
+
+        return self._store_passphrase_once(passphrase, allow_retry=True)
+
+    def _store_passphrase_once(self, passphrase: str, allow_retry: bool) -> bool:
+        """
+        Single attempt to store `passphrase` via `security -i`, the
+        interactive command reader. The whole add-generic-password command
+        -- passphrase included -- is written to the child's stdin instead
+        of being passed as an argv element, so it never appears in argv for
+        any other local process to observe.
+
+        `allow_retry` bounds the "item already exists" recovery to exactly
+        one retry (delete then a single non-recursive re-attempt), never
+        unbounded recursion. In practice `-U` (update if exists) already
+        makes a repeat add succeed in place -- verified empirically, a
+        second `-U` add over an existing item returns 0 and updates the
+        value with no "already exists" error -- so this path is defensive
+        only, for an edge case (e.g. multiple matching items) where `-U`
+        alone doesn't cover it.
+        """
+        cmd = (
+            "add-generic-password "
+            f"-a {_quote_for_security_stdin(self.account)} "
+            f"-s {_quote_for_security_stdin(self.service)} "
+            f"-w {_quote_for_security_stdin(passphrase)} "
+            "-U\n"  # Update if exists
+        )
+
         try:
-            # Use -U flag to update if exists, otherwise add
             result = subprocess.run(
-                [
-                    "security", "add-generic-password",
-                    "-s", self.service,
-                    "-a", self.account,
-                    "-w", passphrase,
-                    "-U"  # Update if exists
-                ],
+                ["security", "-i"],
+                input=cmd,
                 capture_output=True,
                 text=True,
                 timeout=30
             )
-
-            if result.returncode != 0:
-                # Check if it's a duplicate error
-                if "already exists" in result.stderr.lower():
-                    # Try to delete and re-add
-                    self.delete_passphrase()
-                    return self.store_passphrase(passphrase)
-                raise KeychainError(f"Failed to store passphrase: {result.stderr}")
-
-            logger.info(f"Passphrase stored in Keychain (service: {self.service})")
-            return True
-
         except subprocess.TimeoutExpired:
             raise KeychainError("Keychain operation timed out")
         except Exception as e:
-            raise KeychainError(f"Keychain error: {e}")
+            # Never format the exception itself into the message -- on some
+            # platforms an exception like this can carry the failed
+            # command's argv (e.g. FileNotFoundError from a missing
+            # executable). The passphrase is never on argv here, but keep
+            # this fixed regardless so no future subprocess call on this
+            # path can leak one.
+            raise KeychainError(f"Keychain error: {type(e).__name__}")
+
+        if result.returncode == 0:
+            logger.info(f"Passphrase stored in Keychain (service: {self.service})")
+            return True
+
+        # Never surface `security`'s raw stderr in a raised message or log:
+        # it echoes back the command's structure (service/account/flags,
+        # not proven secret-bearing here, but not worth trusting either).
+        # Classify into fixed, sanitized failure-class strings instead.
+        stderr_text = (result.stderr or "").lower()
+
+        if "-25308" in stderr_text or "user interaction is not allowed" in stderr_text:
+            raise KeychainError(
+                "Keychain is locked or unavailable for interaction; "
+                "unlock it and try again"
+            )
+
+        if allow_retry and ("already exists" in stderr_text or "-25299" in stderr_text):
+            self.delete_passphrase()
+            return self._store_passphrase_once(passphrase, allow_retry=False)
+
+        raise KeychainError(
+            f"Failed to store passphrase (security exited with status {result.returncode})"
+        )
 
     def get_passphrase(self) -> Optional[str]:
         """
@@ -181,18 +271,28 @@ class KeychainManager:
             )
 
             if result.returncode == 0:
+                # `-w` prints the secret to this process's stdout by
+                # design (that's how retrieval works) -- it must never be
+                # echoed back into an exception or log message, only
+                # returned to the caller, as below.
                 return result.stdout.strip()
             elif "could not be found" in result.stderr.lower():
                 return None
             else:
-                raise KeychainError(f"Failed to retrieve passphrase: {result.stderr}")
+                # Fixed, sanitized message -- never format `security`'s raw
+                # stderr here. This query never sends the secret, so stderr
+                # isn't proven secret-bearing, but there's no reason to
+                # trust it either.
+                raise KeychainError(
+                    f"Failed to retrieve passphrase (security exited with status {result.returncode})"
+                )
 
         except subprocess.TimeoutExpired:
             raise KeychainError("Keychain operation timed out")
         except KeychainError:
             raise
         except Exception as e:
-            raise KeychainError(f"Keychain error: {e}")
+            raise KeychainError(f"Keychain error: {type(e).__name__}")
 
     def has_passphrase(self) -> bool:
         """
@@ -241,14 +341,16 @@ class KeychainManager:
             elif "could not be found" in result.stderr.lower():
                 return True  # Already deleted
             else:
-                raise KeychainError(f"Failed to delete passphrase: {result.stderr}")
+                raise KeychainError(
+                    f"Failed to delete passphrase (security exited with status {result.returncode})"
+                )
 
         except subprocess.TimeoutExpired:
             raise KeychainError("Keychain operation timed out")
         except KeychainError:
             raise
         except Exception as e:
-            raise KeychainError(f"Keychain error: {e}")
+            raise KeychainError(f"Keychain error: {type(e).__name__}")
 
 
 # Singleton instance

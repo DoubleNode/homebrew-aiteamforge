@@ -666,25 +666,178 @@ function persistPrivateKey(slug, privateKeyB64, deps) {
     return { backend: 'file', location: filePath };
 }
 
+// -----------------------------------------------------------------------------
+// Keychain write channel (XACA-1224)
+// -----------------------------------------------------------------------------
+//
+// keychainAddPassword used to pass the private key as `-w <value>` — an argv
+// element. MEASURED (M1Mini, 2026-09-14, over SSH, login Keychain locked): when
+// `security add-generic-password` fails, Node's execFileSync builds the thrown
+// Error's `.message` by joining the FULL argv, so the freshly generated private
+// key was printed verbatim to stderr. Argv is also visible to any other local
+// process via `ps` for the life of the child, independent of whether it fails.
+//
+// Three channels were evaluated empirically against throwaway keychains
+// (`security create-keychain` under /tmp, deleted afterwards — never the real
+// login Keychain, never a real key):
+//
+//   (a) `security -i` (interactive/batch command mode): the command line is fed
+//       on the CHILD'S STDIN via execFileSync's `input` option, so the secret
+//       never touches argv and is invisible to `ps` (verified: polled `ps
+//       auxww` for the base64 payload substring while `security -i` sat
+//       blocked on stdin — no match). CHOSEN. Verified:
+//         - success: item is added and independently readable via
+//           `find-generic-password` WITHOUT `-w` (existence only, never
+//           re-reading the secret in a test assertion).
+//         - genuine inner failure propagates a real nonzero exit: adding a
+//           duplicate item without `-U` exited 45 (not 0) with stderr
+//           containing "already exists" / "-25299".
+//         - a malformed command line exits 1, not 0.
+//         - quoted literals (the -D/-j description strings, which contain
+//           spaces) round-trip correctly through `-i`'s line tokenizer.
+//       KNOWN HAZARD (does not apply to this call site): if a positional
+//       keychain-file argument is given and does NOT exist as a file, `security`
+//       silently falls through to the DEFAULT keychain and exits 0 — a
+//       "malformed check returns the reassuring result" trap. This call never
+//       passes a keychain-file argument (matches the pre-fix behaviour, which
+//       also always targeted the default keychain), so that hazard is not
+//       reachable here; it is recorded so nobody "improves" this by adding an
+//       explicit keychain path without re-verifying.
+//
+//   (b) `-w` as the LAST option with no value (security prompts, value piped to
+//       stdin). REJECTED — measured, not assumed: with `-w` truly last (no
+//       trailing positional keychain arg — the same shape production uses),
+//       piping the secret to stdin produced TWO tty-style prompts
+//       ("password data for new item:" / "retype password for new item:")
+//       and silently stored an EMPTY password with exit 0 — proof it reads via
+//       `readpassphrase()` against /dev/tty, not stdin, exactly the
+//       SSH/non-tty failure this ticket exists to fix, and worse: it "succeeds"
+//       (exit 0) while storing the wrong value. Separately, placing `-w`
+//       immediately before a positional keychain-path argument (to target a
+//       throwaway keychain for testing) caused `security` to consume that path
+//       AS THE -w VALUE instead of prompting — so this form cannot even be
+//       safely test-isolated from the caller's real default keychain.
+//
+//   (c) (not used) writing the key to a temp file and using some `security`
+//       file-input form — `security` has no such option for
+//       add-generic-password; not applicable.
+//
+// Failures are classified via classifyKeychainFailure() below and re-thrown as
+// a FIXED, sanitized Error (XACA-1224-002) — see that function's doc comment.
+// -----------------------------------------------------------------------------
+
+/**
+ * Known `security(1)` OSStatus failure signatures we recognize and give a
+ * specific, actionable (but still argv/secret-free) message for. Matched
+ * against captured stderr text. Codes + exact message text confirmed via
+ * `security error <code>` on this machine (2026-09-15) — not guessed:
+ *   -25308 "User interaction is not allowed."            (locked, no GUI/SSH)
+ *   -25293 "The user name or passphrase you entered is not correct."
+ *   -25299 "The specified item already exists in the keychain."
+ *   -128   "User canceled the operation."
+ *   -25291 "No keychain is available. You may need to restart your computer."
+ * Anything unmatched falls through to a generic, exit-code-only message —
+ * NEVER the raw stderr text, which could echo something unexpected.
+ * @type {Array<{ match: RegExp, message: string }>}
+ */
+const KEYCHAIN_ERROR_SIGNATURES = [
+    {
+        match: /-25308|interaction is not allowed/i,
+        message: 'Keychain write failed: the Keychain is locked and cannot prompt for ' +
+                 'unlock in this session (no GUI / running over SSH). Unlock it first ' +
+                 '(e.g. `security unlock-keychain`) or run this from a GUI session.',
+    },
+    {
+        match: /-25293|passphrase you entered is not correct/i,
+        message: 'Keychain write failed: the Keychain password entered to unlock it was incorrect.',
+    },
+    {
+        match: /-25299|already exists in the keychain/i,
+        message: 'Keychain write failed: an item already exists for this machine id. Pass --force to replace it, or --rotate to update it in place.',
+    },
+    {
+        // "returned -128" is the literal shape `security` emits (verified —
+        // see the file-level comment); matching that instead of a bare "-128"
+        // avoids false-matching an unrelated "-128" substring elsewhere.
+        match: /returned -128\b|User canceled the operation/i,
+        message: 'Keychain write failed: the Keychain access prompt was canceled.',
+    },
+    {
+        match: /-25291|No keychain is available/i,
+        message: 'Keychain write failed: no Keychain is available on this system.',
+    },
+];
+
+/**
+ * Classify a failed `security` invocation into a FIXED, sanitized message.
+ * NEVER echoes the command line, argv, or raw stderr — only a recognized
+ * failure class, or a generic exit-code-only fallback.
+ * @param {string} stderrText captured stderr (may be empty/undefined)
+ * @param {number|string|null} [exitStatus] child exit code or signal name
+ * @returns {string}
+ */
+function classifyKeychainFailure(stderrText, exitStatus) {
+    const text = typeof stderrText === 'string' ? stderrText : '';
+    for (const sig of KEYCHAIN_ERROR_SIGNATURES) {
+        if (sig.match.test(text)) return sig.message;
+    }
+    const statusText = exitStatus === undefined || exitStatus === null ? 'unknown' : String(exitStatus);
+    return `Keychain write failed (security exit ${statusText}).`;
+}
+
 /**
  * Add (or update with force) the private key as a Keychain generic password.
- * Uses `-w` to pass the value; `-U` (force) updates an existing item.
+ *
+ * The private key is fed to `security -i` (interactive/batch command mode) on
+ * the child's STDIN, never as an argv element — see the file-level comment
+ * above ("Keychain write channel", XACA-1224) for the empirical evaluation of
+ * why. `-U` (force) updates an existing item.
+ *
+ * On failure this throws a sanitized Error (`.sanitized = true`) whose message
+ * is one of the fixed classifications in classifyKeychainFailure() — never the
+ * raw child error, which Node would otherwise build from argv/stderr.
+ *
  * @param {string} slug
  * @param {string} privateKeyB64
  * @param {boolean} force
  */
 function keychainAddPassword(slug, privateKeyB64, force) {
-    const args = [
+    // security -i's line tokenizer supports double-quoted values containing
+    // spaces (verified empirically — the -D/-j literals below round-trip
+    // correctly). slug is restricted upstream to ^[a-z][a-z0-9-]*$ and
+    // privateKeyB64 is base64 (ORIGINAL variant: [A-Za-z0-9+/=] only) — neither
+    // charset can contain a `"` or break out of a quoted token, but refuse
+    // outright rather than trust that invariant silently: a value that could
+    // break the command line must never be interpolated into it.
+    if (/["\\\r\n]/.test(slug) || /["\\\r\n]/.test(privateKeyB64)) {
+        throw new Error('Refusing to write to Keychain: machine id or key material contains an unexpected character.');
+    }
+
+    const parts = [
         'add-generic-password',
-        '-s', KEYCHAIN_SERVICE,
-        '-a', slug,
-        '-w', privateKeyB64,
-        '-D', 'AITeamForge vault private key',
-        '-j', 'X25519 private key for Fleet Monitor secret vault. Do not export.',
+        '-s', `"${KEYCHAIN_SERVICE}"`,
+        '-a', `"${slug}"`,
+        '-w', `"${privateKeyB64}"`,
+        '-D', '"AITeamForge vault private key"',
+        '-j', '"X25519 private key for Fleet Monitor secret vault. Do not export."',
     ];
-    if (force) args.push('-U');
-    // stdio ignore so the key never lands in our stdout/stderr.
-    execFileSync('security', args, { stdio: 'ignore' });
+    if (force) parts.push('-U');
+    const script = parts.join(' ') + '\n';
+
+    try {
+        // Default stdio ('pipe') captures stdout/stderr into err.stdout/err.stderr
+        // on failure rather than letting them inherit to our own stdout/stderr —
+        // the key never appears there because it was never on argv to begin with,
+        // and we never print the captured stderr raw (see catch below).
+        execFileSync('security', ['-i'], { input: script, encoding: 'utf8' });
+    } catch (err) {
+        const stderrText = (err && (err.stderr || '')).toString();
+        const exitStatus = err && (err.status !== undefined && err.status !== null ? err.status : err.signal);
+        const sanitized = new Error(classifyKeychainFailure(stderrText, exitStatus));
+        sanitized.sanitized = true;
+        sanitized.code = 'KEYCHAIN_WRITE_FAILED';
+        throw sanitized;
+    }
 }
 
 /** Write a file with mode 0600 atomically-ish (open with explicit mode). */
@@ -967,6 +1120,52 @@ The private key is stored in the macOS Keychain (service com.aiteamforge.vault,
 account = machine id) when available, otherwise in ~/.aiteamforge/vault/<slug>.key
 (mode 0600). It is NEVER printed and NEVER sent to the server.`;
 
+// -----------------------------------------------------------------------------
+// Top-level error sanitization (XACA-1224-002)
+// -----------------------------------------------------------------------------
+//
+// keychainAddPassword already never puts the private key on argv and always
+// throws its own fixed-message, `.sanitized = true` Error on failure (see its
+// doc comment above) — that is the primary fix. This is defense-in-depth for
+// main()'s own top-level catch: if some OTHER error ever reaches here that
+// looks like a raw Node child_process failure (execFileSync/execSync/spawnSync
+// throw shape — Node builds `.message` by joining the full argv, per the
+// child_process docs), refuse to print it verbatim rather than trust that
+// every call site upstream remembered to sanitize.
+
+/**
+ * True when `err` has the shape Node's execFileSync/execSync/spawnSync give a
+ * failed-child-process Error: a `.cmd` string plus a numeric `.status` or a
+ * `.signal` string. Such an error's `.message` is built from the full argv.
+ * @param {*} err
+ * @returns {boolean}
+ */
+function looksLikeChildProcessError(err) {
+    return !!err && typeof err === 'object' &&
+        typeof err.cmd === 'string' &&
+        (typeof err.status === 'number' || typeof err.signal === 'string');
+}
+
+/**
+ * The message to print for a top-level CLI failure. Passes through any error
+ * we already sanitized ourselves (`.sanitized === true`, e.g. from
+ * keychainAddPassword) or any ordinary validation/logic Error unchanged. Any
+ * error that LOOKS like a raw child_process failure but was NOT already
+ * sanitized is replaced with a generic, argv-free message instead of being
+ * printed verbatim — a last-resort backstop, not the primary defense.
+ * @param {*} err
+ * @returns {string}
+ */
+function safeErrorMessage(err) {
+    if (err && err.sanitized === true) return err.message;
+    if (looksLikeChildProcessError(err)) {
+        const statusText = err.status !== undefined && err.status !== null ? err.status : (err.signal || 'unknown');
+        return `A system command failed (exit ${statusText}). Details withheld: ` +
+               `a failed command's default error text can include sensitive arguments.`;
+    }
+    return (err && err.message) || String(err);
+}
+
 async function main(argv) {
     let opts;
     try {
@@ -994,7 +1193,7 @@ async function main(argv) {
         process.stdout.write('\nDone. You\'re welcome.\n');
         return 0;
     } catch (err) {
-        process.stderr.write('Error: ' + err.message + '\n');
+        process.stderr.write('Error: ' + safeErrorMessage(err) + '\n');
         return 1;
     }
 }
@@ -1033,6 +1232,8 @@ module.exports = {
     privateKeyExists,
     persistPrivateKey,
     readPrivateKey,
+    keychainAddPassword,
+    classifyKeychainFailure,
     // registration
     buildRegistrationPayload,
     registerMachine,
@@ -1040,4 +1241,6 @@ module.exports = {
     // cli
     parseArgs,
     main,
+    safeErrorMessage,
+    looksLikeChildProcessError,
 };
