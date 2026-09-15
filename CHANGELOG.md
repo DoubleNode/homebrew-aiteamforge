@@ -17,7 +17,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     and each tried with the existing png/svg + `dns`→`dns-framework` mapping logic. Also recognizes
     `..._avatar_thumb.png` (previously unmatched by the filename regex, 404 on every agent-panel
     fallback thumbnail), and the 404 body no longer echoes resolved absolute paths (path-disclosure
-    fix). (Canonical source is dev-team `lcars-ui/server.py`; mirrored into `share/lcars-ui/`.)
+    fix). Review round 1: the `lcars-ui/images` pre-check tests for a regular file (a directory used
+    to 500 with its absolute path), 500 bodies name only the filename, and a root that raises
+    `PermissionError`/`RuntimeError` while probing is skipped rather than failing the request.
+    (Canonical source is dev-team `lcars-ui/server.py`; mirrored into `share/lcars-ui/`.)
   - `aiteamforge-upgrade.sh` gained `update_team_image_assets`, a new refresh-only upgrade step
     (wired immediately after `deploy_flat_team_personas`, before `update_claude_hooks`) that mirrors
     every shipped `share/personas/<team>/avatars/*.png` and `share/terminals/<team>/logos/*.png` into

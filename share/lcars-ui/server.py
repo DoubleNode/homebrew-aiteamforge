@@ -16815,6 +16815,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return candidate
 
     @staticmethod
+    def _is_regular_file(path):
+        """is_file() that treats an unreadable path (PermissionError, or a
+        symlink loop's RuntimeError before Python 3.13) as not-a-file."""
+        try:
+            return path.is_file()
+        except (OSError, RuntimeError):
+            return False
+
+    @staticmethod
     def _image_candidate_roots():
         """Return the ordered, de-duplicated list of root dirs to search for
         team logos/avatars (XACA-1221 Decision 1).
@@ -16860,7 +16869,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         for root in candidates:
             try:
                 key = str(root.resolve())
-            except OSError:
+            except (OSError, RuntimeError):  # RuntimeError: symlink loop, Py<3.13
                 key = str(root.absolute())
             if key in seen:
                 continue
@@ -16895,7 +16904,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # First, check if the file exists in the local images directory (for startup logos, etc.)
         local_images_root = UI_DIR / "images"
         local_image_path = self._resolve_contained_path(local_images_root, filename)
-        if local_image_path is not None and local_image_path.exists():
+        # XACA-1221 (PR #900 review): is_file(), not exists() — a directory
+        # (e.g. /images/appicons) reached open() and returned a 500 whose body
+        # echoed the absolute path.
+        if local_image_path is not None and self._is_regular_file(local_image_path):
             try:
                 with open(local_image_path, 'rb') as f:
                     data = f.read()
@@ -16916,8 +16928,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if not head_only:
                     self.wfile.write(data)
                 return
-            except Exception as e:
-                self.send_error(500, f"Error reading local image: {e}")
+            except Exception:
+                # No exception text: OSError messages embed absolute paths.
+                self.send_error(500, f"Error reading local image: {filename}")
                 return
 
         # Expected format: /images/{team}_{name}_{type}.png
@@ -16993,28 +17006,37 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # to reach the magic-byte open() below and raise an uncaught
             # IsADirectoryError (pre-existing, found in XACA-1221-005). A
             # non-file now falls through exactly like a missing one.
-            png_path = None
-            for n in names:
-                candidate = self._resolve_contained_path(base_dir, n)
-                if candidate is not None and candidate.is_file():
-                    png_path = candidate
-                    break
-
-            if png_path is not None:
-                with open(png_path, 'rb') as f:
-                    header = f.read(8)
-                    # PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
-                    if header[:4] == b'\x89PNG':
-                        file_path = png_path
-                        content_type = 'image/png'
+            #
+            # The whole per-root probe is exception-safe (PR #900 review):
+            # an unreadable dir/file (PermissionError), or resolve() hitting a
+            # symlink loop (RuntimeError before Python 3.13), skips THIS root
+            # instead of aborting the request — a broken root must not hide
+            # a good asset in the next one.
+            try:
+                png_path = None
+                for n in names:
+                    candidate = self._resolve_contained_path(base_dir, n)
+                    if candidate is not None and candidate.is_file():
+                        png_path = candidate
                         break
 
-            svg_path = None
-            for n in names:
-                candidate = self._resolve_contained_path(base_dir, n[:-4] + '.svg')
-                if candidate is not None and candidate.is_file():
-                    svg_path = candidate
-                    break
+                if png_path is not None:
+                    with open(png_path, 'rb') as f:
+                        header = f.read(8)
+                        # PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
+                        if header[:4] == b'\x89PNG':
+                            file_path = png_path
+                            content_type = 'image/png'
+                            break
+
+                svg_path = None
+                for n in names:
+                    candidate = self._resolve_contained_path(base_dir, n[:-4] + '.svg')
+                    if candidate is not None and candidate.is_file():
+                        svg_path = candidate
+                        break
+            except (OSError, RuntimeError):
+                continue
 
             if svg_path is not None:
                 file_path = svg_path
@@ -17041,8 +17063,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             if not head_only:
                 self.wfile.write(data)
-        except Exception as e:
-            self.send_error(500, f"Error reading image: {e}")
+        except Exception:
+            # No exception text: OSError messages embed absolute paths.
+            self.send_error(500, f"Error reading image: {filename}")
 
     # XACA-0992: the exact 7 Add-to-Home-Screen filenames scripts/gen-appicons.py
     # produces per team (that script is frozen — do not import it here, it pulls
