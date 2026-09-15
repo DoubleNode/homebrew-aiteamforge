@@ -11,7 +11,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   no longer pass the vault private key / credential-store passphrase on `security`'s command line (it was
   printed in a failed-command error and visible via `ps`). The command is now sent to `security -i` on stdin,
   and failures are reported as fixed messages by type (locked Keychain, duplicate, cancelled, and so on),
-  never raw argv or stderr. Mirror of dev-team canonical; `share/scripts/package.json` test list updated.
+  never raw argv or stderr. Review round 1: over-long commands (over 4000 bytes) are refused before `security` runs, and
+  the module CLI reads `store`'s passphrase via getpass/stdin (`get` prints it only with `--show`). Mirror of
+  dev-team canonical; `share/scripts/package.json` test list updated.
 
 ## [0.20.14] - 2026-09-15
 

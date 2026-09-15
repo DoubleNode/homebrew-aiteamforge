@@ -52,6 +52,16 @@ KEYCHAIN_ACCOUNT = "master-passphrase"
 # correctly through _quote_for_security_stdin below.
 _UNSAFE_SECRET_CHARS = ("\n", "\r", "\x00")
 
+# `security -i` reads at most ~4095 bytes per input line (MEASURED, PR #905
+# review). A longer line is NOT rejected: the first chunk runs as a command
+# with its open quote accepted -- storing a TRUNCATED value -- and the tail
+# runs as further `security` commands, with the exit status taken from the
+# last chunk. The whole encoded command line is therefore capped well below
+# that limit and refused before `security` is ever invoked, so no truncated
+# write happens and the already-exists retry (which deletes first) is never
+# reached for an over-long value.
+_MAX_SECURITY_COMMAND_BYTES = 4000
+
 
 class KeychainError(Exception):
     """Raised when a keychain operation fails."""
@@ -199,6 +209,14 @@ class KeychainManager:
             f"-w {_quote_for_security_stdin(passphrase)} "
             "-U\n"  # Update if exists
         )
+
+        # Checked on every attempt, BEFORE subprocess.run -- so the retry
+        # path's delete_passphrase() can never run for a value that cannot
+        # be written whole.
+        if len(cmd.encode("utf-8")) > _MAX_SECURITY_COMMAND_BYTES:
+            raise KeychainError(
+                "Passphrase is too long to store safely via this keychain channel"
+            )
 
         try:
             result = subprocess.run(
@@ -396,12 +414,23 @@ if __name__ == "__main__":
     # Check availability
     subparsers.add_parser("check", help="Check if keychain is available")
 
-    # Store passphrase
-    store_parser = subparsers.add_parser("store", help="Store passphrase")
-    store_parser.add_argument("passphrase", help="Passphrase to store")
+    # Store passphrase. The passphrase is deliberately NOT a positional
+    # argument (XACA-1224): argv is visible to every local process via `ps`.
+    # It is read from the terminal without echo, or from stdin when piped.
+    subparsers.add_parser(
+        "store",
+        help="Store passphrase (prompted without echo, or read from stdin when piped)",
+    )
 
     # Get passphrase
-    subparsers.add_parser("get", help="Get passphrase")
+    get_parser = subparsers.add_parser(
+        "get", help="Check for the stored passphrase (--show prints it)"
+    )
+    get_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Print the passphrase itself to stdout",
+    )
 
     # Check if exists
     subparsers.add_parser("has", help="Check if passphrase exists")
@@ -421,15 +450,27 @@ if __name__ == "__main__":
                 print("macOS Keychain is NOT available")
 
         elif args.command == "store":
-            keychain.store_passphrase(args.passphrase)
+            import getpass
+            import sys
+
+            if sys.stdin.isatty():
+                passphrase = getpass.getpass("Passphrase: ")
+            else:
+                passphrase = sys.stdin.readline().rstrip("\r\n")
+            if not passphrase:
+                print("Error: no passphrase provided")
+                exit(1)
+            keychain.store_passphrase(passphrase)
             print("Passphrase stored successfully")
 
         elif args.command == "get":
             passphrase = keychain.get_passphrase()
-            if passphrase:
-                print(f"Passphrase: {passphrase}")
-            else:
+            if not passphrase:
                 print("No passphrase found")
+            elif args.show:
+                print(passphrase)
+            else:
+                print("Passphrase found (use --show to print it)")
 
         elif args.command == "has":
             if keychain.has_passphrase():
