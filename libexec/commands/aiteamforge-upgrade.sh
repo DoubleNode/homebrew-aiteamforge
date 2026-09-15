@@ -3337,10 +3337,87 @@ provision_msg_routing() {
 # path at all — there was never a choice to opt out of. Once this step has
 # run once, the operative-copy refresh above takes over for keeping it
 # current on every subsequent upgrade.
+# XACA-1225-015: idempotent, fail-soft, --dry-run-aware migration for a
+# fleet-reporter LaunchAgent plist that predates the Label/interpreter fix
+# (XACA-1225-014). update_msg_relay_reporter() below intentionally never
+# re-renders an existing plist (see its header) — install-side
+# install_fleet_reporter_launchagent() is the only thing that re-renders, and
+# it is skipped whenever the plist already exists. Without this, an
+# already-provisioned box upgrading through this ticket keeps the wrong
+# Label/interpreter forever, and every Label-keyed check (start/status/
+# doctor, _xaca0734_launchctl_is_loaded) reads it as "not loaded".
+#
+# Deliberately narrower than a full re-render: it touches only the two
+# fields the XACA-1225-014 fix changed (Label, and ProgramArguments[0] ONLY
+# when it is still the old hardcoded /opt/homebrew/bin/bash AND that binary
+# is actually missing), and leaves every other key untouched — including a
+# hand-edited EnvironmentVariables block (M4Mini/M1Pro both carry a
+# hand-added FLEET_MONITOR_API in theirs; a re-render would silently drop
+# it).
+_xaca1225_migrate_fleet_reporter_label() {
+  local plist="$1"
+  [ -f "$plist" ] || return 0
+
+  local current_label
+  current_label="$(plutil -extract Label raw -o - "$plist" 2>/dev/null || true)"
+  local needs_label_fix="false"
+  [ "$current_label" = "com.devteam.fleet-reporter" ] && needs_label_fix="true"
+
+  # _XACA1225_LEGACY_BASH_PATH lets a test pin this check to a sandboxed,
+  # deterministically-missing path instead of the real
+  # /opt/homebrew/bin/bash (which DOES exist on any dev/CI box with Homebrew
+  # bash installed, making the "missing -> replace" branch otherwise
+  # impossible to exercise without touching real system paths). Unset in
+  # production, so the default is unchanged.
+  local legacy_interp="${_XACA1225_LEGACY_BASH_PATH:-/opt/homebrew/bin/bash}"
+  local current_arg0
+  current_arg0="$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null || true)"
+  local needs_interp_fix="false"
+  if [ "$current_arg0" = "$legacy_interp" ] && [ ! -x "$legacy_interp" ]; then
+    needs_interp_fix="true"
+  fi
+
+  # Idempotent no-op: already migrated (or nothing to migrate).
+  if [ "$needs_label_fix" != "true" ] && [ "$needs_interp_fix" != "true" ]; then
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    print_info "Would migrate fleet-reporter LaunchAgent plist (Label/interpreter): $plist"
+    return 0
+  fi
+
+  # Unload BEFORE editing, using the file's CURRENT (pre-migration) content —
+  # same ordering fix as install_fleet_reporter_launchagent's own
+  # XACA-1225-015 change: unloading AFTER the edit resolves the job by the
+  # NEW Label and orphans the OLD (com.devteam) job until logout.
+  _aitf_launchctl unload "$plist" 2>/dev/null || true
+
+  if [ "$needs_label_fix" = "true" ]; then
+    plutil -replace Label -string "com.aiteamforge.fleet-reporter" "$plist" 2>/dev/null || true
+  fi
+  if [ "$needs_interp_fix" = "true" ]; then
+    plutil -replace ProgramArguments.0 -string "/bin/bash" "$plist" 2>/dev/null || true
+  fi
+
+  _aitf_launchctl load "$plist" 2>/dev/null || true
+  print_success "Migrated fleet-reporter LaunchAgent plist (Label/interpreter): $plist"
+  return 0
+}
+
 update_msg_relay_reporter() {
   print_section "kb-msg Relay Reporter LaunchAgent"
 
   local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist"
+
+  # Migrate an old-label/old-interpreter plist BEFORE the "already installed"
+  # early return below — that return has never re-rendered an existing
+  # plist (see this function's own header comment), so without this step an
+  # upgraded box keeps the mismatched Label forever.
+  if [ -f "$plist_dest" ]; then
+    _xaca1225_migrate_fleet_reporter_label "$plist_dest"
+  fi
+
   if [ -f "$plist_dest" ]; then
     print_success "fleet-reporter LaunchAgent already installed"
     return 0

@@ -746,9 +746,21 @@ def persist_relay_url(server):
     """
     # The documented shape is "<base>/api/status" — see
     # config/templates/fleet-config.client.example.json and
-    # fleet-reporter.sh:82's default. fleet-reporter POSTs status to this
-    # exact value and derives its relay base by stripping /api/*, so a bare
-    # "<base>/api" would both break its posting AND fail that strip.
+    # fleet-reporter.sh:82's default. fleet-reporter derives its kb-msg
+    # relay-pull base from this exact value by stripping /api/*
+    # (pull_messages()), so a bare "<base>/api" would fail that strip.
+    #
+    # XACA-1225-016: this writes ONLY .centralServer.apiEndpoint (merged into
+    # whatever else is already in FLEET_CONFIG, but never adding a `mode` or
+    # `reporting` block itself) — that is the "relay-only" shape
+    # _fleet_status_configured() (fleet-monitor/client/fleet-reporter.sh)
+    # deliberately treats as NOT configured for status reporting. A machine
+    # provisioned through THIS function alone therefore only gets the kb-msg
+    # relay pull, never a status POST — status reporting needs the full
+    # config install_fleet_monitor()/create_fleet_reporter_config() writes
+    # (mode + localServer + reporting + dashboardGroup), or one of the
+    # FLEET_* env vars _fleet_status_configured() also honors. Do not assume
+    # a machine that only ran this function is reporting status.
     endpoint = _relay_endpoint(server)
     data = {}
     if os.path.isfile(FLEET_CONFIG):

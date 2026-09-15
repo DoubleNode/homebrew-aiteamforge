@@ -816,6 +816,19 @@ install_fleet_reporter_launchagent() {
     local reporter_path
     reporter_path="$(_xaca1225_reporter_path)"
 
+    # XACA-1225-015: unload the EXISTING job (if any) BEFORE we overwrite the
+    # plist file. `launchctl unload <path>` resolves the job by whatever
+    # Label the file on disk carries at the moment it runs — unloading AFTER
+    # the sed rewrite below (the prior order) resolves by the NEW Label, so
+    # re-rendering over an old com.devteam.fleet-reporter plist orphans that
+    # job: it stays loaded under launchd until logout, and two reporters run
+    # every minute. Reading + unloading the pre-rewrite content first means
+    # whichever Label was actually loaded gets booted, regardless of whether
+    # it matches the Label we're about to write.
+    if [ -f "$plist_dest" ]; then
+        _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
+    fi
+
     # Substitute variables in template
     sed \
         -e "s|{{REPORTER_SCRIPT_PATH}}|$reporter_script|g" \
@@ -823,9 +836,6 @@ install_fleet_reporter_launchagent() {
         -e "s|{{USER_HOME}}|$HOME|g" \
         -e "s|{{REPORTER_PATH}}|$reporter_path|g" \
         "$plist_template" > "$plist_dest"
-
-    # Unload if already loaded (ignore errors)
-    _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
 
     # Load the LaunchAgent
     if _aitf_launchctl load "$plist_dest"; then

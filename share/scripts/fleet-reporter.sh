@@ -2117,8 +2117,6 @@ _msg_has_vault_key() {
 }
 
 pull_messages() {
-    local dir="${AITEAMFORGE_DIR:-$HOME/dev-team}"
-
     # msg-client.sh is NOT reliably a sibling of THIS script (XACA-1225-008
     # review round 1). The comment this replaced claimed it always is, in
     # both layouts:
@@ -2157,7 +2155,17 @@ pull_messages() {
     # (a bogus root-relative path that can never exist, and is confusing in
     # the recorded skip reason below).
     [ -n "${AITEAMFORGE_DIR:-}" ] && client_candidates+=("$AITEAMFORGE_DIR/scripts/msg-client.sh")
-    client_candidates+=("$HOME/aiteamforge/scripts/msg-client.sh")
+    # XACA-1225-017 (round 2): only add the $HOME/aiteamforge fallback when it
+    # differs from the AITEAMFORGE_DIR candidate just added -- on a real
+    # consumer box AITEAMFORGE_DIR defaults to exactly $HOME/aiteamforge, so
+    # appending unconditionally listed the identical path twice in the
+    # no-client skip reason below (reviewer-observed).
+    local home_aiteamforge_client="$HOME/aiteamforge/scripts/msg-client.sh"
+    local _have_home_client="false"
+    for candidate in "${client_candidates[@]}"; do
+        [ "$candidate" = "$home_aiteamforge_client" ] && _have_home_client="true"
+    done
+    [ "$_have_home_client" = "true" ] || client_candidates+=("$home_aiteamforge_client")
     local client=""
     local candidate
     for candidate in "${client_candidates[@]}"; do
@@ -2167,7 +2175,56 @@ pull_messages() {
             break
         fi
     done
-    local store="$dir/kanban-hooks/msg-store.py"
+
+    # XACA-1225-017 (round 2): the store must be resolved consistently with
+    # where the CLIENT actually lives, not independently via
+    # "${AITEAMFORGE_DIR:-$HOME/dev-team}" -- that produced $HOME/dev-team
+    # whenever AITEAMFORGE_DIR was unset, even when the
+    # $HOME/aiteamforge/scripts/msg-client.sh candidate just above matched.
+    # Reproduced by the round-2 reviewer: with AITEAMFORGE_DIR unset, the
+    # client resolves under $HOME/aiteamforge, but the store path pointed at
+    # $HOME/dev-team/kanban-hooks/msg-store.py, which doesn't exist there --
+    # the run recorded "no-store" even though a real client was found, so
+    # that whole candidate was a dead end.
+    #
+    # Resolve via an ordered candidate list, first existing file wins. Mirrors
+    # the ordering claude-hooks/msg-inbox-check.sh already uses for this same
+    # file (kept in sync deliberately -- see that script's own XACA-1225
+    # comment):
+    #   1. $AITEAMFORGE_DIR, when set.
+    #   2. $reporter_dir/../.. -- the reporter's repo root. Covers the dev
+    #      checkout (fleet-monitor/client/../.. = the dev-team repo root,
+    #      which has kanban-hooks/ directly under it) and the consumer
+    #      OPERATIVE copy (install_fleet_reporter() puts fleet-reporter.sh at
+    #      $AITEAMFORGE_DIR/fleet-monitor/client/fleet-reporter.sh, so
+    #      ../.. = $AITEAMFORGE_DIR, which also has kanban-hooks/ directly
+    #      under it).
+    #   3. $reporter_dir/.. -- the consumer DECORATIVE copy at
+    #      $AITEAMFORGE_DIR/scripts/fleet-reporter.sh (install-shell.sh ships
+    #      fleet-reporter.sh to TWO destinations; see aiteamforge-upgrade.sh's
+    #      own "ships to TWO destinations" comment near
+    #      update_runtime_helpers). If this script is ever run from there,
+    #      ../.. is one hop too far but .. = $AITEAMFORGE_DIR is exactly
+    #      right.
+    #   4. $HOME/aiteamforge -- the default consumer root, for a manual run
+    #      where neither AITEAMFORGE_DIR nor this script's own path helps.
+    #   5. $HOME/dev-team -- the old hardcoded default, kept as a last resort.
+    local store_candidates=()
+    [ -n "${AITEAMFORGE_DIR:-}" ] && store_candidates+=("$AITEAMFORGE_DIR/kanban-hooks/msg-store.py")
+    store_candidates+=(
+        "$reporter_dir/../../kanban-hooks/msg-store.py"
+        "$reporter_dir/../kanban-hooks/msg-store.py"
+        "$HOME/aiteamforge/kanban-hooks/msg-store.py"
+        "$HOME/dev-team/kanban-hooks/msg-store.py"
+    )
+    local store=""
+    for candidate in "${store_candidates[@]}"; do
+        [ -n "$candidate" ] || continue
+        if [ -f "$candidate" ]; then
+            store="$candidate"
+            break
+        fi
+    done
 
     # ── Skip reasons are RECORDED, not swallowed (XACA-0885-003) ─────────────
     # Every guard below used to `return 0` without a word. That is the wrong
@@ -2199,7 +2256,10 @@ pull_messages() {
         _msg_record_skip "no-client: none of these paths is an executable msg-client.sh: $(printf '%s, ' "${client_candidates[@]}" | sed 's/, $//')"
         return 0
     }
-    [ -f "$store" ]  || { _msg_record_skip "no-store: $store is missing"; return 0; }
+    [ -n "$store" ] || {
+        _msg_record_skip "no-store: none of these paths is a msg-store.py: $(printf '%s, ' "${store_candidates[@]}" | sed 's/, $//')"
+        return 0
+    }
     command -v python3 >/dev/null 2>&1 || { _msg_record_skip "no-python3"; return 0; }
     command -v node    >/dev/null 2>&1 || { _msg_record_skip "no-node"; return 0; }
 
@@ -2417,6 +2477,31 @@ _fleet_status_configured() {
         || [ "${_XACA1225_FLEET_ENV_CONFIGURED:-false}" = "true" ]
 }
 
+# XACA-1225-016: human-readable reason for _fleet_status_configured()'s
+# "false" answer, used only for the diagnostic line main() prints below.
+# Kept separate from _fleet_status_configured() itself (which stays a pure
+# predicate) -- this only distinguishes what an operator needs to know: does
+# a fleet-config.json exist at all, or is it genuinely absent? Before this,
+# the not-configured branch always printed "no fleet-config.json / machine
+# identity found" even when a relay-only fleet-config.json (kb-msg-provision's
+# persist_relay_url(), .centralServer only) was sitting right there -- on a
+# host whose status silently stopped, that sent the operator looking for a
+# missing file that wasn't missing.
+#
+# Safe to assume "exists => relay-only" here: this is only ever called after
+# _fleet_status_configured() has already returned false. Given that, a
+# FLEET_CONFIG_FILE that exists can only be the relay-only (centralServer-only)
+# shape -- any other parse result (a real fleet-config.json, or an
+# unparseable/no-tooling file, both mapped to file_configured=true above)
+# would have made _fleet_status_configured() return true instead.
+_xaca1225_fleet_unconfigured_reason() {
+    if [ -f "$FLEET_CONFIG_FILE" ]; then
+        printf '%s' "relay-only fleet-config.json (no mode/identity)"
+    else
+        printf '%s' "no fleet-config.json / machine identity found"
+    fi
+}
+
 main() {
     echo "=== Fleet Status Reporter ==="
     echo "Machine: $HOSTNAME ($IP_ADDRESS)"
@@ -2442,7 +2527,7 @@ main() {
     # kb-msg-provision's relay URL) takes the collect/send_status path below;
     # that path now also pulls on a failed status POST.
     if ! _fleet_status_configured; then
-        echo "Fleet status reporting not configured on this machine (no fleet-config.json / machine identity found)."
+        echo "Fleet status reporting not configured on this machine ($(_xaca1225_fleet_unconfigured_reason))."
         echo "This reporter cycle will only check the kb-msg cross-machine relay — no status report will be sent."
         echo ""
         echo "Checking kb-msg relay for cross-machine mail..."

@@ -27,7 +27,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   A `fleet-config.json` holding only `centralServer` (what `kb-msg-provision` writes) no longer counts as fleet
   status configured. The template's Label is now `com.aiteamforge.fleet-reporter` (it was `com.devteam.*`,
   which every doctor/status/start check missed), and it runs `/bin/bash`, not `/opt/homebrew/bin/bash`.
-  `kb-msg-provision` registers the inbox hook before keygen.
+  `kb-msg-provision` registers the inbox hook before keygen. Review round 2: re-rendering the plist unloads the
+  job by the Label on disk BEFORE rewriting it, so an old `com.devteam.fleet-reporter` job is no longer left running
+  beside the new one. Upgrade migrates an installed plist's Label in place (and swaps a missing
+  `/opt/homebrew/bin/bash` for `/bin/bash`) without touching `EnvironmentVariables`. The reporter resolves
+  `msg-store.py` with the same ordered candidates as `msg-client.sh`, and its relay-only log line is accurate.
 
 
 - **XACA-1233** — `share/scripts/lcars-health-check.sh`: added `_LCARS_INFRA` row

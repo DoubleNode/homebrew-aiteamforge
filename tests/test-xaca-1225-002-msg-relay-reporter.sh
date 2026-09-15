@@ -175,6 +175,36 @@ _new_home() {
     printf '%s' "$dir"
 }
 
+# _xaca1225_portable_timeout <secs> <cmd...> — round-2 review: R11a/R11b used
+# to call GNU `timeout` directly, which coreutils provides on this dev
+# machine (/opt/homebrew/bin/timeout) but is ABSENT on stock macOS — a
+# consumer box running these suites would get a spurious "command not found"
+# failure rather than a real test result. Prefer the real `timeout`/`gtimeout`
+# when either is on PATH (exact, well-tested semantics); fall back to a
+# portable job-control watchdog otherwise. `wait "$cmd_pid"` after already
+# reaping it via `kill` is safe — POSIX `wait` on an already-reaped pid just
+# returns its exit status again, it does not error.
+_xaca1225_portable_timeout() {
+    local secs="$1"; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$secs" "$@"
+        return $?
+    fi
+    if command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$secs" "$@"
+        return $?
+    fi
+    "$@" &
+    local cmd_pid=$!
+    ( sleep "$secs"; kill -TERM "$cmd_pid" 2>/dev/null ) &
+    local watchdog_pid=$!
+    local rc=0
+    wait "$cmd_pid" 2>/dev/null || rc=$?
+    kill "$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null || true
+    return "$rc"
+}
+
 # _run_ensure <home_dir> [extra_path_prefix] — runs ensure_msg_relay_reporter
 # in a sandboxed subshell. extra_path_prefix (optional) is prepended to PATH
 # so a stubbed `node` can be made discoverable at a controlled location.
@@ -213,7 +243,7 @@ R1_OUT="$WORK_DIR/r1.out"
 ) >"$R1_OUT" 2>&1
 R1_RC=$?
 if [ "$R1_RC" = "0" ] \
-    && grep -q "not configured on this machine" "$R1_OUT" \
+    && grep -q "not configured on this machine (no fleet-config.json / machine identity found)" "$R1_OUT" \
     && grep -q "Checking kb-msg relay for cross-machine mail" "$R1_OUT" \
     && ! grep -q "Reporting to" "$R1_OUT"; then
     test_pass
@@ -651,12 +681,23 @@ R11A_OUT="$WORK_DIR/r11a.out"
           FLEET_REQUIRE_AUTH
     export HOME="$R11A_HOME"
     export AITEAMFORGE_DIR="$R11A_HOME/aiteamforge"
-    timeout 20 bash "$FLEET_REPORTER_SH"
+    _xaca1225_portable_timeout 20 bash "$FLEET_REPORTER_SH"
 ) >"$R11A_OUT" 2>&1
-if grep -q "not configured on this machine" "$R11A_OUT" && ! grep -q "Reporting to" "$R11A_OUT"; then
+# XACA-1225-016 (round 2): a centralServer-only fleet-config.json IS present
+# in this fixture, so the diagnostic must say so — "relay-only fleet-config.json
+# (no mode/identity)" — not the generic "no fleet-config.json / machine
+# identity found" reason, which is only accurate when no file exists at all
+# (see R1). This is a genuine negative control: pre-fix code printed the
+# generic reason UNCONDITIONALLY on every not-configured path, so this exact
+# assertion fails against the pre-fix _xaca1225_fleet_unconfigured_reason-less
+# code (verified: reverting to the single hardcoded string makes this check
+# fail while the old, weaker "not configured on this machine" substring check
+# still passes).
+if grep -q "not configured on this machine (relay-only fleet-config.json (no mode/identity))" "$R11A_OUT" \
+    && ! grep -q "Reporting to" "$R11A_OUT"; then
     test_pass
 else
-    test_fail "expected the relay-only path (no status POST); out=$(cat "$R11A_OUT")"
+    test_fail "expected the relay-only path with an accurate reason (no status POST); out=$(cat "$R11A_OUT")"
 fi
 
 test_start "R11b: unparseable fleet-config.json -> falls back to OLD bare-existence behaviour, status POST attempted"
@@ -666,12 +707,45 @@ mkdir -p "$R11B_HOME/.aiteamforge"
 # nothing from it at all (not even .centralServer.apiEndpoint), so
 # FLEET_MODE/CENTRAL_API both fall back to the script's own hardcoded
 # defaults ("client" / http://localhost:3000/api/status) — there is no field
-# in this fixture to override that with. This is exactly what the real code
-# does for a genuinely corrupt file, so it is the realistic case to test;
-# verified empirically nothing listens on localhost:3000 on this dev machine
-# before adding this case, and the connect-timeout fails fast on a refused
-# connection either way.
+# in this fixture to override that with (any content that WOULD let us steer
+# CENTRAL_API to a chosen port would also have to be valid JSON with a real
+# .centralServer object, which would flip _fleet_config_has_more_than_
+# central_server()'s verdict and test a different code path than "genuinely
+# unparseable" — the two goals are mutually exclusive given the production
+# code, not an oversight here).
+#
+# XACA-1225-017 (round 2): the prior version of this fixture relied on
+# nothing REALLY listening on localhost:3000 on whichever machine runs this
+# suite — true on this dev box today, but not guaranteed, and this repo's own
+# fleet-monitor server can plausibly be running locally. A real POST would
+# have registered a phantom node on a live dashboard. Since the target port
+# can't be steered via the fixture (see above), shadow `curl` with a shell
+# FUNCTION instead of a PATH stub. A PATH stub does NOT work here: R11c's own
+# comment above already established that fleet-reporter.sh's top-of-file
+# `export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:..."` PREPENDS
+# those fixed dirs ahead of anything a caller sets, and curl lives in one of
+# them on every real macOS box — a caller-side PATH stub would never be
+# reached. A bash FUNCTION named `curl`, exported into the child bash's
+# environment, is resolved before PATH search regardless of PATH's value, so
+# it intercepts the call unconditionally. `bash "$FLEET_REPORTER_SH"` below
+# execs a genuine child bash process (not `source`), which is exactly the
+# case `export -f` is for.
+#
+# The assertion only needs "Reporting to $API_ENDPOINT..." to have been
+# printed (that happens unconditionally before curl is ever invoked — see
+# send_status()) and does not care whether the POST itself succeeded, so a
+# stub that never touches the network satisfies the test intent exactly and
+# guarantees zero real network egress, regardless of what happens to be
+# listening on port 3000 wherever this suite runs. Shape mirrors real curl's
+# own output on a failed connect with `-w "\n%{http_code}"` (empty body, then
+# curl's own "000" placeholder for "no HTTP response received"), so
+# send_to_endpoint()'s http_code/body parsing sees a realistic failure.
 printf 'this is not valid json at all {{{' >"$R11B_HOME/.aiteamforge/fleet-config.json"
+curl() {
+    printf '\n000\n'
+    return 0
+}
+export -f curl
 R11B_OUT="$WORK_DIR/r11b.out"
 (
     unset FLEET_MONITOR_API FLEET_MODE FLEET_AUTH_TOKEN FLEET_LOCAL_PORT \
@@ -679,8 +753,9 @@ R11B_OUT="$WORK_DIR/r11b.out"
           FLEET_REQUIRE_AUTH
     export HOME="$R11B_HOME"
     export AITEAMFORGE_DIR="$R11B_HOME/aiteamforge"
-    timeout 20 bash "$FLEET_REPORTER_SH"
+    _xaca1225_portable_timeout 20 bash "$FLEET_REPORTER_SH"
 ) >"$R11B_OUT" 2>&1
+unset -f curl
 if ! grep -q "not configured on this machine" "$R11B_OUT" && grep -q "Reporting to" "$R11B_OUT"; then
     test_pass
 else
@@ -821,6 +896,276 @@ if [ -s "$RLA_SRC" ] && grep -qE '"com\.aiteamforge\.fleet-reporter\.plist"' "$R
     test_pass
 else
     test_fail "remove_launchagents must list com.aiteamforge.fleet-reporter.plist"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R13 — XACA-1225-017 (review round 2): pull_messages() must resolve the
+# CLIENT and the STORE from the same root. With AITEAMFORGE_DIR unset (a
+# manual run) the client resolves via the $HOME/aiteamforge/scripts/
+# msg-client.sh candidate, but the OLD store path
+# ("${AITEAMFORGE_DIR:-$HOME/dev-team}/kanban-hooks/msg-store.py") still
+# pointed at $HOME/dev-team, which does not exist in this fixture — the run
+# recorded "no-store" even though a real client was found (reproduced by the
+# round-2 reviewer). NEGATIVE CONTROL: reverting store resolution to that old
+# single-path form makes this test fail (marker never written, pull-status
+# starts with "no-store") while every other case in this suite (R1-R12, S1-S4)
+# keeps passing — verified by hand against a copied tree with that one line
+# reverted, mirroring the reviewer's own M1-style mutation harness.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "R13: client and store resolve from the SAME root when AITEAMFORGE_DIR is unset -- stub invoked, no no-store/no-client skip"
+R13_HOME=$(_new_home r13)
+R13_MARKER="$WORK_DIR/r13.marker"
+_r10_layout "$R13_HOME" "$R13_MARKER"
+mkdir -p "$R13_HOME/.aiteamforge"
+cat >"$R13_HOME/.aiteamforge/fleet-config.json" <<'EOF'
+{"centralServer":{"enabled":true,"apiEndpoint":"http://127.0.0.1:1/api/status","authToken":""}}
+EOF
+R13_PULL_STATUS="$R13_HOME/.aiteamforge/run/kb-msg-pull-status"
+R13_OUT="$WORK_DIR/r13.out"
+(
+    unset FLEET_MONITOR_API FLEET_MODE FLEET_AUTH_TOKEN FLEET_LOCAL_PORT \
+          FLEET_DASHBOARD_GROUP FLEET_SERVER_URL FLEET_DEBUG FLEET_MACHINE_NAME \
+          FLEET_REQUIRE_AUTH AITEAMFORGE_DIR
+    export HOME="$R13_HOME"
+    bash "$R13_HOME/aiteamforge/fleet-monitor/client/fleet-reporter.sh"
+) >"$R13_OUT" 2>&1
+R13_OK=true
+[ -f "$R13_MARKER" ] || R13_OK=false
+[ -f "$R13_PULL_STATUS" ] || R13_OK=false
+[ -f "$R13_PULL_STATUS" ] && grep -qE '^no-(store|client)' "$R13_PULL_STATUS" && R13_OK=false
+if [ "$R13_OK" = "true" ]; then
+    test_pass
+else
+    test_fail "marker present=$([ -f "$R13_MARKER" ] && echo yes || echo no); pull-status=$(cat "$R13_PULL_STATUS" 2>/dev/null || echo MISSING); out=$(cat "$R13_OUT")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R14 — XACA-1225-015 (review round 2): install_fleet_reporter_launchagent()
+# must unload the EXISTING job (by whatever Label the on-disk plist carries
+# at that moment) BEFORE overwriting the file, not after. Unloading after the
+# rewrite resolves the job by the NEW Label and orphans an old-label
+# (com.devteam.fleet-reporter) job that stays loaded until logout, so two
+# reporters run every minute. A `launchctl` PATH stub records each
+# invocation together with a snapshot of the plist's on-disk Label at call
+# time, so ordering relative to the rewrite is directly observable.
+# NEGATIVE CONTROL: reverting to the pre-fix order (sed render, THEN unload)
+# makes the FIRST logged call read "unload label=com.aiteamforge.fleet-reporter"
+# (the NEW label, already written) instead of "unload label=com.devteam.fleet-reporter"
+# (the OLD label that was actually loaded) -- verified by hand against a
+# copied tree with the two blocks swapped back.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "R14: install_fleet_reporter_launchagent unloads the OLD label BEFORE overwriting the plist"
+R14_HOME=$(_new_home r14)
+mkdir -p "$R14_HOME/aiteamforge/fleet-monitor/client" "$R14_HOME/Library/LaunchAgents"
+cp "$FLEET_REPORTER_SH" "$R14_HOME/aiteamforge/fleet-monitor/client/fleet-reporter.sh"
+R14_PLIST="$R14_HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist"
+# Pre-existing plist as if installed before XACA-1225-014: the FILENAME
+# already matches today's convention, but the CONTENT still carries the
+# pre-fix Label -- exactly the shape a re-render encounters on a real
+# old-label box.
+cat >"$R14_PLIST" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.devteam.fleet-reporter</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/bash</string>
+        <string>/tmp/placeholder-pre-fix-path</string>
+    </array>
+</dict>
+</plist>
+EOF
+LAUNCHCTL_STUB_DIR="$WORK_DIR/r14-launchctl-stub-bin"
+mkdir -p "$LAUNCHCTL_STUB_DIR"
+LAUNCHCTL_LOG="$WORK_DIR/r14-launchctl.log"
+: > "$LAUNCHCTL_LOG"
+cat >"$LAUNCHCTL_STUB_DIR/launchctl" <<STUBEOF
+#!/usr/bin/env bash
+# XACA-1225-015 test stub: record every invocation instead of touching the
+# real launchd. Snapshots the target plist's CURRENT on-disk Label at call
+# time, so the log shows whether unload ran before or after the rewrite.
+{
+    lbl=""
+    if [ -n "\${2:-}" ] && [ -f "\${2:-}" ]; then
+        lbl="\$(plutil -extract Label raw -o - "\${2}" 2>/dev/null || echo UNREADABLE)"
+    fi
+    printf '%s label=%s\n' "\$1" "\$lbl"
+} >> "$LAUNCHCTL_LOG"
+exit 0
+STUBEOF
+chmod +x "$LAUNCHCTL_STUB_DIR/launchctl"
+R14_OUT="$WORK_DIR/r14.out"
+(
+    export HOME="$R14_HOME"
+    export AITEAMFORGE_DIR="$R14_HOME/aiteamforge"
+    export PATH="$LAUNCHCTL_STUB_DIR:$PATH"
+    # shellcheck source=/dev/null
+    source "$FAKE_TAP/libexec/installers/install-fleet-monitor.sh"
+    install_fleet_reporter_launchagent
+) >"$R14_OUT" 2>&1
+R14_OK=true
+[ -s "$LAUNCHCTL_LOG" ] || R14_OK=false
+R14_FIRST="$(sed -n '1p' "$LAUNCHCTL_LOG" 2>/dev/null)"
+R14_SECOND="$(sed -n '2p' "$LAUNCHCTL_LOG" 2>/dev/null)"
+[ "$R14_FIRST" = "unload label=com.devteam.fleet-reporter" ] || R14_OK=false
+[ "$R14_SECOND" = "load label=com.aiteamforge.fleet-reporter" ] || R14_OK=false
+if [ "$R14_OK" = "true" ]; then
+    test_pass
+else
+    test_fail "launchctl log: $(cat "$LAUNCHCTL_LOG" 2>/dev/null || echo MISSING); out=$(cat "$R14_OUT")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R15 — XACA-1225-015 (review round 2): aiteamforge-upgrade.sh's
+# _xaca1225_migrate_fleet_reporter_label() must migrate an old-label plist
+# left behind by a pre-XACA-1225-014 install: Label rewritten, a missing
+# legacy interpreter replaced, EnvironmentVariables preserved byte-for-byte
+# (M4Mini/M1Pro both hand-carry a FLEET_MONITOR_API entry there), idempotent
+# on a second run, and --dry-run writes nothing at all.
+#
+# _XACA1225_LEGACY_BASH_PATH overrides the hardcoded default
+# (/opt/homebrew/bin/bash) so this test can deterministically exercise the
+# "interpreter is missing -> replace" branch regardless of whether THIS
+# machine happens to have Homebrew bash installed (it does, on this dev box
+# -- confirmed via `command -v bash`/`ls -la /opt/homebrew/bin/bash` -- so
+# testing the literal production default here would always take the
+# "already fine, leave it" branch and never exercise the replacement code at
+# all). The env var defaults to the real path in production; this is a
+# test-only override, not a behavior change.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "R15: upgrade migration -- Label + missing interpreter fixed, env preserved, idempotent, --dry-run no-op"
+_R15_MIGRATE_FN="$WORK_DIR/r15-migrate-fn.sh"
+_extract_fn "$UPGRADE_SH" _xaca1225_migrate_fleet_reporter_label >"$_R15_MIGRATE_FN"
+if [ ! -s "$_R15_MIGRATE_FN" ]; then
+    test_fail "could not extract _xaca1225_migrate_fleet_reporter_label from $UPGRADE_SH -- is the name unchanged?"
+else
+    R15_HOME=$(_new_home r15)
+    mkdir -p "$R15_HOME/Library/LaunchAgents"
+    R15_PLIST="$R15_HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist"
+    R15_LEGACY_BASH="$WORK_DIR/r15-legacy-bash-does-not-exist"
+    cat >"$R15_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.devteam.fleet-reporter</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${R15_LEGACY_BASH}</string>
+        <string>/Users/example/aiteamforge/fleet-monitor/client/fleet-reporter.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>FLEET_MONITOR_API</key>
+        <string>https://fleet-monitor.example.test/api/status</string>
+    </dict>
+</dict>
+</plist>
+EOF
+    R15_BEFORE_ENV="$(plutil -extract EnvironmentVariables xml1 -o - "$R15_PLIST" 2>/dev/null)"
+    LAUNCHCTL_STUB_DIR="$WORK_DIR/r15-launchctl-stub-bin"
+    mkdir -p "$LAUNCHCTL_STUB_DIR"
+    LAUNCHCTL_LOG="$WORK_DIR/r15-launchctl.log"
+    : > "$LAUNCHCTL_LOG"
+    # LAUNCHCTL_LOG's path is baked in at heredoc-write time (unquoted
+    # delimiter) -- it's a fixed constant for this whole test, reused
+    # unchanged across all three subshell invocations below (each just
+    # truncates it first), so there is no need for a runtime env-var
+    # indirection the way R14's per-call Label snapshot needs `$1`/`$2` to
+    # stay unexpanded until the stub actually runs.
+    cat >"$LAUNCHCTL_STUB_DIR/launchctl" <<STUBEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> "$LAUNCHCTL_LOG"
+exit 0
+STUBEOF
+    chmod +x "$LAUNCHCTL_STUB_DIR/launchctl"
+    R15_OK=true
+
+    # --dry-run must write NOTHING and call launchctl NOT AT ALL.
+    : > "$LAUNCHCTL_LOG"
+    R15_BEFORE_DRYRUN="$(cat "$R15_PLIST")"
+    (
+        export PATH="$LAUNCHCTL_STUB_DIR:$PATH"
+        export _XACA1225_LEGACY_BASH_PATH="$R15_LEGACY_BASH"
+        # shellcheck source=/dev/null
+        source "$COMMON_SH"
+        # shellcheck source=/dev/null
+        source "$_R15_MIGRATE_FN"
+        DRY_RUN=true
+        _xaca1225_migrate_fleet_reporter_label "$R15_PLIST"
+    ) >"$WORK_DIR/r15-dryrun.out" 2>&1
+    R15_AFTER_DRYRUN="$(cat "$R15_PLIST")"
+    [ "$R15_BEFORE_DRYRUN" = "$R15_AFTER_DRYRUN" ] || R15_OK=false
+    [ -s "$LAUNCHCTL_LOG" ] && R15_OK=false
+
+    # Real run: migrates.
+    : > "$LAUNCHCTL_LOG"
+    (
+        export PATH="$LAUNCHCTL_STUB_DIR:$PATH"
+        export _XACA1225_LEGACY_BASH_PATH="$R15_LEGACY_BASH"
+        # shellcheck source=/dev/null
+        source "$COMMON_SH"
+        # shellcheck source=/dev/null
+        source "$_R15_MIGRATE_FN"
+        DRY_RUN=false
+        _xaca1225_migrate_fleet_reporter_label "$R15_PLIST"
+    ) >"$WORK_DIR/r15-run1.out" 2>&1
+    R15_LABEL="$(plutil -extract Label raw -o - "$R15_PLIST" 2>/dev/null)"
+    R15_ARG0="$(plutil -extract ProgramArguments.0 raw -o - "$R15_PLIST" 2>/dev/null)"
+    R15_AFTER_ENV="$(plutil -extract EnvironmentVariables xml1 -o - "$R15_PLIST" 2>/dev/null)"
+    [ "$R15_LABEL" = "com.aiteamforge.fleet-reporter" ] || R15_OK=false
+    [ "$R15_ARG0" = "/bin/bash" ] || R15_OK=false
+    [ "$R15_BEFORE_ENV" = "$R15_AFTER_ENV" ] || R15_OK=false
+    grep -qx "unload" "$LAUNCHCTL_LOG" || R15_OK=false
+    grep -qx "load" "$LAUNCHCTL_LOG" || R15_OK=false
+
+    # Second run: idempotent no-op -- no further launchctl calls, no further edits.
+    R15_BEFORE_RUN2="$(cat "$R15_PLIST")"
+    : > "$LAUNCHCTL_LOG"
+    (
+        export PATH="$LAUNCHCTL_STUB_DIR:$PATH"
+        export _XACA1225_LEGACY_BASH_PATH="$R15_LEGACY_BASH"
+        # shellcheck source=/dev/null
+        source "$COMMON_SH"
+        # shellcheck source=/dev/null
+        source "$_R15_MIGRATE_FN"
+        DRY_RUN=false
+        _xaca1225_migrate_fleet_reporter_label "$R15_PLIST"
+    ) >"$WORK_DIR/r15-run2.out" 2>&1
+    R15_AFTER_RUN2="$(cat "$R15_PLIST")"
+    [ "$R15_BEFORE_RUN2" = "$R15_AFTER_RUN2" ] || R15_OK=false
+    [ -s "$LAUNCHCTL_LOG" ] && R15_OK=false
+
+    if [ "$R15_OK" = "true" ]; then
+        test_pass
+    else
+        test_fail "label=$R15_LABEL arg0=$R15_ARG0; launchctl-log=$(cat "$LAUNCHCTL_LOG" 2>/dev/null); dryrun-out=$(cat "$WORK_DIR/r15-dryrun.out" 2>/dev/null); run1-out=$(cat "$WORK_DIR/r15-run1.out" 2>/dev/null)"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# S5 — structural: the upgrade run sequence must actually REACH the
+# migration. update_msg_relay_reporter() calling
+# _xaca1225_migrate_fleet_reporter_label() (proven by R15 in isolation) is
+# not enough on its own if update_msg_relay_reporter itself were ever dropped
+# from the run sequence -- S3 already proves it is wired in after
+# provision_msg_routing; this proves the call to the migration function is
+# actually present in that same function's body, so the two facts compose
+# into "the run sequence reaches the migration."
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "S5: update_msg_relay_reporter calls _xaca1225_migrate_fleet_reporter_label"
+UMRR_SRC="$WORK_DIR/update_msg_relay_reporter.extracted.sh"
+_extract_fn "$UPGRADE_SH" update_msg_relay_reporter >"$UMRR_SRC"
+if [ -s "$UMRR_SRC" ] && grep -q "_xaca1225_migrate_fleet_reporter_label" "$UMRR_SRC"; then
+    test_pass
+else
+    test_fail "update_msg_relay_reporter must call _xaca1225_migrate_fleet_reporter_label; extracted body: $(cat "$UMRR_SRC" 2>/dev/null)"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
