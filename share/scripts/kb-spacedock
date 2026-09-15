@@ -74,6 +74,66 @@
 # "pass".
 #
 # ============================================================================
+# KNOWN LIMITATION, CLOSED (XACA-1177): a HUNG tool used to hang this script
+# ============================================================================
+# Before XACA-1177 none of the invocations below carried any time bound. A
+# wedged `aiteamforge doctor`, a `kb-recover` stuck on a lock, or (measured
+# live) `lcars-health-check.sh --status` stalling 20-30s under run-lock
+# contention ("stale run-lock: attempting atomic reclaim") would hang this
+# ENTIRE script with it — no findings printed, no findings file written, no
+# exit code returned. That is worse than a wrong answer: it defeats the
+# "a tool that failed to run is UNKNOWN, never OK" property above so
+# completely that the property never even gets evaluated.
+#
+# THE FIX: every invocation of an EXTERNAL tool this script actually calls
+# (aiteamforge doctor, kb-recover, lcars-health-check.sh --status,
+# kb-sweep-stubs, and the two Tailscale probes inside `verify-reboot`) now
+# runs through _spd_run_bounded (defined below, near _spd_emit), which
+# enforces a hard wall-clock limit and kills the WHOLE process tree — not
+# just the direct child — if it's exceeded. A timeout is reported as its
+# own `unknown` finding (never `ok`, never silently dropped) via the exact
+# same _spd_emit path as any other broken/unreachable tool, naming the
+# surface, the limit, the elapsed time, and the env var to raise it. The run
+# then CONTINUES to every remaining check, the report, and the findings
+# file — one hung tool no longer takes the whole triage down with it.
+#
+# MECHANISM (see _spd_run_bounded's own header comment for the full
+# rationale): GNU `timeout`/`gtimeout` if either is on PATH; otherwise a
+# portable bash-3.2-safe background-process + poll + SIGTERM/SIGKILL
+# fallback that puts the child in its own process group (`set -m` right
+# before backgrounding) so the WHOLE group can be reaped, and captures
+# output to a temp file rather than a pipe (a grandchild holding a pipe's
+# write end open would otherwise hang the capture even after the process we
+# meant to bound is dead).
+#
+# PER-SURFACE LIMITS AND OVERRIDES (KB_SPACEDOCK_*_TIMEOUT, all in seconds;
+# an empty/non-integer/zero value falls back to the default AND says so in
+# the finding, never silently):
+#   KB_SPACEDOCK_DOCTOR_TIMEOUT         default 45   (aiteamforge doctor)
+#   KB_SPACEDOCK_RECOVER_TIMEOUT        default 60   (kb-recover --all-teams)
+#   KB_SPACEDOCK_LCARS_HEALTH_TIMEOUT   default 45   (lcars-health-check.sh --status)
+#   KB_SPACEDOCK_SWEEP_STUBS_TIMEOUT    default 20   (kb-sweep-stubs)
+#   KB_SPACEDOCK_TAILSCALE_TIMEOUT      default 15   (verify-reboot: BOTH the
+#                                        sysext and tunnel Tailscale probes —
+#                                        one shared var, not two; see the
+#                                        comment at _spd_reboot_check_
+#                                        tailscale_sysext for why one bound
+#                                        covers both)
+# Defaults are derived from measured legitimate runtimes on a real host
+# (see each check function's own comment for the specific numbers/dates) or,
+# for `aiteamforge doctor` — never installed on this dev machine, by hard
+# rule — from reading its code and this repo's own documented performance
+# target for that command. See docs/spacedock-diagnostic-inventory.md § 7
+# "Timeout / hang-bounding contract" for the full write-up.
+#
+# DELIBERATELY LEFT UNBOUNDED: every cheap LOCAL read with no network/lock/
+# daemon dependency to hang on — `defaults read`, `pmset`, `fdesetup status`,
+# `netstat`, `tmutil`, port-listening checks via `lsof`/`netstat`, and
+# similar syscalls scattered through the `verify-reboot` checks below.
+# Bounding a call that cannot block would just be defensive theater; see the
+# docs section above for the reasoning surface-by-surface.
+#
+# ============================================================================
 # SEVERITY BUCKETS (used throughout; see _spd_emit)
 # ============================================================================
 #   ok      — the tool ran and found nothing wrong.
@@ -269,6 +329,249 @@ _spd_emit() {
 }
 
 # ---------------------------------------------------------------------------
+# TIMEOUT / HANG-BOUNDING (XACA-1177). See docs/spacedock-diagnostic-
+# inventory.md § "Timeout / hang-bounding contract" for the authoritative
+# write-up (defaults, measurements, which invocations are deliberately
+# unbounded). Short version: every fronted tool this script actually
+# invokes (aiteamforge doctor, kb-recover, lcars-health-check.sh --status,
+# kb-sweep-stubs, and the two Tailscale probes in verify-reboot) is run
+# through _spd_run_bounded below. A hung tool used to hang this whole
+# script with no findings, no findings file, and no exit code — worse than
+# a wrong answer, because this script's core property ("a tool that failed
+# to run is UNKNOWN, never OK") never even got a chance to apply. A timeout
+# now reports `unknown` via the same _spd_emit path as any other
+# unreachable/broken tool — see _spd_resolve_timeout for the per-surface
+# env-var override contract.
+#
+# Cheap LOCAL reads (defaults(1), netstat, fdesetup, pmset, tmutil, etc. in
+# the verify-reboot checks below) are deliberately left UNBOUNDED — they are
+# non-interactive local syscalls with no network/lock/daemon dependency, so
+# there is nothing here to hang on. Bounding them would just be defensive
+# theater; see docs/spacedock-diagnostic-inventory.md for the full list of
+# what stays unbounded and why.
+
+# Validate + resolve one KB_SPACEDOCK_*_TIMEOUT override. Every per-surface
+# timeout funnels through this so "empty / non-integer / zero / negative"
+# all fall back to the documented default THE SAME WAY, and the fallback is
+# never silent — callers fold SPD_TIMEOUT_NOTE into the emitted finding so a
+# typo'd env var is visible, not just quietly ignored.
+#   $1 raw value as read from the env, OR the sentinel _SPD_TIMEOUT_UNSET
+#      when the caller's env var was genuinely unset (see call sites: they
+#      use "${VAR-_SPD_TIMEOUT_UNSET}", NOT "${VAR:-}" — the `-` form is
+#      load-bearing here. "${VAR:-}" collapses "unset" and "set to an empty
+#      string" to the same "" before this function ever sees them, which is
+#      exactly the ambiguity this sentinel exists to break: an operator who
+#      writes `KB_SPACEDOCK_SWEEP_STUBS_TIMEOUT=` (e.g. from a blanked-out
+#      template) has explicitly attempted an override with an invalid
+#      value, and per this script's own documented contract (see the header
+#      "PER-SURFACE LIMITS AND OVERRIDES" section and
+#      docs/spacedock-diagnostic-inventory.md § 7) that must fall back AND
+#      say so, never silently — but simply never mentioning the var at all
+#      must stay silent, or every ordinary run would carry a fallback note
+#      nobody asked for. XACA-1177 regression suite, CASE 5.
+#   $2 default (must itself be a valid positive integer literal)
+#   $3 var name, for the note text
+# Sets (in-shell only — do not call this inside $(...), same reason as
+# _spd_run_bounded below): SPD_TIMEOUT_VALUE, SPD_TIMEOUT_NOTE (empty unless
+# the raw value was rejected and the default was substituted).
+_spd_resolve_timeout() {
+    local raw="$1" default="$2" varname="$3"
+    SPD_TIMEOUT_VALUE="$default"
+    SPD_TIMEOUT_NOTE=""
+    case "$raw" in
+        _SPD_TIMEOUT_UNSET)
+            ;;
+        '')
+            SPD_TIMEOUT_NOTE=" ($varname is set but empty — using default ${default}s)"
+            ;;
+        *[!0-9]*)
+            SPD_TIMEOUT_NOTE=" ($varname='$raw' is not a positive integer — using default ${default}s)"
+            ;;
+        0)
+            SPD_TIMEOUT_NOTE=" ($varname=0 is not valid — using default ${default}s)"
+            ;;
+        *)
+            SPD_TIMEOUT_VALUE="$raw"
+            ;;
+    esac
+}
+
+# Bounded command runner. MUST be called IN-SHELL, never inside `$(...)` —
+# a command substitution runs in a subshell, and a subshell's variable
+# assignments do not propagate back to the caller, which is exactly why
+# this function communicates its result via script-level globals
+# (SPD_RUN_OUT/SPD_RUN_RC/SPD_RUN_TIMED_OUT/SPD_RUN_ELAPSED) instead of
+# returning a value the normal way.
+#
+#   _spd_run_bounded <surface-label> <limit-secs> <cmd> [args...]
+#
+# Sets on return:
+#   SPD_RUN_OUT        combined stdout+stderr of the command (may be empty)
+#   SPD_RUN_RC          the command's exit code (see SPD_RUN_TIMED_OUT below
+#                       for how a real 124/137 FROM THE COMMAND ITSELF is
+#                       told apart from one WE produced by killing it)
+#   SPD_RUN_TIMED_OUT   "1" if the bound was hit and the command was killed,
+#                       "0" otherwise
+#   SPD_RUN_ELAPSED     wall-clock seconds observed (integer; SECONDS-based,
+#                       so sub-second precision is not attempted — not
+#                       needed for a diagnostic-timeout signal)
+#
+# MECHANISM, in probe order:
+#   1. GNU `timeout` (unprefixed — some coreutils installs provide it
+#      directly) or `gtimeout` (the coreutils-prefixed name Homebrew
+#      normally uses so it doesn't collide with anything BSD-provided).
+#      `-k 5` gives a 5s SIGKILL grace after the initial SIGTERM. GNU
+#      timeout already runs the child in — and signals — its own process
+#      group, so no separate orphan handling is needed on this path.
+#   2. Portable fallback for a host with neither (stock macOS ships
+#      neither `timeout` nor `gtimeout`): background the command with job
+#      control turned on (`set -m`) IMMEDIATELY BEFORE backgrounding it, so
+#      it becomes its own process-group leader (pgid == pid). This is not
+#      a new trick invented here — it is the exact mechanism
+#      homebrew-tap/libexec/commands/aiteamforge-doctor.sh's
+#      _x1097_prime_login_path already uses and had to debug the hard way
+#      (XACA-1097-023): `set -m` must run in THIS shell right before the
+#      `&`, never inside the backgrounded subshell — process-group
+#      assignment happens at fork time in the parent, so doing it in the
+#      child is too late and the child inherits the PARENT's pgid instead
+#      of getting its own. Without a real pgid of its own, killing just the
+#      direct child leaves any grandchildren (a hung tool's own forked
+#      probes, a sourced rc file spawning something) alive and reparented.
+#      Poll every 0.1s (not 1s — a fast tool must not pay a coarse-grained
+#      tax) up to the limit; on expiry, SIGTERM the whole group
+#      (`kill -TERM -- -$pid`), grace briefly, then SIGKILL the group.
+#      `disown` right after backgrounding so a later `wait`/kill on it does
+#      not print bash's own job-control "Done"/"Terminated" notice to
+#      stderr (same reasoning as the doctor script's identical `disown`
+#      call).
+#      EXIT CODE TRAP (XACA-1177, caught at Phase A verification): `wait` on
+#      a DISOWNED pid does NOT return the child's exit status — measured
+#      under /bin/bash 3.2.57, `( exit 7 ) & disown; wait` returns 0. An
+#      earlier revision read rc from `wait` and so reported EVERY tool as
+#      rc 0 on a host without timeout/gtimeout (a stub printing 3 stubs +
+#      exit 1 rendered as "[ok] no stubs found"). The subshell therefore
+#      writes its own `$?` to a sidecar file; if that file is absent or
+#      non-numeric when the child was NOT killed, rc is set to 255 so the
+#      caller maps it to UNKNOWN — never to a guessed 0.
+#
+# WHY OUTPUT GOES TO A TEMP FILE, NEVER A PIPE: if the bounded command
+# spawns a grandchild that inherits a pipe's write end (routine for
+# anything that forks — a shell startup file, a daemon health probe, a
+# retry loop), a `$(...)`/pipe capture does not return until EVERY holder
+# of that write end closes it. Killing the direct child alone then leaves
+# the read side hung forever even though the process we meant to bound is
+# long dead — the exact orphan trap this whole function exists to close.
+# A regular file has no such "holder" concept: any process can write to it
+# and closing/killing them has no effect on whether the file can be read
+# back afterward. Verified empirically (see the ad hoc smoke tests in the
+# implementation report) with a stub that sleeps and forks a sleeping
+# grandchild under both the GNU-timeout path and the portable fallback,
+# confirming no process matching the stub's marker survives either path.
+#
+# TIMEOUT DETECTION ON THE GNU PATH: `timeout`/`gtimeout` exit 124 on a
+# SIGTERM timeout, or 128+signal (137 for KILL) if `-k` had to escalate —
+# but a command could also legitimately exit 124 or 137 on its own for
+# unrelated reasons, so the raw rc alone cannot distinguish "timed out"
+# from "happened to exit 124/137 anyway". Elapsed time disambiguates: only
+# treat 124/137 as a timeout when SPD_RUN_ELAPSED is at least the limit
+# (an exact-boundary tie counts as timed out — the fail-closed direction
+# for this script, per its stated "unknown, never a false ok" property).
+# On the fallback path there is no ambiguity at all: this function did the
+# killing itself, so SPD_RUN_TIMED_OUT is set directly from whether it had
+# to intervene, never inferred from rc.
+_spd_run_bounded() {
+    local label="$1" limit="$2"
+    shift 2
+    SPD_RUN_OUT=""
+    SPD_RUN_RC=0
+    SPD_RUN_TIMED_OUT="0"
+    SPD_RUN_ELAPSED=0
+
+    # Defensive only — every call site already resolves its limit through
+    # _spd_resolve_timeout before getting here, so this should never fire
+    # in practice. Kept so a future direct caller fails safe, not silent.
+    case "$limit" in
+        ''|*[!0-9]*|0) limit=30 ;;
+    esac
+
+    local outfile
+    outfile=$(mktemp "${TMPDIR:-/tmp}/kb-spacedock-run.XXXXXX" 2>/dev/null)
+    if [ -z "$outfile" ]; then
+        SPD_RUN_OUT="_spd_run_bounded: mktemp failed while preparing to run surface '$label' — could not capture its output"
+        SPD_RUN_RC=1
+        return 0
+    fi
+
+    local timeout_bin=""
+    if _spd_have timeout; then
+        timeout_bin="timeout"
+    elif _spd_have gtimeout; then
+        timeout_bin="gtimeout"
+    fi
+
+    local start_ts
+    start_ts=$SECONDS
+
+    if [ -n "$timeout_bin" ]; then
+        "$timeout_bin" -k 5 "$limit" "$@" </dev/null >"$outfile" 2>&1
+        SPD_RUN_RC=$?
+        SPD_RUN_ELAPSED=$((SECONDS - start_ts))
+        SPD_RUN_OUT=$(cat "$outfile" 2>/dev/null)
+        rm -f "$outfile" 2>/dev/null
+        case "$SPD_RUN_RC" in
+            124|137)
+                [ "$SPD_RUN_ELAPSED" -ge "$limit" ] && SPD_RUN_TIMED_OUT="1"
+                ;;
+        esac
+        return 0
+    fi
+
+    # Portable fallback — no timeout/gtimeout on PATH.
+    local had_monitor
+    case $- in
+        *m*) had_monitor=true ;;
+        *)   had_monitor=false ;;
+    esac
+    local rcfile="${outfile}.rc"
+    set -m
+    ( "$@" </dev/null >"$outfile" 2>&1; echo "$?" >"$rcfile" ) &
+    local pid=$!
+    disown "$pid" 2>/dev/null || true
+    [ "$had_monitor" = true ] || set +m
+
+    local elapsed_ms=0 limit_ms=$((limit * 1000))
+    while kill -0 "$pid" 2>/dev/null; do
+        [ "$elapsed_ms" -ge "$limit_ms" ] && break
+        sleep 0.1
+        elapsed_ms=$((elapsed_ms + 100))
+    done
+
+    SPD_RUN_ELAPSED=$((SECONDS - start_ts))
+
+    if kill -0 "$pid" 2>/dev/null; then
+        SPD_RUN_TIMED_OUT="1"
+        kill -TERM -- "-$pid" 2>/dev/null || true
+        sleep 0.2
+        kill -KILL -- "-$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null
+        SPD_RUN_RC=124
+    else
+        # rc comes from the sidecar, NOT `wait` — see EXIT CODE TRAP above.
+        wait "$pid" 2>/dev/null
+        local rc_read=""
+        [ -f "$rcfile" ] && rc_read=$(cat "$rcfile" 2>/dev/null)
+        case "$rc_read" in
+            ''|*[!0-9]*) SPD_RUN_RC=255 ;;
+            *) SPD_RUN_RC="$rc_read" ;;
+        esac
+    fi
+
+    SPD_RUN_OUT=$(cat "$outfile" 2>/dev/null)
+    rm -f "$outfile" "$rcfile" 2>/dev/null
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Locating the tools this script fronts. Every resolver degrades to "not
 # found" (empty stdout, non-zero return) rather than guessing — a wrong
 # guess that happens to execute something is worse than a clean SKIP/UNKNOWN.
@@ -364,21 +667,52 @@ _spd_find_kb_sweep_stubs() {
 # clones lay it out differently. It tries plausible SHIPPED locations only,
 # and degrades to "predicate unavailable" (SKIP, not UNKNOWN — a fact about
 # the host's version, not a finding about its health) when none exist.
+# XACA-1177-011: called IN-SHELL by its one caller (_spd_check_mandatory_
+# teams), never via `$(...)` — this function communicates its result
+# through globals (SPD_MANDATORY_TEAMS_LIB on success,
+# SPD_MANDATORY_TEAMS_LIB_TRIED on failure), and a command-substitution
+# subshell would lose those assignments the instant it exits (same reason
+# _spd_run_bounded below must also be called in-shell). On failure,
+# SPD_MANDATORY_TEAMS_LIB_TRIED holds a human-readable account of exactly
+# which paths were checked (with their actual resolved values,
+# env-var-unset cases called out explicitly) — the ONE place that list is
+# written out, so the caller's skip message can quote it directly instead
+# of maintaining its own separate copy that could drift out of sync with
+# the resolution order below.
 _spd_find_mandatory_teams_lib() {
-    if [ -n "${KB_SPACEDOCK_MANDATORY_TEAMS_LIB:-}" ] && [ -f "${KB_SPACEDOCK_MANDATORY_TEAMS_LIB}" ]; then
-        printf '%s\n' "$KB_SPACEDOCK_MANDATORY_TEAMS_LIB"
-        return 0
+    SPD_MANDATORY_TEAMS_LIB=""
+    SPD_MANDATORY_TEAMS_LIB_TRIED=""
+    local atfh atfd p1 p2 p3
+
+    if [ -n "${KB_SPACEDOCK_MANDATORY_TEAMS_LIB:-}" ]; then
+        p1="\$KB_SPACEDOCK_MANDATORY_TEAMS_LIB (${KB_SPACEDOCK_MANDATORY_TEAMS_LIB})"
+        if [ -f "${KB_SPACEDOCK_MANDATORY_TEAMS_LIB}" ]; then
+            SPD_MANDATORY_TEAMS_LIB="$KB_SPACEDOCK_MANDATORY_TEAMS_LIB"
+            return 0
+        fi
+    else
+        p1="\$KB_SPACEDOCK_MANDATORY_TEAMS_LIB (unset)"
     fi
-    local atfh="${AITEAMFORGE_HOME:-}"
-    if [ -n "$atfh" ] && [ -f "$atfh/libexec/lib/mandatory-teams.sh" ]; then
-        printf '%s\n' "$atfh/libexec/lib/mandatory-teams.sh"
-        return 0
+
+    atfh="${AITEAMFORGE_HOME:-}"
+    if [ -n "$atfh" ]; then
+        p2="\$AITEAMFORGE_HOME/libexec/lib/mandatory-teams.sh ($atfh/libexec/lib/mandatory-teams.sh)"
+        if [ -f "$atfh/libexec/lib/mandatory-teams.sh" ]; then
+            SPD_MANDATORY_TEAMS_LIB="$atfh/libexec/lib/mandatory-teams.sh"
+            return 0
+        fi
+    else
+        p2="\$AITEAMFORGE_HOME/libexec/lib/mandatory-teams.sh (AITEAMFORGE_HOME unset)"
     fi
-    local atfd="${AITEAMFORGE_DIR:-$HOME/.aiteamforge}"
+
+    atfd="${AITEAMFORGE_DIR:-$HOME/.aiteamforge}"
+    p3="\${AITEAMFORGE_DIR:-\$HOME/.aiteamforge}/libexec/lib/mandatory-teams.sh ($atfd/libexec/lib/mandatory-teams.sh)"
     if [ -f "$atfd/libexec/lib/mandatory-teams.sh" ]; then
-        printf '%s\n' "$atfd/libexec/lib/mandatory-teams.sh"
+        SPD_MANDATORY_TEAMS_LIB="$atfd/libexec/lib/mandatory-teams.sh"
         return 0
     fi
+
+    SPD_MANDATORY_TEAMS_LIB_TRIED="$p1; $p2; $p3"
     return 1
 }
 
@@ -415,15 +749,31 @@ _spd_check_aiteamforge_doctor() {
             "aiteamforge CLI not found on PATH — doctor diagnostics unavailable on this host" "" ""
         return
     fi
-    local raw rc clean
-    raw=$(aiteamforge doctor 2>&1)
-    rc=$?
-    clean=$(printf '%s\n' "$raw" | _spd_strip_ansi)
+    # Default 45s: NOT measured directly — `aiteamforge` is never installed
+    # on this dev machine (hard rule, see this repo's CLAUDE.md), so this is
+    # derived from reading libexec/commands/aiteamforge-doctor.sh (16 checks,
+    # including a network/Tailscale probe and several `brew`/`launchctl`
+    # calls) plus docs/homebrew-tap/TEST_PLAN.md's own documented perf
+    # target for this exact command ("Test 10.20 — 500-item kanban board —
+    # doctor under 10 seconds"). 45s gives ~4-5x headroom over that target
+    # to absorb brew/network latency on a slow or loaded consumer box
+    # without this script itself becoming the thing that hangs.
+    _spd_resolve_timeout "${KB_SPACEDOCK_DOCTOR_TIMEOUT-_SPD_TIMEOUT_UNSET}" 45 "KB_SPACEDOCK_DOCTOR_TIMEOUT"
+    local limit="$SPD_TIMEOUT_VALUE" note="$SPD_TIMEOUT_NOTE"
+    _spd_run_bounded "aiteamforge-doctor" "$limit" aiteamforge doctor
+    if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
+        _spd_emit "aiteamforge-doctor" "unknown" \
+            "aiteamforge doctor timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_DOCTOR_TIMEOUT) — no result; the tool was killed${note}" \
+            "$(printf '%s\n' "$SPD_RUN_OUT" | _spd_strip_ansi)" "$SPD_RUN_RC"
+        return
+    fi
+    local rc="$SPD_RUN_RC" clean
+    clean=$(printf '%s\n' "$SPD_RUN_OUT" | _spd_strip_ansi)
     case "$rc" in
-        0) _spd_emit "aiteamforge-doctor" "ok" "clean — 0 warnings, 0 failures" "$clean" "$rc" ;;
-        1) _spd_emit "aiteamforge-doctor" "warn" "warnings only (0 failures)" "$clean" "$rc" ;;
-        2) _spd_emit "aiteamforge-doctor" "fail" "one or more failures found" "$clean" "$rc" ;;
-        *) _spd_emit "aiteamforge-doctor" "unknown" "unexpected exit code $rc — this script only understands 0/1/2 from the subcommand form" "$clean" "$rc" ;;
+        0) _spd_emit "aiteamforge-doctor" "ok" "clean — 0 warnings, 0 failures${note}" "$clean" "$rc" ;;
+        1) _spd_emit "aiteamforge-doctor" "warn" "warnings only (0 failures)${note}" "$clean" "$rc" ;;
+        2) _spd_emit "aiteamforge-doctor" "fail" "one or more failures found${note}" "$clean" "$rc" ;;
+        *) _spd_emit "aiteamforge-doctor" "unknown" "unexpected exit code $rc — this script only understands 0/1/2 from the subcommand form${note}" "$clean" "$rc" ;;
     esac
 }
 
@@ -437,29 +787,43 @@ _spd_check_kb_recover() {
         _spd_emit "kb-recover" "unknown" "kanban-helpers.sh not found on this host — kb-recover unavailable" "" ""
         return
     }
-    local shell out rc
+    local shell
     shell=$(_spd_kanban_helpers_shell "$kh")
     if ! _spd_have "$shell"; then
         _spd_emit "kb-recover" "unknown" "kanban-helpers.sh found but its required interpreter ('$shell') is not on PATH" "" ""
         return
     fi
-    out=$(env KB_SPD_KH="$kh" "$shell" -c 'source "$KB_SPD_KH" >/dev/null 2>&1 && kb-recover --all-teams --json' 2>&1)
-    rc=$?
+    # Default 60s: MEASURED on this host — `kb-recover --all-teams --json`
+    # (sourcing kanban-helpers.sh under zsh, scanning every team) took
+    # ~11.6s wall-clock (2026-09-14, `time` around the exact invocation
+    # below). 60s gives >5x headroom for a host with more teams or a
+    # slower/loaded board read.
+    _spd_resolve_timeout "${KB_SPACEDOCK_RECOVER_TIMEOUT-_SPD_TIMEOUT_UNSET}" 60 "KB_SPACEDOCK_RECOVER_TIMEOUT"
+    local limit="$SPD_TIMEOUT_VALUE" note="$SPD_TIMEOUT_NOTE"
+    _spd_run_bounded "kb-recover" "$limit" env KB_SPD_KH="$kh" "$shell" -c \
+        'source "$KB_SPD_KH" >/dev/null 2>&1 && kb-recover --all-teams --json'
+    if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
+        _spd_emit "kb-recover" "unknown" \
+            "kb-recover timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_RECOVER_TIMEOUT) — no result; the tool was killed${note}" \
+            "$SPD_RUN_OUT" "$SPD_RUN_RC"
+        return
+    fi
+    local out="$SPD_RUN_OUT" rc="$SPD_RUN_RC"
     case "$rc" in
         0)
             local total
             total=$(printf '%s' "$out" | jq -r '([.[]] | flatten | length)' 2>/dev/null)
             if [ -z "$total" ] || [ "$total" = "null" ]; then
-                _spd_emit "kb-recover" "unknown" "kb-recover exited 0 but its --json output could not be parsed" "$out" "$rc"
+                _spd_emit "kb-recover" "unknown" "kb-recover exited 0 but its --json output could not be parsed${note}" "$out" "$rc"
             elif [ "$total" -gt 0 ] 2>/dev/null; then
-                _spd_emit "kb-recover" "warn" "$total orphaned in-progress item(s) found across teams" "$out" "$rc"
+                _spd_emit "kb-recover" "warn" "$total orphaned in-progress item(s) found across teams${note}" "$out" "$rc"
             else
-                _spd_emit "kb-recover" "ok" "no orphaned in-progress items found" "$out" "$rc"
+                _spd_emit "kb-recover" "ok" "no orphaned in-progress items found${note}" "$out" "$rc"
             fi
             ;;
-        1) _spd_emit "kb-recover" "unknown" "jq not available to kb-recover — could not run" "$out" "$rc" ;;
-        2) _spd_emit "kb-recover" "unknown" "usage/environment error (e.g. team-paths.json missing)" "$out" "$rc" ;;
-        *) _spd_emit "kb-recover" "unknown" "unexpected exit code $rc" "$out" "$rc" ;;
+        1) _spd_emit "kb-recover" "unknown" "jq not available to kb-recover — could not run${note}" "$out" "$rc" ;;
+        2) _spd_emit "kb-recover" "unknown" "usage/environment error (e.g. team-paths.json missing)${note}" "$out" "$rc" ;;
+        *) _spd_emit "kb-recover" "unknown" "unexpected exit code $rc${note}" "$out" "$rc" ;;
     esac
 }
 
@@ -473,20 +837,56 @@ _spd_check_lcars_health() {
         _spd_emit "lcars-health-check" "unknown" "lcars-health-check.sh not found on this host" "" ""
         return
     }
-    local out rc
+    # Default 45s: MEASURED normal-case runtime on this host is ~0.4-0.5s
+    # (`time zsh lcars-health-check.sh --status`, 3 consecutive runs,
+    # 2026-09-14). The parent ticket's OWN observed contention case is
+    # 20-30s ("stale run-lock: attempting atomic reclaim") — not
+    # reproduced live here (would require racing a real lock), so 45s is
+    # chosen with headroom ABOVE that observed range rather than the quiet
+    # baseline, so this bound does not itself misfire during ordinary lock
+    # contention.
+    _spd_resolve_timeout "${KB_SPACEDOCK_LCARS_HEALTH_TIMEOUT-_SPD_TIMEOUT_UNSET}" 45 "KB_SPACEDOCK_LCARS_HEALTH_TIMEOUT"
+    local limit="$SPD_TIMEOUT_VALUE" note="$SPD_TIMEOUT_NOTE"
+    # NOTE: the OLD code captured `rc=$?` after the if/elif so it reflected
+    # whichever branch actually ran. _spd_run_bounded replaces that pattern
+    # entirely — it sets SPD_RUN_RC itself, so there is no `$?` to chase
+    # here; both branches below just call it and read the globals.
     if [ -x "$path" ]; then
-        out=$("$path" --status 2>&1)
+        _spd_run_bounded "lcars-health-check" "$limit" "$path" --status
     elif _spd_have zsh; then
-        out=$(zsh "$path" --status 2>&1)
+        _spd_run_bounded "lcars-health-check" "$limit" zsh "$path" --status
     else
         _spd_emit "lcars-health-check" "unknown" "found lcars-health-check.sh but it is not executable and zsh is unavailable to run it" "" ""
         return
     fi
-    rc=$?
+    if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
+        # Killing a --status run CAN leave lcars-health-check.sh's own
+        # /tmp/lcars-healthcheck-run-lock directory behind — read
+        # _hc_acquire_run_lock/run_health_check in lcars-health-check.sh:
+        # --status still sets STATUS_ONLY=true and calls the SAME
+        # run_health_check(), which acquires the SAME whole-invocation
+        # lock as a real restart sweep before it even checks that flag.
+        # This does NOT block the real health daemon, though: the lock's
+        # OWN staleness test (_hc_acquire_run_lock, "Test 1: holder
+        # liveness") reclaims immediately once `kill -0 <holder-pid>`
+        # fails, which is true the instant SIGKILL finishes this process —
+        # no waiting for the 600s age-based fallback, which only exists
+        # for a holder that is still alive but stuck. The very next
+        # lcars-health-check.sh invocation (daemon cycle or another
+        # kb-spacedock run) reclaims the lock on its first attempt. Read,
+        # not force-tested: reproducing this live would mean killing a
+        # real acquire against the live daemon, which this ticket's
+        # FORBIDDEN ACTIONS rules out.
+        _spd_emit "lcars-health-check" "unknown" \
+            "lcars-health-check timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_LCARS_HEALTH_TIMEOUT) — no result; the tool was killed${note}" \
+            "$SPD_RUN_OUT" "$SPD_RUN_RC"
+        return
+    fi
+    local out="$SPD_RUN_OUT" rc="$SPD_RUN_RC"
     case "$rc" in
-        0) _spd_emit "lcars-health-check" "ok" "all servers healthy (--status)" "$out" "$rc" ;;
-        1) _spd_emit "lcars-health-check" "warn" "unhealthy or config-drifted server(s) found (--status)" "$out" "$rc" ;;
-        *) _spd_emit "lcars-health-check" "unknown" "unexpected exit code $rc from --status (its own contract only defines 0/1)" "$out" "$rc" ;;
+        0) _spd_emit "lcars-health-check" "ok" "all servers healthy (--status)${note}" "$out" "$rc" ;;
+        1) _spd_emit "lcars-health-check" "warn" "unhealthy or config-drifted server(s) found (--status)${note}" "$out" "$rc" ;;
+        *) _spd_emit "lcars-health-check" "unknown" "unexpected exit code $rc from --status (its own contract only defines 0/1)${note}" "$out" "$rc" ;;
     esac
 }
 
@@ -500,11 +900,24 @@ _spd_check_kb_sweep_stubs() {
         _spd_emit "kb-sweep-stubs" "skip" "not present on this host — expected on a tap consumer (dev-machine-only guard, not shipped by design)" "" ""
         return
     }
-    local out rc
-    out=$("$path" 2>&1)
-    rc=$?
+    # Default 20s: MEASURED normal runtime on this host is ~0.02s (`time
+    # kb-sweep-stubs`, 2026-09-14) — this is a plain filesystem sentinel
+    # scan with no network/daemon dependency. 20s is generous headroom for
+    # a much larger stub set or a slower disk than this host's, while
+    # staying well under the other surfaces' 45-60s bounds since there is
+    # no documented contention case for this one (unlike lcars-health).
+    _spd_resolve_timeout "${KB_SPACEDOCK_SWEEP_STUBS_TIMEOUT-_SPD_TIMEOUT_UNSET}" 20 "KB_SPACEDOCK_SWEEP_STUBS_TIMEOUT"
+    local limit="$SPD_TIMEOUT_VALUE" note="$SPD_TIMEOUT_NOTE"
+    _spd_run_bounded "kb-sweep-stubs" "$limit" "$path"
+    if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
+        _spd_emit "kb-sweep-stubs" "unknown" \
+            "kb-sweep-stubs timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_SWEEP_STUBS_TIMEOUT) — no result; the tool was killed${note}" \
+            "$SPD_RUN_OUT" "$SPD_RUN_RC"
+        return
+    fi
+    local out="$SPD_RUN_OUT" rc="$SPD_RUN_RC"
     case "$rc" in
-        0) _spd_emit "kb-sweep-stubs" "ok" "no stubs found" "$out" "$rc" ;;
+        0) _spd_emit "kb-sweep-stubs" "ok" "no stubs found${note}" "$out" "$rc" ;;
         1)
             # PR #869 review: `// "unknown"` only covers a MISSING key. If the
             # payload is not parseable JSON at all, jq fails, $total is EMPTY,
@@ -514,10 +927,10 @@ _spd_check_kb_sweep_stubs() {
             local total
             total=$(printf '%s' "$out" | jq -r '.total // "unknown"' 2>/dev/null)
             [ -n "$total" ] || total="an unreported number of"
-            _spd_emit "kb-sweep-stubs" "warn" "$total stub(s) found" "$out" "$rc"
+            _spd_emit "kb-sweep-stubs" "warn" "$total stub(s) found${note}" "$out" "$rc"
             ;;
-        2) _spd_emit "kb-sweep-stubs" "unknown" "usage/environment error" "$out" "$rc" ;;
-        *) _spd_emit "kb-sweep-stubs" "unknown" "unexpected exit code $rc" "$out" "$rc" ;;
+        2) _spd_emit "kb-sweep-stubs" "unknown" "usage/environment error${note}" "$out" "$rc" ;;
+        *) _spd_emit "kb-sweep-stubs" "unknown" "unexpected exit code $rc${note}" "$out" "$rc" ;;
     esac
 }
 
@@ -622,10 +1035,28 @@ _spd_check_auto_upgrade_log() {
 # ---------------------------------------------------------------------------
 _spd_check_mandatory_teams() {
     local lib
-    lib=$(_spd_find_mandatory_teams_lib) || {
-        _spd_emit "mandatory-teams" "skip" "atf_team_provisioned predicate not available on this host — mandatory-teams.sh not found (host version may predate it); skipping" "" ""
+    # XACA-1177-011: called IN-SHELL, never `lib=$(_spd_find_mandatory_teams_lib)`
+    # — the resolver sets SPD_MANDATORY_TEAMS_LIB_TRIED as a script-level
+    # global on failure, and a command-substitution subshell would lose
+    # that assignment the instant it exits (the exact trap _spd_run_bounded's
+    # own header comment describes for the same reason). Read the resolved
+    # path back from SPD_MANDATORY_TEAMS_LIB, which the resolver also sets.
+    _spd_find_mandatory_teams_lib
+    if [ $? -ne 0 ]; then
+        # XACA-1177-011: reworded from "mandatory-teams.sh not found (host
+        # version may predate it)" — that framed XACA-1070 as not yet
+        # shipped, which stopped being true 2026-09-12 (mandatory-teams.sh
+        # merged to develop, #865/#879). The real reason a host lands here
+        # is that the predicate isn't INSTALLED there — an aiteamforge
+        # version older than the tap release that carries it, or a
+        # KB_SPACEDOCK_MANDATORY_TEAMS_LIB override pointing nowhere real —
+        # not that the feature is still unmerged. severity stays `skip`
+        # either way: this is a fact about the host's installed version,
+        # never a health finding.
+        _spd_emit "mandatory-teams" "skip" "atf_team_provisioned predicate not installed on this host (checked: ${SPD_MANDATORY_TEAMS_LIB_TRIED}) — this host's aiteamforge version may predate the tap release that ships mandatory-teams.sh; skipping" "" ""
         return
-    }
+    fi
+    lib="$SPD_MANDATORY_TEAMS_LIB"
     local shell="bash"
     if ! _spd_have "$shell"; then shell="zsh"; fi
     if ! _spd_have "$shell"; then
@@ -925,20 +1356,43 @@ _spd_reboot_check_tailscale_sysext() {
         _spd_emit "reboot-t1-tailscale-sysext" "unknown" "systemextensionsctl not found (non-macOS host?)" "" ""
         return
     fi
+    # Default 15s: MEASURED ~0.04s on this host (`time systemextensionsctl
+    # list | grep -i tailscale`, 2026-09-14). Both this and the tunnel
+    # check below share ONE env var (KB_SPACEDOCK_TAILSCALE_TIMEOUT) rather
+    # than two: they're both cheap, near-instant local probes whose only
+    # realistic failure mode is the SAME one (a wedged sysextd/tailscaled
+    # daemon making the call itself hang, per the parent ticket) — there's
+    # no scenario where an operator would legitimately want a different
+    # bound for one vs. the other. 15s is generous headroom over the
+    # measured ~0.04s while staying tight since a hung daemon here means
+    # this IS the tier-1 lockout-risk finding verify-reboot exists to
+    # surface promptly.
+    _spd_resolve_timeout "${KB_SPACEDOCK_TAILSCALE_TIMEOUT-_SPD_TIMEOUT_UNSET}" 15 "KB_SPACEDOCK_TAILSCALE_TIMEOUT"
+    local limit="$SPD_TIMEOUT_VALUE" note="$SPD_TIMEOUT_NOTE"
+    # Bound the TOOL (systemextensionsctl), not the grep piped after it —
+    # per the task brief. The grep runs against the already-captured
+    # output, outside the bounded call.
+    _spd_run_bounded "reboot-t1-tailscale-sysext" "$limit" systemextensionsctl list
+    if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
+        _spd_emit "reboot-t1-tailscale-sysext" "unknown" \
+            "systemextensionsctl timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_TAILSCALE_TIMEOUT) — no result; the tool was killed${note}" \
+            "$SPD_RUN_OUT" "$SPD_RUN_RC"
+        return
+    fi
     local out
-    out=$(systemextensionsctl list 2>&1 | grep -i tailscale)
+    out=$(printf '%s' "$SPD_RUN_OUT" | grep -i tailscale)
     if [ -z "$out" ]; then
-        _spd_emit "reboot-t1-tailscale-sysext" "unknown" "no Tailscale system-extension entry found — Tailscale may not be installed on this host" "" ""
+        _spd_emit "reboot-t1-tailscale-sysext" "unknown" "no Tailscale system-extension entry found — Tailscale may not be installed on this host${note}" "" ""
         return
     fi
     if printf '%s' "$out" | grep -q "activated enabled"; then
-        _spd_emit "reboot-t1-tailscale-sysext" "ok" "Tailscale sysext activated" "$out" ""
+        _spd_emit "reboot-t1-tailscale-sysext" "ok" "Tailscale sysext activated${note}" "$out" ""
         return
     fi
-    local sev note
+    local sev mnote
     sev=$(_spd_reboot_mismatch_sev)
-    note=$(_spd_reboot_mismatch_note)
-    _spd_emit "reboot-t1-tailscale-sysext" "$sev" "Tailscale sysext not activated/enabled.$note" "$out" ""
+    mnote=$(_spd_reboot_mismatch_note)
+    _spd_emit "reboot-t1-tailscale-sysext" "$sev" "Tailscale sysext not activated/enabled.$mnote$note" "$out" ""
 }
 
 _spd_reboot_check_tailscale_tunnel() {
@@ -947,16 +1401,32 @@ _spd_reboot_check_tailscale_tunnel() {
         _spd_emit "reboot-t1-tailscale-tunnel" "unknown" "Tailscale binary not found at $bin — Tailscale may not be installed on this host (override KB_SPACEDOCK_REBOOT_TAILSCALE_BIN if it lives elsewhere)" "" ""
         return
     fi
-    local out
-    out=$("$bin" status 2>&1 | head -1)
-    if printf '%s' "$out" | grep -q '^100\.'; then
-        _spd_emit "reboot-t1-tailscale-tunnel" "ok" "Tailscale tunnel up ($out)" "$out" ""
+    # See _spd_reboot_check_tailscale_sysext above for why this shares
+    # KB_SPACEDOCK_TAILSCALE_TIMEOUT rather than having its own var.
+    # Default 15s: MEASURED ~0.04s on this host (`time "$bin" status`,
+    # 2026-09-14).
+    _spd_resolve_timeout "${KB_SPACEDOCK_TAILSCALE_TIMEOUT-_SPD_TIMEOUT_UNSET}" 15 "KB_SPACEDOCK_TAILSCALE_TIMEOUT"
+    local limit="$SPD_TIMEOUT_VALUE" note="$SPD_TIMEOUT_NOTE"
+    # Bound the TOOL (the Tailscale binary), not the `head -1` piped after
+    # it — per the task brief. `head -1` runs against the already-captured
+    # output, outside the bounded call.
+    _spd_run_bounded "reboot-t1-tailscale-tunnel" "$limit" "$bin" status
+    if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
+        _spd_emit "reboot-t1-tailscale-tunnel" "unknown" \
+            "Tailscale status timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_TAILSCALE_TIMEOUT) — no result; the tool was killed${note}" \
+            "$SPD_RUN_OUT" "$SPD_RUN_RC"
         return
     fi
-    local sev note
+    local out
+    out=$(printf '%s' "$SPD_RUN_OUT" | head -1)
+    if printf '%s' "$out" | grep -q '^100\.'; then
+        _spd_emit "reboot-t1-tailscale-tunnel" "ok" "Tailscale tunnel up ($out)${note}" "$out" ""
+        return
+    fi
+    local sev mnote
     sev=$(_spd_reboot_mismatch_sev)
-    note=$(_spd_reboot_mismatch_note)
-    _spd_emit "reboot-t1-tailscale-tunnel" "$sev" "Tailscale tunnel not up (got: ${out:-<empty>}).$note" "$out" ""
+    mnote=$(_spd_reboot_mismatch_note)
+    _spd_emit "reboot-t1-tailscale-tunnel" "$sev" "Tailscale tunnel not up (got: ${out:-<empty>}).$mnote$note" "$out" ""
 }
 
 _spd_reboot_check_sshd() {
@@ -1501,6 +1971,11 @@ Usage:
 
 Exit code reflects the WORST finding severity across all diagnostics run:
   0 = all ok/skip   1 = worst is warn   2 = worst is fail or unknown
+
+Every fronted tool runs under a timeout (a hang reports 'unknown', never
+hangs this script) — override in seconds: KB_SPACEDOCK_DOCTOR_TIMEOUT (45),
+KB_SPACEDOCK_RECOVER_TIMEOUT (60), KB_SPACEDOCK_LCARS_HEALTH_TIMEOUT (45),
+KB_SPACEDOCK_SWEEP_STUBS_TIMEOUT (20), KB_SPACEDOCK_TAILSCALE_TIMEOUT (15).
 
 This tool fronts existing diagnostics — it does not implement any health
 judgement of its own beyond interpreting their documented exit codes/output.

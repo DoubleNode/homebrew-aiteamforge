@@ -7,6 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1177** — `kb-spacedock` now puts a time limit on every tool it runs (`aiteamforge doctor`,
+  `kb-recover`, `lcars-health-check.sh --status`, `kb-sweep-stubs`, and the Tailscale sysext/tunnel
+  probes in `verify-reboot`). Before this, one hung diagnostic hung the whole triage run, with no
+  findings, no findings file and no exit code. A timeout is now its own `unknown` finding naming the
+  tool, the limit and the env var to raise it, and the run continues. It uses GNU
+  `timeout`/`gtimeout` when installed (Homebrew coreutils; stock macOS has neither), otherwise a bash
+  3.2-safe fallback that kills the whole process group so no child is orphaned. Each tool's limit can
+  be overridden with `KB_SPACEDOCK_{DOCTOR,RECOVER,LCARS_HEALTH,SWEEP_STUBS,TAILSCALE}_TIMEOUT`. An
+  invalid or empty override falls back to the default and says so. The mandatory-teams skip message
+  now lists the paths it checked for the library.
+
 - **XACA-1175** — `auto-upgrade.sh`'s brew-not-found and tap-not-installed exits now log a completion
   marker (`FAILED: brew not found` / `SKIPPED: tap not installed`) before exiting. Previously they
   exited with no marker, so `kb-spacedock` saw a start with no matching complete and reported a
