@@ -397,18 +397,34 @@ BASELINE_DIR="$TEST_TMP_DIR/baseline"
 mkdir -p "$BASELINE_DIR/share"
 BASELINE_MODE=""
 
-test_start "E0: pre-fix negative-control baseline is available (ref or synthesized -- this must never skip)"
+test_start "E0: pre-fix negative-control baseline is available AND populated (ref or synthesized -- this must never skip)"
+_e0_rc=0
 if git -C "$TAP_ROOT" cat-file -e "${BASELINE_REF}^{commit}" 2>/dev/null; then
     BASELINE_MODE="ref:$BASELINE_REF"
-    git -C "$TAP_ROOT" archive "$BASELINE_REF" share | tar -x -C "$BASELINE_DIR"
-    test_pass
+    # Capture the archive's own status: under a plain pipe only tar's exit
+    # would be seen, and an empty/failed archive would leave an empty
+    # baseline that makes E1/E3 pass for the wrong reason (PR #907 review
+    # round 2, XACA-1231-015).
+    git -C "$TAP_ROOT" archive -o "$TEST_TMP_DIR/baseline.tar" "$BASELINE_REF" share || _e0_rc=$?
+    [ "$_e0_rc" -eq 0 ] && { tar -x -C "$BASELINE_DIR" -f "$TEST_TMP_DIR/baseline.tar" || _e0_rc=$?; }
 else
     BASELINE_MODE="synthesized (ref $BASELINE_REF unreachable in this clone -- shallow/depth-1 checkout?)"
-    cp -R "$TAP_ROOT/share/." "$BASELINE_DIR/share/"
-    if [ -d "$BASELINE_DIR/share/terminals/finance" ]; then
+    cp -R "$TAP_ROOT/share/." "$BASELINE_DIR/share/" || _e0_rc=$?
+    if [ "$_e0_rc" -eq 0 ] && [ -d "$BASELINE_DIR/share/terminals/finance" ]; then
         mkdir -p "$TEST_TMP_DIR/synth-excluded"
-        mv "$BASELINE_DIR/share/terminals/finance" "$TEST_TMP_DIR/synth-excluded/finance-terminals"
+        mv "$BASELINE_DIR/share/terminals/finance" "$TEST_TMP_DIR/synth-excluded/finance-terminals" || _e0_rc=$?
     fi
+fi
+# Positive anchors: both held at the pre-fix ref (d1d57eb) and hold in any
+# synthesized baseline -- another team's logos and finance's own personas.
+# An empty or half-extracted baseline cannot satisfy them.
+if [ "$_e0_rc" -ne 0 ]; then
+    test_fail "baseline build failed (rc=$_e0_rc, mode: $BASELINE_MODE)"
+elif ! ls "$BASELINE_DIR/share/terminals/academy/logos/"*.png >/dev/null 2>&1; then
+    test_fail "baseline has no share/terminals/academy/logos/*.png -- not a real share/ tree (mode: $BASELINE_MODE)"
+elif ! ls "$BASELINE_DIR/share/personas/finance/avatars/"*.png >/dev/null 2>&1; then
+    test_fail "baseline has no share/personas/finance/avatars/*.png -- not a real share/ tree (mode: $BASELINE_MODE)"
+else
     test_pass
 fi
 echo "     E0 mode: $BASELINE_MODE"
