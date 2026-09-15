@@ -14,9 +14,13 @@
 # Writes agent data to kanban/tmp/lcars-agent-{team}.json for the LCARS server
 # to serve via GET /api/agent-panel (falls back to /tmp/ if unavailable)
 #
+# An unmapped "<team>:<developer_name>" pair still writes the panel JSON (with
+# an empty avatar) and warns on stderr. It must never return early: callers
+# discard output, so a silent skip leaves the panel on "waiting" (XACA-1220).
+#
 # Returns:
-#   0 - Success
-#   1 - Error (invalid arguments)
+#   0 - Success (including the unmapped-avatar case above)
+#   1 - Error (invalid arguments — team or developer_name empty)
 
 # Source the shared LCARS tmp dir helper (resolve path relative to this script).
 # Must work whether sourced from zsh or bash — zsh's ${0:A:h} modifier isn't
@@ -136,7 +140,23 @@ display_agent_avatar() {
         "medical:Dr. Eric Foreman") avatar_codename="foreman" ;;
         "medical:Dr. Lisa Cuddy") avatar_codename="cuddy" ;;
 
-        *) return 0 ;;
+        # Space Dock team. Codenames must match the shipped
+        # spacedock_<codename>_avatar.png files (no hyphens: serve_image regex).
+        # No amb_handle: these are distinct crew from the ios/android/firebase
+        # personas that own captain-sisko/geordi-laforge/spock/scotty.
+        "spacedock:Captain Benjamin Sisko") avatar_codename="sisko" ;;
+        "spacedock:Geordi La Forge") avatar_codename="geordi" ;;
+        "spacedock:Spock") avatar_codename="spock" ;;
+        # Glob: the installer embeds the persona's double quotes unescaped, so
+        # this arrives as `Montgomery Scotty Scott`, `Montgomery 'Scotty' Scott`
+        # or `Montgomery "Scotty" Scott` depending on the generating path.
+        spacedock:Montgomery\ *Scotty*\ Scott) avatar_codename="scotty" ;;
+
+        *)
+            # Never return early (XACA-1220): write the panel with an empty
+            # avatar, which agent-panel.html renders without an image request.
+            echo "display_agent_avatar: no avatar mapping for '${team}:${developer_name}' — writing panel data without an avatar (add an arm in display-agent-avatar.sh)" >&2
+            ;;
     esac
 
     # Validate AMB handle — only include if agent is registered in centralized config

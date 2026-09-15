@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1220** — `display-agent-avatar.sh` mirror: Space Dock avatar arms and unmapped agent pairs
+  now write panel JSON with an empty avatar and warn on stderr instead of silently exiting.
+
 - **XACA-1177** — `kb-spacedock` now puts a time limit on every tool it runs (`aiteamforge doctor`,
   `kb-recover`, `lcars-health-check.sh --status`, `kb-sweep-stubs`, and the Tailscale sysext/tunnel
   probes in `verify-reboot`). Before this, one hung diagnostic hung the whole triage run, with no
