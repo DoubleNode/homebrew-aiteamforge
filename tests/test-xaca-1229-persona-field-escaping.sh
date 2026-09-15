@@ -17,12 +17,14 @@
 #       generators, and refuses (skips, with a stderr warning naming
 #       XACA-1229) any persona whose field contains a control character
 #       rather than emit it unsafely;
-#   (b) pre-quotes each of the 10 banner send-keys args individually via
-#       `printf %q` (the same LC_ALL=C /bin/bash -c 'printf %q' mechanism as
-#       XACA-1215's _SESSION_DIRECTORY_Q) so the pane's own zsh, which
+#   (b) pre-quotes each of the 10 banner send-keys args (and XACA-1215's
+#       _SESSION_DIRECTORY_Q) with `_xaca1229_q`, which emits a byte-wise
+#       ANSI-C `$'...'` token: [A-Za-z0-9], space and ._-,/:@+ literal, every
+#       other byte a \NNN octal escape (od/awk). The pane's own zsh, which
 #       RE-PARSES the retyped send-keys string a second time, reconstructs
-#       exactly one literal argument per field instead of letting an
-#       embedded " / $() / backtick split or execute;
+#       exactly one literal argument per field. An embedded " / $() /
+#       backtick can't split or execute, and # ~ = can't glob or expand.
+#       Review round 1 replaced `printf %q`, which left those three bare;
 #   (c) the zshrc generator's @developer/@claude_agent double-quoted tmux
 #       args and SESSION_TITLE single-quoted assignment get the matching
 #       (double- vs single-quote) escaping.
@@ -338,7 +340,11 @@ FM_DESC_HOSTILE='Space Dock Analysis - Zoë 日本 Ops'
 # unless something is broken.
 CI_NAME_SULU='=SysAdmin Override'
 CI_ROLE_CSHARP='C# Engineer'
-CI_LOCATION_TILDE='~Ops Console'
+# `~root/...`, not `~Ops ...`: zsh only tilde-expands a `~user` prefix that
+# names a real user and ends at `/` or end-of-word. The escaped space in a
+# `~Ops Console` %q token stopped that lookup, so the fixture could not
+# detect a revert (XACA-1229-016). root exists on every macOS/Linux runner.
+CI_LOCATION_TILDE='~root/Ops Console'
 FM_DESC_SULU='Space Dock Navigation - Helm & Sensor Ops'
 
 PERSONAS_DIR="$AITEAMFORGE_DIR/spacedock/personas/agents"

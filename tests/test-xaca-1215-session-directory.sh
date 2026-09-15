@@ -947,8 +947,9 @@ fi
 #
 # G8: drives the ACTUAL generated script's send-keys pane input through the
 # real pane shells (zsh, then /bin/bash) to prove the XACA-1215-015 fix (the
-# printf %q re-quote) survives the SECOND parse a pane's interactive shell
-# performs on typed text.
+# single-token re-quote of SESSION_DIRECTORY -- originally `printf %q`, since
+# XACA-1229-013 the byte-wise octal `$'...'` `_xaca1229_q` helper) survives the
+# SECOND parse a pane's interactive shell performs on typed text.
 # ═══════════════════════════════════════════════════════════════════════════
 
 G_PWNED_SENTINEL="$TEST_TMP_DIR/case-g-PWNED"
@@ -1304,10 +1305,11 @@ G9EXTPYEOF
     # directory, run it under the same argv-preserving stub tmux (G8_STUB_BIN,
     # already built above), and recover the exact "cd ..." line it sent to
     # send-keys. This exercises install-team.sh's actual
-    # `_SESSION_DIRECTORY_Q=$(LC_ALL=C /bin/bash -c ...)` line — a
-    # hand-rolled duplicate of that line in this test file would keep
-    # passing even if the real fix regressed back to the ineffective
-    # in-process `LC_ALL=C printf %q` form.
+    # `_SESSION_DIRECTORY_Q=$(_xaca1229_q ...)` line (XACA-1229-013: byte-wise
+    # octal `$'...'` via od/awk; XACA-1215-019 originally used
+    # `LC_ALL=C /bin/bash -c 'printf %q'`). A hand-rolled duplicate of that
+    # line in this test file would keep passing even if the real fix
+    # regressed back to the ineffective in-process `LC_ALL=C printf %q` form.
     _g9_real_cd_line() {
         local dir="$1" label="$2"
         local atf="$TEST_TMP_DIR/case-g9-atf-$label"
@@ -1318,8 +1320,8 @@ G9EXTPYEOF
         local log="$TEST_TMP_DIR/case-g9-tmux-$label.log"
         : > "$log"
         # LANG/LC_ALL=en_US.UTF-8 here (not just inside install-team.sh's own
-        # fixed line) matters for MUTATION-SENSITIVITY: the fixed form forces
-        # its own subprocess's locale regardless of this ambient value, but a
+        # fixed line) matters for MUTATION-SENSITIVITY: the fixed form is
+        # locale-independent (od/awk under LC_ALL=C), but a
         # regression back to the ineffective in-process `LC_ALL=C printf %q`
         # builtin form inherits ITS classification from whatever locale THIS
         # generated script process itself started under — without forcing
@@ -1332,10 +1334,11 @@ G9EXTPYEOF
         # masks the in-process `LC_ALL=C printf %q` regression entirely
         # (bash 5's %q is locale-correct either way), so a bare `bash
         # "$script"` here would make this whole case mutation-BLIND on
-        # exactly the machines most likely to run it. install-team.sh's own
-        # fix hardcodes /bin/bash for the same reason (its output must not
-        # depend on PATH ordering); this harness has to match that to
-        # actually exercise the failure mode the fix targets.
+        # exactly the machines most likely to run it. This harness has to
+        # pin /bin/bash to actually exercise the failure mode the fix targets. (The original
+        # XACA-1215-019 fix hardcoded /bin/bash for that reason. The
+        # XACA-1229 od/awk helper doesn't use bash's %q, but a regression to
+        # either %q form still only shows up under /bin/bash 3.2.)
         env -u TMUX -u TMUX_PANE -u TMUX_SOCKET \
             LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
             HOME="$G9_HOME" AITEAMFORGE_DIR="$atf" PATH="$G8_STUB_BIN:$PATH" \
