@@ -39,6 +39,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   now write panel JSON with an empty avatar and warn on stderr instead of silently exiting.
   Sourcing the helper no longer calls it: the zsh executed-vs-sourced guard was always true inside a
   banner, which would have warned and written `lcars-agent-<THEME>.json` on every launch.
+  Review round 1: `lcars-ui/agent-panel.html` shows initials when no avatar is mapped (and clears a previous
+  agent's photo); the warning fires only for teams that already have arms; 20 persona-name arms added for 7 teams.
 
 - **XACA-1177** — `kb-spacedock` now puts a time limit on every tool it runs (`aiteamforge doctor`,
   `kb-recover`, `lcars-health-check.sh --status`, `kb-sweep-stubs`, and the Tailscale sysext/tunnel

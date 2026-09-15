@@ -60,6 +60,19 @@
         object-fit: cover;
         border-radius: 30px;
     }
+    /* No avatar mapped (XACA-1220): initials instead of a broken-image box */
+    .avatar-initials {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 64px;
+        font-weight: 700;
+        letter-spacing: 2px;
+        color: var(--theme-color);
+    }
+    .avatar-initials[hidden] { display: none; }
     .developer-name {
         font-size: 16px;
         font-weight: 700;
@@ -227,7 +240,8 @@
 
     <div id="content" style="display:none; width:100%; display:flex; flex-direction:column; align-items:center;">
         <div class="avatar-frame">
-            <img id="avatar" src="" alt="Agent Avatar">
+            <img id="avatar" alt="Agent Avatar" hidden>
+            <div class="avatar-initials" id="avatar-initials" aria-hidden="true" hidden></div>
         </div>
         <div class="developer-name" id="developer"></div>
         <div class="role" id="role"></div>
@@ -324,8 +338,22 @@
         const hostLabel = document.getElementById('hostname-label');
         hostLabel.textContent = data.hostname ? '@ ' + data.hostname : '';
 
-        if (data.avatar && data.team) {
-            const img = document.getElementById('avatar');
+        const img = document.getElementById('avatar');
+        const initialsEl = document.getElementById('avatar-initials');
+        if (!(data.avatar && data.team)) {
+            // Clear any previous agent's photo so it never shows under this name.
+            img.removeAttribute('src');
+            img.onerror = null;
+            img.hidden = true;
+            initialsEl.textContent = (data.developer || '')
+                .replace(/["'()]/g, '').split(/\s+/).filter(Boolean)
+                .filter((w, i, a) => i === 0 || i === a.length - 1)
+                .map(w => w.charAt(0).toUpperCase()).join('');
+            initialsEl.hidden = false;
+        } else {
+            img.hidden = false;
+            initialsEl.hidden = true;
+            img.alt = data.developer || 'Agent Avatar';
             const newSrc = '/images/' + data.team + '_' + data.avatar + '_avatar.png';
             if (img.src !== newSrc && !img.src.endsWith(newSrc)) {
                 img.src = newSrc;

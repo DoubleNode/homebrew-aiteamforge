@@ -15,12 +15,14 @@
 # to serve via GET /api/agent-panel (falls back to /tmp/ if unavailable)
 #
 # An unmapped "<team>:<developer_name>" pair still writes the panel JSON (with
-# an empty avatar) and warns on stderr. It must never return early: callers
-# discard output, so a silent skip leaves the panel on "waiting" (XACA-1220).
+# an empty avatar), warning on stderr only if the team has other arms. It must
+# never return early: callers discard output, so a silent skip leaves the panel
+# on "waiting" (XACA-1220).
 #
 # Returns:
 #   0 - Success (including the unmapped-avatar case above)
-#   1 - Error (invalid arguments — team or developer_name empty)
+#   1 - Error (invalid arguments — team or developer_name empty, or team /
+#       SESSION_CODE containing "/")
 
 # Source the shared LCARS tmp dir helper (resolve path relative to this script).
 # Must work whether sourced from zsh or bash — zsh's ${0:A:h} modifier isn't
@@ -34,6 +36,8 @@ else
     SCRIPT_DIR="${0:A:h}"
 fi
 source "${SCRIPT_DIR}/lcars-tmp-dir.sh"
+# Captured now: callers reuse SCRIPT_DIR for their own paths.
+_DAA_SELF="${SCRIPT_DIR}/display-agent-avatar.sh"
 
 display_agent_avatar() {
     local team="${1}"
@@ -41,6 +45,10 @@ display_agent_avatar() {
 
     # Validate required arguments
     if [[ -z "$team" || -z "$developer_name" ]]; then
+        return 1
+    fi
+    # team / SESSION_CODE become part of the panel file name
+    if [[ "$team" == */* || "${SESSION_CODE:-}" == */* ]]; then
         return 1
     fi
 
@@ -54,6 +62,10 @@ display_agent_avatar() {
         "academy:Commander Jett Reno") avatar_codename="reno"; amb_handle="jett-reno" ;;
         "academy:Lura Thok"|"academy:Cadet Master Thok"|"academy:Thok") avatar_codename="thok"; amb_handle="lura-thok" ;;
         "academy:The Doctor (EMH)"|"academy:EMH Training Officer"|"academy:Emergency Medical Hologram") avatar_codename="emh"; amb_handle="the-doctor-emh" ;;
+        # Persona **Name:** forms the tap installer embeds (XACA-1220). The
+        # "Scotty"/"Bones"/"Trip" quotes arrive stripped (unescaped embedding).
+        "academy:The Doctor (EMH Mark I)") avatar_codename="emh"; amb_handle="the-doctor-emh" ;;
+        "academy:Lal") ;;  # no avatar image yet: panel shows initials, no warning
 
         # iOS team (TNG)
         "ios:Captain Jean-Luc Picard") avatar_codename="picard"; amb_handle="captain-picard" ;;
@@ -63,6 +75,12 @@ display_agent_avatar() {
         "ios:Counselor Deanna Troi") avatar_codename="deanna"; amb_handle="counselor-troi" ;;
         "ios:Dr Beverly Crusher"|"ios:Dr. Beverly Crusher"|"ios:Doctor Beverly Crusher") avatar_codename="beverly"; amb_handle="beverly-crusher" ;;
         "ios:Wesley Crusher") avatar_codename="wesley"; amb_handle="wesley-crusher" ;;
+        "ios:Jean-Luc Picard") avatar_codename="picard"; amb_handle="captain-picard" ;;
+        "ios:Data") avatar_codename="data"; amb_handle="lt-cmdr-data" ;;
+        "ios:Geordi La Forge") avatar_codename="geordi"; amb_handle="geordi-laforge" ;;
+        "ios:Worf") avatar_codename="worf"; amb_handle="batleth" ;;
+        "ios:Deanna Troi") avatar_codename="deanna"; amb_handle="counselor-troi" ;;
+        "ios:Beverly Crusher") avatar_codename="beverly"; amb_handle="beverly-crusher" ;;
 
         # Android team (TOS)
         "android:Captain James T. Kirk") avatar_codename="kirk"; amb_handle="kirk" ;;
@@ -72,6 +90,8 @@ display_agent_avatar() {
         "android:Lieutenant Hikaru Sulu") avatar_codename="sulu"; amb_handle="sulu" ;;
         "android:Ensign Pavel Chekov") avatar_codename="chekov"; amb_handle="chekov" ;;
         "android:Dr. Leonard McCoy"|"android:Doctor Leonard McCoy") avatar_codename="mccoy"; amb_handle="mccoy" ;;
+        android:Montgomery\ *Scotty*\ Scott) avatar_codename="scotty"; amb_handle="scotty" ;;
+        android:Dr.\ Leonard\ *Bones*\ McCoy) avatar_codename="mccoy"; amb_handle="mccoy" ;;
 
         # Firebase team (DS9)
         "firebase:Commander Benjamin Sisko"|"firebase:Captain Benjamin Sisko") avatar_codename="sisko"; amb_handle="captain-sisko" ;;
@@ -81,12 +101,19 @@ display_agent_avatar() {
         "firebase:Dr. Julian Bashir"|"firebase:Doctor Julian Bashir") avatar_codename="bashir"; amb_handle="bashir" ;;
         "firebase:Constable Odo") avatar_codename="odo"; amb_handle="constable-odo" ;;
         "firebase:Quark") avatar_codename="quark"; amb_handle="quark" ;;
+        "firebase:Benjamin Sisko") avatar_codename="sisko"; amb_handle="captain-sisko" ;;
+        "firebase:Kira Nerys") avatar_codename="kira"; amb_handle="kira-nerys" ;;
+        "firebase:Miles Edward O'Brien") avatar_codename="obrien"; amb_handle="chief-obrien" ;;
+        "firebase:Jadzia Dax") avatar_codename="dax"; amb_handle="dax" ;;
+        "firebase:Julian Bashir") avatar_codename="bashir"; amb_handle="bashir" ;;
+        "firebase:Odo") avatar_codename="odo"; amb_handle="constable-odo" ;;
 
         # Finance team (Ferengi Commerce Authority)
         "finance:Grand Nagus Zek") avatar_codename="zek"; amb_handle="grand-nagus-zek" ;;
         "finance:Quark") avatar_codename="quark-fin"; amb_handle="quark-fin" ;;
         "finance:Nog") avatar_codename="nog"; amb_handle="nog" ;;
         "finance:Brunt") avatar_codename="brunt"; amb_handle="brunt-fca" ;;
+        "finance:Brunt, FCA (Ferengi Commerce Authority)") avatar_codename="brunt"; amb_handle="brunt-fca" ;;
         "finance:Rom") avatar_codename="rom"; amb_handle="rom" ;;
 
         # Command team (Starfleet Command)
@@ -114,10 +141,13 @@ display_agent_avatar() {
         "dns:Dr. T'Ana") avatar_codename="tana" ;;
         "dns:Lt. Shaxs") avatar_codename="shaxs" ;;
         "dns:Commander Ransom") avatar_codename="ransom" ;;
+        "dns:Lieutenant Shaxs") avatar_codename="shaxs" ;;
+        "dns:Commander Jack Ransom") avatar_codename="ransom" ;;
 
         # Freelance team (Enterprise)
         "freelance:Captain Jonathan Archer") avatar_codename="archer"; amb_handle="captain-archer" ;;
         "freelance:Commander Charles 'Trip' Tucker III") avatar_codename="tucker"; amb_handle="tucker" ;;
+        freelance:Commander\ Charles\ *Trip*\ Tucker\ III) avatar_codename="tucker"; amb_handle="tucker" ;;
         "freelance:Sub-Commander T'Pol") avatar_codename="tpol"; amb_handle="tpol" ;;
         "freelance:Dr. Phlox") avatar_codename="phlox"; amb_handle="phlox" ;;
         "freelance:Lieutenant Malcolm Reed") avatar_codename="reed"; amb_handle="reed" ;;
@@ -154,8 +184,17 @@ display_agent_avatar() {
 
         *)
             # Never return early (XACA-1220): write the panel with an empty
-            # avatar, which agent-panel.html renders without an image request.
-            echo "display_agent_avatar: no avatar mapping for '${team}:${developer_name}' — writing panel data without an avatar (add an arm in display-agent-avatar.sh)" >&2
+            # avatar, which agent-panel.html renders as initials. Warn only for
+            # a team that has arms here (a missing station); a custom consumer
+            # team has none and would otherwise warn on every banner launch.
+            case "$team" in
+                *[!a-z0-9_-]*) ;;
+                *)
+                    if grep -Eq "^[[:space:]]*\"?${team}:" "${_DAA_SELF:-}" 2>/dev/null; then
+                        echo "display_agent_avatar: no avatar mapping for '${team}:${developer_name}' — panel will show initials (add an arm in scripts/display-agent-avatar.sh)" >&2
+                    fi
+                    ;;
+            esac
             ;;
     esac
 
