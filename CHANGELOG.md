@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.20.14] - 2026-09-15
+
 - **XACA-1217** — three tap-only test suites no longer orphan helper processes or resume after a signal
   (the XACA-1214 defect class). `test-xaca-1113-012-msg-fail-closed.sh`: `trap cleanup EXIT INT TERM`
   resumed the suite after TERM/INT (the handler returned); it is now `trap cleanup EXIT` plus
@@ -6228,7 +6230,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.13...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.14...HEAD
+[0.20.14]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.13...v0.20.14
 [0.20.13]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.12...v0.20.13
 [0.20.12]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.11...v0.20.12
 [0.20.11]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.10...v0.20.11
