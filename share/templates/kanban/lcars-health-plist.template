@@ -8,13 +8,19 @@
   Rendered by:       install_lcars_health_launchagent() in
                       homebrew-tap/libexec/installers/install-kanban.sh (fresh
                       install; its sed chain resolves only USER_HOME and
-                      AITEAMFORGE_DIR) AND _render_launchagent_template() in
+                      AITEAMFORGE_DIR); _render_launchagent_template() in
                       homebrew-tap/libexec/lib/launchagents.sh (aiteamforge
-                      upgrade / doctor fix; full chain). Every placeholder
-                      below is AITEAMFORGE_DIR, the one token BOTH renderers
-                      resolve. Token names in this comment appear WITHOUT
-                      doubled braces on purpose, so a "no surviving
-                      placeholder" render gate cannot match the comment.
+                      upgrade / doctor fix; full chain); AND, separately,
+                      _render_kanban_template() in
+                      homebrew-tap/libexec/commands/aiteamforge-migrate.sh
+                      (aiteamforge migrate — its own independent
+                      implementation, opt-in: only re-renders a plist that is
+                      already installed, never materializes a new one).
+                      Every placeholder below is AITEAMFORGE_DIR, the one
+                      token ALL THREE renderers resolve. Token names in this
+                      comment appear WITHOUT doubled braces on purpose, so a
+                      "no surviving placeholder" render gate cannot match the
+                      comment.
 
   ── PROVENANCE (XACA-1233-013) ─────────────────────────────────────────
   Until XACA-1233-013 this template was TAP-NATIVE (no dev-team canonical,
@@ -52,11 +58,23 @@
   job and host-ready-plist.template.
 
   Transition safety: a box whose plist predates this template sets no
-  LCARS_HEALTH_LOG, so the refreshed script keeps rotating /tmp — exactly
-  where that old plist still writes. `aiteamforge upgrade` refreshes the
-  script (update_aux_scripts) BEFORE re-rendering this plist
-  (update_launchagents), which rewrites an existing plist whenever the
-  render differs.
+  LCARS_HEALTH_LOG, so the still-old script keeps rotating /tmp — exactly
+  where that old plist still writes. That is the common, safe case, not a
+  guarantee for every order: `aiteamforge upgrade` runs update_aux_scripts
+  before update_launchagents, but the two are gated differently —
+  update_aux_scripts only refreshes the script when the shipped copy is
+  newer than the installed one ([ "$source" -nt "$target" ]), while
+  update_launchagents re-renders this plist on a content diff. A single
+  upgrade run can therefore advance the plist without the script. Running
+  `aiteamforge doctor` with its fix flag can also render a missing plist
+  from a newer Cellar template without ever touching the script, and
+  `aiteamforge migrate` re-renders an
+  already-installed plist (its own separate renderer, see "Rendered by"
+  above) with no aux-script refresh step at all. In that split state the
+  install-root sink grows unrotated (the old script only knows /tmp) until
+  the script itself is later refreshed — degraded and bounded, never a
+  crossed write, but not self-healing on any fixed schedule. Full reasoning
+  and the transition table: docs/xaca-0787-plist-log-paths.md.
 -->
 <plist version="1.0">
 <dict>

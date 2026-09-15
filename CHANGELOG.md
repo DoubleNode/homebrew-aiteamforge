@@ -44,7 +44,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `scripts/templates/lcars-health-plist.template`; previously tap-native): `StandardOutPath` and
   `StandardErrorPath` move from `/tmp/lcars-health.log` / `/tmp/lcars-health-error.log` to
   `{{AITEAMFORGE_DIR}}/lcars-health.log`, and a new `EnvironmentVariables:LCARS_HEALTH_LOG` passes that same path.
-  `share/scripts/lcars-health-check.sh` rotates `$LCARS_HEALTH_LOG` when it is set, and otherwise keeps the `/tmp`
+  `share/scripts/lcars-health-check.sh` rotates `$LCARS_HEALTH_LOG` when it is set to an absolute file path, and otherwise keeps the `/tmp`
   default, so a plist that `aiteamforge upgrade` has not yet re-rendered stays consistent. This ends the shared
   sink with the dev-native `com.devteam.lcars-health` job. `share/templates/kanban/kanban-helpers.template.sh`
   `lcars-logs` now tails the most recently written of the two sinks. Mirror of dev-team canonical

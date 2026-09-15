@@ -179,6 +179,26 @@ done
 # kill-server), so pointing at the shared team socket is non-destructive:
 # it either no-ops (session already present) or adds a new session
 # alongside whatever else already lives on that socket.
+#
+# _hc_heal_noncanonical_port (XACA-0706 self-heal, below) is a SEPARATE
+# consumer of tmux_socket and is NOT non-destructive: on that path it runs
+# `kill-session -t "<session_name>"` against the socket. Before this fix
+# that call ran against the nonexistent per-instance socket for finance/legal
+# and was a silent no-op (has-session already failing meant kill-session did
+# too); with the corrected shared socket it now really can kill the live
+# finance-personal-lcars / legal-coparenting-lcars session on the team's
+# shared tmux server whenever a non-canonical-port heal actually fires for
+# that row. This is the intended XACA-0706 behavior (kill the stale session
+# before _hc_start_lcars_server recreates it), and it stays scoped to
+# exactly that one session — tmux's `-t <name>` target here is an EXACT
+# match, not a prefix/glob (verified: a sibling session sharing the target
+# as a literal prefix, e.g. "finance-personal-lcars-old", is untouched by
+# `kill-session -t finance-personal-lcars`, under both the `-S <path>` and
+# `-L <name>` invocation forms this function uses). No kill-server, no
+# pattern kill — only the one named session on the one named socket. It is
+# new reachable behavior for these two rows specifically (previously a
+# no-op because the socket was wrong), not new behavior for the mechanism
+# itself, which already ran this way for every other team.
 declare -a _LCARS_INFRA=(
     "8443:ios:ios:ios-lcars"
     "8444:android:android:android-lcars"
