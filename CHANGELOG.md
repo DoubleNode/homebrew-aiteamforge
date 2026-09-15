@@ -13,6 +13,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `/images/finance_*_logo.png`; setup's team-image-asset copy and `aiteamforge-upgrade.sh`'s
   `update_team_image_assets` both discover teams dynamically via `ls -d share/terminals/*/logos`, so no
   other manifest needed a finance entry. Mirror of dev-team canonical `finance/terminals/logos/`.
+  Regression coverage: `tests/test-xaca-1231-finance-logos.sh` proves consumer delivery, not just
+  presence in `share/` — shipped-content and 256px dimensions, a class guard measured across every
+  shipped team (avatars imply logos, every logo ≤256px), setup's copy loop and
+  `update_team_image_assets` both landing the 6 files byte-identical to `share/`, and a negative
+  control against the pre-fix tap ref that must (and does) deliver zero finance logos.
 - **XACA-1232** — dns terminal logos and persona avatars now ship in the tap. 8 `dns_*_logo.png`
   files under `share/terminals/dns/logos/` and 14 avatar files (7 `dns_*_avatar.png` + 7
   `dns_*_avatar_thumb.png`) under `share/personas/dns/avatars/`, byte-identical mirrors of

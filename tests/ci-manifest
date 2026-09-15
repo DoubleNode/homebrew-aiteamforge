@@ -145,3 +145,4 @@ test-xaca-1215-session-directory.sh             plain-shell
 test-xaca-1216-flat-persona-deploy.sh           plain-shell
 test-xaca-1221-upgrade-image-assets.sh          plain-shell
 test-xaca-1222-brew-guard.sh                    plain-shell
+test-xaca-1231-finance-logos.sh                 plain-shell
