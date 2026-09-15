@@ -70,6 +70,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   dev-team canonical; `share/scripts/package.json` test list updated.
 
 ## [0.20.14] - 2026-09-15
+- **XACA-1225** — a fresh `fleet=skip` consumer can now provision cross-machine kb-msg with no hand steps
+  (measured on M1Mini, v0.20.13, where all three gaps needed manual fixes). (1) Client Node deps:
+  new `libexec/lib/msg-client-deps.sh` runs `npm ci --omit=dev` in `$AITEAMFORGE_DIR/scripts` from the shipped
+  lockfile. Setup (`install-shell.sh`) and upgrade (`update_msg_client_deps`) share this one function. It
+  skips when the lockfile stamp matches and is fail-soft when node/npm is absent. (2) Relay pull: the
+  `com.aiteamforge.fleet-reporter` LaunchAgent now installs regardless of fleet mode (`ensure_msg_relay_reporter`,
+  setup + `update_msg_relay_reporter`), with node's resolved bin dir baked into the plist `PATH`
+  (`{{REPORTER_PATH}}`). Uninstall now removes that plist. `share/scripts/fleet-reporter.sh` only pulls on an
+  unconfigured box, and still pulls when a status POST fails. (3) Inbox hook: `share/scripts/msg-inbox-check.sh`
+  ships (installer helper loop, `validate-install.sh`, upgrade mandatory-materialize list).
+  `share/scripts/kb-msg-provision` registers it under SessionStart + Stop at a fixed path. The doctor row in
+  `kanban-helpers.template.sh` names that fix instead of `[BLOCKED]`. `kb-msg-provision` also refuses keygen
+  with an actionable message when the login Keychain probe reports it locked. New suites:
+  `test-xaca-1225-001-msg-client-deps.sh`, `test-xaca-1225-002-msg-relay-reporter.sh`,
+  `test-xaca-1225-msg-inbox-check-shipping.sh`.
 
 - **XACA-1217** — three tap-only test suites no longer orphan helper processes or resume after a signal
   (the XACA-1214 defect class). `test-xaca-1113-012-msg-fail-closed.sh`: `trap cleanup EXIT INT TERM`

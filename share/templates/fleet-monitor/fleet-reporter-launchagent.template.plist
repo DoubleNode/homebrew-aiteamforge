@@ -22,7 +22,20 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- XACA-1225-002: the REPORTER_PATH token just below (both braces
+             deliberately NOT written literally in this comment — sed's
+             substitution for it is global across the whole file, so writing
+             it in full here would corrupt THIS COMMENT with the rendered
+             PATH value too) carries the FULL PATH value: node's resolved
+             bin dir, if found at install time, prepended to the standard
+             Homebrew/system fallback. It is NOT a bare node-dir placeholder
+             concatenated with a literal ':' in this template — doing that
+             concatenation in the installer instead avoids ever rendering a
+             leading ':' here when node isn't found (an empty leading PATH
+             component means "current directory", which must never leak
+             into a LaunchAgent's PATH). See install_fleet_reporter_launchagent()
+             in install-fleet-monitor.sh. -->
+        <string>{{REPORTER_PATH}}</string>
         <key>HOME</key>
         <string>{{USER_HOME}}</string>
         <key>AITEAMFORGE_DIR</key>

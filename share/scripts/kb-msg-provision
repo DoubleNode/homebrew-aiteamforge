@@ -192,6 +192,169 @@ def has_private_key(keygen_js, slug):
     return val == "true"
 
 
+# ── Locked/unavailable login Keychain detection (XACA-1225-004) ────────────
+#
+# vault-keygen.js's chooseKeyStorageBackend() picks 'keychain' when
+# process.platform === 'darwin' AND the `security` CLI is present, 'file'
+# otherwise (fleet-monitor/client/vault-keygen.js:578-589, read-only here —
+# XACA-1224 is live on that file and owns it; this module must not edit it
+# or echo its raw stderr). Outside a GUI login session (SSH, a headless
+# launchd job) the login Keychain cannot be unlocked interactively, so
+# `node vault-keygen.js` fails with a raw, uninterpretable `security` error.
+# These three functions detect that BEFORE node is ever invoked, so
+# kb-msg-provision can fail with its own actionable message instead of
+# forwarding the child's stderr (coordination requirement from the live
+# XACA-1224 session: never propagate vault-keygen's raw stderr/exception text).
+#
+# Coordinated wording/approach with XACA-1224 (2026-09-15): probe with
+# `security show-keychain-info`, never `security find-generic-password ... -w`
+# (which PRINTS the secret it looks up — not a probe, a leak).
+def _keychain_backend_would_be_used():
+    """True exactly when vault-keygen.js's own chooseKeyStorageBackend()
+    would pick 'keychain' — mirrors its logic without invoking node."""
+    return sys.platform == "darwin" and shutil.which("security") is not None
+
+
+def _keychain_probe_locked(path=None):
+    """Non-secret exit-status probe for the login keychain. Deliberately
+    `security show-keychain-info`, NOT `security find-generic-password ... -w`
+    — the latter prints the password it finds and must never be used as a
+    probe (orchestrator/XACA-1224 coordination). A nonzero exit, a timeout, or
+    a missing `security` binary are all treated as locked/unavailable — this
+    check fails toward the actionable message, never toward silently
+    proceeding into a raw `security` failure inside node.
+    """
+    if not shutil.which("security"):
+        return True
+    keychain_path = path or os.path.expanduser("~/Library/Keychains/login.keychain-db")
+    try:
+        out = subprocess.run(
+            ["security", "show-keychain-info", keychain_path],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return True
+    return out.returncode != 0
+
+
+def _login_keychain_unavailable():
+    """Combined locked/unavailable verdict for the macOS login Keychain.
+
+    Injectable via KB_MSG_PROVISION_KEYCHAIN_PROBE=locked|unlocked for tests
+    — tests must NEVER invoke the real `security`/`launchctl` binaries or
+    touch a real keychain; the override short-circuits both helpers above.
+    """
+    override = os.environ.get("KB_MSG_PROVISION_KEYCHAIN_PROBE")
+    if override is not None:
+        return override == "locked"
+    # The probe alone is the verdict. An earlier revision OR'd in a "no GUI
+    # session" heuristic (SSH markers, `launchctl managername` != Aqua). That
+    # false-positived on every agent-driven run on a box whose tmux servers
+    # are started detached (managername reports "Background" there while the
+    # login Keychain is unlocked), refusing keygen on exactly the machines
+    # this provisioning exists for. A probe that misses a locked keychain is
+    # safe: vault-keygen.js (XACA-1224) reports the same condition, without
+    # leaking the key, when its own Keychain write fails.
+    return _keychain_probe_locked()
+
+
+# ── kb-msg inbox hook registration on consumer machines (XACA-1225-003) ────
+#
+# kb-msg doctor used to name claude-hooks/setup-hooks.sh as the fix for an
+# unregistered inbox hook unconditionally, but setup-hooks.sh is dev-checkout
+# -only — it was never shipped to a tap consumer (XACA-1113-016), and neither
+# was the script the hook would invoke, msg-inbox-check.sh. Both now ship
+# (sync-tap.sh mirrors claude-hooks/msg-inbox-check.sh -> share/scripts/, and
+# the tap installer copies it to $AITEAMFORGE_DIR/scripts/, default
+# ~/aiteamforge/scripts/), so THIS module is now the consumer-side registrar
+# — the same role setup-hooks.sh plays for a dev checkout, via the same
+# mechanism (register-claude-hook.py, SessionStart + Stop).
+#
+# The registered command string is FIXED — always the default consumer
+# install root, ~/aiteamforge/scripts/msg-inbox-check.sh — and does NOT vary
+# with $AITEAMFORGE_DIR. This is deliberate, not an oversight: register-
+# claude-hook.py's own idempotency is keyed on the EXACT command string (see
+# claude-hooks/register-claude-hook.py's docstring; an opt-in fix for
+# path-variant duplicates is tracked separately at XACA-1171 and is
+# explicitly OUT OF SCOPE here — this module must not touch that logic). If
+# the registered string varied with an operator's $AITEAMFORGE_DIR override,
+# re-running provisioning under a different override would append a second,
+# functionally-identical registration rather than recognising the first —
+# exactly the duplicate-producing failure mode XACA-1171 already describes
+# for a different cause. Resolving the path ONCE, to the one fixed default,
+# is what keeps re-runs idempotent through register-claude-hook.py's
+# existing exact-string dedup, with no new logic needed there.
+def _consumer_inbox_hook_path():
+    return os.path.expanduser("~/aiteamforge/scripts/msg-inbox-check.sh")
+
+
+def _locate_register_claude_hook():
+    """Mirrors kb-msg doctor's own probe order (kanban-helpers.sh,
+    _kb_msg_doctor, XACA-1113-016) so the two tools agree on where this
+    lives in every layout."""
+    base = os.environ.get("AITEAMFORGE_DIR") or os.path.expanduser("~/dev-team")
+    candidates = [
+        os.path.join(base, "claude-hooks", "register-claude-hook.py"),
+        os.path.join(base, "scripts", "register-claude-hook.py"),
+        os.path.expanduser("~/aiteamforge/scripts/register-claude-hook.py"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _inbox_hook_status():
+    """Read-only classification, safe to call from --check.
+
+    Returns (status, command):
+      'absent'        no consumer copy of msg-inbox-check.sh here — this is
+                      a dev checkout (or an incomplete install); out of
+                      scope for this module, unchanged from before
+                      XACA-1225-003.
+      'no-registrar'  the consumer copy exists but register-claude-hook.py
+                      (or python3) could not be located/run.
+      'ok'            already registered under both SessionStart and Stop.
+      'missing'       consumer copy present, registrar available, not yet
+                      registered.
+    `command` is None for 'absent' and 'no-registrar'.
+    """
+    hook_path = _consumer_inbox_hook_path()
+    if not os.path.isfile(hook_path):
+        return "absent", None
+    reg = _locate_register_claude_hook()
+    if not reg or not shutil.which("python3"):
+        return "no-registrar", None
+    command = "bash %s" % hook_path
+    rc = subprocess.run(
+        ["python3", reg, "--check", "--quiet",
+         "--event", "SessionStart", "--event", "Stop", "--command", command],
+    ).returncode
+    return ("ok" if rc == 0 else "missing"), command
+
+
+def _provision_inbox_hook(dry_run):
+    """Register the kb-msg inbox hook on a consumer machine, idempotently.
+    A no-op wherever the consumer copy of msg-inbox-check.sh is absent (a
+    dev checkout: that machine's inbox hook is setup-hooks.sh's job,
+    unchanged by this function).
+
+    Returns one of: 'absent', 'no-registrar', 'ok' (already registered,
+    nothing to do), 'dry-run', 'registered', 'failed'.
+    """
+    status, command = _inbox_hook_status()
+    if status in ("absent", "no-registrar", "ok"):
+        return status
+    # status == "missing"
+    if dry_run:
+        return "dry-run"
+    reg = _locate_register_claude_hook()
+    rc = subprocess.run(
+        ["python3", reg, "--quiet",
+         "--event", "SessionStart", "--event", "Stop", "--command", command],
+    ).returncode
+    return "registered" if rc == 0 else "failed"
+
 
 FLEET_CONFIG = os.path.expanduser("~/.aiteamforge/fleet-config.json")
 
@@ -1168,6 +1331,15 @@ def main():
         missing = [t for t in loc if existing.get(t) != slug]
         if missing:
             gaps.append("%d local team(s) unmapped or mis-targeted: %s" % (len(missing), ", ".join(missing)))
+        # XACA-1225-003. 'absent' (no consumer copy of msg-inbox-check.sh —
+        # a dev checkout, setup-hooks.sh's job) and 'ok' (already registered)
+        # are both silent here: neither is a gap this run could or should
+        # report.
+        inbox_status, _ = _inbox_hook_status()
+        if inbox_status == "missing":
+            gaps.append("kb-msg inbox hook not registered (run: kb-msg-provision)")
+        elif inbox_status == "no-registrar":
+            gaps.append("kb-msg inbox hook: register-claude-hook.py not found — cannot register from here")
         if gaps:
             # XACA-1078-017 (PR #825 review round 2): a GAPS list is the REASON
             # for a non-zero exit, so it goes to stderr via _notice and survives
@@ -1187,6 +1359,28 @@ def main():
         if args.dry_run:
             say("\n  [dry-run] would generate a vault keypair for '%s'" % slug)
         else:
+            # XACA-1225-004: fail with our own actionable message BEFORE
+            # invoking node, rather than forwarding a raw `security` failure
+            # from inside vault-keygen.js when the login Keychain can't be
+            # unlocked in this session (e.g. over SSH). See the
+            # _login_keychain_unavailable() block above for the detection.
+            #
+            # Wording aligned with XACA-1224 (2026-09-15), which detects the
+            # same condition AFTER THE FACT inside vault-keygen.js by matching
+            # its own subprocess stderr against /-25308|interaction is not
+            # allowed/i (errSecInteractionNotAllowed) -- that is a different,
+            # complementary detection point (post-hoc, from the child's own
+            # failure) from this pre-check (prospective, via a non-secret
+            # `security show-keychain-info` probe run before node is ever
+            # invoked); this module must not read or propagate vault-keygen's
+            # stderr itself.
+            if _keychain_backend_would_be_used() and _login_keychain_unavailable():
+                _die_env(
+                    "the login Keychain is locked and cannot prompt for unlock "
+                    "in this session (no GUI / running over SSH). Unlock it "
+                    "first (e.g. `security unlock-keychain`) or run from a GUI "
+                    "session."
+                )
             say("\n  Generating vault keypair for '%s'..." % slug)
             cmd = ["node", keygen_js, "--machine-id", slug]
             if args.server:
@@ -1203,6 +1397,26 @@ def main():
             have_key = has_private_key(keygen_js, slug)
     elif not have_key:
         say("\n  Skipping keypair generation (--no-keygen). Tier 2 stays unavailable.")
+
+    # ── inbox hook (XACA-1225-003) ──
+    # Deliberately BEFORE the routing-map early return below: the routing map
+    # can already be fully correct (the common steady-state re-run) while the
+    # inbox hook has never been registered, and that early return must not
+    # skip the one chance to close it.
+    inbox_outcome = _provision_inbox_hook(args.dry_run)
+    if inbox_outcome == "dry-run":
+        say("  [dry-run] would register kb-msg inbox hook (SessionStart + Stop)")
+    elif inbox_outcome == "registered":
+        say("  Registered kb-msg inbox hook (SessionStart + Stop)")
+    elif inbox_outcome == "failed":
+        print(
+            "kb-msg-provision: inbox hook registration failed "
+            "(register-claude-hook.py exited non-zero) — run 'kb-msg doctor' for detail",
+            file=sys.stderr,
+        )
+    # 'absent' (no consumer copy of msg-inbox-check.sh here — a dev checkout,
+    # setup-hooks.sh's job, unchanged), 'no-registrar', and 'ok' (already
+    # registered) are all silent no-ops: nothing changed, nothing to report.
 
     # ── routing map ──
     if not added and not retargeted:

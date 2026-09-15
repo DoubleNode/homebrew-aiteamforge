@@ -117,6 +117,26 @@ load_config() {
     esac
 }
 
+# XACA-1225-002 (review round 2 self-fix): capture whether any of the
+# env-var fallback's own inputs were ORIGINALLY set, BEFORE load_config()
+# runs and overwrites FLEET_MODE/CENTRAL_API/CENTRAL_AUTH_TOKEN/LOCAL_PORT/
+# DASHBOARD_GROUP with their defaults (FLEET_MODE="${FLEET_MODE:-client}"
+# unconditionally sets the global FLEET_MODE, even when the original env var
+# was unset). _fleet_status_configured() runs inside main(), long after
+# load_config() has already executed at top level below — checking the
+# live vars there would see load_config()'s OWN defaults and read as
+# "configured" unconditionally, on every machine, defeating the check
+# entirely (measured while fixing this: a completely clean env with no
+# fleet-config.json/machine-identity.json/FLEET_* vars still reported
+# Fleet Mode: client and attempted a report). Snapshot the pre-load_config
+# answer once, here, into a var _fleet_status_configured() reads instead.
+_XACA1225_FLEET_ENV_CONFIGURED=false
+if [ -n "${FLEET_MODE:-}" ] || [ -n "${FLEET_MONITOR_API:-}" ] \
+    || [ -n "${FLEET_AUTH_TOKEN:-}" ] || [ -n "${FLEET_LOCAL_PORT:-}" ] \
+    || [ -n "${FLEET_DASHBOARD_GROUP:-}" ]; then
+    _XACA1225_FLEET_ENV_CONFIGURED=true
+fi
+
 # Load configuration
 load_config
 
@@ -2216,11 +2236,96 @@ pull_messages() {
 # MAIN
 # ============================================================================
 
+# XACA-1225-002: has this machine ever run install_fleet_monitor() for real?
+#
+# BACKGROUND: on a fleet=skip consumer (the tap's own non-interactive default
+# — see bin/aiteamforge-setup.sh Step 3: "fleet=skip (defaults)") there is no
+# fleet-config.json and no machine-identity.json, because install_fleet_monitor()
+# — the ONLY thing that writes either — returns early before ever reaching
+# create_fleet_reporter_config()/create_machine_identity() (see
+# install-fleet-monitor.sh's own NON_INTERACTIVE/INSTALL_FLEET_MONITOR guard
+# at the top of that function). load_config()'s environment-variable fallback
+# then silently defaults FLEET_MODE to "client" pointing API_ENDPOINT at
+# http://localhost:3000/api/status — a server that was never installed.
+#
+# Purely local, on-disk check — never network, matching _msg_has_vault_key's
+# own locality discipline above. Absence of BOTH files means nothing has ever
+# told this box where a server is. Presence does NOT mean install_fleet_monitor()
+# ran: kb-msg-provision also writes fleet-config.json (.centralServer.apiEndpoint,
+# the relay URL), so a provisioned fleet=skip consumer takes the configured
+# path below — which is why that path must still pull when the status POST
+# fails (see the send_status branch in main()). FLEET_CONFIG_FILE/MACHINE_IDENTITY_FILE
+# are computed once near the top of this script (before load_config runs),
+# so both are already resolved by the time main() calls this.
+#
+# REGRESSION FOUND DURING XACA-1225-006 TESTING, FIXED HERE: file presence is
+# not the ONLY way this reporter is told where to report. load_config()'s own
+# "environment variables (legacy support)" branch above reads FLEET_MODE,
+# FLEET_MONITOR_API, FLEET_AUTH_TOKEN, FLEET_LOCAL_PORT and
+# FLEET_DASHBOARD_GROUP directly from the environment whenever
+# FLEET_CONFIG_FILE is absent — a documented, pre-existing configuration path
+# with its own regression test (tests/test-xaca-0395-006-consumer-auth.sh
+# case 7, "fleet-reporter.sh sends Authorization header to a localhost
+# endpoint"), which sets HOME to a fresh sandbox with NO fleet-config.json/
+# machine-identity.json and configures purely via
+# FLEET_MODE=standalone/FLEET_LOCAL_PORT/FLEET_AUTH_TOKEN. Checking only the
+# two files made that legitimate env-var-only configuration
+# indistinguishable from "never configured" — the exact fleet=skip default
+# this function exists to detect — so the status POST (and its Authorization
+# header) was silently skipped for a machine that WAS told where to report,
+# just not via a file. Caught live: this case regressed the moment
+# _fleet_status_configured() shipped (measured via the local XACA-1225-006
+# regression run — the case failed with "Fleet status reporting not
+# configured on this machine" instead of sending the report). A machine
+# using neither a file nor any of these vars (the real fleet=skip default —
+# see R1 in tests/test-xaca-1225-002-msg-relay-reporter.sh, which explicitly
+# unsets all five before asserting the skip path) is unaffected: it still
+# takes the not-configured branch exactly as before.
+_fleet_status_configured() {
+    # The env-var arm reads the PRE-load_config() snapshot
+    # (_XACA1225_FLEET_ENV_CONFIGURED, captured just above load_config()'s own
+    # call site), never the live FLEET_MODE/etc. globals — those are
+    # unconditionally overwritten with defaults by load_config() long before
+    # this function ever runs (see that snapshot's own comment for the
+    # measured failure this avoids).
+    [ -f "$FLEET_CONFIG_FILE" ] || [ -f "$MACHINE_IDENTITY_FILE" ] \
+        || [ "${_XACA1225_FLEET_ENV_CONFIGURED:-false}" = "true" ]
+}
+
 main() {
     echo "=== Fleet Status Reporter ==="
     echo "Machine: $HOSTNAME ($IP_ADDRESS)"
     echo "Timestamp: $TIMESTAMP"
     echo ""
+
+    # XACA-1225-002: on a machine that never ran install_fleet_monitor() (see
+    # _fleet_status_configured's own header just above for the full
+    # rationale), this reporter previously did two wrong things every 60s
+    # cycle: (1) burned 3 retries x a 5s backoff POSTing a status report to a
+    # phantom http://localhost:3000/api/status that was never installed, and
+    # (2) — because main() used to `exit 1` the instant send_status failed —
+    # NEVER REACHED pull_messages() at all, so the kb-msg Tier-2 relay pull
+    # this reporter exists to run on a fleet=skip box (XACA-1225-002) never
+    # ran either. `kb-msg doctor` reported "receive path: never attempted a
+    # pull" on every such box, permanently.
+    #
+    # On the "never configured" path below, this reporter cycle does ONLY the
+    # kb-msg pull — no status POST is attempted at all, so there is no
+    # phantom-endpoint retry/log spam, and pull_messages() always gets to run.
+    #
+    # A machine with a fleet-config.json (install_fleet_monitor() OR
+    # kb-msg-provision's relay URL) takes the collect/send_status path below;
+    # that path now also pulls on a failed status POST.
+    if ! _fleet_status_configured; then
+        echo "Fleet status reporting not configured on this machine (no fleet-config.json / machine identity found)."
+        echo "This reporter cycle will only check the kb-msg cross-machine relay — no status report will be sent."
+        echo ""
+        echo "Checking kb-msg relay for cross-machine mail..."
+        pull_messages || true
+        echo ""
+        echo "Done."
+        exit 0
+    fi
 
     # Build payload
     echo "Collecting tmux session data..."
@@ -2252,8 +2357,15 @@ main() {
     else
         echo ""
         echo "Report failed. Check API_ENDPOINT configuration."
-        # Still attempt a mail pull below? No — if the server is unreachable the
-        # pull will fail too. Exit as before.
+        # XACA-1225-002: still attempt the mail pull before exiting non-zero.
+        # A status POST can fail for reasons the relay pull does not share
+        # (a payload/identity rejection on /api/status, a server that serves
+        # the relay but not status). On a fleet=skip consumer the pull is the
+        # only reason this job runs, so a status failure must not starve it.
+        # An unreachable server costs one extra fast-failing request.
+        echo ""
+        echo "Checking kb-msg relay for cross-machine mail..."
+        pull_messages || true
         exit 1
     fi
 

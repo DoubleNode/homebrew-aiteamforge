@@ -23218,24 +23218,43 @@ _kb_msg_doctor() {
     #
     # XACA-1113-016: setup-hooks.sh is the fix for this only on a dev checkout.
     # It lives at claude-hooks/setup-hooks.sh alongside its own source copy of
-    # msg-inbox-check.sh, and the tap ships NEITHER — `git ls-files` on
-    # homebrew-tap returns zero hits for both, and install-shell.sh's helper
-    # loop installs only kb-msg-provision and register-claude-hook.py, never
-    # msg-inbox-check.sh. So on a consumer install this is not "the operator
-    # hasn't run the right command yet" — no command on that machine can
-    # register a working hook, because the script the hook would invoke does
-    # not exist there to symlink or reference. Naming setup-hooks.sh as the fix
-    # unconditionally sent a consumer operator after a file that provably
-    # cannot be found (same defect class as XACA-1090). Probe for the setup
-    # script the same way $reg/$prov are probed above, and only call this
-    # [GAP] when a real fix command exists; otherwise it is [BLOCKED] — reported
-    # honestly, not papered over with an invented command.
+    # msg-inbox-check.sh, and the tap used to ship NEITHER — this is what made
+    # the row [BLOCKED] on a consumer: no command on that machine could
+    # register a working hook, because the script the hook would invoke did
+    # not exist there to symlink or reference.
+    #
+    # XACA-1225-003 closes that gap on the consumer side: msg-inbox-check.sh
+    # now ships too (sync-tap.sh mirrors claude-hooks/msg-inbox-check.sh into
+    # share/scripts/, installed to $AITEAMFORGE_DIR/scripts/, default
+    # ~/aiteamforge/scripts/), and kb-msg-provision registers it there itself
+    # (register-claude-hook.py, SessionStart + Stop — the same mechanism
+    # setup-hooks.sh uses on a dev checkout, mirrored at the fixed consumer
+    # path so re-running provisioning is idempotent by exact command string).
+    # So a THIRD command can close this row now, not just setup-hooks.sh:
+    # kb-msg-provision itself, when the consumer copy of msg-inbox-check.sh is
+    # present. [BLOCKED] survives only for the case NEITHER fix path exists —
+    # reported honestly, not papered over with an invented command.
     local setup_script=""
     for _c in "$fix_base/claude-hooks/setup-hooks.sh" \
               "$base/scripts/setup-hooks.sh"; do
         [[ -f "$_c" ]] && { setup_script="$_c"; break; }
     done
+    # Fixed consumer location (XACA-1225-003) — NOT derived from
+    # $AITEAMFORGE_DIR/$base, which can vary run to run under an override.
+    # kb-msg-provision registers this exact path and no other, so the
+    # --check probe below must match it exactly or a real registration would
+    # read as still-missing.
+    local consumer_hook_script="$HOME/aiteamforge/scripts/msg-inbox-check.sh"
+    # Which command string is actually registrable HERE decides what --check
+    # probes for: the dev symlink target takes priority when a dev checkout
+    # is present (unchanged from before XACA-1225-003); otherwise the fixed
+    # consumer path, when that copy of msg-inbox-check.sh exists; otherwise
+    # the dev form is still probed (harmlessly — neither fix branch below can
+    # apply when both are absent, so this only affects nothing).
     local hook_cmd="bash $HOME/.claude/hooks/msg-inbox-check.sh"
+    if [[ -z "$setup_script" && -f "$consumer_hook_script" ]]; then
+        hook_cmd="bash $consumer_hook_script"
+    fi
     if [[ -n "$reg" ]] && command -v python3 >/dev/null 2>&1; then
         if python3 "$reg" --check --quiet --event SessionStart --event Stop \
                    --command "$hook_cmd" >/dev/null 2>&1; then
@@ -23246,20 +23265,29 @@ _kb_msg_doctor() {
             _kb_msg_row "[GAP]" "inbox hook" "NOT registered — mail arrives and is never surfaced"
             _kb_msg_cont "fix: bash $setup_script"
             gaps=$((gaps + 1))
+        elif [[ -f "$consumer_hook_script" ]]; then
+            # XACA-1225-003: the consumer copy of msg-inbox-check.sh exists —
+            # kb-msg-provision is the real fix here, the same way it already
+            # is for the vault keypair and routing-map rows below.
+            _kb_msg_row "[GAP]" "inbox hook" "NOT registered — mail arrives and is never surfaced"
+            _kb_msg_cont "fix: $fix_base/scripts/kb-msg-provision"
+            gaps=$((gaps + 1))
         else
-            # setup-hooks.sh was not found at either probed path. Report only
-            # what was OBSERVED — absence at those two paths — never an
-            # INFERRED install type. An earlier version of this message said
-            # "not shipped on tap consumers", but that is only one possible
-            # cause of absence: a dev checkout run from a worktree whose main
-            # checkout the doctor cannot locate (e.g. an unusual $HOME) hits
-            # this exact branch too, and telling that operator they are on a
-            # tap consumer is a false diagnosis — the same defect class this
-            # branch exists to remove (XACA-1113 review). Name the two paths
-            # actually checked instead of guessing why they were empty.
+            # Neither the dev nor the consumer copy of msg-inbox-check.sh was
+            # found at any probed path. Report only what was OBSERVED —
+            # absence at those paths — never an INFERRED install type. An
+            # earlier version of this message said "not shipped on tap
+            # consumers", but that is only one possible cause of absence: a
+            # dev checkout run from a worktree whose main checkout the doctor
+            # cannot locate (e.g. an unusual $HOME) hits this exact branch
+            # too, and telling that operator they are on a tap consumer is a
+            # false diagnosis — the same defect class this branch exists to
+            # remove (XACA-1113 review). Name the paths actually checked
+            # instead of guessing why they were empty.
             _kb_msg_row "[BLOCKED]" "inbox hook" "NOT registered — mail arrives and is never surfaced"
             _kb_msg_cont "setup-hooks.sh not found at $fix_base/claude-hooks/setup-hooks.sh"
-            _kb_msg_cont "or $base/scripts/setup-hooks.sh — cannot be fixed from here"
+            _kb_msg_cont "or $base/scripts/setup-hooks.sh, and no consumer copy of"
+            _kb_msg_cont "msg-inbox-check.sh at $consumer_hook_script — cannot be fixed from here"
             _kb_msg_cont "(XACA-1113-016)"
             blocked=$((blocked + 1))
         fi

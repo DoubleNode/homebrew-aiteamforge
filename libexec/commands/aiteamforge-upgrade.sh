@@ -21,6 +21,11 @@ source "${LIBEXEC_DIR}/lib/imgcat-provision.sh"
 # renderer moved out (it was about to become a fourth copy).
 # Must come after common.sh (print_* helpers) and constants.sh (KANBAN_BACKUP_INTERVAL_DEFAULT).
 source "${LIBEXEC_DIR}/lib/launchagents.sh"
+# XACA-1225-001: kb-msg client Node dependency (libsodium-wrappers) installer,
+# shared verbatim with install-shell.sh (fresh installs) — see
+# libexec/lib/msg-client-deps.sh for the sourcing on that side and the full
+# root-cause writeup.
+source "${LIBEXEC_DIR}/lib/msg-client-deps.sh"
 # XACA-0931: shared nested-project persona deploy-target enumerator — the
 # SAME enumerator aiteamforge-persona-parity-check.sh's S3 surface uses
 # (XACA-0931-003), so the upgrade-path fixer and the drift detector can never
@@ -3050,6 +3055,14 @@ PYEOF
 # silently renders EMPTY account labels instead of erroring, and the upgrade
 # looks clean. Carries .sh, so — as above — this list is sufficient and no
 # extra glob-sweep entry is needed.
+#
+# ── XACA-1225-002: msg-inbox-check.sh ─────────────────
+# The kb-msg inbox hook script never shipped to any consumer at all (it was
+# missing from install-shell.sh's helper copy loop, not merely from this
+# upgrade list — see that loop's own comment). It is a NEW file for every
+# already-installed box, so the same "refresh only what already exists"
+# default would skip it forever without this entry. Carries .sh, so — as
+# above — this list is sufficient and no extra glob-sweep entry is needed.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3068,6 +3081,7 @@ kb-spacedock
 gh-bot-review.sh
 gh-bot-test.sh
 team-account-display.sh
+msg-inbox-check.sh
 EOF
 }
 
@@ -3185,6 +3199,36 @@ update_runtime_helpers() {
   fi
 }
 
+# XACA-1225-001: install/refresh the kb-msg Tier-2 sealed-relay client's Node
+# dependency (libsodium-wrappers) on an already-provisioned machine. See
+# libexec/lib/msg-client-deps.sh for the shared implementation (identical code
+# runs on a fresh install via install-shell.sh's install_shell_environment())
+# and the full root-cause writeup: kb-msg-provision drives `node
+# vault-keygen.js` directly, bypassing msg-client.sh's own lazy-bootstrap, and
+# no installer ever ran `npm ci` in scripts/ for a fleet=skip consumer.
+#
+# Placed AFTER update_runtime_helpers, which is what materialises/refreshes
+# scripts/*.sh helpers — including kb-msg-provision itself — on an
+# already-installed box (same ordering rationale as provision_msg_routing
+# immediately below), and BEFORE provision_msg_routing, which is the exact
+# call that fails today with "Cannot find module 'libsodium-wrappers'" when
+# this step has never run.
+#
+# Fail-soft: provision_msg_client_node_deps() always returns 0 (see its own
+# header for why) — this wrapper never aborts the upgrade either.
+update_msg_client_deps() {
+  print_section "kb-msg Client Node Dependencies"
+
+  local scripts_dir="${WORKING_DIR}/scripts"
+  if [ ! -d "$scripts_dir" ]; then
+    print_warning "No working-dir scripts/ directory — skipping kb-msg client dependency install."
+    return 0
+  fi
+
+  provision_msg_client_node_deps "$scripts_dir" "$DRY_RUN"
+  print_success "kb-msg client Node dependencies checked"
+}
+
 # XACA-1078-004: Provision the cross-machine kb-msg routing map
 # (~/.aiteamforge/team-machines.json) on EVERY upgrade, not just a fresh
 # install. install-kanban.sh's own site (XACA-1078-004's install-side
@@ -3260,6 +3304,77 @@ provision_msg_routing() {
       echo "$routing_out" >&2
     fi
     print_warning "  Run by hand to resolve: kb-msg-provision --unattended"
+  fi
+  return 0
+}
+
+# XACA-1225-002: ensure the fleet-reporter LaunchAgent (kb-msg Tier-2 relay
+# pull) is installed on an already-provisioned machine, regardless of
+# FLEET_MODE / whether the user opted into the full Fleet Monitor dashboard.
+# See ensure_msg_relay_reporter() in install-fleet-monitor.sh for the shared
+# implementation (the SAME function bin/aiteamforge-setup.sh's own
+# unconditional "Install kb-msg Relay Reporter" step calls on a fresh
+# install) and fleet-monitor/client/fleet-reporter.sh's own
+# _fleet_status_configured() (also XACA-1225-002) for why this deliberately
+# never provisions fleet-config.json.
+#
+# Placed after provision_msg_routing, grouping the three kb-msg upgrade steps
+# together in dependency order: client Node deps (update_msg_client_deps) ->
+# machine routing map (provision_msg_routing) -> relay-pull LaunchAgent
+# (here). None is a hard prerequisite of the others — every step in this
+# trio is independently fail-soft and safe to run in any order — but this
+# order means a box upgrading for the first time has everything it needs
+# ready before the reporter's first cycle fires.
+#
+# DELIBERATE DIVERGENCE from the XACA-0673/XACA-0610 "never materialise an
+# absent file, that could mean the user opted out" convention that governs
+# update_runtime_helpers' OWN fleet-reporter.sh refresh (the operative
+# fleet-monitor/client/ copy, refreshed only if already present — see that
+# block's own comment a short distance above). This function intentionally
+# DOES materialise when absent, because absence here has never meant "the
+# user opted out": fleet=skip is the tap's own non-interactive default, and
+# install_fleet_monitor() never reaches install_fleet_reporter() on that
+# path at all — there was never a choice to opt out of. Once this step has
+# run once, the operative-copy refresh above takes over for keeping it
+# current on every subsequent upgrade.
+update_msg_relay_reporter() {
+  print_section "kb-msg Relay Reporter LaunchAgent"
+
+  local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist"
+  if [ -f "$plist_dest" ]; then
+    print_success "fleet-reporter LaunchAgent already installed"
+    return 0
+  fi
+
+  local installer="${LIBEXEC_DIR}/installers/install-fleet-monitor.sh"
+  if [ ! -f "$installer" ]; then
+    print_warning "install-fleet-monitor.sh not found ($installer) — skipping kb-msg relay reporter install"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    print_info "Would install: com.aiteamforge.fleet-reporter LaunchAgent (kb-msg relay pull only; status reporting not configured)"
+    return 0
+  fi
+
+  print_info "Installing kb-msg relay reporter LaunchAgent (fleet-reporter.sh; status reporting not configured)..."
+
+  # Subshell isolates install-fleet-monitor.sh's `set -u`; the `||` branch
+  # keeps the upgrade fail-soft even if sourcing or installing errors.
+  # Mirrors update_knowledge_repo's own installer-reuse pattern above.
+  # AITEAMFORGE_DIR must be exported: install-fleet-monitor.sh's functions
+  # (install_fleet_reporter, install_fleet_reporter_launchagent) read it
+  # directly and are never passed it as an argument.
+  if (
+      AITEAMFORGE_DIR="${WORKING_DIR}"
+      export AITEAMFORGE_DIR
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      ensure_msg_relay_reporter
+    ); then
+    print_success "kb-msg relay reporter LaunchAgent installed"
+  else
+    print_warning "kb-msg relay reporter install skipped (non-fatal; upgrade continues)"
   fi
   return 0
 }
@@ -5492,7 +5607,9 @@ update_generated_agent_scripts
 update_mandatory_teams
 update_connect_scripts
 update_runtime_helpers
+update_msg_client_deps
 provision_msg_routing
+update_msg_relay_reporter
 provision_host_ready_config
 update_template_dirs
 update_ttyd_bridge

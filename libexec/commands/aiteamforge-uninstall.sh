@@ -181,6 +181,12 @@ remove_launchagents() {
     # XACA-0626: RunAtLoad agent — starts all configured LCARS servers at login/reboot.
     # XACA-0578 SIBLING-DRIFT NOTE: paired with install-kanban.sh, upgrade, and migrate.
     "com.aiteamforge.lcars-runatload.plist"
+    # XACA-1225-002: fleet-reporter now installs on EVERY consumer regardless
+    # of FLEET_MODE (kb-msg Tier-2 relay pull), not only machines that opted
+    # into the full Fleet Monitor dashboard — this pre-existing gap (the
+    # uninstall command never removed it at all, unlike aiteamforge-stop.sh,
+    # which already lists it) matters far more now that it is ubiquitous.
+    "com.aiteamforge.fleet-reporter.plist"
   )
 
   for agent in "${agents[@]}"; do

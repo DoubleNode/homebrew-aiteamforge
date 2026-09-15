@@ -2350,6 +2350,43 @@ if [ "$INSTALL_FLEET" = "yes" ]; then
 fi
 
 # -----------------------------------------------------------------------
+# kb-msg Relay Reporter (XACA-1225-002) — UNCONDITIONAL, independent of
+# INSTALL_FLEET. fleet-reporter.sh is the ONLY thing that runs the kb-msg
+# Tier-2 sealed-relay PULL (fleet-monitor/client/fleet-reporter.sh's
+# pull_messages(), XACA-0777). install_fleet_monitor() above returns early
+# the instant INSTALL_FLEET != "yes" (the non-interactive default — see Step
+# 3: "fleet=skip (defaults)"), so it never reaches
+# install_fleet_reporter()/install_fleet_reporter_launchagent() on the vast
+# majority of consumer boxes — meaning cross-machine kb-msg mail was never
+# received on any of them. This step runs regardless of the user's Fleet
+# Monitor dashboard choice; ensure_msg_relay_reporter() is idempotent and
+# non-clobbering (skips outright if install_fleet_monitor already installed
+# a REAL, configured reporter above) and deliberately does NOT write
+# fleet-config.json, so fleet-reporter.sh's own _fleet_status_configured()
+# (XACA-1225-002) knows to run kb-msg-relay-only with no status POST.
+#
+# Skipped in cockpit mode for the same reason the "Loading LaunchAgents"
+# sweep further below is: no LaunchAgents are installed in that profile.
+# -----------------------------------------------------------------------
+if [ "$INSTALL_PROFILE" != "cockpit" ]; then
+  echo -e "${BOLD}Installing kb-msg Relay Reporter...${NC}"
+  if [ -f "${INSTALLERS_DIR}/install-fleet-monitor.sh" ]; then
+    (
+      export AITEAMFORGE_DIR="${INSTALL_DIR}"
+      export INSTALL_ROOT="${AITEAMFORGE_HOME}"
+      source "${AITEAMFORGE_HOME}/libexec/lib/common.sh"
+      source "${INSTALLERS_DIR}/install-fleet-monitor.sh"
+      ensure_msg_relay_reporter
+    ) 2>&1 | sed 's/^/  /' || {
+      echo -e "  ${YELLOW}⚠ kb-msg relay reporter install had errors (non-fatal)${NC}"
+    }
+  else
+    echo -e "  ${YELLOW}⚠ Fleet Monitor installer not found (skipping)${NC}"
+  fi
+  echo ""
+fi
+
+# -----------------------------------------------------------------------
 # Load LaunchAgents (must run at TOP LEVEL, not in subshells)
 # launchctl fails silently when run inside pipes or subshells
 # Skipped in cockpit mode — no LaunchAgents are installed (no LCARS server,

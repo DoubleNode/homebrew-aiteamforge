@@ -196,6 +196,11 @@ _val_check_scripts() {
         # both must be present AND executable for the relay to run at all.
         "fleet-reporter.sh"
         "msg-client.sh"
+        # XACA-1225-002: the kb-msg inbox hook script — a standalone
+        # entrypoint (not a sibling any other file requires), but part of the
+        # same kb-msg feature surface as fleet-reporter.sh/msg-client.sh
+        # above, so it is checked alongside them.
+        "msg-inbox-check.sh"
         # XACA-1184-008: the ai.credential resolver sourced by
         # display-agent-avatar.sh (listed above) and the nine team banners.
         # Checked here for precisely the reason the XACA-0796 note below gives:

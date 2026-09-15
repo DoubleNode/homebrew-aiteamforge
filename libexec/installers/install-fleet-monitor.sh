@@ -765,6 +765,31 @@ RCEOF
 }
 
 # Install LaunchAgent for fleet reporter (periodic status reporting)
+# XACA-1225-002: compute the LaunchAgent's PATH so its `node` invocations
+# (msg-client.sh's `exec node`, inside pull_messages()) can find node even
+# when it lives somewhere the standard Homebrew/system fallback doesn't
+# cover — nvm, asdf, volta, `~/Library/Application Support/Herd/...`, etc.
+# launchd jobs get a minimal PATH, not the interactive shell's. Resolved
+# ONCE, at install time, from whatever `node` resolves to in THIS shell's
+# PATH right now (this installer always runs from a shell that already has
+# the user's real PATH — interactively, or as a subshell inheriting it).
+# Empty when node is not found — NEVER emits a leading ':' in that case (an
+# empty leading PATH component means "current directory", which must never
+# leak into a LaunchAgent's PATH). See the template's own comment for why
+# this concatenation happens here rather than in the template.
+_xaca1225_reporter_path() {
+    local fallback="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    local node_bin=""
+    if command -v node >/dev/null 2>&1; then
+        node_bin="$(dirname "$(command -v node)")"
+    fi
+    if [ -n "$node_bin" ]; then
+        printf '%s:%s' "$node_bin" "$fallback"
+    else
+        printf '%s' "$fallback"
+    fi
+}
+
 install_fleet_reporter_launchagent() {
     local reporter_script="$AITEAMFORGE_DIR/fleet-monitor/client/fleet-reporter.sh"
     local plist_template="$SCRIPT_DIR/../../share/templates/fleet-monitor/fleet-reporter-launchagent.template.plist"
@@ -788,11 +813,15 @@ install_fleet_reporter_launchagent() {
     # Create logs directory
     mkdir -p "$AITEAMFORGE_DIR/logs"
 
+    local reporter_path
+    reporter_path="$(_xaca1225_reporter_path)"
+
     # Substitute variables in template
     sed \
         -e "s|{{REPORTER_SCRIPT_PATH}}|$reporter_script|g" \
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
         -e "s|{{USER_HOME}}|$HOME|g" \
+        -e "s|{{REPORTER_PATH}}|$reporter_path|g" \
         "$plist_template" > "$plist_dest"
 
     # Unload if already loaded (ignore errors)
@@ -805,6 +834,65 @@ install_fleet_reporter_launchagent() {
     else
         warning "Failed to load fleet reporter LaunchAgent (may need manual activation)"
     fi
+}
+
+# XACA-1225-002: ensure the fleet-reporter LaunchAgent is installed on EVERY
+# consumer, regardless of FLEET_MODE / whether the user opted into the full
+# Fleet Monitor dashboard. install_fleet_monitor() above returns early on a
+# fleet=skip machine (see its own NON_INTERACTIVE/INSTALL_FLEET_MONITOR guard
+# at the top of that function — this is the tap's own non-interactive
+# default: bin/aiteamforge-setup.sh Step 3 sets fleet=skip), so
+# install_fleet_reporter()/install_fleet_reporter_launchagent() are never
+# reached on such a box today. fleet-reporter.sh is ALSO the only thing that
+# runs the kb-msg Tier-2 sealed-relay PULL (pull_messages(), XACA-0777) — so
+# a fleet=skip box never received cross-machine kb-msg mail at all (`kb-msg
+# doctor` reports "receive path: never attempted a pull", permanently).
+#
+# Deliberately does NOT call create_fleet_reporter_config(): leaving
+# fleet-config.json (and machine-identity.json) absent is exactly what lets
+# fleet-reporter.sh's own _fleet_status_configured() (XACA-1225-002,
+# canonical fleet-monitor/client/fleet-reporter.sh) recognise "kb-msg-relay
+# only, no status dashboard was ever configured" and skip the status-report
+# POST entirely — otherwise every 60s cycle would retry against a phantom
+# http://localhost:3000/api/status that was never installed.
+#
+# Idempotent and NON-CLOBBERING: if the plist already exists — because the
+# user opted into the full Fleet Monitor feature (client/server/standalone),
+# which installs a REAL, configured reporter via install_fleet_monitor()
+# above — this function does nothing. It must never downgrade an
+# already-configured reporter back to the unconfigured/relay-only state, and
+# it must never re-render a plist a prior run of THIS function already
+# installed (re-installing is harmless but pointless; skipping is simpler
+# and matches the "materialize once" contract every caller expects).
+#
+# Called unconditionally from:
+#   - bin/aiteamforge-setup.sh (fresh installs, independent of INSTALL_FLEET)
+#   - aiteamforge-upgrade.sh's update_msg_relay_reporter() (already-
+#     provisioned machines)
+#
+# Fail-soft: every failure path here returns 0. A missing fleet-reporter.sh
+# source (older tap) or a missing template is not shell-fatal — it only
+# means this consumer stays without the kb-msg relay pull, same class of
+# degradation as XACA-1225-001's Node-deps step.
+ensure_msg_relay_reporter() {
+    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist"
+
+    if [ -f "$plist_dest" ]; then
+        # Already installed — either by this function on a prior run, or by
+        # the full Fleet Monitor feature. Never clobber either.
+        return 0
+    fi
+
+    local reporter_src="$SCRIPT_DIR/../../share/scripts/fleet-reporter.sh"
+    if [ ! -f "$reporter_src" ]; then
+        # Nothing shipped to this box yet (older tap install) — fail soft.
+        return 0
+    fi
+
+    info "Installing kb-msg relay reporter (fleet-reporter.sh; status reporting not configured)..."
+    install_fleet_reporter
+    install_fleet_reporter_launchagent
+    return 0
 }
 
 # Uninstall fleet reporter LaunchAgent

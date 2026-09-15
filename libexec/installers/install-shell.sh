@@ -9,6 +9,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
 # imgcat provisioning helper — MUST be sourced after common.sh (uses info/warning/error)
 source "$SCRIPT_DIR/../lib/imgcat-provision.sh"
+# XACA-1225-001: kb-msg client Node dependency (libsodium-wrappers) installer,
+# shared verbatim with aiteamforge-upgrade.sh — see that file for the sourcing
+# and libexec/lib/msg-client-deps.sh for the full root-cause writeup.
+source "$SCRIPT_DIR/../lib/msg-client-deps.sh"
 
 #──────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -220,10 +224,15 @@ install_helper_scripts() {
     # and aiteamforge-upgrade.sh's _xaca0608_render_team_script sets the exec bit
     # when it refreshes the same file, so installing it 644 here would make
     # install and upgrade disagree about the mode on every box.
+    # msg-inbox-check.sh: the kb-msg inbox hook script (checked/invoked
+    # per-session to surface unread cross-machine/same-machine mail) —
+    # shipped alongside msg-client.sh above since it is part of the same
+    # kb-msg feature surface, but it is its own standalone entrypoint, not a
+    # sibling any other file requires.
     for helper in agent-panel-display.sh display-agent-avatar.sh iterm2_window_manager.py \
                   set-lcars-profile-browser.py create-lcars-profile.py lcars-tmp-dir.sh \
                   kanban-backup.py fleet-reporter.sh \
-                  msg-client.sh kb-api-key team-account-display.sh; do
+                  msg-client.sh msg-inbox-check.sh kb-api-key team-account-display.sh; do
         if [ -f "$scripts_src/$helper" ]; then
             cp "$scripts_src/$helper" "$scripts_dest/$helper"
             chmod +x "$scripts_dest/$helper"
@@ -406,6 +415,14 @@ install_shell_environment() {
     install_prompt || return 1
     install_aliases || return 1
     install_helper_scripts || return 1
+    # XACA-1225-001: install the kb-msg Tier-2 sealed-relay client's Node
+    # dependency (libsodium-wrappers) right after install_helper_scripts lays
+    # down msg-client.js/vault-keygen.js/package.json/package-lock.json above.
+    # Fail-soft by design (see provision_msg_client_node_deps in
+    # lib/msg-client-deps.sh) — never aborts the shell install; a missing
+    # Node.js only disables cross-machine kb-msg (Tier 2), not the rest of the
+    # shell environment. Independent of fleet-monitor/FLEET_MODE entirely.
+    provision_msg_client_node_deps "$AITEAMFORGE_DIR/scripts"
     install_worktree_helpers  # non-fatal; banners fall back to stubs if missing
     install_secrets_template || return 1
 
