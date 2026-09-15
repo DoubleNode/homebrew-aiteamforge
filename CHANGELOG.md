@@ -20,6 +20,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     fix). Review round 1: the `lcars-ui/images` pre-check tests for a regular file (a directory used
     to 500 with its absolute path), 500 bodies name only the filename, and a root that raises
     `PermissionError`/`RuntimeError` while probing is skipped rather than failing the request.
+    Avatar thumbnails (`share/personas/*/avatars/*_avatar_thumb.png` and
+    `fleet-monitor/server/public/avatars/`, 137 files) regenerated at 200×200 (were 100×100, upscaled
+    in the agent panel's 180px frame); byte-identical to the canonical dev-team files.
     (Canonical source is dev-team `lcars-ui/server.py`; mirrored into `share/lcars-ui/`.)
   - `aiteamforge-upgrade.sh` gained `update_team_image_assets`, a new refresh-only upgrade step
     (wired immediately after `deploy_flat_team_personas`, before `update_claude_hooks`) that mirrors
