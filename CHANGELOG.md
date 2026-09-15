@@ -46,7 +46,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   3.2-safe fallback that kills the whole process group so no child is orphaned. Each tool's limit can
   be overridden with `KB_SPACEDOCK_{DOCTOR,RECOVER,LCARS_HEALTH,SWEEP_STUBS,TAILSCALE}_TIMEOUT`. An
   invalid or empty override falls back to the default and says so. The mandatory-teams skip message
-  now lists the paths it checked for the library.
+  now lists the paths it checked for the library. Review round 1 hardening:
+  - Overrides are read as base 10, so `08` works and `00` falls back instead of meaning no timeout.
+  - A tool that can't be started (for example a temp-dir failure) reports `unknown` instead of being
+    read as the tool's own warning.
+  - The output and exit-code files live in a private `mktemp -d` directory, so another local user
+    can't plant a fake exit code.
+  - INT/TERM/HUP kill the running tool, remove the temp files and exit 130/143/129.
+  - The Tailscale probes report `unknown` when the tool couldn't run.
+  - Very large tool output is cut down (`KB_SPACEDOCK_DETAIL_MAX_BYTES`), so a finding is never
+    dropped.
+  - The fallback's poll loop has a wall-clock ceiling, capping any overrun at about a second.
+  - The `kb-recover` default is now 120s.
 
 - **XACA-1175** — `auto-upgrade.sh`'s brew-not-found and tap-not-installed exits now log a completion
   marker (`FAILED: brew not found` / `SKIPPED: tap not installed`) before exiting. Previously they

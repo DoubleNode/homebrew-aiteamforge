@@ -89,13 +89,17 @@
 # (aiteamforge doctor, kb-recover, lcars-health-check.sh --status,
 # kb-sweep-stubs, and the two Tailscale probes inside `verify-reboot`) now
 # runs through _spd_run_bounded (defined below, near _spd_emit), which
-# enforces a hard wall-clock limit and kills the WHOLE process tree — not
-# just the direct child — if it's exceeded. A timeout is reported as its
-# own `unknown` finding (never `ok`, never silently dropped) via the exact
-# same _spd_emit path as any other broken/unreachable tool, naming the
-# surface, the limit, the elapsed time, and the env var to raise it. The run
-# then CONTINUES to every remaining check, the report, and the findings
-# file — one hung tool no longer takes the whole triage down with it.
+# enforces a hard wall-clock limit and kills the whole process GROUP — not
+# just the direct child — if it's exceeded. (XACA-1177-016: an earlier
+# revision of this line said "the WHOLE process tree", which overstates
+# the guarantee — see _spd_run_bounded's own header comment for the
+# documented process-GROUP-not-TREE limitation this corrects.) A timeout
+# is reported as its own `unknown` finding (never `ok`, never silently
+# dropped) via the exact same _spd_emit path as any other broken/
+# unreachable tool, naming the surface, the limit, the elapsed time, and
+# the env var to raise it. The run then CONTINUES to every remaining
+# check, the report, and the findings file — one hung tool no longer
+# takes the whole triage down with it.
 #
 # MECHANISM (see _spd_run_bounded's own header comment for the full
 # rationale): GNU `timeout`/`gtimeout` if either is on PATH; otherwise a
@@ -110,7 +114,7 @@
 # an empty/non-integer/zero value falls back to the default AND says so in
 # the finding, never silently):
 #   KB_SPACEDOCK_DOCTOR_TIMEOUT         default 45   (aiteamforge doctor)
-#   KB_SPACEDOCK_RECOVER_TIMEOUT        default 60   (kb-recover --all-teams)
+#   KB_SPACEDOCK_RECOVER_TIMEOUT        default 120  (kb-recover --all-teams)
 #   KB_SPACEDOCK_LCARS_HEALTH_TIMEOUT   default 45   (lcars-health-check.sh --status)
 #   KB_SPACEDOCK_SWEEP_STUBS_TIMEOUT    default 20   (kb-sweep-stubs)
 #   KB_SPACEDOCK_TAILSCALE_TIMEOUT      default 15   (verify-reboot: BOTH the
@@ -125,6 +129,41 @@
 # rule — from reading its code and this repo's own documented performance
 # target for that command. See docs/spacedock-diagnostic-inventory.md § 7
 # "Timeout / hang-bounding contract" for the full write-up.
+#
+# REVIEW ROUND 1 HARDENING (XACA-1177, PR #899) — five additional fixes on
+# top of the original mechanism above, each detailed at its own call site
+# and in docs/spacedock-diagnostic-inventory.md § 7:
+#   B1  "not started at all" (currently: a failed `mktemp -d` for the
+#       private run directory) is now its own explicit state
+#       (SPD_RUN_FAILED_TO_START), checked by every call site via
+#       _spd_emit_run_start_failure BEFORE any tool-specific rc/output
+#       parsing — never folded into that tool's own warn/fail contract.
+#   B2  KB_SPACEDOCK_*_TIMEOUT overrides are canonicalized to base-10
+#       before use (leading zeros are OCTAL to bash's `$(( ))` — "08" was
+#       a fatal arithmetic error, "00" reached GNU `timeout` as literal
+#       "no timeout"), and capped at SPD_TIMEOUT_MAX_SECS (3600) against a
+#       runaway/typo'd value. See _spd_resolve_timeout.
+#   B3  the fallback path's rc sidecar file now lives inside one private,
+#       0700 `mktemp -d` directory alongside the output file, never as a
+#       predictably-named `"${outfile}.rc"` in shared TMPDIR (closes a
+#       local pre-plant-a-fake-rc race). See _spd_run_bounded.
+#   XACA-1177-012  INT/TERM/HUP are trapped (see the SIGNAL HANDLING
+#       section below) so Ctrl-C in an interactive foreground session
+#       kills the active bounded tool and exits promptly, instead of
+#       either being swallowed (GNU path, a real regression from pre-
+#       XACA-1177 behavior) or leaving an orphan (fallback path). Has its
+#       own documented limitation when kb-spacedock is launched as a
+#       BACKGROUNDED job of another non-interactive script — see
+#       _spd_signal_cleanup's own comment.
+#   XACA-1177-013  the two Tailscale `verify-reboot` probes now classify
+#       SPD_RUN_RC before parsing SPD_RUN_OUT, so a >=126 rc or a non-zero
+#       rc with genuinely empty output reports `unknown: could not run`
+#       instead of being silently parsed as if it were real tool output.
+#       See _spd_tailscale_could_not_run.
+#   XACA-1177-015  `_spd_emit`'s `detail` is capped at
+#       KB_SPACEDOCK_DETAIL_MAX_BYTES (default 200000) before ever
+#       reaching `jq`, and a finding is now NEVER silently dropped even if
+#       `jq` fails outright. See _spd_truncate_detail.
 #
 # DELIBERATELY LEFT UNBOUNDED: every cheap LOCAL read with no network/lock/
 # daemon dependency to hang on — `defaults read`, `pmset`, `fdesetup status`,
@@ -262,6 +301,126 @@ SPD_BOARD="${KB_SPACEDOCK_BOARD:-$HOME/.aiteamforge/spacedock/kanban/spacedock-b
 SPD_FINDINGS_DIR="${KB_SPACEDOCK_FINDINGS_DIR:-${TMPDIR:-/tmp}/kb-spacedock}"
 SPD_FINDINGS=()   # accumulated JSON-object strings, one per finding (bash 3.2-safe indexed array)
 
+# XACA-1177 review round 1 (B2): sanity cap enforced by _spd_resolve_timeout
+# on every KB_SPACEDOCK_*_TIMEOUT override, in seconds. Generous relative to
+# every documented default (max 120s) while still bounded — an override this
+# large is far more likely to be a typo (extra digit, wrong units) than a
+# genuinely intended bound, and an UNbounded override would reopen exactly
+# the "script can hang indefinitely" defect this whole ticket exists to
+# close, just moved one layer up into operator-supplied config instead of a
+# missing timeout.
+SPD_TIMEOUT_MAX_SECS=3600
+
+# XACA-1177 review round 1 (XACA-1177-015): default cap, in bytes, on the
+# `detail` field _spd_emit passes to jq. See _spd_truncate_detail for the
+# full incident this closes (an oversized `detail` — now a real
+# possibility since the fronted tools can legitimately run for up to a
+# minute and produce a lot of output — tripped the OS's ARG_MAX and made
+# `jq` fail outright, silently DROPPING the finding with no [unknown]
+# line, nothing). `getconf ARG_MAX` on this host reports 1048576 bytes
+# (1 MiB) for the WHOLE exec (every argv element plus the entire inherited
+# environment combined, not just this one field) — 200000 bytes leaves
+# generous headroom under that for jq's other short --arg values and a
+# normal-sized environment, while still comfortably holding a full
+# doctor/lcars-health/kb-recover run's real-world output (measured a few
+# KB to ~13KB) without ever truncating in the common case. Overridable via
+# KB_SPACEDOCK_DETAIL_MAX_BYTES; an invalid value falls back to this
+# default (this is an internal safety valve, not a per-surface operator
+# setting like the KB_SPACEDOCK_*_TIMEOUT vars — there is no "which
+# surface" to attribute an invalid-override note to the same way, so an
+# invalid value here is silently ignored rather than surfaced in a
+# finding).
+SPD_DETAIL_MAX_BYTES_DEFAULT=200000
+
+# XACA-1177 review round 1 (XACA-1177-012): tracks the ONE in-flight
+# _spd_run_bounded call, if any — this script runs every check
+# sequentially, never concurrently, so a single set of globals suffices.
+# Set immediately before backgrounding a command, cleared immediately after
+# it finishes. Read by _spd_signal_cleanup (the INT/TERM/HUP trap handler,
+# installed below) so a signal arriving mid-run can kill the right
+# thing and clean up the right directory; empty/unset is the normal
+# "nothing currently running" state and must be harmless everywhere these
+# are read (`${VAR:-}` throughout — never a bare `$VAR` under `set -u`).
+SPD_RUN_ACTIVE_PID=""
+SPD_RUN_ACTIVE_MODE=""
+SPD_RUN_ACTIVE_RUNDIR=""
+
+# ---------------------------------------------------------------------------
+# SIGNAL HANDLING (XACA-1177 review round 1, XACA-1177-012)
+# ---------------------------------------------------------------------------
+# Before this fix there was no trap anywhere in this script — confirmed via
+# `grep -n '^trap' scripts/kb-spacedock` returning nothing prior to this
+# change — so this is a net-new installation, never a supersede of an
+# existing handler, and nothing here needs to chain to or preserve a prior
+# trap. Ctrl-C used to behave WORSE than the pre-XACA-1177 (no-timeout-at-
+# all) script on the GNU-timeout path specifically: a tty SIGINT delivered
+# while `timeout` ran synchronously in this script's own process group did
+# not reach timeout's own signal-relay logic, so the run continued to
+# completion past its own limit — a regression, not just a gap. See
+# _spd_run_bounded's own header comment for why running BACKGROUNDED (never
+# disowned) fixes this: it gives this handler a live pid to target, and
+# `wait` blocking on it is itself interruptible by a trap.
+#
+# Harmless when nothing is running: every kill below is `|| true`-guarded
+# and gated on SPD_RUN_ACTIVE_PID being non-empty; the cleanup `rm -rf` is
+# gated the same way on SPD_RUN_ACTIVE_RUNDIR. A signal arriving between
+# checks (nothing in flight) just exits promptly with the right code.
+#
+# DOCUMENTED LIMITATION, found while building this ticket's own regression
+# suite (XACA-1177-012): this INT trap has NO effect if kb-spacedock is
+# itself launched as a BACKGROUNDED job of some OTHER non-interactive
+# script (e.g. `kb-spacedock report &` from a supervisor/automation
+# wrapper with no job control of its own) — POSIX/bash preset SIGINT (and
+# SIGQUIT) to IGNORED for such a child at fork time, and per bash's own
+# documented trap semantics ("signals ignored upon entry to a non-
+# interactive shell cannot be trapped or reset"), NO trap this script
+# installs for itself can override that. Measured directly while building
+# tests/test-xaca-1177-spacedock-timeouts.sh: a plain `child &` from a
+# non-interactive launcher completely swallowed SIGINT (the child's own
+# `trap ... INT` never fired); the SAME child backgrounded with `set -m`
+# immediately before the `&` received it normally. This is NOT a defect in
+# the trap above and cannot be fixed from inside this script — it is a
+# property of how the PARENT chose to launch it. It does not affect the
+# scenario this ticket's fix actually targets: a human running
+# `kb-spacedock report`/`verify-reboot` directly, interactively, in a
+# terminal foreground and hitting Ctrl-C — a foreground job's SIGINT is
+# never preset to ignore this way, so the trap above fires normally there,
+# exactly like SIGTERM (which has no such special-cased inheritance rule
+# either way, and therefore always works regardless of how this script was
+# launched). A caller that needs to reliably stop a BACKGROUNDED
+# kb-spacedock programmatically should send SIGTERM, not SIGINT.
+_spd_signal_cleanup() {
+    local exitcode="$1"
+    if [ -n "${SPD_RUN_ACTIVE_PID:-}" ]; then
+        case "${SPD_RUN_ACTIVE_MODE:-}" in
+            gnu)
+                # Signal `timeout`'s OWN pid, not a process group. GNU
+                # timeout installs handlers for the signals it relays and
+                # forwards them to the monitored command's OWN process
+                # group itself (see _spd_run_bounded) — we don't need (and
+                # don't reliably know) that child's pgid to reach it.
+                kill -TERM "${SPD_RUN_ACTIVE_PID}" 2>/dev/null || true
+                sleep 0.2
+                kill -KILL "${SPD_RUN_ACTIVE_PID}" 2>/dev/null || true
+                ;;
+            fallback)
+                # Here we DO know the pgid — it equals SPD_RUN_ACTIVE_PID
+                # by construction (`set -m` immediately before
+                # backgrounding in _spd_run_bounded gives the job its own
+                # process group whose gid equals its pid).
+                kill -TERM -- "-${SPD_RUN_ACTIVE_PID}" 2>/dev/null || true
+                sleep 0.2
+                kill -KILL -- "-${SPD_RUN_ACTIVE_PID}" 2>/dev/null || true
+                ;;
+        esac
+    fi
+    [ -n "${SPD_RUN_ACTIVE_RUNDIR:-}" ] && rm -rf "${SPD_RUN_ACTIVE_RUNDIR}" 2>/dev/null
+    exit "$exitcode"
+}
+trap '_spd_signal_cleanup 130' INT
+trap '_spd_signal_cleanup 143' TERM
+trap '_spd_signal_cleanup 129' HUP
+
 # ---------------------------------------------------------------------------
 # Small utilities
 # ---------------------------------------------------------------------------
@@ -301,6 +460,38 @@ fi
 
 SPD_HOST=$(_spd_host_id)
 
+# Truncate `detail` to at most SPD_DETAIL_MAX_BYTES_DEFAULT (or
+# KB_SPACEDOCK_DETAIL_MAX_BYTES) bytes (XACA-1177 review round 1,
+# XACA-1177-015). Keeps the FIRST half and LAST half with a documented
+# marker in between naming how many bytes were dropped — head+tail rather
+# than a flat head-only truncation because the TAIL of a tool's output
+# (its final error, the actual failure) is at least as diagnostically
+# useful as its start. Byte-based (`head -c`/`tail -c` — both present in
+# macOS's BSD coreutils, confirmed), never line-based: a payload that is
+# one giant line with no newlines at all (plausible for some tool output)
+# would defeat a line-count-based cap entirely.
+#   $1 = the raw detail string
+# Prints the (possibly truncated) detail to stdout.
+_spd_truncate_detail() {
+    local detail="$1"
+    local max="${KB_SPACEDOCK_DETAIL_MAX_BYTES:-$SPD_DETAIL_MAX_BYTES_DEFAULT}"
+    case "$max" in
+        ''|*[!0-9]*|0) max="$SPD_DETAIL_MAX_BYTES_DEFAULT" ;;
+    esac
+    local len
+    len=$(printf '%s' "$detail" | wc -c | tr -d ' ')
+    if [ "$len" -le "$max" ]; then
+        printf '%s' "$detail"
+        return
+    fi
+    local half=$((max / 2)) head_part tail_part dropped
+    head_part=$(printf '%s' "$detail" | head -c "$half")
+    tail_part=$(printf '%s' "$detail" | tail -c "$half")
+    dropped=$((len - max))
+    printf '%s\n[... %s bytes truncated (raw output was %s bytes; raise with KB_SPACEDOCK_DETAIL_MAX_BYTES=%s) ...]\n%s' \
+        "$head_part" "$dropped" "$len" "$max" "$tail_part"
+}
+
 # Append one finding. Always call this instead of printing ad hoc — it's
 # the single place that shapes the JSON every downstream consumer (report,
 # findings file, filing) reads back.
@@ -309,8 +500,26 @@ SPD_HOST=$(_spd_host_id)
 #   $3 summary   one line, human-readable
 #   $4 detail    optional longer text (raw tool output etc.) — may be empty
 #   $5 exit_code optional numeric exit code that produced this — may be empty
+#
+# XACA-1177 review round 1 (XACA-1177-015): `detail` is now ALWAYS run
+# through _spd_truncate_detail first, and jq's own success is now checked
+# rather than assumed. Before this fix, a `detail` large enough to trip the
+# OS's ARG_MAX (verified with a ~5MB stub payload: `jq: Argument list too
+# long`) made `json=$(jq ...)` come back completely EMPTY, and
+# `SPD_FINDINGS+=("$json")` then appended that empty string to the
+# findings array — the finding was silently GONE: no [unknown] line in the
+# report, nothing in the findings file, nothing anywhere. That is the
+# opposite of this script's whole reason to exist for exactly the class of
+# tool ("ran, but produced a lot of output") it otherwise correctly
+# bounds and reports on. A finding is now NEVER dropped: if jq still fails
+# even after truncation (some other unexpected jq failure), this falls
+# back to a detail-free finding whose summary explicitly says the detail
+# was dropped, built from fields (surface/severity/summary/host) that are
+# always short, script-controlled strings and therefore cannot themselves
+# hit the same limit.
 _spd_emit() {
     local surface="$1" severity="$2" summary="$3" detail="${4:-}" exit_code="${5:-}"
+    detail=$(_spd_truncate_detail "$detail")
     local ec_json="null"
     case "$exit_code" in
         ''|*[!0-9-]*) ec_json="null" ;;
@@ -324,7 +533,16 @@ _spd_emit() {
         --arg detail "$detail" \
         --arg host "$SPD_HOST" \
         --argjson exit_code "$ec_json" \
-        '{host:$host, surface:$surface, severity:$severity, summary:$summary, detail:$detail, exit_code:$exit_code}')
+        '{host:$host, surface:$surface, severity:$severity, summary:$summary, detail:$detail, exit_code:$exit_code}' 2>/dev/null)
+    if [ -z "$json" ]; then
+        json=$(jq -nc \
+            --arg surface "$surface" \
+            --arg severity "$severity" \
+            --arg summary "$summary (detail omitted: could not be JSON-encoded even after truncation — see the surface's raw output directly if still needed)" \
+            --arg host "$SPD_HOST" \
+            --argjson exit_code "$ec_json" \
+            '{host:$host, surface:$surface, severity:$severity, summary:$summary, detail:"", exit_code:$exit_code}' 2>/dev/null)
+    fi
     SPD_FINDINGS+=("$json")
 }
 
@@ -380,49 +598,133 @@ _spd_resolve_timeout() {
     SPD_TIMEOUT_NOTE=""
     case "$raw" in
         _SPD_TIMEOUT_UNSET)
+            return
             ;;
         '')
             SPD_TIMEOUT_NOTE=" ($varname is set but empty — using default ${default}s)"
+            return
             ;;
         *[!0-9]*)
             SPD_TIMEOUT_NOTE=" ($varname='$raw' is not a positive integer — using default ${default}s)"
-            ;;
-        0)
-            SPD_TIMEOUT_NOTE=" ($varname=0 is not valid — using default ${default}s)"
-            ;;
-        *)
-            SPD_TIMEOUT_VALUE="$raw"
+            return
             ;;
     esac
+    # XACA-1177 review round 1 (B2): $raw is now known to be ALL DIGITS,
+    # but that still allows a leading-zero literal ("00", "08", "010") to
+    # slip through to the runner uncanonicalized. That's not cosmetic:
+    # (a) GNU `timeout`/`gtimeout` parse their own numeric argument as a
+    #     plain decimal string, so "00" is accepted as literally ZERO,
+    #     which for GNU timeout means NO TIMEOUT AT ALL — verified live,
+    #     `gtimeout 00 sleep 5` ran the full 5s untouched.
+    # (b) bash's `$(( ))` treats a leading-zero literal as OCTAL, so "08"/
+    #     "09" is a FATAL "value too great for base" the first time the
+    #     fallback path's poll loop computes `$((limit*1000))` — verified
+    #     live under /bin/bash 3.2.57 — and "010" would silently become
+    #     8 instead of 10, a wrong-but-plausible-looking value that would
+    #     never be noticed.
+    # Guard the digit COUNT before doing ANY arithmetic on $raw: a very
+    # long all-digit string can silently overflow/wrap `$(( ))` into a
+    # garbage value (verified: a 26-digit literal evaluated to a negative
+    # number with no error at all) rather than failing loudly the way the
+    # leading-zero case does, so length must be bounded FIRST.
+    if [ "${#raw}" -gt 7 ]; then
+        SPD_TIMEOUT_NOTE=" ($varname='$raw' is unreasonably large — using default ${default}s)"
+        return
+    fi
+    # `$((10#$raw))` forces base-10 interpretation regardless of leading
+    # zeros (verified under /bin/bash 3.2.57: "08"->8, "00"->0, "010"->10)
+    # and cannot itself error given the length guard just above — this is
+    # now the ONE canonical-decimal conversion point; every value that
+    # reaches _spd_run_bounded from here on is guaranteed to be either the
+    # literal $default (already canonical) or this normalized value.
+    local normalized=$((10#$raw))
+    if [ "$normalized" -le 0 ]; then
+        SPD_TIMEOUT_NOTE=" ($varname=$raw is not valid — using default ${default}s)"
+        return
+    fi
+    if [ "$normalized" -gt "$SPD_TIMEOUT_MAX_SECS" ]; then
+        SPD_TIMEOUT_NOTE=" ($varname=$normalized exceeds the ${SPD_TIMEOUT_MAX_SECS}s sanity cap — using default ${default}s)"
+        return
+    fi
+    SPD_TIMEOUT_VALUE="$normalized"
 }
 
 # Bounded command runner. MUST be called IN-SHELL, never inside `$(...)` —
 # a command substitution runs in a subshell, and a subshell's variable
 # assignments do not propagate back to the caller, which is exactly why
 # this function communicates its result via script-level globals
-# (SPD_RUN_OUT/SPD_RUN_RC/SPD_RUN_TIMED_OUT/SPD_RUN_ELAPSED) instead of
+# (SPD_RUN_OUT/SPD_RUN_RC/SPD_RUN_TIMED_OUT/SPD_RUN_ELAPSED/
+# SPD_RUN_FAILED_TO_START/SPD_RUN_FAILED_TO_START_REASON) instead of
 # returning a value the normal way.
 #
 #   _spd_run_bounded <surface-label> <limit-secs> <cmd> [args...]
 #
 # Sets on return:
-#   SPD_RUN_OUT        combined stdout+stderr of the command (may be empty)
-#   SPD_RUN_RC          the command's exit code (see SPD_RUN_TIMED_OUT below
-#                       for how a real 124/137 FROM THE COMMAND ITSELF is
-#                       told apart from one WE produced by killing it)
-#   SPD_RUN_TIMED_OUT   "1" if the bound was hit and the command was killed,
-#                       "0" otherwise
-#   SPD_RUN_ELAPSED     wall-clock seconds observed (integer; SECONDS-based,
-#                       so sub-second precision is not attempted — not
-#                       needed for a diagnostic-timeout signal)
+#   SPD_RUN_OUT          combined stdout+stderr of the command (may be
+#                         empty; meaningless — see below — when
+#                         SPD_RUN_FAILED_TO_START="1")
+#   SPD_RUN_RC            the command's exit code (see SPD_RUN_TIMED_OUT
+#                         below for how a real 124/137 FROM THE COMMAND
+#                         ITSELF is told apart from one WE produced by
+#                         killing it; see SPD_RUN_FAILED_TO_START for why
+#                         this field must never be read on its own)
+#   SPD_RUN_TIMED_OUT     "1" if the bound was hit and the command was
+#                         killed, "0" otherwise
+#   SPD_RUN_ELAPSED       wall-clock seconds observed (integer; SECONDS-
+#                         based, so sub-second precision is not attempted —
+#                         not needed for a diagnostic-timeout signal)
+#   SPD_RUN_FAILED_TO_START / SPD_RUN_FAILED_TO_START_REASON
+#                         XACA-1177 review round 1 (B1). "1"/reason-string
+#                         when the command never even got a chance to run
+#                         at all — currently the ONLY such case is a failed
+#                         `mktemp -d` for the private run directory (see
+#                         B3 below). EVERY CALLER MUST CHECK THIS FIRST,
+#                         via `_spd_emit_run_start_failure` (defined right
+#                         after this function), BEFORE looking at
+#                         SPD_RUN_RC/SPD_RUN_OUT/SPD_RUN_TIMED_OUT at all.
+#                         Before this fix, a failed mktemp set SPD_RUN_RC=1
+#                         with the failure reason stuffed into SPD_RUN_OUT
+#                         — every call site's normal rc-dispatch `case`
+#                         then matched "1" against that TOOL's own warn/
+#                         fail contract and fabricated a plausible-sounding
+#                         but entirely made-up finding (e.g. "warnings
+#                         only (0 failures)" for aiteamforge-doctor, or
+#                         "unhealthy...server(s) found" for lcars-health,
+#                         built from a reason string that was never real
+#                         tool output), and the aggregate exit code came
+#                         out 1 (warn) instead of 2 (fail/unknown) — a
+#                         silent, confident-looking WRONG ANSWER, exactly
+#                         what this whole ticket's "unknown, never a false
+#                         ok" property exists to prevent. "Not started" is
+#                         now its own explicit state, never folded into
+#                         "ran and returned this rc".
 #
 # MECHANISM, in probe order:
 #   1. GNU `timeout` (unprefixed — some coreutils installs provide it
 #      directly) or `gtimeout` (the coreutils-prefixed name Homebrew
 #      normally uses so it doesn't collide with anything BSD-provided).
 #      `-k 5` gives a 5s SIGKILL grace after the initial SIGTERM. GNU
-#      timeout already runs the child in — and signals — its own process
-#      group, so no separate orphan handling is needed on this path.
+#      timeout already runs the MONITORED COMMAND in its own process
+#      group and signals that group at expiry, so no separate orphan
+#      handling is needed for the timeout-expiry case on this path.
+#      RUN BACKGROUNDED, NEVER SYNCHRONOUS AND NEVER DISOWNED (XACA-1177
+#      review round 1, XACA-1177-012 — changed from the original
+#      synchronous invocation): a synchronous foreground `timeout ...`
+#      runs in THIS script's own process group (no `set -m`, no new pgrp
+#      of its own), so a tty SIGINT delivered to the foreground process
+#      group is not specifically routed through timeout's own signal-
+#      relay logic — verified live under /bin/bash 3.2.57: Ctrl-C during
+#      a synchronous run was swallowed and the run continued to
+#      completion past its own limit, a REGRESSION from the plain-hang
+#      behavior this ticket exists to fix (before XACA-1177, Ctrl-C at
+#      least killed the whole unbounded script). Backgrounding gives this
+#      script's INT/TERM/HUP trap (see the SIGNAL HANDLING section near
+#      the top of the file) a live pid to target, and a blocking `wait`
+#      is itself interruptible by a trap firing mid-wait. NOT disowning
+#      matters independently (see the EXIT CODE TRAP note under the
+#      fallback path below) — it turns out to be general to `wait`, not
+#      fallback-specific, so the GNU path gets the same fix for the same
+#      underlying reason.
 #   2. Portable fallback for a host with neither (stock macOS ships
 #      neither `timeout` nor `gtimeout`): background the command with job
 #      control turned on (`set -m`) IMMEDIATELY BEFORE backgrounding it, so
@@ -437,24 +739,74 @@ _spd_resolve_timeout() {
 #      of getting its own. Without a real pgid of its own, killing just the
 #      direct child leaves any grandchildren (a hung tool's own forked
 #      probes, a sourced rc file spawning something) alive and reparented.
+#      This bounds the process GROUP, not the full process TREE: a
+#      descendant that itself detaches from the group (e.g. its own
+#      `setsid`/job-control call) is NOT reachable this way — the same
+#      limitation GNU `timeout` itself has. See docs/spacedock-diagnostic-
+#      inventory.md § 7 for this documented as a known limitation
+#      (XACA-1177-016 — an earlier revision of this comment overstated the
+#      guarantee as "the WHOLE process tree").
 #      Poll every 0.1s (not 1s — a fast tool must not pay a coarse-grained
 #      tax) up to the limit; on expiry, SIGTERM the whole group
 #      (`kill -TERM -- -$pid`), grace briefly, then SIGKILL the group.
-#      `disown` right after backgrounding so a later `wait`/kill on it does
-#      not print bash's own job-control "Done"/"Terminated" notice to
-#      stderr (same reasoning as the doctor script's identical `disown`
-#      call).
-#      EXIT CODE TRAP (XACA-1177, caught at Phase A verification): `wait` on
-#      a DISOWNED pid does NOT return the child's exit status — measured
-#      under /bin/bash 3.2.57, `( exit 7 ) & disown; wait` returns 0. An
-#      earlier revision read rc from `wait` and so reported EVERY tool as
-#      rc 0 on a host without timeout/gtimeout (a stub printing 3 stubs +
-#      exit 1 rendered as "[ok] no stubs found"). The subshell therefore
-#      writes its own `$?` to a sidecar file; if that file is absent or
-#      non-numeric when the child was NOT killed, rc is set to 255 so the
-#      caller maps it to UNKNOWN — never to a guessed 0.
+#      NEVER DISOWNED (changed from the original `disown` call — XACA-1177
+#      review round 1): two independent reasons.
+#        (i)  SIGNAL HANDLING (XACA-1177-012): the trap needs a job bash
+#             still considers "ours" to `kill -0`/target predictably; an
+#             empirically-confirmed clean path (verified: no stray
+#             job-control "Done"/"Terminated" notices leak to stderr from
+#             a non-interactive script either way) means there is no
+#             upside left to disowning that would offset losing that.
+#        (ii) EXIT CODE TRAP (XACA-1177, caught at Phase A verification):
+#             `wait` on a DISOWNED pid does NOT return the child's real
+#             exit status — measured under /bin/bash 3.2.57,
+#             `( exit 7 ) & disown; wait` returns 0 unconditionally,
+#             regardless of the real exit code. An earlier revision read
+#             rc from `wait` and so reported EVERY tool as rc 0 on a host
+#             without timeout/gtimeout (a stub printing 3 stubs + exit 1
+#             rendered as "[ok] no stubs found"). The subshell therefore
+#             STILL writes its own `$?` to a sidecar `rc` file inside the
+#             private run directory (see B3 below) as the source of truth
+#             for this path; if that file is absent, unreadable, or
+#             non-numeric when the child was NOT killed by us, rc is set
+#             to 255 so the caller maps it to UNKNOWN — never to a
+#             guessed 0. (Not disowning ALSO makes `wait`'s own return
+#             value correct now — verified — but the sidecar file is kept
+#             as the actual source of truth here rather than switched to
+#             `wait`'s return, both for symmetry with the "killed" branch
+#             just above it, which cannot use `wait`'s return either way,
+#             and because the regression suite specifically pins the
+#             sidecar-missing -> 255 -> unknown fail-closed behavior.)
 #
-# WHY OUTPUT GOES TO A TEMP FILE, NEVER A PIPE: if the bounded command
+# WHY OUTPUT (AND, ON THE FALLBACK PATH, THE RC SIDECAR) LIVES IN A
+# PRIVATE, PER-RUN DIRECTORY, NOT LOOSE FILES IN SHARED /tmp (XACA-1177
+# review round 1, B3 — SECURITY): the original design mktemp'd only the
+# OUTPUT file (safe on its own — mktemp's O_EXCL creation is genuinely
+# unguessable-in-advance) and then derived the fallback path's rc sidecar
+# as a plain string concatenation, `"${outfile}.rc"`, written later via an
+# ordinary `>` redirect with no exclusivity guarantee at all. On a
+# multi-user host with a world-writable /tmp, a local attacker polling the
+# directory listing (world-readable by default) can observe the freshly
+# mktemp'd outfile the moment it appears and IMMEDIATELY pre-create
+# `${outfile}.rc` — e.g. as a file they own, permissioned so our own later
+# `echo "$?" >"$rcfile"` write silently FAILS (their content survives) —
+# containing a fabricated exit code like "0". The next read of that file
+# then reports a genuinely-failed tool (rc 2, say) as rc 0 = "ok". Moving
+# BOTH files inside one `mktemp -d` directory closes this: the directory's
+# own name is exactly as unguessable as the old outfile's was (same
+# mktemp mechanism), and it is additionally locked to 0700 (owner-only —
+# `mktemp -d` already defaults to this on both macOS/BSD and GNU
+# coreutils; the explicit `chmod 700` below is defense in depth, not
+# reliance on that default), so even a local attacker who somehow guessed
+# or observed the directory name cannot write into it at all. `out` and
+# `rc` are now fixed, non-secret filenames — their safety comes from the
+# directory's permissions, not from obscurity of their own names, which is
+# the standard and considerably more robust pattern (this is also why a
+# `mktemp -d` + fixed-name-files-inside approach is preferred here over
+# mktemp'ing the rc file too: one unguessable, permission-locked boundary
+# beats stacking multiple independently-unguessable file names).
+#
+# WHY OUTPUT GOES TO A FILE AT ALL, NEVER A PIPE: if the bounded command
 # spawns a grandchild that inherits a pipe's write end (routine for
 # anything that forks — a shell startup file, a daemon health probe, a
 # retry loop), a `$(...)`/pipe capture does not return until EVERY holder
@@ -466,7 +818,10 @@ _spd_resolve_timeout() {
 # back afterward. Verified empirically (see the ad hoc smoke tests in the
 # implementation report) with a stub that sleeps and forks a sleeping
 # grandchild under both the GNU-timeout path and the portable fallback,
-# confirming no process matching the stub's marker survives either path.
+# confirming no process matching the stub's marker survives either path
+# (within the process-GROUP boundary — see the "process GROUP, not TREE"
+# note under the fallback mechanism above for the one documented
+# exception).
 #
 # TIMEOUT DETECTION ON THE GNU PATH: `timeout`/`gtimeout` exit 124 on a
 # SIGTERM timeout, or 128+signal (137 for KILL) if `-k` had to escalate —
@@ -486,22 +841,37 @@ _spd_run_bounded() {
     SPD_RUN_RC=0
     SPD_RUN_TIMED_OUT="0"
     SPD_RUN_ELAPSED=0
+    SPD_RUN_FAILED_TO_START="0"
+    SPD_RUN_FAILED_TO_START_REASON=""
 
-    # Defensive only — every call site already resolves its limit through
-    # _spd_resolve_timeout before getting here, so this should never fire
-    # in practice. Kept so a future direct caller fails safe, not silent.
+    # Defensive re-normalize only — every real call site already resolved
+    # its limit through _spd_resolve_timeout before getting here (which
+    # guarantees a canonical, base-10, leading-zero-free decimal — see
+    # B2 there), so this should never actually change anything in
+    # practice. Kept so a future direct/bypassing caller fails safe rather
+    # than handing a leading-zero literal to the arithmetic below, which
+    # is a FATAL "value too great for base" for something like "08" (see
+    # _spd_resolve_timeout's B2 comment) rather than a graceful fallback.
     case "$limit" in
-        ''|*[!0-9]*|0) limit=30 ;;
+        ''|*[!0-9]*) limit=30 ;;
+        *) limit=$((10#$limit)) ;;
     esac
+    [ "$limit" -gt 0 ] || limit=30
 
-    local outfile
-    outfile=$(mktemp "${TMPDIR:-/tmp}/kb-spacedock-run.XXXXXX" 2>/dev/null)
-    if [ -z "$outfile" ]; then
-        SPD_RUN_OUT="_spd_run_bounded: mktemp failed while preparing to run surface '$label' — could not capture its output"
-        SPD_RUN_RC=1
+    local rundir
+    rundir=$(mktemp -d "${TMPDIR:-/tmp}/kb-spacedock-run.XXXXXX" 2>/dev/null)
+    if [ -z "$rundir" ] || [ ! -d "$rundir" ]; then
+        # XACA-1177 review round 1 (B1) — see this function's own header
+        # comment for SPD_RUN_FAILED_TO_START's full contract. This is
+        # currently the ONLY way a call can fail to start at all.
+        SPD_RUN_FAILED_TO_START="1"
+        SPD_RUN_FAILED_TO_START_REASON="mktemp -d failed while preparing a private run directory for surface '$label' (TMPDIR='${TMPDIR:-/tmp}' may be missing, unwritable, or full)"
+        SPD_RUN_RC=255
         return 0
     fi
+    chmod 700 "$rundir" 2>/dev/null || true
 
+    local outfile="$rundir/out" rcfile="$rundir/rc"
     local timeout_bin=""
     if _spd_have timeout; then
         timeout_bin="timeout"
@@ -509,15 +879,30 @@ _spd_run_bounded() {
         timeout_bin="gtimeout"
     fi
 
+    local had_monitor
+    case $- in
+        *m*) had_monitor=true ;;
+        *)   had_monitor=false ;;
+    esac
+
     local start_ts
     start_ts=$SECONDS
 
     if [ -n "$timeout_bin" ]; then
-        "$timeout_bin" -k 5 "$limit" "$@" </dev/null >"$outfile" 2>&1
+        set -m
+        "$timeout_bin" -k 5 "$limit" "$@" </dev/null >"$outfile" 2>&1 &
+        SPD_RUN_ACTIVE_PID=$!
+        SPD_RUN_ACTIVE_MODE="gnu"
+        SPD_RUN_ACTIVE_RUNDIR="$rundir"
+        [ "$had_monitor" = true ] || set +m
+        wait "$SPD_RUN_ACTIVE_PID" 2>/dev/null
         SPD_RUN_RC=$?
+        SPD_RUN_ACTIVE_PID=""
+        SPD_RUN_ACTIVE_MODE=""
+        SPD_RUN_ACTIVE_RUNDIR=""
         SPD_RUN_ELAPSED=$((SECONDS - start_ts))
         SPD_RUN_OUT=$(cat "$outfile" 2>/dev/null)
-        rm -f "$outfile" 2>/dev/null
+        rm -rf "$rundir" 2>/dev/null
         case "$SPD_RUN_RC" in
             124|137)
                 [ "$SPD_RUN_ELAPSED" -ge "$limit" ] && SPD_RUN_TIMED_OUT="1"
@@ -527,37 +912,41 @@ _spd_run_bounded() {
     fi
 
     # Portable fallback — no timeout/gtimeout on PATH.
-    local had_monitor
-    case $- in
-        *m*) had_monitor=true ;;
-        *)   had_monitor=false ;;
-    esac
-    local rcfile="${outfile}.rc"
     set -m
     ( "$@" </dev/null >"$outfile" 2>&1; echo "$?" >"$rcfile" ) &
-    local pid=$!
-    disown "$pid" 2>/dev/null || true
+    SPD_RUN_ACTIVE_PID=$!
+    SPD_RUN_ACTIVE_MODE="fallback"
+    SPD_RUN_ACTIVE_RUNDIR="$rundir"
     [ "$had_monitor" = true ] || set +m
 
+    # Two ceilings, whichever trips first. The counted-ms one gives sub-second
+    # precision for short limits, but it assumes each pass costs exactly
+    # 100ms — every `kill -0` + `sleep` fork adds overhead, so on its own it
+    # UNDER-counts and overran a 20s limit to 23s (measured, XACA-1177 round-1
+    # verification; drift scales with the limit). The SECONDS ceiling bounds
+    # that overrun to ~1s: `SECONDS - start_ts > limit` (strictly greater) can
+    # only hold once real elapsed exceeds the limit, so it never kills early.
     local elapsed_ms=0 limit_ms=$((limit * 1000))
-    while kill -0 "$pid" 2>/dev/null; do
+    while kill -0 "$SPD_RUN_ACTIVE_PID" 2>/dev/null; do
         [ "$elapsed_ms" -ge "$limit_ms" ] && break
+        [ $((SECONDS - start_ts)) -gt "$limit" ] && break
         sleep 0.1
         elapsed_ms=$((elapsed_ms + 100))
     done
 
     SPD_RUN_ELAPSED=$((SECONDS - start_ts))
 
-    if kill -0 "$pid" 2>/dev/null; then
+    if kill -0 "$SPD_RUN_ACTIVE_PID" 2>/dev/null; then
         SPD_RUN_TIMED_OUT="1"
-        kill -TERM -- "-$pid" 2>/dev/null || true
+        kill -TERM -- "-$SPD_RUN_ACTIVE_PID" 2>/dev/null || true
         sleep 0.2
-        kill -KILL -- "-$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null
+        kill -KILL -- "-$SPD_RUN_ACTIVE_PID" 2>/dev/null || true
+        wait "$SPD_RUN_ACTIVE_PID" 2>/dev/null
         SPD_RUN_RC=124
     else
-        # rc comes from the sidecar, NOT `wait` — see EXIT CODE TRAP above.
-        wait "$pid" 2>/dev/null
+        # rc comes from the sidecar, NOT `wait` — see the fallback
+        # mechanism's EXIT CODE TRAP note in this function's header.
+        wait "$SPD_RUN_ACTIVE_PID" 2>/dev/null
         local rc_read=""
         [ -f "$rcfile" ] && rc_read=$(cat "$rcfile" 2>/dev/null)
         case "$rc_read" in
@@ -566,9 +955,33 @@ _spd_run_bounded() {
         esac
     fi
 
+    SPD_RUN_ACTIVE_PID=""
+    SPD_RUN_ACTIVE_MODE=""
+    SPD_RUN_ACTIVE_RUNDIR=""
     SPD_RUN_OUT=$(cat "$outfile" 2>/dev/null)
-    rm -f "$outfile" "$rcfile" 2>/dev/null
+    rm -rf "$rundir" 2>/dev/null
     return 0
+}
+
+# Shared post-_spd_run_bounded gate (XACA-1177 review round 1, B1). EVERY
+# call site must call this IMMEDIATELY after _spd_run_bounded and BEFORE
+# touching SPD_RUN_RC/SPD_RUN_OUT/SPD_RUN_TIMED_OUT for any other purpose
+# (including the timeout check) — a not-started run's SPD_RUN_RC/SPD_RUN_OUT
+# are not the tool's real rc/output and must never be parsed as if they
+# were (see _spd_run_bounded's own header comment for the full incident
+# this closes). Emits the surface's `unknown` finding and returns 0 (the
+# caller should `return` immediately) when a real failure-to-start
+# occurred; returns 1 (nothing emitted, caller proceeds normally) otherwise.
+#   $1 surface name (same string passed to _spd_run_bounded / _spd_emit)
+_spd_emit_run_start_failure() {
+    local surface="$1"
+    if [ "${SPD_RUN_FAILED_TO_START:-0}" = "1" ]; then
+        _spd_emit "$surface" "unknown" \
+            "could not run: ${SPD_RUN_FAILED_TO_START_REASON:-unknown reason}" \
+            "" "$SPD_RUN_RC"
+        return 0
+    fi
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -761,6 +1174,7 @@ _spd_check_aiteamforge_doctor() {
     _spd_resolve_timeout "${KB_SPACEDOCK_DOCTOR_TIMEOUT-_SPD_TIMEOUT_UNSET}" 45 "KB_SPACEDOCK_DOCTOR_TIMEOUT"
     local limit="$SPD_TIMEOUT_VALUE" note="$SPD_TIMEOUT_NOTE"
     _spd_run_bounded "aiteamforge-doctor" "$limit" aiteamforge doctor
+    if _spd_emit_run_start_failure "aiteamforge-doctor"; then return; fi
     if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
         _spd_emit "aiteamforge-doctor" "unknown" \
             "aiteamforge doctor timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_DOCTOR_TIMEOUT) — no result; the tool was killed${note}" \
@@ -793,15 +1207,18 @@ _spd_check_kb_recover() {
         _spd_emit "kb-recover" "unknown" "kanban-helpers.sh found but its required interpreter ('$shell') is not on PATH" "" ""
         return
     fi
-    # Default 60s: MEASURED on this host — `kb-recover --all-teams --json`
+    # Default 120s: MEASURED on this host — `kb-recover --all-teams --json`
     # (sourcing kanban-helpers.sh under zsh, scanning every team) took
-    # ~11.6s wall-clock (2026-09-14, `time` around the exact invocation
-    # below). 60s gives >5x headroom for a host with more teams or a
-    # slower/loaded board read.
-    _spd_resolve_timeout "${KB_SPACEDOCK_RECOVER_TIMEOUT-_SPD_TIMEOUT_UNSET}" 60 "KB_SPACEDOCK_RECOVER_TIMEOUT"
+    # ~11.6s quiet, but 36s in a later full `report` run the same day
+    # (2026-09-14, xtrace with $SECONDS). 60s was the first default and left
+    # only ~1.7x over an observed healthy run — a healthy-but-busy host would
+    # report a false `unknown`, which is itself a wrong finding. 120s is
+    # >3x the worst observed healthy run.
+    _spd_resolve_timeout "${KB_SPACEDOCK_RECOVER_TIMEOUT-_SPD_TIMEOUT_UNSET}" 120 "KB_SPACEDOCK_RECOVER_TIMEOUT"
     local limit="$SPD_TIMEOUT_VALUE" note="$SPD_TIMEOUT_NOTE"
     _spd_run_bounded "kb-recover" "$limit" env KB_SPD_KH="$kh" "$shell" -c \
         'source "$KB_SPD_KH" >/dev/null 2>&1 && kb-recover --all-teams --json'
+    if _spd_emit_run_start_failure "kb-recover"; then return; fi
     if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
         _spd_emit "kb-recover" "unknown" \
             "kb-recover timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_RECOVER_TIMEOUT) — no result; the tool was killed${note}" \
@@ -859,6 +1276,7 @@ _spd_check_lcars_health() {
         _spd_emit "lcars-health-check" "unknown" "found lcars-health-check.sh but it is not executable and zsh is unavailable to run it" "" ""
         return
     fi
+    if _spd_emit_run_start_failure "lcars-health-check"; then return; fi
     if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
         # Killing a --status run CAN leave lcars-health-check.sh's own
         # /tmp/lcars-healthcheck-run-lock directory behind — read
@@ -904,11 +1322,12 @@ _spd_check_kb_sweep_stubs() {
     # kb-sweep-stubs`, 2026-09-14) — this is a plain filesystem sentinel
     # scan with no network/daemon dependency. 20s is generous headroom for
     # a much larger stub set or a slower disk than this host's, while
-    # staying well under the other surfaces' 45-60s bounds since there is
+    # staying well under the other surfaces' 45-120s bounds since there is
     # no documented contention case for this one (unlike lcars-health).
     _spd_resolve_timeout "${KB_SPACEDOCK_SWEEP_STUBS_TIMEOUT-_SPD_TIMEOUT_UNSET}" 20 "KB_SPACEDOCK_SWEEP_STUBS_TIMEOUT"
     local limit="$SPD_TIMEOUT_VALUE" note="$SPD_TIMEOUT_NOTE"
     _spd_run_bounded "kb-sweep-stubs" "$limit" "$path"
+    if _spd_emit_run_start_failure "kb-sweep-stubs"; then return; fi
     if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
         _spd_emit "kb-sweep-stubs" "unknown" \
             "kb-sweep-stubs timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_SWEEP_STUBS_TIMEOUT) — no result; the tool was killed${note}" \
@@ -1351,6 +1770,51 @@ _spd_reboot_check_autologin() {
     fi
 }
 
+# XACA-1177 review round 1 (XACA-1177-013). Both Tailscale probes below
+# used to hand SPD_RUN_OUT straight to pattern-matching without ever
+# looking at SPD_RUN_RC — so a tool that never produced real output at all
+# (127 = command not found, 126 = found but not executable, or any other
+# non-zero rc paired with genuinely EMPTY output — the shape a killed,
+# crashed, or otherwise not-really-run process leaves) got parsed as if it
+# HAD run: an empty/garbage $out either silently failed every pattern match
+# (landing in the mismatch/warn-fail bucket with a summary that reads like
+# a real posture finding, e.g. "Tailscale tunnel not up (got: <empty>)")
+# or, worse, coincidentally matched something. Neither is what actually
+# happened, which is "we don't know — the tool didn't run."
+#
+# The discriminator is deliberately NOT "rc != 0" alone: `tailscale status`
+# LEGITIMATELY exits non-zero with real, informative content when the
+# daemon is simply stopped ("Tailscale is stopped." on stdout) — that is
+# exactly the "not up" finding this check exists to surface, and it must
+# still reach the normal mismatch bucket (_spd_reboot_mismatch_sev/note),
+# never get reclassified as "could not run". A non-zero rc is only treated
+# as "could not run" when EITHER it is >=126 (127/126 are the shell's own
+# exec-failure codes — not the monitored tool telling us anything) OR the
+# output is genuinely empty (a non-zero rc with nothing to say at all is
+# not informative the way "Tailscale is stopped." is).
+#   $1 = SPD_RUN_RC, $2 = SPD_RUN_OUT (raw, unfiltered — check BEFORE any
+#        grep/head narrowing, so a real message can't be filtered away
+#        before this classification ever sees it)
+# Sets SPD_TAILSCALE_COULD_NOT_RUN ("1"/"0").
+_spd_tailscale_could_not_run() {
+    local rc="$1" out="$2"
+    case "$rc" in
+        ''|*[!0-9]*)
+            SPD_TAILSCALE_COULD_NOT_RUN="1"
+            return
+            ;;
+    esac
+    if [ "$rc" -ge 126 ]; then
+        SPD_TAILSCALE_COULD_NOT_RUN="1"
+        return
+    fi
+    if [ "$rc" -ne 0 ] && [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+        SPD_TAILSCALE_COULD_NOT_RUN="1"
+        return
+    fi
+    SPD_TAILSCALE_COULD_NOT_RUN="0"
+}
+
 _spd_reboot_check_tailscale_sysext() {
     if ! _spd_have systemextensionsctl; then
         _spd_emit "reboot-t1-tailscale-sysext" "unknown" "systemextensionsctl not found (non-macOS host?)" "" ""
@@ -1373,10 +1837,17 @@ _spd_reboot_check_tailscale_sysext() {
     # per the task brief. The grep runs against the already-captured
     # output, outside the bounded call.
     _spd_run_bounded "reboot-t1-tailscale-sysext" "$limit" systemextensionsctl list
+    if _spd_emit_run_start_failure "reboot-t1-tailscale-sysext"; then return; fi
     if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
         _spd_emit "reboot-t1-tailscale-sysext" "unknown" \
             "systemextensionsctl timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_TAILSCALE_TIMEOUT) — no result; the tool was killed${note}" \
             "$SPD_RUN_OUT" "$SPD_RUN_RC"
+        return
+    fi
+    _spd_tailscale_could_not_run "$SPD_RUN_RC" "$SPD_RUN_OUT"
+    if [ "$SPD_TAILSCALE_COULD_NOT_RUN" = "1" ]; then
+        _spd_emit "reboot-t1-tailscale-sysext" "unknown" \
+            "systemextensionsctl could not run (exit $SPD_RUN_RC, no usable output)${note}" "$SPD_RUN_OUT" "$SPD_RUN_RC"
         return
     fi
     local out
@@ -1411,10 +1882,22 @@ _spd_reboot_check_tailscale_tunnel() {
     # it — per the task brief. `head -1` runs against the already-captured
     # output, outside the bounded call.
     _spd_run_bounded "reboot-t1-tailscale-tunnel" "$limit" "$bin" status
+    if _spd_emit_run_start_failure "reboot-t1-tailscale-tunnel"; then return; fi
     if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
         _spd_emit "reboot-t1-tailscale-tunnel" "unknown" \
             "Tailscale status timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_TAILSCALE_TIMEOUT) — no result; the tool was killed${note}" \
             "$SPD_RUN_OUT" "$SPD_RUN_RC"
+        return
+    fi
+    # NOTE: `tailscale status` legitimately exits non-zero WITH real
+    # content ("Tailscale is stopped.") when the daemon is simply
+    # stopped — _spd_tailscale_could_not_run's own header comment covers
+    # why that case must still fall through to the mismatch bucket below,
+    # never get reclassified as "could not run" here.
+    _spd_tailscale_could_not_run "$SPD_RUN_RC" "$SPD_RUN_OUT"
+    if [ "$SPD_TAILSCALE_COULD_NOT_RUN" = "1" ]; then
+        _spd_emit "reboot-t1-tailscale-tunnel" "unknown" \
+            "Tailscale status could not run (exit $SPD_RUN_RC, no usable output)${note}" "$SPD_RUN_OUT" "$SPD_RUN_RC"
         return
     fi
     local out
@@ -1974,7 +2457,7 @@ Exit code reflects the WORST finding severity across all diagnostics run:
 
 Every fronted tool runs under a timeout (a hang reports 'unknown', never
 hangs this script) — override in seconds: KB_SPACEDOCK_DOCTOR_TIMEOUT (45),
-KB_SPACEDOCK_RECOVER_TIMEOUT (60), KB_SPACEDOCK_LCARS_HEALTH_TIMEOUT (45),
+KB_SPACEDOCK_RECOVER_TIMEOUT (120), KB_SPACEDOCK_LCARS_HEALTH_TIMEOUT (45),
 KB_SPACEDOCK_SWEEP_STUBS_TIMEOUT (20), KB_SPACEDOCK_TAILSCALE_TIMEOUT (15).
 
 This tool fronts existing diagnostics — it does not implement any health
