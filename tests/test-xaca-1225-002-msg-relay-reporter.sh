@@ -40,6 +40,11 @@
 #       location) — the actual PATH-lookup fix, not just presence of a plist
 #   R7  install_fleet_reporter_launchagent: no unresolved {{...}} placeholder
 #       survives rendering, and the rendered plist is well-formed XML
+#   R12 XACA-1225-008 review round 1, Fix 3: rendered plist's Label is
+#       com.aiteamforge.fleet-reporter (not the old com.devteam.fleet-reporter,
+#       which mismatched the plist's own filename) and ProgramArguments[0]
+#       is /bin/bash (not /opt/homebrew/bin/bash, absent on Intel/no-Homebrew
+#       machines).
 #   R8  fleet-reporter.sh: fleet-config.json PRESENT but send_status FAILS
 #       (nothing listening on the configured port) -> main() still runs
 #       pull_messages() before exiting 1, rather than starving the relay
@@ -52,6 +57,21 @@
 #       defaulted globals. R9a: no files, no vars -> still skips (real
 #       fleet=skip default). R9b: no files, FLEET_MODE+FLEET_LOCAL_PORT set
 #       -> reports.
+#   R10 REGRESSION found+fixed during XACA-1225-008 review round 1: R1-R9
+#       above all run fleet-reporter.sh from ITS OWN checkout location,
+#       where a sibling msg-client.sh always happens to exist (dev checkout,
+#       or the flattened share/scripts/ mirror) — none of them can catch a
+#       regression in the resolution used by the layout the LaunchAgent
+#       ACTUALLY runs: install_fleet_reporter() copies ONLY
+#       fleet-reporter.sh into "$AITEAMFORGE_DIR/fleet-monitor/client/", with
+#       msg-client.sh living exclusively under "$AITEAMFORGE_DIR/scripts/".
+#       R10a/R10b lay out that installed shape (no sibling msg-client.sh) and
+#       assert msg-client.sh is actually INVOKED (a marker file it writes),
+#       not just that a pull-status file exists — R8's bare existence check
+#       cannot distinguish a real pull from a "no-client" skip, since
+#       pull_messages() writes that file on every guard path. R10a covers
+#       the relay-only (unconfigured) path, R10b repeats R8's
+#       send_status-FAILS scenario on the same installed layout.
 #   S1  ensure_msg_relay_reporter is defined and reuses install_fleet_reporter
 #       + install_fleet_reporter_launchagent (no reimplementation)
 #   S2  bin/aiteamforge-setup.sh calls ensure_msg_relay_reporter
@@ -336,6 +356,49 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+# R12 — XACA-1225-008 review round 1, Fix 3: the rendered plist's Label must
+# be com.aiteamforge.fleet-reporter (every checker — aiteamforge-doctor.sh,
+# aiteamforge-status.sh, aiteamforge-start.sh — greps launchctl output for
+# exactly that string; the OLD template's internal Label,
+# com.devteam.fleet-reporter, mismatched the plist's own FILENAME, which is
+# already com.aiteamforge.fleet-reporter.plist everywhere it's referenced —
+# see install-fleet-monitor.sh/aiteamforge-doctor.sh/etc), and
+# ProgramArguments[0] must be /bin/bash (the system bash always present at
+# that fixed path, not /opt/homebrew/bin/bash, which does not exist on an
+# Intel Mac or any machine without Homebrew installed at all — and
+# fleet-reporter.sh is documented bash-3.2-safe, see its own "must run under
+# bash 3.2" comments, so it never needed a newer bash in the first place).
+# Renders the template via the SAME install_fleet_reporter_launchagent() path
+# R6/R7 already exercise (_run_ensure), not a hand-rolled sed, so this proves
+# what actually ships.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "R12: rendered plist has Label=com.aiteamforge.fleet-reporter and ProgramArguments[0]=/bin/bash"
+R12_HOME=$(_new_home r12)
+_run_ensure "$R12_HOME" >"$WORK_DIR/r12.out" 2>&1
+R12_PLIST="$R12_HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist"
+R12_OK=true
+[ -f "$R12_PLIST" ] || R12_OK=false
+R12_LABEL=""
+R12_ARG0=""
+if [ "$R12_OK" = "true" ] && command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$R12_PLIST" >/dev/null 2>&1 || R12_OK=false
+    R12_LABEL="$(plutil -extract Label raw -o - "$R12_PLIST" 2>/dev/null)"
+    R12_ARG0="$(plutil -extract ProgramArguments.0 raw -o - "$R12_PLIST" 2>/dev/null)"
+elif [ "$R12_OK" = "true" ]; then
+    # No plutil (non-macOS test runner) — fall back to a plain-text extraction
+    # matching R6's own awk-based pattern above.
+    R12_LABEL="$(awk '/<key>Label<\/key>/{getline; print; exit}' "$R12_PLIST" | sed -E 's/^\s*<string>(.*)<\/string>\s*$/\1/')"
+    R12_ARG0="$(awk '/<key>ProgramArguments<\/key>/{f=1; next} f && /<string>/{print; exit}' "$R12_PLIST" | sed -E 's/^\s*<string>(.*)<\/string>\s*$/\1/')"
+fi
+[ "$R12_LABEL" = "com.aiteamforge.fleet-reporter" ] || R12_OK=false
+[ "$R12_ARG0" = "/bin/bash" ] || R12_OK=false
+if [ "$R12_OK" = "true" ]; then
+    test_pass
+else
+    test_fail "Label='$R12_LABEL' (want com.aiteamforge.fleet-reporter), ProgramArguments[0]='$R12_ARG0' (want /bin/bash)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 # R8 — fleet-reporter.sh: fleet-config.json IS present (configured path,
 # same as R2), but the configured endpoint has nothing listening — send_status
 # fails every retry. main() must still run pull_messages() before exiting 1,
@@ -440,6 +503,247 @@ if ! grep -q "not configured on this machine" "$R9B_OUT" && grep -q "Reporting t
     test_pass
 else
     test_fail "expected the configured/reporting path with FLEET_MODE+FLEET_LOCAL_PORT set and no files; out=$(cat "$R9B_OUT")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R10 — XACA-1225-008 review round 1, Fix 1 regression coverage: the
+# INSTALLED consumer layout, where fleet-reporter.sh has NO sibling
+# msg-client.sh (see the header comment above for the full rationale).
+#
+# _r10_compute_slug replicates NOTHING of its own — it sources the reporter's
+# own _msg_default_machine_slug() (extracted, so this fixture can never drift
+# from what the real guard actually computes) purely to know which
+# "$HOME/.aiteamforge/vault/<slug>.key" file-fallback path to seed, so Guard
+# 2 (vault key) passes deterministically without depending on, or writing
+# to, the real macOS Keychain. This is a throwaway stub file inside this
+# test's own sandboxed HOME, not a real secret — only its *existence* is
+# ever checked by the guard under test.
+# ═══════════════════════════════════════════════════════════════════════════
+_R10_SLUG_FN="$WORK_DIR/r10-slug-fn.sh"
+awk '/^_msg_default_machine_slug\(\)/,/^}/' "$FLEET_REPORTER_SH" >"$_R10_SLUG_FN"
+_r10_compute_slug() {
+    bash -c "source '$_R10_SLUG_FN'; _msg_default_machine_slug"
+}
+
+# _r10_layout <home_dir> <marker_path> — installed-consumer shape:
+# fleet-reporter.sh ALONE under fleet-monitor/client/ (no sibling), an
+# executable msg-client.sh STUB under scripts/ that writes <marker_path>
+# when actually invoked (instead of touching a real relay), the msg-store.py
+# it also needs, and a file-fallback vault key stub for whatever slug this
+# host's `hostname` actually derives to.
+_r10_layout() {
+    local home_dir="$1" marker="$2"
+    mkdir -p "$home_dir/aiteamforge/fleet-monitor/client"
+    cp "$FLEET_REPORTER_SH" "$home_dir/aiteamforge/fleet-monitor/client/fleet-reporter.sh"
+    mkdir -p "$home_dir/aiteamforge/scripts"
+    cat >"$home_dir/aiteamforge/scripts/msg-client.sh" <<EOF
+#!/usr/bin/env bash
+touch "$marker"
+exit 0
+EOF
+    chmod +x "$home_dir/aiteamforge/scripts/msg-client.sh"
+    mkdir -p "$home_dir/aiteamforge/kanban-hooks"
+    touch "$home_dir/aiteamforge/kanban-hooks/msg-store.py"
+    local slug
+    slug="$(_r10_compute_slug)"
+    mkdir -p "$home_dir/.aiteamforge/vault"
+    printf 'stub-not-a-real-key\n' >"$home_dir/.aiteamforge/vault/${slug}.key"
+}
+
+test_start "R10a: installed layout (no sibling msg-client.sh) — relay-only path still invokes msg-client.sh, not a no-client skip"
+R10A_HOME=$(_new_home r10a)
+R10A_MARKER="$WORK_DIR/r10a.marker"
+_r10_layout "$R10A_HOME" "$R10A_MARKER"
+R10A_PULL_STATUS="$R10A_HOME/.aiteamforge/run/kb-msg-pull-status"
+R10A_OUT="$WORK_DIR/r10a.out"
+(
+    unset FLEET_MONITOR_API FLEET_MODE FLEET_AUTH_TOKEN FLEET_LOCAL_PORT \
+          FLEET_DASHBOARD_GROUP FLEET_SERVER_URL FLEET_DEBUG FLEET_MACHINE_NAME \
+          FLEET_REQUIRE_AUTH
+    export HOME="$R10A_HOME"
+    export AITEAMFORGE_DIR="$R10A_HOME/aiteamforge"
+    bash "$R10A_HOME/aiteamforge/fleet-monitor/client/fleet-reporter.sh"
+) >"$R10A_OUT" 2>&1
+R10A_OK=true
+[ -f "$R10A_MARKER" ] || R10A_OK=false
+[ -f "$R10A_PULL_STATUS" ] || R10A_OK=false
+[ -f "$R10A_PULL_STATUS" ] && grep -q "^no-client" "$R10A_PULL_STATUS" && R10A_OK=false
+if [ "$R10A_OK" = "true" ]; then
+    test_pass
+else
+    test_fail "marker present=$([ -f "$R10A_MARKER" ] && echo yes || echo no); pull-status=$(cat "$R10A_PULL_STATUS" 2>/dev/null || echo MISSING); out=$(cat "$R10A_OUT")"
+fi
+
+test_start "R10b: installed layout, send_status FAILS (R8's scenario) — pull_messages still invokes msg-client.sh, not a no-client skip"
+R10B_HOME=$(_new_home r10b)
+R10B_MARKER="$WORK_DIR/r10b.marker"
+_r10_layout "$R10B_HOME" "$R10B_MARKER"
+mkdir -p "$R10B_HOME/.aiteamforge"
+# NOTE: pull_messages() derives its relay base URL from
+# .centralServer.apiEndpoint directly (read_config(), independent of
+# FLEET_MODE) — so unlike R8 (which leaves apiEndpoint empty, since R8 only
+# asserts the pull-status FILE exists, satisfied even by a "no-relay" skip),
+# this fixture deliberately sets a non-empty apiEndpoint so pull_messages()
+# actually reaches the msg-client.sh stub. FLEET_MODE stays "standalone"
+# pointing send_status at a nothing-listening local port, so the status POST
+# genuinely still fails, matching R8's scenario.
+cat >"$R10B_HOME/.aiteamforge/fleet-config.json" <<'EOF'
+{"mode":"standalone","centralServer":{"enabled":true,"apiEndpoint":"http://127.0.0.1:1/api/status","authToken":""},"localServer":{"enabled":true,"port":59324},"reporting":{"interval":60},"dashboardGroup":""}
+EOF
+R10B_PULL_STATUS="$R10B_HOME/.aiteamforge/run/kb-msg-pull-status"
+R10B_OUT="$WORK_DIR/r10b.out"
+(
+    unset FLEET_MONITOR_API FLEET_MODE FLEET_AUTH_TOKEN FLEET_LOCAL_PORT \
+          FLEET_DASHBOARD_GROUP FLEET_SERVER_URL FLEET_DEBUG FLEET_MACHINE_NAME \
+          FLEET_REQUIRE_AUTH
+    export HOME="$R10B_HOME"
+    export AITEAMFORGE_DIR="$R10B_HOME/aiteamforge"
+    bash "$R10B_HOME/aiteamforge/fleet-monitor/client/fleet-reporter.sh"
+) >"$R10B_OUT" 2>&1
+R10B_RC=$?
+R10B_OK=true
+[ "$R10B_RC" = "1" ] || R10B_OK=false
+[ -f "$R10B_MARKER" ] || R10B_OK=false
+[ -f "$R10B_PULL_STATUS" ] || R10B_OK=false
+[ -f "$R10B_PULL_STATUS" ] && grep -q "^no-client" "$R10B_PULL_STATUS" && R10B_OK=false
+if [ "$R10B_OK" = "true" ]; then
+    test_pass
+else
+    test_fail "rc=$R10B_RC; marker present=$([ -f "$R10B_MARKER" ] && echo yes || echo no); pull-status=$(cat "$R10B_PULL_STATUS" 2>/dev/null || echo MISSING); out=$(cat "$R10B_OUT")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R11 — XACA-1225-008 review round 1, Fix 2: _fleet_status_configured()'s
+# file arm used to treat bare FLEET_CONFIG_FILE existence as "configured".
+# scripts/kb-msg-provision's persist_relay_url() writes fleet-config.json
+# containing ONLY .centralServer — that file's mere presence routed such a
+# consumer into main()'s configured branch, which attempts a real
+# send_status() POST (3 retries x 5s backoff) before ever falling through to
+# pull_messages(). R2/R9b already prove a REAL (create_fleet_reporter_config()
+# shaped) fleet-config.json still takes the configured path — R11a/R11b cover
+# the other two shapes end to end: centralServer-ONLY (must now take the
+# relay-only path, no POST attempted) and an unparseable file (must fall back
+# to the OLD bare-existence behaviour, never silently downgrade a real fleet
+# host that happens to have a corrupt file).
+#
+# R11c drives _fleet_config_has_more_than_central_server() directly (the
+# parser helper itself, EXTRACTED rather than run inside the full script) so
+# its jq path and python3-fallback path can each be tested in true isolation
+# — running the FULL fleet-reporter.sh cannot exercise the no-jq path at all:
+# the script's own top-of-file `export PATH="/opt/homebrew/bin:/usr/local/bin
+# :/usr/bin:/bin:..."` unconditionally PREPENDS those dirs ahead of anything
+# a caller sets, and jq lives in more than one of them on this machine
+# (`/opt/homebrew/bin/jq` AND `/usr/bin/jq` — confirmed via `which -a jq`), so
+# no caller-supplied PATH can ever hide it from a full script run. R11a/R11b
+# above therefore only ever exercise the jq path; R11c is what actually
+# proves the python3 fallback (and the no-tooling fallback) agree with it.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "R11a: centralServer-only fleet-config.json (kb-msg-provision shape) -> relay-only, no status POST attempted"
+R11A_HOME=$(_new_home r11a)
+mkdir -p "$R11A_HOME/.aiteamforge"
+cat >"$R11A_HOME/.aiteamforge/fleet-config.json" <<'EOF'
+{"centralServer":{"enabled":true,"apiEndpoint":"http://127.0.0.1:1/api/status","authToken":"tok"}}
+EOF
+R11A_OUT="$WORK_DIR/r11a.out"
+(
+    unset FLEET_MONITOR_API FLEET_MODE FLEET_AUTH_TOKEN FLEET_LOCAL_PORT \
+          FLEET_DASHBOARD_GROUP FLEET_SERVER_URL FLEET_DEBUG FLEET_MACHINE_NAME \
+          FLEET_REQUIRE_AUTH
+    export HOME="$R11A_HOME"
+    export AITEAMFORGE_DIR="$R11A_HOME/aiteamforge"
+    timeout 20 bash "$FLEET_REPORTER_SH"
+) >"$R11A_OUT" 2>&1
+if grep -q "not configured on this machine" "$R11A_OUT" && ! grep -q "Reporting to" "$R11A_OUT"; then
+    test_pass
+else
+    test_fail "expected the relay-only path (no status POST); out=$(cat "$R11A_OUT")"
+fi
+
+test_start "R11b: unparseable fleet-config.json -> falls back to OLD bare-existence behaviour, status POST attempted"
+R11B_HOME=$(_new_home r11b)
+mkdir -p "$R11B_HOME/.aiteamforge"
+# With the file present but genuinely unparseable, read_config() can extract
+# nothing from it at all (not even .centralServer.apiEndpoint), so
+# FLEET_MODE/CENTRAL_API both fall back to the script's own hardcoded
+# defaults ("client" / http://localhost:3000/api/status) — there is no field
+# in this fixture to override that with. This is exactly what the real code
+# does for a genuinely corrupt file, so it is the realistic case to test;
+# verified empirically nothing listens on localhost:3000 on this dev machine
+# before adding this case, and the connect-timeout fails fast on a refused
+# connection either way.
+printf 'this is not valid json at all {{{' >"$R11B_HOME/.aiteamforge/fleet-config.json"
+R11B_OUT="$WORK_DIR/r11b.out"
+(
+    unset FLEET_MONITOR_API FLEET_MODE FLEET_AUTH_TOKEN FLEET_LOCAL_PORT \
+          FLEET_DASHBOARD_GROUP FLEET_SERVER_URL FLEET_DEBUG FLEET_MACHINE_NAME \
+          FLEET_REQUIRE_AUTH
+    export HOME="$R11B_HOME"
+    export AITEAMFORGE_DIR="$R11B_HOME/aiteamforge"
+    timeout 20 bash "$FLEET_REPORTER_SH"
+) >"$R11B_OUT" 2>&1
+if ! grep -q "not configured on this machine" "$R11B_OUT" && grep -q "Reporting to" "$R11B_OUT"; then
+    test_pass
+else
+    test_fail "expected the OLD bare-existence fallback (status POST attempted); out=$(cat "$R11B_OUT")"
+fi
+
+# R11c: isolated matrix over _fleet_config_has_more_than_central_server()
+# itself — three fixture shapes x jq-available/python3-only/neither-available
+# (9 sub-cases). Extracted, so PATH truly controls which parser answers
+# (see the block comment above for why the full-script cases above cannot).
+_R11C_FN="$WORK_DIR/r11c-fn.sh"
+awk '/^_fleet_config_has_more_than_central_server\(\)/,/^}/' "$FLEET_REPORTER_SH" >"$_R11C_FN"
+if ! grep -q '^_fleet_config_has_more_than_central_server()' "$_R11C_FN"; then
+    test_start "R11c: extract _fleet_config_has_more_than_central_server"
+    test_fail "could not extract the function from $FLEET_REPORTER_SH — is the name unchanged?"
+else
+    _R11C_ONLY_JQ_BIN="$WORK_DIR/r11c-jq-only-bin"
+    _R11C_ONLY_PY_BIN="$WORK_DIR/r11c-py-only-bin"
+    _R11C_NEITHER_BIN="$WORK_DIR/r11c-neither-bin"
+    mkdir -p "$_R11C_ONLY_JQ_BIN" "$_R11C_ONLY_PY_BIN" "$_R11C_NEITHER_BIN"
+    _JQ_BIN="$(command -v jq 2>/dev/null || true)"
+    _PY_BIN="$(command -v python3 2>/dev/null || true)"
+    [ -n "$_JQ_BIN" ] && ln -sf "$_JQ_BIN" "$_R11C_ONLY_JQ_BIN/jq"
+    [ -n "$_PY_BIN" ] && ln -sf "$_PY_BIN" "$_R11C_ONLY_PY_BIN/python3"
+
+    # Invoke bash by its OWN absolute path, never by bare name: exec only
+    # searches PATH for a slash-free command, and $bin_dir below deliberately
+    # has no `bash` symlink in it (it exists only to control what
+    # _fleet_config_has_more_than_central_server() itself can find via
+    # `command -v jq`/`command -v python3` INSIDE that subshell).
+    _R11C_BASH_BIN="$(command -v bash)"
+
+    _r11c_case() {
+        local label="$1" fixture_json="$2" bin_dir="$3" expect_rc="$4"
+        test_start "$label"
+        local f="$WORK_DIR/r11c-$RANDOM.json"
+        printf '%s' "$fixture_json" >"$f"
+        local rc
+        PATH="$bin_dir" "$_R11C_BASH_BIN" -c "source '$_R11C_FN'; _fleet_config_has_more_than_central_server '$f'"
+        rc=$?
+        if [ "$rc" = "$expect_rc" ]; then
+            test_pass
+        else
+            test_fail "expected rc=$expect_rc, got rc=$rc (bin_dir=$bin_dir)"
+        fi
+    }
+
+    R11C_FULL='{"mode":"client","centralServer":{"enabled":true,"apiEndpoint":"http://x/api/status"},"localServer":{"enabled":false,"port":3000},"reporting":{"interval":60},"dashboardGroup":""}'
+    R11C_CENTRAL_ONLY='{"centralServer":{"enabled":true,"apiEndpoint":"http://x/api/status","authToken":"tok"}}'
+    R11C_BAD='not json at all {{{'
+
+    # jq-only PATH (no python3 reachable)
+    _r11c_case "R11c: full fleet-config.json, jq-only -> rc=0 (has extra keys)"        "$R11C_FULL"         "$_R11C_ONLY_JQ_BIN" 0
+    _r11c_case "R11c: centralServer-only, jq-only -> rc=1 (ONLY centralServer)"        "$R11C_CENTRAL_ONLY" "$_R11C_ONLY_JQ_BIN" 1
+    _r11c_case "R11c: unparseable, jq-only -> rc=2 (fall back to old behaviour)"       "$R11C_BAD"          "$_R11C_ONLY_JQ_BIN" 2
+    # python3-only PATH (no jq reachable) — proves the fallback parser agrees
+    _r11c_case "R11c: full fleet-config.json, python3-only -> rc=0"                    "$R11C_FULL"         "$_R11C_ONLY_PY_BIN" 0
+    _r11c_case "R11c: centralServer-only, python3-only -> rc=1"                        "$R11C_CENTRAL_ONLY" "$_R11C_ONLY_PY_BIN" 1
+    _r11c_case "R11c: unparseable, python3-only -> rc=2"                               "$R11C_BAD"          "$_R11C_ONLY_PY_BIN" 2
+    # neither tool reachable -- no-tooling fallback, always rc=2 regardless of shape
+    _r11c_case "R11c: full fleet-config.json, no tooling -> rc=2 (fail back to old behaviour)" "$R11C_FULL"         "$_R11C_NEITHER_BIN" 2
+    _r11c_case "R11c: centralServer-only, no tooling -> rc=2"                          "$R11C_CENTRAL_ONLY" "$_R11C_NEITHER_BIN" 2
+    _r11c_case "R11c: unparseable, no tooling -> rc=2"                                 "$R11C_BAD"          "$_R11C_NEITHER_BIN" 2
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

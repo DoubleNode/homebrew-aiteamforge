@@ -21,7 +21,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `kanban-helpers.template.sh` names that fix instead of `[BLOCKED]`. `kb-msg-provision` also refuses keygen
   with an actionable message when the login Keychain probe reports it locked. New suites:
   `test-xaca-1225-001-msg-client-deps.sh`, `test-xaca-1225-002-msg-relay-reporter.sh`,
-  `test-xaca-1225-msg-inbox-check-shipping.sh`.
+  `test-xaca-1225-msg-inbox-check-shipping.sh`. Review round 1: the LaunchAgent runs
+  `fleet-monitor/client/fleet-reporter.sh`, which has no sibling `msg-client.sh` on a consumer, so every pull was
+  skipped as `no-client`. The reporter now also looks in `$AITEAMFORGE_DIR/scripts` and `~/aiteamforge/scripts`.
+  A `fleet-config.json` holding only `centralServer` (what `kb-msg-provision` writes) no longer counts as fleet
+  status configured. The template's Label is now `com.aiteamforge.fleet-reporter` (it was `com.devteam.*`,
+  which every doctor/status/start check missed), and it runs `/bin/bash`, not `/opt/homebrew/bin/bash`.
+  `kb-msg-provision` registers the inbox hook before keygen.
+
 
 - **XACA-1233** — `share/scripts/lcars-health-check.sh`: added `_LCARS_INFRA` row
   `"0:medical-general:medical:medical-general-lcars"` so `lcars-health-check.sh` supervises

@@ -2119,16 +2119,54 @@ _msg_has_vault_key() {
 pull_messages() {
     local dir="${AITEAMFORGE_DIR:-$HOME/dev-team}"
 
-    # msg-client.sh ships as a SIBLING of THIS script in both layouts:
+    # msg-client.sh is NOT reliably a sibling of THIS script (XACA-1225-008
+    # review round 1). The comment this replaced claimed it always is, in
+    # both layouts:
     #   dev:      fleet-monitor/client/{fleet-reporter.sh,msg-client.sh}
     #   consumer: ~/aiteamforge/scripts/{fleet-reporter.sh,msg-client.sh}
-    #             (tap-mirrored flattened into share/scripts/, same pattern
-    #              fleet-reporter.sh itself already uses — see sync-tap.sh)
-    # Resolving relative to this script's OWN location (not AITEAMFORGE_DIR)
-    # keeps this correct in both layouts without a separate mapping.
+    # That is true for the DEV checkout and for the raw tap mirror (both
+    # keep msg-client.sh/js + vault-keygen.js alongside fleet-reporter.sh —
+    # see sync-tap.sh's share/scripts/ mapping), but it is FALSE for the
+    # installed consumer copy that the LaunchAgent actually runs:
+    # install_fleet_reporter() (homebrew-tap/libexec/installers/
+    # install-fleet-monitor.sh) copies ONLY fleet-reporter.sh into
+    # "$AITEAMFORGE_DIR/fleet-monitor/client/fleet-reporter.sh" — it never
+    # copies msg-client.{sh,js}, vault-keygen.js, or the npm-ci'd
+    # node_modules tree there. Those live exclusively under
+    # "$AITEAMFORGE_DIR/scripts/". The LaunchAgent template
+    # (fleet-reporter-launchagent.template.plist) points ProgramArguments at
+    # exactly that fleet-monitor/client/ copy, so on every real consumer
+    # this reporter runs with NO msg-client.sh sibling, and the old
+    # sibling-only resolution always fell through to the "no-client" skip —
+    # the relay pull this function exists to run never actually ran on a
+    # provisioned consumer box.
+    #
+    # Resolve via an ordered candidate list instead, first executable wins:
+    #   1. sibling of this script (dev checkout; also covers a copy someone
+    #      runs straight out of share/scripts/ or scripts/ before install)
+    #   2. $AITEAMFORGE_DIR/scripts/msg-client.sh — where the installer
+    #      actually puts it, when AITEAMFORGE_DIR is set (the LaunchAgent's
+    #      plist always sets it; see install_fleet_reporter_launchagent())
+    #   3. $HOME/aiteamforge/scripts/msg-client.sh — the default consumer
+    #      root, for a manual run with AITEAMFORGE_DIR unset
     local reporter_dir
     reporter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local client="$reporter_dir/msg-client.sh"
+    local client_candidates=("$reporter_dir/msg-client.sh")
+    # Only add the AITEAMFORGE_DIR candidate when it is actually set — an
+    # unset AITEAMFORGE_DIR would otherwise produce "/scripts/msg-client.sh"
+    # (a bogus root-relative path that can never exist, and is confusing in
+    # the recorded skip reason below).
+    [ -n "${AITEAMFORGE_DIR:-}" ] && client_candidates+=("$AITEAMFORGE_DIR/scripts/msg-client.sh")
+    client_candidates+=("$HOME/aiteamforge/scripts/msg-client.sh")
+    local client=""
+    local candidate
+    for candidate in "${client_candidates[@]}"; do
+        [ -n "$candidate" ] || continue
+        if [ -x "$candidate" ]; then
+            client="$candidate"
+            break
+        fi
+    done
     local store="$dir/kanban-hooks/msg-store.py"
 
     # ── Skip reasons are RECORDED, not swallowed (XACA-0885-003) ─────────────
@@ -2154,8 +2192,13 @@ pull_messages() {
     }
 
     # Guard 1: msg-client.js/.sh not shipped to this box yet (older tap install,
-    # or dev checkout predating XACA-0777).
-    [ -x "$client" ] || { _msg_record_skip "no-client: $client is missing or not executable"; return 0; }
+    # or dev checkout predating XACA-0777) — or shipped somewhere none of the
+    # candidates above resolved. Name every path tried, not just one, since
+    # which candidate SHOULD have matched depends on the install layout.
+    [ -n "$client" ] || {
+        _msg_record_skip "no-client: none of these paths is an executable msg-client.sh: $(printf '%s, ' "${client_candidates[@]}" | sed 's/, $//')"
+        return 0
+    }
     [ -f "$store" ]  || { _msg_record_skip "no-store: $store is missing"; return 0; }
     command -v python3 >/dev/null 2>&1 || { _msg_record_skip "no-python3"; return 0; }
     command -v node    >/dev/null 2>&1 || { _msg_record_skip "no-node"; return 0; }
@@ -2281,6 +2324,75 @@ pull_messages() {
 # see R1 in tests/test-xaca-1225-002-msg-relay-reporter.sh, which explicitly
 # unsets all five before asserting the skip path) is unaffected: it still
 # takes the not-configured branch exactly as before.
+#
+# XACA-1225-008 review round 1, Fix 2: bare FLEET_CONFIG_FILE existence
+# overstated the evidence the SAME WAY the env-var gap above once did.
+# scripts/kb-msg-provision's persist_relay_url() (called from a fleet=skip
+# consumer that only ran `kb-msg-provision --server <url>` to reach the
+# cross-machine relay, never install_fleet_monitor()) writes
+# fleet-config.json containing ONLY the .centralServer key. That file's mere
+# presence used to satisfy this function's first arm, routing such a
+# consumer into main()'s "configured" branch, which attempts a REAL status
+# POST (send_status(), 3 retries x 5s backoff against a dashboard server
+# that was never installed) before it ever falls through to pull_messages()
+# on failure — burning ~15s of every 60s cycle for a box that only ever
+# asked for the kb-msg relay, never a status dashboard.
+# create_fleet_reporter_config() (install-fleet-monitor.sh), the ONLY other
+# writer of this file, always writes mode + localServer + reporting +
+# dashboardGroup alongside centralServer — so a REAL fleet host's file always
+# has at least one key besides centralServer. See
+# _fleet_config_has_more_than_central_server()'s own header comment, just
+# below, for the parse strategy and its unparseable/no-tooling fallback,
+# which is deliberately the OLD bare-existence behaviour — this must never
+# downgrade a real fleet host on a box lacking jq and python3.
+
+# Returns 0 when $1 parses as a JSON object with at least one top-level key
+# other than "centralServer" (a real create_fleet_reporter_config() file —
+# XACA-1225-008 review round 1, Fix 2). Returns 1 when it parses and has
+# ONLY that key (kb-msg-provision's persist_relay_url() shape). Returns 2
+# when the file cannot be parsed as a JSON object at all, or neither jq nor
+# python3 is on PATH — the caller treats 2 the same as 0 (fall back to bare
+# existence) rather than as "not configured": an unparseable file is not
+# evidence a real fleet host isn't real.
+#
+# Mirrors this script's existing jq-then-python3-then-degrade pattern (see
+# _lcars_registry_port_for_team() above) rather than introducing a new one.
+_fleet_config_has_more_than_central_server() {
+    local file="$1"
+    if command -v jq >/dev/null 2>&1; then
+        local extra
+        extra=$(jq -e 'if type == "object" then ((keys_unsorted - ["centralServer"]) | length) else empty end' "$file" 2>/dev/null)
+        case "$extra" in
+            '') : ;;   # not a JSON object, or jq itself errored -- fall through to python3
+            0) return 1 ;;
+            *) return 0 ;;
+        esac
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        FLEET_CONFIG_PROBE_FILE="$file" python3 -c '
+import json, os, sys
+try:
+    with open(os.environ["FLEET_CONFIG_PROBE_FILE"]) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(2)
+if not isinstance(data, dict):
+    sys.exit(2)
+extra = [k for k in data.keys() if k != "centralServer"]
+sys.exit(0 if extra else 1)
+' 2>/dev/null
+        local rc=$?
+        case "$rc" in
+            0) return 0 ;;
+            1) return 1 ;;
+            *) : ;;   # unparseable / unexpected -- fall through to the no-tooling fallback
+        esac
+    fi
+    # Neither tool available, or both failed to parse -- fail back to the OLD
+    # behaviour (bare existence = configured) rather than guess.
+    return 2
+}
+
 _fleet_status_configured() {
     # The env-var arm reads the PRE-load_config() snapshot
     # (_XACA1225_FLEET_ENV_CONFIGURED, captured just above load_config()'s own
@@ -2288,7 +2400,20 @@ _fleet_status_configured() {
     # unconditionally overwritten with defaults by load_config() long before
     # this function ever runs (see that snapshot's own comment for the
     # measured failure this avoids).
-    [ -f "$FLEET_CONFIG_FILE" ] || [ -f "$MACHINE_IDENTITY_FILE" ] \
+    local file_configured=false
+    if [ -f "$FLEET_CONFIG_FILE" ]; then
+        _fleet_config_has_more_than_central_server "$FLEET_CONFIG_FILE"
+        case $? in
+            1) file_configured=false ;;  # ONLY .centralServer (kb-msg-provision's
+                                          # persist_relay_url() shape) -- deliberately
+                                          # NOT "configured" via this file
+            *) file_configured=true ;;   # 0 = a real fleet-config.json; 2 = unparseable
+                                          # or neither jq nor python3 available -- fail
+                                          # back to the OLD bare-existence behaviour
+                                          # rather than guess wrong on a real fleet host
+        esac
+    fi
+    [ "$file_configured" = "true" ] || [ -f "$MACHINE_IDENTITY_FILE" ] \
         || [ "${_XACA1225_FLEET_ENV_CONFIGURED:-false}" = "true" ]
 }
 

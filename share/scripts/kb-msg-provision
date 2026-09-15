@@ -1354,6 +1354,41 @@ def main():
         say("\n  All Tier-2 provisioning present.")
         return 0
 
+    # ── inbox hook (XACA-1225-003; moved ahead of keypair by XACA-1225-008
+    #    review round 1) ──
+    # Runs BEFORE the keypair/keygen section below, not after. Both keygen
+    # failure paths just below `return` (or `_die_env`, SystemExit(2)) out of
+    # main() before it ever reaches code that follows them: a non-zero
+    # vault-keygen exit does `return 1` immediately, and the locked-Keychain
+    # refusal (_keychain_backend_would_be_used() and
+    # _login_keychain_unavailable()) calls _die_env(), which raises
+    # SystemExit(2). While the inbox hook lived AFTER the keypair block,
+    # either failure silently skipped hook registration -- so a machine that
+    # cannot mint (or is refused) a Tier-2 vault key never got same-machine
+    # inbox surfacing wired either, even though the two are unrelated
+    # capabilities. Registering the hook first means a keygen failure only
+    # costs Tier 2 (cross-machine relay), never Tier 1 (local inbox) too.
+    #
+    # This is also still deliberately BEFORE the routing-map early return
+    # further below: the routing map can already be fully correct (the
+    # common steady-state re-run) while the inbox hook has never been
+    # registered, and that early return must not skip the one chance to
+    # close it.
+    inbox_outcome = _provision_inbox_hook(args.dry_run)
+    if inbox_outcome == "dry-run":
+        say("  [dry-run] would register kb-msg inbox hook (SessionStart + Stop)")
+    elif inbox_outcome == "registered":
+        say("  Registered kb-msg inbox hook (SessionStart + Stop)")
+    elif inbox_outcome == "failed":
+        print(
+            "kb-msg-provision: inbox hook registration failed "
+            "(register-claude-hook.py exited non-zero) — run 'kb-msg doctor' for detail",
+            file=sys.stderr,
+        )
+    # 'absent' (no consumer copy of msg-inbox-check.sh here — a dev checkout,
+    # setup-hooks.sh's job, unchanged), 'no-registrar', and 'ok' (already
+    # registered) are all silent no-ops: nothing changed, nothing to report.
+
     # ── keypair ──
     if not have_key and not args.no_keygen:
         if args.dry_run:
@@ -1397,26 +1432,6 @@ def main():
             have_key = has_private_key(keygen_js, slug)
     elif not have_key:
         say("\n  Skipping keypair generation (--no-keygen). Tier 2 stays unavailable.")
-
-    # ── inbox hook (XACA-1225-003) ──
-    # Deliberately BEFORE the routing-map early return below: the routing map
-    # can already be fully correct (the common steady-state re-run) while the
-    # inbox hook has never been registered, and that early return must not
-    # skip the one chance to close it.
-    inbox_outcome = _provision_inbox_hook(args.dry_run)
-    if inbox_outcome == "dry-run":
-        say("  [dry-run] would register kb-msg inbox hook (SessionStart + Stop)")
-    elif inbox_outcome == "registered":
-        say("  Registered kb-msg inbox hook (SessionStart + Stop)")
-    elif inbox_outcome == "failed":
-        print(
-            "kb-msg-provision: inbox hook registration failed "
-            "(register-claude-hook.py exited non-zero) — run 'kb-msg doctor' for detail",
-            file=sys.stderr,
-        )
-    # 'absent' (no consumer copy of msg-inbox-check.sh here — a dev checkout,
-    # setup-hooks.sh's job, unchanged), 'no-registrar', and 'ok' (already
-    # registered) are all silent no-ops: nothing changed, nothing to report.
 
     # ── routing map ──
     if not added and not retargeted:

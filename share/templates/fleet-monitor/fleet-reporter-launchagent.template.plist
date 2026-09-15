@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.devteam.fleet-reporter</string>
+    <string>com.aiteamforge.fleet-reporter</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/bash</string>
+        <string>/bin/bash</string>
         <string>{{REPORTER_SCRIPT_PATH}}</string>
     </array>
     <key>StartInterval</key>
