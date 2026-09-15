@@ -17,6 +17,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   APPROVAL NOT RECEIVED section records the waiver in the same submit, waived CRs show an `APPROVAL WAIVED` chip.
   `lcars-cr-metrics.js` excludes waived CRs from approval cycle times. `share/templates/kanban/cr-schema.json` gains both
   fields.
+  Review round 1: the waiver is offered/accepted only from `cr-submitted`/`cr-held` (server 409), the modal meets WCAG AA
+  contrast and no longer steals focus, `kb-cr revert` refuses a fabricated `cr-approved`, and
+  `share/scripts/cr-schema-validator.py` now ships — installed by `install-kanban.sh` and materialized on upgrade
+  (`_xaca0673_mandatory_materialize_basenames`) — so consumer LCARS can serve the evidence map.
 
 - **XACA-1225** — a fresh `fleet=skip` consumer can now provision cross-machine kb-msg with no hand steps
   (measured on M1Mini, v0.20.13, where all three gaps needed manual fixes). (1) Client Node deps:

@@ -75,6 +75,7 @@ var _crMissingEvidenceLabels = helpers._crMissingEvidenceLabels;
 var _crGapInfo               = helpers._crGapInfo;
 var _crWaiverSubmitAllowed   = helpers._crWaiverSubmitAllowed;
 var _crWaiverPayloadFields   = helpers._crWaiverPayloadFields;
+var _crWaiverAllowedForCrState = helpers._crWaiverAllowedForCrState;
 
 // ─── Derive the REAL evidence map from scripts/cr-schema-validator.py ─────────
 // (mirrors server.py::_derive_cr_evidence_map's documented mechanical rule —
@@ -155,6 +156,49 @@ function crSubmittedAndWaived() {
             cr_approval_waived_at: '2026-09-04T00:00:00Z',
         },
         approvalWaiver: { reason: 'No approval notice received.', actor: 'jsmith', at: '2026-09-04T00:00:00Z' },
+    };
+}
+
+function crHeldOnly() {
+    return {
+        id: 'CR-FIXTURE-HELD',
+        crState: 'cr-held',
+        timestamps: {
+            cr_created_at:   '2026-09-01T00:00:00Z',
+            cr_published_at: '2026-09-02T00:00:00Z',
+            cr_submitted_at: '2026-09-03T00:00:00Z',
+            cr_held_at:      '2026-09-04T00:00:00Z',
+        },
+    };
+}
+
+// XACA-1239-019: the CR-IOS-20260824-0626-style unblock path — submitted,
+// no approval, but the operator (or a prior --force) already moved crState
+// past cr-submitted/cr-held. Has an approval-only gap toward a later target,
+// but is NOT in a state the server will accept a waiver write from.
+function crForcedIntoImplementing() {
+    return {
+        id: 'CR-FIXTURE-FORCED-IMPLEMENTING',
+        crState: 'implementing',
+        timestamps: {
+            cr_created_at:     '2026-09-01T00:00:00Z',
+            cr_published_at:   '2026-09-02T00:00:00Z',
+            cr_submitted_at:   '2026-09-03T00:00:00Z',
+            cr_started_dev_at: '2026-09-04T00:00:00Z',
+        },
+    };
+}
+
+function crRejectedNoApproval() {
+    return {
+        id: 'CR-FIXTURE-REJECTED',
+        crState: 'cr-rejected',
+        timestamps: {
+            cr_created_at:    '2026-09-01T00:00:00Z',
+            cr_published_at:  '2026-09-02T00:00:00Z',
+            cr_submitted_at:  '2026-09-03T00:00:00Z',
+            cr_rejected_at:   '2026-09-04T00:00:00Z',
+        },
     };
 }
 
@@ -241,15 +285,64 @@ test('_crMissingEvidenceLabels: de-dupes and preserves order', () => {
 
 test('_crGapInfo: mapAvailable is false and every field is a safe empty default when evidenceMap is falsy', () => {
     var gap = _crGapInfo(crSubmittedOnly(), 'implementing', null);
-    assert.deepEqual(gap, { mapAvailable: false, missing: [], approvalOnlyGap: false, missingLabels: [] });
+    assert.deepEqual(gap, { mapAvailable: false, missing: [], approvalOnlyGap: false, missingLabels: [], waiverAllowed: false });
 });
 
-test('_crGapInfo: full decision object for the approval-only implementing case', () => {
+test('_crGapInfo: full decision object for the approval-only implementing case (cr-submitted -> waiverAllowed true)', () => {
     var gap = _crGapInfo(crSubmittedOnly(), 'implementing', EVIDENCE_MAP);
     assert.equal(gap.mapAvailable, true);
     assert.deepEqual(gap.missing, ['cr_approved_at|cr_approval_waived_at']);
     assert.equal(gap.approvalOnlyGap, true);
     assert.deepEqual(gap.missingLabels, ['approval']);
+    assert.equal(gap.waiverAllowed, true);
+});
+
+// ─── (A) waiverAllowed (XACA-1239-019, D3) ──────────────────────────────────
+// D3: a waiver may only be RECORDED while the CR's CURRENT crState is
+// cr-submitted or cr-held. This gates independently of approvalOnlyGap: a
+// --force'd CR sitting in 'implementing' (the CR-IOS-20260824-0626 unblock
+// path) or a 'cr-rejected' CR can both still have an approval-only GAP
+// toward a later target, but the server refuses the waiver write from
+// either state (kb-cr.sh _kb_cr_waive_approval) — before this fix the
+// modal offered the waiver anyway and the endpoint answered 500.
+
+test('_crWaiverAllowedForCrState: true for cr-submitted and cr-held, false for everything else', () => {
+    assert.equal(_crWaiverAllowedForCrState('cr-submitted'), true);
+    assert.equal(_crWaiverAllowedForCrState('cr-held'), true);
+    ['implementing', 'deployed-dev', 'deployed-prod', 'cr-rejected', 'cr-approved',
+     'cr-drafted', 'cr-published', 'cr-closed', 'emergency-deployed', undefined, null, ''].forEach(function (s) {
+        assert.equal(_crWaiverAllowedForCrState(s), false, 'crState=' + JSON.stringify(s));
+    });
+});
+
+test('_crGapInfo: waiverAllowed true from cr-held, same as cr-submitted', () => {
+    var gap = _crGapInfo(crHeldOnly(), 'implementing', EVIDENCE_MAP);
+    assert.equal(gap.approvalOnlyGap, true, 'precondition: still an approval-only gap');
+    assert.equal(gap.waiverAllowed, true);
+});
+
+test('_crGapInfo: approval-only gap from implementing (--force-reached) has waiverAllowed FALSE — the CR-IOS-20260824-0626 unblock-path case', () => {
+    var gap = _crGapInfo(crForcedIntoImplementing(), 'deployed-dev', EVIDENCE_MAP);
+    assert.equal(gap.approvalOnlyGap, true, 'precondition: deployed-dev gap is approval-only for this fixture');
+    assert.equal(gap.waiverAllowed, false);
+});
+
+test('_crGapInfo: approval-only gap from cr-rejected has waiverAllowed FALSE', () => {
+    var gap = _crGapInfo(crRejectedNoApproval(), 'implementing', EVIDENCE_MAP);
+    assert.equal(gap.approvalOnlyGap, true, 'precondition: implementing gap is approval-only for this fixture');
+    assert.equal(gap.waiverAllowed, false);
+});
+
+test('_crWaiverSubmitAllowed: approval-only gap + non-blank reason, but waiverAllowed false -> STILL disabled (XACA-1239-019)', () => {
+    var gap = _crGapInfo(crForcedIntoImplementing(), 'deployed-dev', EVIDENCE_MAP);
+    assert.equal(_crWaiverSubmitAllowed(gap, 'even a perfectly good reason'), false);
+});
+
+test('_crWaiverPayloadFields: approval-only gap + reason, but waiverAllowed false -> fields untouched, no approval_waiver sent (XACA-1239-019)', () => {
+    var gap = _crGapInfo(crForcedIntoImplementing(), 'deployed-dev', EVIDENCE_MAP);
+    var base = { deploy_estimate: '2026-09-10T00:00' };
+    var fields = _crWaiverPayloadFields(gap, 'A reason typed anyway.', base);
+    assert.deepEqual(fields, base, 'must never send a waiver the server will refuse');
 });
 
 // ─── (A) SUBMIT enablement (evidence-gap portion) — item 3 (blank/whitespace disabled) ──
@@ -455,6 +548,48 @@ test('_renderStateCondFields: a non-approval gap shows the blocking message (nam
     assert.ok(html.indexOf('APPROVAL NOT RECEIVED') === -1, 'no waiver may be offered for a non-approval gap: ' + html);
 });
 
+// XACA-1239-019: an approval-only gap whose CR is NOT in cr-submitted/cr-held
+// must show the blocked/no-waiver message, never the waiver section — this
+// is the CR-IOS-20260824-0626 unblock-path regression the finding named.
+test('_renderStateCondFields: approval-only gap from a --force-reached "implementing" CR shows the BLOCKED message, not the waiver section', () => {
+    var sb = buildCondFieldsSandbox({});
+    var gap = _crGapInfo(crForcedIntoImplementing(), 'deployed-dev', EVIDENCE_MAP);
+    assert.equal(gap.approvalOnlyGap, true, 'precondition');
+    assert.equal(gap.waiverAllowed, false, 'precondition');
+    var html = sb._renderStateCondFields('deployed-dev', gap);
+    assert.ok(html.indexOf('cr-sc-gap-blocked') !== -1, html);
+    assert.ok(html.indexOf('APPROVAL NOT RECEIVED') === -1, 'must not offer a waiver the server will refuse: ' + html);
+    assert.ok(html.indexOf('CR SUBMITTED') !== -1 && html.indexOf('CR HELD') !== -1,
+        'blocked message must name the states a waiver CAN be recorded from: ' + html);
+});
+
+test('_renderStateCondFields: approval-only gap from a cr-rejected CR shows the BLOCKED message, not the waiver section', () => {
+    var sb = buildCondFieldsSandbox({});
+    var gap = _crGapInfo(crRejectedNoApproval(), 'implementing', EVIDENCE_MAP);
+    assert.equal(gap.approvalOnlyGap, true, 'precondition');
+    assert.equal(gap.waiverAllowed, false, 'precondition');
+    var html = sb._renderStateCondFields('implementing', gap);
+    assert.ok(html.indexOf('cr-sc-gap-blocked') !== -1, html);
+    assert.ok(html.indexOf('APPROVAL NOT RECEIVED') === -1, html);
+});
+
+test('_validateStateCondFields: approval-only gap but waiverAllowed false -> SUBMIT disabled even with a reason typed', () => {
+    var sb = buildCondFieldsSandbox({ 'cr-sc-waiver-reason': { value: 'A reason, but this CR cannot waive from here.' } });
+    var gap = _crGapInfo(crForcedIntoImplementing(), 'deployed-dev', EVIDENCE_MAP);
+    assert.equal(sb._validateStateCondFields('deployed-dev', gap), false);
+});
+
+test('_collectStateCondFields: approval-only gap but waiverAllowed false -> payload never carries approval_waiver', () => {
+    var sb = buildCondFieldsSandbox({
+        'cr-sc-field-deploy_estimate': { value: '2026-09-10T12:00' },
+        'cr-sc-waiver-reason':         { value: 'Reason typed anyway.' },
+    });
+    var gap = _crGapInfo(crForcedIntoImplementing(), 'deployed-dev', EVIDENCE_MAP);
+    var fields = sb._collectStateCondFields('deployed-dev', gap);
+    assert.deepEqual(fields, { deploy_estimate: '2026-09-10T12:00' });
+    assert.ok(!('approval_waiver' in fields));
+});
+
 test('_validateStateCondFields: approval-only gap, blank reason -> SUBMIT disabled (false)', () => {
     var sb = buildCondFieldsSandbox({ 'cr-sc-waiver-reason': { value: '' } });
     var gap = _crGapInfo(crSubmittedOnly(), 'implementing', EVIDENCE_MAP);
@@ -511,6 +646,272 @@ test('_collectStateCondFields: no gapInfo -> unchanged legacy payload (no approv
     var fields = sb._collectStateCondFields('implementing', null);
     assert.deepEqual(fields, {});
     assert.ok(!('approval_waiver' in fields));
+});
+
+// ── (B1b) _showCRStateChangeDialog's internal render/refresh logic ─────────
+// XACA-1239-014/016/017: the label/tone swap on SUBMIT, the "never auto-
+// focus" fix, and the value-preserving/skip-when-unchanged refresh all live
+// as closures inside _showCRStateChangeDialog (they need targetSelect /
+// condFieldsDiv / submitBtn / document, not just gapInfo). Slice that
+// self-contained region (_computeGapInfo through _refreshCondFieldsIfGapChanged,
+// stopping just before the dialog wires its own event listeners) and run it
+// alongside the REAL condFieldsSrc slice above (so _refreshCondFields calls
+// the real _renderStateCondFields / _validateStateCondFields, not a
+// reimplementation) against a minimal fake DOM. The fake DOM does not parse
+// HTML — condFieldsDiv.querySelectorAll always returns a JS-controlled
+// element list, and its innerHTML setter resets each element's .value to a
+// caller-supplied "fresh" value (simulating what a real re-render would
+// naturally produce, e.g. the waiver textarea's baked-in default) — enough
+// to prove the snapshot/restore and skip-if-unchanged LOGIC without a full
+// jsdom, consistent with this file's existing "DOM-light" slicing approach.
+
+var dialogLogicSrc = slice(
+    'function _computeGapInfo(targetState) {',
+    "targetSelect.addEventListener('change', () => {"
+);
+
+function buildDialogLogicSandbox(opts) {
+    opts = opts || {};
+    var innerHTMLSetCount = 0;
+    var focusCalls = 0;
+    var elObjs = [];
+
+    function addEl(spec) {
+        var el = {
+            id: spec.id,
+            value: spec.value,
+            _freshValue: spec.freshValue !== undefined ? spec.freshValue : spec.value,
+            addEventListener: function () {},
+            focus: function () { focusCalls++; },
+        };
+        elObjs.push(el);
+        return el;
+    }
+    (opts.els || []).forEach(addEl);
+
+    var condFieldsDiv = {
+        _html: '',
+        get innerHTML() { return this._html; },
+        set innerHTML(v) {
+            this._html = v;
+            innerHTMLSetCount++;
+            // Simulate a fresh render: every tracked element resets to its
+            // "fresh" value (what the newly-generated HTML would contain).
+            elObjs.forEach(function (el) { el.value = el._freshValue; });
+        },
+        querySelectorAll: function () { return elObjs; },
+    };
+
+    var submitBtn = {
+        disabled: false,
+        textContent: '',
+        dataset: {},
+        _classes: {},
+        classList: {
+            toggle: function (name, force) {
+                var on = force !== undefined ? !!force : !submitBtn._classes[name];
+                submitBtn._classes[name] = on;
+                return on;
+            },
+            contains: function (name) { return !!submitBtn._classes[name]; },
+        },
+    };
+
+    var mapNoticeDiv = { textContent: '', style: { display: '' } };
+    var targetSelect = { value: opts.targetState || '', options: [] };
+
+    var sandbox = {
+        escapeHtml:       escapeHtmlStub,
+        _CR_EVID:         helpers,
+        window:           { lcarsCrEvidenceHelpers: helpers },
+        rawCR:            opts.rawCR || null,
+        _crEvidenceMap:   opts.evidenceMap !== undefined ? opts.evidenceMap : null,
+        targetSelect:     targetSelect,
+        condFieldsDiv:    condFieldsDiv,
+        submitBtn:        submitBtn,
+        mapNoticeDiv:     mapNoticeDiv,
+        document: {
+            getElementById: function (id) {
+                var matches = elObjs.filter(function (e) { return e.id === id; });
+                return matches.length > 0 ? matches[0] : null;
+            },
+        },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(
+        condFieldsSrc + '\n' + dialogLogicSrc +
+        '\nthis._computeGapInfo = _computeGapInfo;' +
+        '\nthis._setSubmitWaiverMode = _setSubmitWaiverMode;' +
+        '\nthis._snapshotCondFieldValues = _snapshotCondFieldValues;' +
+        '\nthis._restoreCondFieldValues = _restoreCondFieldValues;' +
+        '\nthis._gapInfoKey = _gapInfoKey;' +
+        '\nthis._refreshCondFields = _refreshCondFields;' +
+        '\nthis._refreshCondFieldsIfGapChanged = _refreshCondFieldsIfGapChanged;',
+        sandbox
+    );
+
+    return {
+        sandbox:  sandbox,
+        condFieldsDiv: condFieldsDiv,
+        submitBtn: submitBtn,
+        elObjs:   elObjs,
+        addEl:    addEl,
+        getInnerHTMLSetCount: function () { return innerHTMLSetCount; },
+        getFocusCalls:        function () { return focusCalls; },
+    };
+}
+
+test('extraction sanity: dialog-logic slice loads and exposes the functions under test', () => {
+    var h = buildDialogLogicSandbox({});
+    ['_computeGapInfo', '_setSubmitWaiverMode', '_snapshotCondFieldValues',
+     '_restoreCondFieldValues', '_gapInfoKey', '_refreshCondFields',
+     '_refreshCondFieldsIfGapChanged'].forEach(function (name) {
+        assert.equal(typeof h.sandbox[name], 'function', name + ' must be exported by the slice');
+    });
+});
+
+test('_gapInfoKey: identical gap decisions produce the same key; a changed field changes the key', () => {
+    var h = buildDialogLogicSandbox({});
+    var a = { mapAvailable: true, missing: ['x'], approvalOnlyGap: true, waiverAllowed: true };
+    var b = { mapAvailable: true, missing: ['x'], approvalOnlyGap: true, waiverAllowed: true };
+    var c = { mapAvailable: true, missing: ['x'], approvalOnlyGap: true, waiverAllowed: false };
+    assert.equal(h.sandbox._gapInfoKey(a), h.sandbox._gapInfoKey(b));
+    assert.notEqual(h.sandbox._gapInfoKey(a), h.sandbox._gapInfoKey(c));
+    assert.equal(h.sandbox._gapInfoKey(null), h.sandbox._gapInfoKey(undefined));
+});
+
+// ─── XACA-1239-014: SUBMIT relabel + amber tone while the waiver applies ───
+
+test('_refreshCondFields: relabels SUBMIT to "RECORD WAIVER & SUBMIT" and applies the amber waiver tone when the waiver section is offered', () => {
+    var h = buildDialogLogicSandbox({ rawCR: crSubmittedOnly(), evidenceMap: EVIDENCE_MAP, targetState: 'implementing' });
+    h.sandbox._refreshCondFields();
+    assert.equal(h.submitBtn.textContent, 'RECORD WAIVER & SUBMIT');
+    assert.equal(h.submitBtn.dataset.waiverMode, '1');
+    assert.equal(h.submitBtn.classList.contains('cr-sc-submit-waiver'), true);
+});
+
+test('_refreshCondFields: keeps the plain green "SUBMIT" label/tone when there is no gap at all', () => {
+    var h = buildDialogLogicSandbox({ rawCR: crDraftedOnly(), evidenceMap: EVIDENCE_MAP, targetState: 'cr-drafted' });
+    h.sandbox._refreshCondFields();
+    assert.equal(h.submitBtn.textContent, 'SUBMIT');
+    assert.equal(h.submitBtn.dataset.waiverMode, '0');
+    assert.equal(h.submitBtn.classList.contains('cr-sc-submit-waiver'), false);
+});
+
+test('_refreshCondFields: keeps the plain "SUBMIT" label/tone for an approval-only gap that is NOT waiver-eligible (XACA-1239-019 interaction)', () => {
+    var h = buildDialogLogicSandbox({ rawCR: crForcedIntoImplementing(), evidenceMap: EVIDENCE_MAP, targetState: 'deployed-dev' });
+    h.sandbox._refreshCondFields();
+    assert.equal(h.submitBtn.textContent, 'SUBMIT', 'must never claim to "record a waiver" when none can be recorded from here');
+    assert.equal(h.submitBtn.dataset.waiverMode, '0');
+    assert.equal(h.submitBtn.classList.contains('cr-sc-submit-waiver'), false);
+});
+
+test('_refreshCondFields: no target selected -> plain SUBMIT, disabled', () => {
+    var h = buildDialogLogicSandbox({ rawCR: crSubmittedOnly(), evidenceMap: EVIDENCE_MAP, targetState: '' });
+    h.sandbox._refreshCondFields();
+    assert.equal(h.submitBtn.textContent, 'SUBMIT');
+    assert.equal(h.submitBtn.disabled, true);
+});
+
+// ─── XACA-1239-016: no auto-focus, ever (WCAG 3.2.2) ───────────────────────
+
+test('_refreshCondFields: never calls .focus() on any element when the waiver section appears via a target change', () => {
+    var h = buildDialogLogicSandbox({ rawCR: crSubmittedOnly(), evidenceMap: EVIDENCE_MAP, targetState: 'implementing' });
+    h.sandbox._refreshCondFields();
+    assert.ok(h.condFieldsDiv.innerHTML.indexOf('APPROVAL NOT RECEIVED') !== -1, 'sanity: waiver section did render');
+    assert.equal(h.getFocusCalls(), 0, 'no element .focus() may be called from a target change (WCAG 3.2.2)');
+});
+
+test('_refreshCondFields: repeated calls for the same target (simulating Firefox re-firing "change" while arrow-keying a closed select) never call .focus()', () => {
+    var h = buildDialogLogicSandbox({ rawCR: crSubmittedOnly(), evidenceMap: EVIDENCE_MAP, targetState: 'implementing' });
+    h.sandbox._refreshCondFields();
+    h.sandbox._refreshCondFields();
+    h.sandbox._refreshCondFields();
+    assert.equal(h.getFocusCalls(), 0);
+});
+
+// ─── XACA-1239-017: late evidence-map arrival — skip-if-unchanged + preserve typed input ──
+
+test('_refreshCondFieldsIfGapChanged: skips the re-render entirely when the computed gap is unchanged from the last render', () => {
+    // Note: a null->real-map transition ALWAYS changes gapInfo.mapAvailable
+    // (false -> true), which is itself part of the signature this guard
+    // watches — that transition legitimately re-renders even for a
+    // zero-prerequisite state like cr-drafted (covered by the "re-renders
+    // and preserves ... value" tests below). This test instead proves the
+    // guard is a genuine no-op skip, not "always re-render on any call":
+    // the map is ALREADY loaded and unchanged between the two calls, so the
+    // recomputed gap decision for the same target is byte-identical.
+    var h = buildDialogLogicSandbox({ rawCR: crDraftedOnly(), evidenceMap: EVIDENCE_MAP, targetState: 'cr-drafted' });
+    h.sandbox._refreshCondFields();               // initial render (map already available)
+    var countAfterFirst = h.getInnerHTMLSetCount();
+    assert.ok(countAfterFirst >= 1);
+
+    // Nothing changed — same map reference, same target — a second call
+    // (e.g. a defensive re-check) must not touch the DOM again.
+    h.sandbox._refreshCondFieldsIfGapChanged();
+    assert.equal(h.getInnerHTMLSetCount(), countAfterFirst,
+        'must NOT re-render (and must not touch the DOM at all) when the computed gap is unchanged');
+});
+
+test('_refreshCondFieldsIfGapChanged: does nothing when no target is selected yet', () => {
+    var h = buildDialogLogicSandbox({ rawCR: crSubmittedOnly(), evidenceMap: null, targetState: '' });
+    h.sandbox._refreshCondFieldsIfGapChanged();
+    assert.equal(h.getInnerHTMLSetCount(), 0, 'nothing was rendered yet — nothing to refresh');
+});
+
+test('_refreshCondFieldsIfGapChanged: re-renders AND preserves an in-progress typed waiver reason when late map arrival makes the gap approval-only (XACA-1239-017)', () => {
+    var h = buildDialogLogicSandbox({ rawCR: crSubmittedOnly(), evidenceMap: null, targetState: 'implementing' });
+    h.sandbox._refreshCondFields();   // renders with map unavailable -> legacy "no additional fields" fallback
+    assert.ok(h.condFieldsDiv.innerHTML.indexOf('No additional fields required') !== -1,
+        'precondition: map-unavailable fallback rendered');
+    var countBeforeMap = h.getInnerHTMLSetCount();
+
+    // The operator starts typing into the waiver textarea that WILL appear
+    // once the map resolves and the gap becomes approval-only. Its "fresh"
+    // value is the default reason — what a brand-new render would contain —
+    // so restoring correctly is the only way the assertion below can pass.
+    h.addEl({
+        id: 'cr-sc-waiver-reason',
+        value: 'Partially typed reason, before the map resolved',
+        freshValue: helpers.DEFAULT_WAIVER_REASON,
+    });
+
+    // "Map arrives" — implementing now has an approval-only gap for this CR.
+    h.sandbox._crEvidenceMap = EVIDENCE_MAP;
+    h.sandbox._refreshCondFieldsIfGapChanged();
+
+    assert.ok(h.getInnerHTMLSetCount() > countBeforeMap,
+        'the gap DID change (map-unavailable -> approval-only) — this must re-render');
+    var reasonEl = h.elObjs.filter(function (e) { return e.id === 'cr-sc-waiver-reason'; })[0];
+    assert.equal(reasonEl.value, 'Partially typed reason, before the map resolved',
+        'the operator\'s typed reason must survive the late-map re-render, not reset to the default');
+    assert.equal(h.getFocusCalls(), 0, 'the late-map re-render must not steal focus either');
+});
+
+test('_refreshCondFieldsIfGapChanged: re-renders and preserves an already-typed DEPLOY TIMESTAMP value across a late-map gap change', () => {
+    var h = buildDialogLogicSandbox({ rawCR: crSubmittedOnly(), evidenceMap: null, targetState: 'deployed-prod' });
+    h.sandbox._refreshCondFields();
+    var countBeforeMap = h.getInnerHTMLSetCount();
+
+    h.addEl({
+        id: 'cr-sc-field-deploy_estimate',
+        value: '2026-09-20T09:00',
+        freshValue: '2026-09-20T09:00',   // this field's fresh value happens to match — the point is the OTHER field below
+    });
+    h.addEl({
+        id: 'cr-sc-waiver-reason',
+        value: 'Typed before the map resolved.',
+        freshValue: helpers.DEFAULT_WAIVER_REASON,
+    });
+
+    h.sandbox._crEvidenceMap = EVIDENCE_MAP;
+    h.sandbox._refreshCondFieldsIfGapChanged();
+
+    assert.ok(h.getInnerHTMLSetCount() > countBeforeMap, 'gap changed — must re-render');
+    var deployEl = h.elObjs.filter(function (e) { return e.id === 'cr-sc-field-deploy_estimate'; })[0];
+    var reasonEl = h.elObjs.filter(function (e) { return e.id === 'cr-sc-waiver-reason'; })[0];
+    assert.equal(deployEl.value, '2026-09-20T09:00');
+    assert.equal(reasonEl.value, 'Typed before the map resolved.');
 });
 
 // ── (B2) _crWaivedChip — row/detail "APPROVAL WAIVED" indicator ────────────

@@ -948,6 +948,17 @@ install_lcars_profile_script() {
         warning "kb-cr.sh not found (skipping)"
     fi
 
+    # XACA-1239: cr-schema-validator.py backs LCARS GET /api/kanban/cr/evidence-map
+    # (the EDIT STATE modal's prerequisite map). server.py loads it with importlib
+    # from $AITEAMFORGE_DIR/scripts on consumer installs, so it needs no +x.
+    local crval_src="$INSTALL_ROOT/share/scripts/cr-schema-validator.py"
+    if [ -f "$crval_src" ]; then
+        cp "$crval_src" "$scripts_dest/cr-schema-validator.py"
+        info "Installed: cr-schema-validator.py"
+    else
+        warning "cr-schema-validator.py not found (skipping)"
+    fi
+
     # Install kb-tap-release — one-shot homebrew-tap release-cut script (XACA-0570).
     # Reads VERSION, computes next semver, promotes CHANGELOG [Unreleased] -> dated
     # [X.Y.Z], maintains compare-URL footer, bumps VERSION + Formula tag/version,

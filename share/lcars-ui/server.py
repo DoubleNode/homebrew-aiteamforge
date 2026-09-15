@@ -13604,18 +13604,89 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _cr_evidence_validator_cache = {}
 
     @staticmethod
-    def _resolve_cr_schema_validator_path(helpers_root=None):
+    def _cr_schema_validator_candidate_roots():
+        """Ordered, de-duplicated list of root dirs to try for
+        scripts/cr-schema-validator.py in production (helpers_root is None).
+
+        XACA-1239-020: before this, production resolved ONLY
+        Path.home()/"dev-team" — which does not exist on a consumer
+        (Homebrew tap) install. Consumers live under $AITEAMFORGE_DIR
+        (lcars-ui at $AITEAMFORGE_DIR/lcars-ui, scripts at
+        $AITEAMFORGE_DIR/scripts — see homebrew-tap/libexec/installers/
+        install-kanban.sh), so GET /api/kanban/cr/evidence-map and every
+        approval_waiver POST 500'd on every tap machine, even once
+        sync-tap.sh ships scripts/cr-schema-validator.py into the tap (a
+        companion fix in this same ticket — see sync-tap.sh's kb-cr.sh
+        entry for the mapping shape).
+
+        Order (dev-team checkout first, deliberately — this fix must not
+        change resolution on any machine that already worked):
+          1. Path.home() / "dev-team" — unchanged prior behavior.
+          2. $AITEAMFORGE_DIR, if set and non-empty — the installed
+             layout's scripts/ dir, for a consumer machine.
+          3. UI_DIR.absolute().parent — the server's OWN physical install
+             location (mirrors _image_candidate_roots' root 1, XACA-1221);
+             covers a relocated/symlinked lcars-ui where AITEAMFORGE_DIR
+             is unset. `.absolute()`, not `.resolve()` — same reasoning as
+             _image_candidate_roots: don't follow a symlinked lcars-ui
+             into a different on-disk layout.
+
+        UI_DIR and Path.home() are both read HERE, at call time, so tests
+        can patch server.UI_DIR / Path.home() per-case (same contract as
+        _image_candidate_roots).
+
+        De-duplication compares str(root.resolve()) (falling back to
+        str(root.absolute()) if resolve() raises OSError/RuntimeError —
+        e.g. a not-yet-existing path); the UNRESOLVED root is what's kept.
+        """
+        candidates = [Path.home() / "dev-team"]
+        env_dir = os.environ.get("AITEAMFORGE_DIR")
+        if env_dir:
+            candidates.append(Path(env_dir).expanduser())
+        candidates.append(UI_DIR.absolute().parent)
+
+        roots = []
+        seen = set()
+        for root in candidates:
+            try:
+                key = str(root.resolve())
+            except (OSError, RuntimeError):  # RuntimeError: symlink loop, Py<3.13
+                key = str(root.absolute())
+            if key in seen:
+                continue
+            seen.add(key)
+            roots.append(root)
+        return roots
+
+    @classmethod
+    def _resolve_cr_schema_validator_path(cls, helpers_root=None):
         """Resolve scripts/cr-schema-validator.py.
 
-        Mirrors _build_cr_transition_shell_parts's own root resolution
-        exactly: helpers_root is a TEST-ONLY override; production always
-        resolves ~/dev-team (the MAIN checkout — not this worktree), which is
-        where the running server's other kb-cr shell helpers are sourced
-        from. See that method's docstring for why production must leave this
-        argument out.
+        helpers_root is a TEST-ONLY override (mirrors
+        _build_cr_transition_shell_parts' own contract): when given, it is
+        the SOLE candidate — no fallback chain — so a test pointed at a
+        specific worktree/fixture never silently falls through to a real
+        path elsewhere on the machine.
+
+        Production (helpers_root is None) tries each of
+        _cr_schema_validator_candidate_roots(), in order, and returns the
+        first candidate that exists on disk. If none exist, returns the
+        FIRST candidate (Path.home()/"dev-team"/scripts/…) — preserving the
+        pre-XACA-1239-020 error target/message shape for the common case
+        (a dev machine with no dev-team checkout at all) — but the caller
+        (_load_cr_schema_validator_module) still fails closed either way.
         """
-        root = Path(helpers_root) if helpers_root is not None else (Path.home() / "dev-team")
-        return root / "scripts" / "cr-schema-validator.py"
+        if helpers_root is not None:
+            return Path(helpers_root) / "scripts" / "cr-schema-validator.py"
+
+        roots = cls._cr_schema_validator_candidate_roots()
+        for root in roots:
+            candidate = root / "scripts" / "cr-schema-validator.py"
+            if cls._is_regular_file(candidate):
+                return candidate
+        # Nothing found — return the first (dev-team) candidate so the
+        # FileNotFoundError below names the historically-expected path.
+        return roots[0] / "scripts" / "cr-schema-validator.py"
 
     @classmethod
     def _load_cr_schema_validator_module(cls, helpers_root=None):
@@ -13768,6 +13839,59 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 f"— it does not require approval evidence"
             ), None, 400
         return True, None, reason, None
+
+    # XACA-1239-019: per-CR pre-check for approval_waiver, run once the board
+    # is loaded and current_cr is known. _cr_validate_approval_waiver (above)
+    # only validates the request SHAPE against the TARGET state — it has no
+    # access to the CR's own record. Two distinct refusals live here,
+    # mirroring _kb_cr_waive_approval's own guards in scripts/kb-cr.sh (D3),
+    # in the SAME order that helper checks them, so the two never drift:
+    #
+    #   1. crState must be cr-submitted or cr-held (D3). Without this check,
+    #      a waiver offered against any other crState — e.g. a --force'd
+    #      implementing CR moving on to deployed-dev, or cr-rejected moving
+    #      to implementing — reaches _build_cr_transition_shell_parts, whose
+    #      generated script calls _kb_cr_waive_approval, which refuses
+    #      (exit 3) and the SCRIPT's own `|| { …; exit 4; }` (D5) turns that
+    #      into a bare non-zero script exit with no HTTP status mapping —
+    #      the endpoint's generic script-failure path answers 500 for what
+    #      is actually a client-side precondition failure (409).
+    #   2. cr_approved_at / cr_approval_waived_at already on record — the
+    #      "already satisfied" case (pre-existing here since D5; extracted
+    #      alongside the new check so both are covered by one call site and
+    #      one test class instead of leaving this one inline and untestable
+    #      without a full HTTP round-trip).
+    #
+    # Returns (ok, error_message). ok=True means either approval_waiver_reason
+    # is None (nothing to precheck) or the CR's own record raises no
+    # objection; the caller still runs _cr_validate_approval_waiver's target-
+    # state applicability check separately (that one doesn't need current_cr).
+    @staticmethod
+    def _cr_precheck_approval_waiver_against_cr(cr_id, current_cr, approval_waiver_reason):
+        if approval_waiver_reason is None:
+            return True, None
+
+        current_state = current_cr.get("crState")
+        if current_state not in ("cr-submitted", "cr-held"):
+            return False, (
+                f"CR {cr_id} is in state '{current_state}'; a waiver may only "
+                f"be recorded from cr-submitted or cr-held."
+            )
+
+        current_ts = current_cr.get("timestamps") or {}
+        if current_ts.get("cr_approved_at"):
+            return False, (
+                f"CR {cr_id} already has a recorded approval "
+                f"(cr_approved_at) — a waiver is not needed "
+                f"and will not be recorded."
+            )
+        if current_ts.get("cr_approval_waived_at"):
+            return False, (
+                f"CR {cr_id} already has a recorded approval "
+                f"waiver — a second waiver will not be "
+                f"recorded."
+            )
+        return True, None
 
     @staticmethod
     def _build_cr_transition_shell_parts(board_file_str, cr_id, target_state,
@@ -14005,33 +14129,25 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 )
                 return
 
-            # ── "Already satisfied" pre-check for approval_waiver (XACA-1239, D5) ──
-            # _kb_cr_waive_approval itself refuses a second waiver or a waiver
-            # over a real approval — but discovering that by running the shell
-            # helper and parsing its stderr would be fragile. current_cr is
-            # already loaded, so check it directly here and answer a precise
-            # 409 before the waiver step is ever built, matching D5 option (b)
-            # ("let it fail with a clear 409") without depending on stderr text.
-            if approval_waiver_reason is not None:
-                current_ts = current_cr.get("timestamps") or {}
-                if current_ts.get("cr_approved_at"):
-                    self._send_json_response(
-                        {"ok": False, "conflict": True,
-                         "error": f"CR {cr_id} already has a recorded approval "
-                                  f"(cr_approved_at) — a waiver is not needed "
-                                  f"and will not be recorded."},
-                        status=409,
-                    )
-                    return
-                if current_ts.get("cr_approval_waived_at"):
-                    self._send_json_response(
-                        {"ok": False, "conflict": True,
-                         "error": f"CR {cr_id} already has a recorded approval "
-                                  f"waiver — a second waiver will not be "
-                                  f"recorded."},
-                        status=409,
-                    )
-                    return
+            # ── Per-CR pre-check for approval_waiver (XACA-1239, D3/D5) ────────
+            # _kb_cr_waive_approval itself refuses a wrong-state waiver, a
+            # second waiver, or a waiver over a real approval — but
+            # discovering that by running the shell helper and parsing its
+            # stderr would be fragile, and a wrong-state refusal there is
+            # fatal to the WHOLE generated script (D5's `|| { …; exit 4; }`),
+            # which this endpoint would otherwise answer as a bare 500.
+            # current_cr is already loaded, so check it directly here and
+            # answer a precise 409 before the waiver step is ever built
+            # (XACA-1239-019). See _cr_precheck_approval_waiver_against_cr's
+            # own docstring/comment for the full reasoning and ordering.
+            ok, precheck_err = self._cr_precheck_approval_waiver_against_cr(
+                cr_id, current_cr, approval_waiver_reason)
+            if not ok:
+                self._send_json_response(
+                    {"ok": False, "conflict": True, "error": precheck_err},
+                    status=409,
+                )
+                return
 
             # ── Build shell script for atomic transition + field writes ────────
             # We source kanban-helpers.sh and kb-cr.sh so we get _kb_jq_update

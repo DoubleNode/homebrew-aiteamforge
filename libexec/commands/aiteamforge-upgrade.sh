@@ -3063,6 +3063,12 @@ PYEOF
 # already-installed box, so the same "refresh only what already exists"
 # default would skip it forever without this entry. Carries .sh, so — as
 # above — this list is sufficient and no extra glob-sweep entry is needed.
+#
+# ── XACA-1239: cr-schema-validator.py ─────────────────
+# Backs LCARS GET /api/kanban/cr/evidence-map, which server.py resolves from
+# $AITEAMFORGE_DIR/scripts on consumer installs. NEW for every installed box,
+# so it must be materialized, not merely refreshed. Carries .py, which the
+# sweep's glob already covers, so this list is sufficient.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3082,6 +3088,7 @@ gh-bot-review.sh
 gh-bot-test.sh
 team-account-display.sh
 msg-inbox-check.sh
+cr-schema-validator.py
 EOF
 }
 

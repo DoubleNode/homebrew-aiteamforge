@@ -1015,7 +1015,16 @@ _kb_cr_revert_strip_state_data() {
         return 1
     fi
 
-    echo "$snapshot"
+    # XACA-1239-022: `printf '%s'`, NOT `echo` — this is the function's own
+    # return value, captured by the caller via `snapshot=$(... )`. zsh's
+    # builtin `echo` interprets backslash escapes by default, so an `echo`
+    # here would silently rewrite a correctly-escaped `\n` inside a captured
+    # JSON string (e.g. approvalWaiver.reason) into a raw newline BYTE
+    # before it ever leaves this function — corrupting the value at the
+    # source, one level below every caller-side `printf` fix. See the
+    # matching comment at this function's call site in
+    # _kb_cr_container_revert.
+    printf '%s\n' "$snapshot"
     return 0
 }
 
@@ -2142,6 +2151,36 @@ _kb_cr_container_revert() {
         return 1
     fi
 
+    # ── XACA-1239-021: target cr-approved requires cr_approved_at on record ──
+    # cr-approved's entry evidence is timestamps.cr_approved_at (see
+    # _kb_cr_state_entry_ts_field). A waived CR (D1/D7) never sets that field —
+    # timestamps.cr_approval_waived_at occupies the SAME evidentiary slot as
+    # an OR-group member (D2), but it is not cr_approved_at, and a revert must
+    # not fabricate an approved state the CR never actually reached. Without
+    # this guard, `kb-cr revert --to cr-approved` on a waived
+    # implementing/deployed-* CR leaves crState=cr-approved with no
+    # cr_approved_at on record — a fabricated approval that fails
+    # cr-schema-validator.py check7. This check is general — ANY revert/undo
+    # landing on cr-approved with no cr_approved_at on record is refused,
+    # waived or not (e.g. a --force transition that skipped past cr-approved
+    # entirely would hit the same trap). It also covers `undo` for free: the
+    # dispatcher already rejects an explicit --to on undo, so undo can only
+    # reach this function's target_state via _kb_cr_revert_compute_predecessor,
+    # which keys off the literal cr_approved_at timestamp and so never selects
+    # cr-approved for a waived CR in the first place — but since undo routes
+    # through this same function, the guard applies uniformly regardless.
+    if [[ "$target_state" == "cr-approved" ]]; then
+        local _existing_approved_at
+        _existing_approved_at=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].timestamps.cr_approved_at // \"\"" -r 2>/dev/null)
+        if [[ -z "$_existing_approved_at" ]]; then
+            echo "kb-cr $operation: refusing to $operation CR '$cr_id' to 'cr-approved' — no timestamps.cr_approved_at on record." >&2
+            echo "  target cr-approved requires cr_approved_at on record." >&2
+            echo "  If approval was waived, not recorded, revert to cr-submitted or cr-held instead" >&2
+            echo "  (or to implementing, if that state's own prerequisites — including the waiver — are met)." >&2
+            return 1
+        fi
+    fi
+
     # ── Reason mandatory for emergency-deployed reverts ──────────────────────
     if [[ "$current_state" == "emergency-deployed" && -z "$reason" ]]; then
         echo "kb-cr $operation: --reason is required when reverting from emergency-deployed." >&2
@@ -2161,11 +2200,30 @@ _kb_cr_container_revert() {
         snapshot=$(_kb_cr_revert_strip_state_data "$_cr_board" "$cr_idx" "$s") || return 1
         # Only record states whose snapshot has at least one captured field.
         # cr-drafted always returns {}; states with no evidence return {} too.
+        #
+        # XACA-1239-022: use `printf '%s'`, NEVER `echo`, to feed a captured
+        # JSON snapshot into jq. zsh's builtin `echo` interprets backslash
+        # escapes by default (no `-e` needed, unlike bash) — a snapshot that
+        # legitimately contains an escaped control character inside a string
+        # value (e.g. approvalWaiver.reason with an embedded newline, stored
+        # correctly on disk as the two-byte sequence `\` `n` by
+        # `_kb_jq_update`'s `--arg`) gets that escape SILENTLY REWRITTEN into
+        # a literal raw newline byte by `echo` before jq ever sees it. jq then
+        # refuses the now-invalid JSON with "Invalid string: control
+        # characters ... must be escaped" on stderr — the board write itself
+        # (done separately, inside _kb_cr_revert_strip_state_data) is
+        # unaffected, but this had already silently dropped the state from
+        # stripped_states_json/stripped_fields_json (revert_history) whenever
+        # has_data's jq call failed. `printf '%s'` passes the bytes through
+        # unmodified. See memory feedback_zsh_jq_bang_hist.md (sibling zsh/jq
+        # quoting trap) and feedback_double_quoted_shell_body_substitutes_
+        # backticks.md for the same "shell reinterprets already-safe text on
+        # its way through a builtin" shape.
         if [[ -n "$snapshot" && "$snapshot" != "{}" ]]; then
-            has_data=$(echo "$snapshot" | jq -r '[.[] | select(. != null)] | length > 0')
+            has_data=$(printf '%s' "$snapshot" | jq -r '[.[] | select(. != null)] | length > 0')
             if [[ "$has_data" == "true" ]]; then
-                stripped_states_json=$(echo "$stripped_states_json" | jq --arg s "$s" '. + [$s]')
-                stripped_fields_json=$(echo "$stripped_fields_json" | jq --arg s "$s" --argjson v "$snapshot" '. + {($s): $v}')
+                stripped_states_json=$(printf '%s' "$stripped_states_json" | jq --arg s "$s" '. + [$s]')
+                stripped_fields_json=$(printf '%s' "$stripped_fields_json" | jq --arg s "$s" --argjson v "$snapshot" '. + {($s): $v}')
             fi
         fi
     done <<< "$states_to_strip"
@@ -2229,7 +2287,7 @@ _kb_cr_container_revert() {
     n_items="${n_items:-0}"
 
     local stripped_count
-    stripped_count=$(echo "$stripped_states_json" | jq -r 'length')
+    stripped_count=$(printf '%s' "$stripped_states_json" | jq -r 'length')
 
     echo "kb-cr $operation: [$cr_id] $current_state -> $target_state (${stripped_count} state(s) stripped, ${n_items} item(s) affected)"
     if [[ -n "$reason" ]]; then

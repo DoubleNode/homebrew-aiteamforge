@@ -362,12 +362,30 @@ def test_evidence_map_endpoint_fails_closed_on_unreadable_validator(tmp_path):
     XACA-1239: an unreadable validator must 500 with a JSON error, never an
     empty {"states": {}} — an empty map would read to a client as "nothing
     is required anywhere", the opposite of fail-closed.
+
+    XACA-1239-020: _resolve_cr_schema_validator_path now tries THREE
+    candidate roots in production (Path.home()/"dev-team", $AITEAMFORGE_DIR,
+    UI_DIR.absolute().parent — see _cr_schema_validator_candidate_roots),
+    not just Path.home()/"dev-team". Patching only Path.home() is no longer
+    enough to prove fail-closed: on this worktree, UI_DIR.absolute().parent
+    IS a real checkout with a real scripts/cr-schema-validator.py, so root 3
+    would find it and this test would pass for the WRONG reason (silently
+    stop testing the failure path at all). All three candidate roots must
+    be repointed at directories with no validator (mirrors the established
+    idiom in test_xaca0992_appicons.py for the sibling _image_candidate_roots
+    fail-closed cases).
     """
     missing_root = tmp_path / "missing-home"
     (missing_root / "dev-team" / "scripts").mkdir(parents=True, exist_ok=True)
     # Deliberately do NOT create cr-schema-validator.py under it.
 
-    with patch.object(server.Path, "home", return_value=missing_root):
+    fake_ui_dir = tmp_path / "install" / "lcars-ui"
+    (fake_ui_dir / "install-scripts-parent-has-no-validator").mkdir(parents=True)
+
+    with patch.object(server, "UI_DIR", fake_ui_dir), \
+         patch.object(server.Path, "home", return_value=missing_root), \
+         patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("AITEAMFORGE_DIR", None)
         handler, buf = _make_request_handler("/api/kanban/cr/evidence-map")
         handler.do_GET()
 
@@ -378,6 +396,42 @@ def test_evidence_map_endpoint_fails_closed_on_unreadable_validator(tmp_path):
     payload = json.loads(buf.getvalue())
     assert "error" in payload
     assert "states" not in payload, "must never serve an empty map as if it were real"
+
+
+def test_evidence_map_endpoint_resolves_from_installed_layout_when_dev_team_absent(tmp_path):
+    """
+    XACA-1239-020: the actual defect this fixes. A consumer (tap) install
+    has no ~/dev-team at all — cr-schema-validator.py lives at
+    $AITEAMFORGE_DIR/scripts/cr-schema-validator.py instead (per
+    homebrew-tap/libexec/installers/install-kanban.sh's layout, once the
+    companion sync-tap.sh mapping ships it there). Before this fix, every
+    consumer request to GET /api/kanban/cr/evidence-map (and every
+    approval_waiver POST) 500'd, because production resolved ONLY
+    Path.home()/"dev-team", which never exists on such a machine.
+    """
+    missing_dev_team = tmp_path / "missing-home"
+    # Deliberately do NOT create a dev-team dir under it at all.
+
+    installed_root = tmp_path / "aiteamforge"
+    (installed_root / "scripts").mkdir(parents=True)
+    shutil.copy(str(VALIDATOR_PY), str(installed_root / "scripts" / "cr-schema-validator.py"))
+
+    fake_ui_dir = installed_root / "lcars-ui"
+    fake_ui_dir.mkdir(parents=True)
+
+    with patch.object(server, "UI_DIR", fake_ui_dir), \
+         patch.object(server.Path, "home", return_value=missing_dev_team), \
+         patch.dict(os.environ, {"AITEAMFORGE_DIR": str(installed_root)}):
+        handler, buf = _make_request_handler("/api/kanban/cr/evidence-map")
+        handler.do_GET()
+
+    assert handler._response_code == 200, (
+        f"expected 200 resolving via $AITEAMFORGE_DIR, got "
+        f"{handler._response_code}: {buf.getvalue()!r}"
+    )
+    payload = json.loads(buf.getvalue())
+    assert "states" in payload
+    assert payload["states"].get("implementing") == ["cr_submitted_at", "cr_approved_at|cr_approval_waived_at"]
 
 
 # ── (c) waiver + state change run as ONE script ──────────────────────────────
@@ -609,6 +663,82 @@ class TestApprovalWaiverFieldValidation(unittest.TestCase):
         self.addCleanup(home_patch.stop)
         self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
         return _new_handler_instance()
+
+
+# ── (f) per-CR precheck (XACA-1239-019): crState + already-satisfied ────────
+#
+# _cr_precheck_approval_waiver_against_cr is the server-side mirror of
+# _kb_cr_waive_approval's own D3 guards in scripts/kb-cr.sh. Without the
+# crState check, a waiver offered against any CR not sitting in
+# cr-submitted/cr-held (e.g. a --force'd implementing CR moving on to
+# deployed-dev, or cr-rejected moving to implementing) reaches the generated
+# shell script, whose waiver-write step is fatal (D5's `|| { …; exit 4; }`)
+# — the endpoint's generic script-failure path then answers 500 for what is
+# actually a 409-shaped client precondition failure. These tests call the
+# real method directly (no request/socket mocking needed — it takes plain
+# dict args), following this file's own established rule (XACA-0297 review
+# round 3): call the production function, never hand-mirror its logic.
+class TestApprovalWaiverPerCrPrecheck(unittest.TestCase):
+    def test_none_reason_is_a_no_op_ok(self):
+        inst = _new_handler_instance()
+        ok, err = inst._cr_precheck_approval_waiver_against_cr(
+            "CR-GEN-1", {"crState": "implementing"}, None)
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+
+    def test_wrong_crstate_rejected_409(self):
+        inst = _new_handler_instance()
+        for bad_state in ("implementing", "deployed-dev", "deployed-prod",
+                           "cr-rejected", "cr-approved", "cr-published",
+                           "cr-drafted", "emergency-deployed", None):
+            with self.subTest(bad_state=bad_state):
+                cr = {"crState": bad_state, "timestamps": {}}
+                ok, err = inst._cr_precheck_approval_waiver_against_cr(
+                    "CR-GEN-1", cr, "operator requested a waiver anyway")
+                self.assertFalse(ok)
+                self.assertIn("cr-submitted or cr-held", err)
+                self.assertIn("CR-GEN-1", err)
+
+    def test_cr_submitted_and_cr_held_are_accepted_states(self):
+        inst = _new_handler_instance()
+        for good_state in ("cr-submitted", "cr-held"):
+            with self.subTest(good_state=good_state):
+                cr = {"crState": good_state, "timestamps": {}}
+                ok, err = inst._cr_precheck_approval_waiver_against_cr(
+                    "CR-GEN-1", cr, "a reason")
+                self.assertTrue(ok, err)
+                self.assertIsNone(err)
+
+    def test_already_approved_rejected_409_even_from_allowed_state(self):
+        inst = _new_handler_instance()
+        cr = {"crState": "cr-submitted",
+              "timestamps": {"cr_approved_at": "2026-08-01T02:00:00Z"}}
+        ok, err = inst._cr_precheck_approval_waiver_against_cr(
+            "CR-GEN-1", cr, "a reason")
+        self.assertFalse(ok)
+        self.assertIn("already has a recorded approval", err)
+
+    def test_already_waived_rejected_409_even_from_allowed_state(self):
+        inst = _new_handler_instance()
+        cr = {"crState": "cr-held",
+              "timestamps": {"cr_approval_waived_at": "2026-08-01T02:00:00Z"}}
+        ok, err = inst._cr_precheck_approval_waiver_against_cr(
+            "CR-GEN-1", cr, "a reason")
+        self.assertFalse(ok)
+        self.assertIn("already has a recorded approval", err)
+        self.assertIn("waiver", err)
+
+    def test_crstate_checked_before_already_satisfied(self):
+        """A CR in a disallowed state that ALSO happens to carry
+        cr_approved_at must still be refused for the state reason — the
+        D3 gate (kb-cr.sh's own check order) runs first."""
+        inst = _new_handler_instance()
+        cr = {"crState": "implementing",
+              "timestamps": {"cr_approved_at": "2026-08-01T02:00:00Z"}}
+        ok, err = inst._cr_precheck_approval_waiver_against_cr(
+            "CR-GEN-1", cr, "a reason")
+        self.assertFalse(ok)
+        self.assertIn("cr-submitted or cr-held", err)
 
 
 if __name__ == "__main__":

@@ -66,13 +66,29 @@
  *   _crMissingEvidenceLabels(missing, orSeparator)
  *     Unique human labels for a `missing` list, in token order.
  *
+ *   _crWaiverAllowedForCrState(crState)
+ *     XACA-1239-019 (D3): a waiver may only be RECORDED while the CR's
+ *     CURRENT state is 'cr-submitted' or 'cr-held'. This is independent of
+ *     approvalOnlyGap — approvalOnlyGap asks "is approval evidence the only
+ *     thing missing for the TARGET state"; this asks "is the CR's PRESENT
+ *     state one the server will actually accept a waiver write from". A
+ *     --force'd CR sitting in 'implementing' (or any state reached via
+ *     --force / a rejection) can have an approval-only gap toward, say,
+ *     'deployed-dev' while NOT being waiver-eligible at all — the server's
+ *     _kb_cr_waive_approval refuses from any other state (kb-cr.sh), and
+ *     before this fix the modal offered the waiver anyway, the write failed,
+ *     and the transition endpoint answered 500.
+ *
  *   _crGapInfo(cr, state, evidenceMap)
  *     Combines the above into one decision object:
- *       { mapAvailable, missing, approvalOnlyGap, missingLabels }
+ *       { mapAvailable, missing, approvalOnlyGap, missingLabels, waiverAllowed }
  *     mapAvailable is false when evidenceMap itself is falsy (map failed to
  *     load / not yet loaded) — every other field is then a safe empty
  *     default so a caller that forgets to check mapAvailable still reads
- *     "no gap" rather than crashing.
+ *     "no gap" rather than crashing. waiverAllowed reflects ONLY cr.crState
+ *     (via _crWaiverAllowedForCrState) — it does not depend on
+ *     approvalOnlyGap, so a caller can distinguish "no gap at all" from "gap
+ *     is approval-only but this CR's current state can't record a waiver".
  *
  *   _crWaiverSubmitAllowed(gapInfo, reasonText)
  *     The EVIDENCE-GAP portion of the modal's SUBMIT-enablement decision
@@ -80,17 +96,20 @@
  *     lcars-cr-tab.js — this only answers "does the evidence gap block
  *     submit"): true when the map is unavailable (server remains the
  *     backstop) or there is no gap; false when the gap is not approval-only
- *     (no waiver is offered for those); otherwise true only once
- *     reasonText is non-blank after trim.
+ *     (no waiver is offered for those); false when the gap IS approval-only
+ *     but gapInfo.waiverAllowed is false (XACA-1239-019 — the CR's current
+ *     state can't record a waiver, so no reason text can unblock this);
+ *     otherwise true only once reasonText is non-blank after trim.
  *
  *   _crWaiverPayloadFields(gapInfo, reasonText, baseFields)
  *     Returns a NEW fields object (baseFields is never mutated) with
- *     `approval_waiver: {reason}` added when gapInfo.approvalOnlyGap is
- *     true and reasonText trims non-blank. Also strips any `approver` key
- *     from the result in that case — defense in depth, since the server
- *     rejects approval_waiver combined with approver (XACA-1239, D5) and
- *     no approval-only-gap target renders an approver field today, but a
- *     future one might.
+ *     `approval_waiver: {reason}` added when gapInfo.approvalOnlyGap AND
+ *     gapInfo.waiverAllowed are both true and reasonText trims non-blank
+ *     (XACA-1239-019 — never send a waiver the server will refuse). Also
+ *     strips any `approver` key from the result in that case — defense in
+ *     depth, since the server rejects approval_waiver combined with
+ *     approver (XACA-1239, D5) and no approval-only-gap target renders an
+ *     approver field today, but a future one might.
  *
  * No DOM access. No network. Dependency-free.
  */
@@ -132,6 +151,17 @@
         return missing.every(function (token) {
             return String(token).split(sep).indexOf('cr_approval_waived_at') !== -1;
         });
+    }
+
+    // ─── Waiver-allowed-from-current-state test (XACA-1239-019, D3) ────────────
+
+    // D3: "Allowed only from cr-submitted or cr-held". Kept as a small named
+    // set (mirrors TOKEN_LABELS below) rather than importing kb-cr.sh's own
+    // state list — this file stays dependency-free and Node-loadable.
+    var WAIVER_ALLOWED_CR_STATES = { 'cr-submitted': true, 'cr-held': true };
+
+    function crWaiverAllowedForCrState(crState) {
+        return Object.prototype.hasOwnProperty.call(WAIVER_ALLOWED_CR_STATES, crState);
     }
 
     // ─── Human labels ─────────────────────────────────────────────────────────
@@ -187,7 +217,7 @@
 
     function crGapInfo(cr, state, evidenceMap) {
         if (!evidenceMap) {
-            return { mapAvailable: false, missing: [], approvalOnlyGap: false, missingLabels: [] };
+            return { mapAvailable: false, missing: [], approvalOnlyGap: false, missingLabels: [], waiverAllowed: false };
         }
         var sep = evidenceMap.orSeparator || '|';
         var missing = crMissingEvidence(cr, state, evidenceMap);
@@ -196,6 +226,7 @@
             missing:         missing,
             approvalOnlyGap: crApprovalOnlyGap(missing, sep),
             missingLabels:   crMissingEvidenceLabels(missing, sep),
+            waiverAllowed:   crWaiverAllowedForCrState(cr && cr.crState),
         };
     }
 
@@ -205,6 +236,7 @@
         if (!gapInfo || !gapInfo.mapAvailable) return true;     // map unavailable — server is the backstop
         if (!gapInfo.missing || gapInfo.missing.length === 0) return true; // no gap
         if (!gapInfo.approvalOnlyGap) return false;              // blocked — no waiver offered
+        if (!gapInfo.waiverAllowed) return false;                // blocked — CR's current state can't record a waiver (XACA-1239-019)
         return !!(reasonText && String(reasonText).trim().length > 0);
     }
 
@@ -214,7 +246,7 @@
         var fields = {};
         var src = baseFields || {};
         Object.keys(src).forEach(function (k) { fields[k] = src[k]; });
-        if (gapInfo && gapInfo.mapAvailable && gapInfo.approvalOnlyGap) {
+        if (gapInfo && gapInfo.mapAvailable && gapInfo.approvalOnlyGap && gapInfo.waiverAllowed) {
             var reason = (reasonText || '').toString().trim();
             if (reason) {
                 fields.approval_waiver = { reason: reason };
@@ -227,14 +259,15 @@
     // ─── Module assembly ──────────────────────────────────────────────────────
 
     var lcarsCrEvidenceHelpers = {
-        DEFAULT_WAIVER_REASON:    DEFAULT_WAIVER_REASON,
-        _crMissingEvidence:       crMissingEvidence,
-        _crApprovalOnlyGap:       crApprovalOnlyGap,
-        _crEvidenceTokenLabel:    crEvidenceTokenLabel,
-        _crMissingEvidenceLabels: crMissingEvidenceLabels,
-        _crGapInfo:               crGapInfo,
-        _crWaiverSubmitAllowed:   crWaiverSubmitAllowed,
-        _crWaiverPayloadFields:   crWaiverPayloadFields,
+        DEFAULT_WAIVER_REASON:       DEFAULT_WAIVER_REASON,
+        _crMissingEvidence:          crMissingEvidence,
+        _crApprovalOnlyGap:          crApprovalOnlyGap,
+        _crWaiverAllowedForCrState:  crWaiverAllowedForCrState,
+        _crEvidenceTokenLabel:       crEvidenceTokenLabel,
+        _crMissingEvidenceLabels:    crMissingEvidenceLabels,
+        _crGapInfo:                  crGapInfo,
+        _crWaiverSubmitAllowed:      crWaiverSubmitAllowed,
+        _crWaiverPayloadFields:      crWaiverPayloadFields,
     };
 
     // Browser export (loaded via <script> before lcars-cr-tab.js)

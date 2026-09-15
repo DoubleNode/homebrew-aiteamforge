@@ -953,11 +953,19 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
 }
 
 /* Non-blocking notice shown when GET /api/kanban/cr/evidence-map failed to
-   load — every state is offered as before, the server remains the backstop. */
+   load — every state is offered as before, the server remains the backstop.
+   XACA-1239-015/018: the original rgba(255,255,255,.35) on the dialog's
+   #0a0a0f background measured ~3.14:1 — below WCAG 2.1 AA's 4.5:1 minimum
+   for normal-size text (WCAG 1.4.3). Switched to the amber caution tone
+   already used for the waiver section/chip elsewhere in this file
+   (rgba(255,204,0,.65) on #0a0a0f measures ~5.85:1) and bumped 9px -> 10px
+   for legibility — see lcars-ui/tests/test_cr_tab_edit_state_evidence.js
+   for the numeric before/after ratios computed against the WCAG relative-
+   luminance formula. */
 .cr-sc-map-notice {
-    font-size: 9px;
+    font-size: 10px;
     letter-spacing: 0.05em;
-    color: rgba(255, 255, 255, 0.35);
+    color: rgba(255, 204, 0, 0.65);
     font-style: italic;
     padding: 2px 0;
 }
@@ -997,12 +1005,24 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
     background: rgba(255, 204, 0, 0.06);
 }
 
-/* Blocking message for a non-approval gap — no waiver offered (D6). */
+/* Blocking message for a non-approval gap, and for an approval-only gap the
+   CR's current state isn't allowed to waive from (XACA-1239-019) — no
+   waiver is offered in either case (D6).
+   XACA-1239-018: var(--lcars-red) #cc4444 opaque text on this box's own
+   rgba(204,68,68,.10)-over-#0a0a0f background measured ~3.94:1 — below
+   WCAG 2.1 AA's 4.5:1 (mirrors the pre-existing .cr-sc-error box's own
+   sub-AA ~4:1, left alone here since that box is out of this fix's scope).
+   Switched the TEXT to --lcars-alert-red (#ff6666, already an existing
+   LCARS token) against the SAME background tint, measuring ~6.46:1 — the
+   background/border stay the "blocking red" tint operators already
+   recognise; only the text lightened enough to clear AA. See
+   lcars-ui/tests/test_cr_tab_edit_state_evidence.js for the numeric
+   before/after ratios. */
 .cr-sc-gap-blocked {
     font-family: 'Antonio', sans-serif;
     font-size: 11px;
     letter-spacing: 0.05em;
-    color: var(--lcars-red, #cc4444);
+    color: var(--lcars-alert-red, #ff6666);
     background: rgba(204, 68, 68, 0.10);
     border: 1px solid rgba(204, 68, 68, 0.30);
     border-radius: 3px;
@@ -1117,6 +1137,27 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
     opacity: 0.35;
     cursor: not-allowed;
     pointer-events: none;
+}
+
+/* XACA-1239-014: while the APPROVAL NOT RECEIVED waiver section is active,
+   SUBMIT is relabelled "RECORD WAIVER & SUBMIT" (lcars-cr-tab.js
+   _setSubmitWaiverMode) and switches to this amber/caution tone — one click
+   there makes a PERMANENT waiver record, and D6 forbids the ordinary
+   approval-green .cr-sc-submit tone for anything that isn't an approval.
+   Declared after .cr-sc-submit / its :hover so equal-specificity class
+   selectors resolve by source order (the button carries both classes at
+   once); .cr-sc-submit:disabled still wins on its own (a compound selector
+   outranks either single class) so the disabled dimming is unaffected. */
+.cr-sc-submit-waiver {
+    background: rgba(255, 204, 0, 0.14);
+    border-color: rgba(255, 204, 0, 0.45);
+    color: var(--lcars-amber, #ffcc00);
+}
+
+.cr-sc-submit-waiver:hover:not(:disabled) {
+    background: rgba(255, 204, 0, 0.26);
+    border-color: var(--lcars-amber, #ffcc00);
+    color: #000;
 }
 
 /* Inline buttons inside error div (RELOAD / RETRY) */

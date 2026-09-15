@@ -1715,6 +1715,22 @@
     }
 
     /**
+     * XACA-1239-019 (D3): blocking message for an approval-only gap where the
+     * CR's CURRENT state is NOT cr-submitted/cr-held — e.g. a --force'd CR
+     * sitting in 'implementing', or a 'cr-rejected' CR. A waiver can never be
+     * recorded from here (the server's _kb_cr_waive_approval refuses it), so
+     * — unlike the approval-only case — no waiver section is offered. Names
+     * the concrete recovery paths so the operator isn't left guessing.
+     */
+    function _renderWaiverNotAllowedMessage() {
+        const text =
+            'Approval evidence is missing, and a waiver can only be recorded while the CR is in ' +
+            'CR SUBMITTED or CR HELD. Revert this CR to CR SUBMITTED, or use kb-cr approve if a real ' +
+            'approval exists.';
+        return `<div class="cr-sc-gap-blocked" role="alert">${escapeHtml(text)}</div>`;
+    }
+
+    /**
      * Render the conditional fields HTML for a given target state, given the
      * evidence-gap decision for that state (XACA-1239-005, D6).
      *
@@ -1736,6 +1752,16 @@
         }
 
         if (gapInfo.approvalOnlyGap) {
+            // XACA-1239-019 (D3): approval-only is necessary but not
+            // sufficient — a waiver may only be OFFERED (and later recorded)
+            // while the CR's current state is cr-submitted/cr-held. A
+            // --force'd CR in 'implementing', or a 'cr-rejected' CR, can
+            // still have an approval-only gap toward a later target; the
+            // server would refuse the waiver write from there (409), so the
+            // modal must not offer it either.
+            if (!gapInfo.waiverAllowed) {
+                return _renderWaiverNotAllowedMessage() + fieldsHtml;
+            }
             // Waiver section is IN ADDITION to any ordinary required fields
             // this target already has (e.g. DEPLOY TIMESTAMP for deployed-dev
             // / deployed-prod) — approval-only-gap targets never render an
@@ -1867,7 +1893,7 @@
                         options +
                     `</select>` +
                 `</div>` +
-                `<div id="cr-sc-map-notice" class="cr-sc-map-notice" style="display:none"></div>` +
+                `<div id="cr-sc-map-notice" class="cr-sc-map-notice" role="status" style="display:none"></div>` +
                 `<div class="cr-sc-divider"></div>` +
                 `<div id="cr-state-cond-fields" class="cr-sc-cond-fields">` +
                     `<div class="cr-sc-no-fields">Select a target state above.</div>` +
@@ -1875,7 +1901,7 @@
                 `<div id="cr-sc-error" class="cr-sc-error" style="display:none"></div>` +
                 `<div class="cr-sc-actions">` +
                     `<button class="cr-sc-btn cr-sc-cancel" id="cr-sc-cancel">CANCEL</button>` +
-                    `<button class="cr-sc-btn cr-sc-submit" id="cr-sc-submit" disabled>SUBMIT</button>` +
+                    `<button class="cr-sc-btn cr-sc-submit" id="cr-sc-submit" disabled data-waiver-mode="0">SUBMIT</button>` +
                 `</div>` +
             `</div>`;
 
@@ -1943,26 +1969,84 @@
             mapNoticeDiv.style.display = 'block';
         }
 
+        // XACA-1239-014: SUBMIT reads "SUBMIT" / green when no waiver applies,
+        // and "RECORD WAIVER & SUBMIT" / amber (never the approval-green tone
+        // D6 forbids) whenever the rendered form includes the waiver section —
+        // one click there makes a PERMANENT waiver record, so the button must
+        // say so. `data-waiver-mode` lets _doSubmitTransition (a top-level
+        // function that only receives the submitBtn element, not this
+        // dialog's closure) restore the correct label after an error without
+        // needing gapInfo passed back in.
+        function _setSubmitWaiverMode(active) {
+            submitBtn.dataset.waiverMode = active ? '1' : '0';
+            submitBtn.textContent = active ? 'RECORD WAIVER & SUBMIT' : 'SUBMIT';
+            submitBtn.classList.toggle('cr-sc-submit-waiver', !!active);
+        }
+
+        // XACA-1239-016/017: snapshot/restore typed cond-field values across a
+        // re-render. A re-render can be triggered by something OTHER than the
+        // operator editing that field (the async evidence-map resolving after
+        // the operator already started typing) — losing that input is the bug.
+        function _snapshotCondFieldValues() {
+            const values = {};
+            condFieldsDiv.querySelectorAll('input, textarea, select').forEach(el => {
+                if (el.id) values[el.id] = el.value;
+            });
+            return values;
+        }
+
+        function _restoreCondFieldValues(values) {
+            Object.keys(values).forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.value = values[id];
+            });
+        }
+
+        // Signature of the evidence-gap decision actually rendered for the
+        // current target, used by the map-load handler (XACA-1239-017) to
+        // tell "the map resolving changed what should be shown" from "it
+        // didn't" — only the former justifies discarding/re-wiring the DOM.
+        function _gapInfoKey(gapInfo) {
+            if (!gapInfo) return 'none';
+            return JSON.stringify({
+                mapAvailable:    gapInfo.mapAvailable,
+                missing:         gapInfo.missing,
+                approvalOnlyGap: gapInfo.approvalOnlyGap,
+                waiverAllowed:   gapInfo.waiverAllowed,
+            });
+        }
+
+        let _lastCondFieldsGapKey = null;
+
         function _refreshCondFields() {
             const targetState = targetSelect.value;
             if (!targetState) {
                 condFieldsDiv.innerHTML = '<div class="cr-sc-no-fields">Select a target state above.</div>';
                 submitBtn.disabled = true;
+                _setSubmitWaiverMode(false);
+                _lastCondFieldsGapKey = null;
                 return;
             }
             const gapInfo = _computeGapInfo(targetState);
+            const preserved = _snapshotCondFieldValues();
             condFieldsDiv.innerHTML = _renderStateCondFields(targetState, gapInfo);
+            _restoreCondFieldValues(preserved);
+            _lastCondFieldsGapKey = _gapInfoKey(gapInfo);
+            _setSubmitWaiverMode(!!(gapInfo && gapInfo.approvalOnlyGap && gapInfo.waiverAllowed));
             _revalidate();
             // Wire input events on newly-rendered fields
             condFieldsDiv.querySelectorAll('input, textarea, select').forEach(el => {
                 el.addEventListener('input', _revalidate);
                 el.addEventListener('change', _revalidate);
             });
-            // Accessibility (D6/task item 7): sensible focus order — when the
-            // waiver section appears, move focus straight to the reason field
-            // rather than leaving it on the (now stale) target-state select.
-            const waiverReasonEl = condFieldsDiv.querySelector('#cr-sc-waiver-reason');
-            if (waiverReasonEl && typeof waiverReasonEl.focus === 'function') waiverReasonEl.focus();
+            // XACA-1239-016: deliberately NO auto-focus here. This function
+            // runs both from the target-select 'change' listener AND from the
+            // async map-load handler below — moving focus onto the waiver
+            // textarea on every call violates WCAG 3.2.2 (a context change
+            // must not happen without the operator asking for it) and, in
+            // Firefox, arrow-keying a CLOSED <select> fires 'change' on every
+            // step, so focus was being yanked off the select the operator was
+            // still using. Rely on normal tab order instead.
         }
 
         function _revalidate() {
@@ -1970,6 +2054,21 @@
             if (!targetState) { submitBtn.disabled = true; return; }
             const gapInfo = _computeGapInfo(targetState);
             submitBtn.disabled = !_validateStateCondFields(targetState, gapInfo);
+        }
+
+        // XACA-1239-017: called when the (cached) evidence-map fetch resolves
+        // — re-render ONLY if the gap/waiver decision for whatever target is
+        // currently selected actually changed as a result. If the operator
+        // hasn't picked a target yet there's nothing rendered to preserve. If
+        // they have, and the map's arrival doesn't change the outcome (e.g.
+        // it failed to load either way), skip the re-render entirely rather
+        // than replacing DOM the operator may already be typing into.
+        function _refreshCondFieldsIfGapChanged() {
+            const targetState = targetSelect.value;
+            if (!targetState) return;
+            const gapInfo = _computeGapInfo(targetState);
+            if (_gapInfoKey(gapInfo) === _lastCondFieldsGapKey) return;
+            _refreshCondFields();
         }
 
         targetSelect.addEventListener('change', () => {
@@ -2015,7 +2114,12 @@
             } else {
                 _showMapUnavailableNotice();
             }
-            _refreshCondFields();
+            // XACA-1239-017: gap-aware, value-preserving refresh — see
+            // _refreshCondFieldsIfGapChanged above. Replaces an unconditional
+            // _refreshCondFields() call that wiped typed input and moved
+            // focus on every first-open dialog, whether or not the map's
+            // arrival changed anything for the selected target.
+            _refreshCondFieldsIfGapChanged();
         });
     }
 
@@ -2046,7 +2150,12 @@
                     ? ` <button class="cr-sc-btn cr-sc-btn-inline cr-sc-retry" id="cr-sc-retry-btn">RETRY</button>`
                     : '');
             errorDiv.style.display = 'block';
-            submitBtn.textContent = 'SUBMIT';
+            // XACA-1239-014: restore whichever label was active before the
+            // in-flight "SUBMITTING..." text — _doSubmitTransition is a
+            // top-level function with no access to this dialog's gapInfo
+            // closure, so the mode is read back off the button's own
+            // data-waiver-mode attribute (set by _setSubmitWaiverMode above).
+            submitBtn.textContent = submitBtn.dataset.waiverMode === '1' ? 'RECORD WAIVER & SUBMIT' : 'SUBMIT';
             submitBtn.disabled = false;
 
             const reloadBtn = errorDiv.querySelector('#cr-sc-reload-btn');
