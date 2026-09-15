@@ -199,8 +199,48 @@ _hc_roster_lkg_path() {
 # empty file on disk means "known empty", never "unknown". Atomic: mktemp in
 # the SAME directory, then mv. Fails soft (logs a warning, never aborts the
 # sweep) if the directory can't be created or the write/rename fails.
+#
+# XACA-1223-015 (review round 1): a roster status of "ok" is NOT, by itself,
+# proof that this sweep's port lookup is trustworthy enough to persist as
+# last-known-good. Refuse the write — leaving the existing LKG untouched —
+# and log a single ⚠️ line, when ANY of:
+#   (a) lcars_ports.py (the owner tick, §9 step 2) exited non-zero this
+#       sweep — its stdout cannot be trusted as a complete lookup even
+#       though the roster itself read cleanly.
+#   (b) a supervised team (_HC_SUPERVISED — registered AND has an
+#       _LCARS_INFRA row) has no line in this sweep's effective lookup
+#       (_TEAM_PORT[team] unset). This is a PARTIAL ports tick: some rows
+#       resolved, at least one did not. Note this also covers a registered
+#       team whose lcars_port is genuinely null (present key, null value,
+#       XACA-1161-003 seed convergence never fills it in) — that team keeps
+#       warning and keeps the old LKG on EVERY sweep until its port is
+#       fixed. That recurring warning is the intended self-reporting
+#       staleness, not a bug to silence.
+#   (c) the write to the temp file itself fails (checked via the redirect's
+#       own exit status, not merely mkdir/mktemp/mv succeeding).
+# Without this gate, an "ok" roster read racing a broken/partial ports tick
+# (or a disk-full write) could silently overwrite a good LKG with an empty
+# or incomplete one — poisoning every future fallback sweep until the next
+# clean write.
 _hc_write_roster_lkg() {
     local _dir _tmp
+    local -a _hc_lkg_missing
+    local _hc_lkg_t
+
+    if [[ "${_HC_PORTS_RC:-1}" -ne 0 ]]; then
+        log "⚠️  roster: lcars_ports.py exited ${_HC_PORTS_RC} this sweep — last-known-good roster NOT updated (kept previous)"
+        return 1
+    fi
+
+    _hc_lkg_missing=()
+    for _hc_lkg_t in "${_HC_SUPERVISED[@]}"; do
+        [[ -z "${_TEAM_PORT[$_hc_lkg_t]:-}" ]] && _hc_lkg_missing+=("$_hc_lkg_t")
+    done
+    if [[ ${#_hc_lkg_missing[@]} -gt 0 ]]; then
+        log "⚠️  roster: partial ports tick — supervised team(s) [${(j:, :)_hc_lkg_missing}] have no lookup line this sweep — last-known-good roster NOT updated (kept previous)"
+        return 1
+    fi
+
     _dir="${_HC_ROSTER_LKG_PATH:h}"
     if ! mkdir -p "$_dir" 2>/dev/null; then
         log "⚠️  roster: could not create ${_dir} for the last-known-good roster — write skipped this sweep"
@@ -211,10 +251,13 @@ _hc_write_roster_lkg() {
         log "⚠️  roster: mktemp failed in ${_dir} — last-known-good roster not updated this sweep"
         return 1
     fi
-    {
-        printf '# written %s registry=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$_HC_ROSTER_PATH"
+    if ! { printf '# written %s registry=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$_HC_ROSTER_PATH"
         [[ -n "$_HC_EFFECTIVE_LOOKUP" ]] && printf '%s\n' "$_HC_EFFECTIVE_LOOKUP"
-    } > "$_tmp"
+    } > "$_tmp"; then
+        log "⚠️  roster: write to temp file ${_tmp} failed — last-known-good roster not updated this sweep"
+        rm -f "$_tmp" 2>/dev/null
+        return 1
+    fi
     if ! mv "$_tmp" "$_HC_ROSTER_LKG_PATH" 2>/dev/null; then
         log "⚠️  roster: could not replace ${_HC_ROSTER_LKG_PATH} with the freshly-written last-known-good roster — write skipped this sweep"
         rm -f "$_tmp" 2>/dev/null
@@ -278,7 +321,12 @@ done
 # port and ownership from the SAME registry snapshot (D9 in the design doc) —
 # reading them separately would risk the two disagreeing mid-sweep if the
 # registry is transiently corrupt between two reads.
+#
+# XACA-1223-015 (review round 1): capture-first — assign, THEN read $? on the
+# very next line, before any other command can clobber it. _HC_PORTS_RC feeds
+# _hc_write_roster_lkg()'s poisoned-write guard below.
 _PORT_LOOKUP=$(python3 "${_KANBAN_HOOKS_DIR}/lcars_ports.py" --with-primary-host "${_INFRA_TEAMS[@]}")
+_HC_PORTS_RC=$?
 
 # XACA-1223 §9 step 3: choose which lines feed LCARS_SERVERS. A registry that
 # read "ok" filters lcars_ports.py's own output down to registered teams
@@ -345,9 +393,9 @@ _hc_build_roster_note() {
             done <<< "$_HC_EFFECTIVE_LOOKUP"
         fi
         _joined_teams="${(j:, :)_hc_note_teams}"
-        _HC_ROSTER_NOTE="⚠️  roster: registry ${_HC_ROSTER_STATUS} (${_display_path}) — this host's team roster cannot be read; using last-known-good roster ${_HC_ROSTER_LKG_PATH} (written ${_ts}): [${_joined_teams}]. Teams outside it are NOT restarted until the registry reads clean (XACA-1223)."
+        _HC_ROSTER_NOTE="⚠️  roster: registry ${_HC_ROSTER_STATUS} (${_display_path}) — this host's team roster cannot be read; using last-known-good roster ${_HC_ROSTER_LKG_PATH} (written ${_ts}): [${_joined_teams}]. Teams outside it are NOT restarted until the registry reads clean; supervision resumes on the next health-check run once it reads clean (a long-running --daemon process must be restarted to pick this up) (XACA-1223)."
     else
-        _HC_ROSTER_NOTE="🚨 roster: registry ${_HC_ROSTER_STATUS} (${_display_path}) and no last-known-good roster at ${_HC_ROSTER_LKG_PATH} — NO team is restart-eligible this sweep. Repair the registry (kb-spacedock / aiteamforge doctor); supervision resumes automatically once it reads clean (XACA-1223)."
+        _HC_ROSTER_NOTE="🚨 roster: registry ${_HC_ROSTER_STATUS} (${_display_path}) and no last-known-good roster at ${_HC_ROSTER_LKG_PATH} — NO team is restart-eligible this sweep. Repair the registry (kb-spacedock / aiteamforge doctor); supervision resumes on the next health-check run once it reads clean (a long-running --daemon process must be restarted to pick this up) (XACA-1223)."
     fi
 }
 _hc_build_roster_note
@@ -2235,6 +2283,18 @@ run_health_check() {
 run_daemon() {
     log "Starting LCARS health daemon (checking every ${DAEMON_INTERVAL}s)"
     log "Press Ctrl+C to stop"
+
+    # XACA-1223-017 (review round 1): the roster/ports/LCARS_SERVERS globals
+    # are all resolved ONCE at source time (design doc §12 "Daemon mode" —
+    # explicitly out of scope to re-derive per sweep here), so whatever
+    # registry state this daemon happened to start against is frozen for its
+    # entire lifetime. If that state was anything other than "ok", repairing
+    # the registry later does NOT self-heal this already-running daemon —
+    # only a fresh one-shot sweep, or restarting this daemon, re-reads it.
+    # Warn once, at start, so that is not silently discovered days later.
+    if [[ "$_HC_ROSTER_STATUS" != "ok" ]]; then
+        log "⚠️  roster: this daemon started with registry status '${_HC_ROSTER_STATUS}' — its team roster is FROZEN at start (source-time snapshot) and will NOT self-heal even after the registry is repaired. Restart this daemon once the registry reads clean (XACA-1223-017)."
+    fi
 
     # XACA-0894-004 (Review #1): release the run lock deterministically on
     # daemon shutdown instead of relying solely on the 600s staleness
