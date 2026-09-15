@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1232** — dns terminal logos and persona avatars now ship in the tap. 8 `dns_*_logo.png`
+  files under `share/terminals/dns/logos/` and 14 avatar files (7 `dns_*_avatar.png` + 7
+  `dns_*_avatar_thumb.png`) under `share/personas/dns/avatars/`, byte-identical mirrors of
+  dev-team's `dns-framework/terminals/logos/` and `dns-framework/personas/avatars/` canonical
+  sources (`originals/` excluded, matching every other team's convention). These assets sit
+  outside `sync-tap.sh`'s mapped set — like every other team's logos/avatars, they are tap-native
+  files with no `sync_file`/`sync_dir` entry, so no script change was needed.
+
 - **XACA-1224** (SECURITY) — `share/scripts/vault-keygen.js` and `share/kanban-hooks/integrations/keychain.py`
   no longer pass the vault private key / credential-store passphrase on `security`'s command line (it was
   printed in a failed-command error and visible via `ps`). The command is now sent to `security -i` on stdin,
