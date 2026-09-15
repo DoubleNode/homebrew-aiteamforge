@@ -318,27 +318,14 @@ tmux -L "$TMUX_SOCKET" set-option -g allow-rename off 2>/dev/null
 tmux -L "$TMUX_SOCKET" set-window-option -g automatic-rename off 2>/dev/null
 
 # ============================================================================
-# Pre-initialize agent panel JSON files
+# Ensure the team's kanban/tmp directory exists
 # ============================================================================
-# Writes <kanban_tmp>/lcars-agent-<team>-<agent>.json for each agent so the
-# LCARS agent panel display has real developer/role data from the start.
-# Also writes a legacy copy to /tmp/ for use by banner scripts.
-# Runs synchronously before session creation; fast (reads persona markdown only).
-# ============================================================================
-# Resolve init script: installed layout uses scripts/, dev/tap uses share/scripts/
-_PANEL_JSON_SCRIPT="$AITEAMFORGE_DIR/scripts/init-agent-panel-json.py"
-[[ ! -f "$_PANEL_JSON_SCRIPT" ]] && _PANEL_JSON_SCRIPT="$AITEAMFORGE_DIR/share/scripts/init-agent-panel-json.py"
-# Resolve the kanban/tmp directory for this team.
-# Uses KANBAN_DIR already resolved above from TEAM_WORKING_DIR.
-# Falls back to /tmp/ if the directory can't be created.
-_KANBAN_TMP="${KANBAN_DIR}/tmp"
-mkdir -p "$_KANBAN_TMP" 2>/dev/null || _KANBAN_TMP="/tmp"
-
-if [[ -f "$_PANEL_JSON_SCRIPT" ]]; then
-    echo "  Pre-initializing agent panel data..."
-    KANBAN_TMP_DIR="$_KANBAN_TMP" python3 "$_PANEL_JSON_SCRIPT" "$TEAM_ID" "$AITEAMFORGE_DIR" 2>/dev/null \
-        || echo "  Warning: Agent panel JSON init failed (banner will use fallback values)"
-fi
+# LCARS panel JSON (lcars-agent-<session>.json) is written here by
+# display_agent_avatar. This used to live inside a pre-init block that ran
+# init-agent-panel-json.py; that script wrote persona-keyed files no panel
+# reads and was retired in XACA-1228 (the per-window refresh in
+# install-team.sh replaced it).
+mkdir -p "${KANBAN_DIR}/tmp" 2>/dev/null || true
 
 
 # ============================================================================

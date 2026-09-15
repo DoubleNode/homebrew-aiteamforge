@@ -1571,7 +1571,7 @@ setup_window() {{
 # Replaces an earlier init-agent-panel-json.py call that wrote persona-named
 # files (e.g. lcars-agent-legal-advocate.json) which the display panels
 # (keyed on session names like lcars-agent-legal-coparenting-chambers.json)
-# never read.
+# never read. (init-agent-panel-json.py itself was retired in XACA-1228.)
 # ============================================================================
 _AVATAR_HELPER="$AITEAMFORGE_DIR/scripts/display-agent-avatar.sh"
 [ ! -f "$_AVATAR_HELPER" ] && _AVATAR_HELPER="$AITEAMFORGE_DIR/share/scripts/display-agent-avatar.sh"

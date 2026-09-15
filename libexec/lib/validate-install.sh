@@ -191,7 +191,6 @@ _val_check_scripts() {
         "agent-panel-display.sh"
         "display-agent-avatar.sh"
         "lcars-tmp-dir.sh"
-        "init-agent-panel-json.py"
         # XACA-0796: the kb-msg relay entrypoints. fleet-reporter.sh resolves
         # msg-client.sh as a SIBLING and Guard 1 tests `[ -x "$client" ]`, so
         # both must be present AND executable for the relay to run at all.

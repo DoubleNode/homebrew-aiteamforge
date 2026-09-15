@@ -7,6 +7,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1228** — retired the "Pre-initialize agent panel JSON files" block from
+  `share/templates/team-startup.sh.template` and `team-project-startup.sh.template`, and deleted
+  `share/scripts/init-agent-panel-json.py` (tap-native; no dev-team canonical). That script ran on every master
+  startup and wrote `<kanban>/tmp/lcars-agent-<team>-<persona>.json` (plus a `/tmp` copy), but LCARS panels look
+  files up by session name (`lcars-agent-<team>-<session>.json`), so nothing read them; the per-window
+  `display_agent_avatar` refresh in `install-team.sh` already covers the panel's data. The block's
+  `mkdir -p "${KANBAN_DIR}/tmp"` is kept. Removed from `install-shell.sh`'s helper copy list and
+  `validate-install.sh`'s required-scripts list; `tests/test-validate-install.sh` expected pass count 13 → 12.
+  Existing hosts are unchanged: `aiteamforge upgrade` neither re-renders the master startup nor deletes retired
+  helpers, so the old block keeps calling the installed copy (its `[[ -f ]]` guard skips silently if absent).
 - **XACA-1230** — `share/scripts/display-agent-avatar.sh`: the catch-all's "no avatar mapping" warning-scope
   self-grep is now anchored to the case-ARM shape (`team:` prefix followed by a closing `)` on the same line)
   instead of a bare `team:` prefix, so the embedded Python heredoc's `try:`/`else:`/`except:` lines no longer
