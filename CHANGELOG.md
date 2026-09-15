@@ -85,6 +85,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   team's name, relocates the extracted retry block's `_SESSION_LOG`/`mktemp` writes into the sandbox
   instead of real `/tmp`, runs under both bash and zsh, and asserts no `/tmp/` file for the fake team id
   survives either run.
+  Review round 3 (XACA-1215-021/022): the retry re-print now also strips charset designations
+  (`ESC ( B`), every remaining `ESC` + printable (`ESC c`, `ESC 7`/`8`, `ESC =`/`>`), and all remaining
+  C0 control bytes except TAB. Case H's fake agent emits each of these, and a new assertion counts raw
+  control bytes on stdout. G9's negative control only runs where `/bin/bash` is 3.x, since bash 5
+  round-trips the pre-fix form; elsewhere it is a counted SKIP. SKIPs now appear in the Results line.
 
 - **XACA-1216** — Space Dock's crew sessions now get their personas. Its working dir
   (`~/.aiteamforge/spacedock`) is not a git work tree, so none of the git-aware persona deploy

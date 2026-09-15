@@ -101,11 +101,15 @@ if ! type -t test_start >/dev/null 2>&1; then
     _STANDALONE=true
     _PASS_COUNT=0
     _FAIL_COUNT=0
+    _SKIP_COUNT=0
     _CURRENT_TEST=""
 
     test_start() { _CURRENT_TEST="$1"; echo "  >> $1"; }
     test_pass()  { _PASS_COUNT=$((_PASS_COUNT + 1)); echo "     PASS: $_CURRENT_TEST"; }
     test_fail()  { _FAIL_COUNT=$((_FAIL_COUNT + 1)); echo "     FAIL: $_CURRENT_TEST — $1" >&2; }
+    # XACA-1215-022: a SKIP is counted and reported in Results, never silent.
+    # Under test-runner.sh its own test_skip (which counts) is used instead.
+    test_skip()  { _SKIP_COUNT=$((_SKIP_COUNT + 1)); echo "     SKIP: $_CURRENT_TEST — $1"; }
 fi
 
 # print_section/print_info/print_warning/print_success/print_error are
@@ -1127,7 +1131,7 @@ esac
 for _g8_shell in zsh bash; do
     if [ "$_g8_shell" = zsh ] && ! command -v zsh >/dev/null 2>&1; then
         test_start "G8 (XACA-1215-015): pane-shell re-parse under zsh"
-        echo "     SKIP: zsh not found on PATH (expected on CI ubuntu runners) — the bash sub-assertion below still runs and is not skipped"
+        test_skip "zsh not found on PATH (expected on CI ubuntu runners) — the bash sub-assertion below still runs and is not skipped"
         continue
     fi
     rm -f "$G8_PWNED"
@@ -1168,7 +1172,7 @@ done
 # ─────────────────────────────────────────────────────────────────────────────
 if ! command -v zsh >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
     test_start "G9 (XACA-1215-019): non-ASCII SESSION_DIRECTORY round-trip under a real interactive pty"
-    echo "     SKIP: zsh and/or python3 not found on PATH — the pty harness requires both"
+    test_skip "zsh and/or python3 not found on PATH — the pty harness requires both"
 else
     G9_HOME="$TEST_TMP_DIR/case-g9-home"
     G9_ZDOTDIR="$TEST_TMP_DIR/case-g9-zdotdir"
@@ -1349,7 +1353,13 @@ G9EXTPYEOF
     G9_JP_OLD_PWD="$(_g9_pty_pwd "cd $G9_JP_OLD_Q" "$TEST_TMP_DIR/g9-jp-old-out")"
 
     test_start "G9 (negative control): pre-fix plain printf %q FAILS the pty round-trip for 日本"
-    if [ "$G9_JP_OLD_PWD" != "$G9_JP_DIR" ]; then
+    # XACA-1215-022: the mis-encoding is specific to /bin/bash 3.x (macOS).
+    # bash 5 (Linux) emits raw UTF-8 that round-trips, so there the pre-fix
+    # form legitimately succeeds and this control cannot reproduce the bug.
+    G9_BIN_BASH_MAJOR="$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)"
+    if [ "$G9_BIN_BASH_MAJOR" != "3" ]; then
+        test_skip "/bin/bash is major version ${G9_BIN_BASH_MAJOR:-unknown}, not 3 — the pre-fix mis-encoding only reproduces on bash 3.x; positive G9 assertions below still run"
+    elif [ "$G9_JP_OLD_PWD" != "$G9_JP_DIR" ]; then
         test_pass
     else
         test_fail "Pre-fix form unexpectedly succeeded — the negative control no longer reproduces the bug; the positive assertions below cannot be trusted until this is understood. got=[$G9_JP_OLD_PWD]"
@@ -1526,6 +1536,8 @@ mkdir -p "$H_HOME" "$H_ATF/$H_FAKE_TEAM/scripts"
 cat > "$H_ATF/$H_FAKE_TEAM/scripts/${H_FAKE_TEAM}-flaky-startup.sh" <<'HFAKEEOF'
 #!/bin/bash
 printf '\033[3J\033[H\033[2J'
+printf '\033c\0337\033(B\033=\007\017'
+printf 'Initializing \0338Xaca1215caseh\033> Flaky...\r\n'
 echo "Initializing Xaca1215caseh Flaky..."
 echo "Error: working directory does not exist: /fake/not-cloned-repo" >&2
 echo "       (resolved from TEAM_WORKING_DIR for team 'xaca1215caseh' — check the team .conf, an" >&2
@@ -1580,6 +1592,15 @@ _case_h_assert() {
         test_fail "Cross-contamination or missing cause detected ($_label). block1=[$_b1] block2=[$_b2]"
     fi
 
+    test_start "H ($_label) (XACA-1215-021): no C0 control bytes other than TAB/LF (BEL, SI, CR) reach stdout"
+    local _c0_count
+    _c0_count=$(LC_ALL=C tr -dc '\000-\010\013-\037\177' < "$_out" 2>/dev/null | wc -c | tr -d ' ')
+    if [ "${_c0_count:-0}" -eq 0 ]; then
+        test_pass
+    else
+        test_fail "$_c0_count raw control byte(s) reached stdout ($_label): $(LC_ALL=C tr -dc '\000-\010\013-\037\177' < "$_out" | od -c | head -4)"
+    fi
+
     test_start "H ($_label) (XACA-1215-018): no raw terminal control (ESC) bytes reach stdout"
     local _esc_count
     _esc_count=$(LC_ALL=C grep -ac $'\033' "$_out" 2>/dev/null)
@@ -1593,7 +1614,7 @@ _case_h_assert() {
 for _h_shell in bash zsh; do
     if [ "$_h_shell" = zsh ] && ! command -v zsh >/dev/null 2>&1; then
         test_start "H (zsh): session-verify/retry block run"
-        echo "     SKIP: zsh not found on PATH (expected on CI ubuntu runners) — the bash run is not skipped"
+        test_skip "zsh not found on PATH (expected on CI ubuntu runners) — the bash run is not skipped"
         continue
     fi
 
@@ -1633,7 +1654,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 if [ "$_STANDALONE" = true ]; then
     echo ""
-    echo "Results: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed"
+    echo "Results: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed, ${_SKIP_COUNT} skipped"
     if [ "$_FAIL_COUNT" -gt 0 ]; then
         exit 1
     fi

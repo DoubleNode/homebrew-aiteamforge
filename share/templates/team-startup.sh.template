@@ -460,9 +460,11 @@ if [[ ${#_missing_agents[@]} -gt 0 ]]; then
             # already-removed CSI/OSC run):
             #   1. CSI  -- ESC [ params(0x30-0x3F) intermediates(0x20-0x2F) final(0x40-0x7E)
             #   2. OSC  -- ESC ] ... terminated by BEL (\007) or ST (ESC \)
-            #   3. lone ESC + one char -- covers ESC c (RIS/full reset),
-            #      ESC 7 / ESC 8 (save/restore cursor), ESC = / ESC > etc.
-            #   4. bare \r
+            #   3. ESC ( ) * + <charset> -- designations such as ESC ( B
+            #   4. any remaining ESC + one printable char -- ESC c (RIS/full
+            #      reset), ESC 7 / ESC 8, ESC = / ESC >, and the Fe set
+            #   5. every remaining C0 control byte and DEL except TAB (bare
+            #      \r, BEL, SI/SO, a stray ESC) -- XACA-1215-021
             # Lines that are empty AFTER stripping are dropped entirely
             # (a clear-only line would otherwise print as a bare indent).
             if [[ -n "$_agent_retry_log" && -s "$_agent_retry_log" ]]; then
@@ -470,8 +472,9 @@ if [[ ${#_missing_agents[@]} -gt 0 ]]; then
                     {
                         gsub(/\033\[[0-?]*[ -\/]*[@-~]/, "")
                         gsub(/\033\][^\007\033]*(\007|\033\\)/, "")
-                        gsub(/\033[@-Z\\-_]/, "")
-                        gsub(/\r/, "")
+                        gsub(/\033[()*+][ -~]/, "")
+                        gsub(/\033[ -~]/, "")
+                        gsub(/[\001-\010\013-\037\177]/, "")
                         if ($0 != "") print "       " $0
                     }
                 ' "$_agent_retry_log"
