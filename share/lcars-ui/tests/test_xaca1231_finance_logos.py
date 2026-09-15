@@ -190,6 +190,23 @@ LOGO_NAMES = [
 DEPLOYED_LOGOS_DIR = REPO_ROOT / "finance" / "terminals" / "logos"
 ORIGINALS_DIR = DEPLOYED_LOGOS_DIR / "originals"
 
+# This file is also mirrored into the tap at share/lcars-ui/tests/ (sync-tap.sh
+# maps lcars-ui/), where REPO_ROOT is share/ and finance/terminals/logos does
+# not exist. Skip ONLY in that mirrored layout, detected by lcars-ui/ sitting
+# directly under a directory named "share" -- in the dev-team checkout a
+# missing finance/terminals/logos must still FAIL, never skip (XACA-1231
+# round-3 review; same outcome as test_xaca1221_image_roots.py in the tap).
+IN_TAP_MIRROR_LAYOUT = LCARS_UI_DIR.parent.name == "share"
+
+
+def _skip_in_tap_mirror_layout():
+    if IN_TAP_MIRROR_LAYOUT:
+        raise unittest.SkipTest(
+            f"running from the tap mirror ({LCARS_UI_DIR}); this suite checks "
+            f"dev-team's canonical finance/terminals/logos, which the tap layout "
+            f"does not carry"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Fixture scaffold -- reuses test_xaca1221_image_roots.py's recipe: a
@@ -200,6 +217,10 @@ ORIGINALS_DIR = DEPLOYED_LOGOS_DIR / "originals"
 # ---------------------------------------------------------------------------
 
 class _FinanceLogoDeliveryTestBase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        _skip_in_tap_mirror_layout()
+
     def setUp(self):
         self._tmpdir_ctx = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmpdir_ctx.cleanup)
@@ -320,6 +341,10 @@ class TestDeployedFinanceLogoDimensions(unittest.TestCase):
     separately in originals/). Guards against a future regression re-copying
     a master over its deployed 256px file."""
 
+    @classmethod
+    def setUpClass(cls):
+        _skip_in_tap_mirror_layout()
+
     def test_deployed_finance_logos_are_256x256(self):
         for name in LOGO_NAMES:
             with self.subTest(name=name):
@@ -381,6 +406,7 @@ class TestCanonicalMatchesTapMirror(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        _skip_in_tap_mirror_layout()
         if not TAP_LOGOS_DIR.is_dir():
             raise unittest.SkipTest(
                 f"homebrew-tap submodule not initialized (or share/terminals/finance/"

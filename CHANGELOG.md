@@ -67,6 +67,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `fleet-monitor/server/public/avatars/finance_{bar,fca,lcars,nagus,vault,workshop}_logo.png` (1024px masters → 256px)
   and `share/lcars-ui/tests/test_xaca1231_finance_logos.py` — and the negative control's E0 now checks the
   baseline build's exit status plus positive anchors (academy logos, finance avatars) so an empty baseline fails.
+  Review round 3: `share/lcars-ui/tests/test_xaca1231_finance_logos.py` now skips with a reason in this tap layout
+  (it failed 21 here: canonical `finance/terminals/logos` exists only in dev-team). Mirror of dev-team canonical.
 - **XACA-1232** — dns terminal logos and persona avatars now ship in the tap. 8 `dns_*_logo.png`
   files under `share/terminals/dns/logos/` and 14 avatar files (7 `dns_*_avatar.png` + 7
   `dns_*_avatar_thumb.png`) under `share/personas/dns/avatars/`, byte-identical mirrors of
