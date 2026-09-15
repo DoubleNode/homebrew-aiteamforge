@@ -143,15 +143,49 @@ case "$TEST_TMP_DIR" in
 esac
 
 _TMUX_TEST_SOCK=""
+# XACA-1217-008: _e3_run()'s e3_sigterm_child.py (a real running watcher
+# _main() event loop, spawned in the background) used to be tracked
+# nowhere cleanup() could see -- a signal landing while _e3_run() was
+# polling for readiness or for the child to exit (before _e3_run() ever
+# reached its own kill -KILL fallback) left that child orphaned: the fake
+# watcher's _main() has no exit condition of its own besides the SIGTERM
+# _e3_run() sends it. _e3_run() is invoked as `X="$(_e3_run ...)"` at every
+# call site -- command substitution runs the whole function in a SUBSHELL,
+# so a plain variable set inside it (e.g. `_E3_CHILD_PID=$child_pid`) would
+# vanish the moment that subshell exits and never be visible here. A FILE
+# under TEST_TMP_DIR crosses that boundary (real filesystem I/O, not shell
+# state) -- _e3_run() writes the child's pid to it immediately after
+# spawning and removes it once the child is reaped; cleanup() below reads
+# whatever pid is left there if interrupted mid-_e3_run().
 cleanup() {
+    if [ -n "${TEST_TMP_DIR:-}" ] && [ -f "$TEST_TMP_DIR/e3-child.pid" ]; then
+        _e3_pid="$(cat "$TEST_TMP_DIR/e3-child.pid" 2>/dev/null)"
+        if [ -n "$_e3_pid" ]; then
+            kill -KILL "$_e3_pid" >/dev/null 2>&1
+            wait "$_e3_pid" 2>/dev/null
+        fi
+        rm -f "$TEST_TMP_DIR/e3-child.pid"
+    fi
     if [ -n "$_TMUX_TEST_SOCK" ]; then
         tmux -S "$_TMUX_TEST_SOCK" kill-server >/dev/null 2>&1 || true
+        _TMUX_TEST_SOCK=""
     fi
     if [ "${_OWN_TMP:-false}" = true ] && [ -n "${TEST_TMP_DIR:-}" ]; then
         rm -rf "$TEST_TMP_DIR"
+        TEST_TMP_DIR=""
     fi
 }
+# XACA-1217-008: only EXIT was trapped -- INT/TERM/HUP were all untrapped,
+# so a signal during _e3_run() killed the process via bash's default
+# disposition WITHOUT ever running cleanup() (an EXIT trap does not fire
+# when a shell is terminated by an untrapped signal), orphaning the e3
+# child outright. `exit` inside a trap runs the EXIT trap exactly once and
+# then actually terminates the process; same fix shape as XACA-1214/
+# XACA-1217-007.
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sanity: the three files this ticket ships must actually be present in the
@@ -1346,15 +1380,93 @@ cat > "$TEST_TMP_DIR/e3_sigterm_child.py" <<'E3EOF'
 (fully faked iterm2 module) against one activated tab, signals readiness via
 READY_FILE, then waits to be SIGTERM'd from outside. Writes the tab's final
 titleOverride to RESULT_FILE after _main() returns.
-argv: <watch-dir> <ready-file> <result-file>"""
+argv: <watch-dir> <ready-file> <result-file>
+
+LIFECYCLE (XACA-1217-008): the caller (_e3_run() in the suite) normally
+reaps this process itself -- it sends the SIGTERM this harness exists to
+test, then falls back to SIGKILL if the process doesn't exit in time. That
+self-contained bound does nothing if the CALLER (the suite process) is
+itself killed first -- e.g. mid-poll, before it ever sends that SIGTERM --
+because watcher._main() has no exit condition of its own besides the
+signal. Same shape as XACA-1214's hostile_af_unix_listener.py: a
+parent-death watchdog (the caller passes its own pid explicitly via
+KB1144_E3_PARENT_PID, resolved before the event loop ever starts -- a bare
+os.getppid() call made after exec is racy if the caller dies before it
+runs) plus a max-lifetime backstop (env-overridable, validated
+defensively), running on a daemon thread alongside the asyncio loop so it
+can call os._exit() regardless of what the loop is doing.
+"""
 import asyncio
 import json
+import math
+import os
 import sys
+import threading
+import time
 
 WATCH_DIR = sys.argv[1]
 READY_FILE = sys.argv[2]
 RESULT_FILE = sys.argv[3]
 sys.path.insert(0, WATCH_DIR)
+
+# Measured: this suite's two _e3_run() calls (one against the fixed
+# watcher, one against a 017-reverted RED fixture) each complete in well
+# under 5s (the RED fixture's own NEVER_EXITED fallback in _e3_run() bounds
+# it there too). DEFAULT_MAX_LIFETIME_S below is 30s -- comfortably above
+# that for a slower CI box -- so it never fires during a normal
+# (unsignalled) run and only acts as a backstop when the caller is gone.
+DEFAULT_MAX_LIFETIME_S = 30.0
+
+# How often the watchdog thread wakes to check for parent death / lifetime.
+_WATCHDOG_POLL_S = 0.5
+
+
+def _expected_parent_pid():
+    raw = os.environ.get("KB1144_E3_PARENT_PID")
+    if raw is None:
+        return os.getppid()
+    try:
+        value = int(raw)
+    except ValueError:
+        return os.getppid()
+    return value if value > 0 else os.getppid()
+
+
+def _max_lifetime_s():
+    raw = os.environ.get("KB1144_E3_MAX_LIFETIME_S")
+    if raw is None:
+        return DEFAULT_MAX_LIFETIME_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_MAX_LIFETIME_S
+    # XACA-1217-023: float() accepts "inf" -- `value > 0` is True for
+    # +inf, so the prior `value if value > 0 else DEFAULT` form let it
+    # through and disabled the backstop (a deadline of +inf is never
+    # reached). Require finite too.
+    return value if math.isfinite(value) and value > 0 else DEFAULT_MAX_LIFETIME_S
+
+
+def _watchdog(expected_ppid, deadline):
+    while True:
+        time.sleep(_WATCHDOG_POLL_S)
+        if os.getppid() != expected_ppid:
+            os._exit(0)
+        if time.monotonic() >= deadline:
+            os._exit(0)
+
+
+# Resolved before the event loop ever starts, per XACA-1217-008: if our
+# launcher is already gone (parent mismatch at startup), exit now rather
+# than starting a watcher event loop nobody is waiting on.
+_LAUNCH_PPID = _expected_parent_pid()
+if os.getppid() != _LAUNCH_PPID:
+    sys.exit(0)
+threading.Thread(
+    target=_watchdog,
+    args=(_LAUNCH_PPID, time.monotonic() + _max_lifetime_s()),
+    daemon=True,
+).start()
 
 
 class FakeTab:
@@ -1469,8 +1581,28 @@ _e3_run() {
     local ready="$TEST_TMP_DIR/e3-ready-$label"
     local result="$TEST_TMP_DIR/e3-result-$label.json"
 
+    # XACA-1217-008: this function is called as `X="$(_e3_run ...)"` at
+    # every call site below -- command substitution runs the WHOLE function
+    # body in a SUBSHELL. Any assignment to a bash variable made in here
+    # (e.g. a plain `_E3_CHILD_PID=$child_pid`) is invisible to the parent
+    # shell's `cleanup()` once that subshell exits -- subshells can't write
+    # back to parent state. Track the pid via a FILE instead (real
+    # filesystem I/O crosses the subshell boundary that variable
+    # assignments cannot), so cleanup() -- which runs in the parent shell --
+    # can still find and kill it if this function is ever interrupted
+    # before reaching its own kill/wait logic below.
+    local pidfile="$TEST_TMP_DIR/e3-child.pid"
+    # KB1144_E3_PARENT_PID is deliberately NOT overridden here: the child's
+    # actual OS parent is THIS subshell (not the top-level suite process --
+    # command substitution forks a real child process, and bash's `$$`
+    # inside it is documented to still report the ORIGINAL top-level pid,
+    # not this subshell's own, so passing $$ would name the wrong process).
+    # Falling back to a bare os.getppid() is correct here: it tracks this
+    # subshell, which is this child's true immediate parent for as long as
+    # _e3_run() is running.
     python3 "$TEST_TMP_DIR/e3_sigterm_child.py" "$watch_dir" "$ready" "$result" >/dev/null 2>&1 &
     local child_pid=$!
+    echo "$child_pid" > "$pidfile"
 
     local i
     for i in $(seq 1 100); do
@@ -1481,6 +1613,7 @@ _e3_run() {
         echo "NEVER_READY"
         kill -KILL "$child_pid" 2>/dev/null
         wait "$child_pid" 2>/dev/null
+        rm -f "$pidfile"
         return 1
     fi
 
@@ -1494,9 +1627,11 @@ _e3_run() {
         echo "NEVER_EXITED"
         kill -KILL "$child_pid" 2>/dev/null
         wait "$child_pid" 2>/dev/null
+        rm -f "$pidfile"
         return 1
     fi
     wait "$child_pid" 2>/dev/null
+    rm -f "$pidfile"
 
     if [ ! -f "$result" ]; then
         echo "NO_RESULT_FILE"

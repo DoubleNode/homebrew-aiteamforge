@@ -212,13 +212,34 @@ WORK_DIR="$TEST_TMP_DIR/xaca1113-012"
 mkdir -p "$WORK_DIR"
 
 STUB_PID=""
+# Idempotent (XACA-1217-007): each guard clears the state it acted on, so a
+# second call (e.g. the EXIT trap firing after a signal handler's own
+# `exit`) has nothing left to re-kill or re-remove.
 cleanup() {
-    [ -n "$STUB_PID" ] && kill "$STUB_PID" >/dev/null 2>&1
+    if [ -n "$STUB_PID" ]; then
+        kill "$STUB_PID" >/dev/null 2>&1
+        wait "$STUB_PID" 2>/dev/null
+        STUB_PID=""
+    fi
     if [ "${_OWN_TMP:-false}" = true ] && [ -n "${TEST_TMP_DIR:-}" ]; then
         rm -rf "$TEST_TMP_DIR"
+        TEST_TMP_DIR=""
     fi
 }
-trap cleanup EXIT INT TERM
+# XACA-1217-007: `trap cleanup EXIT INT TERM` runs cleanup on INT/TERM but
+# `cleanup` only RETURNS (no `exit` of its own) — under bash that does not
+# terminate the process, execution RESUMES at the point of interruption once
+# the trap returns (measured: SIGTERM/SIGINT mid-run produced 20+ MORE
+# PASS/FAIL lines after the signal instead of the suite dying). HUP was
+# entirely untrapped, so a hangup killed the process via bash's default
+# disposition without ever running cleanup. `exit` inside a trap runs the
+# EXIT trap exactly once and then actually terminates the process, which is
+# what every signal below now does; same fix shape as XACA-1214's
+# test-xaca-0830-002-rung4-deadline.sh.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 echo "=== XACA-1113-012: kb-msg Tier-2 fails CLOSED with no routing credentials ==="
 
@@ -469,9 +490,58 @@ else
     mkdir -p "$M5_DIR"
     STUB_PY="$M5_DIR/stub_vault_server.py"
     cat > "$STUB_PY" <<'PYEOF'
-import http.server, socketserver, sys
+import http.server, math, socketserver, sys, os, time
 
 RESPONSE_FILE = sys.argv[1]
+
+# XACA-1217-007: this stub used to serve_forever() unconditionally, so a
+# caller that dies without reaping it (e.g. this suite is SIGKILLed, which
+# no shell trap can intercept) left the stub HTTP server running forever.
+# Same shape as XACA-1214's tests/fixtures/xaca-0830/hostile_af_unix_listener.py:
+# a parent-death watchdog (the caller passes its own pid explicitly via
+# KB1113_STUB_PARENT_PID, resolved before the socket ever binds -- a bare
+# os.getppid() call made after exec is racy if the caller dies before it
+# runs) plus a max-lifetime backstop (env-overridable, validated
+# defensively) for any orphan shape the watchdog alone doesn't catch.
+#
+# Measured: this suite's mode-5 block (the only caller of this stub) runs
+# in well under 1s end-to-end (two short-lived `node` invocations against a
+# local socket). DEFAULT_MAX_LIFETIME_S below is 60s -- roughly 30x-60x
+# that, comfortably above it for a slower CI box, so it never fires during
+# a normal (unsignalled) run and only acts as a backstop when the caller
+# is gone.
+DEFAULT_MAX_LIFETIME_S = 60.0
+
+# How often handle_request() wakes on its own even with no request
+# pending; also the granularity of the parent-death check.
+POLL_S = 0.5
+
+
+def _expected_parent_pid():
+    raw = os.environ.get("KB1113_STUB_PARENT_PID")
+    if raw is None:
+        return os.getppid()
+    try:
+        value = int(raw)
+    except ValueError:
+        return os.getppid()
+    return value if value > 0 else os.getppid()
+
+
+def _max_lifetime_s():
+    raw = os.environ.get("KB1113_STUB_MAX_LIFETIME_S")
+    if raw is None:
+        return DEFAULT_MAX_LIFETIME_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_MAX_LIFETIME_S
+    # XACA-1217-023: float() accepts "inf" -- `value > 0` is True for
+    # +inf, so the prior `value if value > 0 else DEFAULT` form let it
+    # through and disabled the backstop (a deadline of +inf is never
+    # reached). Require finite too.
+    return value if math.isfinite(value) and value > 0 else DEFAULT_MAX_LIFETIME_S
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -489,17 +559,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+# Resolved before the socket binds, per XACA-1217-007: if our launcher is
+# already gone (parent mismatch at startup), exit now without ever binding
+# or printing a port -- the caller's bounded readiness poll then correctly
+# sees "never came up" instead of a listener it must later notice and reap.
+launch_ppid = _expected_parent_pid()
+if os.getppid() != launch_ppid:
+    sys.exit(0)
+
 httpd = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+httpd.timeout = POLL_S
 print(httpd.server_address[1], flush=True)
 sys.stdout.flush()
-httpd.serve_forever()
+
+deadline = time.monotonic() + _max_lifetime_s()
+while True:
+    httpd.handle_request()
+    if os.getppid() != launch_ppid:
+        break
+    if time.monotonic() >= deadline:
+        break
+httpd.server_close()
 PYEOF
 
     RESP_FILE="$M5_DIR/vault_machines_response.json"
     echo '{"machines":[]}' > "$RESP_FILE"
 
-    python3 "$STUB_PY" "$RESP_FILE" >"$M5_DIR/stub_port.txt" 2>"$M5_DIR/stub_err.txt" &
+    # XACA-1217-007: pass THIS shell's own $$ explicitly via
+    # KB1113_STUB_PARENT_PID so the stub resolves its expected parent BEFORE
+    # binding rather than racing a bare getppid() call after exec. This call
+    # site runs directly in the suite's main shell (never inside a `$( )` or
+    # `( )` subshell), so $$ here IS this process's own pid.
+    KB1113_STUB_PARENT_PID=$$ python3 "$STUB_PY" "$RESP_FILE" >"$M5_DIR/stub_port.txt" 2>"$M5_DIR/stub_err.txt" &
     STUB_PID=$!
+    # Registered immediately after `&`, before the readiness wait below --
+    # a signal landing mid-poll must still find this pid in `cleanup`'s
+    # STUB_PID variable.
 
     STUB_PORT=""
     for _i in 1 2 3 4 5 6 7 8 9 10; do

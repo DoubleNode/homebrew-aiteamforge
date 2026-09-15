@@ -7,6 +7,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1217** — three tap-only test suites no longer orphan helper processes or resume after a signal
+  (the XACA-1214 defect class). `test-xaca-1113-012-msg-fail-closed.sh`: `trap cleanup EXIT INT TERM`
+  resumed the suite after TERM/INT (the handler returned); it is now `trap cleanup EXIT` plus
+  `exit 130/143/129` on INT/TERM/HUP, and the mode-5 `serve_forever` stub gets a parent-death watchdog and a
+  60s max-lifetime backstop. `test-xaca-1144-remote-indicator-delivery.sh`: the `e3_sigterm_child.py`
+  watcher was started inside `$(...)`, so cleanup never knew its PID. It is now tracked by pidfile and
+  watchdogged (30s backstop), and INT/TERM/HUP exit. `test-xaca-1097-resolver-call-sites.sh`: the traps
+  resumed, and a `sleep 1000000` child/grandchild (~11.6 days) is now `X1097_HANG_SLEEP_SECS`, default 120s.
+  Every lifetime resolver rejects `nan`/`inf`. Each fix was watched RED first (signal the suite, or kill
+  the helper's direct parent, and count survivors scoped to that run). Normal runs are unchanged: 35/0,
+  91/0, 19/0.
+
 - **XACA-1223** — `lcars-health-check.sh` now restarts Space Dock's LCARS and stops retrying teams this
   host does not run. Restart eligibility comes from this host's own registry membership, read by the new
   read-only `share/kanban-hooks/lcars_host_roster.py` (`peek_config()` only), instead of the hardcoded team

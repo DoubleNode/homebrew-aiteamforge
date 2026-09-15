@@ -189,9 +189,24 @@ _cleanup() {
     fi
     if [ "${_OWN_TMP:-false}" = true ] && [ -n "${TEST_TMP_DIR:-}" ]; then
         rm -rf "$TEST_TMP_DIR"
+        TEST_TMP_DIR=""
     fi
 }
-trap _cleanup EXIT INT TERM
+# XACA-1217-009: `trap _cleanup EXIT INT TERM` ran _cleanup() on INT/TERM
+# but _cleanup() only RETURNS (no `exit` of its own) -- under bash that does
+# not terminate the process, execution RESUMES at the point of interruption
+# once the trap returns (same defect shape as XACA-1214/XACA-1217-007/-008).
+# HUP was entirely untrapped, so a hangup killed the process via bash's
+# default disposition WITHOUT ever running _cleanup() (an EXIT trap does
+# not fire when a shell is terminated by an untrapped signal) -- every pid
+# already appended to $_X1097_REAP_FILE (including any E1/E2 wrapper,
+# child or grandchild tracked so far) would be orphaned outright. `exit`
+# inside a trap runs the EXIT trap exactly once and then actually
+# terminates the process, which is what every signal below now does.
+trap _cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 SANDBOX="$TEST_TMP_DIR/xaca1097-resolver-sites"
 mkdir -p "$SANDBOX"
@@ -742,20 +757,38 @@ cat > "$FAKE_HANG_SHELL" <<'FAKESHELL'
 # Simulates a stuck ~/.zshrc during "$SHELL -ilc ...": forks a tracked
 # GRANDCHILD, then blocks itself -- so group-kill correctness can be
 # measured against a REAL grandchild, not just the direct child. Both
-# processes block on `exec sleep 1000000` (never returns on its own inside
-# this suite's timeouts) and record their OWN real pid to a file BEFORE
-# that exec -- exec preserves pid but replaces argv, so a `ps`/`pgrep`
-# command-line match on this script's own path would go stale the instant
-# `sleep` replaces it; the pidfile sidesteps that entirely. The grandchild
-# is a genuine NEW `/bin/bash -c '...'` process (not a `( ... )` subshell)
-# because `$BASHPID` is bash 4+ only and was measured to be silently EMPTY
-# under macOS's shipped bash 3.2 -- `$$` inside a real child process is
-# correct on 3.2, `$$` inside a `()` subshell is NOT (it stays the
-# parent's).
+# processes block on `exec sleep $X1097_HANG_SLEEP_SECS` (never returns on
+# its own inside this suite's timeouts) and record their OWN real pid to a
+# file BEFORE that exec -- exec preserves pid but replaces argv, so a
+# `ps`/`pgrep` command-line match on this script's own path would go stale
+# the instant `sleep` replaces it; the pidfile sidesteps that entirely. The
+# grandchild is a genuine NEW `/bin/bash -c '...'` process (not a `( ... )`
+# subshell) because `$BASHPID` is bash 4+ only and was measured to be
+# silently EMPTY under macOS's shipped bash 3.2 -- `$$` inside a real child
+# process is correct on 3.2, `$$` inside a `()` subshell is NOT (it stays
+# the parent's).
+#
+# XACA-1217-009: was `sleep 1000000` (~11.6 days) -- every normal call site
+# below already reaps this child+grandchild explicitly (via pidfile +
+# TERM-then-KILL) once its own outer bound elapses, but that reaping code
+# runs INSIDE the suite's own script body; it never runs at all if the
+# SUITE ITSELF is killed first (the exact scenario this ticket's trap fix
+# is closing elsewhere in this file). A hardcoded 1000000 made that gap's
+# blast radius match the ~5-day XACA-1214 field incident this whole audit
+# was spun out from. Bounded here as a backstop, env-overridable so a
+# caller with a genuinely longer legitimate need for the hang isn't stuck
+# at this default. 120s is comfortably above every timing bound in this
+# file that waits on it (E1_BOUND=4s, E2's outer wait=4s -- ~30x headroom
+# for a slower CI box) while keeping an orphan's worst case at minutes, not
+# nearly two weeks.
 : "${X1097_HANG_PID_PREFIX:?X1097_HANG_PID_PREFIX must be set}"
-/bin/bash -c 'echo "$$" > "'"$X1097_HANG_PID_PREFIX"'.grandchild"; exec sleep 1000000' &
+X1097_HANG_SLEEP_SECS="${X1097_HANG_SLEEP_SECS:-120}"
+case "$X1097_HANG_SLEEP_SECS" in
+    ''|*[!0-9]*) X1097_HANG_SLEEP_SECS=120 ;;
+esac
+/bin/bash -c 'echo "$$" > "'"$X1097_HANG_PID_PREFIX"'.grandchild"; exec sleep '"$X1097_HANG_SLEEP_SECS" &
 echo "$$" > "${X1097_HANG_PID_PREFIX}.child"
-exec sleep 1000000
+exec sleep "$X1097_HANG_SLEEP_SECS"
 FAKESHELL
 chmod +x "$FAKE_HANG_SHELL"
 
