@@ -1280,10 +1280,11 @@ class TestServeImage(unittest.TestCase):
         handler, buf = _make_handler(path="/images/academy_reno_logo.png")
         png_magic = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
 
-        with patch.object(Path, "exists", return_value=False) as mock_exists:
-            # First call (local image check) returns False
-            # Second and third calls (png_path, svg_path checks) return True then False
-            mock_exists.side_effect = [False, True, True]
+        # The local-images pre-check uses exists() (False here); the team
+        # candidate lookup uses is_file() since XACA-1221 (True here), so the
+        # first candidate root's PNG is "found" and its magic bytes read.
+        with patch.object(Path, "exists", return_value=False), \
+                patch.object(Path, "is_file", return_value=True):
             with patch("builtins.open", mock_open(read_data=png_magic)):
                 handler.serve_image("/images/academy_reno_logo.png")
 

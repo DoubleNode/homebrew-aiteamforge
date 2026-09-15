@@ -799,13 +799,31 @@ class TestHeadGetParity(unittest.TestCase):
         path = "/images/academy_lcars_logo.png"
 
         with tempfile.TemporaryDirectory() as tmp:
-            fake_home = Path(tmp)
+            fake_home = Path(tmp) / "home"
             logos_dir = fake_home / "dev-team" / "academy" / "terminals" / "logos"
             logos_dir.mkdir(parents=True)
             (logos_dir / "academy_lcars_logo.png").write_bytes(png_bytes)
 
+            # XACA-1221: serve_image now tries UI_DIR.absolute().parent and
+            # $AITEAMFORGE_DIR BEFORE Path.home()/"dev-team" (see
+            # _image_candidate_roots()). Patching only Path.home() is no
+            # longer enough — on this worktree, UI_DIR.parent IS a git
+            # checkout that also has academy/terminals/logos/
+            # academy_lcars_logo.png (the real, tracked asset), so root 1
+            # would win and serve THAT file's bytes instead of this test's
+            # fixture. UI_DIR is repointed to an empty, unrelated install
+            # dir (root 1 has nothing to find) and AITEAMFORGE_DIR is
+            # popped (root 2 must not leak a tester-shell sandbox path in),
+            # so resolution falls through to root 3 — the fixture this test
+            # actually owns.
+            fake_ui_dir = Path(tmp) / "install" / "lcars-ui"
+            (fake_ui_dir / "images").mkdir(parents=True)
+
             with patch.object(server, "LCARS_TEAM", "academy"), \
-                 patch.object(server.Path, "home", return_value=fake_home):
+                 patch.object(server, "UI_DIR", fake_ui_dir), \
+                 patch.object(server.Path, "home", return_value=fake_home), \
+                 patch.dict(_os.environ, {}, clear=False):
+                _os.environ.pop("AITEAMFORGE_DIR", None)
                 get_handler, get_buf = _make_handler(path, method="GET")
                 get_handler.do_GET()
                 head_handler, head_buf = _make_handler(path, method="HEAD")
@@ -1008,14 +1026,28 @@ class TestServeImageRejectsTraversal(unittest.TestCase):
             ("/images/legal-coparenting_chambers_logo.png", "legal", "legal_chambers_logo.png"),
         ]
         with tempfile.TemporaryDirectory() as tmp:
-            fake_home = Path(tmp)
+            fake_home = Path(tmp) / "home"
             for _path, base_dir_name, filename in cases:
                 logos_dir = fake_home / "dev-team" / base_dir_name / "terminals" / "logos"
                 logos_dir.mkdir(parents=True, exist_ok=True)
                 (logos_dir / filename).write_bytes(png_bytes)
 
+            # XACA-1221: same hazard/fix as
+            # TestHeadGetParity.test_head_get_parity_for_team_logo_image
+            # above — UI_DIR.absolute().parent now outranks
+            # Path.home()/"dev-team", and this worktree's own UI_DIR.parent
+            # carries real, git-tracked dns/legal/freelance logos that would
+            # otherwise win over these fixtures. Repoint UI_DIR at an empty
+            # install dir and drop AITEAMFORGE_DIR so resolution falls
+            # through to the Path.home() root this test actually fixtures.
+            fake_ui_dir = Path(tmp) / "install" / "lcars-ui"
+            (fake_ui_dir / "images").mkdir(parents=True)
+
             with patch.object(server, "LCARS_TEAM", "academy"), \
-                 patch.object(server.Path, "home", return_value=fake_home):
+                 patch.object(server, "UI_DIR", fake_ui_dir), \
+                 patch.object(server.Path, "home", return_value=fake_home), \
+                 patch.dict(_os.environ, {}, clear=False):
+                _os.environ.pop("AITEAMFORGE_DIR", None)
                 for path, _base_dir_name, _filename in cases:
                     with self.subTest(path=path):
                         handler, buf = _make_handler(path)
