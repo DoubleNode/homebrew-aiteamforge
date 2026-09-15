@@ -90,8 +90,9 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --team <name>      # Restrict the sweep to one team (e.g. --team finance-personal)"
             echo ""
             echo "--team narrows run_health_check's LCARS_SERVERS sweep to the single named"
-            echo "team (matched against the team field of the infra table) instead of every"
-            echo "configured team on this host. Composable with --status/--daemon. Omit for"
+            echo "team (matched against the team field of the infra table, among teams"
+            echo "registered on this host — XACA-1223) instead of every LCARS-supervised,"
+            echo "registered team on this host. Composable with --status/--daemon. Omit for"
             echo "the existing full-sweep behaviour (used by cron/LaunchAgent/--daemon)."
             echo ""
             echo "Host-ownership gate (XACA-1063): a team whose registry primary_host names"
@@ -122,7 +123,10 @@ done
 # aiteamforge_paths.DEFAULT_TEAMS[team]["lcars_port"] — it does NOT live here.
 # Funnel ports (8443+), tmux sockets, and session patterns are
 # infrastructure-specific and live only here.
-# When adding teams, add them to both this table AND aiteamforge_paths.py.
+# A row is required for a team's LCARS to be supervised; the row alone never
+# causes a restart (XACA-1223 — see the "XACA-1223 — Host Roster" section
+# below). tests/test_xaca1223_supervision_rows.py fails when a DEFAULT_TEAMS
+# team is neither given a row nor explicitly classified as unsupervised.
 # Use 0 for funnel_port if the team is not Tailscale-funneled.
 declare -a _LCARS_INFRA=(
     "8443:ios:ios:ios-lcars"
@@ -130,10 +134,10 @@ declare -a _LCARS_INFRA=(
     "8445:firebase:firebase:firebase-lcars"
     "8446:academy:academy:academy-lcars"
     "8447:dns:dns:dns-lcars"
-    "8448:freelance:freelance:.*-lcars"
     "8449:command:command:command-lcars"
     "0:finance-personal:finance-personal:finance-personal-lcars"
     "0:legal-coparenting:legal-coparenting:legal-coparenting-lcars"
+    "0:spacedock:spacedock:spacedock-lcars"
 )
 
 # Derive lcars_port for each team from the team-paths registry at runtime via the
@@ -147,21 +151,127 @@ declare -a _LCARS_INFRA=(
 _SCRIPT_DIR="${0:A:h}"
 _KANBAN_HOOKS_DIR="${_SCRIPT_DIR}/kanban-hooks"
 
-# Extract the team names from the infra table for the port lookup.
+# ============================================================================
+# XACA-1223 — Host Roster (registry-membership restart gate)
+# ============================================================================
+# `lcars_ports.py` resolves each team as `live.get(team) or DEFAULT_TEAMS.get(team)`,
+# a PER-TEAM fallback. A team this host's registry does not list still gets a
+# DEFAULT_TEAMS port, and when the registry is missing or corrupt EVERY team
+# does. Its output is therefore NEVER evidence that a team belongs on this
+# host. Membership comes only from `lcars_host_roster.py` (`peek_config`,
+# status `ok`) or, when that cannot be read, from the last-known-good roster
+# (XACA-1223). `lcars_ports.py` is still called on every sweep, with every
+# supervision row, because it is the designated self-heal owner
+# (XACA-1193-001 Decision A).
+#
+# ORDER: the roster is read BEFORE lcars_ports.py runs, so a sweep that meets
+# a corrupt registry sees the corruption before the owner tick
+# (lcars_ports.py -> load_config()) can reseed it in the same tick (design
+# doc §5 "Two reads, one snapshot").
+#
+# LKG path (XACA-1223 §3): ${registry_path:h}/run/lcars-health-roster.lkg,
+# using the roster helper's own path= line whenever it produced one (so an
+# isolated AITEAMFORGE_CONFIG in a sandbox isolates the LKG automatically);
+# falls back to ${AITEAMFORGE_CONFIG:h} then $HOME/.aiteamforge only when the
+# helper itself failed to run. LCARS_HEALTH_ROSTER_LKG overrides the whole
+# path when set.
+_hc_roster_lkg_path() {
+    if [[ -n "${LCARS_HEALTH_ROSTER_LKG:-}" ]]; then
+        printf '%s\n' "$LCARS_HEALTH_ROSTER_LKG"
+        return 0
+    fi
+    local _base
+    if [[ -n "${_HC_ROSTER_PATH:-}" ]]; then
+        _base="${_HC_ROSTER_PATH:h}"
+    elif [[ -n "${AITEAMFORGE_CONFIG:-}" ]]; then
+        _base="${AITEAMFORGE_CONFIG:h}"
+    else
+        _base="$HOME/.aiteamforge"
+    fi
+    printf '%s\n' "${_base}/run/lcars-health-roster.lkg"
+}
+
+# XACA-1223 §3 LKG write rule: called ONLY from run_health_check(), ONLY in
+# restart mode (STATUS_ONLY=false), ONLY when the roster read cleanly
+# (status "ok"). Never at source time (sourcing must stay side-effect free,
+# XACA-0889-017) and never in --status (a read must not mutate). Writes the
+# filtered lookup lines for S, or a header-only file when S is empty — an
+# empty file on disk means "known empty", never "unknown". Atomic: mktemp in
+# the SAME directory, then mv. Fails soft (logs a warning, never aborts the
+# sweep) if the directory can't be created or the write/rename fails.
+_hc_write_roster_lkg() {
+    local _dir _tmp
+    _dir="${_HC_ROSTER_LKG_PATH:h}"
+    if ! mkdir -p "$_dir" 2>/dev/null; then
+        log "⚠️  roster: could not create ${_dir} for the last-known-good roster — write skipped this sweep"
+        return 1
+    fi
+    _tmp=$(mktemp "${_dir}/.lcars-health-roster.lkg.XXXXXX" 2>/dev/null)
+    if [[ -z "$_tmp" ]]; then
+        log "⚠️  roster: mktemp failed in ${_dir} — last-known-good roster not updated this sweep"
+        return 1
+    fi
+    {
+        printf '# written %s registry=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$_HC_ROSTER_PATH"
+        [[ -n "$_HC_EFFECTIVE_LOOKUP" ]] && printf '%s\n' "$_HC_EFFECTIVE_LOOKUP"
+    } > "$_tmp"
+    if ! mv "$_tmp" "$_HC_ROSTER_LKG_PATH" 2>/dev/null; then
+        log "⚠️  roster: could not replace ${_HC_ROSTER_LKG_PATH} with the freshly-written last-known-good roster — write skipped this sweep"
+        rm -f "$_tmp" 2>/dev/null
+        return 1
+    fi
+    return 0
+}
+
+# XACA-1223 §9 step 1: roster (read-only). rc!=0 or no status= line at all
+# (e.g. a partial-upgrade tree missing this file, design §12) is its own
+# state, distinct from peek_config()'s five statuses, and falls to the LKG
+# exactly like an unreadable registry.
+_HC_ROSTER_RAW=$(python3 "${_KANBAN_HOOKS_DIR}/lcars_host_roster.py")
+_HC_ROSTER_RC=$?
+
+_HC_ROSTER_STATUS=""
+_HC_ROSTER_PATH=""
+typeset -A _HC_REGISTERED
+while IFS='=' read -r _hc_rk _hc_rv; do
+    case "$_hc_rk" in
+        status) _HC_ROSTER_STATUS="$_hc_rv" ;;
+        path)   _HC_ROSTER_PATH="$_hc_rv" ;;
+        team)   _HC_REGISTERED[$_hc_rv]=1 ;;
+    esac
+done <<< "$_HC_ROSTER_RAW"
+unset _hc_rk _hc_rv
+
+if [[ "$_HC_ROSTER_RC" -ne 0 || -z "$_HC_ROSTER_STATUS" ]]; then
+    _HC_ROSTER_STATUS="helper-failed"
+fi
+
+_HC_ROSTER_LKG_PATH=$(_hc_roster_lkg_path)
+
+# Extract the team names from the infra table for the port lookup, and split
+# the rows into supervised-and-registered vs. not-registered-here — used
+# both by the once-per-sweep roster note below and by the Summary line's
+# "not registered on this host" count (run_health_check).
 _INFRA_TEAMS=()
+declare -a _HC_SUPERVISED=()
+declare -a _HC_NOT_REGISTERED=()
 for _e in "${_LCARS_INFRA[@]}"; do
     IFS=':' read -r _fp _team _sock _pat <<< "$_e"
     _INFRA_TEAMS+=("$_team")
+    if [[ -n "${_HC_REGISTERED[$_team]:-}" ]]; then
+        _HC_SUPERVISED+=("$_team")
+    else
+        _HC_NOT_REGISTERED+=("$_team")
+    fi
 done
 
+# XACA-1223 §9 step 2: owner tick + ports — UNCHANGED invocation shape (every
+# row, every sweep, every state) so lcars_ports.py keeps running as the
+# designated self-heal owner even when S is empty (design §5).
 # Emits "team:port:primary_host_field" per line to stdout (XACA-1063-002: the
 # --with-primary-host flag added to lcars_ports.py); missing/None ports →
 # stderr warning, omitted from output so we never build a LCARS_SERVERS entry
-# with "". The port returned is from the registry (team-paths.json), not
-# DEFAULT_TEAMS fallback (except when the registry itself is unreadable — see
-# lcars_ports.py's own load_config()/DEFAULT_TEAMS fallback ladder, which this
-# script deliberately reuses rather than re-implementing — XACA-1063-001 § 4.2
-# note 3). primary_host_field is one of: "-" (ABSENT — no declared owner,
+# with "". primary_host_field is one of: "-" (ABSENT — no declared owner,
 # the normal state), "" (present but empty-string/null — malformed, distinct
 # from ABSENT), or the declared owning host verbatim. See lcars_ports.py's
 # docstring for the full field contract. ONE python invocation resolves BOTH
@@ -170,14 +280,87 @@ done
 # registry is transiently corrupt between two reads.
 _PORT_LOOKUP=$(python3 "${_KANBAN_HOOKS_DIR}/lcars_ports.py" --with-primary-host "${_INFRA_TEAMS[@]}")
 
+# XACA-1223 §9 step 3: choose which lines feed LCARS_SERVERS. A registry that
+# read "ok" filters lcars_ports.py's own output down to registered teams
+# only — never the raw, unfiltered lookup, which would restore the per-team
+# DEFAULT_TEAMS fallback as an implicit membership signal (the defect this
+# ticket fixes). Any other status uses the frozen last-known-good roster
+# verbatim (empty if none was ever written).
+if [[ "$_HC_ROSTER_STATUS" == "ok" ]]; then
+    _hc_effective_lines=()
+    while IFS= read -r _hc_ll; do
+        [[ -z "$_hc_ll" ]] && continue
+        _hc_ll_team="${_hc_ll%%:*}"
+        [[ -n "${_HC_REGISTERED[$_hc_ll_team]:-}" ]] && _hc_effective_lines+=("$_hc_ll")
+    done <<< "$_PORT_LOOKUP"
+    _HC_EFFECTIVE_LOOKUP="${(F)_hc_effective_lines}"
+    _HC_LKG_EXISTS=""
+else
+    if [[ -f "$_HC_ROSTER_LKG_PATH" ]]; then
+        _HC_LKG_EXISTS=1
+        _HC_EFFECTIVE_LOOKUP=$(grep -v '^#' "$_HC_ROSTER_LKG_PATH")
+    else
+        _HC_LKG_EXISTS=""
+        _HC_EFFECTIVE_LOOKUP=""
+    fi
+fi
+unset _hc_ll _hc_ll_team _hc_effective_lines
+
+# XACA-1223 §9 step 4: build the once-per-sweep roster diagnostic (design
+# §3's table). Computed here, at source time, but NOT printed here —
+# sourcing must stay side-effect free (XACA-0889-017) — run_health_check()
+# logs $_HC_ROSTER_NOTE after the banner.
+_hc_build_roster_note() {
+    local _joined_s _joined_skipped _joined_teams _ts _display_path
+    local _hc_note_line _hc_note_team
+    local -a _hc_note_teams
+    if [[ "$_HC_ROSTER_STATUS" == "ok" ]]; then
+        if [[ ${#_HC_SUPERVISED[@]} -eq 0 ]]; then
+            _HC_ROSTER_NOTE="ℹ️  roster: registry ok (${_HC_ROSTER_PATH}) — no LCARS-supervised team is registered on this host; nothing to restart"
+            return 0
+        fi
+        _joined_s="${(j:, :)_HC_SUPERVISED}"
+        if [[ ${#_HC_NOT_REGISTERED[@]} -gt 0 ]]; then
+            _joined_skipped="${(j:, :)_HC_NOT_REGISTERED}"
+            _HC_ROSTER_NOTE="ℹ️  roster: registry ok (${_HC_ROSTER_PATH}) — supervising [${_joined_s}]; not registered on this host, skipped: [${_joined_skipped}]"
+        else
+            _HC_ROSTER_NOTE="ℹ️  roster: registry ok (${_HC_ROSTER_PATH}) — supervising [${_joined_s}]"
+        fi
+        return 0
+    fi
+
+    _display_path="${_HC_ROSTER_PATH:-<unresolved — roster helper failed>}"
+    if [[ -n "$_HC_LKG_EXISTS" ]]; then
+        _ts=""
+        if [[ -f "$_HC_ROSTER_LKG_PATH" ]]; then
+            _ts=$(sed -n 's/^# written \([^ ]*\) registry=.*/\1/p' "$_HC_ROSTER_LKG_PATH" | head -1)
+        fi
+        [[ -z "$_ts" ]] && _ts="<unknown>"
+        _hc_note_teams=()
+        if [[ -n "$_HC_EFFECTIVE_LOOKUP" ]]; then
+            while IFS= read -r _hc_note_line; do
+                [[ -z "$_hc_note_line" ]] && continue
+                _hc_note_team="${_hc_note_line%%:*}"
+                _hc_note_teams+=("$_hc_note_team")
+            done <<< "$_HC_EFFECTIVE_LOOKUP"
+        fi
+        _joined_teams="${(j:, :)_hc_note_teams}"
+        _HC_ROSTER_NOTE="⚠️  roster: registry ${_HC_ROSTER_STATUS} (${_display_path}) — this host's team roster cannot be read; using last-known-good roster ${_HC_ROSTER_LKG_PATH} (written ${_ts}): [${_joined_teams}]. Teams outside it are NOT restarted until the registry reads clean (XACA-1223)."
+    else
+        _HC_ROSTER_NOTE="🚨 roster: registry ${_HC_ROSTER_STATUS} (${_display_path}) and no last-known-good roster at ${_HC_ROSTER_LKG_PATH} — NO team is restart-eligible this sweep. Repair the registry (kb-spacedock / aiteamforge doctor); supervision resumes automatically once it reads clean (XACA-1223)."
+    fi
+}
+_hc_build_roster_note
+
 # Build team->port and team->declared-primary-host associative arrays from the
-# lookup output.
+# roster-filtered lookup output (XACA-1223: NOT the raw _PORT_LOOKUP — see
+# step 3 above).
 typeset -A _TEAM_PORT
 typeset -A _TEAM_PRIMARY_HOST
 while IFS=':' read -r _t _p _ph; do
     [[ -n "$_t" && -n "$_p" ]] && _TEAM_PORT[$_t]=$_p
     [[ -n "$_t" && -n "$_p" ]] && _TEAM_PRIMARY_HOST[$_t]="$_ph"
-done <<< "$_PORT_LOOKUP"
+done <<< "$_HC_EFFECTIVE_LOOKUP"
 
 # Build LCARS_SERVERS by combining infra metadata with derived ports.
 # Format: "funnel_port:local_port:team:tmux_socket:session_pattern"
@@ -186,7 +369,14 @@ for _e in "${_LCARS_INFRA[@]}"; do
     IFS=':' read -r _fp _team _sock _pat <<< "$_e"
     _lp="${_TEAM_PORT[$_team]}"
     if [[ -z "$_lp" ]]; then
-        echo "WARNING: no registry lcars_port for team '$_team' — skipping health-check entry" >&2
+        # XACA-1223: a row left out BY the roster gate (not registered on this
+        # host, or outside the last-known-good roster) is an intended skip,
+        # already reported once by $_HC_ROSTER_NOTE. Warning for it here would
+        # print one stderr line per unhosted team on every 300s sweep. Warn
+        # only for a registered team whose port genuinely failed to resolve.
+        if [[ "$_HC_ROSTER_STATUS" == "ok" && -n "${_HC_REGISTERED[$_team]:-}" ]]; then
+            echo "WARNING: no registry lcars_port for team '$_team' — skipping health-check entry" >&2
+        fi
         continue
     fi
     LCARS_SERVERS+=("${_fp}:${_lp}:${_team}:${_sock}:${_pat}")
@@ -442,7 +632,7 @@ if [[ -n "$TEAM_FILTER" ]]; then
         fi
     done
     if [[ ${#_team_filter_matches[@]} -eq 0 ]]; then
-        echo "ERROR: --team '$TEAM_FILTER' did not match any configured team in LCARS_SERVERS (checked ${#LCARS_SERVERS[@]} entries; a team missing its registry lcars_port is excluded — see the WARNING above, if any)." >&2
+        echo "ERROR: --team '$TEAM_FILTER' did not match any team that is both registered on this host and LCARS-supervised (checked ${#LCARS_SERVERS[@]} entries in LCARS_SERVERS; a team missing its registry lcars_port — because it is not registered on this host (XACA-1223) or its port could not be resolved — is excluded; see the WARNING/roster note above, if any)." >&2
         exit 1
     elif [[ ${#_team_filter_matches[@]} -gt 1 ]]; then
         echo "ERROR: --team '$TEAM_FILTER' matched MULTIPLE configured teams (${_team_filter_matches[*]}) — ambiguous, refusing to guess which one to restart. Use a more specific --team value, or edit _LCARS_INFRA to disambiguate." >&2
@@ -1805,6 +1995,13 @@ run_health_check() {
     local restarted=0
     local drifted=0
     local foreign=0
+    # XACA-1223: not registered on this host — computed once at source time
+    # (_HC_NOT_REGISTERED, XACA-1223 §2/§9), not a loop counter; captured
+    # here for the Summary line below.
+    # Only an "ok" roster can say a team is NOT registered; in fallback the
+    # roster is unknown, so the count would wrongly claim every row.
+    local not_registered="${#_HC_NOT_REGISTERED[@]} not registered on this host"
+    [[ "$_HC_ROSTER_STATUS" != "ok" ]] && not_registered="registry roster unreadable (${_HC_ROSTER_STATUS}) — see roster note"
     # XACA-0706: hoist loop-scoped scratch var. A bare `local _bp` INSIDE the
     # outer loop re-declares an already-set local on the 2nd+ iteration, which
     # zsh prints as `_bp=<value>` to stdout — corrupting the health-check log
@@ -1819,6 +2016,15 @@ run_health_check() {
     log "═══════════════════════════════════════════════════════"
     log "LCARS Health Check"
     log "═══════════════════════════════════════════════════════"
+
+    # XACA-1223 §3/§9: log the once-per-sweep roster diagnostic (built at
+    # source time into $_HC_ROSTER_NOTE — see the "XACA-1223 — Host Roster"
+    # section above) and, only in restart mode with a cleanly-read registry,
+    # persist this sweep's set as the new last-known-good roster.
+    log "$_HC_ROSTER_NOTE"
+    if [[ "$STATUS_ONLY" == "false" && "$_HC_ROSTER_STATUS" == "ok" ]]; then
+        _hc_write_roster_lkg
+    fi
 
     # XACA-1063-002: resolve this host's identity ONCE per sweep (D9 — one
     # snapshot, shared by every team's ownership check this run) rather than
@@ -2005,7 +2211,7 @@ run_health_check() {
     done
 
     log "───────────────────────────────────────────────────────"
-    log "Summary: $healthy healthy, $unhealthy unhealthy (configured teams that were restarted/retried), $drifted non-canonical-port drift, $skipped skipped (port-unresolved), $foreign suppressed (not this host's team, XACA-1063)"
+    log "Summary: $healthy healthy, $unhealthy unhealthy (configured teams that were restarted/retried), $drifted non-canonical-port drift, $skipped skipped (port-unresolved), $foreign suppressed (not this host's team, XACA-1063), $not_registered"
 
     if [[ "$STATUS_ONLY" == "false" && $restarted -gt 0 ]]; then
         log "Restarted: $restarted servers"
