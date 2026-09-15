@@ -115,12 +115,31 @@ else
 fi
 TEST_TMP_DIR="$(cd "$TEST_TMP_DIR" && pwd -P)"
 
+# Idempotent (XACA-1217-007): clears the state it acted on, so a second call
+# (e.g. the EXIT trap firing after a signal handler's own `exit`) has
+# nothing left to re-remove.
 cleanup() {
     if [ "${_OWN_TMP:-false}" = true ] && [ -n "${TEST_TMP_DIR:-}" ]; then
         rm -rf "$TEST_TMP_DIR"
+        TEST_TMP_DIR=""
     fi
 }
-trap cleanup EXIT INT TERM
+# XACA-1229-015 (same defect class as XACA-1217-007): `trap cleanup EXIT INT
+# TERM` runs cleanup on INT/TERM but `cleanup` only RETURNS (no `exit` of its
+# own) -- under bash that does not terminate the process, execution RESUMES
+# at the point of interruption once the trap returns, so a TERM mid-run
+# deletes the sandbox out from under the still-running suite and then lets
+# it keep going against a now-missing TEST_TMP_DIR, producing bogus
+# failures instead of a prompt, clean exit. HUP was entirely untrapped, so a
+# hangup killed the process via bash's default disposition without ever
+# running cleanup. `exit` inside a trap runs the EXIT trap exactly once and
+# then actually terminates the process, which is what every signal below
+# now does; same fix shape as XACA-1217-007's
+# test-xaca-1113-012-msg-fail-closed.sh.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 _assert_sandboxed() {
     case "$1" in
@@ -304,6 +323,24 @@ CI_ROLE_HOSTILE='Analysis - handles $(touch $SANDBOX/PWNED_role_dollar) and `tou
 CI_LOCATION_HOSTILE='Spacedock Analysis Bay\Sensor Array'
 FM_DESC_HOSTILE='Space Dock Analysis - Zoë 日本 Ops'
 
+# Case 6 (XACA-1229-013): hostile characters that are SAFE inside a
+# double-quoted bash assignment (so this case is NOT about
+# render_dq/injection at all) but are NOT safe once `printf %q`'s
+# backslash-escaped token gets RETYPED into an interactive zsh pane --
+# `printf %q` escapes these with a lone backslash, which a zsh glob/expansion
+# rule can still act on. A mid-word `#` in Role trips `setopt extended_glob`
+# ("no matches found" -- the whole retyped line fails); a LEADING `~`/`=` in
+# Location/Name triggers tilde/command-path expansion under default zsh
+# options instead of being read back literally. `$'...'` ANSI-C quoting
+# (the XACA-1229-013 fix) has no such hazard in either case. Name/Role/
+# Location all flow straight through raw (see the field-transform notes
+# above), so each fixture value below reaches the banner byte-for-byte
+# unless something is broken.
+CI_NAME_SULU='=SysAdmin Override'
+CI_ROLE_CSHARP='C# Engineer'
+CI_LOCATION_TILDE='~Ops Console'
+FM_DESC_SULU='Space Dock Navigation - Helm & Sensor Ops'
+
 PERSONAS_DIR="$AITEAMFORGE_DIR/spacedock/personas/agents"
 mkdir -p "$PERSONAS_DIR"
 
@@ -358,9 +395,14 @@ _write_persona "$PERSONAS_DIR/spacedock_worf-sd_security_persona.md" \
     "$CI_NAME_CTRL" "Security - Standard Duty" \
     "Spacedock Security Deck" "Security"
 
-test_start "Fixture preflight: 5 persona files written"
+_write_persona "$PERSONAS_DIR/spacedock_sulu-sd_navigation_persona.md" \
+    "sulu-sd" "$FM_DESC_SULU" \
+    "$CI_NAME_SULU" "$CI_ROLE_CSHARP" \
+    "$CI_LOCATION_TILDE" "Command"
+
+test_start "Fixture preflight: 6 persona files written"
 FIXTURE_COUNT=$(find "$PERSONAS_DIR" -maxdepth 1 -name '*_persona.md' 2>/dev/null | wc -l | tr -d ' ')
-if [ "${FIXTURE_COUNT:-0}" -eq 5 ]; then test_pass; else test_fail "Expected 5 fixture files, found ${FIXTURE_COUNT:-0}"; fi
+if [ "${FIXTURE_COUNT:-0}" -eq 6 ]; then test_pass; else test_fail "Expected 6 fixture files, found ${FIXTURE_COUNT:-0}"; fi
 
 # Synthetic team conf: only the two grep'd-for-directly variable families the
 # generators actually read (AGENT_WINDOWS_*, AGENT_TERMINAL_*) -- the
@@ -374,11 +416,13 @@ AGENT_WINDOWS_dockmaster="dockmaster-cmd monitor scratch debug"
 AGENT_WINDOWS_diagnostics="diagnostics-cmd monitor scratch debug"
 AGENT_WINDOWS_analysis="analysis-cmd monitor scratch debug"
 AGENT_WINDOWS_security="security-cmd monitor scratch debug"
+AGENT_WINDOWS_navigation="navigation-cmd monitor scratch debug"
 AGENT_TERMINAL_scotty_sd="repair"
 AGENT_TERMINAL_sisko_sd="dockmaster"
 AGENT_TERMINAL_geordi_sd="diagnostics"
 AGENT_TERMINAL_spock_sd="analysis"
 AGENT_TERMINAL_worf_sd="security"
+AGENT_TERMINAL_sulu_sd="navigation"
 CONFEOF
 
 # Expected values (see field-transform notes above).
@@ -397,6 +441,11 @@ E_OBRIEN_THEME="ENGINEERING"
 E_SPOCK_DEV="Spock"; E_SPOCK_ROLE="$CI_ROLE_HOSTILE"
 E_SPOCK_LOC="$CI_LOCATION_HOSTILE"; E_SPOCK_DESC="SPACEDOCK ANALYSIS - ZOË 日本 OPS"
 E_SPOCK_THEME="SCIENCE"
+
+# XACA-1229-013 fixture (Case 6) — see the comment above CI_NAME_SULU.
+E_SULU_DEV="$CI_NAME_SULU"; E_SULU_ROLE="$CI_ROLE_CSHARP"
+E_SULU_LOC="$CI_LOCATION_TILDE"; E_SULU_DESC="SPACEDOCK NAVIGATION - HELM & SENSOR OPS"
+E_SULU_THEME="COMMAND"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Shared harness bodies (used by both the default suite, against the CURRENT
@@ -697,6 +746,81 @@ if [ -n "$NEGATIVE_CONTROL_TARGET" ]; then
     fi
     rm -f "$SANDBOX_NEGCTRL"/PWNED_* 2>/dev/null
 
+    # Signal 3 (XACA-1229-013 regression probe, independent of Signals 1/2):
+    # re-parse the navigation/sulu-sd banner line -- the fixture carrying a
+    # mid-word `#` in Role, a leading `~` in Location, and a leading `=` in
+    # Name/developer (see the CI_NAME_SULU comment above) -- under
+    # `zsh -f -c 'setopt extended_glob; ...'`. This is a DIFFERENT bug than
+    # Signals 1/2 (those are render_dq/injection bugs, already fixed AT
+    # df2a3a8 itself); this one is in df2a3a8's OWN fix -- the `printf %q`
+    # mechanism it introduced is not safe to retype into a pane with
+    # extended_glob active (XACA-1229-013). Evidence here is expected to
+    # fire for `df2a3a8` (the %q commit) but NOT for `df2a3a8~1` (the
+    # pre-XACA-1229 plain double-quoted form happens to be immune to this
+    # particular hazard class -- MEASURED: both a leading ~/= and a mid-word
+    # # stay literal inside a plain double-quoted "$SESSION_ROLE" retype, no
+    # `printf %q` involved yet). A test_fail here on a `df2a3a8~1` run is
+    # therefore EXPECTED and does not indicate the negative control itself
+    # is broken -- Signals 1/2 above already establish DETECTED=true for
+    # that ref via the real pre-fix bug. This signal exists so that
+    # `--negative-control df2a3a8` (where Signals 1/2 legitimately find
+    # nothing, since THAT bug is already fixed there) still reports
+    # DETECTED=true, proving the XACA-1229-013 fix's own regression test
+    # actually has teeth.
+    NAV_F="$NC_SCRIPTS_DIR/spacedock-navigation-startup.sh"
+    NAV_EG_DETECTED=false
+    NAV_EG_NOTE=""
+    if [ -f "$NAV_F" ]; then
+        _reset_tmux_stub "nc-navigation"
+        TMUX_STUB_HAS_SESSION_EXIT=1
+        export TMUX_STUB_HAS_SESSION_EXIT
+        (
+            HOME="$HOME"
+            SANDBOX="$SANDBOX_NEGCTRL"
+            SKIP_ATTACH=1
+            export HOME SANDBOX SKIP_ATTACH TMUX_STUB_LOG TMUX_STUB_CALL_DIR TMUX_STUB_HAS_SESSION_EXIT PATH
+            bash "$NAV_F"
+        ) >"$TEST_TMP_DIR/nc-navigation-run.log" 2>&1
+
+        NAV_CALL=$(_find_call_with "$TMUX_STUB_CALL_DIR" "banner.sh")
+        if [ -n "$NAV_CALL" ]; then
+            NAV_BANNERLINE=$(sed -n '4p' "$NAV_CALL")
+            mkdir -p "$NC_SCRIPTS_DIR"
+            cat > "$NC_SCRIPTS_DIR/spacedock-banner.sh" <<'NCBANNERSTUBEOF'
+: > "$BANNER_ARGS_OUT"
+for _a in "$@"; do
+    printf '%s\n' "$_a" >> "$BANNER_ARGS_OUT"
+done
+printf '%s\n' "$#" > "$BANNER_ARGS_OUT.count"
+NCBANNERSTUBEOF
+            NC_NAV_EG_OUT="$TEST_TMP_DIR/nc-navigation-extglob.banner-args"
+            _assert_sandboxed "$NC_NAV_EG_OUT"
+            BANNER_ARGS_OUT="$NC_NAV_EG_OUT" zsh -f -c "setopt extended_glob; $NAV_BANNERLINE" \
+                >"$TEST_TMP_DIR/nc-navigation-extglob.stdout.log" 2>"$TEST_TMP_DIR/nc-navigation-extglob.stderr.log"
+            NC_NAV_EG_NARGS=$(cat "$NC_NAV_EG_OUT.count" 2>/dev/null || echo "<none>")
+            if [ "$NC_NAV_EG_NARGS" != "10" ]; then
+                NAV_EG_DETECTED=true
+                NAV_EG_NOTE="extended_glob reparse produced '$NC_NAV_EG_NARGS' args (expected 10); stderr: $(cat "$TEST_TMP_DIR/nc-navigation-extglob.stderr.log" 2>/dev/null)"
+            else
+                NAV_EG_NOTE="extended_glob reparse produced 10 args -- this source is not vulnerable to the XACA-1229-013 class"
+            fi
+        else
+            NAV_EG_NOTE="no banner.sh send-keys call captured for navigation -- persona/conf mapping may not exist on this ref"
+        fi
+    else
+        NAV_EG_NOTE="no spacedock-navigation-startup.sh generated on this ref -- persona/conf mapping may not exist"
+    fi
+
+    test_start "NEGATIVE CONTROL (XACA-1229-013 probe): navigation/sulu-sd banner line FAILS zsh -f -c 'setopt extended_glob' reparse"
+    if [ "$NAV_EG_DETECTED" = true ]; then
+        test_pass
+        echo "     EVIDENCE: $NAV_EG_NOTE"
+        DETECTED=true
+        EVIDENCE="${EVIDENCE}[XACA-1229-013: $NAV_EG_NOTE] "
+    else
+        test_fail "$NAV_EG_NOTE (expected on df2a3a8~1 -- Signals 1/2 above already establish this ref is pre-fix; this probe only fires the XACA-1229-013 sub-bug introduced at df2a3a8 itself)"
+    fi
+
     echo ""
     echo "Negative-control results: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed"
     if [ "$_FAIL_COUNT" -gt 0 ] && [ "$DETECTED" != true ]; then
@@ -768,12 +892,12 @@ else
     test_fail "spacedock-security-startup.sh was generated despite a control character in its Name field"
 fi
 
-test_start "Generation: the other 4 personas' startup scripts WERE generated despite worf-sd's refusal"
-ALL4=true
-for f in spacedock-repair-startup.sh spacedock-dockmaster-startup.sh spacedock-diagnostics-startup.sh spacedock-analysis-startup.sh; do
-    [ -f "$SCRIPTS_DIR/$f" ] || { ALL4=false; echo "     missing: $f" >&2; }
+test_start "Generation: the other 5 personas' startup scripts WERE generated despite worf-sd's refusal"
+ALL5=true
+for f in spacedock-repair-startup.sh spacedock-dockmaster-startup.sh spacedock-diagnostics-startup.sh spacedock-analysis-startup.sh spacedock-navigation-startup.sh; do
+    [ -f "$SCRIPTS_DIR/$f" ] || { ALL5=false; echo "     missing: $f" >&2; }
 done
-if [ "$ALL4" = true ]; then test_pass; else test_fail "one or more of the 4 expected scripts is missing"; fi
+if [ "$ALL5" = true ]; then test_pass; else test_fail "one or more of the 5 expected scripts is missing"; fi
 
 # ─── bash -n on every generated startup script ──────────────────────────────
 test_start "D: every generated startup script passes bash -n"
@@ -784,12 +908,13 @@ for f in "$SCRIPTS_DIR"/spacedock-*-startup.sh; do
 done
 if [ "$SYNTAX_OK" = true ]; then test_pass; else test_fail "one or more generated scripts failed bash -n"; fi
 
-# ─── Assignment round-trip: bash AND zsh, all 4 valid personas ─────────────
+# ─── Assignment round-trip: bash AND zsh, all 5 valid personas ─────────────
 for row in \
     "repair:$E_SCOTTY_DEV:$E_SCOTTY_ROLE:$E_SCOTTY_LOC:$E_SCOTTY_DESC:$E_SCOTTY_THEME" \
     "dockmaster:$E_UNA_DEV:$E_UNA_ROLE:$E_UNA_LOC:$E_UNA_DESC:$E_UNA_THEME" \
     "diagnostics:$E_OBRIEN_DEV:$E_OBRIEN_ROLE:$E_OBRIEN_LOC:$E_OBRIEN_DESC:$E_OBRIEN_THEME" \
-    "analysis:$E_SPOCK_DEV:$E_SPOCK_ROLE:$E_SPOCK_LOC:$E_SPOCK_DESC:$E_SPOCK_THEME"
+    "analysis:$E_SPOCK_DEV:$E_SPOCK_ROLE:$E_SPOCK_LOC:$E_SPOCK_DESC:$E_SPOCK_THEME" \
+    "navigation:$E_SULU_DEV:$E_SULU_ROLE:$E_SULU_LOC:$E_SULU_DESC:$E_SULU_THEME"
 do
     term="${row%%:*}"; rest="${row#*:}"
     dev="${rest%%:*}"; rest="${rest#*:}"
@@ -815,7 +940,7 @@ do
     done
 done
 
-# ─── Banner-arg capture + zsh reparse, all 4 valid personas ────────────────
+# ─── Banner-arg capture + zsh reparse, all 5 valid personas ────────────────
 _capture_banner_args "$SCRIPTS_DIR/spacedock-repair-startup.sh" "$ATF" "$TEST_TMP_DIR/banner-repair" "$SANDBOX_FIXED" \
     "$E_SCOTTY_DESC" "$E_SCOTTY_LOC" "$E_SCOTTY_DEV" "$E_SCOTTY_ROLE"
 REPAIR_CALL_DIR="$LAST_BANNER_CALL_DIR"
@@ -826,6 +951,78 @@ _capture_banner_args "$SCRIPTS_DIR/spacedock-diagnostics-startup.sh" "$ATF" "$TE
     "$E_OBRIEN_DESC" "$E_OBRIEN_LOC" "$E_OBRIEN_DEV" "$E_OBRIEN_ROLE"
 _capture_banner_args "$SCRIPTS_DIR/spacedock-analysis-startup.sh" "$ATF" "$TEST_TMP_DIR/banner-analysis" "$SANDBOX_FIXED" \
     "$E_SPOCK_DESC" "$E_SPOCK_LOC" "$E_SPOCK_DEV" "$E_SPOCK_ROLE"
+# navigation/sulu-sd is XACA-1229-013's own fixture (Case 6: mid-word `#` in
+# Role, leading `~` in Location, leading `=` in Name/developer). This call
+# already covers the "default zsh options" half of the 013 regression test
+# via _capture_banner_args's own byte-exact dev/role/location/desc + 10-arg
+# assertions; the `setopt extended_glob` half follows immediately below,
+# re-parsing the EXACT SAME captured bannerline text a second time.
+_capture_banner_args "$SCRIPTS_DIR/spacedock-navigation-startup.sh" "$ATF" "$TEST_TMP_DIR/banner-navigation" "$SANDBOX_FIXED" \
+    "$E_SULU_DESC" "$E_SULU_LOC" "$E_SULU_DEV" "$E_SULU_ROLE"
+
+# ─── XACA-1229-013: re-parse navigation/sulu-sd's captured banner line a
+#     SECOND time under `zsh -f -c 'setopt extended_glob; ...'` -- the same
+#     bytes _capture_banner_args just proved round-trip under default zsh
+#     options must ALSO round-trip with extended_glob active, since a real
+#     user's interactive zsh may have it on. Reuses the ".bannerline" file
+#     _capture_banner_args already wrote rather than re-deriving/re-running
+#     anything, so this can never drift from what was actually captured.
+#     A stub banner.sh (same shape as _capture_banner_args's own) dumps
+#     "$@" so the reparsed arg count/values can be asserted directly.
+NAV_BANNERLINE_FILE="$TEST_TMP_DIR/banner-navigation.bannerline"
+test_start "navigation: bannerline file captured for extended_glob reparse"
+if [ -s "$NAV_BANNERLINE_FILE" ]; then
+    test_pass
+else
+    test_fail "no bannerline captured at $NAV_BANNERLINE_FILE (banner send-keys call not found above?)"
+fi
+
+if [ -s "$NAV_BANNERLINE_FILE" ]; then
+    NAV_BANNERLINE="$(cat "$NAV_BANNERLINE_FILE")"
+    NAV_EG_SCRIPTS_DIR="$ATF/spacedock/scripts"
+    mkdir -p "$NAV_EG_SCRIPTS_DIR"
+    cat > "$NAV_EG_SCRIPTS_DIR/spacedock-banner.sh" <<'NAVBANNERSTUBEOF'
+: > "$BANNER_ARGS_OUT"
+for _a in "$@"; do
+    printf '%s\n' "$_a" >> "$BANNER_ARGS_OUT"
+done
+printf '%s\n' "$#" > "$BANNER_ARGS_OUT.count"
+NAVBANNERSTUBEOF
+    NAV_EG_OUT="$TEST_TMP_DIR/banner-navigation-extglob.banner-args"
+    _assert_sandboxed "$NAV_EG_OUT"
+    BANNER_ARGS_OUT="$NAV_EG_OUT" zsh -f -c "setopt extended_glob; $NAV_BANNERLINE" \
+        >"$TEST_TMP_DIR/banner-navigation-extglob.stdout.log" 2>"$TEST_TMP_DIR/banner-navigation-extglob.stderr.log"
+
+    test_start "navigation: zsh -f -c 'setopt extended_glob' reparse of the SAME banner line produced exactly 10 args"
+    NAV_EG_NARGS=$(cat "$NAV_EG_OUT.count" 2>/dev/null || echo "<none>")
+    if [ "$NAV_EG_NARGS" = "10" ]; then
+        test_pass
+    else
+        test_fail "expected 10 args after extended_glob zsh reparse, got '$NAV_EG_NARGS'. bannerline: $NAV_BANNERLINE | reparse stderr: $(cat "$TEST_TMP_DIR/banner-navigation-extglob.stderr.log" 2>/dev/null)"
+    fi
+
+    if [ "$NAV_EG_NARGS" = "10" ]; then
+        NAV_EG_A6=$(sed -n '6p' "$NAV_EG_OUT"); NAV_EG_A7=$(sed -n '7p' "$NAV_EG_OUT")
+        NAV_EG_A8=$(sed -n '8p' "$NAV_EG_OUT"); NAV_EG_A9=$(sed -n '9p' "$NAV_EG_OUT")
+
+        test_start "navigation/extended_glob: banner arg 6 (description) byte-exact"
+        if [ "$NAV_EG_A6" = "$E_SULU_DESC" ]; then test_pass; else test_fail "expected [$E_SULU_DESC] got [$NAV_EG_A6]"; fi
+
+        test_start "navigation/extended_glob: banner arg 7 (location, leading ~) byte-exact"
+        if [ "$NAV_EG_A7" = "$E_SULU_LOC" ]; then test_pass; else test_fail "expected [$E_SULU_LOC] got [$NAV_EG_A7]"; fi
+
+        test_start "navigation/extended_glob: banner arg 8 (developer, leading =) byte-exact"
+        if [ "$NAV_EG_A8" = "$E_SULU_DEV" ]; then test_pass; else test_fail "expected [$E_SULU_DEV] got [$NAV_EG_A8]"; fi
+
+        test_start "navigation/extended_glob: banner arg 9 (role, mid-word #) byte-exact"
+        if [ "$NAV_EG_A9" = "$E_SULU_ROLE" ]; then test_pass; else test_fail "expected [$E_SULU_ROLE] got [$NAV_EG_A9]"; fi
+    else
+        for _label in "description" "location, leading ~" "developer, leading =" "role, mid-word #"; do
+            test_start "navigation/extended_glob: banner arg ($_label) byte-exact"
+            test_fail "skipped — arg count was not 10"
+        done
+    fi
+fi
 
 # ─── @claude_agent / @developer tmux set calls inside the startup script's
 #     own creation path (same banner-driving run already captured them) ────

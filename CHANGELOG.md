@@ -96,12 +96,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `Montgomery "Scotty" Scott` lost its quotes, and `Una Chin-Riley ("Number One")` produced a script bash
   could not parse. Values are now escaped (`\` `"` `` ` `` `$`), and a value with a control character
   skips that one persona with a warning instead of emitting an unsafe script. The banner line that
-  `send-keys` retypes into the pane now passes all ten args as `printf %q` tokens (same mechanism as
-  XACA-1215's `_SESSION_DIRECTORY_Q`), so the pane's zsh reads each back as one literal argument instead
-  of splitting on a quote or running `$(...)` a second time. The zshrc generator escaped `@developer` /
+  `send-keys` retypes into the pane now passes all ten args as `$'...'` tokens: letters, digits, space and
+  `._-,/:@+` stay literal and every other byte becomes a `\NNN` octal escape (`od`/`awk`, no locale
+  dependence). The pane's zsh reads each back as one literal argument, with no quote splitting, second
+  `$(...)` run, globbing, or `~`/`=` expansion, even under `extended_glob`. Review round 1: this replaced
+  `printf %q`, which leaves mid-word `#` and a leading `~`/`=` bare (`C# Engineer` failed with `no matches
+  found`). XACA-1215's `_SESSION_DIRECTORY_Q` now uses the same helper, and the test exits on INT/TERM/HUP
+  instead of resuming (XACA-1217 pattern). The zshrc generator escaped `@developer` /
   `@claude_agent` for single quotes inside double quotes (`O'Brien` showed as `O'\''Brien`) and did not
-  escape `SESSION_TITLE` at all; both fixed. Existing hosts pick this up on `aiteamforge upgrade`, whose
-  `update_generated_agent_scripts` re-runs the generator for every team with generated scripts. New test:
+  escape `SESSION_TITLE` at all; both fixed. Existing hosts get the startup-script fix on `aiteamforge
+  upgrade` (`update_generated_agent_scripts` runs `install-team.sh --agent-scripts-only`). That mode does
+  not rewrite `~/.zshrc_<team>_<slug>`, so the zshrc fix reaches a host only on a full team install, which
+  overwrites those files. Until then the old zshrc still resets tmux `@developer` to the mangled name
+  (e.g. `O'\''Brien`) when the pane sources it. New test:
   `tests/test-xaca-1229-persona-field-escaping.sh`.
 
 - **XACA-1224** (SECURITY) — `share/scripts/vault-keygen.js` and `share/kanban-hooks/integrations/keychain.py`

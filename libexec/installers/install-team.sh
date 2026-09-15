@@ -1521,70 +1521,86 @@ SESSION_LOCATION="{location_esc}"
 SESSION_DEVELOPER="{developer_esc}"
 SESSION_ROLE="{role_esc}"
 SESSION_DIRECTORY="{session_directory}"
-# XACA-1215-015: pre-quote SESSION_DIRECTORY ONCE for re-parsing by the
-# pane's own interactive shell. `send-keys` types its argument into the
-# pane like a user would -- a double-quoted "cd \"$SESSION_DIRECTORY\""
-# only protects the ASSIGNMENT above; once retyped into the pane, that
-# same double-quoted context lets the pane's shell (zsh) re-evaluate any
-# $(...), backticks or $ the path contains a SECOND time. `printf %q`
-# produces a single backslash-escaped token that both bash and zsh parse
-# back to the literal value with no quoting/expansion hazard -- verified
-# in a sandbox against bash 3.2's own %q output (space, $(touch X),
-# backtick, ", ', and a literal backslash all round-tripped byte-for-byte
-# under both `zsh -fc` and `/bin/bash -c`, with no side-effect file ever
-# created). Computed once here since SESSION_DIRECTORY never changes
-# across the four setup_window() calls below.
-# XACA-1215-019: LC_ALL=C, not the ambient (UTF-8) locale -- AND it must
-# be set on a genuinely NEW bash process, not merely prefixed onto the
-# builtin call. Under a UTF-8 locale, /bin/bash 3.2's `printf %q`
-# mis-encodes multibyte characters (e.g. a team dir containing "日本") as
-# a mix of raw bytes and octal escapes -- an interactive zsh reading that
-# back through send-keys/ZLE then fails the `cd`.
+# XACA-1215-015/019 background: `send-keys` types its argument into the pane
+# like a user would -- a double-quoted "cd \"$SESSION_DIRECTORY\"" only
+# protects the ASSIGNMENT above; once retyped into the pane, that same
+# double-quoted context lets the pane's shell (zsh) re-evaluate any $(...),
+# backticks or $ the value contains a SECOND time. This mechanism originally
+# pre-quoted with `LC_ALL=C /bin/bash -c 'printf %q "$1"' _ "$1"` run as a
+# genuinely new process (bash resolves its ctype/locale tables via
+# setlocale() once at process startup, so `VAR=val builtin` alone does NOT
+# re-trigger it -- LC_ALL=C only takes effect when it is part of the
+# environment a bash PROCESS is execve()'d into; MEASURED byte-for-byte
+# identical, wrong, output from the in-process prefix form on macOS's
+# bundled bash 3.2). That locale finding is still why this file never
+# trusts bash's own `printf %q` under the ambient (UTF-8) locale --
+# multibyte bytes are escaped by hand below instead of relying on it.
 #
-# `LC_ALL=C printf %q "..."` run as a plain builtin call (no subshell/exec)
-# does NOT fix this on macOS's bundled bash 3.2 -- MEASURED byte-for-byte
-# IDENTICAL output with and without that prefix. bash resolves its
-# ctype/locale tables via setlocale() once at process startup; `VAR=val
-# builtin` only exports VAR into that already-running process's builtin
-# call, which does not re-trigger setlocale(). `LC_ALL=C` only takes
-# effect when it is part of the environment a bash PROCESS is execve()'d
-# into -- confirmed via `env LC_ALL=C /bin/bash -c 'printf %q ...'`
-# (whole new process) producing a clean octal escape per byte (three
-# octal digits each, all six bytes of 日本 escaped uniformly), versus the
-# in-process prefix form reproducing the exact same mixed raw/octal bytes
-# as no prefix at all.
+# XACA-1229-013: `printf %q`'s token itself turned out not to be safe to
+# RETYPE into an interactive zsh pane, because its escaping is
+# backslash-based, not quote-based, and a lone backslash-escaped
+# metacharacter is not immune to the pane's own zsh options. With `setopt
+# extended_glob` active, a mid-word `#` (e.g. Role "C# Engineer") makes the
+# whole retyped line fail glob expansion ("no matches found") instead of
+# running; under default zsh options a value that STARTS with `~` or `=`
+# (e.g. "~root", "=ls") triggers tilde/command-path expansion instead of
+# being read back literally. Nothing executes in either case, but the
+# banner/cd line breaks -- a real regression against the plain
+# double-quoted line this mechanism replaced.
 #
-# Fix: force the exec via an explicit `/bin/bash -c` subprocess so LC_ALL=C
-# is present in ITS environment from process start. `/usr/bin/printf` (the
-# external, non-bash printf) has no %q at all ("illegal format character
-# q"), so this must stay a bash builtin call -- just in a freshly exec'd
-# bash. Verified via a pty-driven interactive zsh harness (python
-# pty.fork(), ZDOTDIR pointed at an empty sandbox, LANG/LC_ALL=en_US.UTF-8
-# on the pty session) typing the resulting `cd ...` line and reading back
-# `pwd`: the pre-fix form (plain `printf %q`) lands at the PARENT dir (cd
-# silently failed -- ZLE garbled the mixed raw/octal bytes and bash never
-# saw a valid path), this fixed form lands in the literal target dir for
-# 日本, é and an emoji, plus the round-1 hostile set (space, $(touch
-# PWNED), backtick, ", ', \, !) -- not just a non-interactive `zsh -fc`
-# re-parse, which cannot see the ZLE-level mangling this fixes at all (it
-# reads the bytes as a literal argv string, no terminal-input layer
-# involved).
-_SESSION_DIRECTORY_Q=$(LC_ALL=C /bin/bash -c 'printf %q "$1"' _ "$SESSION_DIRECTORY")
+# Fix: emit an ANSI-C-quoted token (`$'...'`) instead of a `%q` token.
+# Inside `$'...'`, both zsh and bash disable globbing, tilde/`=`-expansion,
+# parameter/command substitution and history expansion outright -- no shell
+# option reopens any of those inside the quotes -- and `\\NNN` octal escapes
+# are understood by both, so the multibyte handling XACA-1215-019 measured
+# is preserved by escaping every byte >= 0x80 the same uniform way as every
+# other unsafe byte. `_xaca1229_q` builds the token byte-wise via `od`/`awk`
+# (LC_ALL=C on both, so each operates on raw bytes, not characters,
+# regardless of the ambient locale) rather than trusting bash's %q/locale
+# machinery at all: each input byte is copied through literally only if it
+# is in a conservative safe set ([A-Za-z0-9], space, and `. _ - , / : @ +`);
+# every other byte -- quotes, backslash, `$`, backtick, `#`, `~`, `=`, glob
+# metacharacters, and every byte >= 0x80 -- is emitted as a 3-digit octal
+# escape. An empty value still produces one token, `$''`. Verified: bash 3.2
+# and zsh (default opts, `extended_glob`, and `extended_glob ksh_glob`) all
+# round-trip every hostile fixture (embedded ", embedded ', $()/backtick,
+# #, leading ~/=, glob metachars, non-ASCII) to exactly one byte-exact
+# argument with no side-effect file ever created, and a pty-driven
+# interactive zsh ZLE reparse (mirroring XACA-1215-019's own harness) still
+# lands `cd` in the literal target dir.
+_xaca1229_q() {{
+    printf '%s' "$1" | LC_ALL=C od -An -v -to1 | LC_ALL=C awk '
+        {{
+            for (i = 1; i <= NF; i++) {{
+                b = $i
+                v = 0
+                for (j = 1; j <= length(b); j++) v = v * 8 + substr(b, j, 1)
+                if ((v >= 48 && v <= 57) || (v >= 65 && v <= 90) || (v >= 97 && v <= 122) ||
+                    v == 32 || v == 46 || v == 95 || v == 45 || v == 44 || v == 47 ||
+                    v == 58 || v == 64 || v == 43) {{
+                    body = body sprintf("%c", v)
+                }} else {{
+                    body = body sprintf("\\\\%03o", v)
+                }}
+            }}
+        }}
+        END {{
+            q = sprintf("%c", 39)
+            printf "$%s%s%s", q, body, q
+        }}
+    '
+}}
+_SESSION_DIRECTORY_Q=$(_xaca1229_q "$SESSION_DIRECTORY")
 
 # XACA-1229: setup_window()'s send-keys banner line below retypes nine more
 # SESSION_*/TERMINAL_* values into the pane alongside SESSION_DIRECTORY --
-# same pane-reparse hazard as XACA-1215-015/019 above (the pane's
-# interactive zsh re-parses the double-quoted send-keys text a SECOND time,
-# so a persona value carrying a " or a $()/backtick can split args or
-# execute). Pre-quote each one ONCE with the identical /bin/bash -c
-# 'printf %q' + LC_ALL=C mechanism (see the long rationale a few lines up --
-# it applies unchanged here; do not substitute a plain `printf %q` or drop
-# LC_ALL=C). The session-constant fields are quoted here, once; the three
-# per-window fields (TERMINAL_NUMBER/NAME/DESCRIPTION) are quoted inside
+# same pane-reparse hazard, same `_xaca1229_q` mechanism (see the rationale
+# above; do not substitute a plain `printf %q` or drop LC_ALL=C). The
+# session-constant fields are quoted here, once; the three per-window
+# fields (TERMINAL_NUMBER/NAME/DESCRIPTION) are quoted inside
 # setup_window() itself, after set_window_metadata has set them for the
-# window currently being set up. `printf %q ""` yields `''`, so an empty
-# field still occupies its positional slot in the retyped command.
-_xaca1229_q() {{ LC_ALL=C /bin/bash -c 'printf %q "$1"' _ "$1"; }}
+# window currently being set up. An empty field still occupies its
+# positional slot in the retyped command (`_xaca1229_q ""` yields `$''`).
 _SESSION_THEME_Q=$(_xaca1229_q "$SESSION_THEME")
 _SESSION_TYPE_Q=$(_xaca1229_q "$SESSION_TYPE")
 _SESSION_NAME_Q=$(_xaca1229_q "$SESSION_NAME")
@@ -1646,9 +1662,10 @@ setup_window() {{
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER "cd $_SESSION_DIRECTORY_Q" C-m
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". ~/.zshrc_${{SESSION_TYPE}}_${{SESSION_NAME}}" C-m
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $KANBAN_HELPERS" C-m
-    # Every arg below is a pre-quoted single token (printf %q output) --
-    # passed UNQUOTED here, exactly like `cd $_SESSION_DIRECTORY_Q` above,
-    # since each is already one shell word with its own internal escaping.
+    # Every arg below is a pre-quoted single token (`_xaca1229_q` ANSI-C
+    # `$'...'` output) -- passed UNQUOTED here, exactly like
+    # `cd $_SESSION_DIRECTORY_Q` above, since each is already one shell
+    # word with its own internal escaping.
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $AITEAMFORGE_DIR/$SESSION_TYPE/scripts/$SESSION_TYPE-banner.sh $_SESSION_THEME_Q $_SESSION_TYPE_Q $_SESSION_NAME_Q $_TERMINAL_NUMBER_Q $_TERMINAL_NAME_Q $_SESSION_DESCRIPTION_Q $_SESSION_LOCATION_Q $_SESSION_DEVELOPER_Q $_SESSION_ROLE_Q $_TERMINAL_DESCRIPTION_Q" C-m
 }}
 
