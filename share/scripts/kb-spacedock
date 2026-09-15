@@ -192,6 +192,9 @@
 #   0 = every finding is ok/skip.  1 = worst finding is warn.
 #   2 = worst finding is fail or unknown (both are treated as "look at this
 #   now" for exit-code purposes, even though they're reported distinctly).
+#   Also 2, whatever the worst severity, when the findings file could not be
+#   written intact (XACA-1177-021: a malformed element was replaced with an
+#   `unknown` placeholder, or the write failed outright; stderr says which).
 #
 # XACA-1177 review round 2 (XACA-1177-019): a run interrupted by a signal
 # does NOT return one of 0/1/2 above — the trap installed near the top of
@@ -627,6 +630,27 @@ _spd_resolve_bounded_int() {
     SPD_BOUNDED_INT_VALUE="$normalized"
 }
 
+# Drop an incomplete UTF-8 sequence at either edge of a byte-cut piece
+# (XACA-1177-023). `iconv -f UTF-8 -t UTF-8 -c` discards it — verified on
+# macOS libiconv: 'ab\xc3' -> 'ab', '\xa9cd' -> 'cd', and a valid 'caf\xc3\xa9'
+# comes back unchanged. iconv exits 1 on an incomplete trailing sequence
+# while still printing the correct output, so its rc is ignored. If iconv is
+# absent, or returns nothing for a non-empty piece, the raw piece is kept: a
+# replacement glyph is cosmetic, lost content is not.
+_spd_utf8_clean_edges() {
+    local piece="$1" cleaned
+    if [ -z "$piece" ] || ! _spd_have iconv; then
+        printf '%s' "$piece"
+        return
+    fi
+    cleaned=$(printf '%s' "$piece" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null)
+    if [ -z "$cleaned" ]; then
+        printf '%s' "$piece"
+        return
+    fi
+    printf '%s' "$cleaned"
+}
+
 # Generic head+tail-around-a-marker byte truncator, shared by _spd_emit's
 # `detail` and `summary` fields (XACA-1177 review round 2, XACA-1177-018)
 # — head+tail rather than a flat head-only truncation because the TAIL of
@@ -648,6 +672,16 @@ _spd_resolve_bounded_int() {
 # `dropped=len-max` assumed exactly `max` bytes were kept. The tail now
 # gets `max-half` bytes (not `half`), so head+tail always sums to exactly
 # `max` and the reported count is exact.
+# XACA-1177 review round 3:
+#  * XACA-1177-022: with max=1, half=0 and BSD `head -c 0` errors
+#    ("illegal byte count -- 0") onto stderr. A zero-byte head is now simply
+#    the empty string, with no `head` call.
+#  * XACA-1177-023: a byte cut can land inside a multibyte UTF-8 character,
+#    which jq then renders as U+FFFD. Each piece goes through
+#    _spd_utf8_clean_edges, which discards an incomplete sequence at either
+#    edge. The "N bytes truncated" count stays the byte count of the cut; it
+#    does not include the (at most 3 per edge) bytes of a discarded partial
+#    character.
 _spd_truncate_to_bytes() {
     local s="$1" max="$2" extra="${3:-}"
     local len
@@ -658,8 +692,13 @@ _spd_truncate_to_bytes() {
     fi
     local half=$((max / 2)) tail_bytes head_part tail_part dropped
     tail_bytes=$((max - half))
-    head_part=$(printf '%s' "$s" | head -c "$half")
+    head_part=""
+    if [ "$half" -gt 0 ]; then
+        head_part=$(printf '%s' "$s" | head -c "$half")
+        head_part=$(_spd_utf8_clean_edges "$head_part")
+    fi
     tail_part=$(printf '%s' "$s" | tail -c "$tail_bytes")
+    tail_part=$(_spd_utf8_clean_edges "$tail_part")
     dropped=$((len - max))
     printf '%s\n[... %s bytes truncated (raw was %s bytes%s) ...]\n%s' \
         "$head_part" "$dropped" "$len" "$extra" "$tail_part"
@@ -719,7 +758,11 @@ _spd_truncate_summary() {
 _spd_emit_hardcoded_fallback() {
     local surface="$1" severity="$2"
     local host_escaped
-    host_escaped=$(printf '%s' "${SPD_HOST:-unknown-host}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+    # XACA-1177-021: strip U+0000-001F first. JSON forbids raw control
+    # characters in a string, so a tab or newline in ComputerName would
+    # otherwise make this "never fails" tier emit invalid JSON.
+    host_escaped=$(printf '%s' "${SPD_HOST:-unknown-host}" | LC_ALL=C tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+    [ -n "$host_escaped" ] || host_escaped="unknown-host"
     printf '{"host":"%s","surface":"%s","severity":"%s","summary":"finding for surface %s could not be JSON-encoded by jq at all (last-resort fallback, XACA-1177-018)","detail":"","exit_code":null}' \
         "$host_escaped" "$surface" "$severity" "$surface"
 }
@@ -754,9 +797,12 @@ _spd_emit() {
     local surface="$1" severity="$2" summary="$3" detail="${4:-}" exit_code="${5:-}"
     summary=$(_spd_truncate_summary "$summary")
     detail=$(_spd_truncate_detail "$detail")
-    local ec_json="null"
-    case "$exit_code" in
-        ''|*[!0-9-]*) ec_json="null" ;;
+    # XACA-1177-021: only -?[0-9]+ is a JSON number. The old `*[!0-9-]*`
+    # test let "-", "--" and "1-2" through; `--argjson` rejects those, which
+    # failed both jq tiers and forced the tier-3 fallback.
+    local ec_json="null" ec_digits="${exit_code#-}"
+    case "$ec_digits" in
+        ''|*[!0-9]*) ec_json="null" ;;
         *) ec_json="$exit_code" ;;
     esac
     local json
@@ -2545,10 +2591,42 @@ _spd_write_findings_file() {
     local ts findings_file
     ts=$(date -u +%Y%m%dT%H%M%SZ)
     findings_file="$SPD_FINDINGS_DIR/findings-${ts}.json"
-    printf '%s\n' "${SPD_FINDINGS[@]+"${SPD_FINDINGS[@]}"}" | jq -s \
-        --arg host "$SPD_HOST" --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '{host: $host, generated_at: $generated_at, findings: .}' > "$findings_file" 2>/dev/null
-    echo "Findings written to: $findings_file"
+    local generated_at
+    generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # XACA-1177-021: `jq -s` fails on the FIRST malformed element and writes
+    # nothing, so one bad finding used to leave a 0-byte file while this
+    # still printed "Findings written to". Now: try once; on failure, swap
+    # each element that does not parse for a jq-free 'unknown' placeholder
+    # and retry; if that still fails, say so on stderr. Either way the run is
+    # marked so main() exits at least 2 — a findings file that silently
+    # holds no findings is the "success on no data" failure this script
+    # exists to prevent.
+    if printf '%s\n' "${SPD_FINDINGS[@]+"${SPD_FINDINGS[@]}"}" | jq -s \
+        --arg host "$SPD_HOST" --arg generated_at "$generated_at" \
+        '{host: $host, generated_at: $generated_at, findings: .}' > "$findings_file" 2>/dev/null; then
+        echo "Findings written to: $findings_file"
+        return 0
+    fi
+    SPD_FINDINGS_WRITE_FAILED=1
+    local repaired=() f bad=0
+    for f in "${SPD_FINDINGS[@]+"${SPD_FINDINGS[@]}"}"; do
+        if printf '%s' "$f" | jq -e . >/dev/null 2>&1; then
+            repaired+=("$f")
+        else
+            bad=$((bad + 1))
+            repaired+=("$(_spd_emit_hardcoded_fallback "kb-spacedock" "unknown")")
+        fi
+    done
+    if [ "${#repaired[@]}" -gt 0 ] && printf '%s\n' "${repaired[@]}" | jq -s \
+        --arg host "$SPD_HOST" --arg generated_at "$generated_at" \
+        '{host: $host, generated_at: $generated_at, findings: .}' > "$findings_file" 2>/dev/null; then
+        echo "kb-spacedock: $bad malformed finding(s) replaced with an 'unknown' placeholder in the findings file" >&2
+        echo "Findings written to: $findings_file"
+        return 0
+    fi
+    : > "$findings_file" 2>/dev/null
+    echo "kb-spacedock: FAILED to write findings file ($findings_file) — jq could not serialize the findings; treat this run as unknown" >&2
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -2654,6 +2732,7 @@ Usage:
 
 Exit code reflects the WORST finding severity across all diagnostics run:
   0 = all ok/skip   1 = worst is warn   2 = worst is fail or unknown
+  (also 2 if the findings file could not be written intact — see stderr)
 An interrupted run (Ctrl-C, or an external TERM/HUP) exits with the
 signal's own code instead — 130 (INT), 143 (TERM), 129 (HUP) — and writes
 NO findings file: any findings already accumulated from checks that
@@ -2705,6 +2784,11 @@ main() {
     # returns. Capture via command substitution instead, which runs in-shell.
     local code
     code=$(_spd_worst_severity)
+    # XACA-1177-021: a findings file that could not be written intact is an
+    # unknown outcome, never a clean exit.
+    if [ "${SPD_FINDINGS_WRITE_FAILED:-0}" = 1 ] && [ "$code" -lt 2 ]; then
+        code=2
+    fi
     exit "$code"
 }
 

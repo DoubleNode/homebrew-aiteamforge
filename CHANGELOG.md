@@ -91,6 +91,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     dropped.
   - `KB_SPACEDOCK_DETAIL_MAX_BYTES` uses the same validation as the timeout overrides.
   - The signal exit codes 130/143/129 are documented. An interrupted run writes no findings file.
+  Review round 3 hardening:
+  - The jq-free fallback strips control characters from the host id.
+  - A findings file with a malformed element is repaired with an `unknown` placeholder, not left
+    empty, and the run exits 2.
+  - `DETAIL_MAX_BYTES=1` no longer errors.
+  - A multibyte character split by truncation is dropped instead of showing as U+FFFD.
 
 - **XACA-1175** — `auto-upgrade.sh`'s brew-not-found and tap-not-installed exits now log a completion
   marker (`FAILED: brew not found` / `SKIPPED: tap not installed`) before exiting. Previously they
