@@ -7,6 +7,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1233** — `share/scripts/lcars-health-check.sh`: added `_LCARS_INFRA` row
+  `"0:medical-general:medical:medical-general-lcars"` so `lcars-health-check.sh` supervises
+  medical-general's LCARS session like every other registered team. Socket/session
+  measured from `medical-startup.sh` and its `SESSION_PREFIX`; the team was previously
+  registered but absent from every health roster line. Mirror of dev-team canonical
+  `lcars-health-check.sh`.
 - **XACA-1228** — retired the "Pre-initialize agent panel JSON files" block from
   `share/templates/team-startup.sh.template` and `team-project-startup.sh.template`, and deleted
   `share/scripts/init-agent-panel-json.py` (tap-native; no dev-team canonical). That script ran on every master

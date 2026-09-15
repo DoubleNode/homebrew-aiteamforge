@@ -137,6 +137,7 @@ declare -a _LCARS_INFRA=(
     "8449:command:command:command-lcars"
     "0:finance-personal:finance-personal:finance-personal-lcars"
     "0:legal-coparenting:legal-coparenting:legal-coparenting-lcars"
+    "0:medical-general:medical:medical-general-lcars"
     "0:spacedock:spacedock:spacedock-lcars"
 )
 
