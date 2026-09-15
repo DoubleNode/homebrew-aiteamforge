@@ -42,6 +42,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   files with no `sync_file`/`sync_dir` entry, so no script change was needed. `share/lcars-ui/server.py`'s
   `serve_image` now also tries the `dns` directory name (installed layout) alongside `dns-framework`
   (dev tree) for each candidate root, with a mirrored regression test.
+  Review round 1 (PR #906): `share/scripts/kb-init-team`'s `--asset-dir` mismatch warning now accepts
+  either `dns` or `dns-framework` for team `dns` (it previously false-positived on `--asset-dir dns`,
+  the installed-layout name `serve_image` now tries first); `share/lcars-ui/tests/test_xaca1232_dns_image_dir.py`'s
+  docstrings were refreshed to describe the shipped dual-name fix instead of pre-fix TDD framing.
 
 - **XACA-1224** (SECURITY) — `share/scripts/vault-keygen.js` and `share/kanban-hooks/integrations/keychain.py`
   no longer pass the vault private key / credential-store passphrase on `security`'s command line (it was

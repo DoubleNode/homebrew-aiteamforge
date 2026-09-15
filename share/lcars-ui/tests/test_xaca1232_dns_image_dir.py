@@ -8,17 +8,17 @@
 #
 
 """
-Tests for XACA-1232 (subitem 001): LCARS serve_image() hardcodes a
+Tests for XACA-1232: LCARS serve_image() used to hardcode a
 'dns' -> 'dns-framework' on-disk directory rewrite for EVERY candidate root
-returned by _image_candidate_roots() (lcars-ui/server.py ~16960-16962):
+returned by _image_candidate_roots() (lcars-ui/server.py, pre-fix):
 
     team_dir = self._resolve_base_team(team)
     if team_dir == 'dns':
         team_dir = 'dns-framework'
 
-That rewrite is correct ONLY for a developer's ~/dev-team checkout (root3,
+That rewrite was correct ONLY for a developer's ~/dev-team checkout (root3,
 the legacy fallback), where dns's working tree historically lives under a
-sibling directory named 'dns-framework' rather than 'dns'. It is WRONG for
+sibling directory named 'dns-framework' rather than 'dns'. It was WRONG for
 the installed layout (root1: UI_DIR.absolute().parent, and root2:
 $AITEAMFORGE_DIR) used by a Homebrew-tap-provisioned box, because BOTH the
 fresh-install copy loop and the post-install refresh step lay dns's assets
@@ -44,22 +44,47 @@ under a directory named after its tap TEAM_ID, which is 'dns' — never
         `dst="${WORKING_DIR}/$t/$kind"` — again 'dns', never
         'dns-framework'.
 
-So an installed dns box has its logo/avatar PNGs sitting at
+So an installed dns box had its logo/avatar PNGs sitting at
 <root>/dns/terminals/logos/*.png and <root>/dns/personas/avatars/*.png, but
-serve_image() only ever looks under <root>/dns-framework/... for roots 1
-and 2 (it applies the SAME rewrite to every root in
+serve_image() only ever looked under <root>/dns-framework/... for roots 1
+and 2 (it applied the SAME rewrite to every root in
 _image_candidate_roots(), not just root3) — a 404 on every dns image
 request on any tap-provisioned machine.
 
-This file proves the installed-layout gap with DESIRED-behavior (assert
-200) tests, following test_xaca1221_image_roots.py's harness pattern
+The shipped fix (server.py's _team_dir_candidates(), keyed off the
+resolved base brand) does NOT restrict the old rewrite to a single
+fallback root — it tries BOTH on-disk names, 'dns' then 'dns-framework',
+under EVERY candidate root, so a worktree-launched dev server (root1 has
+'dns-framework/') and an installed box (root1/root2 have 'dns/') both
+resolve without either root needing to know in advance which name applies.
+alt_filename remains derived from the base-brand collapse (base_team),
+never from whichever on-disk team_dir happens to be tried, so a dns
+request never probes a 'dns-framework_...'-prefixed filename.
+
+This file, following test_xaca1221_image_roots.py's harness pattern
 exactly (root1 = UI_DIR.absolute().parent; server.Path.home() patched to an
 isolated tmp dir so no real ~/dev-team is ever reachable; no real server is
-started; no real team id/port is used). These tests are expected to FAIL
-at HEAD (server.py unmodified) and are expected to PASS once
-XACA-1232-002 fixes serve_image() to only apply the dns-framework rewrite
-for the ~/dev-team fallback root (or otherwise stops assuming every root
-uses the legacy on-disk name).
+started; no real team id/port is used), verifies:
+
+  - TestInstalledLayoutDnsAssetsResolve: <root>/dns/... resolves (the
+    installed-layout gap this ticket closes).
+  - TestRewrittenLocationStillResolvesAtHead: the same bytes at the legacy
+    'dns-framework' location under root1 still resolve too — the fix ADDS
+    a name, it does not remove the old one.
+  - TestDevTreeLayoutDnsFrameworkAssetsStillResolve: the ~/dev-team
+    checkout (root3, 'dns-framework') keeps resolving when root1 has
+    nothing.
+  - TestDnsDirNamePrecedence: ordering — 'dns' beats 'dns-framework' within
+    one root, and root order beats team_dir-name order across roots.
+  - TestDnsTraversalAndSymlinkEscape: traversal/symlink-escape paths still
+    404 through the new per-(root, team_dir) loop.
+  - TestDnsAltFilenameNotDerivedFromTeamDir: alt_filename is derived from
+    base_team, never from the on-disk team_dir name being tried.
+  - TestNegativeControlPreFixServer: a pinned pre-fix server.py (loaded via
+    `git show <sha>:lcars-ui/server.py`) still 404s on the installed-layout
+    fixtures above, with a vacuity companion assertion proving that module
+    can still serve something else — so the positive tests above are shown
+    to be load-bearing, not passing by fixture-harness accident.
 
 Run with:
     python3 -m unittest lcars-ui/tests/test_xaca1232_dns_image_dir.py
@@ -225,8 +250,11 @@ class _DnsInstalledLayoutTestBase(unittest.TestCase):
     def _installed_avatar_path(self, filename: str) -> Path:
         return self.root1 / self.TEAM / "personas" / "avatars" / filename
 
-    # What serve_image() ACTUALLY looks under today (the bug): the
-    # dns-framework rewrite applied even to the installed-layout root.
+    # The legacy on-disk name serve_image() ALSO tries under this root (as
+    # the second name in _team_dir_candidates()'s order) — pre-fix, this
+    # was the ONLY name tried, even under the installed-layout root, which
+    # was the defect; post-fix it's an additional, deliberately-still-tried
+    # name, exercised by TestRewrittenLocationStillResolvesAtHead below.
     def _rewritten_logo_path(self, filename: str) -> Path:
         return self.root1 / "dns-framework" / "terminals" / "logos" / filename
 
@@ -254,17 +282,18 @@ class _DnsInstalledLayoutTestBase(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Desired behavior: installed-layout dns assets under <root>/dns/... must
-# resolve. All three currently FAIL against HEAD's server.py (404), because
-# serve_image() rewrites team_dir to 'dns-framework' unconditionally.
+# Installed-layout dns assets under <root>/dns/... must resolve — the gap
+# this ticket closes (pre-fix, all three 404'd: serve_image() rewrote
+# team_dir to 'dns-framework' unconditionally, even for the installed
+# layout, which never has a 'dns-framework' directory on disk).
 # ---------------------------------------------------------------------------
 
 class TestInstalledLayoutDnsAssetsResolve(_DnsInstalledLayoutTestBase):
     def test_installed_layout_dns_logo_200(self):
         """<root>/dns/terminals/logos/dns_lcars_logo.png must resolve to
-        200 on an installed (tap-provisioned) layout. FAILS at HEAD: the
-        file is written under 'dns', but serve_image() only looks under
-        'dns-framework' for this root, so it 404s."""
+        200 on an installed (tap-provisioned) layout — _team_dir_candidates()
+        tries 'dns' (this file's on-disk name) before falling back to
+        'dns-framework'."""
         filename = "dns_lcars_logo.png"
         payload = b"DNS-INSTALLED-LOGO"
         _write_png(self._installed_logo_path(filename), payload)
@@ -289,8 +318,8 @@ class TestInstalledLayoutDnsAssetsResolve(_DnsInstalledLayoutTestBase):
 
     def test_installed_layout_dns_avatar_200(self):
         """<root>/dns/personas/avatars/dns_tendi_avatar.png must resolve to
-        200 on an installed layout. FAILS at HEAD for the same reason as
-        the logo case above."""
+        200 on an installed layout, for the same reason as the logo case
+        above."""
         filename = "dns_tendi_avatar.png"
         payload = b"DNS-INSTALLED-AVATAR"
         _write_png(self._installed_avatar_path(filename), payload)
@@ -312,8 +341,8 @@ class TestInstalledLayoutDnsAssetsResolve(_DnsInstalledLayoutTestBase):
     def test_installed_layout_dns_avatar_thumb_200(self):
         """<root>/dns/personas/avatars/dns_tendi_avatar_thumb.png (the
         agent-panel.html fallback thumbnail, XACA-1221 Decision 2) must
-        also resolve on an installed layout. FAILS at HEAD for the same
-        reason as the two cases above."""
+        also resolve on an installed layout, for the same reason as the
+        two cases above."""
         filename = "dns_tendi_avatar_thumb.png"
         payload = b"DNS-INSTALLED-AVATAR-THUMB"
         _write_png(self._installed_avatar_path(filename), payload)
@@ -334,12 +363,12 @@ class TestInstalledLayoutDnsAssetsResolve(_DnsInstalledLayoutTestBase):
 
 
 # ---------------------------------------------------------------------------
-# Confirms WHY it fails today: the same bytes, written at the REWRITTEN
-# ('dns-framework') location instead, DO resolve at HEAD — isolating the
-# defect to the team_dir rewrite rather than to some other root-resolution
-# problem. This test is expected to PASS both before and after the fix (a
-# legacy ~/dev-team-style checkout terminology is not what XACA-1232-002 is
-# removing — only the unconditional application of it to every root).
+# Sanity check isolating WHERE the pre-fix defect was: the same bytes,
+# written at the legacy ('dns-framework') location instead, resolve both
+# before and after the fix — the defect was the UNCONDITIONAL application
+# of the dns-framework rewrite to every root (masking the installed-layout
+# 'dns' name entirely), not the existence of the dns-framework name itself,
+# which the shipped fix deliberately keeps trying as the second candidate.
 # ---------------------------------------------------------------------------
 
 class TestRewrittenLocationStillResolvesAtHead(_DnsInstalledLayoutTestBase):
@@ -353,8 +382,8 @@ class TestRewrittenLocationStillResolvesAtHead(_DnsInstalledLayoutTestBase):
 
         self.assertEqual(
             handler._response_code, 200,
-            "sanity check: today's dns->dns-framework rewrite is exactly "
-            "what makes THIS location resolve — if this fails too, the "
+            "sanity check: 'dns-framework' is still one of the two names "
+            "_team_dir_candidates() tries for dns — if this fails, the "
             "defect is not where this file assumes it is",
         )
         self.assertEqual(buf.getvalue(), _png(payload))

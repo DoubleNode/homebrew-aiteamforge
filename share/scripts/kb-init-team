@@ -555,10 +555,16 @@ _derive_defaults() {
     # unconditionally, with no per-team registration required. That is a
     # hard invariant server.py's image/appicon serving depends on: whatever
     # directory a team's logos/avatars/appicon masters actually live under
-    # MUST be exactly that first segment (or the one hardcoded exception,
-    # 'dns' -> 'dns-framework', which server.py's serve_image applies on
-    # top of the shared resolution and is NOT something new teams get by
-    # default here).
+    # MUST be exactly that first segment, for every base brand EXCEPT the
+    # one hardcoded exception, 'dns'. XACA-1232: server.py's serve_image no
+    # longer rewrites 'dns' to a single 'dns-framework' directory on every
+    # root — it now tries BOTH 'dns' (the installed-layout / tap TEAM_ID
+    # name) and 'dns-framework' (the ~/dev-team checkout name) per
+    # candidate root via _team_dir_candidates(), installed name first. This
+    # script's own default for dns (below) still materializes
+    # 'dns-framework' on disk — that remains correct for the ~/dev-team
+    # dev-tree convention this script provisions into, and is NOT something
+    # new teams get by default here.
     #
     # The default case below used to be `ASSET_DIR="${TEAM_ID}"` — the FULL
     # team id, hyphens and all. For any hyphenated id whose first segment
@@ -609,17 +615,38 @@ _derive_defaults() {
     # directory, e.g. a new mainevent-* team explicitly passing
     # `--asset-dir mainevent`, which is exactly the correct override for a
     # prefix this script does not yet special-case) whenever the value
-    # will not actually be what server.py's _resolve_base_team()/dns
-    # exception resolves this team id to — that mismatch is invisible
+    # will not actually be one server.py's _resolve_base_team()/dns
+    # handling will accept for this team id — that mismatch is invisible
     # until someone notices a broken icon/logo, so surface it at creation
     # time instead.
+    #
+    # XACA-1232: for dns, TWO on-disk names are now acceptable, not one.
+    # server.py's serve_image() no longer rewrites 'dns' to a single
+    # 'dns-framework' directory — it tries BOTH 'dns' (the installed-layout
+    # / tap TEAM_ID name) and 'dns-framework' (the ~/dev-team checkout
+    # name) per candidate root via _team_dir_candidates(). An operator
+    # passing `--asset-dir dns` (matching an installed box) is exactly as
+    # correct as the script's own `--asset-dir dns-framework` default, so
+    # neither should warn; only some OTHER value for a dns team is a real
+    # mismatch. Every non-dns prefix is unchanged: still exactly one
+    # accepted value, the first hyphen-segment.
     _asset_dir_first_seg="${TEAM_ID%%-*}"
-    _asset_dir_expected="${_asset_dir_first_seg}"
-    [[ "$_asset_dir_first_seg" == "dns" ]] && _asset_dir_expected="dns-framework"
-    if [[ "$ASSET_DIR" != "$_asset_dir_expected" ]]; then
-        echo "WARNING: --asset-dir '${ASSET_DIR}' does not match what lcars-ui/server.py's _resolve_base_team() will resolve team '${TEAM_ID}' to ('${_asset_dir_expected}'). Logo/avatar/appicon serving always uses the RESOLVED value, never this script's ASSET_DIR directly — if '${ASSET_DIR}' is not also '${_asset_dir_expected}' on disk (or a deliberate symlink to it), image serving for this team will silently 404 or fall back to another team's icons. Proceeding with the explicit override as requested." >&2
+    _asset_dir_ok="false"
+    if [[ "$_asset_dir_first_seg" == "dns" ]]; then
+        _asset_dir_expected="'dns' or 'dns-framework'"
+        if [[ "$ASSET_DIR" == "dns" || "$ASSET_DIR" == "dns-framework" ]]; then
+            _asset_dir_ok="true"
+        fi
+    else
+        _asset_dir_expected="'${_asset_dir_first_seg}'"
+        if [[ "$ASSET_DIR" == "$_asset_dir_first_seg" ]]; then
+            _asset_dir_ok="true"
+        fi
     fi
-    unset _asset_dir_first_seg _asset_dir_expected
+    if [[ "$_asset_dir_ok" != "true" ]]; then
+        echo "WARNING: --asset-dir '${ASSET_DIR}' does not match what lcars-ui/server.py's _resolve_base_team() (and, for dns, _team_dir_candidates()) will accept for team '${TEAM_ID}' (${_asset_dir_expected}). Logo/avatar/appicon serving always uses the RESOLVED value(s), never this script's ASSET_DIR directly — if '${ASSET_DIR}' is not also on disk under one of those names (or a deliberate symlink to one), image serving for this team will silently 404 or fall back to another team's icons. Proceeding with the explicit override as requested." >&2
+    fi
+    unset _asset_dir_first_seg _asset_dir_expected _asset_dir_ok
 
     # PORT_BAND_BASE: default based on team-id prefix
     if [[ -z "$PORT_BAND_BASE" ]]; then
