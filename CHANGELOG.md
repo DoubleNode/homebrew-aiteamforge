@@ -130,7 +130,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - A findings file with a malformed element is repaired with an `unknown` placeholder, not left
     empty, and the run exits 2.
   - `DETAIL_MAX_BYTES=1` no longer errors.
-  - A multibyte character split by truncation is dropped instead of showing as U+FFFD.
+  - A multibyte character split by truncation is trimmed at the cut edge only, without deleting invalid
+    bytes elsewhere in the output.
+  - An unwritable findings directory is named as the cause, with no raw shell errors.
 
 - **XACA-1175** — `auto-upgrade.sh`'s brew-not-found and tap-not-installed exits now log a completion
   marker (`FAILED: brew not found` / `SKIPPED: tap not installed`) before exiting. Previously they

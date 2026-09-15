@@ -630,25 +630,73 @@ _spd_resolve_bounded_int() {
     SPD_BOUNDED_INT_VALUE="$normalized"
 }
 
-# Drop an incomplete UTF-8 sequence at either edge of a byte-cut piece
-# (XACA-1177-023). `iconv -f UTF-8 -t UTF-8 -c` discards it — verified on
-# macOS libiconv: 'ab\xc3' -> 'ab', '\xa9cd' -> 'cd', and a valid 'caf\xc3\xa9'
-# comes back unchanged. iconv exits 1 on an incomplete trailing sequence
-# while still printing the correct output, so its rc is ignored. If iconv is
-# absent, or returns nothing for a non-empty piece, the raw piece is kept: a
-# replacement glyph is cosmetic, lost content is not.
-_spd_utf8_clean_edges() {
-    local piece="$1" cleaned
-    if [ -z "$piece" ] || ! _spd_have iconv; then
-        printf '%s' "$piece"
-        return
+# Trim a UTF-8 character split by a byte cut — at the cut edge ONLY
+# (XACA-1177-023, reworked in review round 4 as XACA-1177-024/-026).
+#   $1 = the piece
+#   $2 = which edge was cut: "end" for a head piece, "start" for a tail piece
+# Round 3 piped the whole piece through `iconv -c`. That was wrong twice
+# over: iconv deletes EVERY invalid byte, so non-UTF-8 output lost bytes
+# from its middle ('caf\351 status \377\376 ok' -> 'caf status  ok'); and a
+# piece made only of a partial character came back empty, so the "keep raw"
+# fallback put the broken bytes straight back. This version reads at most 4
+# bytes at the cut edge with `od` (stock BSD/GNU) and removes only a
+# sequence the cut actually split:
+#   * start edge: drop up to 3 leading continuation bytes (0x80-0xBF).
+#   * end edge: find the last lead byte in the final 4 bytes; if the bytes
+#     after it are fewer than its sequence needs (2/3/4 for 0xC0/0xE0/0xF0),
+#     drop from that lead byte on.
+# Everything else, including invalid bytes elsewhere in the piece, is left
+# for jq to render exactly as untruncated output would be. The "N bytes
+# truncated" count stays the byte count of the cut, not counting the (at
+# most 3) bytes of a split character removed here.
+_spd_utf8_trim_cut_edge() {
+    local piece="$1" edge="$2" len bytes b drop=0
+    [ -n "$piece" ] || return 0
+    len=$(printf '%s' "$piece" | wc -c | tr -d ' ')
+    if [ "$edge" = "start" ]; then
+        bytes=$(printf '%s' "$piece" | head -c 3 | od -An -tu1)
+        for b in $bytes; do
+            if [ "$b" -ge 128 ] && [ "$b" -le 191 ]; then
+                drop=$((drop + 1))
+            else
+                break
+            fi
+        done
+        if [ "$drop" -eq 0 ]; then
+            printf '%s' "$piece"
+        elif [ "$drop" -lt "$len" ]; then
+            printf '%s' "$piece" | tail -c "+$((drop + 1))"
+        fi
+        return 0
     fi
-    cleaned=$(printf '%s' "$piece" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null)
-    if [ -z "$cleaned" ]; then
+    # end edge
+    bytes=$(printf '%s' "$piece" | tail -c 4 | od -An -tu1)
+    local arr=() n i v need after
+    for b in $bytes; do arr+=("$b"); done
+    n=${#arr[@]}
+    i=$((n - 1))
+    while [ "$i" -ge 0 ]; do
+        v=${arr[$i]}
+        if [ "$v" -lt 128 ]; then
+            break
+        fi
+        if [ "$v" -ge 192 ]; then
+            if [ "$v" -lt 224 ]; then need=2
+            elif [ "$v" -lt 240 ]; then need=3
+            else need=4
+            fi
+            after=$((n - i))
+            [ "$after" -lt "$need" ] && drop="$after"
+            break
+        fi
+        i=$((i - 1))
+    done
+    if [ "$drop" -eq 0 ]; then
         printf '%s' "$piece"
-        return
+    elif [ "$drop" -lt "$len" ]; then
+        printf '%s' "$piece" | head -c "$((len - drop))"
     fi
-    printf '%s' "$cleaned"
+    return 0
 }
 
 # Generic head+tail-around-a-marker byte truncator, shared by _spd_emit's
@@ -678,8 +726,8 @@ _spd_utf8_clean_edges() {
 #    the empty string, with no `head` call.
 #  * XACA-1177-023: a byte cut can land inside a multibyte UTF-8 character,
 #    which jq then renders as U+FFFD. Each piece goes through
-#    _spd_utf8_clean_edges, which discards an incomplete sequence at either
-#    edge. The "N bytes truncated" count stays the byte count of the cut; it
+#    _spd_utf8_trim_cut_edge, which removes only a sequence split at the
+#    edge that was cut. The "N bytes truncated" count stays the byte count of the cut; it
 #    does not include the (at most 3 per edge) bytes of a discarded partial
 #    character.
 _spd_truncate_to_bytes() {
@@ -695,10 +743,10 @@ _spd_truncate_to_bytes() {
     head_part=""
     if [ "$half" -gt 0 ]; then
         head_part=$(printf '%s' "$s" | head -c "$half")
-        head_part=$(_spd_utf8_clean_edges "$head_part")
+        head_part=$(_spd_utf8_trim_cut_edge "$head_part" end)
     fi
     tail_part=$(printf '%s' "$s" | tail -c "$tail_bytes")
-    tail_part=$(_spd_utf8_clean_edges "$tail_part")
+    tail_part=$(_spd_utf8_trim_cut_edge "$tail_part" start)
     dropped=$((len - max))
     printf '%s\n[... %s bytes truncated (raw was %s bytes%s) ...]\n%s' \
         "$head_part" "$dropped" "$len" "$extra" "$tail_part"
@@ -2601,9 +2649,17 @@ _spd_write_findings_file() {
     # marked so main() exits at least 2 — a findings file that silently
     # holds no findings is the "success on no data" failure this script
     # exists to prevent.
+    # XACA-1177-025: an unwritable findings directory is checked up front.
+    # Before, the `>` redirect failed first and bash printed its own raw
+    # "No such file or directory" lines, then the FAILED message blamed jq.
+    if ! { [ -d "$SPD_FINDINGS_DIR" ] && [ -w "$SPD_FINDINGS_DIR" ]; }; then
+        echo "kb-spacedock: FAILED to write findings file — findings directory '$SPD_FINDINGS_DIR' is missing or not writable (check permissions or free disk space; override with KB_SPACEDOCK_FINDINGS_DIR); treat this run as unknown" >&2
+        SPD_FINDINGS_WRITE_FAILED=1
+        return 1
+    fi
     if printf '%s\n' "${SPD_FINDINGS[@]+"${SPD_FINDINGS[@]}"}" | jq -s \
         --arg host "$SPD_HOST" --arg generated_at "$generated_at" \
-        '{host: $host, generated_at: $generated_at, findings: .}' > "$findings_file" 2>/dev/null; then
+        '{host: $host, generated_at: $generated_at, findings: .}' 2>/dev/null > "$findings_file"; then
         echo "Findings written to: $findings_file"
         return 0
     fi
@@ -2617,15 +2673,19 @@ _spd_write_findings_file() {
             repaired+=("$(_spd_emit_hardcoded_fallback "kb-spacedock" "unknown")")
         fi
     done
-    if [ "${#repaired[@]}" -gt 0 ] && printf '%s\n' "${repaired[@]}" | jq -s \
+    if [ "$bad" -gt 0 ] && printf '%s\n' "${repaired[@]}" | jq -s \
         --arg host "$SPD_HOST" --arg generated_at "$generated_at" \
-        '{host: $host, generated_at: $generated_at, findings: .}' > "$findings_file" 2>/dev/null; then
+        '{host: $host, generated_at: $generated_at, findings: .}' 2>/dev/null > "$findings_file"; then
         echo "kb-spacedock: $bad malformed finding(s) replaced with an 'unknown' placeholder in the findings file" >&2
         echo "Findings written to: $findings_file"
         return 0
     fi
-    : > "$findings_file" 2>/dev/null
-    echo "kb-spacedock: FAILED to write findings file ($findings_file) — jq could not serialize the findings; treat this run as unknown" >&2
+    { : > "$findings_file"; } 2>/dev/null
+    if [ "$bad" -eq 0 ]; then
+        echo "kb-spacedock: FAILED to write findings file ($findings_file) — every finding is valid JSON, so the write itself failed (disk full or I/O error?); treat this run as unknown" >&2
+    else
+        echo "kb-spacedock: FAILED to write findings file ($findings_file) — jq could not serialize the findings even after replacing $bad malformed one(s); treat this run as unknown" >&2
+    fi
     return 1
 }
 
