@@ -783,9 +783,16 @@ cat > "$FAKE_HANG_SHELL" <<'FAKESHELL'
 # nearly two weeks.
 : "${X1097_HANG_PID_PREFIX:?X1097_HANG_PID_PREFIX must be set}"
 X1097_HANG_SLEEP_SECS="${X1097_HANG_SLEEP_SECS:-120}"
+# XACA-1217-022: digits-only is not enough. A value at or below the suite's
+# own bounds (e.g. 0) makes the "hung" shell exit on its own, so E1 passes
+# without ever exercising the timeout it exists to test. Floor at 30s: well
+# above E1_BOUND/E2's 4s, and still a bounded orphan.
 case "$X1097_HANG_SLEEP_SECS" in
     ''|*[!0-9]*) X1097_HANG_SLEEP_SECS=120 ;;
 esac
+if [ "$X1097_HANG_SLEEP_SECS" -lt 30 ]; then
+    X1097_HANG_SLEEP_SECS=120
+fi
 /bin/bash -c 'echo "$$" > "'"$X1097_HANG_PID_PREFIX"'.grandchild"; exec sleep '"$X1097_HANG_SLEEP_SECS" &
 echo "$$" > "${X1097_HANG_PID_PREFIX}.child"
 exec sleep "$X1097_HANG_SLEEP_SECS"

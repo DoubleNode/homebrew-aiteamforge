@@ -17,7 +17,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   resumed, and a `sleep 1000000` child/grandchild (~11.6 days) is now `X1097_HANG_SLEEP_SECS`, default 120s.
   Every lifetime resolver rejects `nan`/`inf`. Each fix was watched RED first (signal the suite, or kill
   the helper's direct parent, and count survivors scoped to that run). Normal runs are unchanged: 35/0,
-  91/0, 19/0.
+  91/0, 19/0. Review round 2: `X1097_HANG_SLEEP_SECS` below 30s now falls back to 120s, because `0` let
+  the "hung" shell exit on its own and E1 passed without testing the timeout.
 
 - **XACA-1223** — `lcars-health-check.sh` now restarts Space Dock's LCARS and stops retrying teams this
   host does not run. Restart eligibility comes from this host's own registry membership, read by the new
