@@ -289,7 +289,14 @@ if len(sys.argv) > 17 and sys.argv[17]:
     return 0
 }
 
-# If script is executed (not sourced), display avatar with provided arguments
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]] || [[ "${(%):-%x}" == "${0}" ]] 2>/dev/null; then
+# If script is executed (not sourced), display avatar with provided arguments.
+# zsh rebinds $0 to the sourced file, so the old `%x == $0` test was always true
+# when a banner sourced this with its own positional args bound (XACA-1220).
+# ZSH_EVAL_CONTEXT is exactly "toplevel" only for a directly executed script.
+if [ -n "${ZSH_VERSION:-}" ]; then
+    if [ "${ZSH_EVAL_CONTEXT:-}" = "toplevel" ]; then
+        display_agent_avatar "$@"
+    fi
+elif [ -n "${BASH_VERSION:-}" ] && [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
     display_agent_avatar "$@"
 fi
