@@ -7,6 +7,7 @@
 #   deploy-worktree-personas.sh --all <team> [<main_repo_path>] [--dry-run] [--force] [--verbose]
 #   deploy-worktree-personas.sh --nested-main-root <project_dir> <team> [--dry-run] [--force] [--verbose]
 #   deploy-worktree-personas.sh --flat-dir <target_dir> <team> [--dry-run] [--force] [--verbose]
+#   deploy-worktree-personas.sh --verify-flat-dir <target_dir> <team>
 #   deploy-worktree-personas.sh emit-transformed <src_file> [<char_name>]
 #   deploy-worktree-personas.sh selftest
 #
@@ -22,6 +23,13 @@
 #   basename matches ^<team>_[^/]*_persona\.md$. Everything else is reported
 #   `ORPHAN (not ours — left in place)`. Dotfiles are never touched.
 #   Design: kanban/plans/XACA-1216/XACA-1216-design.md §1-§3.
+#
+# --verify-flat-dir (XACA-1216-018/019): READ-ONLY. Recomputes each source
+#   persona's deployed bytes through the same render the deploy writes with and
+#   compares the target's copies: rc 0 all present + matching, rc 5 any
+#   MISSING/STALE (listed on stdout). Never reads the marker, never writes.
+#   The single post-deploy evidence check for install, startup and upgrade.
+#   Exit codes: see the table above _verify_flat_dir.
 #
 # emit-transformed (XACA-0931-003): read-only. Prints to stdout the EXACT
 # transform _deploy_core would write for <src_file> -- the single authority
@@ -371,6 +379,55 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
+# _dwp_render <src_file> <char_name> <action> [<path>]
+#
+# THE single definition of the bytes a deploy writes for one persona
+# (XACA-1216-019). _deploy_core writes through it, emit-transformed prints
+# through it, and --verify-flat-dir compares through it -- so "what a correct
+# deployed file looks like" cannot drift between the writer and its checkers.
+#   transform rc 0 (name: rewritten) or 3 (no name: in frontmatter)
+#       -> printf '%s\n' of the transform output. Command substitution strips
+#          trailing newlines; the printf restores exactly one.
+#   transform rc 2 (no frontmatter) -> the source bytes verbatim (cp).
+#   any other transform rc          -> nothing (transform failure).
+# Actions: write <path>  |  emit (stdout)  |  cmp <path> (read-only)
+# Sets _DWP_RENDER_TRC to the transform rc.
+# Returns: 0 written / emitted / identical
+#          1 cmp only: <path> differs from the expected bytes, or is unreadable
+#          2 transform failure (nothing written or emitted)
+#          3 write failure
+# ---------------------------------------------------------------------------
+_DWP_RENDER_TRC=0
+_dwp_render() {
+  local src="$1" char="$2" action="$3" path="${4:-}"
+  local out="" trc=0
+  out=$(_transform_persona "$src" "$char") || trc=$?
+  _DWP_RENDER_TRC=$trc
+  case "$trc" in
+    0|3)
+      case "$action" in
+        write) printf '%s\n' "$out" > "$path" || return 3 ;;
+        emit)  printf '%s\n' "$out" ;;
+        cmp)   cmp -s "$path" <(printf '%s\n' "$out") || return 1 ;;
+        *)     return 2 ;;
+      esac
+      ;;
+    2)
+      case "$action" in
+        write) cp "$src" "$path" || return 3 ;;
+        emit)  cat "$src" ;;
+        cmp)   cmp -s "$path" "$src" || return 1 ;;
+        *)     return 2 ;;
+      esac
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Write .claude/agents/ into <project>/.git/info/exclude (idempotent).
 # Mirrors the pattern in kb-sync-personas _kbsp_sync_worktrees (XACA-0660).
 # Resolves exclude path via git-common-dir so it is shared across all
@@ -509,49 +566,44 @@ _deploy_core() {
       continue
     fi
 
-    # Transform: rewrite name: in frontmatter; detect issues via exit code.
-    local transform_out
-    local transform_rc=0
-    transform_out=$(_transform_persona "$src_file" "$char_name") || transform_rc=$?
+    # Transform + write through _dwp_render (XACA-1216-019): the same bytes
+    # emit-transformed prints and --verify-flat-dir compares against.
+    local render_rc=0
+    _dwp_render "$src_file" "$char_name" write "$dest_file" || render_rc=$?
 
-    case "$transform_rc" in
+    case "$render_rc" in
+      0) ;;
+      2)
+        _warn "[${team}] ${bname}: transform error (rc=${_DWP_RENDER_TRC}) — skipping"
+        skipped=$((skipped + 1))
+        continue
+        ;;
+      *)
+        if [ "$_DWP_RENDER_TRC" = "2" ]; then
+          _err "[${team}] Failed to copy: ${dest_file}"
+        else
+          _err "[${team}] Failed to write: ${dest_file}"
+        fi
+        return 2
+        ;;
+    esac
+
+    case "$_DWP_RENDER_TRC" in
       0)
         # Success — get old name for logging
         local old_name
         old_name=$(awk '/^---/{f++} f==1 && /^name[[:space:]]*:/{print; exit}' "$src_file" | sed 's/^name[[:space:]]*:[[:space:]]*//')
-        printf '%s\n' "$transform_out" > "$dest_file" || {
-          _err "[${team}] Failed to write: ${dest_file}"
-          return 2
-        }
         _info "[${team}] transform+copy ${bname} (name: ${old_name} → ${char_name})"
-        deployed=$((deployed + 1))
-        _DWP_DEPLOYED_FILES+=("$bname")
         ;;
       2)
-        # No frontmatter — copy verbatim
         _warn "[${team}] ${bname}: no YAML frontmatter — copying verbatim"
-        cp "$src_file" "$dest_file" || {
-          _err "[${team}] Failed to copy: ${dest_file}"
-          return 2
-        }
-        deployed=$((deployed + 1))
-        _DWP_DEPLOYED_FILES+=("$bname")
         ;;
       3)
-        # No name: in frontmatter — copy verbatim
         _warn "[${team}] ${bname}: no 'name:' in frontmatter — copying verbatim"
-        printf '%s\n' "$transform_out" > "$dest_file" || {
-          _err "[${team}] Failed to write: ${dest_file}"
-          return 2
-        }
-        deployed=$((deployed + 1))
-        _DWP_DEPLOYED_FILES+=("$bname")
-        ;;
-      *)
-        _warn "[${team}] ${bname}: transform error (rc=${transform_rc}) — skipping"
-        skipped=$((skipped + 1))
         ;;
     esac
+    deployed=$((deployed + 1))
+    _DWP_DEPLOYED_FILES+=("$bname")
   done
   _DWP_SKIPPED=$skipped
 
@@ -758,35 +810,50 @@ _deploy_flat_dir() {
   return "$rc"
 }
 
-_deploy_flat_dir_impl() {
+# ---------------------------------------------------------------------------
+# _dwp_flat_target_guard <target> <team> <label>
+#
+# Steps 1-3 of the flat-dir contract, shared by --flat-dir (deploy) and
+# --verify-flat-dir (read-only check) so the two can never disagree about what
+# a valid flat-dir target is (XACA-1216-019). <label> is the CLI mode name
+# used in messages ("--flat-dir" / "--verify-flat-dir").
+# On rc 0 sets _DWP_FLAT_CANON (canonical target) and _DWP_FLAT_AGENTS
+# (<canon>/.claude/agents). Writes nothing.
+# Returns: 0 ok · 1 guard refusal · 4 git territory
+# ---------------------------------------------------------------------------
+_DWP_FLAT_CANON=""
+_DWP_FLAT_AGENTS=""
+_dwp_flat_target_guard() {
   local target="$1"
   local team="$2"
-  local dry="${OPT_DRY_RUN:-false}"
+  local label="$3"
+  _DWP_FLAT_CANON=""
+  _DWP_FLAT_AGENTS=""
 
   # --- 1. Team id ---
   local team_re='^[A-Za-z0-9_-]+$'
   if ! [[ "$team" =~ $team_re ]]; then
-    _err "[flat-dir] invalid team id '${team}' (must match ${team_re})"
+    _err "[${label#--}] invalid team id '${team}' (must match ${team_re})"
     return 1
   fi
 
   # --- 2. Target ---
   if [ -z "$target" ]; then
-    _err "[${team}] --flat-dir: empty target_dir"
+    _err "[${team}] ${label}: empty target_dir"
     return 1
   fi
   local canon=""
   canon=$(_canon_path "$target") || canon=""
   if [ -z "$canon" ]; then
-    _err "[${team}] --flat-dir: cannot canonicalize target: ${target}"
+    _err "[${team}] ${label}: cannot canonicalize target: ${target}"
     return 1
   fi
   if [ ! -d "$canon" ]; then
-    _err "[${team}] --flat-dir: target does not exist or is not a directory: ${canon}"
+    _err "[${team}] ${label}: target does not exist or is not a directory: ${canon}"
     return 1
   fi
   if [ "$canon" = "/" ]; then
-    _err "[${team}] --flat-dir: refusing target '/'"
+    _err "[${team}] ${label}: refusing target '/'"
     return 1
   fi
   # Target == $HOME would deploy into USER-LEVEL ~/.claude/agents, leaking the
@@ -796,7 +863,7 @@ _deploy_flat_dir_impl() {
     local canon_home=""
     canon_home=$(_canon_path "$HOME") || canon_home=""
     if [ "$canon" = "$HOME" ] || { [ -n "$canon_home" ] && [ "$canon" = "$canon_home" ]; }; then
-      _err "[${team}] --flat-dir: refusing target == \$HOME (${canon}) — that is user-level ~/.claude/agents"
+      _err "[${team}] ${label}: refusing target == \$HOME (${canon}) — that is user-level ~/.claude/agents"
       return 1
     fi
   fi
@@ -809,7 +876,7 @@ _deploy_flat_dir_impl() {
   local resolved_target=""
   resolved_target=$(_canon_path "$canon_target") || resolved_target=""
   if [ -L "${canon}/.claude" ] || [ -L "$canon_target" ] || [ "$resolved_target" != "$canon_target" ]; then
-    _err "[${team}] --flat-dir: .claude or .claude/agents is a symlink resolving outside ${canon_target} (resolves to: ${resolved_target:-<unresolvable>})"
+    _err "[${team}] ${label}: .claude or .claude/agents is a symlink resolving outside ${canon_target} (resolves to: ${resolved_target:-<unresolvable>})"
     return 1
   fi
 
@@ -849,9 +916,28 @@ _deploy_flat_dir_impl() {
     walk=$(dirname "$walk")
   done
   if [ -n "$git_why" ]; then
-    _err "[${team}] --flat-dir: REFUSED (git territory) for ${canon}: ${git_why}. Use the git-aware modes (<worktree>, --all, --nested-main-root)."
+    _err "[${team}] ${label}: REFUSED (git territory) for ${canon}: ${git_why}. Use the git-aware modes (<worktree>, --all, --nested-main-root)."
     return 4
   fi
+
+  _DWP_FLAT_CANON="$canon"
+  _DWP_FLAT_AGENTS="$canon_target"
+  return 0
+}
+
+_deploy_flat_dir_impl() {
+  local target="$1"
+  local team="$2"
+  local dry="${OPT_DRY_RUN:-false}"
+
+  # --- 1-3. Team id, target, git refusal (shared with --verify-flat-dir) ---
+  local guard_rc=0
+  _dwp_flat_target_guard "$target" "$team" "--flat-dir" || guard_rc=$?
+  if [ "$guard_rc" -ne 0 ]; then
+    return "$guard_rc"
+  fi
+  local canon="$_DWP_FLAT_CANON"
+  local canon_target="$_DWP_FLAT_AGENTS"
 
   # --- 4. Source ---
   local aiteamforge_dir="${AITEAMFORGE_DIR:-${HOME:-}/aiteamforge}"
@@ -1010,6 +1096,112 @@ FINAL_EOF
   if [ "$partial" = true ] || [ "$prune_fail" -gt 0 ]; then
     return 2
   fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# --verify-flat-dir <target_dir> <team>   (XACA-1216-018/019)
+#
+# READ-ONLY content verification of a flat-dir deploy, and the ONE evidence
+# check install-team.sh, the rendered team startup ("Personas" health row) and
+# aiteamforge upgrade all call after a deploy exits 0. A deploy's rc 0 is the
+# deployer's claim; this is the evidence.
+#
+# For every source *.md in ${AITEAMFORGE_DIR}/<team>/personas/agents it
+# recomputes the expected deployed bytes FROM THE SOURCE through _dwp_render
+# (the function _deploy_core writes with, same char_name derivation) and
+# compares <target_dir>/.claude/agents/<basename> against them. A no-op or
+# stubbed deploy step cannot fake this: the expectation never comes from
+# anything the deploy step produced.
+#   * Never consults .synced-from-tap -- the marker is the deployer's own claim.
+#   * Never writes anything, anywhere (no mkdir, no temp files).
+#   * Extra files in the target (orphans, notes) are not its concern.
+#   * No dev-machine DEFERRED: an absent source is rc 3, never a pass.
+#
+# Output: rc 0 -> one "verified:" line on stdout. rc 5 -> one line per bad
+# file on stdout ("MISSING <basename>" / "STALE <basename>[ (reason)]"), then a
+# "verify:" summary line. Guard/source/transform errors go to stderr.
+#
+# Exit codes (1, 3, 4 mean exactly what they mean for --flat-dir):
+#   0 — every source persona present in the target with the expected content
+#   1 — guard/usage refusal (same guards as --flat-dir: bad team id, target
+#       missing or not a dir, target is / or $HOME, .claude symlink escape)
+#   2 — expected content could not be computed (transform failed, e.g.
+#       python3 unavailable) -- UNINSPECTABLE, never a pass
+#   3 — no persona source (primary dir absent, or 0 *.md files)
+#   4 — target is inside a git work tree (flat-dir never deploys there)
+#   5 — at least one persona MISSING or STALE
+# ---------------------------------------------------------------------------
+_verify_flat_dir() {
+  local target="$1"
+  local team="$2"
+
+  local guard_rc=0
+  _dwp_flat_target_guard "$target" "$team" "--verify-flat-dir" || guard_rc=$?
+  if [ "$guard_rc" -ne 0 ]; then
+    return "$guard_rc"
+  fi
+  local agents="$_DWP_FLAT_AGENTS"
+
+  local aiteamforge_dir="${AITEAMFORGE_DIR:-${HOME:-}/aiteamforge}"
+  local primary_src="${aiteamforge_dir}/${team}/personas/agents"
+  if [ ! -d "$primary_src" ]; then
+    _err "[${team}] --verify-flat-dir: no persona source at ${primary_src} — nothing to verify against"
+    return 3
+  fi
+
+  local total=0 missing=0 stale=0 uninspectable=0
+  local f b char dest cmp_rc
+  while IFS= read -r -d '' f; do
+    b="${f##*/}"
+    total=$((total + 1))
+    dest="${agents}/${b}"
+    if [ -L "$dest" ]; then
+      # --flat-dir refuses to write through a symlinked destination, so a
+      # symlink here was never written by it.
+      printf 'STALE %s (symlink — not written by the deployer)\n' "$b"
+      stale=$((stale + 1))
+      continue
+    fi
+    if [ ! -f "$dest" ]; then
+      printf 'MISSING %s\n' "$b"
+      missing=$((missing + 1))
+      continue
+    fi
+    char=$(_char_from_filename "$b")
+    cmp_rc=0
+    _dwp_render "$f" "$char" cmp "$dest" || cmp_rc=$?
+    case "$cmp_rc" in
+      0) ;;
+      1)
+        if [ -r "$dest" ]; then
+          printf 'STALE %s\n' "$b"
+        else
+          printf 'STALE %s (unreadable)\n' "$b"
+        fi
+        stale=$((stale + 1))
+        ;;
+      *)
+        _err "[${team}] --verify-flat-dir: could not compute the expected content of ${f} (transform rc=${_DWP_RENDER_TRC})"
+        uninspectable=$((uninspectable + 1))
+        ;;
+    esac
+  done < <(find "$primary_src" -maxdepth 1 -name '*.md' -type f -print0 2>/dev/null | sort -z)
+
+  if [ "$total" -eq 0 ]; then
+    _err "[${team}] --verify-flat-dir: persona source has 0 *.md files: ${primary_src}"
+    return 3
+  fi
+  if [ "$uninspectable" -gt 0 ]; then
+    _err "[${team}] --verify-flat-dir: ${uninspectable} of ${total} persona(s) uninspectable — NOT verified"
+    return 2
+  fi
+  if [ $((missing + stale)) -gt 0 ]; then
+    printf 'verify: %d of %d persona(s) do not match the source in %s (%d missing, %d stale)\n' \
+      "$((missing + stale))" "$total" "$agents" "$missing" "$stale"
+    return 5
+  fi
+  printf 'verified: %d of %d persona(s) match the source in %s\n' "$total" "$total" "$agents"
   return 0
 }
 
@@ -2027,6 +2219,207 @@ PERSONA
     _fail "Test 38 — rc=${t38a_rc}/${t38_rc} (want 0/2) bravo=$([ -f "${wd38}/.claude/agents/fteam_bravo_tester_persona.md" ] && echo kept || echo GONE). out: $(cat "${fl}/t38.log" 2>/dev/null)"
   fi
 
+  # =======================================================================
+  # --verify-flat-dir (XACA-1216-018/019) — Tests 39-46.
+  # Same subprocess + sandbox rules as the --flat-dir cases, same subject, so
+  # DWP_SELFTEST_SUBJECT=<pre-change script> is the negative control here too.
+  # Every assertion pins a SPECIFIC rc (0/2/3/4/5) plus output text, so a
+  # subject without the mode (usage rc 1) cannot pass by accident.
+  # =======================================================================
+  # _fv <log> [VAR=val ...] -- <verify args...>   → returns the CLI's rc.
+  _fv() {
+    local log="$1"; shift
+    local envs=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
+    if [ $# -gt 0 ]; then shift; fi
+    env -u TMUX -u TMUX_PANE HOME="$fhome" AITEAMFORGE_DIR="$faitf" \
+      ${envs[@]+"${envs[@]}"} "$BASH" "$fd_subject" --verify-flat-dir "$@" >"$log" 2>&1
+  }
+  # _fv_snap <dir> → a listing + checksum of everything under <dir> (read-only proof).
+  _fv_snap() { (cd "$1" 2>/dev/null && find . -print 2>/dev/null | LC_ALL=C sort && find . -type f -exec cksum {} \; 2>/dev/null | LC_ALL=C sort) || true; }
+
+  # -----------------------------------------------------------------------
+  # Test 39: fresh deploy verifies (rc 0); marker is NOT consulted; read-only
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 39: --verify-flat-dir fresh deploy → rc 0, marker ignored, writes nothing...\n'
+  local aitf39="${fl}/aitf39" wd39="${fl}/wd39"
+  mkdir -p "${aitf39}/fteam/personas/agents" "$wd39"
+  cp "${fsrc}/"*.md "${aitf39}/fteam/personas/agents/"
+  local t39d_rc=0 t39_rc=0 t39b_rc=0
+  _fd "${fl}/t39d.log" "AITEAMFORGE_DIR=${aitf39}" -- "$wd39" fteam --force || t39d_rc=$?
+  local snap39_before="" snap39_after=""
+  snap39_before=$(_fv_snap "$wd39")
+  _fv "${fl}/t39.log" "AITEAMFORGE_DIR=${aitf39}" -- "$wd39" fteam || t39_rc=$?
+  snap39_after=$(_fv_snap "$wd39")
+  # Remove the marker entirely: verification must not care.
+  rm -f "${wd39}/.claude/agents/.synced-from-tap"
+  _fv "${fl}/t39b.log" "AITEAMFORGE_DIR=${aitf39}" -- "$wd39" fteam || t39b_rc=$?
+  if [ "$t39d_rc" -eq 0 ] && [ "$t39_rc" -eq 0 ] && [ "$t39b_rc" -eq 0 ] \
+     && grep -q '^verified: 2 of 2 persona(s) match the source in ' "${fl}/t39.log" \
+     && grep -q '^verified: 2 of 2 ' "${fl}/t39b.log" \
+     && [ -n "$snap39_before" ] && [ "$snap39_before" = "$snap39_after" ]; then
+    _pass "Test 39 (--verify-flat-dir after a real deploy → rc 0 + verified line; still rc 0 with the marker removed; target unchanged)"
+  else
+    _fail "Test 39 — deploy rc=${t39d_rc} verify rc=${t39_rc}/${t39b_rc} (want 0/0/0) unchanged=$([ "$snap39_before" = "$snap39_after" ] && echo yes || echo NO). out: $(cat "${fl}/t39.log" "${fl}/t39b.log" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 40: one deployed byte changed → rc 5, STALE listed
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 40: --verify-flat-dir stale file → rc 5 STALE...\n'
+  local aitf40="${fl}/aitf40" wd40="${fl}/wd40"
+  mkdir -p "${aitf40}/fteam/personas/agents" "$wd40"
+  cp "${fsrc}/"*.md "${aitf40}/fteam/personas/agents/"
+  local t40d_rc=0 t40_rc=0
+  _fd "${fl}/t40d.log" "AITEAMFORGE_DIR=${aitf40}" -- "$wd40" fteam --force || t40d_rc=$?
+  # Flip one byte of the body ("Alpha" → "Blpha"), size unchanged.
+  if [ -f "${wd40}/.claude/agents/fteam_alpha_engineer_persona.md" ]; then
+    sed 's/# Alpha flat body/# Blpha flat body/' "${wd40}/.claude/agents/fteam_alpha_engineer_persona.md" > "${fl}/t40.tmp" \
+      && cat "${fl}/t40.tmp" > "${wd40}/.claude/agents/fteam_alpha_engineer_persona.md"
+  fi
+  _fv "${fl}/t40.log" "AITEAMFORGE_DIR=${aitf40}" -- "$wd40" fteam || t40_rc=$?
+  if [ "$t40d_rc" -eq 0 ] && [ "$t40_rc" -eq 5 ] \
+     && grep -qx 'STALE fteam_alpha_engineer_persona.md' "${fl}/t40.log" \
+     && ! grep -q 'bravo' "${fl}/t40.log" \
+     && grep -q '^verify: 1 of 2 persona(s) do not match the source in .* (0 missing, 1 stale)$' "${fl}/t40.log"; then
+    _pass "Test 40 (--verify-flat-dir one changed byte → rc 5 + STALE <file> + summary; untouched file not listed)"
+  else
+    _fail "Test 40 — deploy rc=${t40d_rc} verify rc=${t40_rc} (want 0/5). out: $(cat "${fl}/t40.log" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 41: a deployed file removed → rc 5, MISSING listed
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 41: --verify-flat-dir missing file → rc 5 MISSING...\n'
+  local aitf41="${fl}/aitf41" wd41="${fl}/wd41"
+  mkdir -p "${aitf41}/fteam/personas/agents" "$wd41"
+  cp "${fsrc}/"*.md "${aitf41}/fteam/personas/agents/"
+  local t41d_rc=0 t41_rc=0
+  _fd "${fl}/t41d.log" "AITEAMFORGE_DIR=${aitf41}" -- "$wd41" fteam --force || t41d_rc=$?
+  rm -f "${wd41}/.claude/agents/fteam_bravo_tester_persona.md"
+  _fv "${fl}/t41.log" "AITEAMFORGE_DIR=${aitf41}" -- "$wd41" fteam || t41_rc=$?
+  if [ "$t41d_rc" -eq 0 ] && [ "$t41_rc" -eq 5 ] \
+     && grep -qx 'MISSING fteam_bravo_tester_persona.md' "${fl}/t41.log" \
+     && grep -q '(1 missing, 0 stale)$' "${fl}/t41.log"; then
+    _pass "Test 41 (--verify-flat-dir removed file → rc 5 + MISSING <file>)"
+  else
+    _fail "Test 41 — deploy rc=${t41d_rc} verify rc=${t41_rc} (want 0/5). out: $(cat "${fl}/t41.log" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 42: source changed + a no-op rc-0 deploy (already deployed, no
+  # --force) → rc 5 STALE; a real --force refresh → rc 0 again
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 42: --verify-flat-dir no-op rc 0 deploy after a source change → rc 5...\n'
+  local aitf42="${fl}/aitf42" wd42="${fl}/wd42"
+  mkdir -p "${aitf42}/fteam/personas/agents" "$wd42"
+  cp "${fsrc}/"*.md "${aitf42}/fteam/personas/agents/"
+  local t42a_rc=0 t42b_rc=0 t42_rc=0 t42c_rc=0 t42v_rc=0
+  _fd "${fl}/t42a.log" "AITEAMFORGE_DIR=${aitf42}" -- "$wd42" fteam --force || t42a_rc=$?
+  printf -- '---\nname: engineering\ndescription: Alpha engineer v2.\n---\n\n# Alpha flat body v2\n' \
+    > "${aitf42}/fteam/personas/agents/fteam_alpha_engineer_persona.md"
+  _fd "${fl}/t42b.log" "AITEAMFORGE_DIR=${aitf42}" -- "$wd42" fteam || t42b_rc=$?
+  _fv "${fl}/t42.log" "AITEAMFORGE_DIR=${aitf42}" -- "$wd42" fteam || t42_rc=$?
+  _fd "${fl}/t42c.log" "AITEAMFORGE_DIR=${aitf42}" -- "$wd42" fteam --force || t42c_rc=$?
+  _fv "${fl}/t42v.log" "AITEAMFORGE_DIR=${aitf42}" -- "$wd42" fteam || t42v_rc=$?
+  if [ "$t42a_rc" -eq 0 ] && [ "$t42b_rc" -eq 0 ] && grep -q 'Already deployed' "${fl}/t42b.log" \
+     && [ "$t42_rc" -eq 5 ] && grep -qx 'STALE fteam_alpha_engineer_persona.md' "${fl}/t42.log" \
+     && [ "$t42c_rc" -eq 0 ] && [ "$t42v_rc" -eq 0 ]; then
+    _pass "Test 42 (--verify-flat-dir: no-op rc 0 deploy over a changed source → rc 5 STALE; --force refresh → rc 0)"
+  else
+    _fail "Test 42 — rc deploy=${t42a_rc} noop=${t42b_rc} verify=${t42_rc} (want 5) force=${t42c_rc} reverify=${t42v_rc} (want 0). out: $(cat "${fl}/t42.log" "${fl}/t42v.log" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 43: nothing ever deployed → rc 5 MISSING x2, and no .claude created
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 43: --verify-flat-dir never-deployed target → rc 5, creates nothing...\n'
+  local wd43="${fl}/wd43"; mkdir -p "$wd43"
+  local t43_rc=0
+  _fv "${fl}/t43.log" -- "$wd43" fteam || t43_rc=$?
+  if [ "$t43_rc" -eq 5 ] && [ "$(grep -c '^MISSING ' "${fl}/t43.log")" -eq 2 ] \
+     && grep -q '(2 missing, 0 stale)$' "${fl}/t43.log" && [ ! -e "${wd43}/.claude" ]; then
+    _pass "Test 43 (--verify-flat-dir empty target → rc 5 + 2 MISSING; no .claude created)"
+  else
+    _fail "Test 43 — rc=${t43_rc} (want 5) claude=$([ -e "${wd43}/.claude" ] && echo CREATED || echo absent). out: $(cat "${fl}/t43.log" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 44: rc 3 (no source, empty source, dev-machine: NO DEFERRED pass) and
+  # guard rcs shared with --flat-dir (1 + refusal text, 4 git territory)
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 44: --verify-flat-dir rc 3 / guard rc 1 / git rc 4...\n'
+  local wd44="${fl}/wd44" aitf44e="${fl}/aitf44e" home44="${fl}/home44"
+  mkdir -p "$wd44" "${aitf44e}/fteam/personas/agents" "${home44}/dev-team/.claude/agents-master/fteam"
+  local t44a=0 t44b=0 t44c=0 t44d=0 t44e=0 t44f=0 t44g=0 t44h=0
+  _fv "${fl}/t44a.log" "AITEAMFORGE_DIR=${fl}/aitf44-absent" -- "$wd44" fteam || t44a=$?
+  _fv "${fl}/t44b.log" "AITEAMFORGE_DIR=${aitf44e}" -- "$wd44" fteam || t44b=$?
+  _fv "${fl}/t44c.log" "HOME=${home44}" "AITEAMFORGE_DIR=${fl}/aitf44-absent" -- "$wd44" fteam || t44c=$?
+  _fv "${fl}/t44d.log" -- "$wd44" 'bad/team' || t44d=$?
+  _fv "${fl}/t44e.log" -- "${fl}/no-such-dir44" fteam || t44e=$?
+  _fv "${fl}/t44f.log" -- "$fhome" fteam || t44f=$?
+  _fv "${fl}/t44g.log" -- "${frepo}/sub" fteam || t44g=$?
+  _fv "${fl}/t44h.log" -- "$wd44" || t44h=$?
+  if [ "$t44a" -eq 3 ] && grep -qF -- '--verify-flat-dir: no persona source at' "${fl}/t44a.log" \
+     && [ "$t44b" -eq 3 ] && grep -qF -- '--verify-flat-dir: persona source has 0 *.md files' "${fl}/t44b.log" \
+     && [ "$t44c" -eq 3 ] && ! grep -q 'DEFERRED' "${fl}/t44c.log" \
+     && [ "$t44d" -eq 1 ] && grep -qF -- "[verify-flat-dir] invalid team id 'bad/team'" "${fl}/t44d.log" \
+     && [ "$t44e" -eq 1 ] && grep -qF -- '--verify-flat-dir: target does not exist or is not a directory' "${fl}/t44e.log" \
+     && [ "$t44f" -eq 1 ] && grep -qF -- '--verify-flat-dir: refusing target == $HOME (' "${fl}/t44f.log" \
+     && [ "$t44g" -eq 4 ] && grep -qF -- '--verify-flat-dir: REFUSED (git territory)' "${fl}/t44g.log" \
+     && [ "$t44h" -eq 1 ] && grep -qF -- '--verify-flat-dir <target_dir> <team>' "${fl}/t44h.log" \
+     && [ ! -e "${wd44}/.claude" ] && [ ! -e "${fhome}/.claude" ]; then
+    _pass "Test 44 (--verify-flat-dir: source absent/empty/dev-machine → rc 3 (no DEFERRED pass); bad team/missing target/\$HOME/arg count → rc 1 + text; git subdir → rc 4)"
+  else
+    _fail "Test 44 — rcs absent=${t44a} empty=${t44b} devmachine=${t44c} (want 3/3/3) badteam=${t44d} nodir=${t44e} home=${t44f} (want 1/1/1) git=${t44g} (want 4) args=${t44h} (want 1). out: $(cat "${fl}"/t44?.log 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 45: render parity on the verbatim-copy edge cases — the verifier's
+  # expectation equals what the deploy wrote AND what emit-transformed prints
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 45: --verify-flat-dir render parity (no frontmatter / no name: / trailing newlines)...\n'
+  local aitf45="${fl}/aitf45" wd45="${fl}/wd45"
+  local src45="${aitf45}/fteam/personas/agents"
+  mkdir -p "$src45" "$wd45"
+  printf '# no frontmatter, no trailing newline' > "${src45}/fteam_nofm_x_persona.md"
+  printf -- '---\ndescription: no name line\n---\n\nbody\n\n\n' > "${src45}/fteam_noname_x_persona.md"
+  printf -- '---\nname: role\n---\nbody\n\n' > "${src45}/fteam_trail_x_persona.md"
+  local t45d_rc=0 t45_rc=0 t45_emit_ok=true f45 b45
+  _fd "${fl}/t45d.log" "AITEAMFORGE_DIR=${aitf45}" -- "$wd45" fteam --force || t45d_rc=$?
+  _fv "${fl}/t45.log" "AITEAMFORGE_DIR=${aitf45}" -- "$wd45" fteam || t45_rc=$?
+  for f45 in "$src45"/*.md; do
+    b45="${f45##*/}"
+    env -u TMUX -u TMUX_PANE HOME="$fhome" "$BASH" "$fd_subject" emit-transformed "$f45" > "${fl}/t45-${b45}.emit" 2>/dev/null \
+      || t45_emit_ok=false
+    cmp -s "${fl}/t45-${b45}.emit" "${wd45}/.claude/agents/${b45}" || t45_emit_ok=false
+  done
+  if [ "$t45d_rc" -eq 0 ] && [ "$t45_rc" -eq 0 ] && grep -q '^verified: 3 of 3 ' "${fl}/t45.log" \
+     && [ "$t45_emit_ok" = true ]; then
+    _pass "Test 45 (--verify-flat-dir edge sources → rc 0 after deploy; emit-transformed byte-identical to every deployed file)"
+  else
+    _fail "Test 45 — deploy rc=${t45d_rc} verify rc=${t45_rc} (want 0/0) emit==deployed=${t45_emit_ok}. out: $(cat "${fl}/t45.log" 2>/dev/null)"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 46: expected content uncomputable (unreadable source) → rc 2, never 0
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 46: --verify-flat-dir uninspectable source → rc 2...\n'
+  local aitf46="${fl}/aitf46" wd46="${fl}/wd46"
+  mkdir -p "${aitf46}/fteam/personas/agents" "$wd46"
+  cp "${fsrc}/"*.md "${aitf46}/fteam/personas/agents/"
+  local t46d_rc=0 t46_rc=0
+  _fd "${fl}/t46d.log" "AITEAMFORGE_DIR=${aitf46}" -- "$wd46" fteam --force || t46d_rc=$?
+  chmod 000 "${aitf46}/fteam/personas/agents/fteam_alpha_engineer_persona.md"
+  _fv "${fl}/t46.log" "AITEAMFORGE_DIR=${aitf46}" -- "$wd46" fteam || t46_rc=$?
+  chmod 644 "${aitf46}/fteam/personas/agents/fteam_alpha_engineer_persona.md"
+  if [ "$t46d_rc" -eq 0 ] && [ "$t46_rc" -eq 2 ] \
+     && grep -qF -- 'uninspectable — NOT verified' "${fl}/t46.log" && ! grep -q '^verified:' "${fl}/t46.log"; then
+    _pass "Test 46 (--verify-flat-dir unreadable source → rc 2 uninspectable, no verified line)"
+  else
+    _fail "Test 46 — deploy rc=${t46d_rc} verify rc=${t46_rc} (want 0/2). out: $(cat "${fl}/t46.log" 2>/dev/null)"
+  fi
+
   # -----------------------------------------------------------------------
   # Summary
   # -----------------------------------------------------------------------
@@ -2068,6 +2461,7 @@ main() {
     printf '       %s --all <team> [<main_repo_path>] [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
     printf '       %s --nested-main-root <project_dir> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
     printf '       %s --flat-dir <target_dir> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
+    printf '       %s --verify-flat-dir <target_dir> <team>\n' "$PROG" >&2
     printf '       %s emit-transformed <src_file> [<char_name>]\n' "$PROG" >&2
     printf '       %s selftest\n' "$PROG" >&2
     exit 1
@@ -2127,19 +2521,18 @@ main() {
       et_char=$(_char_from_filename "$(basename "$et_src")")
     fi
 
-    local et_out et_rc=0
-    et_out=$(_transform_persona "$et_src" "$et_char") || et_rc=$?
+    # Through _dwp_render (XACA-1216-019): transform rc 0/2/3 print exactly the
+    # bytes _deploy_core writes (for the no-frontmatter case that is now the
+    # source verbatim, as cp writes it); any other rc prints nothing.
+    local et_rc=0
+    _dwp_render "$et_src" "$et_char" emit || et_rc=$?
 
     case "$et_rc" in
-      0|2|3)
-        # 0: name: rewritten. 2: no frontmatter, verbatim IS expected output.
-        # 3: no name: in frontmatter, verbatim IS expected output. All three
-        # are what a real deploy would actually write -- see exit-code note above.
-        printf '%s\n' "$et_out"
+      0)
         exit 0
         ;;
       *)
-        _err "emit-transformed: transform failed (rc=${et_rc}) for ${et_src}"
+        _err "emit-transformed: transform failed (rc=${_DWP_RENDER_TRC}) for ${et_src}"
         exit 2
         ;;
     esac
@@ -2176,6 +2569,20 @@ main() {
     local fd_rc=0
     _deploy_flat_dir "$fd_target" "$fd_team" || fd_rc=$?
     exit "$fd_rc"
+  fi
+
+  # --verify-flat-dir mode (XACA-1216-018/019): read-only content verification
+  # of a flat-dir deploy. No options; see the exit-code table above
+  # _verify_flat_dir.
+  if [ "$1" = "--verify-flat-dir" ]; then
+    shift
+    if [ $# -ne 2 ]; then
+      printf 'Usage: %s --verify-flat-dir <target_dir> <team>\n' "$PROG" >&2
+      exit 1
+    fi
+    local vf_rc=0
+    _verify_flat_dir "$1" "$2" || vf_rc=$?
+    exit "$vf_rc"
   fi
 
   # --nested-main-root mode: deploy personas into a nested git repo root

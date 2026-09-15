@@ -4272,8 +4272,10 @@ _xaca1216_team_persona_deploy_mode() {
 #     uses), not re-derived from the conf.
 #   • AITEAMFORGE_DIR is passed explicitly as $WORKING_DIR: kanban-helpers
 #     resets it on dev machines, and the deployer reads its source from it.
-#   • Counters: refreshed / refused (deployer rc 4 — target is inside a git
-#     work tree, left to the git-aware modes) / failed (any other nonzero) /
+#   • Counters: refreshed (deployer rc 0 AND --verify-flat-dir rc 0; under
+#     --dry-run rc 0 alone, nothing was written to verify) / refused (deployer
+#     rc 4 — target is inside a git work tree, left to the git-aware modes) /
+#     failed (any other nonzero, OR rc 0 with a failed/absent verification) /
 #     uninspectable (unreadable conf, invalid TEAM_PERSONA_DEPLOY_MODE value,
 #     flat-dir on a TEAM_HAS_PROJECTS=true team, unresolvable or absent
 #     working dir, resolver unavailable). Invalid/project-team verdicts warn
@@ -4295,7 +4297,7 @@ deploy_flat_team_personas() {
   [ "$DRY_RUN" = true ] && dry_run_args=(--dry-run)
 
   local targets=0 refreshed=0 refused=0 failed=0 uninspectable=0
-  local conf team mode wd deploy_rc
+  local conf team mode wd deploy_rc verify_rc verify_out
 
   if [ ! -d "$teams_dir" ]; then
     print_warning "Team conf directory not found at ${teams_dir} — cannot determine flat-dir persona deploy targets"
@@ -4372,7 +4374,27 @@ deploy_flat_team_personas() {
       AITEAMFORGE_DIR="$WORKING_DIR" "$deployer" --flat-dir "$wd" "$team" --force "${dry_run_args[@]}" || deploy_rc=$?
       case "$deploy_rc" in
         0)
-          refreshed=$((refreshed + 1))
+          # rc 0 is the deployer's word, not evidence (XACA-1216-018): a no-op
+          # or stubbed deploy exits 0 having written nothing, and files left by
+          # an older deploy would pass a presence test. "refreshed" needs
+          # --verify-flat-dir exit 0 as well — the ONE content-level evidence
+          # check shared with install-team.sh and the startup "Personas" row
+          # (it recomputes expected bytes from the source, never reads the
+          # marker). A verifier that errors or is absent is a FAILURE. Skipped
+          # under --dry-run: a dry run writes nothing, so there is nothing to
+          # verify and a verify FAIL would be noise, not a finding.
+          if [ "$DRY_RUN" = true ]; then
+            refreshed=$((refreshed + 1))
+          else
+            verify_rc=0
+            verify_out="$(AITEAMFORGE_DIR="$WORKING_DIR" "$deployer" --verify-flat-dir "$wd" "$team" 2>&1)" || verify_rc=$?
+            if [ "$verify_rc" -eq 0 ]; then
+              refreshed=$((refreshed + 1))
+            else
+              failed=$((failed + 1))
+              print_warning "[${team}] Deploy into ${wd} exited 0 but content verification FAILED (verify exit ${verify_rc}): $(printf '%s' "$verify_out" | tr '\n' ';' | sed 's/;/; /g') — counted failed (fail-soft)"
+            fi
+          fi
           ;;
         4)
           refused=$((refused + 1))

@@ -21,6 +21,11 @@
 #   (c) install-team.sh spacedock, end to end in a sandbox
 #   (d) aiteamforge-upgrade.sh deploy_flat_team_personas on a pre-provisioned
 #       sandbox; a git-repo working dir is refused and counted, fail-soft
+#   XACA-1216-018/019: at all three sites the evidence is the deployer's
+#       --verify-flat-dir (content, recomputed from the source). Stubs replace
+#       ONLY the deploy step; the verifier is always the real one, so a no-op
+#       or stale-files deploy FAILs at install (C6/C8), startup (B3/B8) and
+#       upgrade (D8/D9); a missing verifier FAILs too (B10/D10).
 #   (e) negative control: the (b)/(c)/(d) assertions FAIL against pre-change
 #       copies of the files (`git show <pre-change-ref>:<path>`)
 #
@@ -140,6 +145,46 @@ _extract_fn() {
       capture { print }
       capture && /^}$/ { exit }
     ' "$2"
+}
+
+# _write_deploy_stub <dest> <behaviour>  (XACA-1216-018/019)
+# Stubs ONLY the deploy step. `--verify-flat-dir` is always exec'd to the REAL
+# deployer under test (copied next to the stub as dwp-real.sh), so the evidence
+# check is never the stub vouching for itself — it recomputes the expected
+# content from the source through the real render. Behaviours for --flat-dir:
+#   real     — exec the real deployer (plumbing happy path)
+#   noop     — print a DEFERRED-style line, write nothing, exit 0
+#   noverify — --flat-dir is real, but --verify-flat-dir answers like an OLDER
+#              deployer with no such mode (usage exit 1): verifier unavailable
+_write_deploy_stub() {
+    local dest="$1" behaviour="$2" dir
+    dir="$(dirname "$dest")"
+    cp "$DEPLOYER_SRC" "$dir/dwp-real.sh" || return 1
+    chmod +x "$dir/dwp-real.sh"
+    {
+        echo '#!/bin/bash'
+        echo '# XACA-1216 test stub — see _write_deploy_stub'
+        if [ "$behaviour" = noverify ]; then
+            echo 'if [ "$1" = "--verify-flat-dir" ]; then echo "[deploy-worktree-personas] ERROR: Unknown option: $3" >&2; exit 1; fi'
+        else
+            echo 'if [ "$1" = "--verify-flat-dir" ]; then exec bash "$(dirname "$0")/dwp-real.sh" "$@"; fi'
+        fi
+        case "$behaviour" in
+            real|noverify) echo 'exec bash "$(dirname "$0")/dwp-real.sh" "$@"' ;;
+            noop)          printf '%s\n' 'echo "DEFERRED: dev machine — kb-sync-personas owns this target"' 'exit 0' ;;
+        esac
+    } > "$dest" || return 1
+    chmod +x "$dest"
+}
+
+# _seed_old_personas <agents-dir> — pre-existing files from an "older deploy":
+# every current persona basename present, with OLD content.
+_seed_old_personas() {
+    local agents="$1" b
+    mkdir -p "$agents" || return 1
+    for b in $EXPECTED_PERSONAS; do
+        printf -- '---\nname: old\n---\n# content from an older release\n' > "$agents/$b" || return 1
+    done
 }
 
 # _mk_sandbox_tap <dest> <post|pre>
@@ -288,7 +333,10 @@ _b_harness() {
     } > "$out"
 }
 
-# _b_fixture <kind> — prints "<aitf>\t<wd>"; kind: good-stub|noexec|noop-stub|refuse4-stub|real
+# _b_fixture <kind> — prints "<aitf>\t<wd>"
+# kind: good-stub|noexec|noop-stub|refuse4-stub|real|stale-noop|noverify-stub
+# Every *-stub stubs only the deploy step; --verify-flat-dir reaches the REAL
+# deployer (see _write_deploy_stub).
 _b_fixture() {
     local kind="$1" root aitf wd dwp
     root="$(_next_sandbox)"; aitf="$root/aiteamforge"; wd="$root/home/.aiteamforge/spacedock"
@@ -296,16 +344,10 @@ _b_fixture() {
     cp "$PERSONA_FIXTURE_DIR"/*.md "$aitf/spacedock/personas/agents/"
     dwp="$aitf/scripts/deploy-worktree-personas.sh"
     case "$kind" in
-        good-stub|noexec)
-            cat > "$dwp" <<'EOF'
-#!/bin/bash
-# stub: --flat-dir <wd> <team> ... copies S2 personas, exit 0
-wd="$2"; team="$3"
-mkdir -p "$wd/.claude/agents" && cp "$AITEAMFORGE_DIR/$team/personas/agents/"*.md "$wd/.claude/agents/"
-EOF
-            ;;
-        noop-stub)
-            printf '#!/bin/bash\necho "stub: pretending to deploy"\nexit 0\n' > "$dwp" ;;
+        good-stub|noexec) _write_deploy_stub "$dwp" real ;;
+        noop-stub)        _write_deploy_stub "$dwp" noop ;;
+        noverify-stub)    _write_deploy_stub "$dwp" noverify ;;
+        stale-noop)       _write_deploy_stub "$dwp" noop; _seed_old_personas "$wd/.claude/agents" ;;
         refuse4-stub)
             printf '#!/bin/bash\necho "REFUSED: inside a git work tree" >&2\nexit 4\n' > "$dwp" ;;
         real)
@@ -337,8 +379,8 @@ _b_assert_cases() {
     fi
 
     out="$WORK_DIR/${pfx}1.out"; r="$(_b_run "$harness" good-stub flat-dir "$out")"; rc="${r%%	*}"; wd="${r#*	}"
-    test_start "${pfx}1: happy path (deployer writes every source persona, exit 0) -> Personas OK, no health error"
-    if [ "$rc" = "0" ] && grep -q 'Personas *OK' "$out" && grep -q '^HEALTH_ERRORS=0$' "$out" && grep -q SNIPPET_COMPLETED "$out" \
+    test_start "${pfx}1: happy path (deployer writes every source persona, exit 0) -> Personas OK (content verified), no health error"
+    if [ "$rc" = "0" ] && grep -q "Personas *OK  verified: $EXPECTED_PERSONA_COUNT of $EXPECTED_PERSONA_COUNT persona(s) match the source" "$out" && grep -q '^HEALTH_ERRORS=0$' "$out" && grep -q SNIPPET_COMPLETED "$out" \
         && [ "$(_persona_basenames "$wd/.claude/agents")" = "$EXPECTED_PERSONAS" ]; then
         test_pass
     else
@@ -355,8 +397,8 @@ _b_assert_cases() {
     fi
 
     out="$WORK_DIR/${pfx}3.out"; r="$(_b_run "$harness" noop-stub flat-dir "$out")"; rc="${r%%	*}"
-    test_start "${pfx}3: deployer exits 0 but writes nothing -> Personas FAIL (positive evidence, not rc), _HEALTH_ERRORS++"
-    if [ "$rc" = "0" ] && grep -q 'Personas *FAIL' "$out" && ! grep -q 'Personas *OK' "$out" \
+    test_start "${pfx}3: deploy step exits 0 but writes nothing (REAL verifier) -> Personas FAIL verify exit 5 MISSING, _HEALTH_ERRORS++"
+    if [ "$rc" = "0" ] && grep -q 'Personas *FAIL.*content verification failed (verify exit 5).*MISSING ' "$out" && ! grep -q 'Personas *OK' "$out" \
         && grep -q '^HEALTH_ERRORS=1$' "$out" && grep -q SNIPPET_COMPLETED "$out"; then
         test_pass
     else
@@ -390,6 +432,25 @@ _b_assert_cases() {
         test_pass
     else
         test_fail "rc=$rc claude_exists=$([ -e "$wd/.claude" ] && echo yes || echo no) out: $(tr '\n' '|' < "$out")"
+    fi
+
+    # XACA-1216-019: presence is not freshness.
+    out="$WORK_DIR/${pfx}8.out"; r="$(_b_run "$harness" stale-noop flat-dir "$out")"; rc="${r%%	*}"
+    test_start "${pfx}8: stale files from an older deploy + a no-op exit-0 deploy step (REAL verifier) -> Personas FAIL verify exit 5 STALE, never OK"
+    if [ "$rc" = "0" ] && grep -q "Personas *FAIL.*verify exit 5.*STALE .*(0 missing, $EXPECTED_PERSONA_COUNT stale)" "$out" \
+        && ! grep -q 'Personas *OK' "$out" && grep -q '^HEALTH_ERRORS=1$' "$out" && grep -q SNIPPET_COMPLETED "$out"; then
+        test_pass
+    else
+        test_fail "rc=$rc out: $(tr '\n' '|' < "$out")"
+    fi
+
+    out="$WORK_DIR/${pfx}10.out"; r="$(_b_run "$harness" noverify-stub flat-dir "$out")"; rc="${r%%	*}"
+    test_start "${pfx}10: real deploy but the verifier is unavailable (older deployer, usage exit 1) -> Personas FAIL, never OK"
+    if [ "$rc" = "0" ] && grep -q 'Personas *FAIL.*verify exit 1' "$out" \
+        && ! grep -q 'Personas *OK' "$out" && grep -q '^HEALTH_ERRORS=1$' "$out"; then
+        test_pass
+    else
+        test_fail "rc=$rc out: $(tr '\n' '|' < "$out")"
     fi
 
     test_start "${pfx}6: happy path with the REAL deployer (--flat-dir) -> Personas OK"
@@ -436,10 +497,11 @@ else
     test_fail "$A_WD is (inside) a git work tree after install"
 fi
 
-test_start "C4: install reports no 🚨 persona-deploy failure"
+test_start "C4: install reports no 🚨 persona-deploy failure and a content-verified ✓"
 if [ "$FLAT_DIR_SUPPORTED" != true ]; then
     test_fail "PENDING: deployer lacks --flat-dir (XACA-1216-003) — not faked"
-elif ! grep -q 'persona deploy FAILED' "$A_ERR" "$A_OUT" 2>/dev/null; then
+elif ! grep -q 'persona deploy FAILED' "$A_ERR" "$A_OUT" 2>/dev/null \
+    && grep -q '✓ Personas deployed to .*(content verified against source)' "$A_OUT" 2>/dev/null; then
     test_pass
 else
     test_fail "$(grep -h 'persona deploy FAILED' "$A_ERR" "$A_OUT")"
@@ -457,15 +519,16 @@ else
     test_fail "rc=$C5_RC stderr: $(grep -n 'persona' "$WORK_DIR/c5.err" | head -3)"
 fi
 
-test_start "C6: install with a deployer that exits 0 but writes nothing (DEFERRED/no-op) -> 🚨 naming the missing personas, no ✓, install still exits 0"
-# XACA-1216-016: rc 0 is the deployer's word, not evidence.
+test_start "C6: install with a deploy step that exits 0 but writes nothing (DEFERRED/no-op; REAL verifier) -> 🚨 verify exit 5 naming MISSING personas, no ✓, install still exits 0"
+# XACA-1216-016/018: rc 0 is the deployer's word, not evidence. Only the deploy
+# step is stubbed; --verify-flat-dir is the real one.
 C6_TAP="$WORK_DIR/tap-c6"
 cp -R "$POST_TAP" "$C6_TAP"
-printf '#!/bin/bash\necho "DEFERRED: dev machine — kb-sync-personas owns this target"\nexit 0\n' > "$C6_TAP/share/scripts/deploy-worktree-personas.sh"
+_write_deploy_stub "$C6_TAP/share/scripts/deploy-worktree-personas.sh" noop
 C6_HOME="$(_next_sandbox)/home"; C6_AITF="$(dirname "$C6_HOME")/aiteamforge"
 C6_RC="$(_run_install "$C6_TAP" spacedock "$C6_HOME" "$C6_AITF" "$WORK_DIR/c6.out" "$WORK_DIR/c6.err")"
 if [ "$C6_RC" = "0" ] && [ -f "$C6_AITF/spacedock-startup.sh" ] \
-    && grep -q "🚨.*persona deploy FAILED.*deployer returned 0 but $EXPECTED_PERSONA_COUNT of $EXPECTED_PERSONA_COUNT persona(s) missing" "$WORK_DIR/c6.err" \
+    && grep -q "🚨.*persona deploy FAILED.*deployer returned 0 but content verification FAILED (verify exit 5): MISSING .*($EXPECTED_PERSONA_COUNT missing, 0 stale)" "$WORK_DIR/c6.err" \
     && ! grep -q '✓ Personas deployed' "$WORK_DIR/c6.out" "$WORK_DIR/c6.err"; then
     test_pass
 else
@@ -493,6 +556,23 @@ if [ "$C7_RC" = "0" ] && [ -f "$C7_STARTUP" ] \
     test_pass
 else
     test_fail "rc=$C7_RC mode_line=[$(grep -n 'TEAM_PERSONA_DEPLOY_MODE' "$C7_STARTUP" 2>/dev/null | head -3 | tr '\n' '|')] leftovers=[$_left7] err: $(grep -n 'PERSONA_DEPLOY_MODE' "$WORK_DIR/c7.err" | head -3)"
+fi
+
+test_start "C8: stale persona files from an older deploy + a no-op exit-0 deploy step (REAL verifier) -> 🚨 verify exit 5 naming STALE personas, no ✓, install still exits 0"
+# XACA-1216-019: presence is not freshness — every file is present, all old.
+C8_TAP="$WORK_DIR/tap-c8"
+cp -R "$POST_TAP" "$C8_TAP"
+_write_deploy_stub "$C8_TAP/share/scripts/deploy-worktree-personas.sh" noop
+C8_HOME="$(_next_sandbox)/home"; C8_AITF="$(dirname "$C8_HOME")/aiteamforge"
+_seed_old_personas "$C8_HOME/.aiteamforge/spacedock/.claude/agents"
+C8_RC="$(_run_install "$C8_TAP" spacedock "$C8_HOME" "$C8_AITF" "$WORK_DIR/c8.out" "$WORK_DIR/c8.err")"
+if [ "$C8_RC" = "0" ] && [ -f "$C8_AITF/spacedock-startup.sh" ] \
+    && [ "$(_persona_basenames "$C8_HOME/.aiteamforge/spacedock/.claude/agents")" = "$EXPECTED_PERSONAS" ] \
+    && grep -q "🚨.*persona deploy FAILED.*content verification FAILED (verify exit 5): STALE .*(0 missing, $EXPECTED_PERSONA_COUNT stale)" "$WORK_DIR/c8.err" \
+    && ! grep -q '✓ Personas deployed' "$WORK_DIR/c8.out" "$WORK_DIR/c8.err"; then
+    test_pass
+else
+    test_fail "rc=$C8_RC out/err: $(grep -hn 'ersona' "$WORK_DIR/c8.out" "$WORK_DIR/c8.err" | head -5)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -539,7 +619,7 @@ _d_run() {
       done
       # shellcheck disable=SC1090
       . "$fns"
-      FRAMEWORK_DIR="$root/fw"; WORKING_DIR="$root/aiteamforge"; DRY_RUN=false
+      FRAMEWORK_DIR="$root/fw"; WORKING_DIR="$root/aiteamforge"; DRY_RUN="${D_DRY_RUN:-false}"
       UPGRADE_PERSONA_DEPLOY_HAD_WARNINGS=false
       UPGRADE_PERSONA_DEPLOY_WARNING_SUMMARY="prior-step summary"
       deploy_flat_team_personas
@@ -583,6 +663,7 @@ _d_assert_cases() {
     if [ "$rc" = "0" ] && grep -q '^FN_RC=0$' "$out" && grep -q 'CONTINUED_PAST_CALL' "$out" \
         && [ "$(_persona_basenames "$wd/.claude/agents")" = "$EXPECTED_PERSONAS" ] \
         && grep -q '1 target(s): 1 refreshed, 0 refused, 0 failed, 0 uninspectable' "$out" \
+        && ! grep -q 'content verification FAILED' "$out" \
         && grep -q '^HAD_WARNINGS=false$' "$out" && [ ! -e "$wd/.git" ] && [ ! -e "$root/home/.claude/agents" ]; then
         test_pass
     else
@@ -648,6 +729,52 @@ _d_assert_cases() {
     if [ "$rc" = "0" ] && grep -q '^FN_RC=0$' "$out" && grep -q 'project team (TEAM_HAS_PROJECTS=true)' "$out" \
         && grep -q '0 target(s): 0 refreshed, 0 refused, 0 failed, 1 uninspectable' "$out" \
         && grep -q '^HAD_WARNINGS=true$' "$out" && [ ! -e "$root/home/.aiteamforge/spacedock/.claude" ]; then
+        test_pass
+    else
+        test_fail "rc=$rc out: $(tr '\n' '|' < "$out")"
+    fi
+
+    # XACA-1216-018: "refreshed" needs content evidence, not the deployer's rc 0.
+    root="$(_d_fixture)"; _write_deploy_stub "$root/aiteamforge/scripts/deploy-worktree-personas.sh" noop
+    out="$WORK_DIR/${pfx}8.out"; rc="$(_d_run "$fns" "$root" "$out")"
+    test_start "${pfx}8: deploy step exits 0 but writes nothing (REAL verifier) -> counted failed (not refreshed), warning names verify exit 5 + MISSING, HAD_WARNINGS=true, summary appended"
+    if [ "$rc" = "0" ] && grep -q '^FN_RC=0$' "$out" && grep -q 'CONTINUED_PAST_CALL' "$out" \
+        && grep -q '1 target(s): 0 refreshed, 0 refused, 1 failed, 0 uninspectable' "$out" \
+        && grep -q "exited 0 but content verification FAILED (verify exit 5): MISSING .*($EXPECTED_PERSONA_COUNT missing, 0 stale)" "$out" \
+        && grep -q '^HAD_WARNINGS=true$' "$out" && grep -q '^WARNING_SUMMARY=prior-step summary; .*1 failed' "$out"; then
+        test_pass
+    else
+        test_fail "rc=$rc out: $(tr '\n' '|' < "$out")"
+    fi
+
+    root="$(_d_fixture)"; _write_deploy_stub "$root/aiteamforge/scripts/deploy-worktree-personas.sh" noop
+    _seed_old_personas "$root/home/.aiteamforge/spacedock/.claude/agents"
+    out="$WORK_DIR/${pfx}9.out"; rc="$(_d_run "$fns" "$root" "$out")"
+    test_start "${pfx}9: stale files from an older deploy + no-op exit-0 deploy step (REAL verifier) -> counted failed, warning names STALE, HAD_WARNINGS=true"
+    if [ "$rc" = "0" ] && grep -q '^FN_RC=0$' "$out" \
+        && grep -q '1 target(s): 0 refreshed, 0 refused, 1 failed, 0 uninspectable' "$out" \
+        && grep -q "content verification FAILED (verify exit 5): STALE .*(0 missing, $EXPECTED_PERSONA_COUNT stale)" "$out" \
+        && grep -q '^HAD_WARNINGS=true$' "$out"; then
+        test_pass
+    else
+        test_fail "rc=$rc out: $(tr '\n' '|' < "$out")"
+    fi
+
+    root="$(_d_fixture)"; _write_deploy_stub "$root/aiteamforge/scripts/deploy-worktree-personas.sh" noverify
+    out="$WORK_DIR/${pfx}10.out"; rc="$(_d_run "$fns" "$root" "$out")"
+    test_start "${pfx}10: real deploy but verifier unavailable (older deployer, usage exit 1) -> counted failed, never refreshed"
+    if [ "$rc" = "0" ] && grep -q '1 target(s): 0 refreshed, 0 refused, 1 failed, 0 uninspectable' "$out" \
+        && grep -q 'content verification FAILED (verify exit 1)' "$out" && grep -q '^HAD_WARNINGS=true$' "$out"; then
+        test_pass
+    else
+        test_fail "rc=$rc out: $(tr '\n' '|' < "$out")"
+    fi
+
+    root="$(_d_fixture)"; out="$WORK_DIR/${pfx}11.out"; rc="$(D_DRY_RUN=true _d_run "$fns" "$root" "$out")"
+    test_start "${pfx}11: --dry-run with the real deployer -> nothing written, verification skipped (no verify FAIL), counted in the dry-run summary"
+    if [ "$rc" = "0" ] && grep -q 'Flat-dir persona deploy (dry run): 1 target(s): 1 refreshed, 0 refused, 0 failed, 0 uninspectable' "$out" \
+        && ! grep -q 'content verification FAILED' "$out" && grep -q '^HAD_WARNINGS=false$' "$out" \
+        && [ ! -e "$root/home/.aiteamforge/spacedock/.claude" ]; then
         test_pass
     else
         test_fail "rc=$rc out: $(tr '\n' '|' < "$out")"

@@ -86,6 +86,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   template warns and adds a Personas FAIL row on an unknown rendered value; upgrade counts it
   uninspectable. Deployer mirror carries the canonical selftest fix (Tests 29–31 assert refusal
   text). Suite 29 → 34 cases; all 5 new cases fail against the round-0 files.
+  Review round 2 (XACA-1216-018/019): the deploy evidence at all three sites is now ONE check,
+  `deploy-worktree-personas.sh --verify-flat-dir`, which recomputes each persona's expected bytes from
+  the source and compares content — presence alone let files from an older deploy plus a no-op exit 0
+  read ✓/OK. `install-team.sh` and the startup Personas row replace their local presence loops with it;
+  `aiteamforge upgrade` counts a flat-dir team `refreshed` only when the deploy AND the verification
+  exit 0 (otherwise `failed`, named in the appended warning; verification skipped under `--dry-run`).
+  A verifier that errors or is absent is a failure at every site. Test stubs now replace only the
+  deploy step, so the real verifier judges: no-op deploy (B3/C6/D8), stale files (B8/C8/D9) and a
+  missing verifier (B10/D10) FAIL; happy paths (B1/B6/C4/D2) pass. Suite 34 → 41 cases; against the
+  b3aff25 install/template/upgrade copies 10 fail, including every stale case reading OK/✓/refreshed.
 
 ## [0.20.13] - 2026-09-14
 

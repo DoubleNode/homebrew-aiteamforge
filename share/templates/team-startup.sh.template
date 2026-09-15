@@ -732,36 +732,33 @@ fi
 
 # >>> XACA-1216 persona-health (begin) — extracted verbatim by tests/test-xaca-1216-flat-persona-deploy.sh
 # 5. Personas — only for teams gated into the flat-dir deploy above.
-#    OK needs POSITIVE evidence: the deploy exited 0 AND every *.md in the
-#    persona source is present in $TEAM_WORKING_DIR/.claude/agents. An exit 0
-#    alone is not enough — a deployer that DEFERRED (dev machine), no-op'd, or
-#    was stubbed can exit 0 having written nothing.
+#    OK needs POSITIVE, CONTENT-LEVEL evidence: the deploy exited 0 AND
+#    `deploy-worktree-personas.sh --verify-flat-dir` exited 0. The verifier is
+#    the ONE evidence check shared with install-team.sh and aiteamforge
+#    upgrade (XACA-1216-018/019): it recomputes every persona's expected bytes
+#    from the SOURCE through the deploy's own render and compares content, so
+#    neither a deploy that DEFERRED / no-op'd / was stubbed nor files left by
+#    an OLDER deploy can read OK. It never consults the marker. A verifier that
+#    errors or is absent (older deployer: usage exit 1) is FAIL, never OK.
 if [[ "$_PERSONA_DEPLOY_STATE" == "invalid" ]]; then
     echo "    Personas        FAIL  invalid TEAM_PERSONA_DEPLOY_MODE=$(printf '%q' "$TEAM_PERSONA_DEPLOY_MODE") (allowed: flat-dir or empty) — no deploy was attempted; re-run the team install"
     _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
 elif [[ -n "$_PERSONA_DEPLOY_STATE" ]]; then
-    _PERSONA_SRC="$AITEAMFORGE_DIR/$TEAM_ID/personas/agents"
-    _PERSONA_DST="$TEAM_WORKING_DIR/.claude/agents"
-    _PERSONA_SRC_COUNT=0
-    _PERSONA_MISSING=()
-    if [[ -d "$_PERSONA_SRC" ]]; then
-        while IFS= read -r _persona_src_file; do
-            [[ -n "$_persona_src_file" ]] || continue
-            _PERSONA_SRC_COUNT=$((_PERSONA_SRC_COUNT + 1))
-            [[ -f "$_PERSONA_DST/${_persona_src_file##*/}" ]] || _PERSONA_MISSING+=("${_persona_src_file##*/}")
-        done < <(find "$_PERSONA_SRC" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
-    fi
+    _PERSONA_NL=$'\n'
     if [[ "$_PERSONA_DEPLOY_RC" -ne 0 ]]; then
         echo "    Personas        FAIL  exit $_PERSONA_DEPLOY_RC ($(_persona_deploy_rc_meaning "$_PERSONA_DEPLOY_RC")) — see $_PERSONA_DEPLOY_LOG"
         _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
-    elif [[ $_PERSONA_SRC_COUNT -eq 0 ]]; then
-        echo "    Personas        FAIL  exit 0 but no persona source files in $_PERSONA_SRC, so nothing proves a deploy — see $_PERSONA_DEPLOY_LOG"
-        _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
-    elif [[ ${#_PERSONA_MISSING[@]} -gt 0 ]]; then
-        echo "    Personas        FAIL  exit 0 but ${#_PERSONA_MISSING[@]} of $_PERSONA_SRC_COUNT persona file(s) missing from $_PERSONA_DST: ${_PERSONA_MISSING[*]} — see $_PERSONA_DEPLOY_LOG"
-        _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
     else
-        echo "    Personas        OK  $_PERSONA_SRC_COUNT crew persona(s) in $_PERSONA_DST"
+        _PERSONA_VERIFY_RC=0
+        _PERSONA_VERIFY_OUT="$(AITEAMFORGE_DIR="$AITEAMFORGE_DIR" "$_DWP" --verify-flat-dir "$TEAM_WORKING_DIR" "$TEAM_ID" 2>&1)" || _PERSONA_VERIFY_RC=$?
+        print -r -- "--verify-flat-dir exit ${_PERSONA_VERIFY_RC}:" >>"$_PERSONA_DEPLOY_LOG" 2>/dev/null
+        print -r -- "$_PERSONA_VERIFY_OUT" >>"$_PERSONA_DEPLOY_LOG" 2>/dev/null
+        if [[ "$_PERSONA_VERIFY_RC" -eq 0 ]]; then
+            echo "    Personas        OK  ${_PERSONA_VERIFY_OUT##*${_PERSONA_NL}}"
+        else
+            echo "    Personas        FAIL  exit 0 but content verification failed (verify exit $_PERSONA_VERIFY_RC): ${_PERSONA_VERIFY_OUT//${_PERSONA_NL}/; } — see $_PERSONA_DEPLOY_LOG"
+            _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
+        fi
     fi
 fi
 # <<< XACA-1216 persona-health (end)

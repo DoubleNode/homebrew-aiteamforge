@@ -2080,39 +2080,29 @@ if [[ "$TEAM_PERSONA_DEPLOY_MODE" == "flat-dir" ]]; then
         AITEAMFORGE_DIR="$AITEAMFORGE_DIR" bash "$_XACA1216_DEPLOYER" \
             --flat-dir "$_XACA1216_WD" "$TEAM_ID" --force 2>&1 | sed 's/^/    /' || _xaca1216_rc=$?
     fi
-    # rc 0 is the deployer's word, not evidence (XACA-1216-016): a DEFERRED
-    # (dev machine), no-op or stubbed deployer exits 0 having written nothing.
-    # Success needs every source *.md basename present in the target — the
-    # same test as the startup template's "Personas" health row. Deliberately
-    # a local check, NOT a deployer subcommand: evidence the deployer reports
-    # about itself is exactly what a stubbed/no-op deployer would fake.
+    # rc 0 is the deployer's word, not evidence (XACA-1216-016/018/019): a
+    # DEFERRED (dev machine), no-op or stubbed deploy exits 0 having written
+    # nothing, and files left by an OLDER deploy would pass a presence test.
+    # Success needs exit 0 AND `--verify-flat-dir` exit 0 — the ONE evidence
+    # check shared with the startup "Personas" row and aiteamforge upgrade. It
+    # recomputes every persona's expected bytes from the SOURCE through the
+    # deploy's own render and compares CONTENT, never consulting the marker,
+    # so a no-op deploy step cannot vouch for itself. A verifier that errors or
+    # does not exist (older deployer: usage exit 1) is a FAILURE, never a pass.
     _xaca1216_why=""
     if [[ "$_xaca1216_rc" -eq 0 ]]; then
-        _XACA1216_SRC="$AITEAMFORGE_DIR/$TEAM_ID/personas/agents"
-        _xaca1216_src_n=0
-        _xaca1216_missing=""
-        _xaca1216_missing_n=0
-        if [[ -d "$_XACA1216_SRC" ]]; then
-            while IFS= read -r _xaca1216_f; do
-                [[ -n "$_xaca1216_f" ]] || continue
-                _xaca1216_src_n=$((_xaca1216_src_n + 1))
-                if [[ ! -f "$_XACA1216_WD/.claude/agents/${_xaca1216_f##*/}" ]]; then
-                    _xaca1216_missing_n=$((_xaca1216_missing_n + 1))
-                    _xaca1216_missing="$_xaca1216_missing ${_xaca1216_f##*/}"
-                fi
-            done < <(find "$_XACA1216_SRC" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
+        _xaca1216_vrc=0
+        _xaca1216_vout="$(AITEAMFORGE_DIR="$AITEAMFORGE_DIR" bash "$_XACA1216_DEPLOYER" \
+            --verify-flat-dir "$_XACA1216_WD" "$TEAM_ID" 2>&1)" || _xaca1216_vrc=$?
+        if [[ "$_xaca1216_vrc" -ne 0 ]]; then
+            _xaca1216_why="deployer returned 0 but content verification FAILED (verify exit $_xaca1216_vrc): $(printf '%s' "$_xaca1216_vout" | tr '\n' ';' | sed 's/;/; /g')"
         fi
-        if [[ "$_xaca1216_src_n" -eq 0 ]]; then
-            _xaca1216_why="deployer returned 0 but there are no persona source files in $_XACA1216_SRC, so nothing proves a deploy"
-        elif [[ "$_xaca1216_missing_n" -gt 0 ]]; then
-            _xaca1216_why="deployer returned 0 but $_xaca1216_missing_n of $_xaca1216_src_n persona(s) missing from $_XACA1216_WD/.claude/agents:$_xaca1216_missing — DEFERRED, no-op or stubbed deployer?"
-        fi
-        unset _XACA1216_SRC _xaca1216_src_n _xaca1216_missing _xaca1216_missing_n _xaca1216_f
+        unset _xaca1216_vrc _xaca1216_vout
     else
         _xaca1216_why="exit $_xaca1216_rc ($(_xaca1216_persona_rc_meaning "$_xaca1216_rc"))"
     fi
     if [[ -z "$_xaca1216_why" ]]; then
-        echo "  ✓ Personas deployed to $_XACA1216_WD/.claude/agents (every source persona present)"
+        echo "  ✓ Personas deployed to $_XACA1216_WD/.claude/agents (content verified against source)"
     else
         echo "  🚨 persona deploy FAILED for $TEAM_ID — $_xaca1216_why; target: ${_XACA1216_WD:-<unset>}" >&2
         echo "  🚨 Install continuing — crew sessions will start WITHOUT personas until this is fixed. The startup 'Personas' health check and the next 'aiteamforge upgrade' retry the deploy." >&2
