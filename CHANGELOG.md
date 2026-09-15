@@ -44,7 +44,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `/opt/homebrew/bin/bash` for `/bin/bash`) without touching `EnvironmentVariables`. The reporter resolves
   `msg-store.py` with the same ordered candidates as `msg-client.sh`, and its relay-only log line is accurate.
   Review round 3: the Label migration re-reads the plist and warns instead of printing success when
-  `plutil -replace` fails (R16), and R2 uses the portable timeout.
+  `plutil -replace` fails (R16), and R2 uses the portable timeout. Its fix-by-hand hint names only the key that
+  failed to migrate.
 
 
 - **XACA-1233** — `share/scripts/lcars-health-check.sh`: added `_LCARS_INFRA` row

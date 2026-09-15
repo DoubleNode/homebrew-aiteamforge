@@ -3411,7 +3411,12 @@ _xaca1225_migrate_fleet_reporter_label() {
   if { [ "$needs_label_fix" = "true" ] && [ "$after_label" != "com.aiteamforge.fleet-reporter" ]; } \
      || { [ "$needs_interp_fix" = "true" ] && [ "$after_arg0" != "/bin/bash" ]; }; then
     print_warning "Could not migrate fleet-reporter LaunchAgent plist (Label='${after_label:-?}', interpreter='${after_arg0:-?}'): $plist"
-    print_info "  Fix by hand: plutil -replace Label -string com.aiteamforge.fleet-reporter \"$plist\", then unload and load it"
+    if [ "$needs_label_fix" = "true" ] && [ "$after_label" != "com.aiteamforge.fleet-reporter" ]; then
+      print_info "  Fix by hand: plutil -replace Label -string com.aiteamforge.fleet-reporter \"$plist\", then unload and load it"
+    fi
+    if [ "$needs_interp_fix" = "true" ] && [ "$after_arg0" != "/bin/bash" ]; then
+      print_info "  Fix by hand: plutil -replace ProgramArguments.0 -string /bin/bash \"$plist\", then unload and load it"
+    fi
     return 0
   fi
   if [ "${AITEAMFORGE_SKIP_LAUNCHCTL:-}" != "1" ] && type _xaca0734_launchctl_is_loaded >/dev/null 2>&1 \
