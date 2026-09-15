@@ -1123,6 +1123,9 @@ discover_tests() {
 run_test_file() {
   local test_file="$1"
   CURRENT_TEST_FILE="$(basename "$test_file")"
+  # XACA-1222: exported so the brew-guard shim's BLOCKED line names the suite
+  # (it runs inside the suite's child process and only sees the environment).
+  export CURRENT_TEST_FILE
 
   if [ ! -f "$test_file" ]; then
     print_error "Test file not found: $test_file"
@@ -1300,6 +1303,11 @@ run_test_file() {
     print_error "BREW GUARD TRIPPED: $CURRENT_TEST_FILE reached a real, unstubbed, mutating/unrecognized brew invocation, OR the guard itself was lost mid-run — see the XACA-1222 BREW GUARD lines above. Failing this run regardless of the suite's own pass/fail result."
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
     FAILED_TESTS=$((FAILED_TESTS + 1))
+    # A lost guard is not a per-suite failure: every remaining suite would run
+    # with the real brew on PATH. main() stops the loop on this flag.
+    if [ "${BREW_GUARD_LOST:-false}" = true ]; then
+      BREW_GUARD_ABORT=true
+    fi
   fi
 
   echo ""
@@ -1405,6 +1413,10 @@ main() {
   # Run tests
   for test_file in "${test_files[@]}"; do
     run_test_file "$test_file"
+    if [ "${BREW_GUARD_ABORT:-false}" = true ]; then
+      print_error "BREW GUARD LOST after $CURRENT_TEST_FILE — stopping here. The remaining suites were NOT run, because they would have run with the real brew on PATH (XACA-1222)."
+      break
+    fi
   done
 
   # Print summary

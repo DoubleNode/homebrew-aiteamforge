@@ -82,8 +82,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     the network, or — for `desc --search` — scans every formula's description instead of one). Removed
     `shellenv` from the allowlist: `eval "$(brew shellenv)"` would put the real brew ahead of this shim
     on `PATH` for the rest of that process, and a tree-wide grep found no shipped caller. README's
-    "Brew Guard" section now documents `HOMEBREW_NO_INSTALL_FROM_API`/`HOMEBREW_NO_ANALYTICS` alongside
-    `HOMEBREW_NO_AUTO_UPDATE`, the blocked flags, and that an absolute-path `brew` call bypasses any
+    "Brew Guard" section now documents `HOMEBREW_NO_ANALYTICS` alongside `HOMEBREW_NO_AUTO_UPDATE`, the
+    blocked flags, and that an absolute-path `brew` call bypasses any
     PATH-based shim.
   - Review round 1 [XACA-1222-013]: `tests/lib/brew-guard.sh`'s shim directory no longer depends on a
     trap to get cleaned up — three suites (`test-tailscale.sh`, `test-xaca-0650-doctor-venv.sh`,
@@ -93,6 +93,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     directory `aiteamforge-brewguard.$$.XXXXXX` (also fixing BSD `mktemp -t`, which left a literal
     `XXXXXX` in the name) and sweeps sibling directories whose embedded PID is no longer alive before
     creating a new one — self-healing regardless of whether any trap fires.
+  - Review round 2 BLOCKING: the shim no longer exports `HOMEBREW_NO_INSTALL_FROM_API`. It does not
+    keep brew offline: with it set, a lookup of a name no installed tap knows (`brew info aiteamforge`,
+    reached from shipped `common.sh`/`config.sh`) takes the core-tap path, which on a Homebrew 4+ host
+    without homebrew/core tapped clones homebrew-core into the brew prefix.
+  - Review round 2 [XACA-1222-014]: a guard lost mid-run now stops the suite loop ("BREW GUARD LOST
+    after <suite> — stopping here") instead of running the remaining suites against the real brew.
+  - Review round 2 [XACA-1222-015]: `run_test_file` exports `CURRENT_TEST_FILE`, so a BLOCKED line names
+    the offending suite instead of `test_file=unset`. Guard suite: 48 assertions (ABORT, NAME, ENV added).
 
 - **XACA-1220** — `display-agent-avatar.sh` mirror: Space Dock avatar arms and unmapped agent pairs
   now write panel JSON with an empty avatar and warn on stderr instead of silently exiting.

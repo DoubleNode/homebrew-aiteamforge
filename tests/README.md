@@ -241,8 +241,10 @@ sources the runner does **not**; run suites through the runner.
 
 The shim passes a small allowlist of **read-only** calls through to the real brew
 (`--prefix`, `--version`, `list`, `info`, `outdated`, `deps`, a bare `brew tap`, ...),
-with `HOMEBREW_NO_AUTO_UPDATE=1`, `HOMEBREW_NO_ANALYTICS=1`, and
-`HOMEBREW_NO_INSTALL_FROM_API=1` set so even those stay off the network. It **blocks
+with `HOMEBREW_NO_AUTO_UPDATE=1` and `HOMEBREW_NO_ANALYTICS=1` set so even those stay
+off the network. `HOMEBREW_NO_INSTALL_FROM_API` is deliberately **not** set: on a host
+without homebrew/core tapped it turns a lookup of an unknown name (`brew info
+aiteamforge`) into a full `git clone` of homebrew-core. It **blocks
 everything else**: every mutating subcommand, `brew tap <name>` (any argument at all —
 only the bare form is read-only), and anything it does not recognise. Unknown is treated
 as mutating. Even an otherwise-allowlisted subcommand is blocked if it carries one of a

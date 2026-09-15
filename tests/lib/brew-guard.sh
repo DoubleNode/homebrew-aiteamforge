@@ -229,9 +229,15 @@ fi
 
 # Even an allowlisted subcommand must not reach the network or rewrite the
 # Homebrew repo: `outdated` and `info` both trigger brew's auto-update.
+#
+# Do NOT add HOMEBREW_NO_INSTALL_FROM_API here (PR #902 review round 2). It
+# sounds like "stay offline" and does the opposite: with it set, a lookup of
+# a name no installed tap knows (`brew list aiteamforge`, `brew info
+# aiteamforge` — both reached from shipped config.sh/common.sh) falls through
+# to the core-tap path, which on a Homebrew 4+ host without homebrew/core
+# tapped runs a full `git clone` of homebrew-core into the brew prefix.
 export HOMEBREW_NO_AUTO_UPDATE=1
 export HOMEBREW_NO_ANALYTICS=1
-export HOMEBREW_NO_INSTALL_FROM_API=1
 
 if [ "$_readonly" -eq 1 ]; then
   _real="${AITEAMFORGE_BREW_GUARD_REAL_BREW:-}"
@@ -341,12 +347,18 @@ brew_guard_assert() {
 
   local _marker="${AITEAMFORGE_BREW_GUARD_MARKER:-}"
 
+  # Set true only by the two "guard lost" branches below, so a caller can tell
+  # "this suite tripped the guard" (the run can continue safely) from "the
+  # guard is gone" (every later suite would run unprotected — stop).
+  BREW_GUARD_LOST=false
+
   if [ "$_strict" = true ] && [ -n "${AITEAMFORGE_BREW_GUARD_DIR:-}" ]; then
     if [ ! -d "$AITEAMFORGE_BREW_GUARD_DIR" ] \
        || [ ! -x "$AITEAMFORGE_BREW_GUARD_DIR/brew" ] \
        || [ -z "$_marker" ] \
        || [ ! -f "$_marker" ]; then
       echo "XACA-1222 BREW GUARD: guard lost — $AITEAMFORGE_BREW_GUARD_DIR (its shim executable or marker file) no longer exists after this suite ran. A suite that deletes shared test infrastructure, or any interruption that skips cleanup ordering, can leave every REMAINING suite unprotected against a real brew mutation. Failing closed." >&2
+      BREW_GUARD_LOST=true
       return 1
     fi
 
@@ -354,6 +366,7 @@ brew_guard_assert() {
     _resolved="$(command -v brew 2>/dev/null || true)"
     if [ -n "$_resolved" ] && [ "$_resolved" != "$AITEAMFORGE_BREW_GUARD_DIR/brew" ]; then
       echo "XACA-1222 BREW GUARD: guard lost — 'brew' in the runner's own shell now resolves to '$_resolved', not the guard shim '$AITEAMFORGE_BREW_GUARD_DIR/brew'. The runner's own PATH never carries a suite-local override (only a suite's own already-exited child process can add one), so this can only mean the guard's position on PATH was disturbed. Failing closed." >&2
+      BREW_GUARD_LOST=true
       return 1
     fi
   fi

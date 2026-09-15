@@ -928,6 +928,107 @@ $(_tail "$SWEEP_LOG")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PR #902 review round 2 — ABORT1-3: a LOST guard stops the suite loop.
+# Suite A deletes the shim dir (the inherited AITEAMFORGE_BREW_GUARD_DIR);
+# suite B, which sorts after it, would otherwise run with the real brew on
+# PATH. B only writes a marker, so its absence proves the loop stopped.
+# ═══════════════════════════════════════════════════════════════════════════
+ABORT_DIR="$WORK_DIR/sbx-abort"
+mkdir -p "$ABORT_DIR"
+ABORT_B_MARKER="$WORK_DIR/abort-b-ran.marker"
+rm -f "$ABORT_B_MARKER"
+export XACA1222_ABORT_B_MARKER="$ABORT_B_MARKER"
+
+cat > "$ABORT_DIR/test-xaca-1222-abort-a.sh" <<'FIXTURE_EOF'
+#!/bin/bash
+echo "fixture ABORT-A: deleting the guard shim dir ${AITEAMFORGE_BREW_GUARD_DIR:-<unset>}"
+[ -n "${AITEAMFORGE_BREW_GUARD_DIR:-}" ] && rm -r "$AITEAMFORGE_BREW_GUARD_DIR"
+exit 0
+FIXTURE_EOF
+chmod +x "$ABORT_DIR/test-xaca-1222-abort-a.sh"
+
+cat > "$ABORT_DIR/test-xaca-1222-abort-b.sh" <<'FIXTURE_EOF'
+#!/bin/bash
+: > "${XACA1222_ABORT_B_MARKER:?marker path not set}"
+exit 0
+FIXTURE_EOF
+chmod +x "$ABORT_DIR/test-xaca-1222-abort-b.sh"
+
+ABORT_LOG="$WORK_DIR/nested-abort.log"
+run_nested "$ABORT_DIR" "$ABORT_LOG"
+ABORT_RC=$?
+
+test_start "ABORT1: nested runner exits non-zero when a suite destroys the guard"
+if [ "$ABORT_RC" -ne 0 ]; then
+  test_pass
+else
+  test_fail "nested run exited 0 after the guard was lost. Log tail:
+$(_tail "$ABORT_LOG")"
+fi
+
+test_start "ABORT2: the suite after the one that lost the guard never ran"
+if [ ! -f "$ABORT_B_MARKER" ]; then
+  test_pass
+else
+  test_fail "ABORT-B's marker exists — the runner kept going with the real brew on PATH. Log tail:
+$(_tail "$ABORT_LOG")"
+fi
+
+test_start "ABORT3: the runner says why it stopped and names the suite that lost the guard"
+if grep -F -q -- "BREW GUARD LOST after test-xaca-1222-abort-a.sh" "$ABORT_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected 'BREW GUARD LOST after test-xaca-1222-abort-a.sh'. Log tail:
+$(_tail "$ABORT_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR #902 review round 2 — NAME1: the BLOCKED line names the offending suite
+# (run_test_file exports CURRENT_TEST_FILE into the suite's environment).
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "NAME1: the negative control's BLOCKED line names its suite (not test_file=unset)"
+if grep -F -q -- "test_file=test-xaca-1222-ctrl-negative.sh" "$NEG_LOG" 2>/dev/null; then
+  test_pass
+else
+  test_fail "expected test_file=test-xaca-1222-ctrl-negative.sh in the nested log. Log tail:
+$(_tail "$NEG_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR #902 review round 2 — ENV1-2: what a passed-through call sees. It must
+# have auto-update off, and must NOT have HOMEBREW_NO_INSTALL_FROM_API (which
+# turns an unknown-name lookup into a homebrew-core git clone).
+# ═══════════════════════════════════════════════════════════════════════════
+ENV_BIN="$WORK_DIR/env-fake-brew-bin"
+mkdir -p "$ENV_BIN"
+cat > "$ENV_BIN/brew" <<'FAKEBREW_EOF'
+#!/bin/bash
+echo "NO_INSTALL_FROM_API=${HOMEBREW_NO_INSTALL_FROM_API-unset} NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE-unset}"
+FAKEBREW_EOF
+chmod +x "$ENV_BIN/brew"
+
+ENV_OUT="$(
+  env -u AITEAMFORGE_BREW_GUARD_ACTIVE -u AITEAMFORGE_BREW_GUARD_DIR \
+      -u AITEAMFORGE_BREW_GUARD_MARKER -u AITEAMFORGE_BREW_GUARD_OWNER_PID \
+      -u AITEAMFORGE_BREW_GUARD_REAL_BREW -u HOMEBREW_NO_INSTALL_FROM_API \
+      -u HOMEBREW_NO_AUTO_UPDATE \
+      PATH="$ENV_BIN:$PATH" LIB_PATH="$LIB_PATH" \
+      bash -c '. "$LIB_PATH" && brew_guard_install && brew --version; brew_guard_cleanup' 2>&1
+)"
+
+test_start "ENV1: a passed-through call runs with HOMEBREW_NO_AUTO_UPDATE=1"
+case "$ENV_OUT" in
+  *"NO_AUTO_UPDATE=1"*) test_pass ;;
+  *) test_fail "fake real brew saw: $ENV_OUT" ;;
+esac
+
+test_start "ENV2: a passed-through call does NOT get HOMEBREW_NO_INSTALL_FROM_API"
+case "$ENV_OUT" in
+  *"NO_INSTALL_FROM_API=unset"*) test_pass ;;
+  *) test_fail "fake real brew saw: $ENV_OUT" ;;
+esac
+
+# ═══════════════════════════════════════════════════════════════════════════
 if [ "${_STANDALONE:-false}" != true ] && [ -n "${TEST_RESULTS_FILE:-}" ] && [ -f "${TEST_RESULTS_FILE}" ]; then
   _x1222_fail_lines="$(grep '^FAIL:' "$TEST_RESULTS_FILE" 2>/dev/null || true)"
   if [ -n "$_x1222_fail_lines" ]; then
