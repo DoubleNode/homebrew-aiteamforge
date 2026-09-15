@@ -190,12 +190,14 @@ done
 # shared tmux server whenever a non-canonical-port heal actually fires for
 # that row. This is the intended XACA-0706 behavior (kill the stale session
 # before _hc_start_lcars_server recreates it), and it stays scoped to
-# exactly that one session — tmux's `-t <name>` target here is an EXACT
-# match, not a prefix/glob (verified: a sibling session sharing the target
-# as a literal prefix, e.g. "finance-personal-lcars-old", is untouched by
-# `kill-session -t finance-personal-lcars`, under both the `-S <path>` and
-# `-L <name>` invocation forms this function uses). No kill-server, no
-# pattern kill — only the one named session on the one named socket. It is
+# exactly that one session because its targets use tmux's exact-name anchor
+# `-t "=<name>"` (XACA-1233-023). A BARE `-t <name>` is NOT exact: when no
+# session has that exact name tmux falls back to a unique prefix match, so
+# `kill-session -t finance-personal-lcars` with only
+# "finance-personal-lcars-old" present kills the -old session (reproduced,
+# tmux 3.6a, both `-S <path>` and `-L <name>`). With "=" it returns 1 and
+# leaves the sibling alone. No kill-server, no pattern kill — only the one
+# named session on the one named socket. It is
 # new reachable behavior for these two rows specifically (previously a
 # no-op because the socket was wrong), not new behavior for the mechanism
 # itself, which already ran this way for every other team.
@@ -1301,18 +1303,25 @@ _hc_heal_noncanonical_port() {
     # 1. Kill the team's <instance>-lcars tmux session ONLY (not other panes).
     #    The session name is the team's session_pattern with the leading ".*"
     #    glob stripped, matching how run_health_check derives it for restart.
+    #    XACA-1233-023: targets are "=${kill_session}" (tmux exact-name
+    #    anchor), NOT a bare name. A bare `-t name` falls back to a unique
+    #    PREFIX match when no session has that exact name, so on a shared team
+    #    socket (finance/legal) an absent finance-personal-lcars would resolve
+    #    to, and kill, e.g. finance-personal-lcars-old (reproduced, tmux 3.6a,
+    #    -S and -L). Keep the quotes: in zsh an unquoted `=name` is
+    #    =-expansion (command-path lookup) and errors.
     local kill_session="${session_name}"
     local socket_path="$TMUX_SOCKET_DIR/$tmux_socket"
     if [[ -S "$socket_path" ]]; then
-        if tmux -S "$socket_path" has-session -t "$kill_session" 2>/dev/null; then
+        if tmux -S "$socket_path" has-session -t "=${kill_session}" 2>/dev/null; then
             log "    Killing stale tmux session: $kill_session (socket $tmux_socket)"
-            tmux -S "$socket_path" kill-session -t "$kill_session" 2>/dev/null || true
+            tmux -S "$socket_path" kill-session -t "=${kill_session}" 2>/dev/null || true
         fi
     else
         # Fallback to -L syntax.
-        if tmux -L "$tmux_socket" has-session -t "$kill_session" 2>/dev/null; then
+        if tmux -L "$tmux_socket" has-session -t "=${kill_session}" 2>/dev/null; then
             log "    Killing stale tmux session: $kill_session (socket $tmux_socket)"
-            tmux -L "$tmux_socket" kill-session -t "$kill_session" 2>/dev/null || true
+            tmux -L "$tmux_socket" kill-session -t "=${kill_session}" 2>/dev/null || true
         fi
     fi
 

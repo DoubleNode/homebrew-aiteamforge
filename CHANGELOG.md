@@ -40,6 +40,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   measured from `medical-startup.sh` and its `SESSION_PREFIX`; the team was previously
   registered but absent from every health roster line. Mirror of dev-team canonical
   `lcars-health-check.sh`.
+- **XACA-1233-023** — `share/scripts/lcars-health-check.sh`: `_hc_heal_noncanonical_port` targets its
+  tmux session with the exact-name anchor `-t "=<session>"`; a bare `-t` prefix-matched a sibling session
+  (e.g. `finance-personal-lcars-old`) on a shared team socket when the exact session was absent. Mirror of
+  dev-team canonical.
 - **XACA-1233-018** — `share/scripts/lcars-health-check.sh`: `finance-personal` / `legal-coparenting`
   `_LCARS_INFRA` rows now name tmux sockets `finance` / `legal` (what `finance-startup.sh` /
   `legal-startup.sh` actually create) instead of the per-instance ids, so a restart recreates the
