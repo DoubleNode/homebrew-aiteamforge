@@ -146,3 +146,4 @@ test-xaca-1216-flat-persona-deploy.sh           plain-shell
 test-xaca-1221-upgrade-image-assets.sh          plain-shell
 test-xaca-1222-brew-guard.sh                    plain-shell
 test-xaca-1231-finance-logos.sh                 plain-shell
+test-xaca-1229-persona-field-escaping.sh        plain-shell

@@ -1356,6 +1356,19 @@ def window_desc(win_name, terminal_id, win_index):
 # drift this ticket exists to close).
 _SESSION_DIR_HOME_PREFIX = "$HOME"
 
+def _bash_dq_escape(s):
+    """Escape `s` for safe embedding inside a double-quoted bash string
+    (VAR="...here..."). Shared by render_session_directory and render_dq
+    (XACA-1229) so the two callers can never silently drift apart. Escape
+    backslash FIRST so the backslashes added for the other characters don't
+    themselves get re-escaped on a later pass."""
+    return (
+        s.replace('\\', '\\\\')
+         .replace('"', '\\"')
+         .replace('`', '\\`')
+         .replace('$', '\\$')
+    )
+
 def render_session_directory(raw, team_id):
     """Escape `raw` for embedding in SESSION_DIRECTORY="...", preserving a
     literal leading "$HOME" (inserted by the bash caller, never by us) as
@@ -1375,16 +1388,30 @@ def render_session_directory(raw, team_id):
 
     home_literal = raw.startswith(_SESSION_DIR_HOME_PREFIX)
     rest = raw[len(_SESSION_DIR_HOME_PREFIX):] if home_literal else raw
-
-    # Escape backslash FIRST so the backslashes we add for the other
-    # characters don't themselves get re-escaped on a later pass.
-    escaped_rest = (
-        rest.replace('\\', '\\\\')
-            .replace('"', '\\"')
-            .replace('`', '\\`')
-            .replace('$', '\\$')
-    )
+    escaped_rest = _bash_dq_escape(rest)
     return (_SESSION_DIR_HOME_PREFIX + escaped_rest) if home_literal else escaped_rest
+
+# ---- Generic double-quoted-assignment renderer (XACA-1229) ----
+# Unlike render_session_directory, an empty/missing value is legitimate here
+# — SESSION_DESCRIPTION, SESSION_LOCATION, a window description, etc. may
+# genuinely be blank — so render_dq returns "" for None/empty rather than
+# refusing. It refuses (returns None) only on control characters, which
+# could break the generated script (e.g. a newline ending the assignment
+# early) or worse.
+def render_dq(raw, team_id, field_label):
+    """Escape `raw` for embedding in a double-quoted bash assignment
+    (VAR="..."). Returns "" for None/empty. Returns None (and prints a
+    stderr warning naming the team and field) if `raw` contains a control
+    character (ord < 0x20 or 0x7f) — callers must skip whatever this value
+    belongs to rather than emit it unsafely."""
+    if not raw:
+        return ""
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
+        print(f"  ⚠️  {team_id}: {field_label} contains newline/control characters — "
+              f"refusing to embed it in the generated startup script (XACA-1229)",
+              file=sys.stderr)
+        return None
+    return _bash_dq_escape(raw)
 
 
 # Computed ONCE — the working directory is per-team, not per-persona, so a
@@ -1404,6 +1431,31 @@ def generate_script(terminal_id, character, identity, windows, frontmatter, sess
     role      = identity["role"]
     theme     = identity["theme"] or "OPERATIONS"
 
+    # ---- XACA-1229: escape every persona/config-sourced value before it is
+    # embedded in the generated script's double-quoted assignments. A real
+    # persona (Montgomery "Scotty" Scott, Una Chin-Riley ("Number One")) can
+    # carry quotes/parens that would otherwise break the assignment or
+    # execute as a second command. render_dq returns "" for a legitimately
+    # blank field and None only on a control character -- a None here means
+    # this WHOLE persona's script must be skipped (mirrors the other
+    # per-persona `continue`s in the main loop below), never emitted unsafely
+    # and never used to abort the rest of the team.
+    # aiteamforge_dir / team_color are installer/.conf-resolved (not persona
+    # free text) and don't carry the $HOME-literal contraction session_directory
+    # does, so they're plain opaque text here too -- cheap to run through the
+    # same helper for defense in depth (XACA-1229).
+    theme_esc         = render_dq(theme,          team_id, "SESSION_THEME (Uniform Color)")
+    session_desc_esc  = render_dq(session_desc,   team_id, "SESSION_DESCRIPTION")
+    location_esc      = render_dq(location,       team_id, "SESSION_LOCATION")
+    developer_esc     = render_dq(developer,      team_id, "SESSION_DEVELOPER (Name)")
+    role_esc          = render_dq(role,           team_id, "SESSION_ROLE (Role)")
+    character_esc     = render_dq(character,      team_id, "persona name (@claude_agent)")
+    aiteamforge_dir_esc = render_dq(aiteamforge_dir, team_id, "AITEAMFORGE_DIR")
+    team_color_esc    = render_dq(team_color,     team_id, "THEME_COLOR")
+    if None in (theme_esc, session_desc_esc, location_esc, developer_esc, role_esc,
+                character_esc, aiteamforge_dir_esc, team_color_esc):
+        return None
+
     bg_code, accent_code = THEME_COLORS.get(theme, DEFAULT_THEME_COLORS)
 
     # Ensure we have at least 4 windows; pad with generic names if needed
@@ -1413,12 +1465,19 @@ def generate_script(terminal_id, character, identity, windows, frontmatter, sess
     win_names = base_windows[:4]
 
     # Build set_window_metadata case branches (reused by panel-regen loop
-    # and session-creation loop below).
+    # and session-creation loop below). Window names/descriptions get the
+    # same escape-or-skip-persona treatment as the persona fields above
+    # (XACA-1229) -- a window name is config-sourced (AGENT_WINDOWS_*) but
+    # not trusted any more than a persona field.
     metadata_cases = []
     for i, wname in enumerate(win_names):
         wdesc = window_desc(wname, terminal_id, i)
+        wname_esc = render_dq(wname, team_id, f"window name (window {i})")
+        wdesc_esc = render_dq(wdesc, team_id, f"window description (window {i})")
+        if wname_esc is None or wdesc_esc is None:
+            return None
         metadata_cases.append(
-            f'        {i}) TERMINAL_NUMBER={i}; TERMINAL_NAME="{wname}"; TERMINAL_DESCRIPTION="{wdesc}" ;;'
+            f'        {i}) TERMINAL_NUMBER={i}; TERMINAL_NAME="{wname_esc}"; TERMINAL_DESCRIPTION="{wdesc_esc}" ;;'
         )
     window_metadata_section = "\n".join(metadata_cases)
 
@@ -1454,13 +1513,13 @@ set +x
 # Auto-generated by aiteamforge installer (install-team.sh generate_per_agent_startup_scripts)
 # AITEAMFORGE_GENERATED_VERSION={tap_version}
 
-SESSION_THEME="{theme}"
+SESSION_THEME="{theme_esc}"
 SESSION_TYPE="{team_id}"
 SESSION_NAME="{terminal_id}"
-SESSION_DESCRIPTION="{session_desc}"
-SESSION_LOCATION="{location}"
-SESSION_DEVELOPER="{developer}"
-SESSION_ROLE="{role}"
+SESSION_DESCRIPTION="{session_desc_esc}"
+SESSION_LOCATION="{location_esc}"
+SESSION_DEVELOPER="{developer_esc}"
+SESSION_ROLE="{role_esc}"
 SESSION_DIRECTORY="{session_directory}"
 # XACA-1215-015: pre-quote SESSION_DIRECTORY ONCE for re-parsing by the
 # pane's own interactive shell. `send-keys` types its argument into the
@@ -1511,11 +1570,33 @@ SESSION_DIRECTORY="{session_directory}"
 # reads the bytes as a literal argv string, no terminal-input layer
 # involved).
 _SESSION_DIRECTORY_Q=$(LC_ALL=C /bin/bash -c 'printf %q "$1"' _ "$SESSION_DIRECTORY")
-THEME_COLOR="{team_color}"
+
+# XACA-1229: setup_window()'s send-keys banner line below retypes nine more
+# SESSION_*/TERMINAL_* values into the pane alongside SESSION_DIRECTORY --
+# same pane-reparse hazard as XACA-1215-015/019 above (the pane's
+# interactive zsh re-parses the double-quoted send-keys text a SECOND time,
+# so a persona value carrying a " or a $()/backtick can split args or
+# execute). Pre-quote each one ONCE with the identical /bin/bash -c
+# 'printf %q' + LC_ALL=C mechanism (see the long rationale a few lines up --
+# it applies unchanged here; do not substitute a plain `printf %q` or drop
+# LC_ALL=C). The session-constant fields are quoted here, once; the three
+# per-window fields (TERMINAL_NUMBER/NAME/DESCRIPTION) are quoted inside
+# setup_window() itself, after set_window_metadata has set them for the
+# window currently being set up. `printf %q ""` yields `''`, so an empty
+# field still occupies its positional slot in the retyped command.
+_xaca1229_q() {{ LC_ALL=C /bin/bash -c 'printf %q "$1"' _ "$1"; }}
+_SESSION_THEME_Q=$(_xaca1229_q "$SESSION_THEME")
+_SESSION_TYPE_Q=$(_xaca1229_q "$SESSION_TYPE")
+_SESSION_NAME_Q=$(_xaca1229_q "$SESSION_NAME")
+_SESSION_DESCRIPTION_Q=$(_xaca1229_q "$SESSION_DESCRIPTION")
+_SESSION_LOCATION_Q=$(_xaca1229_q "$SESSION_LOCATION")
+_SESSION_DEVELOPER_Q=$(_xaca1229_q "$SESSION_DEVELOPER")
+_SESSION_ROLE_Q=$(_xaca1229_q "$SESSION_ROLE")
+THEME_COLOR="{team_color_esc}"
 
 SESSION_CODE="${{SESSION_TYPE}}-${{SESSION_NAME}}"
 
-AITEAMFORGE_DIR="{aiteamforge_dir}"
+AITEAMFORGE_DIR="{aiteamforge_dir_esc}"
 
 # Theme color file directory for fleet-monitor integration
 THEME_PORTS_DIR="$AITEAMFORGE_DIR/lcars-ports"
@@ -1554,10 +1635,21 @@ KANBAN_HELPERS="$AITEAMFORGE_DIR/kanban-helpers.sh"
 
 setup_window() {{
     sleep 0.1
+    # XACA-1229: TERMINAL_NUMBER/NAME/DESCRIPTION are the three per-window
+    # banner args -- quote them here (set_window_metadata has already set
+    # them for this window by the time setup_window runs) using the same
+    # _xaca1229_q helper as the session-constant _Q vars above.
+    local _TERMINAL_NUMBER_Q _TERMINAL_NAME_Q _TERMINAL_DESCRIPTION_Q
+    _TERMINAL_NUMBER_Q=$(_xaca1229_q "$TERMINAL_NUMBER")
+    _TERMINAL_NAME_Q=$(_xaca1229_q "$TERMINAL_NAME")
+    _TERMINAL_DESCRIPTION_Q=$(_xaca1229_q "$TERMINAL_DESCRIPTION")
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER "cd $_SESSION_DIRECTORY_Q" C-m
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". ~/.zshrc_${{SESSION_TYPE}}_${{SESSION_NAME}}" C-m
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $KANBAN_HELPERS" C-m
-    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $AITEAMFORGE_DIR/$SESSION_TYPE/scripts/$SESSION_TYPE-banner.sh \\"$SESSION_THEME\\" \\"$SESSION_TYPE\\" \\"$SESSION_NAME\\" \\"$TERMINAL_NUMBER\\" \\"$TERMINAL_NAME\\" \\"$SESSION_DESCRIPTION\\" \\"$SESSION_LOCATION\\" \\"$SESSION_DEVELOPER\\" \\"$SESSION_ROLE\\" \\"$TERMINAL_DESCRIPTION\\"" C-m
+    # Every arg below is a pre-quoted single token (printf %q output) --
+    # passed UNQUOTED here, exactly like `cd $_SESSION_DIRECTORY_Q` above,
+    # since each is already one shell word with its own internal escaping.
+    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $AITEAMFORGE_DIR/$SESSION_TYPE/scripts/$SESSION_TYPE-banner.sh $_SESSION_THEME_Q $_SESSION_TYPE_Q $_SESSION_NAME_Q $_TERMINAL_NUMBER_Q $_TERMINAL_NAME_Q $_SESSION_DESCRIPTION_Q $_SESSION_LOCATION_Q $_SESSION_DEVELOPER_Q $_SESSION_ROLE_Q $_TERMINAL_DESCRIPTION_Q" C-m
 }}
 
 # ============================================================================
@@ -1646,7 +1738,7 @@ if [ $? != 0 ]; then
     $TMUX_CMD set -t $SESSION_CODE status-left "  $SESSION_NAME "
     # Set session-specific variables for dynamic status-right
     $TMUX_CMD set -t $SESSION_CODE @developer "$SESSION_DEVELOPER"
-    $TMUX_CMD set -t $SESSION_CODE @claude_agent "{character}"
+    $TMUX_CMD set -t $SESSION_CODE @claude_agent "{character_esc}"
     $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | 🖥  $DISPLAY_HOST  "
     $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour{bg_code},fg=colour255"
     $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour{accent_code},fg=colour255,bold"
@@ -1666,7 +1758,7 @@ if [ $? != 0 ]; then
     echo "{team_id.title()} {terminal_id.title()} initialized"
     echo ""
     echo "--> {len(win_names)} command stations active"
-    echo "--> {developer} reporting for duty"
+    echo "--> $SESSION_DEVELOPER reporting for duty"
     echo ""
     sleep 1
 fi
@@ -1732,6 +1824,12 @@ for pfile in persona_files:
     windows = agent_windows.get(terminal_id) or []
 
     script_text = generate_script(terminal_id, character, identity, windows, frontmatter, session_desc, location, atf_dir, _session_directory)
+    if script_text is None:
+        # render_dq already printed a per-field ⚠️ warning naming the team
+        # and the offending field (XACA-1229) — skip just this persona,
+        # mirroring the other per-persona `continue`s in this loop, rather
+        # than aborting the whole team's script generation.
+        continue
 
     out_path = scripts_dir / f"{team_id}-{terminal_id}-startup.sh"
 
@@ -3735,6 +3833,48 @@ def parse_core_identity(text):
     return result
 
 # -------------------------------------------------------------------------
+# XACA-1229: escape helpers for persona-sourced text embedded in this
+# zshrc's shell assignments. Independent copy of the helpers in
+# generate_per_agent_startup_scripts() (see the TODO above about extracting
+# a shared persona_parser.py — this is the same duplication, not a new one)
+# because this is a SEPARATE python3 heredoc/process with no access to that
+# one's definitions.
+# -------------------------------------------------------------------------
+def _has_control_chars(s):
+    return any(ord(c) < 0x20 or ord(c) == 0x7f for c in s)
+
+def render_dq(raw, team_id, field_label):
+    """Escape `raw` for embedding in a DOUBLE-quoted shell assignment
+    (VAR="..."). "" for None/empty (legitimate — not every persona field is
+    populated). None (+ stderr warning naming team/field) if `raw` contains
+    a control character; caller must skip whatever this value belongs to."""
+    if not raw:
+        return ""
+    if _has_control_chars(raw):
+        print(f"  ⚠️  {team_id}: {field_label} contains newline/control characters — "
+              f"refusing to embed it in the generated zshrc (XACA-1229)", file=sys.stderr)
+        return None
+    return (
+        raw.replace('\\', '\\\\')
+           .replace('"', '\\"')
+           .replace('`', '\\`')
+           .replace('$', '\\$')
+    )
+
+def render_sq(raw, team_id, field_label):
+    """Escape `raw` for embedding in a SINGLE-quoted shell assignment
+    (VAR='...'): close the quote, escape the quote itself, reopen it — the
+    standard '\\'' technique. "" for None/empty. None (+ stderr warning) if
+    `raw` contains a control character."""
+    if not raw:
+        return ""
+    if _has_control_chars(raw):
+        print(f"  ⚠️  {team_id}: {field_label} contains newline/control characters — "
+              f"refusing to embed it in the generated zshrc (XACA-1229)", file=sys.stderr)
+        return None
+    return raw.replace("'", "'\\''")
+
+# -------------------------------------------------------------------------
 # Build the unset block — omits the current team's own theme var
 # -------------------------------------------------------------------------
 unset_lines = "\n".join(
@@ -3805,9 +3945,25 @@ for pfile in persona_files:
     # Output path: $HOME/.zshrc_<team>_<slug>
     out_path = Path(home_dir) / f".zshrc_{team_id}_{terminal_id}"
 
-    # Escape single quotes in char_name / character for shell safety
-    char_name_safe = char_name.replace("'", "'\\''")
-    character_safe = character.replace("'", "'\\''")
+    # XACA-1229: char_name_safe/character_safe used to be escaped for a
+    # SINGLE-quoted context (' -> '\'') but are embedded below in
+    # DOUBLE-quoted tmux args (`tmux set-option @developer "{{char_name_safe}}"`,
+    # `@claude_agent "{{team_id}}-{{character_safe}}"`) — the wrong escaping for
+    # that context: quotes showed up literally (O'Brien -> O'\''Brien) and "
+    # / ` / $ were never neutralized at all. render_dq escapes for the
+    # context these are actually used in. SESSION_TITLE='{{session_title}}' IS
+    # single-quoted, but had no escaping at all until now.
+    #
+    # A None here means a control character was found (render_dq/render_sq
+    # already printed the warning) — skip this persona's zshrc entirely
+    # rather than emit something unsafe, mirroring the other per-persona
+    # `continue`s in this loop.
+    char_name_safe = render_dq(char_name, team_id, "SESSION_DEVELOPER/@developer (Name)")
+    character_safe = render_dq(character, team_id, "@claude_agent (persona name)")
+    session_title_safe = render_sq(session_title, team_id, "SESSION_TITLE")
+    if None in (char_name_safe, character_safe, session_title_safe):
+        continue
+    session_title = session_title_safe
 
     zshrc = f'''\
 #!/bin/zsh

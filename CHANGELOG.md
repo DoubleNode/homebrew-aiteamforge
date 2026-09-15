@@ -65,6 +65,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   the installed-layout name `serve_image` now tries first); `share/lcars-ui/tests/test_xaca1232_dns_image_dir.py`'s
   docstrings were refreshed to describe the shipped dual-name fix instead of pre-fix TDD framing.
 
+- **XACA-1229** — `libexec/installers/install-team.sh` now escapes persona text in the per-agent startup
+  scripts and zshrc files it generates. Name, Role, Location, Uniform Color, description, persona name,
+  window names, `AITEAMFORGE_DIR` and `THEME_COLOR` were written into double-quoted bash strings unescaped:
+  `Montgomery "Scotty" Scott` lost its quotes, and `Una Chin-Riley ("Number One")` produced a script bash
+  could not parse. Values are now escaped (`\` `"` `` ` `` `$`), and a value with a control character
+  skips that one persona with a warning instead of emitting an unsafe script. The banner line that
+  `send-keys` retypes into the pane now passes all ten args as `printf %q` tokens (same mechanism as
+  XACA-1215's `_SESSION_DIRECTORY_Q`), so the pane's zsh reads each back as one literal argument instead
+  of splitting on a quote or running `$(...)` a second time. The zshrc generator escaped `@developer` /
+  `@claude_agent` for single quotes inside double quotes (`O'Brien` showed as `O'\''Brien`) and did not
+  escape `SESSION_TITLE` at all; both fixed. Existing hosts pick this up on `aiteamforge upgrade`, whose
+  `update_generated_agent_scripts` re-runs the generator for every team with generated scripts. New test:
+  `tests/test-xaca-1229-persona-field-escaping.sh`.
+
 - **XACA-1224** (SECURITY) — `share/scripts/vault-keygen.js` and `share/kanban-hooks/integrations/keychain.py`
   no longer pass the vault private key / credential-store passphrase on `security`'s command line (it was
   printed in a failed-command error and visible via `ps`). The command is now sent to `security -i` on stdin,
