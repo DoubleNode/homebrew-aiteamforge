@@ -266,7 +266,7 @@ R2_OUT="$WORK_DIR/r2.out"
 (
     export HOME="$R2_HOME"
     export AITEAMFORGE_DIR="$R2_HOME/aiteamforge"
-    timeout 20 bash "$FLEET_REPORTER_SH"
+    _xaca1225_portable_timeout 20 bash "$FLEET_REPORTER_SH"
 ) >"$R2_OUT" 2>&1
 if ! grep -q "not configured on this machine" "$R2_OUT" && grep -q "Reporting to" "$R2_OUT"; then
     test_pass
@@ -1146,6 +1146,51 @@ STUBEOF
         test_pass
     else
         test_fail "label=$R15_LABEL arg0=$R15_ARG0; launchctl-log=$(cat "$LAUNCHCTL_LOG" 2>/dev/null); dryrun-out=$(cat "$WORK_DIR/r15-dryrun.out" 2>/dev/null); run1-out=$(cat "$WORK_DIR/r15-run1.out" 2>/dev/null)"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R16 — XACA-1225 review round 3: the migration must NOT report success when
+# `plutil -replace` fails (unwritable plist + dir). It used to print
+# "Migrated" while the old Label stayed, on every upgrade.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "R16: upgrade migration on an unwritable plist warns instead of claiming success"
+if [ ! -s "$_R15_MIGRATE_FN" ]; then
+    test_fail "migration function not extracted (see R15)"
+else
+    R16_DIR="$WORK_DIR/r16-ro"
+    mkdir -p "$R16_DIR"
+    R16_PLIST="$R16_DIR/com.aiteamforge.fleet-reporter.plist"
+    cat >"$R16_PLIST" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.devteam.fleet-reporter</string>
+</dict>
+</plist>
+EOF
+    chmod 444 "$R16_PLIST"
+    chmod 555 "$R16_DIR"
+    (
+        export AITEAMFORGE_SKIP_LAUNCHCTL=1
+        # shellcheck source=/dev/null
+        source "$COMMON_SH"
+        # shellcheck source=/dev/null
+        source "$_R15_MIGRATE_FN"
+        DRY_RUN=false
+        _xaca1225_migrate_fleet_reporter_label "$R16_PLIST"
+    ) >"$WORK_DIR/r16.out" 2>&1
+    chmod 755 "$R16_DIR"
+    chmod 644 "$R16_PLIST"
+    R16_LABEL="$(plutil -extract Label raw -o - "$R16_PLIST" 2>/dev/null)"
+    if [ "$R16_LABEL" != "com.devteam.fleet-reporter" ]; then
+        test_fail "fixture was writable after all (label=$R16_LABEL) -- R16 proves nothing on this filesystem"
+    elif grep -q "Could not migrate" "$WORK_DIR/r16.out" && ! grep -q "Migrated fleet-reporter" "$WORK_DIR/r16.out"; then
+        test_pass
+    else
+        test_fail "expected a 'Could not migrate' warning and no success line; out=$(cat "$WORK_DIR/r16.out")"
     fi
 fi
 

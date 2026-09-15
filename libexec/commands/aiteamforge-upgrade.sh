@@ -3401,6 +3401,24 @@ _xaca1225_migrate_fleet_reporter_label() {
   fi
 
   _aitf_launchctl load "$plist" 2>/dev/null || true
+
+  # Verify, don't assume (review round 3): `plutil -replace` fails on an
+  # unwritable plist, and the `|| true` above would otherwise print success
+  # while the old Label stays, repeated on every upgrade. Re-read both keys.
+  local after_label after_arg0
+  after_label="$(plutil -extract Label raw -o - "$plist" 2>/dev/null || true)"
+  after_arg0="$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null || true)"
+  if { [ "$needs_label_fix" = "true" ] && [ "$after_label" != "com.aiteamforge.fleet-reporter" ]; } \
+     || { [ "$needs_interp_fix" = "true" ] && [ "$after_arg0" != "/bin/bash" ]; }; then
+    print_warning "Could not migrate fleet-reporter LaunchAgent plist (Label='${after_label:-?}', interpreter='${after_arg0:-?}'): $plist"
+    print_info "  Fix by hand: plutil -replace Label -string com.aiteamforge.fleet-reporter \"$plist\", then unload and load it"
+    return 0
+  fi
+  if [ "${AITEAMFORGE_SKIP_LAUNCHCTL:-}" != "1" ] && type _xaca0734_launchctl_is_loaded >/dev/null 2>&1 \
+     && ! _xaca0734_launchctl_is_loaded "com.aiteamforge.fleet-reporter"; then
+    print_warning "Migrated fleet-reporter LaunchAgent plist, but com.aiteamforge.fleet-reporter is not registered with launchd: $plist"
+    return 0
+  fi
   print_success "Migrated fleet-reporter LaunchAgent plist (Label/interpreter): $plist"
   return 0
 }

@@ -43,6 +43,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   beside the new one. Upgrade migrates an installed plist's Label in place (and swaps a missing
   `/opt/homebrew/bin/bash` for `/bin/bash`) without touching `EnvironmentVariables`. The reporter resolves
   `msg-store.py` with the same ordered candidates as `msg-client.sh`, and its relay-only log line is accurate.
+  Review round 3: the Label migration re-reads the plist and warns instead of printing success when
+  `plutil -replace` fails (R16), and R2 uses the portable timeout.
 
 
 - **XACA-1233** — `share/scripts/lcars-health-check.sh`: added `_LCARS_INFRA` row
