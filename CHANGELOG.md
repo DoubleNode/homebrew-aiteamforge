@@ -18,6 +18,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Review round 1: the last-known-good roster is not rewritten when `lcars_ports.py` exits non-zero, a
   supervised team has no port line, or the temp-file write fails; the roster notes and a `--daemon` start-up
   warning now say a long-running daemon must be restarted after the registry is repaired.
+  Review round 2: a host with no supervised team now writes its header-only ("known empty") roster instead of
+  logging a false write failure every sweep.
   (Canonical sources are dev-team `lcars-health-check.sh` and `kanban-hooks/lcars_host_roster.py`.)
 - **XACA-1221** — LCARS team logos and avatars are now resolved and refreshed correctly on an
   installed (non-dev) box:

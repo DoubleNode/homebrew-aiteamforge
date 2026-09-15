@@ -251,8 +251,14 @@ _hc_write_roster_lkg() {
         log "⚠️  roster: mktemp failed in ${_dir} — last-known-good roster not updated this sweep"
         return 1
     fi
-    if ! { printf '# written %s registry=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$_HC_ROSTER_PATH"
-        [[ -n "$_HC_EFFECTIVE_LOOKUP" ]] && printf '%s\n' "$_HC_EFFECTIVE_LOOKUP"
+    # XACA-1223 review round 2: the group's status must be "header written AND
+    # (no lookup lines, or lookup lines written)". A bare `[[ -n ]] && printf`
+    # as the group's LAST command returned 1 for an empty lookup, so a
+    # successful header-only ("known empty") write was reported as failed and
+    # never persisted; and a failed header printf was masked by a successful
+    # second printf.
+    if ! { printf '# written %s registry=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$_HC_ROSTER_PATH" \
+        && { [[ -z "$_HC_EFFECTIVE_LOOKUP" ]] || printf '%s\n' "$_HC_EFFECTIVE_LOOKUP"; }
     } > "$_tmp"; then
         log "⚠️  roster: write to temp file ${_tmp} failed — last-known-good roster not updated this sweep"
         rm -f "$_tmp" 2>/dev/null
