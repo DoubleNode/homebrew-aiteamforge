@@ -190,7 +190,17 @@ display_agent_avatar() {
             case "$team" in
                 *[!a-z0-9_-]*) ;;
                 *)
-                    if grep -Eq "^[[:space:]]*\"?${team}:" "${_DAA_SELF:-}" 2>/dev/null; then
+                    # XACA-1230: anchor to the case-ARM shape (team: prefix ...
+                    # closing paren), not a bare "team:" prefix — the bare form
+                    # also matched non-arm lines further down, e.g. the embedded
+                    # Python heredoc's "try:"/"else:"/"except:". Requiring a ")"
+                    # later on the same line is a cheap, reliable arm signature:
+                    # every real arm above closes its pattern list with ")"
+                    # before its commands, and none of the false-positive lines
+                    # do. $team is safe to splice unescaped into the ERE here —
+                    # the case guard just above already restricts it to
+                    # [a-z0-9_-], none of which are ERE metacharacters.
+                    if grep -Eq "^[[:space:]]*\"?${team}:.*\)" "${_DAA_SELF:-}" 2>/dev/null; then
                         echo "display_agent_avatar: no avatar mapping for '${team}:${developer_name}' — panel will show initials (add an arm in scripts/display-agent-avatar.sh)" >&2
                     fi
                     ;;

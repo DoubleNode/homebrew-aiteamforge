@@ -7,6 +7,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1230** — `share/scripts/display-agent-avatar.sh`: the catch-all's "no avatar mapping" warning-scope
+  self-grep is now anchored to the case-ARM shape (`team:` prefix followed by a closing `)` on the same line)
+  instead of a bare `team:` prefix, so the embedded Python heredoc's `try:`/`else:`/`except:` lines no longer
+  count as arms (no false warning for a team named `try`, `else` or `except`). Mirror of dev-team canonical
+  `scripts/display-agent-avatar.sh`.
 - **XACA-1231** — finance ships its 6 terminal logos (`finance_{bar,fca,lcars,nagus,vault,workshop}_logo.png`,
   256x256) under `share/terminals/finance/logos/`, matching every other team's deployed-only layout (no
   `originals/`). Previously finance shipped no tap-side logos at all, so consumers 404'd on
