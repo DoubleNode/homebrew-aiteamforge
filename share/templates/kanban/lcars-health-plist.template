@@ -1,5 +1,63 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.aiteamforge.lcars-health.plist — TEMPLATE
+
+  Canonical source:  scripts/templates/lcars-health-plist.template   (dev-team)
+  Tap mirror:        share/templates/kanban/lcars-health-plist.template
+  Rendered by:       install_lcars_health_launchagent() in
+                      homebrew-tap/libexec/installers/install-kanban.sh (fresh
+                      install; its sed chain resolves only USER_HOME and
+                      AITEAMFORGE_DIR) AND _render_launchagent_template() in
+                      homebrew-tap/libexec/lib/launchagents.sh (aiteamforge
+                      upgrade / doctor fix; full chain). Every placeholder
+                      below is AITEAMFORGE_DIR, the one token BOTH renderers
+                      resolve. Token names in this comment appear WITHOUT
+                      doubled braces on purpose, so a "no surviving
+                      placeholder" render gate cannot match the comment.
+
+  ── PROVENANCE (XACA-1233-013) ─────────────────────────────────────────
+  Until XACA-1233-013 this template was TAP-NATIVE (no dev-team canonical,
+  no sync-tap.sh entry). It became canonical here because its log sink and
+  lcars-health-check.sh's rotation target (a canonical, tap-mirrored
+  script) must change TOGETHER, through one mirror two-step. Same shape as
+  host-ready-plist.template beside it; do not move it back tap-side-only.
+
+  ── LOG SINK: why not /tmp, why not the logs subdirectory ───────────────
+  The tap job used to write stdout to /tmp/lcars-health.log — the SAME file
+  the dev-native com.devteam.lcars-health job writes (two jobs, one sink;
+  docs/xaca-0787-plist-log-paths.md). The sink is now scoped to the install
+  root, and three values are rendered from the one AITEAMFORGE_DIR token so
+  they cannot drift apart:
+    StandardOutPath                      the file launchd appends stdout to
+    StandardErrorPath                    the SAME file (see below)
+    EnvironmentVariables:LCARS_HEALTH_LOG  what lcars-health-check.sh ROTATES
+  The script rotates LOG_FILE but never writes it; if the plist and the
+  script disagree, one file is rotated while the real sink grows unbounded.
+
+  The file sits BESIDE the program (install root), not in the install
+  root's logs subdirectory. launchd does NOT create a missing parent
+  directory for StandardOutPath — the job simply fails to spawn — and
+  neither renderer creates that subdirectory for this agent; on a fresh
+  install this agent is loaded BEFORE install_auto_upgrade_launchagent
+  first creates it. /tmp was originally chosen precisely because it always
+  exists (XACA-0651 note in install-kanban.sh). The install root keeps that
+  guarantee structurally: ProgramArguments lives in the same directory, so
+  if launchd can find the program it can open the sink.
+
+  stderr joins stdout (previously /tmp/lcars-health-error.log) so that
+  lcars-health-check.sh's size rotation covers every byte this job emits,
+  and nothing is left behind in a world-shared /tmp that a second user on
+  the same Mac could not open. Same single-file choice as the dev-native
+  job and host-ready-plist.template.
+
+  Transition safety: a box whose plist predates this template sets no
+  LCARS_HEALTH_LOG, so the refreshed script keeps rotating /tmp — exactly
+  where that old plist still writes. `aiteamforge upgrade` refreshes the
+  script (update_aux_scripts) BEFORE re-rendering this plist
+  (update_launchagents), which rewrites an existing plist whenever the
+  render differs.
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -12,9 +70,14 @@
     <key>StartInterval</key>
     <integer>300</integer>
     <key>StandardOutPath</key>
-    <string>/tmp/lcars-health.log</string>
+    <string>{{AITEAMFORGE_DIR}}/lcars-health.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/lcars-health-error.log</string>
+    <string>{{AITEAMFORGE_DIR}}/lcars-health.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LCARS_HEALTH_LOG</key>
+        <string>{{AITEAMFORGE_DIR}}/lcars-health.log</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

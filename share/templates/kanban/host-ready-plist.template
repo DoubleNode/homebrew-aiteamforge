@@ -25,10 +25,11 @@
 
   ── WHY THIS FILE'S PROVENANCE DIVERGES FROM ITS share/templates/kanban/
      SIBLINGS — DO NOT "FIX" THIS BACK ───────────────────────────────────
-  backup-plist.template, lcars-health-plist.template and
-  cr-confluence-poller-plist.template are TAP-NATIVE: they have no dev-team
-  canonical source and no sync-tap.sh entry (verified — grep for their
-  basenames in sync-tap.sh returns nothing). This file is deliberately NOT
+  backup-plist.template and cr-confluence-poller-plist.template are
+  TAP-NATIVE: they have no dev-team canonical source and no sync-tap.sh
+  entry (verified — grep for their basenames in sync-tap.sh returns
+  nothing). lcars-health-plist.template was tap-native too until
+  XACA-1233-013 made it canonical beside this file. This file is deliberately NOT
   like them, per the XACA-0340 canonical-source rule and this ticket's own
   mandate: it lives here, in dev-team, as the single source of truth, and is
   mirrored to the tap by an explicit `sync_file` line in sync-tap.sh. A

@@ -19700,9 +19700,21 @@ lcars-daemon() {
 }
 
 # View recent health check logs
+# XACA-1233-013: the tap's com.aiteamforge.lcars-health LaunchAgent now writes
+# to $AITEAMFORGE_DIR/lcars-health.log; the dev-native com.devteam job, a tap
+# plist not yet re-rendered by `aiteamforge upgrade`, and crontab/manual runs
+# still write /tmp/lcars-health.log. Show whichever existing candidate was
+# written most recently — that is the live sink on this machine.
 lcars-logs() {
     local lines="${1:-50}"
-    local log_file="/tmp/lcars-health.log"
+    local log_file="" _lh_cand
+    for _lh_cand in ${AITEAMFORGE_DIR:+"${AITEAMFORGE_DIR}/lcars-health.log"} "/tmp/lcars-health.log"; do
+        [[ -f "$_lh_cand" ]] || continue
+        if [[ -z "$log_file" || "$_lh_cand" -nt "$log_file" ]]; then
+            log_file="$_lh_cand"
+        fi
+    done
+    [[ -n "$log_file" ]] || log_file="/tmp/lcars-health.log"
     if [[ -f "$log_file" ]]; then
         tail -n "$lines" "$log_file"
     else

@@ -36,6 +36,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   measured from `medical-startup.sh` and its `SESSION_PREFIX`; the team was previously
   registered but absent from every health roster line. Mirror of dev-team canonical
   `lcars-health-check.sh`.
+- **XACA-1233-018** — `share/scripts/lcars-health-check.sh`: `finance-personal` / `legal-coparenting`
+  `_LCARS_INFRA` rows now name tmux sockets `finance` / `legal` (what `finance-startup.sh` /
+  `legal-startup.sh` actually create) instead of the per-instance ids, so a restart recreates the
+  LCARS terminal session on the team's real tmux server. Mirror of dev-team canonical.
+- **XACA-1233-013** — `share/templates/kanban/lcars-health-plist.template` (now mirrored from dev-team canonical
+  `scripts/templates/lcars-health-plist.template`; previously tap-native): `StandardOutPath` and
+  `StandardErrorPath` move from `/tmp/lcars-health.log` / `/tmp/lcars-health-error.log` to
+  `{{AITEAMFORGE_DIR}}/lcars-health.log`, and a new `EnvironmentVariables:LCARS_HEALTH_LOG` passes that same path.
+  `share/scripts/lcars-health-check.sh` rotates `$LCARS_HEALTH_LOG` when it is set, and otherwise keeps the `/tmp`
+  default, so a plist that `aiteamforge upgrade` has not yet re-rendered stays consistent. This ends the shared
+  sink with the dev-native `com.devteam.lcars-health` job. `share/templates/kanban/kanban-helpers.template.sh`
+  `lcars-logs` now tails the most recently written of the two sinks. Mirror of dev-team canonical
+  `lcars-health-check.sh`, `scripts/templates/lcars-health-plist.template` and `scripts/templates/host-ready-plist.template`
+  (comment only), plus a hand port of `kanban-helpers.sh` `lcars-logs`.
 - **XACA-1228** — retired the "Pre-initialize agent panel JSON files" block from
   `share/templates/team-startup.sh.template` and `team-project-startup.sh.template`, and deleted
   `share/scripts/init-agent-panel-json.py` (tap-native; no dev-team canonical). That script ran on every master

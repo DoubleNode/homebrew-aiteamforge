@@ -29,7 +29,36 @@ if [[ -z "${AITEAMFORGE_DIR:-}" ]]; then
 fi
 DEV_TEAM_DIR="$AITEAMFORGE_DIR"
 LCARS_UI_DIR="$AITEAMFORGE_DIR/lcars-ui"
+# XACA-1233-013: LOG_FILE is the file rotate_log_if_needed() rotates. This
+# script never opens it for writing — its content arrives via whoever
+# redirects our stdout (the LaunchAgent's StandardOutPath, or a crontab
+# `>> file`). So LOG_FILE is only correct if it names THAT file, and the only
+# party that knows it is the caller. The tap's com.aiteamforge.lcars-health
+# plist (canonical: scripts/templates/lcars-health-plist.template) therefore
+# passes LCARS_HEALTH_LOG in its EnvironmentVariables, rendered from the SAME
+# {{AITEAMFORGE_DIR}} token as its StandardOutPath, so the two cannot drift.
+#
+# Why an env var and not a path derived here from AITEAMFORGE_DIR/_SCRIPT_DIR:
+# a derived path would move the rotation target on every box the moment this
+# script is refreshed, while any plist not yet re-rendered still sends stdout
+# to /tmp — a split sink (rotate one file, grow the other unbounded). With the
+# env var, every caller that does not set it (a pre-XACA-1233 tap plist, the
+# dev-native com.devteam.lcars-health job, crontab, a manual run) keeps the
+# historical /tmp default, which is exactly where those callers still write.
+# Full reasoning: docs/xaca-0787-plist-log-paths.md (§ "Why a plist-only fix
+# does not actually work" and the XACA-1233-013 section at its end).
+#
+# A set-but-unusable value (relative path, or a trailing slash that names a
+# directory) falls back to /tmp loudly on stderr rather than rotating
+# something nobody writes to.
 LOG_FILE="/tmp/lcars-health.log"
+if [[ -n "${LCARS_HEALTH_LOG:-}" ]]; then
+    if [[ "$LCARS_HEALTH_LOG" == /* && "$LCARS_HEALTH_LOG" != */ ]]; then
+        LOG_FILE="$LCARS_HEALTH_LOG"
+    else
+        echo "WARNING: LCARS_HEALTH_LOG='$LCARS_HEALTH_LOG' is not an absolute file path; rotating $LOG_FILE instead." >&2
+    fi
+fi
 STATUS_ONLY=false
 DAEMON_MODE=false
 DAEMON_INTERVAL=60  # Check every 60 seconds in daemon mode
@@ -128,6 +157,28 @@ done
 # below). tests/test_xaca1223_supervision_rows.py fails when a DEFAULT_TEAMS
 # team is neither given a row nor explicitly classified as unsupervised.
 # Use 0 for funnel_port if the team is not Tailscale-funneled.
+#
+# XACA-1233-018: finance-personal/legal-coparenting's tmux_socket field used
+# to repeat the row's own team id ("finance-personal"/"legal-coparenting"),
+# but neither startup script ever creates a socket with that name —
+# finance-startup.sh:59 sets TMUX_SOCKET="finance" and legal-startup.sh:94
+# sets TMUX_SOCKET="legal" (the shared per-team socket, session-prefixed by
+# project — e.g. session "finance-personal-lcars" lives ON socket
+# "finance"). Measured live on M4Mini (2026-09-15): the `finance` socket is
+# up and holds finance-personal-lcars; no `finance-personal` socket exists.
+# The stale value only mattered on a restart: _hc_start_lcars_server passes
+# tmux_socket straight to ensure_lcars_tmux_session (scripts/
+# lcars-launch-helpers.sh), which recreated the LCARS terminal session on a
+# nonexistent per-instance socket — orphaned from the real `tmux -L
+# finance`/`legal` server the team's own tooling and the fleet reporter
+# enumerate. The server process itself was unaffected (start_lcars_server
+# never touches tmux). Same defect class as XACA-0866 (finance-personal-
+# connect.sh baked TMUX_SOCKET=instance-id while startup uses the
+# team-base socket). ensure_lcars_tmux_session only ever calls
+# has-session/new-session on the target socket (never kill-session/
+# kill-server), so pointing at the shared team socket is non-destructive:
+# it either no-ops (session already present) or adds a new session
+# alongside whatever else already lives on that socket.
 declare -a _LCARS_INFRA=(
     "8443:ios:ios:ios-lcars"
     "8444:android:android:android-lcars"
@@ -135,8 +186,8 @@ declare -a _LCARS_INFRA=(
     "8446:academy:academy:academy-lcars"
     "8447:dns:dns:dns-lcars"
     "8449:command:command:command-lcars"
-    "0:finance-personal:finance-personal:finance-personal-lcars"
-    "0:legal-coparenting:legal-coparenting:legal-coparenting-lcars"
+    "0:finance-personal:finance:finance-personal-lcars"
+    "0:legal-coparenting:legal:legal-coparenting-lcars"
     "0:medical-general:medical:medical-general-lcars"
     "0:spacedock:spacedock:spacedock-lcars"
 )
