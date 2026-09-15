@@ -13,7 +13,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   dev-team's `dns-framework/terminals/logos/` and `dns-framework/personas/avatars/` canonical
   sources (`originals/` excluded, matching every other team's convention). These assets sit
   outside `sync-tap.sh`'s mapped set — like every other team's logos/avatars, they are tap-native
-  files with no `sync_file`/`sync_dir` entry, so no script change was needed.
+  files with no `sync_file`/`sync_dir` entry, so no script change was needed. `share/lcars-ui/server.py`'s
+  `serve_image` now also tries the `dns` directory name (installed layout) alongside `dns-framework`
+  (dev tree) for each candidate root, with a mirrored regression test.
 
 - **XACA-1224** (SECURITY) — `share/scripts/vault-keygen.js` and `share/kanban-hooks/integrations/keychain.py`
   no longer pass the vault private key / credential-store passphrase on `security`'s command line (it was

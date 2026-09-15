@@ -16774,12 +16774,48 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         kept as its own method so callers read "give me the base brand"
         rather than "split this string and take element 0, discarding the
         project-params tail". `dns` is the one base brand this does NOT
-        fully resolve for every caller: it stays 'dns' here (matching the
-        appicons/dns/ master directory), but serve_image further maps that
-        to the 'dns-framework' dev-team subdirectory locally, since that's
-        an unrelated on-disk-layout quirk, not a base-brand question.
+        fully resolve into a single on-disk directory name for every
+        caller: it stays 'dns' here (matching the appicons/dns/ master
+        directory, and also the installed layout's on-disk directory —
+        the tap TEAM_ID a Homebrew-provisioned box writes assets under).
+        A developer's ~/dev-team checkout is the one place that uses a
+        different name, 'dns-framework', for the same base brand — an
+        on-disk-layout quirk, not a base-brand question, so serve_image()
+        tries both names per candidate root instead of rewriting this
+        return value (XACA-1232; see _team_dir_candidates() below).
         """
         return _split_team_id(team)[0]
+
+    # XACA-1232: on-disk directory name(s), beyond the base brand itself, to
+    # try for a given base-brand team. 'dns' is the only entry: the
+    # installed layout (a Homebrew-tap-provisioned box) lays dns's logos/
+    # avatars under a directory literally named 'dns' (its tap TEAM_ID —
+    # see homebrew-tap/share/teams/dns.conf and aiteamforge-setup.sh /
+    # aiteamforge-upgrade.sh's update_team_image_assets()), while a
+    # developer's ~/dev-team checkout keeps dns's working tree under a
+    # sibling directory named 'dns-framework'. Keyed by base brand (the
+    # _resolve_base_team() return value), not by raw team id, so it
+    # composes with that method rather than duplicating its collapsing
+    # rules. One small, named place for this — see _team_dir_candidates().
+    _DNS_TEAM_DIR_ALT_NAMES = ('dns-framework',)
+
+    @classmethod
+    def _team_dir_candidates(cls, base_team: str) -> tuple:
+        """Ordered on-disk directory names to try for a base-brand team.
+
+        Almost always just (base_team,). 'dns' is the one exception
+        (XACA-1232) — see _DNS_TEAM_DIR_ALT_NAMES above for why. serve_image()
+        tries every root from _image_candidate_roots() in order, and within
+        EACH root tries every name this returns in order (installed-layout
+        name first, legacy dev-tree name second): a worktree-launched dev
+        server (whose root1 is the worktree root, which has dns-framework/)
+        still resolves, and an installed box (root1/root2 =
+        <install>/dns/...) resolves too — neither root needs to know in
+        advance which name applies.
+        """
+        if base_team == 'dns':
+            return (base_team,) + cls._DNS_TEAM_DIR_ALT_NAMES
+        return (base_team,)
 
     @staticmethod
     def _resolve_contained_path(root, *parts):
@@ -16949,17 +16985,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         team, name, img_type = match.groups()
 
-        # Map team names to actual directory names. XACA-0992: the
+        # Map team names to actual directory name(s). XACA-0992: the
         # freelance-/legal-/medical-/finance- collapsing lives in the shared
         # _resolve_base_team() (see comment above it) so this and
-        # serve_appicon() can't drift apart. 'dns' is the one exception:
-        # its base brand IS 'dns' (that's the appicon master's directory
-        # name), but its dev-team logos/avatars physically live under
-        # 'dns-framework' — a serve_image-only on-disk quirk, applied here
-        # on top of the shared resolution rather than folded into it.
-        team_dir = self._resolve_base_team(team)
-        if team_dir == 'dns':
-            team_dir = 'dns-framework'
+        # serve_appicon() can't drift apart. XACA-1232: 'dns' is still the
+        # one exception, but it's no longer a single unconditional rewrite
+        # applied to every root — the installed layout and a developer's
+        # ~/dev-team checkout use DIFFERENT on-disk directory names for the
+        # same base brand (see _team_dir_candidates()'s docstring above), so
+        # the candidate-root loop below tries EACH name in team_dirs under
+        # every root, rather than one name substituted for all of them.
+        base_team = self._resolve_base_team(team)
+        team_dirs = self._team_dir_candidates(base_team)
 
         if img_type == 'logo':
             # Logos: {team}/terminals/logos/{team}_{terminal}_logo.png
@@ -16970,23 +17007,32 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             sub = ("personas", "avatars")
 
         # If team was mapped (e.g., legal-coparenting -> legal), also try
-        # filenames with the mapped team prefix (e.g., legal_crane_avatar.png)
+        # filenames with the mapped team prefix (e.g., legal_crane_avatar.png).
+        # XACA-1232: derived from base_team, the BASE-BRAND collapse, never
+        # from whichever on-disk team_dir happens to be tried below — 'dns'
+        # has no alt filename (base_team == team for a dns request; only its
+        # on-disk directory name varies), so deriving this from team_dir
+        # would produce the nonsense 'dns-framework_lcars_logo.png'.
         alt_filename = None
-        if team_dir != team:
-            alt_filename = filename.replace(team + '_', team_dir + '_', 1)
+        if base_team != team:
+            alt_filename = filename.replace(team + '_', base_team + '_', 1)
         names = [filename] + ([alt_filename] if alt_filename else [])
 
         # XACA-1221: try each candidate root in turn (installed layout,
         # then $AITEAMFORGE_DIR, then ~/dev-team — see
-        # _image_candidate_roots()'s docstring). Within a root, preserve
-        # today's exact semantics: PNG candidates are tried filename-then-
-        # alt (first one that EXISTS wins, regardless of validity), and
+        # _image_candidate_roots()'s docstring). XACA-1232: within a root,
+        # also try each on-disk team directory name in team_dirs order
+        # (installed-layout name first, legacy dev-tree name second — see
+        # _team_dir_candidates()'s docstring). Preserve today's exact
+        # per-(root, team_dir) semantics: PNG candidates are tried filename-
+        # then-alt (first one that EXISTS wins, regardless of validity), and
         # only if that candidate's magic bytes are invalid — or no PNG
         # candidate exists at all — do we fall to the SVG candidates
-        # (same filename-then-alt order). The first root that produces
-        # EITHER a valid PNG or an existing SVG wins outright; a root with
-        # only an invalid-magic PNG and no SVG falls through to the next
-        # root, exactly as it fell through to SVG before this ticket.
+        # (same filename-then-alt order). The first (root, team_dir) pair
+        # that produces EITHER a valid PNG or an existing SVG wins outright,
+        # over both loop levels; a pair with only an invalid-magic PNG and
+        # no SVG falls through to the next team_dir, then the next root,
+        # exactly as it fell through to SVG before this ticket.
         #
         # XACA-0992 SECURITY: `filename`/`alt_filename` are already
         # traversal-free by construction — they matched the
@@ -17000,47 +17046,60 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         file_path = None
         content_type = None
         for root in self._image_candidate_roots():
-            base_dir = root.joinpath(team_dir, *sub)
+            for team_dir in team_dirs:
+                base_dir = root.joinpath(team_dir, *sub)
 
-            # is_file(), not exists(): a DIRECTORY named like the image used
-            # to reach the magic-byte open() below and raise an uncaught
-            # IsADirectoryError (pre-existing, found in XACA-1221-005). A
-            # non-file now falls through exactly like a missing one.
-            #
-            # The whole per-root probe is exception-safe (PR #900 review):
-            # an unreadable dir/file (PermissionError), or resolve() hitting a
-            # symlink loop (RuntimeError before Python 3.13), skips THIS root
-            # instead of aborting the request — a broken root must not hide
-            # a good asset in the next one.
-            try:
-                png_path = None
-                for n in names:
-                    candidate = self._resolve_contained_path(base_dir, n)
-                    if candidate is not None and candidate.is_file():
-                        png_path = candidate
-                        break
-
-                if png_path is not None:
-                    with open(png_path, 'rb') as f:
-                        header = f.read(8)
-                        # PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
-                        if header[:4] == b'\x89PNG':
-                            file_path = png_path
-                            content_type = 'image/png'
+                # is_file(), not exists(): a DIRECTORY named like the image
+                # used to reach the magic-byte open() below and raise an
+                # uncaught IsADirectoryError (pre-existing, found in
+                # XACA-1221-005). A non-file now falls through exactly like
+                # a missing one.
+                #
+                # The whole per-(root, team_dir) probe is exception-safe
+                # (PR #900 review): an unreadable dir/file (PermissionError),
+                # or resolve() hitting a symlink loop (RuntimeError before
+                # Python 3.13), skips THIS (root, team_dir) pair instead of
+                # aborting the request — a broken pair must not hide a good
+                # asset in the next one.
+                try:
+                    png_path = None
+                    for n in names:
+                        candidate = self._resolve_contained_path(base_dir, n)
+                        if candidate is not None and candidate.is_file():
+                            png_path = candidate
                             break
 
-                svg_path = None
-                for n in names:
-                    candidate = self._resolve_contained_path(base_dir, n[:-4] + '.svg')
-                    if candidate is not None and candidate.is_file():
-                        svg_path = candidate
-                        break
-            except (OSError, RuntimeError):
-                continue
+                    if png_path is not None:
+                        with open(png_path, 'rb') as f:
+                            header = f.read(8)
+                            # PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
+                            if header[:4] == b'\x89PNG':
+                                file_path = png_path
+                                content_type = 'image/png'
+                                break  # inner (team_dir) loop only
 
-            if svg_path is not None:
-                file_path = svg_path
-                content_type = 'image/svg+xml'
+                    svg_path = None
+                    for n in names:
+                        candidate = self._resolve_contained_path(base_dir, n[:-4] + '.svg')
+                        if candidate is not None and candidate.is_file():
+                            svg_path = candidate
+                            break
+                except (OSError, RuntimeError):
+                    continue
+
+                if svg_path is not None:
+                    file_path = svg_path
+                    content_type = 'image/svg+xml'
+                    break  # inner (team_dir) loop only
+
+            if file_path is not None:
+                # A valid PNG or an existing SVG was found under one of
+                # this root's team_dirs — stop trying further team_dirs
+                # AND further roots. Without this, a hit on team_dirs'
+                # second name (e.g. root1/dns-framework/...) would only
+                # break the inner loop and the outer loop would keep
+                # probing root2/root3, potentially overwriting file_path
+                # with a later, lower-priority match.
                 break
 
         if file_path is None:
