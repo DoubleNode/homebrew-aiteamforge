@@ -92,6 +92,7 @@
 #   Container lifecycle (v2.0 — state + timestamp, atomic — argument starts with CR-):
 #   kb-cr submit  <CR-ID>
 #   kb-cr approve <CR-ID> [--approver <login>] [--approver-name "<name>"]
+#   kb-cr waive-approval <CR-ID> --reason "<text>" [--actor <name>]  [XACA-1239 — evidence only, no crState change]
 #   kb-cr reject  <CR-ID> [--reason "<text>"]
 #   kb-cr hold    <CR-ID> [--reason "<text>"]
 #   kb-cr start-dev  <CR-ID>
@@ -574,7 +575,18 @@ _kb_cr_state_strip_spec() {
         cr-submitted)       printf 'ts\ttimestamps.cr_submitted_at\n' ;;
         cr-rejected)        printf 'ts\ttimestamps.cr_rejected_at\n' ;;
         cr-held)            printf 'ts\ttimestamps.cr_held_at\n' ;;
-        cr-approved)        printf 'ts\ttimestamps.cr_approved_at\nobj\tapprover\n' ;;
+        # XACA-1239 (D7): cr_approval_waived_at + approvalWaiver are stripped
+        # alongside cr_approved_at/approver, not on their own line — a waiver
+        # occupies the SAME evidentiary slot as an approval (D2's OR-group),
+        # so a revert to cr-submitted-or-earlier must remove whichever of the
+        # two is on record, exactly as it removes a real approval. This is
+        # true even though a waived CR's crState never actually passed through
+        # "cr-approved" on its way to implementing/deployed-* — the revert
+        # driver strips every state with rank > target_rank regardless of
+        # which ranks the CR's crState literally visited (see
+        # _kb_cr_states_above_rank), which is why borrowing cr-approved's
+        # strip-spec line is correct rather than needing a rank of its own.
+        cr-approved)        printf 'ts\ttimestamps.cr_approved_at\nobj\tapprover\nts\ttimestamps.cr_approval_waived_at\nobj\tapprovalWaiver\n' ;;
         implementing)       printf 'ts\ttimestamps.cr_started_dev_at\nts\ttimestamps.cr_started_test_at\n' ;;
         deployed-dev)       printf 'ts\ttimestamps.cr_deployed_dev_at\n' ;;
         deployed-prod)      printf 'ts\ttimestamps.cr_deployed_prod_at\n' ;;
@@ -655,13 +667,29 @@ _kb_cr_state_entry_ts_field() {
 #     emergency_justification.
 #   * cr-closed — `kb-cr close` is reachable from any state.
 #
+# OR-GROUP NOTATION (XACA-1239, D2). A line may be a single field
+# ("cr_submitted_at") or a "|"-joined OR-group ("cr_approved_at|cr_approval_waived_at"),
+# meaning ANY ONE of the piped fields being present satisfies that line — not
+# all of them. Today the only OR-group is approval itself: `implementing`,
+# `deployed-dev` and `deployed-prod` accept EITHER a real cr_approved_at OR a
+# recorded cr_approval_waived_at (kb-cr waive-approval — XACA-1239-002) as
+# evidence the CR was deliberately moved forward without approval, not that
+# approval was fabricated. A waiver is new evidence, never a substitute value
+# written into cr_approved_at itself — readers must still be able to tell the
+# two apart (see approvalWaiver in cr-schema.json). Consumers of this map
+# (_kb_cr_missing_evidence here, and the validator/endpoint mirrors below)
+# must split any line on "|" and treat it as satisfied if any member is
+# non-empty; when reporting a gap, report the FULL "a|b" token, not one member.
+#
 # Kept in sync BY HAND with two siblings that answer different questions and
 # must not be merged with this one (same standing caveat as
 # _kb_cr_state_entry_ts_field vs _kb_cr_state_strip_spec):
-#   * scripts/cr-schema-validator.py  EVIDENCE_PREREQS  (check8)
+#   * scripts/cr-schema-validator.py  EVIDENCE_PREREQS  (check8) — same "a|b"
+#     OR-group token notation.
 #   * claude-hooks/damage-control/confluence-cr-guard.py POST_APPROVAL_EVIDENCE
 #     — which DOES include emergency, because it asks "was this page acted on",
-#     not "could the verbs produce this shape".
+#     not "could the verbs produce this shape". (XACA-1239-003 decides whether
+#     a waiver belongs in that tuple.)
 # ─────────────────────────────────────────────────────────────────────────────
 _kb_cr_state_required_evidence() {
     case "$1" in
@@ -671,9 +699,9 @@ _kb_cr_state_required_evidence() {
         cr-rejected)        echo "cr_submitted_at" ;;
         cr-held)            echo "cr_submitted_at" ;;
         cr-approved)        echo "cr_submitted_at" ;;
-        implementing)       printf 'cr_submitted_at\ncr_approved_at\n' ;;
-        deployed-dev)       printf 'cr_submitted_at\ncr_approved_at\n' ;;
-        deployed-prod)      printf 'cr_submitted_at\ncr_approved_at\n' ;;
+        implementing)       printf 'cr_submitted_at\ncr_approved_at|cr_approval_waived_at\n' ;;
+        deployed-dev)       printf 'cr_submitted_at\ncr_approved_at|cr_approval_waived_at\n' ;;
+        deployed-prod)      printf 'cr_submitted_at\ncr_approved_at|cr_approval_waived_at\n' ;;
         emergency-deployed) ;;                      # break-glass, by design
         cr-closed)          ;;                      # reachable from any state
         *)                  return 1 ;;
@@ -686,6 +714,14 @@ _kb_cr_state_required_evidence() {
 # Echo the prerequisite timestamp fields for <state> that are absent or null on
 # .crs[<cr_idx>], space-separated on one line. Empty output means every
 # prerequisite is present (or the state has none). Non-zero exit = bad state.
+#
+# OR-GROUP AWARE (XACA-1239, D2). A line from _kb_cr_state_required_evidence
+# may be a "|"-joined token, e.g. "cr_approved_at|cr_approval_waived_at". That
+# line is satisfied if ANY one of the piped fields is non-empty on
+# .timestamps — it is not an AND across the members. When NONE of the members
+# is present, the FULL token (with the "|") is what gets reported as missing,
+# so a caller can tell "approval (or a recorded waiver)" apart from a single
+# plain field, and so the reporting stays lossless for a multi-member group.
 _kb_cr_missing_evidence() {
     local board_file="$1"
     local cr_idx="$2"
@@ -695,12 +731,26 @@ _kb_cr_missing_evidence() {
     required=$(_kb_cr_state_required_evidence "$state") || return 1
     [[ -z "$required" ]] && return 0
 
-    local field value missing=""
+    local field member value present missing=""
     while IFS= read -r field; do
         [[ -z "$field" ]] && continue
-        value=$(_kb_jq_read "$board_file" \
-            ".crs[$cr_idx].timestamps[\"$field\"] // \"\"" -r 2>/dev/null)
-        if [[ -z "$value" ]]; then
+        present=0
+        # Split "a|b|c" on "|" via a herestring fed by a command substitution
+        # (NOT a pipe into `while read`, which would subshell the loop under
+        # some shells and lose $present). `${field//|/$'\n'}` looks like it
+        # should do this inline, but zsh does not expand the `$'\n'`
+        # quoted-string literal inside a parameter-substitution replacement —
+        # it inserts the literal four characters `$`, `'`, `\`, `n` instead of
+        # a real newline, silently turning every multi-member token into ONE
+        # unsplit member that never matches any real timestamp field. `tr`
+        # avoids that trap entirely.
+        while IFS= read -r member; do
+            [[ -z "$member" ]] && continue
+            value=$(_kb_jq_read "$board_file" \
+                ".crs[$cr_idx].timestamps[\"$member\"] // \"\"" -r 2>/dev/null)
+            [[ -n "$value" ]] && present=1
+        done <<< "$(tr '|' '\n' <<< "$field")"
+        if [[ "$present" -eq 0 ]]; then
             missing="${missing:+$missing }$field"
         fi
     done <<< "$required"
@@ -839,7 +889,7 @@ _kb_cr_stamp_state_entry() {
             echo "_kb_cr_stamp_state_entry: refusing to stamp $ts_field on CR [$cr_id] — could not determine the prerequisite evidence for state '$new_state'." >&2
             echo "  _kb_cr_missing_evidence exited $_me_rc, which means _kb_cr_state_required_evidence does not recognise '$new_state'." >&2
             echo "  That is NOT the same as 'this state has no prerequisites', and it is not safe to treat it as though it were: the answer is unknown, so the write is refused." >&2
-            echo "  If '$new_state' is a legitimate new state, add it to _kb_cr_state_required_evidence (and to _kb_cr_state_entry_ts_field and cr-schema-validator.py's STATE_ENTRY_TS/EVIDENCE_PREREQS) — all four are hand-synced." >&2
+            echo "  If '$new_state' is a legitimate new state, add it to _kb_cr_state_required_evidence (and to _kb_cr_state_entry_ts_field and cr-schema-validator.py's STATE_ENTRY_TS/EVIDENCE_PREREQS) — all four are hand-synced. A prerequisite line may be a plain field or a '|'-joined OR-group such as 'cr_approved_at|cr_approval_waived_at' (XACA-1239, D2) — any one member present satisfies the line." >&2
             echo "  --force does NOT override this, deliberately: --force lets an operator skip evidence they know is missing, but nothing here can tell them what the missing evidence would have been. This is a defect in the state maps, not a decision to make." >&2
             return 1
         fi
@@ -855,6 +905,14 @@ _kb_cr_stamp_state_entry() {
                 printf '%s\n' "$missing" | tr ' ' '\n' | while IFS= read -r _m; do
                     [[ -n "$_m" ]] && echo "    - timestamps.$_m" >&2
                 done
+                # XACA-1239 (D2/D3). "cr_approval_waived_at" only ever appears
+                # here as part of the "cr_approved_at|cr_approval_waived_at"
+                # OR-group, never alone — so this substring match is exactly
+                # "approval is one of the missing lines" and needs no separate
+                # single-field case.
+                if [[ "$missing" == *cr_approval_waived_at* ]]; then
+                    echo "  Approval not recorded — record it with 'kb-cr approve', or record a waiver with 'kb-cr waive-approval <CR> --reason \"...\"'." >&2
+                fi
                 echo "  Writing $ts_field now would create a timestamp for something that did not happen, and nothing downstream can tell a fabricated one from an earned one." >&2
                 echo "  Advance the CR through the verbs that record the evidence (kb-cr submit / approve / …), or re-run with --force to override deliberately — the override is written to the CR activity log." >&2
                 return 1
@@ -1320,6 +1378,198 @@ _kb_cr_container_approve() {
     [[ -n "$approver_login" ]] && approver_msg+=" approver=$approver_login"
     [[ -n "$approver_name" ]]  && approver_msg+=" ($approver_name)"
     echo "kb-cr approve: [$cr_id] cr-submitted -> cr-approved (cr_approved_at=$ts${approver_msg})"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_waive_approval <board_file> <cr_idx> <cr_id> <reason> <actor>
+# (XACA-1239, D1/D2/D3)
+#
+# Records EVIDENCE that approval was deliberately NOT obtained before the CR
+# was moved forward — never writes cr_approved_at or approver. This is what
+# lets `implementing` / `deployed-dev` / `deployed-prod` be reached truthfully
+# when the real approval signal (XACA-0899) is unavailable, without inventing
+# a `cr_approved_at` (see _kb_cr_state_required_evidence's D2 OR-group note).
+#
+# FIXED SIGNATURE — a parallel effort wires this into the LCARS transition
+# endpoint's generated shell script (XACA-1239-004), which already has
+# board_file/cr_idx as shell variables. Board resolution and flag parsing are
+# the CALLER's job (see the `waive-approval)` dispatcher arm below for the
+# CLI path); this function does the guard + the write only.
+#
+# Refuses (return != 0, board is NOT written) when:
+#   2 — <reason> is empty or whitespace-only after trimming. A waiver's
+#       reason IS its audit trail — there is no meaningful default.
+#   3 — crState is not cr-submitted or cr-held (D3). A CR already past
+#       cr-approved has (or should have) real approval evidence; a CR
+#       earlier than cr-submitted has nothing to waive yet.
+#   4 — timestamps.cr_approved_at is already set. A real approval exists —
+#       waiving it would not blend with the approval, it would MASK it.
+#       (Reachable even when crState is cr-held: `kb-cr hold` accepts a
+#       predecessor of cr-approved and does not strip cr_approved_at.)
+#   5 — a waiver is already on record (timestamps.cr_approval_waived_at or
+#       .approvalWaiver present). A waiver is a one-time decision, not a
+#       re-recordable one — re-waiving would silently overwrite the first
+#       reason/actor/timestamp, destroying the original audit trail.
+#   6 — timestamps.cr_submitted_at is missing. Keeps EVIDENCE_PREREQS honest:
+#       cr_approval_waived_at's own row requires cr_submitted_at, same as a
+#       real approval does.
+#   1 — usage error (a required positional is empty) or the board write
+#       itself failed.
+#
+# On success, ONE jq write sets (and nothing else):
+#   .timestamps.cr_approval_waived_at = <ts>
+#   .approvalWaiver = { reason: <trimmed reason>, actor: <actor>, at: <ts> }
+#   .updatedAt = <ts>, .lastUpdated = <ts>
+# crState is NOT touched — D3: "A waiver on its own doesn't change crState."
+#
+# Appends a `cr_approval_waived` activity event (note=reason). Activity
+# append failure is non-fatal, matching every sibling write in this file
+# (_kb_cr_container_approve/reject/hold all do the same with their events).
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_waive_approval() {
+    local board_file="$1"
+    local cr_idx="$2"
+    local cr_id="$3"
+    local reason="$4"
+    local actor="$5"
+
+    if [[ -z "$board_file" || -z "$cr_idx" || -z "$cr_id" ]]; then
+        echo "kb-cr: ERROR: _kb_cr_waive_approval requires <board_file> <cr_idx> <cr_id> <reason> <actor>" >&2
+        return 1
+    fi
+
+    # Trim leading/trailing whitespace so a reason of "   " (present but
+    # blank) is refused exactly like an empty string.
+    local trimmed="${reason#"${reason%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if [[ -z "$trimmed" ]]; then
+        echo "kb-cr waive-approval: --reason is required and cannot be empty or whitespace-only. This is the audit trail for proceeding without approval." >&2
+        return 2
+    fi
+
+    local current_state
+    current_state=$(_kb_cr_container_get_state "$board_file" "$cr_idx")
+    case "$current_state" in
+        cr-submitted) ;;
+        cr-held) ;;
+        *)
+            echo "kb-cr waive-approval: CR '$cr_id' is in state '$current_state'; a waiver may only be recorded from cr-submitted or cr-held." >&2
+            return 3
+            ;;
+    esac
+
+    local existing_approved
+    existing_approved=$(_kb_jq_read "$board_file" \
+        ".crs[$cr_idx].timestamps[\"cr_approved_at\"] // \"\"" -r 2>/dev/null)
+    if [[ -n "$existing_approved" ]]; then
+        echo "kb-cr waive-approval: CR '$cr_id' already has a recorded approval (cr_approved_at=$existing_approved) — refusing to waive an approved CR. A waiver stands in for a missing approval; it is never layered on top of a real one." >&2
+        return 4
+    fi
+
+    local existing_waived existing_waiver_obj
+    existing_waived=$(_kb_jq_read "$board_file" \
+        ".crs[$cr_idx].timestamps[\"cr_approval_waived_at\"] // \"\"" -r 2>/dev/null)
+    existing_waiver_obj=$(_kb_jq_read "$board_file" \
+        ".crs[$cr_idx].approvalWaiver // empty" 2>/dev/null)
+    if [[ -n "$existing_waived" || -n "$existing_waiver_obj" ]]; then
+        echo "kb-cr waive-approval: CR '$cr_id' already has a recorded waiver — a waiver is a one-time decision and is not re-recordable (it would silently overwrite the original reason/actor/timestamp)." >&2
+        return 5
+    fi
+
+    local submitted_at
+    submitted_at=$(_kb_jq_read "$board_file" \
+        ".crs[$cr_idx].timestamps[\"cr_submitted_at\"] // \"\"" -r 2>/dev/null)
+    if [[ -z "$submitted_at" ]]; then
+        echo "kb-cr waive-approval: CR '$cr_id' has no timestamps.cr_submitted_at on record — cannot waive approval for a CR that was never submitted." >&2
+        return 6
+    fi
+
+    local ts
+    ts=$(_kb_cr_timestamp)
+
+    _kb_jq_update "$board_file" '
+        .crs[$cidx].timestamps.cr_approval_waived_at = $ts |
+        .crs[$cidx].approvalWaiver = { reason: $reason, actor: $actor, at: $ts } |
+        .crs[$cidx].updatedAt = $ts |
+        .lastUpdated = $ts
+    ' \
+    --argjson cidx   "$cr_idx" \
+    --arg     ts     "$ts" \
+    --arg     reason "$trimmed" \
+    --arg     actor  "$actor" \
+    || return 1
+
+    local evt
+    evt=$(_kb_cr_activity_event "cr_approval_waived" \
+        "field=cr_approval_waived_at" "note=$trimmed" 2>/dev/null || echo "")
+    if [[ -n "$evt" ]]; then
+        _kb_cr_activity_append "$board_file" "$cr_id" "$evt" 2>/dev/null || true
+    fi
+
+    echo "kb-cr waive-approval: [$cr_id] approval WAIVED (this is NOT an approval) — cr_approval_waived_at=$ts actor=$actor"
+    echo "  reason: $trimmed"
+    return 0
+}
+
+# kb-cr waive-approval <CR-ID> --reason "<text>" [--actor <name>]
+# Predecessor states: cr-submitted, cr-held (D3)
+#
+# CLI entry point for _kb_cr_waive_approval — resolves board/index and parses
+# flags, exactly as _kb_cr_container_approve does for `approve`, then
+# delegates the guard + write to the shared helper (also called directly by
+# the LCARS transition endpoint's generated script, XACA-1239-004). See that
+# function's header comment for the full refusal list and write shape.
+#
+# --actor default: unlike approve's --approver/--approver-name (genuinely
+# optional — left blank if omitted), a waiver's actor is always populated,
+# because the audit trail needs someone to name. There is no existing
+# "acting operator" default among the approve/reject/hold verbs to follow, but
+# this file already has one for exactly this shape of field —
+# _kb_cr_activity_event and _kb_cr_container_revert's revert_history[].actor
+# both default to `${KB_CR_ACTOR:-kb-cr}`. approvalWaiver.actor reuses that
+# same convention rather than inventing a second one.
+_kb_cr_container_waive_approval() {
+    local cr_id="${1:-}"
+    shift 2>/dev/null
+
+    if [[ -z "$cr_id" ]]; then
+        echo "Usage: kb-cr waive-approval <CR-ID> --reason \"<text>\" [--actor <name>]" >&2
+        return 1
+    fi
+
+    local reason="" actor=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --reason)   reason="${2:-}"; shift 2 ;;
+            --reason=*) reason="${1#--reason=}"; shift ;;
+            --actor)    actor="${2:-}"; shift 2 ;;
+            --actor=*)  actor="${1#--actor=}"; shift ;;
+            *) shift ;;
+        esac
+    done
+    actor="${actor:-${KB_CR_ACTOR:-kb-cr}}"
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    if [[ -z "$reason" ]]; then
+        echo "kb-cr waive-approval: --reason is required. This is the audit trail for proceeding without approval." >&2
+        echo "Usage: kb-cr waive-approval <CR-ID> --reason \"<text>\" [--actor <name>]" >&2
+        return 1
+    fi
+
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr waive-approval: CR '$cr_id' not found on board '$_cr_team'." >&2
+        return 1
+    fi
+
+    _kb_cr_waive_approval "$_cr_board" "$cr_idx" "$cr_id" "$reason" "$actor"
+    local rc=$?
+    [[ $rc -eq 0 ]] && echo "  Next: kb-cr transition $cr_id implementing"
+    return $rc
 }
 
 # kb-cr reject <CR-ID> [--reason "<text>"]
@@ -2349,6 +2599,19 @@ kb-cr() {
                 *)    _kb_cr_dispatch_item_lifecycle \
                           approve approving \
                           _kb_cr_container_approve _kb_cr_approve "$@" ;;
+            esac ;;
+        # waive-approval (XACA-1239) is CONTAINER-ONLY — there is no v1
+        # per-item equivalent and none is added here: a waiver is evidence on
+        # the .crs[] record (D1), and v1 single-item CRs predate that record
+        # existing at all. A non-"CR-" argument is refused with guidance
+        # rather than silently routed anywhere.
+        waive-approval)
+            case "${1:-}" in
+                CR-*) _kb_cr_container_waive_approval "$@" ;;
+                *)
+                    echo "kb-cr waive-approval: requires a CR-ID (e.g. CR-TEAM-YYYYMMDD-0001), not an item-id — waive-approval is container-only." >&2
+                    return 1
+                    ;;
             esac ;;
         reject)
             case "${1:-}" in
@@ -5769,6 +6032,18 @@ _kb_cr_help() {
     echo "  approve <CR-ID> [--approver <login>] [--approver-name \"<name>\"]"
     echo "              cr-submitted → cr-approved"
     echo "              Writes timestamps.cr_approved_at + approver{login,name}."
+    echo "  waive-approval <CR-ID> --reason \"<text>\" [--actor <name>]  [XACA-1239]"
+    echo "              cr-submitted|cr-held → (state unchanged)"
+    echo "              Records EVIDENCE that approval was deliberately NOT obtained —"
+    echo "              never writes cr_approved_at or approver. Writes"
+    echo "              timestamps.cr_approval_waived_at + approvalWaiver{reason,actor,at}."
+    echo "              Satisfies the approval prerequisite for implementing /"
+    echo "              deployed-dev / deployed-prod as an OR-group alongside a real"
+    echo "              approval — see 'transition' above. Refused if the CR already"
+    echo "              carries cr_approved_at or an existing waiver, or has no"
+    echo "              cr_submitted_at. --reason is required (non-empty). Container-only"
+    echo "              (CR-ID required) — no v1 per-item form. A stopgap until XACA-0899"
+    echo "              provides a real approval signal."
     echo "  reject  <CR-ID> [--reason \"<text>\"]"
     echo "              cr-submitted|cr-held → cr-rejected"
     echo "              Writes timestamps.cr_rejected_at; increments pushback_count;"

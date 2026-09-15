@@ -101,6 +101,27 @@
         }
       }
     },
+    "approvalWaiver": {
+      "type": "object",
+      "required": false,
+      "description": "XACA-1239 (D1). Recorded evidence that approval was deliberately NOT obtained before the CR was moved forward — a stopgap until XACA-0899 provides a real IT Connect approval signal. Populated by kb-cr waive-approval (XACA-1239-002), never by kb-cr approve. A waiver satisfies the approval prerequisite for implementing / deployed-dev / deployed-prod (see crTimestamps.cr_approval_waived_at and the '|'-joined OR-group notation in _kb_cr_state_required_evidence / EVIDENCE_PREREQS) WITHOUT writing cr_approved_at or approver — readers must be able to tell a waived CR from an approved one by checking which of the two objects/timestamps is present, never by crState alone.",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required, non-empty (after trimming) justification for proceeding without approval. The LCARS modal pre-fills an editable default; the CLI requires --reason."
+        },
+        "actor": {
+          "type": "string",
+          "description": "Login/handle of the operator who recorded the waiver."
+        },
+        "at": {
+          "type": "string",
+          "format": "ISO 8601 UTC",
+          "description": "Timestamp the waiver was recorded. Mirrors (and is written alongside) crTimestamps.cr_approval_waived_at."
+        }
+      }
+    },
     "itemIds": {
       "type": "array",
       "items": { "type": "string" },
@@ -274,6 +295,13 @@
       "format": "ISO 8601 UTC",
       "recorded_when": "crState transitions to cr-approved (kb-cr approve)",
       "stored_on": "crs[] container record"
+    },
+    "cr_approval_waived_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "kb-cr waive-approval is called (XACA-1239-002); does not change crState — only cr-submitted or cr-held CRs with no cr_approved_at and no existing waiver may record one",
+      "stored_on": "crs[] container record",
+      "description": "XACA-1239 (D1/D2). NOT an approval. Satisfies the approval prerequisite for implementing / deployed-dev / deployed-prod as the OR-group 'cr_approved_at|cr_approval_waived_at' (see scripts/kb-cr.sh _kb_cr_state_required_evidence and scripts/cr-schema-validator.py EVIDENCE_PREREQS), without ever being written alongside a fabricated cr_approved_at or approver. A revert to cr-submitted or earlier strips this field (and approvalWaiver) into revert_history alongside cr_approved_at."
     },
     "cr_dev_started_at": {
       "type": "string",

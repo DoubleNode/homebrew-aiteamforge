@@ -30,7 +30,12 @@
  *     Returns { avg, sampleCount, hits, earlies, lates, hitPct, earlyPct, latePct }.
  *
  *   rollupAll(crs, opts)
- *     Convenience wrapper — returns all 8 rollups in one object.
+ *     Convenience wrapper — returns all 8 rollups in one object, plus
+ *     cr_approval_waived_count (XACA-1239).
+ *
+ *   countWaived(crs)
+ *     XACA-1239: count of CRs carrying a recorded approval waiver
+ *     (timestamps.cr_approval_waived_at). Unwindowed — see doc comment.
  *
  * opts shape: { windowDays: number (default 14), now: number (default Date.now()) }
  *
@@ -116,6 +121,23 @@
         var sum = 0;
         for (var i = 0; i < values.length; i++) { sum += values[i]; }
         return sum / values.length;
+    }
+
+    /**
+     * XACA-1239: true when a CR container has a recorded approval waiver
+     * (timestamps.cr_approval_waived_at is present and non-empty).
+     *
+     * A waiver is evidence that approval was NOT received and the CR
+     * proceeded anyway (see approvalWaiver{reason,actor,at}). It must never
+     * be treated as an approval by any derived metric — see the explicit
+     * exclusion in derivePerCR() below and countWaived().
+     *
+     * @param {object} ts - cr.timestamps (already defaulted to {} by callers)
+     * @returns {boolean}
+     */
+    function _isWaived(ts) {
+        var val = ts && ts.cr_approval_waived_at;
+        return val !== null && val !== undefined && val !== '';
     }
 
     /**
@@ -217,6 +239,22 @@
             if (!Object.prototype.hasOwnProperty.call(SEGMENT_PAIRS, key)) { continue; }
             var pair = SEGMENT_PAIRS[key];
             result[key] = _daysBetween(ts[pair[0]], ts[pair[1]]);
+        }
+
+        // XACA-1239: submit_to_approve and approve_to_dev must stay
+        // waiver-free until XACA-0899 delivers a real approval signal.
+        // A waived CR has no cr_approved_at, so both segments above already
+        // come out null from the pair lookup — but that's INCIDENTAL, not a
+        // guarantee: a later back-fill of cr_approved_at onto a waived CR
+        // (D3 notes a real approval after a waiver is out of scope for
+        // XACA-1239, i.e. still possible in the data) would silently
+        // un-exclude it. Force the exclusion explicitly instead of relying
+        // on the missing-timestamp side effect. Also: never start the
+        // approve_to_dev clock at the waiver timestamp — a waiver records
+        // "approval was not received", not a start-of-work event.
+        if (_isWaived(ts)) {
+            result.cr_cycle_submit_to_approve_days = null;
+            result.cr_cycle_approve_to_dev_days = null;
         }
 
         // deploy_estimate_delta_days:
@@ -386,21 +424,53 @@
     }
 
     /**
+     * XACA-1239: count CRs carrying a recorded approval waiver
+     * (timestamps.cr_approval_waived_at). Never label a waiver as an
+     * approval — this is a distinct, additive metric, not a substitute for
+     * any approval count.
+     *
+     * Deliberately NOT filtered through _filterToWindow's completion-anchor
+     * rolling window (unlike rollupSegment/rollupEstimateDelta): a waiver is
+     * a live status recorded while a CR is still at cr-submitted/cr-held,
+     * long before it reaches a completion-class timestamp
+     * (cr_completed_at / cr_deployed_prod_at / cr_emergency_deployed_at).
+     * Windowing on completion here would hide exactly the still-in-flight
+     * waived CRs this metric exists to surface.
+     *
+     * @param {Array} crs - Array of CR container records
+     * @returns {number} count of CRs with a non-empty cr_approval_waived_at
+     */
+    function countWaived(crs) {
+        var count = 0;
+        if (!Array.isArray(crs)) { return count; }
+        for (var i = 0; i < crs.length; i++) {
+            var cr = crs[i];
+            if (!cr || typeof cr !== 'object') { continue; }
+            var ts = (cr.timestamps && typeof cr.timestamps === 'object') ? cr.timestamps : {};
+            if (_isWaived(ts)) { count++; }
+        }
+        return count;
+    }
+
+    /**
      * Convenience wrapper — compute all 8 rollups in a single call.
      *
      * Returns an object keyed by each derived field name, plus a top-level
-     * `estimateDelta` key for the full rollupEstimateDelta result.
+     * `estimateDelta` key for the full rollupEstimateDelta result and a
+     * `cr_approval_waived_count` key (XACA-1239) for the count of CRs
+     * carrying a recorded approval waiver — never counted as an approval.
      *
      * Shape:
      * {
      *   cr_cycle_draft_to_submit_days:         { avg, median, sampleCount },
-     *   cr_cycle_submit_to_approve_days:       { avg, median, sampleCount },
-     *   cr_cycle_approve_to_dev_days:          { avg, median, sampleCount },
+     *   cr_cycle_submit_to_approve_days:       { avg, median, sampleCount },  // waiver-free (XACA-1239)
+     *   cr_cycle_approve_to_dev_days:          { avg, median, sampleCount },  // waiver-free (XACA-1239)
      *   cr_cycle_dev_to_test_days:             { avg, median, sampleCount },
      *   cr_cycle_test_to_deploydev_days:       { avg, median, sampleCount },
      *   cr_cycle_deploydev_to_deployprod_days: { avg, median, sampleCount },
      *   cr_cycle_total_days:                   { avg, median, sampleCount },
      *   estimateDelta: { avg, sampleCount, hits, earlies, lates, hitPct, earlyPct, latePct },
+     *   cr_approval_waived_count: number,
      * }
      *
      * @param {Array}  crs    - Array of CR container records
@@ -413,6 +483,8 @@
             result[SEGMENT_KEYS[i]] = rollupSegment(crs, SEGMENT_KEYS[i], opts);
         }
         result.estimateDelta = rollupEstimateDelta(crs, opts);
+        // XACA-1239: unwindowed by design — see countWaived() doc comment.
+        result.cr_approval_waived_count = countWaived(crs);
         return result;
     }
 
@@ -423,6 +495,7 @@
         rollupSegment:        rollupSegment,
         rollupEstimateDelta:  rollupEstimateDelta,
         rollupAll:            rollupAll,
+        countWaived:          countWaived,
     };
 
     // Browser export (IIFE + window-attach pattern matching lcars-cr-tab.js)

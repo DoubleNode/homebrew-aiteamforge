@@ -13411,6 +13411,47 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] ERROR reading CR activity for {cr_id}: {e}")
             self._send_json_response({"error": str(e), "crId": cr_id}, status=500)
 
+    def handle_cr_evidence_map(self):
+        """GET /api/kanban/cr/evidence-map — per-crState prerequisite evidence.
+
+        DERIVED at request time from scripts/cr-schema-validator.py's
+        STATE_ENTRY_TS + EVIDENCE_PREREQS (XACA-1239, D4) via
+        self._derive_cr_evidence_map() — never a hand-copied fifth map. See
+        that method and _load_cr_schema_validator_module (defined further
+        down this class, near _cr_validate_fields) for the derivation rule
+        and the import-by-path technique.
+
+        Response shape:
+            {
+              "states": {"<crState>": ["token", ...], ...},
+              "orSeparator": "|",
+              "source": "cr-schema-validator.py"
+            }
+        A token may be a single timestamps.<field> name or an "a|b" OR-group
+        (any one member present satisfies it) — split on orSeparator by the
+        caller, mirroring scripts/kb-cr.sh's own notation.
+
+        FAILS CLOSED (XACA-1239): if the validator cannot be loaded, this
+        returns 500 with a JSON error, NEVER an empty {"states": {}} — an
+        empty map would read to a client as "no state has any
+        prerequisite", which is the opposite of what an unreadable answer
+        should mean.
+        """
+        try:
+            states = self._derive_cr_evidence_map()
+        except Exception as e:
+            print(f"[LCARS] ERROR deriving CR evidence map: {e}")
+            self._send_json_response(
+                {"error": f"could not load cr-schema-validator.py: {e}"},
+                status=500,
+            )
+            return
+        self._send_json_response({
+            "states": states,
+            "orSeparator": "|",
+            "source": "cr-schema-validator.py",
+        })
+
     # ── CR Transition endpoint (XACA-0328-005) ──────────────────────────────
     # Valid target states (mirrors crStates in cr-schema.json).
     _CR_VALID_STATES = frozenset([
@@ -13544,10 +13585,194 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     return False, f"deploy_estimate must be parseable ISO 8601 for target {target_state}"
         return True, None
 
+    # ── Approval-waiver evidence map (XACA-1239, D4) ─────────────────────────
+    # kb-cr.sh:846 already documents FOUR hand-synced copies of the crState ->
+    # prerequisite-evidence relationship: _kb_cr_state_required_evidence,
+    # _kb_cr_state_entry_ts_field, and this validator's STATE_ENTRY_TS +
+    # EVIDENCE_PREREQS. The LCARS modal must not become a fifth hand-copied
+    # map — it fetches GET /api/kanban/cr/evidence-map instead, and this
+    # method DERIVES that map at request time from the validator's own two
+    # dicts, mechanically, rather than re-stating it.
+    #
+    # Cache is a plain class-level dict, not functools.lru_cache: it is keyed
+    # by the RESOLVED VALIDATOR PATH (not by helpers_root, which may be a
+    # relative test path) so two different helpers_root values that resolve
+    # to the same file share one load, and so a test that points at a
+    # DIFFERENT worktree's copy — to prove the derivation goes red when the
+    # validator's maps are mutated — never sees a stale module from another
+    # path.
+    _cr_evidence_validator_cache = {}
+
+    @staticmethod
+    def _resolve_cr_schema_validator_path(helpers_root=None):
+        """Resolve scripts/cr-schema-validator.py.
+
+        Mirrors _build_cr_transition_shell_parts's own root resolution
+        exactly: helpers_root is a TEST-ONLY override; production always
+        resolves ~/dev-team (the MAIN checkout — not this worktree), which is
+        where the running server's other kb-cr shell helpers are sourced
+        from. See that method's docstring for why production must leave this
+        argument out.
+        """
+        root = Path(helpers_root) if helpers_root is not None else (Path.home() / "dev-team")
+        return root / "scripts" / "cr-schema-validator.py"
+
+    @classmethod
+    def _load_cr_schema_validator_module(cls, helpers_root=None):
+        """Import scripts/cr-schema-validator.py by path and cache the module.
+
+        Loaded via importlib.util.spec_from_file_location because the
+        filename's hyphen makes it unimportable as a package module (same
+        technique tests/test_xaca0924_evidence_maps.py already uses to pin
+        this file's own maps).
+
+        Raises on any failure (missing file, syntax error, …) — the caller
+        (handle_cr_evidence_map / _cr_target_accepts_approval_waiver) is
+        responsible for turning that into a loud failure rather than quietly
+        treating "could not load" as "no prerequisites" (XACA-1239: an empty
+        map would read to a client as "nothing is required", the opposite of
+        fail-closed).
+        """
+        validator_path = cls._resolve_cr_schema_validator_path(helpers_root)
+        cache_key = str(validator_path)
+        cached = cls._cr_evidence_validator_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        import importlib.util
+        if not validator_path.is_file():
+            raise FileNotFoundError(f"cr-schema-validator.py not found at {validator_path}")
+        spec = importlib.util.spec_from_file_location(
+            "cr_schema_validator_lcars", str(validator_path)
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"could not build an import spec for {validator_path}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        cls._cr_evidence_validator_cache[cache_key] = mod
+        return mod
+
+    @classmethod
+    def _derive_cr_evidence_map(cls, helpers_root=None):
+        """Derive {crState: [requiredToken, ...]} from STATE_ENTRY_TS +
+        EVIDENCE_PREREQS (XACA-1239, D4).
+
+        Mechanical rule, chosen to produce EXACTLY what
+        scripts/kb-cr.sh's _kb_cr_state_required_evidence() prints for every
+        state (pinned by lcars-ui/tests/test_xaca1239_evidence_map_and_waiver.py):
+        for each crState, look up its entry-timestamp field in
+        STATE_ENTRY_TS. A state that stamps NO timestamp on entry
+        (cr-drafted) has no prerequisites. Otherwise, if that field has a row
+        in EVIDENCE_PREREQS, the state's prerequisites are exactly that row,
+        in order (each entry may itself be a plain field or an "a|b"
+        OR-group token — passed through unchanged, never split here; the
+        caller decides how to interpret "|"). A field with NO row in
+        EVIDENCE_PREREQS (cr-published, cr-submitted, emergency-deployed,
+        cr-closed) has no prerequisites, matching the shell map's explicit
+        empty cases.
+        """
+        mod = cls._load_cr_schema_validator_module(helpers_root)
+        prereqs_by_field = dict(mod.EVIDENCE_PREREQS)
+        states = {}
+        for state, entry_field in mod.STATE_ENTRY_TS.items():
+            if not entry_field:
+                states[state] = []
+                continue
+            states[state] = list(prereqs_by_field.get(entry_field, ()))
+        return states
+
+    # Cap on approval_waiver.reason — generous for a free-text justification,
+    # small enough that a client cannot use this field to smuggle an
+    # unbounded blob into the activity log (XACA-1239).
+    _CR_APPROVAL_WAIVER_MAX_REASON_LEN = 2000
+
+    def _cr_target_accepts_approval_waiver(self, target_state):
+        """True if target_state's DERIVED evidence includes the approval
+        OR-group — i.e. one of its required tokens names
+        cr_approval_waived_at as an alternative to cr_approved_at.
+
+        A waiver is only meaningful alongside a move that actually needs
+        approval evidence (D5): offering it elsewhere would let the field
+        silently do nothing useful, or record a waiver for evidence nothing
+        downstream ever reads. Raises whatever _derive_cr_evidence_map raises
+        — the caller decides how to fail closed rather than this method
+        guessing "not applicable" for "could not tell".
+        """
+        states = self._derive_cr_evidence_map()
+        tokens = states.get(target_state, [])
+        return any("cr_approval_waived_at" in token.split("|") for token in tokens)
+
+    def _cr_validate_approval_waiver(self, target_state, fields):
+        """Validate fields.approval_waiver = {"reason": "<non-blank str>"}.
+
+        Returns (ok, error_message, reason, http_status):
+          * approval_waiver absent            -> (True, None, None, None)
+          * present and valid                 -> (True, None, "<trimmed reason>", None)
+          * present and invalid                -> (False, "<message>", None, 400)
+          * present, valid shape, but target's applicability could not be
+            determined (validator failed to load)
+                                                -> (False, "<message>", None, 500)
+
+        Shape is intentionally strict (reject unknown keys) rather than
+        ignoring them: approval_waiver is a single-purpose payload introduced
+        fresh by this ticket, so there is no legacy caller relying on extra
+        keys being tolerated, and silently ignoring an unrecognised key would
+        hide a client bug (e.g. a typo'd "approver"/"actor" nested here by
+        mistake) instead of surfacing it.
+
+        approval_waiver + approver together is rejected as contradictory: one
+        says "approved", the other says "approval was NOT received, we
+        proceeded anyway" — sending both describes two different histories
+        for the same move.
+
+        Whether the CR ALREADY carries an approval or a waiver (the "already
+        satisfied" case) is deliberately NOT checked here — this method only
+        validates the SHAPE of the request against the TARGET state. The
+        per-CR check lives in handle_cr_transition, once the board is loaded,
+        so it can answer with a precise 409 instead of running the shell
+        helper just to discover its refusal (D5 option (b): "let it fail with
+        a clear 409" — done as a pre-check rather than by parsing the
+        helper's stderr, which would be fragile).
+        """
+        waiver = fields.get("approval_waiver")
+        if waiver is None:
+            return True, None, None, None
+        if not isinstance(waiver, dict):
+            return False, "approval_waiver must be an object", None, 400
+        extra_keys = set(waiver.keys()) - {"reason"}
+        if extra_keys:
+            return False, (
+                f"approval_waiver has unexpected field(s): "
+                f"{', '.join(sorted(extra_keys))} (only 'reason' is accepted)"
+            ), None, 400
+        reason = waiver.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            return False, "approval_waiver.reason is required and must be a non-blank string", None, 400
+        reason = reason.strip()
+        if len(reason) > self._CR_APPROVAL_WAIVER_MAX_REASON_LEN:
+            return False, (
+                f"approval_waiver.reason exceeds "
+                f"{self._CR_APPROVAL_WAIVER_MAX_REASON_LEN} characters"
+            ), None, 400
+        if fields.get("approver"):
+            return False, "approval_waiver cannot be combined with approver — they are contradictory", None, 400
+        try:
+            accepts = self._cr_target_accepts_approval_waiver(target_state)
+        except Exception as e:
+            return False, (
+                f"could not verify whether target '{target_state}' accepts a "
+                f"waiver: {e}"
+            ), None, 500
+        if not accepts:
+            return False, (
+                f"approval_waiver is not applicable to target '{target_state}' "
+                f"— it does not require approval evidence"
+            ), None, 400
+        return True, None, reason, None
 
     @staticmethod
     def _build_cr_transition_shell_parts(board_file_str, cr_id, target_state,
-                                         helpers_root=None):
+                                         helpers_root=None, approval_waiver=None,
+                                         actor=None):
         """
         Assemble the shell commands that perform a CR state transition.
 
@@ -13571,22 +13796,68 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         board write is masked by later commands and the handler, which inspects
         only the final returncode, answers 200 for a transition that never
         happened.
+
+        approval_waiver / actor (XACA-1239, D5). approval_waiver, when not
+        None, is the ALREADY-VALIDATED waiver reason string (never the raw
+        request object — see handle_cr_transition /
+        _cr_validate_approval_waiver, which extract and trim it before it
+        ever reaches here). When set, a call to _kb_cr_waive_approval is
+        inserted BEFORE the state-write line, so the waiver and the state
+        change run as ONE generated script: if the waiver write fails, the
+        state write never executes (the script has no `set -e`, so this is
+        an explicit `|| { ...; exit 4; }` guard, same lesson as
+        XACA-0297-023 above), which makes a half-done move — state advanced
+        with neither a real approval nor a recorded waiver — impossible.
+        `force` is never passed to either helper call from here.
+
+        The waiver step's own failure is `exit 4`, not `exit 3` (already the
+        state-write's code) or a new number past the field-update builder's
+        own `exit 4` (_build_cr_field_update_shell_parts, below): the two
+        `exit 4`s are DIFFERENT builders' DIFFERENT sequential steps that can
+        never both run in one script execution (the first fatal `exit`
+        terminates the whole `zsh -c` script), and handle_cr_transition maps
+        every nonzero returncode identically — a 5xx with the captured
+        stderr text — so no caller ever reads the numeric exit code itself to
+        distinguish which step failed; the stderr message is what does that.
+        Reusing 4 here rather than inventing a fifth number keeps this
+        builder's own two codes (3 for state, 4 for waiver) the same shape
+        the field-update builder already uses for its own single write.
+
+        actor defaults to "lcars-ui" when approval_waiver is set and actor is
+        None or blank — the same default handle_cr_transition already
+        applies to the request body's own top-level `actor` field, reused
+        here rather than inventing a second default.
         """
         root = helpers_root if helpers_root is not None else str(Path.home() / "dev-team")
-        return [
+        parts = [
             f"source {shlex.quote(root + '/kanban-helpers.sh')}",
             f"source {shlex.quote(root + '/scripts/kb-cr.sh')}",
             # Find CR index
             f'cr_idx=$(_kb_jq_read "{board_file_str}" \'.crs | to_entries[] '
             f'| select(.value.id == "{cr_id}") | .key\' -r 2>/dev/null)',
             'if [ -z "$cr_idx" ]; then echo "CR not found in board" >&2; exit 2; fi',
+        ]
+        if approval_waiver is not None:
+            waiver_actor = actor if (actor and str(actor).strip()) else "lcars-ui"
+            parts.append(
+                # Inserted BEFORE the state write below (D5) — its failure is
+                # fatal (exit 4) so a failed waiver write can never be
+                # followed by a state write that treats it as satisfied.
+                # `force` is never passed.
+                f'_kb_cr_waive_approval "{board_file_str}" "$cr_idx" '
+                f'{shlex.quote(cr_id)} {shlex.quote(str(approval_waiver))} '
+                f'{shlex.quote(str(waiver_actor))}'
+                f' || {{ echo "approval waiver write failed for {cr_id}" >&2; exit 4; }}'
+            )
+        parts.append(
             # State transition + entry timestamp via the SHARED helper. It also
             # emits the cr_state_changed activity event, which is why this
             # endpoint no longer appends its own.
             f'_kb_cr_stamp_state_entry "{board_file_str}" "$cr_idx" '
             f'{shlex.quote(cr_id)} {shlex.quote(target_state)}'
-            f' || {{ echo "state write failed for {cr_id}" >&2; exit 3; }}',
-        ]
+            f' || {{ echo "state write failed for {cr_id}" >&2; exit 3; }}'
+        )
+        return parts
 
 
     @staticmethod
@@ -13673,6 +13944,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({"ok": False, "error": field_err}, status=400)
                 return
 
+            # ── Validate fields.approval_waiver, if present (XACA-1239, D5) ────
+            # Shape/applicability only — whether THIS CR already carries an
+            # approval or a waiver is checked below, once the board is loaded,
+            # so that case can answer 409 with a precise message instead.
+            ok, waiver_err, approval_waiver_reason, waiver_status = \
+                self._cr_validate_approval_waiver(target_state, fields)
+            if not ok:
+                self._send_json_response({"ok": False, "error": waiver_err},
+                                          status=waiver_status or 400)
+                return
+
             # ── Resolve board file from CR-ID prefix ───────────────────────────
             m = re.match(r"^CR-([A-Z]+)-", cr_id)
             if not m:
@@ -13722,6 +14004,34 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     status=409,
                 )
                 return
+
+            # ── "Already satisfied" pre-check for approval_waiver (XACA-1239, D5) ──
+            # _kb_cr_waive_approval itself refuses a second waiver or a waiver
+            # over a real approval — but discovering that by running the shell
+            # helper and parsing its stderr would be fragile. current_cr is
+            # already loaded, so check it directly here and answer a precise
+            # 409 before the waiver step is ever built, matching D5 option (b)
+            # ("let it fail with a clear 409") without depending on stderr text.
+            if approval_waiver_reason is not None:
+                current_ts = current_cr.get("timestamps") or {}
+                if current_ts.get("cr_approved_at"):
+                    self._send_json_response(
+                        {"ok": False, "conflict": True,
+                         "error": f"CR {cr_id} already has a recorded approval "
+                                  f"(cr_approved_at) — a waiver is not needed "
+                                  f"and will not be recorded."},
+                        status=409,
+                    )
+                    return
+                if current_ts.get("cr_approval_waived_at"):
+                    self._send_json_response(
+                        {"ok": False, "conflict": True,
+                         "error": f"CR {cr_id} already has a recorded approval "
+                                  f"waiver — a second waiver will not be "
+                                  f"recorded."},
+                        status=409,
+                    )
+                    return
 
             # ── Build shell script for atomic transition + field writes ────────
             # We source kanban-helpers.sh and kb-cr.sh so we get _kb_jq_update
@@ -13793,7 +14103,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # positional args, and two comment/string decoys) sailed past a
             # harness that rebuilt the script by hand.
             shell_parts = self._build_cr_transition_shell_parts(
-                board_file_str, cr_id, target_state
+                board_file_str, cr_id, target_state,
+                approval_waiver=approval_waiver_reason, actor=actor,
             )
 
             # XACA-0895-018's own crState+entry-timestamp write USED to live here.
@@ -16518,6 +16829,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Todo API endpoints
         elif path == '/api/todos':
             self.serve_todos_list(parsed.query)
+        # CR evidence map (XACA-1239, D4) — an EXACT path match, and it MUST
+        # be matched before any generic '/api/kanban/cr/<id>/...' prefix
+        # branch below (the /activity branch immediately following it
+        # today, and any future one): 'evidence-map' does not match the
+        # CR-ID regex ^CR-[A-Z]+-\d{8}-\d+$, so if this fell through to a
+        # prefix branch it would 400 "Invalid CR-ID format" instead of
+        # serving the map.
+        elif path == '/api/kanban/cr/evidence-map':
+            self.handle_cr_evidence_map()
         # CR activity log API (XACA-0328-002) — must be before generic /activity route
         elif path.startswith('/api/kanban/cr/') and path.endswith('/activity'):
             cr_id = path[len('/api/kanban/cr/'):-len('/activity')]

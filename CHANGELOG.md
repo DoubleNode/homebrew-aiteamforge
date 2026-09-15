@@ -7,6 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1239** — CR approval WAIVER and an evidence-aware LCARS EDIT STATE modal. Main Event teams receive no
+  approval notice (XACA-0899), so a submitted CR can now record `cr_approval_waived_at` + `approvalWaiver{reason,actor,at}`
+  instead of fabricating `cr_approved_at`. `share/scripts/kb-cr.sh`: approval prerequisite is the OR-group
+  `cr_approved_at|cr_approval_waived_at`, new `kb-cr waive-approval <CR> --reason` (cr-submitted/cr-held only), revert strips
+  the waiver into `revert_history`. `share/lcars-ui/server.py`: `GET /api/kanban/cr/evidence-map` and
+  `fields.approval_waiver` on the transition endpoint (waiver write is fatal before the state write).
+  `share/lcars-ui/js/lcars-cr-tab.js` + new `lcars-cr-evidence-helpers.js`: states missing prerequisites are labelled, an
+  APPROVAL NOT RECEIVED section records the waiver in the same submit, waived CRs show an `APPROVAL WAIVED` chip.
+  `lcars-cr-metrics.js` excludes waived CRs from approval cycle times. `share/templates/kanban/cr-schema.json` gains both
+  fields.
+
 - **XACA-1225** — a fresh `fleet=skip` consumer can now provision cross-machine kb-msg with no hand steps
   (measured on M1Mini, v0.20.13, where all three gaps needed manual fixes). (1) Client Node deps:
   new `libexec/lib/msg-client-deps.sh` runs `npm ci --omit=dev` in `$AITEAMFORGE_DIR/scripts` from the shipped

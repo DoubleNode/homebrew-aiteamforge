@@ -43,7 +43,7 @@
  *   copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown
  */
 
-/* global boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab, createFilterBar, copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown, loadBoardData, lcarsCrAgeHelpers */
+/* global boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab, createFilterBar, copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown, loadBoardData, lcarsCrAgeHelpers, lcarsCrEvidenceHelpers, apiFetch */
 
 'use strict';
 
@@ -497,6 +497,13 @@
             cr_emergency_deployed_at:   ts.cr_emergency_deployed_at || '',
             cr_completed_at:            ts.cr_completed_at || '',
             cr_closed_at:               ts.cr_closed_at || '',
+            // XACA-1239: approval-waiver evidence (D1). NEVER an approval — a
+            // waived CR must remain distinguishable from an approved one by
+            // readers, so this is projected separately from cr_approved_at,
+            // never merged into it.
+            cr_approval_waived_at:      ts.cr_approval_waived_at || '',
+            cr_approval_waived_reason:  (cr.approvalWaiver && cr.approvalWaiver.reason) || '',
+            cr_approval_waived_actor:   (cr.approvalWaiver && cr.approvalWaiver.actor) || '',
             addedAt:                    cr.createdAt || '',
             priority:                   linkedItem ? linkedItem.priority : '',
             linkedItemIds:              linkedItemIds,
@@ -672,6 +679,25 @@
         return `<span class="cr-state-badge ${cls}">${escapeHtml(raw.toUpperCase().replace(/-/g, ' '))}</span>`;
     }
 
+    /**
+     * XACA-1239: "APPROVAL WAIVED" indicator — amber (never green: a waived
+     * CR must never read as an approved one), with the reason/actor/at in
+     * the title="" tooltip. Text label carries the meaning, not color alone
+     * (D6 accessibility note). Returns '' when the item was never waived.
+     */
+    function _crWaivedChip(item) {
+        if (!item || !item.cr_approval_waived_at) return '';
+        const actor  = item.cr_approval_waived_actor || '';
+        const reason = item.cr_approval_waived_reason || '';
+        const at     = item.cr_approval_waived_at || '';
+        const tipParts = [];
+        if (actor) tipParts.push(`Waived by ${actor}`);
+        if (at)    tipParts.push(`at ${at}`);
+        if (reason) tipParts.push(`Reason: ${reason}`);
+        const tip = escapeHtml(tipParts.length > 0 ? tipParts.join(' — ') : 'Approval waived — not an approval');
+        return `<span class="cr-waived-chip" title="${tip}">APPROVAL WAIVED</span>`;
+    }
+
     function _formatDeployWindow(value) {
         if (!value || !String(value).trim()) return '<span class="cr-dim">—</span>';
         const d = new Date(value);
@@ -787,6 +813,11 @@
     // this script. The renderer below stays here because it touches the DOM
     // contract (escapeHtml + the .cr-age / .cr-age-empty CSS classes).
     const _AGE = (typeof window !== 'undefined' && window.lcarsCrAgeHelpers) || {};
+
+    // Same pattern for the EDIT STATE prerequisite-gap helpers (XACA-1239-005):
+    // pure logic lives in lcars-cr-evidence-helpers.js (window.lcarsCrEvidenceHelpers),
+    // loaded immediately before this script, so it stays unit-testable without a DOM.
+    const _CR_EVID = (typeof window !== 'undefined' && window.lcarsCrEvidenceHelpers) || {};
 
     /**
      * Render the AGE <td> cell content. Returns a span carrying both the relative
@@ -957,6 +988,7 @@
         const crId       = escapeHtml(item.cr_id || '');
         const crType     = _typeBadge(item.cr_type);
         const crState    = _stateBadge(item.crState);
+        const waivedChip = _crWaivedChip(item);
         const titleCell  = _titleWithBadge(item);
         const platform   = escapeHtml(item.platform || '');
         const approver   = escapeHtml(item.cr_approver_name || item.cr_approved_by || '');
@@ -994,7 +1026,7 @@
         return `<tr class="cr-row${isExpanded ? ' cr-row-expanded' : ''}" data-cr-id="${escapeHtml(item.cr_id)}" data-item-id="${escapeHtml(item.id)}">
             <td class="cr-col-chevron">${chevronBtn}</td>
             <td class="cr-col-id"><button class="cr-id-copy" data-cr-id="${crId}" title="Copy CR ID to clipboard"><span class="cr-id-mono">${crId}</span></button></td>
-            <td class="cr-col-typestate"><div class="cr-typestate-stack"><div class="cr-typestate-type">${crType}</div><div class="cr-typestate-state">${crState}</div></div></td>
+            <td class="cr-col-typestate"><div class="cr-typestate-stack"><div class="cr-typestate-type">${crType}</div><div class="cr-typestate-state">${crState}</div>${waivedChip}</div></td>
             <td class="cr-col-title">${titleCell}</td>
             <td class="cr-col-platform">${platform}</td>
             <td class="cr-col-approver">${approver}</td>
@@ -1399,6 +1431,11 @@
         'cr_published':        'var(--lcars-amber, #ffcc00)',
         'cr_proper_detected':  'var(--lcars-cyan,  #99ccff)',
         'cr_field_update':     'var(--lcars-blue,  #9999ff)',
+        // XACA-1239: amber, matching the modal's waiver section and the row/
+        // detail "APPROVAL WAIVED" chip — deliberately NOT green (no color
+        // used elsewhere in this map reads as "approved"), so this event
+        // never visually reads as an approval.
+        'cr_approval_waived':  'var(--lcars-amber, #ffcc00)',
     };
 
     function _crActivityTypePill(type) {
@@ -1409,6 +1446,18 @@
     function _crActivityDetails(evt) {
         if (evt.type === 'cr_state_changed' && evt.from_state && evt.to_state) {
             return `<span class="cr-activity-states">${escapeHtml(evt.from_state)} &rarr; ${escapeHtml(evt.to_state)}</span>`;
+        }
+        // XACA-1239: render distinctly rather than falling through to the
+        // generic evt.note branch below — "Approval waived by <actor>:
+        // <reason>" names the event explicitly so it can never be read as an
+        // approval, even though evt.note (the reason) would otherwise match
+        // that generic branch too (_kb_cr_waive_approval emits this event
+        // with field=cr_approval_waived_at, note=<trimmed reason>, no
+        // from_state/to_state — see scripts/kb-cr.sh _kb_cr_activity_event).
+        if (evt.type === 'cr_approval_waived') {
+            const actor  = evt.actor ? escapeHtml(evt.actor) : 'unknown';
+            const reason = evt.note ? escapeHtml(evt.note) : '';
+            return `<span class="cr-activity-waiver">Approval waived by ${actor}${reason ? ': ' + reason : ''}</span>`;
         }
         if ((evt.type === 'cr_proper_detected' || evt.type === 'cr_field_update') && evt.field) {
             const oldV = evt.old_value != null ? escapeHtml(String(evt.old_value)) : '&mdash;';
@@ -1471,6 +1520,49 @@
     }
 
     // ─── EDIT STATE dialog (XACA-0328-004) ────────────────────────────────────
+
+    // ─── Evidence-map fetch/cache (XACA-1239-005, D4/D6) ──────────────────────
+    //
+    // GET /api/kanban/cr/evidence-map (server.py::handle_cr_evidence_map) is
+    // the ONLY source of per-state prerequisite data — this file must never
+    // grow a fifth hand-copied copy of the map kb-cr.sh:846 already documents
+    // four of (D4). Cached as a Promise for the lifetime of the page: the
+    // map is derived from files on disk that don't change while the page is
+    // open, so there is no reason to re-fetch on every dialog open. On
+    // failure the cache is cleared so the NEXT call retries (a transient
+    // network blip must not wedge the modal into "unavailable" forever), and
+    // the caller is handed `null` to mean "treat every state as available;
+    // the server remains the backstop" (D6's fallback bullet) — never an
+    // empty map, which would read as "nothing is required anywhere".
+    let _crEvidenceMapPromise = null;
+
+    function _loadCREvidenceMap() {
+        if (_crEvidenceMapPromise) return _crEvidenceMapPromise;
+        _crEvidenceMapPromise = fetch(apiUrl('/api/kanban/cr/evidence-map'))
+            .then(r => {
+                if (!r.ok) throw new Error('evidence-map HTTP ' + r.status);
+                return r.json();
+            })
+            .then(data => {
+                if (!data || typeof data !== 'object' || !data.states) {
+                    throw new Error('evidence-map: malformed response');
+                }
+                return data;
+            })
+            .catch(err => {
+                console.warn('[LCARS CR] evidence map unavailable — falling back to unrestricted target states:', err);
+                _crEvidenceMapPromise = null;   // invalidate so a later call retries
+                return null;
+            });
+        return _crEvidenceMapPromise;
+    }
+
+    // Pre-filled, editable default reason (XACA-1239, D3) — single source of
+    // truth lives in lcars-cr-evidence-helpers.js so lcars-cr-tab.js and its
+    // tests never duplicate the literal string.
+    const _CR_APPROVAL_WAIVER_DEFAULT_REASON =
+        _CR_EVID.DEFAULT_WAIVER_REASON ||
+        'No approval notice received — IT Connect approval signal not integrated (XACA-0899).';
 
     /**
      * The 10 valid CR states and their per-state conditional field definitions.
@@ -1553,14 +1645,12 @@
     }
 
     /**
-     * Render the conditional fields HTML for a given target state.
-     * Returns an HTML string for injection into #cr-state-cond-fields.
+     * Render the ordinary per-state input fields (unchanged from pre-XACA-1239
+     * behaviour). Extracted so _renderStateCondFields can combine it with the
+     * waiver section / gap-blocked message below without duplicating this loop.
      */
-    function _renderStateCondFields(targetState) {
+    function _renderPlainStateFields(targetState) {
         const fieldDefs = _CR_STATE_FIELDS[targetState] || [];
-        if (fieldDefs.length === 0) {
-            return '<div class="cr-sc-no-fields">No additional fields required for this state.</div>';
-        }
         return fieldDefs.map(f => {
             const id = 'cr-sc-field-' + f.key;
             let input;
@@ -1585,14 +1675,95 @@
     }
 
     /**
-     * Validate the current state of all conditional fields for targetState.
+     * XACA-1239, D6: "APPROVAL NOT RECEIVED" section — offered only when the
+     * target state's ONLY missing prerequisite is the approval OR-group.
+     * Deliberately NOT styled like an approval (no green "approved" chip,
+     * see lcars-cr-tab.css .cr-sc-waiver-section) — this records that
+     * approval was NOT received, not that it was granted.
+     */
+    function _renderApprovalWaiverSection() {
+        const reasonId  = 'cr-sc-waiver-reason';
+        const explainId = 'cr-sc-waiver-explain';
+        return (
+            `<div class="cr-sc-waiver-section" id="cr-sc-waiver-section">` +
+                `<div class="cr-sc-waiver-title">APPROVAL NOT RECEIVED</div>` +
+                `<p id="${explainId}" class="cr-sc-waiver-explain">` +
+                    `This records an approval <strong>WAIVER</strong>, not an approval. The CR will show as waived.` +
+                `</p>` +
+                `<div class="cr-sc-field-group">` +
+                    `<label class="cr-sc-label" for="${reasonId}">WAIVER REASON</label>` +
+                    `<textarea id="${reasonId}" class="cr-sc-textarea cr-sc-waiver-textarea" rows="3" ` +
+                        `maxlength="2000" aria-describedby="${explainId}" required>` +
+                        `${escapeHtml(_CR_APPROVAL_WAIVER_DEFAULT_REASON)}` +
+                    `</textarea>` +
+                `</div>` +
+            `</div>`
+        );
+    }
+
+    /**
+     * XACA-1239, D6: blocking message for a gap that is NOT approval-only —
+     * no waiver is offered for these; the operator is told what must happen
+     * first (e.g. submit the CR before it can move to a later state).
+     */
+    function _renderGapBlockedMessage(gapInfo) {
+        const labels = (gapInfo && gapInfo.missingLabels) || [];
+        const text = labels.length > 0
+            ? `Cannot move to this state yet — missing: ${labels.join(', ')}.`
+            : `Cannot move to this state yet — unmet prerequisites.`;
+        return `<div class="cr-sc-gap-blocked" role="alert">${escapeHtml(text)}</div>`;
+    }
+
+    /**
+     * Render the conditional fields HTML for a given target state, given the
+     * evidence-gap decision for that state (XACA-1239-005, D6).
+     *
+     * `gapInfo` is the object lcarsCrEvidenceHelpers._crGapInfo() returns, or
+     * null/undefined when the caller has none yet (e.g. a direct unit-test
+     * call, or the evidence map hasn't resolved/failed to load). In every
+     * "no gapInfo" / "map unavailable" / "no gap" case this returns EXACTLY
+     * what the pre-XACA-1239 function returned — behaviour is unchanged
+     * (D6's explicit fallback + "no gap → current behaviour unchanged").
+     *
+     * Returns an HTML string for injection into #cr-state-cond-fields.
+     */
+    function _renderStateCondFields(targetState, gapInfo) {
+        const fieldsHtml = _renderPlainStateFields(targetState);
+        const noFieldsHtml = '<div class="cr-sc-no-fields">No additional fields required for this state.</div>';
+
+        if (!gapInfo || !gapInfo.mapAvailable || !gapInfo.missing || gapInfo.missing.length === 0) {
+            return fieldsHtml || noFieldsHtml;
+        }
+
+        if (gapInfo.approvalOnlyGap) {
+            // Waiver section is IN ADDITION to any ordinary required fields
+            // this target already has (e.g. DEPLOY TIMESTAMP for deployed-dev
+            // / deployed-prod) — approval-only-gap targets never render an
+            // approver field today, so there is nothing to suppress here.
+            return fieldsHtml + _renderApprovalWaiverSection();
+        }
+
+        // Any other gap — block submit, name the missing step(s), no waiver offered.
+        return _renderGapBlockedMessage(gapInfo) + fieldsHtml;
+    }
+
+    /**
+     * Validate the current state of all conditional fields for targetState,
+     * PLUS the evidence-gap decision for targetState (XACA-1239-005).
      * Returns true when SUBMIT should be enabled.
-     * Validation rules:
+     *
+     * Per-field rules (unchanged from pre-XACA-1239):
      *   - All required fields non-empty after trim
      *   - cr_proper_url: must start with https://
      *   - datetime-local: must be parseable
+     *
+     * Evidence-gap rule (delegated to lcarsCrEvidenceHelpers._crWaiverSubmitAllowed,
+     * so it is testable without a DOM — see lcars-cr-evidence-helpers.js):
+     *   - map unavailable, or no gap → unaffected (server remains the backstop)
+     *   - gap is NOT approval-only → blocked, no waiver offered
+     *   - gap IS approval-only → blocked until the waiver reason is non-blank
      */
-    function _validateStateCondFields(targetState) {
+    function _validateStateCondFields(targetState, gapInfo) {
         const fieldDefs = _CR_STATE_FIELDS[targetState] || [];
         for (const f of fieldDefs) {
             if (!f.required) continue;
@@ -1607,13 +1778,24 @@
                 if (isNaN(new Date(val).getTime())) return false;
             }
         }
+
+        if (typeof _CR_EVID._crWaiverSubmitAllowed === 'function') {
+            const reasonEl = document.getElementById('cr-sc-waiver-reason');
+            const reasonText = reasonEl ? reasonEl.value : '';
+            if (!_CR_EVID._crWaiverSubmitAllowed(gapInfo, reasonText)) return false;
+        }
+
         return true;
     }
 
     /**
-     * Collect the `fields` payload from conditional inputs for a given target state.
+     * Collect the `fields` payload from conditional inputs for a given target
+     * state, PLUS fields.approval_waiver when the evidence gap is
+     * approval-only and a reason has been typed (XACA-1239-005). Payload
+     * assembly for the waiver itself is delegated to
+     * lcarsCrEvidenceHelpers._crWaiverPayloadFields (testable without a DOM).
      */
-    function _collectStateCondFields(targetState) {
+    function _collectStateCondFields(targetState, gapInfo) {
         const fieldDefs = _CR_STATE_FIELDS[targetState] || [];
         const fields = {};
         for (const f of fieldDefs) {
@@ -1629,6 +1811,12 @@
             } else {
                 fields[f.key] = val;
             }
+        }
+
+        if (typeof _CR_EVID._crWaiverPayloadFields === 'function') {
+            const reasonEl = document.getElementById('cr-sc-waiver-reason');
+            const reasonText = reasonEl ? reasonEl.value : '';
+            return _CR_EVID._crWaiverPayloadFields(gapInfo, reasonText, fields);
         }
         return fields;
     }
@@ -1679,6 +1867,7 @@
                         options +
                     `</select>` +
                 `</div>` +
+                `<div id="cr-sc-map-notice" class="cr-sc-map-notice" style="display:none"></div>` +
                 `<div class="cr-sc-divider"></div>` +
                 `<div id="cr-state-cond-fields" class="cr-sc-cond-fields">` +
                     `<div class="cr-sc-no-fields">Select a target state above.</div>` +
@@ -1709,6 +1898,50 @@
         const condFieldsDiv = dialog.querySelector('#cr-state-cond-fields');
         const submitBtn = dialog.querySelector('#cr-sc-submit');
         const errorDiv = dialog.querySelector('#cr-sc-error');
+        const mapNoticeDiv = dialog.querySelector('#cr-sc-map-notice');
+
+        // XACA-1239-005 (D4/D6): evidence map for this dialog's lifetime.
+        // null until _loadCREvidenceMap() resolves; stays null (permanently,
+        // for THIS open dialog) if the fetch failed — D6's explicit fallback
+        // is "all states are shown as available; the server remains the
+        // backstop", never a retry loop that could flip the dropdown/gate
+        // state under the operator mid-edit.
+        let _crEvidenceMap = null;
+
+        function _computeGapInfo(targetState) {
+            if (typeof _CR_EVID._crGapInfo !== 'function') return null;
+            return _CR_EVID._crGapInfo(rawCR, targetState, _crEvidenceMap);
+        }
+
+        // Annotate dropdown option TEXT (never innerHTML — textContent is
+        // injection-safe and preserves the current selection) with a
+        // "requires <label>" suffix for any state with a missing
+        // prerequisite (D6: "A state with missing prerequisites is
+        // labelled, e.g. IMPLEMENTING — requires approval"). Every state
+        // stays selectable — this never disables an option.
+        function _annotateStateOptions() {
+            if (!_crEvidenceMap || typeof _CR_EVID._crGapInfo !== 'function') return;
+            Array.from(targetSelect.options).forEach(opt => {
+                const s = opt.value;
+                if (!s) return;
+                const gap = _CR_EVID._crGapInfo(rawCR, s, _crEvidenceMap);
+                const baseLabel = s.toUpperCase().replace(/-/g, ' ');
+                if (gap.missing && gap.missing.length > 0) {
+                    opt.textContent = `${baseLabel} — requires ${gap.missingLabels.join(', ')}`;
+                    opt.classList.add('cr-sc-option-gap');
+                } else {
+                    opt.textContent = baseLabel;
+                    opt.classList.remove('cr-sc-option-gap');
+                }
+            });
+        }
+
+        function _showMapUnavailableNotice() {
+            if (!mapNoticeDiv) return;
+            mapNoticeDiv.textContent =
+                'Prerequisite checks are unavailable right now — every state is shown as available; the server still enforces requirements on submit.';
+            mapNoticeDiv.style.display = 'block';
+        }
 
         function _refreshCondFields() {
             const targetState = targetSelect.value;
@@ -1717,19 +1950,26 @@
                 submitBtn.disabled = true;
                 return;
             }
-            condFieldsDiv.innerHTML = _renderStateCondFields(targetState);
+            const gapInfo = _computeGapInfo(targetState);
+            condFieldsDiv.innerHTML = _renderStateCondFields(targetState, gapInfo);
             _revalidate();
             // Wire input events on newly-rendered fields
             condFieldsDiv.querySelectorAll('input, textarea, select').forEach(el => {
                 el.addEventListener('input', _revalidate);
                 el.addEventListener('change', _revalidate);
             });
+            // Accessibility (D6/task item 7): sensible focus order — when the
+            // waiver section appears, move focus straight to the reason field
+            // rather than leaving it on the (now stale) target-state select.
+            const waiverReasonEl = condFieldsDiv.querySelector('#cr-sc-waiver-reason');
+            if (waiverReasonEl && typeof waiverReasonEl.focus === 'function') waiverReasonEl.focus();
         }
 
         function _revalidate() {
             const targetState = targetSelect.value;
             if (!targetState) { submitBtn.disabled = true; return; }
-            submitBtn.disabled = !_validateStateCondFields(targetState);
+            const gapInfo = _computeGapInfo(targetState);
+            submitBtn.disabled = !_validateStateCondFields(targetState, gapInfo);
         }
 
         targetSelect.addEventListener('change', () => {
@@ -1741,9 +1981,10 @@
         submitBtn.addEventListener('click', () => {
             const targetState = targetSelect.value;
             if (!targetState) return;
-            if (!_validateStateCondFields(targetState)) return;
+            const gapInfo = _computeGapInfo(targetState);
+            if (!_validateStateCondFields(targetState, gapInfo)) return;
 
-            const fields = _collectStateCondFields(targetState);
+            const fields = _collectStateCondFields(targetState, gapInfo);
             const payload = {
                 targetState,
                 expectedUpdatedAt,
@@ -1758,6 +1999,24 @@
             errorDiv.style.display = 'none';
             errorDiv.innerHTML = '';
         }
+
+        // Kick off the evidence-map fetch (cached — see _loadCREvidenceMap).
+        // Does NOT block the dialog (D6: "Do not block the dialog") — it
+        // opens immediately with the pre-XACA-1239 fallback behaviour and
+        // upgrades in place once (if) the map resolves.
+        _loadCREvidenceMap().then(map => {
+            // The dialog may already be closed/replaced by the time this
+            // resolves (fast operator, or a slow/failed fetch) — never write
+            // into a detached overlay.
+            if (!document.body.contains(overlay)) return;
+            _crEvidenceMap = map;
+            if (map) {
+                _annotateStateOptions();
+            } else {
+                _showMapUnavailableNotice();
+            }
+            _refreshCondFields();
+        });
     }
 
     /**
@@ -1942,6 +2201,25 @@
             ? `<div class="cr-doc-summary">${escapeHtml(view.cr_summary)}</div>`
             : '';
 
+        // XACA-1239: waiver detail row — only present when the CR was moved
+        // forward on a recorded waiver rather than a real approval. Reason is
+        // shown in full here (not just the row chip's tooltip), per D6/task
+        // item 6 ("reason/actor/at in a tooltip or detail view").
+        const waiverRow = view.cr_approval_waived_at
+            ? `<div class="cr-doc-meta-row cr-doc-waiver-row">
+                    <div class="cr-doc-meta-cell cr-doc-meta-cell--wide">
+                        <span class="cr-doc-meta-label">APPROVAL</span>
+                        <span class="cr-waived-chip" title="Not an approval — see reason below">APPROVAL WAIVED</span>
+                        <div class="cr-doc-waiver-detail">
+                            ${escapeHtml(view.cr_approval_waived_actor || 'unknown actor')} &mdash; ${escapeHtml(view.cr_approval_waived_at)}
+                            ${view.cr_approval_waived_reason
+                                ? `<div class="cr-doc-waiver-reason">${escapeHtml(view.cr_approval_waived_reason)}</div>`
+                                : ''}
+                        </div>
+                    </div>
+                </div>`
+            : '';
+
         return `
             <div class="cr-doc-meta">
                 <div class="cr-doc-meta-row">
@@ -1958,6 +2236,7 @@
                 <div class="cr-doc-meta-row cr-doc-url-row">
                     <div class="cr-doc-meta-cell cr-doc-meta-cell--wide"><span class="cr-doc-meta-label">CR-PROPER URL</span>${properUrlCell}</div>
                 </div>
+                ${waiverRow}
                 ${summary}
                 ${launch ? `<div class="cr-doc-launch-row">${launch}</div>` : ''}
             </div>`;

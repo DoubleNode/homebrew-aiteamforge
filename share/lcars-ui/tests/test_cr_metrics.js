@@ -348,3 +348,79 @@ test('rollup: CR-FIXTURE-004 out-of-window is excluded from sampleCount', functi
     assert.strictEqual(result.avg, null, 'avg null when sampleCount=0');
     assert.strictEqual(result.median, null, 'median null when sampleCount=0');
 });
+
+// ─── Test 16-18: XACA-1239 — approval waiver must never read as an approval ───
+
+// A waived CR that ALSO carries cr_submitted_at and (implausibly, but the
+// exclusion must be explicit not incidental — see the D3 out-of-scope note
+// on a later real approval) a cr_approved_at. If the exclusion were only the
+// side effect of a missing cr_approved_at, this fixture would slip through.
+var WAIVED_CR_WITH_BACKFILLED_APPROVAL = {
+    id: 'CR-FIXTURE-WAIVED-001',
+    timestamps: {
+        cr_created_at:            '2026-08-01T00:00:00Z',
+        cr_submitted_at:          '2026-08-02T00:00:00Z',
+        cr_approval_waived_at:    '2026-08-02T12:00:00Z',
+        cr_approved_at:           '2026-08-03T00:00:00Z',  // back-filled/anomalous — must still be excluded
+        cr_dev_started_at:        '2026-08-04T00:00:00Z',
+    },
+    approvalWaiver: { reason: 'IT Connect approval signal not integrated (XACA-0899)', actor: 'reno', at: '2026-08-02T12:00:00Z' },
+};
+
+var WAIVED_CR_NO_BACKFILL = {
+    id: 'CR-FIXTURE-WAIVED-002',
+    timestamps: {
+        cr_created_at:         '2026-08-05T00:00:00Z',
+        cr_submitted_at:       '2026-08-06T00:00:00Z',
+        cr_approval_waived_at: '2026-08-06T12:00:00Z',
+    },
+    approvalWaiver: { reason: 'No approval notice received', actor: 'reno', at: '2026-08-06T12:00:00Z' },
+};
+
+test('derivePerCR: waived CR excludes submit_to_approve and approve_to_dev EVEN WITH a back-filled cr_approved_at', function () {
+    var derived = metrics.derivePerCR(WAIVED_CR_WITH_BACKFILLED_APPROVAL);
+    assert.strictEqual(derived.cr_cycle_submit_to_approve_days, null,
+        'submit_to_approve must be null for a waived CR regardless of cr_approved_at presence');
+    assert.strictEqual(derived.cr_cycle_approve_to_dev_days, null,
+        'approve_to_dev must be null for a waived CR — never start the clock at the waiver time');
+    // Unrelated segments are unaffected by the waiver.
+    assert.ok(derived.cr_cycle_draft_to_submit_days !== null,
+        'draft_to_submit is unrelated to approval and must still compute');
+});
+
+test('derivePerCR: non-waived CR is unaffected by the waiver exclusion', function () {
+    var derived = metrics.derivePerCR(crIndex['CR-FIXTURE-001']);
+    assert.ok(derived.cr_cycle_submit_to_approve_days !== null,
+        'a normal (non-waived) fixture CR must still compute submit_to_approve');
+});
+
+test('countWaived: counts CRs with cr_approval_waived_at, ignores everything else', function () {
+    assert.strictEqual(metrics.countWaived([]), 0, 'empty array => 0');
+    assert.strictEqual(metrics.countWaived(null), 0, 'non-array => 0, never throws');
+    assert.strictEqual(metrics.countWaived(fixture.crs), 0,
+        'the gold-standard fixture has no waived CRs');
+    var mixed = fixture.crs.concat([
+        WAIVED_CR_WITH_BACKFILLED_APPROVAL,
+        WAIVED_CR_NO_BACKFILL,
+        null,
+        { id: 'CR-NO-TIMESTAMPS' },
+    ]);
+    assert.strictEqual(metrics.countWaived(mixed), 2,
+        'exactly the 2 waived fixtures count; null/malformed entries are skipped without throwing');
+});
+
+test('rollupAll: cr_approval_waived_count is unwindowed — an in-flight waived CR counts even with no completion timestamp', function () {
+    // WAIVED_CR_NO_BACKFILL has no cr_completed_at/cr_deployed_prod_at/
+    // cr_emergency_deployed_at, so it would be excluded from every OTHER
+    // rollup by _filterToWindow — but the waived count must still see it.
+    var result = metrics.rollupAll([WAIVED_CR_NO_BACKFILL], FIXTURE_OPTS);
+    assert.strictEqual(result.cr_cycle_total_days.sampleCount, 0,
+        'sanity: this fixture has no completion anchor, so windowed rollups see 0 samples');
+    assert.strictEqual(result.cr_approval_waived_count, 1,
+        'cr_approval_waived_count must surface the in-flight waived CR regardless of windowing');
+});
+
+test('rollupAll: fixture cr_approval_waived_count is 0 (no waived CRs in the gold-standard fixture)', function () {
+    var result = metrics.rollupAll(fixture.crs, FIXTURE_OPTS);
+    assert.strictEqual(result.cr_approval_waived_count, 0);
+});

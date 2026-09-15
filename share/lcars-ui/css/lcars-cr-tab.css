@@ -934,6 +934,119 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
     font-style: italic;
 }
 
+/* ── XACA-1239-005: EDIT STATE evidence-gap UI ──────────────────────────────
+   Modal "APPROVAL NOT RECEIVED" waiver section, the non-waiver gap-blocked
+   message, dropdown-option annotation, the evidence-map-unavailable notice,
+   and the row/detail "APPROVAL WAIVED" indicator + activity-log rendering.
+   The waiver section and every waived indicator use the SAME amber/caution
+   tone as the rest of this file's warning chrome (.cr-badge-drafted-24h,
+   .cr-state-submitted) and deliberately never green (.cr-state-approved) —
+   a waiver records that approval was NOT received, so nothing here may read
+   as an approval (D6). */
+
+/* Dropdown options annotated with "— requires <label>" (D6). <option> CSS
+   support is limited across browsers, but color is one of the few properties
+   that reliably applies — best-effort visual cue; the text itself already
+   carries the meaning. */
+.cr-sc-option-gap {
+    color: rgba(255, 204, 0, 0.85);
+}
+
+/* Non-blocking notice shown when GET /api/kanban/cr/evidence-map failed to
+   load — every state is offered as before, the server remains the backstop. */
+.cr-sc-map-notice {
+    font-size: 9px;
+    letter-spacing: 0.05em;
+    color: rgba(255, 255, 255, 0.35);
+    font-style: italic;
+    padding: 2px 0;
+}
+
+/* "APPROVAL NOT RECEIVED" waiver section */
+.cr-sc-waiver-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    background: rgba(255, 204, 0, 0.08);
+    border: 1px solid rgba(255, 204, 0, 0.35);
+    border-radius: 4px;
+}
+
+.cr-sc-waiver-title {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    color: var(--lcars-amber, #ffcc00);
+    text-transform: uppercase;
+}
+
+.cr-sc-waiver-explain {
+    font-size: 10px;
+    line-height: 1.4;
+    color: rgba(255, 255, 255, 0.65);
+    margin: 0;
+}
+
+.cr-sc-waiver-textarea {
+    border-color: rgba(255, 204, 0, 0.35);
+}
+.cr-sc-waiver-textarea:focus {
+    border-color: var(--lcars-amber, #ffcc00);
+    background: rgba(255, 204, 0, 0.06);
+}
+
+/* Blocking message for a non-approval gap — no waiver offered (D6). */
+.cr-sc-gap-blocked {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    color: var(--lcars-red, #cc4444);
+    background: rgba(204, 68, 68, 0.10);
+    border: 1px solid rgba(204, 68, 68, 0.30);
+    border-radius: 3px;
+    padding: 8px 10px;
+    line-height: 1.4;
+}
+
+/* Row + detail-modal "APPROVAL WAIVED" indicator. Text label carries the
+   meaning (never color alone, D6 accessibility note) — amber, matching the
+   waiver section above, never green (.cr-state-approved's color) so a
+   waived CR can never visually read as an approved one. */
+.cr-waived-chip {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    background: rgba(255, 204, 0, 0.16);
+    color: var(--lcars-amber, #ffcc00);
+    border: 1px solid rgba(255, 204, 0, 0.40);
+    cursor: default;
+}
+
+.cr-doc-waiver-detail {
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.65);
+    margin-top: 4px;
+    line-height: 1.4;
+}
+
+.cr-doc-waiver-reason {
+    font-style: italic;
+    color: rgba(255, 255, 255, 0.55);
+    margin-top: 2px;
+}
+
+/* Activity-log "Approval waived by <actor>: <reason>" row */
+.cr-activity-waiver {
+    color: var(--lcars-amber, #ffcc00);
+}
+
 /* Inline error display */
 .cr-sc-error {
     font-family: 'Antonio', sans-serif;
