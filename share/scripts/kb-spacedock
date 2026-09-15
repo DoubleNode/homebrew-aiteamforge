@@ -193,6 +193,26 @@
 #   2 = worst finding is fail or unknown (both are treated as "look at this
 #   now" for exit-code purposes, even though they're reported distinctly).
 #
+# XACA-1177 review round 2 (XACA-1177-019): a run interrupted by a signal
+# does NOT return one of 0/1/2 above — the trap installed near the top of
+# this script (see SIGNAL HANDLING) exits with the signal's own POSIX
+# 128+n code instead, from _spd_signal_cleanup, bypassing the normal
+# worst-severity computation entirely:
+#   130 = SIGINT (Ctrl-C in an interactive foreground session — see the
+#         SIGNAL HANDLING section's own documented limitation for when a
+#         BACKGROUNDED invocation's SIGINT is preset to ignored by bash
+#         itself, independent of anything this script does)
+#   143 = SIGTERM
+#   129 = SIGHUP
+# VERIFIED (not assumed): an interrupted run writes NO findings file at
+# all — _spd_signal_cleanup kills the active tool and removes its private
+# run directory, then exits directly; it never calls
+# _spd_write_findings_file. Any findings already accumulated in-memory
+# from checks that completed BEFORE the signal arrived are lost with it,
+# not partially flushed. Reproduced live: `report` sent SIGTERM ~2s into a
+# run with a later check hung — exited 143, and the findings directory
+# was confirmed empty afterward (no findings-*.json).
+#
 # ============================================================================
 # BOARD LOCATION, HOST-QUALIFIED IDS, AND GRACEFUL DEGRADATION
 # ============================================================================
@@ -324,13 +344,45 @@ SPD_TIMEOUT_MAX_SECS=3600
 # normal-sized environment, while still comfortably holding a full
 # doctor/lcars-health/kb-recover run's real-world output (measured a few
 # KB to ~13KB) without ever truncating in the common case. Overridable via
-# KB_SPACEDOCK_DETAIL_MAX_BYTES; an invalid value falls back to this
-# default (this is an internal safety valve, not a per-surface operator
-# setting like the KB_SPACEDOCK_*_TIMEOUT vars — there is no "which
-# surface" to attribute an invalid-override note to the same way, so an
-# invalid value here is silently ignored rather than surfaced in a
-# finding).
+# KB_SPACEDOCK_DETAIL_MAX_BYTES, validated the SAME way as every
+# KB_SPACEDOCK_*_TIMEOUT override (XACA-1177 review round 2,
+# XACA-1177-020 — see _spd_resolve_bounded_int, shared with
+# _spd_resolve_timeout rather than duplicated): an invalid value falls
+# back to this default and says so — folded into the truncation marker
+# text itself (the one place this internal, not-per-surface setting is
+# actually observable), rather than attached to any one surface's finding
+# the way a per-surface timeout note is.
 SPD_DETAIL_MAX_BYTES_DEFAULT=200000
+# XACA-1177 review round 2 (XACA-1177-020): sanity cap on
+# KB_SPACEDOCK_DETAIL_MAX_BYTES overrides, mirroring SPD_TIMEOUT_MAX_SECS
+# above. Noted, not fixed, per this round's own scope: on Linux, `execve`'s
+# PER-ARGUMENT limit (`MAX_ARG_STRLEN`, typically 128 KiB) is a tighter
+# ceiling than the WHOLE-exec `ARG_MAX` this default was originally sized
+# against (measured on this macOS host only) — an operator raising this
+# override on a Linux host should stay mindful of that separate, smaller
+# ceiling; this cap does not attempt to detect or enforce it.
+SPD_DETAIL_MAX_BYTES_CAP=1000000
+
+# XACA-1177 review round 2 (XACA-1177-018): fixed cap, in bytes, on
+# _spd_emit's `summary` field — NOT overridable (unlike `detail` above):
+# summary is meant to stay a short, human-scannable one-liner by
+# construction, so there is no legitimate reason for an operator to want
+# it larger, only a bug in whatever built it (e.g. a check that embeds raw
+# tool output — `got: $out` — directly into a summary string instead of
+# `detail`). `detail` truncation alone (XACA-1177-015) was NOT sufficient
+# to prevent an oversized `summary` from tripping the exact same
+# `jq: Argument list too long` failure it was meant to close: a Tailscale
+# stub returning a 1.5MB first line reached `_spd_emit` with THAT embedded
+# in `summary`, and the pre-round-2 detail-free FALLBACK finding (see
+# _spd_emit below) still reused the same oversized `summary` verbatim —
+# so both jq attempts failed, `SPD_FINDINGS+=("$json")` appended an empty
+# string, and the finding vanished with no report line and no findings-
+# file entry at all (verified: 0 report lines, exit 0 — a false all-ok).
+# 4096 bytes is comfortably larger than any summary this script's own
+# check functions construct (all are short, fixed template text with
+# small interpolated bits — env var names, elapsed times, limits) while
+# still bounded against exactly this failure mode.
+SPD_SUMMARY_MAX_BYTES=4096
 
 # XACA-1177 review round 1 (XACA-1177-012): tracks the ONE in-flight
 # _spd_run_bounded call, if any — this script runs every check
@@ -392,22 +444,60 @@ SPD_RUN_ACTIVE_RUNDIR=""
 _spd_signal_cleanup() {
     local exitcode="$1"
     if [ -n "${SPD_RUN_ACTIVE_PID:-}" ]; then
+        # XACA-1177 review round 2 (XACA-1177-017): `disown` HERE, and only
+        # here — never on the normal (non-signal) path, where `wait`'s
+        # return value is the real source of truth for a tool's exit code
+        # and disowning breaks that (see _spd_run_bounded's own EXIT CODE
+        # TRAP note: `wait` on a disowned pid returns 0 unconditionally
+        # under /bin/bash 3.2.57, regardless of the real exit status).
+        # Inside THIS handler we never read `wait`'s return value at all —
+        # the exit code is the fixed 130/143/129 the caught signal maps to
+        # — so disowning is safe here and suppresses a real leak: verified
+        # live under /bin/bash 3.2.57 that a SIGKILL'd `set -m` background
+        # job prints "<pid> Killed: 9  <command>" to this script's own
+        # stderr the moment bash's job monitor next notices, UNLESS the
+        # pid was disowned first (reproduced with a repro harness
+        # mirroring this exact trap+background structure; disowning
+        # suppressed it on every run, not disowning leaked it on every
+        # run).
+        disown "${SPD_RUN_ACTIVE_PID}" 2>/dev/null || true
         case "${SPD_RUN_ACTIVE_MODE:-}" in
             gnu)
-                # Signal `timeout`'s OWN pid, not a process group. GNU
-                # timeout installs handlers for the signals it relays and
-                # forwards them to the monitored command's OWN process
-                # group itself (see _spd_run_bounded) — we don't need (and
-                # don't reliably know) that child's pgid to reach it.
-                kill -TERM "${SPD_RUN_ACTIVE_PID}" 2>/dev/null || true
+                # XACA-1177 review round 2 (XACA-1177-017): changed from
+                # signaling ONLY timeout's own pid to signaling the whole
+                # process GROUP (`-- -$pid`) — reviewer-verified live that
+                # GNU timeout's process group id EQUALS its own pid (this
+                # script backgrounds the timeout invocation itself via
+                # `set -m`, which gives it a fresh group at fork time, and
+                # GNU timeout puts the command IT execs into that SAME
+                # group rather than a separate one). A TERM-ignoring
+                # monitored command (`trap '' TERM; exec sleep 60`)
+                # previously survived: sending SIGTERM to ONLY timeout's
+                # pid IS relayed to the child by timeout's own signal
+                # handler, but a child that ignores it stays alive; the
+                # follow-up SIGKILL to ONLY timeout's pid then just kills
+                # timeout itself — SIGKILL is uncatchable, so timeout dies
+                # instantly WITHOUT running its own relay logic to forward
+                # that SIGKILL onward, orphaning the still-ignoring child.
+                # Signaling the GROUP directly reaches both processes
+                # without depending on timeout's relay logic at all — same
+                # mechanism the fallback arm below already used. Verified
+                # live: reproduced the orphan with pid-only targeting
+                # (child survived every run) and confirmed group targeting
+                # kills it (zero survivors every run).
+                kill -TERM -- "-${SPD_RUN_ACTIVE_PID}" 2>/dev/null || true
                 sleep 0.2
-                kill -KILL "${SPD_RUN_ACTIVE_PID}" 2>/dev/null || true
+                kill -KILL -- "-${SPD_RUN_ACTIVE_PID}" 2>/dev/null || true
                 ;;
             fallback)
                 # Here we DO know the pgid — it equals SPD_RUN_ACTIVE_PID
                 # by construction (`set -m` immediately before
                 # backgrounding in _spd_run_bounded gives the job its own
-                # process group whose gid equals its pid).
+                # process group whose gid equals its pid). Already
+                # group-targeted before this review round; verified this
+                # also correctly kills a TERM-ignoring monitored command
+                # under the fallback path (no separate relay-logic
+                # dependency here the way the GNU arm had).
                 kill -TERM -- "-${SPD_RUN_ACTIVE_PID}" 2>/dev/null || true
                 sleep 0.2
                 kill -KILL -- "-${SPD_RUN_ACTIVE_PID}" 2>/dev/null || true
@@ -460,36 +550,178 @@ fi
 
 SPD_HOST=$(_spd_host_id)
 
-# Truncate `detail` to at most SPD_DETAIL_MAX_BYTES_DEFAULT (or
-# KB_SPACEDOCK_DETAIL_MAX_BYTES) bytes (XACA-1177 review round 1,
-# XACA-1177-015). Keeps the FIRST half and LAST half with a documented
-# marker in between naming how many bytes were dropped — head+tail rather
-# than a flat head-only truncation because the TAIL of a tool's output
-# (its final error, the actual failure) is at least as diagnostically
-# useful as its start. Byte-based (`head -c`/`tail -c` — both present in
-# macOS's BSD coreutils, confirmed), never line-based: a payload that is
-# one giant line with no newlines at all (plausible for some tool output)
-# would defeat a line-count-based cap entirely.
+# Generic bounded-positive-integer validator (XACA-1177 review round 2,
+# XACA-1177-020): shared by _spd_resolve_timeout (every
+# KB_SPACEDOCK_*_TIMEOUT override, in seconds) and _spd_truncate_detail's
+# KB_SPACEDOCK_DETAIL_MAX_BYTES override below, rather than duplicating
+# the same digit-length guard + base-10 normalization + cap logic twice —
+# which had already drifted once: the DETAIL_MAX_BYTES validator predated
+# this shared helper and never got _spd_resolve_timeout's own leading-
+# zero/overflow fixes (XACA-1177 review round 1, B2), so a value like 34
+# nines passed its old bare `''|*[!0-9]*|0` check, then silently
+# overflowed `$(( ))` into a garbage value that corrupted the truncation
+# math it was meant to bound.
+#   $1 raw value as read from the env, OR the sentinel _SPD_TIMEOUT_UNSET
+#      for "genuinely unset" — see _spd_resolve_timeout below for why
+#      every call site uses "${VAR-_SPD_TIMEOUT_UNSET}", never "${VAR:-}"
+#   $2 default (must itself be a valid positive integer literal)
+#   $3 cap — maximum accepted value (must be >= default)
+#   $4 varname, for the note text
+#   $5 unit suffix appended after every number the note mentions (e.g.
+#      "s" for seconds; "" for a unitless byte count)
+# Sets (in-shell only — do not call this inside $(...)): SPD_BOUNDED_INT_
+# VALUE, SPD_BOUNDED_INT_NOTE (empty unless the raw value was rejected and
+# the default was substituted).
+_spd_resolve_bounded_int() {
+    local raw="$1" default="$2" cap="$3" varname="$4" unit="${5:-}"
+    SPD_BOUNDED_INT_VALUE="$default"
+    SPD_BOUNDED_INT_NOTE=""
+    case "$raw" in
+        _SPD_TIMEOUT_UNSET)
+            return
+            ;;
+        '')
+            SPD_BOUNDED_INT_NOTE=" ($varname is set but empty — using default ${default}${unit})"
+            return
+            ;;
+        *[!0-9]*)
+            SPD_BOUNDED_INT_NOTE=" ($varname='$raw' is not a positive integer — using default ${default}${unit})"
+            return
+            ;;
+    esac
+    # XACA-1177 review round 2 (cheap fix): strip LEADING ZEROS before the
+    # digit-count guard below, not after. A literal like "00000030" has 8
+    # characters but a perfectly reasonable numeric value (30) — the OLD
+    # length guard tested the raw literal's on-the-wire character count,
+    # so "00000030" was rejected as "unreasonably large" with a message
+    # that didn't match the actual reason (it isn't large at all).
+    # Stripping first makes the length guard test the same thing base-10
+    # normalization is about to produce, and lets "00000030" resolve to
+    # 30 as it arguably should.
+    local stripped="$raw"
+    while [ "${#stripped}" -gt 1 ] && [ "${stripped#0}" != "$stripped" ]; do
+        stripped="${stripped#0}"
+    done
+    # Guard the digit COUNT before doing ANY arithmetic: a very long
+    # all-digit string can silently overflow/wrap `$(( ))` into a garbage
+    # value (verified: a 26-digit literal evaluated to a negative number
+    # with no error at all) rather than failing loudly the way a leading-
+    # zero-as-octal mismatch does, so length must be bounded FIRST.
+    if [ "${#stripped}" -gt 7 ]; then
+        SPD_BOUNDED_INT_NOTE=" ($varname='$raw' is unreasonably large — using default ${default}${unit})"
+        return
+    fi
+    # `$((10#$stripped))` forces base-10 interpretation regardless of any
+    # remaining leading zero (verified under /bin/bash 3.2.57: "08"->8,
+    # "00"->0, "010"->10) and cannot itself error given the length guard
+    # just above.
+    local normalized=$((10#$stripped))
+    if [ "$normalized" -le 0 ]; then
+        SPD_BOUNDED_INT_NOTE=" ($varname=$raw is not valid — using default ${default}${unit})"
+        return
+    fi
+    if [ "$normalized" -gt "$cap" ]; then
+        SPD_BOUNDED_INT_NOTE=" ($varname=$normalized exceeds the ${cap}${unit} sanity cap — using default ${default}${unit})"
+        return
+    fi
+    SPD_BOUNDED_INT_VALUE="$normalized"
+}
+
+# Generic head+tail-around-a-marker byte truncator, shared by _spd_emit's
+# `detail` and `summary` fields (XACA-1177 review round 2, XACA-1177-018)
+# — head+tail rather than a flat head-only truncation because the TAIL of
+# a tool's output (its final error, the actual failure) is at least as
+# diagnostically useful as its start. Byte-based (`head -c`/`tail -c` —
+# both present in macOS's BSD coreutils, confirmed), never line-based: a
+# payload that is one giant line with no newlines at all (plausible for
+# some tool output) would defeat a line-count-based cap entirely.
+#   $1 = the raw string
+#   $2 = max bytes (already validated by the caller — this function does
+#        not itself validate or fall back to a default)
+#   $3 = optional extra text appended inside the truncation marker (e.g.
+#        an invalid-override note, or "; raise with VAR=N" — empty is
+#        fine)
+# XACA-1177 review round 2 (cheap fix): the reported "N bytes truncated"
+# count used to be off by one whenever `max` was ODD — `half=$((max/2))`
+# was reused for BOTH head and tail, so head+tail totaled
+# `2*floor(max/2)` bytes, ONE FEWER than `max` for an odd max, while
+# `dropped=len-max` assumed exactly `max` bytes were kept. The tail now
+# gets `max-half` bytes (not `half`), so head+tail always sums to exactly
+# `max` and the reported count is exact.
+_spd_truncate_to_bytes() {
+    local s="$1" max="$2" extra="${3:-}"
+    local len
+    len=$(printf '%s' "$s" | wc -c | tr -d ' ')
+    if [ "$len" -le "$max" ]; then
+        printf '%s' "$s"
+        return
+    fi
+    local half=$((max / 2)) tail_bytes head_part tail_part dropped
+    tail_bytes=$((max - half))
+    head_part=$(printf '%s' "$s" | head -c "$half")
+    tail_part=$(printf '%s' "$s" | tail -c "$tail_bytes")
+    dropped=$((len - max))
+    printf '%s\n[... %s bytes truncated (raw was %s bytes%s) ...]\n%s' \
+        "$head_part" "$dropped" "$len" "$extra" "$tail_part"
+}
+
+# Truncate `detail` to at most SPD_DETAIL_MAX_BYTES_DEFAULT (or a valid
+# KB_SPACEDOCK_DETAIL_MAX_BYTES override, capped at
+# SPD_DETAIL_MAX_BYTES_CAP) bytes (XACA-1177 review round 1, XACA-1177-015;
+# validation hardened in review round 2, XACA-1177-020). An invalid
+# override falls back to the default and says so — folded into the
+# truncation marker itself when truncation actually happens, since this is
+# an internal, not-per-surface setting with no one finding to attach a
+# note to the way a per-surface timeout note works.
 #   $1 = the raw detail string
 # Prints the (possibly truncated) detail to stdout.
 _spd_truncate_detail() {
     local detail="$1"
-    local max="${KB_SPACEDOCK_DETAIL_MAX_BYTES:-$SPD_DETAIL_MAX_BYTES_DEFAULT}"
-    case "$max" in
-        ''|*[!0-9]*|0) max="$SPD_DETAIL_MAX_BYTES_DEFAULT" ;;
-    esac
-    local len
-    len=$(printf '%s' "$detail" | wc -c | tr -d ' ')
-    if [ "$len" -le "$max" ]; then
-        printf '%s' "$detail"
-        return
-    fi
-    local half=$((max / 2)) head_part tail_part dropped
-    head_part=$(printf '%s' "$detail" | head -c "$half")
-    tail_part=$(printf '%s' "$detail" | tail -c "$half")
-    dropped=$((len - max))
-    printf '%s\n[... %s bytes truncated (raw output was %s bytes; raise with KB_SPACEDOCK_DETAIL_MAX_BYTES=%s) ...]\n%s' \
-        "$head_part" "$dropped" "$len" "$max" "$tail_part"
+    _spd_resolve_bounded_int "${KB_SPACEDOCK_DETAIL_MAX_BYTES-_SPD_TIMEOUT_UNSET}" \
+        "$SPD_DETAIL_MAX_BYTES_DEFAULT" "$SPD_DETAIL_MAX_BYTES_CAP" \
+        "KB_SPACEDOCK_DETAIL_MAX_BYTES" ""
+    local max="$SPD_BOUNDED_INT_VALUE"
+    _spd_truncate_to_bytes "$detail" "$max" "; raise with KB_SPACEDOCK_DETAIL_MAX_BYTES=${max}${SPD_BOUNDED_INT_NOTE}"
+}
+
+# Truncate `summary` to SPD_SUMMARY_MAX_BYTES (XACA-1177 review round 2,
+# XACA-1177-018). NOT overridable, unlike `detail` — see SPD_SUMMARY_
+# MAX_BYTES's own comment for why a legitimate summary never needs to be
+# this large.
+#   $1 = the raw summary string
+_spd_truncate_summary() {
+    _spd_truncate_to_bytes "$1" "$SPD_SUMMARY_MAX_BYTES" ""
+}
+
+# Absolute last-resort finding, built WITHOUT jq at all — no jq invocation,
+# so no argument-list-length concern and no dependency on jq succeeding
+# (XACA-1177 review round 2, XACA-1177-018). Used only if BOTH the full
+# _spd_emit attempt AND its jq-based detail-free fallback have failed;
+# should be unreachable in practice now that summary/detail are both
+# always pre-capped, but this exists so SPD_FINDINGS can NEVER receive a
+# bare empty string. THE ACTUAL DEFECT this closes: an empty string
+# appended to SPD_FINDINGS is later fed to `jq -r '.severity'` by both
+# _spd_report and _spd_worst_severity — on empty input that fails, jq's
+# error lands on ITS OWN stderr (uncaptured by `$(...)`, which only
+# captures stdout), leaving the captured severity as an EMPTY string. An
+# empty string matches neither `fail`/`unknown`/`warn`/`ok`/`skip`, so the
+# finding never prints in the report AND never counts toward the worst
+# severity — a false, completely silent "all ok", exit 0. Reproduced live:
+# a Tailscale stub returning a 1.5MB first line (embedded verbatim into a
+# check's summary text via `got: $out`) produced 0 report lines and exit 0
+# instead of a real finding.
+#   $1 surface, $2 severity — both assumed to be short, JSON-safe internal
+#      constants per this script's own convention (every _spd_emit call
+#      site passes short fixed literal strings for both, never anything
+#      derived from raw tool output) — NOT escaped, matching that
+#      assumption; $2 is expected to already be one of this script's five
+#      severity tokens.
+_spd_emit_hardcoded_fallback() {
+    local surface="$1" severity="$2"
+    local host_escaped
+    host_escaped=$(printf '%s' "${SPD_HOST:-unknown-host}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+    printf '{"host":"%s","surface":"%s","severity":"%s","summary":"finding for surface %s could not be JSON-encoded by jq at all (last-resort fallback, XACA-1177-018)","detail":"","exit_code":null}' \
+        "$host_escaped" "$surface" "$severity" "$surface"
 }
 
 # Append one finding. Always call this instead of printing ad hoc — it's
@@ -501,24 +733,26 @@ _spd_truncate_detail() {
 #   $4 detail    optional longer text (raw tool output etc.) — may be empty
 #   $5 exit_code optional numeric exit code that produced this — may be empty
 #
-# XACA-1177 review round 1 (XACA-1177-015): `detail` is now ALWAYS run
-# through _spd_truncate_detail first, and jq's own success is now checked
-# rather than assumed. Before this fix, a `detail` large enough to trip the
-# OS's ARG_MAX (verified with a ~5MB stub payload: `jq: Argument list too
-# long`) made `json=$(jq ...)` come back completely EMPTY, and
-# `SPD_FINDINGS+=("$json")` then appended that empty string to the
-# findings array — the finding was silently GONE: no [unknown] line in the
-# report, nothing in the findings file, nothing anywhere. That is the
-# opposite of this script's whole reason to exist for exactly the class of
-# tool ("ran, but produced a lot of output") it otherwise correctly
-# bounds and reports on. A finding is now NEVER dropped: if jq still fails
-# even after truncation (some other unexpected jq failure), this falls
-# back to a detail-free finding whose summary explicitly says the detail
-# was dropped, built from fields (surface/severity/summary/host) that are
-# always short, script-controlled strings and therefore cannot themselves
-# hit the same limit.
+# XACA-1177 review round 1 (XACA-1177-015): `detail` is ALWAYS run through
+# _spd_truncate_detail first, and jq's own success is checked rather than
+# assumed. XACA-1177 review round 2 (XACA-1177-018): `summary` is now
+# ALSO always capped the same way (see SPD_SUMMARY_MAX_BYTES) — the
+# round-1 fix alone was NOT sufficient: a check that embeds raw tool
+# output into `summary` instead of `detail` (verified live: a Tailscale
+# stub's 1.5MB first line reaching a check's `summary` via `got: $out`)
+# still tripped `jq: Argument list too long` on BOTH the primary attempt
+# and the round-1 detail-free fallback (which reused the same oversized,
+# un-truncated summary verbatim) — `json` came back empty from both, and
+# `SPD_FINDINGS+=("$json")` silently appended that empty string, which
+# corrupts every later `jq -r '.severity'` read of it into an empty
+# string that matches no known severity: the finding never printed and
+# never counted toward the worst severity, a false silent "all ok". A
+# THIRD tier (_spd_emit_hardcoded_fallback, no jq at all) now guarantees a
+# finding is NEVER dropped even if jq fails for some other reason on both
+# of the first two attempts.
 _spd_emit() {
     local surface="$1" severity="$2" summary="$3" detail="${4:-}" exit_code="${5:-}"
+    summary=$(_spd_truncate_summary "$summary")
     detail=$(_spd_truncate_detail "$detail")
     local ec_json="null"
     case "$exit_code" in
@@ -542,6 +776,9 @@ _spd_emit() {
             --arg host "$SPD_HOST" \
             --argjson exit_code "$ec_json" \
             '{host:$host, surface:$surface, severity:$severity, summary:$summary, detail:"", exit_code:$exit_code}' 2>/dev/null)
+    fi
+    if [ -z "$json" ]; then
+        json=$(_spd_emit_hardcoded_fallback "$surface" "$severity")
     fi
     SPD_FINDINGS+=("$json")
 }
@@ -592,61 +829,24 @@ _spd_emit() {
 # Sets (in-shell only — do not call this inside $(...), same reason as
 # _spd_run_bounded below): SPD_TIMEOUT_VALUE, SPD_TIMEOUT_NOTE (empty unless
 # the raw value was rejected and the default was substituted).
+#
+# XACA-1177 review round 2 (XACA-1177-020): this is now a thin wrapper
+# around the shared _spd_resolve_bounded_int (defined earlier, near
+# _spd_truncate_detail, which also uses it for KB_SPACEDOCK_DETAIL_MAX_
+# BYTES) rather than its own independent copy of the same leading-zero/
+# overflow-guard/cap logic — see that function's own header comment for
+# the full B2 rationale (leading-zero-as-octal in $(( )), silent overflow
+# on a very long digit string, etc.), which all still applies here
+# unchanged. The "s" (seconds) unit suffix reproduces this function's
+# EXACT pre-round-2 note wording byte-for-byte (verified against the
+# regression suite's existing assertions, e.g. "using default 20s",
+# "not a positive integer") — this refactor changes nothing observable
+# about _spd_resolve_timeout's behavior, only where the logic lives.
 _spd_resolve_timeout() {
     local raw="$1" default="$2" varname="$3"
-    SPD_TIMEOUT_VALUE="$default"
-    SPD_TIMEOUT_NOTE=""
-    case "$raw" in
-        _SPD_TIMEOUT_UNSET)
-            return
-            ;;
-        '')
-            SPD_TIMEOUT_NOTE=" ($varname is set but empty — using default ${default}s)"
-            return
-            ;;
-        *[!0-9]*)
-            SPD_TIMEOUT_NOTE=" ($varname='$raw' is not a positive integer — using default ${default}s)"
-            return
-            ;;
-    esac
-    # XACA-1177 review round 1 (B2): $raw is now known to be ALL DIGITS,
-    # but that still allows a leading-zero literal ("00", "08", "010") to
-    # slip through to the runner uncanonicalized. That's not cosmetic:
-    # (a) GNU `timeout`/`gtimeout` parse their own numeric argument as a
-    #     plain decimal string, so "00" is accepted as literally ZERO,
-    #     which for GNU timeout means NO TIMEOUT AT ALL — verified live,
-    #     `gtimeout 00 sleep 5` ran the full 5s untouched.
-    # (b) bash's `$(( ))` treats a leading-zero literal as OCTAL, so "08"/
-    #     "09" is a FATAL "value too great for base" the first time the
-    #     fallback path's poll loop computes `$((limit*1000))` — verified
-    #     live under /bin/bash 3.2.57 — and "010" would silently become
-    #     8 instead of 10, a wrong-but-plausible-looking value that would
-    #     never be noticed.
-    # Guard the digit COUNT before doing ANY arithmetic on $raw: a very
-    # long all-digit string can silently overflow/wrap `$(( ))` into a
-    # garbage value (verified: a 26-digit literal evaluated to a negative
-    # number with no error at all) rather than failing loudly the way the
-    # leading-zero case does, so length must be bounded FIRST.
-    if [ "${#raw}" -gt 7 ]; then
-        SPD_TIMEOUT_NOTE=" ($varname='$raw' is unreasonably large — using default ${default}s)"
-        return
-    fi
-    # `$((10#$raw))` forces base-10 interpretation regardless of leading
-    # zeros (verified under /bin/bash 3.2.57: "08"->8, "00"->0, "010"->10)
-    # and cannot itself error given the length guard just above — this is
-    # now the ONE canonical-decimal conversion point; every value that
-    # reaches _spd_run_bounded from here on is guaranteed to be either the
-    # literal $default (already canonical) or this normalized value.
-    local normalized=$((10#$raw))
-    if [ "$normalized" -le 0 ]; then
-        SPD_TIMEOUT_NOTE=" ($varname=$raw is not valid — using default ${default}s)"
-        return
-    fi
-    if [ "$normalized" -gt "$SPD_TIMEOUT_MAX_SECS" ]; then
-        SPD_TIMEOUT_NOTE=" ($varname=$normalized exceeds the ${SPD_TIMEOUT_MAX_SECS}s sanity cap — using default ${default}s)"
-        return
-    fi
-    SPD_TIMEOUT_VALUE="$normalized"
+    _spd_resolve_bounded_int "$raw" "$default" "$SPD_TIMEOUT_MAX_SECS" "$varname" "s"
+    SPD_TIMEOUT_VALUE="$SPD_BOUNDED_INT_VALUE"
+    SPD_TIMEOUT_NOTE="$SPD_BOUNDED_INT_NOTE"
 }
 
 # Bounded command runner. MUST be called IN-SHELL, never inside `$(...)` —
@@ -2454,6 +2654,11 @@ Usage:
 
 Exit code reflects the WORST finding severity across all diagnostics run:
   0 = all ok/skip   1 = worst is warn   2 = worst is fail or unknown
+An interrupted run (Ctrl-C, or an external TERM/HUP) exits with the
+signal's own code instead — 130 (INT), 143 (TERM), 129 (HUP) — and writes
+NO findings file: any findings already accumulated from checks that
+completed before the signal arrived are discarded with it, not partially
+flushed.
 
 Every fronted tool runs under a timeout (a hang reports 'unknown', never
 hangs this script) — override in seconds: KB_SPACEDOCK_DOCTOR_TIMEOUT (45),

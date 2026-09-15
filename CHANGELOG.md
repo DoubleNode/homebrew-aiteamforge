@@ -76,6 +76,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     dropped.
   - The fallback's poll loop has a wall-clock ceiling, capping any overrun at about a second.
   - The `kb-recover` default is now 120s.
+  Review round 2 hardening:
+  - Ctrl-C/TERM now kills the tool's whole process group, so a tool that ignores TERM can't survive.
+  - Summaries are capped at 4096 bytes, with a jq-free last-resort fallback, so a finding is never
+    dropped.
+  - `KB_SPACEDOCK_DETAIL_MAX_BYTES` uses the same validation as the timeout overrides.
+  - The signal exit codes 130/143/129 are documented. An interrupted run writes no findings file.
 
 - **XACA-1175** — `auto-upgrade.sh`'s brew-not-found and tap-not-installed exits now log a completion
   marker (`FAILED: brew not found` / `SKIPPED: tap not installed`) before exiting. Previously they
