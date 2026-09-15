@@ -85,8 +85,23 @@ if ! type -t test_start >/dev/null 2>&1; then
     test_pass()  { _PASS_COUNT=$((_PASS_COUNT + 1)); echo "     PASS: $_CURRENT_TEST"; }
     test_fail()  { _FAIL_COUNT=$((_FAIL_COUNT + 1)); echo "     FAIL: $_CURRENT_TEST -- $1" >&2; }
 fi
-_SKIP_COUNT=0
-test_skip() { _SKIP_COUNT=$((_SKIP_COUNT + 1)); echo "     SKIP (not a pass): $_CURRENT_TEST -- $1"; }
+# PR #907 review (XACA-1231-013): this used to define test_skip
+# UNCONDITIONALLY, which SHADOWED test-runner.sh's own exported test_skip
+# (it exports test_start/test_pass/test_fail/test_skip together — see its
+# `export -f` line) whenever this suite ran under the runner, not just in
+# standalone mode. A skip in the (e) negative control therefore printed a
+# line but was invisible to the runner's own SKIP accounting (no "SKIP:"
+# marker ever reached TEST_RESULTS_FILE), so a CI run where the control
+# never executed still reported fully green. Guard it like the other three
+# so the runner's own version wins whenever one is present. As of this fix
+# nothing in this suite calls test_skip any more (see (e) below — the
+# negative control now always runs, ref or synthesized, never skips), but
+# the guard stays as defense-in-depth against a future call site
+# reintroducing the same shadowing bug.
+if ! type -t test_skip >/dev/null 2>&1; then
+    _SKIP_COUNT=0
+    test_skip() { _SKIP_COUNT=$((_SKIP_COUNT + 1)); echo "     SKIP (not a pass): $_CURRENT_TEST -- $1"; }
+fi
 
 EXPECTED_LOGOS="finance_bar_logo.png finance_fca_logo.png finance_lcars_logo.png finance_nagus_logo.png finance_vault_logo.png finance_workshop_logo.png"
 
@@ -356,21 +371,53 @@ fi
 echo ""
 echo "=== (e) negative control: pre-fix baseline ($BASELINE_REF) delivers ZERO finance logos ==="
 
-if ! git -C "$TAP_ROOT" cat-file -e "${BASELINE_REF}^{commit}" 2>/dev/null; then
-    test_start "E0: baseline ref $BASELINE_REF is reachable in this clone"
-    test_skip "ref not found in this clone (shallow?) -- set XACA1231_PRECHANGE_REF; controls E1-E3 did NOT run"
-else
-    test_start "E0: baseline ref $BASELINE_REF is reachable in this clone"
-    test_pass
+# PR #907 review (XACA-1231-013): E0-E3 used to SKIP entirely when
+# BASELINE_REF was unreachable -- exactly the case on tap CI's depth-1
+# checkout (d1d57eb is not fetched), where the skip (compounded by the
+# test_skip-shadowing bug fixed above) made the whole suite report green
+# with the negative control never having run at all. The control must
+# ALWAYS execute. When the pinned ref IS reachable (a full/deep local
+# clone), use it -- git history is the strongest evidence. When it is NOT
+# (shallow CI checkout, or an override pointing nowhere), SYNTHESIZE the
+# pre-fix baseline instead of skipping: the measured pre-fix state is
+# exactly "share/terminals/finance does not exist" (confirmed when the ref
+# WAS reachable: `git show d1d57eb:share/terminals/finance` ->
+# "fatal: path exists on disk but not in d1d57eb" -- finance had personas
+# there already, just no terminal-logo asset class), so a synthesized
+# baseline is built by copying the ENTIRE current share/ tree (files AND
+# dirs -- an earlier draft of this fix globbed only `share/*/`, which
+# silently dropped share/CHANGELOG.md and share/requirements.txt, two real
+# top-level FILES under share/; caught by an independent post-hoc diff
+# against the real tree, not by this suite's own assertions, since neither
+# missing file affects (c)/(d)'s finance-scoped checks -- worth fixing
+# anyway so "synthesized" means the whole tree, not just what this ticket
+# happens to touch) and then relocating (never deleting) share/terminals/
+# finance out of the copy with `mv`, so nothing needs `rm -rf`.
+BASELINE_DIR="$TEST_TMP_DIR/baseline"
+mkdir -p "$BASELINE_DIR/share"
+BASELINE_MODE=""
 
-    BASELINE_DIR="$TEST_TMP_DIR/baseline"
-    mkdir -p "$BASELINE_DIR"
+test_start "E0: pre-fix negative-control baseline is available (ref or synthesized -- this must never skip)"
+if git -C "$TAP_ROOT" cat-file -e "${BASELINE_REF}^{commit}" 2>/dev/null; then
+    BASELINE_MODE="ref:$BASELINE_REF"
     git -C "$TAP_ROOT" archive "$BASELINE_REF" share | tar -x -C "$BASELINE_DIR"
+    test_pass
+else
+    BASELINE_MODE="synthesized (ref $BASELINE_REF unreachable in this clone -- shallow/depth-1 checkout?)"
+    cp -R "$TAP_ROOT/share/." "$BASELINE_DIR/share/"
+    if [ -d "$BASELINE_DIR/share/terminals/finance" ]; then
+        mkdir -p "$TEST_TMP_DIR/synth-excluded"
+        mv "$BASELINE_DIR/share/terminals/finance" "$TEST_TMP_DIR/synth-excluded/finance-terminals"
+    fi
+    test_pass
+fi
+echo "     E0 mode: $BASELINE_MODE"
 
+{
     test_start "E1: baseline share/ tree does NOT already ship finance logos (control must not be vacuous)"
     if [ -d "$BASELINE_DIR/share/terminals/finance/logos" ] \
         && ls "$BASELINE_DIR/share/terminals/finance/logos/"*.png >/dev/null 2>&1; then
-        test_fail "NEGATIVE CONTROL VACUOUS: $BASELINE_REF already ships finance logos -- point XACA1231_PRECHANGE_REF at an earlier ref"
+        test_fail "NEGATIVE CONTROL VACUOUS: baseline ($BASELINE_MODE) already ships finance logos -- point XACA1231_PRECHANGE_REF at an earlier ref"
     else
         test_pass
     fi
@@ -437,7 +484,7 @@ else
     else
         test_fail "rc=$RC_E2 finance_logos=$_e3_finance_logos pool_terminal_logo_bytes_leaked=[$_e3_pool_leak] out=[$(tr '\n' '|' < "$OUT_E2")]"
     fi
-fi
+}
 
 # ═══════════════════════════════════════════════════════════════════════
 if [ "${_STANDALONE:-false}" != true ] && [ -n "${TEST_RESULTS_FILE:-}" ] && [ -f "${TEST_RESULTS_FILE}" ]; then

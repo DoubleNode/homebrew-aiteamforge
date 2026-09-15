@@ -33,6 +33,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   shipped team (avatars imply logos, every logo ≤256px), setup's copy loop and
   `update_team_image_assets` both landing the 6 files byte-identical to `share/`, and a negative
   control against the pre-fix tap ref that must (and does) deliver zero finance logos.
+  PR #907 review: the negative control used to SKIP entirely on tap CI's depth-1 checkout (the
+  pinned pre-fix ref is unreachable there), and a local `test_skip` shadowed `tests/test-runner.sh`'s
+  own exported one, so that skip was invisible to the runner's SKIP accounting — a CI run where the
+  control never executed still reported fully green. It now always runs: when the pinned ref is
+  reachable it's used directly, otherwise the pre-fix baseline is synthesized (the full current
+  `share/` tree, minus `share/terminals/finance`, nothing deleted to build it) so the control never
+  skips. `test_skip` is now defined only when not already provided, so it can no longer shadow the
+  runner's version.
 - **XACA-1232** — dns terminal logos and persona avatars now ship in the tap. 8 `dns_*_logo.png`
   files under `share/terminals/dns/logos/` and 14 avatar files (7 `dns_*_avatar.png` + 7
   `dns_*_avatar_thumb.png`) under `share/personas/dns/avatars/`, byte-identical mirrors of
