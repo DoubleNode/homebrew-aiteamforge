@@ -22,6 +22,20 @@ readonly NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DIR="${TEST_DIR:-$SCRIPT_DIR}"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Brew Guard (XACA-1222) — install BEFORE any suite can run, at top level so
+# this executes whether test-runner.sh is run directly OR `source`d by a
+# suite (the entrypoint guard at the bottom of this file only gates main(),
+# not this). Every suite run_test_file() launches is a child `bash` process
+# and therefore inherits PATH — the shim is on it before any suite's own code
+# runs, with no per-suite opt-in required. See tests/lib/brew-guard.sh for
+# full rationale; failure to install is fail-closed (aborts here, via `set -e`
+# above) rather than silently continuing without the guard.
+# ═══════════════════════════════════════════════════════════════════════════
+# shellcheck source=lib/brew-guard.sh
+source "$SCRIPT_DIR/lib/brew-guard.sh"
+brew_guard_install
+
 # Test state
 VERBOSE=false
 TOTAL_TESTS=0
@@ -96,8 +110,14 @@ cleanup_test_env() {
   fi
 }
 
-# Trap to ensure cleanup even on failure
-trap cleanup_test_env EXIT INT TERM
+# Trap to ensure cleanup even on failure. XACA-1222: the EXIT path also
+# removes the brew-guard shim dir — owner-PID-gated, so it is a no-op in any
+# process that merely inherited the guard.
+_runner_exit_cleanup() {
+  cleanup_test_env
+  brew_guard_cleanup
+}
+trap _runner_exit_cleanup EXIT INT TERM
 
 # Start a new test
 test_start() {
@@ -1093,6 +1113,12 @@ run_test_file() {
   # for the full rationale and the seven vectors covered.
   leak_guard_snapshot
 
+  # XACA-1222: rotate the brew-guard violations marker so this suite's
+  # aggregation below (brew_guard_assert) only reflects what THIS suite
+  # triggers, never a leftover from whatever ran before it. No-op if the
+  # guard was never installed.
+  brew_guard_reset
+
   # Set up test environment
   setup_test_env
 
@@ -1218,6 +1244,20 @@ run_test_file() {
     # fails the run below — this only fixes the arithmetic a log-scraper
     # would otherwise be misled by. Bump TOTAL_TESTS in lockstep so the
     # identity holds; PASSED_TESTS/SKIPPED_TESTS are deliberately untouched.
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+  fi
+
+  # XACA-1222: a suite that reached a real, mutating/unrecognized brew
+  # invocation is failed regardless of its own exit code or pass/fail
+  # bookkeeping — install-team.sh's `brew install "$dep" || { warn; }`
+  # pattern swallows a non-zero exit entirely, so the exit code alone is not
+  # a reliable signal here. brew_guard_assert reads the marker the shim
+  # wrote independently of that exit code. Same accounting shape as the leak
+  # guard above (own TOTAL_TESTS/FAILED_TESTS bump, since this never went
+  # through a test_start/test_pass/test_fail event of its own).
+  if ! brew_guard_assert; then
+    print_error "BREW GUARD TRIPPED: $CURRENT_TEST_FILE reached a real, unstubbed, mutating/unrecognized brew invocation — see the XACA-1222 BREW GUARD lines above. Failing this run regardless of the suite's own pass/fail result."
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
     FAILED_TESTS=$((FAILED_TESTS + 1))
   fi

@@ -66,6 +66,81 @@ _cleanup() {
 trap _cleanup EXIT INT TERM
 
 # ─────────────────────────────────────────────────────────────────────────────
+# XACA-1222: stub `brew` so run_install() can never reach the network or
+# mutate the host.
+#
+# install-team.sh's dependency step (libexec/installers/install-team.sh
+# ~1910-1938) runs `brew list [--cask] $dep` then, on a miss, `brew install
+# [--cask] $dep` for every entry in TEAM_BREW_DEPS / TEAM_BREW_CASK_DEPS.
+# freelance.conf (exercised by Case 2 below) lists real deps including the
+# `android-studio` cask — a real `brew install --cask android-studio` is a
+# multi-hundred-MB network fetch that would hang this runner and install
+# real software on the host. finance/legal (Cases 1/3/5) ship empty
+# TEAM_BREW_DEPS/CASK_DEPS arrays, so only Case 2 actually exercises the
+# install path today — but the stub is wired into every run_install() call
+# (not just Case 2's) so a future conf change can't silently reintroduce a
+# real brew invocation here.
+#
+# Pattern lifted from tests/test-xaca-1216-flat-persona-deploy.sh's brew
+# stub (`brew list` reports "installed", everything else refuses loudly),
+# extended with: full-argv logging (so the "nothing mutating happened"
+# claim is verified, not assumed — see the assertion after Case 2 and the
+# suite-wide one near the end), and an explicit mutating-subcommand refusal
+# list rather than a single install|else split.
+# ─────────────────────────────────────────────────────────────────────────────
+STUB_BIN="$TEST_TMP_DIR/stub-bin"
+mkdir -p "$STUB_BIN"
+BREW_STUB_LOG="$TEST_TMP_DIR/brew-stub.log"
+: > "$BREW_STUB_LOG"
+
+cat > "$STUB_BIN/brew" <<'BREWSTUBEOF'
+#!/bin/sh
+# XACA-1222 test stub for test-xaca-0463-port-allocation.sh.
+# Logs every invocation (full argv) to $_BREW_STUB_LOG, then:
+#   - `brew list ...`    → exit 0 ("already installed"), so install-team.sh
+#                           takes its already-installed branch and never
+#                           calls `brew install` for a dep that happens to
+#                           already be on the runner (real or otherwise).
+#   - `brew --prefix`    → not currently called by install-team.sh (grepped
+#                           for XACA-1222), but handled defensively: prints a
+#                           nonexistent path, never a real host prefix.
+#   - anything mutating/network (install/upgrade/tap/untap/reinstall/
+#     uninstall/update/services) → refuse loudly, non-zero exit.
+#   - anything else       → refuse loudly too (fail closed on the unknown).
+{
+    printf '%s' "brew"
+    for _a in "$@"; do printf ' %s' "$_a"; done
+    printf '\n'
+} >> "${_BREW_STUB_LOG:-/dev/null}"
+
+case "$1" in
+    list)
+        exit 0
+        ;;
+    --prefix)
+        printf '%s\n' "/nonexistent-xaca-1222-brew-prefix"
+        exit 0
+        ;;
+    install|upgrade|tap|untap|reinstall|uninstall|update|services)
+        echo "brew stub: refusing mutating/network subcommand '$*' inside XACA-0463 port-allocation sandbox (XACA-1222)" >&2
+        exit 1
+        ;;
+    *)
+        echo "brew stub: refusing unrecognised subcommand '$*' inside XACA-0463 port-allocation sandbox (XACA-1222)" >&2
+        exit 1
+        ;;
+esac
+BREWSTUBEOF
+chmod +x "$STUB_BIN/brew"
+
+# find_brew_violations <logfile> — mutating/network brew subcommands present
+# in a stub log. Anchored on line-start "brew <subcommand>" so it cannot
+# false-match a dep NAMED "install" etc. appearing as an argument.
+find_brew_violations() {
+    grep -E '^brew (install|upgrade|tap|untap|reinstall|uninstall|update|services)\b' "$1" 2>/dev/null || true
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Sandbox helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -103,9 +178,15 @@ run_install() {
     local err_file="$_SB/install-${label}.err"
     local rc=0
 
+    # XACA-1222: PATH-prepend the brew stub so install-team.sh's dependency
+    # step (real for freelance, see Case 2) can never reach the network or
+    # mutate the host. _BREW_STUB_LOG is the suite-wide log; every case's
+    # brew invocations accumulate into it for the assertions below.
     HOME="$_SB_HOME" \
     AITEAMFORGE_DIR="$_SB_AITF" \
     AITEAMFORGE_CONFIG="$_SB_CONFIG" \
+    PATH="$STUB_BIN:$PATH" \
+    _BREW_STUB_LOG="$BREW_STUB_LOG" \
         bash "$INSTALL_TEAM" "$team" "$@" \
         >"$out_file" 2>"$err_file" || rc=$?
 
@@ -233,6 +314,30 @@ if [[ "$_c2_pass" = true ]]; then
     else
         test_fail "expected freelance-doublenode-workstats.lcars_port=8501, got '${_c2_port2:-<empty>}'"
     fi
+fi
+
+# XACA-1222: freelance.conf is the one team.conf in this suite with real
+# TEAM_BREW_DEPS/TEAM_BREW_CASK_DEPS (including the android-studio cask) —
+# this is the case that would have hung the runner on real brew network I/O
+# pre-stub. Assert POSITIVE evidence the stub was actually reached for it
+# (absence of a violation later proves nothing if the stub was never
+# invoked at all — e.g. if `brew` resolved to the real host binary because
+# PATH wiring broke). "brew list android-studio" appearing in the log means
+# install-team.sh's cask-dep loop ran and called our stub, not the real
+# brew.
+test_start "XACA-1222 case-2c: freelance install actually reached the brew stub (not real brew)"
+if grep -qF 'brew list --cask android-studio' "$BREW_STUB_LOG" 2>/dev/null; then
+    test_pass
+else
+    test_fail "expected 'brew list --cask android-studio' in $BREW_STUB_LOG after the freelance install — stub was not reached (or freelance.conf's cask deps changed); log: $(cat "$BREW_STUB_LOG" 2>/dev/null | tr '\n' ';')"
+fi
+
+test_start "XACA-1222 case-2d: no mutating brew subcommand reached the stub for the freelance install"
+_c2_brew_viol="$(find_brew_violations "$BREW_STUB_LOG")"
+if [[ -z "$_c2_brew_viol" ]]; then
+    test_pass
+else
+    test_fail "mutating brew subcommand(s) reached the stub: ${_c2_brew_viol//$'\n'/; }"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -377,6 +482,32 @@ if printf '%s' "$_c5_err" | grep -qi 'exhausted'; then
     test_pass
 else
     test_fail "stderr does not contain 'exhausted'; got: ${_c5_err:0:200}"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1222: suite-wide brew-sandboxing backstop.
+#
+# Case-2c/2d above already checked the one case with real deps. This is a
+# second, independent read over the FULL suite log (every run_install() call
+# across every case) so a future case added anywhere in this file that adds
+# team-conf brew deps can't silently regress the sandboxing without tripping
+# a test. Positive-evidence first (the log has SOME content — an empty log
+# would make the "no violations" check below vacuously true), then the
+# no-mutating-subcommand check.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "XACA-1222: brew stub log is non-empty (stub was reached at least once this suite)"
+if [[ -s "$BREW_STUB_LOG" ]]; then
+    test_pass
+else
+    test_fail "brew stub log at $BREW_STUB_LOG is empty or missing — either no case in this suite still exercises TEAM_BREW_DEPS, or the PATH stub wiring is broken; either way this check can't verify anything below it"
+fi
+
+test_start "XACA-1222: no mutating brew subcommand was attempted anywhere in this suite"
+_suite_brew_viol="$(find_brew_violations "$BREW_STUB_LOG")"
+if [[ -z "$_suite_brew_viol" ]]; then
+    test_pass
+else
+    test_fail "mutating brew subcommand(s) reached the stub: ${_suite_brew_viol//$'\n'/; } (full log: $(cat "$BREW_STUB_LOG" 2>/dev/null | tr '\n' ';'))"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

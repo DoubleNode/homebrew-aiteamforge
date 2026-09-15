@@ -231,6 +231,38 @@ or the target `kanban-helpers.sh` is git-tracked, unless `AITEAMFORGE_ALLOW_DEV_
 is set. Unsandboxed tests WILL trip this guard and abort. See
 `test-xaca-0564-kanban-helpers-overwrite-guard.sh` for the regression-test coverage.
 
+### Brew Guard (XACA-1222)
+
+`test-runner.sh` installs a systemic backstop, `tests/lib/brew-guard.sh`, before any
+suite runs. It puts a shim `brew` at the front of `PATH` and exports it, so every suite
+the runner launches inherits it with no per-suite opt-in. A suite that `source`s
+`test-runner.sh` gets it too. A suite run as a bare `bash tests/test-foo.sh` that never
+sources the runner does **not**; run suites through the runner.
+
+The shim passes a small allowlist of **read-only** calls through to the real brew
+(`--prefix`, `--version`, `list`, `info`, `outdated`, `deps`, a bare `brew tap`, ...),
+with `HOMEBREW_NO_AUTO_UPDATE=1` so even those stay off the network. It **blocks
+everything else**: every mutating subcommand, `brew tap <name>`, and anything it does not
+recognise. Unknown is treated as mutating. A blocked call prints a loud
+`XACA-1222 BREW GUARD` line, exits 97, and appends to a marker file the runner checks
+after each suite (`brew_guard_assert`). A suite whose code swallows brew's exit code
+(`brew install "$dep" || { warn ...; }`, as `install-team.sh` does) therefore still fails.
+
+On a host with **no** brew on `PATH` (the ubuntu CI runner) the guard installs nothing:
+an unstubbed `brew install` already fails there, and a shim would make `command -v brew`
+succeed where it used to fail.
+
+This exists because `test-xaca-0463-port-allocation.sh` reached a real
+`brew install --cask android-studio` during a full `test-runner.sh` run, from a suite
+`ci-manifest` classifies `plain-shell`.
+
+If your suite drives code that installs brew packages, stub `brew` yourself (see
+`test-xaca-0463-port-allocation.sh` or `test-xaca-1216-flat-persona-deploy.sh`). A
+suite-local stub prepended to `PATH` sits in front of the guard and wins. If a suite
+legitimately needs a read-only call the guard does not allow, extend the allowlist in
+`tests/lib/brew-guard.sh`; do not add an opt-out. `test-xaca-1222-brew-guard.sh` is the
+guard's own regression suite.
+
 ## Test Coverage
 
 | Component | Test File | Coverage |

@@ -35,6 +35,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - Corrected a stale comment in `aiteamforge-setup.sh` claiming "Space Dock ships no avatars in the
     tap" — true when written, false since XACA-1212 added Space Dock's avatars and logos.
 
+- **XACA-1222** — Test suites can no longer reach a real `brew` mutation. `test-xaca-0463-port-allocation.sh`
+  ran `install-team.sh freelance` with the host's brew on PATH, so a full `tests/test-runner.sh` run fetched
+  and installed the `android-studio` cask for real, hanging the run. `test-xaca-1070-mandatory-install.sh`
+  had the same gap (academy's `python@3`/`node`/`jq`/`gh`), hidden only because most hosts already have
+  those. Both now stub brew and assert no mutating call was attempted. New `tests/lib/brew-guard.sh`, wired
+  into `test-runner.sh`, is the systemic backstop: it puts a `brew` shim first on PATH that passes a
+  read-only allowlist (including bare `brew tap`) through to the real brew with auto-update off, and blocks
+  everything else — including subcommands it does not recognise — with exit 97 and a marker file. The
+  runner fails any suite that tripped it even when the suite swallowed the exit code, as `install-team.sh`
+  does. On a host with no brew (the ubuntu CI runner) the guard installs nothing, so `command -v brew`
+  still fails there. `test-xaca-1222-brew-guard.sh` is the negative control (a fake "real brew", never
+  the host's).
+
 - **XACA-1220** — `display-agent-avatar.sh` mirror: Space Dock avatar arms and unmapped agent pairs
   now write panel JSON with an empty avatar and warn on stderr instead of silently exiting.
   Sourcing the helper no longer calls it: the zsh executed-vs-sourced guard was always true inside a

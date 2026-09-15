@@ -2488,6 +2488,69 @@ _x1070t_write_org_config() {
     cp "$ORG_YAML_EXAMPLE" "$1/.aiteamforge/organization.yaml"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1222: stub `brew` so T1/T2's REAL, non---connect-only install-team.sh
+# runs can never reach the network or mutate the host.
+#
+# Unlike every other real-installer test in this repo, T1/T2 below drive a
+# FULL (non---connect-only) install of "academy" specifically to exercise the
+# ATF_ENV_TEAM_WORKING_DIR override (XACA-1070-031) — and academy.conf ships
+# a NON-empty TEAM_BREW_DEPS (python@3, node, jq, gh; TEAM_BREW_CASK_DEPS is
+# empty). install-team.sh's dependency step (libexec/installers/install-team.sh,
+# "INSTALL HOMEBREW DEPENDENCIES") runs `brew list "$dep"` then, on a miss,
+# `brew install "$dep"` for each. Whether that reaches a real network fetch
+# on any given host depends entirely on which of those four formulae happen
+# to already be installed there — exactly the kind of host-dependent
+# behavior a sandboxed test must never depend on. Stub unconditionally.
+#
+# Pattern lifted from tests/test-xaca-0463-port-allocation.sh's brew stub:
+# `brew list` reports "already installed" (exit 0) so install-team.sh never
+# takes the `brew install` branch at all; every other subcommand refuses
+# loudly. Full-argv logging lets the assertions below prove the stub was
+# actually reached rather than assuming it.
+# ─────────────────────────────────────────────────────────────────────────────
+_X1070T_STUB_BIN="$TEST_TMP_DIR/x1070t-stub-bin"
+mkdir -p "$_X1070T_STUB_BIN"
+_X1070T_BREW_STUB_LOG="$TEST_TMP_DIR/x1070t-brew-stub.log"
+: > "$_X1070T_BREW_STUB_LOG"
+
+cat > "$_X1070T_STUB_BIN/brew" <<'X1070T_BREWSTUBEOF'
+#!/bin/sh
+# XACA-1222 test stub for test-xaca-1070-mandatory-install.sh (SECTION T).
+# Logs every invocation (full argv) to $_X1070T_BREW_STUB_LOG, then:
+#   - `brew list ...` → exit 0 ("already installed"), so install-team.sh
+#     never calls `brew install` for any of academy's real deps.
+#   - anything mutating/network → refuse loudly, non-zero exit.
+#   - anything else → refuse loudly too (fail closed on the unknown).
+{
+    printf '%s' "brew"
+    for _a in "$@"; do printf ' %s' "$_a"; done
+    printf '\n'
+} >> "${_X1070T_BREW_STUB_LOG:-/dev/null}"
+
+case "$1" in
+    list)
+        exit 0
+        ;;
+    install|upgrade|tap|untap|reinstall|uninstall|update|services)
+        echo "brew stub: refusing mutating/network subcommand '$*' inside XACA-1070 SECTION T sandbox (XACA-1222)" >&2
+        exit 1
+        ;;
+    *)
+        echo "brew stub: refusing unrecognised subcommand '$*' inside XACA-1070 SECTION T sandbox (XACA-1222)" >&2
+        exit 1
+        ;;
+esac
+X1070T_BREWSTUBEOF
+chmod +x "$_X1070T_STUB_BIN/brew"
+
+# _x1070t_find_brew_violations — mutating/network brew subcommands present
+# in the stub log. Anchored on line-start "brew <subcommand>" so it cannot
+# false-match a dep NAMED "install" etc. appearing as an argument.
+_x1070t_find_brew_violations() {
+    grep -E '^brew (install|upgrade|tap|untap|reinstall|uninstall|update|services)\b' "$_X1070T_BREW_STUB_LOG" 2>/dev/null || true
+}
+
 # ── T0: preflight -- confirm academy really is unparameterized (this suite's
 # fixture assumption), so T1/T2 exercise the ATF_ENV_TEAM_WORKING_DIR branch
 # and not the parametric (XACA-0485) one ──
@@ -2508,6 +2571,7 @@ _t1_stdout="$SANDBOX/t1-stdout.txt"
 _t1_stderr="$SANDBOX/t1-stderr.txt"
 _t1_rc=0
 HOME="$_t1_home" AITEAMFORGE_DIR="$_t1_aitf" \
+    PATH="$_X1070T_STUB_BIN:$PATH" _X1070T_BREW_STUB_LOG="$_X1070T_BREW_STUB_LOG" \
     bash "$INSTALL_TEAM_SH" academy >"$_t1_stdout" 2>"$_t1_stderr" || _t1_rc=$?
 assert_eq "$_t1_rc" "0" "expected a clean install, got exit $_t1_rc (stderr: $(cat "$_t1_stderr"))"
 assert_file_exists "$_t1_home/academy/$_X1070T_MARKER" "with no override, personas must land under the conf default \$HOME/academy -- got nothing there (stdout: $(cat "$_t1_stdout"))"
@@ -2525,10 +2589,26 @@ _t2_stdout="$SANDBOX/t2-stdout.txt"
 _t2_stderr="$SANDBOX/t2-stderr.txt"
 _t2_rc=0
 HOME="$_t2_home" AITEAMFORGE_DIR="$_t2_aitf" TEAM_WORKING_DIR="$_t2_custom" \
+    PATH="$_X1070T_STUB_BIN:$PATH" _X1070T_BREW_STUB_LOG="$_X1070T_BREW_STUB_LOG" \
     bash "$INSTALL_TEAM_SH" academy >"$_t2_stdout" 2>"$_t2_stderr" || _t2_rc=$?
 assert_eq "$_t2_rc" "0" "expected a clean install, got exit $_t2_rc (stderr: $(cat "$_t2_stderr"))"
 assert_file_exists "$_t2_custom/$_X1070T_MARKER" "the ATF_ENV_TEAM_WORKING_DIR override must win -- personas must land under the caller-supplied dir (stdout: $(cat "$_t2_stdout"))"
 assert_file_not_exists "$_t2_home/academy/$_X1070T_MARKER" "with an override given, the conf default (\$HOME/academy) must NEVER be populated -- both cannot win"
+_block_end
+
+# ── T3 [XACA-1222 safety]: prove the brew stub was actually reached by both
+# T1 and T2 (not silently bypassed by a PATH-resolution mistake) and that
+# neither run attempted a mutating/network brew subcommand ──
+_block_start "T3 [safety]: brew stub reached by T1+T2 (academy real deps: python@3/node/jq/gh) with zero mutating brew calls"
+if grep -qF 'brew list' "$_X1070T_BREW_STUB_LOG" 2>/dev/null; then
+    :
+else
+    _block_note_fail "expected at least one 'brew list ...' line in $_X1070T_BREW_STUB_LOG after T1+T2 -- stub was not reached (or academy.conf's brew deps changed to empty); log: $(cat "$_X1070T_BREW_STUB_LOG" 2>/dev/null | tr '\n' ';')"
+fi
+_t3_viol="$(_x1070t_find_brew_violations)"
+if [ -n "$_t3_viol" ]; then
+    _block_note_fail "mutating brew subcommand(s) reached the stub: ${_t3_viol//$'\n'/; }"
+fi
 _block_end
 
 # ═══════════════════════════════════════════════════════════════════════════
