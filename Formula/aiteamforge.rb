@@ -2,7 +2,7 @@ class Aiteamforge < Formula
   desc "AI-powered multi-team development infrastructure"
   homepage "https://github.com/DoubleNode/homebrew-aiteamforge"
   url "https://github.com/DoubleNode/homebrew-aiteamforge.git",
-      tag: "v0.20.14"
+      tag: "v0.20.15"
   license "MIT"
 
   head "https://github.com/DoubleNode/homebrew-aiteamforge.git", branch: "main"
