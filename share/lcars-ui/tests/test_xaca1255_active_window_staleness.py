@@ -282,5 +282,181 @@ class ActiveWindowStalenessTests(unittest.TestCase):
             "not enforcing its own threshold")
 
 
+class WindowTrustFailClosedTests(unittest.TestCase):
+    """XACA-1255-021: /api/agent-panel must never serve a CONFIDENT wrong window.
+
+    ── The defect ─────────────────────────────────────────────────────────
+    The staleness guard above stops the endpoint trusting a stale index, but
+    what it does INSTEAD is fall through to `lcars-agent-<session>.json` —
+    which scripts/display-agent-avatar.sh writes with the same content for
+    every window of a session, LAST-WRITER-WINS. So the web panel still
+    served one chat whichever window most recently ran the banner. The
+    terminal panel already refuses exactly this (RENDER_WINDOW_TRUSTED,
+    XACA-1255-006); the endpoint did not.
+
+    A HALF-established fail-closed invariant is worse than none: the working
+    half teaches people the panel can be trusted about whose window they are
+    looking at, and they carry that trust to the half that has not earned it.
+
+    MEASURED 2026-09-16 on this machine: of 4 live academy sessions only
+    academy-chancellor had a fresh active-window file — engineering, medical
+    and training were 3h-24h stale. THREE of four sessions were already being
+    served through this untrusted fallback.
+
+    ── The contract ───────────────────────────────────────────────────────
+    Every response carries `window_trusted`, `window_index` and
+    `window_unavailable_reason`. The keys are ALWAYS present: an absent key
+    is indistinguishable from an older server, and a client would read "no
+    flag" as "trusted" — the reassuring default this ticket exists to remove.
+
+    The payload itself is still served when untrusted, mirroring the terminal
+    panel's DEMOTE-don't-hide choice: team/developer/role/avatar are
+    session-scoped and stay correct, and a degraded panel is still a panel.
+    What must never happen is serving it with no indication that the window
+    is unconfirmed.
+
+    ── Negative controls (MEASURED 2026-09-16, both directions) ───────────
+    Run over the whole file (15 tests: 6 staleness + 9 here).
+
+    (1) Fix disabled — `data["window_trusted"] = True` unconditionally:
+        5 failed, 10 passed. The five are exactly the untrusted paths —
+        stale index, absent index file, non-numeric index, fresh index with
+        no window JSON, sessionless request. Both test_trusted_path_* stay
+        GREEN, which is what makes them a control rather than noise.
+
+    (2) Mirror control — trust hard-coded False even on the good path:
+        1 failed, 14 passed, the failure being
+        test_trusted_path_sets_window_trusted_true. So this class cannot be
+        satisfied by a "refuse everything" fix either; it pins both
+        directions, not just the safe one.
+    """
+
+    def setUp(self):
+        self.tmp_dir = Path(tempfile.mkdtemp(prefix="x1255trust-"))
+        (self.tmp_dir / f"lcars-agent-{SESSION}.json").write_text(
+            json.dumps({"name": "SESSION_LEVEL", "terminal": "OTHER-WINDOW"}))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _write_window_json(self, index=3):
+        (self.tmp_dir / f"lcars-agent-{SESSION}-w{index}.json").write_text(
+            json.dumps({"name": "WINDOW_3", "terminal": "THIS-WINDOW"}))
+
+    def _write_active_window(self, content, age_s=0):
+        target = self.tmp_dir / f"lcars-active-window-{SESSION}"
+        target.write_text(content)
+        if age_s:
+            past = time.time() - age_s
+            os.utime(target, (past, past))
+        return target
+
+    def _serve(self, session=SESSION):
+        suffix = f"?session={session}" if session else ""
+        handler, buf = _make_handler(f"/api/agent-panel{suffix}")
+        with patch("server.LCARS_TMP_DIR", self.tmp_dir), \
+             patch("server._fetch_amb_badges", return_value=[]):
+            handler.serve_agent_panel_data()
+        buf.seek(0)
+        return json.loads(buf.read())
+
+    def _assert_untrusted(self, payload, why):
+        # Keys must EXIST, not merely be falsey-by-absence.
+        self.assertIn("window_trusted", payload,
+                      "window_trusted key missing entirely — a client cannot "
+                      "distinguish this from an old server and will assume trust")
+        self.assertIs(payload["window_trusted"], False, why)
+        self.assertIsNone(payload["window_index"],
+                          "an untrusted response must not name a window index")
+        self.assertTrue(
+            payload.get("window_unavailable_reason"),
+            "an untrusted response must SAY WHY; a bare false is a dead end for "
+            "whoever has to debug it")
+
+    # -- trusted path (positive control) -----------------------------------
+
+    def test_trusted_path_sets_window_trusted_true(self):
+        """GUARD CONTROL. A fresh index + that window's own JSON IS trustworthy."""
+        self._write_window_json()
+        self._write_active_window("3", age_s=0)
+        payload = self._serve()
+        self.assertEqual(payload["name"], "WINDOW_3")
+        self.assertIs(payload["window_trusted"], True,
+                      "the endpoint refused to trust a genuinely resolvable "
+                      "window — the guard is over-blocking, not fail-closed")
+        self.assertEqual(payload["window_index"], 3)
+        self.assertIsNone(payload["window_unavailable_reason"])
+
+    def test_trusted_path_window_index_is_an_int(self):
+        """The index is JSON-typed as a number, not the raw file string."""
+        self._write_window_json()
+        self._write_active_window("3", age_s=0)
+        payload = self._serve()
+        self.assertIsInstance(payload["window_index"], int)
+
+    # -- untrusted paths (the fail-closed half) ----------------------------
+
+    def test_stale_index_is_untrusted(self):
+        """GUARD-CRITICAL. Falls back, and says the fallback is not trusted."""
+        self._write_window_json()
+        self._write_active_window("3", age_s=190)
+        payload = self._serve()
+        self.assertEqual(payload["name"], "SESSION_LEVEL")
+        self._assert_untrusted(
+            payload,
+            "a STALE index fell back to the session-level file and still "
+            "reported the window as trusted — that file is last-writer-wins "
+            "across windows, so this is a confident wrong answer")
+        self.assertIn("stale", payload["window_unavailable_reason"].lower())
+
+    def test_absent_index_file_is_untrusted(self):
+        """No panel running for this session at all."""
+        self._write_window_json()
+        payload = self._serve()
+        self.assertEqual(payload["name"], "SESSION_LEVEL")
+        self._assert_untrusted(
+            payload, "with no active-window file the served data belongs to "
+                     "whichever window wrote last, which is not known to be this one")
+
+    def test_non_numeric_index_is_untrusted(self):
+        """Corrupt/partial write."""
+        self._write_window_json()
+        self._write_active_window("not-a-number", age_s=0)
+        payload = self._serve()
+        self.assertEqual(payload["name"], "SESSION_LEVEL")
+        self._assert_untrusted(
+            payload, "a non-numeric index is not a window and must not be "
+                     "reported as a trusted one")
+
+    def test_fresh_index_without_window_json_is_untrusted(self):
+        """The window is known but has written nothing yet."""
+        self._write_active_window("3", age_s=0)   # deliberately no window JSON
+        payload = self._serve()
+        self.assertEqual(payload["name"], "SESSION_LEVEL")
+        self._assert_untrusted(
+            payload, "the window index resolved but that window has no data; "
+                     "the session-level file is someone else's")
+
+    def test_sessionless_request_is_untrusted(self):
+        """No ?session= at all: the glob picks the most recent file, full stop."""
+        self._write_window_json()
+        with patch("server.LCARS_TEAM", SESSION.split("-")[0]):
+            payload = self._serve(session=None)
+        self._assert_untrusted(
+            payload, "a request that names no session cannot have established "
+                     "which window it is looking at")
+
+    def test_waiting_response_also_carries_the_trust_keys(self):
+        """Absence of data is still not a trusted window."""
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
+        payload = self._serve()
+        self.assertEqual(payload.get("status"), "waiting")
+        self._assert_untrusted(
+            payload, "the waiting response omitted the trust keys, so a client "
+                     "would have to branch on their absence")
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

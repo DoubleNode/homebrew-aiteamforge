@@ -22,6 +22,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   New `share/lcars-ui/tests/test_xaca1255_active_window_staleness.py` (7 tests, real temp dirs + real `os.utime`, no
   `Path` mocks — the existing suite stubbed `exists()=False` and passed 200/200 with the guard disabled), including a
   pin on `ACTIVE_WINDOW_MAX_AGE_S = 180` so a retune cannot leave the cases on the same side of the threshold.
+  Gate round 1: `share/lcars-ui/server.py`'s `/api/agent-panel` now always emits `window_trusted`,
+  `window_index` and `window_unavailable_reason`, defaulting UNTRUSTED so new branches fail closed (keys are
+  never conditionally omitted — an absent key would read as "trusted"); `share/lcars-ui/agent-panel.html` dims
+  the badge and shows "(unconfirmed window)". Previously the web endpoint still fell through to the
+  last-writer-wins session-level file, so it could serve one chat another window's data — the exact class the
+  terminal panel refuses. `share/scripts/agent-panel-display.sh`: tmux queries are now bounded (a wedged tmux
+  server no longer wedges the render loop; forks reduced 5 -> 1 per render) and the per-session hook install is
+  verified by reading the value back and retried until it lands — NOT by its exit code, since `set-hook -gu`
+  leaves the key present with an empty value.
 
 ## [0.20.15] - 2026-09-16
 

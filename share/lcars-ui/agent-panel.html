@@ -144,6 +144,26 @@
         border-radius: 4px;
         margin-bottom: 4px;
     }
+    /* XACA-1255-021: the WINDOW-scoped badge when the server could not confirm
+       which window this data belongs to. Mirrors the terminal panel's own
+       "demote, don't hide" choice (${DIM} + "(unconfirmed window)"): a probable
+       window label is still useful, it just must not outrank the caveat. */
+    .terminal-badge.unconfirmed {
+        background: transparent;
+        color: var(--text-secondary);
+        border: 1px dashed var(--text-secondary);
+        opacity: 0.75;
+        font-weight: 400;
+    }
+    .unconfirmed-note {
+        display: none;
+        font-size: 9px;
+        color: var(--text-secondary);
+        opacity: 0.8;
+        margin-bottom: 4px;
+        font-style: italic;
+    }
+    .unconfirmed-note.shown { display: block; }
     .hostname-label {
         font-size: 9px;
         color: var(--text-secondary);
@@ -252,6 +272,7 @@
         </div>
         <div class="account-nickname" id="account-nickname"></div>
         <span class="terminal-badge" id="terminal-badge"></span>
+        <div class="unconfirmed-note" id="unconfirmed-note" title=""></div>
         <div class="hostname-label" id="hostname-label"></div>
     </div>
     <div id="waiting" class="waiting">
@@ -334,7 +355,30 @@
             nickEl.classList.add('account-nickname-empty');
         }
 
-        document.getElementById('terminal-badge').textContent = data.terminal || '';
+        // XACA-1255-021: `terminal` is WINDOW-scoped. When the server could not
+        // establish which window this payload belongs to it falls back to
+        // `lcars-agent-<session>.json`, which display-agent-avatar.sh writes
+        // last-writer-wins across every window of the session — so that badge may
+        // name a DIFFERENT window's terminal. Render it demoted, and say why.
+        //
+        // `=== false` deliberately, NOT `!data.window_trusted`: an older server
+        // that does not send the key at all must not be silently treated as
+        // untrusted-and-dimmed, nor a missing key as trusted. Only an explicit
+        // false degrades; anything else keeps the previous appearance.
+        const termBadge = document.getElementById('terminal-badge');
+        const unconfirmedNote = document.getElementById('unconfirmed-note');
+        termBadge.textContent = data.terminal || '';
+        if (data.window_trusted === false) {
+            termBadge.classList.add('unconfirmed');
+            unconfirmedNote.classList.add('shown');
+            unconfirmedNote.textContent = '(unconfirmed window)';
+            unconfirmedNote.title = data.window_unavailable_reason || '';
+        } else {
+            termBadge.classList.remove('unconfirmed');
+            unconfirmedNote.classList.remove('shown');
+            unconfirmedNote.textContent = '';
+            unconfirmedNote.title = '';
+        }
         const hostLabel = document.getElementById('hostname-label');
         hostLabel.textContent = data.hostname ? '@ ' + data.hostname : '';
 

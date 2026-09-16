@@ -329,31 +329,247 @@ ACTIVE_WINDOW_FILE="${LCARS_TMP}lcars-active-window-${SESSION_CODE}"
 # the hook fires for. Do NOT "simplify" this back to `-g`: a global hook is one
 # hook per tmux server, shared by every session on the socket, and the last
 # panel to start anywhere in the fleet wins (defect C above).
-"${TMUX_CMD[@]}" set-hook -t "$SESSION_CODE" session-window-changed \
-    "run-shell 'echo #{window_index} > ${LCARS_TMP}lcars-active-window-#{session_name}'" 2>/dev/null
+#
+# ── XACA-1255-023: THE INSTALL IS VERIFIED AND RETRIED ────────────────────
+#
+# This used to be a single fire-and-forget `set-hook ... 2>/dev/null` with no
+# check and no retry. A panel started BEFORE its tmux session exists — which is
+# ordinary during session bring-up — silently got NO hook, forever. MEASURED on
+# tmux 3.6a: `set-hook -t no-such-session` exits 1 and installs nothing, and
+# that 1 was being discarded.
+#
+# WHAT DEPENDS ON WHAT (stated explicitly, because the dependency is currently
+# invisible and that is the trap):
+#   * server.py's /api/agent-panel resolves the per-window agent JSON through
+#     ${ACTIVE_WINDOW_FILE}. It is the ONLY remaining reader.
+#   * TWO independent writers keep that file fresh: this hook (event-driven, on
+#     every window switch) and refresh_active_window_file() (polled, on change
+#     and at least once every 60s).
+#   * Because the 60s heartbeat exists, a missing hook is currently MASKED —
+#     the file still gets written, just up to 60s late, and server.py's own
+#     staleness budget is 180s, so nothing visibly breaks.
+#   * That masking is a coincidence of two numbers, NOT a design. Raise the
+#     heartbeat interval above server.py's 180s budget, or make the heartbeat
+#     conditional, and a silently-missing hook becomes a real outage with no
+#     signal pointing at it.
+# So the redundancy is deliberate and is documented here, AND the hook install
+# is verified rather than assumed. Either mechanism alone is sufficient; the
+# failure mode this removes is having neither while believing you have one.
+WINDOW_HOOK_BODY="run-shell 'echo #{window_index} > ${LCARS_TMP}lcars-active-window-#{session_name}'"
+WINDOW_HOOK_INSTALLED=0
+
+# Install the per-session hook and CONFIRM it by reading the value back.
+# Returns 0 once the hook is verifiably present, 1 otherwise (caller retries).
+install_window_hook() {
+    [[ "${WINDOW_HOOK_INSTALLED:-0}" = "1" ]] && return 0
+
+    "${TMUX_CMD[@]}" set-hook -t "$SESSION_CODE" session-window-changed \
+        "$WINDOW_HOOK_BODY" 2>/dev/null
+
+    # VERIFY BY VALUE, never by key presence and never by exit code.
+    # `set-hook -gu` (the legacy-global retirement above) leaves the option KEY
+    # present with an EMPTY value — MEASURED on tmux 3.6a: `show-options -gv
+    # session-window-changed` returns rc=0 and an empty string after the unset.
+    # So a grep for the key name would match a hook that does not exist, and rc
+    # would call it success. Only the BODY proves an install.
+    #
+    # Matching on the ${LCARS_TMP} path fragment rather than the whole string is
+    # deliberate: tmux normalises the quoting when it echoes a hook back
+    # (single quotes in, double quotes out), so a byte-equality check would
+    # never match. The fragment is also the thing actually worth asserting — it
+    # is what defect C got wrong, baking one session's tmp dir into every
+    # session's hook.
+    local readback
+    readback=$(tmux_bounded_probe "${WINDOW_PROBE_TIMEOUT_S:-1.5}" \
+        "${TMUX_CMD[@]}" show-options -v -t "$SESSION_CODE" session-window-changed 2>/dev/null) || readback=""
+    readback="${readback%%$'\n'*}"
+    case "$readback" in
+        *"${LCARS_TMP}lcars-active-window-"*)
+            WINDOW_HOOK_INSTALLED=1
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+install_window_hook || true
+
+# ── BOUNDED tmux PROBE (XACA-1255-020) ────────────────────────────────────
+#
+# XACA-1255 replaced a local `cat` of a shared index file with LIVE tmux
+# queries. That is the right answer for correctness, but it handed the render
+# loop a new failure mode the file read never had: `tmux display-message`
+# against a wedged server — or a socket path that accepts the connection and
+# then never speaks tmux's protocol — BLOCKS INDEFINITELY. A panel that polls
+# every ~2s would hang forever on the first such call. A `cat` could not do
+# that.
+#
+# Same exposure, same remedy as kanban-helpers.sh's _kb_tmux_bounded_probe
+# (XACA-0830-002): no dependency on `timeout`/`gtimeout` (macOS ships
+# neither), a sibling watchdog subshell SIGKILLs the probe if it outlives the
+# deadline, whichever side finishes first wins, and the loser is reaped.
+#
+# DELIBERATE DIVERGENCE from that function: it uses zsh's `zselect` module
+# with a `sleep` watchdog as its documented fallback. This one uses the
+# `sleep` path ONLY, because scripts/tests/test-agent-panel-display.sh
+# extracts these functions and runs them under BASH — `zmodload`/`zselect`
+# are zsh-only and would make the extracted copy die. `sleep` accepts a
+# fractional argument on both macOS/BSD and GNU coreutils, so the timeout
+# stays a plain decimal string and needs no arithmetic (bash 3.2 has no
+# float math).
+#
+# Inherits _kb_tmux_bounded_probe's known, accepted limitation: the `sleep`
+# is a real forked grandchild, so killing the watchdog subshell does not kill
+# it. If the probe answers early, one short-lived `sleep` lingers for at most
+# the remaining timeout, reparents to launchd, and is reaped normally. Not a
+# leak — bounded by WINDOW_PROBE_TIMEOUT_S.
+WINDOW_PROBE_TIMEOUT_S="${AGENT_PANEL_TMUX_TIMEOUT_S:-1.5}"
+
+tmux_bounded_probe() {
+    local timeout_s="$1"
+    shift
+    [[ $# -gt 0 ]] || return 1
+
+    # SELF-DEFENDING DEADLINE. An empty or malformed timeout makes the watchdog's
+    # `sleep` fail INSTANTLY, so it SIGKILLs the probe before the probe can
+    # answer — every call then returns empty and every window reads
+    # "unavailable". That is a mass false-negative wearing the costume of a
+    # working guard: the same "reports a verdict it could not actually reach"
+    # shape _kb_tmux_bounded_probe documents for its own zselect fallback.
+    #
+    # Not hypothetical — MEASURED here: WINDOW_PROBE_TIMEOUT_S is a TOP-LEVEL
+    # assignment, and scripts/tests/test-agent-panel-display.sh extracts only
+    # FUNCTIONS, so under that harness the variable is unset and every probe
+    # died instantly (17 failures, all of them "window never resolves").
+    # Anything that reads this value from outside the full script hits the same
+    # trap, so the default belongs HERE, not only at the assignment site.
+    case "$timeout_s" in
+        ''|*[!0-9.]*|*.*.*) timeout_s="1.5" ;;
+        .) timeout_s="1.5" ;;
+    esac
+
+    local tmpfile
+    tmpfile=$(mktemp "${TMPDIR:-/tmp}/lcars-panel-probe.XXXXXX" 2>/dev/null) || return 1
+
+    "$@" >"$tmpfile" 2>/dev/null &
+    local cmd_pid=$!
+
+    ( sleep "$timeout_s" 2>/dev/null; kill -KILL "$cmd_pid" 2>/dev/null ) &
+    local watchdog_pid=$!
+
+    wait "$cmd_pid" 2>/dev/null
+    local rc=$?
+
+    kill -KILL "$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
+
+    cat "$tmpfile" 2>/dev/null
+    rm -f "$tmpfile" 2>/dev/null
+    return $rc
+}
+
+# ── WINDOW IDENTITY: ONE atomic, bounded, validated probe per render ───────
+#
+# TRAP (the load-bearing fact of this ticket): `tmux display-message -t
+# <bad-session> -p '#I'` EXITS 0 and prints an EMPTY field — a failure that
+# reads as a success. Verified 2026-09-16 on the academy socket: rc=0, output
+# ''. Re-verified for the COMBINED format below on an isolated socket:
+#     display-message -t no-such-session -p '#S\t#I\t#W'  ->  rc=0, out=$'\t\t'
+# So the exit code is never the predicate; only the VALUE is.
+#
+# ATOMICITY (XACA-1255-019, same defect class as the kanban-helpers resolver):
+# index and name used to be TWO separate `display-message` calls. A session
+# dying between them yielded a REAL index beside an EMPTY name — and a caller
+# that defaulted the name then minted a FABRICATED identity. One call cannot
+# half-answer: either the target resolved and both fields are real, or it did
+# not and both are empty. The name is taken as the remainder after the tab, so
+# a window name containing colons or spaces survives intact.
+#
+# FORK BUDGET (XACA-1255-020): this used to be up to 5 blocking tmux forks per
+# render (get_active_json, get_window_index, get_window_name, get_crew_avatars,
+# plus ~2 more per 2s poll via compute_content_fingerprint). The cache below
+# collapses that to ONE. It works because a subshell INHERITS its parent's
+# variables: render_panel and the poll loop refresh the cache in the PARENT
+# shell, so every `$(get_window_index)` subshell downstream reads the cached
+# value and forks nothing. Cache writes made INSIDE a subshell are discarded,
+# which is correct and harmless — they are never relied upon.
+#
+# With the cache invalid (its default, and the state every unit test runs in)
+# each call probes exactly as before, so the zero-argument contract of
+# get_window_index / get_window_name is unchanged.
+WINDOW_ID_CACHE_VALID=0
+WINDOW_ID_CACHE_OK=0
+WINDOW_ID_CACHE_INDEX=""
+WINDOW_ID_CACHE_NAME=""
+
+# Mark the cached identity stale. Call in the PARENT shell before a render or
+# poll iteration, never inside a subshell (the write would be discarded).
+invalidate_window_identity() {
+    WINDOW_ID_CACHE_VALID=0
+}
+
+# Perform the single bounded probe and populate the cache. Always returns 0;
+# WINDOW_ID_CACHE_OK says whether the window actually resolved.
+refresh_window_identity() {
+    WINDOW_ID_CACHE_OK=0
+    WINDOW_ID_CACHE_INDEX=""
+    WINDOW_ID_CACHE_NAME=""
+    WINDOW_ID_CACHE_VALID=1
+
+    local raw idx nm
+    # `${...:-1.5}`, NOT a bare "$WINDOW_PROBE_TIMEOUT_S" (XACA-1255-020).
+    # WINDOW_PROBE_TIMEOUT_S is a TOP-LEVEL assignment; anything that loads only
+    # the FUNCTIONS (scripts/tests/test-agent-panel-display.sh does exactly that)
+    # leaves it unset, and under `set -u` — which that harness sets, and which
+    # tests/test-kanban-helpers-nounset.sh exists to defend — a bare reference
+    # ABORTS the subshell before tmux_bounded_probe's own default can apply.
+    # MEASURED: 17 failures, every one presenting as "window never resolves"
+    # rather than as an unbound-variable error, because the abort happened
+    # inside a `$(...)` capture.
+    raw=$(tmux_bounded_probe "${WINDOW_PROBE_TIMEOUT_S:-1.5}" \
+        "${TMUX_CMD[@]}" display-message -t "$SESSION_CODE" -p '#I'$'\t''#W' 2>/dev/null) || raw=""
+    # First line only; a multi-line answer is not a window identity.
+    raw="${raw%%$'\n'*}"
+    case "$raw" in
+        *$'\t'*) ;;   # must carry the tab separator, else it is not our format
+        *) return 0 ;;
+    esac
+    idx="${raw%%$'\t'*}"
+    nm="${raw#*$'\t'}"
+    idx=$(printf '%s' "$idx" | tr -d '[:space:]')
+    nm=$(printf '%s' "$nm" | tr -d '\r\n\t')
+
+    # VALUE validation, mirroring kanban-helpers.sh's _kb_is_valid_window_index /
+    # _kb_is_valid_window_name. Both must pass or NEITHER field is published —
+    # that all-or-nothing rule is what stops a half-resolved pane from pairing a
+    # real index with an invented name.
+    case "$idx" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    [[ -n "$nm" ]] || return 0
+
+    WINDOW_ID_CACHE_INDEX="$idx"
+    WINDOW_ID_CACHE_NAME="$nm"
+    WINDOW_ID_CACHE_OK=1
+    return 0
+}
 
 # Live, session-scoped window index. Prints the index, or nothing at all.
-#
-# TRAP: `tmux display-message -t <bad-session> -p '#I'` EXITS 0 and prints an
-# EMPTY field — a failure that reads as a success. Verified 2026-09-16 on the
-# academy socket: rc=0, output ''. So validate that the value is numeric and
-# never trust the exit code. Returns 1 when the window cannot be resolved;
-# callers must render an explicit unavailable state, not another window's data.
+# Returns 1 when the window cannot be resolved; callers must render an explicit
+# unavailable state, not another window's data.
 get_window_index() {
-    local idx
-    idx=$("${TMUX_CMD[@]}" display-message -t "$SESSION_CODE" -p '#I' 2>/dev/null | head -1 | tr -d '[:space:]')
-    [[ "$idx" =~ ^[0-9]+$ ]] || return 1
-    echo "$idx"
+    [[ "${WINDOW_ID_CACHE_VALID:-0}" = "1" ]] || refresh_window_identity
+    [[ "${WINDOW_ID_CACHE_OK:-0}" = "1" ]] || return 1
+    echo "${WINDOW_ID_CACHE_INDEX:-}"
 }
 
 # Live, session-scoped window NAME — used to label the MISSION with the window
 # it belongs to, so a chat sitting in a different window of the same session is
 # never misled into reading it as its own.
 get_window_name() {
-    local nm
-    nm=$("${TMUX_CMD[@]}" display-message -t "$SESSION_CODE" -p '#W' 2>/dev/null | head -1 | tr -d '\r\n\t')
-    [[ -n "$nm" ]] || return 1
-    echo "$nm"
+    [[ "${WINDOW_ID_CACHE_VALID:-0}" = "1" ]] || refresh_window_identity
+    [[ "${WINDOW_ID_CACHE_OK:-0}" = "1" ]] || return 1
+    echo "${WINDOW_ID_CACHE_NAME:-}"
 }
 
 # Keep server.py's copy of the index truthful while this panel is running.
@@ -1026,6 +1242,14 @@ render_panel() {
     # Clear screen + scrollback buffer (needed to wipe iTerm2 inline images)
     printf '\033[H\033[2J\033[3J'
 
+    # ONE tmux probe for the whole render (XACA-1255-020). Done HERE, in the
+    # parent shell, so every `$(...)` subshell below — get_active_json,
+    # get_window_index, get_window_name, get_crew_avatars — inherits the result
+    # and forks no tmux of its own. Previously each of those probed
+    # independently: up to 5 blocking, unbounded tmux calls per render.
+    invalidate_window_identity
+    refresh_window_identity
+
     # Resolve which JSON file to read (window-specific or fallback)
     RENDER_JSON_FILE=$(get_active_json)
 
@@ -1612,7 +1836,11 @@ trap cleanup EXIT INT TERM HUP
 
 # Font is set via the "Agent Panel" iTerm2 profile (created by iterm2_window_manager.py split-agent-panel)
 
-# Capture initial state before render
+# Capture initial state before render.
+# Seed the window-identity cache in the parent shell first (XACA-1255-020) so
+# this whole start-up block costs ONE tmux probe rather than one per call.
+invalidate_window_identity
+refresh_window_identity
 ACTIVE_JSON=$(get_active_json)
 if [[ -f "$ACTIVE_JSON" ]]; then
     LAST_MTIME=$(stat -f %m "$ACTIVE_JSON" 2>/dev/null)
@@ -1673,6 +1901,21 @@ while true; do
     # unresolvable window means the panel should re-render into the explicit
     # MISSION UNAVAILABLE state. It cannot busy-spin — each iteration sleeps ~2s
     # and renders at most once, and the fingerprint gate below still applies.
+    # ONE probe per poll iteration (XACA-1255-020), in the parent shell so the
+    # subshells below — and compute_content_fingerprint's own get_active_json /
+    # get_window_index — all read the same cached answer instead of each firing
+    # its own blocking tmux call. Invalidate FIRST: a window switch between
+    # iterations must be seen, so the cache never outlives one iteration.
+    invalidate_window_identity
+    refresh_window_identity
+
+    # XACA-1255-023: retry the hook until it verifiably lands. A panel that
+    # started before its tmux session existed got no hook and, before this,
+    # never tried again. install_window_hook() short-circuits to a no-op once
+    # installed, so the steady-state cost is one variable test per poll — it
+    # only touches tmux while the hook is genuinely still missing.
+    install_window_hook || true
+
     CURRENT_WINDOW_INDEX=$(get_window_index) || CURRENT_WINDOW_INDEX=""
     # Keep server.py's copy of the index fresh even on cycles that do not render.
     refresh_active_window_file "$CURRENT_WINDOW_INDEX"

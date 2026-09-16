@@ -18278,6 +18278,14 @@ end tell
         tmp_dir = LCARS_TMP_DIR
         agent_file = None
 
+        # XACA-1255-021 window-trust state. Default to UNTRUSTED: every path that
+        # does not positively establish which window this data belongs to must
+        # leave it false. Fail-closed by construction — a new branch added later
+        # is untrusted unless it explicitly earns trust.
+        window_trusted = False
+        window_index = None
+        window_unavailable_reason = None
+
         if session:
             # Check for per-window file first (supports multi-agent terminals).
             # <kanban/tmp>/lcars-active-window-{session} is written by a
@@ -18307,9 +18315,57 @@ end tell
                             win_file = tmp_dir / f"lcars-agent-{session}-w{win_idx}.json"
                             if win_file.exists():
                                 agent_file = win_file
+                                window_index = int(win_idx)
+                                window_trusted = True
+                            else:
+                                window_unavailable_reason = (
+                                    f"window {win_idx} is active but has written no agent JSON yet"
+                                )
+                        else:
+                            window_unavailable_reason = (
+                                "active-window file holds a non-numeric value "
+                                "(corrupt or partial write)"
+                            )
+                    else:
+                        window_unavailable_reason = (
+                            f"active-window file is stale ({int(age)}s old, budget "
+                            f"{ACTIVE_WINDOW_MAX_AGE_S}s) — no panel is maintaining it"
+                        )
                 except Exception:
-                    pass
-            # Fallback to session-level file
+                    window_unavailable_reason = "active-window file could not be read"
+            else:
+                window_unavailable_reason = (
+                    "no active-window file — no agent panel is running for this session"
+                )
+
+            # ── XACA-1255-021: the fallback is NOT a trusted answer ───────────
+            #
+            # `lcars-agent-<session>.json` is written by
+            # scripts/display-agent-avatar.sh with the SAME content it writes to
+            # the per-window file — so across several windows of one session it
+            # is LAST-WRITER-WINS. Falling through to it therefore serves one
+            # chat whichever window most recently ran the banner: exactly the
+            # class of confident wrong answer the terminal panel now refuses via
+            # RENDER_WINDOW_TRUSTED.
+            #
+            # Leaving the terminal panel fixed and this endpoint unfixed is worse
+            # than fixing neither: the working half teaches people the panel can
+            # be trusted about whose window they are looking at, and they carry
+            # that trust to the web panel, where it is not earned.
+            #
+            # MEASURED on this machine 2026-09-16: of 4 live academy sessions,
+            # only academy-chancellor had a fresh active-window file;
+            # engineering/medical/training were 3h-24h stale, i.e. THREE of four
+            # sessions were already being served through this exact fallback.
+            #
+            # We still SERVE the payload — team/developer/role/location/avatar/
+            # amb_handle are session-scoped and stay correct, and a degraded
+            # panel is still a panel (the same reasoning as the terminal panel's
+            # identity block). What changes is that the response now says so, so
+            # a client renders an unconfirmed state instead of a confident one.
+            # The window-scoped fields are flagged, not deleted, mirroring the
+            # terminal panel's DEMOTE-don't-hide choice: a probable window label
+            # is still useful, it just must not outrank the caveat.
             if agent_file is None:
                 agent_file = tmp_dir / f"lcars-agent-{session}.json"
         else:
@@ -18321,6 +18377,10 @@ end tell
             )
             if candidates:
                 agent_file = candidates[0]
+                window_unavailable_reason = (
+                    "no session requested — served the most recently written agent "
+                    "file for this team, which belongs to whichever window wrote last"
+                )
 
         if agent_file and agent_file.exists():
             try:
@@ -18330,6 +18390,17 @@ end tell
                 amb_handle = data.get("amb_handle", "")
                 if amb_handle:
                     data["badges"] = _fetch_amb_badges(amb_handle)
+
+                # XACA-1255-021: state the window-trust verdict explicitly.
+                # These keys are ALWAYS present, never conditionally omitted — an
+                # absent key is indistinguishable from an old server and would let
+                # a client read "no flag" as "trusted", which is the reassuring
+                # default this ticket exists to remove.
+                data["window_trusted"] = window_trusted
+                data["window_index"] = window_index
+                data["window_unavailable_reason"] = (
+                    None if window_trusted else window_unavailable_reason
+                )
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self._send_cors_headers()
@@ -18345,7 +18416,15 @@ end tell
         self._send_cors_headers()
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
-        self.wfile.write(json.dumps({"status": "waiting"}).encode())
+        # No data at all. Carry the same trust keys so a client never has to
+        # branch on their absence (XACA-1255-021) — "waiting" is definitionally
+        # not a trusted window either.
+        self.wfile.write(json.dumps({
+            "status": "waiting",
+            "window_trusted": False,
+            "window_index": None,
+            "window_unavailable_reason": window_unavailable_reason or "no agent data available",
+        }).encode())
 
     def serve_knowledge_stats(self):
         """Serve knowledge base statistics.
