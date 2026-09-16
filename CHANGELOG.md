@@ -44,9 +44,28 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   anchored to. True resolution failure now fails LOUDLY — a `DEGRADED` diagnostic naming every path tried, a
   distinct roster note, `DEGRADED` in the Summary line, and exit code 3 from one-shot mode only; the daemon
   never exits and keeps supervising on last-known-good, because leaving every team unsupervised is strictly
-  worse than degraded supervision. Consumers with the `scripts/` copy present should see zero `helper-failed`
+  worse than degraded supervision — **but production is NOT the daemon path**: neither shipped plist passes
+  `--daemon` (`com.devteam.lcars-health.plist`, `StartInterval=120`, and the tap-rendered
+  `com.aiteamforge.lcars-health`, `StartInterval=300`, `KeepAlive=false`, both invoke the script bare), so
+  `DAEMON_MODE` is always false in production and a degraded install exits 3 once per cycle for real. That is
+  inert by design, not an oversight: `KeepAlive=false` means launchd never treats the exit as a crash to
+  respawn from, the exit only fires AFTER that cycle's restart sweep has already run on the last-known-good
+  roster, and launchd's own `StartInterval` starts the next instance regardless — supervision continues once
+  per interval either way, the same guarantee `run_daemon`'s loop would provide if anything actually ran in
+  that mode (nothing does). Consumers with the `scripts/` copy present should see zero `helper-failed`
   lines from `kb-spacedock` CHECK 3 and a live roster read after upgrading; consumers relying only on the
-  LaunchAgent-supervised root copy saw no defect here to begin with.
+  LaunchAgent-supervised root copy saw no defect here to begin with. **Gate-round-3 (3 reviewer findings):**
+  (1) `kb-spacedock` CHECK 3's exit-code map still reported the new exit 3 as `unknown`, with a comment
+  claiming the contract was "only 0/1" — now maps 3 to `fail` and the comment states the real 0/1/3 contract.
+  (2) the regression suite had no fixture for the installed-ROOT layout (script directly at
+  `<root>/lcars-health-check.sh` + `<root>/kanban-hooks/` — MEASURED as the real shipped LaunchAgent target on
+  all 3 consumers) nor for the `scripts/`-only eligibility guard itself; deleting that guard outright would
+  have left the suite green. Added a 4th layout fixture plus a dedicated "escape-guard" fixture asserting
+  directly on `_KANBAN_HOOKS_DIR` emptiness and `_HC_HOOKS_DEGRADED=true` (not just exit code) — verified by
+  temporarily neutering the guard and confirming the new assertions fail, then restoring it; now 71/71.
+  (3) the DEGRADED message's `Tried:` list named an ineligible candidate 2 unqualified even when the guard
+  never let it be probed, while the sentence asserted "no candidate contained" either helper — an assertion
+  of coverage that never happened. The ineligible path is now suffixed `(skipped: not a scripts/ dir)`.
 
 - **XACA-1255** — agent panel MISSION showed a DIFFERENT concurrent chat's kanban item. One panel process serves one
   tmux session holding 4 windows, each potentially running a separate chat, and window identity was resolved from a

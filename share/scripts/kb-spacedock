@@ -1595,10 +1595,23 @@ _spd_check_lcars_health() {
         return
     fi
     local out="$SPD_RUN_OUT" rc="$SPD_RUN_RC"
+    # XACA-1254-017: lcars-health-check.sh's --status contract is now 0/1/3
+    # (exit 3 = DEGRADED, added by XACA-1254 — kanban-hooks/ could not be
+    # resolved at any candidate path, a one-shot-only code; see its own
+    # header comment near run_health_check's `return 3`). Reporting exit 3
+    # as "unknown" would mean a health checker that just LEARNED about a new
+    # failure mode still shrugs at it by name — exactly the silent-
+    # degradation shape this whole ticket exists to fix. Map it to "fail"
+    # explicitly, matching the severity every other genuine failure surface
+    # in this script uses (see e.g. the aiteamforge-doctor/mandatory-teams/
+    # reboot-t3-* checks above). The catch-all below remains for any FUTURE
+    # exit code this script does not yet know about — that one legitimately
+    # stays "unknown" until it, too, is named here.
     case "$rc" in
         0) _spd_emit "lcars-health-check" "ok" "all servers healthy (--status)${note}" "$out" "$rc" ;;
         1) _spd_emit "lcars-health-check" "warn" "unhealthy or config-drifted server(s) found (--status)${note}" "$out" "$rc" ;;
-        *) _spd_emit "lcars-health-check" "unknown" "unexpected exit code $rc from --status (its own contract only defines 0/1)${note}" "$out" "$rc" ;;
+        3) _spd_emit "lcars-health-check" "fail" "DEGRADED — kanban-hooks/ could not be resolved at any candidate path (--status)${note}" "$out" "$rc" ;;
+        *) _spd_emit "lcars-health-check" "unknown" "unexpected exit code $rc from --status (its own contract defines 0/1/3)${note}" "$out" "$rc" ;;
     esac
 }
 

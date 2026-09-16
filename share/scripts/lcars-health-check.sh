@@ -300,16 +300,29 @@ declare -a _LCARS_INFRA=(
 # Candidate 2 is still recorded in _HC_HOOKS_TRIED for the DEGRADED
 # diagnostic below regardless of eligibility — "name every path tried" is a
 # diagnostic-completeness guarantee, independent of whether that path was
-# eligible to WIN.
+# eligible to WIN. XACA-1254-019: "recorded" is not "probed", and the
+# DEGRADED message must not blur the two — it is built by joining
+# _HC_HOOKS_TRIED verbatim and asserts "no candidate contained
+# lcars_host_roster.py or lcars_ports.py", which is only true of paths this
+# code actually checked. An ineligible candidate 2 was never opened, so it
+# is appended here with an explicit "(skipped: not a scripts/ dir)"
+# annotation instead of the bare path — the message still names every path
+# that exists conceptually (diagnostic completeness intact), but no longer
+# implies coverage that never happened for the ones it excludes.
 _SCRIPT_DIR="${0:A:h}"
 _KANBAN_HOOKS_DIR=""
 typeset -ga _HC_HOOKS_TRIED=()
 typeset -ga _HC_HOOKS_CANDIDATES=()
 _HC_CAND1="${_SCRIPT_DIR}/kanban-hooks"
 _HC_CAND2="${_SCRIPT_DIR:h}/kanban-hooks"
-_HC_HOOKS_TRIED+=("$_HC_CAND1" "$_HC_CAND2")
+_HC_HOOKS_TRIED+=("$_HC_CAND1")
 _HC_HOOKS_CANDIDATES+=("$_HC_CAND1")
-[[ "${_SCRIPT_DIR:t}" == "scripts" ]] && _HC_HOOKS_CANDIDATES+=("$_HC_CAND2")
+if [[ "${_SCRIPT_DIR:t}" == "scripts" ]]; then
+    _HC_HOOKS_TRIED+=("$_HC_CAND2")
+    _HC_HOOKS_CANDIDATES+=("$_HC_CAND2")
+else
+    _HC_HOOKS_TRIED+=("${_HC_CAND2} (skipped: not a scripts/ dir)")
+fi
 for _cand in "${_HC_HOOKS_CANDIDATES[@]}"; do
     [[ -f "$_cand/lcars_host_roster.py" && -f "$_cand/lcars_ports.py" ]] || continue
     _KANBAN_HOOKS_DIR="$_cand"
@@ -2533,6 +2546,27 @@ run_health_check() {
     # note + Summary line above instead. Checked first, ahead of the
     # ordinary STATUS_ONLY unhealthy/drifted check below, since the resolver
     # failure is the more fundamental problem being surfaced.
+    #
+    # XACA-1254 gate-round-3 narrative correction: "run_daemon keeps
+    # looping" describes a mode PRODUCTION DOES NOT USE. Neither shipped
+    # plist (com.devteam.lcars-health.plist here, com.aiteamforge.lcars-health
+    # from scripts/templates/lcars-health-plist.template on tap consumers)
+    # passes `--daemon` — both invoke this script bare and rely on launchd's
+    # own `StartInterval` (120s / 300s) for periodicity, so `DAEMON_MODE` is
+    # always false in production and this `return 3` DOES fire on every
+    # cycle of a degraded install. That is not a gap: `KeepAlive` is false
+    # (explicit on the tap template, absent — same default — on the
+    # dev-native plist), so launchd does not treat this exit as a crash to
+    # respawn from; there is no respawn storm to avoid. `return 3` also
+    # fires only AFTER this function's restart sweep above has already run
+    # for every configured team on the last-known-good roster, so no restart
+    # work is skipped because of it. The practical effect is exactly the
+    # log-visibility one it looks like: this process instance exits 3,
+    # launchd's StartInterval fires the next instance 120s/300s later, and
+    # that instance re-asserts DEGRADED the same way — supervision continues
+    # uninterrupted, once per interval, for exactly the same reason
+    # run_daemon's loop would if anything actually ran in `--daemon` mode
+    # (nothing does).
     if [[ "$_HC_HOOKS_DEGRADED" == "true" && "$DAEMON_MODE" != "true" ]]; then
         _hc_run_lock_release
         return 3
