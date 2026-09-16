@@ -7,6 +7,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1246** — mirror of the canonical dev-team fix: LCARS servers spawned under launchd could never see
+  `CLAUDE_ACCT_*` (that file is sourced by interactive shells only), so `has_credentials` read false
+  fleet-wide. `share/lcars-ui/server.py` now resolves a team's Anthropic credential AT REQUEST TIME via a
+  new non-interactive entry point in `claude_code_cc_aliases.sh` (not mirrored to the tap — no tiered
+  vault/cache/env chain exists on a consumer box, so the resolver falls back to a quiet
+  declared-but-unavailable state there rather than claiming a mechanism that isn't present) instead of
+  reading a frozen process environment. Also updates `share/lcars-ui/index.html` and
+  `share/lcars-ui/js/lcars-team-account.js` copy to stop prescribing `~/.zshrc.secrets` edits (a launchd
+  process can't see that file) and to report distinct, non-inventive states for the credential-status UI;
+  adds `share/lcars-ui/tests/test_xaca1246_credential_resolver_fallback.py`. Merged into `share/lcars-ui/server.py`
+  as a three-way merge on top of XACA-1255's already-mirrored `window_trusted` additions to the same file —
+  both changesets are independent (non-overlapping line ranges) and both are present in the result.
+
 - **XACA-1254** — `share/scripts/lcars-health-check.sh` resolved its `kanban-hooks/` python helpers as
   `${_SCRIPT_DIR}/kanban-hooks`, assuming the hooks dir is a CHILD of the script's own directory. That is true
   only in the dev tree. In the tap, `sync-tap.sh:881` places the script at `share/scripts/` while

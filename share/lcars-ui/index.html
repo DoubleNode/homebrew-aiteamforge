@@ -806,7 +806,8 @@
                                 <label class="team-config-label">AI Engine Account Routing</label>
                                 <span class="team-config-hint">
                                     Per-team AI engine account assignment. Maps each team to an engine account
-                                    and API key env var sourced from ~/.zshrc.secrets. Configuration stored in
+                                    and API key env var, resolved per request through the vault/cache/env-var
+                                    chain (XACA-1246) — not read once at server start. Configuration stored in
                                     ~/.aiteamforge/team-paths.json (schema v2). (XACA-0281)
                                 </span>
                             </div>
@@ -2540,7 +2541,7 @@
                            pattern="^[A-Z][A-Z0-9_]*$"
                            autocomplete="off"
                            spellcheck="false">
-                    <small class="form-hint">Uppercase env var name sourced from ~/.zshrc.secrets. Pattern: <code>TEAM_&lt;TEAM&gt;_API_KEY</code>. Must match <code>^[A-Z][A-Z0-9_]*$</code>.</small>
+                    <small class="form-hint">Uppercase env var name resolved per request via the vault/cache/env-var chain (XACA-1246) — not read once from a shell rc file. Pattern: <code>TEAM_&lt;TEAM&gt;_API_KEY</code>. Must match <code>^[A-Z][A-Z0-9_]*$</code>.</small>
                 </div>
 
                 <!-- XACA-1178-007: ai.credential.auth_type (XACA-0282-012 §1.2). Optional:

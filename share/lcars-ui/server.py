@@ -3413,6 +3413,42 @@ CONFIG_DIR = Path.home() / "dev-team" / "config"
 SESSION_NAME = os.environ.get("LCARS_SESSION_NAME", "lcars")
 LCARS_TEAM = os.environ.get("LCARS_TEAM", "").strip()
 
+# XACA-1246-003: credential resolver (see _resolve_team_credential below).
+# Located relative to server.py's OWN file path (Path(__file__)), NEVER via
+# $HOME or $PWD -- the remote-SSH spawn path (academy-startup.sh:216) runs
+# with a different $HOME context, and _lcars_spawn_detached `cd`s into this
+# directory before exec'ing, both of which would silently resolve to the
+# wrong copy (or none) under a $HOME/$PWD-relative lookup. UI_DIR.parent is
+# the repo root in every layout this server runs from -- the checked-out
+# worktree, the main clone, and the SSH-remote clone alike -- because
+# claude_code_cc_aliases.sh always lives one directory up from lcars-ui/.
+_CC_ALIASES_SCRIPT = UI_DIR.parent / "claude_code_cc_aliases.sh"
+
+# Tier 1 shells out to vault-fetch.sh -> node, whose OWN network timeout is
+# 10s (fleet-monitor/client/vault-fetch.js FETCH_TIMEOUT_MS) -- far longer
+# than this server can afford to block. This server is single-threaded
+# (TCPServer, see below) and XACA-0889 was a restart-loop caused by exactly
+# this class of stall blocking /api/status past the health check's 3s
+# watchdog (see _ensure_collector_running's own comment on that incident).
+# 2.0s is chosen to leave roughly 1s of headroom under that 3s budget for
+# the rest of this request's handling (JSON parse, response write, thread/
+# process scheduling) -- deliberately NOT "just under 3s", which would
+# leave no margin at all. A hung/slow vault fetch is killed well before it
+# would naturally time out on its own; that is the point (approval
+# condition 3), not a bug.
+_CC_CREDENTIAL_RESOLVE_TIMEOUT = 2.0  # seconds
+
+# Mirrors _cc_export_account_credentials' own team-slug gate in
+# claude_code_cc_aliases.sh (XACA-0539-011): leading alphanumeric, then
+# [A-Za-z0-9_-]. This is LAYER ONE of the two-layer defense approval
+# condition 1 requires (layer two is the shell function's own identical
+# check, run on the value AFTER it crosses into a subprocess argv).
+_CC_TEAM_SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
+
+# Must match claude_code_cc_aliases.sh's _cc_resolve_credential_for_team
+# sentinel exactly.
+_CC_TOKEN_SENTINEL = "===AITF-CRED-TOKEN==="
+
 
 def lcars_runtime_target_path() -> Path:
     """XACA-0798: absolute path of the RUNTIME router-redirect file.
@@ -3944,6 +3980,19 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # XACA-0333-002: mtime-based cache for team-paths.json (avoids disk read on every GET)
     _TEAM_PATHS_CACHE: dict = {'mtime_ns': None, 'data': None}
     _TEAM_PATHS_CACHE_LOCK: threading.Lock = threading.Lock()
+
+    # XACA-1246-003: short-TTL cache of the credential resolver's OUTCOME
+    # RECORD, token stripped (design §5.1 -- a design requirement, not an
+    # optimization: each resolve costs a zsh + python3 subprocess, and on a
+    # vault machine a node vault-fetch with network I/O). Keyed
+    # (team, env_var_name) so a var_name change (an `assign`) naturally
+    # misses rather than serving a stale entry; ALSO checked against
+    # team-paths.json's own mtime_ns so a hand-edit that leaves var_name
+    # unchanged still invalidates within one TTL window. The token itself
+    # is NEVER a value in this dict, regardless of want_value.
+    _CREDENTIAL_RESOLVE_CACHE: dict = {}
+    _CREDENTIAL_RESOLVE_CACHE_LOCK: threading.Lock = threading.Lock()
+    _CREDENTIAL_RESOLVE_CACHE_TTL = 30.0  # seconds
 
     # XACA-0387 (audit F-04-008): socket timeout protects each connection's
     # request thread from a slow-loris connection that would otherwise pin it
@@ -15033,13 +15082,285 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 return None, str(e)
 
+    def _resolve_team_credential(self, team: str, *, want_value: bool = False, force: bool = False) -> dict:
+        """Resolve whether `team` has a working Anthropic credential, and
+        optionally the token itself, through the ONE seam XACA-1246-003
+        gives every credential-consuming call site.
+
+        Calls claude_code_cc_aliases.sh's _cc_resolve_credential_for_team at
+        REQUEST TIME (via _invoke_credential_resolver), which wraps the
+        existing _cc_export_account_credentials UNCHANGED -- so this server
+        answers correctly regardless of whether its own process environment
+        was frozen at exec by launchd (XACA-1246-001), and a rotated key or
+        a repaired ~/.zshrc.secrets takes effect on the NEXT request, no
+        restart needed. Full design:
+        kanban/plans/XACA-1246/XACA-1246-002-secret-delivery-decision.md
+
+        ONE seam, not three: serve_team_account_current, the account/assign
+        handler, and handle_team_account_test_connection all call this, so
+        "does a credential resolve" (presence) and "what is it" (value) can
+        never again be computed from two different sources and disagree --
+        that divergence IS this ticket, one level up (design §5).
+
+        Returns {'available': bool, 'mode': str|None, 'fault': str|None,
+        'var_name': str, 'token': str|None}. `token` is populated ONLY when
+        want_value=True and available is True; it is NEVER cached and NEVER
+        logged by this method or its caller here.
+
+        `force=True` bypasses and refreshes the outcome cache -- REQUIRED
+        at the account/assign call site (XACA-1246-003 design §5): the
+        credential was just rewritten, so a cached outcome keyed against
+        the PREVIOUS variable name would be wrong.
+        """
+        if not team or not _CC_TEAM_SLUG_RE.match(team):
+            return {'available': False, 'mode': None, 'fault': 'invalid team identity',
+                    'var_name': '', 'token': None}
+
+        data, err = self._read_team_paths_raw()
+        if err:
+            return {'available': False, 'mode': None, 'fault': f'team-paths.json unreadable: {err}',
+                    'var_name': '', 'token': None}
+
+        team_paths_file = Path.home() / '.aiteamforge' / 'team-paths.json'
+        try:
+            team_paths_mtime_ns = os.stat(team_paths_file).st_mtime_ns
+        except OSError:
+            team_paths_mtime_ns = None
+
+        team_block = data.get('teams', {}).get(team) or {}
+        ai_block = team_block.get('ai')
+        credential = None
+        if isinstance(ai_block, dict) and 'credential' in ai_block:
+            cred = ai_block.get('credential')
+            if isinstance(cred, dict):
+                credential = cred
+            # An explicit `null`, or a corrupt non-dict/non-null value, both
+            # fall through to "undeclared" below. Three-state semantics
+            # (XACA-0282-012 I5): absent key and null both mean "no team
+            # credential" -- NEVER tested with truthiness (approval
+            # condition 4).
+
+        # Obligation 4 / condition 4: short-circuit BEFORE spawning
+        # anything. 24 of 27 teams are undeclared (measured, design §5.1)
+        # -- this keeps a panel-open at 3 resolves, not 27.
+        if credential is None:
+            return {'available': False, 'mode': None, 'fault': None, 'var_name': '', 'token': None}
+
+        var_name = credential.get('env_var_name') or ''
+        cache_key = (team, var_name)
+
+        if not want_value and not force:
+            with LCARSHandler._CREDENTIAL_RESOLVE_CACHE_LOCK:
+                entry = LCARSHandler._CREDENTIAL_RESOLVE_CACHE.get(cache_key)
+            if entry is not None:
+                age = time.monotonic() - entry['ts']
+                if (age < LCARSHandler._CREDENTIAL_RESOLVE_CACHE_TTL
+                        and entry.get('team_paths_mtime_ns') == team_paths_mtime_ns):
+                    cached = dict(entry['record'])
+                    cached['token'] = None
+                    return cached
+
+        record = self._invoke_credential_resolver(team, want_value=want_value, env_var_name=var_name)
+        record['var_name'] = var_name
+
+        # Cache the outcome with the token stripped (§5.1 -- never cache the
+        # token itself, regardless of want_value).
+        cacheable = {k: v for k, v in record.items() if k != 'token'}
+        with LCARSHandler._CREDENTIAL_RESOLVE_CACHE_LOCK:
+            LCARSHandler._CREDENTIAL_RESOLVE_CACHE[cache_key] = {
+                'ts': time.monotonic(),
+                'team_paths_mtime_ns': team_paths_mtime_ns,
+                'record': cacheable,
+            }
+
+        if not want_value:
+            record['token'] = None
+        return record
+
+    def _invoke_credential_resolver(self, team: str, *, want_value: bool, env_var_name: str = '') -> dict:
+        """Spawn the resolve-only entry point in claude_code_cc_aliases.sh
+        and parse its stdout contract (see that file's
+        _cc_resolve_credential_for_team docstring, XACA-1246-003).
+
+        Bounded by _CC_CREDENTIAL_RESOLVE_TIMEOUT -- see that constant's own
+        comment for why (single-threaded server, XACA-0889 3s watchdog,
+        vault-fetch's own 10s network timeout).
+
+        GRACEFUL DEGRADATION WHEN THE SCRIPT IS ABSENT (coordinator
+        correction to the original XACA-1246-003 pass, which wrongly
+        assumed both files ship together and faulted every team on a tap
+        consumer): claude_code_cc_aliases.sh (the CALLEE) and lcars-ui/
+        server.py (this file, the CALLER) ship ASYMMETRICALLY. sync-tap.sh
+        mirrors lcars-ui/ wholesale via a `sync_dir` call --
+
+            sync-tap.sh:694  sync_dir "$SOURCE_DIR/lcars-ui" "$TAP/share/lcars-ui" ...
+
+        -- so server.py reaches every consumer. claude_code_cc_aliases.sh
+        appears NOWHERE in sync-tap.sh, under sync_file OR sync_dir; it is
+        not shipped. A consumer's actual aliases file is a DIFFERENT,
+        templated homebrew-tap/share/templates/aliases/cc-aliases.sh (606
+        lines; zero occurrences of _cc_export_account_credentials) -- the
+        tiered vault/cache/env-var chain this resolver wraps does not exist
+        there at all. Do NOT "fix" this by adding claude_code_cc_aliases.sh
+        to sync-tap.sh -- shipping the full interactive chain to consumers
+        is a separate decision with its own review surface, not this
+        ticket's call; see the coordinator's correction on XACA-1246-003.
+
+        Consumers' supported model is the plain env-var read: LCARS started
+        from an interactive shell that already carries the var in its
+        process environment (the env-var-failover tier, just performed
+        directly rather than through the chain). When the script is
+        genuinely absent, this method reproduces that EXACT pre-XACA-1246-003
+        behavior (`bool(env_var_name and os.environ.get(env_var_name))`)
+        instead of reporting a fault -- a fault here would turn every
+        consumer's current green into red for a gap that predates this
+        ticket and is not what this ticket changed.
+        THIS IS A DIFFERENT CONDITION from the script being PRESENT and the
+        chain genuinely failing (non-zero chain_rc, timeout, spawn error,
+        `exit 90` from a failed `source`) -- that case still faults, below,
+        exactly as before. "no chain installed here" and "the chain ran and
+        could not answer" must never collapse into the same signal.
+        """
+        result = {'available': False, 'mode': None, 'fault': None, 'token': None}
+
+        if not _CC_ALIASES_SCRIPT.exists():
+            available = bool(env_var_name and os.environ.get(env_var_name))
+            result['available'] = available
+            # Distinct, observable mode value -- NEVER a fault -- so a
+            # consumer/dashboard can tell this process resolved via the
+            # legacy direct-env-var read, not the resolver chain. This is
+            # NOT one of the chain's own tier vocabulary values (vault |
+            # cache | env-failover | env-legacy); it names a materially
+            # different mechanism (no subprocess, no chain, no vault/cache
+            # tiers even attempted) and must stay visually distinct from
+            # them for that reason. Server-side field only -- subitem 006
+            # owns any user-facing copy built from it.
+            result['mode'] = 'env-direct' if available else None
+            if want_value and available:
+                result['token'] = os.environ.get(env_var_name)
+            return result
+
+        mode_arg = 'value' if want_value else 'presence'
+
+        # Approval condition 1: `team` NEVER enters the -c script TEXT -- it
+        # arrives as a POSITIONAL PARAMETER ($1), exactly the pattern at
+        # scripts/lcars-launch-helpers.sh:927-930 (_lcars_spawn_detached).
+        # This is layer two of the two-layer defense; layer one is the
+        # _CC_TEAM_SLUG_RE check in _resolve_team_credential above, and a
+        # third, independent copy of the same check runs inside the shell
+        # function itself before it does anything with the value.
+        #
+        # `source "$2" >&2 2>/dev/null`: claude_code_cc_aliases.sh prints an
+        # unconditional startup banner (`echo "Claude Code CC functions
+        # loaded!"` and friends) as a normal side effect of being sourced --
+        # true for every interactive shell that sources it, and therefore
+        # also true here. `>&2` moves that banner (and anything else the
+        # sourcing itself writes to stdout) onto this subprocess's stderr,
+        # so this resolver's stdout contract -- line 1 is JSON, nothing else
+        # -- holds regardless of what that file prints on load. Verified
+        # live against this exact invocation during XACA-1246-003
+        # implementation: without the redirect, the banner's ~12 lines
+        # preceded the JSON record and broke first-line parsing.
+        script = 'source "$2" >&2 2>/dev/null || exit 90; _cc_resolve_credential_for_team "$1" "$3"'
+
+        env = os.environ.copy()
+        # Belt-and-suspenders alongside the unset/export
+        # _cc_resolve_credential_for_team itself does: this server's OWN
+        # LCARS_TEAM must never leak into a subprocess resolving a
+        # DIFFERENT team's credential (design §2 a-2 -- LCARS answers for
+        # any of 27 teams from one process).
+        env.pop('LCARS_TEAM', None)
+        env.pop('SESSION_TYPE', None)
+
+        try:
+            proc = subprocess.run(
+                ['zsh', '-f', '-c', script, 'zsh', team, str(_CC_ALIASES_SCRIPT), mode_arg],
+                capture_output=True,
+                text=True,
+                timeout=_CC_CREDENTIAL_RESOLVE_TIMEOUT,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            result['fault'] = 'credential resolution timed out'
+            return result
+        except OSError as exc:
+            result['fault'] = f'could not spawn credential resolver: {exc}'
+            return result
+
+        stdout = proc.stdout or ''
+        stderr = proc.stderr or ''
+
+        first_line, _, rest = stdout.partition('\n')
+        try:
+            record = json.loads(first_line)
+        except (json.JSONDecodeError, ValueError):
+            result['fault'] = 'credential resolver returned an unparsable response'
+            return result
+
+        available = bool(record.get('available'))
+        mode = record.get('mode') or None
+        fault = record.get('fault') or None
+        chain_rc = record.get('chain_rc')
+
+        if not available and not fault and chain_rc == 1:
+            # Design §6.1: rc=1 is the chain's OWN fail-closed judgment call
+            # ("a source that should have answered could not be reached") --
+            # extract its human reason from stderr rather than re-deriving
+            # one. Every rc=1 exit in _cc_export_account_credentials is
+            # preceded by exactly one line with this prefix (tier 3's two
+            # `return 1` sites), and nothing else this resolver or the chain
+            # ever prints uses it.
+            for line in reversed(stderr.splitlines()):
+                if line.startswith('✗ '):
+                    fault = line[2:].strip()
+                    break
+            if not fault:
+                fault = 'credential resolver failed closed (see server log for detail)'
+
+        token = None
+        if want_value and available:
+            idx = rest.find(_CC_TOKEN_SENTINEL)
+            if idx != -1:
+                token = rest[idx + len(_CC_TOKEN_SENTINEL):]
+                if token.startswith('\n'):
+                    token = token[1:]
+                if token.endswith('\n'):
+                    token = token[:-1]
+            if not token:
+                # available=true but no token could be extracted -- fail
+                # closed on the VALUE even though presence said true, rather
+                # than handing the caller an empty string it might treat as
+                # "no auth header needed."
+                available = False
+                fault = fault or 'resolver reported available but no token was returned'
+
+        result['available'] = available
+        result['mode'] = mode if available else None
+        result['fault'] = fault
+        result['token'] = token
+        return result
+
     def serve_team_account_current(self, query_string: str):
         """GET /api/team-config/account/current?team=<id>
 
         Returns {account_id, account_nickname, env_var_name, has_credentials,
-        last_validated_at, auth_type, engine_slug, account_slug, config_source}.
-        NEVER returns the actual key value — has_credentials is a bool derived from
-        bool(os.environ.get(env_var_name)).
+        credential_source, credential_fault, last_validated_at, auth_type,
+        engine_slug, account_slug, config_source}.
+        NEVER returns the actual key value — has_credentials comes from
+        _resolve_team_credential(team, want_value=False), the SAME seam
+        handle_team_account_test_connection uses for the value itself
+        (XACA-1246-003). Presence is defined as "the value resolver would
+        succeed", not as a separate, cheaper question computed from
+        os.environ directly — a presence answer and a value answer drawn
+        from different sources is XACA-1246 itself, one level up (design
+        §5). credential_source mirrors the resolver's `mode` (vault | cache
+        | env-failover | env-legacy | env-direct | null) -- env-direct means
+        the resolver chain (claude_code_cc_aliases.sh) is not installed on
+        this machine at all and this fell back to a direct os.environ read
+        (see _invoke_credential_resolver's docstring: the tap ships this
+        server but not that chain); credential_fault is null unless a
+        credential IS declared and the resolver could not honor it (design
+        §6.1's three response states).
 
         ai.credential is the only source read. XACA-1184-003 dropped the legacy
         anthropic_* fallback that used to serve the undeclared case; nothing
@@ -15120,8 +15441,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 engine_slug = ''
                 account_slug = ''
 
-            # Derive has_credentials without ever touching the key value
-            has_credentials = bool(env_var_name and os.environ.get(env_var_name))
+            # Derive has_credentials through the ONE resolver seam
+            # (XACA-1246-003) rather than a direct os.environ read — see
+            # this method's docstring. want_value=False: never touch the
+            # key value here.
+            cred = self._resolve_team_credential(team, want_value=False)
+            has_credentials = cred['available']
+            credential_source = cred['mode']
+            credential_fault = cred['fault']
 
             # Read last_validated_at from the validation-cache file
             cache = self._load_account_validation_cache()
@@ -15132,6 +15459,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 'account_nickname': account_nickname,
                 'env_var_name': env_var_name,
                 'has_credentials': has_credentials,
+                'credential_source': credential_source,
+                'credential_fault': credential_fault,
                 'last_validated_at': last_validated_at,
                 'auth_type': auth_type,
                 'engine_slug': engine_slug,
@@ -15357,6 +15686,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             # Resolve env_var_name: prefer explicit field, fall back to team lookup
             env_var_name = body.get('env_var_name', '').strip()
+            team = ''
             if not env_var_name:
                 team = body.get('team', '').strip() or LCARS_TEAM
                 if team not in TEAM_KANBAN_DIRS:
@@ -15397,19 +15727,108 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     ai_credential = None
                 if isinstance(ai_credential, dict):
                     env_var_name = ai_credential.get('env_var_name') or ''
+            else:
+                # XACA-1246-003: env_var_name was supplied directly — the
+                # ONLY shape the current UI ever sends (lcars-ui/js/
+                # lcars-team-account.js's edit modal posts the raw input
+                # value, which may be an unsaved candidate the operator is
+                # trying out, not necessarily this team's currently
+                # persisted credential). The resolver chain only ever
+                # speaks in terms of a TEAM's SAVED credential — there is no
+                # "test this arbitrary var name" operation — so
+                # best-effort-associate a team: try this server's own team
+                # first (the realistic case; this UI edits one team's
+                # account), then fall back to scanning team-paths.json for
+                # any team whose SAVED env_var_name matches.
+                #
+                # Ambiguous when more than one team shares a var name
+                # (measured, design doc §8: academy/android/command all
+                # declare CLAUDE_ACCT_ME_TOKEN) — but resolution is
+                # IDENTICAL regardless of which is picked for the tier-3
+                # (env-var) case, since that tier reads the named variable
+                # itself after sourcing ~/.zshrc.secrets, not anything
+                # team-specific. It can only diverge for a team whose
+                # tier-1/2 (vault) answer differs — a narrower ambiguity
+                # this direct-name path never disambiguated before either
+                # (it used to read os.environ with no team awareness at
+                # all).
+                candidate_team = LCARS_TEAM
+
+                def _cred_var_name(block):
+                    ai = block.get('ai') if isinstance(block, dict) else None
+                    cred = ai.get('credential') if isinstance(ai, dict) else None
+                    return (cred.get('env_var_name') or '') if isinstance(cred, dict) else ''
+
+                data, err = self._read_team_paths_raw()
+                if not err and data:
+                    teams_data = data.get('teams') or {}
+                    if not (candidate_team
+                            and _cred_var_name(teams_data.get(candidate_team) or {}) == env_var_name):
+                        candidate_team = ''
+                        for cand_team, cand_block in teams_data.items():
+                            if _cred_var_name(cand_block) == env_var_name:
+                                candidate_team = cand_team
+                                break
+                team = candidate_team
 
             if not env_var_name:
                 self._send_json_response({'ok': False, 'error': 'No env_var_name could be resolved'}, status=400)
                 return
 
-            # Read the actual key from the process environment — NEVER from the request
-            api_key = os.environ.get(env_var_name, '')
+            # Resolve the VALUE through the ONE seam (XACA-1246-003 design
+            # §5) when a team is known — the same resolver
+            # serve_team_account_current and the account/assign handler use
+            # for presence, so presence and value can never again disagree.
+            # force=True: TEST CONNECTION must never serve a stale cached
+            # outcome. NEVER from the request body, NEVER logged.
+            api_key = ''
+            credential_fault = None
+            if team:
+                cred = self._resolve_team_credential(team, want_value=True, force=True)
+                if cred['available'] and cred.get('token'):
+                    api_key = cred['token']
+                else:
+                    credential_fault = cred['fault']
             if not api_key:
+                # No team association (an unsaved candidate value), or the
+                # resolver chain found nothing for the associated team's
+                # SAVED credential — fall back to the LCARS process's own
+                # environment. Honest, not a regression: on this ticket's
+                # actual failure mode (a launchd-spawned server) that read
+                # correctly reports nothing, exactly as it did before
+                # XACA-1246-003.
+                api_key = os.environ.get(env_var_name, '')
+            if not api_key:
+                # XACA-1246-006: when the resolver chain gave a real reason
+                # (credential_fault), surface THAT — it names an actual cause
+                # (timeout, chain missing, unresolvable) rather than a
+                # generic failure. When it did not (no team association, or
+                # the var is simply unset everywhere this server looked),
+                # say so plainly WITHOUT implying a shell-rc-file edit would
+                # fix it -- a launchd-spawned server never reads ~/.zshrc /
+                # ~/.zshrc.secrets (interactive-shell-only files), and
+                # resolution is re-checked on every request regardless, so
+                # there is nothing here a restart would fix either.
+                #
+                # Deliberately does NOT say "did not resolve via the
+                # credential chain": on a tap consumer (claude_code_cc_
+                # aliases.sh absent -- _invoke_credential_resolver's
+                # script-absent branch) no chain was ever consulted at all,
+                # it fell straight to the same os.environ read this method
+                # performs a line above -- so claiming a chain was tried and
+                # declined would be false for that machine. This wording is
+                # true whether a chain ran and found nothing, or no chain
+                # exists on this box at all.
                 self._send_json_response({
                     'ok': False,
                     'account_fingerprint': None,
                     'model_access': None,
-                    'error': f'Environment variable {env_var_name!r} is not set or empty',
+                    'error': credential_fault or (
+                        f'Environment variable {env_var_name!r} could not be resolved for this '
+                        'account, and is not set in this server\'s own process environment either. '
+                        'Re-checked on every request — verify the account/engine assignment rather '
+                        'than editing a shell rc file.'
+                    ),
                 }, status=400)
                 return
 
@@ -15937,9 +16356,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 raise
 
-            # has_credentials: true if the env var is set in the LCARS process environment
-            # NEVER return the actual key value
-            has_credentials = bool(env_var_name and os.environ.get(env_var_name))
+            # has_credentials via the ONE resolver seam (XACA-1246-003).
+            # force=True is LOAD-BEARING here, not a nicety: the credential
+            # was just rewritten above, so an outcome cached against the
+            # PREVIOUS env_var_name/account would be wrong — same spot that
+            # already invalidates LCARSHandler._TEAM_PATHS_CACHE.
+            # NEVER returns the actual key value (want_value=False).
+            cred = self._resolve_team_credential(team, want_value=False, force=True)
+            has_credentials = cred['available']
+            credential_source = cred['mode']
+            credential_fault = cred['fault']
 
             self._send_json_response({
                 'success': True,
@@ -15953,6 +16379,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     'auth_type': matched_account.get('auth_type') or '',
                 },
                 'has_credentials': has_credentials,
+                'credential_source': credential_source,
+                'credential_fault': credential_fault,
             })
         except Exception as e:
             print(f"[LCARS] ERROR in handle_team_account_assign: {e}")

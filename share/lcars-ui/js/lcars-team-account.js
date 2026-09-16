@@ -145,7 +145,15 @@
         if (dotEl) {
             dotEl.title = (
                 status === 'ok' ? 'Credentials present and validated' :
-                status === 'missing' ? 'No credentials — env var not set in this LCARS process' :
+                // XACA-1246-006: 'missing' collapses several distinct states
+                // (undeclared, declared-but-unresolvable-with-fault,
+                // declared-but-unresolvable-no-reason) — see
+                // _missingCredentialTooltip's own comment for why each is
+                // worded differently, and never as "env var not set in this
+                // LCARS process" (false for a declared credential resolved
+                // through the vault/cache chain, and misleading for the
+                // launchd case this ticket exists to fix).
+                status === 'missing' ? _missingCredentialTooltip(currentConfig) :
                 'Credentials present but never validated — run TEST CONNECTION'
             );
         }
@@ -803,9 +811,13 @@
             // Refresh the row to reflect new state (nickname, account_id, status dot).
             await _refreshTeamRow(teamSlug);
 
-            var credLabel = data.has_credentials
-                ? 'Key env var detected.'
-                : 'No key env var set — update ~/.zshrc.secrets.';
+            // XACA-1246-006: never prescribe ~/.zshrc.secrets here — a
+            // launchd-spawned LCARS server never reads it (that file is
+            // sourced by INTERACTIVE shells only), so telling an operator to
+            // edit it sends them down a dead end with no path forward. See
+            // _credentialAssignLabel's own comment for the four states this
+            // now distinguishes.
+            var credLabel = _credentialAssignLabel(data);
             _showToast(
                 teamSlug.toUpperCase() + ' → ' + accountSlug + ' assigned. ' + credLabel,
                 data.has_credentials ? 'success' : 'warning'
@@ -925,6 +937,115 @@
         var age = Date.now() - new Date(cfg.last_validated_at).getTime();
         var sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
         return age <= sevenDaysMs ? 'ok' : 'unvalidated';
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // XACA-1246-006: credential-state copy
+    //
+    // The credential is now resolved AT REQUEST TIME through
+    // claude_code_cc_aliases.sh's vault/cache/env-var chain
+    // (XACA-1246-003) — a launchd-spawned LCARS server's own frozen
+    // process environment is no longer the source of truth, so
+    // "edit ~/.zshrc.secrets and restart" is never correct advice: a
+    // launchd-spawned server does not read ~/.zshrc / ~/.zshrc.secrets
+    // at all (those are read by INTERACTIVE shells only), and even
+    // where they would apply, no restart is needed — resolution is
+    // re-checked on every request. These two helpers replace the old
+    // single `has_credentials ? A : B` copy (which always named that
+    // file) with copy that stays honest about which of four DISTINCT
+    // states the server actually observed:
+    //   1. resolved via the chain (vault | cache | env-failover | env-legacy)
+    //   2. resolved via a direct env-var read ("env-direct" — the chain
+    //      itself is not installed on this machine; every tap consumer)
+    //   3. declared but unresolvable, WITH a reason (credential_fault)
+    //   4. declared but unresolvable, with NO reason reported — say that
+    //      plainly rather than inventing one (see the module header).
+    // A 5th state — no team credential declared/decided at all (24 of 27
+    // teams, measured) — is the CORRECT, quiet default and must not be
+    // reported as if something were broken; see _missingCredentialTooltip.
+    //
+    // Do NOT read this as "check the vault" guidance for an operator —
+    // fleet-monitor/server/data/vault.json does not exist on every box
+    // and vault provisioning is tracked separately (XACA-1256); these
+    // strings describe what THIS server observed, not a vault UI to go
+    // look at.
+    // ─────────────────────────────────────────────────────────────
+
+    /** Human label for a resolver `mode` value. Mirrors claude_code_cc_aliases.sh's
+     *  own chain vocabulary (vault | cache | env-failover | env-legacy) plus the
+     *  server-side "env-direct" fallback mode (XACA-1246-003) — never invents a
+     *  mode the resolver doesn't actually report. */
+    function _credentialModeLabel(mode) {
+        switch (mode) {
+            case 'vault': return 'sealed vault';
+            case 'cache': return 'offline vault cache';
+            case 'env-failover': return 'env-var fallback (vault reachable, no key sealed there)';
+            case 'env-legacy': return 'account env var (normal on this machine)';
+            case 'env-direct': return 'direct environment read — no vault/cache chain installed here';
+            default: return mode || 'the credential chain';
+        }
+    }
+
+    /** Toast copy for a resolved (has_credentials=true) result. */
+    function _credentialResolvedLabel(data) {
+        return 'Key credential resolved via ' + _credentialModeLabel(data && data.credential_source) + '.';
+    }
+
+    /** Toast copy for an unresolved (has_credentials=false) result — NEVER
+     *  prescribes editing ~/.zshrc.secrets, which a launchd-spawned server
+     *  cannot see (XACA-1246). Distinguishes a reported fault from the
+     *  honest "no reason given" case rather than guessing one.
+     *
+     *  Deliberately does NOT say "the chain reported no specific reason":
+     *  `credential_source`/`mode` is null on EVERY unresolved outcome,
+     *  including a tap consumer where the chain (claude_code_cc_aliases.sh)
+     *  isn't installed at all and was never consulted — server.py falls
+     *  straight to a direct env-var read there (XACA-1246-003's env-direct
+     *  fallback). Claiming "the chain" ran and declined would be false on
+     *  that machine, so this stays mechanism-neutral instead. */
+    function _credentialUnresolvedLabel(data) {
+        var fault = data && data.credential_fault;
+        var suffix = ' Re-checked on every request — no restart needed once fixed; '
+            + 'a shell rc-file edit will not reach this server.';
+        if (fault) {
+            return 'Key credential NOT resolved: ' + fault + '.' + suffix;
+        }
+        return 'Key credential NOT resolved, and no specific reason was reported.' + suffix
+            + ' Verify the account/engine assignment above.';
+    }
+
+    /** Combined toast label for the assign response. */
+    function _credentialAssignLabel(data) {
+        return (data && data.has_credentials)
+            ? _credentialResolvedLabel(data)
+            : _credentialUnresolvedLabel(data);
+    }
+
+    /** Status-dot tooltip for the 'missing' status. Kept DISTINCT from
+     *  _credentialUnresolvedLabel's toast copy: the common case here (24 of
+     *  27 teams, measured) is "no team credential declared/decided" —
+     *  correct and quiet, not a fault — so this checks config_source/
+     *  env_var_name FIRST and only reports a fault when one was actually
+     *  declared and failed to resolve. */
+    function _missingCredentialTooltip(cfg) {
+        if (!cfg || cfg.config_source !== 'ai' || !cfg.env_var_name) {
+            // Undeclared (no ai.credential key at all), or a declared
+            // explicit-null "no team credential" decision — both are the
+            // CORRECT state for a team using the CLI's own default login,
+            // not a failure. XACA-0282-012 three-state contract: absence
+            // and null both mean "no team credential", never falsiness.
+            return 'No team account assigned — this team uses the CLI’s default login.';
+        }
+        var fault = cfg.credential_fault;
+        if (fault) {
+            return 'Declared credential (' + cfg.env_var_name + ') could not be resolved: ' + fault
+                + '. Re-checked on every request — no restart needed once fixed.';
+        }
+        // Mechanism-neutral for the same reason as _credentialUnresolvedLabel
+        // above — mode is null here whether a chain ran and found nothing
+        // or no chain exists on this machine at all; never claim "the chain".
+        return 'Declared credential (' + cfg.env_var_name + ') did not resolve, and no specific reason '
+            + 'was reported. Re-checked on every request — verify the account assignment above.';
     }
 
     /** Fill the modal input fields from a config object (or clear them). */
