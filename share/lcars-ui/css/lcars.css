@@ -16089,10 +16089,28 @@ body {
     color: var(--lcars-green, #99cc99);
 }
 
-/* Red: env var not set / no credentials found */
+/* Red: a DECLARED credential exists but could not be resolved — a genuine
+   fault, should read as alarming. */
 .team-account-row[data-credential-status="missing"] .team-account-status-dot {
     background: var(--lcars-red, #cc6666);
     color: var(--lcars-red, #cc6666);
+}
+
+/* Undeclared: no team credential declared/decided at all (24 of 27 teams,
+   measured XACA-1246) — this is the CORRECT, quiet default (the team uses
+   the CLI's own login), not a fault, and must not carry the same alarm as
+   "missing" above. XACA-1246 [UX] review finding: the tooltip text already
+   distinguished the two, but the dot itself was visually identical red for
+   both, so a glance at the panel could not tell "normal" from "broken".
+   Shape-differentiated, not just color, for accessibility (colorblind /
+   grayscale rendering): a dim, unlit HOLLOW ring instead of a solid filled
+   dot with a glow — no box-shadow, transparent fill, reduced opacity. */
+.team-account-row[data-credential-status="undeclared"] .team-account-status-dot {
+    background: transparent;
+    border-color: rgba(255, 255, 255, 0.35);
+    color: transparent;
+    box-shadow: none;
+    opacity: 0.55;
 }
 
 /* Amber (default): env var set but never validated */

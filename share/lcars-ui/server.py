@@ -514,10 +514,10 @@ AITEAMFORGE_API_KEY_FILE = Path.home() / '.aiteamforge' / 'api-key'
 
 # Contract §3.3 — credential shape validation. Applied to whichever credential
 # was extracted (Bearer or X-API-Key) BEFORE it ever reaches a comparison.
-_AUTH_CREDENTIAL_SHAPE_RE = re.compile(r'^[A-Za-z0-9._~+/=-]{16,512}$')
+_AUTH_CREDENTIAL_SHAPE_RE = re.compile(r'^[A-Za-z0-9._~+/=-]{16,512}\Z')
 
 # Contract §3.1 — case-insensitive scheme, at least one space/tab separator.
-_AUTH_BEARER_RE = re.compile(r'^[Bb][Ee][Aa][Rr][Ee][Rr][ \t]+(.+)$')
+_AUTH_BEARER_RE = re.compile(r'^[Bb][Ee][Aa][Rr][Ee][Rr][ \t]+(.+)\Z')
 
 # Contract §4 — byte-exact 401 body. Compact separators, this key order, no
 # trailing newline. Do NOT build this via json.dumps(); a future change to
@@ -613,11 +613,11 @@ else:  # pragma: no cover - exercised only when the module fails to import
 # evaluation §6.5 item 5 — LCARSHandler extends SimpleHTTPRequestHandler, whose
 # do_GET serves files from disk, so a loose pattern here is a path-traversal-
 # adjacent surface rather than merely a routing bug.
-_TERMINAL_WS_ROUTE_RE = re.compile(r'^/terminal/([a-zA-Z0-9_-]+)/ws$')
+_TERMINAL_WS_ROUTE_RE = re.compile(r'^/terminal/([a-zA-Z0-9_-]+)/ws\Z')
 # The two ordinary (buffered) ttyd endpoints: the index (empty leaf) and
 # /token. Both need X-WEBAUTH-USER injected too — ttyd 1.7.7 with
 # `-H X-WEBAUTH-USER` answers 407 on BOTH without it (measured 2026-08-26).
-_TERMINAL_ASSET_ROUTE_RE = re.compile(r'^/terminal/([a-zA-Z0-9_-]+)/(|token)$')
+_TERMINAL_ASSET_ROUTE_RE = re.compile(r'^/terminal/([a-zA-Z0-9_-]+)/(|token)\Z')
 _TERMINAL_ROUTE_PREFIX = '/terminal/'
 
 
@@ -3453,7 +3453,7 @@ _CC_CREDENTIAL_RESOLVE_TIMEOUT = 2.0  # seconds
 # [A-Za-z0-9_-]. This is LAYER ONE of the two-layer defense approval
 # condition 1 requires (layer two is the shell function's own identical
 # check, run on the value AFTER it crosses into a subprocess argv).
-_CC_TEAM_SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
+_CC_TEAM_SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*\Z')
 
 # Must match claude_code_cc_aliases.sh's _cc_resolve_credential_for_team
 # sentinel exactly.
@@ -5086,7 +5086,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def _resolve_selector(self, data, selector):
         """Resolve selector (ID or index) to array index. Returns -1 if not found."""
         # Check if it's a JIRA-style ID (X followed by 3 letters, dash, digits)
-        if re.match(r'^X[A-Z]{3}-\d+$', str(selector)):
+        if re.match(r'^X[A-Z]{3}-\d+\Z', str(selector)):
             return self._find_item_index(data, selector)
         # Otherwise treat as numeric index
         try:
@@ -12878,7 +12878,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         from urllib.parse import parse_qs
         try:
             # Validate item_id format to prevent path traversal
-            if not re.match(r'^X[A-Z]{2,4}-\d{4}$', item_id):
+            if not re.match(r'^X[A-Z]{2,4}-\d{4}\Z', item_id):
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
@@ -13172,7 +13172,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             # Sanitize item_id: must be alphanumeric + dash only (no / .. or leading .)
             import re as _re
-            if not _re.match(r'^[A-Za-z0-9][A-Za-z0-9\-]*$', item_id):
+            if not _re.match(r'^[A-Za-z0-9][A-Za-z0-9\-]*\Z', item_id):
                 self._send_json_response({"exists": False, "itemId": item_id})
                 return
 
@@ -13327,7 +13327,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             # Sanitize item_id: must be alphanumeric + dash only (no / .. or leading .)
-            if not _re.match(r'^[A-Za-z0-9][A-Za-z0-9\-]*$', item_id):
+            if not _re.match(r'^[A-Za-z0-9][A-Za-z0-9\-]*\Z', item_id):
                 self._send_json_response({
                     "error": f"Invalid item ID format: {item_id}"
                 }, status=400)
@@ -13429,7 +13429,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """
         try:
             # Validate CR-ID format to prevent path traversal
-            if not re.match(r'^CR-[A-Z]+-\d{8}-\d+$', cr_id):
+            if not re.match(r'^CR-[A-Z]+-\d{8}-\d+\Z', cr_id):
                 self._send_json_response({"error": "Invalid CR-ID format"}, status=400)
                 return
 
@@ -14953,7 +14953,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _ACCOUNT_VALIDATION_CACHE_PATH = Path.home() / '.aiteamforge' / 'account-validation.json'
 
     # Env-var name regex: must start with uppercase letter, only uppercase + digits + underscore
-    _ENV_VAR_NAME_RE = re.compile(r'^[A-Z][A-Z0-9_]*$')
+    _ENV_VAR_NAME_RE = re.compile(r'^[A-Z][A-Z0-9_]*\Z')
 
     # Valid values for ai.credential.auth_type (XACA-0282-012 §1.2 / §2.2).
     # "none" is reserved for XACA-0283 (keyless endpoints) and is deliberately
@@ -15042,19 +15042,82 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def _load_account_validation_cache(self):
         """Load the account validation timestamp cache from disk.
 
-        Returns a dict mapping env_var_name -> ISO timestamp string, or {} on any error.
+        Returns a dict shaped {team: {env_var_name: ISO timestamp}}, or {} on
+        any error or malformed content.
+
+        XACA-1246 [Review] residual finding: prior to this fix the cache was
+        FLAT -- {env_var_name: ISO timestamp} -- keyed on the env var name
+        ALONE. Multiple teams can (and, measured, do: academy/android/command
+        all declare CLAUDE_ACCT_ME_TOKEN, design doc §8) name the SAME
+        variable, so that shape made TEST CONNECTION on one team display as
+        "recently validated" for every OTHER team naming the same var -- a
+        false green on the exact status this ticket exists to make honest,
+        one layer above the resolution-layer fix already landed in
+        _resolve_team_credential / handle_team_account_test_connection. Both
+        components (team AND env_var_name) are now required to attribute a
+        validation; see _get_cached_validated_at, the one place this is read
+        back.
+
+        A legacy flat-shaped file -- or one with legacy entries mixed in
+        alongside new per-team ones -- is TOLERATED, never crashed on, and
+        never migrated: an old top-level value is a bare string, not a dict,
+        so it simply cannot match `cache.get(team)` returning a dict (a real
+        team name was never a flat cache's key space to begin with, and even
+        in the pathological case where it collided, _get_cached_validated_at's
+        isinstance guard treats a non-dict value as "no entry for this team"
+        rather than raising or laundering it into an attributed validation).
+        Migrating a flat entry (e.g. copying it onto every team declaring that
+        var) would simply re-manufacture the false green under a new
+        implementation -- discarding it is the honest choice: "not validated"
+        is true when validation cannot be attributed to a team, and the
+        degradation is benign + self-healing (the next TEST CONNECTION
+        re-populates it correctly). The on-disk file is left untouched by
+        this method -- legacy entries are dropped only the next time a save
+        actually occurs (see _save_account_validation_cache).
         """
         try:
             p = self._ACCOUNT_VALIDATION_CACHE_PATH
             if p.exists():
                 with open(p, 'r') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
         except Exception as e:
             print(f"[LCARS] WARNING reading account-validation cache: {e}")
         return {}
 
+    def _get_cached_validated_at(self, cache: dict, team: str, env_var_name: str):
+        """Look up a validation timestamp keyed on (team, env_var_name) ONLY.
+
+        Both are required -- see _load_account_validation_cache's docstring
+        for why the env var name alone is not a safe key. Any entry under
+        `team` that is not itself a dict (a pre-rekey legacy flat entry, or
+        any other malformed shape) is treated as absent rather than raising
+        or being reinterpreted: it predates per-team attribution and MUST
+        NOT be laundered into "validated".
+        """
+        if not team or not env_var_name:
+            return None
+        team_cache = cache.get(team)
+        if not isinstance(team_cache, dict):
+            return None
+        return team_cache.get(env_var_name)
+
     def _save_account_validation_cache(self, cache: dict):
-        """Atomically persist the account validation cache to disk."""
+        """Atomically persist the account validation cache to disk.
+
+        `cache` is shaped {team: {env_var_name: ISO timestamp}} (see
+        _load_account_validation_cache). Any top-level entry whose value is
+        NOT itself a dict -- i.e. a pre-rekey legacy flat entry
+        ({env_var_name: timestamp}) loaded alongside new-format ones -- is
+        dropped here before writing, never carried forward: this is the
+        DISCARD, not a migration (XACA-1246 [Review] residual finding; see
+        _load_account_validation_cache's docstring for why migrating it
+        would just re-manufacture the false green under a new shape). This
+        is also the point where an on-disk legacy-shaped file is upgraded to
+        the new shape -- the write only ever happens here, never on read.
+        """
+        cache = {k: v for k, v in cache.items() if isinstance(v, dict)}
         p = self._ACCOUNT_VALIDATION_CACHE_PATH
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = p.with_suffix(f'.json.tmp.{os.getpid()}')
@@ -15326,13 +15389,27 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # pipes are already torn down by the SIGKILL so this returns
             # promptly. Guard with a short timeout of its own in case
             # reaping itself somehow stalls -- fall back to proc.kill()
-            # (the direct child only) plus a final blocking reap rather than
-            # ever leaving this call hung indefinitely.
+            # (the direct child only) plus a SECOND bounded reap rather than
+            # ever leaving this call hung indefinitely. XACA-1246 review
+            # finding: the original fallback ended in a bare, unbounded
+            # `proc.communicate()` -- if the child is unreapable (e.g.
+            # D-state, wedged in uninterruptible I/O), that call blocks this
+            # request thread forever, which is exactly the failure mode this
+            # whole handler exists to bound. If the child STILL cannot be
+            # reaped after the second bounded wait, give up and return the
+            # fault instead of blocking further -- a leaked zombie is
+            # strictly better than a wedged thread.
             try:
                 proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass  # give up on reaping; do not block the request thread further
             result['fault'] = 'credential resolution timed out'
             return result
 
@@ -15499,9 +15576,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             credential_source = cred['mode']
             credential_fault = cred['fault']
 
-            # Read last_validated_at from the validation-cache file
+            # Read last_validated_at from the validation-cache file, keyed on
+            # (team, env_var_name) -- NOT env_var_name alone. Multiple teams
+            # can declare the same variable (measured: academy/android/command
+            # all name CLAUDE_ACCT_ME_TOKEN), so a var-name-only key made
+            # validating ONE team's credential display as "recently
+            # validated" for every OTHER team naming the same var -- a false
+            # green on this exact status display (XACA-1246 [Review]
+            # residual finding). See _get_cached_validated_at /
+            # _load_account_validation_cache for the full rationale.
             cache = self._load_account_validation_cache()
-            last_validated_at = cache.get(env_var_name) if env_var_name else None
+            last_validated_at = self._get_cached_validated_at(cache, team, env_var_name)
 
             self._send_json_response({
                 'account_id': account_id,
@@ -15777,48 +15862,93 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if isinstance(ai_credential, dict):
                     env_var_name = ai_credential.get('env_var_name') or ''
             else:
-                # XACA-1246-003: env_var_name was supplied directly — the
-                # ONLY shape the current UI ever sends (lcars-ui/js/
-                # lcars-team-account.js's edit modal posts the raw input
-                # value, which may be an unsaved candidate the operator is
-                # trying out, not necessarily this team's currently
-                # persisted credential). The resolver chain only ever
-                # speaks in terms of a TEAM's SAVED credential — there is no
-                # "test this arbitrary var name" operation — so
-                # best-effort-associate a team: try this server's own team
-                # first (the realistic case; this UI edits one team's
-                # account), then fall back to scanning team-paths.json for
-                # any team whose SAVED env_var_name matches.
+                # env_var_name was supplied directly — the shape the edit
+                # modal's TEST CONNECTION button sends (lcars-ui/js/
+                # lcars-team-account.js's testTeamAccountConnection).
                 #
-                # Ambiguous when more than one team shares a var name
-                # (measured, design doc §8: academy/android/command all
-                # declare CLAUDE_ACCT_ME_TOKEN) — but resolution is
-                # IDENTICAL regardless of which is picked for the tier-3
-                # (env-var) case, since that tier reads the named variable
-                # itself after sourcing ~/.zshrc.secrets, not anything
-                # team-specific. It can only diverge for a team whose
-                # tier-1/2 (vault) answer differs — a narrower ambiguity
-                # this direct-name path never disambiguated before either
-                # (it used to read os.environ with no team awareness at
-                # all).
-                candidate_team = LCARS_TEAM
+                # XACA-1246 [Review] finding (highest severity), superseding
+                # the XACA-1246-003 "best-effort-associate a team" approach
+                # that used to live here: that approach TRIED this server's
+                # own LCARS_TEAM first, then FELL BACK to scanning
+                # team-paths.json for the first OTHER team whose SAVED
+                # env_var_name happened to match. All three of academy,
+                # android and command currently declare the SAME variable
+                # (CLAUDE_ACCT_ME_TOKEN, measured, design doc §8) — so
+                # testing one team's credential could silently resolve and
+                # probe a DIFFERENT team's token, report green, and write
+                # last_validated_at against a team that was never actually
+                # tested. The old comment reasoned this was safe because
+                # resolution is "identical regardless of which is picked"
+                # for the tier-3 (plain env-var) case -- true only while
+                # every team's credential still bottoms out at the SAME
+                # os.environ read. It stops being true the moment tier-1
+                # (vault) is populated: a vault-sealed secret is per
+                # (engine, account), so a different team can resolve a
+                # genuinely different token, and the old code could not
+                # keep two teams' answers straight. That ambiguity was
+                # accepted once on tier-3 reasoning; it is not accepted
+                # here — do not re-introduce guessing to restore the old
+                # UI-compat shape.
+                #
+                # The modal now ALWAYS sends `team` when it knows one (see
+                # that file's testTeamAccountConnection) — the caller
+                # already knows which team it's testing, so the server
+                # never needs to guess. When `team` is present, use it
+                # directly, but do not just trust it blindly either: confirm
+                # this team's OWN SAVED credential actually declares this
+                # exact env_var_name. A mismatch means the operator is
+                # testing an unsaved candidate value that differs from what
+                # is persisted for this team — that is a real, useful thing
+                # to want to check, but this endpoint cannot honor it
+                # through the per-team resolver chain (which only ever
+                # speaks in terms of a team's SAVED credential), and MUST
+                # NOT silently re-resolve some other team as a substitute.
+                # Fail with a clear, actionable error instead.
+                team = body.get('team', '').strip()
 
                 def _cred_var_name(block):
                     ai = block.get('ai') if isinstance(block, dict) else None
                     cred = ai.get('credential') if isinstance(ai, dict) else None
                     return (cred.get('env_var_name') or '') if isinstance(cred, dict) else ''
 
-                data, err = self._read_team_paths_raw()
-                if not err and data:
+                if team:
+                    if not _CC_TEAM_SLUG_RE.match(team):
+                        self._send_json_response(
+                            {'ok': False, 'error': f'Invalid team identifier: {team!r}'}, status=400)
+                        return
+                    if team not in TEAM_KANBAN_DIRS:
+                        self._send_json_response({'ok': False, 'error': f'Unknown team: {team}'}, status=400)
+                        return
+
+                    data, err = self._read_team_paths_raw()
+                    if err:
+                        self._send_json_response({'ok': False, 'error': err}, status=500)
+                        return
                     teams_data = data.get('teams') or {}
-                    if not (candidate_team
-                            and _cred_var_name(teams_data.get(candidate_team) or {}) == env_var_name):
-                        candidate_team = ''
-                        for cand_team, cand_block in teams_data.items():
-                            if _cred_var_name(cand_block) == env_var_name:
-                                candidate_team = cand_team
-                                break
-                team = candidate_team
+                    declared_var_name = _cred_var_name(teams_data.get(team) or {})
+
+                    if declared_var_name != env_var_name:
+                        declared_var_display = repr(declared_var_name) if declared_var_name else 'none saved'
+                        self._send_json_response({
+                            'ok': False,
+                            'error': (
+                                f'env_var_name {env_var_name!r} does not match team {team!r}\'s '
+                                f'saved credential ({declared_var_display}). '
+                                'Refusing to guess another team\'s credential -- save this value for '
+                                f'{team!r} first, or reload the panel to test the currently-saved value.'
+                            ),
+                        }, status=400)
+                        return
+                # else: no team was supplied at all -- an unsaved candidate
+                # value the caller has no team association for (legacy
+                # shape; the current UI always sends one, see above). This
+                # is NOT the same as the old guessing branch: `team` stays
+                # '' here, so the resolver-chain lookup below is skipped
+                # entirely and this falls through to the plain
+                # os.environ.get(env_var_name, '') read further down --
+                # this server's OWN process environment, never another
+                # team's vault-resolved credential. No path here can ever
+                # produce a wrong-team green.
 
             if not env_var_name:
                 self._send_json_response({'ok': False, 'error': 'No env_var_name could be resolved'}, status=400)
@@ -15994,12 +16124,35 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     error_msg = error_msg.replace(api_key, '[REDACTED]')
                 ok = False
 
-            # On success, cache the validation timestamp
+            # On success, cache the validation timestamp -- keyed on
+            # (team, env_var_name), NOT env_var_name alone (XACA-1246
+            # [Review] residual finding; see _load_account_validation_cache's
+            # docstring). Multiple teams can declare the same variable, so a
+            # var-name-only key attributed one team's validation to every
+            # other team naming the same var.
+            #
+            # `team` can be '' here -- the "unsaved candidate value, no team
+            # association" shape a couple branches up (a caller posting only
+            # env_var_name; the current UI always posts `team` per Finding 1
+            # above, so this is a legacy/API-only path today). '' is used
+            # as-is as the bucket key rather than skipping the write: no real
+            # team is ever named '' (serve_team_account_current's `team`
+            # always defaults to LCARS_TEAM, never empty), so this bucket can
+            # never be read back for any actual team lookup and cannot
+            # produce a false green -- it is inert storage, not a false
+            # attribution, and keeps this endpoint's "a successful probe
+            # always records a validation timestamp" contract unchanged for
+            # that caller shape.
             if ok:
                 from datetime import datetime, timezone
                 ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
                 cache = self._load_account_validation_cache()
-                cache[env_var_name] = ts
+                if not isinstance(cache.get(team), dict):
+                    # Fresh bucket, or a legacy/malformed non-dict value
+                    # under this exact key -- never write into a non-dict,
+                    # replace with a fresh dict instead of raising.
+                    cache[team] = {}
+                cache[team][env_var_name] = ts
                 self._save_account_validation_cache(cache)
 
             response = {
@@ -17891,7 +18044,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # name is either terminal name (for logos) or avatar codename (for avatars)
 
         # Parse the filename: team_name_type.png
-        match = re.match(r'^([a-z-]+)_([a-z_]+)_(logo|avatar|avatar_thumb)\.png$', filename)
+        match = re.match(r'^([a-z-]+)_([a-z_]+)_(logo|avatar|avatar_thumb)\.png\Z', filename)
         if not match:
             self.send_error(404, f"Invalid image path: {path}")
             return
@@ -18648,7 +18801,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             # Sanitize terminal name — only allow alphanumeric, hyphens, underscores
             # This prevents command injection through the tmux target
-            if not re.match(r'^[a-zA-Z0-9_-]+$', str(terminal)):
+            if not re.match(r'^[a-zA-Z0-9_-]+\Z', str(terminal)):
                 self._send_json_response({"error": "Invalid terminal name: only alphanumeric, hyphens, and underscores allowed"}, status=400)
                 return
 
@@ -19538,7 +19691,7 @@ end tell
             return
 
         # Sanitize engineId to prevent path traversal
-        if not re.match(r'^[a-zA-Z0-9_-]+$', engine_id):
+        if not re.match(r'^[a-zA-Z0-9_-]+\Z', engine_id):
             self._send_json_response({"error": "Invalid engineId"})
             return
 

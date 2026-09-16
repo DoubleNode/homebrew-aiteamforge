@@ -145,15 +145,18 @@
         if (dotEl) {
             dotEl.title = (
                 status === 'ok' ? 'Credentials present and validated' :
-                // XACA-1246-006: 'missing' collapses several distinct states
-                // (undeclared, declared-but-unresolvable-with-fault,
-                // declared-but-unresolvable-no-reason) — see
-                // _missingCredentialTooltip's own comment for why each is
-                // worded differently, and never as "env var not set in this
-                // LCARS process" (false for a declared credential resolved
-                // through the vault/cache chain, and misleading for the
-                // launchd case this ticket exists to fix).
-                status === 'missing' ? _missingCredentialTooltip(currentConfig) :
+                // XACA-1246-006: _missingCredentialTooltip collapses several
+                // distinct states (undeclared, declared-but-unresolvable-
+                // with-fault, declared-but-unresolvable-no-reason) — see its
+                // own comment for why each is worded differently, and never
+                // as "env var not set in this LCARS process" (false for a
+                // declared credential resolved through the vault/cache
+                // chain, and misleading for the launchd case this ticket
+                // exists to fix). Both 'undeclared' and 'missing' route
+                // through it — the function itself branches on cfg to pick
+                // the right wording; only the DOT's color/shape (CSS,
+                // data-credential-status) tells them apart visually.
+                (status === 'missing' || status === 'undeclared') ? _missingCredentialTooltip(currentConfig) :
                 'Credentials present but never validated — run TEST CONNECTION'
             );
         }
@@ -436,15 +439,30 @@
     //
     // Reads current env_var_name from the modal input and POSTs
     // to /api/team-config/account/test-connection.
+    //
+    // XACA-1246 [Review] finding (highest severity): this used to post
+    // ONLY env_var_name, never the team the modal is actually editing —
+    // the server then had to GUESS which team's credential to resolve
+    // (try its own LCARS_TEAM, else scan team-paths.json for the first
+    // team declaring the same var name). Every declared team currently
+    // names the same variable (CLAUDE_ACCT_ME_TOKEN for academy/android/
+    // command), so testing one team's credential could silently resolve
+    // and probe a DIFFERENT team's token and record last_validated_at
+    // against the wrong one. The modal already knows which team it's
+    // editing (the hidden team-account-edit-team-slug field, set by
+    // openTeamAccountEditModal) — send it, so the server never has to
+    // guess.
     // ─────────────────────────────────────────────────────────────
     async function testTeamAccountConnection() {
         var envVarInput = document.getElementById('team-account-edit-env-var');
         var testStatusEl = document.getElementById('team-account-test-status');
         var testBtn = document.getElementById('team-account-test-btn');
+        var slugInput = document.getElementById('team-account-edit-team-slug');
 
         if (!envVarInput || !testStatusEl) return;
 
         var envVarName = envVarInput.value.trim();
+        var teamSlug = slugInput ? slugInput.value.trim() : '';
         if (!envVarName) {
             testStatusEl.textContent = 'Enter an env var name first.';
             testStatusEl.className = 'status-error';
@@ -456,10 +474,16 @@
         if (testBtn) testBtn.disabled = true;
 
         try {
+            var testBody = { env_var_name: envVarName };
+            // Only include `team` when the modal actually has one — an
+            // unsaved candidate value with no associated team is still a
+            // legitimate (if narrower) case the server must fail
+            // explicitly on, not guess through.
+            if (teamSlug) testBody.team = teamSlug;
             var resp = await apiFetch(_apiUrl('/api/team-config/account/test-connection'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ env_var_name: envVarName })
+                body: JSON.stringify(testBody)
             });
             var data = await resp.json();
 
@@ -930,9 +954,24 @@
     /**
      * Determine credential status from the current config object.
      * Follows the status dot logic from the spec.
+     *
+     * XACA-1246 [UX] review finding: 'missing' used to collapse two very
+     * different situations into one alarming red dot — a team that never
+     * declared a credential at all (24 of 27, measured; the CORRECT, quiet
+     * default) and a team whose DECLARED credential genuinely failed to
+     * resolve (an actual fault). Split them: 'undeclared' for the former,
+     * 'missing' reserved for the latter. Mirrors the same config_source /
+     * env_var_name check _missingCredentialTooltip already used for its
+     * copy — the dot now agrees with the tooltip instead of only the text
+     * telling them apart.
      */
     function _resolveCredentialStatus(cfg) {
-        if (!cfg || !cfg.has_credentials) return 'missing';
+        if (!cfg || !cfg.has_credentials) {
+            if (!cfg || cfg.config_source !== 'ai' || !cfg.env_var_name) {
+                return 'undeclared';
+            }
+            return 'missing';
+        }
         if (!cfg.last_validated_at) return 'unvalidated';
         var age = Date.now() - new Date(cfg.last_validated_at).getTime();
         var sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
@@ -1026,7 +1065,19 @@
      *  27 teams, measured) is "no team credential declared/decided" —
      *  correct and quiet, not a fault — so this checks config_source/
      *  env_var_name FIRST and only reports a fault when one was actually
-     *  declared and failed to resolve. */
+     *  declared and failed to resolve.
+     *
+     *  XACA-1246 review finding: this tooltip's data comes from
+     *  serve_team_account_current -> _resolve_team_credential(team,
+     *  want_value=False) WITHOUT force=True, which is allowed to answer
+     *  from the server's 30s TTL outcome cache
+     *  (_CREDENTIAL_RESOLVE_CACHE_TTL). Assign and TEST CONNECTION both
+     *  pass force=True and genuinely re-resolve on every call; this
+     *  display does not, so its copy must not claim per-request precision
+     *  it doesn't have — say "continuously" (bounded by the cache TTL),
+     *  never "on every request". Forcing an uncached resolve here instead
+     *  would spawn a resolver subprocess per team on every panel load (up
+     *  to 27 teams) purely to freshen a tooltip — not worth the cost. */
     function _missingCredentialTooltip(cfg) {
         if (!cfg || cfg.config_source !== 'ai' || !cfg.env_var_name) {
             // Undeclared (no ai.credential key at all), or a declared
@@ -1039,13 +1090,13 @@
         var fault = cfg.credential_fault;
         if (fault) {
             return 'Declared credential (' + cfg.env_var_name + ') could not be resolved: ' + fault
-                + '. Re-checked on every request — no restart needed once fixed.';
+                + '. Re-checked continuously (within seconds) — no restart needed once fixed.';
         }
         // Mechanism-neutral for the same reason as _credentialUnresolvedLabel
         // above — mode is null here whether a chain ran and found nothing
         // or no chain exists on this machine at all; never claim "the chain".
         return 'Declared credential (' + cfg.env_var_name + ') did not resolve, and no specific reason '
-            + 'was reported. Re-checked on every request — verify the account assignment above.';
+            + 'was reported. Re-checked continuously (within seconds) — verify the account assignment above.';
     }
 
     /** Fill the modal input fields from a config object (or clear them). */
@@ -1074,13 +1125,42 @@
     }
 
     /**
+     * XACA-1246 [UX] review finding: the credential-status copy this ticket
+     * introduced (_credentialResolvedLabel / _credentialUnresolvedLabel /
+     * _credentialAssignLabel) runs ~4-9x longer than the old fixed string
+     * ('Key env var detected.'), but every call site here that doesn't pass
+     * an explicit duration fell through to the global showToast's fixed 6s
+     * (warning/error) or 3s (success/info) default regardless of message
+     * length. Scale it: keep the same base default, then add reading time
+     * for whatever runs past a short baseline (~200wpm / ~17 chars-per-sec
+     * average adult reading speed -> ~60ms/char; rounded up a little to
+     * leave margin), capped so one message can't pin the toast open
+     * indefinitely. Local to this file's `_showToast` wrapper only — the
+     * shared global `showToast` in lcars.js (used by the rest of the app)
+     * is untouched, and any call site here that already passes an explicit
+     * `duration` (e.g. the two 8000ms Fleet-Monitor toasts above) keeps it
+     * verbatim; this only fills in when the caller left it unset.
+     */
+    function _autoToastDuration(message, type) {
+        var base = (type === 'error' || type === 'warning') ? 6000 : 3000;
+        var msg = message || '';
+        var BASELINE_LEN = 40;   // messages this short or shorter need no bonus
+        var MS_PER_CHAR = 60;
+        var MAX_DURATION = 15000;
+        var extra = Math.max(0, msg.length - BASELINE_LEN) * MS_PER_CHAR;
+        return Math.min(base + extra, MAX_DURATION);
+    }
+
+    /**
      * Delegate to the global showToast from lcars.js (line ~357).
      * Falls back to console.log if not yet available (shouldn't happen in practice
      * since lcars.js loads before this file).
      */
     function _showToast(message, type, duration) {
+        var resolvedType = type || 'info';
+        var resolvedDuration = (duration != null) ? duration : _autoToastDuration(message, resolvedType);
         if (typeof showToast === 'function') {
-            showToast(message, type || 'info', duration || null);
+            showToast(message, resolvedType, resolvedDuration);
         } else {
             console.log('[team-account toast]', type, message);
         }
