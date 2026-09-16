@@ -257,6 +257,16 @@ class TestConnectionFieldTypeValidationTests(unittest.TestCase):
         self.addCleanup(self._tmpdir.cleanup)
         self.home = self._tmpdir.name
         (Path(self.home) / ".aiteamforge").mkdir(parents=True, exist_ok=True)
+        # XACA-1246 [Review] finding 033 (round 4): team-paths.json must
+        # actually EXIST and be readable here so `test_empty_string_team_
+        # still_treated_as_teamless` below exercises the case its docstring
+        # describes -- a genuinely undeclared name against a READABLE
+        # registry (400) -- rather than incidentally hitting the now-
+        # distinct "registry unreadable" path (500), which finding 033
+        # gave its own honest status/wording and its own coverage in
+        # test_xaca1246_round4_review_findings.py.
+        with open(Path(self.home) / ".aiteamforge" / "team-paths.json", "w") as f:
+            json.dump({"teams": {}}, f)
         env_patch = patch.dict(os.environ, {"HOME": self.home}, clear=False)
         env_patch.start()
         self.addCleanup(env_patch.stop)

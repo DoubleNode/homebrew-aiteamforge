@@ -513,20 +513,39 @@
                 testStatusEl.textContent = data.error || 'Token present — not probed';
                 testStatusEl.className = 'status-warning';
             } else {
-                // XACA-1246 [UX-027]: the round-2 blocking fix stopped a known
-                // team's unavailable credential from silently falling back to
-                // a DIFFERENT team's token (borrowed via a shared env var
-                // name) and reporting success. A team that used to see
-                // "Connection OK" here purely off that borrowed value now
-                // correctly sees a failure instead -- said explicitly here,
-                // mirroring the status-dot tooltip's UX-023 addendum above
-                // (renderTeamRow), so this reads as remediation rather than a
-                // fresh regression. Proportionate: one addendum on the
-                // generic failure branch, not a notification framework.
+                // XACA-1246 [UX-027], narrowed by [Review] findings 031/034:
+                // this branch used to staple the addendum below onto the
+                // ENTIRE generic-failure case unconditionally -- which also
+                // caught the team-mismatch error, any resolver
+                // credential_fault, REAL network/API failures (expired
+                // token, timeout, 401), and finding 030's new
+                // input-validation 400s. An operator whose credential
+                // genuinely expired got a false causal explanation that
+                // could read as "ignore this, it's migration noise."
+                //
+                // The server now emits an explicit `show_fallback_removed_note`
+                // flag rather than leaving the client to infer this from
+                // `data.error` text (see handle_team_account_test_connection's
+                // matching comment for the exact signal: `team` known AND no
+                // reported `credential_fault` -- precisely the pre-probe "no
+                // token to test" state the old cross-team fallback used to
+                // paper over; a real reported fault or an actual network
+                // probe never sets it). Gating on a server-computed boolean,
+                // not a string match, keeps this from re-triggering on
+                // unrelated failure shapes.
+                //
+                // Wording no longer says "recent maintenance" ([Review]
+                // finding 034: that phrasing has no time bound and goes
+                // stale the moment it's read weeks later) -- it states the
+                // mechanism plainly instead, which stays accurate
+                // indefinitely rather than implying a recent event.
                 testStatusEl.textContent = 'Failed: ' + (data.error || 'Unknown error') +
-                    ' (If this showed “Connection OK” before recent maintenance, that ' +
-                    'is expected: a fix stopped this check from silently accepting another ' +
-                    'team’s credential when this team’s own is unavailable.)';
+                    (data.show_fallback_removed_note
+                        ? ' (Note: this team has no credential of its own configured. ' +
+                          'Automatic fallback to another team’s credential is intentionally ' +
+                          'not supported — configure this team’s own account/engine ' +
+                          'assignment to resolve this.)'
+                        : '');
                 testStatusEl.className = 'status-error';
             }
         } catch (err) {

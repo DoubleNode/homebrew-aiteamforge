@@ -8358,6 +8358,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             body = json.loads(self.rfile.read(content_length))
 
+            # XACA-1246 [Review] finding 032 (pattern sweep): valid JSON that is
+            # not an object, or a field whose value is a non-string truthy type
+            # (e.g. {"platform": 123}), used to reach `(body.get(x) or "").strip()`
+            # and raise -- AttributeError on a non-string, or 'list'/'int' object
+            # has no attribute 'strip' -- surfacing as a raw exception rather than
+            # a clean 400. Type-check before stripping.
+            if not isinstance(body, dict):
+                self._send_json_response({"ok": False, "error": "Request body must be a JSON object"}, status=400)
+                return
+            for _field in ("platform", "result", "checkedAt", "codeVersion", "targetVersion"):
+                if not isinstance(body.get(_field, ""), str):
+                    self._send_json_response({"ok": False, "error": f"{_field} must be a string"}, status=400)
+                    return
+
             platform    = (body.get("platform") or "").strip()
             result      = (body.get("result") or "").strip()
             checked_at  = (body.get("checkedAt") or "").strip()
@@ -9223,6 +9237,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({"ok": False, "error": "Empty request body"}, status=400)
                 return
             body = json.loads(self.rfile.read(content_length))
+
+            # XACA-1246 [Review] finding 032 (pattern sweep): see handle_team_account_assign
+            # for the full rationale -- a non-dict body or a non-string field value used to
+            # raise before this point could be turned into a clean 400.
+            if not isinstance(body, dict):
+                self._send_json_response({"ok": False, "error": "Request body must be a JSON object"}, status=400)
+                return
+            if not isinstance(body.get("crId", ""), str):
+                self._send_json_response({"ok": False, "error": "crId must be a string"}, status=400)
+                return
 
             cr_id = (body.get("crId") or "").strip()
             if not cr_id:
@@ -14124,6 +14148,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return
             body = json.loads(self.rfile.read(content_length))
 
+            # XACA-1246 [Review] finding 032 (pattern sweep): see handle_team_account_assign
+            # for the full rationale -- a non-dict body, or a "targetState"/"actor" value
+            # that is present but not a string (including explicit null), used to raise
+            # out of `body.get(x, default).strip()` here -- `.get`'s default only applies
+            # when the key is ABSENT, not when its value is None or another type.
+            if not isinstance(body, dict):
+                self._send_json_response({"ok": False, "error": "Request body must be a JSON object"}, status=400)
+                return
+            if not isinstance(body.get("targetState", ""), str):
+                self._send_json_response({"ok": False, "error": "targetState must be a string"}, status=400)
+                return
+            if not isinstance(body.get("actor", "lcars-ui"), str):
+                self._send_json_response({"ok": False, "error": "actor must be a string"}, status=400)
+                return
+
             target_state     = body.get("targetState", "").strip()
             expected_updated = body.get("expectedUpdatedAt", "")
             fields           = body.get("fields") or {}
@@ -15882,9 +15921,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # `body.get('team', '')` return None, NOT the '' default (`.get`'s
             # default only applies when the KEY is absent, not when its value is
             # None) -- and that raw exception text used to reach the client as an
-            # HTTP 500 (the sibling save/assign handlers already type-check before
-            # `.strip()`; this handler didn't). Type-check every body field before
-            # stripping it and return a clean 400 instead.
+            # HTTP 500. Type-check every body field before stripping it and return
+            # a clean 400 instead.
+            #
+            # XACA-1246 [Review] finding 032: the claim this comment used to make
+            # here -- "the sibling save/assign handlers already type-check before
+            # `.strip()`" -- was FALSE when written: handle_team_account_save did,
+            # but handle_team_account_assign did not, and that false claim is almost
+            # certainly why finding 030's fix was applied only to this handler and
+            # assign's matching `(body.get(x) or '').strip()` sites went unfixed for
+            # a full review round. Assign now has the same type-check (finding 032,
+            # this round) -- verify sibling claims like this against the actual code
+            # before repeating them, not from what a prior fix intended.
             env_var_name_raw = body.get('env_var_name', '')
             if not isinstance(env_var_name_raw, str):
                 self._send_json_response(
@@ -16147,6 +16195,31 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         _cred_name = _ai_cred.get('env_var_name') if isinstance(_ai_cred, dict) else None
                         if isinstance(_cred_name, str) and _cred_name:
                             declared_names.add(_cred_name)
+                # XACA-1246 [Review] finding 033: this guard already failed
+                # CLOSED correctly on an unreadable team-paths.json -- `_tp_err`
+                # set means `declared_names` stays empty, so the membership
+                # check below refuses the request either way. What was wrong
+                # was the MESSAGE: `_tp_err` was captured above and then simply
+                # discarded, so a corrupt/unreadable registry produced the exact
+                # same "'X' is not declared as any team's Anthropic credential"
+                # wording as a genuinely undeclared name -- sending the operator
+                # chasing a declaration problem that does not exist when the
+                # real fault is "we could not read the registry at all". Surface
+                # the actual cause; the fail-closed behavior is unchanged.
+                if _tp_err:
+                    self._send_json_response({
+                        'ok': False,
+                        'probed': False,
+                        'account_fingerprint': None,
+                        'model_access': None,
+                        'error': (
+                            f'Could not read team-paths.json to verify {env_var_name!r} is a '
+                            f'declared Anthropic credential name -- refusing to read or '
+                            f'fingerprint an unrelated process environment variable. '
+                            f'Underlying error: {_tp_err}'
+                        ),
+                    }, status=500)
+                    return
                 if env_var_name not in declared_names:
                     self._send_json_response({
                         'ok': False,
@@ -16200,6 +16273,29 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # `if not api_key and not team:` gate above) -- but it does
                 # not need to, because the seam it already consulted
                 # covers that question for whichever team asked.
+                # XACA-1246 [Review] findings 031/034: the client used to staple
+                # a "that is expected: a fix stopped this check from silently
+                # accepting another team's credential" addendum onto EVERY
+                # generic failure, including real network/API failures (expired
+                # token, timeout, 401) and finding 030's new input-validation
+                # 400s -- because the client had no way to tell THIS specific
+                # pre-probe "no credential to test" case apart from a probe
+                # that was actually attempted and failed. Emit an explicit
+                # signal instead of leaving the client to guess from prose.
+                #
+                # Chosen signal: `team` is known AND `credential_fault is
+                # None`. Per the comment above, that combination means the
+                # resolver seam ran cleanly and reported "unavailable, no
+                # token" WITHOUT an error -- design §6.1's rc=0 "no key
+                # anywhere" state -- which is EXACTLY the state the old
+                # cross-team fallback used to paper over with a borrowed
+                # token. When `credential_fault` IS set (a real reported
+                # cause: resolver timeout, invalid team identity, chain
+                # missing), that is a genuine, unrelated infra problem, not
+                # the removed-fallback shape, and must not carry this note.
+                # The teamless legacy caller shape (`team` falsy) never had a
+                # cross-team fallback to remove either, so it is excluded too.
+                show_fallback_removed_note = bool(team) and credential_fault is None
                 self._send_json_response({
                     'ok': False,
                     'account_fingerprint': None,
@@ -16210,6 +16306,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         'Re-checked on every request — verify the account/engine assignment rather '
                         'than editing a shell rc file.'
                     ),
+                    'show_fallback_removed_note': show_fallback_removed_note,
                 }, status=400)
                 return
 
@@ -16363,6 +16460,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 'account_fingerprint': account_fingerprint if ok else None,
                 'model_access': model_access,
                 'error': error_msg,
+                # XACA-1246 [Review] findings 031/034: explicit False here (an
+                # actual network probe ran, so whatever `ok`/`error` say, this
+                # is never the pre-probe "no credential to test" shape the
+                # fallback-removal note describes) -- see the sibling
+                # `show_fallback_removed_note` comment above for the full
+                # signal rationale. Set explicitly rather than left absent, so
+                # the client never has to infer this case from a missing key.
+                'show_fallback_removed_note': False,
             }
             self._send_json_response(response)
         except json.JSONDecodeError as e:
@@ -16640,6 +16745,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response(
                     {'success': False, 'error': 'Request body must be a JSON object'}, status=400)
                 return
+
+            # XACA-1246 [Review] finding 032: `(body.get(x) or '').strip()` still
+            # raises AttributeError on a non-string truthy value -- e.g.
+            # {"team": 123} makes `body.get('team') or ''` evaluate to 123 (truthy,
+            # so the `or ''` fallback never fires), and `123.strip()` raises,
+            # leaking "'int' object has no attribute 'strip'" through the generic
+            # `except Exception` below as an HTTP 500. Finding 030 fixed this exact
+            # shape in the sibling test-connection handler; it was never applied
+            # here. Type-check every body field before stripping it.
+            for _field in ('team', 'engine_slug', 'account_slug'):
+                if not isinstance(body.get(_field), (str, type(None))):
+                    self._send_json_response(
+                        {'success': False, 'error': f'{_field} must be a string'}, status=400)
+                    return
 
             team = (body.get('team') or '').strip()
             engine_slug = (body.get('engine_slug') or '').strip()
