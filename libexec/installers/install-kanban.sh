@@ -670,6 +670,64 @@ install_kb_port_reconcile_script() {
     success "Installed: $dest"
 }
 
+# XACA-1261: Install kb-sync-personas + its personas-manifest.json config to
+# AITEAMFORGE_DIR so tap machines have a supported way to deploy/drift-check
+# personas without dev-machine access. Before this ticket there was ZERO
+# sync_file mapping for either file (root cause of XACA-1261) — the tool
+# existed only at ~/dev-team/scripts/kb-sync-personas.
+#
+# The manifest is delivered UNMODIFIED — no per-machine rendering step
+# (XACA-1261-002's design decision) — so this is a plain `cp`, same as the
+# script, never routed through a rewrite-aware render. It lands at
+# $AITEAMFORGE_DIR/.claude/personas-manifest.json, the exact path
+# kb-sync-personas' own $DEV_TEAM/.claude/personas-manifest.json resolution
+# already expects in consumer mode ($DEV_TEAM == $AITEAMFORGE_DIR there) — no
+# script changes needed to find it.
+#
+# SIBLING-DRIFT NOTE: this install function is paired with:
+#   (a) _xaca0608_aux_script_map entry (kb-sync-personas) + dedicated
+#       update_personas_manifest() (personas-manifest.json, plain cp — NOT
+#       the map, which renders+chmod+x every entry) in aiteamforge-upgrade.sh
+#   (b) kb-sync-personas also added to
+#       _xaca1143_aux_mandatory_materialize_basenames() there, since it is a
+#       brand-new file every existing consumer is missing
+# Teardown: no per-file removal entry exists for kb-port-reconcile or any of
+# its scripts/ siblings in uninstall_kanban_system() either (verified — none
+# of deploy-worktree-personas.sh / remote-tmux-attach.sh / kb-init-team* are
+# listed there); a full `aiteamforge uninstall` wholesale-removes
+# $AITEAMFORGE_DIR (remove_files() in aiteamforge-uninstall.sh), which already
+# covers scripts/kb-sync-personas and .claude/personas-manifest.json with no
+# code change needed. Kept consistent with that existing pattern rather than
+# adding a one-off entry only this file would have.
+install_kb_sync_personas_script() {
+    local scripts_src="$INSTALL_ROOT/share/scripts"
+    local src="${scripts_src}/kb-sync-personas"
+    local dest="$AITEAMFORGE_DIR/scripts/kb-sync-personas"
+    local manifest_src="${scripts_src}/personas-manifest.json"
+    local manifest_dest="$AITEAMFORGE_DIR/.claude/personas-manifest.json"
+
+    if [ ! -f "$src" ]; then
+        warning "kb-sync-personas not found at: ${src} (skipping)"
+        return 0
+    fi
+
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    info "Installing kb-sync-personas (persona deployment/drift-check tool)"
+    cp "$src" "$dest"
+    chmod +x "$dest"
+    success "Installed: $dest"
+
+    if [ ! -f "$manifest_src" ]; then
+        warning "personas-manifest.json not found at: ${manifest_src} (skipping manifest)"
+        return 0
+    fi
+
+    mkdir -p "$AITEAMFORGE_DIR/.claude"
+    info "Installing personas-manifest.json"
+    cp "$manifest_src" "$manifest_dest"
+    success "Installed: $manifest_dest"
+}
+
 # XACA-0774: Install remote-tmux-attach.sh to AITEAMFORGE_DIR/scripts/ so freshly
 # rendered *-connect.sh scripts (which reference it as
 # ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh, a LOCAL client-side path) find
@@ -2895,6 +2953,7 @@ EOF
     install_lcars_health_check_script
     install_worktree_personas_script
     install_kb_port_reconcile_script
+    install_kb_sync_personas_script
     install_remote_tmux_attach_script
     install_lcars_remote_atf_resolve_script
     install_kb_init_team_scripts

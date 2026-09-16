@@ -7,6 +7,79 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1261** — `kb-sync-personas` (persona deployment/drift-check tool) and its
+  `personas-manifest.json` config had ZERO delivery path to any tap consumer — no
+  `sync_file` mapping, no installer laydown, no upgrade refresh — so no machine that
+  actually hosts teams had a supported way to deploy or drift-check personas. Fixes the
+  installer/upgrade half (dev-team's `sync-tap.sh` half lands separately): `libexec/
+  installers/install-kanban.sh` gains `install_kb_sync_personas_script()` (modeled on
+  `install_kb_port_reconcile_script()`), called from `install_kanban_system()`, seeding
+  both `$AITEAMFORGE_DIR/scripts/kb-sync-personas` (executable) and
+  `$AITEAMFORGE_DIR/.claude/personas-manifest.json` (plain copy — the manifest ships
+  UNMODIFIED, no per-machine rendering, per XACA-1261-002's design) on fresh install.
+  `libexec/commands/aiteamforge-upgrade.sh` gets a matching upgrade path: a
+  `kb-sync-personas|${WORKING_DIR}/scripts/kb-sync-personas` entry in
+  `_xaca0608_aux_script_map()` plus a `kb-sync-personas` entry in
+  `_xaca1143_aux_mandatory_materialize_basenames()` (mandatory, since every existing
+  consumer is missing this brand-new file — deliberately NOT added to
+  `_xaca0673_mandatory_materialize_basenames()`, which only feeds
+  `update_runtime_helpers()`'s `.sh`/`.py`-extensioned glob sweep and would silently
+  never refresh an extensionless file routed through the aux-script-map instead); and a
+  new dedicated `update_personas_manifest()` function (plain `cp`, no render/chmod +x —
+  the manifest must not go through `_xaca0608_render_team_script`, which both
+  sed-rewrites `~/dev-team`-shaped paths and unconditionally sets the executable bit,
+  neither appropriate for an unmodified JSON data file) called right after
+  `update_aux_scripts` in the main upgrade sequence. Also closes a related teardown
+  gap in `libexec/commands/aiteamforge-uninstall.sh`: `remove_files()`'s
+  `dirs_to_remove` listed `claude` (no dot — a different, pre-existing directory) but
+  never `.claude` (with the dot), so the newly-created `$AITEAMFORGE_DIR/.claude/
+  personas-manifest.json` would have survived a full `aiteamforge uninstall` as an
+  orphaned file; added `.claude` to that list (verified nothing else references
+  `$AITEAMFORGE_DIR/.claude/` in this tap). No matching per-file uninstall entry was
+  added for `kb-sync-personas` itself — verified that `scripts/` is already
+  wholesale-removed there and no other `scripts/`-destined sibling (e.g.
+  `kb-port-reconcile`, `deploy-worktree-personas.sh`) has an individual entry either.
+  Finally, guards a behaviour change that shipping this tool would otherwise have caused
+  silently: `libexec/installers/install-claude-config.sh`'s `invoke_persona_sync()`
+  gated on `command -v kb-sync-personas`, which encoded "am I on the dev machine?" as
+  "does this tool exist on PATH?" — a proxy that held only while the tool had never been
+  delivered anywhere else. Since this ticket ships it AND `kanban-helpers.sh` puts
+  `${AITEAMFORGE_DIR}/scripts` on PATH, that test would newly resolve TRUE on a consumer
+  whenever the installer inherits a shell that has sourced the helpers, turning a
+  consumer install/upgrade into an unrequested `sync --all` WRITE across every
+  registered team working dir (client-owned freelance repos included) — a write
+  XACA-1261-002 had explicitly deferred as a policy question to XACA-1260-002 on the
+  assumption consumer delivery did not introduce it. `invoke_persona_sync()` now returns
+  early unless the dev-machine persona master (`~/dev-team/.claude/agents-master`) is
+  present, preserving the consumer's pre-existing no-op exactly; the measured gap
+  (XACA-1261-001) is the absence of an ON-DEMAND sync/drift check, not of an automatic
+  one, since persona content already refreshes each upgrade via XACA-0925/XACA-0931.
+
+- **XACA-1261-006** — test coverage for the delivery fix above. Adds
+  `tests/test-xaca-1261-persona-tool-delivery.sh`: sandboxed assertions that a fresh
+  install lays down both `kb-sync-personas` (executable, byte-identical to source) and
+  `personas-manifest.json` (byte-identical, unmodified); that `update_aux_scripts` +
+  `update_personas_manifest` alone materialise both files on upgrade starting from a
+  tree where they are ABSENT (simulating an existing pre-XACA-1261 consumer, with
+  install never invoked in the same test process); negative controls that run the
+  identical assertions against the pre-fix tree (materialized via `git show HEAD:...`)
+  and show them failing — the pre-fix installer has no `install_kb_sync_personas_script`
+  function at all, and the pre-fix upgrade map/mandatory-list combo does not lay the
+  script down even when the fixture source is present on disk; and delivery-layer
+  checks that the copies actually reaching a consumer contain the XACA-1261
+  consumer-mode/hosted-filter functions (`_is_hosted_here`, `_resolve_target_repo_for_team`,
+  `KBSP_MODE`) rather than a stale pre-fix copy — without duplicating the script's own
+  selftest Test 21, which already covers that filtering logic at the unit level. Also
+  adds `tests/test-xaca-1261-persona-sync-consumer-guard.sh` covering the
+  `invoke_persona_sync()` consumer-write guard (see the XACA-1261 entry above): a
+  sandboxed-`HOME` test with a stub `kb-sync-personas` on `PATH` proving the guard
+  suppresses the stub when `~/dev-team/.claude/agents-master` is absent, a wiring-sanity
+  test proving the same stub IS invoked when the dev-master IS present (ruling out "the
+  stub never fires" as an alternative explanation), and a load-bearing negative control
+  showing the pre-fix `invoke_persona_sync` (via `git show HEAD:...`) DOES invoke the
+  stub under the identical consumer-shaped sandbox, proving the guard — not some other
+  factor — is what makes the fixed version safe.
+
 - **XACA-1246** — mirror of the canonical dev-team fix: LCARS servers spawned under launchd could never see
   `CLAUDE_ACCT_*` (that file is sourced by interactive shells only), so `has_credentials` read false
   fleet-wide. `share/lcars-ui/server.py` now resolves a team's Anthropic credential AT REQUEST TIME via a

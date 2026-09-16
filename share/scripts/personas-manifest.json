@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "lastUpdated": "2026-04-30",
+  "masterRoot": ".claude/agents-master",
+  "deployments": [
+    {
+      "team": "academy",
+      "targetRepo": "~/dev-team",
+      "targetDir": ".claude/agents",
+      "groups": ["academy"],
+      "exists": true,
+      "isGitRepo": true
+    },
+    {
+      "team": "ios",
+      "targetRepo": "/Users/Shared/Development/Main Event/MainEventApp-iOS",
+      "targetDir": ".claude/agents",
+      "groups": ["ios", "mainevent"],
+      "exists": true,
+      "isGitRepo": true
+    },
+    {
+      "team": "android",
+      "targetRepo": "/Users/Shared/Development/Main Event/MainEventApp-Android",
+      "targetDir": ".claude/agents",
+      "groups": ["android", "mainevent"],
+      "exists": true,
+      "isGitRepo": true
+    },
+    {
+      "team": "firebase",
+      "targetRepo": "/Users/Shared/Development/Main Event/MainEventApp-Functions",
+      "targetDir": ".claude/agents",
+      "groups": ["firebase", "mainevent"],
+      "exists": true,
+      "isGitRepo": true
+    },
+    {
+      "team": "command",
+      "targetRepo": "/Users/Shared/Development/Main Event/dev-team",
+      "targetDir": ".claude/agents",
+      "groups": ["command", "mainevent"],
+      "exists": true,
+      "isGitRepo": true
+    },
+    {
+      "team": "dns",
+      "targetRepo": "/Users/Shared/Development/DNSFramework",
+      "targetDir": ".claude/agents",
+      "groups": ["dns"],
+      "exists": true,
+      "isGitRepo": true
+    },
+    {
+      "team": "freelance-starwords",
+      "targetRepo": "~/Development/DoubleNode/Starwords",
+      "targetDir": ".claude/agents",
+      "groups": ["freelance"],
+      "exists": true,
+      "isGitRepo": true
+    },
+    {
+      "team": "freelance-appplanning",
+      "targetRepo": "~/Development/DoubleNode/appPlanning",
+      "targetDir": ".claude/agents",
+      "groups": ["freelance"],
+      "exists": true,
+      "isGitRepo": true
+    },
+    {
+      "team": "freelance-workstats",
+      "targetRepo": "~/Development/DoubleNode/WorkStats",
+      "targetDir": ".claude/agents",
+      "groups": ["freelance"],
+      "exists": true,
+      "isGitRepo": true
+    },
+    {
+      "team": "freelance-lifeboard",
+      "targetRepo": "~/Development/DoubleNode/LifeBoard",
+      "targetDir": ".claude/agents",
+      "groups": ["freelance"],
+      "exists": true,
+      "isGitRepo": true
+    },
+    {
+      "team": "finance",
+      "targetRepo": "~/finance",
+      "targetDir": ".claude/agents",
+      "groups": ["finance"],
+      "exists": true,
+      "isGitRepo": false
+    },
+    {
+      "team": "legal",
+      "targetRepo": "~/legal",
+      "targetDir": ".claude/agents",
+      "groups": ["legal"],
+      "exists": true,
+      "isGitRepo": false
+    },
+    {
+      "team": "medical",
+      "targetRepo": "~/medical",
+      "targetDir": ".claude/agents",
+      "groups": ["medical"],
+      "exists": true,
+      "isGitRepo": false
+    },
+    {
+      "team": "spacedock",
+      "targetRepo": "~/.aiteamforge/spacedock",
+      "targetDir": ".claude/agents",
+      "groups": ["spacedock"],
+      "exists": true,
+      "isGitRepo": false
+    }
+  ]
+}

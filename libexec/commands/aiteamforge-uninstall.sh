@@ -308,6 +308,23 @@ remove_files() {
   local removed=0
 
   # Remove non-data directories
+  #
+  # XACA-1261: added ".claude" (with the leading dot — distinct from the
+  # unrelated "claude" entry below, which is $AITEAMFORGE_DIR/claude/, home to
+  # statusline-command.sh/agent-tracking.sh; verified via grep across libexec/
+  # that nothing else references $AITEAMFORGE_DIR/.claude/). Before this
+  # ticket, $AITEAMFORGE_DIR/.claude/ was never listed here at all — it did
+  # not exist on any consumer, since install_kb_sync_personas_script() is the
+  # first thing to ever create it (personas-manifest.json). Without this
+  # entry, a full `aiteamforge uninstall` would wholesale-remove `scripts/`
+  # (covering kb-sync-personas itself, no entry needed there) but silently
+  # leave personas-manifest.json orphaned under `.claude/` forever — the
+  # "verify delivery, not presence" gap in reverse, on teardown instead of
+  # install. No matching per-file removal entry exists for kb-port-reconcile
+  # or any other scripts/-destined sibling either (verified: none of
+  # deploy-worktree-personas.sh / remote-tmux-attach.sh / kb-init-team* are
+  # individually listed) — they all rely on this same wholesale "scripts"
+  # removal, which is why kb-sync-personas needs no entry of its own here.
   local dirs_to_remove=(
     "lcars-ui"
     "fleet-monitor"
@@ -316,6 +333,7 @@ remove_files() {
     "docs"
     "skills"
     "claude"
+    ".claude"
     "templates"
   )
 

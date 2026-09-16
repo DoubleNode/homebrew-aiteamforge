@@ -678,6 +678,38 @@ invoke_persona_sync() {
     local devteam_dir="${HOME}/dev-team"
     local sync_script="${devteam_dir}/scripts/kb-sync-personas"
 
+    # XACA-1261: this function pre-dates kb-sync-personas being shipped to tap
+    # consumers, and its `command -v` test silently encoded "am I on the dev
+    # machine?" as "does kb-sync-personas exist on PATH?". That proxy was true
+    # only because the tool had never been delivered anywhere else. XACA-1261
+    # ships it to every consumer AND kanban-helpers.sh puts
+    # ${AITEAMFORGE_DIR}/scripts on PATH, so from this ticket forward the test
+    # resolves TRUE on a consumer whenever the installer inherits a shell that
+    # has sourced kanban-helpers.sh (the `command -v` here reads the AMBIENT
+    # PATH — see tests/test-xaca-0787-012-claude-config-flag-guard.sh, which
+    # sanitises PATH for exactly this reason).
+    #
+    # Left unguarded, that turns a consumer install/upgrade into an unrequested
+    # `sync --all` WRITE across every registered team working dir — including
+    # client-owned freelance repos. That write was never designed: XACA-1261-002
+    # explicitly deferred the client-repo-write policy question to XACA-1260-002
+    # on the stated assumption that consumer delivery does not introduce it.
+    # Shipping the tool without this guard would have made that assumption false.
+    #
+    # The measured gap (XACA-1261-001) is the lack of an ON-DEMAND sync/drift
+    # check, not a missing automatic one — persona CONTENT already refreshes on
+    # every upgrade via update_team_personas (XACA-0925) and
+    # deploy_team_personas_to_projects (XACA-0931). So the correct behaviour is
+    # to keep install-time auto-sync a DEV-MACHINE-ONLY action and preserve the
+    # consumer's existing no-op exactly. Anchor on the dev master root, which is
+    # the same signal kb-sync-personas itself uses for KBSP_MODE detection, and
+    # is never present on a consumer.
+    if [[ ! -d "${devteam_dir}/.claude/agents-master" ]]; then
+        log_info "Skipping install-time persona sync: no dev-machine persona master at ${devteam_dir}/.claude/agents-master."
+        log_info "Persona content refreshes automatically on upgrade; run 'kb-sync-personas check --all' on demand to audit."
+        return 0
+    fi
+
     if command -v kb-sync-personas >/dev/null 2>&1; then
         if kb-sync-personas sync --all; then
             log_success "Persona sync complete"

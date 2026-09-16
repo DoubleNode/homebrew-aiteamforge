@@ -949,6 +949,7 @@ auto-upgrade.sh|${WORKING_DIR}/scripts/auto-upgrade.sh
 cellar-watch-trigger.sh|${WORKING_DIR}/scripts/cellar-watch-trigger.sh
 deploy-worktree-personas.sh|${WORKING_DIR}/scripts/deploy-worktree-personas.sh
 kb-port-reconcile|${WORKING_DIR}/scripts/kb-port-reconcile
+kb-sync-personas|${WORKING_DIR}/scripts/kb-sync-personas
 worktree-helpers.sh|${WORKING_DIR}/worktree-helpers.sh
 iterm2_badge_helper.sh|${WORKING_DIR}/iterm2_badge_helper.sh
 EOF
@@ -1015,10 +1016,30 @@ _xaca0608_aux_scriptdir_basenames() {
 # file lands at WORKING_DIR root, so that would be the wrong list (see the
 # XACA-1143 comment above this function for the failure mode of getting that
 # swap backwards).
+#
+# XACA-1261: kb-sync-personas — same reasoning as worktree-helpers.sh/
+# iterm2_badge_helper.sh above, not by inference: this file has ZERO
+# sync_file/aux-map entries before this ticket (root cause of XACA-1261 —
+# "no supported way to deploy or drift-check personas on any machine that
+# actually hosts teams"), so EVERY existing consumer box is missing it, not
+# merely some. It is scripts/-destined ($AITEAMFORGE_DIR/scripts/
+# kb-sync-personas — now in _xaca0608_aux_script_map() above), so without this
+# entry update_aux_scripts()'s "[ ! -f $target ] && continue" guard would skip
+# every already-installed box forever. Deliberately NOT added to
+# _xaca0673_mandatory_materialize_basenames() — that list feeds
+# update_runtime_helpers()'s *.sh/*.py (+ 4 named extensionless exceptions)
+# glob sweep, and kb-sync-personas is extensionless and not one of those 4
+# exceptions; it is fully owned by the aux-script-map path above, so THIS is
+# the list it belongs in, not that one (same swap-it-backwards failure mode
+# the XACA-1143 comment above warns about). personas-manifest.json (its
+# config) is NOT listed here — it must ship unmodified with no rendering
+# step, so it does not go through this scripts/-destined, render+chmod+x aux
+# map/mandatory-list pair at all; see update_personas_manifest() instead.
 _xaca1143_aux_mandatory_materialize_basenames() {
   cat <<'EOF'
 worktree-helpers.sh
 iterm2_badge_helper.sh
+kb-sync-personas
 EOF
 }
 
@@ -1100,6 +1121,55 @@ update_aux_scripts() {
     print_success "All helper scripts up to date"
   else
     print_success "Updated ${updated} helper script(s)"
+  fi
+}
+
+# XACA-1261: Refresh personas-manifest.json — kb-sync-personas' own config
+# (dev-team-authored per-team deployment roster), colocated with the script
+# in share/scripts/ (see sync-tap.sh's XACA-1261 comment) but delivered to
+# $AITEAMFORGE_DIR/.claude/personas-manifest.json, NOT $AITEAMFORGE_DIR/
+# scripts/ — the same path kb-sync-personas' own
+# $DEV_TEAM/.claude/personas-manifest.json resolution expects in consumer
+# mode ($DEV_TEAM == $AITEAMFORGE_DIR there).
+#
+# Deliberately NOT folded into _xaca0608_aux_script_map()/update_aux_scripts():
+# every entry in that map is laid down via _xaca0608_render_team_script,
+# which both sed-rewrites ~/dev-team-shaped literals AND unconditionally
+# chmod +x's the target. XACA-1261-002's design requires the manifest ship
+# UNMODIFIED (no per-machine rendering step) — the sed rewrite is a
+# behavior-changing risk for a data file whose content is JSON path/team
+# data, not a shell script, and chmod +x on a JSON config is simply wrong.
+# So this gets its own small function, doing a plain `cp` (no render, no exec
+# bit), mirroring update_aux_scripts()'s conditional-refresh shape
+# (mandatory-materialize since every existing consumer is missing this file —
+# same reasoning as kb-sync-personas itself in
+# _xaca1143_aux_mandatory_materialize_basenames — but there is exactly one
+# file here, so a full map entry would be overhead, not clarity).
+update_personas_manifest() {
+  print_section "Updating Persona Deployment Manifest"
+
+  local source="${FRAMEWORK_DIR}/share/scripts/personas-manifest.json"
+  local target="${WORKING_DIR}/.claude/personas-manifest.json"
+
+  if [ ! -f "$source" ]; then
+    print_warning "personas-manifest.json not found at ${source} — skipping"
+    return 0
+  fi
+
+  # Mandatory-materialize: refresh if newer, OR create if this consumer never
+  # had it (every consumer predates XACA-1261, so this branch is what actually
+  # gets the file onto an already-installed box).
+  if [ ! -f "$target" ] || [ "$source" -nt "$target" ] || [ "$FORCE" = true ]; then
+    print_info "Updating personas-manifest.json..."
+    if [ "$DRY_RUN" = false ]; then
+      mkdir -p "$(dirname "$target")"
+      cp "$source" "$target"
+      print_success "Updated personas-manifest.json"
+    else
+      echo "Would update: personas-manifest.json"
+    fi
+  else
+    print_success "personas-manifest.json up to date"
   fi
 }
 
@@ -5691,6 +5761,7 @@ update_kanban_hooks
 update_knowledge_repo
 update_knowledge_sync
 update_aux_scripts
+update_personas_manifest
 update_team_scripts
 # XACA-1215-005c: regenerate per-agent startup scripts (SESSION_DIRECTORY
 # fix) on already-provisioned teams — see update_generated_agent_scripts'

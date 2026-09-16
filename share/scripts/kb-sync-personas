@@ -1,0 +1,2757 @@
+#!/usr/bin/env bash
+# kb-sync-personas — Persona sync tool for XACA-0285 per-team agent scoping
+# Usage: kb-sync-personas <subcommand> [args]
+# Subcommands: list, check, sync, sync-worktrees, diff, refresh, selftest, help
+#
+# Sources: ~/dev-team/.claude/personas-manifest.json (manifest)
+#          ~/dev-team/.claude/agents-master/          (canonical source)
+# Writes:  <targetRepo>/<targetDir>/ (synced copies)
+#
+# Safety: refuses to write to any path containing /worktrees/ (sync subcommand).
+#         sync-worktrees is the OPT-IN subcommand for deploying into worktree
+#         .claude/agents/ dirs of container-layout (gitignored-persona) teams.
+
+set -euo pipefail
+
+PROG="kb-sync-personas"
+
+# Resolve DEV_TEAM as the repo root — one directory above this script's location.
+# When installed at ~/dev-team/scripts/kb-sync-personas, DEV_TEAM = ~/dev-team.
+# This also works when running from a worktree (scripts/ sibling of .claude/).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEV_TEAM="$(dirname "$SCRIPT_DIR")"
+
+MANIFEST="${DEV_TEAM}/.claude/personas-manifest.json"
+MASTER_RELATIVE="$(jq -r '.masterRoot' "$MANIFEST" 2>/dev/null || echo ".claude/agents-master")"
+MASTER_ROOT="${DEV_TEAM}/${MASTER_RELATIVE}"
+SCHEMA_VERSION="$(jq -r '.schemaVersion' "$MANIFEST" 2>/dev/null || echo "1")"
+
+# ---------------------------------------------------------------------------
+# XACA-1261: dev vs. consumer mode
+# ---------------------------------------------------------------------------
+# On the dev machine, MASTER_ROOT (.claude/agents-master/) genuinely exists —
+# 13 git-tracked group subdirectories. On a tap consumer, only this script and
+# the manifest itself are shipped (sync-tap.sh mirrors them individually;
+# agents-master/ is never mirrored wholesale), so MASTER_ROOT does not exist
+# there. That absence is the natural, zero-new-flag mode signal — no new CLI
+# flag needed to tell the two apart. KBSP_MODE remains overridable via env var
+# for deterministic testing, consistent with the selftest suite's existing
+# philosophy of overriding globals directly (see Test 14's MANIFEST/MASTER_ROOT
+# override) rather than inventing a separate mocking mechanism.
+#
+# Values: "dev" (targetRepo comes straight from the manifest; every deployment
+# row is considered hosted; group content comes from agents-master/) or
+# "consumer" (targetRepo is re-resolved from team-paths.json; rows are filtered
+# to what this machine actually hosts; group content comes from the per-team
+# ${DEV_TEAM}/<group>/personas/agents/ mirror XACA-0925 already refreshes).
+if [ -z "${KBSP_MODE:-}" ]; then
+  if [ -d "$MASTER_ROOT" ]; then
+    KBSP_MODE="dev"
+  else
+    KBSP_MODE="consumer"
+  fi
+fi
+
+# team-paths.json is the CLAUDE.md-documented authoritative per-machine registry
+# — the same file kb-port-reconcile, LCARS, and every other kb-* helper already
+# trust for a team's real on-disk location. Overridable for tests (selftest
+# Test 15's synthetic-fixture pattern), never for normal operation.
+TEAM_PATHS_JSON="${TEAM_PATHS_JSON:-$HOME/.aiteamforge/team-paths.json}"
+
+# Consumer-mode precondition: the registry must exist AND parse as valid JSON,
+# or _resolve_target_repo_for_team / _is_hosted_here would both silently return
+# empty for every team — indistinguishable from a genuinely correct "this
+# machine hosts nothing" result. FAIL CLOSED instead: an unreadable/absent
+# registry in consumer mode is an explicit, loud error, never a quietly empty
+# (but exit-0) list. Called once per subcommand invocation (not per team) so a
+# broken registry is reported once, clearly, rather than once per deployment
+# row. A no-op in dev mode, where the manifest's own targetRepo field is
+# authoritative and this file is never consulted.
+_require_team_paths_registry() {
+  if [ "$KBSP_MODE" != "consumer" ]; then
+    return 0
+  fi
+  if [ ! -f "$TEAM_PATHS_JSON" ]; then
+    _err "Consumer mode (KBSP_MODE=consumer) requires a team-paths registry at:"
+    _err "  $TEAM_PATHS_JSON"
+    _err "but no file exists there. Without it, targetRepo/hosted-here cannot be"
+    _err "resolved for ANY team — refusing to proceed rather than silently"
+    _err "reporting an empty (but successful-looking) result."
+    exit 1
+  fi
+  if ! jq -e . "$TEAM_PATHS_JSON" >/dev/null 2>&1; then
+    _err "Consumer mode: $TEAM_PATHS_JSON exists but does not parse as JSON."
+    _err "Refusing to proceed — targetRepo/hosted-here cannot be resolved reliably."
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
+
+_err() { echo "${PROG}: ERROR: $*" >&2; }
+_warn() { echo "${PROG}: WARN: $*" >&2; }
+_info() { echo "${PROG}: $*"; }
+
+# Expand ~ and env vars in a path string
+_expand_path() {
+  local p="$1"
+  # Replace leading ~/ with $HOME/ (safe, no eval)
+  p="${p/#\~/$HOME}"
+  # Expand $VAR and ${VAR} references via envsubst (no shell injection risk)
+  p="$(printf '%s' "$p" | envsubst)"
+  echo "$p"
+}
+
+# SHA-256 of a file, portable for macOS (shasum -a 256) and Linux (sha256sum)
+_sha256() {
+  local f="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$f" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" | awk '{print $1}'
+  else
+    _err "No sha256 tool found (need shasum or sha256sum)"
+    return 1
+  fi
+}
+
+# Check if jq is available
+_require_jq() {
+  if ! command -v jq >/dev/null 2>&1; then
+    _err "jq is required but not found. Install with: brew install jq"
+    exit 1
+  fi
+}
+
+# Refuse to operate on a path that is inside a git worktree dir.
+# This guard applies to the 'sync' subcommand — the normal deployment path that
+# writes to the main (non-worktree) checkout of each target repo. Worktrees are
+# deliberately excluded from 'sync' because git-tracked persona dirs (.claude/agents
+# committed to the repo) are already inherited by each worktree via branch checkout;
+# writing there from 'sync' would silently create duplicate or conflicting files on
+# branches that diverge from what the main repo tracks.
+_guard_worktree_path() {
+  local p="$1"
+  if [[ "$p" == */worktrees/* ]]; then
+    _err "Refusing to write to path containing '/worktrees/': $p"
+    _err "Sync writes to real (non-worktree) repos only. Use the main repo path."
+    _err "For container-layout teams whose personas are gitignored, use:"
+    _err "  kb-sync-personas sync-worktrees <team|--all> [--dry-run] [--prune]"
+    exit 1
+  fi
+}
+
+# Portable path canonicalizer — resolves symlinks + eliminates ../ traversal.
+# Works on macOS (no realpath, no readlink -f) and bash 3.2.
+# If the path doesn't exist, walks up to the nearest existing ancestor,
+# canonicalizes that, then appends the remaining suffix.
+# Outputs the canonical absolute path; returns 1 on failure.
+_canon_path() {
+  local p="$1"
+  # Fast path: python3 os.path.realpath handles everything in one call.
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$p"
+    return
+  fi
+  # Fallback: walk up to the nearest existing ancestor, cd+pwd -P, then reattach suffix.
+  local suffix=""
+  local cur="$p"
+  while [ -n "$cur" ] && [ "$cur" != "/" ]; do
+    if [ -e "$cur" ]; then
+      local real
+      real=$(cd "$cur" 2>/dev/null && pwd -P) || return 1
+      if [ -n "$suffix" ]; then
+        echo "${real}/${suffix}"
+      else
+        echo "$real"
+      fi
+      return 0
+    fi
+    local base
+    base=$(basename "$cur")
+    suffix="${base}${suffix:+/$suffix}"
+    cur=$(dirname "$cur")
+  done
+  return 1
+}
+
+# Guard for the sync-worktrees subcommand: assert that the write target is
+# (a) a path that ends in /.claude/agents (nothing else), and
+# (b) actually lives under the canonical repo root's worktrees/ directory.
+# This is a CONTROLLED carve-out: writing into /worktrees/ is the entire point
+# of sync-worktrees, but we scope the permission narrowly so it cannot be
+# accidentally broadened to other paths.
+# Both sides are canonicalized before comparison, defeating ../-traversal attacks
+# and macOS /tmp→/private/tmp symlink mismatches.
+_guard_worktree_target() {
+  local target_path="$1"   # the full path we intend to write into
+  local repo_root="$2"     # main repo root (the non-worktree checkout)
+
+  # Must end in /.claude/agents — never a broader dir
+  if [[ "$target_path" != */.claude/agents ]]; then
+    _err "sync-worktrees target must end in '/.claude/agents': $target_path"
+    exit 1
+  fi
+
+  # Canonicalize the repo root (must exist).
+  local canon_root
+  canon_root=$(_canon_path "$repo_root") || {
+    _err "sync-worktrees: cannot canonicalize repo root: $repo_root"
+    exit 1
+  }
+
+  # Canonicalize the target path.
+  # .claude/agents may not exist yet — strip the known leaf, canonicalize the
+  # parent (the worktree root, which DOES exist), then reattach the leaf.
+  local target_parent="${target_path%/.claude/agents}"
+  local canon_parent
+  canon_parent=$(_canon_path "$target_parent") || {
+    _err "sync-worktrees: cannot canonicalize target parent: $target_parent"
+    exit 1
+  }
+  local canon_target="${canon_parent}/.claude/agents"
+
+  # Must be underneath the canonical repo's worktrees/ directory.
+  local canon_worktrees="${canon_root}/worktrees"
+  if [[ "$canon_target" != "${canon_worktrees}/"* ]]; then
+    _err "sync-worktrees target does not live under repo worktrees dir ($canon_worktrees): $canon_target (resolved from: $target_path)"
+    exit 1
+  fi
+}
+
+# Guard for deploying personas into the MAIN git root itself when the git root
+# is a nested checkout BELOW the container (e.g. container=MainEventApp-Functions/,
+# git_root=MainEventApp-Functions/develop/).
+# Safety intent: only accept <git_root>/.claude/agents where git_root was
+# discovered by _resolve_git_roots AND differs from the container — never let an
+# arbitrary caller path bypass the worktree safety fence by claiming to be a
+# "main root". Both sides are canonicalized to defeat traversal attacks.
+#
+# Distinct from _guard_worktree_target: linked worktrees live at
+# <container>/worktrees/<name>; the nested main checkout lives directly at
+# <container>/<inner-name>/ — it passes neither the worktrees/ prefix check
+# nor the git-registry linked-worktree check, so it needs its own guard.
+_guard_main_root_target() {
+  local target_path="$1"   # the full path we intend to write into
+  local git_root="$2"      # the resolved inner git root (from _resolve_git_roots)
+  local container="$3"     # the outer container dir (targetRepo)
+
+  # Must end in /.claude/agents — never a broader dir
+  if [[ "$target_path" != */.claude/agents ]]; then
+    _err "main-root target must end in '/.claude/agents': $target_path"
+    exit 1
+  fi
+
+  # Canonicalize all three paths.
+  local canon_target_parent="${target_path%/.claude/agents}"
+  local canon_parent canon_git_root canon_container
+  canon_parent=$(_canon_path "$canon_target_parent") || {
+    _err "sync-worktrees: cannot canonicalize main-root target parent: $canon_target_parent"
+    exit 1
+  }
+  canon_git_root=$(_canon_path "$git_root") || {
+    _err "sync-worktrees: cannot canonicalize git_root: $git_root"
+    exit 1
+  }
+  canon_container=$(_canon_path "$container") || {
+    _err "sync-worktrees: cannot canonicalize container: $container"
+    exit 1
+  }
+
+  # The target parent must be exactly the resolved git root.
+  if [ "$canon_parent" != "$canon_git_root" ]; then
+    _err "main-root deploy target parent ($canon_parent) does not match resolved git root ($canon_git_root)"
+    exit 1
+  fi
+
+  # The git root must differ from the container — if they are the same this is
+  # iOS/DNS where sync already covers the main deployment; deploying here again
+  # would be a double-deploy.
+  if [ "$canon_git_root" = "$canon_container" ]; then
+    _err "main-root deploy called with git_root == container; use _guard_worktree_target for linked worktrees (container IS git root)"
+    exit 1
+  fi
+
+  # The git root must be a direct child of the container (depth-1 nested checkout).
+  # This prevents a crafted git_root path that passes the git_root != container
+  # check but is not actually a direct child.
+  local canon_git_parent
+  canon_git_parent=$(dirname "$canon_git_root")
+  if [ "$canon_git_parent" != "$canon_container" ]; then
+    _err "main-root deploy: git_root ($canon_git_root) is not a direct child of container ($canon_container)"
+    exit 1
+  fi
+}
+
+# Deploy personas to one target directory (copy/replace/skip + orphan handling
+# + marker write). Shared by the linked-worktree deploy loop and the new
+# nested-main-root deploy path in _kbsp_sync_worktrees.
+#
+# Arguments:
+#   $1  label       — human-readable name for log output (e.g. basename of wt)
+#   $2  full_target — absolute path to <target>/.claude/agents
+#   $3  team        — team name (for log prefixes)
+#   $4  deploy_idx  — manifest deployment index (passed to _source_files_for_deployment)
+#   $5  dry_run     — "true" or "false"
+#   $6  prune       — "true" or "false"
+#
+# Writes to the any_error variable in the CALLER's scope (nameref not available
+# in bash 3.2, so we use a global flag __deploy_any_error set to "true" on error;
+# caller must check and propagate it).
+#
+# k501: all loop-locals declared before loops — zsh emits `local X=v` to stdout
+# on 2nd+ iterations of a calling loop otherwise.
+__deploy_any_error=false
+_deploy_personas_to_one_target() {
+  local label="$1"
+  local full_target="$2"
+  local team="$3"
+  local deploy_idx="$4"
+  local dry_run="$5"
+  local prune="$6"
+
+  _info "[$team] Target: $label"
+  [ "$dry_run" = true ] && _info "[$team] (DRY RUN — no writes)"
+
+  if [ ! -d "$full_target" ] && [ "$dry_run" = false ]; then
+    if ! mkdir -p "$full_target"; then
+      _err "[$team] Failed to create target dir: $full_target"
+      __deploy_any_error=true
+      return
+    fi
+    _info "[$team]   Created: $full_target"
+  fi
+
+  # k501: hoist loop-locals before the inner loops.
+  local copied=0 skipped=0 replaced=0
+  local src_file bname target_file master_sha deployed_sha
+  local tgt_file tbasename found sf
+  while IFS= read -r src_file; do
+    [ -z "$src_file" ] && continue
+    bname=$(basename "$src_file")
+    target_file="${full_target}/${bname}"
+    master_sha=$(_sha256 "$src_file")
+
+    if [ ! -f "$target_file" ]; then
+      if [ "$dry_run" = true ]; then
+        echo "    COPY     $bname"
+      else
+        if ! cp "$src_file" "$target_file"; then
+          _err "[$team] Failed to copy $bname to $full_target"
+          __deploy_any_error=true
+        else
+          echo "    copied   $bname"
+        fi
+      fi
+      copied=$((copied + 1))
+    else
+      deployed_sha=$(_sha256 "$target_file")
+      if [ "$master_sha" = "$deployed_sha" ]; then
+        skipped=$((skipped + 1))
+      else
+        if [ "$dry_run" = true ]; then
+          echo "    REPLACE  $bname (hash differs)"
+        else
+          if ! cp "$src_file" "$target_file"; then
+            _err "[$team] Failed to replace $bname in $full_target"
+            __deploy_any_error=true
+          else
+            echo "    replaced $bname"
+          fi
+        fi
+        replaced=$((replaced + 1))
+      fi
+    fi
+  done < <(_source_files_for_deployment "$deploy_idx")
+
+  # Handle orphans
+  if [ -d "$full_target" ]; then
+    while IFS= read -r tgt_file; do
+      [ -z "$tgt_file" ] && continue
+      tbasename=$(basename "$tgt_file")
+      [[ "$tbasename" == .* ]] && continue
+      found=false
+      while IFS= read -r sf; do
+        [ "$(basename "$sf")" = "$tbasename" ] && found=true && break
+      done < <(_source_files_for_deployment "$deploy_idx")
+      if [ "$found" = false ]; then
+        if [ "$prune" = true ]; then
+          if [ "$dry_run" = true ]; then
+            echo "    PRUNE    $tbasename (orphan)"
+          else
+            rm "$tgt_file"
+            echo "    pruned   $tbasename"
+          fi
+        else
+          _warn "[$team] ORPHAN $tbasename in $label (not in master; use --prune to remove)"
+        fi
+      fi
+    done < <(find "$full_target" -maxdepth 1 -name '*.md' -type f | sort)
+  fi
+
+  if [ "$dry_run" = false ]; then
+    _write_marker "$full_target"
+  fi
+
+  _info "[$team]   $label: copied=${copied} replaced=${replaced} skipped=${skipped}"
+}
+
+# Get number of deployments in manifest
+_deployment_count() {
+  jq '.deployments | length' "$MANIFEST"
+}
+
+# Get a field from deployment index i
+_deploy_field() {
+  local i="$1" field="$2"
+  jq -r ".deployments[$i].$field" "$MANIFEST"
+}
+
+# Get deployment index by team name; prints -1 if not found
+_deploy_index_by_team() {
+  local team="$1"
+  jq -r --arg t "$team" '.deployments | to_entries[] | select(.value.team == $t) | .key' "$MANIFEST" | head -1
+}
+
+# XACA-1261: resolve the source directory for one persona group.
+# Dev mode:      ${MASTER_ROOT}/${grp} — the canonical agents-master/<group>/.
+# Consumer mode: ${DEV_TEAM}/${grp}/personas/agents — DEV_TEAM == AITEAMFORGE_DIR
+#                on a consumer (per this script's own DEV_TEAM resolution at the
+#                top of the file). This is the per-group flat mirror XACA-0925
+#                already refreshes on every `aiteamforge upgrade`, seeded from
+#                share/personas/<group>/agents/ by sync-tap.sh's XACA-0671 loop.
+# A group with no consumer-side content at all (sync-tap.sh's XACA-0671 loop
+# hardcodes a 12-name roster and deliberately excludes "snw" — it predates any
+# consuming team) simply resolves to a path that does not exist. That is not a
+# distinct error case: the caller (_source_files_for_deployment) already warns
+# and continues on a missing group directory in BOTH modes, so an unmirrored
+# group degrades to "zero files from this group, sync continues" exactly like a
+# dev-mode typo in the manifest's groups[] array would.
+_group_persona_dir() {
+  local grp="$1"
+  if [ "$KBSP_MODE" = "consumer" ]; then
+    echo "${DEV_TEAM}/${grp}/personas/agents"
+  else
+    echo "${MASTER_ROOT}/${grp}"
+  fi
+}
+
+# XACA-1261: resolve a deployment's targetRepo.
+# Dev mode:      the manifest's own targetRepo field — authored for, and
+#                correct on, the dev machine.
+# Consumer mode: IGNORE the manifest's targetRepo entirely (it is guaranteed to
+#                be a dev-machine-local path — see 002-design.md's Option C
+#                rejection) and resolve team-paths.json's
+#                .teams[$team].working_dir instead, the CLAUDE.md-documented
+#                authoritative per-machine value every other kb-* helper
+#                already trusts.
+# Fails closed on a per-team basis: an absent registry FILE is caught earlier
+# by _require_team_paths_registry (loud, exit 1) — this function's own empty
+# result covers the narrower, expected case of "the registry exists and is
+# valid JSON, but this particular team has no entry in it", which callers must
+# treat as "not hosted here" via _is_hosted_here, never as some other default
+# (e.g. never falls back to the manifest's own dev-local targetRepo).
+_resolve_target_repo_for_team() {
+  local i="$1" team="$2"
+  if [ "$KBSP_MODE" != "consumer" ]; then
+    _deploy_field "$i" "targetRepo"
+    return 0
+  fi
+  jq -r --arg t "$team" '.teams[$t].working_dir // empty' "$TEAM_PATHS_JSON" 2>/dev/null
+}
+
+# XACA-1261: is this team's deployment actually hosted on THIS machine?
+# Dev mode: always true — the dev machine is authoritative for its own
+#           manifest, so every row is shown regardless of registry state
+#           (matches today's pre-XACA-1261 behavior exactly, no regression).
+# Consumer mode: true iff BOTH hold —
+#   1. the team has a matching key in team-paths.json (a resolved, non-empty
+#      working_dir), AND
+#   2. _resolve_git_roots against that working_dir returns at least one line
+#      (a REAL checkout lives there, not just a registered-but-empty stub —
+#      the academy-on-a-non-academy-consumer shape: registered, but only
+#      kanban/+worktrees/ exist, no real repo checkout).
+# A team failing either check is OMITTED from list/check/sync/diff entirely —
+# never shown flagged-but-included (002-design.md Q4: omission is unambiguous,
+# a flagged row is still parseable as "this IS a deployment target here").
+_is_hosted_here() {
+  local team="$1"
+  if [ "$KBSP_MODE" != "consumer" ]; then
+    return 0
+  fi
+  local working_dir
+  working_dir=$(jq -r --arg t "$team" '.teams[$t].working_dir // empty' "$TEAM_PATHS_JSON" 2>/dev/null)
+  if [ -z "$working_dir" ]; then
+    return 1
+  fi
+  local roots
+  roots=$(_resolve_git_roots "$working_dir" 2>/dev/null)
+  if [ -z "$roots" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# Compute the full source file list for a deployment (union of groups)
+# Outputs one absolute path per line
+_source_files_for_deployment() {
+  local i="$1"
+  local group_count
+  group_count=$(jq ".deployments[$i].groups | length" "$MANIFEST")
+  local g=0
+  while [ "$g" -lt "$group_count" ]; do
+    local grp
+    grp=$(jq -r ".deployments[$i].groups[$g]" "$MANIFEST")
+    local grp_dir
+    grp_dir=$(_group_persona_dir "$grp")
+    if [ -d "$grp_dir" ]; then
+      find "$grp_dir" -maxdepth 1 -name '*.md' -type f | sort
+    else
+      _warn "Master group directory not found: $grp_dir"
+    fi
+    g=$((g + 1))
+  done
+}
+
+# Write the .synced-from-master marker file
+_write_marker() {
+  local target_dir="$1"
+  local master_sha
+  master_sha=$(git -C "$DEV_TEAM" rev-parse HEAD 2>/dev/null || echo "unknown")
+  local ts
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  cat > "${target_dir}/.synced-from-master" <<EOF
+# kb-sync-personas marker — do not edit manually
+synced_at: ${ts}
+master_commit: ${master_sha}
+schema_version: ${SCHEMA_VERSION}
+EOF
+}
+
+# Detect whether a deployment's personas dir is gitignored (container-layout)
+# vs git-tracked (kanban-inside-repo). Returns 0 if gitignored, 1 if tracked.
+#
+# A deployment is a container-layout team (gitignored personas) when:
+#   git check-ignore -q <targetDir> succeeds (the dir itself is ignored), OR
+#   git ls-files <targetDir> returns nothing (no tracked files under it).
+# It is git-tracked when ls-files returns at least one file or the dir is not
+# under git ignore. check-ignore is tried first as the most direct signal;
+# ls-files is the fallback (handles "not yet created" dirs correctly too).
+#
+# Usage: if _deployment_is_gitignored_personas <targetRepo> <targetDir>; then ...
+_deployment_is_gitignored_personas() {
+  local repo="$1"
+  local rel_dir="$2"  # relative path inside the repo, e.g. ".claude/agents"
+
+  # Non-git repo (e.g. ~/finance) — no git tracking, treat as gitignored
+  if [ ! -d "${repo}/.git" ]; then
+    return 0
+  fi
+
+  # check-ignore: succeeds (exit 0) when the path is gitignored
+  if git -C "$repo" check-ignore -q "$rel_dir" 2>/dev/null; then
+    return 0
+  fi
+
+  # Fallback: if ls-files returns nothing, no tracked files exist under this dir.
+  # This covers the case where the dir doesn't exist yet (check-ignore may return
+  # non-zero for non-existent paths even if they would be ignored if created).
+  local tracked_count
+  tracked_count=$(git -C "$repo" ls-files "$rel_dir" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$tracked_count" -eq 0 ]; then
+    return 0
+  fi
+
+  return 1
+}
+
+# Enumerate active worktrees for a given repo root.
+# Outputs one worktree path per line, EXCLUDING the main repo root itself.
+# (The main repo is the first entry from `worktree list`; only branch worktrees
+# under worktrees/ are relevant targets for sync-worktrees.)
+_list_repo_worktrees() {
+  local repo="$1"
+  local main_root=""
+  local first=true
+  while IFS= read -r line; do
+    if [[ "$line" == "worktree "* ]]; then
+      local wt_path="${line#worktree }"
+      if [ "$first" = true ]; then
+        main_root="$wt_path"
+        first=false
+      else
+        # Only emit paths that are NOT the main repo root
+        if [ "$wt_path" != "$main_root" ]; then
+          echo "$wt_path"
+        fi
+      fi
+    fi
+  done < <(git -C "$repo" worktree list --porcelain 2>/dev/null)
+}
+
+# Resolve the actual git root(s) for a container path.
+#
+# Container-layout teams (iOS, Android, Firebase, DNS) store their code in a
+# child directory of the container, not at the container root itself. The
+# container is NOT a git repo; the inner child dir IS.
+#
+# SIBLING-DRIFT NOTE (k501): the inner-root subdir name varies per team
+# (iOS: "DEV", Android/Firebase: "develop", DNS: "DNSFramework-Android",
+# potentially more in future). DNS can have MULTIPLE inner git repos. Never
+# hardcode the inner-root name — discover it by probing immediate children.
+# Any change to this function should be mirrored in _list_repo_worktrees
+# callers (check, list, sync-worktrees) and in the selftest suite.
+#
+# Algorithm:
+#   1. If <container> itself is a git repo (git rev-parse succeeds AND
+#      the reported toplevel equals the container), print it and return.
+#   2. Otherwise scan every IMMEDIATE child directory that contains a .git
+#      entry (file or dir) and confirm it is a git work-tree. Print each.
+#   3. If nothing found, print nothing (caller decides how to warn).
+#
+# Outputs one absolute git-root path per line.
+_resolve_git_roots() {
+  local container="$1"
+
+  # Case 1: container is itself a git repo
+  local top
+  top=$(git -C "$container" rev-parse --show-toplevel 2>/dev/null) || top=""
+  if [ -n "$top" ]; then
+    # Canonicalize both sides before comparing to defeat symlink mismatches
+    local canon_container canon_top
+    canon_container=$(_canon_path "$container") || canon_container="$container"
+    canon_top=$(_canon_path "$top")             || canon_top="$top"
+    if [ "$canon_container" = "$canon_top" ]; then
+      echo "$top"
+      return 0
+    fi
+  fi
+
+  # Case 2: scan immediate children
+  # k501: declare loop-locals BEFORE the loop — zsh emits `local X=v` to stdout
+  # on 2nd+ iterations (a multi-inner-repo container would leak `root=…` into
+  # this function's output). Kept consistent with the _resolve_git_roots twin
+  # in deploy-worktree-personas.sh (XACA-0617).
+  local found=false
+  local child root
+  for child in "$container"/*/; do
+    [ -d "$child" ] || continue
+    # Quick check: must have a .git entry (file for worktrees, dir for main)
+    [ -e "${child}.git" ] || continue
+    # Confirm it is a valid work-tree
+    if git -C "$child" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      root=$(git -C "$child" rev-parse --show-toplevel 2>/dev/null) || continue
+      echo "$root"
+      found=true
+    fi
+  done
+
+  if [ "$found" = true ]; then
+    return 0
+  fi
+  # Nothing found — caller warns
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: sync-worktrees
+# ---------------------------------------------------------------------------
+_kbsp_sync_worktrees() {
+  _require_jq
+  local filter_team="" dry_run=false prune=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --all) filter_team="" ;;
+      --dry-run) dry_run=true ;;
+      --prune) prune=true ;;
+      -*) _warn "Unknown flag: $1" ;;
+      *) filter_team="$1" ;;
+    esac
+    shift
+  done
+
+  local count
+  count=$(_deployment_count)
+  local any_error=false
+
+  local i=0
+  while [ "$i" -lt "$count" ]; do
+    local team
+    team=$(_deploy_field "$i" "team")
+    if [ -n "$filter_team" ] && [ "$team" != "$filter_team" ]; then
+      i=$((i + 1))
+      continue
+    fi
+
+    local target_repo target_dir is_git
+    target_repo=$(_expand_path "$(_deploy_field "$i" "targetRepo")")
+    target_dir=$(_deploy_field "$i" "targetDir")
+    is_git=$(_deploy_field "$i" "isGitRepo")
+
+    # Skip non-existent repos with a warning (same as 'sync')
+    if [ ! -d "$target_repo" ]; then
+      _warn "[$team] targetRepo missing, skipping: $target_repo"
+      i=$((i + 1))
+      continue
+    fi
+
+    # Gate: only container-layout teams (gitignored personas). Git-tracked persona
+    # dirs are inherited by each worktree automatically via branch checkout.
+    if ! _deployment_is_gitignored_personas "$target_repo" "$target_dir"; then
+      _info "[$team] personas are git-tracked; worktrees inherit via checkout — skipping"
+      i=$((i + 1))
+      continue
+    fi
+
+    # Resolve actual git root(s) inside this container.
+    # Container-layout teams store the git repo in a child subdir (e.g. DEV/,
+    # develop/, DNSFramework-Android/). DNS may have multiple inner git repos.
+    local git_roots=()
+    while IFS= read -r gr; do
+      [ -z "$gr" ] && continue
+      git_roots+=("$gr")
+    done < <(_resolve_git_roots "$target_repo")
+
+    if [ "${#git_roots[@]}" -eq 0 ]; then
+      _warn "[$team] No git repos found inside container: $target_repo — skipping"
+      i=$((i + 1))
+      continue
+    fi
+
+    # Aggregate worktrees across all resolved git roots.
+    # For each git root, also ensure .claude/agents/ is listed in its
+    # git exclude file (local-only, untracked — never touches .gitignore).
+    local worktree_count=0
+    local wt_paths=()
+    local gr_idx=0
+    # Declare loop-local vars before the loop per k501-zsh-local-in-loop-gotcha:
+    # assigning `local` inside a loop body causes zsh to emit the assignment to
+    # stdout on 2nd+ iterations, corrupting output. Declare once, assign inside.
+    local git_root exclude_line common_dir_rel exclude_file
+    while [ "$gr_idx" -lt "${#git_roots[@]}" ]; do
+      git_root="${git_roots[$gr_idx]}"
+      while IFS= read -r wt_path; do
+        [ -z "$wt_path" ] && continue
+        wt_paths+=("$wt_path")
+        worktree_count=$((worktree_count + 1))
+      done < <(_list_repo_worktrees "$git_root")
+
+      # Ensure .claude/agents/ appears in this root's git exclude file so that
+      # deployed persona files remain untracked and invisible to git status.
+      # git-common-dir is the authoritative location for the exclude file; it is
+      # shared across all worktrees of this repo (lives in the common .git dir).
+      # Resolve the common-dir relative path against the git root before use.
+      exclude_line=".claude/agents/"
+      common_dir_rel=$(git -C "$git_root" rev-parse --git-common-dir 2>/dev/null) || common_dir_rel=""
+      if [ -n "$common_dir_rel" ]; then
+        exclude_file="${git_root}/${common_dir_rel}/info/exclude"
+        if [ "$dry_run" = true ]; then
+          if grep -qxF "$exclude_line" "$exclude_file" 2>/dev/null; then
+            _info "[$team] exclude: '$exclude_line' already present in $(basename "$git_root")/.git/info/exclude"
+          else
+            _info "[$team] exclude (DRY RUN): would add '$exclude_line' to $(basename "$git_root")/.git/info/exclude"
+          fi
+        else
+          mkdir -p "$(dirname "$exclude_file")"
+          if ! grep -qxF "$exclude_line" "$exclude_file" 2>/dev/null; then
+            # Add a comment header only when creating the entry for the first time
+            printf '# Academy persona deployment (untracked, ephemeral) — XACA infra\n%s\n' \
+              "$exclude_line" >> "$exclude_file"
+            _info "[$team] exclude: added '$exclude_line' to $(basename "$git_root")/.git/info/exclude"
+          else
+            _info "[$team] exclude: '$exclude_line' already present in $(basename "$git_root")/.git/info/exclude"
+          fi
+        fi
+      else
+        _warn "[$team] could not resolve git-common-dir for $git_root — skipping exclude update"
+      fi
+
+      gr_idx=$((gr_idx + 1))
+    done
+
+    # Deploy to linked worktrees (may be zero — nested main roots are
+    # deployed separately below regardless of worktree count).
+    if [ "$worktree_count" -gt 0 ]; then
+      _info "[$team] Found $worktree_count linked worktree(s)"
+    else
+      _info "[$team] No linked worktrees found"
+    fi
+
+    # k501: hoist loop-locals — zsh emits `local X=v` to stdout on 2nd+ iterations.
+    local wt_idx=0 wt_path full_target wt_label
+    while [ "$wt_idx" -lt "${#wt_paths[@]}" ]; do
+      wt_path="${wt_paths[$wt_idx]}"
+      full_target="${wt_path}/${target_dir}"
+
+      # Controlled guard: write target must be <worktree>/.claude/agents only.
+      # Pass the CONTAINER as repo_root because worktrees live at
+      # <container>/worktrees/<name>, not <inner-git-root>/worktrees/<name>.
+      _guard_worktree_target "$full_target" "$target_repo"
+
+      wt_label=$(basename "$wt_path")
+      __deploy_any_error=false
+      _deploy_personas_to_one_target "$wt_label" "$full_target" "$team" "$i" "$dry_run" "$prune"
+      if [ "$__deploy_any_error" = true ]; then any_error=true; fi
+
+      wt_idx=$((wt_idx + 1))
+    done
+
+    # XACA-0660: Deploy to each nested main git root when it differs from the
+    # container (e.g. Firebase/Android where the git checkout is at
+    # <container>/develop/ rather than at the container root itself).
+    # iOS/DNS are unaffected: when container IS the git root, _resolve_git_roots
+    # returns the container itself, git_root == target_repo, and we skip — the
+    # 'sync' subcommand already handled the main deployment for those teams.
+    # k501: hoist ALL loop-locals before the loop — under zsh, `local var`
+    # (even unassigned) inside a 2+-iteration loop emits `var=value` to stdout
+    # on the 2nd+ pass (fires on DNS multi-root topology or --all multi-team).
+    local main_root_idx=0 main_root_path main_root_full main_root_label
+    local canon_main_root canon_container_cmp
+    while [ "$main_root_idx" -lt "${#git_roots[@]}" ]; do
+      main_root_path="${git_roots[$main_root_idx]}"
+
+      # Only deploy to the inner git root when it's genuinely nested below the
+      # container — i.e. container IS NOT the git root itself.
+      canon_main_root=$(_canon_path "$main_root_path") || { main_root_idx=$((main_root_idx + 1)); continue; }
+      canon_container_cmp=$(_canon_path "$target_repo") || { main_root_idx=$((main_root_idx + 1)); continue; }
+
+      if [ "$canon_main_root" = "$canon_container_cmp" ]; then
+        # Container IS the git root (iOS/DNS) — sync subcommand owns this; skip.
+        main_root_idx=$((main_root_idx + 1))
+        continue
+      fi
+
+      main_root_full="${main_root_path}/${target_dir}"
+      main_root_label="[main-root:$(basename "$main_root_path")]"
+
+      # Validate the target before writing — safety gate for nested main root.
+      _guard_main_root_target "$main_root_full" "$main_root_path" "$target_repo"
+
+      __deploy_any_error=false
+      _deploy_personas_to_one_target "$main_root_label" "$main_root_full" "$team" "$i" "$dry_run" "$prune"
+      if [ "$__deploy_any_error" = true ]; then any_error=true; fi
+
+      main_root_idx=$((main_root_idx + 1))
+    done
+
+    i=$((i + 1))
+  done
+
+  if [ "$any_error" = true ]; then
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: help
+# ---------------------------------------------------------------------------
+_kbsp_help() {
+  cat <<'USAGE'
+kb-sync-personas — Persona sync tool (XACA-0285)
+
+USAGE:
+  kb-sync-personas list                              List all deployments + status
+  kb-sync-personas check [team] [--json]             Drift detection; exit 1 on any drift
+  kb-sync-personas sync <team|--all> [opts]          Copy master -> target (main repo only)
+    --dry-run                                        Show plan without writing
+    --prune                                          Delete orphaned files in target
+  kb-sync-personas sync-worktrees <team|--all> [opts]
+                                                     Deploy personas into active worktrees
+                                                     of container-layout teams only (opt-in).
+                                                     Git-tracked-persona teams are skipped.
+    --dry-run                                        Show plan without writing
+    --prune                                          Delete orphaned files in worktree target
+  kb-sync-personas diff <team>                       Show per-file diff (diff -u)
+  kb-sync-personas refresh                           Update manifest exists hints
+  kb-sync-personas selftest                          Run self-test suite (uses temp dirs)
+  kb-sync-personas help                              This message
+
+MANIFEST:
+  ~/dev-team/.claude/personas-manifest.json
+
+MASTER:
+  ~/dev-team/.claude/agents-master/
+
+SAFETY:
+  sync:          Refuses to write to any path containing /worktrees/.
+  sync-worktrees: OPT-IN worktree deploy. Skipping is detected per-repo at runtime:
+                 a team is auto-skipped only when its .claude/agents/ is committed to
+                 git (e.g. Academy). Teams that gitignore or have not committed their
+                 personas — including container-layout teams (iOS, Android, Firebase,
+                 DNS) and any team without a committed agents dir (e.g. Command) —
+                 receive worktree deployment.
+                 Writes ONLY into <worktree>/.claude/agents/ — never a broader dir.
+  Both:          Skips deployments whose targetRepo does not exist (warn, not error).
+                 Use --require (sync only) to treat missing targetRepo as an error.
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: list
+# ---------------------------------------------------------------------------
+_kbsp_list() {
+  _require_jq
+  _require_team_paths_registry
+  local count
+  count=$(_deployment_count)
+  printf "%-30s %-55s %-8s %-8s %s\n" "TEAM" "TARGET REPO" "EXISTS" "GIT" "STATUS"
+  printf "%-30s %-55s %-8s %-8s %s\n" "----" "-----------" "------" "---" "------"
+  local i=0
+  while [ "$i" -lt "$count" ]; do
+    local team target_repo target_dir exists is_git
+    team=$(_deploy_field "$i" "team")
+    if ! _is_hosted_here "$team"; then
+      i=$((i + 1))
+      continue
+    fi
+    target_repo=$(_expand_path "$(_resolve_target_repo_for_team "$i" "$team")")
+    target_dir=$(_deploy_field "$i" "targetDir")
+    exists=$(_deploy_field "$i" "exists")
+    is_git=$(_deploy_field "$i" "isGitRepo")
+
+    local full_target="${target_repo}/${target_dir}"
+    local status="unknown"
+    if [ ! -d "$target_repo" ]; then
+      status="MISSING-REPO"
+    elif [ ! -d "$full_target" ]; then
+      status="NOT-SYNCED"
+    elif [ -f "${full_target}/.synced-from-master" ]; then
+      # Quick: count md files to see if count matches expected
+      local deployed_count
+      deployed_count=$(find "$full_target" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')
+      local source_count
+      source_count=$(_source_files_for_deployment "$i" | wc -l | tr -d ' ')
+      if [ "$deployed_count" -eq "$source_count" ]; then
+        status="SYNCED(${deployed_count})"
+      else
+        status="COUNT-MISMATCH(master=${source_count},deployed=${deployed_count})"
+      fi
+    else
+      status="NO-MARKER"
+    fi
+
+    # Worktree deployment count (container-layout teams only)
+    local wt_info=""
+    if [ -d "$target_repo" ] && _deployment_is_gitignored_personas "$target_repo" "$target_dir"; then
+      local wt_synced=0 wt_total=0
+      # k501: hoist loop-locals; the outer git-roots loop compounds the zsh leak.
+      # Also hoist canon_list_gr / canon_target_repo_list used in the nested-main-
+      # root check below (XACA-0660) — same rule applies across iterations.
+      local list_gr wt_full canon_list_gr canon_target_repo_list
+      while IFS= read -r list_gr; do
+        [ -z "$list_gr" ] && continue
+        while IFS= read -r wt_path; do
+          [ -z "$wt_path" ] && continue
+          wt_total=$((wt_total + 1))
+          wt_full="${wt_path}/${target_dir}"
+          if [ -f "${wt_full}/.synced-from-master" ]; then
+            wt_synced=$((wt_synced + 1))
+          fi
+        done < <(_list_repo_worktrees "$list_gr")
+
+        # XACA-0660: also count the nested main git root itself as a deploy
+        # target when it differs from the container (Firebase/Android pattern).
+        # iOS/DNS: git_root == container, canon check skips them correctly.
+        canon_list_gr=$(_canon_path "$list_gr" 2>/dev/null) || canon_list_gr="$list_gr"
+        canon_target_repo_list=$(_canon_path "$target_repo" 2>/dev/null) || canon_target_repo_list="$target_repo"
+        if [ "$canon_list_gr" != "$canon_target_repo_list" ]; then
+          wt_total=$((wt_total + 1))
+          wt_full="${list_gr}/${target_dir}"
+          if [ -f "${wt_full}/.synced-from-master" ]; then
+            wt_synced=$((wt_synced + 1))
+          fi
+        fi
+      done < <(_resolve_git_roots "$target_repo")
+      if [ "$wt_total" -gt 0 ]; then
+        wt_info=" [wt:${wt_synced}/${wt_total}]"
+      fi
+    fi
+
+    printf "%-30s %-55s %-8s %-8s %s%s\n" "$team" "${target_repo}" "$exists" "$is_git" "$status" "$wt_info"
+    i=$((i + 1))
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: check
+# ---------------------------------------------------------------------------
+_kbsp_check() {
+  _require_jq
+  _require_team_paths_registry
+  local filter_team="" json_output=false require_exists=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json_output=true ;;
+      --require) require_exists=true ;;
+      --all) filter_team="" ;;
+      -*) _warn "Unknown flag: $1" ;;
+      *) filter_team="$1" ;;
+    esac
+    shift
+  done
+
+  local count
+  count=$(_deployment_count)
+  local any_drift=false
+
+  # JSON accumulators — populated only when --json is active
+  local json_deployments="" json_worktrees=""
+
+  local i=0
+  while [ "$i" -lt "$count" ]; do
+    local team
+    team=$(_deploy_field "$i" "team")
+    if [ -n "$filter_team" ] && [ "$team" != "$filter_team" ]; then
+      i=$((i + 1))
+      continue
+    fi
+    if ! _is_hosted_here "$team"; then
+      i=$((i + 1))
+      continue
+    fi
+
+    local target_repo target_dir
+    target_repo=$(_expand_path "$(_resolve_target_repo_for_team "$i" "$team")")
+    target_dir=$(_deploy_field "$i" "targetDir")
+    local full_target="${target_repo}/${target_dir}"
+
+    if [ ! -d "$target_repo" ]; then
+      if [ "$require_exists" = true ]; then
+        _err "targetRepo does not exist (--require): $target_repo"
+        return 1
+      else
+        _warn "[$team] targetRepo missing, skipping: $target_repo"
+        i=$((i + 1))
+        continue
+      fi
+    fi
+
+    local drift_items="" team_status="synced"
+    local file_count=0
+
+    while IFS= read -r src_file; do
+      [ -z "$src_file" ] && continue
+      local basename
+      basename=$(basename "$src_file")
+      local target_file="${full_target}/${basename}"
+      local master_sha
+      master_sha=$(_sha256 "$src_file")
+      file_count=$((file_count + 1))
+
+      if [ ! -f "$target_file" ]; then
+        drift_items="${drift_items} MISSING-IN-DEPLOY:${basename}"
+        team_status="drifted"
+        any_drift=true
+        if [ "$json_output" = false ]; then
+          echo "  [${team}] MISSING  $basename"
+        fi
+      else
+        local deployed_sha
+        deployed_sha=$(_sha256 "$target_file")
+        if [ "$master_sha" != "$deployed_sha" ]; then
+          drift_items="${drift_items} DRIFTED:${basename}"
+          team_status="drifted"
+          any_drift=true
+          if [ "$json_output" = false ]; then
+            echo "  [${team}] DRIFTED  $basename"
+          fi
+        fi
+      fi
+    done < <(_source_files_for_deployment "$i")
+
+    # Check for orphans (files in target not in source)
+    # O(n*m): for each target file we re-invoke _source_files_for_deployment (inner loop).
+    # At current scale (max ~14 files × 2 groups per deployment) the inner iteration
+    # ceiling is ~28 subshell calls per check run — acceptable. If group or file counts
+    # grow significantly, precompute the source set once per deployment before this loop.
+    if [ -d "$full_target" ]; then
+      while IFS= read -r tgt_file; do
+        [ -z "$tgt_file" ] && continue
+        local tbasename
+        tbasename=$(basename "$tgt_file")
+        [[ "$tbasename" == .* ]] && continue  # skip dot files like .synced-from-master
+        local found=false
+        while IFS= read -r sf; do
+          [ "$(basename "$sf")" = "$tbasename" ] && found=true && break
+        done < <(_source_files_for_deployment "$i")
+        if [ "$found" = false ]; then
+          drift_items="${drift_items} ORPHAN:${tbasename}"
+          if [ "$team_status" = "synced" ]; then team_status="has-orphans"; fi
+          if [ "$json_output" = false ]; then
+            echo "  [${team}] ORPHAN   $tbasename (not in master groups)"
+          fi
+        fi
+      done < <(find "$full_target" -maxdepth 1 -name '*.md' -type f | sort)
+    fi
+
+    if [ "$json_output" = false ]; then
+      if [ "$team_status" = "synced" ]; then
+        echo "[${team}] OK (${file_count} files synced)"
+      fi
+    fi
+
+    # Build JSON deployment entry (additive to existing consumers — new key only)
+    if [ "$json_output" = true ]; then
+      # Convert space-separated drift_items to a JSON array of strings
+      local drift_json="[]"
+      if [ -n "$drift_items" ]; then
+        # drift_items has a leading space; trim it, then split on spaces
+        drift_json=$(printf '%s\n' $drift_items | jq -R . | jq -s .)
+      fi
+      local dep_entry
+      dep_entry=$(jq -n \
+        --arg team "$team" \
+        --arg status "$team_status" \
+        --argjson drift "$drift_json" \
+        '{"team": $team, "status": $status, "drift": $drift}')
+      if [ -z "$json_deployments" ]; then
+        json_deployments="$dep_entry"
+      else
+        json_deployments="${json_deployments},${dep_entry}"
+      fi
+    fi
+
+    # Worktree drift check — container-layout teams only.
+    # Enumerate git roots first (container-layout repos are not themselves git repos).
+    if _deployment_is_gitignored_personas "$target_repo" "$target_dir"; then
+      # k501: hoist loop-locals — outer git-roots loop makes the zsh stdout-leak
+      # reachable across multiple iterations (DNS multi-root topology).
+      # Also hoist canon_check_gr / canon_target_repo_chk used in the XACA-0660
+      # nested-main-root block below — same rule, same reason.
+      local check_gr wt_label wt_full wt_status wt_drift_items
+      local bname wt_file wt_sha src_sha wt_drift_json wt_entry
+      local canon_check_gr canon_target_repo_chk
+      while IFS= read -r check_gr; do
+        [ -z "$check_gr" ] && continue
+        while IFS= read -r wt_path; do
+          [ -z "$wt_path" ] && continue
+          wt_label=$(basename "$wt_path")
+          wt_full="${wt_path}/${target_dir}"
+          wt_status="" wt_drift_items=""
+          if [ ! -d "$wt_full" ]; then
+            if [ "$json_output" = false ]; then
+              echo "  [${team}] WORKTREE-NOT-SYNCED  $wt_label"
+            fi
+            any_drift=true
+            wt_status="not-synced"
+          elif [ -f "${wt_full}/.synced-from-master" ]; then
+            wt_status="synced"
+            while IFS= read -r src_file; do
+              [ -z "$src_file" ] && continue
+              bname=$(basename "$src_file")
+              wt_file="${wt_full}/${bname}"
+              if [ ! -f "$wt_file" ]; then
+                if [ "$json_output" = false ]; then
+                  echo "  [${team}] WORKTREE-MISSING  $wt_label/$bname"
+                fi
+                any_drift=true
+                wt_status="drifted"
+                wt_drift_items="${wt_drift_items} MISSING:${bname}"
+              else
+                wt_sha=$(_sha256 "$wt_file")
+                src_sha=$(_sha256 "$src_file")
+                if [ "$wt_sha" != "$src_sha" ]; then
+                  if [ "$json_output" = false ]; then
+                    echo "  [${team}] WORKTREE-DRIFTED  $wt_label/$bname"
+                  fi
+                  any_drift=true
+                  wt_status="drifted"
+                  wt_drift_items="${wt_drift_items} DRIFTED:${bname}"
+                fi
+              fi
+            done < <(_source_files_for_deployment "$i")
+          else
+            # Worktree has persona files but is missing the sync marker — indeterminate state.
+            if [ "$json_output" = false ]; then
+              echo "  [${team}] WORKTREE-NO-MARKER  $wt_label"
+            fi
+            # FIX XACA-0584-011: treat WORKTREE-NO-MARKER as drift so check exits nonzero.
+            # A missing marker means we cannot verify the worktree was cleanly synced;
+            # it is an indeterminate/unsynced state consistent with MISSING and DRIFTED.
+            any_drift=true
+            wt_status="no-marker"
+          fi
+
+          # Build JSON worktree entry (XACA-0584-012)
+          if [ "$json_output" = true ] && [ -n "$wt_status" ]; then
+            wt_drift_json="[]"
+            if [ -n "$wt_drift_items" ]; then
+              wt_drift_json=$(printf '%s\n' $wt_drift_items | jq -R . | jq -s .)
+            fi
+            wt_entry=$(jq -n \
+              --arg team "$team" \
+              --arg worktree "$wt_label" \
+              --arg status "$wt_status" \
+              --argjson drift "$wt_drift_json" \
+              '{"team": $team, "worktree": $worktree, "status": $status, "drift": $drift}')
+            if [ -z "$json_worktrees" ]; then
+              json_worktrees="$wt_entry"
+            else
+              json_worktrees="${json_worktrees},${wt_entry}"
+            fi
+          fi
+        done < <(_list_repo_worktrees "$check_gr")
+
+        # XACA-0660: inspect the nested main git root itself as a deploy target
+        # when it differs from the container (Firebase/Android pattern where the
+        # git checkout is at <container>/develop/, not at the container root).
+        # iOS/DNS: git_root == container, the canon comparison skips them.
+        canon_check_gr=$(_canon_path "$check_gr" 2>/dev/null) || canon_check_gr="$check_gr"
+        canon_target_repo_chk=$(_canon_path "$target_repo" 2>/dev/null) || canon_target_repo_chk="$target_repo"
+        if [ "$canon_check_gr" != "$canon_target_repo_chk" ]; then
+          wt_label="[main-root:$(basename "$check_gr")]"
+          wt_full="${check_gr}/${target_dir}"
+          wt_status="" wt_drift_items=""
+          if [ ! -d "$wt_full" ]; then
+            if [ "$json_output" = false ]; then
+              echo "  [${team}] MAIN-ROOT-NOT-SYNCED  $wt_label"
+            fi
+            any_drift=true
+            wt_status="not-synced"
+          elif [ -f "${wt_full}/.synced-from-master" ]; then
+            wt_status="synced"
+            while IFS= read -r src_file; do
+              [ -z "$src_file" ] && continue
+              bname=$(basename "$src_file")
+              wt_file="${wt_full}/${bname}"
+              if [ ! -f "$wt_file" ]; then
+                if [ "$json_output" = false ]; then
+                  echo "  [${team}] MAIN-ROOT-MISSING  ${wt_label}/${bname}"
+                fi
+                any_drift=true
+                wt_status="drifted"
+                wt_drift_items="${wt_drift_items} MISSING:${bname}"
+              else
+                wt_sha=$(_sha256 "$wt_file")
+                src_sha=$(_sha256 "$src_file")
+                if [ "$wt_sha" != "$src_sha" ]; then
+                  if [ "$json_output" = false ]; then
+                    echo "  [${team}] MAIN-ROOT-DRIFTED  ${wt_label}/${bname}"
+                  fi
+                  any_drift=true
+                  wt_status="drifted"
+                  wt_drift_items="${wt_drift_items} DRIFTED:${bname}"
+                fi
+              fi
+            done < <(_source_files_for_deployment "$i")
+          else
+            # Main root has a .claude/agents dir but no sync marker — indeterminate.
+            if [ "$json_output" = false ]; then
+              echo "  [${team}] MAIN-ROOT-NO-MARKER  $wt_label"
+            fi
+            any_drift=true
+            wt_status="no-marker"
+          fi
+
+          # Emit JSON entry for the nested main root (parallel to linked-worktree entries).
+          if [ "$json_output" = true ] && [ -n "$wt_status" ]; then
+            wt_drift_json="[]"
+            if [ -n "$wt_drift_items" ]; then
+              wt_drift_json=$(printf '%s\n' $wt_drift_items | jq -R . | jq -s .)
+            fi
+            wt_entry=$(jq -n \
+              --arg team "$team" \
+              --arg worktree "$wt_label" \
+              --arg status "$wt_status" \
+              --argjson drift "$wt_drift_json" \
+              '{"team": $team, "worktree": $worktree, "status": $status, "drift": $drift}')
+            if [ -z "$json_worktrees" ]; then
+              json_worktrees="$wt_entry"
+            else
+              json_worktrees="${json_worktrees},${wt_entry}"
+            fi
+          fi
+        fi
+      done < <(_resolve_git_roots "$target_repo")
+    fi
+
+    i=$((i + 1))
+  done
+
+  if [ "$json_output" = true ]; then
+    # Emit the complete JSON document (valid, parseable by jq)
+    local any_drift_bool="false"
+    [ "$any_drift" = true ] && any_drift_bool="true"
+    printf '{"any_drift":%s,"deployments":[%s],"worktrees":[%s]}\n' \
+      "$any_drift_bool" \
+      "${json_deployments}" \
+      "${json_worktrees}"
+  fi
+
+  if [ "$any_drift" = true ]; then
+    if [ "$json_output" = false ]; then
+      echo ""
+      _err "Drift detected. Run 'kb-sync-personas sync --all' to fix main deployments."
+      _err "Run 'kb-sync-personas sync-worktrees --all' to fix worktree deployments."
+    fi
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: sync
+# ---------------------------------------------------------------------------
+_kbsp_sync() {
+  _require_jq
+  _require_team_paths_registry
+  local filter_team="" dry_run=false prune=false require_exists=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --all) filter_team="" ;;
+      --dry-run) dry_run=true ;;
+      --prune) prune=true ;;
+      --require) require_exists=true ;;
+      -*) _warn "Unknown flag: $1" ;;
+      *) filter_team="$1" ;;
+    esac
+    shift
+  done
+
+  local count
+  count=$(_deployment_count)
+  local any_error=false
+
+  local i=0
+  while [ "$i" -lt "$count" ]; do
+    local team
+    team=$(_deploy_field "$i" "team")
+    if [ -n "$filter_team" ] && [ "$team" != "$filter_team" ]; then
+      i=$((i + 1))
+      continue
+    fi
+    if ! _is_hosted_here "$team"; then
+      i=$((i + 1))
+      continue
+    fi
+
+    local target_repo target_dir is_git
+    target_repo=$(_expand_path "$(_resolve_target_repo_for_team "$i" "$team")")
+    target_dir=$(_deploy_field "$i" "targetDir")
+    is_git=$(_deploy_field "$i" "isGitRepo")
+    local full_target="${target_repo}/${target_dir}"
+
+    # Safety: refuse worktrees
+    _guard_worktree_path "$target_repo"
+
+    if [ ! -d "$target_repo" ]; then
+      if [ "$require_exists" = true ]; then
+        _err "[$team] targetRepo missing (--require): $target_repo"
+        any_error=true
+        i=$((i + 1))
+        continue
+      else
+        _warn "[$team] targetRepo missing, skipping: $target_repo"
+        i=$((i + 1))
+        continue
+      fi
+    fi
+
+    _info "[$team] Syncing to: $full_target"
+    [ "$dry_run" = true ] && _info "[$team] (DRY RUN — no writes)"
+
+    # Ensure target dir exists
+    if [ ! -d "$full_target" ] && [ "$dry_run" = false ]; then
+      mkdir -p "$full_target"
+      _info "[$team] Created: $full_target"
+    fi
+
+    local copied=0 skipped=0 replaced=0
+
+    while IFS= read -r src_file; do
+      [ -z "$src_file" ] && continue
+      local basename
+      basename=$(basename "$src_file")
+      local target_file="${full_target}/${basename}"
+      local master_sha
+      master_sha=$(_sha256 "$src_file")
+
+      if [ ! -f "$target_file" ]; then
+        if [ "$dry_run" = true ]; then
+          echo "  COPY     $basename"
+        else
+          cp "$src_file" "$target_file"
+          echo "  copied   $basename"
+        fi
+        copied=$((copied + 1))
+      else
+        local deployed_sha
+        deployed_sha=$(_sha256 "$target_file")
+        if [ "$master_sha" = "$deployed_sha" ]; then
+          skipped=$((skipped + 1))
+        else
+          if [ "$dry_run" = true ]; then
+            echo "  REPLACE  $basename (hash differs)"
+          else
+            cp "$src_file" "$target_file"
+            echo "  replaced $basename"
+          fi
+          replaced=$((replaced + 1))
+        fi
+      fi
+    done < <(_source_files_for_deployment "$i")
+
+    # Handle orphans
+    # O(n*m): same cost characteristic as the check subcommand's orphan loop above.
+    # Ceiling: ~14 files × 2 groups = ~28 inner iterations per sync run — acceptable.
+    if [ -d "$full_target" ]; then
+      while IFS= read -r tgt_file; do
+        [ -z "$tgt_file" ] && continue
+        local tbasename
+        tbasename=$(basename "$tgt_file")
+        [[ "$tbasename" == .* ]] && continue
+        local found=false
+        while IFS= read -r sf; do
+          [ "$(basename "$sf")" = "$tbasename" ] && found=true && break
+        done < <(_source_files_for_deployment "$i")
+        if [ "$found" = false ]; then
+          if [ "$prune" = true ]; then
+            if [ "$dry_run" = true ]; then
+              echo "  PRUNE    $tbasename (orphan)"
+            else
+              rm "$tgt_file"
+              echo "  pruned   $tbasename"
+            fi
+          else
+            _warn "[$team] ORPHAN $tbasename (not in master; use --prune to remove)"
+          fi
+        fi
+      done < <(find "$full_target" -maxdepth 1 -name '*.md' -type f | sort)
+    fi
+
+    if [ "$dry_run" = false ]; then
+      _write_marker "$full_target"
+    fi
+
+    _info "[$team] Done: copied=${copied} replaced=${replaced} skipped=${skipped}"
+    if [ "$is_git" = "true" ]; then
+      _info "[$team] REMINDER: commit new files in $full_target to include them in git tracking"
+    fi
+
+    i=$((i + 1))
+  done
+
+  if [ "$any_error" = true ]; then
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: diff
+# ---------------------------------------------------------------------------
+_kbsp_diff() {
+  _require_jq
+  _require_team_paths_registry
+  local team="$1"
+  if [ -z "$team" ]; then
+    _err "Usage: kb-sync-personas diff <team>"
+    return 1
+  fi
+
+  local idx
+  idx=$(_deploy_index_by_team "$team")
+  if [ -z "$idx" ]; then
+    _err "Unknown team: $team"
+    return 1
+  fi
+
+  if ! _is_hosted_here "$team"; then
+    _err "[$team] is not hosted on this machine (no team-paths.json entry, or no"
+    _err "resolvable git checkout at its working_dir) — nothing to diff here."
+    return 1
+  fi
+
+  local target_repo target_dir
+  target_repo=$(_expand_path "$(_resolve_target_repo_for_team "$idx" "$team")")
+  target_dir=$(_deploy_field "$idx" "targetDir")
+  local full_target="${target_repo}/${target_dir}"
+
+  if [ ! -d "$target_repo" ]; then
+    _warn "[$team] targetRepo missing: $target_repo"
+    return 0
+  fi
+
+  local found_diff=false
+  while IFS= read -r src_file; do
+    [ -z "$src_file" ] && continue
+    local basename
+    basename=$(basename "$src_file")
+    local target_file="${full_target}/${basename}"
+    if [ ! -f "$target_file" ]; then
+      echo "--- /dev/null"
+      echo "+++ $target_file (missing in deploy)"
+    else
+      if ! diff -q "$src_file" "$target_file" > /dev/null 2>&1; then
+        diff -u "$src_file" "$target_file" || true
+        found_diff=true
+      fi
+    fi
+  done < <(_source_files_for_deployment "$idx")
+
+  if [ "$found_diff" = false ]; then
+    _info "[$team] No differences found."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: refresh
+# ---------------------------------------------------------------------------
+_kbsp_refresh() {
+  _require_jq
+  _info "Refreshing manifest exists hints..."
+  local count
+  count=$(_deployment_count)
+  local updated=0
+  local i=0
+
+  # We need to rewrite the manifest with updated exists values
+  # Build a jq update expression
+  local jq_updates="."
+  while [ "$i" -lt "$count" ]; do
+    local target_repo
+    target_repo=$(_expand_path "$(_deploy_field "$i" "targetRepo")")
+    local new_exists="false"
+    if [ -d "$target_repo" ]; then
+      new_exists="true"
+    fi
+    local current_exists
+    current_exists=$(_deploy_field "$i" "exists")
+    if [ "$new_exists" != "$current_exists" ]; then
+      updated=$((updated + 1))
+      local team
+      team=$(_deploy_field "$i" "team")
+      _info "  [$team] exists: $current_exists -> $new_exists"
+      jq_updates="${jq_updates} | .deployments[$i].exists = ${new_exists}"
+    fi
+    i=$((i + 1))
+  done
+
+  if [ "$updated" -gt 0 ]; then
+    local tmp
+    tmp=$(mktemp)
+    jq "$jq_updates" "$MANIFEST" > "$tmp" && mv "$tmp" "$MANIFEST"
+    _info "Manifest updated: $updated deployment(s) refreshed."
+  else
+    _info "All exists hints are current, no changes needed."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Subcommand: selftest
+# ---------------------------------------------------------------------------
+_kbsp_selftest() {
+  _require_jq
+  _info "Running self-test suite..."
+  local fail=0
+  local pass=0
+
+  # Create a temp dir as fake target repo
+  local tmp_repo
+  tmp_repo=$(mktemp -d)
+  local tmp_target="${tmp_repo}/.claude/agents"
+  mkdir -p "$tmp_target"
+
+  _info "[selftest] Temp repo: $tmp_repo"
+
+  # Use academy group (4 files — small and deterministic)
+  local src_group="${MASTER_ROOT}/academy"
+  if [ ! -d "$src_group" ]; then
+    _err "[selftest] Master academy group not found: $src_group"
+    rm -rf "$tmp_repo"
+    return 1
+  fi
+
+  local src_count
+  src_count=$(find "$src_group" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d ' ')
+  _info "[selftest] Source files in academy group: $src_count"
+
+  # --- Test 1: Source enumeration counts match expected file count ---
+  _info "[selftest] Test 1: source enumeration counts match expected file count..."
+  local dry_output
+  dry_output=$(
+    # simulate sync logic directly on temp dir
+    for f in "$src_group"/*.md; do
+      basename "$f"
+    done
+  )
+  local dry_count
+  dry_count=$(echo "$dry_output" | grep -c '.' || true)
+  if [ "$dry_count" -eq "$src_count" ]; then
+    _info "[selftest] PASS: Test 1 (source enumeration)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 1 — expected $src_count files, got $dry_count"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 2: Actually copy files to tmp target ---
+  _info "[selftest] Test 2: copy master files to temp target..."
+  cp "$src_group"/*.md "$tmp_target/"
+  local copied_count
+  copied_count=$(find "$tmp_target" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d ' ')
+  if [ "$copied_count" -eq "$src_count" ]; then
+    _info "[selftest] PASS: Test 2 (copy: $copied_count files)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 2 — expected $src_count, got $copied_count"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 3: SHA comparison detects in-sync files ---
+  _info "[selftest] Test 3: SHA comparison — files should all match..."
+  local drift_found=false
+  for src_file in "$src_group"/*.md; do
+    local bname
+    bname=$(basename "$src_file")
+    local tgt="${tmp_target}/${bname}"
+    local sha_src sha_tgt
+    sha_src=$(_sha256 "$src_file")
+    sha_tgt=$(_sha256 "$tgt")
+    if [ "$sha_src" != "$sha_tgt" ]; then
+      drift_found=true
+    fi
+  done
+  if [ "$drift_found" = false ]; then
+    _info "[selftest] PASS: Test 3 (no drift on fresh copy)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 3 — unexpected drift on fresh copy"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 4: Drift detected after file modification ---
+  _info "[selftest] Test 4: modify a deployed file, check drift detection..."
+  local first_file
+  first_file=$(find "$tmp_target" -maxdepth 1 -name '*.md' | sort | head -1)
+  local first_bname
+  first_bname=$(basename "$first_file")
+  echo "# selftest drift injection" >> "$first_file"
+
+  local src_sha tgt_sha
+  src_sha=$(_sha256 "${src_group}/${first_bname}")
+  tgt_sha=$(_sha256 "$first_file")
+  if [ "$src_sha" != "$tgt_sha" ]; then
+    _info "[selftest] PASS: Test 4 (drift detected after modification)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 4 — expected drift not detected"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 5: Marker file writing ---
+  _info "[selftest] Test 5: .synced-from-master marker file..."
+  _write_marker "$tmp_target"
+  if [ -f "${tmp_target}/.synced-from-master" ]; then
+    local has_ts has_sha
+    has_ts=$(grep -c "synced_at:" "${tmp_target}/.synced-from-master" || true)
+    has_sha=$(grep -c "master_commit:" "${tmp_target}/.synced-from-master" || true)
+    if [ "$has_ts" -gt 0 ] && [ "$has_sha" -gt 0 ]; then
+      _info "[selftest] PASS: Test 5 (marker file written correctly)"
+      pass=$((pass + 1))
+    else
+      _err "[selftest] FAIL: Test 5 — marker file missing expected fields"
+      fail=$((fail + 1))
+    fi
+  else
+    _err "[selftest] FAIL: Test 5 — marker file not created"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 6: worktree path guard ---
+  _info "[selftest] Test 6: worktree path guard..."
+  local guard_triggered=false
+  if (
+    _guard_worktree_path "/some/path/worktrees/branch/.claude/agents" 2>/dev/null
+  ); then
+    true
+  else
+    guard_triggered=true
+  fi
+  if [ "$guard_triggered" = true ]; then
+    _info "[selftest] PASS: Test 6 (worktree guard fires correctly)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 6 — worktree guard did not fire"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 7: _guard_worktree_target — accepts valid <worktree>/.claude/agents ---
+  _info "[selftest] Test 7: _guard_worktree_target accepts valid worktree target..."
+  local tmp_wt_repo
+  tmp_wt_repo=$(mktemp -d)
+  mkdir -p "${tmp_wt_repo}/worktrees/mybranch/.claude/agents"
+  local accept_ok=true
+  if ! (
+    # Must NOT exit 1 for a valid target
+    _guard_worktree_target "${tmp_wt_repo}/worktrees/mybranch/.claude/agents" "$tmp_wt_repo" 2>/dev/null
+  ); then
+    accept_ok=false
+  fi
+  if [ "$accept_ok" = true ]; then
+    _info "[selftest] PASS: Test 7 (_guard_worktree_target accepts valid path)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 7 — _guard_worktree_target rejected a valid path"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 8: _guard_worktree_target — rejects non-.claude/agents worktree path ---
+  _info "[selftest] Test 8: _guard_worktree_target rejects non-.claude/agents path..."
+  local reject_ok=false
+  if ! (
+    _guard_worktree_target "${tmp_wt_repo}/worktrees/mybranch/scripts" "$tmp_wt_repo" 2>/dev/null
+  ); then
+    reject_ok=true
+  fi
+  if [ "$reject_ok" = true ]; then
+    _info "[selftest] PASS: Test 8 (_guard_worktree_target rejects non-.claude/agents path)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 8 — _guard_worktree_target should have rejected the path"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 9: _guard_worktree_target — rejects path not under repo worktrees/ ---
+  _info "[selftest] Test 9: _guard_worktree_target rejects path outside repo worktrees/..."
+  local reject_outside=false
+  if ! (
+    _guard_worktree_target "/tmp/someother/worktrees/x/.claude/agents" "$tmp_wt_repo" 2>/dev/null
+  ); then
+    reject_outside=true
+  fi
+  if [ "$reject_outside" = true ]; then
+    _info "[selftest] PASS: Test 9 (_guard_worktree_target rejects path outside repo worktrees)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 9 — should have rejected path outside repo worktrees"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 9b: _guard_worktree_target — rejects ../-traversal attack path ---
+  # A path like <worktrees>/x/../../../evil/.claude/agents passes naive string-prefix
+  # matching but resolves outside the repo entirely. Canonicalization must catch it.
+  _info "[selftest] Test 9b: _guard_worktree_target rejects traversal-attack path..."
+  local reject_traversal=false
+  # Create a directory that, after traversal, would land outside the worktrees dir
+  mkdir -p "${tmp_wt_repo}/worktrees/x"
+  local traversal_path="${tmp_wt_repo}/worktrees/x/../../../evil/.claude/agents"
+  if ! (
+    _guard_worktree_target "$traversal_path" "$tmp_wt_repo" 2>/dev/null
+  ); then
+    reject_traversal=true
+  fi
+  if [ "$reject_traversal" = true ]; then
+    _info "[selftest] PASS: Test 9b (_guard_worktree_target rejects ../-traversal path)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 9b — _guard_worktree_target should have rejected traversal path"
+    fail=$((fail + 1))
+  fi
+  rm -rf "$tmp_wt_repo"
+
+  # --- Test 10: gitignore gate — detects gitignored .claude/agents in a temp git repo ---
+  _info "[selftest] Test 10: gitignore gate detects gitignored personas dir..."
+  local tmp_git_repo
+  tmp_git_repo=$(mktemp -d)
+  git -C "$tmp_git_repo" init -q
+  # Write a .gitignore that ignores .claude/agents/
+  printf ".claude/agents/\n" > "${tmp_git_repo}/.gitignore"
+  git -C "$tmp_git_repo" add .gitignore >/dev/null 2>&1
+  mkdir -p "${tmp_git_repo}/.claude/agents"
+  local gitignored_detected=false
+  if _deployment_is_gitignored_personas "$tmp_git_repo" ".claude/agents"; then
+    gitignored_detected=true
+  fi
+  if [ "$gitignored_detected" = true ]; then
+    _info "[selftest] PASS: Test 10 (gitignore gate: detected gitignored personas dir)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 10 — gitignore gate did not detect gitignored dir"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 11: gitignore gate — detects git-TRACKED .claude/agents in a temp git repo ---
+  _info "[selftest] Test 11: gitignore gate detects git-tracked personas dir..."
+  local tmp_tracked_repo
+  tmp_tracked_repo=$(mktemp -d)
+  git -C "$tmp_tracked_repo" init -q
+  mkdir -p "${tmp_tracked_repo}/.claude/agents"
+  printf "# tracked persona\n" > "${tmp_tracked_repo}/.claude/agents/test.md"
+  git -C "$tmp_tracked_repo" add .claude/agents/test.md >/dev/null 2>&1
+  git -C "$tmp_tracked_repo" -c user.email="t@t.com" -c user.name="T" \
+    commit -q -m "add persona" >/dev/null 2>&1
+  local tracked_detected=false
+  if ! _deployment_is_gitignored_personas "$tmp_tracked_repo" ".claude/agents"; then
+    tracked_detected=true  # correctly identified as NOT gitignored
+  fi
+  if [ "$tracked_detected" = true ]; then
+    _info "[selftest] PASS: Test 11 (gitignore gate: correctly identified git-tracked dir)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 11 — gitignore gate misidentified tracked dir as gitignored"
+    fail=$((fail + 1))
+  fi
+  rm -rf "$tmp_git_repo" "$tmp_tracked_repo"
+
+  # --- Test 12: _resolve_git_roots — container with an inner git repo ---
+  # Simulates the container-layout pattern: a non-git parent dir containing one
+  # inner git repo in a child subdir (the iOS/Android/Firebase/DNS topology).
+  _info "[selftest] Test 12: _resolve_git_roots discovers inner git root in container..."
+  local tmp_container
+  tmp_container=$(mktemp -d)
+  local inner_name="inner-repo"
+  local inner_path="${tmp_container}/${inner_name}"
+  mkdir -p "$inner_path"
+  git -C "$inner_path" init -q
+  # Container itself is NOT a git repo
+  local resolved_roots=()
+  while IFS= read -r r; do
+    [ -z "$r" ] && continue
+    resolved_roots+=("$r")
+  done < <(_resolve_git_roots "$tmp_container")
+  if [ "${#resolved_roots[@]}" -eq 1 ]; then
+    local canon_inner canon_resolved
+    canon_inner=$(_canon_path "$inner_path") || canon_inner="$inner_path"
+    canon_resolved=$(_canon_path "${resolved_roots[0]}") || canon_resolved="${resolved_roots[0]}"
+    if [ "$canon_inner" = "$canon_resolved" ]; then
+      _info "[selftest] PASS: Test 12 (_resolve_git_roots found 1 inner git root)"
+      pass=$((pass + 1))
+    else
+      _err "[selftest] FAIL: Test 12 — resolved root ($canon_resolved) != expected ($canon_inner)"
+      fail=$((fail + 1))
+    fi
+  else
+    _err "[selftest] FAIL: Test 12 — expected 1 git root, got ${#resolved_roots[@]}"
+    fail=$((fail + 1))
+  fi
+  rm -rf "$tmp_container"
+
+  # --- Test 13: _resolve_git_roots — multiple inner git repos (DNS topology) ---
+  _info "[selftest] Test 13: _resolve_git_roots discovers multiple inner git roots..."
+  local tmp_multi_container
+  tmp_multi_container=$(mktemp -d)
+  local inner_a="${tmp_multi_container}/repo-a"
+  local inner_b="${tmp_multi_container}/repo-b"
+  mkdir -p "$inner_a" "$inner_b"
+  git -C "$inner_a" init -q
+  git -C "$inner_b" init -q
+  local multi_roots=()
+  while IFS= read -r r; do
+    [ -z "$r" ] && continue
+    multi_roots+=("$r")
+  done < <(_resolve_git_roots "$tmp_multi_container")
+  if [ "${#multi_roots[@]}" -eq 2 ]; then
+    _info "[selftest] PASS: Test 13 (_resolve_git_roots found 2 inner git roots)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 13 — expected 2 git roots, got ${#multi_roots[@]}"
+    fail=$((fail + 1))
+  fi
+  rm -rf "$tmp_multi_container"
+
+  # --- Test 14: synthetic container-layout worktree deploy via real subcommand ---
+  # Full round-trip invoking _kbsp_sync_worktrees directly (same process, not a
+  # subshell re-exec) against a synthetic fixture.  Compared to the previous
+  # manual-cp approach this now exercises: the exclude_file write,
+  # _guard_worktree_target, the copied/replaced/skipped counter logic, and the
+  # .synced-from-master marker write.
+  #
+  # Wiring strategy: MANIFEST and MASTER_ROOT are script-level globals.
+  # We temporarily swap them for synthetic values, invoke the subcommand, then
+  # restore them — consistent with the existing "call internal helpers directly"
+  # pattern used throughout this selftest rather than adding a new override
+  # mechanism.
+  #
+  # Assertions:
+  #   14a — first run: worktree has canonical persona count; exclude file contains
+  #          exactly one .claude/agents/ entry; .synced-from-master marker present.
+  #   14b — second run (idempotent): copied=0 in output; exclude not duplicated.
+  #   14c — --dry-run: no files written to the target dir.
+  _info "[selftest] Test 14: synthetic container-layout worktree deploy via real subcommand..."
+
+  local tmp_synth
+  tmp_synth=$(mktemp -d)
+  # Scoped cleanup — only removes the dir created by THIS test.
+  # Runs on both normal exit and error (via subshell ERR or explicit guard).
+
+  local synth_container="${tmp_synth}/FakeContainer"
+  local synth_inner="${synth_container}/inner-dev"
+  local synth_wt_path="${synth_container}/worktrees/feature-branch"
+  mkdir -p "$synth_inner"
+
+  # Init inner git repo; register the worktree (git worktree add creates target dir)
+  git -C "$synth_inner" init -q
+  git -C "$synth_inner" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+  git -C "$synth_inner" worktree add "$synth_wt_path" -b "feature-selftest-t14" >/dev/null 2>&1
+
+  # Build a synthetic master dir with 3 fake persona .md files
+  local synth_master_root="${tmp_synth}/fake-master"
+  local synth_team_dir="${synth_master_root}/synth-team"
+  mkdir -p "$synth_team_dir"
+  printf "# persona A\n" > "${synth_team_dir}/persona-a.md"
+  printf "# persona B\n" > "${synth_team_dir}/persona-b.md"
+  printf "# persona C\n" > "${synth_team_dir}/persona-c.md"
+  local synth_canonical_count=3
+
+  # Build a synthetic manifest pointing at the synth container and master
+  local synth_manifest="${tmp_synth}/personas-manifest.json"
+  cat > "$synth_manifest" <<SYNTH_MANIFEST
+{
+  "schemaVersion": "1",
+  "masterRoot": "fake-master",
+  "deployments": [
+    {
+      "team": "synth-team",
+      "targetRepo": "${synth_container}",
+      "targetDir": ".claude/agents",
+      "isGitRepo": false,
+      "exists": true,
+      "groups": ["synth-team"]
+    }
+  ]
+}
+SYNTH_MANIFEST
+
+  # Swap globals to point at synthetic fixture; restore on function exit.
+  local _saved_manifest="$MANIFEST"
+  local _saved_master_root="$MASTER_ROOT"
+  local _saved_master_relative="$MASTER_RELATIVE"
+  MANIFEST="$synth_manifest"
+  MASTER_ROOT="$synth_master_root"
+  MASTER_RELATIVE="fake-master"
+
+  # --- Test 14a: first run — full deploy via real subcommand ---
+  local t14a_ok=true
+  local t14a_out
+  t14a_out=$(_kbsp_sync_worktrees synth-team 2>&1) || t14a_ok=false
+
+  local synth_target="${synth_wt_path}/.claude/agents"
+  local synth_wt_count
+  synth_wt_count=$(find "$synth_target" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
+
+  # Verify persona count
+  if [ "$synth_wt_count" -ne "$synth_canonical_count" ]; then
+    t14a_ok=false
+    _err "[selftest] Test 14a: persona count mismatch — got $synth_wt_count, expected $synth_canonical_count"
+  fi
+
+  # Verify .synced-from-master marker was written
+  if [ ! -f "${synth_target}/.synced-from-master" ]; then
+    t14a_ok=false
+    _err "[selftest] Test 14a: .synced-from-master marker not written"
+  fi
+
+  # Verify exclude file contains exactly one .claude/agents/ entry
+  local synth_common_dir
+  synth_common_dir=$(git -C "$synth_inner" rev-parse --git-common-dir 2>/dev/null) || synth_common_dir=""
+  local synth_exclude_file="${synth_inner}/${synth_common_dir}/info/exclude"
+  local exclude_entry_count=0
+  if [ -f "$synth_exclude_file" ]; then
+    exclude_entry_count=$(grep -cxF ".claude/agents/" "$synth_exclude_file" 2>/dev/null || true)
+  fi
+  if [ "$exclude_entry_count" -ne 1 ]; then
+    t14a_ok=false
+    _err "[selftest] Test 14a: expected 1 exclude entry, got $exclude_entry_count (file: $synth_exclude_file)"
+  fi
+
+  if [ "$t14a_ok" = true ]; then
+    _info "[selftest] PASS: Test 14a (first run: $synth_wt_count/$synth_canonical_count personas; exclude entry present; marker written)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 14a — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 14b: second run — idempotent (copied=0, exclude not duplicated) ---
+  local t14b_ok=true
+  local t14b_out
+  t14b_out=$(_kbsp_sync_worktrees synth-team 2>&1) || t14b_ok=false
+
+  # copied= counter in output should be 0 (all files already deployed, hashes match)
+  if ! echo "$t14b_out" | grep -qF "copied=0"; then
+    t14b_ok=false
+    _err "[selftest] Test 14b: expected copied=0 on second run; output: $t14b_out"
+  fi
+
+  # Exclude file must still have exactly 1 entry (no duplication on re-run)
+  local exclude_entry_count_2=0
+  if [ -f "$synth_exclude_file" ]; then
+    exclude_entry_count_2=$(grep -cxF ".claude/agents/" "$synth_exclude_file" 2>/dev/null || true)
+  fi
+  if [ "$exclude_entry_count_2" -ne 1 ]; then
+    t14b_ok=false
+    _err "[selftest] Test 14b: exclude entry duplicated after second run — count=$exclude_entry_count_2"
+  fi
+
+  if [ "$t14b_ok" = true ]; then
+    _info "[selftest] PASS: Test 14b (idempotent: copied=0; exclude not duplicated)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 14b — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 14c: --dry-run writes nothing ---
+  # Add a second worktree to the fixture; run the subcommand with --dry-run and
+  # assert that the second worktree's .claude/agents dir is not created and no
+  # files are written.  Using a second worktree (rather than removing the first)
+  # avoids the set -o pipefail trap: `find` on a non-existent dir exits 1 and its
+  # exit code propagates through `| wc -l | tr -d ' '` before the assignment lands.
+  local t14c_ok=true
+  local synth_wt2_path="${synth_container}/worktrees/dry-run-branch"
+  git -C "$synth_inner" worktree add "$synth_wt2_path" -b "feature-selftest-t14c" >/dev/null 2>&1 || t14c_ok=false
+  local synth_target2="${synth_wt2_path}/.claude/agents"
+  _kbsp_sync_worktrees synth-team --dry-run >/dev/null 2>&1 || true
+  # Target dir must NOT have been created (dry-run writes nothing)
+  if [ -d "$synth_target2" ]; then
+    t14c_ok=false
+    _err "[selftest] Test 14c: --dry-run created target dir $synth_target2 (expected no writes)"
+  fi
+  if [ -f "${synth_target2}/.synced-from-master" ]; then
+    t14c_ok=false
+    _err "[selftest] Test 14c: --dry-run wrote .synced-from-master marker"
+  fi
+  git -C "$synth_inner" worktree remove --force "$synth_wt2_path" >/dev/null 2>&1 || true
+
+  if [ "$t14c_ok" = true ]; then
+    _info "[selftest] PASS: Test 14c (--dry-run: no files written)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 14c — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+
+  # Restore globals before cleanup
+  MANIFEST="$_saved_manifest"
+  MASTER_ROOT="$_saved_master_root"
+  MASTER_RELATIVE="$_saved_master_relative"
+
+  git -C "$synth_inner" worktree remove --force "$synth_wt_path" >/dev/null 2>&1 || true
+  rm -rf "$tmp_synth"
+
+  # --- Test 15: live parity check for iOS (if available) ---
+  _info "[selftest] Test 15: live iOS worktree parity check (skipped if repos unavailable)..."
+  local ios_container="/Users/Shared/Development/Main Event/MainEventApp-iOS"
+  if [ ! -d "$ios_container" ]; then
+    _info "[selftest] SKIP: Test 15 — iOS container not present on this machine"
+  else
+    # Compute canonical persona count for ios (groups: ios + mainevent)
+    local ios_idx
+    ios_idx=$(jq -r '.deployments | to_entries[] | select(.value.team == "ios") | .key' "$MANIFEST" | head -1)
+    local ios_canonical_count=0
+    if [ -n "$ios_idx" ]; then
+      ios_canonical_count=$(_source_files_for_deployment "$ios_idx" | wc -l | tr -d ' ')
+    fi
+
+    local ios_parity_pass=true
+    local ios_wt_checked=0
+    local ios_inner_root
+    while IFS= read -r ios_inner_root; do
+      [ -z "$ios_inner_root" ] && continue
+      local ios_wt
+      while IFS= read -r ios_wt; do
+        [ -z "$ios_wt" ] && continue
+        ios_wt_checked=$((ios_wt_checked + 1))
+        local ios_wt_count
+        ios_wt_count=$(find "${ios_wt}/.claude/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$ios_wt_count" -ne "$ios_canonical_count" ]; then
+          _warn "[selftest] iOS parity FAIL: $(basename "$ios_wt") has $ios_wt_count personas, expected $ios_canonical_count"
+          ios_parity_pass=false
+        else
+          _info "[selftest]   iOS $(basename "$ios_wt"): $ios_wt_count/$ios_canonical_count personas ✓"
+        fi
+      done < <(_list_repo_worktrees "$ios_inner_root")
+    done < <(_resolve_git_roots "$ios_container")
+
+    if [ "$ios_wt_checked" -eq 0 ]; then
+      _info "[selftest] SKIP: Test 15 — no active iOS worktrees on this machine"
+    elif [ "$ios_parity_pass" = true ]; then
+      _info "[selftest] PASS: Test 15 (iOS parity: $ios_wt_checked worktrees all at $ios_canonical_count personas)"
+      pass=$((pass + 1))
+    else
+      _err "[selftest] FAIL: Test 15 — iOS parity mismatch (run 'kb-sync-personas sync-worktrees ios' to fix)"
+      fail=$((fail + 1))
+    fi
+  fi
+
+  # --- Test 16: nested main-root deploy — personas land in inner git root ---
+  # Scenario: container-layout team where the git checkout is nested below the
+  # container (Firebase/Android pattern). After sync-worktrees, the inner git root
+  # itself (not just the linked worktrees) must receive personas.
+  # Fixture: FakeContainer16/{inner-dev (git repo), worktrees/feature-branch (linked wt)}.
+  # Assertions: personas landed in inner-dev/.claude/agents; marker written; exclude entry.
+  _info "[selftest] Test 16: nested main-root deploy — personas land in inner git root..."
+
+  local tmp16
+  tmp16=$(mktemp -d)
+  local t16_container="${tmp16}/FakeContainer16"
+  local t16_inner="${t16_container}/inner-dev"
+  local t16_wt="${t16_container}/worktrees/feature-t16"
+  mkdir -p "$t16_inner"
+  git -C "$t16_inner" init -q
+  git -C "$t16_inner" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+  git -C "$t16_inner" worktree add "$t16_wt" -b "feature-selftest-t16" >/dev/null 2>&1
+
+  local t16_master_root="${tmp16}/fake-master16"
+  local t16_team_dir="${t16_master_root}/t16-team"
+  mkdir -p "$t16_team_dir"
+  printf "# persona X\n" > "${t16_team_dir}/persona-x.md"
+  printf "# persona Y\n" > "${t16_team_dir}/persona-y.md"
+  local t16_canonical_count=2
+
+  local t16_manifest="${tmp16}/manifest16.json"
+  cat > "$t16_manifest" <<T16_MANIFEST
+{
+  "schemaVersion": "1",
+  "masterRoot": "fake-master16",
+  "deployments": [
+    {
+      "team": "t16-team",
+      "targetRepo": "${t16_container}",
+      "targetDir": ".claude/agents",
+      "isGitRepo": false,
+      "exists": true,
+      "groups": ["t16-team"]
+    }
+  ]
+}
+T16_MANIFEST
+
+  local _saved_manifest_16="$MANIFEST"
+  local _saved_master_root_16="$MASTER_ROOT"
+  local _saved_master_relative_16="$MASTER_RELATIVE"
+  MANIFEST="$t16_manifest"
+  MASTER_ROOT="$t16_master_root"
+  MASTER_RELATIVE="fake-master16"
+
+  local t16_ok=true
+  _kbsp_sync_worktrees t16-team >/dev/null 2>&1 || t16_ok=false
+
+  # Assert: personas landed in the NESTED MAIN ROOT (inner-dev/.claude/agents)
+  local t16_main_target="${t16_inner}/.claude/agents"
+  local t16_main_count
+  t16_main_count=$(find "$t16_main_target" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$t16_main_count" -ne "$t16_canonical_count" ]; then
+    t16_ok=false
+    _err "[selftest] Test 16: main-root persona count mismatch — got $t16_main_count, expected $t16_canonical_count (target: $t16_main_target)"
+  fi
+
+  # Assert: .synced-from-master marker written to nested main root
+  if [ ! -f "${t16_main_target}/.synced-from-master" ]; then
+    t16_ok=false
+    _err "[selftest] Test 16: .synced-from-master marker not written to nested main root ($t16_main_target)"
+  fi
+
+  # Assert: exclude entry present in inner git root's git-common-dir/info/exclude
+  local t16_common_dir
+  t16_common_dir=$(git -C "$t16_inner" rev-parse --git-common-dir 2>/dev/null) || t16_common_dir=""
+  local t16_exclude_file="${t16_inner}/${t16_common_dir}/info/exclude"
+  local t16_exclude_count=0
+  if [ -f "$t16_exclude_file" ]; then
+    t16_exclude_count=$(grep -cxF ".claude/agents/" "$t16_exclude_file" 2>/dev/null || true)
+  fi
+  if [ "$t16_exclude_count" -ne 1 ]; then
+    t16_ok=false
+    _err "[selftest] Test 16: expected 1 exclude entry in inner-dev, got $t16_exclude_count (file: $t16_exclude_file)"
+  fi
+
+  MANIFEST="$_saved_manifest_16"
+  MASTER_ROOT="$_saved_master_root_16"
+  MASTER_RELATIVE="$_saved_master_relative_16"
+
+  git -C "$t16_inner" worktree remove --force "$t16_wt" >/dev/null 2>&1 || true
+  rm -rf "$tmp16"
+
+  if [ "$t16_ok" = true ]; then
+    _info "[selftest] PASS: Test 16 (nested main-root deploy: $t16_main_count/$t16_canonical_count personas; marker written; exclude entry present)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 16 — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 17: main root + linked worktree both receive personas ---
+  # Asserts that the XACA-0660 main-root loop AND the existing linked-worktree loop
+  # both fire correctly on the same container (the original fixture shape from Test 14).
+  # Uses fresh fixture with 1 inner git root + 1 linked worktree.
+  _info "[selftest] Test 17: main root + linked worktree both receive personas..."
+
+  local tmp17
+  tmp17=$(mktemp -d)
+  local t17_container="${tmp17}/FakeContainer17"
+  local t17_inner="${t17_container}/inner-dev"
+  local t17_wt="${t17_container}/worktrees/feature-t17"
+  mkdir -p "$t17_inner"
+  git -C "$t17_inner" init -q
+  git -C "$t17_inner" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+  git -C "$t17_inner" worktree add "$t17_wt" -b "feature-selftest-t17" >/dev/null 2>&1
+
+  local t17_master_root="${tmp17}/fake-master17"
+  local t17_team_dir="${t17_master_root}/t17-team"
+  mkdir -p "$t17_team_dir"
+  printf "# persona P\n" > "${t17_team_dir}/persona-p.md"
+  printf "# persona Q\n" > "${t17_team_dir}/persona-q.md"
+  local t17_canonical_count=2
+
+  local t17_manifest="${tmp17}/manifest17.json"
+  cat > "$t17_manifest" <<T17_MANIFEST
+{
+  "schemaVersion": "1",
+  "masterRoot": "fake-master17",
+  "deployments": [
+    {
+      "team": "t17-team",
+      "targetRepo": "${t17_container}",
+      "targetDir": ".claude/agents",
+      "isGitRepo": false,
+      "exists": true,
+      "groups": ["t17-team"]
+    }
+  ]
+}
+T17_MANIFEST
+
+  local _saved_manifest_17="$MANIFEST"
+  local _saved_master_root_17="$MASTER_ROOT"
+  local _saved_master_relative_17="$MASTER_RELATIVE"
+  MANIFEST="$t17_manifest"
+  MASTER_ROOT="$t17_master_root"
+  MASTER_RELATIVE="fake-master17"
+
+  local t17_ok=true
+  _kbsp_sync_worktrees t17-team >/dev/null 2>&1 || t17_ok=false
+
+  # Assert: personas landed in the nested MAIN ROOT
+  local t17_main_count
+  t17_main_count=$(find "${t17_inner}/.claude/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$t17_main_count" -ne "$t17_canonical_count" ]; then
+    t17_ok=false
+    _err "[selftest] Test 17: main-root persona count — got $t17_main_count, expected $t17_canonical_count"
+  fi
+
+  # Assert: personas also landed in the LINKED WORKTREE
+  local t17_wt_count
+  t17_wt_count=$(find "${t17_wt}/.claude/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$t17_wt_count" -ne "$t17_canonical_count" ]; then
+    t17_ok=false
+    _err "[selftest] Test 17: linked-worktree persona count — got $t17_wt_count, expected $t17_canonical_count"
+  fi
+
+  # Assert: markers written to BOTH targets
+  if [ ! -f "${t17_inner}/.claude/agents/.synced-from-master" ]; then
+    t17_ok=false
+    _err "[selftest] Test 17: .synced-from-master marker missing from nested main root"
+  fi
+  if [ ! -f "${t17_wt}/.claude/agents/.synced-from-master" ]; then
+    t17_ok=false
+    _err "[selftest] Test 17: .synced-from-master marker missing from linked worktree"
+  fi
+
+  MANIFEST="$_saved_manifest_17"
+  MASTER_ROOT="$_saved_master_root_17"
+  MASTER_RELATIVE="$_saved_master_relative_17"
+
+  git -C "$t17_inner" worktree remove --force "$t17_wt" >/dev/null 2>&1 || true
+  rm -rf "$tmp17"
+
+  if [ "$t17_ok" = true ]; then
+    _info "[selftest] PASS: Test 17 (both targets deployed: main-root=$t17_main_count, linked-wt=$t17_wt_count personas)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 17 — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 18: iOS/DNS no-double-deploy — container IS the git root ---
+  # When container is itself the git root (_resolve_git_roots returns the container),
+  # the XACA-0660 main-root loop must skip it (canon_main_root == canon_container_cmp)
+  # and NOT deploy a second copy. The sync subcommand owns the main deployment for these
+  # teams; sync-worktrees must succeed with no error and no file written to a
+  # "main root" target that would duplicate the standard deploy path.
+  _info "[selftest] Test 18: iOS/DNS no-double-deploy — container IS git root..."
+
+  local tmp18
+  tmp18=$(mktemp -d)
+  local t18_container="${tmp18}/iOS-style-container"
+  mkdir -p "$t18_container"
+  # Container itself IS the git repo (iOS/DNS topology)
+  git -C "$t18_container" init -q
+  git -C "$t18_container" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+
+  local t18_master_root="${tmp18}/fake-master18"
+  local t18_team_dir="${t18_master_root}/t18-team"
+  mkdir -p "$t18_team_dir"
+  printf "# persona R\n" > "${t18_team_dir}/persona-r.md"
+
+  local t18_manifest="${tmp18}/manifest18.json"
+  cat > "$t18_manifest" <<T18_MANIFEST
+{
+  "schemaVersion": "1",
+  "masterRoot": "fake-master18",
+  "deployments": [
+    {
+      "team": "t18-team",
+      "targetRepo": "${t18_container}",
+      "targetDir": ".claude/agents",
+      "isGitRepo": true,
+      "exists": true,
+      "groups": ["t18-team"]
+    }
+  ]
+}
+T18_MANIFEST
+
+  local _saved_manifest_18="$MANIFEST"
+  local _saved_master_root_18="$MASTER_ROOT"
+  local _saved_master_relative_18="$MASTER_RELATIVE"
+  MANIFEST="$t18_manifest"
+  MASTER_ROOT="$t18_master_root"
+  MASTER_RELATIVE="fake-master18"
+
+  local t18_ok=true
+  local t18_out
+  # git-tracked personas check: container has .gitignore that does NOT ignore .claude/agents/
+  # so _deployment_is_gitignored_personas returns false → sync-worktrees skips this team.
+  # We need the team to be treated as gitignored (container-layout) to exercise the
+  # main-root skip path. Add a .gitignore that ignores .claude/agents/
+  printf ".claude/agents/\n" > "${t18_container}/.gitignore"
+  git -C "$t18_container" add .gitignore >/dev/null 2>&1
+
+  t18_out=$(_kbsp_sync_worktrees t18-team 2>&1) || t18_ok=false
+
+  # The main-root loop must have skipped the container-as-root case: no personas
+  # should land at t18_container/.claude/agents (sync-worktrees never writes there
+  # without a linked worktree in this fixture — and there are NO linked worktrees).
+  # The command must exit without error.
+  local t18_main_target="${t18_container}/.claude/agents"
+  if [ -d "$t18_main_target" ]; then
+    # A directory was created — that's a double-deploy. Check if it has persona files.
+    local t18_deploy_count
+    t18_deploy_count=$(find "$t18_main_target" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$t18_deploy_count" -gt 0 ]; then
+      t18_ok=false
+      _err "[selftest] Test 18: main-root loop wrote $t18_deploy_count personas to container root (double-deploy)"
+    fi
+    # Directory may be created as side-effect of exclude write; files are the real signal
+  fi
+
+  MANIFEST="$_saved_manifest_18"
+  MASTER_ROOT="$_saved_master_root_18"
+  MASTER_RELATIVE="$_saved_master_relative_18"
+
+  rm -rf "$tmp18"
+
+  if [ "$t18_ok" = true ]; then
+    _info "[selftest] PASS: Test 18 (iOS/DNS no-double-deploy: container-as-root skipped correctly)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 18 — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 19: check detects main-root drift ---
+  # After a full sync, remove a persona file from the nested main root, then assert
+  # that 'check' reports DRIFT (not SYNCED) for that team. The JSON output must
+  # include an entry with status != "synced" for the main root.
+  _info "[selftest] Test 19: check detects main-root drift..."
+
+  local tmp19
+  tmp19=$(mktemp -d)
+  local t19_container="${tmp19}/FakeContainer19"
+  local t19_inner="${t19_container}/inner-dev"
+  local t19_wt="${t19_container}/worktrees/feature-t19"
+  mkdir -p "$t19_inner"
+  git -C "$t19_inner" init -q
+  git -C "$t19_inner" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+  git -C "$t19_inner" worktree add "$t19_wt" -b "feature-selftest-t19" >/dev/null 2>&1
+
+  local t19_master_root="${tmp19}/fake-master19"
+  local t19_team_dir="${t19_master_root}/t19-team"
+  mkdir -p "$t19_team_dir"
+  printf "# persona S\n" > "${t19_team_dir}/persona-s.md"
+  printf "# persona T\n" > "${t19_team_dir}/persona-t.md"
+
+  local t19_manifest="${tmp19}/manifest19.json"
+  cat > "$t19_manifest" <<T19_MANIFEST
+{
+  "schemaVersion": "1",
+  "masterRoot": "fake-master19",
+  "deployments": [
+    {
+      "team": "t19-team",
+      "targetRepo": "${t19_container}",
+      "targetDir": ".claude/agents",
+      "isGitRepo": false,
+      "exists": true,
+      "groups": ["t19-team"]
+    }
+  ]
+}
+T19_MANIFEST
+
+  local _saved_manifest_19="$MANIFEST"
+  local _saved_master_root_19="$MASTER_ROOT"
+  local _saved_master_relative_19="$MASTER_RELATIVE"
+  MANIFEST="$t19_manifest"
+  MASTER_ROOT="$t19_master_root"
+  MASTER_RELATIVE="fake-master19"
+
+  # First: fully deploy so the baseline is clean
+  _kbsp_sync_worktrees t19-team >/dev/null 2>&1 || true
+
+  # Induce drift: remove one persona file from the nested main root
+  local t19_main_agents="${t19_inner}/.claude/agents"
+  local t19_drifted_file
+  t19_drifted_file=$(find "$t19_main_agents" -maxdepth 1 -name 'persona-s.md' 2>/dev/null | head -1)
+  if [ -n "$t19_drifted_file" ]; then
+    rm "$t19_drifted_file"
+  fi
+
+  # check must exit non-zero (drift detected) and the JSON must show the main root entry
+  local t19_check_exit=0
+  local t19_json_out
+  t19_json_out=$(_kbsp_check t19-team --json 2>&1) || t19_check_exit=$?
+
+  local t19_ok=true
+
+  # check must report drift (exit non-zero)
+  if [ "$t19_check_exit" -eq 0 ]; then
+    t19_ok=false
+    _err "[selftest] Test 19: check returned exit 0 when main-root drift was induced (expected non-zero)"
+  fi
+
+  # JSON must include a main-root entry with a non-synced status
+  local t19_main_root_label
+  t19_main_root_label="[main-root:$(basename "$t19_inner")]"
+  local t19_has_drift_entry
+  t19_has_drift_entry=$(printf '%s' "$t19_json_out" | jq -r \
+    --arg lbl "$t19_main_root_label" \
+    '.worktrees[]? | select(.worktree == $lbl and .status != "synced") | .status' \
+    2>/dev/null | head -1) || t19_has_drift_entry=""
+  if [ -z "$t19_has_drift_entry" ]; then
+    t19_ok=false
+    _err "[selftest] Test 19: JSON worktrees array did not contain drifted main-root entry for '$t19_main_root_label'; json=$t19_json_out"
+  fi
+
+  MANIFEST="$_saved_manifest_19"
+  MASTER_ROOT="$_saved_master_root_19"
+  MASTER_RELATIVE="$_saved_master_relative_19"
+
+  git -C "$t19_inner" worktree remove --force "$t19_wt" >/dev/null 2>&1 || true
+  rm -rf "$tmp19"
+
+  if [ "$t19_ok" = true ]; then
+    _info "[selftest] PASS: Test 19 (check detects main-root drift: status=$t19_has_drift_entry)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 19 — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 20: list counts the main root in [wt:N/M] ---
+  # After syncing a container-layout team with a nested main root, the 'list'
+  # subcommand's [wt:synced/total] annotation must count the main root in the total
+  # (and as synced when it is deployed). Fixture: same shape as Test 16.
+  _info "[selftest] Test 20: list counts the nested main root in [wt:N/M]..."
+
+  local tmp20
+  tmp20=$(mktemp -d)
+  local t20_container="${tmp20}/FakeContainer20"
+  local t20_inner="${t20_container}/inner-dev"
+  local t20_wt="${t20_container}/worktrees/feature-t20"
+  mkdir -p "$t20_inner"
+  git -C "$t20_inner" init -q
+  git -C "$t20_inner" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+  git -C "$t20_inner" worktree add "$t20_wt" -b "feature-selftest-t20" >/dev/null 2>&1
+
+  local t20_master_root="${tmp20}/fake-master20"
+  local t20_team_dir="${t20_master_root}/t20-team"
+  mkdir -p "$t20_team_dir"
+  printf "# persona U\n" > "${t20_team_dir}/persona-u.md"
+
+  local t20_manifest="${tmp20}/manifest20.json"
+  cat > "$t20_manifest" <<T20_MANIFEST
+{
+  "schemaVersion": "1",
+  "masterRoot": "fake-master20",
+  "deployments": [
+    {
+      "team": "t20-team",
+      "targetRepo": "${t20_container}",
+      "targetDir": ".claude/agents",
+      "isGitRepo": false,
+      "exists": true,
+      "groups": ["t20-team"]
+    }
+  ]
+}
+T20_MANIFEST
+
+  local _saved_manifest_20="$MANIFEST"
+  local _saved_master_root_20="$MASTER_ROOT"
+  local _saved_master_relative_20="$MASTER_RELATIVE"
+  MANIFEST="$t20_manifest"
+  MASTER_ROOT="$t20_master_root"
+  MASTER_RELATIVE="fake-master20"
+
+  local t20_ok=true
+
+  # First assert WITHOUT deploy: list must show wt:0/2 (1 linked wt + 1 main root = 2 total)
+  local t20_list_before
+  t20_list_before=$(_kbsp_list 2>&1 | grep "t20-team") || t20_list_before=""
+  local t20_total_before
+  t20_total_before=$(printf '%s' "$t20_list_before" | grep -oE '\[wt:[0-9]+/[0-9]+\]' | grep -oE '/[0-9]+' | tr -d '/' | head -1) || t20_total_before=""
+  if [ "$t20_total_before" != "2" ]; then
+    t20_ok=false
+    _err "[selftest] Test 20: before deploy, list should show wt:0/2 — got '$t20_list_before'"
+  fi
+
+  # Deploy and re-check: should be wt:2/2
+  _kbsp_sync_worktrees t20-team >/dev/null 2>&1 || true
+
+  local t20_list_after
+  t20_list_after=$(_kbsp_list 2>&1 | grep "t20-team") || t20_list_after=""
+  local t20_synced_after t20_total_after
+  t20_synced_after=$(printf '%s' "$t20_list_after" | grep -oE '\[wt:[0-9]+/[0-9]+\]' | grep -oE 'wt:[0-9]+' | grep -oE '[0-9]+' | head -1) || t20_synced_after=""
+  t20_total_after=$(printf '%s' "$t20_list_after" | grep -oE '\[wt:[0-9]+/[0-9]+\]' | grep -oE '/[0-9]+' | tr -d '/' | head -1) || t20_total_after=""
+  if [ "$t20_synced_after" != "2" ] || [ "$t20_total_after" != "2" ]; then
+    t20_ok=false
+    _err "[selftest] Test 20: after deploy, list should show [wt:2/2] — got '$t20_list_after'"
+  fi
+
+  MANIFEST="$_saved_manifest_20"
+  MASTER_ROOT="$_saved_master_root_20"
+  MASTER_RELATIVE="$_saved_master_relative_20"
+
+  git -C "$t20_inner" worktree remove --force "$t20_wt" >/dev/null 2>&1 || true
+  rm -rf "$tmp20"
+
+  if [ "$t20_ok" = true ]; then
+    _info "[selftest] PASS: Test 20 (list [wt:N/M]: before=wt:0/$t20_total_before, after=wt:$t20_synced_after/$t20_total_after)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 20 — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 21: XACA-1261 consumer-mode targetRepo/hosted-here resolution ---
+  # Synthetic fixture exercising _resolve_target_repo_for_team + _is_hosted_here
+  # via the real _kbsp_list subcommand, following Test 14/19/20's "swap script
+  # globals, invoke the real subcommand, restore" pattern rather than inventing
+  # a new mocking mechanism.
+  #
+  # Three manifest rows, one synthetic team-paths.json:
+  #   t21-hosted       — has a team-paths.json entry whose working_dir IS a real
+  #                       git repo (Case 1 of _resolve_git_roots) -> must APPEAR,
+  #                       with TARGET REPO resolved from the REGISTRY, never from
+  #                       the manifest's own (deliberately wrong) targetRepo field.
+  #   t21-unhosted     — HAS a team-paths.json entry, but that working_dir is a
+  #                       plain directory with no git checkout inside it -> must
+  #                       be OMITTED (registered-but-not-really-hosted, the
+  #                       academy-on-a-non-academy-consumer shape).
+  #   t21-unregistered — no team-paths.json entry at all -> must be OMITTED.
+  #
+  # 21d is the negative control the spec requires: re-run the IDENTICAL manifest
+  # + registry fixture under KBSP_MODE=dev (the pre-fix resolution path — targetRepo
+  # read straight off the manifest, no hosted-here filter). It must fail to
+  # produce a correct result — t21-hosted resolves to the manifest's deliberately
+  # bogus dev-only path (not the registry's real git dir), and the two rows that
+  # consumer mode omits are NOT filtered at all — proving this test actually
+  # exercises the fix rather than passing vacuously either way.
+  _info "[selftest] Test 21: consumer-mode targetRepo/hosted-here resolution..."
+
+  local tmp21
+  tmp21=$(mktemp -d)
+
+  # t21-hosted: working_dir IS the git repo itself (matches Case 1 in
+  # _resolve_git_roots, same shape Test 12 already relies on).
+  local t21_hosted_repo="${tmp21}/HostedRepo"
+  mkdir -p "$t21_hosted_repo"
+  git -C "$t21_hosted_repo" init -q
+  git -C "$t21_hosted_repo" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+
+  # t21-unhosted: registered, but no git checkout lives here at all.
+  local t21_unhosted_dir="${tmp21}/UnhostedDir"
+  mkdir -p "$t21_unhosted_dir/kanban"
+
+  local t21_team_paths="${tmp21}/team-paths21.json"
+  cat > "$t21_team_paths" <<T21_TEAM_PATHS
+{
+  "schema_version": 3,
+  "teams": {
+    "t21-hosted": { "working_dir": "${t21_hosted_repo}" },
+    "t21-unhosted": { "working_dir": "${t21_unhosted_dir}" }
+  }
+}
+T21_TEAM_PATHS
+
+  local t21_manifest="${tmp21}/manifest21.json"
+  cat > "$t21_manifest" <<T21_MANIFEST
+{
+  "schemaVersion": "1",
+  "masterRoot": "fake-master21",
+  "deployments": [
+    {
+      "team": "t21-hosted",
+      "targetRepo": "${tmp21}/dev-only-bogus-path-hosted",
+      "targetDir": ".claude/agents",
+      "isGitRepo": true,
+      "exists": true,
+      "groups": ["t21-group"]
+    },
+    {
+      "team": "t21-unhosted",
+      "targetRepo": "${tmp21}/dev-only-bogus-path-unhosted",
+      "targetDir": ".claude/agents",
+      "isGitRepo": true,
+      "exists": true,
+      "groups": ["t21-group"]
+    },
+    {
+      "team": "t21-unregistered",
+      "targetRepo": "${tmp21}/dev-only-bogus-path-unregistered",
+      "targetDir": ".claude/agents",
+      "isGitRepo": true,
+      "exists": true,
+      "groups": ["t21-group"]
+    }
+  ]
+}
+T21_MANIFEST
+
+  local _saved_manifest_21="$MANIFEST"
+  local _saved_team_paths_json_21="$TEAM_PATHS_JSON"
+  local _saved_kbsp_mode_21="$KBSP_MODE"
+  MANIFEST="$t21_manifest"
+  TEAM_PATHS_JSON="$t21_team_paths"
+
+  # --- 21a/b/c: consumer mode ---
+  KBSP_MODE="consumer"
+  local t21_consumer_out
+  t21_consumer_out=$(_kbsp_list 2>&1)
+
+  local t21_ok=true
+
+  local t21_hosted_line
+  t21_hosted_line=$(printf '%s\n' "$t21_consumer_out" | grep -E '^t21-hosted[[:space:]]') || t21_hosted_line=""
+  if [ -z "$t21_hosted_line" ]; then
+    t21_ok=false
+    _err "[selftest] Test 21a: t21-hosted row missing from consumer-mode list; output=$t21_consumer_out"
+  elif [[ "$t21_hosted_line" != *"$t21_hosted_repo"* ]]; then
+    t21_ok=false
+    _err "[selftest] Test 21a: t21-hosted row did not resolve TARGET REPO from the registry ($t21_hosted_repo); got: $t21_hosted_line"
+  elif [[ "$t21_hosted_line" == *"dev-only-bogus-path"* ]]; then
+    t21_ok=false
+    _err "[selftest] Test 21a: t21-hosted row used the manifest's own targetRepo instead of the registry; got: $t21_hosted_line"
+  fi
+
+  local t21_unhosted_line
+  t21_unhosted_line=$(printf '%s\n' "$t21_consumer_out" | grep -E '^t21-unhosted[[:space:]]') || t21_unhosted_line=""
+  if [ -n "$t21_unhosted_line" ]; then
+    t21_ok=false
+    _err "[selftest] Test 21b: t21-unhosted row should be OMITTED (registered but no git checkout) — got: $t21_unhosted_line"
+  fi
+
+  local t21_unregistered_line
+  t21_unregistered_line=$(printf '%s\n' "$t21_consumer_out" | grep -E '^t21-unregistered[[:space:]]') || t21_unregistered_line=""
+  if [ -n "$t21_unregistered_line" ]; then
+    t21_ok=false
+    _err "[selftest] Test 21c: t21-unregistered row should be OMITTED (no team-paths.json entry) — got: $t21_unregistered_line"
+  fi
+
+  # --- 21d: negative control — same fixture, pre-fix (dev-mode) resolution path ---
+  KBSP_MODE="dev"
+  local t21_dev_out
+  t21_dev_out=$(_kbsp_list 2>&1)
+
+  local t21_dev_hosted_line
+  t21_dev_hosted_line=$(printf '%s\n' "$t21_dev_out" | grep -E '^t21-hosted[[:space:]]') || t21_dev_hosted_line=""
+  if [ -z "$t21_dev_hosted_line" ] || [[ "$t21_dev_hosted_line" != *"dev-only-bogus-path-hosted"* ]]; then
+    t21_ok=false
+    _err "[selftest] Test 21d: negative control did not behave like the pre-fix path (expected t21-hosted to show the manifest's bogus dev-only targetRepo under KBSP_MODE=dev) — got: $t21_dev_hosted_line"
+  fi
+  local t21_dev_unhosted_line
+  t21_dev_unhosted_line=$(printf '%s\n' "$t21_dev_out" | grep -E '^t21-unhosted[[:space:]]') || t21_dev_unhosted_line=""
+  if [ -z "$t21_dev_unhosted_line" ]; then
+    t21_ok=false
+    _err "[selftest] Test 21d: negative control expected t21-unhosted to be UNFILTERED under KBSP_MODE=dev (dev mode applies no hosted-here filter) — it was absent instead"
+  fi
+
+  MANIFEST="$_saved_manifest_21"
+  TEAM_PATHS_JSON="$_saved_team_paths_json_21"
+  KBSP_MODE="$_saved_kbsp_mode_21"
+
+  rm -rf "$tmp21"
+
+  if [ "$t21_ok" = true ]; then
+    _info "[selftest] PASS: Test 21 (consumer mode: hosted row resolved from registry; unhosted + unregistered omitted; negative control confirms the fix is load-bearing)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 21 — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+
+  # --- Cleanup ---
+  rm -rf "$tmp_repo"
+  _info "[selftest] Temp dir cleaned up."
+
+  # --- Summary ---
+  echo ""
+  echo "Self-test results: ${pass} passed, ${fail} failed"
+  if [ "$fail" -gt 0 ]; then
+    _err "Self-test FAILED ($fail failures)"
+    return 1
+  else
+    _info "Self-test PASSED"
+    return 0
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+_require_jq
+
+if [ ! -f "$MANIFEST" ]; then
+  _err "Manifest not found: $MANIFEST"
+  _err "Expected at: ~/dev-team/.claude/personas-manifest.json"
+  exit 1
+fi
+
+if [ ! -d "$MASTER_ROOT" ]; then
+  _err "Master root not found: $MASTER_ROOT"
+  exit 1
+fi
+
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+  list)            _kbsp_list "$@" ;;
+  check)           _kbsp_check "$@" ;;
+  sync)            _kbsp_sync "$@" ;;
+  sync-worktrees)  _kbsp_sync_worktrees "$@" ;;
+  diff)            _kbsp_diff "$@" ;;
+  refresh)         _kbsp_refresh "$@" ;;
+  selftest)        _kbsp_selftest "$@" ;;
+  help|--help|-h)  _kbsp_help ;;
+  *)
+    _err "Unknown subcommand: $CMD"
+    echo ""
+    _kbsp_help
+    exit 1
+    ;;
+esac
