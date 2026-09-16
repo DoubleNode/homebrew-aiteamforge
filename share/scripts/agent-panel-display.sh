@@ -392,7 +392,10 @@ install_window_hook() {
     return 1
 }
 
-install_window_hook || true
+# NOTE: install_window_hook is NOT called here. Its readback uses
+# tmux_bounded_probe and WINDOW_PROBE_TIMEOUT_S, both of which are defined
+# BELOW — see the "STARTUP CALL" block after tmux_bounded_probe for why the
+# call site moved and what the old ordering silently broke (XACA-1255-027).
 
 # ── BOUNDED tmux PROBE (XACA-1255-020) ────────────────────────────────────
 #
@@ -468,6 +471,74 @@ tmux_bounded_probe() {
     return $rc
 }
 
+# ── STARTUP CALL: install_window_hook, AFTER its dependencies (XACA-1255-027) ─
+#
+# THE DEFECT THIS FIXES: this call used to sit immediately after
+# install_window_hook's DEFINITION, ~35 lines above — which is before
+# tmux_bounded_probe() and WINDOW_PROBE_TIMEOUT_S exist. A shell function is
+# resolved at CALL time, so the readback line inside install_window_hook ran
+# `tmux_bounded_probe` when no such command was defined: command-not-found,
+# swallowed by the `2>/dev/null` inside the `$(...)` capture, readback empty,
+# the case match fails, `return 1`. The startup VERIFICATION could therefore
+# never succeed on its first call — dead code that reported failure regardless
+# of whether the hook had actually installed.
+#
+# It stayed invisible because it SELF-CORRECTS: the poll loop calls
+# install_window_hook again ~2s later, by which time everything is defined, and
+# WINDOW_HOOK_INSTALLED latches. The only observable symptom was a ~2s window in
+# which the script believed the hook was missing while it was in fact present.
+#
+# THIS IS THE SAME SHAPE THE TICKET ALREADY FIXED ELSEWHERE: a verification step
+# that always fails, masked by a retry, reads identically to a verification step
+# that works. The 60s refresh_active_window_file heartbeat masking the
+# unverified hook (XACA-1255-022) was that shape; leaving this one in the same
+# file would be a second instance of it.
+#
+# WHY HERE and not earlier: everything install_window_hook touches (TMUX_CMD,
+# SESSION_CODE, WINDOW_HOOK_BODY, tmux_bounded_probe, WINDOW_PROBE_TIMEOUT_S) is
+# defined above this line, and nothing between the old call site and here reads
+# WINDOW_HOOK_INSTALLED. Keep this call BELOW tmux_bounded_probe; moving it back
+# up silently restores the dead-code state.
+install_window_hook || true
+
+# ── WINDOW-FIELD VALIDATORS — BYTE-IDENTICAL TO kanban-helpers.sh (XACA-1255-028) ─
+#
+# These two function bodies are a VERBATIM COPY of kanban-helpers.sh's
+# _kb_is_valid_window_index / _kb_is_valid_window_name. The copy exists because
+# this script is standalone zsh with no kanban dependency: sourcing
+# kanban-helpers.sh here would pull in the whole board/jq/lock machinery (and
+# its own tmux probing) into a 2-second render loop, for two predicates.
+#
+# A COPY IS A DRIFT HAZARD, AND IT ALREADY DRIFTED. Before this change the panel
+# did not have these functions at all — it inlined a "mirroring" check that
+# ran `tr -d '[:space:]'` over the index and `tr -d '\r\n\t'` over the name
+# FIRST, so the panel ACCEPTED " 5" and a tab-bearing name where
+# kanban-helpers.sh REJECTS both. Two sites doing the same check differently is
+# precisely the class XACA-1255-019 exists to remove, and a comment claiming
+# they mirror each other is not a mechanism.
+#
+# THE MECHANISM: tests/test-xaca-1255-panel-hook-and-validators.sh extracts both
+# definitions from both files and asserts they are byte-identical. Editing one
+# without the other fails that suite loudly — it does not silently diverge.
+# If you change either definition, change BOTH, in the same commit.
+#
+# Do NOT "improve" this copy in place (no whitespace tolerance, no
+# normalisation). Normalising input before validating is what produced the
+# divergence: it makes the panel answer a question the canonical validator was
+# never asked.
+_kb_is_valid_window_index() {
+    [[ "${1-}" =~ ^[0-9]+$ ]]
+}
+
+_kb_is_valid_window_name() {
+    local n="${1-}"
+    [[ -n "$n" ]] || return 1
+    case "$n" in
+        *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
+    esac
+    return 0
+}
+
 # ── WINDOW IDENTITY: ONE atomic, bounded, validated probe per render ───────
 #
 # TRAP (the load-bearing fact of this ticket): `tmux display-message -t
@@ -536,17 +607,18 @@ refresh_window_identity() {
     esac
     idx="${raw%%$'\t'*}"
     nm="${raw#*$'\t'}"
-    idx=$(printf '%s' "$idx" | tr -d '[:space:]')
-    nm=$(printf '%s' "$nm" | tr -d '\r\n\t')
-
-    # VALUE validation, mirroring kanban-helpers.sh's _kb_is_valid_window_index /
-    # _kb_is_valid_window_name. Both must pass or NEITHER field is published —
-    # that all-or-nothing rule is what stops a half-resolved pane from pairing a
-    # real index with an invented name.
-    case "$idx" in
-        ''|*[!0-9]*) return 0 ;;
-    esac
-    [[ -n "$nm" ]] || return 0
+    # VALUE validation through the SHARED validator definitions above — not a
+    # re-implementation of them, and deliberately with NO normalisation step in
+    # front (XACA-1255-028). The `tr -d '[:space:]'` / `tr -d '\r\n\t'` scrub
+    # that used to sit here is what made this site accept " 5" and a tab-bearing
+    # name that kanban-helpers.sh rejects: stripping before validating answers a
+    # different question than the canonical validator was asked.
+    #
+    # Both must pass or NEITHER field is published — that all-or-nothing rule
+    # is what stops a half-resolved pane from pairing a real index with an
+    # invented name.
+    _kb_is_valid_window_index "$idx" || return 0
+    _kb_is_valid_window_name "$nm" || return 0
 
     WINDOW_ID_CACHE_INDEX="$idx"
     WINDOW_ID_CACHE_NAME="$nm"

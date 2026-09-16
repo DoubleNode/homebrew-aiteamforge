@@ -63,6 +63,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   server no longer wedges the render loop; forks reduced 5 -> 1 per render) and the per-session hook install is
   verified by reading the value back and retried until it lands — NOT by its exit code, since `set-hook -gu`
   leaves the key present with an empty value.
+  Gate round 2: `share/scripts/agent-panel-display.sh` — the per-session hook install's read-back verification
+  was dead on its first call (it referenced a probe defined later in the file, with the error swallowed by an
+  in-substitution `2>/dev/null`, self-healing only on the first poll); the call now sits below both
+  definitions. The panel's index validator no longer strips whitespace before validating, making it
+  byte-identical to `_kb_is_valid_window_index` in `kanban-helpers.sh` (not mirrored here) — two sites doing
+  the same check differently is the drift class the shared validators exist to remove.
 
 ## [0.20.15] - 2026-09-16
 
