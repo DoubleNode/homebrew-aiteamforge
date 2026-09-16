@@ -163,15 +163,69 @@ class TestConnectionAuthSchemeTests(unittest.TestCase):
 
     def setUp(self):
         self._env_patches = []
+        # XACA-1246 [Review] finding 029: the teamless test-connection path
+        # now refuses to fingerprint/probe any env var name that isn't
+        # declared as SOME team's Anthropic credential in team-paths.json
+        # (closing a fingerprint oracle where an arbitrary process env var,
+        # e.g. AWS_SECRET_ACCESS_KEY, could be named and fingerprinted with
+        # no ownership check at all). These tests exercise the D3
+        # auth-scheme branch (token prefix -> probe header shape), not team
+        # scoping, so give each synthetic test var a throwaway declared
+        # credential here -- in an isolated HOME -- rather than widening
+        # what the server itself will disclose just to keep an old test
+        # passing.
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.home = self._tmpdir.name
+        (Path(self.home) / ".aiteamforge").mkdir(parents=True, exist_ok=True)
+        self.team_paths_file = Path(self.home) / ".aiteamforge" / "team-paths.json"
+        home_patch = patch.dict(os.environ, {"HOME": self.home}, clear=False)
+        home_patch.start()
+        self._env_patches.append(home_patch)
+        self._declared_vars = []
+        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+            LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
 
     def tearDown(self):
-        for p in self._env_patches:
+        # XACA-1246 [Review] finding 029 follow-up: stop in REVERSE
+        # (LIFO) order, not insertion order. `patch.dict`'s stop()
+        # snapshots-and-restores the WHOLE dict as of its own start()
+        # time -- with the HOME patch now started FIRST and per-test var
+        # patches nested inside it, stopping HOME first (as the old FIFO
+        # loop did, back when every entry here was an independent
+        # single-var patch with no nesting) let the LATER var patch's
+        # stop() restore its own snapshot -- which still had HOME set to
+        # the tmp dir -- reintroducing a leaked HOME into the real
+        # environment for every test that ran afterward. Measured: this
+        # silently broke test_xaca1246_credential_resolver_fallback.py's
+        # real-script test whenever it ran later in the same session,
+        # because that test's subprocess then read team-paths.json from
+        # the (already-cleaned-up) leaked tmp HOME instead of the real one.
+        for p in reversed(self._env_patches):
             p.stop()
+        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+            LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
 
     def _set_env(self, name, value):
         p = patch.dict("os.environ", {name: value})
         p.start()
         self._env_patches.append(p)
+        # Declare `name` as a throwaway team's Anthropic credential so the
+        # finding-029 guard on the teamless path lets this synthetic var
+        # through -- see the setUp comment above.
+        if name not in self._declared_vars:
+            self._declared_vars.append(name)
+        with open(self.team_paths_file, "w") as f:
+            json.dump({
+                "teams": {
+                    f"x1178authscheme_{i}": {"ai": {"credential": {
+                        "engine_slug": "anthropic", "env_var_name": declared_name,
+                    }}}
+                    for i, declared_name in enumerate(self._declared_vars)
+                }
+            }, f)
+        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+            LCARSHandler._TEAM_PATHS_CACHE = {"mtime_ns": None, "data": None}
 
     def _post(self, env_var_name):
         body = json.dumps({"env_var_name": env_var_name}).encode()

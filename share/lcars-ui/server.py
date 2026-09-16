@@ -15877,10 +15877,28 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             # Resolve env_var_name: prefer explicit field, fall back to team lookup
-            env_var_name = body.get('env_var_name', '').strip()
+            # XACA-1246 [Review] finding 030: `body.get(x, '').strip()` raises
+            # AttributeError on a non-string value -- e.g. `{"team": null}` makes
+            # `body.get('team', '')` return None, NOT the '' default (`.get`'s
+            # default only applies when the KEY is absent, not when its value is
+            # None) -- and that raw exception text used to reach the client as an
+            # HTTP 500 (the sibling save/assign handlers already type-check before
+            # `.strip()`; this handler didn't). Type-check every body field before
+            # stripping it and return a clean 400 instead.
+            env_var_name_raw = body.get('env_var_name', '')
+            if not isinstance(env_var_name_raw, str):
+                self._send_json_response(
+                    {'ok': False, 'error': 'env_var_name must be a string'}, status=400)
+                return
+            env_var_name = env_var_name_raw.strip()
             team = ''
             if not env_var_name:
-                team = body.get('team', '').strip() or LCARS_TEAM
+                team_raw = body.get('team', '')
+                if not isinstance(team_raw, str):
+                    self._send_json_response(
+                        {'ok': False, 'error': 'team must be a string'}, status=400)
+                    return
+                team = team_raw.strip() or LCARS_TEAM
                 if team not in TEAM_KANBAN_DIRS:
                     self._send_json_response({'ok': False, 'error': f'Unknown team: {team}'}, status=400)
                     return
@@ -15962,7 +15980,28 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # speaks in terms of a team's SAVED credential), and MUST
                 # NOT silently re-resolve some other team as a substitute.
                 # Fail with a clear, actionable error instead.
-                team = body.get('team', '').strip()
+                team_raw = body.get('team', '')
+                if not isinstance(team_raw, str):
+                    self._send_json_response(
+                        {'ok': False, 'error': 'team must be a string'}, status=400)
+                    return
+                # XACA-1246 [Review] finding 030: a whitespace-only team (e.g.
+                # "   ") strips down to '' -- indistinguishable, past this
+                # point, from a team key that was never sent at all. That
+                # ambiguity used to silently slide a deliberately-but-badly
+                # supplied team into the SAME `else` branch as a genuinely
+                # absent one, i.e. the teamless os.environ read further down
+                # -- a security-relevant path per finding 029 (it discloses
+                # ANY process env var's fingerprint with no
+                # credential-ownership check). An explicitly-provided-but-
+                # blank team is a malformed request, not an omission --
+                # reject it outright instead of downgrading it to "no team
+                # association".
+                if team_raw and not team_raw.strip():
+                    self._send_json_response(
+                        {'ok': False, 'error': 'team must not be blank/whitespace-only'}, status=400)
+                    return
+                team = team_raw.strip()
 
                 def _cred_var_name(block):
                     ai = block.get('ai') if isinstance(block, dict) else None
@@ -16070,6 +16109,57 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # declare the identical env_var_name, measured) as a
                 # validated green for this one. A known team's failure
                 # must be surfaced, never quietly bridged.
+                #
+                # XACA-1246 [Review] finding 029 (security, fingerprint
+                # oracle): before this guard, a teamless caller could name
+                # ANY process environment variable -- e.g.
+                # AWS_SECRET_ACCESS_KEY -- and get back a first4+last4
+                # fingerprint of its live value with NO API call and no
+                # credential-ownership check: an unrecognized-prefix value
+                # hits the D7 "auth scheme not recognized" branch below,
+                # which returns the already-computed fingerprint with
+                # probed=False before ever reaching the network. Measured:
+                # `AWS_SECRET_ACCESS_KEY` -> `wJal****...EKEY`.
+                # `_ENV_VAR_NAME_RE` alone (^[A-Z][A-Z0-9_]*$) does not close
+                # this -- AWS_SECRET_ACCESS_KEY matches that shape too; a
+                # name-pattern check says nothing about who owns the value
+                # behind it.
+                #
+                # Chosen remedy (deliberate, not the alternative of simply
+                # never fingerprinting the unprobed/D7 path): constrain the
+                # teamless path to variable NAMES this server actually knows
+                # about as an Anthropic credential -- i.e. declared as SOME
+                # team's ai.credential.env_var_name in team-paths.json. This
+                # does not resolve a VALUE from any particular team (that
+                # ambiguity is exactly what the team-known branch above
+                # refuses to guess, XACA-1246 [Review] blocking finding) --
+                # it only answers "has anyone ever configured this NAME as
+                # an Anthropic credential", which is enough to keep an
+                # unrelated secret (AWS/Twilio/etc.) out of this endpoint
+                # entirely while still letting an operator test-drive a
+                # candidate value for a name that legitimately is one.
+                declared_names = set()
+                _tp_data, _tp_err = self._read_team_paths_raw()
+                if not _tp_err and isinstance(_tp_data, dict):
+                    for _team_block in (_tp_data.get('teams') or {}).values():
+                        _ai_block = _team_block.get('ai') if isinstance(_team_block, dict) else None
+                        _ai_cred = _ai_block.get('credential') if isinstance(_ai_block, dict) else None
+                        _cred_name = _ai_cred.get('env_var_name') if isinstance(_ai_cred, dict) else None
+                        if isinstance(_cred_name, str) and _cred_name:
+                            declared_names.add(_cred_name)
+                if env_var_name not in declared_names:
+                    self._send_json_response({
+                        'ok': False,
+                        'probed': False,
+                        'account_fingerprint': None,
+                        'model_access': None,
+                        'error': (
+                            f'{env_var_name!r} is not declared as any team\'s Anthropic '
+                            'credential in team-paths.json -- refusing to read or '
+                            'fingerprint an unrelated process environment variable.'
+                        ),
+                    }, status=400)
+                    return
                 api_key = os.environ.get(env_var_name, '')
             if not api_key:
                 # XACA-1246-006: when the resolver chain gave a real reason

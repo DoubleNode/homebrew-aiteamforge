@@ -513,7 +513,20 @@
                 testStatusEl.textContent = data.error || 'Token present — not probed';
                 testStatusEl.className = 'status-warning';
             } else {
-                testStatusEl.textContent = 'Failed: ' + (data.error || 'Unknown error');
+                // XACA-1246 [UX-027]: the round-2 blocking fix stopped a known
+                // team's unavailable credential from silently falling back to
+                // a DIFFERENT team's token (borrowed via a shared env var
+                // name) and reporting success. A team that used to see
+                // "Connection OK" here purely off that borrowed value now
+                // correctly sees a failure instead -- said explicitly here,
+                // mirroring the status-dot tooltip's UX-023 addendum above
+                // (renderTeamRow), so this reads as remediation rather than a
+                // fresh regression. Proportionate: one addendum on the
+                // generic failure branch, not a notification framework.
+                testStatusEl.textContent = 'Failed: ' + (data.error || 'Unknown error') +
+                    ' (If this showed “Connection OK” before recent maintenance, that ' +
+                    'is expected: a fix stopped this check from silently accepting another ' +
+                    'team’s credential when this team’s own is unavailable.)';
                 testStatusEl.className = 'status-error';
             }
         } catch (err) {

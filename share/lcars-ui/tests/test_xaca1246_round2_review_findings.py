@@ -116,6 +116,33 @@ def _response_json(buf):
     return json.loads(buf.read().decode())
 
 
+def _fake_urlopen_success():
+    """A urlopen() context manager returning a successful /v1/messages reply.
+
+    XACA-1246 [Review] finding 028: without this, a bare `patch("server.
+    urllib.request.urlopen")` leaves an unconfigured MagicMock in place --
+    `json.loads(<MagicMock>.read().decode(...))` then raises TypeError
+    inside the probe's own try/except, forcing `ok=False` UNCONDITIONALLY,
+    on both vulnerable and fixed code alike. That made
+    test_faulted_seam_never_reports_wrong_team_fingerprint vacuous: its
+    `account_fingerprint is None` assertion passed either way, because the
+    probe could never reach the branch that actually populates a
+    fingerprint (`account_fingerprint if ok else None`). Giving the mock a
+    real `type: message` body lets a probe that is REACHED succeed, so the
+    assertion can actually distinguish "correctly never got this far" from
+    "got here and got lucky." Mirrors test_xaca1178_test_connection_auth_
+    scheme.py's helper of the same name.
+    """
+    fake_resp = MagicMock()
+    fake_resp.status = 200
+    fake_resp.read.return_value = json.dumps(
+        {"type": "message", "model": "claude-haiku-4-5"}
+    ).encode()
+    fake_resp.__enter__ = MagicMock(return_value=fake_resp)
+    fake_resp.__exit__ = MagicMock(return_value=False)
+    return fake_resp
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # BLOCKING: a known team whose seam FAULTS must never fall back to a raw
 # os.environ read that may belong to a different team.
@@ -211,18 +238,60 @@ class KnownTeamSeamFaultNeverFallsBackTests(unittest.TestCase):
 
     def test_faulted_seam_never_reports_wrong_team_fingerprint(self):
         """response['account_fingerprint'] must never be derived from the
-        shared os.environ value -- it must be None on a faulted seam."""
+        shared os.environ value -- it must be None on a faulted seam.
+
+        XACA-1246 [Review] finding 028: the original version of this test
+        patched urlopen with a bare, unconfigured MagicMock. That forces
+        `json.loads(<MagicMock>)` to raise inside the probe's own
+        try/except, which sets `ok=False` UNCONDITIONALLY -- so
+        `account_fingerprint if ok else None` always evaluated to None
+        regardless of whether the fix's `and not team` scoping was present
+        at all. Verified by reverting that one line
+        (`if not api_key and not team:` -> `if not api_key:`) and
+        confirming, pre-fix, this test still passed while 3 of the other 4
+        sub-tests in this class correctly failed -- exactly the "manufactures
+        confidence" shape this finding warns about.
+
+        Fixed by giving urlopen a REAL `type: message` success body
+        (_fake_urlopen_success()), so a probe that is actually REACHED
+        succeeds and populates a real, non-None fingerprint. On fixed code
+        the seam fault for a KNOWN team short-circuits before urlopen is
+        ever called, so the fingerprint stays None and urlopen is never
+        invoked. On reverted code, the `if not api_key:` fallback picks up
+        WRONG_TEAM_TOKEN from the shared env var, the probe now reaches
+        this success mock, `ok` becomes True, and the fingerprint gets
+        populated FROM THAT WRONG TOKEN -- which this test asserts must
+        never happen, by name, not just via assertIsNone.
+        """
         def _fake_resolve(team, *, want_value=False, force=False):
             return {"available": False, "mode": None, "fault": "chain timed out", "token": None}
 
+        # The fingerprint a probe WOULD produce if it ever (wrongly) probed
+        # the shared/wrong-team token -- computed with server.py's own
+        # formula so this assertion tracks that formula rather than
+        # hardcoding a magic string. Never a real secret: WRONG_TEAM_TOKEN
+        # is a synthetic fixture token (all 'a's + a literal '9999' tail),
+        # not a live credential -- safe to derive and compare in test
+        # output per this ticket's "never print a secret value" rule.
+        _wt = self.WRONG_TEAM_TOKEN
+        wrong_team_fingerprint = _wt[:8].replace(_wt[4:8], '****') + '…' + _wt[-4:]
+
         with patch.object(LCARSHandler, "_resolve_team_credential", side_effect=_fake_resolve), \
              patch.object(LCARSHandler, "_save_account_validation_cache"), \
-             patch("server.urllib.request.urlopen"):
+             patch("server.urllib.request.urlopen",
+                   return_value=_fake_urlopen_success()) as mock_urlopen:
             handler, buf = self._post(self.TEAM_B, self.SHARED_VAR)
             handler.handle_team_account_test_connection()
 
         response = _response_json(buf)
         self.assertIsNone(response.get("account_fingerprint"))
+        # The seam fault must short-circuit before the probe is ever
+        # reached -- if this fires, the fallback silently engaged.
+        mock_urlopen.assert_not_called()
+        # Named assertion the finding asked for: whatever the fingerprint
+        # value ends up being, it must never be team A's (the wrong-team
+        # token's) fingerprint specifically.
+        self.assertNotEqual(response.get("account_fingerprint"), wrong_team_fingerprint)
         # Belt-and-suspenders: the wrong-team token's tail must not appear
         # anywhere in the response body.
         self.assertNotIn(self.WRONG_TEAM_TOKEN[-4:], json.dumps(response))
