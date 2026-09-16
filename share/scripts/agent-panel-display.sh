@@ -277,28 +277,113 @@ get_theme_color() {
     esac
 }
 
-# Active window file (written by tmux session-window-changed hook)
+# ═══════════════════════════════════════════════════════════════════════
+# WINDOW IDENTITY (XACA-1255)
+#
+# This panel is launched ONCE PER SESSION as an iTerm split, OUTSIDE tmux:
+#     agent-panel-display.sh <session-code>
+# It has no tmux pane of its own, so the only thing it can honestly report is
+# "which window of <session-code> is currently active". Several Claude chats
+# run in different WINDOWS of one session; the panel is session-level.
+#
+# It used to read that index out of a shared file written by a tmux hook
+# installed with `set-hook -g` (GLOBAL). That channel was wrong three ways:
+#   (A) the file could be arbitrarily stale relative to tmux reality, so the
+#       MISSION block showed a DIFFERENT chat's kanban item;
+#   (B) the file was seeded only when ABSENT, so a restarted panel inherited a
+#       stale index indefinitely with no staleness check;
+#   (C) `-g` installs ONE hook per tmux SERVER, shared by every session on the
+#       socket, and the hook body baked in ${LCARS_TMP} — which is resolved PER
+#       SESSION. The last panel to start fleet-wide decided where every
+#       session's index got written. MEASURED 2026-09-16: 9 panels across 2
+#       distinct kanban tmp dirs shared 1 global hook, and 5 command-* index
+#       files sat 23 days stale while their panels were running.
+#
+# Fix: ask tmux, live, on every render, scoped to THIS panel's own session.
+# (B) and (C) cease to exist rather than being guarded, because the panel no
+# longer READS the shared file at all.
+# ═══════════════════════════════════════════════════════════════════════
+
+# The panel does NOT read this file any more. It is kept — and kept fresh —
+# only because lcars-ui/server.py::serve_agent_panel_data() still resolves the
+# per-window agent JSON through it (proven by grep, 2026-09-16; it is the sole
+# remaining reader outside the *-shutdown.sh cleanup globs and session-reaper).
+# Do not delete it without fixing that reader first.
 ACTIVE_WINDOW_FILE="${LCARS_TMP}lcars-active-window-${SESSION_CODE}"
 
-# Ensure the tmux hook is set for window-change detection
-"${TMUX_CMD[@]}" set-hook -g session-window-changed \
+# Retire the legacy GLOBAL hook (defect C). It is one option per tmux SERVER
+# with a single ${LCARS_TMP} baked in, and a socket hosts sessions from
+# DIFFERENT tmp dirs (e.g. academy-chancellor -> ~/dev-team/kanban/tmp/ while
+# academy-medical -> ~/medical/general/kanban/tmp/), so whichever panel started
+# last sent every session's index to its own dir. Unsetting is idempotent —
+# every panel does it and then installs its own session-scoped hook below.
+# Rollout note: a NEW panel clearing the global hook would strand an OLD panel
+# that still reads the shared file — but panels self-restart on this script's
+# mtime (see the poll loop), so every panel is on the new code within a poll
+# cycle of the deploy.
+"${TMUX_CMD[@]}" set-hook -gu session-window-changed 2>/dev/null
+
+# PER-SESSION hook (`-t`), NEVER `-g`. This keeps the file above fresh for
+# server.py on every window switch, confined to this session — so the
+# ${LCARS_TMP} baked into the body is always the right tmp dir for the session
+# the hook fires for. Do NOT "simplify" this back to `-g`: a global hook is one
+# hook per tmux server, shared by every session on the socket, and the last
+# panel to start anywhere in the fleet wins (defect C above).
+"${TMUX_CMD[@]}" set-hook -t "$SESSION_CODE" session-window-changed \
     "run-shell 'echo #{window_index} > ${LCARS_TMP}lcars-active-window-#{session_name}'" 2>/dev/null
 
-# Initialize the active-window file if it doesn't exist
-if [[ ! -f "$ACTIVE_WINDOW_FILE" ]]; then
-    local_idx=$("${TMUX_CMD[@]}" list-windows -t "$SESSION_CODE" -F '#{window_active}:#{window_index}' 2>/dev/null | grep '^1:' | cut -d: -f2)
-    [[ -n "$local_idx" ]] && echo "$local_idx" > "$ACTIVE_WINDOW_FILE"
-fi
-
-# Get the active tmux window index from hook-written file
+# Live, session-scoped window index. Prints the index, or nothing at all.
+#
+# TRAP: `tmux display-message -t <bad-session> -p '#I'` EXITS 0 and prints an
+# EMPTY field — a failure that reads as a success. Verified 2026-09-16 on the
+# academy socket: rc=0, output ''. So validate that the value is numeric and
+# never trust the exit code. Returns 1 when the window cannot be resolved;
+# callers must render an explicit unavailable state, not another window's data.
 get_window_index() {
-    cat "$ACTIVE_WINDOW_FILE" 2>/dev/null | tr -d '[:space:]'
+    local idx
+    idx=$("${TMUX_CMD[@]}" display-message -t "$SESSION_CODE" -p '#I' 2>/dev/null | head -1 | tr -d '[:space:]')
+    [[ "$idx" =~ ^[0-9]+$ ]] || return 1
+    echo "$idx"
 }
 
-# Get the JSON file for the currently active tmux window
+# Live, session-scoped window NAME — used to label the MISSION with the window
+# it belongs to, so a chat sitting in a different window of the same session is
+# never misled into reading it as its own.
+get_window_name() {
+    local nm
+    nm=$("${TMUX_CMD[@]}" display-message -t "$SESSION_CODE" -p '#W' 2>/dev/null | head -1 | tr -d '\r\n\t')
+    [[ -n "$nm" ]] || return 1
+    echo "$nm"
+}
+
+# Keep server.py's copy of the index truthful while this panel is running.
+# The old code seeded the file ONLY when it was absent (defect B), so a stale
+# value survived forever. Writing on change — and at least once a minute —
+# means a stale mtime now unambiguously says "no panel is running for this
+# session", which is what makes a reader-side staleness guard meaningful.
+ACTIVE_WINDOW_FILE_REFRESHED=0
+refresh_active_window_file() {
+    local idx="$1"
+    [[ "$idx" =~ ^[0-9]+$ ]] || return
+    local now cur=""
+    now=$(date +%s)
+    [[ -f "$ACTIVE_WINDOW_FILE" ]] && cur=$(cat "$ACTIVE_WINDOW_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [[ "$cur" != "$idx" ]] || (( now - ACTIVE_WINDOW_FILE_REFRESHED >= 60 )); then
+        echo "$idx" > "$ACTIVE_WINDOW_FILE" 2>/dev/null
+        ACTIVE_WINDOW_FILE_REFRESHED=$now
+    fi
+}
+
+# Get the JSON file for the currently active tmux window.
+# NOTE the fallback: when the window is unresolvable, or that window has no
+# agent JSON of its own, this still returns the session-level file so the
+# IDENTITY block (avatar/developer/role) keeps rendering. That fallback is
+# deliberately NOT trusted for the MISSION block — render_panel decides that
+# separately via RENDER_WINDOW_TRUSTED (XACA-1255-006), because a fallback file
+# belongs to whichever window last wrote it, which may not be this one.
 get_active_json() {
     local win_idx
-    win_idx=$(get_window_index)
+    win_idx=$(get_window_index) || win_idx=""
     if [[ -n "$win_idx" ]]; then
         local win_file="${JSON_BASE}-w${win_idx}.json"
         if [[ -f "$win_file" ]]; then
@@ -308,6 +393,26 @@ get_active_json() {
     fi
     # Fallback to main session JSON
     echo "$JSON_FILE"
+}
+
+# Resolve the per-window subagent tracking file for a window index.
+#
+# XACA-1255: three call sites (get_crew_avatars, compute_content_fingerprint,
+# and the poll loop) interpolated the index straight into this path. When tmux
+# cannot resolve a window the index is EMPTY, and that built
+# "lcars-subagents-<session>-w.json" — a path naming a window that cannot
+# exist. It was harmless only because every use was an [[ -f ]] test that
+# always failed; a malformed path that merely fails to MATCH is a coincidence,
+# not a design, and any later use (a write, a glob, an error message) would
+# act on nonsense. Prints nothing and returns non-zero when there is no window
+# to name, mirroring the guard get_active_json() above already applies.
+#
+# The numeric test — not merely a non-empty one — matches get_window_index()'s
+# own contract: anything that is not a run of digits is not a window index.
+subagent_file_for_window() {
+    local idx="$1"
+    [[ "$idx" =~ ^[0-9]+$ ]] || return 1
+    echo "${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${idx}.json"
 }
 
 # Read JSON field (uses RENDER_JSON_FILE set by render_panel)
@@ -393,7 +498,9 @@ kanban_field() {
 # Supports both legacy format (["reno"]) and new expiry format ([{"type":"reno","expires":null}])
 get_crew_avatars() {
     local win_idx=$(get_window_index)
-    local subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${win_idx}.json"
+    # No resolvable window means no subagent file to read (XACA-1255).
+    local subagent_file
+    subagent_file=$(subagent_file_for_window "$win_idx") || return
     [[ ! -f "$subagent_file" ]] && return
 
     # Skip stale files (>1 hour old = likely orphaned).
@@ -542,7 +649,10 @@ get_remote_host_info() {
 compute_content_fingerprint() {
     local active_json=$(get_active_json)
     local win_idx=$(get_window_index)
-    local subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${win_idx}.json"
+    # Empty when the window is unresolvable; the [[ -f ]] below then simply
+    # contributes nothing to the fingerprint, as before (XACA-1255).
+    local subagent_file
+    subagent_file=$(subagent_file_for_window "$win_idx") || subagent_file=""
     local board_file=$(get_board_file)
 
     # Use stat (mtime+size) instead of full file reads — orders of magnitude cheaper
@@ -919,6 +1029,22 @@ render_panel() {
     # Resolve which JSON file to read (window-specific or fallback)
     RENDER_JSON_FILE=$(get_active_json)
 
+    # Resolve window identity LIVE from tmux, scoped to this panel's own
+    # session (XACA-1255). RENDER_WINDOW_TRUSTED is true only when tmux gave us
+    # a real window index AND the JSON we are about to read is that window's
+    # OWN file. Anything else — tmux unreachable, session gone, a remote panel
+    # with no local tmux, or a resolved window that has no agent JSON yet —
+    # means we do not know whose mission this is, and the MISSION block must
+    # say so rather than confidently render some other window's kanban item.
+    RENDER_WINDOW_INDEX=$(get_window_index) || RENDER_WINDOW_INDEX=""
+    RENDER_WINDOW_NAME=$(get_window_name) || RENDER_WINDOW_NAME=""
+    if [[ -n "$RENDER_WINDOW_INDEX" && "$RENDER_JSON_FILE" == "${JSON_BASE}-w${RENDER_WINDOW_INDEX}.json" ]]; then
+        RENDER_WINDOW_TRUSTED=true
+    else
+        RENDER_WINDOW_TRUSTED=false
+    fi
+    refresh_active_window_file "$RENDER_WINDOW_INDEX"
+
     # Detect remote mode and show waiting message if data not synced yet
     local is_remote=false
     local remote_host=""
@@ -1283,14 +1409,75 @@ render_panel() {
     fi
 
     echo ""
-    print_wrapped "$terminal_name" "${WHITE}${BOLD}" "${RESET}"
-    print_wrapped "$terminal_desc" "${GRAY}" "${RESET}"
+    # SESSION-scoped vs WINDOW-scoped identity (XACA-1255-015).
+    #
+    # team / developer / role / location / avatar / amb_handle are valid for the
+    # whole tmux session and stay CORRECT even when the window is unresolved, so
+    # they render normally in every state -- a degraded panel is still a panel.
+    #
+    # terminal_name / terminal_desc are WINDOW-scoped. When RENDER_WINDOW_TRUSTED
+    # is false they describe whichever window last wrote the session-level
+    # fallback file, which may not be this one. Printing them in WHITE BOLD there
+    # made the panel contradict itself: full confidence directly above a MISSION
+    # block saying it cannot resolve that very window -- with the confident half
+    # on top, which is what the eye hits first.
+    #
+    # They are DEMOTED, not hidden. A probable window name is still useful; it
+    # just must not outrank the caveat beneath it. ${DIM} is this file's
+    # established "this data is not reliable" idiom (see `Avatar unavailable` /
+    # `Logo unavailable`, XACA-1138-021/022).
+    if [[ "$RENDER_WINDOW_TRUSTED" == "true" ]]; then
+        print_wrapped "$terminal_name" "${WHITE}${BOLD}" "${RESET}"
+        print_wrapped "$terminal_desc" "${GRAY}" "${RESET}"
+    else
+        print_wrapped "$terminal_name" "${DIM}" "${RESET}"
+        print_wrapped "$terminal_desc" "${DIM}" "${RESET}"
+        # Say WHY it is dim. Dimness alone is a signal only to someone who
+        # already knows the convention.
+        if [[ -n "$terminal_name" || -n "$terminal_desc" ]]; then
+            echo "${DIM}  (unconfirmed window)${RESET}"
+        fi
+    fi
 
     # ═══════════════════════════════════════
     # MISSION: Current kanban item + subitems
     # ═══════════════════════════════════════
+    # Degraded state (XACA-1255-006): if we could not establish which window
+    # this mission would belong to, say so. Absence of an answer must never
+    # render as a confident wrong answer — that is the original bug.
     local board_file=$(get_board_file)
-    if [[ -n "$board_file" && -f "$board_file" ]]; then
+    if [[ "$RENDER_WINDOW_TRUSTED" != "true" ]]; then
+        echo ""
+        echo "${TC}━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+        echo "${GRAY}MISSION${RESET}"
+        # ${DIM} sentence case, matching this file's OWN missing-data idiom
+        # (`  Avatar unavailable` / `  Logo unavailable`, XACA-1138-021/022),
+        # whose comments reason explicitly that a louder placeholder "would cry
+        # wolf". This is that same normal condition -- a remote panel, or a
+        # window with no agent in it yet -- not an incident (XACA-1255-016).
+        #
+        # The previous RED+BOLD+ALLCAPS was a style that appears nowhere else in
+        # this file, and RED is already spoken for here: get_theme_color maps it
+        # to command/security/incident, and the MISSION status dot uses it for
+        # `paused`. Reusing it for "normal" drains it of meaning where it
+        # actually matters.
+        echo "${DIM}  Unavailable${RESET}"
+        # Terse and user-meaningful. The old copy was implementation detail
+        # ("tmux could not resolve the active window for this session.") that
+        # cost THREE wrapped lines of a 30-column pane to say what the next line
+        # already implies. The window NAME is dropped from this line too -- it is
+        # on screen a few lines above, in the identity block.
+        if [[ -z "$RENDER_WINDOW_INDEX" ]]; then
+            print_wrapped "Window not identified." "${DIM}" "${RESET}"
+        else
+            print_wrapped "No agent in win ${RENDER_WINDOW_INDEX} yet." "${DIM}" "${RESET}"
+        fi
+        # KEEP THIS SENTENCE. It states the POLICY rather than the symptom, and
+        # the policy is what earns trust: the panel is deliberately choosing to
+        # show nothing over showing someone else's mission. Everything else on
+        # this block is negotiable copy; this line is the product.
+        print_wrapped "Not showing another window's item." "${DIM}" "${RESET}"
+    elif [[ -n "$board_file" && -f "$board_file" ]]; then
         local terminal_id="${SESSION_CODE##*-}"
         KANBAN_JSON=$(get_kanban_info "$board_file" "$terminal_id" "$terminal_name")
         local item_id=$(kanban_field item_id)
@@ -1311,7 +1498,52 @@ render_panel() {
         if [[ -n "$item_id" || -n "$task" ]]; then
             echo ""
             echo "${TC}━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-            echo "${GRAY}MISSION${RESET}"
+            # Label the MISSION with the window it belongs to. The panel is
+            # session-level and cannot show N windows' missions at once, so a
+            # chat in a different window of this session must be able to see at
+            # a glance that this item is not theirs (XACA-1255-006).
+            local win_label=""
+            if [[ -n "$RENDER_WINDOW_INDEX" ]]; then
+                # The INDEX is the only genuinely new character in this label.
+                # The tmux window name is normally IDENTICAL to terminal_name --
+                # verified on live data (w0->chancellor-cmd, w1->architecture,
+                # w2->strategy, w3->coordination) -- and terminal_name is already
+                # on screen in WHITE BOLD two lines up. The old label spent 21 of
+                # 30 columns restating it, in ${DIM} with no color, which made the
+                # whole point of XACA-1255 the LEAST prominent element on the
+                # panel while sitting beside the MOST prominent, the CYAN+BOLD
+                # item id (XACA-1255-017).
+                #
+                # So: spend the columns on the name only when it actually differs
+                # from what is already shown, and give what remains ${TC} theme
+                # color (the same color as the section rule directly above it) so
+                # it reads as a deliberate tag rather than an afterthought.
+                local win_tag="win ${RENDER_WINDOW_INDEX}"
+                if [[ -n "$RENDER_WINDOW_NAME" && "$RENDER_WINDOW_NAME" != "$terminal_name" ]]; then
+                    # Width budget for "MISSION [win <idx>: <name>]":
+                    #   "MISSION " 8 + "[" 1 + "win " 4 + ${#idx} + ": " 2 + L + "]" 1
+                    # so L <= TARGET_COLS - 16 - ${#idx}.
+                    #
+                    # The old `TARGET_COLS - 17` hard-coded a ONE-character index.
+                    # MEASURED before this change: `MISSION [win 12: release-engin]`
+                    # is 31 columns in a 30-column pane, wrapping the "]" alone
+                    # onto the next line -- precisely the failure XACA-1138-022
+                    # already fixed once for "[avatar unavailable]".
+                    local name_max=$(( TARGET_COLS - 16 - ${#RENDER_WINDOW_INDEX} ))
+                    (( name_max < 4 )) && name_max=4
+                    local win_name="$RENDER_WINDOW_NAME"
+                    # Truncate VISIBLY. The old `${NAME:0:13}` cut with no marker,
+                    # so "release-engineering-backlog" became "release-engin" and
+                    # read as a complete name -- on the one component whose entire
+                    # job is naming the window.
+                    if (( ${#win_name} > name_max )); then
+                        win_name="${win_name:0:$((name_max - 1))}…"
+                    fi
+                    win_tag="${win_tag}: ${win_name}"
+                fi
+                win_label=" ${TC}${BOLD}[${win_tag}]${RESET}"
+            fi
+            echo "${GRAY}MISSION${RESET}${win_label}"
 
             if [[ -n "$item_id" ]]; then
                 echo "${CYAN}${BOLD}${item_id}${RESET}${YELLOW}${work_mode_indicator}${RESET}"
@@ -1387,7 +1619,8 @@ if [[ -f "$ACTIVE_JSON" ]]; then
 else
     LAST_MTIME=""
 fi
-LAST_WINDOW_INDEX=$(get_window_index)
+LAST_WINDOW_INDEX=$(get_window_index) || LAST_WINDOW_INDEX=""
+refresh_active_window_file "$LAST_WINDOW_INDEX"
 BOARD_FILE=$(get_board_file)
 LAST_BOARD_MTIME=""
 [[ -n "$BOARD_FILE" && -f "$BOARD_FILE" ]] && LAST_BOARD_MTIME=$(stat -f %m "$BOARD_FILE" 2>/dev/null)
@@ -1434,8 +1667,15 @@ while true; do
     # ── Quick mtime checks (cheap) ───────────────────────
     local needs_render=false
 
-    # Check if active tmux window changed
-    CURRENT_WINDOW_INDEX=$(get_window_index)
+    # Check if active tmux window changed.
+    # This is now a LIVE tmux query (XACA-1255), so a transient tmux hiccup can
+    # flip this to empty for one cycle and back. That is correct, not a bug: an
+    # unresolvable window means the panel should re-render into the explicit
+    # MISSION UNAVAILABLE state. It cannot busy-spin — each iteration sleeps ~2s
+    # and renders at most once, and the fingerprint gate below still applies.
+    CURRENT_WINDOW_INDEX=$(get_window_index) || CURRENT_WINDOW_INDEX=""
+    # Keep server.py's copy of the index fresh even on cycles that do not render.
+    refresh_active_window_file "$CURRENT_WINDOW_INDEX"
     if [[ "$CURRENT_WINDOW_INDEX" != "$LAST_WINDOW_INDEX" ]]; then
         LAST_WINDOW_INDEX="$CURRENT_WINDOW_INDEX"
         ACTIVE_JSON=$(get_active_json)
@@ -1466,9 +1706,15 @@ while true; do
 
     # Check if subagent tracking file changed
     if [[ "$needs_render" != "true" ]]; then
-        local sub_win_idx=$(get_window_index)
-        local subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${sub_win_idx}.json"
-        if [[ -f "$subagent_file" ]]; then
+        # Reuse the index resolved at the top of this iteration rather than
+        # re-querying tmux a second time in the same 2s cycle.
+        # An unresolvable window yields no path at all rather than a
+        # "-w.json" one (XACA-1255). Behaviour is unchanged: with no file to
+        # consider, the elif below still clears a previously-seen mtime and
+        # schedules a render.
+        local subagent_file
+        subagent_file=$(subagent_file_for_window "$CURRENT_WINDOW_INDEX") || subagent_file=""
+        if [[ -n "$subagent_file" && -f "$subagent_file" ]]; then
             local current_sub_mtime=$(stat -f %m "$subagent_file" 2>/dev/null)
             if [[ "$current_sub_mtime" != "$LAST_SUBAGENT_MTIME" ]]; then
                 LAST_SUBAGENT_MTIME="$current_sub_mtime"

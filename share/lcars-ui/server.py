@@ -18279,16 +18279,34 @@ end tell
         agent_file = None
 
         if session:
-            # Check for per-window file first (supports multi-agent terminals)
-            # The active window index is written by a tmux hook to <kanban/tmp>/lcars-active-window-{session}
+            # Check for per-window file first (supports multi-agent terminals).
+            # <kanban/tmp>/lcars-active-window-{session} is written by a
+            # per-session tmux hook AND refreshed at least once a minute by the
+            # running agent panel (scripts/agent-panel-display.sh).
+            #
+            # XACA-1255 — STALENESS GUARD. Before that ticket this file was
+            # seeded only when ABSENT and kept by a GLOBAL tmux hook that every
+            # session on a socket overwrote, so it could sit arbitrarily stale
+            # (measured 2026-09-16: 5 command-* index files frozen 23 days old
+            # while their panels were running) and this lookup then served one
+            # chat the agent data of a DIFFERENT window. A stale index is worse
+            # than no index: it is a confident wrong answer. Now that the panel
+            # heartbeats the file, a stale mtime unambiguously means "no panel
+            # is maintaining this session" — so ignore the index entirely and
+            # fall through to the session-level file rather than trusting it.
+            ACTIVE_WINDOW_MAX_AGE_S = 180  # 3x the panel's 60s refresh interval
             active_window_file = tmp_dir / f"lcars-active-window-{session}"
             if active_window_file.exists():
                 try:
-                    win_idx = active_window_file.read_text().strip()
-                    if win_idx:
-                        win_file = tmp_dir / f"lcars-agent-{session}-w{win_idx}.json"
-                        if win_file.exists():
-                            agent_file = win_file
+                    age = time.time() - active_window_file.stat().st_mtime
+                    if age <= ACTIVE_WINDOW_MAX_AGE_S:
+                        win_idx = active_window_file.read_text().strip()
+                        # Only a numeric index is meaningful; anything else is
+                        # a corrupt/partial write, not a window.
+                        if win_idx.isdigit():
+                            win_file = tmp_dir / f"lcars-agent-{session}-w{win_idx}.json"
+                            if win_file.exists():
+                                agent_file = win_file
                 except Exception:
                     pass
             # Fallback to session-level file

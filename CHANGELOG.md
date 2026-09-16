@@ -7,6 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1255** — agent panel MISSION showed a DIFFERENT concurrent chat's kanban item. One panel process serves one
+  tmux session holding 4 windows, each potentially running a separate chat, and window identity was resolved from a
+  stale, globally-clobbered file. `share/scripts/agent-panel-display.sh`: window index now comes from a live,
+  session-scoped `tmux display-message -t "$SESSION_CODE" -p '#I'` instead of a hook-written file; the fleet-wide
+  `set-hook -g` (9 panels across 2 tmp dirs shared 1 global hook, 5 files frozen 23 days) is replaced by `-gu` plus a
+  per-session `set-hook -t`. LOAD-BEARING: `tmux display-message` against a nonexistent session exits 0 and prints
+  empty, so the value is validated numeric rather than the exit code trusted. The panel is now write-only on
+  `lcars-active-window-*` with a >=60s heartbeat, which is what makes its mtime meaningful; `share/lcars-ui/server.py`
+  gained the matching 180s staleness guard (3x heartbeat) plus non-numeric rejection in `serve_agent_panel_data()`, so a
+  stale index can no longer serve one chat another window's agent data. When window identity cannot be trusted the
+  panel now renders an explicit dim `Unavailable` + `Not showing another window's item.` instead of silently falling
+  through to another window's item, and trusted renders are labelled with the window they belong to.
+  New `share/lcars-ui/tests/test_xaca1255_active_window_staleness.py` (7 tests, real temp dirs + real `os.utime`, no
+  `Path` mocks — the existing suite stubbed `exists()=False` and passed 200/200 with the guard disabled), including a
+  pin on `ACTIVE_WINDOW_MAX_AGE_S = 180` so a retune cannot leave the cases on the same side of the threshold.
+
 ## [0.20.15] - 2026-09-16
 
 - **XACA-1239** — CR approval WAIVER and an evidence-aware LCARS EDIT STATE modal. Main Event teams receive no
