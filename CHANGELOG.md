@@ -7,6 +7,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1254** — `share/scripts/lcars-health-check.sh` resolved its `kanban-hooks/` python helpers as
+  `${_SCRIPT_DIR}/kanban-hooks`, assuming the hooks dir is a CHILD of the script's own directory. That is true
+  only in the dev tree. In the tap, `sync-tap.sh:881` places the script at `share/scripts/` while
+  `sync-tap.sh:701` places the helpers at `share/kanban-hooks/` — a SIBLING one level up; the installed layout
+  (`~/aiteamforge/scripts/` + `~/aiteamforge/kanban-hooks/`) has the same shape. So on BOTH shipped layouts
+  every consumer's roster and port lookup failed, `lcars_host_roster.py` and `lcars_ports.py` were never
+  invoked, and supervision silently fell back to the last-known-good roster — broken since the script first
+  shipped (XACA-0585). Because XACA-1223 made supervision registry-driven, a newly-provisioned team outside the
+  stale `.lkg` roster went UNSUPERVISED on every consumer, and the only signal was one line in the health log.
+  Replaced the single assignment with an ordered candidate probe — script-dir CHILD first (so the dev tree is
+  unaffected), then script-dir PARENT (tap + installed) — where a candidate wins if it holds AT LEAST ONE of
+  `lcars_host_roster.py` / `lcars_ports.py`. Deliberately not "both" (that rejects a legitimate partial-upgrade
+  tree and breaks XACA-1223's "owner tick still runs when roster fails" guarantee) and deliberately not
+  "directory exists" (an empty-but-present `scripts/kanban-hooks` would win candidate 1 and stay broken).
+  True resolution failure now fails LOUDLY — a `DEGRADED` diagnostic naming every path tried, a distinct roster
+  note, `DEGRADED` in the Summary line, and exit code 3 from one-shot mode only; the daemon never exits and
+  keeps supervising on last-known-good, because leaving every team unsupervised is strictly worse than degraded
+  supervision. Consumers should see zero `helper-failed` lines and a live roster read after upgrading.
+
 - **XACA-1255** — agent panel MISSION showed a DIFFERENT concurrent chat's kanban item. One panel process serves one
   tmux session holding 4 windows, each potentially running a separate chat, and window identity was resolved from a
   stale, globally-clobbered file. `share/scripts/agent-panel-display.sh`: window index now comes from a live,

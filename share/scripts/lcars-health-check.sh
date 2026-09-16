@@ -220,10 +220,83 @@ declare -a _LCARS_INFRA=(
 # In this script, "canonical port" or "resolved port" means the team's registry port
 # from ~/.aiteamforge/team-paths.json, NOT the DEFAULT_TEAMS template baseline.
 # See docs/team-registry-guide.md § "LCARS Port Authority Model" (XACA-0803).
-# Both dev-tree (kanban-hooks/ sibling of this script) and shipped tap layout
-# (share/kanban-hooks/) resolve via script dir.
+# XACA-1254: kanban-hooks/ is NOT always a child of this script's directory
+# — that was a false assumption this comment used to make, and it has been
+# wrong for both shipped layouts since the script first shipped (XACA-0585).
+# Three on-disk layouts exist, and the hooks dir sits in a different place
+# relative to the script in each:
+#   - dev tree:  <repo-root>/lcars-health-check.sh + <repo-root>/kanban-hooks/
+#                — hooks dir is a CHILD of the script's own directory.
+#   - tap:       share/scripts/lcars-health-check.sh (placed by
+#                sync-tap.sh:881) + share/kanban-hooks/ (placed by
+#                sync-tap.sh:701) — hooks dir is a SIBLING one level up.
+#   - installed: ~/aiteamforge/scripts/lcars-health-check.sh +
+#                ~/aiteamforge/kanban-hooks/ — hooks dir is a SIBLING one
+#                level up, same relationship as the tap layout.
+# Probe both relationships, in that order, so the dev tree (already a child
+# relationship) keeps resolving on candidate 1 and never falls through to
+# candidate 2.
+#
+# XACA-1254 advisor ruling (post-002-review): this predicate answers ONE
+# question only — WHICH DIRECTORY is the hooks dir? — and must stay
+# separate from a second, already-solved question: which INDIVIDUAL helper
+# files does that directory contain? XACA-1223 (:367-369 below) already
+# handles a single missing helper file per-file, by simply letting its
+# python3 invocation fail naturally (rc!=0 -> _HC_ROSTER_STATUS=
+# "helper-failed") — that machinery is not being rebuilt here.
+#
+# A candidate therefore wins if it contains AT LEAST ONE of the two helper
+# files — not both, and not mere directory existence:
+#   - "directory exists" is UNSAFE: an empty (but present) kanban-hooks/
+#     alongside the script — plausible on a consumer install even where the
+#     tap layout itself lacks the directory entirely — would let candidate 1
+#     win while still being completely non-functional, reintroducing this
+#     same defect under a different disguise.
+#   - "both files required" is TOO STRICT: it would reject a genuine
+#     partial-upgrade tree that legitimately ships one helper but not the
+#     other (see the XACA-1223 "partial-upgrade tree" test fixture), which
+#     would silently deny lcars_ports.py's self-heal "owner tick" a helper
+#     file it actually has, in a directory that actually IS the correct one.
+# "At least one" correctly resolves the directory in both of the above
+# cases and defers entirely to XACA-1223's existing per-file handling for
+# whichever single file, if any, then turns out to be missing.
 _SCRIPT_DIR="${0:A:h}"
-_KANBAN_HOOKS_DIR="${_SCRIPT_DIR}/kanban-hooks"
+_KANBAN_HOOKS_DIR=""
+typeset -ga _HC_HOOKS_TRIED=()
+for _cand in "${_SCRIPT_DIR}/kanban-hooks" "${_SCRIPT_DIR:h}/kanban-hooks"; do
+    _HC_HOOKS_TRIED+=("$_cand")
+    [[ -f "$_cand/lcars_host_roster.py" || -f "$_cand/lcars_ports.py" ]] || continue
+    _KANBAN_HOOKS_DIR="$_cand"
+    break
+done
+unset _cand
+
+# XACA-1254-003: NEITHER candidate contained EITHER helper file — a true
+# resolution failure, distinct from "resolved, but one helper is
+# individually missing" (which is XACA-1223's existing per-file path and is
+# deliberately left untouched — see the invocation guards at :~397 and
+# :~468 below, which only take this DEGRADED branch, never the individual-
+# missing-file case). Fail LOUDLY — name every path tried — but never
+# fatally. This file is sourceable (see the $zsh_eval_context toplevel guard
+# at the bottom, XACA-0889-017); a bare `exit` here would kill a sourcing
+# shell, so this only sets a flag and prints a diagnostic. The flag drives
+# three things downstream: (1) a distinct, mechanically-greppable roster
+# note (see _hc_build_roster_note's DEGRADED branch below) instead of the
+# generic "helper-failed" wording, (2) skipping the doomed
+# lcars_host_roster.py / lcars_ports.py invocations below — calling python3
+# against a bogus path (there being nowhere left to look) would just print
+# its own confusing raw "No such file or directory" instead of this
+# controlled diagnostic — while still landing on the EXISTING first-class
+# "helper-failed" _HC_ROSTER_STATUS (XACA-1223) so the already-correct
+# last-known-good-roster fallback runs unchanged, and (3) a distinct exit
+# code for a one-shot sweep (run_health_check, near its `return 0`/
+# `return 1` at the bottom) — never for a daemon, which must keep looping
+# and supervising on the last-known-good roster rather than exit.
+_HC_HOOKS_DEGRADED="false"
+if [[ -z "$_KANBAN_HOOKS_DIR" ]]; then
+    _HC_HOOKS_DEGRADED="true"
+    echo "🚨 DEGRADED: could not resolve kanban-hooks/ — no candidate directory contained lcars_host_roster.py or lcars_ports.py. Tried: ${(j:, :)_HC_HOOKS_TRIED}" >&2
+fi
 
 # ============================================================================
 # XACA-1223 — Host Roster (registry-membership restart gate)
@@ -350,8 +423,20 @@ _hc_write_roster_lkg() {
 # (e.g. a partial-upgrade tree missing this file, design §12) is its own
 # state, distinct from peek_config()'s five statuses, and falls to the LKG
 # exactly like an unreadable registry.
-_HC_ROSTER_RAW=$(python3 "${_KANBAN_HOOKS_DIR}/lcars_host_roster.py")
-_HC_ROSTER_RC=$?
+#
+# XACA-1254-003: when the hooks dir itself was never resolved, don't invoke
+# python3 against a bogus path — synthesize the same shape a real helper
+# failure produces (empty output, non-zero rc) so every downstream consumer
+# of _HC_ROSTER_RAW/_HC_ROSTER_RC still takes the existing, already-correct
+# "helper-failed" fallback path below, instead of a confusing raw "No such
+# file or directory" from python3 itself.
+if [[ "$_HC_HOOKS_DEGRADED" == "true" ]]; then
+    _HC_ROSTER_RAW=""
+    _HC_ROSTER_RC=127
+else
+    _HC_ROSTER_RAW=$(python3 "${_KANBAN_HOOKS_DIR}/lcars_host_roster.py")
+    _HC_ROSTER_RC=$?
+fi
 
 _HC_ROSTER_STATUS=""
 _HC_ROSTER_PATH=""
@@ -405,8 +490,17 @@ done
 # XACA-1223-015 (review round 1): capture-first — assign, THEN read $? on the
 # very next line, before any other command can clobber it. _HC_PORTS_RC feeds
 # _hc_write_roster_lkg()'s poisoned-write guard below.
-_PORT_LOOKUP=$(python3 "${_KANBAN_HOOKS_DIR}/lcars_ports.py" --with-primary-host "${_INFRA_TEAMS[@]}")
-_HC_PORTS_RC=$?
+#
+# XACA-1254-003: same rationale as the roster helper above — skip the call
+# entirely when the hooks dir was never resolved, and synthesize an
+# equivalent failure shape instead of a raw python3 path error.
+if [[ "$_HC_HOOKS_DEGRADED" == "true" ]]; then
+    _PORT_LOOKUP=""
+    _HC_PORTS_RC=127
+else
+    _PORT_LOOKUP=$(python3 "${_KANBAN_HOOKS_DIR}/lcars_ports.py" --with-primary-host "${_INFRA_TEAMS[@]}")
+    _HC_PORTS_RC=$?
+fi
 
 # XACA-1223 §9 step 3: choose which lines feed LCARS_SERVERS. A registry that
 # read "ok" filters lcars_ports.py's own output down to registered teams
@@ -457,7 +551,24 @@ _hc_build_roster_note() {
         return 0
     fi
 
-    _display_path="${_HC_ROSTER_PATH:-<unresolved — roster helper failed>}"
+    # XACA-1254-003: when NO candidate directory contained EITHER helper
+    # file (a true resolution failure — as opposed to a directory that
+    # resolved fine but is individually missing one helper, which keeps the
+    # existing "helper-failed" wording in the else branch below, untouched),
+    # say so explicitly and name every candidate tried — "DEGRADED" is the
+    # mechanically-greppable token that distinguishes this failure class
+    # from an ordinary "helper-failed" registry/helper read. Both branches
+    # below interpolate ${_display_path} into $_HC_ROSTER_NOTE, so this
+    # alone is enough to carry the DEGRADED wording into the sweep's status
+    # output, logged once per cycle by run_health_check (including every
+    # daemon iteration — XACA-1223-017's source-time-snapshot note applies
+    # here too: this diagnostic is frozen at source time same as the roster
+    # itself).
+    if [[ "$_HC_HOOKS_DEGRADED" == "true" ]]; then
+        _display_path="DEGRADED — kanban-hooks/ not found; no candidate contained lcars_host_roster.py or lcars_ports.py. Tried: ${(j:, :)_HC_HOOKS_TRIED}"
+    else
+        _display_path="${_HC_ROSTER_PATH:-<unresolved — roster helper failed>}"
+    fi
     if [[ -n "$_HC_LKG_EXISTS" ]]; then
         _ts=""
         if [[ -f "$_HC_ROSTER_LKG_PATH" ]]; then
@@ -2137,6 +2248,10 @@ run_health_check() {
     # roster is unknown, so the count would wrongly claim every row.
     local not_registered="${#_HC_NOT_REGISTERED[@]} not registered on this host"
     [[ "$_HC_ROSTER_STATUS" != "ok" ]] && not_registered="registry roster unreadable (${_HC_ROSTER_STATUS}) — see roster note"
+    # XACA-1254-003: re-assert DEGRADED in the Summary line too, every cycle
+    # (this function body runs fresh each sweep, including each daemon
+    # iteration) — not just in the once-per-sweep roster note above.
+    [[ "$_HC_HOOKS_DEGRADED" == "true" ]] && not_registered="DEGRADED — kanban-hooks/ unresolved, see roster note above"
     # XACA-0706: hoist loop-scoped scratch var. A bare `local _bp` INSIDE the
     # outer loop re-declares an already-set local on the 2nd+ iteration, which
     # zsh prints as `_bp=<value>` to stdout — corrupting the health-check log
@@ -2353,6 +2468,22 @@ run_health_check() {
     fi
 
     log "═══════════════════════════════════════════════════════"
+
+    # XACA-1254-003: a hooks-dir resolution failure gets its own exit code,
+    # distinct from the ordinary healthy/unhealthy codes below (0 and 1 are
+    # the only codes in use elsewhere in this script — see the --team
+    # handling and argument-parsing exits above — so 3 is free and
+    # unambiguous). This applies ONLY to a one-shot invocation: run_daemon's
+    # `while true; do run_health_check; sleep ...; done` never inspects this
+    # return value, and must not exit at all on a resolver failure — it
+    # keeps looping and re-asserting DEGRADED every cycle via the roster
+    # note + Summary line above instead. Checked first, ahead of the
+    # ordinary STATUS_ONLY unhealthy/drifted check below, since the resolver
+    # failure is the more fundamental problem being surfaced.
+    if [[ "$_HC_HOOKS_DEGRADED" == "true" && "$DAEMON_MODE" != "true" ]]; then
+        _hc_run_lock_release
+        return 3
+    fi
 
     # Return non-zero in status-only mode if any server is unhealthy or bound to
     # the wrong port (XACA-0706 — surfaces the drift to callers/monitors).
