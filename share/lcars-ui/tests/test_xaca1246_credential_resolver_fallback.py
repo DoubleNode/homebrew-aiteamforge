@@ -47,8 +47,10 @@ Run with:
 import io
 import json
 import os
+import shlex
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -214,6 +216,100 @@ class InvokeCredentialResolverFallbackTests(unittest.TestCase):
         self.assertFalse(result["available"])
         self.assertEqual(result["fault"], "credential resolution timed out")
         self.assertNotEqual(result["mode"], "env-direct")
+
+    def test_timeout_kills_grandchild_not_just_direct_child(self):
+        """DEFECT 1 regression (QA finding, XACA-1246 follow-up, proven live
+        with `ps aux`): subprocess.run's own `timeout=` kills only the
+        DIRECT child (zsh) -- it does NOT kill that shell's own children.
+        In production, tier 1 shells out to `node` (vault-fetch.js); a
+        genuinely hung fetch used to leak an orphaned `node` process
+        indefinitely every time this timeout fired.
+
+        Reproduces QA's shape with an isolated fake resolver script (own
+        TemporaryDirectory, no real infrastructure touched): the fake
+        `_cc_resolve_credential_for_team` backgrounds a long-lived
+        grandchild and writes its REAL pid to a file, then waits on it.
+        This test overrides the timeout to sub-second so the whole test
+        stays fast, but the grandchild itself sleeps far longer than that
+        (20s) so a pass can only mean it was actively killed -- not that
+        it happened to finish on its own, which is exactly the failure
+        mode a control-flow-only check ("the Python call returned in
+        time") would miss.
+        """
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        pidfile = os.path.join(tmpdir.name, "grandchild.pid")
+        fake_script = os.path.join(tmpdir.name, "fake_cc_aliases.sh")
+        with open(fake_script, "w") as f:
+            f.write(
+                "_cc_resolve_credential_for_team() {\n"
+                f"  sleep 20 &\n"
+                f"  echo $! > {shlex.quote(pidfile)}\n"
+                "  wait\n"
+                "}\n"
+            )
+
+        original_script = server._CC_ALIASES_SCRIPT
+        server._CC_ALIASES_SCRIPT = Path(fake_script)
+        self.addCleanup(lambda: setattr(server, "_CC_ALIASES_SCRIPT", original_script))
+
+        original_timeout = server._CC_CREDENTIAL_RESOLVE_TIMEOUT
+        server._CC_CREDENTIAL_RESOLVE_TIMEOUT = 0.5
+        self.addCleanup(lambda: setattr(server, "_CC_CREDENTIAL_RESOLVE_TIMEOUT", original_timeout))
+
+        start = time.monotonic()
+        result = self.handler._invoke_credential_resolver(
+            "academy", want_value=False, env_var_name=""
+        )
+        elapsed = time.monotonic() - start
+
+        self.assertFalse(result["available"])
+        self.assertEqual(result["fault"], "credential resolution timed out")
+        self.assertNotEqual(result["mode"], "env-direct")
+        # The call must return promptly on the 0.5s timeout, not block for
+        # anywhere near the grandchild's own 20s sleep (would indicate the
+        # fix's own reap/kill path is itself stalling).
+        self.assertLess(elapsed, 10.0)
+
+        # Read the grandchild's REAL pid, written by the fake script itself
+        # (not derived/guessed on the Python side).
+        deadline = time.monotonic() + 3.0
+        pid = None
+        while time.monotonic() < deadline:
+            if os.path.exists(pidfile):
+                content = Path(pidfile).read_text().strip()
+                if content:
+                    pid = int(content)
+                    break
+            time.sleep(0.05)
+        self.assertIsNotNone(pid, "fake resolver script never wrote the grandchild's pid")
+
+        # OS-LEVEL verification, not control flow: poll os.kill(pid, 0) --
+        # the standard liveness probe (raises ProcessLookupError once the
+        # process is reaped) -- until the grandchild is actually gone, or
+        # give up well short of its own 20s sleep. A pass here can only
+        # mean the process was actively killed; if the defect regresses,
+        # this loop exhausts its deadline with the process still alive.
+        deadline = time.monotonic() + 5.0
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            except PermissionError:
+                # Exists but owned differently -- treat as still alive.
+                time.sleep(0.1)
+                continue
+            time.sleep(0.1)
+        self.assertFalse(
+            alive,
+            f"grandchild pid {pid} (sleep 20, backgrounded by the fake resolver "
+            "shell) is STILL RUNNING after the resolver's timeout fired -- "
+            "the process-group kill did not reach it. This is the exact "
+            "orphaned-subprocess defect this test guards against.",
+        )
 
 
 class TestConnectionSiteFallbackTests(unittest.TestCase):

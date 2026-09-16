@@ -41,6 +41,7 @@ import mimetypes
 import os
 import re
 import shlex
+import signal
 import socket
 import stat
 import subprocess
@@ -3426,16 +3427,25 @@ _CC_ALIASES_SCRIPT = UI_DIR.parent / "claude_code_cc_aliases.sh"
 
 # Tier 1 shells out to vault-fetch.sh -> node, whose OWN network timeout is
 # 10s (fleet-monitor/client/vault-fetch.js FETCH_TIMEOUT_MS) -- far longer
-# than this server can afford to block. This server is single-threaded
-# (TCPServer, see below) and XACA-0889 was a restart-loop caused by exactly
-# this class of stall blocking /api/status past the health check's 3s
-# watchdog (see _ensure_collector_running's own comment on that incident).
-# 2.0s is chosen to leave roughly 1s of headroom under that 3s budget for
-# the rest of this request's handling (JSON parse, response write, thread/
-# process scheduling) -- deliberately NOT "just under 3s", which would
-# leave no margin at all. A hung/slow vault fetch is killed well before it
-# would naturally time out on its own; that is the point (approval
-# condition 3), not a bug.
+# than this server can afford to block. This server has been
+# http.server.ThreadingHTTPServer since XACA-0890-004 (see LCARSServer,
+# below), NOT single-threaded -- so a blocking resolve stalls only THIS
+# request's own thread, never the whole server, and does not by itself
+# reproduce XACA-0889's restart loop (a single-threaded stall blocking
+# /api/status past the health check's 3s watchdog; see
+# _ensure_collector_running's own comment on that incident). The budget
+# still matters for two reasons that survive the threading swap: XACA-0889's
+# 3s watchdog remains a real ceiling this server should stay comfortably
+# under regardless of which request path is slow, and an UNBOUNDED resolve
+# would let a genuinely stuck vault fetch pile up threads indefinitely
+# instead of failing fast and freeing one (see _invoke_credential_resolver's
+# process-group kill on timeout). 2.0s is chosen to leave roughly 1s of
+# headroom under that 3s budget for the rest of this request's handling
+# (JSON parse, response write, thread/process scheduling) -- deliberately
+# NOT "just under 3s", which would leave no margin at all. A hung/slow
+# vault fetch's whole process group is killed (SIGKILL via os.killpg, see
+# _invoke_credential_resolver) well before it would naturally time out on
+# its own; that is the point (approval condition 3), not a bug.
 _CC_CREDENTIAL_RESOLVE_TIMEOUT = 2.0  # seconds
 
 # Mirrors _cc_export_account_credentials' own team-slug gate in
@@ -15183,8 +15193,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         _cc_resolve_credential_for_team docstring, XACA-1246-003).
 
         Bounded by _CC_CREDENTIAL_RESOLVE_TIMEOUT -- see that constant's own
-        comment for why (single-threaded server, XACA-0889 3s watchdog,
-        vault-fetch's own 10s network timeout).
+        comment for why (ThreadingHTTPServer per-request-thread budget,
+        XACA-0889 3s watchdog, vault-fetch's own 10s network timeout). On
+        timeout the child's entire process group is killed (SIGKILL), not
+        just the direct zsh child -- see the TimeoutExpired handler below.
 
         GRACEFUL DEGRADATION WHEN THE SCRIPT IS ABSENT (coordinator
         correction to the original XACA-1246-003 pass, which wrongly
@@ -15272,23 +15284,60 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         env.pop('LCARS_TEAM', None)
         env.pop('SESSION_TYPE', None)
 
+        # XACA-1246 follow-up (post-003 QA finding): subprocess.run's own
+        # `timeout=` kills only the DIRECT child (this zsh) -- it does NOT
+        # kill that shell's own children. In production tier 1 shells out to
+        # `node` (vault-fetch.js); a genuinely hung (not merely slow) fetch
+        # used to leak an orphaned `node` process indefinitely every time
+        # this timeout fired, proven live with `ps aux` (a fake hanging
+        # script's sleep kept running ~8s after the 2.0s timeout returned).
+        # Popen(..., start_new_session=True) puts this whole invocation in
+        # its OWN process group (a new session, per POSIX setsid semantics),
+        # so on timeout the except clause below can SIGKILL the entire group
+        # -- parent zsh AND any descendant it spawned -- instead of only the
+        # pid subprocess.run would have reaped.
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 ['zsh', '-f', '-c', script, 'zsh', team, str(_CC_ALIASES_SCRIPT), mode_arg],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=_CC_CREDENTIAL_RESOLVE_TIMEOUT,
                 env=env,
+                start_new_session=True,
             )
-        except subprocess.TimeoutExpired:
-            result['fault'] = 'credential resolution timed out'
-            return result
         except OSError as exc:
             result['fault'] = f'could not spawn credential resolver: {exc}'
             return result
 
-        stdout = proc.stdout or ''
-        stderr = proc.stderr or ''
+        try:
+            stdout, stderr = proc.communicate(timeout=_CC_CREDENTIAL_RESOLVE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # Kill the WHOLE process group, not just proc.pid -- this is
+            # what actually takes the orphaned grandchild down with it.
+            # Best-effort: the group may already be gone by the time we get
+            # here (e.g. the shell itself exited between the timeout firing
+            # and this line running), so ProcessLookupError is expected and
+            # benign, not an error worth surfacing.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # Reap so the killed process doesn't linger as a zombie; the
+            # pipes are already torn down by the SIGKILL so this returns
+            # promptly. Guard with a short timeout of its own in case
+            # reaping itself somehow stalls -- fall back to proc.kill()
+            # (the direct child only) plus a final blocking reap rather than
+            # ever leaving this call hung indefinitely.
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+            result['fault'] = 'credential resolution timed out'
+            return result
+
+        stdout = stdout or ''
+        stderr = stderr or ''
 
         first_line, _, rest = stdout.partition('\n')
         try:
