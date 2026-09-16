@@ -157,7 +157,21 @@
                 // the right wording; only the DOT's color/shape (CSS,
                 // data-credential-status) tells them apart visually.
                 (status === 'missing' || status === 'undeclared') ? _missingCredentialTooltip(currentConfig) :
-                'Credentials present but never validated — run TEST CONNECTION'
+                // XACA-1246 [UX-023]: the validation cache was re-keyed
+                // from env_var_name alone to (team, env_var_name) — see
+                // _load_account_validation_cache's docstring (server.py).
+                // Multiple teams sharing one variable used to inherit
+                // whichever of them last ran TEST CONNECTION as a shared,
+                // wrong-team green; the re-key makes each team earn its
+                // own validation, so a team that was showing green purely
+                // off that shared entry flips to this state with no
+                // action having actually changed. Said explicitly so that
+                // flip doesn't read as a fresh regression -- proportionate
+                // one-line addendum, not a dismissible banner/framework.
+                'Credentials present but not yet validated under this team\'s own record — run ' +
+                'TEST CONNECTION. (If this was green before recent maintenance, that is expected: ' +
+                'a validation-cache correctness fix reset entries that used to be shared between ' +
+                'teams declaring the same variable.)'
             );
         }
 

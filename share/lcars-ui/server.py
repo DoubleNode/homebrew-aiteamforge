@@ -3448,6 +3448,28 @@ _CC_ALIASES_SCRIPT = UI_DIR.parent / "claude_code_cc_aliases.sh"
 # its own; that is the point (approval condition 3), not a bug.
 _CC_CREDENTIAL_RESOLVE_TIMEOUT = 2.0  # seconds
 
+# XACA-1246 [Review] finding: the post-timeout REAP (waiting for the
+# SIGKILLed process group to actually die, see _invoke_credential_resolver)
+# used to bound itself with two SEPARATE 5s `communicate()` calls -- a
+# worst case of 2.0s (initial resolve timeout) + 5s + 5s = 12s, nearly 4x
+# the 3s watchdog ceiling _CC_CREDENTIAL_RESOLVE_TIMEOUT's own comment
+# above was chosen to respect. "bound the reap so it can't hang the
+# request thread forever" was satisfied literally (12s is bounded) while
+# violating the actual constraint that motivated bounding it in the first
+# place. Once SIGKILL has been delivered to the whole process group, the
+# kernel reaps the zombie essentially immediately (a wait() syscall
+# returning as soon as the scheduler processes it) -- normal case is
+# milliseconds, not seconds. 0.25s per attempt is generous scheduling
+# margin for that normal case while keeping the pathological case (D-state,
+# wedged in uninterruptible I/O -- the ONE case this double-reap exists
+# for at all) bounded at 0.5s total, not 10s. Worst case for the whole
+# seam is therefore 2.0 + 0.25 + 0.25 = 2.5s, comfortably under the 3s
+# ceiling with headroom left for the rest of the request (JSON parse,
+# response write) -- this fault path is already rare (it only runs after
+# the initial resolve has already timed out), so it does not need the
+# same margin as the common case.
+_CC_CREDENTIAL_REAP_TIMEOUT = 0.25  # seconds, per post-SIGKILL reap attempt
+
 # Mirrors _cc_export_account_credentials' own team-slug gate in
 # claude_code_cc_aliases.sh (XACA-0539-011): leading alphanumeric, then
 # [A-Za-z0-9_-]. This is LAYER ONE of the two-layer defense approval
@@ -9208,7 +9230,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             # Validate CR-ID format
-            if not re.match(r"^CR-[A-Z]+-\d{8}-\d+$", cr_id):
+            if not re.match(r"^CR-[A-Z]+-\d{8}-\d+\Z", cr_id):
                 self._send_json_response({"ok": False, "error": f"Invalid CR-ID format: {cr_id}"}, status=400)
                 return
 
@@ -9422,7 +9444,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         import fcntl
         try:
             # Validate CR-ID format
-            if not re.match(r"^CR-[A-Z]+-\d{8}-\d+$", cr_id):
+            if not re.match(r"^CR-[A-Z]+-\d{8}-\d+\Z", cr_id):
                 self._send_json_response({"ok": False, "error": f"Invalid CR-ID format: {cr_id}"}, status=400)
                 return
 
@@ -14108,7 +14130,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             actor            = body.get("actor", "lcars-ui").strip() or "lcars-ui"
 
             # ── Validate CR-ID format ──────────────────────────────────────────
-            if not re.match(r"^CR-[A-Z]+-\d{8}-\d+$", cr_id):
+            if not re.match(r"^CR-[A-Z]+-\d{8}-\d+\Z", cr_id):
                 self._send_json_response({"ok": False, "error": "Invalid CR-ID format"}, status=400)
                 return
 
@@ -15399,15 +15421,25 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # reaped after the second bounded wait, give up and return the
             # fault instead of blocking further -- a leaked zombie is
             # strictly better than a wedged thread.
+            #
+            # XACA-1246 [Review] follow-up finding: this pair used to be
+            # `timeout=5` each -- a 10s worst case on top of the 2.0s
+            # initial timeout (12s total) against the 3s watchdog budget
+            # _CC_CREDENTIAL_RESOLVE_TIMEOUT exists to respect (see that
+            # constant's comment). Bounded is not the same as
+            # budget-respecting. _CC_CREDENTIAL_REAP_TIMEOUT (0.25s) keeps
+            # this pair's worst case at 0.5s -- see that constant's own
+            # comment for why the normal post-SIGKILL reap needs nowhere
+            # near 5s, and why 0.25s is still generous margin.
             try:
-                proc.communicate(timeout=5)
+                proc.communicate(timeout=_CC_CREDENTIAL_REAP_TIMEOUT)
             except subprocess.TimeoutExpired:
                 try:
                     proc.kill()
                 except ProcessLookupError:
                     pass
                 try:
-                    proc.communicate(timeout=5)
+                    proc.communicate(timeout=_CC_CREDENTIAL_REAP_TIMEOUT)
                 except subprocess.TimeoutExpired:
                     pass  # give up on reaping; do not block the request thread further
             result['fault'] = 'credential resolution timed out'
@@ -15634,6 +15666,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(content_length))
+            # XACA-1246 [Review] finding: valid JSON that is not an object
+            # (a list, string, number, `null`, ...) used to reach the first
+            # `body.get(...)` below, raise AttributeError, and fall into the
+            # generic `except Exception` at the bottom of this method --
+            # which echoed the raw exception text (e.g. "'list' object has
+            # no attribute 'get'") straight into the HTTP 500 response body.
+            # Reject the wrong shape here, with a clean 400, before any
+            # `.get()` call can run.
+            if not isinstance(body, dict):
+                self._send_json_response(
+                    {'success': False, 'error': 'Request body must be a JSON object'}, status=400)
+                return
 
             team = body.get('team') or LCARS_TEAM
             if team not in TEAM_KANBAN_DIRS:
@@ -15793,6 +15837,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 'env_var_name': env_var_name,
                 'auth_type': auth_type,
             })
+        except json.JSONDecodeError as e:
+            self._send_json_response({'success': False, 'error': f'Invalid JSON body: {e}'}, status=400)
         except Exception as e:
             print(f"[LCARS] ERROR in handle_team_account_save: {e}")
             self._send_json_response({'success': False, 'error': str(e)}, status=500)
@@ -15817,6 +15863,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(content_length))
+            # XACA-1246 [Review] finding: valid JSON that is not an object
+            # (a list, string, number, `null`, ...) used to reach
+            # `body.get(...)` below, raise AttributeError, and fall into
+            # the generic `except Exception` at the bottom of this method
+            # -- which echoed the raw exception text (e.g. "'list' object
+            # has no attribute 'get'") straight into the HTTP 500 response
+            # body. Reject the wrong shape here, with a clean 400, before
+            # any `.get()` call can run.
+            if not isinstance(body, dict):
+                self._send_json_response(
+                    {'ok': False, 'error': 'Request body must be a JSON object'}, status=400)
+                return
 
             # Resolve env_var_name: prefer explicit field, fall back to team lookup
             env_var_name = body.get('env_var_name', '').strip()
@@ -15929,13 +15987,26 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                     if declared_var_name != env_var_name:
                         declared_var_display = repr(declared_var_name) if declared_var_name else 'none saved'
+                        # XACA-1246 [UX-021]: the old wording put `{team!r}`
+                        # directly against a literal "'s", e.g.
+                        # "team 'academy''s saved credential" -- the two
+                        # adjacent apostrophes read as a typo. Phrased below
+                        # without the possessive.
+                        #
+                        # XACA-1246 [UX-022]: "Refusing to guess another
+                        # team's credential" is an internal design
+                        # assertion (this endpoint's own reasoning for why
+                        # it errors) leaking into user-facing text. Worded
+                        # from the operator's point of view instead: state
+                        # what's true (this value isn't what's saved) and
+                        # what to do about it.
                         self._send_json_response({
                             'ok': False,
                             'error': (
-                                f'env_var_name {env_var_name!r} does not match team {team!r}\'s '
-                                f'saved credential ({declared_var_display}). '
-                                'Refusing to guess another team\'s credential -- save this value for '
-                                f'{team!r} first, or reload the panel to test the currently-saved value.'
+                                f'The value provided does not match the credential saved for '
+                                f'team {team!r} ({declared_var_display}). '
+                                f'This value hasn\'t been saved for {team!r} yet -- save it first, '
+                                'or reload the panel to test the currently-saved credential.'
                             ),
                         }, status=400)
                         return
@@ -15944,11 +16015,22 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # shape; the current UI always sends one, see above). This
                 # is NOT the same as the old guessing branch: `team` stays
                 # '' here, so the resolver-chain lookup below is skipped
-                # entirely and this falls through to the plain
-                # os.environ.get(env_var_name, '') read further down --
-                # this server's OWN process environment, never another
-                # team's vault-resolved credential. No path here can ever
-                # produce a wrong-team green.
+                # entirely FOR THIS CALLER SHAPE, and falls through to the
+                # plain os.environ.get(env_var_name, '') read further down
+                # -- this server's OWN process environment, not another
+                # team's vault-resolved credential.
+                #
+                # What this does NOT claim: it says nothing about the case
+                # where `team` IS known. That path is guarded separately,
+                # at the `if not api_key and not team:` check below the
+                # seam call -- a known team whose resolver seam reports
+                # unavailable must never fall through to this same
+                # process-environment read, because a different team can
+                # (and, measured, does) declare the identical
+                # env_var_name (XACA-1246 [Review] blocking finding: a
+                # prior version of this fallback was NOT scoped to the
+                # teamless case, so it silently served team A's token as
+                # a validated green for team B).
 
             if not env_var_name:
                 self._send_json_response({'ok': False, 'error': 'No env_var_name could be resolved'}, status=400)
@@ -15968,14 +16050,26 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     api_key = cred['token']
                 else:
                     credential_fault = cred['fault']
-            if not api_key:
-                # No team association (an unsaved candidate value), or the
-                # resolver chain found nothing for the associated team's
-                # SAVED credential — fall back to the LCARS process's own
-                # environment. Honest, not a regression: on this ticket's
-                # actual failure mode (a launchd-spawned server) that read
-                # correctly reports nothing, exactly as it did before
-                # XACA-1246-003.
+            if not api_key and not team:
+                # ONLY the teamless shape reaches this read: no team
+                # association at all (an unsaved candidate value -- the
+                # legacy caller shape documented above). Fall back to the
+                # LCARS process's own environment. Honest, not a
+                # regression: on this ticket's actual failure mode (a
+                # launchd-spawned server) that read correctly reports
+                # nothing, exactly as it did before XACA-1246-003.
+                #
+                # This is deliberately NOT an `if not api_key:` covering
+                # every caller shape (XACA-1246 [Review] blocking finding
+                # on the prior version of this fallback): when `team` IS
+                # known and the seam above reported unavailable --
+                # whether from a genuine fault or simply no token -- that
+                # is the answer for THIS team, full stop. Substituting a
+                # process-environment read here can silently serve a
+                # DIFFERENT team's token (multiple teams can and do
+                # declare the identical env_var_name, measured) as a
+                # validated green for this one. A known team's failure
+                # must be surfaced, never quietly bridged.
                 api_key = os.environ.get(env_var_name, '')
             if not api_key:
                 # XACA-1246-006: when the resolver chain gave a real reason
@@ -15998,6 +16092,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # declined would be false for that machine. This wording is
                 # true whether a chain ran and found nothing, or no chain
                 # exists on this box at all.
+                #
+                # `team` truthy + credential_fault is None here means the
+                # seam (real chain, or the script-absent env-direct
+                # fallback -- either way) ran and reported "unavailable, no
+                # token" WITHOUT an error (design §6.1's rc=0 "no key
+                # anywhere" state). This generic message stays accurate for
+                # that case too: the seam's own resolution -- chain tier 3
+                # (env-failover) or the env-direct read -- already checks
+                # this exact process's environment as part of answering
+                # for `team` (both spawn with `env = os.environ.copy()` /
+                # read os.environ directly), so "not set in this server's
+                # own process environment either" was genuinely evaluated,
+                # not skipped. XACA-1246 [Review] blocking finding: this
+                # method must never perform a SECOND, independent
+                # os.environ read of its own for a known team (see the
+                # `if not api_key and not team:` gate above) -- but it does
+                # not need to, because the seam it already consulted
+                # covers that question for whichever team asked.
                 self._send_json_response({
                     'ok': False,
                     'account_fingerprint': None,
@@ -16163,6 +16275,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 'error': error_msg,
             }
             self._send_json_response(response)
+        except json.JSONDecodeError as e:
+            self._send_json_response({'ok': False, 'error': f'Invalid JSON body: {e}'}, status=400)
         except Exception as e:
             print(f"[LCARS] ERROR in handle_team_account_test_connection: {e}")
             self._send_json_response({'ok': False, 'error': str(e)}, status=500)
@@ -16425,6 +16539,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             body = json.loads(self.rfile.read(content_length))
+            # XACA-1246 [Review] finding: valid JSON that is not an object
+            # (a list, string, number, `null`, ...) used to reach
+            # `body.get(...)` below, raise AttributeError, and fall into
+            # the generic `except Exception` at the bottom of this method
+            # -- which echoed the raw exception text straight into the
+            # HTTP 500 response body. Reject the wrong shape here, with a
+            # clean 400, before any `.get()` call can run.
+            if not isinstance(body, dict):
+                self._send_json_response(
+                    {'success': False, 'error': 'Request body must be a JSON object'}, status=400)
+                return
 
             team = (body.get('team') or '').strip()
             engine_slug = (body.get('engine_slug') or '').strip()
@@ -16584,6 +16709,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 'credential_source': credential_source,
                 'credential_fault': credential_fault,
             })
+        except json.JSONDecodeError as e:
+            self._send_json_response({'success': False, 'error': f'Invalid JSON body: {e}'}, status=400)
         except Exception as e:
             print(f"[LCARS] ERROR in handle_team_account_assign: {e}")
             self._send_json_response({'success': False, 'error': str(e)}, status=500)

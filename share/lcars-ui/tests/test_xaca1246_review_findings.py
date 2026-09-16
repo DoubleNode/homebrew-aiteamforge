@@ -233,7 +233,15 @@ class TestConnectionTeamScopingTests(unittest.TestCase):
         response = _response_json(buf)
         self.assertFalse(response["ok"])
         self.assertIn(self.TEAM_A, response["error"])
-        self.assertIn("SOME_OTHER_VAR_NAME", response["error"])
+        # XACA-1246 [UX-021/UX-022] round-2 review: the message no longer
+        # echoes the posted (mismatched) var name back verbatim -- it was
+        # rephrased to name the team and its ACTUAL saved var (avoiding the
+        # `{team!r}` + "'s" double-apostrophe artifact and the internal
+        # "refusing to guess" phrasing) rather than the value that was
+        # rejected. Assert on what the new copy DOES promise: it names the
+        # team and the credential that IS saved for it.
+        self.assertIn(self.SHARED_VAR, response["error"])
+        self.assertNotIn("''", response["error"])
 
     def test_unknown_team_errors_before_any_resolution(self):
         with patch.object(LCARSHandler, "_resolve_team_credential") as mock_resolve:
@@ -373,8 +381,8 @@ class CredentialResolverUnboundedReapTests(unittest.TestCase):
         fake_proc.pid = 424242
         fake_proc.communicate.side_effect = [
             subprocess.TimeoutExpired(cmd="resolver", timeout=server._CC_CREDENTIAL_RESOLVE_TIMEOUT),
-            subprocess.TimeoutExpired(cmd="resolver", timeout=5),
-            subprocess.TimeoutExpired(cmd="resolver", timeout=5),
+            subprocess.TimeoutExpired(cmd="resolver", timeout=server._CC_CREDENTIAL_REAP_TIMEOUT),
+            subprocess.TimeoutExpired(cmd="resolver", timeout=server._CC_CREDENTIAL_REAP_TIMEOUT),
         ]
 
         with patch("server.subprocess.Popen", return_value=fake_proc), \
@@ -396,7 +404,7 @@ class CredentialResolverUnboundedReapTests(unittest.TestCase):
         # the exact defect: the old code's final fallback was a bare
         # proc.communicate() with no timeout at all.
         last_call = fake_proc.communicate.call_args_list[-1]
-        self.assertEqual(last_call, call(timeout=5))
+        self.assertEqual(last_call, call(timeout=server._CC_CREDENTIAL_REAP_TIMEOUT))
 
         # Process-group kill was attempted (the primary defense); proc.kill()
         # (the direct-child fallback) fires between the two reap attempts.
