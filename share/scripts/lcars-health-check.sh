@@ -237,6 +237,28 @@ declare -a _LCARS_INFRA=(
 # relationship) keeps resolving on candidate 1 and never falls through to
 # candidate 2.
 #
+# MEASURED impact (XACA-1254 gate-round-1 correction — replaces an earlier,
+# unverified claim in this comment and in the ticket that "every consumer's
+# roster and port lookup failed" / teams "went unsupervised on every
+# consumer"). Probed all 3 live consumers over SSH:
+#   - The LaunchAgent on every host invokes the ROOT copy,
+#     `$AITEAMFORGE_DIR/lcars-health-check.sh`. There, script-dir IS
+#     `$AITEAMFORGE_DIR`, so candidate 1 (`$AITEAMFORGE_DIR/kanban-hooks`)
+#     is a CHILD and always won — on every host, both before and after this
+#     fix. Supervision via the LaunchAgent was NEVER broken.
+#   - What WAS broken: kb-spacedock's health CHECK 3
+#     (`_spd_find_lcars_health_check()`) resolves and runs a SEPARATE copy
+#     at `$AITEAMFORGE_DIR/scripts/lcars-health-check.sh`, where script-dir
+#     is `$AITEAMFORGE_DIR/scripts` and the correct hooks dir is the
+#     SIBLING `$AITEAMFORGE_DIR/kanban-hooks` — candidate 2, unreachable
+#     pre-fix. That `scripts/` copy exists on darren-m4-mini and
+#     darren-m1-mini (CHECK 3 was genuinely broken there) but is ABSENT on
+#     darren-m1pro-mbp, where kb-spacedock's CHECK 3 cannot run at all,
+#     fix or no fix — a different gap this ticket does not close.
+#   - `$AITEAMFORGE_DIR/scripts/kanban-hooks` (the directory this comment
+#     used to worry could win candidate 1 empty-but-present, see below) is
+#     ABSENT on all 3 hosts — not present-but-empty.
+#
 # XACA-1254 advisor ruling (post-002-review): this predicate answers ONE
 # question only — WHICH DIRECTORY is the hooks dir? — and must stay
 # separate from a second, already-solved question: which INDIVIDUAL helper
@@ -245,31 +267,62 @@ declare -a _LCARS_INFRA=(
 # python3 invocation fail naturally (rc!=0 -> _HC_ROSTER_STATUS=
 # "helper-failed") — that machinery is not being rebuilt here.
 #
-# A candidate therefore wins if it contains AT LEAST ONE of the two helper
-# files — not both, and not mere directory existence:
-#   - "directory exists" is UNSAFE: an empty (but present) kanban-hooks/
-#     alongside the script — plausible on a consumer install even where the
-#     tap layout itself lacks the directory entirely — would let candidate 1
-#     win while still being completely non-functional, reintroducing this
-#     same defect under a different disguise.
-#   - "both files required" is TOO STRICT: it would reject a genuine
-#     partial-upgrade tree that legitimately ships one helper but not the
-#     other (see the XACA-1223 "partial-upgrade tree" test fixture), which
-#     would silently deny lcars_ports.py's self-heal "owner tick" a helper
-#     file it actually has, in a directory that actually IS the correct one.
-# "At least one" correctly resolves the directory in both of the above
-# cases and defers entirely to XACA-1223's existing per-file handling for
-# whichever single file, if any, then turns out to be missing.
+# Selection is TWO-PASS, not "first candidate holding at least one helper"
+# (gate-round-1 reviewer finding 2 — that single-pass shape is exploitable:
+# a stray/partial kanban-hooks/ at candidate 1, holding only ONE helper,
+# would win outright and SHADOW a COMPLETE candidate 2 next to it):
+#   - pass 1: the first candidate holding BOTH lcars_host_roster.py and
+#     lcars_ports.py wins.
+#   - pass 2 (only if pass 1 found none): the first candidate holding AT
+#     LEAST ONE of the two wins. This fallback is what XACA-1223's
+#     "partial-upgrade tree" test fixture (case d3) needs — it legitimately
+#     ships lcars_ports.py without lcars_host_roster.py in what IS the
+#     correct hooks dir (a CHILD relationship there, so it is always
+#     candidate 1 regardless of ordering). Requiring "both" outright would
+#     reject that tree and silently deny lcars_ports.py's self-heal "owner
+#     tick" a helper file it actually has, in a directory that actually IS
+#     the correct one.
+# "Directory exists" alone is never sufficient at either pass — an empty
+# (but present) kanban-hooks/ must not win by presence alone; it must
+# actually hold a helper file.
+#
+# Candidate 2 (script-dir PARENT) is further constrained to when it names a
+# genuine sibling relationship (gate-round-1 reviewer finding 3 — the $HOME
+# escape): it is only ELIGIBLE TO WIN when the script's own directory is
+# itself a recognised container segment ("scripts" — the tap
+# `share/scripts/` and installed `scripts/` copy shape, the only layouts
+# where the sibling relationship is real). A script sitting at a tree root
+# (dev tree, or the installed root copy) has no legitimate sibling one
+# level up — walking there escapes the install/dev tree entirely (for the
+# installed root copy, `${_SCRIPT_DIR:h}` is exactly `$HOME`) — and
+# candidate 1 already resolves both of those root-copy layouts via the
+# child relationship, so this gate costs neither working layout anything.
+# Candidate 2 is still recorded in _HC_HOOKS_TRIED for the DEGRADED
+# diagnostic below regardless of eligibility — "name every path tried" is a
+# diagnostic-completeness guarantee, independent of whether that path was
+# eligible to WIN.
 _SCRIPT_DIR="${0:A:h}"
 _KANBAN_HOOKS_DIR=""
 typeset -ga _HC_HOOKS_TRIED=()
-for _cand in "${_SCRIPT_DIR}/kanban-hooks" "${_SCRIPT_DIR:h}/kanban-hooks"; do
-    _HC_HOOKS_TRIED+=("$_cand")
-    [[ -f "$_cand/lcars_host_roster.py" || -f "$_cand/lcars_ports.py" ]] || continue
+typeset -ga _HC_HOOKS_CANDIDATES=()
+_HC_CAND1="${_SCRIPT_DIR}/kanban-hooks"
+_HC_CAND2="${_SCRIPT_DIR:h}/kanban-hooks"
+_HC_HOOKS_TRIED+=("$_HC_CAND1" "$_HC_CAND2")
+_HC_HOOKS_CANDIDATES+=("$_HC_CAND1")
+[[ "${_SCRIPT_DIR:t}" == "scripts" ]] && _HC_HOOKS_CANDIDATES+=("$_HC_CAND2")
+for _cand in "${_HC_HOOKS_CANDIDATES[@]}"; do
+    [[ -f "$_cand/lcars_host_roster.py" && -f "$_cand/lcars_ports.py" ]] || continue
     _KANBAN_HOOKS_DIR="$_cand"
     break
 done
-unset _cand
+if [[ -z "$_KANBAN_HOOKS_DIR" ]]; then
+    for _cand in "${_HC_HOOKS_CANDIDATES[@]}"; do
+        [[ -f "$_cand/lcars_host_roster.py" || -f "$_cand/lcars_ports.py" ]] || continue
+        _KANBAN_HOOKS_DIR="$_cand"
+        break
+    done
+fi
+unset _cand _HC_CAND1 _HC_CAND2
 
 # XACA-1254-003: NEITHER candidate contained EITHER helper file — a true
 # resolution failure, distinct from "resolved, but one helper is

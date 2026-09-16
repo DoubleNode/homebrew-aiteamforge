@@ -23,21 +23,30 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **XACA-1254** — `share/scripts/lcars-health-check.sh` resolved its `kanban-hooks/` python helpers as
   `${_SCRIPT_DIR}/kanban-hooks`, assuming the hooks dir is a CHILD of the script's own directory. That is true
   only in the dev tree. In the tap, `sync-tap.sh:881` places the script at `share/scripts/` while
-  `sync-tap.sh:701` places the helpers at `share/kanban-hooks/` — a SIBLING one level up; the installed layout
-  (`~/aiteamforge/scripts/` + `~/aiteamforge/kanban-hooks/`) has the same shape. So on BOTH shipped layouts
-  every consumer's roster and port lookup failed, `lcars_host_roster.py` and `lcars_ports.py` were never
-  invoked, and supervision silently fell back to the last-known-good roster — broken since the script first
-  shipped (XACA-0585). Because XACA-1223 made supervision registry-driven, a newly-provisioned team outside the
-  stale `.lkg` roster went UNSUPERVISED on every consumer, and the only signal was one line in the health log.
-  Replaced the single assignment with an ordered candidate probe — script-dir CHILD first (so the dev tree is
-  unaffected), then script-dir PARENT (tap + installed) — where a candidate wins if it holds AT LEAST ONE of
-  `lcars_host_roster.py` / `lcars_ports.py`. Deliberately not "both" (that rejects a legitimate partial-upgrade
-  tree and breaks XACA-1223's "owner tick still runs when roster fails" guarantee) and deliberately not
-  "directory exists" (an empty-but-present `scripts/kanban-hooks` would win candidate 1 and stay broken).
-  True resolution failure now fails LOUDLY — a `DEGRADED` diagnostic naming every path tried, a distinct roster
-  note, `DEGRADED` in the Summary line, and exit code 3 from one-shot mode only; the daemon never exits and
-  keeps supervising on last-known-good, because leaving every team unsupervised is strictly worse than degraded
-  supervision. Consumers should see zero `helper-failed` lines and a live roster read after upgrading.
+  `sync-tap.sh:701` places the helpers at `share/kanban-hooks/` — a SIBLING one level up; the installed
+  `scripts/` copy (`~/aiteamforge/scripts/lcars-health-check.sh` + `~/aiteamforge/kanban-hooks/`) has the same
+  shape. Broken since the script first shipped (XACA-0585). **MEASURED impact (gate-round-1 correction —
+  supersedes an earlier, unverified claim here that "every consumer's roster and port lookup failed" / teams
+  "went unsupervised on every consumer"):** probed all 3 live consumers over SSH. The LaunchAgent on every host
+  runs the ROOT copy (`$AITEAMFORGE_DIR/lcars-health-check.sh`), where `kanban-hooks/` IS a child of the
+  script's own directory — supervision was **never** broken on any consumer. What was actually broken:
+  `kb-spacedock`'s health CHECK 3, which resolves and runs the separate `scripts/lcars-health-check.sh` copy —
+  present (and broken) on darren-m4-mini and darren-m1-mini, absent entirely on darren-m1pro-mbp (so CHECK 3
+  can't run there, fix or no fix). Replaced the single assignment with an ordered candidate probe — script-dir
+  CHILD first (so the dev tree is unaffected), then script-dir PARENT (tap + installed `scripts/` copy).
+  **Gate-round-1 hardening (2 reviewer findings):** (1) selection is now TWO-PASS — pass 1 requires a candidate
+  hold BOTH `lcars_host_roster.py` and `lcars_ports.py`, pass 2 falls back to "at least one" only if pass 1
+  found none, so a stray/partial `kanban-hooks/` at candidate 1 can no longer shadow a complete candidate 2;
+  the "at least one" fallback exists solely for XACA-1223's own partial-upgrade fixture (case d3), not for an
+  empty-but-present `scripts/kanban-hooks` (measured ABSENT, not empty-but-present, on all 3 consumers).
+  (2) candidate 2 (script-dir PARENT) is now only eligible to win when the script's own directory is a
+  recognised container segment (`scripts`), so it can no longer resolve to a directory outside the tree it's
+  anchored to. True resolution failure now fails LOUDLY — a `DEGRADED` diagnostic naming every path tried, a
+  distinct roster note, `DEGRADED` in the Summary line, and exit code 3 from one-shot mode only; the daemon
+  never exits and keeps supervising on last-known-good, because leaving every team unsupervised is strictly
+  worse than degraded supervision. Consumers with the `scripts/` copy present should see zero `helper-failed`
+  lines from `kb-spacedock` CHECK 3 and a live roster read after upgrading; consumers relying only on the
+  LaunchAgent-supervised root copy saw no defect here to begin with.
 
 - **XACA-1255** — agent panel MISSION showed a DIFFERENT concurrent chat's kanban item. One panel process serves one
   tmux session holding 4 windows, each potentially running a separate chat, and window identity was resolved from a
