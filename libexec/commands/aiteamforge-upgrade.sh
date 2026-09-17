@@ -3154,6 +3154,7 @@ kb-ttyd-bridge.sh
 kb-host-ready.sh
 kb-msg-provision
 kb-spacedock
+kb-pr-monitor
 gh-bot-review.sh
 gh-bot-test.sh
 team-account-display.sh
@@ -3184,12 +3185,12 @@ update_runtime_helpers() {
 
   local updated=0
   local src name target
-  # Sweep shipped helpers. kb-init-team, kb-api-key, kb-msg-provision and
-  # kb-spacedock (XACA-1071) are
+  # Sweep shipped helpers. kb-init-team, kb-api-key, kb-msg-provision,
+  # kb-spacedock (XACA-1071) and kb-pr-monitor (XACA-1275) are
   # extensionless, so each is listed explicitly alongside the *.sh / *.py
   # globs (XACA-0395: same gap class as kb-init-team — the glob cannot match
   # an extensionless name; kb-msg-provision added under XACA-1078-004).
-  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock; do
+  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock "$scripts_source"/kb-pr-monitor; do
     [ -f "$src" ] || continue
     name="$(basename "$src")"
     target="${scripts_dest}/${name}"

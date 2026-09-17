@@ -212,7 +212,7 @@ gh pr create \
 
 #### 5. PR Review Handoff & Monitoring
 
-Since all agents author PRs under the same GitHub account, agents **cannot** use `gh pr review` to approve their own PRs. Two separate GitHub Apps submit formal reviews from another terminal instead — **each covers a different gate, and they must never be conflated:**
+Since all agents author PRs under the same GitHub account (`ehlersd`), agents **cannot** use `gh pr review` to approve their own PRs. Two separate GitHub Apps submit formal reviews from another terminal instead — **each covers a different gate, and they must never be conflated:**
 
 | Gate | Bot login (GitHub App) | Submitted via | Covers |
 |---|---|---|---|
@@ -221,42 +221,620 @@ Since all agents author PRs under the same GitHub account, agents **cannot** use
 
 Both are GitHub Apps, so both show up as `.user.type == "Bot"` in the GitHub API — filtering by `.user.type` alone cannot tell them apart, and resolves to whichever bot reviewed most recently. That lets a tester APPROVE satisfy the review gate (or vice versa) on a single-signal merge. **Always filter by the exact `.user.login` string, never by `.user.type`.**
 
-**Pass `--repo owner/repo` to both bot commands whenever your remote is not named `origin`.** They auto-detect the repo via `git remote get-url origin` (check yours with `git remote -v` first); if that remote name does not exist the command exits 1 with "Could not auto-detect repository." Passing `--repo` explicitly always works and is the safe default. **Also verify the exit code capture-first:** `gh-bot-test ... | tail` (or any pipe) reports the pipe's own exit status, not the command's — a failed submission can silently read as success. Capture the command's own exit code before piping its output anywhere.
+**Both bot commands require `--repo owner/repo` explicitly.** They attempt to auto-detect the repo via `git remote get-url origin`, which fails whenever your remote isn't named `origin` (check with `git remote -v` first) — the command then exits 1 with "Could not auto-detect repository." **Also verify the exit code capture-first:** `gh-bot-test ... | tail` (or any pipe) reports the pipe's own exit status, not the command's — a failed submission can silently read as success. Capture the command's own exit code before piping its output anywhere.
 
-Every PR passes **three gates** — **Test**, **Review**, and the **protected-subitem sweep** (`kb-sweep` output shows no `PROTECTED SUBITEMS UNRESOLVED`, i.e. every `[Review]`/`[Test]`/`[UX]` subitem is resolved) — plus a **branch-freshness / mergeability** gate before the merge itself. The loop that enforces all of them ships as a runnable script: **`{{AITEAMFORGE_DIR}}/scripts/kb-pr-monitor`**. Run it; do **not** hand-roll a polling loop.
+**A. Generate Review Handoff Prompts**
 
-**A. Generate review handoff prompts**
-
-After opening the PR, generate a handoff prompt for BOTH gates so each can be pasted into its own terminal. Each prompt carries: PR number + title + URL, repo path, kanban item id, a 2–3 sentence summary, `gh pr checkout <N>`, the platform lint/test commands (see Testing Guidelines below), and the submit line — `gh-bot-test` for the tester, `gh-bot-review` for the reviewer, each with `--event APPROVE|REQUEST_CHANGES`. Long output goes to `/tmp/<test|review>-<N>.md` and is passed with `--body-file`. Every prompt ends with **⚠️ DO NOT MERGE — the creating agent monitors the gates and merges.**
-
-**B. Run the monitor**
+After creating the PR, generate handoff prompts for BOTH gates so the user can copy/paste each into a separate terminal. Use this template (fill in actual values):
 
 ```
-{{AITEAMFORGE_DIR}}/scripts/kb-pr-monitor --pr <N> --item <ITEM-ID> [--repo <owner>/<repo>] [--once] [--no-merge]
-  0 GATES_PASSED (merged via kb-merge; caller still runs kb-done)
- 10 RESPAWN_TESTER   11 RESPAWN_REVIEWER   12 RESPAWN_BOTH (update-branch ran)
- 20 CONFLICT   21 UX_REOPEN   22 BLOCKED   30 PR_CLOSED   31 TIMEOUT   2 usage/env
-final stdout line: VERDICT: <NAME> pr=<N> item=<ID> detail=<...>
+═══════════════════════════════════════════════════════════════════════════════
+ PR TEST REQUEST - Paste this into a tester agent terminal
+═══════════════════════════════════════════════════════════════════════════════
+
+ PR #<number>: <title>   |   URL: <pr_url>   |   Repo: <repo_path>   |   Kanban Item: <ITEM-ID>
+
+ Summary: <2-3 sentence description of what changed and why>
+
+ Quick Start:
+   cd <repo_path>
+   gh pr checkout <number>
+
+ Run the platform lint/test commands (see Testing Guidelines below), exercise the affected
+ features and edge/error paths, then submit:
+
+   gh-bot-test --pr <number> --repo <owner>/<repo> --event APPROVE --body "Tests pass - <summary>"
+   gh-bot-test --pr <number> --repo <owner>/<repo> --event REQUEST_CHANGES --body "<failures + repro steps>"
+   # Long output: write to /tmp/test-<number>.md first, then use --body-file
+
+ ⚠️  DO NOT MERGE — the creating agent monitors both gates and merges after both approve.
+═══════════════════════════════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════════════════════════════
+ PR REVIEW REQUEST - Paste this into a reviewer agent terminal
+═══════════════════════════════════════════════════════════════════════════════
+
+ PR #<number>: <title>   |   URL: <pr_url>   |   Repo: <repo_path>   |   Kanban Item: <ITEM-ID>
+
+ Summary: <2-3 sentence description of what changed and why>
+ Files changed: <count>  |  Lines: +<additions> -<deletions>
+
+ Quick Start:
+   cd <repo_path>
+   gh pr checkout <number>
+   gh pr diff <number>
+
+ Review using the standard checklist (Security, Architecture, Code Quality, Performance,
+ Testing), then submit:
+
+   gh-bot-review --pr <number> --repo <owner>/<repo> --event APPROVE --body "LGTM - <summary>"
+   gh-bot-review --pr <number> --repo <owner>/<repo> --event REQUEST_CHANGES --body "<feedback>"
+   # Long reviews: write to /tmp/review-<number>.md first, then use --body-file
+
+   # Non-blocking suggestions become kanban subitems (NOT PR comments):
+   source {{AITEAMFORGE_DIR}}/kanban-helpers.sh
+   kb-backlog sub add <ITEM-ID> "[Review] <suggestion> (PR #<number>)"
+
+ ⚠️  DO NOT MERGE — the creating agent monitors both gates and merges after both approve.
+═══════════════════════════════════════════════════════════════════════════════
 ```
 
-What to do per verdict:
-- **0 GATES_PASSED** — merged already; run `kb-done`.
-- **10 / 11** — push fixes, re-issue only that bot's handoff prompt, re-run the monitor.
-- **12 RESPAWN_BOTH** — `gh pr update-branch` ran, so both approvals are stale: re-issue BOTH handoffs, re-run the monitor.
-- **20 CONFLICT** — resolve by hand (checkout, merge the base branch in, fix, push); `gh pr update-branch` does NOT fix content conflicts. For a `CHANGELOG.md` collision, **union-resolve — keep BOTH blocks**, then count occurrences and drop genuine duplicates (replacement-shaped conflicts duplicate content). Then re-issue BOTH handoffs and re-run.
-- **21 UX_REOPEN** — the diff touches UI paths but `[UX]` was cancelled: re-open it, get a UX evaluation, re-run.
-- **22 BLOCKED** — a gate is genuinely red or unclassifiable: read the `detail=` field and investigate. Do not `--admin` past it.
-- **30 PR_CLOSED / 31 TIMEOUT / 2** — stop and report to the user.
+**B. Four-Gate Monitoring Loop**
 
-**Invariants you must hold WITHOUT running anything**
+After generating both handoff prompts, the creating agent polls until ALL FOUR gates clear, then merges: (1) test, (2) review, (3) protected-subitem sweep, (4) branch freshness + mergeability. Between gates 3 and 4 sits an additional CI check-runs allowlist (Gate 3.5) — it requires every check to have reached a positively-safe conclusion (`pass` or `skipping`, per `gh pr checks`'s own `bucket` classification) before merging; a failed/cancelled/timed-out check blocks outright, and a still-running check re-polls rather than passing, so neither a red build nor an unfinished one can slip through under `--admin`.
 
-- Hand off the tester and reviewer gates **together, in one message** — they run in parallel, not in sequence. For UI-touching tickets add a UX evaluation as a third parallel handoff.
-- **Whoever runs a gate must NOT merge.** The creating agent merges, after the monitor returns 0.
-- **Non-blocking finding budget: MAX 3** `[Review]`/`[Test]`/`[UX]` subitems per review round, spent on the highest-severity findings; the rest go in the review body as prose under `### Additional observations (not filed)`. **Blocking findings — security, data loss, breaking changes without migration, missing error handling — are NEVER capped.**
-- **Never check `reviewDecision`** — the GitHub Team plan does not count bot reviews, so it always reads `REVIEW_REQUIRED`, and `BLOCKED` is the normal steady state rather than an error. That is precisely why the merge uses `--admin`. `BLOCKED` therefore carries no readiness signal in either direction: measure branch staleness by counting commits, never by reading `mergeStateStatus`.
-- The monitor's `sync-tap-drift` and `tap-changelog-completeness` arms are **dev-team-only**: they key on CI checks of those exact names, which do not exist on a consumer repo, so the buckets stay empty and the arms never fire. If you ever see one named in a `BLOCKED` verdict, you are looking at the framework's own repo, not yours.
+> **IMPORTANT:** Do NOT check `reviewDecision` — GitHub does not count GitHub App bot reviews toward `required_approving_review_count` on the Team plan. `reviewDecision` will always show `"REVIEW_REQUIRED"` even after both bots approve. Check the reviews list directly, keyed to each bot's own login.
 
-**Full gate rationale, every fail-closed guard and its ticket provenance live in `kb-pr-monitor`'s own header comments — read the script, don't re-expand it here.**
+```bash
+# ── Seed each gate's last-processed timestamp separately (skip pre-existing reviews) ──
+# --paginate is REQUIRED on every call to this endpoint: it pages at 30, so on a
+# long-running PR a bot's latest verdict can sit past page 1 and either look
+# "not detected", or — worse — let a stale page-1 APPROVED outrank a newer
+# CHANGES_REQUESTED once sorted. Never drop --paginate to "simplify" this.
+LAST_TEST_AT=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
+  --jq '[.[] | select(.user.login == "ds9-tester-bot[bot]")] | sort_by(.submitted_at) | last | .submitted_at // empty')
+LAST_REVIEW_AT=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
+  --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]")] | sort_by(.submitted_at) | last | .submitted_at // empty')
+
+TEST_OK="false"; REVIEW_OK="false"; MERGE_UNKNOWN_RETRIES=0; NO_CHECKS_RETRIES=0; POLL_COUNT=0; PREV_HEAD_SHA=""; FORCE_PUSH_CUTOFF=""
+
+while true; do
+  STATE=$(gh pr view <number> --json state --jq '.state')
+  if [ "$STATE" = "CLOSED" ] || [ "$STATE" = "MERGED" ]; then
+    echo "PR is $STATE — exiting monitor."
+    break
+  fi
+
+  POLL_COUNT=$((POLL_COUNT + 1))
+  if [ $((POLL_COUNT % 5)) -eq 0 ]; then
+    echo "Still watching PR #<number>... (poll $POLL_COUNT, TEST=$TEST_OK REVIEW=$REVIEW_OK)"
+  fi
+
+  # Key both gates' verdicts to the CURRENT head SHA, not just to a newer timestamp — a
+  # review submitted against an older commit must never satisfy a gate for a newer push.
+  HEAD_SHA=$(gh pr view <number> --json headRefOid --jq '.headRefOid')
+
+  # TEST_OK/REVIEW_OK are latches — once a poll sets one true it stays true until this
+  # loop exits. That's fine for a HEAD that never moves, but if a push lands BETWEEN the
+  # two approvals (e.g. the tester approves commit X, then a fix or unrelated push moves
+  # HEAD to Y before the reviewer gets to it), the tester's latch stays true forever even
+  # though no bot has ever reviewed Y under that flag. The per-poll commit_id filter below
+  # only stops a STALE query result from setting a flag true — it does nothing to a flag
+  # that is ALREADY true from a prior HEAD. Reset both latches the moment HEAD_SHA itself
+  # changes, so every gate must be freshly re-earned against whatever HEAD is current now.
+  if [ -n "$PREV_HEAD_SHA" ] && [ "$HEAD_SHA" != "$PREV_HEAD_SHA" ]; then
+    echo "Head SHA changed ($PREV_HEAD_SHA -> $HEAD_SHA) since the last poll — a push landed."
+    echo "Resetting both gate latches; a prior approval against the old head does not carry"
+    echo "forward, each bot must re-approve the new head before this gate re-opens."
+    TEST_OK="false"; REVIEW_OK="false"; NO_CHECKS_RETRIES=0
+
+    # ── Force-push / rebase detection (XACA-1159-030) ──────────────────────────────────
+    # The committer-date guard below (kept, see its own comment) assumes the NEW head's
+    # committer date is newer than any stale review pointed at it. That holds for an
+    # ORDINARY rebase — committer dates get rewritten to "now" — but NOT when a force-push
+    # re-points HEAD onto a PRE-EXISTING OLDER commit (drop the tip commit and force-push,
+    # or rebase with --committer-date-is-author-date): a review submitted after that old
+    # commit's original (old) committer date but before it was force-pushed back into place
+    # passes the committer-date check even though it never saw this content as HEAD.
+    #
+    # This is a genuinely different, mechanical check: whether the new head is even a
+    # descendant of the previous head at all. An ordinary push is always a fast-forward —
+    # PREV_HEAD_SHA remains an ancestor of HEAD_SHA. A force-push/rebase is not: history was
+    # rewritten, so PREV_HEAD_SHA is no longer reachable from HEAD_SHA. `compare/A...B`
+    # reports `status: "ahead"` exactly when A is an ancestor of B (B is A plus new commits);
+    # "diverged" or "behind" means it is not.
+    #
+    # VALIDATED against this repo's own PR #851 (XACA-1154) HeadRefForcePushedEvent history
+    # (`gh api graphql` on the PR's timelineItems), not asserted:
+    #   ordinary push   fa1a7598...53b23188 -> compare status="ahead"    (ahead_by=2, behind_by=0)
+    #   force-push      53b23188...3c23b5f5 -> compare status="diverged" (ahead_by=8, behind_by=7)
+    # (53b23188 was the `beforeCommit` and 3c23b5f5 the `afterCommit` of that PR's third
+    # HeadRefForcePushedEvent.) The ordinary push is a clean "ahead"; the force-push is not —
+    # exactly the discriminator this check needs.
+    #
+    # FAILS CLOSED: an unreadable compare result (empty/network error) is treated as a
+    # force-push, never as safe.
+    #
+    # THE ACTUAL MECHANICAL CLOSE: on a detected force-push, stamp the CURRENT wall-clock
+    # time as a floor no review can have been submitted before, and require every matching
+    # review this poll onward to clear that floor in addition to the commit's own committer
+    # date (below). A stale review re-pointed onto the rewritten head by GitHub was, by
+    # definition, submitted before this floor was stamped — it cannot pass regardless of
+    # what its own submitted_at or the commit's committer date say. A genuinely fresh
+    # re-review submitted after this poll clears it normally.
+    FF_STATUS=$(gh api "repos/<owner>/<repo>/compare/$PREV_HEAD_SHA...$HEAD_SHA" --jq '.status // empty' 2>/dev/null)
+    if [ "$FF_STATUS" != "ahead" ]; then
+      echo "⚠ Non-fast-forward change detected (compare status='${FF_STATUS:-<unreadable>}') —"
+      echo "  this looks like a force-push/rebase, not an ordinary push. Stamping a fresh"
+      echo "  cutoff: no review submitted before this moment can satisfy either gate, no"
+      echo "  matter what its commit_id or submitted_at claim."
+      FORCE_PUSH_CUTOFF=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    fi
+  fi
+  PREV_HEAD_SHA="$HEAD_SHA"
+
+  # On an ordinary push, a stale review keeps its OLD commit_id, so the per-poll filter below
+  # correctly fails to match it against the new HEAD_SHA and the freshly-reset latch stays
+  # false until a real new review lands. On a REBASE, GitHub re-points the commit_id of
+  # whatever reviews were current at rebase time onto the NEW head — so a filter that only
+  # checks `commit_id == HEAD_SHA` can match a review that predates the rebase and never
+  # saw the rebased content, immediately re-setting the latch true on the next poll.
+  # Measured, not theoretical: PR #851 (XACA-1154) showed both bots' APPROVED reviews
+  # re-pointed onto the post-rebase head 3c23b5f5 within seconds of the force-push, with
+  # submitted_at of 13:26:48Z and 13:27:13Z — both BEFORE 3c23b5f5's own committer date of
+  # 13:28:41Z (`gh api repos/{owner}/{repo}/commits/3c23b5f5... --jq '.commit.committer.date'`).
+  # A head-SHA-keyed APPROVED is proof the review is CURRENT, not proof the reviewer SAW the
+  # current content, and those are the same thing only when the head moved by an ordinary push.
+  #
+  # Fetch the head commit's own committer date and require every matching review's
+  # `submitted_at` to be STRICTLY AFTER it (the extra jq clause on Gates 1 and 2 below).
+  # A review that predates the commit it is attributed to cannot have seen that commit's
+  # content — this is what rejects the re-pointed pair above while still accepting a genuine
+  # later re-review on the same head (PR #851 had one, at 13:35:41Z / 13:36:10Z, both after
+  # the committer date and correctly accepted). This is a HEURISTIC, not a mechanical
+  # guarantee on its own — see the force-push block above for why (it catches an ordinary
+  # rebase, whose committer dates get rewritten to "now", but not a force-push onto a
+  # pre-existing older commit). The force-push block's wall-clock cutoff above is what
+  # actually closes that gap for a rewrite that happens WHILE this loop is running; this
+  # date-based check remains as defense-in-depth for a poll that never saw a PREV_HEAD_SHA
+  # baseline (the loop's very first poll) or a manual/ad-hoc check reproduced outside it.
+  # ISO-8601 `Z` timestamps of equal precision sort correctly as plain strings, so no date
+  # parsing is needed — jq's/bash's string `>` does the right thing directly.
+  # FAILS CLOSED: if the committer date can't be read, substitute a sentinel date that sorts
+  # after every real timestamp, so no review can satisfy either gate until a real committer
+  # date is read on a later poll — an unreadable date is never treated as a passing review.
+  HEAD_COMMIT_DATE=$(gh api "repos/<owner>/<repo>/commits/$HEAD_SHA" --jq '.commit.committer.date // empty' 2>/dev/null)
+  if [ -z "$HEAD_COMMIT_DATE" ]; then
+    echo "⚠ could not read committer date for head commit $HEAD_SHA — failing closed: no"
+    echo "  review can satisfy either gate this poll until a real committer date is read."
+    HEAD_COMMIT_DATE="9999-99-99T99:99:99Z"   # sorts after any real ISO-8601 timestamp
+  fi
+
+  # EFFECTIVE_CUTOFF is the LATER of the commit's own committer date and any force-push
+  # cutoff stamped above (sticky across polls once set — real wall-clock time only moves
+  # forward, so an older force-push's cutoff can never wrongly exceed a newer one). Plain
+  # string comparison is valid because both are the same ISO-8601 `Z` format/precision.
+  EFFECTIVE_CUTOFF="$HEAD_COMMIT_DATE"
+  # `[[ ]]`, NOT `[ ... \> ... ]`. zsh's `[` builtin REJECTS `>` as a string
+  # operator -- it errors with "condition expected: >" and the branch is simply
+  # not taken, so the force-push floor is never stamped and this silently
+  # reverts to the weaker committer-date-only behaviour. It FAILS OPEN, on the
+  # shell consumers actually run (zsh is the macOS default). bash accepts the
+  # escaped form, which is exactly why testing this under bash alone passes it.
+  if [[ -n "$FORCE_PUSH_CUTOFF" && "$FORCE_PUSH_CUTOFF" > "$EFFECTIVE_CUTOFF" ]]; then
+    EFFECTIVE_CUTOFF="$FORCE_PUSH_CUTOFF"
+  fi
+
+  # ── Gate 1: Test (ds9-tester-bot[bot]) ──
+  L=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
+    --jq '[.[] | select(.user.login == "ds9-tester-bot[bot]" and .commit_id == "'"$HEAD_SHA"'" and ((.submitted_at // "") > "'"$EFFECTIVE_CUTOFF"'"))] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
+  AT="${L%|*}"; ST="${L#*|}"
+  if [ -n "$ST" ] && [ "$AT" != "$LAST_TEST_AT" ]; then
+    if [ "$ST" = "CHANGES_REQUESTED" ]; then
+      echo "Test failures reported — pausing monitor."
+      LAST_TEST_AT="$AT"
+      gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
+        --jq '[.[] | select(.user.login == "ds9-tester-bot[bot]" and .state == "CHANGES_REQUESTED")] | last | .body'
+      # Address feedback, push fixes, re-run the LAST_TEST_AT seed line, re-enter loop.
+      break
+    elif [ "$ST" = "APPROVED" ]; then
+      TEST_OK="true"; LAST_TEST_AT="$AT"; echo "✓ Test gate passed."
+    fi
+  fi
+
+  # ── Gate 2: Review (ai-security-review-bot[bot]) ──
+  L=$(gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
+    --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]" and .commit_id == "'"$HEAD_SHA"'" and ((.submitted_at // "") > "'"$EFFECTIVE_CUTOFF"'"))] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
+  AT="${L%|*}"; ST="${L#*|}"
+  if [ -n "$ST" ] && [ "$AT" != "$LAST_REVIEW_AT" ]; then
+    if [ "$ST" = "CHANGES_REQUESTED" ]; then
+      echo "Review changes requested — pausing monitor."
+      LAST_REVIEW_AT="$AT"
+      gh api --paginate repos/<owner>/<repo>/pulls/<number>/reviews \
+        --jq '[.[] | select(.user.login == "ai-security-review-bot[bot]" and .state == "CHANGES_REQUESTED")] | last | .body'
+      # Address feedback, push fixes, re-run the LAST_REVIEW_AT seed line, re-enter loop.
+      break
+    elif [ "$ST" = "APPROVED" ]; then
+      REVIEW_OK="true"; LAST_REVIEW_AT="$AT"; echo "✓ Review gate passed."
+    fi
+  fi
+
+  if [ "$TEST_OK" != "true" ] || [ "$REVIEW_OK" != "true" ]; then
+    sleep 60
+    continue
+  fi
+
+  # ── Gate 3: Protected subitem sweep ──
+  # Gate on the literal marker in kb-sweep's OUTPUT — never its exit code (that
+  # over-blocks on framework subitems that legitimately complete AFTER merge), and
+  # never a homegrown board.json re-parse (a bypass that has merged a PR through an
+  # open [Review] subitem before).
+  #
+  # ABSENCE OF THE MARKER IS NOT EVIDENCE OF A CLEAN SWEEP (XACA-1159-033): checking
+  # only "does the output contain PROTECTED SUBITEMS UNRESOLVED" proves the bad text
+  # isn't there — it says nothing about whether kb-sweep ever ran. A failed `source`
+  # leaves the `kb-sweep` shell function undefined; the next line then errors with
+  # something like "kb-sweep: command not found" (bash) or "command not found:
+  # kb-sweep" (zsh) and returns non-zero — output that plainly contains no marker
+  # text, which the old check read as a clean sweep. Same shape as XACA-1145's shipped
+  # kb-sweep, which had NO protected-subitem gate at all and failed open on every
+  # consumer box: a check that never runs and a check that never matches are
+  # indistinguishable from a passing one.
+  #
+  # Require POSITIVE evidence the sweep actually completed instead. kb-sweep always
+  # prints a "SUBITEM STATUS SWEEP: <id>" header right after it resolves the item,
+  # followed by either "No subitems found — ready to close." (zero-subitem items) or
+  # the "Legend:" line that only prints after the subitem table has been walked (items
+  # with subitems) — see kanban-helpers.sh. Neither line appears on any error path (bad
+  # context, item not found, undefined function). FAILS CLOSED: no header+completion
+  # pair found -> block, even though the PROTECTED SUBITEMS marker is also absent.
+  source {{AITEAMFORGE_DIR}}/kanban-helpers.sh
+  SOURCE_RC=$?
+  SWEEP_OUTPUT=$(kb-sweep <ITEM-ID> 2>&1)
+  SWEEP_RC=$?
+  echo "$SWEEP_OUTPUT"
+  SWEEP_RAN_OK="false"
+  if echo "$SWEEP_OUTPUT" | grep -qE "SUBITEM STATUS SWEEP: <ITEM-ID>" \
+     && echo "$SWEEP_OUTPUT" | grep -qE "ready to close\.|^  Legend:"; then
+    SWEEP_RAN_OK="true"
+  fi
+  if [ "$SOURCE_RC" -ne 0 ] || [ "$SWEEP_RAN_OK" != "true" ]; then
+    echo "✗ kb-sweep did NOT positively confirm a completed sweep for <ITEM-ID>"
+    echo "  (source rc=$SOURCE_RC, kb-sweep rc=$SWEEP_RC). No 'SUBITEM STATUS SWEEP:"
+    echo "  <ITEM-ID>' header + completion line found in its output — the PROTECTED"
+    echo "  SUBITEMS marker being absent does NOT mean the sweep ran clean; it may not"
+    echo "  have run at all. Fix the source/invocation (check kanban-helpers.sh path,"
+    echo "  team context) before treating this gate as passed. Not merging."
+    break
+  fi
+  # kb-sweep's OWN exit code (SWEEP_RC) is deliberately NOT part of the pass/fail
+  # decision above or below — it is legitimately non-zero for reasons unrelated to
+  # protected subitems (e.g. a framework subitem that completes AFTER merge), which is
+  # exactly the documented over-blocking this gate must not reintroduce. It is captured
+  # only to make the diagnostic above concrete.
+  if echo "$SWEEP_OUTPUT" | grep -qE "PROTECTED SUBITEMS UNRESOLVED \([0-9]+\)"; then
+    echo "✗ Protected [Review]/[Test]/[UX] subitems are still open — agents cannot cancel"
+    echo "  them without user approval. Resolve them, push fixes if needed, re-enter the loop."
+    break
+  fi
+
+  # ── Gate 3.5: CI check runs — allowlist of positively-safe conclusions, not a denylist
+  #    of one bad state ──
+  # `--admin` bypasses branch-protection review counting, NOT CI results — a build/lint/test
+  # workflow that has not positively concluded safely must still block the merge.
+  #
+  # NOTE THE IRONY THIS REPLACES: the prior version of this gate keyed only on
+  # `state == "FAILURE"`, in a comment that itself warned against enumerated denylists —
+  # while doing exactly that with a single enumerated bad value. `state == "FAILURE"` cannot
+  # distinguish "hasn't failed YET (still running)" from "actually passed", and it does not
+  # match CANCELLED, TIMED_OUT, ACTION_REQUIRED, or STALE — none of those equal the string
+  # "FAILURE", so all of them sailed through under the old check. Measured on this repo's own
+  # PR #855: `shell-suite` alone took 5m38s (19:36:29Z -> 19:42:07Z) while the gate bots do
+  # not wait for GitHub CI to finish — a real, not hypothetical, unfinished-check race.
+  #
+  # `gh pr checks --json` exposes a `bucket` field precisely for this: gh's own source
+  # (pkg/cmd/pr/checks/aggregate.go, verified against upstream, not assumed) maps every
+  # check state/conclusion into exactly one of five buckets:
+  #   pass     = SUCCESS
+  #   skipping = SKIPPED, NEUTRAL
+  #   fail     = ERROR, FAILURE, TIMED_OUT, ACTION_REQUIRED
+  #   cancel   = CANCELLED
+  #   pending  = everything else (QUEUED, IN_PROGRESS, WAITING, EXPECTED, REQUESTED, STALE,
+  #              and any future/unrecognised state — this bucket is gh's own default case)
+  # Require every check to be `pass` or `skipping` before merging. `fail` or `cancel` blocks
+  # outright. Anything else — including a state gh doesn't recognise yet — lands in `pending`
+  # by construction and is treated as "not finished", which re-polls rather than merges; an
+  # unrecognised state is never treated as safe.
+  #
+  # ⚠️ VERIFIED, NOT ASSUMED: `gh pr checks --help` documents an "Additional exit codes: 8:
+  # Checks pending" — but that exit code is produced only by the plain-text output path; in
+  # `--json` mode (which this gate uses) the command writes JSON and returns success
+  # regardless of pending checks (confirmed against gh's own source, pkg/cmd/pr/checks/checks.go).
+  # Do NOT rely on `gh pr checks`'s own exit code here — inspect the `bucket` field values
+  # directly, exactly as this gate does.
+  #
+  # A PR with NO checks configured at all is a distinct case from an unreadable/failed API
+  # call: `gh pr checks` errors with "no checks reported on the '<branch>' branch" when the
+  # check list is genuinely empty (verified against gh's source), which is not a reason to
+  # block forever. Any OTHER read failure fails closed — an unreadable answer is never
+  # evidence of safety.
+  #
+  # "NO CHECKS REPORTED" IS ITSELF AMBIGUOUS (XACA-1159-034): gh prints this exact string
+  # in TWO genuinely different situations that look identical from one read — (a) this
+  # repo/branch has no CI configured at all, and (b) GitHub has not finished REGISTERING
+  # the checks that a just-landed push WILL trigger yet, a transient state that lasts a
+  # handful of seconds. Accepting (a)'s conclusion ("nothing to gate on, proceed") the
+  # first time this string appears means a PR can merge in the gap of case (b), before CI
+  # even exists to gate on. Neither case is distinguishable from a single read.
+  #
+  # Resolve it the same way Gate 4 resolves `mergeable=UNKNOWN` (an analogous GitHub
+  # eventual-consistency gap): bound a re-poll against the SAME head SHA rather than
+  # guessing on the first answer. NO_CHECKS_RETRIES counts consecutive "no checks
+  # reported" reads while HEAD_SHA is unchanged; it resets to 0 on a new push (a fresh
+  # head earns a fresh grace period — see the HEAD_SHA-change block above) and again
+  # below the moment `gh pr checks` reports real check data (case (a) is now
+  # unambiguously ruled out). Below the threshold this re-polls exactly like the
+  # PENDING_CHECKS branch two paragraphs down; only once the ambiguity has had multiple
+  # polls to resolve and STILL reads "no checks reported" is it accepted as case (a).
+  # Bounded, not indefinite: worst case is 5 * 10s = 50s, mirroring Gate 4's own
+  # MERGE_UNKNOWN_RETRIES bound rather than inventing a new shape for the same problem.
+  CHECKS_OUT=$(gh pr checks <number> --repo <owner>/<repo> --json name,bucket \
+    --jq '.[] | "\(.name)|\(.bucket)"' 2>&1)
+  CHECKS_RC=$?
+  if [ $CHECKS_RC -ne 0 ]; then
+    if echo "$CHECKS_OUT" | grep -qi "no checks reported"; then
+      NO_CHECKS_RETRIES=$((NO_CHECKS_RETRIES + 1))
+      if [ "$NO_CHECKS_RETRIES" -lt 5 ]; then
+        echo "gh reports 'no checks reported' for PR #<number> at $HEAD_SHA (poll"
+        echo "  $NO_CHECKS_RETRIES/5 since this head appeared) — could mean no CI is"
+        echo "  configured, or that GitHub hasn't registered checks for this push yet."
+        echo "  Not assuming either; re-polling before accepting this as a genuine pass."
+        sleep 10
+        continue
+      fi
+      echo "'no checks reported' persisted for $NO_CHECKS_RETRIES consecutive polls"
+      echo "  against the same head ($HEAD_SHA) — treating as genuinely no CI configured"
+      echo "  on this repo/branch, proceeding."
+    else
+      echo "✗ Could not read CI check status for PR #<number> (gh pr checks exited $CHECKS_RC):"
+      echo "$CHECKS_OUT"
+      echo "  Not assuming safe — investigate before merging."
+      break
+    fi
+  else
+    NO_CHECKS_RETRIES=0   # real check data observed — case (a) is now unambiguously ruled out
+    UNSAFE_CHECKS=""
+    PENDING_CHECKS=""
+    # A here-doc, NOT a pipe: a `while` on the right of a pipe runs in a subshell and the
+    # accumulator variables would not survive the loop.
+    while IFS='|' read -r C_NAME C_BUCKET; do
+      [ -n "$C_NAME" ] || continue
+      case "$C_BUCKET" in
+        pass|skipping) : ;;
+        fail|cancel) UNSAFE_CHECKS="${UNSAFE_CHECKS}${UNSAFE_CHECKS:+, }$C_NAME ($C_BUCKET)" ;;
+        *) PENDING_CHECKS="${PENDING_CHECKS}${PENDING_CHECKS:+, }$C_NAME (${C_BUCKET:-<unreadable>})" ;;
+      esac
+    done <<CHECKS_EOF
+$CHECKS_OUT
+CHECKS_EOF
+    if [ -n "$UNSAFE_CHECKS" ]; then
+      echo "✗ Failing/cancelled/timed-out check(s) on PR #<number>: $UNSAFE_CHECKS"
+      echo "  Investigate before merging. Do NOT --admin past this — --admin bypasses the"
+      echo "  Team-plan review-count block, it is not a license to merge over a failed CI run."
+      break
+    fi
+    if [ -n "$PENDING_CHECKS" ]; then
+      echo "CI still running on PR #<number>: $PENDING_CHECKS — re-polling rather than merging"
+      echo "  on an unfinished build."
+      sleep 60
+      continue
+    fi
+  fi
+
+  # ── Gate 4: Branch freshness + mergeability ──
+  # Order matters. Check UNKNOWN FIRST, not last: GitHub computes `mergeable` and
+  # `mergeStateStatus` asynchronously, so either can read UNKNOWN for a moment right
+  # after a push. Testing for CONFLICTING while a field is still UNKNOWN makes that
+  # test false and lets a genuinely conflicted PR sail through.
+  MERGE_INFO=$(gh pr view <number> --json mergeable,mergeStateStatus --jq '"\(.mergeable)|\(.mergeStateStatus)"')
+  MERGEABLE="${MERGE_INFO%|*}"; MERGE_STATE="${MERGE_INFO#*|}"
+
+  if [ -z "$MERGEABLE" ] || [ -z "$MERGE_STATE" ] || [ "$MERGEABLE" = "UNKNOWN" ] || [ "$MERGE_STATE" = "UNKNOWN" ]; then
+    MERGE_UNKNOWN_RETRIES=$((MERGE_UNKNOWN_RETRIES + 1))
+    if [ "$MERGE_UNKNOWN_RETRIES" -ge 5 ]; then
+      echo "✗ Mergeability stuck at UNKNOWN after 5 polls — not safe to assume mergeable. Pausing for a human look."
+      break
+    fi
+    echo "Mergeability still UNKNOWN (poll $MERGE_UNKNOWN_RETRIES/5) — re-polling rather than proceeding."
+    sleep 10
+    continue
+  fi
+  MERGE_UNKNOWN_RETRIES=0
+
+  # A content conflict needs manual resolution — `gh pr update-branch` fixes staleness,
+  # never content conflicts. Never merge over this.
+  if [ "$MERGEABLE" = "CONFLICTING" ] || [ "$MERGE_STATE" = "DIRTY" ]; then
+    echo "✗ PR #<number> has merge conflicts (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE)."
+    echo "  Resolve manually: checkout the branch, merge/rebase the base branch in, resolve"
+    echo "  conflicts, push, then re-spawn BOTH bots, re-seed both LAST_*_AT, re-enter the loop."
+    break
+  fi
+
+  # Count staleness via the compare API's `behind_by` — never read it off
+  # `mergeStateStatus`. That field reports exactly one state, and a PR that's
+  # bot-approved-but-unmet-by-branch-protection can sit at BLOCKED permanently on a
+  # Team plan, which MASKS a genuine BEHIND state entirely. Fail closed if the count
+  # can't be read — an unreadable answer is not evidence of freshness.
+  BASE_REF=$(gh pr view <number> --json baseRefName --jq '.baseRefName')
+  BEHIND_BY=$(gh api "repos/<owner>/<repo>/compare/$BASE_REF...$HEAD_SHA" --jq '.behind_by' 2>/dev/null)
+  case "$BEHIND_BY" in ''|*[!0-9]*) BEHIND_BY="" ;; esac
+  if [ -z "$BEHIND_BY" ]; then
+    echo "✗ Could not determine how far behind $BASE_REF this PR is — not assuming fresh. Investigate before merging."
+    break
+  fi
+  if [ "$BEHIND_BY" -gt 0 ] || [ "$MERGE_STATE" = "BEHIND" ]; then
+    echo "Branch is $BEHIND_BY commit(s) behind $BASE_REF — running gh pr update-branch."
+    echo "Prior bot approvals are against a stale base; re-spawn BOTH bots, re-seed both"
+    echo "LAST_*_AT, re-enter the loop after this."
+    gh pr update-branch <number>
+    break
+  fi
+
+  # Allowlist, not denylist: `mergeStateStatus` is a vocabulary (CLEAN/BEHIND/DIRTY/
+  # BLOCKED/UNSTABLE/DRAFT/UNKNOWN), not a boolean — merge only on states verified safe
+  # here. BLOCKED is the normal steady state on a Team plan (bot reviews don't count
+  # toward the required-approval count), NOT an error — it carries no readiness signal
+  # in either direction, which is exactly why the merge below needs --admin.
+  if [ "$MERGE_STATE" != "CLEAN" ] && [ "$MERGE_STATE" != "UNSTABLE" ] && [ "$MERGE_STATE" != "BLOCKED" ]; then
+    echo "✗ mergeStateStatus=$MERGE_STATE is not on the merge allowlist (CLEAN, UNSTABLE, BLOCKED) — investigate before merging."
+    break
+  fi
+
+  # ── Pre-merge RESIDUAL advisory banner ──────────────────────────────────
+  # kb-sweep's Gate 3 output ($SWEEP_OUTPUT, already captured earlier THIS
+  # iteration) may carry a distinct advisory block — literal header
+  # `RESIDUAL OPEN SUBITEMS (N) — advisory, not merge-gating:` — listing
+  # open subitems that are neither protected ([Review]/[Test]/[UX], already
+  # gated at Gate 3) nor one of the mandatory trailing framework subitems.
+  # Ordinary implementation subitems must NOT gate a merge — that would
+  # reintroduce the over-blocking Gate 3's own exit-code note already
+  # rejects — so this step is print-only: it NEVER `break`s, `continue`s,
+  # or makes the merge conditional. It reuses $SWEEP_OUTPUT rather than
+  # re-running kb-sweep or re-parsing board.json — the latter is the same
+  # forbidden escape hatch Gate 3 already calls out.
+  #
+  # WHY THIS EXISTS: a PR merged with six parked subitems (five citing a
+  # different ticket id in their titles) that surfaced only at kb-done,
+  # after the PR — and the ticket that shipped it — had already closed. A
+  # replay of hundreds of merged PR-to-item pairs found roughly one in six
+  # merges (16.2%) still carries at least one such residual line open at
+  # merge time, median 1 line when non-zero, max 15 — rare enough that
+  # gating would be wrong (explicit non-goal), common enough that silent
+  # loss is a real, recurring gap worth one banner.
+  #
+  # ABSENCE IS REPORTED, NEVER READ AS "NONE": a kb-sweep predating this
+  # banner emits no RESIDUAL header at all, and printing nothing in that
+  # case would look identical to a genuinely clean sweep. Three cases are
+  # distinguished explicitly instead of collapsed into one: header present
+  # with N>0, header present with N=0 (kb-sweep ran and found nothing), and
+  # header absent (older kb-sweep, or a zero-subitem item) — the absent
+  # case gets its own loud notice, never silence.
+  #
+  # Portable across BSD awk (macOS) and gawk: no gawk-only 3-arg match(),
+  # anchored on the ASCII header text (never any emoji/glyph, which is not
+  # reliably matchable across awk implementations). `printf '%s\n' "$VAR"`
+  # is used instead of `echo "$VAR"` throughout since a captured subitem
+  # title could start with `-`. No `[ a \> b ]` string comparisons, no
+  # bash-4-only constructs, no top-level `local` — this whole loop already
+  # targets zsh + bash 3.2 (see the FORCE_PUSH_CUTOFF note above); this
+  # block is verified under both.
+  #
+  # XACA-1199-012 (review round 1): the naive "first line matching
+  # /RESIDUAL OPEN SUBITEMS \([0-9]+\)/" is HIJACKABLE — a status-table row
+  # is itself a subitem TITLE, and nothing stops a title from containing
+  # that exact literal text. A hijacked match would extract a fake block
+  # (or none at all) instead of kb-sweep's real header + body. Anchor on
+  # the header's own printed SHAPE instead of the bare marker text:
+  #   * the real header (kb-sweep) is printed as exactly two leading
+  #     spaces, then a glyph that is NOT a space and NOT "[";
+  #   * a status-table row is printed as two leading spaces then "[" (an
+  #     icon: "[✓]"/"[ ]"/etc) — excluded by the same rule;
+  #   * a PROTECTED/RESIDUAL body line is printed with FIVE leading spaces
+  #     (a bullet) — excluded because it does not have exactly two.
+  # The em dash before "advisory" is a multibyte UTF-8 literal that is not
+  # reliably matchable across awk implementations (same reasoning as the
+  # glyph note above), so the trailing anchor below deliberately matches
+  # the ASCII text "advisory, not merge-gating" followed by ':' or '.' at
+  # END OF LINE instead of the em dash itself — this is the literal closing
+  # punctuation kb-sweep always emits (':' when N>0, '.' when N==0), and no
+  # table/body line ends there. Verified against BSD awk (macOS) with a
+  # title-collision fixture (tests/test-xaca-1199-merge-banner.zsh case
+  # (e)); re-verify under gawk/mawk if this anchor is ever revised.
+  RESIDUAL_BLOCK=$(printf '%s\n' "$SWEEP_OUTPUT" | awk '
+    !found {
+      if ($0 ~ /^  [^ \[]/ && $0 ~ /RESIDUAL OPEN SUBITEMS \([0-9]+\)/ && $0 ~ /advisory, not merge-gating[:.]$/) {
+        found=1
+      }
+    }
+    found {
+      if ($0 == "") { exit }
+      print
+    }
+  ')
+
+  if [ -n "$RESIDUAL_BLOCK" ]; then
+    RESIDUAL_HEADER_LINE=$(printf '%s\n' "$RESIDUAL_BLOCK" | awk 'NR==1')
+    # Same anchoring applied to the count parse (XACA-1199-012): even
+    # though RESIDUAL_HEADER_LINE is, by construction above, already the
+    # correctly-identified header line, this re-asserts the shape before
+    # trusting it — defense in depth against a future refactor that feeds
+    # this a differently-sourced line.
+    RESIDUAL_COUNT=$(printf '%s\n' "$RESIDUAL_HEADER_LINE" | awk '
+      $0 ~ /^  [^ \[]/ && /RESIDUAL OPEN SUBITEMS \([0-9]+\)/ && /advisory, not merge-gating[:.]$/ {
+        n = match($0, /RESIDUAL OPEN SUBITEMS \([0-9]+\)/)
+        if (n > 0) {
+          s = substr($0, RSTART, RLENGTH)
+          gsub(/[^0-9]/, "", s)
+          print s
+        }
+      }
+    ')
+    case "$RESIDUAL_COUNT" in
+      ''|*[!0-9]*)
+        echo "⚠ Could not parse a residual count from kb-sweep's RESIDUAL header — treating as non-zero to be safe:"
+        printf '%s\n' "$RESIDUAL_BLOCK"
+        ;;
+      0)
+        echo "Residual subitems: none."
+        ;;
+      *)
+        echo "━━ RESIDUAL (non-blocking) — merging anyway ━━"
+        printf '%s\n' "$RESIDUAL_BLOCK"
+        echo "These will surface again at kb-done — re-home them to the ticket that owns the work before this ticket closes."
+        ;;
+    esac
+  elif printf '%s\n' "$SWEEP_OUTPUT" | grep -Fq "No subitems found — ready to close."; then
+    echo "Residual subitems: n/a (item has no subitems)."
+  elif printf '%s\n' "$SWEEP_OUTPUT" | awk '
+      $0 ~ /^  [^ \[]/ && /RESIDUAL OPEN SUBITEMS:/ && /residual report unavailable/ && /board read failed\.$/ { found=1 }
+      END { exit !found }
+    '; then
+    # kb-sweep's OWN "residual report unavailable — board read failed" line
+    # (a failed dedicated re-query, distinct from "no subitems" and from
+    # "older kb-sweep, no RESIDUAL support at all") used to fall through to
+    # the generic else below and get misdiagnosed as an older kb-sweep. Name
+    # the real cause instead. Print-only — never breaks/continues/exits; the
+    # merge proceeds exactly as before.
+    echo "⚠ kb-sweep could not read the board for its residual report (board read failed) — residual subitems were NOT checked this round; read the full sweep output above for open untagged subitems before this ticket closes."
+  else
+    echo "⚠ kb-sweep emitted no RESIDUAL report (older kb-sweep?) — read the full sweep output above for open untagged subitems before this ticket closes."
+  fi
+
+  echo "All gates passed + branch fresh (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE). Merging with --admin..."
+  gh pr merge <number> --squash --delete-branch --admin
+  kb-done
+  break
+done
+```
+
+**Monitoring Behavior:**
+- Poll every **60 seconds**; a brief status line every 5 polls (~5 min) shows TEST/REVIEW state.
+- Both gates key their verdict to the PR's **current head SHA** (`commit_id`) — an approval from before an ordinary push can't satisfy a gate for the new one. **Head-SHA keying alone is NOT sufficient after a rebase or force-push**: GitHub re-points an existing review's `commit_id` onto the new head, so the same filter can match a review that predates the rebase and never saw the rebased content (measured on PR #851 — both bots' `commit_id` re-pointed within seconds of the force-push, with `submitted_at` timestamps *before* that commit's own committer date). Two layered checks close this, with different guarantees — **state the residual honestly rather than calling the combination bulletproof**:
+  - **Mechanically enforced** for a force-push/rebase that happens *while this loop instance is running*: each poll compares the new head against the previous poll's head via the compare API (`compare/PREV...NEW`); anything other than `status: "ahead"` (fast-forward) is treated as a rewrite regardless of what any review's `commit_id` or `submitted_at` claims, and stamps the current wall-clock time as a floor no review can have been submitted before. Fails closed if the compare call is unreadable. Verified against this repo's own PR #851 `HeadRefForcePushedEvent` history: an ordinary push compared `ahead` (2/0), the actual force-push compared `diverged` (8/7).
+  - **Heuristic, not mechanical**, for a rewrite that already happened *before the loop's first poll* (no previous-head baseline to compare against) or a manual/ad-hoc check outside the loop: falls back to requiring each matching review's `submitted_at` to be strictly after the head commit's own `commit.committer.date`. This catches an ordinary rebase (committer dates get rewritten to "now") but is known to miss a force-push that re-points HEAD onto a pre-existing *older* commit, since a stale review's `submitted_at` can still be later than that old commit's own committer date. That residual case still depends on the operator's judgment — treat any rebase/force-push as a fresh review round, re-spawn both bots, re-seed both `LAST_*_AT`, as a matter of course.
+  See the inline comments above Gate 1 and Troubleshooting § "rebase re-points commit_id" for the measured detail and the manual verification query.
+- On `CHANGES_REQUESTED` from either bot: pause, surface the review body, address feedback, push fixes, re-seed ONLY that gate's `LAST_*_AT`, re-enter the loop.
+- Gate 3 (subitem sweep), Gate 3.5 (CI check runs), and Gate 4 (freshness/mergeability) only run once BOTH bot gates have passed — see the loop's ordering above.
+- **Gate 3 requires POSITIVE evidence kb-sweep ran**, not merely the absence of the `PROTECTED SUBITEMS UNRESOLVED` marker: a failed `source` of kanban-helpers.sh (or any other error that stops kb-sweep from running) also produces output without that marker, and the old check read that silence as a clean sweep. The gate now requires the `SUBITEM STATUS SWEEP: <id>` header plus a completion line (`ready to close.` or `Legend:`) before it will trust the marker's absence at all — missing either fails closed, regardless of what the marker check would have said.
+- **Pre-merge RESIDUAL advisory banner**: immediately before the merge, the loop re-extracts kb-sweep's advisory `RESIDUAL OPEN SUBITEMS (N) — advisory, not merge-gating:` block from `$SWEEP_OUTPUT` (the same variable Gate 3 already captured this iteration — never a re-run of `kb-sweep`, never a board.json re-parse) and prints it as a banner. This is **purely observational** — it never `break`s, `continue`s, or otherwise makes the merge conditional; ordinary untagged subitems remain explicitly non-gating (only `[Review]`/`[Test]`/`[UX]` and framework subitems gate, at Gate 3). It exists because a PR once merged with six parked subitems that surfaced only at `kb-done`, after both the PR and its ticket had closed; a replay of merged PR-to-item pairs found roughly 16.2% still print at least one residual line at merge time (median 1, max 15) — too rare to gate on, too common to keep silent. Absence of the RESIDUAL header is reported explicitly, never treated as "none": an older `kb-sweep` prints no header at all, which must not read the same as a genuinely empty residual list.
+- Gate 3.5 is an **allowlist**, not a denylist of one bad state: every check must land in gh's own `pass` or `skipping` bucket before merging — `fail` (FAILURE/ERROR/TIMED_OUT/ACTION_REQUIRED) or `cancel` (CANCELLED) blocks outright, and anything still `pending` (including a state gh doesn't recognise) re-polls rather than passing. `--admin` overrides the Team-plan review-count requirement, it does not and must not override a red, cancelled, or still-running CI run. `gh pr checks`'s own exit-code-8-on-pending behavior is documented for plain-text output only — in `--json` mode (used here) it returns success regardless of pending checks, so this gate inspects the `bucket` field directly rather than trusting the command's exit code.
+- **`gh pr checks`'s "no checks reported" is ambiguous, not a clean pass on first read**: it means either "no CI configured" or "GitHub hasn't registered this push's checks yet" — indistinguishable from one query. The gate re-polls (`NO_CHECKS_RETRIES`, bounded at 5 polls / 10s each, same shape as Gate 4's `MERGE_UNKNOWN_RETRIES`) against the unchanged head SHA before accepting it as a genuine "no CI here"; the counter resets on a new push and the moment real check data is observed.
+- On a stale branch (Gate 4): `gh pr update-branch` dismisses stale reviews — re-spawn BOTH bots and re-seed BOTH timestamps afterward.
+- On merge conflicts (Gate 4): halt, never merge — resolve manually, then re-spawn both bots.
+- `state: "CLOSED"` or `"MERGED"` → notify the user and exit the monitor.
+- **NEVER** use `echo "$VAR" | jq` — control characters break parsing; always use `gh api --jq`.
+- Uses `--admin` because the GitHub Team plan does not count bot reviews toward branch protection — `reviewDecision` always reads `REVIEW_REQUIRED` even after both approve.
+- **Do NOT** merge without all four gates clearing — the monitoring loop handles merge automatically.
 
 ---
 

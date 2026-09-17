@@ -7,6 +7,33 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1275** — The shipped `claude-md-global.template`'s section 5 ("PR Review Handoff &
+  Monitoring") embedded the entire four-gate PR monitoring loop as ~630 lines of inline shell —
+  628 of the template's 1,483 lines, 42% of the file — and that text was rendered into every
+  consumer's `~/.claude/CLAUDE.md`, where it was re-read on every session and every subagent
+  spawn. The loop now ships as a runnable script, `share/scripts/kb-pr-monitor` (installed to
+  `$AITEAMFORGE_DIR/scripts/kb-pr-monitor`), and section 5 is a stub that states the gate
+  contract, the invocation, the per-verdict action and the invariants an agent cannot obtain by
+  running something. Template: 1,483 → 905 lines (89,145 → 49,753 bytes, -44%); no markdown
+  heading and no `{{PLACEHOLDER}}` token was lost (counts verified identical before/after). The
+  script's `sync-tap-drift` / `tap-changelog-completeness` arms key on CI check names that do not
+  exist on a consumer repo, so they never fire there — noted explicitly in the stub so a consumer
+  reading a `BLOCKED` verdict is not misled.
+
+  `kb-pr-monitor` is EXTENSIONLESS, the same delivery gap class as `kb-init-team` / `kb-api-key` /
+  `kb-msg-provision` / `kb-spacedock`: fresh installs get it from `aiteamforge-setup.sh`'s
+  `find -type f` bulk copy of `share/scripts/`, but the upgrade path's `*.sh`/`*.py` globs cannot
+  match a bare name, so it is also listed explicitly in BOTH
+  `_xaca0673_mandatory_materialize_basenames()` and `update_runtime_helpers()`'s sweep — without
+  those, every already-installed box would have been told by its own CLAUDE.md to run a script it
+  would never receive.
+
+  The OUTGOING render is registered as a historical provenance variant
+  (`share/templates/claude/historical/claude-md-global.75b6f33.template`). A box that lost its
+  render receipt but is sitting on an untouched pre-XACA-1275 render was recognized as pristine
+  only by the "try the CURRENT template first" shortcut; changing the current template revokes
+  that recognition, which would have stranded such a box on the long render permanently.
+
 - **XACA-1264** — `kb-sync-personas`'s `_deployment_is_gitignored_personas` decided whether a
   deployment's personas arrive via git checkout (SKIP) or must be deployed explicitly (DEPLOY) by
   asking "is ANYTHING tracked under `targetDir`?" — a whole-directory `git ls-files | wc -l` count.

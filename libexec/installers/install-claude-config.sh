@@ -327,6 +327,21 @@ _xaca1159_write_claude_md_receipt() {
 # has been byte-for-byte stable since the tap's first commit -- confirmed by
 # diffing apply_template() itself across all four pre-XACA-1159 commits that
 # ever touched this template (b99bf32, d864622, 322b99b, 51f6af4).
+#
+# XACA-1275 -- THIS LIST IS NO LONGER PURELY A PRE-XACA-1159 BOOTSTRAP SET.
+# The first four entries are the pre-XACA-1159 renders described above. The
+# fifth (75b6f33) is the render that shipped immediately BEFORE XACA-1275
+# shrank section 5 ("PR Review Handoff & Monitoring") from ~630 embedded
+# lines to a stub pointing at share/scripts/kb-pr-monitor -- a 1,483-line
+# template becoming 905. It is registered here for a specific reason: a box
+# that lost its receipt but is sitting on an untouched 75b6f33 render used to
+# be recognized as pristine by the "try the CURRENT template first" shortcut
+# below. Changing the current template silently revokes that recognition, so
+# without this entry such a box fails provenance, is treated as customized,
+# and is never refreshed again -- permanently stranded on the long render.
+# GENERAL RULE for whoever edits this template next: before changing it,
+# register the OUTGOING render here, or you strand every receipt-less box
+# currently sitting on it.
 # {{ORG_NAME}}/{{ORG_SLUG}}/{{SHARED_DEV_ROOT}} have NEVER been substituted
 # by apply_template() in any of those commits (the template's own
 # TODO(plugins/...) comment documents this as deliberate, pending a future
@@ -346,6 +361,7 @@ claude-md-global.b99bf32.template|DEV_TEAM_DIR
 claude-md-global.d864622.template|AITEAMFORGE_DIR
 claude-md-global.322b99b.template|AITEAMFORGE_DIR
 claude-md-global.51f6af4.template|AITEAMFORGE_DIR
+claude-md-global.75b6f33.template|AITEAMFORGE_DIR
 EOF
 }
 

@@ -1,0 +1,819 @@
+#!/usr/bin/env bash
+# ============================================================================
+# kb-pr-monitor — dual-gate PR monitoring loop (XACA-1275)
+# ============================================================================
+# Extracted verbatim-in-semantics from claude/CLAUDE.md § "PR Auto-Spawn:
+# Test + Review + Merge" (the 921-line embedded shell block, ~18K tokens
+# loaded into EVERY session and EVERY subagent). This script IS that loop.
+#
+# Usage: scripts/kb-pr-monitor --pr <N> --item <ITEM-ID> [--repo <owner>/<repo>]
+#                              [--poll-seconds 60] [--max-hours 48]
+#                              [--once] [--no-merge] [--help]
+#
+# Exit codes (the verdict contract):
+#    0  GATES_PASSED     all gates green + branch fresh; merged via kb-merge.
+#                        kb-done is deliberately NOT run — the caller owns that.
+#   10  RESPAWN_TESTER   tester bot submitted CHANGES_REQUESTED
+#   11  RESPAWN_REVIEWER reviewer bot submitted CHANGES_REQUESTED
+#   12  RESPAWN_BOTH     `gh pr update-branch` ran; both prior approvals stale
+#   20  CONFLICT         mergeable=CONFLICTING or mergeStateStatus=DIRTY
+#   21  UX_REOPEN        UI paths in diff but [UX] subitem cancelled
+#   22  BLOCKED          a gate blocked (protected subitems open, sweep did not
+#                        positively run, failing/cancelled CI check, tap gate red
+#                        with no bypass, mergeStateStatus off the allowlist,
+#                        unreadable behind-count, mergeability stuck UNKNOWN)
+#   30  PR_CLOSED        PR state CLOSED or MERGED externally
+#   31  TIMEOUT          exceeded --max-hours
+#    2  USAGE_ERROR      usage error / missing dependency / unresolvable env
+#
+# The FINAL line on stdout is ALWAYS exactly:
+#   VERDICT: <NAME> pr=<N> item=<ID> detail=<one-line>
+#
+# --once runs exactly one poll iteration and never sleeps (this is what the
+# test suite drives). Any state the continuous loop would resolve by sleeping
+# and re-polling — pending CI, "no checks reported", mergeability UNKNOWN,
+# gates not yet approved — resolves under --once to BLOCKED. That is
+# deliberately FAIL-CLOSED: "not settled yet" must never read as "safe".
+#
+# --no-merge runs every gate but stops short of kb-merge, still returning
+# 0/GATES_PASSED. For dry runs and tests.
+#
+# SHELL PORTABILITY: this script must parse and run under BOTH zsh and
+# /bin/bash 3.2 (macOS system bash). No bash-4 constructs, no top-level
+# `local`, no `export -f`, no bare glob qualifiers.
+#
+# WHY kanban-helpers IS INVOKED THROUGH `zsh -c` (deviation from the CLAUDE.md
+# block, which ran inside an already-zsh interactive session): kanban-helpers.sh
+# is `#!/usr/bin/env zsh` and uses ${=var}, zmodload zsh/zselect, setopt and
+# associative arrays. Sourcing it from bash 3.2 is a syntax-error storm, so a
+# bash-shebang script cannot source it directly. Delegating to a zsh subshell
+# preserves the SOURCE_RC / command-rc distinction Gate 3 depends on AND makes
+# behaviour identical no matter which shell invoked this script.
+# The caller must have team context resolvable (export KB_TEAM/KB_TERMINAL, or
+# a .kb-team sentinel) — if it is not, kb-sweep fails and Gate 3 fails closed.
+#
+# Provenance of the guards below — do NOT "simplify" a fail-closed check:
+#   XACA-0897-098  --paginate on every reviews query (endpoint pages at 30)
+#   XACA-1159-030  latch reset + force-push cutoff on head change
+#   XACA-1159-032  Gate 3.5 bucket ALLOWLIST (not a FAILURE denylist)
+#   XACA-1159-033  Gate 3 positive-execution evidence (SWEEP_RAN_OK)
+#   XACA-1159-034  bounded re-poll on ambiguous "no checks reported"
+#   XACA-0523      protected-subitem grep anchored on the "(N)" count
+#   XACA-0703-009  UX Layer-2 backstop via `gh pr diff`, not `git diff`
+#   XACA-0944      Gate 4 ordering + counted staleness + merge allowlist
+#   XACA-1122      publisher-only gitlink skip + state-dependent tap remedy
+#   XACA-1199      pre-merge RESIDUAL advisory banner (print-only)
+# ============================================================================
+
+PR_NUM=""
+ITEM_ID=""
+REPO=""
+POLL_SECONDS=60
+MAX_HOURS=48
+ONCE="false"
+DO_MERGE="true"
+
+KBPM_HELPERS="${KBPM_HELPERS:-$HOME/dev-team/kanban-helpers.sh}"
+KBPM_PIDFILE=""
+KBPM_RCFILE=""
+
+PUBLISHER_LOGIN="aiteamforge-publisher[bot]"   # the App identity; XACA-1122 §4
+TESTER_BOT="ds9-tester-bot[bot]"
+REVIEWER_BOT="ai-security-review-bot[bot]"
+
+usage() {
+    # Extract the header's usage block by its own MARKERS, not by line number:
+    # a hardcoded range silently prints the wrong text after any header edit.
+    awk '/^# Usage:/ {p=1} /^# SHELL PORTABILITY/ {p=0} p {sub(/^# ?/, ""); print}' "$0"
+}
+
+_kbpm_cleanup() {
+    [ -n "$KBPM_PIDFILE" ] && command rm -f "$KBPM_PIDFILE"
+    [ -n "$KBPM_RCFILE" ] && command rm -f "$KBPM_RCFILE"
+    return 0
+}
+
+# The verdict is the script's entire contract. It exits; nothing runs after it.
+verdict() {
+    _v_name="$1"; shift
+    _v_detail=$(printf '%s' "$*" | tr '\n\r' '  ')
+    case "$_v_name" in
+        GATES_PASSED)     _v_code=0 ;;
+        RESPAWN_TESTER)   _v_code=10 ;;
+        RESPAWN_REVIEWER) _v_code=11 ;;
+        RESPAWN_BOTH)     _v_code=12 ;;
+        CONFLICT)         _v_code=20 ;;
+        UX_REOPEN)        _v_code=21 ;;
+        BLOCKED)          _v_code=22 ;;
+        PR_CLOSED)        _v_code=30 ;;
+        TIMEOUT)          _v_code=31 ;;
+        *)                _v_name="USAGE_ERROR"; _v_code=2 ;;
+    esac
+    printf 'VERDICT: %s pr=%s item=%s detail=%s\n' \
+        "$_v_name" "${PR_NUM:-none}" "${ITEM_ID:-none}" "$_v_detail"
+    exit "$_v_code"
+}
+
+# Continuous mode sleeps and re-polls; --once must NOT sleep, and "unsettled"
+# is never a pass, so it lands on BLOCKED.
+repoll_or_block() {
+    if [ "$ONCE" = "true" ]; then
+        verdict BLOCKED "--once: $2 (continuous mode would re-poll)"
+    fi
+    sleep "$1"
+}
+
+# ── kanban-helpers bridge (see header) ──────────────────────────────────────
+# Runs "$@" (a kanban-helpers function + args) in a zsh subshell with the
+# helpers sourced. Merged stdout+stderr become this function's stdout.
+# "<source_rc> <cmd_rc>" is written to $KBPM_RCFILE so Gate 3 can keep
+# SOURCE_RC and kb-sweep's own rc distinct, exactly as the source block did.
+_kbpm_helpers_run() {
+    printf '%s\n' "127 127" > "$KBPM_RCFILE"
+    zsh -c '
+        helpers="$1"; rcfile="$2"; shift 2
+        source "$helpers" >/dev/null 2>&1
+        src=$?
+        if [ $src -ne 0 ]; then printf "%s %s\n" "$src" "127" > "$rcfile"; exit 127; fi
+        "$@"
+        cmd=$?
+        printf "%s %s\n" "0" "$cmd" > "$rcfile"
+        exit $cmd
+    ' _kbpm "$KBPM_HELPERS" "$KBPM_RCFILE" "$@" 2>&1
+}
+
+# Same bridge for a snippet that needs several private helpers in one shell.
+_kbpm_helpers_eval() {
+    _he_code="$1"; shift
+    zsh -c '
+        helpers="$1"; code="$2"; shift 2
+        source "$helpers" >/dev/null 2>&1 || exit 111
+        eval "$code"
+    ' _kbpm "$KBPM_HELPERS" "$_he_code" "$@" 2>/dev/null
+}
+
+# Gate 3.5 duplicate-check-name ranking. NEVER DOWNGRADE on a duplicate name:
+# `sync-tap-drift|fail` then `sync-tap-drift|pass` must record fail. Duplicate
+# names are real here — dev-team commit 5a93566c carried three `parity` runs.
+_x1159_rank() {
+    case "$1" in
+        fail|cancel)   printf 3 ;;
+        pass|skipping) printf 1 ;;
+        "")            printf 0 ;;
+        *)             printf 2 ;;   # pending, or a state gh does not name
+    esac
+}
+
+# ── argument parsing ────────────────────────────────────────────────────────
+_need_val() {
+    if [ "$2" -lt 2 ]; then
+        printf 'kb-pr-monitor: %s requires a value\n' "$1" >&2
+        verdict USAGE_ERROR "$1 requires a value"
+    fi
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --pr)             _need_val "$1" $#; PR_NUM="$2"; shift 2 ;;
+        --pr=*)           PR_NUM="${1#*=}"; shift ;;
+        --item)           _need_val "$1" $#; ITEM_ID="$2"; shift 2 ;;
+        --item=*)         ITEM_ID="${1#*=}"; shift ;;
+        --repo)           _need_val "$1" $#; REPO="$2"; shift 2 ;;
+        --repo=*)         REPO="${1#*=}"; shift ;;
+        --poll-seconds)   _need_val "$1" $#; POLL_SECONDS="$2"; shift 2 ;;
+        --poll-seconds=*) POLL_SECONDS="${1#*=}"; shift ;;
+        --max-hours)      _need_val "$1" $#; MAX_HOURS="$2"; shift 2 ;;
+        --max-hours=*)    MAX_HOURS="${1#*=}"; shift ;;
+        --once)           ONCE="true"; shift ;;
+        --no-merge)       DO_MERGE="false"; shift ;;
+        -h|--help)        usage; exit 0 ;;
+        *)                printf 'kb-pr-monitor: unknown argument: %s\n' "$1" >&2
+                          usage >&2
+                          verdict USAGE_ERROR "unknown argument: $1" ;;
+    esac
+done
+
+[ -n "$PR_NUM" ]  || verdict USAGE_ERROR "--pr is required"
+[ -n "$ITEM_ID" ] || verdict USAGE_ERROR "--item is required"
+case "$PR_NUM" in ''|*[!0-9]*) verdict USAGE_ERROR "--pr must be a number, got '$PR_NUM'" ;; esac
+case "$POLL_SECONDS" in ''|*[!0-9]*) verdict USAGE_ERROR "--poll-seconds must be a number" ;; esac
+case "$MAX_HOURS" in ''|*[!0-9]*) verdict USAGE_ERROR "--max-hours must be a number" ;; esac
+
+command -v gh  >/dev/null 2>&1 || verdict USAGE_ERROR "gh CLI not found on PATH"
+command -v zsh >/dev/null 2>&1 || verdict USAGE_ERROR "zsh not found on PATH (kanban-helpers.sh is zsh-only)"
+command -v awk >/dev/null 2>&1 || verdict USAGE_ERROR "awk not found on PATH"
+
+# --repo default: `gh repo view`, NOT `git remote get-url origin`. This repo's
+# remote is named `dev-team`, so remote-name auto-detection always fails here.
+if [ -z "$REPO" ]; then
+    REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+    REPO_RC=$?    # capture-first: `cmd | tail` would report tail's rc, not gh's
+    if [ "$REPO_RC" -ne 0 ] || [ -z "$REPO" ]; then
+        verdict USAGE_ERROR "could not resolve --repo via 'gh repo view' (rc=$REPO_RC); pass --repo owner/repo"
+    fi
+fi
+case "$REPO" in
+    */*) : ;;
+    *)   verdict USAGE_ERROR "--repo must be owner/repo, got '$REPO'" ;;
+esac
+REPO_OWNER="${REPO%%/*}"
+REPO_NAME="${REPO##*/}"
+
+if [ ! -f "$KBPM_HELPERS" ]; then
+    verdict USAGE_ERROR "kanban-helpers.sh not found at $KBPM_HELPERS"
+fi
+
+KBPM_RCFILE=$(mktemp "${TMPDIR:-/tmp}/kb-pr-monitor-rc.XXXXXX" 2>/dev/null)
+[ -n "$KBPM_RCFILE" ] || verdict USAGE_ERROR "could not create a temp file for helper exit codes"
+
+# PID file + timeout → discoverable by the reaper, self-terminates if orphaned.
+KBPM_PIDFILE="/tmp/pr-monitor-${REPO_OWNER}-${REPO_NAME}-${PR_NUM}.pid"
+printf '%s\n' "$$" > "$KBPM_PIDFILE"
+trap '_kbpm_cleanup' EXIT
+trap '_kbpm_cleanup; exit 130' INT
+trap '_kbpm_cleanup; exit 143' TERM
+
+# ── seed last-processed timestamps (skip pre-existing reviews) ──────────────
+# XACA-0897-098: EVERY query against this endpoint carries --paginate. It pages
+# at 30 (measured on PR #754, 37 reviews): un-paginated, `last` picks the latest
+# verdict WITHIN page 1, not overall. Over-blocks in one direction; in the
+# mirror case a stale page-1 APPROVED outranks a live CHANGES_REQUESTED and
+# merges over a rejection. --paginate concatenates all pages into one array
+# before --jq runs, so the existing filters need no other change.
+LAST_TEST_AT=$(gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" \
+    --jq '[.[] | select(.user.login == "'"$TESTER_BOT"'")] | sort_by(.submitted_at) | last | .submitted_at // empty' 2>/dev/null)
+LAST_REVIEW_AT=$(gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" \
+    --jq '[.[] | select(.user.login == "'"$REVIEWER_BOT"'")] | sort_by(.submitted_at) | last | .submitted_at // empty' 2>/dev/null)
+
+TEST_OK="false"
+REVIEW_OK="false"
+MERGE_UNKNOWN_RETRIES=0
+NO_CHECKS_RETRIES=0
+PREV_HEAD_SHA=""
+FORCE_PUSH_CUTOFF=""
+
+PR_MONITOR_START=$(date +%s)
+POLL=0
+
+while true; do
+    NOW=$(date +%s)
+    if [ $((NOW - PR_MONITOR_START)) -gt $((MAX_HOURS * 3600)) ]; then
+        verdict TIMEOUT "monitor exceeded ${MAX_HOURS}h"
+    fi
+
+    STATE=$(gh pr view "$PR_NUM" --repo "$REPO" --json state --jq '.state' 2>/dev/null)
+    if [ "$STATE" = "CLOSED" ] || [ "$STATE" = "MERGED" ]; then
+        verdict PR_CLOSED "PR state is $STATE"
+    fi
+
+    POLL=$((POLL + 1))
+    [ $((POLL % 5)) -eq 0 ] && printf 'Watching PR #%s... poll=%s TEST=%s REVIEW=%s\n' "$PR_NUM" "$POLL" "$TEST_OK" "$REVIEW_OK"
+
+    # Pagination and a stale-SHA read are TWO INDEPENDENT ways to resolve the
+    # wrong review — fixing one does not fix the other. Refresh HEAD every poll
+    # and key both gates to it via .commit_id, not submitted_at ordering alone.
+    HEAD_SHA=$(gh pr view "$PR_NUM" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null)
+    if [ -z "$HEAD_SHA" ]; then
+        verdict BLOCKED "could not read head SHA for PR #$PR_NUM — not assuming anything about gate state"
+    fi
+    # NOTE: `gh api --jq` is gh's OWN jq evaluator — it has NO --arg flag
+    # (`--jq --arg head "$X"` exits 1 "unknown flag", output empty, gates never
+    # flip, loop polls to its timeout). Bind the SHA with the quote-dance below.
+
+    # XACA-1159-030: TEST_OK/REVIEW_OK are latches. If a push lands BETWEEN the
+    # two approvals, the earlier latch stays true for a head no bot reviewed.
+    # The per-poll .commit_id filter only stops a STALE result from SETTING a
+    # flag — it does nothing to one already true. Reset on head change.
+    if [ -n "$PREV_HEAD_SHA" ] && [ "$HEAD_SHA" != "$PREV_HEAD_SHA" ]; then
+        printf 'Head SHA changed (%s -> %s) — a push landed. Resetting both gate latches.\n' "$PREV_HEAD_SHA" "$HEAD_SHA"
+        TEST_OK="false"; REVIEW_OK="false"; NO_CHECKS_RETRIES=0
+
+        # Force-push / rebase detection. The committer-date guard below assumes
+        # the new head's committer date is newer than any stale review pointed
+        # at it — true for an ordinary rebase, FALSE when a force-push re-points
+        # HEAD onto a PRE-EXISTING OLDER commit. The mechanical discriminator is
+        # descendancy: an ordinary push is a fast-forward (PREV is an ancestor,
+        # compare status "ahead"); a rewrite is not ("diverged"/"behind").
+        # VALIDATED on PR #851 (XACA-1154): ordinary push -> "ahead"
+        # (ahead 2/behind 0); force-push -> "diverged" (ahead 8/behind 7).
+        # FAILS CLOSED: an unreadable compare result counts as a force-push.
+        FF_STATUS=$(gh api "repos/$REPO/compare/$PREV_HEAD_SHA...$HEAD_SHA" --jq '.status // empty' 2>/dev/null)
+        if [ "$FF_STATUS" != "ahead" ]; then
+            printf '%s\n' "! Non-fast-forward change (compare status='${FF_STATUS:-<unreadable>}') — force-push/rebase."
+            printf '%s\n' "  Stamping a cutoff: no review submitted before this moment can satisfy either gate."
+            FORCE_PUSH_CUTOFF=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        fi
+    fi
+    PREV_HEAD_SHA="$HEAD_SHA"
+
+    # On an ordinary push a stale review keeps its OLD commit_id and the filter
+    # excludes it. On a REBASE, GitHub RE-POINTS a stale review's commit_id onto
+    # the new head, so `commit_id == HEAD_SHA` alone can match a review that
+    # never saw the rebased content — measured on PR #851: two APPROVED at
+    # 13:26:48Z/13:27:13Z against a head whose committer date is 13:28:41Z.
+    # Requiring submitted_at strictly after the head's own committer date
+    # rejects that pair. ISO-8601 `Z` strings of equal precision sort as plain
+    # strings. FAILS CLOSED via a sentinel that sorts after every real stamp.
+    HEAD_COMMIT_DATE=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.commit.committer.date // empty' 2>/dev/null)
+    if [ -z "$HEAD_COMMIT_DATE" ]; then
+        printf '%s\n' "! could not read committer date for $HEAD_SHA — failing closed for this poll."
+        HEAD_COMMIT_DATE="9999-99-99T99:99:99Z"
+    fi
+
+    # EFFECTIVE_CUTOFF = the later of the commit's committer date and any
+    # force-push floor (sticky once set; wall-clock only moves forward).
+    EFFECTIVE_CUTOFF="$HEAD_COMMIT_DATE"
+    # `[[ ]]`, NOT `[ "$A" \> "$B" ]`. zsh's `[` builtin REJECTS `>` as a string
+    # operator: it errors "condition expected: >", the branch is skipped, the
+    # force-push floor is silently never applied — FAILS OPEN on the shell users
+    # actually run. bash accepts the escaped form, which is exactly why a
+    # bash-only test would pass a broken version of this line.
+    if [[ -n "$FORCE_PUSH_CUTOFF" && "$FORCE_PUSH_CUTOFF" > "$EFFECTIVE_CUTOFF" ]]; then
+        EFFECTIVE_CUTOFF="$FORCE_PUSH_CUTOFF"
+    fi
+
+    # ── Gate 1: tester ──────────────────────────────────────────────────────
+    L=$(gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" \
+        --jq '[.[] | select(.user.login == "'"$TESTER_BOT"'" and .commit_id == "'"$HEAD_SHA"'" and ((.submitted_at // "") > "'"$EFFECTIVE_CUTOFF"'"))] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"' 2>/dev/null)
+    AT="${L%|*}"; ST="${L#*|}"
+    if [ -n "$ST" ] && [ "$AT" != "$LAST_TEST_AT" ]; then
+        if [ "$ST" = "CHANGES_REQUESTED" ]; then
+            printf '%s\n' "Test failures — pausing."
+            LAST_TEST_AT="$AT"
+            gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" \
+                --jq '[.[] | select(.user.login == "'"$TESTER_BOT"'" and .state == "CHANGES_REQUESTED" and .commit_id == "'"$HEAD_SHA"'")] | last | .body' 2>/dev/null
+            verdict RESPAWN_TESTER "tester bot requested changes at $AT on $HEAD_SHA"
+        elif [ "$ST" = "APPROVED" ]; then
+            TEST_OK="true"; LAST_TEST_AT="$AT"
+            printf '%s\n' "OK Test gate passed."
+        fi
+    fi
+
+    # ── Gate 2: reviewer ────────────────────────────────────────────────────
+    L=$(gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" \
+        --jq '[.[] | select(.user.login == "'"$REVIEWER_BOT"'" and .commit_id == "'"$HEAD_SHA"'" and ((.submitted_at // "") > "'"$EFFECTIVE_CUTOFF"'"))] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"' 2>/dev/null)
+    AT="${L%|*}"; ST="${L#*|}"
+    if [ -n "$ST" ] && [ "$AT" != "$LAST_REVIEW_AT" ]; then
+        if [ "$ST" = "CHANGES_REQUESTED" ]; then
+            printf '%s\n' "Review changes requested — pausing."
+            LAST_REVIEW_AT="$AT"
+            gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" \
+                --jq '[.[] | select(.user.login == "'"$REVIEWER_BOT"'" and .state == "CHANGES_REQUESTED" and .commit_id == "'"$HEAD_SHA"'")] | last | .body' 2>/dev/null
+            verdict RESPAWN_REVIEWER "reviewer bot requested changes at $AT on $HEAD_SHA"
+        elif [ "$ST" = "APPROVED" ]; then
+            REVIEW_OK="true"; LAST_REVIEW_AT="$AT"
+            printf '%s\n' "OK Review gate passed."
+        fi
+    fi
+
+    if [ "$TEST_OK" != "true" ] || [ "$REVIEW_OK" != "true" ]; then
+        repoll_or_block "$POLL_SECONDS" "gates not yet satisfied (TEST=$TEST_OK REVIEW=$REVIEW_OK) on head $HEAD_SHA"
+        continue
+    fi
+
+    # ── Gate 3: protected-subitem sweep ─────────────────────────────────────
+    # Gate on kb-sweep's OUTPUT, never its exit code (which over-blocks on
+    # framework subitems that complete AFTER merge), and NEVER on a homegrown
+    # board.json re-parse — that escape hatch merged PR #435 through an open
+    # [Review]. The marker grep is anchored on the emitter's "(N)" count
+    # (XACA-0523): a bare-substring grep false-matches subitem TITLES quoting
+    # the phrase.
+    #
+    # XACA-1159-033 — ABSENCE OF THE MARKER IS NOT EVIDENCE OF A CLEAN SWEEP.
+    # A failed source leaves kb-sweep undefined; "command not found" output
+    # contains no marker text either, and a marker-only check reads that as
+    # clean. Require POSITIVE evidence: kb-sweep's own "SUBITEM STATUS SWEEP:
+    # <id>" header PLUS either "No subitems found — ready to close." or the
+    # "Legend:" line that only prints after the subitem table is walked.
+    # Neither appears on any error path. No pair -> BLOCKED.
+    SWEEP_OUTPUT=$(_kbpm_helpers_run kb-sweep "$ITEM_ID")
+    SWEEP_RCPAIR=$(cat "$KBPM_RCFILE" 2>/dev/null)
+    SOURCE_RC="${SWEEP_RCPAIR%% *}"
+    SWEEP_RC="${SWEEP_RCPAIR##* }"
+    case "$SOURCE_RC" in ''|*[!0-9]*) SOURCE_RC=127 ;; esac
+    case "$SWEEP_RC" in ''|*[!0-9]*) SWEEP_RC=127 ;; esac
+    printf '%s\n' "$SWEEP_OUTPUT"
+
+    SWEEP_RAN_OK="false"
+    if printf '%s\n' "$SWEEP_OUTPUT" | grep -qE "SUBITEM STATUS SWEEP: $ITEM_ID" \
+       && printf '%s\n' "$SWEEP_OUTPUT" | grep -qE "ready to close\.|^  Legend:"; then
+        SWEEP_RAN_OK="true"
+    fi
+    if [ "$SOURCE_RC" -ne 0 ] || [ "$SWEEP_RAN_OK" != "true" ]; then
+        printf '%s\n' "x kb-sweep did NOT positively confirm a completed sweep for $ITEM_ID"
+        printf '%s\n' "  (source rc=$SOURCE_RC, kb-sweep rc=$SWEEP_RC). No 'SUBITEM STATUS SWEEP:"
+        printf '%s\n' "  $ITEM_ID' header + completion line in its output — the PROTECTED SUBITEMS"
+        printf '%s\n' "  marker being absent does NOT mean the sweep ran clean; it may not have run"
+        printf '%s\n' "  at all. Check kanban-helpers path and team context (KB_TEAM/KB_TERMINAL)."
+        verdict BLOCKED "kb-sweep did not positively confirm a completed sweep (source rc=$SOURCE_RC, sweep rc=$SWEEP_RC)"
+    fi
+    # SWEEP_RC is deliberately NOT part of the pass/fail decision — it is
+    # legitimately non-zero for framework subitems that complete after merge,
+    # which is precisely the over-blocking this gate must not reintroduce. It
+    # is captured only to make the diagnostic above concrete.
+    if printf '%s\n' "$SWEEP_OUTPUT" | grep -qE "PROTECTED SUBITEMS UNRESOLVED \([0-9]+\)"; then
+        printf '%s\n' "x Protected [Review]/[Test]/[UX] subitems open — resolve them (agents cannot cancel without user approval), push fixes, re-spawn affected subagents, re-seed, re-enter."
+        verdict BLOCKED "protected [Review]/[Test]/[UX] subitems unresolved on $ITEM_ID"
+    fi
+
+    # ── Gate 3 UX backstop (Layer 2) ────────────────────────────────────────
+    # Re-open [UX] when the diff touches UI paths but [UX] was auto-cancelled.
+    # Fires AFTER the sweep (a still-open [UX] already blocked above) and does
+    # NOT bypass kb-sweep — it adds a re-open trigger so the next round
+    # re-triggers Gate 3. UI patterns mirror docs/ux-eval-gate.md.
+    # XACA-0703-009: `gh pr diff --name-only`, NOT `git diff origin/develop...`
+    # — this repo's remote is `dev-team`, so the git form silently returns
+    # empty on most Academy PRs.
+    UI_DIFF=$(gh pr diff "$PR_NUM" --repo "$REPO" --name-only 2>/dev/null | grep -E \
+        'lcars-ui/|\.html$|\.css$|\.scss$|\.sass$|\.jsx$|\.tsx$|View\.swift$|\.storyboard$|Assets\.xcassets/|res/layout/|res/drawable/|res/values/colors\.xml|res/values/dimens\.xml|design-system/|design-tokens/|DESIGN\.md' \
+        || true)
+    if [ -n "$UI_DIFF" ]; then
+        # `kb-backlog sub list` needs a numeric board index; resolve it through
+        # the same private helpers the source used. Its per-line format is
+        # "  [idx] [STAT] [UX] title" with STAT a 4-char uppercase truncation
+        # (TODO/COMP/CANC/IN_P/BLOC) — there is NO separate "state:" line, so
+        # the status must be read off the [UX] line itself. The awk below is
+        # a portable field-scan (BSD awk + gawk), not a gawk-only 3-arg match.
+        _UX_STAT=$(_kbpm_helpers_eval '
+            _t=$(_kb_get_team_from_code "$1" 2>/dev/null) || true
+            _b=$(_kb_get_board_file "$_t" 2>/dev/null) || true
+            _i=$(_kb_find_by_id "$_b" "$1" 2>/dev/null) || true
+            if [ -n "$_i" ] && [ "$_i" -ge 0 ] 2>/dev/null; then
+                _raw=$(kb-backlog sub list "$_i" 2>/dev/null) || true
+                if [ -n "$_raw" ]; then
+                    printf "%s\n" "$_raw" | grep "\[UX\]" \
+                      | awk "{for(i=1;i<=NF;i++) if(\$i ~ /^\[[A-Z_]+\]\$/) {print tolower(substr(\$i,2,length(\$i)-2)); exit}}"
+                fi
+            fi
+        ' "$ITEM_ID")
+        UX_STATE=""
+        case "$_UX_STAT" in
+            canc) UX_STATE="cancelled" ;;
+            comp) UX_STATE="completed" ;;
+            todo) UX_STATE="todo" ;;
+            in_p) UX_STATE="in_progress" ;;
+            bloc) UX_STATE="blocked" ;;
+            *)    UX_STATE="$_UX_STAT" ;;
+        esac
+        if [ "$UX_STATE" = "cancelled" ]; then
+            printf '%s\n' "x UI surface in diff but [UX] subitem was cancelled — re-opening UX gate."
+            printf '%s\n' "  UI paths detected:"
+            printf '%s\n' "$UI_DIFF" | head -10
+            printf '%s\n' "  Action: kb-backlog sub todo <PARENT-BOARD-IDX> <UX-SUBITEM-IDX> to re-open,"
+            printf '%s\n' "          then spawn the UX evaluator (see 'UX expert by team') and re-enter."
+            verdict UX_REOPEN "UI paths in diff but [UX] subitem is cancelled on $ITEM_ID"
+        fi
+    fi
+
+    # ── Gate 3.5: CI check runs — ALLOWLIST of positively-safe conclusions ──
+    # XACA-1159-032. `--admin` bypasses branch-protection review counting, NOT
+    # CI results: a check that has not positively concluded safely must block.
+    # The prior version keyed on `state == "FAILURE"` in three places — which
+    # cannot distinguish "hasn't failed YET (still running)" from "actually
+    # passed", and never matches CANCELLED/TIMED_OUT/ACTION_REQUIRED, so all of
+    # those read as safe and --admin merged over them.
+    # gh's own aggregate.go maps every state into exactly one bucket:
+    #   pass=SUCCESS · skipping=SKIPPED,NEUTRAL · fail=ERROR,FAILURE,TIMED_OUT,
+    #   ACTION_REQUIRED · cancel=CANCELLED · pending=everything else (gh's
+    #   DEFAULT case, so any future/unrecognised state lands here by
+    #   construction and is never treated as safe).
+    # VERIFIED, NOT ASSUMED: `gh pr checks`'s documented exit code 8 for pending
+    # is produced ONLY by the plain-text path; in --json mode it returns success
+    # regardless. Inspect `bucket`, never the exit code.
+    CHECKS_OUT=$(gh pr checks "$PR_NUM" --repo "$REPO" --json name,bucket --jq '.[] | "\(.name)|\(.bucket)"' 2>&1)
+    CHECKS_RC=$?
+    SYNC_TAP_BUCKET=""; CHANGELOG_BUCKET=""; UNSAFE_CHECKS=""; PENDING_CHECKS=""
+    if [ "$CHECKS_RC" -ne 0 ]; then
+        if printf '%s\n' "$CHECKS_OUT" | grep -qi "no checks reported"; then
+            # XACA-1159-034: "no checks reported" is AMBIGUOUS — (a) no CI is
+            # configured, or (b) GitHub has not registered this push's checks
+            # yet (transient, seconds). Indistinguishable from one read, and
+            # accepting (a) on first sight lets a PR merge inside gap (b),
+            # before CI exists to gate on. Bound a re-poll against the SAME
+            # head, same shape as Gate 4's MERGE_UNKNOWN_RETRIES. Resets on a
+            # new push and the moment real check data appears.
+            NO_CHECKS_RETRIES=$((NO_CHECKS_RETRIES + 1))
+            if [ "$NO_CHECKS_RETRIES" -lt 5 ]; then
+                printf '%s\n' "gh reports 'no checks reported' for PR #$PR_NUM at $HEAD_SHA (poll $NO_CHECKS_RETRIES/5)"
+                printf '%s\n' "  — could be no CI configured, or checks not yet registered. Not assuming either."
+                repoll_or_block 10 "'no checks reported' unresolved after $NO_CHECKS_RETRIES/5 polls at $HEAD_SHA"
+                continue
+            fi
+            printf '%s\n' "'no checks reported' persisted $NO_CHECKS_RETRIES polls on $HEAD_SHA — treating as genuinely no CI configured."
+        else
+            # Any OTHER read failure fails closed — an unreadable answer is
+            # never evidence of safety.
+            printf '%s\n' "x Could not read CI check status for PR #$PR_NUM (gh pr checks exited $CHECKS_RC):"
+            printf '%s\n' "$CHECKS_OUT"
+            verdict BLOCKED "could not read CI checks (gh pr checks rc=$CHECKS_RC)"
+        fi
+    else
+        NO_CHECKS_RETRIES=0   # real check data — case (a) unambiguously ruled out
+        # A here-doc, NOT a pipe: a `while` on the right of a pipe runs in a
+        # subshell and these accumulators would not survive the loop.
+        while IFS='|' read -r C_NAME C_BUCKET; do
+            [ -n "$C_NAME" ] || continue
+            # Record the two tap buckets for their bypass-aware arms, but do
+            # NOT `continue` past the classifier (PR #855 blocking finding): an
+            # earlier version did, so a `pending`/unreadable bucket on them
+            # matched neither fail nor cancel and fell straight through to
+            # Gate 4 and merged. It hid whenever another pending check masked
+            # it, and surfaced exactly when the tap checks were last to finish
+            # — the normal case for a path-filtered workflow.
+            case "$C_NAME" in
+                sync-tap-drift)
+                    [ "$(_x1159_rank "$C_BUCKET")" -gt "$(_x1159_rank "$SYNC_TAP_BUCKET")" ] \
+                        && SYNC_TAP_BUCKET="$C_BUCKET" ;;
+                tap-changelog-completeness)
+                    [ "$(_x1159_rank "$C_BUCKET")" -gt "$(_x1159_rank "$CHANGELOG_BUCKET")" ] \
+                        && CHANGELOG_BUCKET="$C_BUCKET" ;;
+            esac
+            case "$C_BUCKET" in
+                pass|skipping) : ;;
+                fail|cancel)
+                    case "$C_NAME" in
+                        sync-tap-drift|tap-changelog-completeness) : ;;   # own arms adjudicate
+                        *) UNSAFE_CHECKS="${UNSAFE_CHECKS}${UNSAFE_CHECKS:+, }$C_NAME ($C_BUCKET)" ;;
+                    esac ;;
+                # Includes the two tap checks: a PENDING or unreadable tap gate
+                # re-polls like any other. A bypass answers "this failure is
+                # intentional", not "this check has not finished".
+                *) PENDING_CHECKS="${PENDING_CHECKS}${PENDING_CHECKS:+, }$C_NAME (${C_BUCKET:-<unreadable>})" ;;
+            esac
+        done <<CHECKS_EOF
+$CHECKS_OUT
+CHECKS_EOF
+    fi
+
+    if [ "$SYNC_TAP_BUCKET" = "fail" ] || [ "$SYNC_TAP_BUCKET" = "cancel" ]; then
+        BYPASS=$(gh pr view "$PR_NUM" --repo "$REPO" --json commits,labels --jq '([.commits[] | (.messageHeadline + "\n" + (.messageBody // ""))] | any(test("(?m)^Tap-Only-Edit:[[:space:]]*intentional"; "i"))) or ([.labels[].name] | any(. == "tap-only-intentional"))' 2>/dev/null)
+        if [ "$BYPASS" != "true" ]; then
+            # XACA-1122: the publisher is MERGED but not necessarily ARMED, and
+            # the correct remedy INVERTS between those states — a line naming
+            # only one is wrong half the time without ever looking wrong. The
+            # arming switch is the repo variable TAP_PUBLISHER_ENABLED and it is
+            # the ONLY predicate the gates read. Checking the App instead is its
+            # own trap: App present + variable unset reads as "live" while
+            # nothing mirrors.
+            printf '%s\n' "x sync-tap-drift FAILED (bucket=$SYNC_TAP_BUCKET) on PR #$PR_NUM. WHICH REMEDY APPLIES DEPENDS ON WHETHER THE PUBLISHER IS ARMED — determine it, do not assume. DECISIVE: 'gh variable get TAP_PUBLISHER_ENABLED --repo DoubleNode/dev-team' — armed if it prints 'true' in ANY casing (Actions == ignores case; the shell guards fold to match), and NOT armed for '1', 'yes', or surrounding whitespace; exit 1 with 'variable TAP_PUBLISHER_ENABLED was not found' means not armed. That variable is what the gates key on (vars.TAP_PUBLISHER_ENABLED == 'true'). PRECONDITIONS, not the switch: 'gh api apps/aiteamforge-publisher' (404 = App not created, so arming would fail) and 'REMOTE_NAME=dev-team bash scripts/check-tap-cutover-ready.sh' (exit 0 = tap mainline equals develop's gitlink with zero drift). Do NOT decide on 'gh workflow list --repo DoubleNode/dev-team | grep tap-publisher' — it tests presence only. IF THE PUBLISHER IS NOT ARMED: run sync-tap.sh, commit the tap submodule bump, push — the manual two-step is the ONLY working mechanism and your PR can legitimately be red here. IF IT IS ARMED: do NOT run sync-tap.sh or commit a gitlink bump; the publisher owns the mirror and a feature PR should not be red. Investigate whether the drift is yours at all or a publisher run that has not landed yet. EITHER WAY: 'Tap-Only-Edit: intentional' trailer / 'tap-only-intentional' label remains the bypass for a deliberate tap-only edit."
+            verdict BLOCKED "sync-tap-drift bucket=$SYNC_TAP_BUCKET with no Tap-Only-Edit bypass"
+        fi
+        printf '%s\n' "sync-tap-drift FAILED (bucket=$SYNC_TAP_BUCKET) but bypass present — proceeding."
+    fi
+    if [ "$CHANGELOG_BUCKET" = "fail" ] || [ "$CHANGELOG_BUCKET" = "cancel" ]; then
+        BYPASS=$(gh pr view "$PR_NUM" --repo "$REPO" --json commits,labels --jq '([.commits[] | (.messageHeadline + "\n" + (.messageBody // ""))] | any(test("(?m)^Changelog-Skip:[[:space:]]+.+"; "i"))) or ([.labels[].name] | any(. == "changelog-skip"))' 2>/dev/null)
+        if [ "$BYPASS" != "true" ]; then
+            printf '%s\n' "x tap-changelog-completeness FAILED (bucket=$CHANGELOG_BUCKET) on PR #$PR_NUM. Add missing XACA ids to homebrew-tap/CHANGELOG.md [Unreleased], or add a 'Changelog-Skip: <reason>' trailer / 'changelog-skip' label if this is a no-op tap edit."
+            verdict BLOCKED "tap-changelog-completeness bucket=$CHANGELOG_BUCKET with no Changelog-Skip bypass"
+        fi
+        printf '%s\n' "tap-changelog-completeness FAILED (bucket=$CHANGELOG_BUCKET) but bypass present — proceeding."
+    fi
+
+    # Catch-all: every OTHER check must land in pass/skipping. Allowlist only
+    # the two adjudicated arms above — do NOT extend this by enumerating more
+    # names, that rebuilds the denylist this replaces. Before XACA-0822 this
+    # step enumerated exactly those two, so `cochange` (XACA-0810/0811) fell
+    # through and --admin merged over it; verified red on PR #842.
+    if [ -n "$UNSAFE_CHECKS" ]; then
+        printf '%s\n' "x Failing/cancelled/timed-out check(s) not covered by a named arm: $UNSAFE_CHECKS"
+        printf '%s\n' "  Investigate before merging. Do NOT --admin past these; that is how a red gate ships."
+        verdict BLOCKED "unsafe CI check(s): $UNSAFE_CHECKS"
+    fi
+    if [ -n "$PENDING_CHECKS" ]; then
+        printf '%s\n' "CI still running/unresolved on PR #$PR_NUM: $PENDING_CHECKS — re-polling rather than merging on an unfinished build."
+        repoll_or_block "$POLL_SECONDS" "CI checks unresolved: $PENDING_CHECKS"
+        continue
+    fi
+
+    # ── Gate 4: mergeability + freshness. ORDER IS LOAD-BEARING (XACA-0944) ──
+    # UNKNOWN is checked FIRST and re-polls: GitHub computes mergeability
+    # asynchronously, so testing for CONFLICTING while it is still UNKNOWN
+    # makes the test false and a genuinely conflicted PR sails through — a
+    # too-early check returns the reassuring answer. DIRTY/CONFLICTING SECOND
+    # and halts. Staleness THIRD. Only then does it fall through to merge.
+    MERGE_INFO=$(gh pr view "$PR_NUM" --repo "$REPO" --json mergeable,mergeStateStatus --jq '"\(.mergeable)|\(.mergeStateStatus)"' 2>/dev/null)
+    MERGEABLE="${MERGE_INFO%|*}"; MERGE_STATE="${MERGE_INFO#*|}"
+
+    # BOTH fields settle independently, so EITHER reading UNKNOWN (or empty,
+    # from a failed gh) means "not settled" — gate on both. Measured live on
+    # PR #828: MERGEABLE|BLOCKED -> UNKNOWN|UNKNOWN -> MERGEABLE|BLOCKED.
+    if [ -z "$MERGEABLE" ] || [ -z "$MERGE_STATE" ] || [ "$MERGEABLE" = "UNKNOWN" ] || [ "$MERGE_STATE" = "UNKNOWN" ]; then
+        MERGE_UNKNOWN_RETRIES=$((MERGE_UNKNOWN_RETRIES + 1))
+        if [ "$MERGE_UNKNOWN_RETRIES" -ge 5 ]; then
+            printf '%s\n' "x mergeability stuck at UNKNOWN after 5 polls (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE). Not safe to assume mergeable; pausing for a human look."
+            verdict BLOCKED "mergeability stuck UNKNOWN after 5 polls (mergeable=$MERGEABLE state=$MERGE_STATE)"
+        fi
+        printf '%s\n' "mergeability UNKNOWN (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE; poll $MERGE_UNKNOWN_RETRIES/5) — re-polling rather than proceeding to merge."
+        repoll_or_block 10 "mergeability UNKNOWN (mergeable=$MERGEABLE state=$MERGE_STATE, poll $MERGE_UNKNOWN_RETRIES/5)"
+        continue
+    fi
+    MERGE_UNKNOWN_RETRIES=0
+
+    # DIRTY/CONFLICTING halt (XACA-0944, PR #757). Gate 4 used to branch on
+    # exactly one bad state (BEHIND) and fall through to merge for every other
+    # value, DIRTY included — verified live during XACA-0923. NEVER
+    # `gh pr update-branch` a conflicted PR: that fixes a stale base, not
+    # content conflicts.
+    if [ "$MERGEABLE" = "CONFLICTING" ] || [ "$MERGE_STATE" = "DIRTY" ]; then
+        printf '%s\n' "x PR #$PR_NUM has merge conflicts (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE) — gh pr update-branch will NOT fix this."
+        CONFLICT_FILES=$(gh pr diff "$PR_NUM" --repo "$REPO" --name-only 2>/dev/null | head -20)
+        if [ -n "$CONFLICT_FILES" ]; then
+            printf '%s\n' "  Files touched on this PR (conflict is most likely among these):"
+            printf '%s\n' "$CONFLICT_FILES" | sed 's/^/    /'
+        fi
+        printf '%s\n' "  Resolve manually: checkout the branch, merge/rebase develop, resolve, push. CHANGELOG [Unreleased] collisions are union-resolved — keep BOTH blocks, then de-duplicate."
+        verdict CONFLICT "mergeable=$MERGEABLE mergeStateStatus=$MERGE_STATE"
+    fi
+
+    # STALENESS: COUNT IT, DO NOT READ IT OFF mergeStateStatus (XACA-0944).
+    # That field reports exactly ONE state, and BLOCKED is permanent on this
+    # repo (the Team plan does not count bot reviews), so BLOCKED is reported
+    # EVEN WHEN THE BRANCH IS ALSO BEHIND — an arm keyed on the literal string
+    # BEHIND is dead code that never fires. Measured on PR #828: 1 commit
+    # behind develop while three consecutive `gh pr view` calls read BLOCKED.
+    # The compare API is authoritative and remote-agnostic; a local
+    # `git rev-list HEAD..origin/develop` would resolve nothing here (remote is
+    # `dev-team`). The `|| MERGE_STATE = BEHIND` clause is kept deliberately:
+    # on a repo without a permanent blocker it still fires.
+    BASE_REF=$(gh pr view "$PR_NUM" --repo "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null)
+    BEHIND_BY=$(gh api "repos/$REPO/compare/$BASE_REF...$HEAD_SHA" --jq '.behind_by' 2>/dev/null)
+    case "$BEHIND_BY" in ''|*[!0-9]*) BEHIND_BY="" ;; esac
+    if [ -z "$BEHIND_BY" ]; then
+        # Fail closed: an unreadable staleness count is NOT evidence of freshness.
+        printf '%s\n' "x could not determine how far behind $BASE_REF PR #$PR_NUM is (compare API returned nothing usable) — not assuming fresh."
+        verdict BLOCKED "unreadable behind-count against $BASE_REF"
+    fi
+    if [ "$BEHIND_BY" -gt 0 ] || [ "$MERGE_STATE" = "BEHIND" ]; then
+        # XACA-1122: inspect what the PR is behind BY, not merely how far.
+        # required_status_checks.strict is MEASURED false on develop — every
+        # forced update-branch is OUR OWN policy, ours to tune. Do NOT "fix"
+        # staleness cost by flipping strict to true (§2.3 anti-recommendation).
+        # Under the publisher decouple a feature PR NEVER touches the gitlink,
+        # so a gap made entirely of publisher gitlink-only bumps carries
+        # nothing it needs and cannot conflict with it. Note what update-branch
+        # actually costs: dismiss_stale_reviews acts on pushes to a PR'S HEAD
+        # BRANCH, so it is our own update-branch — not the publisher's push to
+        # develop — that wipes both bot approvals.
+        # FAIL CLOSED: any inability to classify the range falls through to
+        # update-branch exactly as before.
+        SKIP_UPDATE="false"
+        # compare/A...B lists commits in B not in A — argument order matters.
+        RANGE=$(gh api --paginate "repos/$REPO/compare/$HEAD_SHA...$BASE_REF" \
+            --jq '.commits[] | "\(.sha)|\(.author.login // "")"' 2>/dev/null)
+        RANGE_COUNT=$(printf '%s\n' "$RANGE" | grep -c '|')
+        case "$RANGE_COUNT" in ''|*[!0-9]*) RANGE_COUNT=0 ;; esac
+
+        if [ -z "$RANGE" ] || [ "$RANGE_COUNT" -eq 0 ]; then
+            printf '%s\n' "Could not enumerate the behind-range — classifying as NOT publisher-only (fail closed)."
+        elif [ "$RANGE_COUNT" -ne "$BEHIND_BY" ]; then
+            # A mismatch means truncation or a race: we did not see the whole
+            # range, and a partial range that happens to be all-publisher is
+            # exactly the reassuring-wrong-answer shape. Fail closed.
+            printf '%s\n' "Behind-range enumeration returned $RANGE_COUNT commit(s) but behind_by=$BEHIND_BY — did not see the whole range; fail closed."
+        else
+            SKIP_UPDATE="true"
+            # A here-doc, NOT a pipe: a `while` on the right of a pipe runs in
+            # a subshell and SKIP_UPDATE=false would not survive the loop.
+            while IFS='|' read -r C_SHA C_LOGIN; do
+                [ -n "$C_SHA" ] || continue
+                if [ "$C_LOGIN" != "$PUBLISHER_LOGIN" ]; then
+                    SKIP_UPDATE="false"
+                    printf '%s\n' "  $C_SHA authored by '${C_LOGIN:-<unreadable>}' — not the publisher."
+                    break
+                fi
+                # Gitlink-only means the commit's ENTIRE file list is the submodule path.
+                C_FILES=$(gh api "repos/$REPO/commits/$C_SHA" --jq '[.files[].filename] | sort | join(",")' 2>/dev/null)
+                if [ "$C_FILES" != "homebrew-tap" ]; then
+                    SKIP_UPDATE="false"
+                    printf '%s\n' "  $C_SHA touches '${C_FILES:-<unreadable>}' — not a gitlink-only bump."
+                    break
+                fi
+            done <<RANGE_EOF
+$RANGE
+RANGE_EOF
+        fi
+
+        if [ "$SKIP_UPDATE" = "true" ]; then
+            printf '%s\n' "Branch is $BEHIND_BY commit(s) behind $BASE_REF, and EVERY one is a publisher-authored gitlink-only bump — skipping update-branch and proceeding to merge (XACA-1122). Bot approvals stay valid."
+        else
+            printf '%s\n' "Branch is $BEHIND_BY commit(s) behind $BASE_REF (mergeStateStatus=$MERGE_STATE) — running gh pr update-branch. Prior bot approvals are against a stale base."
+            gh pr update-branch "$PR_NUM" --repo "$REPO"
+            UPDATE_RC=$?
+            verdict RESPAWN_BOTH "ran gh pr update-branch (rc=$UPDATE_RC), $BEHIND_BY commit(s) behind $BASE_REF; re-spawn BOTH bots and re-seed both LAST_*_AT"
+        fi
+    fi
+
+    # Merge allowlist, not denylist (XACA-0944). mergeStateStatus is a
+    # VOCABULARY (CLEAN/BEHIND/DIRTY/BLOCKED/UNSTABLE/DRAFT/UNKNOWN), not a
+    # boolean; the original arm caught only BEHIND, leaving every unenumerated
+    # value — DIRTY included — reading as safe. Merge only on:
+    #   CLEAN    — no conflicts, no blockers
+    #   UNSTABLE — a non-required check failing; required ones are Gates 1-3.5
+    #   BLOCKED  — the NORMAL steady state here. The Team plan does not count
+    #              bot reviews, so both bots approving still leaves the PR
+    #              BLOCKED forever; that is exactly why the merge uses --admin.
+    #              Do NOT drop BLOCKED — that blocks every merge on this repo.
+    # BLOCKED carries NO readiness signal in either direction; readiness is
+    # what Gates 1-3.5 establish. Anything else (DRAFT, or an unrecognised
+    # value) is suspicious, not green.
+    if [ "$MERGE_STATE" != "CLEAN" ] && [ "$MERGE_STATE" != "UNSTABLE" ] && [ "$MERGE_STATE" != "BLOCKED" ]; then
+        printf '%s\n' "x mergeStateStatus=$MERGE_STATE is not on the merge allowlist (CLEAN, UNSTABLE, BLOCKED) — not proceeding. Likely DRAFT or an unrecognised value."
+        verdict BLOCKED "mergeStateStatus=$MERGE_STATE off the merge allowlist"
+    fi
+
+    # ── Pre-merge RESIDUAL advisory banner (XACA-1199) — PRINT-ONLY ─────────
+    # Re-extracted from $SWEEP_OUTPUT captured at Gate 3 THIS iteration — never
+    # a re-run of kb-sweep, never a board.json re-parse. It NEVER changes the
+    # verdict or skips the merge: ordinary untagged subitems must not gate, or
+    # we reintroduce the over-blocking Gate 3 already rejects. It exists
+    # because XACA-1186 / PR #874 merged with six parked subitems that surfaced
+    # only at kb-done; 16.2% of 808 replayed merges print at least one residual
+    # line (median 1, max 15) — too rare to gate, too common to keep silent.
+    #
+    # ABSENCE IS REPORTED, NEVER READ AS "NONE": a pre-XACA-1199 kb-sweep emits
+    # no header at all, which must not look identical to an empty residual list.
+    #
+    # XACA-1199-012: anchoring on the bare marker text is HIJACKABLE — a
+    # status-table row IS a subitem title and can contain that literal text.
+    # Anchor on the header's printed SHAPE: exactly two leading spaces then a
+    # glyph that is neither space nor "[" (table rows are two spaces + "[";
+    # body bullets have five). The trailing anchor matches the ASCII
+    # "advisory, not merge-gating" + ':' or '.' at end of line rather than the
+    # em dash, which is not reliably matchable across awk implementations.
+    # Portable BSD awk + gawk: no gawk-only 3-arg match().
+    RESIDUAL_BLOCK=$(printf '%s\n' "$SWEEP_OUTPUT" | awk '
+      !found {
+        if ($0 ~ /^  [^ \[]/ && $0 ~ /RESIDUAL OPEN SUBITEMS \([0-9]+\)/ && $0 ~ /advisory, not merge-gating[:.]$/) {
+          found=1
+        }
+      }
+      found {
+        if ($0 == "") { exit }
+        print
+      }
+    ')
+
+    if [ -n "$RESIDUAL_BLOCK" ]; then
+        RESIDUAL_HEADER_LINE=$(printf '%s\n' "$RESIDUAL_BLOCK" | awk 'NR==1')
+        # Same anchoring re-asserted on the count parse — defense in depth
+        # against a future refactor feeding this a differently-sourced line.
+        RESIDUAL_COUNT=$(printf '%s\n' "$RESIDUAL_HEADER_LINE" | awk '
+          $0 ~ /^  [^ \[]/ && /RESIDUAL OPEN SUBITEMS \([0-9]+\)/ && /advisory, not merge-gating[:.]$/ {
+            n = match($0, /RESIDUAL OPEN SUBITEMS \([0-9]+\)/)
+            if (n > 0) {
+              s = substr($0, RSTART, RLENGTH)
+              gsub(/[^0-9]/, "", s)
+              print s
+            }
+          }
+        ')
+        case "$RESIDUAL_COUNT" in
+            ''|*[!0-9]*)
+                printf '%s\n' "! Could not parse a residual count from kb-sweep's RESIDUAL header — treating as non-zero to be safe:"
+                printf '%s\n' "$RESIDUAL_BLOCK"
+                ;;
+            0)
+                printf '%s\n' "Residual subitems: none."
+                ;;
+            *)
+                printf '%s\n' "== RESIDUAL (non-blocking) — merging anyway =="
+                printf '%s\n' "$RESIDUAL_BLOCK"
+                printf '%s\n' "These will surface again at kb-done — re-home them to the ticket that owns the work before this ticket closes."
+                ;;
+        esac
+    elif printf '%s\n' "$SWEEP_OUTPUT" | grep -Fq "No subitems found — ready to close."; then
+        printf '%s\n' "Residual subitems: n/a (item has no subitems)."
+    elif printf '%s\n' "$SWEEP_OUTPUT" | awk '
+        $0 ~ /^  [^ \[]/ && /RESIDUAL OPEN SUBITEMS:/ && /residual report unavailable/ && /board read failed\.$/ { found=1 }
+        END { exit !found }
+      '; then
+        # XACA-1199-023: kb-sweep's OWN "residual report unavailable — board
+        # read failed" line (a failed dedicated re-query) used to fall through
+        # to the generic else and get misdiagnosed as a pre-XACA-1199 kb-sweep.
+        printf '%s\n' "! kb-sweep could not read the board for its residual report (board read failed) — residual subitems were NOT checked this round; read the full sweep output above before this ticket closes."
+    else
+        printf '%s\n' "! kb-sweep emitted no RESIDUAL report (pre-XACA-1199 kb-sweep?) — read the full sweep output above for open untagged subitems before this ticket closes."
+    fi
+
+    if [ "$DO_MERGE" != "true" ]; then
+        printf '%s\n' "All gates passed + branch fresh (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE). --no-merge: stopping short of kb-merge."
+        verdict GATES_PASSED "--no-merge: all gates passed (mergeable=$MERGEABLE state=$MERGE_STATE); kb-merge NOT run"
+    fi
+
+    printf '%s\n' "All gates passed + branch fresh (mergeable=$MERGEABLE, mergeStateStatus=$MERGE_STATE). Merging with --admin..."
+    # kb-merge wraps `gh pr merge` for the worktree-lock case (XACA-0467):
+    # from a worktree --delete-branch fails locally even though the API merge
+    # succeeded; kb-merge detects that and falls back to remote-only cleanup.
+    MERGE_OUT=$(_kbpm_helpers_run kb-merge "$PR_NUM")
+    MERGE_RCPAIR=$(cat "$KBPM_RCFILE" 2>/dev/null)
+    MERGE_SOURCE_RC="${MERGE_RCPAIR%% *}"
+    MERGE_CMD_RC="${MERGE_RCPAIR##* }"
+    case "$MERGE_SOURCE_RC" in ''|*[!0-9]*) MERGE_SOURCE_RC=127 ;; esac
+    case "$MERGE_CMD_RC" in ''|*[!0-9]*) MERGE_CMD_RC=127 ;; esac
+    printf '%s\n' "$MERGE_OUT"
+    if [ "$MERGE_SOURCE_RC" -ne 0 ] || [ "$MERGE_CMD_RC" -ne 0 ]; then
+        verdict BLOCKED "kb-merge did not succeed (source rc=$MERGE_SOURCE_RC, kb-merge rc=$MERGE_CMD_RC) — PR not merged"
+    fi
+    # kb-done is deliberately NOT run here; the caller owns closing the item.
+    verdict GATES_PASSED "merged PR #$PR_NUM via kb-merge; run kb-done yourself"
+done
