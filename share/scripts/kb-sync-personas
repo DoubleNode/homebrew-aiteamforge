@@ -776,6 +776,10 @@ _resolve_git_roots() {
 # ---------------------------------------------------------------------------
 _kbsp_sync_worktrees() {
   _require_jq
+  # XACA-1261-019: consumer mode resolves targetRepo from the registry, so an
+  # absent/unparseable registry must fail loudly here too rather than silently
+  # deploying nowhere (no-op success is the failure mode this guards).
+  _require_team_paths_registry
   local filter_team="" dry_run=false prune=false
 
   while [ $# -gt 0 ]; do
@@ -802,8 +806,22 @@ _kbsp_sync_worktrees() {
       continue
     fi
 
+    # XACA-1261-019: sync-worktrees must use the SAME consumer-mode resolution as
+    # list/check/sync/diff. It previously read the raw manifest targetRepo even in
+    # consumer mode. That happens to work today only because XACA-1260 reverted the
+    # freelance targetRepo to the container, which is a valid path on a consumer --
+    # a coincidence of that revert, not a designed property, and it breaks the
+    # moment any manifest targetRepo names a dev-only path. It matters more here
+    # than anywhere else: for container-layout teams `sync` writes an inert
+    # container-level path, so sync-worktrees is the subcommand that actually
+    # delivers usable personas (measured by the XACA-1260 owner).
+    if ! _is_hosted_here "$team"; then
+      i=$((i + 1))
+      continue
+    fi
+
     local target_repo target_dir is_git
-    target_repo=$(_expand_path "$(_deploy_field "$i" "targetRepo")")
+    target_repo=$(_expand_path "$(_resolve_target_repo_for_team "$i" "$team")")
     target_dir=$(_deploy_field "$i" "targetDir")
     is_git=$(_deploy_field "$i" "isGitRepo")
 
