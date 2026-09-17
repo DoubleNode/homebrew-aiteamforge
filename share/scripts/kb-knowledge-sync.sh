@@ -16,10 +16,57 @@
 # script MUST no-op cleanly in that world and simply start doing real work
 # the moment a real clone + credentials show up — without anyone having to
 # touch a LaunchAgent or plist. Every degraded condition (not a repo yet,
-# lock already held, dirty tree, mid-rebase, rebase conflict, push
-# rejected/offline/no-auth) is logged and treated as an ORDINARY outcome,
-# not a script failure. The only thing that must NEVER happen is a wedged,
-# half-rebased ~/knowledge left behind for a human to discover days later.
+# lock already held, mid-rebase, rebase conflict, push rejected/offline/
+# no-auth) is logged and treated as an ORDINARY outcome, not a script
+# failure. The only thing that must NEVER happen is a wedged, half-rebased
+# ~/knowledge left behind for a human to discover days later.
+#
+# ─────────────────────────────────────────────────────────────────────────
+# XACA-1266 — the dirty-tree contract, and why it changed
+# ─────────────────────────────────────────────────────────────────────────
+# Before XACA-1266, ANY dirty tree (`git status --porcelain` non-empty)
+# skipped BOTH halves of the sync outright (`skipped-dirty`, now RETIRED —
+# see kanban/plans/XACA-1266/XACA-1266-003-design-decision.md §3.5). Since
+# nothing in the codebase ever commits to ~/knowledge
+# (kb-knowledge-add lands entries untracked), the tree is dirty
+# essentially always on an authoring machine — so that guard made the
+# daemon a permanent, silent no-op on exactly the machines that most need
+# it, for weeks at a stretch (measured: 38/38 consecutive ticks on M3Pro).
+#
+# We still NEVER stash. Stashing someone else's in-flight, uncommitted
+# knowledge entry behind their back is exactly the kind of "clever"
+# surprise this daemon must never pull — a knowledge commit is authored via
+# kb-knowledge-add and a dirty tree here always means a human is mid-edit.
+# What changed is HOW we protect that invariant: instead of a guard that
+# refuses to touch the tree at all whenever it's dirty, we now delegate
+# enforcement to git itself, which is a categorically stronger position.
+#
+#   - `git fetch` is measured to never touch the working tree, the index,
+#     or HEAD (see 002 §1.1) — there is no dirty-tree hazard to guard
+#     against, so it now runs UNCONDITIONALLY, every tick, dirty or clean.
+#   - On a DIRTY tree we integrate ONLY via `git merge --ff-only @{u}`,
+#     never `rebase`, never a plain `merge`, and never `--autostash`
+#     (measured exiting 0 while leaving conflict markers behind — see 002
+#     §1.5 — which is worse than the guard it would replace). `--ff-only`
+#     is structurally incapable of overwriting a modified or untracked
+#     path: it refuses (exit 1, HEAD unchanged, local content verbatim) on
+#     both collision shapes, and refuses just as cleanly (HEAD unchanged,
+#     no rebase dir left behind) when the branch has genuinely diverged
+#     and a fast-forward is impossible. No state exists in which
+#     `--ff-only` leaves the repo worse than it found it.
+#   - On a CLEAN tree, nothing changes: `git pull --rebase`, same as
+#     before.
+#   - The PUSH side is UNCHANGED and stays gated on a clean tree — pushing
+#     from a dirty tree was never safe and still isn't. Since the tree is
+#     essentially never clean on an authoring machine, this means push
+#     stays permanently closed until a separate, out-of-scope change
+#     (commit-on-write) lands; see the design doc §6/§7. This ticket fixes
+#     INBOUND convergence only. A machine will reliably RECEIVE the
+#     fleet's knowledge and reliably REPORT when it cannot. It will still
+#     never SHARE its own.
+#
+# See kanban/plans/XACA-1266/XACA-1266-003-design-decision.md for the full
+# design (this comment summarizes it; that document is normative).
 #
 # Usage:
 #   kb-knowledge-sync.sh [repo-path]
@@ -40,17 +87,32 @@
 #                                     considered abandoned by a crashed prior
 #                                     run and reclaimed. Default 3600 (2x the
 #                                     30-min LaunchAgent interval).
+#   KB_KNOWLEDGE_SYNC_STATE_FILE      Override the (d)-notify state file path
+#                                     (default $HOME/.aiteamforge/run/
+#                                     knowledge-sync-state.json). The daemon
+#                                     COMPUTES this path itself, the same way
+#                                     it computes KB_KNOWLEDGE_SYNC_LOCK_DIR
+#                                     above — it is NOT derived from the log
+#                                     path (which is plist-assigned per host
+#                                     and not daemon-knowable; see design doc
+#                                     §10). Consumers (the SessionStart guard
+#                                     hook, the health-check script) read this
+#                                     same env var / default so they resolve
+#                                     the identical path without either side
+#                                     hardcoding the other's internals.
 #
 # Exit-code policy:
 #   This script exits 0 in essentially every normal AND degraded case —
-#   not-a-repo, lock-held, dirty-tree, rebase-conflict, push-failure are all
-#   ordinary outcomes for a best-effort background sync and must never mark
-#   the LaunchAgent job as failed. Non-zero exit is reserved ONLY for actual
-#   script-usage bugs (e.g. too many arguments) — never for a git/network
-#   condition. Grep the log output (tagged `[kb-knowledge-sync]`) to see what
-#   actually happened on a given run.
+#   not-a-repo, lock-held, fetch-failure, a fast-forward refusal (dirty or
+#   diverged), rebase-conflict, push-failure are all ordinary outcomes for a
+#   best-effort background sync and must never mark the LaunchAgent job as
+#   failed. Non-zero exit is reserved ONLY for actual script-usage bugs
+#   (e.g. too many arguments) or genuine data-integrity defects (Guard 1b
+#   PII containment, Guard 4 duplicate ID-slot collision) — never for an
+#   ordinary git/network condition. Grep the log output (tagged
+#   `[kb-knowledge-sync]`) to see what actually happened on a given run.
 #
-# XACA-0749
+# XACA-0749, XACA-1266
 
 set -uo pipefail
 # NOTE: deliberately no `set -e` — this script's entire contract is to keep
@@ -196,11 +258,170 @@ if ! _acquire_lock; then
     fi
 fi
 
-# ── Guard 3: quiescent tree (no in-progress rebase/merge, no dirty tree) ─────
+# ── (d) notify state (XACA-1266 §4) ──────────────────────────────────────────
+# A throttled, daemon-written state file so a machine that cannot converge
+# says so LOUDLY instead of no-opping quietly forever (the failure mode
+# this ticket exists to kill — a 1004-run, ~21-day silent stall on M4Mini).
+# Trigger is "failure to converge over time", NEVER mere dirtiness — after
+# the fix below, a dirty tree converges inbound on its own, so the old
+# "warn whenever dirty" signal (which fired on ~100% of ticks on a heavy-
+# authoring machine and trained everyone to ignore it) is retired outright.
+#
+# Fail-direction split (design §4.4), deliberate and asymmetric:
+#   - WRITER (here): an unwritable state file logs `notify-state-unwritable`
+#     and the sync CONTINUES NORMALLY. Degrading the actual sync because a
+#     counter could not be persisted would be strictly worse than the bug
+#     being fixed here.
+#   - READER (claude-hooks/kb-knowledge-sync-guard.sh,
+#     scripts/kb-knowledge-sync-health-check.sh): a missing, unreadable, or
+#     stale state file must be treated as UNKNOWN — NOT healthy — never as
+#     "no stall". Mirrors the existing STALE-CACHE fail-closed philosophy
+#     exactly: absence of a problem report is not a report of absence.
+#
+# STATE_FILE is COMPUTED the same way LOCK_DIR above is: an env-var override
+# with a sensible, non-hardcoded default. It is deliberately NOT derived
+# from $KB_KNOWLEDGE_SYNC_LOG_PATH — that path is assigned per-host by each
+# machine's LaunchAgent plist (StandardOutPath/StandardErrorPath) and is
+# therefore fundamentally NOT knowable from inside this script (see design
+# doc §10); a consumer hardcoding it goes blind on hosts where it differs
+# (measured: M4Mini). This file's path, by contrast, is the SAME formula on
+# every host and every consumer, so nothing needs to rediscover it per host.
+STATE_FILE="${KB_KNOWLEDGE_SYNC_STATE_FILE:-$HOME/.aiteamforge/run/knowledge-sync-state.json}"
+
+_now_iso() {
+    date -u +'%Y-%m-%dT%H:%M:%SZ'
+}
+
+# Minimal scalar-field reader for the single-line JSON this script itself
+# writes (see _update_notify_state below) — deliberately NOT a general JSON
+# parser, just enough to read back the known, controlled field shapes this
+# script produces (a bare integer, a double-quoted string, or a literal
+# null) without adding a jq dependency, matching this script's existing
+# dependency-light philosophy (see the inline Guard 4 duplicate-slot check
+# further down, which avoids sourcing the zsh validator for the same
+# reason). Prints "" if the key or file is absent/unreadable/malformed.
+_json_field() {
+    local file="$1" key="$2"
+    [ -r "$file" ] || { printf ''; return 0; }
+    sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p' "$file" 2>/dev/null | head -1
+}
+
+# Backslash- and quote-escape a value for embedding in the JSON this script
+# writes. Values here are always paths/tokens/timestamps we generate
+# ourselves, but escape anyway rather than assume.
+_json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# _update_notify_state <token> <measured-ahead> <measured-behind>
+#
+# Called once per tick with the phase token that determines convergence
+# (fetch-failed / blocked-ff-conflict / blocked-ff-diverged /
+# rebase-conflict-aborted / converged-ff / fetch-only-dirty /
+# rebased-advanced / already-current / synced — see design doc §3.5 for the
+# full token vocabulary). Reads the PREVIOUS counter from $STATE_FILE (if
+# present/readable), advances it per the increment/reset table below,
+# writes the new state atomically (temp file + mv so a reader never sees a
+# half-written file), and — only at a backed-off milestone threshold — logs
+# a greppable `notify-stall` line to THIS script's own log (distinct from
+# the SessionStart hook's user-facing banner, which reads the state file
+# independently).
+#
+#   Increment on: fetch-failed, blocked-ff-conflict, blocked-ff-diverged,
+#                 rebase-conflict-aborted   (design §5's fail-direction table)
+#   Reset to 0 on: converged-ff, rebased-advanced, already-current,
+#                  fetch-only-dirty, synced   (design §4.2)
+#
+# Threshold is 6 consecutive unproductive ticks (~3h at the 30-min cadence)
+# normally, escalated to 2 (~1h) when the LATEST token is blocked-ff-
+# diverged — that state cannot self-heal (no human action, no future tick,
+# fixes a diverged+dirty tree) and needs a human by definition. Beyond the
+# threshold, notify only at backed-off milestones (threshold, threshold*4,
+# threshold*16, …) — never every tick, so this cannot become the same
+# alert-fatigue noise the old unconditional dirty warning was.
+_update_notify_state() {
+    local token="$1" m_ahead="${2:-}" m_behind="${3:-}"
+    local prev_counter prev_first new_counter threshold
+
+    prev_counter="$(_json_field "$STATE_FILE" consecutive_unproductive_ticks)"
+    case "$prev_counter" in ''|*[!0-9]*) prev_counter=0 ;; esac
+    prev_first="$(_json_field "$STATE_FILE" first_unproductive_at)"
+
+    case "$token" in
+        fetch-failed|blocked-ff-conflict|blocked-ff-diverged|rebase-conflict-aborted)
+            new_counter=$(( prev_counter + 1 ))
+            if [ "$prev_counter" -eq 0 ]; then
+                prev_first="$(_now_iso)"
+            fi
+            ;;
+        converged-ff|rebased-advanced|already-current|fetch-only-dirty|synced)
+            new_counter=0
+            prev_first=""
+            ;;
+        *)
+            # An unrecognized token — leave the counter exactly as it was
+            # rather than guess in either direction.
+            new_counter="$prev_counter"
+            ;;
+    esac
+
+    threshold=6
+    [ "$token" = "blocked-ff-diverged" ] && threshold=2
+
+    if [ "$new_counter" -ge "$threshold" ] && [ "$threshold" -gt 0 ]; then
+        local _milestone=$threshold
+        while [ "$_milestone" -le "$new_counter" ]; do
+            if [ "$_milestone" -eq "$new_counter" ]; then
+                log "notify-stall: ${new_counter} consecutive unproductive tick(s) on ${REPO_DIR} (last=${token}, threshold=${threshold}) — ahead=${m_ahead:-unknown} behind=${m_behind:-unknown}, first unproductive at ${prev_first:-unknown}"
+                break
+            fi
+            _milestone=$(( _milestone * 4 ))
+        done
+    fi
+
+    local state_dir tmp_file
+    state_dir="${STATE_FILE%/*}"
+    if [ "$state_dir" = "$STATE_FILE" ]; then
+        state_dir="."
+    fi
+    if ! mkdir -p "$state_dir" 2>/dev/null; then
+        log "notify-state-unwritable: could not create ${state_dir} for ${STATE_FILE} — sync continuing normally"
+        return 0
+    fi
+
+    tmp_file="${STATE_FILE}.tmp.$$"
+    {
+        printf '{'
+        printf '"consecutive_unproductive_ticks":%d,' "$new_counter"
+        if [ -n "$prev_first" ]; then
+            printf '"first_unproductive_at":"%s",' "$(_json_escape "$prev_first")"
+        else
+            printf '"first_unproductive_at":null,'
+        fi
+        printf '"last_outcome_token":"%s",' "$(_json_escape "$token")"
+        printf '"last_fetch_at":"%s",' "$(_json_escape "$(_now_iso)")"
+        printf '"measured_ahead":%s,' "${m_ahead:-null}"
+        printf '"measured_behind":%s,' "${m_behind:-null}"
+        printf '"repo_path":"%s"' "$(_json_escape "$REPO_DIR")"
+        printf '}\n'
+    } > "$tmp_file" 2>/dev/null
+
+    if [ ! -s "$tmp_file" ] || ! mv "$tmp_file" "$STATE_FILE" 2>/dev/null; then
+        log "notify-state-unwritable: could not write ${STATE_FILE} — sync continuing normally"
+        rm -f "$tmp_file" 2>/dev/null || true
+        return 0
+    fi
+    return 0
+}
+
+# ── Guard 3: quiescent-tree detection + fetch/integrate (XACA-1266) ─────────
 # We never stash: a dirty tree here means a human is mid-edit (knowledge
 # commits are authored via kb-knowledge-add), and stashing someone else's
 # in-flight work behind their back is exactly the kind of "clever" surprise
-# this daemon must never pull.
+# this daemon must never pull. That invariant is now enforced by git itself
+# (see the XACA-1266 header comment above) rather than by refusing to act
+# at all — a dirty tree no longer skips the sync, it changes HOW we
+# integrate.
 GIT_DIR="$(git -C "$REPO_DIR" rev-parse --absolute-git-dir 2>/dev/null || true)"
 if [ -z "$GIT_DIR" ]; then
     log "no-op-not-a-repo: could not resolve git-dir for ${REPO_DIR} — exiting"
@@ -212,24 +433,131 @@ if [ -d "${GIT_DIR}/rebase-merge" ] || [ -d "${GIT_DIR}/rebase-apply" ] || [ -f 
     exit 0
 fi
 
+# Dirty flag only — no longer an exit. Selects the integrate strategy
+# below and separately gates the push at the very end.
 _dirty="$(git -C "$REPO_DIR" status --porcelain 2>&1)"
-if [ -n "$_dirty" ]; then
-    log "skipped-dirty: ${REPO_DIR} has uncommitted changes — not touching it"
-    log_block "dirty status" "$_dirty"
-    exit 0
-fi
 
 PRE_SYNC_HEAD="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
 
 # No upstream configured (e.g. a detached clone, or a fixture repo without a
-# tracking branch set up) — nothing to pull or push against; no-op cleanly
-# rather than letting `git pull --rebase` fail with a generic error.
+# tracking branch set up) — nothing to fetch or integrate against; no-op
+# cleanly. Moved AHEAD of the dirty branch below (XACA-1266 design §3.1):
+# fetching requires an upstream, and the new unconditional fetch has to run
+# before we decide how to integrate.
 if ! git -C "$REPO_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
     log "no-op-no-upstream: ${REPO_DIR} has no upstream tracking branch configured — nothing to sync"
     exit 0
 fi
 
-# ── Step: fetch + rebase ──────────────────────────────────────────────────────
+# ── Step: fetch (unconditional — this is the fix) ────────────────────────────
+# Measured (design doc §2, 002 §1.1): fetch touches neither the working
+# tree, the index, nor HEAD. There is no dirty-tree hazard here, which is
+# exactly why gating it behind the old dirty-check bought nothing except a
+# stall — on M3Pro the fetch step did not execute once in 38 consecutive
+# ticks, because the old guard exited before ever reaching it.
+log "fetching: git -C ${REPO_DIR} fetch"
+FETCH_OUTPUT="$(git -C "$REPO_DIR" fetch 2>&1)"
+FETCH_EXIT=$?
+
+if [ "$FETCH_EXIT" -ne 0 ]; then
+    log "fetch-failed: git fetch failed in ${REPO_DIR} (offline / no auth / remote unreachable?) — refs, HEAD, and tree all unchanged; will retry next tick"
+    log_block "git fetch output" "$FETCH_OUTPUT"
+    _update_notify_state "fetch-failed" "" ""
+    exit 0
+fi
+
+# ── Guard 4 helpers: post-merge duplicate ID-slot gate (XACA-0818 fleet backstop) ─
+# The per-directory allocation lock added to kb-knowledge-add/-promote in
+# XACA-0818 serializes writers WITHIN one host, but it cannot stop two DIFFERENT
+# hosts from each allocating the same NNN slot offline and then git-merging both
+# entries cleanly (distinct slug filenames => no git conflict, two files silently
+# sharing e.g. k004). A fast-forward — clean-tree rebase or dirty-tree ff-only —
+# is exactly where such a cross-host collision materializes. Surface it
+# immediately as a HARD, loud failure so the colliding state is never pushed
+# onward to the rest of the fleet. Factored into functions (XACA-1266) because
+# there are now TWO successful-integration call sites (clean rebase, dirty
+# fast-forward) that both need it, where before there was only one.
+#
+# This mirrors the "Duplicate ID slots within one tier dir" check in
+# kb-knowledge-validate (XACA-0802) — reimplemented inline here rather than
+# invoking that zsh function, to keep this bash daemon dependency-light and to
+# gate ONLY on slot collisions (not the validator's unrelated frontmatter/xref
+# checks, which must never turn a benign sync into a failure). Like the Guard 1b
+# PII-containment abort above, this is a deliberate exception to the script's
+# otherwise exit-0-always contract: a data collision is a genuine defect, not an
+# ordinary git/network condition. We do NOT auto-remediate — renumbering entries
+# is the operator's call (see the XACA-0818 remediation).
+_check_dup_slots() {
+    _DUP_SLOTS_FOUND="$(
+        find "$REPO_DIR" -type f -name '*.md' ! -name 'INDEX.md' -not -path '*/.git/*' -print0 2>/dev/null \
+        | while IFS= read -r -d '' _f; do
+            _d="${_f%/*}"; _b="${_f##*/}"
+            # slot key = leading lowercase prefix + THREE-OR-MORE digits (k004, t001,
+            # k1000, …). XACA-1155: this was exactly 3 digits, so a cross-host
+            # collision on any slot past k999 was invisible here and got pushed.
+            _slot="$(printf '%s\n' "$_b" | sed -n 's/^\([a-z][a-z]*[0-9][0-9][0-9][0-9]*\)-.*\.md$/\1/p')"
+            [ -n "$_slot" ] && printf '%s\t%s\t%s\n' "$_d" "$_slot" "$_b"
+          done \
+        | awk -F'\t' '{ key=$1 "\t" $2; c[key]++; if (c[key]==1) { first[key]=$3 } else { print $1 "  slot=" $2 "  collides: " first[key] " + " $3 } }'
+    )"
+}
+
+_handle_dup_slots_fatal() {
+    if [ -n "$_DUP_SLOTS_FOUND" ]; then
+        log "FATAL: duplicate knowledge ID slot(s) detected in ${REPO_DIR} after sync — a cross-host merge landed two entries in the same NNN slot (XACA-0818). NOT auto-remediating and NOT pushing. Run kb-knowledge-validate to confirm, then apply the XACA-0818 remediation (renumber the colliding entry) and re-run sync."
+        log_block "duplicate ID slots" "$_DUP_SLOTS_FOUND"
+        exit 65  # EX_DATAERR — deliberate loud failure (see Guard 1b precedent)
+    fi
+}
+
+if [ -n "$_dirty" ]; then
+    # ── DIRTY tree: integrate ONLY by fast-forward ───────────────────────────
+    _pre_behind="$(git -C "$REPO_DIR" rev-list --count 'HEAD..@{u}' 2>/dev/null || true)"
+    case "$_pre_behind" in ''|*[!0-9]*) _pre_behind=0 ;; esac
+    _pre_ahead="$(git -C "$REPO_DIR" rev-list --count '@{u}..HEAD' 2>/dev/null || true)"
+    case "$_pre_ahead" in ''|*[!0-9]*) _pre_ahead=0 ;; esac
+
+    if [ "$_pre_behind" -eq 0 ]; then
+        log "fetch-only-dirty: ${REPO_DIR} is dirty but already at upstream tip (0 behind) — nothing to fast-forward"
+        _update_notify_state "fetch-only-dirty" "$_pre_ahead" "0"
+        log "push-withheld-dirty: ${REPO_DIR} has uncommitted changes — push withheld (push requires a clean tree)"
+        exit 0
+    fi
+
+    log "attempting fast-forward on a dirty tree: git -C ${REPO_DIR} merge --ff-only @{u} (${_pre_behind} commit(s) behind)"
+    MERGE_OUTPUT="$(git -C "$REPO_DIR" merge --ff-only '@{u}' 2>&1)"
+    MERGE_EXIT=$?
+
+    if [ "$MERGE_EXIT" -eq 0 ]; then
+        log "converged-ff: ${REPO_DIR} advanced ${_pre_behind} commit(s) via fast-forward on a dirty tree — uncommitted local work is byte-identical, untouched (no stash was needed or created)"
+        log_block "git merge --ff-only output" "$MERGE_OUTPUT"
+        _check_dup_slots
+        _handle_dup_slots_fatal  # exits 65 and does not return if a collision is found
+        _update_notify_state "converged-ff" "$_pre_ahead" "0"
+        log "push-withheld-dirty: ${REPO_DIR} has uncommitted changes — push withheld (push requires a clean tree)"
+        exit 0
+    elif [ "$MERGE_EXIT" -eq 1 ]; then
+        log "blocked-ff-conflict: fast-forward refused in ${REPO_DIR} — incoming change(s) collide with the dirty tree (colliding path(s) named below by git itself). HEAD and local content are unchanged; git refused rather than clobbered. This machine CANNOT RECEIVE this content until the colliding local path is committed or removed by a human; it will keep retrying every tick."
+        log_block "git merge --ff-only output" "$MERGE_OUTPUT"
+        _update_notify_state "blocked-ff-conflict" "$_pre_ahead" "$_pre_behind"
+        log "push-withheld-dirty: ${REPO_DIR} has uncommitted changes — push withheld (push requires a clean tree)"
+        exit 0
+    else
+        log "blocked-ff-diverged: ${REPO_DIR} is dirty AND has diverged from its upstream (${_pre_ahead} ahead, ${_pre_behind} behind) — a fast-forward is impossible. HEAD and local content are unchanged; no rebase was attempted or left in progress. This machine CANNOT RECEIVE until a human resolves the dirty tree (this daemon never stashes or rebases a dirty tree) — it needs a human, not another tick."
+        log_block "git merge --ff-only output" "$MERGE_OUTPUT"
+        _update_notify_state "blocked-ff-diverged" "$_pre_ahead" "$_pre_behind"
+        log "push-withheld-dirty: ${REPO_DIR} has uncommitted changes — push withheld (push requires a clean tree)"
+        exit 0
+    fi
+fi
+
+# ── CLEAN tree: unchanged behaviour — git pull --rebase ──────────────────────
+# `git pull --rebase` performs its own internal fetch; the unconditional
+# fetch above already ran, so this is redundant-but-harmless on the common
+# path (nothing new to fetch) and remains the real fetch attempt on the
+# rare case where connectivity drops in between (see the
+# pull-failed-no-rebase-started branch below, unchanged from before this
+# ticket).
 log "pulling: git -C ${REPO_DIR} pull --rebase"
 PULL_OUTPUT="$(git -C "$REPO_DIR" pull --rebase 2>&1)"
 PULL_EXIT=$?
@@ -258,53 +586,41 @@ if [ "$PULL_EXIT" -ne 0 ]; then
     fi
 
     if [ "$REBASE_WAS_STARTED" -eq 1 ]; then
-        log "rebase-aborted: rebase conflict in ${REPO_DIR} — aborted, tree left at pre-sync HEAD (${PRE_SYNC_HEAD})"
+        log "rebase-conflict-aborted: rebase conflict in ${REPO_DIR} — aborted, tree left at pre-sync HEAD (${PRE_SYNC_HEAD})"
+        _update_notify_state "rebase-conflict-aborted" "" ""
     else
         log "pull-failed-no-rebase-started: git pull --rebase failed before any rebase began in ${REPO_DIR} (offline / fetch error?) — tree untouched at ${PRE_SYNC_HEAD}, will retry next tick"
     fi
     exit 0
 fi
 
-log "pull-succeeded: ${REPO_DIR} is up to date with upstream"
-
-# ── Guard 4: post-merge duplicate ID-slot gate (XACA-0818 fleet backstop) ────
-# The per-directory allocation lock added to kb-knowledge-add/-promote in
-# XACA-0818 serializes writers WITHIN one host, but it cannot stop two DIFFERENT
-# hosts from each allocating the same NNN slot offline and then git-merging both
-# entries cleanly (distinct slug filenames => no git conflict, two files silently
-# sharing e.g. k004). The rebase we just ran is exactly where such a cross-host
-# collision materializes. Surface it immediately as a HARD, loud failure so the
-# colliding state is never pushed onward to the rest of the fleet.
-#
-# This mirrors the "Duplicate ID slots within one tier dir" check in
-# kb-knowledge-validate (XACA-0802) — reimplemented inline here rather than
-# invoking that zsh function, to keep this bash daemon dependency-light and to
-# gate ONLY on slot collisions (not the validator's unrelated frontmatter/xref
-# checks, which must never turn a benign sync into a failure). Like the Guard 1b
-# PII-containment abort above, this is a deliberate exception to the script's
-# otherwise exit-0-always contract: a data collision is a genuine defect, not an
-# ordinary git/network condition. We do NOT auto-remediate — renumbering entries
-# is the operator's call (see the XACA-0818 remediation).
-_dup_slots="$(
-    find "$REPO_DIR" -type f -name '*.md' ! -name 'INDEX.md' -not -path '*/.git/*' -print0 2>/dev/null \
-    | while IFS= read -r -d '' _f; do
-        _d="${_f%/*}"; _b="${_f##*/}"
-        # slot key = leading lowercase prefix + THREE-OR-MORE digits (k004, t001,
-        # k1000, …). XACA-1155: this was exactly 3 digits, so a cross-host
-        # collision on any slot past k999 was invisible here and got pushed.
-        _slot="$(printf '%s\n' "$_b" | sed -n 's/^\([a-z][a-z]*[0-9][0-9][0-9][0-9]*\)-.*\.md$/\1/p')"
-        [ -n "$_slot" ] && printf '%s\t%s\t%s\n' "$_d" "$_slot" "$_b"
-      done \
-    | awk -F'\t' '{ key=$1 "\t" $2; c[key]++; if (c[key]==1) { first[key]=$3 } else { print $1 "  slot=" $2 "  collides: " first[key] " + " $3 } }'
-)"
-
-if [ -n "$_dup_slots" ]; then
-    log "FATAL: duplicate knowledge ID slot(s) detected in ${REPO_DIR} after sync — a cross-host merge landed two entries in the same NNN slot (XACA-0818). NOT auto-remediating and NOT pushing. Run kb-knowledge-validate to confirm, then apply the XACA-0818 remediation (renumber the colliding entry) and re-run sync."
-    log_block "duplicate ID slots" "$_dup_slots"
-    exit 65  # EX_DATAERR — deliberate loud failure (see Guard 1b precedent)
+POST_PULL_HEAD="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
+if [ -n "$PRE_SYNC_HEAD" ] && [ "$POST_PULL_HEAD" != "$PRE_SYNC_HEAD" ]; then
+    # 001 measured "pull-succeeded" printing the IDENTICAL string whether or
+    # not a fast-forward/rebase actually moved HEAD, making the
+    # content-bearing pull fraction unmeasurable. Distinguish for real, and
+    # carry the commit count (design §3.5's "two measurement defects").
+    _advanced_count="$(git -C "$REPO_DIR" rev-list --count "${PRE_SYNC_HEAD}..${POST_PULL_HEAD}" 2>/dev/null || true)"
+    case "$_advanced_count" in ''|*[!0-9]*) _advanced_count="unknown" ;; esac
+    log "rebased-advanced: ${REPO_DIR} advanced ${_advanced_count} commit(s) via rebase (${PRE_SYNC_HEAD} -> ${POST_PULL_HEAD})"
+    _update_notify_state "rebased-advanced" "" "$_advanced_count"
+else
+    log "already-current: ${REPO_DIR} is up to date with upstream — pull was a no-op"
+    _update_notify_state "already-current" "" "0"
 fi
 
+_check_dup_slots
+_handle_dup_slots_fatal  # exits 65 and does not return if a collision is found
+
 # ── Step: push (only if we actually have local commits ahead) ───────────────
+# Gate is UNCHANGED and remains exactly as strict as before this ticket:
+# push only ever runs here, on the path reached ONLY by a clean tree (the
+# dirty branch above always exits before reaching this point, logging
+# push-withheld-dirty itself). Pushing from a dirty tree was never safe and
+# still isn't — see the XACA-1266 header comment for why this half of the
+# contract stays broken (nothing ever commits to ~/knowledge, so this gate
+# is in practice permanently closed on an authoring machine until a
+# separate, out-of-scope commit-on-write change lands).
 AHEAD="$(git -C "$REPO_DIR" rev-list --count '@{u}..HEAD' 2>/dev/null || true)"
 case "$AHEAD" in
     ''|*[!0-9]*) AHEAD=0 ;;
@@ -326,4 +642,5 @@ if [ "$PUSH_EXIT" -ne 0 ]; then
 fi
 
 log "synced: pushed ${AHEAD} commit(s) from ${REPO_DIR} to upstream"
+_update_notify_state "synced" "0" "0"
 exit 0

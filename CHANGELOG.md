@@ -7,6 +7,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1266** — `kb-knowledge-sync.sh` no longer treats a dirty `~/knowledge` tree as a reason to
+  skip the whole tick. It now fetches unconditionally and converges a dirty-but-not-diverged tree
+  via `git merge --ff-only`. Previously the daemon refused BOTH halves of the sync whenever the tree
+  had uncommitted changes — and since nothing ever commits to `~/knowledge` (entries are authored
+  untracked), the tree is dirty essentially always, so the daemon was a permanent silent no-op that
+  exited 0 with no error signal. Measured: 38/38 consecutive skipped ticks on one machine, a
+  1004-run/~21-day stall on another. The never-stash invariant is unchanged and is now enforced by
+  git itself rather than by refusing to act: `fetch` touches neither tree, index, nor HEAD, and
+  `--ff-only` refuses cleanly (HEAD unchanged, local content verbatim) on both collision shapes and
+  on genuine divergence. **Push is unchanged and still requires a clean tree — this fixes INBOUND
+  convergence only.** A machine will reliably receive and reliably report; it will still never share
+  what it authored. Expect a near-constant `push-withheld-dirty` on an authoring machine: that is the
+  designed outcome, not a regression. New log tokens retire `skipped-dirty` entirely, which makes it
+  a version discriminator — seeing it in a host's log means that host has not picked this up yet.
+  The health check gains a fourth, independent lane reading a new daemon-written state file: an
+  ABSENT state file is AMBIGUOUS (never "healthy", never "problem"), since absence is genuinely
+  expected until the upgraded daemon completes its first tick.
+
 - **XACA-1275** — The shipped `claude-md-global.template`'s section 5 ("PR Review Handoff &
   Monitoring") embedded the entire four-gate PR monitoring loop as ~630 lines of inline shell —
   628 of the template's 1,483 lines, 42% of the file — and that text was rendered into every
