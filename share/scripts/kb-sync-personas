@@ -697,40 +697,122 @@ EOF
 }
 
 # Detect whether a deployment's personas dir is gitignored (container-layout)
-# vs git-tracked (kanban-inside-repo). Returns 0 if gitignored, 1 if tracked.
+# vs git-tracked (kanban-inside-repo). Returns 0 if gitignored (DEPLOY), 1 if
+# git-tracked (SKIP — worktrees inherit our personas via branch checkout).
 #
-# A deployment is a container-layout team (gitignored personas) when:
-#   git check-ignore -q <targetDir> succeeds (the dir itself is ignored), OR
-#   git ls-files <targetDir> returns nothing (no tracked files under it).
-# It is git-tracked when ls-files returns at least one file or the dir is not
-# under git ignore. check-ignore is tried first as the most direct signal;
-# ls-files is the fallback (handles "not yet created" dirs correctly too).
+# XACA-1264: the prior implementation asked "is ANYTHING tracked under
+# targetDir?" (a whole-directory `ls-files | wc -l` count). On a client-owned
+# repo with the CLIENT's own crew committed under .claude/agents AND our
+# personas excluded via .git/info/exclude, the client's files alone made that
+# count non-zero, so a genuinely gitignored deployment was misreported as
+# "git-tracked" and silently skipped with a FALSE message claiming worktrees
+# inherit via checkout. The only question that has ever mattered is "are OURS
+# tracked here?" — this function now asks exactly that:
 #
-# Usage: if _deployment_is_gitignored_personas <targetRepo> <targetDir>; then ...
+#   Our personas are git-delivered (return 1 / SKIP) iff AT LEAST ONE
+#   basename this deployment would deploy is present in the target repo's
+#   git index under targetDir.
+#
+# Basenames come from _source_files_for_deployment "$i" — the same enumerator
+# _kbsp_sync uses to decide what to copy — so this classifier can never
+# disagree with the deployer, and it inherits dev/consumer-mode group
+# resolution for free. "ANY tracked => SKIP", deliberately not "ALL": under
+# ALL, a deployment sitting mid-way through "new master persona added, not
+# yet committed" (the routine, expected state on e.g. Academy's own repo)
+# would flip to DEPLOY, and the caller would then append targetDir to THIS
+# repo's OWN .git/info/exclude, hiding every future persona from `git
+# status` forever. ANY is stable across that window because at least one
+# basename is always already tracked. Full rationale + measurements:
+# XACA-1264-003 decision doc.
+#
+# Usage: if _deployment_is_gitignored_personas <targetRepo> <targetDir> <deploymentIndex>; then ...
 _deployment_is_gitignored_personas() {
   local repo="$1"
   local rel_dir="$2"  # relative path inside the repo, e.g. ".claude/agents"
+  local i="$3"        # deployment index into MANIFEST — enumerates OUR basenames
+  local tracked=0 total=0 rc src_file bname warn_team
 
   # Non-git repo (e.g. ~/finance) — no git tracking, treat as gitignored
   if [ ! -d "${repo}/.git" ]; then
     return 0
   fi
 
-  # check-ignore: succeeds (exit 0) when the path is gitignored
+  # check-ignore: succeeds (exit 0) when the WHOLE targetDir is gitignored.
+  # Untouched by XACA-1264 — sound whenever it fires. (Measured residual,
+  # not changed here: a repo whose targetDir is ignored AND which has one of
+  # our own basenames force-added would DEPLOY over that tracked file — but
+  # `check-ignore -q` on a directory containing tracked content itself
+  # returns rc=1 in that mixed state, so this branch does not fire there in
+  # practice. Decision doc §3.5.)
   if git -C "$repo" check-ignore -q "$rel_dir" 2>/dev/null; then
     return 0
   fi
 
-  # Fallback: if ls-files returns nothing, no tracked files exist under this dir.
-  # This covers the case where the dir doesn't exist yet (check-ignore may return
-  # non-zero for non-existent paths even if they would be ignored if created).
-  local tracked_count
-  tracked_count=$(git -C "$repo" ls-files "$rel_dir" 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$tracked_count" -eq 0 ]; then
-    return 0
+  # Per-basename index probe, one `ls-files --error-unmatch` call per
+  # basename this deployment would deploy — never a count. That call gives a
+  # three-state answer by exit code:
+  #   0   = this basename IS in the index (tracked)
+  #   1   = NOT in the index — also covers "targetDir doesn't exist on disk
+  #         yet" (MEASURED, decision doc §2 — no special-casing needed: a
+  #         probe under a non-existent directory still correctly answers
+  #         "not tracked")
+  #   128 = git itself could not answer (not-a-repo, corrupt index)
+  # This replaces counting lines (`ls-files | wc -l`), which collapsed 1 and
+  # 128 into the same "0 tracked" result — the exact
+  # malformed-check-returns-the-reassuring-result shape XACA-1264 exists to
+  # remove. The loop also does not call git at all when this deployment
+  # resolves zero basenames (see the zero-master check below, which runs
+  # after the loop but is reached with no git call having preceded it).
+  while IFS= read -r src_file; do
+    [ -z "$src_file" ] && continue
+    bname=$(basename "$src_file")
+    total=$((total + 1))
+    git -C "$repo" ls-files --error-unmatch -- "${rel_dir}/${bname}" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      tracked=$((tracked + 1))
+    elif [ "$rc" -ne 1 ]; then
+      # Indeterminate (neither the "tracked" nor the "not tracked" answer) —
+      # fail toward SKIP, since SKIP writes nothing and is fully recovered by
+      # re-running once the git error is fixed, while DEPLOY would write into
+      # (and permanently modify .git/info/exclude on) a repo we have just
+      # proven we cannot read. But this must NEVER reach the caller's
+      # reassuring "personas are git-tracked; worktrees inherit via
+      # checkout" message — that would be a lie about why nothing happened —
+      # so warn loudly and explicitly here instead. This deliberately
+      # reverses the prior fallback's fail-direction, which silently
+      # collapsed rc=128 into "0 tracked" => DEPLOY. Decision doc §3.6.
+      warn_team=$(_deploy_field "$i" "team" 2>/dev/null)
+      _warn "[${warn_team:-?}] persona classification INDETERMINATE (git exited $rc on $repo) — skipping, but NOT because personas are tracked. Deployment did not run; re-run after fixing the repo."
+      return 1
+    fi
+  done < <(_source_files_for_deployment "$i")
+
+  # Zero master files resolved for this deployment (empty/missing group dir,
+  # or — in consumer mode — a group sync-tap.sh's roster never mirrors, e.g.
+  # snw). "None of ours tracked" is vacuously true over an empty set, and
+  # letting that fall through to DEPLOY would make the caller append
+  # targetDir to the repo's .git/info/exclude while copying zero files — a
+  # permanent mutation for nothing. SKIP is the true no-op here. Decision
+  # doc §3.1.
+  if [ "$total" -eq 0 ]; then
+    warn_team=$(_deploy_field "$i" "team" 2>/dev/null)
+    _warn "[${warn_team:-?}] no source personas resolved for this deployment — nothing to deploy"
+    return 1
   fi
 
-  return 1
+  if [ "$tracked" -gt 0 ]; then
+    if [ "$tracked" -lt "$total" ]; then
+      # Partial tracking is an anomaly under the ANY rule above (it is not
+      # itself a reason to change the verdict) — surface it rather than
+      # silently resolving it. Decision doc §3.3.
+      warn_team=$(_deploy_field "$i" "team" 2>/dev/null)
+      _warn "[${warn_team:-?}] partial persona tracking: ${tracked}/${total} of our basenames are git-tracked under ${rel_dir} — treating as git-tracked (skipping), but this is an anomaly worth investigating"
+    fi
+    return 1
+  fi
+
+  return 0
 }
 
 # Enumerate active worktrees for a given repo root.
@@ -884,7 +966,7 @@ _kbsp_sync_worktrees() {
 
     # Gate: only container-layout teams (gitignored personas). Git-tracked persona
     # dirs are inherited by each worktree automatically via branch checkout.
-    if ! _deployment_is_gitignored_personas "$target_repo" "$target_dir"; then
+    if ! _deployment_is_gitignored_personas "$target_repo" "$target_dir" "$i"; then
       _info "[$team] personas are git-tracked; worktrees inherit via checkout — skipping"
       i=$((i + 1))
       continue
@@ -1120,7 +1202,7 @@ _kbsp_list() {
 
     # Worktree deployment count (container-layout teams only)
     local wt_info=""
-    if [ -d "$target_repo" ] && _deployment_is_gitignored_personas "$target_repo" "$target_dir"; then
+    if [ -d "$target_repo" ] && _deployment_is_gitignored_personas "$target_repo" "$target_dir" "$i"; then
       local wt_synced=0 wt_total=0
       # k501: hoist loop-locals; the outer git-roots loop compounds the zsh leak.
       # Also hoist canon_list_gr / canon_target_repo_list used in the nested-main-
@@ -1301,7 +1383,7 @@ _kbsp_check() {
 
     # Worktree drift check — container-layout teams only.
     # Enumerate git roots first (container-layout repos are not themselves git repos).
-    if _deployment_is_gitignored_personas "$target_repo" "$target_dir"; then
+    if _deployment_is_gitignored_personas "$target_repo" "$target_dir" "$i"; then
       # k501: hoist loop-locals — outer git-roots loop makes the zsh stdout-leak
       # reachable across multiple iterations (DNS multi-root topology).
       # Also hoist canon_check_gr / canon_target_repo_chk used in the XACA-0660
@@ -1939,6 +2021,18 @@ _kbsp_selftest() {
   fi
   rm -rf "$tmp_wt_repo"
 
+  # Real academy deployment index — used by Tests 10-12 below so the
+  # per-basename probe (XACA-1264) has a real manifest deployment/group to
+  # enumerate basenames from. Resolved by lookup, not hardcoded, so it stays
+  # correct if the manifest is ever reordered.
+  local academy_deploy_idx
+  academy_deploy_idx=$(_deploy_index_by_team "academy")
+  if [ -z "$academy_deploy_idx" ] || [ "$academy_deploy_idx" = "-1" ]; then
+    _err "[selftest] academy deployment not found in manifest — cannot run Tests 10-12"
+    rm -rf "$tmp_repo"
+    return 1
+  fi
+
   # --- Test 10: gitignore gate — detects gitignored .claude/agents in a temp git repo ---
   _info "[selftest] Test 10: gitignore gate detects gitignored personas dir..."
   local tmp_git_repo
@@ -1949,7 +2043,7 @@ _kbsp_selftest() {
   git -C "$tmp_git_repo" add .gitignore >/dev/null 2>&1
   mkdir -p "${tmp_git_repo}/.claude/agents"
   local gitignored_detected=false
-  if _deployment_is_gitignored_personas "$tmp_git_repo" ".claude/agents"; then
+  if _deployment_is_gitignored_personas "$tmp_git_repo" ".claude/agents" "$academy_deploy_idx"; then
     gitignored_detected=true
   fi
   if [ "$gitignored_detected" = true ]; then
@@ -1960,27 +2054,101 @@ _kbsp_selftest() {
     fail=$((fail + 1))
   fi
 
-  # --- Test 11: gitignore gate — detects git-TRACKED .claude/agents in a temp git repo ---
-  _info "[selftest] Test 11: gitignore gate detects git-tracked personas dir..."
+  # --- Test 11: gitignore gate — a foreign (non-ours) tracked file must NOT
+  # read as "our personas are git-tracked" (XACA-1264) ---
+  # Prior to XACA-1264 this test tracked ".claude/agents/test.md" — a basename
+  # that is NOT one of ours — and asserted the dir was "correctly identified"
+  # as git-tracked. That assertion encoded the exact defect XACA-1264 fixes:
+  # the whole-directory count considered ANY tracked file "ours", including a
+  # foreign one. Under the corrected per-basename predicate, a foreign file
+  # that isn't one of our basenames must NOT cause a SKIP — the correct
+  # answer is "none of ours tracked" => DEPLOY (return 0). This test now
+  # pins THAT behaviour. The genuinely-tracked-real-persona case (SKIP) is
+  # covered by Test 12b below, and by the live Academy verification this
+  # selftest performs elsewhere against the real ~/dev-team repo.
+  _info "[selftest] Test 11: a foreign tracked file (not one of ours) does not trigger a false SKIP..."
   local tmp_tracked_repo
   tmp_tracked_repo=$(mktemp -d)
   git -C "$tmp_tracked_repo" init -q
   mkdir -p "${tmp_tracked_repo}/.claude/agents"
-  printf "# tracked persona\n" > "${tmp_tracked_repo}/.claude/agents/test.md"
+  printf "# not one of ours\n" > "${tmp_tracked_repo}/.claude/agents/test.md"
   git -C "$tmp_tracked_repo" add .claude/agents/test.md >/dev/null 2>&1
   git -C "$tmp_tracked_repo" -c user.email="t@t.com" -c user.name="T" \
-    commit -q -m "add persona" >/dev/null 2>&1
-  local tracked_detected=false
-  if ! _deployment_is_gitignored_personas "$tmp_tracked_repo" ".claude/agents"; then
-    tracked_detected=true  # correctly identified as NOT gitignored
+    commit -q -m "add foreign file" >/dev/null 2>&1
+  local foreign_not_ours_deploys=false
+  if _deployment_is_gitignored_personas "$tmp_tracked_repo" ".claude/agents" "$academy_deploy_idx"; then
+    foreign_not_ours_deploys=true  # correctly DEPLOYs: none of OUR basenames are tracked here
   fi
-  if [ "$tracked_detected" = true ]; then
-    _info "[selftest] PASS: Test 11 (gitignore gate: correctly identified git-tracked dir)"
+  if [ "$foreign_not_ours_deploys" = true ]; then
+    _info "[selftest] PASS: Test 11 (foreign tracked file correctly ignored — DEPLOY, not a false SKIP)"
     pass=$((pass + 1))
   else
-    _err "[selftest] FAIL: Test 11 — gitignore gate misidentified tracked dir as gitignored"
+    _err "[selftest] FAIL: Test 11 — a foreign tracked file falsely triggered SKIP (this is the XACA-1264 defect)"
     fail=$((fail + 1))
   fi
+
+  # --- Test 11b: gitignore gate — detects a genuinely git-TRACKED real persona
+  # basename under .claude/agents (the load-bearing "must still SKIP" case,
+  # decision doc §3.4) ---
+  _info "[selftest] Test 11b: gitignore gate detects a real, git-tracked persona basename..."
+  local tmp_real_tracked_repo real_persona_basename
+  tmp_real_tracked_repo=$(mktemp -d)
+  real_persona_basename="academy_thok_testing_persona.md"
+  git -C "$tmp_real_tracked_repo" init -q
+  mkdir -p "${tmp_real_tracked_repo}/.claude/agents"
+  printf "# real tracked persona\n" > "${tmp_real_tracked_repo}/.claude/agents/${real_persona_basename}"
+  git -C "$tmp_real_tracked_repo" add ".claude/agents/${real_persona_basename}" >/dev/null 2>&1
+  git -C "$tmp_real_tracked_repo" -c user.email="t@t.com" -c user.name="T" \
+    commit -q -m "add real persona" >/dev/null 2>&1
+  local real_tracked_detected=false
+  if ! _deployment_is_gitignored_personas "$tmp_real_tracked_repo" ".claude/agents" "$academy_deploy_idx"; then
+    real_tracked_detected=true  # correctly identified as NOT gitignored (SKIP)
+  fi
+  if [ "$real_tracked_detected" = true ]; then
+    _info "[selftest] PASS: Test 11b (gitignore gate: correctly identified real tracked persona — SKIP)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 11b — gitignore gate missed a real tracked persona basename"
+    fail=$((fail + 1))
+  fi
+  rm -rf "$tmp_real_tracked_repo"
+
+  # --- Test 11c: mixed state (XACA-1264's exact reported defect) — a
+  # client-owned repo with the CLIENT's own crew committed under
+  # .claude/agents AND our personas excluded via .git/info/exclude must
+  # DEPLOY (return 0), not SKIP. Models the fixture in
+  # scripts/deploy-freelance-personas.sh:150-163, the in-repo precedent for
+  # this exact "does the index contain any of OUR basenames" question. ---
+  _info "[selftest] Test 11c: mixed state — client crew tracked + ours excluded => DEPLOY, not SKIP..."
+  local tmp_mixed_repo
+  tmp_mixed_repo=$(mktemp -d)
+  git -C "$tmp_mixed_repo" init -q
+  mkdir -p "${tmp_mixed_repo}/.claude/agents"
+  # Client's own crew — short personal names, off our naming scheme, tracked.
+  printf "# client crew member\n" > "${tmp_mixed_repo}/.claude/agents/crash.md"
+  git -C "$tmp_mixed_repo" add .claude/agents/crash.md >/dev/null 2>&1
+  git -C "$tmp_mixed_repo" -c user.email="c@c.com" -c user.name="C" \
+    commit -q -m "add client crew" >/dev/null 2>&1
+  # Our personas excluded via .git/info/exclude (never committed to the
+  # client's tree) — the exact mechanism XACA-1264-002 measured working.
+  # `git init` does not create .git/info/ until something needs it.
+  mkdir -p "${tmp_mixed_repo}/.git/info"
+  printf ".claude/agents/\n" >> "${tmp_mixed_repo}/.git/info/exclude"
+  # Our own persona ALSO sits on disk, present but excluded/untracked — the
+  # realistic shape of the defect, not just the rule with nothing to match.
+  printf "# ours, excluded, never committed\n" > "${tmp_mixed_repo}/.claude/agents/academy_thok_testing_persona.md"
+  local mixed_state_deploys=false
+  if _deployment_is_gitignored_personas "$tmp_mixed_repo" ".claude/agents" "$academy_deploy_idx"; then
+    mixed_state_deploys=true  # correctly DEPLOYs: none of OUR basenames are tracked here
+  fi
+  if [ "$mixed_state_deploys" = true ]; then
+    _info "[selftest] PASS: Test 11c (mixed state correctly resolves to DEPLOY, not a false SKIP)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 11c — mixed state (client crew tracked, ours excluded) falsely SKIPped (this is the XACA-1264 defect)"
+    fail=$((fail + 1))
+  fi
+  rm -rf "$tmp_mixed_repo"
   rm -rf "$tmp_git_repo" "$tmp_tracked_repo"
 
   # --- Test 12: _resolve_git_roots — container with an inner git repo ---

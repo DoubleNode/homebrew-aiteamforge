@@ -7,6 +7,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1264** — `kb-sync-personas`'s `_deployment_is_gitignored_personas` decided whether a
+  deployment's personas arrive via git checkout (SKIP) or must be deployed explicitly (DEPLOY) by
+  asking "is ANYTHING tracked under `targetDir`?" — a whole-directory `git ls-files | wc -l` count.
+  On a client-owned repo with the CLIENT's own crew committed under `.claude/agents` while our
+  personas are excluded via `.git/info/exclude`, the client's files alone made that count non-zero,
+  so a genuinely gitignored deployment was misreported as git-tracked and silently skipped while
+  printing a FALSE message claiming worktrees inherit our personas via checkout. They do not —
+  ours are excluded, so no checkout ever produces them. Fix: the classifier now asks the precise
+  question, probing each basename the deployment would actually deploy with
+  `git ls-files --error-unmatch` (exit-code semantics, so "not tracked" (rc=1) stays
+  distinguishable from "git could not answer" (rc=128) — the old count collapsed both to 0).
+  Multi-group deployments use ANY-tracked ⇒ SKIP, deliberately not ALL, because under ALL a
+  deployment mid-way through "new master persona added, not yet committed" flips to DEPLOY and the
+  caller then appends `targetDir` to that repo's own `.git/info/exclude`, hiding every future
+  persona from `git status`. An indeterminate git error now fails toward SKIP with a loud warning
+  that names the error and states it is NOT because personas are tracked; a deployment resolving
+  zero master files short-circuits to SKIP rather than DEPLOY-with-nothing-to-copy. Signature
+  gained a third argument (the deployment index), updated at all three production call sites
+  (`sync-worktrees`, `list`, `check`).
+
 - **XACA-1267** — `kb-sync-personas`'s `_expand_path` called `envsubst` unconditionally, so a
   missing `envsubst` binary silently blanked EVERY expanded path, not just ones containing a
   `$VAR` reference. Every call site invokes `_expand_path` inside a `$( )` command-substitution
