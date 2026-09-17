@@ -459,7 +459,60 @@ _resolve_target_repo_for_team() {
     _deploy_field "$i" "targetRepo"
     return 0
   fi
-  jq -r --arg t "$team" '.teams[$t].working_dir // empty' "$TEAM_PATHS_JSON" 2>/dev/null
+
+  local working_dir
+  working_dir=$(jq -r --arg t "$team" '.teams[$t].working_dir // empty' "$TEAM_PATHS_JSON" 2>/dev/null)
+  if [ -z "$working_dir" ]; then
+    echo ""
+    return 0
+  fi
+  working_dir=$(_expand_path "$working_dir")
+
+  # XACA-1261: the registry's working_dir is a CONTAINER, not necessarily the
+  # git work-tree. Measured 2026-09-16 on darren-m4-mini: for all 11 freelance
+  # teams `git -C "$working_dir" rev-parse --is-inside-work-tree` fails, and the
+  # real work-tree is "$working_dir/develop" (registry working_dir
+  # /Users/Shared/Development/Bandwear/Android -> root .../Android/develop).
+  # Returning working_dir verbatim would make sync write
+  # "$working_dir/.claude/agents" — a SECOND, divergent deployment beside the
+  # real one at "$working_dir/develop/.claude/agents", and would make
+  # list/check report on a path where nothing is deployed. (XACA-1260 populated
+  # exactly the git-toplevel location, and asked that a later sync be a no-op
+  # rather than a rival copy.)
+  #
+  # Resolve the same way _is_hosted_here does, so the row we SHOW and the path
+  # we WRITE can never disagree: _resolve_git_roots handles both "container is
+  # itself the repo" (Case 1) and "the repo is an immediate child" (Case 2).
+  local roots
+  roots=$(_resolve_git_roots "$working_dir" 2>/dev/null)
+  if [ -z "$roots" ]; then
+    # No checkout beneath it. _is_hosted_here already omits such a team, so this
+    # is normally unreachable; emit empty rather than a path that only looks
+    # plausible, so any caller reaching it fails visibly instead of writing to a
+    # bare container.
+    echo ""
+    return 0
+  fi
+
+  # Never target a linked worktree: _guard_worktree_path refuses these later
+  # anyway, and sync-worktrees is the opt-in subcommand for that. Filtering here
+  # keeps the FIRST surviving root meaningful instead of depending on scan order.
+  local root chosen=""
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    case "$root" in
+      */worktrees/*) continue ;;
+    esac
+    if [ -z "$chosen" ]; then
+      chosen="$root"
+    else
+      _warn "[$team] multiple git work-trees under $working_dir; using $chosen (ignoring $root)"
+    fi
+  done <<ROOTS_EOF
+$roots
+ROOTS_EOF
+
+  echo "$chosen"
 }
 
 # XACA-1261: is this team's deployment actually hosted on THIS machine?
@@ -2587,13 +2640,27 @@ T20_MANIFEST
   local t21_unhosted_dir="${tmp21}/UnhostedDir"
   mkdir -p "$t21_unhosted_dir/kanban"
 
+  # t21-nested (XACA-1261): the registry working_dir is a CONTAINER and the real
+  # git work-tree is an immediate child (_resolve_git_roots Case 2). This is the
+  # SHAPE MEASURED ON darren-m4-mini for all 11 freelance teams: working_dir
+  # /Users/Shared/Development/<Org>/<Project>, work-tree <...>/develop. A
+  # resolver that returned working_dir verbatim would make sync write a second,
+  # divergent .claude/agents beside the real one — this asserts it does not.
+  local t21_nested_container="${tmp21}/NestedContainer"
+  local t21_nested_repo="${t21_nested_container}/develop"
+  mkdir -p "$t21_nested_repo"
+  git -C "$t21_nested_repo" init -q
+  git -C "$t21_nested_repo" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+
   local t21_team_paths="${tmp21}/team-paths21.json"
   cat > "$t21_team_paths" <<T21_TEAM_PATHS
 {
   "schema_version": 3,
   "teams": {
     "t21-hosted": { "working_dir": "${t21_hosted_repo}" },
-    "t21-unhosted": { "working_dir": "${t21_unhosted_dir}" }
+    "t21-unhosted": { "working_dir": "${t21_unhosted_dir}" },
+    "t21-nested": { "working_dir": "${t21_nested_container}" }
   }
 }
 T21_TEAM_PATHS
@@ -2615,6 +2682,14 @@ T21_TEAM_PATHS
     {
       "team": "t21-unhosted",
       "targetRepo": "${tmp21}/dev-only-bogus-path-unhosted",
+      "targetDir": ".claude/agents",
+      "isGitRepo": true,
+      "exists": true,
+      "groups": ["t21-group"]
+    },
+    {
+      "team": "t21-nested",
+      "targetRepo": "${tmp21}/dev-only-bogus-path-nested",
       "targetDir": ".claude/agents",
       "isGitRepo": true,
       "exists": true,
@@ -2670,6 +2745,18 @@ T21_MANIFEST
   if [ -n "$t21_unregistered_line" ]; then
     t21_ok=false
     _err "[selftest] Test 21c: t21-unregistered row should be OMITTED (no team-paths.json entry) — got: $t21_unregistered_line"
+  fi
+
+  # 21e (XACA-1261): nested work-tree must resolve to the CHILD repo, never the
+  # bare container the registry names.
+  local t21_nested_line
+  t21_nested_line=$(printf '%s\n' "$t21_consumer_out" | grep -E '^t21-nested[[:space:]]') || t21_nested_line=""
+  if [ -z "$t21_nested_line" ]; then
+    t21_ok=false
+    _err "[selftest] Test 21e: t21-nested row missing — a container whose work-tree is a child must still be hosted; output=$t21_consumer_out"
+  elif [[ "$t21_nested_line" != *"$t21_nested_repo"* ]]; then
+    t21_ok=false
+    _err "[selftest] Test 21e: t21-nested resolved to the bare container instead of the child work-tree ($t21_nested_repo); got: $t21_nested_line"
   fi
 
   # --- 21d: negative control — same fixture, pre-fix (dev-mode) resolution path ---
