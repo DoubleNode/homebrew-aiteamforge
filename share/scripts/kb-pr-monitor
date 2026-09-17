@@ -25,9 +25,17 @@
 #   30  PR_CLOSED        PR state CLOSED or MERGED externally
 #   31  TIMEOUT          exceeded --max-hours
 #    2  USAGE_ERROR      usage error / missing dependency / unresolvable env
+#    0  HELP             --help/-h: usage printed, no PR was monitored. It
+#                        SHARES exit 0 with GATES_PASSED on purpose (--help
+#                        exiting non-zero would break every conventional
+#                        caller), so anything that must tell "help" from
+#                        "merged" reads the VERDICT NAME, never the code alone.
 #
 # The FINAL line on stdout is ALWAYS exactly:
 #   VERDICT: <NAME> pr=<N> item=<ID> detail=<one-line>
+# — on EVERY exit path, --help and usage errors included (XACA-1275-014). The
+# help path previously ran `usage; exit 0` and emitted no verdict at all, so a
+# caller keying on the exit code alone read --help as "gates passed, merged".
 #
 # --once runs exactly one poll iteration and never sleeps (this is what the
 # test suite drives). Any state the continuous loop would resolve by sleeping
@@ -63,6 +71,8 @@
 #   XACA-0944      Gate 4 ordering + counted staleness + merge allowlist
 #   XACA-1122      publisher-only gitlink skip + state-dependent tap remedy
 #   XACA-1199      pre-merge RESIDUAL advisory banner (print-only)
+#   XACA-1275-013  Gate 3.5 positive evidence: >=1 CI row must be CLASSIFIED
+#   XACA-1275-014  every exit path emits a VERDICT line (HELP included)
 # ============================================================================
 
 PR_NUM=""
@@ -107,6 +117,7 @@ verdict() {
         BLOCKED)          _v_code=22 ;;
         PR_CLOSED)        _v_code=30 ;;
         TIMEOUT)          _v_code=31 ;;
+        HELP)             _v_code=0 ;;
         *)                _v_name="USAGE_ERROR"; _v_code=2 ;;
     esac
     printf 'VERDICT: %s pr=%s item=%s detail=%s\n' \
@@ -186,7 +197,12 @@ while [ $# -gt 0 ]; do
         --max-hours=*)    MAX_HOURS="${1#*=}"; shift ;;
         --once)           ONCE="true"; shift ;;
         --no-merge)       DO_MERGE="false"; shift ;;
-        -h|--help)        usage; exit 0 ;;
+        -h|--help)        usage
+                          # The verdict line is the contract, and the contract
+                          # says EVERY exit path ends with one. `usage; exit 0`
+                          # left --help indistinguishable from GATES_PASSED for
+                          # a caller reading only $? (XACA-1275-014).
+                          verdict HELP "usage printed; no PR was monitored" ;;
         *)                printf 'kb-pr-monitor: unknown argument: %s\n' "$1" >&2
                           usage >&2
                           verdict USAGE_ERROR "unknown argument: $1" ;;
@@ -508,11 +524,26 @@ while true; do
             verdict BLOCKED "could not read CI checks (gh pr checks rc=$CHECKS_RC)"
         fi
     else
-        NO_CHECKS_RETRIES=0   # real check data — case (a) unambiguously ruled out
+        # XACA-1275-013 — rc=0 IS NOT THE CLAIM "A CHECK WAS VERIFIED".
+        # `gh pr checks --json` can exit 0 having emitted ZERO rows. The loop
+        # below then iterates zero times, UNSAFE_CHECKS and PENDING_CHECKS both
+        # stay empty, and every downstream test reads that as "nothing unsafe,
+        # nothing pending" — i.e. as a pass. The previous version reset
+        # NO_CHECKS_RETRIES right here under the comment "real check data —
+        # case (a) unambiguously ruled out", which asserted something the code
+        # never verified; a zero-row run reached GATES_PASSED having verified
+        # not one CI check, and would have merged with --admin (reproduced with
+        # a stub gh returning rc=0 and empty stdout).
+        # The remedy is POSITIVE EVIDENCE, the same shape as Gate 3's
+        # SWEEP_RAN_OK: count the rows this loop actually classifies, and
+        # require at least one below. This counter claims exactly that and
+        # nothing more.
+        CLASSIFIED_CHECKS=0
         # A here-doc, NOT a pipe: a `while` on the right of a pipe runs in a
         # subshell and these accumulators would not survive the loop.
         while IFS='|' read -r C_NAME C_BUCKET; do
             [ -n "$C_NAME" ] || continue
+            CLASSIFIED_CHECKS=$((CLASSIFIED_CHECKS + 1))
             # Record the two tap buckets for their bypass-aware arms, but do
             # NOT `continue` past the classifier (PR #855 blocking finding): an
             # earlier version did, so a `pending`/unreadable bucket on them
@@ -543,6 +574,32 @@ while true; do
         done <<CHECKS_EOF
 $CHECKS_OUT
 CHECKS_EOF
+
+        # rc=0 with zero classified rows is ANOMALOUS, not a documented signal.
+        # gh reports a genuinely check-less PR as an ERROR whose text carries
+        # "no checks reported" — that string is precisely why the arm above may
+        # end by proceeding. gh does NOT report one as rc=0 plus an empty
+        # array. So this branch gets the SAME bounded re-poll (a just-landed
+        # push may not have registered its checks yet) but a DIFFERENT
+        # terminal: when the budget is spent it BLOCKS. Nothing documents this
+        # shape as "no CI here", and anomalous is never evidence of safety.
+        if [ "$CLASSIFIED_CHECKS" -lt 1 ]; then
+            NO_CHECKS_RETRIES=$((NO_CHECKS_RETRIES + 1))
+            if [ "$NO_CHECKS_RETRIES" -lt 5 ]; then
+                printf '%s\n' "gh pr checks exited 0 for PR #$PR_NUM at $HEAD_SHA but 0 check rows were classified (poll $NO_CHECKS_RETRIES/5)"
+                printf '%s\n' "  — a just-landed push may not have registered its checks yet. Not assuming safe."
+                repoll_or_block 10 "gh pr checks rc=0 but 0 rows classified at $HEAD_SHA (poll $NO_CHECKS_RETRIES/5)"
+                continue
+            fi
+            printf '%s\n' "x gh pr checks exited 0 but classified 0 check rows across $NO_CHECKS_RETRIES polls on $HEAD_SHA."
+            printf '%s\n' "  gh reports a genuinely check-less PR as an ERROR ('no checks reported'), NOT as rc=0 with an"
+            printf '%s\n' "  empty array — so this is anomalous, and anomalous is not evidence that CI is safe."
+            printf '%s\n' "  Investigate before merging; do NOT --admin past an unverified check set."
+            verdict BLOCKED "gh pr checks rc=0 classified 0 check rows at $HEAD_SHA after $NO_CHECKS_RETRIES polls"
+        fi
+        # Only NOW is "no CI configured" genuinely ruled out: >=1 row was
+        # classified by the loop above. This reset claims only that.
+        NO_CHECKS_RETRIES=0
     fi
 
     if [ "$SYNC_TAP_BUCKET" = "fail" ] || [ "$SYNC_TAP_BUCKET" = "cancel" ]; then

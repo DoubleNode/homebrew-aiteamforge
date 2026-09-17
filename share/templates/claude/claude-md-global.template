@@ -233,7 +233,7 @@ After opening the PR, generate a handoff prompt for BOTH gates so each can be pa
 
 ```
 {{AITEAMFORGE_DIR}}/scripts/kb-pr-monitor --pr <N> --item <ITEM-ID> [--repo <owner>/<repo>] [--once] [--no-merge]
-  0 GATES_PASSED (merged via kb-merge; caller still runs kb-done)
+  0 GATES_PASSED (merged via kb-merge; caller still runs kb-done) — 0 is ALSO HELP (--help): read the NAME, not just $?
  10 RESPAWN_TESTER   11 RESPAWN_REVIEWER   12 RESPAWN_BOTH (update-branch ran)
  20 CONFLICT   21 UX_REOPEN   22 BLOCKED   30 PR_CLOSED   31 TIMEOUT   2 usage/env
 final stdout line: VERDICT: <NAME> pr=<N> item=<ID> detail=<...>
