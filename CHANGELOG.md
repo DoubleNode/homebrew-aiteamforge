@@ -7,6 +7,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1267** — `kb-sync-personas`'s `_expand_path` called `envsubst` unconditionally, so a
+  missing `envsubst` binary silently blanked EVERY expanded path, not just ones containing a
+  `$VAR` reference. Every call site invokes `_expand_path` inside a `$( )` command-substitution
+  subshell, and bash's `inherit_errexit` is OFF by default, so `set -e` never propagated and the
+  internal `envsubst` failure was swallowed rather than aborting — `check --all` returned `rc=0`
+  under a minimal PATH lacking `envsubst` vs. `rc=1` (real drift) under a full one, and `refresh`
+  would have overwritten manifest `exists` hints to `false` for every entry. Fix: probe `envsubst`
+  availability once at script top level and skip the call entirely when it is missing or the path
+  has no literal `$`; on a failed expansion the original path is kept, never blanked.
+
 ## [0.20.17] - 2026-09-17
 
 - **XACA-1260** — the shipped `personas-manifest.json` was stale: it covered only 4 of the

@@ -94,14 +94,64 @@ _err() { echo "${PROG}: ERROR: $*" >&2; }
 _warn() { echo "${PROG}: WARN: $*" >&2; }
 _info() { echo "${PROG}: $*"; }
 
+# XACA-1267: probe envsubst availability ONCE, at top level, never inside a
+# subshell. Every call site invokes _expand_path as `var=$(_expand_path ...)`
+# — always inside a `$( )` command-substitution subshell — and bash's
+# inherit_errexit shopt is unavailable or OFF (MEASURED 2026-09-17 on this
+# machine: /bin/bash 3.2.57 rejects it outright -- "shopt: inherit_errexit:
+# invalid shell option name" -- while bash 5.3.3 has it and reports it
+# "off"). On the macOS system bash there is therefore no way to opt in at
+# all. So `set -e` at the top of
+# this script does not propagate into that subshell. A flag set from *inside*
+# _expand_path would live only in that discarded subshell and could never be
+# read back by later calls, which is exactly why "warn once" cannot be done
+# with a flag the function itself sets. Doing the probe here instead — a
+# plain top-level statement, not a subshell — means the result is a normal
+# global any later call can read, and the single warning below fires exactly
+# once per script run regardless of how many times _expand_path is called
+# (21-42 calls were measured per invocation). This fires whenever envsubst is
+# missing, even on a run where no path actually needs it (0 of 90
+# personas-manifest.json values and 0 of team-paths.json values currently
+# contain a literal '$') — kept unconditional for simplicity; pre-scanning
+# every path to suppress a merely-latent-risk warning was judged not worth
+# the added coupling for a once-per-run, single-line message.
+if command -v envsubst >/dev/null 2>&1; then
+  _KBSP_HAVE_ENVSUBST=1
+else
+  _KBSP_HAVE_ENVSUBST=0
+  _warn "envsubst not found on PATH — \$VAR-style references in team-paths.json / personas-manifest.json path values will NOT be expanded (tilde '~' expansion is unaffected). Harmless unless a configured path contains a literal '\$'. NOTE: envsubst is normally INSTALLED yet absent from the minimal PATH of launchd/cron/non-interactive ssh -- installing gettext will NOT help; put its directory (e.g. /opt/homebrew/bin) on PATH instead."
+fi
+
 # Expand ~ and env vars in a path string
 _expand_path() {
   local p="$1"
   # Replace leading ~/ with $HOME/ (safe, no eval)
   p="${p/#\~/$HOME}"
-  # Expand $VAR and ${VAR} references via envsubst (no shell injection risk)
-  p="$(printf '%s' "$p" | envsubst)"
-  echo "$p"
+  # Expand $VAR and ${VAR} references via envsubst (no shell injection risk),
+  # but only when envsubst is on PATH (_KBSP_HAVE_ENVSUBST, probed once above)
+  # AND the path actually contains a literal '$'. Previously this called
+  # envsubst unconditionally; when envsubst was missing, the resulting
+  # pipeline failure was silently swallowed (this function always runs inside
+  # a `$( )` subshell — see the probe comment above — so the missing-binary
+  # failure never aborted anything) and "$p" was reset to an EMPTY string for
+  # every path, not just ones containing "$VAR" references. Skipping the call
+  # entirely when it cannot help preserves 100% of current real-world
+  # behavior (see the probe comment for the 0/90 and 0-value measurements)
+  # and removes the failure mode at its source rather than papering over its
+  # symptom. Never blank the result on a missing/empty/failed expansion —
+  # fail visible (the warning above), never fail empty: keep the original "$p".
+  if [ "$_KBSP_HAVE_ENVSUBST" = "1" ] && [[ "$p" == *'$'* ]]; then
+    local expanded
+    expanded="$(printf '%s' "$p" | envsubst)"
+    if [ -n "$expanded" ]; then
+      p="$expanded"
+    fi
+  fi
+  # printf, not echo: echo can swallow/misinterpret a leading '-' in some
+  # shells/builtins, which would corrupt a pathological path starting with
+  # '-'. Behavior is identical for every normal path; this only changes
+  # output for that edge case.
+  printf '%s\n' "$p"
 }
 
 # SHA-256 of a file, portable for macOS (shasum -a 256) and Linux (sha256sum)
