@@ -3128,6 +3128,91 @@ T22_TEAM_PATHS
     fail=$((fail + 1))
   fi
 
+  # --- Test 23: XACA-1261-021 — sync-worktrees under consumer mode ---
+  # Round-3 verification had to hand-build this fixture because no selftest
+  # covered _kbsp_sync_worktrees in consumer mode. The risk it guards is a
+  # SILENT NO-OP: the consumer-mode _is_hosted_here filter is an early
+  # `continue`, so a mis-scoped filter would skip a team that should deploy
+  # while still exiting 0 — exactly the "delivered but does nothing" shape this
+  # whole ticket exists to remove. Asserts a hosted team IS processed and an
+  # unhosted team is omitted, in one dry-run pass.
+  _info "[selftest] Test 23: sync-worktrees consumer-mode hosted/unhosted handling..."
+  local t23 t23_ok=true
+  t23=$(mktemp -d)
+
+  # Hosted: container holding a real inner git repo (container-layout shape).
+  local t23_container="${t23}/HostedContainer"
+  local t23_inner="${t23_container}/develop"
+  mkdir -p "$t23_inner"
+  git -C "$t23_inner" init -q
+  git -C "$t23_inner" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+
+  # Unhosted: registered, but no checkout anywhere beneath it.
+  local t23_unhosted="${t23}/UnhostedContainer"
+  mkdir -p "$t23_unhosted/kanban"
+
+  # Consumer-shaped persona source: <DEV_TEAM>/<group>/personas/agents
+  local t23_src="${t23}/t23-group/personas/agents"
+  mkdir -p "$t23_src"
+  printf -- '---\nname: t23-persona\n---\nbody\n' > "${t23_src}/t23-persona.md"
+
+  local t23_registry="${t23}/team-paths23.json"
+  cat > "$t23_registry" <<T23_REG
+{
+  "schema_version": 3,
+  "teams": {
+    "t23-hosted": { "working_dir": "${t23_container}" },
+    "t23-unhosted": { "working_dir": "${t23_unhosted}" }
+  }
+}
+T23_REG
+
+  local t23_manifest="${t23}/manifest23.json"
+  cat > "$t23_manifest" <<T23_MAN
+{
+  "schemaVersion": "1",
+  "masterRoot": "fake-master23",
+  "deployments": [
+    { "team": "t23-hosted",   "targetRepo": "${t23_container}", "targetDir": ".claude/agents",
+      "isGitRepo": true, "exists": true, "groups": ["t23-group"] },
+    { "team": "t23-unhosted", "targetRepo": "${t23_unhosted}",  "targetDir": ".claude/agents",
+      "isGitRepo": true, "exists": true, "groups": ["t23-group"] }
+  ]
+}
+T23_MAN
+
+  local _sv_man_23="$MANIFEST" _sv_tp_23="$TEAM_PATHS_JSON" _sv_mode_23="$KBSP_MODE" _sv_dt_23="$DEV_TEAM"
+  MANIFEST="$t23_manifest"
+  TEAM_PATHS_JSON="$t23_registry"
+  DEV_TEAM="$t23"          # so _group_persona_dir resolves <DEV_TEAM>/<grp>/personas/agents
+  KBSP_MODE="consumer"
+
+  local t23_out
+  t23_out=$(_kbsp_sync_worktrees --all --dry-run 2>&1) || true
+
+  MANIFEST="$_sv_man_23"; TEAM_PATHS_JSON="$_sv_tp_23"
+  KBSP_MODE="$_sv_mode_23"; DEV_TEAM="$_sv_dt_23"
+
+  if ! printf '%s\n' "$t23_out" | grep -q 't23-hosted'; then
+    t23_ok=false
+    _err "[selftest] Test 23a: hosted team was SILENTLY SKIPPED by the consumer-mode filter (exit 0, deployed nothing). output=$t23_out"
+  fi
+  if printf '%s\n' "$t23_out" | grep -q 't23-unhosted'; then
+    t23_ok=false
+    _err "[selftest] Test 23b: unhosted team should be omitted in consumer mode; it was processed. output=$t23_out"
+  fi
+
+  rm -rf "$t23"
+
+  if [ "$t23_ok" = true ]; then
+    _info "[selftest] PASS: Test 23 (sync-worktrees consumer mode: hosted processed, unhosted omitted)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 23 — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+
   # --- Cleanup ---
   rm -rf "$tmp_repo"
   _info "[selftest] Temp dir cleaned up."
