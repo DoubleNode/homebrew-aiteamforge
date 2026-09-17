@@ -17,6 +17,66 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   availability once at script top level and skip the call entirely when it is missing or the path
   has no literal `$`; on a failed expansion the original path is kept, never blanked.
 
+- **XACA-1268** — `aiteamforge upgrade` never created a persona GROUP source
+  directory (`${WORKING_DIR}/<group>/personas/agents`) for a team that was
+  registered on a machine but never went through `install-team.sh` — the
+  live case was `dns` on M4Mini: hosted (real `working_dir`, matching
+  registry entry), but `update_team_personas()`'s enumeration (config
+  `.teams[]` union deployed targets) never saw it, and its own `dns` group
+  source silently never existed. This is an ENUMERATION fix only —
+  `_xaca0925_refresh_team_personas()` already creates the destination fresh
+  from the Cellar when missing; no new create path was added.
+  `update_team_personas()` in `libexec/commands/aiteamforge-upgrade.sh`
+  gains a second, additive enumeration pass via a new hosted-group
+  predicate (`_xaca1268_hosted_groups()` and its helpers
+  `_xaca1268_load_manifest`, `_xaca1268_load_registry`,
+  `_xaca1268_expand_path`, `_xaca1268_dir_state`,
+  `_xaca1268_best_conf_team`), implementing the binding decision in
+  `kanban/plans/XACA-1268/XACA-1268-002-create-semantics-decision.md`: a
+  two-rail union, each anchored to a real shipped consumer's own hosted
+  test rather than a re-derived heuristic. Rail 1 mirrors
+  `kb-sync-personas`' consumer-mode `_is_hosted_here()` (registry
+  `working_dir` expands, exists, and is/contains a real git work tree) and
+  unions that team's `groups[]` from the Cellar's own
+  `share/scripts/personas-manifest.json` — this is what correctly includes
+  the shared `mainevent` group for an `ios`/`android`/`firebase`/`command`
+  deployment, and correctly excludes it everywhere else, since `mainevent`
+  belongs to no team in the shipped registry. Rail 2 mirrors the existing
+  XACA-0862-005/021 proof-of-install pair (`working_dir` isdir() AND
+  `kanban_dir` isdir()) and adds a team's own group via longest-prefix
+  match against shipped `share/teams/*.conf` basenames — the same matching
+  algorithm already used at the connect-script call site, generalised
+  rather than duplicated. Both rails are registry-anchored and fail
+  CLOSED, never silently empty: a missing/unparseable
+  `personas-manifest.json`, an unreadable/unparseable
+  `team-paths.json`, or the absence of both `jq` and `python3` each
+  produce a DISTINCT, named `print_warning`, and an unclassifiable
+  registry entry (permission-denied directory, or hosted-but-unmatched
+  against every manifest row and team conf) is counted and reported as
+  INDETERMINATE, never folded into "not hosted." Path expansion is pure
+  shell (`$HOME`/`${HOME}`/leading `~` only, mirroring
+  `_aiteamforge_org_expand_home()`) rather than borrowing
+  `kb-sync-personas`' `envsubst`-based `_expand_path()` — `envsubst` is
+  absent from a non-login `PATH` (measured on M4Mini:
+  `/usr/bin:/bin:/usr/sbin:/sbin`), which is exactly the environment a
+  launchd-driven auto-upgrade runs under; depending on it would have
+  silently expanded every `~`/`$VAR` registry path to empty and produced
+  the identical silent-empty-set failure this ticket exists to close.
+  Adds an XACA-0771-pattern assert-present pass after the refresh loop
+  (loud `print_warning`, never a hard failure, skipped under `--dry-run`)
+  for any newly-enumerated group that still doesn't exist afterward.
+  Rewrites the `update_team_personas()` header comment that asserted
+  "upgrade never MATERIALISES a new team" as a structural invariant — that
+  claim was already false (`update_mandatory_teams`, XACA-1070, runs
+  eleven lines earlier in the same sequence and deliberately backfills a
+  whole team) — with an accurate statement of what is and isn't
+  guaranteed post-XACA-1268, cross-referencing XACA-0771 and XACA-1070 as
+  the two prior scoped exceptions to the same convention. Measured across
+  the current three-machine fleet (see
+  `kanban/plans/XACA-1268/XACA-1268-001-fleet-measurement.md`): this
+  predicate creates exactly one directory (`dns` on M4Mini) and creates
+  `mainevent` nowhere.
+
 ## [0.20.17] - 2026-09-17
 
 - **XACA-1260** — the shipped `personas-manifest.json` was stale: it covered only 4 of the

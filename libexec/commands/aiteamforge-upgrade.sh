@@ -4214,6 +4214,463 @@ _xaca0931_load_persona_targets() {
   done < <(pt_enumerate_targets "$FRAMEWORK_DIR")
 }
 
+# ---------------------------------------------------------------------------
+# XACA-1268 — hosted-group predicate helpers
+#
+# Binding decision: kanban/plans/XACA-1268/XACA-1268-002-create-semantics-decision.md.
+# This is an ENUMERATION extension, not a new create path. It computes which
+# persona GROUP source directories (${WORKING_DIR}/<group>/personas/agents)
+# some shipped consumer on THIS machine will actually read, and hands the
+# resulting group ids to update_team_personas()'s EXISTING `teams[]` loop —
+# _xaca0925_refresh_team_personas() already creates the destination fresh
+# from the Cellar when it does not yet exist (see that function's call-site
+# comment a few lines below). No mkdir/cp is added here.
+#
+# TWO RAILS, because two different shipped things read this directory and
+# they key on different questions (-002 §"The hosted-group predicate"):
+#   Rail 1 — kb-sync-personas in consumer mode. Reads the SHARED group for
+#            a deployment (e.g. `mainevent` for an ios/android/firebase/
+#            command team), gated on that tool's own _is_hosted_here()
+#            semantics (registry working_dir expands, exists, and is/
+#            contains a real git work tree).
+#   Rail 2 — the upgrade's own deploy_team_personas_to_projects /
+#            deploy_flat_team_personas steps. Reads a team's OWN group,
+#            gated on the XACA-0862-005/021 proof-of-install pair
+#            (working_dir isdir() AND kanban_dir isdir()).
+# Using one predicate for both is the sibling-heuristic-drift failure in
+# its purest form (-002 §"Option D") — a create rule and a read rule
+# answering different questions while appearing to agree. Keep them apart.
+# ---------------------------------------------------------------------------
+
+# Pure-shell $HOME/${HOME} + leading-~ expansion — deliberately NOT envsubst.
+# MEASURED (XACA-1268-002 fail-closed matrix row 9): kb-sync-personas' own
+# _expand_path() pipes through envsubst, which is ABSENT from a non-login
+# PATH (/usr/bin:/bin:/usr/sbin:/sbin, measured on M4Mini) and resolves only
+# under a login shell (/opt/homebrew/bin/envsubst) — exactly the shell a
+# launchd-driven auto-upgrade does NOT run under. A borrowed envsubst
+# dependency here would silently expand every ~/$VAR path to an empty
+# string, and every downstream isdir()/git-root test would then read as
+# "not hosted" — the identical silent-empty-set failure this whole ticket
+# exists to close, reopened one call deeper. Only $HOME/${HOME} and a
+# leading ~ are handled: those are the only variable references this
+# codebase's own registry/manifest writers ever emit (mirrors
+# _aiteamforge_org_expand_home()'s identical scope in
+# lib/aiteamforge-org-paths.sh). Anything else left containing a literal
+# '~' or '$' after this pass simply fails the isdir() test that follows —
+# the correct fail-CLOSED outcome (an unexpandable reference is not a
+# directory), never a crash.
+_xaca1268_expand_path() {
+  local p="$1"
+  case "$p" in
+    "~") p="$HOME" ;;
+    "~/"*) p="${HOME}${p#\~}" ;;
+  esac
+  p="${p//\$\{HOME\}/$HOME}"
+  p="${p//\$HOME/$HOME}"
+  printf '%s' "$p"
+}
+
+# Distinguish "does not exist" from "exists but is not accessible" for a
+# directory path — the identical rule _xaca0925_refresh_team_personas
+# already applies to its own src (XACA-0925-014/019) and dest (018/019): an
+# unreadable directory is an error to report, never an empty set to proceed
+# past as though it simply were not there. Echoes: ok | absent | unreadable.
+# Always returns 0 — safe to call unguarded under `set -eo pipefail`.
+_xaca1268_dir_state() {
+  local p="$1"
+  if [ -z "$p" ] || [ ! -d "$p" ]; then
+    printf 'absent'
+    return 0
+  fi
+  if [ ! -r "$p" ] || [ ! -x "$p" ]; then
+    printf 'unreadable'
+    return 0
+  fi
+  printf 'ok'
+  return 0
+}
+
+# Boolean-by-exit-code: does $1 either *contain* a real git work tree, or
+# *is* one itself? Mirrors share/scripts/kb-sync-personas' _resolve_git_roots()
+# closely enough for a yes/no answer (Rail 1 only ever needs "is this
+# hosted", never the list of roots) — same two cases, same order. Loop-local
+# declared BEFORE its for loop, not inside the body (k501 zsh precedent: a
+# `local x=v` INSIDE a loop body prints to stdout on the 2nd+ iteration —
+# see _resolve_git_roots' own comment for the fuller explanation).
+_xaca1268_has_git_root() {
+  local container="$1"
+  if [ -z "$container" ] || [ ! -d "$container" ]; then
+    return 1
+  fi
+  if git -C "$container" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    return 0
+  fi
+  local child
+  for child in "$container"/*/; do
+    [ -d "$child" ] || continue
+    [ -e "${child}.git" ] || continue
+    if git -C "$child" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Longest-prefix match of $1 against the tap-shipped share/teams/*.conf
+# basenames — the SAME algorithm already used at the connect-script call
+# site above (search this file for "best_team"), generalised into a
+# function so both that call site's semantics and Rail 2 here stay in
+# lock-step without a second, drifting copy of the matching rule.
+# "<team>" exact, or "<team>-<rest>"; longest basename wins. Echoes the
+# winning basename, or nothing if no conf matches. Always returns 0.
+_xaca1268_best_conf_team() {
+  local slug="$1" confs_dir="$2"
+  local conf team_id best=""
+  for conf in "$confs_dir"/*.conf; do
+    [ -f "$conf" ] || continue
+    team_id="$(basename "$conf" .conf)"
+    if [ "$slug" = "$team_id" ] || [ "${slug#"${team_id}-"}" != "$slug" ]; then
+      if [ "${#team_id}" -gt "${#best}" ]; then
+        best="$team_id"
+      fi
+    fi
+  done
+  printf '%s' "$best"
+  return 0
+}
+
+# Load ${FRAMEWORK_DIR}/share/scripts/personas-manifest.json (the CELLAR
+# copy — update_personas_manifest() runs earlier in this SAME pass, but the
+# Cellar copy is authoritative and cannot be stale relative to the run in
+# progress) into a flat "<team>\t<group1> <group2> ..." row list.
+#
+# jq preferred, python3 fallback — same priority order as
+# _aiteamforge_get_field() (jq is a hard Formula dependency, always present
+# on a brew-installed consumer; python3 is kept as the fallback).
+#
+# Sets (never unset on any path — always defined, even on failure):
+#   _XACA1268_MANIFEST_STATE  — ok | absent | unparseable | no-json-tool
+#   _XACA1268_MANIFEST_ROWS   — array of "<team>\t<groups space-separated>"
+#
+# Row 2 vs row 3 of the fail-closed matrix MUST stay distinguishable by the
+# caller: "absent" (consumer predates XACA-1261) and "unparseable" (a
+# corrupted file on a consumer that HAS taken XACA-1261) call for different
+# human responses and must never share one message.
+_xaca1268_load_manifest() {
+  local manifest="${FRAMEWORK_DIR}/share/scripts/personas-manifest.json"
+  _XACA1268_MANIFEST_ROWS=()
+  _XACA1268_MANIFEST_STATE="ok"
+
+  if [ ! -f "$manifest" ]; then
+    _XACA1268_MANIFEST_STATE="absent"
+    return 0
+  fi
+
+  local out="" line
+  if command -v jq >/dev/null 2>&1; then
+    if ! jq -e '(type == "object") and (.deployments // [] | type == "array")' "$manifest" >/dev/null 2>&1; then
+      _XACA1268_MANIFEST_STATE="unparseable"
+      return 0
+    fi
+    out="$(jq -r '
+      .deployments[]? | select((.team // "") != "")
+      | "\(.team)\t\((.groups // []) | map(select(type == "string")) | join(" "))"
+    ' "$manifest" 2>/dev/null)" || true
+  elif command -v python3 >/dev/null 2>&1; then
+    out="$(python3 - "$manifest" <<'PYEOF' 2>/dev/null
+import json, sys
+
+try:
+    with open(sys.argv[1]) as fh:
+        data = json.load(fh)
+    deployments = data.get("deployments", []) if isinstance(data, dict) else None
+    if not isinstance(deployments, list):
+        raise ValueError("no deployments array")
+except Exception:
+    print("XACA1268-PARSE-ERROR")
+    sys.exit(0)
+
+for d in deployments:
+    if not isinstance(d, dict):
+        continue
+    team = d.get("team")
+    if not team or not isinstance(team, str):
+        continue
+    groups = d.get("groups") or []
+    groups = [g for g in groups if isinstance(g, str)]
+    print("%s\t%s" % (team, " ".join(groups)))
+PYEOF
+)"
+    if [ "$out" = "XACA1268-PARSE-ERROR" ]; then
+      _XACA1268_MANIFEST_STATE="unparseable"
+      return 0
+    fi
+  else
+    _XACA1268_MANIFEST_STATE="no-json-tool"
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    if [ -n "$line" ]; then
+      _XACA1268_MANIFEST_ROWS+=("$line")
+    fi
+  done <<< "$out"
+  return 0
+}
+
+# Load ${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json} — same file
+# and same env-var override convention as the existing XACA-0862 Source (c)
+# read above (search this file for "_tp_reg_file") — into a flat
+# "<slug>\t<working_dir-raw>\t<kanban_dir-raw>" row list. Raw (unexpanded)
+# values only; expansion happens per-row via _xaca1268_expand_path() at the
+# point of use.
+#
+# Sets (never unset on any path):
+#   _XACA1268_REGISTRY_STATE  — ok | absent | unparseable | no-json-tool
+#   _XACA1268_REGISTRY_ROWS   — array of "<slug>\t<working_dir>\t<kanban_dir>"
+_xaca1268_load_registry() {
+  local reg="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+  _XACA1268_REGISTRY_ROWS=()
+  _XACA1268_REGISTRY_STATE="ok"
+
+  if [ ! -f "$reg" ]; then
+    _XACA1268_REGISTRY_STATE="absent"
+    return 0
+  fi
+
+  local out="" line
+  if command -v jq >/dev/null 2>&1; then
+    if ! jq -e '(type == "object") and (.teams // {} | type == "object")' "$reg" >/dev/null 2>&1; then
+      _XACA1268_REGISTRY_STATE="unparseable"
+      return 0
+    fi
+    out="$(jq -r '
+      (.teams // {}) | to_entries[]? | select(.value | type == "object")
+      | "\(.key)\t\(.value.working_dir // "")\t\(.value.kanban_dir // "")"
+    ' "$reg" 2>/dev/null)" || true
+  elif command -v python3 >/dev/null 2>&1; then
+    out="$(python3 - "$reg" <<'PYEOF' 2>/dev/null
+import json, sys
+
+try:
+    with open(sys.argv[1]) as fh:
+        data = json.load(fh)
+    teams = data.get("teams", {}) if isinstance(data, dict) else None
+    if not isinstance(teams, dict):
+        raise ValueError("no teams object")
+except Exception:
+    print("XACA1268-PARSE-ERROR")
+    sys.exit(0)
+
+for slug, entry in teams.items():
+    if not isinstance(entry, dict):
+        continue
+    wd = entry.get("working_dir") or ""
+    kd = entry.get("kanban_dir") or ""
+    if not isinstance(wd, str):
+        wd = ""
+    if not isinstance(kd, str):
+        kd = ""
+    print("%s\t%s\t%s" % (slug, wd, kd))
+PYEOF
+)"
+    if [ "$out" = "XACA1268-PARSE-ERROR" ]; then
+      _XACA1268_REGISTRY_STATE="unparseable"
+      return 0
+    fi
+  else
+    _XACA1268_REGISTRY_STATE="no-json-tool"
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    if [ -n "$line" ]; then
+      _XACA1268_REGISTRY_ROWS+=("$line")
+    fi
+  done <<< "$out"
+  return 0
+}
+
+# The XACA-1268 hosted-group predicate itself. Populates
+# _XACA1268_HOSTED_GROUPS with every persona GROUP name some shipped
+# consumer on THIS machine will actually read — NEVER a team id, and NEVER
+# derived by string surgery on one (-002 rejects option B for exactly that
+# reason: get_template_id() covers only finance/legal/medical and would
+# silently mishandle every freelance-* instance and the shared `mainevent`
+# group, which belongs to no team at all).
+#
+# Emits print_warning/print_info per the fail-closed matrix for every
+# degraded-input case. "The union is legitimately empty" and "the union
+# could not be computed" must never collapse into the same silent outcome —
+# see the STATE case blocks below and the caller's own success/failure
+# reporting in update_team_personas().
+#
+# Sets (always, on every return path):
+#   _XACA1268_HOSTED_GROUPS  — array of group ids to create/refresh
+#   _XACA1268_INDETERMINATE — count of registry entries that could not be
+#                              classified hosted/not-hosted (never treated
+#                              as "not hosted")
+# Always returns 0 — safe to call as a bare statement under `set -eo pipefail`.
+_xaca1268_hosted_groups() {
+  _XACA1268_HOSTED_GROUPS=()
+  _XACA1268_INDETERMINATE=0
+
+  local confs_dir="${FRAMEWORK_DIR}/share/teams"
+  local reg_path="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+
+  _xaca1268_load_manifest
+  _xaca1268_load_registry
+
+  case "$_XACA1268_MANIFEST_STATE" in
+    absent)
+      print_warning "XACA-1268: ${FRAMEWORK_DIR}/share/scripts/personas-manifest.json not found (this Cellar predates XACA-1261) — manifest-driven group-source creation (Rail 1) is OFF for this run; Rail 2 and the existing refresh path above are unaffected."
+      ;;
+    unparseable)
+      print_warning "XACA-1268: ${FRAMEWORK_DIR}/share/scripts/personas-manifest.json exists but does not parse as JSON — manifest-driven group-source creation (Rail 1) is OFF for this run; Rail 2 and the existing refresh path above are unaffected."
+      ;;
+    no-json-tool)
+      print_warning "XACA-1268: neither jq nor python3 is available — cannot read personas-manifest.json or ${reg_path}; group-source creation (both rails) is OFF for this run. The existing refresh path above is unaffected."
+      ;;
+  esac
+
+  case "$_XACA1268_REGISTRY_STATE" in
+    absent)
+      print_warning "XACA-1268: registry ${reg_path} not found — group-source creation (both rails, registry-anchored) is OFF for this run. The existing config/deployed-target refresh path above is unaffected."
+      return 0
+      ;;
+    unparseable)
+      print_warning "XACA-1268: registry ${reg_path} exists but does not parse as JSON — group-source creation (both rails, registry-anchored) is OFF for this run. The existing config/deployed-target refresh path above is unaffected."
+      return 0
+      ;;
+    no-json-tool)
+      # Shared root cause already warned above (neither jq nor python3) —
+      # both rails are registry-anchored too, so there is nothing further to
+      # attempt.
+      return 0
+      ;;
+  esac
+
+  if [ ! -d "$confs_dir" ]; then
+    print_warning "XACA-1268: ${confs_dir} not found — cannot resolve registry team ids against shipped team confs; group-source creation (both rails) is OFF for this run."
+    return 0
+  fi
+
+  local rail1_ok=true
+  if [ "$_XACA1268_MANIFEST_STATE" != "ok" ]; then
+    rail1_ok=false
+  fi
+
+  # All loop-body locals declared up front, before any loop — a `local x=v`
+  # INSIDE a loop body prints to stdout on the 2nd+ iteration under zsh (see
+  # _xaca1268_has_git_root's comment / _resolve_git_roots precedent).
+  local row slug wd_raw kd_raw wd kd wd_state kd_state
+  local mrow mt mg mteam mgroups found_exact best tteam g u already src_root
+  local -a rail1_groups=() rail2_groups=() union=()
+
+  for row in "${_XACA1268_REGISTRY_ROWS[@]:-}"; do
+    [ -n "$row" ] || continue
+    IFS=$'\t' read -r slug wd_raw kd_raw <<< "$row"
+    [ -n "$slug" ] || continue
+
+    wd="$(_xaca1268_expand_path "$wd_raw")"
+    kd="$(_xaca1268_expand_path "$kd_raw")"
+    wd_state="$(_xaca1268_dir_state "$wd")"
+    kd_state="$(_xaca1268_dir_state "$kd")"
+
+    if [ "$wd_state" = "unreadable" ] || [ "$kd_state" = "unreadable" ]; then
+      print_warning "XACA-1268: [${slug}] working_dir and/or kanban_dir exists but is not readable/accessible (permission denied) — cannot determine whether this team is hosted here; skipping (indeterminate)"
+      _XACA1268_INDETERMINATE=$((_XACA1268_INDETERMINATE + 1))
+      continue
+    fi
+
+    # ---- Rail 1: kb-sync-personas consumer-mode read -------------------
+    if [ "$rail1_ok" = true ] && [ "$wd_state" = "ok" ]; then
+      if _xaca1268_has_git_root "$wd"; then
+        mteam=""
+        mgroups=""
+        found_exact=false
+        for mrow in "${_XACA1268_MANIFEST_ROWS[@]:-}"; do
+          [ -n "$mrow" ] || continue
+          IFS=$'\t' read -r mt mg <<< "$mrow"
+          if [ "$mt" = "$slug" ]; then
+            mteam="$mt"; mgroups="$mg"; found_exact=true
+            break
+          fi
+        done
+        if [ "$found_exact" = false ]; then
+          best="$(_xaca1268_best_conf_team "$slug" "$confs_dir")"
+          if [ -n "$best" ]; then
+            for mrow in "${_XACA1268_MANIFEST_ROWS[@]:-}"; do
+              [ -n "$mrow" ] || continue
+              IFS=$'\t' read -r mt mg <<< "$mrow"
+              if [ "$mt" = "$best" ]; then
+                mteam="$mt"; mgroups="$mg"
+                break
+              fi
+            done
+          fi
+        fi
+        if [ -z "$mteam" ]; then
+          print_warning "XACA-1268: [${slug}] hosted here (real git work tree at ${wd}) but matches no personas-manifest.json row and no share/teams conf — cannot determine its persona group(s); skipping (indeterminate)"
+          _XACA1268_INDETERMINATE=$((_XACA1268_INDETERMINATE + 1))
+        elif [ -z "$mgroups" ]; then
+          print_warning "XACA-1268: [${slug}] manifest row '${mteam}' carries no groups[] — nothing to create for this team via Rail 1"
+        else
+          for g in $mgroups; do
+            rail1_groups+=("$g")
+          done
+        fi
+      fi
+    fi
+
+    # ---- Rail 2: upgrade's own deploy steps (XACA-0862-005/021 pair) ---
+    if [ "$wd_state" = "ok" ] && [ "$kd_state" = "ok" ]; then
+      tteam="$(_xaca1268_best_conf_team "$slug" "$confs_dir")"
+      if [ -n "$tteam" ]; then
+        rail2_groups+=("$tteam")
+      fi
+      # No match: this registry slug has no shipped team conf at all. Not
+      # warned here — the existing connect-script call site already reports
+      # this class via _xaca0862_020_is_known_scoped_out / "no team template
+      # matches"; duplicating it here would be noise, not new information.
+    fi
+  done
+
+  for g in "${rail1_groups[@]:-}" "${rail2_groups[@]:-}"; do
+    [ -n "$g" ] || continue
+    already=false
+    for u in "${union[@]:-}"; do
+      [ "$u" = "$g" ] && { already=true; break; }
+    done
+    [ "$already" = true ] || union+=("$g")
+  done
+
+  src_root="${FRAMEWORK_DIR}/share/personas"
+  for g in "${union[@]:-}"; do
+    # `"${union[@]:-}"` on a genuinely empty (but declared) array still
+    # yields ONE empty-string word, per bash/zsh array-expansion semantics —
+    # the same reason every OTHER loop in this function over a `:-`
+    # fallback array guards with this exact line first. Without it, an
+    # empty union prints a spurious "candidate group id '' contains
+    # characters..." warning instead of silently doing nothing (caught by
+    # a fixture with zero share/teams/*.conf files — see selftest).
+    [ -n "$g" ] || continue
+    if ! _xaca0925_valid_team_id "$g"; then
+      print_warning "XACA-1268: candidate group id '${g}' contains characters outside [A-Za-z0-9_-] — skipping (path-safety guard)"
+      continue
+    fi
+    if [ ! -d "${src_root}/${g}/agents" ]; then
+      # Not shipped by this Cellar. The refresh helper would also no-op
+      # with "No shipped personas for this team" if handed this id, so
+      # filtering here (rather than there) keeps the assert-present pass
+      # below from warning about something that was never supposed to exist.
+      continue
+    fi
+    _XACA1268_HOSTED_GROUPS+=("$g")
+  done
+  return 0
+}
+
 update_team_personas() {
   print_section "Updating Team Personas"
 
@@ -4242,12 +4699,44 @@ update_team_personas() {
   # has an on-disk nested-project deploy target (pt_enumerate_targets,
   # lib/persona-targets.sh) — a deployed persona dir is conclusive evidence
   # the team is installed, independent of what the config says
-  # (XACA-0931-001 §2.4/§3.4). This union is still REFRESH-ONLY:
-  # _xaca0925_refresh_team_personas only ever writes into a dir it creates
-  # fresh from the Cellar or one that's already there — it can never bring a
-  # team the box never had personas for into being, so the anti-glob
-  # invariant (upgrade never MATERIALISES a new team) holds structurally
-  # rather than by the config filter.
+  # (XACA-0931-001 §2.4/§3.4).
+  #
+  # XACA-1268 UPDATE — the comment this replaces asserted "upgrade never
+  # MATERIALISES a new team" as a structural guarantee of this union. That
+  # claim was already false by the time XACA-1268 was filed:
+  # update_mandatory_teams() runs eleven lines above this function in the
+  # call sequence below (search this file for "update_mandatory_teams") and
+  # deliberately backfills a WHOLE team onto machines that never had it,
+  # gated on a shipped `"mandatory": true` registry key — that is
+  # `update_mandatory_teams`' own job (see its header comment), not an
+  # accident this comment failed to anticipate. The live rule, accurate as
+  # of XACA-1268, is narrower and additive, not structural-by-omission:
+  #
+  #   Upgrade never materializes a TEAM (no board, no kanban_dir, no
+  #   registry entry, no connect/startup scripts, no LaunchAgent — none of
+  #   that machinery is produced here). It DOES materialize a persona GROUP
+  #   SOURCE directory (${WORKING_DIR}/<group>/personas/agents — just the
+  #   handful of .md files under it) when, and only when, a shipped
+  #   consumer on THIS machine will actually read it. See
+  #   _xaca1268_hosted_groups() above and
+  #   kanban/plans/XACA-1268/XACA-1268-002-create-semantics-decision.md
+  #   (binding) for the full derivation of that predicate.
+  #
+  # This is the THIRD scoped exception carved into this same file's
+  # "upgrade is refresh-only" convention, and it is the narrowest of the
+  # three — a group is not a team (12 shipped groups, 11 shipped teams;
+  # `mainevent` belongs to no team at all), so nothing this exception
+  # creates ever grows into team-shaped machinery on its own:
+  #   XACA-0771 — materializes a missing shared alias FILE, gated on
+  #               membership in an explicit mandatory-basename set.
+  #   XACA-1070 — materializes a whole TEAM, gated on `"mandatory": true`
+  #               in shipped registry data (update_mandatory_teams, above).
+  #   XACA-1268 — materializes a persona GROUP SOURCE dir, gated on the
+  #               reading consumer's OWN hosted predicate (this comment).
+  # A prior version of this comment described present-state behaviour as
+  # though it were an invariant of the code, and it silently stopped being
+  # true the moment XACA-1070 shipped — leave an accurate rule here instead
+  # of repeating that mistake for whoever reads this next.
   #
   # ORDERING: this function runs BEFORE deploy_team_personas_to_projects in
   # the run sequence (see the call site below update_team_personas). That is
@@ -4301,6 +4790,50 @@ update_team_personas() {
     fi
   done
 
+  # XACA-1268: extend the enumeration a SECOND time with GROUP sources a
+  # shipped consumer on this machine will actually read but this box was
+  # never `install-team.sh`-provisioned for (see -002, binding). This
+  # appends a persona GROUP id to the SAME `teams` array the loop below
+  # already refreshes via the EXISTING _xaca0925_refresh_team_personas() —
+  # no new create path, see the rewritten comment above this function's
+  # `_xaca0931_load_persona_targets` call.
+  _xaca1268_hosted_groups
+  if [ "${_XACA1268_INDETERMINATE:-0}" -gt 0 ]; then
+    # `if`, not an embedded `cond && a || b` ternary — set -eo pipefail
+    # abort risk aside (see _xaca1268_hosted_groups' own comment on that
+    # class of hazard), plain `if` reads unambiguously either way.
+    local _xaca1268_entry_word="entries"
+    if [ "${_XACA1268_INDETERMINATE}" -eq 1 ]; then
+      _xaca1268_entry_word="entry"
+    fi
+    print_warning "XACA-1268: ${_XACA1268_INDETERMINATE} registry ${_xaca1268_entry_word} could not be classified as hosted/not-hosted here — see warnings above for detail; never treated as 'not hosted'."
+  fi
+
+  local _hg _hg_already _hg_known
+  local -a _xaca1268_new_groups=()
+  for _hg in "${_XACA1268_HOSTED_GROUPS[@]:-}"; do
+    [ -n "$_hg" ] || continue
+    _hg_already=false
+    for _hg_known in "${teams[@]:-}"; do
+      [ "$_hg_known" = "$_hg" ] && { _hg_already=true; break; }
+    done
+    if [ "$_hg_already" = false ]; then
+      teams+=("$_hg")
+      _xaca1268_new_groups+=("$_hg")
+    fi
+  done
+
+  if [ ${#_xaca1268_new_groups[@]} -gt 0 ]; then
+    print_info "XACA-1268: creating persona source(s) for group(s) hosted here but never provisioned: ${_xaca1268_new_groups[*]}"
+  elif [ "$_XACA1268_REGISTRY_STATE" = "ok" ] && [ "$_XACA1268_MANIFEST_STATE" = "ok" ]; then
+    # Fail-closed matrix row 13: an empty result and a computation that
+    # never ran must never look the same. Both authority sources (the
+    # manifest and the registry) read cleanly this run and still produced
+    # no missing group — say so explicitly rather than printing nothing,
+    # which would be indistinguishable from this step never having run.
+    print_success "XACA-1268: hosted-group check clean — personas-manifest.json and ${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json} both read successfully; no missing group source found"
+  fi
+
   if [ ${#teams[@]} -eq 0 ]; then
     print_warning "No configured or discovered teams found — skipping persona refresh"
     return 0
@@ -4326,6 +4859,21 @@ update_team_personas() {
       print_warning "[${team}] ${_XACA0925_TEAM_ORPHANS} orphan persona file(s) in working dir with no Cellar counterpart (left in place, not deleted)"
     fi
   done
+
+  # XACA-1268 assert-present pass (XACA-0771 house pattern): after acting,
+  # loudly warn — never hard-fail — on any group this run expected to
+  # materialize but didn't (e.g. the per-file cp loop above hit a write
+  # failure for every file). Skipped under --dry-run: nothing was actually
+  # written this run, so there is nothing to verify.
+  if [ "$DRY_RUN" != true ]; then
+    local _xaca1268_ap_group
+    for _xaca1268_ap_group in "${_xaca1268_new_groups[@]:-}"; do
+      [ -n "$_xaca1268_ap_group" ] || continue
+      if [ ! -d "${WORKING_DIR}/${_xaca1268_ap_group}/personas/agents" ]; then
+        print_warning "XACA-1268: [${_xaca1268_ap_group}] expected to materialize this run but ${WORKING_DIR}/${_xaca1268_ap_group}/personas/agents still does not exist — see this team's refresh warning above for the cause"
+      fi
+    done
+  fi
 
   if [ $total_updated -eq 0 ]; then
     print_success "All team personas up to date"
