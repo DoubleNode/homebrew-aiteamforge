@@ -347,6 +347,19 @@ _update_notify_state() {
     case "$prev_counter" in ''|*[!0-9]*) prev_counter=0 ;; esac
     prev_first="$(_json_field "$STATE_FILE" first_unproductive_at)"
 
+    # XACA-1266-013: the threshold that applied on the PREVIOUS tick, read
+    # from the state file's OWN last_outcome_token — the same pure function
+    # of a token used to compute THIS tick's threshold below. No new
+    # persisted field needed: threshold is entirely determined by token, so
+    # "what threshold applied before" is recoverable from "what token was
+    # recorded before". Used only to detect an ESCALATION (see below); an
+    # absent/unrecognized prior token defaults to the non-escalated 6,
+    # exactly like this tick's own default.
+    local prev_token prev_threshold
+    prev_token="$(_json_field "$STATE_FILE" last_outcome_token)"
+    prev_threshold=6
+    [ "$prev_token" = "blocked-ff-diverged" ] && prev_threshold=2
+
     case "$token" in
         fetch-failed|blocked-ff-conflict|blocked-ff-diverged|rebase-conflict-aborted)
             new_counter=$(( prev_counter + 1 ))
@@ -368,15 +381,49 @@ _update_notify_state() {
     threshold=6
     [ "$token" = "blocked-ff-diverged" ] && threshold=2
 
+    # XACA-1266-013: the ORIGINAL implementation walked an exact-match
+    # milestone sequence (threshold, threshold*4, threshold*16, …) starting
+    # from the CURRENT tick's threshold and fired ONLY when new_counter
+    # landed EXACTLY on one of those values. That silently drops the first
+    # notify-stall when the threshold ESCALATES mid-streak: e.g. five
+    # ordinary unproductive ticks accumulate under threshold=6 (no fire —
+    # correctly, 5<6), then the sixth tick's token is blocked-ff-diverged,
+    # dropping the threshold to 2. new_counter is now 6, but the escalated
+    # sequence is 2, 8, 32, … — 6 matches none of them, so the alert that
+    # is already overdue under the NEW threshold is silently deferred to
+    # counter=8, two ticks later. blocked-ff-diverged is exactly the state
+    # that cannot self-heal and needs a human fastest — this is the one
+    # case where that deferral costs the most.
+    #
+    # FIX: keep the exact-match sequence (it is correct and sufficient for
+    # the constant-threshold case, and tests/test-xaca-1266-006 CASE5/6
+    # assert its silence-between-milestones property directly), and ADD a
+    # second, independent firing condition that catches ONLY the
+    # escalation transition: threshold just dropped relative to what
+    # applied last tick (prev_threshold, computed above) AND the counter
+    # is already at/past the new, lower threshold. That fires on the exact
+    # tick the escalation happens, regardless of where new_counter falls
+    # in the escalated sequence, and — because it only fires on drop, not
+    # on every subsequent tick under the same (now-stable) escalated
+    # threshold — still resumes the normal backed-off cadence afterward
+    # (the exact-match sequence takes back over from the NEXT tick, since
+    # threshold no longer "just dropped" relative to prev_threshold).
     if [ "$new_counter" -ge "$threshold" ] && [ "$threshold" -gt 0 ]; then
+        local _fire=0
         local _milestone=$threshold
         while [ "$_milestone" -le "$new_counter" ]; do
             if [ "$_milestone" -eq "$new_counter" ]; then
-                log "notify-stall: ${new_counter} consecutive unproductive tick(s) on ${REPO_DIR} (last=${token}, threshold=${threshold}) — ahead=${m_ahead:-unknown} behind=${m_behind:-unknown}, first unproductive at ${prev_first:-unknown}"
+                _fire=1
                 break
             fi
             _milestone=$(( _milestone * 4 ))
         done
+        if [ "$_fire" -eq 0 ] && [ "$threshold" -lt "$prev_threshold" ]; then
+            _fire=1
+        fi
+        if [ "$_fire" -eq 1 ]; then
+            log "notify-stall: ${new_counter} consecutive unproductive tick(s) on ${REPO_DIR} (last=${token}, threshold=${threshold}) — ahead=${m_ahead:-unknown} behind=${m_behind:-unknown}, first unproductive at ${prev_first:-unknown}"
+        fi
     fi
 
     local state_dir tmp_file
