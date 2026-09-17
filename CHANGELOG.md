@@ -55,6 +55,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   (XACA-1261-001) is the absence of an ON-DEMAND sync/drift check, not of an automatic
   one, since persona content already refreshes each upgrade via XACA-0925/XACA-0931.
 
+  Follow-ups from the PR #917 gate round: `share/scripts/kb-sync-personas` re-mirrored with
+  the consumer-mode fixes (the fatal `MASTER_ROOT` startup guard is now mode-gated — it
+  previously killed EVERY subcommand on a consumer, including `--help`, making the whole
+  delivery inert); `share/scripts/lcars-launch-helpers.sh` re-mirrored with a second
+  presence-proxy guard (`deploy_team_personas()` gated on `[ -x kb-sync-personas ]`, which
+  this ticket would have flipped true on consumers, diverting legal/finance/medical startup
+  off the XACA-0931-hardened fallback). Both XACA-1261 tap test files now pin an explicit
+  pre-fix commit instead of `HEAD` — `HEAD` stopped meaning "pre-fix" once the fix was
+  committed, silently voiding 8/26 negative-control assertions — with a self-validating
+  FATAL guard that aborts if the pinned ref already contains the fix, and both are enrolled
+  in `tests/ci-manifest` (they were absent, which made `ci-manifest-check.sh` exit 1).
 - **XACA-1261-006** — test coverage for the delivery fix above. Adds
   `tests/test-xaca-1261-persona-tool-delivery.sh`: sandboxed assertions that a fresh
   install lays down both `kb-sync-personas` (executable, byte-identical to source) and

@@ -2106,7 +2106,30 @@ deploy_team_personas() {
     local project_dir="${3:-$PWD}"
     local _atf_base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
     local _sync_tool="${_atf_base}/scripts/kb-sync-personas"
-    if [ -x "$_sync_tool" ]; then
+    # XACA-1261 (code review blocking finding): `[ -x "$_sync_tool" ]` alone is
+    # a PRESENCE proxy, not a dev-machine test — it means "kb-sync-personas
+    # exists at this path", which XACA-1261 made true on EVERY tap consumer
+    # too (that ticket ships/installs the script + its manifest into
+    # ${AITEAMFORGE_DIR}/scripts/kb-sync-personas so consumer-mode list/check/
+    # sync work at all). Left unguarded, this branch would have started
+    # running "$_sync_tool" sync-worktrees on every legal/finance/medical
+    # session start on every consumer, in place of the XACA-0931-hardened
+    # deploy-worktree-personas.sh --force fallback below — with its own
+    # stdout/stderr sent to /dev/null and NO fallback on failure, and reading
+    # sync-worktrees' still-unresolved-for-consumer-mode manifest targetRepo
+    # (see kb-sync-personas' own _kbsp_sync_worktrees, not yet routed through
+    # the XACA-1261 consumer-mode resolver), risking a silent no-op. This is
+    # the SECOND, previously un-audited site with the exact "kb-sync-personas
+    # presence == dev machine" assumption already fixed once for
+    # invoke_persona_sync() in the tap's install-claude-config.sh — anchor on
+    # the dev-only persona master directory instead, which is NEVER mirrored
+    # to any consumer (sync-tap.sh mirrors only individual per-group flat
+    # dirs into ${DEV_TEAM}/<group>/personas/agents/, never agents-master/
+    # itself), so this compound check is a genuine dev-vs-consumer test rather
+    # than a tool-presence proxy. Preserves BOTH existing behaviours exactly:
+    # dev machine unchanged (master exists there), consumer keeps today's
+    # hardened fallback (master never exists under ${AITEAMFORGE_DIR}).
+    if [ -x "$_sync_tool" ] && [ -d "${_atf_base}/.claude/agents-master" ]; then
         # Dev machine path (kb-sync-personas present): unchanged behaviour.
         echo "   Syncing ${label} personas into project dir..."
         "$_sync_tool" sync-worktrees "$team" >/dev/null 2>&1 \

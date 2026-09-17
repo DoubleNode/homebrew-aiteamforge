@@ -441,18 +441,64 @@ _group_persona_dir() {
 # XACA-1261: resolve a deployment's targetRepo.
 # Dev mode:      the manifest's own targetRepo field — authored for, and
 #                correct on, the dev machine.
-# Consumer mode: IGNORE the manifest's targetRepo entirely (it is guaranteed to
-#                be a dev-machine-local path — see 002-design.md's Option C
-#                rejection) and resolve team-paths.json's
-#                .teams[$team].working_dir instead, the CLAUDE.md-documented
-#                authoritative per-machine value every other kb-* helper
-#                already trusts.
+# Consumer mode: MEASURED 2026-09-16 on darren-m4-mini across two container
+#                topologies that look IDENTICAL in shape (a non-git container
+#                with exactly one inner git root) but have OPPOSITE correct
+#                answers:
+#                  dns              -> the CONTAINER itself is the deploy
+#                                      target (manifest targetRepo ==
+#                                      registry working_dir ==
+#                                      /Users/Shared/Development/DNSFramework)
+#                  freelance-<proj> -> a CHILD of the container is the deploy
+#                                      target (working_dir is the container,
+#                                      but the real work-tree is
+#                                      "<container>/develop")
+#                No root-count or child-scanning heuristic can distinguish
+#                these two — a prior version of this function kept the FIRST
+#                git root discovered under working_dir and merely `_warn`ed
+#                about any others, which a code review correctly rejected as
+#                unsound: DNS specifically has MULTIPLE independent inner git
+#                roots (DNSProtocols/, DNSCore/, …, each its own .git), so
+#                "first root wins" would have silently targeted only one
+#                alphabetically-first sub-repo and treated the rest as merely
+#                "ignored" — check/sync could report success while several of
+#                DNS's real sub-repos were never touched.
+#
+#                What DOES encode the right per-team answer is the manifest's
+#                OWN targetRepo field — authored data, not inferred, that
+#                already carries the correct per-team shape. Prefer it
+#                outright, existence-checked (never git-checked) against THIS
+#                machine:
+#                  1. _expand_path the manifest's targetRepo. If it resolves
+#                     to an existing directory here, use it as-is.
+#                  2. Otherwise fall back to the registry's working_dir
+#                     (_expand_path'd). If THAT exists, use it.
+#                  3. Otherwise return empty — no plausible-but-wrong guess,
+#                     and no git-root scanning/multi-root warning at all.
+#
+#                SEQUENCING DEPENDENCY: rule 1 depends on XACA-1260's manifest
+#                targetRepo corrections (PR #918) for the freelance teams —
+#                until that merges, a freelance manifest targetRepo may still
+#                be a dev-machine-local value that does not exist on the
+#                consumer, so rule 1 misses and rule 2 (correctly, per this
+#                fallback) returns the bare container instead of the real
+#                child work-tree. That is a KNOWN, EXPECTED interim state, not
+#                a defect in this resolver — fix it in the manifest data via
+#                #918, not by adding inference back here.
+#
 # Fails closed on a per-team basis: an absent registry FILE is caught earlier
 # by _require_team_paths_registry (loud, exit 1) — this function's own empty
-# result covers the narrower, expected case of "the registry exists and is
-# valid JSON, but this particular team has no entry in it", which callers must
-# treat as "not hosted here" via _is_hosted_here, never as some other default
-# (e.g. never falls back to the manifest's own dev-local targetRepo).
+# result covers the narrower, expected case of "neither the manifest's
+# targetRepo nor the registry's working_dir resolves to a real directory
+# here", which callers must treat as "not hosted here" via _is_hosted_here,
+# never as some other default (e.g. never falls back to inferring a git root).
+#
+# DISAGREEMENT GUARD: every caller checks _is_hosted_here($team) before
+# calling this function, and _is_hosted_here's contract is "a real checkout
+# lives somewhere under working_dir". If _is_hosted_here already said yes but
+# THIS function still resolves nothing (rule 3), the two functions disagree —
+# that is not the ordinary "ignore this team" path, so surface it loudly
+# (stderr) rather than letting it read as a plain MISSING-REPO row.
 _resolve_target_repo_for_team() {
   local i="$1" team="$2"
   if [ "$KBSP_MODE" != "consumer" ]; then
@@ -460,59 +506,33 @@ _resolve_target_repo_for_team() {
     return 0
   fi
 
-  local working_dir
-  working_dir=$(jq -r --arg t "$team" '.teams[$t].working_dir // empty' "$TEAM_PATHS_JSON" 2>/dev/null)
-  if [ -z "$working_dir" ]; then
-    echo ""
-    return 0
-  fi
-  working_dir=$(_expand_path "$working_dir")
-
-  # XACA-1261: the registry's working_dir is a CONTAINER, not necessarily the
-  # git work-tree. Measured 2026-09-16 on darren-m4-mini: for all 11 freelance
-  # teams `git -C "$working_dir" rev-parse --is-inside-work-tree` fails, and the
-  # real work-tree is "$working_dir/develop" (registry working_dir
-  # /Users/Shared/Development/Bandwear/Android -> root .../Android/develop).
-  # Returning working_dir verbatim would make sync write
-  # "$working_dir/.claude/agents" — a SECOND, divergent deployment beside the
-  # real one at "$working_dir/develop/.claude/agents", and would make
-  # list/check report on a path where nothing is deployed. (XACA-1260 populated
-  # exactly the git-toplevel location, and asked that a later sync be a no-op
-  # rather than a rival copy.)
-  #
-  # Resolve the same way _is_hosted_here does, so the row we SHOW and the path
-  # we WRITE can never disagree: _resolve_git_roots handles both "container is
-  # itself the repo" (Case 1) and "the repo is an immediate child" (Case 2).
-  local roots
-  roots=$(_resolve_git_roots "$working_dir" 2>/dev/null)
-  if [ -z "$roots" ]; then
-    # No checkout beneath it. _is_hosted_here already omits such a team, so this
-    # is normally unreachable; emit empty rather than a path that only looks
-    # plausible, so any caller reaching it fails visibly instead of writing to a
-    # bare container.
-    echo ""
+  local manifest_raw manifest_target_repo
+  manifest_raw=$(_deploy_field "$i" "targetRepo")
+  manifest_target_repo=$(_expand_path "$manifest_raw")
+  if [ -n "$manifest_target_repo" ] && [ -d "$manifest_target_repo" ]; then
+    echo "$manifest_target_repo"
     return 0
   fi
 
-  # Never target a linked worktree: _guard_worktree_path refuses these later
-  # anyway, and sync-worktrees is the opt-in subcommand for that. Filtering here
-  # keeps the FIRST surviving root meaningful instead of depending on scan order.
-  local root chosen=""
-  while IFS= read -r root; do
-    [ -n "$root" ] || continue
-    case "$root" in
-      */worktrees/*) continue ;;
-    esac
-    if [ -z "$chosen" ]; then
-      chosen="$root"
-    else
-      _warn "[$team] multiple git work-trees under $working_dir; using $chosen (ignoring $root)"
+  local working_dir_raw working_dir=""
+  working_dir_raw=$(jq -r --arg t "$team" '.teams[$t].working_dir // empty' "$TEAM_PATHS_JSON" 2>/dev/null)
+  if [ -n "$working_dir_raw" ]; then
+    working_dir=$(_expand_path "$working_dir_raw")
+    if [ -d "$working_dir" ]; then
+      echo "$working_dir"
+      return 0
     fi
-  done <<ROOTS_EOF
-$roots
-ROOTS_EOF
+  fi
 
-  echo "$chosen"
+  # Neither resolved to a real directory. If _is_hosted_here already reported
+  # this team as hosted, that is a genuine disagreement between the two
+  # functions — make noise instead of silently emitting empty.
+  if _is_hosted_here "$team"; then
+    _warn "[$team] _is_hosted_here reports this team as hosted here, but _resolve_target_repo_for_team could not resolve a real directory from either the manifest's targetRepo ('$manifest_raw') or the registry's working_dir ('$working_dir_raw'). This is a disagreement between the two functions, not an ordinary missing-repo case — investigate before trusting this team's list/check/sync/diff output (XACA-1261)."
+  fi
+
+  echo ""
+  return 0
 }
 
 # XACA-1261: is this team's deployment actually hosted on THIS machine?
@@ -539,6 +559,14 @@ _is_hosted_here() {
   if [ -z "$working_dir" ]; then
     return 1
   fi
+  # XACA-1261-015: expand BEFORE testing. _resolve_target_repo_for_team
+  # _expand_path's the same registry value, so reading it raw here made the two
+  # functions disagree for any working_dir containing ~ or $VAR: the hosted
+  # check would fail (no such literal directory) and omit a team that resolves
+  # perfectly well, i.e. a silently missing row rather than a visible error.
+  # Both functions must normalise identically or the omission filter and the
+  # write target are answering different questions.
+  working_dir=$(_expand_path "$working_dir")
   local roots
   roots=$(_resolve_git_roots "$working_dir" 2>/dev/null)
   if [ -z "$roots" ]; then
@@ -2601,20 +2629,55 @@ T20_MANIFEST
 
   # --- Test 21: XACA-1261 consumer-mode targetRepo/hosted-here resolution ---
   # Synthetic fixture exercising _resolve_target_repo_for_team + _is_hosted_here
-  # via the real _kbsp_list subcommand, following Test 14/19/20's "swap script
-  # globals, invoke the real subcommand, restore" pattern rather than inventing
-  # a new mocking mechanism.
+  # via the real _kbsp_list subcommand (plus direct function calls for the cases
+  # a list row can't observe), following Test 14/19/20's "swap script globals,
+  # invoke the real subcommand, restore" pattern rather than inventing a new
+  # mocking mechanism.
   #
-  # Three manifest rows, one synthetic team-paths.json:
-  #   t21-hosted       — has a team-paths.json entry whose working_dir IS a real
-  #                       git repo (Case 1 of _resolve_git_roots) -> must APPEAR,
-  #                       with TARGET REPO resolved from the REGISTRY, never from
-  #                       the manifest's own (deliberately wrong) targetRepo field.
-  #   t21-unhosted     — HAS a team-paths.json entry, but that working_dir is a
-  #                       plain directory with no git checkout inside it -> must
-  #                       be OMITTED (registered-but-not-really-hosted, the
-  #                       academy-on-a-non-academy-consumer shape).
-  #   t21-unregistered — no team-paths.json entry at all -> must be OMITTED.
+  # Manifest rows / synthetic team-paths.json entries:
+  #   t21-hosted           — team-paths working_dir IS a real git repo (Case 1
+  #                          of _resolve_git_roots) -> must APPEAR, with TARGET
+  #                          REPO resolved from the REGISTRY, never from the
+  #                          manifest's own (deliberately bogus) targetRepo.
+  #   t21-unhosted         — HAS a team-paths.json entry, but that working_dir
+  #                          is a plain directory with no git checkout inside
+  #                          it -> must be OMITTED (registered-but-not-really-
+  #                          hosted, the academy-on-a-non-academy-consumer
+  #                          shape).
+  #   t21-unregistered     — no team-paths.json entry at all -> must be
+  #                          OMITTED.
+  #   t21-dns (21e)        — the DNS shape (code-review blocking finding): a
+  #                          non-git CONTAINER whose registry working_dir AND
+  #                          manifest targetRepo are the SAME container path,
+  #                          which ALSO has a child directory that is its own
+  #                          real git checkout (Case 2 of _resolve_git_roots
+  #                          finds it, so the team is hosted). Rule 1 (manifest
+  #                          targetRepo exists on this machine -> use it) must
+  #                          win and resolve to the CONTAINER, never to the
+  #                          child git root — pinning the fix for the exact
+  #                          "DNS has multiple inner git roots" blocking finding
+  #                          (a first-root-wins scan could not tell this case
+  #                          apart from t21-freelance-pending below; this
+  #                          resolver never scans roots at all).
+  #   t21-freelance-pending (21f) — the freelance-pre-#918 shape: registry
+  #                          working_dir is a non-git container with a real
+  #                          child git checkout (identical STRUCTURAL shape to
+  #                          t21-dns), but the manifest's targetRepo is a
+  #                          dev-machine-local path that does NOT exist on this
+  #                          machine (rule 1 misses). Rule 2 must fall back to
+  #                          the registry's working_dir (the container) — the
+  #                          documented, expected interim answer pending
+  #                          XACA-1260/PR #918 — never inferring the child
+  #                          work-tree via any root scan.
+  #   t21-neither (21g)    — NEITHER the manifest targetRepo NOR the registry
+  #                          working_dir exists on this machine -> the resolver
+  #                          must return empty (asserted via a DIRECT call,
+  #                          since a list row can't distinguish "resolver
+  #                          returned empty" from "never reached the resolver")
+  #                          AND the team must be OMITTED from list (consistent
+  #                          with _is_hosted_here also being false here, so
+  #                          this is the ordinary not-hosted path, not the
+  #                          disagreement-guard path).
   #
   # 21d is the negative control the spec requires: re-run the IDENTICAL manifest
   # + registry fixture under KBSP_MODE=dev (the pre-fix resolution path — targetRepo
@@ -2640,18 +2703,37 @@ T20_MANIFEST
   local t21_unhosted_dir="${tmp21}/UnhostedDir"
   mkdir -p "$t21_unhosted_dir/kanban"
 
-  # t21-nested (XACA-1261): the registry working_dir is a CONTAINER and the real
-  # git work-tree is an immediate child (_resolve_git_roots Case 2). This is the
-  # SHAPE MEASURED ON darren-m4-mini for all 11 freelance teams: working_dir
-  # /Users/Shared/Development/<Org>/<Project>, work-tree <...>/develop. A
-  # resolver that returned working_dir verbatim would make sync write a second,
-  # divergent .claude/agents beside the real one — this asserts it does not.
-  local t21_nested_container="${tmp21}/NestedContainer"
-  local t21_nested_repo="${t21_nested_container}/develop"
-  mkdir -p "$t21_nested_repo"
-  git -C "$t21_nested_repo" init -q
-  git -C "$t21_nested_repo" -c user.email="t@t.com" -c user.name="T" \
+  # t21-dns (21e): non-git container whose working_dir/targetRepo IS the
+  # container, with a child git checkout present (DNS's real multi-sub-repo
+  # shape — DNSProtocols/, DNSCore/, etc, each its own .git). Only one child
+  # repo is needed to prove the point: rule 1 must never even look at it.
+  local t21_dns_container="${tmp21}/DnsContainer"
+  local t21_dns_child="${t21_dns_container}/DNSProtocols"
+  mkdir -p "$t21_dns_child"
+  git -C "$t21_dns_child" init -q
+  git -C "$t21_dns_child" -c user.email="t@t.com" -c user.name="T" \
     commit -q --allow-empty -m "init" >/dev/null 2>&1
+
+  # t21-freelance-pending (21f): STRUCTURALLY IDENTICAL to t21-dns (non-git
+  # container + one child git checkout) but the manifest targetRepo will be
+  # bogus (simulating a pre-XACA-1260/#918 dev-only value) — so rule 2's
+  # container fallback is what must fire here, in contrast to t21-dns where
+  # rule 1 fires. Same shape, different manifest data, opposite rule taken;
+  # that is exactly the pair the blocking finding said no scan could tell apart.
+  local t21_fl_container="${tmp21}/FreelanceContainer"
+  local t21_fl_child="${t21_fl_container}/develop"
+  mkdir -p "$t21_fl_child"
+  git -C "$t21_fl_child" init -q
+  git -C "$t21_fl_child" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+
+  # t21-neither (21g): registered, but BOTH the registry working_dir and the
+  # manifest targetRepo point at paths that do not exist on this machine at
+  # all — no directories created for either. _is_hosted_here must also be
+  # false here (same working_dir feeds both), so this exercises the ordinary
+  # "not hosted" path, not the disagreement guard.
+  local t21_neither_working_dir="${tmp21}/does-not-exist-workingdir"
+  local t21_neither_manifest_repo="${tmp21}/does-not-exist-manifest-targetrepo"
 
   local t21_team_paths="${tmp21}/team-paths21.json"
   cat > "$t21_team_paths" <<T21_TEAM_PATHS
@@ -2660,7 +2742,9 @@ T20_MANIFEST
   "teams": {
     "t21-hosted": { "working_dir": "${t21_hosted_repo}" },
     "t21-unhosted": { "working_dir": "${t21_unhosted_dir}" },
-    "t21-nested": { "working_dir": "${t21_nested_container}" }
+    "t21-dns": { "working_dir": "${t21_dns_container}" },
+    "t21-freelance-pending": { "working_dir": "${t21_fl_container}" },
+    "t21-neither": { "working_dir": "${t21_neither_working_dir}" }
   }
 }
 T21_TEAM_PATHS
@@ -2688,8 +2772,24 @@ T21_TEAM_PATHS
       "groups": ["t21-group"]
     },
     {
-      "team": "t21-nested",
-      "targetRepo": "${tmp21}/dev-only-bogus-path-nested",
+      "team": "t21-dns",
+      "targetRepo": "${t21_dns_container}",
+      "targetDir": ".claude/agents",
+      "isGitRepo": true,
+      "exists": true,
+      "groups": ["t21-group"]
+    },
+    {
+      "team": "t21-freelance-pending",
+      "targetRepo": "${tmp21}/dev-only-bogus-path-freelance-pending",
+      "targetDir": ".claude/agents",
+      "isGitRepo": true,
+      "exists": true,
+      "groups": ["t21-group"]
+    },
+    {
+      "team": "t21-neither",
+      "targetRepo": "${t21_neither_manifest_repo}",
       "targetDir": ".claude/agents",
       "isGitRepo": true,
       "exists": true,
@@ -2747,16 +2847,62 @@ T21_MANIFEST
     _err "[selftest] Test 21c: t21-unregistered row should be OMITTED (no team-paths.json entry) — got: $t21_unregistered_line"
   fi
 
-  # 21e (XACA-1261): nested work-tree must resolve to the CHILD repo, never the
-  # bare container the registry names.
-  local t21_nested_line
-  t21_nested_line=$(printf '%s\n' "$t21_consumer_out" | grep -E '^t21-nested[[:space:]]') || t21_nested_line=""
-  if [ -z "$t21_nested_line" ]; then
+  # 21e (XACA-1261 blocking finding — DNS shape): manifest targetRepo IS the
+  # container and must be used AS-IS, even though a child git root also
+  # exists. This is the exact case a first-root-wins scan could not have
+  # gotten right for DNS's real multi-sub-repo layout.
+  local t21_dns_line
+  t21_dns_line=$(printf '%s\n' "$t21_consumer_out" | grep -E '^t21-dns[[:space:]]') || t21_dns_line=""
+  if [ -z "$t21_dns_line" ]; then
     t21_ok=false
-    _err "[selftest] Test 21e: t21-nested row missing — a container whose work-tree is a child must still be hosted; output=$t21_consumer_out"
-  elif [[ "$t21_nested_line" != *"$t21_nested_repo"* ]]; then
+    _err "[selftest] Test 21e: t21-dns row missing — a container with a child git root must still be hosted; output=$t21_consumer_out"
+  elif [[ "$t21_dns_line" != *"$t21_dns_container"* ]]; then
     t21_ok=false
-    _err "[selftest] Test 21e: t21-nested resolved to the bare container instead of the child work-tree ($t21_nested_repo); got: $t21_nested_line"
+    _err "[selftest] Test 21e: t21-dns did not resolve TARGET REPO to the container ($t21_dns_container) via rule 1; got: $t21_dns_line"
+  elif [[ "$t21_dns_line" == *"$t21_dns_child"* ]]; then
+    t21_ok=false
+    _err "[selftest] Test 21e: t21-dns resolved to the child git root ($t21_dns_child) instead of the manifest's own targetRepo (the container) — rule 1 must win over any root inference; got: $t21_dns_line"
+  fi
+
+  # 21f (XACA-1261): STRUCTURALLY IDENTICAL to t21-dns (container + one child
+  # git root), but the manifest targetRepo is bogus here -> rule 2 must fall
+  # back to the container (the documented pending-#918 interim answer), never
+  # to the child work-tree.
+  local t21_fl_line
+  t21_fl_line=$(printf '%s\n' "$t21_consumer_out" | grep -E '^t21-freelance-pending[[:space:]]') || t21_fl_line=""
+  if [ -z "$t21_fl_line" ]; then
+    t21_ok=false
+    _err "[selftest] Test 21f: t21-freelance-pending row missing — a container with a child git root must still be hosted; output=$t21_consumer_out"
+  elif [[ "$t21_fl_line" != *"$t21_fl_container"* ]]; then
+    t21_ok=false
+    _err "[selftest] Test 21f: t21-freelance-pending did not fall back to the registry's working_dir ($t21_fl_container); got: $t21_fl_line"
+  elif [[ "$t21_fl_line" == *"$t21_fl_child"* ]]; then
+    t21_ok=false
+    _err "[selftest] Test 21f: t21-freelance-pending resolved to the child work-tree ($t21_fl_child) instead of the container fallback — that is the OLD (rejected) root-inference behavior; got: $t21_fl_line"
+  elif [[ "$t21_fl_line" == *"dev-only-bogus-path"* ]]; then
+    t21_ok=false
+    _err "[selftest] Test 21f: t21-freelance-pending used the bogus manifest targetRepo instead of falling back; got: $t21_fl_line"
+  fi
+
+  # 21g (XACA-1261): neither the manifest targetRepo nor the registry
+  # working_dir exists on this machine. Asserted via a DIRECT call to
+  # _resolve_target_repo_for_team (a list row can't distinguish "resolver
+  # returned empty" from "never reached the resolver" — _is_hosted_here
+  # already omits this team from the list for the same underlying reason).
+  local t21_neither_idx
+  t21_neither_idx=$(_deploy_index_by_team "t21-neither")
+  local t21_neither_direct
+  t21_neither_direct=$(_resolve_target_repo_for_team "$t21_neither_idx" "t21-neither" 2>/dev/null)
+  if [ -n "$t21_neither_direct" ]; then
+    t21_ok=false
+    _err "[selftest] Test 21g: _resolve_target_repo_for_team should return empty when neither manifest targetRepo nor registry working_dir exist — got: '$t21_neither_direct'"
+  fi
+
+  local t21_neither_line
+  t21_neither_line=$(printf '%s\n' "$t21_consumer_out" | grep -E '^t21-neither[[:space:]]') || t21_neither_line=""
+  if [ -n "$t21_neither_line" ]; then
+    t21_ok=false
+    _err "[selftest] Test 21g: t21-neither row should be OMITTED from list (not hosted here) — got: $t21_neither_line"
   fi
 
   # --- 21d: negative control — same fixture, pre-fix (dev-mode) resolution path ---
@@ -2784,10 +2930,117 @@ T21_MANIFEST
   rm -rf "$tmp21"
 
   if [ "$t21_ok" = true ]; then
-    _info "[selftest] PASS: Test 21 (consumer mode: hosted row resolved from registry; unhosted + unregistered omitted; negative control confirms the fix is load-bearing)"
+    _info "[selftest] PASS: Test 21 (consumer mode: hosted row resolved from registry; unhosted + unregistered omitted; DNS-shape manifest priority + freelance-pending container fallback + neither-resolves empty all pinned; negative control confirms the fix is load-bearing)"
     pass=$((pass + 1))
   else
     _err "[selftest] FAIL: Test 21 — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+
+  # --- Test 22: XACA-1261 Finding 3 — consumer-shape MASTER_ROOT guard ---
+  # CRITICAL, and structurally different from every test above: this is the
+  # ONE case that must NOT be exercised only on the dev machine. Every other
+  # test in this suite calls this script's FUNCTIONS in-process, inheriting
+  # the REAL dev machine's MASTER_ROOT (which genuinely exists here) — so a
+  # defect in the main-dispatch preamble (bare top-level code, not a function
+  # this suite can call directly, that runs unconditionally before ANY
+  # subcommand) is invisible to all of them. That is exactly how the original
+  # unconditional "MASTER_ROOT must exist" guard shipped killing list, check,
+  # diff, --help, and even selftest itself on every real consumer while this
+  # very selftest suite stayed green on the dev machine.
+  #
+  # Build an actual consumer-SHAPED sandbox on disk and exec a real COPY of
+  # this script as a genuine subprocess against it — no in-process global
+  # overrides can reach the preamble, so this is the only way to prove it.
+  # DEV_TEAM is derived from the script's OWN location (one directory above
+  # SCRIPT_DIR): a copy dropped directly under /tmp resolves DEV_TEAM=/tmp and
+  # dies on a missing manifest before ever reaching the guard under test — the
+  # sandbox therefore mirrors the real "<root>/scripts/<script>" layout.
+  _info "[selftest] Test 22: consumer-shape MASTER_ROOT guard (XACA-1261 Finding 3)..."
+
+  local tmp22 t22_ok=true
+  tmp22=$(mktemp -d)
+  mkdir -p "${tmp22}/scripts" "${tmp22}/.claude" "${tmp22}/t22-team/personas/agents"
+  cp "${BASH_SOURCE[0]}" "${tmp22}/scripts/kb-sync-personas"
+  chmod +x "${tmp22}/scripts/kb-sync-personas"
+  echo "# fake persona" > "${tmp22}/t22-team/personas/agents/fake.md"
+
+  # t22-team's working_dir/targetRepo doubles as a real git checkout, purely
+  # so _is_hosted_here (unchanged by this fix) reports it hosted and the row
+  # actually appears in `list` output — proving the preamble fix, not merely
+  # that a broken/omitted row happens not to crash.
+  git -C "${tmp22}/t22-team" init -q
+  git -C "${tmp22}/t22-team" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+
+  cat > "${tmp22}/.claude/personas-manifest.json" <<T22_MANIFEST
+{
+  "schemaVersion": "1",
+  "masterRoot": ".claude/agents-master",
+  "deployments": [
+    {
+      "team": "t22-team",
+      "targetRepo": "${tmp22}/t22-team",
+      "targetDir": ".claude/agents",
+      "isGitRepo": true,
+      "exists": true,
+      "groups": ["t22-team"]
+    }
+  ]
+}
+T22_MANIFEST
+
+  local t22_team_paths="${tmp22}/team-paths22.json"
+  cat > "$t22_team_paths" <<T22_TEAM_PATHS
+{
+  "schema_version": 3,
+  "teams": {
+    "t22-team": { "working_dir": "${tmp22}/t22-team" }
+  }
+}
+T22_TEAM_PATHS
+
+  # Deliberately NO ${tmp22}/.claude/agents-master — THIS is the consumer
+  # shape (agents-master/ is never mirrored). KBSP_MODE is left UNSET so the
+  # subprocess's own top-of-file auto-detection runs for real, exactly as it
+  # would on an actual consumer machine.
+  # NOTE (set -euo pipefail is active for this whole script): a bare
+  # `out=$(cmd)` where cmd fails would abort the ENTIRE selftest run right
+  # here under errexit — exactly the failure mode this test exists to catch,
+  # so it must survive a failing subprocess to report it. `|| rc=$?` after an
+  # rc pre-initialized to 0 is the safe idiom already used elsewhere in this
+  # suite (see t14a_out's `|| t14a_ok=false`) — the assignment inside `||`
+  # itself always succeeds, so errexit never fires on either branch.
+  local t22_list_out t22_list_rc=0 t22_help_out t22_help_rc=0
+  t22_list_out=$(TEAM_PATHS_JSON="$t22_team_paths" "${tmp22}/scripts/kb-sync-personas" list 2>&1) || t22_list_rc=$?
+  t22_help_out=$(TEAM_PATHS_JSON="$t22_team_paths" "${tmp22}/scripts/kb-sync-personas" --help 2>&1) || t22_help_rc=$?
+
+  if [ "$t22_list_rc" -ne 0 ]; then
+    t22_ok=false
+    _err "[selftest] Test 22a: 'list' should exit 0 in the consumer shape (no agents-master/) — exit=$t22_list_rc, output=$t22_list_out"
+  elif [[ "$t22_list_out" == *"Master root not found"* ]]; then
+    t22_ok=false
+    _err "[selftest] Test 22a: 'list' hit the dev-mode MASTER_ROOT guard in the consumer shape — output=$t22_list_out"
+  elif [[ "$t22_list_out" != *"t22-team"* ]]; then
+    t22_ok=false
+    _err "[selftest] Test 22a: 'list' ran but did not show the hosted t22-team row — output=$t22_list_out"
+  fi
+
+  if [ "$t22_help_rc" -ne 0 ]; then
+    t22_ok=false
+    _err "[selftest] Test 22b: '--help' should exit 0 in the consumer shape — exit=$t22_help_rc, output=$t22_help_out"
+  elif [[ "$t22_help_out" == *"Master root not found"* ]]; then
+    t22_ok=false
+    _err "[selftest] Test 22b: '--help' hit the dev-mode MASTER_ROOT guard in the consumer shape — output=$t22_help_out"
+  fi
+
+  rm -rf "$tmp22"
+
+  if [ "$t22_ok" = true ]; then
+    _info "[selftest] PASS: Test 22 (consumer shape subprocess: list + --help both run and exit 0 without agents-master/ present)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 22 — see diagnostics above"
     fail=$((fail + 1))
   fi
 
@@ -2812,15 +3065,73 @@ T21_MANIFEST
 # ---------------------------------------------------------------------------
 _require_jq
 
+# The manifest itself IS shipped to consumers (install_kb_sync_personas_script()
+# in install-kanban.sh / update_personas_manifest() in aiteamforge-upgrade.sh
+# both lay it down at $AITEAMFORGE_DIR/.claude/personas-manifest.json — the
+# exact path $MANIFEST resolves to on a consumer, since DEV_TEAM there IS
+# AITEAMFORGE_DIR), so this stays fatal in BOTH modes — a missing manifest is a
+# genuinely broken install either way. Only the static hint text below needs
+# to be mode-aware: it used to hardcode the dev-machine path unconditionally,
+# which is simply wrong/misleading on a consumer box.
 if [ ! -f "$MANIFEST" ]; then
   _err "Manifest not found: $MANIFEST"
-  _err "Expected at: ~/dev-team/.claude/personas-manifest.json"
+  if [ "$KBSP_MODE" = "dev" ]; then
+    _err "Expected at: ~/dev-team/.claude/personas-manifest.json"
+  else
+    _err "Expected at: \$AITEAMFORGE_DIR/.claude/personas-manifest.json (this machine's AITEAMFORGE_DIR/DEV_TEAM resolved to: $DEV_TEAM)"
+  fi
   exit 1
 fi
 
-if [ ! -d "$MASTER_ROOT" ]; then
-  _err "Master root not found: $MASTER_ROOT"
-  exit 1
+# XACA-1261 Finding 3 (CRITICAL, QA-caught): agents-master/ is, BY DESIGN,
+# NEVER mirrored to a consumer (sync-tap.sh mirrors only individual per-group
+# flat dirs into ${DEV_TEAM}/<group>/personas/agents/ — see _group_persona_dir
+# above — never agents-master/ itself). That absence is precisely the signal
+# that put us into KBSP_MODE=consumer a few dozen lines up. An UNCONDITIONAL
+# "MASTER_ROOT must exist" check here therefore killed list/check/diff/--help/
+# selftest on EVERY consumer, unconditionally, before dispatch was ever
+# reached — the entire consumer-mode feature was unreachable. Nothing caught
+# it because every test (including this file's own selftest) runs ON THE DEV
+# MACHINE, where MASTER_ROOT genuinely exists and this guard was always a
+# no-op; the bug only manifests in the consumer shape.
+#
+# Dev mode:      keep today's behavior EXACTLY — a missing agents-master/ on
+#                the dev machine is still a fatal, broken-checkout error.
+# Consumer mode: MASTER_ROOT's absence is normal, not an error — validate the
+#                thing that actually matters instead: at least ONE per-team
+#                source directory (${DEV_TEAM}/<group>/personas/agents, what
+#                _group_persona_dir resolves in this mode) must exist
+#                SOMEWHERE under DEV_TEAM, proving this is a real,
+#                at-least-partially-provisioned AITeamForge install and not a
+#                bare/corrupt one. A single missing GROUP among many is
+#                legitimate (a consumer legitimately hosts only some teams)
+#                and is already reported per-deployment, non-fatally, by
+#                _source_files_for_deployment's own "Master group directory
+#                not found: $grp_dir" warning — distinguishable there from a
+#                clean sync because that warning names the specific group
+#                directory, while THIS check only fires when NOTHING was ever
+#                provisioned for ANY group, anywhere.
+if [ "$KBSP_MODE" = "dev" ]; then
+  if [ ! -d "$MASTER_ROOT" ]; then
+    _err "Master root not found: $MASTER_ROOT"
+    exit 1
+  fi
+else
+  _xaca1261_has_group_content=false
+  for _xaca1261_group_dir in "${DEV_TEAM}"/*/personas/agents; do
+    [ -d "$_xaca1261_group_dir" ] || continue
+    _xaca1261_has_group_content=true
+    break
+  done
+  if [ "$_xaca1261_has_group_content" = false ]; then
+    _err "No persona source content found under $DEV_TEAM"
+    _err "  (expected at least one <group>/personas/agents/ directory)."
+    _err "This looks like a broken or incomplete AITeamForge install — refusing"
+    _err "to proceed rather than silently reporting empty (but"
+    _err "successful-looking) results for every team."
+    exit 1
+  fi
+  unset _xaca1261_has_group_content _xaca1261_group_dir
 fi
 
 CMD="${1:-help}"

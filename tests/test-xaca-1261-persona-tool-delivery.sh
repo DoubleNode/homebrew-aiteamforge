@@ -179,12 +179,37 @@ _extract_fn_from_file() {
 
 CURRENT_INSTALL_TEXT="$(cat "$INSTALLER")"
 CURRENT_UPGRADE_TEXT="$(cat "$UPGRADE_SH")"
-PREFIX_INSTALL_TEXT="$(git -C "$TAP_ROOT" show HEAD:libexec/installers/install-kanban.sh 2>/dev/null)"
-PREFIX_UPGRADE_TEXT="$(git -C "$TAP_ROOT" show HEAD:libexec/commands/aiteamforge-upgrade.sh 2>/dev/null)"
+# XACA-1261 (QA finding): these negative controls originally materialized
+# "pre-fix" content via `git show HEAD:<path>`. That was only valid while the
+# XACA-1261 tap changes were UNCOMMITTED. Once they landed on tap `main`, HEAD
+# began CONTAINING the fix, so the controls compared the fix against itself and
+# silently stopped asserting anything (measured: 8/26 assertions failing).
+# A moving ref cannot express "the tree before this change" -- pin it.
+XACA1261_PREFIX_REF="472d53d2c9e39d14fea86186e75baed577bb48c1"
+
+PREFIX_INSTALL_TEXT="$(git -C "$TAP_ROOT" show "${XACA1261_PREFIX_REF}:libexec/installers/install-kanban.sh" 2>/dev/null)"
+PREFIX_UPGRADE_TEXT="$(git -C "$TAP_ROOT" show "${XACA1261_PREFIX_REF}:libexec/commands/aiteamforge-upgrade.sh" 2>/dev/null)"
 
 if [ -z "$PREFIX_INSTALL_TEXT" ] || [ -z "$PREFIX_UPGRADE_TEXT" ]; then
-    echo "FATAL: could not materialize pre-fix (HEAD) content via git show -- needed for the" >&2
-    echo "required negative-control tests. Is $TAP_ROOT a git repo with a HEAD commit?" >&2
+    echo "FATAL: could not materialize pre-fix content at ${XACA1261_PREFIX_REF} via git show --" >&2
+    echo "needed for the required negative-control tests. Is $TAP_ROOT a git repo containing that commit?" >&2
+    exit 1
+fi
+
+# SELF-VALIDATION: a negative control that silently stops being negative is
+# worse than no control, because it reports green. Assert the pinned ref really
+# LACKS the fix before trusting anything derived from it. Sentinels are
+# per-file and deliberately specific: both of these files legitimately MENTION
+# "kb-sync-personas" before the fix (pre-existing comments), so a bare
+# name grep would wrongly conclude "already fixed" and mask the vacuity.
+if printf '%s' "$PREFIX_INSTALL_TEXT" | grep -q 'install_kb_sync_personas_script'; then
+    echo "FATAL: pinned pre-fix ref ${XACA1261_PREFIX_REF} ALREADY defines" >&2
+    echo "install_kb_sync_personas_script -- the negative control would be vacuous." >&2
+    exit 1
+fi
+if printf '%s' "$PREFIX_UPGRADE_TEXT" | grep -q 'update_personas_manifest'; then
+    echo "FATAL: pinned pre-fix ref ${XACA1261_PREFIX_REF} ALREADY defines" >&2
+    echo "update_personas_manifest -- the negative control would be vacuous." >&2
     exit 1
 fi
 

@@ -43,7 +43,7 @@
 #   TEST 3 (NEGATIVE CONTROL, LOAD-BEARING): re-run TEST 1's exact scenario
 #           (same sandboxed HOME with agents-master ABSENT, same stub on PATH)
 #           against the PRE-FIX invoke_persona_sync, materialized via
-#           `git show HEAD:libexec/installers/install-claude-config.sh` (the
+#           `git show ${XACA1261_PREFIX_REF}:libexec/installers/install-claude-config.sh` (the
 #           guard fix is uncommitted, so HEAD is exactly the pre-fix code).
 #           The stub MUST be invoked (sentinel written) -- proving the guard is
 #           load-bearing, not decorative: the pre-fix code cannot reproduce
@@ -110,10 +110,27 @@ _extract_fn_from_text() {
 }
 
 CURRENT_TEXT="$(cat "$CLAUDE_CONFIG_INSTALLER")"
-PREFIX_TEXT="$(git -C "$TAP_ROOT" show HEAD:libexec/installers/install-claude-config.sh 2>/dev/null)"
+# XACA-1261 (QA finding): `HEAD` stopped meaning "pre-fix" the moment the fix
+# was committed to tap `main`, silently turning this control vacuous. Pin it.
+XACA1261_PREFIX_REF="472d53d2c9e39d14fea86186e75baed577bb48c1"
+
+PREFIX_TEXT="$(git -C "$TAP_ROOT" show "${XACA1261_PREFIX_REF}:libexec/installers/install-claude-config.sh" 2>/dev/null)"
 
 if [ -z "$PREFIX_TEXT" ]; then
-    echo "FATAL: could not materialize pre-fix (HEAD) install-claude-config.sh via git show -- needed for the required negative control." >&2
+    echo "FATAL: could not materialize pre-fix install-claude-config.sh at ${XACA1261_PREFIX_REF} -- needed for the required negative control." >&2
+    exit 1
+fi
+
+# SELF-VALIDATION: assert the pinned ref genuinely PRE-DATES the guard.
+# The sentinel must be unique to the GUARD ITSELF. Neither "kb-sync-personas"
+# nor "agents-master" works: this file already mentions both before the fix
+# (agents-master appears in comments at pre-fix lines 671 and 854), so either
+# would wrongly report "already fixed" and mask a vacuous control -- this exact
+# check caught that mistake when it was first written with the wrong sentinel.
+# The guard's own log line appears 0 times pre-fix and 1 time post-fix.
+if printf '%s' "$PREFIX_TEXT" | grep -q 'Skipping install-time persona sync'; then
+    echo "FATAL: pinned pre-fix ref ${XACA1261_PREFIX_REF} already contains the" >&2
+    echo "agents-master guard -- this negative control would be vacuous." >&2
     exit 1
 fi
 
