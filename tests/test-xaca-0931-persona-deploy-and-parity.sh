@@ -526,7 +526,18 @@ echo "=== Part C/D: deploy_team_personas_to_projects / update_team_personas (ext
 # an unrelated purpose -- purely because deploy_team_personas_to_projects()'s
 # comment block mentions its name in prose, not code). Hand-picking exactly
 # the real call graph sidesteps that here.
-_FN_NAMES="update_team_personas deploy_team_personas_to_projects _xaca0931_load_persona_targets _xaca0925_refresh_team_personas _xaca0925_valid_team_id _xaca0925_cleanup_failed_backup_if_empty _xaca0925_prune_persona_backups"
+#
+# XACA-1268: this hand-picked list is itself a k501 sibling-heuristic-drift
+# trap -- it must track update_team_personas()'s real call graph by hand,
+# and it already drifted once (this is the SECOND time: XACA-0931-005's own
+# comment above records the first). update_team_personas() now also calls
+# _xaca1268_hosted_groups(), which in turn calls _xaca1268_load_manifest,
+# _xaca1268_load_registry, _xaca1268_expand_path, _xaca1268_dir_state,
+# _xaca1268_has_git_root, _xaca1268_best_conf_team -- all seven new names
+# must be listed here or the extracted update_team_personas body calls an
+# undefined function (rc=127) the moment this suite invokes it, which is
+# exactly what happened before this fix.
+_FN_NAMES="update_team_personas deploy_team_personas_to_projects _xaca0931_load_persona_targets _xaca0925_refresh_team_personas _xaca0925_valid_team_id _xaca0925_cleanup_failed_backup_if_empty _xaca0925_prune_persona_backups _xaca1268_hosted_groups _xaca1268_load_manifest _xaca1268_load_registry _xaca1268_expand_path _xaca1268_dir_state _xaca1268_has_git_root _xaca1268_best_conf_team"
 _COMBINED_SRC=""
 for _fn in $_FN_NAMES; do
     _src="$(awk -v fn="$_fn" '
