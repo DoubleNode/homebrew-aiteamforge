@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "lastUpdated": "2026-04-30",
+  "lastUpdated": "2026-09-16",
   "masterRoot": ".claude/agents-master",
   "deployments": [
     {
@@ -52,36 +52,92 @@
       "isGitRepo": true
     },
     {
-      "team": "freelance-starwords",
-      "targetRepo": "~/Development/DoubleNode/Starwords",
+      "team": "freelance-bandwear-android",
+      "targetRepo": "/Users/Shared/Development/Bandwear/Android",
       "targetDir": ".claude/agents",
       "groups": ["freelance"],
-      "exists": true,
-      "isGitRepo": true
+      "exists": false,
+      "isGitRepo": false
     },
     {
-      "team": "freelance-appplanning",
-      "targetRepo": "~/Development/DoubleNode/appPlanning",
+      "team": "freelance-bandwear-dashboard",
+      "targetRepo": "/Users/Shared/Development/Bandwear/Dashboard",
       "targetDir": ".claude/agents",
       "groups": ["freelance"],
-      "exists": true,
-      "isGitRepo": true
+      "exists": false,
+      "isGitRepo": false
     },
     {
-      "team": "freelance-workstats",
-      "targetRepo": "~/Development/DoubleNode/WorkStats",
+      "team": "freelance-doublenode-appplanning",
+      "targetRepo": "/Users/Shared/Development/DoubleNode/appPlanning",
       "targetDir": ".claude/agents",
       "groups": ["freelance"],
-      "exists": true,
-      "isGitRepo": true
+      "exists": false,
+      "isGitRepo": false
     },
     {
-      "team": "freelance-lifeboard",
-      "targetRepo": "~/Development/DoubleNode/LifeBoard",
+      "team": "freelance-doublenode-awaysentry",
+      "targetRepo": "/Users/Shared/Development/DoubleNode/AwaySentry",
       "targetDir": ".claude/agents",
       "groups": ["freelance"],
-      "exists": true,
-      "isGitRepo": true
+      "exists": false,
+      "isGitRepo": false
+    },
+    {
+      "team": "freelance-doublenode-caravan",
+      "targetRepo": "/Users/Shared/Development/DoubleNode/Caravan",
+      "targetDir": ".claude/agents",
+      "groups": ["freelance"],
+      "exists": false,
+      "isGitRepo": false
+    },
+    {
+      "team": "freelance-doublenode-fleetterminal",
+      "targetRepo": "/Users/Shared/Development/DoubleNode/FleetTerminal",
+      "targetDir": ".claude/agents",
+      "groups": ["freelance"],
+      "exists": false,
+      "isGitRepo": false
+    },
+    {
+      "team": "freelance-doublenode-lifeboard",
+      "targetRepo": "/Users/Shared/Development/DoubleNode/LifeBoard",
+      "targetDir": ".claude/agents",
+      "groups": ["freelance"],
+      "exists": false,
+      "isGitRepo": false
+    },
+    {
+      "team": "freelance-doublenode-starwords",
+      "targetRepo": "/Users/Shared/Development/DoubleNode/Starwords",
+      "targetDir": ".claude/agents",
+      "groups": ["freelance"],
+      "exists": false,
+      "isGitRepo": false
+    },
+    {
+      "team": "freelance-doublenode-workstats",
+      "targetRepo": "/Users/Shared/Development/DoubleNode/WorkStats",
+      "targetDir": ".claude/agents",
+      "groups": ["freelance"],
+      "exists": false,
+      "isGitRepo": false
+    },
+    {
+      "team": "freelance-liquidstyle-agentbadges-app",
+      "targetRepo": "/Users/Shared/Development/Liquidstyle/AgentBadges-APP",
+      "targetDir": ".claude/agents",
+      "groups": ["freelance"],
+      "exists": false,
+      "isGitRepo": false
+    },
+    {
+      "team": "freelance-liquidstyle-agentbadges-ios",
+      "targetRepo": "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS",
+      "targetDir": ".claude/agents",
+      "groups": ["freelance"],
+      "exists": false,
+      "isGitRepo": false
     },
     {
       "team": "finance",

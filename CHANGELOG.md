@@ -7,6 +7,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-1260** — the shipped `personas-manifest.json` was stale: it covered only 4 of the
+  11 freelance teams, used short slugs (`freelance-starwords`) instead of the registered
+  team ids from `team-machines.json`, and pointed `targetRepo` at
+  `~/Development/DoubleNode/<Project>` paths that do not exist on any machine. Consumers
+  running `kb-sync-personas` against it silently deployed personas for a minority of
+  freelance teams and no-op'd on the rest. Mirrors dev-team's canonical manifest (the
+  XACA-1260 fix merged as #918): all 11 teams present, registered team ids as slugs, and
+  `targetRepo` set to the measured git toplevel under `/Users/Shared/Development/`.
+  `exists`/`isGitRepo` gate no behaviour in `kb-sync-personas` (live `-d` tests are used
+  everywhere) and are per-machine facts in a fleet-shared file, so they are recorded
+  honestly for the authoring machine rather than asserted true.
+
 ## [0.20.16] - 2026-09-16
 
 - **XACA-1261** — `kb-sync-personas` (persona deployment/drift-check tool) and its
