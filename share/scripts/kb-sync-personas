@@ -726,11 +726,45 @@ EOF
 # XACA-1264-003 decision doc.
 #
 # Usage: if _deployment_is_gitignored_personas <targetRepo> <targetDir> <deploymentIndex>; then ...
+#
+# XACA-1264-015: skip-reason channel. Every call site branches on this
+# function's exit status alone (0=DEPLOY, 1=SKIP) via `if`/`if !` — that
+# collapses three semantically different SKIP causes into one boolean, and
+# callers assumed only one of them ("personas are git-tracked; worktrees
+# inherit via checkout"). Two of the three SKIP causes below are new in this
+# PR and are NOT that — a caller printing the tracked-message for them is a
+# lie about why nothing happened. Deliberately NOT folded into the exit
+# status itself: every call site uses condition context, where any nonzero
+# collapses identically for branching purposes, and a second nonzero code
+# would entangle with the set -e/errexit fix in XACA-1264-016. Instead the
+# function records WHY it returned 1 here so each caller can say something
+# true. Set as a plain (non-`local`) assignment so it survives the return
+# and is readable by the caller; reset UNCONDITIONALLY at function entry
+# (below) so a stale value from a PREVIOUS deployment in a caller's loop can
+# never be misattributed to the current one — a caller must read it
+# immediately after a call that it knows actually invoked this function
+# (never after a short-circuited `&&`/`||` that skipped the call).
+#
+# Values once a call returns 1 (SKIP):
+#   tracked        - our personas ARE git-tracked here (the original,
+#                     true case) — "worktrees inherit via checkout" is
+#                     correct.
+#   indeterminate  - git itself could not answer (rc other than 0/1, e.g.
+#                     128 for not-a-repo/corrupt index) — classification
+#                     FAILED; nothing was decided either way.
+#   zero_basenames - this deployment resolved zero source personas (empty
+#                     or unmirrored group, e.g. `snw` in consumer mode) —
+#                     there was nothing to classify.
+# Meaningless (left "") whenever the function returns 0 (DEPLOY).
+_KBSP_SKIP_REASON=""
+
 _deployment_is_gitignored_personas() {
   local repo="$1"
   local rel_dir="$2"  # relative path inside the repo, e.g. ".claude/agents"
   local i="$3"        # deployment index into MANIFEST — enumerates OUR basenames
   local tracked=0 total=0 rc src_file bname warn_team
+
+  _KBSP_SKIP_REASON=""
 
   # Non-git repo (e.g. ~/finance) — no git tracking, treat as gitignored
   if [ ! -d "${repo}/.git" ]; then
@@ -763,12 +797,45 @@ _deployment_is_gitignored_personas() {
   # remove. The loop also does not call git at all when this deployment
   # resolves zero basenames (see the zero-master check below, which runs
   # after the loop but is reached with no git call having preceded it).
+  #
+  # XACA-1264-017: the pathspec is prefixed with git's literal-pathspec
+  # magic, `:(literal)`, so a basename containing a glob metacharacter
+  # (`*`, `?`, `[`, a leading `:`) is matched EXACTLY rather than as a
+  # pattern. Without it, `ls-files --error-unmatch -- "dir/foo[1].md"` can
+  # match some OTHER tracked file whose name the glob happens to fit, and
+  # report rc=0 ("tracked") for a basename that was never committed at all
+  # — a false SKIP. Our current 80 basenames
+  # (`<group>_<name>_<role>_persona.md`) contain no metacharacters, so this
+  # was latent, not live — but the whole point of this classifier is to
+  # answer the exact question asked. MEASURED on git 2.54.0: an untracked
+  # glob-shaped pathspec without the prefix silently resolves to an
+  # unrelated tracked file (rc=0); with the prefix it correctly reports
+  # "not tracked" (rc=1), and an exact literal match still reports rc=0.
+  #
+  # XACA-1264-016: restructured from a bare statement (`git ...; rc=$?`)
+  # into an explicit if/then/else. The bare form is safe ONLY because every
+  # current call site invokes this function as the condition of an `if`/
+  # `if !`, which suspends `set -e` (active at the top of this script) for
+  # the ENTIRE function body executed as that condition — bash's
+  # documented-but-surprising behavior for functions called from a
+  # conditional context. Call this function any other way (e.g.
+  # `x=$(_deployment_is_gitignored_personas ...)`, or as a plain statement)
+  # and a bare failing `git` command here — rc=1 "not tracked" is the
+  # COMMON case, not a rare error — aborts the whole script before `rc=$?`
+  # ever runs. MEASURED: reproduced the abort by calling the function
+  # outside condition context under both `/bin/bash` 3.2 and zsh; the
+  # explicit if/then/else below makes THIS command's own exit status
+  # handling self-contained, independent of how the enclosing call is
+  # written.
   while IFS= read -r src_file; do
     [ -z "$src_file" ] && continue
     bname=$(basename "$src_file")
     total=$((total + 1))
-    git -C "$repo" ls-files --error-unmatch -- "${rel_dir}/${bname}" >/dev/null 2>&1
-    rc=$?
+    if git -C "$repo" ls-files --error-unmatch -- ":(literal)${rel_dir}/${bname}" >/dev/null 2>&1; then
+      rc=0
+    else
+      rc=$?
+    fi
     if [ "$rc" -eq 0 ]; then
       tracked=$((tracked + 1))
     elif [ "$rc" -ne 1 ]; then
@@ -784,6 +851,7 @@ _deployment_is_gitignored_personas() {
       # collapsed rc=128 into "0 tracked" => DEPLOY. Decision doc §3.6.
       warn_team=$(_deploy_field "$i" "team" 2>/dev/null)
       _warn "[${warn_team:-?}] persona classification INDETERMINATE (git exited $rc on $repo) — skipping, but NOT because personas are tracked. Deployment did not run; re-run after fixing the repo."
+      _KBSP_SKIP_REASON="indeterminate"
       return 1
     fi
   done < <(_source_files_for_deployment "$i")
@@ -798,6 +866,7 @@ _deployment_is_gitignored_personas() {
   if [ "$total" -eq 0 ]; then
     warn_team=$(_deploy_field "$i" "team" 2>/dev/null)
     _warn "[${warn_team:-?}] no source personas resolved for this deployment — nothing to deploy"
+    _KBSP_SKIP_REASON="zero_basenames"
     return 1
   fi
 
@@ -806,9 +875,22 @@ _deployment_is_gitignored_personas() {
       # Partial tracking is an anomaly under the ANY rule above (it is not
       # itself a reason to change the verdict) — surface it rather than
       # silently resolving it. Decision doc §3.3.
+      #
+      # XACA-1264-018: downgraded from _warn to _info. This fires on
+      # PRECISELY the state this file's own rationale calls routine ("new
+      # master persona added, not yet committed" — see the ANY-vs-ALL
+      # comment above _deployment_is_gitignored_personas), which means it
+      # warned on every `list`/`check`/`sync-worktrees` run during an
+      # ordinary working window. A warning that fires on the expected,
+      # routine case trains people to ignore the warning channel — and it
+      # shared that channel with the genuinely urgent `indeterminate`
+      # warning just above, which must never be tuned out. That one (and
+      # the `zero_basenames` one) stay on `_warn`; only this routine,
+      # already-explained case moves to `_info`.
       warn_team=$(_deploy_field "$i" "team" 2>/dev/null)
-      _warn "[${warn_team:-?}] partial persona tracking: ${tracked}/${total} of our basenames are git-tracked under ${rel_dir} — treating as git-tracked (skipping), but this is an anomaly worth investigating"
+      _info "[${warn_team:-?}] partial persona tracking: ${tracked}/${total} of our basenames are git-tracked under ${rel_dir} — treating as git-tracked (skipping); routine during a working window (new persona not yet committed), but worth a glance if it persists"
     fi
+    _KBSP_SKIP_REASON="tracked"
     return 1
   fi
 
@@ -903,6 +985,39 @@ _resolve_git_roots() {
   return 0
 }
 
+# XACA-1264-015: prints the sync-worktrees SKIP message appropriate to
+# $_KBSP_SKIP_REASON, which the caller must have JUST set via a call to
+# _deployment_is_gitignored_personas that returned 1 (SKIP) for this team.
+# Split out of _kbsp_sync_worktrees's loop body into its own function so it
+# can be extracted and driven directly by the test suite (same awk
+# function-slice technique tests/test-xaca-1264-mixed-state.sh already uses
+# for the classifier itself), independent of the rest of
+# _kbsp_sync_worktrees's worktree-resolution machinery — that machinery
+# never even runs on the SKIP path this function covers.
+#
+# Only "tracked" is the ORIGINAL, true case: our personas ARE git-tracked
+# here, so "worktrees inherit via checkout" is correct and goes to stdout
+# (via _info) exactly as before this ticket. "indeterminate" and
+# "zero_basenames" are NOT that — printing the same reassuring line for
+# them would be the exact false-message defect XACA-1264-015 exists to
+# remove — so they go to stderr (via _warn) instead, stating plainly that
+# the deployment did not run and pointing back at the classifier's own
+# (also-stderr) warning for the specific reason.
+_kbsp_report_sync_worktrees_skip() {
+  local team="$1"
+  case "$_KBSP_SKIP_REASON" in
+    tracked)
+      _info "[$team] personas are git-tracked; worktrees inherit via checkout — skipping"
+      ;;
+    indeterminate|zero_basenames)
+      _warn "[$team] worktree persona deployment did NOT run (reason: ${_KBSP_SKIP_REASON}) — see warning above"
+      ;;
+    *)
+      _warn "[$team] worktree persona deployment did NOT run (unrecognized classification reason: '${_KBSP_SKIP_REASON}')"
+      ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Subcommand: sync-worktrees
 # ---------------------------------------------------------------------------
@@ -966,8 +1081,16 @@ _kbsp_sync_worktrees() {
 
     # Gate: only container-layout teams (gitignored personas). Git-tracked persona
     # dirs are inherited by each worktree automatically via branch checkout.
+    #
+    # XACA-1264-015: the classifier can return SKIP (rc=1) for THREE
+    # different reasons (see _KBSP_SKIP_REASON's doc comment above
+    # _deployment_is_gitignored_personas) — only "tracked" makes the
+    # "worktrees inherit via checkout" line true. Read the reason
+    # IMMEDIATELY here, in the same branch that invoked the classifier
+    # (never after a short-circuited `&&`/`||`), so a stale value from a
+    # prior team in this loop can never be misattributed to this one.
     if ! _deployment_is_gitignored_personas "$target_repo" "$target_dir" "$i"; then
-      _info "[$team] personas are git-tracked; worktrees inherit via checkout — skipping"
+      _kbsp_report_sync_worktrees_skip "$team"
       i=$((i + 1))
       continue
     fi
@@ -1201,8 +1324,18 @@ _kbsp_list() {
     fi
 
     # Worktree deployment count (container-layout teams only)
+    #
+    # XACA-1264-015: the classifier call is split out of the old
+    # `[ -d "$target_repo" ] && _deployment_is_gitignored_personas ...`
+    # combined condition on purpose. Under `&&` short-circuiting, when
+    # `[ -d "$target_repo" ]` is false the classifier is NEVER invoked —
+    # reading $_KBSP_SKIP_REASON in that branch would silently read a stale
+    # value left over from a PRIOR team's iteration. Nesting (rather than
+    # `&&`-chaining) guarantees $_KBSP_SKIP_REASON is read only in the
+    # branch that is known to have just invoked the classifier.
     local wt_info=""
-    if [ -d "$target_repo" ] && _deployment_is_gitignored_personas "$target_repo" "$target_dir" "$i"; then
+    if [ -d "$target_repo" ]; then
+    if _deployment_is_gitignored_personas "$target_repo" "$target_dir" "$i"; then
       local wt_synced=0 wt_total=0
       # k501: hoist loop-locals; the outer git-roots loop compounds the zsh leak.
       # Also hoist canon_list_gr / canon_target_repo_list used in the nested-main-
@@ -1235,6 +1368,20 @@ _kbsp_list() {
       if [ "$wt_total" -gt 0 ]; then
         wt_info=" [wt:${wt_synced}/${wt_total}]"
       fi
+    else
+      # XACA-1264-015: classifier returned SKIP. Only the "tracked" reason
+      # means "worktrees legitimately inherit via checkout, nothing to
+      # report" (leave wt_info blank, as before). The other two reasons mean
+      # the classification FAILED or had nothing to classify — leaving
+      # wt_info blank for those would look identical to a legitimate
+      # tracked-skip, so mark them distinctly instead of silently omitting
+      # the column.
+      case "$_KBSP_SKIP_REASON" in
+        indeterminate) wt_info=" [wt:ERR-INDETERMINATE]" ;;
+        zero_basenames) wt_info=" [wt:ERR-NO-SOURCE]" ;;
+        tracked|*) : ;;  # true SKIP — nothing to report
+      esac
+    fi
     fi
 
     printf "%-30s %-55s %-8s %-8s %s%s\n" "$team" "${target_repo}" "$exists" "$is_git" "$status" "$wt_info"
@@ -1533,6 +1680,43 @@ _kbsp_check() {
           fi
         fi
       done < <(_resolve_git_roots "$target_repo")
+    else
+      # XACA-1264-015: classifier returned SKIP. Only "tracked" means the
+      # worktree drift question is moot (worktrees legitimately inherit via
+      # checkout — skipping this whole block is correct). "indeterminate"
+      # and "zero_basenames" mean the classification FAILED or had nothing
+      # to classify — silently skipping the block for those made worktree
+      # drift read as an affirmative "OK" (via the unrelated main-deployment
+      # "[team] OK (N files synced)" line printed above, which only ever
+      # covers the top-level deployment, never worktrees). Surface that
+      # worktree drift is UNKNOWN here rather than letting that unrelated
+      # line stand in for it, and count it against the exit code so a
+      # scripted consumer cannot treat this run as clean.
+      case "$_KBSP_SKIP_REASON" in
+        indeterminate|zero_basenames)
+          if [ "$json_output" = false ]; then
+            echo "  [${team}] WORKTREE-CHECK-SKIPPED (reason: ${_KBSP_SKIP_REASON}) — see warning above; worktree drift is UNKNOWN, not verified clean"
+          fi
+          any_drift=true
+          if [ "$json_output" = true ]; then
+            local skip_wt_entry
+            skip_wt_entry=$(jq -n \
+              --arg team "$team" \
+              --arg worktree "" \
+              --arg status "skip-error:${_KBSP_SKIP_REASON}" \
+              --argjson drift '[]' \
+              '{"team": $team, "worktree": $worktree, "status": $status, "drift": $drift}')
+            if [ -z "$json_worktrees" ]; then
+              json_worktrees="$skip_wt_entry"
+            else
+              json_worktrees="${json_worktrees},${skip_wt_entry}"
+            fi
+          fi
+          ;;
+        tracked|*)
+          : # genuinely tracked (or unrecognized-but-not-erroring) — nothing to check
+          ;;
+      esac
     fi
 
     i=$((i + 1))
@@ -3430,6 +3614,224 @@ T23_MAN
     _err "[selftest] FAIL: Test 23 — see diagnostics above"
     fail=$((fail + 1))
   fi
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # XACA-1264-015/016/017: _KBSP_SKIP_REASON tagging, literal-pathspec
+  # matching, and set -e survival in non-condition context.
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # --- Test 24: _KBSP_SKIP_REASON == "tracked" for the genuine SKIP case ---
+  _info "[selftest] Test 24: _KBSP_SKIP_REASON == 'tracked' when personas are genuinely git-tracked..."
+  local tmp_t24 t24_basename
+  tmp_t24=$(mktemp -d)
+  t24_basename="academy_thok_testing_persona.md"
+  git -C "$tmp_t24" init -q
+  mkdir -p "${tmp_t24}/.claude/agents"
+  printf "# real tracked persona\n" > "${tmp_t24}/.claude/agents/${t24_basename}"
+  git -C "$tmp_t24" add ".claude/agents/${t24_basename}" >/dev/null 2>&1
+  git -C "$tmp_t24" -c user.email="t@t.com" -c user.name="T" \
+    commit -q -m "add real persona" >/dev/null 2>&1
+  _KBSP_SKIP_REASON="stale-from-a-prior-call"  # must be overwritten, not merely appended-to
+  local t24_rc=0
+  _deployment_is_gitignored_personas "$tmp_t24" ".claude/agents" "$academy_deploy_idx" || t24_rc=$?
+  if [ "$t24_rc" -eq 1 ] && [ "$_KBSP_SKIP_REASON" = "tracked" ]; then
+    _info "[selftest] PASS: Test 24 (rc=1, reason=tracked)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 24 — expected rc=1/reason=tracked, got rc=${t24_rc}/reason='${_KBSP_SKIP_REASON}'"
+    fail=$((fail + 1))
+  fi
+  rm -rf "$tmp_t24"
+
+  # --- Test 25: _KBSP_SKIP_REASON == "indeterminate" for a git rc=128 case ---
+  _info "[selftest] Test 25: _KBSP_SKIP_REASON == 'indeterminate' on a corrupt/bogus .git..."
+  local tmp_t25
+  tmp_t25=$(mktemp -d)
+  mkdir -p "${tmp_t25}/.git" "${tmp_t25}/.claude/agents"
+  printf 'not a real git repository\n' > "${tmp_t25}/.git/HEAD"
+  _KBSP_SKIP_REASON="stale-from-a-prior-call"
+  local t25_rc=0
+  _deployment_is_gitignored_personas "$tmp_t25" ".claude/agents" "$academy_deploy_idx" || t25_rc=$?
+  if [ "$t25_rc" -eq 1 ] && [ "$_KBSP_SKIP_REASON" = "indeterminate" ]; then
+    _info "[selftest] PASS: Test 25 (rc=1, reason=indeterminate)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 25 — expected rc=1/reason=indeterminate, got rc=${t25_rc}/reason='${_KBSP_SKIP_REASON}'"
+    fail=$((fail + 1))
+  fi
+  rm -rf "$tmp_t25"
+
+  # --- Test 26: _KBSP_SKIP_REASON == "zero_basenames" when the deployment
+  # resolves zero source personas (synthetic manifest pointing at an empty
+  # group, same technique as Test 21's MANIFEST/MASTER_ROOT override) ---
+  _info "[selftest] Test 26: _KBSP_SKIP_REASON == 'zero_basenames' when zero source personas resolve..."
+  local tmp_t26 t26_manifest
+  tmp_t26=$(mktemp -d)
+  mkdir -p "${tmp_t26}/target/.claude/agents"
+  git -C "${tmp_t26}/target" init -q
+  t26_manifest="${tmp_t26}/manifest26.json"
+  cat > "$t26_manifest" <<T26_MANIFEST
+{
+  "schemaVersion": "1",
+  "masterRoot": "fake-master26",
+  "deployments": [
+    {
+      "team": "t26-zero",
+      "targetRepo": "${tmp_t26}/target",
+      "targetDir": ".claude/agents",
+      "isGitRepo": true,
+      "exists": true,
+      "groups": ["t26-nonexistent-group-fixture"]
+    }
+  ]
+}
+T26_MANIFEST
+  local _saved_manifest_26="$MANIFEST"
+  MANIFEST="$t26_manifest"
+  local t26_idx
+  t26_idx=$(_deploy_index_by_team "t26-zero")
+  _KBSP_SKIP_REASON="stale-from-a-prior-call"
+  local t26_rc=0
+  _deployment_is_gitignored_personas "${tmp_t26}/target" ".claude/agents" "$t26_idx" || t26_rc=$?
+  MANIFEST="$_saved_manifest_26"
+  if [ "$t26_rc" -eq 1 ] && [ "$_KBSP_SKIP_REASON" = "zero_basenames" ]; then
+    _info "[selftest] PASS: Test 26 (rc=1, reason=zero_basenames)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 26 — expected rc=1/reason=zero_basenames, got rc=${t26_rc}/reason='${_KBSP_SKIP_REASON}'"
+    fail=$((fail + 1))
+  fi
+  rm -rf "$tmp_t26"
+
+  # --- Test 27: XACA-1264-017 — literal pathspec matching. A basename
+  # containing glob metacharacters must be matched EXACTLY, never as a
+  # pattern that could match some OTHER tracked file. Fixture: a DIFFERENT
+  # tracked file whose name a glob-shaped (but untracked) basename would
+  # match if the pathspec were not literal. ---
+  _info "[selftest] Test 27: literal pathspec — glob-shaped basename does not falsely match a different tracked file..."
+  local tmp_t27 t27_glob_basename t27_manifest t27_group_dir
+  tmp_t27=$(mktemp -d)
+  mkdir -p "${tmp_t27}/target/.claude/agents"
+  git -C "${tmp_t27}/target" init -q
+  # A tracked file whose name a glob pattern "acad[0-9]my_x_persona.md" would
+  # match, WITHOUT being that literal name — proves a non-literal probe would
+  # wrongly report "tracked" for a basename that was never committed.
+  printf "# decoy\n" > "${tmp_t27}/target/.claude/agents/academy1_x_persona.md"
+  git -C "${tmp_t27}/target" add ".claude/agents/academy1_x_persona.md" >/dev/null 2>&1
+  git -C "${tmp_t27}/target" -c user.email="t@t.com" -c user.name="T" \
+    commit -q -m "add decoy" >/dev/null 2>&1
+  # Master-side fixture: ONE source basename, deliberately glob-shaped and
+  # NEVER committed to the target repo above. Dev-mode group resolution
+  # (_group_persona_dir: "${MASTER_ROOT}/${grp}") — same override technique
+  # as Test 14/16/17's own MASTER_ROOT swaps, simpler than routing through
+  # consumer mode's extra "/personas/agents" suffix for a fixture that
+  # doesn't need to exercise that path.
+  t27_group_dir="${tmp_t27}/master-root-fixture/t27-group"
+  mkdir -p "$t27_group_dir"
+  t27_glob_basename="acad[0-9]my_x_persona.md"
+  printf "# master source (glob-shaped basename, never committed to target)\n" > "${t27_group_dir}/${t27_glob_basename}"
+  t27_manifest="${tmp_t27}/manifest27.json"
+  cat > "$t27_manifest" <<T27_MANIFEST
+{
+  "schemaVersion": "1",
+  "masterRoot": "fake-master27",
+  "deployments": [
+    {
+      "team": "t27-glob",
+      "targetRepo": "${tmp_t27}/target",
+      "targetDir": ".claude/agents",
+      "isGitRepo": true,
+      "exists": true,
+      "groups": ["t27-group"]
+    }
+  ]
+}
+T27_MANIFEST
+  local _saved_manifest_27="$MANIFEST" _saved_master_root_27="$MASTER_ROOT"
+  MANIFEST="$t27_manifest"
+  MASTER_ROOT="${tmp_t27}/master-root-fixture"
+  local t27_idx
+  t27_idx=$(_deploy_index_by_team "t27-glob")
+  local t27_rc=0
+  _deployment_is_gitignored_personas "${tmp_t27}/target" ".claude/agents" "$t27_idx" || t27_rc=$?
+  MANIFEST="$_saved_manifest_27"
+  MASTER_ROOT="$_saved_master_root_27"
+  # DEPLOY (rc=0) is correct: the glob-shaped basename was never literally
+  # committed; only an unrelated decoy with a similar-looking name was. A
+  # pre-XACA-1264-017 non-literal pathspec would report rc=1 (falsely
+  # "tracked") here instead.
+  if [ "$t27_rc" -eq 0 ]; then
+    _info "[selftest] PASS: Test 27 (glob-shaped basename correctly NOT matched against decoy — DEPLOY)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 27 — expected rc=0 (literal no-match => DEPLOY), got rc=${t27_rc} (a non-literal pathspec would false-match the decoy)"
+    fail=$((fail + 1))
+  fi
+  rm -rf "$tmp_t27"
+
+  # --- Test 28: XACA-1264-016 — the internal git probe must survive
+  # execution in NON-CONDITION context under `set -e` (active at the top of
+  # this script), independent of how the enclosing function happens to be
+  # called by its current call sites. Reproduces the OLD bare-statement
+  # shape (`git ...; rc=$?`) and the NEW explicit if/then/else shape as
+  # standalone snippets inside an isolated `set -e` subshell under BOTH
+  # /bin/bash and zsh, and confirms: old aborts before reaching its own
+  # `echo`, new does not. This pins the mechanical guarantee directly rather
+  # than relying on all five current call sites happening to use `if`/`if !`. ---
+  _info "[selftest] Test 28: probe survives set -e in non-condition context, under bash AND zsh (XACA-1264-016)..."
+  local tmp_t28
+  tmp_t28=$(mktemp -d)
+  git -C "$tmp_t28" init -q
+  mkdir -p "${tmp_t28}/.claude/agents"
+  # Deliberately untracked — the probe below returns rc=1 ("not tracked"),
+  # the COMMON case this fix targets, not a rare error.
+  local t28_all_ok=true
+  local t28_shell
+  for t28_shell in bash zsh; do
+    if ! command -v "$t28_shell" >/dev/null 2>&1; then
+      _warn "[selftest] Test 28: '$t28_shell' not found on PATH — skipping that half"
+      continue
+    fi
+    local t28_old_out t28_new_out
+    t28_old_out=$("$t28_shell" -c '
+      set -e
+      cd "'"$tmp_t28"'" || exit 99
+      git ls-files --error-unmatch -- ".claude/agents/nope.md" >/dev/null 2>&1
+      rc=$?
+      echo "OLD-SURVIVED rc=$rc"
+    ' 2>&1) || true
+    t28_new_out=$("$t28_shell" -c '
+      set -e
+      cd "'"$tmp_t28"'" || exit 99
+      if git ls-files --error-unmatch -- ":(literal).claude/agents/nope.md" >/dev/null 2>&1; then
+        rc=0
+      else
+        rc=$?
+      fi
+      echo "NEW-SURVIVED rc=$rc"
+    ' 2>&1) || true
+    case "$t28_old_out" in
+      *"OLD-SURVIVED"*)
+        t28_all_ok=false
+        _err "[selftest] Test 28 ($t28_shell): OLD bare-statement shape unexpectedly SURVIVED under set -e (expected it to abort before its echo) — output: $t28_old_out"
+        ;;
+    esac
+    case "$t28_new_out" in
+      *"NEW-SURVIVED"*) : ;;  # expected
+      *)
+        t28_all_ok=false
+        _err "[selftest] Test 28 ($t28_shell): NEW if/then/else shape did NOT survive set -e in non-condition context — output: $t28_new_out"
+        ;;
+    esac
+  done
+  if [ "$t28_all_ok" = true ]; then
+    _info "[selftest] PASS: Test 28 (old shape aborts under set -e; new if/then/else shape survives — verified under bash and zsh where available)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 28 — see diagnostics above"
+    fail=$((fail + 1))
+  fi
+  rm -rf "$tmp_t28"
 
   # --- Cleanup ---
   rm -rf "$tmp_repo"

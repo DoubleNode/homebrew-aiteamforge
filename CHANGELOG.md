@@ -27,6 +27,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   gained a third argument (the deployment index), updated at all three production call sites
   (`sync-worktrees`, `list`, `check`).
 
+  Follow-up from review: the three `return 1` reasons are now distinguished via a
+  `_KBSP_SKIP_REASON` sentinel, because the caller previously printed the "worktrees inherit via
+  checkout" line on ANY skip — which meant the two NEW skip paths (indeterminate git error, zero
+  resolved basenames) emitted the very false message this ticket removes. `list` and `check` no
+  longer let those states read as a legitimate tracked-skip or an "OK". The probe path is now
+  prefixed `:(literal)` (measured: without it, `--error-unmatch -- "dir/bar[0-9].md"` false-matches
+  an unrelated tracked `bar1.md`), and the probe no longer depends on caller condition-context to
+  survive `set -e`.
+
 - **XACA-1267** — `kb-sync-personas`'s `_expand_path` called `envsubst` unconditionally, so a
   missing `envsubst` binary silently blanked EVERY expanded path, not just ones containing a
   `$VAR` reference. Every call site invokes `_expand_path` inside a `$( )` command-substitution
