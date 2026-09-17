@@ -93,6 +93,22 @@ _require_team_paths_registry() {
 _err() { echo "${PROG}: ERROR: $*" >&2; }
 _warn() { echo "${PROG}: WARN: $*" >&2; }
 _info() { echo "${PROG}: $*"; }
+# XACA-1264-022: low-severity, non-alarming notice — goes to STDERR (never
+# pollutes a machine-readable stdout stream) but carries no "WARN:" prefix,
+# so it doesn't retrain readers to tune out the genuinely urgent _warn
+# channel either. Use this — never _info — for anything printed from inside
+# the classifier (_deployment_is_gitignored_personas) or from any other
+# code path reachable during `check --json` / `list`: _info goes to STDOUT,
+# and both of those commands treat their own stdout as a machine-readable
+# or fixed-width-table interface. A notice on stdout there is not cosmetic
+# noise, it is bytes injected into the interface itself — `check --json`'s
+# consumer literally fails to parse (measured: jq exit 5) the moment one
+# fires. See the incident this fixes: XACA-1264-018 moved the "partial
+# persona tracking" notice from _warn to _info to cure alarm fatigue, but
+# _info's destination is STDOUT — the wrong axis entirely. Severity (do I
+# alarm the human?) and stream (do I corrupt a machine interface?) are two
+# independent questions; conflating them is what broke this the first time.
+_note() { echo "${PROG}: $*" >&2; }
 
 # XACA-1267: probe envsubst availability ONCE, at top level, never inside a
 # subshell. Every call site invokes _expand_path as `var=$(_expand_path ...)`
@@ -876,19 +892,33 @@ _deployment_is_gitignored_personas() {
       # itself a reason to change the verdict) — surface it rather than
       # silently resolving it. Decision doc §3.3.
       #
-      # XACA-1264-018: downgraded from _warn to _info. This fires on
-      # PRECISELY the state this file's own rationale calls routine ("new
-      # master persona added, not yet committed" — see the ANY-vs-ALL
-      # comment above _deployment_is_gitignored_personas), which means it
-      # warned on every `list`/`check`/`sync-worktrees` run during an
-      # ordinary working window. A warning that fires on the expected,
-      # routine case trains people to ignore the warning channel — and it
-      # shared that channel with the genuinely urgent `indeterminate`
-      # warning just above, which must never be tuned out. That one (and
-      # the `zero_basenames` one) stay on `_warn`; only this routine,
-      # already-explained case moves to `_info`.
+      # XACA-1264-018: downgraded from _warn to (originally) _info, to cure
+      # alarm fatigue — this fires on PRECISELY the state this file's own
+      # rationale calls routine ("new master persona added, not yet
+      # committed" — see the ANY-vs-ALL comment above
+      # _deployment_is_gitignored_personas), which means it warned on every
+      # `list`/`check`/`sync-worktrees` run during an ordinary working
+      # window. A warning that fires on the expected, routine case trains
+      # people to ignore the warning channel — and it shared that channel
+      # with the genuinely urgent `indeterminate` warning just above, which
+      # must never be tuned out. That one (and the `zero_basenames` one)
+      # stay on `_warn`; only this routine, already-explained case moves off
+      # of it.
+      #
+      # XACA-1264-022 (second-round review, BLOCKING): _info was the wrong
+      # target — this classifier runs from inside `check --json` and
+      # `list`, and _info writes to STDOUT, which both of those commands
+      # treat as a machine-readable/fixed-width interface. A notice printed
+      # from here corrupted that interface (measured: `check --json`'s
+      # stdout no longer parsed as JSON — `jq -e .` exited 5 — the moment
+      # this line fired; `list`'s table was interleaved with it too).
+      # Severity (should this alarm a human?) and stream (does this corrupt
+      # a machine interface?) are independent axes; `_info` vs `_warn` only
+      # ever controlled the first one. `_note` is _info's severity on
+      # _warn's stream — stderr, no "WARN:" prefix — so it neither
+      # retrains readers to ignore real warnings nor leaks into stdout.
       warn_team=$(_deploy_field "$i" "team" 2>/dev/null)
-      _info "[${warn_team:-?}] partial persona tracking: ${tracked}/${total} of our basenames are git-tracked under ${rel_dir} — treating as git-tracked (skipping); routine during a working window (new persona not yet committed), but worth a glance if it persists"
+      _note "[${warn_team:-?}] partial persona tracking: ${tracked}/${total} of our basenames are git-tracked under ${rel_dir} — treating as git-tracked (skipping); routine during a working window (new persona not yet committed), but worth a glance if it persists"
     fi
     _KBSP_SKIP_REASON="tracked"
     return 1
@@ -1091,6 +1121,21 @@ _kbsp_sync_worktrees() {
     # prior team in this loop can never be misattributed to this one.
     if ! _deployment_is_gitignored_personas "$target_repo" "$target_dir" "$i"; then
       _kbsp_report_sync_worktrees_skip "$team"
+      # XACA-1264-019 (second-round review): the honest "did NOT run"
+      # message _kbsp_report_sync_worktrees_skip just printed for
+      # indeterminate/zero_basenames/unrecognized reasons reaches nobody —
+      # this subcommand always returned 0 regardless of $_KBSP_SKIP_REASON,
+      # and both in-tree callers (skills/git-worktree/SKILL.md,
+      # scripts/lcars-launch-helpers.sh) discard this command's stderr
+      # outright, so a caller checking only the exit code sees success even
+      # though a deployment silently did not run. Same fail-direction rule
+      # as XACA-1264-020: only "tracked" is the genuine no-op; anything
+      # else — indeterminate, zero_basenames, or an unrecognized reason —
+      # must flip the exit code so a scripted consumer cannot mistake this
+      # for a clean run.
+      if [ "$_KBSP_SKIP_REASON" != "tracked" ]; then
+        any_error=true
+      fi
       i=$((i + 1))
       continue
     fi
@@ -1334,54 +1379,75 @@ _kbsp_list() {
     # `&&`-chaining) guarantees $_KBSP_SKIP_REASON is read only in the
     # branch that is known to have just invoked the classifier.
     local wt_info=""
+    # XACA-1264-021 (second-round review): this nesting is LOAD-BEARING —
+    # do not flatten it back into `[ -d "$target_repo" ] && _deployment_is_gitignored_personas ...`.
+    # It exists precisely so $_KBSP_SKIP_REASON is read ONLY in the branch
+    # that just invoked the classifier (see the XACA-1264-015 comment
+    # above): under `&&` short-circuiting, a false `[ -d "$target_repo" ]`
+    # skips the classifier entirely, and reading $_KBSP_SKIP_REASON in that
+    # case would silently pick up a stale value from a PRIOR team's
+    # iteration of this same loop. The indentation below reflects the true
+    # nesting (outer `if [ -d ... ]`, inner `if _deployment_is_gitignored...`)
+    # — an un-indented flattening here reads as `&&`-chainable and invites
+    # exactly the regression this comment is warning against.
     if [ -d "$target_repo" ]; then
-    if _deployment_is_gitignored_personas "$target_repo" "$target_dir" "$i"; then
-      local wt_synced=0 wt_total=0
-      # k501: hoist loop-locals; the outer git-roots loop compounds the zsh leak.
-      # Also hoist canon_list_gr / canon_target_repo_list used in the nested-main-
-      # root check below (XACA-0660) — same rule applies across iterations.
-      local list_gr wt_full canon_list_gr canon_target_repo_list
-      while IFS= read -r list_gr; do
-        [ -z "$list_gr" ] && continue
-        while IFS= read -r wt_path; do
-          [ -z "$wt_path" ] && continue
-          wt_total=$((wt_total + 1))
-          wt_full="${wt_path}/${target_dir}"
-          if [ -f "${wt_full}/.synced-from-master" ]; then
-            wt_synced=$((wt_synced + 1))
-          fi
-        done < <(_list_repo_worktrees "$list_gr")
+      if _deployment_is_gitignored_personas "$target_repo" "$target_dir" "$i"; then
+        local wt_synced=0 wt_total=0
+        # k501: hoist loop-locals; the outer git-roots loop compounds the zsh leak.
+        # Also hoist canon_list_gr / canon_target_repo_list used in the nested-main-
+        # root check below (XACA-0660) — same rule applies across iterations.
+        local list_gr wt_full canon_list_gr canon_target_repo_list
+        while IFS= read -r list_gr; do
+          [ -z "$list_gr" ] && continue
+          while IFS= read -r wt_path; do
+            [ -z "$wt_path" ] && continue
+            wt_total=$((wt_total + 1))
+            wt_full="${wt_path}/${target_dir}"
+            if [ -f "${wt_full}/.synced-from-master" ]; then
+              wt_synced=$((wt_synced + 1))
+            fi
+          done < <(_list_repo_worktrees "$list_gr")
 
-        # XACA-0660: also count the nested main git root itself as a deploy
-        # target when it differs from the container (Firebase/Android pattern).
-        # iOS/DNS: git_root == container, canon check skips them correctly.
-        canon_list_gr=$(_canon_path "$list_gr" 2>/dev/null) || canon_list_gr="$list_gr"
-        canon_target_repo_list=$(_canon_path "$target_repo" 2>/dev/null) || canon_target_repo_list="$target_repo"
-        if [ "$canon_list_gr" != "$canon_target_repo_list" ]; then
-          wt_total=$((wt_total + 1))
-          wt_full="${list_gr}/${target_dir}"
-          if [ -f "${wt_full}/.synced-from-master" ]; then
-            wt_synced=$((wt_synced + 1))
+          # XACA-0660: also count the nested main git root itself as a deploy
+          # target when it differs from the container (Firebase/Android pattern).
+          # iOS/DNS: git_root == container, canon check skips them correctly.
+          canon_list_gr=$(_canon_path "$list_gr" 2>/dev/null) || canon_list_gr="$list_gr"
+          canon_target_repo_list=$(_canon_path "$target_repo" 2>/dev/null) || canon_target_repo_list="$target_repo"
+          if [ "$canon_list_gr" != "$canon_target_repo_list" ]; then
+            wt_total=$((wt_total + 1))
+            wt_full="${list_gr}/${target_dir}"
+            if [ -f "${wt_full}/.synced-from-master" ]; then
+              wt_synced=$((wt_synced + 1))
+            fi
           fi
+        done < <(_resolve_git_roots "$target_repo")
+        if [ "$wt_total" -gt 0 ]; then
+          wt_info=" [wt:${wt_synced}/${wt_total}]"
         fi
-      done < <(_resolve_git_roots "$target_repo")
-      if [ "$wt_total" -gt 0 ]; then
-        wt_info=" [wt:${wt_synced}/${wt_total}]"
+      else
+        # XACA-1264-015: classifier returned SKIP. Only the "tracked" reason
+        # means "worktrees legitimately inherit via checkout, nothing to
+        # report" (leave wt_info blank, as before). The other two reasons mean
+        # the classification FAILED or had nothing to classify — leaving
+        # wt_info blank for those would look identical to a legitimate
+        # tracked-skip, so mark them distinctly instead of silently omitting
+        # the column.
+        #
+        # XACA-1264-020 (second-round review): the ORIGINAL `tracked|*) : ;;`
+        # catch-all silently read any UNRECOGNIZED reason the same as a
+        # genuine "tracked" skip (blank column, looks clean) — the same
+        # reassuring-wrong-answer shape this ticket's own defect class
+        # describes, reappearing inside its own fix. `tracked` is now its own
+        # explicit arm; every other value — `indeterminate`, `zero_basenames`,
+        # or anything not yet named — is marked as an error rather than
+        # silently treated as safe.
+        case "$_KBSP_SKIP_REASON" in
+          indeterminate) wt_info=" [wt:ERR-INDETERMINATE]" ;;
+          zero_basenames) wt_info=" [wt:ERR-NO-SOURCE]" ;;
+          tracked) : ;;  # true SKIP — nothing to report
+          *) wt_info=" [wt:ERR-UNKNOWN-REASON:${_KBSP_SKIP_REASON:-<empty>}]" ;;
+        esac
       fi
-    else
-      # XACA-1264-015: classifier returned SKIP. Only the "tracked" reason
-      # means "worktrees legitimately inherit via checkout, nothing to
-      # report" (leave wt_info blank, as before). The other two reasons mean
-      # the classification FAILED or had nothing to classify — leaving
-      # wt_info blank for those would look identical to a legitimate
-      # tracked-skip, so mark them distinctly instead of silently omitting
-      # the column.
-      case "$_KBSP_SKIP_REASON" in
-        indeterminate) wt_info=" [wt:ERR-INDETERMINATE]" ;;
-        zero_basenames) wt_info=" [wt:ERR-NO-SOURCE]" ;;
-        tracked|*) : ;;  # true SKIP — nothing to report
-      esac
-    fi
     fi
 
     printf "%-30s %-55s %-8s %-8s %s%s\n" "$team" "${target_repo}" "$exists" "$is_git" "$status" "$wt_info"
@@ -1692,10 +1758,28 @@ _kbsp_check() {
       # worktree drift is UNKNOWN here rather than letting that unrelated
       # line stand in for it, and count it against the exit code so a
       # scripted consumer cannot treat this run as clean.
+      #
+      # XACA-1264-020 (second-round review): the ORIGINAL shape here was
+      # `tracked|*) : ;;` — a catch-all that silently treated ANY
+      # unrecognized `_KBSP_SKIP_REASON` value the same as a genuine
+      # "tracked" skip. That is the exact reassuring-wrong-answer defect
+      # class this whole ticket exists to remove, now reappearing inside
+      # its own fix: an unrecognized reason must never read as "safe",
+      # because "safe" is precisely the one answer the classifier has NOT
+      # given when the reason is neither `tracked`, `indeterminate`, nor
+      # `zero_basenames`. `tracked` is now its own explicit arm (only that
+      # exact string is the no-op); every other case — including
+      # `indeterminate`, `zero_basenames`, an empty string, or any future
+      # reason the classifier might add — falls through to the same
+      # unknown/unverified handling below, distinguished only in the
+      # printed detail.
       case "$_KBSP_SKIP_REASON" in
-        indeterminate|zero_basenames)
+        tracked)
+          : # genuinely tracked — worktrees inherit via checkout, nothing to check
+          ;;
+        *)
           if [ "$json_output" = false ]; then
-            echo "  [${team}] WORKTREE-CHECK-SKIPPED (reason: ${_KBSP_SKIP_REASON}) — see warning above; worktree drift is UNKNOWN, not verified clean"
+            echo "  [${team}] WORKTREE-CHECK-SKIPPED (reason: ${_KBSP_SKIP_REASON:-<empty>}) — see warning above; worktree drift is UNKNOWN, not verified clean"
           fi
           any_drift=true
           if [ "$json_output" = true ]; then
@@ -1703,7 +1787,7 @@ _kbsp_check() {
             skip_wt_entry=$(jq -n \
               --arg team "$team" \
               --arg worktree "" \
-              --arg status "skip-error:${_KBSP_SKIP_REASON}" \
+              --arg status "skip-error:${_KBSP_SKIP_REASON:-unknown}" \
               --argjson drift '[]' \
               '{"team": $team, "worktree": $worktree, "status": $status, "drift": $drift}')
             if [ -z "$json_worktrees" ]; then
@@ -1712,9 +1796,6 @@ _kbsp_check() {
               json_worktrees="${json_worktrees},${skip_wt_entry}"
             fi
           fi
-          ;;
-        tracked|*)
-          : # genuinely tracked (or unrecognized-but-not-erroring) — nothing to check
           ;;
       esac
     fi
