@@ -211,6 +211,46 @@ done
 
 [ -n "$PR_NUM" ]  || verdict USAGE_ERROR "--pr is required"
 [ -n "$ITEM_ID" ] || verdict USAGE_ERROR "--item is required"
+
+# --item is VALIDATED, for the same reason --pr is (XACA-1275-026). It is not
+# merely passed to kb-sweep: it is also the needle that proves kb-sweep ran FOR
+# THIS ITEM, which is the whole of the XACA-1159-033 positive-evidence property
+# Gate 3 rests on. Unvalidated and interpolated into a regex, `--item '.*'`
+# turned "prove the header named MY item" into "prove it named anything" —
+# VERIFIED: a sweep whose header read "SUBITEM STATUS SWEEP: XACA-9999"
+# satisfied the gate and the run reached GATES_PASSED.
+#
+# The shape is derived from the ids that actually exist on the boards, not
+# assumed: XACA-1275, XACA-1275-026, EPIC-0001, REL-2026-Q3-012,
+# CR-ACADEMY-20260506-0001, todo-1777231661-3085. A pattern like
+# ^[A-Z]+-[0-9]+(-[0-9]+)?$ would reject the last three, so the rule is
+# structural instead — alphanumeric segments joined by single hyphens, at least
+# two of them — which admits every real shape while containing no regex
+# metacharacter by construction.
+#
+# Validation is defence in depth, NOT the fix. The fix is that the match itself
+# is literal (grep -F at Gate 3); this check means a malformed id is refused
+# with a clear message instead of quietly matching nothing.
+_item_reject() {
+    printf 'kb-pr-monitor: --item %s\n' "$1" >&2
+    verdict USAGE_ERROR "--item '$ITEM_ID' is not a valid kanban item id ($1)"
+}
+if [ "${#ITEM_ID}" -gt 64 ]; then
+    _item_reject "is longer than 64 characters"
+fi
+case "$ITEM_ID" in
+    *[!A-Za-z0-9-]*) _item_reject "may contain only letters, digits and hyphens (got '$ITEM_ID')" ;;
+esac
+case "$ITEM_ID" in
+    -*|*-)  _item_reject "must not start or end with a hyphen (got '$ITEM_ID')" ;;
+esac
+case "$ITEM_ID" in
+    *--*)   _item_reject "must not contain an empty segment '--' (got '$ITEM_ID')" ;;
+esac
+case "$ITEM_ID" in
+    *-*)    : ;;
+    *)      _item_reject "must contain at least one hyphen-separated segment, e.g. XACA-1275 (got '$ITEM_ID')" ;;
+esac
 case "$PR_NUM" in ''|*[!0-9]*) verdict USAGE_ERROR "--pr must be a number, got '$PR_NUM'" ;; esac
 case "$POLL_SECONDS" in ''|*[!0-9]*) verdict USAGE_ERROR "--poll-seconds must be a number" ;; esac
 case "$MAX_HOURS" in ''|*[!0-9]*) verdict USAGE_ERROR "--max-hours must be a number" ;; esac
@@ -264,7 +304,17 @@ LAST_REVIEW_AT=$(gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" \
 TEST_OK="false"
 REVIEW_OK="false"
 MERGE_UNKNOWN_RETRIES=0
-NO_CHECKS_RETRIES=0
+# TWO counters, deliberately NOT one (XACA-1275-024). Gate 3.5 has two distinct
+# "cannot see any checks" arms, and they TERMINATE DIFFERENTLY: gh's documented
+# "no checks reported" error eventually PROCEEDS (it is a real signal meaning no
+# CI is configured), while rc=0 with zero rows eventually BLOCKS (it is
+# anomalous and documents nothing). A single shared budget lets whichever arm
+# happens to observe the fifth poll decide the outcome for polls it never saw —
+# measured: 4 zero-row polls + 1 "no checks reported" poll reached GATES_PASSED
+# and merged having classified ZERO CI rows. Each arm owns its own budget, and
+# each message counts only its own arm's observations.
+NO_CHECKS_RETRIES=0     # gh errored with "no checks reported"
+ZERO_ROWS_RETRIES=0     # gh exited 0 but the classifier saw no rows
 PREV_HEAD_SHA=""
 FORCE_PUSH_CUTOFF=""
 
@@ -277,10 +327,30 @@ while true; do
         verdict TIMEOUT "monitor exceeded ${MAX_HOURS}h"
     fi
 
+    # XACA-1275-028: this was the ONE unguarded read in the poll loop. Head SHA,
+    # committer date, mergeable and behind_by all fail closed; this one did not,
+    # so an unreadable result ('' from a network error, an auth failure, a gh
+    # change) was neither CLOSED nor MERGED and the loop simply carried on as
+    # though the PR were OPEN. Bounded — it cannot manufacture an approval — but
+    # it is the odd one out, and "the read failed" should never be
+    # indistinguishable from "the answer was fine".
+    # ALLOWLIST, not a denylist: `gh pr view --json state` has exactly three
+    # values (OPEN/CLOSED/MERGED), so anything else is a failed read or a
+    # vocabulary change, and neither is a reason to keep polling.
     STATE=$(gh pr view "$PR_NUM" --repo "$REPO" --json state --jq '.state' 2>/dev/null)
-    if [ "$STATE" = "CLOSED" ] || [ "$STATE" = "MERGED" ]; then
-        verdict PR_CLOSED "PR state is $STATE"
-    fi
+    STATE_RC=$?   # capture-first: after a pipe this would be the LAST stage's rc
+    case "$STATE" in
+        CLOSED|MERGED)
+            verdict PR_CLOSED "PR state is $STATE" ;;
+        OPEN)
+            : ;;
+        *)
+            printf '%s\n' "x could not read the state of PR #$PR_NUM (gh rc=$STATE_RC, value='${STATE:-<empty>}')."
+            printf '%s\n' "  Expected exactly one of OPEN/CLOSED/MERGED. An unreadable state is NOT"
+            printf '%s\n' "  evidence the PR is open — every other read in this loop fails closed and"
+            printf '%s\n' "  so does this one. Check gh auth and network, then re-enter."
+            verdict BLOCKED "could not read PR state (gh rc=$STATE_RC, value='${STATE:-<empty>}')" ;;
+    esac
 
     POLL=$((POLL + 1))
     [ $((POLL % 5)) -eq 0 ] && printf 'Watching PR #%s... poll=%s TEST=%s REVIEW=%s\n' "$PR_NUM" "$POLL" "$TEST_OK" "$REVIEW_OK"
@@ -302,7 +372,7 @@ while true; do
     # flag — it does nothing to one already true. Reset on head change.
     if [ -n "$PREV_HEAD_SHA" ] && [ "$HEAD_SHA" != "$PREV_HEAD_SHA" ]; then
         printf 'Head SHA changed (%s -> %s) — a push landed. Resetting both gate latches.\n' "$PREV_HEAD_SHA" "$HEAD_SHA"
-        TEST_OK="false"; REVIEW_OK="false"; NO_CHECKS_RETRIES=0
+        TEST_OK="false"; REVIEW_OK="false"; NO_CHECKS_RETRIES=0; ZERO_ROWS_RETRIES=0
 
         # Force-push / rebase detection. The committer-date guard below assumes
         # the new head's committer date is newer than any stale review pointed
@@ -411,7 +481,13 @@ while true; do
     printf '%s\n' "$SWEEP_OUTPUT"
 
     SWEEP_RAN_OK="false"
-    if printf '%s\n' "$SWEEP_OUTPUT" | grep -qE "SUBITEM STATUS SWEEP: $ITEM_ID" \
+    # grep -qF, NOT -qE (XACA-1275-026). This needle carries a caller-supplied
+    # value, and it is the positive evidence the gate is made of — a LITERAL
+    # match is the property actually wanted ("the header named this item"), so
+    # a regex here was never buying anything it could not also give away. The
+    # SECOND grep stays -E: its pattern is a fixed alternation with an anchor
+    # and contains no interpolation.
+    if printf '%s\n' "$SWEEP_OUTPUT" | grep -qF "SUBITEM STATUS SWEEP: $ITEM_ID" \
        && printf '%s\n' "$SWEEP_OUTPUT" | grep -qE "ready to close\.|^  Legend:"; then
         SWEEP_RAN_OK="true"
     fi
@@ -462,6 +538,28 @@ while true; do
                 fi
             fi
         ' "$ITEM_ID")
+        _UX_RC=$?   # capture-first; 111 is the bridge's source-failure code
+
+        # XACA-1275-027: an UNREADABLE [UX] state must BLOCK, not proceed.
+        # This backstop is the ONLY protection for a CANCELLED [UX] subitem —
+        # a cancelled subitem is invisible to Gate 3's PROTECTED SUBITEMS
+        # marker by construction, which is exactly why this layer exists. The
+        # state is read through a bridge that ends in 2>/dev/null and exits 111
+        # when the helpers fail to source, so a broken read arrived as '' and
+        # was then compared against "cancelled": not equal, therefore "not
+        # cancelled", therefore proceed. Absence of the word is not evidence
+        # the subitem is live, and the one gate protecting this case must not
+        # be satisfied by its own failure to run.
+        if [ "$_UX_RC" -ne 0 ] || [ -z "$_UX_STAT" ]; then
+            printf '%s\n' "x could not read the [UX] subitem state for $ITEM_ID (helper rc=$_UX_RC)."
+            [ "$_UX_RC" -eq 111 ] && printf '%s\n' "  rc=111 is the helpers bridge failing to source kanban-helpers.sh."
+            printf '%s\n' "  The diff touches UI paths, so a CANCELLED [UX] here would need re-opening —"
+            printf '%s\n' "  and a cancelled [UX] is invisible to Gate 3, making this the only check for"
+            printf '%s\n' "  it. An unreadable state is not evidence that it is not cancelled."
+            printf '%s\n' "  Check KB_TEAM/KB_TERMINAL context and the kanban-helpers path, then re-enter."
+            verdict BLOCKED "could not read the [UX] subitem state for $ITEM_ID (helper rc=$_UX_RC)"
+        fi
+
         UX_STATE=""
         case "$_UX_STAT" in
             canc) UX_STATE="cancelled" ;;
@@ -469,7 +567,15 @@ while true; do
             todo) UX_STATE="todo" ;;
             in_p) UX_STATE="in_progress" ;;
             bloc) UX_STATE="blocked" ;;
-            *)    UX_STATE="$_UX_STAT" ;;
+            *)
+                # A token this script does not recognise is not "not cancelled"
+                # — it is a state it cannot vouch for, which on the only gate
+                # covering a cancelled [UX] is the same thing as unreadable.
+                printf '%s\n' "x unrecognised [UX] subitem state token '$_UX_STAT' for $ITEM_ID."
+                printf '%s\n' "  Expected one of TODO/COMP/CANC/IN_P/BLOC. A token this script cannot"
+                printf '%s\n' "  interpret is not evidence that [UX] is live; treating it as 'not"
+                printf '%s\n' "  cancelled' is the failure this guard exists to prevent."
+                verdict BLOCKED "unrecognised [UX] subitem state '$_UX_STAT' on $ITEM_ID" ;;
         esac
         if [ "$UX_STATE" = "cancelled" ]; then
             printf '%s\n' "x UI surface in diff but [UX] subitem was cancelled — re-opening UX gate."
@@ -584,22 +690,31 @@ CHECKS_EOF
         # terminal: when the budget is spent it BLOCKS. Nothing documents this
         # shape as "no CI here", and anomalous is never evidence of safety.
         if [ "$CLASSIFIED_CHECKS" -lt 1 ]; then
-            NO_CHECKS_RETRIES=$((NO_CHECKS_RETRIES + 1))
-            if [ "$NO_CHECKS_RETRIES" -lt 5 ]; then
-                printf '%s\n' "gh pr checks exited 0 for PR #$PR_NUM at $HEAD_SHA but 0 check rows were classified (poll $NO_CHECKS_RETRIES/5)"
+            # ZERO_ROWS_RETRIES, never NO_CHECKS_RETRIES (XACA-1275-024). These
+            # two arms share a SHAPE ("no checks visible") and a budget SIZE,
+            # but not a terminal: this one blocks, the other proceeds. Sharing
+            # one counter meant four polls here could be spent by a single poll
+            # there, and the printed count named polls this arm never made.
+            ZERO_ROWS_RETRIES=$((ZERO_ROWS_RETRIES + 1))
+            if [ "$ZERO_ROWS_RETRIES" -lt 5 ]; then
+                printf '%s\n' "gh pr checks exited 0 for PR #$PR_NUM at $HEAD_SHA but 0 check rows were classified (poll $ZERO_ROWS_RETRIES/5)"
                 printf '%s\n' "  — a just-landed push may not have registered its checks yet. Not assuming safe."
-                repoll_or_block 10 "gh pr checks rc=0 but 0 rows classified at $HEAD_SHA (poll $NO_CHECKS_RETRIES/5)"
+                repoll_or_block 10 "gh pr checks rc=0 but 0 rows classified at $HEAD_SHA (poll $ZERO_ROWS_RETRIES/5)"
                 continue
             fi
-            printf '%s\n' "x gh pr checks exited 0 but classified 0 check rows across $NO_CHECKS_RETRIES polls on $HEAD_SHA."
+            printf '%s\n' "x gh pr checks exited 0 but classified 0 check rows across $ZERO_ROWS_RETRIES polls on $HEAD_SHA."
             printf '%s\n' "  gh reports a genuinely check-less PR as an ERROR ('no checks reported'), NOT as rc=0 with an"
             printf '%s\n' "  empty array — so this is anomalous, and anomalous is not evidence that CI is safe."
             printf '%s\n' "  Investigate before merging; do NOT --admin past an unverified check set."
-            verdict BLOCKED "gh pr checks rc=0 classified 0 check rows at $HEAD_SHA after $NO_CHECKS_RETRIES polls"
+            verdict BLOCKED "gh pr checks rc=0 classified 0 check rows at $HEAD_SHA after $ZERO_ROWS_RETRIES polls"
         fi
         # Only NOW is "no CI configured" genuinely ruled out: >=1 row was
-        # classified by the loop above. This reset claims only that.
+        # classified by the loop above. That single fact rules out BOTH
+        # ambiguities at once, so BOTH budgets reset here — real check data is
+        # positive evidence against "no CI configured" and against "checks not
+        # registered yet" alike.
         NO_CHECKS_RETRIES=0
+        ZERO_ROWS_RETRIES=0
     fi
 
     if [ "$SYNC_TAP_BUCKET" = "fail" ] || [ "$SYNC_TAP_BUCKET" = "cancel" ]; then
