@@ -506,22 +506,57 @@ _resolve_target_repo_for_team() {
     return 0
   fi
 
-  local manifest_raw manifest_target_repo
-  manifest_raw=$(_deploy_field "$i" "targetRepo")
-  manifest_target_repo=$(_expand_path "$manifest_raw")
-  if [ -n "$manifest_target_repo" ] && [ -d "$manifest_target_repo" ]; then
-    echo "$manifest_target_repo"
-    return 0
-  fi
-
+  # Resolve the REGISTRY value first. It is the per-machine authority and it is
+  # what _is_hosted_here validates, so it must bound whatever we accept from the
+  # manifest -- see the containment check below.
   local working_dir_raw working_dir=""
   working_dir_raw=$(jq -r --arg t "$team" '.teams[$t].working_dir // empty' "$TEAM_PATHS_JSON" 2>/dev/null)
   if [ -n "$working_dir_raw" ]; then
     working_dir=$(_expand_path "$working_dir_raw")
-    if [ -d "$working_dir" ]; then
-      echo "$working_dir"
+  fi
+
+  local manifest_raw manifest_target_repo
+  manifest_raw=$(_deploy_field "$i" "targetRepo")
+  manifest_target_repo=$(_expand_path "$manifest_raw")
+
+  # XACA-1261 (PR #917 round-2 review): accepting the manifest path on bare
+  # `-d` existence was a real blind spot, reproduced live by the reviewer: a
+  # team validated as hosted (because the REGISTRY's working_dir holds a real
+  # git checkout) could have sync target a completely different, non-git, stale
+  # directory named only by the manifest -- silently, with no warning. We would
+  # validate one path and write to another.
+  #
+  # The manifest is authored per-team and correctly encodes shape (DNS deploys
+  # at its container, freelance at its container too since XACA-1260's revert),
+  # so we still PREFER it -- but only when it is the registry path itself or
+  # lives INSIDE it. In every measured real case on darren-m4-mini the two are
+  # equal, so containment costs nothing there; a manifest path pointing outside
+  # the registry's working_dir is by construction the stale-dev-machine-path
+  # case this whole consumer mode exists to stop trusting.
+  #
+  # Anything outside is refused LOUDLY rather than silently preferred or
+  # silently dropped: a wrong deployment target is worse than a missing row.
+  if [ -n "$manifest_target_repo" ] && [ -d "$manifest_target_repo" ]; then
+    if [ -z "$working_dir" ]; then
+      # No registry entry to bound it. _is_hosted_here already omits such a
+      # team in consumer mode, so this is effectively unreachable; prefer the
+      # manifest rather than inventing a second rule for a dead path.
+      echo "$manifest_target_repo"
       return 0
     fi
+    local canon_manifest canon_wd
+    canon_manifest=$(_canon_path "$manifest_target_repo") || canon_manifest="$manifest_target_repo"
+    canon_wd=$(_canon_path "$working_dir")                || canon_wd="$working_dir"
+    if [ "$canon_manifest" = "$canon_wd" ] || [ "${canon_manifest#"${canon_wd}"/}" != "$canon_manifest" ]; then
+      echo "$manifest_target_repo"
+      return 0
+    fi
+    _warn "[$team] manifest targetRepo ('$manifest_raw' -> '$canon_manifest') exists on this machine but lies OUTSIDE the registry's working_dir ('$working_dir_raw' -> '$canon_wd'). Refusing to deploy there: _is_hosted_here validates the registry path, so honouring the manifest here would validate one directory and write to another. Falling back to the registry path (XACA-1261)."
+  fi
+
+  if [ -n "$working_dir" ] && [ -d "$working_dir" ]; then
+    echo "$working_dir"
+    return 0
   fi
 
   # Neither resolved to a real directory. If _is_hosted_here already reported
@@ -2735,6 +2770,12 @@ T20_MANIFEST
   local t21_neither_working_dir="${tmp21}/does-not-exist-workingdir"
   local t21_neither_manifest_repo="${tmp21}/does-not-exist-manifest-targetrepo"
 
+  # t21-outside (PR #917 round-2 blocking finding): registry working_dir IS a
+  # real git checkout (so _is_hosted_here says hosted), while the manifest names
+  # a DIFFERENT, existing, non-git directory outside it. Must NOT be used.
+  local t21_outside="${tmp21}/OutsideStaleDir"
+  mkdir -p "$t21_outside"
+
   local t21_team_paths="${tmp21}/team-paths21.json"
   cat > "$t21_team_paths" <<T21_TEAM_PATHS
 {
@@ -2744,7 +2785,8 @@ T20_MANIFEST
     "t21-unhosted": { "working_dir": "${t21_unhosted_dir}" },
     "t21-dns": { "working_dir": "${t21_dns_container}" },
     "t21-freelance-pending": { "working_dir": "${t21_fl_container}" },
-    "t21-neither": { "working_dir": "${t21_neither_working_dir}" }
+    "t21-neither": { "working_dir": "${t21_neither_working_dir}" },
+    "t21-outside": { "working_dir": "${t21_hosted_repo}" }
   }
 }
 T21_TEAM_PATHS
@@ -2782,6 +2824,14 @@ T21_TEAM_PATHS
     {
       "team": "t21-freelance-pending",
       "targetRepo": "${tmp21}/dev-only-bogus-path-freelance-pending",
+      "targetDir": ".claude/agents",
+      "isGitRepo": true,
+      "exists": true,
+      "groups": ["t21-group"]
+    },
+    {
+      "team": "t21-outside",
+      "targetRepo": "${tmp21}/OutsideStaleDir",
       "targetDir": ".claude/agents",
       "isGitRepo": true,
       "exists": true,
@@ -2903,6 +2953,22 @@ T21_MANIFEST
   if [ -n "$t21_neither_line" ]; then
     t21_ok=false
     _err "[selftest] Test 21g: t21-neither row should be OMITTED from list (not hosted here) — got: $t21_neither_line"
+  fi
+
+  # 21h: manifest targetRepo that EXISTS but lies OUTSIDE the registry's
+  # working_dir must be refused and fall back to the registry path. Reproduces
+  # the reviewer's live case: validated one path, would have written another.
+  local t21_outside_line
+  t21_outside_line=$(printf '%s\n' "$t21_consumer_out" | grep -E '^t21-outside[[:space:]]') || t21_outside_line=""
+  if [ -z "$t21_outside_line" ]; then
+    t21_ok=false
+    _err "[selftest] Test 21h: t21-outside row missing; expected a row resolved to the REGISTRY path. output=$t21_consumer_out"
+  elif [[ "$t21_outside_line" == *"OutsideStaleDir"* ]]; then
+    t21_ok=false
+    _err "[selftest] Test 21h: manifest targetRepo OUTSIDE the registry working_dir was silently used as the deploy target -- validated one path, would write another; got: $t21_outside_line"
+  elif [[ "$t21_outside_line" != *"$t21_hosted_repo"* ]]; then
+    t21_ok=false
+    _err "[selftest] Test 21h: expected fallback to the registry working_dir ($t21_hosted_repo); got: $t21_outside_line"
   fi
 
   # --- 21d: negative control — same fixture, pre-fix (dev-mode) resolution path ---
