@@ -115,15 +115,25 @@ DO_MERGE="true"
 # (not portable to BSD). This script lives at <checkout>/scripts/kb-pr-monitor,
 # so <checkout>/kanban-helpers.sh is its sibling one directory up.
 #
-# The sibling is used ONLY when it actually exists there: a tap-installed
-# copy of this script has no such sibling — kanban-helpers.sh is not
-# tap-mirrored (only a template is, at
-# homebrew-tap/share/templates/kanban/kanban-helpers.template.sh) — so a tap
-# consumer keeps the historical $HOME/dev-team default untouched. This
-# resolution only ever changes which checkout's kanban-helpers.sh a
-# dev-team-tree run defaults to; it does not change behavior for anyone
-# relying on the old default, and KBPM_HELPERS set in the environment (every
-# existing test case sets it explicitly) always wins regardless.
+# The sibling is used ONLY when it actually exists there.
+#
+# XACA-1276-022 CORRECTION: an earlier version of this comment claimed a
+# tap-installed copy has NO such sibling, so a tap consumer would keep the
+# historical $HOME/dev-team default. That was FALSE about the installed
+# layout, and the claim is the kind a future maintainer would reason from.
+# The tap installs BOTH halves into the same tree: install-kanban.sh
+# materializes $AITEAMFORGE_DIR/kanban-helpers.sh (rendered from
+# share/templates/kanban/kanban-helpers.template.sh — the TEMPLATE is what
+# is mirrored, but it lands as a real kanban-helpers.sh), and
+# aiteamforge-upgrade.sh installs this script to $AITEAMFORGE_DIR/scripts/.
+# That is exactly the sibling-one-up shape, so a tap machine DOES resolve
+# its own installed helpers here.
+#
+# That is the desired behaviour, not a regression: before XACA-1276-021 a
+# tap machine resolved $HOME/dev-team, which on a consumer box does not
+# exist, so every run ended in USAGE_ERROR. It now resolves the helpers it
+# actually installed. Fail-closed is unchanged either way (see below), and
+# KBPM_HELPERS set in the environment always wins regardless.
 #
 # Fail-closed is UNCHANGED by this: whichever default is computed here, the
 # "kanban-helpers.sh not found at $KBPM_HELPERS" USAGE_ERROR check further

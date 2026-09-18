@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1276-022** — corrected a false invariant in `share/scripts/kb-pr-monitor`'s
+  `KBPM_HELPERS` resolution comment. It claimed a tap-installed copy has no sibling
+  `kanban-helpers.sh` and so keeps the `$HOME/dev-team` default; in fact `install-kanban.sh`
+  materializes `$AITEAMFORGE_DIR/kanban-helpers.sh` and `aiteamforge-upgrade.sh` installs this
+  script to `$AITEAMFORGE_DIR/scripts/` — exactly the sibling-one-up shape. Tap machines DO
+  resolve their own installed helpers, which is the desired behaviour (previously they resolved
+  a non-existent `$HOME/dev-team` and every run ended in `USAGE_ERROR`). Comment only; no
+  behaviour change.
 
 - XACA-1282 — Ship the XACA-1277 compaction-threshold premise ratchet
   (`share/scripts/kb-compaction-premise-check.sh`) to tap machines, and make it
