@@ -117,6 +117,34 @@ echo
 # everywhere it would newly land. The fix is not to loosen fail-closed; it is
 # to try more than exactly one path before giving up, and to say what was
 # tried when nothing is found.
+# XACA-1282-024 (PR #929 review): pick the newest VERSION-SHAPED entry, filtering
+# BEFORE taking the max. The previous `sort -V | tail -1` took the max over EVERY
+# entry and only then asked whether it parsed -- so a single unrelated directory
+# that sorts high silently disqualified an otherwise valid versions dir (measured:
+# 'staging' sorts above 2.1.276 under sort -V). The failure was doubly bad because
+# the remedy it printed (export CLAUDE_VERSIONS_DIR=<that very dir>) then failed
+# identically, sending the operator in a circle.
+#
+# Applied to BOTH the explicit-override branch and _candidate_ok, deliberately
+# going beyond the review finding's literal wording (it named _candidate_ok only).
+# The two sites had the IDENTICAL defect from the same copied line; fixing one and
+# leaving the other would have made the override path pass by coincidence.
+# Prints empty when no entry parses -- callers keep their own '<none>' wording.
+_newest_version_entry() {
+  find "$1" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' \
+    | sort -V | tail -1
+}
+
+# _non_version_entries <dir> -- space-joined basenames that did NOT parse, for the
+# failure message. An operator who sees "entries present: staging" can act; one who
+# sees only "<none>" against a visibly non-empty directory cannot.
+_non_version_entries() {
+  find "$1" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null \
+    | grep -Ev '^[0-9]+\.[0-9]+\.[0-9]+' \
+    | sort | tr '\n' ' '
+}
+
 if [ -n "${CLAUDE_VERSIONS_DIR:-}" ]; then
   VERSIONS_DIR="$CLAUDE_VERSIONS_DIR"
   if [ ! -d "$VERSIONS_DIR" ]; then
@@ -124,12 +152,13 @@ if [ -n "${CLAUDE_VERSIONS_DIR:-}" ]; then
     echo; echo "RESULT: could not verify (rc=$RC)"; exit "$RC"
   fi
   # SC2012: find, not ls, so odd directory entries cannot corrupt the parse.
-  VERSION=$(find "$VERSIONS_DIR" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null | sort -V | tail -1)
-  case "$VERSION" in
-    [0-9]*.[0-9]*.[0-9]*) : ;;
-    *) unver "A. newest entry in $VERSIONS_DIR is '${VERSION:-<none>}' — not a parseable version."
-       echo; echo "RESULT: could not verify (rc=$RC)"; exit "$RC" ;;
-  esac
+  VERSION=$(_newest_version_entry "$VERSIONS_DIR")
+  if [ -z "$VERSION" ]; then
+    _others=$(_non_version_entries "$VERSIONS_DIR")
+    _others=${_others% }
+    unver "A. newest entry in $VERSIONS_DIR is '<none>' — not a parseable version.${_others:+ (non-version entries present: $_others)}"
+    echo; echo "RESULT: could not verify (rc=$RC)"; exit "$RC"
+  fi
 else
   # No override given -- probe a short list of plausible install locations.
   # Every candidate is held to the SAME bar the explicit override always
@@ -162,11 +191,9 @@ else
   _candidate_ok() {
     _d="$1"
     [ -d "$_d" ] || return 1
-    _v=$(find "$_d" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null | sort -V | tail -1)
-    case "$_v" in
-      [0-9]*.[0-9]*.[0-9]*) _CAND_VERSION="$_v"; return 0 ;;
-      *) return 1 ;;
-    esac
+    _v=$(_newest_version_entry "$_d")
+    [ -n "$_v" ] || return 1
+    _CAND_VERSION="$_v"; return 0
   }
 
   # Candidates, in probe order. VERIFIED against this machine (M3Pro,
