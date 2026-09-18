@@ -173,6 +173,17 @@ if [ -n "${CLAUDE_VERSIONS_DIR:-}" ]; then
     _others=${_others% }
     if [ -n "$_others" ]; then
       unver "A. no version-shaped entry in $VERSIONS_DIR — present but unparseable: $_others"
+    elif [ ! -r "$VERSIONS_DIR" ] || [ ! -x "$VERSIONS_DIR" ]; then
+      # XACA-1282-028 (PR #929 review round 3): "(directory is empty)" was a claim
+      # this code never measured. _non_version_entries reaches zero entries via
+      # `find ... 2>/dev/null`, so an UNREADABLE directory (mode 000) that in fact
+      # CONTAINS entries reported itself as empty -- the same false-assertion class
+      # 027 was written to remove, reintroduced by 027's own fix. Worse, it pointed
+      # the operator at "install Claude Code" when the actual fix is a permission
+      # change. A directory needs BOTH r (list) and x (traverse) to enumerate, so
+      # both are checked; this matches the `[ ! -r "$BIN" ]` guard already applied
+      # to the binary further down.
+      unver "A. cannot enumerate $VERSIONS_DIR — not readable/searchable by $(id -un 2>/dev/null || echo "this user"). This is a PERMISSION problem, not a missing install: fix the mode, or point CLAUDE_VERSIONS_DIR at a readable copy."
     else
       unver "A. no version-shaped entry in $VERSIONS_DIR (directory is empty) — cannot re-derive the formula."
     fi
