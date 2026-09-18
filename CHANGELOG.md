@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.20.18] - 2026-09-18
+
 - **XACA-1266** — `kb-knowledge-sync.sh` no longer treats a dirty `~/knowledge` tree as a reason to
   skip the whole tick. It now fetches unconditionally and converges a dirty-but-not-diverged tree
   via `git merge --ff-only`. Previously the daemon refused BOTH halves of the sync whenever the tree
@@ -6720,7 +6722,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.17...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.18...HEAD
+[0.20.18]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.17...v0.20.18
 [0.20.17]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.16...v0.20.17
 [0.20.16]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.15...v0.20.16
 [0.20.15]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.14...v0.20.15
