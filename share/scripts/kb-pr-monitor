@@ -315,29 +315,61 @@ MERGE_UNKNOWN_RETRIES=0
 # each message counts only its own arm's observations.
 NO_CHECKS_RETRIES=0     # gh errored with "no checks reported"
 ZERO_ROWS_RETRIES=0     # gh exited 0 but the classifier saw no rows
-# ...AND ONE FACT THE TWO COUNTERS CANNOT CARRY BETWEEN THEM (XACA-1275-030).
-# Splitting the budgets closed "one arm spends the other's budget" and opened
-# its MIRROR: with the counters fully independent, neither terminal considers
-# the other arm's observations, so when gh never returns a usable answer at a
-# head the two arms RACE and the one that PROCEEDS wins on count. MEASURED on
-# the pre-fix script under /bin/bash 3.2, bash 5.3 and `zsh -f`: 4 zero-row
-# polls then 5 "no checks reported" polls reached VERDICT: GATES_PASSED and
-# invoked kb-merge (`--admin` in production) having classified ZERO CI rows;
-# a 6-poll form (1 zero-row + 5 "no checks reported") does it too, in both arm
-# orderings. The shared-counter version blocked that sequence — for the wrong
-# reason and with a false count, but it blocked.
+# ...AND ONE FACT NEITHER COUNTER CAN CARRY (XACA-1275-030, corrected by -031/
+# -032/-033). Splitting the budgets closed "one arm spends the other's budget"
+# and opened its MIRROR: with the counters fully independent, neither terminal
+# considers the other arm's observations, so when gh never returns a usable
+# answer at a head the two arms RACE and the one that PROCEEDS wins on count.
+#
+# MEASURED per cell (stub-gh, /bin/bash 3.2 and `zsh -f`, both shells agreed on
+# every cell). Poll order at ONE unchanged head; Z = gh rc=0 with zero
+# classified rows, N = gh's "no checks reported" error, P = one PENDING row:
+#
+#     shape      051fff30   5896b772   1bf05f50   now     (r1 / r2 / r3 / r4)
+#     ZZZZN      MERGE      re-polls   re-polls   re-polls
+#     ZNNNNN     MERGE      MERGE      BLOCK      BLOCK
+#     ZZZZNNNNN  MERGE      MERGE      BLOCK      BLOCK
+#     NNNNZN     BLOCK      MERGE      BLOCK      BLOCK   <- the ONE regression
+#     PNNNNN     MERGE      MERGE      MERGE      BLOCK   <- -031/-032, BLOCKING
+#     ZPNNNNN    MERGE      MERGE      MERGE      BLOCK   <- same defect
+#     NNNNN      MERGE      MERGE      MERGE      MERGE   <- must NEVER block
+#
+# "re-polls" means the shape produced no verdict within its own length — stated
+# rather than scored, because a run that ends on the harness's overrun sentinel
+# is not a measurement of the script.
+#
+# XACA-1275-033 — CORRECTING THE RECORD, NOT SOFTENING IT. Round 3 wrote that
+# "the shared-counter version blocked that sequence". Re-measured, that is
+# FALSE. At the split (051fff30 -> 5896b772) exactly ONE shape regressed:
+# NNNNZN. ZNNNNN and ZZZZNNNNN MERGED at 051fff30 too — they are PRE-EXISTING
+# fail-opens the split exposed rather than created — and ZZZZN is a defect the
+# split FIXED (MERGE -> re-polls). Crediting a baseline with blocks it never
+# performed hides which change owes which fix, and it is what made the last
+# row of the table above look like a closed case for three rounds.
 #
 # THE PRINCIPLE: taking the PROCEED path requires positive evidence that CI
 # genuinely is not configured at this head. "no checks reported" is gh's
 # documented signal for exactly that, which is why that arm may proceed on it.
-# But if this head has ALSO produced the anomalous rc=0-with-zero-rows shape,
-# the two observations CONTRADICT each other — gh does not report a
-# check-less PR both ways — and a contradicted signal is not evidence.
-# This flag is therefore not a third budget: it is sticky per head, set the
-# moment the anomalous shape is seen, and it only ever REMOVES the proceed
-# option. It is cleared in exactly the two places both counters are cleared:
-# on a head change, and when >=1 real check row is finally classified.
-ZERO_ROWS_SEEN="false"  # anomalous rc=0/zero-rows seen at THIS head
+# ANY observation at the SAME head that contradicts "there is no CI here"
+# withdraws that option, because a contradicted signal is not evidence:
+#   * the anomalous rc=0-with-zero-rows shape — gh does not report a check-less
+#     PR both ways, so the two answers cannot both describe this head; and
+#   * >=1 CLASSIFIED CHECK ROW — a STRONGER contradiction, because a row is a
+#     check that demonstrably exists. XACA-1275-031/-032, BLOCKING: that site
+#     used to CLEAR this flag, borrowing the counters' clear-on-real-data
+#     rationale. The rationale is right for a BUDGET (real data proves the
+#     "not registered yet" gap is over) and BACKWARDS for this FLAG (real data
+#     proves CI is present, which IS the contradiction). MEASURED, both shells:
+#     P then NNNNN at one unchanged head reached GATES_PASSED and invoked
+#     kb-merge, printing "CI still running/unresolved" and "treating as
+#     genuinely no CI configured" five polls apart about the same head.
+#
+# So this is not a third budget. It is a per-head record of what contradicts
+# "no CI here"; it only ever REMOVES the proceed option; and it is cleared in
+# exactly ONE place — a head change, where every per-head observation is void.
+# It holds the REASON, not a boolean, so the refusal below can name the
+# contradiction it actually saw instead of asserting one shape for both.
+CI_ABSENCE_CONTRADICTED=""   # non-empty => this head contradicted "no CI here"
 PREV_HEAD_SHA=""
 FORCE_PUSH_CUTOFF=""
 
@@ -396,7 +428,10 @@ while true; do
     if [ -n "$PREV_HEAD_SHA" ] && [ "$HEAD_SHA" != "$PREV_HEAD_SHA" ]; then
         printf 'Head SHA changed (%s -> %s) — a push landed. Resetting both gate latches.\n' "$PREV_HEAD_SHA" "$HEAD_SHA"
         TEST_OK="false"; REVIEW_OK="false"; NO_CHECKS_RETRIES=0; ZERO_ROWS_RETRIES=0
-        ZERO_ROWS_SEEN="false"   # sticky per HEAD, so a new head starts clean
+        # The ONLY clear site (XACA-1275-032). Every contradiction this flag
+        # records is an observation ABOUT a specific head, so a new head voids
+        # it — and nothing else does.
+        CI_ABSENCE_CONTRADICTED=""
 
         # Force-push / rebase detection. The committer-date guard below assumes
         # the new head's committer date is newer than any stale review pointed
@@ -505,7 +540,8 @@ while true; do
     printf '%s\n' "$SWEEP_OUTPUT"
 
     SWEEP_RAN_OK="false"
-    # LITERAL **and** END-ANCHORED (XACA-1275-026 then -027). This needle
+    # LITERAL, START-ANCHORED **and** END-ANCHORED (XACA-1275-026, -027, -034).
+    # This needle
     # carries a caller-supplied value and is the positive evidence the gate is
     # made of, so both properties are required and neither implies the other:
     #   * LITERAL, because `--item '.*'` under grep -qE turned "prove the
@@ -517,11 +553,29 @@ while true; do
     #     was satisfied by a header reading "SUBITEM STATUS SWEEP: XACA-1275",
     #     and that run also reached GATES_PASSED. XACA-127 is a well-formed id
     #     that passes the validation above, so validation does not cover this.
-    # grep -F cannot express "literal, at end of line", so the match is done in
-    # awk: index() is a literal search (no regex applies to `want`), and the
-    # remainder after the match must be whitespace-only. kb-sweep prints the
-    # header as "  SUBITEM STATUS SWEEP: <id>" with nothing after the id, so
-    # allowing only trailing whitespace is exact rather than lenient.
+    #   * START-ANCHORED, because an end anchor alone still let index() match
+    #     the needle ANYWHERE on the line — VERIFIED (XACA-1275-034, BLOCKING):
+    #     a sweep whose real header read "SUBITEM STATUS SWEEP: XACA-9999",
+    #     carrying a subitem TITLE row that merely ENDED with "SUBITEM STATUS
+    #     SWEEP: XACA-127", satisfied this gate under `--item XACA-127` and the
+    #     run reached GATES_PASSED and merged. That is the same title-hijack
+    #     class the RESIDUAL banner below already guards with `^  [^ \[]`, and
+    #     it defeats the exact property Gate 3 exists for: proving kb-sweep
+    #     resolved THIS working_id and not another one.
+    # grep -F cannot express "literal, anchored", so the match is done in awk:
+    # index() is a literal search (no regex ever applies to `want`), and BOTH
+    # sides of the match must then be whitespace-only — i.e. the whole line is
+    # the header. kb-sweep prints it as "  SUBITEM STATUS SWEEP: <id>" with
+    # nothing before but indentation and nothing after (kanban-helpers.sh), and
+    # every OTHER line it prints that could quote the phrase — a status row, a
+    # PROTECTED/RESIDUAL bullet — carries "[idx] [STAT]" or "- " before it, so
+    # a whitespace-only prefix rejects all of them.
+    # Deliberately NOT keyed to the exact two-space indent: matching any leading
+    # whitespace rejects every hijack shape kb-sweep can actually emit while not
+    # making this gate fail closed on a cosmetic indentation change elsewhere.
+    # index() returns the FIRST occurrence only, and that costs nothing here: if
+    # the first one has non-whitespace before it, so does every later one (the
+    # first occurrence is itself non-whitespace), so no header can be missed.
     # Portable across BSD awk (macOS) and gawk: no gawk-only 3-arg match(), no
     # \< word boundaries. `awk -v` does interpret backslash escapes in the
     # assigned value; ITEM_ID is validated above to alphanumeric segments
@@ -531,7 +585,9 @@ while true; do
     if printf '%s\n' "$SWEEP_OUTPUT" | awk -v want="SUBITEM STATUS SWEEP: $ITEM_ID" '
            {
                i = index($0, want)
-               if (i > 0 && substr($0, i + length(want)) ~ /^[[:space:]]*$/) { found = 1; exit }
+               if (i > 0 &&
+                   substr($0, 1, i - 1) ~ /^[[:space:]]*$/ &&
+                   substr($0, i + length(want)) ~ /^[[:space:]]*$/) { found = 1; exit }
            }
            END { exit !found }' \
        && printf '%s\n' "$SWEEP_OUTPUT" | grep -qE "ready to close\.|^  Legend:"; then
@@ -671,14 +727,15 @@ while true; do
             # itself permission to proceed. If this head has also produced the
             # anomalous rc=0/zero-rows shape, the two observations contradict
             # each other and neither is evidence of a check-less PR.
-            if [ "$ZERO_ROWS_SEEN" = "true" ]; then
-                printf '%s\n' "x 'no checks reported' was observed on $NO_CHECKS_RETRIES polls at $HEAD_SHA, but this SAME head has"
-                printf '%s\n' "  also answered rc=0 with zero classified check rows. gh reports a genuinely check-less PR"
-                printf '%s\n' "  ONE way — as that error — so the two shapes CONTRADICT each other, and a contradicted"
-                printf '%s\n' "  signal is not evidence that CI is absent. Proceeding here would merge on the reassuring"
-                printf '%s\n' "  half of an answer the script could not evaluate."
+            if [ -n "$CI_ABSENCE_CONTRADICTED" ]; then
+                printf '%s\n' "x 'no checks reported' was observed on $NO_CHECKS_RETRIES polls at $HEAD_SHA, but this SAME head"
+                printf '%s\n' "  has also produced: $CI_ABSENCE_CONTRADICTED."
+                printf '%s\n' "  gh reports a genuinely check-less PR exactly ONE way — as that error — so the two"
+                printf '%s\n' "  observations CONTRADICT each other, and a contradicted signal is not evidence that CI is"
+                printf '%s\n' "  absent. Proceeding here would merge on the reassuring half of an answer the script could"
+                printf '%s\n' "  not evaluate."
                 printf '%s\n' "  Investigate before merging; do NOT --admin past an unverified check set."
-                verdict BLOCKED "'no checks reported' contradicted by rc=0/zero-rows at the same head $HEAD_SHA"
+                verdict BLOCKED "'no checks reported' contradicted at the same head $HEAD_SHA by: $CI_ABSENCE_CONTRADICTED"
             fi
             # XACA-1275-025: "observed on N polls", NOT "persisted N polls".
             # The counter accumulates its own arm's observations wherever they
@@ -754,12 +811,12 @@ CHECKS_EOF
         # terminal: when the budget is spent it BLOCKS. Nothing documents this
         # shape as "no CI here", and anomalous is never evidence of safety.
         if [ "$CLASSIFIED_CHECKS" -lt 1 ]; then
-            # Sticky for THIS head (XACA-1275-030), set BEFORE the budget test
-            # so it is recorded even on the poll that goes on to block. It is
-            # read by the "no checks reported" terminal above, which may
-            # otherwise proceed; this arm's own terminal already blocks, so
-            # the flag never changes what happens here.
-            ZERO_ROWS_SEEN="true"
+            # Sticky for THIS head (XACA-1275-030), recorded BEFORE the budget
+            # test so it survives the poll that goes on to block. It is read by
+            # the "no checks reported" terminal above, which may otherwise
+            # proceed; this arm's own terminal already blocks, so recording it
+            # never changes what happens here.
+            CI_ABSENCE_CONTRADICTED="gh pr checks rc=0 with zero classified check rows"
             # ZERO_ROWS_RETRIES, never NO_CHECKS_RETRIES (XACA-1275-024). These
             # two arms share a SHAPE ("no checks visible") and a budget SIZE,
             # but not a terminal: this one blocks, the other proceeds. Sharing
@@ -778,14 +835,27 @@ CHECKS_EOF
             printf '%s\n' "  Investigate before merging; do NOT --admin past an unverified check set."
             verdict BLOCKED "gh pr checks rc=0 classified 0 check rows at $HEAD_SHA after $ZERO_ROWS_RETRIES polls"
         fi
-        # Only NOW is "no CI configured" genuinely ruled out: >=1 row was
-        # classified by the loop above. That single fact rules out BOTH
-        # ambiguities at once, so BOTH budgets reset here — real check data is
-        # positive evidence against "no CI configured" and against "checks not
-        # registered yet" alike.
+        # >=1 row was classified by the loop above. That single fact does two
+        # DIFFERENT things, and conflating them is what XACA-1275-031/-032
+        # found (BLOCKING).
+        #
+        # For the two BUDGETS it is a RESET. Both count polls in which gh could
+        # not show us the checks; real data proves that window is over, and a
+        # later window deserves its own full budget.
         NO_CHECKS_RETRIES=0
         ZERO_ROWS_RETRIES=0
-        ZERO_ROWS_SEEN="false"
+        # For the CONTRADICTION RECORD it is the opposite — a SET, not a clear.
+        # This head has now shown a check that demonstrably exists, which is the
+        # strongest possible contradiction of "there is genuinely no CI
+        # configured here". Clearing here re-armed the proceed terminal and was
+        # defeated by a single intervening classified poll: MEASURED, both
+        # shells, at one unchanged head, `build|pending` followed by five "no
+        # checks reported" polls reached GATES_PASSED and invoked kb-merge.
+        # A pass/skipping row is recorded too, deliberately: this arm proceeds
+        # past here on its own evidence, so the record only matters if gh LATER
+        # claims at this same head that there are no checks at all — a claim
+        # that any earlier row contradicts regardless of that row's bucket.
+        CI_ABSENCE_CONTRADICTED="$CLASSIFIED_CHECKS classified check row(s) at this head"
     fi
 
     if [ "$SYNC_TAP_BUCKET" = "fail" ] || [ "$SYNC_TAP_BUCKET" = "cancel" ]; then
