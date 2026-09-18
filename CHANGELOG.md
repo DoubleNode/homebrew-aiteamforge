@@ -48,6 +48,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   recognized as a finding at all and gates nothing on merge (though it still blocks `kb-done`); only
   a malformed tag within an intact class prefix is blocking. Comments corrected to match the
   already-tested behaviour; no predicate logic changed.
+- **XACA-1276** — `share/scripts/kb-pr-monitor` was 393 lines stale against canonical: it still
+  shipped Gate 3's pre-XACA-1281 bare `index($0, want)` header check instead of the full-line
+  string-equality fix, so every consumer's merge gate carried a measured, forgeable fail-open
+  (a bare-continuation subitem title could satisfy Gate 3's sweep-header check). Re-mirrored the
+  full file from canonical `scripts/kb-pr-monitor` to close the gap, and picked up two fixes along
+  with it: (020) Gate 3's UX Layer-2 backstop now captures the rc of `gh pr diff --name-only`
+  before filtering it, so a failed read (HTTP 406 on a 300+ file PR) is treated as an explicit
+  unknown and re-opens `[UX]` instead of silently reading as "no UI files touched"; (021)
+  `KBPM_HELPERS`'s default now resolves relative to the checkout this script itself lives in
+  (captured via `$0` at top level, before any function reads it — zsh sets `$0` to the *function's*
+  name inside a function body, which silently broke a naive in-function resolution) rather than a
+  hardcoded `$HOME/dev-team/kanban-helpers.sh`, so a worktree-style install no longer silently
+  sources an unrelated checkout's helpers; falls back to the historical default when no sibling
+  `kanban-helpers.sh` exists next to the script (this tap's own installed shape — the file is not
+  itself tap-mirrored), and an unresolvable helpers file still fails closed exactly as before.
 
 ## [0.20.18] - 2026-09-18
 

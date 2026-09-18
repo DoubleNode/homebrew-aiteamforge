@@ -90,6 +90,10 @@ DO_MERGE="true"
 KBPM_HELPERS="${KBPM_HELPERS:-$HOME/dev-team/kanban-helpers.sh}"
 KBPM_PIDFILE=""
 KBPM_RCFILE=""
+# XACA-1281-002: durable, head-keyed home for the Gate 3.5 CI-absence
+# contradiction record (see _kbpm_ca_* below). Override for tests — a test
+# MUST NEVER write into the live ~/.aiteamforge tree.
+KBPM_STATE_DIR="${KBPM_STATE_DIR:-$HOME/.aiteamforge/run/kb-pr-monitor}"
 
 # PUBLISHER_LOGIN (the aiteamforge-publisher[bot] App identity) is no longer
 # declared here: XACA-1276-006 replaced the Gate-4 author-identity check it
@@ -180,6 +184,84 @@ _x1159_rank() {
         "")            printf 0 ;;
         *)             printf 2 ;;   # pending, or a state gh does not name
     esac
+}
+
+# ── Gate 3.5 CI-absence contradiction record — durable + head-keyed (XACA-1281-002) ──
+# CI_ABSENCE_CONTRADICTED (set further below) is a per-PROCESS shell variable:
+# cleared on head change (correct — a new head's observations are unrelated)
+# but ALSO gone the moment this process exits or restarts (wrong — the fact it
+# records, "gh contradicted itself at this exact commit", does not expire when
+# a process does). MEASURED: process A observed a pending check row followed
+# by 5x "no checks reported" at one head and correctly BLOCKED; a fresh
+# process B polling the SAME unchanged head, having never seen the pending row
+# itself, saw only "no checks reported" and reached GATES_PASSED + merged.
+# Separately, a force-push back onto a PREVIOUSLY-contradicted head plus a
+# fresh bot re-review reproduces the same forgetting within a single run: the
+# in-process latch is cleared on every head change, including a return to a
+# head this same process already flagged.
+#
+# The fix persists the record on disk, keyed by (repo, PR, head SHA) —
+# IDENTITY, not recency or process lifetime — under $KBPM_STATE_DIR (override
+# for tests; production default is a real per-machine state tree, never
+# `/tmp`, so the record outlives a single run the way the fact it records
+# does). A head change still clears the IN-PROCESS latch a few lines below
+# (still correct), but deliberately does NOT touch anything under
+# $KBPM_STATE_DIR — keying the persisted record by head SHA identity, rather
+# than clearing it on head change, is the entire point of this fix.
+#
+# HEAD_SHA is sanitized to a plausible git object id (lowercase/uppercase hex)
+# before it is ever used as a path component. `gh` should never hand back
+# anything else, but this is the state layer's only line of defense if it
+# someday does, and refusing silently would be worse than the bug it fixes —
+# an unrecognisable id is treated as "state for this head cannot be
+# resolved", which the one call site that matters (the PROCEED decision at
+# the "no checks reported" terminal) turns into a BLOCK, never a shrug.
+_kbpm_ca_dir() {
+    printf '%s/%s/%s\n' "$KBPM_STATE_DIR" "$REPO_OWNER" "$REPO_NAME"
+}
+
+_kbpm_ca_file() {
+    _ca_head="$1"
+    case "$_ca_head" in
+        ""|*[!0-9a-fA-F]*) return 1 ;;
+    esac
+    printf '%s/%s.%s.contradicted\n' "$(_kbpm_ca_dir)" "$PR_NUM" "$_ca_head"
+}
+
+# Best-effort write. This is NEVER the fail-closed decision point — a write
+# failure here must not block ordinary polling (only the PROCEED read at the
+# terminal does that). Non-zero return exists purely so the call site can log
+# it; nothing branches on it, and both call sites already block on their own
+# per-arm budget regardless of whether the write below succeeds.
+_kbpm_ca_write() {
+    _ca_desc="$1"; _ca_head="$2"
+    _ca_file=$(_kbpm_ca_file "$_ca_head") || return 1
+    mkdir -p "$(_kbpm_ca_dir)" 2>/dev/null || return 1
+    printf '%s\n' "$_ca_desc" > "$_ca_file" 2>/dev/null
+}
+
+# Tri-state read for the ONE decision point that must fail closed:
+#   prints the record, returns 0  -> a process (this one or a prior one)
+#                                    recorded a contradiction at this exact
+#                                    head — do not proceed.
+#   prints nothing, returns 1     -> no record on file; the state dir itself
+#                                    is confirmed usable. Genuinely clean.
+#   prints nothing, returns 2     -> could not tell (state dir uncreatable,
+#                                    record unreadable, or HEAD_SHA did not
+#                                    look like a git object id). NEVER treat
+#                                    this the same as "clean".
+_kbpm_ca_read() {
+    _ca_head="$1"
+    _ca_file=$(_kbpm_ca_file "$_ca_head") || return 2
+    if [ -f "$_ca_file" ]; then
+        cat "$_ca_file" 2>/dev/null && return 0
+        return 2
+    fi
+    # No file yet — but that reads as "clean" only once the directory tree
+    # itself is confirmed usable; a state dir that cannot even be created
+    # must not be silently reported as "nothing on file".
+    mkdir -p "$(_kbpm_ca_dir)" 2>/dev/null || return 2
+    return 1
 }
 
 # ── argument parsing ────────────────────────────────────────────────────────
@@ -281,6 +363,36 @@ case "$REPO" in
 esac
 REPO_OWNER="${REPO%%/*}"
 REPO_NAME="${REPO##*/}"
+
+# XACA-1281-012/-013 (round 2, both gate bots): REPO_OWNER/REPO_NAME are used
+# UNVALIDATED as path components in _kbpm_ca_dir (and, below, in
+# KBPM_PIDFILE's filename) — a pre-existing pattern for the pidfile, but this
+# ticket promoted it from a single /tmp filename to a directory TREE under
+# $KBPM_STATE_DIR, meaningfully widening the blast radius of a malicious
+# --repo value ('../' segments writing the contradiction record outside
+# $KBPM_STATE_DIR entirely). The split on `/` above means neither variable can
+# itself contain a "/" — but each can independently be exactly "." or ".."
+# (e.g. --repo '../evil' yields REPO_OWNER='..'; --repo 'owner/..' yields
+# REPO_NAME='..'), which is the actual traversal vector, and each is also
+# exposed to every other unvalidated character a caller cares to pass. Same
+# treatment ITEM_ID and PR_NUM already get above: validated at parse time,
+# loud USAGE_ERROR on rejection, not a silent fallback. This validation runs
+# BEFORE line ~368 builds KBPM_PIDFILE from these same variables, so that
+# pre-existing site is covered for free — no separate fix needed there.
+case "$REPO_OWNER" in
+    ''|*[!A-Za-z0-9._-]*)
+        verdict USAGE_ERROR "--repo owner segment may contain only letters, digits, '.', '_' and '-' (got '$REPO_OWNER')" ;;
+esac
+case "$REPO_OWNER" in
+    .|..) verdict USAGE_ERROR "--repo owner segment must not be '.' or '..' (got '$REPO_OWNER')" ;;
+esac
+case "$REPO_NAME" in
+    ''|*[!A-Za-z0-9._-]*)
+        verdict USAGE_ERROR "--repo name segment may contain only letters, digits, '.', '_' and '-' (got '$REPO_NAME')" ;;
+esac
+case "$REPO_NAME" in
+    .|..) verdict USAGE_ERROR "--repo name segment must not be '.' or '..' (got '$REPO_NAME')" ;;
+esac
 
 if [ ! -f "$KBPM_HELPERS" ]; then
     verdict USAGE_ERROR "kanban-helpers.sh not found at $KBPM_HELPERS"
@@ -435,9 +547,16 @@ while true; do
     if [ -n "$PREV_HEAD_SHA" ] && [ "$HEAD_SHA" != "$PREV_HEAD_SHA" ]; then
         printf 'Head SHA changed (%s -> %s) — a push landed. Resetting both gate latches.\n' "$PREV_HEAD_SHA" "$HEAD_SHA"
         TEST_OK="false"; REVIEW_OK="false"; NO_CHECKS_RETRIES=0; ZERO_ROWS_RETRIES=0
-        # The ONLY clear site (XACA-1275-032). Every contradiction this flag
-        # records is an observation ABOUT a specific head, so a new head voids
-        # it — and nothing else does.
+        # The ONLY clear site (XACA-1275-032) for the IN-PROCESS latch. Every
+        # contradiction this flag records is an observation ABOUT a specific
+        # head, so a new head voids it — and nothing else does.
+        # XACA-1281-002: this clears ONLY the in-memory variable. The durable,
+        # on-disk record under $KBPM_STATE_DIR (_kbpm_ca_* below) is keyed by
+        # head SHA identity and is deliberately left untouched here — it
+        # belongs to the OLD head, which still exists and can still be
+        # returned to by a force-push-back, and "a head change happened" is
+        # not evidence that gh's earlier self-contradiction at that older SHA
+        # stopped being true.
         CI_ABSENCE_CONTRADICTED=""
 
         # Force-push / rebase detection. The committer-date guard below assumes
@@ -564,76 +683,176 @@ while true; do
     printf '%s\n' "$SWEEP_OUTPUT"
 
     SWEEP_RAN_OK="false"
-    # LITERAL, START-ANCHORED **and** END-ANCHORED (XACA-1275-026, -027, -034).
-    # This needle
-    # carries a caller-supplied value and is the positive evidence the gate is
-    # made of, so both properties are required and neither implies the other:
-    #   * LITERAL, because `--item '.*'` under grep -qE turned "prove the
-    #     header named MY item" into "prove it named anything" — VERIFIED: a
-    #     header reading "SUBITEM STATUS SWEEP: XACA-9999" satisfied the gate
-    #     and the run reached GATES_PASSED.
-    #   * END-ANCHORED, because switching to grep -qF fixed the metacharacter
-    #     hole and left a PREFIX hole behind it — VERIFIED: `--item XACA-127`
-    #     was satisfied by a header reading "SUBITEM STATUS SWEEP: XACA-1275",
-    #     and that run also reached GATES_PASSED. XACA-127 is a well-formed id
-    #     that passes the validation above, so validation does not cover this.
-    #   * START-ANCHORED, because an end anchor alone still let index() match
-    #     the needle ANYWHERE on the line — VERIFIED (XACA-1275-034, BLOCKING):
-    #     a sweep whose real header read "SUBITEM STATUS SWEEP: XACA-9999",
-    #     carrying a subitem TITLE row that merely ENDED with "SUBITEM STATUS
-    #     SWEEP: XACA-127", satisfied this gate under `--item XACA-127` and the
-    #     run reached GATES_PASSED and merged. That is the same title-hijack
-    #     class the RESIDUAL banner below already guards with `^  [^ \[]`, and
-    #     it defeats the exact property Gate 3 exists for: proving kb-sweep
-    #     resolved THIS working_id and not another one.
-    # grep -F cannot express "literal, anchored", so the match is done in awk:
-    # index() is a literal search (no regex ever applies to `want`), and BOTH
-    # sides of the match must then be whitespace-only — i.e. the whole line is
-    # the header. kb-sweep prints it as "  SUBITEM STATUS SWEEP: <id>" with
-    # nothing before but indentation and nothing after (kanban-helpers.sh), and
-    # every OTHER line it prints that could quote the phrase — a status row, a
-    # PROTECTED/RESIDUAL bullet — carries "[idx] [STAT]" or "- " before it, so
-    # a whitespace-only prefix rejects all of them.
-    # Deliberately NOT keyed to the exact two-space indent: matching any leading
-    # whitespace rejects every hijack shape kb-sweep can actually emit while not
-    # making this gate fail closed on a cosmetic indentation change elsewhere.
-    # index() returns the FIRST occurrence only, and that costs nothing here: if
-    # the first one has non-whitespace before it, so does every later one (the
-    # first occurrence is itself non-whitespace), so no header can be missed.
-    # Portable across BSD awk (macOS) and gawk: no gawk-only 3-arg match(), no
-    # \< word boundaries. `awk -v` does interpret backslash escapes in the
-    # assigned value; ITEM_ID is validated above to alphanumeric segments
-    # joined by single hyphens, so it contains no backslash by construction.
-    # The SECOND grep stays -E: a fixed alternation with an anchor, no
-    # interpolation.
+    # WHAT kb-sweep ACTUALLY EMITS (kanban-helpers.sh, verified by reading the
+    # emitter, not assumed): a top box-rule line, "  SUBITEM STATUS SWEEP:
+    # <id>", a bottom box-rule line, then (populated case) one status ROW per
+    # subitem shaped "  <icon> <sub_id>: <title>" — e.g. "  [✓] XACA-1-002:
+    # <title>" — followed eventually by "  Legend: [✓] completed  [/]
+    # cancelled  [●] in_progress  [!] blocked  [ ] todo"; or (empty case) the
+    # single line "  No subitems found — ready to close." printed immediately
+    # before the closing box-rule. Either way, kb-sweep ALSO prints a terminal
+    # "SWEEP COMPLETE: <id> blocking=<N> advisory=<M>" line right before that
+    # closing box-rule, on every completion path (XACA-1276-002). A PRIOR
+    # version of this comment claimed every non-header line carries a "[idx]
+    # [STAT]" prefix — that shape does not exist anywhere in the emitter and
+    # was never true; a status ROW's prefix is the icon + id, nothing more.
+    # The real hazard is that `sub_title` is caller-controlled board data: a
+    # subitem title containing an embedded newline prints as a BARE
+    # continuation line with NO prefix at all (not even the two-space
+    # indent), because printf reproduces the newline literally. That bare
+    # line is the entire attack surface for both halves below — a forged
+    # line with no prefix can equal the header text or the sentinel text
+    # byte-for-byte.
     #
-    # XACA-1276-003 — the SECOND half of the positive-evidence pair. Same
-    # literal+anchored index() technique as the header check above (a
+    # HALF A — header. LITERAL, START-ANCHORED, END-ANCHORED **and now
+    # RULE-ADJACENT**. The first three were each bought by a measured
+    # GATES_PASSED escape and must not regress:
+    #   * LITERAL — `--item '.*'` under grep -qE turned "prove the header
+    #     named MY item" into "prove it named anything" (XACA-1275-026).
+    #   * END-ANCHORED — grep -qF closed the metacharacter hole but left a
+    #     PREFIX hole: `--item XACA-127` was satisfied by a header reading
+    #     "...XACA-1275" (XACA-1275-027).
+    #   * START-ANCHORED — an end anchor alone still let a match land
+    #     anywhere on the line: a subitem TITLE row that merely ENDED with
+    #     "SUBITEM STATUS SWEEP: XACA-127" satisfied `--item XACA-127` and
+    #     reached GATES_PASSED (XACA-1275-034).
+    # All three are now enforced by doing FULL-LINE STRING EQUALITY
+    # (`trim(line) == want`) instead of a substring/prefix/suffix test —
+    # equality is strictly stronger than anchoring both ends, and `want` is
+    # compared as a literal awk string, never a regex, so nothing in ITEM_ID
+    # is ever interpreted as a pattern.
+    #   * RULE-ADJACENT (XACA-1281-001) — full-line equality alone is still
+    #     satisfiable by a BARE CONTINUATION line: a multi-line subitem title
+    #     whose second line reads exactly "SUBITEM STATUS SWEEP: <id>" has no
+    #     prefix to reject it. MEASURED to reach GATES_PASSED. The header is
+    #     therefore accepted only when the line immediately BEFORE it and the
+    #     line immediately AFTER it are each, on their own, entirely
+    #     box-rule characters — the shape kb-sweep's real header is always
+    #     sandwiched in and a lone forged line is not.
+    #   * EXACTLY-ONE (XACA-1281-012, round 2 — CLOSES THE CLASS, not the
+    #     instance). Round 1's comment above conceded that "forging all three
+    #     lines at once would require the attacker to already control the
+    #     board data adjacent to the header on both sides" and stopped there.
+    #     That is false: a SINGLE subitem title with TWO embedded newlines —
+    #     "\n═\nSUBITEM STATUS SWEEP: <other-id>\n═" — reproduces a complete
+    #     rule/header/rule sandwich from one attacker-controlled field, no
+    #     second subitem or adjacent board data required. MEASURED reaching
+    #     GATES_PASSED end-to-end under both bash and zsh. The structural fact
+    #     that closes this: kb-sweep prints its OWN header sandwich exactly
+    #     ONCE, and it is the FIRST thing the function emits (kanban-helpers.sh
+    #     ~7216-7221 — blank line, rule, header, rule, THEN the subitem table).
+    #     Every subitem title — the only text an attacker controls — prints
+    #     LATER, inside the table, so a forged sandwich can only ever be an
+    #     ADDITIONAL rule-sandwiched header-shaped line, never the first/only
+    #     one a genuine sweep produces. So: count every line that is BOTH
+    #     header-shaped (starts with the fixed "SUBITEM STATUS SWEEP: "
+    #     prefix — checked generically, not against `want`, so a forged
+    #     sandwich naming a DIFFERENT id is counted too) and rule-sandwiched.
+    #     Exactly one such line may exist; two or more is itself positive
+    #     evidence of forgery (a real sweep cannot produce a second) and
+    #     BLOCKS regardless of which id either one names — no "first match
+    #     wins" fallback. The one that exists must additionally equal `want`.
+    # Box-rule detection is NOT keyed to the rule's exact character count —
+    # it strips every "═" from the trimmed line and accepts it as a rule iff
+    # nothing but "═" was there, so a cosmetic width change in
+    # kanban-helpers.sh does not make this gate unpassable.
+    # Portable across BSD awk (macOS "one true awk") and gawk: no gawk-only
+    # 3-arg match(), no \< word boundaries, no character-class bracket
+    # expressions built from the multi-byte "═" (gsub with it used as a plain
+    # literal pattern is byte-safe in both). `awk -v` interprets backslash
+    # escapes in the assigned value; ITEM_ID is validated above to
+    # alphanumeric segments joined by single hyphens, so it contains no
+    # backslash by construction. `want`/`hdr_prefix` are compared with plain
+    # string equality/`index()`, never gsub'd as a pattern, so multi-byte
+    # characters (═) are byte-safe in both awk implementations too.
+    #
+    # HALF B — completion. XACA-1276-003 (severity taxonomy §4/§11.1, the
+    # XACA-1201 fold) REPLACES the "ready to close."/"Legend:" evidence
+    # entirely, rather than hardening it further, because that evidence was a
+    # LIVE FAIL-OPEN no amount of anchoring on ITS OWN text can close:
+    # kb-sweep prints "Legend:" BEFORE the protected-subitem loop and its
+    # SWEEP COMPLETE marker, so any abort in that window (a failed fork, an
+    # undefined function, `set -u`, a signal) leaves an UNFORGED, byte-exact
+    # "Legend:" line on stdout with no marker at all. XACA-1281-013's
+    # full-line-equality hardening (kept above, for HALF A) closes a FORGERY
+    # of that text; it cannot close a genuine, mid-sweep-abort print of it,
+    # because the real fixed string is what full-line equality is designed
+    # to accept. Reproduced end-to-end by the PR #881 reviewer under
+    # `ulimit -u` fork pressure. The sentinel is printed by kb-sweep AFTER
+    # the protected-subitem check on every completion path
+    # (kanban-helpers.sh), so its absence now means the sweep did not
+    # actually finish — "Legend:"/"ready to close." are no longer accepted
+    # as evidence of anything, hardened or not. Same literal+anchored
+    # index() technique as HALF A's original (pre-rule-adjacency) form: a
     # per-subitem TITLE row always starts "  [", so a whitespace-only prefix
-    # before the needle rejects every hijack shape); the suffix pattern pins
+    # before the needle rejects every hijack shape; the suffix pattern pins
     # the exact "blocking=<N> advisory=<M>" shape kb-sweep prints it with
     # (kanban-helpers.sh), tolerating only trailing whitespace, so a title
     # that merely CONTAINS the sentinel text followed by unrelated prose does
     # not satisfy it either. Deliberately NOT keyed to a specific indent —
     # kb-sweep prints this one flush-left today, but a cosmetic reindent
     # elsewhere in this file must not fail this gate closed for the wrong
-    # reason.
-    if printf '%s\n' "$SWEEP_OUTPUT" | awk -v want="SUBITEM STATUS SWEEP: $ITEM_ID" '
-           {
-               i = index($0, want)
-               if (i > 0 &&
-                   substr($0, 1, i - 1) ~ /^[[:space:]]*$/ &&
-                   substr($0, i + length(want)) ~ /^[[:space:]]*$/) { found = 1; exit }
+    # reason. `want` here is a second, independently-scoped awk variable of
+    # the same name in the second invocation below — not shared with HALF A.
+    if printf '%s\n' "$SWEEP_OUTPUT" | awk \
+           -v want="SUBITEM STATUS SWEEP: $ITEM_ID" \
+           -v hdr_prefix="SUBITEM STATUS SWEEP: " \
+           -v cwant="SWEEP COMPLETE: $ITEM_ID" '
+           function trim(s,    t) {
+               t = s
+               gsub(/^[[:space:]]+/, "", t)
+               gsub(/[[:space:]]+$/, "", t)
+               return t
            }
-           END { exit !found }' \
-       && printf '%s\n' "$SWEEP_OUTPUT" | awk -v want="SWEEP COMPLETE: $ITEM_ID" '
-           {
-               i = index($0, want)
-               if (i > 0 &&
-                   substr($0, 1, i - 1) ~ /^[[:space:]]*$/ &&
-                   substr($0, i + length(want)) ~ /^ blocking=[0-9]+ advisory=[0-9]+[[:space:]]*$/) { found = 1; exit }
+           function is_rule(s,    t) {
+               t = trim(s)
+               if (t == "") return 0
+               gsub(/═/, "", t)
+               return (t == "")
            }
-           END { exit !found }'; then
+           { lines[NR] = $0 }
+           END {
+               # XACA-1281-012: count EVERY rule-sandwiched, header-shaped
+               # line — generically, by prefix, not just ones naming
+               # ITEM_ID — so a forged sandwich for a DIFFERENT id is also
+               # counted. Exactly one may exist (a genuine sweep produces
+               # no more), and that one must name ITEM_ID.
+               header_hits = 0
+               header_ok = 0
+               for (i = 2; i < NR; i++) {
+                   t = trim(lines[i])
+                   if (index(t, hdr_prefix) == 1 && is_rule(lines[i - 1]) && is_rule(lines[i + 1])) {
+                       header_hits++
+                       if (t == want) header_ok = 1
+                   }
+               }
+               # XACA-1276-003: completion evidence is the terminal
+               # "SWEEP COMPLETE: <id> blocking=<N> advisory=<M>" sentinel —
+               # REPLACES "Legend:"/"ready to close." entirely (see HALF B
+               # above for why hardening that old text, as XACA-1281-013 did,
+               # cannot close the mid-sweep-abort fail-open this targets).
+               # Same literal+anchored index() technique as HALF A used in its
+               # original (pre-rule-adjacency) form: a per-subitem TITLE row
+               # always starts "  [", so a whitespace-only prefix before the
+               # needle rejects every hijack shape; the suffix pattern pins
+               # the exact "blocking=<N> advisory=<M>" shape kb-sweep prints
+               # it with (kanban-helpers.sh), tolerating only trailing
+               # whitespace, so a title merely CONTAINING the sentinel text
+               # followed by unrelated prose does not satisfy it either.
+               completion_ok = 0
+               for (i = 1; i <= NR; i++) {
+                   ln = lines[i]
+                   ci = index(ln, cwant)
+                   if (ci > 0 &&
+                       substr(ln, 1, ci - 1) ~ /^[[:space:]]*$/ &&
+                       substr(ln, ci + length(cwant)) ~ /^ blocking=[0-9]+ advisory=[0-9]+[[:space:]]*$/) {
+                       completion_ok = 1
+                       break
+                   }
+               }
+               exit !(header_hits == 1 && header_ok && completion_ok)
+           }
+       '; then
         SWEEP_RAN_OK="true"
     fi
     if [ "$SOURCE_RC" -ne 0 ] || [ "$SWEEP_RAN_OK" != "true" ]; then
@@ -783,13 +1002,42 @@ while true; do
             # each other and neither is evidence of a check-less PR.
             if [ -n "$CI_ABSENCE_CONTRADICTED" ]; then
                 printf '%s\n' "x 'no checks reported' was observed on $NO_CHECKS_RETRIES polls at $HEAD_SHA, but this SAME head"
-                printf '%s\n' "  has also produced: $CI_ABSENCE_CONTRADICTED."
+                printf '%s\n' "  has also produced (this process): $CI_ABSENCE_CONTRADICTED."
                 printf '%s\n' "  gh reports a genuinely check-less PR exactly ONE way — as that error — so the two"
                 printf '%s\n' "  observations CONTRADICT each other, and a contradicted signal is not evidence that CI is"
                 printf '%s\n' "  absent. Proceeding here would merge on the reassuring half of an answer the script could"
                 printf '%s\n' "  not evaluate."
                 printf '%s\n' "  Investigate before merging; do NOT --admin past an unverified check set."
-                verdict BLOCKED "'no checks reported' contradicted at the same head $HEAD_SHA by: $CI_ABSENCE_CONTRADICTED"
+                verdict BLOCKED "'no checks reported' contradicted at the same head $HEAD_SHA by (this process): $CI_ABSENCE_CONTRADICTED"
+            fi
+            # XACA-1281-002: the in-process latch above only sees what THIS
+            # process observed. Consult the durable, head-keyed record too —
+            # a PRIOR process may have witnessed the contradiction at this
+            # exact SHA and exited (or been restarted) before this process
+            # ever polled it, and a force-push back onto a previously
+            # contradicted head must not un-contradict gh's own earlier
+            # answer just because the in-memory latch was reset on the way
+            # back. This is the ONE place a broken state layer must fail
+            # closed (rc=2): proceeding on "no checks reported" requires
+            # being able to rule out a recorded contradiction, and an
+            # unreadable/uncreatable state dir cannot rule anything out.
+            _CA_ONDISK=$(_kbpm_ca_read "$HEAD_SHA")
+            _CA_ONDISK_RC=$?
+            if [ "$_CA_ONDISK_RC" -eq 0 ]; then
+                printf '%s\n' "x 'no checks reported' was observed on $NO_CHECKS_RETRIES polls at $HEAD_SHA, and a PRIOR"
+                printf '%s\n' "  PROCESS observed a contradiction at this SAME SHA (on-disk record under"
+                printf '%s\n' "  $KBPM_STATE_DIR): $_CA_ONDISK."
+                printf '%s\n' "  A head restart, a fresh process, or a force-push back onto this exact commit does not"
+                printf '%s\n' "  un-contradict gh's own earlier answer at it. Investigate before merging; do NOT --admin"
+                printf '%s\n' "  past an unverified check set."
+                verdict BLOCKED "'no checks reported' contradicted at the same head $HEAD_SHA by prior process: $_CA_ONDISK"
+            elif [ "$_CA_ONDISK_RC" -eq 2 ]; then
+                printf '%s\n' "x Could not confirm the CI-absence contradiction state for $HEAD_SHA under"
+                printf '%s\n' "  $KBPM_STATE_DIR (uncreatable/unreadable state dir, or an unrecognisable head SHA)."
+                printf '%s\n' "  Proceeding on 'no checks reported' requires ruling out a recorded contradiction from a"
+                printf '%s\n' "  prior process, and that could not be done — failing closed rather than treating"
+                printf '%s\n' "  'unknown' as 'clean'. Check KBPM_STATE_DIR permissions, then re-enter."
+                verdict BLOCKED "could not read the CI-absence contradiction state for $HEAD_SHA under $KBPM_STATE_DIR"
             fi
             # XACA-1275-025: "observed on N polls", NOT "persisted N polls".
             # The counter accumulates its own arm's observations wherever they
@@ -871,6 +1119,13 @@ CHECKS_EOF
             # proceed; this arm's own terminal already blocks, so recording it
             # never changes what happens here.
             CI_ABSENCE_CONTRADICTED="gh pr checks rc=0 with zero classified check rows"
+            # XACA-1281-002: persist it too, so a DIFFERENT process (or this
+            # one, after a restart) can still see the contradiction at this
+            # exact head. Best-effort — a write failure here is never a
+            # decision point; this arm blocks on its own ZERO_ROWS_RETRIES
+            # budget below regardless of whether the write succeeds.
+            _kbpm_ca_write "$CI_ABSENCE_CONTRADICTED" "$HEAD_SHA" \
+                || printf '%s\n' "! could not persist the CI-absence contradiction record for $HEAD_SHA under $KBPM_STATE_DIR (non-blocking here)."
             # ZERO_ROWS_RETRIES, never NO_CHECKS_RETRIES (XACA-1275-024). These
             # two arms share a SHAPE ("no checks visible") and a budget SIZE,
             # but not a terminal: this one blocks, the other proceeds. Sharing
@@ -910,6 +1165,14 @@ CHECKS_EOF
         # claims at this same head that there are no checks at all — a claim
         # that any earlier row contradicts regardless of that row's bucket.
         CI_ABSENCE_CONTRADICTED="$CLASSIFIED_CHECKS classified check row(s) at this head"
+        # XACA-1281-002: persist it too (best-effort; never a decision point
+        # here — this arm's own evidence lets it proceed past this poll
+        # regardless of write success). This is the record a LATER process,
+        # or this same process after a force-push back onto this head, needs
+        # to see so it cannot proceed on "no checks reported" at this exact
+        # SHA without knowing a check demonstrably existed here.
+        _kbpm_ca_write "$CI_ABSENCE_CONTRADICTED" "$HEAD_SHA" \
+            || printf '%s\n' "! could not persist the CI-absence contradiction record for $HEAD_SHA under $KBPM_STATE_DIR (non-blocking here)."
     fi
 
     if [ "$SYNC_TAP_BUCKET" = "fail" ] || [ "$SYNC_TAP_BUCKET" = "cancel" ]; then
