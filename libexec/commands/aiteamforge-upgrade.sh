@@ -3139,6 +3139,16 @@ PYEOF
 # $AITEAMFORGE_DIR/scripts on consumer installs. NEW for every installed box,
 # so it must be materialized, not merely refreshed. Carries .py, which the
 # sweep's glob already covers, so this list is sufficient.
+# XACA-1282-007: kb-compaction-premise-check.sh is the XACA-1277 compaction-threshold
+# premise ratchet, newly mirrored into share/scripts/ by sync-tap.sh in this ticket.
+# Identical situation to XACA-0774's remote-tmux-attach.sh above: it CARRIES the .sh
+# extension, so update_runtime_helpers' self-maintaining *.sh sweep refreshes it once
+# present and it needs NO _xaca0608_aux_script_map entry — but it is a BRAND-NEW file,
+# so every already-installed box has no target on disk and the sweep's "only refresh
+# what's already there" default would skip it forever. The three machines this ratchet
+# exists for (M4Mini, M1Pro, M1Mini) are ALL already-installed, so without this entry
+# the mirror delivers to fresh installs only — i.e. to none of them. Same install-vs-
+# upgrade asymmetry as XACA-0751/0761/0771.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3160,6 +3170,7 @@ gh-bot-test.sh
 team-account-display.sh
 msg-inbox-check.sh
 cr-schema-validator.py
+kb-compaction-premise-check.sh
 EOF
 }
 

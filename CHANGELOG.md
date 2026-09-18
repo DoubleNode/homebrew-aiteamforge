@@ -7,6 +7,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-1282 — Ship the XACA-1277 compaction-threshold premise ratchet
+  (`share/scripts/kb-compaction-premise-check.sh`) to tap machines, and make it
+  actually arrive on ones that already exist. The script re-derives the P=50
+  auto-compaction formula from the installed Claude Code binary and fails closed
+  when it cannot. **Two coupled changes, not one:** (a) `sync-tap.sh` now maps the
+  canonical `scripts/kb-compaction-premise-check.sh` into `share/scripts/`; (b) the
+  basename is added to `_xaca0673_mandatory_materialize_basenames()` in
+  `libexec/commands/aiteamforge-upgrade.sh`, because the mapping alone reaches FRESH
+  INSTALLS ONLY — `update_runtime_helpers`' `*.sh` sweep refreshes but never creates
+  newly-shipped files, and all three target machines (M4Mini, M1Pro, M1Mini) are
+  already-installed. Exactly the XACA-0774 `remote-tmux-attach.sh` situation, and the
+  same install-vs-upgrade asymmetry as XACA-0751/0761/0771. Also fixed in the script
+  itself (XACA-1282-002): `VERSIONS_DIR` previously defaulted to a single hardcoded
+  path that is EMPTY on M4Mini and ABSENT on M1Pro/M1Mini, so a mirrored copy would
+  have exited `rc=2` before running a single check on 3 of 4 fleet machines. It now
+  probes `command -v claude`'s resolved location, homebrew, npm-global and the
+  aiteamforge root, and its fail-closed message names every path tried plus the
+  hostname and the `CLAUDE_VERSIONS_DIR` remedy.
+
 ## [0.20.18] - 2026-09-18
 
 - **XACA-1266** — `kb-knowledge-sync.sh` no longer treats a dirty `~/knowledge` tree as a reason to
