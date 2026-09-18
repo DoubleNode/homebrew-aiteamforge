@@ -315,6 +315,29 @@ MERGE_UNKNOWN_RETRIES=0
 # each message counts only its own arm's observations.
 NO_CHECKS_RETRIES=0     # gh errored with "no checks reported"
 ZERO_ROWS_RETRIES=0     # gh exited 0 but the classifier saw no rows
+# ...AND ONE FACT THE TWO COUNTERS CANNOT CARRY BETWEEN THEM (XACA-1275-030).
+# Splitting the budgets closed "one arm spends the other's budget" and opened
+# its MIRROR: with the counters fully independent, neither terminal considers
+# the other arm's observations, so when gh never returns a usable answer at a
+# head the two arms RACE and the one that PROCEEDS wins on count. MEASURED on
+# the pre-fix script under /bin/bash 3.2, bash 5.3 and `zsh -f`: 4 zero-row
+# polls then 5 "no checks reported" polls reached VERDICT: GATES_PASSED and
+# invoked kb-merge (`--admin` in production) having classified ZERO CI rows;
+# a 6-poll form (1 zero-row + 5 "no checks reported") does it too, in both arm
+# orderings. The shared-counter version blocked that sequence — for the wrong
+# reason and with a false count, but it blocked.
+#
+# THE PRINCIPLE: taking the PROCEED path requires positive evidence that CI
+# genuinely is not configured at this head. "no checks reported" is gh's
+# documented signal for exactly that, which is why that arm may proceed on it.
+# But if this head has ALSO produced the anomalous rc=0-with-zero-rows shape,
+# the two observations CONTRADICT each other — gh does not report a
+# check-less PR both ways — and a contradicted signal is not evidence.
+# This flag is therefore not a third budget: it is sticky per head, set the
+# moment the anomalous shape is seen, and it only ever REMOVES the proceed
+# option. It is cleared in exactly the two places both counters are cleared:
+# on a head change, and when >=1 real check row is finally classified.
+ZERO_ROWS_SEEN="false"  # anomalous rc=0/zero-rows seen at THIS head
 PREV_HEAD_SHA=""
 FORCE_PUSH_CUTOFF=""
 
@@ -373,6 +396,7 @@ while true; do
     if [ -n "$PREV_HEAD_SHA" ] && [ "$HEAD_SHA" != "$PREV_HEAD_SHA" ]; then
         printf 'Head SHA changed (%s -> %s) — a push landed. Resetting both gate latches.\n' "$PREV_HEAD_SHA" "$HEAD_SHA"
         TEST_OK="false"; REVIEW_OK="false"; NO_CHECKS_RETRIES=0; ZERO_ROWS_RETRIES=0
+        ZERO_ROWS_SEEN="false"   # sticky per HEAD, so a new head starts clean
 
         # Force-push / rebase detection. The committer-date guard below assumes
         # the new head's committer date is newer than any stale review pointed
@@ -481,13 +505,35 @@ while true; do
     printf '%s\n' "$SWEEP_OUTPUT"
 
     SWEEP_RAN_OK="false"
-    # grep -qF, NOT -qE (XACA-1275-026). This needle carries a caller-supplied
-    # value, and it is the positive evidence the gate is made of — a LITERAL
-    # match is the property actually wanted ("the header named this item"), so
-    # a regex here was never buying anything it could not also give away. The
-    # SECOND grep stays -E: its pattern is a fixed alternation with an anchor
-    # and contains no interpolation.
-    if printf '%s\n' "$SWEEP_OUTPUT" | grep -qF "SUBITEM STATUS SWEEP: $ITEM_ID" \
+    # LITERAL **and** END-ANCHORED (XACA-1275-026 then -027). This needle
+    # carries a caller-supplied value and is the positive evidence the gate is
+    # made of, so both properties are required and neither implies the other:
+    #   * LITERAL, because `--item '.*'` under grep -qE turned "prove the
+    #     header named MY item" into "prove it named anything" — VERIFIED: a
+    #     header reading "SUBITEM STATUS SWEEP: XACA-9999" satisfied the gate
+    #     and the run reached GATES_PASSED.
+    #   * END-ANCHORED, because switching to grep -qF fixed the metacharacter
+    #     hole and left a PREFIX hole behind it — VERIFIED: `--item XACA-127`
+    #     was satisfied by a header reading "SUBITEM STATUS SWEEP: XACA-1275",
+    #     and that run also reached GATES_PASSED. XACA-127 is a well-formed id
+    #     that passes the validation above, so validation does not cover this.
+    # grep -F cannot express "literal, at end of line", so the match is done in
+    # awk: index() is a literal search (no regex applies to `want`), and the
+    # remainder after the match must be whitespace-only. kb-sweep prints the
+    # header as "  SUBITEM STATUS SWEEP: <id>" with nothing after the id, so
+    # allowing only trailing whitespace is exact rather than lenient.
+    # Portable across BSD awk (macOS) and gawk: no gawk-only 3-arg match(), no
+    # \< word boundaries. `awk -v` does interpret backslash escapes in the
+    # assigned value; ITEM_ID is validated above to alphanumeric segments
+    # joined by single hyphens, so it contains no backslash by construction.
+    # The SECOND grep stays -E: a fixed alternation with an anchor, no
+    # interpolation.
+    if printf '%s\n' "$SWEEP_OUTPUT" | awk -v want="SUBITEM STATUS SWEEP: $ITEM_ID" '
+           {
+               i = index($0, want)
+               if (i > 0 && substr($0, i + length(want)) ~ /^[[:space:]]*$/) { found = 1; exit }
+           }
+           END { exit !found }' \
        && printf '%s\n' "$SWEEP_OUTPUT" | grep -qE "ready to close\.|^  Legend:"; then
         SWEEP_RAN_OK="true"
     fi
@@ -621,7 +667,25 @@ while true; do
                 repoll_or_block 10 "'no checks reported' unresolved after $NO_CHECKS_RETRIES/5 polls at $HEAD_SHA"
                 continue
             fi
-            printf '%s\n' "'no checks reported' persisted $NO_CHECKS_RETRIES polls on $HEAD_SHA — treating as genuinely no CI configured."
+            # XACA-1275-030: the budget is spent, but spending it is NOT by
+            # itself permission to proceed. If this head has also produced the
+            # anomalous rc=0/zero-rows shape, the two observations contradict
+            # each other and neither is evidence of a check-less PR.
+            if [ "$ZERO_ROWS_SEEN" = "true" ]; then
+                printf '%s\n' "x 'no checks reported' was observed on $NO_CHECKS_RETRIES polls at $HEAD_SHA, but this SAME head has"
+                printf '%s\n' "  also answered rc=0 with zero classified check rows. gh reports a genuinely check-less PR"
+                printf '%s\n' "  ONE way — as that error — so the two shapes CONTRADICT each other, and a contradicted"
+                printf '%s\n' "  signal is not evidence that CI is absent. Proceeding here would merge on the reassuring"
+                printf '%s\n' "  half of an answer the script could not evaluate."
+                printf '%s\n' "  Investigate before merging; do NOT --admin past an unverified check set."
+                verdict BLOCKED "'no checks reported' contradicted by rc=0/zero-rows at the same head $HEAD_SHA"
+            fi
+            # XACA-1275-025: "observed on N polls", NOT "persisted N polls".
+            # The counter accumulates its own arm's observations wherever they
+            # fall in the sequence; they need not be consecutive, and claiming
+            # persistence for a run the other arm interrupted is the same
+            # overstatement this ticket already corrected once.
+            printf '%s\n' "'no checks reported' observed on $NO_CHECKS_RETRIES polls at $HEAD_SHA (not necessarily consecutive) — treating as genuinely no CI configured."
         else
             # Any OTHER read failure fails closed — an unreadable answer is
             # never evidence of safety.
@@ -690,6 +754,12 @@ CHECKS_EOF
         # terminal: when the budget is spent it BLOCKS. Nothing documents this
         # shape as "no CI here", and anomalous is never evidence of safety.
         if [ "$CLASSIFIED_CHECKS" -lt 1 ]; then
+            # Sticky for THIS head (XACA-1275-030), set BEFORE the budget test
+            # so it is recorded even on the poll that goes on to block. It is
+            # read by the "no checks reported" terminal above, which may
+            # otherwise proceed; this arm's own terminal already blocks, so
+            # the flag never changes what happens here.
+            ZERO_ROWS_SEEN="true"
             # ZERO_ROWS_RETRIES, never NO_CHECKS_RETRIES (XACA-1275-024). These
             # two arms share a SHAPE ("no checks visible") and a budget SIZE,
             # but not a terminal: this one blocks, the other proceeds. Sharing
@@ -715,6 +785,7 @@ CHECKS_EOF
         # registered yet" alike.
         NO_CHECKS_RETRIES=0
         ZERO_ROWS_RETRIES=0
+        ZERO_ROWS_SEEN="false"
     fi
 
     if [ "$SYNC_TAP_BUCKET" = "fail" ] || [ "$SYNC_TAP_BUCKET" = "cancel" ]; then
