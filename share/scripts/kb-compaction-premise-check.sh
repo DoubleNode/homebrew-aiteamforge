@@ -108,8 +108,15 @@ echo
 
 # ── Locate the installed binary ─────────────────────────────────────────────
 # XACA-1282-002: CLAUDE_VERSIONS_DIR stays the highest-precedence override,
-# validated exactly as it always was (same two failure messages, same
-# behavior) -- only the DEFAULT changes. The OLD default
+# and the DEFAULT changes. XACA-1282-026 (PR #929 review round 2): this comment
+# used to claim the override branch was "validated exactly as it always was".
+# That is NO LONGER TRUE and deliberately so -- XACA-1282-024 fixed a defect
+# that ORIGINATED in this branch (verified against merge-base 0ad2cb5f:116-121)
+# and was only later copied into _candidate_ok. A mixed directory now selects
+# the version-shaped entry where it previously exited rc=2, and the
+# unparseable-entry message changed. The old "identical behaviour" guarantee
+# was never worth keeping the defect for; it is retired, not violated by
+# accident. The OLD default
 # ($HOME/.local/share/claude/versions) was measured EMPTY on M4Mini and
 # ABSENT on M1Pro/M1Mini (kanban/XACA-1282_fleet_compaction_rollout.md), so a
 # mirrored copy of this ratchet exited rc=2 before running a single check on
@@ -129,7 +136,10 @@ echo
 # going beyond the review finding's literal wording (it named _candidate_ok only).
 # The two sites had the IDENTICAL defect from the same copied line; fixing one and
 # leaving the other would have made the override path pass by coincidence.
-# Prints empty when no entry parses -- callers keep their own '<none>' wording.
+# Prints empty when no entry parses; each caller words its own failure (the
+# override branch distinguishes an empty dir from unparseable entries -- see
+# XACA-1282-027 below). Found while fixing 026: this line itself used to say
+# "callers keep their own '<none>' wording", which 027 had just falsified.
 _newest_version_entry() {
   find "$1" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null \
     | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' \
@@ -154,16 +164,27 @@ if [ -n "${CLAUDE_VERSIONS_DIR:-}" ]; then
   # SC2012: find, not ls, so odd directory entries cannot corrupt the parse.
   VERSION=$(_newest_version_entry "$VERSIONS_DIR")
   if [ -z "$VERSION" ]; then
+    # XACA-1282-027 (PR #929 review round 2): the previous wording said
+    # "newest entry is '<none>'" and then listed entries that WERE present --
+    # self-contradicting, and the empty-dir regression assertion was pinning
+    # that wart in place. Both moved together: the message now distinguishes
+    # an empty directory from one whose entries simply do not parse.
     _others=$(_non_version_entries "$VERSIONS_DIR")
     _others=${_others% }
-    unver "A. newest entry in $VERSIONS_DIR is '<none>' — not a parseable version.${_others:+ (non-version entries present: $_others)}"
+    if [ -n "$_others" ]; then
+      unver "A. no version-shaped entry in $VERSIONS_DIR — present but unparseable: $_others"
+    else
+      unver "A. no version-shaped entry in $VERSIONS_DIR (directory is empty) — cannot re-derive the formula."
+    fi
     echo; echo "RESULT: could not verify (rc=$RC)"; exit "$RC"
   fi
 else
   # No override given -- probe a short list of plausible install locations.
-  # Every candidate is held to the SAME bar the explicit override always
-  # was: the directory must exist AND contain at least one entry that parses
-  # as a version. An existing-but-EMPTY directory (the exact M4Mini shape)
+  # Every candidate is held to the SAME bar as the explicit override branch
+  # above (they share _newest_version_entry, so they cannot drift apart) --
+  # note "the same as the override branch NOW", not "as it always was": both
+  # changed together under XACA-1282-024. The directory must exist AND contain
+  # at least one VERSION-SHAPED entry. An existing-but-EMPTY directory (the exact M4Mini shape)
   # is correctly rejected here, not accepted as "found" -- that is what the
   # old single-path default got wrong, not the fail-closed exit itself.
 
@@ -186,8 +207,10 @@ else
   }
 
   # _candidate_ok <dir> -- rc=0 and sets $_CAND_VERSION when <dir> exists AND
-  # its newest `sort -V` entry parses as a version. Identical validation to
-  # the explicit-override branch above, applied to each guess in turn.
+  # contains at least one version-shaped entry, taking the newest of THOSE.
+  # (Not "its newest `sort -V` entry": keying on the unfiltered max is the
+  # XACA-1282-024 defect. Both this and the override branch now route through
+  # _newest_version_entry.)
   _candidate_ok() {
     _d="$1"
     [ -d "$_d" ] || return 1
