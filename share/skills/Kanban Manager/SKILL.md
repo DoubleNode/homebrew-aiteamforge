@@ -130,7 +130,7 @@ source ~/dev-team/kanban-helpers.sh && kb-backlog list
 | `kb-backlog sub due <parent-id> <sub-idx> [YYYY-MM-DD]` | Set subitem due date |
 | `kb-backlog sub rename-id <old-id> <new-id>` | Repair a mis-prefixed subitem **ID** (changes the identifier, not the title) |
 | `kb-backlog sub rename <subitem-id> "new title"` | Change a subitem's visible **title text** (changes the title, not the ID; see `rename-id` for ID repairs) |
-| `kb-backlog sub cancel <subitem-id> [--reason "text"] [--user-approved]` | Mark subitem **CANCELLED**. Takes a **subitem-id**, unlike `done`/`todo`/`start`/`due`/`priority` above which take `<parent-idx> <sub-idx>`. **Protected `[Review]`/`[Test]`/`[UX]` subitems are a merge gate and are REFUSED** unless `--user-approved` is given together with `--reason` — that combination is reserved for the **user only**, same rule as `kb-done --force`. Agents must never pass `--user-approved`. |
+| `kb-backlog sub cancel <subitem-id> [--reason "text"] [--user-approved]` | Mark subitem **CANCELLED**. Takes a **subitem-id**, unlike `done`/`todo`/`start`/`due`/`priority` above which take `<parent-idx> <sub-idx>`. **Protected `[Review]`/`[Test]`/`[UX]` subitems are a merge gate and are REFUSED** unless `--user-approved` is given together with `--reason` — that combination is reserved for the **user only**, same rule as `kb-done --force`. Agents must never pass `--user-approved`. **This guard covers `[Advisory]`-tagged findings too** (XACA-1276) — severity (`[Advisory]`/`[Blocking]`) relaxes only the *merge* gate, never this cancel guard; `[Review][Advisory] …` is still refused the same as `[Review] …`. |
 
 **Note:** Subitem IDs use format `XTEAM-0001-001` (parent ID + 3-digit suffix)
 
@@ -148,7 +148,7 @@ source ~/dev-team/kanban-helpers.sh && kb-backlog list
 | `kb-pause "reason"` | Pause task with reason (stores previous status) |
 | `kb-resume` | Resume paused task and return to previous status |
 | `kb-done [--force]` | Complete current task (requires all subitems completed) |
-| `kb-cancel <id> ["reason"\|--reason "text"] [--force] [--user-approved]` | Cancel item/subitem without completing. A **bare call with no ID always refuses** — it never infers the target from the active window. `--force` is user-only and bypasses the unresolved-subitem check on an **item**; it does **not** bypass the protected `[Review]`/`[Test]`/`[UX]` subitem guard — only `--user-approved` (with a reason) does that. |
+| `kb-cancel <id> ["reason"\|--reason "text"] [--force] [--user-approved]` | Cancel item/subitem without completing. A **bare call with no ID always refuses** — it never infers the target from the active window. `--force` is user-only and bypasses the unresolved-subitem check on an **item**; it does **not** bypass the protected `[Review]`/`[Test]`/`[UX]` subitem guard (including `[Advisory]`-tagged findings) — only `--user-approved` (with a reason) does that. |
 | `kb-pick <id>` | Mark item as active (simple assignment, no Claude launch) |
 | `kb-run <id>` | Launch Claude Code with task (auto-creates worktree if in main repo) |
 | `kb-stop-working` | Stop working on current item without completing |
@@ -310,6 +310,8 @@ kb-backlog sub insert 0 99 "Appended step"   # pos out of range → appended
 Use `sub rename` to change the visible title text of an existing subitem. Takes the full subitem ID (e.g. `XACA-0001-004`), not a parent+index.
 
 > **rename vs. rename-id:** `sub rename` changes the **title text** displayed in LCARS and reports. `sub rename-id` changes the **subitem's ID** (used to repair mis-prefixed IDs from XACA-0233 tooling). Do not confuse them.
+
+> **Severity downgrade guard (XACA-1276):** renaming a protected `[Review]`/`[Test]`/`[UX]` finding from blocking to `[Advisory]` (e.g. `[Review] Fix X` → `[Review][Advisory] Fix X`) is treated as a downgrade of the merge gate and is REFUSED without `--user-approved` + `--reason`, same as a class-tag change. `[Advisory]` → blocking (dropping or changing the severity tag back) always proceeds unchanged — only loosening the gate is guarded.
 
 ```bash
 kb-backlog sub rename XACA-0001-004 "Implement REST endpoints"

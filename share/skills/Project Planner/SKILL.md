@@ -183,6 +183,21 @@ Subitems tagged with `[Review]` or `[Test]` are **protected subitems** with spec
 
 5. **"Cancelled with a reason" is NOT equivalent to "completed."** Agents must not use cancellation as a shortcut to avoid doing review/test work.
 
+#### Severity axis on protected findings (XACA-1276)
+
+A reviewer/tester/UX-evaluator finding filed on a PR carries an optional severity tag
+immediately after its class tag: `[Review][Blocking]` / `[Review][Advisory]` (same for
+`[Test]`/`[UX]`). Only `[Advisory]` de-gates the **merge** — it never de-gates the ticket's
+**close**: `kb-done` still refuses while the subitem is `todo`, exactly as for a blocking
+finding. **Planner-emitted trailing subitems** (`Testing & Debugging`, `PR Creation & Test
+Handoff`, `QA Testing & Code Review`, `[UX] UX/UI Evaluation`, `Retrospective`, `Sync Local
+Develop Branch`) stay **unclassified** — the planner creates them before any PR exists, so
+it cannot know a finding's severity at creation time, and unclassified resolves BLOCKING
+by design (fail-closed). Only a reviewer/tester/UX-evaluator filing an actual finding
+*after* inspecting a diff may write `[Advisory]`. Full grammar and disposition path:
+`kanban/plans/XACA-1276/XACA-1276_severity_taxonomy.md`,
+`kanban/plans/XACA-1276/XACA-1276_advisory_disposition.md`.
+
 ---
 
 ## Usage

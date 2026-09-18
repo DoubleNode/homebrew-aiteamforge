@@ -73,6 +73,10 @@
 #   XACA-1199      pre-merge RESIDUAL advisory banner (print-only)
 #   XACA-1275-013  Gate 3.5 positive evidence: >=1 CI row must be CLASSIFIED
 #   XACA-1275-014  every exit path emits a VERDICT line (HELP included)
+#   XACA-1276-003  severity taxonomy: SWEEP COMPLETE sentinel (XACA-1201
+#                  fold, replaces the fail-open "Legend:"/"ready to close."
+#                  evidence), shape-anchored PROTECTED marker read, and the
+#                  print-only ADVISORY FINDINGS banner
 # ============================================================================
 
 PR_NUM=""
@@ -87,7 +91,10 @@ KBPM_HELPERS="${KBPM_HELPERS:-$HOME/dev-team/kanban-helpers.sh}"
 KBPM_PIDFILE=""
 KBPM_RCFILE=""
 
-PUBLISHER_LOGIN="aiteamforge-publisher[bot]"   # the App identity; XACA-1122 §4
+# PUBLISHER_LOGIN (the aiteamforge-publisher[bot] App identity) is no longer
+# declared here: XACA-1276-006 replaced the Gate-4 author-identity check it
+# fed with a general file-overlap test (see that gate's own comment block),
+# so the identity is no longer a gating fact anywhere in this script.
 TESTER_BOT="ds9-tester-bot[bot]"
 REVIEWER_BOT="ai-security-review-bot[bot]"
 
@@ -520,17 +527,34 @@ while true; do
     # Gate on kb-sweep's OUTPUT, never its exit code (which over-blocks on
     # framework subitems that complete AFTER merge), and NEVER on a homegrown
     # board.json re-parse — that escape hatch merged PR #435 through an open
-    # [Review]. The marker grep is anchored on the emitter's "(N)" count
-    # (XACA-0523): a bare-substring grep false-matches subitem TITLES quoting
-    # the phrase.
+    # [Review]. The PROTECTED marker check below is shape-anchored, not a
+    # bare-substring grep, for the same reason the RESIDUAL banner further
+    # down is (XACA-1199-012): a per-subitem status ROW is itself a subitem
+    # TITLE and can quote the marker text verbatim; kb-sweep always prints
+    # those rows as two spaces + "[" (the status icon), so anchoring on
+    # "two spaces then NOT '['" rejects every such row while still matching
+    # the real header, which kb-sweep never prints with a "[" third
+    # character.
     #
     # XACA-1159-033 — ABSENCE OF THE MARKER IS NOT EVIDENCE OF A CLEAN SWEEP.
     # A failed source leaves kb-sweep undefined; "command not found" output
     # contains no marker text either, and a marker-only check reads that as
     # clean. Require POSITIVE evidence: kb-sweep's own "SUBITEM STATUS SWEEP:
-    # <id>" header PLUS either "No subitems found — ready to close." or the
-    # "Legend:" line that only prints after the subitem table is walked.
-    # Neither appears on any error path. No pair -> BLOCKED.
+    # <id>" header PLUS a terminal "SWEEP COMPLETE: <id> blocking=<N>
+    # advisory=<M>" sentinel.
+    #
+    # XACA-1276-003 (severity taxonomy §4/§11.1, the XACA-1201 fold) —
+    # REPLACES the pre-existing "ready to close."/"Legend:" evidence, which
+    # was a LIVE FAIL-OPEN: kb-sweep prints "Legend:" BEFORE the
+    # protected-subitem loop and its marker, so any abort in that window (a
+    # failed fork, an undefined function, `set -u`, a signal) left
+    # header+Legend on stdout with no marker at all — and the old check read
+    # that as a clean sweep and merged. Reproduced end-to-end by the PR #881
+    # reviewer under `ulimit -u` fork pressure. The sentinel is printed by
+    # kb-sweep AFTER the protected-subitem check on every completion path
+    # (kanban-helpers.sh), so its absence now means the sweep did not
+    # actually finish — "Legend:"/"ready to close." are no longer accepted
+    # as evidence of anything.
     SWEEP_OUTPUT=$(_kbpm_helpers_run kb-sweep "$ITEM_ID")
     SWEEP_RCPAIR=$(cat "$KBPM_RCFILE" 2>/dev/null)
     SOURCE_RC="${SWEEP_RCPAIR%% *}"
@@ -582,6 +606,18 @@ while true; do
     # joined by single hyphens, so it contains no backslash by construction.
     # The SECOND grep stays -E: a fixed alternation with an anchor, no
     # interpolation.
+    #
+    # XACA-1276-003 — the SECOND half of the positive-evidence pair. Same
+    # literal+anchored index() technique as the header check above (a
+    # per-subitem TITLE row always starts "  [", so a whitespace-only prefix
+    # before the needle rejects every hijack shape); the suffix pattern pins
+    # the exact "blocking=<N> advisory=<M>" shape kb-sweep prints it with
+    # (kanban-helpers.sh), tolerating only trailing whitespace, so a title
+    # that merely CONTAINS the sentinel text followed by unrelated prose does
+    # not satisfy it either. Deliberately NOT keyed to a specific indent —
+    # kb-sweep prints this one flush-left today, but a cosmetic reindent
+    # elsewhere in this file must not fail this gate closed for the wrong
+    # reason.
     if printf '%s\n' "$SWEEP_OUTPUT" | awk -v want="SUBITEM STATUS SWEEP: $ITEM_ID" '
            {
                i = index($0, want)
@@ -590,22 +626,40 @@ while true; do
                    substr($0, i + length(want)) ~ /^[[:space:]]*$/) { found = 1; exit }
            }
            END { exit !found }' \
-       && printf '%s\n' "$SWEEP_OUTPUT" | grep -qE "ready to close\.|^  Legend:"; then
+       && printf '%s\n' "$SWEEP_OUTPUT" | awk -v want="SWEEP COMPLETE: $ITEM_ID" '
+           {
+               i = index($0, want)
+               if (i > 0 &&
+                   substr($0, 1, i - 1) ~ /^[[:space:]]*$/ &&
+                   substr($0, i + length(want)) ~ /^ blocking=[0-9]+ advisory=[0-9]+[[:space:]]*$/) { found = 1; exit }
+           }
+           END { exit !found }'; then
         SWEEP_RAN_OK="true"
     fi
     if [ "$SOURCE_RC" -ne 0 ] || [ "$SWEEP_RAN_OK" != "true" ]; then
         printf '%s\n' "x kb-sweep did NOT positively confirm a completed sweep for $ITEM_ID"
         printf '%s\n' "  (source rc=$SOURCE_RC, kb-sweep rc=$SWEEP_RC). No 'SUBITEM STATUS SWEEP:"
-        printf '%s\n' "  $ITEM_ID' header + completion line in its output — the PROTECTED SUBITEMS"
-        printf '%s\n' "  marker being absent does NOT mean the sweep ran clean; it may not have run"
-        printf '%s\n' "  at all. Check kanban-helpers path and team context (KB_TEAM/KB_TERMINAL)."
+        printf '%s\n' "  $ITEM_ID' header + 'SWEEP COMPLETE: $ITEM_ID blocking=<N> advisory=<M>'"
+        printf '%s\n' "  sentinel in its output — a sweep that dies between the header and the"
+        printf '%s\n' "  sentinel (a failed fork, an undefined function, set -u, a signal) is NOT"
+        printf '%s\n' "  a clean sweep, even if it printed 'Legend:' or other-looking output first."
+        printf '%s\n' "  Check kanban-helpers path and team context (KB_TEAM/KB_TERMINAL)."
         verdict BLOCKED "kb-sweep did not positively confirm a completed sweep (source rc=$SOURCE_RC, sweep rc=$SWEEP_RC)"
     fi
     # SWEEP_RC is deliberately NOT part of the pass/fail decision — it is
     # legitimately non-zero for framework subitems that complete after merge,
     # which is precisely the over-blocking this gate must not reintroduce. It
     # is captured only to make the diagnostic above concrete.
-    if printf '%s\n' "$SWEEP_OUTPUT" | grep -qE "PROTECTED SUBITEMS UNRESOLVED \([0-9]+\)"; then
+    #
+    # XACA-1276-003 — shape-anchored, not a bare-substring grep, for the same
+    # reason the sentinel/header checks above are: a per-subitem TITLE row is
+    # printed as two spaces + "[" (the status icon) and can quote this marker
+    # text verbatim; the real marker is printed as two spaces + an emoji, so
+    # "two spaces then NOT '['" separates the two shapes unconditionally.
+    if printf '%s\n' "$SWEEP_OUTPUT" | awk '
+        $0 ~ /^  [^ \[]/ && /PROTECTED SUBITEMS UNRESOLVED \([0-9]+\)/ { found=1 }
+        END { exit !found }
+      '; then
         printf '%s\n' "x Protected [Review]/[Test]/[UX] subitems open — resolve them (agents cannot cancel without user approval), push fixes, re-spawn affected subagents, re-seed, re-enter."
         verdict BLOCKED "protected [Review]/[Test]/[UX] subitems unresolved on $ITEM_ID"
     fi
@@ -957,19 +1011,63 @@ CHECKS_EOF
         verdict BLOCKED "unreadable behind-count against $BASE_REF"
     fi
     if [ "$BEHIND_BY" -gt 0 ] || [ "$MERGE_STATE" = "BEHIND" ]; then
-        # XACA-1122: inspect what the PR is behind BY, not merely how far.
-        # required_status_checks.strict is MEASURED false on develop — every
-        # forced update-branch is OUR OWN policy, ours to tune. Do NOT "fix"
-        # staleness cost by flipping strict to true (§2.3 anti-recommendation).
-        # Under the publisher decouple a feature PR NEVER touches the gitlink,
-        # so a gap made entirely of publisher gitlink-only bumps carries
-        # nothing it needs and cannot conflict with it. Note what update-branch
-        # actually costs: dismiss_stale_reviews acts on pushes to a PR'S HEAD
-        # BRANCH, so it is our own update-branch — not the publisher's push to
-        # develop — that wipes both bot approvals.
-        # FAIL CLOSED: any inability to classify the range falls through to
-        # update-branch exactly as before.
+        # XACA-1122 inspected what the PR is behind BY, not merely how far,
+        # but carved out exactly one exception: every behind-range commit
+        # authored by the publisher AND gitlink-only. XACA-1276-006
+        # generalizes that to the fact the author check was only ever a
+        # PROXY for: a behind-range commit cannot invalidate this PR's
+        # approvals unless it touches a file THIS PR also touches — nothing
+        # else can conflict with, or stale-out review of, content the PR
+        # never looked at. The publisher's gitlink-only bump is simply the
+        # commonest commit whose file set is disjoint from a feature PR's;
+        # file overlap is the load-bearing fact and author identity is not,
+        # so the old publisher-only case is a natural SUBSET of this one
+        # (a gitlink-only bump touches only `homebrew-tap`, which a feature
+        # PR no longer touches under the publisher decouple).
+        #
+        # required_status_checks.strict is MEASURED false on develop
+        # (re-verified 2026-09-18: `gh api
+        # repos/DoubleNode/dev-team/branches/develop/protection` ->
+        # required_status_checks.strict=false) — every forced update-branch
+        # remains OUR OWN policy, ours to tune. Do NOT "fix" staleness cost
+        # by flipping strict to true (§2.3 anti-recommendation). The
+        # ticket's "develop moves 11.6-13.0 commits/day" figure is ITS
+        # claim, not re-derived here as a precise number; a 7-day sample
+        # (79 commits / 7 days ~= 11.3/day, measured 2026-09-18 against
+        # dev-team/develop) lands in the same range and is offered only as
+        # rough corroboration, not a fresh measurement of that figure. Note
+        # what update-branch actually costs: dismiss_stale_reviews acts on
+        # pushes to a PR'S HEAD BRANCH, so it is our own update-branch —
+        # not the publisher's push to develop — that wipes both bot
+        # approvals.
+        #
+        # FAIL CLOSED, explicitly: SKIP_UPDATE starts false and is flipped
+        # true ONLY after every commit's file list AND the PR's own file
+        # list were positively read. Unenumerable range, a partial range,
+        # an unreadable per-commit or per-PR file list, an empty file list
+        # where content was expected, gh/git errors — every one of these
+        # leaves SKIP_UPDATE false and falls through to update-branch
+        # exactly as before XACA-1122. A classification failure must never
+        # be the reason a stale base gets merged.
         SKIP_UPDATE="false"
+
+        # ── Ignore-list: files whose overlap is NOT conflict-risk evidence ──
+        # CHANGELOG.md's [Unreleased] block is touched by essentially every
+        # commit (CLAUDE.md mandates a CHANGELOG entry on every commit) and
+        # so by essentially every PR AND every base commit alike — leaving
+        # it in the overlap set makes this test fire on ~100% of PRs and
+        # buys nothing. Ignoring it is a TRADE, not a free lunch: a genuine
+        # CHANGELOG conflict is no longer caught HERE, pre-emptively; it
+        # surfaces later as an ordinary merge conflict (verdict CONFLICT)
+        # when the merge is attempted, which is where CLAUDE.md's
+        # union-resolve guidance already handles it. That is accepted, not
+        # an oversight. Nothing else is on this list: RELNOTES_*.md carries
+        # per-release content rather than a near-universal per-commit touch
+        # like CHANGELOG's [Unreleased] header, so there is no equivalent
+        # evidence it is safe to ignore — do not extend this list on
+        # intuition; each entry needs its own stated reason.
+        OVERLAP_IGNORE_FILES="CHANGELOG.md"
+
         # compare/A...B lists commits in B not in A — argument order matters.
         RANGE=$(gh api --paginate "repos/$REPO/compare/$HEAD_SHA...$BASE_REF" \
             --jq '.commits[] | "\(.sha)|\(.author.login // "")"' 2>/dev/null)
@@ -977,37 +1075,95 @@ CHECKS_EOF
         case "$RANGE_COUNT" in ''|*[!0-9]*) RANGE_COUNT=0 ;; esac
 
         if [ -z "$RANGE" ] || [ "$RANGE_COUNT" -eq 0 ]; then
-            printf '%s\n' "Could not enumerate the behind-range — classifying as NOT publisher-only (fail closed)."
+            printf '%s\n' "Could not enumerate the behind-range — classifying as overlapping (fail closed)."
         elif [ "$RANGE_COUNT" -ne "$BEHIND_BY" ]; then
             # A mismatch means truncation or a race: we did not see the whole
-            # range, and a partial range that happens to be all-publisher is
+            # range, and a partial range that happens to look disjoint is
             # exactly the reassuring-wrong-answer shape. Fail closed.
             printf '%s\n' "Behind-range enumeration returned $RANGE_COUNT commit(s) but behind_by=$BEHIND_BY — did not see the whole range; fail closed."
         else
-            SKIP_UPDATE="true"
+            RANGE_FILES=""
+            RANGE_UNREADABLE="false"
             # A here-doc, NOT a pipe: a `while` on the right of a pipe runs in
-            # a subshell and SKIP_UPDATE=false would not survive the loop.
+            # a subshell and RANGE_UNREADABLE=true would not survive the loop.
             while IFS='|' read -r C_SHA C_LOGIN; do
                 [ -n "$C_SHA" ] || continue
-                if [ "$C_LOGIN" != "$PUBLISHER_LOGIN" ]; then
-                    SKIP_UPDATE="false"
-                    printf '%s\n' "  $C_SHA authored by '${C_LOGIN:-<unreadable>}' — not the publisher."
+                # C_LOGIN is diagnostic only now (not gating) — kept so the
+                # legacy publisher-authored case still prints recognizably.
+                C_FILES=$(gh api "repos/$REPO/commits/$C_SHA" --jq '.files[].filename' 2>/dev/null)
+                C_FILES_RC=$?
+                if [ "$C_FILES_RC" -ne 0 ] || [ -z "$C_FILES" ]; then
+                    RANGE_UNREADABLE="true"
+                    printf '%s\n' "  $C_SHA (author '${C_LOGIN:-<unreadable>}'): could not read its changed-file list (rc=$C_FILES_RC) — fail closed."
                     break
                 fi
-                # Gitlink-only means the commit's ENTIRE file list is the submodule path.
-                C_FILES=$(gh api "repos/$REPO/commits/$C_SHA" --jq '[.files[].filename] | sort | join(",")' 2>/dev/null)
-                if [ "$C_FILES" != "homebrew-tap" ]; then
-                    SKIP_UPDATE="false"
-                    printf '%s\n' "  $C_SHA touches '${C_FILES:-<unreadable>}' — not a gitlink-only bump."
-                    break
-                fi
+                RANGE_FILES="$RANGE_FILES
+$C_FILES"
             done <<RANGE_EOF
 $RANGE
 RANGE_EOF
+
+            if [ "$RANGE_UNREADABLE" = "true" ]; then
+                : # SKIP_UPDATE stays false; message already printed above.
+            else
+                # This PR's own changed files — the set the behind-range is
+                # tested against. `gh pr diff --name-only`, NOT `git diff`:
+                # this repo's remote is `dev-team`, so the git form resolves
+                # nothing on most Academy PRs (XACA-0703-009).
+                PR_FILES_RAW=$(gh pr diff "$PR_NUM" --repo "$REPO" --name-only 2>/dev/null)
+                PR_DIFF_RC=$?
+                if [ "$PR_DIFF_RC" -ne 0 ] || [ -z "$PR_FILES_RAW" ]; then
+                    printf '%s\n' "Could not read this PR's own changed-file list (rc=$PR_DIFF_RC) — fail closed."
+                else
+                    # Filter the ignore-list out of the RANGE side only.
+                    # Sufficient: intersection(PR, RANGE \ ignore) already
+                    # excludes an ignore-listed file from the result
+                    # regardless of whether the PR side also touches it.
+                    RANGE_FILES_FILTERED=""
+                    while IFS= read -r RF; do
+                        [ -n "$RF" ] || continue
+                        case " $OVERLAP_IGNORE_FILES " in
+                            *" $RF "*) continue ;;
+                        esac
+                        RANGE_FILES_FILTERED="$RANGE_FILES_FILTERED
+$RF"
+                    done <<RANGE_FILTER_EOF
+$RANGE_FILES
+RANGE_FILTER_EOF
+
+                    # Exact-line membership test via case, not grep -f: no
+                    # process substitution and no temp file, so this stays
+                    # identical under /bin/bash 3.2 and zsh -f. Wrapping both
+                    # sides in leading/trailing newlines makes
+                    # *"\n$PF\n"* an exact-line match, not a substring one.
+                    OVERLAP_FILE=""
+                    while IFS= read -r PF; do
+                        [ -n "$PF" ] || continue
+                        case "
+$RANGE_FILES_FILTERED
+" in
+                            *"
+$PF
+"*)
+                                OVERLAP_FILE="$PF"
+                                break
+                                ;;
+                        esac
+                    done <<PR_FILTER_EOF
+$PR_FILES_RAW
+PR_FILTER_EOF
+
+                    if [ -n "$OVERLAP_FILE" ]; then
+                        printf '%s\n' "  behind-range and PR both touch '$OVERLAP_FILE' — not disjoint."
+                    else
+                        SKIP_UPDATE="true"
+                    fi
+                fi
+            fi
         fi
 
         if [ "$SKIP_UPDATE" = "true" ]; then
-            printf '%s\n' "Branch is $BEHIND_BY commit(s) behind $BASE_REF, and EVERY one is a publisher-authored gitlink-only bump — skipping update-branch and proceeding to merge (XACA-1122). Bot approvals stay valid."
+            printf '%s\n' "Branch is $BEHIND_BY commit(s) behind $BASE_REF, and the behind-range's changed files are disjoint from this PR's own changed files — skipping update-branch and proceeding to merge (XACA-1276-006, generalized from XACA-1122). Bot approvals stay valid."
         else
             printf '%s\n' "Branch is $BEHIND_BY commit(s) behind $BASE_REF (mergeStateStatus=$MERGE_STATE) — running gh pr update-branch. Prior bot approvals are against a stale base."
             gh pr update-branch "$PR_NUM" --repo "$REPO"
@@ -1106,6 +1262,77 @@ RANGE_EOF
         printf '%s\n' "! kb-sweep could not read the board for its residual report (board read failed) — residual subitems were NOT checked this round; read the full sweep output above before this ticket closes."
     else
         printf '%s\n' "! kb-sweep emitted no RESIDUAL report (pre-XACA-1199 kb-sweep?) — read the full sweep output above for open untagged subitems before this ticket closes."
+    fi
+
+    # ── Pre-merge ADVISORY FINDINGS banner (XACA-1276-003, severity taxonomy
+    # §11.1 C9) — PRINT-ONLY. Re-extracted from the SAME $SWEEP_OUTPUT
+    # captured at Gate 3 this iteration, exactly like the RESIDUAL banner
+    # above — never a re-run of kb-sweep, never a board.json re-parse.
+    #
+    # INVARIANT F7: this block MUST NEVER reach `verdict`. It cannot block,
+    # cannot change an exit code, cannot alter a verdict name — it exists
+    # solely to answer taxonomy §12 risk 3: "the easiest bug to ship here is
+    # advisory findings that gate nothing and appear nowhere." A finding
+    # filed "[Review][Advisory] …" / "[Test][Advisory] …" / "[UX][Advisory]
+    # …" no longer increments kb-sweep's PROTECTED SUBITEMS UNRESOLVED count
+    # (kanban-helpers.sh), so without this banner it would be invisible at
+    # merge time.
+    #
+    # Same defensive parse shape as the RESIDUAL banner: shape-anchored
+    # header extraction, a re-asserted count parse, and an unparseable-count
+    # arm that treats the count as non-zero and prints the raw block rather
+    # than silently dropping it. kb-sweep's marker text is "ADVISORY FINDINGS
+    # OPEN (N) — visible, never merge-gating:" — deliberately neither
+    # "PROTECTED SUBITEMS UNRESOLVED (N)" nor "RESIDUAL OPEN SUBITEMS (N) —
+    # advisory, not merge-gating:", so it can never satisfy either of those
+    # awk extractions above, and neither of those can satisfy this one.
+    ADVISORY_BLOCK=$(printf '%s\n' "$SWEEP_OUTPUT" | awk '
+      !found {
+        if ($0 ~ /^  [^ \[]/ && $0 ~ /ADVISORY FINDINGS OPEN \([0-9]+\)/ && $0 ~ /visible, never merge-gating[:.]$/) {
+          found=1
+        }
+      }
+      found {
+        if ($0 == "") { exit }
+        print
+      }
+    ')
+
+    if [ -n "$ADVISORY_BLOCK" ]; then
+        ADVISORY_HEADER_LINE=$(printf '%s\n' "$ADVISORY_BLOCK" | awk 'NR==1')
+        # Same anchoring re-asserted on the count parse — defense in depth
+        # against a future refactor feeding this a differently-sourced line.
+        ADVISORY_COUNT=$(printf '%s\n' "$ADVISORY_HEADER_LINE" | awk '
+          $0 ~ /^  [^ \[]/ && /ADVISORY FINDINGS OPEN \([0-9]+\)/ && /visible, never merge-gating[:.]$/ {
+            n = match($0, /ADVISORY FINDINGS OPEN \([0-9]+\)/)
+            if (n > 0) {
+              s = substr($0, RSTART, RLENGTH)
+              gsub(/[^0-9]/, "", s)
+              print s
+            }
+          }
+        ')
+        case "$ADVISORY_COUNT" in
+            ''|*[!0-9]*)
+                printf '%s\n' "! Could not parse an advisory count from kb-sweep's ADVISORY FINDINGS header — treating as non-zero to be safe:"
+                printf '%s\n' "$ADVISORY_BLOCK"
+                ;;
+            0)
+                # kb-sweep only ever prints this block when it counted at
+                # least one open advisory finding — a parsed 0 alongside a
+                # present block is itself a contradiction. Print raw rather
+                # than silently treating it as "none reported".
+                printf '%s\n' "! Advisory findings header parsed to 0 with the block still present — printing raw, not dropping it:"
+                printf '%s\n' "$ADVISORY_BLOCK"
+                ;;
+            *)
+                printf '%s\n' "== ADVISORY (non-blocking) — visible before merge =="
+                printf '%s\n' "$ADVISORY_BLOCK"
+                printf '%s\n' "These do NOT gate the merge. Resolve at your discretion before kb-done."
+                ;;
+        esac
+    else
+        printf '%s\n' "Advisory findings: none reported (or kb-sweep predates advisory reporting)."
     fi
 
     if [ "$DO_MERGE" != "true" ]; then
