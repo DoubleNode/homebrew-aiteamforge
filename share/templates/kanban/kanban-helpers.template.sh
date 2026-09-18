@@ -4880,6 +4880,55 @@ _kb_sweep_first_foreign_id() {
     return 1
 }
 
+# _kb_finding_severity_of (XACA-1276, ported from canonical kanban-helpers.sh
+# — severity taxonomy §4, kanban/plans/XACA-1276/XACA-1276_severity_taxonomy.md):
+# decides whether a protected [Review]/[Test]/[UX] finding is BLOCKING
+# (merge-gating, the default) or ADVISORY (reported but never merge-gating)
+# from its title's severity tag. Grammar: <class>[<severity>]<body>, e.g.
+# "[Review][Advisory] Consider extracting the duplicated loader (PR #78)".
+# "[Advisory]" is the ONLY token that de-gates a finding. Every malformation
+# — wrong case, a typo, a detached "[Review] [Advisory]", a reversed
+# "[Advisory][Review]", an [Advisory] tag with an empty/whitespace-only body
+# — resolves to BLOCKING. This is the fail-closed invariant: a finding whose
+# severity cannot be determined is blocking, never "unknown".
+#
+# Sets globals and NEVER echoes, so every caller reads $_KB_FINDING_CLASS /
+# $_KB_FINDING_SEVERITY directly — no `$(...)`, no subshell, no fork.
+#
+# kb-sweep's OWN protected-subitem gate does NOT call this function — it
+# spells the identical case arms out inline (kb-sweep's own hot loop never
+# depends on ANY external function call succeeding). This function is used
+# by kb-sweep's print-only advisory report block below (not a per-subitem
+# merge-gating hot path).
+#
+# Usage: _kb_finding_severity_of <title>
+# Sets $_KB_FINDING_CLASS to "[Review]"/"[Test]"/"[UX]"/"" (empty = title is
+# not in gated prefix position at all) and $_KB_FINDING_SEVERITY to
+# "blocking"/"advisory"/"" (empty iff class is empty). Always resets both
+# first, so a caller never reads a stale value from a previous, unrelated
+# call.
+_kb_finding_severity_of() {
+    local title="${1-}" rest=""
+    typeset -g _KB_FINDING_CLASS="" _KB_FINDING_SEVERITY=""
+    case "$title" in
+        \[Review\]\[Advisory\]*) _KB_FINDING_CLASS="[Review]"; rest="${title#\[Review\]\[Advisory\]}" ;;
+        \[Test\]\[Advisory\]*)   _KB_FINDING_CLASS="[Test]";   rest="${title#\[Test\]\[Advisory\]}"   ;;
+        \[UX\]\[Advisory\]*)     _KB_FINDING_CLASS="[UX]";     rest="${title#\[UX\]\[Advisory\]}"     ;;
+        \[Review\]*) _KB_FINDING_CLASS="[Review]"; _KB_FINDING_SEVERITY="blocking"; return 0 ;;
+        \[Test\]*)   _KB_FINDING_CLASS="[Test]";   _KB_FINDING_SEVERITY="blocking"; return 0 ;;
+        \[UX\]*)     _KB_FINDING_CLASS="[UX]";     _KB_FINDING_SEVERITY="blocking"; return 0 ;;
+        *) return 0 ;;                       # not a finding at all
+    esac
+    # F3: an [Advisory] tag with an empty/whitespace-only body is a
+    # malformed filing, not a severity decision -- still blocking.
+    if [[ -z "${rest//[[:space:]]/}" ]]; then
+        _KB_FINDING_SEVERITY="blocking"
+    else
+        _KB_FINDING_SEVERITY="advisory"
+    fi
+    return 0
+}
+
 # Review all subitems for the current active kanban item and report their statuses
 # Usage: kb-sweep [item-id]
 # If item-id is provided, reviews subitems for that item
@@ -4969,6 +5018,13 @@ kb-sweep() {
 
     if [[ "$subitem_count" -eq 0 ]]; then
         echo "  No subitems found — ready to close."
+        # XACA-1276 (ported from canonical, severity taxonomy §11.1
+        # SENTINEL): terminal evidence the sweep actually reached a
+        # completion path, unfoldable by any abort between here and the top
+        # of the function. Zero subitems trivially means zero blocking and
+        # zero advisory findings — nothing was ever read to compute either
+        # count.
+        echo "SWEEP COMPLETE: $working_id blocking=0 advisory=0"
         echo "═══════════════════════════════════════════════════════"
         echo ""
         return 0
@@ -5014,18 +5070,49 @@ kb-sweep() {
     # (see cancel-guard below). We surface them as a distinct, explicit gate so the
     # merge-monitor's grep has an unambiguous signal AND humans get a louder log
     # line than the generic "N remaining".
+    # XACA-1276 (ported from canonical, severity taxonomy §4/§11.1 C1): a
+    # title's severity slot — "[Advisory]" IMMEDIATELY adjacent to the class
+    # tag, e.g. "[Review][Advisory] <body>" — is decided INLINE here,
+    # duplicating (not calling) the same case arms _kb_finding_severity_of()
+    # above defines, because a fork inside $(...) OR an undefined-function
+    # "command not found" on THIS hot path both abort the sweep before the
+    # "PROTECTED SUBITEMS UNRESOLVED" marker ever prints, which CLAUDE.md
+    # Gate 3 reads as a clean sweep — fail-open on the merge gate. Plain
+    # inline `[[ ]]`/case syntax evaluated by the already-running
+    # interpreter has neither failure mode. "[Advisory]" is the ONLY token
+    # that de-gates a finding; every malformation (wrong case, a typo, a
+    # detached "[Review] [Advisory]", a reversed "[Advisory][Review]", an
+    # empty/whitespace-only body after the tag) falls through to the
+    # existing class-only arm below and stays BLOCKING.
     local protected_unresolved=0
     local protected_lines=""
     while IFS="|" read -r ps_status ps_id ps_title; do
         [[ -z "$ps_status" ]] && continue
-        if [[ "$ps_title" == \[Review\]* ]] || [[ "$ps_title" == \[Test\]* ]] || [[ "$ps_title" == \[UX\]* ]]; then
+        local ps_advisory=false ps_rest=""
+        if [[ "$ps_title" == \[Review\]\[Advisory\]* ]]; then
+            ps_rest="${ps_title#\[Review\]\[Advisory\]}"
+        elif [[ "$ps_title" == \[Test\]\[Advisory\]* ]]; then
+            ps_rest="${ps_title#\[Test\]\[Advisory\]}"
+        elif [[ "$ps_title" == \[UX\]\[Advisory\]* ]]; then
+            ps_rest="${ps_title#\[UX\]\[Advisory\]}"
+        elif [[ "$ps_title" == \[Review\]* ]] || [[ "$ps_title" == \[Test\]* ]] || [[ "$ps_title" == \[UX\]* ]]; then
+            : # class-tagged, no (or non-[Advisory]) severity slot -- blocking (F1/F2)
+        else
+            continue  # not a class-tagged finding at all -- ungated, unchanged
+        fi
+        # F3: an [Advisory] tag followed by an empty/whitespace-only body is
+        # a malformed filing, not a severity decision -- ps_advisory stays
+        # false and the finding is still counted as blocking below.
+        if [[ -n "$ps_rest" ]] && [[ -n "${ps_rest//[[:space:]]/}" ]]; then
+            ps_advisory=true
+        fi
+        $ps_advisory && continue  # genuine [Advisory]: never gates the merge
             case "$ps_status" in
                 todo|in_progress|blocked)
                     protected_unresolved=$((protected_unresolved + 1))
                     protected_lines+="     • ${ps_id}: ${ps_title} [${ps_status}]"$'\n'
                     ;;
             esac
-        fi
     done <<< "$subitem_lines"
 
     if [[ "$protected_unresolved" -gt 0 ]]; then
@@ -5159,6 +5246,53 @@ kb-sweep() {
         echo ""
     else
         echo "  ℹ️  RESIDUAL OPEN SUBITEMS (0) — advisory, not merge-gating."
+        echo ""
+    fi
+
+    # XACA-1276 (ported from canonical, severity taxonomy §11.1 C2/C3, §12
+    # risk 3): findings explicitly filed "[Review][Advisory] …" /
+    # "[Test][Advisory] …" / "[UX][Advisory] …" do NOT gate the merge (the
+    # protected-subitem loop above skips them), but they must still be
+    # VISIBLE somewhere at merge time — an advisory finding that gates
+    # nothing and appears nowhere is the easiest bug to ship here. The
+    # RESIDUAL block above deliberately excludes EVERY class-tagged title
+    # (`\[Review\]*`/`\[Test\]*`/`\[UX\]*`), advisory or not, so an advisory
+    # finding would otherwise be invisible in both blocks at once. This
+    # block is a THIRD, DISTINCT marker — placed AFTER the RESIDUAL block's
+    # own terminating blank line so it can never be swept into either
+    # block's shape-anchored extraction. It is print-only: it NEVER touches
+    # protected_unresolved, remaining_count, or kb-sweep's exit code, and
+    # its header text is neither "PROTECTED SUBITEMS UNRESOLVED (N)" nor
+    # "RESIDUAL OPEN SUBITEMS (N)", so scripts/kb-pr-monitor's Gate 3 /
+    # RESIDUAL awk can never mistake it for either.
+    #
+    # Unlike the protected-subitem loop above, this block never decides
+    # whether the merge is allowed, so calling _kb_finding_severity_of()
+    # directly — no `$(...)`, no subshell — cannot fail open on the gate:
+    # on a lookup failure (e.g. an undefined helper from a partial source)
+    # the entry is simply left off THIS report; it is still correctly
+    # counted as blocking by the protected loop's own inline,
+    # dependency-free logic above regardless of what happens here.
+    local advisory_unresolved=0
+    local advisory_lines=""
+    while IFS="|" read -r ad_status ad_id ad_title; do
+        [[ -z "$ad_status" ]] && continue
+        case "$ad_status" in
+            todo|in_progress|blocked) ;;
+            *) continue ;;
+        esac
+        _kb_finding_severity_of "$ad_title" 2>/dev/null || continue
+        if [[ "$_KB_FINDING_SEVERITY" == "advisory" ]]; then
+            advisory_unresolved=$((advisory_unresolved + 1))
+            advisory_lines+="     • ${ad_id}: ${ad_title} [${ad_status}]"$'\n'
+        fi
+    done <<< "$subitem_lines"
+
+    if [[ "$advisory_unresolved" -gt 0 ]]; then
+        echo "  ℹ️  ADVISORY FINDINGS OPEN ($advisory_unresolved) — visible, never merge-gating:"
+        printf '%s' "$advisory_lines"
+        echo "     [Review][Advisory]/[Test][Advisory]/[UX][Advisory] findings are reported here"
+        echo "     but do NOT block the merge. Resolve at your discretion before kb-done."
         echo ""
     fi
 
@@ -5531,13 +5665,27 @@ kb-sweep() {
         fi
     fi
 
+    # XACA-1276 (ported from canonical, severity taxonomy §11.1 SENTINEL):
+    # terminal marker printed AFTER the protected-subitem check, on every
+    # completion path (this one and the zero-subitem early return above) —
+    # never in a separate branch that an abort could skip while these two
+    # branches somehow still ran. $protected_unresolved is the same count
+    # "PROTECTED SUBITEMS UNRESOLVED (N)" above already printed;
+    # $advisory_unresolved is the same count "ADVISORY FINDINGS OPEN (N)"
+    # above already printed. Plain echo, no fork — an abort anywhere
+    # earlier in this function means execution never reaches here, so the
+    # sentinel's ABSENCE is what makes a mid-sweep abort distinguishable
+    # from a real completion; the READ half of this contract lives in
+    # scripts/kb-pr-monitor (tap-mirrored, not this template).
     if [[ "$remaining_count" -eq 0 ]]; then
         echo "  $resolved_count of $subitem_count subitems resolved. Ready to close."
+        echo "SWEEP COMPLETE: $working_id blocking=$protected_unresolved advisory=$advisory_unresolved"
         echo "═══════════════════════════════════════════════════════"
         echo ""
         return 0
     else
         echo "  $resolved_count of $subitem_count subitems resolved. $remaining_count remaining — address before closing."
+        echo "SWEEP COMPLETE: $working_id blocking=$protected_unresolved advisory=$advisory_unresolved"
         echo "═══════════════════════════════════════════════════════"
         echo ""
         return 1

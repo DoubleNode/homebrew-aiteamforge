@@ -25,6 +25,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   probes `command -v claude`'s resolved location, homebrew, npm-global and the
   aiteamforge root, and its fail-closed message names every path tried plus the
   hostname and the `CLAUDE_VERSIONS_DIR` remedy.
+- **XACA-1276** — `share/templates/kanban/kanban-helpers.template.sh`'s `kb-sweep` gains the
+  terminal sentinel `SWEEP COMPLETE: <id> blocking=<N> advisory=<M>` (printed after the
+  protected-subitem check, on every completion path), the inline `[Advisory]` severity carve-out
+  in the protected-subitem loop (a genuine `[Review][Advisory]`/`[Test][Advisory]`/`[UX][Advisory]`
+  finding no longer increments `protected_unresolved`), and the print-only
+  "ADVISORY FINDINGS OPEN (N)" report block, plus a new `_kb_finding_severity_of` helper — porting
+  canonical `kanban-helpers.sh`'s XACA-1276-002/-003 behaviour that was previously shipped with
+  zero coverage in the template. Without this, the next tap sync would have handed every consumer
+  a `kb-sweep` that never emits the sentinel `scripts/kb-pr-monitor`'s `SWEEP_RAN_OK` gate now
+  requires, blocking every consumer PR merge.
 
 ## [0.20.18] - 2026-09-18
 
