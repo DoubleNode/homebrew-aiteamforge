@@ -77,6 +77,14 @@
 #                  fold, replaces the fail-open "Legend:"/"ready to close."
 #                  evidence), shape-anchored PROTECTED marker read, and the
 #                  print-only ADVISORY FINDINGS banner
+#   XACA-1276-017  Gate 4 per-commit file list: --paginate + 3000-file
+#                  pagination-ceiling guard (silent 300-file GitHub cap)
+#   XACA-1276-020  Gate 3 UX backstop: capture-first rc on `gh pr diff`, so a
+#                  failed read (HTTP 406 on 300+ files) re-opens [UX] instead
+#                  of silently reading as "no UI files touched"
+#   XACA-1276-021  KBPM_HELPERS default resolves relative to THIS script's
+#                  own checkout, not a hardcoded ~/dev-team — a worktree run
+#                  must not silently read the main repo's kanban-helpers.sh
 # ============================================================================
 
 PR_NUM=""
@@ -87,7 +95,62 @@ MAX_HOURS=48
 ONCE="false"
 DO_MERGE="true"
 
-KBPM_HELPERS="${KBPM_HELPERS:-$HOME/dev-team/kanban-helpers.sh}"
+# XACA-1276-021: the default below used to be the single literal
+# $HOME/dev-team/kanban-helpers.sh — always the MAIN repo's checkout,
+# regardless of where this script itself is running from. A worktree run
+# (scripts/kb-pr-monitor invoked from inside
+# ~/dev-team/worktrees/<slug>/) would silently source the MAIN repo's
+# kanban-helpers.sh instead of its OWN worktree's copy. The main repo sits on
+# develop, which does not carry an in-flight ticket's subitems, so kb-sweep
+# there emits zero "SWEEP COMPLETE: <id>" for that id and Gate 3 fails
+# closed UNCONDITIONALLY on every worktree run — not a real block, just the
+# wrong file being read.
+#
+# Fix: resolve the default relative to the CHECKOUT this script itself lives
+# in. "$0" is what invoked this script (direct exec, `bash <path>`, or
+# `zsh -f <path>` — the test suite uses both of the latter two, and $0 is
+# preserved identically by each); dirname/cd/pwd resolves it to an absolute
+# path portably under both /bin/bash 3.2 and bash 5.x, no BASH_SOURCE (empty
+# under zsh — see feedback_bash_source_empty_under_zsh) and no readlink -f
+# (not portable to BSD). This script lives at <checkout>/scripts/kb-pr-monitor,
+# so <checkout>/kanban-helpers.sh is its sibling one directory up.
+#
+# The sibling is used ONLY when it actually exists there: a tap-installed
+# copy of this script has no such sibling — kanban-helpers.sh is not
+# tap-mirrored (only a template is, at
+# homebrew-tap/share/templates/kanban/kanban-helpers.template.sh) — so a tap
+# consumer keeps the historical $HOME/dev-team default untouched. This
+# resolution only ever changes which checkout's kanban-helpers.sh a
+# dev-team-tree run defaults to; it does not change behavior for anyone
+# relying on the old default, and KBPM_HELPERS set in the environment (every
+# existing test case sets it explicitly) always wins regardless.
+#
+# Fail-closed is UNCHANGED by this: whichever default is computed here, the
+# "kanban-helpers.sh not found at $KBPM_HELPERS" USAGE_ERROR check further
+# below still fires if the resolved path is not a real file — this only
+# changes WHICH default path is tried, never whether a missing file still
+# blocks. If $0 cannot be resolved at all (the cd fails), the sibling test
+# below simply cannot succeed and the historical default is used, which
+# still blocks via that same existing check if it is also absent.
+#
+# $0 is captured HERE, at top level, into KBPM_SELF — NOT read directly
+# inside the function below. zsh sets $0 to the FUNCTION's name inside a
+# function body (bash preserves the script's $0 there); reading $0 inside
+# _kbpm_default_helpers() under zsh -f resolved to "_kbpm_default_helpers"
+# itself, `dirname` turned that into ".", and the whole resolution silently
+# collapsed to the current working directory instead of the checkout —
+# MEASURED to reach USAGE_ERROR under zsh only, bash unaffected. Top-level
+# code is not inside any function in either shell, so $0 is unambiguous here.
+KBPM_SELF="$0"
+_kbpm_default_helpers() {
+    _dh_dir=$(cd -- "$(dirname -- "$KBPM_SELF")" >/dev/null 2>&1 && pwd -P) || _dh_dir=""
+    if [ -n "$_dh_dir" ] && [ -f "$_dh_dir/../kanban-helpers.sh" ]; then
+        printf '%s\n' "$_dh_dir/../kanban-helpers.sh"
+    else
+        printf '%s\n' "$HOME/dev-team/kanban-helpers.sh"
+    fi
+}
+KBPM_HELPERS="${KBPM_HELPERS:-$(_kbpm_default_helpers)}"
 KBPM_PIDFILE=""
 KBPM_RCFILE=""
 # XACA-1281-002: durable, head-keyed home for the Gate 3.5 CI-absence
@@ -891,9 +954,36 @@ while true; do
     # XACA-0703-009: `gh pr diff --name-only`, NOT `git diff origin/develop...`
     # — this repo's remote is `dev-team`, so the git form silently returns
     # empty on most Academy PRs.
-    UI_DIFF=$(gh pr diff "$PR_NUM" --repo "$REPO" --name-only 2>/dev/null | grep -E \
-        'lcars-ui/|\.html$|\.css$|\.scss$|\.sass$|\.jsx$|\.tsx$|View\.swift$|\.storyboard$|Assets\.xcassets/|res/layout/|res/drawable/|res/values/colors\.xml|res/values/dimens\.xml|design-system/|design-tokens/|DESIGN\.md' \
-        || true)
+    #
+    # XACA-1276-020: capture-first. The prior shape piped straight into
+    # `grep ... || true`, which reports the PIPE's exit — always 0 — never
+    # `gh`'s. On a 300+ file PR, `gh pr diff --name-only` exits 1 with HTTP
+    # 406 (measured on PR #644, the same ceiling XACA-1276-017 documented on
+    # the sibling Gate-4 call site immediately below in this file), and the
+    # old `2>/dev/null | grep || true` shape swallowed that failure into an
+    # empty, "clean-looking" UI_DIFF — so the Layer-2 [UX] re-open silently
+    # never fired. A `gh pr diff` call that exits non-zero is an explicit
+    # UNKNOWN, never "no UI files touched": treat it as though the diff DID
+    # touch a UI path, so the block below runs its existing [UX]-state
+    # checks instead of skipping them. Re-running the UX evaluator when it
+    # turns out to be unnecessary is cheap; silently skipping it when it was
+    # necessary is the exact failure this backstop exists to prevent.
+    #
+    # Deliberately rc-only, NOT also "or empty output" (unlike the Gate-4
+    # PR_FILES_RAW guard below): the regex filter legitimately produces an
+    # empty UI_DIFF whenever the read succeeded but genuinely touched no UI
+    # path, and this call's raw (pre-filter) output is not otherwise needed
+    # downstream — only rc distinguishes "gh failed" from "gh succeeded, no
+    # UI match".
+    UI_DIFF_RAW=$(gh pr diff "$PR_NUM" --repo "$REPO" --name-only 2>/dev/null)
+    UI_DIFF_RC=$?
+    if [ "$UI_DIFF_RC" -ne 0 ]; then
+        UI_DIFF="<diff unreadable: gh pr diff --name-only exited $UI_DIFF_RC>"
+    else
+        UI_DIFF=$(printf '%s\n' "$UI_DIFF_RAW" | grep -E \
+            'lcars-ui/|\.html$|\.css$|\.scss$|\.sass$|\.jsx$|\.tsx$|View\.swift$|\.storyboard$|Assets\.xcassets/|res/layout/|res/drawable/|res/values/colors\.xml|res/values/dimens\.xml|design-system/|design-tokens/|DESIGN\.md' \
+            || true)
+    fi
     if [ -n "$UI_DIFF" ]; then
         # `kb-backlog sub list` needs a numeric board index; resolve it through
         # the same private helpers the source used. Its per-line format is
