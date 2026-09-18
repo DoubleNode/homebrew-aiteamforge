@@ -1086,15 +1086,39 @@ CHECKS_EOF
             RANGE_UNREADABLE="false"
             # A here-doc, NOT a pipe: a `while` on the right of a pipe runs in
             # a subshell and RANGE_UNREADABLE=true would not survive the loop.
+            # XACA-1276-017: GitHub's "Get a commit" endpoint returns AT MOST
+            # 300 files when unpaginated, with NO truncation indicator —
+            # MEASURED on commit 84cbe994 (333 changed files, from PR #644):
+            # `gh api repos/.../commits/84cbe994 --jq '.files|length'` reads
+            # exactly 300, rc=0, and `--jq keys` carries no "truncated" field.
+            # A commit like that made the behind-range's file set read as
+            # SMALLER than it is, so a PR touching file #301+ classified as
+            # disjoint and skipped update-branch — fail-open in the exact
+            # feature this block exists to gate. `--paginate` follows
+            # GitHub's own Link headers for this endpoint and is VERIFIED to
+            # recover all 333 files on that same commit (4 pages of
+            # per_page=100). It does not make the read unbounded, though:
+            # GitHub's documented pagination ceiling for commit file listings
+            # is 3000 files total, silently capped the same way past that
+            # point. COMMIT_FILES_PAGE_CEILING is THAT documented number, not
+            # a re-guess of the same 300 this bug was filed against — a count
+            # at or beyond it means truncation can no longer be ruled out, so
+            # it fails exactly like an unreadable list.
+            COMMIT_FILES_PAGE_CEILING=3000
             while IFS='|' read -r C_SHA C_LOGIN; do
                 [ -n "$C_SHA" ] || continue
                 # C_LOGIN is diagnostic only now (not gating) — kept so the
                 # legacy publisher-authored case still prints recognizably.
-                C_FILES=$(gh api "repos/$REPO/commits/$C_SHA" --jq '.files[].filename' 2>/dev/null)
+                C_FILES=$(gh api --paginate "repos/$REPO/commits/$C_SHA" --jq '.files[].filename' 2>/dev/null)
                 C_FILES_RC=$?
+                C_FILES_COUNT=$(printf '%s\n' "$C_FILES" | grep -c .)
                 if [ "$C_FILES_RC" -ne 0 ] || [ -z "$C_FILES" ]; then
                     RANGE_UNREADABLE="true"
                     printf '%s\n' "  $C_SHA (author '${C_LOGIN:-<unreadable>}'): could not read its changed-file list (rc=$C_FILES_RC) — fail closed."
+                    break
+                elif [ "$C_FILES_COUNT" -ge "$COMMIT_FILES_PAGE_CEILING" ]; then
+                    RANGE_UNREADABLE="true"
+                    printf '%s\n' "  $C_SHA (author '${C_LOGIN:-<unreadable>}'): changed-file list returned $C_FILES_COUNT entries, at/above GitHub's ${COMMIT_FILES_PAGE_CEILING}-file pagination ceiling — cannot rule out silent truncation; fail closed."
                     break
                 fi
                 RANGE_FILES="$RANGE_FILES
@@ -1110,6 +1134,20 @@ RANGE_EOF
                 # tested against. `gh pr diff --name-only`, NOT `git diff`:
                 # this repo's remote is `dev-team`, so the git form resolves
                 # nothing on most Academy PRs (XACA-0703-009).
+                #
+                # XACA-1276-017: does this call share the per-commit
+                # silent-truncation risk fixed above? MEASURED no. `gh pr
+                # diff` reads GitHub's diff media-type endpoint (a git-style
+                # text diff), not the paginated JSON files array, and that
+                # endpoint fails LOUD past its own file-count ceiling rather
+                # than quietly truncating — verified against PR #644 (the
+                # 333-file PR behind commit 84cbe994 above): `gh pr diff 644
+                # --name-only` exits 1 with "HTTP 406: ... diff exceeded the
+                # maximum number of files (300)". The existing
+                # rc/empty-output check two lines below already fails closed
+                # on that, so no count-ceiling guard is needed on this side —
+                # unlike the per-commit read, this API refuses rather than
+                # silently shrinking the answer.
                 PR_FILES_RAW=$(gh pr diff "$PR_NUM" --repo "$REPO" --name-only 2>/dev/null)
                 PR_DIFF_RC=$?
                 if [ "$PR_DIFF_RC" -ne 0 ] || [ -z "$PR_FILES_RAW" ]; then

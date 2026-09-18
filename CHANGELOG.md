@@ -35,6 +35,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   zero coverage in the template. Without this, the next tap sync would have handed every consumer
   a `kb-sweep` that never emits the sentinel `scripts/kb-pr-monitor`'s `SWEEP_RAN_OK` gate now
   requires, blocking every consumer PR merge.
+- **XACA-1276-017/-018** — fixed two blocking gate-bot findings from PR #930. (017)
+  `share/scripts/kb-pr-monitor`'s Gate 4 behind-range file-overlap test read a commit's changed-file
+  list via an unpaginated `gh api repos/.../commits/<sha>` call, which GitHub silently caps at 300
+  files with no truncation indicator — a commit over that cap could read as touching fewer files
+  than it does, letting a disjoint-file classification fail open and skip `update-branch` on a stale
+  base. Added `--paginate` (recovers up to GitHub's documented 3000-file pagination ceiling) plus a
+  `COMMIT_FILES_PAGE_CEILING` guard that fails closed at/above that ceiling. (018) `kb-sweep`'s
+  inline protected-subitem gate and `_kb_finding_severity_of` in
+  `share/templates/kanban/kanban-helpers.template.sh` carried a code comment claiming a reordered
+  severity tag "resolves BLOCKING" — false: a malformed CLASS tag (e.g. `[Advisory][Review]`) is not
+  recognized as a finding at all and gates nothing on merge (though it still blocks `kb-done`); only
+  a malformed tag within an intact class prefix is blocking. Comments corrected to match the
+  already-tested behaviour; no predicate logic changed.
 
 ## [0.20.18] - 2026-09-18
 

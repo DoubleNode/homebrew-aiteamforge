@@ -4886,11 +4886,16 @@ _kb_sweep_first_foreign_id() {
 # (merge-gating, the default) or ADVISORY (reported but never merge-gating)
 # from its title's severity tag. Grammar: <class>[<severity>]<body>, e.g.
 # "[Review][Advisory] Consider extracting the duplicated loader (PR #78)".
-# "[Advisory]" is the ONLY token that de-gates a finding. Every malformation
-# — wrong case, a typo, a detached "[Review] [Advisory]", a reversed
-# "[Advisory][Review]", an [Advisory] tag with an empty/whitespace-only body
-# — resolves to BLOCKING. This is the fail-closed invariant: a finding whose
-# severity cannot be determined is blocking, never "unknown".
+# "[Advisory]" is the ONLY token that de-gates a finding. A malformed
+# SEVERITY slot — wrong case, a typo, a detached "[Review] [Advisory]", an
+# [Advisory] tag with an empty/whitespace-only body — resolves to BLOCKING:
+# the class arms below still match, only the severity token did not. This is
+# the fail-closed invariant: a finding whose severity cannot be determined
+# is blocking, never "unknown". A malformed CLASS tag is different — a
+# reversed "[Advisory][Review]", a lowercase "[review]", or a leading space
+# matches none of the arms below, so the title is not recognized as a
+# finding at all and this function gates nothing on it (it still blocks
+# `kb-done` as an ordinary unresolved subitem).
 #
 # Sets globals and NEVER echoes, so every caller reads $_KB_FINDING_CLASS /
 # $_KB_FINDING_SEVERITY directly — no `$(...)`, no subshell, no fork.
@@ -5080,10 +5085,15 @@ kb-sweep() {
     # Gate 3 reads as a clean sweep — fail-open on the merge gate. Plain
     # inline `[[ ]]`/case syntax evaluated by the already-running
     # interpreter has neither failure mode. "[Advisory]" is the ONLY token
-    # that de-gates a finding; every malformation (wrong case, a typo, a
-    # detached "[Review] [Advisory]", a reversed "[Advisory][Review]", an
-    # empty/whitespace-only body after the tag) falls through to the
-    # existing class-only arm below and stays BLOCKING.
+    # that de-gates a finding. A malformed SEVERITY slot (wrong case, a
+    # typo, a detached "[Review] [Advisory]", an empty/whitespace-only body
+    # after the tag) falls through to the existing class-only arm below and
+    # stays BLOCKING — the class prefix still matched. A malformed CLASS tag
+    # (a reversed "[Advisory][Review]", a lowercase "[review]", a leading
+    # space) matches none of the arms below, falls to the final `else
+    # continue`, and is not recognized as a finding at all — it gates
+    # nothing here, though it still blocks kb-done as an ordinary unresolved
+    # subitem.
     local protected_unresolved=0
     local protected_lines=""
     while IFS="|" read -r ps_status ps_id ps_title; do
