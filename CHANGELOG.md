@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1285** — `share/scripts/kb-pr-monitor`: drops the startup seed that stalled
+  pre-approved PRs. The seed used an unfiltered "latest review per bot" query with
+  no `commit_id`/freshness check, so a PR where both gate bots had already approved
+  the current head before the monitor started never saw its dedup latch flip
+  (`--once` -> BLOCKED/22, continuous -> TIMEOUT/31) even though it had already
+  passed. Freshness is fully enforced downstream by the existing
+  `commit_id == HEAD_SHA` + cutoff-date gate filters, so the seed was redundant and
+  actively harmful. Mirrored from dev-team canonical.
 - **Test harness: an inherited `GIT_DIR` can no longer steer fixture git commands into a real repo.**
   With `GIT_DIR`/`GIT_WORK_TREE` exported, a fixture's bare `cd "$X"; git init; git config user.name ...`
   acts on the repo `GIT_DIR` names, not the fixture. That happened on 2026-09-08: suites run with them

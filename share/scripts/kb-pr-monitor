@@ -723,17 +723,42 @@ trap '_kbpm_cleanup' EXIT
 trap '_kbpm_cleanup; exit 130' INT
 trap '_kbpm_cleanup; exit 143' TERM
 
-# ── seed last-processed timestamps (skip pre-existing reviews) ──────────────
-# XACA-0897-098: EVERY query against this endpoint carries --paginate. It pages
-# at 30 (measured on PR #754, 37 reviews): un-paginated, `last` picks the latest
-# verdict WITHIN page 1, not overall. Over-blocks in one direction; in the
-# mirror case a stale page-1 APPROVED outranks a live CHANGES_REQUESTED and
-# merges over a rejection. --paginate concatenates all pages into one array
-# before --jq runs, so the existing filters need no other change.
-LAST_TEST_AT=$(gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" \
-    --jq '[.[] | select(.user.login == "'"$TESTER_BOT"'")] | sort_by(.submitted_at) | last | .submitted_at // empty' 2>/dev/null)
-LAST_REVIEW_AT=$(gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" \
-    --jq '[.[] | select(.user.login == "'"$REVIEWER_BOT"'")] | sort_by(.submitted_at) | last | .submitted_at // empty' 2>/dev/null)
+# ── no startup seed (XACA-1285) ──────────────────────────────────────────────
+# There used to be a seed here that pre-loaded LAST_TEST_AT/LAST_REVIEW_AT from
+# each bot's latest review BEFORE the loop's first poll, on the theory that a
+# review already sitting on the PR when the monitor starts is "pre-existing"
+# and should be skipped rather than re-processed. That seed used the SAME
+# un-filtered "latest review per bot" query Gates 1/2 do NOT use for the
+# decision itself — it carried no commit_id or freshness check at all. If both
+# bots had already APPROVED the current head before the monitor started (the
+# exact steady state after a clean run), the seed and the first poll's gate
+# read were IDENTICAL values, the `"$AT" != "$LAST_*_AT"` dedup check below
+# never saw a change, and the gate latch never flipped — --once reported
+# BLOCKED, continuous ran to TIMEOUT, on a PR that had already fully passed
+# (XACA-1285, reproduced by XACA-1285-001; hit live on PR #926/#930/#942).
+# The freshness guards that make the seed unnecessary shipped in XACA-1159-030.
+#
+# The fix is to not seed at all: LAST_TEST_AT/LAST_REVIEW_AT start empty, so
+# the very first poll's gate read is unconditionally new and drives TEST_OK/
+# REVIEW_OK immediately. This is safe because gate freshness is already fully
+# enforced downstream, independent of any seed: Gates 1/2 (below) filter on
+# `.commit_id == HEAD_SHA` AND `.submitted_at > EFFECTIVE_CUTOFF` (the later of
+# the head's committer date and any force-push floor), and the in-run latch
+# still dedups repeated identical reads within one process. A stale review on
+# an old commit, or one that predates the current head/force-push cutoff,
+# still cannot satisfy either gate — seeding never added a freshness check the
+# gates didn't already have; it only ever discarded a value the gates would
+# have accepted. Keying a seed to HEAD_SHA instead of dropping it would not
+# have fixed this: it would just re-capture the same already-valid approval
+# timestamp and reproduce the identical stall.
+#
+# One accepted behavior change: a CHANGES_REQUESTED already sitting on the
+# current head (post-cutoff) before the monitor starts now surfaces as
+# RESPAWN_TESTER/RESPAWN_REVIEWER on the first poll instead of being silently
+# skipped — that respawn is the correct action; the PR was never actually
+# clear to merge.
+LAST_TEST_AT=""
+LAST_REVIEW_AT=""
 
 TEST_OK="false"
 REVIEW_OK="false"
