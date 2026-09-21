@@ -16,6 +16,42 @@
 #   10  RESPAWN_TESTER   tester bot submitted CHANGES_REQUESTED
 #   11  RESPAWN_REVIEWER reviewer bot submitted CHANGES_REQUESTED
 #   12  RESPAWN_BOTH     `gh pr update-branch` ran; both prior approvals stale
+#   23  ROUND_LIMIT      (XACA-1299-004) a bot submitted CHANGES_REQUESTED for
+#                        the >=4th time (KBPM_ROUND_LIMIT, env-overridable) on
+#                        this PR — TERMINAL, like BLOCKED: the monitor does NOT
+#                        emit a respawn verdict for this round. Escalate to the
+#                        user; at round>=4 a blocking finding must show a
+#                        regression or a named harm, otherwise re-file it
+#                        [Advisory] + a spin-out ticket rather than looping the
+#                        same two bots again. A round that reads "unknown" (the
+#                        reviews fetch itself failed) NEVER trips this breaker
+#                        — see _kbpm_round_trips_limit.
+#
+#   RESPAWN_TESTER/RESPAWN_REVIEWER/RESPAWN_BOTH/ROUND_LIMIT detail=
+#   (XACA-1299-003) also carries `tester_round=<N|unknown>
+#   tester_approved_sha=<sha|none|unknown> reviewer_round=<N|unknown>
+#   reviewer_approved_sha=<sha|none|unknown>` — the round is the count of
+#   DISTINCT commit_ids that bot submitted CHANGES_REQUESTED on (blocking
+#   rounds; approvals/comments never count — XACA-1299-016), approved_sha is
+#   that bot's latest APPROVED commit_id. "unknown" (never 0) means the
+#   reviews fetch itself failed. See _kbpm_round_detail.
+#
+#   RESPAWN_TESTER/RESPAWN_REVIEWER/RESPAWN_BOTH detail= (XACA-1299-004) ALSO
+#   carries a re-review MODE HINT per bot: `tester_mode=<full|delta:<sha>>
+#   reviewer_mode=<...>` (ROUND_LIMIT detail carries it too). The bot that just
+#   requested changes is always `full`. Every one of these verdicts is followed
+#   by a fix push, so the OTHER bot always needs a re-review (Gates 1/2 key on
+#   commit_id == HEAD): `delta:<HEAD>` when it already approved the current
+#   head (the fix commits are the whole delta — XACA-1299-015; there is no
+#   "no re-run needed" state), `delta:<its own last approved sha>` when
+#   that sha is a verified linear ancestor of HEAD (safe to re-verify only the
+#   delta via `kb-run-test|kb-run-review <ID> --delta <sha>`), or `full`
+#   whenever that cannot be positively established (rebase, merge commit in
+#   range, none/unknown approved sha, or a `gh` read failure — fail CLOSED to
+#   full, never delta). RESPAWN_BOTH is always `tester_mode=full
+#   reviewer_mode=full` — both approvals are against a base `update-branch`
+#   just replaced, so there is no "delta" to compute. See
+#   _kbpm_respawn_mode_detail / _kbpm_delta_mode.
 #   20  CONFLICT         mergeable=CONFLICTING or mergeStateStatus=DIRTY
 #   21  UX_REOPEN        UI paths in diff but [UX] subitem cancelled
 #   22  BLOCKED          a gate blocked (protected subitems open, sweep did not
@@ -85,6 +121,11 @@
 #   XACA-1276-021  KBPM_HELPERS default resolves relative to THIS script's
 #                  own checkout, not a hardcoded ~/dev-team — a worktree run
 #                  must not silently read the main repo's kanban-helpers.sh
+#   XACA-1299-004  ROUND_LIMIT circuit breaker (round>=4 CR is terminal, not a
+#                  respawn) + per-bot full/delta re-review mode
+#                  hints in RESPAWN_* detail=, fail-closed to full on anything
+#                  that cannot positively prove a linear, merge-commit-free
+#                  ancestor range for the "already approved, just stale" bot
 # ============================================================================
 
 PR_NUM=""
@@ -175,6 +216,17 @@ KBPM_STATE_DIR="${KBPM_STATE_DIR:-$HOME/.aiteamforge/run/kb-pr-monitor}"
 TESTER_BOT="ds9-tester-bot[bot]"
 REVIEWER_BOT="ai-security-review-bot[bot]"
 
+# XACA-1299-003: review-ROUND counting is keyed off this list, not off
+# TESTER_BOT/REVIEWER_BOT individually, so a future third reviewer identity —
+# e.g. if the UX gate ever grows a bot reviewer instead of the kanban-subitem
+# check it uses today (see the Gate 3 UX backstop further down: [UX] state is
+# read from kb-backlog, not from a PR review) — is a one-line addition here.
+# One login per line (bot logins never contain whitespace, so a newline list
+# needs no quoting/escaping to iterate under either shell — see the existing
+# `while IFS= read -r ... <<EOF` pattern used elsewhere in this script).
+KBPM_ROUND_BOT_LOGINS="$TESTER_BOT
+$REVIEWER_BOT"
+
 usage() {
     # Extract the header's usage block by its own MARKERS, not by line number:
     # a hardcoded range silently prints the wrong text after any header edit.
@@ -196,6 +248,7 @@ verdict() {
         RESPAWN_TESTER)   _v_code=10 ;;
         RESPAWN_REVIEWER) _v_code=11 ;;
         RESPAWN_BOTH)     _v_code=12 ;;
+        ROUND_LIMIT)      _v_code=23 ;;
         CONFLICT)         _v_code=20 ;;
         UX_REOPEN)        _v_code=21 ;;
         BLOCKED)          _v_code=22 ;;
@@ -335,6 +388,195 @@ _kbpm_ca_read() {
     # must not be silently reported as "nothing on file".
     mkdir -p "$(_kbpm_ca_dir)" 2>/dev/null || return 2
     return 1
+}
+
+# ── review-round counting (XACA-1299-003) ───────────────────────────────────
+# A "round" is a BLOCKING round: the count of DISTINCT commit_ids a bot has
+# submitted CHANGES_REQUESTED against. APPROVED and COMMENTED reviews do not
+# count. An earlier any-state definition let re-approvals forced purely by a
+# develop sync (update-branch / RESPAWN_BOTH) inflate the count, so ROUND_LIMIT
+# could fire on a bot's FIRST-ever request for changes and push a legitimate
+# first blocker toward [Advisory] (XACA-1299-016). The breaker targets repeated
+# blocking rounds — fix churn — not sync thrash, which kb-gate-round-stats
+# measures separately.
+#
+# Deliberately NOT reusing Gate 1/2's `gh api --jq` calls above: those use
+# gh's OWN jq evaluator (no --arg — see the header comment on why the SHA is
+# bound via a quote-dance instead), which is fine for pulling a single scalar
+# per poll but awkward for a multi-bot structured computation. This goes
+# through a real `jq` on the RAW reviews payload instead, fetched ONCE
+# (_kbpm_fetch_review_rounds) and reused for every login in
+# KBPM_ROUND_BOT_LOGINS — one API call for all bots, not one per bot. Kept as
+# a small, pure, separately-testable function
+# (tests/test-xaca-1299-round-counter.sh feeds it fixture JSON directly, no
+# `gh` stub involved) with a thin live-fetch wrapper around it.
+#
+# _kbpm_bot_review_round <bot-login> <reviews-json-file>
+#   Prints "<round>|<approved_sha>":
+#     <round>        distinct commit_ids that login submitted CHANGES_REQUESTED
+#                    on (blocking rounds only — APPROVED/COMMENTED rounds, e.g.
+#                    re-approvals forced by a develop sync, never count toward
+#                    the breaker; XACA-1299-016), or the literal
+#                    string "unknown" on any failure — NEVER 0 for a failure,
+#                    because 0 is a real, reassuring answer ("has reviewed,
+#                    never re-run") a caller cannot distinguish from "the
+#                    fetch failed silently" unless failure gets its own token.
+#     <approved_sha> that login's most recent APPROVED review's commit_id
+#                    (by submitted_at), or "none" if it reviewed but never
+#                    approved, or "unknown" alongside an unknown round.
+_kbpm_bot_review_round() {
+    _brr_login="$1"; _brr_json_file="$2"
+    if ! command -v jq >/dev/null 2>&1; then
+        printf 'unknown|unknown\n'; return 0
+    fi
+    if [ -z "$_brr_json_file" ] || [ ! -f "$_brr_json_file" ]; then
+        printf 'unknown|unknown\n'; return 0
+    fi
+    _brr_out=$(jq -r --arg login "$_brr_login" '
+        if (type != "array") then
+            "unknown|unknown"
+        else
+            ([ .[] | select(.user.login == $login) ]) as $r
+            | ($r | map(select(.state == "CHANGES_REQUESTED")) | [ .[].commit_id ] | map(select(. != null and . != "")) | unique | length) as $round
+            | ($r | map(select(.state == "APPROVED")) | sort_by(.submitted_at // "") | last | .commit_id) as $appr
+            | "\($round)|\($appr // "none")"
+        end
+    ' "$_brr_json_file" 2>/dev/null)
+    _brr_rc=$?
+    if [ "$_brr_rc" -ne 0 ] || [ -z "$_brr_out" ]; then
+        printf 'unknown|unknown\n'; return 0
+    fi
+    printf '%s\n' "$_brr_out"
+}
+
+# _kbpm_fetch_review_rounds — the ONE live network call. Prints one
+# "<login> <round>|<approved_sha>" line per KBPM_ROUND_BOT_LOGINS entry.
+# NOT called every poll — only at the point a verdict actually needs the
+# numbers (RESPAWN_TESTER/RESPAWN_REVIEWER/RESPAWN_BOTH below), so an
+# ordinary "still waiting" poll pays nothing extra for this.
+#
+# `gh api --paginate` WITHOUT --jq prints each page as its OWN top-level JSON
+# array back-to-back — gh's own --help: "Each page is a separate JSON array or
+# object. Pass --slurp to wrap all pages ... into an outer JSON array." Piping
+# through `jq -s 'add // []'` slurps every top-level page into an
+# array-of-arrays and `add` flattens it into one flat reviews array, whether
+# the PR has one page of reviews or many. Every step captures its rc into a
+# file BEFORE any downstream command can overwrite `$?` (capture-first — see
+# feedback_pipefail_hides_exit_code), so a gh failure and a jq failure are
+# both caught, never silently treated as "zero reviews".
+_kbpm_fetch_review_rounds() {
+    _frr_unknown_all() {
+        while IFS= read -r _frr_login; do
+            [ -n "$_frr_login" ] || continue
+            printf '%s unknown|unknown\n' "$_frr_login"
+        done <<KBPM_RR_UNKNOWN_EOF
+$KBPM_ROUND_BOT_LOGINS
+KBPM_RR_UNKNOWN_EOF
+    }
+
+    _frr_raw=$(mktemp "${TMPDIR:-/tmp}/kb-pr-monitor-reviews-raw.XXXXXX" 2>/dev/null)
+    _frr_flat=$(mktemp "${TMPDIR:-/tmp}/kb-pr-monitor-reviews-flat.XXXXXX" 2>/dev/null)
+    if [ -z "$_frr_raw" ] || [ -z "$_frr_flat" ]; then
+        _frr_unknown_all
+        [ -n "$_frr_raw" ] && command rm -f "$_frr_raw"
+        [ -n "$_frr_flat" ] && command rm -f "$_frr_flat"
+        return 0
+    fi
+
+    gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" > "$_frr_raw" 2>/dev/null
+    _frr_gh_rc=$?
+    if [ "$_frr_gh_rc" -ne 0 ] || [ ! -s "$_frr_raw" ] || ! command -v jq >/dev/null 2>&1; then
+        _frr_unknown_all
+        command rm -f "$_frr_raw" "$_frr_flat"
+        return 0
+    fi
+
+    jq -s 'add // []' "$_frr_raw" > "$_frr_flat" 2>/dev/null
+    _frr_jq_rc=$?
+    command rm -f "$_frr_raw"
+    if [ "$_frr_jq_rc" -ne 0 ] || [ ! -s "$_frr_flat" ]; then
+        _frr_unknown_all
+        command rm -f "$_frr_flat"
+        return 0
+    fi
+
+    while IFS= read -r _frr_login; do
+        [ -n "$_frr_login" ] || continue
+        _frr_result=$(_kbpm_bot_review_round "$_frr_login" "$_frr_flat")
+        printf '%s %s\n' "$_frr_login" "$_frr_result"
+    done <<KBPM_RR_LOOKUP_EOF
+$KBPM_ROUND_BOT_LOGINS
+KBPM_RR_LOOKUP_EOF
+    command rm -f "$_frr_flat"
+}
+
+# _kbpm_round_lookup <bot-login> <fetch-output-file> — exact-match line lookup
+# against _kbpm_fetch_review_rounds' output (one "<login> <round>|<sha>" line
+# per bot). Reads via redirection, not a pipe, so it never forks a subshell —
+# not load-bearing here (no variable needs to escape it), but consistent with
+# every other read loop in this script.
+_kbpm_round_lookup() {
+    _rl_login="$1"; _rl_file="$2"
+    _rl_result="unknown|unknown"
+    while IFS=' ' read -r _rl_l _rl_v; do
+        [ "$_rl_l" = "$_rl_login" ] && _rl_result="$_rl_v"
+    done < "$_rl_file"
+    printf '%s\n' "$_rl_result"
+}
+
+# _kbpm_round_detail — fetches once and sets TESTER_ROUND/TESTER_APPROVED_SHA/
+# REVIEWER_ROUND/REVIEWER_APPROVED_SHA as script globals, so the XACA-1299-004
+# ROUND_LIMIT check (round>=KBPM_ROUND_LIMIT) and the delta/full mode-hint
+# logic can read them directly instead of re-parsing a verdict detail string.
+# Called only at the three RESPAWN_* verdict sites below, never in the
+# steady-state poll.
+#
+# MUST be called PLAIN — `_kbpm_round_detail` — NEVER as `$(_kbpm_round_detail)`
+# or inside any other command substitution / pipeline. Every shell that runs
+# this script (bash AND zsh) forks a SUBSHELL for command substitution, and a
+# subshell's variable assignments never propagate back to the caller — the
+# whole reason this function exists (per-global TESTER_ROUND etc., not just a
+# printed string) would silently do nothing outside the subshell.
+# XACA-1299-004 MEASURED this exactly: with the three call sites written as
+# `_RR_DETAIL=$(_kbpm_round_detail)`, tester_round=4/5 fixtures still reached
+# RESPAWN_TESTER instead of ROUND_LIMIT, because `_kbpm_round_trips_limit
+# "$TESTER_ROUND"` outside the substitution saw TESTER_ROUND still at its
+# caller-scope value (unset), never the "4" the subshell had computed and then
+# discarded. Use the paired `_kbpm_round_detail_string` (below), called
+# separately AFTER this one, to get the same info back as a string — that
+# second call is safe to run inside `$()` because by then the globals it
+# reads are already set in the CURRENT shell and a subshell only needs to READ
+# them, not set anything the caller depends on.
+_kbpm_round_detail() {
+    TESTER_ROUND="unknown"; TESTER_APPROVED_SHA="unknown"
+    REVIEWER_ROUND="unknown"; REVIEWER_APPROVED_SHA="unknown"
+
+    _rd_tmp=$(mktemp "${TMPDIR:-/tmp}/kb-pr-monitor-rounds.XXXXXX" 2>/dev/null)
+    if [ -z "$_rd_tmp" ]; then
+        return 0   # globals already at "unknown" from the top of this function
+    fi
+    _kbpm_fetch_review_rounds > "$_rd_tmp" 2>/dev/null
+
+    _rd_tester=$(_kbpm_round_lookup "$TESTER_BOT" "$_rd_tmp")
+    _rd_reviewer=$(_kbpm_round_lookup "$REVIEWER_BOT" "$_rd_tmp")
+    command rm -f "$_rd_tmp"
+
+    TESTER_ROUND="${_rd_tester%%|*}"
+    TESTER_APPROVED_SHA="${_rd_tester#*|}"
+    REVIEWER_ROUND="${_rd_reviewer%%|*}"
+    REVIEWER_APPROVED_SHA="${_rd_reviewer#*|}"
+
+}
+
+# _kbpm_round_detail_string — prints the CURRENT TESTER_ROUND/TESTER_APPROVED_SHA/
+# REVIEWER_ROUND/REVIEWER_APPROVED_SHA globals as the `key=value ...` fragment
+# used in verdict detail= lines. Safe to call inside `$()` (unlike
+# _kbpm_round_detail itself — see the warning on that function): this one only
+# READS globals, it sets nothing the caller needs back. Always call
+# _kbpm_round_detail PLAIN first, then this one, in that order.
+_kbpm_round_detail_string() {
+    printf 'tester_round=%s tester_approved_sha=%s reviewer_round=%s reviewer_approved_sha=%s' \
+        "$TESTER_ROUND" "$TESTER_APPROVED_SHA" "$REVIEWER_ROUND" "$REVIEWER_APPROVED_SHA"
 }
 
 # ── argument parsing ────────────────────────────────────────────────────────
@@ -565,6 +807,132 @@ CI_ABSENCE_CONTRADICTED=""   # non-empty => this head contradicted "no CI here"
 PREV_HEAD_SHA=""
 FORCE_PUSH_CUTOFF=""
 
+# ── round-limit circuit breaker + delta re-review mode hints (XACA-1299-004) ─
+# Deliberately placed AFTER argument parsing / --repo validation, not inside
+# the XACA-1299-003 "review-round counting" section above: this script's own
+# tests/test-xaca-1299-round-counter.sh extracts THAT section by slicing
+# between its own start marker and the "# ── argument parsing" marker (the
+# same by-marker technique this script's usage() uses on its header), so
+# anything placed between those two markers is swept into that extraction
+# too. These functions are exercised by their OWN suite
+# (tests/test-xaca-1299-round-limit.sh) instead, and living down here keeps
+# the two extractions from overlapping.
+#
+# KBPM_ROUND_LIMIT: env-overridable ONLY so tests/test-xaca-1299-round-limit.sh
+# can drive the breaker at a small round count without needing 4 real review
+# rounds' worth of fixture data. Production callers must not set this.
+KBPM_ROUND_LIMIT="${KBPM_ROUND_LIMIT:-4}"
+
+# _kbpm_round_trips_limit <round-value: N|unknown|empty>
+# Returns 0 (trips) iff the value is a plain non-negative integer >= the
+# limit. "unknown" (the reviews fetch failed) and "" both return 1 — a round
+# this script could not actually count must NEVER be treated as having
+# reached the limit; that would turn "we couldn't read GitHub" into "escalate
+# to the user as a repeat offender", which is a worse failure mode than just
+# falling through to the ordinary respawn verdict. This is a deliberate
+# fail-OPEN on the breaker itself (never on the underlying gate: the PR still
+# cannot merge until a bot approves — ROUND_LIMIT only adds an escalation on
+# top of the respawn that would otherwise fire, it never removes one).
+_kbpm_round_trips_limit() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *)           [ "$1" -ge "$KBPM_ROUND_LIMIT" ] ;;
+    esac
+}
+
+# _kbpm_delta_mode <approved-sha|none|unknown|empty> <head-sha>
+# Prints "full" or "delta:<approved-sha>". FAIL CLOSED to "full" on every path
+# that cannot positively prove the delta is safe to review in isolation:
+#   * approved sha is none/unknown/empty, or identical to HEAD (the caller is
+#     expected to emit "delta:<HEAD>" for an exact match and never call this —
+#     but if it is called anyway, "full" is still the safe answer);
+#   * `jq` is unavailable;
+#   * the compare API call fails or returns unreadable/empty output;
+#   * compare .status is anything other than "ahead" (identical/diverged/
+#     behind — a rebase or force-push re-points history, and a diverged range
+#     is not a delta of the reviewed content at all);
+#   * the compare payload's `.commits` array is truncated relative to
+#     `.total_commits` (GitHub's compare endpoint caps at 250 commits; a
+#     truncated array cannot be fully checked for merge commits, so treat it
+#     the same as "cannot verify");
+#   * ANY commit in the (verified-complete) range has other than exactly one
+#     parent — a merge commit in the range (e.g. develop merged into the PR
+#     branch) means the "delta" is not a simple linear stack of the PR's own
+#     new work, and a narrow re-review could miss content a full review would
+#     have caught.
+# Only when .status=="ahead", the commit list is verified complete, and every
+# commit in it is single-parent does this print "delta:<approved-sha>".
+_kbpm_delta_mode() {
+    _dm_approved="$1"; _dm_head="$2"
+    case "$_dm_approved" in
+        ""|none|unknown) printf 'full'; return 0 ;;
+    esac
+    if [ "$_dm_approved" = "$_dm_head" ]; then
+        # Not expected to be called this way (callers emit "delta:<HEAD>"
+        # for an exact match first), but fail closed rather than printing a nonsensical
+        # "delta:<sha>" against its own head if it ever is.
+        printf 'full'; return 0
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        printf 'full'; return 0
+    fi
+    _dm_cmp=$(gh api "repos/$REPO/compare/$_dm_approved...$_dm_head" 2>/dev/null)
+    _dm_rc=$?
+    if [ "$_dm_rc" -ne 0 ] || [ -z "$_dm_cmp" ]; then
+        printf 'full'; return 0
+    fi
+    _dm_ok=$(printf '%s' "$_dm_cmp" | jq -r '
+        if (.status // "") != "ahead" then
+            "no"
+        elif (((.total_commits // (.commits // [] | length))) > ((.commits // [] | length))) then
+            "no"
+        elif ([(.commits // [])[] | ((.parents // []) | length)] | any(. != 1)) then
+            "no"
+        else
+            "yes"
+        end
+    ' 2>/dev/null)
+    _dm_jq_rc=$?
+    if [ "$_dm_jq_rc" -eq 0 ] && [ "$_dm_ok" = "yes" ]; then
+        printf 'delta:%s' "$_dm_approved"
+    else
+        printf 'full'
+    fi
+}
+
+# _kbpm_respawn_mode_detail <triggering-bot: tester|reviewer>
+# Must be called AFTER _kbpm_round_detail (uses its TESTER_APPROVED_SHA /
+# REVIEWER_APPROVED_SHA globals) and with HEAD_SHA already set for this poll.
+# Prints "tester_mode=<...> reviewer_mode=<...>" for the RESPAWN_TESTER /
+# RESPAWN_REVIEWER detail= line. The bot named by $1 just submitted
+# CHANGES_REQUESTED and is always "full". The OTHER bot is "delta:<HEAD_SHA>"
+# when its own last APPROVED commit_id already equals the current HEAD_SHA:
+# the verdict is always followed by a fix push, which makes that approval stale
+# (Gates 1/2 key on commit_id == HEAD), and the fix commits are exactly the
+# delta it has not seen. A "not_needed" hint here stalled the PR until TIMEOUT
+# (XACA-1299-015). Otherwise it is whatever _kbpm_delta_mode determines from
+# that bot's own approved sha.
+_kbpm_respawn_mode_detail() {
+    _rmd_trigger="$1"
+    if [ "$_rmd_trigger" = "tester" ]; then
+        _rmd_tester_mode="full"
+        if [ "$REVIEWER_APPROVED_SHA" = "$HEAD_SHA" ]; then
+            _rmd_reviewer_mode="delta:$HEAD_SHA"
+        else
+            _rmd_reviewer_mode=$(_kbpm_delta_mode "$REVIEWER_APPROVED_SHA" "$HEAD_SHA")
+        fi
+    else
+        _rmd_reviewer_mode="full"
+        if [ "$TESTER_APPROVED_SHA" = "$HEAD_SHA" ]; then
+            _rmd_tester_mode="delta:$HEAD_SHA"
+        else
+            _rmd_tester_mode=$(_kbpm_delta_mode "$TESTER_APPROVED_SHA" "$HEAD_SHA")
+        fi
+    fi
+    printf 'tester_mode=%s reviewer_mode=%s' "$_rmd_tester_mode" "$_rmd_reviewer_mode"
+}
+# ── end round-limit circuit breaker + delta re-review mode hints ────────────
+
 PR_MONITOR_START=$(date +%s)
 POLL=0
 
@@ -686,7 +1054,17 @@ while true; do
             LAST_TEST_AT="$AT"
             gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" \
                 --jq '[.[] | select(.user.login == "'"$TESTER_BOT"'" and .state == "CHANGES_REQUESTED" and .commit_id == "'"$HEAD_SHA"'")] | last | .body' 2>/dev/null
-            verdict RESPAWN_TESTER "tester bot requested changes at $AT on $HEAD_SHA"
+            _kbpm_round_detail
+            _RR_DETAIL=$(_kbpm_round_detail_string)
+            # Mode hints are computed BEFORE the breaker so ROUND_LIMIT carries them too:
+            # after a user-approved fix push the OTHER bot needs a re-review just as it
+            # does after a respawn (XACA-1299-015).
+            _RM_DETAIL=$(_kbpm_respawn_mode_detail tester)
+            if _kbpm_round_trips_limit "$TESTER_ROUND"; then
+                printf '%s\n' "x tester bot has now requested changes on its ${TESTER_ROUND}th distinct round (limit $KBPM_ROUND_LIMIT) — this is a circuit breaker, not another respawn."
+                verdict ROUND_LIMIT "tester bot requested changes at $AT on $HEAD_SHA at round $TESTER_ROUND (limit $KBPM_ROUND_LIMIT) — escalate to the user: a blocking finding at round>=$KBPM_ROUND_LIMIT must show a regression or a named harm, otherwise re-file it [Advisory] plus a spin-out ticket instead of respawning the same two bots again; $_RR_DETAIL; $_RM_DETAIL"
+            fi
+            verdict RESPAWN_TESTER "tester bot requested changes at $AT on $HEAD_SHA; $_RR_DETAIL; $_RM_DETAIL"
         elif [ "$ST" = "APPROVED" ]; then
             TEST_OK="true"; LAST_TEST_AT="$AT"
             printf '%s\n' "OK Test gate passed."
@@ -703,7 +1081,17 @@ while true; do
             LAST_REVIEW_AT="$AT"
             gh api --paginate "repos/$REPO/pulls/$PR_NUM/reviews" \
                 --jq '[.[] | select(.user.login == "'"$REVIEWER_BOT"'" and .state == "CHANGES_REQUESTED" and .commit_id == "'"$HEAD_SHA"'")] | last | .body' 2>/dev/null
-            verdict RESPAWN_REVIEWER "reviewer bot requested changes at $AT on $HEAD_SHA"
+            _kbpm_round_detail
+            _RR_DETAIL=$(_kbpm_round_detail_string)
+            # Mode hints are computed BEFORE the breaker so ROUND_LIMIT carries them too:
+            # after a user-approved fix push the OTHER bot needs a re-review just as it
+            # does after a respawn (XACA-1299-015).
+            _RM_DETAIL=$(_kbpm_respawn_mode_detail reviewer)
+            if _kbpm_round_trips_limit "$REVIEWER_ROUND"; then
+                printf '%s\n' "x reviewer bot has now requested changes on its ${REVIEWER_ROUND}th distinct round (limit $KBPM_ROUND_LIMIT) — this is a circuit breaker, not another respawn."
+                verdict ROUND_LIMIT "reviewer bot requested changes at $AT on $HEAD_SHA at round $REVIEWER_ROUND (limit $KBPM_ROUND_LIMIT) — escalate to the user: a blocking finding at round>=$KBPM_ROUND_LIMIT must show a regression or a named harm, otherwise re-file it [Advisory] plus a spin-out ticket instead of respawning the same two bots again; $_RR_DETAIL; $_RM_DETAIL"
+            fi
+            verdict RESPAWN_REVIEWER "reviewer bot requested changes at $AT on $HEAD_SHA; $_RR_DETAIL; $_RM_DETAIL"
         elif [ "$ST" = "APPROVED" ]; then
             REVIEW_OK="true"; LAST_REVIEW_AT="$AT"
             printf '%s\n' "OK Review gate passed."
@@ -1569,7 +1957,15 @@ PR_FILTER_EOF
             printf '%s\n' "Branch is $BEHIND_BY commit(s) behind $BASE_REF (mergeStateStatus=$MERGE_STATE) — running gh pr update-branch. Prior bot approvals are against a stale base."
             gh pr update-branch "$PR_NUM" --repo "$REPO"
             UPDATE_RC=$?
-            verdict RESPAWN_BOTH "ran gh pr update-branch (rc=$UPDATE_RC), $BEHIND_BY commit(s) behind $BASE_REF; re-spawn BOTH bots and re-seed both LAST_*_AT"
+            _kbpm_round_detail
+            _RR_DETAIL=$(_kbpm_round_detail_string)
+            # XACA-1299-004: both bots' approvals are against a base
+            # update-branch just replaced (dismiss_stale_reviews acts on our
+            # own update-branch push) — there is no "delta" of the OLD content
+            # to re-verify, the base itself moved. Always full, both bots.
+            # Deliberately NOT run through the round-limit breaker either:
+            # neither bot requested changes here, staleness is not a rejection.
+            verdict RESPAWN_BOTH "ran gh pr update-branch (rc=$UPDATE_RC), $BEHIND_BY commit(s) behind $BASE_REF; re-spawn BOTH bots and re-seed both LAST_*_AT; $_RR_DETAIL; tester_mode=full reviewer_mode=full"
         fi
     fi
 

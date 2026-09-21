@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1299** — `share/scripts/kb-pr-monitor`: per-bot blocking-round counter; new terminal verdict
+  `ROUND_LIMIT` (exit 23) when a bot requests changes on its >= 4th distinct commit; `RESPAWN_*` /
+  `ROUND_LIMIT` detail carries `tester_mode=` / `reviewer_mode=` (`full` | `delta:<sha>`) re-review hints.
+  Mirrored from dev-team canonical.
 
 ## [0.20.20] - 2026-09-21
 - **XACA-1165 (follow-up)** — removed the per-role "Model tier note" blockquote from the bodies of
