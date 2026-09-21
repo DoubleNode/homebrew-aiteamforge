@@ -20,6 +20,35 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `ROUND_LIMIT` (exit 23) when a bot requests changes on its >= 4th distinct commit; `RESPAWN_*` /
   `ROUND_LIMIT` detail carries `tester_mode=` / `reviewer_mode=` (`full` | `delta:<sha>`) re-review hints.
   Mirrored from dev-team canonical.
+- **XACA-1305** — `aiteamforge upgrade` now refreshes deployed personas in **non-git** project
+  directories. `libexec/lib/persona-targets.sh` used to drop any candidate that was not a git repo
+  (`git rev-parse --show-toplevel || continue`), so a directory like M4Mini's `~/finance/personal`
+  was never discovered. It kept a 2026-06-29 persona snapshot (`model: haiku`) through the 0.20.20
+  upgrade, and the log still read "1 target(s) refreshed". This is the field case XACA-0931 was
+  filed for.
+  - A non-git directory is now admitted only on a sentinel: it is not inside any git work tree
+    (env-scrubbed `rev-parse` plus a structural `.git` walk to `/`, matching the deployer's
+    flat-dir guard), `.claude`, `.claude/agents` and `.synced-from-tap` are not symlinks, and the
+    marker's `team:` and canonicalized `source_path:` match this team's
+    `$AITEAMFORGE_DIR/<team>/personas/agents`. Old-format markers (no `deployed_file:` lines) and
+    CRLF/trailing whitespace are accepted. No marker, a foreign team or source, and kb-sync-personas'
+    `.synced-from-master` are all still rejected. Git targets behave exactly as before.
+  - The enumerator emits a third column, `git|flat`, so git-ness is decided in one place.
+    `deploy_team_personas_to_projects` routes `flat` targets to the existing XACA-1216
+    `deploy-worktree-personas.sh --flat-dir … --force`; before, every target went to
+    `--nested-main-root`, which hard-refuses non-git dirs. rc 3/4 are logged by name. A missing
+    third column defaults to `git`.
+  - `share/scripts/aiteamforge-persona-parity-check.sh` parses the new column and verifies `flat`
+    targets read-only through `--verify-flat-dir`.
+  - `tests/test-xaca-0931-persona-deploy-and-parity.sh`: 53/53 pass under `/bin/bash` 3.2 and bash 5. The new Part F
+    covers every admission and rejection case, plus an end-to-end deploy that compares content with
+    `cmp` (not mtime) and checks that the marker's `synced_at` advances. A positive control shows the
+    new discovery assertions fail against a mutant of `persona-targets.sh` whose non-git
+    admission always refuses (the pre-fix behavior). It is a mutant rather than `git show HEAD:`
+    because a HEAD-extracted "pre-fix" file becomes the fix itself once committed. A mutant that
+    fails to run aborts the suite rather than passing as "nothing discovered".
+  - Tap-only: none of the three changed sources is in `sync-tap.sh`'s map. The mirrored deployer
+    is unchanged.
 
 ## [0.20.20] - 2026-09-21
 - **XACA-1165 (follow-up)** — removed the per-role "Model tier note" blockquote from the bodies of

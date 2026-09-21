@@ -386,7 +386,7 @@ else
     _mk_conf "$T_FW/share/teams" medical "true" "" "$T_WD/proj"
     OUT="$(_run_pt "$T_FW")"
     LINES="$(_pt_target_lines "$OUT")"
-    if printf '%s\n' "$LINES" | grep -qE "^medical	.*/proj/general\$"; then
+    if printf '%s\n' "$LINES" | grep -qE "^medical	.*/proj/general	git\$"; then
         test_pass
     else
         test_fail "expected medical/general to be enumerated despite the missing marker; got LINES=[$LINES]"
@@ -475,6 +475,385 @@ else
 fi
 
 echo ""
+echo "=== Part F: XACA-1305 flat (non-git) target discovery ==="
+
+# Flat-target fixtures need a SANDBOXED AITEAMFORGE_DIR since
+# _pt_flat_target_ok reads it directly (see that function's header comment
+# for why the comparison target is AITEAMFORGE_DIR-based, not
+# framework_dir-based). Every invocation below sets AITEAMFORGE_DIR
+# explicitly as a one-shot prefix to `_run_pt` (never a bare assignment,
+# which would only affect this shell and not necessarily be what a reader
+# expects) so it can never fall through to a real $HOME/aiteamforge.
+unset TMUX
+
+# _mk_flat_source <aiteamforge_dir> <team> — the canonical S2 working-dir
+# source dir a flat marker's source_path must canonically match.
+_mk_flat_source() {
+    local aitf="$1" team="$2"
+    mkdir -p "${aitf}/${team}/personas/agents"
+    printf '%s\n' "---" "name: role" "---" "SOURCE BODY" > "${aitf}/${team}/personas/agents/${team}_char_role_persona.md"
+}
+
+# _mk_flat_project <project_dir> <aiteamforge_dir> <team> [fmt=new|old] [marker_team] [marker_source]
+#
+# Build a NON-GIT deployed target: <project_dir>/.claude/agents/ with one
+# deployed persona file plus a .synced-from-tap marker. Defaults produce an
+# ADMISSIBLE flat target (marker team + source_path both match the real
+# team/source); callers proving a REJECTED case override marker_team/
+# marker_source. fmt=old omits mode:/deployed_file: (pre-XACA-1216 marker
+# shape -- the exact field-evidence shape for finance/personal on M4Mini).
+_mk_flat_project() {
+    # NOTE: mteam/msrc's defaults reference $team/$aitf -- those must be
+    # assigned in a PRIOR `local` statement, not the same one. Bash does not
+    # guarantee same-statement `local a=1 b=${2:-$a}` sees the fresh $a
+    # (measured: it silently sees an empty/outer $a instead), which is
+    # exactly the shape of bug this whole ticket is about -- getting it
+    # wrong here would make TF1/TF2 pass for the wrong reason (a
+    # marker with an empty team: still gets rejected by SOME check, just
+    # not the one the test claims to exercise).
+    local d="$1" aitf="$2" team="$3" fmt="${4:-new}"
+    local mteam="${5:-$team}"
+    local msrc="${6:-${aitf}/${team}/personas/agents}"
+    mkdir -p "${d}/.claude/agents"
+    printf '%s\n' "---" "name: placeholder" "---" "body" > "${d}/.claude/agents/${team}_char_role_persona.md"
+    {
+        printf 'synced_at: 2020-01-01T00:00:00Z\n'
+        printf 'team: %s\n' "$mteam"
+        printf 'source_path: %s\n' "$msrc"
+        printf 'aiteamforge_dir: %s\n' "$aitf"
+        if [ "$fmt" = "new" ]; then
+            printf 'mode: flat-dir\n'
+            printf 'deployed_file: %s_char_role_persona.md\n' "$team"
+        fi
+    } > "${d}/.claude/agents/.synced-from-tap"
+}
+
+# TF1: non-git dir + OLD-format marker (no mode:/deployed_file:) with a
+# matching team/source_path -> discovered, mode flat. This is the exact
+# field-evidence shape (finance/personal on M4Mini).
+test_start "TF1: non-git dir with OLD-format matching marker -> discovered, mode=flat"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams" "$T_AITF/proj"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+_mk_flat_source "$T_AITF" finance
+_mk_flat_project "$T_AITF/proj/personal" "$T_AITF" finance old
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+LINES="$(_pt_target_lines "$OUT")"
+if printf '%s\n' "$LINES" | grep -qE "^finance	.*/proj/personal	flat\$"; then
+    test_pass
+else
+    test_fail "expected finance/personal (old-format marker) discovered as mode=flat; got LINES=[$LINES]"
+fi
+
+# TF2: same, but NEW-format marker (mode:/deployed_file: present) -> discovered
+test_start "TF2: non-git dir with NEW-format matching marker -> discovered, mode=flat"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams" "$T_AITF/proj"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+_mk_flat_source "$T_AITF" finance
+_mk_flat_project "$T_AITF/proj/personal" "$T_AITF" finance new
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+LINES="$(_pt_target_lines "$OUT")"
+if printf '%s\n' "$LINES" | grep -qE "^finance	.*/proj/personal	flat\$"; then
+    test_pass
+else
+    test_fail "expected finance/personal (new-format marker) discovered as mode=flat; got LINES=[$LINES]"
+fi
+
+# TF3: a git-repo sibling under the SAME team's working dir is discovered as
+# mode=git, unchanged -- proves the two modes coexist without interference.
+test_start "TF3: git-repo sibling under the same team is still discovered as mode=git (no regression)"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+_mk_flat_source "$T_AITF" finance
+_mk_project_git_root "$T_AITF/proj/business"
+_mk_deployed_agents "$T_AITF/proj/business"
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+LINES="$(_pt_target_lines "$OUT")"
+if printf '%s\n' "$LINES" | grep -qE "^finance	.*/proj/business	git\$"; then
+    test_pass
+else
+    test_fail "expected finance/business (git repo) discovered as mode=git; got LINES=[$LINES]"
+fi
+
+# TF4: non-git, NO marker at all -> skipped (today's behaviour, unchanged)
+test_start "TF4: non-git dir with NO marker -> not discovered"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams" "$T_AITF/proj/personal/.claude/agents"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+_mk_flat_source "$T_AITF" finance
+printf '%s\n' "---" "name: x" "---" "body" > "$T_AITF/proj/personal/.claude/agents/finance_char_role_persona.md"
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+LINES="$(_pt_target_lines "$OUT")"
+if [ -z "$LINES" ]; then
+    test_pass
+else
+    test_fail "expected zero targets (no marker -> not discovered); got LINES=[$LINES]"
+fi
+
+# TF5: non-git, marker names ANOTHER team (legal) while sitting under finance
+# -> skipped
+test_start "TF5: non-git dir with marker naming a DIFFERENT team -> not discovered"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams" "$T_AITF/proj"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+_mk_flat_source "$T_AITF" finance
+_mk_flat_source "$T_AITF" legal
+_mk_flat_project "$T_AITF/proj/personal" "$T_AITF" finance new legal "${T_AITF}/legal/personas/agents"
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+LINES="$(_pt_target_lines "$OUT")"
+if [ -z "$LINES" ]; then
+    test_pass
+else
+    test_fail "expected zero targets (marker names 'legal' while enumerating 'finance') -- got LINES=[$LINES]"
+fi
+
+# TF6: non-git, marker's source_path points ELSEWHERE (same team, wrong dir)
+# -> skipped
+test_start "TF6: non-git dir with marker source_path pointing elsewhere -> not discovered"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams" "$T_AITF/proj"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+_mk_flat_source "$T_AITF" finance
+OTHER_SRC="$(_next_sandbox)/elsewhere/personas/agents"
+mkdir -p "$OTHER_SRC"
+printf '%s\n' "---" "name: role" "---" "x" > "$OTHER_SRC/finance_char_role_persona.md"
+_mk_flat_project "$T_AITF/proj/personal" "$T_AITF" finance new finance "$OTHER_SRC"
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+LINES="$(_pt_target_lines "$OUT")"
+if [ -z "$LINES" ]; then
+    test_pass
+else
+    test_fail "expected zero targets (source_path names a different dir) -- got LINES=[$LINES]"
+fi
+
+# TF7: non-git, marker file itself is a SYMLINK -> skipped
+test_start "TF7: non-git dir whose .synced-from-tap marker is a SYMLINK -> not discovered"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams" "$T_AITF/proj"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+_mk_flat_source "$T_AITF" finance
+_mk_flat_project "$T_AITF/proj/personal" "$T_AITF" finance new
+REAL_MARKER="$T_AITF/proj/personal/.claude/agents/.synced-from-tap"
+mv "$REAL_MARKER" "${REAL_MARKER}.real"
+ln -sf "${REAL_MARKER}.real" "$REAL_MARKER"
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+LINES="$(_pt_target_lines "$OUT")"
+if [ -z "$LINES" ]; then
+    test_pass
+else
+    test_fail "expected zero targets (marker is a symlink) -- got LINES=[$LINES]"
+fi
+
+# TF8: non-git, .claude/agents itself is a SYMLINK -> skipped
+test_start "TF8: non-git dir whose .claude/agents is a SYMLINK -> not discovered"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams" "$T_AITF/proj/personal/.claude"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+_mk_flat_source "$T_AITF" finance
+REAL_AGENTS="$(_next_sandbox)/real-agents"
+mkdir -p "$REAL_AGENTS"
+printf '%s\n' "---" "name: x" "---" "body" > "$REAL_AGENTS/finance_char_role_persona.md"
+{
+    printf 'synced_at: 2020-01-01T00:00:00Z\n'
+    printf 'team: finance\n'
+    printf 'source_path: %s\n' "${T_AITF}/finance/personas/agents"
+    printf 'aiteamforge_dir: %s\n' "$T_AITF"
+} > "$REAL_AGENTS/.synced-from-tap"
+ln -sf "$REAL_AGENTS" "$T_AITF/proj/personal/.claude/agents"
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+LINES="$(_pt_target_lines "$OUT")"
+if [ -z "$LINES" ]; then
+    test_pass
+else
+    test_fail "expected zero targets (.claude/agents is a symlink) -- got LINES=[$LINES]"
+fi
+
+# TF9: non-git, carries kb-sync-personas' OWN marker (.synced-from-master:
+# synced_at/master_commit/schema_version, no team:/source_path:) -> skipped.
+# This is the documented "known gap" (medical/general) -- adopting that
+# marker format would be inference, not a sentinel (plan doc's "Rejected"
+# list).
+test_start "TF9: non-git dir with a .synced-from-master (kb-sync-personas) marker only -> not discovered"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams" "$T_AITF/proj/personal/.claude/agents"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+_mk_flat_source "$T_AITF" finance
+printf '%s\n' "---" "name: x" "---" "body" > "$T_AITF/proj/personal/.claude/agents/finance_char_role_persona.md"
+{
+    printf 'synced_at: 2020-01-01T00:00:00Z\n'
+    printf 'master_commit: deadbeef\n'
+    printf 'schema_version: 1\n'
+} > "$T_AITF/proj/personal/.claude/agents/.synced-from-master"
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+LINES="$(_pt_target_lines "$OUT")"
+if [ -z "$LINES" ]; then
+    test_pass
+else
+    test_fail "expected zero targets (.synced-from-master is not .synced-from-tap) -- got LINES=[$LINES]"
+fi
+
+# TF10: a LINKED WORKTREE (.git is a FILE) still refused even when it ALSO
+# carries a matching flat marker -- git territory takes priority; the flat
+# admission path must never be reachable for a linked worktree (adversarial
+# check on top of TA10's plain case).
+test_start "TF10: a linked git worktree with a matching flat marker is STILL rejected (git territory wins)"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+_mk_project_git_root "$T_AITF/mainrepo"
+( cd "$T_AITF/mainrepo" && git worktree add -q -b tf10-branch "$T_AITF/mainrepo-wt" >/dev/null 2>&1 )
+if [ -f "$T_AITF/mainrepo-wt/.git" ]; then
+    mkdir -p "$T_FW/share/teams"
+    _mk_conf "$T_FW/share/teams" wtteam "true" "" "$T_AITF"
+    _mk_flat_source "$T_AITF" wtteam
+    _mk_flat_project "$T_AITF/mainrepo-wt" "$T_AITF" wtteam new
+    OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+    LINES="$(_pt_target_lines "$OUT")"
+    if [ -z "$LINES" ]; then
+        test_pass
+    else
+        test_fail "expected the linked worktree to stay rejected even with a matching flat marker; got LINES=[$LINES]"
+    fi
+else
+    test_fail "PRECONDITION FAILED: could not create a linked worktree with .git as a file"
+fi
+
+# TF11: source dir named by the marker does not exist -- reject, don't crash.
+test_start "TF11: marker's source_path names a dir that does NOT exist -> not discovered (reject, no crash)"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams" "$T_AITF/proj"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+# Deliberately do NOT create $T_AITF/finance/personas/agents.
+_mk_flat_project "$T_AITF/proj/personal" "$T_AITF" finance new
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+RC=$?
+LINES="$(_pt_target_lines "$OUT")"
+if [ "$RC" -eq 0 ] && [ -z "$LINES" ]; then
+    test_pass
+else
+    test_fail "expected zero targets and rc=0 (missing source dir rejects, never crashes); got rc=$RC LINES=[$LINES]"
+fi
+
+# TF12: marker parsing tolerates CRLF line endings and trailing whitespace.
+test_start "TF12: marker with CRLF line endings and trailing whitespace still admits the flat target"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams" "$T_AITF/proj/personal/.claude/agents"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+_mk_flat_source "$T_AITF" finance
+printf '%s\n' "---" "name: placeholder" "---" "body" > "$T_AITF/proj/personal/.claude/agents/finance_char_role_persona.md"
+printf 'synced_at: 2020-01-01T00:00:00Z \r\nteam: finance  \r\nsource_path: %s \r\naiteamforge_dir: %s\r\n' \
+    "${T_AITF}/finance/personas/agents" "$T_AITF" > "$T_AITF/proj/personal/.claude/agents/.synced-from-tap"
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+LINES="$(_pt_target_lines "$OUT")"
+if printf '%s\n' "$LINES" | grep -qE "^finance	.*/proj/personal	flat\$"; then
+    test_pass
+else
+    test_fail "expected CRLF/trailing-whitespace marker to still admit the flat target; got LINES=[$LINES]"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POSITIVE CONTROL (mandatory, XACA-1305-003 dispatch): prove TF1/TF2 FAIL
+# when non-git admission is absent -- a test that passes on the buggy code is
+# vacuous.
+#
+# MUTATION, NOT HISTORY: the "pre-fix" lib is the CURRENT persona-targets.sh
+# with `_pt_flat_target_ok` overridden to always refuse, which is exactly the
+# pre-fix behavior (non-git -> not a project). An earlier revision extracted
+# the pre-fix file via `git show HEAD:...`; that is only pre-fix while the fix
+# is UNCOMMITTED. Once committed, HEAD *is* the fix, the control compared the
+# fix against itself, and it failed permanently (caught 2026-09-21 by rerunning
+# the suite on the committed tree). A mutant needs no git, no history and no
+# pinned SHA, so it holds in shallow clones and archives too.
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Positive control: TF1/TF2 must FAIL with non-git admission disabled ---"
+ORIG_PT_LIB="$WORK_DIR/mutant-no-flat-persona-targets.sh"
+if cp "$PT_LIB" "$ORIG_PT_LIB" 2>"$WORK_DIR/orig-pt-show.log" \
+   && printf '\n# XACA-1305 positive-control mutant: pre-fix behavior\n_pt_flat_target_ok() { return 1; }\n' >> "$ORIG_PT_LIB" \
+   && [ -s "$ORIG_PT_LIB" ]; then
+    # Run pt_enumerate_targets from a GIVEN lib file in an ISOLATED subshell
+    # (via a fresh bash -c) so sourcing the mutant never clobbers this
+    # suite's own (fixed) pt_enumerate_targets/_pt_flat_target_ok definitions
+    # -- every other test in this file must keep using the fixed version.
+    # The `#UNINSPECTABLE` trailer is REQUIRED: a mutant that fails to source
+    # prints nothing, and "nothing discovered" would otherwise read as the
+    # expected pre-fix failure -- a vacuous green for the control itself.
+    _run_pt_from_lib() {
+        local lib="$1" fw="$2" aitf="$3" out
+        out="$(AITEAMFORGE_DIR="$aitf" "${BASH:-/bin/bash}" -c 'source "$1" && pt_enumerate_targets "$2"' _ "$lib" "$fw")" || return 1
+        case "$out" in
+            *'#UNINSPECTABLE'*) printf '%s\n' "$out" ;;
+            *) echo "FATAL: positive-control mutant produced no #UNINSPECTABLE trailer (did not source/run)" >&2; return 1 ;;
+        esac
+    }
+
+    _POSCTRL_FAIL_COUNT=0
+
+    test_start "POSCTRL-TF1: TF1 fixture (old-format marker) is NOT discovered by the pre-fix persona-targets.sh"
+    T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+    mkdir -p "$T_FW/share/teams" "$T_AITF/proj"
+    _mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+    _mk_flat_source "$T_AITF" finance
+    _mk_flat_project "$T_AITF/proj/personal" "$T_AITF" finance old
+    ORIG_OUT="$(_run_pt_from_lib "$ORIG_PT_LIB" "$T_FW" "$T_AITF" 2>/dev/null)" || { echo "FATAL: positive-control mutant did not run -- control would be vacuous" >&2; exit 1; }
+    ORIG_LINES="$(_pt_target_lines "$ORIG_OUT")"
+    if [ -z "$ORIG_LINES" ]; then
+        test_pass
+    else
+        _POSCTRL_FAIL_COUNT=$((_POSCTRL_FAIL_COUNT + 1))
+        test_fail "PRE-FIX CODE UNEXPECTEDLY DISCOVERED the flat target (positive control invalid): LINES=[$ORIG_LINES]"
+    fi
+
+    test_start "POSCTRL-TF2: TF2 fixture (new-format marker) is NOT discovered by the pre-fix persona-targets.sh"
+    T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+    mkdir -p "$T_FW/share/teams" "$T_AITF/proj"
+    _mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+    _mk_flat_source "$T_AITF" finance
+    _mk_flat_project "$T_AITF/proj/personal" "$T_AITF" finance new
+    ORIG_OUT="$(_run_pt_from_lib "$ORIG_PT_LIB" "$T_FW" "$T_AITF" 2>/dev/null)" || { echo "FATAL: positive-control mutant did not run -- control would be vacuous" >&2; exit 1; }
+    ORIG_LINES="$(_pt_target_lines "$ORIG_OUT")"
+    if [ -z "$ORIG_LINES" ]; then
+        test_pass
+    else
+        _POSCTRL_FAIL_COUNT=$((_POSCTRL_FAIL_COUNT + 1))
+        test_fail "PRE-FIX CODE UNEXPECTEDLY DISCOVERED the flat target (positive control invalid): LINES=[$ORIG_LINES]"
+    fi
+
+    # The MEANINGFUL signal: re-run TF1/TF2's OWN assertion (discovery,
+    # mode=flat) against the pre-fix code and count how many of THOSE fail.
+    # Both must fail pre-fix (the bug this ticket exists to fix), and both
+    # pass post-fix (TF1/TF2 above) -- that pairing is what makes the new
+    # tests non-vacuous.
+    test_start "POSCTRL-SUMMARY: pre-fix persona-targets.sh fails the new flat-discovery assertion for BOTH TF1 and TF2 (non-vacuous test proof)"
+    T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+    mkdir -p "$T_FW/share/teams" "$T_AITF/proj"
+    _mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+    _mk_flat_source "$T_AITF" finance
+    _mk_flat_project "$T_AITF/proj/personal" "$T_AITF" finance old
+    _NEW_ASSERTION_FAILS_PREFIX=0
+    ORIG_OUT="$(_run_pt_from_lib "$ORIG_PT_LIB" "$T_FW" "$T_AITF" 2>/dev/null)" || { echo "FATAL: positive-control mutant did not run -- control would be vacuous" >&2; exit 1; }
+    ORIG_LINES="$(_pt_target_lines "$ORIG_OUT")"
+    printf '%s\n' "$ORIG_LINES" | grep -qE "^finance	.*/proj/personal	flat\$" || _NEW_ASSERTION_FAILS_PREFIX=$((_NEW_ASSERTION_FAILS_PREFIX + 1))
+    T_FW2="$(_next_sandbox)"; T_AITF2="$(_next_sandbox)"
+    mkdir -p "$T_FW2/share/teams" "$T_AITF2/proj"
+    _mk_conf "$T_FW2/share/teams" finance "true" "" "$T_AITF2/proj"
+    _mk_flat_source "$T_AITF2" finance
+    _mk_flat_project "$T_AITF2/proj/personal" "$T_AITF2" finance new
+    ORIG_OUT2="$(_run_pt_from_lib "$ORIG_PT_LIB" "$T_FW2" "$T_AITF2" 2>/dev/null)" || { echo "FATAL: positive-control mutant did not run -- control would be vacuous" >&2; exit 1; }
+    ORIG_LINES2="$(_pt_target_lines "$ORIG_OUT2")"
+    printf '%s\n' "$ORIG_LINES2" | grep -qE "^finance	.*/proj/personal	flat\$" || _NEW_ASSERTION_FAILS_PREFIX=$((_NEW_ASSERTION_FAILS_PREFIX + 1))
+    echo "     POSITIVE CONTROL: the new flat-discovery assertion fails against the pre-fix script in ${_NEW_ASSERTION_FAILS_PREFIX} of 2 cases (expected: 2 of 2 -- proves the test can detect the bug)"
+    if [ "$_NEW_ASSERTION_FAILS_PREFIX" -eq 2 ]; then
+        test_pass
+    else
+        test_fail "expected the new assertion to fail in 2 of 2 cases against the pre-fix script (proving it can detect the bug); it only failed in ${_NEW_ASSERTION_FAILS_PREFIX} of 2 -- the test may be vacuous"
+    fi
+else
+    echo "FATAL: could not build the positive-control mutant of persona-targets.sh -- $(cat "$WORK_DIR/orig-pt-show.log" 2>/dev/null)" >&2
+    exit 1
+fi
+
+echo ""
 echo "=== Part B: subshell-visibility of the #UNINSPECTABLE trailer ==="
 
 # TB1: _xaca0931_load_persona_targets (process-substitution consumer) must
@@ -508,7 +887,7 @@ else
     if [ "$_rc" -eq 0 ] \
         && [ "${#_XACA0931_TARGETS[@]}" -eq 1 ] \
         && [ "${_XACA0931_TARGETS_UNINSPECTABLE:-MISSING}" = "1" ] \
-        && [[ "${_XACA0931_TARGETS[0]}" == teama$'\t'*"/proj/a" ]]; then
+        && [[ "${_XACA0931_TARGETS[0]}" == teama$'\t'*"/proj/a"$'\t'git ]]; then
         test_pass
     else
         test_fail "globals not visible/correct after return: count=${#_XACA0931_TARGETS[@]} uninspectable=${_XACA0931_TARGETS_UNINSPECTABLE:-MISSING} first=${_XACA0931_TARGETS[0]:-<empty>}"
@@ -867,6 +1246,51 @@ else
     test_fail "expected rc=0 and 'No configured or discovered teams found'; rc=$_RC stub log: $(cat "$_STUB_LOG")"
 fi
 
+# TC10 (XACA-1305, END-TO-END): deploy_team_personas_to_projects routes a
+# FLAT (non-git) target discovered by pt_enumerate_targets to `--flat-dir`,
+# not `--nested-main-root` -- real execution through the extracted function,
+# the real deployer, real filesystem. Asserts on CONTENT (cmp against
+# emit-transformed), never mtime, and that the marker advanced to the
+# new format with deployed_file: lines (XACA-1305 requirement #6 on the
+# verification checklist).
+test_start "TC10: deploy_team_personas_to_projects refreshes a FLAT (non-git) target end-to-end (content cmp + marker format, never mtime)"
+T_HOME="$(_next_sandbox)"; T_FW="$(_next_sandbox)"; T_WD="$(_next_sandbox)"
+_seed_real_deployer "$T_WD"
+mkdir -p "$T_WD/finance-projects"
+_mk_flat_source "$T_WD" finance
+_mk_flat_project "$T_WD/finance-projects/personal" "$T_WD" finance old
+OLD_MARKER_SNAPSHOT="$(cat "$T_WD/finance-projects/personal/.claude/agents/.synced-from-tap")"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_WD/finance-projects"
+_seed_config "$T_WD" finance
+_reset_deploy_globals
+(
+    set -eo pipefail
+    HOME="$T_HOME" AITEAMFORGE_DIR="$T_WD" FRAMEWORK_DIR="$T_FW" WORKING_DIR="$T_WD" DRY_RUN=false
+    _install_print_stubs
+    deploy_team_personas_to_projects
+) >"$WORK_DIR/tc10.log" 2>&1
+_RC=$?
+DEPLOYED_FILE="$T_WD/finance-projects/personal/.claude/agents/finance_char_role_persona.md"
+NEW_MARKER="$T_WD/finance-projects/personal/.claude/agents/.synced-from-tap"
+EXPECTED_OUT=$("$DEPLOY_SH_REAL" emit-transformed "$T_WD/finance/personas/agents/finance_char_role_persona.md" 2>/dev/null)
+CONTENT_OK=false
+if [ -f "$DEPLOYED_FILE" ] && printf '%s\n' "$EXPECTED_OUT" | cmp -s - "$DEPLOYED_FILE"; then
+    CONTENT_OK=true
+fi
+NEW_MARKER_SNAPSHOT="$(cat "$NEW_MARKER" 2>/dev/null)"
+NEW_SYNCED_AT="$(grep '^synced_at: ' "$NEW_MARKER" 2>/dev/null | head -1)"
+DEPLOYED_FILE_LINES="$(grep -c '^deployed_file: ' "$NEW_MARKER" 2>/dev/null || true)"
+if [ "$_RC" -eq 0 ] \
+    && grep -qE "1 target\(s\) refreshed, 0 skipped, 0 failed" "$_STUB_LOG" \
+    && [ "$CONTENT_OK" = true ] \
+    && [ "$NEW_MARKER_SNAPSHOT" != "$OLD_MARKER_SNAPSHOT" ] \
+    && [ "$NEW_SYNCED_AT" != "synced_at: 2020-01-01T00:00:00Z" ] \
+    && [ "${DEPLOYED_FILE_LINES:-0}" -ge 1 ]; then
+    test_pass
+else
+    test_fail "expected the flat target refreshed via --flat-dir with matching content + advanced synced_at + new-format marker; rc=$_RC content_ok=$CONTENT_OK new_synced=[$NEW_SYNCED_AT] deployed_file_lines=${DEPLOYED_FILE_LINES:-0} stub=$(cat "$_STUB_LOG") log=$(cat "$WORK_DIR/tc10.log")"
+fi
+
 echo ""
 echo "=== Part E: emit-transformed + S3 parity-check fail-closed behaviour ==="
 
@@ -1034,6 +1458,43 @@ if [ "$PARITY_RC" -eq 1 ]; then
     test_pass
 else
     test_fail "expected exit 1 (S3 drift detected despite empty .teams[]); got rc=$PARITY_RC. An exit 0 here means the empty-teams guard short-circuited before the deployed-vs-source surface ran. out=$PARITY_OUT"
+fi
+
+echo ""
+echo "=== Part F2: XACA-1305 S3 parity check for FLAT (non-git) targets (--verify-flat-dir) ==="
+
+# TF-PARITY1: a FRESHLY-deployed flat target (via the real --flat-dir mode)
+# is reported CLEAN (rc 0) through the parity checker's flat-target path.
+# Uses PARITY_SYNCED (DEPLOY_SCRIPT repointed at the canonical deployer,
+# same "post-sync" scratch copy Part E's own tests use) so this is never
+# entangled with the TE0 tap-mirror-sync gate.
+test_start "TF-PARITY1: a freshly-deployed flat target is reported CLEAN by the parity checker (--verify-flat-dir)"
+T_FW="$(_next_sandbox)"; T_WD="$(_next_sandbox)"; T_HOME="$(_next_sandbox)"
+mkdir -p "$T_WD/finance/personas/agents" "$T_WD/proj/personal"
+printf '%s\n' "---" "name: role" "---" "SOURCE BODY" > "$T_WD/finance/personas/agents/finance_char_role_persona.md"
+FD_RC=0
+AITEAMFORGE_DIR="$T_WD" HOME="$T_HOME" "$DEPLOY_SH_REAL" --flat-dir "$T_WD/proj/personal" finance --force >"$WORK_DIR/tfparity1-deploy.log" 2>&1 || FD_RC=$?
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_WD/proj"
+_seed_config "$T_WD" finance
+PARITY_OUT="$(HOME="$T_HOME" AITEAMFORGE_DIR="$T_WD" "$PARITY_SYNCED" --working-dir "$T_WD" --framework-dir "$T_FW" 2>&1)"
+PARITY_RC=$?
+if [ "$FD_RC" -eq 0 ] && [ "$PARITY_RC" -eq 0 ]; then
+    test_pass
+else
+    test_fail "expected --flat-dir deploy rc=0 and parity rc=0 (clean); got deploy_rc=$FD_RC parity_rc=$PARITY_RC deploy_log=$(cat "$WORK_DIR/tfparity1-deploy.log") parity_out=$PARITY_OUT"
+fi
+
+# TF-PARITY2: the SAME target, now with STALE deployed content (as if the
+# source changed after deploy, or the file was hand-edited) -> the parity
+# checker reports DRIFT (exit 1) via --verify-flat-dir, never a silent clean.
+test_start "TF-PARITY2: a STALE flat target (deployed content no longer matches source) is reported as DRIFT"
+printf '%s\n' "---" "name: char" "---" "STALE CONTENT, HAND-EDITED AFTER DEPLOY" > "$T_WD/proj/personal/.claude/agents/finance_char_role_persona.md"
+PARITY_OUT2="$(HOME="$T_HOME" AITEAMFORGE_DIR="$T_WD" "$PARITY_SYNCED" --working-dir "$T_WD" --framework-dir "$T_FW" 2>&1)"
+PARITY_RC2=$?
+if [ "$PARITY_RC2" -eq 1 ] && printf '%s' "$PARITY_OUT2" | grep -qi "verify-flat-dir reports"; then
+    test_pass
+else
+    test_fail "expected exit 1 with a --verify-flat-dir drift diagnostic; got rc=$PARITY_RC2 out=$PARITY_OUT2"
 fi
 
 echo ""

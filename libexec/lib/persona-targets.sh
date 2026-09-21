@@ -29,8 +29,32 @@
 #
 # THE ENUMERATOR'S OUTPUT CONTRACT — read this before changing the emission
 # shape:
-#   Zero or more lines:  "<team>\t<project_dir>"    (project_dir canonicalized)
+#   Zero or more lines:  "<team>\t<project_dir>\t<mode>"  (project_dir
+#                        canonicalized; mode is "git" or "flat" — see
+#                        XACA-1305 below)
 #   Exactly one final line: "#UNINSPECTABLE\t<N>"
+#
+# XACA-1305 — FLAT (NON-GIT) TARGETS: a project dir that is not a git work
+# tree at all can still be a legitimate deploy target (e.g. ~/finance/personal
+# on a box where that project was never `git init`-ed). Admitting it purely
+# because it "looks like a project" would widen discovery into arbitrary
+# directories, so admission is SENTINEL-gated, never inferred from directory
+# shape (memory: sentinel files over structural inference): a non-git
+# candidate is admitted only when <dir>/.claude/agents/.synced-from-tap
+# exists, is a regular file (not a symlink), and its `team:`/`source_path:`
+# fields name THIS team's canonical source
+# (`<framework_dir>/<team>/personas/agents`). The marker is written only by
+# deploy-worktree-personas.sh's own `--flat-dir`/`--nested-main-root` modes,
+# so its presence with a matching source is proof a prior deploy put personas
+# there — see _pt_flat_target_ok() below for the exact rule. Both old-format
+# (no `mode:`/`deployed_file:` lines) and new-format markers are accepted;
+# only `team:` and `source_path:` are read. A git-root candidate is emitted
+# with mode "git" exactly as before this ticket; a sentinel-admitted non-git
+# candidate is emitted with mode "flat". Consumers must route on this column,
+# never re-derive git-ness themselves (k501 sibling-heuristic drift) — the
+# upgrade path calls `--nested-main-root` for "git" and `--flat-dir` for
+# "flat"; the parity checker compares "git" targets directly and verifies
+# "flat" targets via `--verify-flat-dir`.
 #
 # WHY THE COUNT RIDES ON STDOUT AS A TRAILER LINE, NOT A GLOBAL VARIABLE:
 # the natural way to consume a streaming enumerator in bash is
@@ -99,6 +123,123 @@ _pt_canon_path() {
     cur=$(dirname "$cur")
   done
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# _pt_flat_target_ok <team> <canon_d>
+#
+# XACA-1305: the sentinel-admission rule for a NON-GIT project dir (see the
+# file header's "FLAT (NON-GIT) TARGETS" section). Called only when
+# `git -C <canon_d> rev-parse --show-toplevel` has ALREADY failed for
+# <canon_d> in the caller's loop — this function does its OWN, stricter
+# git-territory check rather than trusting that, because the caller's check
+# used unscrubbed environment. Returns 0 (admit) or 1 (reject); never
+# crashes, never admits on doubt (fail closed).
+#
+# GIT-TERRITORY CHECK, MIRRORED FROM deploy-worktree-personas.sh's
+# _dwp_flat_target_guard step 3 (its own header explains why BOTH signals run
+# and neither is skippable): rev-parse with GIT_* scrubbed (a leaked GIT_DIR
+# makes plain rev-parse lie), AND a structural walk to / looking for a `.git`
+# entry (covers git missing, "dubious ownership", or a bare `.git` dir git
+# itself won't recognise). This is deliberately AT LEAST as strict as the
+# enumerator's own git-root test above it — it must be, or the enumerator and
+# the deployer's own --flat-dir refusal (rc 4) could disagree about the same
+# directory (k501 sibling-heuristic drift). Do not weaken this to match the
+# caller's simpler check; mirror the deployer's, exactly.
+#
+# SENTINEL CHECKS: <canon_d>/.claude/agents must be a real directory (not a
+# symlink); its .synced-from-tap marker must be a regular file (not a
+# symlink); the marker's `team:` must equal <team>; the marker's
+# `source_path:`, canonicalized, must equal this team's canonical S2 source
+# dir, canonicalized — and that source dir must actually exist (a marker
+# naming a since-deleted source is rejected, not admitted on faith).
+#
+# WHY THE COMPARISON TARGET IS `${AITEAMFORGE_DIR:-$HOME/aiteamforge}/<team>/
+# personas/agents`, NOT `<framework_dir>/<team>/personas/agents` (the Cellar/
+# S1 dir pt_enumerate_targets's own <framework_dir> parameter names): the
+# marker's `source_path:` is written by deploy-worktree-personas.sh's
+# `_write_marker` as its caller's `primary_src`, which BOTH `--flat-dir` and
+# `--nested-main-root` derive as `${AITEAMFORGE_DIR:-$HOME/aiteamforge}/
+# <team>/personas/agents` (the working-dir S2 source) — never the Cellar.
+# The field evidence this ticket was filed from confirms it byte-for-byte
+# (source_path: /Users/…/aiteamforge/finance/personas/agents, aiteamforge_dir:
+# /Users/…/aiteamforge). Comparing against the Cellar path instead would
+# reject every real marker on the fleet, including the one this ticket exists
+# to admit — so this function reads AITEAMFORGE_DIR directly, matching
+# `_deploy_flat_dir_impl`'s own default EXACTLY, rather than re-deriving a
+# second, diverging definition of "this team's source" from the framework_dir
+# parameter (k501 sibling-heuristic drift).
+#
+# Marker parsing tolerates CRLF line endings and trailing whitespace on every
+# line, and both the old marker format (synced_at/team/source_path/
+# aiteamforge_dir only) and the new one (adds mode:/deployed_file: lines) —
+# only `team:` and `source_path:` are ever read, so both formats satisfy this
+# test identically. A `.synced-from-master` marker (kb-sync-personas' own,
+# unrelated format) is invisible to this test by construction: we look for
+# `.synced-from-tap` specifically, never the other filename.
+# ---------------------------------------------------------------------------
+_pt_flat_target_ok() {
+  local team="$1"
+  local canon_d="$2"
+
+  # --- Git-territory refusal (stricter, mirrors the deployer's guard) ---
+  if command -v git >/dev/null 2>&1; then
+    local rp_out=""
+    rp_out=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_CEILING_DIRECTORIES
+             git -C "$canon_d" rev-parse --is-inside-work-tree 2>/dev/null) || rp_out=""
+    [ "$rp_out" = "true" ] && return 1
+  fi
+  local walk="$canon_d"
+  while :; do
+    if [ ! -x "$walk" ]; then
+      return 1   # cannot search an ancestor -> cannot rule out .git -> fail closed
+    fi
+    if [ -e "${walk}/.git" ] || [ -L "${walk}/.git" ]; then
+      return 1
+    fi
+    [ "$walk" = "/" ] && break
+    walk=$(dirname "$walk")
+  done
+
+  # --- Sentinel: .claude/agents must be a real dir, not a symlink ---
+  local agents_dir="${canon_d}/.claude/agents"
+  [ -L "$agents_dir" ] && return 1
+  [ -d "$agents_dir" ] || return 1
+  [ -L "${canon_d}/.claude" ] && return 1
+
+  # --- Sentinel: .synced-from-tap must be a regular file, not a symlink ---
+  local marker="${agents_dir}/.synced-from-tap"
+  [ -L "$marker" ] && return 1
+  [ -f "$marker" ] || return 1
+
+  # --- Parse team:/source_path: only, tolerating CRLF + trailing whitespace ---
+  local marker_team="" marker_source="" line
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"                                # tolerate CRLF
+    line="${line%"${line##*[![:space:]]}"}"             # trim trailing whitespace
+    case "$line" in
+      'team: '*)        marker_team="${line#team: }" ;;
+      'source_path: '*) marker_source="${line#source_path: }" ;;
+    esac
+  done < "$marker"
+
+  [ -n "$marker_team" ] && [ "$marker_team" = "$team" ] || return 1
+  [ -n "$marker_source" ] || return 1
+
+  # --- source_path: must (canonically) name THIS team's S2 source dir, and
+  #     that source dir must actually exist -- reject, don't crash, on a
+  #     marker naming a source that is no longer there. Matches
+  #     _deploy_flat_dir_impl's own primary_src default EXACTLY (see the
+  #     header comment above for why this is AITEAMFORGE_DIR, not
+  #     framework_dir). ---
+  local expected_source="${AITEAMFORGE_DIR:-${HOME:-}/aiteamforge}/${team}/personas/agents"
+  [ -d "$expected_source" ] || return 1
+  local canon_source="" canon_expected=""
+  canon_source="$(_pt_canon_path "$marker_source")" || return 1
+  canon_expected="$(_pt_canon_path "$expected_source")" || return 1
+  [ "$canon_source" = "$canon_expected" ] || return 1
+
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -247,7 +388,7 @@ pt_enumerate_targets() {
       continue
     fi
 
-    local d bname agents_dir canon_d top canon_top
+    local d bname agents_dir canon_d top canon_top mode
     for d in "$working_dir"/*/; do
       [ -d "$d" ] || continue
       d="${d%/}"
@@ -259,10 +400,27 @@ pt_enumerate_targets() {
       canon_d="$(_pt_canon_path "$d")" || continue
 
       # GIT-ROOT resolution — the load-bearing filter (see header comment).
-      top="$(git -C "$canon_d" rev-parse --show-toplevel 2>/dev/null)" || continue   # not a git repo -> not a project
-      canon_top="$(_pt_canon_path "$top")" || continue
-      [ "$canon_d" = "$canon_top" ] || continue        # inside a repo but not its root
-      [ -f "${canon_d}/.git" ] && continue              # linked worktree (.git FILE, not dir) — wrong mode
+      # UNCHANGED for a real git root (mode "git"). When rev-parse fails
+      # outright (not a git work tree at all), XACA-1305 gives the candidate
+      # a second chance via the sentinel-gated flat-target admission below —
+      # a dir INSIDE a work tree but not its root, or a linked worktree,
+      # still falls straight through to `continue` exactly as before this
+      # ticket, and never reaches the flat check (git territory stays git
+      # territory).
+      mode=""
+      top="$(git -C "$canon_d" rev-parse --show-toplevel 2>/dev/null)" || top=""
+      if [ -n "$top" ]; then
+        canon_top="$(_pt_canon_path "$top")" || continue
+        [ "$canon_d" = "$canon_top" ] || continue        # inside a repo but not its root
+        [ -f "${canon_d}/.git" ] && continue              # linked worktree (.git FILE, not dir) — wrong mode
+        mode="git"
+      else
+        if _pt_flat_target_ok "$team" "$canon_d"; then
+          mode="flat"
+        else
+          continue   # not a git repo AND not a sentinel-admitted flat target -> not a project
+        fi
+      fi
 
       # REFRESH-ONLY gate: only targets that ALREADY have deployed personas.
       agents_dir="${canon_d}/.claude/agents"
@@ -275,7 +433,7 @@ pt_enumerate_targets() {
         continue
       fi
 
-      printf '%s\t%s\n' "$team" "$canon_d"
+      printf '%s\t%s\t%s\n' "$team" "$canon_d" "$mode"
     done
   done
 

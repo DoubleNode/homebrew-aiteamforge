@@ -297,9 +297,20 @@ done
 # Sets the shared DRIFT_FOUND flag; never exits directly, so one bad target
 # never stops the remaining targets from being checked (mirrors the S1<->S2
 # loop's own continue-on-drift behavior above).
+#
+# <mode> is the enumerator's own column (XACA-1305: "git" or "flat", default
+# "git" for a caller that omits it). A "flat" target is handed to
+# _check_s3_target_flat() instead — see that function's header for why.
 _check_s3_target() {
     local team="$1"
     local project_dir="$2"
+    local mode="${3:-git}"
+
+    if [ "$mode" = "flat" ]; then
+        _check_s3_target_flat "$team" "$project_dir"
+        return
+    fi
+
     local s2_dir="${WORKING_DIR}/${team}/personas/agents"
     local s3_dir="${project_dir}/.claude/agents"
 
@@ -375,8 +386,52 @@ _check_s3_target() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# _check_s3_target_flat <team> <project_dir> — XACA-1305
+#
+# A "flat" (non-git) target's S2<->S3 comparison is NEVER reimplemented here.
+# deploy-worktree-personas.sh's own `--verify-flat-dir` mode is the single
+# authority for what a flat target's deployed content should look like (it
+# already recomputes each source persona's expected bytes through the SAME
+# render `--flat-dir` writes with, via `_dwp_render`/`_char_from_filename`,
+# and applies the identical guard `--flat-dir` uses — team id, target
+# validity, git-territory refusal, symlink escape). Re-deriving any of that
+# here would be a second, independent implementation of "is this target
+# clean" — exactly the k501 sibling-heuristic drift this whole enumerator/
+# checker pairing exists to avoid. READ-ONLY: this only ever invokes
+# `--verify-flat-dir`, never `--flat-dir` (never a write mode).
+#
+# Exit codes (deploy-worktree-personas.sh header, --verify-flat-dir table):
+#   0 clean · 5 MISSING/STALE persona(s) found (drift) · 1/2/3/4 guard,
+#   transform, source, or git-territory failures — none of these are a
+#   silent pass; all set DRIFT_FOUND.
+# ---------------------------------------------------------------------------
+_check_s3_target_flat() {
+    local team="$1"
+    local project_dir="$2"
+    local out rc
+
+    rc=0
+    out="$("$DEPLOY_SCRIPT" --verify-flat-dir "$project_dir" "$team" 2>&1)" || rc=$?
+
+    case "$rc" in
+        0)
+            ;;
+        5)
+            _log "DRIFT [${team}]: --verify-flat-dir reports stale/missing persona(s) at ${project_dir}/.claude/agents:"
+            _log "$out"
+            DRIFT_FOUND=true
+            ;;
+        *)
+            _err_always "ERROR [${team}]: --verify-flat-dir failed (rc=${rc}) for ${project_dir} — ${out}"
+            DRIFT_FOUND=true
+            ;;
+    esac
+}
+
 # pt_enumerate_targets (libexec/lib/persona-targets.sh) streams zero or more
-# "<team>\t<project_dir>" lines and ALWAYS ends with a "#UNINSPECTABLE\t<N>"
+# "<team>\t<project_dir>\t<mode>" lines (mode "git" or "flat" — XACA-1305)
+# and ALWAYS ends with a "#UNINSPECTABLE\t<N>"
 # trailer line — never a global variable — precisely because a global a
 # streaming enumerator sets is invisible across a subshell boundary (its own
 # header comment explains why: `<(...)`/pipe consumers run it in a subshell).
@@ -406,9 +461,9 @@ elif [ ! -f "$DEPLOY_SCRIPT" ] || [ ! -x "$DEPLOY_SCRIPT" ]; then
     _err_always "ERROR: ${DEPLOY_SCRIPT} not found or not executable — cannot compute expected transform output for any S3 target. Treating as a check FAILURE."
     DRIFT_FOUND=true
 else
-    while IFS=$'\t' read -r s3_team s3_project_dir; do
+    while IFS=$'\t' read -r s3_team s3_project_dir s3_mode; do
         [ -n "$s3_team" ] || continue
-        _check_s3_target "$s3_team" "$s3_project_dir"
+        _check_s3_target "$s3_team" "$s3_project_dir" "${s3_mode:-git}"
     done <<< "$S3_TARGETS"
 fi
 

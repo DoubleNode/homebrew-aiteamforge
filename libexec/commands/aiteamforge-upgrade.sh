@@ -4375,8 +4375,9 @@ update_team_prompts() {
 # Adding cache state shared across two top-level phases reopens that class.
 #
 # Call pt_enumerate_targets (lib/persona-targets.sh) and parse its output into
-# two globals: _XACA0931_TARGETS (array of "team<TAB>project_dir" elements)
-# and _XACA0931_TARGETS_UNINSPECTABLE (count).
+# two globals: _XACA0931_TARGETS (array of "team<TAB>project_dir<TAB>mode"
+# elements — mode is "git" or "flat", XACA-1305) and
+# _XACA0931_TARGETS_UNINSPECTABLE (count).
 #
 # WHY THIS PARSING LIVES HERE AND NOT INSIDE THE LIB: pt_enumerate_targets is
 # invoked via `< <(pt_enumerate_targets ...)` (process substitution) so it can
@@ -4387,12 +4388,17 @@ update_team_prompts() {
 # line. This helper is the single place in this file that un-multiplexes it,
 # so update_team_personas() and deploy_team_personas_to_projects() (both
 # XACA-0931-002) don't each carry their own copy of that parsing.
+#
+# XACA-1305: a missing 3rd column (a defensive caller, or a hypothetical
+# older enumerator build) defaults to "git" — the only mode this consumer
+# ever routed to before this ticket, so that default is both safe and
+# backward compatible.
 # ---------------------------------------------------------------------------
 _xaca0931_load_persona_targets() {
   _XACA0931_TARGETS=()
   _XACA0931_TARGETS_UNINSPECTABLE=0
-  local _key _val
-  while IFS=$'\t' read -r _key _val; do
+  local _key _val _mode
+  while IFS=$'\t' read -r _key _val _mode; do
     [ -n "$_key" ] || continue
     if [ "$_key" = "#UNINSPECTABLE" ]; then
       case "$_val" in
@@ -4401,7 +4407,7 @@ _xaca0931_load_persona_targets() {
       esac
       continue
     fi
-    _XACA0931_TARGETS+=("${_key}"$'\t'"${_val}")
+    _XACA0931_TARGETS+=("${_key}"$'\t'"${_val}"$'\t'"${_mode:-git}")
   done < <(pt_enumerate_targets "$FRAMEWORK_DIR")
 }
 
@@ -5163,12 +5169,13 @@ deploy_team_personas_to_projects() {
 
   local refreshed=0 skipped=0 failed=0
   local any_target=false
-  local line team project_dir in_configured ct deploy_rc
+  local line team project_dir mode in_configured ct deploy_rc
 
   for line in "${_XACA0931_TARGETS[@]:-}"; do
     [ -n "$line" ] || continue
-    IFS=$'\t' read -r team project_dir <<< "$line"
+    IFS=$'\t' read -r team project_dir mode <<< "$line"
     [ -n "$team" ] && [ -n "$project_dir" ] || continue
+    mode="${mode:-git}"   # XACA-1305: missing 3rd column -> git (backward compat)
     any_target=true
 
     # Defense-in-depth path-safety guard (matches _xaca0925_valid_team_id) —
@@ -5196,12 +5203,29 @@ deploy_team_personas_to_projects() {
     fi
 
     deploy_rc=0
-    "$deployer" --nested-main-root "$project_dir" "$team" --force "${dry_run_args[@]}" || deploy_rc=$?
+    # XACA-1305: route by the enumerator's OWN mode column — this is the one
+    # place git-ness was decided (persona-targets.sh); never re-derive it
+    # here (k501 sibling-heuristic drift).
+    if [ "$mode" = "flat" ]; then
+      "$deployer" --flat-dir "$project_dir" "$team" --force "${dry_run_args[@]}" || deploy_rc=$?
+    else
+      "$deployer" --nested-main-root "$project_dir" "$team" --force "${dry_run_args[@]}" || deploy_rc=$?
+    fi
     if [ "$deploy_rc" -eq 0 ]; then
       refreshed=$((refreshed + 1))
     else
       failed=$((failed + 1))
-      print_warning "[${team}] Deploy to ${project_dir} failed (exit ${deploy_rc}) — continuing with remaining targets (fail-soft)"
+      case "$deploy_rc" in
+        3)
+          print_warning "[${team}] Deploy to ${project_dir} failed (exit 3: no persona source found — see deploy-worktree-personas.sh's exit-code table) — continuing with remaining targets (fail-soft)"
+          ;;
+        4)
+          print_warning "[${team}] Deploy to ${project_dir} failed (exit 4: target is inside a git work tree, refused by --flat-dir — mode/target mismatch) — continuing with remaining targets (fail-soft)"
+          ;;
+        *)
+          print_warning "[${team}] Deploy to ${project_dir} failed (exit ${deploy_rc}) — continuing with remaining targets (fail-soft)"
+          ;;
+      esac
     fi
   done
 
