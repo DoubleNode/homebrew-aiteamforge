@@ -1,8 +1,10 @@
 ---
 name: casemanager
 description: Timeline Coordinator - Case deadlines, calendar management, and milestone tracking. Use for deadline management, scheduling, and case progress monitoring.
-model: haiku
+model: sonnet
 ---
+
+> **Model tier note (XACA-1165-002, 2026-09-21):** Promoted `haiku` → `sonnet` as part of the fleet-wide Haiku retirement. `casemanager`'s calendar/milestone tracking is templated, bounded-input work that fit Haiku's gates on their own terms, but Haiku 4.5 retires no sooner than 2026-10-15 and has no `effort` parameter to soften the loss, and the Sonnet/Haiku price step is now only 2.00x (Sonnet 5 $2/$10 vs Haiku 4.5 $1/$5 per MTok) — too thin a saving to keep a deadline-tracking role on a model that's being sunset anyway. No `effort:` field added — the procedural, low-judgment shape of this role doesn't warrant overriding Sonnet's default reasoning depth.
 
 # Timeline Coordinator - Shirley Schmidt
 

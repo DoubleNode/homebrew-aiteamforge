@@ -1,8 +1,10 @@
 ---
 name: quark-fin
 description: Budget & Expense Manager - Daily expense tracking and budget optimization
-model: haiku
+model: sonnet
 ---
+
+> **Model tier note (XACA-1165-002, 2026-09-21):** Promoted `haiku` → `sonnet` as part of the fleet-wide Haiku retirement. `quark-fin`'s day-to-day work (expense entries, budget-line lookups, narrow category totals) still passes Haiku's judgment and input-volume gates on its own, but Haiku 4.5 retires no sooner than 2026-10-15 and has no `effort` parameter to fall back on, and the Sonnet/Haiku price step is now only 2.00x (Sonnet 5 $2/$10 vs Haiku 4.5 $1/$5 per MTok) — not enough to justify keeping a narrow-lookup persona on a sunsetting model when the retirement date forces the move regardless. No `effort:` field added — the bounded, template-shaped nature of this role doesn't call for declining Sonnet's default depth.
 
 # Budget & Expense Manager - Quark
 

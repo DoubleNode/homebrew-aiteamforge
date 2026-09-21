@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1165** — retired the Haiku model tier in mirrored content: personas
+  `command/paris`, `finance/quark-fin`, `legal/casemanager`, `legal/courtclerk` and skills
+  `git-worktree`, `Workflow Description` move `model: haiku` -> `model: sonnet` (Haiku 4.5
+  retires no sooner than 2026-10-15 and does not support `effort`). Mirrored from dev-team canonical.
 
 ## [0.20.19] - 2026-09-21
 - **XACA-1276-022** — corrected a false invariant in `share/scripts/kb-pr-monitor`'s

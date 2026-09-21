@@ -1,8 +1,10 @@
 ---
 name: courtclerk
 description: Filing Specialist - Court documents, motions, and pleadings preparation. Use for drafting filings, motion practice, and court document formatting.
-model: haiku
+model: sonnet
 ---
+
+> **Model tier note (XACA-1165-002, 2026-09-21):** Promoted `haiku` → `sonnet` as part of the fleet-wide Haiku retirement. `courtclerk`'s template-driven filing prep (motion/pleading formatting against fixed court forms) fit Haiku's judgment and input-volume gates on their own terms, but Haiku 4.5 retires no sooner than 2026-10-15 and has no `effort` parameter to fall back on, and the Sonnet/Haiku price step is now only 2.00x (Sonnet 5 $2/$10 vs Haiku 4.5 $1/$5 per MTok) — not enough to justify holding a filing-prep persona on a sunsetting tier. No `effort:` field added — bounded, template-shaped filing work doesn't call for declining Sonnet's default depth.
 
 # Filing Specialist - Brad Chase
 
