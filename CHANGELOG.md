@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.20] - 2026-09-21
 - **XACA-1165 (follow-up)** — removed the per-role "Model tier note" blockquote from the bodies of
   personas `command/paris`, `finance/quark-fin`, `legal/casemanager`, `legal/courtclerk` and skills
   `git-worktree`, `Workflow Description` (the body is the system prompt; rationale now lives in
@@ -6859,7 +6861,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.19...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.20...HEAD
+[0.20.20]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.19...v0.20.20
 [0.20.19]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.18...v0.20.19
 [0.20.18]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.17...v0.20.18
 [0.20.17]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.16...v0.20.17
