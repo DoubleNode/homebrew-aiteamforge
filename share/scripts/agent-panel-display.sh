@@ -2027,7 +2027,11 @@ while true; do
         # "-w.json" one (XACA-1255). Behaviour is unchanged: with no file to
         # consider, the elif below still clears a previously-seen mtime and
         # schedules a render.
-        local subagent_file
+        # Declare WITH an initializer: this is the top-level while loop, and a
+        # bare `local subagent_file` on the 2nd+ iteration makes zsh print
+        # "subagent_file=<path>" to stdout, i.e. into the panel (regressed by XACA-1255;
+        # same symptom as XACA-0137-043).
+        local subagent_file=""
         subagent_file=$(subagent_file_for_window "$CURRENT_WINDOW_INDEX") || subagent_file=""
         if [[ -n "$subagent_file" && -f "$subagent_file" ]]; then
             local current_sub_mtime=$(stat -f %m "$subagent_file" 2>/dev/null)
