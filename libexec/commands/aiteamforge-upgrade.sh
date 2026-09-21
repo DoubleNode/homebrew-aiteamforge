@@ -4178,6 +4178,180 @@ _xaca0925_refresh_team_personas() {
 }
 
 # ---------------------------------------------------------------------------
+# PROMPT_REFRESH_TEAMS / update_team_prompts (XACA-1296-020)
+#
+# install-team.sh (:2122-2153) seeds share/personas/<team>/prompts/*.txt into
+# ${TEAM_DIR}/scripts/prompts/ (cc-aliases reads
+# <AITEAMFORGE_DIR>/<team>/scripts/prompts/<team>-<terminal>-prompt.txt at
+# launch) — but ONLY at first install; it never reruns for an
+# already-installed team. Nothing on the upgrade path refreshed it either:
+# update_team_personas()/_xaca0925_refresh_team_personas() above refreshes
+# only personas/agents/*.md. So a shipped prompt fix (e.g. XACA-1296's own
+# scope-rule wording) froze at whatever content existed at install time on
+# every already-installed machine, forever. This closes that gap.
+#
+# SCOPED TO SPACEDOCK ONLY, deliberately — this is not "every team's prompts,
+# minus the ones we haven't gotten to yet." sync-tap.sh mirrors
+# spacedock/scripts/prompts/ into the tap's share/personas/spacedock/prompts/
+# and explicitly leaves every other team's tap-shipped prompt un-mirrored and
+# free to drift from its dev-team canonical (see the XACA-0853 correction
+# comment above sync-tap.sh's `share/personas/<team>/agents (XACA-0671)`
+# loop). Refreshing an un-mirrored team's prompts here would silently start
+# enforcing a freshness guarantee sync-tap.sh never promised for that team —
+# a behaviour change for every team but spacedock smuggled in under a
+# spacedock-scoped bugfix, not something this ticket's contract covers.
+#
+# PROMPT_REFRESH_TEAMS is the one-token knob for adding a team later: append
+# its id here AND extend sync-tap.sh's spacedock-only `sync_dir` call to
+# include it in the SAME change — the two lists describe the same promise
+# (tap prompt content stays current with canonical) from two ends of the
+# pipe, and they must move together or one end silently stops backing the
+# other's claim.
+PROMPT_REFRESH_TEAMS=(spacedock)
+
+# Refresh one team's shipped .txt prompt content into its already-installed
+# scripts/prompts/ dir. Mirrors _xaca0925_refresh_team_personas()'s
+# conventions (cmp-based diff gate, DRY_RUN honored, fail-soft per team,
+# report only actually-written counts) with one deliberate difference: NO
+# BACKUP. install-team.sh's own prompt-seed step (:2122-2153, the only other
+# writer of this destination) does not back these files up before
+# overwriting either — prompts are generated tap content mirrored verbatim
+# from canonical, never hand-edited in place on a consumer machine, so there
+# is nothing local to preserve. Backing them up here would imply a
+# local-edit-preservation guarantee this destination has never actually had.
+#
+# Sets the caller-visible global _XACA1296_TEAM_UPDATED (count of files
+# ACTUALLY (re)written this run) before returning. Returns 1 when the
+# refresh did not complete cleanly (failed mkdir or any failed per-file cp) —
+# a malformed team id or an absent/unreadable source or dest is a deliberate
+# skip (return 0), matching _xaca0925_refresh_team_personas's own return
+# contract.
+_xaca1296_refresh_team_prompts() {
+  local team="$1"
+
+  _XACA1296_TEAM_UPDATED=0
+
+  # Defense-in-depth path-safety guard, same convention as
+  # _xaca0925_valid_team_id's caller (XACA-0925-017) — PROMPT_REFRESH_TEAMS is
+  # a fixed literal today, but this function's contract should not silently
+  # depend on that staying true.
+  if ! _xaca0925_valid_team_id "$team"; then
+    print_warning "[${team}] Team id contains characters outside [A-Za-z0-9_-] — skipping prompt refresh (path-safety guard)"
+    return 0
+  fi
+
+  # "Installed" means the team's own dir exists — matches install-team.sh's
+  # TEAM_DIR="$AITEAMFORGE_DIR/$TEAM_ID". Upgrade never creates a team (see
+  # update_team_personas's header comment on the same invariant); a team that
+  # was never installed here gets no scripts/prompts/ dir materialized by
+  # this function either.
+  local team_dir="${WORKING_DIR}/${team}"
+  if [ ! -d "$team_dir" ]; then
+    print_info "[${team}] Team not installed on this machine (no ${team_dir}) — skipping prompt refresh; upgrade never creates a team"
+    return 0
+  fi
+
+  local src="${FRAMEWORK_DIR}/share/personas/${team}/prompts"
+  local dest="${team_dir}/scripts/prompts"
+
+  if [ ! -d "$src" ]; then
+    print_info "[${team}] No shipped prompts for this team — skipping"
+    return 0
+  fi
+  if [ ! -r "$src" ] || [ ! -x "$src" ]; then
+    print_warning "[${team}] Shipped prompt source directory exists but is not readable/accessible (permission denied) — skipping"
+    return 0
+  fi
+
+  local -a src_files=()
+  local f name
+  for f in "$src"/*.txt; do
+    [ -f "$f" ] || continue
+    src_files+=("$f")
+  done
+
+  if [ ${#src_files[@]} -eq 0 ]; then
+    print_info "[${team}] No .txt prompt files shipped for this team — skipping"
+    return 0
+  fi
+
+  # Diff gate: cmp -s ONLY (never mtime). Decides only whether this team has
+  # any work to do this run — never used to selectively skip an individual
+  # file in the write loop below.
+  local any_diff=false
+  for f in "${src_files[@]}"; do
+    name="$(basename "$f")"
+    if [ ! -f "${dest}/${name}" ] || ! cmp -s "$f" "${dest}/${name}"; then
+      any_diff=true
+      break
+    fi
+  done
+
+  if [ "$any_diff" = false ]; then
+    return 0   # idempotent no-op: content already current, nothing to write
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    print_info "Would update ${#src_files[@]} prompt file(s) for ${team}"
+    _XACA1296_TEAM_UPDATED=${#src_files[@]}
+    return 0
+  fi
+
+  if ! mkdir -p "$dest"; then
+    print_warning "[${team}] Could not create destination directory ${dest} — prompt refresh failed for this team"
+    return 1
+  fi
+
+  local written=0
+  local any_write_failed=false
+  for f in "${src_files[@]}"; do
+    name="$(basename "$f")"
+    if cp "$f" "${dest}/${name}"; then
+      written=$((written + 1))
+    else
+      any_write_failed=true
+      print_warning "[${team}] Failed to write ${name} to ${dest}"
+    fi
+  done
+  _XACA1296_TEAM_UPDATED=${written}
+
+  if [ "$any_write_failed" = true ]; then
+    print_warning "[${team}] Prompt refresh incomplete for this team — ${written}/${#src_files[@]} file(s) actually written"
+    return 1
+  fi
+
+  print_success "[${team}] Updated ${written} prompt file(s)"
+  return 0
+}
+
+update_team_prompts() {
+  print_section "Updating Team Prompts"
+
+  local _xaca1296_prompts_source_root="${FRAMEWORK_DIR}/share/personas"
+  if [ ! -d "$_xaca1296_prompts_source_root" ]; then
+    print_warning "Framework share/personas not found — skipping prompt refresh"
+    return 0
+  fi
+
+  local total_updated=0
+  local team
+  for team in "${PROMPT_REFRESH_TEAMS[@]}"; do
+    if ! _xaca1296_refresh_team_prompts "$team"; then
+      print_warning "[${team}] Prompt refresh did not complete cleanly — continuing with remaining teams (fail-soft; see warning above for detail)"
+    fi
+    total_updated=$((total_updated + _XACA1296_TEAM_UPDATED))
+  done
+
+  if [ $total_updated -eq 0 ]; then
+    print_success "All team prompts up to date"
+  elif [ "$DRY_RUN" = true ]; then
+    print_success "Would update ${total_updated} prompt file(s) across refreshed teams"
+  else
+    print_success "Updated ${total_updated} prompt file(s) across refreshed teams"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # _xaca0931_load_persona_targets
 #
 # DELIBERATELY CALLED TWICE PER UPGRADE RUN (once from update_team_personas,
@@ -6414,6 +6588,14 @@ update_ttyd_bridge
 update_imgcat
 update_shell_helpers
 update_team_personas
+# XACA-1296-020: refreshes PROMPT_REFRESH_TEAMS' (spacedock-only)
+# scripts/prompts/*.txt content on an already-installed team. Sequenced
+# immediately after update_team_personas since both refresh the same
+# share/personas/<team>/ source tree, but it does not participate in the
+# XACA-0931 S2->S3 deploy ordering below (deploy_team_personas_to_projects /
+# deploy_flat_team_personas only push personas/agents content, never prompts)
+# so it does not need to sit between them.
+update_team_prompts
 # XACA-0931-002: MUST run immediately after update_team_personas, not before
 # update_claude_hooks arbitrarily moved — ordering is a correctness
 # requirement (XACA-0931-001 §3.6). After update_aux_scripts (already

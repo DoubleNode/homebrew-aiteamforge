@@ -16,6 +16,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `share/kanban-hooks/msg-store.py`: display-only scope banner on spacedock mail from another
   machine or team (case-insensitive team match). Spacedock personas and prompts carry the scope rule (code change / another team /
   more than one machine → escalate to Academy); spacedock prompts are now mirrored to the tap.
+  `libexec/commands/aiteamforge-upgrade.sh` gained `update_team_prompts` (spacedock-only, via
+  `PROMPT_REFRESH_TEAMS`): install-team.sh only ever seeded `scripts/prompts/*.txt` at first
+  install, so the mirrored fix above never reached an already-installed spacedock without this.
 - **XACA-1292** — `share/scripts/kb-sync-personas`: `--prune` no longer deletes a client's own
   git-tracked crew `.md` files in mixed-state repos. Tracked files are reported
   `CLIENT-TRACKED (not ours, left alone)` instead of ORPHAN; when git cannot answer, the file is
