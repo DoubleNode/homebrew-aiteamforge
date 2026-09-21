@@ -36,6 +36,15 @@ TEST_DIR="${TEST_DIR:-$SCRIPT_DIR}"
 source "$SCRIPT_DIR/lib/brew-guard.sh"
 brew_guard_install
 
+# Git-env scrub — drop inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE (and the
+# rest of `git rev-parse --local-env-vars`) before any suite runs, so a fixture's
+# bare `git init`/`git config`/`git commit` can never land in a real repo the
+# caller pointed GIT_DIR at. Every suite is a child process and inherits the
+# scrubbed environment. Same top-level placement and fail-closed shape as the
+# brew guard above. See tests/lib/git-env-hermetic.sh.
+# shellcheck source=lib/git-env-hermetic.sh
+source "$SCRIPT_DIR/lib/git-env-hermetic.sh"
+
 # Test state
 VERBOSE=false
 TOTAL_TESTS=0

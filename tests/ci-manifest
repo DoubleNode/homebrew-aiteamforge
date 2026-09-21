@@ -49,6 +49,7 @@ test-config.sh                                  plain-shell
 test-doctor-fix.sh                              plain-shell
 test-e2e-setup-launch.sh                        plain-shell
 test-fresh-install.sh                           excluded:requires-real-brew-install
+test-git-env-hermetic.sh                        plain-shell
 test-installers.sh                              plain-shell
 test-integration.sh                             plain-shell
 test-kb-quarantine-stub.sh                      plain-shell

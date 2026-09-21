@@ -39,6 +39,12 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Drop inherited GIT_DIR/GIT_WORK_TREE & co. before any fixture `git init`/
+# `git config`: exported, they redirect those into a REAL repo (this suite's
+# fixtures once wrote a fake identity into the main tap checkout). Also
+# sourced by test-runner.sh; repeated here for standalone runs.
+# shellcheck source=lib/git-env-hermetic.sh
+. "$SCRIPT_DIR/lib/git-env-hermetic.sh" || { echo "FATAL: cannot source lib/git-env-hermetic.sh" >&2; exit 1; }
 UPGRADE_SH="$TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh"
 INSTALLER="$TAP_ROOT/libexec/installers/install-kanban.sh"
 LIBEXEC_DIR_REAL="$TAP_ROOT/libexec"
@@ -145,7 +151,7 @@ SETUP
     chmod +x "$dir/.githooks/setup-global-hooks.sh"
     echo "$marker" > "$dir/agents/INDEX.md"
     (
-        cd "$dir"
+        cd "$dir" || exit 1
         git init -q
         git config user.email test@example.com
         git config user.name "Test Fixture"
@@ -256,7 +262,7 @@ _build_fixture "$U3_FIX" "u3 upstream marker" || { echo "FATAL: u3 fixture" >&2;
 U3_RC0=$(_run_upgrade "$U3_HOME" "$U3_ROOT" "file://$U3_FIX" false)
 # Local divergent commit in the clone.
 (
-    cd "$U3_ROOT"
+    cd "$U3_ROOT" || exit 1
     git config user.email test@example.com
     git config user.name "Local Diverge"
     echo "local-only-diverged-work" > LOCAL_ONLY.md

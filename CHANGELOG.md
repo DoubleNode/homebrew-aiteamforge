@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **Test harness: an inherited `GIT_DIR` can no longer steer fixture git commands into a real repo.**
+  With `GIT_DIR`/`GIT_WORK_TREE` exported, a fixture's bare `cd "$X"; git init; git config user.name ...`
+  acts on the repo `GIT_DIR` names, not the fixture. That happened on 2026-09-08: suites run with them
+  pointed at a dev checkout wrote `Sandbox <test@example.com>` into its config (via
+  `test-xaca-0761` Case 3), and 18 tap commits were authored under it. New `tests/lib/git-env-hermetic.sh`
+  unsets every `git rev-parse --local-env-vars` variable. `tests/test-runner.sh` sources it before any
+  suite runs, and the four suites with bare fixture `git config user.*` (0747, 0751, 0751-014, 0761) also
+  source it for standalone runs; their fixture `cd`s now `|| exit 1`. New `tests/test-git-env-hermetic.sh`
+  (plain-shell, 6 tests) covers a positive control, the scrub, an end-to-end probe through the real runner
+  with a hostile `GIT_DIR`, and a coverage check with a mutant. It fails 4 against the pre-fix runner and suites.
 - **XACA-1299** — `share/scripts/kb-pr-monitor`: per-bot blocking-round counter; new terminal verdict
   `ROUND_LIMIT` (exit 23) when a bot requests changes on its >= 4th distinct commit; `RESPAWN_*` /
   `ROUND_LIMIT` detail carries `tester_mode=` / `reviewer_mode=` (`full` | `delta:<sha>`) re-review hints.

@@ -40,6 +40,12 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Drop inherited GIT_DIR/GIT_WORK_TREE & co. before any fixture `git init`/
+# `git config`: exported, they redirect those into a REAL repo (this suite's
+# fixtures once wrote a fake identity into the main tap checkout). Also
+# sourced by test-runner.sh; repeated here for standalone runs.
+# shellcheck source=lib/git-env-hermetic.sh
+. "$SCRIPT_DIR/lib/git-env-hermetic.sh" || { echo "FATAL: cannot source lib/git-env-hermetic.sh" >&2; exit 1; }
 INSTALLER="$TAP_ROOT/libexec/installers/install-kanban.sh"
 UPGRADE_REGISTRATION_SUITE="$SCRIPT_DIR/test-knowledge-sync-upgrade-registration.sh"
 
@@ -222,7 +228,7 @@ test_start "Case 3 — idempotent re-run: real clone root, ran twice, identical 
 C3_HOME=$(_next_home); C3_ROOT="$C3_HOME/knowledge"
 mkdir -p "$C3_ROOT"
 (
-    cd "$C3_ROOT"
+    cd "$C3_ROOT" || exit 1
     git init -q
     git config user.email test@example.com
     git config user.name "Sandbox"
