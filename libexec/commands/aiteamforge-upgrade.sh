@@ -3149,6 +3149,10 @@ PYEOF
 # exists for (M4Mini, M1Pro, M1Mini) are ALL already-installed, so without this entry
 # the mirror delivers to fresh installs only — i.e. to none of them. Same install-vs-
 # upgrade asymmetry as XACA-0751/0761/0771.
+# XACA-1283-002: kb-compaction-quality-watch.sh, the P=50 quality-regression watch
+# (docs/compaction-quality-watch.md). Same situation as the premise ratchet directly
+# above: a brand-new .sh on every already-installed box, needed on M4Mini/M1Pro/M1Mini
+# for baseline capture and post-Stage-2 watching, so it must be materialized here.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3171,6 +3175,7 @@ team-account-display.sh
 msg-inbox-check.sh
 cr-schema-validator.py
 kb-compaction-premise-check.sh
+kb-compaction-quality-watch.sh
 EOF
 }
 
@@ -5994,6 +5999,61 @@ update_global_claude_md() {
   return 0
 }
 
+# XACA-1283: ~/.claude/settings.json on the UPGRADE path.
+#
+# install_settings_json() (install-claude-config.sh) renders and merges
+# settings.json.template, but its ONLY call site is install_claude_config(),
+# reached from `aiteamforge setup`. Before this function the upgrade run
+# sequence never touched settings.json, so a key added to the template never
+# reached an already-installed box -- same install-time-only
+# bug class as update_claude_hooks (XACA-0771) / update_global_claude_md
+# (XACA-1159).
+#
+# Routes through the FILL-ABSENT helper, never install_settings_json(): the
+# setup merge is template-wins and replaces arrays wholesale, which on an
+# unattended nightly run would reset user-tuned values and drop box-local
+# permission entries. WHICH keys it manages lives in ONE place:
+# _xaca1283_upgrade_settings_key_paths() in install-claude-config.sh -- do not
+# name keys here. Every outcome logs one "settings-keys:" line (greppable in
+# auto-upgrade.log). See _xaca1283_refresh_settings_json_keys() for the full
+# rationale. Same subshell/fail-soft/CLAUDE_CONFIG_DIR
+# rationale as update_global_claude_md above.
+update_claude_settings() {
+  print_section "Updating Claude Code settings.json"
+
+  local installer="${LIBEXEC_DIR}/installers/install-claude-config.sh"
+  if [ ! -f "$installer" ]; then
+    print_warning "install-claude-config.sh not found ($installer) — skipping settings.json refresh"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "settings-keys: dry-run (would add any ABSENT upgrade-managed keys to ~/.claude/settings.json from the shipped template; existing values, including user-changed ones, would be left as they are)"
+    return 0
+  fi
+
+  print_info "Filling absent upgrade-managed keys in settings.json (idempotent; fail-soft; never overrides an existing value)..."
+
+  local _xaca1283_result="" _xaca1283_rc=0
+  _xaca1283_result="$(
+      AITEAMFORGE_DIR="${WORKING_DIR}"
+      TEMPLATE_DIR="${FRAMEWORK_DIR}/share/templates"
+      export AITEAMFORGE_DIR TEMPLATE_DIR
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      _xaca1283_refresh_settings_json_keys
+    )" && _xaca1283_rc=0 || _xaca1283_rc=$?
+
+  case "$_xaca1283_rc" in
+    0) print_success "${_xaca1283_result:-settings-keys: added=0 (no-op)}" ;;
+    2) print_success "${_xaca1283_result:-settings-keys: added (count unavailable)}" ;;
+    3) print_warning "${_xaca1283_result:-settings-keys: untouched}" ;;
+    *) print_warning "${_xaca1283_result:-settings-keys: skipped (non-fatal; upgrade continues)}" ;;
+  esac
+
+  return 0
+}
+
 # Update skills
 update_skills() {
   print_section "Updating Skills"
@@ -6376,6 +6436,7 @@ deploy_flat_team_personas
 update_team_image_assets
 update_claude_hooks
 update_global_claude_md
+update_claude_settings
 update_skills
 update_launchagents
 # XACA-0763-005: tear down the retired com.aiteamforge.lcars-runatload agent

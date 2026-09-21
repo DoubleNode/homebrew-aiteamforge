@@ -855,6 +855,173 @@ install_settings_json() {
     fi
 }
 
+# XACA-1283: settings.json key paths the UPGRADE path fills in when ABSENT.
+# SINGLE SOURCE OF TRUTH -- the merge, the "added N" count/log line and the
+# tests all read this list; nothing else hard-codes a key name. One JSON path
+# array per line. To ship a settings key to already-installed boxes: add it to
+# share/templates/claude/settings.json.template AND add its path here (a key
+# only in the template reaches fresh installs, never upgrades). A listed path
+# the template does not carry is a no-op, never an error.
+#
+# STAGED ROLLOUT (XACA-1283): Stage A ships only the scalar below. Stage B
+# adds exactly one line here -- ["env","CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] --
+# plus the matching template line, after the P=50 7-day gate on M3Pro.
+_xaca1283_upgrade_settings_key_paths() {
+    cat <<'EOF'
+["skipDangerousModePermissionPrompt"]
+EOF
+}
+
+# The key-path list above as ONE compact JSON array (e.g. [["a"],["env","b"]]).
+_xaca1283_upgrade_settings_key_paths_json() {
+    _xaca1283_upgrade_settings_key_paths | jq -s -c '.'
+}
+
+# Fill-absent merge (XACA-1283). For every listed path: if the base file has
+# NO value there (key missing, or its parent object missing), take the
+# template's value; if the base has ANY value -- including `false`, `"70"` or
+# an empty string -- the user's value wins and is left alone. Nothing outside
+# the list is touched: permissions arrays, hooks, model, plugins and every
+# other key in the base pass through unchanged in value.
+# Args: base_file template_rendered_file output_file
+merge_settings_json_fill_absent() {
+    local base_file="$1"
+    local overlay_file="$2"
+    local output_file="$3"
+
+    if ! command -v jq &>/dev/null; then
+        log_error "jq is required for JSON merging"
+        return 1
+    fi
+
+    local paths_json
+    paths_json="$(_xaca1283_upgrade_settings_key_paths_json)" || return 1
+
+    jq -s --argjson paths "$paths_json" '
+      .[0] as $base | .[1] as $ovl |
+      reduce $paths[] as $p ($base;
+        if (($base | getpath($p)) == null) and (($ovl | getpath($p)) != null)
+        then setpath($p; ($ovl | getpath($p)))
+        else . end)
+    ' "$base_file" "$overlay_file" > "$output_file"
+}
+
+# UPGRADE-path settings.json refresh (XACA-1283). Called ONLY from
+# aiteamforge-upgrade.sh's update_claude_settings().
+#
+# Before this, `aiteamforge upgrade` had NO function that touched
+# ~/.claude/settings.json at all: install_settings_json() is reached only from
+# install_claude_config() on `aiteamforge setup` (same install-time-only bug
+# class as XACA-0771 hooks / XACA-1159 CLAUDE.md). A key added to
+# settings.json.template therefore never reached an already-installed box.
+#
+# Deliberately NOT a reuse of install_settings_json(): merge_settings_json()
+# is template-WINS (`$base * $ovl`), and jq's `*` replaces arrays wholesale,
+# so running it unattended every night would (a) reset any user-tuned value
+# (e.g. skipDangerousModePermissionPrompt=false back to true) and (b) drop
+# every box-local permissions.allow/deny/ask entry. That is acceptable for an
+# operator explicitly re-running setup; it is not acceptable for a nightly
+# LaunchAgent. Upgrade instead fills ONLY absent listed keys.
+#
+# Every outcome prints ONE line starting with the stable token
+# "settings-keys:" so on-machine verification can grep auto-upgrade.log
+# (auto-upgrade.sh appends all `aiteamforge upgrade` output to it):
+#   settings-keys: added=N keys=<a,b>     settings-keys: added=0 (no-op ...)
+#   settings-keys: untouched (...)        settings-keys: skipped (...)
+#
+# Return codes (mirrors _xaca1159_refresh_global_claude_md):
+#   0 already current (nothing absent)  2 keys added  3 left untouched
+#   1 skipped/error (existing file never modified)
+_xaca1283_refresh_settings_json_keys() {
+    local target="${CLAUDE_CONFIG_DIR}/settings.json"
+    local template="${TEMPLATE_DIR}/claude/settings.json.template"
+
+    if [[ ! -f "$template" ]]; then
+        echo "settings-keys: skipped (shipped settings.json.template not found)"
+        return 1
+    fi
+    # Symlink = user-managed (dotfiles / deploy-to-production.sh). Never write
+    # through it into a tracked repo. Checked before -f, which follows links.
+    if [[ -L "$target" ]]; then
+        echo "settings-keys: untouched (${target} is a symlink -- user-managed; neither the link nor its destination was modified)"
+        return 3
+    fi
+    if [[ ! -f "$target" ]]; then
+        echo "settings-keys: skipped (${target} not installed -- 'aiteamforge setup' installs it the first time)"
+        return 1
+    fi
+    if ! jq -e 'type == "object"' "$target" >/dev/null 2>&1; then
+        echo "settings-keys: untouched (${target} is not a valid JSON object)"
+        return 3
+    fi
+
+    local rendered candidate paths_json
+    paths_json="$(_xaca1283_upgrade_settings_key_paths_json 2>/dev/null)" || paths_json=""
+    if [[ -z "$paths_json" ]]; then
+        echo "settings-keys: skipped (could not read the upgrade key list)"
+        return 1
+    fi
+    rendered="$(mktemp "${target}.tmpl.XXXXXX" 2>/dev/null)" || {
+        echo "settings-keys: skipped (could not create a temp file)"
+        return 1
+    }
+    if ! apply_template "$template" "$rendered" >/dev/null 2>&1 \
+        || ! jq -e 'type == "object"' "$rendered" >/dev/null 2>&1; then
+        rm -f "$rendered"
+        echo "settings-keys: skipped (rendering settings.json.template failed; existing file untouched)"
+        return 1
+    fi
+
+    # Which listed paths are absent from the live file AND supplied by the
+    # template -- exactly the set the merge below adds.
+    local _added
+    _added="$(jq -r -n --argjson paths "$paths_json" \
+        --slurpfile a "$target" --slurpfile b "$rendered" '
+        [ $paths[] as $p | select((($a[0] | getpath($p)) == null) and (($b[0] | getpath($p)) != null))
+          | $p | map(tostring) | join(".") ] | join(",")' 2>/dev/null)" || {
+        rm -f "$rendered"
+        echo "settings-keys: skipped (could not compare settings.json against the template)"
+        return 1
+    }
+    if [[ -z "$_added" ]]; then
+        rm -f "$rendered"
+        echo "settings-keys: added=0 (no-op; every upgrade-managed key already present)"
+        return 0
+    fi
+
+    candidate="$(mktemp "${target}.XXXXXX" 2>/dev/null)" || {
+        rm -f "$rendered"
+        echo "settings-keys: skipped (could not create a temp file)"
+        return 1
+    }
+    if ! merge_settings_json_fill_absent "$target" "$rendered" "$candidate" 2>/dev/null \
+        || ! jq -e 'type == "object"' "$candidate" >/dev/null 2>&1; then
+        rm -f "$rendered" "$candidate"
+        echo "settings-keys: skipped (merge failed; existing file untouched)"
+        return 1
+    fi
+    rm -f "$rendered"
+
+    backup_file "$target" >/dev/null 2>&1 || true
+
+    local _mode=""
+    if command -v _aitf_file_mode >/dev/null 2>&1; then
+        _mode="$(_aitf_file_mode "$target")"
+    fi
+    case "$_mode" in ''|*[!0-7]*) _mode=644 ;; esac
+    chmod "$_mode" "$candidate" 2>/dev/null || true
+
+    local _n
+    _n="$(printf '%s\n' "$_added" | tr ',' '\n' | grep -c .)"
+    if mv -f "$candidate" "$target" 2>/dev/null; then
+        echo "settings-keys: added=${_n} keys=${_added}"
+        return 2
+    fi
+    rm -f "$candidate"
+    echo "settings-keys: skipped (failed to install the updated settings.json; existing file left in place)"
+    return 1
+}
+
 #------------------------------------------------------------------------------
 # Main Installation Function
 #------------------------------------------------------------------------------

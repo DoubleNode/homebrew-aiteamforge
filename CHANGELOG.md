@@ -6,6 +6,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1283-002** — Mirror `share/scripts/kb-compaction-quality-watch.sh`, the P=50 compaction
+  quality-regression watch (canonical `scripts/kb-compaction-quality-watch.sh` in dev-team; design in
+  its `docs/compaction-quality-watch.md`). Read-only: it scans `~/.claude/projects` transcripts and
+  reports a tool-error-excess metric vs a baseline (exit 0 OK / 1 REVERT_RECOMMENDED / 2 error /
+  3 INSUFFICIENT_DATA). Added to `_xaca0673_mandatory_materialize_basenames()` in
+  `libexec/commands/aiteamforge-upgrade.sh` so already-installed boxes receive it on upgrade (a new
+  `.sh` is otherwise skipped by the refresh-only sweep). No launchd job ships on tap boxes; it is run
+  by hand for baseline capture and post-Stage-2 checks.
+- **XACA-1283 (Stage A)** — `aiteamforge upgrade` can now deliver `~/.claude/settings.json` keys to
+  already-installed boxes. Before this, nothing on the upgrade path touched settings.json at all:
+  `install_settings_json()` (the only thing that applies `settings.json.template`) is reached only
+  from `aiteamforge setup`, so a key added to the template never reached a box installed before it
+  (same install-time-only bug class as XACA-0771 hooks / XACA-1159 CLAUDE.md). New
+  `update_claude_settings()` in `libexec/commands/aiteamforge-upgrade.sh` (run after
+  `update_global_claude_md`) calls the new `_xaca1283_refresh_settings_json_keys()` in
+  `libexec/installers/install-claude-config.sh`, which adds the key paths listed in
+  `_xaca1283_upgrade_settings_key_paths()` (the single source for which keys upgrade manages)
+  **only when absent**: a user's existing value, including `false`, wins and is left alone; nothing
+  outside the list changes; a run with nothing to add does not rewrite the file; a symlinked
+  settings.json is never written through. It deliberately does NOT reuse `merge_settings_json()`,
+  which is template-wins and replaces arrays wholesale (on an unattended nightly run that would reset
+  user-tuned values and drop box-local `permissions` entries; that setup-time behavior is unchanged).
+  Every run logs one `settings-keys:` line (`added=N keys=...`, `added=0 (no-op ...)`, `untouched
+  (...)` or `skipped (...)`), which lands in `auto-upgrade.log` for on-machine verification.
+  **Stage A ships exactly one key: `skipDangerousModePermissionPrompt: true`** (already in the
+  template since the initial tap commit, but never delivered on upgrade). **Heads-up: this key
+  SUPPRESSES Claude Code's dangerous-mode (bypass-permissions) confirmation prompt**, so after upgrade
+  that prompt no longer appears on any tap box that did not already set the key. The template does
+  NOT yet carry `env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`; that key ships in Stage B (one template line
+  plus one key-list line) after its 7-day gate. New suite
+  `tests/test-xaca-1283-settings-merge-env-and-scalar.sh` (plain-shell, registered in
+  `tests/ci-manifest`) runs the real upgrade function and setup merge in a sandboxed HOME, proves the
+  nested `env` merge against a fixture template and injected key list, and carries a Stage-A guard
+  that fails if the P=50 key reaches the shipped template or key list early.
+- **XACA-1283 — correction to the XACA-0773 entry below (history not rewritten).** That entry says
+  `settings.json` changes reach deployed machines via "fresh install AND `brew upgrade` hydration".
+  The upgrade half was never true: no step of `aiteamforge upgrade` (and nothing in the Formula's
+  `post_install`) called `install_settings_json()`, so the `block-icloud-paths.py` `PreToolUse`
+  matcher that XACA-0773 added to `settings.json.template` reached only freshly set-up boxes. The
+  hook FILE itself was delivered on upgrade (XACA-0771's `update_claude_hooks`); its settings.json
+  REGISTRATION was not. XACA-1283's upgrade step does not cover `hooks` either: it only adds the keys
+  in its list.
 - **XACA-1165** — retired the Haiku model tier in mirrored content: personas
   `command/paris`, `finance/quark-fin`, `legal/casemanager`, `legal/courtclerk` and skills
   `git-worktree`, `Workflow Description` move `model: haiku` -> `model: sonnet` (Haiku 4.5
