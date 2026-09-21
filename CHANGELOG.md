@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1165 (follow-up)** — removed the per-role "Model tier note" blockquote from the bodies of
+  personas `command/paris`, `finance/quark-fin`, `legal/casemanager`, `legal/courtclerk` and skills
+  `git-worktree`, `Workflow Description` (the body is the system prompt; rationale now lives in
+  dev-team `claude/MODEL_SELECTION.md`). Mirrored from dev-team canonical.
 - **XACA-1296** — Space Dock is local-only. `share/scripts/kb-msg-provision`: an `--unattended`
   run (installer, upgrade) now writes spacedock's per-machine self-entry to `team-machines.json`
   instead of deferring it forever (spacedock is tier-4 by design; M4Mini had none).

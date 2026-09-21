@@ -26,8 +26,6 @@ status: production-ready
 model: sonnet
 ---
 
-> **Model tier note (XACA-1165-002, 2026-09-21):** Promoted `haiku` → `sonnet` as part of the fleet-wide Haiku retirement. This skill's job (a single-field description update on the active kanban card) fit Haiku's judgment and input-volume gates on their own terms, but Haiku 4.5 retires no sooner than 2026-10-15 and has no `effort` parameter to fall back on, and the Sonnet/Haiku price step is now only 2.00x (Sonnet 5 $2/$10 vs Haiku 4.5 $1/$5 per MTok) — too small a saving to keep a narrow-lookup skill on a sunsetting tier. No `effort:` field added — this skill's procedural, single-field-update shape doesn't call for overriding Sonnet's default depth.
-
 # Workflow Description
 
 ## Skill Metadata

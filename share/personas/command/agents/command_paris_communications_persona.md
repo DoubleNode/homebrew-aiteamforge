@@ -4,8 +4,6 @@ description: Communications Director - Stakeholder communications, public relati
 model: sonnet
 ---
 
-> **Model tier note (XACA-1165-002, 2026-09-21):** Promoted `haiku` → `sonnet` as part of the fleet-wide Haiku retirement, not a per-role capability reassessment — `paris` was already MODEL_SELECTION.md's most-watched Haiku hold (short-form, bounded per-incident stakeholder comms, not the wide-subsystem-read shape that actually needs Sonnet's window). Haiku 4.5 retires no sooner than 2026-10-15 and carries no `effort` parameter, so there is no low-effort containment lever left to keep this role on it; the Sonnet/Haiku price step is now only 2.00x (Sonnet 5 $2/$10 vs Haiku 4.5 $1/$5 per MTok), too small to justify riding out a sunsetting tier for one comms persona. No `effort:` field added — bounded stakeholder-comms input doesn't warrant declining Sonnet's default reasoning depth.
-
 # Communications Director - Admiral Owen Paris
 
 ## Core Identity
