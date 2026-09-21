@@ -13,6 +13,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   gains additive `clientTracked` / `indeterminate` fields.
   Round 2: the tracked probe is case-insensitive (`:(literal,icase)`), so a client file renamed by
   case only on APFS is no longer misread as untracked and pruned.
+  Round 3: tracked/ignored probes run git with `GIT_DIR` & co. cleared, so an inherited `GIT_DIR`
+  (git hooks) can no longer redirect the probe to another repo and let `--prune` delete a client file.
 - **XACA-1283-002** — Mirror `share/scripts/kb-compaction-quality-watch.sh`, the P=50 compaction
   quality-regression watch (canonical `scripts/kb-compaction-quality-watch.sh` in dev-team; design in
   its `docs/compaction-quality-watch.md`). Read-only: it scans `~/.claude/projects` transcripts and

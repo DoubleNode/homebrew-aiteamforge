@@ -810,7 +810,7 @@ _deployment_is_gitignored_personas() {
   # `check-ignore -q` on a directory containing tracked content itself
   # returns rc=1 in that mixed state, so this branch does not fire there in
   # practice. Decision doc §3.5.)
-  if git -C "$repo" check-ignore -q "$rel_dir" 2>/dev/null; then
+  if _git_probe -C "$repo" check-ignore -q "$rel_dir" 2>/dev/null; then
     return 0
   fi
 
@@ -863,7 +863,7 @@ _deployment_is_gitignored_personas() {
     [ -z "$src_file" ] && continue
     bname=$(basename "$src_file")
     total=$((total + 1))
-    if git -C "$repo" ls-files --error-unmatch -- ":(literal)${rel_dir}/${bname}" >/dev/null 2>&1; then
+    if _git_probe -C "$repo" ls-files --error-unmatch -- ":(literal)${rel_dir}/${bname}" >/dev/null 2>&1; then
       rc=0
     else
       rc=$?
@@ -943,6 +943,21 @@ _deployment_is_gitignored_personas() {
   return 0
 }
 
+# XACA-1292: run git for a tracked/ignored PROBE with the repo-selecting
+# environment cleared. `git -C <dir>` does NOT override an inherited GIT_DIR
+# (git exports it to hooks; ours run `kb-sync-personas sync --all` from
+# post-merge, and from a linked worktree GIT_DIR is set), so the probe
+# silently asks some OTHER repo whether a client file is tracked, gets "no",
+# and --prune deletes it. MEASURED by the XACA-1292 round-2 QA gate. Every
+# tracked/ignored probe — here and in _deployment_is_gitignored_personas
+# above (defined earlier, resolved at call time) — goes through this wrapper
+# so the answer is about the repo that contains the file.
+_git_probe() {
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
+      -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      -u GIT_NAMESPACE -u GIT_PREFIX git "$@"
+}
+
 # XACA-1292: classifies a single FILE already sitting on disk under a
 # deployment target directory — as opposed to _deployment_is_gitignored_personas
 # above, which classifies OUR master basenames as a set. This one answers a
@@ -1010,7 +1025,7 @@ _target_file_git_state() {
   # only means "untracked" when no `.git` entry exists anywhere from <dir> up
   # to /. Any `.git` found on the way up -> indeterminate (fail closed).
   local inside probe
-  if inside=$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null); then
+  if inside=$(_git_probe -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null); then
     [ "$inside" = "true" ] || return 2
   else
     probe=$(cd "$dir" 2>/dev/null && pwd -P) || return 2
@@ -1030,7 +1045,7 @@ _target_file_git_state() {
   # `:(literal)crew.md` -> rc=1, `:(literal,icase)crew.md` -> rc=0. Erring
   # toward "tracked" is the safe direction here — the worst case is a real
   # orphan left in place, never a client file deleted.
-  if git -C "$dir" ls-files --error-unmatch -- ":(literal,icase)${bname}" >/dev/null 2>&1; then
+  if _git_probe -C "$dir" ls-files --error-unmatch -- ":(literal,icase)${bname}" >/dev/null 2>&1; then
     rc=0
   else
     rc=$?
