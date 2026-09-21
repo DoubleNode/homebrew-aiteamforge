@@ -14,7 +14,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   run (installer, upgrade) now writes spacedock's per-machine self-entry to `team-machines.json`
   instead of deferring it forever (spacedock is tier-4 by design; M4Mini had none).
   `share/kanban-hooks/msg-store.py`: display-only scope banner on spacedock mail from another
-  machine or team. Spacedock personas and prompts carry the scope rule (code change / another team /
+  machine or team (case-insensitive team match). Spacedock personas and prompts carry the scope rule (code change / another team /
   more than one machine → escalate to Academy); spacedock prompts are now mirrored to the tap.
 - **XACA-1292** — `share/scripts/kb-sync-personas`: `--prune` no longer deletes a client's own
   git-tracked crew `.md` files in mixed-state repos. Tracked files are reported

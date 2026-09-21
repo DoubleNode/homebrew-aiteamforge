@@ -266,7 +266,10 @@ def _spacedock_scope_banner(rec, recipient_team):
     Never raises: this is called from display paths (inbox/read) and must
     never turn a corrupt or partial record into a crashed inbox listing.
     """
-    if recipient_team != _SPACEDOCK_TEAM:
+    # Case-insensitive: team ids are lowercase by convention, but a mixed-case
+    # KB_TEAM still resolves the same inbox on a case-insensitive filesystem,
+    # and must not silently hide every banner (XACA-1296 [Test] finding).
+    if not isinstance(recipient_team, str) or recipient_team.lower() != _SPACEDOCK_TEAM:
         return None
     if not isinstance(rec, dict):
         return _SCOPE_BANNER_TEMPLATE.format(source="an unverified origin")
@@ -278,7 +281,7 @@ def _spacedock_scope_banner(rec, recipient_team):
         return _SCOPE_BANNER_TEMPLATE.format(source="another machine")
 
     if origin == "local":
-        if isinstance(from_team, str) and from_team == _SPACEDOCK_TEAM:
+        if isinstance(from_team, str) and from_team.lower() == _SPACEDOCK_TEAM:
             return None  # same-machine spacedock -> spacedock: no banner
         if isinstance(from_team, str) and from_team:
             return _SCOPE_BANNER_TEMPLATE.format(source=f"team {from_team}")
