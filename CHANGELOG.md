@@ -47,6 +47,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     admission always refuses (the pre-fix behavior). It is a mutant rather than `git show HEAD:`
     because a HEAD-extracted "pre-fix" file becomes the fix itself once committed. A mutant that
     fails to run aborts the suite rather than passing as "nothing discovered".
+  - TF13 (XACA-1305-013, PR #945 review): pins the structural `.git` walk. An ancestor `.git` that
+    git cannot resolve must still refuse the candidate. The test has a precondition (git really
+    fails) and a paired control (no ancestor `.git` means admitted). Disabling the walk fails TF13
+    and only TF13: 53/54.
   - Tap-only: none of the three changed sources is in `sync-tap.sh`'s map. The mirrored deployer
     is unchanged.
 

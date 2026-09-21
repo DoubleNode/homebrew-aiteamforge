@@ -751,6 +751,42 @@ else
     test_fail "expected CRLF/trailing-whitespace marker to still admit the flat target; got LINES=[$LINES]"
 fi
 
+# TF13 (XACA-1305-013, PR #945 review): the STRUCTURAL `.git` walk is the only
+# thing that refuses this fixture. An ancestor carries a `.git` entry git itself
+# cannot resolve (a gitdir file pointing nowhere), so `rev-parse
+# --is-inside-work-tree` fails and only the walk to `/` sees git territory. This
+# pins the deployer-mirrored guard: weaken the walk and this admits the dir.
+# Two built-in controls keep it from passing vacuously:
+#   (a) PRECONDITION: git must really fail on the candidate. If git ever resolves
+#       it, the rev-parse branch would be what refuses, and TF13 is not testing
+#       the walk at all -> fail loudly, never pass.
+#   (b) PAIRED CONTROL: the identical fixture minus the ancestor `.git` IS
+#       admitted, so the ancestor `.git` is the only thing that differs.
+test_start "TF13: ancestor .git that git cannot resolve -> refused by the structural walk alone (with precondition + paired control)"
+T_FW="$(_next_sandbox)"; T_AITF="$(_next_sandbox)"
+mkdir -p "$T_FW/share/teams" "$T_AITF/proj"
+_mk_conf "$T_FW/share/teams" finance "true" "" "$T_AITF/proj"
+_mk_flat_source "$T_AITF" finance
+_mk_flat_project "$T_AITF/proj/personal" "$T_AITF" finance new
+# (b) paired control first, before the ancestor .git exists.
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+CONTROL_LINES="$(_pt_target_lines "$OUT")"
+printf 'gitdir: %s/does-not-exist\n' "$T_AITF" > "$T_AITF/proj/.git"
+# (a) precondition: git must NOT classify the candidate as inside a work tree.
+PRE="$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_CEILING_DIRECTORIES
+       git -C "$T_AITF/proj/personal" rev-parse --is-inside-work-tree 2>/dev/null)" || PRE=""
+OUT="$(AITEAMFORGE_DIR="$T_AITF" _run_pt "$T_FW")"
+LINES="$(_pt_target_lines "$OUT")"
+if [ "$PRE" = "true" ]; then
+    test_fail "PRECONDITION: git resolved the bogus ancestor .git as a work tree, so this fixture does not isolate the structural walk -- TF13 is invalid on this git version"
+elif ! printf '%s\n' "$CONTROL_LINES" | grep -qE "^finance	.*/proj/personal	flat\$"; then
+    test_fail "PAIRED CONTROL: fixture without the ancestor .git was NOT admitted, so a refusal below proves nothing; got CONTROL_LINES=[$CONTROL_LINES]"
+elif [ -z "$LINES" ]; then
+    test_pass
+else
+    test_fail "expected the structural walk to refuse a candidate under an ancestor .git git cannot resolve; got LINES=[$LINES]"
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # POSITIVE CONTROL (mandatory, XACA-1305-003 dispatch): prove TF1/TF2 FAIL
 # when non-git admission is absent -- a test that passes on the buggy code is
