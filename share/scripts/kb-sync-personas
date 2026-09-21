@@ -393,7 +393,7 @@ _deploy_personas_to_one_target() {
   # k501: hoist loop-locals before the inner loops.
   local copied=0 skipped=0 replaced=0
   local src_file bname target_file master_sha deployed_sha
-  local tgt_file tbasename found sf
+  local tgt_file tbasename found sf git_state_rc
   while IFS= read -r src_file; do
     [ -z "$src_file" ] && continue
     bname=$(basename "$src_file")
@@ -443,7 +443,23 @@ _deploy_personas_to_one_target() {
         [ "$(basename "$sf")" = "$tbasename" ] && found=true && break
       done < <(_source_files_for_deployment "$deploy_idx")
       if [ "$found" = false ]; then
-        if [ "$prune" = true ]; then
+        # XACA-1292: a file we don't recognize is not automatically OUR
+        # orphan to prune — it may be a file the client committed to their
+        # own repo (XACA-1264 mixed-state DEPLOY). Classify before acting.
+        if _target_file_git_state "$tgt_file"; then
+          git_state_rc=0
+        else
+          git_state_rc=$?
+        fi
+        if [ "$git_state_rc" -eq 0 ]; then
+          # Tracked in the target's own repo — never ours to remove, even
+          # under --prune, and never reported as ORPHAN.
+          _warn "[$team] CLIENT-TRACKED $tbasename in $label (not ours, left alone)"
+        elif [ "$git_state_rc" -eq 2 ]; then
+          # Indeterminate — fail closed, never prune, and say so explicitly
+          # rather than silently treating it as either synced or orphaned.
+          _warn "[$team] persona classification INDETERMINATE for $tbasename in $label (git could not answer) — leaving in place, not pruned"
+        elif [ "$prune" = true ]; then
           if [ "$dry_run" = true ]; then
             echo "    PRUNE    $tbasename (orphan)"
           else
@@ -925,6 +941,100 @@ _deployment_is_gitignored_personas() {
   fi
 
   return 0
+}
+
+# XACA-1292: classifies a single FILE already sitting on disk under a
+# deployment target directory — as opposed to _deployment_is_gitignored_personas
+# above, which classifies OUR master basenames as a set. This one answers a
+# narrower, per-file question: "is THIS file (found by the orphan scan, not
+# one of ours) tracked in whatever repo it happens to live in?"
+#
+# Why this exists: XACA-1264 moved client-owned MIXED-STATE repos (client has
+# committed some of their own crew .md files into .claude/agents alongside
+# our deployed ones) into the DEPLOY branch. Both orphan loops then see the
+# client's committed files sitting next to ours, don't recognize the
+# basenames, and call them ORPHAN — the warning even says "use --prune to
+# remove", which would delete a file the client committed to their own repo.
+# This helper lets the orphan loops tell "ours is missing this basename
+# because it truly is unwanted cruft" apart from "this was never ours to
+# begin with, and it is the client's".
+#
+# Reuses the XACA-1264 ls-files --error-unmatch ':(literal)' idiom, but
+# resolves the repo from the FILE's own directory rather than a
+# deployment's targetRepo field, because the caller may be probing a linked
+# worktree, a nested main-root checkout, or (for non-git-hosted teams like
+# ~/finance) a directory that is not inside any git work tree at all.
+# `git -C <dir> ls-files` resolves a bare pathspec relative to <dir> itself
+# (not the repo root), so no repo-root/relative-path math is needed here.
+#
+# Usage — MUST be called from conditional context (if/while/&&/||), exactly
+# like _deployment_is_gitignored_personas above: this function's own body is
+# set -e-safe (every git call is guarded by an explicit if/then/else, per
+# XACA-1264-016), but bash aborts a script running under `set -e` if a
+# function call that itself returns non-zero is used as a bare statement.
+#
+# Return codes (no stdout — pure exit status, so callers can use it directly
+# as an `if` condition):
+#   0 = tracked        — git ls-files --error-unmatch confirms this exact
+#                         file is in the index of its own repo. NEVER prune,
+#                         even under --prune; this is the client's file.
+#   1 = untracked       — either (a) the file's directory is not inside ANY
+#                         git work tree at all (`git rev-parse
+#                         --is-inside-work-tree` failed) — nothing can be
+#                         client-tracked in a non-repo directory, so this is
+#                         a legitimate, non-failure "untracked"; or (b) it IS
+#                         inside a work tree and ls-files cleanly answered
+#                         rc=1 (genuinely not tracked). Existing ORPHAN /
+#                         --prune behavior applies.
+#   2 = indeterminate   — inside a real git work tree, but git itself could
+#                         not answer cleanly (ls-files exited something
+#                         other than 0/1, e.g. 128 for a corrupt index).
+#                         FAIL CLOSED: callers must never prune this file,
+#                         and must surface that the state is unknown rather
+#                         than silently treating it as synced/orphan either
+#                         way.
+_target_file_git_state() {
+  local file="$1"
+  local dir bname rc
+
+  dir=$(dirname "$file")
+  bname=$(basename "$file")
+
+  # Not inside any git work tree at all -> legitimately untracked; nothing
+  # can be client-tracked in a directory that isn't a git repo.
+  #
+  # But rev-parse ALSO fails inside a repo that is broken rather than absent
+  # (a linked worktree whose `.git` file points at a pruned gitdir, a corrupt
+  # HEAD) — and files there may well be client-tracked. Reading that failure
+  # as "untracked" would hand --prune a client file, so a failed rev-parse
+  # only means "untracked" when no `.git` entry exists anywhere from <dir> up
+  # to /. Any `.git` found on the way up -> indeterminate (fail closed).
+  local inside probe
+  if inside=$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null); then
+    [ "$inside" = "true" ] || return 2
+  else
+    probe=$(cd "$dir" 2>/dev/null && pwd -P) || return 2
+    while :; do
+      [ -e "$probe/.git" ] && return 2
+      [ "$probe" = "/" ] && break
+      probe=$(dirname "$probe")
+    done
+    return 1
+  fi
+
+  if git -C "$dir" ls-files --error-unmatch -- ":(literal)${bname}" >/dev/null 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  elif [ "$rc" -eq 1 ]; then
+    return 1
+  else
+    return 2
+  fi
 }
 
 # Enumerate active worktrees for a given repo root.
@@ -1510,6 +1620,7 @@ _kbsp_check() {
     fi
 
     local drift_items="" team_status="synced"
+    local client_tracked_items="" indeterminate_items=""
     local file_count=0
 
     while IFS= read -r src_file; do
@@ -1558,10 +1669,40 @@ _kbsp_check() {
           [ "$(basename "$sf")" = "$tbasename" ] && found=true && break
         done < <(_source_files_for_deployment "$i")
         if [ "$found" = false ]; then
-          drift_items="${drift_items} ORPHAN:${tbasename}"
-          if [ "$team_status" = "synced" ]; then team_status="has-orphans"; fi
-          if [ "$json_output" = false ]; then
-            echo "  [${team}] ORPHAN   $tbasename (not in master groups)"
+          # XACA-1292: an unrecognized file isn't automatically OUR orphan —
+          # it may be one the client committed to their own repo (XACA-1264
+          # mixed-state DEPLOY). Classify before counting it as drift.
+          local git_state_rc
+          if _target_file_git_state "$tgt_file"; then
+            git_state_rc=0
+          else
+            git_state_rc=$?
+          fi
+          if [ "$git_state_rc" -eq 0 ]; then
+            # Tracked in the target's own repo — informational only. Never
+            # added to drift_items, never flips team_status away from
+            # "synced" (this is not something of ours to fix).
+            client_tracked_items="${client_tracked_items} CLIENT-TRACKED:${tbasename}"
+            if [ "$json_output" = false ]; then
+              echo "  [${team}] CLIENT-TRACKED $tbasename (not ours, left alone)"
+            fi
+          elif [ "$git_state_rc" -eq 2 ]; then
+            # Indeterminate — fail closed: never counted as drift/orphan
+            # (we can't prove it's ours to prune), but must not be silently
+            # folded into "synced" either, since that's a claim we can't
+            # back up. Its own status value + its own JSON field, visible
+            # in both output modes.
+            indeterminate_items="${indeterminate_items} INDETERMINATE:${tbasename}"
+            if [ "$team_status" = "synced" ]; then team_status="indeterminate"; fi
+            if [ "$json_output" = false ]; then
+              echo "  [${team}] INDETERMINATE $tbasename (git could not classify; not counted as synced)"
+            fi
+          else
+            drift_items="${drift_items} ORPHAN:${tbasename}"
+            if [ "$team_status" = "synced" ]; then team_status="has-orphans"; fi
+            if [ "$json_output" = false ]; then
+              echo "  [${team}] ORPHAN   $tbasename (not in master groups)"
+            fi
           fi
         fi
       done < <(find "$full_target" -maxdepth 1 -name '*.md' -type f | sort)
@@ -1581,12 +1722,27 @@ _kbsp_check() {
         # drift_items has a leading space; trim it, then split on spaces
         drift_json=$(printf '%s\n' $drift_items | jq -R . | jq -s .)
       fi
+      # XACA-1292: client-tracked and indeterminate files get their OWN
+      # fields rather than folding into "drift" — existing consumers that
+      # read "drift" as "things to fix by re-syncing" must not start
+      # seeing client-owned files or unclassifiable ones in that list.
+      # Additive-only: "team"/"status"/"drift" keep their prior meaning.
+      local client_tracked_json="[]"
+      if [ -n "$client_tracked_items" ]; then
+        client_tracked_json=$(printf '%s\n' $client_tracked_items | jq -R . | jq -s .)
+      fi
+      local indeterminate_json="[]"
+      if [ -n "$indeterminate_items" ]; then
+        indeterminate_json=$(printf '%s\n' $indeterminate_items | jq -R . | jq -s .)
+      fi
       local dep_entry
       dep_entry=$(jq -n \
         --arg team "$team" \
         --arg status "$team_status" \
         --argjson drift "$drift_json" \
-        '{"team": $team, "status": $status, "drift": $drift}')
+        --argjson clientTracked "$client_tracked_json" \
+        --argjson indeterminate "$indeterminate_json" \
+        '{"team": $team, "status": $status, "drift": $drift, "clientTracked": $clientTracked, "indeterminate": $indeterminate}')
       if [ -z "$json_deployments" ]; then
         json_deployments="$dep_entry"
       else
@@ -1941,7 +2097,23 @@ _kbsp_sync() {
           [ "$(basename "$sf")" = "$tbasename" ] && found=true && break
         done < <(_source_files_for_deployment "$i")
         if [ "$found" = false ]; then
-          if [ "$prune" = true ]; then
+          # XACA-1292: don't assume an unrecognized file is OUR orphan — it
+          # may be a file the client committed to their own repo
+          # (XACA-1264 mixed-state DEPLOY). Classify before acting.
+          local git_state_rc
+          if _target_file_git_state "$tgt_file"; then
+            git_state_rc=0
+          else
+            git_state_rc=$?
+          fi
+          if [ "$git_state_rc" -eq 0 ]; then
+            # Tracked in the target's own repo — never ours to remove, even
+            # under --prune, and never reported as ORPHAN.
+            _warn "[$team] CLIENT-TRACKED $tbasename (not ours, left alone)"
+          elif [ "$git_state_rc" -eq 2 ]; then
+            # Indeterminate — fail closed, never prune, say so explicitly.
+            _warn "[$team] persona classification INDETERMINATE for $tbasename (git could not answer) — leaving in place, not pruned"
+          elif [ "$prune" = true ]; then
             if [ "$dry_run" = true ]; then
               echo "  PRUNE    $tbasename (orphan)"
             else
@@ -3913,6 +4085,120 @@ T27_MANIFEST
     fail=$((fail + 1))
   fi
   rm -rf "$tmp_t28"
+
+  # --- Test 29: XACA-1292 — a client-tracked file in the target survives
+  # --prune (never ORPHAN, never rm'd), while a genuine untracked orphan is
+  # still pruned as before. Reuses the Test 14 synthetic-container pattern:
+  # a real inner git repo + linked worktree, driven through the real
+  # sync-worktrees subcommand (not a unit-level call), so this exercises
+  # _target_file_git_state wired into the actual orphan loop end-to-end. ---
+  _info "[selftest] Test 29: client-tracked file survives --prune; real orphan still pruned (XACA-1292)..."
+
+  local tmp_t29
+  tmp_t29=$(mktemp -d)
+  local t29_container="${tmp_t29}/FakeContainer29"
+  local t29_inner="${t29_container}/inner-dev"
+  local t29_wt_path="${t29_container}/worktrees/feature-t29"
+  mkdir -p "$t29_inner"
+
+  git -C "$t29_inner" init -q
+  git -C "$t29_inner" -c user.email="t@t.com" -c user.name="T" \
+    commit -q --allow-empty -m "init" >/dev/null 2>&1
+  git -C "$t29_inner" worktree add "$t29_wt_path" -b "feature-selftest-t29" >/dev/null 2>&1
+
+  local t29_master_root="${tmp_t29}/fake-master-29"
+  local t29_team_dir="${t29_master_root}/synth-team-29"
+  mkdir -p "$t29_team_dir"
+  printf "# persona X\n" > "${t29_team_dir}/persona-x.md"
+
+  local t29_manifest="${tmp_t29}/personas-manifest.json"
+  cat > "$t29_manifest" <<T29_MANIFEST
+{
+  "schemaVersion": "1",
+  "masterRoot": "fake-master-29",
+  "deployments": [
+    {
+      "team": "synth-team-29",
+      "targetRepo": "${t29_container}",
+      "targetDir": ".claude/agents",
+      "isGitRepo": false,
+      "exists": true,
+      "groups": ["synth-team-29"]
+    }
+  ]
+}
+T29_MANIFEST
+
+  local _saved_manifest_29="$MANIFEST" _saved_master_root_29="$MASTER_ROOT" _saved_master_relative_29="$MASTER_RELATIVE"
+  MANIFEST="$t29_manifest"
+  MASTER_ROOT="$t29_master_root"
+  MASTER_RELATIVE="fake-master-29"
+
+  local t29_target="${t29_wt_path}/.claude/agents"
+  local t29_ok=true
+
+  # Client commits their own crew file directly into the worktree, BEFORE
+  # our tool ever touches this repo — matching the real XACA-1264
+  # mixed-state premise (client already committed some crew .md files).
+  # Order matters for this fixture: running our deploy first would add
+  # ".claude/agents/" to the inner repo's info/exclude (so our OWN deployed
+  # files don't show up as untracked noise), and `git add` on an
+  # already-ignored path is refused by git — an artifact of this test
+  # fixture's ordering, not of the real-world scenario the ticket targets.
+  mkdir -p "$t29_target"
+  printf "# client crew\n" > "${t29_target}/client-crew-t29.md"
+  git -C "$t29_wt_path" add .claude/agents/client-crew-t29.md >/dev/null 2>&1 || true
+  git -C "$t29_wt_path" -c user.email="c@c.com" -c user.name="C" \
+    commit -q -m "client adds their own crew file" >/dev/null 2>&1 || true
+
+  # A genuine orphan: not ours, not tracked by the client either.
+  printf "# stale\n" > "${t29_target}/old-orphan-t29.md"
+
+  # Single real run: deploys our one persona file AND exercises the orphan
+  # loop (client-tracked file left alone; genuine orphan pruned) in the
+  # same pass — closer to how sync-worktrees --prune is actually invoked.
+  local t29_out
+  t29_out=$(_kbsp_sync_worktrees synth-team-29 --prune 2>&1) || true
+
+  if [ ! -f "${t29_target}/persona-x.md" ]; then
+    t29_ok=false
+    _err "[selftest] Test 29: setup failed — persona-x.md was not deployed to $t29_target — output: $t29_out"
+  fi
+  if [ ! -f "${t29_target}/client-crew-t29.md" ]; then
+    t29_ok=false
+    _err "[selftest] Test 29: client-tracked file was REMOVED by --prune (this is the XACA-1292 defect) — output: $t29_out"
+  fi
+  if [ -f "${t29_target}/old-orphan-t29.md" ]; then
+    t29_ok=false
+    _err "[selftest] Test 29: genuine untracked orphan was NOT pruned — output: $t29_out"
+  fi
+  case "$t29_out" in
+    *"CLIENT-TRACKED"*"client-crew-t29.md"*) : ;;
+    *)
+      t29_ok=false
+      _err "[selftest] Test 29: expected a CLIENT-TRACKED notice for client-crew-t29.md — output: $t29_out"
+      ;;
+  esac
+  case "$t29_out" in
+    *"ORPHAN"*"client-crew-t29.md"*)
+      t29_ok=false
+      _err "[selftest] Test 29: client-tracked file was misreported as ORPHAN — output: $t29_out"
+      ;;
+    *) : ;;
+  esac
+
+  MANIFEST="$_saved_manifest_29"
+  MASTER_ROOT="$_saved_master_root_29"
+  MASTER_RELATIVE="$_saved_master_relative_29"
+  rm -rf "$tmp_t29"
+
+  if [ "$t29_ok" = true ]; then
+    _info "[selftest] PASS: Test 29 (client-tracked file survives --prune; genuine orphan still pruned)"
+    pass=$((pass + 1))
+  else
+    _err "[selftest] FAIL: Test 29 — see diagnostics above"
+    fail=$((fail + 1))
+  fi
 
   # --- Cleanup ---
   rm -rf "$tmp_repo"

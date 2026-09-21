@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1292** — `share/scripts/kb-sync-personas`: `--prune` no longer deletes a client's own
+  git-tracked crew `.md` files in mixed-state repos. Tracked files are reported
+  `CLIENT-TRACKED (not ours, left alone)` instead of ORPHAN; when git cannot answer, the file is
+  reported indeterminate and never pruned. `check` stops counting client files as drift; `--json`
+  gains additive `clientTracked` / `indeterminate` fields.
 - **XACA-1283-002** — Mirror `share/scripts/kb-compaction-quality-watch.sh`, the P=50 compaction
   quality-regression watch (canonical `scripts/kb-compaction-quality-watch.sh` in dev-team; design in
   its `docs/compaction-quality-watch.md`). Read-only: it scans `~/.claude/projects` transcripts and
