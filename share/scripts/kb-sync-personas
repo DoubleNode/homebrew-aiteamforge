@@ -451,6 +451,10 @@ _deploy_personas_to_one_target() {
         else
           git_state_rc=$?
         fi
+        # Tracked in a repo WE own = our retired persona, not a client file.
+        if [ "$git_state_rc" -eq 0 ] && _deployment_owns_tracked_files "$deploy_idx"; then
+          git_state_rc=1
+        fi
         if [ "$git_state_rc" -eq 0 ]; then
           # Tracked in the target's own repo — never ours to remove, even
           # under --prune, and never reported as ORPHAN.
@@ -941,6 +945,21 @@ _deployment_is_gitignored_personas() {
   fi
 
   return 0
+}
+
+# XACA-1292 (round 4): does this deployment OWN the git-tracked files in its
+# target dir? A tracked file we don't recognize means opposite things by owner:
+#   isGitRepo: true  — our own repo (academy, ios, …). We commit personas
+#                      there ourselves, so a tracked file missing from master
+#                      is a persona WE retired: a real ORPHAN, and --prune
+#                      must still remove it (the pre-XACA-1292 behavior).
+#   anything else    — a client-owned repo (freelance, isGitRepo: false) or a
+#                      missing/malformed field. A tracked file there is the
+#                      client's: CLIENT-TRACKED, never pruned.
+# Only the exact string "true" grants ownership; every other value falls to
+# the protective side. Pure exit status; call from conditional context.
+_deployment_owns_tracked_files() {
+  [ "$(_deploy_field "$1" "isGitRepo" 2>/dev/null)" = "true" ]
 }
 
 # XACA-1292: run git for a tracked/ignored PROBE with the repo-selecting
@@ -1701,6 +1720,10 @@ _kbsp_check() {
           else
             git_state_rc=$?
           fi
+          # Tracked in a repo WE own = our retired persona, not a client file.
+          if [ "$git_state_rc" -eq 0 ] && _deployment_owns_tracked_files "$i"; then
+            git_state_rc=1
+          fi
           if [ "$git_state_rc" -eq 0 ]; then
             # Tracked in the target's own repo — informational only. Never
             # added to drift_items, never flips team_status away from
@@ -2128,6 +2151,10 @@ _kbsp_sync() {
             git_state_rc=0
           else
             git_state_rc=$?
+          fi
+          # Tracked in a repo WE own = our retired persona, not a client file.
+          if [ "$git_state_rc" -eq 0 ] && _deployment_owns_tracked_files "$i"; then
+            git_state_rc=1
           fi
           if [ "$git_state_rc" -eq 0 ]; then
             # Tracked in the target's own repo — never ours to remove, even

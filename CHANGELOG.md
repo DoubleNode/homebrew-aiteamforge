@@ -25,6 +25,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   case only on APFS is no longer misread as untracked and pruned.
   Round 3: tracked/ignored probes run git with `GIT_DIR` & co. cleared, so an inherited `GIT_DIR`
   (git hooks) can no longer redirect the probe to another repo and let `--prune` delete a client file.
+  Round 4: the protection applies only to client-owned deployments (`isGitRepo` not exactly `true`);
+  in our own repos a tracked persona missing from master is our retired persona and stays prunable.
 - **XACA-1283-002** — Mirror `share/scripts/kb-compaction-quality-watch.sh`, the P=50 compaction
   quality-regression watch (canonical `scripts/kb-compaction-quality-watch.sh` in dev-team; design in
   its `docs/compaction-quality-watch.md`). Read-only: it scans `~/.claude/projects` transcripts and
