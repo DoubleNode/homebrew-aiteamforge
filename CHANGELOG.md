@@ -11,6 +11,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `CLIENT-TRACKED (not ours, left alone)` instead of ORPHAN; when git cannot answer, the file is
   reported indeterminate and never pruned. `check` stops counting client files as drift; `--json`
   gains additive `clientTracked` / `indeterminate` fields.
+  Round 2: the tracked probe is case-insensitive (`:(literal,icase)`), so a client file renamed by
+  case only on APFS is no longer misread as untracked and pruned.
 - **XACA-1283-002** — Mirror `share/scripts/kb-compaction-quality-watch.sh`, the P=50 compaction
   quality-regression watch (canonical `scripts/kb-compaction-quality-watch.sh` in dev-team; design in
   its `docs/compaction-quality-watch.md`). Read-only: it scans `~/.claude/projects` transcripts and

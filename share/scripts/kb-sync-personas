@@ -1022,7 +1022,15 @@ _target_file_git_state() {
     return 1
   fi
 
-  if git -C "$dir" ls-files --error-unmatch -- ":(literal)${bname}" >/dev/null 2>&1; then
+  # `icase` as well as `literal`: on a case-insensitive filesystem (macOS
+  # default, core.ignorecase=true) a client file can sit on disk as
+  # `crew.md` while the index records `Crew.md` (a case-only rename done
+  # outside `git mv`). A case-sensitive probe answers rc=1 "untracked" for
+  # it and hands the client's file to --prune. MEASURED git 2.54 / APFS:
+  # `:(literal)crew.md` -> rc=1, `:(literal,icase)crew.md` -> rc=0. Erring
+  # toward "tracked" is the safe direction here — the worst case is a real
+  # orphan left in place, never a client file deleted.
+  if git -C "$dir" ls-files --error-unmatch -- ":(literal,icase)${bname}" >/dev/null 2>&1; then
     rc=0
   else
     rc=$?
