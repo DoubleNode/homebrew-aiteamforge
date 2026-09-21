@@ -230,6 +230,67 @@ def parse_address(addr):
 
 
 # ---------------------------------------------------------------------------
+# XACA-1296-017: Space Dock scope banner
+# ---------------------------------------------------------------------------
+#
+# docs/spacedock-board-hygiene.md "Intake from outside this machine" (decided
+# for XACA-1296-017, option A): work arriving at Space Dock from outside this
+# machine is DELIVERED, never refused, but carries a scope banner reminding
+# the crew that Space Dock handles only this machine's local state and
+# anything wider escalates to Academy. Delivery itself is never touched by
+# this — the banner is display-only, computed fresh at read time from the
+# stored record; _append_record/ingest/_build_record above are untouched.
+
+_SPACEDOCK_TEAM = "spacedock"
+
+_SCOPE_BANNER_TEMPLATE = (
+    "⚠ SCOPE (XACA-1296): this request came from {source}. Space Dock "
+    "handles only THIS machine's local state — if it needs a code "
+    "change, involves another team, or applies to more than one machine, "
+    "sisko-sd escalates it to Academy (docs/spacedock-board-hygiene.md rule 4)."
+)
+
+
+def _spacedock_scope_banner(rec, recipient_team):
+    """Return the scope-banner text for this record, or None if none applies.
+
+    Applies only when the RECIPIENT is spacedock. Within that, a banner is
+    shown when the message provably came from outside this machine's
+    spacedock team (origin == "relay", i.e. another machine, OR from_team !=
+    "spacedock", i.e. another team on this same machine) -- and ALSO when the
+    provenance fields are missing or not a recognized shape. Failing toward
+    the banner on unparseable provenance is deliberate: an unparseable
+    origin/sender is exactly the case where the crew most needs the caution,
+    not a case to silently wave through as if it were confirmed local.
+
+    Never raises: this is called from display paths (inbox/read) and must
+    never turn a corrupt or partial record into a crashed inbox listing.
+    """
+    if recipient_team != _SPACEDOCK_TEAM:
+        return None
+    if not isinstance(rec, dict):
+        return _SCOPE_BANNER_TEMPLATE.format(source="an unverified origin")
+
+    origin = rec.get("origin")
+    from_team = rec.get("from_team")
+
+    if origin == "relay":
+        return _SCOPE_BANNER_TEMPLATE.format(source="another machine")
+
+    if origin == "local":
+        if isinstance(from_team, str) and from_team == _SPACEDOCK_TEAM:
+            return None  # same-machine spacedock -> spacedock: no banner
+        if isinstance(from_team, str) and from_team:
+            return _SCOPE_BANNER_TEMPLATE.format(source=f"team {from_team}")
+        # local origin but sender team missing/malformed -- fail toward caution
+        return _SCOPE_BANNER_TEMPLATE.format(source="an unverified sender")
+
+    # origin missing, None, or any value other than "local"/"relay" -- fail
+    # toward caution rather than assuming it is safely local.
+    return _SCOPE_BANNER_TEMPLATE.format(source="an unverified origin")
+
+
+# ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
 
@@ -335,7 +396,15 @@ def cmd_inbox(args):
     if not args.all:
         records = [r for r in records if not r.get("read_at")]
     if args.json:
-        print(json.dumps(records))
+        # scope_banner is computed fresh for display only -- it is never
+        # written back to the stored JSONL (this list came from _read_jsonl
+        # above and locked_update/_append_record are not invoked here).
+        out = []
+        for r in records:
+            copy = dict(r)
+            copy["scope_banner"] = _spacedock_scope_banner(r, args.team)
+            out.append(copy)
+        print(json.dumps(out))
         return
     if not records:
         return  # print nothing on an empty inbox (no noise)
@@ -346,6 +415,9 @@ def cmd_inbox(args):
         if len(body) > 100:
             body = body[:97] + "..."
         print(f"{flag} [{r.get('id','')[:8]}] {r.get('created_at','')}  {frm}\n    {body}")
+        banner = _spacedock_scope_banner(r, args.team)
+        if banner:
+            print(f"    {banner}")
 
 
 def cmd_unread_count(args):
@@ -374,8 +446,14 @@ def cmd_read(args):
         print(json.dumps({"ok": False, "error": "not found"}))
         sys.exit(1)
     r = matched["rec"]
+    # Computed fresh for display only, same as cmd_inbox -- never written
+    # back into the stored record (r is the dict handed back from the
+    # locked_update closure above, already persisted before this point).
+    banner = _spacedock_scope_banner(r, args.team)
     if args.json:
-        print(json.dumps(r))
+        out = dict(r)
+        out["scope_banner"] = banner
+        print(json.dumps(out))
     else:
         frm = f"{r.get('from_team','?')}:{r.get('from_terminal','?')}"
         print(f"From: {frm}")
@@ -384,6 +462,9 @@ def cmd_read(args):
         print(f"Thread: {r.get('thread_id','')[:8]}")
         print("")
         print(r.get("body", ""))
+        if banner:
+            print("")
+            print(banner)
 
 
 def cmd_who(args):

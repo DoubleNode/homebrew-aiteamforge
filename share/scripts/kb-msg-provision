@@ -808,6 +808,30 @@ INSTANCE_TO_TEMPLATE = {
     "medical-general":   "medical",
 }
 
+# XACA-1296 (G6). Teams that are, BY DESIGN, tier-4-forever: see
+# kanban-hooks/aiteamforge_paths.py:402-419 for spacedock's own comment —
+# `primary_host` is deliberately absent because it is a default, LOCAL-ONLY,
+# PER-MACHINE team on every install, not a single-authority team that has
+# simply never been classified yet. Declaring a `primary_host` for it would
+# suppress its LCARS on every other host (XACA-1063); it must NEVER be added
+# there, so this tool can never read one for spacedock and _classify_team()
+# will always resolve it via the tier-4 board-file bootstrap path.
+#
+# XACA-1078-003's --unattended deferral of tier-4-only classifications exists
+# to stop a STALE regenerated board stub from making a team that migrated
+# AWAY look resident on a machine it no longer lives on (see local_teams()'s
+# docstring). That risk assumes some other machine could be the "real" owner
+# — structurally impossible for a team that never has a primary_host and
+# never migrates. For spacedock, tier-4-with-a-local-board IS the authority,
+# not a guess pending one, so deferring it is simply wrong: no automatic
+# caller (the tap installer, `aiteamforge upgrade`) ever runs
+# `--add-team spacedock`, so "deferred" here meant "never written
+# automatically" — measured 2026-09-21: M4Mini's team-machines.json (18
+# keys, all unattended-provisioned) has no spacedock self-entry despite a
+# local board, while M1Mini's (provisioned via a manual/attended run before
+# XACA-1078-003 existed) does. This allowlist is what makes both paths agree.
+PER_MACHINE_ALWAYS_LOCAL_TEAMS = {"spacedock"}
+
 
 def with_aliases(teams):
     """Every id a sender might legitimately use for these teams."""
@@ -990,6 +1014,16 @@ def local_teams_by_tier(slug, routing_map):
     tier 4 is a contemporaneous observation of the very team-creation call in
     progress, not archaeology on someone else's leftovers.
 
+    XACA-1296 (G6) carves out a SECOND exemption, alongside --add-team:
+    PER_MACHINE_ALWAYS_LOCAL_TEAMS (see its own comment). Those teams are
+    tier-4 not because no authority has classified them YET, but because no
+    authority ever will — they have no primary_host by design and never
+    migrate, so a local board is never "someone else's leftover" the way
+    XACA-1078-003's deferral rule assumes. Counting them in `authoritative`
+    despite `tier == 4` keeps a full --unattended run (the tap installer,
+    `aiteamforge upgrade`) from deferring their self-entry forever, since no
+    automatic caller ever runs --add-team for them either.
+
     Returns (authoritative, tier4_only, unknown, foreign) — `unknown` and
     `foreign` are identical to local_teams()'s own buckets; deliberately NOT
     used by a plain (non-unattended) run, which keeps calling local_teams()
@@ -1007,7 +1041,8 @@ def local_teams_by_tier(slug, routing_map):
         if bucket == "skip":
             continue
         elif bucket == "local":
-            (authoritative if tier in (2, 3) else tier4_only).append(name)
+            is_authoritative = tier in (2, 3) or name in PER_MACHINE_ALWAYS_LOCAL_TEAMS
+            (authoritative if is_authoritative else tier4_only).append(name)
         elif bucket == "unknown":
             unknown.append(name)
         elif bucket == "foreign":
