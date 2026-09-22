@@ -23426,9 +23426,30 @@ _kb_msg_doctor() {
         hook_cmd="bash $consumer_hook_script"
     fi
     if [[ -n "$reg" ]] && command -v python3 >/dev/null 2>&1; then
+        # Deploy-source awareness (same rule as setup-hooks.sh). On a dev
+        # checkout whose deploy-to-production.sh maps a tracked settings file
+        # onto ~/.claude/settings.json, a registration present ONLY in the live
+        # file is removed by the next settings deploy — measured on M3Pro on
+        # 2026-09-17, after which mail went unsurfaced for four days while this
+        # row would have read [ok]. So when that mapping exists and its source
+        # file does, the hook must be registered there too to count as ok.
+        local deploy_src=""
+        if [[ -n "$setup_script" && -f "$fix_base/deploy-to-production.sh" ]]; then
+            deploy_src="$(awk '$1 == "deploy_file" && $3 == "~/.claude/settings.json" { print $2; exit }' \
+                "$fix_base/deploy-to-production.sh" 2>/dev/null)"
+            case "$deploy_src" in "~/"*) deploy_src="$HOME/${deploy_src#\~/}" ;; esac
+            [[ -f "$deploy_src" ]] || deploy_src=""
+        fi
         if python3 "$reg" --check --quiet --event SessionStart --event Stop \
                    --command "$hook_cmd" >/dev/null 2>&1; then
-            _kb_msg_row "[ok]" "inbox hook" "registered on SessionStart + Stop"
+            if [[ -n "$deploy_src" ]] && ! python3 "$reg" --check --quiet --event SessionStart --event Stop \
+                       --command "$hook_cmd" --settings "$deploy_src" >/dev/null 2>&1; then
+                _kb_msg_row "[GAP]" "inbox hook" "registered in live settings only — the next deploy removes it"
+                _kb_msg_cont "tracked source $deploy_src lacks it; fix: bash $setup_script, then commit"
+                gaps=$((gaps + 1))
+            else
+                _kb_msg_row "[ok]" "inbox hook" "registered on SessionStart + Stop"
+            fi
         elif [[ -n "$setup_script" ]]; then
             # Genuinely operator-actionable: setup-hooks.sh closes it. Stays
             # [GAP] — it is not reclassified merely to make the exit greener.

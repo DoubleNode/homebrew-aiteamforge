@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **`kb-msg doctor`: a live-only inbox-hook registration on a dev checkout is now `[GAP]`, not `[ok]`.**
+  `share/templates/kanban/kanban-helpers.template.sh`: mirror of the canonical `_kb_msg_doctor` change
+  (byte-identical; divergence ratchet unchanged). When the checkout's `deploy-to-production.sh` maps a
+  tracked settings file onto `~/.claude/settings.json` and that file exists, the hook must be registered
+  there too. Otherwise the next settings deploy removes it (measured 2026-09-17). Inert on consumer installs,
+  which have no deploy script.
 - **XACA-1285** — `share/scripts/kb-pr-monitor`: drops the startup seed that stalled
   pre-approved PRs. The seed used an unfiltered "latest review per bot" query with
   no `commit_id`/freshness check, so a PR where both gate bots had already approved
