@@ -252,6 +252,15 @@ else
   # dependency (grep -E + sed are POSIX and present on every fleet machine).
   # Prints nothing (fails closed) when the field is absent or the file is
   # unreadable/malformed; the caller decides what that means.
+  # XACA-1297-016: FIRST MATCH IN FILE ORDER, not JSON-aware. `grep -o` finds
+  # the field on minified single-line JSON too, but a NESTED key with the same
+  # name that appears before the top-level one wins. Direction of that error:
+  # a nested "name" in front of the real one makes a genuine install fail the
+  # exact-name check (rejected, rc=2 -- fail-closed). A decoy nested
+  # "@anthropic-ai/claude-code" in front of a different top-level name could
+  # mislabel discovery, but the binary is still judged by A0-A6 on its own
+  # bytes, so that cannot become a false PASS. On all 3 tap machines the first
+  # "name"/"version" matches ARE the top-level ones (measured 2026-09-22).
   _pkg_json_field() {
     _pjf_file="$1"; _pjf_field="$2"
     [ -f "$_pjf_file" ] && [ -r "$_pjf_file" ] || return 1
