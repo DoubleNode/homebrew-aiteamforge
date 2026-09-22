@@ -1647,22 +1647,96 @@ fi
 # validate reports it, and the auto-commit refuses to commit INTO a
 # collision (hold reason slot-collision), so the daemon never manufactures a
 # committed one either.
+# XACA-1291-024 (live performance defect, first real tick post-merge,
+# 2026-09-22): the per-file `while read ... | sed -n '...'` shape above
+# forked TWO processes (a `printf` subshell + a `sed`) per candidate file.
+# Measured live against the real ~/knowledge (2,301 .md files) on M-series
+# hardware at LaunchAgent Nice 15 / LowPriorityIO: still inside this loop
+# 7+ minutes after the tick's commit landed, sampled mid-stall waiting on
+# the per-file sed forks. `_check_dup_slots` runs at up to 3 call sites per
+# tick (successful clean-rebase integration, successful dirty fast-forward,
+# and again for the same two paths further down), so the fork storm could
+# repeat multiple times in one tick.
+#
+# Replaced with a SINGLE awk process reading `git ls-tree`'s output once,
+# doing the basename/dir split and the slot-prefix match inline (POSIX
+# awk only — match()/substr(), no gawk-only 3-arg match() or {n,m} interval
+# needed, so this runs unmodified under macOS's /usr/bin/awk, the "one true
+# awk" derivative the LaunchAgent actually executes under). Semantics are
+# byte-identical to the old per-file loop (proven by
+# tests/test-xaca-1291-dup-slots-perf-equivalence.sh, which keeps the retired
+# implementation as a literal reference and diffs both against fixtures AND
+# a read-only clone of the real ~/knowledge):
+#   - only *.md files, INDEX.md excluded
+#   - dir = the path up to the last "/", prefixed with "$REPO_DIR/" exactly
+#     as before (so collision output text is unchanged)
+#   - slot = the leading lowercase-letter + THREE-OR-MORE-digit prefix
+#     immediately before a literal "-" (k004, t001, k1000, … — XACA-1155's
+#     "3 digits or more", not exactly 3)
+#   - identical collision line format: "<dir>  slot=<slot>  collides:
+#     <first> + <this>"
+#
+# NUL-delimited, quoting-proof (XACA-1291-025). An earlier revision of this
+# rewrite read `git ls-tree -r --name-only HEAD` WITHOUT -z, reasoning that
+# the allocator's slug grammar keeps every legitimate name plain ASCII. That
+# was the wrong premise: the grammar constrains the BASENAME, not the
+# directory (agents/zoë/…), and it constrains the allocator, not a hand-made
+# or cross-host file. Without -z git C-quotes any path containing non-ASCII
+# bytes (core.quotePath, default true), `"` or `\` — e.g. "agents/zo\303\253/
+# k001-a.md", WITH the surrounding quotes — so the quoted form fails the slot
+# match and the file vanishes from the scan. Measured on the equivalence
+# suite's PART D fixture: -z finds all 6 collisions, the non-z version 1 (4
+# with core.quotePath=false), so the daemon would push a duplicate onward
+# instead of exiting 65. With -z, git emits the raw bytes and
+# core.quotePath has no effect at all.
+#
+# NUL -> record separator: POSIX awk (and macOS's /usr/bin/awk) cannot use
+# NUL as RS, so `tr '\n\0' '\001\n'` first maps any literal NEWLINE inside a
+# path to \001, then each NUL terminator to a newline. The one path shape
+# that would otherwise be lost — a filename containing a newline — therefore
+# stays ONE record, keeps its dir/slot, and is counted like any other file
+# (conservative: it can only ADD a collision, never hide one or split into a
+# phantom second record). It is displayed with "\n" in place of the byte.
+# (The retired per-file loop silently skipped such a basename; this is a
+# deliberate strict improvement, pinned by the equivalence suite's
+# newline case.) A genuine \001 byte in a path displays as "\n" too —
+# cosmetic only; grouping uses the unmodified bytes.
+# LC_ALL=C makes awk byte-oriented: no multibyte decoding of non-UTF-8 names,
+# and [a-z] means exactly ASCII a-z whatever the host locale.
 _check_dup_slots() {
     _DUP_SLOTS_FOUND="$(
         git -C "$REPO_DIR" ls-tree -r -z --name-only HEAD 2>/dev/null \
-        | while IFS= read -r -d '' _f; do
-            # suffix test, not a case pattern: bash 3.2 misparses one in here
-            [ "${_f%.md}" != "$_f" ] || continue
-            _f="$REPO_DIR/$_f"
-            _d="${_f%/*}"; _b="${_f##*/}"
-            [ "$_b" = "INDEX.md" ] && continue
-            # slot key = leading lowercase prefix + THREE-OR-MORE digits (k004, t001,
-            # k1000, …). XACA-1155: this was exactly 3 digits, so a cross-host
-            # collision on any slot past k999 was invisible here and got pushed.
-            _slot="$(printf '%s\n' "$_b" | sed -n 's/^\([a-z][a-z]*[0-9][0-9][0-9][0-9]*\)-.*\.md$/\1/p')"
-            [ -n "$_slot" ] && printf '%s\t%s\t%s\n' "$_d" "$_slot" "$_b"
-          done \
-        | awk -F'\t' '{ key=$1 "\t" $2; c[key]++; if (c[key]==1) { first[key]=$3 } else { print $1 "  slot=" $2 "  collides: " first[key] " + " $3 } }'
+        | tr '\n\0' '\001\n' \
+        | LC_ALL=C awk -v repo="$REPO_DIR" '
+            BEGIN { nl = sprintf("%c", 1) }
+            {
+                path = $0
+                slash = 0
+                for (i = length(path); i >= 1; i--) {
+                    if (substr(path, i, 1) == "/") { slash = i; break }
+                }
+                if (slash > 0) {
+                    dir  = repo "/" substr(path, 1, slash - 1)
+                    base = substr(path, slash + 1)
+                } else {
+                    dir  = repo
+                    base = path
+                }
+                if (base !~ /\.md$/) next
+                if (base == "INDEX.md") next
+                if (!match(base, /^[a-z]+[0-9][0-9][0-9]+-/)) next
+                slot = substr(base, 1, RLENGTH - 1)
+                key = dir "\t" slot
+                c[key]++
+                if (c[key] == 1) {
+                    first[key] = base
+                } else {
+                    line = dir "  slot=" slot "  collides: " first[key] " + " base
+                    gsub(nl, "\\n", line)
+                    print line
+                }
+            }
+        '
     )"
 }
 

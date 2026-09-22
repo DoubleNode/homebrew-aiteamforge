@@ -13,6 +13,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Claude Code docs define it, a dangling settings symlink is UNKNOWN, and `--retention-days` uses
   an `is not None` check (023). `fleet-monitor/server/config/token-oauth-accounts.json`: per-machine
   provenance strings, with a node test (024).
+- **XACA-1291** (follow-up, dev-team PR #953) — `share/scripts/kb-knowledge-sync.sh`:
+  - `_check_dup_slots` is now a single NUL-safe `awk` pass instead of one `sed` fork per file
+    (~2,300 forks on a real knowledge repo; a live tick took ~12 minutes). Measured 8.6s → 0.04s,
+    with identical output, and it no longer misses C-quoted or newline-bearing paths.
 - **XACA-1300** — fix round for PR #952. Mirrors from dev-team: `share/scripts/kb-token-report` (retention
   resolved from managed/user/user-local settings with `coverage.retention_source`; unknown retention exits
   4; zero boards is `tickets.state:"no_boards"`), and under `fleet-monitor/server/`:
