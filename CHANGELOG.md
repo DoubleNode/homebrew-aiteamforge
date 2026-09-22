@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1300** — fleet collection of weekly token aggregates (Part B2). Mirrors from dev-team:
+  `scripts/kb-token-report` → `share/scripts/kb-token-report` (new), `fleet-monitor/client/fleet-reporter.sh`
+  → `share/scripts/fleet-reporter.sh` (`send_token_reports()`), and under `fleet-monitor/server/`:
+  `server.js`, `package.json`, new `lib/token-reports-routes.js` (API-key-gated GET endpoints),
+  new `config/token-oauth-accounts.json`, new `tests/xaca-1300-003-token-reports.test.js`. Tap-only:
+  `aiteamforge-upgrade.sh` adds `kb-token-report` to `_xaca0673_mandatory_materialize_basenames()` and
+  lists it explicitly in `update_runtime_helpers`' sweep loop (extensionless, like `kb-pr-monitor`), so
+  already-installed boxes receive it on upgrade. New `tests/test-xaca-1300-token-report-materialize.sh`.
 - **XACA-0870** — LCARS Usage Monitor: the BY MODEL section gains a stacked-bar chart of each model
   tier's share of spend (TODAY / 7-DAY toggle, exact-percent legend, HTML hover tooltip) above the
   unchanged numeric table. Mirrors `lcars-ui/index.html`, `lcars-ui/css/usage-indicator.css`

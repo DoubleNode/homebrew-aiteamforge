@@ -1,0 +1,986 @@
+#!/usr/bin/env python3
+# ============================================================================
+# kb-token-report — per-machine weekly token aggregate (XACA-1300-002)
+# ============================================================================
+# Reads this machine's Claude Code transcripts (~/.claude/projects) and emits
+# ONE weekly aggregate record: summable token rows by account / team / model /
+# role (main vs subagent) / session class / agent type / UTC day, plus tokens
+# per completed ticket and fresh-session first-turn context.
+#
+# AUTHORITATIVE DESIGN: kanban/plans/XACA-1300/XACA-1300-001_schema.md
+# (schema_version 1). Read it before changing anything here. The short
+# version of the rules this file implements:
+#
+# DEDUP (design §0, normative). Claude Code writes one `type:"assistant"`
+#   line PER CONTENT BLOCK, each carrying the same message.id and a copy of
+#   message.usage. Summing per line overcounts ~2x. Usage is keyed by
+#   (transcript file, message.id) and the LAST occurrence wins (only
+#   output_tokens changes across repeats, and it only grows). The week/day
+#   of a message is taken from that same last line's top-level `timestamp`
+#   (never file mtime).
+#
+# CLASSIFIER (design §2). One class per MAIN session, first match wins:
+#   gate (title / kb-run-* prompt opener) > ticket (title / kb-run task
+#   prompt / worktree cwd / gitBranch) > scheduled (first user record carries
+#   scheduledTaskId|cron, or majority entrypoint sdk-cli outside a temp dir)
+#   > other. Subagents INHERIT the parent's class, ticket, team and account;
+#   their own sidecar agentType is a separate dimension.
+#
+# ATTRIBUTION (design §3). Last row of ~/.claude/.session-account-map.jsonl
+#   for the session wins. account_resolved:true -> account_id, or
+#   `default-oauth` when account_id is empty. Anything else is an explicit
+#   `unattributed:*` bucket and is never folded into an account.
+#
+# DAY DIMENSION (orchestrator decision on design open question 4). Records
+#   stay keyed by ISO week in UTC, but every row carries a UTC `day`
+#   (YYYY-MM-DD). Retention is 30 days, so these records ARE the long-term
+#   history; the day dimension lets a later reader re-bucket them to each
+#   account's cap-reset week without the raw transcripts.
+#
+# OAUTH HASH -> ACCOUNT (design open question 1). The record carries
+#   coverage.default_oauth_account_hash (sha256[:8] of ~/.claude.json
+#   oauthAccount.accountUuid). This script does NOT invent a mapping. An
+#   OPTIONAL operator-maintained file (--oauth-account-map, default
+#   ~/.aiteamforge/oauth-account-map.json, ABSENT by default) of the shape
+#   {"<hash8>": "<account_id>"} adds coverage.default_oauth_account_id. It
+#   is a label only: rows keep `default-oauth` so the fleet rollup (003)
+#   owns the fold. Absent file -> the field is null. Present but unreadable
+#   -> exit 3 (never a silent null).
+#
+# PRIVACY. Aggregates only. Message text, prompts, titles and file contents
+#   are read in memory for classification and never written to any output.
+#   Tests assert no fixture text leaks into --json.
+#
+# FAIL-CLOSED (design §7). A collected zero is data; absence is not zero.
+#   - projects dir missing/unreadable ................ exit 2, no record
+#   - transcript unreadable .......................... exit 3 (or
+#       --allow-partial: complete:false, final:false forced)
+#   - unparseable JSON line .......................... counted; a file where
+#       they exceed 1% of lines is treated as unreadable. A single torn FINAL
+#       line (live session mid-write) is counted but does not trip the 1%
+#       rule — that is the case the tolerance exists for.
+#   - usage dict missing a core field / non-integer .. exit 3, never 0
+#   - assistant usage without message.id ............. counted undeduped, exit 3
+#   - assistant usage without a timestamp ............ exit 3 (cannot be
+#       assigned to a week; never guessed from mtime)
+#   - session-account map missing .................... every session is
+#       unattributed:map_missing, map_state "missing", stderr warning
+#   - map unreadable ................................. exit 3
+#   - map rows unparseable ........................... map_state "partial"
+#   - board unreadable ............................... tickets.state "error",
+#       tickets.items null (never an empty list that reads as zero)
+#   - team-paths.json missing ........................ team "unknown",
+#       tickets.state "unavailable"; unreadable/invalid -> exit 3
+#   - subagent whose parent file is absent ........... class "other",
+#       counted in coverage.orphan_subagents
+#   - week before the recompute window ............... exit 4 (refuses to
+#       produce a partial record that could overwrite good history)
+#
+# EXIT CODES (sibling convention, scripts/kb-gate-round-stats):
+#   0  record produced
+#   1  usage error (bad flag / bad --week)
+#   2  environment: projects dir missing or unreadable
+#   3  data unreadable / malformed (see above); no record on stdout
+#   4  refused: week is outside the recompute window
+#
+# Usage:
+#   scripts/kb-token-report [--week YYYY-Www|last|current] [--json]
+#   scripts/kb-token-report --help
+#
+# XACA-1300-002
+# ============================================================================
+
+import argparse
+import datetime as dt
+import glob
+import hashlib
+import json
+import math
+import os
+import re
+import socket
+import statistics
+import subprocess
+import sys
+
+SCRIPT_NAME = "kb-token-report"
+SCHEMA_VERSION = 1
+GENERATOR_VERSION = "1"
+
+EXIT_OK = 0
+EXIT_USAGE = 1
+EXIT_ENV = 2
+EXIT_DATA = 3
+EXIT_REFUSED = 4
+
+CORE = (
+    ("input", "input_tokens"),
+    ("output", "output_tokens"),
+    ("cache_creation", "cache_creation_input_tokens"),
+    ("cache_read", "cache_read_input_tokens"),
+)
+SYNTHETIC_MODEL = "<synthetic>"
+
+TICKET = r"([A-Z][A-Z0-9]{1,7}-\d{3,5})"
+RX_GATE_TITLE = re.compile(r"^\[(Review|Test|UX)\]\s+" + TICKET)
+RX_DEBUG_TITLE = re.compile(r"^\[Debug\]\s+" + TICKET)
+RX_TASK_TITLE = re.compile(r"^" + TICKET + r":")
+RX_P_REVIEW = re.compile(r"^You are reviewing a Pull Request for kanban item \[" + TICKET + r"\]")
+RX_P_TEST = re.compile(r"^You are QA testing a Pull Request for kanban item \[" + TICKET + r"\]")
+RX_P_UX = re.compile(
+    r"^You are the UX expert conducting a UX/UI evaluation of a Pull Request for kanban item \["
+    + TICKET + r"\]")
+RX_P_TASK = re.compile(r"^Build a todo list to accomplish this task:\s*## Task ID: " + TICKET)
+RX_WT = re.compile(r"/worktrees/([a-z][a-z0-9]{1,7}-\d{3,5})(?:/|$)")
+RX_BR = re.compile(r"^(?:feature|bugfix|refactor|hotfix|chore)/([a-z][a-z0-9]{1,7}-\d{3,5})", re.I)
+RX_TMP_CWD = re.compile(r"^(/tmp|/private/tmp|/var/folders|/private/var/folders)(/|$)")
+RX_WEEK = re.compile(r"^(\d{4})-W(\d{2})$")
+
+UNPARSEABLE_FILE_THRESHOLD = 0.01
+
+
+class DataError(Exception):
+    """Unrecoverable data problem -> exit 3."""
+
+
+def warn(msg):
+    print("%s: WARNING: %s" % (SCRIPT_NAME, msg), file=sys.stderr)
+
+
+def die(code, msg):
+    print("%s: ERROR: %s" % (SCRIPT_NAME, msg), file=sys.stderr)
+    sys.exit(code)
+
+
+def iso_z(t):
+    return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_ts(s):
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        t = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=dt.timezone.utc)
+    return t.astimezone(dt.timezone.utc)
+
+
+def week_bounds(label):
+    m = RX_WEEK.match(label)
+    if not m:
+        return None
+    try:
+        d = dt.date.fromisocalendar(int(m.group(1)), int(m.group(2)), 1)
+    except ValueError:
+        return None
+    start = dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc)
+    return start, start + dt.timedelta(days=7)
+
+
+def week_label(t):
+    y, w, _ = t.isocalendar()
+    return "%04d-W%02d" % (y, w)
+
+
+def nearest_rank(sorted_vals, q):
+    """Nearest-rank percentile on an already-sorted list."""
+    if not sorted_vals:
+        return None
+    k = max(1, int(math.ceil(q * len(sorted_vals))))
+    return sorted_vals[k - 1]
+
+
+def num(v):
+    """Median of ints can be x.5; keep ints as ints for byte-stable JSON."""
+    if v is None:
+        return None
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    return v
+
+
+def stats(vals):
+    vals = sorted(vals)
+    if not vals:
+        return {"n": 0, "median": None, "p90": None, "min": None, "max": None}
+    return {
+        "n": len(vals),
+        "median": num(statistics.median(vals)),
+        "p90": nearest_rank(vals, 0.9),
+        "min": vals[0],
+        "max": vals[-1],
+    }
+
+
+def empty_tokens():
+    return {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0, "total": 0}
+
+
+def add_tokens(acc, u):
+    for short, _ in CORE:
+        acc[short] += u[short]
+    acc["total"] = acc["input"] + acc["output"] + acc["cache_creation"] + acc["cache_read"]
+
+
+# ---------------------------------------------------------------------------
+# Transcript scanning
+# ---------------------------------------------------------------------------
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content
+                       if isinstance(b, dict) and b.get("type") == "text"
+                       and isinstance(b.get("text"), str))
+    return ""
+
+
+class FileScan(object):
+    __slots__ = ("path", "unreadable", "lines", "unparseable", "torn_final",
+                 "usage", "order", "malformed", "no_id", "no_ts", "assistant_lines",
+                 "entrypoints", "titles", "first_prompt", "cwd", "branch",
+                 "sched_first", "seen_first_user", "first_parent", "first_uuid_seen")
+
+    def __init__(self, path):
+        self.path = path
+        self.unreadable = None
+        self.lines = 0
+        self.unparseable = 0
+        self.torn_final = False
+        self.usage = {}      # key -> (ts, model, tokens-dict)
+        self.order = []      # first-seen order of keys
+        self.malformed = 0
+        self.no_id = 0
+        self.no_ts = 0
+        self.assistant_lines = 0
+        self.entrypoints = {}
+        self.titles = []
+        self.first_prompt = ""
+        self.cwd = ""
+        self.branch = ""
+        self.sched_first = False
+        self.seen_first_user = False
+        self.first_parent = "unset"
+        self.first_uuid_seen = False
+
+
+def valid_usage(u):
+    if not isinstance(u, dict):
+        return None
+    out = {}
+    for short, key in CORE:
+        v = u.get(key)
+        # bool is an int subclass; a boolean is not a token count.
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            return None
+        out[short] = v
+    return out
+
+
+def scan_file(path, want_classifier):
+    fs = FileScan(path)
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as e:
+        fs.unreadable = type(e).__name__
+        return fs
+    lines = raw.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+    last_idx = len(lines) - 1
+    for idx, bline in enumerate(lines):
+        if not bline.strip():
+            continue
+        fs.lines += 1
+        try:
+            o = json.loads(bline.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            fs.unparseable += 1
+            if idx == last_idx:
+                fs.torn_final = True
+            continue
+        if not isinstance(o, dict):
+            fs.unparseable += 1
+            continue
+        t = o.get("type")
+        msg = o.get("message") if isinstance(o.get("message"), dict) else {}
+        if t == "assistant" and "usage" in msg:
+            fs.assistant_lines += 1
+            u = valid_usage(msg.get("usage"))
+            if u is None:
+                fs.malformed += 1
+            else:
+                ts = parse_ts(o.get("timestamp"))
+                if ts is None:
+                    fs.no_ts += 1
+                mid = msg.get("id")
+                if not isinstance(mid, str) or not mid:
+                    fs.no_id += 1
+                    key = ("<no-id>", idx)
+                else:
+                    key = mid
+                if key not in fs.usage:
+                    fs.order.append(key)
+                model = msg.get("model")
+                if not isinstance(model, str) or not model:
+                    model = "<no-model>"
+                fs.usage[key] = (ts, model, u)
+        if not want_classifier:
+            if not fs.cwd and isinstance(o.get("cwd"), str):
+                fs.cwd = o["cwd"]
+            continue
+        if "uuid" in o and not fs.first_uuid_seen:
+            fs.first_uuid_seen = True
+            fs.first_parent = o.get("parentUuid")
+        ep = o.get("entrypoint")
+        if isinstance(ep, str) and ep:
+            fs.entrypoints[ep] = fs.entrypoints.get(ep, 0) + 1
+        if t == "custom-title" and isinstance(o.get("customTitle"), str) and o["customTitle"]:
+            fs.titles.append(o["customTitle"])
+        if not fs.cwd and isinstance(o.get("cwd"), str):
+            fs.cwd = o["cwd"]
+        if not fs.branch and isinstance(o.get("gitBranch"), str):
+            fs.branch = o["gitBranch"]
+        if t == "user" and not fs.seen_first_user:
+            fs.seen_first_user = True
+            if o.get("scheduledTaskId") or o.get("cron"):
+                fs.sched_first = True
+        if (t == "user" and not fs.first_prompt and not o.get("isMeta")
+                and not o.get("toolUseResult")):
+            tx = text_of(msg.get("content"))
+            if tx.strip():
+                # Held in memory for regex matching only; never emitted.
+                fs.first_prompt = tx.lstrip()[:400]
+    # >1% unparseable (a lone torn final line excused) -> unreadable.
+    excess = fs.unparseable - (1 if fs.torn_final else 0)
+    if fs.lines and excess > 0 and excess > UNPARSEABLE_FILE_THRESHOLD * fs.lines:
+        fs.unreadable = "unparseable>1%"
+    return fs
+
+
+def classify(fs):
+    """Returns (session_class, signal, ticket_id). Design §2."""
+    for ti in fs.titles:
+        m = RX_GATE_TITLE.match(ti)
+        if m:
+            return "gate", "title:" + m.group(1).lower(), m.group(2)
+    fp = fs.first_prompt
+    for name, rx in (("review", RX_P_REVIEW), ("test", RX_P_TEST), ("ux", RX_P_UX)):
+        m = rx.match(fp)
+        if m:
+            return "gate", "prompt:" + name, m.group(1)
+    for ti in fs.titles:
+        m = RX_TASK_TITLE.match(ti) or RX_DEBUG_TITLE.match(ti)
+        if m:
+            return "ticket", "title", m.group(1)
+    m = RX_P_TASK.match(fp.replace("\n", " "))
+    if m:
+        return "ticket", "prompt:task-id", m.group(1)
+    m = RX_WT.search(fs.cwd)
+    if m:
+        return "ticket", "cwd:worktree", m.group(1).upper()
+    m = RX_BR.match(fs.branch)
+    if m:
+        return "ticket", "gitBranch", m.group(1).upper()
+    if fs.sched_first:
+        return "scheduled", "first-user-record", None
+    ep = None
+    if fs.entrypoints:
+        ep = sorted(fs.entrypoints.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    if ep == "sdk-cli":
+        if RX_TMP_CWD.match(fs.cwd):
+            return "other", "sdk-cli:tempdir-cwd", None
+        return "scheduled", "sdk-cli:headless", None
+    return "other", "none", None
+
+
+# ---------------------------------------------------------------------------
+# Config inputs: session-account map, team-paths, boards
+# ---------------------------------------------------------------------------
+
+def load_account_map(path):
+    """Returns (state, rows_ok, rows_bad, mapping). Last row wins."""
+    if not os.path.exists(path):
+        return "missing", 0, 0, {}
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as e:
+        raise DataError("session-account map unreadable: %s (%s)" % (path, type(e).__name__))
+    mp = {}
+    ok = bad = 0
+    for bline in raw.split(b"\n"):
+        if not bline.strip():
+            continue
+        try:
+            r = json.loads(bline.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            bad += 1
+            continue
+        if not isinstance(r, dict) or not isinstance(r.get("session_id"), str):
+            bad += 1
+            continue
+        ok += 1
+        mp[r["session_id"]] = r
+    return ("partial" if bad else "ok"), ok, bad, mp
+
+
+def attribute(sid, map_state, mp):
+    if map_state == "missing":
+        return "unattributed:map_missing"
+    r = mp.get(sid)
+    if r is None:
+        return "unattributed:not_in_map"
+    if r.get("account_resolved") is not True:
+        return "unattributed:map_unresolved"
+    acct = r.get("account_id")
+    if isinstance(acct, str) and acct:
+        return acct
+    return "default-oauth"
+
+
+def load_team_paths(path):
+    """Returns (state, teams-dict)."""
+    if not os.path.exists(path):
+        return "missing", {}
+    try:
+        with open(path) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise DataError("team-paths unreadable: %s (%s)" % (path, type(e).__name__))
+    teams = d.get("teams") if isinstance(d, dict) else None
+    if not isinstance(teams, dict):
+        raise DataError("team-paths has no 'teams' object: %s" % path)
+    return "ok", teams
+
+
+class TeamResolver(object):
+    def __init__(self, teams):
+        self.prefixes = []
+        self.codes = {}
+        for slug, v in teams.items():
+            if not isinstance(v, dict):
+                continue
+            code = v.get("team_code")
+            if isinstance(code, str) and code:
+                self.codes[slug] = code.upper()
+            for k in ("working_dir", "kanban_dir"):
+                p = v.get(k)
+                if not isinstance(p, str) or not p:
+                    continue
+                p = os.path.realpath(os.path.expanduser(p)).rstrip("/")
+                if k == "kanban_dir" and p.endswith("/kanban"):
+                    p = p[:-len("/kanban")]
+                self.prefixes.append((p, slug))
+        self.prefixes.sort(key=lambda x: (-len(x[0]), x[1]))
+
+    def resolve(self, cwd, ticket_id):
+        if not cwd:
+            return "unknown"
+        c = os.path.realpath(cwd).rstrip("/")
+        hits = [(p, s) for p, s in self.prefixes if c == p or c.startswith(p + "/")]
+        if not hits:
+            return "unknown"
+        longest = len(hits[0][0])
+        top = sorted(set(s for p, s in hits if len(p) == longest))
+        if len(top) == 1:
+            return top[0]
+        if ticket_id:
+            pref = ticket_id.split("-")[0].upper()
+            byc = [s for s in top if self.codes.get(s) and pref in (self.codes[s], "X" + self.codes[s])]
+            if len(byc) == 1:
+                return byc[0]
+        return "ambiguous:" + "|".join(top)
+
+
+def board_files(teams, board_dirs):
+    dirs = []
+    if board_dirs:
+        dirs = list(board_dirs)
+    else:
+        for v in teams.values():
+            if isinstance(v, dict) and isinstance(v.get("kanban_dir"), str) and v["kanban_dir"]:
+                dirs.append(os.path.expanduser(v["kanban_dir"]))
+    files = set()
+    for d in dirs:
+        for b in glob.glob(os.path.join(d, "*-board.json")):
+            files.add(os.path.realpath(b))
+    return sorted(files)
+
+
+def load_boards(files):
+    """Returns (items-by-id, read, unreadable). Read-only."""
+    items = {}
+    read = unreadable = 0
+    for b in files:
+        try:
+            with open(b) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError) as e:
+            warn("board unreadable: %s (%s)" % (b, type(e).__name__))
+            unreadable += 1
+            continue
+        backlog = d.get("backlog") if isinstance(d, dict) else None
+        if not isinstance(backlog, list):
+            warn("board has no 'backlog' list: %s" % b)
+            unreadable += 1
+            continue
+        read += 1
+        for it in backlog:
+            if not isinstance(it, dict) or not isinstance(it.get("id"), str):
+                continue
+            prev = items.get(it["id"])
+            if prev is None or str(it.get("completedAt") or "") > str(prev.get("completedAt") or ""):
+                items[it["id"]] = it
+    return items, read, unreadable
+
+
+def oauth_hash(claude_json):
+    try:
+        with open(claude_json) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    acct = d.get("oauthAccount") if isinstance(d, dict) else None
+    uid = acct.get("accountUuid") if isinstance(acct, dict) else None
+    if not isinstance(uid, str) or not uid:
+        return None
+    return hashlib.sha256(uid.encode("utf-8")).hexdigest()[:8]
+
+
+def load_oauth_account_map(path):
+    """Optional operator hook (design open question 1). Absent -> None."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise DataError("oauth-account map unreadable: %s (%s)" % (path, type(e).__name__))
+    if not isinstance(d, dict):
+        raise DataError("oauth-account map is not a JSON object: %s" % path)
+    return d
+
+
+def retention_days_from(settings_path):
+    try:
+        with open(settings_path) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return 30
+    v = d.get("cleanupPeriodDays") if isinstance(d, dict) else None
+    if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+        return v
+    return 30
+
+
+def machine_name():
+    try:
+        r = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True,
+                           text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return socket.gethostname().split(".")[0]
+
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+
+def build_record(args, now):
+    projects = os.path.expanduser(args.projects_dir)
+    if not os.path.isdir(projects):
+        die(EXIT_ENV, "projects dir missing: %s — no record produced" % projects)
+    if not os.access(projects, os.R_OK | os.X_OK):
+        die(EXIT_ENV, "projects dir unreadable: %s — no record produced" % projects)
+
+    # --- week + recompute window --------------------------------------------
+    if args.week in ("last", "current"):
+        base = now if args.week == "current" else now - dt.timedelta(days=7)
+        label = week_label(base)
+    else:
+        label = args.week
+    bounds = week_bounds(label)
+    if bounds is None:
+        die(EXIT_USAGE, "--week must be YYYY-Www, 'last' or 'current', got: %s" % args.week)
+    wstart, wend = bounds
+    retention_days = args.retention_days or retention_days_from(os.path.expanduser(args.settings_file))
+    horizon = now - dt.timedelta(days=retention_days)
+    recomputable = wstart >= horizon + dt.timedelta(days=1)
+    if not recomputable:
+        die(EXIT_REFUSED,
+            "%s starts %s, before the recompute window (retention horizon %s + 1 day). "
+            "Transcripts for it are already partly pruned; refusing to emit a partial record "
+            "that could replace a good historical aggregate." % (label, iso_z(wstart), iso_z(horizon)))
+    if wstart > now:
+        die(EXIT_USAGE, "%s has not started yet (now %s)" % (label, iso_z(now)))
+
+    # --- config inputs --------------------------------------------------------
+    map_state, map_rows, map_bad, amap = load_account_map(os.path.expanduser(args.map_file))
+    if map_state == "missing":
+        warn("session-account map missing (%s): every session is unattributed:map_missing"
+             % args.map_file)
+    elif map_state == "partial":
+        warn("session-account map: %d unparseable row(s)" % map_bad)
+    tp_state, teams = load_team_paths(os.path.expanduser(args.team_paths))
+    if tp_state == "missing":
+        warn("team-paths missing (%s): teams are 'unknown', tickets unavailable" % args.team_paths)
+    resolver = TeamResolver(teams)
+    oa_hash = oauth_hash(os.path.expanduser(args.claude_json))
+    oa_map = load_oauth_account_map(os.path.expanduser(args.oauth_account_map)
+                                    if args.oauth_account_map else "")
+    oa_account = None
+    if oa_map is not None and oa_hash is not None:
+        v = oa_map.get(oa_hash)
+        oa_account = v if isinstance(v, str) and v else None
+
+    cov = {
+        "retention_days": retention_days,
+        "retention_horizon": iso_z(horizon),
+        "recomputable": recomputable,
+        "files_scanned": 0,
+        "files_unreadable": 0,
+        "lines_unparseable": 0,
+        "usage_malformed": 0,
+        "usage_without_id": 0,
+        "usage_without_timestamp": 0,
+        "assistant_lines": 0,
+        "assistant_messages_dedup": 0,
+        "orphan_subagents": 0,
+        "map_state": map_state,
+        "map_rows": map_rows,
+        "map_rows_unparseable": map_bad,
+        "team_paths_state": tp_state,
+        "default_oauth_account_hash": oa_hash,
+        "default_oauth_account_id": oa_account,
+        "boards_read": 0,
+        "boards_unreadable": 0,
+    }
+    unreadable_paths = []
+
+    rows = {}          # dim-tuple -> {"sessions": set, "messages": n, "tokens": {...}}
+    ticket_tok = {}    # ticket -> {"sessions": set, "tokens": {...}}  (lifetime, retained)
+    first_turns = []
+
+    def consume(fs, sess_key, dims_base, ticket_id):
+        for key in fs.order:
+            ts, model, u = fs.usage[key]
+            if ticket_id:
+                tt = ticket_tok.setdefault(ticket_id, {"sessions": set(), "tokens": empty_tokens()})
+                tt["sessions"].add(sess_key)
+                add_tokens(tt["tokens"], u)
+            if ts is None or not (wstart <= ts < wend):
+                continue
+            dims = dims_base + (model, ts.strftime("%Y-%m-%d"))
+            r = rows.setdefault(dims, {"sessions": set(), "messages": 0, "tokens": empty_tokens()})
+            r["sessions"].add(sess_key)
+            r["messages"] += 1
+            add_tokens(r["tokens"], u)
+
+    def tally(fs):
+        cov["files_scanned"] += 1
+        cov["lines_unparseable"] += fs.unparseable
+        cov["usage_malformed"] += fs.malformed
+        cov["usage_without_id"] += fs.no_id
+        cov["usage_without_timestamp"] += fs.no_ts
+        cov["assistant_lines"] += fs.assistant_lines
+        if fs.unreadable:
+            cov["files_unreadable"] += 1
+            unreadable_paths.append((fs.path, fs.unreadable))
+            return False
+        cov["assistant_messages_dedup"] += len(fs.usage)
+        return True
+
+    # --- main sessions --------------------------------------------------------
+    parents = {}   # sessionId -> (class, ticket, team, account)
+    for f in sorted(glob.glob(os.path.join(projects, "*", "*.jsonl"))):
+        sid = os.path.basename(f)[:-len(".jsonl")]
+        fs = scan_file(f, True)
+        if not tally(fs):
+            continue
+        cls, _sig, tid = classify(fs)
+        team = resolver.resolve(fs.cwd, tid)
+        acct = attribute(sid, map_state, amap)
+        parents[sid] = (cls, tid, team, acct)
+        consume(fs, f, (acct, team, "main", cls, None), tid)
+        # First turn = first deduplicated assistant message of a FRESH session
+        # (first uuid-bearing record has parentUuid null). `<synthetic>` turns are
+        # locally generated error records with zero usage, not a model call, so
+        # they are skipped rather than recorded as a 0-token first turn.
+        if fs.first_uuid_seen and fs.first_parent is None:
+            real = [k for k in fs.order if fs.usage[k][1] != SYNTHETIC_MODEL]
+            if real:
+                ts, _m, u = fs.usage[real[0]]
+                if ts is not None and wstart <= ts < wend:
+                    first_turns.append(u["input"] + u["cache_read"] + u["cache_creation"])
+
+    # --- subagents (inherit parent) ------------------------------------------
+    for f in sorted(glob.glob(os.path.join(projects, "*", "*", "subagents", "*.jsonl"))):
+        parent_sid = os.path.basename(os.path.dirname(os.path.dirname(f)))
+        agent_type = "<no-meta>"
+        stem = f[:-len(".jsonl")]
+        for meta_path in (stem + ".meta.json", stem + ".json"):
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path) as fh:
+                        meta = json.load(fh)
+                    at = meta.get("agentType") if isinstance(meta, dict) else None
+                    if isinstance(at, str) and at:
+                        agent_type = at
+                except (OSError, ValueError):
+                    pass
+                break
+        fs = scan_file(f, False)
+        if not tally(fs):
+            continue
+        p = parents.get(parent_sid)
+        if p is None:
+            cov["orphan_subagents"] += 1
+            cls, tid = "other", None
+            team = resolver.resolve(fs.cwd, None)
+            acct = attribute(parent_sid, map_state, amap)
+        else:
+            cls, tid, team, acct = p
+        consume(fs, f, (acct, team, "subagent", cls, agent_type), tid)
+
+    # --- fail-closed data checks ---------------------------------------------
+    problems = []
+    if cov["usage_malformed"]:
+        problems.append("%d assistant usage dict(s) missing a core field or non-integer"
+                        % cov["usage_malformed"])
+    if cov["usage_without_id"]:
+        problems.append("%d assistant usage line(s) without message.id (counted undeduped)"
+                        % cov["usage_without_id"])
+    if cov["usage_without_timestamp"]:
+        problems.append("%d assistant usage line(s) without a parseable timestamp"
+                        % cov["usage_without_timestamp"])
+    for path, why in unreadable_paths:
+        warn("transcript unreadable: %s (%s)" % (path, why))
+    if unreadable_paths and not args.allow_partial:
+        problems.append("%d transcript file(s) unreadable (use --allow-partial to emit a "
+                        "complete:false record)" % len(unreadable_paths))
+    if problems:
+        raise DataError("; ".join(problems))
+
+    # --- tickets (read-only boards) -------------------------------------------
+    tickets = {"state": "ok", "items": None, "summary": None,
+               "completed_in_week": None, "completed_in_week_unlinked": None}
+    if tp_state == "missing" and not args.board_dir:
+        tickets["state"] = "unavailable"
+    else:
+        bfiles = board_files(teams, args.board_dir)
+        items, bread, bbad = load_boards(bfiles)
+        cov["boards_read"] = bread
+        cov["boards_unreadable"] = bbad
+        if bbad or bread == 0:
+            tickets["state"] = "error"
+            if bread == 0 and not bbad:
+                warn("no *-board.json found in any kanban dir")
+        else:
+            out = []
+            completed = 0
+            for tid_, it in items.items():
+                if it.get("status") != "completed":   # absent status means todo
+                    continue
+                ca = parse_ts(it.get("completedAt"))
+                if ca is None or not (wstart <= ca < wend):
+                    continue
+                completed += 1
+                tt = ticket_tok.get(tid_)
+                if tt is None:
+                    continue
+                st = parse_ts(it.get("startedAt")) or parse_ts(it.get("addedAt"))
+                out.append({
+                    "ticket_id": tid_,
+                    "completed_at": iso_z(ca),
+                    "sessions": len(tt["sessions"]),
+                    "tokens": dict(tt["tokens"]),
+                    # unknown start -> cannot prove the lifetime is inside retention
+                    "lifetime_truncated": st is None or st < horizon,
+                })
+            out.sort(key=lambda x: x["ticket_id"])
+            tickets["items"] = out
+            tickets["completed_in_week"] = completed
+            tickets["completed_in_week_unlinked"] = completed - len(out)
+            tot = sorted(x["tokens"]["total"] for x in out)
+            tickets["summary"] = {
+                "n": len(tot),
+                "median": num(statistics.median(tot)) if tot else None,
+                "mean": (sum(tot) // len(tot)) if tot else None,
+                "p90": nearest_rank(tot, 0.9),
+                "total": sum(tot),
+            }
+
+    complete = (cov["files_unreadable"] == 0 and map_state != "partial"
+                and tickets["state"] == "ok")
+    cov["complete"] = complete
+    final = wend <= now and cov["files_unreadable"] == 0
+
+    out_rows = []
+    for dims in sorted(rows, key=lambda d: tuple("" if x is None else x for x in d)):
+        acct, team, role, cls, agent_type, model, day = dims
+        r = rows[dims]
+        out_rows.append({
+            "account": acct, "team": team, "model": model, "role": role,
+            "session_class": cls, "agent_type": agent_type, "day": day,
+            "sessions": len(r["sessions"]), "messages": r["messages"],
+            "tokens": dict(r["tokens"]),
+        })
+    for r in out_rows:   # the invariant the collector re-checks
+        t = r["tokens"]
+        assert t["total"] == t["input"] + t["output"] + t["cache_creation"] + t["cache_read"]
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "record_type": "kb-token-report.weekly",
+        "machine": args.machine or machine_name(),
+        "week": label,
+        "week_start": iso_z(wstart),
+        "week_end": iso_z(wend),
+        "generated_at": iso_z(now),
+        "generator": {"script": SCRIPT_NAME, "version": GENERATOR_VERSION},
+        "final": final,
+        "coverage": cov,
+        "rows": out_rows,
+        "tickets": tickets,
+        "first_turn_context": stats(first_turns),
+    }
+
+
+def fmt_m(n):
+    return "%.1fM" % (n / 1e6)
+
+
+def pct(a, b):
+    return "%.1f%%" % (100.0 * a / b) if b else "n/a"
+
+
+def print_human(rec):
+    cov = rec["coverage"]
+    rows = rec["rows"]
+    total = sum(r["tokens"]["total"] for r in rows)
+    print("kb-token-report  machine=%s  week=%s  [%s .. %s)  final=%s complete=%s"
+          % (rec["machine"], rec["week"], rec["week_start"], rec["week_end"],
+             str(rec["final"]).lower(), str(cov["complete"]).lower()))
+    print("coverage: files=%d unreadable=%d unparseable_lines=%d messages(dedup)=%d "
+          "assistant_lines=%d orphans=%d map=%s(%d rows) boards=%d/%d"
+          % (cov["files_scanned"], cov["files_unreadable"], cov["lines_unparseable"],
+             cov["assistant_messages_dedup"], cov["assistant_lines"], cov["orphan_subagents"],
+             cov["map_state"], cov["map_rows"], cov["boards_read"],
+             cov["boards_read"] + cov["boards_unreadable"]))
+    print("default-oauth login hash: %s%s" % (
+        cov["default_oauth_account_hash"] or "unknown",
+        (" -> " + cov["default_oauth_account_id"]) if cov["default_oauth_account_id"] else
+        " (no hash->account mapping configured)"))
+    print("")
+    if not rows:
+        print("TOTAL: 0 tokens — explicit empty week (%d files scanned, none had usage in it)"
+              % cov["files_scanned"])
+    else:
+        unattr = sum(r["tokens"]["total"] for r in rows if r["account"].startswith("unattributed:"))
+        print("TOTAL: %s tokens   attributed %s   unattributed %s"
+              % (fmt_m(total), pct(total - unattr, total), pct(unattr, total)))
+
+    def group(label, keyf):
+        acc = {}
+        for r in rows:
+            k = keyf(r)
+            acc[k] = acc.get(k, 0) + r["tokens"]["total"]
+        if not acc:
+            return
+        print("")
+        print("by %s:" % label)
+        for k, v in sorted(acc.items(), key=lambda kv: (-kv[1], str(kv[0]))):
+            print("  %-44s %12s  %6s" % (k, fmt_m(v), pct(v, total)))
+
+    group("account", lambda r: r["account"])
+    group("session class", lambda r: r["session_class"])
+    group("role", lambda r: r["role"])
+    group("model", lambda r: r["model"])
+    group("team", lambda r: r["team"])
+    group("day (UTC)", lambda r: r["day"])
+    print("")
+    t = rec["tickets"]
+    if t["state"] != "ok":
+        print("tickets: state=%s — per-ticket numbers NOT available (this is not zero)" % t["state"])
+    else:
+        s = t["summary"]
+        print("tickets completed this week: %d on boards, %d with linked sessions on this machine"
+              % (t["completed_in_week"], s["n"]))
+        if s["n"]:
+            trunc = sum(1 for x in t["items"] if x["lifetime_truncated"])
+            print("  lifetime tokens/ticket: median %s  mean %s  p90 %s  total %s  (%d lifetime-truncated)"
+                  % (fmt_m(s["median"]), fmt_m(s["mean"]), fmt_m(s["p90"]), fmt_m(s["total"]), trunc))
+            print("  (per-machine only — the fleet rollup sums by ticket before taking medians)")
+    f = rec["first_turn_context"]
+    if f["n"]:
+        print("fresh-session first-turn context: n=%d median %s p90 %s min %s max %s"
+              % (f["n"], f["median"], f["p90"], f["min"], f["max"]))
+    else:
+        print("fresh-session first-turn context: n=0 (no fresh main sessions started this week)")
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(
+        prog=SCRIPT_NAME,
+        description="Per-machine weekly token aggregate (XACA-1300). Deduplicates usage by "
+                    "(file, message.id), classifies sessions, attributes accounts, and emits "
+                    "the schema_version 1 weekly record. See the header of this script and "
+                    "kanban/plans/XACA-1300/XACA-1300-001_schema.md.",
+        epilog="Exit codes: 0 ok, 1 usage, 2 projects dir missing/unreadable, "
+               "3 data unreadable/malformed (no record), 4 week outside the recompute window.")
+    ap.add_argument("--week", default="last",
+                    help="ISO week in UTC: YYYY-Www, 'last' (default, most recent closed week) "
+                         "or 'current' (in progress, final:false)")
+    ap.add_argument("--json", action="store_true", help="emit the weekly record as JSON")
+    ap.add_argument("--projects-dir", default="~/.claude/projects")
+    ap.add_argument("--map-file", default="~/.claude/.session-account-map.jsonl")
+    ap.add_argument("--team-paths", default="~/.aiteamforge/team-paths.json")
+    ap.add_argument("--board-dir", action="append", default=None,
+                    help="kanban dir holding *-board.json (repeatable). Overrides discovery "
+                         "from team-paths. Boards are only ever read.")
+    ap.add_argument("--claude-json", default="~/.claude.json",
+                    help="source of oauthAccount.accountUuid for the default-oauth hash")
+    ap.add_argument("--oauth-account-map", default="~/.aiteamforge/oauth-account-map.json",
+                    help="OPTIONAL {hash8: account_id} label file; absent by default")
+    ap.add_argument("--settings-file", default="~/.claude/settings.json",
+                    help="read cleanupPeriodDays from here (default 30)")
+    ap.add_argument("--retention-days", type=int, default=None)
+    ap.add_argument("--machine", default=None, help="machine name (default scutil LocalHostName)")
+    ap.add_argument("--now", default=None, help=argparse.SUPPRESS)  # tests: fixed clock
+    ap.add_argument("--allow-partial", action="store_true",
+                    help="emit a complete:false, final:false record when transcripts are unreadable")
+
+    def _err(msg):
+        ap.print_usage(sys.stderr)
+        print("%s: ERROR: %s" % (SCRIPT_NAME, msg), file=sys.stderr)
+        sys.exit(EXIT_USAGE)
+    ap.error = _err
+    args = ap.parse_args(argv)
+    if args.retention_days is not None and args.retention_days <= 0:
+        die(EXIT_USAGE, "--retention-days must be positive")
+    now = dt.datetime.now(dt.timezone.utc)
+    if args.now:
+        now = parse_ts(args.now)
+        if now is None:
+            die(EXIT_USAGE, "--now must be an ISO timestamp")
+    try:
+        rec = build_record(args, now)
+    except DataError as e:
+        die(EXIT_DATA, "%s — no record produced" % e)
+    if args.json:
+        sys.stdout.write(json.dumps(rec, indent=2, sort_keys=True) + "\n")
+    else:
+        print_human(rec)
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

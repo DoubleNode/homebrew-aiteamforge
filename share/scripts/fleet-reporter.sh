@@ -2336,6 +2336,123 @@ pull_messages() {
 }
 
 # ============================================================================
+# Weekly token aggregates (XACA-1300-003)
+# ============================================================================
+# Runs scripts/kb-token-report for the last completed ISO week (final) and the
+# current partial week, and POSTs each record to <central>/api/token-reports.
+# Design: kanban/plans/XACA-1300/XACA-1300-001_schema.md. Only the AGGREGATE
+# record leaves this machine — kb-token-report never emits transcript text.
+#
+# Cadence: this reporter fires every 60s, but a scan takes ~40s per week on a
+# busy machine, so the token report is THROTTLED by a stamp file: at most once
+# per FLEET_TOKEN_REPORT_INTERVAL (default 6h) after a clean cycle, or once per
+# FLEET_TOKEN_REPORT_RETRY (default 1h) after a failed one. The attempt stamp is
+# written BEFORE the scan, so an overlapping cron cycle skips instead of
+# starting a second scan.
+#
+# Best-effort like pull_messages(): never fails the status report. The outcome
+# of every attempt (including why nothing was sent) is written to
+# ~/.aiteamforge/run/token-report-status, so a silent machine is diagnosable
+# on the machine itself; the fleet side shows it as "missing", never zero.
+#
+# Server replies: 200/201 = stored/replaced/unchanged. 409 = the server already
+# holds a better record (a final week, or a newer run) — logged, not retried.
+# kb-token-report exit 4 = week outside the recompute window — logged, not an
+# error. Anything else marks the cycle failed (retried after the short interval).
+send_token_reports() {
+    [ "${FLEET_TOKEN_REPORT_DISABLE:-0}" = "1" ] && return 0
+    # No endpoint -> nothing to ship to (and "${API_ENDPOINTS[@]}" on an empty
+    # array is an unbound-variable abort under set -u on /bin/bash 3.2).
+    [ "${#API_ENDPOINTS[@]}" -gt 0 ] || return 0
+    local state_dir="${FLEET_TOKEN_REPORT_STATE_DIR:-$HOME/.aiteamforge/run}"
+    local status_file="$state_dir/token-report-status"
+    local stamp_file="$state_dir/token-report-last"
+    mkdir -p "$state_dir" 2>/dev/null || return 0
+
+    # Resolve kb-token-report: explicit override, dev checkout
+    # (fleet-monitor/client/../../scripts), consumer $AITEAMFORGE_DIR/scripts,
+    # default consumer root, then a flattened sibling (share/scripts layout).
+    local reporter_dir tool="" candidate
+    reporter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local candidates=()
+    [ -n "${FLEET_TOKEN_REPORT_BIN:-}" ] && candidates+=("$FLEET_TOKEN_REPORT_BIN")
+    candidates+=("$reporter_dir/../../scripts/kb-token-report")
+    [ -n "${AITEAMFORGE_DIR:-}" ] && candidates+=("$AITEAMFORGE_DIR/scripts/kb-token-report")
+    candidates+=("$HOME/aiteamforge/scripts/kb-token-report" "$reporter_dir/kb-token-report")
+    for candidate in "${candidates[@]}"; do
+        if [ -f "$candidate" ]; then tool="$candidate"; break; fi
+    done
+    if [ -z "$tool" ]; then
+        printf 'no-tool: kb-token-report not found at: %s\n' "$(printf '%s, ' "${candidates[@]}" | sed 's/, $//')" > "$status_file" 2>/dev/null || true
+        return 0
+    fi
+    command -v python3 >/dev/null 2>&1 || { printf 'no-python3\n' > "$status_file" 2>/dev/null; return 0; }
+
+    # Throttle. The stamp holds "<epoch> <ok|fail|running>" of the last attempt.
+    local now last_epoch=0 last_result="fail" wait_for
+    now=$(date +%s)
+    if [ -f "$stamp_file" ]; then
+        read -r last_epoch last_result < "$stamp_file" 2>/dev/null || true
+        case "$last_epoch" in ''|*[!0-9]*) last_epoch=0 ;; esac
+    fi
+    if [ "$last_result" = "ok" ]; then
+        wait_for="${FLEET_TOKEN_REPORT_INTERVAL:-21600}"
+    else
+        wait_for="${FLEET_TOKEN_REPORT_RETRY:-3600}"
+    fi
+    if [ $((now - last_epoch)) -lt "$wait_for" ]; then
+        return 0
+    fi
+    printf '%s running\n' "$now" > "$stamp_file" 2>/dev/null || true
+
+    echo "Shipping weekly token aggregates ($tool)..."
+    local result="ok" week rc out_file env_file err_file response http_code endpoint url lines=""
+    out_file=$(mktemp "${TMPDIR:-/tmp}/kb-token-report.XXXXXX") || return 0
+    env_file=$(mktemp "${TMPDIR:-/tmp}/kb-token-envelope.XXXXXX") || { rm -f "$out_file"; return 0; }
+    err_file=$(mktemp "${TMPDIR:-/tmp}/kb-token-report-err.XXXXXX") || { rm -f "$out_file" "$env_file"; return 0; }
+    for week in last current; do
+        rc=0
+        python3 "$tool" --week "$week" --json --machine "$HOSTNAME" > "$out_file" 2> "$err_file" || rc=$?
+        if [ "$rc" -eq 4 ]; then
+            lines="${lines}${week}: refused-recompute (exit 4)"$'\n'
+            continue
+        elif [ "$rc" -ne 0 ]; then
+            result="fail"
+            lines="${lines}${week}: kb-token-report exit $rc: $(head -c 300 "$err_file" | tr '\n' ' ')"$'\n'
+            continue
+        fi
+        # Wrap the record in the {machine_id, hostname, record} envelope.
+        if ! python3 -c 'import json,sys; rec=json.load(open(sys.argv[1])); json.dump({"machine_id": sys.argv[2], "hostname": sys.argv[3], "record": rec}, open(sys.argv[4], "w"))' \
+            "$out_file" "$MACHINE_ID" "$HOSTNAME" "$env_file" 2>/dev/null; then
+            result="fail"; lines="${lines}${week}: record was not valid JSON"$'\n'; continue
+        fi
+        for endpoint in "${API_ENDPOINTS[@]}"; do
+            url="${endpoint%/api/*}/api/token-reports"
+            if [ -n "${CENTRAL_AUTH_TOKEN:-}" ]; then
+                response=$(curl -s -w "\n%{http_code}" --connect-timeout 10 --max-time 60 -X POST \
+                    -H "Content-Type: application/json" -H "Authorization: Bearer $CENTRAL_AUTH_TOKEN" \
+                    --data-binary "@$env_file" "$url" 2>/dev/null) || true
+            else
+                response=$(curl -s -w "\n%{http_code}" --connect-timeout 10 --max-time 60 -X POST \
+                    -H "Content-Type: application/json" \
+                    --data-binary "@$env_file" "$url" 2>/dev/null) || true
+            fi
+            http_code=$(printf '%s' "$response" | tail -1)
+            case "$http_code" in
+                200|201) lines="${lines}${week}: sent to $url (HTTP $http_code)"$'\n' ;;
+                409)     lines="${lines}${week}: server kept its record at $url (HTTP 409 $(printf '%s' "$response" | sed '$d' | head -c 200))"$'\n' ;;
+                *)       result="fail"; lines="${lines}${week}: FAILED to send to $url (HTTP ${http_code:-none})"$'\n' ;;
+            esac
+        done
+    done
+    rm -f "$out_file" "$env_file" "$err_file"
+    printf '%s %s\n' "$now" "$result" > "$stamp_file" 2>/dev/null || true
+    printf '%s at %s\n%s' "$result" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$lines" > "$status_file" 2>/dev/null || true
+    printf '%s' "$lines" | sed 's/^/  /'
+    [ "$result" = "ok" ]
+}
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -2583,6 +2700,10 @@ main() {
     echo ""
     echo "Checking kb-msg relay for cross-machine mail..."
     pull_messages || true
+
+    # Weekly token aggregates (XACA-1300-003; throttled, best-effort).
+    echo ""
+    send_token_reports || true
 }
 
 # Run main function

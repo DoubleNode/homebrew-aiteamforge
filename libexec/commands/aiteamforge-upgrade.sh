@@ -3153,6 +3153,13 @@ PYEOF
 # (docs/compaction-quality-watch.md). Same situation as the premise ratchet directly
 # above: a brand-new .sh on every already-installed box, needed on M4Mini/M1Pro/M1Mini
 # for baseline capture and post-Stage-2 watching, so it must be materialized here.
+# XACA-1300 (B2): kb-token-report, the per-machine weekly token-aggregate tool.
+# fleet-reporter.sh's send_token_reports() runs it from $AITEAMFORGE_DIR/scripts on
+# tap machines. Brand-new on every already-installed box AND extensionless, so it
+# needs BOTH this entry (materialise when absent) and an explicit entry in
+# update_runtime_helpers' sweep loop (the *.sh/*.py globs cannot match it) —
+# the kb-pr-monitor (XACA-1275) shape. Missing either, upgraded machines never
+# receive it and the fleet collects no token aggregates from them.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3176,6 +3183,7 @@ msg-inbox-check.sh
 cr-schema-validator.py
 kb-compaction-premise-check.sh
 kb-compaction-quality-watch.sh
+kb-token-report
 EOF
 }
 
@@ -3202,11 +3210,12 @@ update_runtime_helpers() {
   local updated=0
   local src name target
   # Sweep shipped helpers. kb-init-team, kb-api-key, kb-msg-provision,
-  # kb-spacedock (XACA-1071) and kb-pr-monitor (XACA-1275) are
+  # kb-spacedock (XACA-1071), kb-pr-monitor (XACA-1275) and kb-token-report
+  # (XACA-1300) are
   # extensionless, so each is listed explicitly alongside the *.sh / *.py
   # globs (XACA-0395: same gap class as kb-init-team — the glob cannot match
   # an extensionless name; kb-msg-provision added under XACA-1078-004).
-  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock "$scripts_source"/kb-pr-monitor; do
+  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key "$scripts_source"/kb-msg-provision "$scripts_source"/kb-spacedock "$scripts_source"/kb-pr-monitor "$scripts_source"/kb-token-report; do
     [ -f "$src" ] || continue
     name="$(basename "$src")"
     target="${scripts_dest}/${name}"

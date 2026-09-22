@@ -38,6 +38,7 @@ const { ensureReady: vaultEnsureReady } = require('./lib/vault-crypto');
 // integration tests exercise the REAL handlers (not an inline re-implementation).
 const { registerVaultRoutes } = require('./lib/vault-routes');
 const { registerMsgRelayRoutes } = require('./lib/msg-relay-routes');
+const { registerTokenReportsRoutes } = require('./lib/token-reports-routes');
 
 // XACA-0395-005: shared API-key auth gate (kanban/plans/XACA-0395/
 // XACA-0395_auth_contract.md). requireApiKey is mounted as the second
@@ -3189,6 +3190,21 @@ registerVaultRoutes(app);
 // ============================================================================
 
 registerMsgRelayRoutes(app);
+
+// ============================================================================
+// FLEET TOKEN TELEMETRY (XACA-1300-003)
+// ============================================================================
+// Weekly per-machine token aggregates shipped by fleet-reporter.sh (it runs
+// scripts/kb-token-report). Durable system of record under data/token-reports/
+// — transcripts expire after 30 days, these never do. The live roster is
+// passed in so a machine that never reported reads as "missing", never zero.
+// Handlers live in lib/token-reports-routes.js.
+// ============================================================================
+
+registerTokenReportsRoutes(app, {
+    listFleetMachines: () => Array.from(machines.values())
+        .map(m => ({ machine_id: m.machine_id, hostname: m.hostname })),
+});
 
 // ============================================================================
 // TEAM CONFIGURATION API (Auto-Discovery)

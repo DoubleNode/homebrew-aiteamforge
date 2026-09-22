@@ -1,0 +1,33 @@
+{
+  "_comment": "XACA-1300-003. Which account each machine's DEFAULT OAuth login is, used ONLY by fleet-monitor's /api/token-reports aggregation to label kb-token-report rows whose account is `default-oauth`. The per-machine records are never rewritten. Keys are the machine's short name (first DNS label of the reporter hostname, lowercased); `aliases` catch the LocalHostName form. default_oauth_account=null means NOT STATED: those rows stay `default-oauth:unmapped`, never guessed. login_hash_observed is sha256[:8] of ~/.claude.json oauthAccount.accountUuid, the same hash kb-token-report records; a record carrying a different hash is labelled `default-oauth:login-changed`, and one login hash stated as two different accounts is labelled `default-oauth:conflict` on every machine involved. Provenance fields say where each value came from; a user-stated account is not a measurement.",
+  "machines": {
+    "darren-m1pro-mbp": {
+      "aliases": ["darren-m1pro"],
+      "default_oauth_account": "claude-max-me",
+      "provenance": "user-stated 2026-09-22",
+      "login_hash_observed": "2c3106f6",
+      "login_hash_provenance": "read-only ssh probe 2026-09-22 (XACA-1300-003)"
+    },
+    "darren-m4-mini": {
+      "aliases": [],
+      "default_oauth_account": "claude-max-me2",
+      "provenance": "user-stated 2026-09-22",
+      "login_hash_observed": "2c3106f6",
+      "login_hash_provenance": "read-only ssh probe 2026-09-22 (XACA-1300-003)"
+    },
+    "darren-m1-mini": {
+      "aliases": [],
+      "default_oauth_account": "claude-max-me2",
+      "provenance": "user-stated 2026-09-22",
+      "login_hash_observed": "2fdf8434",
+      "login_hash_provenance": "read-only ssh probe 2026-09-22 (XACA-1300-003)"
+    },
+    "darren-m3pro-mbp": {
+      "aliases": ["darren-m3pro"],
+      "default_oauth_account": "claude-max-me",
+      "provenance": "user-stated 2026-09-22 (day to day M3Pro runs on claude-max-me2 through per-team ai.credential routing; that traffic carries its own resolved account, not default-oauth)",
+      "login_hash_observed": "2fdf8434",
+      "login_hash_provenance": "local read 2026-09-22 (XACA-1300-003)"
+    }
+  }
+}
