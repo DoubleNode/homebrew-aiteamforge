@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1291** (review round 1) — `share/scripts/kb-knowledge-sync.sh`:
+  - the unwind of the daemon's own unpushed auto-commits now moves HEAD exactly once, by CAS, then resets only the index (`read-tree -m HEAD`); any race ends the tick without pushing;
+  - scaffold detection matches whole template lines only (no false holds on prose containing `YYYY-MM-DD`);
+  - a push guard refuses to push a net deletion of an allowlisted entry that still exists on disk;
+  - out-of-allowlist dirty paths no longer count toward the outbound-stuck alarm.
 - **XACA-1291** — `share/scripts/kb-knowledge-sync.sh`: knowledge-sync OUTBOUND auto-commit. The daemon
   now commits only validated, complete, quiescent entries (agents/subjects/teams plus referentially-closed
   INDEX.md) through a private temp index, never `git add`. Hooks are enforced, never `--no-verify`. The

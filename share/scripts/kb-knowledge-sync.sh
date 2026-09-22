@@ -379,6 +379,8 @@ OUT_HAS_WITHHELD=0
 AC_HOOK_ERR_KEY=""
 AC_HOOK_ERR_AT=""
 AC_RESYNC_PENDING=""
+AC_NONALLOW_FP_PREV=""
+_RES_OTHER_FP=""
 
 # _notify_milestone_due <counter> <threshold> <prev_threshold>
 #
@@ -568,6 +570,12 @@ _update_notify_state() {
         printf '"last_outbound_token":"%s",' "$(_json_escape "$ob_record")"
         printf '"outbound_withheld_paths":%d,' "$OUT_WITHHELD_PATHS"
         printf '"outbound_quarantined":%d,' "$OUT_QUARANTINED"
+        printf '"outbound_nonallowlisted_paths":%d,' "${_RES_OTHER:-0}"
+        if [ -n "$_RES_OTHER_FP" ]; then
+            printf '"outbound_nonallowlisted_fingerprint":"%s",' "$(_json_escape "$_RES_OTHER_FP")"
+        else
+            printf '"outbound_nonallowlisted_fingerprint":null,'
+        fi
         if [ -n "$AC_HOOK_ERR_KEY" ]; then
             printf '"autocommit_hook_error_key":"%s",' "$(_json_escape "$AC_HOOK_ERR_KEY")"
             printf '"autocommit_hook_error_at":"%s",' "$(_json_escape "$AC_HOOK_ERR_AT")"
@@ -594,11 +602,12 @@ _update_notify_state() {
 # Everything below is called from the tick body further down. None of it
 # writes the working tree: the only object-writing operations are
 # `hash-object -w` (objects), temp-index `read-tree` / `update-index` /
-# `commit` (a PRIVATE index file + objects + the branch ref), `reset --mixed`
-# (ref + index, unwind only) and real-index `update-index --cacheinfo`
-# (index only, resync only). There is deliberately no `git add` anywhere in
-# this file: a `git add` of any shape reads the working tree by pathspec and
-# is exactly how another session's half-written entry gets swept in.
+# `commit` (a PRIVATE index file + objects + the branch ref), the unwind's
+# CAS `update-ref` + real-index `read-tree -m HEAD` (ref once, then index
+# only) and real-index `update-index --cacheinfo` (index only, resync
+# only). There is deliberately no `git add` anywhere in this file: a
+# `git add` of any shape reads the working tree by pathspec and is exactly
+# how another session's half-written entry gets swept in.
 
 _AC_TAB="$(printf '\t')"
 AC_RESULT="none"
@@ -789,15 +798,25 @@ _ac_validate_entry_blob() {
     if ! _ac_git cat-file blob "$sha" > "$f" 2>/dev/null; then echo "blob-unreadable"; return 1; fi
     if _ac_blob_has_nul "$f"; then echo "contains-nul"; return 1; fi
     if grep -qF -e '<!-- knowledge-sync: hold -->' "$f"; then echo "hold-marker"; return 1; fi
+    # XACA-1291 (review): the template placeholders (K###, YYYY-MM-DD, ...)
+    # are matched ONLY as the whole scaffold LINES knowledge_entry_template.md
+    # emits — never as substrings. Finished, committed entries legitimately
+    # discuss `YYYY-MM-DD` formats and cite `K###` in prose (6 of 1,699
+    # measured), and a substring match held such an entry forever.
     if grep -qF \
         -e '<!-- Describe the symptom and root cause. -->' \
         -e '<!-- The fix, workaround, or correct approach. -->' \
         -e '<!-- What could go wrong next time if forgotten. -->' \
         -e '<!-- PREFERRED CREATION PATH' \
-        -e 'K###' \
-        -e 'k###-short-slug' \
-        -e 'YYYY-MM-DD' \
-        -e '[XACA-XXXX]' \
+        "$f" \
+        || LC_ALL=C grep -qE \
+        -e '^id:[[:space:]]*k###-short-slug' \
+        -e '^date:[[:space:]]*YYYY-MM-DD[[:space:]]*$' \
+        -e '^# K###:' \
+        -e '^\*\*Date:\*\*[[:space:]]*YYYY-MM-DD[[:space:]]*$' \
+        -e '^\*\*Source:\*\*[[:space:]]*\[XACA-XXXX\]' \
+        -e '^- K### .*\[Related entry title\]' \
+        -e '^- \[XACA-XXXX\] .*Source kanban item' \
         "$f"; then
         echo "scaffold-marker"
         return 1
@@ -966,6 +985,10 @@ _ac_load_prior_state() {
     [ "$AC_HOOK_ERR_AT" = "null" ] && AC_HOOK_ERR_AT=""
     AC_RESYNC_PENDING="$(_json_field "$STATE_FILE" autocommit_index_resync_pending)"
     [ "$AC_RESYNC_PENDING" = "null" ] && AC_RESYNC_PENDING=""
+    AC_NONALLOW_FP_PREV="$(_json_field "$STATE_FILE" outbound_nonallowlisted_fingerprint)"
+    [ "$AC_NONALLOW_FP_PREV" = "null" ] && AC_NONALLOW_FP_PREV=""
+    # carried forward unchanged by any tick that exits before _ac_residual
+    _RES_OTHER_FP="$AC_NONALLOW_FP_PREV"
     return 0
 }
 
@@ -1455,24 +1478,75 @@ _ac_autocommit() {
 
 # Residual dirt after the tick's commit (design §5.2 outbound_withheld_paths):
 # everything still dirty, split into allowlisted (held/incomplete) and
-# non-allowlisted. Sets OUT_WITHHELD_PATHS, _RES_ALLOWED, _RES_OTHER.
+# non-allowlisted. Sets OUT_WITHHELD_PATHS (ALLOWLISTED only), _RES_ALLOWED,
+# _RES_OTHER and _RES_OTHER_FP (a fingerprint of the non-allowlisted paths
+# AND their current bytes, for the once-per-change informational log).
+#
+# XACA-1291 (review): a non-allowlisted dirty path (e.g. projects/…/INDEX.md,
+# permanent on M3Pro) is NOT withheld outbound — the daemon never commits
+# outside its allowlist by design, so counting it made OUTBOUND-STUCK alarm
+# forever on a state no tick can change. It is reported, not counted.
 _ac_residual() {
-    local rec p
+    local rec p h
     OUT_WITHHELD_PATHS=0
     _RES_ALLOWED=0
     _RES_OTHER=0
+    _RES_OTHER_FP=""
     _ac_tmp || return 0
     _ac_git status --porcelain=v1 -z --untracked-files=all --no-renames > "$TICK_TMP/status.post" 2>/dev/null </dev/null || return 0
+    : > "$TICK_TMP/residual.other"
     while IFS= read -r -d '' rec; do
         p="${rec:3}"
-        OUT_WITHHELD_PATHS=$(( OUT_WITHHELD_PATHS + 1 ))
         if [ -n "$(_ac_classify "$p")" ]; then
             _RES_ALLOWED=$(( _RES_ALLOWED + 1 ))
+            OUT_WITHHELD_PATHS=$(( OUT_WITHHELD_PATHS + 1 ))
         else
             _RES_OTHER=$(( _RES_OTHER + 1 ))
+            h="-"
+            [ -f "$REPO_DIR/$p" ] && h="$(_ac_git hash-object -- "$p" 2>/dev/null </dev/null || echo "?")"
+            printf '%s\t%s\t%s\n' "${rec:0:2}" "$p" "$h" >> "$TICK_TMP/residual.other"
         fi
     done < "$TICK_TMP/status.post"
+    if [ "$_RES_OTHER" -gt 0 ]; then
+        _RES_OTHER_FP="$(LC_ALL=C sort "$TICK_TMP/residual.other" | _ac_sha1)"
+    fi
     return 0
+}
+
+# Informational, once per CONTENT change (not per tick): non-allowlisted dirt.
+_ac_report_nonallowlisted() {
+    [ "$_RES_OTHER" -gt 0 ] || return 0
+    [ "$_RES_OTHER_FP" = "$AC_NONALLOW_FP_PREV" ] && return 0
+    log "outbound-nonallowlisted-info: ${_RES_OTHER} dirty path(s) in ${REPO_DIR} are outside the auto-commit allowlist and are NOT counted as withheld. The daemon never commits outside agents/, subjects/ and teams/ entries + INDEX.md, so a human commits these by hand (logged once per content change):"
+    log_block "non-allowlisted dirty paths" "$(cut -f1,2 "$TICK_TMP/residual.other" | LC_ALL=C sort | head -50)"
+    return 0
+}
+
+# XACA-1291 (review): phantom-deletion push guard. If the real-index resync
+# after an auto-commit is blocked (index.lock held), the real index still
+# lacks the entry the daemon just committed. A human `git commit` in that gap
+# records the entry as DELETED although the file is on disk. The outgoing
+# NET diff (@{u}..HEAD) is the only thing a push changes on the fleet, so it
+# is checked directly, whatever the timing: an allowlisted path the push
+# would delete while the file still exists here is a stale-index artifact,
+# never an intended deletion (a real `git rm` removes the file too). While
+# any such path exists, nothing is pushed; the next auto-commit re-adds the
+# file, the net deletion disappears, and the push resumes by itself.
+# Fail CLOSED: if the diff cannot be computed, report it and do not push.
+_ac_phantom_deletions() {
+    local p
+    _PHANTOM_DEL=""
+    if ! _ac_tmp; then _PHANTOM_DEL="(scratch dir unavailable)"; return 0; fi
+    if ! _ac_git diff --name-only -z --no-renames --diff-filter=D '@{u}' HEAD > "$TICK_TMP/outgoing.del" 2>/dev/null </dev/null; then
+        _PHANTOM_DEL="(outgoing diff failed)"
+        return 0
+    fi
+    while IFS= read -r -d '' p; do
+        [ -n "$(_ac_classify "$p")" ] || continue
+        [ -e "$REPO_DIR/$p" ] || continue
+        _PHANTOM_DEL="${_PHANTOM_DEL:+$_PHANTOM_DEL, }$p"
+    done < "$TICK_TMP/outgoing.del"
+    [ -n "$_PHANTOM_DEL" ]
 }
 
 _ac_counts() {
@@ -1604,15 +1678,33 @@ _handle_dup_slots_fatal() {
 # New-reachable state once the daemon commits: our auto-commit is unpushed,
 # upstream advanced, and the tree is dirty again. A dirty diverged tree can
 # never fast-forward, so without this the daemon would wedge itself
-# (blocked-ff-diverged, forever). `reset --mixed <merge-base>` moves only the
-# branch ref and the index — NEVER the worktree (measured byte-identical,
-# design §1.6) — and only ever over commits that are (a) not on the upstream
-# and (b) provably OURS: daemon committer + both trailers naming THIS host.
-# A human's commit or another host's makes this skip, and the tick reaches
-# today's blocked-ff-diverged, which needs a human by design.
-# XACA-1291-008: the ref move is a compare-and-swap against the HEAD the
-# ownership check examined, so a human commit landing mid-check makes the
-# unwind refuse instead of dropping that commit off the branch.
+# (blocked-ff-diverged, forever). The unwind moves only the branch ref and the
+# index — NEVER the worktree (measured byte-identical, design §1.6) — and only
+# ever over commits that are (a) not on the upstream and (b) provably OURS:
+# daemon committer + both trailers naming THIS host. A human's commit or
+# another host's makes this skip, and the tick reaches today's
+# blocked-ff-diverged, which needs a human by design.
+#
+# XACA-1291-008 race contract — HEAD moves EXACTLY ONCE, by compare-and-swap:
+#   1. `update-ref HEAD <mb> <examined-head>` — git refuses atomically if a
+#      human commit landed after the ownership check. Refusal = clean skip.
+#   2. `read-tree -m HEAD` — INDEX ONLY. It never writes a ref, and it takes
+#      index.lock before resolving HEAD, so it cannot interleave with a human
+#      `git commit` (which holds index.lock across its own HEAD update). If a
+#      human commit landed between 1 and 2, the index simply follows THEIR
+#      commit, which is exactly what their own `git commit` left it as.
+#      (This used to be `reset --mixed <mb>`: a SECOND, non-CAS HEAD move that
+#      dropped a human commit landing between 1 and 2 off the branch, left its
+#      change as an uncommitted edit, and let this tick auto-commit and push
+#      over it. Mutation-tested in the race suite, T35.)
+#   3. HEAD re-read: anything but <mb> means we lost a race.
+# If step 2 fails (index.lock held), the ref move is rolled back by the same
+# CAS in reverse so the index and HEAD agree again; if even that is refused a
+# human moved HEAD, and their commit stands.
+# Any lost race or failure ENDS THE TICK right here: no integrate (no rebase
+# or merge of the human's fresh commit), no auto-commit, no push, and no
+# notify-state write (a transient race is not an unproductive tick). The next
+# tick re-evaluates from whatever HEAD the human left.
 if [ -n "$_dirty" ] && _ac_enabled; then
     _unwind_head="$(git -C "$REPO_DIR" rev-parse -q --verify HEAD 2>/dev/null || true)"
     _ac_counts
@@ -1620,13 +1712,31 @@ if [ -n "$_dirty" ] && _ac_enabled; then
         && git -C "$REPO_DIR" diff --cached --quiet 2>/dev/null \
         && _ac_all_own_ahead; then
         _unwind_mb="$(git -C "$REPO_DIR" merge-base "$_unwind_head" '@{u}' 2>/dev/null || true)"
-        if [ -n "$_unwind_mb" ] \
-            && git -C "$REPO_DIR" update-ref -m "knowledge-sync: unwind own unpushed auto-commit(s)" HEAD "$_unwind_mb" "$_unwind_head" >/dev/null 2>&1 \
-            && git -C "$REPO_DIR" reset -q --mixed "$_unwind_mb" >/dev/null 2>&1; then
-            log "autocommit-unwound: ${_AHEAD} own unpushed auto-commit(s) returned to the working tree to fast-forward over upstream (worktree untouched)"
-            _dirty="$(git -C "$REPO_DIR" status --porcelain 2>&1)"
+        _unwind_end=1
+        if [ -z "$_unwind_mb" ]; then
+            _unwind_end=0
+            log "autocommit-unwind-skipped: no merge-base between HEAD and upstream in ${REPO_DIR} — leaving it as found"
+        elif ! git -C "$REPO_DIR" update-ref -m "knowledge-sync: unwind own unpushed auto-commit(s)" HEAD "$_unwind_mb" "$_unwind_head" >/dev/null 2>&1; then
+            log "autocommit-unwind-lost-race: HEAD in ${REPO_DIR} moved after the ownership check (a concurrent commit) — the compare-and-swap refused; branch and index left exactly as found"
+        elif ! git -C "$REPO_DIR" read-tree -m HEAD >/dev/null 2>&1; then
+            if git -C "$REPO_DIR" update-ref -m "knowledge-sync: roll back unwind (index busy)" HEAD "$_unwind_head" "$_unwind_mb" >/dev/null 2>&1; then
+                log "autocommit-unwind-index-busy: the branch ref moved but the index could not be reset (index.lock held?) — ref rolled back by compare-and-swap, ${REPO_DIR} left as found"
+            else
+                log "autocommit-unwind-index-busy: the branch ref moved but the index could not be reset, and the rollback was refused because HEAD moved again (a concurrent commit) — that commit stands on the branch"
+            fi
         else
-            log "autocommit-unwind-failed: could not reset ${REPO_DIR} to the merge-base — leaving it as found"
+            _unwind_now="$(git -C "$REPO_DIR" rev-parse -q --verify HEAD 2>/dev/null || true)"
+            if [ "$_unwind_now" != "$_unwind_mb" ]; then
+                log "autocommit-unwind-lost-race: a concurrent commit (${_unwind_now}) landed on ${REPO_DIR} during the unwind — it is kept on the branch (HEAD is never moved a second time) and the index follows it"
+            else
+                _unwind_end=0
+                log "autocommit-unwound: ${_AHEAD} own unpushed auto-commit(s) returned to the working tree to fast-forward over upstream (worktree untouched)"
+                _dirty="$(git -C "$REPO_DIR" status --porcelain 2>&1)"
+            fi
+        fi
+        if [ "$_unwind_end" -eq 1 ]; then
+            log "tick-ended-unwind-race: ${REPO_DIR} — not integrating, committing or pushing this tick; the next tick re-evaluates from the current HEAD"
+            exit 0
         fi
     fi
 fi
@@ -1760,6 +1870,9 @@ if [ "$OUTBOUND_TOKEN" != "outbound-not-attempted" ]; then
         # not produced by a clean tick of ours; do not ship it on this tick.
         log "push-deferred-race: not pushing ${REPO_DIR} this tick (the auto-commit lost a race with a concurrent commit); next tick re-evaluates from the new HEAD"
         PUSH_RESULT="deferred"
+    elif [ "$_AHEAD" -gt 0 ] && [ "$_BEHIND" -eq 0 ] && _ac_phantom_deletions; then
+        log "outbound-withheld-phantom-deletion: not pushing ${REPO_DIR} — the outgoing commits would DELETE ${_PHANTOM_DEL} from the fleet while the file still exists here (a commit made from a stale index). The next auto-commit re-adds it and the push resumes; if the deletion is intended, delete the local file too"
+        PUSH_RESULT="phantom-deletion"
     elif [ "$_AHEAD" -gt 0 ] && [ "$_BEHIND" -eq 0 ]; then
         # The dup-slot gate must cover whatever is about to leave this machine
         # (an auto-commit, or a human commit pushed from a dirty tree).
@@ -1796,6 +1909,7 @@ if [ -n "${TICK_TMP:-}" ] || _ac_tmp; then
     fi
 fi
 _ac_residual
+_ac_report_nonallowlisted
 _ac_counts
 OUT_HAS_WITHHELD=0
 if [ "$OUT_WITHHELD_PATHS" -gt 0 ] || [ "$_AHEAD" -gt 0 ]; then
@@ -1810,6 +1924,8 @@ if [ "$OUTBOUND_TOKEN" != "outbound-not-attempted" ]; then
         OUTBOUND_TOKEN="push-failed"
     elif [ "$PUSH_RESULT" = "diverged" ]; then
         OUTBOUND_TOKEN="outbound-withheld-diverged"
+    elif [ "$PUSH_RESULT" = "phantom-deletion" ]; then
+        OUTBOUND_TOKEN="outbound-withheld-phantom-deletion"
     elif [ "$AC_RESULT" = "deferred-staged" ] || [ "$AC_RESULT" = "deferred-git-busy" ] || [ "$AC_RESULT" = "no-identity" ]; then
         case "$AC_RESULT" in
             no-identity) OUTBOUND_TOKEN="autocommit-no-identity" ;;
@@ -1819,8 +1935,6 @@ if [ "$OUTBOUND_TOKEN" != "outbound-not-attempted" ]; then
         OUTBOUND_TOKEN="autocommit-disabled"
     elif [ "$_RES_ALLOWED" -gt 0 ]; then
         OUTBOUND_TOKEN="outbound-withheld-incomplete"
-    elif [ "$_RES_OTHER" -gt 0 ]; then
-        OUTBOUND_TOKEN="outbound-withheld-nonallowlisted"
     elif [ "$PUSH_RESULT" = "pushed" ]; then
         OUTBOUND_TOKEN="pushed"
     else
