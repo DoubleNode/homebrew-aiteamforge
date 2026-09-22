@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1297 (part 2)** — `share/scripts/kb-compaction-premise-check.sh`: ratchet checks C and D2 now tell
+  "nothing to measure on this machine" apart from "could not measure". A non-empty, FULLY READ transcript corpus
+  with no Haiku 4.5 turns (check C) or no entrypoint-bearing records (D2) reports a new `N/A` outcome that does not
+  change the exit code; an empty, unreadable, partially unreadable or wholly-unparseable corpus still fails closed
+  at rc=2, and a PASS/WARN now also requires that every file opened. An rc=0 run carrying N/A checks says
+  "all MEASURED premises hold" and names the unmeasured ones. Measured unassisted on all three tap machines:
+  M1Pro rc=0 fully measured, M4Mini rc=0 (C N/A), M1Mini rc=0 (D2 N/A).
 
 ## [0.20.22] - 2026-09-22
 - **XACA-1291** (follow-up round 2, dev-team PR #953) — `share/scripts/kb-knowledge-sync.sh`: pin `LC_ALL=C` on the whole `_check_dup_slots` pipeline (an unpinned `tr` aborted on a non-UTF-8 byte in a UTF-8 locale and reported a partial scan as clean), and fail loud (exit 65) when the scan cannot complete, instead of returning an empty 'no collisions'.

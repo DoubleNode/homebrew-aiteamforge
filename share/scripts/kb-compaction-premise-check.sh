@@ -11,6 +11,14 @@
 # unparseable version, or an unavailable measurement reports COULD NOT VERIFY
 # and exits non-zero. "Could not verify" is never a pass.
 #
+# XACA-1297-019: checks C and D2 can also report N/A (not applicable) instead
+# of pass/warn/fail/could-not-verify. That is a DIFFERENT claim from "could not
+# verify" -- it means the transcript corpus itself was read successfully and is
+# non-empty, but the specific thing being checked (a Haiku 4.5 turn for C, an
+# entrypoint-bearing record for D2) was never observed on this machine. N/A
+# never sets the exit code, but rc=0 says so explicitly rather than printing an
+# unqualified "all premises hold" -- see the RESULT block near the bottom.
+#
 #   A. The compaction formula in the INSTALLED Claude Code binary still has the
 #      shape XACA-1277-001/004 read, and its two constants (13000, 20000) and
 #      its coded bufferFraction default (0.2) are unchanged.
@@ -31,6 +39,11 @@
 #      (This comment previously described the rejected 85% design -- the same
 #      docstring-vs-implementation mismatch class this ratchet exists to catch,
 #      found in review as XACA-1277-016.)
+#      XACA-1297-019: XACA-1165 retired the 200K/Haiku tier, so a non-empty
+#      corpus with zero Haiku 4.5 turns may now be the COMMON case, not an
+#      edge case. That reports N/A ("tier unused here"), never could-not-verify
+#      or pass -- the corpus was read fine, there is just nothing on this tier
+#      to compare against threshold(P).
 # KNOWN RESIDUAL (stated, not hidden). The size floor can only catch truncation
 # it can measure against a known-good size. Three things must hold for it to be
 # bypassed: BASE_BIN_BYTES must be badly stale (real bundle far larger), the
@@ -55,6 +68,10 @@
 #   D. CLAUDE_CODE_ENTRYPOINT has not become `remote_cowork` or `local-agent`
 #      anywhere in THIS MACHINE's transcripts (~/.claude/projects — it is a
 #      single-machine scan, not a fleet-wide one), and is not set to one now.
+#      D1 (the live env check) always runs. D2 (the transcript scan) reports
+#      N/A on a corpus that read fine but has never recorded an entrypoint key
+#      at all -- see D2's own comment below for why that is worded cautiously
+#      (XACA-1297-019).
 #
 # NOT wired into CI, and NOT wired into any hook. Run it by hand:
 #
@@ -64,8 +81,15 @@
 # Suggested cadence: after every Claude Code version bump, and at the
 # MODEL_SELECTION.md quarterly review.
 #
-# Exit codes:  0 = all premises hold   1 = a premise has DRIFTED
+# Exit codes:  0 = all MEASURED premises hold (see N/A note below)
+#              1 = a premise has DRIFTED
 #              2 = COULD NOT VERIFY (treat as failure, not as a pass)
+#              N/A is not an exit code -- it is a third per-check OUTCOME
+#              (XACA-1297-019, checks C/D2 only), printed as `N/A    <check>`
+#              for a check whose corpus was readable and non-empty but had
+#              nothing on-tier to measure. It never changes RC; an rc=0 run
+#              that produced any N/A checks says so by name in the RESULT
+#              line instead of printing a bare "all premises hold".
 
 set -uo pipefail
 
@@ -94,6 +118,19 @@ BASE_HAIKU_PEAK=80702           # XACA-1277-005 observed peak, N=194 turns
 RC=0
 FAIL_N=0
 UNVER_N=0
+# XACA-1297-019: a THIRD per-check OUTCOME, distinct from pass/warn/fail/unver.
+# It fires when the transcript corpus itself was scanned successfully and is
+# non-empty, but the specific thing a check looks for was never observed on
+# this machine -- e.g. zero Haiku 4.5 turns (C), or zero entrypoint-bearing
+# records (D2). That is NOT the same evidence as an empty/unreadable corpus
+# (which stays `unver`, rc=2) and it must not silently read as a pass either,
+# so nappl() never touches RC -- but it DOES have to surface in the final
+# RESULT line so rc=0 is never printed as "every premise was checked" when one
+# or more were actually N/A. NAPPL_TAGS records WHICH checks were N/A for that
+# final line; callers append their own tag before calling nappl() (nappl()
+# takes no tag argument -- its message already names the check).
+NAPPL_N=0
+NAPPL_TAGS=""
 SHAPE_FAILS=0
 SHAPE_TOTAL=0
 note()  { printf '  %s\n' "$*"; }
@@ -101,6 +138,7 @@ pass()  { printf 'PASS   %s\n' "$*"; }
 warn()  { printf 'WARN   %s\n' "$*"; }
 fail()  { printf 'FAIL   %s\n' "$*"; FAIL_N=$((FAIL_N+1)); RC=1; }
 unver() { printf 'COULD NOT VERIFY  %s\n' "$*"; UNVER_N=$((UNVER_N+1)); if [ "$RC" -eq 0 ]; then RC=2; fi; return 0; }
+nappl() { printf 'N/A    %s\n' "$*"; NAPPL_N=$((NAPPL_N+1)); return 0; }
 
 echo "kb-compaction-premise-check — XACA-1277 ratchet"
 echo "configured P = ${P}"
@@ -874,12 +912,37 @@ fi
 fi   # DERIVE_OK
 echo
 
+# _parse_corpus_line <CORPUS|line> -- sets FILES_OK / FILES_FAILED /
+# RECORDS_TOTAL from the scans' `CORPUS|<ok> <failed> <records>` line, or to 0
+# each when the line is absent or malformed (the caller distinguishes "absent"
+# by testing the raw line itself, and fails closed on it).
+# XACA-1297-019b (PR #955 review, advisory): checks C and D2 each carried a
+# verbatim copy of this parse -- three seds plus three numeric guards. PR #955
+# round 1 reported them as "already drifted"; re-checked for round 2, they were
+# byte-identical modulo the variable name and indentation, and that claim is
+# withdrawn rather than left standing in a comment. The reason to extract it is
+# still good: two parsers for one wire format is how the halves start
+# disagreeing while each half's own tests stay green.
+_parse_corpus_line() {
+  FILES_OK=""; FILES_FAILED=""; RECORDS_TOTAL=""
+  case "$1" in
+    CORPUS\|[0-9]*' '[0-9]*' '[0-9]*)
+      FILES_OK=$(printf '%s\n' "$1" | sed -E 's/^CORPUS\|([0-9]+) ([0-9]+) ([0-9]+)$/\1/')
+      FILES_FAILED=$(printf '%s\n' "$1" | sed -E 's/^CORPUS\|([0-9]+) ([0-9]+) ([0-9]+)$/\2/')
+      RECORDS_TOTAL=$(printf '%s\n' "$1" | sed -E 's/^CORPUS\|([0-9]+) ([0-9]+) ([0-9]+)$/\3/')
+      ;;
+  esac
+  case "$FILES_OK" in ''|*[!0-9]*) FILES_OK=0 ;; esac
+  case "$FILES_FAILED" in ''|*[!0-9]*) FILES_FAILED=0 ;; esac
+  case "$RECORDS_TOTAL" in ''|*[!0-9]*) RECORDS_TOTAL=0 ;; esac
+}
+
 # ── C. 200K-tier observed peak vs threshold(P) ──────────────────────────────
 if [ -z "$P200" ]; then
   unver "C  200K-tier threshold unavailable (section B could not derive it) - the Haiku peak premise was NOT checked this run."
 else
 echo "C. 200K-tier (Haiku 4.5) observed peak vs threshold($P) = $P200"
-PEAK=$(python3 - "$P200" <<'PY' 2>/dev/null
+RAW=$(python3 - "$P200" <<'PY' 2>/dev/null
 import glob, json, os, sys
 # XACA-1277-034: the 200K tier is PINNED to a specific model family, not
 # inferred from the substring "haiku". Haiku 4.5 is 200K; that is a fact about
@@ -891,15 +954,45 @@ TIER_200K = "haiku-4-5"
 _seen_other_haiku = set()
 root = os.path.expanduser("~/.claude/projects")
 peak = 0; turns = 0
+# XACA-1297-019: corpus facts, independent of the haiku-specific turns/peak
+# counters above -- "do not infer corpus size from the existing counters"
+# (turns is ALREADY zero on any machine that never ran Haiku 4.5, which is
+# exactly the ambiguous case this is meant to resolve: is that zero because
+# the corpus is empty/unreadable, or because it is a real, non-empty corpus
+# that simply never used this tier?). files_ok/files_failed distinguish "could
+# not open" from "opened fine"; records_total counts every line that parses as
+# JSON at all, regardless of whether it mentions "haiku" or Haiku 4.5.
+files_ok = 0; files_failed = 0; records_total = 0
 for path in glob.iglob(os.path.join(root, "**", "*.jsonl"), recursive=True):
     try:
-        with open(path, errors="replace") as fh:
+        fh = open(path, errors="replace")
+    except Exception:
+        files_failed += 1
+        continue
+    # XACA-1297-019b (PR #955 gates, BLOCKING): count a file as OK only after it
+    # has been read to the end. The increment used to happen here, so a file that
+    # threw on its first line (I/O error, permissions revoked mid-scan, decoding
+    # blow-up) was recorded as fully read with 0 records -- indistinguishable
+    # from an empty-but-fine file, and therefore eligible for the N/A path.
+    _read_ok = False
+    try:
+        with fh:
             for line in fh:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                # XACA-1297-019b (PR #955 review, advisory): only a JSON OBJECT
+                # counts as a transcript record. A file of bare scalars (123,
+                # null, "x") is valid JSON per line but carries no record, and
+                # counting it made an unusable corpus look non-empty -- i.e.
+                # N/A-eligible. Fail-closed direction: fewer records, not more.
+                if not isinstance(d, dict):
+                    continue
+                records_total += 1
                 if "haiku" not in line:      # family prefilter; tier discrimination below
                     continue
-                try: d = json.loads(line)
-                except Exception: continue
-                m = d.get("message")
+                m = d.get("message") if isinstance(d, dict) else None
                 if not isinstance(m, dict): continue
                 _mid = str(m.get("model", ""))
                 if TIER_200K not in _mid:
@@ -914,28 +1007,68 @@ for path in glob.iglob(os.path.join(root, "**", "*.jsonl"), recursive=True):
                     + (u.get("cache_read_input_tokens", 0) or 0)
                 turns += 1
                 if tot > peak: peak = tot
+        _read_ok = True
     except Exception:
         pass
+    if _read_ok:
+        files_ok += 1
+    else:
+        files_failed += 1
+print("CORPUS|%d %d %d" % (files_ok, files_failed, records_total))
 print("%d %d" % (peak, turns))
 PY
 )
 # Surface any NOTE| lines the scan emitted (excluded non-4.5 Haiku ids), then
-# strip them so the peak/turns parse sees only its own line. PR #927 r6: the
-# note was DEAD CODE via two independent suppressors — the prefilter tested
-# TIER_200K so such a record never reached the branch, and the note went to
-# stderr, which this invocation discards. The CHANGELOG shipped it as
-# delivered behaviour regardless.
-printf '%s\n' "$PEAK" | grep -E "^NOTE\|" | sed 's/^NOTE|/  /' || true
-PEAK=$(printf '%s\n' "$PEAK" | grep -vE "^NOTE\|" | tail -1)
+# strip them so downstream parsing sees only the CORPUS| and peak/turns lines.
+# PR #927 r6: the note was DEAD CODE via two independent suppressors — the
+# prefilter tested TIER_200K so such a record never reached the branch, and
+# the note went to stderr, which this invocation discards. The CHANGELOG
+# shipped it as delivered behaviour regardless.
+printf '%s\n' "$RAW" | grep -E "^NOTE\|" | sed 's/^NOTE|/  /' || true
+# XACA-1297-019: pull the CORPUS| line out before the tail -1 that used to be
+# the whole story -- it is now a middle line, not the last one.
+_C_CORPUS=$(printf '%s\n' "$RAW" | grep -E "^CORPUS\|" | tail -1)
+_parse_corpus_line "$_C_CORPUS"
+PEAK=$(printf '%s\n' "$RAW" | grep -vE "^NOTE\||^CORPUS\|" | tail -1)
 if [ -z "$PEAK" ]; then
   unver "C  transcript scan failed — cannot establish the 200K-tier peak."
+elif [ -z "$_C_CORPUS" ]; then
+  # The scan ran (PEAK parsed) but never printed corpus stats -- an internal
+  # inconsistency, not a documented outcome. Fail closed rather than guess.
+  unver "C  transcript scan did not report corpus stats — treating as unreadable."
+elif [ "$RECORDS_TOTAL" -eq 0 ]; then
+  # XACA-1297-019: genuinely EMPTY or UNREADABLE corpus -- 0 files found, every
+  # file failed to open, or every file that opened parsed zero JSON records
+  # (this single check covers all three; see the comment above nappl()'s
+  # definition). This keeps today's `unver`/rc=2 behaviour, worded to say the
+  # premise is unmeasured rather than implying it failed, plus what would fix it.
+  note "corpus: $FILES_OK file(s) opened, $FILES_FAILED failed to open, $RECORDS_TOTAL JSON record(s) parsed"
+  unver "C  no transcript corpus on this machine (~/.claude/projects) — the Haiku-peak premise is UNMEASURED, not clear. Fix: use Claude Code on this machine until transcripts accumulate under ~/.claude/projects, or re-run with HOME pointed at a profile/machine that already has some."
 else
+  note "corpus: $FILES_OK file(s) opened, $FILES_FAILED failed to open, $RECORDS_TOTAL JSON record(s) parsed"
   # NOT `set -- $PEAK`: zsh does not word-split an unquoted parameter, so $2
   # would be unset and `set -u` aborts the script mid-check (verified).
   OBS=$(printf '%s\n' "$PEAK" | cut -d' ' -f1)
   TURNS=$(printf '%s\n' "$PEAK" | cut -d' ' -f2)
-  if [ "${TURNS:-0}" -eq 0 ] || [ "${OBS:-0}" -eq 0 ]; then
-    unver "C  no Haiku turns found in ~/.claude/projects — the peak premise is UNMEASURED on this machine, not clear."
+  if { [ "${TURNS:-0}" -eq 0 ] || [ "${OBS:-0}" -eq 0 ]; } && [ "${FILES_FAILED:-0}" -gt 0 ]; then
+    # XACA-1297-019b (PR #955 gates, BLOCKING -- reproduced by BOTH bots): N/A
+    # asserts a claim about the WHOLE machine ("the 200K tier is unused here").
+    # A corpus that was only PARTLY read cannot support that claim: the Haiku
+    # turn that would fail this check may sit in the file that did not open.
+    # Measured on the PR-955 head before this fix: one readable Sonnet record
+    # plus one mode-000 file holding a 95,000-token Haiku 4.5 turn reported
+    # N/A and rc=0, where develop reported rc=2. Absence of evidence in the
+    # half we could read is not evidence of absence -- fail closed.
+    unver "C  corpus is PARTIALLY unreadable ($FILES_OK file(s) read, $FILES_FAILED could NOT be read) and no Haiku 4.5 turn was found in the part that was read — this is NOT 'tier unused': a turn that would trip this check could be sitting in a file that did not open. Fix the permissions/IO on those files and re-run."
+  elif [ "${TURNS:-0}" -eq 0 ] || [ "${OBS:-0}" -eq 0 ]; then
+    # XACA-1297-019: the corpus is real and was read FULLY (RECORDS_TOTAL>0 and
+    # FILES_FAILED==0
+    # above) -- there is simply no Haiku 4.5 turn in it. XACA-1165 retired the
+    # 200K/Haiku tier, so this may now be the PERMANENT state on some
+    # machines, not a transient gap. That is "tier unused", not "unmeasured" --
+    # N/A, not could-not-verify, and it must not silently pass either.
+    NAPPL_TAGS="${NAPPL_TAGS:+$NAPPL_TAGS }C"
+    nappl "C  corpus is non-empty ($RECORDS_TOTAL records across $FILES_OK files) but no Haiku 4.5 turns were found — the 200K tier is UNUSED on this machine, so there is no early-compaction exposure on that tier to measure. XACA-1165 retired the Haiku tier; this may be permanent."
   else
     PCT=$(awk -v o="$OBS" -v t="$P200" 'BEGIN{printf "%.1f", 100*o/t}')
     note "observed peak $OBS over $TURNS Haiku turns = ${PCT}% of threshold($P)  [XACA-1277-005 baseline peak: $BASE_HAIKU_PEAK / N=194]"
@@ -952,8 +1085,27 @@ else
       fail "C  Haiku peak has REACHED threshold($P) — P=$P now compacts Haiku sessions early. Raise P, or stop applying the override to 200K-tier work."
     elif [ "$NEAR" = "1" ]; then
       fail "C  Haiku peak is within 5% of threshold($P). Treat as drift: the margin XACA-1277-005 cleared P=$P on has effectively gone."
+    elif [ "$GREW" = "1" ] && [ "${FILES_FAILED:-0}" -gt 0 ]; then
+      # XACA-1297-019d (PR #955 round 3, advisory 030/033): WARN was the last
+      # rc=0-capable branch left ungated. It says "still under threshold",
+      # which is a whole-corpus claim exactly like PASS. It happened to be
+      # unreachable at rc=0 only because D2 scans the same corpus and gates
+      # every non-fail branch -- correctness by coincidence in a neighbouring
+      # check, which is the shape this ratchet exists to catch. Gated here on
+      # its own terms.
+      unver "C  Haiku peak has GROWN past the XACA-1277-005 baseline ($BASE_HAIKU_PEAK -> $OBS) AND $FILES_FAILED file(s) did NOT open ($FILES_OK did) — the peak in the unread file(s) could be higher still, so 'under threshold($P)' cannot be asserted. Fix the permissions/IO and re-run."
     elif [ "$GREW" = "1" ]; then
       warn "C  Haiku peak has GROWN past the XACA-1277-005 baseline ($BASE_HAIKU_PEAK -> $OBS). Still under threshold($P), but the 'Haiku structurally tops out near 80K' reading is weakening — re-run 005's analysis and re-record the baseline."
+    elif [ "${FILES_FAILED:-0}" -gt 0 ]; then
+      # XACA-1297-019c (PR #955 round 2, BLOCKING, found by BOTH gates): the
+      # partial-read guard above only fires when the readable half found NO
+      # Haiku turn at all. Once any turn exists there, this branch used to
+      # conclude PASS while a file sat unread beside it -- reproduced with a
+      # readable 100-token turn next to a mode-000 file holding a 500,000-token
+      # one (5.5x threshold). A FAIL above is still sound (positive evidence
+      # stands on its own), but a PASS is a claim about the WHOLE corpus and
+      # cannot be made from part of it.
+      unver "C  Haiku peak is under the baseline in the part of the corpus that could be read, but $FILES_FAILED file(s) did NOT open ($FILES_OK did) — a higher peak could be sitting in them, so this is NOT a pass. Fix the permissions/IO and re-run."
     else
       pass "C  Haiku peak has not grown past the XACA-1277-005 baseline (margin to threshold($P): $((P200-OBS)) tokens)"
     fi
@@ -978,19 +1130,55 @@ import glob, json, os, collections
 root = os.path.expanduser("~/.claude/projects")
 c = collections.Counter(); n = 0
 KEYS = ("entrypoint", "claudeCodeEntrypoint", "CLAUDE_CODE_ENTRYPOINT")
+# XACA-1297-019: corpus facts, independent of `n` (the entrypoint-bearing
+# record count) above -- `n` is ALREADY zero on a small/fresh corpus that has
+# never recorded an entrypoint key, which is exactly the case this is meant to
+# disambiguate: is that zero because the corpus is empty/unreadable, or
+# because it is a real, non-empty corpus whose records simply never carry this
+# field? files_ok/files_failed distinguish "could not open" from "opened
+# fine"; records_total counts every line that parses as JSON at all,
+# regardless of whether it mentions "ntrypoint".
+files_ok = 0; files_failed = 0; records_total = 0
 for path in glob.iglob(os.path.join(root, "**", "*.jsonl"), recursive=True):
     try:
-        with open(path, errors="replace") as fh:
+        fh = open(path, errors="replace")
+    except Exception:
+        files_failed += 1
+        continue
+    # XACA-1297-019b (PR #955 gates, BLOCKING): count a file as OK only after it
+    # has been read to the end. The increment used to happen here, so a file that
+    # threw on its first line (I/O error, permissions revoked mid-scan, decoding
+    # blow-up) was recorded as fully read with 0 records -- indistinguishable
+    # from an empty-but-fine file, and therefore eligible for the N/A path.
+    _read_ok = False
+    try:
+        with fh:
             for line in fh:
-                if "ntrypoint" not in line: continue
-                try: d = json.loads(line)
-                except Exception: continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                # XACA-1297-019b (PR #955 review, advisory): only a JSON OBJECT
+                # counts as a transcript record. A file of bare scalars (123,
+                # null, "x") is valid JSON per line but carries no record, and
+                # counting it made an unusable corpus look non-empty -- i.e.
+                # N/A-eligible. Fail-closed direction: fewer records, not more.
+                if not isinstance(d, dict):
+                    continue
+                records_total += 1
                 if not isinstance(d, dict): continue
+                if "ntrypoint" not in line: continue
                 for k in KEYS:
                     if k in d:
                         c[str(d[k])] += 1; n += 1
+        _read_ok = True
     except Exception:
         pass
+    if _read_ok:
+        files_ok += 1
+    else:
+        files_failed += 1
+print("CORPUS|%d %d %d" % (files_ok, files_failed, records_total))
 print(n)
 for v, k in c.most_common(20):
     print("%s\t%d" % (v, k))
@@ -999,25 +1187,86 @@ PY
 if [ -z "$EP" ]; then
   unver "D2 transcript entrypoint scan failed — cannot confirm this machine still emits only the cleared values."
 else
-  TOTAL=$(printf '%s\n' "$EP" | head -1)
-  if [ "${TOTAL:-0}" -eq 0 ]; then
-    unver "D2 no entrypoint-bearing records found — the premise is unmeasured, not clear."
+  # XACA-1297-019: CORPUS| is now the first line; TOTAL and the entrypoint
+  # value/count rows shift down by one from the old layout.
+  _D2_CORPUS=$(printf '%s\n' "$EP" | head -1)
+  _parse_corpus_line "$_D2_CORPUS"
+  if [ -z "$_D2_CORPUS" ]; then
+    unver "D2 transcript scan did not report corpus stats — treating as unreadable."
+  elif [ "$RECORDS_TOTAL" -eq 0 ]; then
+    # XACA-1297-019: genuinely EMPTY or UNREADABLE corpus (0 files, every file
+    # failed to open, or every opened file parsed zero JSON records — see the
+    # identical reasoning above nappl()'s definition and in check C). Keeps
+    # today's `unver`/rc=2 behaviour, worded as unmeasured rather than failed,
+    # plus what would fix it.
+    note "corpus: $FILES_OK file(s) opened, $FILES_FAILED failed to open, $RECORDS_TOTAL JSON record(s) parsed"
+    unver "D2 no transcript corpus on this machine (~/.claude/projects) — the entrypoint premise is UNMEASURED, not clear. Fix: use Claude Code on this machine until transcripts accumulate under ~/.claude/projects, or re-run with HOME pointed at a profile/machine that already has some."
   else
-    note "observed over $TOTAL records on THIS machine:"
-    printf '%s\n' "$EP" | tail -n +2 | while IFS=$'\t' read -r v k; do note "  $v  ($k)"; done
-    if printf '%s\n' "$EP" | tail -n +2 | grep -qE '^(remote_cowork|local-agent)\b'; then
-      fail "D2 a gated entrypoint has APPEARED in this machine's transcripts — re-derive the Sonnet window before leaving P=$P in place."
+    note "corpus: $FILES_OK file(s) opened, $FILES_FAILED failed to open, $RECORDS_TOTAL JSON record(s) parsed"
+    _D2_REST=$(printf '%s\n' "$EP" | tail -n +2)
+    TOTAL=$(printf '%s\n' "$_D2_REST" | head -1)
+    # XACA-1297-019b (PR #955 review, advisory): a missing/malformed count line
+    # used to be coerced to 0, which fed the N/A branch -- a parse failure
+    # reported as "nothing to see here". Check C fails closed on the symmetric
+    # inconsistency; D2 now matches it.
+    case "$TOTAL" in ''|*[!0-9]*)
+      unver "D2 entrypoint scan produced an unparseable record count ('$TOTAL') — the premise is UNMEASURED, not clear."
+      TOTAL="" ;;
+    esac
+    if [ -n "$TOTAL" ]; then
+    if [ "$TOTAL" -eq 0 ] && [ "${FILES_FAILED:-0}" -gt 0 ]; then
+      # XACA-1297-019b (PR #955 gates, BLOCKING): same hole as check C, and this
+      # is the shape both bots actually reproduced -- a mode-000 file holding
+      # {"entrypoint":"local-agent"} beside one readable ordinary record gave
+      # N/A + rc=0 on the pre-fix head, against rc=2 on develop. A gated
+      # entrypoint hiding in an unread file is exactly what D2 exists to catch.
+      unver "D2 corpus is PARTIALLY unreadable ($FILES_OK file(s) read, $FILES_FAILED could NOT be read) and no entrypoint-bearing record was found in the part that was read — a gated entrypoint could be in a file that did not open. Fix the permissions/IO on those files and re-run."
+    elif [ "$TOTAL" -eq 0 ]; then
+      # XACA-1297-019: the corpus is real and was read FULLY (RECORDS_TOTAL>0
+      # above) -- it simply has no entrypoint-bearing record. Worded
+      # CAUTIOUSLY, deliberately more hedged than check C's N/A: absence of a
+      # FIELD is weaker evidence than absence of a TIER. A model tier (C) is
+      # either used or it isn't -- there is no third way a Haiku 4.5 turn goes
+      # unrecorded. An entrypoint key, by contrast, could in principle be
+      # present in the real session and simply not persisted to disk on some
+      # code path this scan hasn't accounted for -- so "never observed" here
+      # cannot fully rule out "never recorded" as distinct from "never
+      # occurred". D1 above (the live env check) still ran this run and is
+      # what actually protects THIS shell; D2 only ever covered what the
+      # transcript corpus can attest to, and here it has nothing to attest.
+      NAPPL_TAGS="${NAPPL_TAGS:+$NAPPL_TAGS }D2"
+      nappl "D2 corpus is non-empty ($RECORDS_TOTAL records across $FILES_OK files) but no entrypoint-bearing records were found — no gated entrypoint has been observed on this machine. CAUTION: absence of the entrypoint FIELD is weaker evidence than absence of a TIER (contrast check C) -- a machine whose records never carry this key cannot fully distinguish 'never used' from 'never recorded'. D1 above still ran and is what protects the CURRENT shell regardless of this result."
     else
-      pass "D2 only cleared entrypoint values observed"
+      note "observed over $TOTAL records on THIS machine:"
+      printf '%s\n' "$_D2_REST" | tail -n +2 | while IFS=$'\t' read -r v k; do note "  $v  ($k)"; done
+      if printf '%s\n' "$_D2_REST" | tail -n +2 | grep -qE '^(remote_cowork|local-agent)\b'; then
+        fail "D2 a gated entrypoint has APPEARED in this machine's transcripts — re-derive the Sonnet window before leaving P=$P in place."
+      elif [ "${FILES_FAILED:-0}" -gt 0 ]; then
+        # XACA-1297-019c (PR #955 round 2, BLOCKING): same shape as check C --
+        # reproduced with a readable {"entrypoint":"cli"} beside a mode-000 file
+        # holding {"entrypoint":"local-agent"}. "Only cleared values observed"
+        # is a whole-corpus claim; an unread file can hold a gated one.
+        unver "D2 only cleared entrypoint values in the part of the corpus that could be read, but $FILES_FAILED file(s) did NOT open ($FILES_OK did) — a gated entrypoint could be sitting in them, so this is NOT a pass. Fix the permissions/IO and re-run."
+      else
+        pass "D2 only cleared entrypoint values observed"
+      fi
+    fi
     fi
   fi
 fi
 
 echo
 case "$RC" in
-  0) echo "RESULT: all XACA-1277 premises hold (rc=0)" ;;
+  0) if [ "$NAPPL_N" -gt 0 ]; then
+       echo "RESULT: all MEASURED XACA-1277 premises hold (rc=0) — but $NAPPL_N check(s) were N/A (not applicable) on this machine and were NOT measured:$NAPPL_TAGS. See the N/A line(s) above for why -- this is not the same as 'every premise checked out'."
+     else
+       echo "RESULT: all XACA-1277 premises hold (rc=0)"
+     fi
+     ;;
   1) echo "RESULT: a premise has DRIFTED (rc=1) — re-open the XACA-1277 decision before trusting claude/MODEL_SELECTION.md §5."
-     [ "$UNVER_N" -gt 0 ] && echo "        NOTE: $UNVER_N check(s) ALSO could not be verified this run — rc=1 takes precedence over rc=2, so the exit code alone does not show them. Read the COULD NOT VERIFY lines above; the drift below may not be the whole story." ;;
-  2) echo "RESULT: COULD NOT VERIFY (rc=2) — this is a failure, not a pass. Do not read it as 'premises hold'." ;;
+     [ "$UNVER_N" -gt 0 ] && echo "        NOTE: $UNVER_N check(s) ALSO could not be verified this run — rc=1 takes precedence over rc=2, so the exit code alone does not show them. Read the COULD NOT VERIFY lines above; the drift below may not be the whole story."
+     [ "$NAPPL_N" -gt 0 ] && echo "        NOTE: $NAPPL_N check(s) were ALSO N/A (not applicable) this run:$NAPPL_TAGS." ;;
+  2) echo "RESULT: COULD NOT VERIFY (rc=2) — this is a failure, not a pass. Do not read it as 'premises hold'."
+     [ "$NAPPL_N" -gt 0 ] && echo "        NOTE: $NAPPL_N check(s) were ALSO N/A (not applicable) this run:$NAPPL_TAGS." ;;
 esac
 exit "$RC"
