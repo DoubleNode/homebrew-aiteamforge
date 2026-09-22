@@ -4296,8 +4296,21 @@ PROMPT
 
     # Invoke the skill. Capture stdout to extract the Confluence URL.
     # `claude -p` (--print) runs one-shot non-interactive mode; reads prompt from stdin.
+    # XACA-1300-014: pin a session id and record the account this headless
+    # launch runs on (shared rule in session-account-map-headless.sh), so the
+    # token report can attribute it. Absent helper (tap consumers do not ship
+    # it) = launch exactly as before, unrecorded. Helper stderr is NOT
+    # redirected: a recorder failure must be visible (XACA-1197), and the
+    # helper always exits 0 so it can never stop the publish.
+    local -a _kbcr_sid_args=()
+    local _kbcr_sid=""
+    if [[ -x "${HOME}/dev-team/scripts/session-account-map-headless.sh" ]]; then
+        _kbcr_sid=$("${HOME}/dev-team/scripts/session-account-map-headless.sh" </dev/null)
+        [[ -n "$_kbcr_sid" ]] && _kbcr_sid_args=(--session-id "$_kbcr_sid")
+    fi
+
     local skill_output
-    skill_output=$(printf '%s\n' "$skill_prompt" | claude -p 2>&1) || {
+    skill_output=$(printf '%s\n' "$skill_prompt" | claude -p "${_kbcr_sid_args[@]}" 2>&1) || {
         echo "kb-cr publish: skill invocation failed (exit $?)." >&2
         echo "$skill_output" >&2
         return 1

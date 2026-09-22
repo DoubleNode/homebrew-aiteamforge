@@ -4,28 +4,28 @@
     "darren-m1pro-mbp": {
       "aliases": ["darren-m1pro"],
       "default_oauth_account": "claude-max-me",
-      "provenance": "measured 2026-09-22: ~/.claude.json oauthAccount email (orchestrator ssh/local read); supersedes an earlier user statement that had M4Mini=me2",
+      "provenance": "measured 2026-09-22: ~/.claude.json oauthAccount (orchestrator ssh/local read) is the me@ login -> claude-max-me. Matches the earlier user statement for M1Pro (me); no change.",
       "login_hash_observed": "2c3106f6",
       "login_hash_provenance": "read-only ssh probe 2026-09-22 (XACA-1300-003)"
     },
     "darren-m4-mini": {
       "aliases": [],
       "default_oauth_account": "claude-max-me",
-      "provenance": "measured 2026-09-22: ~/.claude.json oauthAccount email (orchestrator ssh/local read); supersedes an earlier user statement that had M4Mini=me2",
+      "provenance": "measured 2026-09-22: ~/.claude.json oauthAccount (orchestrator ssh/local read) is the me@ login -> claude-max-me. SUPERSEDES the earlier user statement for M4Mini (me2): stated me2, measured me.",
       "login_hash_observed": "2c3106f6",
       "login_hash_provenance": "read-only ssh probe 2026-09-22 (XACA-1300-003)"
     },
     "darren-m1-mini": {
       "aliases": [],
       "default_oauth_account": "claude-max-me2",
-      "provenance": "measured 2026-09-22: ~/.claude.json oauthAccount email (orchestrator ssh/local read); supersedes an earlier user statement that had M4Mini=me2",
+      "provenance": "measured 2026-09-22: ~/.claude.json oauthAccount (orchestrator ssh/local read) is the me2@ login -> claude-max-me2. Matches the earlier user statement for M1Mini (me2); no change.",
       "login_hash_observed": "2fdf8434",
       "login_hash_provenance": "read-only ssh probe 2026-09-22 (XACA-1300-003)"
     },
     "darren-m3pro-mbp": {
       "aliases": ["darren-m3pro"],
       "default_oauth_account": "claude-max-me2",
-      "provenance": "measured 2026-09-22: ~/.claude.json oauthAccount email (orchestrator ssh/local read); supersedes an earlier user statement that had M4Mini=me2",
+      "provenance": "measured 2026-09-22: ~/.claude.json oauthAccount (local read) is the me2@ login -> claude-max-me2. The earlier user statement for M3Pro was 'default me, currently using me2'; the measured default login is me2, consistent with its 'currently using me2' half, not its 'default me' half.",
       "login_hash_observed": "2fdf8434",
       "login_hash_provenance": "local read 2026-09-22 (XACA-1300-003)"
     }

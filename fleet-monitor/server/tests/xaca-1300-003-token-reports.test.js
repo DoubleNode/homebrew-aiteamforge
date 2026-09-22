@@ -373,6 +373,26 @@ test('the shipped config parses and every entry carries provenance', () => {
     }
 });
 
+test('each shipped provenance states ITS OWN machine\'s prior->measured change, no emails (XACA-1300-024)', () => {
+    const shipped = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'token-oauth-accounts.json'), 'utf8')).machines;
+    const label = { 'darren-m1pro-mbp': 'M1Pro', 'darren-m4-mini': 'M4Mini', 'darren-m1-mini': 'M1Mini', 'darren-m3pro-mbp': 'M3Pro' };
+    const seen = new Set();
+    for (const [k, v] of Object.entries(shipped)) {
+        assert.ok(!seen.has(v.provenance), `${k}: provenance copied from another machine`);
+        seen.add(v.provenance);
+        assert.doesNotMatch(v.provenance, /[\w.+-]+@[\w-]+\.[\w.-]+/, `${k}: provenance carries an email address`);
+        if (!label[k]) continue;
+        assert.ok(v.provenance.includes(label[k]), `${k}: provenance does not name its own machine`);
+        for (const [other, name] of Object.entries(label)) {
+            if (other !== k) assert.ok(!v.provenance.includes(name), `${k}: provenance talks about ${name}`);
+        }
+    }
+    // Only M4Mini's measurement superseded a user statement.
+    for (const [k, v] of Object.entries(shipped)) {
+        assert.equal(/SUPERSEDES/.test(v.provenance), k === 'darren-m4-mini', `${k}: SUPERSEDES marker`);
+    }
+});
+
 test('the shipped config resolves every machine to its stated account, none to conflict (XACA-1300-018)', () => {
     const shipped = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'token-oauth-accounts.json'), 'utf8')).machines;
     const resolved = {};

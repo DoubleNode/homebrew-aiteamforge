@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1300-022/023/024** — mirrors of the XACA-1300 review advisories. `share/scripts/fleet-reporter.sh`:
+  a `kb-token-report` exit 4 now records the tool's first `ERROR:` line (bounded) in the status
+  file, and `retention unknown` counts as a failure so the 1h retry applies (022).
+  `share/scripts/kb-token-report`: the managed tier also reads `managed-settings.d/*.json` as the
+  Claude Code docs define it, a dangling settings symlink is UNKNOWN, and `--retention-days` uses
+  an `is not None` check (023). `fleet-monitor/server/config/token-oauth-accounts.json`: per-machine
+  provenance strings, with a node test (024).
 - **XACA-1300** — fix round for PR #952. Mirrors from dev-team: `share/scripts/kb-token-report` (retention
   resolved from managed/user/user-local settings with `coverage.retention_source`; unknown retention exits
   4; zero boards is `tickets.state:"no_boards"`), and under `fleet-monitor/server/`:
@@ -14,6 +21,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `tests/xaca-1300-003-token-reports.test.js`. Tap-only: `tests/ci-manifest` registers
   `test-xaca-1300-token-report-materialize.sh` (plain-shell); `tests/test-xaca-1283-settings-merge-env-and-scalar.sh`
   gains U3b, asserting a user-set `cleanupPeriodDays=90` survives the upgrade fill-absent merge (XACA-1300-013).
+- **XACA-1300-014** — tap consumers now write `~/.claude/.session-account-map.jsonl` rows (measured:
+  the file did not exist on any tap machine; nothing on the consumer launch path ever called a
+  recorder). Ships the recorder chain `share/scripts/session-account-map-headless.sh` →
+  `session-account-map-record.sh` → `session-account-map.py` (mirrored from dev-team canonical),
+  copies it in `install-shell.sh`'s helper loop, and adds all three to
+  `aiteamforge-upgrade.sh`'s mandatory-materialize list so ALREADY-INSTALLED boxes get them (all
+  are `.sh`/`.py`, so the glob sweep reaches them; no extensionless entry needed).
+  `share/templates/aliases/cc-aliases.sh`: `_cc_launch` and the plain-claude `cc` fallback (the
+  headless `kb-run-*` gate path, argument-less `cc` only) call the helper, which pins the
+  `--session-id` and records the row. RECORD ONLY: tap launchers still do not apply a team's
+  declared `ai.credential` route (follow-up XACA-1312), so rows honestly carry what runs —
+  default OAuth (`account_resolved:true`, empty `account_id`) or `account_resolved:false` for an
+  inherited credential — never the declared-but-unapplied team account. A missing helper means an
+  unrecorded launch, never a failed one. `share/scripts/kb-cr.sh` mirror: `kb-cr publish`'s
+  `claude -p` records the same way.
 - **XACA-1300** — fleet collection of weekly token aggregates (Part B2). Mirrors from dev-team:
   `scripts/kb-token-report` → `share/scripts/kb-token-report` (new), `fleet-monitor/client/fleet-reporter.sh`
   → `share/scripts/fleet-reporter.sh` (`send_token_reports()`), and under `fleet-monitor/server/`:

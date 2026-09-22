@@ -2406,7 +2406,7 @@ send_token_reports() {
     printf '%s running\n' "$now" > "$stamp_file" 2>/dev/null || true
 
     echo "Shipping weekly token aggregates ($tool)..."
-    local result="ok" week rc out_file env_file err_file response http_code endpoint url lines=""
+    local result="ok" week rc out_file env_file err_file response http_code endpoint url lines="" reason=""
     out_file=$(mktemp "${TMPDIR:-/tmp}/kb-token-report.XXXXXX") || return 0
     env_file=$(mktemp "${TMPDIR:-/tmp}/kb-token-envelope.XXXXXX") || { rm -f "$out_file"; return 0; }
     err_file=$(mktemp "${TMPDIR:-/tmp}/kb-token-report-err.XXXXXX") || { rm -f "$out_file" "$env_file"; return 0; }
@@ -2414,7 +2414,28 @@ send_token_reports() {
         rc=0
         python3 "$tool" --week "$week" --json --machine "$HOSTNAME" > "$out_file" 2> "$err_file" || rc=$?
         if [ "$rc" -eq 4 ]; then
-            lines="${lines}${week}: refused-recompute (exit 4)"$'\n'
+            # XACA-1300-022: exit 4 has two causes and they need different
+            # handling. A week older than the recompute window is a normal,
+            # benign refusal (stays "ok", 6h interval). "retention unknown"
+            # (unreadable/invalid settings, XACA-1300-017) refuses EVERY week,
+            # so the machine goes missing fleet-wide: that is a FAILURE, so the
+            # 1h retry applies and the status line says why. No record exists
+            # on exit 4 (coverage.retention_source is never emitted), so the
+            # cause comes from the tool's own ERROR line. Only that one line is
+            # kept, capped at 300 bytes with control characters stripped; the
+            # tool never prints transcript text on stderr.
+            # `|| true`: no ERROR line makes grep exit 1, which pipefail +
+            # set -e would turn into an abort (same class as XACA-0782).
+            reason=$(grep -m1 'ERROR:' "$err_file" | head -c 300 | tr -d '\000-\037') || true
+            case "$reason" in
+                *"retention unknown"*)
+                    result="fail"
+                    lines="${lines}${week}: refused-recompute (exit 4, retention unknown -> retry 1h): ${reason}"$'\n'
+                    ;;
+                *)
+                    lines="${lines}${week}: refused-recompute (exit 4): ${reason:-no ERROR line on stderr}"$'\n'
+                    ;;
+            esac
             continue
         elif [ "$rc" -ne 0 ]; then
             result="fail"

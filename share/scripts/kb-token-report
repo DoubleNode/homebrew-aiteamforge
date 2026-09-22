@@ -571,17 +571,41 @@ def load_oauth_account_map(path):
     return d
 
 
+# XACA-1300-023: paths and precedence VERIFIED 2026-09-22 against the Claude
+# Code docs, not written from memory:
+#   https://code.claude.com/docs/en/managed-settings  ("Choose a delivery
+#     mechanism" / "Split a file-based policy across teams")
+#   https://code.claude.com/docs/en/settings          ("Settings precedence")
+# - File path: /Library/Application Support/ClaudeCode/managed-settings.json
+#   (macOS), /etc/claude-code/managed-settings.json (Linux and WSL).
+# - An optional managed-settings.d/ next to it: Claude Code merges
+#   managed-settings.json first, then every non-hidden *.json in that directory
+#   in alphabetical order, and for a single value such as cleanupPeriodDays
+#   "the later file's value replaces the earlier one".
+# - Managed settings sit above every user/project/--settings level ("nothing
+#   you set overrides them"), so a managed value wins outright over the user
+#   files; cleanupPeriodDays is not one of the documented exceptions.
+# NOT readable here, so NOT covered: server-managed (claude.ai / gateway)
+# settings and MDM/OS policies (macOS com.anthropic.claudecode profile), which
+# the docs rank ABOVE the file tier. See docs/token-budget.md section 2.
 MANAGED_SETTINGS_DEFAULT = (
     "/Library/Application Support/ClaudeCode/managed-settings.json" if sys.platform == "darwin"
     else "/etc/claude-code/managed-settings.json")
+MANAGED_DROPIN_DIRNAME = "managed-settings.d"
 
 
 def _cleanup_days_in(path):
     """One settings file's cleanupPeriodDays: ("absent", None) when the file or
     the key is absent, ("ok", N) for a positive int, ("unknown", why) when the
-    file exists but cannot be read/parsed or the value is not a positive int."""
-    if not os.path.exists(path):
+    file exists but cannot be read/parsed or the value is not a positive int.
+
+    A DANGLING symlink is UNKNOWN, not absent (XACA-1300-023): the path was
+    deliberately put there, so treating it as "no setting" would silently
+    fall back to a wider retention than whatever it used to point at."""
+    if not os.path.lexists(path):
         return "absent", None
+    if not os.path.exists(path):
+        return "unknown", "%s is a dangling symlink" % path
     try:
         with open(path) as fh:
             d = json.load(fh)
@@ -597,11 +621,40 @@ def _cleanup_days_in(path):
     return "unknown", "%s cleanupPeriodDays is not a positive integer: %r" % (path, v)
 
 
+def _managed_file_days(managed_path):
+    """The file-based managed tier as Claude Code documents it (see the comment
+    on MANAGED_SETTINGS_DEFAULT): managed-settings.json, then
+    managed-settings.d/*.json (non-hidden, alphabetical), a later file's
+    cleanupPeriodDays replacing an earlier one. Returns ("ok", (N, file_that_set_it)),
+    ("absent", None), or ("unknown", why) when any file in the tier is
+    unknown or the drop-in directory cannot be listed (fail closed)."""
+    files = [managed_path]
+    dropin = os.path.join(os.path.dirname(managed_path), MANAGED_DROPIN_DIRNAME)
+    if os.path.lexists(dropin):
+        if not os.path.isdir(dropin):
+            return "unknown", "%s is not a directory" % dropin
+        try:
+            names = sorted(n for n in os.listdir(dropin)
+                           if n.endswith(".json") and not n.startswith("."))
+        except OSError as e:
+            return "unknown", "%s unreadable (%s)" % (dropin, type(e).__name__)
+        files.extend(os.path.join(dropin, n) for n in names)
+    days = None
+    for f in files:
+        st, v = _cleanup_days_in(f)
+        if st == "unknown":
+            return "unknown", v
+        if st == "ok":
+            days = (v, f)
+    return ("ok", days) if days else ("absent", None)
+
+
 def retention_days_from(settings_path, local_path=None, managed_path=None):
     """Returns (days_or_None, source, detail). XACA-1300-017: never a silent 30.
 
-    Managed settings outrank every user file in Claude Code, so a managed
-    value wins outright. Otherwise the user settings.json and settings.local.json
+    Managed settings outrank every user file in Claude Code (verified against
+    the docs, see MANAGED_SETTINGS_DEFAULT), so a managed value -- from
+    managed-settings.json or its managed-settings.d/ drop-ins -- wins outright. Otherwise the user settings.json and settings.local.json
     are both consulted and the SMALLER value is taken: a smaller retention only
     narrows the recompute window, so the choice fails closed whichever file
     Claude Code actually honours. Any consulted file that exists but is
@@ -610,9 +663,9 @@ def retention_days_from(settings_path, local_path=None, managed_path=None):
     because nothing proves any week is still inside retention. Nothing
     defined anywhere -> Claude Code's own default, 30."""
     if managed_path:
-        st, v = _cleanup_days_in(managed_path)
+        st, v = _managed_file_days(managed_path)
         if st == "ok":
-            return v, "managed", managed_path
+            return v[0], "managed", v[1]
         if st == "unknown":
             return None, "unknown", v
     found = []
@@ -662,7 +715,10 @@ def build_record(args, now):
     if bounds is None:
         die(EXIT_USAGE, "--week must be YYYY-Www, 'last' or 'current', got: %s" % args.week)
     wstart, wend = bounds
-    if args.retention_days:
+    # `is not None`, not truthiness (XACA-1300-023): main() rejects <= 0 with a
+    # usage error; a falsy test here would read an explicit 0 that ever got
+    # past that guard as "no flag" and quietly consult the settings files.
+    if args.retention_days is not None:
         retention_days, retention_source, retention_detail = args.retention_days, "flag", None
     else:
         retention_days, retention_source, retention_detail = retention_days_from(
