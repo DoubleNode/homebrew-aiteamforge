@@ -56,17 +56,44 @@
 #     `--ff-only` leaves the repo worse than it found it.
 #   - On a CLEAN tree, nothing changes: `git pull --rebase`, same as
 #     before.
-#   - The PUSH side is UNCHANGED and stays gated on a clean tree — pushing
-#     from a dirty tree was never safe and still isn't. Since the tree is
-#     essentially never clean on an authoring machine, this means push
-#     stays permanently closed until a separate, out-of-scope change
-#     (commit-on-write) lands; see the design doc §6/§7. This ticket fixes
-#     INBOUND convergence only. A machine will reliably RECEIVE the
-#     fleet's knowledge and reliably REPORT when it cannot. It will still
-#     never SHARE its own.
+#   - The PUSH side: see the XACA-1291 section immediately below. The
+#     clean-tree push gate described in earlier revisions of this comment
+#     is GONE.
+#
+# ─────────────────────────────────────────────────────────────────────────
+# XACA-1291 — the OUTBOUND half: daemon-side auto-commit
+# ─────────────────────────────────────────────────────────────────────────
+# XACA-1266 fixed RECEIVING. Sending stayed permanently closed: push was
+# gated on a clean tree and nothing ever committed, so an authoring machine
+# never shared a single entry. The tick is now:
+#
+#   guards -> fetch -> UNWIND own unpushed auto-commits (diverged + dirty)
+#          -> integrate (unchanged) -> AUTO-COMMIT complete entries
+#          -> dup-slot gate -> PUSH when ahead > 0 and behind == 0 (clean OR
+#             dirty) -> ONE notify-state write (inbound + outbound counters)
+#
+# Auto-commit only commits allowlisted (agents/ subjects/ teams/) entries
+# that are COMPLETE (valid SPEC §3 frontmatter, non-empty tags, no
+# kb-knowledge-add scaffold markers, a real body), QUIESCENT (untouched for
+# 15 min, no editor swap/lock file) and not carrying the author opt-out
+# `<!-- knowledge-sync: hold -->`, plus an INDEX.md only when every row it
+# adds points at a committed entry. The commit is built in a PRIVATE temp
+# index seeded from HEAD — never `git add`, never the human's index — so a
+# half-written entry or another session's staging can never be swept in.
+# Hooks always run; a refusal quarantines the named entry by content hash,
+# an unattributed refusal (a broken hook) backs off for 24h. Kill switch:
+# KB_KNOWLEDGE_SYNC_AUTOCOMMIT=0 or $HOME/.aiteamforge/knowledge-sync-
+# autocommit.off (the sentinel exists because launchd cannot see shell env).
+#
+# Pushing from a dirty tree is safe: push reads refs and objects only, never
+# the worktree or the index (measured byte-identical, design §1.6). The only
+# real precondition is behind == 0, which is checked explicitly.
+#
+# Normative design: kanban/plans/XACA-1291/XACA-1291_outbound_autocommit_
+# design.md. This comment summarizes it; that document wins.
 #
 # See kanban/plans/XACA-1266/XACA-1266-003-design-decision.md for the full
-# design (this comment summarizes it; that document is normative).
+# INBOUND design (this comment summarizes it; that document is normative).
 #
 # Usage:
 #   kb-knowledge-sync.sh [repo-path]
@@ -100,6 +127,18 @@
 #                                     same env var / default so they resolve
 #                                     the identical path without either side
 #                                     hardcoding the other's internals.
+#   KB_KNOWLEDGE_SYNC_AUTOCOMMIT      XACA-1291 kill switch: `0` disables
+#                                     unwind + auto-commit (any other value,
+#                                     or unset, = enabled). The sentinel file
+#                                     $HOME/.aiteamforge/knowledge-sync-
+#                                     autocommit.off disables it too — that is
+#                                     the one a LaunchAgent can actually see.
+#   KB_KNOWLEDGE_SYNC_AUTOCOMMIT_QUIESCE_SECONDS
+#                                     Minimum age (mtime) before an entry is a
+#                                     commit candidate. Default 900.
+#   KB_KNOWLEDGE_SYNC_QUARANTINE_FILE Writer-private quarantine sidecar
+#                                     (default: STATE_FILE with .json swapped
+#                                     for .quarantine). No consumer reads it.
 #
 # Exit-code policy:
 #   This script exits 0 in essentially every normal AND degraded case —
@@ -214,6 +253,11 @@ _LOCK_HELD=false
 
 # shellcheck disable=SC2329  # invoked indirectly via the trap below, not by direct call
 release_lock() {
+    # XACA-1291: the per-tick scratch dir (temp index, blobs, commit message)
+    # lives next to the lock's lifetime, so it goes when the lock goes.
+    if [ -n "${TICK_TMP:-}" ] && [ -d "$TICK_TMP" ]; then
+        rm -rf "$TICK_TMP" 2>/dev/null || true
+    fi
     if [ "$_LOCK_HELD" = "true" ]; then
         rm -rf "$LOCK_DIR" 2>/dev/null || true
     fi
@@ -313,34 +357,108 @@ _json_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-# _update_notify_state <token> <measured-ahead> <measured-behind>
+# ── XACA-1291 outbound configuration (design §4.1) ──────────────────────────
+AC_SENTINEL="${HOME}/.aiteamforge/knowledge-sync-autocommit.off"
+AC_QUIESCE_SECONDS="${KB_KNOWLEDGE_SYNC_AUTOCOMMIT_QUIESCE_SECONDS:-900}"
+case "$AC_QUIESCE_SECONDS" in ''|*[!0-9]*) AC_QUIESCE_SECONDS=900 ;; esac
+QUARANTINE_FILE="${KB_KNOWLEDGE_SYNC_QUARANTINE_FILE:-${STATE_FILE%.json}.quarantine}"
+AUTOCOMMIT_MAX_PATHS=200
+ENTRY_MAX_BYTES=262144
+COMMIT_ATTEMPTS_PER_TICK=2
+QUARANTINE_MAX_LINES=500
+HOOK_ERROR_BACKOFF_SECONDS=86400
+AC_COMMITTER_NAME="knowledge-sync daemon"
+AC_TRAILER_MARK="Knowledge-Sync-Autocommit: v1"
+
+# Outbound bookkeeping carried into the ONE _update_notify_state call per
+# tick (design §5.2). Set by the tick body below; defaults mean "nothing
+# happened".
+OUT_WITHHELD_PATHS=0
+OUT_QUARANTINED=0
+OUT_HAS_WITHHELD=0
+AC_HOOK_ERR_KEY=""
+AC_HOOK_ERR_AT=""
+AC_RESYNC_PENDING=""
+
+# _notify_milestone_due <counter> <threshold> <prev_threshold>
 #
-# Called once per tick with the phase token that determines convergence
+# Returns 0 when a notify line is due. Extracted (XACA-1291 §5.3) from the
+# XACA-1266-013 inline logic so the inbound AND outbound counters share ONE
+# milestone rule instead of two copies that can drift apart.
+#
+# XACA-1266-013: the ORIGINAL implementation walked an exact-match
+# milestone sequence (threshold, threshold*4, threshold*16, …) starting
+# from the CURRENT tick's threshold and fired ONLY when the counter landed
+# EXACTLY on one of those values. That silently drops the first notify
+# when the threshold ESCALATES mid-streak: e.g. five ordinary unproductive
+# ticks accumulate under threshold=6 (no fire — correctly, 5<6), then the
+# sixth tick's token is blocked-ff-diverged, dropping the threshold to 2.
+# The counter is now 6, but the escalated sequence is 2, 8, 32, … — 6
+# matches none of them, so the alert that is already overdue under the NEW
+# threshold is silently deferred. FIX: keep the exact-match sequence (it
+# is correct for the constant-threshold case, and tests/test-xaca-1266-006
+# CASE5/6 assert its silence-between-milestones property directly), and
+# ADD a second, independent condition that catches ONLY the escalation
+# transition: the threshold just dropped relative to what applied last
+# tick AND the counter is already at/past the new, lower threshold. It
+# fires on the exact tick of the drop and never again under the same
+# (now-stable) threshold, so the backed-off cadence resumes afterwards.
+_notify_milestone_due() {
+    local n="$1" t="$2" pt="$3" m
+    [ "$n" -ge "$t" ] && [ "$t" -gt 0 ] || return 1
+    m=$t
+    while [ "$m" -le "$n" ]; do
+        [ "$m" -eq "$n" ] && return 0
+        m=$(( m * 4 ))
+    done
+    [ "$t" -lt "$pt" ] && return 0
+    return 1
+}
+
+# Outbound threshold (design §5.3): 2 for the two states that cannot
+# self-heal without a human (a hook refusal needs an author edit, a broken
+# hook needs a hook fix), else 48 ticks (~24h). Authoring legitimately
+# leaves incomplete dirt for hours; this signal must mean "this machine
+# has not shared something for a day", not "someone is typing".
+_outbound_threshold() {
+    case "$1" in
+        autocommit-refused|autocommit-hook-error) echo 2 ;;
+        *) echo 48 ;;
+    esac
+}
+
+# _update_notify_state <inbound-token> <outbound-token> <measured-ahead> <measured-behind>
+#
+# Called ONCE per tick (XACA-1291 §5.1). The inbound half is unchanged from
+# XACA-1266: it takes the phase token that determines convergence
 # (fetch-failed / blocked-ff-conflict / blocked-ff-diverged /
 # rebase-conflict-aborted / converged-ff / fetch-only-dirty /
 # rebased-advanced / already-current / synced — see design doc §3.5 for the
-# full token vocabulary). Reads the PREVIOUS counter from $STATE_FILE (if
-# present/readable), advances it per the increment/reset table below,
-# writes the new state atomically (temp file + mv so a reader never sees a
-# half-written file), and — only at a backed-off milestone threshold — logs
-# a greppable `notify-stall` line to THIS script's own log (distinct from
-# the SessionStart hook's user-facing banner, which reads the state file
-# independently).
+# full token vocabulary). Reads the PREVIOUS counters from $STATE_FILE (if
+# present/readable), advances them per the tables below, writes the new
+# state atomically (temp file + mv so a reader never sees a half-written
+# file), and — only at a backed-off milestone — logs a greppable
+# `notify-stall` / `notify-outbound-stall` line to THIS script's own log.
 #
-#   Increment on: fetch-failed, blocked-ff-conflict, blocked-ff-diverged,
+#   Inbound increment on: fetch-failed, blocked-ff-conflict, blocked-ff-diverged,
 #                 rebase-conflict-aborted   (design §5's fail-direction table)
-#   Reset to 0 on: converged-ff, rebased-advanced, already-current,
+#   Inbound reset to 0 on: converged-ff, rebased-advanced, already-current,
 #                  fetch-only-dirty, synced   (design §4.2)
+#   Inbound threshold 6, escalated to 2 for blocked-ff-diverged.
 #
-# Threshold is 6 consecutive unproductive ticks (~3h at the 30-min cadence)
-# normally, escalated to 2 (~1h) when the LATEST token is blocked-ff-
-# diverged — that state cannot self-heal (no human action, no future tick,
-# fixes a diverged+dirty tree) and needs a human by definition. Beyond the
-# threshold, notify only at backed-off milestones (threshold, threshold*4,
-# threshold*16, …) — never every tick, so this cannot become the same
-# alert-fatigue noise the old unconditional dirty warning was.
+#   Outbound (XACA-1291 §5.3): a SECOND, independent counter in the SAME
+#   file and the SAME write. Never a second mechanism.
+#     reset on: pushed, outbound-current (and autocommit-disabled when
+#               nothing is withheld)
+#     neutral: outbound-not-attempted. Inbound did not converge and the
+#               inbound counter already reports it. The counter AND the
+#               last outbound token are left as they were: recording
+#               "not-attempted" as the last token would silently lower an
+#               escalated threshold (2) back to 48 in the reader.
+#     +1 on everything else; threshold 48, or 2 for autocommit-refused /
+#               autocommit-hook-error.
 _update_notify_state() {
-    local token="$1" m_ahead="${2:-}" m_behind="${3:-}"
+    local token="$1" ob_token="${2:-}" m_ahead="${3:-}" m_behind="${4:-}"
     local prev_counter prev_first new_counter threshold
 
     prev_counter="$(_json_field "$STATE_FILE" consecutive_unproductive_ticks)"
@@ -349,12 +467,9 @@ _update_notify_state() {
 
     # XACA-1266-013: the threshold that applied on the PREVIOUS tick, read
     # from the state file's OWN last_outcome_token — the same pure function
-    # of a token used to compute THIS tick's threshold below. No new
-    # persisted field needed: threshold is entirely determined by token, so
-    # "what threshold applied before" is recoverable from "what token was
-    # recorded before". Used only to detect an ESCALATION (see below); an
-    # absent/unrecognized prior token defaults to the non-escalated 6,
-    # exactly like this tick's own default.
+    # of a token used to compute THIS tick's threshold below. Used only to
+    # detect an ESCALATION (see _notify_milestone_due); an absent or
+    # unrecognized prior token defaults to the non-escalated 6.
     local prev_token prev_threshold
     prev_token="$(_json_field "$STATE_FILE" last_outcome_token)"
     prev_threshold=6
@@ -381,48 +496,42 @@ _update_notify_state() {
     threshold=6
     [ "$token" = "blocked-ff-diverged" ] && threshold=2
 
-    # XACA-1266-013: the ORIGINAL implementation walked an exact-match
-    # milestone sequence (threshold, threshold*4, threshold*16, …) starting
-    # from the CURRENT tick's threshold and fired ONLY when new_counter
-    # landed EXACTLY on one of those values. That silently drops the first
-    # notify-stall when the threshold ESCALATES mid-streak: e.g. five
-    # ordinary unproductive ticks accumulate under threshold=6 (no fire —
-    # correctly, 5<6), then the sixth tick's token is blocked-ff-diverged,
-    # dropping the threshold to 2. new_counter is now 6, but the escalated
-    # sequence is 2, 8, 32, … — 6 matches none of them, so the alert that
-    # is already overdue under the NEW threshold is silently deferred to
-    # counter=8, two ticks later. blocked-ff-diverged is exactly the state
-    # that cannot self-heal and needs a human fastest — this is the one
-    # case where that deferral costs the most.
-    #
-    # FIX: keep the exact-match sequence (it is correct and sufficient for
-    # the constant-threshold case, and tests/test-xaca-1266-006 CASE5/6
-    # assert its silence-between-milestones property directly), and ADD a
-    # second, independent firing condition that catches ONLY the
-    # escalation transition: threshold just dropped relative to what
-    # applied last tick (prev_threshold, computed above) AND the counter
-    # is already at/past the new, lower threshold. That fires on the exact
-    # tick the escalation happens, regardless of where new_counter falls
-    # in the escalated sequence, and — because it only fires on drop, not
-    # on every subsequent tick under the same (now-stable) escalated
-    # threshold — still resumes the normal backed-off cadence afterward
-    # (the exact-match sequence takes back over from the NEXT tick, since
-    # threshold no longer "just dropped" relative to prev_threshold).
-    if [ "$new_counter" -ge "$threshold" ] && [ "$threshold" -gt 0 ]; then
-        local _fire=0
-        local _milestone=$threshold
-        while [ "$_milestone" -le "$new_counter" ]; do
-            if [ "$_milestone" -eq "$new_counter" ]; then
-                _fire=1
-                break
-            fi
-            _milestone=$(( _milestone * 4 ))
-        done
-        if [ "$_fire" -eq 0 ] && [ "$threshold" -lt "$prev_threshold" ]; then
-            _fire=1
-        fi
-        if [ "$_fire" -eq 1 ]; then
-            log "notify-stall: ${new_counter} consecutive unproductive tick(s) on ${REPO_DIR} (last=${token}, threshold=${threshold}) — ahead=${m_ahead:-unknown} behind=${m_behind:-unknown}, first unproductive at ${prev_first:-unknown}"
+    if _notify_milestone_due "$new_counter" "$threshold" "$prev_threshold"; then
+        log "notify-stall: ${new_counter} consecutive unproductive tick(s) on ${REPO_DIR} (last=${token}, threshold=${threshold}) — ahead=${m_ahead:-unknown} behind=${m_behind:-unknown}, first unproductive at ${prev_first:-unknown}"
+    fi
+
+    # ── Outbound counter (XACA-1291 §5.2/§5.3) ─────────────────────────────
+    local ob_prev ob_first ob_prev_token ob_new ob_threshold ob_prev_threshold ob_record
+    ob_prev="$(_json_field "$STATE_FILE" consecutive_outbound_withheld_ticks)"
+    case "$ob_prev" in ''|*[!0-9]*) ob_prev=0 ;; esac
+    ob_first="$(_json_field "$STATE_FILE" first_outbound_withheld_at)"
+    [ "$ob_first" = "null" ] && ob_first=""
+    ob_prev_token="$(_json_field "$STATE_FILE" last_outbound_token)"
+    [ "$ob_prev_token" = "null" ] && ob_prev_token=""
+    ob_record="$ob_token"
+    case "$ob_token" in
+        pushed|outbound-current)
+            ob_new=0; ob_first="" ;;
+        ''|outbound-not-attempted)
+            ob_new="$ob_prev"
+            ob_record="${ob_prev_token:-outbound-not-attempted}" ;;
+        autocommit-disabled)
+            if [ "$OUT_HAS_WITHHELD" -eq 1 ]; then
+                ob_new=$(( ob_prev + 1 ))
+            else
+                ob_new=0; ob_first=""
+            fi ;;
+        *)
+            ob_new=$(( ob_prev + 1 )) ;;
+    esac
+    if [ "$ob_new" -gt 0 ] && [ -z "$ob_first" ]; then
+        ob_first="$(_now_iso)"
+    fi
+    if [ "$ob_new" -gt "$ob_prev" ]; then
+        ob_threshold="$(_outbound_threshold "$ob_record")"
+        ob_prev_threshold="$(_outbound_threshold "$ob_prev_token")"
+        if _notify_milestone_due "$ob_new" "$ob_threshold" "$ob_prev_threshold"; then
+            log "notify-outbound-stall: ${ob_new} consecutive outbound-withheld tick(s) on ${REPO_DIR} (last=${ob_record}, threshold=${ob_threshold}) — this machine is RECEIVING but not SENDING; withheld_paths=${OUT_WITHHELD_PATHS} quarantined=${OUT_QUARANTINED}, first withheld at ${ob_first:-unknown}"
         fi
     fi
 
@@ -449,7 +558,27 @@ _update_notify_state() {
         printf '"last_fetch_at":"%s",' "$(_json_escape "$(_now_iso)")"
         printf '"measured_ahead":%s,' "${m_ahead:-null}"
         printf '"measured_behind":%s,' "${m_behind:-null}"
-        printf '"repo_path":"%s"' "$(_json_escape "$REPO_DIR")"
+        printf '"repo_path":"%s",' "$(_json_escape "$REPO_DIR")"
+        printf '"consecutive_outbound_withheld_ticks":%d,' "$ob_new"
+        if [ -n "$ob_first" ]; then
+            printf '"first_outbound_withheld_at":"%s",' "$(_json_escape "$ob_first")"
+        else
+            printf '"first_outbound_withheld_at":null,'
+        fi
+        printf '"last_outbound_token":"%s",' "$(_json_escape "$ob_record")"
+        printf '"outbound_withheld_paths":%d,' "$OUT_WITHHELD_PATHS"
+        printf '"outbound_quarantined":%d,' "$OUT_QUARANTINED"
+        if [ -n "$AC_HOOK_ERR_KEY" ]; then
+            printf '"autocommit_hook_error_key":"%s",' "$(_json_escape "$AC_HOOK_ERR_KEY")"
+            printf '"autocommit_hook_error_at":"%s",' "$(_json_escape "$AC_HOOK_ERR_AT")"
+        else
+            printf '"autocommit_hook_error_key":null,"autocommit_hook_error_at":null,'
+        fi
+        if [ -n "$AC_RESYNC_PENDING" ]; then
+            printf '"autocommit_index_resync_pending":"%s"' "$(_json_escape "$AC_RESYNC_PENDING")"
+        else
+            printf '"autocommit_index_resync_pending":null'
+        fi
         printf '}\n'
     } > "$tmp_file" 2>/dev/null
 
@@ -459,6 +588,898 @@ _update_notify_state() {
         return 0
     fi
     return 0
+}
+
+# ══ XACA-1291: outbound auto-commit library (design §4) ══════════════════════
+# Everything below is called from the tick body further down. None of it
+# writes the working tree: the only object-writing operations are
+# `hash-object -w` (objects), temp-index `read-tree` / `update-index` /
+# `commit` (a PRIVATE index file + objects + the branch ref), `reset --mixed`
+# (ref + index, unwind only) and real-index `update-index --cacheinfo`
+# (index only, resync only). There is deliberately no `git add` anywhere in
+# this file: a `git add` of any shape reads the working tree by pathspec and
+# is exactly how another session's half-written entry gets swept in.
+
+_AC_TAB="$(printf '\t')"
+AC_RESULT="none"
+AC_Q_SKIPPED=0
+AC_COMMIT_OUT=""
+AC_NO_PUSH=0   # XACA-1291-008: set on a lost race / failed verify — never push that tick
+TICK_TMP=""
+
+_ac_enabled() {
+    [ "${KB_KNOWLEDGE_SYNC_AUTOCOMMIT:-1}" = "0" ] && return 1
+    [ -e "$AC_SENTINEL" ] && return 1
+    return 0
+}
+
+_ac_host() {
+    local h
+    h="$(scutil --get LocalHostName 2>/dev/null || true)"
+    [ -n "$h" ] || h="$(hostname -s 2>/dev/null || true)"
+    [ -n "$h" ] || h="unknown-host"
+    printf '%s' "$h" | tr -c 'A-Za-z0-9-' '-'
+}
+AC_HOST="$(_ac_host)"
+
+# Per-tick scratch dir (removed by release_lock). Call as a plain statement,
+# never inside $(...), or the assignment dies with the subshell.
+_ac_tmp() {
+    if [ -z "$TICK_TMP" ]; then
+        TICK_TMP="$(mktemp -d "${TMPDIR:-/tmp}/kb-knowledge-sync-tick.XXXXXX" 2>/dev/null || true)"
+    fi
+    [ -n "$TICK_TMP" ] && [ -d "$TICK_TMP" ]
+}
+
+_ac_git() { git -C "$REPO_DIR" "$@"; }
+
+_ac_sha1() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum | awk '{print $1}'
+    elif command -v sha1sum >/dev/null 2>&1; then
+        sha1sum | awk '{print $1}'
+    else
+        cksum | awk '{print $1 "-" $2}'
+    fi
+}
+
+_ac_mtime() {
+    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || true
+}
+
+_ac_iso_to_epoch() {
+    local t="$1" e=""
+    [ -n "$t" ] || { printf ''; return 0; }
+    e="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$t" '+%s' 2>/dev/null || true)"
+    [ -n "$e" ] || e="$(date -u -d "$t" '+%s' 2>/dev/null || true)"
+    case "$e" in ''|*[!0-9]*) printf '' ;; *) printf '%s' "$e" ;; esac
+}
+
+_ac_count_lines() {
+    local n
+    n="$(wc -l < "$1" 2>/dev/null || echo 0)"
+    echo $(( n + 0 ))
+}
+
+# P4: any git operation in progress, or the real index locked.
+_ac_git_busy() {
+    local f
+    for f in MERGE_HEAD rebase-merge rebase-apply CHERRY_PICK_HEAD REVERT_HEAD sequencer BISECT_LOG index.lock; do
+        if [ -e "${GIT_DIR}/${f}" ]; then
+            _AC_BUSY_WHY="$f"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ── §4.2 path allowlist (ERE, anchored). The character class also makes every
+# accepted path shell- and pathspec-safe; paths still always go after `--`.
+_AC_SEG='[a-z0-9][a-z0-9_-]*'
+_AC_NAME='[a-z]+[0-9]{3,}-[a-z0-9][a-z0-9_-]*\.md'
+AC_ENTRY_RE="^(agents|teams)/${_AC_SEG}/${_AC_NAME}\$|^subjects/${_AC_SEG}(/${_AC_SEG})?/${_AC_NAME}\$"
+AC_INDEX_RE="^(agents|teams)/${_AC_SEG}/INDEX\\.md\$|^subjects/${_AC_SEG}(/${_AC_SEG})?/INDEX\\.md\$"
+
+# _ac_classify <repo-relative-path> -> prints "index", "entry <tier>", or
+# nothing (not a candidate). The filename prefix must match the tier
+# (k=agent, s=subject, t=team); a wrong prefix is not a candidate.
+_ac_classify() {
+    local p="$1" top b pfx tier
+    if [[ "$p" =~ $AC_INDEX_RE ]]; then
+        echo "index"
+        return 0
+    fi
+    if [[ "$p" =~ $AC_ENTRY_RE ]]; then
+        top="${p%%/*}"
+        b="${p##*/}"
+        case "$top" in
+            agents) pfx=k; tier=agent ;;
+            subjects) pfx=s; tier=subject ;;
+            teams) pfx=t; tier=team ;;
+            *) return 0 ;;
+        esac
+        case "$b" in
+            "${pfx}"[0-9]*) echo "entry ${tier}" ;;
+        esac
+    fi
+    return 0
+}
+
+# §4.3 test 4: editor artifacts for this basename. They are gitignored, so
+# they are checked on the filesystem. `-L` as well as `-e`: the emacs lock
+# `.#b` is a DANGLING symlink, which `-e` alone reports as absent.
+_ac_editor_artifact() {
+    local abs="$1" d b f
+    d="${abs%/*}"
+    b="${abs##*/}"
+    for f in "$d/.$b".sw? "$d/.$b".tmp* "$d/$b~" "$d/#$b#" "$d/.#$b" "$d/$b.tmp"; do
+        if [ -e "$f" ] || [ -L "$f" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# §4.3 tests 2–4 on the worktree file, BEFORE hashing (so a file still being
+# typed never writes a loose object). Prints the hold reason on failure.
+_ac_precheck() {
+    local abs="$REPO_DIR/$1" sz m now age
+    if [ ! -f "$abs" ] || [ -L "$abs" ]; then echo "not-regular-file"; return 1; fi
+    if [ -x "$abs" ]; then echo "executable"; return 1; fi
+    sz="$(wc -c < "$abs" 2>/dev/null || echo 0)"
+    sz=$(( sz + 0 ))
+    if [ "$sz" -lt 1 ] || [ "$sz" -gt "$ENTRY_MAX_BYTES" ]; then echo "size-out-of-bounds"; return 1; fi
+    m="$(_ac_mtime "$abs")"
+    case "$m" in ''|*[!0-9]*) echo "mtime-unreadable"; return 1 ;; esac
+    now="$(date +%s)"
+    age=$(( now - m ))
+    # A future mtime (negative age) is NOT quiescent.
+    if [ "$age" -lt 0 ] || [ "$age" -lt "$AC_QUIESCE_SECONDS" ]; then echo "not-quiescent"; return 1; fi
+    if _ac_editor_artifact "$abs"; then echo "editor-artifact"; return 1; fi
+    return 0
+}
+
+# Hash the file ONCE (the exact bytes that will be committed) and re-read its
+# mtime afterwards: a write that landed during the hash makes it
+# not-quiescent. Sets _AC_SHA. Call as a plain statement.
+_ac_hash() {
+    local abs="$REPO_DIR/$1" m0 m1
+    m0="$(_ac_mtime "$abs")"
+    _AC_SHA="$(_ac_git hash-object -w -- "$1" 2>/dev/null </dev/null || true)"
+    m1="$(_ac_mtime "$abs")"
+    [ -n "$_AC_SHA" ] && [ "$m0" = "$m1" ]
+}
+
+# XACA-1291-008: another entry in the same directory already uses this NNN
+# slot (committed, or sitting in the worktree). Committing it would create
+# the exact cross-entry collision Guard 4 exists to stop, and would then
+# block every push; hold it for the author to renumber instead.
+_ac_slot_collides() {
+    local abs="$REPO_DIR/$1" d b slot f
+    d="${abs%/*}"
+    b="${abs##*/}"
+    slot="${b%%-*}"
+    for f in "$d/$slot"-*.md; do
+        [ -e "$f" ] || continue
+        [ "$f" = "$abs" ] && continue
+        return 0
+    done
+    if _ac_git ls-tree --name-only HEAD -- "${1%/*}/" 2>/dev/null </dev/null \
+        | awk -F/ -v s="$slot" -v me="$b" '{ n = $NF } index(n, s "-") == 1 && n != me && n ~ /\.md$/ { f = 1 } END { exit (f ? 0 : 1) }'; then
+        return 0
+    fi
+    return 1
+}
+
+# NUL-byte test on a blob file (§4.3 test 2, evaluated on the committed bytes).
+_ac_blob_has_nul() {
+    local all nonul
+    all="$(wc -c < "$1")"
+    nonul="$(tr -d '\000' < "$1" | wc -c)"
+    [ "$(( all + 0 ))" -ne "$(( nonul + 0 ))" ]
+}
+
+# §4.3 tests 5–7 on the blob <sha> for entry <path> of <tier>. Prints the
+# hold reason on failure. The scaffold markers are EXACT strings: a bare
+# `<!--` is not a test, because finished entries legitimately carry HTML
+# comments inside code samples (13 measured in HEAD, design §1.4).
+_ac_validate_entry_blob() {
+    local sha="$1" p="$2" tier="$3" f want_id
+    f="$TICK_TMP/blob.validate"
+    if ! _ac_git cat-file blob "$sha" > "$f" 2>/dev/null; then echo "blob-unreadable"; return 1; fi
+    if _ac_blob_has_nul "$f"; then echo "contains-nul"; return 1; fi
+    if grep -qF -e '<!-- knowledge-sync: hold -->' "$f"; then echo "hold-marker"; return 1; fi
+    if grep -qF \
+        -e '<!-- Describe the symptom and root cause. -->' \
+        -e '<!-- The fix, workaround, or correct approach. -->' \
+        -e '<!-- What could go wrong next time if forgotten. -->' \
+        -e '<!-- PREFERRED CREATION PATH' \
+        -e 'K###' \
+        -e 'k###-short-slug' \
+        -e 'YYYY-MM-DD' \
+        -e '[XACA-XXXX]' \
+        "$f"; then
+        echo "scaffold-marker"
+        return 1
+    fi
+    want_id="${p##*/}"
+    want_id="${want_id%.md}"
+    # Values are compared RAW (trimmed, never unquoted): the tracked
+    # .githooks/pre-commit compares raw values too, and the daemon must be at
+    # least as strict as the hook, or a daemon-approved entry could be refused.
+    awk -v want_id="$want_id" -v want_tier="$tier" '
+        function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+        BEGIN { state = 0; body = 0; reason = ""; tags_ok = 0; intags = 0 }
+        NR == 1 {
+            if ($0 ~ /^---[ \t\r]*$/) { state = 1; next }
+            reason = "no-frontmatter"; exit
+        }
+        state == 1 {
+            if ($0 ~ /^---[ \t\r]*$/) { state = 2; next }
+            if (NR > 40) { reason = "frontmatter-unclosed"; exit }
+            if (intags) {
+                if ($0 ~ /^[ \t]+- [^ \t]/) { tags_ok = 1; next }
+                intags = 0
+            }
+            if (match($0, /^[A-Za-z_][A-Za-z0-9_-]*:/)) {
+                key = substr($0, 1, RLENGTH - 1)
+                val = trim(substr($0, RLENGTH + 1))
+                if (key == "id") fid = val
+                else if (key == "tier") ftier = val
+                else if (key == "date") fdate = val
+                else if (key == "agent") fagent = val
+                else if (key == "team") fteam = val
+                else if (key == "tags") {
+                    if (val == "") intags = 1
+                    else if (val ~ /^\[.*\]$/) {
+                        inner = substr(val, 2, length(val) - 2)
+                        if (inner ~ /[^ \t]/) tags_ok = 1
+                    }
+                }
+            }
+            next
+        }
+        state == 2 {
+            if ($0 !~ /^[ \t\r]*$/ && $0 !~ /^#/ && $0 !~ /^---[ \t\r]*$/) body++
+        }
+        END {
+            if (reason != "") { print reason; exit 1 }
+            if (state != 2) { print "frontmatter-unclosed"; exit 1 }
+            if (fid != want_id) { print "id-mismatch"; exit 1 }
+            if (ftier != want_tier) { print "tier-mismatch"; exit 1 }
+            if (fdate !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) { print "bad-date"; exit 1 }
+            if (!tags_ok) { print "tags-empty"; exit 1 }
+            if (want_tier == "agent" && fagent == "") { print "agent-empty"; exit 1 }
+            if (want_tier == "team" && fteam == "") { print "team-empty"; exit 1 }
+            if (body < 3) { print "body-empty"; exit 1 }
+        }
+    ' "$f"
+}
+
+# INDEX reference extractor (design §1.7): the two measured forms,
+# '**File:** `x.md`' and '](./x.md)'. Refs resolve in the INDEX's own dir.
+_ac_refs() {
+    local f
+    f="$(cat)"
+    {
+        # shellcheck disable=SC2016  # the backticks are literal INDEX markdown, not command substitution
+        printf '%s\n' "$f" | sed -n 's/^\*\*File:\*\* `\([^`/][^`/]*\.md\)`.*/\1/p'
+        printf '%s\n' "$f" | grep -oE '\]\(\./[^)/]+\.md\)' | sed 's/^\](\.\///; s/)$//'
+    } | LC_ALL=C sort -u
+}
+
+_ac_is_quarantined() {
+    [ -r "$QUARANTINE_FILE" ] || return 1
+    awk -F'\t' -v s="$2" -v p="$1" '$1 == s && $2 == p { f = 1 } END { exit (f ? 0 : 1) }' "$QUARANTINE_FILE" 2>/dev/null
+}
+
+# §4.6 quarantine sidecar: self-compacting (drop lines whose path is gone or
+# whose blob no longer matches the worktree), capped, atomic (tmp + mv).
+# Optional $1 = file of new lines to append. Sets OUT_QUARANTINED. Returns 1
+# only if the sidecar could not be written.
+_ac_quarantine_refresh() {
+    local add="${1:-}" line sha rest p out cur_cmp
+    out="$TICK_TMP/quarantine.new"
+    : > "$out"
+    if [ -r "$QUARANTINE_FILE" ]; then
+        while IFS= read -r line <&4; do
+            [ -n "$line" ] || continue
+            sha="${line%%"$_AC_TAB"*}"
+            rest="${line#*"$_AC_TAB"}"
+            p="${rest%%"$_AC_TAB"*}"
+            [ -f "$REPO_DIR/$p" ] || continue
+            [ "$(_ac_git hash-object -- "$p" 2>/dev/null </dev/null || true)" = "$sha" ] || continue
+            printf '%s\n' "$line" >> "$out"
+        done 4< "$QUARANTINE_FILE"
+    fi
+    if [ -n "$add" ] && [ -s "$add" ]; then
+        cat "$add" >> "$out"
+    fi
+    tail -n "$QUARANTINE_MAX_LINES" "$out" > "${out}.capped" 2>/dev/null || cp "$out" "${out}.capped"
+    OUT_QUARANTINED="$(_ac_count_lines "${out}.capped")"
+    cur_cmp=1
+    if [ -f "$QUARANTINE_FILE" ]; then
+        cmp -s "${out}.capped" "$QUARANTINE_FILE" && cur_cmp=0
+    elif [ ! -s "${out}.capped" ]; then
+        cur_cmp=0
+    fi
+    [ "$cur_cmp" -eq 0 ] && return 0
+    if mkdir -p "${QUARANTINE_FILE%/*}" 2>/dev/null \
+        && cp "${out}.capped" "${QUARANTINE_FILE}.tmp.$$" 2>/dev/null \
+        && mv "${QUARANTINE_FILE}.tmp.$$" "$QUARANTINE_FILE" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "${QUARANTINE_FILE}.tmp.$$" 2>/dev/null || true
+    log "quarantine-unwritable: could not write ${QUARANTINE_FILE} — refused path(s) are held this tick and will be re-attempted once next tick"
+    return 1
+}
+
+# §4.6 hook-error key: the effective pre-commit hook's content (or "none")
+# plus the configured hooks directory. `--git-path` resolves the hooks
+# directory setting itself, so a replaced hook changes the key. READ-ONLY:
+# the daemon never sets, overrides or bypasses the hook location.
+_ac_hook_key() {
+    local hp hook
+    hp="$(_ac_git config --get core.hooksPath 2>/dev/null || true)"
+    hook="$(_ac_git rev-parse --git-path hooks/pre-commit 2>/dev/null || true)"
+    case "$hook" in
+        /*|'') ;;
+        *) hook="$REPO_DIR/$hook" ;;
+    esac
+    # XACA-1291-008: hash the EFFECTIVE chain. On dispatcher hosts the
+    # installed hook just execs the tracked .githooks/pre-commit, so fixing
+    # the tracked hook must change the key (and end the backoff) too.
+    {
+        if [ -n "$hook" ] && [ -f "$hook" ]; then cat "$hook"; else printf 'none'; fi
+        printf '\nhooks-dir=%s\n' "$hp"
+        if [ -f "$REPO_DIR/.githooks/pre-commit" ]; then
+            printf 'tracked:\n'
+            cat "$REPO_DIR/.githooks/pre-commit"
+        fi
+    } | _ac_sha1
+}
+
+# P7: tripped while the recorded key equals the CURRENT hook's key and the
+# record is < 24h old. A changed hook, or a day passing, earns ONE attempt.
+_ac_hook_error_tripped() {
+    local cur at_e now age
+    [ -n "$AC_HOOK_ERR_KEY" ] || return 1
+    cur="$(_ac_hook_key)"
+    if [ "$cur" != "$AC_HOOK_ERR_KEY" ]; then
+        log "autocommit-hook-changed: the pre-commit hook changed since the last hook error — making one attempt this tick"
+        return 1
+    fi
+    at_e="$(_ac_iso_to_epoch "$AC_HOOK_ERR_AT")"
+    [ -n "$at_e" ] || return 1
+    now="$(date +%s)"
+    age=$(( now - at_e ))
+    if [ "$age" -ge 0 ] && [ "$age" -lt "$HOOK_ERROR_BACKOFF_SECONDS" ]; then
+        return 0
+    fi
+    return 1
+}
+
+_ac_load_prior_state() {
+    AC_HOOK_ERR_KEY="$(_json_field "$STATE_FILE" autocommit_hook_error_key)"
+    [ "$AC_HOOK_ERR_KEY" = "null" ] && AC_HOOK_ERR_KEY=""
+    AC_HOOK_ERR_AT="$(_json_field "$STATE_FILE" autocommit_hook_error_at)"
+    [ "$AC_HOOK_ERR_AT" = "null" ] && AC_HOOK_ERR_AT=""
+    AC_RESYNC_PENDING="$(_json_field "$STATE_FILE" autocommit_index_resync_pending)"
+    [ "$AC_RESYNC_PENDING" = "null" ] && AC_RESYNC_PENDING=""
+    return 0
+}
+
+_ac_index_blob() {
+    _ac_git ls-files -s -- "$1" 2>/dev/null </dev/null | awk 'NR == 1 { print $2 }'
+}
+
+# Real-index update for ONE path, retrying while index.lock is held.
+_ac_update_real_index() {
+    local i=0
+    while [ "$i" -lt 5 ]; do
+        if _ac_git update-index --add --cacheinfo "100644,$2,$1" >/dev/null 2>&1 </dev/null; then
+            return 0
+        fi
+        i=$(( i + 1 ))
+        sleep 1
+    done
+    return 1
+}
+
+# §4.5 step 9, re-run FIRST on the next tick for anything a held index.lock
+# blocked (before P6, so a stale index never trips P6 permanently). The
+# pre-commit blob is recovered from the parent of the last commit touching
+# the path; a path a human has since changed in the index is left alone.
+_ac_repair_pending_resync() {
+    local item p sha head_blob cur c old still=""
+    [ -n "$AC_RESYNC_PENDING" ] || return 0
+    while IFS= read -r item; do
+        [ -n "$item" ] || continue
+        p="${item%%=*}"
+        sha="${item#*=}"
+        head_blob="$(_ac_git rev-parse -q --verify "HEAD:$p" 2>/dev/null </dev/null || true)"
+        [ "$head_blob" = "$sha" ] || continue
+        cur="$(_ac_index_blob "$p")"
+        [ "$cur" = "$sha" ] && continue
+        c="$(_ac_git log -1 --format=%H -- "$p" 2>/dev/null </dev/null || true)"
+        old=""
+        [ -n "$c" ] && old="$(_ac_git rev-parse -q --verify "${c}^:$p" 2>/dev/null </dev/null || true)"
+        if [ -z "$cur" ] || [ "$cur" = "$old" ]; then
+            if ! _ac_update_real_index "$p" "$sha"; then
+                still="${still:+$still;}${p}=${sha}"
+            fi
+        fi
+    done <<EOF_PENDING
+$(printf '%s\n' "$AC_RESYNC_PENDING" | tr ';' '\n')
+EOF_PENDING
+    if [ -n "$still" ]; then
+        log "autocommit-index-resync-pending: the real index is still locked; ${still} will be repaired on a later tick"
+    else
+        log "autocommit-index-resynced: repaired the real index after a previously blocked resync"
+    fi
+    AC_RESYNC_PENDING="$still"
+    return 0
+}
+
+# §4.4 OWN_AUTOCOMMIT: committer is the daemon AND the body carries both
+# trailers, with THIS host. Any other commit (a human's, another host's)
+# means no unwind.
+_ac_all_own_ahead() {
+    local list c cn body
+    list="$(_ac_git rev-list "@{u}..${_unwind_head:-HEAD}" 2>/dev/null </dev/null || true)"
+    [ -n "$list" ] || return 1
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        cn="$(_ac_git log -1 --format=%cn "$c" 2>/dev/null </dev/null || true)"
+        [ "$cn" = "$AC_COMMITTER_NAME" ] || return 1
+        body="$(_ac_git log -1 --format=%B "$c" 2>/dev/null </dev/null || true)"
+        printf '%s\n' "$body" | grep -qxF "$AC_TRAILER_MARK" || return 1
+        printf '%s\n' "$body" | grep -qxF "Knowledge-Sync-Host: ${AC_HOST}" || return 1
+    done <<EOF_OWN
+$list
+EOF_OWN
+    return 0
+}
+
+# Record a hold reason; log it only when (path, key, reason) is new since the
+# last tick, so an abandoned stub is not re-logged every 30 minutes.
+_ac_hold() {
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$TICK_TMP/held"
+}
+
+_ac_flush_hold_log() {
+    local heldlog="${STATE_FILE%.json}.held" p reason key
+    [ -f "$TICK_TMP/held" ] || : > "$TICK_TMP/held"
+    LC_ALL=C sort -u "$TICK_TMP/held" > "$TICK_TMP/held.sorted"
+    while IFS="$_AC_TAB" read -r p reason key <&4; do
+        if [ -r "$heldlog" ] && grep -qxF "${p}${_AC_TAB}${reason}${_AC_TAB}${key}" "$heldlog" 2>/dev/null; then
+            continue
+        fi
+        log "autocommit-held: ${p} (${reason}) — not committed; it stays local and is re-evaluated every tick"
+    done 4< "$TICK_TMP/held.sorted"
+    if ! cmp -s "$TICK_TMP/held.sorted" "$heldlog" 2>/dev/null; then
+        if mkdir -p "${heldlog%/*}" 2>/dev/null && cp "$TICK_TMP/held.sorted" "${heldlog}.tmp.$$" 2>/dev/null; then
+            mv "${heldlog}.tmp.$$" "$heldlog" 2>/dev/null || rm -f "${heldlog}.tmp.$$" 2>/dev/null || true
+        fi
+    fi
+    return 0
+}
+
+# §4.5 INDEX coupling rule: commit an INDEX.md only when it is referentially
+# closed — no ref removed, dir not human-touched, and every added ref is in
+# HEAD or in this same commit. Reads $TICK_TMP/{indexcands,entries,touched},
+# writes $TICK_TMP/idxset; holds go to $TICK_TMP/held.
+_ac_index_rule() {
+    local p sha d reason r
+    : > "$TICK_TMP/idxset"
+    cut -f1 "$TICK_TMP/entries" > "$TICK_TMP/entrypaths"
+    while IFS="$_AC_TAB" read -r p sha <&4; do
+        [ -n "$p" ] || continue
+        d="${p%/INDEX.md}"
+        _ac_git cat-file blob "$sha" 2>/dev/null </dev/null | _ac_refs > "$TICK_TMP/refs.new"
+        if _ac_git cat-file -e "HEAD:$p" 2>/dev/null </dev/null; then
+            _ac_git cat-file blob "HEAD:$p" 2>/dev/null </dev/null | _ac_refs > "$TICK_TMP/refs.old"
+        else
+            : > "$TICK_TMP/refs.old"
+        fi
+        LC_ALL=C comm -23 "$TICK_TMP/refs.new" "$TICK_TMP/refs.old" > "$TICK_TMP/refs.added"
+        LC_ALL=C comm -13 "$TICK_TMP/refs.new" "$TICK_TMP/refs.old" > "$TICK_TMP/refs.removed"
+        reason=""
+        if [ -s "$TICK_TMP/refs.removed" ]; then
+            reason="index-drops-refs"
+        elif grep -qxF -- "$d" "$TICK_TMP/touched" 2>/dev/null; then
+            reason="dir-human-touched"
+        else
+            while IFS= read -r r <&5; do
+                [ -n "$r" ] || continue
+                _ac_git cat-file -e "HEAD:$d/$r" 2>/dev/null </dev/null && continue
+                grep -qxF -- "$d/$r" "$TICK_TMP/entrypaths" 2>/dev/null && continue
+                reason="index-refs-uncommitted"
+                break
+            done 5< "$TICK_TMP/refs.added"
+        fi
+        if [ -n "$reason" ]; then
+            _ac_hold "$p" "$reason" "$sha"
+        else
+            printf '%s\t%s\n' "$p" "$sha" >> "$TICK_TMP/idxset"
+        fi
+    done 4< "$TICK_TMP/indexcands"
+    return 0
+}
+
+# _ac_run_hook <name> <temp-index> [args...] — run the repo's EFFECTIVE hook
+# exactly the way `git commit` would: resolved through `rev-parse --git-path
+# hooks/<name>` (so core.hooksPath / dispatcher layouts are honoured), only if
+# it is an executable file, from the worktree top, with GIT_INDEX_FILE pointing
+# at the index being committed. Output is appended to AC_COMMIT_OUT. There is
+# no way to skip it: the function has no bypass argument, and every commit
+# attempt calls it (XACA-1291 §4.6 — hooks always run).
+_ac_run_hook() {
+    local name="$1" ti="$2" hook out rc
+    shift 2
+    hook="$(_ac_git rev-parse --git-path "hooks/$name" 2>/dev/null </dev/null || true)"
+    case "$hook" in
+        /*|'') ;;
+        *) hook="$REPO_DIR/$hook" ;;
+    esac
+    if [ -z "$hook" ] || [ ! -f "$hook" ] || [ ! -x "$hook" ]; then
+        return 0
+    fi
+    out="$(cd "$REPO_DIR" && GIT_INDEX_FILE="$ti" GIT_EDITOR=: "$hook" "$@" 2>&1 </dev/null)"
+    rc=$?
+    if [ -n "$out" ]; then
+        AC_COMMIT_OUT="${AC_COMMIT_OUT}${out}
+"
+    fi
+    return "$rc"
+}
+
+# One commit attempt. Returns:
+#   0 committed, landed and verified
+#   1 refused by a hook, >=1 path attributed ($TICK_TMP/attributed)
+#   2 nothing to commit        3 could not build the temp index / tree
+#   4 landed but verify failed — ROLLED BACK (compare-and-swap), nothing kept
+#   5 lost the race: HEAD moved while we were building/hooking — nothing landed
+#   6 unattributed refusal (hook error, signing failure, ...)
+#
+# XACA-1291-008 (race fix). The commit is built on a pre_head captured FIRST
+# and seeded into the temp index with `read-tree "$pre_head"`; the hooks run
+# against that index; the commit object is made with `commit-tree -p
+# "$pre_head"`; and it lands ONLY via `update-ref HEAD <new> <pre_head>`, which
+# git refuses atomically if the branch moved. A human commit that lands at ANY
+# point in the attempt therefore makes us lose cleanly (rc 5) instead of the
+# old failure mode, where `git commit` parented our tree — built from the OLD
+# HEAD — onto the human's new commit and silently reverted their change.
+_ac_commit_attempt() {
+    local n="$1" ti msg name email ne ni word subj p sha pre_head line tree new bad=0 refused=0
+    ti="$TICK_TMP/index.$n"
+    msg="$TICK_TMP/msg.$n"
+    : > "$TICK_TMP/attributed"
+    AC_COMMIT_OUT=""
+    cat "$TICK_TMP/entries" "$TICK_TMP/idxset" > "$TICK_TMP/commitlist"
+    [ -s "$TICK_TMP/commitlist" ] || return 2
+
+    pre_head="$(_ac_git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null </dev/null || true)"
+    [ -n "$pre_head" ] || return 3
+    AC_PRE_HEAD="$pre_head"
+
+    # Env is a per-command prefix ONLY. GIT_INDEX_FILE is never exported:
+    # push, reset and status later in this tick must see the REAL index.
+    GIT_INDEX_FILE="$ti" _ac_git read-tree "$pre_head" >/dev/null 2>&1 </dev/null || return 3
+    while IFS="$_AC_TAB" read -r p sha <&4; do
+        GIT_INDEX_FILE="$ti" _ac_git update-index --add --cacheinfo "100644,$sha,$p" >/dev/null 2>&1 </dev/null || bad=1
+    done 4< "$TICK_TMP/commitlist"
+    [ "$bad" -eq 0 ] || return 3
+    if GIT_INDEX_FILE="$ti" _ac_git diff --cached --quiet "$pre_head" -- 2>/dev/null </dev/null; then
+        return 2
+    fi
+
+    ne="$(_ac_count_lines "$TICK_TMP/entries")"
+    ni="$(_ac_count_lines "$TICK_TMP/idxset")"
+    word="entries"
+    [ "$ne" -eq 1 ] && word="entry"
+    subj="knowledge-sync: auto-commit ${ne} ${word}"
+    [ "$ni" -gt 0 ] && subj="${subj} + ${ni} INDEX"
+    subj="${subj} from ${AC_HOST}"
+    {
+        printf '%s\n\n' "$subj"
+        cut -f1 "$TICK_TMP/commitlist" | LC_ALL=C sort
+        printf '\n%s\nKnowledge-Sync-Host: %s\n' "$AC_TRAILER_MARK" "$AC_HOST"
+    } > "$msg"
+
+    # Hooks RUN, in git commit's order. The daemon never skips, disables or
+    # re-points them.
+    if ! _ac_run_hook pre-commit "$ti"; then
+        refused=1
+    elif ! _ac_run_hook prepare-commit-msg "$ti" "$msg" message; then
+        refused=1
+    elif ! _ac_run_hook commit-msg "$ti" "$msg"; then
+        refused=1
+    fi
+    if [ "$refused" -eq 1 ]; then
+        # Attribution: a COMMIT_SET path named on a [FAIL]/[BLOCK] line (the
+        # installed and tracked hook formats respectively).
+        while IFS="$_AC_TAB" read -r p sha <&4; do
+            line="$(printf '%s\n' "$AC_COMMIT_OUT" | grep -F -e '[FAIL]' -e '[BLOCK]' | grep -F -- "$p" | head -1)"
+            if [ -n "$line" ]; then
+                printf '%s\t%s\t%s\t%s\n' "$sha" "$p" "$(_now_iso)" "$(printf '%s' "$line" | tr '\t\n' '  ')" >> "$TICK_TMP/attributed"
+            fi
+        done 4< "$TICK_TMP/commitlist"
+        [ -s "$TICK_TMP/attributed" ] && return 1
+        return 6
+    fi
+
+    # A pre-commit hook may legitimately rewrite the index it was given (a
+    # formatter); like `git commit`, the tree is taken AFTER the hooks.
+    tree="$(GIT_INDEX_FILE="$ti" _ac_git write-tree 2>/dev/null </dev/null || true)"
+    [ -n "$tree" ] || return 3
+    _ac_git stripspace < "$msg" > "${msg}.clean" 2>/dev/null || cp "$msg" "${msg}.clean"
+    name="$(_ac_git config --get user.name 2>/dev/null || true)"
+    email="$(_ac_git config --get user.email 2>/dev/null || true)"
+    new="$(GIT_AUTHOR_NAME="$name" GIT_AUTHOR_EMAIL="$email" \
+        GIT_COMMITTER_NAME="$AC_COMMITTER_NAME" GIT_COMMITTER_EMAIL="knowledge-sync@${AC_HOST}.local" \
+        git -C "$REPO_DIR" commit-tree "$tree" -p "$pre_head" -F "${msg}.clean" 2>"$TICK_TMP/commit-tree.err" </dev/null)"
+    if [ -z "$new" ]; then
+        AC_COMMIT_OUT="${AC_COMMIT_OUT}$(cat "$TICK_TMP/commit-tree.err" 2>/dev/null)"
+        return 6
+    fi
+
+    # Land it — compare-and-swap on the branch. Refused if HEAD moved.
+    if ! _ac_git update-ref -m "commit: ${subj}" HEAD "$new" "$pre_head" >/dev/null 2>"$TICK_TMP/update-ref.err" </dev/null; then
+        AC_COMMIT_OUT="${AC_COMMIT_OUT}$(cat "$TICK_TMP/update-ref.err" 2>/dev/null)"
+        return 5
+    fi
+
+    # §4.5 step 8, belt and braces: our commit sits directly on pre_head and
+    # carries exactly the validated blobs. If not, roll back (again by CAS).
+    if [ "$(_ac_git rev-parse -q --verify 'HEAD^' 2>/dev/null </dev/null || true)" != "$pre_head" ]; then
+        bad=1
+    fi
+    while IFS="$_AC_TAB" read -r p sha <&4; do
+        if [ "$(_ac_git rev-parse -q --verify "HEAD:$p" 2>/dev/null </dev/null || true)" != "$sha" ]; then
+            bad=1
+        fi
+    done 4< "$TICK_TMP/commitlist"
+    if [ "$bad" -ne 0 ]; then
+        _ac_git update-ref -m "knowledge-sync: roll back unverified auto-commit" HEAD "$pre_head" "$new" >/dev/null 2>&1 </dev/null || true
+        return 4
+    fi
+
+    # post-commit, like git: its exit status is ignored.
+    _ac_run_hook post-commit "$ti" || true
+    return 0
+}
+
+# §4.5 step 9: move the REAL index forward for our paths, but only where it
+# still holds the pre-commit state. A path a human re-staged after P6 wins.
+_ac_resync_real_index() {
+    local p sha cur pre pending=""
+    while IFS="$_AC_TAB" read -r p sha <&4; do
+        cur="$(_ac_index_blob "$p")"
+        pre="$(_ac_git rev-parse -q --verify "${AC_PRE_HEAD}:$p" 2>/dev/null </dev/null || true)"
+        if [ -z "$cur" ] || [ "$cur" = "$pre" ]; then
+            if ! _ac_update_real_index "$p" "$sha"; then
+                pending="${pending:+$pending;}${p}=${sha}"
+            fi
+        fi
+    done 4< "$TICK_TMP/commitlist"
+    if [ -n "$pending" ]; then
+        log "autocommit-index-resync-pending: the real index was locked after the commit; it will be repaired first next tick (${pending})"
+        AC_RESYNC_PENDING="${AC_RESYNC_PENDING:+$AC_RESYNC_PENDING;}${pending}"
+    fi
+    return 0
+}
+
+# §4.5 AUTOCOMMIT. Precondition P2 (converged) and P3 (0 behind) are the
+# caller's; P1 and P4–P8 are checked here. Sets AC_RESULT to one of:
+# none | committed | refused | hook-error | deferred-staged |
+# deferred-git-busy | no-identity | disabled.
+_ac_autocommit() {
+    local rec xy p cls reason attempt rc ntrunc name email
+    AC_RESULT="none"
+    AC_Q_SKIPPED=0
+
+    if ! _ac_enabled; then
+        AC_RESULT="disabled"
+        log "autocommit-disabled: kill switch is on (KB_KNOWLEDGE_SYNC_AUTOCOMMIT=0 or ${AC_SENTINEL}) — local entries are not being shared"
+        return 0
+    fi
+    if _ac_git_busy; then
+        AC_RESULT="deferred-git-busy"
+        log "autocommit-deferred-git-busy: ${_AC_BUSY_WHY} present in ${GIT_DIR} — a git operation is in progress; not committing this tick"
+        return 0
+    fi
+    if ! _ac_git symbolic-ref -q HEAD >/dev/null 2>&1; then
+        AC_RESULT="deferred-git-busy"
+        log "autocommit-deferred-git-busy: HEAD is detached in ${REPO_DIR} — not committing this tick"
+        return 0
+    fi
+    if ! _ac_git diff --cached --quiet 2>/dev/null </dev/null; then
+        AC_RESULT="deferred-staged"
+        log "autocommit-deferred-staged: a human has changes staged in ${REPO_DIR} — the daemon stays out of the whole repo this tick"
+        return 0
+    fi
+    if _ac_hook_error_tripped; then
+        AC_RESULT="hook-error"
+        log "autocommit-hook-error: the pre-commit hook failed without naming an entry at ${AC_HOOK_ERR_AT} and has not changed since — backing off (one retry per 24h). Fix the hook (install the tracked .githooks/pre-commit); the daemon never bypasses it"
+        return 0
+    fi
+    name="$(_ac_git config --get user.name 2>/dev/null || true)"
+    email="$(_ac_git config --get user.email 2>/dev/null || true)"
+    if [ -z "$name" ] || [ -z "$email" ]; then
+        AC_RESULT="no-identity"
+        log "autocommit-no-identity: git user.name/user.email not configured for ${REPO_DIR} — cannot author an auto-commit"
+        return 0
+    fi
+    if ! _ac_tmp; then
+        AC_RESULT="deferred-git-busy"
+        log "autocommit-deferred-git-busy: could not create a scratch directory under ${TMPDIR:-/tmp}"
+        return 0
+    fi
+
+    # 1. candidates, straight from git status (NUL-separated; bash 3.2 read -d '').
+    : > "$TICK_TMP/cands"
+    : > "$TICK_TMP/touched"
+    : > "$TICK_TMP/entries"
+    : > "$TICK_TMP/indexcands"
+    : > "$TICK_TMP/held"
+    if ! _ac_git status --porcelain=v1 -z --untracked-files=all --no-renames > "$TICK_TMP/status" 2>/dev/null </dev/null; then
+        AC_RESULT="deferred-git-busy"
+        log "autocommit-deferred-git-busy: git status failed in ${REPO_DIR}"
+        return 0
+    fi
+    while IFS= read -r -d '' rec; do
+        xy="${rec:0:2}"
+        p="${rec:3}"
+        cls="$(_ac_classify "$p")"
+        [ -n "$cls" ] || continue
+        case "$xy" in
+            '??'|' M') printf '%s\t%s\n' "$p" "$cls" >> "$TICK_TMP/cands" ;;
+            *) printf '%s\n' "${p%/*}" >> "$TICK_TMP/touched"
+               _ac_hold "$p" "human-touched-${xy// /_}" "status" ;;
+        esac
+    done < "$TICK_TMP/status"
+    LC_ALL=C sort -u "$TICK_TMP/cands" > "$TICK_TMP/cands.sorted"
+    ntrunc="$(_ac_count_lines "$TICK_TMP/cands.sorted")"
+    if [ "$ntrunc" -gt "$AUTOCOMMIT_MAX_PATHS" ]; then
+        log "autocommit-truncated: ${ntrunc} candidates this tick; evaluating the first ${AUTOCOMMIT_MAX_PATHS} in sorted order, the rest next tick"
+        head -n "$AUTOCOMMIT_MAX_PATHS" "$TICK_TMP/cands.sorted" > "$TICK_TMP/cands"
+    else
+        cp "$TICK_TMP/cands.sorted" "$TICK_TMP/cands"
+    fi
+
+    # 2. hash + validate on the blob.
+    while IFS="$_AC_TAB" read -r p cls <&4; do
+        [ -n "$p" ] || continue
+        if ! reason="$(_ac_precheck "$p")"; then
+            _ac_hold "$p" "$reason" "mtime:$(_ac_mtime "$REPO_DIR/$p")"
+            continue
+        fi
+        if [ "$cls" != "index" ] && _ac_slot_collides "$p"; then
+            _ac_hold "$p" "slot-collision" "mtime:$(_ac_mtime "$REPO_DIR/$p")"
+            continue
+        fi
+        if ! _ac_hash "$p"; then
+            _ac_hold "$p" "not-quiescent" "mtime:$(_ac_mtime "$REPO_DIR/$p")"
+            continue
+        fi
+        if _ac_is_quarantined "$p" "$_AC_SHA"; then
+            AC_Q_SKIPPED=$(( AC_Q_SKIPPED + 1 ))
+            _ac_hold "$p" "quarantined" "$_AC_SHA"
+            continue
+        fi
+        if [ "$cls" = "index" ]; then
+            _ac_git cat-file blob "$_AC_SHA" > "$TICK_TMP/blob.index" 2>/dev/null </dev/null
+            if _ac_blob_has_nul "$TICK_TMP/blob.index"; then
+                _ac_hold "$p" "contains-nul" "$_AC_SHA"
+                continue
+            fi
+            printf '%s\t%s\n' "$p" "$_AC_SHA" >> "$TICK_TMP/indexcands"
+            continue
+        fi
+        if ! reason="$(_ac_validate_entry_blob "$_AC_SHA" "$p" "${cls#entry }")"; then
+            _ac_hold "$p" "${reason:-invalid}" "$_AC_SHA"
+            continue
+        fi
+        printf '%s\t%s\n' "$p" "$_AC_SHA" >> "$TICK_TMP/entries"
+    done 4< "$TICK_TMP/cands"
+
+    # 3–7. INDEX rule, temp index, commit; at most COMMIT_ATTEMPTS_PER_TICK
+    # attempts, each with a strictly smaller path set.
+    attempt=1
+    while [ "$attempt" -le "$COMMIT_ATTEMPTS_PER_TICK" ]; do
+        _ac_index_rule
+        _ac_commit_attempt "$attempt"
+        rc=$?
+        case "$rc" in
+            0)
+                [ "$AC_RESULT" = "refused" ] || AC_RESULT="committed"
+                AC_HOOK_ERR_KEY=""
+                AC_HOOK_ERR_AT=""
+                log "autocommit: $(head -1 "$TICK_TMP/msg.$attempt") as $(_ac_git rev-parse --short HEAD 2>/dev/null </dev/null)"
+                log_block "autocommit path" "$(cut -f1 "$TICK_TMP/commitlist" | LC_ALL=C sort)"
+                _ac_resync_real_index
+                break
+                ;;
+            1)
+                AC_RESULT="refused"
+                log "autocommit-refused: the pre-commit hook refused attempt ${attempt}; quarantining the named entr(y|ies) by content hash (an edit releases them)"
+                log_block "hook output" "$(printf '%s\n' "$AC_COMMIT_OUT" | head -20)"
+                if ! _ac_quarantine_refresh "$TICK_TMP/attributed"; then
+                    :   # held this tick; re-attempted once next tick (still bounded)
+                fi
+                cut -f2 "$TICK_TMP/attributed" > "$TICK_TMP/attributed.paths"
+                while IFS="$_AC_TAB" read -r _q_sha p _q_rest; do
+                    _ac_hold "$p" "hook-refused" "$_q_sha"
+                done < "$TICK_TMP/attributed"
+                awk -F'\t' 'NR == FNR { drop[$1] = 1; next } !($1 in drop)' "$TICK_TMP/attributed.paths" "$TICK_TMP/entries" > "$TICK_TMP/entries.next"
+                mv "$TICK_TMP/entries.next" "$TICK_TMP/entries"
+                awk -F'\t' 'NR == FNR { drop[$1] = 1; next } !($1 in drop)' "$TICK_TMP/attributed.paths" "$TICK_TMP/indexcands" > "$TICK_TMP/indexcands.next"
+                mv "$TICK_TMP/indexcands.next" "$TICK_TMP/indexcands"
+                attempt=$(( attempt + 1 ))
+                ;;
+            2)
+                break
+                ;;
+            3)
+                AC_RESULT="deferred-git-busy"
+                log "autocommit-deferred-git-busy: could not build the private temp index — not committing this tick"
+                break
+                ;;
+            4)
+                AC_RESULT="deferred-git-busy"
+                AC_NO_PUSH=1
+                log "autocommit-verify-failed: the landed commit did not carry exactly the validated blobs on the expected parent — rolled back, NOT pushing this tick, retrying next tick"
+                break
+                ;;
+            5)
+                AC_RESULT="deferred-git-busy"
+                AC_NO_PUSH=1
+                log "autocommit-lost-race: HEAD moved while the auto-commit was being built (a concurrent commit) — nothing landed, the real index is untouched, NOT pushing this tick; retrying next tick on top of the new HEAD"
+                log_block "git output" "$(printf '%s\n' "$AC_COMMIT_OUT" | head -20)"
+                break
+                ;;
+            *)
+                AC_RESULT="hook-error"
+                AC_HOOK_ERR_KEY="$(_ac_hook_key)"
+                AC_HOOK_ERR_AT="$(_now_iso)"
+                log "autocommit-hook-error: the commit was refused but no entry was named (a broken hook, a signing failure, or another environment fault). No entry is quarantined. Backing off: one retry per 24h or when the hook changes. The daemon never bypasses the hook — fix it (install the tracked .githooks/pre-commit)."
+                log_block "git commit output" "$(printf '%s\n' "$AC_COMMIT_OUT" | head -20)"
+                break
+                ;;
+        esac
+    done
+    _ac_flush_hold_log
+    return 0
+}
+
+# Residual dirt after the tick's commit (design §5.2 outbound_withheld_paths):
+# everything still dirty, split into allowlisted (held/incomplete) and
+# non-allowlisted. Sets OUT_WITHHELD_PATHS, _RES_ALLOWED, _RES_OTHER.
+_ac_residual() {
+    local rec p
+    OUT_WITHHELD_PATHS=0
+    _RES_ALLOWED=0
+    _RES_OTHER=0
+    _ac_tmp || return 0
+    _ac_git status --porcelain=v1 -z --untracked-files=all --no-renames > "$TICK_TMP/status.post" 2>/dev/null </dev/null || return 0
+    while IFS= read -r -d '' rec; do
+        p="${rec:3}"
+        OUT_WITHHELD_PATHS=$(( OUT_WITHHELD_PATHS + 1 ))
+        if [ -n "$(_ac_classify "$p")" ]; then
+            _RES_ALLOWED=$(( _RES_ALLOWED + 1 ))
+        else
+            _RES_OTHER=$(( _RES_OTHER + 1 ))
+        fi
+    done < "$TICK_TMP/status.post"
+    return 0
+}
+
+_ac_counts() {
+    _AHEAD="$(git -C "$REPO_DIR" rev-list --count '@{u}..HEAD' 2>/dev/null || true)"
+    case "$_AHEAD" in ''|*[!0-9]*) _AHEAD=0 ;; esac
+    _BEHIND="$(git -C "$REPO_DIR" rev-list --count 'HEAD..@{u}' 2>/dev/null || true)"
+    case "$_BEHIND" in ''|*[!0-9]*) _BEHIND=0 ;; esac
 }
 
 # ── Guard 3: quiescent-tree detection + fetch/integrate (XACA-1266) ─────────
@@ -480,8 +1501,16 @@ if [ -d "${GIT_DIR}/rebase-merge" ] || [ -d "${GIT_DIR}/rebase-apply" ] || [ -f 
     exit 0
 fi
 
-# Dirty flag only — no longer an exit. Selects the integrate strategy
-# below and separately gates the push at the very end.
+# XACA-1291 §4.5 step 9 (deferred half): carry the hook-error key and any
+# blocked real-index resync forward from the last tick, and repair the
+# latter FIRST — before the dirty check and before P6 — so a stale index left
+# by a held index.lock can never read as "a human staged something" forever.
+_ac_load_prior_state
+if [ -n "$AC_RESYNC_PENDING" ] && [ ! -e "${GIT_DIR}/index.lock" ]; then
+    _ac_repair_pending_resync
+fi
+
+# Dirty flag only — no longer an exit. Selects the integrate strategy below.
 _dirty="$(git -C "$REPO_DIR" status --porcelain 2>&1)"
 
 PRE_SYNC_HEAD="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
@@ -509,7 +1538,7 @@ FETCH_EXIT=$?
 if [ "$FETCH_EXIT" -ne 0 ]; then
     log "fetch-failed: git fetch failed in ${REPO_DIR} (offline / no auth / remote unreachable?) — refs, HEAD, and tree all unchanged; will retry next tick"
     log_block "git fetch output" "$FETCH_OUTPUT"
-    _update_notify_state "fetch-failed" "" ""
+    _update_notify_state "fetch-failed" "outbound-not-attempted" "" ""
     exit 0
 fi
 
@@ -534,11 +1563,25 @@ fi
 # otherwise exit-0-always contract: a data collision is a genuine defect, not an
 # ordinary git/network condition. We do NOT auto-remediate — renumbering entries
 # is the operator's call (see the XACA-0818 remediation).
+#
+# XACA-1291-008 (scope): the scan reads the COMMITTED tree (HEAD), not the
+# working tree. The gate's job is "never push a colliding state onward", and
+# only committed content can be pushed. Scanning the worktree made a LOCAL,
+# UNTRACKED half-entry that happened to share a slot block every push forever
+# (exit 65, nothing in notify state) now that push no longer needs a clean
+# tree. A local collision is the author's in-progress state: kb-knowledge-
+# validate reports it, and the auto-commit refuses to commit INTO a
+# collision (hold reason slot-collision), so the daemon never manufactures a
+# committed one either.
 _check_dup_slots() {
     _DUP_SLOTS_FOUND="$(
-        find "$REPO_DIR" -type f -name '*.md' ! -name 'INDEX.md' -not -path '*/.git/*' -print0 2>/dev/null \
+        git -C "$REPO_DIR" ls-tree -r -z --name-only HEAD 2>/dev/null \
         | while IFS= read -r -d '' _f; do
+            # suffix test, not a case pattern: bash 3.2 misparses one in here
+            [ "${_f%.md}" != "$_f" ] || continue
+            _f="$REPO_DIR/$_f"
             _d="${_f%/*}"; _b="${_f##*/}"
+            [ "$_b" = "INDEX.md" ] && continue
             # slot key = leading lowercase prefix + THREE-OR-MORE digits (k004, t001,
             # k1000, …). XACA-1155: this was exactly 3 digits, so a cross-host
             # collision on any slot past k999 was invisible here and got pushed.
@@ -557,6 +1600,39 @@ _handle_dup_slots_fatal() {
     fi
 }
 
+# ── Step: UNWIND own unpushed auto-commits (XACA-1291 §4.4) ──────────────────
+# New-reachable state once the daemon commits: our auto-commit is unpushed,
+# upstream advanced, and the tree is dirty again. A dirty diverged tree can
+# never fast-forward, so without this the daemon would wedge itself
+# (blocked-ff-diverged, forever). `reset --mixed <merge-base>` moves only the
+# branch ref and the index — NEVER the worktree (measured byte-identical,
+# design §1.6) — and only ever over commits that are (a) not on the upstream
+# and (b) provably OURS: daemon committer + both trailers naming THIS host.
+# A human's commit or another host's makes this skip, and the tick reaches
+# today's blocked-ff-diverged, which needs a human by design.
+# XACA-1291-008: the ref move is a compare-and-swap against the HEAD the
+# ownership check examined, so a human commit landing mid-check makes the
+# unwind refuse instead of dropping that commit off the branch.
+if [ -n "$_dirty" ] && _ac_enabled; then
+    _unwind_head="$(git -C "$REPO_DIR" rev-parse -q --verify HEAD 2>/dev/null || true)"
+    _ac_counts
+    if [ -n "$_unwind_head" ] && [ "$_AHEAD" -gt 0 ] && [ "$_BEHIND" -gt 0 ] && ! _ac_git_busy \
+        && git -C "$REPO_DIR" diff --cached --quiet 2>/dev/null \
+        && _ac_all_own_ahead; then
+        _unwind_mb="$(git -C "$REPO_DIR" merge-base "$_unwind_head" '@{u}' 2>/dev/null || true)"
+        if [ -n "$_unwind_mb" ] \
+            && git -C "$REPO_DIR" update-ref -m "knowledge-sync: unwind own unpushed auto-commit(s)" HEAD "$_unwind_mb" "$_unwind_head" >/dev/null 2>&1 \
+            && git -C "$REPO_DIR" reset -q --mixed "$_unwind_mb" >/dev/null 2>&1; then
+            log "autocommit-unwound: ${_AHEAD} own unpushed auto-commit(s) returned to the working tree to fast-forward over upstream (worktree untouched)"
+            _dirty="$(git -C "$REPO_DIR" status --porcelain 2>&1)"
+        else
+            log "autocommit-unwind-failed: could not reset ${REPO_DIR} to the merge-base — leaving it as found"
+        fi
+    fi
+fi
+
+INBOUND_TOKEN=""
+
 if [ -n "$_dirty" ]; then
     # ── DIRTY tree: integrate ONLY by fast-forward ───────────────────────────
     _pre_behind="$(git -C "$REPO_DIR" rev-list --count 'HEAD..@{u}' 2>/dev/null || true)"
@@ -566,128 +1642,191 @@ if [ -n "$_dirty" ]; then
 
     if [ "$_pre_behind" -eq 0 ]; then
         log "fetch-only-dirty: ${REPO_DIR} is dirty but already at upstream tip (0 behind) — nothing to fast-forward"
-        _update_notify_state "fetch-only-dirty" "$_pre_ahead" "0"
-        log "push-withheld-dirty: ${REPO_DIR} has uncommitted changes — push withheld (push requires a clean tree)"
-        exit 0
-    fi
-
-    log "attempting fast-forward on a dirty tree: git -C ${REPO_DIR} merge --ff-only @{u} (${_pre_behind} commit(s) behind)"
-    MERGE_OUTPUT="$(git -C "$REPO_DIR" merge --ff-only '@{u}' 2>&1)"
-    MERGE_EXIT=$?
-
-    if [ "$MERGE_EXIT" -eq 0 ]; then
-        log "converged-ff: ${REPO_DIR} advanced ${_pre_behind} commit(s) via fast-forward on a dirty tree — uncommitted local work is byte-identical, untouched (no stash was needed or created)"
-        log_block "git merge --ff-only output" "$MERGE_OUTPUT"
-        _check_dup_slots
-        _handle_dup_slots_fatal  # exits 65 and does not return if a collision is found
-        _update_notify_state "converged-ff" "$_pre_ahead" "0"
-        log "push-withheld-dirty: ${REPO_DIR} has uncommitted changes — push withheld (push requires a clean tree)"
-        exit 0
-    elif [ "$MERGE_EXIT" -eq 1 ]; then
-        log "blocked-ff-conflict: fast-forward refused in ${REPO_DIR} — incoming change(s) collide with the dirty tree (colliding path(s) named below by git itself). HEAD and local content are unchanged; git refused rather than clobbered. This machine CANNOT RECEIVE this content until the colliding local path is committed or removed by a human; it will keep retrying every tick."
-        log_block "git merge --ff-only output" "$MERGE_OUTPUT"
-        _update_notify_state "blocked-ff-conflict" "$_pre_ahead" "$_pre_behind"
-        log "push-withheld-dirty: ${REPO_DIR} has uncommitted changes — push withheld (push requires a clean tree)"
-        exit 0
+        INBOUND_TOKEN="fetch-only-dirty"
     else
-        log "blocked-ff-diverged: ${REPO_DIR} is dirty AND has diverged from its upstream (${_pre_ahead} ahead, ${_pre_behind} behind) — a fast-forward is impossible. HEAD and local content are unchanged; no rebase was attempted or left in progress. This machine CANNOT RECEIVE until a human resolves the dirty tree (this daemon never stashes or rebases a dirty tree) — it needs a human, not another tick."
-        log_block "git merge --ff-only output" "$MERGE_OUTPUT"
-        _update_notify_state "blocked-ff-diverged" "$_pre_ahead" "$_pre_behind"
-        log "push-withheld-dirty: ${REPO_DIR} has uncommitted changes — push withheld (push requires a clean tree)"
-        exit 0
-    fi
-fi
+        log "attempting fast-forward on a dirty tree: git -C ${REPO_DIR} merge --ff-only @{u} (${_pre_behind} commit(s) behind)"
+        MERGE_OUTPUT="$(git -C "$REPO_DIR" merge --ff-only '@{u}' 2>&1)"
+        MERGE_EXIT=$?
 
-# ── CLEAN tree: unchanged behaviour — git pull --rebase ──────────────────────
-# `git pull --rebase` performs its own internal fetch; the unconditional
-# fetch above already ran, so this is redundant-but-harmless on the common
-# path (nothing new to fetch) and remains the real fetch attempt on the
-# rare case where connectivity drops in between (see the
-# pull-failed-no-rebase-started branch below, unchanged from before this
-# ticket).
-log "pulling: git -C ${REPO_DIR} pull --rebase"
-PULL_OUTPUT="$(git -C "$REPO_DIR" pull --rebase 2>&1)"
-PULL_EXIT=$?
-
-if [ "$PULL_EXIT" -ne 0 ]; then
-    log_block "git pull --rebase output" "$PULL_OUTPUT"
-
-    # A `git pull --rebase` can fail in two distinct ways, and ops reading the
-    # log needs to tell them apart:
-    #   1. The fetch/rebase actually started and hit a conflict → a rebase-merge/
-    #      rebase-apply dir exists and MUST be aborted to unwedge the tree.
-    #   2. It failed BEFORE any rebase began (network/fetch error, remote
-    #      unreachable) → no rebase dir, nothing to abort, tree already untouched.
-    REBASE_WAS_STARTED=0
-    if [ -d "${GIT_DIR}/rebase-merge" ] || [ -d "${GIT_DIR}/rebase-apply" ]; then
-        REBASE_WAS_STARTED=1
-        log "rebase conflict detected in ${REPO_DIR} — running git rebase --abort"
-        if ! git -C "$REPO_DIR" rebase --abort >/dev/null 2>&1; then
-            log "WARNING: git rebase --abort itself failed in ${REPO_DIR} — manual intervention required"
+        if [ "$MERGE_EXIT" -eq 0 ]; then
+            log "converged-ff: ${REPO_DIR} advanced ${_pre_behind} commit(s) via fast-forward on a dirty tree — uncommitted local work is byte-identical, untouched (no stash was needed or created)"
+            log_block "git merge --ff-only output" "$MERGE_OUTPUT"
+            _check_dup_slots
+            _handle_dup_slots_fatal  # exits 65 and does not return if a collision is found
+            INBOUND_TOKEN="converged-ff"
+        elif [ "$MERGE_EXIT" -eq 1 ]; then
+            log "blocked-ff-conflict: fast-forward refused in ${REPO_DIR} — incoming change(s) collide with the dirty tree (colliding path(s) named below by git itself). HEAD and local content are unchanged; git refused rather than clobbered. This machine CANNOT RECEIVE this content until the colliding local path is committed or removed by a human; it will keep retrying every tick."
+            log_block "git merge --ff-only output" "$MERGE_OUTPUT"
+            _update_notify_state "blocked-ff-conflict" "outbound-not-attempted" "$_pre_ahead" "$_pre_behind"
+            exit 0
+        else
+            log "blocked-ff-diverged: ${REPO_DIR} is dirty AND has diverged from its upstream (${_pre_ahead} ahead, ${_pre_behind} behind) — a fast-forward is impossible. HEAD and local content are unchanged; no rebase was attempted or left in progress. This machine CANNOT RECEIVE until a human resolves it (the daemon unwinds only its OWN unpushed auto-commits, never a human's or another host's) — it needs a human, not another tick."
+            log_block "git merge --ff-only output" "$MERGE_OUTPUT"
+            _update_notify_state "blocked-ff-diverged" "outbound-not-attempted" "$_pre_ahead" "$_pre_behind"
+            exit 0
         fi
     fi
-
-    POST_ABORT_HEAD="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
-    if [ -n "$PRE_SYNC_HEAD" ] && [ "$POST_ABORT_HEAD" != "$PRE_SYNC_HEAD" ]; then
-        log "WARNING: HEAD in ${REPO_DIR} changed unexpectedly during a failed pull (was ${PRE_SYNC_HEAD}, now ${POST_ABORT_HEAD})"
-    fi
-
-    if [ "$REBASE_WAS_STARTED" -eq 1 ]; then
-        log "rebase-conflict-aborted: rebase conflict in ${REPO_DIR} — aborted, tree left at pre-sync HEAD (${PRE_SYNC_HEAD})"
-        _update_notify_state "rebase-conflict-aborted" "" ""
-    else
-        log "pull-failed-no-rebase-started: git pull --rebase failed before any rebase began in ${REPO_DIR} (offline / fetch error?) — tree untouched at ${PRE_SYNC_HEAD}, will retry next tick"
-    fi
-    exit 0
-fi
-
-POST_PULL_HEAD="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
-if [ -n "$PRE_SYNC_HEAD" ] && [ "$POST_PULL_HEAD" != "$PRE_SYNC_HEAD" ]; then
-    # 001 measured "pull-succeeded" printing the IDENTICAL string whether or
-    # not a fast-forward/rebase actually moved HEAD, making the
-    # content-bearing pull fraction unmeasurable. Distinguish for real, and
-    # carry the commit count (design §3.5's "two measurement defects").
-    _advanced_count="$(git -C "$REPO_DIR" rev-list --count "${PRE_SYNC_HEAD}..${POST_PULL_HEAD}" 2>/dev/null || true)"
-    case "$_advanced_count" in ''|*[!0-9]*) _advanced_count="unknown" ;; esac
-    log "rebased-advanced: ${REPO_DIR} advanced ${_advanced_count} commit(s) via rebase (${PRE_SYNC_HEAD} -> ${POST_PULL_HEAD})"
-    _update_notify_state "rebased-advanced" "" "$_advanced_count"
 else
-    log "already-current: ${REPO_DIR} is up to date with upstream — pull was a no-op"
-    _update_notify_state "already-current" "" "0"
+    # ── CLEAN tree: unchanged behaviour — git pull --rebase ──────────────────
+    # `git pull --rebase` performs its own internal fetch; the unconditional
+    # fetch above already ran, so this is redundant-but-harmless on the common
+    # path (nothing new to fetch) and remains the real fetch attempt on the
+    # rare case where connectivity drops in between (see the
+    # pull-failed-no-rebase-started branch below, unchanged from before this
+    # ticket). Own auto-commits are rebased here like any other local commit.
+    log "pulling: git -C ${REPO_DIR} pull --rebase"
+    PULL_OUTPUT="$(git -C "$REPO_DIR" pull --rebase 2>&1)"
+    PULL_EXIT=$?
+
+    if [ "$PULL_EXIT" -ne 0 ]; then
+        log_block "git pull --rebase output" "$PULL_OUTPUT"
+
+        # A `git pull --rebase` can fail in two distinct ways, and ops reading the
+        # log needs to tell them apart:
+        #   1. The fetch/rebase actually started and hit a conflict → a rebase-merge/
+        #      rebase-apply dir exists and MUST be aborted to unwedge the tree.
+        #   2. It failed BEFORE any rebase began (network/fetch error, remote
+        #      unreachable) → no rebase dir, nothing to abort, tree already untouched.
+        REBASE_WAS_STARTED=0
+        if [ -d "${GIT_DIR}/rebase-merge" ] || [ -d "${GIT_DIR}/rebase-apply" ]; then
+            REBASE_WAS_STARTED=1
+            log "rebase conflict detected in ${REPO_DIR} — running git rebase --abort"
+            if ! git -C "$REPO_DIR" rebase --abort >/dev/null 2>&1; then
+                log "WARNING: git rebase --abort itself failed in ${REPO_DIR} — manual intervention required"
+            fi
+        fi
+
+        POST_ABORT_HEAD="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
+        if [ -n "$PRE_SYNC_HEAD" ] && [ "$POST_ABORT_HEAD" != "$PRE_SYNC_HEAD" ]; then
+            log "WARNING: HEAD in ${REPO_DIR} changed unexpectedly during a failed pull (was ${PRE_SYNC_HEAD}, now ${POST_ABORT_HEAD})"
+        fi
+
+        if [ "$REBASE_WAS_STARTED" -eq 1 ]; then
+            log "rebase-conflict-aborted: rebase conflict in ${REPO_DIR} — aborted, tree left at pre-sync HEAD (${PRE_SYNC_HEAD})"
+            _update_notify_state "rebase-conflict-aborted" "outbound-not-attempted" "" ""
+        else
+            log "pull-failed-no-rebase-started: git pull --rebase failed before any rebase began in ${REPO_DIR} (offline / fetch error?) — tree untouched at ${PRE_SYNC_HEAD}, will retry next tick"
+        fi
+        exit 0
+    fi
+
+    POST_PULL_HEAD="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
+    if [ -n "$PRE_SYNC_HEAD" ] && [ "$POST_PULL_HEAD" != "$PRE_SYNC_HEAD" ]; then
+        # 001 measured "pull-succeeded" printing the IDENTICAL string whether or
+        # not a fast-forward/rebase actually moved HEAD, making the
+        # content-bearing pull fraction unmeasurable. Distinguish for real, and
+        # carry the commit count (design §3.5's "two measurement defects").
+        _advanced_count="$(git -C "$REPO_DIR" rev-list --count "${PRE_SYNC_HEAD}..${POST_PULL_HEAD}" 2>/dev/null || true)"
+        case "$_advanced_count" in ''|*[!0-9]*) _advanced_count="unknown" ;; esac
+        log "rebased-advanced: ${REPO_DIR} advanced ${_advanced_count} commit(s) via rebase (${PRE_SYNC_HEAD} -> ${POST_PULL_HEAD})"
+        INBOUND_TOKEN="rebased-advanced"
+    else
+        log "already-current: ${REPO_DIR} is up to date with upstream — pull was a no-op"
+        INBOUND_TOKEN="already-current"
+    fi
+
+    _check_dup_slots
+    _handle_dup_slots_fatal  # exits 65 and does not return if a collision is found
+fi
+_DUP_CHECKED_HEAD="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
+
+# ── Step: AUTOCOMMIT (XACA-1291 §4.5) ───────────────────────────────────────
+# Only on a converged tick (P2 — every non-converged branch above has
+# already exited) and only at 0 behind (P3): committing on a tree that is
+# behind turns a fast-forwardable state into a diverged one.
+_ac_counts
+OUTBOUND_TOKEN=""
+AC_RESULT="none"
+if [ "$_BEHIND" -gt 0 ]; then
+    OUTBOUND_TOKEN="outbound-not-attempted"
+elif [ -n "$(git -C "$REPO_DIR" status --porcelain 2>/dev/null)" ]; then
+    _ac_autocommit
+elif ! _ac_enabled; then
+    AC_RESULT="disabled"
 fi
 
-_check_dup_slots
-_handle_dup_slots_fatal  # exits 65 and does not return if a collision is found
-
-# ── Step: push (only if we actually have local commits ahead) ───────────────
-# Gate is UNCHANGED and remains exactly as strict as before this ticket:
-# push only ever runs here, on the path reached ONLY by a clean tree (the
-# dirty branch above always exits before reaching this point, logging
-# push-withheld-dirty itself). Pushing from a dirty tree was never safe and
-# still isn't — see the XACA-1266 header comment for why this half of the
-# contract stays broken (nothing ever commits to ~/knowledge, so this gate
-# is in practice permanently closed on an authoring machine until a
-# separate, out-of-scope commit-on-write change lands).
-AHEAD="$(git -C "$REPO_DIR" rev-list --count '@{u}..HEAD' 2>/dev/null || true)"
-case "$AHEAD" in
-    ''|*[!0-9]*) AHEAD=0 ;;
-esac
-
-if [ "$AHEAD" -eq 0 ]; then
-    log "up-to-date: ${REPO_DIR} has no local commits ahead of upstream — nothing to push"
-    exit 0
+# ── Step: push (XACA-1291 §4.7 — relaxed gate) ──────────────────────────────
+# Pushes on the dirty AND the clean path. `git push` reads refs and the
+# object store only; it never reads or writes the worktree or the index
+# (measured: dirt byte-identical before and after, design §1.6). The old
+# "push requires a clean tree" gate protected nothing the push touches — it
+# was a side effect of the pre-XACA-1266 whole-sync dirty guard. The one
+# real precondition, behind == 0, is checked explicitly. Never --force.
+PUSH_RESULT="none"
+if [ "$OUTBOUND_TOKEN" != "outbound-not-attempted" ]; then
+    _ac_counts
+    if [ "$AC_NO_PUSH" -eq 1 ]; then
+        # A concurrent commit raced the auto-commit. Whatever HEAD is now was
+        # not produced by a clean tick of ours; do not ship it on this tick.
+        log "push-deferred-race: not pushing ${REPO_DIR} this tick (the auto-commit lost a race with a concurrent commit); next tick re-evaluates from the new HEAD"
+        PUSH_RESULT="deferred"
+    elif [ "$_AHEAD" -gt 0 ] && [ "$_BEHIND" -eq 0 ]; then
+        # The dup-slot gate must cover whatever is about to leave this machine
+        # (an auto-commit, or a human commit pushed from a dirty tree).
+        if [ "$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)" != "$_DUP_CHECKED_HEAD" ] || [ -n "$_dirty" ]; then
+            _check_dup_slots
+            _handle_dup_slots_fatal  # exits 65 and does not return if a collision is found
+        fi
+        log "pushing: ${_AHEAD} local commit(s) ahead of upstream in ${REPO_DIR}"
+        PUSH_OUTPUT="$(git -C "$REPO_DIR" push 2>&1)"
+        PUSH_EXIT=$?
+        if [ "$PUSH_EXIT" -ne 0 ]; then
+            log "push-failed: git push failed in ${REPO_DIR} (offline / no auth / rejected?) — will retry next tick, NOT force-pushing"
+            log_block "git push output" "$PUSH_OUTPUT"
+            PUSH_RESULT="failed"
+        else
+            log "synced: pushed ${_AHEAD} commit(s) from ${REPO_DIR} to upstream"
+            PUSH_RESULT="pushed"
+            case "$INBOUND_TOKEN" in
+                already-current|rebased-advanced) INBOUND_TOKEN="synced" ;;
+            esac
+        fi
+    elif [ "$_AHEAD" -gt 0 ]; then
+        log "outbound-withheld-diverged: ${REPO_DIR} is ${_AHEAD} ahead and ${_BEHIND} behind after integrate — a push would be rejected; not pushing"
+        PUSH_RESULT="diverged"
+    else
+        log "up-to-date: ${REPO_DIR} has no local commits ahead of upstream — nothing to push"
+    fi
 fi
 
-log "pushing: ${AHEAD} local commit(s) ahead of upstream in ${REPO_DIR}"
-PUSH_OUTPUT="$(git -C "$REPO_DIR" push 2>&1)"
-PUSH_EXIT=$?
-
-if [ "$PUSH_EXIT" -ne 0 ]; then
-    log "push-failed: git push failed in ${REPO_DIR} (offline / no auth / rejected?) — will retry next tick, NOT force-pushing"
-    log_block "git push output" "$PUSH_OUTPUT"
-    exit 0
+# ── Outbound token (design §5.3 precedence, first match wins) ───────────────
+if [ -n "${TICK_TMP:-}" ] || _ac_tmp; then
+    if [ -r "$QUARANTINE_FILE" ]; then
+        _ac_quarantine_refresh "" || true
+    fi
+fi
+_ac_residual
+_ac_counts
+OUT_HAS_WITHHELD=0
+if [ "$OUT_WITHHELD_PATHS" -gt 0 ] || [ "$_AHEAD" -gt 0 ]; then
+    OUT_HAS_WITHHELD=1
+fi
+if [ "$OUTBOUND_TOKEN" != "outbound-not-attempted" ]; then
+    if [ "$AC_RESULT" = "hook-error" ]; then
+        OUTBOUND_TOKEN="autocommit-hook-error"
+    elif [ "$AC_RESULT" = "refused" ] || [ "$AC_Q_SKIPPED" -gt 0 ]; then
+        OUTBOUND_TOKEN="autocommit-refused"
+    elif [ "$PUSH_RESULT" = "failed" ]; then
+        OUTBOUND_TOKEN="push-failed"
+    elif [ "$PUSH_RESULT" = "diverged" ]; then
+        OUTBOUND_TOKEN="outbound-withheld-diverged"
+    elif [ "$AC_RESULT" = "deferred-staged" ] || [ "$AC_RESULT" = "deferred-git-busy" ] || [ "$AC_RESULT" = "no-identity" ]; then
+        case "$AC_RESULT" in
+            no-identity) OUTBOUND_TOKEN="autocommit-no-identity" ;;
+            *) OUTBOUND_TOKEN="autocommit-${AC_RESULT}" ;;
+        esac
+    elif [ "$AC_RESULT" = "disabled" ]; then
+        OUTBOUND_TOKEN="autocommit-disabled"
+    elif [ "$_RES_ALLOWED" -gt 0 ]; then
+        OUTBOUND_TOKEN="outbound-withheld-incomplete"
+    elif [ "$_RES_OTHER" -gt 0 ]; then
+        OUTBOUND_TOKEN="outbound-withheld-nonallowlisted"
+    elif [ "$PUSH_RESULT" = "pushed" ]; then
+        OUTBOUND_TOKEN="pushed"
+    else
+        OUTBOUND_TOKEN="outbound-current"
+    fi
 fi
 
-log "synced: pushed ${AHEAD} commit(s) from ${REPO_DIR} to upstream"
-_update_notify_state "synced" "0" "0"
+_update_notify_state "$INBOUND_TOKEN" "$OUTBOUND_TOKEN" "$_AHEAD" "$_BEHIND"
 exit 0

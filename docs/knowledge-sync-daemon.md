@@ -1,4 +1,4 @@
-# Knowledge Sync Daemon (XACA-0749 / XACA-0761 / XACA-1266)
+# Knowledge Sync Daemon (XACA-0749 / XACA-0761 / XACA-1266 / XACA-1291)
 
 Automated cross-machine sync for the shared `~/knowledge` git clone. Part of
 EPIC-0047 (knowledge system fleet-wide).
@@ -7,13 +7,16 @@ EPIC-0047 (knowledge system fleet-wide).
 
 `kb-knowledge-sync.sh` keeps `~/knowledge` converged with the remote on a
 timer, so knowledge entries authored on one fleet machine propagate to the
-rest of the fleet without anyone remembering to pull or push. It is a
-**best-effort background job**, not a guaranteed-consistency system.
+rest of the fleet without anyone remembering to pull, commit, or push. It is
+a **best-effort background job**, not a guaranteed-consistency system.
 
 **What "sync" means in practice today:** the daemon reliably brings *other
-machines'* knowledge to yours. It does not yet reliably send *your own*
-authored entries out — see "Known limitation" below before relying on this
-for anything you need shared urgently.
+machines'* knowledge to yours (XACA-1266), **and** it now auto-commits and
+sends your own authored entries out too (XACA-1291) — once an entry is
+complete and has sat untouched for 15 minutes, the daemon commits it on
+your behalf and pushes on the next tick where it's not behind upstream. See
+"Outbound: what gets auto-committed" below for exactly which entries
+qualify, and "Remaining limitation" for what still needs a manual commit.
 
 ## Design philosophy: degrade gracefully, and never touch uncommitted work
 
@@ -26,7 +29,8 @@ launchd never marks the job as failed and never leaves a wedged tree:
 | Another sync already running (lock held) | Skip, exit 0 |
 | Mid-rebase / mid-merge | Skip entirely (no stash — a human is mid-edit), exit 0 |
 | Working tree dirty, upstream has new commits | Fetches (always safe) and fast-forwards if it can; refuses without touching anything if it can't, exit 0 |
-| Dirty tree, fast-forward succeeded | Push is still withheld — push always requires a clean tree |
+| Diverged and dirty, but the "ahead" commits are all the daemon's own unpushed auto-commits | Undoes just those auto-commits (worktree untouched), then integrates normally |
+| After integration | Auto-commits any eligible entries (see "Outbound" below), then pushes whenever it has something to send and isn't behind — **dirty tree or clean** |
 | Clean tree | Fetches, then `git pull --rebase`, as before |
 | `pull --rebase` hits a conflict (clean tree) | `git rebase --abort` → tree restored to pre-sync HEAD, failure logged, exit 0 |
 | `push` rejected / offline / no auth | Warning logged, exit 0 (retried next tick) |
@@ -36,7 +40,46 @@ launchd never marks the job as failed and never leaves a wedged tree:
 It never pushes with `--force`, never auto-resolves a conflict, and **never
 stashes or otherwise touches a dirty working tree's files** — a fast-forward
 either applies cleanly with your uncommitted content untouched, or it
-refuses outright and leaves everything exactly as it was.
+refuses outright and leaves everything exactly as it was. Auto-commit
+builds its commit in a private, disposable index and never runs `git add`,
+so it can never sweep up a file you're still mid-edit on.
+
+## Outbound: what gets auto-committed, and what never does
+
+Not every uncommitted file in `~/knowledge` gets picked up. An entry is
+only auto-committed if **all** of these hold:
+
+- It's under `agents/`, `subjects/`, or `teams/` (or it's an `INDEX.md`) —
+  nothing else in the repo is ever touched.
+- It's **complete**: valid frontmatter (id/tier/date/tags, plus
+  agent/team where required), the filename matches the frontmatter id, a
+  real body, and none of the `kb-knowledge-add` template's placeholder
+  markers still present.
+- It's **quiescent**: untouched for at least 15 minutes, and no editor
+  swap/backup file sitting next to it.
+- It doesn't carry the opt-out marker `<!-- knowledge-sync: hold -->` —
+  add that line to any entry to keep the daemon from touching it.
+- It isn't currently quarantined (see below).
+- For an `INDEX.md`: it only adds rows that point at entries which are
+  already committed or are being committed in the same tick, and it
+  doesn't drop any existing row.
+
+Anything that doesn't qualify yet is logged as `autocommit-held: <path>
+(<reason>)` and simply re-checked on the next tick — nothing is lost or
+skipped forever except a quarantined or hold-marked entry, and both of
+those clear as soon as you edit the file.
+
+**If the pre-commit hook refuses an entry** (`autocommit-refused`), that
+specific entry is quarantined by its content hash until you change it —
+edit the file (any change releases it) and it will be picked up again. If
+the hook refuses without naming which entry, that's `autocommit-hook-error`
+— a hook/environment problem, not a bad entry — and the daemon backs off
+for 24h.
+
+**Kill switch:** set `KB_KNOWLEDGE_SYNC_AUTOCOMMIT=0`, or create
+`~/.aiteamforge/knowledge-sync-autocommit.off`. Either disables auto-commit
+(inbound sync keeps working); the sentinel file exists because a
+LaunchAgent's environment can't be set with a shell `export`.
 
 ## Log output reference
 
@@ -48,17 +91,20 @@ Each run logs one or more lines tagged `[kb-knowledge-sync]`, greppable as
 | `converged-ff` | You had uncommitted changes, and the daemon still pulled in new fleet knowledge cleanly — your own changes are untouched. |
 | `fetch-only-dirty` | You had uncommitted changes; there was nothing new to pull in anyway. |
 | `blocked-ff-conflict` | You had uncommitted changes that collide with something new coming in. Nothing was touched — see "Troubleshooting" below. |
-| `blocked-ff-diverged` | You have local commits **and** uncommitted changes, and upstream has moved — the daemon can't reconcile this automatically. See "Troubleshooting" below. |
+| `blocked-ff-diverged` | You have local commits (not the daemon's own auto-commits) **and** uncommitted changes, and upstream has moved — the daemon can't reconcile this automatically. See "Troubleshooting" below. |
 | `rebased-advanced` | Clean tree — pulled in new fleet knowledge. |
 | `already-current` | Clean tree — already up to date, nothing to do. |
-| `push-withheld-dirty` | Nothing was pushed this tick because the tree was dirty. **This is normal and expected on a machine where you're actively authoring entries** — see "Known limitation." |
-| `synced` | Pushed your locally committed changes successfully. |
+| `autocommit: <subject> as <sha>` | The daemon committed one or more of your eligible entries on your behalf. |
+| `autocommit-held: <path> (<reason>)` | That entry wasn't committed this tick yet — see "Outbound" above for why. |
+| `autocommit-refused` / `autocommit-hook-error` | The pre-commit hook rejected an entry (quarantined) or failed outright (backed off) — see "Outbound" above. |
+| `synced` | Pushed your locally committed (including auto-committed) changes successfully. |
 | `push-failed` | Push was rejected, or you're offline / not authenticated. Retried automatically next tick. |
 
-> **Version check:** if your log ever shows `skipped-dirty` instead of any
-> of the tokens above, this machine is still running a daemon version from
-> before XACA-1266 and has not yet received the current release — check for
-> a pending `brew upgrade aiteamforge`.
+> **Version check:** if your log ever shows `skipped-dirty` or
+> `push-withheld-dirty` instead of the tokens above, this machine is still
+> running a daemon version from before XACA-1266 / XACA-1291 respectively
+> and has not yet received the current release — check for a pending
+> `brew upgrade aiteamforge`.
 
 ## Troubleshooting
 
@@ -71,8 +117,10 @@ move, or remove the local content that's in the way; the daemon will not do
 this for you.
 
 **Log shows `blocked-ff-diverged`:** you have local commits ahead of
-upstream *and* an uncommitted change, so the daemon can't fast-forward.
-Resolve it by hand from `~/knowledge`:
+upstream (and they're not just the daemon's own not-yet-pushed
+auto-commits — if they were, the daemon would have unwound them itself)
+*and* an uncommitted change, so the daemon can't fast-forward. Resolve it
+by hand from `~/knowledge`:
 
 ```bash
 cd ~/knowledge
@@ -87,19 +135,26 @@ conflict between local and remote history on a clean tree and backed out
 cleanly — **your tree is at its pre-sync HEAD, nothing is lost, and nothing
 was pushed**. Resolve it the same way as `blocked-ff-diverged` above.
 
-**Log is full of `push-withheld-dirty`:** expected, not a bug — see "Known
-limitation" directly below.
+**Log shows `autocommit-held: <path> (<reason>)`:** that entry isn't
+eligible for auto-commit yet — see "Outbound" above for what each reason
+means. Most clear themselves automatically (finish editing, wait out the
+15-minute quiescence window); a `hold-marker` reason means the entry has
+`<!-- knowledge-sync: hold -->` in it and stays local until you remove that
+line yourself.
 
-## Known limitation: your own entries may not be leaving this machine
+**Log shows `autocommit-refused`:** the pre-commit hook rejected a specific
+entry; it's quarantined by content hash until you edit the file (any change
+releases it). **`autocommit-hook-error`** means the hook failed without
+naming an entry — a broken hook/environment, not a bad entry — and the
+daemon backs off 24h; fix the hook rather than the file.
 
-Today, authoring a knowledge entry (`kb-knowledge-add` and similar commands)
-does not commit it — it lands as an untracked file. The daemon only ever
-pushes from a clean tree, so on a machine where you're actively authoring,
-the tree is rarely clean and pushes are mostly skipped
-(`push-withheld-dirty`). **Pulling other machines' knowledge into yours is
-reliable; pushing your own out is not, yet.** Until this is addressed,
-periodically commit and push your own authored entries by hand if you need
-them to reach the rest of the fleet promptly:
+## Remaining limitation: not every entry is auto-committed
+
+Auto-commit only covers `agents/`, `subjects/`, `teams/`, and `INDEX.md`
+files that are complete and quiescent (see "Outbound" above) — it will
+never touch anything outside that allowlist, or an entry you've marked
+`<!-- knowledge-sync: hold -->`. For those, commit and push by hand if you
+need them to reach the fleet:
 
 ```bash
 cd ~/knowledge

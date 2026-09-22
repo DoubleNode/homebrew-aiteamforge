@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1291** — `share/scripts/kb-knowledge-sync.sh`: knowledge-sync OUTBOUND auto-commit. The daemon
+  now commits only validated, complete, quiescent entries (agents/subjects/teams plus referentially-closed
+  INDEX.md) through a private temp index, never `git add`. Hooks are enforced, never `--no-verify`. The
+  commit lands via `commit-tree` plus a race-safe `update-ref HEAD <new> <pre_head>`. The daemon pushes
+  from a dirty tree when 0 behind (`push-withheld-dirty` retired). Hook-refused entries are quarantined
+  until edited. Kill switch: `KB_KNOWLEDGE_SYNC_AUTOCOMMIT=0` or `~/.aiteamforge/knowledge-sync-autocommit.off`.
+  Withheld outbound is reported in the existing notify-state file. `docs/knowledge-sync-daemon.md` updated.
 - **XACA-1283-021/022** — `libexec/installers/install-claude-config.sh`: two PR #934 review fixes to the
   settings.json upgrade-path key refresh. (021) `_xaca1283_refresh_settings_json_keys` fell back to mode
   0644 whenever `_aitf_file_mode` wasn't in scope (e.g. the installer sourced standalone), silently
