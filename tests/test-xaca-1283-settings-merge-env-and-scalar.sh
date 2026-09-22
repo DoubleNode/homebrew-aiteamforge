@@ -80,11 +80,15 @@ trap cleanup EXIT
 _REAL_HOME="$HOME"
 P_PATH='["env","CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]'
 SKIP_PATH='["skipDangerousModePermissionPrompt"]'
+# XACA-1300-004: cleanupPeriodDays pinned to 30 (the Claude Code documented
+# default) joined the shipped key list unconditionally (not staged), so it is
+# counted in EXPECT_ADDED alongside skipDangerousModePermissionPrompt below.
+CLEANUP_PATH='["cleanupPeriodDays"]'
 
 if [ "$XACA1283_STAGE" = B ]; then
-    EXPECT_P='"50"'; EXPECT_ADDED=2
+    EXPECT_P='"50"'; EXPECT_ADDED=3
 else
-    EXPECT_P='null'; EXPECT_ADDED=1
+    EXPECT_P='null'; EXPECT_ADDED=2
 fi
 
 # ── Extract the REAL upgrade-side function (so the test fails if it is
@@ -231,6 +235,14 @@ else
     test_fail "template=$(tmpl_get '.skipDangerousModePermissionPrompt') keys=$SHIPPED_KEYS"
 fi
 
+test_start "S5 (XACA-1300-004): shipped template carries cleanupPeriodDays=30 and the key list includes it"
+if [ "$(tmpl_get '.cleanupPeriodDays')" = '30' ] \
+    && printf '%s' "$SHIPPED_KEYS" | jq -e --argjson p "$CLEANUP_PATH" 'index([$p]) != null' >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "template=$(tmpl_get '.cleanupPeriodDays') keys=$SHIPPED_KEYS"
+fi
+
 # ═══ G1: STAGE-A GUARD — flipped by Stage B ═════════════════════════════════
 if [ "$XACA1283_STAGE" = B ]; then
     test_start "G1 (Stage B): shipped template carries env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=\"50\" (string) AND the key list includes it"
@@ -258,6 +270,12 @@ if [ "$(jget "$CD/settings.json" '.skipDangerousModePermissionPrompt')" = 'true'
 else
     test_fail "got $(jget "$CD/settings.json" '.skipDangerousModePermissionPrompt') ; upgrade output: $(cat "$TEST_TMP_DIR/u1/upgrade.out")"
 fi
+test_start "U1a2 (XACA-1300-004): upgrade adds top-level scalar cleanupPeriodDays=30 to a pre-existing settings.json that lacks it"
+if [ "$(jget "$CD/settings.json" '.cleanupPeriodDays')" = '30' ]; then
+    test_pass
+else
+    test_fail "got $(jget "$CD/settings.json" '.cleanupPeriodDays') ; upgrade output: $(cat "$TEST_TMP_DIR/u1/upgrade.out")"
+fi
 test_start "U1b: env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE after upgrade is ${EXPECT_P} (stage ${XACA1283_STAGE})"
 if [ "$(jget "$CD/settings.json" '.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE')" = "$EXPECT_P" ]; then
     test_pass
@@ -266,7 +284,7 @@ else
 fi
 test_start "U1c: upgrade preserves unrelated user content (custom env key, permissions arrays, model, hooks) exactly"
 _expect="$(printf '%s' "$SEED_ABSENT" | jq -S -c --argjson p "$EXPECT_P" \
-    '.skipDangerousModePermissionPrompt=true | if $p != null then .env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$p else . end')"
+    '.skipDangerousModePermissionPrompt=true | .cleanupPeriodDays=30 | if $p != null then .env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$p else . end')"
 _got="$(jq -S -c . "$CD/settings.json" 2>/dev/null)"
 if [ -n "$_got" ] && [ "$_got" = "$_expect" ]; then
     test_pass

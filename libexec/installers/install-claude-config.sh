@@ -866,9 +866,18 @@ install_settings_json() {
 # STAGED ROLLOUT (XACA-1283): Stage A ships only the scalar below. Stage B
 # adds exactly one line here -- ["env","CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] --
 # plus the matching template line, after the P=50 7-day gate on M3Pro.
+#
+# XACA-1300-004: cleanupPeriodDays pinned to 30 (the Claude Code documented
+# default -- see docs/en/data-usage#data-retention, "Local caching ... 30
+# days by default ... Adjust the period with cleanupPeriodDays"). Today the
+# key is unset everywhere (fleet rides the implicit default); this makes the
+# value explicit and deployed rather than an assumption that could change
+# under us. Not experimental/staged like the autocompact override above --
+# added directly alongside the existing scalar.
 _xaca1283_upgrade_settings_key_paths() {
     cat <<'EOF'
 ["skipDangerousModePermissionPrompt"]
+["cleanupPeriodDays"]
 EOF
 }
 

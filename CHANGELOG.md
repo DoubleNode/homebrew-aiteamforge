@@ -6,6 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1300-004** — pin `cleanupPeriodDays=30` (transcript retention) fleet-wide. Claude Code's
+  documented default for local session transcripts is 30 days (confirmed against
+  `code.claude.com/docs/en/data-usage`, not previously verified); the key was unset everywhere, so the
+  fleet rode the implicit default. Added to `share/templates/claude/settings.json.template` (fresh
+  installs) and to `_xaca1283_upgrade_settings_key_paths()` in
+  `libexec/installers/install-claude-config.sh` (the XACA-1283 fill-absent list, so `aiteamforge upgrade`
+  fills it in on already-installed boxes, not only fresh `aiteamforge setup`). Not staged/experimental —
+  added directly alongside the existing `skipDangerousModePermissionPrompt` scalar entry.
+  `tests/test-xaca-1283-settings-merge-env-and-scalar.sh` extended: new S5 (template + key-list
+  structural check) and U1a2 (upgrade adds it to an absent-key seed) cases, `EXPECT_ADDED` bumped to
+  account for the third listed key. Tap-only file (no canonical `dev-team/` mirror for
+  `install-claude-config.sh` or `settings.json.template` — neither appears in `sync-tap.sh`'s map).
 - **XACA-1297** — `share/scripts/kb-compaction-premise-check.sh`: the compaction ratchet now discovers
   npm-installed Claude Code (single `bin/claude.exe`, version from `package.json`, no `versions/` dir) — the
   layout on every tap machine — instead of always ending COULD NOT VERIFY (rc=2). Accepted only when
