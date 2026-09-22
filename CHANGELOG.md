@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.22] - 2026-09-22
 - **XACA-1291** (follow-up round 2, dev-team PR #953) — `share/scripts/kb-knowledge-sync.sh`: pin `LC_ALL=C` on the whole `_check_dup_slots` pipeline (an unpinned `tr` aborted on a non-UTF-8 byte in a UTF-8 locale and reported a partial scan as clean), and fail loud (exit 65) when the scan cannot complete, instead of returning an empty 'no collisions'.
 - **XACA-1300-022/023/024** — mirrors of the XACA-1300 review advisories. `share/scripts/fleet-reporter.sh`:
   a `kb-token-report` exit 4 now records the tool's first `ERROR:` line (bounded) in the status
@@ -7016,7 +7018,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.21...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.22...HEAD
+[0.20.22]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.21...v0.20.22
 [0.20.21]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.20...v0.20.21
 [0.20.20]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.19...v0.20.20
 [0.20.19]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.18...v0.20.19
