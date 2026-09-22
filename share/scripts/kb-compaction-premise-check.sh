@@ -155,6 +155,13 @@ _non_version_entries() {
     | sort | tr '\n' ' '
 }
 
+# XACA-1297-002: LAYOUT ("versions-dir" | "npm-pkg") decouples BIN's location
+# from VERSIONS_DIR -- a single-binary npm install has no versions/ tree at
+# all. Defaulted here so it is always defined under `set -u` regardless of
+# which branch below runs; only unassisted discovery (the no-override branch)
+# ever changes it.
+LAYOUT="versions-dir"
+PKG_DIR=""
 if [ -n "${CLAUDE_VERSIONS_DIR:-}" ]; then
   VERSIONS_DIR="$CLAUDE_VERSIONS_DIR"
   if [ ! -d "$VERSIONS_DIR" ]; then
@@ -230,21 +237,77 @@ else
     _CAND_VERSION="$_v"; return 0
   }
 
+  # XACA-1297-001: all three tap machines (M1Pro, M4Mini, M1Mini; measured
+  # 2026-09-22, aiteamforge 0.20.21) install Claude Code via npm, not the
+  # native installer -- `claude` resolves to <pkg>/bin/claude.exe and there is
+  # no .../versions/<ver> layout anywhere. `_candidate_ok` above can never
+  # match that shape, so every unassisted run on those three machines probed a
+  # versions dir that will never exist and ended "COULD NOT VERIFY rc=2"
+  # before checking a single premise. _npm_pkg_ok is the acceptance test for
+  # the npm layout, held to an equivalent bar: not "a directory exists", but
+  # "this is verifiably the @anthropic-ai/claude-code package".
+
+  # _pkg_json_field <package.json> <field> -- portable extraction of a
+  # top-level '"field": "value"' string from package.json, no jq/node/python
+  # dependency (grep -E + sed are POSIX and present on every fleet machine).
+  # Prints nothing (fails closed) when the field is absent or the file is
+  # unreadable/malformed; the caller decides what that means.
+  _pkg_json_field() {
+    _pjf_file="$1"; _pjf_field="$2"
+    [ -f "$_pjf_file" ] && [ -r "$_pjf_file" ] || return 1
+    LC_ALL=C grep -a -o -E "\"$_pjf_field\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$_pjf_file" \
+      | head -1 | sed -E "s/^\"$_pjf_field\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"\$/\1/"
+  }
+
+  # _npm_pkg_ok <dir> -- rc=0 and sets $_CAND_VERSION when <dir> is
+  # verifiably an @anthropic-ai/claude-code npm install:
+  #   - <dir>/bin/claude.exe exists and is (or resolves to) a regular file;
+  #   - <dir>/package.json exists and its "name" is EXACTLY
+  #     "@anthropic-ai/claude-code" -- this is the marker that distinguishes
+  #     a real npm install from an arbitrary binary someone dropped on PATH
+  #     (regression case 8 in tests/test-xaca-1282-002-versions-dir-discovery.sh
+  #     must still be rejected: no package.json alongside it means no match);
+  #   - its "version" is version-shaped (^[0-9]+\.[0-9]+\.[0-9]+).
+  # A malformed, missing, or wrong-name package.json is a REJECTED candidate,
+  # never an accepted one -- same fail-closed posture as _candidate_ok.
+  _npm_pkg_ok() {
+    _d="$1"
+    [ -n "$_d" ] || return 1
+    [ -f "$_d/bin/claude.exe" ] || return 1
+    _name=$(_pkg_json_field "$_d/package.json" name) || return 1
+    [ "$_name" = "@anthropic-ai/claude-code" ] || return 1
+    _v=$(_pkg_json_field "$_d/package.json" version) || return 1
+    printf '%s' "$_v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' || return 1
+    _CAND_VERSION="$_v"; return 0
+  }
+
   # Candidates, in probe order. VERIFIED against this machine (M3Pro,
-  # 2026-09-18) means: observed to exist and resolve as described here, not
-  # that every fleet machine uses it -- the three tap machines (M4Mini,
-  # M1Pro, M1Mini) were not reachable from this session and get Claude Code
-  # by a different route than this dev machine's native installer, per the
-  # plan doc. Unverified candidates are included because they are plausible
-  # and cheap to probe, and are gated by _candidate_ok so a directory that
-  # merely exists for an unrelated reason is harmlessly skipped.
+  # 2026-09-18) means: observed to exist and resolve as described here.
+  # XACA-1297-001 (measured 2026-09-22, over ssh, aiteamforge 0.20.21): the
+  # three tap machines (darren-m1pro-mbp, darren-m4-mini, darren-m1-mini) ARE
+  # now verified too, and all three install Claude Code via npm, never the
+  # native installer -- `command -v claude` resolves through
+  # /opt/homebrew/bin/claude to <npm-root>/@anthropic-ai/claude-code/bin/
+  # claude.exe on every one of them. Versions observed: 2.1.205 (M1Pro,
+  # claude.exe 237437968 bytes), 2.1.278 (M4Mini, 217695408 bytes), 2.1.267
+  # (M1Mini, 200489184 bytes) -- confirming binary size is NOT monotonic with
+  # version. Remaining unverified candidates (brew formula, aiteamforge root)
+  # are kept because they are plausible and cheap to probe, and are gated by
+  # _candidate_ok/_npm_pkg_ok so a directory that merely exists for an
+  # unrelated reason is harmlessly skipped.
   _CAND_PATH=()
   _CAND_LABEL=()
+  # XACA-1297-001: parallel array, same indices as _CAND_PATH/_CAND_LABEL.
+  # "versions-dir" candidates are validated by _candidate_ok (multi-version
+  # native-installer layout); "npm-pkg" candidates are validated by
+  # _npm_pkg_ok (single-binary npm install -- all three tap machines).
+  _CAND_TYPE=()
 
   # 1. VERIFIED (M3Pro): the native Claude Code installer's own layout; this
   #    machine's `claude` resolves into exactly this directory.
   _CAND_PATH+=("$HOME/.local/share/claude/versions")
   _CAND_LABEL+=("default native-installer path")
+  _CAND_TYPE+=("versions-dir")
 
   # 2. VERIFIED MECHANISM (M3Pro; resolves to the same path as #1 here,
   #    since this machine uses the native installer) -- but this candidate
@@ -252,6 +315,10 @@ else
   #    machine this session cannot reach, by deriving the versions dir from
   #    whatever `claude` on PATH actually resolves to, rather than assuming
   #    the default prefix.
+  #    XACA-1297-001: also VERIFIED on the tap fleet, where `claude` resolves
+  #    to <npm-pkg>/bin/claude.exe rather than a versions-dir -- the npm-pkg
+  #    branch below is what generalizes THIS mechanism past the dev machine's
+  #    own native-installer layout.
   _claude_bin=$(command -v claude 2>/dev/null || true)
   if [ -n "$_claude_bin" ]; then
     _resolved=$(_resolve_symlink_chain "$_claude_bin")
@@ -259,6 +326,20 @@ else
     if [ -n "$_resolved_parent" ] && [ "$(basename "$_resolved_parent")" = "versions" ]; then
       _CAND_PATH+=("$_resolved_parent")
       _CAND_LABEL+=("resolved from 'command -v claude' ($_claude_bin -> $_resolved)")
+      _CAND_TYPE+=("versions-dir")
+    elif [ -n "$_resolved_parent" ] && [ "$(basename "$_resolved_parent")" = "bin" ] \
+         && [ "$(basename "$_resolved")" = "claude.exe" ]; then
+      # MEASURED 2026-09-22 (all three tap machines, aiteamforge 0.20.21):
+      #   command -v claude -> /opt/homebrew/bin/claude
+      #     -> ../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+      # so the package dir is the PARENT of bin/, not versions/<ver>.
+      # _npm_pkg_ok (not path shape alone) is what confirms it below.
+      _npm_pkg_dir=$(dirname "$_resolved_parent" 2>/dev/null || true)
+      if [ -n "$_npm_pkg_dir" ]; then
+        _CAND_PATH+=("$_npm_pkg_dir")
+        _CAND_LABEL+=("resolved from 'command -v claude', npm package layout ($_claude_bin -> $_resolved)")
+        _CAND_TYPE+=("npm-pkg")
+      fi
     fi
   fi
 
@@ -266,22 +347,34 @@ else
   #    confirm against, and by design (XACA-0212, CLAUDE.md) this dev
   #    machine must never carry the aiteamforge tap that would install one.
   #    Gated by _candidate_ok, so this is a no-op guess where it doesn't
-  #    apply.
+  #    apply. (The tap fleet's actual `brew`-installed layout is the npm
+  #    package probed by #2 and #4 -- `brew install` there pulls the
+  #    @anthropic-ai/claude-code npm package, not a claude-code formula with
+  #    its own versions/ tree.)
   if command -v brew >/dev/null 2>&1; then
     _brew_prefix=$(brew --prefix 2>/dev/null || true)
     if [ -n "$_brew_prefix" ]; then
       _CAND_PATH+=("$_brew_prefix/opt/claude-code/versions")
       _CAND_LABEL+=("homebrew opt (formula: claude-code)")
+      _CAND_TYPE+=("versions-dir")
     fi
   fi
 
-  # 4. UNVERIFIED: no @anthropic-ai/claude-code npm package is installed on
-  #    this machine (checked 2026-09-18: `npm ls -g` returned empty).
+  # 4. VERIFIED (M1Pro, M4Mini, M1Mini; measured 2026-09-22, aiteamforge
+  #    0.20.21): `npm root -g`/@anthropic-ai/claude-code is the package
+  #    directory ITSELF -- there is no nested .../versions subdirectory to
+  #    probe. That path never exists on any of the three tap machines; it was
+  #    the XACA-1297 bug -- this candidate could never match, so every
+  #    unassisted run there fell all the way through to rc=2. Package
+  #    contents observed: bin/ (claude.exe only), cli-wrapper.cjs,
+  #    install.cjs, node_modules/, package.json, README.md, sdk-tools.d.ts --
+  #    validated by _npm_pkg_ok, not by this list.
   if command -v npm >/dev/null 2>&1; then
     _npm_root=$(npm root -g 2>/dev/null || true)
     if [ -n "$_npm_root" ]; then
-      _CAND_PATH+=("$_npm_root/@anthropic-ai/claude-code/versions")
+      _CAND_PATH+=("$_npm_root/@anthropic-ai/claude-code")
       _CAND_LABEL+=("npm global root (@anthropic-ai/claude-code)")
+      _CAND_TYPE+=("npm-pkg")
     fi
   fi
 
@@ -290,21 +383,36 @@ else
   #    provisioning through AITeamForge and might place it here.
   _CAND_PATH+=("$HOME/.aiteamforge/claude/versions")
   _CAND_LABEL+=("aiteamforge tap install root")
+  _CAND_TYPE+=("versions-dir")
 
   VERSIONS_DIR=""
+  PKG_DIR=""
   _i=0
   while [ "$_i" -lt "${#_CAND_PATH[@]}" ]; do
     _try="${_CAND_PATH[$_i]}"
-    if _candidate_ok "$_try"; then
-      VERSIONS_DIR="$_try"
-      VERSION="$_CAND_VERSION"
-      note "auto-discovered Claude Code versions dir at $VERSIONS_DIR (${_CAND_LABEL[$_i]})"
-      break
+    _try_type="${_CAND_TYPE[$_i]}"
+    if [ "$_try_type" = "npm-pkg" ]; then
+      # XACA-1297-001/002: single-binary npm install -- validated via
+      # package.json (_npm_pkg_ok), not a version-shaped directory entry.
+      if _npm_pkg_ok "$_try"; then
+        LAYOUT="npm-pkg"
+        PKG_DIR="$_try"
+        VERSION="$_CAND_VERSION"
+        note "auto-discovered Claude Code npm package at $PKG_DIR (version $VERSION, ${_CAND_LABEL[$_i]})"
+        break
+      fi
+    else
+      if _candidate_ok "$_try"; then
+        VERSIONS_DIR="$_try"
+        VERSION="$_CAND_VERSION"
+        note "auto-discovered Claude Code versions dir at $VERSIONS_DIR (${_CAND_LABEL[$_i]})"
+        break
+      fi
     fi
     _i=$((_i + 1))
   done
 
-  if [ -z "$VERSIONS_DIR" ]; then
+  if [ -z "$VERSIONS_DIR" ] && [ -z "$PKG_DIR" ]; then
     unver "A. no Claude Code versions directory found on $(hostname 2>/dev/null || echo '<unknown host>') after probing ${#_CAND_PATH[@]} locations:"
     _i=0
     while [ "$_i" -lt "${#_CAND_PATH[@]}" ]; do
@@ -313,10 +421,28 @@ else
     done
     note "Remedy: export CLAUDE_VERSIONS_DIR=/path/to/claude/versions and re-run, e.g.:"
     note "  CLAUDE_VERSIONS_DIR=/path/to/versions bash $SELF"
+    # XACA-1297-002: on a single-binary npm install where discovery still
+    # somehow missed it (e.g. 'claude' not on PATH and npm not on PATH
+    # either), CLAUDE_VERSIONS_DIR still works via the same version-named-
+    # symlink trick the truncated-binary remedy below uses -- it only ever
+    # accepts the versions-dir layout, so point it at a synthetic one:
+    note "For a single-binary npm install (@anthropic-ai/claude-code), point it at a"
+    note "directory containing a version-named symlink to bin/claude.exe instead, e.g.:"
+    note "  d=\$(mktemp -d); ln -s /path/to/node_modules/@anthropic-ai/claude-code/bin/claude.exe \"\$d/<version>\"; \\"
+    note "  CLAUDE_VERSIONS_DIR=\"\$d\" bash $SELF"
     echo; echo "RESULT: could not verify (rc=$RC)"; exit "$RC"
   fi
 fi
-BIN="$VERSIONS_DIR/$VERSION"
+# XACA-1297-002: BIN is decoupled from VERSIONS_DIR -- LAYOUT decides where
+# the binary lives. It defaults to "versions-dir" (below) and the explicit
+# CLAUDE_VERSIONS_DIR override branch never changes it (that override only
+# ever names a multi-version directory); only unassisted discovery above can
+# set it to "npm-pkg", when a single-binary npm install is what matched.
+if [ "$LAYOUT" = "npm-pkg" ]; then
+  BIN="$PKG_DIR/bin/claude.exe"
+else
+  BIN="$VERSIONS_DIR/$VERSION"
+fi
 if [ ! -r "$BIN" ]; then
   unver "A. binary $BIN is not readable."
   echo; echo "RESULT: could not verify (rc=$RC)"; exit "$RC"
@@ -374,6 +500,16 @@ case "$BASE_BIN_BYTES" in ''|*[!0-9]*)
   echo "kb-compaction-premise-check: BASE_BIN_BYTES must be an integer, got '$BASE_BIN_BYTES'" >&2; exit 2 ;;
 esac
 _LARGEST="$BASE_BIN_BYTES"
+# XACA-1297-002: this loop only makes sense for the multi-version
+# native-installer layout, where OTHER files in VERSIONS_DIR are genuine
+# siblings that can attest to a real, larger, complete size. A "npm-pkg"
+# install is a single binary with no siblings to compare against -- there is
+# nothing to loop over, and VERSIONS_DIR is empty in that layout, so looping
+# over "$VERSIONS_DIR"/* would glob-expand the empty string to "/*" and scan
+# the filesystem root. The floor for a single-binary install rests on
+# BASE_BIN_BYTES alone (see the BIN_SIZE floor message and the truncated-
+# binary remedy below, both of which say so explicitly).
+if [ "$LAYOUT" = "versions-dir" ]; then
 for _f in "$VERSIONS_DIR"/*; do
   [ -f "$_f" ] || continue
   # Exclude the file under test: including it would make the floor "is this file
@@ -396,6 +532,7 @@ for _f in "$VERSIONS_DIR"/*; do
   case "$_fs" in ''|*[!0-9]*) _fs=0 ;; esac
   [ "$_fs" -gt "$_LARGEST" ] && _LARGEST="$_fs"
 done
+fi
 if [ -n "${BIN_MIN_BYTES:-}" ]; then
   # Explicit override still honoured, but a non-numeric one must NOT fail open.
   case "$BIN_MIN_BYTES" in ''|*[!0-9]*)
@@ -413,25 +550,67 @@ case "$BIN_SIZE" in ''|*[!0-9]*) BIN_SIZE=0 ;; esac
 # limitation, not a tautology -- the floor never falls below 90% of the baseline
 # -- but it degrades silently with age, which is precisely the failure mode this
 # whole ticket is about. Make the ratchet report its OWN staleness.
+#
+# XACA-1297-003 (BLOCKING found in review of XACA-1297-001/002): BASE_BIN_BYTES
+# is a floor ANCHOR, not "the size on the machine that last ran this script".
+# It must be the SMALLEST known-complete size across the WHOLE fleet, because
+# every other machine's floor is 90% of whichever is larger, it or their own
+# largest sibling -- raising it to a local reading can fail-close a smaller,
+# perfectly complete binary elsewhere. MEASURED 2026-09-22 (aiteamforge
+# 0.20.21, all npm-pkg layout): 2.1.205 (M1Pro) = 237437968 bytes, 2.1.278
+# (M4Mini) = 217695408 bytes, 2.1.267 (M1Mini) = 200489184 bytes -- size is
+# NOT monotonic with version, so "refresh to what I just measured" is actively
+# the wrong instruction; blindly following it from M1Pro would set the floor
+# to 90% of 237437968 = 213694171, which fails M1Mini's complete 200489184-byte
+# binary closed (rc=2) despite nothing being truncated there. The floor DEFAULT
+# (215643408) is left unchanged here: 200489184 is 93% of it, which still
+# clears the 90% bar, so no fleet-measured complete binary is fail-closed by
+# the current baseline. This WARN legitimately fires on M1Pro (237437968 >
+# 215643408*1.1 = 237207748) -- that is fine and expected, NOT a bug: it is a
+# WARN, never changes RC, and the fix is to lower this line's advice, not to
+# silence the WARN.
 if [ "$BIN_SIZE" -gt $(( BASE_BIN_BYTES + BASE_BIN_BYTES / 10 )) ]; then
   warn "A. BASE_BIN_BYTES ($BASE_BIN_BYTES) is >10% below the installed bundle ($BIN_SIZE) — the recorded"
   note "baseline is STALE. The size floor still works but its coverage has degraded;"
-  note "refresh BASE_BIN_BYTES to $BIN_SIZE in this script."
+  note "do NOT refresh BASE_BIN_BYTES to $BIN_SIZE (this machine's size) -- binary size is"
+  note "NOT monotonic with version across the fleet (measured 200489184-237437968 bytes),"
+  note "and setting the floor to one machine's local reading can fail-close a smaller,"
+  note "complete binary on another machine. If it genuinely needs refreshing, set it to"
+  note "the SMALLEST known-complete size measured across the WHOLE fleet, never to just"
+  note "this machine's own size."
 fi
 
 if [ "$BIN_SIZE" -lt "$BIN_MIN_BYTES" ]; then
-  unver "A. binary $BIN is $BIN_SIZE bytes (< $BIN_MIN_BYTES = ${BIN_MIN_PCT}% of $_LARGEST, the larger of the recorded baseline $BASE_BIN_BYTES and the largest sibling) — empty, truncated, or still downloading."
+  # XACA-1297-002: the "largest sibling" framing only applies to the
+  # versions-dir layout; a single-binary npm install has no sibling to name.
+  if [ "$LAYOUT" = "versions-dir" ]; then
+    unver "A. binary $BIN is $BIN_SIZE bytes (< $BIN_MIN_BYTES = ${BIN_MIN_PCT}% of $_LARGEST, the larger of the recorded baseline $BASE_BIN_BYTES and the largest sibling) — empty, truncated, or still downloading."
+  else
+    unver "A. binary $BIN is $BIN_SIZE bytes (< $BIN_MIN_BYTES = ${BIN_MIN_PCT}% of $_LARGEST, the recorded baseline $BASE_BIN_BYTES -- single-binary npm install, no sibling to compare against) — empty, truncated, or still downloading."
+  fi
   note "A newer version file appears before its download completes; this is NOT drift."
-  note "Re-run once the upgrade finishes, or pin to a complete version:"
-  note "  d=\$(mktemp -d); ln -s $VERSIONS_DIR/<complete-version> \"\$d/\"; \\"
-  note "  CLAUDE_VERSIONS_DIR=\"\$d\" bash $SELF"
-  note "Complete versions present:"
-  for f in "$VERSIONS_DIR"/*; do
-    [ -f "$f" ] || continue
-    fs=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
-    case "$fs" in ''|*[!0-9]*) fs=0 ;; esac
-    [ "$fs" -ge "$BIN_MIN_BYTES" ] && note "  $(basename "$f")  (${fs} bytes)"
-  done
+  if [ "$LAYOUT" = "versions-dir" ]; then
+    note "Re-run once the upgrade finishes, or pin to a complete version:"
+    note "  d=\$(mktemp -d); ln -s $VERSIONS_DIR/<complete-version> \"\$d/\"; \\"
+    note "  CLAUDE_VERSIONS_DIR=\"\$d\" bash $SELF"
+    note "Complete versions present:"
+    for f in "$VERSIONS_DIR"/*; do
+      [ -f "$f" ] || continue
+      fs=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+      case "$fs" in ''|*[!0-9]*) fs=0 ;; esac
+      [ "$fs" -ge "$BIN_MIN_BYTES" ] && note "  $(basename "$f")  (${fs} bytes)"
+    done
+  else
+    # XACA-1297-002: a single-binary npm install ($PKG_DIR) has no sibling
+    # version to pin to -- the versions-dir remedy above does not apply.
+    note "Single-binary npm install ($PKG_DIR) -- reinstall it, or wait for an"
+    note "in-progress 'npm install -g @anthropic-ai/claude-code' to finish, then re-run:"
+    note "  bash $SELF"
+    note "Or point CLAUDE_VERSIONS_DIR at a directory containing a version-named symlink"
+    note "to a COMPLETE binary (falls back to the versions-dir layout):"
+    note "  d=\$(mktemp -d); ln -s $PKG_DIR/bin/claude.exe \"\$d/<version>\"; \\"
+    note "  CLAUDE_VERSIONS_DIR=\"\$d\" bash $SELF"
+  fi
   echo; echo "RESULT: COULD NOT VERIFY (rc=$RC) — this is a failure, not a pass. Do not read it as 'premises hold'."
   exit "$RC"
 fi

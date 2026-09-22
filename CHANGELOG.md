@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1297** — `share/scripts/kb-compaction-premise-check.sh`: the compaction ratchet now discovers
+  npm-installed Claude Code (single `bin/claude.exe`, version from `package.json`, no `versions/` dir) — the
+  layout on every tap machine — instead of always ending COULD NOT VERIFY (rc=2). Accepted only when
+  `package.json` names `@anthropic-ai/claude-code` with a version-shaped version. Single-binary installs
+  floor on `BASE_BIN_BYTES` alone; the staleness WARN no longer advises raising the anchor to the local size.
 - **XACA-1291** (review round 1) — `share/scripts/kb-knowledge-sync.sh`:
   - the unwind of the daemon's own unpushed auto-commits now moves HEAD exactly once, by CAS, then resets only the index (`read-tree -m HEAD`); any race ends the tick without pushing;
   - scaffold detection matches whole template lines only (no false holds on prose containing `YYYY-MM-DD`);
