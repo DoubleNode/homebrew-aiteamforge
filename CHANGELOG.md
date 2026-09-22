@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-0870** — LCARS Usage Monitor: the BY MODEL section gains a stacked-bar chart of each model
+  tier's share of spend (TODAY / 7-DAY toggle, exact-percent legend, HTML hover tooltip) above the
+  unchanged numeric table. Mirrors `lcars-ui/index.html`, `lcars-ui/css/usage-indicator.css`
+  (cache-buster `?v=1.3`) and the new `lcars-ui/tests/test-xaca-0870-model-chart.js` from dev-team.
 - **XACA-1300-004** — pin `cleanupPeriodDays=30` (transcript retention) fleet-wide. Claude Code's
   documented default for local session transcripts is 30 days (confirmed against
   `code.claude.com/docs/en/data-usage`, not previously verified); the key was unset everywhere, so the

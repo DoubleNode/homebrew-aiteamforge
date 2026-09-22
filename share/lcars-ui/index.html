@@ -42,7 +42,7 @@
     <!-- Activity Timeline Panel -->
     <link rel="stylesheet" href="css/lcars-activity.css">
     <!-- Claude Usage Indicator widget (XACA-0243-004/005) -->
-    <link rel="stylesheet" href="css/usage-indicator.css?v=1.1">
+    <link rel="stylesheet" href="css/usage-indicator.css?v=1.3">
     <!-- XACA-0292-007: CHANGE REQ list view styles -->
     <link rel="stylesheet" href="css/lcars-cr-tab.css?v=1.5">
     <!-- XACA-0334-005: Daily Overview grid + card styles -->
@@ -1703,6 +1703,23 @@
                         <!-- SECTION: BY MODEL (XACA-0679-003) -->
                         <section class="usage-section usage-by-model" aria-label="Per-model token and cost breakdown" id="uw-by-model-section">
                             <div class="usage-section-title">BY MODEL</div>
+
+                            <!-- Chart: stacked bar, share of spend by tier (XACA-0870-001) -->
+                            <div class="uw-model-chart-block" id="uw-model-chart-block">
+                                <div class="uw-model-chart-toggle" role="group" aria-label="Chart period">
+                                    <button type="button" class="uw-model-chart-period-btn" id="uw-model-chart-period-today" data-period="today" aria-pressed="false">TODAY</button>
+                                    <button type="button" class="uw-model-chart-period-btn" id="uw-model-chart-period-7d" data-period="7d" aria-pressed="true">7-DAY</button>
+                                </div>
+                                <div class="uw-model-chart-wrap">
+                                    <canvas id="uw-model-chart" role="img" aria-label="Share of spend by model tier"></canvas>
+                                </div>
+                                <div class="uw-model-chart-legend" id="uw-model-chart-legend" aria-live="polite">
+                                    <!-- Populated by JS: one .uw-model-chart-legend-item per non-zero tier -->
+                                </div>
+                                <!-- HTML tooltip (XACA-0870-010): MUST stay outside .uw-model-chart-wrap (32px, overflow:hidden) or it clips -->
+                                <div class="uw-model-chart-tip" id="uw-model-chart-tip" role="tooltip" hidden></div>
+                            </div>
+
                             <div class="uw-model-table" id="uw-model-table" aria-label="Per-model spend table">
                                 <!-- Populated by JS: one .uw-model-row per tier -->
                             </div>
@@ -2926,6 +2943,7 @@
         if (!tiers) {
             // No data from this cache cycle — show placeholder, don't throw
             tableEl.innerHTML = '<div class="uw-model-empty">No per-model data available</div>';
+            renderByModelChart(byModel); // renders its own "no usage" state
             return;
         }
 
@@ -3012,7 +3030,387 @@
 
             tableEl.appendChild(row);
         });
+
+        renderByModelChart(byModel);
     }
+
+    // ── Per-model chart render (XACA-0870-002) ────────────────────────────────
+    // Single stacked horizontal bar showing each tier's share of spend for the
+    // selected period. A doughnut was rejected (design decision, XACA-0870):
+    // real-world 7-day spend has tiers as small as 0.11% of total, which is an
+    // invisible sliver on a doughnut. A stacked bar + explicit min display width
+    // (below) plus a text legend keeps tiny tiers readable.
+
+    // Fixed per-tier colors — NOT index-dependent, so a tier's color stays
+    // stable across refreshes even when tiers appear/disappear (e.g. "Other").
+    var _MODEL_CHART_COLORS = {
+        Opus:   '#CC99CC', // purple — LCARSCharts.colors.purple
+        Sonnet: '#99CCFF', // cyan   — LCARSCharts.colors.cyan
+        Haiku:  '#99CC99', // green  — LCARSCharts.colors.green
+        Fable:  '#FF9900', // orange — matches the existing Fable escalation accent
+        Other:  '#FFCC99'  // tan    — LCARSCharts.colors.tan
+    };
+
+    // A non-zero tier is never rendered narrower than this (in percentage
+    // points of the bar's width) so a tiny real share (e.g. 0.11%) doesn't
+    // disappear into a sub-pixel sliver. This ONLY affects the rendered bar
+    // segment width — the tooltip and text legend always show the true
+    // percent, never the clamped one.
+    var _MODEL_CHART_MIN_PCT = 1.5;
+
+    var _uwModelChart = null;              // single Chart.js instance — update or destroy+recreate, never stack
+    var _uwModelChartLastByModel = null;   // last payload seen, so the period toggle can re-render without a refetch
+    var _uwModelChartPeriod = 'last_7d';   // 'today' | 'last_7d' — default 7-DAY per spec
+
+    // ── Compute each tier's share of the selected period ─────────────────────
+    // Returns null if tiers are absent/malformed. Otherwise { entries, basis, total }
+    // where basis is 'cost' (normal case), 'tokens' (cost is $0 but tokens > 0),
+    // or null (both zero / no usage this period).
+    function _uwModelChartComputeShares(byModel, period) {
+        var tiers = (byModel && byModel.tiers && typeof byModel.tiers === 'object') ? byModel.tiers : null;
+        if (!tiers) return null;
+
+        var costField = period === 'today' ? 'today_cost_usd' : 'last_7d_cost_usd';
+        var tokField  = period === 'today' ? 'today_tokens'    : 'last_7d_tokens';
+
+        var tierKeys = _MODEL_TIERS.slice(); // ['Opus','Sonnet','Haiku','Fable']
+        var other = tiers['Other'];
+        var otherHasData = other && (((other[costField]) > 0) || ((other[tokField]) > 0));
+        if (otherHasData) tierKeys.push('Other');
+
+        var entries = tierKeys.map(function (key) {
+            var t = tiers[key] || {};
+            var rawCost = t[costField];
+            var rawTok  = t[tokField];
+            var cost = (typeof rawCost === 'number' && !isNaN(rawCost) && rawCost > 0) ? rawCost : 0;
+            var tok  = (typeof rawTok  === 'number' && !isNaN(rawTok)  && rawTok  > 0) ? rawTok  : 0;
+            return { key: key, cost: cost, tokens: tok, pct: 0 };
+        });
+
+        var totalCost = entries.reduce(function (sum, e) { return sum + e.cost; }, 0);
+        var totalTok  = entries.reduce(function (sum, e) { return sum + e.tokens; }, 0);
+
+        var basis = totalCost > 0 ? 'cost' : (totalTok > 0 ? 'tokens' : null);
+        if (!basis) return { entries: entries, basis: null, total: 0 };
+
+        var total = basis === 'cost' ? totalCost : totalTok;
+        entries.forEach(function (e) {
+            var raw = basis === 'cost' ? e.cost : e.tokens;
+            e.pct = total > 0 ? (raw / total) * 100 : 0;
+        });
+
+        return { entries: entries, basis: basis, total: total };
+    }
+
+    // ── Text legend (the thing that keeps a 0.11% tier legible) ──────────────
+    function _uwModelChartPctStr(pct) {
+        return (pct < 1 ? pct.toFixed(2) : pct.toFixed(1)) + '%';
+    }
+
+    function _uwModelChartRenderLegend(legendEl, result) {
+        var visible = result && result.basis ? result.entries.filter(function (e) { return e.pct > 0; }) : [];
+
+        // Content signature (XACA-0870-011): the legend is aria-live, so rebuilding
+        // identical content on every 30s usage poll makes screen readers re-announce
+        // it. Skip the DOM rebuild entirely when what it would show is unchanged.
+        var sig;
+        if (!result) {
+            sig = 'nodata';
+        } else if (!result.basis || visible.length === 0) {
+            sig = 'nousage';
+        } else {
+            sig = result.basis + '|' + visible.map(function (e) {
+                return e.key + ':' + _uwModelChartPctStr(e.pct);
+            }).join(',');
+        }
+        if (legendEl._uwLegendSig === sig) return;
+        legendEl._uwLegendSig = sig;
+
+        while (legendEl.firstChild) legendEl.removeChild(legendEl.firstChild);
+
+        if (!result) {
+            // tiers absent/malformed — data unavailable (matches the table's placeholder)
+            legendEl.textContent = 'No per-model data available';
+            return;
+        }
+        if (!result.basis || visible.length === 0) {
+            legendEl.textContent = 'No usage in this period';
+            return;
+        }
+
+        visible.forEach(function (e) {
+            var item = document.createElement('span');
+            item.className = 'uw-model-chart-legend-item';
+
+            var swatch = document.createElement('span');
+            swatch.className = 'uw-model-chart-legend-swatch';
+            swatch.style.backgroundColor = _MODEL_CHART_COLORS[e.key] || _MODEL_CHART_COLORS.Other;
+            swatch.setAttribute('aria-hidden', 'true');
+            item.appendChild(swatch);
+
+            var label = document.createElement('span');
+            label.className = 'uw-model-chart-legend-label';
+            label.textContent = (_MODEL_LABELS[e.key] || e.key.toUpperCase()) + ' ' + _uwModelChartPctStr(e.pct);
+            item.appendChild(label);
+
+            legendEl.appendChild(item);
+        });
+
+        if (result.basis === 'tokens') {
+            var note = document.createElement('span');
+            note.className = 'uw-model-chart-legend-note';
+            note.textContent = 'by tokens (no cost data)';
+            legendEl.appendChild(note);
+        }
+    }
+
+    // ── HTML tooltip (XACA-0870-010) ─────────────────────────────────────────
+    // Chart.js draws its built-in tooltip INSIDE the canvas, and the canvas lives
+    // in a 32px overflow:hidden wrapper — the two-line tooltip lost its body line.
+    // The built-in one is disabled and this `external` handler drives
+    // #uw-model-chart-tip, which sits in .uw-model-chart-block outside the wrapper.
+    function _uwModelChartHideTip() {
+        var tip = document.getElementById('uw-model-chart-tip');
+        if (tip) tip.hidden = true;
+    }
+
+    function _uwModelChartTipLines(ds) {
+        var basisNote = ds._basis === 'tokens' ? ' (by tokens)' : '';
+        return {
+            title: ds.label,
+            body: _uwModelChartPctStr(ds._truePct) + basisNote + ' · ' + formatCost(ds._cost) + ' · ' + formatTokens(ds._tokens) + ' tokens'
+        };
+    }
+
+    function _uwModelChartTooltipExternal(context) {
+        try {
+            var tip   = document.getElementById('uw-model-chart-tip');
+            var block = document.getElementById('uw-model-chart-block');
+            if (!tip || !block) return;
+            var tooltip = context && context.tooltip;
+            var dp = tooltip && tooltip.dataPoints && tooltip.dataPoints[0];
+            if (!tooltip || tooltip.opacity === 0 || !dp || !dp.dataset) {
+                tip.hidden = true;
+                return;
+            }
+
+            // textContent only — never innerHTML with data-derived strings.
+            var lines = _uwModelChartTipLines(dp.dataset);
+            while (tip.firstChild) tip.removeChild(tip.firstChild);
+            var titleEl = document.createElement('span');
+            titleEl.className = 'uw-model-chart-tip-title';
+            titleEl.textContent = lines.title;
+            var bodyEl = document.createElement('span');
+            bodyEl.className = 'uw-model-chart-tip-body';
+            bodyEl.textContent = lines.body;
+            tip.appendChild(titleEl);
+            tip.appendChild(bodyEl);
+
+            // Measure at left:0 (shrink-to-fit width is computed against the space
+            // to the right of `left`, so measuring after a move would under-read).
+            tip.style.left = '0px';
+            tip.style.top  = '0px';
+            tip.hidden = false;
+
+            var canvas     = context.chart.canvas;
+            var blockRect  = block.getBoundingClientRect();
+            var canvasRect = canvas.getBoundingClientRect();
+            var wrapRect   = (canvas.parentNode || canvas).getBoundingClientRect();
+
+            // Centre on the hovered SEGMENT (for a horizontal bar Chart.js's caretX
+            // is the bar's value end, not its middle); fall back to caretX.
+            var el = dp.element;
+            var segX = (el && typeof el.x === 'number' && typeof el.base === 'number')
+                ? (el.x + el.base) / 2 : tooltip.caretX;
+            var anchorX = (canvasRect.left - blockRect.left) + segX;
+
+            var tipW = tip.offsetWidth;
+            var maxLeft = Math.max(0, block.clientWidth - tipW);
+            var left = Math.min(Math.max(anchorX - tipW / 2, 0), maxLeft);
+            var top  = (wrapRect.bottom - blockRect.top) + 4;
+
+            tip.style.left = Math.round(left) + 'px';
+            tip.style.top  = Math.round(top) + 'px';
+        } catch (err) {
+            _uwModelChartHideTip();
+        }
+    }
+
+    function _uwModelChartBindTipHide(canvas) {
+        if (!canvas || canvas._uwTipHideBound) return;
+        canvas._uwTipHideBound = true;
+        canvas.addEventListener('mouseleave', _uwModelChartHideTip);
+    }
+
+    function _uwModelChartPrefersReducedMotion() {
+        try {
+            return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // ── Chart render/update — never throws, degrades to "hidden" or "no data" ─
+    function renderByModelChart(byModel) {
+        _uwModelChartLastByModel = byModel;
+
+        var block  = document.getElementById('uw-model-chart-block');
+        var legend = document.getElementById('uw-model-chart-legend');
+        var canvas = document.getElementById('uw-model-chart');
+        if (!block || !legend || !canvas) return;
+
+        // Charting libs not loaded (CDN blocked/offline) — hide the chart block
+        // entirely and leave the numeric table (already rendered) untouched.
+        if (typeof LCARSCharts === 'undefined' || typeof Chart === 'undefined') {
+            block.style.display = 'none';
+            return;
+        }
+
+        try {
+            var result = _uwModelChartComputeShares(byModel, _uwModelChartPeriod);
+            _uwModelChartRenderLegend(legend, result);
+
+            var visibleEntries = (result && result.basis)
+                ? result.entries.filter(function (e) { return e.pct > 0; })
+                : [];
+
+            if (visibleEntries.length === 0) {
+                _uwModelChartHideTip();
+                if (_uwModelChart) {
+                    _uwModelChart.destroy();
+                    _uwModelChart = null;
+                }
+                block.style.display = '';
+                canvas.style.display = 'none';
+                return;
+            }
+
+            block.style.display = '';
+            canvas.style.display = '';
+
+            // Clamp tiny non-zero shares up to a minimum DISPLAY width, then renormalize
+            // the whole set back to 100 so the stack never overflows/clips the x axis
+            // (the axis max is fixed at 100 below). Only the rendered segment width is
+            // touched — _truePct (used by the tooltip and already used by the legend
+            // above) always carries the real, un-clamped percentage.
+            var clampedPcts = visibleEntries.map(function (e) {
+                return e.pct < _MODEL_CHART_MIN_PCT ? _MODEL_CHART_MIN_PCT : e.pct;
+            });
+            var clampedSum = clampedPcts.reduce(function (sum, v) { return sum + v; }, 0);
+            var normalizeFactor = clampedSum > 0 ? (100 / clampedSum) : 1;
+
+            var datasets = visibleEntries.map(function (e, idx) {
+                var displayPct = clampedPcts[idx] * normalizeFactor;
+                var color = _MODEL_CHART_COLORS[e.key] || _MODEL_CHART_COLORS.Other;
+                return {
+                    label: _MODEL_LABELS[e.key] || e.key.toUpperCase(),
+                    data: [displayPct],
+                    backgroundColor: color,
+                    hoverBackgroundColor: color,
+                    borderColor: LCARSCharts.colors.background,
+                    borderWidth: 1,
+                    borderRadius: 3,
+                    borderSkipped: false,
+                    // Custom fields (Chart.js ignores unknown keys) read back in the tooltip
+                    // callback below so it can show the TRUE percent, not the clamped display one.
+                    _tierKey: e.key,
+                    _truePct: e.pct,
+                    _cost: e.cost,
+                    _tokens: e.tokens,
+                    _basis: result.basis
+                };
+            });
+
+            var chartData = { labels: ['Share'], datasets: datasets };
+
+            var chartOptions = {
+                indexAxis: 'y',
+                maintainAspectRatio: false,
+                interaction: { mode: 'nearest', intersect: true },
+                scales: {
+                    x: { stacked: true, min: 0, max: 100, display: false, grid: { display: false } },
+                    y: { stacked: true, display: false, grid: { display: false } }
+                },
+                plugins: {
+                    legend: { display: false }, // custom text legend (#uw-model-chart-legend) used instead
+                    tooltip: {
+                        // XACA-0870-010: the canvas tooltip clips inside the 32px wrapper;
+                        // render an HTML one outside it instead (shows the TRUE pct).
+                        enabled: false,
+                        external: _uwModelChartTooltipExternal
+                    }
+                }
+            };
+            // XACA-0870-015: honour reduced motion for the 600ms grow-in.
+            if (_uwModelChartPrefersReducedMotion()) chartOptions.animation = false;
+
+            // Same tier set as the live chart → swap data in place without animation,
+            // so the periodic usage poll doesn't replay the 600ms grow-in every cycle.
+            // A different tier set (e.g. "Other" appeared) → destroy and recreate.
+            var tierSig = datasets.map(function (ds) { return ds._tierKey; }).join(',');
+            // The datasets are about to be replaced, so any visible tooltip now
+            // describes stale numbers: hide it and clear Chart.js's active state so
+            // the next hover re-fires the external handler with fresh data.
+            _uwModelChartHideTip();
+            if (_uwModelChart && _uwModelChart._uwTierSig === tierSig) {
+                try { _uwModelChart.tooltip.setActiveElements([], { x: 0, y: 0 }); } catch (eTip) { /* best-effort */ }
+                _uwModelChart.data.datasets = datasets;
+                _uwModelChart.update('none');
+                return;
+            }
+            if (_uwModelChart) {
+                _uwModelChart.destroy();
+                _uwModelChart = null;
+            }
+            _uwModelChart = LCARSCharts.createBar('uw-model-chart', chartData, chartOptions);
+            if (_uwModelChart) _uwModelChart._uwTierSig = tierSig;
+            _uwModelChartBindTipHide(canvas);
+        } catch (err) {
+            // Never let a chart failure break the surrounding page.
+            if (window.console && console.warn) console.warn('[uw-model-chart] render failed', err);
+            _uwModelChartHideTip();
+            if (_uwModelChart) {
+                try { _uwModelChart.destroy(); } catch (e2) { /* ignore */ }
+                _uwModelChart = null;
+            }
+            block.style.display = 'none';
+        }
+    }
+
+    // ── Period toggle (TODAY / 7-DAY) — persists across data refreshes ───────
+    function _uwModelChartSetPeriod(period) {
+        if (period !== 'today' && period !== 'last_7d') return;
+        _uwModelChartPeriod = period;
+        try {
+            if (window.localStorage) window.localStorage.setItem('uw-model-chart-period', period);
+        } catch (e) { /* best-effort per-viewer convenience only */ }
+
+        var todayBtn = document.getElementById('uw-model-chart-period-today');
+        var d7Btn    = document.getElementById('uw-model-chart-period-7d');
+        if (todayBtn) todayBtn.setAttribute('aria-pressed', period === 'today' ? 'true' : 'false');
+        if (d7Btn)    d7Btn.setAttribute('aria-pressed', period === 'last_7d' ? 'true' : 'false');
+
+        _uwModelChartHideTip();
+        renderByModelChart(_uwModelChartLastByModel);
+    }
+
+    (function _uwModelChartInitToggle() {
+        try {
+            var saved = window.localStorage && window.localStorage.getItem('uw-model-chart-period');
+            if (saved === 'today' || saved === 'last_7d') _uwModelChartPeriod = saved;
+        } catch (e) { /* ignore — browser storage may be unavailable/blocked */ }
+
+        var todayBtn = document.getElementById('uw-model-chart-period-today');
+        var d7Btn    = document.getElementById('uw-model-chart-period-7d');
+        if (todayBtn) {
+            todayBtn.setAttribute('aria-pressed', _uwModelChartPeriod === 'today' ? 'true' : 'false');
+            todayBtn.addEventListener('click', function () { _uwModelChartSetPeriod('today'); });
+        }
+        if (d7Btn) {
+            d7Btn.setAttribute('aria-pressed', _uwModelChartPeriod === 'last_7d' ? 'true' : 'false');
+            d7Btn.addEventListener('click', function () { _uwModelChartSetPeriod('last_7d'); });
+        }
+    }());
 
     // ── Main render function ─────────────────────────────────────────────────
     function applyUsage(d) {

@@ -929,7 +929,8 @@ body.theme-communications .usage-indicator.compact { background: linear-gradient
 
 .usage-account-toggle button {
     background: transparent;
-    border: 1px solid rgba(255,255,255,0.25);
+    /* XACA-0870-012: 0.45 alpha = ~4.5:1 vs the panel bg (rgb 10,10,20); 0.25 was 2.14:1 (< WCAG 1.4.11 3:1) */
+    border: 1px solid rgba(255,255,255,0.45);
     border-radius: 8px;
     color: rgba(255,255,255,0.5);
     cursor: pointer;
@@ -950,7 +951,7 @@ body.theme-communications .usage-indicator.compact { background: linear-gradient
 }
 
 .usage-account-toggle button:hover:not(.active) {
-    border-color: rgba(255,255,255,0.45);
+    border-color: rgba(255,255,255,0.75); /* XACA-0870-012: stays distinct from the raised 0.45 rest border */
     color: rgba(255,255,255,0.8);
 }
 
@@ -1068,9 +1069,170 @@ body.theme-communications .usage-indicator.compact { background: linear-gradient
     margin-left: -6px; /* compensate so tier label stays aligned */
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   XACA-0870 — BY MODEL spend-share chart (stacked bar) + period toggle
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.uw-model-chart-block {
+    position: relative; /* XACA-0870-010: containing block for the HTML tooltip (#uw-model-chart-tip) */
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ── Period toggle (TODAY / 7-DAY) — pill-style, matches .usage-account-toggle ── */
+.uw-model-chart-toggle {
+    display: flex;
+    gap: 2px;
+    justify-content: center;
+    width: 100%;
+}
+
+.uw-model-chart-period-btn {
+    /* XACA-0870-014: 24px min target (WCAG 2.5.8 AA); inline-flex keeps the label vertically centred */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 24px;
+    box-sizing: border-box;
+    background: transparent;
+    /* XACA-0870-012: 0.45 alpha = ~4.5:1 vs the panel bg (rgb 10,10,20); 0.25 was 2.14:1 (< WCAG 1.4.11 3:1) */
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    border-radius: 8px;
+    color: rgba(255, 255, 255, 0.5);
+    cursor: pointer;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 8px;
+    text-transform: uppercase;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    line-height: 1.4;
+}
+
+.uw-model-chart-period-btn[aria-pressed="true"] {
+    background: rgba(153, 204, 255, 0.18);
+    border-color: var(--lcars-cyan, #99ccff);
+    color: var(--lcars-cyan, #99ccff);
+}
+
+.uw-model-chart-period-btn:hover:not([aria-pressed="true"]) {
+    border-color: rgba(255, 255, 255, 0.75); /* XACA-0870-012: stays distinct from the raised 0.45 rest border */
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.uw-model-chart-period-btn:focus-visible {
+    outline: 1px solid rgba(153, 204, 255, 0.70);
+    outline-offset: 1px;
+}
+
+/* ── Chart canvas wrapper — fixed small height; `position: relative` is a
+   Chart.js responsive-mode requirement (it sizes the canvas to this parent). ── */
+.uw-model-chart-wrap {
+    position: relative;
+    width: 100%;
+    height: 32px;
+    min-height: 28px;
+    max-height: 40px;
+    overflow: hidden; /* narrow panel — never let the canvas cause horizontal scroll */
+}
+
+.uw-model-chart-wrap canvas {
+    max-width: 100%;
+}
+
+/* ── Text legend — the piece that keeps a ~0.1% tier readable ── */
+.uw-model-chart-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.55);
+    min-height: 12px;
+}
+
+.uw-model-chart-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-variant-numeric: tabular-nums;
+}
+
+.uw-model-chart-legend-swatch {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.uw-model-chart-legend-label {
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.uw-model-chart-legend-note {
+    font-style: italic;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    color: rgba(255, 255, 255, 0.6); /* XACA-0870-013: ~6:1 vs panel bg; 0.35 was 3.15:1 (< 4.5:1) */
+}
+
+/* ── HTML tooltip (XACA-0870-010) — lives in .uw-model-chart-block, OUTSIDE the
+   32px overflow:hidden .uw-model-chart-wrap. Chart.js's own canvas tooltip was
+   clipped there (56px tooltip in a 32px box lost its body line), so the chart
+   disables it and drives this element through the `external` handler instead. ── */
+.uw-model-chart-tip {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 20;
+    pointer-events: none;
+    box-sizing: border-box;
+    max-width: 100%;
+    padding: 4px 7px;
+    background: rgba(10, 10, 26, 0.96);
+    border: 1px solid var(--lcars-tan, #cc9966);
+    border-radius: 6px;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 9px;
+    line-height: 1.35;
+    color: rgba(255, 255, 255, 0.9);
+    font-variant-numeric: tabular-nums;
+    white-space: normal;
+}
+
+.uw-model-chart-tip[hidden] {
+    display: none;
+}
+
+.uw-model-chart-tip-title {
+    display: block;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--lcars-tan, #cc9966);
+}
+
+.uw-model-chart-tip-body {
+    display: block; /* wraps at spaces on the narrowest panel rather than overflowing the tip box */
+}
+
 /* Reduce-motion: suppress all BY-MODEL animations/transitions */
 @media (prefers-reduced-motion: reduce) {
     .uw-model-fable-badge {
         animation: none !important;
+    }
+
+    .uw-model-chart-period-btn {
+        transition: none !important;
     }
 }
