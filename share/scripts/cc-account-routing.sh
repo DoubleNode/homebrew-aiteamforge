@@ -144,6 +144,17 @@ _cc_export_account_credentials() {
     # the one warning line).
     _cc_secrets_file_lookup() {
         local _name="$1"
+        # XACA-1312 fix round 1 (bot review, PR #957): defense in depth —
+        # this function's own ${(P)_name} below is the second indirection
+        # sink (see the caller-side validation ahead of this function's
+        # only current call site, a few lines below in this file, for the
+        # full rationale and the proof-of-exploit this guards against). A
+        # future call site that forwards an unvalidated name must not
+        # silently reintroduce the same hole.
+        if [[ ! "$_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            print -u2 "⚠ _cc_secrets_file_lookup: '${_name}' is not a valid shell identifier — refusing to look it up"
+            return 0
+        fi
         local _f="${HOME}/.zshrc.secrets"
         [[ -f "$_f" ]] || return 0
         local _enforce_msg
@@ -1024,11 +1035,27 @@ print(h[:64])
     # tier 1 keys on the team slug regardless of ai.credential, so it still
     # runs for these teams — see the python-side comment above) has nothing
     # to refuse ON; there was no request to fail. The one exception,
-    # UNCHANGED from before this ticket: a vault-configured machine whose
-    # vault is genuinely UNREACHABLE with no cache/env fallback always
-    # refuses, for every cred_state — that branch already returned 1
-    # unconditionally pre-XACA-1312 and still does; an outage must never
-    # silently downgrade billing, declared route or not.
+    # UNCHANGED from before this ticket (XACA-0977 D3, "the single most
+    # important negative clause in the contract" — see this file's own
+    # Case6a/6b-style regression coverage): a vault-configured machine whose
+    # vault is genuinely UNREACHABLE with no cache/env fallback refuses for
+    # cred_state=absent (an un-lifted, legacy-shape team) exactly as it did
+    # pre-XACA-1312 — an outage must never silently downgrade billing for a
+    # team that vault tier 1 is still actively trying to route.
+    #
+    # XACA-1312 fix round 1 (bot review, PR #957; rollout plan
+    # XACA-1312_005_rollout_plan.md §6.2) narrows this ONE further: null —
+    # and ONLY null, not absent — is exempted from that outage refusal.
+    # §6.2 explicitly sells setting ai.credential to `null` as reverting a
+    # team to default-OAuth "with no refusal risk", and is explicit that
+    # this is a DIFFERENT, more deliberate state than plain absent (its own
+    # words: deleting the key instead "re-arms the XACA-1184 legacy lift" —
+    # i.e. absent and null are NOT interchangeable for this purpose). An
+    # operator reaching for that documented escape hatch during an incident
+    # (e.g. because they suspect the vault is the problem) must not be
+    # refused BY the vault they are explicitly routing around. absent keeps
+    # the pre-existing D3 behavior unchanged — it was never part of §6.2's
+    # promise, and un-lifted teams are the exact case D3 exists to protect.
     if [[ -z "$env_var_name" ]]; then
         if [[ "$_vault_not_found" -eq 1 ]]; then
             # XACA-0972-004: the vault was REACHED and said "no such secret".
@@ -1044,13 +1071,26 @@ print(h[:64])
             return 0
         fi
         if [[ "$_vault_configured" -eq 1 ]]; then
-            # Vault machine, vault genuinely UNREACHABLE, no env-var
-            # configured. Fail closed — unconditionally, for every
-            # cred_state — an outage must never silently downgrade the
-            # account. XACA-0972-018: name the ACTUAL fault. For exit 8 this
-            # reads "no fleet server URL is configured", not "vault
-            # inaccessible" — the latter sends an operator to check a server
-            # that is fine.
+            if [[ "$cred_state" == "null" ]]; then
+                # XACA-1312 fix round 1 (§6.2): the documented no-refusal-
+                # risk rollback state — quiet, same shape as the 404 branch
+                # above's null case.
+                return 0
+            fi
+            if [[ "$cred_state" == "object" ]]; then
+                # Vault machine, vault genuinely UNREACHABLE, no env-var
+                # configured, and cred_state IS object — an operator
+                # declared a specific route and it could not be reached.
+                # Fail closed. XACA-0972-018: name the ACTUAL fault. For
+                # exit 8 this reads "no fleet server URL is configured",
+                # not "vault inaccessible" — the latter sends an operator
+                # to check a server that is fine.
+                _cc_fail_closed "No token source available for team '${team}' — ${_vault_fault} and no env-var configured"
+                return $?
+            fi
+            # cred_state == absent: XACA-0977 D3, unchanged — an un-lifted
+            # team is still actively vault-routed by tier 1 above, so an
+            # outage here refuses exactly as it did pre-XACA-1312.
             _cc_fail_closed "No token source available for team '${team}' — ${_vault_fault} and no env-var configured"
             return $?
         fi
@@ -1063,6 +1103,23 @@ print(h[:64])
             print -u2 "⚠ Team '${team}' declares no ai.credential (undeclared) — using machine login"
         fi
         return 0
+    fi
+
+    # XACA-1312 fix round 1 (bot review, PR #957): env_var_name comes from
+    # team-paths.json (an operator-editable config file, not a fixed
+    # constant), and zsh's ${(P)...} indirection EVALUATES a subscript
+    # embedded in the name it's given — verified: with
+    # n='path[$(touch /tmp/sentinel)1]', `${(P)n}` runs the command
+    # substitution. _cc_secrets_file_lookup indexes an associative array by
+    # the same untrusted string a few lines down, so it is a second sink,
+    # not just this one. Validate BEFORE either sink is reached: a
+    # non-identifier value here can only come from a hand-edited or
+    # corrupted team-paths.json, never from a legitimate declaration, so
+    # this is the same "present but the wrong shape" bucket cred_state=
+    # invalid already refuses for a malformed ai.credential as a whole.
+    if [[ ! "$env_var_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        _cc_fail_closed "Team '${team}' ai.credential.env_var_name '${env_var_name}' is not a valid shell identifier — refusing to treat it as a credential source. Fix teams.${team}.ai.credential.env_var_name in ${team_json}, or set AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 to launch on the machine login."
+        return $?
     fi
 
     # env_var_name is declared here, which by construction means

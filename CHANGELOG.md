@@ -20,6 +20,27 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `libexec/commands/aiteamforge-upgrade.sh` (materialize on upgrade,
   including a dedicated copy step for `vault-fetch.js`), and checked by
   `bin/aiteamforge-doctor.sh` and `Formula/aiteamforge.rb`.
+- **XACA-1312 fix round 1** — `share/templates/aliases/cc-aliases.sh`'s
+  `_cc_routing_core_missing` now honors `AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1`
+  as its own message always promised (it refused unconditionally before);
+  every wired launch site branches on its return value, and fail-soft
+  shims cover `_cc_run_claude_with_auth`/`_cc_record_session_account`/
+  `_cc_resume_account_guard` for when the core never loaded (all
+  core-defined, previously called unconditionally — "command not found"
+  under override-with-missing-core). `share/scripts/cc-account-routing.sh`:
+  `env_var_name` is validated as a shell identifier before either of its
+  `${(P)...}`-indirection sinks (fail-closed on a malformed value); a vault
+  outage no longer refuses a `null`-declared team (rollout plan §6.2's
+  documented "no refusal risk" promise), while `absent` (un-lifted/legacy)
+  teams keep the pre-existing XACA-0977 D3 outage-refusal unchanged.
+  `share/scripts/kb-cr.sh`: publish now refuses (not a silent unrouted
+  `claude -p`) when the routing core fails to load, unless the same
+  override is set, and records the routed session unconditionally like
+  every other launch site. `tests/test-xaca-1300-014-session-account-map-shipping.sh`
+  fixture now materializes the routing core (mirrors a real install) and
+  the E1/E2/E3/E5 assertions reflect the resulting, intentional recording
+  behavior change; new `tests/test-xaca-1312-014-missing-core-override.sh`
+  covers the missing-core + override matrix end to end.
 
 ## [0.20.23] - 2026-09-22
 - **XACA-1297 (part 2)** — `share/scripts/kb-compaction-premise-check.sh`: ratchet checks C and D2 now tell

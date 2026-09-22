@@ -21,12 +21,57 @@ AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
 # must refuse cc/cc-*/ccc rather than silently launch unrouted (design §6,
 # "if the core fails to load"). _cc_routing_core_missing is what every
 # wired launch site below checks before doing anything else.
+#
+# XACA-1312 fix round 1 (bot review, PR #957): the message below has always
+# promised that AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 launches on the machine
+# login even when the core itself is missing -- design §6's own escape
+# hatch. Until this fix the function returned 1 unconditionally, so the
+# override did nothing here (verified: core absent + override set + `ccc`
+# still refused). Every call site below now branches on THIS return value
+# instead of hardcoding `return 1` -- see each site's own comment.
 _cc_routing_core_missing() {
+    if [[ "${AITEAMFORGE_ALLOW_DEFAULT_OAUTH:-0}" == "1" ]]; then
+        print -u2 "⚠ AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 — routing core missing at $AITEAMFORGE_DIR/scripts/cc-account-routing.sh — this session bills the MACHINE LOGIN, not any declared team credential"
+        return 0
+    fi
     print -u2 "✗ routing core missing at $AITEAMFORGE_DIR/scripts/cc-account-routing.sh — run 'aiteamforge upgrade' (or AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 to launch on the machine login)"
     return 1
 }
 if [[ -f "$AITEAMFORGE_DIR/scripts/cc-account-routing.sh" ]]; then
     source "$AITEAMFORGE_DIR/scripts/cc-account-routing.sh" || true
+fi
+# XACA-1312 fix round 1 (bot review, PR #957): every wired launch site below
+# calls _cc_run_claude_with_auth UNCONDITIONALLY after its missing-core
+# check -- fine when the core loaded (it defines the real function), but
+# under AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 with the core ABSENT,
+# _cc_routing_core_missing now returns 0 and lets the site fall through to
+# a function that was never defined ("command not found", rc 127) --
+# discovered by this round's own new missing-core-override test. This shim
+# only ever receives an EMPTY token when it runs (resolution never ran
+# either in that branch), so it is equivalent to a bare `claude "$@"` --
+# the same shape as the real function's own -z "$_cc_token" fast path.
+if ! command -v _cc_run_claude_with_auth >/dev/null 2>&1; then
+    _cc_run_claude_with_auth() {
+        shift 2
+        claude "$@"
+    }
+fi
+# Same reasoning as the shim above, for _cc_record_session_account (also
+# core-defined, also called unconditionally by every launch site below).
+# Silent no-op, matching the real function's own documented fail-soft
+# contract ("Silent no-op when the recorder is absent ... never aborts a
+# launch") -- there is no recorder to call when the core never loaded.
+if ! command -v _cc_record_session_account >/dev/null 2>&1; then
+    _cc_record_session_account() { :; }
+fi
+# Same reasoning again for _cc_resume_account_guard (ccc's cross-account
+# resume check, also core-defined). With no core there is no map-lookup
+# infra to check against, so this shim always ALLOWS the resume (return 0)
+# -- refusing here would defeat the override's whole purpose (a partial or
+# broken install must still be able to launch/resume under explicit
+# consent).
+if ! command -v _cc_resume_account_guard >/dev/null 2>&1; then
+    _cc_resume_account_guard() { return 0; }
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -269,16 +314,19 @@ _cc_launch() {
     # declared ai.credential right after the prompt-file checks, via the
     # SAME shared core dev claude_code_cc_aliases.sh uses. A missing core
     # (partial upgrade, or a non-zsh shell) refuses rather than launching
-    # unrouted (design §6).
-    if ! command -v _cc_route_prepare >/dev/null 2>&1; then
-        _cc_routing_core_missing
-        return 1
-    fi
+    # unrouted (design §6) -- UNLESS AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1, in
+    # which case _cc_routing_core_missing itself returns 0 and we fall
+    # through with the token/id locals left empty (default OAuth, per
+    # fix round 1 / bot review on PR #957).
     local _CC_RESOLVED_TOKEN="" _CC_RESOLVED_AUTH_TYPE=""
     local _CC_BILLED_ID="" _CC_BILLED_NICKNAME=""
-    _cc_route_prepare
-    if [[ $? -eq 1 ]]; then
-        echo "ERROR: Cannot resolve Anthropic token for this team — aborting launch" >&2
+    if command -v _cc_route_prepare >/dev/null 2>&1; then
+        _cc_route_prepare
+        if [[ $? -eq 1 ]]; then
+            echo "ERROR: Cannot resolve Anthropic token for this team — aborting launch" >&2
+            return 1
+        fi
+    elif ! _cc_routing_core_missing; then
         return 1
     fi
 
@@ -393,19 +441,22 @@ cc() {
     # whenever a team context exists, via the SAME shared core.
     local _cc_fb_team="${SESSION_TYPE:-${LCARS_TEAM:-${KB_TEAM:-}}}"
     if [[ -n "$_cc_fb_team" ]]; then
-        if ! command -v _cc_route_prepare >/dev/null 2>&1; then
-            _cc_routing_core_missing
-            return 1
-        fi
+        # XACA-1312 fix round 1: same missing-core override handling as
+        # site #1 above -- _cc_routing_core_missing returns 0 under
+        # AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 and we fall through unrouted.
         local _CC_RESOLVED_TOKEN="" _CC_RESOLVED_AUTH_TYPE=""
         local _CC_BILLED_ID="" _CC_BILLED_NICKNAME=""
-        _cc_route_prepare
-        if [[ $? -eq 1 ]]; then
-            # XACA-1312 §3.3: REFUSED. claude must NOT run at all -- a
-            # refusal is not a persona failure, and falling back to plain
-            # unrouted claude here would reconstruct the exact
-            # silent-downgrade defect this ticket exists to close.
-            echo "ERROR: Cannot resolve Anthropic token for team '${_cc_fb_team}' — aborting launch" >&2
+        if command -v _cc_route_prepare >/dev/null 2>&1; then
+            _cc_route_prepare
+            if [[ $? -eq 1 ]]; then
+                # XACA-1312 §3.3: REFUSED. claude must NOT run at all -- a
+                # refusal is not a persona failure, and falling back to
+                # plain unrouted claude here would reconstruct the exact
+                # silent-downgrade defect this ticket exists to close.
+                echo "ERROR: Cannot resolve Anthropic token for team '${_cc_fb_team}' — aborting launch" >&2
+                return 1
+            fi
+        elif ! _cc_routing_core_missing; then
             return 1
         fi
         # Pin a session id the same way _cc_launch does (XACA-0541), only
@@ -466,18 +517,26 @@ ccc() {
         esac
     done
 
-    if ! command -v _cc_route_prepare >/dev/null 2>&1; then
-        _cc_routing_core_missing
-        return 1
-    fi
-
     # Resolve credentials BEFORE reading the sidecar (ordering is
     # load-bearing — see dev ccc()'s own comment on this: the recorder must
     # never run against a pre-resolution empty billed id).
+    #
+    # XACA-1312 fix round 1: missing core is no longer an unconditional
+    # refusal here either -- _cc_routing_core_missing returns 0 under
+    # AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1, treated the same as a successful
+    # (unrouted, default-OAuth) _cc_route_prepare rc=0 below.
     local _CC_RESOLVED_TOKEN="" _CC_RESOLVED_AUTH_TYPE=""
     local _CC_BILLED_ID="" _CC_BILLED_NICKNAME=""
-    _cc_route_prepare
-    local _ccc_cred_rc=$?
+    local _ccc_cred_rc
+    if command -v _cc_route_prepare >/dev/null 2>&1; then
+        _cc_route_prepare
+        _ccc_cred_rc=$?
+    else
+        if ! _cc_routing_core_missing; then
+            return 1
+        fi
+        _ccc_cred_rc=0
+    fi
     local resolved_account_id="$_CC_BILLED_ID"
     local resolved_account_nickname="$_CC_BILLED_NICKNAME"
 

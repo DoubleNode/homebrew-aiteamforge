@@ -13,7 +13,12 @@
 # unrelated to CR publishing; a missing/broken core must not break the rest
 # of this file, only the one call site that resolves a team credential.
 typeset -g _KB_CR_ROUTING_CORE="${${(%):-%x}:A:h}/cc-account-routing.sh"
-[[ -f "$_KB_CR_ROUTING_CORE" ]] && source "$_KB_CR_ROUTING_CORE" 2>/dev/null
+# XACA-1312 fix round 1 (bot review, PR #957): the source used to run under
+# `2>/dev/null`, which silently swallowed the reason a broken/partial core
+# failed to load (syntax error, unreadable file, etc). Let it print to the
+# real stderr instead — this only fires on an actual failure since the
+# `[[ -f ]] &&` guard already keeps a plain missing file quiet.
+[[ -f "$_KB_CR_ROUTING_CORE" ]] && source "$_KB_CR_ROUTING_CORE"
 #
 # ══════════════════════════════════════════════════════════════════════════════
 # UNIFIED v2.0 LIFECYCLE (XACA-0327)
@@ -4344,9 +4349,22 @@ PROMPT
             _kbcr_sid=$(uuidgen | tr 'A-Z' 'a-z')
             _kbcr_sid_args=(--session-id "$_kbcr_sid")
         fi
-    elif [[ -x "${HOME}/dev-team/scripts/session-account-map-headless.sh" ]]; then
-        _kbcr_sid=$("${HOME}/dev-team/scripts/session-account-map-headless.sh" </dev/null)
-        [[ -n "$_kbcr_sid" ]] && _kbcr_sid_args=(--session-id "$_kbcr_sid")
+    elif [[ "${AITEAMFORGE_ALLOW_DEFAULT_OAUTH:-0}" == "1" ]]; then
+        # XACA-1312 fix round 1 (bot review, PR #957): the core never
+        # loaded (missing file, source error, or a non-zsh caller) used to
+        # fall straight through to plain `claude -p` below with NO gate at
+        # all — a fail-open billing path on CR publish, contradicting
+        # design §6 ("fail-closed also covers the fix didn't arrive"). It
+        # now only falls through under the same explicit override every
+        # other routing site honors, with the same unsuppressible warning.
+        print -u2 "⚠ AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 — kb-cr publish: routing core did not load (${_KB_CR_ROUTING_CORE}) — this session bills the MACHINE LOGIN"
+        if [[ -x "${HOME}/dev-team/scripts/session-account-map-headless.sh" ]]; then
+            _kbcr_sid=$("${HOME}/dev-team/scripts/session-account-map-headless.sh" </dev/null)
+            [[ -n "$_kbcr_sid" ]] && _kbcr_sid_args=(--session-id "$_kbcr_sid")
+        fi
+    else
+        echo "kb-cr publish: ✗ routing core did not load (${_KB_CR_ROUTING_CORE}) — aborting publish (nothing was billed). Fix the core, or set AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 to publish on the machine login." >&2
+        return 1
     fi
 
     local skill_output
@@ -4357,17 +4375,22 @@ PROMPT
             return 1
         }
     else
-        # Core never loaded at all — plain claude, exactly as before XACA-1312.
+        # Core never loaded, but AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 was set
+        # above (the only remaining way to reach this branch) — plain
+        # claude, exactly as before XACA-1312, under explicit consent.
         skill_output=$(printf '%s\n' "$skill_prompt" | claude -p "${_kbcr_sid_args[@]}" 2>&1) || {
             echo "kb-cr publish: skill invocation failed (exit $?)." >&2
             echo "$skill_output" >&2
             return 1
         }
     fi
-    if [[ -n "$_kbcr_sid" && -n "$_kbcr_billed_id$_kbcr_billed_nick" ]]; then
-        command -v _cc_record_session_account >/dev/null 2>&1 && \
-            _cc_record_session_account "$_kbcr_sid" "$_kbcr_billed_id" "$_kbcr_billed_nick"
-    fi
+    # XACA-1312-019 (bot review, PR #957): record unconditionally, like
+    # every other launch site — _cc_record_session_account already no-ops
+    # on an empty session id (see its own contract comment), so the extra
+    # "$_kbcr_billed_id$_kbcr_billed_nick non-empty" gate here only served
+    # to silently drop the record for default-OAuth kb-cr publishes.
+    command -v _cc_record_session_account >/dev/null 2>&1 && \
+        _cc_record_session_account "$_kbcr_sid" "$_kbcr_billed_id" "$_kbcr_billed_nick"
 
     # Extract the Confluence URL from skill output.
     local conf_url
