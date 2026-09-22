@@ -352,6 +352,82 @@ else
     test_fail "got $(jq -S -c . "$CD/settings.json" 2>/dev/null) ; log: $(cat "$TEST_TMP_DIR/f4/fixture.out")"
 fi
 
+# ═══ M*: XACA-1283-021 — settings.json file MODE must be preserved ════════
+# _aitf_file_mode (defined in aiteamforge-upgrade.sh) is NOT visible to
+# _xaca1283_refresh_settings_json_keys in either real call shape exercised by
+# this suite: the "real upgrade path" below sources only the EXTRACTED
+# update_claude_settings function body (never the sibling _aitf_file_mode
+# definition elsewhere in aiteamforge-upgrade.sh -- see UPD_FN_SRC above),
+# and the fixture/"installer sourced alone" path sources
+# install-claude-config.sh by itself. Both must fall back to a SELF-CONTAINED
+# mode lookup, not silently widen 0600 -> 0644 (reviewer-verified regression,
+# PR #934).
+sb="$TEST_TMP_DIR/m1"; mkdir -p "$sb/home/.claude" "$sb/aiteamforge"
+printf '%s\n' "$SEED_ABSENT" > "$sb/home/.claude/settings.json"
+chmod 0600 "$sb/home/.claude/settings.json"
+run_upgrade_in "$sb"
+test_start "M1 (real upgrade path): a 0600 settings.json stays 0600 after an add"
+_got_mode="$(stat -f '%Lp' "$sb/home/.claude/settings.json" 2>/dev/null || stat -c '%a' "$sb/home/.claude/settings.json" 2>/dev/null)"
+if [ "$(jget "$sb/home/.claude/settings.json" '.skipDangerousModePermissionPrompt')" = 'true' ] && [ "$_got_mode" = "600" ]; then
+    test_pass
+else
+    test_fail "mode=$_got_mode (expected 600) ; key added=$(jget "$sb/home/.claude/settings.json" '.skipDangerousModePermissionPrompt') ; log: $(cat "$sb/upgrade.out")"
+fi
+
+sb="$TEST_TMP_DIR/m2"; mkdir -p "$sb/home/.claude" "$sb/aiteamforge" "$sb/templates/claude"
+printf '%s\n' "$SEED_ABSENT" > "$sb/home/.claude/settings.json"
+chmod 0600 "$sb/home/.claude/settings.json"
+printf '%s\n' "$FIX_TMPL" > "$sb/templates/claude/settings.json.template"
+printf '%s\n' "$FIX_KEYS" > "$sb/keys.list"
+(
+    export HOME="$sb/home"
+    export AITEAMFORGE_DIR="$sb/aiteamforge"
+    export CLAUDE_CONFIG_DIR="$sb/home/.claude"
+    export TEMPLATE_DIR="$sb/templates"
+    case "$CLAUDE_CONFIG_DIR" in "$_REAL_HOME"/.claude*) echo "FATAL: sandbox escaped" >&2; exit 99 ;; esac
+    # shellcheck source=/dev/null
+    source "$INSTALLER" >/dev/null 2>&1
+    if command -v _aitf_file_mode >/dev/null 2>&1; then
+        echo "FATAL: _aitf_file_mode unexpectedly in scope -- this case no longer proves the standalone path" >&2
+        exit 98
+    fi
+    _xaca1283_upgrade_settings_key_paths() { cat "$sb/keys.list"; }
+    _xaca1283_refresh_settings_json_keys
+) > "$sb/fixture.out" 2>&1
+test_start "M2 (installer sourced alone, _aitf_file_mode confirmed out of scope): a 0600 settings.json stays 0600 after an add"
+_got_mode="$(stat -f '%Lp' "$sb/home/.claude/settings.json" 2>/dev/null || stat -c '%a' "$sb/home/.claude/settings.json" 2>/dev/null)"
+if [ "$(jq -c '.skipDangerousModePermissionPrompt' "$sb/home/.claude/settings.json" 2>/dev/null)" = 'true' ] && [ "$_got_mode" = "600" ] && ! grep -q "FATAL" "$sb/fixture.out"; then
+    test_pass
+else
+    test_fail "mode=$_got_mode (expected 600) ; log: $(cat "$sb/fixture.out")"
+fi
+
+# ═══ N*: XACA-1283-022 — an explicit JSON null is a USER VALUE, not absent ═
+# getpath($base;$p) == null is true BOTH for a missing key AND for an
+# explicit `null` value at that path, so the old absence check overwrote a
+# deliberate `"skipDangerousModePermissionPrompt": null` with the template's
+# value -- contradicting the "ANY value wins" comment on
+# merge_settings_json_fill_absent (reviewer finding, PR #934).
+SEED_NULL_TOP='{"skipDangerousModePermissionPrompt":null}'
+CD="$(run_fixture_case n1 "$SEED_NULL_TOP" "$FIX_TMPL" "$FIX_KEYS")"
+test_start "N1: explicit top-level null is preserved (not overwritten by the template), while the still-absent nested env key IS added"
+if [ "$(jq -S -c . "$CD/settings.json" 2>/dev/null)" = '{"env":{"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":"50"},"skipDangerousModePermissionPrompt":null}' ] \
+    && grep -q "settings-keys: added=1 keys=env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE$" "$TEST_TMP_DIR/n1/fixture.out"; then
+    test_pass
+else
+    test_fail "got $(jq -S -c . "$CD/settings.json" 2>/dev/null) ; log: $(cat "$TEST_TMP_DIR/n1/fixture.out")"
+fi
+
+SEED_NULL_NESTED='{"env":{"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":null},"skipDangerousModePermissionPrompt":false}'
+CD="$(run_fixture_case n2 "$SEED_NULL_NESTED" "$FIX_TMPL" "$FIX_KEYS")"
+test_start "N2: explicit NESTED env null is preserved (not overwritten), and the present skip=false is also left alone; logs added=0"
+if [ "$(jq -S -c . "$CD/settings.json" 2>/dev/null)" = "$(printf '%s' "$SEED_NULL_NESTED" | jq -S -c .)" ] \
+    && grep -q "settings-keys: added=0" "$TEST_TMP_DIR/n2/fixture.out"; then
+    test_pass
+else
+    test_fail "got $(jq -S -c . "$CD/settings.json" 2>/dev/null) ; log: $(cat "$TEST_TMP_DIR/n2/fixture.out")"
+fi
+
 # ═══ P*: SETUP path semantics (pre-existing merge_settings_json) ═══════════
 CD="$(run_setup_case p1 "$SEED_ABSENT")"
 test_start "P1: setup merge adds skip=true, sets env P to ${EXPECT_P}, keeps the user's other env key"

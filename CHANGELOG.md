@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1283-021/022** — `libexec/installers/install-claude-config.sh`: two PR #934 review fixes to the
+  settings.json upgrade-path key refresh. (021) `_xaca1283_refresh_settings_json_keys` fell back to mode
+  0644 whenever `_aitf_file_mode` wasn't in scope (e.g. the installer sourced standalone), silently
+  widening a `0600 settings.json`; it now has a self-contained `_xaca1283_file_mode` fallback (BSD
+  `stat -f %Lp` first, GNU `stat -c %a` second) so the original mode is always preserved. (022)
+  `merge_settings_json_fill_absent` treated an explicit JSON `null` the same as an absent key
+  (`getpath == null` is true for both), so a user-set `"skipDangerousModePermissionPrompt": null` was
+  silently overwritten to `true` — contradicting the documented "ANY value wins" semantics. The absence
+  check is now path-existence (`has()`-walk), so an explicit null is recognized as a user value and left
+  alone. New test cases (M1/M2, N1/N2) in
+  `tests/test-xaca-1283-settings-merge-env-and-scalar.sh`, both proven against a pre-fix mutant.
 
 ## [0.20.21] - 2026-09-21
 - **Mirror: `share/lcars-ui/tests/conftest.py` now scrubs inherited git env at import.** Brings the tap copy

@@ -897,13 +897,48 @@ merge_settings_json_fill_absent() {
     local paths_json
     paths_json="$(_xaca1283_upgrade_settings_key_paths_json)" || return 1
 
+    # "Absent" means the path is not reachable in $base -- a missing key, or a
+    # missing parent object -- NOT "the value at that path is null". Reviewer
+    # fix (XACA-1283-022): getpath($base;$p) == null is ALSO true for an
+    # explicit `"skipDangerousModePermissionPrompt": null` in the user's file,
+    # which used to make this function overwrite a deliberate null with the
+    # template's value -- contradicting the "ANY value wins" comment above.
+    # path_exists() walks the path key-by-key with has(), so an explicit null
+    # counts as present (has() is true regardless of the value) and is left
+    # alone; only a truly missing key/parent counts as absent.
     jq -s --argjson paths "$paths_json" '
+      def path_exists($obj; $p):
+        if ($p | length) == 0 then true
+        elif ($obj | type) != "object" then false
+        else
+          ($p[0]) as $k |
+          if ($obj | has($k)) then path_exists($obj[$k]; $p[1:]) else false end
+        end;
       .[0] as $base | .[1] as $ovl |
       reduce $paths[] as $p ($base;
-        if (($base | getpath($p)) == null) and (($ovl | getpath($p)) != null)
+        if (path_exists($base; $p) | not) and (($ovl | getpath($p)) != null)
         then setpath($p; ($ovl | getpath($p)))
         else . end)
     ' "$base_file" "$overlay_file" > "$output_file"
+}
+
+# Self-contained file-mode lookup for _xaca1283_refresh_settings_json_keys
+# (XACA-1283-021 review fix). Does NOT depend on _aitf_file_mode being in
+# scope -- this file is sourced standalone by tests and by other callers
+# that never load aiteamforge-upgrade.sh, and command -v _aitf_file_mode
+# was silently missing there, dropping a 0600 settings.json to 0644 on
+# every refresh. BSD `stat -f %Lp` first since the shipped fleet is all
+# macOS; GNU `stat -c %a` as the portable fallback (used by the test
+# suite's Linux-shaped mocks). Prints nothing (empty string) if both fail.
+_xaca1283_file_mode() {
+    local f="$1" m=""
+    m="$(stat -f '%Lp' "$f" 2>/dev/null)"          # BSD / macOS
+    case "$m" in ''|*[!0-7]*) m="" ;; esac
+    if [[ -z "$m" ]]; then
+        m="$(stat -c '%a' "$f" 2>/dev/null)"       # GNU coreutils
+        case "$m" in ''|*[!0-7]*) m="" ;; esac
+    fi
+    printf '%s' "$m"
 }
 
 # UPGRADE-path settings.json refresh (XACA-1283). Called ONLY from
@@ -975,9 +1010,20 @@ _xaca1283_refresh_settings_json_keys() {
     # Which listed paths are absent from the live file AND supplied by the
     # template -- exactly the set the merge below adds.
     local _added
+    # Mirrors merge_settings_json_fill_absent's path_exists() (XACA-1283-022):
+    # this drives the "settings-keys: added=..." log line, and must agree
+    # with what the merge actually does or the log would claim a key was
+    # added when an explicit user null left it untouched (or vice versa).
     _added="$(jq -r -n --argjson paths "$paths_json" \
         --slurpfile a "$target" --slurpfile b "$rendered" '
-        [ $paths[] as $p | select((($a[0] | getpath($p)) == null) and (($b[0] | getpath($p)) != null))
+        def path_exists($obj; $p):
+          if ($p | length) == 0 then true
+          elif ($obj | type) != "object" then false
+          else
+            ($p[0]) as $k |
+            if ($obj | has($k)) then path_exists($obj[$k]; $p[1:]) else false end
+          end;
+        [ $paths[] as $p | select((path_exists($a[0]; $p) | not) and (($b[0] | getpath($p)) != null))
           | $p | map(tostring) | join(".") ] | join(",")' 2>/dev/null)" || {
         rm -f "$rendered"
         echo "settings-keys: skipped (could not compare settings.json against the template)"
@@ -1007,6 +1053,8 @@ _xaca1283_refresh_settings_json_keys() {
     local _mode=""
     if command -v _aitf_file_mode >/dev/null 2>&1; then
         _mode="$(_aitf_file_mode "$target")"
+    else
+        _mode="$(_xaca1283_file_mode "$target")"
     fi
     case "$_mode" in ''|*[!0-7]*) _mode=644 ;; esac
     chmod "$_mode" "$candidate" 2>/dev/null || true
