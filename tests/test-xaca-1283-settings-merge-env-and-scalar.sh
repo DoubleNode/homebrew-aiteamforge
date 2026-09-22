@@ -307,6 +307,20 @@ else
     test_fail "got $(jget "$CD/settings.json" '.')"
 fi
 
+# ═══ U3b (XACA-1300-013): a user-set cleanupPeriodDays survives fill-absent ═
+# The key's OWN preservation, not only skip/env P (U3). Non-vacuity lives in the
+# same case: the other shipped keys must still be ADDED in this run, so a no-op
+# or aborted upgrade cannot pass it, and the log must count one fewer add than
+# a file lacking every key (cleanupPeriodDays was present, so it is not added).
+CD="$(run_upgrade_case u3b '{"model":"sonnet","cleanupPeriodDays":90}')"
+test_start "U3b (XACA-1300-013): upgrade keeps a user-set cleanupPeriodDays=90 while still adding the absent keys; logs added=$((EXPECT_ADDED - 1))"
+if [ "$(jget "$CD/settings.json" '[.cleanupPeriodDays,.skipDangerousModePermissionPrompt,.model]')" = '[90,true,"sonnet"]' ] \
+    && grep -q "settings-keys: added=$((EXPECT_ADDED - 1))" "$TEST_TMP_DIR/u3b/upgrade.out"; then
+    test_pass
+else
+    test_fail "got $(jget "$CD/settings.json" '.') ; upgrade output: $(cat "$TEST_TMP_DIR/u3b/upgrade.out")"
+fi
+
 # ═══ U4: idempotent — a second run changes nothing and logs a no-op ════════
 CD="$(run_upgrade_case u4 "$SEED_ABSENT")"
 cp "$CD/settings.json" "$TEST_TMP_DIR/u4.first"

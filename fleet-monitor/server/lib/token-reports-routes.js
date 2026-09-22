@@ -45,6 +45,13 @@
  * GET /api/token-reports (no week) returns the history index: every stored
  * (machine, week) with its final/complete flags, no rows.
  *
+ * CORRUPT FILES (XACA-1300-020): ?week= opens only that week's file per
+ * machine (the roster comes from directory/file NAMES), so a torn record in
+ * another week cannot fail it. A torn file for the requested week is reported
+ * as status:"unreadable" (counted in summary.unreadable and listed in
+ * unreadable_machines) — never "missing", never zero, never in the totals.
+ * The index lists such a file with error:"unreadable" rather than failing.
+ *
  * DEFAULT-OAUTH LABELLING: kb-token-report labels a session billed to the
  * machine's own OAuth login as account `default-oauth`, plus the login's hash
  * (coverage.default_oauth_account_hash). Which account that login IS comes from
@@ -235,27 +242,51 @@ function decide(stored, record) {
     return { action: 'replaced' };
 }
 
-/** Every stored (machine, week) entry, without rows. */
-function listIndex() {
-    const root = storeRoot();
-    let machineDirs;
+/** Validated machine-id directory names in the store ([] when it does not exist yet). */
+function storedMachineIds() {
     try {
-        machineDirs = fs.readdirSync(root, { withFileTypes: true }).filter(d => d.isDirectory());
+        return fs.readdirSync(storeRoot(), { withFileTypes: true })
+            .filter(d => d.isDirectory() && MACHINE_ID_RE.test(d.name)).map(d => d.name);
     } catch (e) {
         if (e.code === 'ENOENT') return [];
         throw e;
     }
+}
+
+/** Week names stored for one machine, by FILENAME only (no file is opened),
+ *  ascending. Skips *.tmp.* leftovers. */
+function storedWeeks(machineId) {
     const out = [];
-    for (const d of machineDirs) {
-        if (!MACHINE_ID_RE.test(d.name)) continue;
-        for (const f of fs.readdirSync(path.join(root, d.name))) {
-            const m = /^(\d{4}-W\d{2})\.json$/.exec(f);
-            if (!m) continue;   // skips *.tmp.* leftovers
-            const entry = readEntry(d.name, m[1]);
+    for (const f of fs.readdirSync(path.join(storeRoot(), machineId))) {
+        const m = /^(\d{4}-W\d{2})\.json$/.exec(f);
+        if (m) out.push(m[1]);
+    }
+    return out.sort();
+}
+
+/** readEntry that turns an unreadable/corrupt file into a per-file marker
+ *  (XACA-1300-020): one torn record must not blind every other week, and it is
+ *  never read as missing or zero either. */
+function readEntrySafe(machineId, week) {
+    try {
+        return { entry: readEntry(machineId, week) };
+    } catch (e) {
+        return { error: 'unreadable', detail: String(e.message).slice(0, 200) };
+    }
+}
+
+/** Every stored (machine, week) entry, without rows. A corrupt file is listed
+ *  with error:"unreadable" instead of failing the whole index. */
+function listIndex() {
+    const out = [];
+    for (const id of storedMachineIds()) {
+        for (const week of storedWeeks(id)) {
+            const { entry, error, detail } = readEntrySafe(id, week);
+            if (error) { out.push({ machine_id: id, week, error, detail }); continue; }
             out.push({
-                machine_id: d.name,
+                machine_id: id,
                 hostname: entry.hostname,
-                week: m[1],
+                week,
                 final: entry.record.final,
                 complete: entry.record.coverage.complete,
                 generated_at: entry.record.generated_at,
@@ -265,6 +296,16 @@ function listIndex() {
     }
     out.sort((a, b) => (a.machine_id + a.week).localeCompare(b.machine_id + b.week));
     return out;
+}
+
+/** Hostname of a stored machine from its newest READABLE record (one read in
+ *  the normal case); null when none is readable. */
+function storedHostname(machineId, weeks) {
+    for (let i = weeks.length - 1; i >= 0; i--) {
+        const { entry } = readEntrySafe(machineId, weeks[i]);
+        if (entry) return entry.hostname || null;
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,41 +424,52 @@ function registerTokenReportsRoutes(app, opts = {}) {
     });
 
     app.get('/api/token-reports', requireApiKey, (req, res) => {
-        let index;
-        try {
-            index = listIndex();
-        } catch (e) {
-            console.error('token-reports: index error:', e.message);
-            return res.status(500).json({ error: 'store unreadable' });
-        }
-
         const week = req.query.week;
-        if (week === undefined) return res.json({ entries: index });
+        if (week === undefined) {
+            try {
+                return res.json({ entries: listIndex() });
+            } catch (e) {
+                console.error('token-reports: index error:', e.message);
+                return res.status(500).json({ error: 'store unreadable' });
+            }
+        }
         if (typeof week !== 'string' || !(WEEK_RE.test(week) || week === 'last')) {
             return res.status(400).json({ error: 'week must be YYYY-Www or "last"' });
         }
         const wk = week === 'last' ? lastCompletedWeek() : week;
 
-        // Roster = every machine that ever sent a token report + the live fleet.
-        const roster = new Map();
-        for (const e of index) {
-            if (!roster.has(e.machine_id)) roster.set(e.machine_id, { hostname: e.hostname, sources: new Set() });
-            roster.get(e.machine_id).sources.add('token-reports');
-        }
-        for (const m of listFleetMachines()) {
-            if (!m || !m.machine_id) continue;
-            if (!roster.has(m.machine_id)) roster.set(m.machine_id, { hostname: m.hostname, sources: new Set() });
-            roster.get(m.machine_id).sources.add('fleet');
-        }
-
         const machines = [];
-        const summary = { reported: 0, final: 0, partial: 0, missing: 0 };
+        const summary = { reported: 0, final: 0, partial: 0, missing: 0, unreadable: 0 };
         try {
+            // Roster = every machine that ever sent a token report + the live
+            // fleet. Built from directory and file NAMES; only this week's file
+            // is opened per machine (XACA-1300-020), never the whole history.
+            const roster = new Map();
+            for (const id of storedMachineIds()) {
+                roster.set(id, { hostname: null, weeks: storedWeeks(id), sources: new Set(['token-reports']) });
+            }
+            for (const m of listFleetMachines()) {
+                if (!m || !m.machine_id) continue;
+                if (!roster.has(m.machine_id)) roster.set(m.machine_id, { hostname: null, weeks: [], sources: new Set() });
+                const info = roster.get(m.machine_id);
+                info.sources.add('fleet');
+                info.hostname = info.hostname || m.hostname || null;
+            }
             const oauthMap = loadOauthMap();
             for (const [machineId, info] of roster) {
-                const entry = MACHINE_ID_RE.test(machineId) ? readEntry(machineId, wk) : null;
-                const base = { machine_id: machineId, hostname: (entry && entry.hostname) || info.hostname || null,
+                const has = info.weeks.includes(wk);
+                const got = has ? readEntrySafe(machineId, wk) : {};
+                const entry = got.entry || null;
+                const base = { machine_id: machineId,
+                               hostname: (entry && entry.hostname)
+                                   || (entry ? null : storedHostname(machineId, info.weeks.filter(w => w !== wk)))
+                                   || info.hostname || null,
                                roster_sources: Array.from(info.sources).sort() };
+                if (got.error) {
+                    summary.unreadable++;
+                    machines.push(Object.assign(base, { status: 'unreadable', error: got.error, detail: got.detail, record: null }));
+                    continue;
+                }
                 if (!entry) {
                     summary.missing++;
                     machines.push(Object.assign(base, { status: 'missing', record: null }));
@@ -441,6 +493,7 @@ function registerTokenReportsRoutes(app, opts = {}) {
         return res.json({
             week: wk, summary, account_totals: accountTotals(machines),
             missing_machines: machines.filter(m => m.status === 'missing').map(m => m.hostname || m.machine_id),
+            unreadable_machines: machines.filter(m => m.status === 'unreadable').map(m => m.hostname || m.machine_id),
             machines,
         });
     });

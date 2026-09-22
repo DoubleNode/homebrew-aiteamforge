@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1300** — fix round for PR #952. Mirrors from dev-team: `share/scripts/kb-token-report` (retention
+  resolved from managed/user/user-local settings with `coverage.retention_source`; unknown retention exits
+  4; zero boards is `tickets.state:"no_boards"`), and under `fleet-monitor/server/`:
+  `lib/token-reports-routes.js` (`?week=` opens only that week's files; a torn record is
+  `status:"unreadable"`), `config/token-oauth-accounts.json` (measured default logins) and
+  `tests/xaca-1300-003-token-reports.test.js`. Tap-only: `tests/ci-manifest` registers
+  `test-xaca-1300-token-report-materialize.sh` (plain-shell); `tests/test-xaca-1283-settings-merge-env-and-scalar.sh`
+  gains U3b, asserting a user-set `cleanupPeriodDays=90` survives the upgrade fill-absent merge (XACA-1300-013).
 - **XACA-1300** — fleet collection of weekly token aggregates (Part B2). Mirrors from dev-team:
   `scripts/kb-token-report` → `share/scripts/kb-token-report` (new), `fleet-monitor/client/fleet-reporter.sh`
   → `share/scripts/fleet-reporter.sh` (`send_token_reports()`), and under `fleet-monitor/server/`:

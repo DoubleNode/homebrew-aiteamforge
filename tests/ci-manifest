@@ -153,3 +153,4 @@ test-xaca-1261-persona-sync-consumer-guard.sh   plain-shell
 test-xaca-1268-upgrade-creates-missing-group.sh plain-shell
 test-xaca-1283-settings-merge-env-and-scalar.sh plain-shell
 test-xaca-1296-020-prompt-refresh.sh            plain-shell
+test-xaca-1300-token-report-materialize.sh      plain-shell

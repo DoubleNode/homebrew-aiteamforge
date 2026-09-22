@@ -217,7 +217,7 @@ test('a fleet machine with no record for the week is "missing" with record:null'
     await post(record());
     const res = await request(app).get('/api/token-reports?week=2026-W38');
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body.summary, { reported: 1, final: 1, partial: 0, missing: 1 });
+    assert.deepEqual(res.body.summary, { reported: 1, final: 1, partial: 0, missing: 1, unreadable: 0 });
     const beta = res.body.machines.find(m => m.machine_id === 'uuid-beta');
     assert.equal(beta.status, 'missing');
     assert.equal(beta.record, null);
@@ -232,11 +232,45 @@ test('a machine that reported other weeks but not this one is missing for this o
     assert.deepEqual(res.body.machines[0].roster_sources, ['token-reports']);
 });
 
-test('a corrupt stored record surfaces as 500, never as "missing"', async () => {
+test('a corrupt record for the requested week is "unreadable" — never missing, never zero, never totalled', async () => {
+    fleetRoster = [{ machine_id: 'uuid-beta', hostname: 'm-beta.example' }];
     await post(record());
     fs.writeFileSync(path.join(TEST_DIR, 'uuid-alpha', '2026-W38.json'), '{torn');
     const res = await request(app).get('/api/token-reports?week=2026-W38');
-    assert.equal(res.status, 500);
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.summary, { reported: 0, final: 0, partial: 0, missing: 1, unreadable: 1 });
+    const alpha = res.body.machines.find(m => m.machine_id === 'uuid-alpha');
+    assert.equal(alpha.status, 'unreadable');
+    assert.equal(alpha.error, 'unreadable');
+    assert.equal(alpha.record, null);
+    assert.deepEqual(res.body.unreadable_machines, ['uuid-alpha']);
+    assert.deepEqual(res.body.missing_machines, ['m-beta.example'], 'the torn machine is not counted missing');
+    assert.deepEqual(res.body.account_totals, {}, 'nothing from the torn file reaches the totals');
+});
+
+test('a corrupt record in ANOTHER week does not fail this week (only this week\'s file is opened)', async () => {
+    await post(record());
+    await post(record({ week: '2026-W37', generated_at: '2026-09-15T14:00:00Z' }));
+    fs.writeFileSync(path.join(TEST_DIR, 'uuid-alpha', '2026-W37.json'), '{torn');
+    const res = await request(app).get('/api/token-reports?week=2026-W38');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.summary.reported, 1);
+    assert.equal(res.body.summary.unreadable, 0);
+    assert.equal(res.body.machines[0].hostname, 'm-alpha.example');
+});
+
+test('the index lists a corrupt file with error:"unreadable" and keeps every other entry', async () => {
+    await post(record());
+    await post(record({ week: '2026-W37', generated_at: '2026-09-15T14:00:00Z' }));
+    fs.writeFileSync(path.join(TEST_DIR, 'uuid-alpha', '2026-W37.json'), '{torn');
+    const res = await request(app).get('/api/token-reports');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.entries.length, 2);
+    const w37 = res.body.entries.find(e => e.week === '2026-W37');
+    const w38 = res.body.entries.find(e => e.week === '2026-W38');
+    assert.equal(w37.error, 'unreadable');
+    assert.equal('final' in w37, false, 'no flags fabricated for a torn file');
+    assert.equal(w38.final, true);
 });
 
 test('week=last resolves to the last completed ISO week', async () => {
@@ -337,6 +371,21 @@ test('the shipped config parses and every entry carries provenance', () => {
         assert.equal(typeof v.provenance, 'string', `${k} provenance`);
         assert.ok(v.default_oauth_account === null || typeof v.default_oauth_account === 'string', k);
     }
+});
+
+test('the shipped config resolves every machine to its stated account, none to conflict (XACA-1300-018)', () => {
+    const shipped = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'token-oauth-accounts.json'), 'utf8')).machines;
+    const resolved = {};
+    for (const [k, v] of Object.entries(shipped)) {
+        const r = resolveDefaultOauth(shipped, { machine: `${k}.local`, coverage: { default_oauth_account_hash: v.login_hash_observed } });
+        assert.notEqual(r.resolved_as, 'default-oauth:conflict', `${k} resolves to conflict`);
+        assert.equal(r.resolved_as, v.default_oauth_account, k);
+        resolved[k] = r.resolved_as;
+    }
+    assert.deepEqual(resolved, {
+        'darren-m1pro-mbp': 'claude-max-me', 'darren-m4-mini': 'claude-max-me',
+        'darren-m1-mini': 'claude-max-me2', 'darren-m3pro-mbp': 'claude-max-me2',
+    });
 });
 
 // ── auth ───────────────────────────────────────────────────────────────────

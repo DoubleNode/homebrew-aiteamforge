@@ -69,6 +69,10 @@
 #   - map rows unparseable ........................... map_state "partial"
 #   - board unreadable ............................... tickets.state "error",
 #       tickets.items null (never an empty list that reads as zero)
+#   - no *-board.json found at all ................... tickets.state
+#       "no_boards", items null, complete:false (XACA-1300-016)
+#   - settings unreadable / cleanupPeriodDays invalid  retention UNKNOWN ->
+#       exit 4 for every week (XACA-1300-017; never a silent default 30)
 #   - team-paths.json missing ........................ team "unknown",
 #       tickets.state "unavailable"; unreadable/invalid -> exit 3
 #   - subagent whose parent file is absent ........... class "other",
@@ -567,16 +571,63 @@ def load_oauth_account_map(path):
     return d
 
 
-def retention_days_from(settings_path):
+MANAGED_SETTINGS_DEFAULT = (
+    "/Library/Application Support/ClaudeCode/managed-settings.json" if sys.platform == "darwin"
+    else "/etc/claude-code/managed-settings.json")
+
+
+def _cleanup_days_in(path):
+    """One settings file's cleanupPeriodDays: ("absent", None) when the file or
+    the key is absent, ("ok", N) for a positive int, ("unknown", why) when the
+    file exists but cannot be read/parsed or the value is not a positive int."""
+    if not os.path.exists(path):
+        return "absent", None
     try:
-        with open(settings_path) as fh:
+        with open(path) as fh:
             d = json.load(fh)
-    except (OSError, ValueError):
-        return 30
-    v = d.get("cleanupPeriodDays") if isinstance(d, dict) else None
+    except (OSError, ValueError) as e:
+        return "unknown", "%s unreadable (%s)" % (path, type(e).__name__)
+    if not isinstance(d, dict):
+        return "unknown", "%s is not a JSON object" % path
+    if "cleanupPeriodDays" not in d:
+        return "absent", None
+    v = d["cleanupPeriodDays"]
     if isinstance(v, int) and not isinstance(v, bool) and v > 0:
-        return v
-    return 30
+        return "ok", v
+    return "unknown", "%s cleanupPeriodDays is not a positive integer: %r" % (path, v)
+
+
+def retention_days_from(settings_path, local_path=None, managed_path=None):
+    """Returns (days_or_None, source, detail). XACA-1300-017: never a silent 30.
+
+    Managed settings outrank every user file in Claude Code, so a managed
+    value wins outright. Otherwise the user settings.json and settings.local.json
+    are both consulted and the SMALLER value is taken: a smaller retention only
+    narrows the recompute window, so the choice fails closed whichever file
+    Claude Code actually honours. Any consulted file that exists but is
+    unreadable, not an object, or carries a non-positive-int value makes the
+    result UNKNOWN (days None): the exit-4 guard then refuses every week,
+    because nothing proves any week is still inside retention. Nothing
+    defined anywhere -> Claude Code's own default, 30."""
+    if managed_path:
+        st, v = _cleanup_days_in(managed_path)
+        if st == "ok":
+            return v, "managed", managed_path
+        if st == "unknown":
+            return None, "unknown", v
+    found = []
+    for label, p in (("user", settings_path), ("user-local", local_path)):
+        if not p:
+            continue
+        st, v = _cleanup_days_in(p)
+        if st == "unknown":
+            return None, "unknown", v
+        if st == "ok":
+            found.append((v, label, p))
+    if found:
+        v, label, p = min(found)
+        return v, label, p
+    return 30, "default", None
 
 
 def machine_name():
@@ -611,7 +662,19 @@ def build_record(args, now):
     if bounds is None:
         die(EXIT_USAGE, "--week must be YYYY-Www, 'last' or 'current', got: %s" % args.week)
     wstart, wend = bounds
-    retention_days = args.retention_days or retention_days_from(os.path.expanduser(args.settings_file))
+    if args.retention_days:
+        retention_days, retention_source, retention_detail = args.retention_days, "flag", None
+    else:
+        retention_days, retention_source, retention_detail = retention_days_from(
+            os.path.expanduser(args.settings_file),
+            os.path.expanduser(args.settings_local_file) if args.settings_local_file else None,
+            os.path.expanduser(args.managed_settings_file) if args.managed_settings_file else None)
+    if retention_days is None:
+        # XACA-1300-017: fail closed. An unknown retention cannot prove that ANY
+        # week's transcripts are intact, so no week is recomputable.
+        die(EXIT_REFUSED,
+            "%s: retention unknown (%s); cannot prove the week is inside the recompute window. "
+            "Fix the settings file or pass --retention-days N." % (label, retention_detail))
     horizon = now - dt.timedelta(days=retention_days)
     recomputable = wstart >= horizon + dt.timedelta(days=1)
     if not recomputable:
@@ -643,6 +706,7 @@ def build_record(args, now):
 
     cov = {
         "retention_days": retention_days,
+        "retention_source": retention_source,
         "retention_horizon": iso_z(horizon),
         "recomputable": recomputable,
         "files_scanned": 0,
@@ -779,10 +843,14 @@ def build_record(args, now):
         items, bread, bbad = load_boards(bfiles)
         cov["boards_read"] = bread
         cov["boards_unreadable"] = bbad
-        if bbad or bread == 0:
+        if bread == 0 and not bbad:
+            # XACA-1300-016: nothing was found, nothing failed. Distinct from
+            # "error" so a host that simply holds no boards is not read as broken;
+            # still items null and complete:false (per-ticket numbers are absent).
+            tickets["state"] = "no_boards"
+            warn("no *-board.json found in any kanban dir")
+        elif bbad:
             tickets["state"] = "error"
-            if bread == 0 and not bbad:
-                warn("no *-board.json found in any kanban dir")
         else:
             out = []
             completed = 0
@@ -951,7 +1019,11 @@ def main(argv):
     ap.add_argument("--oauth-account-map", default="~/.aiteamforge/oauth-account-map.json",
                     help="OPTIONAL {hash8: account_id} label file; absent by default")
     ap.add_argument("--settings-file", default="~/.claude/settings.json",
-                    help="read cleanupPeriodDays from here (default 30)")
+                    help="user settings; read cleanupPeriodDays from here")
+    ap.add_argument("--settings-local-file", default="~/.claude/settings.local.json",
+                    help="user-local settings; the smaller cleanupPeriodDays of the two wins")
+    ap.add_argument("--managed-settings-file", default=MANAGED_SETTINGS_DEFAULT,
+                    help="managed settings; its cleanupPeriodDays outranks the user files")
     ap.add_argument("--retention-days", type=int, default=None)
     ap.add_argument("--machine", default=None, help="machine name (default scutil LocalHostName)")
     ap.add_argument("--now", default=None, help=argparse.SUPPRESS)  # tests: fixed clock
