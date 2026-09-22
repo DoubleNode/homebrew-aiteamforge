@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1291** (follow-up round 2, dev-team PR #953) — `share/scripts/kb-knowledge-sync.sh`: pin `LC_ALL=C` on the whole `_check_dup_slots` pipeline (an unpinned `tr` aborted on a non-UTF-8 byte in a UTF-8 locale and reported a partial scan as clean), and fail loud (exit 65) when the scan cannot complete, instead of returning an empty 'no collisions'.
 - **XACA-1300-022/023/024** — mirrors of the XACA-1300 review advisories. `share/scripts/fleet-reporter.sh`:
   a `kb-token-report` exit 4 now records the tool's first `ERROR:` line (bounded) in the status
   file, and `retention unknown` counts as a failure so the 1h retry applies (022).

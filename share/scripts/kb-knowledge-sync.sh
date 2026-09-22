@@ -1703,10 +1703,56 @@ fi
 # cosmetic only; grouping uses the unmodified bytes.
 # LC_ALL=C makes awk byte-oriented: no multibyte decoding of non-UTF-8 names,
 # and [a-z] means exactly ASCII a-z whatever the host locale.
+#
+# XACA-1291-028: LC_ALL=C must pin EVERY stage, not just awk. An earlier
+# revision pinned only awk, leaving `tr` in the CALLER's locale. macOS/BSD
+# `tr` decodes its input as characters, so under ANY UTF-8 locale
+# (LANG/LC_CTYPE/LC_ALL = en_US.UTF-8, C.UTF-8) it aborts with "Illegal byte
+# sequence" at the FIRST byte in the stream that is not valid UTF-8 —
+# anywhere in the tree, including inside a non-.md filename that the scan
+# would have skipped anyway. Everything at or after that byte in tree order
+# is then lost. Measured on the PART F fixture: under en_US.UTF-8 the
+# unpinned pipeline found 2 of 5 collisions (0 of 5 when the bad byte sorts
+# first) and reported them as a CLEAN scan, so the daemon would push the
+# duplicate onward instead of exiting 65. Such a path cannot be created on
+# APFS, but it can be in a TREE that a Linux host committed and this host
+# fetched — and `ls-tree` reads the tree, not the worktree. The LaunchAgent
+# sets no LANG so the daemon itself has always been on the C path, but
+# docs/knowledge-sync-daemon.md tells humans to run this script by hand,
+# which inherits their LANG.
+#
+# MEASURED (XACA-1291-028), so nobody has to re-derive it: `git ls-tree -r -z
+# --name-only HEAD` is byte-identical under C, en_US.UTF-8 and C.UTF-8, with
+# an invalid-UTF-8 path present, and `core.quotePath` has no effect under -z
+# — git writes the tree's raw path bytes with no transcoding. The LC_ALL=C on
+# the git stage below is therefore belt-and-braces (it pins the whole
+# pipeline so the invariant is obvious and survives a future git), NOT the
+# fix; `tr` is where the locale actually bit.
+#
+# FAIL LOUD, never silently empty (XACA-1291-028). Before this, a failure of
+# ANY stage produced an empty $_DUP_SLOTS_FOUND — byte-identical to "no
+# collisions found" — so a broken scan read as a clean bill of health and the
+# push proceeded. That is the same fail-open family this ticket keeps hitting.
+# Two guards, both cheap, close it:
+#   1. The pipeline's exit status. `set -o pipefail` is on script-wide (see
+#      the top of this file), so the command substitution's status is the
+#      rightmost non-zero stage — this catches a failed `git ls-tree` (unborn
+#      HEAD, corrupt object store), a failed `tr`, and a failed `awk` alike.
+#   2. An END sentinel carrying awk's record count. If the sentinel line is
+#      absent, awk did not reach END (killed, truncated, syntax error) and the
+#      output cannot be trusted even at rc 0. If it says 0 records while HEAD's
+#      tree is NOT empty, the stream was lost somewhere upstream.
+# Either guard sets $_DUP_SLOTS_SCAN_ERROR, which _handle_dup_slots_fatal
+# turns into the same loud exit 65 as a real collision: a gate that could not
+# run certifies nothing, so it must refuse to push rather than wave the tick
+# through. The "0 paths" probe runs ONLY on the already-suspicious path, so
+# the happy path pays nothing for it.
 _check_dup_slots() {
-    _DUP_SLOTS_FOUND="$(
-        git -C "$REPO_DIR" ls-tree -r -z --name-only HEAD 2>/dev/null \
-        | tr '\n\0' '\001\n' \
+    _DUP_SLOTS_FOUND=""
+    _DUP_SLOTS_SCAN_ERROR=""
+    _dup_raw="$(
+        LC_ALL=C git -C "$REPO_DIR" ls-tree -r -z --name-only HEAD 2>/dev/null \
+        | LC_ALL=C tr '\n\0' '\001\n' \
         | LC_ALL=C awk -v repo="$REPO_DIR" '
             BEGIN { nl = sprintf("%c", 1) }
             {
@@ -1736,11 +1782,54 @@ _check_dup_slots() {
                     print line
                 }
             }
+            END { printf "__KBSCAN__%d\n", NR }
         '
     )"
+    _dup_rc=$?
+
+    if [ "$_dup_rc" -ne 0 ]; then
+        # An UNBORN HEAD is not a failed scan: a freshly provisioned machine
+        # whose knowledge remote is still empty has nothing committed, so
+        # nothing colliding can be pushed. Treat it as genuinely clean, or the
+        # gate would wedge such a machine at exit 65 on every tick. Any OTHER
+        # rc with a HEAD that DOES resolve (corrupt object store, a `tr` that
+        # aborted on a locale, a broken awk program) is a real failure.
+        if ! git -C "$REPO_DIR" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+            return 0
+        fi
+        _DUP_SLOTS_SCAN_ERROR="scan-pipeline-exit: the ls-tree | tr | awk pipeline exited ${_dup_rc}"
+        return 0
+    fi
+
+    # The sentinel is always the LAST line (collision lines can never contain a
+    # raw newline — awk mapped any embedded one to \001 and renders it "\n").
+    _dup_last="${_dup_raw##*$'\n'}"
+    case "$_dup_last" in
+        __KBSCAN__[0-9]*)
+            _dup_n="${_dup_last#__KBSCAN__}"
+            ;;
+        *)
+            _DUP_SLOTS_SCAN_ERROR="scan-sentinel-missing: awk never reached END, so its output is truncated or absent"
+            return 0
+            ;;
+    esac
+
+    if [ "$_dup_n" -eq 0 ] \
+       && [ -n "$(LC_ALL=C git -C "$REPO_DIR" ls-tree --name-only HEAD 2>/dev/null)" ]; then
+        _DUP_SLOTS_SCAN_ERROR="scan-read-zero-paths: the scan read 0 paths but HEAD's tree is not empty"
+        return 0
+    fi
+
+    if [ "$_dup_raw" != "$_dup_last" ]; then
+        _DUP_SLOTS_FOUND="${_dup_raw%$'\n'*}"
+    fi
 }
 
 _handle_dup_slots_fatal() {
+    if [ -n "${_DUP_SLOTS_SCAN_ERROR:-}" ]; then
+        log "FATAL: the duplicate-ID-slot scan (Guard 4) could not be completed in ${REPO_DIR} — ${_DUP_SLOTS_SCAN_ERROR}. This gate's whole job is to certify that no colliding slot state leaves this machine; a scan that did not run certifies nothing, so this tick REFUSES TO PUSH rather than reporting a clean tree (XACA-1291-028). Reproduce with: LC_ALL=C git -C ${REPO_DIR} ls-tree -r -z --name-only HEAD | LC_ALL=C tr '\\n\\0' '\\001\\n' | LC_ALL=C awk 'END{print NR}'"
+        exit 65  # EX_DATAERR — a gate that cannot run is a hard failure, not a clean tick
+    fi
     if [ -n "$_DUP_SLOTS_FOUND" ]; then
         log "FATAL: duplicate knowledge ID slot(s) detected in ${REPO_DIR} after sync — a cross-host merge landed two entries in the same NNN slot (XACA-0818). NOT auto-remediating and NOT pushing. Run kb-knowledge-validate to confirm, then apply the XACA-0818 remediation (renumber the colliding entry) and re-run sync."
         log_block "duplicate ID slots" "$_DUP_SLOTS_FOUND"
