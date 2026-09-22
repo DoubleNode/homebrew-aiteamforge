@@ -235,10 +235,20 @@ install_helper_scripts() {
     # .py -- each by its OWN dirname, so all three must land here together
     # (same transitive-sibling rule as the msg-client chain above). Missing,
     # cc still launches, just unrecorded.
+    # cc-account-routing.sh + vault-fetch.sh (XACA-1312): the credential-
+    # routing core cc-aliases.sh now sources, and its Tier-1 vault dependency
+    # (U1: consumers become vault-primary / env-var-failover, same model as
+    # M3Pro). vault-fetch.sh resolves vault-fetch.js at ITS OWN dirname
+    # (SCRIPT_DIR, unchanged from the dev/M3Pro shape) -- see the datafile
+    # loop below for that sibling. EXECUTABLE: both carry a shebang and are
+    # invoked directly (cc-account-routing.sh is `source`d; vault-fetch.sh is
+    # exec'd by the routing core). Missing cc-account-routing.sh = cc/ccc
+    # refuse (fail-closed, design §6) rather than launch unrouted.
     for helper in agent-panel-display.sh display-agent-avatar.sh iterm2_window_manager.py \
                   set-lcars-profile-browser.py create-lcars-profile.py lcars-tmp-dir.sh \
                   kanban-backup.py fleet-reporter.sh \
                   session-account-map-headless.sh session-account-map-record.sh session-account-map.py \
+                  cc-account-routing.sh vault-fetch.sh \
                   msg-client.sh msg-inbox-check.sh kb-api-key team-account-display.sh; do
         if [ -f "$scripts_src/$helper" ]; then
             cp "$scripts_src/$helper" "$scripts_dest/$helper"
@@ -260,8 +270,15 @@ install_helper_scripts() {
     #   package-lock.json — pins libsodium-wrappers to the exact build we tested
     #                     instead of letting every consumer box independently
     #                     re-resolve ^0.7.16.
+    #   vault-fetch.js    — no shebang; only ever reached via `exec node
+    #                     "$FETCH_JS"` from vault-fetch.sh (XACA-1312), same
+    #                     shape as msg-client.js/vault-keygen.js above.
     # msg-client.sh stays in the executable loop above — fleet-reporter.sh's
     # Guard 1 tests `[ -x "$client" ]`, so its exec bit is load-bearing.
+    # vault-fetch.sh (XACA-1312) is the same shape — it is EXEC'D directly by
+    # cc-account-routing.sh, so it stays in the executable loop above too;
+    # only its require()'d sibling vault-fetch.js belongs in this datafile
+    # loop.
     # kb-msg provisioning tools (XACA-0885). Executable, unlike the datafiles
     # below: kb-msg-provision is invoked directly by an operator, and
     # register-claude-hook.py is invoked by kb-msg-provision and kb-msg doctor.
@@ -292,7 +309,7 @@ install_helper_scripts() {
         fi
     done
 
-    for datafile in msg-client.js vault-keygen.js package.json package-lock.json; do
+    for datafile in msg-client.js vault-keygen.js vault-fetch.js package.json package-lock.json; do
         if [ -f "$scripts_src/$datafile" ]; then
             cp "$scripts_src/$datafile" "$scripts_dest/$datafile"
             chmod 644 "$scripts_dest/$datafile"

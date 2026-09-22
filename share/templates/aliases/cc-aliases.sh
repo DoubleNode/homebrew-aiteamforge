@@ -9,6 +9,26 @@
 # Installation directory (substituted during install)
 AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
 
+# XACA-1312: the credential-routing core (design doc §1.1, §6) — the SAME
+# file dev claude_code_cc_aliases.sh sources, shipped here so a consumer's
+# cc/cc-*/ccc launches actually apply the team's declared ai.credential
+# instead of always billing the machine login. Tap-Only-Edit: intentional
+# (this template is not in sync-tap.sh's mirror map — grep confirms only
+# comment hits — so this source line and the _cc_launch/cc/ccc wiring below
+# are native to this file, not derived from the canonical launcher).
+#
+# Fail-closed on a missing/broken core: a partial upgrade or a non-zsh shell
+# must refuse cc/cc-*/ccc rather than silently launch unrouted (design §6,
+# "if the core fails to load"). _cc_routing_core_missing is what every
+# wired launch site below checks before doing anything else.
+_cc_routing_core_missing() {
+    print -u2 "✗ routing core missing at $AITEAMFORGE_DIR/scripts/cc-account-routing.sh — run 'aiteamforge upgrade' (or AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 to launch on the machine login)"
+    return 1
+}
+if [[ -f "$AITEAMFORGE_DIR/scripts/cc-account-routing.sh" ]]; then
+    source "$AITEAMFORGE_DIR/scripts/cc-account-routing.sh" || true
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Core Infrastructure
 # ─────────────────────────────────────────────────────────────────────────────
@@ -232,9 +252,33 @@ _cc_clear_claude_active() {
 _cc_launch() {
     local prompt_file="$1"
 
+    # XACA-0977 BLOCKING A parity (dev claude_code_cc_aliases.sh): a GLOBAL,
+    # out-of-band signal telling cc() whether claude was ever actually
+    # invoked, separate from this function's return code. Pre-clear FIRST —
+    # before any early-abort path below — so a stale "1" from a PRIOR
+    # successful call in this shell can't leak through.
+    _CC_LAUNCH_INVOKED=0
+
     # Read prompt text directly
     if [[ ! -f "$prompt_file" ]]; then
         echo "ERROR: Prompt file not found: $prompt_file" >&2
+        return 1
+    fi
+
+    # XACA-1312 (design doc §4, site #1): resolve and apply the team's
+    # declared ai.credential right after the prompt-file checks, via the
+    # SAME shared core dev claude_code_cc_aliases.sh uses. A missing core
+    # (partial upgrade, or a non-zsh shell) refuses rather than launching
+    # unrouted (design §6).
+    if ! command -v _cc_route_prepare >/dev/null 2>&1; then
+        _cc_routing_core_missing
+        return 1
+    fi
+    local _CC_RESOLVED_TOKEN="" _CC_RESOLVED_AUTH_TYPE=""
+    local _CC_BILLED_ID="" _CC_BILLED_NICKNAME=""
+    _cc_route_prepare
+    if [[ $? -eq 1 ]]; then
+        echo "ERROR: Cannot resolve Anthropic token for this team — aborting launch" >&2
         return 1
     fi
 
@@ -284,37 +328,45 @@ _cc_launch() {
         return 0
     fi
 
-    # XACA-1300-014: record this launch in ~/.claude/.session-account-map.jsonl.
-    # The shared helper pins its own --session-id and writes the row; when it
-    # returns one, that id REPLACES the local pin above so the row and the
-    # launch carry the same id. RECORD ONLY: this file does not apply the
-    # team's declared ai.credential route (applying routes on tap launchers is
-    # follow-up XACA-1312), so the helper records what actually runs -- default
-    # OAuth, or account_resolved:false for an inherited credential -- and never
-    # the declared-but-unapplied team account. Helper absent = unrecorded
-    # launch, exactly as before. Its stderr is NOT redirected (XACA-1197).
-    local _cc_hl="$AITEAMFORGE_DIR/scripts/session-account-map-headless.sh"
-    if [[ -x "$_cc_hl" ]]; then
-        local _cc_hl_sid
-        _cc_hl_sid=$("$_cc_hl" </dev/null)
-        [[ -n "$_cc_hl_sid" ]] && _cc_pinned_id="$_cc_hl_sid"
-    fi
+    # XACA-1312 (design doc §0 D3 correction, §4 CLAUDE_BILLED_ACCOUNT_ID
+    # contract): record via the shared helper with the GATED billed
+    # identity _cc_route_prepare just resolved — NOT the old headless
+    # helper's own recording rule, which reads CLAUDE_BILLED_ACCOUNT_ID from
+    # the CALLING shell's environment. That is empty even on a successful
+    # route: the token only ever reaches claude's CHILD env via
+    # _cc_run_claude_with_auth's subshell, so the headless helper's rule 1
+    # would have recorded every routed tap launch as default OAuth —
+    # exactly the mis-record this ticket exists to fix. Record at LAUNCH
+    # time (crash-safe, XACA-0668 parity) using the local pin above.
+    _cc_record_session_account "$_cc_pinned_id" "$_CC_BILLED_ID" "$_CC_BILLED_NICKNAME"
 
     # Build optional flag array — empty values are simply omitted.
     local -a _cc_extra_args=()
     [[ -n "$_cc_name" ]] && _cc_extra_args+=(--name "$_cc_name")
     [[ -n "$_cc_pinned_id" ]] && _cc_extra_args+=(--session-id "$_cc_pinned_id")
 
-    claude --permission-mode bypassPermissions "${_cc_extra_args[@]}" --append-system-prompt "$CLAUDE_SYSTEM_PROMPT" \
+    # XACA-1312: from here on claude is genuinely being invoked (dev parity)
+    # -- flip the signal BEFORE the call, and inject the resolved credential
+    # via the shared scoped-env helper instead of a bare `claude` call.
+    _CC_LAUNCH_INVOKED=1
+    _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
+        --permission-mode bypassPermissions "${_cc_extra_args[@]}" --append-system-prompt "$CLAUDE_SYSTEM_PROMPT" \
         "If an AMB heartbeat system reminder is present, call mcp__amb__heartbeat first, then introduce yourself briefly."
+    local _cc_launch_claude_rc=$?
 
     # Pass the pinned UUID so _cc_save_session can skip the ls -t heuristic.
     _cc_save_session "$_cc_pinned_id"
+
+    # XACA-1312: post-exit record too (dev _cc_launch parity) — a session
+    # may be resumable even after a non-zero exit, and billing already
+    # occurred either way.
+    _cc_record_session_account "$_cc_pinned_id" "$_CC_BILLED_ID" "$_CC_BILLED_NICKNAME"
 
     if command -v kb-clear &> /dev/null; then
         kb-clear
     fi
     _cc_clear_claude_active
+    return $_cc_launch_claude_rc
 }
 
 # Context-aware cc command — detects terminal SESSION_TYPE/SESSION_NAME and
@@ -335,18 +387,63 @@ cc() {
             echo "🚨 Falling back to plain claude — NO PERSONA (generic assistant, no character/team context)." >&2
         fi
     fi
-    # XACA-1300-014: plain-claude fallback -- the headless gate path
-    # (`printf prompt | cc` from kb-run-* with no persona context). Pin + record
-    # via the shared helper, same RECORD-ONLY contract as _cc_launch above (no
-    # team route is applied here; that is follow-up XACA-1312). Only when cc got
-    # NO arguments: `cc --resume <id>`, `cc -c` and subcommands would break or
-    # conflict with an added --session-id, so they stay unrecorded. </dev/null
-    # keeps the helper's `claude --help` probe off the piped gate prompt.
+    # XACA-1312 (design §4 site #2): plain-claude fallback -- the headless
+    # gate path (`printf prompt | cc` from kb-run-* with no persona context)
+    # AND the "prompt file not found" fallthrough above. Route it too,
+    # whenever a team context exists, via the SAME shared core.
+    local _cc_fb_team="${SESSION_TYPE:-${LCARS_TEAM:-${KB_TEAM:-}}}"
+    if [[ -n "$_cc_fb_team" ]]; then
+        if ! command -v _cc_route_prepare >/dev/null 2>&1; then
+            _cc_routing_core_missing
+            return 1
+        fi
+        local _CC_RESOLVED_TOKEN="" _CC_RESOLVED_AUTH_TYPE=""
+        local _CC_BILLED_ID="" _CC_BILLED_NICKNAME=""
+        _cc_route_prepare
+        if [[ $? -eq 1 ]]; then
+            # XACA-1312 §3.3: REFUSED. claude must NOT run at all -- a
+            # refusal is not a persona failure, and falling back to plain
+            # unrouted claude here would reconstruct the exact
+            # silent-downgrade defect this ticket exists to close.
+            echo "ERROR: Cannot resolve Anthropic token for team '${_cc_fb_team}' — aborting launch" >&2
+            return 1
+        fi
+        # Pin a session id the same way _cc_launch does (XACA-0541), only
+        # when cc got NO arguments -- with arguments this may be
+        # `cc --resume <id>`, `cc -c` or a subcommand, where an added
+        # --session-id would conflict or break the command.
+        local -a _cc_fb_extra=()
+        local _cc_fb_sid=""
+        if (( $# == 0 )); then
+            local _cc_fb_has_sid=""
+            claude --help 2>/dev/null | grep -q -- "--session-id" && _cc_fb_has_sid=1
+            if [[ -n "$_cc_fb_has_sid" ]]; then
+                _cc_fb_sid=$(uuidgen | tr 'A-Z' 'a-z')
+                _cc_fb_extra=(--session-id "$_cc_fb_sid")
+            fi
+        fi
+        _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
+            --permission-mode bypassPermissions "${_cc_fb_extra[@]}" "$@"
+        local _cc_fb_rc=$?
+        # XACA-1312 D3 correction: record via the gated identity, never the
+        # headless helper's own rule (see _cc_launch's matching comment).
+        _cc_record_session_account "$_cc_fb_sid" "$_CC_BILLED_ID" "$_CC_BILLED_NICKNAME"
+        return $_cc_fb_rc
+    fi
+
+    # XACA-1300-014: no team context -- nothing declared to route. Keep the
+    # headless helper exactly as before; it correctly attributes a NESTED
+    # headless launch (one shelled out from inside an already-routed parent
+    # session) via CLAUDE_BILLED_ACCOUNT_ID inherited from that parent's
+    # export. Only when cc got NO arguments: `cc --resume <id>`, `cc -c` and
+    # subcommands would break or conflict with an added --session-id, so
+    # they stay unrecorded. </dev/null keeps the helper's `claude --help`
+    # probe off the piped gate prompt.
     local -a _cc_fb_args=()
     if (( $# == 0 )) && [[ -x "$AITEAMFORGE_DIR/scripts/session-account-map-headless.sh" ]]; then
-        local _cc_fb_sid
-        _cc_fb_sid=$("$AITEAMFORGE_DIR/scripts/session-account-map-headless.sh" </dev/null)
-        [[ -n "$_cc_fb_sid" ]] && _cc_fb_args=(--session-id "$_cc_fb_sid")
+        local _cc_fb_sid2
+        _cc_fb_sid2=$("$AITEAMFORGE_DIR/scripts/session-account-map-headless.sh" </dev/null)
+        [[ -n "$_cc_fb_sid2" ]] && _cc_fb_args=(--session-id "$_cc_fb_sid2")
     fi
     claude --permission-mode bypassPermissions "${_cc_fb_args[@]}" "$@"
 }
@@ -354,6 +451,44 @@ cc() {
 # Resume the most recent Claude session for THIS terminal
 # Uses stored session ID instead of --continue (which picks most recent globally)
 ccc() {
+    # XACA-1312 (design §5): argument parsing + routing + cross-account
+    # guard parity with dev ccc(). A typo like `ccc --forse` must be a usage
+    # error, not silent consent-absent.
+    local _ccc_force=0
+    while (( $# )); do
+        case "$1" in
+            --force) _ccc_force=1; shift ;;
+            *)
+                print -u2 "ccc: unknown argument '$1'"
+                print -u2 "usage: ccc [--force]"
+                return 2
+                ;;
+        esac
+    done
+
+    if ! command -v _cc_route_prepare >/dev/null 2>&1; then
+        _cc_routing_core_missing
+        return 1
+    fi
+
+    # Resolve credentials BEFORE reading the sidecar (ordering is
+    # load-bearing — see dev ccc()'s own comment on this: the recorder must
+    # never run against a pre-resolution empty billed id).
+    local _CC_RESOLVED_TOKEN="" _CC_RESOLVED_AUTH_TYPE=""
+    local _CC_BILLED_ID="" _CC_BILLED_NICKNAME=""
+    _cc_route_prepare
+    local _ccc_cred_rc=$?
+    local resolved_account_id="$_CC_BILLED_ID"
+    local resolved_account_nickname="$_CC_BILLED_NICKNAME"
+
+    # --- D3 parity: rc=1 is fail-closed, UNCONDITIONALLY — --force does NOT
+    # override. Consenting to bill account X is meaningless when no token
+    # for X could be obtained.
+    if [[ $_ccc_cred_rc -eq 1 ]]; then
+        echo "ERROR: Cannot resolve Anthropic token — aborting resume (no session was resumed, nothing was billed)" >&2
+        return 1
+    fi
+
     local window_suffix
     window_suffix=$(_cc_window_suffix) || window_suffix=""
     local session_file="$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
@@ -365,6 +500,14 @@ ccc() {
         local session_id saved_name saved_dir
         IFS='|' read -r session_id saved_name saved_dir < "$session_file"
         if [[ -n "$session_id" ]]; then
+            # XACA-0977 D1/D2 parity: cross-account resume guard, via the
+            # shared helper (design §1.1, §5) — same implementation dev ccc
+            # uses. On a mismatch with no --force it has already printed the
+            # full warning; this function's only job is to return.
+            if ! _cc_resume_account_guard "$session_id" "$resolved_account_id" "$_ccc_force"; then
+                return 1
+            fi
+
             # XACA-0177: restore project dir so claude --resume sees the
             # same cwd that was active when the session was saved.
             if [[ -n "$saved_dir" && "$saved_dir" != "$PWD" ]]; then
@@ -374,22 +517,33 @@ ccc() {
                     echo "ccc: warning — saved project dir '$saved_dir' is gone, resuming from $PWD" >&2
                 fi
             fi
-            claude --permission-mode bypassPermissions --resume "$session_id"
+
+            _cc_save_session "$session_id"
+            _cc_record_session_account "$session_id" "$resolved_account_id" "$resolved_account_nickname"
+
+            _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
+                --permission-mode bypassPermissions --resume "$session_id"
+            local _ccc_claude_rc=$?
             _cc_save_session
+            _cc_record_session_account "$session_id" "$resolved_account_id" "$resolved_account_nickname"
             if command -v kb-clear &> /dev/null; then
                 kb-clear
             fi
             _cc_clear_claude_active
-            return
+            return $_ccc_claude_rc
         fi
     fi
 
-    claude --permission-mode bypassPermissions --continue
+    print -u2 $'\e[2m'"ccc: no saved session for this window — using --continue; billed to ${resolved_account_nickname:-default OAuth}"$'\e[0m'
+    _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
+        --permission-mode bypassPermissions --continue
+    local _ccc_claude_rc=$?
     _cc_save_session
     if command -v kb-clear &> /dev/null; then
         kb-clear
     fi
     _cc_clear_claude_active
+    return $_ccc_claude_rc
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

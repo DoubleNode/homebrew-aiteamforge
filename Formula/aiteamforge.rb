@@ -206,6 +206,13 @@ class Aiteamforge < Formula
     # Verify worktree-helpers.sh ships in installer payload (XACA-0494/XACA-0506)
     assert_path_exists libexec/"share/scripts/worktree-helpers.sh"
 
+    # Verify the credential-routing core + its vault dependency ship in the
+    # installer payload (XACA-1312) — a missing core makes cc/ccc refuse to
+    # launch on every consumer.
+    assert_path_exists libexec/"share/scripts/cc-account-routing.sh"
+    assert_path_exists libexec/"share/scripts/vault-fetch.sh"
+    assert_path_exists libexec/"share/scripts/vault-fetch.js"
+
     # Test that setup wizard shows version
     system "#{bin}/aiteamforge-setup", "--help"
   end

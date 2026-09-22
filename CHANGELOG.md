@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1312** — tap consumer launchers (`cc`, `ccc`, `_cc_launch` in
+  `share/templates/aliases/cc-aliases.sh`) now apply the per-team Anthropic
+  credential instead of always billing the machine login, and fail closed
+  (single `✗` line, rc 1, claude never runs) when a declared credential
+  cannot be resolved — `AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1` is the sanctioned
+  per-launch override. Ships the shared routing core
+  `share/scripts/cc-account-routing.sh` plus its vault dependency
+  (`share/scripts/vault-fetch.sh`/`.js`) so consumers become
+  vault-primary/env-var-failover. `share/scripts/kb-cr.sh` routes its
+  `claude -p` skill invocation the same way. Delivered via
+  `libexec/installers/install-shell.sh` (fresh install),
+  `libexec/commands/aiteamforge-upgrade.sh` (materialize on upgrade,
+  including a dedicated copy step for `vault-fetch.js`), and checked by
+  `bin/aiteamforge-doctor.sh` and `Formula/aiteamforge.rb`.
 
 ## [0.20.23] - 2026-09-22
 - **XACA-1297 (part 2)** — `share/scripts/kb-compaction-premise-check.sh`: ratchet checks C and D2 now tell

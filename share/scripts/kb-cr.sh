@@ -3,6 +3,18 @@
 #
 # Sourced by kanban-helpers.sh. Provides the kb-cr dispatcher.
 #
+# XACA-1312: credential-routing core, for the `claude -p` skill-invocation
+# site in the publish flow (design doc §4 site #13, §6). Sourced HERE, at
+# TOP LEVEL (not inside a function), so cc-account-routing.sh's own
+# self-location capture (${(%):-%x} at ITS source time) sees kb-cr.sh's
+# caller frame correctly — both layouts this file ships to (dev scripts/,
+# tap share/scripts/ via sync-tap.sh) keep cc-account-routing.sh as a
+# sibling in the same directory. Fail-soft: kb-cr.sh has many commands
+# unrelated to CR publishing; a missing/broken core must not break the rest
+# of this file, only the one call site that resolves a team credential.
+typeset -g _KB_CR_ROUTING_CORE="${${(%):-%x}:A:h}/cc-account-routing.sh"
+[[ -f "$_KB_CR_ROUTING_CORE" ]] && source "$_KB_CR_ROUTING_CORE" 2>/dev/null
+#
 # ══════════════════════════════════════════════════════════════════════════════
 # UNIFIED v2.0 LIFECYCLE (XACA-0327)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4296,25 +4308,66 @@ PROMPT
 
     # Invoke the skill. Capture stdout to extract the Confluence URL.
     # `claude -p` (--print) runs one-shot non-interactive mode; reads prompt from stdin.
-    # XACA-1300-014: pin a session id and record the account this headless
-    # launch runs on (shared rule in session-account-map-headless.sh), so the
-    # token report can attribute it. Absent helper (tap consumers do not ship
-    # it) = launch exactly as before, unrecorded. Helper stderr is NOT
-    # redirected: a recorder failure must be visible (XACA-1197), and the
-    # helper always exits 0 so it can never stop the publish.
+    #
+    # XACA-1312 (design §4 site #13): apply the team's declared credential to
+    # this launch, via the shared core sourced at the top of this file, and
+    # record with the GATED identity through _cc_record_session_account
+    # (resolved next to the core — correct on a consumer, unlike the old
+    # hardcoded $HOME/dev-team/scripts/session-account-map-headless.sh call,
+    # which is also wrong for a ROUTED launch for the D3 reason documented
+    # in the design doc's §0 corrections table and _cc_record_session_
+    # account's own comment). If the core never loaded at all (partial
+    # install/upgrade, or a non-zsh caller) degrade to exactly the pre-1312
+    # behavior — unrouted, pinned via the headless helper if present — so a
+    # transitional install can still publish. If the core loaded but
+    # REFUSES (a declared credential could not be resolved), fail closed:
+    # this is CR publishing, and silently billing the machine login for it
+    # is the exact defect this ticket exists to close.
     local -a _kbcr_sid_args=()
-    local _kbcr_sid=""
-    if [[ -x "${HOME}/dev-team/scripts/session-account-map-headless.sh" ]]; then
+    local _kbcr_sid="" _kbcr_billed_id="" _kbcr_billed_nick=""
+    local _kbcr_token="" _kbcr_auth_type=""
+    if command -v _cc_route_prepare >/dev/null 2>&1; then
+        local _CC_RESOLVED_TOKEN="" _CC_RESOLVED_AUTH_TYPE=""
+        local _CC_BILLED_ID="" _CC_BILLED_NICKNAME=""
+        _cc_route_prepare
+        if [[ $? -eq 1 ]]; then
+            echo "kb-cr publish: cannot resolve Anthropic token for this team — aborting publish (nothing was billed)." >&2
+            return 1
+        fi
+        _kbcr_token="$_CC_RESOLVED_TOKEN"
+        _kbcr_auth_type="$_CC_RESOLVED_AUTH_TYPE"
+        _kbcr_billed_id="$_CC_BILLED_ID"
+        _kbcr_billed_nick="$_CC_BILLED_NICKNAME"
+        local _kbcr_has_sid=""
+        claude --help 2>/dev/null | grep -q -- "--session-id" && _kbcr_has_sid=1
+        if [[ -n "$_kbcr_has_sid" ]]; then
+            _kbcr_sid=$(uuidgen | tr 'A-Z' 'a-z')
+            _kbcr_sid_args=(--session-id "$_kbcr_sid")
+        fi
+    elif [[ -x "${HOME}/dev-team/scripts/session-account-map-headless.sh" ]]; then
         _kbcr_sid=$("${HOME}/dev-team/scripts/session-account-map-headless.sh" </dev/null)
         [[ -n "$_kbcr_sid" ]] && _kbcr_sid_args=(--session-id "$_kbcr_sid")
     fi
 
     local skill_output
-    skill_output=$(printf '%s\n' "$skill_prompt" | claude -p "${_kbcr_sid_args[@]}" 2>&1) || {
-        echo "kb-cr publish: skill invocation failed (exit $?)." >&2
-        echo "$skill_output" >&2
-        return 1
-    }
+    if command -v _cc_run_claude_with_auth >/dev/null 2>&1; then
+        skill_output=$(printf '%s\n' "$skill_prompt" | _cc_run_claude_with_auth "$_kbcr_token" "$_kbcr_auth_type" -p "${_kbcr_sid_args[@]}" 2>&1) || {
+            echo "kb-cr publish: skill invocation failed (exit $?)." >&2
+            echo "$skill_output" >&2
+            return 1
+        }
+    else
+        # Core never loaded at all — plain claude, exactly as before XACA-1312.
+        skill_output=$(printf '%s\n' "$skill_prompt" | claude -p "${_kbcr_sid_args[@]}" 2>&1) || {
+            echo "kb-cr publish: skill invocation failed (exit $?)." >&2
+            echo "$skill_output" >&2
+            return 1
+        }
+    fi
+    if [[ -n "$_kbcr_sid" && -n "$_kbcr_billed_id$_kbcr_billed_nick" ]]; then
+        command -v _cc_record_session_account >/dev/null 2>&1 && \
+            _cc_record_session_account "$_kbcr_sid" "$_kbcr_billed_id" "$_kbcr_billed_nick"
+    fi
 
     # Extract the Confluence URL from skill output.
     local conf_url

@@ -3169,6 +3169,16 @@ PYEOF
 # absent chain degrades to an UNRECORDED launch, never an error: nothing would
 # surface the gap. .sh/.py, so the glob sweep reaches them once listed here; no
 # extensionless sweep entry is needed.
+# XACA-1312: cc-account-routing.sh (the credential-routing core cc-aliases.sh
+# now sources) and vault-fetch.sh (its Tier-1 vault dependency, U1: consumers
+# become vault-primary / env-var-failover). BRAND-NEW on every already-
+# installed box, same "refresh only what exists" gap as the recorder chain
+# above -- without this entry, cc/ccc on an upgraded (not freshly installed)
+# consumer would refuse forever (design §6: a missing core is fail-closed,
+# not a silent unrouted launch). Both are .sh, so the glob sweep reaches them
+# once listed here. vault-fetch.js (their require()'d sibling, no .sh/.py
+# extension) is NOT reachable by this sweep at all -- see the dedicated
+# materialize step in update_runtime_helpers() below.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3196,6 +3206,8 @@ kb-token-report
 session-account-map-headless.sh
 session-account-map-record.sh
 session-account-map.py
+cc-account-routing.sh
+vault-fetch.sh
 EOF
 }
 
@@ -3257,6 +3269,31 @@ update_runtime_helpers() {
     fi
     updated=$((updated + 1))
   done
+
+  # XACA-1312: vault-fetch.js is vault-fetch.sh's require()'d sibling (same
+  # self-location shape as vault-keygen.js next to msg-client.js — see the
+  # datafile note in install-shell.sh's install_helper_scripts()) and
+  # carries no .sh/.py extension, so the sweep loop above cannot reach it.
+  # Materialize it unconditionally alongside vault-fetch.sh, whose own
+  # _xaca0673_mandatory_materialize_basenames entry guarantees vault-fetch.sh
+  # itself lands on every already-installed box — shipping the wrapper
+  # without this sibling would repeat the exact MODULE_NOT_FOUND class the
+  # msg-client.js/vault-keygen.js comments document. Always overwritten
+  # (never gated on "already exists"), same as the mandatory .sh/.py entries
+  # above: on upgrade this is a brand-new file everywhere.
+  local _vf_src="${scripts_source}/vault-fetch.js"
+  local _vf_dest="${scripts_dest}/vault-fetch.js"
+  if [ -f "$_vf_src" ]; then
+    print_info "Updating scripts/vault-fetch.js..."
+    if [ "$DRY_RUN" = false ]; then
+      cp "$_vf_src" "$_vf_dest"
+      chmod 644 "$_vf_dest"
+      print_success "Updated scripts/vault-fetch.js"
+    else
+      echo "Would update: scripts/vault-fetch.js"
+    fi
+    updated=$((updated + 1))
+  fi
 
   if [ $updated -eq 0 ]; then
     print_success "All runtime helper scripts up to date"

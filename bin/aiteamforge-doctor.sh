@@ -828,6 +828,15 @@ check_config() {
         check_result warn "${alias_name} missing" "Run: aiteamforge setup --shell"
       fi
     done
+
+    # XACA-1312: cc-aliases.sh sources this at $AITEAMFORGE_DIR/scripts/
+    # cc-account-routing.sh; a missing core makes cc/cc-*/ccc refuse
+    # outright (fail-closed, design §6) instead of launching unrouted.
+    if [ -f "${AITEAMFORGE_DIR}/scripts/cc-account-routing.sh" ]; then
+      check_result pass "cc-account-routing.sh (deployed)"
+    else
+      check_result warn "cc-account-routing.sh missing — cc/ccc will refuse to launch" "Run: aiteamforge upgrade"
+    fi
   else
     check_result pass "Alias files (not installed — cockpit profile)"
   fi
