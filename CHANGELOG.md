@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.21] - 2026-09-21
 - **Mirror: `share/lcars-ui/tests/conftest.py` now scrubs inherited git env at import.** Brings the tap copy
   in line with dev-team canonical: repository-local git variables (`git rev-parse --local-env-vars` plus a
   fallback list) are popped before any LCARS pytest fixture runs a `git` command. The companion runner scrub
@@ -6927,7 +6929,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.20...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.21...HEAD
+[0.20.21]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.20...v0.20.21
 [0.20.20]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.19...v0.20.20
 [0.20.19]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.18...v0.20.19
 [0.20.18]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.17...v0.20.18
