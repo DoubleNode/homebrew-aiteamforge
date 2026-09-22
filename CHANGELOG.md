@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.23] - 2026-09-22
 - **XACA-1297 (part 2)** — `share/scripts/kb-compaction-premise-check.sh`: ratchet checks C and D2 now tell
   "nothing to measure on this machine" apart from "could not measure". A non-empty, FULLY READ transcript corpus
   with no Haiku 4.5 turns (check C) or no entrypoint-bearing records (D2) reports a new `N/A` outcome that does not
@@ -7025,7 +7027,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.22...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.23...HEAD
+[0.20.23]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.22...v0.20.23
 [0.20.22]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.21...v0.20.22
 [0.20.21]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.20...v0.20.21
 [0.20.20]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.19...v0.20.20
