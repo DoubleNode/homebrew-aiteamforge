@@ -25,6 +25,46 @@ for a five-line check.
 """
 from pathlib import Path
 
+
+# ── Git-env scrub: drop INHERITED repository-local git variables ─────────────
+#
+# With GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE exported, git ignores both the
+# cwd and an explicit path: a fixture's `git init <tmp>` / `git config user.*`
+# / `git commit` (subprocess, cwd=tmp) lands in whatever REAL repo GIT_DIR
+# names. That happened to the tap on 2026-09-08 (18 commits authored
+# `Sandbox <test@example.com>`). Every test subprocess inherits os.environ,
+# so popping the variables here, at conftest import, covers them all.
+# Same list and rationale as scripts/tests/lib/git-env-hermetic.sh (the shell
+# runners' copy) -- independent, not shared, like the tap-submodule check
+# below. tests/conftest.py carries an identical copy; guarded by
+# tests/test-git-env-hermetic-runners.sh.
+_GIT_LOCAL_ENV_FALLBACK = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
+)
+
+
+def _scrub_inherited_git_env():
+    import os
+    import subprocess
+    names = set(_GIT_LOCAL_ENV_FALLBACK)
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--local-env-vars"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+        names.update(out.split())
+    except Exception:
+        pass  # the fixed fallback list still applies
+    for name in names:
+        os.environ.pop(name, None)
+
+
+_scrub_inherited_git_env()
+
 # lcars-ui/tests/conftest.py -> lcars-ui/tests -> lcars-ui -> REPO ROOT.
 # homebrew-tap (and .gitmodules) live at the repo root, a sibling of
 # lcars-ui/, not under lcars-ui/ itself.

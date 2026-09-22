@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **Mirror: `share/lcars-ui/tests/conftest.py` now scrubs inherited git env at import.** Brings the tap copy
+  in line with dev-team canonical: repository-local git variables (`git rev-parse --local-env-vars` plus a
+  fallback list) are popped before any LCARS pytest fixture runs a `git` command. The companion runner scrub
+  was mirrored earlier, but this file was missed, and `sync-tap.sh --check` reported it as 1 drifted file. Test-only; installed
+  behaviour is unchanged.
 - **`kb-msg doctor`: a live-only inbox-hook registration on a dev checkout is now `[GAP]`, not `[ok]`.**
   `share/templates/kanban/kanban-helpers.template.sh`: mirror of the canonical `_kb_msg_doctor` change
   (byte-identical; divergence ratchet unchanged). When the checkout's `deploy-to-production.sh` maps a
