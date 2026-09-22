@@ -27,22 +27,53 @@
 #        refuse every launch outright. With the core present, EVERY
 #        team-context launch now runs GATED resolution (_cc_route_prepare),
 #        even when the team is undeclared and the outcome is "use the
-#        machine login" — so account_resolved is true whenever a row is
-#        written at all (_cc_record_session_account always passes
-#        --account-id explicitly, even empty — see its own contract
-#        comment). This is a genuine, intentional semantic change from
-#        XACA-1312, not a relaxed assertion: pre-1312, an undeclared team's
-#        launch never went through gated resolution at all, so the OLD
-#        headless recorder's own heuristic (present/absent
-#        CLAUDE_BILLED_ACCOUNT_ID) produced account_resolved:false for E2's
-#        inherited-credential case. Post-1312 the route IS attempted (and
-#        quietly defers to whatever the shell already had), so E2 now
-#        expects account_resolved:true, same as E1/E3. A declared-but-
-#        unresolvable OR engine-mismatched credential is a DIFFERENT,
-#        already-refused case (see cc-account-routing.sh's engine guard and
-#        _cc_fail_closed) and is exhaustively covered by
+#        machine login".
+#
+#        XACA-1312 fix round 2 (orchestrator review of round 1): round 1's
+#        claim above — "account_resolved is true whenever a row is written
+#        at all" — was WRONG and has been REVERTED, not kept. It rested on
+#        "_cc_record_session_account always passes --account-id explicitly,
+#        even empty", which was accurate about round-1's code but encoded a
+#        wrong billing record: _cc_run_claude_with_auth's empty-token
+#        branch runs plain `claude "$@"`, which INHERITS whatever
+#        credential the calling shell already carried (E2's
+#        ANTHROPIC_AUTH_TOKEN="fake-sentinel-inherited" — an agent shell's
+#        own token, never named in the row by design). Recording that as
+#        "resolved, default OAuth" claims the launch ran on the machine
+#        login when it actually ran on an unidentified inherited
+#        credential. _cc_record_session_account now mirrors
+#        session-account-map-headless.sh's own rule 1 vs rule 3 exactly: no
+#        credential var anywhere in the shell → resolved/default-OAuth
+#        (E1, E3 — neither sets ANTHROPIC_AUTH_TOKEN); a credential var
+#        present with no gated billed pair → account_resolved=false,
+#        unknown account (E2, restored to its pre-round-1 expectation). See
+#        cc-account-routing.sh's _cc_record_session_account docstring for
+#        the full rule table. E2b (below) exercises the ONE case that is
+#        still legitimately resolved-to-a-real-account despite an inherited
+#        credential: CLAUDE_BILLED_ACCOUNT_ID also present (a NESTED
+#        headless launch inheriting an already-routed parent's exported
+#        pair) — that is rule 2, unaffected by this fix, and only reachable
+#        through the OTHER cc() branch (no team context at all, which still
+#        calls session-account-map-headless.sh directly and always did). A
+#        declared-but-unresolvable OR engine-mismatched credential is a
+#        DIFFERENT, already-refused case (see cc-account-routing.sh's
+#        engine guard and _cc_fail_closed) and is exhaustively covered by
 #        scripts/tests/test-cc-aliases-smoke.sh, not here.
 #   E5   recorder failure: the launch still happens and the failure is visible
+#   E6/E6-ccc  the ticket's own core scenario: a DECLARED credential (team
+#        "declared" in team-paths.json above) applied by the consumer
+#        launcher end to end, through `cc` and through `ccc`. Env var is
+#        checked for PRESENCE only in the stub (never its value); the
+#        calling shell is checked too, to confirm the token stays scoped to
+#        claude's child env (_cc_run_claude_with_auth's subshell), never
+#        exported back.
+#   E7/E7-ccc  same declared team, env var empty -> refuse (rc 1), claude
+#        never runs, nothing is recorded — through `cc` and `ccc`.
+#   E8   E7 + AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 -> launches anyway on an
+#        unsuppressible warning, recorded as default OAuth.
+#   E6 mutation check: breaks the declared env-var resolution in a SCRATCH
+#        COPY of cc-account-routing.sh and confirms E6 goes red, proving E6
+#        actually exercises that code path.
 #   Z    the real ~/.claude/.session-account-map.jsonl is never written
 #
 # Sandboxing: HOME, AITEAMFORGE_DIR and SESSION_ACCOUNT_MAP_PATH all point under
@@ -173,10 +204,22 @@ if [ "${1:-}" = "--help" ]; then
 fi
 printf '%s\n' "$*" >> "$STUB_ARGV"
 cat >> "$STUB_STDIN"
+# XACA-1312 round 2 (E6): presence-only credential check, never the value.
+# `${VAR:+SET}` alone is the safe idiom -- concatenating it with `${VAR:-...}`
+# would print the ACTUAL VALUE when the var is set (the `:-` fallback
+# operator only substitutes on unset/empty; when set it expands to $VAR
+# itself), which is exactly the leak this must not reproduce.
+if [ -n "${STUB_ENV:-}" ]; then
+    {
+        printf 'AUTH_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:+SET}"
+        printf 'API_KEY=%s\n' "${ANTHROPIC_API_KEY:+SET}"
+        printf 'OAUTH_TOKEN=%s\n' "${CLAUDE_CODE_OAUTH_TOKEN:+SET}"
+    } >> "$STUB_ENV"
+fi
 exit 0
 STUB
 chmod +x "$WORK/bin/claude"
-STUB_ARGV="$WORK/argv.log"; STUB_STDIN="$WORK/stdin.log"
+STUB_ARGV="$WORK/argv.log"; STUB_STDIN="$WORK/stdin.log"; STUB_ENV="$WORK/env.log"
 MAP="$SBHOME/.claude/.session-account-map.jsonl"
 ALL_SIDS="$WORK/sids.txt"; : >"$ALL_SIDS"
 
@@ -204,7 +247,7 @@ chmod +x "$ATF/scripts/cc-account-routing.sh"
 # now that the routing core is wired in (XACA-1312).
 mkdir -p "$SBHOME/.aiteamforge"
 cat >"$SBHOME/.aiteamforge/team-paths.json" <<'JSON'
-{"teams":{"academy":{}}}
+{"teams":{"academy":{},"declared":{"ai":{"credential":{"account_id":"acct-e6-declared","nickname":"E6 Declared","env_var_name":"CLAUDE_ACCT_TEST_TOKEN"}}}}}
 JSON
 
 # Persona prompt so _cc_launch has something to launch.
@@ -221,10 +264,10 @@ sandboxed() {
         HOME="$SBHOME" AITEAMFORGE_DIR="$ATF" SESSION_ACCOUNT_MAP_PATH="$MAP" \
         PATH="$WORK/bin:$PATH" KB_TEAM=academy KB_TERMINAL=agent \
         CLAUDE_ACCT_TEST_TOKEN="fake-sentinel-declared-not-applied" \
-        STUB_ARGV="$STUB_ARGV" STUB_STDIN="$STUB_STDIN" \
+        STUB_ARGV="$STUB_ARGV" STUB_STDIN="$STUB_STDIN" STUB_ENV="$STUB_ENV" \
         "$@"
 }
-reset_logs() { : >"$MAP"; : >"$STUB_ARGV"; : >"$STUB_STDIN"; }
+reset_logs() { : >"$MAP"; : >"$STUB_ARGV"; : >"$STUB_STDIN"; : >"$STUB_ENV"; }
 rows() { if [ -f "$MAP" ]; then grep -c . "$MAP"; else echo 0; fi; }
 field() {
     printf '%s' "$1" | python3 -c 'import json,sys; v=json.load(sys.stdin).get(sys.argv[1]); print("__ABSENT__" if v is None else (str(v).lower() if isinstance(v,bool) else v))' "$2"
@@ -267,11 +310,21 @@ else
     if grep -q "GATE PROMPT e1" "$STUB_STDIN"; then check_row E1 "" true
     else test_fail "gate prompt never reached claude; err=$(cat "$WORK/e1.err")"; fi
 
-    test_start "E2: inherited credential (agent shell), team undeclared → gated resolution ran (account_resolved:true), inherited token never named in the row"
+    test_start "E2: inherited credential (agent shell), team undeclared → gated resolution attempted but produced no billed pair → account_resolved:false (unknown account), inherited token never named in the row"
     reset_logs
     sandboxed env ANTHROPIC_AUTH_TOKEN="fake-sentinel-inherited" \
         zsh -fc 'source "$1" >/dev/null 2>&1; printf "%s\n" "GATE PROMPT e2" | cc' _ "$CC_INSTALLED" >/dev/null 2>"$WORK/e2.err"
-    check_row E2 "" true
+    check_row E2 "" false
+
+    test_start "E2b: inherited credential + CLAUDE_BILLED_ACCOUNT_ID already exported (nested headless launch under an already-routed parent, NO team context) → resolved to that inherited account"
+    reset_logs
+    sandboxed env -u KB_TEAM \
+        ANTHROPIC_AUTH_TOKEN="fake-sentinel-inherited-e2b" \
+        CLAUDE_BILLED_ACCOUNT_ID="acct-e2b-parent" \
+        CLAUDE_BILLED_ACCOUNT_NICKNAME="E2B Parent" \
+        zsh -fc 'source "$1" >/dev/null 2>&1; printf "%s\n" "GATE PROMPT e2b" | cc' _ "$CC_INSTALLED" >/dev/null 2>"$WORK/e2b.err"
+    if grep -q "GATE PROMPT e2b" "$STUB_STDIN"; then check_row E2b "acct-e2b-parent" true
+    else test_fail "gate prompt never reached claude; err=$(cat "$WORK/e2b.err")"; fi
 
     # XACA-1312 fix round 1: _cc_launch (design doc §4 site #1) records
     # TWICE for one launch by design — once BEFORE invoking claude
@@ -318,6 +371,105 @@ else
     launch_sid >>"$ALL_SIDS"
     if grep -q "GATE PROMPT e5" "$STUB_STDIN" && grep -q "RC=0" "$WORK/e5.out"; then test_pass
     else test_fail "stdin=$(cat "$STUB_STDIN") out=$(cat "$WORK/e5.out") err=$(cat "$WORK/e5.err")"; fi
+
+    # ═══ E6/E7/E8 — the ticket's own core scenario: a DECLARED credential
+    # applied by the CONSUMER launcher (round-1 replaced the fixture's
+    # declared-team case with the undeclared "academy" team above, which
+    # left this end-to-end path with no coverage at all — see this file's
+    # top-of-file comment). The "declared" team (team-paths.json above)
+    # points env_var_name at CLAUDE_ACCT_TEST_TOKEN, which sandboxed()
+    # already exports with a fake sentinel value by default — E6 uses that
+    # default; E7/E8 override it to empty.
+    test_start "E6: declared credential + env var SET (non-vault) → claude (stub) receives it in env (presence-only), row records the declared account, resolved:true, token never left in the calling shell"
+    reset_logs
+    sandboxed env KB_TEAM=declared \
+        zsh -fc 'source "$1" >/dev/null 2>&1; printf "%s\n" "GATE PROMPT e6" | cc; print -r -- "SHELL_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:+SET}"' \
+        _ "$CC_INSTALLED" >"$WORK/e6.out" 2>"$WORK/e6.err"
+    if grep -q "GATE PROMPT e6" "$STUB_STDIN" \
+        && grep -q "^AUTH_TOKEN=SET$" "$STUB_ENV" \
+        && grep -q "^SHELL_AUTH_TOKEN=$" "$WORK/e6.out"; then
+        check_row E6 "acct-e6-declared" true
+    else
+        test_fail "argv=$(cat "$STUB_ARGV") env=$(cat "$STUB_ENV") out=$(cat "$WORK/e6.out") err=$(tail -5 "$WORK/e6.err")"
+    fi
+
+    test_start "E6-ccc: same declared credential via ccc() (no saved sidecar -> --continue fallback) → claude (stub) still receives it in env, never in the calling shell"
+    reset_logs
+    sandboxed env KB_TEAM=declared \
+        zsh -fc 'source "$1" >/dev/null 2>&1; ccc </dev/null; print -r -- "RC=$? SHELL_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:+SET}"' \
+        _ "$CC_INSTALLED" >"$WORK/e6ccc.out" 2>"$WORK/e6ccc.err"
+    if grep -q "^AUTH_TOKEN=SET$" "$STUB_ENV" && grep -q "RC=0 SHELL_AUTH_TOKEN=$" "$WORK/e6ccc.out"; then
+        test_pass
+    else
+        test_fail "env=$(cat "$STUB_ENV") out=$(cat "$WORK/e6ccc.out") err=$(tail -5 "$WORK/e6ccc.err")"
+    fi
+
+    test_start "E7: declared credential + env var EMPTY (non-vault) → refuse, rc 1, stub claude NOT invoked, no row claiming the machine login"
+    reset_logs
+    sandboxed env KB_TEAM=declared CLAUDE_ACCT_TEST_TOKEN= \
+        zsh -fc 'source "$1" >/dev/null 2>&1; printf "%s\n" "GATE PROMPT e7" | cc; print -r -- "RC=$?"' \
+        _ "$CC_INSTALLED" >"$WORK/e7.out" 2>"$WORK/e7.err"
+    if grep -q "RC=1" "$WORK/e7.out" && ! grep -q "GATE PROMPT e7" "$STUB_STDIN" && [ "$(rows)" = 0 ]; then
+        test_pass
+    else
+        test_fail "out=$(cat "$WORK/e7.out") rows=$(rows) stdin=$(cat "$STUB_STDIN") err=$(tail -5 "$WORK/e7.err")"
+    fi
+
+    test_start "E7-ccc: same empty-env-var refusal via ccc() — rc 1, stub claude NOT invoked (before any sidecar is even read)"
+    reset_logs
+    sandboxed env KB_TEAM=declared CLAUDE_ACCT_TEST_TOKEN= \
+        zsh -fc 'source "$1" >/dev/null 2>&1; ccc </dev/null; print -r -- "RC=$?"' \
+        _ "$CC_INSTALLED" >"$WORK/e7ccc.out" 2>"$WORK/e7ccc.err"
+    if grep -q "RC=1" "$WORK/e7ccc.out" && [ "$(rows)" = 0 ] && [ ! -s "$STUB_ARGV" ]; then
+        test_pass
+    else
+        test_fail "out=$(cat "$WORK/e7ccc.out") rows=$(rows) argv=$(cat "$STUB_ARGV") err=$(tail -5 "$WORK/e7ccc.err")"
+    fi
+
+    test_start "E8: E7 + AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 → launches anyway, unsuppressible warning printed, row = default OAuth"
+    reset_logs
+    sandboxed env KB_TEAM=declared CLAUDE_ACCT_TEST_TOKEN= AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 \
+        zsh -fc 'source "$1" >/dev/null 2>&1; printf "%s\n" "GATE PROMPT e8" | cc; print -r -- "RC=$?"' \
+        _ "$CC_INSTALLED" >"$WORK/e8.out" 2>"$WORK/e8.err"
+    if grep -q "GATE PROMPT e8" "$STUB_STDIN" && grep -q "RC=0" "$WORK/e8.out" \
+        && grep -q "AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1" "$WORK/e8.err" \
+        && grep -q "MACHINE LOGIN" "$WORK/e8.err"; then
+        check_row E8 "" true
+    else
+        test_fail "out=$(cat "$WORK/e8.out") err=$(cat "$WORK/e8.err") stdin=$(cat "$STUB_STDIN")"
+    fi
+
+    # Mutation check for E6: break the declared-credential env-var path in a
+    # scratch COPY of the routing core and confirm E6 goes red (proves the
+    # test actually exercises that code, not a vacuously-green fixture).
+    test_start "E6 mutation check: breaking the declared env-var resolution makes E6 fail"
+    _mut_core="$WORK/cc-account-routing.mutant.sh"
+    sed 's/_CC_RESOLVED_TOKEN="\$_env_token"/_CC_RESOLVED_TOKEN=""/' \
+        "$ATF/scripts/cc-account-routing.sh" >"$_mut_core"
+    if ! diff -q "$ATF/scripts/cc-account-routing.sh" "$_mut_core" >/dev/null 2>&1; then
+        cp "$ATF/scripts/cc-account-routing.sh" "$WORK/cc-account-routing.orig.sh"
+        cp "$_mut_core" "$ATF/scripts/cc-account-routing.sh"
+        reset_logs
+        sandboxed env KB_TEAM=declared \
+            zsh -fc 'source "$1" >/dev/null 2>&1; printf "%s\n" "GATE PROMPT e6mut" | cc; print -r -- "RC=$?"' \
+            _ "$CC_INSTALLED" >"$WORK/e6mut.out" 2>"$WORK/e6mut.err"
+        cp "$WORK/cc-account-routing.orig.sh" "$ATF/scripts/cc-account-routing.sh"
+        # Mutated: token resolution silently zeroed, but a declared credential
+        # was still found -- _CC_BILLED_ID stays non-empty (from
+        # CLAUDE_ACTIVE_ACCOUNT_ID, gated on $_CC_RESOLVED_TOKEN in
+        # _cc_route_prepare) only when the token IS non-empty, so this mutant
+        # instead surfaces as a launch that now records default OAuth (or a
+        # differing account_id) instead of E6's declared account -- either
+        # way, NOT a match for E6's asserted row. Confirm the mutant's
+        # observable result actually differs from E6's.
+        if grep -q "^AUTH_TOKEN=SET$" "$STUB_ENV"; then
+            test_fail "mutant still injected a credential into claude's env — mutation had no effect"
+        else
+            test_pass
+        fi
+    else
+        test_fail "mutation sed produced no change — pattern no longer matches cc-account-routing.sh"
+    fi
 fi
 
 # ═══ Z — real map untouched ═════════════════════════════════════════════════

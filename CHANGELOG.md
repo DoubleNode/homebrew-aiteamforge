@@ -41,6 +41,28 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   the E1/E2/E3/E5 assertions reflect the resulting, intentional recording
   behavior change; new `tests/test-xaca-1312-014-missing-core-override.sh`
   covers the missing-core + override matrix end to end.
+- **XACA-1312 fix round 2** — `share/scripts/cc-account-routing.sh`'s
+  `_cc_record_session_account` no longer records `account_resolved:true` /
+  default OAuth for every launch whose route produced no team token: when
+  no billed pair resolved it now checks whether the calling shell carries
+  an INHERITED credential (`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`/
+  `CLAUDE_CODE_OAUTH_TOKEN`/Bedrock/Vertex) — present means the launch ran
+  on an unidentified credential and is recorded `account_resolved:false`
+  (unknown account), matching `session-account-map-headless.sh`'s own
+  rule; absent means genuinely default OAuth, unchanged. Fixed once in the
+  shared function every launch site (`_cc_launch`, `cc()`'s fallback,
+  `ccc`, `share/scripts/kb-cr.sh`) already calls.
+  `tests/test-xaca-1300-014-session-account-map-shipping.sh`'s E2 is
+  reverted to `account_resolved:false` (round 1 had it backwards); new E2b
+  pins the one case that legitimately still resolves to a real account
+  despite an inherited credential (`CLAUDE_BILLED_ACCOUNT_ID` also
+  present — a nested headless launch under an already-routed parent). Also
+  restores end-to-end coverage of the ticket's own core scenario — a
+  DECLARED credential applied by the consumer launcher, which round 1's
+  fixture change had left untested — with E6 (env var set → applied,
+  presence-only assertion), E7 (env var empty → refuse), E8 (E7 + the
+  override → launches on default OAuth), each through both `cc` and `ccc`,
+  plus a mutation check. 16/16 (was 9/9).
 
 ## [0.20.23] - 2026-09-22
 - **XACA-1297 (part 2)** — `share/scripts/kb-compaction-premise-check.sh`: ratchet checks C and D2 now tell

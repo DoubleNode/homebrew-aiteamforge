@@ -1265,6 +1265,39 @@ _cc_route_prepare() {
 # Silent no-op when the recorder is absent or session_id is empty — same
 # fail-soft contract every existing call site already had. Never aborts a
 # launch.
+#
+# XACA-1312 round 2 (fix-round-1 review finding "wrong account recorded"):
+# every call site reads $_billed_id / $_billed_nickname straight from
+# _cc_route_prepare's $_CC_BILLED_ID / $_CC_BILLED_NICKNAME, which
+# _cc_route_prepare ZEROES whenever $_CC_RESOLVED_TOKEN is empty (no team
+# route token — cred_state absent/null, or the missing-core override). But
+# "no route token" is NOT the same fact as "default OAuth" —
+# _cc_run_claude_with_auth's own empty-token branch runs plain `claude
+# "$@"`, which INHERITS whatever ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY /
+# CLAUDE_CODE_OAUTH_TOKEN / Bedrock / Vertex switch the calling shell
+# already carried (e.g. an agent shell's own credential). Recording that as
+# account_resolved:true/default-OAuth is a WRONG billing record: it claims
+# "this ran on the machine login" when it actually ran on an inherited,
+# unidentified credential. Mirror
+# session-account-map-headless.sh's rule 1 vs rule 3 exactly instead of
+# collapsing both into "resolved, default OAuth":
+#   billed_id/nickname non-empty  → rule 2, a real gated route: record it
+#                                    (unchanged from before this fix).
+#   both empty, NO credential var
+#     present in this shell        → rule 1: genuinely default OAuth,
+#                                     record account_resolved=true, "".
+#   both empty, a credential var
+#     IS present in this shell     → rule 3: an inherited, ungated
+#                                     credential — record
+#                                     account_resolved=false (unknown
+#                                     account), never "true, default OAuth".
+# The rule-3 branch must OMIT --account-id (not pass it as "") so the shim
+# never sets its ACCOUNT_ID_EXPLICIT flag — passing --account-id "" always
+# forces account_resolved=true, per session-account-map-record.sh's own
+# contract. It also scrubs CLAUDE_ACTIVE_ACCOUNT_ID/_NICKNAME for the call
+# only: those are UNGATED metadata (exported before any token tier runs —
+# XACA-0977-013/015) that the shim falls back to reading when --account-id
+# is omitted, and they can be non-empty even when no token ever resolved.
 _cc_record_session_account() {
     local _sid="$1"
     local _billed_id="$2"
@@ -1272,9 +1305,35 @@ _cc_record_session_account() {
     [[ -z "$_sid" ]] && return 0
     local _recorder="${_CC_ROUTING_CORE_DIR}/session-account-map-record.sh"
     [[ -x "$_recorder" ]] || return 0
-    "$_recorder" "$_sid" \
-        --account-id "$_billed_id" \
-        --account-nickname "$_billed_nickname" 2>/dev/null || true
+
+    if [[ -n "$_billed_id" || -n "$_billed_nickname" ]]; then
+        "$_recorder" "$_sid" \
+            --account-id "$_billed_id" \
+            --account-nickname "$_billed_nickname" 2>/dev/null || true
+        return 0
+    fi
+
+    local _cred_present=0
+    [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]] && _cred_present=1
+    [[ -n "${ANTHROPIC_API_KEY:-}" ]] && _cred_present=1
+    [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && _cred_present=1
+    [[ -n "${CLAUDE_CODE_USE_BEDROCK:-}" ]] && _cred_present=1
+    [[ -n "${CLAUDE_CODE_USE_VERTEX:-}" ]] && _cred_present=1
+
+    if [[ "$_cred_present" -eq 0 ]]; then
+        # rule 1: no credential anywhere in this shell → genuinely default
+        # OAuth, resolved.
+        "$_recorder" "$_sid" \
+            --account-id "" \
+            --account-nickname "" 2>/dev/null || true
+    else
+        # rule 3: an inherited credential with no gated billed pair —
+        # unknown account. Omit --account-id; scrub the ungated metadata
+        # pair for this call only so the shim's own fallback can't stamp a
+        # stray value onto a record we are explicitly marking unresolved.
+        CLAUDE_ACTIVE_ACCOUNT_ID="" CLAUDE_ACTIVE_ACCOUNT_NICKNAME="" \
+            "$_recorder" "$_sid" 2>/dev/null || true
+    fi
 }
 
 # _cc_resume_account_guard <session_id> <resolved_account_id> <force 0|1>
