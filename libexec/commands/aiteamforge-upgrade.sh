@@ -3160,6 +3160,15 @@ PYEOF
 # update_runtime_helpers' sweep loop (the *.sh/*.py globs cannot match it) —
 # the kb-pr-monitor (XACA-1275) shape. Missing either, upgraded machines never
 # receive it and the fleet collects no token aggregates from them.
+# XACA-1300-014: the session-account-map recorder chain
+# (session-account-map-headless.sh -> session-account-map-record.sh ->
+# session-account-map.py). BRAND-NEW on every already-installed box -- measured:
+# ~/.claude/.session-account-map.jsonl did not exist on any tap machine because
+# none of the three ever shipped -- so the "refresh only what exists" default
+# would skip all three forever. cc-aliases.sh guards the helper with `-x`, so an
+# absent chain degrades to an UNRECORDED launch, never an error: nothing would
+# surface the gap. .sh/.py, so the glob sweep reaches them once listed here; no
+# extensionless sweep entry is needed.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3184,6 +3193,9 @@ cr-schema-validator.py
 kb-compaction-premise-check.sh
 kb-compaction-quality-watch.sh
 kb-token-report
+session-account-map-headless.sh
+session-account-map-record.sh
+session-account-map.py
 EOF
 }
 

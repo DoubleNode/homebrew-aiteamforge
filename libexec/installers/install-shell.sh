@@ -229,9 +229,16 @@ install_helper_scripts() {
     # shipped alongside msg-client.sh above since it is part of the same
     # kb-msg feature surface, but it is its own standalone entrypoint, not a
     # sibling any other file requires.
+    # session-account-map-{headless,record}.sh + session-account-map.py
+    # (XACA-1300-014): the session->account recorder chain. cc-aliases.sh calls
+    # the headless helper at every launch; it execs record.sh, which runs the
+    # .py -- each by its OWN dirname, so all three must land here together
+    # (same transitive-sibling rule as the msg-client chain above). Missing,
+    # cc still launches, just unrecorded.
     for helper in agent-panel-display.sh display-agent-avatar.sh iterm2_window_manager.py \
                   set-lcars-profile-browser.py create-lcars-profile.py lcars-tmp-dir.sh \
                   kanban-backup.py fleet-reporter.sh \
+                  session-account-map-headless.sh session-account-map-record.sh session-account-map.py \
                   msg-client.sh msg-inbox-check.sh kb-api-key team-account-display.sh; do
         if [ -f "$scripts_src/$helper" ]; then
             cp "$scripts_src/$helper" "$scripts_dest/$helper"

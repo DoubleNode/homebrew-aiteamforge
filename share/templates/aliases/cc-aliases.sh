@@ -284,6 +284,22 @@ _cc_launch() {
         return 0
     fi
 
+    # XACA-1300-014: record this launch in ~/.claude/.session-account-map.jsonl.
+    # The shared helper pins its own --session-id and writes the row; when it
+    # returns one, that id REPLACES the local pin above so the row and the
+    # launch carry the same id. RECORD ONLY: this file does not apply the
+    # team's declared ai.credential route (applying routes on tap launchers is
+    # follow-up XACA-1312), so the helper records what actually runs -- default
+    # OAuth, or account_resolved:false for an inherited credential -- and never
+    # the declared-but-unapplied team account. Helper absent = unrecorded
+    # launch, exactly as before. Its stderr is NOT redirected (XACA-1197).
+    local _cc_hl="$AITEAMFORGE_DIR/scripts/session-account-map-headless.sh"
+    if [[ -x "$_cc_hl" ]]; then
+        local _cc_hl_sid
+        _cc_hl_sid=$("$_cc_hl" </dev/null)
+        [[ -n "$_cc_hl_sid" ]] && _cc_pinned_id="$_cc_hl_sid"
+    fi
+
     # Build optional flag array — empty values are simply omitted.
     local -a _cc_extra_args=()
     [[ -n "$_cc_name" ]] && _cc_extra_args+=(--name "$_cc_name")
@@ -319,7 +335,20 @@ cc() {
             echo "🚨 Falling back to plain claude — NO PERSONA (generic assistant, no character/team context)." >&2
         fi
     fi
-    claude --permission-mode bypassPermissions "$@"
+    # XACA-1300-014: plain-claude fallback -- the headless gate path
+    # (`printf prompt | cc` from kb-run-* with no persona context). Pin + record
+    # via the shared helper, same RECORD-ONLY contract as _cc_launch above (no
+    # team route is applied here; that is follow-up XACA-1312). Only when cc got
+    # NO arguments: `cc --resume <id>`, `cc -c` and subcommands would break or
+    # conflict with an added --session-id, so they stay unrecorded. </dev/null
+    # keeps the helper's `claude --help` probe off the piped gate prompt.
+    local -a _cc_fb_args=()
+    if (( $# == 0 )) && [[ -x "$AITEAMFORGE_DIR/scripts/session-account-map-headless.sh" ]]; then
+        local _cc_fb_sid
+        _cc_fb_sid=$("$AITEAMFORGE_DIR/scripts/session-account-map-headless.sh" </dev/null)
+        [[ -n "$_cc_fb_sid" ]] && _cc_fb_args=(--session-id "$_cc_fb_sid")
+    fi
+    claude --permission-mode bypassPermissions "${_cc_fb_args[@]}" "$@"
 }
 
 # Resume the most recent Claude session for THIS terminal
