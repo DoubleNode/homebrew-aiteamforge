@@ -1735,3 +1735,47 @@ _cc_run_claude_with_auth() {
         esac
     )
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1312 fix round 3 (bot review, PR #957, finding 022): core-completeness
+# gate. A truncated/mid-parse-error source of this file (an interrupted
+# upgrade copy, a syntax error) can define an EARLY function like
+# _cc_route_prepare without ever reaching a LATER one like
+# _cc_run_claude_with_auth. A consumer that only checked "does
+# _cc_route_prepare exist" treated that half-loaded state as "core fully
+# loaded", resolved a real token via _cc_route_prepare, then handed it to
+# the consumer's own fallback shim for the function that never got defined
+# -- silently dropping the token and launching on the machine login while
+# the banner/recorder still claimed the team account (round-2 finding).
+#
+# _cc_routing_core_complete is the ONE completeness gate every consumer
+# (cc-aliases.sh, kb-cr.sh) must use instead of checking any single
+# function's presence. It is deliberately declared at the very end of this
+# file, after every function the core defines, and paired with the
+# sentinel below: a truncated/broken source can fail to reach this point at
+# all, in which case `command -v _cc_routing_core_complete` itself already
+# reports "not loaded" without needing to be called. Consumers must
+# therefore always gate as:
+#     if command -v _cc_routing_core_complete >/dev/null 2>&1 && _cc_routing_core_complete; then
+# never a bare `command -v` on one function.
+typeset -ga _CC_ROUTING_CORE_REQUIRED_FUNCS=(
+    _cc_route_prepare
+    _cc_run_claude_with_auth
+    _cc_record_session_account
+    _cc_resume_account_guard
+)
+_cc_routing_core_complete() {
+    [[ "${_CC_ROUTING_CORE_COMPLETE:-0}" == "1" ]] || return 1
+    local _cc_req_fn
+    for _cc_req_fn in "${_CC_ROUTING_CORE_REQUIRED_FUNCS[@]}"; do
+        command -v "$_cc_req_fn" >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
+# Sentinel: set ONLY if every statement above this line in the file parsed
+# and ran. A truncated file (e.g. `head -n <N>` mid-function, or a syntax
+# error partway through) never reaches this assignment, so
+# _cc_routing_core_complete's first check already fails fail-closed even in
+# the (should-be-impossible) case where every individual `command -v` above
+# happened to pass anyway. Belt and braces, not redundancy.
+typeset -g _CC_ROUTING_CORE_COMPLETE=1

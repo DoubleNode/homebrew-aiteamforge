@@ -29,50 +29,85 @@ AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
 # override did nothing here (verified: core absent + override set + `ccc`
 # still refused). Every call site below now branches on THIS return value
 # instead of hardcoding `return 1` -- see each site's own comment.
+#
+# XACA-1312 fix round 3 (bot review, PR #957, finding 022): "missing" now
+# covers PARTIAL too. Round 1/2 shimmed each of the three core functions
+# independently ("if this ONE function isn't defined, shim just it"). A
+# truncated/mid-parse-error core (interrupted upgrade copy) can define an
+# EARLY function like _cc_route_prepare without reaching a LATER one like
+# _cc_run_claude_with_auth -- every call site below used
+# `command -v _cc_route_prepare` as its "is the core loaded" signal, so
+# that half-loaded state read as "loaded", resolved a REAL token, and then
+# handed it to the runner shim (still installed, since only
+# _cc_run_claude_with_auth was missing) -- which silently dropped it and
+# launched bare `claude` on the machine login while the banner/recorder
+# still claimed the team account. The core itself now exposes
+# _cc_routing_core_complete (see its own comment in cc-account-routing.sh)
+# as the single completeness gate; every call site below uses THAT instead
+# of checking any one function's presence, and this file's own fallback
+# shims are installed together, never independently, so a partial core's
+# leftover (untrustworthy) definitions are always fully discarded.
 _cc_routing_core_missing() {
     if [[ "${AITEAMFORGE_ALLOW_DEFAULT_OAUTH:-0}" == "1" ]]; then
-        print -u2 "⚠ AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 — routing core missing at $AITEAMFORGE_DIR/scripts/cc-account-routing.sh — this session bills the MACHINE LOGIN, not any declared team credential"
+        print -u2 "⚠ AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 — routing core missing/incomplete at $AITEAMFORGE_DIR/scripts/cc-account-routing.sh — this session bills the MACHINE LOGIN, not any declared team credential"
+        _cc_install_core_fallback_shims
         return 0
     fi
-    print -u2 "✗ routing core missing at $AITEAMFORGE_DIR/scripts/cc-account-routing.sh — run 'aiteamforge upgrade' (or AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 to launch on the machine login)"
+    print -u2 "✗ routing core missing/incomplete at $AITEAMFORGE_DIR/scripts/cc-account-routing.sh — run 'aiteamforge upgrade' (or AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 to launch on the machine login)"
     return 1
 }
 if [[ -f "$AITEAMFORGE_DIR/scripts/cc-account-routing.sh" ]]; then
     source "$AITEAMFORGE_DIR/scripts/cc-account-routing.sh" || true
 fi
-# XACA-1312 fix round 1 (bot review, PR #957): every wired launch site below
-# calls _cc_run_claude_with_auth UNCONDITIONALLY after its missing-core
-# check -- fine when the core loaded (it defines the real function), but
-# under AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 with the core ABSENT,
-# _cc_routing_core_missing now returns 0 and lets the site fall through to
-# a function that was never defined ("command not found", rc 127) --
-# discovered by this round's own new missing-core-override test. This shim
-# only ever receives an EMPTY token when it runs (resolution never ran
-# either in that branch), so it is equivalent to a bare `claude "$@"` --
-# the same shape as the real function's own -z "$_cc_token" fast path.
-if ! command -v _cc_run_claude_with_auth >/dev/null 2>&1; then
+# XACA-1312 fix round 3: every call site below gates on _cc_routing_core_complete,
+# not on `command -v _cc_route_prepare`. When the core loads FULLY it defines
+# its own real _cc_routing_core_complete (sentinel + all four required
+# functions; see cc-account-routing.sh's own comment) — this file must NOT
+# shadow that. Only define a fallback here when the core did not already
+# supply one: a fully-missing core never reaches that far, and neither does
+# a core truncated before that point, so in both cases this fallback (an
+# unconditional "not complete") is the correct answer.
+if ! command -v _cc_routing_core_complete >/dev/null 2>&1; then
+    _cc_routing_core_complete() { return 1; }
+fi
+# Fallback shims, installed TOGETHER (never per-function) only when the
+# core is missing/incomplete AND AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 -- see
+# _cc_routing_core_missing above. Redefining all of them here unconditionally
+# discards whatever a partial parse left behind, rather than trusting
+# individual leftover definitions.
+_cc_install_core_fallback_shims() {
+    # Defense in depth (round-3 finding): a shim must never silently drop a
+    # resolved credential. Every call site below skips _cc_route_prepare
+    # entirely once the core is judged incomplete, so $1 is always empty in
+    # normal operation -- but refuse loudly instead of launching unrouted if
+    # that invariant is ever violated (e.g. a future call site change).
     _cc_run_claude_with_auth() {
+        local _cc_shim_token="$1"
         shift 2
+        if [[ -n "$_cc_shim_token" ]]; then
+            print -u2 "✗ routing core missing/incomplete — refusing to launch: a team credential was resolved but the function needed to apply it isn't available. Aborting rather than billing the wrong account."
+            return 1
+        fi
         claude "$@"
     }
-fi
-# Same reasoning as the shim above, for _cc_record_session_account (also
-# core-defined, also called unconditionally by every launch site below).
-# Silent no-op, matching the real function's own documented fail-soft
-# contract ("Silent no-op when the recorder is absent ... never aborts a
-# launch") -- there is no recorder to call when the core never loaded.
-if ! command -v _cc_record_session_account >/dev/null 2>&1; then
+    # Silent no-op, matching the real function's own documented fail-soft
+    # contract ("Silent no-op when the recorder is absent ... never aborts a
+    # launch") -- there is no recorder to call when the core never loaded.
     _cc_record_session_account() { :; }
-fi
-# Same reasoning again for _cc_resume_account_guard (ccc's cross-account
-# resume check, also core-defined). With no core there is no map-lookup
-# infra to check against, so this shim always ALLOWS the resume (return 0)
-# -- refusing here would defeat the override's whole purpose (a partial or
-# broken install must still be able to launch/resume under explicit
-# consent).
-if ! command -v _cc_resume_account_guard >/dev/null 2>&1; then
-    _cc_resume_account_guard() { return 0; }
-fi
+    # ccc's cross-account resume check. Same defense-in-depth as the runner
+    # shim above: only auto-allow when NO account was actually resolved (the
+    # override path's normal shape, $2 empty). If a resolved account id is
+    # ever passed in anyway, refuse instead of rubber-stamping a resume this
+    # shim has no way to safety-check.
+    _cc_resume_account_guard() {
+        local _cc_shim_resolved_id="$2"
+        if [[ -n "$_cc_shim_resolved_id" ]]; then
+            print -u2 "✗ routing core missing/incomplete — refusing resume: a team account was resolved but the cross-account guard needed to check it isn't available. Aborting."
+            return 1
+        fi
+        return 0
+    }
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Core Infrastructure
@@ -320,7 +355,7 @@ _cc_launch() {
     # fix round 1 / bot review on PR #957).
     local _CC_RESOLVED_TOKEN="" _CC_RESOLVED_AUTH_TYPE=""
     local _CC_BILLED_ID="" _CC_BILLED_NICKNAME=""
-    if command -v _cc_route_prepare >/dev/null 2>&1; then
+    if _cc_routing_core_complete; then
         _cc_route_prepare
         if [[ $? -eq 1 ]]; then
             echo "ERROR: Cannot resolve Anthropic token for this team — aborting launch" >&2
@@ -446,7 +481,7 @@ cc() {
         # AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 and we fall through unrouted.
         local _CC_RESOLVED_TOKEN="" _CC_RESOLVED_AUTH_TYPE=""
         local _CC_BILLED_ID="" _CC_BILLED_NICKNAME=""
-        if command -v _cc_route_prepare >/dev/null 2>&1; then
+        if _cc_routing_core_complete; then
             _cc_route_prepare
             if [[ $? -eq 1 ]]; then
                 # XACA-1312 §3.3: REFUSED. claude must NOT run at all -- a
@@ -528,7 +563,7 @@ ccc() {
     local _CC_RESOLVED_TOKEN="" _CC_RESOLVED_AUTH_TYPE=""
     local _CC_BILLED_ID="" _CC_BILLED_NICKNAME=""
     local _ccc_cred_rc
-    if command -v _cc_route_prepare >/dev/null 2>&1; then
+    if _cc_routing_core_complete; then
         _cc_route_prepare
         _ccc_cred_rc=$?
     else

@@ -19,6 +19,17 @@ typeset -g _KB_CR_ROUTING_CORE="${${(%):-%x}:A:h}/cc-account-routing.sh"
 # real stderr instead — this only fires on an actual failure since the
 # `[[ -f ]] &&` guard already keeps a plain missing file quiet.
 [[ -f "$_KB_CR_ROUTING_CORE" ]] && source "$_KB_CR_ROUTING_CORE"
+# XACA-1312 fix round 3 (bot review, PR #957, finding 022): the completeness
+# gate the publish flow below uses instead of checking any one core
+# function's presence (see the routing block's own comment further down,
+# and cc-account-routing.sh's own comment on _cc_routing_core_complete). A
+# fully-missing or truncated-before-this-point core never defines its own
+# _cc_routing_core_complete, so this local fallback (always "not complete")
+# is the correct answer; a fully-loaded core already defined its own real
+# one above and this is a no-op.
+if ! command -v _cc_routing_core_complete >/dev/null 2>&1; then
+    _cc_routing_core_complete() { return 1; }
+fi
 #
 # ══════════════════════════════════════════════════════════════════════════════
 # UNIFIED v2.0 LIFECYCLE (XACA-0327)
@@ -4321,17 +4332,39 @@ PROMPT
     # hardcoded $HOME/dev-team/scripts/session-account-map-headless.sh call,
     # which is also wrong for a ROUTED launch for the D3 reason documented
     # in the design doc's §0 corrections table and _cc_record_session_
-    # account's own comment). If the core never loaded at all (partial
-    # install/upgrade, or a non-zsh caller) degrade to exactly the pre-1312
-    # behavior — unrouted, pinned via the headless helper if present — so a
-    # transitional install can still publish. If the core loaded but
-    # REFUSES (a declared credential could not be resolved), fail closed:
-    # this is CR publishing, and silently billing the machine login for it
-    # is the exact defect this ticket exists to close.
+    # account's own comment).
+    #
+    # XACA-1312 fix round 1 (bot review, PR #957): if the core never loaded
+    # at all (missing file, source error, or a non-zsh caller), this used to
+    # fall straight through to plain `claude -p` with NO gate at all — a
+    # fail-open billing path on CR publish, contradicting design §6
+    # ("fail-closed also covers the fix didn't arrive"). It now only falls
+    # through unrouted under the same explicit AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1
+    # override every other routing site honors (with the same unsuppressible
+    # warning); without the override it refuses outright. If the core loaded
+    # but _cc_route_prepare REFUSES (a declared credential could not be
+    # resolved), fail closed unconditionally: this is CR publishing, and
+    # silently billing the machine login for it is the exact defect this
+    # ticket exists to close.
+    #
+    # XACA-1312 fix round 3 (bot review, PR #957, finding 022): "never
+    # loaded" now covers PARTIAL loads too, via _cc_routing_core_complete
+    # (defined by the core itself; see cc-account-routing.sh's own comment,
+    # and the local fallback near this file's own source line above). The
+    # old `command -v _cc_route_prepare` / `command -v _cc_run_claude_with_auth`
+    # checks below each asked "does THIS ONE function exist", which a
+    # truncated core (e.g. an interrupted upgrade copy that defines
+    # _cc_route_prepare but not _cc_run_claude_with_auth) could pass for the
+    # first while failing the second — resolving a real token via
+    # _cc_route_prepare, then silently dropping it into the plain-`claude -p`
+    # branch below with NO override gate at all. Both checks now use the
+    # SAME single completeness gate.
     local -a _kbcr_sid_args=()
     local _kbcr_sid="" _kbcr_billed_id="" _kbcr_billed_nick=""
     local _kbcr_token="" _kbcr_auth_type=""
-    if command -v _cc_route_prepare >/dev/null 2>&1; then
+    local _kbcr_core_complete=0
+    _cc_routing_core_complete && _kbcr_core_complete=1
+    if [[ $_kbcr_core_complete -eq 1 ]]; then
         local _CC_RESOLVED_TOKEN="" _CC_RESOLVED_AUTH_TYPE=""
         local _CC_BILLED_ID="" _CC_BILLED_NICKNAME=""
         _cc_route_prepare
@@ -4350,34 +4383,30 @@ PROMPT
             _kbcr_sid_args=(--session-id "$_kbcr_sid")
         fi
     elif [[ "${AITEAMFORGE_ALLOW_DEFAULT_OAUTH:-0}" == "1" ]]; then
-        # XACA-1312 fix round 1 (bot review, PR #957): the core never
-        # loaded (missing file, source error, or a non-zsh caller) used to
-        # fall straight through to plain `claude -p` below with NO gate at
-        # all — a fail-open billing path on CR publish, contradicting
-        # design §6 ("fail-closed also covers the fix didn't arrive"). It
-        # now only falls through under the same explicit override every
-        # other routing site honors, with the same unsuppressible warning.
-        print -u2 "⚠ AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 — kb-cr publish: routing core did not load (${_KB_CR_ROUTING_CORE}) — this session bills the MACHINE LOGIN"
+        print -u2 "⚠ AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 — kb-cr publish: routing core did not load/incomplete (${_KB_CR_ROUTING_CORE}) — this session bills the MACHINE LOGIN"
         if [[ -x "${HOME}/dev-team/scripts/session-account-map-headless.sh" ]]; then
             _kbcr_sid=$("${HOME}/dev-team/scripts/session-account-map-headless.sh" </dev/null)
             [[ -n "$_kbcr_sid" ]] && _kbcr_sid_args=(--session-id "$_kbcr_sid")
         fi
     else
-        echo "kb-cr publish: ✗ routing core did not load (${_KB_CR_ROUTING_CORE}) — aborting publish (nothing was billed). Fix the core, or set AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 to publish on the machine login." >&2
+        echo "kb-cr publish: ✗ routing core did not load/incomplete (${_KB_CR_ROUTING_CORE}) — aborting publish (nothing was billed). Fix the core, or set AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 to publish on the machine login." >&2
         return 1
     fi
 
     local skill_output
-    if command -v _cc_run_claude_with_auth >/dev/null 2>&1; then
+    if [[ $_kbcr_core_complete -eq 1 ]]; then
         skill_output=$(printf '%s\n' "$skill_prompt" | _cc_run_claude_with_auth "$_kbcr_token" "$_kbcr_auth_type" -p "${_kbcr_sid_args[@]}" 2>&1) || {
             echo "kb-cr publish: skill invocation failed (exit $?)." >&2
             echo "$skill_output" >&2
             return 1
         }
     else
-        # Core never loaded, but AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 was set
-        # above (the only remaining way to reach this branch) — plain
-        # claude, exactly as before XACA-1312, under explicit consent.
+        # Core missing/incomplete, but AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 was
+        # set above (the only remaining way to reach this branch, since the
+        # `else` above already returned 1 otherwise) — plain claude, exactly
+        # as before XACA-1312, under explicit consent. _kbcr_token is always
+        # empty here (the completeness check above already routed away from
+        # _cc_route_prepare), so there is no credential to drop.
         skill_output=$(printf '%s\n' "$skill_prompt" | claude -p "${_kbcr_sid_args[@]}" 2>&1) || {
             echo "kb-cr publish: skill invocation failed (exit $?)." >&2
             echo "$skill_output" >&2

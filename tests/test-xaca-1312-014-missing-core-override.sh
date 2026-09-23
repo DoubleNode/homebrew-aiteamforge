@@ -155,6 +155,115 @@ else
     test_fail "out=$m4_out marker=$(cat "$STUB_MARKER" 2>/dev/null) env-leak=$(cat "$STUB_ENV" 2>/dev/null)"
 fi
 
+# ─────────────────────────────────────────────────────────────────────────
+# XACA-1312 fix round 3 (bot review, PR #957, subitem XACA-1312-022):
+# PARTIAL core, not just a fully-absent one. A truncated/mid-parse-error
+# cc-account-routing.sh (interrupted upgrade copy) can define an EARLY
+# function like _cc_route_prepare (~L1223) without ever reaching a LATER
+# one like _cc_run_claude_with_auth (~L1693). Round 1/2's shims were
+# installed PER missing function, so this half-loaded state resolved a
+# REAL token via the real _cc_route_prepare and then silently dropped it
+# into the (still-installed, since only _cc_run_claude_with_auth was
+# missing) runner shim's `shift 2` — launching bare `claude` on the machine
+# login with NO override set, while the banner/recorder still claimed the
+# team account. Pre-fix-round-3 this was "invoked, no override, no
+# warning" (the exact silent bypass this whole ticket exists to close);
+# BEFORE round 1/2 existed at all it was rc=127 "command not found" (no
+# launch at all — the safe-by-accident shape the round-2 review used as
+# its control).
+#
+# P1/P2 prove the no-override refusal now also covers this partial shape.
+# P3/P4 prove the override still launches (unrouted, no credential leaked)
+# rather than crashing with "command not found".
+#
+# The cut point (N) is computed from the REAL core file at test time, not
+# hardcoded — it must land strictly after _cc_route_prepare's definition
+# and strictly before _cc_run_claude_with_auth's, so the failure this test
+# exists to catch is reproduced regardless of future edits shifting line
+# numbers in cc-account-routing.sh.
+REAL_CORE="$TAP_ROOT/share/scripts/cc-account-routing.sh"
+[ -f "$REAL_CORE" ] || { echo "FATAL: required file not found: $REAL_CORE" >&2; exit 1; }
+
+route_prepare_line="$(grep -n '^_cc_route_prepare()' "$REAL_CORE" | head -1 | cut -d: -f1)"
+run_claude_line="$(grep -n '^_cc_run_claude_with_auth()' "$REAL_CORE" | head -1 | cut -d: -f1)"
+if [ -z "$route_prepare_line" ] || [ -z "$run_claude_line" ]; then
+    echo "FATAL: could not locate _cc_route_prepare/_cc_run_claude_with_auth in $REAL_CORE — cannot compute a valid truncation point" >&2
+    exit 1
+fi
+if [ "$run_claude_line" -le "$route_prepare_line" ]; then
+    echo "FATAL: _cc_run_claude_with_auth ($run_claude_line) is not after _cc_route_prepare ($route_prepare_line) in $REAL_CORE — assumption this test relies on no longer holds" >&2
+    exit 1
+fi
+TRUNCATE_AT=$((run_claude_line - 1))
+if [ "$TRUNCATE_AT" -le "$route_prepare_line" ]; then
+    echo "FATAL: computed truncation point ($TRUNCATE_AT) does not land strictly between _cc_route_prepare ($route_prepare_line) and _cc_run_claude_with_auth ($run_claude_line)" >&2
+    exit 1
+fi
+
+TRUNC_CORE="$ATF/scripts/cc-account-routing.sh"
+head -n "$TRUNCATE_AT" "$REAL_CORE" >"$TRUNC_CORE"
+# Sanity: the truncated copy must actually fail to define
+# _cc_run_claude_with_auth (proves the cut really landed mid-function /
+# before it, not e.g. past a stray earlier match), and must still define
+# _cc_route_prepare (proves the cut didn't accidentally land too early).
+if zsh -fc "source '$TRUNC_CORE' >/dev/null 2>&1; command -v _cc_run_claude_with_auth" >/dev/null 2>&1; then
+    echo "FATAL: truncated core at $TRUNCATE_AT still defines _cc_run_claude_with_auth — truncation point is wrong" >&2
+    exit 1
+fi
+if ! zsh -fc "source '$TRUNC_CORE' >/dev/null 2>&1; command -v _cc_route_prepare" >/dev/null 2>&1; then
+    echo "FATAL: truncated core at $TRUNCATE_AT no longer defines _cc_route_prepare — truncation point is wrong" >&2
+    exit 1
+fi
+
+# ── P1: cc, no override, PARTIAL core → refuse (not "command not found") ─
+test_start "P1: cc refuses when the routing core is PARTIALLY loaded (route_prepare defined, run_claude_with_auth not) and no override is set"
+reset_logs
+p1_out="$(sandboxed zsh -fc 'source "$1" >/dev/null 2>&1; printf "%s\n" "GATE PROMPT p1" | cc; print -r -- "RC=$?"' _ "$CC_INSTALLED" 2>&1)"
+if [ ! -s "$STUB_MARKER" ] && printf '%s' "$p1_out" | grep -q "RC=1" && printf '%s' "$p1_out" | grep -q "routing core missing"; then
+    test_pass
+else
+    test_fail "claude invoked, wrong rc, or 'command not found' leaked through; out=$p1_out marker=$(cat "$STUB_MARKER" 2>/dev/null)"
+fi
+
+# ── P2: ccc, no override, PARTIAL core → refuse ───────────────────────────
+test_start "P2: ccc refuses when the routing core is PARTIALLY loaded and no override is set"
+reset_logs
+p2_out="$(sandboxed zsh -fc 'source "$1" >/dev/null 2>&1; ccc; print -r -- "RC=$?"' _ "$CC_INSTALLED" 2>&1)"
+if [ ! -s "$STUB_MARKER" ] && printf '%s' "$p2_out" | grep -q "RC=1" && printf '%s' "$p2_out" | grep -q "routing core missing"; then
+    test_pass
+else
+    test_fail "claude invoked, wrong rc, or 'command not found' leaked through; out=$p2_out marker=$(cat "$STUB_MARKER" 2>/dev/null)"
+fi
+
+# ── P3: cc, override set, PARTIAL core → launches unrouted, NO credential ─
+test_start "P3: AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 makes cc launch on the machine login with a PARTIAL core, with no team credential leaked"
+reset_logs
+p3_out="$(sandboxed env AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 zsh -fc 'source "$1" >/dev/null 2>&1; printf "%s\n" "GATE PROMPT p3" | cc; print -r -- "RC=$?"' _ "$CC_INSTALLED" 2>&1)"
+if [ -s "$STUB_MARKER" ] && printf '%s' "$p3_out" | grep -q "RC=0" \
+   && printf '%s' "$p3_out" | grep -q "AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1" \
+   && printf '%s' "$p3_out" | grep -q "MACHINE LOGIN" \
+   && [ ! -s "$STUB_ENV" ]; then
+    test_pass
+else
+    test_fail "out=$p3_out marker=$(cat "$STUB_MARKER" 2>/dev/null) env-leak=$(cat "$STUB_ENV" 2>/dev/null)"
+fi
+
+# ── P4: ccc, override set, PARTIAL core → launches unrouted, NO credential
+test_start "P4: AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 makes ccc launch on the machine login with a PARTIAL core, with no team credential leaked"
+reset_logs
+p4_out="$(sandboxed env AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 zsh -fc 'source "$1" >/dev/null 2>&1; ccc; print -r -- "RC=$?"' _ "$CC_INSTALLED" 2>&1)"
+if [ -s "$STUB_MARKER" ] && printf '%s' "$p4_out" | grep -q "AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1" \
+   && printf '%s' "$p4_out" | grep -q "MACHINE LOGIN" \
+   && [ ! -s "$STUB_ENV" ]; then
+    test_pass
+else
+    test_fail "out=$p4_out marker=$(cat "$STUB_MARKER" 2>/dev/null) env-leak=$(cat "$STUB_ENV" 2>/dev/null)"
+fi
+
+# Remove the truncated core before the next block (M-series reused ATF —
+# not an issue since they ran first, but leave the sandbox clean).
+rm -f "$TRUNC_CORE"
+
 if [ -n "${_PASS_COUNT+x}" ]; then
     echo ""
     echo "XACA-1312-014 missing-core override tests: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed"

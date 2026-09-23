@@ -63,6 +63,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   presence-only assertion), E7 (env var empty → refuse), E8 (E7 + the
   override → launches on default OAuth), each through both `cc` and `ccc`,
   plus a mutation check. 16/16 (was 9/9).
+- **XACA-1312 fix round 3** — closes a partial-core fail-open the round-1/2
+  shims left open: `share/templates/aliases/cc-aliases.sh`'s per-function
+  shims (`if ! command -v <fn>; then <shim>; fi`) let a truncated core that
+  defined `_cc_route_prepare` but not `_cc_run_claude_with_auth` read as
+  "loaded" (checked via `_cc_route_prepare` alone), resolve a real token,
+  then silently drop it into the still-installed runner shim and launch
+  unrouted with NO override set. `share/scripts/cc-account-routing.sh` now
+  declares one completeness gate, `_cc_routing_core_complete()`, at the
+  very end of the file — a `_CC_ROUTING_CORE_COMPLETE=1` sentinel that is
+  the file's own last statement, plus a check that all four required
+  functions are defined — so a truncated source fails both checks at once.
+  `cc-aliases.sh`'s three launch sites and `share/scripts/kb-cr.sh`'s
+  routing block (which had the identical hole in its own
+  `command -v _cc_run_claude_with_auth` else-branch) now gate on this
+  instead of any single function's presence, and `cc-aliases.sh`'s fallback
+  shims install together as one unit rather than per-function. Defense in
+  depth: the runner shim now refuses instead of silently dropping a
+  non-empty token, and the resume-guard shim now refuses instead of
+  auto-allowing a resolved account id. New `tests/test-xaca-1312-014-missing-core-override.sh`
+  P1-P4 (partial-core refusal/override for `cc`/`ccc`, truncation point
+  computed from the real core file, mutation-verified) and new
+  `tests/test-xaca-1312-022-kbcr-core-completeness.sh` (kb-cr.sh's own copy
+  of the gate against full/partial/absent cores, mutation-verified). Also
+  corrects `kb-cr.sh`'s routing-block header comment, which still described
+  the pre-round-1 unrouted-degrade behavior.
 
 ## [0.20.23] - 2026-09-22
 - **XACA-1297 (part 2)** — `share/scripts/kb-compaction-premise-check.sh`: ratchet checks C and D2 now tell
