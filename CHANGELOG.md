@@ -24,6 +24,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - `vault-keygen.js --rotate` writes the new key to a staging slot and replaces the stored key only after the server accepts the new public key. Without an admin token it exits 4 without writing anything.
     - The admin token is sent only over https, or over http to a loopback address.
     - The unlock dialog's error text meets WCAG AA contrast; the page behind the dialog is marked `inert` while it is open; a 403 CSRF rejection gets its own message.
+- **XACA-1300** — fold in PR #954 review advisories (025-027) and a defect
+  (028) in the tap's Anthropic-account/session-map machinery:
+  - `share/scripts/session-account-map-headless.sh`'s "known blind spot"
+    comment now also documents a settings.json/managed-settings `env` block
+    injecting a credential (settings.json `env` wins over a shell export —
+    measured XACA-1282); no behavior change, comment-only (025).
+  - `share/scripts/cc-account-routing.sh` gains two shared helpers,
+    `_cc_probe_has_session_id` (memoizes the `claude --help` --session-id
+    feature-detect ONCE per shell instead of once per launch site) and
+    `_cc_fb_wants_pinned_sid` (extends session-id pinning past `$# == 0` to
+    also cover print-mode calls). `share/scripts/kb-token-report`'s managed
+    settings retention tier no longer wins outright over the user files —
+    Claude Code's real `managedSourcesBehavior` default is exclusive
+    first-wins, not layered merging, so a remote/MDM source we cannot
+    detect can silently exclude the managed file entirely; the smaller of
+    every readable candidate is now taken instead (026).
+  - `share/templates/aliases/cc-aliases.sh` (Tap-Only-Edit: intentional —
+    this file has no sync-tap mapping; hand-kept in parity with dev
+    `claude_code_cc_aliases.sh`): `_cc_launch` and `cc()`'s two fallback
+    branches now use the shared memoized probe instead of each forking
+    `claude --help` independently, and the no-team-context fallback skips
+    invoking `session-account-map-headless.sh` entirely when
+    `--session-id` is unsupported (027). `cc()`'s fallback branches now
+    also pin --session-id for `cc -p "prompt"` (print mode with no
+    caller-managed session flags), not only `$# == 0` — before this fix a
+    print-mode gate call wrote no session-account-map row at all (028).
 
 ## [0.20.24] - 2026-09-23
 - **XACA-1313** — freelance terminals now route to the per-instance

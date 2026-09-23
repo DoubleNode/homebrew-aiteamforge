@@ -1302,6 +1302,64 @@ _cc_route_prepare() {
     return 0
 }
 
+# _cc_probe_has_session_id
+#
+# XACA-1300-027: feature-detect `claude --help`'s --session-id support ONCE
+# per shell, memoized into a global, instead of every launch site (persona
+# _cc_launch, cc()'s two fallback branches — in both dev
+# claude_code_cc_aliases.sh and the tap cc-aliases.sh copy) independently
+# forking `claude --help`. In cc()'s no-team-context fallback specifically,
+# callers should also use this BEFORE deciding whether to invoke
+# session-account-map-headless.sh at all: that script's own top-of-file
+# check re-probes the identical thing and, when unsupported, silently no-ops
+# (exit 0, no stdout) — so skipping the call in that case changes no
+# observable behavior, only saves a whole extra fork+exec of a second
+# script on every gate launch.
+#
+# Returns 0 (true, --session-id supported) or 1 (false). Memoizes into the
+# global _CC_HAS_SESSION_ID ("1"/"0") so later calls in the SAME shell are
+# free; a fresh shell (new tab/pane, or claude itself upgraded mid-session)
+# re-probes once on first use.
+_cc_probe_has_session_id() {
+    if [[ -z "${_CC_HAS_SESSION_ID:-}" ]]; then
+        if claude --help 2>/dev/null | grep -q -- "--session-id"; then
+            _CC_HAS_SESSION_ID=1
+        else
+            _CC_HAS_SESSION_ID=0
+        fi
+    fi
+    [[ "$_CC_HAS_SESSION_ID" == "1" ]]
+}
+
+# _cc_fb_wants_pinned_sid <args...>
+#
+# XACA-1300-028: cc()'s fallback branches (no persona/team-routed launch)
+# used to pin --session-id only when cc() got NO arguments at all, so
+# `cc -p "prompt"` (print/non-interactive mode) wrote NO
+# session-account-map row while `printf … | cc` (the kb-run-* gate pattern,
+# also zero arguments) did. True when it is safe AND useful to pin one:
+# either no arguments at all (the existing, always-safe case), or the only
+# relevant flag among the arguments is print mode (-p/--print) and the
+# caller has not already taken session identity into their own hands via
+# --session-id/--resume/-r/--continue/-c — any of which could conflict with
+# an added --session-id, or means the caller is deliberately resuming/
+# continuing an EXISTING session rather than starting a fresh one.
+_cc_fb_wants_pinned_sid() {
+    (( $# == 0 )) && return 0
+    local _cc_fb_saw_print="" _cc_fb_arg
+    for _cc_fb_arg in "$@"; do
+        case "$_cc_fb_arg" in
+            --session-id|--session-id=*|--resume|--resume=*|-r|--continue|-c)
+                return 1
+                ;;
+            -p|--print)
+                _cc_fb_saw_print=1
+                ;;
+        esac
+    done
+    [[ -n "$_cc_fb_saw_print" ]]
+}
+
 # _cc_record_session_account <session_id> <billed_id> <billed_nickname>
 #
 # Resolves session-account-map-record.sh NEXT TO THE CORE

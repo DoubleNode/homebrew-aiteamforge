@@ -54,7 +54,20 @@
 #   CLAUDE_ACTIVE_ACCOUNT_ID is deliberately never used: it is UNGATED
 #   metadata (exported before any token resolves — XACA-0977-013/015).
 #   Known blind spot: an `apiKeyHelper` in Claude settings is not inspected;
-#   such a launch is recorded under rule 1 or 2 by its environment alone.
+#   such a launch is recorded under rule 1 by its (empty) environment alone.
+#   XACA-1300-025: a settings.json / managed-settings `env` block is the
+#   same blind spot by a different mechanism. Claude Code applies that
+#   block to its OWN process, not to this calling shell, so a credential
+#   injected purely via `env` in settings.json/managed-settings is
+#   INVISIBLE to the presence tests below — and settings.json's `env` wins
+#   over a shell export of the same name (measured XACA-1282), so even
+#   when the calling shell DOES export a credential var, the value that
+#   var carries is not necessarily the one claude will actually use. The
+#   dangerous case is the shell exporting NOTHING: rule 1 then records
+#   account_resolved=true/default-OAuth with full confidence, when the
+#   launch may actually be running on a settings-injected, non-default
+#   credential — the same "confidently wrong" shape as the apiKeyHelper
+#   gap, not the safer "unresolved" shape of rule 3.
 #
 # Presence tests below use [ -n "${VAR:-}" ] only; no value is ever printed.
 # Must stay bash 3.2 compatible (/bin/bash on macOS): no associative arrays,

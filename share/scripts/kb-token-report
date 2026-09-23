@@ -571,10 +571,12 @@ def load_oauth_account_map(path):
     return d
 
 
-# XACA-1300-023: paths and precedence VERIFIED 2026-09-22 against the Claude
-# Code docs, not written from memory:
+# XACA-1300-023/026: paths and precedence VERIFIED 2026-09-22 (paths, drop-in
+# merge order) and re-verified 2026-09-23 (managedSourcesBehavior) against the
+# Claude Code docs, not written from memory:
 #   https://code.claude.com/docs/en/managed-settings  ("Choose a delivery
-#     mechanism" / "Split a file-based policy across teams")
+#     mechanism" / "Split a file-based policy across teams" / "How Claude
+#     Code combines managed sources")
 #   https://code.claude.com/docs/en/settings          ("Settings precedence")
 # - File path: /Library/Application Support/ClaudeCode/managed-settings.json
 #   (macOS), /etc/claude-code/managed-settings.json (Linux and WSL).
@@ -582,12 +584,28 @@ def load_oauth_account_map(path):
 #   managed-settings.json first, then every non-hidden *.json in that directory
 #   in alphabetical order, and for a single value such as cleanupPeriodDays
 #   "the later file's value replaces the earlier one".
-# - Managed settings sit above every user/project/--settings level ("nothing
-#   you set overrides them"), so a managed value wins outright over the user
-#   files; cleanupPeriodDays is not one of the documented exceptions.
+# - XACA-1300-026 correction: managed settings do NOT simply "outrank and
+#   layer over" the user files. The real rule is managedSourcesBehavior,
+#   default "first-wins": Claude Code ranks admin sources (remote/gateway
+#   settings > MDM/OS-level policy > this file tier > Windows HKCU), picks
+#   the SINGLE highest-ranked one that delivers at least one POLICY key, and
+#   IGNORES every other admin source entirely -- not just the keys that
+#   winning source also sets. Only a small, documented set of keys (sandbox
+#   and MCP allowlist locks, a few behavior toggles, `env`) are read from
+#   every admin source regardless; cleanupPeriodDays is confirmed NOT one of
+#   them, so it is fully subject to that exclusion.
 # NOT readable here, so NOT covered: server-managed (claude.ai / gateway)
 # settings and MDM/OS policies (macOS com.anthropic.claudecode profile), which
-# the docs rank ABOVE the file tier. See docs/token-budget.md section 2.
+# the docs rank ABOVE the file tier -- and neither is reliably detectable
+# from a plain file-reading script (remote settings are fetched over the
+# network at Claude Code startup; the docs name the macOS MDM domain but not
+# a command/file this script could read to check it). So finding a valid
+# cleanupPeriodDays in managed-settings.json is NOT proof Claude Code is
+# actually honouring it: a remote or MDM source could be delivering some
+# unrelated policy key on this machine right now and silently excluding this
+# entire file. retention_days_from() below folds the managed-file value into
+# the same smaller-wins comparison as the user files rather than trusting it
+# outright, to fail closed against that gap. See docs/token-budget.md §2.
 MANAGED_SETTINGS_DEFAULT = (
     "/Library/Application Support/ClaudeCode/managed-settings.json" if sys.platform == "darwin"
     else "/etc/claude-code/managed-settings.json")
@@ -652,23 +670,31 @@ def _managed_file_days(managed_path):
 def retention_days_from(settings_path, local_path=None, managed_path=None):
     """Returns (days_or_None, source, detail). XACA-1300-017: never a silent 30.
 
-    Managed settings outrank every user file in Claude Code (verified against
-    the docs, see MANAGED_SETTINGS_DEFAULT), so a managed value -- from
-    managed-settings.json or its managed-settings.d/ drop-ins -- wins outright. Otherwise the user settings.json and settings.local.json
-    are both consulted and the SMALLER value is taken: a smaller retention only
-    narrows the recompute window, so the choice fails closed whichever file
-    Claude Code actually honours. Any consulted file that exists but is
-    unreadable, not an object, or carries a non-positive-int value makes the
-    result UNKNOWN (days None): the exit-4 guard then refuses every week,
-    because nothing proves any week is still inside retention. Nothing
-    defined anywhere -> Claude Code's own default, 30."""
+    XACA-1300-026 correction: a managed-file value is no longer returned as
+    an unconditional winner. Claude Code's real managedSourcesBehavior
+    default ("first-wins") can make it pick a DIFFERENT admin source
+    (remote/gateway or MDM/OS policy) and ignore this file's
+    cleanupPeriodDays entirely, and that condition is not detectable from
+    here (see the comment on MANAGED_SETTINGS_DEFAULT) -- so this script is
+    always "unsure which tier wins" whenever the managed file is present.
+    Fail-closed response: fold the managed-file value into the SAME
+    smaller-wins comparison as the user settings.json / settings.local.json
+    values below, rather than trusting it outright. A smaller retention only
+    narrows the recompute window, so the choice fails closed whichever
+    source Claude Code actually honours -- it can only ever get MORE
+    conservative than trusting managed blindly, never less. Any consulted
+    file that exists but is unreadable, not an object, or carries a
+    non-positive-int value still makes the WHOLE result UNKNOWN immediately
+    (days None): the exit-4 guard then refuses every week, because nothing
+    proves any week is still inside retention. Nothing defined anywhere ->
+    Claude Code's own default, 30."""
+    found = []
     if managed_path:
         st, v = _managed_file_days(managed_path)
-        if st == "ok":
-            return v[0], "managed", v[1]
         if st == "unknown":
             return None, "unknown", v
-    found = []
+        if st == "ok":
+            found.append((v[0], "managed", v[1]))
     for label, p in (("user", settings_path), ("user-local", local_path)):
         if not p:
             continue
@@ -678,7 +704,7 @@ def retention_days_from(settings_path, local_path=None, managed_path=None):
         if st == "ok":
             found.append((v, label, p))
     if found:
-        v, label, p = min(found)
+        v, label, p = min(found, key=lambda t: t[0])
         return v, label, p
     return 30, "default", None
 
@@ -1079,7 +1105,8 @@ def main(argv):
     ap.add_argument("--settings-local-file", default="~/.claude/settings.local.json",
                     help="user-local settings; the smaller cleanupPeriodDays of the two wins")
     ap.add_argument("--managed-settings-file", default=MANAGED_SETTINGS_DEFAULT,
-                    help="managed settings; its cleanupPeriodDays outranks the user files")
+                    help="managed settings; its cleanupPeriodDays is folded into the "
+                         "smaller-wins comparison with the user files (XACA-1300-026)")
     ap.add_argument("--retention-days", type=int, default=None)
     ap.add_argument("--machine", default=None, help="machine name (default scutil LocalHostName)")
     ap.add_argument("--now", default=None, help=argparse.SUPPRESS)  # tests: fixed clock

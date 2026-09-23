@@ -388,11 +388,14 @@ _cc_launch() {
     fi
 
     # --- XACA-0541: pinned session-id --------------------------------------
-    # Feature-detect once; generate a lowercase UUID when supported.
-    local _cc_has_session_id=""
-    claude --help 2>/dev/null | grep -q -- "--session-id" && _cc_has_session_id=1
+    # XACA-1300-027 (Tap-Only-Edit: intentional -- this file has no
+    # sync-tap mapping, see CONTRIBUTING; hand-kept in parity with dev
+    # claude_code_cc_aliases.sh): shared, memoized probe now provided by
+    # cc-account-routing.sh (synced), instead of a standalone `claude
+    # --help` fork here. cc()'s two fallback branches below share the same
+    # memoized answer, so `claude --help` runs at most once per shell.
     local _cc_pinned_id=""
-    if [[ -n "$_cc_has_session_id" ]]; then
+    if _cc_probe_has_session_id; then
         _cc_pinned_id=$(uuidgen | tr 'A-Z' 'a-z')
     fi
 
@@ -494,19 +497,21 @@ cc() {
         elif ! _cc_routing_core_missing; then
             return 1
         fi
-        # Pin a session id the same way _cc_launch does (XACA-0541), only
-        # when cc got NO arguments -- with arguments this may be
-        # `cc --resume <id>`, `cc -c` or a subcommand, where an added
-        # --session-id would conflict or break the command.
+        # Pin a session id the same way _cc_launch does (XACA-0541), when cc
+        # got NO arguments, OR (XACA-1300-028, Tap-Only-Edit: intentional --
+        # parity with dev claude_code_cc_aliases.sh) when the only relevant
+        # flag is print mode (-p/--print) and the caller hasn't already
+        # taken session identity into their own hands -- see
+        # _cc_fb_wants_pinned_sid's own comment (cc-account-routing.sh) for
+        # the exact rule. With `cc --resume <id>`, `cc -c` or a subcommand
+        # an added --session-id would conflict or break the command, so
+        # those are excluded. XACA-1300-027: the supported-flag check is
+        # the shared memoized probe, not a standalone fork.
         local -a _cc_fb_extra=()
         local _cc_fb_sid=""
-        if (( $# == 0 )); then
-            local _cc_fb_has_sid=""
-            claude --help 2>/dev/null | grep -q -- "--session-id" && _cc_fb_has_sid=1
-            if [[ -n "$_cc_fb_has_sid" ]]; then
-                _cc_fb_sid=$(uuidgen | tr 'A-Z' 'a-z')
-                _cc_fb_extra=(--session-id "$_cc_fb_sid")
-            fi
+        if _cc_fb_wants_pinned_sid "$@" && _cc_probe_has_session_id; then
+            _cc_fb_sid=$(uuidgen | tr 'A-Z' 'a-z')
+            _cc_fb_extra=(--session-id "$_cc_fb_sid")
         fi
         _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
             --permission-mode bypassPermissions "${_cc_fb_extra[@]}" "$@"
@@ -521,12 +526,19 @@ cc() {
     # headless helper exactly as before; it correctly attributes a NESTED
     # headless launch (one shelled out from inside an already-routed parent
     # session) via CLAUDE_BILLED_ACCOUNT_ID inherited from that parent's
-    # export. Only when cc got NO arguments: `cc --resume <id>`, `cc -c` and
-    # subcommands would break or conflict with an added --session-id, so
-    # they stay unrecorded. </dev/null keeps the helper's `claude --help`
-    # probe off the piped gate prompt.
+    # export. When cc got NO arguments, OR (XACA-1300-028, Tap-Only-Edit:
+    # intentional -- parity with dev) print mode with no caller-managed
+    # session flags -- see _cc_fb_wants_pinned_sid's comment for the exact
+    # rule. `cc --resume <id>`, `cc -c` and subcommands would break or
+    # conflict with an added --session-id, so those stay unrecorded.
+    # </dev/null keeps the helper's `claude --help` probe off the piped
+    # gate prompt. XACA-1300-027: gate on the shared memoized probe FIRST
+    # so the helper (which would just re-probe the identical thing and
+    # silently no-op) is never even invoked when --session-id is
+    # unsupported.
     local -a _cc_fb_args=()
-    if (( $# == 0 )) && [[ -x "$AITEAMFORGE_DIR/scripts/session-account-map-headless.sh" ]]; then
+    if _cc_fb_wants_pinned_sid "$@" && _cc_probe_has_session_id \
+        && [[ -x "$AITEAMFORGE_DIR/scripts/session-account-map-headless.sh" ]]; then
         local _cc_fb_sid2
         _cc_fb_sid2=$("$AITEAMFORGE_DIR/scripts/session-account-map-headless.sh" </dev/null)
         [[ -n "$_cc_fb_sid2" ]] && _cc_fb_args=(--session-id "$_cc_fb_sid2")
