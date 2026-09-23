@@ -581,6 +581,28 @@ describe('unlock dialog — WCAG AA text contrast against the shipped themes (XA
 });
 
 // ===========================================================================
+// 4b. XACA-0398-020 — the dialog buttons and the lock chip have a hit area of
+//     at least 44x44px (they measured ~30px and 25px tall). Both skins run the
+//     same bytes (see the byte-identity test above), so one copy covers both.
+// ===========================================================================
+
+describe('unlock dialog + chip — 44px minimum touch target (XACA-0398-020)', () => {
+    const rules = dialogRules();
+    const px = (v) => {
+        const m = /^(\d+(?:\.\d+)?)px$/.exec(String(v || '').trim());
+        return m ? Number(m[1]) : NaN;
+    };
+    for (const sel of ['.fleet-unlock-btn', '.fleet-unlock-chip']) {
+        test(`${sel} declares min-height and min-width >= 44px with border-box sizing`, () => {
+            const r = rules[sel] || {};
+            assert.ok(px(r['min-height']) >= 44, `${sel} min-height is ${r['min-height']}`);
+            assert.ok(px(r['min-width']) >= 44, `${sel} min-width is ${r['min-width']}`);
+            assert.equal(r['box-sizing'], 'border-box', `${sel} must size the min-height as the full hit box`);
+        });
+    }
+});
+
+// ===========================================================================
 // 5. XACA-0398-018 — background is inert + aria-hidden while the modal is
 //    open, and restored to its ORIGINAL state on every close path.
 // ===========================================================================

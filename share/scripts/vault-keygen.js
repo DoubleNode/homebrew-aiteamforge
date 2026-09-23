@@ -40,6 +40,11 @@
  *     Contents: base64 (ORIGINAL variant) of the 32-byte X25519 private key, single line.
  * ───────────────────────────────────────────────────────────────────────────
  *
+ * Exit codes (full text in HELP below): 0 ok, 1 failure, 2 usage, 3 ENROLLMENT
+ * PENDING, 4 rotation refused with nothing written — no admin credential, or
+ * (XACA-0398-021) a previous rotation's `<slug>.rotating` staging slot still
+ * exists; recover that with --resume-rotation.
+ *
  * libsodium-wrappers initializes ASYNCHRONOUSLY. Every entry point here awaits
  * sodium.ready before touching crypto — see SECRET-VAULT-DESIGN.md §3.3.
  */
@@ -889,8 +894,17 @@ function fallbackKeyPath(slug) {
 // A non-2xx or a throw at step 3 leaves the primary key exactly as it was. The
 // staging slot is deliberately NOT deleted on failure: a network error can
 // happen AFTER the server applied the PUT, and in that case the staged key is
-// the only copy of the private key the server now expects. The next --rotate
-// overwrites it.
+// the only copy of the private key the server now expects.
+//
+// XACA-0398-021: for that same reason a later --rotate must NEVER overwrite
+// an existing staging slot. It used to (force:true), so "network error after
+// the server applied the PUT" followed by a retried --rotate that then failed
+// destroyed the only key matching the server. Now --rotate REFUSES while a
+// staging slot exists (ROTATE_STAGING_EXISTS -> EXIT_ROTATE_REFUSED, nothing
+// written, nothing sent). Recovery is --resume-rotation, which re-PUTs the
+// STAGED key's public key and promotes it on 2xx. That is correct whichever
+// key the server holds right now: if it already has the staged key the PUT is
+// a no-op, and if it still has the old one the PUT completes the rotation.
 //
 // The staging slug appends ".rotating". validateSlug() forbids "." so it can
 // never collide with a real machine id: file backend -> <slug>.rotating.key,
@@ -1574,6 +1588,13 @@ async function provisionMachine(opts) {
  * with NOTHING written when no admin credential is available.
  */
 async function rotateMachineKey({ machineId, backend, publicKey, privateKey, payload, opts, log }) {
+    // -1. XACA-0398-021: an existing staging slot may be the ONLY key that
+    //     matches the server (a previous PUT applied, then its response was
+    //     lost). Never overwrite it — refuse before anything else happens.
+    if (privateKeyExists(stagingSlug(machineId), { backend })) {
+        throw stagingExistsError(machineId, backend);
+    }
+
     // 0. Resolve the URL (no throw yet, no write). XACA-0398-015: a URL that
     //    cannot carry the admin credential makes rotation impossible — refuse
     //    before prompting for the credential or writing anything.
@@ -1605,10 +1626,48 @@ async function rotateMachineKey({ machineId, backend, publicKey, privateKey, pay
         throw err;
     }
 
-    // 3. Stage the new private key. The primary slot is untouched.
-    const staged = persistPrivateKey(stagingSlug(machineId), privateKey, { backend, force: true });
+    // 3. Stage the new private key. The primary slot is untouched. force:false
+    //    (XACA-0398-021): the slot was just checked empty, and on the Keychain
+    //    backend a racing writer then fails -25299 instead of being clobbered.
+    const staged = persistPrivateKey(stagingSlug(machineId), privateKey, { backend, force: false });
     log(`New private key staged: ${staged.location}`);
 
+    return registerAndPromote({ machineId, backend, publicKey, privateKey, payload,
+        resolvedUrl, adminToken, staged, opts, log });
+}
+
+/**
+ * The refusal --rotate raises when a staging slot already exists (XACA-0398-021).
+ * Mapped to EXIT_ROTATE_REFUSED by main(). Nothing has been written or sent.
+ */
+function stagingExistsError(machineId, backend) {
+    const where = backend === 'keychain'
+        ? `Keychain ${KEYCHAIN_SERVICE} / ${stagingSlug(machineId)}`
+        : fallbackKeyPath(stagingSlug(machineId));
+    const err = new Error(
+        `Refusing to rotate: a previous rotation's staged key still exists (${where}). ` +
+        `It may be the ONLY private key matching the server — a rotation whose response ` +
+        `was lost can still have been applied — so it is never overwritten. NOTHING was ` +
+        `written or sent. To recover, run:\n` +
+        `    FLEET_ADMIN_TOKEN=<token> node vault-keygen.js --resume-rotation --machine-id ${machineId}\n` +
+        `That re-registers the STAGED key's public key and promotes it on success, which is ` +
+        `correct whichever key the server lists now (GET /api/vault/machines). Only if you are ` +
+        `certain the server still lists your CURRENT key and you want to abandon the staged ` +
+        `one, remove the staged slot by hand, then --rotate again. ` +
+        `See docs/fleet-monitor-auth-cutover.md.`
+    );
+    err.code = 'ROTATE_STAGING_EXISTS';
+    err.sanitized = true;
+    return err;
+}
+
+/**
+ * Steps 4-5 of a rotation, shared by rotateMachineKey and resumeRotation:
+ * PUT the staged key's public key, and only on 2xx promote it over the
+ * primary slot and drop staging. Any failure leaves both slots as they were.
+ */
+async function registerAndPromote({ machineId, backend, publicKey, privateKey, payload,
+    resolvedUrl, adminToken, staged, opts, log }) {
     // 4. Register the new public key. A throw here propagates with the primary
     //    key intact and the staged copy kept (see the staging-slot comment).
     let registration;
@@ -1622,7 +1681,8 @@ async function rotateMachineKey({ machineId, backend, publicKey, privateKey, pay
     } catch (err) {
         log(`Rotation NOT applied: registering the new public key failed (${err.message}). ` +
             `The existing private key is unchanged. The new key is left in staging at ` +
-            `${staged.location} in case the server applied it anyway.`);
+            `${staged.location} in case the server applied it anyway — run ` +
+            `--resume-rotation --machine-id ${machineId} to finish (it is safe either way).`);
         throw err;
     }
 
@@ -1632,7 +1692,8 @@ async function rotateMachineKey({ machineId, backend, publicKey, privateKey, pay
         } else {
             log(`Rotation returned HTTP ${registration.status}: ` + JSON.stringify(registration.body || {}));
         }
-        log('Rotation NOT applied: the existing private key is unchanged and still matches the server.');
+        log(`Rotation NOT applied: the stored private key is unchanged, and the new key is ` +
+            `kept in staging at ${staged.location}. Retry with --resume-rotation --machine-id ${machineId}.`);
         return { machineId, publicKey, storage: null, registration, payload, pending: false };
     }
 
@@ -1643,8 +1704,9 @@ async function rotateMachineKey({ machineId, backend, publicKey, privateKey, pay
     } catch (err) {
         const e = new Error(
             `The server accepted the new public key, but promoting the new private key failed ` +
-            `(${err.message}). It is still in staging at ${staged.location} — copy it to the ` +
-            `primary slot before doing anything else, or secrets sealed to the new key cannot be opened.`
+            `(${err.message}). It is still in staging at ${staged.location} — run ` +
+            `--resume-rotation --machine-id ${machineId} before doing anything else, or secrets ` +
+            `sealed to the new key cannot be opened.`
         );
         e.code = 'ROTATE_PROMOTE_FAILED';
         e.sanitized = true;
@@ -1653,6 +1715,61 @@ async function rotateMachineKey({ machineId, backend, publicKey, privateKey, pay
     removeStagedKey(machineId, { backend });
     log(`Registered new public key (${registration.status}); private key rotated: ${storage.location}`);
     return { machineId, publicKey, storage, registration, payload, pending: false };
+}
+
+/**
+ * --resume-rotation (XACA-0398-021): finish a rotation whose staging slot was
+ * left behind (lost response, non-2xx, or a failed promote). Re-PUTs the
+ * STAGED key's public key and promotes it on 2xx — see the staging-slot
+ * comment for why that is right whichever key the server holds. Never
+ * generates a key. Refuses (ROTATE_ADMIN_REQUIRED, nothing sent) without an
+ * admin credential, like --rotate.
+ */
+async function resumeRotation(opts) {
+    opts = opts || {};
+    const log = opts.log || (() => {});
+    const machineId = opts.machineId || defaultMachineSlug();
+    const label = opts.label || `${os.userInfo().username}@${os.hostname()}`;
+    const slugErrors = validateSlug(machineId);
+    if (slugErrors.length) throw new Error('Invalid machine id: ' + slugErrors.join('; '));
+
+    const backend = chooseKeyStorageBackend();
+    const staging = stagingSlug(machineId);
+    if (!privateKeyExists(staging, { backend })) {
+        throw new Error(`No staged rotation for machine "${machineId}" (${backend}); nothing to resume.`);
+    }
+    const privateKey = readPrivateKey(staging, { backend });
+    const publicKey = await derivePublicKeyFromPrivate(privateKey);
+    const payload = await buildRegistrationPayload({ id: machineId, label, publicKey });
+    log(`Resuming rotation for ${machineId} with the staged key (public key ${publicKey}).`);
+
+    if (opts.dryRun) {
+        log('[dry-run] Skipping registration and promotion.');
+        return { machineId, publicKey, storage: null, registration: null, payload, pending: false };
+    }
+
+    const resolvedUrl = opts.serverUrl
+        ? acceptFleetUrl(opts.serverUrl, '--server / opts.serverUrl')
+        : resolveFleetUrl();
+    if (!resolvedUrl) {
+        const err = new Error(unresolvedFleetUrlMessage('vault-keygen --resume-rotation'));
+        err.code = 'FLEET_URL_UNRESOLVED';
+        throw err;
+    }
+    assertAdminTransport(resolvedUrl);
+    const adminToken = await resolveFleetAdminToken({ interactive: true });
+    if (!adminToken) {
+        const err = new Error(
+            'Refusing to resume rotation: no admin credential available (FLEET_ADMIN_TOKEN unset, ' +
+            'and no interactive TTY to prompt). Nothing was sent; both keys are unchanged.'
+        );
+        err.code = 'ROTATE_ADMIN_REQUIRED';
+        throw err;
+    }
+    const staged = { backend, location: backend === 'keychain'
+        ? `Keychain ${KEYCHAIN_SERVICE} / ${staging}` : fallbackKeyPath(staging) };
+    return registerAndPromote({ machineId, backend, publicKey, privateKey, payload,
+        resolvedUrl, adminToken, staged, opts, log });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1672,6 +1789,7 @@ function parseArgs(argv) {
             case '--rotate':       opts.rotate = true; break;
             case '--dry-run':      opts.dryRun = true; break;
             case '--register-only': opts.registerOnly = true; break;
+            case '--resume-rotation': opts.resumeRotation = true; break;
             case '-h':
             case '--help':         opts.help = true; break;
             default:
@@ -1702,6 +1820,11 @@ Options:
   --rotate              Generate a NEW keypair for an existing machine and update
                         its registration in place (PUT). You MUST then re-seal all
                         existing secrets to the new key (SECRET-VAULT-DESIGN.md §5.4).
+                        Refused (exit 4) while a previous rotation's staged key
+                        still exists - use --resume-rotation instead.
+  --resume-rotation     Finish an interrupted --rotate (XACA-0398-021): re-register
+                        the STAGED key's public key and, on success, promote it
+                        to the stored key. Safe whichever key the server holds.
   --force               Replace an existing local private key without rotating.
   --register-only       Re-register the ALREADY-STORED key for this machine id
                         without generating a new one (XACA-0398-004). Use this to
@@ -1734,9 +1857,12 @@ EXIT CODES:
      but could NOT be registered because no admin credential was available.
      This is NOT a failure of key generation; it means the machine needs an
      operator to run --register-only with FLEET_ADMIN_TOKEN set.
-  4  --rotate refused: no admin credential available. NOTHING was written; the
-     existing key is unchanged. (Rotation never stores the new key until the
-     server has accepted its public key, so it has no pending state.)
+  4  --rotate / --resume-rotation refused. NOTHING was written or sent; the
+     existing key is unchanged. Either no admin credential was available, or
+     (--rotate only, XACA-0398-021) a previous rotation's staged key still
+     exists and might be the only key matching the server - finish it with
+     --resume-rotation. (Rotation never stores the new key until the server
+     has accepted its public key, so it has no pending state.)
 
 The private key is stored in the macOS Keychain (service com.aiteamforge.vault,
 account = machine id) when available, otherwise in ~/.aiteamforge/vault/<slug>.key
@@ -1755,6 +1881,8 @@ const EXIT_ENROLLMENT_PENDING = 3;
 // XACA-0398-014: --rotate refused BEFORE anything was written, because no
 // admin credential was available. Distinct from 3: pending means "a key was
 // stored and awaits registration"; this means "nothing changed at all".
+// XACA-0398-021 reuses it for "a staging slot already exists" (same contract:
+// refused, nothing written, nothing sent); stderr names which cause it was.
 const EXIT_ROTATE_REFUSED = 4;
 
 // -----------------------------------------------------------------------------
@@ -1815,9 +1943,18 @@ async function main(argv) {
         process.stdout.write(HELP + '\n');
         return 0;
     }
+    if (opts.resumeRotation && (opts.rotate || opts.force || opts.registerOnly)) {
+        process.stderr.write('--resume-rotation cannot be combined with --rotate, --force or --register-only.\n\n' + HELP + '\n');
+        return 2;
+    }
 
     try {
-        const result = opts.registerOnly
+        const result = opts.resumeRotation
+            ? await resumeRotation({
+                ...opts,
+                log: (m) => process.stdout.write(m + '\n'),
+            })
+            : opts.registerOnly
             ? await registerOnly({
                 ...opts,
                 log: (m) => process.stdout.write(m + '\n'),
@@ -1839,7 +1976,9 @@ async function main(argv) {
         return 0;
     } catch (err) {
         process.stderr.write('Error: ' + safeErrorMessage(err) + '\n');
-        if (err && err.code === 'ROTATE_ADMIN_REQUIRED') return EXIT_ROTATE_REFUSED;
+        if (err && (err.code === 'ROTATE_ADMIN_REQUIRED' || err.code === 'ROTATE_STAGING_EXISTS')) {
+            return EXIT_ROTATE_REFUSED;
+        }
         return 1;
     }
 }
@@ -1899,6 +2038,7 @@ module.exports = {
     isMachineRegistered,
     provisionMachine,
     rotateMachineKey,
+    resumeRotation,
     registerOnly,
     // cli
     parseArgs,

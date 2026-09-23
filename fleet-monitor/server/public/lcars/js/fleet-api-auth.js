@@ -268,6 +268,8 @@
                 '}',
                 '.fleet-unlock-btn {',
                 '    border: none; border-radius: 6px; padding: 9px 20px;',
+                // XACA-0398-020: 44px minimum touch target (was ~30px tall).
+                '    box-sizing: border-box; min-height: 44px; min-width: 44px;',
                 '    font-family: inherit; font-size: 12px; font-weight: 700;',
                 '    letter-spacing: 1.5px; text-transform: uppercase; cursor: pointer;',
                 '    color: var(--lcars-black, #000000);',
@@ -279,7 +281,10 @@
                 '.fleet-unlock-chip {',
                 '    position: fixed; right: 16px; bottom: 16px; z-index: 10040;',
                 '    background: var(--lcars-orange, #ff9900); color: var(--lcars-black, #000000);',
-                '    border: none; border-radius: 14px; padding: 6px 14px;',
+                // XACA-0398-020: 44px minimum touch target (was 25px tall). The
+                // chip is the only lock/logout affordance, in a screen corner.
+                '    border: none; border-radius: 22px; padding: 10px 18px;',
+                '    box-sizing: border-box; min-height: 44px; min-width: 44px;',
                 '    font-family: var(--font-primary, "Share Tech Mono", monospace);',
                 '    font-size: 11px; font-weight: 700; letter-spacing: 1.5px;',
                 '    text-transform: uppercase; cursor: pointer;',

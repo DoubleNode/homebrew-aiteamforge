@@ -24,6 +24,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - `vault-keygen.js --rotate` writes the new key to a staging slot and replaces the stored key only after the server accepts the new public key. Without an admin token it exits 4 without writing anything.
     - The admin token is sent only over https, or over http to a loopback address.
     - The unlock dialog's error text meets WCAG AA contrast; the page behind the dialog is marked `inert` while it is open; a 403 CSRF rejection gets its own message.
+    - `vault-keygen.js --rotate` refuses (exit 4) when a staging slot is already there, instead of overwriting it. The new `--resume-rotation` re-sends the staged public key and promotes the staged key once the server accepts it.
+    - The unlock dialog's buttons and the lock chip are at least 44px in each direction, so they are easier to hit.
 - **XACA-1300** — fold in PR #954 review advisories (025-027) and a defect
   (028) in the tap's Anthropic-account/session-map machinery:
   - `share/scripts/session-account-map-headless.sh`'s "known blind spot"
