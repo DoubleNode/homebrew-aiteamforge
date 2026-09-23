@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1303** — `ccc` warns (never blocks) before resuming a session whose last turn carried a large context (default ≥100K tokens; `CC_RESUME_CONTEXT_WARN_TOKENS`, `0` disables), suggesting a fresh session plus `kb-recover`. Mirrors `scripts/cc-account-routing.sh` (`_cc_resume_context_warning`) and adds the guarded call to the `ccc` template.
 - **XACA-0398** — two credential levels for fleet-monitor: a fleet token (`FLEET_AUTH_TOKEN`) for reporters and machine traffic, and a new admin token (`FLEET_ADMIN_TOKEN`) for vault writes, machine registration, engines, dashboards and epics.
   - **Server (mirrored under `fleet-monitor/server/`):**
     - Signing in from LCARS gives an 8-hour HttpOnly session cookie, protected against cross-site request forgery.

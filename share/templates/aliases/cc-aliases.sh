@@ -627,6 +627,12 @@ ccc() {
             _cc_save_session "$session_id"
             _cc_record_session_account "$session_id" "$resolved_account_id" "$resolved_account_nickname"
 
+            # XACA-1303: never-blocking resume cost warning. Optional — guarded
+            # with `command -v` (not the completeness gate) so a stale or
+            # missing routing core skips it silently instead of breaking resume.
+            command -v _cc_resume_context_warning >/dev/null 2>&1 && \
+                _cc_resume_context_warning "$session_id"
+
             _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
                 --permission-mode bypassPermissions --resume "$session_id"
             local _ccc_claude_rc=$?
@@ -640,6 +646,8 @@ ccc() {
         fi
     fi
 
+    # XACA-1303: no resume cost warning here — no session id to locate a
+    # transcript by until claude has already picked one.
     print -u2 $'\e[2m'"ccc: no saved session for this window — using --continue; billed to ${resolved_account_nickname:-default OAuth}"$'\e[0m'
     _cc_run_claude_with_auth "$_CC_RESOLVED_TOKEN" "$_CC_RESOLVED_AUTH_TYPE" \
         --permission-mode bypassPermissions --continue

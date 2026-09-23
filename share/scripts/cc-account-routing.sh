@@ -1592,6 +1592,107 @@ else:
     return 0
 }
 
+# _cc_resume_context_warning <session_id>
+#
+# XACA-1303-002: never-blocking cost warning printed before a `ccc` resume
+# reloads a large prior transcript into context. A resumed session replays
+# its ENTIRE prior context before the first new turn — the trigger was 4
+# Firebase sessions resumed 2026-09-21 that each started around 156K
+# tokens. This is advisory only: it is a SEPARATE, optional concern from
+# _cc_resume_account_guard above (which blocks on a real mismatch), and it
+# must NEVER prevent a resume — every failure mode below (bad session id,
+# no transcript, no python3, malformed JSON, no usage lines) is silent and
+# returns 0. See docs/token-budget.md for the dedup rule this reuses
+# (design: kanban/plans/XACA-1300/XACA-1300-001_schema.md) — usage repeats
+# per content block sharing one message.id, so only the LAST assistant
+# usage record in the transcript is read, never summed.
+#
+# Threshold is the named constant below, overridable via
+# CC_RESUME_CONTEXT_WARN_TOKENS (non-numeric override falls back to the
+# default; 0 disables the warning entirely).
+_cc_resume_context_warning() {
+    local _session_id="$1"
+    [[ -z "$_session_id" ]] && return 0
+
+    # Validate shape BEFORE it touches a glob: real session ids are UUIDs
+    # (hex + hyphens). Anything else — '/', glob metacharacters, etc. —
+    # is untrusted input and is skipped rather than risking an escape out
+    # of projects/*/<id>.jsonl. Same idiom as the shell-identifier checks
+    # elsewhere in this file (e.g. _cc_secrets_file_lookup above).
+    if [[ ! "$_session_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        return 0
+    fi
+
+    # Named constant + env override (XACA-1303-002 design).
+    local _CC_RESUME_CONTEXT_WARN_DEFAULT=100000
+    local _threshold="${CC_RESUME_CONTEXT_WARN_TOKENS:-$_CC_RESUME_CONTEXT_WARN_DEFAULT}"
+    if [[ ! "$_threshold" =~ ^[0-9]+$ ]]; then
+        _threshold="$_CC_RESUME_CONTEXT_WARN_DEFAULT"
+    fi
+    (( _threshold == 0 )) && return 0
+
+    command -v python3 >/dev/null 2>&1 || return 0
+
+    local _config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    # UUIDs are unique across projects — no need to re-derive the cwd
+    # slug the transcript lives under, just glob for it directly.
+    # `setopt localoptions nullglob` (scoped to this function only) means
+    # no match -> empty array, never a "no matches found" abort — the
+    # zsh-glob-qualifier form `(N)` glued onto the pattern does the same
+    # thing but is NOT `bash -n`-parseable (it trips the required syntax
+    # check on this file), so this is the portable-to-parse equivalent.
+    setopt localoptions nullglob
+    local -a _cc_rcw_matches
+    _cc_rcw_matches=("${_config_dir}"/projects/*/"${_session_id}".jsonl)
+    (( ${#_cc_rcw_matches[@]} == 0 )) && return 0
+    local _transcript="${_cc_rcw_matches[1]}"
+    [[ -r "$_transcript" ]] || return 0
+
+    # Read only the tail — the check itself must cost nothing noticeable.
+    # Walk in reverse, take the LAST assistant usage record's total
+    # context (input + cache_read + cache_creation); never sum — usage
+    # repeats per content block for the same message.id (see kb-token-report).
+    local _context_tokens
+    _context_tokens=$(tail -n 200 -- "$_transcript" 2>/dev/null | python3 -c '
+import json, sys
+
+for line in reversed(sys.stdin.readlines()):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        rec = json.loads(line)
+    except Exception:
+        continue
+    if rec.get("type") != "assistant":
+        continue
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        continue
+    usage = msg.get("usage")
+    if not isinstance(usage, dict):
+        continue
+    try:
+        total = (int(usage.get("input_tokens", 0) or 0)
+                 + int(usage.get("cache_read_input_tokens", 0) or 0)
+                 + int(usage.get("cache_creation_input_tokens", 0) or 0))
+    except (TypeError, ValueError):
+        continue
+    print(total)
+    break
+' 2>/dev/null)
+
+    [[ "$_context_tokens" =~ ^[0-9]+$ ]] || return 0
+    (( _context_tokens >= _threshold )) || return 0
+
+    local _cc_rcw_kdisplay=$(( _context_tokens / 1000 ))
+    local _cc_rcw_id8="${_session_id[1,8]}"
+    print -u2 "ccc: ⚠ resuming session ${_cc_rcw_id8} reloads ~${_cc_rcw_kdisplay}K tokens of context before your first turn."
+    print -u2 "ccc:   Starting a new phase of work? A fresh session is cheaper — run kb-recover for the resume manifest, then start with cc."
+    print -u2 "ccc:   (threshold CC_RESUME_CONTEXT_WARN_TOKENS=${_threshold}; set 0 to silence. See docs/token-budget.md)"
+    return 0
+}
+
 # ═══════════════════════════════════════════════════════════════
 # XACA-1246-003: LCARS credential resolver (non-interactive, resolve-only)
 # ═══════════════════════════════════════════════════════════════
