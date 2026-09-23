@@ -1397,6 +1397,49 @@ _kb_warn_worktree_conflict() {
     echo "─────────────────────────────────────"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_template_to_instance (XACA-0565): canonical template-key → instance-id map.
+#
+# Personal-org teams ship a single instance whose id differs from the template
+# key stored in .aiteamforge-config teams[]:
+#     finance → finance-personal
+#     legal   → legal-coparenting
+#     medical → medical-general
+# All other keys (academy, ios, android, firebase, dns, command, freelance-*,
+# and already-resolved instance ids) pass through unchanged.
+#
+# Single canonical shell source-of-truth for this mapping in dev-team. Used by:
+#   • _kb_check_dual_boards (below) — to derive the canonical instance id from
+#     the template key when scanning for legacy stub boards.
+#   • worktree-helpers.sh wt-finish case (~L1566) — when resolving a finished
+#     worktree's project key to its board file.
+#
+# MUST stay a deterministic case statement — NEVER a glob: _kb_check_dual_boards
+# intentionally tolerates a legacy stub (e.g. finance-board.json) alongside the
+# canonical instance board (finance-personal-board.json); a glob would match the
+# stub and re-introduce XACA-0565's bug.
+#
+# Mirror copy: homebrew-tap/libexec/lib/kanban-paths.sh ships a SHELL-identical
+# `get_board_id` because the tap installs standalone and cannot source dev-team
+# helpers at runtime. Keep the two case bodies aligned; the tap copy carries a
+# back-reference comment to this function. Adding a new personal-org team =
+# one canonical edit here + one mirror edit in kanban-paths.sh.
+#
+# Sister concern (different ecosystem, OPPOSITE direction): aiteamforge_paths.py
+# `_resolve_template_band` strips an instance suffix (finance-personal → finance)
+# and is intentionally separate (Python, opposite direction). Not in scope to
+# consolidate here.
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_template_to_instance() {
+    local team="${1-}"
+    case "$team" in
+        finance)  echo "finance-personal"  ;;
+        legal)    echo "legal-coparenting" ;;
+        medical)  echo "medical-general"   ;;
+        *)        echo "$team"             ;;
+    esac
+}
+
 _kb_get_board_file() {
     local team="$1"
     local kanban_dir
