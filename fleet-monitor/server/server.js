@@ -4008,6 +4008,25 @@ if (String(process.env.FLEET_REQUIRE_AUTH || '') === '1' &&
     console.error('================================================================================');
     process.exit(1);
 }
+// XACA-0398-013: both tiers set but to the SAME value is the tier split
+// silently collapsed — every fleet reporter can act as admin. Under the switch
+// that is as unacceptable as the fallback posture above. Never prints a value;
+// the comparison happens inside auth-middleware (getAuthPosture().identical).
+if (String(process.env.FLEET_REQUIRE_AUTH || '') === '1' && _authPosture.identical) {
+    console.error('');
+    console.error('================================================================================');
+    console.error('FATAL: FLEET_REQUIRE_AUTH=1 but FLEET_ADMIN_TOKEN is identical to FLEET_AUTH_TOKEN');
+    console.error('================================================================================');
+    console.error('  Refusing to start — with identical tokens the admin tier is not separate:');
+    console.error('  every machine holding the fleet token can perform admin actions.');
+    console.error('');
+    console.error('  To resolve:');
+    console.error('    1. Set FLEET_ADMIN_TOKEN to a DIFFERENT credential from FLEET_AUTH_TOKEN');
+    console.error('       (Fly.io secrets in production)');
+    console.error('    2. Restart this server');
+    console.error('================================================================================');
+    process.exit(1);
+}
 
 // ============================================================================
 // START SERVER

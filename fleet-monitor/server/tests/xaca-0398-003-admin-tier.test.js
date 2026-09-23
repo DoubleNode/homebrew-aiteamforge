@@ -340,9 +340,9 @@ describe('tier matrix — admin token only, and fully open', () => {
     });
     test('getAuthPosture reports states only', () => {
         setTokens({ fleet: FLEET_TOKEN, admin: '' });
-        assert.deepEqual(auth.getAuthPosture(), { fleet: 'set', admin: 'blank' });
+        assert.deepEqual(auth.getAuthPosture(), { fleet: 'set', admin: 'blank', identical: false });
         clearTokens();
-        assert.deepEqual(auth.getAuthPosture(), { fleet: 'absent', admin: 'absent' });
+        assert.deepEqual(auth.getAuthPosture(), { fleet: 'absent', admin: 'absent', identical: false });
     });
 });
 
@@ -954,6 +954,33 @@ describe('FLEET_REQUIRE_AUTH=1 refuses to start unless BOTH tokens resolve', () 
             assert.ok(!all.includes(FLEET_TOKEN) && !all.includes(ADMIN_TOKEN));
         });
     }
+
+    // XACA-0398-013: identical after trimming — the tier split has collapsed.
+    test('identical tokens (post-strip) -> exit 1 with a FATAL naming the collision, no token in output', async () => {
+        const { code, out } = await runExpectingExit({ FLEET_AUTH_TOKEN: FLEET_TOKEN, FLEET_ADMIN_TOKEN: `  ${FLEET_TOKEN}\n` });
+        assert.equal(code, 1);
+        assert.match(out.stderr, /FATAL: FLEET_REQUIRE_AUTH=1 but FLEET_ADMIN_TOKEN is identical to FLEET_AUTH_TOKEN/);
+        const all = out.stdout + out.stderr;
+        assert.ok(!all.includes(FLEET_TOKEN), 'token value leaked into server output');
+    });
+});
+
+describe('getAuthPosture().identical (XACA-0398-013)', () => {
+    afterEach(clearTokens);
+    const cases = [
+        ['distinct tokens', { fleet: FLEET_TOKEN, admin: ADMIN_TOKEN }, false],
+        ['identical tokens', { fleet: FLEET_TOKEN, admin: FLEET_TOKEN }, true],
+        ['identical after trimming', { fleet: ` ${FLEET_TOKEN}`, admin: `${FLEET_TOKEN}\t\n` }, true],
+        ['fleet only', { fleet: FLEET_TOKEN }, false],
+        ['both blank', { fleet: ' ', admin: ' ' }, false],
+        ['neither', {}, false],
+    ];
+    for (const [name, env, expected] of cases) {
+        test(`${name} -> ${expected}`, () => {
+            setTokens(env);
+            assert.equal(auth.getAuthPosture().identical, expected);
+        });
+    }
 });
 
 // ===========================================================================
@@ -979,6 +1006,8 @@ describe('logAuthStartupNotice — one line per tier, never a value', () => {
         { name: 'admin only', env: { admin: ADMIN_TOKEN }, log: [/AUTH ADMIN: gate ACTIVE$/], warn: [/AUTH: gate ACTIVE with the admin token only/] },
         { name: 'neither', env: {}, log: [], warn: [/AUTH: gate OPEN/, /AUTH ADMIN: gate OPEN/] },
         { name: 'admin blank, no fleet', env: { admin: '' }, log: [], warn: [/AUTH: gate OPEN/, /AUTH ADMIN CONFIG ERROR/] },
+        // XACA-0398-013: warned even without FLEET_REQUIRE_AUTH (which makes it FATAL instead).
+        { name: 'identical tokens (post-strip)', env: { fleet: FLEET_TOKEN, admin: ` ${FLEET_TOKEN} ` }, log: [/AUTH: gate ACTIVE$/], warn: [/AUTH ADMIN: FLEET_ADMIN_TOKEN is identical to FLEET_AUTH_TOKEN/] },
     ];
     for (const c of cases) {
         test(c.name, () => {

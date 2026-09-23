@@ -200,12 +200,30 @@ function resolveAdminKeyState() {
 }
 
 /**
+ * True when BOTH tiers are set and resolve to the same (post-strip) value —
+ * the tier split has silently collapsed: every fleet reporter holds the admin
+ * credential (XACA-0398-013). Compared with safeEqual; the values never leave
+ * this function.
+ */
+function tiersIdentical() {
+    const fleet = resolveKeyState();
+    const admin = resolveAdminKeyState();
+    if (fleet.state !== KEY_STATE_SET || admin.state !== KEY_STATE_SET) return false;
+    return safeEqual(fleet.key, admin.key);
+}
+
+/**
  * Per-tier key states, for server.js's FLEET_REQUIRE_AUTH block and tests.
- * States only — never a key value.
- * @returns {{ fleet: 'absent'|'blank'|'set', admin: 'absent'|'blank'|'set' }}
+ * States only — never a key value. `identical` is true when both tiers are
+ * set to the same value (XACA-0398-013).
+ * @returns {{ fleet: 'absent'|'blank'|'set', admin: 'absent'|'blank'|'set', identical: boolean }}
  */
 function getAuthPosture() {
-    return { fleet: resolveKeyState().state, admin: resolveAdminKeyState().state };
+    return {
+        fleet: resolveKeyState().state,
+        admin: resolveAdminKeyState().state,
+        identical: tiersIdentical(),
+    };
 }
 
 /**
@@ -419,6 +437,11 @@ function checkApiKey(req, res) {
  *             active with the admin key only (reporters cannot authenticate).
  *
  * Admin-tier line (contract §7 "Tiers"):
+ * - FLEET_ADMIN_TOKEN set, equal to FLEET_AUTH_TOKEN (post-strip)
+ *                                  -> WARN "AUTH ADMIN: FLEET_ADMIN_TOKEN is
+ *                                     identical to FLEET_AUTH_TOKEN" (XACA-0398-013;
+ *                                     server.js turns this into a FATAL under
+ *                                     FLEET_REQUIRE_AUTH=1).
  * - FLEET_ADMIN_TOKEN set          -> "AUTH ADMIN: gate ACTIVE" via log().
  * - unset/blank, fleet key set     -> WARN "AUTH ADMIN: sharing fleet token".
  * - blank, no fleet key            -> WARN AUTH ADMIN CONFIG ERROR, gate OPEN.
@@ -458,7 +481,13 @@ function logAuthStartupNotice(logger = console) {
     }
 
     // ---- Admin tier: exactly one line (XACA-0398) ----
-    if (admin === KEY_STATE_SET) {
+    if (admin === KEY_STATE_SET && tiersIdentical()) {
+        logger.warn(
+            '[fleet-monitor] AUTH ADMIN: FLEET_ADMIN_TOKEN is identical to FLEET_AUTH_TOKEN — ' +
+            'the admin tier is NOT separate: any machine holding the fleet token can perform ' +
+            'admin actions. Set FLEET_ADMIN_TOKEN to a different credential.'
+        );
+    } else if (admin === KEY_STATE_SET) {
         logger.log('[fleet-monitor] AUTH ADMIN: gate ACTIVE');
     } else if (fleet === KEY_STATE_SET) {
         logger.warn(

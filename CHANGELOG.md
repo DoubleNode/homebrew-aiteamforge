@@ -19,6 +19,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - `share/scripts/kb-msg-provision` adds `--fleet-token-stdin` to write the token into `fleet-config.json` at mode 0600, and reports machines that are waiting for enrollment.
   - **Installer:** `libexec/installers/install-fleet-monitor.sh` and `share/templates/fleet-monitor/fleet-reporter-config.template.json` keep an existing `authToken` when setup is re-run, instead of blanking it, and write the config at 0600.
   - Consumers must be on a release that includes this change BEFORE the operator turns authentication on in production. See `docs/fleet-monitor-auth-cutover.md` in dev-team.
+  - **Fixes from the PR #961 review gates:**
+    - `FLEET_REQUIRE_AUTH=1` refuses identical fleet and admin tokens.
+    - `vault-keygen.js --rotate` writes the new key to a staging slot and replaces the stored key only after the server accepts the new public key. Without an admin token it exits 4 without writing anything.
+    - The admin token is sent only over https, or over http to a loopback address.
+    - The unlock dialog's error text meets WCAG AA contrast; the page behind the dialog is marked `inert` while it is open; a 403 CSRF rejection gets its own message.
 
 ## [0.20.24] - 2026-09-23
 - **XACA-1313** — freelance terminals now route to the per-instance

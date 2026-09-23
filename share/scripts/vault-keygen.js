@@ -159,6 +159,8 @@ function fleetConfigPath() {
 //
 // https is NOT required: a LAN/dev fleet-monitor over plain http is a legitimate
 // deployment, and the tests exercise it. Tightening that is a separate decision.
+// EXCEPTION: the ADMIN credential is never sent over non-loopback http — see
+// adminTransportCheck() (XACA-0398-015).
 
 const ALLOWED_FLEET_SCHEMES = ['http:', 'https:'];
 
@@ -631,6 +633,75 @@ async function resolveFleetAdminToken(opts, deps) {
     return trimmed.length > 0 ? trimmed : null;
 }
 
+// -----------------------------------------------------------------------------
+// Admin-credential transport rule (XACA-0398-015)
+// -----------------------------------------------------------------------------
+//
+// ALLOWED_FLEET_SCHEMES deliberately permits plain http for ANY host (a LAN/dev
+// fleet-monitor is legitimate — see validateFleetUrl). That is acceptable for
+// the FLEET token's traffic, whose posture predates this rule and is out of
+// scope here. It is NOT acceptable for the ADMIN credential: it unlocks vault
+// writes, machine (re-)registration and the engine registry, and over http to
+// a non-loopback host it crosses the network in cleartext.
+//
+// Rule: the admin Authorization header is attached ONLY to an https:// URL, or
+// to http:// on a loopback host (localhost, 127.0.0.0/8, ::1 — traffic that
+// never leaves the machine). Anything else fails closed with
+// ADMIN_TOKEN_INSECURE_TRANSPORT BEFORE the request is sent. Callers also
+// avoid PROMPTING for a token they would then be unable to send.
+//
+// Every admin-header sender goes through this: registerMachine() (register,
+// --register-only, --rotate) here, and adminAuthHeaders() in
+// scripts/vault-migrate-env-keys.js.
+
+/** @returns {boolean} true for localhost, 127.0.0.0/8, or ::1 (URL.hostname form) */
+function isLoopbackHost(hostname) {
+    const h = String(hostname || '').toLowerCase();
+    if (h === 'localhost') return true;
+    if (h === '[::1]' || h === '::1') return true;
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (m && Number(m[1]) === 127 && m.slice(2).every((o) => Number(o) <= 255)) return true;
+    return false;
+}
+
+/**
+ * May the admin credential be sent to this URL?
+ * @param {string} url absolute URL
+ * @returns {{ ok: true }|{ ok: false, reason: string }} reason names scheme +
+ *          host only (never userinfo, path or query)
+ */
+function adminTransportCheck(url) {
+    let parsed;
+    try {
+        parsed = new URL(String(url));
+    } catch (_) {
+        return { ok: false, reason: 'the fleet URL is not a valid absolute URL' };
+    }
+    if (parsed.protocol === 'https:') return { ok: true };
+    if (parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname)) return { ok: true };
+    return {
+        ok: false,
+        reason: `the fleet URL is ${parsed.protocol}//${parsed.hostname} — the admin credential ` +
+                `is only sent over https, or over plain http to a loopback host ` +
+                `(localhost, 127.0.0.0/8, ::1)`,
+    };
+}
+
+/**
+ * Throw ADMIN_TOKEN_INSECURE_TRANSPORT unless adminTransportCheck(url) passes.
+ * The message never contains the credential.
+ */
+function assertAdminTransport(url) {
+    const check = adminTransportCheck(url);
+    if (check.ok) return;
+    const err = new Error(
+        `Refusing to send the admin credential (FLEET_ADMIN_TOKEN): ${check.reason}. ` +
+        `Nothing was sent. Point FLEET_MONITOR_URL / --server at the https:// endpoint.`
+    );
+    err.code = 'ADMIN_TOKEN_INSECURE_TRANSPORT';
+    throw err;
+}
+
 /**
  * Build the Authorization header for a fleet-bound request, or `{}` when no
  * credential resolves. Nothing is ever logged. Always returns a Promise so
@@ -794,6 +865,66 @@ function securityCliAvailable() {
 /** @returns {string} absolute fallback key-file path for a slug */
 function fallbackKeyPath(slug) {
     return path.join(vaultDir(), `${slug}.key`);
+}
+
+// -----------------------------------------------------------------------------
+// Rotation staging slot (XACA-0398-014)
+// -----------------------------------------------------------------------------
+//
+// --rotate used to overwrite the stored private key FIRST and register the new
+// public key SECOND. Any failure in between (no admin credential -> ENROLLMENT
+// PENDING, a 401, a 5xx, a dead network) left the server holding the OLD
+// public key while the only copy of the matching private key had just been
+// destroyed: every secret sealed to this machine became unopenable.
+//
+// The rule now: the stored key is not touched until the server has ACCEPTED
+// the new public key (2xx). Neither backend offers an atomic
+// "replace-if-the-server-agrees", so the new key goes to a STAGING slot first:
+//   1. resolve the admin credential + fleet URL (refuse, writing nothing, if
+//      either is missing);
+//   2. write the new key to the staging slot (a failure here aborts BEFORE
+//      anything is sent — the server never learns a pubkey we cannot open);
+//   3. PUT the new public key;
+//   4. only on 2xx, promote: write it over the primary slot, then drop staging.
+// A non-2xx or a throw at step 3 leaves the primary key exactly as it was. The
+// staging slot is deliberately NOT deleted on failure: a network error can
+// happen AFTER the server applied the PUT, and in that case the staged key is
+// the only copy of the private key the server now expects. The next --rotate
+// overwrites it.
+//
+// The staging slug appends ".rotating". validateSlug() forbids "." so it can
+// never collide with a real machine id: file backend -> <slug>.rotating.key,
+// Keychain -> account "<slug>.rotating" under the same service.
+
+/** @returns {string} the staging-slot slug used during --rotate */
+function stagingSlug(slug) {
+    return `${slug}.rotating`;
+}
+
+/**
+ * Best-effort removal of the staging slot after a successful promote. Never
+ * throws: the promote already succeeded, so a leftover staging copy is only
+ * clutter (it holds the SAME key as the primary slot by then).
+ * @returns {boolean} whether it was removed
+ */
+function removeStagedKey(slug, deps) {
+    deps = deps || {};
+    const backend = deps.backend || chooseKeyStorageBackend();
+    try {
+        if (backend === 'keychain') {
+            const del = deps.keychainDelete || ((acct) => execFileSync(
+                'security',
+                ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', acct],
+                { stdio: 'ignore' }
+            ));
+            del(stagingSlug(slug));
+        } else {
+            (deps.unlink || fs.unlinkSync)(fallbackKeyPath(stagingSlug(slug)));
+        }
+        return true;
+    } catch (_) {
+        return false;
+    }
 }
 
 /**
@@ -1167,9 +1298,14 @@ async function registerMachine(payload, opts) {
     // XACA-0398-004: register/rotate is an ADMIN-tier route now. Send the
     // Authorization header alongside the fleet-URL/redirect guards this
     // function already applies — none of that machinery changes.
+    //
+    // XACA-0398-015: never PROMPT for a token that cannot be sent (insecure
+    // transport), and never SEND one: the check below runs before fetch().
+    const transportOk = adminTransportCheck(url).ok;
     const adminHeaders = opts.adminToken !== undefined
         ? (opts.adminToken ? { Authorization: `Bearer ${opts.adminToken}` } : {})
-        : await fleetAuthHeaders('admin', { interactive: !!opts.interactiveAdmin });
+        : await fleetAuthHeaders('admin', { interactive: !!opts.interactiveAdmin && transportOk });
+    if (adminHeaders.Authorization && !transportOk) assertAdminTransport(url);
 
     // XACA-0972-029: refuse redirects rather than following them. This request
     // carries the machine's PUBLIC key and registers it under an id; a redirect
@@ -1274,6 +1410,10 @@ async function registerOnly(opts) {
         throw err;
     }
 
+    // XACA-0398-015: --register-only exists to send the admin credential; if
+    // the URL cannot carry it, say so now instead of prompting for it.
+    assertAdminTransport(resolvedUrl);
+
     // Admin credential is resolved ONCE, here, and handed to registerMachine
     // as an already-known value (opts.adminToken) so a TTY prompt — if one
     // happens — never fires twice for one invocation.
@@ -1376,7 +1516,11 @@ async function provisionMachine(opts) {
         return { machineId, publicKey, storage: null, registration: null, payload, pending: false };
     }
 
-    // Persist the private key (force when rotating or explicitly forced).
+    if (opts.rotate) {
+        return rotateMachineKey({ machineId, backend, publicKey, privateKey, payload, opts, log });
+    }
+
+    // Persist the private key (force when explicitly forced).
     const storage = persistPrivateKey(machineId, privateKey, {
         backend,
         force: opts.force || opts.rotate,
@@ -1420,6 +1564,94 @@ async function provisionMachine(opts) {
             JSON.stringify(registration.body || {}));
     }
 
+    return { machineId, publicKey, storage, registration, payload, pending: false };
+}
+
+/**
+ * The --rotate half of provisionMachine (XACA-0398-014). See the "Rotation
+ * staging slot" comment above fallbackKeyPath for the ordering and why it
+ * cannot lose the key. Throws ROTATE_ADMIN_REQUIRED (-> EXIT_ROTATE_REFUSED)
+ * with NOTHING written when no admin credential is available.
+ */
+async function rotateMachineKey({ machineId, backend, publicKey, privateKey, payload, opts, log }) {
+    // 0. Resolve the URL (no throw yet, no write). XACA-0398-015: a URL that
+    //    cannot carry the admin credential makes rotation impossible — refuse
+    //    before prompting for the credential or writing anything.
+    const resolvedUrl = opts.serverUrl
+        ? acceptFleetUrl(opts.serverUrl, '--server / opts.serverUrl')
+        : resolveFleetUrl();
+    if (resolvedUrl) assertAdminTransport(resolvedUrl);
+
+    // 1. Credential FIRST (before any write). No ENROLLMENT PENDING for a rotation: pending would
+    //    mean "new key stored, server still on the old one" — the exact state
+    //    this ordering exists to make impossible.
+    const adminToken = await resolveFleetAdminToken({ interactive: true });
+    if (!adminToken) {
+        const err = new Error(
+            'Refusing to rotate: no admin credential available (FLEET_ADMIN_TOKEN unset, ' +
+            'and no interactive TTY to prompt). Rotation must register the new public key ' +
+            'in the same run, so NOTHING was generated into storage and the existing key ' +
+            'is unchanged. Re-run with FLEET_ADMIN_TOKEN set.'
+        );
+        err.code = 'ROTATE_ADMIN_REQUIRED';
+        throw err;
+    }
+
+    // 2. An unresolvable URL is refused here — still before any write.
+    //    registerMachine would refuse it too, but only AFTER staging.
+    if (!resolvedUrl) {
+        const err = new Error(unresolvedFleetUrlMessage('vault-keygen --rotate'));
+        err.code = 'FLEET_URL_UNRESOLVED';
+        throw err;
+    }
+
+    // 3. Stage the new private key. The primary slot is untouched.
+    const staged = persistPrivateKey(stagingSlug(machineId), privateKey, { backend, force: true });
+    log(`New private key staged: ${staged.location}`);
+
+    // 4. Register the new public key. A throw here propagates with the primary
+    //    key intact and the staged copy kept (see the staging-slot comment).
+    let registration;
+    try {
+        registration = await registerMachine(payload, {
+            serverUrl: resolvedUrl,
+            rotate: true,
+            adminToken,
+            fetchImpl: opts.fetchImpl,
+        });
+    } catch (err) {
+        log(`Rotation NOT applied: registering the new public key failed (${err.message}). ` +
+            `The existing private key is unchanged. The new key is left in staging at ` +
+            `${staged.location} in case the server applied it anyway.`);
+        throw err;
+    }
+
+    if (!(registration.status >= 200 && registration.status < 300)) {
+        if (registration.status === 401) {
+            log('Rotation returned HTTP 401: the admin credential was rejected.');
+        } else {
+            log(`Rotation returned HTTP ${registration.status}: ` + JSON.stringify(registration.body || {}));
+        }
+        log('Rotation NOT applied: the existing private key is unchanged and still matches the server.');
+        return { machineId, publicKey, storage: null, registration, payload, pending: false };
+    }
+
+    // 5. Server accepted the new public key: promote.
+    let storage;
+    try {
+        storage = persistPrivateKey(machineId, privateKey, { backend, force: true });
+    } catch (err) {
+        const e = new Error(
+            `The server accepted the new public key, but promoting the new private key failed ` +
+            `(${err.message}). It is still in staging at ${staged.location} — copy it to the ` +
+            `primary slot before doing anything else, or secrets sealed to the new key cannot be opened.`
+        );
+        e.code = 'ROTATE_PROMOTE_FAILED';
+        e.sanitized = true;
+        throw e;
+    }
+    removeStagedKey(machineId, { backend });
+    log(`Registered new public key (${registration.status}); private key rotated: ${storage.location}`);
     return { machineId, publicKey, storage, registration, payload, pending: false };
 }
 
@@ -1489,6 +1721,9 @@ CREDENTIALS (XACA-0398-004 — two tiers):
   generated and stored, but registration is skipped and this exits with the
   ENROLLMENT PENDING code below — an operator finishes it later with
   --register-only.
+  The admin credential is only ever sent to an https:// URL, or to plain http
+  on a loopback host (localhost, 127.0.0.0/8, ::1). Any other http URL is
+  refused before anything is sent (XACA-0398-015).
 
 EXIT CODES:
   0  success (registered, or --dry-run / --help)
@@ -1499,6 +1734,9 @@ EXIT CODES:
      but could NOT be registered because no admin credential was available.
      This is NOT a failure of key generation; it means the machine needs an
      operator to run --register-only with FLEET_ADMIN_TOKEN set.
+  4  --rotate refused: no admin credential available. NOTHING was written; the
+     existing key is unchanged. (Rotation never stores the new key until the
+     server has accepted its public key, so it has no pending state.)
 
 The private key is stored in the macOS Keychain (service com.aiteamforge.vault,
 account = machine id) when available, otherwise in ~/.aiteamforge/vault/<slug>.key
@@ -1513,6 +1751,11 @@ account = machine id) when available, otherwise in ~/.aiteamforge/vault/<slug>.k
 // there is no way to import a JS constant into that Python file, so keep the
 // two literal 3's in sync if this ever changes.
 const EXIT_ENROLLMENT_PENDING = 3;
+
+// XACA-0398-014: --rotate refused BEFORE anything was written, because no
+// admin credential was available. Distinct from 3: pending means "a key was
+// stored and awaits registration"; this means "nothing changed at all".
+const EXIT_ROTATE_REFUSED = 4;
 
 // -----------------------------------------------------------------------------
 // Top-level error sanitization (XACA-1224-002)
@@ -1596,6 +1839,7 @@ async function main(argv) {
         return 0;
     } catch (err) {
         process.stderr.write('Error: ' + safeErrorMessage(err) + '\n');
+        if (err && err.code === 'ROTATE_ADMIN_REQUIRED') return EXIT_ROTATE_REFUSED;
         return 1;
     }
 }
@@ -1625,7 +1869,11 @@ module.exports = {
     resolveFleetAdminToken,
     fleetAuthHeaders,
     readHiddenLine,
+    isLoopbackHost,
+    adminTransportCheck,
+    assertAdminTransport,
     EXIT_ENROLLMENT_PENDING,
+    EXIT_ROTATE_REFUSED,
     // slug/label
     defaultMachineSlug,
     validateSlug,
@@ -1638,6 +1886,8 @@ module.exports = {
     chooseKeyStorageBackend,
     securityCliAvailable,
     fallbackKeyPath,
+    stagingSlug,
+    removeStagedKey,
     privateKeyExists,
     persistPrivateKey,
     readPrivateKey,
@@ -1648,6 +1898,7 @@ module.exports = {
     registerMachine,
     isMachineRegistered,
     provisionMachine,
+    rotateMachineKey,
     registerOnly,
     // cli
     parseArgs,

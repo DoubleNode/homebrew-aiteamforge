@@ -60,6 +60,10 @@
     var MSG_RATE_LIMITED = 'Too many failed attempts. Wait 15 minutes and try again.';
     var MSG_NETWORK = 'Could not reach the server. Check your connection and try again.';
     var MSG_UNEXPECTED = 'Unlock failed. Try again.';
+    // XACA-0398-019: a 403 from /api/auth/login is the server's CSRF check
+    // refusing this page (Origin/Host mismatch, stripped Sec-Fetch-Site…).
+    // Retrying the same page cannot fix that, so don't tell them to.
+    var MSG_FORBIDDEN = 'Could not verify this page — reload and try again.';
     var MSG_EMPTY = 'Enter the admin token.';
 
     function createFleetApiAuth(deps) {
@@ -157,7 +161,7 @@
             }
         }
 
-        /** POST the token. Returns 'ok' | 'rejected' | 'rate_limited' | 'network' | 'gate_open' | 'error'. */
+        /** POST the token. Returns 'ok' | 'rejected' | 'forbidden' | 'rate_limited' | 'network' | 'gate_open' | 'error'. */
         async function submitToken(token) {
             var body = JSON.stringify({ token: token });
             token = null; // drop our reference as early as possible
@@ -176,6 +180,7 @@
             }
             if (r.ok) return 'ok';
             if (r.status === 401) return 'rejected';
+            if (r.status === 403) return 'forbidden';
             if (r.status === 429) return 'rate_limited';
             if (r.status === 409) return 'gate_open';
             return 'error';
@@ -243,9 +248,15 @@
                 '.fleet-unlock-input:focus-visible, .fleet-unlock-btn:focus-visible {',
                 '    outline: 2px solid var(--lcars-amber, #ffcc00); outline-offset: 2px;',
                 '}',
+                // XACA-0398-017: NOT --lcars-red. Both shipped themes define
+                // it as #cc4444, which is 4.11:1 on --lcars-darker (fails AA
+                // 4.5:1 for 12px text). --lcars-alert-red (#ff6666) is 6.74:1.
+                // The global --lcars-red is left alone — the whole UI uses it.
+                // tests/xaca-0398-003-fleet-api-auth.test.js checks every
+                // dialog text/background pair against BOTH theme files.
                 '.fleet-unlock-error {',
                 '    min-height: 18px; margin: 8px 0 0 0; font-size: 12px;',
-                '    color: var(--lcars-red, #ff6666);',
+                '    color: var(--lcars-alert-red, #ff6666);',
                 '}',
                 '.fleet-unlock-note {',
                 '    margin: 10px 0 0 0; font-size: 11px; line-height: 1.5;',
@@ -287,6 +298,41 @@
                 }
             }
             return node;
+        }
+
+        /**
+         * XACA-0398-018: take everything behind the overlay out of the
+         * accessibility tree and out of interaction while the modal is open,
+         * so a screen-reader virtual cursor cannot wander into the dashboard.
+         * Sets `inert` (the real fix) plus aria-hidden="true" (fallback for
+         * engines without inert) on every body child EXCEPT the overlay.
+         * Returns a function that restores each node's ORIGINAL attributes —
+         * a node that was already inert/aria-hidden stays that way.
+         */
+        function hideBackground(overlay) {
+            var saved = [];
+            var kids = doc.body.children;
+            for (var i = 0; i < kids.length; i++) {
+                var node = kids[i];
+                if (node === overlay) continue;
+                saved.push({
+                    node: node,
+                    inert: node.getAttribute('inert'),
+                    ariaHidden: node.getAttribute('aria-hidden'),
+                });
+                node.setAttribute('inert', '');
+                node.setAttribute('aria-hidden', 'true');
+            }
+            return function restore() {
+                for (var j = 0; j < saved.length; j++) {
+                    var s = saved[j];
+                    if (s.inert === null) s.node.removeAttribute('inert');
+                    else s.node.setAttribute('inert', s.inert);
+                    if (s.ariaHidden === null) s.node.removeAttribute('aria-hidden');
+                    else s.node.setAttribute('aria-hidden', s.ariaHidden);
+                }
+                saved = [];
+            };
         }
 
         /**
@@ -364,6 +410,7 @@
             box.appendChild(form);
             overlay.appendChild(box);
             doc.body.appendChild(overlay);
+            var restoreBackground = hideBackground(overlay);
 
             var closed = false;
             function close(result) {
@@ -372,6 +419,7 @@
                 input.value = '';
                 doc.removeEventListener('keydown', onKeydown, true);
                 if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+                restoreBackground();
                 if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
                     try { previouslyFocused.focus(); } catch (_) { /* element gone */ }
                 }
@@ -436,6 +484,7 @@
                 }
                 errorEl.textContent =
                     outcome === 'rejected' ? MSG_REJECTED :
+                    outcome === 'forbidden' ? MSG_FORBIDDEN :
                     outcome === 'rate_limited' ? MSG_RATE_LIMITED :
                     outcome === 'network' ? MSG_NETWORK : MSG_UNEXPECTED;
                 input.focus();
