@@ -1611,6 +1611,9 @@ else:
 # CC_RESUME_CONTEXT_WARN_TOKENS (non-numeric override falls back to the
 # default; 0 disables the warning entirely).
 _cc_resume_context_warning() {
+    # XACA-1303-011: pin option semantics — under a caller's KSH_ARRAYS the
+    # [1] subscript below would read empty and silently skip the warning.
+    emulate -L zsh
     local _session_id="$1"
     [[ -z "$_session_id" ]] && return 0
 
@@ -1641,7 +1644,7 @@ _cc_resume_context_warning() {
     # zsh-glob-qualifier form `(N)` glued onto the pattern does the same
     # thing but is NOT `bash -n`-parseable (it trips the required syntax
     # check on this file), so this is the portable-to-parse equivalent.
-    setopt localoptions nullglob
+    setopt nullglob   # local: emulate -L above scopes all options to this function
     local -a _cc_rcw_matches
     _cc_rcw_matches=("${_config_dir}"/projects/*/"${_session_id}".jsonl)
     (( ${#_cc_rcw_matches[@]} == 0 )) && return 0
@@ -1649,7 +1652,7 @@ _cc_resume_context_warning() {
     [[ -r "$_transcript" ]] || return 0
 
     # Read only the tail — the check itself must cost nothing noticeable.
-    # Walk in reverse, take the LAST assistant usage record's total
+    # Walk in reverse, take the LAST real (non-synthetic, non-zero) assistant usage record's total
     # context (input + cache_read + cache_creation); never sum — usage
     # repeats per content block for the same message.id (see kb-token-report).
     local _context_tokens
@@ -1669,6 +1672,12 @@ for line in reversed(sys.stdin.readlines()):
     msg = rec.get("message")
     if not isinstance(msg, dict):
         continue
+    # XACA-1303-010: Claude Code writes model "<synthetic>" assistant records
+    # with all-zero usage for interrupts ("No response requested."), 429 /
+    # usage-limit errors and API-unreachable errors. They are not a real
+    # turn, so they must not stand in for the context size -- keep walking.
+    if msg.get("model") == "<synthetic>":
+        continue
     usage = msg.get("usage")
     if not isinstance(usage, dict):
         continue
@@ -1677,6 +1686,8 @@ for line in reversed(sys.stdin.readlines()):
                  + int(usage.get("cache_read_input_tokens", 0) or 0)
                  + int(usage.get("cache_creation_input_tokens", 0) or 0))
     except (TypeError, ValueError):
+        continue
+    if total <= 0:
         continue
     print(total)
     break
