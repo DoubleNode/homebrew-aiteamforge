@@ -2799,6 +2799,59 @@ kb-pr() {
     kb-status "pr_review"
 }
 
+# kb-merge — wrap `gh pr merge` with worktree-lock fallback handling.
+# When the auto-merge loop runs from inside a worktree, `gh pr merge --delete-branch`
+# fails locally because the develop branch is checked out elsewhere. The API merge
+# itself succeeds; only the local branch-delete step errors. This wrapper detects
+# that specific failure mode, falls back to remote-branch cleanup via direct push,
+# and returns success.
+#
+# Usage: kb-merge <PR#> [--squash|--merge|--rebase]  (defaults to --squash)
+#
+# Exit:
+#   0 — PR merged (and branch cleanup completed or was already done)
+#   1 — merge failed for any other reason (gh's stderr is preserved)
+kb-merge() {
+    local pr="${1-}"
+    [[ -z "$pr" ]] && { echo "Usage: kb-merge <PR#> [--squash|--merge|--rebase]" >&2; return 1; }
+    local strategy="${2:---squash}"
+
+    # Capture combined output so we can pattern-match on the worktree-lock error.
+    local out
+    if out=$(gh pr merge "$pr" "$strategy" --delete-branch --admin 2>&1); then
+        echo "$out"
+        return 0
+    fi
+
+    # Look for the worktree-lock signature. The gh CLI surfaces git's stderr here.
+    # Git emits variants: "is already used by worktree at PATH" (lock-file path)
+    # and "is already checked out at PATH" (branch-delete path on newer git).
+    if echo "$out" | grep -qE 'is already (used by|checked out)'; then
+        # API merge already succeeded; we just need to delete the remote branch.
+        local branch remote
+        branch=$(gh pr view "$pr" --json headRefName --jq '.headRefName' 2>/dev/null)
+        # Prefer dev-team remote (this repo's convention), fall back to origin.
+        remote=$(git remote 2>/dev/null | grep -E '^(dev-team|origin)$' | head -1)
+        if [[ -n "$branch" && -n "$remote" ]]; then
+            if git push "$remote" --delete "$branch" 2>&1; then
+                echo "✓ kb-merge: PR #$pr merged via API; remote branch '$branch' deleted manually (worktree-lock fallback)."
+                return 0
+            else
+                echo "⚠️  kb-merge: PR #$pr merged via API but remote branch '$branch' delete failed." >&2
+                echo "    Run manually: git push $remote --delete $branch" >&2
+                return 0  # the merge itself succeeded
+            fi
+        fi
+        echo "⚠️  kb-merge: PR #$pr merged via API but could not auto-detect branch/remote for cleanup." >&2
+        echo "$out" >&2
+        return 0
+    fi
+
+    # Other failure — surface gh's stderr unchanged.
+    echo "$out" >&2
+    return 1
+}
+
 # Block current task with a reason
 # DEPRECATED: Use kb-pause instead
 # Usage: kb-block "reason"
@@ -12434,6 +12487,112 @@ _kb_knowledge_global_root() {
 # Ported from dev-team/kanban-helpers.sh — HOME-based, no dev-team coupling.
 _kb_overlay_config_path() {
     printf '%s\n' "${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+}
+
+# =============================================================================
+# XACA-0658: Versioned release-push flow — version-source config shell accessors
+# =============================================================================
+# These delegate to aiteamforge_paths.py (single source of truth) via an
+# inline python3 call.  They never call `echo "$VAR" | jq` (control-char risk)
+# and never `export -f` (zsh prints function body to stdout — zsh gotcha).
+#
+# Zsh note: jq `!=` filters are avoided; == with swapped branches is used instead.
+# All local variable declarations are outside loops to avoid zsh's `local VAR`
+# stdout-emission gotcha.
+#
+# Usage: _kb_get_team_version_sources <team> [<platform>]
+#   Prints a JSON array of version_source entries to stdout.
+#   If <platform> is given, only entries matching that platform are returned.
+#   Returns 0 on success (even if the array is empty); 1 if config unavailable.
+_kb_get_team_version_sources() {
+    local _team="${1-}" _platform="${2-}"
+    [[ -z "$_team" ]] && return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    local _cfg
+    _cfg=$(_kb_overlay_config_path)
+    [[ -f "$_cfg" ]] || return 1
+    python3 - "$_cfg" "$_team" "$_platform" <<'PYEOF'
+import json, sys
+cfg, team, platform = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+sources = data.get("teams", {}).get(team, {}).get("version_sources", [])
+if not isinstance(sources, list):
+    sources = []
+if platform:
+    sources = [s for s in sources if isinstance(s, dict) and s.get("platform") == platform]
+print(json.dumps([s for s in sources if isinstance(s, dict)]))
+PYEOF
+}
+
+# Usage: _kb_get_team_branch_env_map <team>
+#   Prints the raw branch_env_map JSON object to stdout.
+#   Values are either strings ("DEV") or objects ({"ios":"DEV"}).
+#   Returns 0 on success (even if empty); 1 if config unavailable.
+_kb_get_team_branch_env_map() {
+    local _team="${1-}"
+    [[ -z "$_team" ]] && return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    local _cfg
+    _cfg=$(_kb_overlay_config_path)
+    [[ -f "$_cfg" ]] || return 1
+    python3 - "$_cfg" "$_team" <<'PYEOF'
+import json, sys
+cfg, team = sys.argv[1], sys.argv[2]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+raw = data.get("teams", {}).get(team, {}).get("branch_env_map", {})
+if not isinstance(raw, dict):
+    raw = {}
+print(json.dumps(raw))
+PYEOF
+}
+
+# Usage: _kb_get_team_relnotes_dir <team> <platform>
+#   Prints the ABSOLUTE path to the relnotes directory for <team>/<platform>.
+#   Resolves relnotes_sources[].dir relative to working_dir.
+#   Falls back to working_dir if relnotes_sources is absent for the platform.
+#   Returns 0 on success; 1 if config unavailable or team unknown.
+_kb_get_team_relnotes_dir() {
+    local _team="${1-}" _platform="${2-}"
+    [[ -z "$_team" || -z "$_platform" ]] && return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    local _cfg
+    _cfg=$(_kb_overlay_config_path)
+    [[ -f "$_cfg" ]] || return 1
+    python3 - "$_cfg" "$_team" "$_platform" <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+cfg, team, platform = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+entry = data.get("teams", {}).get(team)
+if not isinstance(entry, dict):
+    sys.exit(1)
+working_dir = entry.get("working_dir", "")
+if not working_dir:
+    sys.exit(1)
+working_dir = str(Path(working_dir).expanduser())
+sources = entry.get("relnotes_sources", [])
+if isinstance(sources, list):
+    for s in sources:
+        if isinstance(s, dict) and s.get("platform") == platform:
+            rel_dir = s.get("dir", ".")
+            abs_dir = str((Path(working_dir) / rel_dir).resolve())
+            print(abs_dir)
+            sys.exit(0)
+# Fall back to working_dir if no matching relnotes_source entry
+print(working_dir)
+PYEOF
 }
 
 # Internal: resolve the local (unsynced) knowledge root (honours KB_KNOWLEDGE_LOCAL_ROOT)
