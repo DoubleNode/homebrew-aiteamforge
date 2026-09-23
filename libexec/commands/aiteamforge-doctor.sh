@@ -77,6 +77,7 @@ Components:
   framework       Framework installation integrity
   version-drift   Cellar vs working-dir version drift (XACA-0578)
   helpers-drift   Installed kanban-helpers.sh function inventory vs shipped template (XACA-1095)
+  vault-drift     vault-fetch.js / vault-keygen.js resolveFleetUrl export drift (XACA-1322)
   config          Configuration files and validity
   board           Kanban board resolution + template/stub-collision detection (XACA-0655)
   connect         Cockpit connect scripts vs installed team instances (XACA-0845)
@@ -1133,6 +1134,107 @@ check_kanban_helpers_inventory() {
   fi
   echo "    Remediation: run 'aiteamforge upgrade --non-interactive' to refresh kanban-helpers.sh from the shipped template."
   echo "    (doctor --fix does not remediate this — the fix is the upgrade path above, not a doctor auto-fix.)"
+}
+
+# Check: vault-fetch.js / vault-keygen.js drift (XACA-1322)
+#
+# vault-fetch.js require()s ./vault-keygen.js (a same-directory sibling in
+# scripts/) and calls kg.resolveFleetUrl() to locate the fleet-monitor relay.
+# An upgrade that refreshes vault-fetch.js but leaves a stale (pre-XACA-0972)
+# vault-keygen.js beside it crashes `cc` at runtime with "kg.resolveFleetUrl
+# is not a function". check_framework's required-file inventory (and
+# validate-install.sh's _val_check_scripts) only confirm BOTH files are
+# PRESENT — that check is blind to a case where the sibling exists but is
+# missing the function vault-fetch.js actually calls. This check verifies
+# they agree with each other, directly in `aiteamforge doctor`.
+check_vault_keygen_drift() {
+  print_section "Checking Vault Fetch/Keygen Compatibility"
+
+  local working_dir scripts_dir fetch_js keygen_js
+  working_dir=$(get_working_dir)
+  scripts_dir="${working_dir}/scripts"
+  fetch_js="${scripts_dir}/vault-fetch.js"
+  keygen_js="${scripts_dir}/vault-keygen.js"
+
+  if [ ! -f "$fetch_js" ]; then
+    print_info "  vault-fetch.js not installed — vault drift check not applicable"
+    return
+  fi
+
+  if [ ! -f "$keygen_js" ]; then
+    check_result fail "vault-keygen.js missing but vault-fetch.js requires it — kb-msg vault ops will crash (kg.resolveFleetUrl is not a function)" \
+      "Run: aiteamforge upgrade --non-interactive"
+    return
+  fi
+
+  # Prefer a real probe: require() the installed vault-keygen.js and check
+  # the export is a live function. A require() failure for an UNRELATED
+  # reason (e.g. libsodium-wrappers not installed) says nothing about
+  # whether THIS file exports resolveFleetUrl — fall back to the static
+  # grep below rather than reporting drift off an unrelated error.
+  local _vk_node
+  if _vk_node="$(_x1097_resolve node)"; then
+    local probe_out probe_rc
+    if probe_out="$("$_vk_node" -e '
+        let kg;
+        try {
+          kg = require(process.argv[1]);
+        } catch (e) {
+          console.error("REQUIRE_FAILED:" + (e && e.message ? e.message : String(e)));
+          process.exit(2);
+        }
+        process.exit(typeof kg.resolveFleetUrl === "function" ? 0 : 1);
+      ' "$keygen_js" 2>&1)"; then
+      probe_rc=0
+    else
+      probe_rc=$?
+    fi
+
+    if [ "$probe_rc" -eq 0 ]; then
+      check_result pass "vault-keygen.js exports resolveFleetUrl() (verified via node require)"
+      return
+    elif [ "$probe_rc" -eq 1 ]; then
+      check_result fail "vault-keygen.js loads but does NOT export resolveFleetUrl() — stale pre-XACA-0972 copy beside a current vault-fetch.js (kg.resolveFleetUrl is not a function)" \
+        "Run: aiteamforge upgrade --non-interactive"
+      return
+    fi
+    # probe_rc == 2 (or anything else): require() itself failed (missing
+    # dep, etc.) — inconclusive about THIS file. Fall through to the static
+    # grep fallback below instead of reporting drift off an unrelated error.
+    if [ "$VERBOSE" = true ] && [ -n "${probe_out:-}" ]; then
+      echo "    node probe inconclusive: $(printf '%s' "$probe_out" | tail -n1)"
+    fi
+    unset probe_out probe_rc
+  fi
+
+  # Static fallback: node unavailable, or its require() probe above could
+  # not run to completion. Text-match resolveFleetUrl inside
+  # module.exports. A clean miss here IS real evidence (this is the exact
+  # shape of the historical bug — a stale file genuinely lacking the
+  # export), so it is reported as FAIL, not a shrug. WARN is reserved for
+  # truly no signal at all (file unreadable, or the exports block itself
+  # can't be located).
+  if [ ! -r "$keygen_js" ]; then
+    check_result warn "vault-keygen.js present but not readable — could not verify resolveFleetUrl export" \
+      "Check file permissions: ${keygen_js}"
+    return
+  fi
+
+  local exports_block
+  exports_block="$(awk '/module\.exports[[:space:]]*=/{flag=1} flag{print} flag && /^\}/{exit}' "$keygen_js" 2>/dev/null)" || true
+
+  if [ -z "$exports_block" ]; then
+    check_result warn "vault-keygen.js present but could not verify resolveFleetUrl export (no node on PATH and module.exports block not found by static scan)" \
+      "Install node for a definitive check, or inspect: ${keygen_js}"
+    return
+  fi
+
+  if printf '%s\n' "$exports_block" | grep -q 'resolveFleetUrl'; then
+    check_result pass "vault-keygen.js exports resolveFleetUrl() (verified via static grep — node unavailable for a live probe)"
+  else
+    check_result fail "vault-keygen.js's module.exports does NOT mention resolveFleetUrl — stale pre-XACA-0972 copy beside a current vault-fetch.js (kg.resolveFleetUrl is not a function)" \
+      "Run: aiteamforge upgrade --non-interactive"
+  fi
 }
 
 # Check: Configuration
@@ -2384,6 +2486,9 @@ case "$CHECK_COMPONENT" in
   helpers-drift)
     check_kanban_helpers_inventory
     ;;
+  vault-drift)
+    check_vault_keygen_drift
+    ;;
   config)
     check_config
     ;;
@@ -2424,6 +2529,7 @@ case "$CHECK_COMPONENT" in
     check_framework
     check_version_drift
     check_kanban_helpers_inventory
+    check_vault_keygen_drift
     check_config
     check_board_resolution
     check_connect_scripts

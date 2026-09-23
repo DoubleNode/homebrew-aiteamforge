@@ -49,10 +49,22 @@ trap cleanup EXIT INT TERM
 # ---------------------------------------------------------------------------
 # Harness: run install_helper_scripts() from a given install-shell.sh image
 # against a fresh sandboxed AITEAMFORGE_DIR. Echoes the resulting scripts dir.
+#
+# XACA-1322-001: install_helper_scripts()'s datafile loop now reads its file
+# list from _aitf_consumer_datafiles() (libexec/lib/msg-client-deps.sh)
+# instead of hand-listing the five names inline — that function is normally
+# reached via install-shell.sh's own top-of-file `source`, which this harness
+# deliberately bypasses (it extracts ONLY install_helper_scripts() via sed so
+# the rest of the installer never runs). So the harness must now source
+# lib/msg-client-deps.sh itself before eval'ing the extracted function, or
+# _aitf_consumer_datafiles is undefined and the loop silently iterates zero
+# entries. Accepts an optional 3rd arg overriding which deps file to source,
+# so T5 below can mutate the SHARED LIST instead of the installer script.
 # ---------------------------------------------------------------------------
 run_installer_from() {
     local installer_file="$1"
     local dest_root="$2"
+    local deps_file="${3:-$TAP_ROOT/libexec/lib/msg-client-deps.sh}"
 
     (
         export AITEAMFORGE_DIR="$dest_root/aiteamforge"
@@ -62,6 +74,8 @@ run_installer_from() {
         info()    { :; }
         success() { :; }
         warning() { :; }
+        # shellcheck disable=SC1090
+        source "$deps_file"
         # Extract ONLY install_helper_scripts() so we never run the rest of the
         # installer (which would touch launchd, brew, and real user dirs).
         eval "$(sed -n '/^install_helper_scripts() {/,/^}/p' "$installer_file")"
@@ -166,18 +180,24 @@ fi
 if ! command -v node >/dev/null 2>&1; then
     echo "  SKIP  T5 (node not on PATH)"
 else
-    NEG_INSTALLER="$SANDBOX/install-shell-neg.sh"
-    # Remove ONLY vault-keygen.js from the data-file loop. msg-client.js must
-    # still install, or node fails to find the ENTRYPOINT and raises a different
-    # error than the transitive-sibling one T3 guards — which would make T5 pass
-    # for the wrong reason (it did, on the first draft of this test).
-    sed 's/^\( *for datafile in .*\)vault-keygen\.js \(.*\)$/\1\2/' \
-        "$TAP_ROOT/libexec/installers/install-shell.sh" > "$NEG_INSTALLER"
+    # XACA-1322-001: the datafile list moved OUT of install-shell.sh's loop
+    # and into _aitf_consumer_datafiles() (lib/msg-client-deps.sh), so the
+    # negative control now mutates a COPY of that shared list, not the
+    # installer script — install-shell.sh itself no longer names any of these
+    # files literally. Remove ONLY the vault-keygen.js entry from the
+    # heredoc. msg-client.js must still install, or node fails to find the
+    # ENTRYPOINT and raises a different error than the transitive-sibling one
+    # T3 guards — which would make T5 pass for the wrong reason (it did, on
+    # the first draft of this test).
+    NEG_DEPS="$SANDBOX/msg-client-deps-neg.sh"
+    sed '/^vault-keygen\.js$/d' \
+        "$TAP_ROOT/libexec/lib/msg-client-deps.sh" > "$NEG_DEPS"
 
-    if grep -qE '^ *for datafile in .*msg-client\.js' "$NEG_INSTALLER" \
-       && ! grep -qE '^ *for datafile in .*vault-keygen' "$NEG_INSTALLER"; then
+    NEG_LIST="$( ( source "$NEG_DEPS" && _aitf_consumer_datafiles ) 2>/dev/null )"
+    if grep -qx 'msg-client.js' <<< "$NEG_LIST" \
+       && ! grep -qx 'vault-keygen.js' <<< "$NEG_LIST"; then
         NEG_DIR="$SANDBOX/neg"; mkdir -p "$NEG_DIR"
-        NEG_SCRIPTS="$(run_installer_from "$NEG_INSTALLER" "$NEG_DIR")"
+        NEG_SCRIPTS="$(run_installer_from "$TAP_ROOT/libexec/installers/install-shell.sh" "$NEG_DIR" "$NEG_DEPS")"
         NEG_OUT="$( cd "$NEG_SCRIPTS" && MSG_CLIENT_NO_AUTO_INSTALL=1 \
                     node msg-client.js pull --server http://127.0.0.1:9 2>&1 )"
         if grep -q "Cannot find module './vault-keygen.js'" <<< "$NEG_OUT"; then

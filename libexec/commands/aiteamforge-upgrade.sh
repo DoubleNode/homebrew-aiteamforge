@@ -3278,30 +3278,49 @@ update_runtime_helpers() {
     updated=$((updated + 1))
   done
 
-  # XACA-1312: vault-fetch.js is vault-fetch.sh's require()'d sibling (same
-  # self-location shape as vault-keygen.js next to msg-client.js — see the
-  # datafile note in install-shell.sh's install_helper_scripts()) and
-  # carries no .sh/.py extension, so the sweep loop above cannot reach it.
-  # Materialize it unconditionally alongside vault-fetch.sh, whose own
-  # _xaca0673_mandatory_materialize_basenames entry guarantees vault-fetch.sh
-  # itself lands on every already-installed box — shipping the wrapper
-  # without this sibling would repeat the exact MODULE_NOT_FOUND class the
-  # msg-client.js/vault-keygen.js comments document. Always overwritten
-  # (never gated on "already exists"), same as the mandatory .sh/.py entries
-  # above: on upgrade this is a brand-new file everywhere.
-  local _vf_src="${scripts_source}/vault-fetch.js"
-  local _vf_dest="${scripts_dest}/vault-fetch.js"
-  if [ -f "$_vf_src" ]; then
-    print_info "Updating scripts/vault-fetch.js..."
-    if [ "$DRY_RUN" = false ]; then
-      cp "$_vf_src" "$_vf_dest"
-      chmod 644 "$_vf_dest"
-      print_success "Updated scripts/vault-fetch.js"
-    else
-      echo "Would update: scripts/vault-fetch.js"
+  # XACA-1322-002: mirror the FULL shared _aitf_consumer_datafiles() list
+  # (msg-client.js, vault-keygen.js, vault-fetch.js, package.json,
+  # package-lock.json — lib/msg-client-deps.sh, sourced near the top of this
+  # file) instead of the single vault-fetch.js special case XACA-1312 added
+  # here. History: none of these five carry a .sh/.py extension, so the
+  # executable sweep loop above can never reach any of them (same reason
+  # XACA-1312 needed its own materialize step for vault-fetch.js alone). The
+  # narrower XACA-1312 scope was itself the bug XACA-1322 was filed over: an
+  # upgrade could land a FRESH vault-fetch.js next to a STALE vault-keygen.js
+  # (vault-fetch.js calling kg.resolveFleetUrl, which the old sibling doesn't
+  # define yet), and msg-client.js/package.json/package-lock.json were never
+  # refreshed on upgrade at all — consumers hit
+  # `vault-fetch.js:521 TypeError: kg.resolveFleetUrl is not a function`.
+  # Reading the shared list (rather than re-hardcoding a longer one here)
+  # means this loop and install-shell.sh's install_helper_scripts() datafile
+  # loop can never drift apart on WHICH datafiles ship — the same
+  # single-source-of-truth discipline XACA-1322-001 already applied to the
+  # list itself. Always overwritten (never gated on "already exists" the way
+  # the executable sweep's absent-target check is) — a present-but-STALE
+  # sibling is exactly this bug, so skipping an existing dest would leave the
+  # crash in place; a missing dest must also be created, same as the prior
+  # vault-fetch.js-only step always did.
+  #
+  # KNOWN GAP (XACA-0912, not fixed here — separate ticket, user decision):
+  # this whole function returns early above if WORKING_DIR/scripts/ is
+  # absent, so on a box that hits that early return this loop (like every
+  # other refresh in this function) never runs either.
+  local _datafile _df_src _df_dest
+  for _datafile in $(_aitf_consumer_datafiles); do
+    _df_src="${scripts_source}/${_datafile}"
+    _df_dest="${scripts_dest}/${_datafile}"
+    if [ -f "$_df_src" ]; then
+      print_info "Updating scripts/${_datafile}..."
+      if [ "$DRY_RUN" = false ]; then
+        cp "$_df_src" "$_df_dest"
+        chmod 644 "$_df_dest"
+        print_success "Updated scripts/${_datafile}"
+      else
+        echo "Would update: scripts/${_datafile}"
+      fi
+      updated=$((updated + 1))
     fi
-    updated=$((updated + 1))
-  fi
+  done
 
   if [ $updated -eq 0 ]; then
     print_success "All runtime helper scripts up to date"

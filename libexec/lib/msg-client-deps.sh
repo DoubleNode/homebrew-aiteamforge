@@ -37,6 +37,49 @@
 # (feedback_set_e_last_line_short_circuit.md) — every branch below returns
 # explicitly via an `if`/`return 0`, never via `&&` short-circuit.
 
+# _aitf_consumer_datafiles: the non-executed require()/import payload that
+# must ship alongside the executable helper scripts in
+# $AITEAMFORGE_DIR/scripts/ on EVERY consumer box — msg-client.js's and
+# vault-fetch.js's require()'d siblings, plus the package manifest/lockfile
+# that anchors provision_msg_client_node_deps()'s `npm ci` above.
+#
+# XACA-1322-001: previously this exact five-name list was hand-duplicated in
+# install-shell.sh's install_helper_scripts() (fresh installs) only.
+# aiteamforge-upgrade.sh's update_runtime_helpers() never re-shipped it (its
+# sweep targets *.sh/*.py, plus a vault-fetch.js-only special case) — so an
+# upgraded box could end up with a NEW vault-fetch.js next to a STALE
+# vault-keygen.js, e.g. vault-fetch.js calling a function
+# (kg.resolveFleetUrl) that the old sibling doesn't define yet, and `cc`
+# crashing with a TypeError at the require() boundary. This function is now
+# the ONE place either caller reads the list from, so they can never drift
+# apart again — same "shared source of truth" discipline this file already
+# applies to provision_msg_client_node_deps() itself (see the file header).
+#
+# Call sites:
+#   - install-shell.sh: install_helper_scripts()'s datafile loop (fresh
+#     install).
+#   - aiteamforge-upgrade.sh: update_runtime_helpers()'s datafile loop
+#     (XACA-1322-002; replaces the vault-fetch.js-only XACA-1312 special
+#     case) — already-provisioned machines, on upgrade.
+#
+# Style/compat: heredoc-to-stdout, mirroring
+# _xaca0673_mandatory_materialize_basenames() in aiteamforge-upgrade.sh —
+# bash 3.2 safe (no associative arrays, no mapfile), safe to source twice
+# (plain function definition, no top-level side effects), and consumable
+# with either `for f in $(_aitf_consumer_datafiles)` (word-splits on
+# whitespace/newlines; every entry here is a bare filename with no spaces or
+# glob metacharacters) or `case $'\n'"$(_aitf_consumer_datafiles)"$'\n' in`
+# for a membership test.
+_aitf_consumer_datafiles() {
+  cat <<'EOF'
+msg-client.js
+vault-keygen.js
+vault-fetch.js
+package.json
+package-lock.json
+EOF
+}
+
 # Compute a cheap, portable content stamp for package-lock.json so repeat
 # upgrades skip a reinstall unless the shipped lockfile actually changed.
 # shasum/sha256sum preferred (content-addressed, both ship on stock macOS);

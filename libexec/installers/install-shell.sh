@@ -213,6 +213,11 @@ install_helper_scripts() {
     # ./vault-keygen.js, so that sibling has to land too, or node dies on
     # MODULE_NOT_FOUND inside a swallowed `2>/dev/null || true` — a silent crash
     # every reporter cycle. Ship the whole require chain, not just entrypoints.
+    # (The require-chain datafiles themselves — msg-client.js, vault-keygen.js,
+    # vault-fetch.js, package.json, package-lock.json — are copied below via
+    # the shared _aitf_consumer_datafiles() list in lib/msg-client-deps.sh;
+    # see that function's header for XACA-1322-001, the install/upgrade-drift
+    # bug this line exists to prevent from recurring.)
     # team-account-display.sh (XACA-1184-002) is the same transitive-sibling
     # shape as the msg-client chain above, one layer up: display-agent-avatar.sh
     # in this very loop SOURCES it to resolve the team's routed ai.credential,
@@ -258,7 +263,11 @@ install_helper_scripts() {
 
     # Non-executed payload — copied, never chmod +x, because nothing execs these
     # directly and a misleading mode bit invites the next reader to assume a
-    # contract that does not exist:
+    # contract that does not exist. This list (the five names below) is now
+    # defined ONCE, in _aitf_consumer_datafiles() (lib/msg-client-deps.sh,
+    # sourced at the top of this file) and consumed by the loop just below —
+    # this comment block explains WHY each one ships, the loop itself no
+    # longer hand-lists them (XACA-1322-001):
     #   msg-client.js   — no shebang; only ever reached via `exec node "$CLIENT_JS"`
     #   vault-keygen.js — no shebang; only ever reached via require() from msg-client.js
     #   package.json    — a manifest, and what lets msg-client.sh's `npm install`
@@ -309,7 +318,13 @@ install_helper_scripts() {
         fi
     done
 
-    for datafile in msg-client.js vault-keygen.js vault-fetch.js package.json package-lock.json; do
+    # XACA-1322-001: the datafile list itself now lives in ONE place —
+    # _aitf_consumer_datafiles() in lib/msg-client-deps.sh (sourced at the top
+    # of this file) — instead of being hand-duplicated here. See that
+    # function's header for why: a second, upgrade-side copy of this exact
+    # list drifting out of sync with this one is the bug class XACA-1322 was
+    # filed over.
+    for datafile in $(_aitf_consumer_datafiles); do
         if [ -f "$scripts_src/$datafile" ]; then
             cp "$scripts_src/$datafile" "$scripts_dest/$datafile"
             chmod 644 "$scripts_dest/$datafile"
@@ -441,7 +456,9 @@ install_shell_environment() {
     install_helper_scripts || return 1
     # XACA-1225-001: install the kb-msg Tier-2 sealed-relay client's Node
     # dependency (libsodium-wrappers) right after install_helper_scripts lays
-    # down msg-client.js/vault-keygen.js/package.json/package-lock.json above.
+    # down the _aitf_consumer_datafiles() list — msg-client.js, vault-keygen.js,
+    # vault-fetch.js, package.json, package-lock.json (lib/msg-client-deps.sh,
+    # XACA-1322-001) — above.
     # Fail-soft by design (see provision_msg_client_node_deps in
     # lib/msg-client-deps.sh) — never aborts the shell install; a missing
     # Node.js only disables cross-machine kb-msg (Tier 2), not the rest of the

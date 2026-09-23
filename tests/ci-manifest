@@ -155,3 +155,4 @@ test-xaca-1283-settings-merge-env-and-scalar.sh plain-shell
 test-xaca-1296-020-prompt-refresh.sh            plain-shell
 test-xaca-1300-token-report-materialize.sh      plain-shell
 test-xaca-1300-014-session-account-map-shipping.sh plain-shell
+test-xaca-1322-consumer-datafile-refresh.sh     plain-shell

@@ -534,6 +534,223 @@ assert_contains "$output" "chmod +x"
 test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
+# _val_check_vault_drift (XACA-1322)
+#
+# vault-fetch.js require()s ./vault-keygen.js and calls kg.resolveFleetUrl().
+# _val_check_scripts above only proves both files EXIST — these tests cover
+# the drift _val_check_scripts is blind to: a vault-keygen.js that exists but
+# does not (any longer) export resolveFleetUrl.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Node is expected on every dev/CI runner this suite targets (see
+# test-xaca-1097-doctor-phantom-deps.sh's identical assumption), but degrade
+# to a SKIP rather than a false failure if a runner genuinely lacks it —
+# the "node absent" behavior is covered separately below via a stripped PATH.
+_VAULT_HAVE_NODE=false
+command -v node &>/dev/null && _VAULT_HAVE_NODE=true
+
+test_start "_val_check_vault_drift: no-op when vault-fetch.js is not installed"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/vault_no_fetch"
+mkdir -p "$install_dir/scripts"
+_val_check_vault_drift "$install_dir" >/dev/null 2>&1
+assert_equal "0" "$_VAL_PASS"
+assert_equal "0" "$_VAL_WARN"
+assert_equal "0" "$_VAL_FAIL"
+test_pass
+
+test_start "_val_check_vault_drift: fails when vault-keygen.js is missing entirely"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/vault_keygen_missing"
+mkdir -p "$install_dir/scripts"
+touch "$install_dir/scripts/vault-fetch.js"
+_val_check_vault_drift "$install_dir" >/dev/null 2>&1
+assert_equal "0" "$_VAL_PASS"
+assert_equal "0" "$_VAL_WARN"
+assert_equal "1" "$_VAL_FAIL"
+test_pass
+
+test_start "_val_check_vault_drift: fail message on missing vault-keygen.js names the upgrade remedy"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/vault_keygen_missing_msg"
+mkdir -p "$install_dir/scripts"
+touch "$install_dir/scripts/vault-fetch.js"
+output=$(_capture _val_check_vault_drift "$install_dir")
+assert_contains "$output" "aiteamforge upgrade"
+test_pass
+
+if [ "$_VAULT_HAVE_NODE" = true ]; then
+    test_start "_val_check_vault_drift: passes via node require when vault-keygen.js exports resolveFleetUrl (XACA-1322)"
+    _reload_validate_lib
+    _val_reset
+    install_dir="$TEST_TMP_DIR/vault_valid_node"
+    mkdir -p "$install_dir/scripts"
+    touch "$install_dir/scripts/vault-fetch.js"
+    cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
+function resolveFleetUrl() { return null; }
+module.exports = { resolveFleetUrl };
+EOF
+    _val_check_vault_drift "$install_dir" >/dev/null 2>&1
+    assert_equal "1" "$_VAL_PASS"
+    assert_equal "0" "$_VAL_WARN"
+    assert_equal "0" "$_VAL_FAIL"
+    test_pass
+
+    test_start "_val_check_vault_drift: fails via node require when vault-keygen.js is stale (no resolveFleetUrl) (XACA-1322)"
+    _reload_validate_lib
+    _val_reset
+    install_dir="$TEST_TMP_DIR/vault_stale_node"
+    mkdir -p "$install_dir/scripts"
+    touch "$install_dir/scripts/vault-fetch.js"
+    cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
+// stale pre-XACA-0972 vault-keygen.js -- no resolveFleetUrl export
+function generateKeypair() { return {}; }
+module.exports = { generateKeypair };
+EOF
+    _val_check_vault_drift "$install_dir" >/dev/null 2>&1
+    assert_equal "0" "$_VAL_PASS"
+    assert_equal "0" "$_VAL_WARN"
+    assert_equal "1" "$_VAL_FAIL"
+    test_pass
+
+    test_start "_val_check_vault_drift: stale-file failure message names the crash symptom and upgrade remedy"
+    _reload_validate_lib
+    _val_reset
+    install_dir="$TEST_TMP_DIR/vault_stale_msg"
+    mkdir -p "$install_dir/scripts"
+    touch "$install_dir/scripts/vault-fetch.js"
+    cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
+function generateKeypair() { return {}; }
+module.exports = { generateKeypair };
+EOF
+    output=$(_capture _val_check_vault_drift "$install_dir")
+    assert_contains "$output" "resolveFleetUrl is not a function"
+    assert_contains "$output" "aiteamforge upgrade"
+    test_pass
+
+    test_start "_val_check_vault_drift: a require() failure on an UNRELATED missing module falls back to grep (PASS on real export) (XACA-1322)"
+    _reload_validate_lib
+    _val_reset
+    install_dir="$TEST_TMP_DIR/vault_require_fails_fallback_pass"
+    mkdir -p "$install_dir/scripts"
+    touch "$install_dir/scripts/vault-fetch.js"
+    cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
+require('totally-does-not-exist-xaca-1322-fixture');
+function resolveFleetUrl() { return null; }
+module.exports = { resolveFleetUrl };
+EOF
+    # Direct call (no pipe) so _VAL_* mutations land in THIS shell rather
+    # than a _capture subshell -- _capture's pipeline forks a subshell,
+    # which would silently discard the counter updates being asserted here.
+    _val_check_vault_drift "$install_dir" >/dev/null 2>&1
+    # Must NOT report drift off the unrelated missing-module error -- a
+    # confident FAIL here would be exactly the false positive this check is
+    # required to avoid.
+    assert_equal "1" "$_VAL_PASS"
+    assert_equal "0" "$_VAL_WARN"
+    assert_equal "0" "$_VAL_FAIL"
+    test_pass
+
+    test_start "_val_check_vault_drift: require()-fails fallback PASS message names the static-grep path (XACA-1322)"
+    _reload_validate_lib
+    _val_reset
+    install_dir="$TEST_TMP_DIR/vault_require_fails_fallback_pass_msg"
+    mkdir -p "$install_dir/scripts"
+    touch "$install_dir/scripts/vault-fetch.js"
+    cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
+require('totally-does-not-exist-xaca-1322-fixture');
+function resolveFleetUrl() { return null; }
+module.exports = { resolveFleetUrl };
+EOF
+    output=$(_capture _val_check_vault_drift "$install_dir")
+    assert_contains "$output" "static grep"
+    test_pass
+
+    test_start "_val_check_vault_drift: warns (never a silent pass) when vault-keygen.js is unreadable"
+    _reload_validate_lib
+    _val_reset
+    install_dir="$TEST_TMP_DIR/vault_unreadable"
+    mkdir -p "$install_dir/scripts"
+    touch "$install_dir/scripts/vault-fetch.js"
+    cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
+function resolveFleetUrl() { return null; }
+module.exports = { resolveFleetUrl };
+EOF
+    chmod 000 "$install_dir/scripts/vault-keygen.js"
+    # Node's own require() on an unreadable file also fails closed (ENOENT/EACCES),
+    # falling through to the static-fallback branch, which is what this test
+    # actually exercises end to end.
+    _val_check_vault_drift "$install_dir" >/dev/null 2>&1
+    chmod 644 "$install_dir/scripts/vault-keygen.js"  # restore so cleanup can remove it
+    assert_equal "0" "$_VAL_PASS"
+    assert_equal "1" "$_VAL_WARN"
+    assert_equal "0" "$_VAL_FAIL"
+    test_pass
+else
+    echo "    SKIP: node not resolvable on this machine/runner -- node-probe-specific vault-drift assertions skipped (static-grep-fallback assertions below still run against a stripped PATH)"
+fi
+
+test_start "_val_check_vault_drift: static grep fallback PASSES when node is absent from PATH and export is present (XACA-1322)"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/vault_no_node_pass"
+mkdir -p "$install_dir/scripts"
+touch "$install_dir/scripts/vault-fetch.js"
+cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
+function resolveFleetUrl() { return null; }
+module.exports = { resolveFleetUrl };
+EOF
+_VAULT_SAVED_PATH="$PATH"
+PATH="/usr/bin:/bin"
+# Direct call (no _capture pipe/subshell) so _VAL_* mutations are visible
+# to the asserts below in THIS shell.
+_val_check_vault_drift "$install_dir" >/dev/null 2>&1
+PATH="$_VAULT_SAVED_PATH"
+assert_equal "1" "$_VAL_PASS"
+assert_equal "0" "$_VAL_WARN"
+assert_equal "0" "$_VAL_FAIL"
+test_pass
+
+test_start "_val_check_vault_drift: static grep fallback PASS message names the fallback path (node absent) (XACA-1322)"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/vault_no_node_pass_msg"
+mkdir -p "$install_dir/scripts"
+touch "$install_dir/scripts/vault-fetch.js"
+cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
+function resolveFleetUrl() { return null; }
+module.exports = { resolveFleetUrl };
+EOF
+_VAULT_SAVED_PATH="$PATH"
+PATH="/usr/bin:/bin"
+output=$(_capture _val_check_vault_drift "$install_dir")
+PATH="$_VAULT_SAVED_PATH"
+assert_contains "$output" "static grep"
+test_pass
+
+test_start "_val_check_vault_drift: static grep fallback FAILS when node is absent from PATH and export is genuinely missing (XACA-1322)"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/vault_no_node_fail"
+mkdir -p "$install_dir/scripts"
+touch "$install_dir/scripts/vault-fetch.js"
+cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
+function generateKeypair() { return {}; }
+module.exports = { generateKeypair };
+EOF
+_VAULT_SAVED_PATH="$PATH"
+PATH="/usr/bin:/bin"
+_val_check_vault_drift "$install_dir" >/dev/null 2>&1
+PATH="$_VAULT_SAVED_PATH"
+assert_equal "0" "$_VAL_PASS"
+assert_equal "0" "$_VAL_WARN"
+assert_equal "1" "$_VAL_FAIL"
+test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
 # _val_check_lcars
 # ═══════════════════════════════════════════════════════════════════════════
 
