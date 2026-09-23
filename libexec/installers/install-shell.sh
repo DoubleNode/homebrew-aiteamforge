@@ -248,7 +248,7 @@ install_helper_scripts() {
                   set-lcars-profile-browser.py create-lcars-profile.py lcars-tmp-dir.sh \
                   kanban-backup.py fleet-reporter.sh \
                   session-account-map-headless.sh session-account-map-record.sh session-account-map.py \
-                  cc-account-routing.sh vault-fetch.sh \
+                  cc-account-routing.sh vault-fetch.sh cc-credential-team-resolver.sh \
                   msg-client.sh msg-inbox-check.sh kb-api-key team-account-display.sh; do
         if [ -f "$scripts_src/$helper" ]; then
             cp "$scripts_src/$helper" "$scripts_dest/$helper"

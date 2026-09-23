@@ -173,11 +173,37 @@ fi
 # contract, not because the failure mode is desirable. See BLOCKING A's
 # note on the two kanban-helpers.sh call sites for the concrete case this
 # swallowed.
+
+# XACA-1313: resolve a bare "freelance" identity to its registered instance
+# slug (freelance-<client>-<project>) before it is recorded as the
+# attribution "team" below — otherwise every freelance record is written
+# against the un-routable literal "freelance", disagreeing with what
+# `cc`/`ccc` actually billed. Lazily sourced: this shim is called from
+# non-interactive contexts (kb-run/kb-work) that may not have sourced
+# claude_code_cc_aliases.sh in this shell.
+_SACM_TEAM="${SESSION_TYPE:-${LCARS_TEAM:-${KB_TEAM:-}}}"
+if ! command -v _cc_credential_team >/dev/null 2>&1; then
+  _sacm_own_dir="$(dirname "$0")"
+  for _sacm_r in "${_sacm_own_dir}/cc-credential-team-resolver.sh" \
+                 ${AITEAMFORGE_DIR:+"${AITEAMFORGE_DIR}/scripts/cc-credential-team-resolver.sh"} \
+                 "${HOME}/dev-team/scripts/cc-credential-team-resolver.sh" \
+                 "${HOME}/aiteamforge/scripts/cc-credential-team-resolver.sh"; do
+    if [[ -n "$_sacm_r" && -f "$_sacm_r" ]]; then
+      source "$_sacm_r"
+      break
+    fi
+  done
+  unset _sacm_r _sacm_own_dir
+fi
+if [[ -n "$_SACM_TEAM" ]] && command -v _cc_credential_team >/dev/null 2>&1; then
+  _SACM_TEAM="$(_cc_credential_team "$_SACM_TEAM")"
+fi
+
 python3 "$(dirname "$0")/session-account-map.py" record \
   --session-id "$SESSION_ID" \
   --account-id "$ACCOUNT_ID" \
   --account-nickname "$ACCOUNT_NICKNAME" \
-  --team "${SESSION_TYPE:-${LCARS_TEAM:-${KB_TEAM:-}}}" \
+  --team "$_SACM_TEAM" \
   --terminal "${TMUX_PANE:-${KB_TERMINAL:-}}" \
   --cwd "$PWD" \
   --pid "$$" \

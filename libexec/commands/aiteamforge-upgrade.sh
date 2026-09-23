@@ -3179,6 +3179,13 @@ PYEOF
 # once listed here. vault-fetch.js (their require()'d sibling, no .sh/.py
 # extension) is NOT reachable by this sweep at all -- see the dedicated
 # materialize step in update_runtime_helpers() below.
+# XACA-1313: cc-credential-team-resolver.sh, sourced by cc-account-routing.sh
+# (sibling-first) to map a bare "freelance" SESSION_TYPE to the registered
+# freelance-<client>-<project> instance whose ai.credential LCARS saves.
+# BRAND-NEW on every already-installed box (measured on M4Mini 0.20.21:
+# absent). Absent file degrades to looking up bare "freelance" -- no
+# error, but every freelance instance route is silently ignored -- so
+# nothing would surface the gap. .sh, reached by the glob sweep once listed.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3208,6 +3215,7 @@ session-account-map-record.sh
 session-account-map.py
 cc-account-routing.sh
 vault-fetch.sh
+cc-credential-team-resolver.sh
 EOF
 }
 

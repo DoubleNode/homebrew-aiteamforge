@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1313** — freelance terminals now route to the per-instance
+  Anthropic credential: `share/scripts/cc-credential-team-resolver.sh` (new)
+  maps a bare `freelance` session to its registered
+  `freelance-<client>-<project>` team, and `share/scripts/cc-account-routing.sh`,
+  `share/scripts/session-account-map-record.sh` and
+  `share/scripts/teams/freelance/scripts/freelance-banner.sh` consult it.
+  Delivered by `libexec/installers/install-shell.sh` (helper loop) and
+  `libexec/commands/aiteamforge-upgrade.sh` (`_xaca0673` materialize list), so
+  already-installed consumers receive it on upgrade. Applied from the patch
+  XACA-1313 held back for this release, released under XACA-1315.
 - **XACA-1312** — tap consumer launchers (`cc`, `ccc`, `_cc_launch` in
   `share/templates/aliases/cc-aliases.sh`) now apply the per-team Anthropic
   credential instead of always billing the machine login, and fail closed

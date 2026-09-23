@@ -106,14 +106,23 @@ unset _saved
 # (kanban-hooks/aiteamforge_registry.ai_credential). This replaced nine
 # byte-identical inline team-paths parsers parked in nine banners.
 #
-# NOTE (XACA-1184-002, behaviour deliberately UNCHANGED): the slug below is the
-# bare "freelance", which is a parameterized-template contract violation that
-# aiteamforge_paths.py's contract scrub deletes from the overlay — real teams
-# are freelance-<instance> (MEASURED: 11 of them on this machine, bare
-# "freelance" absent). So this lookup could never match before and cannot now;
-# it resolves "unknown-team" and renders "(default OAuth)", exactly as the
-# legacy read resolved "" and rendered "(default OAuth)". Left as-is on purpose:
-# making it resolve a real instance is a semantic change, not a field rename.
+# NOTE (XACA-1313, supersedes the XACA-1184-002 note that used to sit here):
+# the slug this banner asks about is the bare "freelance", which is a
+# parameterized-template contract violation that aiteamforge_paths.py's
+# contract scrub deletes from the overlay -- real teams are
+# freelance-<instance> (MEASURED: 11 of them on this machine, bare
+# "freelance" absent). XACA-1184-002 called this "deliberately unchanged"
+# and left it resolving "unknown-team" / "(default OAuth)" on every
+# freelance terminal -- but that was the defect, not a design choice: LCARS
+# Settings routes a credential under the INSTANCE key, so a session that
+# `cc`/`ccc` correctly billed to a routed account still had its OWN banner
+# claim "(default OAuth)". scripts/cc-credential-team-resolver.sh's
+# _cc_credential_team() now recovers the real instance slug (tmux session
+# name, then the .kb-team sentinel, accepted only when it is both
+# freelance-shaped AND actually registered -- never guessed) before this
+# banner asks team-account-display.sh anything; when neither source
+# qualifies, "freelance" passes through unchanged and this banner renders
+# exactly the pre-XACA-1313 "(default OAuth)" it always did.
 _active_account=""
 if [[ -n "${AITEAMFORGE_DIR:-}" && -f "${AITEAMFORGE_DIR}/scripts/team-account-display.sh" ]]; then
     source "${AITEAMFORGE_DIR}/scripts/team-account-display.sh"
@@ -121,6 +130,36 @@ elif [[ -f "${HOME}/dev-team/scripts/team-account-display.sh" ]]; then
     source "${HOME}/dev-team/scripts/team-account-display.sh"
 elif [[ -f "${HOME}/aiteamforge/scripts/team-account-display.sh" ]]; then
     source "${HOME}/aiteamforge/scripts/team-account-display.sh"
+fi
+# XACA-1313: resolve the bare "freelance" placeholder to the registered
+# instance slug (see the NOTE above) before either lookup below.
+#
+# Probe order: self-located sibling paths FIRST, ahead of the
+# AITEAMFORGE_DIR/dev-team/aiteamforge fallback list. This script's own
+# directory sits at a DIFFERENT relative offset from the resolver on each
+# layout -- dev `freelance/scripts/` is 2 levels above the repo root's
+# `scripts/`; a materialized consumer install is 3 levels above its flat
+# `scripts/` (`share/scripts/teams/freelance/scripts/` -> `share/scripts/`,
+# XACA-1313-006) -- so both offsets are tried before falling back to the
+# env-var/HOME-hardcoded candidates, which break from a checkout that is
+# not literally at `~/dev-team` (e.g. a worktree).
+_active_team='freelance'
+_fb_own_dir="${${(%):-%x}:A:h}"
+if [[ -f "${_fb_own_dir}/../../scripts/cc-credential-team-resolver.sh" ]]; then
+    source "${_fb_own_dir}/../../scripts/cc-credential-team-resolver.sh"
+elif [[ -f "${_fb_own_dir}/../../../cc-credential-team-resolver.sh" ]]; then
+    source "${_fb_own_dir}/../../../cc-credential-team-resolver.sh"
+elif [[ -n "${AITEAMFORGE_DIR:-}" && -f "${AITEAMFORGE_DIR}/scripts/cc-credential-team-resolver.sh" ]]; then
+    source "${AITEAMFORGE_DIR}/scripts/cc-credential-team-resolver.sh"
+elif [[ -f "${HOME}/dev-team/scripts/cc-credential-team-resolver.sh" ]]; then
+    source "${HOME}/dev-team/scripts/cc-credential-team-resolver.sh"
+elif [[ -f "${HOME}/aiteamforge/scripts/cc-credential-team-resolver.sh" ]]; then
+    source "${HOME}/aiteamforge/scripts/cc-credential-team-resolver.sh"
+fi
+unset _fb_own_dir
+if command -v _cc_credential_team >/dev/null 2>&1; then
+    _active_team=$(_cc_credential_team 'freelance' 2>/dev/null)
+    [[ -z "$_active_team" ]] && _active_team='freelance'
 fi
 # XACA-1184-019/020: the resolver now returns "<kind>|<label>" and owns the
 # whole decision, including the two states this banner used to get wrong. It
@@ -130,15 +169,16 @@ fi
 # that contradicted cc-whoami reading the same credential. The banner now only
 # styles what the resolver decided; it never invents an affordance of its own.
 if command -v atf_team_account_display >/dev/null 2>&1; then
-    _active_account=$(atf_team_account_display 'freelance' 2>/dev/null)
+    _active_account=$(atf_team_account_display "$_active_team" 2>/dev/null)
 elif command -v atf_team_account_nickname >/dev/null 2>&1; then
     # Installed resolver predates atf_team_account_display (a half-applied
     # upgrade: banners and resolver ship together, but not atomically). Degrade
     # to the old nickname-or-nothing contract rather than rendering a blank.
-    _active_nickname=$(atf_team_account_nickname 'freelance' 2>/dev/null)
+    _active_nickname=$(atf_team_account_nickname "$_active_team" 2>/dev/null)
     [[ -n "$_active_nickname" ]] && _active_account="account|${_active_nickname}"
     unset _active_nickname
 fi
+unset _active_team
 # An unreadable/absent resolver is itself "we do not know", but this banner
 # predates the distinction on such boxes; keep the historical affordance rather
 # than newly alarming an install that never had the resolver at all.

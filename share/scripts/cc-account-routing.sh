@@ -52,6 +52,38 @@ typeset -g _CC_ROUTING_CORE_COMPLETE=0
 # that, and they differ between the dev and (future) consumer layouts.
 typeset -g _CC_ROUTING_CORE_DIR="${${(%):-%x}:A:h}"
 
+# XACA-1313: shared resolver that turns a bare "freelance" team identity
+# into the REGISTERED freelance-<client>-<project> instance a credential
+# actually lives under. Every freelance startup script hardcodes
+# SESSION_TYPE="freelance", but LCARS Settings saves ai.credential under the
+# instance slug — so the raw team value below would otherwise never match
+# anything and every freelance session would silently launch on default
+# OAuth (known since XACA-1184-002; see freelance-banner.sh). The
+# implementation lives in its own file, NOT inlined here, because two of
+# the other three call sites (cc-whoami.sh, session-account-map-record.sh)
+# must not pay for sourcing this whole 1200+ line routing core just to
+# reach one function — one implementation, several sourcing sites, per
+# scripts/cc-credential-team-resolver.sh's own header.
+#
+# Probe order: _CC_ROUTING_CORE_DIR (this file's own directory) FIRST. Both
+# layouts put the resolver right beside this file -- dev `scripts/`,
+# consumer `$AITEAMFORGE_DIR/scripts/` -- so a consumer copy finds its
+# sibling without depending on $AITEAMFORGE_DIR being correctly exported at
+# source time. The AITEAMFORGE_DIR/dev-team/aiteamforge 3-way list is kept
+# only as a fallback for a layout that ever splits the two files apart.
+if ! command -v _cc_credential_team >/dev/null 2>&1; then
+    for _cc_ctr_f in \
+        "${_CC_ROUTING_CORE_DIR}/cc-credential-team-resolver.sh" \
+        ${AITEAMFORGE_DIR:+"${AITEAMFORGE_DIR}/scripts/cc-credential-team-resolver.sh"} \
+        "${HOME}/dev-team/scripts/cc-credential-team-resolver.sh" \
+        "${HOME}/aiteamforge/scripts/cc-credential-team-resolver.sh"; do
+        if [[ -n "$_cc_ctr_f" && -f "$_cc_ctr_f" ]]; then
+            source "$_cc_ctr_f"
+            break
+        fi
+    done
+    unset _cc_ctr_f
+fi
 
 # Resolve the Anthropic account credentials for the current team using a tiered
 # source chain (vault → sealed cache → env-var). Reads team identity from
@@ -200,6 +232,18 @@ if mode & 0o077:
     if [[ -z "$team" ]]; then
         print -u2 "⚠ No team context — using default Anthropic OAuth"
         return 0
+    fi
+
+    # XACA-1313: resolve a bare "freelance" identity to its registered
+    # instance slug (freelance-<client>-<project>) before anything below
+    # uses it as a team-paths.json key. No-op for every other team,
+    # including one that is already an instance slug. The slug-safety gate
+    # immediately below still applies to WHATEVER this prints — defense in
+    # depth, since the resolver's own candidates (tmux session name,
+    # .kb-team sentinel contents) are just as operator-controlled as
+    # SESSION_TYPE/LCARS_TEAM/KB_TEAM.
+    if command -v _cc_credential_team >/dev/null 2>&1; then
+        team="$(_cc_credential_team "$team")"
     fi
 
     # Validate team is a safe slug before it is used as a vault account_slug,
