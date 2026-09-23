@@ -264,6 +264,57 @@ fi
 # not an issue since they ran first, but leave the sandbox clean).
 rm -f "$TRUNC_CORE"
 
+# ─────────────────────────────────────────────────────────────────────────
+# XACA-1312 fix round 4 (bot review, PR #957, subitem XACA-1312-025): the
+# sentinel must be cleared when this file is SOURCED, not only checked at
+# read time. Round 3's completeness gate (_cc_routing_core_complete) is a
+# real function that stays defined once a COMPLETE core has been sourced
+# into a shell. Re-sourcing a TRUNCATED/interrupted copy of the SAME file
+# into that shell later (e.g. `aiteamforge upgrade` re-running mid-copy, or
+# any code path that re-sources the core defensively) only ADDS/overwrites
+# definitions -- it never UNSETS what the prior complete load already set.
+# Before this fix, _CC_ROUTING_CORE_COMPLETE stayed 1 across the truncated
+# re-source, so _cc_routing_core_complete kept reporting "complete" against
+# a shell that now mixed stale (pre-truncation) and missing function
+# bodies -- the same silent-drop shape XACA-1312-022 closed for a
+# NEVER-complete core, reopened here for a PREVIOUSLY-complete one.
+#
+# S1 proves the gate itself flips false. S2 proves the integration
+# behavior: cc refuses (no override) rather than launching on the stale
+# "complete" state.
+FULL_CORE_ATF="$ATF/scripts/cc-account-routing.sh"
+cp "$REAL_CORE" "$FULL_CORE_ATF"
+RESOURCE_TRUNC="$WORK/trunc-core-for-resource.sh"
+head -n "$TRUNCATE_AT" "$REAL_CORE" >"$RESOURCE_TRUNC"
+
+test_start "S1: re-sourcing a TRUNCATED core after a COMPLETE core in the same shell flips _cc_routing_core_complete to false"
+reset_logs
+s1_out="$(sandboxed zsh -fc '
+    source "$1" >/dev/null 2>&1
+    source "$2" >/dev/null 2>&1
+    if command -v _cc_routing_core_complete >/dev/null 2>&1 && _cc_routing_core_complete; then
+        print -r -- "COMPLETE=1"
+    else
+        print -r -- "COMPLETE=0"
+    fi
+' _ "$CC_INSTALLED" "$RESOURCE_TRUNC" 2>&1)"
+if printf '%s' "$s1_out" | grep -q "COMPLETE=0"; then
+    test_pass
+else
+    test_fail "expected COMPLETE=0 after a truncated re-source followed a complete one; out=$s1_out"
+fi
+
+test_start "S2: cc refuses (no override) after a COMPLETE core is followed by a TRUNCATED re-source in the same shell"
+reset_logs
+s2_out="$(sandboxed zsh -fc 'source "$1" >/dev/null 2>&1; source "$2" >/dev/null 2>&1; printf "%s\n" "GATE PROMPT s2" | cc; print -r -- "RC=$?"' _ "$CC_INSTALLED" "$RESOURCE_TRUNC" 2>&1)"
+if [ ! -s "$STUB_MARKER" ] && printf '%s' "$s2_out" | grep -q "RC=1" && printf '%s' "$s2_out" | grep -q "routing core missing"; then
+    test_pass
+else
+    test_fail "claude invoked or wrong rc/message; out=$s2_out marker=$(cat "$STUB_MARKER" 2>/dev/null)"
+fi
+
+rm -f "$FULL_CORE_ATF"
+
 if [ -n "${_PASS_COUNT+x}" ]; then
     echo ""
     echo "XACA-1312-014 missing-core override tests: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed"

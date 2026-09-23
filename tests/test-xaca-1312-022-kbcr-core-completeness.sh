@@ -149,6 +149,126 @@ else
     test_fail "expected the local fallback to define _cc_routing_core_complete and report incomplete; got: $k3_out"
 fi
 
+# ─────────────────────────────────────────────────────────────────────────
+# XACA-1312 fix round 4 (bot review, PR #957, subitem XACA-1312-024): K1-K3
+# above only prove the completeness GATE itself distinguishes a full core
+# from a partial one (this file's header explicitly scopes out driving
+# _kb_cr_publish). That leaves the publish flow's OWN routing branches --
+# refuse-without-override / launch-unrouted-with-override, the same
+# AITEAMFORGE_ALLOW_DEFAULT_OAUTH shape as
+# test-xaca-1312-014-missing-core-override.sh's M/P series -- unverified
+# for kb-cr.sh's call site specifically. It has its own independent gate
+# wiring (kb-cr.sh's publish flow, ~L4362-4394), not a call into
+# cc-aliases.sh's shared launch sites.
+#
+# L1/L2 isolate _kb_cr_publish the same way K1-K3 isolate the completeness
+# gate: source the REAL kb-cr.sh next to a PARTIAL core (same truncation
+# shape as K2), then override every board/network-touching dependency
+# (_kb_cr_preamble, _kb_jq_read, _kb_cr_find_container,
+# _kb_cr_set_confluence_url, _kb_cr_set_publish_stamps) with sandboxed
+# stand-ins, relying on the SAME dynamic-scoping convention the real
+# _kb_cr_preamble uses (assigns _cr_team/_cr_board/etc. without `local`,
+# into the caller's locals) -- so the call never touches a real kanban
+# board or Confluence; only the routing-gate branch under test executes.
+# `claude` is a stub on PATH; no real session or Confluence call is ever
+# made.
+#
+# L1  no override → _kb_cr_publish refuses (rc=1), claude stub NEVER invoked
+# L2  override set → _kb_cr_publish invokes the claude stub, with NO
+#     ANTHROPIC_*/CLAUDE_CODE_OAUTH_TOKEN var reaching it (presence-only
+#     check via ${VAR:+SET}), and prints the unsuppressible MACHINE LOGIN
+#     warning
+LDIR="$WORK/publish-partial"
+mkdir -p "$LDIR/bin" "$LDIR/board/cr-docs" "$LDIR/home"
+cp "$KB_CR_SH" "$LDIR/kb-cr.sh"
+head -n "$TRUNCATE_AT" "$REAL_CORE" >"$LDIR/cc-account-routing.sh"
+ITEM_ID="XACA-TEST-0001"
+echo "# fake CR doc" >"$LDIR/board/cr-docs/${ITEM_ID}-CR.md"
+
+L_STUB_MARKER="$LDIR/marker.log"
+L_STUB_ENV="$LDIR/env.log"
+cat >"$LDIR/bin/claude" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = "--help" ]; then
+    echo "  --session-id <uuid>  Use a specific session ID"
+    exit 0
+fi
+printf '%s\n' "invoked" >>"$L_STUB_MARKER"
+: >"$L_STUB_ENV"
+[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]    && echo "ANTHROPIC_AUTH_TOKEN" >>"$L_STUB_ENV"
+[ -n "${ANTHROPIC_API_KEY:-}" ]       && echo "ANTHROPIC_API_KEY" >>"$L_STUB_ENV"
+[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo "CLAUDE_CODE_OAUTH_TOKEN" >>"$L_STUB_ENV"
+cat >/dev/null
+echo "Confluence URL: https://example.invalid/wiki/spaces/DPD2/pages/1"
+echo "Confluence Version: 1"
+echo "Confluence Title: Test CR"
+exit 0
+STUB
+chmod +x "$LDIR/bin/claude"
+
+sandboxed_pub() {
+    env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN \
+        -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX \
+        -u CLAUDE_BILLED_ACCOUNT_ID -u CLAUDE_BILLED_ACCOUNT_NICKNAME \
+        -u CLAUDE_ACTIVE_ACCOUNT_ID -u CLAUDE_ACTIVE_ACCOUNT_NICKNAME \
+        -u SESSION_TYPE -u SESSION_NAME -u SESSION_DIR -u SESSION_CODE \
+        -u TMUX -u TMUX_PANE -u LCARS_TEAM -u CLAUDE_SESSION_ID \
+        -u AITEAMFORGE_ALLOW_DEFAULT_OAUTH \
+        HOME="$LDIR/home" PATH="$LDIR/bin:$PATH" KB_TEAM=academy KB_TERMINAL=agent \
+        L_STUB_MARKER="$L_STUB_MARKER" L_STUB_ENV="$L_STUB_ENV" \
+        "$@"
+}
+reset_l_logs() { : >"$L_STUB_MARKER"; : >"$L_STUB_ENV"; }
+
+test_start "L1: kb-cr publish with a PARTIAL core and NO override refuses (rc=1), claude stub never invoked"
+reset_l_logs
+l1_out="$(sandboxed_pub zsh -fc '
+    LDIR_L="$1"; ITEM_L="$2"
+    source "$LDIR_L/kb-cr.sh" >/dev/null 2>&1
+    _kb_cr_preamble() {
+        _cr_team="academy"; _cr_board="$LDIR_L/board/board.json"
+        _cr_enabled="true"; _cr_item_id="$ITEM_L"; _cr_idx=0
+        return 0
+    }
+    _kb_jq_read() { echo "CR-TEST-0001"; }
+    _kb_cr_find_container() { echo "0"; }
+    _kb_cr_set_confluence_url() { return 0; }
+    _kb_cr_set_publish_stamps() { return 0; }
+    _kb_cr_publish "$ITEM_L"
+    print -r -- "RC=$?"
+' _ "$LDIR" "$ITEM_ID" 2>&1)"
+if [ ! -s "$L_STUB_MARKER" ] && printf '%s' "$l1_out" | grep -q "RC=1" \
+   && printf '%s' "$l1_out" | grep -q "routing core did not load/incomplete"; then
+    test_pass
+else
+    test_fail "claude invoked or wrong rc/message; out=$l1_out marker=$(cat "$L_STUB_MARKER" 2>/dev/null)"
+fi
+
+test_start "L2: kb-cr publish with a PARTIAL core and AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 invokes the claude stub with no team credential, prints the warning"
+reset_l_logs
+l2_out="$(sandboxed_pub env AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1 zsh -fc '
+    LDIR_L="$1"; ITEM_L="$2"
+    source "$LDIR_L/kb-cr.sh" >/dev/null 2>&1
+    _kb_cr_preamble() {
+        _cr_team="academy"; _cr_board="$LDIR_L/board/board.json"
+        _cr_enabled="true"; _cr_item_id="$ITEM_L"; _cr_idx=0
+        return 0
+    }
+    _kb_jq_read() { echo "CR-TEST-0001"; }
+    _kb_cr_find_container() { echo "0"; }
+    _kb_cr_set_confluence_url() { return 0; }
+    _kb_cr_set_publish_stamps() { return 0; }
+    _kb_cr_publish "$ITEM_L"
+    print -r -- "RC=$?"
+' _ "$LDIR" "$ITEM_ID" 2>&1)"
+if [ -s "$L_STUB_MARKER" ] && printf '%s' "$l2_out" | grep -q "AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1" \
+   && printf '%s' "$l2_out" | grep -q "MACHINE LOGIN" \
+   && [ ! -s "$L_STUB_ENV" ]; then
+    test_pass
+else
+    test_fail "out=$l2_out marker=$(cat "$L_STUB_MARKER" 2>/dev/null) env-leak=$(cat "$L_STUB_ENV" 2>/dev/null)"
+fi
+
 if [ -n "${_PASS_COUNT+x}" ]; then
     echo ""
     echo "XACA-1312-022 kb-cr.sh core-completeness tests: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed"

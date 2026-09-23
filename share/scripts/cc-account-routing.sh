@@ -27,6 +27,18 @@ if [ -z "${ZSH_VERSION:-}" ]; then
     return 1 2>/dev/null || exit 1
 fi
 
+# XACA-1312-025 (bot review, PR #957, finding 025): clear the completeness
+# sentinel at the TOP of the file, before any function definitions. Without
+# this, re-sourcing a truncated/interrupted copy of this file in a shell
+# that had PREVIOUSLY sourced a complete core leaves the old
+# _CC_ROUTING_CORE_COMPLETE=1 (and the old function bodies) sitting in
+# scope: the truncated source only ever ADDS/overwrites definitions, it
+# never unsets what a prior complete load already set, so
+# _cc_routing_core_complete would wrongly report "complete" against
+# stale/mixed function bodies. Clearing it here means a truncated re-source
+# always fails closed regardless of what was loaded before it.
+typeset -g _CC_ROUTING_CORE_COMPLETE=0
+
 # Self-location, captured ONCE at source time (not re-derived per call --
 # see the XACA-1312 comment ahead of _vault_fetch's assignment below for why
 # a per-call ${(%):-%x} inside a function is NOT equivalent to this). This
