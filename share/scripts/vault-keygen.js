@@ -1740,25 +1740,53 @@ async function registerAndPromote({ machineId, backend, publicKey, privateKey, p
 // message needs to reveal to be actionable.
 
 /**
- * The error --resume-rotation raises when the staged key cannot be read as a
- * 32-byte X25519 private key (XACA-0398-023). Mapped to EXIT_ROTATE_REFUSED
- * by main(), same as ROTATE_ADMIN_REQUIRED / ROTATE_STAGING_EXISTS. Nothing
- * has been resolved or sent when this is thrown.
+ * The error --resume-rotation raises when the staged key EXISTS but cannot be
+ * read as a valid 32-byte X25519 private key (XACA-0398-023). Mapped to
+ * EXIT_ROTATE_REFUSED by main(), same as ROTATE_ADMIN_REQUIRED /
+ * ROTATE_STAGING_EXISTS. Nothing has been resolved or sent when this is
+ * thrown.
+ *
+ * XACA-0398-027: this function is never reached for a MISSING slot —
+ * resumeRotation()'s privateKeyExists() check runs first and throws its own
+ * plain Error ("No staged rotation ... nothing to resume") for that case,
+ * which is not sanitized/coded and so falls through main()'s catch-all to
+ * exit 1, not EXIT_ROTATE_REFUSED (4). The message below used to say
+ * "missing, empty, or..." even though "missing" can never reach it; it now
+ * names only the cases this function actually handles.
+ *
+ * XACA-0398-026: step 3's recovery text used to say to remove the slot
+ * outright. If the server's public key matches neither the stored key nor
+ * anything else on hand, this unreadable slot may still be the ONLY key that
+ * matches what the server now holds — it just fails the 32-byte X25519
+ * validation here. So back it up before removing it, in case it turns out to
+ * be repairable by hand later. Never print key material to do so: for the
+ * file backend that means copying the file (its bytes never pass through the
+ * terminal); for the Keychain backend that means redirecting `security
+ * find-generic-password -w`'s stdout straight to a file, again never echoed.
  */
 function stagingCorruptError(machineId, backend) {
+    const slug = stagingSlug(machineId);
     const where = backend === 'keychain'
-        ? `Keychain ${KEYCHAIN_SERVICE} / ${stagingSlug(machineId)}`
-        : fallbackKeyPath(stagingSlug(machineId));
+        ? `Keychain ${KEYCHAIN_SERVICE} / ${slug}`
+        : fallbackKeyPath(slug);
+    const backupHint = backend === 'keychain'
+        ? `export the Keychain item to a file first — never the terminal — created 0600 from the ` +
+          `start (umask 077; a later chmod leaves it world-readable meanwhile), e.g. ` +
+          `\`( umask 077; mkdir -p ~/.aiteamforge/vault; security find-generic-password -s ` +
+          `${KEYCHAIN_SERVICE} -a ${slug} -w > ~/.aiteamforge/vault/${slug}.bak-$(date +%Y%m%d%H%M%S) )\``
+        : `copy the file aside first, e.g. \`cp -p ${where} ${where}.bak-$(date +%Y%m%d%H%M%S)\``;
     const err = new Error(
-        `Refusing to resume rotation: the staged private key (${where}) is missing, empty, or ` +
-        `cannot be read as a valid 32-byte X25519 key. Nothing was sent. To recover:\n` +
+        `Refusing to resume rotation: the staged private key (${where}) is empty or cannot be ` +
+        `decoded as a valid 32-byte X25519 key. Nothing was sent. To recover:\n` +
         `  1. Check GET /api/vault/machines for the public key the server currently holds for ` +
         `"${machineId}".\n` +
         `  2. If it matches the STORED (primary) key's public key, the staged rotation never ` +
         `applied — remove the staging slot by hand and run --rotate again.\n` +
-        `  3. Otherwise the staged key is lost — re-enroll this machine with an admin token ` +
-        `(vault-keygen --rotate after clearing the staging slot, or --register-only once a new ` +
-        `key exists).\n` +
+        `  3. Otherwise the staged key may still be the only one that matches the server, even ` +
+        `though it fails validation here — back it up before removing it, in case it turns out ` +
+        `to be repairable: ${backupHint}. Only once the backup exists, remove the staging slot ` +
+        `and re-enroll this machine with an admin token (vault-keygen --rotate after clearing ` +
+        `the staging slot, or --register-only once a new key exists).\n` +
         `See docs/fleet-monitor-auth-cutover.md.`
     );
     err.code = 'ROTATE_STAGING_CORRUPT';

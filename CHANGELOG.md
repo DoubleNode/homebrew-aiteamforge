@@ -26,7 +26,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - The unlock dialog's error text meets WCAG AA contrast; the page behind the dialog is marked `inert` while it is open; a 403 CSRF rejection gets its own message.
     - `vault-keygen.js --rotate` refuses (exit 4) when a staging slot is already there, instead of overwriting it. The new `--resume-rotation` re-sends the staged public key and promotes the staged key once the server accepts it.
     - The unlock dialog's buttons and the lock chip are at least 44px in each direction, so they are easier to hit.
-    - `vault-keygen.js --resume-rotation` refuses a missing, empty or corrupt staged key with `ROTATE_STAGING_CORRUPT` (exit 4) before anything is sent. The message gives recovery steps and never prints the key material.
+    - `vault-keygen.js --resume-rotation` refuses an empty or corrupt staged key with `ROTATE_STAGING_CORRUPT` (exit 4) before anything is sent. A missing staging slot instead reports "nothing to resume" and exits 1. The message gives recovery steps, which back up the staged key (a Keychain export is created 0600 under `umask 077`) before removing it, and it never prints the key material.
 - **XACA-1300** — fold in PR #954 review advisories (025-027) and a defect
   (028) in the tap's Anthropic-account/session-map machinery:
   - `share/scripts/session-account-map-headless.sh`'s "known blind spot"
