@@ -52,6 +52,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     also pin --session-id for `cc -p "prompt"` (print mode with no
     caller-managed session flags), not only `$# == 0` — before this fix a
     print-mode gate call wrote no session-account-map row at all (028).
+- **XACA-1300 (PR #962 review-gate round 1, 029/031)** —
+  `share/scripts/cc-account-routing.sh`: `_cc_fb_wants_pinned_sid` (028)
+  inverted from a denylist to an ALLOWLIST. The denylist missed
+  resume-class flags a denylist is always one release behind on
+  (`--from-pr`, `--from-pr=N`, `--teleport`, `--teleport=S`) and attached
+  short-flag value forms (`-rID`) that never matched its exact-token
+  entries at all — either gap slipped a stray `--session-id` onto a
+  caller-managed resume/teleport/PR-linked launch; `cc -p -rID` didn't
+  just mis-record, claude itself rejected the command. Now pins only when
+  `-p`/`--print` is present and every other argument is a non-flag
+  positional or one of `--model`/`--output-format`/`--permission-mode`/
+  `--append-system-prompt`/`--verbose` (verified against `claude --help`);
+  any unknown flag fails closed to no-pin, same as pre-028 behavior (029,
+  [Review][Blocking]). `_cc_probe_has_session_id` (027) now memoizes ONLY
+  a positive `--session-id`-supported result — a negative used to stick
+  for the shell's whole life, so one transient `claude --help` failure
+  permanently disabled session-id pinning and session-account-map
+  recording; it now re-probes on the next call after any negative (031,
+  [Test][Advisory]).
 
 ## [0.20.24] - 2026-09-23
 - **XACA-1313** — freelance terminals now route to the per-instance

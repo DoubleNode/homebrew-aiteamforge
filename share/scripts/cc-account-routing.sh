@@ -1316,12 +1316,25 @@ _cc_route_prepare() {
 # observable behavior, only saves a whole extra fork+exec of a second
 # script on every gate launch.
 #
-# Returns 0 (true, --session-id supported) or 1 (false). Memoizes into the
-# global _CC_HAS_SESSION_ID ("1"/"0") so later calls in the SAME shell are
-# free; a fresh shell (new tab/pane, or claude itself upgraded mid-session)
-# re-probes once on first use.
+# Returns 0 (true, --session-id supported) or 1 (false). Memoizes ONLY a
+# POSITIVE result into the global _CC_HAS_SESSION_ID ("1") so later calls
+# in the SAME shell are free once claude is known to support --session-id.
+#
+# XACA-1300-031 (PR #962 test-gate advisory): round 1 also cached a
+# NEGATIVE result ("0") for the shell's whole lifetime. Before this
+# function existed, every launch site ran its own fresh `claude --help`
+# probe, so one transient failure (claude mid-upgrade, a flaky exec, a
+# momentarily broken PATH) cost that one launch and nothing more — the
+# NEXT launch probed again and could succeed. Caching "0" regressed that:
+# a single bad probe permanently disabled --session-id pinning AND every
+# session-account-map row for the rest of the shell's life, silently, with
+# no way to recover short of opening a new shell. Only a confirmed "1" is
+# ever trustworthy to skip re-probing (claude does not un-ship a flag); a
+# "0"/unset result always re-probes on the next call, same cost as
+# pre-XACA-1300-027 for the failure case, free for the steady-state
+# (supported) case this optimization actually targets.
 _cc_probe_has_session_id() {
-    if [[ -z "${_CC_HAS_SESSION_ID:-}" ]]; then
+    if [[ "${_CC_HAS_SESSION_ID:-}" != "1" ]]; then
         if claude --help 2>/dev/null | grep -q -- "--session-id"; then
             _CC_HAS_SESSION_ID=1
         else
@@ -1338,24 +1351,76 @@ _cc_probe_has_session_id() {
 # `cc -p "prompt"` (print/non-interactive mode) wrote NO
 # session-account-map row while `printf … | cc` (the kb-run-* gate pattern,
 # also zero arguments) did. True when it is safe AND useful to pin one:
-# either no arguments at all (the existing, always-safe case), or the only
-# relevant flag among the arguments is print mode (-p/--print) and the
-# caller has not already taken session identity into their own hands via
-# --session-id/--resume/-r/--continue/-c — any of which could conflict with
-# an added --session-id, or means the caller is deliberately resuming/
-# continuing an EXISTING session rather than starting a fresh one.
+# either no arguments at all (the existing, always-safe case), or every
+# argument is either the print flag (-p/--print) or a flag this function
+# KNOWS is session-identity-neutral.
+#
+# XACA-1300-029 (PR #962 review, BLOCKING): round 1 shipped a DENYLIST
+# (reject --session-id/--resume/-r/--continue/-c, pin otherwise) — wrong
+# CLASS of check. claude has other resume-class flags a denylist will
+# always be one release behind on (--from-pr, --from-pr=N, --teleport,
+# --teleport=S), plus attached short-flag value forms (-rID) that never
+# matched the exact-token entries `-r`/`-c` at all. Any of those slipped a
+# stray --session-id onto a caller-managed resume/teleport/PR-linked
+# launch — `cc -p -rID` didn't just mis-record, it made claude itself
+# reject the command ("--session-id can only be used with --continue or
+# --resume if --fork-session"). Inverted to an ALLOWLIST: pin only when
+# -p/--print is present and EVERY OTHER argument is either a non-flag
+# positional (the prompt) or one of the handful of flags below, verified
+# session-identity-neutral against `claude --help` (checked live 2026-09,
+# not recalled — re-check if claude's CLI changes):
+#   --model <value>              (--model=value or --model value)
+#   --output-format <value>      (print-only output shaping)
+#   --permission-mode <value>    (permission handling, not session identity)
+#   --append-system-prompt <value>
+#   --verbose                    (boolean, no value)
+# ANY other flag — --resume, -r (bare or with an attached value like
+# -rID), --continue, -c, --session-id, --from-pr, --from-pr=N, --teleport,
+# --teleport=S, a combined short-flag bundle like -pc/-pr/-cp, or anything
+# not on this list at all — fails CLOSED to "no pin", which is exactly the
+# pre-XACA-1300-028 behavior (safe: cc() still launches, just unrecorded,
+# same as before this whole ticket). A combined bundle never separately
+# matches `-p`/`--print` as its own token, so it naturally falls through
+# to "no pin" without needing a special case — documented here rather than
+# silently relying on it: -pc/-pr/-cp/etc. never pin.
+#
+# Value-taking flags in "bare" form (no `=`) unconditionally consume the
+# NEXT token as their value — exactly like the real CLI parser — without
+# re-examining it against this allowlist (a value can legitimately look
+# like anything). A value-taking flag with nothing following it is
+# malformed input; that fails closed too (no pin), never a crash.
 _cc_fb_wants_pinned_sid() {
     (( $# == 0 )) && return 0
-    local _cc_fb_saw_print="" _cc_fb_arg
-    for _cc_fb_arg in "$@"; do
-        case "$_cc_fb_arg" in
-            --session-id|--session-id=*|--resume|--resume=*|-r|--continue|-c)
-                return 1
-                ;;
+    local -a _cc_fb_args
+    _cc_fb_args=("$@")
+    local _cc_fb_saw_print=""
+    local -i _cc_fb_i=1
+    while (( _cc_fb_i <= $#_cc_fb_args )); do
+        local _cc_fb_tok="${_cc_fb_args[_cc_fb_i]}"
+        case "$_cc_fb_tok" in
             -p|--print)
                 _cc_fb_saw_print=1
                 ;;
+            --model|--output-format|--permission-mode|--append-system-prompt)
+                (( _cc_fb_i++ ))
+                (( _cc_fb_i > $#_cc_fb_args )) && return 1
+                ;;
+            --model=*|--output-format=*|--permission-mode=*|--append-system-prompt=*)
+                ;;
+            --verbose)
+                ;;
+            -*)
+                # Every resume/session-identity flag this function must
+                # reject, every attached-value short form (-rID), every
+                # combined short-flag bundle (-pc/-pr/-cp), and anything
+                # simply not on the allowlist above — one fail-closed arm.
+                return 1
+                ;;
+            *)
+                # Non-flag positional: the prompt text itself.
+                ;;
         esac
+        (( _cc_fb_i++ ))
     done
     [[ -n "$_cc_fb_saw_print" ]]
 }
