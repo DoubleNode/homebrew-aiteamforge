@@ -1772,7 +1772,8 @@ function stagingCorruptError(machineId, backend) {
     const backupHint = backend === 'keychain'
         ? `export the Keychain item to a file first — never the terminal — created 0600 from the ` +
           `start (umask 077; a later chmod leaves it world-readable meanwhile), e.g. ` +
-          `\`( umask 077; mkdir -p ~/.aiteamforge/vault; security find-generic-password -s ` +
+          `\`( umask 077; mkdir -p ~/.aiteamforge/vault && chmod 700 ~/.aiteamforge/vault; ` +
+          `security find-generic-password -s ` +
           `${KEYCHAIN_SERVICE} -a ${slug} -w > ~/.aiteamforge/vault/${slug}.bak-$(date +%Y%m%d%H%M%S) )\``
         : `copy the file aside first, e.g. \`cp -p ${where} ${where}.bak-$(date +%Y%m%d%H%M%S)\``;
     const err = new Error(
