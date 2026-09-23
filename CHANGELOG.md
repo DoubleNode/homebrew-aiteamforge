@@ -88,6 +88,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   of the gate against full/partial/absent cores, mutation-verified). Also
   corrects `kb-cr.sh`'s routing-block header comment, which still described
   the pre-round-1 unrouted-degrade behavior.
+- **XACA-1312 fold-in round (PR #957, advisory)** — `share/scripts/cc-account-routing.sh`
+  now clears `_CC_ROUTING_CORE_COMPLETE` at the TOP of the file (before any function
+  definitions), so re-sourcing a TRUNCATED/interrupted copy of the file in a shell that
+  had previously sourced a COMPLETE core can no longer inherit the stale "complete"
+  sentinel — the same silent-drop shape round 3 closed for a core that was never
+  complete, reopened here for one that had been. New `tests/test-xaca-1312-014-missing-core-override.sh`
+  S1/S2 (full core, then a truncated re-source in the SAME shell → the completeness gate
+  flips false and `cc` refuses with no override; mutation-verified). Also adds
+  `tests/test-xaca-1312-022-kbcr-core-completeness.sh` L1/L2, driving `_kb_cr_publish`
+  itself (not just the gate function) against a PARTIAL core with every board/network
+  dependency stubbed: refuses without override, launches unrouted with no credential
+  leak and the warning under `AITEAMFORGE_ALLOW_DEFAULT_OAUTH=1` (mutation-verified).
 
 ## [0.20.23] - 2026-09-22
 - **XACA-1297 (part 2)** — `share/scripts/kb-compaction-premise-check.sh`: ratchet checks C and D2 now tell
