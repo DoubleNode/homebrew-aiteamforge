@@ -1717,13 +1717,88 @@ async function registerAndPromote({ machineId, backend, publicKey, privateKey, p
     return { machineId, publicKey, storage, registration, payload, pending: false };
 }
 
+// -----------------------------------------------------------------------------
+// Staged-key validation (XACA-0398-023)
+// -----------------------------------------------------------------------------
+//
+// resumeRotation() used to hand whatever readPrivateKey() returned straight to
+// derivePublicKeyFromPrivate(), which calls sodium.from_base64() then
+// sodium.crypto_scalarmult_base() with no validation of its own. A corrupt,
+// empty, or truncated staging slot (a partial write, a hand-edited file, a
+// disk error) surfaced as a RAW libsodium error — "invalid privateKey length"
+// or "incomplete input" — with no recovery guidance, while `--rotate` stayed
+// refused (ROTATE_STAGING_EXISTS, by design: the slot might still be the only
+// key matching the server) — an operator was stuck with neither command able
+// to proceed and no indication of what to do next.
+//
+// Fail closed HERE instead, before the value is decoded any further or
+// anything is resolved/sent, with a fixed, sanitized message that names the
+// recovery path from docs/fleet-monitor-auth-cutover.md. Never echoes the raw
+// value or even its length — a corrupted key's raw byte length can leak
+// information about how it was truncated, and the file-system mode/size are
+// already visible to an operator who goes looking, so there is nothing this
+// message needs to reveal to be actionable.
+
+/**
+ * The error --resume-rotation raises when the staged key cannot be read as a
+ * 32-byte X25519 private key (XACA-0398-023). Mapped to EXIT_ROTATE_REFUSED
+ * by main(), same as ROTATE_ADMIN_REQUIRED / ROTATE_STAGING_EXISTS. Nothing
+ * has been resolved or sent when this is thrown.
+ */
+function stagingCorruptError(machineId, backend) {
+    const where = backend === 'keychain'
+        ? `Keychain ${KEYCHAIN_SERVICE} / ${stagingSlug(machineId)}`
+        : fallbackKeyPath(stagingSlug(machineId));
+    const err = new Error(
+        `Refusing to resume rotation: the staged private key (${where}) is missing, empty, or ` +
+        `cannot be read as a valid 32-byte X25519 key. Nothing was sent. To recover:\n` +
+        `  1. Check GET /api/vault/machines for the public key the server currently holds for ` +
+        `"${machineId}".\n` +
+        `  2. If it matches the STORED (primary) key's public key, the staged rotation never ` +
+        `applied — remove the staging slot by hand and run --rotate again.\n` +
+        `  3. Otherwise the staged key is lost — re-enroll this machine with an admin token ` +
+        `(vault-keygen --rotate after clearing the staging slot, or --register-only once a new ` +
+        `key exists).\n` +
+        `See docs/fleet-monitor-auth-cutover.md.`
+    );
+    err.code = 'ROTATE_STAGING_CORRUPT';
+    err.sanitized = true;
+    return err;
+}
+
+/**
+ * Validate a staged private key BEFORE deriving anything from it. Throws
+ * stagingCorruptError() — never a raw libsodium error — on anything that is
+ * not exactly a 32-byte X25519 key once base64 (ORIGINAL variant) decoded.
+ * @param {string} privateKeyB64Raw the value read back from storage
+ * @param {string} machineId used only to build the error message
+ * @param {string} backend used only to build the error message
+ * @returns {Promise<void>}
+ */
+async function validateStagedPrivateKey(privateKeyB64Raw, machineId, backend) {
+    if (typeof privateKeyB64Raw !== 'string' || privateKeyB64Raw.length === 0) {
+        throw stagingCorruptError(machineId, backend);
+    }
+    const sodium = await ensureSodium();
+    let decoded;
+    try {
+        decoded = sodium.from_base64(privateKeyB64Raw, sodium.base64_variants.ORIGINAL);
+    } catch (_) {
+        throw stagingCorruptError(machineId, backend);
+    }
+    if (!decoded || decoded.length !== X25519_KEY_BYTES) {
+        throw stagingCorruptError(machineId, backend);
+    }
+}
+
 /**
  * --resume-rotation (XACA-0398-021): finish a rotation whose staging slot was
  * left behind (lost response, non-2xx, or a failed promote). Re-PUTs the
  * STAGED key's public key and promotes it on 2xx — see the staging-slot
  * comment for why that is right whichever key the server holds. Never
  * generates a key. Refuses (ROTATE_ADMIN_REQUIRED, nothing sent) without an
- * admin credential, like --rotate.
+ * admin credential, like --rotate. Refuses (ROTATE_STAGING_CORRUPT, nothing
+ * sent) if the staged key itself is unreadable — XACA-0398-023.
  */
 async function resumeRotation(opts) {
     opts = opts || {};
@@ -1739,6 +1814,10 @@ async function resumeRotation(opts) {
         throw new Error(`No staged rotation for machine "${machineId}" (${backend}); nothing to resume.`);
     }
     const privateKey = readPrivateKey(staging, { backend });
+    // XACA-0398-023: validate BEFORE deriving anything — a corrupt/empty/short
+    // staged key must fail closed with recovery guidance, not a raw libsodium
+    // error, and must do so before any URL/credential resolution or network call.
+    await validateStagedPrivateKey(privateKey, machineId, backend);
     const publicKey = await derivePublicKeyFromPrivate(privateKey);
     const payload = await buildRegistrationPayload({ id: machineId, label, publicKey });
     log(`Resuming rotation for ${machineId} with the staged key (public key ${publicKey}).`);
@@ -1861,8 +1940,11 @@ EXIT CODES:
      existing key is unchanged. Either no admin credential was available, or
      (--rotate only, XACA-0398-021) a previous rotation's staged key still
      exists and might be the only key matching the server - finish it with
-     --resume-rotation. (Rotation never stores the new key until the server
-     has accepted its public key, so it has no pending state.)
+     --resume-rotation, or (--resume-rotation only, XACA-0398-023) the staged
+     key itself is missing/empty/unreadable - see the printed recovery steps
+     and docs/fleet-monitor-auth-cutover.md. (Rotation never stores the new
+     key until the server has accepted its public key, so it has no pending
+     state.)
 
 The private key is stored in the macOS Keychain (service com.aiteamforge.vault,
 account = machine id) when available, otherwise in ~/.aiteamforge/vault/<slug>.key
@@ -1976,7 +2058,8 @@ async function main(argv) {
         return 0;
     } catch (err) {
         process.stderr.write('Error: ' + safeErrorMessage(err) + '\n');
-        if (err && (err.code === 'ROTATE_ADMIN_REQUIRED' || err.code === 'ROTATE_STAGING_EXISTS')) {
+        if (err && (err.code === 'ROTATE_ADMIN_REQUIRED' || err.code === 'ROTATE_STAGING_EXISTS' ||
+                    err.code === 'ROTATE_STAGING_CORRUPT')) {
             return EXIT_ROTATE_REFUSED;
         }
         return 1;
@@ -2027,6 +2110,8 @@ module.exports = {
     fallbackKeyPath,
     stagingSlug,
     removeStagedKey,
+    validateStagedPrivateKey,
+    stagingCorruptError,
     privateKeyExists,
     persistPrivateKey,
     readPrivateKey,
