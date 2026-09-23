@@ -3059,7 +3059,7 @@
     }
 
     function saveNickname(machineId, nickname) {
-        fetch(CONFIG.apiBase + '/api/machine/' + machineId + '/nickname', {
+        window.fleetApiFetch(CONFIG.apiBase + '/api/machine/' + machineId + '/nickname', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ nickname: nickname || null })

@@ -14,6 +14,20 @@
  * kanban/plans/XACA-0395/XACA-0395_auth_contract.md exactly — that document is
  * normative; this file must not deviate from it without a contract update.
  *
+ * TWO TIERS (XACA-0398-003, contract §3.6 + §7 "Tiers"):
+ *   fleet tier -> FLEET_AUTH_TOKEN. Machine-to-machine routes (reporters,
+ *                 kanban-helpers.sh, msg-client.js). Header credentials only.
+ *                 Accepts the fleet key OR the admin key (admin is a superset).
+ *   admin tier -> FLEET_ADMIN_TOKEN. Operator routes (vault writes, machine
+ *                 registration, engines, credentials, dashboards, epics,
+ *                 nickname). Accepts a header equal to the admin-tier expected
+ *                 key, OR the lib/admin-session.js cookie when every CSRF rule
+ *                 holds. While FLEET_ADMIN_TOKEN is unset, the admin-tier
+ *                 expected key falls back to FLEET_AUTH_TOKEN (staging
+ *                 posture; startup logs a WARN).
+ *   Both tiers are OPEN only when NEITHER key is set, so there is no
+ *   configuration where one tier is open and the other closed.
+ *
  * SECRET: `FLEET_AUTH_TOKEN` (env var only — no file. The Fly.io instance gets
  * it from Fly secrets). This is a DIFFERENT secret than LCARS's
  * `AITEAMFORGE_API_KEY` (contract §1) — do not read AITEAMFORGE_API_KEY here,
@@ -53,25 +67,34 @@
  *                                app.post(path, requireApiKey, handler)
  *   checkApiKey(req, res)    -> boolean. Guard form, drop-in replacement for
  *                                the old requireBearer(req, res).
+ *   isAdminAuthorized / requireAdminKey / checkAdminKey -> the same three
+ *                                shapes for the ADMIN tier (XACA-0398).
+ *   getAuthPosture()         -> { fleet, admin } key states (never values).
+ *   getAdminExpectedKey()    -> admin-tier key for lib/auth-routes.js only.
  *   safeEqual(a, b)          -> constant-time credential equality (exported
  *                                for its own unit test, contract §5).
  *   logAuthStartupNotice()   -> logs the one required startup posture line
  *                                (contract §7 — "never silently open"), plus
  *                                a distinct CONFIG ERROR line for the BLANK
- *                                state. Intended to be called ONCE by
- *                                server.js at process startup — mirrors
- *                                lcars-ui/server.py's resolve_api_key_or_die()
- *                                minus the FLEET_REQUIRE_AUTH abort path,
- *                                which is not implemented anywhere in
- *                                fleet-monitor yet (see note below) and is
- *                                deliberately not added here.
+ *                                state. Called ONCE by server.js at process
+ *                                startup — mirrors lcars-ui/server.py's
+ *                                resolve_api_key_or_die() minus the
+ *                                FLEET_REQUIRE_AUTH abort path itself: that
+ *                                path IS implemented (XACA-0395-005), but it
+ *                                lives in server.js, immediately after this
+ *                                function's call site, not inside this
+ *                                function or this module (see below).
  *
- * FLEET_REQUIRE_AUTH (contract §7 "path to fail-closed"): grep confirms this
- * switch does not exist anywhere in fleet-monitor today — no refuse-to-start
- * path exists to preserve or extend. Wiring it (mirroring LCARS's
- * AITEAMFORGE_REQUIRE_AUTH / resolve_api_key_or_die()) is out of this
- * module's scope: it requires a call site at actual process startup, which
- * lives in server.js. Out of scope for this file/subitem.
+ * FLEET_REQUIRE_AUTH (contract §7 "path to fail-closed"): IS implemented —
+ * server.js's "AUTH GATE STARTUP NOTICE" block calls logAuthStartupNotice()
+ * above, then checks FLEET_REQUIRE_AUTH itself: if it is "1" and the
+ * resolved key state of EITHER tier is not 'set' (XACA-0398 user decision:
+ * the switch also requires FLEET_ADMIN_TOKEN), it logs a FATAL message and calls
+ * process.exit(1) before app.listen() runs, refusing to start rather than
+ * serve state-mutating routes unauthenticated. This mirrors LCARS's
+ * AITEAMFORGE_REQUIRE_AUTH / resolve_api_key_or_die(). This module
+ * deliberately does NOT implement that check itself: the call site is
+ * process startup, which lives in server.js, not here.
  *
  * COMPARISON (contract §5): both credential values are SHA-256 hashed first,
  * then compared with crypto.timingSafeEqual on the two (unconditionally
@@ -89,6 +112,7 @@
  */
 
 const crypto = require('crypto');
+const adminSession = require('./admin-session');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -141,21 +165,20 @@ const KEY_STATE_BLANK  = 'blank';  // set, but empty/ASCII-whitespace-only — a
 const KEY_STATE_SET    = 'set';    // set to a real value
 
 /**
- * Resolve FLEET_AUTH_TOKEN into { state, key }. Read fresh on every call —
+ * Resolve one env var into { state, key }. Read fresh on every call —
  * deliberately NOT cached at module load (unlike LCARS's file-backed
  * resolution, contract §2's caching rationale doesn't apply here: there is
  * no file to re-read, just an env var lookup, and per-call reads are what
- * let tests flip FLEET_AUTH_TOKEN between cases against one required()
- * module instance).
+ * let tests flip the env between cases against one required() module
+ * instance).
  *
- * ABSENT and BLANK both yield key: null (open posture, contract §7,
- * unchanged) — the distinction exists purely so callers (isAuthorized via
- * getExpectedToken, and logAuthStartupNotice) can tell "nobody configured a
- * key" apart from "someone tried to and produced nothing," without ever
- * inspecting or logging the actual value.
+ * ABSENT and BLANK both yield key: null — the distinction exists purely so
+ * logAuthStartupNotice() can tell "nobody configured a key" apart from
+ * "someone tried to and produced nothing," without ever inspecting or
+ * logging the actual value.
  */
-function resolveKeyState() {
-    const raw = process.env.FLEET_AUTH_TOKEN;
+function resolveEnvKeyState(envName) {
+    const raw = process.env[envName];
     if (typeof raw !== 'string') {
         return { state: KEY_STATE_ABSENT, key: null };
     }
@@ -166,9 +189,33 @@ function resolveKeyState() {
     return { state: KEY_STATE_SET, key: stripped };
 }
 
-/** Resolve the expected key from FLEET_AUTH_TOKEN, or null (open posture)
- *  for either the ABSENT or BLANK state — see resolveKeyState() above. */
-function getExpectedToken() {
+/** FLEET_AUTH_TOKEN (fleet tier). */
+function resolveKeyState() {
+    return resolveEnvKeyState('FLEET_AUTH_TOKEN');
+}
+
+/** FLEET_ADMIN_TOKEN (admin tier, XACA-0398). */
+function resolveAdminKeyState() {
+    return resolveEnvKeyState('FLEET_ADMIN_TOKEN');
+}
+
+/**
+ * Per-tier key states, for server.js's FLEET_REQUIRE_AUTH block and tests.
+ * States only — never a key value.
+ * @returns {{ fleet: 'absent'|'blank'|'set', admin: 'absent'|'blank'|'set' }}
+ */
+function getAuthPosture() {
+    return { fleet: resolveKeyState().state, admin: resolveAdminKeyState().state };
+}
+
+/**
+ * The admin-tier expected key: FLEET_ADMIN_TOKEN if set, else the
+ * FLEET_AUTH_TOKEN staging fallback, else null (open posture). Exported for
+ * lib/auth-routes.js (login + cookie issue); never logged.
+ */
+function getAdminExpectedKey() {
+    const admin = resolveAdminKeyState().key;
+    if (admin) return admin;
     return resolveKeyState().key;
 }
 
@@ -205,42 +252,85 @@ function hasValidShape(credential) {
     return typeof credential === 'string' && CREDENTIAL_SHAPE_RE.test(credential);
 }
 
-// ---------------------------------------------------------------------------
-// Core predicate — the single implementation
-// ---------------------------------------------------------------------------
-
 /**
- * isAuthorized(req) -> boolean
- *
- * The single implementation. No res, no side effects — safe to call from a
- * guard, from middleware, or from a plain function. Implements contract §3
- * (header parsing + both-headers-present rules) and §7 (open-when-unset).
+ * Apply contract §3.3/§3.4 to the two headers.
+ * @returns {{ status: 'none'|'conflict'|'present', credential: string|null }}
+ *   none     -> neither header yielded a valid-shape credential
+ *   conflict -> both did, and they differ (always a rejection, §3.4)
+ *   present  -> exactly one usable credential
  */
-function isAuthorized(req) {
-    const expected = getExpectedToken();
-    if (!expected) return true; // §7 — open posture when no server token configured
-
+function extractHeaderCredential(req) {
     const bearerRaw = extractBearerCredential(req);
     const apiKeyRaw = extractApiKeyCredential(req);
     const bearer = hasValidShape(bearerRaw) ? bearerRaw : null;
     const apiKey = hasValidShape(apiKeyRaw) ? apiKeyRaw : null;
 
-    let credential;
     if (bearer && apiKey) {
-        // §3.4 — both present. Equal: use it. Differ: 401, do not try either
-        // individually. The agreement check itself MUST be constant-time —
-        // comparing with `===` would reintroduce the oracle on this path.
-        if (!safeEqual(bearer, apiKey)) return false;
-        credential = bearer;
-    } else if (bearer) {
-        credential = bearer;
-    } else if (apiKey) {
-        credential = apiKey;
-    } else {
-        return false; // neither yielded a valid-shape credential
+        // §3.4 — both present. Equal: use it. Differ: reject, do not try
+        // either individually. The agreement check itself MUST be
+        // constant-time — `===` would reintroduce the oracle on this path.
+        if (!safeEqual(bearer, apiKey)) return { status: 'conflict', credential: null };
+        return { status: 'present', credential: bearer };
     }
+    if (bearer) return { status: 'present', credential: bearer };
+    if (apiKey) return { status: 'present', credential: apiKey };
+    return { status: 'none', credential: null };
+}
 
-    return safeEqual(credential, expected);
+// ---------------------------------------------------------------------------
+// Core predicates — one per tier
+// ---------------------------------------------------------------------------
+
+/**
+ * isAuthorized(req) -> boolean — the FLEET tier.
+ *
+ * No res, no side effects — safe to call from a guard, from middleware, or
+ * from a plain function. Implements contract §3.1-§3.4 and §7. Accepts a
+ * header credential equal to the fleet key OR the admin key (admin is a
+ * superset). NEVER accepts the session cookie: no browser page calls a
+ * fleet-tier route, so the cookie stays least-privilege.
+ */
+function isAuthorized(req) {
+    const fleetKey = resolveKeyState().key;
+    const adminKey = resolveAdminKeyState().key;
+    if (!fleetKey && !adminKey) return true; // §7 — open only when neither tier has a key
+
+    const { status, credential } = extractHeaderCredential(req);
+    if (status !== 'present') return false;
+
+    // Evaluate both comparisons unconditionally (no short-circuit), so which
+    // key matched is not visible in timing.
+    const fleetOk = fleetKey ? safeEqual(credential, fleetKey) : false;
+    const adminOk = adminKey ? safeEqual(credential, adminKey) : false;
+    return fleetOk || adminOk;
+}
+
+/**
+ * isAdminAuthorized(req) -> boolean — the ADMIN tier (XACA-0398).
+ *
+ * Expected key: getAdminExpectedKey() (FLEET_ADMIN_TOKEN, else the
+ * FLEET_AUTH_TOKEN staging fallback). Open only when neither key is set.
+ *
+ * Credential sources, in precedence order (contract §3.6):
+ *   1. A valid-shape header credential. If one is presented, the decision is
+ *      made on it alone — a wrong header 401s even alongside a good cookie.
+ *   2. Otherwise the __Host-fleet_admin session cookie, accepted only when
+ *      every request-side CSRF rule holds (X-Fleet-CSRF: 1, Origin host ==
+ *      Host exactly, Sec-Fetch-Site same-origin when present). A CSRF
+ *      failure is "no credential presented", i.e. the byte-identical 401.
+ */
+function isAdminAuthorized(req) {
+    const expected = getAdminExpectedKey();
+    if (!expected) return true; // §7 — open only when neither tier has a key
+
+    const { status, credential } = extractHeaderCredential(req);
+    if (status === 'conflict') return false;
+    if (status === 'present') return safeEqual(credential, expected);
+
+    const cookie = adminSession.readSessionCookie(req);
+    if (!cookie) return false;
+    if (!adminSession.passesCsrfChecks(req)) return false;
+    return adminSession.verifySession(cookie, expected).valid;
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +370,19 @@ function requireApiKey(req, res, next) {
     sendUnauthorized(res);
 }
 
+/** Express middleware form, ADMIN tier: app.post(path, requireAdminKey, handler) */
+function requireAdminKey(req, res, next) {
+    if (isAdminAuthorized(req)) return next();
+    sendUnauthorized(res);
+}
+
+/** Guard form, ADMIN tier. Same shape as checkApiKey. */
+function checkAdminKey(req, res) {
+    if (isAdminAuthorized(req)) return true;
+    sendUnauthorized(res);
+    return false;
+}
+
 /**
  * Guard form — drop-in replacement for msg-relay-routes.js's old
  * requireBearer(req, res). Returns true if authorized; otherwise writes the
@@ -296,12 +399,12 @@ function checkApiKey(req, res) {
 // ---------------------------------------------------------------------------
 
 /**
- * Log the single required startup posture line. Intended to be called ONCE
- * by server.js at process startup (not wired here — that call site is out of
- * this module's scope; see the module doc comment). Never logs the key, its
- * length, or any prefix of it — the three messages below are the entire log
- * surface.
+ * Log the required startup posture: exactly ONE line per tier (XACA-0398),
+ * fleet tier first, then admin tier. Intended to be called ONCE by server.js
+ * at process startup. Never logs a key, its length, or any prefix of it —
+ * the messages below are the entire log surface.
  *
+ * Fleet-tier line (unchanged from XACA-0395 except the admin-only case):
  * - SET    -> "AUTH: gate ACTIVE" (contract §7, exact wording, no extras).
  * - ABSENT -> the exact contract §7 open-posture line — matches LCARS's
  *             equivalent "no API key configured" message.
@@ -312,21 +415,36 @@ function checkApiKey(req, res) {
  *             silently opens the gate fleet-wide. Says only that the
  *             variable was set-but-blank and is being ignored — nothing
  *             about what it contained.
+ * - fleet not set but FLEET_ADMIN_TOKEN set -> a WARN that the gate is
+ *             active with the admin key only (reporters cannot authenticate).
+ *
+ * Admin-tier line (contract §7 "Tiers"):
+ * - FLEET_ADMIN_TOKEN set          -> "AUTH ADMIN: gate ACTIVE" via log().
+ * - unset/blank, fleet key set     -> WARN "AUTH ADMIN: sharing fleet token".
+ * - blank, no fleet key            -> WARN AUTH ADMIN CONFIG ERROR, gate OPEN.
+ * - neither key                    -> WARN "AUTH ADMIN: gate OPEN".
  *
  * @param {{log: Function, warn: Function}} [logger] injectable for tests;
  *   defaults to the real console.
- * @returns {'absent'|'blank'|'set'} the resolved state, for callers/tests
- *   that want to assert on it without re-deriving it.
+ * @returns {'absent'|'blank'|'set'} the FLEET-tier state (unchanged return
+ *   contract). Use getAuthPosture() for both tiers.
  */
 function logAuthStartupNotice(logger = console) {
-    const { state } = resolveKeyState();
+    const fleet = resolveKeyState().state;
+    const admin = resolveAdminKeyState().state;
 
-    if (state === KEY_STATE_SET) {
+    // ---- Fleet tier: exactly one line ----
+    if (fleet === KEY_STATE_SET) {
         logger.log('[fleet-monitor] AUTH: gate ACTIVE');
-        return state;
-    }
-
-    if (state === KEY_STATE_BLANK) {
+    } else if (admin === KEY_STATE_SET) {
+        // The fleet tier is CLOSED (it accepts the admin key), but no fleet
+        // key exists, so reporters holding only a fleet token will 401.
+        logger.warn(
+            '[fleet-monitor] AUTH: gate ACTIVE with the admin token only — ' +
+            'FLEET_AUTH_TOKEN is ' + (fleet === KEY_STATE_BLANK ? 'set but blank (CONFIG ERROR)' : 'unset') +
+            ', so fleet reporters cannot authenticate.'
+        );
+    } else if (fleet === KEY_STATE_BLANK) {
         logger.warn(
             '[fleet-monitor] AUTH CONFIG ERROR: FLEET_AUTH_TOKEN is set but blank ' +
             '(empty or whitespace-only) and is being IGNORED. The gate is OPEN — ' +
@@ -335,17 +453,41 @@ function logAuthStartupNotice(logger = console) {
             'intentional choice. Set FLEET_AUTH_TOKEN to a real credential, or ' +
             'unset it entirely if the open posture is intended.'
         );
-        return state;
+    } else {
+        logger.warn('[fleet-monitor] AUTH: gate OPEN — no API key configured; state-mutating routes are UNAUTHENTICATED');
     }
 
-    logger.warn('[fleet-monitor] AUTH: gate OPEN — no API key configured; state-mutating routes are UNAUTHENTICATED');
-    return state;
+    // ---- Admin tier: exactly one line (XACA-0398) ----
+    if (admin === KEY_STATE_SET) {
+        logger.log('[fleet-monitor] AUTH ADMIN: gate ACTIVE');
+    } else if (fleet === KEY_STATE_SET) {
+        logger.warn(
+            '[fleet-monitor] AUTH ADMIN: sharing fleet token — FLEET_ADMIN_TOKEN is ' +
+            (admin === KEY_STATE_BLANK ? 'set but blank (CONFIG ERROR, ignored)' : 'unset') +
+            ', so admin routes accept FLEET_AUTH_TOKEN. Any machine holding the fleet ' +
+            'token can perform admin actions. Staging posture only; set FLEET_ADMIN_TOKEN.'
+        );
+    } else if (admin === KEY_STATE_BLANK) {
+        logger.warn(
+            '[fleet-monitor] AUTH ADMIN CONFIG ERROR: FLEET_ADMIN_TOKEN is set but blank ' +
+            'and is being IGNORED. The admin gate is OPEN — admin routes are UNAUTHENTICATED.'
+        );
+    } else {
+        logger.warn('[fleet-monitor] AUTH ADMIN: gate OPEN — no admin or fleet key configured; admin routes are UNAUTHENTICATED');
+    }
+
+    return fleet;
 }
 
 module.exports = {
     isAuthorized,
     requireApiKey,
     checkApiKey,
+    isAdminAuthorized,
+    requireAdminKey,
+    checkAdminKey,
+    getAuthPosture,
+    getAdminExpectedKey,
     safeEqual,
     logAuthStartupNotice,
 };

@@ -201,7 +201,7 @@ const CREDENTIALS_UI = {
         }
 
         try {
-            const response = await fetch(`${this.apiBase}/${integrationId}`, {
+            const response = await window.fleetApiFetch(`${this.apiBase}/${integrationId}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(credData)
@@ -242,7 +242,7 @@ const CREDENTIALS_UI = {
         }
 
         try {
-            const response = await fetch(`${this.apiBase}/${integrationId}`, {
+            const response = await window.fleetApiFetch(`${this.apiBase}/${integrationId}`, {
                 method: 'DELETE'
             });
 

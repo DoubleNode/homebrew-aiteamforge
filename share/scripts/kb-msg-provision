@@ -48,6 +48,37 @@ Usage:
                      [--server <url>] [--machine-id <slug>] [--quiet]
     kb-msg-provision --add-team <team-id> [--unattended] [--quiet]
     kb-msg-provision --unattended [--server <url>] [--quiet]
+    <token-source> | kb-msg-provision --fleet-token-stdin [--quiet]
+
+TWO-TIER CREDENTIALS (XACA-0398-004) — what this file does and does not touch
+------------------------------------------------------------------------------
+The keypair/registration flow above (vault-keygen.js) now needs an ADMIN-tier
+credential (FLEET_ADMIN_TOKEN) to register or rotate a machine — this file
+never resolves or holds that credential itself, and NEVER writes it to disk;
+vault-keygen.js resolves it (env var, or a hidden TTY prompt when run
+interactively) and this file only reads its exit code:
+  - exit 0            registered.
+  - exit 3            ENROLLMENT PENDING — the key was generated/stored but
+                       NOT registered (no admin credential was available,
+                       which is the expected outcome under --unattended,
+                       whose closed stdin means vault-keygen.js can never
+                       prompt). This is reported as a WARNING, not a failure:
+                       provisioning continues and the routing map is still
+                       written. An operator completes it later with
+                       `vault-keygen.js --register-only`, run by hand with
+                       FLEET_ADMIN_TOKEN set.
+  - anything else      a real failure; provisioning stops, nothing is written.
+A private key that exists locally but is missing from the server's public
+registry — the "registered on some earlier run that actually failed"
+trap — is detected the same way on every run (a live, read-only GET) and
+reported as "NOT ENROLLED", with the same --register-only remedy.
+
+`--fleet-token-stdin` is the FLEET tier's own provisioning primitive: it
+reads the token from STDIN (never argv, never shell history) and
+merge-writes it into fleet-config.json's centralServer.authToken at mode
+0600, preserving every other key, and never echoes it. Standalone mode: does
+not touch the keypair or the routing map, and does not combine with
+--add-team, --server, --check, or --dry-run.
 
 UNATTENDED CALLERS (XACA-1078) — the contract in one place
 ------------------------------------------------------------
@@ -104,6 +135,7 @@ import glob
 import ipaddress
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -119,6 +151,21 @@ TEAM_PATHS = os.path.expanduser("~/.aiteamforge/team-paths.json")
 # this tool never writes.
 TEAM_MACHINES = os.path.expanduser("~/.aiteamforge/team-machines.json")
 BACKUP_SUFFIX = ".pre-kb-msg-provision.bak"
+
+# ── FLEET-tier credential shape + ENROLLMENT PENDING contract (XACA-0398-004) ──
+#
+# Same shape auth-middleware.js's CREDENTIAL_SHAPE_RE enforces server-side
+# (fleet-monitor/server/lib/auth-middleware.js) -- checked here too so a
+# malformed value (a pasted curl command, an empty pipe, a stray newline) is
+# refused BEFORE it is written to disk, not discovered later as a confusing
+# 401 from every reporter on the machine.
+FLEET_TOKEN_SHAPE_RE = re.compile(r'^[A-Za-z0-9._~+/=-]{16,512}$')
+
+# Mirrors fleet-monitor/client/vault-keygen.js's EXIT_ENROLLMENT_PENDING
+# (XACA-0398-004 design doc §4.2). There is no way to import a JS module's
+# constant into this Python file, so this literal 3 and that one must be kept
+# in sync by hand if either ever changes.
+VAULT_KEYGEN_EXIT_ENROLLMENT_PENDING = 3
 
 
 def _die_env(msg):
@@ -786,6 +833,124 @@ def persist_relay_url(server):
     return True, previous
 
 
+# ── Fleet-token provisioning (XACA-0398-004, --fleet-token-stdin) ──────────
+#
+# The FLEET tier moved from "nobody ever set this" to "this is how you set
+# it" (design §2.3/§4.2). Merge-writes .centralServer.authToken -- same file,
+# same _write_json_atomic single write path, same merge pattern as
+# persist_relay_url() above, just a different field -- and NEVER echoes the
+# value: not in a success message, not in a refusal message (a refusal names
+# only the LENGTH read, never the content).
+def _write_fleet_token(token, say):
+    """Merge-write .centralServer.authToken into FLEET_CONFIG at mode 0600,
+    preserving every other key. `token` has already been shape-validated by
+    the caller -- this function does not re-validate it.
+
+    mkstemp (inside _write_json_atomic) already creates its temp file at 0600
+    -- that IS the mechanism the module docstring for --fleet-token-stdin
+    relies on to fix a looser-mode pre-existing file -- but the credential
+    this writes is materially more sensitive than the apiEndpoint URL
+    persist_relay_url() writes to the same file, so this does not rely on
+    that being the ONLY thing enforcing the mode: it re-asserts 0600
+    explicitly afterward, the same belt-and-braces posture
+    fsWriteFile0600() takes in vault-keygen.js for the private-key fallback
+    file.
+    """
+    data = {}
+    if os.path.isfile(FLEET_CONFIG):
+        try:
+            data = json.load(open(FLEET_CONFIG))
+        except ValueError as exc:
+            _die_env(
+                "%s is not valid JSON (%s).\n"
+                "  Refusing to rewrite it -- fix it by hand, then re-run."
+                % (FLEET_CONFIG, exc)
+            )
+        if not isinstance(data, dict):
+            _die_env("%s is not a JSON object; refusing to rewrite." % FLEET_CONFIG)
+    central = data.get("centralServer")
+    if not isinstance(central, dict):
+        central = {}
+    central["authToken"] = token
+    data["centralServer"] = central
+    _write_json_atomic(FLEET_CONFIG, data, "fleet-config")
+    try:
+        os.chmod(FLEET_CONFIG, 0o600)
+    except OSError as exc:
+        _die_env("wrote %s but could not set mode 0600: %s" % (FLEET_CONFIG, exc))
+    say("  Wrote fleet auth token to %s (mode 0600). Value not shown." % FLEET_CONFIG)
+
+
+def run_fleet_token_stdin(say):
+    """--fleet-token-stdin: read the FLEET_AUTH_TOKEN value from STDIN --
+    never argv (visible via `ps`), never shell history -- and merge-write it
+    into fleet-config.json. Refuses (exit 1, nothing written) a value that
+    does not match the server's own credential shape
+    (auth-middleware.js CREDENTIAL_SHAPE_RE), which catches a pasted curl
+    command, a stray newline, or an empty pipe before it ever reaches disk.
+
+    Used by the cutover runbook (design §5.1 stage 1) to push the fleet
+    token to every online reporter, and by an installer/upgrade path once it
+    has the token in hand -- neither of those callers can safely pass a
+    secret as a CLI argument.
+    """
+    raw = sys.stdin.read()
+    token = raw.strip()
+    if not FLEET_TOKEN_SHAPE_RE.match(token):
+        _notice(
+            "refusing to write: stdin did not contain a valid credential "
+            "(expected 16-512 characters of [A-Za-z0-9._~+/=-]; got %d "
+            "character(s) after stripping surrounding whitespace). The "
+            "value itself is never shown here." % len(token)
+        )
+        return 1
+    _write_fleet_token(token, say)
+    return 0
+
+
+def _registration_lookup(keygen_js, slug):
+    """Is `slug` currently listed in the PUBLIC vault machine registry?
+
+    Delegates the actual HTTP call to vault-keygen.js's own
+    resolveFleetUrl()/fleetFetchInit()/assertNoRedirect() via a throwaway
+    node -e script, rather than reimplementing URL resolution or redirect
+    refusal a second time in Python -- the same "require() the real module"
+    discipline this file's _locate_keygen() comment already states for the
+    machine slug.
+
+    Returns 'registered', 'not-registered', or 'unknown' -- the last for
+    every kind of "cannot tell" (node missing, no URL configured, the
+    request failed, a non-2xx, an unparsable body). 'unknown' must NEVER be
+    reported to an operator as either definite answer; callers are expected
+    to stay silent on 'unknown', mirroring vault-migrate-env-keys.js's
+    roundTripVerify() "skip on doubt" posture. Never raises.
+    """
+    if not shutil.which("node"):
+        return "unknown"
+    script = (
+        "(async () => {"
+        "  const kg = require(%s);"
+        "  try {"
+        "    const base = kg.resolveFleetUrl();"
+        "    if (!base) { console.log('unknown'); return; }"
+        "    const url = base.replace(/\\/+$/, '') + '/api/vault/machines';"
+        "    const res = kg.assertNoRedirect(await fetch(url, kg.fleetFetchInit()), url);"
+        "    if (!res.ok) { console.log('unknown'); return; }"
+        "    const body = await res.json();"
+        "    const machines = (body && body.machines) || [];"
+        "    console.log(machines.some(m => m && m.id === %s) ? 'registered' : 'not-registered');"
+        "  } catch (e) { console.log('unknown'); }"
+        "})();"
+    ) % (json.dumps(keygen_js), json.dumps(slug))
+    try:
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=15)
+    except (subprocess.TimeoutExpired, OSError):
+        return "unknown"
+    text = out.stdout.strip()
+    result = text.splitlines()[-1] if text else "unknown"
+    return result if result in ("registered", "not-registered") else "unknown"
+
+
 # ── Template/instance aliases ────────────────────────────────────────────────
 # MIRROR of _kb_template_to_instance / _kb_instance_to_template in
 # kanban-helpers.sh (~1840, XACA-0576). Keep the three cases in lock-step; that
@@ -1283,12 +1448,31 @@ def main():
                           "from the write set and reported as 'deferred'. Deliberately "
                           "NOT the same promise as kb-init-team's --non-interactive — "
                           "see the module docstring's 'UNATTENDED CALLERS' section.")
+    ap.add_argument("--fleet-token-stdin", action="store_true",
+                     help="Read the FLEET-tier auth token from stdin (never argv, "
+                          "never shell history) and merge-write it into "
+                          "fleet-config.json's centralServer.authToken at mode 0600, "
+                          "preserving every other key. Standalone mode: does not "
+                          "generate a keypair, does not touch the routing map, and "
+                          "never echoes the token. Mutually exclusive with "
+                          "--add-team, --server, --check, and --dry-run.")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
     def say(msg=""):
         if not args.quiet:
             print(msg)
+
+    # ── --fleet-token-stdin: standalone, dispatched before anything else ───
+    # needs neither node nor vault-keygen.js, so it is handled before
+    # _locate_keygen() ever runs.
+    if args.fleet_token_stdin:
+        if args.add_team or args.server or args.check or args.dry_run:
+            _die_env(
+                "--fleet-token-stdin does not combine with --add-team, --server, "
+                "--check, or --dry-run."
+            )
+        return run_fleet_token_stdin(say)
 
     # ── --add-team implications and guards (Decision 1/5, rule 8) ──────────
     if args.add_team and args.server:
@@ -1373,6 +1557,18 @@ def main():
         gaps = []
         if not have_key:
             gaps.append("no vault keypair for '%s' (run: kb-msg-provision)" % slug)
+        else:
+            # XACA-0398-004 §5.3: a key can exist locally while the server has
+            # never heard of it -- 'unknown' (no network / no node / URL
+            # unresolved) is silent here, never reported as a gap, matching
+            # this file's existing skip-on-doubt posture elsewhere.
+            reg_status = _registration_lookup(keygen_js, slug)
+            if reg_status == "not-registered":
+                gaps.append(
+                    "private key present for '%s' but NOT registered with the "
+                    "vault (run: FLEET_ADMIN_TOKEN=<token> node %s --register-only "
+                    "--machine-id %s)" % (slug, keygen_js, slug)
+                )
         if not map_existed:
             gaps.append("no %s" % TEAM_MACHINES)
         missing = [t for t in loc if existing.get(t) != slug]
@@ -1472,13 +1668,60 @@ def main():
             # on top of vault-keygen.js already never reading it today.
             run_kwargs = {"stdin": subprocess.DEVNULL} if args.unattended else {}
             rc = subprocess.run(cmd, **run_kwargs).returncode
-            if rc != 0:
+            # XACA-0398-004: ENROLLMENT PENDING (vault-keygen.js's
+            # EXIT_ENROLLMENT_PENDING) is a WARNING, not a failure -- the key
+            # WAS generated and stored; only registration is outstanding
+            # because no admin credential was available (the common case
+            # here: --unattended closes stdin, so vault-keygen.js's own TTY
+            # check for FLEET_ADMIN_TOKEN naturally finds none, no prompt, no
+            # hang). Continue on to write the routing map rather than
+            # aborting "half-way" -- this is precisely the outcome the
+            # design's Decision 3 sign-off approved for unattended
+            # new-machine enrollment.
+            if rc == VAULT_KEYGEN_EXIT_ENROLLMENT_PENDING:
+                say(
+                    "\n  ENROLLMENT PENDING: a keypair for '%s' was generated and "
+                    "stored, but NOT registered (no FLEET_ADMIN_TOKEN available%s). "
+                    "An operator must complete enrollment by hand:\n"
+                    "    FLEET_ADMIN_TOKEN=<token> node %s --register-only "
+                    "--machine-id %s\n"
+                    "  This machine's other Tier-2 state is otherwise fully "
+                    "provisioned; re-running this tool will NOT regenerate the key."
+                    % (
+                        slug,
+                        "" if not args.unattended else ", and --unattended never prompts",
+                        keygen_js, slug,
+                    )
+                )
+            elif rc != 0:
                 print("kb-msg-provision: vault-keygen failed (exit %d). Routing map not written."
                       % rc, file=sys.stderr)
                 return 1
             have_key = has_private_key(keygen_js, slug)
     elif not have_key:
         say("\n  Skipping keypair generation (--no-keygen). Tier 2 stays unavailable.")
+
+    # ── registration-trap detection (XACA-0398-004 §5.3) ──
+    # Closes the exact trap that motivated this subitem: a private key stored
+    # on an EARLIER run whose registration attempt 401'd (or predates the
+    # admin-tier split entirely) is silently skipped by `if not have_key` on
+    # every run since -- nothing above this line would ever notice. Detected
+    # the same way --register-only itself decides POST vs PUT: the PUBLIC
+    # GET /api/vault/machines, the server's own authoritative answer, not a
+    # local marker file that could drift from it. Best-effort and read-only
+    # -- 'unknown' is silent, matching this file's skip-on-doubt posture
+    # elsewhere, and this never runs under --dry-run (a dry run should not
+    # depend on network reachability to finish).
+    if have_key and not args.no_keygen and not args.dry_run:
+        reg_status = _registration_lookup(keygen_js, slug)
+        if reg_status == "not-registered":
+            say(
+                "\n  NOT ENROLLED: a private key exists locally for '%s' but the "
+                "vault has no matching registration. Complete it with:\n"
+                "    FLEET_ADMIN_TOKEN=<token> node %s --register-only "
+                "--machine-id %s"
+                % (slug, keygen_js, slug)
+            )
 
     # ── routing map ──
     if not added and not retargeted:

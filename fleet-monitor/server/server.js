@@ -46,7 +46,20 @@ const { registerTokenReportsRoutes } = require('./lib/token-reports-routes');
 // handler signature changes (contract §9). logAuthStartupNotice() is called
 // once at process start, just before app.listen(), so the ABSENT/BLANK/SET
 // posture always reaches an operator's logs (never silently open).
-const { requireApiKey, logAuthStartupNotice } = require('./lib/auth-middleware');
+//
+// XACA-0398-003: TWO tiers (contract §3.6 / §7 "Tiers"). requireApiKey is the
+// FLEET tier (reporters, kanban-helpers.sh) — status, team-register,
+// kanban-push, knowledge-push. requireAdminKey is the ADMIN tier (operator
+// actions from the LCARS pages) — nickname, credentials x2, dashboards x4,
+// epics x3. Adding a mutating route? Pick a tier deliberately, and add it to
+// tests/xaca-0398-003-admin-tier.test.js's inventory, which fails otherwise.
+const {
+    requireApiKey,
+    requireAdminKey,
+    logAuthStartupNotice,
+    getAuthPosture,
+} = require('./lib/auth-middleware');
+const { registerAuthRoutes } = require('./lib/auth-routes');
 
 // ============================================================================
 // CONFIGURATION
@@ -1919,7 +1932,7 @@ app.get('/api/fleet', (req, res) => {
  * PUT /api/machine/:machineId/nickname
  * Set or clear a machine's nickname
  */
-app.put('/api/machine/:machineId/nickname', requireApiKey, (req, res) => {
+app.put('/api/machine/:machineId/nickname', requireAdminKey, (req, res) => {
     try {
         const { machineId } = req.params;
         const { nickname } = req.body;
@@ -2647,7 +2660,7 @@ function execCredentialCli(command, integrationId = null, inputData = null) {
  * Body: { type: "jira", endpoint: "...", user: "...", token: "..." }
  * NEVER returns credential values
  */
-app.post('/api/credentials/:integration', requireApiKey, async (req, res) => {
+app.post('/api/credentials/:integration', requireAdminKey, async (req, res) => {
     try {
         const { integration } = req.params;
         const credData = req.body;
@@ -2682,7 +2695,7 @@ app.post('/api/credentials/:integration', requireApiKey, async (req, res) => {
  * DELETE /api/credentials/:integration
  * Delete credential for an integration
  */
-app.delete('/api/credentials/:integration', requireApiKey, async (req, res) => {
+app.delete('/api/credentials/:integration', requireAdminKey, async (req, res) => {
     try {
         const { integration } = req.params;
 
@@ -2851,7 +2864,7 @@ app.get('/api/dashboards', (req, res) => {
  * Reorder dashboards by providing an array of IDs in the desired order
  * NOTE: This route MUST be defined before /api/dashboards/:id to avoid matching "reorder" as an ID
  */
-app.put('/api/dashboards/reorder', requireApiKey, (req, res) => {
+app.put('/api/dashboards/reorder', requireAdminKey, (req, res) => {
     try {
         const { order } = req.body;
 
@@ -2921,7 +2934,7 @@ app.get('/api/dashboards/:id', (req, res) => {
  * POST /api/dashboards
  * Create a new dashboard configuration
  */
-app.post('/api/dashboards', requireApiKey, (req, res) => {
+app.post('/api/dashboards', requireAdminKey, (req, res) => {
     try {
         const { name, title, subtitle, description, divisions, machines, org_color } = req.body;
 
@@ -2984,7 +2997,7 @@ app.post('/api/dashboards', requireApiKey, (req, res) => {
  * PUT /api/dashboards/:id
  * Update an existing dashboard configuration
  */
-app.put('/api/dashboards/:id', requireApiKey, (req, res) => {
+app.put('/api/dashboards/:id', requireAdminKey, (req, res) => {
     try {
         const { id } = req.params;
         const { name, title, subtitle, description, divisions, machines, org_color, sort_order, show_all_fleet_on, visible_dashboards } = req.body;
@@ -3027,7 +3040,7 @@ app.put('/api/dashboards/:id', requireApiKey, (req, res) => {
  * DELETE /api/dashboards/:id
  * Delete a dashboard configuration (system dashboards cannot be deleted)
  */
-app.delete('/api/dashboards/:id', requireApiKey, (req, res) => {
+app.delete('/api/dashboards/:id', requireAdminKey, (req, res) => {
     try {
         const { id } = req.params;
         const config = loadDashboardConfig();
@@ -3205,6 +3218,18 @@ registerTokenReportsRoutes(app, {
     listFleetMachines: () => Array.from(machines.values())
         .map(m => ({ machine_id: m.machine_id, hostname: m.hostname })),
 });
+
+// ============================================================================
+// ADMIN-TIER OPERATOR SESSION (XACA-0398-003)
+// ============================================================================
+// POST /api/auth/login, POST /api/auth/logout, GET /api/auth/session. The
+// LCARS unlock dialog (public/{lcars,lcars2}/js/fleet-api-auth.js) exchanges
+// the admin token for an 8-hour HttpOnly __Host- cookie that authenticates
+// ADMIN-tier routes only, behind four CSRF rules. Contract §3.6. Handlers live
+// in lib/auth-routes.js; the cookie itself in lib/admin-session.js.
+// ============================================================================
+
+registerAuthRoutes(app);
 
 // ============================================================================
 // TEAM CONFIGURATION API (Auto-Discovery)
@@ -3668,7 +3693,7 @@ app.get('/api/epics/:team', (req, res) => {
  * POST /api/epics/:team
  * Create a new Epic for a team
  */
-app.post('/api/epics/:team', requireApiKey, (req, res) => {
+app.post('/api/epics/:team', requireAdminKey, (req, res) => {
     const { team } = req.params;
     const { title, description, priority, category, dueDate } = req.body;
     const boardPath = findBoardPath(team);
@@ -3730,7 +3755,7 @@ app.post('/api/epics/:team', requireApiKey, (req, res) => {
  * PUT /api/epics/:team/:epicId
  * Update an existing Epic
  */
-app.put('/api/epics/:team/:epicId', requireApiKey, (req, res) => {
+app.put('/api/epics/:team/:epicId', requireAdminKey, (req, res) => {
     const { team, epicId } = req.params;
     const updates = req.body;
     const boardPath = findBoardPath(team);
@@ -3773,7 +3798,7 @@ app.put('/api/epics/:team/:epicId', requireApiKey, (req, res) => {
  * DELETE /api/epics/:team/:epicId
  * Delete an Epic
  */
-app.delete('/api/epics/:team/:epicId', requireApiKey, (req, res) => {
+app.delete('/api/epics/:team/:epicId', requireAdminKey, (req, res) => {
     const { team, epicId } = req.params;
     const boardPath = findBoardPath(team);
 
@@ -3954,17 +3979,31 @@ setInterval(getLatestTapVersion, TAP_VERSION_CACHE_TTL_MS);
 // existing deployment. auth-middleware.js is intentionally NOT modified for
 // this — its own doc comment states the startup call site belongs in
 // server.js, not in the shared module.
-const _authStartupState = logAuthStartupNotice();
-if (_authStartupState !== 'set' && String(process.env.FLEET_REQUIRE_AUTH || '') === '1') {
+//
+// XACA-0398-003 (user decision): FLEET_REQUIRE_AUTH=1 now requires BOTH tiers
+// — FLEET_AUTH_TOKEN and FLEET_ADMIN_TOKEN must each resolve to 'set'. The
+// admin tier's fallback to the fleet token is a staging posture and is not
+// acceptable under the switch. The FATAL lines name WHICH variable is missing,
+// never a value.
+logAuthStartupNotice();
+const _authPosture = getAuthPosture();
+if (String(process.env.FLEET_REQUIRE_AUTH || '') === '1' &&
+    (_authPosture.fleet !== 'set' || _authPosture.admin !== 'set')) {
+    const _missing = [];
+    if (_authPosture.fleet !== 'set') _missing.push(`FLEET_AUTH_TOKEN (${_authPosture.fleet})`);
+    if (_authPosture.admin !== 'set') _missing.push(`FLEET_ADMIN_TOKEN (${_authPosture.admin})`);
     console.error('');
     console.error('================================================================================');
-    console.error('FATAL: FLEET_REQUIRE_AUTH=1 but no usable API key resolved');
+    console.error('FATAL: FLEET_REQUIRE_AUTH=1 but not every auth tier resolved a key');
     console.error('================================================================================');
+    console.error(`  Missing: ${_missing.join(', ')}`);
     console.error('  Refusing to start — FLEET_REQUIRE_AUTH=1 means a server that answers');
-    console.error('  requests must never run with state-mutating routes unauthenticated.');
+    console.error('  requests must never run with state-mutating routes unauthenticated, and');
+    console.error('  must not run with the admin tier sharing the fleet token.');
     console.error('');
     console.error('  To resolve:');
-    console.error('    1. Set FLEET_AUTH_TOKEN to a real credential (a Fly.io secret in production)');
+    console.error('    1. Set FLEET_AUTH_TOKEN and FLEET_ADMIN_TOKEN to real, DIFFERENT credentials');
+    console.error('       (Fly.io secrets in production)');
     console.error('    2. Restart this server');
     console.error('================================================================================');
     process.exit(1);

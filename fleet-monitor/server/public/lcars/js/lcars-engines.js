@@ -276,7 +276,7 @@
 
             // Dry-run DELETE (no ?confirm=true) to get usage info
             try {
-                var resp = await fetch(
+                var resp = await window.fleetApiFetch(
                     ENGINES_API + '/' + encodeURIComponent(engineSlug) +
                     '/accounts/' + encodeURIComponent(accountSlug),
                     { method: 'DELETE' }
@@ -374,7 +374,7 @@
             if (authType) addBody.auth_type = authType;
 
             try {
-                var resp = await fetch(
+                var resp = await window.fleetApiFetch(
                     ENGINES_API + '/' + encodeURIComponent(_activeEngineSlug) + '/accounts',
                     {
                         method: 'POST',
@@ -488,7 +488,7 @@
             saveBtn.textContent = 'SAVING...';
 
             try {
-                var resp = await fetch(
+                var resp = await window.fleetApiFetch(
                     ENGINES_API + '/' + encodeURIComponent(_activeEngineSlug) +
                     '/accounts/' + encodeURIComponent(_activeAccountSlug),
                     {
@@ -550,7 +550,7 @@
             serverErrEl.style.display = 'none';
 
             try {
-                var resp = await fetch(
+                var resp = await window.fleetApiFetch(
                     ENGINES_API + '/' + encodeURIComponent(_activeEngineSlug) +
                     '/accounts/' + encodeURIComponent(_activeAccountSlug) + '?confirm=true',
                     { method: 'DELETE' }
@@ -728,7 +728,7 @@
             } else if (mode === 'PUT') {
                 ok = await putSecret(per, ciphertexts, errId);
             } else { // UPSERT: try PUT (re-seal), fall back to POST if it doesn't exist yet.
-                var putResp = await fetch(per, {
+                var putResp = await window.fleetApiFetch(per, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ engine_slug: engineSlug, account_slug: accountSlug, ciphertexts: ciphertexts })
@@ -751,7 +751,7 @@
     }
 
     async function postSecret(base, engineSlug, accountSlug, ciphertexts, errId) {
-        var resp = await fetch(base, {
+        var resp = await window.fleetApiFetch(base, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ engine_slug: engineSlug, account_slug: accountSlug, ciphertexts: ciphertexts })
@@ -764,7 +764,7 @@
     }
 
     async function putSecret(per, ciphertexts, errId) {
-        var resp = await fetch(per, {
+        var resp = await window.fleetApiFetch(per, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ciphertexts: ciphertexts })

@@ -770,7 +770,7 @@ const DASHBOARDS_UI = {
         const order = this.dashboards.map(d => d.id);
 
         try {
-            const response = await fetch(`${this.apiBase}/reorder`, {
+            const response = await window.fleetApiFetch(`${this.apiBase}/reorder`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ order })
@@ -916,14 +916,14 @@ const DASHBOARDS_UI = {
             let response;
             if (this.isNewDashboard) {
                 // Create new
-                response = await fetch(this.apiBase, {
+                response = await window.fleetApiFetch(this.apiBase, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(dashboardData)
                 });
             } else {
                 // Update existing
-                response = await fetch(`${this.apiBase}/${this.selectedDashboard.id}`, {
+                response = await window.fleetApiFetch(`${this.apiBase}/${this.selectedDashboard.id}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(dashboardData)
@@ -982,7 +982,7 @@ const DASHBOARDS_UI = {
         if (!this.selectedDashboard) return;
 
         try {
-            const response = await fetch(`${this.apiBase}/${this.selectedDashboard.id}`, {
+            const response = await window.fleetApiFetch(`${this.apiBase}/${this.selectedDashboard.id}`, {
                 method: 'DELETE'
             });
 

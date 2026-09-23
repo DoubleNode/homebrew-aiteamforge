@@ -730,6 +730,54 @@ create_fleet_reporter_config() {
             ;;
     esac
 
+    # XACA-0398-004: PRESERVE an existing fleet auth token rather than
+    # overwriting it with "". Before this fix, re-running setup — a routine
+    # install-kanban.sh / aiteamforge-upgrade.sh operation, not only a manual
+    # re-run — unconditionally rewrote fleet-config.json with
+    # "authToken": "", silently dropping the machine back to a 401 the
+    # moment the fleet gate closes (the credential design's runbook,
+    # kanban/plans/XACA-0398/XACA-0398_credential_design.md §5.1 stage 2,
+    # explicitly warns not to re-run setup between stages 1 and 2 on older
+    # consumers for exactly this reason). Read whatever token is already on
+    # disk with whichever JSON tool is available — this script already
+    # treats jq as optional elsewhere (the fleet_registration_status update
+    # further below uses the same command -v jq guard). If neither jq nor
+    # python3 is present, this degrades to the pre-fix behavior (an empty
+    # token) rather than failing the install; the credential can still be
+    # supplied afterward via `kb-msg-provision --fleet-token-stdin`.
+    local existing_config="$HOME/.aiteamforge/fleet-config.json"
+    local existing_auth_token=""
+    if [ -f "$existing_config" ]; then
+        if command -v jq &>/dev/null; then
+            existing_auth_token="$(jq -r '.centralServer.authToken // ""' "$existing_config" 2>/dev/null)"
+        elif command -v python3 &>/dev/null; then
+            existing_auth_token="$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    tok = (data.get("centralServer") or {}).get("authToken") or ""
+    sys.stdout.write(tok)
+except Exception:
+    pass
+' "$existing_config" 2>/dev/null)"
+        fi
+    fi
+    # Shape-check before embedding: this value is about to be spliced into
+    # both a `sed` replacement (the template branch, `|`-delimited) and a
+    # bare JSON string (the heredoc fallback), and it came from a file this
+    # script did not necessarily write itself (a hand-edited or pre-XACA-0398
+    # config). Restrict it to the same charset the server's own
+    # CREDENTIAL_SHAPE_RE accepts (fleet-monitor/server/lib/auth-middleware.js)
+    # — which contains no `"`, `\`, `|`, `&`, or newline — rather than
+    # escaping for two different embedding contexts at once. Anything else
+    # is dropped to empty with a warning: the same "safe over silent" call
+    # kb-msg-provision --fleet-token-stdin's own shape check makes.
+    if [ -n "$existing_auth_token" ] && ! printf '%s' "$existing_auth_token" | grep -qE '^[A-Za-z0-9._~+/=-]{16,512}$'; then
+        warning "Existing fleet auth token in $existing_config does not match the expected credential shape — dropping it rather than risk a malformed config. Re-provision with: kb-msg-provision --fleet-token-stdin"
+        existing_auth_token=""
+    fi
+
     if [ -f "$reporter_config_template" ]; then
         sed \
             -e "s|{{FLEET_MODE}}|$FLEET_MODE|g" \
@@ -738,16 +786,17 @@ create_fleet_reporter_config() {
             -e "s|{{LOCAL_ENABLED}}|$local_enabled|g" \
             -e "s|{{LOCAL_PORT}}|$local_port|g" \
             -e "s|{{DASHBOARD_GROUP}}||g" \
-            "$reporter_config_template" > "$HOME/.aiteamforge/fleet-config.json"
+            -e "s|{{AUTH_TOKEN}}|$existing_auth_token|g" \
+            "$reporter_config_template" > "$existing_config"
     else
         # Fallback: generate config directly
-        cat > "$HOME/.aiteamforge/fleet-config.json" <<RCEOF
+        cat > "$existing_config" <<RCEOF
 {
   "mode": "$FLEET_MODE",
   "centralServer": {
     "enabled": $central_enabled,
     "apiEndpoint": "$central_api",
-    "authToken": ""
+    "authToken": "$existing_auth_token"
   },
   "localServer": {
     "enabled": $local_enabled,
@@ -761,7 +810,12 @@ create_fleet_reporter_config() {
 RCEOF
     fi
 
-    success "Fleet reporter config created at $HOME/.aiteamforge/fleet-config.json"
+    # XACA-0398-004: the fleet auth token is a credential (design doc §2.3 —
+    # same trust tier as the vault private-key file fallback). Assert 0600
+    # whether the file pre-existed at a looser mode or was just created.
+    chmod 600 "$existing_config"
+
+    success "Fleet reporter config created at $existing_config"
 }
 
 # Install LaunchAgent for fleet reporter (periodic status reporting)

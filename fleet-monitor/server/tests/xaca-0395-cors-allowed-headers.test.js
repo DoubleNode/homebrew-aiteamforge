@@ -112,6 +112,9 @@ describe('server.js — CORS preflight refuses to approve Authorization (finding
                 ...process.env,
                 PORT: String(port),
                 FLEET_AUTH_TOKEN: 'test-fleet-token-not-a-real-secret',
+                // XACA-0398: hermetic — a FLEET_REQUIRE_AUTH=1 in the developer's shell now also
+                // requires FLEET_ADMIN_TOKEN and would make server.js refuse to start.
+                FLEET_REQUIRE_AUTH: '0',
                 FLEET_MONITOR_ALLOWED_ORIGINS: FOREIGN_ORIGIN,
             },
             stdio: ['ignore', 'ignore', 'ignore'],

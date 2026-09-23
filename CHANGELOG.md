@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-0398** — two credential levels for fleet-monitor: a fleet token (`FLEET_AUTH_TOKEN`) for reporters and machine traffic, and a new admin token (`FLEET_ADMIN_TOKEN`) for vault writes, machine registration, engines, dashboards and epics.
+  - **Server (mirrored under `fleet-monitor/server/`):**
+    - Signing in from LCARS gives an 8-hour HttpOnly session cookie, protected against cross-site request forgery.
+    - `FLEET_REQUIRE_AUTH=1` refuses to start unless both tokens are set.
+    - Failed logins are rate-limited per client, keyed on `Fly-Client-IP` when running on Fly.
+  - **Browser:** a shared `fleet-api-auth.js` wrapper handles every call that changes data.
+  - **Command-line tools:**
+    - `share/scripts/vault-keygen.js` sends the admin token when registering or rotating a machine key, and can retry registration with `--register-only`.
+    - It exits with code 3 when the machine is waiting for enrollment.
+    - `share/scripts/msg-client.js` now uses the same shared token lookup.
+    - `share/scripts/kb-msg-provision` adds `--fleet-token-stdin` to write the token into `fleet-config.json` at mode 0600, and reports machines that are waiting for enrollment.
+  - **Installer:** `libexec/installers/install-fleet-monitor.sh` and `share/templates/fleet-monitor/fleet-reporter-config.template.json` keep an existing `authToken` when setup is re-run, instead of blanking it, and write the config at 0600.
+  - Consumers must be on a release that includes this change BEFORE the operator turns authentication on in production. See `docs/fleet-monitor-auth-cutover.md` in dev-team.
 
 ## [0.20.24] - 2026-09-23
 - **XACA-1313** — freelance terminals now route to the per-instance

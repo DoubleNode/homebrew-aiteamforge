@@ -34,8 +34,6 @@
  * every relay call. Auth gates who may RELAY; sealing gates who may READ.
  */
 
-const fs   = require('fs');
-
 // Reuse slug + private-key storage helpers from vault-keygen.js (same dir).
 const kg = require('./vault-keygen.js');
 
@@ -62,15 +60,22 @@ function fleetConfigPath() {
     return kg.fleetConfigPath();
 }
 
-/** Resolve the relay bearer token: env override, else fleet-config. '' if none. */
+/**
+ * Resolve the relay bearer token (FLEET tier): env override, else
+ * fleet-config. '' if none.
+ *
+ * XACA-0398-004: delegates to kg.resolveFleetAuthToken() instead of a
+ * hand-copied duplicate. This was the exact drift vault-keygen.js's own
+ * resolveFleetUrl() comment already named: this file's old copy picked the
+ * FIRST EXISTING config file and gave up if it lacked authToken, while
+ * resolveFleetUrl() loops every candidate and falls through an empty one
+ * (XACA-0972-016). Deduping onto the shared resolver fixes that same class
+ * of bug for the token, not just the URL — a machine with a stale, empty
+ * ~/.aiteamforge/fleet-config.json masking a good ~/.dev-team/ one no longer
+ * loses its token silently.
+ */
 function resolveAuthToken() {
-    if (process.env.FLEET_AUTH_TOKEN) return process.env.FLEET_AUTH_TOKEN;
-    try {
-        const cfg = JSON.parse(fs.readFileSync(fleetConfigPath(), 'utf8'));
-        return (cfg.centralServer && cfg.centralServer.authToken) || '';
-    } catch (_) {
-        return '';
-    }
+    return kg.resolveFleetAuthToken() || '';
 }
 
 /** Build fetch headers, adding Bearer auth only when a token is configured. */

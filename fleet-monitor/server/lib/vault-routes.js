@@ -18,17 +18,23 @@
  * machine with the matching private key can open it. Routes validate shape and
  * length of ciphertext — they intentionally cannot verify content.
  *
- * Auth (XACA-0395-005): EPIC-0019 transport auth has now landed. The 6
- * mutating routes below (POST/PUT/DELETE machines, POST/PUT/DELETE secrets)
- * are gated with the shared requireApiKey middleware from ./auth-middleware —
- * additive only, no signature or contract change (contract §9; the "shaped so
- * auth middleware can wrap them" claim above was verified accurate). The
- * remaining GET routes, INCLUDING `GET /api/vault/secrets/:engineSlug/
- * :accountSlug/ciphertext` (returns ciphertext, fails the public-route
- * allowlist's R2), stay UNGATED — they are outside this ticket's mutating-verb
- * scope (contract §6) and are a known, accepted gap carried to XACA-0398, not
- * a handled one. Do not read "vault routes are now gated" as "all vault
- * routes are now gated."
+ * Auth: the 6 mutating routes below (POST/PUT/DELETE machines, POST/PUT/DELETE
+ * secrets) are gated at the ADMIN tier with requireAdminKey from
+ * ./auth-middleware (XACA-0395-005 added the gate; XACA-0398-003 moved it from
+ * the fleet tier to the admin tier). Registering or rotating a recipient, and
+ * writing or deleting a seal, therefore needs FLEET_ADMIN_TOKEN (or the LCARS
+ * unlock session), not merely a fleet machine's config.
+ *
+ * The 4 GET routes (mode, machine list, secret list, ciphertext delivery) are
+ * UNGATED by a recorded decision (XACA-0398-005; contract §6 "Recorded
+ * deviation"), not by oversight. See each route's own comment for what it
+ * discloses and what would reverse the decision. Do not read "vault routes are
+ * gated" as "all vault routes are gated."
+ *
+ * PRODUCTION CAVEAT: every gate here is OPEN until FLEET_AUTH_TOKEN or
+ * FLEET_ADMIN_TOKEN is set on the server (contract §7). Until the XACA-0398-006
+ * cutover sets them in production, anyone who can reach the port can register a
+ * recipient, so the premises below do not yet hold there.
  *
  * Wiring: this module requires the same store singletons as server.js
  * (vault-store, vault-crypto, engines-store). Those stores resolve their file
@@ -40,7 +46,7 @@
 const vaultStore = require('./vault-store');
 const { ensureReady: vaultEnsureReady } = require('./vault-crypto');
 const enginesStore = require('./engines-store');
-const { requireApiKey } = require('./auth-middleware');
+const { requireAdminKey } = require('./auth-middleware');
 
 /**
  * Register all /api/vault/* routes on the given Express app (or router).
@@ -61,9 +67,10 @@ function registerVaultRoutes(app) {
      *   - mode = "vault"        → store initialized from vault.json (normal)
      *   - mode = "env_failover" → vault.json absent/unreadable; env-var fallback
      *
-     * Auth: none (consistent with all /api/vault/* routes — auth is deferred to
-     * EPIC-0019). This endpoint is read-only and never returns any credential
-     * material. `source` is a human-readable label only.
+     * Auth: none, by decision (XACA-0398-005). This endpoint is read-only and
+     * never returns any credential material: it discloses only whether the
+     * server is in vault or env-failover mode. `source` is a human-readable
+     * label only.
      *
      * Always returns 200; both states are valid operational states, not errors.
      */
@@ -90,6 +97,19 @@ function registerVaultRoutes(app) {
      * List all registered vault machines.
      * Returns metadata only: id, label, public_key, registered_at, updated_at.
      * Public keys are non-secret; safe to return (design doc §7.1).
+     *
+     * Auth: none, by decision (XACA-0398-005). DISCLOSES to an uncredentialed
+     * caller: the full vault recipient roster (machine slugs and labels, which
+     * name the operator's hosts), each recipient's X25519 public key, and
+     * enrollment and rotation times. No secret material. The public key lets a
+     * caller seal TO a machine, never open anything. The host roster is already
+     * public through GET /api/fleet.
+     *
+     * Consumers: LCARS vault-seal.js and vault-migrate-env-keys.js read this
+     * list to choose seal recipients. Neither sends a credential today, so
+     * gating it would break sealing. Being public is also a detection aid: an
+     * attacker-registered recipient appears here, and every seal is made to
+     * EVERY machine in this list at seal time. Review this list before sealing.
      */
     app.get('/api/vault/machines', (req, res) => {
         try {
@@ -113,7 +133,7 @@ function registerVaultRoutes(app) {
      * Returns 201 + new machine on success; 409 if id already exists.
      * Requires await ensureReady() before base64/crypto validation.
      */
-    app.post('/api/vault/machines', requireApiKey, async (req, res) => {
+    app.post('/api/vault/machines', requireAdminKey, async (req, res) => {
         try {
             await vaultEnsureReady();
 
@@ -149,7 +169,7 @@ function registerVaultRoutes(app) {
      * Body: { label?, public_key? } — merges with existing fields for validation.
      * Returns 404 if machine not found.
      */
-    app.put('/api/vault/machines/:id', requireApiKey, async (req, res) => {
+    app.put('/api/vault/machines/:id', requireAdminKey, async (req, res) => {
         try {
             await vaultEnsureReady();
 
@@ -193,7 +213,7 @@ function registerVaultRoutes(app) {
      * With ?confirm=true: removes the machine. Existing ciphertext copies are NOT
      * cascade-deleted (design doc §4.4).
      */
-    app.delete('/api/vault/machines/:id', requireApiKey, (req, res) => {
+    app.delete('/api/vault/machines/:id', requireAdminKey, (req, res) => {
         try {
             const { id }      = req.params;
             const { confirm } = req.query;
@@ -244,6 +264,16 @@ function registerVaultRoutes(app) {
      * NEVER returns the `sealed` ciphertext bytes on this endpoint.
      * This is the no-plaintext guarantee: the list endpoint makes it structurally
      * impossible to read secret content through the API (design doc §7.2).
+     *
+     * Auth: none, by decision (XACA-0398-005). DISCLOSES to an uncredentialed
+     * caller: which (engine, account) secrets exist, meaning the engine names
+     * and the account slugs (these name teams and billing accounts), the
+     * operator-chosen labels, create and update times (when a key was last
+     * rotated), and which machines can decrypt each one. No ciphertext, no
+     * plaintext. This is an accepted residual (credential design §5.2).
+     * vault-migrate-env-keys.js reads it without a credential (as of
+     * XACA-0398-005), so gating it needs that client changed first. Revisit
+     * together with the ciphertext route below.
      */
     app.get('/api/vault/secrets', (req, res) => {
         try {
@@ -276,18 +306,58 @@ function registerVaultRoutes(app) {
      * locally using its private key (which never leaves the machine).
      * This is the endpoint cc-launch (A.4.3) calls at boot.
      *
-     * RECIPIENT MODEL — why this is NOT a hole (design doc §2, §3.2, §7.2):
-     *   Delivery is intentionally NOT gated by caller identity. The `sealed` blob
-     *   is an anonymous libsodium sealed box — it is cryptographically useless to
-     *   anyone who does not hold the recipient machine's X25519 PRIVATE key, which
-     *   never leaves that machine. "Registered recipient" is enforced by the seal
-     *   targeting, NOT by an auth check here: only the machine whose pubkey the
-     *   ciphertext was sealed to can open it. A server-side attacker who reads this
-     *   response gains only ciphertext they already could read off disk (Residual
-     *   Risk R1 — transport auth is deferred to EPIC-0019). Returning ciphertext
-     *   to an unauthenticated caller leaks nothing the threat model doesn't already
-     *   grant the attacker. Do NOT "fix" this with a recipient check before A.4.1's
-     *   auth story (EPIC-0019) lands — it would add false assurance, not security.
+     * AUTH DECISION: UNGATED (XACA-0398-005, re-evaluated 2026-09-23). This is a
+     * recorded deviation from contract §6: the route returns ciphertext (fails
+     * R2), and its caller could present a credential (fails R3).
+     *
+     *   Premise. The `sealed` blob is an anonymous libsodium sealed box. Only the
+     *   holder of the recipient's X25519 PRIVATE key can open it, and that key
+     *   never leaves the machine (Keychain, or a 0600 file). "Registered
+     *   recipient" is enforced by who the blob was sealed TO, not by an auth
+     *   check here. That holds only while an attacker cannot become a recipient.
+     *   Registration and rotation (POST/PUT /api/vault/machines) are now
+     *   ADMIN-tier (XACA-0398-003). Sealing is client-side and point-in-time: a
+     *   seal covers only the machines registered when it was made. A recipient
+     *   registered later gets no copy until an operator re-seals.
+     *   THE PREMISE DOES NOT HOLD IN PRODUCTION until XACA-0398-006 sets
+     *   FLEET_ADMIN_TOKEN (or at least FLEET_AUTH_TOKEN). Until then the gate is
+     *   open and anyone can register a recipient.
+     *
+     *   What this leaks to an uncredentialed caller: a blob that cannot be opened
+     *   without the private key, its sealed_at, and whether (engine, account,
+     *   machine) exists (the 404 codes). The last two are already public through
+     *   GET /api/vault/secrets. Nothing new.
+     *
+     *   What a fleet-tier gate would buy: very little. Every party that could open
+     *   the blob already holds the private key on a fleet machine, and so can
+     *   read that machine's fleet-config.json (0600, same user). A stolen key
+     *   from a backup usually comes with that file too. The admin token passes
+     *   the fleet tier (admin is a superset), so the gate does not help against
+     *   admin compromise either.
+     *   What it would cost: vault-fetch.js sends NO credential today
+     *   (kg.fleetFetchInit() is { redirect: 'manual' } only). A 401 is treated
+     *   as unreachable (exit 4). cc-account-routing.sh then falls back to the
+     *   stale cache, then to the env var, and then REFUSES to launch a declared
+     *   team (XACA-1312). Gating before every consumer runs a vault-fetch that
+     *   sends the token is a fleet-wide launch outage.
+     *
+     *   Residual risk if the ADMIN token is compromised: the attacker registers
+     *   their own public key. That recipient is visible in the public GET
+     *   /api/vault/machines. The next operator seal (LCARS vault-seal.js or
+     *   vault-migrate-env-keys.js, both of which seal to EVERY listed machine)
+     *   then includes the attacker, who fetches the blob here. With the admin
+     *   token they could do so even if this route were gated. The mitigation is
+     *   to review the recipient list before sealing and to rotate the admin
+     *   token. Gating this route is not the mitigation.
+     *
+     *   REVERSE THIS (gate with requireApiKey, the fleet tier) when ALL of these
+     *   hold: (1) vault-fetch.js sends the fleet token from fleet-config.json
+     *   authToken; (2) every consumer runs a tap release that includes (1); (3)
+     *   production has FLEET_AUTH_TOKEN set. Reverse sooner if the sealed box
+     *   stops being sufficient on its own, for example a need for
+     *   harvest-now-decrypt-later resistance or a recipient private key found
+     *   stored anywhere except the machine. Do NOT add a per-recipient identity
+     *   check here: the server has no machine credential to check it against.
      *
      * STRUCTURED ERROR `code` field (additive, machine-readable — XACA-0538-003):
      *   Each error carries a stable `code` so the A.4.2/A.4.3 vault-fetch client can
@@ -352,7 +422,7 @@ function registerVaultRoutes(app) {
      * 409 if (engine_slug, account_slug) already exists — use PUT to replace.
      * 201 on creation.
      */
-    app.post('/api/vault/secrets', requireApiKey, async (req, res) => {
+    app.post('/api/vault/secrets', requireAdminKey, async (req, res) => {
         try {
             await vaultEnsureReady();
 
@@ -421,7 +491,7 @@ function registerVaultRoutes(app) {
      * Bumps updated_at; preserves created_at.
      * 404 if the secret does not exist.
      */
-    app.put('/api/vault/secrets/:engineSlug/:accountSlug', requireApiKey, async (req, res) => {
+    app.put('/api/vault/secrets/:engineSlug/:accountSlug', requireAdminKey, async (req, res) => {
         try {
             await vaultEnsureReady();
 
@@ -490,7 +560,7 @@ function registerVaultRoutes(app) {
      * With ?confirm=true: executes deletion.
      * 404 if not found.
      */
-    app.delete('/api/vault/secrets/:engineSlug/:accountSlug', requireApiKey, (req, res) => {
+    app.delete('/api/vault/secrets/:engineSlug/:accountSlug', requireAdminKey, (req, res) => {
         try {
             const { engineSlug, accountSlug } = req.params;
             const { confirm }                 = req.query;

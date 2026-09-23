@@ -307,6 +307,9 @@ describe('server.js — requireApiKey actually mounted on all 14 mutating routes
                 ...process.env,
                 PORT: String(port),
                 FLEET_AUTH_TOKEN: TEST_TOKEN,
+                // XACA-0398: hermetic — a FLEET_REQUIRE_AUTH=1 in the developer's shell now also
+                // requires FLEET_ADMIN_TOKEN and would make server.js refuse to start.
+                FLEET_REQUIRE_AUTH: '0',
             },
             stdio: ['ignore', 'ignore', 'ignore'],
         });

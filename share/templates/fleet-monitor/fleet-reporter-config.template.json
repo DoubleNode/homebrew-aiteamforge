@@ -3,7 +3,7 @@
   "centralServer": {
     "enabled": {{CENTRAL_ENABLED}},
     "apiEndpoint": "{{CENTRAL_API_ENDPOINT}}",
-    "authToken": ""
+    "authToken": "{{AUTH_TOKEN}}"
   },
   "localServer": {
     "enabled": {{LOCAL_ENABLED}},

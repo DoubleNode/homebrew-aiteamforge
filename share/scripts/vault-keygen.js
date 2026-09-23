@@ -56,8 +56,22 @@ const MAX_FIELD_LEN  = 200;
 const X25519_KEY_BYTES = 32;
 
 const KEYCHAIN_SERVICE = 'com.aiteamforge.vault';
-const VAULT_DIR        = path.join(os.homedir(), '.aiteamforge', 'vault');
 const BASE64_ORIGINAL  = 'base64.ORIGINAL'; // sentinel; resolved against sodium at runtime
+
+// XACA-0398-004 INCIDENT: this used to be `const VAULT_DIR = path.join(os.homedir(), ...)`,
+// evaluated ONCE at module require() time. That is the exact anti-pattern
+// resolveFleetUrl()'s own comment already warns against ("call this LAZILY... never
+// bind it to a module-level constant, or the config is read once at require time and
+// can never be exercised per-test") — and this file had it anyway, one function over.
+// MEASURED: a test suite that requires this module BEFORE sandboxing $HOME (the normal
+// order — `require()` calls sit at the top of a test file) got a VAULT_DIR frozen to the
+// REAL home directory forever; two real files landed under the real
+// ~/.aiteamforge/vault/ during this ticket's own test development, because
+// fallbackKeyPath() closed over the stale constant instead of re-deriving it.
+// vaultDir() below re-reads os.homedir() (which itself re-reads $HOME) on every call.
+function vaultDir() {
+    return path.join(os.homedir(), '.aiteamforge', 'vault');
+}
 
 // -----------------------------------------------------------------------------
 // Fleet URL resolution (XACA-0972-001)
@@ -475,6 +489,166 @@ function unresolvedFleetUrlMessage(toolName) {
            `  (There is deliberately no localhost fallback: a fleet service is remote by definition.)`;
 }
 
+// -----------------------------------------------------------------------------
+// Two-tier bearer-token resolution (XACA-0398-004)
+// -----------------------------------------------------------------------------
+//
+// Design: kanban/plans/XACA-0398/XACA-0398_credential_design.md §2.2/§4.1
+// (USER DECISIONS: two-tier model approved). This module already hosts the
+// shared FLEET URL resolver above, for the same reason it must host the
+// shared TOKEN resolvers too — it is the one vault file mirrored into the
+// Homebrew tap and required() by msg-client.js, vault-fetch.js and
+// vault-migrate-env-keys.js, so a second copy is a second chance to drift
+// (msg-client.js's own resolveAuthToken() had already drifted this way —
+// first-existing-file-wins vs resolveFleetUrl()'s loop-and-fall-through,
+// XACA-0972-016 — before this ticket deduped it onto resolveFleetAuthToken()
+// below).
+//
+// FLEET tier: machine-to-machine traffic (reporters, msg-client, the
+// msg-relay guard). Read-only, synchronous, and — same posture as the
+// private-key file fallback — lives in fleet-config.json at mode 0600.
+//
+// ADMIN tier: everything an operator does by hand from a CLI (vault
+// registration/rotation, the migration tool). NEVER persisted anywhere —
+// env var for one command, or a hidden TTY prompt. Because a TTY prompt is
+// asynchronous, resolution here is async even on the fleet-tier path, so
+// every caller can `await` uniformly regardless of which tier it asked for.
+
+/**
+ * Resolve the FLEET-tier bearer token: env FLEET_AUTH_TOKEN first (if
+ * non-blank), else LOOP fleetConfigCandidates() and fall THROUGH a file that
+ * exists but carries no usable authToken — mirrors resolveFleetUrl()'s
+ * fall-through (XACA-0972-016). Keep this in sync with kanban-helpers.sh's
+ * _kb_fleet_auth_args, which currently uses first-existing-file-wins;
+ * aligning that shell copy is optional in-scope polish per the design doc,
+ * not required by this ticket.
+ * @returns {string|null} the token, or null if nothing resolves
+ */
+function resolveFleetAuthToken() {
+    if (typeof process.env.FLEET_AUTH_TOKEN === 'string') {
+        const envTok = process.env.FLEET_AUTH_TOKEN.trim();
+        if (envTok.length > 0) return envTok;
+    }
+    for (const cfgPath of fleetConfigCandidates()) {
+        let token;
+        try {
+            const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+            token = cfg && cfg.centralServer && cfg.centralServer.authToken;
+        } catch (_) {
+            continue; // missing, unreadable, or malformed — try the next one
+        }
+        if (typeof token === 'string' && token.trim().length > 0) return token.trim();
+    }
+    return null;
+}
+
+/**
+ * Hidden (non-echoing) single-line TTY read. Used ONLY for the admin-token
+ * prompt below — there is deliberately no interactive path for the fleet
+ * token. Never writes the typed value anywhere but the resolved Promise;
+ * every keystroke handling branch below discards its input on Ctrl-C.
+ *
+ * Injectable via `deps` so tests never touch a real TTY: pass fake
+ * `stdin`/`stdout` EventEmitter-shaped stubs and drive `onData` yourself.
+ *
+ * @param {string} promptText
+ * @param {{ stdin?: object, stdout?: object }} [deps]
+ * @returns {Promise<string|null>} the typed line (untrimmed), or null on Ctrl-C
+ */
+function readHiddenLine(promptText, deps) {
+    deps = deps || {};
+    const stdin = deps.stdin || process.stdin;
+    const stdout = deps.stdout || process.stdout;
+    return new Promise((resolve) => {
+        stdout.write(promptText);
+        let input = '';
+        const canRaw = typeof stdin.setRawMode === 'function';
+        const wasRaw = canRaw && typeof stdin.isRaw === 'boolean' ? stdin.isRaw : false;
+        if (canRaw) stdin.setRawMode(true);
+        if (typeof stdin.resume === 'function') stdin.resume();
+        if (typeof stdin.setEncoding === 'function') stdin.setEncoding('utf8');
+
+        function cleanup() {
+            stdin.removeListener('data', onData);
+            if (canRaw) stdin.setRawMode(wasRaw);
+            if (typeof stdin.pause === 'function') stdin.pause();
+        }
+
+        function onData(chunk) {
+            const s = chunk.toString();
+            for (const ch of s) {
+                if (ch === '\n' || ch === '\r') {
+                    cleanup();
+                    stdout.write('\n');
+                    resolve(input);
+                    return;
+                }
+                if (ch === '\u0003') { // Ctrl-C — abandon, never partial-resolve
+                    cleanup();
+                    stdout.write('\n');
+                    resolve(null);
+                    return;
+                }
+                if (ch === '\u007f' || ch === '\b') { // backspace/delete
+                    input = input.slice(0, -1);
+                    continue;
+                }
+                input += ch;
+            }
+        }
+        stdin.on('data', onData);
+    });
+}
+
+/**
+ * Resolve the ADMIN-tier bearer token (design §2.2/§4.1). Env
+ * FLEET_ADMIN_TOKEN first (if non-blank); otherwise, only when the caller
+ * allows an interactive prompt AND stdin is a real TTY, a hidden prompt.
+ * NEVER reads or writes any file — that is the entire point of the two-tier
+ * split (design §6): this credential must not be able to sit in plaintext on
+ * a fleet machine the way the fleet token does.
+ *
+ * @param {{ interactive?: boolean }} [opts]
+ * @param {{ isTTY?: boolean, readHiddenLine?: Function, stdin?: object, stdout?: object }} [deps]
+ *        injectable for tests — `isTTY: false` (or omitting a real TTY)
+ *        short-circuits to null with no prompt, exactly as an unattended run
+ *        (stdin closed to /dev/null) does in production.
+ * @returns {Promise<string|null>}
+ */
+async function resolveFleetAdminToken(opts, deps) {
+    opts = opts || {};
+    deps = deps || {};
+    if (typeof process.env.FLEET_ADMIN_TOKEN === 'string') {
+        const envTok = process.env.FLEET_ADMIN_TOKEN.trim();
+        if (envTok.length > 0) return envTok;
+    }
+    const isTTY = deps.isTTY !== undefined ? deps.isTTY : !!(process.stdin && process.stdin.isTTY);
+    if (!opts.interactive || !isTTY) return null;
+    const prompt = deps.readHiddenLine || readHiddenLine;
+    const line = await prompt('FLEET_ADMIN_TOKEN (input hidden, Ctrl-C to skip): ', deps);
+    if (!line) return null;
+    const trimmed = line.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Build the Authorization header for a fleet-bound request, or `{}` when no
+ * credential resolves. Nothing is ever logged. Always returns a Promise so
+ * callers can `await` uniformly regardless of tier — the fleet-tier branch
+ * resolves synchronously under the hood, but exposing that difference to
+ * callers is exactly the kind of asymmetry that produces a forgotten-`await`
+ * bug later.
+ * @param {'fleet'|'admin'} tier
+ * @param {{ interactive?: boolean }} [opts] passed through to resolveFleetAdminToken
+ * @returns {Promise<{Authorization?: string}>}
+ */
+async function fleetAuthHeaders(tier, opts) {
+    const token = tier === 'admin'
+        ? await resolveFleetAdminToken(opts)
+        : resolveFleetAuthToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 // Lazily-loaded sodium handle so the module is requireable without the dep present
 // (e.g. in environments that only run the storage/payload logic). Crypto callers
 // must call ensureSodium() first.
@@ -570,6 +744,24 @@ async function generateKeypair() {
     };
 }
 
+/**
+ * Derive the X25519 PUBLIC key from a stored PRIVATE key (base64 ORIGINAL).
+ * Used by --register-only (XACA-0398-004), which re-registers an EXISTING
+ * key without regenerating it — mirrors msg-client.js's sealOpenLocal(),
+ * which already derives its own public key the same way (crypto_scalarmult_
+ * base) precisely so the server never needs to hand a machine its own
+ * pubkey back.
+ * @param {string} privateKeyB64
+ * @returns {Promise<string>} base64 ORIGINAL public key
+ */
+async function derivePublicKeyFromPrivate(privateKeyB64) {
+    const sodium = await ensureSodium();
+    const v = sodium.base64_variants.ORIGINAL;
+    const sk = sodium.from_base64(privateKeyB64, v);
+    const pk = sodium.crypto_scalarmult_base(sk);
+    return sodium.to_base64(pk, v);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Private-key storage backend selection + implementations
 // ─────────────────────────────────────────────────────────────────────────────
@@ -601,7 +793,7 @@ function securityCliAvailable() {
 
 /** @returns {string} absolute fallback key-file path for a slug */
 function fallbackKeyPath(slug) {
-    return path.join(VAULT_DIR, `${slug}.key`);
+    return path.join(vaultDir(), `${slug}.key`);
 }
 
 /**
@@ -933,9 +1125,15 @@ async function buildRegistrationPayload({ id, label, publicKey }) {
 /**
  * POST or PUT the registration payload to the vault.
  * @param {object} payload from buildRegistrationPayload
- * @param {{ serverUrl?: string, rotate?: boolean, fetchImpl?: Function }} [opts]
+ * @param {{ serverUrl?: string, rotate?: boolean, fetchImpl?: Function,
+ *           adminToken?: string|null, interactiveAdmin?: boolean }} [opts]
  *   rotate=true -> PUT /api/vault/machines/:id (in-place key update, §8.2)
  *   rotate=false -> POST /api/vault/machines (create; 409 on collision)
+ *   adminToken: if provided (including `null`/`''`), used AS-IS — no
+ *     resolution or prompt is attempted, so a caller that already resolved
+ *     (or deliberately withheld) the credential is never asked twice. If
+ *     `undefined` (the default), the admin token is resolved here via
+ *     fleetAuthHeaders('admin', { interactive: interactiveAdmin }).
  * @returns {Promise<{ status: number, body: any }>}
  */
 async function registerMachine(payload, opts) {
@@ -966,12 +1164,19 @@ async function registerMachine(payload, opts) {
         ? `${serverUrl}/api/vault/machines/${encodeURIComponent(payload.id)}`
         : `${serverUrl}/api/vault/machines`;
 
+    // XACA-0398-004: register/rotate is an ADMIN-tier route now. Send the
+    // Authorization header alongside the fleet-URL/redirect guards this
+    // function already applies — none of that machinery changes.
+    const adminHeaders = opts.adminToken !== undefined
+        ? (opts.adminToken ? { Authorization: `Bearer ${opts.adminToken}` } : {})
+        : await fleetAuthHeaders('admin', { interactive: !!opts.interactiveAdmin });
+
     // XACA-0972-029: refuse redirects rather than following them. This request
     // carries the machine's PUBLIC key and registers it under an id; a redirect
     // would register this machine with a host the URL validation never saw.
     const res = assertNoRedirect(await doFetch(url, {
         method,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...adminHeaders },
         body: JSON.stringify(payload),
         // XACA-0972-037: LAST, so nothing above can override the guard.
         ...fleetFetchInit(),
@@ -980,6 +1185,137 @@ async function registerMachine(payload, opts) {
     let body = null;
     try { body = await res.json(); } catch (_) { /* non-JSON / empty body */ }
     return { status: res.status, body };
+}
+
+/**
+ * Is `machineId` currently listed in the PUBLIC machine registry?
+ * (XACA-0398-004 §5.3 — the registration-trap fix.) This GET is unauthenticated
+ * (design §5.2/§1) on every posture, so this never needs a credential.
+ *
+ * Used by registerOnly() to decide POST (never seen before) vs PUT (rotate an
+ * existing entry) — which is also what makes it the authoritative "is this
+ * machine actually enrolled" signal: it is the server's own answer, not a
+ * local marker file that could drift from it (a marker survives a manual
+ * `DELETE /api/vault/machines/:id`; this does not).
+ *
+ * @param {string} serverUrl already-resolved base URL (no trailing slash)
+ * @param {string} machineId
+ * @param {{ fetchImpl?: Function }} [opts]
+ * @returns {Promise<boolean>}
+ * @throws {Error} on a non-2xx response or a network/parse failure — callers
+ *         that want a "don't know" tri-state should catch and treat any
+ *         throw as unknown, never as false.
+ */
+async function isMachineRegistered(serverUrl, machineId, opts) {
+    opts = opts || {};
+    const doFetch = opts.fetchImpl || globalThis.fetch;
+    if (typeof doFetch !== 'function') {
+        throw new Error('No fetch implementation available (Node 18+ required, or pass opts.fetchImpl)');
+    }
+    const base = serverUrl.replace(/\/+$/, '');
+    const url = `${base}/api/vault/machines`;
+    const res = assertNoRedirect(await doFetch(url, { ...fleetFetchInit() }), url);
+    if (!res.ok) {
+        const err = new Error(`GET /api/vault/machines returned HTTP ${res.status}`);
+        err.httpStatus = res.status;
+        throw err;
+    }
+    const body = await res.json();
+    const machines = (body && body.machines) || [];
+    return machines.some((m) => m && m.id === machineId);
+}
+
+/**
+ * Re-register an ALREADY-STORED key without regenerating it (XACA-0398-004
+ * §4.2, closing the §5.3 registration trap). Derives the public key from the
+ * stored private key (derivePublicKeyFromPrivate), checks the public registry
+ * to decide POST vs PUT, and requires the ADMIN-tier credential — the same
+ * ENROLLMENT PENDING posture as provisionMachine() applies when none resolves.
+ *
+ * @param {{ machineId?: string, label?: string, serverUrl?: string,
+ *           dryRun?: boolean, log?: (msg:string)=>void }} [opts]
+ * @returns {Promise<{ machineId: string, publicKey: string,
+ *                     registration: object|null, payload: object, pending: boolean }>}
+ */
+async function registerOnly(opts) {
+    opts = opts || {};
+    const log = opts.log || (() => {});
+    const machineId = opts.machineId || defaultMachineSlug();
+    const label = opts.label || `${os.userInfo().username}@${os.hostname()}`;
+
+    const slugErrors = validateSlug(machineId);
+    if (slugErrors.length) {
+        throw new Error('Invalid machine id: ' + slugErrors.join('; '));
+    }
+
+    const backend = chooseKeyStorageBackend();
+    if (!privateKeyExists(machineId, { backend })) {
+        throw new Error(
+            `No stored private key for machine "${machineId}" (${backend}). ` +
+            `--register-only never generates a key — run vault-keygen without ` +
+            `it first, or without --register-only, to create one.`
+        );
+    }
+    const privateKeyB64 = readPrivateKey(machineId, { backend });
+    const publicKey = await derivePublicKeyFromPrivate(privateKeyB64);
+    const payload = await buildRegistrationPayload({ id: machineId, label, publicKey });
+
+    if (opts.dryRun) {
+        log('[dry-run] Skipping registration lookup and network calls.');
+        return { machineId, publicKey, registration: null, payload, pending: false };
+    }
+
+    const resolvedUrl = opts.serverUrl
+        ? acceptFleetUrl(opts.serverUrl, '--server / opts.serverUrl')
+        : resolveFleetUrl();
+    if (!resolvedUrl) {
+        const err = new Error(unresolvedFleetUrlMessage('vault-keygen --register-only'));
+        err.code = 'FLEET_URL_UNRESOLVED';
+        throw err;
+    }
+
+    // Admin credential is resolved ONCE, here, and handed to registerMachine
+    // as an already-known value (opts.adminToken) so a TTY prompt — if one
+    // happens — never fires twice for one invocation.
+    const adminToken = await resolveFleetAdminToken({ interactive: true });
+    if (!adminToken) {
+        log(
+            'ENROLLMENT PENDING: no admin credential available (FLEET_ADMIN_TOKEN ' +
+            'unset, and no interactive TTY to prompt). Nothing was sent to the ' +
+            'server. Re-run with FLEET_ADMIN_TOKEN set once you have it.'
+        );
+        return { machineId, publicKey, registration: null, payload, pending: true };
+    }
+
+    let alreadyRegistered = false;
+    try {
+        alreadyRegistered = await isMachineRegistered(resolvedUrl, machineId, { fetchImpl: opts.fetchImpl });
+    } catch (err) {
+        // Skip-on-doubt: an unreadable registry answer must not silently pick
+        // POST-vs-PUT — try POST (first-time enrollment is the more common
+        // reason --register-only gets run) and let the server's own 409 say
+        // "already exists" if that guess was wrong.
+        log(`Warning: could not confirm current registration (${err.message}); assuming not yet registered.`);
+    }
+
+    const registration = await registerMachine(payload, {
+        serverUrl: resolvedUrl,
+        rotate: alreadyRegistered,
+        adminToken,
+        fetchImpl: opts.fetchImpl,
+    });
+
+    if (registration.status >= 200 && registration.status < 300) {
+        log(`Registered public key (${registration.status}).`);
+    } else if (registration.status === 401) {
+        log('Registration returned HTTP 401: the admin credential was rejected. Supply a valid FLEET_ADMIN_TOKEN and retry.');
+    } else if (registration.status === 409) {
+        log(`Server returned 409 (machine id "${machineId}" already registered). Re-run once more — the registry now shows it, so the next attempt rotates instead.`);
+    } else {
+        log(`Registration returned HTTP ${registration.status}: ` + JSON.stringify(registration.body || {}));
+    }
+
+    return { machineId, publicKey, registration, payload, pending: false };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -996,7 +1332,7 @@ async function registerMachine(payload, opts) {
  *   log?: (msg:string)=>void
  * }} opts
  * @returns {Promise<{ machineId: string, publicKey: string, storage: object,
- *                     registration: object|null, payload: object }>}
+ *                     registration: object|null, payload: object, pending: boolean }>}
  */
 async function provisionMachine(opts) {
     opts = opts || {};
@@ -1037,7 +1373,7 @@ async function provisionMachine(opts) {
 
     if (opts.dryRun) {
         log('[dry-run] Skipping private-key storage and registration.');
-        return { machineId, publicKey, storage: null, registration: null, payload };
+        return { machineId, publicKey, storage: null, registration: null, payload, pending: false };
     }
 
     // Persist the private key (force when rotating or explicitly forced).
@@ -1047,14 +1383,35 @@ async function provisionMachine(opts) {
     });
     log(`Private key stored: ${storage.location}`);
 
+    // XACA-0398-004 §4.2/§5.3/§6: registration is now ADMIN-tier. Resolve the
+    // credential BEFORE attempting the POST/PUT — env FLEET_ADMIN_TOKEN, or
+    // (only when stdin is a real TTY) a hidden prompt. An UNATTENDED caller
+    // (kb-msg-provision closes stdin to /dev/null under --unattended) never
+    // has a TTY here, so this naturally resolves to null with no prompt and
+    // no hang — that IS the "unattended install stops at ENROLLMENT PENDING"
+    // decision (design §6/§10 Q4), not a separate code path to remember.
+    const adminToken = await resolveFleetAdminToken({ interactive: true });
+    if (!adminToken) {
+        log(
+            'ENROLLMENT PENDING: the key is generated and stored, but NOT registered ' +
+            '— no admin credential available (FLEET_ADMIN_TOKEN unset, and no ' +
+            'interactive TTY to prompt). An operator must complete enrollment with:\n' +
+            `    FLEET_ADMIN_TOKEN=<token> node vault-keygen.js --register-only --machine-id ${machineId}`
+        );
+        return { machineId, publicKey, storage, registration: null, payload, pending: true };
+    }
+
     // Register the public key with the vault.
     const registration = await registerMachine(payload, {
         serverUrl: opts.serverUrl,
         rotate: opts.rotate,
+        adminToken,
     });
 
     if (registration.status >= 200 && registration.status < 300) {
         log(`Registered public key (${registration.status}).`);
+    } else if (registration.status === 401) {
+        log('Registration returned HTTP 401: the admin credential was rejected. Supply FLEET_ADMIN_TOKEN and retry (or --register-only once you have a valid one).');
     } else if (registration.status === 409) {
         log(`Server returned 409 (machine id "${machineId}" already registered). ` +
             `Use --rotate to update the existing entry's public_key.`);
@@ -1063,7 +1420,7 @@ async function provisionMachine(opts) {
             JSON.stringify(registration.body || {}));
     }
 
-    return { machineId, publicKey, storage, registration, payload };
+    return { machineId, publicKey, storage, registration, payload, pending: false };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1071,19 +1428,20 @@ async function provisionMachine(opts) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-    const opts = { force: false, rotate: false, dryRun: false };
+    const opts = { force: false, rotate: false, dryRun: false, registerOnly: false };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         switch (a) {
-            case '--machine-id': opts.machineId = argv[++i]; break;
-            case '--label':      opts.label = argv[++i]; break;
+            case '--machine-id':   opts.machineId = argv[++i]; break;
+            case '--label':        opts.label = argv[++i]; break;
             case '--server':
-            case '--server-url': opts.serverUrl = argv[++i]; break;
-            case '--force':      opts.force = true; break;
-            case '--rotate':     opts.rotate = true; break;
-            case '--dry-run':    opts.dryRun = true; break;
+            case '--server-url':   opts.serverUrl = argv[++i]; break;
+            case '--force':        opts.force = true; break;
+            case '--rotate':       opts.rotate = true; break;
+            case '--dry-run':      opts.dryRun = true; break;
+            case '--register-only': opts.registerOnly = true; break;
             case '-h':
-            case '--help':       opts.help = true; break;
+            case '--help':         opts.help = true; break;
             default:
                 if (a.startsWith('--machine-id=')) opts.machineId = a.split('=')[1];
                 else if (a.startsWith('--label=')) opts.label = a.split('=')[1];
@@ -1113,12 +1471,48 @@ Options:
                         its registration in place (PUT). You MUST then re-seal all
                         existing secrets to the new key (SECRET-VAULT-DESIGN.md §5.4).
   --force               Replace an existing local private key without rotating.
+  --register-only       Re-register the ALREADY-STORED key for this machine id
+                        without generating a new one (XACA-0398-004). Use this to
+                        complete an ENROLLMENT PENDING machine, or to recover one
+                        whose key was stored on an earlier run but never actually
+                        registered (registration is checked against the live
+                        registry, not assumed from local state).
   --dry-run             Generate + show the payload; do NOT store the key or register.
   -h, --help            Show this help.
+
+CREDENTIALS (XACA-0398-004 — two tiers):
+  Registration/rotation (POST/PUT /api/vault/machines) is an ADMIN-tier call.
+  Supply the credential via the FLEET_ADMIN_TOKEN environment variable, or —
+  only when stdin is a real interactive TTY — this tool prompts for it (input
+  is never echoed). It is NEVER written to disk. If neither is available (for
+  example an unattended install/upgrade, which closes stdin), the key is still
+  generated and stored, but registration is skipped and this exits with the
+  ENROLLMENT PENDING code below — an operator finishes it later with
+  --register-only.
+
+EXIT CODES:
+  0  success (registered, or --dry-run / --help)
+  1  registration failed (validation error, or the server rejected it) — see
+     the printed HTTP status; also returned on an unexpected top-level error
+  2  usage error (bad argument)
+  3  ENROLLMENT PENDING — the key was generated/stored (or already existed)
+     but could NOT be registered because no admin credential was available.
+     This is NOT a failure of key generation; it means the machine needs an
+     operator to run --register-only with FLEET_ADMIN_TOKEN set.
 
 The private key is stored in the macOS Keychain (service com.aiteamforge.vault,
 account = machine id) when available, otherwise in ~/.aiteamforge/vault/<slug>.key
 (mode 0600). It is NEVER printed and NEVER sent to the server.`;
+
+// XACA-0398-004: the ENROLLMENT PENDING exit code. Distinct from 0 (success),
+// 1 (a real failure — validation or a rejected registration) and 2 (usage
+// error) so a caller (kb-msg-provision, an operator's own script) can tell
+// "the key exists and is fine, only registration is outstanding" apart from
+// an actual error without parsing stdout. kb-msg-provision mirrors this
+// literal value in its own VAULT_KEYGEN_EXIT_ENROLLMENT_PENDING constant —
+// there is no way to import a JS constant into that Python file, so keep the
+// two literal 3's in sync if this ever changes.
+const EXIT_ENROLLMENT_PENDING = 3;
 
 // -----------------------------------------------------------------------------
 // Top-level error sanitization (XACA-1224-002)
@@ -1180,13 +1574,21 @@ async function main(argv) {
     }
 
     try {
-        const result = await provisionMachine({
-            ...opts,
-            log: (m) => process.stdout.write(m + '\n'),
-        });
+        const result = opts.registerOnly
+            ? await registerOnly({
+                ...opts,
+                log: (m) => process.stdout.write(m + '\n'),
+            })
+            : await provisionMachine({
+                ...opts,
+                log: (m) => process.stdout.write(m + '\n'),
+            });
         // Echo the public key + payload (safe — public). NEVER the private key.
         process.stdout.write('\nRegistration payload (public data only):\n');
         process.stdout.write(JSON.stringify(result.payload, null, 2) + '\n');
+        if (result.pending) {
+            return EXIT_ENROLLMENT_PENDING;
+        }
         if (result.registration && result.registration.status >= 400) {
             return 1;
         }
@@ -1206,8 +1608,8 @@ if (require.main === module) {
 module.exports = {
     // constants
     KEYCHAIN_SERVICE,
-    VAULT_DIR,
     X25519_KEY_BYTES,
+    vaultDir, // XACA-0398-004: was the frozen VAULT_DIR constant; now a function — see its own comment
     // fleet URL resolution (shared with vault-fetch.js / vault-migrate-env-keys.js)
     fleetConfigPath,
     fleetConfigCandidates,
@@ -1218,6 +1620,12 @@ module.exports = {
     unresolvedFleetUrlMessage,
     fleetFetchInit,
     assertNoRedirect,
+    // two-tier bearer-token resolution (XACA-0398-004)
+    resolveFleetAuthToken,
+    resolveFleetAdminToken,
+    fleetAuthHeaders,
+    readHiddenLine,
+    EXIT_ENROLLMENT_PENDING,
     // slug/label
     defaultMachineSlug,
     validateSlug,
@@ -1225,6 +1633,7 @@ module.exports = {
     // crypto
     ensureSodium,
     generateKeypair,
+    derivePublicKeyFromPrivate,
     // storage
     chooseKeyStorageBackend,
     securityCliAvailable,
@@ -1237,7 +1646,9 @@ module.exports = {
     // registration
     buildRegistrationPayload,
     registerMachine,
+    isMachineRegistered,
     provisionMachine,
+    registerOnly,
     // cli
     parseArgs,
     main,

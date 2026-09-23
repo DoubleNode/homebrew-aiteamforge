@@ -67,8 +67,14 @@ function buildApp() {
 
 const app = buildApp();
 
+// XACA-0398: the admin tier reads FLEET_ADMIN_TOKEN too. Clear it up front so
+// a value exported in the developer's shell can't change these fleet-tier
+// assertions, and after every test so nothing leaks between files.
+delete process.env.FLEET_ADMIN_TOKEN;
+
 afterEach(() => {
     delete process.env.FLEET_AUTH_TOKEN;
+    delete process.env.FLEET_ADMIN_TOKEN;
 });
 
 // ---------------------------------------------------------------------------
@@ -388,7 +394,9 @@ describe('logAuthStartupNotice', () => {
         const state = logAuthStartupNotice(logger);
         assert.equal(state, 'absent');
         assert.equal(logger.logCalls.length, 0);
-        assert.equal(logger.warnCalls.length, 1);
+        // XACA-0398: one line per tier — fleet line first, then the admin line.
+        assert.equal(logger.warnCalls.length, 2);
+        assert.match(logger.warnCalls[1], /AUTH ADMIN: gate OPEN/);
         assert.equal(
             logger.warnCalls[0],
             '[fleet-monitor] AUTH: gate OPEN — no API key configured; state-mutating routes are UNAUTHENTICATED'
@@ -401,7 +409,7 @@ describe('logAuthStartupNotice', () => {
         const logger = fakeLogger();
         const state = logAuthStartupNotice(logger);
         assert.equal(state, 'blank');
-        assert.equal(logger.warnCalls.length, 1);
+        assert.equal(logger.warnCalls.length, 2, 'fleet CONFIG ERROR line + admin line (XACA-0398)');
         assert.match(logger.warnCalls[0], /CONFIG ERROR/);
         assert.match(logger.warnCalls[0], /set but blank/i);
         assert.notEqual(
@@ -432,13 +440,14 @@ describe('logAuthStartupNotice', () => {
         assert.equal(isAuthorized({ get: () => undefined }), true);
     });
 
-    test('SET -> "AUTH: gate ACTIVE" via log(), not warn(), and nothing else', () => {
+    test('SET -> "AUTH: gate ACTIVE" via log(), not warn(), plus the admin-tier sharing-fleet-token WARN (XACA-0398)', () => {
         process.env.FLEET_AUTH_TOKEN = TEST_TOKEN;
         const logger = fakeLogger();
         const state = logAuthStartupNotice(logger);
         assert.equal(state, 'set');
         assert.deepEqual(logger.logCalls, ['[fleet-monitor] AUTH: gate ACTIVE']);
-        assert.equal(logger.warnCalls.length, 0);
+        assert.equal(logger.warnCalls.length, 1);
+        assert.match(logger.warnCalls[0], /AUTH ADMIN: sharing fleet token/);
     });
 
     test('default logger (no arg) does not throw — exercises the real console path', () => {

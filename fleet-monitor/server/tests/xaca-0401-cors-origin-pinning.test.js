@@ -89,6 +89,8 @@ describe('server.js - CORS origin is fail-closed (finding 017)', () => {
                 ...process.env,
                 PORT: String(port),
                 FLEET_AUTH_TOKEN: 'test-fleet-token-not-a-real-secret',
+                // XACA-0398: hermetic — see xaca-0395-cors-allowed-headers.test.js.
+                FLEET_REQUIRE_AUTH: '0',
                 FLEET_MONITOR_ALLOWED_ORIGINS: ALLOWED_ORIGIN,
             },
             stdio: ['ignore', 'ignore', 'ignore'],
