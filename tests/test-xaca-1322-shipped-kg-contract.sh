@@ -243,8 +243,9 @@ else
     if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
         # PR #965 round-6 advisory: in CI a missing node must not read green.
         test_fail "node not resolvable in CI (CI/GITHUB_ACTIONS set) -- the contract this test exists to enforce went unchecked; install node on the runner"
+    else
+        test_skip "node not resolvable in this environment -- the export-shape contract cannot be verified here; this is a real gap in coverage for THIS run, not a pass"
     fi
-    test_skip "node not resolvable in this environment -- the export-shape contract cannot be verified here; this is a real gap in coverage for THIS run, not a pass"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
