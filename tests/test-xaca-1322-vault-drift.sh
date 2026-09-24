@@ -101,6 +101,17 @@ _gen_fetch_js() {
     done
 }
 
+# _gen_fetch_js_ref <member> [<member> ...] -> stdout: a vault-fetch.js body
+# that references kg.<member> WITHOUT calling it (XACA-1322-019: a
+# not-called member only needs to be DEFINED, not a function).
+_gen_fetch_js_ref() {
+    echo "const kg = require('./vault-keygen');"
+    local m
+    for m in "$@"; do
+        echo "console.log(kg.${m});"
+    done
+}
+
 # _gen_keygen_js <member> [<member> ...] -> stdout: a vault-keygen.js body
 # that exports every member given as a function.
 _gen_keygen_js() {
@@ -138,6 +149,13 @@ _reload_vault_drift_lib() {
     unset _VAULT_DRIFT_SH_LOADED
     # shellcheck source=../libexec/lib/vault-drift.sh
     source "$VAULT_DRIFT_LIB"
+}
+
+# _scan <fetch_js_path> -> stdout: raw _aitf_vd_scan_kg_usage output
+# (M:CALLED:/M:NOTCALLED:/U: lines), against a freshly reloaded lib.
+_scan() {
+    _reload_vault_drift_lib
+    _aitf_vd_scan_kg_usage "$1"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -479,6 +497,324 @@ _MUTANT_STATUS="$(
 assert_equal "PASS" "$_MUTANT_STATUS" \
     "mutant cmp override should have flipped the differs-from-shipped row from FAIL to PASS -- if this doesn't hold, the table rows above cannot be trusted to catch an always-PASS fallback regression" \
     && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 6 — derivation edge cases (PR #965 round 2: XACA-1322-017/018/019)
+#
+# 017 — left-boundary: pkg.version / _kg.x / obj.kg.x must NOT count, but
+#       the real `...kg.fleetFetchInit()` spread shape must.
+# 018 — comments (//, single-line /* */, multi-line /* */) are stripped
+#       before scanning, so a mere mention is never counted; and
+#       bracket/computed access, destructuring, and aliasing are flagged
+#       as an unrecognized pattern (WARN), never silently ignored.
+# 019 — a member vault-fetch.js CALLS must be a function; a member it only
+#       references (never calls) just needs to be defined.
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "derivation: pkg.version / _kg.x / obj.kg.x are NOT counted (XACA-1322-017 left-boundary)"
+d="$SANDBOX/deriv-boundary.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+const v = pkg.version;
+const w = obj.kg.x;
+const z = _kg.x;
+kg.resolveFleetUrl();
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:resolveFleetUrl" "$_scan_out" \
+    "boundary-excluded occurrences (pkg./_kg./obj.kg.) leaked into the derived set: $_scan_out" && test_pass
+
+test_start "derivation: '...kg.fleetFetchInit()' spread is counted as CALLED (XACA-1322-017 spread exception)"
+d="$SANDBOX/deriv-spread.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+foo({ ...kg.fleetFetchInit(), signal: 1 });
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:fleetFetchInit" "$_scan_out" \
+    "the real spread shape used in vault-fetch.js was not counted: $_scan_out" && test_pass
+
+test_start "derivation: a // line-comment mention of kg.futureMember is NOT counted (XACA-1322-018)"
+d="$SANDBOX/deriv-comment-line.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+kg.resolveFleetUrl();
+// TODO: use kg.futureMember() here later
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:resolveFleetUrl" "$_scan_out" \
+    "a // line-comment mention leaked into the derived set: $_scan_out" && test_pass
+
+test_start "derivation: a single-line /* */ block-comment mention of kg.anotherFuture is NOT counted (XACA-1322-018)"
+d="$SANDBOX/deriv-comment-block1.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+kg.resolveFleetUrl();
+/* also mentions kg.anotherFuture() */
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:resolveFleetUrl" "$_scan_out" \
+    "a single-line block-comment mention leaked into the derived set: $_scan_out" && test_pass
+
+test_start "derivation: a multi-line /* */ block-comment mention of kg.thirdFuture is NOT counted (XACA-1322-018)"
+d="$SANDBOX/deriv-comment-block2.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+kg.resolveFleetUrl();
+/* multi
+   line kg.thirdFuture()
+   comment */
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:resolveFleetUrl" "$_scan_out" \
+    "a multi-line block-comment mention leaked into the derived set: $_scan_out" && test_pass
+
+test_start "derivation: kg['acceptFleetUrl'](...) bracket/computed access is flagged unrecognized (XACA-1322-018)"
+d="$SANDBOX/deriv-bracket.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+kg.resolveFleetUrl();
+const a = kg['acceptFleetUrl'](1);
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_contains "$_scan_out" "M:CALLED:resolveFleetUrl" "real call missing from scan: $_scan_out"
+assert_contains "$_scan_out" "U:bracket" "kg['x'] bracket access was not flagged unrecognized: $_scan_out" && test_pass
+
+test_start "derivation: 'const {a} = kg' destructuring is flagged unrecognized (XACA-1322-018)"
+d="$SANDBOX/deriv-destructure.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+kg.resolveFleetUrl();
+const {a} = kg;
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_contains "$_scan_out" "M:CALLED:resolveFleetUrl" "real call missing from scan: $_scan_out"
+assert_contains "$_scan_out" "U:destructur" "destructuring from kg was not flagged unrecognized: $_scan_out" && test_pass
+
+test_start "derivation: 'const k = kg;' aliasing is flagged unrecognized (XACA-1322-018)"
+d="$SANDBOX/deriv-alias.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+kg.resolveFleetUrl();
+const k = kg;
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_contains "$_scan_out" "M:CALLED:resolveFleetUrl" "real call missing from scan: $_scan_out"
+assert_contains "$_scan_out" "U:kg aliased" "kg aliasing was not flagged unrecognized: $_scan_out" && test_pass
+
+test_start "derivation against the REAL shipped share/scripts/vault-fetch.js: exact 7-member CALLED set, zero unrecognized patterns (XACA-1322-014/017/018)"
+_scan_out="$(_scan "$TAP_ROOT/share/scripts/vault-fetch.js")"
+# shellcheck disable=SC2086
+_expected_sorted="$(printf '%s\n' $ALL_7_MEMBERS | sed 's/^/M:CALLED:/' | sort)"
+_actual_sorted="$(printf '%s\n' "$_scan_out" | sort)"
+assert_equal "$_expected_sorted" "$_actual_sorted" \
+    "derivation against the real vault-fetch.js did not produce exactly the known 7 CALLED members with no unrecognized patterns -- got: $_scan_out" && test_pass
+
+if [ "$_HAVE_NODE" = true ]; then
+    for _bad_kind in null string object; do
+        test_start "node probe: a CALLED member exported as $_bad_kind (not a function) -> FAIL (XACA-1322-019)"
+        _reload_vault_drift_lib
+        d="$SANDBOX/deriv-notfunc-$_bad_kind"
+        _mk_pair "$d" "$(_gen_fetch_js resolveFleetUrl)" ""
+        case "$_bad_kind" in
+            null)   printf '%s\n' "module.exports = { resolveFleetUrl: null };" > "$d/scripts/vault-keygen.js" ;;
+            string) printf '%s\n' "module.exports = { resolveFleetUrl: 'not-a-fn' };" > "$d/scripts/vault-keygen.js" ;;
+            object) printf '%s\n' "module.exports = { resolveFleetUrl: {} };" > "$d/scripts/vault-keygen.js" ;;
+        esac
+        _aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
+        assert_equal "FAIL" "$_AITF_VD_STATUS" \
+            "a CALLED member exported as $_bad_kind (not a function) must FAIL -- this is the exact crash class XACA-1322 exists to catch, got: $_AITF_VD_STATUS / $_AITF_VD_MSG"
+        assert_contains "$_AITF_VD_MSG" "resolveFleetUrl" && test_pass
+    done
+
+    test_start "node probe: a NOT-called member exported as a plain string -> PASS (presence-only requirement, XACA-1322-019)"
+    _reload_vault_drift_lib
+    d="$SANDBOX/deriv-notcalled-string"
+    mkdir -p "$d/scripts"
+    printf '%s\n' "$(_gen_fetch_js_ref readPrivateKey)" > "$d/scripts/vault-fetch.js"
+    printf '%s\n' "module.exports = { readPrivateKey: 'not-a-function-but-never-called' };" > "$d/scripts/vault-keygen.js"
+    _aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
+    assert_equal "PASS" "$_AITF_VD_STATUS" \
+        "a NOT-called member exported as a non-function must still PASS -- vault-fetch.js never invokes it, got: $_AITF_VD_STATUS / $_AITF_VD_MSG" && test_pass
+
+    test_start "full check: an unrecognized bracket access downgrades an otherwise-PASS node-probe result to WARN, never silently PASS (XACA-1322-018)"
+    _reload_vault_drift_lib
+    d="$SANDBOX/deriv-full-warn"
+    mkdir -p "$d/scripts"
+    cat > "$d/scripts/vault-fetch.js" <<'EOF_JS'
+const kg = require('./vault-keygen');
+kg.resolveFleetUrl();
+const a = kg['acceptFleetUrl'](1);
+EOF_JS
+    printf '%s\n' "$(_gen_keygen_js resolveFleetUrl acceptFleetUrl)" > "$d/scripts/vault-keygen.js"
+    _aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
+    assert_equal "WARN" "$_AITF_VD_STATUS" \
+        "an unrecognized access pattern alongside an otherwise-PASS node probe must downgrade to WARN, not stay PASS -- got: $_AITF_VD_STATUS / $_AITF_VD_MSG"
+    assert_contains "$_AITF_VD_MSG" "could not fully verify" && test_pass
+else
+    echo "    SKIP: node not resolvable on this machine/runner -- 019/018-downgrade node-probe assertions skipped"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 7 — set -e/pipefail caller matrix (XACA-1322-016)
+#
+# Both real callers of this shared lib (doctor's check_vault_keygen_drift,
+# validate-install's _val_check_vault_drift) run under a caller's
+# `set -eo pipefail`. Before this fix, a bare `node_bin=$(...)` (no node
+# resolvable) or a bare `required_members=$(...)` (no kg.* references, so
+# the derivation pipe's grep exits 1 under pipefail) aborted the WHOLE
+# calling script right here -- silently, with no PASS/WARN/FAIL rendered,
+# and (in doctor's case) no further checks or summary.
+#
+# Every row below runs the REAL extracted function bodies (same seam
+# test-xaca-1097-doctor-phantom-deps.sh uses -- the command file has
+# main-body side effects, so it cannot be `source`d directly) under
+# `set -eo pipefail` with PATH stripped to exclude node, and asserts BOTH
+# that a REACHED sentinel prints (the calling script did not abort) AND
+# that the expected status was reported. Every row runs under BOTH
+# /bin/bash and PATH bash.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_sep_fetch="$(_gen_fetch_js resolveFleetUrl)"
+_sep_keygen_ok="$(_gen_keygen_js resolveFleetUrl)"
+_sep_keygen_stale="$(_gen_keygen_js generateKeypair)"
+
+# identical -> PASS (no-node fallback byte-compare)
+_mk_pair "$SANDBOX/sep-identical" "$_sep_fetch" "$_sep_keygen_ok"
+mkdir -p "$SANDBOX/sep-identical-fw/share/scripts"
+printf '%s\n' "$_sep_fetch" > "$SANDBOX/sep-identical-fw/share/scripts/vault-fetch.js"
+printf '%s\n' "$_sep_keygen_ok" > "$SANDBOX/sep-identical-fw/share/scripts/vault-keygen.js"
+
+# differs -> FAIL (no-node fallback byte-compare)
+_mk_pair "$SANDBOX/sep-differs" "$_sep_fetch" "$_sep_keygen_stale"
+mkdir -p "$SANDBOX/sep-differs-fw/share/scripts"
+printf '%s\n' "$_sep_fetch" > "$SANDBOX/sep-differs-fw/share/scripts/vault-fetch.js"
+printf '%s\n' "$_sep_keygen_ok" > "$SANDBOX/sep-differs-fw/share/scripts/vault-keygen.js"
+
+# shipped copy missing -> WARN
+_mk_pair "$SANDBOX/sep-shipmissing" "$_sep_fetch" "$_sep_keygen_ok"
+mkdir -p "$SANDBOX/sep-shipmissing-fw"
+
+# no kg.* references at all -> WARN (variant B: the derivation pipe itself
+# has nothing to emit -- this is the "grep exits 1 under pipefail" trigger)
+mkdir -p "$SANDBOX/sep-nokg/scripts"
+printf '%s\n%s\n' "// no kg.* references at all" "console.log(1);" > "$SANDBOX/sep-nokg/scripts/vault-fetch.js"
+printf '%s\n' "$_sep_keygen_ok" > "$SANDBOX/sep-nokg/scripts/vault-keygen.js"
+mkdir -p "$SANDBOX/sep-nokg-fw/share/scripts"
+printf '%s\n' "$_sep_fetch" > "$SANDBOX/sep-nokg-fw/share/scripts/vault-fetch.js"
+printf '%s\n' "$_sep_keygen_ok" > "$SANDBOX/sep-nokg-fw/share/scripts/vault-keygen.js"
+
+# vault-fetch.js not installed at all -> SKIP (both callers return early,
+# before even resolving node -- included to confirm it stays harmless too)
+mkdir -p "$SANDBOX/sep-absent/scripts"
+mkdir -p "$SANDBOX/sep-absent-fw/share/scripts"
+
+# _run_doctor_nonode <working_dir> <framework_dir> <shell_bin> [<vault_drift_lib>]
+_run_doctor_nonode() {
+    local working_dir_fixture="$1" framework_fixture="$2" shell_bin="$3" vd_lib="${4:-$VAULT_DRIFT_LIB}"
+    AITEAMFORGE_DIR="$working_dir_fixture" AITEAMFORGE_HOME="$framework_fixture" LIBEXEC_DIR="$TAP_ROOT/libexec" \
+        PATH="/usr/bin:/bin" "$shell_bin" -c "
+        set -eo pipefail
+        source '$COMMON_LIB'
+        source '$CONFIG_LIB'
+        source '$vd_lib'
+        TOTAL_CHECKS=0 PASSED_CHECKS=0 FAILED_CHECKS=0 WARNING_CHECKS=0 VERBOSE=false
+        $DOCTOR_CHECK_RESULT_SRC
+        $DOCTOR_VAULT_CHECK_SRC
+        check_vault_keygen_drift
+        echo \"REACHED pass=\$PASSED_CHECKS warn=\$WARNING_CHECKS fail=\$FAILED_CHECKS\"
+    " 2>&1
+}
+
+# _run_val_nonode <install_dir> <framework_dir> <shell_bin>
+# validate-install.sh self-sources ITS OWN libexec/lib/vault-drift.sh (see
+# its header) -- unlike the doctor helper above there is no separate lib
+# path to inject, so this always exercises the real on-disk file, same as
+# SECTION 4a above.
+_run_val_nonode() {
+    local install_dir_fixture="$1" framework_fixture="$2" shell_bin="$3"
+    AITEAMFORGE_HOME="$framework_fixture" PATH="/usr/bin:/bin" "$shell_bin" -c "
+        set -eo pipefail
+        source '$VALIDATE_LIB'
+        export AITEAMFORGE_HOME='$framework_fixture'
+        _val_reset
+        _val_check_vault_drift '$install_dir_fixture'
+        echo \"REACHED pass=\$_VAL_PASS warn=\$_VAL_WARN fail=\$_VAL_FAIL\"
+    " 2>&1
+}
+
+# _run_sep_row <slug> <doctor|val> <shell_bin> <wd> <fw> <expected substring>
+_run_sep_row() {
+    local slug="$1" caller="$2" shell_bin="$3" wd="$4" fw="$5" expect="$6"
+    local out
+    case "$caller" in
+        doctor) out="$(_run_doctor_nonode "$wd" "$fw" "$shell_bin")" ;;
+        val)    out="$(_run_val_nonode "$wd" "$fw" "$shell_bin")" ;;
+    esac
+    test_start "set -eo pipefail [$slug/$caller/$shell_bin, no node]: reaches REACHED and reports $expect"
+    assert_contains "$out" "REACHED" \
+        "aborted before the REACHED sentinel under set -eo pipefail with no node on PATH -- this is the exact XACA-1322-016 regression. Output: $out"
+    assert_contains "$out" "$expect" \
+        "reached but reported the wrong status -- expected to contain '$expect'. Output: $out" \
+        && test_pass
+}
+
+for _sep_shell in /bin/bash bash; do
+    for _sep_caller in doctor val; do
+        _run_sep_row "identical"   "$_sep_caller" "$_sep_shell" "$SANDBOX/sep-identical"   "$SANDBOX/sep-identical-fw"   "pass=1"
+        _run_sep_row "differs"     "$_sep_caller" "$_sep_shell" "$SANDBOX/sep-differs"     "$SANDBOX/sep-differs-fw"     "fail=1"
+        _run_sep_row "shipmissing" "$_sep_caller" "$_sep_shell" "$SANDBOX/sep-shipmissing" "$SANDBOX/sep-shipmissing-fw" "warn=1"
+        _run_sep_row "nokg"        "$_sep_caller" "$_sep_shell" "$SANDBOX/sep-nokg"        "$SANDBOX/sep-nokg-fw"        "warn=1"
+        _run_sep_row "fetchabsent" "$_sep_caller" "$_sep_shell" "$SANDBOX/sep-absent"      "$SANDBOX/sep-absent-fw"      "pass=0 warn=0 fail=0"
+    done
+done
+
+# aiteamforge-setup.sh's REAL call convention is
+# `validate_installation "${INSTALL_DIR}" || true` (bin/aiteamforge-setup.sh)
+# -- tested directly (not just via _val_check_vault_drift) since a
+# tester-bot finding named this call path explicitly.
+for _sep_shell in /bin/bash bash; do
+    test_start "set -eo pipefail via aiteamforge-setup.sh's real 'validate_installation ... || true' convention [$_sep_shell, no node]: reaches the next statement"
+    _setup_out="$(
+        AITEAMFORGE_HOME="$SANDBOX/sep-differs-fw" PATH="/usr/bin:/bin" "$_sep_shell" -c "
+            set -eo pipefail
+            source '$VALIDATE_LIB'
+            export AITEAMFORGE_HOME='$SANDBOX/sep-differs-fw'
+            validate_installation '$SANDBOX/sep-differs' || true
+            echo REACHED_VIA_SETUP_SH_CONVENTION
+        " 2>&1
+    )"
+    assert_contains "$_setup_out" "REACHED_VIA_SETUP_SH_CONVENTION" \
+        "aiteamforge-setup.sh's real call convention (validate_installation ... || true) did not reach its own next statement -- output: $_setup_out" \
+        && test_pass
+done
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 8 — mutation sentinel (set -e class, XACA-1322-016)
+#
+# Proves SECTION 7's rows are not vacuous: patching out the
+# `|| node_bin=""` guard reintroduces the exact bare-assignment-under-
+# set-e hazard the fix closes, and a no-node REACHED row must then fail to
+# reach its sentinel.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_MUTANT_VD_LIB="$SANDBOX/vault-drift-mutant.sh"
+sed 's/node_bin="\$(_aitf_vd_resolve_node)" || node_bin=""/node_bin="$(_aitf_vd_resolve_node)"/' "$VAULT_DRIFT_LIB" > "$_MUTANT_VD_LIB"
+
+test_start "MUTATION SENTINEL (set -e class): the patched temp copy actually differs from the real lib"
+if diff -q "$VAULT_DRIFT_LIB" "$_MUTANT_VD_LIB" >/dev/null 2>&1; then
+    test_fail "mutant lib is IDENTICAL to the real lib -- the sed substitution did not match the guard; every row below would be vacuous"
+else
+    test_pass
+fi
+
+for _sep_shell in /bin/bash bash; do
+    test_start "MUTATION SENTINEL [$_sep_shell]: removing '|| node_bin=\"\"' makes a no-node REACHED row fail (proves SECTION 7 is not vacuous)"
+    _mutant_out="$(_run_doctor_nonode "$SANDBOX/sep-differs" "$SANDBOX/sep-differs-fw" "$_sep_shell" "$_MUTANT_VD_LIB")"
+    assert_not_contains "$_mutant_out" "REACHED" \
+        "mutant (guard removed) should have aborted before REACHED under set -eo pipefail with no node on PATH -- if REACHED still printed, SECTION 7's rows cannot be trusted to catch a regression of the XACA-1322-016 fix. Output: $_mutant_out" \
+        && test_pass
+done
 
 # ═══════════════════════════════════════════════════════════════════════════
 if [ "$_STANDALONE" = true ]; then

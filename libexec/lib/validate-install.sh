@@ -305,7 +305,19 @@ _val_check_vault_drift() {
 
     # Nothing to check if vault-fetch.js itself isn't installed — its own
     # presence/absence is already covered by _val_check_scripts above.
-    [ -f "$fetch_js" ] || return
+    #
+    # XACA-1322-016: `return 0`, not a bare `return` -- a bare `return`
+    # here propagates $? from the FAILING `[ -f ... ]` test it follows
+    # (i.e. exit 1), so this "nothing to do" early exit itself makes
+    # `_val_check_vault_drift` return non-zero. That's harmless when the
+    # caller is `validate_installation`'s own internal (unguarded)
+    # sequence, because `validate_installation` is always invoked wrapped
+    # in `|| true` or an `if` condition by its own two real callers -- but
+    # a direct, unguarded call to `_val_check_vault_drift` under a bare
+    # `set -eo pipefail` (exactly how a reviewer/tester reproduces this
+    # class of defect) would abort right here, before ever reaching a
+    # PASS/WARN/FAIL/SKIP render.
+    [ -f "$fetch_js" ] || return 0
 
     _val_section "Vault Fetch/Keygen Compatibility"
 
