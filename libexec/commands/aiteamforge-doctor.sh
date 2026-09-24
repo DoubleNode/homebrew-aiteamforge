@@ -82,7 +82,7 @@ Components:
   framework       Framework installation integrity
   version-drift   Cellar vs working-dir version drift (XACA-0578)
   helpers-drift   Installed kanban-helpers.sh function inventory vs shipped template (XACA-1095)
-  vault-drift     vault-fetch.js / vault-keygen.js kg.* export drift (XACA-1322)
+  vault-drift     vault-fetch.js / vault-keygen.js vs shipped copy byte drift (XACA-1322)
   config          Configuration files and validity
   board           Kanban board resolution + template/stub-collision detection (XACA-0655)
   connect         Cockpit connect scripts vs installed team instances (XACA-0845)
@@ -1150,17 +1150,19 @@ check_kanban_helpers_inventory() {
 # "kg.<name> is not a function". check_framework's required-file inventory
 # (and validate-install.sh's _val_check_scripts) only confirm BOTH files are
 # PRESENT — that check is blind to a case where the sibling exists but is
-# missing a member vault-fetch.js actually calls. This check verifies they
-# agree with each other, directly in `aiteamforge doctor`.
+# stale. This check verifies both installed files are byte-identical to the
+# copies this tap release shipped, directly in `aiteamforge doctor`.
 #
 # XACA-1322-013: the actual detection logic lives in the shared
 # libexec/lib/vault-drift.sh (_aitf_vault_drift_check), sourced above -- this
-# function only renders that result in doctor's check_result style, and
-# supplies this file's own richer PATH-aware node resolver (_x1097_resolve)
-# to it. Do not re-add drift-detection logic here; fix vault-drift.sh
-# instead so validate-install.sh's copy of this check can't drift from it
-# again (that duplication is exactly what let the same false-PASS/false-FAIL
-# bug ship in both places -- PR #965 review).
+# function only renders that result in doctor's check_result style. Do not
+# re-add drift-detection logic here; fix vault-drift.sh instead so
+# validate-install.sh's copy of this check can't drift from it again (that
+# duplication is exactly what let the same false-PASS/false-FAIL bug ship
+# in both places -- PR #965 review). vault-drift.sh does a byte comparison
+# against the shipped copy only -- no JS parsing, so it has no use for this
+# file's PATH-aware node resolver (_x1097_resolve) or any node resolver at
+# all (PR #965 rounds 2-5, see vault-drift.sh's own header).
 check_vault_keygen_drift() {
   print_section "Checking Vault Fetch/Keygen Compatibility"
 

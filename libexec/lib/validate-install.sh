@@ -31,7 +31,7 @@ _atf_validate_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null 
 # shellcheck source=./launchagents.sh
 [ -f "$_atf_validate_script_dir/launchagents.sh" ] && . "$_atf_validate_script_dir/launchagents.sh" 2>/dev/null || true
 # config.sh: get_framework_dir() -- needed below to locate the shipped
-# share/scripts/ copy for the vault-drift no-node fallback. Neither
+# share/scripts/ copy the vault-drift check byte-compares against. Neither
 # bin/aiteamforge-doctor.sh nor bin/aiteamforge-setup.sh (the two callers of
 # validate_installation) source config.sh themselves, so self-resolve it
 # here too, same as the other libs above. Has no top-level side effects

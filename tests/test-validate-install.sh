@@ -538,39 +538,32 @@ test_pass
 #
 # vault-fetch.js require()s ./vault-keygen.js and calls several kg.*
 # members on it. _val_check_scripts above only proves both files EXIST —
-# these tests cover the drift _val_check_scripts is blind to: a
-# vault-keygen.js that exists but no longer exports what vault-fetch.js
-# requires.
+# these tests cover the drift _val_check_scripts is blind to: an installed
+# vault-keygen.js/vault-fetch.js pair that is stale relative to what this
+# tap release shipped.
 #
 # XACA-1322-013 (PR #965 review): the detection logic that used to live
 # directly in this function moved to the shared libexec/lib/vault-drift.sh
 # (_aitf_vault_drift_check), also sourced by aiteamforge-doctor.sh's
 # check_vault_keygen_drift — see test-xaca-1322-vault-drift.sh for the full
-# table-driven coverage of that shared implementation (both callers,
-# every kg.* member, every no-node-fallback shape). The tests below cover
-# only this file's wrapper: that it calls through correctly and renders
-# PASS/WARN/FAIL in validate-install's own style.
+# table-driven coverage of that shared implementation (both callers, every
+# byte-compare shape). The tests below cover only this file's wrapper: that
+# it calls through correctly and renders PASS/WARN/FAIL in validate-install's
+# own style.
 #
-# XACA-1322-015: the no-node fallback used to be a static awk/grep scan for
-# `resolveFleetUrl` inside `module.exports`, which the PR #965 tester broke
-# with an indented/one-line exports block plus unrelated later text
-# mentioning the name (false PASS) and a nested flush-left brace (false
-# FAIL). It is now a byte-compare (cmp) against a shipped copy resolved via
-# get_framework_dir()/$AITEAMFORGE_HOME — the three tests below that
-# exercise the no-node path set AITEAMFORGE_HOME to a fixture framework dir
-# so that resolution is deterministic and hermetic (never touches this
-# machine's real brew/framework state).
+# PR #965 rounds 2-5 (XACA-1322): the check used to derive a required kg.*
+# member set from the installed vault-fetch.js via a static awk lexer, then
+# verify it via a node require() probe (or, with no node, the lexer's own
+# scan). Every round closed one lexer desync (regex-vs-division, a template
+# before "/", await/yield) and the next round found another. The user
+# decided to remove static JS parsing from the runtime check entirely: it
+# is now ALWAYS a byte-compare (cmp) of the installed files against the
+# shipped copy resolved via get_framework_dir()/$AITEAMFORGE_HOME — no
+# node, no lexer, no heuristic, nothing for adversarial JS to desynchronize.
+# The tests below set AITEAMFORGE_HOME to a fixture framework dir so that
+# resolution is deterministic and hermetic (never touches this machine's
+# real brew/framework state).
 # ═══════════════════════════════════════════════════════════════════════════
-
-# Node is expected on every dev/CI runner this suite targets (see
-# test-xaca-1097-doctor-phantom-deps.sh's identical assumption), but degrade
-# to a SKIP rather than a false failure if a runner genuinely lacks it —
-# the "node absent" behavior is covered separately below via a stripped PATH.
-_VAULT_HAVE_NODE=false
-command -v node &>/dev/null && _VAULT_HAVE_NODE=true
-
-# The 7 real kg.* members vault-fetch.js uses (XACA-1322-014).
-_VAULT_ALL_7='acceptFleetUrl assertNoRedirect defaultMachineSlug fleetFetchInit readPrivateKey resolveFleetUrl unresolvedFleetUrlMessage'
 
 # stdout: a vault-fetch.js body referencing kg.<member>() for each argument.
 _vault_gen_fetch_js() {
@@ -579,19 +572,10 @@ _vault_gen_fetch_js() {
     for m in "$@"; do echo "kg.${m}();"; done
 }
 
-# stdout: a vault-keygen.js body exporting each argument as a function.
-_vault_gen_keygen_js() {
-    local m
-    for m in "$@"; do echo "function ${m}() { return null; }"; done
-    echo "module.exports = {"
-    for m in "$@"; do echo "  ${m},"; done
-    echo "};"
-}
-
 # Point get_framework_dir()/$AITEAMFORGE_HOME at a fixture dir with
 # share/scripts/{vault-fetch.js,vault-keygen.js} seeded from the given
-# content, so the no-node fallback's shipped-copy comparison is
-# deterministic. Call _vault_clear_shipped_fixture when done.
+# content, so the byte-compare's shipped-copy comparison is deterministic.
+# Call _vault_clear_shipped_fixture when done.
 _vault_set_shipped_fixture() {
     local fixture_dir="$1" fetch_content="$2" keygen_content="$3"
     mkdir -p "$fixture_dir/share/scripts"
@@ -608,6 +592,12 @@ _vault_clear_shipped_fixture() {
         unset AITEAMFORGE_HOME
     fi
 }
+
+_VAULT_FETCH_OK="$(_vault_gen_fetch_js resolveFleetUrl)"
+_VAULT_KEYGEN_OK='function resolveFleetUrl() { return null; }
+module.exports = { resolveFleetUrl };'
+_VAULT_KEYGEN_STALE='function generateKeypair() { return {}; }
+module.exports = { generateKeypair };'
 
 test_start "_val_check_vault_drift: no-op when vault-fetch.js is not installed"
 _reload_validate_lib
@@ -642,204 +632,150 @@ output=$(_capture _val_check_vault_drift "$install_dir")
 assert_contains "$output" "aiteamforge upgrade"
 test_pass
 
-if [ "$_VAULT_HAVE_NODE" = true ]; then
-    test_start "_val_check_vault_drift: passes via node require when vault-keygen.js exports every kg.* member vault-fetch.js uses (XACA-1322-014)"
-    _reload_validate_lib
-    _val_reset
-    install_dir="$TEST_TMP_DIR/vault_valid_node"
-    mkdir -p "$install_dir/scripts"
-    # shellcheck disable=SC2086
-    _vault_gen_fetch_js $_VAULT_ALL_7 > "$install_dir/scripts/vault-fetch.js"
-    # shellcheck disable=SC2086
-    _vault_gen_keygen_js $_VAULT_ALL_7 > "$install_dir/scripts/vault-keygen.js"
-    _val_check_vault_drift "$install_dir" >/dev/null 2>&1
-    assert_equal "1" "$_VAL_PASS"
-    assert_equal "0" "$_VAL_WARN"
-    assert_equal "0" "$_VAL_FAIL"
-    test_pass
-
-    test_start "_val_check_vault_drift: fails via node require when vault-keygen.js is stale (no resolveFleetUrl) (XACA-1322)"
-    _reload_validate_lib
-    _val_reset
-    install_dir="$TEST_TMP_DIR/vault_stale_node"
-    mkdir -p "$install_dir/scripts"
-    _vault_gen_fetch_js resolveFleetUrl > "$install_dir/scripts/vault-fetch.js"
-    cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
-// stale pre-XACA-0972 vault-keygen.js -- no resolveFleetUrl export
-function generateKeypair() { return {}; }
-module.exports = { generateKeypair };
-EOF
-    _val_check_vault_drift "$install_dir" >/dev/null 2>&1
-    assert_equal "0" "$_VAL_PASS"
-    assert_equal "0" "$_VAL_WARN"
-    assert_equal "1" "$_VAL_FAIL"
-    test_pass
-
-    test_start "_val_check_vault_drift: stale-file failure message names the crash symptom and upgrade remedy"
-    _reload_validate_lib
-    _val_reset
-    install_dir="$TEST_TMP_DIR/vault_stale_msg"
-    mkdir -p "$install_dir/scripts"
-    _vault_gen_fetch_js resolveFleetUrl > "$install_dir/scripts/vault-fetch.js"
-    cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
-function generateKeypair() { return {}; }
-module.exports = { generateKeypair };
-EOF
-    output=$(_capture _val_check_vault_drift "$install_dir")
-    assert_contains "$output" "resolveFleetUrl is not a function"
-    assert_contains "$output" "aiteamforge upgrade"
-    test_pass
-
-    test_start "_val_check_vault_drift: a require() failure on an UNRELATED missing module falls through to the shipped-copy fallback (PASS when identical) (XACA-1322)"
-    _reload_validate_lib
-    _val_reset
-    install_dir="$TEST_TMP_DIR/vault_require_fails_fallback_pass"
-    mkdir -p "$install_dir/scripts"
-    _vault_gen_fetch_js resolveFleetUrl > "$install_dir/scripts/vault-fetch.js"
-    cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
-require('totally-does-not-exist-xaca-1322-fixture');
-function resolveFleetUrl() { return null; }
-module.exports = { resolveFleetUrl };
-EOF
-    _vault_set_shipped_fixture "$TEST_TMP_DIR/vault_require_fails_fallback_pass_fw" \
-        "$(cat "$install_dir/scripts/vault-fetch.js")" \
-        "$(cat "$install_dir/scripts/vault-keygen.js")"
-    # Direct call (no pipe) so _VAL_* mutations land in THIS shell rather
-    # than a _capture subshell -- _capture's pipeline forks a subshell,
-    # which would silently discard the counter updates being asserted here.
-    _val_check_vault_drift "$install_dir" >/dev/null 2>&1
-    _vault_clear_shipped_fixture
-    # Must NOT report drift off the unrelated missing-module error -- a
-    # confident FAIL here would be exactly the false positive this check is
-    # required to avoid.
-    assert_equal "1" "$_VAL_PASS"
-    assert_equal "0" "$_VAL_WARN"
-    assert_equal "0" "$_VAL_FAIL"
-    test_pass
-
-    test_start "_val_check_vault_drift: warns (never a silent pass) when vault-keygen.js is unreadable"
-    _reload_validate_lib
-    _val_reset
-    install_dir="$TEST_TMP_DIR/vault_unreadable"
-    mkdir -p "$install_dir/scripts"
-    _vault_gen_fetch_js resolveFleetUrl > "$install_dir/scripts/vault-fetch.js"
-    cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
-function resolveFleetUrl() { return null; }
-module.exports = { resolveFleetUrl };
-EOF
-    chmod 000 "$install_dir/scripts/vault-keygen.js"
-    # Node's own require() on an unreadable file also fails closed (ENOENT/EACCES),
-    # falling through to the fallback branch, which WARNs here because the
-    # installed file itself is unreadable -- the shipped-copy comparison
-    # never even runs (no shipped fixture is set up for this test on purpose).
-    _val_check_vault_drift "$install_dir" >/dev/null 2>&1
-    chmod 644 "$install_dir/scripts/vault-keygen.js"  # restore so cleanup can remove it
-    assert_equal "0" "$_VAL_PASS"
-    assert_equal "1" "$_VAL_WARN"
-    assert_equal "0" "$_VAL_FAIL"
-    test_pass
-else
-    echo "    SKIP: node not resolvable on this machine/runner -- node-probe-specific vault-drift assertions skipped (no-node-fallback assertions below still run against a stripped PATH)"
-fi
-
-test_start "_val_check_vault_drift: no-node fallback PASSES when installed files match the shipped copy (XACA-1322-015)"
+test_start "_val_check_vault_drift: PASSES when installed files match the shipped copy"
 _reload_validate_lib
 _val_reset
-install_dir="$TEST_TMP_DIR/vault_no_node_pass"
+install_dir="$TEST_TMP_DIR/vault_identical"
 mkdir -p "$install_dir/scripts"
-_vault_gen_fetch_js resolveFleetUrl > "$install_dir/scripts/vault-fetch.js"
-cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
-function resolveFleetUrl() { return null; }
-module.exports = { resolveFleetUrl };
-EOF
-_vault_set_shipped_fixture "$TEST_TMP_DIR/vault_no_node_pass_fw" \
-    "$(cat "$install_dir/scripts/vault-fetch.js")" \
-    "$(cat "$install_dir/scripts/vault-keygen.js")"
-_VAULT_SAVED_PATH="$PATH"
-PATH="/usr/bin:/bin"
-# Direct call (no _capture pipe/subshell) so _VAL_* mutations are visible
-# to the asserts below in THIS shell.
+printf '%s\n' "$_VAULT_FETCH_OK" > "$install_dir/scripts/vault-fetch.js"
+printf '%s\n' "$_VAULT_KEYGEN_OK" > "$install_dir/scripts/vault-keygen.js"
+_vault_set_shipped_fixture "$TEST_TMP_DIR/vault_identical_fw" "$_VAULT_FETCH_OK" "$_VAULT_KEYGEN_OK"
 _val_check_vault_drift "$install_dir" >/dev/null 2>&1
-PATH="$_VAULT_SAVED_PATH"
 _vault_clear_shipped_fixture
 assert_equal "1" "$_VAL_PASS"
 assert_equal "0" "$_VAL_WARN"
 assert_equal "0" "$_VAL_FAIL"
 test_pass
 
-test_start "_val_check_vault_drift: no-node fallback PASS message names the shipped-copy path, not a JS-parsing heuristic (XACA-1322-015)"
+test_start "_val_check_vault_drift: PASS message names the shipped-copy comparison, not a JS-parsing heuristic"
 _reload_validate_lib
 _val_reset
-install_dir="$TEST_TMP_DIR/vault_no_node_pass_msg"
+install_dir="$TEST_TMP_DIR/vault_identical_msg"
 mkdir -p "$install_dir/scripts"
-_vault_gen_fetch_js resolveFleetUrl > "$install_dir/scripts/vault-fetch.js"
-cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
-function resolveFleetUrl() { return null; }
-module.exports = { resolveFleetUrl };
-EOF
-_vault_set_shipped_fixture "$TEST_TMP_DIR/vault_no_node_pass_msg_fw" \
-    "$(cat "$install_dir/scripts/vault-fetch.js")" \
-    "$(cat "$install_dir/scripts/vault-keygen.js")"
-_VAULT_SAVED_PATH="$PATH"
-PATH="/usr/bin:/bin"
+printf '%s\n' "$_VAULT_FETCH_OK" > "$install_dir/scripts/vault-fetch.js"
+printf '%s\n' "$_VAULT_KEYGEN_OK" > "$install_dir/scripts/vault-keygen.js"
+_vault_set_shipped_fixture "$TEST_TMP_DIR/vault_identical_msg_fw" "$_VAULT_FETCH_OK" "$_VAULT_KEYGEN_OK"
 output=$(_capture _val_check_vault_drift "$install_dir")
-PATH="$_VAULT_SAVED_PATH"
 _vault_clear_shipped_fixture
 assert_contains "$output" "shipped copy"
 assert_not_contains "$output" "static grep"
 test_pass
 
-test_start "_val_check_vault_drift: no-node fallback FAILS when installed files differ from the shipped copy, even when the OLD awk scan would have wrongly PASSed it (XACA-1322-015)"
+test_start "_val_check_vault_drift: FAILS when installed vault-keygen.js differs from the shipped copy, message names vault-keygen.js"
 _reload_validate_lib
 _val_reset
-install_dir="$TEST_TMP_DIR/vault_no_node_fail"
+install_dir="$TEST_TMP_DIR/vault_keygen_differs"
 mkdir -p "$install_dir/scripts"
-_vault_gen_fetch_js resolveFleetUrl > "$install_dir/scripts/vault-fetch.js"
-# Shape the OLD awk fallback would have false-PASSed: an indented closing
-# brace (awk's `/^\}/` never matches it) plus an unrelated later comment
-# that happens to mention "resolveFleetUrl" -- PR #965 tester variant 2.
-cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
-function generateKeypair() { return {}; }
-module.exports = {
-    generateKeypair
-    };
-// TODO: add resolveFleetUrl here eventually
-EOF
-# Shipped copy is the genuinely correct file -- installed differs from it,
-# so the byte-compare fallback must FAIL regardless of what text either
-# file happens to contain.
-_vault_set_shipped_fixture "$TEST_TMP_DIR/vault_no_node_fail_fw" \
-    "$(cat "$install_dir/scripts/vault-fetch.js")" \
-    'function resolveFleetUrl() { return null; }
-module.exports = { resolveFleetUrl };'
-_VAULT_SAVED_PATH="$PATH"
-PATH="/usr/bin:/bin"
+printf '%s\n' "$_VAULT_FETCH_OK" > "$install_dir/scripts/vault-fetch.js"
+printf '%s\n' "$_VAULT_KEYGEN_STALE" > "$install_dir/scripts/vault-keygen.js"
+_vault_set_shipped_fixture "$TEST_TMP_DIR/vault_keygen_differs_fw" "$_VAULT_FETCH_OK" "$_VAULT_KEYGEN_OK"
+# Direct call (no _capture pipe/subshell) so _VAL_* mutations land in THIS
+# shell -- _capture's command substitution forks a subshell, which would
+# silently discard the counter updates being asserted here.
 _val_check_vault_drift "$install_dir" >/dev/null 2>&1
-PATH="$_VAULT_SAVED_PATH"
-_vault_clear_shipped_fixture
 assert_equal "0" "$_VAL_PASS"
 assert_equal "0" "$_VAL_WARN"
 assert_equal "1" "$_VAL_FAIL"
+# Second call (message only, counters not asserted from this one) via
+# _capture, which IS a subshell but that's fine here -- only its stdout
+# is used.
+_val_reset
+output=$(_capture _val_check_vault_drift "$install_dir")
+_vault_clear_shipped_fixture
+assert_contains "$output" "vault-keygen.js"
+assert_contains "$output" "aiteamforge upgrade"
 test_pass
 
-test_start "_val_check_vault_drift: no-node fallback WARNs (never PASS) when the shipped scripts dir cannot be resolved"
+test_start "_val_check_vault_drift: FAILS when installed vault-fetch.js differs from the shipped copy, message names vault-fetch.js"
 _reload_validate_lib
 _val_reset
-install_dir="$TEST_TMP_DIR/vault_no_node_no_shipped"
+install_dir="$TEST_TMP_DIR/vault_fetch_differs"
 mkdir -p "$install_dir/scripts"
-_vault_gen_fetch_js resolveFleetUrl > "$install_dir/scripts/vault-fetch.js"
-cat > "$install_dir/scripts/vault-keygen.js" <<'EOF'
-function resolveFleetUrl() { return null; }
-module.exports = { resolveFleetUrl };
-EOF
+printf '%s\n' "$(_vault_gen_fetch_js resolveFleetUrl brandNewMember)" > "$install_dir/scripts/vault-fetch.js"
+printf '%s\n' "$_VAULT_KEYGEN_OK" > "$install_dir/scripts/vault-keygen.js"
+_vault_set_shipped_fixture "$TEST_TMP_DIR/vault_fetch_differs_fw" "$_VAULT_FETCH_OK" "$_VAULT_KEYGEN_OK"
+_val_check_vault_drift "$install_dir" >/dev/null 2>&1
+assert_equal "0" "$_VAL_PASS"
+assert_equal "0" "$_VAL_WARN"
+assert_equal "1" "$_VAL_FAIL"
+_val_reset
+output=$(_capture _val_check_vault_drift "$install_dir")
+_vault_clear_shipped_fixture
+assert_contains "$output" "vault-fetch.js"
+assert_contains "$output" "aiteamforge upgrade"
+test_pass
+
+test_start "_val_check_vault_drift: FAILS when BOTH installed files differ from the shipped copy, message names both"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/vault_both_differ"
+mkdir -p "$install_dir/scripts"
+printf '%s\n' "$(_vault_gen_fetch_js resolveFleetUrl brandNewMember)" > "$install_dir/scripts/vault-fetch.js"
+printf '%s\n' "$_VAULT_KEYGEN_STALE" > "$install_dir/scripts/vault-keygen.js"
+_vault_set_shipped_fixture "$TEST_TMP_DIR/vault_both_differ_fw" "$_VAULT_FETCH_OK" "$_VAULT_KEYGEN_OK"
+_val_check_vault_drift "$install_dir" >/dev/null 2>&1
+assert_equal "0" "$_VAL_PASS"
+assert_equal "0" "$_VAL_WARN"
+assert_equal "1" "$_VAL_FAIL"
+_val_reset
+output=$(_capture _val_check_vault_drift "$install_dir")
+_vault_clear_shipped_fixture
+assert_contains "$output" "vault-keygen.js"
+assert_contains "$output" "vault-fetch.js"
+test_pass
+
+test_start "_val_check_vault_drift: WARNs (never PASS) when the shipped scripts dir cannot be resolved"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/vault_no_shipped_dir"
+mkdir -p "$install_dir/scripts"
+printf '%s\n' "$_VAULT_FETCH_OK" > "$install_dir/scripts/vault-fetch.js"
+printf '%s\n' "$_VAULT_KEYGEN_OK" > "$install_dir/scripts/vault-keygen.js"
 # Point AITEAMFORGE_HOME at a framework dir with NO share/scripts fixture --
 # get_framework_dir() resolves, but there is nothing to compare against.
 _VAULT_SAVED_HOME="${AITEAMFORGE_HOME:-}"
-export AITEAMFORGE_HOME="$TEST_TMP_DIR/vault_no_node_no_shipped_fw_empty"
-_VAULT_SAVED_PATH="$PATH"
-PATH="/usr/bin:/bin"
+export AITEAMFORGE_HOME="$TEST_TMP_DIR/vault_no_shipped_dir_fw_empty"
 _val_check_vault_drift "$install_dir" >/dev/null 2>&1
-PATH="$_VAULT_SAVED_PATH"
+_vault_clear_shipped_fixture
+assert_equal "0" "$_VAL_PASS"
+assert_equal "1" "$_VAL_WARN"
+assert_equal "0" "$_VAL_FAIL"
+test_pass
+
+test_start "_val_check_vault_drift: WARNs (never PASS) when the shipped vault-keygen.js is missing"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/vault_shipped_keygen_missing"
+mkdir -p "$install_dir/scripts"
+printf '%s\n' "$_VAULT_FETCH_OK" > "$install_dir/scripts/vault-fetch.js"
+printf '%s\n' "$_VAULT_KEYGEN_OK" > "$install_dir/scripts/vault-keygen.js"
+_fw="$TEST_TMP_DIR/vault_shipped_keygen_missing_fw"
+mkdir -p "$_fw/share/scripts"
+printf '%s\n' "$_VAULT_FETCH_OK" > "$_fw/share/scripts/vault-fetch.js"
+# vault-keygen.js deliberately NOT written to the shipped fixture.
+_VAULT_SAVED_HOME="${AITEAMFORGE_HOME:-}"
+export AITEAMFORGE_HOME="$_fw"
+_val_check_vault_drift "$install_dir" >/dev/null 2>&1
+assert_equal "0" "$_VAL_PASS"
+assert_equal "1" "$_VAL_WARN"
+assert_equal "0" "$_VAL_FAIL"
+_val_reset
+output=$(_capture _val_check_vault_drift "$install_dir")
+_vault_clear_shipped_fixture
+assert_contains "$output" "shipped copies unavailable"
+test_pass
+
+test_start "_val_check_vault_drift: WARNs (never a silent pass) when the installed vault-keygen.js is unreadable"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/vault_installed_unreadable"
+mkdir -p "$install_dir/scripts"
+printf '%s\n' "$_VAULT_FETCH_OK" > "$install_dir/scripts/vault-fetch.js"
+printf '%s\n' "$_VAULT_KEYGEN_OK" > "$install_dir/scripts/vault-keygen.js"
+_vault_set_shipped_fixture "$TEST_TMP_DIR/vault_installed_unreadable_fw" "$_VAULT_FETCH_OK" "$_VAULT_KEYGEN_OK"
+chmod 000 "$install_dir/scripts/vault-keygen.js"
+_val_check_vault_drift "$install_dir" >/dev/null 2>&1
+chmod 644 "$install_dir/scripts/vault-keygen.js"  # restore so cleanup can remove it
 _vault_clear_shipped_fixture
 assert_equal "0" "$_VAL_PASS"
 assert_equal "1" "$_VAL_WARN"
