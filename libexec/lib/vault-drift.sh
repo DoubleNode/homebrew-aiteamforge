@@ -141,13 +141,21 @@ _aitf_vd_resolve_node() {
 # counted as a real reference (a prior version of this scanner did no
 # stripping at all and reported a false FAIL off exactly this -- a `//
 # TODO: use kg.futureMember()` comment with no real call, XACA-1322-018
-# review). LIMITATION: the stripper is a plain per-character state machine,
-# not a JS tokenizer -- it does not know about string/template literals, so
-# a literal "//" or "/*" INSIDE a string (e.g. a "http://..." URL) would be
-# misread as the start of a comment and eat real code after it. The real
-# vault-fetch.js does not currently contain such a literal; this is a
-# known, accepted limitation rather than a full parser (XACA-1322-018
-# review).
+# review). The stripper is a small single-pass lexer (POSIX/BWK-awk
+# compatible, no gawk extensions), not just a "//"/"/*" scanner -- it
+# tracks single- and double-quoted strings, template literals (including
+# `${...}` substitutions, which are lexed as real code, including nested
+# strings/comments/templates), and regex-vs-division disambiguation. A
+# literal "//" or "/*" INSIDE a string/template/regex (e.g. a
+# "http://..." URL) is no longer misread as a comment start -- string,
+# template and regex CONTENTS are kept verbatim in the scanned text (never
+# blanked), so a `kg` mention inside one can still only produce a WARN or
+# FAIL (via the token-accounting ratchet below), never a false PASS
+# (XACA-1322-023/024 review, fixing the XACA-1322-018 known limitation).
+# FAIL-CLOSED AT EOF: if the file ends mid string/template/regex/block
+# comment, or with an unclosed `${` substitution, the lexer emits a single
+# `U:unterminated <kind>` line rather than silently treating whatever was
+# scanned as complete.
 #
 # ── Left-boundary rule for RECOGNIZED member access (XACA-1322-017) ─────
 # left_ok(), below, gates only whether an immediate `kg.<member>` counts
@@ -176,37 +184,185 @@ _aitf_vd_scan_kg_usage() {
             }
             return 0
         }
+        # is_regex_start(tok): true when a "/" seen immediately after
+        # token/char "tok" (the last significant token/char, "" meaning
+        # start-of-file or start of a `${...}` substitution) begins a
+        # regex literal rather than division (XACA-1322-023/024 review).
+        function is_regex_start(tok) {
+            if (tok == "") return 1
+            if (tok in KW) return 1
+            if (length(tok) == 1 && index(REGEX_CHARS, tok) > 0) return 1
+            return 0
+        }
         BEGIN {
-            in_comment = 0
+            # KW: the keywords after which a following "/" starts a regex,
+            # not division (XACA-1322-023/024 spec).
+            KW["return"] = 1; KW["typeof"] = 1; KW["case"] = 1; KW["do"] = 1
+            KW["else"] = 1; KW["in"] = 1; KW["of"] = 1; KW["new"] = 1
+            KW["delete"] = 1; KW["void"] = 1; KW["throw"] = 1
+            KW["instanceof"] = 1
+            # Single characters after which a following "/" starts a
+            # regex, not division.
+            REGEX_CHARS = "(,=:[!&|?{};+-*%<>~^"
+
+            # Special characters, built via sprintf so none of them need
+            # to appear literally inside this single-quoted shell string.
+            SQC = sprintf("%c", 39)   # single quote
+            DQC = sprintf("%c", 34)   # double quote
+            BQC = sprintf("%c", 96)   # backtick
+            BSC = sprintf("%c", 92)   # backslash
+
+            # Lexer state: "CODE", "SQ" (single-quoted string), "DQ"
+            # (double-quoted string), "TPL" (template literal content),
+            # "REGEX" (regex literal), or "BCOMMENT" (block comment).
+            # depth/stk_type track a stack of template ("TPL") and
+            # template-substitution ("SUBST") frames so `${...}` nests to
+            # any depth; subst_brace[depth] counts unmatched "{" inside a
+            # SUBST frame so an inner object literal or block does not
+            # close the substitution early.
+            state = "CODE"
+            depth = 0
+            prev_tok = ""
+            in_class = 0
             cleaned = ""
+
             while ((getline line < fetch_js) > 0) {
                 out = ""
                 i = 1
                 n = length(line)
                 while (i <= n) {
-                    if (in_comment) {
-                        rest = substr(line, i)
-                        p = index(rest, "*/")
-                        if (p > 0) { i = i + p + 1; in_comment = 0 }
-                        else { i = n + 1 }
-                    } else {
-                        c2 = substr(line, i, 2)
-                        if (c2 == "//") {
-                            i = n + 1
-                        } else if (c2 == "/*") {
-                            rest = substr(line, i + 2)
-                            p = index(rest, "*/")
-                            if (p > 0) { i = i + 2 + p + 1 }
-                            else { in_comment = 1; i = n + 1 }
+                    c1 = substr(line, i, 1)
+                    c2 = substr(line, i, 2)
+
+                    if (state == "BCOMMENT") {
+                        if (c2 == "*/") { state = "CODE"; i += 2 }
+                        else { i += 1 }
+                        continue
+                    }
+
+                    if (state == "SQ" || state == "DQ") {
+                        qc = (state == "SQ") ? SQC : DQC
+                        if (c1 == BSC) {
+                            if (i == n) { out = out c1; i += 1 }
+                            else { out = out substr(line, i, 2); i += 2 }
+                        } else if (c1 == qc) {
+                            out = out c1; state = "CODE"; prev_tok = "VALUE"; i += 1
                         } else {
-                            out = out substr(line, i, 1)
-                            i++
+                            out = out c1; i += 1
                         }
+                        continue
+                    }
+
+                    if (state == "TPL") {
+                        if (c1 == BSC) {
+                            if (i == n) { out = out c1; i += 1 }
+                            else { out = out substr(line, i, 2); i += 2 }
+                        } else if (c2 == "${") {
+                            out = out c2
+                            depth++
+                            stk_type[depth] = "SUBST"
+                            subst_brace[depth] = 1
+                            state = "CODE"
+                            prev_tok = ""
+                            i += 2
+                        } else if (c1 == BQC) {
+                            out = out c1
+                            depth--
+                            state = (depth == 0) ? "CODE" : (stk_type[depth] == "TPL" ? "TPL" : "CODE")
+                            i += 1
+                        } else {
+                            out = out c1; i += 1
+                        }
+                        continue
+                    }
+
+                    if (state == "REGEX") {
+                        if (c1 == BSC) {
+                            if (i == n) { out = out c1; i += 1 }
+                            else { out = out substr(line, i, 2); i += 2 }
+                        } else if (c1 == "[") {
+                            in_class = 1; out = out c1; i += 1
+                        } else if (c1 == "]") {
+                            in_class = 0; out = out c1; i += 1
+                        } else if (c1 == "/" && !in_class) {
+                            out = out c1; state = "CODE"; prev_tok = "VALUE"; i += 1
+                        } else {
+                            out = out c1; i += 1
+                        }
+                        continue
+                    }
+
+                    # state == "CODE"
+                    if (c2 == "//") {
+                        i = n + 1
+                    } else if (c2 == "/*") {
+                        state = "BCOMMENT"; i += 2
+                    } else if (c1 == SQC) {
+                        state = "SQ"; out = out c1; i += 1
+                    } else if (c1 == DQC) {
+                        state = "DQ"; out = out c1; i += 1
+                    } else if (c1 == BQC) {
+                        depth++; stk_type[depth] = "TPL"; state = "TPL"; out = out c1; i += 1
+                    } else if (c1 == "/") {
+                        if (is_regex_start(prev_tok)) {
+                            state = "REGEX"; in_class = 0; out = out c1; i += 1
+                        } else {
+                            out = out c1; prev_tok = "/"; i += 1
+                        }
+                    } else if (c1 == "{") {
+                        if (depth > 0) subst_brace[depth]++
+                        out = out c1; prev_tok = "{"; i += 1
+                    } else if (c1 == "}" && depth > 0) {
+                        subst_brace[depth]--
+                        out = out c1
+                        if (subst_brace[depth] == 0) {
+                            depth--
+                            state = (depth == 0) ? "CODE" : (stk_type[depth] == "TPL" ? "TPL" : "CODE")
+                        } else {
+                            prev_tok = "}"
+                        }
+                        i += 1
+                    } else if (c1 ~ /[A-Za-z_$]/) {
+                        rest = substr(line, i)
+                        match(rest, /^[A-Za-z_$][A-Za-z0-9_$]*/)
+                        word = substr(rest, 1, RLENGTH)
+                        out = out word
+                        prev_tok = (word in KW) ? word : "VALUE"
+                        i += RLENGTH
+                    } else if (c1 ~ /[0-9]/) {
+                        rest = substr(line, i)
+                        match(rest, /^[0-9][0-9A-Za-z_.]*/)
+                        numtxt = substr(rest, 1, RLENGTH)
+                        out = out numtxt
+                        prev_tok = "VALUE"
+                        i += RLENGTH
+                    } else if (c1 ~ /[ \t\r]/) {
+                        out = out c1; i += 1
+                    } else {
+                        out = out c1; prev_tok = c1; i += 1
                     }
                 }
                 cleaned = cleaned out "\n"
             }
             close(fetch_js)
+
+            # FAIL-CLOSED AT EOF (XACA-1322-023/024): the lexer ending
+            # mid-construct means the rest of the file was never really
+            # scanned as code -- report exactly one unterminated-<kind>
+            # line rather than silently trusting whatever was captured.
+            if (state == "BCOMMENT") {
+                unrec_n++; unrec_order[unrec_n] = "unterminated block comment"
+            } else if (state == "SQ") {
+                unrec_n++; unrec_order[unrec_n] = "unterminated single-quoted string"
+            } else if (state == "DQ") {
+                unrec_n++; unrec_order[unrec_n] = "unterminated double-quoted string"
+            } else if (state == "REGEX") {
+                unrec_n++; unrec_order[unrec_n] = "unterminated regex literal"
+            } else if (state == "TPL") {
+                unrec_n++; unrec_order[unrec_n] = "unterminated template literal"
+            } else if (depth > 0) {
+                unrec_n++; unrec_order[unrec_n] = "unterminated ${ substitution"
+            }
 
             s = cleaned
             slen = length(s)

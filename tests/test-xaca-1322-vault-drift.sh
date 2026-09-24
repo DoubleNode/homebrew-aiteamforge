@@ -764,18 +764,36 @@ _scan_out="$(_scan "$d")"
 assert_equal "M:CALLED:resolveFleetUrl" "$_scan_out" \
     "a bare 'kg' mention inside a // comment leaked into the derived/unaccounted set: $_scan_out" && test_pass
 
-test_start "021: '// kg' inside a string literal on the same line as real code -- KNOWN LIMITATION, documented fail-closed (WARN or FAIL, never PASS)"
-# The comment stripper is a plain per-character state machine (documented
-# limitation, XACA-1322-018 review): it does not know about string/
-# template literals, so the literal text "// kg" INSIDE a string is
-# misread as the start of a real comment and eats the rest of the line --
-# including a genuine kg.resolveFleetUrl() call that follows on the same
-# line. The real vault-fetch.js does not contain this shape. The
-# resulting behavior here is NOT full soundness (the eaten call silently
-# drops out of the derived set) -- what IS guaranteed is that it can never
-# read as a silent PASS: with nothing left to derive from this file, the
-# check reports WARN ("could not determine which vault-keygen.js exports
-# ..."), never PASS.
+test_start "021 FIXED: '// kg' inside a string literal no longer eats the real call on the same line (XACA-1322-023/024)"
+# FORMERLY a documented known limitation (XACA-1322-018 review): the old
+# comment stripper was a plain per-character state machine with no idea
+# about string/template literals, so the literal text "// kg" INSIDE a
+# string was misread as the start of a real comment and ate the rest of
+# the line -- including a genuine kg.resolveFleetUrl() call that followed
+# on the same line, AND the bare "kg" word inside the string itself. With
+# nothing left to derive, the old check WARNed "could not determine which
+# vault-keygen.js exports ... (no kg.* references found)". PR #965 round 4
+# review (XACA-1322-023) demonstrated a sibling shape (a comment-lookalike
+# inside a string with NO bare "kg" mention, e.g. 'http://host') could
+# actually reach a false PASS this way whenever the eaten call was the
+# only reference to a member the keygen was missing. Round 4 tester repro
+# XACA-1322-024 confirmed it (see the "lexer fix" rows below). FIXED by
+# replacing the stripper with a real single-pass lexer (see the header
+# comment above _aitf_vd_scan_kg_usage) that tracks string/template/regex
+# boundaries, so a "//"/"/*" lookalike inside one is never mistaken for a
+# comment start -- string CONTENTS are kept verbatim, never blanked.
+#
+# The UPDATED, ACCURATE claim for THIS specific fixture: the real
+# kg.resolveFleetUrl() call is no longer eaten (no longer "no kg.*
+# references found"). But this fixture's string ALSO contains a bare "kg"
+# word (not followed by ".") -- kept verbatim per rule 2, that word is now
+# correctly a real, standalone "kg" token with no recognized access
+# pattern, so it downgrades the result to WARN ("could not fully
+# verify"), same as any other unrecognized kg token (XACA-1322-021/022).
+# This is rule 2's guarantee working exactly as designed: "a kg mention
+# inside a string can only cause a WARN or FAIL, never a false PASS." A
+# fixture with a comment-lookalike but no bare "kg" word (the "lexer fix"
+# rows below) is what now reaches a clean, correctly-derived PASS/FAIL.
 _reload_vault_drift_lib
 d="$SANDBOX/v021-string-literal-comment"
 mkdir -p "$d/scripts"
@@ -785,11 +803,370 @@ printf '%s\n' \
     > "$d/scripts/vault-fetch.js"
 printf '%s\n' "$(_gen_keygen_js resolveFleetUrl)" > "$d/scripts/vault-keygen.js"
 _scan_out="$(_scan "$d/scripts/vault-fetch.js")"
-assert_equal "" "$_scan_out" \
-    "expected the known-limitation stripper to eat the real call after '// kg' inside the string -- if this no longer holds, update this test and the doc comment together: $_scan_out"
-_aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
-assert_not_contains "$_AITF_VD_STATUS" "PASS" \
-    "a real kg.* call eaten by the string-literal comment limitation must never read as a silent PASS -- got: $_AITF_VD_STATUS / $_AITF_VD_MSG" && test_pass
+assert_contains "$_scan_out" "M:CALLED:resolveFleetUrl" \
+    "the '// kg' string-literal lookalike must no longer eat the real kg.resolveFleetUrl() call that follows it on the same line -- got: $_scan_out"
+assert_contains "$_scan_out" "U:unaccounted kg token" \
+    "the bare 'kg' word kept verbatim inside the string (not followed by '.') must still be flagged as an unaccounted token -- got: $_scan_out"
+if [ "$_HAVE_NODE" = true ]; then
+    _aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
+    assert_equal "WARN" "$_AITF_VD_STATUS" \
+        "the real call is now correctly derived, but the bare 'kg' word inside the string is still unaccounted -- this must WARN (could not fully verify), never silently PASS -- got: $_AITF_VD_STATUS / $_AITF_VD_MSG"
+    assert_contains "$_AITF_VD_MSG" "could not fully verify" && test_pass
+else
+    echo "    SKIP: node not resolvable on this machine/runner -- WARN assertion needs the node-probe path"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 6C -- lexer-based comment/string stripper (PR #965 round 4:
+# XACA-1322-023 review / XACA-1322-024 tester repro)
+#
+# 023/024 (Blocking): the OLD per-character stripper did not know about
+# string/template/regex literals, so a "//" or "/*" lookalike INSIDE one
+# was misread as a real comment start and ate a genuine kg.<member>() call
+# that followed on the same (or, for a stray unterminated block-comment
+# opener, a later) line -- a FALSE PASS whenever the eaten call was the
+# only reference to a member the installed keygen was missing. The fix
+# replaces the stripper with a small single-pass lexer that tracks single-
+# and double-quoted strings, template literals (with `${...}`
+# substitutions lexed as real code, to any nesting depth), and regex-vs-
+# division. String/template/regex CONTENTS are kept verbatim in the
+# scanned text (never blanked) -- a `kg` mention inside one can therefore
+# still produce a WARN or FAIL via the token-accounting ratchet, but never
+# a false PASS. An unterminated string/template/regex/block-comment, or an
+# unclosed `${` substitution, fails closed with one `U:unterminated
+# <kind>` line at EOF rather than trusting a partial scan.
+#
+# NOTE ON QUOTING: every fixture below is written DIRECTLY to a file via
+# `cat > "$f" <<'EOF_JS'` (a plain redirection), never captured through a
+# `$(cat <<'EOF_JS' ... )` command substitution. /bin/bash 3.2 (macOS'
+# shipped bash) has a real parsing bug where a heredoc with a literal
+# apostrophe in its body, when that heredoc lives inside a `$( ... )`
+# command substitution, corrupts the shell's quote-tracking for the REST
+# OF THE FILE ("unexpected EOF while looking for matching `''" at every
+# later checkpoint) even though the heredoc delimiter is quoted (fully
+# literal body, no expansion) -- confirmed by bisection while writing
+# this suite. Writing straight to a file sidesteps it entirely and is the
+# same pattern already used throughout this file.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# _assert_trigger_row <slug> <fetch_js_path> <missing_member>
+#   <fetch_js_path> must already be a complete vault-fetch.js: the
+#   require() binding, a real kg.a() call, then a trigger line/lines that
+#   themselves reference kg.<missing_member> (same line or a following
+#   line). keygen exports ONLY "a". Runs the FULL check on both the
+#   node-probe path (must FAIL, naming missing_member -- the comment/
+#   string lookalike in the trigger must not swallow the real call) and
+#   the no-node fallback path (must never read PASS).
+_assert_trigger_row() {
+    local slug="$1" fetch_js_path="$2" missing_member="$3"
+    local d="$SANDBOX/vfix-$slug"
+    mkdir -p "$d/scripts"
+    cp "$fetch_js_path" "$d/scripts/vault-fetch.js"
+    printf '%s\n' "$(_gen_keygen_js a)" > "$d/scripts/vault-keygen.js"
+
+    if [ "$_HAVE_NODE" = true ]; then
+        test_start "lexer fix [$slug]: kg.$missing_member() is derived, not eaten -> FAIL (node path, XACA-1322-023/024)"
+        _reload_vault_drift_lib
+        _aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
+        assert_equal "FAIL" "$_AITF_VD_STATUS" \
+            "the '$slug' trigger must not swallow the real kg.$missing_member() call as if it were commented out -- got: $_AITF_VD_STATUS / $_AITF_VD_MSG"
+        assert_contains "$_AITF_VD_MSG" "$missing_member" \
+            "expected the FAIL message to name $missing_member -- got: $_AITF_VD_MSG" && test_pass
+    else
+        echo "    SKIP: node not resolvable on this machine/runner -- [$slug] node-path assertion skipped"
+    fi
+
+    test_start "lexer fix [$slug]: no-node fallback path -> never PASS (XACA-1322-023/024)"
+    _reload_vault_drift_lib
+    local _saved_path="$PATH"
+    PATH="$_NO_NODE_PATH"
+    _aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
+    PATH="$_saved_path"
+    assert_not_contains "$_AITF_VD_STATUS" "PASS" \
+        "the '$slug' trigger must never read as a silent PASS on the no-node fallback path either -- got: $_AITF_VD_STATUS / $_AITF_VD_MSG" && test_pass
+}
+
+# ── Same-line lookalikes: a comment-opener substring sits INSIDE a
+# string/template on the SAME line as the real call (XACA-1322-023 repro
+# shapes from the round-4 review body).
+_src_http_single="$SANDBOX/src-http-url-single-quote-same-line.js"
+cat > "$_src_http_single" <<'EOF_JS'
+const kg = require('./vault-keygen.js');
+kg.a();
+const u = 'http://host'; kg.bMissing();
+EOF_JS
+
+_src_aslashslashb_double="$SANDBOX/src-double-quote-slash-slash-same-line.js"
+cat > "$_src_aslashslashb_double" <<'EOF_JS'
+const kg = require('./vault-keygen.js');
+kg.a();
+const s = "a//b"; kg.bMissing();
+EOF_JS
+
+_src_xslashslashy_template="$SANDBOX/src-template-slash-slash-same-line.js"
+cat > "$_src_xslashslashy_template" <<'EOF_JS'
+const kg = require('./vault-keygen.js');
+kg.a();
+const t = `x//y`; kg.bMissing();
+EOF_JS
+
+_src_blockcomment_open_singleline="$SANDBOX/src-block-comment-open-string-same-line.js"
+cat > "$_src_blockcomment_open_singleline" <<'EOF_JS'
+const kg = require('./vault-keygen.js');
+kg.a();
+const c = '/*'; kg.bMissing();
+EOF_JS
+
+_assert_trigger_row "http-url-single-quote-same-line"     "$_src_http_single"                  "bMissing"
+_assert_trigger_row "double-quote-slash-slash-same-line"  "$_src_aslashslashb_double"           "bMissing"
+_assert_trigger_row "template-slash-slash-same-line"      "$_src_xslashslashy_template"         "bMissing"
+_assert_trigger_row "block-comment-open-string-same-line" "$_src_blockcomment_open_singleline"  "bMissing"
+
+# An escaped quote inside a single-quoted string must not end the string
+# early -- the "// not a comment" text after it stays inside the string,
+# and the real call after the string closes is still derived.
+_src_escaped_quote="$SANDBOX/src-escaped-quote-in-string.js"
+cat > "$_src_escaped_quote" <<'EOF_JS'
+const kg = require('./vault-keygen.js');
+kg.a();
+const s = 'it\'s // not a comment'; kg.bMissing();
+EOF_JS
+_assert_trigger_row "escaped-quote-in-string" "$_src_escaped_quote" "bMissing"
+
+# ── Regex literals: a "/" that is regex, not division, and a character
+# class inside the regex where "/" does not end it.
+_src_regex_escaped_slashes="$SANDBOX/src-regex-escaped-slashes.js"
+cat > "$_src_regex_escaped_slashes" <<'EOF_JS'
+const kg = require('./vault-keygen.js');
+kg.a();
+/\/\//.test(s); kg.bMissing();
+EOF_JS
+
+_src_regex_char_class="$SANDBOX/src-regex-character-class.js"
+cat > "$_src_regex_char_class" <<'EOF_JS'
+const kg = require('./vault-keygen.js');
+kg.a();
+/[/]/.test(s); kg.bMissing();
+EOF_JS
+
+_assert_trigger_row "regex-escaped-slashes" "$_src_regex_escaped_slashes" "bMissing"
+_assert_trigger_row "regex-character-class" "$_src_regex_char_class" "bMissing"
+
+# ── XACA-1322-024 tester repros: the exact 4 round-4 trigger shapes, with
+# the real call on the LINE AFTER the trigger (not combined on one line),
+# derived against resolveFleetUrl (the member the real shipped file
+# actually needs) rather than a synthetic bMissing.
+_src_double_quoted_url_nextline="$SANDBOX/src-024-double-quoted-url-next-line.js"
+cat > "$_src_double_quoted_url_nextline" <<'EOF_JS'
+const kg = require('./vault-keygen.js');
+kg.a();
+const base = "http://fleet.example.com";
+kg.resolveFleetUrl();
+EOF_JS
+
+_src_single_quoted_url_nextline="$SANDBOX/src-024-single-quoted-url-next-line.js"
+cat > "$_src_single_quoted_url_nextline" <<'EOF_JS'
+const kg = require('./vault-keygen.js');
+kg.a();
+const base = 'http://fleet.example.com';
+kg.resolveFleetUrl();
+EOF_JS
+
+_src_template_url_nextline="$SANDBOX/src-024-template-url-next-line.js"
+cat > "$_src_template_url_nextline" <<'EOF_JS'
+const kg = require('./vault-keygen.js');
+kg.a();
+const base = `http://fleet.example.com`;
+kg.resolveFleetUrl();
+EOF_JS
+
+_src_blockcomment_open_nextline="$SANDBOX/src-024-block-comment-open-next-line.js"
+cat > "$_src_blockcomment_open_nextline" <<'EOF_JS'
+const kg = require('./vault-keygen.js');
+kg.a();
+const note = "/* see docs";
+kg.resolveFleetUrl();
+EOF_JS
+
+_assert_trigger_row "024-double-quoted-url-next-line"  "$_src_double_quoted_url_nextline"  "resolveFleetUrl"
+_assert_trigger_row "024-single-quoted-url-next-line"  "$_src_single_quoted_url_nextline"  "resolveFleetUrl"
+_assert_trigger_row "024-template-url-next-line"       "$_src_template_url_nextline"       "resolveFleetUrl"
+_assert_trigger_row "024-block-comment-open-next-line" "$_src_blockcomment_open_nextline"  "resolveFleetUrl"
+
+# ── Template substitution: kg.bMissing() called INSIDE ${...} must be
+# lexed as real code, including when nested with its own string + real
+# comment.
+test_start "lexer fix: kg.bMissing() inside a template \${...} substitution is derived as CALLED"
+d="$SANDBOX/tpl-subst-called.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+const t = `${kg.bMissing()}`;
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:bMissing" "$_scan_out" \
+    "kg.bMissing() inside a template \${...} substitution must be recognized as a real, accounted CALLED reference -- got: $_scan_out" && test_pass
+
+test_start "lexer fix: a nested string + a real comment inside \${...} are both handled correctly"
+d="$SANDBOX/tpl-subst-nested.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+const t = `${"nested // string" /* real comment */ + kg.bMissing()}`;
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:bMissing" "$_scan_out" \
+    "a nested string and a real /* comment */ inside a template substitution must not confuse the lexer's return to the enclosing template -- got: $_scan_out" && test_pass
+
+# ── Division vs. regex: a real "/" division followed by a genuine "//"
+# comment must NOT be misread as a regex literal, and the comment must
+# still be stripped (kg.fake() inside it is never required).
+test_start "lexer fix: division (not regex) followed by a real // comment -- comment IS stripped"
+d="$SANDBOX/div-not-regex.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+kg.a();
+var a = 1, b = 2;
+a / b; // kg.fake()
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:a" "$_scan_out" \
+    "'a / b' must be read as division (not a regex literal), and the trailing // comment must still be stripped so kg.fake() is never required -- got: $_scan_out" && test_pass
+
+# ── Multi-line constructs: a multi-line template and a multi-line block
+# comment must both close correctly and not corrupt subsequent scanning.
+test_start "lexer fix: a multi-line template literal closes correctly"
+d="$SANDBOX/multiline-template.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+const t = `line one
+line two still inside
+`;
+kg.a();
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:a" "$_scan_out" \
+    "a multi-line template literal must close at its final backtick and not swallow/corrupt the real call after it -- got: $_scan_out" && test_pass
+
+test_start "lexer fix: a multi-line block comment closes correctly and strips a kg.bMissing() mention inside it"
+d="$SANDBOX/multiline-blockcomment.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+/* this is
+   a multi-line
+   comment mentioning kg.bMissing() which must be stripped */
+kg.a();
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:a" "$_scan_out" \
+    "a multi-line block comment must be fully stripped (including a kg.bMissing() mention inside it) and still let the real call after it through -- got: $_scan_out" && test_pass
+
+# ── FAIL-CLOSED AT EOF (rule 6): an unterminated string/template/regex/
+# block comment, or an unclosed \${ substitution, must emit exactly one
+# U:unterminated <kind> line and the full check must WARN, never PASS.
+_run_unterminated_row() {
+    # <keygen_content> defaults to a keygen exporting all 7 real members
+    # ($_full_keygen_js) -- override it when the fixture itself derives a
+    # DIFFERENT real, accounted member before running out of file (e.g.
+    # the "${ substitution" case, which fully lexes kg.bMissing() before
+    # EOF), so the node probe's OTHER required member doesn't itself FAIL
+    # and mask the WARN-from-unterminated-construct this row exists to
+    # prove.
+    local slug="$1" kind="$2" fetch_js_path="$3" keygen_content="${4:-$_full_keygen_js}"
+
+    test_start "EOF fail-closed [$slug]: unterminated $kind emits a U:unterminated line"
+    _scan_out="$(_scan "$fetch_js_path")"
+    assert_contains "$_scan_out" "U:unterminated $kind" \
+        "expected a fail-closed U:unterminated $kind line at EOF -- got: $_scan_out" && test_pass
+
+    test_start "EOF fail-closed [$slug]: full check reports WARN, never PASS"
+    _reload_vault_drift_lib
+    local dd="$SANDBOX/unterm-full-$slug"
+    mkdir -p "$dd/scripts"
+    cp "$fetch_js_path" "$dd/scripts/vault-fetch.js"
+    printf '%s\n' "$keygen_content" > "$dd/scripts/vault-keygen.js"
+    _aitf_vault_drift_check "$dd/scripts" "$dd/shipped" >/dev/null 2>&1
+    assert_equal "WARN" "$_AITF_VD_STATUS" \
+        "an unterminated $kind at EOF must WARN, never PASS -- got: $_AITF_VD_STATUS / $_AITF_VD_MSG" && test_pass
+}
+
+_src_unterm_sq="$SANDBOX/src-unterm-single-quoted-string.js"
+cat > "$_src_unterm_sq" <<'EOF_JS'
+const kg = require('./vault-keygen');
+const s = 'never closed
+EOF_JS
+
+_src_unterm_dq="$SANDBOX/src-unterm-double-quoted-string.js"
+cat > "$_src_unterm_dq" <<'EOF_JS'
+const kg = require('./vault-keygen');
+const s = "never closed
+EOF_JS
+
+_src_unterm_tpl="$SANDBOX/src-unterm-template-literal.js"
+cat > "$_src_unterm_tpl" <<'EOF_JS'
+const kg = require('./vault-keygen');
+const t = `never closed
+EOF_JS
+
+_src_unterm_regex="$SANDBOX/src-unterm-regex-literal.js"
+cat > "$_src_unterm_regex" <<'EOF_JS'
+const kg = require('./vault-keygen');
+var re = /never closed
+EOF_JS
+
+_src_unterm_bcomment="$SANDBOX/src-unterm-block-comment.js"
+cat > "$_src_unterm_bcomment" <<'EOF_JS'
+const kg = require('./vault-keygen');
+/* never closed
+EOF_JS
+
+_src_unterm_subst="$SANDBOX/src-unterm-subst.js"
+cat > "$_src_unterm_subst" <<'EOF_JS'
+const kg = require('./vault-keygen');
+const t = `head ${kg.bMissing()
+EOF_JS
+
+_run_unterminated_row "single-quoted-string" "single-quoted string" "$_src_unterm_sq"
+_run_unterminated_row "double-quoted-string" "double-quoted string" "$_src_unterm_dq"
+_run_unterminated_row "template-literal"     "template literal"     "$_src_unterm_tpl"
+_run_unterminated_row "regex-literal"        "regex literal"        "$_src_unterm_regex"
+_run_unterminated_row "block-comment"        "block comment"        "$_src_unterm_bcomment"
+_run_unterminated_row "subst"                '${ substitution'      "$_src_unterm_subst" "$(_gen_keygen_js bMissing)"
+
+# ── Mutation sentinel (string-literal/lexer class, XACA-1322-023/024) ───
+# Proves the rows above are not vacuous: patching the lexer so it treats
+# quote characters as ordinary code (never entering the SQ/DQ string
+# states) reintroduces the exact false-PASS defect this round fixes -- a
+# "//" inside what would have been a string is read as a real comment
+# again, eating the real call. The 'http://host' same-line row must then
+# flip from FAIL to PASS.
+_MUTANT_023_LIB="$SANDBOX/vault-drift-mutant-023.sh"
+sed -e 's/c1 == SQC) {/0) {/' -e 's/c1 == DQC) {/0) {/' "$VAULT_DRIFT_LIB" > "$_MUTANT_023_LIB"
+
+test_start "MUTATION SENTINEL (string-literal class): the patched temp copy actually differs from the real lib"
+if diff -q "$VAULT_DRIFT_LIB" "$_MUTANT_023_LIB" >/dev/null 2>&1; then
+    test_fail "mutant lib is IDENTICAL to the real lib -- the sed substitution did not match the quote-handling branches; the row below would be vacuous"
+else
+    test_pass
+fi
+
+if [ "$_HAVE_NODE" = true ]; then
+    test_start "MUTATION SENTINEL [string-literal class]: treating quotes as ordinary code flips the 'http://host' row from FAIL to PASS"
+    _MUTANT_STATUS_023="$(
+        unset _VAULT_DRIFT_SH_LOADED
+        # shellcheck source=../libexec/lib/vault-drift.sh
+        source "$_MUTANT_023_LIB"
+        d="$SANDBOX/mutant-023"
+        mkdir -p "$d/scripts"
+        cp "$_src_http_single" "$d/scripts/vault-fetch.js"
+        printf '%s\n' "$(_gen_keygen_js a)" > "$d/scripts/vault-keygen.js"
+        _aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
+        echo "$_AITF_VD_STATUS"
+    )"
+    assert_equal "PASS" "$_MUTANT_STATUS_023" \
+        "mutant (quotes treated as ordinary code) should have flipped the 'http://host' row from FAIL to PASS -- if this doesn't hold, the string-literal rows above cannot be trusted to catch a regression of the XACA-1322-023/024 lexer fix. Got: $_MUTANT_STATUS_023" \
+        && test_pass
+else
+    echo "    SKIP: node not resolvable on this machine/runner -- string-literal mutation sentinel needs the node-probe PASS path"
+fi
 
 # ── Mutation sentinel (021 class) ───────────────────────────────────────
 # Proves the rows above are not vacuous: disabling the ratchet's
