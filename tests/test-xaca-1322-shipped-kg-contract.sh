@@ -135,6 +135,54 @@ fi
 echo "     (derived ${#MEMBERS[@]} member(s): ${MEMBERS[*]})"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Accounting ratchet (PR #965 round-6 advisory): the derivation above only
+# sees `kg.<member>`. If vault-fetch.js ever reaches kg another way
+# (destructuring, kg[...], an alias, passing kg as an argument), those
+# members would silently drop out of the contract. So every standalone `kg`
+# token must be immediately followed by "." -- except the single
+# `const|let|var kg = require(` binding line.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# _unaccounted_kg_uses <fetch_js> -> stdout: "<line>:<match>" for each kg
+# token not followed by "." outside the one require binding; empty = clean.
+_unaccounted_kg_uses() {
+    local fetch_js="$1" _binding_seen=false _ln _line _hits
+    _ln=0
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _ln=$((_ln + 1))
+        _hits="$(printf '%s\n' "$_line" | grep -oE '(^|[^A-Za-z0-9_$])kg([^A-Za-z0-9_$.]|$)' || true)"
+        [ -z "$_hits" ] && continue
+        if [ "$_binding_seen" = false ] \
+            && printf '%s\n' "$_line" | grep -qE '^[[:space:]]*(const|let|var)[[:space:]]+kg[[:space:]]*=[[:space:]]*require\(' \
+            && [ "$(printf '%s\n' "$_hits" | wc -l | tr -d ' ')" = "1" ]; then
+            _binding_seen=true
+            continue
+        fi
+        printf '%s\n' "$_hits" | sed "s/^/${_ln}:/"
+    done < "$fetch_js"
+}
+
+test_start "every kg use in shipped vault-fetch.js is kg.<member> (or the one require binding)"
+_unacc="$(_unaccounted_kg_uses "$SHIPPED_FETCH")"
+if [ -z "$_unacc" ]; then
+    test_pass
+else
+    test_fail "unaccounted kg use(s) -- the member contract below cannot see these; extend _derive_kg_members before relaxing this: $(printf '%s' "$_unacc" | tr '\n' ' ')"
+fi
+
+test_start "MUTATION SENTINEL: an unaccounted kg use (helper(kg), destructuring, kg[...]) is caught"
+_ratchet_ok=true
+for _variant in 'helper(kg);' 'const { resolveFleetUrl } = kg;' "kg['resolveFleetUrl']();" 'const k = kg;'; do
+    _mut="$SANDBOX/vault-fetch-ratchet-mutant.js"
+    { cat "$SHIPPED_FETCH"; printf '%s\n' "$_variant"; } > "$_mut"
+    if cmp -s "$SHIPPED_FETCH" "$_mut" || [ -z "$(_unaccounted_kg_uses "$_mut")" ]; then
+        _ratchet_ok=false
+        test_fail "ratchet did not flag appended variant: $_variant"
+    fi
+done
+[ "$_ratchet_ok" = true ] && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
 # require() wiring — vault-fetch.js must actually require vault-keygen.js
 # from the same directory.
 # ═══════════════════════════════════════════════════════════════════════════
@@ -192,6 +240,10 @@ if [ "$_HAVE_NODE" = true ]; then
     fi
 else
     test_start "shipped vault-keygen.js exports every derived member as a function (node require)"
+    if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+        # PR #965 round-6 advisory: in CI a missing node must not read green.
+        test_fail "node not resolvable in CI (CI/GITHUB_ACTIONS set) -- the contract this test exists to enforce went unchecked; install node on the runner"
+    fi
     test_skip "node not resolvable in this environment -- the export-shape contract cannot be verified here; this is a real gap in coverage for THIS run, not a pass"
 fi
 
