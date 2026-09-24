@@ -94,18 +94,46 @@ _aitf_vd_resolve_node() {
 #                        enough -- kg.<name>() still throws at runtime.
 #   M:NOTCALLED:<name>   kg.<name> referenced but never invoked. The probe
 #                        only needs the member to be defined at all.
-#   U:<description>      an access pattern the scanner cannot statically
-#                        resolve to a plain kg.<name> reference: bracket /
-#                        computed access (kg['x'], kg[x]), destructuring
-#                        (`} = kg` / `}=kg`), or aliasing (`= kg;` /
-#                        `= kg,`). _aitf_vault_drift_check downgrades an
-#                        otherwise-PASS result to WARN when any U: line is
-#                        present (XACA-1322-018) -- a FAIL is never
-#                        downgraded; the blocking signal wins.
+#   U:<description>      a `kg` occurrence the scanner cannot account for
+#                        as a recognized member access or the one allowed
+#                        require() binding -- see the token-accounting
+#                        ratchet below (XACA-1322-021). Includes the
+#                        former named categories (bracket/computed access
+#                        `kg['x']`, destructuring `} = kg`, aliasing
+#                        `= kg;`) as well as every other shape.
+#                        _aitf_vault_drift_check downgrades an otherwise-
+#                        PASS result to WARN when any U: line is present
+#                        (XACA-1322-018) -- a FAIL is never downgraded;
+#                        the blocking signal wins.
 #
 # A member seen BOTH called and not-called somewhere in the file is only
 # ever reported as CALLED (the stricter requirement -- see the `delete`
 # below).
+#
+# ── Token-accounting ratchet (XACA-1322-021) ────────────────────────────
+# 018's bracket/destructure/alias detectors each recognized exactly one
+# named shape and let everything else through with NO output at all --
+# `kg?.x`, `kg .x`, `kg<TAB>.x`, `kg\n  .x` (a chain broken across a
+# line), `(kg).x`, `helper(kg)`, `[kg]`, a bare `let k = kg` with no
+# trailing `;`/`,`, and `obj.kg.x` (kg itself as somebody else's member)
+# were all invisible to both the required-member derivation AND the U:
+# downgrade -- a file mixing one of these with an ordinary `kg.` call
+# read as a clean PASS even though the member reached only that way could
+# be genuinely missing. The fix closes the CLASS instead of enumerating
+# more variants: every standalone `kg` IDENTIFIER TOKEN in the file (an
+# occurrence of the two characters `k`,`g` bounded on both sides by
+# start/end-of-string or a character NOT in [A-Za-z0-9_$] -- so `pkg`,
+# `kgx`, `_kg` and `$kg` are never tokens at all) must be accounted for as
+# exactly one of: (a) a recognized member access -- `kg.<member>` with an
+# IMMEDIATE dot, subject to the left-boundary rule below (so `obj.kg.x`'s
+# `kg` token, itself preceded by a plain `.`, is NOT a recognized access
+# even though it IS a token); or (b) the single require() binding
+# matching `(const|let|var)[ \t]+kg[ \t]*=[ \t]*require\(`, allowed at
+# most once -- only the FIRST such match in the file is the accounted
+# binding; a second `const kg = require(...)` is itself an extra,
+# unaccounted token. Any other token occurrence emits exactly one
+# `U:unaccounted kg token: <snippet>` line and can never fall through
+# silently.
 #
 # ── Comment handling ────────────────────────────────────────────────────
 # `//` to end of line and `/* ... */` (including multi-line) are stripped
@@ -121,14 +149,19 @@ _aitf_vd_resolve_node() {
 # known, accepted limitation rather than a full parser (XACA-1322-018
 # review).
 #
-# ── Left-boundary rule (XACA-1322-017) ──────────────────────────────────
-# A `kg.`/`kg[` match only counts when the character immediately before
-# "kg" is: the start of the file, any character NOT in [A-Za-z0-9_$.], or
-# the char sequence is the three-dot spread `...`. This excludes
-# `pkg.version` (preceded by an identifier char), `_kg.x` (preceded by
-# `_`), and `obj.kg.x` (preceded by a plain `.` that is not part of a `...`
-# spread) -- while still counting the real
-# `{ ...kg.fleetFetchInit(), ... }` spread shape used in the shipped file.
+# ── Left-boundary rule for RECOGNIZED member access (XACA-1322-017) ─────
+# left_ok(), below, gates only whether an immediate `kg.<member>` counts
+# as a RECOGNIZED access (case (a) in the token-accounting ratchet above)
+# -- it is narrower than the token-boundary check the ratchet applies
+# first. A `kg.` counts as recognized only when the character immediately
+# before "kg" is: the start of the file, any character NOT in
+# [A-Za-z0-9_$.], or the char sequence is the three-dot spread `...`. This
+# excludes `pkg.version` (preceded by an identifier char -- not even a
+# token) and `obj.kg.x` (its "kg" IS a standalone token -- preceded by a
+# plain "." -- but is somebody else's member, not the free variable, so
+# it falls through to the ratchet's unaccounted case) -- while still
+# counting the real `{ ...kg.fleetFetchInit(), ... }` spread shape used
+# in the shipped file.
 _aitf_vd_scan_kg_usage() {
     local fetch_js="$1"
     [ -r "$fetch_js" ] || return 0
@@ -178,80 +211,71 @@ _aitf_vd_scan_kg_usage() {
             s = cleaned
             slen = length(s)
 
-            # ── kg.<member> -- membership + called/not-called ───────────
+            # ── XACA-1322-021 token-accounting ratchet ───────────────────
+            # Step 1: locate the ONE allowed require() binding, if any --
+            # only its FIRST occurrence in the file counts. Find the "kg"
+            # inside that match by literal index() (the pattern contains
+            # no other "kg" substring), not a second regex.
+            require_kg_abs = 0
+            if (match(s, /(const|let|var)[ \t]+kg[ \t]*=[ \t]*require\(/)) {
+                bind_match = substr(s, RSTART, RLENGTH)
+                bind_off = index(bind_match, "kg")
+                if (bind_off > 0) require_kg_abs = RSTART + bind_off - 1
+            }
+
+            # Step 2: walk every standalone "kg" TOKEN in the file (bounded
+            # on both sides by start/end-of-string or a character NOT in
+            # [A-Za-z0-9_$] -- so "pkg"/"kgx"/"_kg"/"$kg" never match) and
+            # account for each one individually.
             pos = 1
             while (pos <= slen) {
                 rest = substr(s, pos)
-                if (!match(rest, /kg\./)) break
+                if (!match(rest, /kg/)) break
                 abs = pos + RSTART - 1
-                if (left_ok(s, abs)) {
-                    after = substr(s, abs + 3)
-                    if (match(after, /^[A-Za-z_$][A-Za-z0-9_$]*/)) {
-                        member = substr(after, 1, RLENGTH)
-                        tail = substr(after, RLENGTH + 1)
-                        sub(/^[ \t\r\n]*/, "", tail)
-                        if (substr(tail, 1, 1) == "(") {
-                            called[member] = 1
-                        } else {
-                            notcalled[member] = 1
-                        }
-                        pos = abs + 3 + RLENGTH
+
+                tok_prevc = (abs > 1) ? substr(s, abs - 1, 1) : ""
+                tok_nextc = substr(s, abs + 2, 1)
+                left_is_boundary  = (abs == 1) || (tok_prevc !~ /[A-Za-z0-9_$]/)
+                right_is_boundary = (tok_nextc == "") || (tok_nextc !~ /[A-Za-z0-9_$]/)
+
+                if (left_is_boundary && right_is_boundary) {
+                    if (abs == require_kg_abs) {
+                        # (b) the one allowed require() binding -- silent,
+                        # no M: or U: output.
+                        pos = abs + 2
                         continue
                     }
-                }
-                pos = abs + 1
-            }
-
-            # ── kg[ -- bracket / computed access (unrecognized) ─────────
-            pos = 1
-            while (pos <= slen) {
-                rest = substr(s, pos)
-                if (!match(rest, /kg\[/)) break
-                abs = pos + RSTART - 1
-                if (left_ok(s, abs)) {
-                    snippet = substr(s, abs, 30)
-                    gsub(/[\n\r]/, " ", snippet)
-                    key = "bracket:" snippet
-                    if (!(key in unrec)) { unrec[key] = 1; unrec_order[++unrec_n] = "bracket/computed access: " snippet }
+                    recognized = 0
+                    if (tok_nextc == "." && left_ok(s, abs)) {
+                        after = substr(s, abs + 3)
+                        if (match(after, /^[A-Za-z_$][A-Za-z0-9_$]*/)) {
+                            member = substr(after, 1, RLENGTH)
+                            tail = substr(after, RLENGTH + 1)
+                            sub(/^[ \t\r\n]*/, "", tail)
+                            if (substr(tail, 1, 1) == "(") {
+                                called[member] = 1
+                            } else {
+                                notcalled[member] = 1
+                            }
+                            recognized = 1
+                        }
+                    }
+                    if (!recognized) {
+                        # (c) unaccounted -- fail-closed, exactly one U:
+                        # line per occurrence (position-keyed, so two
+                        # textually-identical occurrences each still get
+                        # their own line rather than being deduplicated
+                        # away, and a shape already caught above -- e.g. a
+                        # recognized kg.<member> -- never reaches here, so
+                        # there is no risk of a double report per
+                        # occurrence, XACA-1322-022).
+                        snippet = substr(s, (abs > 10 ? abs - 10 : 1), 40)
+                        gsub(/[\n\r\t]/, " ", snippet)
+                        unrec_n++
+                        unrec_order[unrec_n] = "unaccounted kg token: " snippet
+                    }
                 }
                 pos = abs + 2
-            }
-
-            # ── destructuring: "} = kg" / "}=kg" (unrecognized) ─────────
-            pos = 1
-            while (pos <= slen) {
-                rest = substr(s, pos)
-                if (!match(rest, /}[ \t]*=[ \t]*kg/)) break
-                abs = pos + RSTART - 1
-                mlen = RLENGTH
-                nextc = substr(s, abs + mlen, 1)
-                if (nextc !~ /[A-Za-z0-9_$]/) {
-                    snippet = substr(s, abs, mlen)
-                    gsub(/[\n\r]/, " ", snippet)
-                    key = "destructure:" snippet
-                    if (!(key in unrec)) { unrec[key] = 1; unrec_order[++unrec_n] = "destructuring from kg: " snippet }
-                }
-                pos = abs + mlen
-            }
-
-            # ── aliasing: "= kg;" / "= kg," (unrecognized) ──────────────
-            pos = 1
-            while (pos <= slen) {
-                rest = substr(s, pos)
-                if (!match(rest, /=[ \t]*kg[ \t]*[;,]/)) break
-                abs = pos + RSTART - 1
-                mlen = RLENGTH
-                prevc = (abs > 1) ? substr(s, abs - 1, 1) : ""
-                # Exclude "}" too -- "}=kg;"/"}= kg," is the destructuring
-                # shape above, already reported as destructure; without
-                # this the same text would be double-reported as an alias.
-                if (prevc !~ /[=!<>}]/) {
-                    snippet = substr(s, abs, mlen)
-                    gsub(/[\n\r]/, " ", snippet)
-                    key = "alias:" snippet
-                    if (!(key in unrec)) { unrec[key] = 1; unrec_order[++unrec_n] = "kg aliased to another name: " snippet }
-                }
-                pos = abs + mlen
             }
 
             # A member seen both called and not-called anywhere in the

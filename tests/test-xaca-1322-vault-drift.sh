@@ -511,7 +511,7 @@ assert_equal "PASS" "$_MUTANT_STATUS" \
 #       references (never calls) just needs to be defined.
 # ═══════════════════════════════════════════════════════════════════════════
 
-test_start "derivation: pkg.version / _kg.x / obj.kg.x are NOT counted (XACA-1322-017 left-boundary)"
+test_start "derivation: pkg.version / _kg.x are NOT counted at all (not tokens); obj.kg.x IS a token but NOT a recognized access -> unaccounted (XACA-1322-017/021 left-boundary)"
 d="$SANDBOX/deriv-boundary.js"
 cat > "$d" <<'EOF_JS'
 const kg = require('./vault-keygen');
@@ -521,8 +521,22 @@ const z = _kg.x;
 kg.resolveFleetUrl();
 EOF_JS
 _scan_out="$(_scan "$d")"
-assert_equal "M:CALLED:resolveFleetUrl" "$_scan_out" \
-    "boundary-excluded occurrences (pkg./_kg./obj.kg.) leaked into the derived set: $_scan_out" && test_pass
+# pkg./_kg. are never even "kg" tokens (preceded by an identifier char) --
+# no output of any kind. obj.kg.x's "kg" IS a standalone token (preceded
+# by a plain "."), so as of XACA-1322-021 it is no longer silently
+# dropped -- it is a token that is not a recognized member access
+# (`kg` itself is someone else's member here, not the free variable), so
+# it must surface as exactly one U: line rather than vanishing.
+assert_contains "$_scan_out" "M:CALLED:resolveFleetUrl" \
+    "the real call went missing from the scan: $_scan_out"
+assert_contains "$_scan_out" "U:unaccounted kg token" \
+    "obj.kg.x's kg token must now be flagged unaccounted, not silently dropped (XACA-1322-021): $_scan_out"
+# Exactly TWO lines total: the one real M:CALLED call and the one
+# obj.kg.x U: line -- pkg.version and _kg.x must not have contributed a
+# line of their own (they are never even tokens).
+_scan_line_count="$(printf '%s\n' "$_scan_out" | grep -c .)"
+assert_equal "2" "$_scan_line_count" \
+    "expected exactly 2 output lines (1 M: + 1 U:) -- pkg.version/_kg.x must not surface as their own occurrence: $_scan_out" && test_pass
 
 test_start "derivation: '...kg.fleetFetchInit()' spread is counted as CALLED (XACA-1322-017 spread exception)"
 d="$SANDBOX/deriv-spread.js"
@@ -578,7 +592,7 @@ const a = kg['acceptFleetUrl'](1);
 EOF_JS
 _scan_out="$(_scan "$d")"
 assert_contains "$_scan_out" "M:CALLED:resolveFleetUrl" "real call missing from scan: $_scan_out"
-assert_contains "$_scan_out" "U:bracket" "kg['x'] bracket access was not flagged unrecognized: $_scan_out" && test_pass
+assert_contains "$_scan_out" "U:unaccounted kg token" "kg['x'] bracket access was not flagged unrecognized: $_scan_out" && test_pass
 
 test_start "derivation: 'const {a} = kg' destructuring is flagged unrecognized (XACA-1322-018)"
 d="$SANDBOX/deriv-destructure.js"
@@ -589,7 +603,7 @@ const {a} = kg;
 EOF_JS
 _scan_out="$(_scan "$d")"
 assert_contains "$_scan_out" "M:CALLED:resolveFleetUrl" "real call missing from scan: $_scan_out"
-assert_contains "$_scan_out" "U:destructur" "destructuring from kg was not flagged unrecognized: $_scan_out" && test_pass
+assert_contains "$_scan_out" "U:unaccounted kg token" "destructuring from kg was not flagged unrecognized: $_scan_out" && test_pass
 
 test_start "derivation: 'const k = kg;' aliasing is flagged unrecognized (XACA-1322-018)"
 d="$SANDBOX/deriv-alias.js"
@@ -600,7 +614,7 @@ const k = kg;
 EOF_JS
 _scan_out="$(_scan "$d")"
 assert_contains "$_scan_out" "M:CALLED:resolveFleetUrl" "real call missing from scan: $_scan_out"
-assert_contains "$_scan_out" "U:kg aliased" "kg aliasing was not flagged unrecognized: $_scan_out" && test_pass
+assert_contains "$_scan_out" "U:unaccounted kg token" "kg aliasing was not flagged unrecognized: $_scan_out" && test_pass
 
 test_start "derivation against the REAL shipped share/scripts/vault-fetch.js: exact 7-member CALLED set, zero unrecognized patterns (XACA-1322-014/017/018)"
 _scan_out="$(_scan "$TAP_ROOT/share/scripts/vault-fetch.js")"
@@ -653,6 +667,163 @@ EOF_JS
     assert_contains "$_AITF_VD_MSG" "could not fully verify" && test_pass
 else
     echo "    SKIP: node not resolvable on this machine/runner -- 019/018-downgrade node-probe assertions skipped"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 6B — token-accounting ratchet (PR #965 round 3: XACA-1322-021/022)
+#
+# 021 (Blocking): kg?.x, kg .x, kg<TAB>.x, kg\n  .x, (kg).x, helper(kg),
+# [kg], a bare "let k = kg" (no ; or ,), "return kg", and "obj.kg.x" were
+# all invisible to both the required-member derivation AND the old
+# bracket/destructure/alias-only U: downgrade -- a file mixing one of
+# these with a normal kg.<member>() call read as a clean PASS. The fix is
+# the token-accounting ratchet: every standalone "kg" token must be
+# accounted for as a recognized kg.<member> access or the one allowed
+# require() binding, or it emits exactly one U: line.
+#
+# 022 (Advisory): "} = kg" was reported as BOTH destructure and alias.
+# The ratchet visits each token occurrence exactly once, so this class of
+# double-report is structurally impossible now, not just patched for this
+# one shape.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# _run_021_variant_row <slug> <variant_code_lines> -- mixes the variant
+# with a normal, satisfied kg.a() call (keygen exports ONLY "a") so a PASS
+# can only happen if the variant's own "kg" token is never accounted for.
+# The variant itself references kg.bMissing, a member the keygen does NOT
+# export -- proving the WARN is not incidentally caused by something else.
+_run_021_variant_row() {
+    local slug="$1" variant_code="$2"
+    test_start "021 variant [$slug]: mixed with a normal kg.a() call -> WARN, never a silent PASS (XACA-1322-021)"
+    _reload_vault_drift_lib
+    local d="$SANDBOX/v021-$slug"
+    mkdir -p "$d/scripts"
+    {
+        printf '%s\n' "const kg = require('./vault-keygen');"
+        printf '%s\n' "kg.a();"
+        printf '%s\n' "$variant_code"
+    } > "$d/scripts/vault-fetch.js"
+    printf '%s\n' "$(_gen_keygen_js a)" > "$d/scripts/vault-keygen.js"
+    _aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
+    assert_equal "WARN" "$_AITF_VD_STATUS" \
+        "the '$slug' kg-access variant mixed with a normal call must downgrade an otherwise-PASS result to WARN, never stay silently PASS (XACA-1322-021) -- got: $_AITF_VD_STATUS / $_AITF_VD_MSG"
+    assert_contains "$_AITF_VD_MSG" "could not fully verify" \
+        "expected the WARN message to name 'could not fully verify' -- got: $_AITF_VD_MSG" && test_pass
+}
+
+if [ "$_HAVE_NODE" = true ]; then
+    _run_021_variant_row "optional-chaining"      "kg?.bMissing();"
+    _run_021_variant_row "space-before-dot"       "kg .bMissing();"
+    _run_021_variant_row "tab-before-dot"         "$(printf 'kg\t.bMissing();')"
+    _run_021_variant_row "parenthesized"          "(kg).bMissing();"
+    _run_021_variant_row "chained-across-newline" "$(printf 'kg\n  .bMissing();')"
+    _run_021_variant_row "bare-argument"          "helper(kg);"
+    _run_021_variant_row "array-literal"          "[kg];"
+    _run_021_variant_row "alias-no-semicolon"     "let k = kg"
+    _run_021_variant_row "return-kg"              "return kg;"
+    _run_021_variant_row "kg-as-someone-elses-member" "obj.kg.x();"
+
+    test_start "021: a SECOND 'const kg = require(...)' binding is itself unaccounted -> WARN (only the first binding is allowed)"
+    _reload_vault_drift_lib
+    d="$SANDBOX/v021-second-require"
+    mkdir -p "$d/scripts"
+    cat > "$d/scripts/vault-fetch.js" <<'EOF_JS'
+const kg = require('./vault-keygen');
+kg.a();
+const kg = require('./vault-keygen');
+EOF_JS
+    printf '%s\n' "$(_gen_keygen_js a)" > "$d/scripts/vault-keygen.js"
+    _aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
+    assert_equal "WARN" "$_AITF_VD_STATUS" \
+        "a second require() binding must be treated as an unaccounted extra token, downgrading to WARN -- got: $_AITF_VD_STATUS / $_AITF_VD_MSG" && test_pass
+else
+    echo "    SKIP: node not resolvable on this machine/runner -- 021 node-probe-downgrade assertions skipped"
+fi
+
+test_start "021: pkg.x / kgx.y / \$kg.z are not even TOKENS -- no U: lines"
+d="$SANDBOX/deriv-nontoken.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+kg.resolveFleetUrl();
+pkg.x;
+kgx.y;
+$kg.z;
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:resolveFleetUrl" "$_scan_out" \
+    "pkg./kgx./\$kg. must never be treated as a 'kg' token -- got: $_scan_out" && test_pass
+
+test_start "021: a bare 'kg' mention (no dot) inside a comment is ignored, same as a kg.member mention"
+d="$SANDBOX/deriv-comment-bare-kg.js"
+cat > "$d" <<'EOF_JS'
+const kg = require('./vault-keygen');
+kg.resolveFleetUrl();
+// just kg, not a real reference
+EOF_JS
+_scan_out="$(_scan "$d")"
+assert_equal "M:CALLED:resolveFleetUrl" "$_scan_out" \
+    "a bare 'kg' mention inside a // comment leaked into the derived/unaccounted set: $_scan_out" && test_pass
+
+test_start "021: '// kg' inside a string literal on the same line as real code -- KNOWN LIMITATION, documented fail-closed (WARN or FAIL, never PASS)"
+# The comment stripper is a plain per-character state machine (documented
+# limitation, XACA-1322-018 review): it does not know about string/
+# template literals, so the literal text "// kg" INSIDE a string is
+# misread as the start of a real comment and eats the rest of the line --
+# including a genuine kg.resolveFleetUrl() call that follows on the same
+# line. The real vault-fetch.js does not contain this shape. The
+# resulting behavior here is NOT full soundness (the eaten call silently
+# drops out of the derived set) -- what IS guaranteed is that it can never
+# read as a silent PASS: with nothing left to derive from this file, the
+# check reports WARN ("could not determine which vault-keygen.js exports
+# ..."), never PASS.
+_reload_vault_drift_lib
+d="$SANDBOX/v021-string-literal-comment"
+mkdir -p "$d/scripts"
+printf '%s\n' \
+    "const kg = require('./vault-keygen');" \
+    "const s = \"// kg\"; kg.resolveFleetUrl();" \
+    > "$d/scripts/vault-fetch.js"
+printf '%s\n' "$(_gen_keygen_js resolveFleetUrl)" > "$d/scripts/vault-keygen.js"
+_scan_out="$(_scan "$d/scripts/vault-fetch.js")"
+assert_equal "" "$_scan_out" \
+    "expected the known-limitation stripper to eat the real call after '// kg' inside the string -- if this no longer holds, update this test and the doc comment together: $_scan_out"
+_aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
+assert_not_contains "$_AITF_VD_STATUS" "PASS" \
+    "a real kg.* call eaten by the string-literal comment limitation must never read as a silent PASS -- got: $_AITF_VD_STATUS / $_AITF_VD_MSG" && test_pass
+
+# ── Mutation sentinel (021 class) ───────────────────────────────────────
+# Proves the rows above are not vacuous: disabling the ratchet's
+# unaccounted-token branch reintroduces the exact false-PASS defect
+# XACA-1322-021 fixes, and a 021 variant row must then flip from WARN to
+# PASS.
+_MUTANT_021_LIB="$SANDBOX/vault-drift-mutant-021.sh"
+sed 's/if (!recognized) {/if (0) {/' "$VAULT_DRIFT_LIB" > "$_MUTANT_021_LIB"
+
+test_start "MUTATION SENTINEL (021 class): the patched temp copy actually differs from the real lib"
+if diff -q "$VAULT_DRIFT_LIB" "$_MUTANT_021_LIB" >/dev/null 2>&1; then
+    test_fail "mutant lib is IDENTICAL to the real lib -- the sed substitution did not match the ratchet's unaccounted branch; the row below would be vacuous"
+else
+    test_pass
+fi
+
+if [ "$_HAVE_NODE" = true ]; then
+    test_start "MUTATION SENTINEL [021 class]: disabling the unaccounted-token branch flips a 021 variant row (kg?.x()) from WARN to PASS"
+    _MUTANT_STATUS_021="$(
+        unset _VAULT_DRIFT_SH_LOADED
+        # shellcheck source=../libexec/lib/vault-drift.sh
+        source "$_MUTANT_021_LIB"
+        d="$SANDBOX/mutant-021"
+        mkdir -p "$d/scripts"
+        printf '%s\n' "const kg = require('./vault-keygen');" "kg.a();" "kg?.bMissing();" > "$d/scripts/vault-fetch.js"
+        printf '%s\n' "$(_gen_keygen_js a)" > "$d/scripts/vault-keygen.js"
+        _aitf_vault_drift_check "$d/scripts" "$d/shipped" >/dev/null 2>&1
+        echo "$_AITF_VD_STATUS"
+    )"
+    assert_equal "PASS" "$_MUTANT_STATUS_021" \
+        "mutant (unaccounted-token branch disabled) should have flipped the kg?.x() row from WARN to PASS -- if this doesn't hold, the 021 rows above cannot be trusted to catch a regression of the ratchet. Got: $_MUTANT_STATUS_021" \
+        && test_pass
+else
+    echo "    SKIP: node not resolvable on this machine/runner -- 021 mutation sentinel needs the node-probe PASS path"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
