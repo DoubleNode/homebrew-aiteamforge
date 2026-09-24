@@ -28,6 +28,11 @@ source "${LIBEXEC_DIR}/lib/launchagents.sh"
 [ -f "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh" ] && source "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh" 2>/dev/null || true
 # shellcheck source=../lib/kanban-paths.sh
 [ -f "${LIBEXEC_DIR}/lib/kanban-paths.sh" ] && source "${LIBEXEC_DIR}/lib/kanban-paths.sh" 2>/dev/null || true
+# XACA-1322-013: shared vault-fetch.js/vault-keygen.js drift detector, also
+# sourced by validate-install.sh -- ONE implementation for both callers (see
+# vault-drift.sh's own header comment for why the duplicate mattered).
+# shellcheck source=../lib/vault-drift.sh
+[ -f "${LIBEXEC_DIR}/lib/vault-drift.sh" ] && source "${LIBEXEC_DIR}/lib/vault-drift.sh" 2>/dev/null || true
 # XACA-1070-007: mandatory-team vocabulary (atf_mandatory_teams/
 # atf_is_mandatory_team/atf_team_provisioned) — the SAME lib the setup
 # wizard's force-append and the upgrade backfill source, so this doctor
@@ -77,7 +82,7 @@ Components:
   framework       Framework installation integrity
   version-drift   Cellar vs working-dir version drift (XACA-0578)
   helpers-drift   Installed kanban-helpers.sh function inventory vs shipped template (XACA-1095)
-  vault-drift     vault-fetch.js / vault-keygen.js resolveFleetUrl export drift (XACA-1322)
+  vault-drift     vault-fetch.js / vault-keygen.js kg.* export drift (XACA-1322)
   config          Configuration files and validity
   board           Kanban board resolution + template/stub-collision detection (XACA-0655)
   connect         Cockpit connect scripts vs installed team instances (XACA-0845)
@@ -1139,102 +1144,52 @@ check_kanban_helpers_inventory() {
 # Check: vault-fetch.js / vault-keygen.js drift (XACA-1322)
 #
 # vault-fetch.js require()s ./vault-keygen.js (a same-directory sibling in
-# scripts/) and calls kg.resolveFleetUrl() to locate the fleet-monitor relay.
-# An upgrade that refreshes vault-fetch.js but leaves a stale (pre-XACA-0972)
-# vault-keygen.js beside it crashes `cc` at runtime with "kg.resolveFleetUrl
-# is not a function". check_framework's required-file inventory (and
-# validate-install.sh's _val_check_scripts) only confirm BOTH files are
+# scripts/) and calls several kg.* members on it to locate/talk to the
+# fleet-monitor relay. An upgrade that refreshes vault-fetch.js but leaves a
+# stale vault-keygen.js beside it crashes `cc` at runtime with
+# "kg.<name> is not a function". check_framework's required-file inventory
+# (and validate-install.sh's _val_check_scripts) only confirm BOTH files are
 # PRESENT — that check is blind to a case where the sibling exists but is
-# missing the function vault-fetch.js actually calls. This check verifies
-# they agree with each other, directly in `aiteamforge doctor`.
+# missing a member vault-fetch.js actually calls. This check verifies they
+# agree with each other, directly in `aiteamforge doctor`.
+#
+# XACA-1322-013: the actual detection logic lives in the shared
+# libexec/lib/vault-drift.sh (_aitf_vault_drift_check), sourced above -- this
+# function only renders that result in doctor's check_result style, and
+# supplies this file's own richer PATH-aware node resolver (_x1097_resolve)
+# to it. Do not re-add drift-detection logic here; fix vault-drift.sh
+# instead so validate-install.sh's copy of this check can't drift from it
+# again (that duplication is exactly what let the same false-PASS/false-FAIL
+# bug ship in both places -- PR #965 review).
 check_vault_keygen_drift() {
   print_section "Checking Vault Fetch/Keygen Compatibility"
 
-  local working_dir scripts_dir fetch_js keygen_js
+  local working_dir framework_dir scripts_dir fetch_js shipped_dir
   working_dir=$(get_working_dir)
+  framework_dir=$(get_framework_dir)
   scripts_dir="${working_dir}/scripts"
   fetch_js="${scripts_dir}/vault-fetch.js"
-  keygen_js="${scripts_dir}/vault-keygen.js"
+  shipped_dir="${framework_dir}/share/scripts"
 
   if [ ! -f "$fetch_js" ]; then
     print_info "  vault-fetch.js not installed — vault drift check not applicable"
     return
   fi
 
-  if [ ! -f "$keygen_js" ]; then
-    check_result fail "vault-keygen.js missing but vault-fetch.js requires it — kb-msg vault ops will crash (kg.resolveFleetUrl is not a function)" \
-      "Run: aiteamforge upgrade --non-interactive"
+  if ! command -v _aitf_vault_drift_check >/dev/null 2>&1; then
+    check_result warn "vault-drift.sh not available — could not verify vault-keygen.js/vault-fetch.js compatibility" \
+      "Expected: ${LIBEXEC_DIR}/lib/vault-drift.sh"
     return
   fi
 
-  # Prefer a real probe: require() the installed vault-keygen.js and check
-  # the export is a live function. A require() failure for an UNRELATED
-  # reason (e.g. libsodium-wrappers not installed) says nothing about
-  # whether THIS file exports resolveFleetUrl — fall back to the static
-  # grep below rather than reporting drift off an unrelated error.
-  local _vk_node
-  if _vk_node="$(_x1097_resolve node)"; then
-    local probe_out probe_rc
-    if probe_out="$("$_vk_node" -e '
-        let kg;
-        try {
-          kg = require(process.argv[1]);
-        } catch (e) {
-          console.error("REQUIRE_FAILED:" + (e && e.message ? e.message : String(e)));
-          process.exit(2);
-        }
-        process.exit(typeof kg.resolveFleetUrl === "function" ? 0 : 1);
-      ' "$keygen_js" 2>&1)"; then
-      probe_rc=0
-    else
-      probe_rc=$?
-    fi
+  _aitf_vault_drift_check "$scripts_dir" "$shipped_dir"
 
-    if [ "$probe_rc" -eq 0 ]; then
-      check_result pass "vault-keygen.js exports resolveFleetUrl() (verified via node require)"
-      return
-    elif [ "$probe_rc" -eq 1 ]; then
-      check_result fail "vault-keygen.js loads but does NOT export resolveFleetUrl() — stale pre-XACA-0972 copy beside a current vault-fetch.js (kg.resolveFleetUrl is not a function)" \
-        "Run: aiteamforge upgrade --non-interactive"
-      return
-    fi
-    # probe_rc == 2 (or anything else): require() itself failed (missing
-    # dep, etc.) — inconclusive about THIS file. Fall through to the static
-    # grep fallback below instead of reporting drift off an unrelated error.
-    if [ "$VERBOSE" = true ] && [ -n "${probe_out:-}" ]; then
-      echo "    node probe inconclusive: $(printf '%s' "$probe_out" | tail -n1)"
-    fi
-    unset probe_out probe_rc
-  fi
-
-  # Static fallback: node unavailable, or its require() probe above could
-  # not run to completion. Text-match resolveFleetUrl inside
-  # module.exports. A clean miss here IS real evidence (this is the exact
-  # shape of the historical bug — a stale file genuinely lacking the
-  # export), so it is reported as FAIL, not a shrug. WARN is reserved for
-  # truly no signal at all (file unreadable, or the exports block itself
-  # can't be located).
-  if [ ! -r "$keygen_js" ]; then
-    check_result warn "vault-keygen.js present but not readable — could not verify resolveFleetUrl export" \
-      "Check file permissions: ${keygen_js}"
-    return
-  fi
-
-  local exports_block
-  exports_block="$(awk '/module\.exports[[:space:]]*=/{flag=1} flag{print} flag && /^\}/{exit}' "$keygen_js" 2>/dev/null)" || true
-
-  if [ -z "$exports_block" ]; then
-    check_result warn "vault-keygen.js present but could not verify resolveFleetUrl export (no node on PATH and module.exports block not found by static scan)" \
-      "Install node for a definitive check, or inspect: ${keygen_js}"
-    return
-  fi
-
-  if printf '%s\n' "$exports_block" | grep -q 'resolveFleetUrl'; then
-    check_result pass "vault-keygen.js exports resolveFleetUrl() (verified via static grep — node unavailable for a live probe)"
-  else
-    check_result fail "vault-keygen.js's module.exports does NOT mention resolveFleetUrl — stale pre-XACA-0972 copy beside a current vault-fetch.js (kg.resolveFleetUrl is not a function)" \
-      "Run: aiteamforge upgrade --non-interactive"
-  fi
+  case "$_AITF_VD_STATUS" in
+    PASS) check_result pass "$_AITF_VD_MSG" ;;
+    WARN) check_result warn "$_AITF_VD_MSG" ;;
+    FAIL) check_result fail "$_AITF_VD_MSG" ;;
+    *) : ;;  # SKIP (or unset) -- nothing to render; the fetch_js gate above already covers it
+  esac
 }
 
 # Check: Configuration

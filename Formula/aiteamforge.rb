@@ -187,6 +187,15 @@ class Aiteamforge < Formula
     # nothing on every consumer.
     assert_path_exists libexec/"libexec/lib/mandatory-teams.sh"
 
+    # XACA-1322-013: vault-drift.sh is the SINGLE shared implementation of the
+    # vault-fetch.js/vault-keygen.js drift check, sourced by both
+    # validate-install.sh and aiteamforge-doctor.sh. Both callers source it
+    # defensively (`[ -f ... ] && source ...`), so a missing file degrades to
+    # a silent WARN rather than a crash -- assert it here so a packaging
+    # regression fails the Formula test instead of shipping a doctor check
+    # that quietly never runs on every consumer.
+    assert_path_exists libexec/"libexec/lib/vault-drift.sh"
+
     # Verify alias templates exist (must ship in released package for install-shell.sh)
     assert_path_exists libexec/"share/templates/aliases/agent-aliases.sh"
     assert_path_exists libexec/"share/templates/aliases/cc-aliases.sh"
