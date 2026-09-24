@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.25] - 2026-09-24
 - **XACA-1322** — `aiteamforge upgrade` now refreshes all five consumer datafiles (`msg-client.js`, `vault-keygen.js`, `vault-fetch.js`, `package.json`, `package-lock.json`), not just `vault-fetch.js`. Previously an upgraded machine got a new `vault-fetch.js` beside a stale `vault-keygen.js`, and `cc` crashed with `kg.resolveFleetUrl is not a function`.
   - The list is defined once, in `_aitf_consumer_datafiles()` (`libexec/lib/msg-client-deps.sh`), and both `install-shell.sh` and `update_runtime_helpers` read it, so install and upgrade cannot drift apart again.
   - A refreshed `package-lock.json` re-runs `npm ci` through the existing lockfile-checksum check.
@@ -7208,7 +7210,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.24...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.25...HEAD
+[0.20.25]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.24...v0.20.25
 [0.20.24]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.23...v0.20.24
 [0.20.23]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.22...v0.20.23
 [0.20.22]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.21...v0.20.22
