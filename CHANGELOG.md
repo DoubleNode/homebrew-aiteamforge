@@ -11,6 +11,51 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - `_kb_create_item_worktree` / `_kb_discover_worktree` now match canonical: an existing directory (orphaned or a reused worktree) needs confirmation; a non-interactive shell refuses unless `KB_RUN_ASSUME_YES` is set. New helpers `_kb_umbrella_root`, `_kb_resolve_project_root`, `_kb_confirm_existing_worktree`.
   - Repo paths containing a space (for example `.../Main Event/...`) no longer break worktree creation or discovery from inside an existing worktree: creating one registered a newline-containing path outside the repo, and an unregistered dir could not be discovered (quoted `dirname`, not `xargs dirname`).
   - Removed 16 client-specific arms from `_kb_get_team_code` / `_kb_get_team_from_code` (XACA-0628 regression). Freelance teams resolve from `~/.aiteamforge/team-paths.json`; an unregistered code resolves empty. The template's help/comment examples no longer name a client slug.
+- **XACA-1151 PR-C** — ported the XACA-0551 time-tracking call sites and batch-H fail-closed guards
+  into the template, stacked on PR-B
+  - `kb-done` flushes `timeWorkedMs` and sets `leadTimeMs` on completion (byte-identical to canonical
+    apart from the pre-existing legacy loose retrospective-file fallback, deliberately kept —
+    XACA-0815); `kb-cancel` and `kb-stop-working` now flush `timeWorkedMs` before clearing
+    `workStartedAt` (byte-identical to canonical); `_kb_add_subitem_blocker` now calls the shared
+    `_kb_flush_work_time` instead of an inlined BSD `date -j` computation; `_kb_reopen_item`'s debug
+    subitem numbering is `max(existing suffix)+1`, not `count+1` (the old formula produced a
+    duplicate id when a lower-numbered subitem had been removed, leaving a gap).
+  - `_kb_get_config_dir` / `_kb_get_activity_dir` fail closed (non-zero return, no output) instead of
+    returning a bogus root-relative path (`/config`, `/activity`) when the kanban dir can't be
+    resolved. `_kb_protected_cancel_guard` restores the 8th `hint_extra` argument (XACA-0886), which
+    never reached the tap. `kb-sweep` gains the XACA-0624 unestimated-item advisory notice (its other
+    drift from canonical, e.g. the knowledge-count root, is unchanged — out of this PR's scope).
+    `_kb_get_persona_delegation_guide`'s iOS table gains the missing `beverly` Bug Fixing row
+    (XACA-0237). `_kb_log_activity` restores the generic `freelance-<terminal>` agent_id fallback
+    (XACA-0628); its `amb-session-map.json` path stays on `${AITEAMFORGE_DIR}` (template-only,
+    deliberate divergence from canonical's `~/dev-team`).
+  - **`kb-pause`/`kb-resume` item-level arms are now ported too, retiring XACA-0819-014.**
+    XACA-0819-014 narrowed the sync to subitems only because at the time nothing at the item level
+    banked `workStartedAt` on completion — `kb-done`/`kb-cancel`/`kb-stop-working` all deleted it
+    unbanked, so an item-level pause/resume flush would have been paired with nothing. This same PR's
+    port of `_kb_flush_work_time` into those three verbs removes that premise, and leaves the OLD
+    pause/resume behavior actively wrong rather than merely incomplete: an item's `workStartedAt` kept
+    running straight through a pause (nothing cleared it), so `kb-done` went on to book the paused
+    wall-clock gap as work — the same `kb-variance` corruption XACA-0819-014 existed to prevent, now
+    inflating instead of deflating. `kb-pause`'s item arm now flushes + clears `workStartedAt`;
+    `kb-resume`'s item arm now restarts `workStartedAt` and seeds `startedAt` (`//=`) — both
+    byte-identical to canonical, matching the subitem arms which were already correct. `kb-backlog
+    unpick`/`demote` remain the one deliberate, UNCHANGED exception: canonical's `unpick` flush is on
+    record inflating `timeWorkedMs` to ~12.2 billion ms from one stale `workStartedAt` (XACA-0884),
+    where a pause span is bounded by how long a human leaves work paused and an unpick/demote span can
+    be arbitrarily stale. Losing an unpick/demote item's final open span reads slightly low, the
+    conservative direction. Updated `tests/test-xaca-0819-pause-resume-active-span.sh`, which was
+    pinned to the old "item arm untouched" premise and had already gone red (1/20) from this PR's
+    `kb-done`/`kb-cancel`/`kb-stop-working` port alone, before pause/resume was touched: it now asserts
+    item-level flush/restart (mirroring the subitem coverage), a file-wide call-site count of 9 (was
+    1), and a new case isolating `kb-backlog unpick`'s arm to confirm it still has zero call sites.
+  - New suite `tests/test-xaca-1151-prc-time-tracking.sh` (outer repo): 47 pinned assertions, 14
+    negative controls against a frozen pre-port fixture extracted from this PR's own base commit
+    (`b781f89`; `kb-pause`/`kb-resume` bodies additionally verified byte-identical at this PR's own
+    first-pass tap commit, so the same fixture validly covers both), with a runtime byte-provenance
+    re-check, including a sleep-free deterministic item-level pause→resume→done cycle proving the
+    paused gap is excluded from `timeWorkedMs`. Verified under `/bin/bash` 3.2, brew bash 5, and
+    `env -i`.
 
 ## [0.20.26] - 2026-09-25
 - **XACA-1340** — agent panels no longer exit with "iTerm2 not running" while iTerm2 is running. The liveness check used `pgrep -f "iTerm.app"`, but macOS `pgrep` excludes the caller's ancestors unless `-a` is passed, and a local panel runs inside iTerm2, so the check never saw its own host. Panels launched over `ssh -t` (connect scripts) also probed the remote host. `share/scripts/agent-panel-display.sh` now skips the check under SSH and otherwise uses `pgrep -a -x iTerm2`.

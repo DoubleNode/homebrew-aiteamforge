@@ -256,7 +256,11 @@ PYEOF
 _kb_get_config_dir() {
     local team="$1"
     local kanban_dir
-    kanban_dir=$(_kb_get_kanban_dir "$team")
+    kanban_dir=$(_kb_get_kanban_dir "$team") || return 1
+    if [[ -z "$kanban_dir" || ! -d "$kanban_dir" ]]; then
+        echo "Error: could not resolve kanban directory for team '${team}'" >&2
+        return 1
+    fi
     echo "${kanban_dir}/config"
 }
 
@@ -2552,9 +2556,9 @@ _kb_check_unblock_dependents() {
 # Add a blocker to a subitem (XACA-0025)
 # Usage: _kb_add_subitem_blocker <board_file> <subitem_id> <blocker_id>
 _kb_add_subitem_blocker() {
-    local board_file="$1"
-    local subitem_id="$2"
-    local blocker_id="$3"
+    local board_file="${1-}"
+    local subitem_id="${2-}"
+    local blocker_id="${3-}"
 
     local indices timestamp
     indices=$(_kb_resolve_subitem_id "$board_file" "$subitem_id")
@@ -2567,6 +2571,13 @@ _kb_add_subitem_blocker() {
     local parent_idx="${indices%%:*}"
     local sub_idx="${indices##*:}"
 
+    # XACA-0948-006 audit: intentionally NOT converged to ITEM_STATUS_CONTRACT.md
+    # §1.5. blocker_status only gates a completed/cancelled equality check, and per
+    # the contract's ceiling (§1.2) an unrecorded item/subitem can never resolve to
+    # either -- so "empty"/"todo"/the full §1.5 value all fail these two comparisons
+    # identically. The value IS printed in the error message below, but only inside
+    # the completed/cancelled branch, where it is always a genuine recorded terminal
+    # status, never the unrecorded default. Left as-is.
     # Validate that blocker is not already resolved
     local blocker_status
     if _kb_is_subitem_id "$blocker_id"; then
@@ -2594,23 +2605,9 @@ _kb_add_subitem_blocker() {
 
     timestamp=$(_kb_get_timestamp)
 
-    # XACA-0029: Calculate and accumulate work time if actively working
-    local work_started_at existing_time_ms total_time_ms
-    work_started_at=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].workStartedAt // empty" -r)
-    existing_time_ms=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].timeWorkedMs // 0")
-    total_time_ms="$existing_time_ms"
-
-    if [[ -n "$work_started_at" ]]; then
-        # Calculate elapsed time in milliseconds
-        local start_epoch now_epoch elapsed_ms
-        # Strip Z suffix and parse as UTC (macOS date -j -f ignores timezone suffix)
-        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${${work_started_at%\.[0-9]*}%Z}" "+%s" 2>/dev/null || echo "0")
-        now_epoch=$(date -u "+%s")
-        if [[ "$start_epoch" != "0" ]] && [[ "$start_epoch" -gt 0 ]]; then
-            elapsed_ms=$(( (now_epoch - start_epoch) * 1000 ))
-            total_time_ms=$(( existing_time_ms + elapsed_ms ))
-        fi
-    fi
+    # XACA-0029/XACA-0551: Flush active-effort time before clearing the span.
+    local total_time_ms
+    total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$parent_idx].subitems[$sub_idx]")
 
     _kb_jq_update "$board_file" '
         .backlog[$pidx].subitems[$sidx].blockedBy = ((.backlog[$pidx].subitems[$sidx].blockedBy // []) + [$blocker] | unique) |
@@ -2727,7 +2724,11 @@ _kb_get_activity_dir() {
     fi
 
     local kanban_dir
-    kanban_dir=$(_kb_get_kanban_dir "$team")
+    kanban_dir=$(_kb_get_kanban_dir "$team") || return 1
+    if [[ -z "$kanban_dir" || ! -d "$kanban_dir" ]]; then
+        echo "Warning: _kb_get_activity_dir: could not resolve kanban directory for team '${team}'" >&2
+        return 1
+    fi
 
     local activity_dir="${kanban_dir}/activity"
 
@@ -2787,7 +2788,14 @@ _kb_log_activity() {
             fi
             _map_file="${AITEAMFORGE_DIR}/amb-session-map.json"
             if [[ -n "$_session_name" ]] && [[ -f "$_map_file" ]]; then
-                agent_id=$(jq -r --arg s "$_session_name" '.[$s] // "unknown"' "$_map_file" 2>/dev/null) || agent_id="unknown"
+                agent_id=$(jq -r --arg s "$_session_name" '.[$s] // ""' "$_map_file" 2>/dev/null) || agent_id=""
+                # XACA-0628: overlay-only freelance projects reduce to the
+                # generic 'freelance-<terminal>' key (no project-specific entry).
+                if [[ -z "$agent_id" ]] && [[ "${_session_name#freelance-}" != "$_session_name" ]]; then
+                    local _generic_key="freelance-${_session_name##*-}"
+                    agent_id=$(jq -r --arg s "$_generic_key" '.[$s] // ""' "$_map_file" 2>/dev/null) || agent_id=""
+                fi
+                [[ -z "$agent_id" ]] && agent_id="unknown"
             else
                 agent_id="unknown"
             fi
@@ -3166,36 +3174,50 @@ kb-pause() {
     local timestamp
     timestamp=$(_kb_get_timestamp)
 
-    # XACA-0551: A pause ENDS the current active span -- flush elapsed into
+    # XACA-0551: A pause ENDS the current active span. Flush the elapsed time into
     # timeWorkedMs and clear workStartedAt so post-resume time is measured fresh.
+    # The flush total is computed read-only; resolve the right base_path for either
+    # a main item or a subitem working_on_id.
     #
-    # SUBITEM ONLY -- deliberate divergence from canonical (XACA-0819-014).
-    # Canonical applies this to items AND subitems. Here it is applied to
-    # SUBITEMS ONLY, because this template's item level has no counterpart
-    # flush anywhere: kb-done / kb-cancel / kb-stop-working / kb-backlog unpick
-    # all delete an item's workStartedAt WITHOUT banking it. Writing item-level
-    # timeWorkedMs on pause alone would therefore produce a total that is always
-    # missing its final span -- and `kb-variance` (share/templates/aliases/
-    # kanban-aliases.sh) selects completed items on `timeWorkedMs > 0`, so those
-    # items would silently graduate from the honest `no_time` bucket into the
-    # estimate-accuracy math carrying a systematically LOW actual. An absent
-    # number is better than a plausible wrong one.
+    # ITEM-LEVEL NOW MATCHES CANONICAL (XACA-1151 PR-C, retiring XACA-0819-014).
+    # XACA-0819-014 previously held this back to subitems only, because at the
+    # time this template's item level had NO counterpart flush anywhere:
+    # kb-done / kb-cancel / kb-stop-working all deleted an item's
+    # workStartedAt WITHOUT banking it. That premise no longer holds -- PR-C
+    # wired _kb_flush_work_time into all three of those verbs at the item
+    # level. With THIS function still skipping the item-level flush, a paused
+    # item's workStartedAt kept ticking straight through the pause, so
+    # kb-done went on to book the paused wall-clock gap as if it were active
+    # work -- the exact `kb-variance` estimate-accuracy corruption
+    # XACA-0819-014 existed to prevent, now happening in the INFLATING
+    # direction instead of the deflating one it was written against. Item and
+    # subitem now flush identically, closing that gap.
     #
-    # Subitems have the counterpart flushes canonical assumes (4 sites in this
-    # file), so the span is fully accounted there and this is safe.
-    #
-    # Do NOT "complete" this by porting flush into those 4 item-level verbs
-    # without re-deriving the semantics first: canonical's `unpick` flush is on
-    # record inflating timeWorkedMs to ~12.2 BILLION ms from a single stale
-    # workStartedAt (see XACA-0884 in the outer CHANGELOG).
+    # `kb-backlog unpick` (and `demote`) remain the ONE deliberate exception:
+    # they still do NOT call _kb_flush_work_time. Canonical's `unpick` flush
+    # is on record inflating timeWorkedMs to ~12.2 BILLION ms from a single
+    # stale workStartedAt (XACA-0884, outer CHANGELOG) -- porting it would
+    # trade a rare, large, silent corruption for a routine, small, disclosed
+    # one. Leaving unpick/demote non-flushing means an item stopped that way
+    # simply loses its final open span (timeWorkedMs reads slightly LOW),
+    # which is the conservative failure direction and is unchanged by this
+    # ticket.
     local pause_total_time_ms="0"
-    if [[ -n "$working_on_id" ]] && _kb_is_subitem_id "$working_on_id"; then
-        local pause_indices pause_pidx pause_sidx
-        pause_indices=$(_kb_resolve_subitem_id "$board_file" "$working_on_id")
-        pause_pidx="${pause_indices%%:*}"
-        pause_sidx="${pause_indices##*:}"
-        if [[ "$pause_pidx" != "-1" ]] && [[ "$pause_sidx" != "-1" ]]; then
-            pause_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$pause_pidx].subitems[$pause_sidx]")
+    if [[ -n "$working_on_id" ]]; then
+        if _kb_is_subitem_id "$working_on_id"; then
+            local pause_indices pause_pidx pause_sidx
+            pause_indices=$(_kb_resolve_subitem_id "$board_file" "$working_on_id")
+            pause_pidx="${pause_indices%%:*}"
+            pause_sidx="${pause_indices##*:}"
+            if [[ "$pause_pidx" != "-1" ]] && [[ "$pause_sidx" != "-1" ]]; then
+                pause_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$pause_pidx].subitems[$pause_sidx]")
+            fi
+        else
+            local pause_item_idx
+            pause_item_idx=$(_kb_find_by_id "$board_file" "$working_on_id")
+            if [[ "$pause_item_idx" -ge 0 ]]; then
+                pause_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$pause_item_idx]")
+            fi
         fi
     fi
 
@@ -3218,11 +3240,12 @@ kb-pause() {
             # Try to find and update the item or subitem
             .backlog = [.backlog[] |
                 if .id == $workingOnId then
-                    # Direct match on parent item — paused state only.
-                    # NO span flush/clear here: see the SUBITEM ONLY note above.
+                    # Direct match on parent item — end the active span
                     .pausedReason = $reason |
                     .pausedAt = $timestamp |
                     .pausedPreviousStatus = $prevStatus |
+                    (if $timeMs != "0" then .timeWorkedMs = ($timeMs | tonumber) else . end) |
+                    del(.workStartedAt) |
                     .updatedAt = $timestamp
                 elif (.subitems // []) | any(.id == $workingOnId) then
                     # Match on a subitem — end the active span on the subitem
@@ -4992,18 +5015,28 @@ kb-resume() {
         (if $workingOnId != "" then
             .backlog = [.backlog[] |
                 if .id == $workingOnId then
-                    # Direct match on parent item — clear paused state ONLY.
-                    # Deliberately does NOT restart the span (XACA-0819-014):
-                    # kb-pause does not END it at item level in this template, so
-                    # overwriting workStartedAt here would DISCARD the pre-pause
-                    # elapsed that the live active-effort display still reads.
-                    # Item-level pause/resume behaviour is therefore unchanged
-                    # from before XACA-0819. Pause and resume must stay paired:
-                    # if the item-level flush is ever added to kb-pause, add the
-                    # restart back HERE in the same change, never separately.
+                    # Direct match on parent item — START a fresh active span
+                    # (XACA-0551). kb-pause flushed + cleared workStartedAt; resume
+                    # restarts the clock so post-resume time is credited.
+                    #
+                    # ITEM-LEVEL NOW MATCHES CANONICAL (XACA-1151 PR-C, retiring
+                    # the XACA-0819-014 pairing note). The old comment here said
+                    # resume must never restart the item-level span because
+                    # kb-pause never ended it -- true at the time, since nothing
+                    # banked an item workStartedAt anywhere. PR-C wired
+                    # _kb_flush_work_time into kb-done/kb-cancel/kb-stop-working
+                    # at the item level and into kb-pause item arm (see that
+                    # function own updated comment), so the span IS now ended at
+                    # pause; restarting it here on resume is the correct
+                    # counterpart, not the data-loss risk it used to be.
+                    # kb-backlog unpick / demote remain the one deliberate
+                    # non-flushing exception (XACA-0884) and are unaffected by
+                    # this change.
                     del(.pausedReason) |
                     del(.pausedAt) |
                     del(.pausedPreviousStatus) |
+                    .workStartedAt = $timestamp |
+                    .startedAt //= $timestamp |
                     .updatedAt = $timestamp
                 elif (.subitems // []) | any(.id == $workingOnId) then
                     # Match on a subitem — START a fresh active span on the subitem
@@ -5605,6 +5638,14 @@ kb-sweep() {
         echo ""
     fi
 
+    # XACA-0624: Advisory-only — unestimated items surface here so they are discoverable.
+    # Does NOT affect PROTECTED SUBITEMS UNRESOLVED marker or kb-sweep exit code.
+    # The start gate (_kb_require_points) is the enforcement mechanism; this is informational.
+    if ! _kb_is_estimated "$board_file" "$item_idx"; then
+        echo "  ℹ️  [points] This item has no effort estimate (set with: kb-backlog points $working_id <hours>)"
+        echo ""
+    fi
+
     # Retrospective file validation (blocking — prevents kb-done if retro file is missing)
     # Check if there's a completed "Retrospective" subitem and validate the file exists
     local has_retro_subitem=false retro_subitem_completed=false retro_blocking=false
@@ -6016,11 +6057,14 @@ kb-done() {
     board_file=$(_kb_get_board_file "$team")
     window_id=$(_kb_get_window_id "$terminal" "$window_name")
 
-    # Get working_id from argument or from activeWindows
+    # Get working_id from argument or from activeWindows.
+    # XACA-0462: Use ${1-} default expansion — the PR auto-merge monitoring
+    # loop (CLAUDE.md) calls `kb-done` with no args under bash `set -u`, and
+    # an unguarded "$1" tripped "$1: unbound variable" post-merge.
     local working_id explicit_id_provided=false
-    if [[ -n "$1" ]]; then
+    if [[ -n "${1-}" ]]; then
         # Use provided item ID
-        working_id="$1"
+        working_id="${1-}"
         explicit_id_provided=true
 
         # When explicit ID is provided, derive correct board file from ID prefix
@@ -6044,7 +6088,7 @@ kb-done() {
     # Check for --force flag (allows completing items with incomplete subitems)
     # --force is restricted to user-only usage. Agents must NOT use this flag.
     local force_complete=false
-    if [[ "$1" == "--force" ]] || [[ "$2" == "--force" ]]; then
+    if [[ "${1-}" == "--force" ]] || [[ "${2-}" == "--force" ]]; then
         force_complete=true
         echo "WARNING: --force bypasses subitem completion checks."
         echo "WARNING: This flag is reserved for the user only. Agents must NOT use --force."
@@ -6063,25 +6107,44 @@ kb-done() {
         parent_idx=$(_kb_find_by_id "$board_file" "$parent_id")
         if [[ "$parent_idx" -ge 0 ]]; then
             # Capture old status before update.
-            # XACA-0948: subitem-layer resolution (ITEM_STATUS_CONTRACT.md
-            # §1.1) -- recorded status wins verbatim (including ""-safe
-            # handling), else "todo". No evidence branch at the subitem layer.
+            # XACA-0948-006: subitem-layer resolution (ITEM_STATUS_CONTRACT.md
+            # §1.1) — recorded status wins verbatim (including ""-safe handling),
+            # else "todo". No evidence branch at the subitem layer.
             local sub_old_status
             sub_old_status=$(_kb_jq_read "$board_file" \
                 "${_KB_ITEM_STATUS_JQ_DEFS} [.backlog[\$pidx].subitems[] | select(.id == \$subId)] | first | kb_resolve_subitem_status" \
                 --argjson pidx "$parent_idx" --arg subId "$working_id" -r 2>/dev/null || echo "todo")
+            # XACA-0551: flush the in-flight active span into timeWorkedMs before
+            # the span is cleared (this was the leak — kb-done del'd workStartedAt
+            # without crediting the elapsed time).
+            local sub_done_indices sub_done_subidx sub_total_time_ms
+            sub_done_indices=$(_kb_resolve_subitem_id "$board_file" "$working_id")
+            sub_done_subidx="${sub_done_indices##*:}"
+            sub_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$parent_idx].subitems[$sub_done_subidx]")
+            # XACA-0665: gate item_found and activity log on board-write success so a
+            # jq transform failure (e.g. fromdateiso8601 rejecting a fractional timestamp)
+            # does not produce a misleading "Task completed!" message.
             if ! _kb_jq_update "$board_file" '
                 .backlog[$pidx].subitems = [.backlog[$pidx].subitems[] |
                     if .id == $subId then
                         .status = "completed" |
                         .completedAt = $ts |
                         .updatedAt = $ts |
+                        (if $timeMs != "0" then .timeWorkedMs = ($timeMs | tonumber) else . end) |
+                        # XACA-0551: pure wall-clock lead time (createdAt//addedAt → completedAt).
+                        # Forward-only: skip gracefully when the anchor is missing (no backfill).
+                        ( (.createdAt // .addedAt) as $created |
+                          if $created != null then
+                            .leadTimeMs = ((($ts | sub("\\.[0-9]+Z?$";"Z") | sub("Z$";"") + "Z" | fromdateiso8601)
+                                          - ($created | sub("\\.[0-9]+Z?$";"Z") | sub("Z$";"") + "Z" | fromdateiso8601)) * 1000)
+                          else . end ) |
                         del(.activelyWorking, .workStartedAt, .worktree, .worktreeBranch, .worktreeWindowId)
                     else . end
                 ] |
                 .backlog[$pidx].updatedAt = $ts |
                 .lastUpdated = $ts
-            ' --argjson pidx "$parent_idx" --arg subId "$working_id" --arg ts "$timestamp"; then
+            ' --argjson pidx "$parent_idx" --arg subId "$working_id" --arg ts "$timestamp" \
+              --arg timeMs "$sub_total_time_ms"; then
                 echo "❌ kb-done: board write failed (jq transform produced no output). Task NOT completed." >&2
                 return 1
             fi
@@ -6105,17 +6168,33 @@ kb-done() {
                 fi
             fi
 
+            # XACA-0551: flush the in-flight active span into timeWorkedMs before
+            # clearing workStartedAt (the leak fix for main items).
+            local item_total_time_ms
+            item_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$item_idx]")
+            # XACA-0665: gate item_found and activity log on board-write success so a
+            # jq transform failure (e.g. fromdateiso8601 rejecting a fractional timestamp)
+            # does not produce a misleading "Task completed!" message.
             if ! _kb_jq_update "$board_file" \
                 '.backlog[$idx].status = "completed" |
                  .backlog[$idx].completedAt = $ts |
                  .backlog[$idx].updatedAt = $ts |
+                 (if $timeMs != "0" then .backlog[$idx].timeWorkedMs = ($timeMs | tonumber) else . end) |
+                 # XACA-0551: pure wall-clock lead time (createdAt//addedAt → completedAt).
+                 # Forward-only: skip gracefully when the anchor is missing (no backfill).
+                 ( (.backlog[$idx].createdAt // .backlog[$idx].addedAt) as $created |
+                   if $created != null then
+                     .backlog[$idx].leadTimeMs = ((($ts | sub("\\.[0-9]+Z?$";"Z") | sub("Z$";"") + "Z" | fromdateiso8601)
+                                                  - ($created | sub("\\.[0-9]+Z?$";"Z") | sub("Z$";"") + "Z" | fromdateiso8601)) * 1000)
+                   else . end ) |
                  del(.backlog[$idx].activelyWorking) |
                  del(.backlog[$idx].workStartedAt) |
                  del(.backlog[$idx].worktree) |
                  del(.backlog[$idx].worktreeBranch) |
                  del(.backlog[$idx].worktreeWindowId) |
                  .lastUpdated = $ts' \
-                --argjson idx "$item_idx" --arg ts "$timestamp"; then
+                --argjson idx "$item_idx" --arg ts "$timestamp" \
+                --arg timeMs "$item_total_time_ms"; then
                 echo "❌ kb-done: board write failed (jq transform produced no output). Task NOT completed." >&2
                 return 1
             fi
@@ -6135,15 +6214,13 @@ kb-done() {
     # XACA-0100: Knowledge capture reminder for completed main items (non-blocking)
     # Only fires for main items (not subitems) since retros are per-item, not per-subitem
     if [[ ! "$working_id" =~ ^X[A-Z]{3}-[0-9]+-[0-9]+$ ]]; then
-        local kb_kanban_dir
-        kb_kanban_dir=$(_kb_get_kanban_dir "$team")
+        # Search for retrospective file matching the item ID
+        local kb_retro_file="" kb_retro_rc=0 kb_retro_team="" kb_retro_kdir=""
         local kb_item_lower
         kb_item_lower=$(echo "$working_id" | tr '[:upper:]' '[:lower:]')
-
-        # Search for retrospective file matching the item ID.
+        # Use _kb_find_existing_retro — plan-doc-independent, searches both layouts.
         # XACA-1135: rc captured immediately after the assignment (see the exit-code map
         # on _kb_find_existing_retro). This block stays NON-BLOCKING in every branch.
-        local kb_retro_file="" kb_retro_rc=0 kb_retro_team="" kb_retro_kdir=""
         # XACA-1135: resolve team/kanban-dir ONCE here and hand the same values to both
         # _kb_find_existing_retro and _kb_retro_failure_lines. _kb_find_existing_retro
         # runs in a $( ) subshell and so cannot pass its internal resolution back out;
@@ -6165,17 +6242,17 @@ kb-done() {
             kb_retro_rc=1
         fi
 
-        # Legacy loose fallback, preserved deliberately (XACA-1135): this template's
-        # pre-port reminder also matched any file under kanban/knowledge/ whose NAME
-        # merely contains the lowercased item id. _kb_find_existing_retro is stricter
-        # (it requires the <ID>_*_RETROSPECTIVE.md convention), so running it alone
-        # would make this reminder fire for items whose retro the old code did find.
-        # Only consulted under rc=1 ("searched, genuinely absent") — never under
-        # 2/3/4, where nothing was searched and a loose hit would launder an
-        # unresolved lookup into a false "found".
+        # Legacy loose fallback, preserved deliberately (XACA-0815, WAIVE — not
+        # ported from canonical, which drops this in favor of relying solely
+        # on _kb_find_existing_retro's stricter <ID>_*_RETROSPECTIVE.md
+        # convention): this template additionally matches any file under
+        # kanban/knowledge/ whose NAME merely contains the lowercased item id.
+        # Only consulted under rc=1 ("searched, genuinely absent") — never
+        # under 2/3/4, where nothing was searched and a loose hit would
+        # launder an unresolved lookup into a false "found".
         if [[ $kb_retro_rc -eq 1 ]]; then
             local kb_search_dirs=()
-            [[ -d "${kb_kanban_dir}/knowledge" ]] && kb_search_dirs+=("${kb_kanban_dir}/knowledge")
+            [[ -d "${kb_retro_kdir}/knowledge" ]] && kb_search_dirs+=("${kb_retro_kdir}/knowledge")
             for kb_dir in "${kb_search_dirs[@]}"; do
                 if [[ -d "$kb_dir" ]]; then
                     kb_retro_file=$(find "$kb_dir" -maxdepth 3 -type f -name "*${kb_item_lower}*" 2>/dev/null | head -1)
@@ -6204,7 +6281,7 @@ kb-done() {
             printf "  ║  No retrospective found for %-29s║\n" "${working_id}"
             echo "  ║                                                         ║"
             echo "  ║  Consider capturing what you learned:                   ║"
-            echo "  ║  Template: ~/knowledge/templates/retrospective...  ║"
+            echo "  ║  Template: ~/knowledge/templates/retrospective_template.md  ║"
             printf "  ║  Save to:  kanban/%-40s║\n" "${working_id}_*_RETROSPECTIVE.md"
             echo "  ║                                                         ║"
             echo "  ║  Run: kb-retro-check to see all items missing retros    ║"
@@ -6320,14 +6397,21 @@ _kb_looks_like_flag() {
 _kb_protected_cancel_guard() {
     local sub_title="${1-}" reason="${2-}" user_approved="${3-}" sub_id="${4-}" cmd_hint="${5-}"
     local mode="${6:-cancel}"
-    local hint_target="${7:-$sub_id}"
+    local hint_target="${7:-$sub_id}" hint_extra="${8-}"
     typeset -g _KB_CANCEL_GUARD_AUDIT=false
 
-    # XACA-0886-030 (ported): direct call, not $(...) — this decision
-    # (empty tag == "proceed") is the single most important guard-path read
-    # in this file; it must never be reachable via a code path a fork
-    # failure could silently corrupt.
+    # Tag match kept IDENTICAL to the pre-existing advisory check this
+    # replaces (XACA-0113/XACA-0703): lowercase substring match on the
+    # subitem title, in this priority order. Delegated to _kb_protected_tag_of
+    # (XACA-0886-022) so this and the remove/rename checks can never drift.
+    # XACA-0886-030: direct call, not $(...) — see _kb_protected_tag_of's own
+    # header. This decision (empty tag == "proceed") is the single most
+    # important guard-path read in this file; it must never be reachable via
+    # a code path a fork failure could silently corrupt.
     local tag
+    # XACA-0886-033: the helper returns through a global, so if it is ever
+    # undefined the global would still hold the PREVIOUS call's answer. A
+    # non-zero status (127 = command not found) must refuse, never proceed.
     _kb_protected_tag_of "$sub_title" || { echo "❌ REFUSED: protected-tag lookup failed (helper unavailable) — refusing rather than guessing (XACA-0886-033)." >&2; return 1; }
     tag="$_KB_PROTECTED_TAG"
 
@@ -6388,10 +6472,17 @@ _kb_protected_cancel_guard() {
     echo "❌ REFUSED: '${tag}' subitems are a protected merge gate (CLAUDE.md Three-Gate PR Merge" >&2
     echo "   System). Agents must NOT ${mode} them — resolve the underlying work instead." >&2
     echo "   The user can override with:" >&2
-    # XACA-0886-031 (round-3 review, ported): hint_target lets "remove" print
-    # a command that actually WORKS when run verbatim — it takes index pairs,
-    # not an ID. See this function's own header comment.
-    print -r -- "     ${cmd_hint} ${hint_target} --user-approved --reason \"<why this is being ${verb_past}>\"" >&2
+    # XACA-0886-031 (round-3 review): hint_target/hint_extra let each mode
+    # print a command that actually WORKS when run verbatim — "remove" takes
+    # index pairs (not an ID), and "rename" needs the new-title positional
+    # the old hint always omitted. See this function's own header comment.
+    if [[ -n "$hint_extra" ]]; then
+        # XACA-0886-034: print -r, not echo — zsh echo interprets backslashes and
+        # would strip the ${(q)} quoting in hint_extra, so the hint would not re-run verbatim.
+        print -r -- "     ${cmd_hint} ${hint_target} ${hint_extra} --user-approved --reason \"<why this is being ${verb_past}>\"" >&2
+    else
+        print -r -- "     ${cmd_hint} ${hint_target} --user-approved --reason \"<why this is being ${verb_past}>\"" >&2
+    fi
     echo "   --user-approved is reserved for the user only, same rule as kb-done --force." >&2
     return 1
 }
@@ -6402,6 +6493,15 @@ _kb_protected_cancel_guard() {
 # the target from activeWindows the way kb-done still does (that behaviour
 # change for kb-done is a separate ticket, XACA-0933; do not touch it here).
 kb-cancel() {
+    # XACA-0886-032 (round-3 review, defense-in-depth): reset the audit flag
+    # unconditionally at entry. Every guard call in this function already
+    # runs unconditionally (so the guard's own first line resets it before
+    # this function's own reads), which is why the actual bug this ticket
+    # fixes was in `sub rename`'s CONDITIONAL guard call instead — but
+    # resetting here too means this function can never depend on that being
+    # true forever, and matches the same defensive pattern now applied at
+    # every entry point that reads this global.
+    typeset -g _KB_CANCEL_GUARD_AUDIT=false
     local context team terminal window_name board_file window_id
     context=$(_kb_detect_context)
     team="${context%%:*}"
@@ -6414,9 +6514,9 @@ kb-cancel() {
 
     # ── Argument parsing (XACA-0886) ────────────────────────────────────
     # A proper flag/positional loop, replacing the old fixed-position
-    # $1/$2/$3 reads that (a) silently dropped a positional reason given
-    # alongside --force/--user-approved in certain slot combinations, and
-    # (b) fell back to inferring the target from activeWindows on a bare
+    # ${1-}/${2-}/${3-} reads that (a) silently dropped a positional reason
+    # given alongside --force/--user-approved in certain slot combinations,
+    # and (b) fell back to inferring the target from activeWindows on a bare
     # call. Flags may appear before or after the ID, in any order.
     local working_id="" reason="" positional_reason="" reason_flag_seen=false
     local force_cancel=false user_approved=false
@@ -6424,7 +6524,7 @@ kb-cancel() {
     local _kbc_usage="Usage: kb-cancel <ID> [\"reason text\"] [--reason \"text\"] [--force] [--user-approved] [-- \"positional reason starting with --\"]"
 
     while [[ $# -gt 0 ]]; do
-        case "$1" in
+        case "${1-}" in
             -h|--help)
                 echo "$_kbc_usage"
                 echo ""
@@ -6475,18 +6575,18 @@ kb-cancel() {
                 # text of "--weird reason"). Example: kb-cancel ID -- "--x".
                 shift
                 while [[ $# -gt 0 ]]; do
-                    _kbc_positional+=("$1")
+                    _kbc_positional+=("${1-}")
                     shift
                 done
                 break
                 ;;
             --*)
-                echo "Error: unknown flag '$1'" >&2
+                echo "Error: unknown flag '${1-}'" >&2
                 echo "$_kbc_usage" >&2
                 return 1
                 ;;
             *)
-                _kbc_positional+=("$1")
+                _kbc_positional+=("${1-}")
                 shift
                 ;;
         esac
@@ -6556,34 +6656,46 @@ kb-cancel() {
         local parent_idx
         parent_idx=$(_kb_find_by_id "$board_file" "$parent_id")
         if [[ "$parent_idx" -ge 0 ]]; then
-            # XACA-0886-023: reads by ID (select(.id == $subId)), never by raw
-            # array index — but a select() that matches NOTHING (subitem ID
-            # does not exist under this parent) used to leave cancel_sub_title
-            # empty and fall through: the guard sees an empty/untagged title
-            # and allows it, then the `if .id == $subId then ... end` update
-            # matches nothing either, so this printed "Task cancelled!" for an
-            # ID that was never touched (false success). Refuse explicitly.
-            local cancel_sub_title
-            cancel_sub_title=$(_kb_jq_read "$board_file" \
-                '.backlog[$pidx].subitems[]? | select(.id == $subId) | .title // empty' \
-                --argjson pidx "$parent_idx" --arg subId "$working_id" -r)
+            # XACA-0886-023: resolve by ID, never by raw index. jq's negative
+            # array index wraps to the LAST element, so a not-found subitem
+            # (which _kb_resolve_subitem_id signals via subidx "-1") used to
+            # silently read the LAST subitem's title instead of failing —
+            # the guard then evaluated against the wrong subitem entirely,
+            # and the later `if .id == $subId then ... end` update matched
+            # nothing, so this printed "Task cancelled!" for an ID that was
+            # never touched (false success). Check for not-found FIRST, the
+            # same way `kb-backlog sub cancel` already does at its own
+            # _kb_resolve_subitem_id call site.
+            local cancel_sub_indices cancel_sub_subidx cancel_sub_total_time_ms
+            cancel_sub_indices=$(_kb_resolve_subitem_id "$board_file" "$working_id")
+            cancel_sub_subidx="${cancel_sub_indices##*:}"
 
-            if [[ -z "$cancel_sub_title" ]]; then
+            if [[ "$cancel_sub_subidx" == "-1" ]]; then
                 echo "Error: Subitem not found: $working_id" >&2
                 return 1
             fi
 
+            # XACA-0551: flush the in-flight active span before clearing it.
+
             # XACA-0886: hard-block guard for protected [Review]/[Test]/[UX]
-            # subitems, BEFORE any board write.
+            # subitems, BEFORE any board write. Select by ID, not by index —
+            # see the not-found comment above for why index-based reads are
+            # unsafe here.
+            local cancel_sub_title
+            cancel_sub_title=$(_kb_jq_read "$board_file" \
+                '.backlog[$pidx].subitems[] | select(.id == $subId) | .title // empty' \
+                --argjson pidx "$parent_idx" --arg subId "$working_id" -r)
             if ! _kb_protected_cancel_guard "$cancel_sub_title" "$reason" "$user_approved" "$working_id" "kb-cancel" "cancel"; then
                 return 1
             fi
 
+            cancel_sub_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$parent_idx].subitems[$cancel_sub_subidx]")
             local update_jq='.backlog[$pidx].subitems = [.backlog[$pidx].subitems[] |
                 if .id == $subId then
                     .status = "cancelled" |
                     .cancelledAt = $ts |
                     .updatedAt = $ts |
+                    (if $timeMs != "0" then .timeWorkedMs = ($timeMs | tonumber) else . end) |
                     del(.activelyWorking, .workStartedAt, .worktree, .worktreeBranch, .worktreeWindowId)'
             if [[ -n "$reason" ]]; then
                 update_jq="$update_jq | .cancelledReason = \$reason"
@@ -6604,11 +6716,13 @@ kb-cancel() {
             if [[ -n "$reason" ]]; then
                 _kb_jq_update "$board_file" "$update_jq" \
                     --argjson pidx "$parent_idx" --arg subId "$working_id" \
-                    --arg ts "$timestamp" --arg reason "$reason"
+                    --arg ts "$timestamp" --arg reason "$reason" \
+                    --arg timeMs "$cancel_sub_total_time_ms"
             else
                 _kb_jq_update "$board_file" "$update_jq" \
                     --argjson pidx "$parent_idx" --arg subId "$working_id" \
-                    --arg ts "$timestamp"
+                    --arg ts "$timestamp" \
+                    --arg timeMs "$cancel_sub_total_time_ms"
             fi
             item_found=true
         fi
@@ -6634,12 +6748,23 @@ kb-cancel() {
             # as a print/display, not a no-op re-declaration. Declaring them
             # fresh on every iteration (2nd and later) was dumping their
             # previous-iteration values to stdout as visible noise ahead of
-            # the refusal message.
+            # the refusal message (caught via a template-port smoke test,
+            # not the zsh unit suite — it only pattern-matched expected
+            # substrings and never noticed the extra lines).
+            # XACA-0886-029 (round-2 review, "Additional observations"): _kbc_line is
+            # declared local HERE, alongside the other hoisted _kbc_* locals, rather
+            # than left as a bare `for _kbc_line in ...` loop variable further down —
+            # zsh does not implicitly localize a for-loop's iteration variable, so an
+            # undeclared one leaks into the caller's shell (visible via `typeset -p
+            # _kbc_line` after this function returns).
             local _kbc_si _kbc_si_title _kbc_si_tag _kbc_si_status _kbc_si_id _kbc_line
             for (( _kbc_si = 0; _kbc_si < _kbc_item_sub_count; _kbc_si++ )); do
                 _kbc_si_title=$(_kb_jq_read "$board_file" ".backlog[$item_idx].subitems[$_kbc_si].title // empty" -r)
-                # XACA-0886-030 (ported): direct call, not $(...) — a fork
-                # failure here fed straight into the `continue` below.
+                # XACA-0886-030: direct call, not $(...) — a fork-pressure or
+                # undefined-function failure here fed straight into the
+                # `continue` below, which is the same fail-open shape kb-sweep's
+                # own bug had, just running once per subitem in THIS loop
+                # instead of kb-sweep's.
                 _kb_protected_tag_of "$_kbc_si_title" || { echo "❌ REFUSED: protected-tag lookup failed (helper unavailable) — refusing rather than guessing (XACA-0886-033)." >&2; return 1; }
                 _kbc_si_tag="$_KB_PROTECTED_TAG"
                 [[ -z "$_kbc_si_tag" ]] && continue
@@ -6704,6 +6829,9 @@ kb-cancel() {
                         # XACA-0886-029: an open protected subitem always fails this
                         # sweep too — --force is REQUIRED here in addition to
                         # --user-approved + --reason, not an alternative to them.
+                        # XACA-0886-036: print -r + ${(q)} — the reason is user text; echo would
+                        # interpret backslashes and plain double quotes would let a pasted
+                        # hint expand $(...) or break on an embedded quote.
                         print -r -- "   To bypass (user only): kb-cancel $working_id --user-approved --force --reason ${(q)reason}"
                     else
                         echo "   To bypass (user only): kb-cancel $working_id --force"
@@ -6723,9 +6851,13 @@ kb-cancel() {
                 echo "    Reason: ${reason}"
             fi
 
+            # XACA-0551: flush the in-flight active span before clearing it.
+            local cancel_item_total_time_ms
+            cancel_item_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$item_idx]")
             local update_jq='.backlog[$idx].status = "cancelled" |
                 .backlog[$idx].cancelledAt = $ts |
                 .backlog[$idx].updatedAt = $ts |
+                (if $timeMs != "0" then .backlog[$idx].timeWorkedMs = ($timeMs | tonumber) else . end) |
                 del(.backlog[$idx].activelyWorking) |
                 del(.backlog[$idx].workStartedAt) |
                 del(.backlog[$idx].worktree) |
@@ -6741,10 +6873,12 @@ kb-cancel() {
 
             if [[ -n "$reason" ]]; then
                 _kb_jq_update "$board_file" "$update_jq" \
-                    --argjson idx "$item_idx" --arg ts "$timestamp" --arg reason "$reason"
+                    --argjson idx "$item_idx" --arg ts "$timestamp" --arg reason "$reason" \
+                    --arg timeMs "$cancel_item_total_time_ms"
             else
                 _kb_jq_update "$board_file" "$update_jq" \
-                    --argjson idx "$item_idx" --arg ts "$timestamp"
+                    --argjson idx "$item_idx" --arg ts "$timestamp" \
+                    --arg timeMs "$cancel_item_total_time_ms"
             fi
             item_found=true
         fi
@@ -6810,13 +6944,22 @@ kb-stop-working() {
         parent_idx=$(_kb_find_by_id "$board_file" "$parent_id")
 
         if [[ "$parent_idx" -ge 0 ]]; then
+            # XACA-0551: flush the in-flight active span before clearing it.
+            local sw_sub_indices sw_sub_subidx sw_sub_total_time_ms
+            sw_sub_indices=$(_kb_resolve_subitem_id "$board_file" "$working_id")
+            sw_sub_subidx="${sw_sub_indices##*:}"
+            sw_sub_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$parent_idx].subitems[$sw_sub_subidx]")
             # Find subitem index by ID and clear its activelyWorking flag and worktree info
             _kb_jq_update "$board_file" '
                 .backlog[$pidx].subitems = [.backlog[$pidx].subitems[] |
-                    if .id == $subId then del(.activelyWorking, .workStartedAt, .worktree, .worktreeBranch, .worktreeWindowId) else . end
+                    if .id == $subId then
+                        (if $timeMs != "0" then .timeWorkedMs = ($timeMs | tonumber) else . end) |
+                        del(.activelyWorking, .workStartedAt, .worktree, .worktreeBranch, .worktreeWindowId)
+                    else . end
                 ] |
                 .lastUpdated = $ts
-            ' --argjson pidx "$parent_idx" --arg subId "$working_id" --arg ts "$timestamp"
+            ' --argjson pidx "$parent_idx" --arg subId "$working_id" --arg ts "$timestamp" \
+              --arg timeMs "$sw_sub_total_time_ms"
             echo "Cleared activelyWorking on subitem: $working_id"
         fi
     else
@@ -6825,14 +6968,19 @@ kb-stop-working() {
         item_idx=$(_kb_find_by_id "$board_file" "$working_id")
 
         if [[ "$item_idx" -ge 0 ]]; then
+            # XACA-0551: flush the in-flight active span before clearing it.
+            local sw_item_total_time_ms
+            sw_item_total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$item_idx]")
             _kb_jq_update "$board_file" \
-                'del(.backlog[$idx].activelyWorking) |
+                '(if $timeMs != "0" then .backlog[$idx].timeWorkedMs = ($timeMs | tonumber) else . end) |
+                 del(.backlog[$idx].activelyWorking) |
                  del(.backlog[$idx].workStartedAt) |
                  del(.backlog[$idx].worktree) |
                  del(.backlog[$idx].worktreeBranch) |
                  del(.backlog[$idx].worktreeWindowId) |
                  .lastUpdated = $ts' \
-                --argjson idx "$item_idx" --arg ts "$timestamp"
+                --argjson idx "$item_idx" --arg ts "$timestamp" \
+                --arg timeMs "$sw_item_total_time_ms"
             echo "Cleared activelyWorking on item: $working_id"
         fi
     fi
@@ -8003,12 +8151,26 @@ kb-backlog() {
             # into timeWorkedMs -- items not actively being worked keep their
             # persisted timeWorkedMs verbatim. Precedent: a stale workStartedAt
             # left open for ~4 months would have been booked as ~4 months of
-            # phantom work by a naive flush-on-demote. Now that canonical's
-            # _kb_flush_work_time HAS been ported into this template, demote
-            # must still NOT call it. Enforced by
-            # test-xaca-0819-pause-resume-active-span.sh, which asserts the only
-            # call site in this file is the ONE inside kb-pause's subitem branch
-            # (XACA-0819-014 narrowed the sync to subitems only).
+            # phantom work by a naive flush-on-demote.
+            #
+            # UPDATED (XACA-1151 PR-C, retiring XACA-0819-014's narrower claim):
+            # _kb_flush_work_time now has SEVERAL call sites in this file --
+            # kb-done, kb-cancel, kb-stop-working and kb-pause all call it, at
+            # both the item and subitem level, since PR-C closed the
+            # item-level gap XACA-0819-014 identified (see kb-pause's own
+            # comment). `kb-backlog demote` and `kb-backlog unpick` are now
+            # the ONLY two verbs that deliberately do NOT call it -- this is
+            # no longer "the subitem-only sync", it is "everything except
+            # demote/unpick". The precedent above is why: demote/unpick's
+            # spans can be arbitrarily stale (months), where pause's span is
+            # bounded by how long a human leaves work paused -- a difference
+            # in RISK, not in principle. A demoted/unpicked item simply loses
+            # its final open span (timeWorkedMs reads slightly low), the
+            # conservative direction, same trade PR-C's CHANGELOG entry
+            # documents for kb-pause. Enforced by
+            # tests/test-xaca-1151-prc-time-tracking.sh (outer repo), which
+            # asserts kb-backlog unpick does NOT write timeWorkedMs, and by
+            # this suite's own demote freeze assertions (Coverage 4 below).
             local demote_jq_filter='
                 .backlog[$idx].status = "todo" |
                 .backlog[$idx].updatedAt = $ts |
@@ -10070,6 +10232,7 @@ _kb_get_persona_delegation_guide() {
             guide+="| Work Type | subagent_type | Persona |\n"
             guide+="|---|---|---|\n"
             guide+="| Feature Development | captain | Picard |\n"
+            guide+="| Bug Fixing | beverly | Beverly Crusher |\n"
             guide+="| Refactoring / Optimization | data | Data |\n"
             guide+="| Testing / QA | worf | Worf |\n"
             guide+="| UI/UX / Accessibility | wesley | Wesley |\n"
@@ -10936,17 +11099,17 @@ kb-work() {
 # Auto-adds debug subitems (diagnose, fix, testing, PR, QA, retrospective, sync)
 # Returns 0 on success, 1 if item is not completed/cancelled
 _kb_reopen_item() {
-    local board_file="$1"
-    local index="$2"
-    local item_id="$3"
+    local board_file="${1-}"
+    local index="${2-}"
+    local item_id="${3-}"
 
     # Read the item's current status.
-    # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution. The gate below is
+    # XACA-0948-006: ITEM_STATUS_CONTRACT.md §1.5 resolution. The gate below is
     # unaffected by this change (unrecorded items can never resolve to
     # completed/cancelled per the contract's ceiling, so this was already a
-    # behavioral no-op for the gate) -- it only fixes the early-return
-    # message, which used to print a blank "(status: )" for an unrecorded
-    # item instead of its resolved value.
+    # behavioral no-op for the gate) -- it only fixes the early-return message,
+    # which used to print a blank "(status: )" for an unrecorded item instead
+    # of its resolved value.
     local current_status
     current_status=$(_kb_jq_read "$board_file" "${_KB_ITEM_STATUS_JQ_DEFS} .backlog[$index] | kb_resolve_item_status" -r)
 
@@ -10956,14 +11119,24 @@ _kb_reopen_item() {
         return 1
     fi
 
+    # INVARIANT: no top-level item may hold status == "in_progress" while UNESTIMATED.
+    # Re-gate on reopen — legacy items completed before XACA-0624 will be unestimated;
+    # this is the right moment to capture an estimate. Items already estimated sail through.
+    if ! _kb_require_points "$board_file" "$index" "$item_id"; then
+        return 1
+    fi
+
     local timestamp
     timestamp=$(_kb_get_timestamp)
 
     # Transition the item back to in_progress, preserving previous status
+    # XACA-0551: startedAt //= guarantees the lead-time anchor exists even on items
+    # that were created before time tracking shipped (forward-only, idempotent).
     _kb_jq_update "$board_file" '
         .backlog[$idx].status = "in_progress" |
         .backlog[$idx].activelyWorking = true |
         .backlog[$idx].workStartedAt = $ts |
+        .backlog[$idx].startedAt //= $ts |
         .backlog[$idx].reopenedAt = $ts |
         .backlog[$idx].previousStatus = $prev |
         del(.backlog[$idx].completedAt) |
@@ -10972,10 +11145,14 @@ _kb_reopen_item() {
       --arg ts "$timestamp" \
       --arg prev "$current_status"
 
-    # Count existing subitems to determine starting number for debug subitems
-    local existing_count
-    existing_count=$(_kb_jq_read "$board_file" ".backlog[$index].subitems // [] | length" -r)
-    local next_num=$((existing_count + 1))
+    # Determine starting number for debug subitems by scanning max existing index + 1.
+    # XACA-0248: must use max+1, NOT length+1 — when subitems have been renamed/renumbered
+    # the array length collides with existing higher indices. select() pre-filter makes
+    # the "skip subitems with non-conforming IDs" behavior explicit.
+    local max_existing_idx
+    max_existing_idx=$(_kb_jq_read "$board_file" \
+        ".backlog[$index].subitems // [] | map(select(.id | test(\"-[0-9]+$\"))) | map(.id | capture(\"-(?<n>[0-9]+)$\").n | tonumber) | (max // 0)" -r)
+    local next_num=$((max_existing_idx + 1))
 
     # The 7 standard debug subitems
     local debug_titles=(
