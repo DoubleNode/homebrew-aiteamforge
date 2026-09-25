@@ -667,7 +667,7 @@ Persists for the lifetime of this shell only.
 Examples:
   kb-context-set academy
   kb-context-set ios bridge
-  kb-context-set freelance-doublenode-starwords engineering
+  kb-context-set freelance-acme-widget engineering
 
 See also:
   kb-context-show   diagnose current context resolution
@@ -3800,7 +3800,7 @@ _kb_tmux_bounded_probe() {
 # SAME session-name convention _kb_detect_context uses to derive
 # team/terminal: session = "<team>-<terminal>" (terminal = suffix after the
 # LAST dash; team = everything before it -- correct even when team itself
-# contains dashes, e.g. "freelance-doublenode-starwords").
+# contains dashes, e.g. "freelance-acme-widget").
 #
 # Usage: _kb_tmux_live_window_ids <team> [explicit_socket]
 #   team             required.
