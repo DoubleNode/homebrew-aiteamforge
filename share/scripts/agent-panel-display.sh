@@ -1935,10 +1935,34 @@ render_panel
 # Capture initial content fingerprint
 LAST_CONTENT_FINGERPRINT=$(compute_content_fingerprint)
 
+# _apd_iterm_host_gone — succeed (0) only when this panel should exit because
+# the iTerm2 that hosts it has died (prevents orphan processes).
+#
+# XACA-1340, two defects that each killed panels while iTerm2 was running:
+#
+# 1. `-a` is load-bearing. macOS pgrep EXCLUDES the calling process's
+#    ancestors unless -a is given, and a locally launched panel runs INSIDE
+#    iTerm2 — so a plain `pgrep -f "iTerm.app"` could never see the iTerm2
+#    that hosts it. The old check passed only on incidental matches (other
+#    processes whose argv merely contained "iTerm.app", e.g. MCP servers
+#    carrying iTerm's utilities dir in an inline PATH, or transient iTerm XPC
+#    workers); once those exited, the panel exited. `-x iTerm2` matches the
+#    app's process name exactly, so incidental argv matches no longer count.
+#
+# 2. Every *-connect.sh launches this panel via `ssh -t ${HOST} …`, where a
+#    pgrep probes the REMOTE host's process table, not the machine whose iTerm2
+#    displays the pane. Under SSH the check is unnecessary: closing the pane (or
+#    iTerm2 dying) drops the connection and sshd HUPs this loop. Do NOT swap in
+#    has_iterm_gui() — it pgreps the remote host and lacks -a.
+_apd_iterm_host_gone() {
+    [[ -n "${SSH_CONNECTION:-}" || -n "${SSH_TTY:-}" ]] && return 1
+    ! pgrep -a -x iTerm2 > /dev/null 2>&1
+}
+
 # Poll for changes (window switches, file updates, script self-update)
 while true; do
     # Check if iTerm2 is still alive — exit if it died (prevents orphan processes)
-    if ! pgrep -f "iTerm.app" > /dev/null 2>&1; then
+    if _apd_iterm_host_gone; then
         echo "iTerm2 not running — exiting agent panel display" >&2
         exit 0
     fi

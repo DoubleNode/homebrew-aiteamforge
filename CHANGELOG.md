@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1340** — agent panels no longer exit with "iTerm2 not running" while iTerm2 is running. The liveness check used `pgrep -f "iTerm.app"`, but macOS `pgrep` excludes the caller's ancestors unless `-a` is passed, and a local panel runs inside iTerm2, so the check never saw its own host. Panels launched over `ssh -t` (connect scripts) also probed the remote host. `share/scripts/agent-panel-display.sh` now skips the check under SSH and otherwise uses `pgrep -a -x iTerm2`.
 
 ## [0.20.25] - 2026-09-24
 - **XACA-1322** — `aiteamforge upgrade` now refreshes all five consumer datafiles (`msg-client.js`, `vault-keygen.js`, `vault-fetch.js`, `package.json`, `package-lock.json`), not just `vault-fetch.js`. Previously an upgraded machine got a new `vault-fetch.js` beside a stale `vault-keygen.js`, and `cc` crashed with `kg.resolveFleetUrl is not a function`.
