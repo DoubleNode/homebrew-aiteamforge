@@ -51,7 +51,10 @@ fi
 # prefix "${TEAM_NAME} @ " so a single invocation can close all connect
 # windows for this team, or just the one targeting a specific host when
 # a host argument is supplied.
-if [[ -d "/Applications/iTerm.app" ]] && pgrep -f "iTerm.app" > /dev/null; then
+# `-a -x iTerm2` (not `-f "iTerm.app"`): this script runs INSIDE the iTerm2
+# pane being closed, and macOS pgrep excludes the caller's ancestors unless
+# -a is given, so a plain pgrep can never see its own host (XACA-1340/1341).
+if [[ -d "/Applications/iTerm.app" ]] && pgrep -a -x iTerm2 > /dev/null; then
     if [[ -n "$HOST_FILTER" ]]; then
         _match_title="${TEAM_NAME} @ ${HOST_FILTER}"
         _match_mode="exact"

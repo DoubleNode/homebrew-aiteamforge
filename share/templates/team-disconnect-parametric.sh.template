@@ -65,7 +65,10 @@ fi
 # Match windows whose title starts with "${TEAM_ID}-" AND contains " @ ".
 # With a host argument, additionally require the title to end with
 # " @ ${HOST_FILTER}" so we close only that host's windows for this team.
-if [[ -d "/Applications/iTerm.app" ]] && pgrep -f "iTerm.app" > /dev/null; then
+# `-a -x iTerm2` (not `-f "iTerm.app"`): this script runs INSIDE the iTerm2
+# pane being closed, and macOS pgrep excludes the caller's ancestors unless
+# -a is given, so a plain pgrep can never see its own host (XACA-1340/1341).
+if [[ -d "/Applications/iTerm.app" ]] && pgrep -a -x iTerm2 > /dev/null; then
     if [[ -n "$HOST_FILTER" ]]; then
         _host_suffix=" @ ${HOST_FILTER}"
     else

@@ -213,12 +213,16 @@ ensure_iterm2_ready() {
     fi
 
     # Launch iTerm2 if it isn't already running.
-    if ! pgrep -f "iTerm.app" > /dev/null 2>&1; then
+    # `-a -x iTerm2` (not `-f "iTerm.app"`): a manually-run startup script can
+    # execute INSIDE an already-open iTerm2 pane, and macOS pgrep excludes the
+    # caller's ancestors unless -a is given, so a plain pgrep could never see
+    # its own host and would launch a redundant second iTerm2 (XACA-1340/1341).
+    if ! pgrep -a -x iTerm2 > /dev/null 2>&1; then
         echo "  iTerm2 not running — launching..."
         open -a iTerm.app
         # Poll until the process appears (max 10s).
         local _elapsed=0
-        while ! pgrep -f "iTerm.app" > /dev/null 2>&1; do
+        while ! pgrep -a -x iTerm2 > /dev/null 2>&1; do
             sleep 1
             _elapsed=$((_elapsed + 1))
             if [[ $_elapsed -ge 10 ]]; then

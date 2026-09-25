@@ -641,6 +641,29 @@ print(default_port + "|" + band_base + "|" + band_range + "|" + registry_port)
 }
 
 # ---------------------------------------------------------------------------
+# iterm_app_running — returns 0 (true) only when the iTerm2 GUI process is
+# actually running on THIS machine.
+#
+# `-a` is load-bearing (XACA-1340/1341): macOS pgrep EXCLUDES the calling
+# process's ancestors unless -a is given. Any probe run from inside an iTerm2
+# pane is a descendant of iTerm2, so a plain `pgrep -x iTerm2` (or `pgrep -f
+# "iTerm.app"`) can never see the iTerm2 that hosts the very shell running the
+# check — it only ever passes on incidental, unrelated matches. `-a` includes
+# ancestors so the real iTerm2 process is visible; `-x iTerm2` keeps the match
+# exact (process name only, not argv substring) so it isn't re-widened back
+# into false positives.
+#
+# SSH caveat: this probes the process table of whatever host it RUNS on. Over
+# `ssh -t host …`, that is the REMOTE host, not the machine whose iTerm2
+# displays the pane — callers reached over SSH must not treat a negative
+# result here as "the local iTerm2 is gone" (see agent-panel-display.sh's
+# _apd_iterm_host_gone(), which short-circuits under SSH instead of calling
+# this).
+iterm_app_running() {
+    pgrep -a -x iTerm2 >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
 # is_headless — returns 0 (true) when no macOS GUI session is available for
 # iTerm2/Terminal.app automation; returns 1 (false) when a GUI is present.
 #
@@ -673,9 +696,13 @@ is_headless() {
         return 0
     fi
     # Belt-and-suspenders: neither GUI terminal app is running => nothing to drive.
-    if ! pgrep -x iTerm2 >/dev/null 2>&1 \
-       && ! pgrep -f "iTerm.app" >/dev/null 2>&1 \
-       && ! pgrep -f "Terminal.app" >/dev/null 2>&1; then
+    # iTerm2 check uses iterm_app_running() (pgrep -a -x iTerm2 — see its
+    # comment for why -a is load-bearing, XACA-1340/1341). Terminal.app gets
+    # the same -a for uniformity with the lint added in XACA-1341-005, even
+    # though is_headless() is not itself reached from inside a pane it is
+    # probing (it is called by *-startup.sh, launched pre-pane).
+    if ! iterm_app_running \
+       && ! pgrep -a -f "Terminal.app" >/dev/null 2>&1; then
         return 0
     fi
     return 1   # a GUI session is available
@@ -699,7 +726,7 @@ is_headless() {
 # only changes behavior when the caller has explicitly opted in.
 has_iterm_gui() {
     if [[ "${AITF_NO_ITERM_GUI:-}" == "1" ]]; then return 1; fi
-    [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]] || pgrep -f "iTerm.app" >/dev/null 2>&1
+    [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]] || iterm_app_running
 }
 
 # ---------------------------------------------------------------------------

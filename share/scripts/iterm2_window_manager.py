@@ -79,13 +79,21 @@ def is_iterm2_running():
     This check prevents hanging on iterm2.Connection.async_create() when
     iTerm2 is not running or is in a restart loop.
 
-    Uses -f (full command match) instead of -x (exact name match) because
-    pgrep -x "iTerm2" fails in some macOS terminal contexts even when
-    iTerm2 is running. Matching against the app bundle path is reliable.
+    Uses `-a -x iTerm2` (XACA-1340/1341). `-x iTerm2` matches the process
+    name exactly (not an argv substring like the old `-f "iTerm.app"`, which
+    passed on incidental matches such as MCP servers carrying iTerm's
+    utilities dir in an inline PATH). `-a` is load-bearing: macOS pgrep
+    EXCLUDES the calling process's ancestors unless -a is given, and this
+    check often runs from a script launched INSIDE an iTerm2 pane — a
+    descendant of iTerm2 — so without -a it could never see the very iTerm2
+    that hosts it and would report "not running" while it plainly was. (A
+    previous version of this comment attributed that same failure to
+    `pgrep -x` being unreliable "in some macOS terminal contexts"; the real
+    cause was this ancestor exclusion, not -x itself.)
     """
     try:
         result = subprocess.run(
-            ["pgrep", "-f", "iTerm.app"],
+            ["pgrep", "-a", "-x", "iTerm2"],
             capture_output=True,
             timeout=3
         )
