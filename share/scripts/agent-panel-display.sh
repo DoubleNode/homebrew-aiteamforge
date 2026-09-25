@@ -1953,7 +1953,12 @@ LAST_CONTENT_FINGERPRINT=$(compute_content_fingerprint)
 #    pgrep probes the REMOTE host's process table, not the machine whose iTerm2
 #    displays the pane. Under SSH the check is unnecessary: closing the pane (or
 #    iTerm2 dying) drops the connection and sshd HUPs this loop. Do NOT swap in
-#    has_iterm_gui() — it pgreps the remote host and lacks -a.
+#    has_iterm_gui() — it now carries -a too (via iterm_app_running(), XACA-1341),
+#    but that doesn't help here: this loop runs ON the remote host over the SSH
+#    session, so any pgrep it runs — -a or not — still probes the REMOTE
+#    process table, which never has an iTerm2 to find, and TERM_PROGRAM is
+#    generally not forwarded over ssh either. The SSH_CONNECTION/SSH_TTY
+#    short-circuit above is the actual correct check for this code path.
 _apd_iterm_host_gone() {
     [[ -n "${SSH_CONNECTION:-}" || -n "${SSH_TTY:-}" ]] && return 1
     ! pgrep -a -x iTerm2 > /dev/null 2>&1
