@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1151 PR-B** — the kanban helpers template no longer deletes an orphaned directory at a worktree path without asking, and no longer ships client team-slug arms
+  - `_kb_create_item_worktree` / `_kb_discover_worktree` now match canonical: an existing directory (orphaned or a reused worktree) needs confirmation; a non-interactive shell refuses unless `KB_RUN_ASSUME_YES` is set. New helpers `_kb_umbrella_root`, `_kb_resolve_project_root`, `_kb_confirm_existing_worktree`.
+  - Repo paths containing a space (for example `.../Main Event/...`) no longer break worktree discovery (quoted `dirname`, not `xargs dirname`).
+  - Removed 16 client-specific arms from `_kb_get_team_code` / `_kb_get_team_from_code` (XACA-0628 regression). Freelance teams resolve from `~/.aiteamforge/team-paths.json`; an unregistered code resolves empty.
 
 ## [0.20.26] - 2026-09-25
 - **XACA-1340** — agent panels no longer exit with "iTerm2 not running" while iTerm2 is running. The liveness check used `pgrep -f "iTerm.app"`, but macOS `pgrep` excludes the caller's ancestors unless `-a` is passed, and a local panel runs inside iTerm2, so the check never saw its own host. Panels launched over `ssh -t` (connect scripts) also probed the remote host. `share/scripts/agent-panel-display.sh` now skips the check under SSH and otherwise uses `pgrep -a -x iTerm2`.

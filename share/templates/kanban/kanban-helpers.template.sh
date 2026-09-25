@@ -1224,17 +1224,108 @@ _kb_reset_worktree() {
     return 0
 }
 
+# Detects the umbrella-repo root for the current directory context.
+# An umbrella repo is a non-git parent directory that holds multiple independent
+# sub-repos (each with its own .git). DNS Framework is the canonical example:
+#   DNSFramework/           <- umbrella root (no .git, but has .kb-umbrella marker)
+#     DNSCrashWorkarounds/  <- sub-repo (has .git)
+#     DNSProtocols/         <- sub-repo (has .git)
+#     worktrees/            <- worktrees go HERE, sibling to sub-repos
+#
+# Resolution order:
+#   1. Honors $KB_UMBRELLA_ROOT env var if set (from team zshrc)
+#   2. Auto-detect: walk up from cwd looking for a directory that contains a
+#      .kb-umbrella sentinel file (plain empty file created by the user once)
+#
+# To declare a directory as an umbrella root, run:
+#   touch /path/to/DNSFramework/.kb-umbrella
+#
+# This is explicit and deterministic. It avoids false positives on directories
+# like /tmp or ~/projects that happen to contain multiple git repos.
+#
+# NOTE on .kb-umbrella sentinel (XACA-0389 / F-08-009):
+#   .kb-umbrella is an OPTIONAL, per-machine, user-created marker file (not
+#   committed to any repo). It is absent by default — non-umbrella-repo users
+#   simply never create it. The env var $KB_UMBRELLA_ROOT is the preferred
+#   override for CI/automated contexts; the sentinel file is for interactive
+#   developer machines. When neither is set, this function returns 1 cleanly and
+#   callers (_kb_in_umbrella, _kb_umbrella_sub_repos) treat it as non-umbrella.
+#
+# Stops walking at $HOME or / to avoid infinite loops on broken systems.
+# Echoes the absolute path on success, empty on no detection.
+# Return code: 0 if umbrella detected, 1 if not.
+_kb_umbrella_root() {
+    # Resolution step 1: honor explicit env var
+    if [[ -n "${KB_UMBRELLA_ROOT:-}" ]] && [[ -d "$KB_UMBRELLA_ROOT" ]]; then
+        echo "$KB_UMBRELLA_ROOT"
+        return 0
+    fi
+
+    # Resolution step 2: auto-detect by walking up from cwd looking for .kb-umbrella sentinel
+    local dir="$PWD"
+    local iterations=0
+
+    while [[ "$dir" != "/" ]] && [[ "$dir" != "$HOME" ]] && (( iterations < 10 )); do
+        (( iterations++ ))
+
+        # Guard rail: don't treat $HOME as a valid umbrella even if it has a sentinel
+        if [[ "$dir" == "$HOME" ]]; then
+            break
+        fi
+
+        if [[ -f "$dir/.kb-umbrella" ]]; then
+            echo "$dir"
+            return 0
+        fi
+
+        dir="${dir%/*}"
+        [[ -z "$dir" ]] && dir="/"
+    done
+
+    return 1
+}
+
+# Resolve the project root directory for worktree placement given a git root path.
+# Three-case cascade (XACA-0184-005):
+#   1. Umbrella context: if KB_UMBRELLA_ROOT or auto-detect matches and git_root is
+#      inside that umbrella, worktrees go at umbrella level (shared across sub-repos).
+#   2. Named-main convention: if git_root basename is develop/main/master/DEV,
+#      worktrees go sibling to that checkout (legacy single-repo layout).
+#   3. Fallback: worktrees go inside the git root itself.
+# Usage: _kb_resolve_project_root <git_root>
+# Echoes the resolved project root path.
+_kb_resolve_project_root() {
+    local git_root="${1-}"
+    local umbrella_root
+    umbrella_root=$(_kb_umbrella_root 2>/dev/null)
+    if [[ -n "$umbrella_root" ]] && [[ "$git_root" == "$umbrella_root"/* ]]; then
+        echo "$umbrella_root"
+    elif [[ "$(basename "$git_root")" == "develop" ]] || \
+         [[ "$(basename "$git_root")" == "main" ]] || \
+         [[ "$(basename "$git_root")" == "master" ]] || \
+         [[ "$(basename "$git_root")" == "DEV" ]]; then
+        echo "$(dirname "$git_root")"
+    else
+        echo "$git_root"
+    fi
+}
+
 # Create a worktree for an item and cd into it
 # Usage: _kb_create_item_worktree <item_id> <title>
 # Returns the worktree path, or empty on failure
 _kb_create_item_worktree() {
-    local item_id="$1"
-    local title="$2"
+    local item_id="${1-}"
+    local title="${2-}"
 
-    local git_root worktree_dir branch_name worktree_name project_root
+    local git_root worktree_dir branch_name worktree_name project_root git_common
 
-    # Get the main repo root (works from any worktree)
-    git_root=$(git rev-parse --git-common-dir 2>/dev/null | xargs dirname)
+    # Get the main repo root (works from any worktree).
+    # Use --path-format=absolute + quoted dirname (not `| xargs dirname`, which
+    # word-splits on paths with spaces — XACA-0598/XACA-0599 alignment).
+    git_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    if [[ -n "$git_common" ]]; then
+        git_root=$(dirname "$git_common")
+    fi
     if [[ -z "$git_root" ]] || [[ "$git_root" == "." ]]; then
         git_root=$(git rev-parse --show-toplevel 2>/dev/null)
     fi
@@ -1244,16 +1335,11 @@ _kb_create_item_worktree() {
         return 1
     fi
 
-    # Determine the project root for worktrees
-    # If git_root is named after a common main branch (develop, main, master, DEV),
-    # worktrees should be a sibling directory (one level up), not inside the checkout directory
-    local git_root_name
-    git_root_name=$(basename "$git_root")
-    if [[ "$git_root_name" == "develop" ]] || [[ "$git_root_name" == "main" ]] || [[ "$git_root_name" == "master" ]] || [[ "$git_root_name" == "DEV" ]]; then
-        project_root=$(dirname "$git_root")
-    else
-        project_root="$git_root"
-    fi
+    # Determine the project root for worktrees using three-case cascade (XACA-0184-005):
+    #   1. Umbrella context: worktrees at umbrella level (shared across sub-repos)
+    #   2. Named-main convention: worktrees sibling to develop/main/master/DEV checkout
+    #   3. Fallback: worktrees inside the git root itself
+    project_root=$(_kb_resolve_project_root "$git_root")
 
     # Create worktree directory name from item ID (lowercase, portable)
     worktree_name=$(echo "$item_id" | tr '[:upper:]' '[:lower:]')
@@ -1267,6 +1353,10 @@ _kb_create_item_worktree() {
     existing_worktree=$(git worktree list --porcelain 2>/dev/null | grep -A2 "^worktree.*/${worktree_name}$" | head -1 | sed 's/^worktree //')
 
     if [[ -n "$existing_worktree" ]] && [[ -d "$existing_worktree" ]]; then
+        if ! _kb_confirm_existing_worktree "$existing_worktree" "reuse" "$item_id"; then
+            echo "Error: Aborted by user — existing worktree not reused." >&2
+            return 1
+        fi
         echo "✓ Using existing worktree: $existing_worktree" >&2
         echo "$existing_worktree"
         return 0
@@ -1274,6 +1364,10 @@ _kb_create_item_worktree() {
 
     # Check if directory exists but git doesn't know about it (orphaned)
     if [[ -d "$worktree_dir" ]]; then
+        if ! _kb_confirm_existing_worktree "$worktree_dir" "destructive" "$item_id"; then
+            echo "Error: Aborted by user — orphaned directory not removed." >&2
+            return 1
+        fi
         # Check if it's a valid git worktree
         if [[ -f "$worktree_dir/.git" ]]; then
             echo "⚠️  Found orphaned worktree directory. Attempting repair..." >&2
@@ -1395,6 +1489,131 @@ _kb_warn_worktree_conflict() {
     echo ""
     echo "Proceeding anyway..."
     echo "─────────────────────────────────────"
+}
+
+# _kb_confirm_existing_worktree <path> <mode> <item_id>   (XACA-0573)
+#
+# Shows a warning box with contextual information about an existing directory at
+# the canonical worktree path, then prompts the user for confirmation.
+#
+# Arguments:
+#   $1 = canonical worktree path (e.g. /…/worktrees/xaca-0573)
+#   $2 = mode: "reuse"        — git-tracked worktree that will be reused as-is
+#              "destructive"  — untracked dir that would be deleted and recreated
+#   $3 = item id (e.g. XACA-0573) — used in the warning box header
+#
+# Information shown: path · git branch · dirty-state summary · last activity
+#
+# Bypass: KB_RUN_ASSUME_YES non-empty → log and return 0 without prompting.
+# Non-TTY:  stdin not a TTY → print error and return 1.
+# Prompt: [y/N] default-no — y/Y → 0, anything else → 1.
+#
+# Return codes:
+#   0 — confirmed (user said y/Y, or KB_RUN_ASSUME_YES bypass)
+#   1 — declined, non-TTY, or any other abort condition
+_kb_confirm_existing_worktree() {
+    local wt_path="${1-}"
+    local mode="${2-reuse}"
+    local item_id="${3-}"
+
+    # ── Gather context (best-effort; each step silently degrades) ────────────
+
+    # Branch name
+    local branch_name=""
+    if [[ -d "$wt_path/.git" ]] || [[ -f "$wt_path/.git" ]]; then
+        branch_name=$(git -C "$wt_path" branch --show-current 2>/dev/null)
+    fi
+    [[ -z "$branch_name" ]] && branch_name="(not a git dir)"
+
+    # Dirty state — porcelain v1 counts
+    local dirty_untracked=0
+    local dirty_modified=0
+    local dirty_staged=0
+    if [[ -d "$wt_path/.git" ]] || [[ -f "$wt_path/.git" ]]; then
+        local porcelain_line
+        while IFS= read -r porcelain_line; do
+            local xy="${porcelain_line:0:2}"
+            local x="${xy:0:1}"
+            local y="${xy:1:1}"
+            if [[ "$xy" == "??" ]]; then
+                dirty_untracked=$(( dirty_untracked + 1 ))
+            else
+                [[ "$x" != " " && "$x" != "?" ]] && dirty_staged=$(( dirty_staged + 1 ))
+                [[ "$y" != " " && "$y" != "?" ]] && dirty_modified=$(( dirty_modified + 1 ))
+            fi
+        done < <(git -C "$wt_path" status --porcelain 2>/dev/null)
+    fi
+
+    local dirty_summary=""
+    if [[ $(( dirty_staged + dirty_modified + dirty_untracked )) -eq 0 ]]; then
+        dirty_summary="clean"
+    else
+        local dirty_parts=()
+        [[ "$dirty_staged"    -gt 0 ]] && dirty_parts+=("${dirty_staged} staged")
+        [[ "$dirty_modified"  -gt 0 ]] && dirty_parts+=("${dirty_modified} modified")
+        [[ "$dirty_untracked" -gt 0 ]] && dirty_parts+=("${dirty_untracked} untracked")
+        local _part
+        for _part in "${dirty_parts[@]}"; do
+            [[ -n "$dirty_summary" ]] && dirty_summary="${dirty_summary}, "
+            dirty_summary="${dirty_summary}${_part}"
+        done
+    fi
+
+    # Last activity — HEAD commit timestamp first, dir mtime as fallback
+    local last_activity=""
+    if [[ -d "$wt_path/.git" ]] || [[ -f "$wt_path/.git" ]]; then
+        last_activity=$(git -C "$wt_path" log -1 --format="%cr" HEAD 2>/dev/null)
+    fi
+    if [[ -z "$last_activity" ]]; then
+        # macOS stat fallback
+        last_activity=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M" "$wt_path" 2>/dev/null || echo "unknown")
+    fi
+
+    # ── KB_RUN_ASSUME_YES bypass ─────────────────────────────────────────────
+    if [[ -n "${KB_RUN_ASSUME_YES:-}" ]]; then
+        echo "KB_RUN_ASSUME_YES set — skipping confirmation for existing worktree at $wt_path ($mode mode)" >&2
+        return 0
+    fi
+
+    # ── Warning box ──────────────────────────────────────────────────────────
+    # All UI lines go to stderr — the helper is called inside `$(...)` capture
+    # contexts (e.g. new_worktree=$(_kb_create_item_worktree ...)) where any
+    # stdout would contaminate the captured value. See XACA-0573-005 finding.
+    echo "" >&2
+    if [[ "$mode" == "destructive" ]]; then
+        echo "🛑  Untracked directory at canonical worktree path — would be DELETED" >&2
+    else
+        echo "⚠️  Existing worktree found for ${item_id}" >&2
+    fi
+    echo "─────────────────────────────────────" >&2
+    echo "  Path:          $wt_path" >&2
+    echo "  Branch:        $branch_name" >&2
+    echo "  Dirty state:   $dirty_summary" >&2
+    echo "  Last activity: $last_activity" >&2
+    echo "" >&2
+    if [[ "$mode" == "destructive" ]]; then
+        echo "  Continuing will permanently delete this directory and all its contents." >&2
+    else
+        echo "  Continuing will reuse this worktree; uncommitted work is preserved as-is." >&2
+    fi
+    echo "─────────────────────────────────────" >&2
+    echo "" >&2
+
+    # ── Non-TTY guard ────────────────────────────────────────────────────────
+    if [[ ! -t 0 ]]; then
+        echo "Non-interactive shell — refusing to proceed without explicit confirmation." >&2
+        return 1
+    fi
+
+    # ── Interactive prompt ───────────────────────────────────────────────────
+    local confirm
+    printf "Proceed? [y/N]: " >&2
+    read -r confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        return 0
+    fi
+    echo "Aborted." >&2
+    return 1
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1574,10 +1793,9 @@ _kb_clear_working_on() {
 #      differently) or python3 is unavailable.
 #   3. Built-in case table below — only the well-known teams this file has
 #      always shipped, as a last-resort fallback when both the overlay and
-#      the loader are unavailable. The freelance-* arms here are retained
-#      example entries from a specific install (xaca-0139:allowed markers);
-#      they are NOT extended for this ticket — new per-client codes belong
-#      in the overlay, not in this table (see XACA-0628/XACA-1058).
+#      the loader are unavailable. Per-client freelance-* slugs have no
+#      arm (XACA-1151 removed the 8 that re-entered); they belong in the
+#      overlay, not in this table (see XACA-0628/XACA-1058).
 # ─────────────────────────────────────────────────────────────────────────────
 # XACA-1058-013: in-process memo for _kb_get_team_code. See the identical
 # block comment in dev-team/kanban-helpers.sh's _kb_get_team_code for the
@@ -1727,17 +1945,10 @@ _kb_get_team_code() {
         android)                           _builtin="AND" ;;
         firebase)                          _builtin="FIR" ;;
         freelance)                         _builtin="FRE" ;;
-        # NOTE: freelance-<client>-<project> entries below are examples of registered
-        # team IDs from a specific install. New installations register their own team IDs
-        # via the overlay (step 1 above) — no new arms are added here (XACA-1058).
-        freelance-doublenode-starwords)    _builtin="FSW" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-doublenode-workstats)    _builtin="FWS" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-doublenode-appplanning)  _builtin="FAP" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-doublenode-lifeboard)    _builtin="FLB" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-doublenode-caravan)      _builtin="VAN" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-doublenode-awaysentry)   _builtin="FAS" ;; # xaca-0139:allowed — stable team slug constant
-        freelance-liquidstyle-agentbadges-app) _builtin="FLA" ;;
-        freelance-liquidstyle-agentbadges-ios) _builtin="FLI" ;;
+        # NOTE: per-client freelance-<client>-<project> slugs have NO arm here.
+        # They resolve from the team-paths.json overlay (step 1 above), which is
+        # where every install registers its own teams (XACA-0628/XACA-1058).
+        # XACA-1151 removed 8 client-slug arms that had re-entered this table.
         academy)                           _builtin="ACA" ;;
         dns)                               _builtin="DNS" ;;
         command)                           _builtin="CMD" ;;
@@ -1822,17 +2033,9 @@ _kb_get_team_from_code() {
         AND) echo "android" ;;
         FIR) echo "firebase" ;;
         FRE) echo "freelance" ;;
-        # NOTE: FSW/FWS/FAP/FLB/VAN/FAS are example registered codes from a
-        # specific install. New installations register their own team codes
-        # via the overlay (step 1 above) — no new arms are added here (XACA-1058).
-        FSW) echo "freelance-doublenode-starwords" ;; # xaca-0139:allowed — stable team slug constant
-        FWS) echo "freelance-doublenode-workstats" ;; # xaca-0139:allowed — stable team slug constant
-        FAP) echo "freelance-doublenode-appplanning" ;; # xaca-0139:allowed — stable team slug constant
-        FLB) echo "freelance-doublenode-lifeboard" ;; # xaca-0139:allowed — stable team slug constant
-        VAN) echo "freelance-doublenode-caravan" ;; # xaca-0139:allowed — stable team slug constant
-        FAS) echo "freelance-doublenode-awaysentry" ;; # xaca-0139:allowed — stable team slug constant
-        FLA) echo "freelance-liquidstyle-agentbadges-app" ;;
-        FLI) echo "freelance-liquidstyle-agentbadges-ios" ;;
+        # NOTE: per-client freelance codes have NO arm here; they resolve from
+        # the team-paths.json overlay (step 1 above) — XACA-0628/XACA-1058.
+        # XACA-1151 removed 8 client-code arms that had re-entered this table.
         ACA) echo "academy" ;;
         DNS) echo "dns" ;;
         CMD) echo "command" ;;
@@ -10814,7 +11017,7 @@ _kb_reopen_item() {
 # Returns: worktree path on stdout if found, empty if not
 # Usage: _kb_discover_worktree <item_id>
 _kb_discover_worktree() {
-    local item_id="$1"
+    local item_id="${1-}"
     if [[ -z "$item_id" ]]; then
         return 1
     fi
@@ -10822,21 +11025,21 @@ _kb_discover_worktree() {
     local worktree_name
     worktree_name=$(echo "$item_id" | tr '[:upper:]' '[:lower:]')
 
-    # Strategy 1: Derive project_root the same way _kb_create_item_worktree does
-    local git_root project_root
-    git_root=$(git rev-parse --git-common-dir 2>/dev/null | xargs dirname)
+    # Strategy 1: Derive project_root via shared helper (same logic as _kb_create_item_worktree)
+    # Uses three-case cascade: umbrella → named-main → fallback (XACA-0184-005)
+    # Use --path-format=absolute + quoted dirname (not `| xargs dirname`, which
+    # word-splits on paths with spaces — XACA-0598/XACA-0599 alignment).
+    local git_root project_root git_common
+    git_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    if [[ -n "$git_common" ]]; then
+        git_root=$(dirname "$git_common")
+    fi
     if [[ -z "$git_root" ]] || [[ "$git_root" == "." ]]; then
         git_root=$(git rev-parse --show-toplevel 2>/dev/null)
     fi
 
     if [[ -n "$git_root" ]]; then
-        local git_root_name
-        git_root_name=$(basename "$git_root")
-        if [[ "$git_root_name" == "develop" ]] || [[ "$git_root_name" == "main" ]] || [[ "$git_root_name" == "master" ]] || [[ "$git_root_name" == "DEV" ]]; then
-            project_root=$(dirname "$git_root")
-        else
-            project_root="$git_root"
-        fi
+        project_root=$(_kb_resolve_project_root "$git_root")
 
         local candidate="${project_root}/worktrees/${worktree_name}"
         if [[ -d "$candidate" ]]; then
