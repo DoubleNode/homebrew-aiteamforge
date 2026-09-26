@@ -2455,18 +2455,41 @@ _kb_add_blocker() {
 
     timestamp=$(_kb_get_timestamp)
 
-    # XACA-1151-044: flush active-effort time before clearing the span
-    # (mirrors _kb_add_subitem_blocker's shape, XACA-0029/XACA-0551, applied
-    # at the item level for the first time). Blocking an item previously left
-    # workStartedAt completely untouched, so a later kb-done/kb-cancel banked
-    # the ENTIRE blocked interval as work -- the same shape of bug as
-    # cleanup-all (XACA-1151-037) and the pre-round-2 kb-pause/kb-resume item
-    # arms in this file: an open span surviving a state transition that
-    # should have ended it.
-    local total_time_ms
-    total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$index]")
+    # XACA-1151-044/045 (PR #971 review round 4): flush active-effort time
+    # before clearing the span (mirrors _kb_add_subitem_blocker's shape,
+    # XACA-0029/XACA-0551, applied at the item level for the first time) --
+    # but ONLY when the item is not already terminal. Round 3 flushed
+    # unconditionally, which on a completed/cancelled item banked a stale
+    # workStartedAt as fresh work (reviewer-measured: ~8,780h from a single
+    # stale seed), bypassing the XACA-0552 freeze -- the same freeze
+    # precedent `kb-backlog demote`'s own usage text documents (~8083 below:
+    # "discarded, never credited (XACA-0552 freeze precedent)"). A terminal
+    # item's workStartedAt is discarded, never credited. For a non-terminal
+    # item, blocking previously left workStartedAt completely untouched, so a
+    # later kb-done/kb-cancel banked the ENTIRE blocked interval as work --
+    # the same shape of bug as cleanup-all (XACA-1151-037) and the
+    # pre-round-2 kb-pause/kb-resume item arms in this file: an open span
+    # surviving a state transition that should have ended it.
+    local item_status
+    item_status=$(_kb_jq_read "$board_file" ".backlog[$index].status // empty" -r)
 
-    # Add blocker to blockedBy array (create if needed), set status to blocked
+    local total_time_ms="0"
+    if [[ "$item_status" != "completed" ]] && [[ "$item_status" != "cancelled" ]]; then
+        total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$index]")
+    fi
+
+    # Add blocker to blockedBy array (create if needed), set status to blocked.
+    # XACA-1151-047: worktree/worktreeBranch/worktreeWindowId/worktreeLinkedAt
+    # are crash-recovery metadata (XACA-0884). The pre-round-3 body never
+    # touched any of them -- round 3 deleted the first three anyway, copying
+    # `kb-backlog unpick`'s clear-on-stop shape without checking that
+    # precedent applied here. It does not: unpick/demote genuinely end work
+    # on an item, while a block is frequently temporary, and the worktree a
+    # blocked item was being worked in is still the right one to resume in
+    # once unblocked. Reverted to the pre-round-3 behavior: only
+    # activelyWorking and workStartedAt are cleared, on both terminal and
+    # non-terminal items; the four worktree fields are left exactly as they
+    # were.
     _kb_jq_update "$board_file" '
         .backlog[$idx].blockedBy = ((.backlog[$idx].blockedBy // []) + [$blocker] | unique) |
         .backlog[$idx].status = "blocked" |
@@ -2474,9 +2497,6 @@ _kb_add_blocker() {
         (if $timeMs != "0" then .backlog[$idx].timeWorkedMs = ($timeMs | tonumber) else . end) |
         del(.backlog[$idx].activelyWorking) |
         del(.backlog[$idx].workStartedAt) |
-        del(.backlog[$idx].worktree) |
-        del(.backlog[$idx].worktreeBranch) |
-        del(.backlog[$idx].worktreeWindowId) |
         .backlog[$idx].updatedAt = $ts |
         .lastUpdated = $ts
     ' --argjson idx "$index" \
@@ -2504,23 +2524,31 @@ _kb_remove_blocker() {
 
     timestamp=$(_kb_get_timestamp)
 
-    # XACA-1151-044: restart the active span ONLY if a live window is still
-    # tracking this item as its workingOnId right now -- the same "actually
-    # being worked" signal cleanup-all's orphan predicate (XACA-0597, ported
-    # XACA-1151-037) and kb-resume both key off (activeWindows[].workingOnId
-    # match). Deliberately NOT unconditional: XACA-1129 is the re-stamp
-    # hazard -- resurrecting workStartedAt on an item nobody is actively
-    # sitting at (the common case: this unblock fires later, in the
-    # background, via _kb_check_unblock_dependents when the blocker
-    # completes, with no terminal open on this item at all) would be a NEW
-    # instance of the exact corruption class this whole ticket chain exists
-    # to close. A blocked item whose window is still open (blocked WHILE
-    # being worked, not stepped away from) is the one case restarting is
-    # actually correct.
-    local is_being_worked
-    is_being_worked=$(_kb_jq_read "$board_file" \
-        '(.activeWindows // []) | any(.workingOnId == $id)' \
-        --arg id "$item_id")
+    # XACA-1151-046 (PR #971 review round 4): does NOT restart workStartedAt.
+    # Round 3 added a restart gated on "a live window is still tracking this
+    # item as workingOnId", reasoned as mirroring the subitem blocker -- but
+    # _kb_remove_subitem_blocker has never restarted anything, so round 3's
+    # restart was new behavior, not a port, and it was wrong on every path:
+    # (1) it stamped workStartedAt on status=todo with no activelyWorking,
+    # exactly the stale shape the XACA-1151-042 upgrade-audit jq flags; (2) it
+    # ignored a paused window entirely, so paused -> block -> unblock -> done
+    # banked the paused gap as work; (3) it fires only on the one-blocker
+    # `kb-backlog unblock X Y` path -- `unblock X` (all blockers) uses its own
+    # jq below unconditionally, and the automatic dependent-unblock path
+    # (_kb_check_unblock_dependents, below) has its own separate inline jq
+    # and NEVER called this function at all, contradicting round 3's own
+    # comment that it was "the common case" this restart existed for; (4) it
+    # could resurrect workStartedAt on a completed/cancelled item that
+    # happened to carry a stray blockedBy plus a stale activeWindows entry.
+    # Dropped entirely. This matches _kb_remove_subitem_blocker, and a span
+    # that should resume is re-stamped the normal way: kb-pick/kb-run/
+    # kb-resume already stamp workStartedAt when work actually restarts.
+    #
+    # Note (pre-existing, not in scope here): unblocking unconditionally
+    # forces status="todo" once blockedBy empties, even if the item was
+    # itself completed/cancelled with a stray blockedBy left over, or if a
+    # human intended to resume it directly into in_progress. That is
+    # existing behavior, unchanged by this fix.
 
     # Remove blocker from blockedBy array
     # If blockedBy becomes empty, change status from blocked to todo and clean up
@@ -2529,18 +2557,13 @@ _kb_remove_blocker() {
         if (.backlog[$idx].blockedBy | length) == 0 then
             .backlog[$idx].status = "todo" |
             del(.backlog[$idx].blockedBy) |
-            del(.backlog[$idx].blockedAt) |
-            (if $isWorked == "true" then
-                .backlog[$idx].workStartedAt = $ts |
-                .backlog[$idx].startedAt //= $ts
-             else . end)
+            del(.backlog[$idx].blockedAt)
         else . end |
         .backlog[$idx].updatedAt = $ts |
         .lastUpdated = $ts
     ' --argjson idx "$index" \
       --arg blocker "$blocker_id" \
-      --arg ts "$timestamp" \
-      --arg isWorked "$is_being_worked"
+      --arg ts "$timestamp"
 }
 
 # Check and unblock dependents when an item is completed

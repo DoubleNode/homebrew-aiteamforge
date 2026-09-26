@@ -139,18 +139,47 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
       platform-portable structural properties — no action needed here.
     - **XACA-1151-044 [Advisory, folded in]:** item-level `_kb_add_blocker`/`_kb_remove_blocker` kept
       the active span open across a block, so a later `kb-done`/`kb-cancel` banked the whole blocked
-      interval as worked time (canonical had the identical gap, fixed there first this round).
-      Blocking an item now ends its active span (flush + clear, mirroring
-      `_kb_add_subitem_blocker`'s existing shape, applied at the item level for the first time), and
-      unblocking restarts it only if a live window is still tracking the item as its `workingOnId`
-      right now — the same signal `cleanup-all`'s orphan predicate already uses — so an unblock on a
-      todo/completed or currently-idle item does not stamp a new `workStartedAt` (XACA-1129 is the
-      re-stamp hazard this avoids reproducing). Ported verbatim from the fixed canonical
+      interval as worked time (canonical had the identical gap, fixed there first this round). Final
+      semantics (see the round-4 entry immediately below for the corrections that got here): blocking
+      a non-terminal item ends and banks its active span (flush + clear `activelyWorking`/
+      `workStartedAt`, mirroring `_kb_add_subitem_blocker`'s existing shape, applied at the item level
+      for the first time); blocking a completed/cancelled item never flushes — its stale
+      `workStartedAt` is discarded, matching the XACA-0552 freeze; neither path touches any of the
+      four worktree pointer fields (`worktree`/`worktreeBranch`/`worktreeWindowId`/
+      `worktreeLinkedAt`). Unblocking never restarts `workStartedAt` — kb-pick/kb-run/kb-resume already
+      re-stamp the span when work genuinely resumes. Ported verbatim from the fixed canonical
       `kanban-helpers.sh` (verified byte-identical after normalizing pre-existing arg-style and
-      comment-block drift). Bumped `tests/test-xaca-0819-pause-resume-active-span.sh`'s file-wide
-      `_kb_flush_work_time` call-site count from 10 to 11 (the new `_kb_add_blocker` call; unblock
-      restarts the span via a plain jq assignment, not a call to this function, so it adds no site of
-      its own) and this file's own `_kb_flush_work_time` header comment to match.
+      comment-block drift).
+
+    **PR #971 review round 4 (XACA-1151-045/046/047 — corrections to round 3's own 044 fix):**
+    - **XACA-1151-045 [Blocking]:** `_kb_add_blocker`'s flush was unconditional, bypassing the
+      XACA-0552 freeze — blocking a completed/cancelled item with a stale `workStartedAt` banked it as
+      fresh work (reviewer-measured: ~8,780h from a single stale seed). Fixed: flush ONLY when the
+      item's own status is not `completed`/`cancelled`; on a terminal item, `workStartedAt` is
+      discarded without banking.
+    - **XACA-1151-046 [Blocking]:** `_kb_remove_blocker`'s restart-on-unblock was wrong on every path
+      — it stamped `workStartedAt` on `status=todo` with no `activelyWorking` (exactly the stale shape
+      the XACA-1151-042 upgrade-audit jq exists to find), it ignored a PAUSED window (a window's
+      `status == "paused"` still satisfied the bare `workingOnId` match, so unblock could resurrect a
+      span nobody had actually resumed via `kb-resume`), it fired only on the one-blocker `kb-backlog
+      unblock X Y` path (the all-blockers `unblock X` path and the automatic dependent-unblock path
+      have their own separate inline jq and never called this function at all), and it could
+      resurrect `workStartedAt` on a completed/cancelled item carrying a stray `blockedBy` plus a
+      stale `activeWindows` entry. Fixed: the restart is dropped entirely, matching
+      `_kb_remove_subitem_blocker` (which has never restarted anything). The pre-existing "unblock
+      forces `status=todo`" behavior is unchanged and documented as out of scope.
+    - **XACA-1151-047 [Blocking]:** `_kb_add_blocker`'s flush also deleted `worktree`/
+      `worktreeBranch`/`worktreeWindowId` (leaving `worktreeLinkedAt` dangling) — crash-recovery
+      metadata (XACA-0884) a temporary block should never touch, and out of round 3's own scope.
+      Reverted to the pre-round-3 behavior: none of the four fields are deleted.
+    - New table rows in `tests/test-xaca-1151-044-item-blocker-flush.zsh` (canonical, this repo's
+      outer counterpart) and this repo's own template test coverage, each with a negative control
+      reproducing the exact round-3 bug from newly-frozen fixtures extracted verbatim from the
+      round-3 commits, with their own runtime byte-provenance re-check. Bumped
+      `tests/test-xaca-0819-pause-resume-active-span.sh`'s file-wide `_kb_flush_work_time` call-site
+      count from 10 to 11 (the new `_kb_add_blocker` call; unblock still adds no site of its own) and
+      this file's own `_kb_flush_work_time` header comment to match — unchanged by this round, since
+      the call site itself, not its condition, is what the count tracks.
 
 ## [0.20.26] - 2026-09-25
 - **XACA-1340** — agent panels no longer exit with "iTerm2 not running" while iTerm2 is running. The liveness check used `pgrep -f "iTerm.app"`, but macOS `pgrep` excludes the caller's ancestors unless `-a` is passed, and a local panel runs inside iTerm2, so the check never saw its own host. Panels launched over `ssh -t` (connect scripts) also probed the remote host. `share/scripts/agent-panel-display.sh` now skips the check under SSH and otherwise uses `pgrep -a -x iTerm2`.
