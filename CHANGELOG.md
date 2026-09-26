@@ -75,10 +75,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
       control against the frozen pre-fix arm (new fixture `tests/fixtures/xaca-1151/pre-port-cleanup-all-arm.txt`,
       from tap commit `2aa571d`, the exact HEAD the reviewer measured against) mutated live into a copy
       of the CURRENT template — sourcing a whole old tap commit would also revert kb-done/kb-cancel and
-      mask the exact interaction under test. **Upgrade disclosure:** consumer boards already swept by
-      the old `cleanup-all`, or paused under the old item-level `kb-pause`, may still carry a stale
-      `workStartedAt` that this fix cannot retroactively clear — see the outer repo's CHANGELOG for the
-      read-only audit one-liner. No automatic board-mutating remediation is shipped.
+      mask the exact interaction under test. **Upgrade disclosure (consumer boards, cannot be
+      retro-fixed by this change):** (a) any item or subitem already swept by the OLD `cleanup-all`
+      still carries a stale `workStartedAt` today; (b) any ITEM paused under the OLD item-level
+      `kb-pause` (before this fix) still carries a stale `workStartedAt` too — subitems are unaffected
+      by (b), since the subitem pause arm already flushed correctly before this fix. After upgrading,
+      `kb-resume` re-stamps `workStartedAt` and discards the gap safely, but a `kb-done`/`kb-cancel`
+      run directly from either stale state (no intervening resume) will bank it. No automatic
+      board-mutating remediation is shipped. Consumers can audit their own boards read-only with
+      (checks items AND subitems; a stale row has `workStartedAt` set while EITHER mid-pause
+      (`pausedAt` set) OR not actually being worked (`activelyWorking` not `true`) OR not
+      `in_progress` — an OR, not an AND: an old-paused item is still `in_progress` with
+      `activelyWorking: true`, and an old-cleanup-all orphan usually still reads `in_progress` too, so
+      an AND-of-all-three filter misses both populations):
+      ```
+      jq '[.backlog[], (.backlog[].subitems[]? // empty)]
+          | map(select(.workStartedAt != null and (.pausedAt != null or .activelyWorking != true or .status != "in_progress")))
+          | map({id, status, workStartedAt})' board.json
+      ```
     - **XACA-1151-038 [Advisory]:** corrected three stale comments — `kb-backlog demote`'s "Coverage 4
       below" now says that coverage lives in this file's own `test-xaca-0819-pause-resume-active-span.sh`,
       not further down in the template; `_kb_flush_work_time`'s header no longer says "definition only"
@@ -90,6 +104,53 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
       now" from "resume anchors to some other stale value". New row 2m (a2) seeds a genuine 2-real-day
       gap via `pausedAt` and asserts the real anchor point epoch-close to now, with a live sensitivity
       mutant (anchoring to `.pausedAt` instead) proving the assertion actually discriminates.
+  - **PR #971 review round 3 (XACA-1151-041/042/043/044):**
+    - **XACA-1151-041 [Advisory]:** `kb-backlog sub cancel` deleted `workStartedAt` without flushing
+      it, the one remaining terminal-transition arm in this file that didn't bank the open span
+      first — silent time loss, not corruption, but an outlier against the rest of the file's own
+      pattern. Ported canonical's arm verbatim (jq filter body confirmed byte-for-byte identical
+      after normalizing the pre-existing `$1` vs. `${1-}` local-arg style drift). New outer-repo test
+      row with a negative control against the frozen pre-fix arm (new fixture
+      `tests/fixtures/xaca-1151/pre-port-subcancel-arm.txt`, from tap commit `3783964`, own runtime
+      byte-provenance check). Corrected `_kb_flush_work_time`'s header comment, which claimed
+      `kb-backlog demote`/`unpick` were the only non-flushing verbs in the file — no longer an
+      accurate "these two only" claim once a third verb (`sub cancel`) is fixed to flush; reworded to
+      name the real call-site count instead.
+    - **XACA-1151-042 [Blocking]:** the upgrade-audit jq in this file (and the outer repo's) returned
+      `[]` for both stale populations it was written to find — the AND-of-three-conditions shape
+      unconditionally required `status != "in_progress"`, but an item paused under the OLD pause bug
+      is still `in_progress` with `activelyWorking: true`, and a `cleanup-all` orphan usually still
+      reads `in_progress` too, so the AND excluded both real populations. Replaced with an OR (any ONE
+      condition is sufficient), applied to items AND subitems, verified empirically against a
+      constructed 6-row sample board (5 stale shapes + 1 live item) before being written here: the
+      corrected filter finds exactly the 5 stale rows and excludes the live one; the old filter, run
+      as a negative control, finds only 2 of the 5. This note is now fully self-contained — this repo
+      is public and the outer repo is private, so it no longer points readers there. Corrected part
+      (b) of the disclosure to say ITEMS only (the subitem pause arm already flushed correctly before
+      this PR).
+    - **XACA-1151-043 [Blocking]:** `tests/test-xaca-1151-prc-time-tracking.sh` (outer repo) depends
+      on BSD `date` (the product code's `_kb_flush_work_time` calls `date -j -f`) but was registered
+      to run on ubuntu-latest — every BSD-date call site in it was silently exercised against the
+      wrong `date` implementation on every PR, never on the platform the product code actually
+      requires. New dedicated outer-repo workflow, `runs-on: macos-latest`, `paths:`-filtered, citing
+      the XACA-1190 macOS-cost precedent. Checked this repo's own
+      `tests/test-xaca-0819-pause-resume-active-span.sh` for the same class of defect: it is already
+      correctly wired to `macos-latest` in this repo's own `tests.yml` and asserts only
+      platform-portable structural properties — no action needed here.
+    - **XACA-1151-044 [Advisory, folded in]:** item-level `_kb_add_blocker`/`_kb_remove_blocker` kept
+      the active span open across a block, so a later `kb-done`/`kb-cancel` banked the whole blocked
+      interval as worked time (canonical had the identical gap, fixed there first this round).
+      Blocking an item now ends its active span (flush + clear, mirroring
+      `_kb_add_subitem_blocker`'s existing shape, applied at the item level for the first time), and
+      unblocking restarts it only if a live window is still tracking the item as its `workingOnId`
+      right now — the same signal `cleanup-all`'s orphan predicate already uses — so an unblock on a
+      todo/completed or currently-idle item does not stamp a new `workStartedAt` (XACA-1129 is the
+      re-stamp hazard this avoids reproducing). Ported verbatim from the fixed canonical
+      `kanban-helpers.sh` (verified byte-identical after normalizing pre-existing arg-style and
+      comment-block drift). Bumped `tests/test-xaca-0819-pause-resume-active-span.sh`'s file-wide
+      `_kb_flush_work_time` call-site count from 10 to 11 (the new `_kb_add_blocker` call; unblock
+      restarts the span via a plain jq assignment, not a call to this function, so it adds no site of
+      its own) and this file's own `_kb_flush_work_time` header comment to match.
 
 ## [0.20.26] - 2026-09-25
 - **XACA-1340** — agent panels no longer exit with "iTerm2 not running" while iTerm2 is running. The liveness check used `pgrep -f "iTerm.app"`, but macOS `pgrep` excludes the caller's ancestors unless `-a` is passed, and a local panel runs inside iTerm2, so the check never saw its own host. Panels launched over `ssh -t` (connect scripts) also probed the remote host. `share/scripts/agent-panel-display.sh` now skips the check under SSH and otherwise uses `pgrep -a -x iTerm2`.

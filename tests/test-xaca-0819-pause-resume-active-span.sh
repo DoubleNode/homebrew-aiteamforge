@@ -431,15 +431,19 @@ ok "3a: exactly 1 _kb_flush_work_time() definition in the rendered template" \
 
 # 3b: the file-wide real call-site count. XACA-1151 PR-C ported item-level
 # flushing into kb-done, kb-cancel, kb-stop-working and kb-pause (2 sites
-# each: item + subitem), plus _kb_add_subitem_blocker's 1 (subitem only) =
-# 9. This is an EXACT match, not a floor: a mismatch in EITHER direction
-# means either an un-reviewed removal or an un-reviewed addition, and both
-# need eyes on the diff.
+# each: item + subitem), plus _kb_add_subitem_blocker's 1 (subitem only) = 9,
+# review round 3 (XACA-1151-041) added `kb-backlog sub cancel`'s 1 (subitem
+# only) = 10, and the same round (XACA-1151-044) added item-level
+# `_kb_add_blocker`'s 1 (block side only -- `_kb_remove_blocker` restarts
+# the span via a plain jq assignment, not a call to this function) = 11.
+# This is an EXACT match, not a floor: a mismatch in EITHER direction means
+# either an un-reviewed removal or an un-reviewed addition, and both need
+# eyes on the diff.
 _CALL_COUNT_TOTAL=$(grep -c '_kb_flush_work_time "' "$RENDERED" 2>/dev/null)
 [ -n "$_CALL_COUNT_TOTAL" ] || _CALL_COUNT_TOTAL=0
-ok "3b: exactly 9 real _kb_flush_work_time call sites file-wide (kb-done/kb-cancel/kb-stop-working/kb-pause x2 each + _kb_add_subitem_blocker x1)" \
-   "$([ "$_CALL_COUNT_TOTAL" -eq 9 ] && echo 1 || echo 0)" \
-   "expected 9 call sites (call-shaped substring '_kb_flush_work_time \"'), found $_CALL_COUNT_TOTAL"
+ok "3b: exactly 11 real _kb_flush_work_time call sites file-wide (kb-done/kb-cancel/kb-stop-working/kb-pause x2 each + _kb_add_subitem_blocker x1 + sub-cancel x1 + _kb_add_blocker x1)" \
+   "$([ "$_CALL_COUNT_TOTAL" -eq 11 ] && echo 1 || echo 0)" \
+   "expected 11 call sites (call-shaped substring '_kb_flush_work_time \"'), found $_CALL_COUNT_TOTAL"
 
 # 3c: isolate kb-pause's own function body (from its header to its own
 # top-level closing brace) and confirm it now contains 2 call sites (item +

@@ -1684,12 +1684,15 @@ _kb_get_timestamp() {
 }
 
 # Ported from canonical kanban-helpers.sh for XACA-0819. As of XACA-1151
-# PR-C this has 9 real call sites in this file (kb-done, kb-cancel,
-# kb-stop-working and kb-pause x2 each -- item + subitem -- plus
-# _kb_add_subitem_blocker x1; see the XACA-0819-014 comment at kb-pause,
-# ~line 3187, for the full call-site landscape). It is deliberately NOT
-# called from `kb-backlog demote` or `kb-backlog unpick` (per
-# XACA-0884/XACA-0552) -- those two remain the only non-flushing verbs.
+# PR-C (review round 3, XACA-1151-041/044) this has 11 real call sites in
+# this file (kb-done, kb-cancel, kb-stop-working and kb-pause x2 each --
+# item + subitem -- plus _kb_add_subitem_blocker x1, `kb-backlog sub cancel`
+# x1 (subitem only), and _kb_add_blocker x1 (item-level, block side only --
+# _kb_remove_blocker restarts the span via a plain jq assignment, not a call
+# to this function); see the XACA-0819-014 comment at kb-pause, ~line 3187,
+# for the full call-site landscape). It is deliberately NOT called from
+# `kb-backlog demote` or `kb-backlog unpick` (per XACA-0884/XACA-0552) --
+# those two remain the only non-flushing verbs.
 _kb_flush_work_time() {
     local board_file="$1" base_path="$2"
     local work_started_at existing_time_ms total_time_ms
@@ -2452,16 +2455,34 @@ _kb_add_blocker() {
 
     timestamp=$(_kb_get_timestamp)
 
+    # XACA-1151-044: flush active-effort time before clearing the span
+    # (mirrors _kb_add_subitem_blocker's shape, XACA-0029/XACA-0551, applied
+    # at the item level for the first time). Blocking an item previously left
+    # workStartedAt completely untouched, so a later kb-done/kb-cancel banked
+    # the ENTIRE blocked interval as work -- the same shape of bug as
+    # cleanup-all (XACA-1151-037) and the pre-round-2 kb-pause/kb-resume item
+    # arms in this file: an open span surviving a state transition that
+    # should have ended it.
+    local total_time_ms
+    total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$index]")
+
     # Add blocker to blockedBy array (create if needed), set status to blocked
     _kb_jq_update "$board_file" '
         .backlog[$idx].blockedBy = ((.backlog[$idx].blockedBy // []) + [$blocker] | unique) |
         .backlog[$idx].status = "blocked" |
         .backlog[$idx].blockedAt //= $ts |
+        (if $timeMs != "0" then .backlog[$idx].timeWorkedMs = ($timeMs | tonumber) else . end) |
+        del(.backlog[$idx].activelyWorking) |
+        del(.backlog[$idx].workStartedAt) |
+        del(.backlog[$idx].worktree) |
+        del(.backlog[$idx].worktreeBranch) |
+        del(.backlog[$idx].worktreeWindowId) |
         .backlog[$idx].updatedAt = $ts |
         .lastUpdated = $ts
     ' --argjson idx "$index" \
       --arg blocker "$blocker_id" \
-      --arg ts "$timestamp"
+      --arg ts "$timestamp" \
+      --arg timeMs "$total_time_ms"
 }
 
 # Remove a blocker from an item
@@ -2483,6 +2504,24 @@ _kb_remove_blocker() {
 
     timestamp=$(_kb_get_timestamp)
 
+    # XACA-1151-044: restart the active span ONLY if a live window is still
+    # tracking this item as its workingOnId right now -- the same "actually
+    # being worked" signal cleanup-all's orphan predicate (XACA-0597, ported
+    # XACA-1151-037) and kb-resume both key off (activeWindows[].workingOnId
+    # match). Deliberately NOT unconditional: XACA-1129 is the re-stamp
+    # hazard -- resurrecting workStartedAt on an item nobody is actively
+    # sitting at (the common case: this unblock fires later, in the
+    # background, via _kb_check_unblock_dependents when the blocker
+    # completes, with no terminal open on this item at all) would be a NEW
+    # instance of the exact corruption class this whole ticket chain exists
+    # to close. A blocked item whose window is still open (blocked WHILE
+    # being worked, not stepped away from) is the one case restarting is
+    # actually correct.
+    local is_being_worked
+    is_being_worked=$(_kb_jq_read "$board_file" \
+        '(.activeWindows // []) | any(.workingOnId == $id)' \
+        --arg id "$item_id")
+
     # Remove blocker from blockedBy array
     # If blockedBy becomes empty, change status from blocked to todo and clean up
     _kb_jq_update "$board_file" '
@@ -2490,13 +2529,18 @@ _kb_remove_blocker() {
         if (.backlog[$idx].blockedBy | length) == 0 then
             .backlog[$idx].status = "todo" |
             del(.backlog[$idx].blockedBy) |
-            del(.backlog[$idx].blockedAt)
+            del(.backlog[$idx].blockedAt) |
+            (if $isWorked == "true" then
+                .backlog[$idx].workStartedAt = $ts |
+                .backlog[$idx].startedAt //= $ts
+             else . end)
         else . end |
         .backlog[$idx].updatedAt = $ts |
         .lastUpdated = $ts
     ' --argjson idx "$index" \
       --arg blocker "$blocker_id" \
-      --arg ts "$timestamp"
+      --arg ts "$timestamp" \
+      --arg isWorked "$is_being_worked"
 }
 
 # Check and unblock dependents when an item is completed
@@ -8885,7 +8929,18 @@ kb-backlog() {
                     local timestamp
                     timestamp=$(_kb_get_timestamp)
 
+                    # XACA-1151-041 (ported from canonical, XACA-0551): flush accrued
+                    # active effort before clearing workStartedAt. This path was
+                    # missed by the original XACA-0551 port -- it deleted
+                    # workStartedAt without banking it, the same shape of bug as
+                    # cleanup-all (XACA-1151-037) and the pre-round-2 kb-pause/
+                    # kb-resume item arms: a subitem's open span was silently
+                    # discarded on cancel instead of credited to timeWorkedMs.
+                    local total_time_ms
+                    total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$parent_idx].subitems[$sub_idx]")
+
                     local update_jq='.backlog[$pidx].subitems[$sidx].status = "cancelled" |
+                       .backlog[$pidx].subitems[$sidx].timeWorkedMs = ($timeMs | tonumber) |
                        .backlog[$pidx].subitems[$sidx].cancelledAt = $ts |
                        .backlog[$pidx].subitems[$sidx].updatedAt = $ts |
                        .backlog[$pidx].updatedAt = $ts |
@@ -8909,12 +8964,14 @@ kb-backlog() {
                            --argjson pidx "$parent_idx" \
                            --argjson sidx "$sub_idx" \
                            --arg ts "$timestamp" \
+                           --arg timeMs "$total_time_ms" \
                            --arg reason "$reason"
                     else
                         _kb_jq_update "$board_file" "$update_jq" \
                            --argjson pidx "$parent_idx" \
                            --argjson sidx "$sub_idx" \
-                           --arg ts "$timestamp"
+                           --arg ts "$timestamp" \
+                           --arg timeMs "$total_time_ms"
                     fi
                     echo "✓ Cancelled [$sub_id]: $sub_title"
 
