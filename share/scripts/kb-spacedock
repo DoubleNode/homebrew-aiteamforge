@@ -1837,6 +1837,395 @@ SPD_TEAMS_EOF
     fi
 }
 
+# ---------------------------------------------------------------------------
+# CHECK 7 — VPN/Tailscale MagicDNS resolver-order conflict (XACA-1258-002)
+# ---------------------------------------------------------------------------
+# MEASURED on M3Pro 2026-09-16: when a full-tunnel third-party VPN (NordLynx
+# at the time, gw 10.5.0.2, utun11) owns the default route on a Tailscale
+# host, Tailscale's MagicDNS resolver (100.100.100.100, scutil --dns
+# order=100200) sits AHEAD of the VPN's own resolver (order=104800) in
+# macOS's resolver priority. MagicDNS then stops answering (its own upstream
+# resolvers are reached over Tailscale's own tunnel, which the third-party
+# VPN's full-tunnel default route no longer routes to), but macOS still
+# queries it FIRST for every hostname lookup — so every name lookup fails
+# while raw-IP traffic keeps working. This reads to a human as "the network
+# is down"; it is actually a resolver-priority conflict between two VPN
+# stacks. Fix: `tailscale set --accept-dns=false` (costs fleet MagicDNS name
+# resolution — see docs/vpn-coexistence-runbook.md, written alongside this
+# ticket).
+#
+# THE CONJUNCTION THIS DETECTS (both (a) and (b) required for CONFLICT):
+#   (a) the default route goes out a utun interface that is NOT Tailscale's
+#       own. Tailscale's own utun is identified by EXACT match against the
+#       address `tailscale ip -4` reports — NEVER by range-testing
+#       100.64.0.0/10, because a VPN's own DNS server can legitimately live
+#       in that same CGNAT range (e.g. NordLynx's internal resolver at
+#       100.64.0.2) and a range test would misidentify the VPN's own
+#       interface as Tailscale's.
+#   (b) `scutil --dns` has a resolver for nameserver 100.100.100.100 whose
+#       `order` is numerically LOWER (= higher priority) than the resolver
+#       this check ties to the foreign VPN interface from (a) via that
+#       resolver's `if_index` name — or, when no resolver can be tied to
+#       that interface at all, the first OTHER resolver in scutil's own
+#       listed order that carries an `order` value (documented choice: some
+#       VPN clients install a resolver with no `if_index`, only a
+#       domain/global scope, so "the VPN's resolver" is sometimes
+#       unidentifiable by interface, and first-listed-by-priority is the
+#       best available proxy for "what MagicDNS is actually racing against").
+#
+# VERDICT, folded into this script's existing severity vocabulary (see
+# SEVERITY BUCKETS in the header — this check adds no new bucket):
+#   CONFLICT       -> fail     both (a) and (b) hold
+#   OK             -> ok       (a) holds but (b) does not (e.g. accept-dns
+#                               is already off, so no 100.100.100.100
+#                               resolver is installed at all)
+#   N/A            -> skip     no foreign-utun default route, or Tailscale
+#                               is not installed/not connected on this host
+#   COULD_NOT_RUN  -> unknown  a probe failed to execute, or scutil's output
+#                               was too ambiguous to evaluate (b) at all —
+#                               NEVER folded into ok/skip; see this script's
+#                               "a tool that failed to run is UNKNOWN, never
+#                               OK" property in the header above.
+#
+# Every external command below is independently overridable for stubbing in
+# tests:
+#   KB_SPACEDOCK_VPN_ROUTE_BIN      default "route"     (primary default-route probe)
+#   KB_SPACEDOCK_VPN_NETSTAT_BIN    default "netstat"    (fallback if route absent)
+#   KB_SPACEDOCK_VPN_IFCONFIG_BIN   default "ifconfig"
+#   KB_SPACEDOCK_VPN_SCUTIL_BIN     default "scutil"
+#   KB_SPACEDOCK_VPN_PROBE_TIMEOUT  default 10s — bounds route/netstat/ifconfig/scutil
+#                                    (XACA-1177 contract; timeout -> [unknown])
+#   KB_SPACEDOCK_VPN_TAILSCALE_APP_BIN  default /Applications/Tailscale.app/Contents/MacOS/Tailscale
+#                                    (the app-bundle probe path; override so tests
+#                                    can model "Tailscale absent" on a host that has it)
+#   KB_SPACEDOCK_VPN_TAILSCALE_BIN  default /Applications/Tailscale.app/Contents/MacOS/Tailscale,
+#                                    falling back to `tailscale` on PATH —
+#                                    independent of KB_SPACEDOCK_REBOOT_TAILSCALE_BIN
+#                                    (same default location, but this check
+#                                    runs under triage/report, not
+#                                    verify-reboot, and a test may want to
+#                                    stub one without the other).
+#
+# `tailscale ip -4` is the one call in this check that talks to a daemon
+# (tailscaled) and can therefore hang the same way the two verify-reboot
+# Tailscale probes can — it shares their existing
+# KB_SPACEDOCK_TAILSCALE_TIMEOUT bound (default 15s) rather than getting a
+# bespoke timeout var, same rationale as
+# _spd_reboot_check_tailscale_sysext's own comment: one wedged-daemon
+# failure mode, no scenario where an operator would want a different bound
+# for this call than for the other two. route/netstat/ifconfig/scutil below
+# are cheap LOCAL reads with no daemon dependency (same category as
+# `defaults read`/`pmset`/`netstat` elsewhere in this script) and are
+# deliberately left unbounded, per the header's own "DELIBERATELY LEFT
+# UNBOUNDED" section.
+
+# Prints the default route's outbound interface name on stdout; returns
+# non-zero with no output if neither probe could determine it (never
+# guesses).
+_spd_vpn_default_route_if() {
+    local route_bin="${KB_SPACEDOCK_VPN_ROUTE_BIN:-route}"
+    local netstat_bin="${KB_SPACEDOCK_VPN_NETSTAT_BIN:-netstat}"
+    local out rc ifn
+    if _spd_have "$route_bin"; then
+        _spd_run_bounded "vpn-dns-conflict" "${SPD_VPN_PROBE_LIMIT:-10}" "$route_bin" -n get default
+        out="$SPD_RUN_OUT"
+        rc="$SPD_RUN_RC"
+        [ "$SPD_RUN_TIMED_OUT" = "1" ] && rc=124
+        if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+            ifn=$(printf '%s\n' "$out" | awk '/^[[:space:]]*interface:/{print $2; exit}')
+            if [ -n "$ifn" ]; then
+                printf '%s\n' "$ifn"
+                return 0
+            fi
+        fi
+    fi
+    # Fallback only — `route -n get default` is the documented primary
+    # probe and is reliable on every macOS version this script targets;
+    # netstat's column layout is more version-fragile (an Expire column can
+    # shift the "real" last field), so this is best-effort.
+    if _spd_have "$netstat_bin"; then
+        _spd_run_bounded "vpn-dns-conflict" "${SPD_VPN_PROBE_LIMIT:-10}" "$netstat_bin" -rn -f inet
+        out="$SPD_RUN_OUT"
+        rc="$SPD_RUN_RC"
+        [ "$SPD_RUN_TIMED_OUT" = "1" ] && rc=124
+        if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+            ifn=$(printf '%s\n' "$out" | awk '$1=="default"{print $NF; exit}')
+            if [ -n "$ifn" ]; then
+                printf '%s\n' "$ifn"
+                return 0
+            fi
+        fi
+    fi
+    return 1
+}
+
+# Resolves which Tailscale binary/CLI to invoke. Prints the resolved
+# path/command on stdout; returns 1 with no output when Tailscale is not
+# installed on this host at all (a legitimate N/A signal for the caller,
+# never a probe failure).
+_spd_vpn_tailscale_bin() {
+    if [ -n "${KB_SPACEDOCK_VPN_TAILSCALE_BIN:-}" ]; then
+        printf '%s\n' "$KB_SPACEDOCK_VPN_TAILSCALE_BIN"
+        return 0
+    fi
+    local app_bin="${KB_SPACEDOCK_VPN_TAILSCALE_APP_BIN:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"
+    if [ -x "$app_bin" ]; then
+        printf '%s\n' "$app_bin"
+        return 0
+    fi
+    if _spd_have tailscale; then
+        printf 'tailscale\n'
+        return 0
+    fi
+    return 1
+}
+
+# Given a Tailscale IPv4 address, finds which interface carries it via
+# `ifconfig` (EXACT match — never a range test, see this check's own header
+# comment for why). Prints the interface name on stdout on success.
+#   returns 0  found (interface name printed)
+#   returns 1  ifconfig itself could not be run (missing binary, non-zero
+#              exit, or empty output) — COULD_NOT_RUN territory
+#   returns 2  ifconfig ran fine but no interface carries this address —
+#              anomalous (Tailscale reported an address bound to nothing);
+#              also COULD_NOT_RUN territory rather than a guess
+_spd_vpn_if_for_addr() {
+    local want="$1"
+    local ifconfig_bin="${KB_SPACEDOCK_VPN_IFCONFIG_BIN:-ifconfig}"
+    if ! _spd_have "$ifconfig_bin"; then
+        return 1
+    fi
+    local ifc_out ifc_rc
+    _spd_run_bounded "vpn-dns-conflict" "${SPD_VPN_PROBE_LIMIT:-10}" "$ifconfig_bin"
+    ifc_out="$SPD_RUN_OUT"
+    ifc_rc="$SPD_RUN_RC"
+    [ "$SPD_RUN_TIMED_OUT" = "1" ] && ifc_rc=124
+    if [ "$ifc_rc" -ne 0 ] || [ -z "$ifc_out" ]; then
+        return 1
+    fi
+    local found_if awk_rc
+    found_if=$(printf '%s\n' "$ifc_out" | awk -v want="$want" '
+        /^[A-Za-z0-9]+:/ { cur = $1; sub(/:$/, "", cur); next }
+        /inet[ \t]/ {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "inet") { addr = $(i + 1); break }
+            }
+            if (addr == want) { print cur; f = 1; exit }
+        }
+        END { if (!f) exit 1 }
+    ')
+    awk_rc=$?
+    if [ "$awk_rc" -ne 0 ] || [ -z "$found_if" ]; then
+        return 2
+    fi
+    printf '%s\n' "$found_if"
+    return 0
+}
+
+_spd_check_vpn_dns_conflict() {
+    local surface="vpn-dns-conflict"
+
+    # XACA-1177 hang-bounding contract: every external probe in this check is
+    # bounded. `tailscale ip -4` uses KB_SPACEDOCK_TAILSCALE_TIMEOUT (below);
+    # route/netstat/ifconfig/scutil share KB_SPACEDOCK_VPN_PROBE_TIMEOUT.
+    # A timeout reports [unknown] (fail-closed), never [ok].
+    _spd_resolve_timeout "${KB_SPACEDOCK_VPN_PROBE_TIMEOUT-_SPD_TIMEOUT_UNSET}" 10 "KB_SPACEDOCK_VPN_PROBE_TIMEOUT"
+    SPD_VPN_PROBE_LIMIT="$SPD_TIMEOUT_VALUE"
+    local probe_note="$SPD_TIMEOUT_NOTE"
+
+    # --- (a), part 1: does the default route go out a utun at all? ---
+    local def_if
+    def_if=$(_spd_vpn_default_route_if)
+    if [ -z "$def_if" ]; then
+        _spd_emit "$surface" "unknown" \
+            "could not determine the default route's outbound interface ('route -n get default' and 'netstat -rn -f inet' both failed, timed out (limit ${SPD_VPN_PROBE_LIMIT}s; KB_SPACEDOCK_VPN_PROBE_TIMEOUT), or produced no interface)${probe_note} — VPN/MagicDNS resolver-order check could not run" "" ""
+        return
+    fi
+    case "$def_if" in
+        utun*) ;;
+        *)
+            _spd_emit "$surface" "skip" \
+                "default route goes out '$def_if' (not a utun interface) — no foreign-VPN default route present; N/A" "" ""
+            return
+            ;;
+    esac
+
+    # --- (a), part 2: is that utun Tailscale's OWN, or a foreign VPN's? ---
+    local ts_bin
+    ts_bin=$(_spd_vpn_tailscale_bin)
+    if [ -z "$ts_bin" ]; then
+        _spd_emit "$surface" "skip" \
+            "default route goes out utun interface '$def_if', but Tailscale does not appear to be installed on this host — cannot be a Tailscale/VPN resolver conflict; N/A" "" ""
+        return
+    fi
+
+    _spd_resolve_timeout "${KB_SPACEDOCK_TAILSCALE_TIMEOUT-_SPD_TIMEOUT_UNSET}" 15 "KB_SPACEDOCK_TAILSCALE_TIMEOUT"
+    local limit="$SPD_TIMEOUT_VALUE" note="$SPD_TIMEOUT_NOTE"
+    _spd_run_bounded "$surface" "$limit" "$ts_bin" ip -4
+    if _spd_emit_run_start_failure "$surface"; then return; fi
+    if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
+        _spd_emit "$surface" "unknown" \
+            "'$ts_bin ip -4' timed out after ${SPD_RUN_ELAPSED}s (limit ${limit}s; raise with KB_SPACEDOCK_TAILSCALE_TIMEOUT) — no result; the tool was killed${note}" \
+            "$SPD_RUN_OUT" "$SPD_RUN_RC"
+        return
+    fi
+    _spd_tailscale_could_not_run "$SPD_RUN_RC" "$SPD_RUN_OUT"
+    if [ "$SPD_TAILSCALE_COULD_NOT_RUN" = "1" ]; then
+        _spd_emit "$surface" "unknown" \
+            "'$ts_bin ip -4' could not run (exit $SPD_RUN_RC, no usable output)${note} — VPN/MagicDNS resolver-order check could not run" "$SPD_RUN_OUT" "$SPD_RUN_RC"
+        return
+    fi
+    local ts_ip
+    ts_ip=$(printf '%s\n' "$SPD_RUN_OUT" | head -1 | tr -d '[:space:]')
+    case "$ts_ip" in
+        [0-9]*.[0-9]*.[0-9]*.[0-9]*) ;;
+        *)
+            _spd_emit "$surface" "skip" \
+                "default route goes out utun interface '$def_if', but '$ts_bin ip -4' returned no usable IPv4 address (Tailscale installed but not connected/logged in on this host) — cannot be a Tailscale/VPN resolver conflict; N/A" \
+                "$SPD_RUN_OUT" "$SPD_RUN_RC"
+            return
+            ;;
+    esac
+
+    local ts_if ts_if_rc
+    ts_if=$(_spd_vpn_if_for_addr "$ts_ip")
+    ts_if_rc=$?
+    if [ "$ts_if_rc" -eq 1 ]; then
+        _spd_emit "$surface" "unknown" \
+            "default route goes out utun interface '$def_if' and Tailscale reports address $ts_ip, but '${KB_SPACEDOCK_VPN_IFCONFIG_BIN:-ifconfig}' could not be run or timed out (limit ${SPD_VPN_PROBE_LIMIT}s; KB_SPACEDOCK_VPN_PROBE_TIMEOUT) to identify which interface carries it${probe_note} — VPN/MagicDNS resolver-order check could not run" "" ""
+        return
+    elif [ "$ts_if_rc" -eq 2 ] || [ -z "$ts_if" ]; then
+        _spd_emit "$surface" "unknown" \
+            "Tailscale reports address $ts_ip, but no interface on this host carries it (per '${KB_SPACEDOCK_VPN_IFCONFIG_BIN:-ifconfig}') — cannot confirm which utun is Tailscale's own; VPN/MagicDNS resolver-order check could not run" "" ""
+        return
+    fi
+
+    if [ "$def_if" = "$ts_if" ]; then
+        _spd_emit "$surface" "skip" \
+            "default route goes out '$def_if', which IS Tailscale's own utun interface — no foreign VPN owns the default route; N/A" "" ""
+        return
+    fi
+
+    # (a) holds: def_if is a foreign (non-Tailscale) utun that owns the
+    # default route, while Tailscale itself is on $ts_if.
+    local vpn_if="$def_if"
+
+    # --- (b): scutil --dns resolver ordering ---
+    local scutil_bin="${KB_SPACEDOCK_VPN_SCUTIL_BIN:-scutil}"
+    if ! _spd_have "$scutil_bin"; then
+        _spd_emit "$surface" "unknown" \
+            "foreign VPN utun '$vpn_if' owns the default route (Tailscale is on '$ts_if'), but '$scutil_bin' is not on PATH — resolver-order check could not run" "" ""
+        return
+    fi
+    local dns_out dns_rc
+    _spd_run_bounded "$surface" "$SPD_VPN_PROBE_LIMIT" "$scutil_bin" --dns
+    if _spd_emit_run_start_failure "$surface"; then return; fi
+    dns_out="$SPD_RUN_OUT"
+    dns_rc="$SPD_RUN_RC"
+    if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
+        _spd_emit "$surface" "unknown" \
+            "'$scutil_bin --dns' timed out after ${SPD_RUN_ELAPSED}s (limit ${SPD_VPN_PROBE_LIMIT}s; raise with KB_SPACEDOCK_VPN_PROBE_TIMEOUT) — no result; the tool was killed${probe_note}" \
+            "$dns_out" "$dns_rc"
+        return
+    fi
+    if [ "$dns_rc" -ne 0 ] || [ -z "$dns_out" ]; then
+        _spd_emit "$surface" "unknown" \
+            "foreign VPN utun '$vpn_if' owns the default route, but '$scutil_bin --dns' failed (exit $dns_rc) or returned no output — resolver-order check could not run" "$dns_out" "$dns_rc"
+        return
+    fi
+
+    # Parse scutil --dns into one "order|if_name|has_magicdns" line per
+    # resolver block, in the order scutil printed them. `order` and
+    # `if_name` are empty when that block's output didn't carry the field.
+    # Order values are forced to canonical base-10 (`10#$n`) the same way
+    # KB_SPACEDOCK_*_TIMEOUT overrides are elsewhere in this script, purely
+    # as cheap insurance against a leading-zero literal being misread as
+    # octal by a later `-lt` test — scutil's own order values are not
+    # operator-supplied and have never been observed with a leading zero.
+    local parsed
+    parsed=$(printf '%s\n' "$dns_out" | awk '
+        function flush() {
+            if (blk > 0) { printf "%s|%s|%s\n", order, ifn, has_ts }
+        }
+        /^resolver #/ { flush(); blk++; order = ""; ifn = ""; has_ts = 0; next }
+        /nameserver\[[0-9]+\][ \t]*:/ {
+            if ($0 ~ /100\.100\.100\.100/) has_ts = 1
+            next
+        }
+        /if_index[ \t]*:.*\(.*\)/ {
+            n = $0
+            sub(/.*\(/, "", n); sub(/\).*/, "", n)
+            ifn = n
+            next
+        }
+        /order[ \t]*:/ {
+            n = $0
+            sub(/^[^:]*:[ \t]*/, "", n)
+            gsub(/[ \t]+$/, "", n)
+            order = n
+            next
+        }
+        END { flush() }
+    ')
+
+    local ord ifn has_ts
+    local ts_order="" vpn_order="" vpn_order_desc="" first_other_order="" first_other_desc=""
+    while IFS='|' read -r ord ifn has_ts; do
+        [ -z "$ord$ifn$has_ts" ] && continue
+        case "$ord" in
+            ''|*[!0-9]*) ord="" ;;
+            *) ord=$((10#$ord)) ;;
+        esac
+        if [ "$has_ts" = "1" ]; then
+            if [ -n "$ord" ] && { [ -z "$ts_order" ] || [ "$ord" -lt "$ts_order" ]; }; then
+                ts_order="$ord"
+            fi
+        else
+            if [ -n "$ord" ] && [ -n "$ifn" ] && [ "$ifn" = "$vpn_if" ]; then
+                if [ -z "$vpn_order" ] || [ "$ord" -lt "$vpn_order" ]; then
+                    vpn_order="$ord"
+                    vpn_order_desc="the resolver tied to '$vpn_if' (if_index)"
+                fi
+            fi
+            if [ -z "$first_other_order" ] && [ -n "$ord" ]; then
+                first_other_order="$ord"
+                first_other_desc="the first-listed non-MagicDNS resolver${ifn:+ (if=$ifn)}"
+            fi
+        fi
+    done <<SPD_DNS_PARSED_EOF
+$parsed
+SPD_DNS_PARSED_EOF
+
+    if [ -z "$ts_order" ]; then
+        _spd_emit "$surface" "ok" \
+            "foreign VPN utun '$vpn_if' owns the default route (Tailscale is on '$ts_if'), but no scutil --dns resolver for 100.100.100.100 was found (or none carries an 'order') — MagicDNS resolver override is not installed (e.g. accept-dns already off); OK, no conflict" \
+            "$dns_out" ""
+        return
+    fi
+
+    local cmp_order="$vpn_order" cmp_desc="$vpn_order_desc"
+    if [ -z "$cmp_order" ]; then
+        cmp_order="$first_other_order"
+        cmp_desc="$first_other_desc"
+    fi
+    if [ -z "$cmp_order" ]; then
+        _spd_emit "$surface" "unknown" \
+            "foreign VPN utun '$vpn_if' owns the default route and a MagicDNS resolver (100.100.100.100, order=$ts_order) exists, but no other scutil --dns resolver carries an 'order' to compare against (none tied to '$vpn_if' by if_index, and no other resolver has an order at all) — cannot determine resolver priority; VPN/MagicDNS resolver-order check could not run" \
+            "$dns_out" ""
+        return
+    fi
+
+    if [ "$ts_order" -lt "$cmp_order" ]; then
+        _spd_emit "$surface" "fail" \
+            "CONFLICT: foreign VPN utun '$vpn_if' owns the default route, and MagicDNS's resolver (100.100.100.100, order=$ts_order) is ranked AHEAD of $cmp_desc (order=$cmp_order) — name lookups likely fail while raw IP keeps working. Fix: 'tailscale set --accept-dns=false' (costs fleet MagicDNS name resolution). See docs/vpn-coexistence-runbook.md." \
+            "$dns_out" ""
+    else
+        _spd_emit "$surface" "ok" \
+            "foreign VPN utun '$vpn_if' owns the default route, but MagicDNS's resolver (100.100.100.100, order=$ts_order) is not ranked ahead of $cmp_desc (order=$cmp_order) — no resolver-order conflict detected" \
+            "$dns_out" ""
+    fi
+}
+
 _spd_run_all_checks() {
     _spd_check_aiteamforge_doctor
     _spd_check_kb_recover
@@ -1844,6 +2233,7 @@ _spd_run_all_checks() {
     _spd_check_kb_sweep_stubs
     _spd_check_auto_upgrade_log
     _spd_check_mandatory_teams
+    _spd_check_vpn_dns_conflict
 }
 
 # ===========================================================================

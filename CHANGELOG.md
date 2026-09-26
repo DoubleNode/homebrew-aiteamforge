@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1258** — `kb-spacedock` gains the `vpn-dns-conflict` check: it reports `[fail]` when a
+  third-party VPN utun owns the default route while Tailscale MagicDNS (100.100.100.100) is still
+  ordered ahead of the VPN's resolver, which silently breaks all name resolution (raw IPs keep
+  working). Tailscale's interface is matched exactly on `tailscale ip -4`; every probe is
+  time-bounded (`KB_SPACEDOCK_VPN_PROBE_TIMEOUT`, default 10s) and a failure or timeout reports
+  `[unknown]`, never `[ok]`. Never uses `dig`.
 - **XACA-1341** — every remaining "is iTerm2 running?" check now uses `pgrep -a -x iTerm2`. macOS `pgrep` excludes the caller's ancestors unless `-a` is passed, so checks run inside an iTerm2 pane could not see iTerm2 (XACA-1340 fixed only the agent panel). Fixed: the disconnect templates (`team-disconnect.sh.template`, `team-disconnect-parametric.sh.template`) and `share/scripts/teams/dns-disconnect.sh`, the startup templates (`team-startup.sh.template`, `team-project-startup.sh.template`), `share/scripts/lcars-launch-helpers.sh` (new `iterm_app_running()`, used by `has_iterm_gui()` and `is_headless()`), and `share/scripts/iterm2_window_manager.py`. Also corrects a stale comment in `share/scripts/agent-panel-display.sh` about why `has_iterm_gui()` is not used there.
 - **XACA-1151 PR-B** — the kanban helpers template no longer deletes an orphaned directory at a worktree path without asking, and no longer ships client team-slug arms
   - `_kb_create_item_worktree` / `_kb_discover_worktree` now match canonical: an existing directory (orphaned or a reused worktree) needs confirmation; a non-interactive shell refuses unless `KB_RUN_ASSUME_YES` is set. New helpers `_kb_umbrella_root`, `_kb_resolve_project_root`, `_kb_confirm_existing_worktree`.
