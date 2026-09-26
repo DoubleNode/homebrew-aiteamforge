@@ -205,6 +205,28 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
       count from 10 to 11 (the new `_kb_add_blocker` call; unblock still adds no site of its own) and
       this file's own `_kb_flush_work_time` header comment to match — unchanged by this round, since
       the call site itself, not its condition, is what the count tracks.
+      comment-block drift). Bumped `tests/test-xaca-0819-pause-resume-active-span.sh`'s file-wide
+      `_kb_flush_work_time` call-site count from 10 to 11 (the new `_kb_add_blocker` call; unblock
+      restarts the span via a plain jq assignment, not a call to this function, so it adds no site of
+      its own) and this file's own `_kb_flush_work_time` header comment to match.
+- **XACA-1151 PR-D** — release commands and the kanban-directory resolver, stacked on PR-C
+  - `_kb_get_releases_dir` no longer carries its own hardcoded per-team paths: it now derives the
+    releases directory from `_kb_get_kanban_dir` + `/releases`, so a team's releases always live next
+    to its board. This drops 3 `{{ORG_NAME}}` install-time placeholder sites that lived directly in the
+    old per-team case arms (the ios/android/firebase releases paths), and adds a fail-closed check —
+    an unresolvable team now errors instead of always printing a path.
+  - `kb-release create` gains `--environments <list>` and `--planned` (a shorthand for the full
+    `PLANNED,DEV,QA,ALPHA,BETA,GAMMA,PROD` pipeline), matching the board's `defaultEnvironments`
+    override support.
+  - `kb-release show <REL-ID>` now renders release detail (name/status/type) plus its linked CRs, in
+    addition to the existing `kb-release show <item-id>` assignment view.
+  - `_kb_get_kanban_dir` now refuses an empty team outright instead of silently falling back to the
+    academy-shared directory; a freelance team registered in the overlay resolves unconditionally
+    (rather than only when its directory already exists on disk, which was the old registry-read's
+    behavior); and a bare template team id (e.g. `finance`) normalizes to its instance form (e.g.
+    `finance-personal`) before matching, instead of falling through to the unknown-team default. The
+    well-known case arms (still carrying install-time placeholders) and the unknown-team fallback are
+    unchanged.
 
 ## [0.20.26] - 2026-09-25
 - **XACA-1340** — agent panels no longer exit with "iTerm2 not running" while iTerm2 is running. The liveness check used `pgrep -f "iTerm.app"`, but macOS `pgrep` excludes the caller's ancestors unless `-a` is passed, and a local panel runs inside iTerm2, so the check never saw its own host. Panels launched over `ssh -t` (connect scripts) also probed the remote host. `share/scripts/agent-panel-display.sh` now skips the check under SSH and otherwise uses `pgrep -a -x iTerm2`.

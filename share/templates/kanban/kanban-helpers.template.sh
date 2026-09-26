@@ -148,8 +148,14 @@ PYEOF
 }
 
 _kb_get_kanban_dir() {
-    local team="$1"
+    local team="${1-}"
     local _atf_dir="${AITEAMFORGE_DIR}"
+
+    # XACA-0383 (F-08-004): refuse empty team — cannot resolve a board dir.
+    if [[ -z "$team" ]]; then
+        echo "kb: _kb_get_kanban_dir called with no team — refusing (cannot resolve a board dir)." >&2
+        return 1
+    fi
 
     # ── Strategy 0: board-less guard (XACA-0727 / XACA-0794-013) ─────────────
     # Refuse BEFORE any resolution strategy. A board-less alias has no board, so
@@ -163,6 +169,25 @@ _kb_get_kanban_dir() {
             echo "kb: '$team' is a board-less alias (no kanban board) — this is intentional, not corruption. (XACA-0727/XACA-0794)" >&2
         fi
         return 1
+    fi
+
+    # XACA-0726: normalize bare template id → canonical instance id.
+    # Callers that receive a bare team id (e.g. "finance" from a tmux session
+    # split in _kb_detect_context) would otherwise fail to match any case arm or
+    # overlay entry, since the registry keys on the suffixed instance form.
+    # _kb_template_to_instance is idempotent — already-suffixed ids pass through.
+    team="$(_kb_template_to_instance "$team")"
+
+    # XACA-0628: generic-freelance slugs resolve from the overlay first. The
+    # overlay entry (with team_code) is the source of truth — there is no case
+    # arm for these. Falls through to registry/case-arm below for non-freelance
+    # teams and for freelance entries not yet backfilled with a team_code.
+    if [[ "$team" == freelance-* ]]; then
+        local _ovl_dir
+        if _ovl_dir=$(_kb_overlay_lookup "$team" kanban_dir) && [[ -n "$_ovl_dir" ]]; then
+            echo "$_ovl_dir"
+            return 0
+        fi
     fi
 
     # ── Strategy 1: team-paths.json registry (XACA-0649) ─────────────────────
@@ -21440,25 +21465,13 @@ _kb_get_releases_dir() {
     local team="${1:-$LCARS_TEAM}"
     team=$(echo "$team" | tr '[:upper:]' '[:lower:]')
 
-    case "$team" in
-        academy)
-            echo "${AITEAMFORGE_DIR}/kanban/releases"
-            ;;
-        ios)
-            # TODO(installer): {{SHARED_DEV_ROOT}} and {{ORG_NAME}} resolved at install time
-            echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-iOS/DEV/dev-team/kanban/releases"
-            ;;
-        android)
-            echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Android/develop/dev-team/kanban/releases"
-            ;;
-        firebase)
-            echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Functions/develop/dev-team/kanban/releases"
-            ;;
-        *)
-            # Default to legacy location for unknown teams
-            echo "${AITEAMFORGE_DIR}/releases"
-            ;;
-    esac
+    local kanban_dir
+    kanban_dir=$(_kb_get_kanban_dir "$team") || return 1
+    if [[ -z "$kanban_dir" || ! -d "$kanban_dir" ]]; then
+        echo "Error: could not resolve kanban directory for team '${team}'" >&2
+        return 1
+    fi
+    echo "${kanban_dir}/releases"
 }
 
 # Helper: Load releases from board file for current team
@@ -21495,6 +21508,10 @@ kb-release-create() {
     local project=""
     local target_date=""
     local short_title=""
+    # XACA-0736: --environments overrides the board's defaultEnvironments list;
+    # --planned is a convenience shorthand that forces the full PLANNED-leading pipeline.
+    local environments=""
+    local use_planned_pipeline="false"
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -21519,6 +21536,16 @@ kb-release-create() {
                 short_title="$2"
                 shift 2
                 ;;
+            --environments)
+                environments="$2"
+                shift 2
+                ;;
+            --planned)
+                # XACA-0736: convenience flag — forces the PLANNED-leading default pipeline.
+                # Equivalent to --environments PLANNED,DEV,QA,ALPHA,BETA,GAMMA,PROD.
+                use_planned_pipeline="true"
+                shift
+                ;;
             --help|-h)
                 echo "Usage: kb-release create <name> [options]"
                 echo ""
@@ -21528,11 +21555,16 @@ kb-release-create() {
                 echo "  --project <name>       Project name (e.g., Starwords, MyProject)"
                 echo "  --target-date <date>   Target date (YYYY-MM-DD)"
                 echo "  --short-title <title>  Short display name for LCARS UI"
+                echo "  --environments <list>  Override environments pipeline (comma-separated, e.g. PLANNED,DEV,QA,PROD)"
+                echo "  --planned              Force the full PLANNED-leading pipeline (XACA-0736);"
+                echo "                         overrides board's defaultEnvironments if drifted"
                 echo ""
                 echo "Examples:"
                 echo "  kb-release create 'Q1 2026 Feature Release'"
                 echo "  kb-release create 'iOS Hotfix 2.8.1' --type hotfix --platforms ios"
                 echo "  kb-release create 'March Update' --platforms ios,android,firebase --target-date 2026-03-15"
+                echo "  kb-release create 'Sprint 12' --planned"
+                echo "  kb-release create 'Hotfix 2.9.1' --environments PLANNED,PROD --platforms ios"
                 return 0
                 ;;
             *)
@@ -21563,6 +21595,12 @@ kb-release-create() {
             ;;
     esac
 
+    # XACA-0736: --planned sets the canonical PLANNED-leading default pipeline.
+    # If both --planned and --environments are given, --environments wins (explicit override).
+    if [[ "$use_planned_pipeline" == "true" && -z "$environments" ]]; then
+        environments="PLANNED,DEV,QA,ALPHA,BETA,GAMMA,PROD"
+    fi
+
     # XACA-0822-005: Detect caller's team and resolve the correct LCARS port
     # via _kb_team_lcars_port (ported from canonical's XACA-0482 fix). This
     # template previously read a single global lcars-ui/.lcars-port file,
@@ -21583,23 +21621,43 @@ kb-release-create() {
         _lcars_port="8080"
     }
 
-    # Build JSON payload
+    # Build JSON payload — include environments only when explicitly provided
     local json_payload
-    json_payload=$(jq -n \
-        --arg name "$name" \
-        --arg type "$rel_type" \
-        --arg platforms "$platforms" \
-        --arg project "$project" \
-        --arg targetDate "$target_date" \
-        --arg shortTitle "$short_title" \
-        '{
-            name: $name,
-            type: $type,
-            platforms: ($platforms | split(",")),
-            project: (if $project != "" then $project else null end),
-            targetDate: (if $targetDate != "" then $targetDate else null end),
-            shortTitle: (if $shortTitle != "" then $shortTitle else null end)
-        }')
+    if [[ -n "$environments" ]]; then
+        json_payload=$(jq -n \
+            --arg name "$name" \
+            --arg type "$rel_type" \
+            --arg platforms "$platforms" \
+            --arg project "$project" \
+            --arg targetDate "$target_date" \
+            --arg shortTitle "$short_title" \
+            --arg environments "$environments" \
+            '{
+                name: $name,
+                type: $type,
+                platforms: ($platforms | split(",")),
+                environments: ($environments | split(",")),
+                project: (if $project != "" then $project else null end),
+                targetDate: (if $targetDate != "" then $targetDate else null end),
+                shortTitle: (if $shortTitle != "" then $shortTitle else null end)
+            }')
+    else
+        json_payload=$(jq -n \
+            --arg name "$name" \
+            --arg type "$rel_type" \
+            --arg platforms "$platforms" \
+            --arg project "$project" \
+            --arg targetDate "$target_date" \
+            --arg shortTitle "$short_title" \
+            '{
+                name: $name,
+                type: $type,
+                platforms: ($platforms | split(",")),
+                project: (if $project != "" then $project else null end),
+                targetDate: (if $targetDate != "" then $targetDate else null end),
+                shortTitle: (if $shortTitle != "" then $shortTitle else null end)
+            }')
+    fi
 
     # Call LCARS server to create the release
     local response http_code body curl_exit
@@ -21626,6 +21684,7 @@ kb-release-create() {
         echo "✓ Created release: $release_name ($release_id)"
         echo "  Type: $rel_type"
         echo "  Platforms: $platforms"
+        [[ -n "$environments" ]] && echo "  Environments: $environments"
         [[ -n "$target_date" ]] && echo "  Target: $target_date"
         [[ -n "$project" ]] && echo "  Project: $project"
         echo ""
@@ -21869,16 +21928,16 @@ kb-release-unassign() {
 }
 
 # Show release assignment for an item
-# Usage: kb-release-show <item-id>
+# Usage: kb-release-show <item-id|REL-ID>
 kb-release-show() {
-    local item_id="$1"
+    local item_id="${1-}"
 
     if [[ -z "$item_id" ]]; then
-        echo "Usage: kb-release-show <item-id>"
+        echo "Usage: kb-release-show <item-id|REL-ID>"
         return 1
     fi
 
-    # Use current team context
+    # Use current team context (shared by the item-id and REL-ID views)
     local context team board_file
     context=$(_kb_detect_context)
     team="${context%%:*}"
@@ -21887,6 +21946,39 @@ kb-release-show() {
     if [[ ! -f "$board_file" ]]; then
         echo "Error: Board not found for team: $team"
         return 1
+    fi
+
+    # REL-ID form: show release detail incl. its linked CRs (XACA-0657).
+    # Gives the Release Manager skill a working command to inspect linkedCRs
+    # at PROD promote — `kb-release show <item-id>` only covers item assignment.
+    if [[ "$item_id" == REL-* ]]; then
+        local rel_id="$item_id" rel_obj
+        rel_obj=$(_kb_jq_read "$board_file" '.releases[] | select(.id == $id)' --arg id "$rel_id")
+        if [[ -z "$rel_obj" || "$rel_obj" == "null" ]]; then
+            echo "Error: Release '$rel_id' not found in $team board"
+            return 1
+        fi
+        # XACA-0948-006 audit: release status (releases[] entity), not a backlog
+        # item -- out of ITEM_STATUS_CONTRACT.md's scope. Left as-is.
+        local rel_name rel_status rel_type cr_count cr_id cr_title cr_linked
+        rel_name=$(printf '%s\n' "$rel_obj" | jq -r '.name // "(unnamed)"')
+        rel_status=$(printf '%s\n' "$rel_obj" | jq -r '.status // "unknown"')
+        rel_type=$(printf '%s\n' "$rel_obj" | jq -r '.type // "—"')
+        echo "Release $rel_id:"
+        echo "  Name:   $rel_name"
+        echo "  Status: $rel_status"
+        echo "  Type:   $rel_type"
+        cr_count=$(printf '%s\n' "$rel_obj" | jq -r '(.linkedCRs // []) | length')
+        if [[ "$cr_count" -eq 0 ]]; then
+            echo "  Linked CRs: (none)"
+        else
+            echo "  Linked CRs ($cr_count):"
+            while IFS=$'\t' read -r cr_id cr_title cr_linked; do
+                [[ -z "$cr_id" ]] && continue
+                echo "    - $cr_id  $cr_title  (linked $cr_linked)"
+            done < <(printf '%s\n' "$rel_obj" | jq -r '(.linkedCRs // [])[] | "\(.crId)\t\(.crTitle)\t\(.linkedAt)"')
+        fi
+        return 0
     fi
 
     # Validate item belongs to current team
