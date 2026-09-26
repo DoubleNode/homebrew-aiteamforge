@@ -2126,7 +2126,9 @@ _spd_vpn_scutil_state() {
         SPD_VPN_SCUTIL_RC="$SPD_RUN_RC"
         return
     fi
-    SPD_VPN_SCUTIL_OUT="$SPD_RUN_OUT"
+    # Strip CR so CRLF-terminated output parses like LF output instead of
+    # failing the exact-match header test with a misleading message.
+    SPD_VPN_SCUTIL_OUT=$(printf '%s' "$SPD_RUN_OUT" | tr -d '\r')
     SPD_VPN_SCUTIL_RC="$SPD_RUN_RC"
     if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
         SPD_VPN_SCUTIL_STATE="probe_failed"
@@ -2164,11 +2166,12 @@ _spd_vpn_scutil_state() {
     local parsed
     parsed=$(printf '%s\n' "$section_out" | awk '
         function flush() {
-            if (blk > 0) { printf "%s|%s|%s\n", order, has_ts, is_domain }
+            if (blk > 0) { printf "%s|%s|%s|%s\n", order, has_ts, is_domain, has_ns }
         }
-        /^resolver #/ { flush(); blk++; order = ""; has_ts = 0; is_domain = 0; next }
+        /^resolver #/ { flush(); blk++; order = ""; has_ts = 0; is_domain = 0; has_ns = 0; next }
         /^[[:space:]]*domain[ \t]*:/ { is_domain = 1; next }
         /nameserver\[[0-9]+\][ \t]*:/ {
+            has_ns = 1
             if ($0 ~ /100\.100\.100\.100/) has_ts = 1
             next
         }
@@ -2182,15 +2185,21 @@ _spd_vpn_scutil_state() {
         END { flush() }
     ')
 
-    local ord has_ts is_domain
-    local default_count=0 ambiguous_order=0 tie=0
+    local ord has_ts is_domain has_ns
+    local default_count=0 ambiguous_order=0 no_ns=0 tie=0
     local min_order="" min_has_ts=""
-    while IFS='|' read -r ord has_ts is_domain; do
-        [ -z "$ord$has_ts$is_domain" ] && continue
+    while IFS='|' read -r ord has_ts is_domain has_ns; do
+        [ -z "$ord$has_ts$is_domain$has_ns" ] && continue
         [ "$is_domain" = "1" ] && continue
         default_count=$((default_count + 1))
+        # A default resolver with no nameserver cannot be ranked honestly
+        # against the others (unobserved in real scutil output): fail closed.
+        [ "$has_ns" = "1" ] || no_ns=1
+        # 10+ digits is rejected, not wrapped: $((10#N)) silently overflows
+        # past 64 bits and would flip the primary-resolver verdict. Real
+        # scutil orders are ~6 digits (100600, 200000).
         case "$ord" in
-            ''|*[!0-9]*)
+            ''|*[!0-9]*|??????????*)
                 ambiguous_order=1
                 continue
                 ;;
@@ -2216,7 +2225,12 @@ SPD_DNS_PARSED_EOF
     fi
     if [ "$ambiguous_order" = "1" ]; then
         SPD_VPN_SCUTIL_STATE="ambiguous"
-        SPD_VPN_SCUTIL_DETAIL="at least one default resolver in scutil --dns's 'DNS configuration' section has a missing or non-numeric 'order' value"
+        SPD_VPN_SCUTIL_DETAIL="at least one default resolver in scutil --dns's 'DNS configuration' section has a missing, non-numeric, or out-of-range (10+ digit) 'order' value"
+        return
+    fi
+    if [ "$no_ns" = "1" ]; then
+        SPD_VPN_SCUTIL_STATE="ambiguous"
+        SPD_VPN_SCUTIL_DETAIL="at least one default resolver in scutil --dns's 'DNS configuration' section has no nameserver, so the primary resolver cannot be determined"
         return
     fi
     if [ "$tie" = "1" ]; then
@@ -2305,16 +2319,31 @@ _spd_check_vpn_dns_conflict() {
         # connection but `tailscale ip -4` not (yet) reporting an address
         # (-> [unknown], never folded into a clean skip). Consult scutil to
         # tell the two apart (XACA-1258-028).
+        # Preserve the tailscale probe's own output/rc: _spd_vpn_scutil_state
+        # runs another bounded probe and overwrites SPD_RUN_OUT/RC
+        # (XACA-1258-034).
+        local ts_out="$SPD_RUN_OUT" ts_rc="$SPD_RUN_RC"
         _spd_vpn_scutil_state
-        if [ "$SPD_VPN_SCUTIL_STATE" = "magicdns" ]; then
-            _spd_emit "$surface" "unknown" \
-                "default route goes out utun interface '$def_if', and '$ts_bin ip -4' returned no usable IPv4 address, but scutil --dns shows a MagicDNS (100.100.100.100) resolver installed as the primary default resolver (order=$SPD_VPN_SCUTIL_ORDER) — Tailscale may be half-up; cannot rule out a resolver-order conflict" \
-                "$SPD_RUN_OUT" "$SPD_RUN_RC"
-        else
-            _spd_emit "$surface" "skip" \
-                "default route goes out utun interface '$def_if', but '$ts_bin ip -4' returned no usable IPv4 address (Tailscale installed but not connected/logged in on this host) — cannot be a Tailscale/VPN resolver conflict; N/A" \
-                "$SPD_RUN_OUT" "$SPD_RUN_RC"
-        fi
+        # Only a CLEAN "not_magicdns" read may become [skip]. magicdns,
+        # probe_failed and ambiguous all mean MagicDNS cannot be ruled out,
+        # so they fail closed to [unknown] (XACA-1258-033).
+        case "$SPD_VPN_SCUTIL_STATE" in
+            not_magicdns)
+                _spd_emit "$surface" "skip" \
+                    "default route goes out utun interface '$def_if', but '$ts_bin ip -4' returned no usable IPv4 address (Tailscale installed but not connected/logged in on this host) and scutil --dns shows no MagicDNS primary resolver — cannot be a Tailscale/VPN resolver conflict; N/A" \
+                    "$ts_out" "$ts_rc"
+                ;;
+            magicdns)
+                _spd_emit "$surface" "unknown" \
+                    "default route goes out utun interface '$def_if', and '$ts_bin ip -4' returned no usable IPv4 address, but scutil --dns shows a MagicDNS (100.100.100.100) resolver installed as the primary default resolver (order=$SPD_VPN_SCUTIL_ORDER) — Tailscale may be half-up; cannot rule out a resolver-order conflict" \
+                    "$ts_out" "$ts_rc"
+                ;;
+            *)
+                _spd_emit "$surface" "unknown" \
+                    "default route goes out utun interface '$def_if', and '$ts_bin ip -4' returned no usable IPv4 address, and scutil --dns could not be read unambiguously (state: ${SPD_VPN_SCUTIL_STATE:-unset}) — cannot rule out a MagicDNS resolver-order conflict" \
+                    "$ts_out" "$ts_rc"
+                ;;
+        esac
         return
     fi
 
