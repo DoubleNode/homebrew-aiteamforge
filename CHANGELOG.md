@@ -6,6 +6,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1151-051** — `kb-backlog` gains `--sub-repo` on `add`/`change`, a subitem-ID collision fix,
+  and a completion-time-accuracy fix, closing the remaining drift from the dev-source kanban helpers.
+  - `kb-backlog add`/`kb-backlog change` accept `--sub-repo <name>` to tag a backlog item with the
+    sub-repository (within a multi-repo "umbrella" checkout) it belongs to. When an umbrella is
+    detected, the name is validated against the umbrella's actual sub-repositories and an unknown one
+    is refused; outside an umbrella, any value is accepted. `change --sub-repo ""` clears the field.
+    New helper `_kb_umbrella_sub_repos` lists a detected umbrella's real sub-repo directories.
+  - `kb-backlog sub add` now generates the next subitem ID from `max(existing numeric suffixes)+1`
+    instead of `count+1`, so removing or renumbering a subitem no longer produces a duplicate ID for
+    the next one added.
+  - `kb-backlog sub done` now records `leadTimeMs` (creation to completion, wall-clock) alongside the
+    existing `timeWorkedMs`, and its retrospective-file safety check no longer loses its own
+    lead-time anchor when it has to revert a completion back to in-progress. `sub done`/`sub todo`/
+    `sub stop` now share the same time-flush helper the rest of the template already uses, instead of
+    a second, separately-maintained copy of the same elapsed-time math.
+  - `sub remove`/`sub cancel` reset an internal audit flag at the start of each call, matching an
+    upstream defense-in-depth hardening (currently non-observable — both already reset it themselves
+    on every call — but keeps the two copies from silently drifting apart).
 - **XACA-1269-007** — `aiteamforge doctor` (BOTH copies: `libexec/commands/aiteamforge-doctor.sh` and
   `bin/aiteamforge-doctor.sh`) now checks the five installer-only LaunchAgents that `aiteamforge
   upgrade` can never self-heal: `cellar-watch`, `lcars-watch`, `cr-confluence-poller` (per-team plists,

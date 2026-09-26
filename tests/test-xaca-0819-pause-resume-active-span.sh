@@ -89,8 +89,10 @@
 #        - the file-wide real call-site count (`_kb_flush_work_time "`)
 #          matches the CURRENT set of callers: kb-done (item+subitem),
 #          kb-cancel (item+subitem), kb-stop-working (item+subitem),
-#          kb-pause (item+subitem), _kb_add_subitem_blocker (subitem only)
-#          = 9. This count is expected to grow again if a future ticket
+#          kb-pause (item+subitem), _kb_add_subitem_blocker (subitem only),
+#          sub-cancel (subitem only), _kb_add_blocker (block side only),
+#          sub-done/sub-todo/sub-stop (subitem only, XACA-1151-051/PR-E2)
+#          = 14. This count is expected to grow again if a future ticket
 #          ports another verb; a MISMATCH (not just a shrink) fails, so an
 #          accidental removal is caught the same as an unreviewed addition.
 #        - kb-pause's own function body contains exactly 2 call sites (item
@@ -436,14 +438,17 @@ ok "3a: exactly 1 _kb_flush_work_time() definition in the rendered template" \
 # only) = 10, and the same round (XACA-1151-044) added item-level
 # `_kb_add_blocker`'s 1 (block side only -- `_kb_remove_blocker` restarts
 # the span via a plain jq assignment, not a call to this function) = 11.
+# XACA-1151-051 (PR-E2) then ported `kb-backlog sub done`/`sub todo`/`sub
+# stop` off their old duplicated inline BSD-`date -j` blocks onto this same
+# shared helper (subitem only, 1 site each) = 14.
 # This is an EXACT match, not a floor: a mismatch in EITHER direction means
 # either an un-reviewed removal or an un-reviewed addition, and both need
 # eyes on the diff.
 _CALL_COUNT_TOTAL=$(grep -c '_kb_flush_work_time "' "$RENDERED" 2>/dev/null)
 [ -n "$_CALL_COUNT_TOTAL" ] || _CALL_COUNT_TOTAL=0
-ok "3b: exactly 11 real _kb_flush_work_time call sites file-wide (kb-done/kb-cancel/kb-stop-working/kb-pause x2 each + _kb_add_subitem_blocker x1 + sub-cancel x1 + _kb_add_blocker x1)" \
-   "$([ "$_CALL_COUNT_TOTAL" -eq 11 ] && echo 1 || echo 0)" \
-   "expected 11 call sites (call-shaped substring '_kb_flush_work_time \"'), found $_CALL_COUNT_TOTAL"
+ok "3b: exactly 14 real _kb_flush_work_time call sites file-wide (kb-done/kb-cancel/kb-stop-working/kb-pause x2 each + _kb_add_subitem_blocker x1 + sub-cancel x1 + _kb_add_blocker x1 + sub-done/sub-todo/sub-stop x1 each)" \
+   "$([ "$_CALL_COUNT_TOTAL" -eq 14 ] && echo 1 || echo 0)" \
+   "expected 14 call sites (call-shaped substring '_kb_flush_work_time \"'), found $_CALL_COUNT_TOTAL"
 
 # 3c: isolate kb-pause's own function body (from its header to its own
 # top-level closing brace) and confirm it now contains 2 call sites (item +

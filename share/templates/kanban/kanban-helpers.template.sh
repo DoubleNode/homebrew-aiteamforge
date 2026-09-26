@@ -1333,6 +1333,23 @@ _kb_umbrella_root() {
     return 1
 }
 
+# XACA-1151-051 (ported from canonical): _kb_in_umbrella itself is NOT ported here —
+# nothing in this template calls it yet. This helper IS, because `kb-backlog add`
+# and `kb-backlog change` call it directly to validate --sub-repo.
+# Lists immediate sub-repo directory names (basename only) inside an umbrella.
+# Used by CLI validation and error messages.
+# Echoes one sub-repo name per line.
+_kb_umbrella_sub_repos() {
+    local root
+    root=$(_kb_umbrella_root) || return 1
+    [[ -z "$root" ]] && return 1
+    # Only list real sub-repos (directory-form .git), not secondary worktrees (file-form)
+    for d in "$root"/*/; do
+        local d_path="${d%/}"
+        [[ -d "$d_path/.git" ]] && basename "$d_path"
+    done
+}
+
 # Resolve the project root directory for worktree placement given a git root path.
 # Three-case cascade (XACA-0184-005):
 #   1. Umbrella context: if KB_UMBRELLA_ROOT or auto-detect matches and git_root is
@@ -7127,14 +7144,23 @@ kb-backlog() {
     case "$cmd" in
         add)
             # XACA-0822-006: parse --points out of args before positional
-            # parsing (ported from canonical, XACA-0624). This template's
-            # add) has no other flag-parsing loop (no --sub-repo support
-            # here — that drift is separate and out of scope), so this loop
-            # is scoped to --points only.
+            # parsing (ported from canonical, XACA-0624). XACA-1151-051 added
+            # --sub-repo to this same loop (ported from canonical, umbrella
+            # routing) — the "out of scope" note this comment used to carry
+            # is retired now that it's ported.
+            local sub_repo=""
             local points=""
             local add_args=()
             while [[ $# -gt 0 ]]; do
                 case "$1" in
+                    --sub-repo)
+                        sub_repo="$2"
+                        shift 2
+                        ;;
+                    --sub-repo=*)
+                        sub_repo="${1#--sub-repo=}"
+                        shift
+                        ;;
                     --points)
                         points="$2"
                         shift 2
@@ -7142,6 +7168,14 @@ kb-backlog() {
                     --points=*)
                         points="${1#--points=}"
                         shift
+                        ;;
+                    -h|--help)
+                        echo "Usage: kb-backlog add \"task\" [priority] [\"description\"] [jira-id] [os] [--sub-repo <name>] [--points <hours>]"
+                        echo "Priority: low | med | medium | high | crit | critical | block | blocked"
+                        echo "OS: iOS | Android | Firebase"
+                        echo "Sub-repo: sub-repo name within an umbrella project (e.g., DNSProtocols)"
+                        echo "Points: developer-hours estimate for this item (e.g. 4, 0.5, 1.25)"
+                        return 0
                         ;;
                     *)
                         add_args+=("$1")
@@ -7186,12 +7220,30 @@ kb-backlog() {
                 esac
             fi
 
+            # XACA-1151-051 (ported from canonical): validate --sub-repo against
+            # umbrella sub-repos when an umbrella is detected.
+            if [[ -n "$sub_repo" ]]; then
+                local umbrella_root
+                umbrella_root=$(_kb_umbrella_root 2>/dev/null)
+                if [[ -n "$umbrella_root" ]]; then
+                    local sub_repos_list
+                    sub_repos_list=$(_kb_umbrella_sub_repos 2>/dev/null)
+                    if ! echo "$sub_repos_list" | grep -qx "$sub_repo"; then
+                        echo "Error: sub-repo '$sub_repo' not found in umbrella '$umbrella_root'"
+                        echo "Available: $(echo "$sub_repos_list" | tr '\n' ' ' | sed 's/ $//')"
+                        return 1
+                    fi
+                fi
+                # If no umbrella detected, allow any string (user may be adding for another machine)
+            fi
+
             if [[ -z "$task" ]]; then
-                echo "Usage: kb-backlog add \"task\" [priority] [\"description\"] [jira-id] [os] [--points <hours>]"
+                echo "Usage: kb-backlog add \"task\" [priority] [\"description\"] [jira-id] [os] [--sub-repo <name>] [--points <hours>]"
                 echo "Priority: low | med | medium | high | crit | critical | block | blocked"
                 echo "Description: Optional multi-line description (max 5 lines displayed)"
                 echo "JIRA ID: Optional JIRA ticket ID (e.g., ME-123, PROJ-456)"
                 echo "OS: Optional platform - iOS | Android | Firebase"
+                echo "Sub-repo: Optional sub-repo name within an umbrella project (e.g., DNSProtocols)"
                 echo "Points: Optional developer-hours estimate (e.g. 4, 0.5, 1.25)"
                 return 1
             fi
@@ -7206,6 +7258,14 @@ kb-backlog() {
                     echo "Error: --points must be a non-negative number of developer-hours (e.g. 4, 0.5, 1.25)"
                     return 1
                 fi
+            fi
+
+            # XACA-1151-051 (ported from canonical): reject task titles that
+            # look like unparsed flags (catches typos, --help, etc.)
+            if [[ "$task" == -* ]]; then
+                echo "Error: task title cannot start with '-' (got: '$task')"
+                echo "       Only --sub-repo and --help are recognized flags for 'add'."
+                return 1
             fi
 
             local timestamp item_id
@@ -7241,6 +7301,12 @@ kb-backlog() {
                 jq_args+=(--arg os "$normalized_os")
             fi
 
+            # Add subRepo field if provided (XACA-1151-051, ported from canonical)
+            if [[ -n "$sub_repo" ]]; then
+                jq_filter+=', "subRepo": $subRepo'
+                jq_args+=(--arg subRepo "$sub_repo")
+            fi
+
             # Add points field if provided (XACA-0624/XACA-0822-006: --argjson so stored as JSON number)
             if [[ -n "$points" ]]; then
                 jq_filter+=', "points": $points'
@@ -7256,6 +7322,7 @@ kb-backlog() {
             echo "✓ Added [$item_id]: $task [$priority]"
             [[ -n "$jira_id" ]] && echo "  JIRA: $jira_id"
             [[ -n "$normalized_os" ]] && echo "  OS: $normalized_os"
+            [[ -n "$sub_repo" ]] && echo "  Sub-repo: $sub_repo"
             [[ -n "$points" ]] && echo "  Points: ${points}h"
             [[ -n "$description" ]] && echo "  Description: ${description:0:50}..."
 
@@ -7280,16 +7347,43 @@ kb-backlog() {
             ;;
 
         change|edit)
+            # XACA-1151-051 (ported from canonical): pre-scan for --sub-repo
+            # flag (may appear anywhere in args).
+            local change_sub_repo=""
+            local change_sub_repo_set=0
+            local change_args=()
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --sub-repo)
+                        change_sub_repo="${2:-}"
+                        change_sub_repo_set=1
+                        shift 2
+                        ;;
+                    --sub-repo=*)
+                        change_sub_repo="${1#--sub-repo=}"
+                        change_sub_repo_set=1
+                        shift
+                        ;;
+                    *)
+                        change_args+=("$1")
+                        shift
+                        ;;
+                esac
+            done
+            set -- "${change_args[@]+"${change_args[@]}"}"
+
             local selector="$1"
             local arg2="$2"
             local arg3="$3"
 
             if [[ -z "$selector" ]]; then
-                echo "Usage: kb-backlog change <id> [\"new title\"] [priority]"
+                echo "Usage: kb-backlog change <id> [\"new title\"] [priority] [--sub-repo <name>]"
                 echo "Examples:"
                 echo "  kb-backlog change XFRE-0001 \"Updated title\""
                 echo "  kb-backlog change XFRE-0001 high"
                 echo "  kb-backlog change XFRE-0001 \"Updated title\" high"
+                echo "  kb-backlog change XDNS-0001 --sub-repo DNSProtocols"
+                echo "  kb-backlog change XDNS-0001 --sub-repo \"\"   (clears the field)"
                 return 1
             fi
 
@@ -7336,16 +7430,56 @@ kb-backlog() {
                 [[ "$new_priority" == "block" ]] && new_priority="blocked"
             fi
 
+            # XACA-1151-051 (ported from canonical): validate --sub-repo value
+            # when umbrella context is active.
+            if [[ $change_sub_repo_set -eq 1 ]] && [[ -n "$change_sub_repo" ]]; then
+                local umbrella_root_chg
+                umbrella_root_chg=$(_kb_umbrella_root 2>/dev/null)
+                if [[ -n "$umbrella_root_chg" ]]; then
+                    local sub_repos_list_chg
+                    sub_repos_list_chg=$(_kb_umbrella_sub_repos 2>/dev/null)
+                    if ! echo "$sub_repos_list_chg" | grep -qx "$change_sub_repo"; then
+                        echo "Error: sub-repo '$change_sub_repo' not found in umbrella '$umbrella_root_chg'"
+                        echo "Available: $(echo "$sub_repos_list_chg" | tr '\n' ' ' | sed 's/ $//')"
+                        return 1
+                    fi
+                fi
+            fi
+
             local timestamp
             timestamp=$(_kb_get_timestamp)
 
-            # Update with exclusive locking (add updatedAt timestamp)
-            _kb_jq_update "$board_file" \
-               '.backlog[$idx].title = $title | .backlog[$idx].priority = $priority | .backlog[$idx].updatedAt = $timestamp | .lastUpdated = $timestamp' \
-               --argjson idx "$index" \
-               --arg title "$new_title" \
-               --arg priority "$new_priority" \
-               --arg timestamp "$timestamp"
+            # XACA-1151-051 (ported from canonical): build the jq update
+            # expression. If --sub-repo was provided, update .subRepo (delete
+            # the field entirely when an empty string is passed to clear it).
+            if [[ $change_sub_repo_set -eq 1 ]]; then
+                if [[ -n "$change_sub_repo" ]]; then
+                    _kb_jq_update "$board_file" \
+                       '.backlog[$idx].title = $title | .backlog[$idx].priority = $priority | .backlog[$idx].subRepo = $subrepo | .backlog[$idx].updatedAt = $timestamp | .lastUpdated = $timestamp' \
+                       --argjson idx "$index" \
+                       --arg title "$new_title" \
+                       --arg priority "$new_priority" \
+                       --arg subrepo "$change_sub_repo" \
+                       --arg timestamp "$timestamp"
+                else
+                    # Empty string → delete the subRepo field
+                    _kb_jq_update "$board_file" \
+                       '.backlog[$idx].title = $title | .backlog[$idx].priority = $priority | del(.backlog[$idx].subRepo) | .backlog[$idx].updatedAt = $timestamp | .lastUpdated = $timestamp' \
+                       --argjson idx "$index" \
+                       --arg title "$new_title" \
+                       --arg priority "$new_priority" \
+                       --arg timestamp "$timestamp"
+                fi
+                _kb_log_activity "field_update" "$item_id" "item" "subRepo" "" "$change_sub_repo" ""
+            else
+                # Update with exclusive locking (add updatedAt timestamp)
+                _kb_jq_update "$board_file" \
+                   '.backlog[$idx].title = $title | .backlog[$idx].priority = $priority | .backlog[$idx].updatedAt = $timestamp | .lastUpdated = $timestamp' \
+                   --argjson idx "$index" \
+                   --arg title "$new_title" \
+                   --arg priority "$new_priority" \
+                   --arg timestamp "$timestamp"
+            fi
 
             echo "✓ Updated [$item_id]: $new_title [$new_priority]"
 
@@ -8441,11 +8575,17 @@ kb-backlog() {
                         return 1
                     fi
 
-                    local timestamp sub_id sub_count
+                    local timestamp sub_id max_sub_idx
                     timestamp=$(_kb_get_timestamp)
-                    # Generate subitem ID: <parent-id>-### (3 digits starting at 001)
-                    sub_count=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems // [] | length" -r)
-                    sub_id=$(printf "%s-%03d" "$parent_id" "$((sub_count + 1))")
+                    # XACA-1151-051 (ported from canonical, XACA-0248): must use max+1,
+                    # NOT length+1 — when subitems have been renamed/renumbered
+                    # (e.g., 001..006 + 012..016) the array length collides with
+                    # existing higher indices. The select() pre-filter makes the
+                    # "ignore subitems with non-conforming IDs" behavior explicit
+                    # rather than relying on capture() returning null.
+                    max_sub_idx=$(_kb_jq_read "$board_file" \
+                        ".backlog[$parent_idx].subitems // [] | map(select(.id | test(\"-[0-9]+$\"))) | map(.id | capture(\"-(?<n>[0-9]+)$\").n | tonumber) | (max // 0)" -r)
+                    sub_id=$(printf "%s-%03d" "$parent_id" "$((max_sub_idx + 1))")
 
                     # Build subitem with optional JIRA and OS
                     local jq_filter='.backlog[$idx].subitems = ((.backlog[$idx].subitems // []) + [{"id": $subid, "title": $title, "status": "todo", "addedAt": $ts'
@@ -8501,6 +8641,12 @@ kb-backlog() {
                     ;;
 
                 remove|rm)
+                    # XACA-1151-051 (ported from canonical, XACA-0886-032, round-3
+                    # review, defense-in-depth): see kb-cancel's own header comment
+                    # for why this reset is added at every entry point that reads
+                    # the flag, even though this arm's guard call is unconditional
+                    # already.
+                    typeset -g _KB_CANCEL_GUARD_AUDIT=false
                     # ── Argument parsing (XACA-0886-022) ────────────────
                     # Positional <parent-index> <subitem-index> as before, plus the
                     # same --reason/--user-approved/-- machinery as kb-cancel so a
@@ -8730,29 +8876,25 @@ kb-backlog() {
                     local timestamp
                     timestamp=$(_kb_get_timestamp)
 
-                    # XACA-0029: Calculate and accumulate work time
-                    local work_started_at existing_time_ms total_time_ms
-                    work_started_at=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].workStartedAt // empty" -r)
-                    existing_time_ms=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].timeWorkedMs // 0")
-                    total_time_ms="$existing_time_ms"
-
-                    if [[ -n "$work_started_at" ]]; then
-                        # Calculate elapsed time in milliseconds
-                        local start_epoch now_epoch elapsed_ms
-                        # Strip Z suffix and parse as UTC (macOS date -j -f ignores timezone suffix)
-                        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${${work_started_at%\.[0-9]*}%Z}" "+%s" 2>/dev/null || echo "0")
-                        now_epoch=$(date -u "+%s")
-                        if [[ "$start_epoch" != "0" ]] && [[ "$start_epoch" -gt 0 ]]; then
-                            elapsed_ms=$(( (now_epoch - start_epoch) * 1000 ))
-                            total_time_ms=$(( existing_time_ms + elapsed_ms ))
-                        fi
-                    fi
+                    # XACA-1151-051 (ported from canonical, XACA-0029/XACA-0551): flush
+                    # active-effort time via the shared helper instead of the old
+                    # inline BSD-`date -j` recompute, and record leadTimeMs the same
+                    # way kb-done/kb-cancel/sub cancel already do.
+                    local total_time_ms
+                    total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$parent_idx].subitems[$sub_idx]")
 
                     _kb_jq_update "$board_file" \
                        '.backlog[$pidx].subitems[$sidx].status = "completed" |
                         .backlog[$pidx].subitems[$sidx].completedAt = $ts |
                         .backlog[$pidx].subitems[$sidx].updatedAt = $ts |
                         .backlog[$pidx].subitems[$sidx].timeWorkedMs = ($timeMs | tonumber) |
+                        # XACA-0551: pure wall-clock lead time (createdAt//addedAt → completedAt).
+                        # Forward-only: skip gracefully when the anchor is missing (no backfill).
+                        ( (.backlog[$pidx].subitems[$sidx].createdAt // .backlog[$pidx].subitems[$sidx].addedAt) as $created |
+                          if $created != null then
+                            .backlog[$pidx].subitems[$sidx].leadTimeMs = ((($ts | sub("\\.[0-9]+Z?$";"Z") | sub("Z$";"") + "Z" | fromdateiso8601)
+                                                                          - ($created | sub("\\.[0-9]+Z?$";"Z") | sub("Z$";"") + "Z" | fromdateiso8601)) * 1000)
+                          else . end ) |
                         .backlog[$pidx].updatedAt = $ts |
                         del(.backlog[$pidx].subitems[$sidx].activelyWorking) |
                         del(.backlog[$pidx].subitems[$sidx].workStartedAt) |
@@ -8848,6 +8990,7 @@ kb-backlog() {
                                '.backlog[$pidx].subitems[$sidx].status = "in_progress" |
                                 .backlog[$pidx].subitems[$sidx].activelyWorking = true |
                                 .backlog[$pidx].subitems[$sidx].workStartedAt = $ts |
+                                .backlog[$pidx].subitems[$sidx].startedAt //= $ts |
                                 .backlog[$pidx].subitems[$sidx].updatedAt = $ts |
                                 del(.backlog[$pidx].subitems[$sidx].completedAt) |
                                 .backlog[$pidx].updatedAt = $ts |
@@ -8881,6 +9024,12 @@ kb-backlog() {
                     ;;
 
                 cancel)
+                    # XACA-1151-051 (ported from canonical, XACA-0886-032, round-3
+                    # review, defense-in-depth): see kb-cancel's own header comment
+                    # for why this reset is added at every entry point that reads
+                    # the flag, even though this arm's guard call is unconditional
+                    # already.
+                    typeset -g _KB_CANCEL_GUARD_AUDIT=false
                     # ── Argument parsing (XACA-0886) ────────────────────
                     local parent_idx sub_idx reason="" user_approved=false reason_flag_seen=false
                     local _kbsc_id="" _kbsc_usage="Usage: kb-backlog sub cancel <subitem-id> [--reason \"text\"] [--user-approved] [-- \"positional reason starting with --\"]"
@@ -9078,23 +9227,11 @@ kb-backlog() {
                     local timestamp
                     timestamp=$(_kb_get_timestamp)
 
-                    # XACA-0029: Calculate and accumulate work time if actively working
-                    local work_started_at existing_time_ms total_time_ms
-                    work_started_at=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].workStartedAt // empty" -r)
-                    existing_time_ms=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].timeWorkedMs // 0")
-                    total_time_ms="$existing_time_ms"
-
-                    if [[ -n "$work_started_at" ]]; then
-                        # Calculate elapsed time in milliseconds
-                        local start_epoch now_epoch elapsed_ms
-                        # Strip Z suffix and parse as UTC (macOS date -j -f ignores timezone suffix)
-                        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${${work_started_at%\.[0-9]*}%Z}" "+%s" 2>/dev/null || echo "0")
-                        now_epoch=$(date -u "+%s")
-                        if [[ "$start_epoch" != "0" ]] && [[ "$start_epoch" -gt 0 ]]; then
-                            elapsed_ms=$(( (now_epoch - start_epoch) * 1000 ))
-                            total_time_ms=$(( existing_time_ms + elapsed_ms ))
-                        fi
-                    fi
+                    # XACA-1151-051 (ported from canonical, XACA-0029/XACA-0551): flush
+                    # active-effort time via the shared helper instead of the old
+                    # inline BSD-`date -j` recompute.
+                    local total_time_ms
+                    total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$parent_idx].subitems[$sub_idx]")
 
                     _kb_jq_update "$board_file" \
                        '.backlog[$pidx].subitems[$sidx].status = "todo" |
@@ -9333,23 +9470,11 @@ kb-backlog() {
                     local timestamp
                     timestamp=$(_kb_get_timestamp)
 
-                    # XACA-0029: Calculate and accumulate work time
-                    local work_started_at existing_time_ms total_time_ms
-                    work_started_at=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].workStartedAt // empty" -r)
-                    existing_time_ms=$(_kb_jq_read "$board_file" ".backlog[$parent_idx].subitems[$sub_idx].timeWorkedMs // 0")
-                    total_time_ms="$existing_time_ms"
-
-                    if [[ -n "$work_started_at" ]]; then
-                        # Calculate elapsed time in milliseconds
-                        local start_epoch now_epoch elapsed_ms
-                        # Strip Z suffix and parse as UTC (macOS date -j -f ignores timezone suffix)
-                        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${${work_started_at%\.[0-9]*}%Z}" "+%s" 2>/dev/null || echo "0")
-                        now_epoch=$(date -u "+%s")
-                        if [[ "$start_epoch" != "0" ]] && [[ "$start_epoch" -gt 0 ]]; then
-                            elapsed_ms=$(( (now_epoch - start_epoch) * 1000 ))
-                            total_time_ms=$(( existing_time_ms + elapsed_ms ))
-                        fi
-                    fi
+                    # XACA-1151-051 (ported from canonical, XACA-0029/XACA-0551): flush
+                    # active-effort time via the shared helper instead of the old
+                    # inline BSD-`date -j` recompute.
+                    local total_time_ms
+                    total_time_ms=$(_kb_flush_work_time "$board_file" ".backlog[$parent_idx].subitems[$sub_idx]")
 
                     # Clear activelyWorking flag and worktree info, accumulate time
                     _kb_jq_update "$board_file" \
@@ -10065,7 +10190,7 @@ else:
             echo "Usage: kb-backlog <command> [args...]"
             echo ""
             echo "Commands:"
-            echo "  add \"task\" [pri] [\"desc\"] [jira] [os] [--points <hours>]  Add task with optional fields"
+            echo "  add \"task\" [pri] [\"desc\"] [jira] [os] [--sub-repo <name>] [--points <hours>]  Add task"
             echo "  list                               List all backlog items"
             echo "  show <id>                          Show detailed view of a single item"
             echo "  change <i> [\"title\"] [priority]   Update item title and/or priority"
@@ -10094,6 +10219,11 @@ else:
             echo ""
             echo "OS: iOS | Android | Firebase (platform-specific tasks)"
             echo ""
+            echo "Sub-repo: Name of a sub-repository within an umbrella project"
+            echo "  - Validated against _kb_umbrella_sub_repos when umbrella is detected"
+            echo "  - Omit flag when empty; allowed without validation if no umbrella context"
+            echo "  - Example: --sub-repo DNSProtocols (DNS Framework sub-repo)"
+            echo ""
             echo "Issue Tracking:"
             echo "  JIRA:   ME-123, PROJ-456"
             echo "  GitHub: #123 (team default) or owner/repo#123 (explicit)"
@@ -10109,6 +10239,7 @@ else:
             echo "  kb-backlog add \"Critical crash\" crit \"\" ME-123"
             echo "  kb-backlog add \"Update docs\" med \"Review API docs\""
             echo "  kb-backlog add \"iOS payment fix\" high \"\" ME-456 iOS"
+            echo "  kb-backlog add \"DNS lookup fix\" high \"\" \"\" \"\" --sub-repo DNSProtocols"
             echo "  kb-backlog list"
             echo "  kb-backlog change 0 \"New title\" high"
             echo "  kb-backlog tag 0 iOS feature urgent"
