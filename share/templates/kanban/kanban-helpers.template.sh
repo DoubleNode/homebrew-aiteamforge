@@ -103,43 +103,31 @@ _kb_board_less_alias_of() {
     local team="${1-}"
     [[ -z "$team" ]] && return 1
 
-    # 1. Explicit overlay marker -- authoritative once the overlay is migrated.
-    #    The helper exits non-zero for "not board-less" AND for "config unreadable";
-    #    both correctly mean "fall through to the built-in table" below.
-    local _cfg_file="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
-    if [[ -f "$_cfg_file" ]] && command -v python3 &>/dev/null; then
-        local _alias
-        if _alias=$(python3 - "$_cfg_file" "$team" 2>/dev/null <<'PYEOF'
-import json, sys
-from pathlib import Path
-cfg, team = sys.argv[1], sys.argv[2]
-try:
-    entry = json.loads(Path(cfg).read_text(encoding="utf-8")).get("teams", {}).get(team, {})
-except Exception:
-    sys.exit(1)
-if not isinstance(entry, dict) or entry.get("board_less") is not True:
-    sys.exit(1)
-alias = entry.get("alias_of")
-# Absence is representable as missing / null / "null" / "" -- normalize all four
-# (_ABSENT_SENTINELS in aiteamforge_paths.py).
-if alias not in (None, "", "null"):
-    print(alias)
-sys.exit(0)
-PYEOF
-        ); then
-            if [[ -n "$_alias" ]]; then
-                echo "$_alias"
-            else
-                # Overlay marks the team board-less but omits alias_of. Python's
-                # board_less_alias_of() falls back to DEFAULT_TEAMS here; mirror it,
-                # or the error message below loses its "use 'command'" guidance.
-                _kb_board_less_builtin_alias_of "$team" || true
-            fi
-            return 0
-        fi
+    # 1. Explicit overlay marker (XACA-0794) — authoritative once migrated.
+    local _bl _alias
+    if _bl=$(_kb_overlay_lookup "$team" board_less 2>/dev/null); then
+        case "$_bl" in
+            true|True|TRUE|1)
+                if _alias=$(_kb_overlay_lookup "$team" alias_of 2>/dev/null) \
+                   && [[ -n "$_alias" && "$_alias" != "null" ]]; then
+                    echo "$_alias"
+                else
+                    # XACA-0794-011: the overlay marks this team board-less but omits
+                    # (or nulls) alias_of. Python's board_less_alias_of() falls back to
+                    # DEFAULT_TEAMS in exactly this case; the shell used to return 0
+                    # with EMPTY output instead, so the caller's error message silently
+                    # lost the "use 'command' instead" guidance — the single most useful
+                    # part of it — and the two halves disagreed on the same overlay.
+                    _kb_board_less_builtin_alias_of "$team" || true
+                fi
+                return 0
+                ;;
+        esac
     fi
 
-    # 2. Built-in fallback -- un-migrated overlay, or no overlay at all.
+    # 2. Built-in fallback — un-migrated overlays, or no overlay at all. This
+    #    guard stays authoritative even on machines whose tap heredoc has not yet
+    #    been updated, closing the new-helpers / old-tap update window.
     if _kb_board_less_builtin_alias_of "$team"; then
         return 0
     fi
@@ -332,23 +320,32 @@ _kb_jq_atomic_write() {
     # Note: bash flock syntax (200>"$file") doesn't work in zsh, so we use perl
     perl -e '
         use Fcntl qw(:flock);
-        my $lock_file   = shift @ARGV;
+        my $lock_file   = shift @ARGV;  # zsh-index-ok: Perl, 0-indexed by design
         my $tmp_file    = shift @ARGV;
         my $target_file = shift @ARGV;
 
-        # Structural guarantee, not just an incidental fact: this primitive
-        # must never be able to degenerate into system()'"'"'s single-scalar
-        # shell-metacharacter-check form, which (unlike the execvp() LIST
-        # form) re-parses the argv through a shell. Both real callers here
-        # always pass jq with well over a dozen argv elements.
-        die "_kb_jq_atomic_write: refusing to run with fewer than 2 argv elements (got " . scalar(@ARGV) . ") -- this primitive must never shell out\n"
+        # XACA-0935 review finding 3 (subitem -013): @ARGV (the command to
+        # run) must never be allowed to degenerate into Perl system()'"'"'s
+        # single-scalar shell-metacharacter-check form, which — unlike the
+        # execvp() LIST form — re-parses the argument through the system
+        # shell. Both real callers (_kb_jq_update, _kb_log_activity) always
+        # pass jq with well over a dozen argv elements, so this cannot
+        # trigger today, but a `die` here makes that a structural guarantee
+        # instead of an incidental fact that could silently stop being true
+        # later. See also the `system { $ARGV[0] } @ARGV` indirect-object
+        # call below, which forces LIST-form dispatch even in the
+        # (structurally impossible) case @ARGV ever had exactly one element.
+        die "_kb_jq_atomic_write: refusing to run with fewer than 2 argv elements (got " . scalar(@ARGV) . ") — this primitive must never shell out\n"
             if scalar(@ARGV) < 2;
 
-        # A die() between here and the successful rename() below must not
-        # leave $tmp_file behind. An END block fires on every exit path,
-        # die()s included, so cleanup can never be skipped. $cleanup_tmp is
-        # cleared only after a successful rename, where $tmp_file no longer
-        # exists anyway.
+        # XACA-0935 review finding 1 (BLOCKING): a die() between here and the
+        # successful rename() below used to leave $tmp_file behind (lock-open,
+        # tmp-open, or rename failure all `die` without cleanup — finding 4 /
+        # subitem -015). An END block fires on every exit path, including
+        # die()s unwind, so this is the one place cleanup cannot be skipped.
+        # $cleanup_tmp is flipped off only after a successful rename, where
+        # $tmp_file no longer exists anyway (unlink on a gone file is a
+        # harmless no-op, but skip it explicitly for clarity).
         my $cleanup_tmp = 1;
         END { unlink($tmp_file) if $cleanup_tmp && defined($tmp_file) && -e $tmp_file; }
 
@@ -356,24 +353,26 @@ _kb_jq_atomic_write() {
         flock($fh, LOCK_EX) or die "Cannot lock: $!";
 
         # Capture the child'"'"'s stdout to tmp_file by redirecting our own
-        # STDOUT fd before exec (system() children inherit it) -- no shell
+        # STDOUT fd before exec (system() children inherit it) — no shell
         # redirection operator needed.
         open(my $out, ">", $tmp_file) or die "Cannot open tmp file: $!";
         open(my $saved_stdout, ">&STDOUT") or die "Cannot save stdout: $!";
         open(STDOUT, ">&", $out) or die "Cannot redirect stdout: $!";
-        # Indirect-object form forces execvp() LIST-form dispatch
-        # unconditionally, regardless of how many elements @ARGV has --
-        # unlike plain system(@ARGV), this can never degenerate into the
-        # single-scalar shell path even if the die guard above were bypassed.
+        # Indirect-object form `system { $ARGV[0] } @ARGV` forces execvp()
+        # LIST-form dispatch unconditionally, regardless of how many
+        # elements @ARGV has — unlike plain `system(@ARGV)`, this can never
+        # degenerate into the single-scalar shell-metacharacter-check path
+        # even if the `die` guard above were ever bypassed or removed.
         my $status = system { $ARGV[0] } @ARGV;  # zsh-index-ok: Perl, 0-indexed by design
         open(STDOUT, ">&", $saved_stdout) or die "Cannot restore stdout: $!";
         close($saved_stdout);
         close($out);
 
-        # SAFETY: gate on the FULL $status, never `$status >> 8` alone. A
-        # child killed by a signal (SIGTERM/SIGINT/...) sets the low 7 bits
-        # of $status and leaves the high byte (the shifted "exit code") at 0
-        # -- `>> 8` alone reads that as a clean exit(0) and would rename a
+        # SAFETY (XACA-0935 review finding 1, BLOCKING): gate on the FULL
+        # $status, never on `$status >> 8` alone. A child killed by a signal
+        # (e.g. SIGTERM/SIGINT) sets the low 7 bits of $status and leaves the
+        # high byte (the shifted "exit code") at 0 — `>> 8` on its own reads
+        # that as a clean exit(0) and the old code below would rename a
         # partially-flushed tmp file over the target. Only a literal
         # $status == 0 (no signal, exit code 0) counts as success.
         if ($status == 0 && -s $tmp_file) {
@@ -383,12 +382,13 @@ _kb_jq_atomic_write() {
             exit(0);
         }
 
-        # Failure path: report a specific reason instead of letting the
-        # caller'"'"'s generic $error_label stand in for every cause -- a
-        # signal kill, a nonzero jq exit, and a genuine empty-output guard
-        # trip are different failure classes. Callers that want silence
-        # (e.g. _kb_log_activity, deliberately best-effort) already wrap this
-        # whole invocation in 2>/dev/null.
+        # Failure path: report a specific reason (XACA-0935 review finding 3,
+        # subitem -014) instead of letting the caller'"'"'s generic
+        # $error_label stand in for every cause — a signal kill, a nonzero
+        # jq exit, and a genuine empty-output guard trip are different
+        # failure classes and get different stderr lines. Callers that want
+        # silence (e.g. _kb_log_activity, which is deliberately best-effort)
+        # already wrap this whole invocation in 2>/dev/null.
         my $exit_code;
         if ($status == -1) {
             print STDERR "_kb_jq_atomic_write: failed to execute command: $!\n";
@@ -406,15 +406,34 @@ _kb_jq_atomic_write() {
             $exit_code = 1;
         }
 
-        # XACA-0935: unlink $tmp_file HERE, while the flock is still held,
-        # instead of leaving it to the END block. $tmp_file is a fixed,
-        # non-unique name (${board_file}.tmp) shared by every writer racing
-        # for this lock -- an END-only unlink runs AFTER close($fh) below
-        # releases the lock, so a slow failing process could delete the tmp
-        # file a different, already-relocked writer just created. Cleaning
-        # up in-lock, before close($fh), removes that window; END remains a
-        # safety net for `die` exits, all of which (once $tmp_file exists)
-        # happen before $fh is closed, so it still always fires in-lock.
+        # XACA-0935 review finding (subitem -016): unlink $tmp_file HERE,
+        # while the flock is still held, rather than leaving it to the END
+        # block below. $tmp_file is a fixed, non-unique name derived from
+        # the target (${board_file}.tmp) — every writer racing for this
+        # lock uses the *same* path. The END block still fires after this
+        # explicit exit(), but by then close($fh) has released the lock,
+        # so an END-block-only unlink here would run OUT of the lock: a
+        # slow failing process could delete the tmp file a *different*,
+        # already-relocked writer just created moments after this one gave
+        # up the lock. Deleting in-lock, before close($fh), restores the
+        # original ordering (this primitive unlinked in-lock prior to the
+        # -015 fix) and keeps the END block doing exactly what -015 needed
+        # it for: a safety net on `die` exits. Every `die` above that can
+        # fire *after* $tmp_file has actually been created (tmp-open,
+        # stdout-save, stdout-redirect, rename) happens before $fh is ever
+        # closed, so END runs in-lock there too. The lock-open/flock dies are
+        # the one genuinely out-of-lock case, and the earlier wording here was
+        # too strong: this process has not created its own tmp yet, but
+        # $tmp_file is a SHARED, non-unique path, so a *concurrent* writer
+        # tmp can already exist at it and END would unlink that file without
+        # holding the lock. The outcome is still fail-closed -- the victim
+        # aborts on its own -s/rename check with an error rather than writing
+        # anything corrupt -- and reaching it at all needs an exotic failure
+        # (EMFILE, or a lock file chmod-ed out from under us), so this is
+        # documented rather than complicated further.
+        #
+        # $cleanup_tmp is flipped off here so the END block does not
+        # redundantly re-check an already-removed file.
         unlink($tmp_file) if defined($tmp_file) && -e $tmp_file;
         $cleanup_tmp = 0;
         close($fh);
@@ -517,8 +536,8 @@ def kb_resolve_item_status:
 # Read board file with shared locking
 # Usage: _kb_jq_read "board_file" "jq_filter" [jq_args...]
 _kb_jq_read() {
-    local board_file="$1"
-    local jq_filter="$2"
+    local board_file="${1-}"
+    local jq_filter="${2-}"
     shift 2
     local jq_args=("$@")
 
@@ -531,7 +550,7 @@ _kb_jq_read() {
     # This prevents race conditions where we read a 0-byte file during atomic rename
     perl -e '
         use Fcntl qw(:flock);
-        my $lock_file = $ARGV[0];
+        my $lock_file = $ARGV[0];  # zsh-index-ok: Perl, 0-indexed by design
         open(my $fh, "<", $lock_file) or die "Cannot open lock file: $!";
         flock($fh, LOCK_SH) or die "Cannot lock: $!";
         my $exit_code = system(@ARGV[1..$#ARGV]);
@@ -13587,46 +13606,78 @@ _kb_val_global_sig() {
     local head_sha repo_top porc line p out mdlines=""
     local -a files
 
+    # (1) must be a git work tree, and (2) must not itself be gitignored.
     git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
     _kb_val_root_is_ignored "$root" && return 1
 
+    # (3) HEAD. An unborn branch (fresh init, no commits) fails here ->
+    #     uncomputable -> invoke. Deliberate; XACA-1119-002 §2.4 hole (f).
     head_sha=$(git -C "$root" rev-parse HEAD 2>/dev/null) || return 1
     [[ -n "$head_sha" ]] || return 1
 
+    # (4) porcelain paths are REPO-TOP relative, not root-relative. Join
+    #     against the toplevel exactly as _kb_val_collect_changed_root does,
+    #     or every path is wrong whenever the knowledge root is not itself
+    #     the repo top.
     repo_top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || return 1
     [[ -n "$repo_top" ]] || return 1
 
+    # (5) Same command, same flags, same parse as _kb_val_collect_changed_root.
+    #     Capture-first: an EMPTY porcelain is a valid, cacheable state; a
+    #     FAILED git call is not. Distinguish them by rc, not by emptiness.
     porc=$(git -C "$root" status --porcelain=v1 --untracked-files=all -- . 2>/dev/null) || return 1
 
-    # XACA-1119 [Review] FIX: fold the FULL porcelain, not only `.md` lines.
-    # The `*.md` test `continue`d BEFORE appending to $mdlines, so any line it
-    # rejected never entered the signature — a SILENT SKIP reachable in the
-    # ordinary case, because non-`-z` porcelain C-QUOTES a path containing a
-    # space or non-ASCII byte (`p` ends in `"`, so `*.md` is false). Measured:
-    # `?? "k001-beta copy.md"` left the signature byte-identical while the
-    # validator exited 1 on the duplicate ID slot it introduced. Not
-    # equal-blindness — the duplicate ID-slot check is a hard error over the
-    # FULL on-disk listing, independent of porcelain scope. Folding all of
-    # $porc does NOT reintroduce an always-true trigger: the predicate is
-    # "changed since last clean validate", so stable dirt stays skippable.
-    # $files still takes only unquoted `.md` paths — a C-quoted path cannot be
-    # `[[ -f ]]`-tested, and the validator's collector skips them identically.
+    # XACA-1119 [Review] FIX — the line set folded below is the FULL porcelain
+    # output, NOT only the lines whose path ends `.md`. The original version
+    # applied the `*.md` test and `continue`d BEFORE appending to $mdlines, so
+    # any line the test rejected never entered the signature at all. That is a
+    # SILENT SKIP, and it was reachable in the ordinary case rather than an
+    # exotic one: non-`-z` porcelain C-QUOTES a path containing a space or a
+    # non-ASCII byte, so `p` ends in `"`, `*.md` is false, and the whole line
+    # is dropped. Measured — `?? "k001-beta copy.md"` produced a byte-identical
+    # signature while the real validator exited 1 on the duplicate ID slot it
+    # introduced. It is NOT equal-blindness with the validator: the duplicate
+    # ID-slot check is a hard error computed over the FULL on-disk `*.md`
+    # listing per val_dir (~:20348, ~:20418), independent of porcelain scope,
+    # so the validator sees exactly what this probe was missing. Against the
+    # bare `grep -q '\.md$'` this replaced, it was a strict REGRESSION.
+    #
+    # Folding all of $porc is correct AND does not reintroduce an always-true
+    # trigger: the predicate is "has this CHANGED since the last clean
+    # validate", not "is anything dirty". A stable non-`.md` dirty file yields
+    # a stable line and stays skippable. Non-`.md` churn now costs an extra
+    # invoke — the conservative direction, and cheap next to a 175s validate.
+    #
+    # $files (content-hash set) deliberately still takes only unquoted `.md`
+    # paths: a C-quoted path cannot be `[[ -f ]]`-tested without unquoting, and
+    # _kb_val_collect_changed_root applies the identical `[[ -f "$abs" ]] ||
+    # continue`, so the validator never examines those files either. Parity is
+    # preserved on CONTENT while the LINE set now covers every path.
     mdlines="$porc"
 
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
         p="${line:3}"
-        [[ "$p" == *" -> "* ]] && p="${p#* -> }"
+        [[ "$p" == *" -> "* ]] && p="${p#* -> }"     # rename: NEW path
         [[ "$p" == *.md ]] || continue
+        # INDEX.md is deliberately NOT excluded here — see the header note above.
         [[ -f "${repo_top}/${p}" ]] && files+=("${repo_top}/${p}")
     done <<< "$porc"
 
+    # (6) Content hash of every candidate. xargs -0 so an arbitrarily large
+    #     dirty set cannot hit ARG_MAX, and so a path containing spaces is
+    #     passed intact. A non-zero rc here (e.g. one unreadable file) is
+    #     UNCERTAINTY -> return 1.
     if (( ${#files[@]} )); then
         out=$(print -rN -- "${files[@]}" | _kb_val_multi_file_hash) || return 1
     else
         out=""
     fi
 
+    # (7) Fold. The literal version token namespaces this algorithm: a
+    #     global-tier signature can never collide with a project-tier one,
+    #     and a future algorithm change invalidates every stale record for
+    #     free by bumping the token.
     {
         print -r -- "kbval-global-sig-v2"
         print -r -- "HEAD=${head_sha}"
@@ -13935,7 +13986,7 @@ _kb_ambiguous_tier_write_guard() {
     _kb_current_session_is_local_only_team && return 0  # defensive; shouldn't be reachable if unresolved
 
     if [[ "$allow_global" == "true" ]]; then
-        echo "Warning: kb-knowledge-add could not resolve the current session's team (no tmux or env signal) — it can't verify this isn't a finance/legal/medical (PII) session. Proceeding to the SHARED/synced knowledge root anyway because --force was passed." >&2
+        echo "Warning: kb-knowledge-add could not resolve the current session's team (no tmux, KB_TEAM, or .kb-team sentinel) — it can't verify this isn't a finance/legal/medical (PII) session. Proceeding to the SHARED/synced knowledge root anyway because --force was passed." >&2
         return 0
     fi
 
@@ -21221,15 +21272,19 @@ _kb_overlay_retry_read() {
 _kb_overlay_lookup() {
     local slug="${1-}" field="${2-}"
     [[ -z "$slug" || -z "$field" ]] && return 1
-    command -v python3 &>/dev/null || return 1
-    local cfg="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+    command -v python3 >/dev/null 2>&1 || return 1
+    local cfg
+    cfg=$(_kb_overlay_config_path)
     [[ -f "$cfg" ]] || return 1
     # XACA-1058-020: a plain single-quoted assignment, not `$(cat <<'PYEOF'
-    # ... PYEOF)` -- the heredoc-via-command-substitution form forks TWICE
-    # per call (the $(...) subshell, then `cat` exec'd inside it) just to
-    # copy a constant string into a variable, on a hot path (this function
-    # is called from inside a loop at 2 sites per the CHANGELOG). No single
-    # quotes in the body, so it is safe verbatim inside one.
+    # ... PYEOF)`. The heredoc-via-command-substitution form forks TWICE per
+    # call (the $(...) subshell, then `cat` exec'd inside it) just to copy a
+    # constant string into a variable -- on the hot path named in the
+    # CHANGELOG (this function is called from inside a loop at 2 sites), that
+    # is two wasted forks per iteration for zero behavioral difference. The
+    # script body contains no single quotes, so it is safe verbatim inside
+    # one; if a future edit needs to add one, switch to $'...' with '\''
+    # escapes rather than reintroducing the cat fork.
     local _script='
 import json, sys
 cfg, slug, field = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -21246,19 +21301,38 @@ except Exception:
     sys.exit(2)  # short/partial JSON -- mid-write snapshot
 teams = data.get("teams")
 if not isinstance(teams, dict) or not teams:
-    # XACA-1058-023: {"teams": {}} is well-formed JSON but is treated as
-    # STRUCTURALLY UNSOUND (retried), not a legitimate "no teams registered
-    # yet" answer -- mirroring aiteamforge_paths.py, which owns the single source of
-    # truth, config_is_structurally_valid(), which classifies an empty teams
-    # dict as a corruption signature (XACA-0705 / k501: two sites must never
-    # independently redecide this; see dev-team/kanban-helpers.sh copy of
-    # this script for the full incident evidence). No installer persists
-    # this shape to the live team-paths.json -- every scaffold using it is
-    # an in-memory default replaced before the first write.
+    # XACA-1058-023: an empty teams map is well-formed JSON but is treated
+    # as STRUCTURALLY UNSOUND (retried), not a legitimate "no teams
+    # registered yet" answer -- deliberately mirroring aiteamforge_paths.py,
+    # which owns the single source of truth here: config_is_structurally_valid()
+    # (kanban-hooks/aiteamforge_paths.py) classifies an empty teams dict as a
+    # corruption signature, and is called from BOTH load_config() and
+    # server.py _build_team_kanban_dirs() for exactly that reason (XACA-0705
+    # and k501 -- two sites must never independently redecide this).
+    # Diverging here would recreate the two-site sibling-drift class this
+    # repo has already been bitten by, just with a THIRD site (the shell).
+    # No installer persists this shape to the LIVE team-paths.json: every
+    # empty-teams scaffold found in install-team.sh, kb-init-team, and
+    # kb-port-fix.py is an in-memory default that gets the real entry
+    # inserted BEFORE the first write ever happens -- confirmed by reading
+    # each site, not assumed. Two real incidents (see
+    # homebrew-tap/share/CHANGELOG.md: the Academy 404 and the Android
+    # blank-board entries) instead show this shape landing ON DISK only as a
+    # writer bug, both times requiring the same corrupt-config self-heal
+    # path this retry already exists for.
+    # XACA-1029 already warned that "the file was VALID both times" -- that
+    # is not a counter-argument here, it cuts the other way: "valid" there
+    # meant byte-for-byte parseable JSON, a strictly weaker claim than "a
+    # structurally sound registry". A file that parses fine but says "zero
+    # teams registered" is precisely the corruption signature both incidents
+    # above describe, not evidence the shape is safe to accept immediately.
     sys.exit(2)
 entry = teams.get(slug)
 if not isinstance(entry, dict):
     sys.exit(1)  # file is structurally sound; this slug genuinely is not registered
+# Only self-describing overlay entries (those carrying a team_code) are honoured;
+# this is the marker that distinguishes a generic-freelance registration from a
+# legacy stub that still relies on the hardcoded fallbacks.
 code = entry.get("team_code")
 if not code:
     sys.exit(1)
@@ -21282,12 +21356,13 @@ print(val)
 _kb_overlay_code_to_slug() {
     local code="${1-}"
     [[ -z "$code" ]] && return 1
-    command -v python3 &>/dev/null || return 1
-    local cfg="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+    command -v python3 >/dev/null 2>&1 || return 1
+    local cfg
+    cfg=$(_kb_overlay_config_path)
     [[ -f "$cfg" ]] || return 1
     # XACA-1058-020: see the matching comment in _kb_overlay_lookup above --
-    # same fix, same reason (the other of the two hot-path targets named in
-    # the CHANGELOG).
+    # same fix, same reason (this is the other of the two hot-path targets
+    # named in the CHANGELOG).
     local _script='
 import json, sys
 cfg, code = sys.argv[1], sys.argv[2].upper()
@@ -21304,8 +21379,8 @@ except Exception:
     sys.exit(2)
 teams = data.get("teams")
 if not isinstance(teams, dict) or not teams:
-    sys.exit(2)  # XACA-1058-023: see _kb_overlay_lookup script above for
-    # the full justification for retrying (not accepting) an empty "teams" map.
+    sys.exit(2)  # XACA-1058-023: see _kb_overlay_lookup script above for the
+    # full justification for retrying (not accepting) an empty "teams" map.
 for slug, entry in teams.items():
     if isinstance(entry, dict) and str(entry.get("team_code", "")).upper() == code:
         print(slug)
@@ -21330,8 +21405,12 @@ sys.exit(1)
 #      is worse than a clean "unknown team" error for a per-client instance.
 _kb_team_lcars_port() {
     local team="${1-}"
-    [[ -z "$team" ]] && return 1
+    if [[ -z "$team" ]]; then
+        return 1
+    fi
 
+    # XACA-0628: generic-freelance slugs resolve their port from the overlay
+    # first (the overlay entry with team_code is authoritative; no case arm).
     if [[ "$team" == freelance-* ]]; then
         local _ovl_port
         if _ovl_port=$(_kb_overlay_lookup "$team" lcars_port) && [[ "$_ovl_port" =~ ^[0-9]+$ ]]; then
@@ -21340,7 +21419,11 @@ _kb_team_lcars_port() {
         fi
     fi
 
-    if command -v aiteamforge_team_lcars_port &>/dev/null; then
+    # (a) Prefer the canonical loader when available (XACA-0168)
+    # Require non-empty AND purely numeric output before trusting it as a port;
+    # non-numeric output (error strings, debug noise) falls through to the
+    # built-in case table below rather than reaching curl with garbage. (XACA-0482-010)
+    if command -v aiteamforge_team_lcars_port &>/dev/null 2>&1; then
         local _atf_port
         _atf_port=$(aiteamforge_team_lcars_port "$team" 2>/dev/null)
         if [[ -n "$_atf_port" ]] && [[ "$_atf_port" =~ ^[0-9]+$ ]]; then
@@ -21349,28 +21432,29 @@ _kb_team_lcars_port() {
         fi
     fi
 
+    # (b) Built-in fallback table — keep in sync with aiteamforge-paths.sh defaults
     local _port=""
     case "$team" in
-        ios)        _port="8260" ;;
-        android)    _port="8280" ;;
-        firebase)   _port="8240" ;;
-        academy)    _port="8203" ;;
-        dns)        _port="8180" ;;
-        # Generic base slug for an unclaimed/legacy freelance instance —
-        # per-client slugs resolve via the overlay branch above, not here.
-        freelance)  _port="8505" ;;
-        command)    _port="8234" ;;
-        # XACA-0822-005: XACA-0727/XACA-0463 (canonical) established mainevent
-        # is a board-less alias on its OWN LCARS band (8400), NOT command's
-        # 8234 — the prior 8234 arm here was a stale collision left over from
-        # before that renumber (never ported into this template until now).
-        # xaca-0139:allowed — "mainevent" is a legacy team slug constant (backward-compat alias, not user-facing org branding)
-        mainevent)  _port="8400" ;;
-        spacedock)  _port="8380" ;;
-        *)          _port="" ;;
+        ios)                                    _port="8260" ;;
+        android)                                _port="8280" ;;
+        firebase)                               _port="8240" ;;
+        academy)                                _port="8203" ;;
+        dns)                                    _port="8180" ;;
+        # Freelance per-client/project slugs resolve their port via the
+        # overlay-first branch above (XACA-0628) — no hardcoded arms here.
+        freelance)                              _port="8505" ;;
+        command)                                _port="8234" ;;
+        # XACA-0727 / XACA-0463: mainevent is a board-less alias on its own LCARS
+        # band (8400), NOT command's 8234. The prior shared arm was a stale
+        # collision left over before the 8234→8400 renumber.
+        mainevent)                              _port="8400" ;;
+        spacedock)                           _port="8380" ;;
+        *)                                      _port="" ;;
     esac
 
-    [[ -z "$_port" ]] && return 1
+    if [[ -z "$_port" ]]; then
+        return 1
+    fi
     echo "$_port"
     return 0
 }
