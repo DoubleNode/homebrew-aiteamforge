@@ -1955,7 +1955,7 @@ SPD_TEAMS_EOF
 # the interface name on stdout, or nothing if the header/column/default
 # line could not be found.
 _spd_netstat_default_if() {
-    printf '%s\n' "$1" | awk '
+    printf '%s\n' "$1" | LC_ALL=C awk '
         /^Destination/ {
             col = 0
             for (i = 1; i <= NF; i++) { if ($i == "Netif") { col = i } }
@@ -1985,7 +1985,7 @@ _spd_vpn_default_route_if() {
         rc="$SPD_RUN_RC"
         [ "$SPD_RUN_TIMED_OUT" = "1" ] && rc=124
         if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
-            ifn=$(printf '%s\n' "$out" | awk '/^[[:space:]]*interface:/{print $2; exit}')
+            ifn=$(printf '%s\n' "$out" | LC_ALL=C awk '/^[[:space:]]*interface:/{print $2; exit}')
             if [ -n "$ifn" ]; then
                 SPD_VPN_DEF_IF="$ifn"
                 return 0
@@ -2060,7 +2060,7 @@ _spd_vpn_if_for_addr() {
         return 1
     fi
     local found_if awk_rc
-    found_if=$(printf '%s\n' "$ifc_out" | awk -v want="$want" '
+    found_if=$(printf '%s\n' "$ifc_out" | LC_ALL=C awk -v want="$want" '
         /^[A-Za-z0-9]+:/ { cur = $1; sub(/:$/, "", cur); next }
         /inet[ \t]/ {
             for (i = 1; i <= NF; i++) {
@@ -2126,9 +2126,16 @@ _spd_vpn_scutil_state() {
         SPD_VPN_SCUTIL_RC="$SPD_RUN_RC"
         return
     fi
+    # Every awk/grep in this check runs under LC_ALL=C: macOS awk ABORTS
+    # ("towc: multibyte conversion failure") on a non-UTF-8 byte under a
+    # UTF-8 locale, and the data parsed here is structural ASCII
+    # (XACA-1258-040).
     # Strip CR so CRLF-terminated output parses like LF output instead of
-    # failing the exact-match header test with a misleading message.
-    SPD_VPN_SCUTIL_OUT=$(printf '%s' "$SPD_RUN_OUT" | tr -d '\r')
+    # failing the exact-match header test with a misleading message. Pure
+    # parameter expansion, not `tr -d`: under a UTF-8 locale BSD tr stops at
+    # the first invalid byte ("Illegal byte sequence"), silently truncating
+    # the output (XACA-1258-040).
+    SPD_VPN_SCUTIL_OUT="${SPD_RUN_OUT//$'\r'/}"
     SPD_VPN_SCUTIL_RC="$SPD_RUN_RC"
     if [ "$SPD_RUN_TIMED_OUT" = "1" ]; then
         SPD_VPN_SCUTIL_STATE="probe_failed"
@@ -2141,7 +2148,7 @@ _spd_vpn_scutil_state() {
         return
     fi
 
-    if ! printf '%s\n' "$SPD_VPN_SCUTIL_OUT" | grep -qx 'DNS configuration'; then
+    if ! printf '%s\n' "$SPD_VPN_SCUTIL_OUT" | LC_ALL=C grep -qx 'DNS configuration'; then
         SPD_VPN_SCUTIL_STATE="ambiguous"
         SPD_VPN_SCUTIL_DETAIL="scutil --dns output did not contain a recognizable 'DNS configuration' section header"
         return
@@ -2150,7 +2157,7 @@ _spd_vpn_scutil_state() {
     # Truncate to the first section only — everything from the top through
     # (but not including) the scoped-queries header.
     local section_out
-    section_out=$(printf '%s\n' "$SPD_VPN_SCUTIL_OUT" | awk '
+    section_out=$(printf '%s\n' "$SPD_VPN_SCUTIL_OUT" | LC_ALL=C awk '
         /^DNS configuration \(for scoped queries\)/ { exit }
         { print }
     ')
@@ -2164,7 +2171,7 @@ _spd_vpn_scutil_state() {
     # scutil's own order values are not operator-supplied and have never
     # been observed with a leading zero.
     local parsed
-    parsed=$(printf '%s\n' "$section_out" | awk '
+    parsed=$(printf '%s\n' "$section_out" | LC_ALL=C awk '
         function flush() {
             if (blk > 0) { printf "%s|%s|%s|%s\n", order, has_ts, is_domain, has_ns }
         }
@@ -2195,16 +2202,22 @@ _spd_vpn_scutil_state() {
         # A default resolver with no nameserver cannot be ranked honestly
         # against the others (unobserved in real scutil output): fail closed.
         [ "$has_ns" = "1" ] || no_ns=1
-        # 10+ digits is rejected, not wrapped: $((10#N)) silently overflows
-        # past 64 bits and would flip the primary-resolver verdict. Real
-        # scutil orders are ~6 digits (100600, 200000).
+        # scutil's order is a 32-bit unsigned value (max 4294967295). Values
+        # of 11+ digits are rejected BEFORE any arithmetic ($((10#N)) wraps
+        # silently past 64 bits and would flip the verdict); a 10-digit value
+        # is safe to evaluate and is rejected only if above the 32-bit max
+        # (XACA-1258-036, -042). Real orders are ~6 digits (100600, 200000).
         case "$ord" in
-            ''|*[!0-9]*|??????????*)
+            ''|*[!0-9]*|???????????*)
                 ambiguous_order=1
                 continue
                 ;;
             *)
                 ord=$((10#$ord))
+                if [ "$ord" -gt 4294967295 ]; then
+                    ambiguous_order=1
+                    continue
+                fi
                 ;;
         esac
         if [ -z "$min_order" ] || [ "$ord" -lt "$min_order" ]; then
@@ -2225,7 +2238,7 @@ SPD_DNS_PARSED_EOF
     fi
     if [ "$ambiguous_order" = "1" ]; then
         SPD_VPN_SCUTIL_STATE="ambiguous"
-        SPD_VPN_SCUTIL_DETAIL="at least one default resolver in scutil --dns's 'DNS configuration' section has a missing, non-numeric, or out-of-range (10+ digit) 'order' value"
+        SPD_VPN_SCUTIL_DETAIL="at least one default resolver in scutil --dns's 'DNS configuration' section has a missing, non-numeric, or out-of-range (above 4294967295) 'order' value"
         return
     fi
     if [ "$no_ns" = "1" ]; then
@@ -2311,7 +2324,7 @@ _spd_check_vpn_dns_conflict() {
     # the app's daemon can precede the actual address on stdout/stderr
     # (XACA-1258-028).
     local ts_ip
-    ts_ip=$(printf '%s\n' "$SPD_RUN_OUT" | grep -Eo '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | head -1)
+    ts_ip=$(printf '%s\n' "$SPD_RUN_OUT" | LC_ALL=C grep -Eo '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | head -1)
     if [ -z "$ts_ip" ]; then
         # rc 0 but no usable address at all. This can mean Tailscale is
         # simply not connected (the common case -> [skip]), or that it is
@@ -2340,7 +2353,7 @@ _spd_check_vpn_dns_conflict() {
                 ;;
             *)
                 _spd_emit "$surface" "unknown" \
-                    "default route goes out utun interface '$def_if', and '$ts_bin ip -4' returned no usable IPv4 address, and scutil --dns could not be read unambiguously (state: ${SPD_VPN_SCUTIL_STATE:-unset}) — cannot rule out a MagicDNS resolver-order conflict" \
+                    "default route goes out utun interface '$def_if', and '$ts_bin ip -4' returned no usable IPv4 address, and scutil --dns could not be read unambiguously (state: ${SPD_VPN_SCUTIL_STATE:-unset}: ${SPD_VPN_SCUTIL_DETAIL:-no detail}) — cannot rule out a MagicDNS resolver-order conflict" \
                     "$ts_out" "$ts_rc"
                 ;;
         esac
