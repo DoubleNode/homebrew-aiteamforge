@@ -1683,8 +1683,13 @@ _kb_get_timestamp() {
     date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
-# Ported from canonical kanban-helpers.sh for XACA-0819. Deliberately NOT
-# called from `kb-backlog demote` (per XACA-0884/XACA-0552) — definition only.
+# Ported from canonical kanban-helpers.sh for XACA-0819. As of XACA-1151
+# PR-C this has 9 real call sites in this file (kb-done, kb-cancel,
+# kb-stop-working and kb-pause x2 each -- item + subitem -- plus
+# _kb_add_subitem_blocker x1; see the XACA-0819-014 comment at kb-pause,
+# ~line 3187, for the full call-site landscape). It is deliberately NOT
+# called from `kb-backlog demote` or `kb-backlog unpick` (per
+# XACA-0884/XACA-0552) -- those two remain the only non-flushing verbs.
 _kb_flush_work_time() {
     local board_file="$1" base_path="$2"
     local work_started_at existing_time_ms total_time_ms
@@ -8170,7 +8175,10 @@ kb-backlog() {
             # documents for kb-pause. Enforced by
             # tests/test-xaca-1151-prc-time-tracking.sh (outer repo), which
             # asserts kb-backlog unpick does NOT write timeWorkedMs, and by
-            # this suite's own demote freeze assertions (Coverage 4 below).
+            # the demote freeze assertions in this tap repo's OWN
+            # tests/test-xaca-0819-pause-resume-active-span.sh (Coverage 4
+            # in that file -- not below in this one; this comment lives in
+            # the shipped template, not a test suite).
             local demote_jq_filter='
                 .backlog[$idx].status = "todo" |
                 .backlog[$idx].updatedAt = $ts |
@@ -9558,19 +9566,44 @@ else:
             local timestamp
             timestamp=$(_kb_get_timestamp)
 
-            # Find and clear all items with worktreeWindowId that don't have matching active windows
+            # Sweep two INDEPENDENT orphan classes (XACA-0597). Both predicates are
+            # computed from the ORIGINAL object ($o) so neither masks the other:
+            #   Branch A (orphaned worktree): worktreeWindowId is set but no active
+            #            window owns it -> a session exited without cleanup.
+            #   Branch B (orphaned flag): activelyWorking is stuck true while the item
+            #            is NOT in_progress and NO live window tracks it -- neither via
+            #            worktreeWindowId nor via activeWindows[].workingOnId. This is the
+            #            reopened-without-a-worktree case (worktreeWindowId is null), which
+            #            the old worktreeWindowId-gated predicate skipped, leaving the LCARS
+            #            card pulsing forever in TODO.
+            # Either match clears activelyWorking + workStartedAt; Branch A additionally
+            # clears the worktree tracking fields.
+            #
+            # XACA-1151-037: workStartedAt MUST be cleared here (not just activelyWorking).
+            # kb-done/kb-cancel now flush _kb_flush_work_time before deleting workStartedAt,
+            # so an orphan that keeps a stale workStartedAt has its entire elapsed span --
+            # weeks or months since the orphaning event -- banked into timeWorkedMs the next
+            # time it is done or cancelled. Measured: 619h against a ~1h seed, on both items
+            # and subitems, before this fix.
             _kb_jq_update "$board_file" '
                 .activeWindows as $windows |
                 ($windows | map(.id) | unique) as $active_ids |
+                ($windows | map(.workingOnId) | map(select(. != null)) | unique) as $active_work_ids |
+                def sweep:
+                    . as $o |
+                    (($o.worktreeWindowId != null) and (($o.worktreeWindowId | IN($active_ids[])) | not)) as $orphan_wt |
+                    (($o.activelyWorking == true)
+                        and ($o.status != "in_progress")
+                        and ((($o.worktreeWindowId != null) and ($o.worktreeWindowId | IN($active_ids[]))) | not)
+                        and ((($o.id != null) and ($o.id | IN($active_work_ids[]))) | not)) as $orphan_flag |
+                    if ($orphan_wt or $orphan_flag) then
+                        (if $orphan_wt then del(.worktree, .worktreeBranch, .worktreeWindowId) else . end)
+                        | del(.activelyWorking, .workStartedAt)
+                        | .updatedAt = $ts
+                    else . end;
                 .backlog = [.backlog[] |
-                    if (.worktreeWindowId != null) and ((.worktreeWindowId | IN($active_ids[])) | not) then
-                        del(.activelyWorking, .worktree, .worktreeBranch, .worktreeWindowId) | .updatedAt = $ts
-                    else . end |
-                    .subitems = ((.subitems // []) | [.[] |
-                        if (.worktreeWindowId != null) and ((.worktreeWindowId | IN($active_ids[])) | not) then
-                            del(.activelyWorking, .worktree, .worktreeBranch, .worktreeWindowId) | .updatedAt = $ts
-                        else . end
-                    ])
+                    sweep |
+                    .subitems = ((.subitems // []) | map(sweep))
                 ] |
                 .lastUpdated = $ts
             ' --arg ts "$timestamp"

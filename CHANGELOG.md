@@ -45,7 +45,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     wall-clock gap as work — the same `kb-variance` corruption XACA-0819-014 existed to prevent, now
     inflating instead of deflating. `kb-pause`'s item arm now flushes + clears `workStartedAt`;
     `kb-resume`'s item arm now restarts `workStartedAt` and seeds `startedAt` (`//=`) — both
-    byte-identical to canonical, matching the subitem arms which were already correct. `kb-backlog
+    semantically identical to canonical, differing only in comments (NOT byte-identical — the raw
+    comparator lens still shows drift from this PR's own rewritten anti-regression comments; norm/hard
+    drift is 0/0), matching the subitem arms which were already correct. `kb-backlog
     unpick`/`demote` remain the one deliberate, UNCHANGED exception: canonical's `unpick` flush is on
     record inflating `timeWorkedMs` to ~12.2 billion ms from one stale `workStartedAt` (XACA-0884),
     where a pause span is bounded by how long a human leaves work paused and an unpick/demote span can
@@ -55,13 +57,39 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     `kb-done`/`kb-cancel`/`kb-stop-working` port alone, before pause/resume was touched: it now asserts
     item-level flush/restart (mirroring the subitem coverage), a file-wide call-site count of 9 (was
     1), and a new case isolating `kb-backlog unpick`'s arm to confirm it still has zero call sites.
-  - New suite `tests/test-xaca-1151-prc-time-tracking.sh` (outer repo): 47 pinned assertions, 14
-    negative controls against a frozen pre-port fixture extracted from this PR's own base commit
-    (`b781f89`; `kb-pause`/`kb-resume` bodies additionally verified byte-identical at this PR's own
-    first-pass tap commit, so the same fixture validly covers both), with a runtime byte-provenance
-    re-check, including a sleep-free deterministic item-level pause→resume→done cycle proving the
-    paused gap is excluded from `timeWorkedMs`. Verified under `/bin/bash` 3.2, brew bash 5, and
-    `env -i`.
+  - New suite `tests/test-xaca-1151-prc-time-tracking.sh` (outer repo): 59 pinned assertions (was 47;
+    see the PR #971 review round below), 19 negative controls (was 14) against a frozen pre-port
+    fixture extracted from this PR's own base commit (`b781f89`; `kb-pause`/`kb-resume` bodies
+    additionally verified byte-identical at this PR's own first-pass tap commit, so the same fixture
+    validly covers both), with a runtime byte-provenance re-check, including a sleep-free deterministic
+    item-level pause→resume→done cycle proving the paused gap is excluded from `timeWorkedMs`. Verified
+    under `/bin/bash` 3.2, brew bash 5, and `env -i`.
+  - **PR #971 review round (XACA-1151-037/038/039):**
+    - **XACA-1151-037 [Blocking]: `kb-backlog cleanup-all` cleared `activelyWorking` and the worktree
+      fields for an orphan but NOT `workStartedAt`.** Harmless before this PR (kb-done/kb-cancel
+      discarded `workStartedAt` unbanked); actively dangerous after it, since an orphan's surviving
+      stale `workStartedAt` is now flushed in full by the next `kb-done`/`kb-cancel` — reviewer-measured
+      619h against a ~1h seed, items and subitems alike. Ported canonical's full XACA-0597 two-branch
+      sweep verbatim (jq filter body confirmed byte-for-byte identical to canonical). Four new outer-repo
+      test rows cover `cleanup-all` × {kb-done, kb-cancel} × {item, subitem}, each with a negative
+      control against the frozen pre-fix arm (new fixture `tests/fixtures/xaca-1151/pre-port-cleanup-all-arm.txt`,
+      from tap commit `2aa571d`, the exact HEAD the reviewer measured against) mutated live into a copy
+      of the CURRENT template — sourcing a whole old tap commit would also revert kb-done/kb-cancel and
+      mask the exact interaction under test. **Upgrade disclosure:** consumer boards already swept by
+      the old `cleanup-all`, or paused under the old item-level `kb-pause`, may still carry a stale
+      `workStartedAt` that this fix cannot retroactively clear — see the outer repo's CHANGELOG for the
+      read-only audit one-liner. No automatic board-mutating remediation is shipped.
+    - **XACA-1151-038 [Advisory]:** corrected three stale comments — `kb-backlog demote`'s "Coverage 4
+      below" now says that coverage lives in this file's own `test-xaca-0819-pause-resume-active-span.sh`,
+      not further down in the template; `_kb_flush_work_time`'s header no longer says "definition only"
+      (9 real call sites as of this PR); "byte-identical" claims for `kb-pause`/`kb-resume` vs. canonical
+      (this file and `tests/fixtures/xaca-1145/tap-divergence.baseline`, outer repo) corrected to
+      "semantically identical, differing only in comments".
+    - **XACA-1151-039 [Advisory]:** the outer suite's row 2m never manufactured a real paused interval
+      (pause fired immediately after board creation), so it could not distinguish "resume anchors to
+      now" from "resume anchors to some other stale value". New row 2m (a2) seeds a genuine 2-real-day
+      gap via `pausedAt` and asserts the real anchor point epoch-close to now, with a live sensitivity
+      mutant (anchoring to `.pausedAt` instead) proving the assertion actually discriminates.
 
 ## [0.20.26] - 2026-09-25
 - **XACA-1340** — agent panels no longer exit with "iTerm2 not running" while iTerm2 is running. The liveness check used `pgrep -f "iTerm.app"`, but macOS `pgrep` excludes the caller's ancestors unless `-a` is passed, and a local panel runs inside iTerm2, so the check never saw its own host. Panels launched over `ssh -t` (connect scripts) also probed the remote host. `share/scripts/agent-panel-display.sh` now skips the check under SSH and otherwise uses `pgrep -a -x iTerm2`.
