@@ -123,13 +123,58 @@ def _load_schema(filename: str) -> dict:
 # Redaction-safe error formatting
 # ---------------------------------------------------------------------------
 
+# Alias names in notify.json are user-chosen map KEYS and get printed in error
+# paths and --resolve-check labels, so they are constrained to a short slug
+# (mirrored byte-identically in notify.schema.json's aliases.propertyNames).
+ALIAS_NAME_PATTERN = r"^[a-z][a-z0-9-]{0,31}(?![\s\S])"
+_ALIAS_NAME_RE = re.compile(ALIAS_NAME_PATTERN)
+
+REDACTED_KEY = "<redacted-key>"
+
+
+def _declared_property_names(node: Any, acc: set) -> set:
+    """Every property name the schema itself declares (``properties`` keys)."""
+    if isinstance(node, dict):
+        props = node.get("properties")
+        if isinstance(props, dict):
+            acc.update(props.keys())
+        for v in node.values():
+            _declared_property_names(v, acc)
+    elif isinstance(node, list):
+        for v in node:
+            _declared_property_names(v, acc)
+    return acc
+
+
+_KNOWN_KEYS: set | None = None
+
+
+def _render_key(key: str) -> str:
+    """
+    Render a mapping key for output only when it cannot be a stray secret:
+    a property name one of the release schemas declares, or a key matching
+    the alias-name grammar. Anything else (a URL, token or phone number
+    pasted into a key slot) prints as REDACTED_KEY. Deliberately not "any
+    identifier": an AWS key id such as AKIA... is a valid identifier.
+    """
+    global _KNOWN_KEYS
+    if _KNOWN_KEYS is None:
+        known: set = set()
+        for name in ("notify.schema.json", "wiki.schema.json", "profile.schema.json"):
+            _declared_property_names(_load_schema(name), known)
+        _KNOWN_KEYS = known
+    if key in _KNOWN_KEYS or _ALIAS_NAME_RE.search(key):
+        return key
+    return REDACTED_KEY
+
+
 def _format_path(path: list) -> str:
     out = "$"
     for seg in path:
         if isinstance(seg, int):
             out += f"[{seg}]"
         else:
-            out += f".{seg}"
+            out += f".{_render_key(str(seg))}"
     return out
 
 
@@ -443,7 +488,7 @@ def _notify_secret_refs(config: dict) -> list[tuple[str, str]]:
     for alias, alias_cfg in sorted(config.get("aliases", {}).items()):
         target = alias_cfg.get("target")
         if isinstance(target, dict) and isinstance(target.get("secretRef"), str):
-            out.append((f"$.aliases.{alias}.target.secretRef", target["secretRef"]))
+            out.append((f"$.aliases.{_render_key(alias)}.target.secretRef", target["secretRef"]))
     return out
 
 

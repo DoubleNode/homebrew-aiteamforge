@@ -12,7 +12,7 @@
       "type": "object",
       "description": "Keyed by alias name (e.g. 'cr-approver', 'release-channel'). At least one alias required.",
       "minProperties": 1,
-      "propertyNames": { "type": "string", "minLength": 1 },
+      "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}(?![\\s\\S])" },
       "additionalProperties": {
         "type": "object",
         "required": ["provider", "target"],
