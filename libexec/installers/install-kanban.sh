@@ -1006,6 +1006,51 @@ install_lcars_profile_script() {
         warning "kb-cr.sh not found (skipping)"
     fi
 
+    # XACA-1342-019: install the release-config validator CLI + its Python
+    # library + its three JSON schemas. Sourced by kanban-helpers.sh (same
+    # guard+source pattern as kb-cr.sh above). release_config_validate.py
+    # resolves the schemas relative to its own file (a release_config_schemas/
+    # sibling directory), so all four ship together; it also imports
+    # aiteamforge_paths from a ../kanban-hooks/ sibling, which
+    # install_kanban_hooks() already lands at $AITEAMFORGE_DIR/kanban-hooks/.
+    local kbrcv_src="$INSTALL_ROOT/share/scripts/kb-release-config-validate.sh"
+    if [ -f "$kbrcv_src" ]; then
+        cp "$kbrcv_src" "$scripts_dest/kb-release-config-validate.sh"
+        chmod +x "$scripts_dest/kb-release-config-validate.sh"
+        info "Installed: kb-release-config-validate.sh"
+    else
+        warning "kb-release-config-validate.sh not found (skipping)"
+    fi
+
+    local rcv_src="$INSTALL_ROOT/share/scripts/release_config_validate.py"
+    if [ -f "$rcv_src" ]; then
+        cp "$rcv_src" "$scripts_dest/release_config_validate.py"
+        chmod +x "$scripts_dest/release_config_validate.py"
+        info "Installed: release_config_validate.py"
+    else
+        warning "release_config_validate.py not found (skipping)"
+    fi
+
+    local rcv_schemas_src="$INSTALL_ROOT/share/scripts/release_config_schemas"
+    if [ -d "$rcv_schemas_src" ]; then
+        mkdir -p "$scripts_dest/release_config_schemas"
+        local rcv_schema_file rcv_schema_name rcv_schema_count=0
+        for rcv_schema_file in "$rcv_schemas_src"/*.schema.json; do
+            [ -f "$rcv_schema_file" ] || continue
+            rcv_schema_name="$(basename "$rcv_schema_file")"
+            cp "$rcv_schema_file" "$scripts_dest/release_config_schemas/$rcv_schema_name"
+            chmod 644 "$scripts_dest/release_config_schemas/$rcv_schema_name"
+            rcv_schema_count=$((rcv_schema_count + 1))
+        done
+        if [ "$rcv_schema_count" -gt 0 ]; then
+            info "Installed: release_config_schemas/ ($rcv_schema_count schema(s))"
+        else
+            warning "release_config_schemas/ present but empty (skipping)"
+        fi
+    else
+        warning "release_config_schemas/ not found (skipping)"
+    fi
+
     # XACA-1239: cr-schema-validator.py backs LCARS GET /api/kanban/cr/evidence-map
     # (the EDIT STATE modal's prerequisite map). server.py loads it with importlib
     # from $AITEAMFORGE_DIR/scripts on consumer installs, so it needs no +x.

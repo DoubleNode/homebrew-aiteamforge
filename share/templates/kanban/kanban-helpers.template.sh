@@ -27067,3 +27067,22 @@ unset _KB_CR_LOADED 2>/dev/null
 if ! typeset -f kb-cr >/dev/null 2>&1 && [[ -f "${AITEAMFORGE_DIR}/scripts/kb-cr.sh" ]]; then
     source "${AITEAMFORGE_DIR}/scripts/kb-cr.sh"
 fi
+
+# Release-config validator CLI (XACA-1342-019, mirrors the canonical
+# XACA-1342-005 block in dev-team's kanban-helpers.sh) — kb-release-config-validate
+# Sources kb-release-config-validate.sh, same guard+source pattern as the
+# kb-cr block immediately above (function-presence guard, not a flag
+# variable — see that block's comment for why: an exported flag survives
+# into child shells but a shell function does not, so a flag-based guard
+# silently under-sources in any nested `source kanban-helpers.sh` shell).
+# File-existence guard prevents a hard failure on installs where this file
+# has not been deployed yet (e.g. an upgrade that hasn't run since this
+# ticket landed). install_lcars_profile_script() (install-kanban.sh) lays down
+# kb-release-config-validate.sh and its release_config_validate.py library at
+# ${AITEAMFORGE_DIR}/scripts/ on fresh installs, same function that installs
+# kb-cr.sh above; aiteamforge-upgrade.sh's _xaca0673_mandatory_materialize_basenames
+# materializes both on upgrade.
+if ! typeset -f kb-release-config-validate >/dev/null 2>&1 && \
+    [[ -f "${AITEAMFORGE_DIR}/scripts/kb-release-config-validate.sh" ]]; then
+    source "${AITEAMFORGE_DIR}/scripts/kb-release-config-validate.sh"
+fi

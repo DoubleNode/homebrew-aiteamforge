@@ -10,6 +10,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `kb-release-config-validate` (`share/scripts/`): `secretRef` accepts only `vault:<engine>/<account>` or `env:<VAR>`,
   literals in `secretRef`/`target`/`credential` are errors, and no resolved value is ever printed. LCARS never offers
   or probes engines marked `kind: "secret-only"` as AI credentials; the Fleet Monitor Engines tab badges them.
+  Review round 1: `env:` refs must be `RELEASE_<TEAM>_<PURPOSE>` and are team-owned; `vault:` team ownership uses the
+  longest registered team id; `vault:` refs resolve from the flattened `share/scripts/` layout; the installer and
+  `aiteamforge upgrade` now install the validator, library and schemas, and the kanban-helpers template sources it.
 - **XACA-1083** — per-team **Require Epics** / **Require Releases** start gates, default ON. `kb-pick`, `kb-run`,
   `kb-work` and reopen refuse to start an item that has no Epic or Release resolving on the board, unless the team turned
   the setting off (Command ships OFF) or the item's `addedAt` is before the shipped `grandfatherCutoff`, so existing

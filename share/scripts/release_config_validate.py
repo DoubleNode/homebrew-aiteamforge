@@ -53,7 +53,7 @@ from jsonschema.exceptions import ValidationError
 #                                            pattern (fleet-monitor/server/
 #                                            lib/vault-store.js SLUG_RE:
 #                                            ^[a-z][a-z0-9-]*$, <=64 chars)
-#   env:<VAR_NAME>                       -- ^[A-Z_][A-Z0-9_]*$
+#   env:RELEASE_<TEAM>_<PURPOSE>         -- ^RELEASE_[A-Z][A-Z0-9_]*$ (team-owned, XACA-1342-018)
 #
 # This pattern string is duplicated verbatim in each *.schema.json file's
 # "secretRef" property (JSON Schema files can't $ref a Python constant).
@@ -70,8 +70,13 @@ from jsonschema.exceptions import ValidationError
 # ECMA-262, where \Z is a literal "Z" (or a syntax error under /u), so an
 # Ajv consumer would reject every valid ref. (?![\s\S]) is a true
 # end-of-string assertion in both dialects.
+#
+# env: names must start with RELEASE_ (XACA-1342-018): a release config can
+# then never name an unrelated process variable (CLAUDE_ACCT_*,
+# TEAM_*_API_KEY, ...). Which TEAM may read a RELEASE_ name is enforced at
+# resolve time -- see _team_owns_env_var().
 # ---------------------------------------------------------------------------
-SECRET_REF_PATTERN = r"^(vault:[a-z][a-z0-9-]{0,63}/[a-z][a-z0-9-]{0,63}|env:[A-Z_][A-Z0-9_]*)(?![\s\S])"
+SECRET_REF_PATTERN = r"^(vault:[a-z][a-z0-9-]{0,63}/[a-z][a-z0-9-]{0,63}|env:RELEASE_[A-Z][A-Z0-9_]*)(?![\s\S])"
 SECRET_REF_RE = re.compile(SECRET_REF_PATTERN)
 
 # Field names that MUST never have their instance value echoed in an error
@@ -285,10 +290,47 @@ _VAULT_FETCH_EXIT_DESCRIPTIONS = {
 # monkeypatch.setattr(rcv, "VAULT_FETCH_SH", fake) instead.
 _VAULT_FETCH_SH_OVERRIDE_ENV_VAR = "RELEASE_CONFIG_VALIDATE_VAULT_FETCH_SH_OVERRIDE"
 
-VAULT_FETCH_SH = Path(
-    os.environ.get(_VAULT_FETCH_SH_OVERRIDE_ENV_VAR)
-    or (Path(__file__).resolve().parent.parent / "fleet-monitor" / "client" / "vault-fetch.sh")
-)
+
+def _resolve_vault_fetch_sh(base_dir: Path | None = None) -> Path:
+    """
+    Resolve the vault-fetch.sh path through a candidate list, the same
+    pattern _load_aiteamforge_paths_module() already uses for
+    aiteamforge_paths.py -- __file__-relative layout differs between the
+    dev tree and the flattened tap layout (XACA-1342-020):
+
+      - dev tree: this file lives in scripts/, vault-fetch.sh lives in the
+        sibling fleet-monitor/client/ directory.
+      - tap layout: sync-tap.sh (~:1135) flattens vault-fetch.sh to
+        share/scripts/vault-fetch.sh -- a direct SIBLING of this module
+        (share/scripts/release_config_validate.py) -- because there is no
+        share/fleet-monitor/ in the tap.
+
+    The override env var wins outright (test-only escape hatch, see above);
+    otherwise the dev-tree path is tried first, then the flattened sibling.
+    If neither exists, the dev-tree path is returned anyway so the
+    "not found" error downstream names a stable, predictable path rather
+    than whichever candidate happened to be tried last.
+
+    `base_dir` is a test-only override for `Path(__file__).resolve().parent`
+    -- it lets a test build a mock tap layout without touching the real
+    file tree the module was loaded from.
+    """
+    override = os.environ.get(_VAULT_FETCH_SH_OVERRIDE_ENV_VAR)
+    if override:
+        return Path(override)
+
+    this_dir = base_dir if base_dir is not None else Path(__file__).resolve().parent
+    candidates = [
+        this_dir.parent / "fleet-monitor" / "client" / "vault-fetch.sh",  # dev layout
+        this_dir / "vault-fetch.sh",  # tap layout: flattened sibling
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
+
+
+VAULT_FETCH_SH = _resolve_vault_fetch_sh()
 
 
 def resolve_secret_ref(ref: str, team: str) -> str:
@@ -299,10 +341,11 @@ def resolve_secret_ref(ref: str, team: str) -> str:
 
     Args:
         ref: a secretRef string, either "vault:<engine_slug>/<account_slug>"
-             or "env:<VAR_NAME>".
+             or "env:RELEASE_<TEAM>_<PURPOSE>".
         team: the calling team's id, used to enforce team isolation on
-              vault: refs (§ 2.2) -- the vault seals per machine, not per
-              team, so this is the enforcement point.
+              vault: and env: refs (§ 2.2) -- the vault seals per machine,
+              not per team, and the environment is shared, so this is the
+              enforcement point.
 
     Raises:
         SecretResolutionError: on any failure. The message never contains
@@ -317,11 +360,11 @@ def resolve_secret_ref(ref: str, team: str) -> str:
     if not match:
         raise SecretResolutionError(
             "secretRef does not match the vault:<engine>/<account> or "
-            "env:<VAR_NAME> grammar"
+            "env:RELEASE_<TEAM>_<PURPOSE> grammar"
         )
 
     if ref.startswith("env:"):
-        return _resolve_env_ref(ref[len("env:"):])
+        return _resolve_env_ref(ref[len("env:"):], team)
 
     # ref.startswith("vault:") -- the only other branch SECRET_REF_RE allows.
     path = ref[len("vault:"):]
@@ -329,7 +372,101 @@ def resolve_secret_ref(ref: str, team: str) -> str:
     return _resolve_vault_ref(engine_slug, account_slug, team)
 
 
-def _resolve_env_ref(var_name: str) -> str:
+# Test-only hook (XACA-1342-021): a module-level override for the
+# registered-team-id set, so a test can exercise _resolve_vault_ref()'s
+# team-isolation logic against a fixture registry (e.g. one that includes
+# the real mainevent-* / freelance-doublenode-* collision shapes) without
+# touching the live ~/.aiteamforge/team-paths.json. None (the default)
+# means "load the real registry". Set via
+# monkeypatch.setattr(rcv, "_TEAM_IDS_OVERRIDE", frozenset({...})).
+_TEAM_IDS_OVERRIDE: frozenset[str] | None = None
+
+
+def _resolve_registered_team_ids() -> frozenset[str]:
+    """
+    Return every registered team id, from the same canonical registry
+    accessor (aiteamforge_paths.list_teams()) the CLI already uses to
+    resolve --config-dir.
+
+    FAILS CLOSED (XACA-1342-021): if the registry cannot be loaded for any
+    reason -- missing module, corrupt/unreadable config, anything -- this
+    raises SecretResolutionError rather than falling back to a bare prefix
+    check. Team isolation must never silently degrade to "allow".
+    """
+    if _TEAM_IDS_OVERRIDE is not None:
+        return _TEAM_IDS_OVERRIDE
+    try:
+        aiteamforge_paths = _load_aiteamforge_paths_module()
+        return frozenset(aiteamforge_paths.list_teams())
+    except Exception as exc:  # noqa: BLE001 - deliberately broad: fail
+        # closed on ANY registry-load error, and never forward str(exc)
+        # (could echo a config path or content) -- only the type name.
+        raise SecretResolutionError(
+            "refusing vault resolution: team registry unavailable "
+            f"({type(exc).__name__})"
+        ) from None
+
+
+def _team_owns_account_slug(
+    team: str, account_slug: str, registered_team_ids: frozenset[str]
+) -> bool:
+    """
+    True iff `account_slug` belongs to `team` under the "<team>-<purpose>"
+    convention (XACA-1342-001), even when registered team ids collide as
+    prefixes of one another (e.g. "mainevent" vs.
+    "mainevent-maineventapp-ios" -- both real registered team ids).
+
+    A bare `account_slug.startswith(f"{team}-")` is ambiguous here: since
+    team ids themselves may contain "-", a SHORTER team id can be a
+    false-positive prefix match for an account slug that actually belongs
+    to a longer, more specific team id. This finds the LONGEST registered
+    team id `T` such that `account_slug` starts with `"T-"`, and requires
+    `T == team` -- so only the most specific owning team ever passes.
+    """
+    longest_owner: str | None = None
+    for candidate in registered_team_ids:
+        if account_slug.startswith(f"{candidate}-"):
+            if longest_owner is None or len(candidate) > len(longest_owner):
+                longest_owner = candidate
+    return longest_owner == team
+
+
+def _env_prefix_for_team(team_id: str) -> str:
+    """RELEASE_<TEAM>_ with the team id uppercased and '-' mapped to '_'."""
+    return "RELEASE_" + team_id.upper().replace("-", "_") + "_"
+
+
+def _team_owns_env_var(
+    team: str, var_name: str, registered_team_ids: frozenset[str]
+) -> bool:
+    """
+    True iff `var_name` belongs to `team` under RELEASE_<TEAM>_<PURPOSE>
+    (XACA-1342-018). Same longest-owner rule as _team_owns_account_slug():
+    RELEASE_MAINEVENT_MAINEVENTAPP_IOS_X belongs to mainevent-maineventapp-ios,
+    never to mainevent, even though both prefixes match.
+    """
+    longest_owner: str | None = None
+    for candidate in registered_team_ids:
+        if var_name.startswith(_env_prefix_for_team(candidate)):
+            if longest_owner is None or len(candidate) > len(longest_owner):
+                longest_owner = candidate
+    return longest_owner == team
+
+
+def _resolve_env_ref(var_name: str, team: str) -> str:
+    # Team isolation for env: refs (XACA-1342-018), checked before the
+    # environment is read, so --resolve-check cannot act as a set/unset
+    # oracle for another team's variables. Fails closed with the registry.
+    registered_team_ids = _resolve_registered_team_ids()
+    if team not in registered_team_ids:
+        raise SecretResolutionError(
+            f"refusing env resolution: '{team}' is not a registered team id"
+        )
+    if not _team_owns_env_var(team, var_name, registered_team_ids):
+        raise SecretResolutionError(
+            "refusing cross-team secret: environment variable does not belong "
+            f"to team '{team}' (expected {_env_prefix_for_team(team)}<PURPOSE>)"
+        )
     value = os.environ.get(var_name)
     if not value:
         raise SecretResolutionError(
@@ -340,11 +477,19 @@ def _resolve_env_ref(var_name: str) -> str:
 
 def _resolve_vault_ref(engine_slug: str, account_slug: str, team: str) -> str:
     # Team isolation (§ 2.2): refuse any vault: ref whose account slug does
-    # not start with "<team>-". Checked before ever touching vault-fetch.sh.
-    prefix = f"{team}-"
-    if not account_slug.startswith(prefix):
+    # not belong to `team` under the "<team>-<purpose>" convention.
+    # Checked before ever touching vault-fetch.sh. See
+    # _team_owns_account_slug() for why a bare startswith(f"{team}-") is
+    # unsafe (XACA-1342-021): team ids themselves contain "-", so a shorter
+    # team id can be a false-positive prefix of a longer, unrelated team id.
+    registered_team_ids = _resolve_registered_team_ids()
+    if team not in registered_team_ids:
         raise SecretResolutionError(
-            f"refusing cross-team secret: account slug does not start with '{prefix}'"
+            f"refusing vault resolution: '{team}' is not a registered team id"
+        )
+    if not _team_owns_account_slug(team, account_slug, registered_team_ids):
+        raise SecretResolutionError(
+            f"refusing cross-team secret: account slug does not belong to team '{team}'"
         )
 
     if not VAULT_FETCH_SH.is_file():
@@ -595,6 +740,19 @@ def _run(argv: list[str]) -> int:
         print(f"kb-release-config-validate: {exc}", file=sys.stderr)
         return 2
 
+    # XACA-1342-024 (Advisory, folded in): a missing config DIRECTORY is a
+    # real error, not "nothing to validate" -- without this, --all against
+    # a directory that doesn't exist prints "not present (skipped)" for
+    # every target and exits 0, which reads as a pass even though nothing
+    # was actually validated. A missing individual FILE under an existing
+    # directory keeps the current skip/explicit-only behavior below.
+    if not config_dir.is_dir():
+        print(
+            f"kb-release-config-validate: config directory not found: {config_dir}",
+            file=sys.stderr,
+        )
+        return 1
+
     had_failure = False
     for label, rel_parts, validate_fn, secret_ref_fn, explicit_only in _build_targets(args):
         path = config_dir.joinpath(*rel_parts)
@@ -610,7 +768,15 @@ def _run(argv: list[str]) -> int:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 config = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
+        except Exception as exc:  # noqa: BLE001 - deliberately broad
+            # (XACA-1342-022): OSError/json.JSONDecodeError alone missed
+            # UnicodeDecodeError (invalid UTF-8), RecursionError (deeply
+            # nested JSON) and ValueError (an int literal past json's
+            # digit-count limit) -- each left main() to propagate a raw
+            # traceback. Same redaction discipline as the resolve-check
+            # handler below: report only the exception TYPE name, never
+            # str(exc) (which for some of these can embed a snippet of the
+            # offending content) and never the file's content.
             print(
                 f"{label}: could not read/parse config ({type(exc).__name__})",
                 file=sys.stderr,

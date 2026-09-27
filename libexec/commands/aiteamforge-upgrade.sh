@@ -3186,6 +3186,17 @@ PYEOF
 # absent). Absent file degrades to looking up bare "freelance" -- no
 # error, but every freelance instance route is silently ignored -- so
 # nothing would surface the gap. .sh, reached by the glob sweep once listed.
+# XACA-1342-019: kb-release-config-validate.sh (thin zsh CLI dispatcher) and
+# release_config_validate.py (the library it dispatches to). BRAND-NEW on
+# every already-installed box: sync-tap.sh only started mirroring them into
+# share/scripts/ in this ticket, so an upgraded (not freshly installed)
+# consumer has no target on disk and the "refresh only what exists" default
+# would skip both forever, identical to the XACA-1312/1313 gap above. Both
+# carry a .sh/.py extension, so the glob sweep reaches them once listed here
+# -- no extensionless sweep entry needed. release_config_validate.py's three
+# JSON schema siblings (release_config_schemas/*.schema.json) carry neither
+# extension the sweep globs for NOR a flat scripts/ destination -- see the
+# dedicated materialize step in update_runtime_helpers() below.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -3216,6 +3227,8 @@ session-account-map.py
 cc-account-routing.sh
 vault-fetch.sh
 cc-credential-team-resolver.sh
+kb-release-config-validate.sh
+release_config_validate.py
 EOF
 }
 
@@ -3321,6 +3334,40 @@ update_runtime_helpers() {
       updated=$((updated + 1))
     fi
   done
+
+  # XACA-1342-019: release-config validator JSON schemas
+  # (release_config_schemas/*.schema.json). release_config_validate.py
+  # resolves these from a release_config_schemas/ sibling directory next to
+  # itself (see the sync_file comment on the release_config_validate.py
+  # mirror in sync-tap.sh) — without them the CLI is present but every
+  # validation call fails on a missing schema file. Neither the *.sh/*.py
+  # glob sweep above nor the flat-file datafile loop just above can reach
+  # these: they carry a .json extension AND live in a subdirectory of
+  # scripts/, not scripts/ itself. Always (re)written, same discipline as the
+  # datafile loop directly above — a present-but-STALE schema is the same bug
+  # as a missing one, so gating on "already exists" would leave a stale
+  # schema in place forever. mkdir -p covers both the brand-new-subdirectory
+  # case (upgraded box that never had release_config_schemas/) and the
+  # already-materialized case (no-op).
+  local _schemas_src_dir="${scripts_source}/release_config_schemas"
+  if [ -d "$_schemas_src_dir" ]; then
+    local _schema_src _schema_dest _schema_name
+    for _schema_src in "$_schemas_src_dir"/*.schema.json; do
+      [ -f "$_schema_src" ] || continue
+      _schema_name="$(basename "$_schema_src")"
+      _schema_dest="${scripts_dest}/release_config_schemas/${_schema_name}"
+      print_info "Updating scripts/release_config_schemas/${_schema_name}..."
+      if [ "$DRY_RUN" = false ]; then
+        mkdir -p "${scripts_dest}/release_config_schemas"
+        cp "$_schema_src" "$_schema_dest"
+        chmod 644 "$_schema_dest"
+        print_success "Updated scripts/release_config_schemas/${_schema_name}"
+      else
+        echo "Would update: scripts/release_config_schemas/${_schema_name}"
+      fi
+      updated=$((updated + 1))
+    done
+  fi
 
   if [ $updated -eq 0 ]; then
     print_success "All runtime helper scripts up to date"

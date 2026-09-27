@@ -158,3 +158,4 @@ test-xaca-1300-014-session-account-map-shipping.sh plain-shell
 test-xaca-1322-consumer-datafile-refresh.sh     plain-shell
 test-xaca-1322-shipped-kg-contract.sh           plain-shell
 test-xaca-1322-vault-drift.sh                   plain-shell
+test-xaca-1342-release-config-install.sh        plain-shell

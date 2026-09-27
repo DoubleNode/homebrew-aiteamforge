@@ -129,6 +129,15 @@
 
             var body = document.createElement('div');
             body.className = 'engine-card-body';
+
+            // XACA-1342-016: the badge's title tooltip is unreachable by keyboard,
+            // touch and screen readers, so state the meaning as visible text too.
+            if (engine.kind === 'secret-only') {
+                var kindNote = document.createElement('p');
+                kindNote.className = 'engine-card-kind-note';
+                kindNote.textContent = 'Holds vault secrets only. Not an AI engine: never probed or offered as a team AI credential.';
+                body.appendChild(kindNote);
+            }
             body.id = 'engine-accounts-' + escHtml(engine.slug);
 
             if (!engine.accounts || engine.accounts.length === 0) {

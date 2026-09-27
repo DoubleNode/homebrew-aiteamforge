@@ -31,8 +31,8 @@
             "properties": {
               "secretRef": {
                 "type": "string",
-                "description": "vault:<engine_slug>/<account_slug> or env:<VAR_NAME> only. A literal value is a validation error.",
-                "pattern": "^(vault:[a-z][a-z0-9-]{0,63}/[a-z][a-z0-9-]{0,63}|env:[A-Z_][A-Z0-9_]*)(?![\\s\\S])"
+                "description": "vault:<engine_slug>/<account_slug> or env:RELEASE_<TEAM>_<PURPOSE> only. A literal value is a validation error.",
+                "pattern": "^(vault:[a-z][a-z0-9-]{0,63}/[a-z][a-z0-9-]{0,63}|env:RELEASE_[A-Z][A-Z0-9_]*)(?![\\s\\S])"
               }
             }
           }

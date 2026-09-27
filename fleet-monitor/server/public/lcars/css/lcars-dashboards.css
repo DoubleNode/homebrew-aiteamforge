@@ -1108,16 +1108,31 @@
 /* XACA-1342-013: secret-only engine badge (release-notify, release-wiki, …) —
    holds vault secrets only, never a probeable AI engine. */
 .engine-card-kind-badge {
+    /* XACA-1342-015: same idiom as .engine-vault-badge / .engine-auth-type-badge.
+       Tan text on a faint tan tint over the card surface (the first version drew
+       --lcars-dark text on --lcars-surface, 1.15:1 contrast). */
+    display: inline-block;
+    font-family: 'Antonio', sans-serif;
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 1px;
     text-transform: uppercase;
-    color: var(--lcars-dark);
-    background: var(--lcars-surface);
-    border-radius: 4px;
-    padding: 3px 8px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+    color: var(--lcars-tan);
+    background: rgba(204, 153, 102, 0.08);
     flex-shrink: 0;
 }
+
+.engine-card-kind-note {
+    /* XACA-1342-016: visible explanation for secret-only engines. */
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: var(--lcars-tan);
+}
+
 
 .engine-card-body {
     padding: 16px 20px;
