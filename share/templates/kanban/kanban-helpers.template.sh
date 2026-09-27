@@ -10237,6 +10237,276 @@ _kb_require_points() {
     return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-1083 (tap port): Board-settings start gates — require Epic / require Release
+# ─────────────────────────────────────────────────────────────────────────────
+# Ported verbatim from canonical kanban-helpers.sh (XACA-1083-002/003). Same
+# shape as _kb_require_points (XACA-0822-008 in this file / XACA-0624
+# canonical) — same signature, same message style, same exit convention
+# (0 = allowed to start, 1 = refused + box printed). Wired into kb-pick,
+# kb-run and _kb_reopen_item, immediately after _kb_require_points at each
+# (points -> epic -> release order). NOTE: canonical also gates kb-work; this
+# template's kb-work does not call _kb_require_points at all (pre-existing
+# tap gap, not introduced here — see the XACA-1083 tap-port retro), so the
+# epic/release gates are intentionally NOT added to kb-work either, to keep
+# all three start-gates co-located at identical call sites. `kb-backlog sub
+# start` and `kb-backlog add` are deliberately NOT gated — see
+# docs/BOARD_SETTINGS.md § "Where it is enforced".
+#
+# Config source: kanban-hooks/board_settings.json (committed) or the runtime
+# overlay at ~/.aiteamforge/board_settings.json, resolved via the CLI wrapper
+# kanban-hooks/board_settings.py (XACA-1083-001). Doc: docs/BOARD_SETTINGS.md.
+#
+# FAIL-CLOSED CONTRACT: python3 missing, board_settings.py missing, a non-zero
+# exit, empty/unparseable `get` output, or a boolean value that isn't the
+# literal string "false" -> the gate is REQUIRED. A missing/malformed
+# grandfatherCutoff, or a missing/unparseable item creation timestamp -> the
+# item is NOT grandfathered (gate applies). Both directions mirror
+# aiteamforge_paths.py's is_epic_required_for_team() / is_item_grandfathered()
+# fail-closed contract — see docs/BOARD_SETTINGS.md § Fail-Closed Contract.
+
+# _kb_board_settings_script
+# Resolves the absolute path to kanban-hooks/board_settings.py, self-located
+# relative to THIS FILE (kanban-helpers.sh) — NOT via $AITEAMFORGE_DIR — so a
+# worktree's own copy of board_settings.py is used instead of the main
+# checkout's. BASH_SOURCE[0] is empty under zsh when a file is sourced;
+# ${(%):-%x} is zsh's equivalent self-location primitive. Under bash the
+# ${(%):-%x} alternative is never evaluated (BASH_SOURCE[0] short-circuits
+# it), so this is syntactically safe under both shells including bash 3.2.
+# (memory: feedback_bash_source_empty_under_zsh)
+#
+# Prints the resolved path and returns 0, or returns 1 (nothing printed) if
+# the containing directory cannot be resolved.
+_kb_board_settings_script() {
+    local _self _dir
+    _self="${BASH_SOURCE[0]:-${(%):-%x}}"
+    [[ -z "$_self" ]] && return 1
+    _dir="$(cd "$(dirname "$_self")" 2>/dev/null && pwd)"
+    [[ -z "$_dir" ]] && return 1
+    printf '%s\n' "${_dir}/kanban-hooks/board_settings.py"
+    return 0
+}
+
+# _kb_board_settings_fetch <team>
+# ONE python invocation per call — fetches ALL board-settings fields for
+# <team> at once (not one call per field), per the perf note in
+# XACA-1083-002's task brief: this runs on every kb-pick/kb-run/kb-work.
+# Echoes the raw `key=value` block from `board_settings.py get <team>` on
+# success. On ANY failure mode (team empty, python3 missing, script missing,
+# non-zero exit, empty output, or output missing either required boolean
+# key) echoes a synthetic fail-closed block instead: both booleans "true",
+# empty grandfatherCutoff (-> no grandfathering), creationTimestampField
+# defaulted to "addedAt". Always returns 0 — callers parse the echoed block,
+# never the return code.
+_kb_board_settings_fetch() {
+    local team="${1-}"
+    local fail_closed
+    fail_closed=$(printf '%s\n' \
+        "team=${team}" \
+        "requireEpicOnStart=true" \
+        "requireReleaseOnStart=true" \
+        "grandfatherCutoff=" \
+        "creationTimestampField=addedAt")
+
+    if [[ -z "$team" ]]; then
+        printf '%s\n' "$fail_closed"
+        return 0
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf '%s\n' "$fail_closed"
+        return 0
+    fi
+
+    local script
+    script=$(_kb_board_settings_script 2>/dev/null)
+    if [[ -z "$script" ]] || [[ ! -f "$script" ]]; then
+        printf '%s\n' "$fail_closed"
+        return 0
+    fi
+
+    local out rc
+    out=$(python3 "$script" get "$team" 2>/dev/null)
+    rc=$?
+
+    if [[ $rc -ne 0 ]] || [[ -z "$out" ]]; then
+        printf '%s\n' "$fail_closed"
+        return 0
+    fi
+
+    # Unparseable-output guard: both required boolean keys must be present.
+    if ! printf '%s\n' "$out" | grep -q '^requireEpicOnStart=' || \
+       ! printf '%s\n' "$out" | grep -q '^requireReleaseOnStart='; then
+        printf '%s\n' "$fail_closed"
+        return 0
+    fi
+
+    printf '%s\n' "$out"
+    return 0
+}
+
+# _kb_bs_field <settings_blob> <key>
+# Extracts the value for <key> from a `key=value`-per-line blob (as produced
+# by _kb_board_settings_fetch). Empty output if the key is absent.
+_kb_bs_field() {
+    local blob="${1-}" key="${2-}"
+    printf '%s\n' "$blob" | grep "^${key}=" | head -1 | cut -d= -f2-
+}
+
+# _kb_board_settings_is_grandfathered <cutoff> <created_at>
+# Returns 0 (grandfathered/exempt) ONLY when both <cutoff> and <created_at>
+# parse as ISO-8601 timestamps AND <created_at> is STRICTLY BEFORE <cutoff>.
+# Returns 1 (not exempt) on empty/missing input, unparseable input, or
+# created_at >= cutoff (equal is NOT exempt — mirrors
+# aiteamforge_paths.py's is_item_grandfathered()). Never lets a jq parse
+# failure propagate as "exempt" (try/catch defaults to false).
+#
+# NOTE: uses jq's fromdateiso8601, which requires a bare "...Z" timestamp —
+# fractional seconds are stripped and a missing "Z" is appended (covers the
+# naive-assumed-UTC case), but a non-Z UTC OFFSET form (e.g. "+00:00") is
+# not normalized the way aiteamforge_paths.py's Python parser normalizes it.
+# This is a deliberately conservative simplification: today's shipped
+# grandfatherCutoff is always "Z"-suffixed (board_settings.json), and an
+# offset form that fails to parse here falls to "not exempt" — the same
+# fail-closed direction the contract already requires, never the reverse.
+_kb_board_settings_is_grandfathered() {
+    local cutoff="${1-}" created_at="${2-}"
+    [[ -z "$cutoff" ]] && return 1
+    [[ -z "$created_at" ]] && return 1
+
+    local result
+    result=$(jq -n -r \
+        --arg addedAt "$created_at" \
+        --arg cutoff "$cutoff" \
+        '
+        def norm: (sub("\\.[0-9]+Z?$"; "Z")) | if test("Z$") then . else . + "Z" end;
+        try ( ($addedAt|norm|fromdateiso8601) < ($cutoff|norm|fromdateiso8601) ) catch false
+        ' 2>/dev/null)
+
+    [[ "$result" == "true" ]]
+}
+
+# _kb_require_epic <board_file> <index> <item_id>
+# INVARIANT: when a team's requireEpicOnStart is on, no top-level item may
+# start (status -> "in_progress") without a valid (non-dangling) epicId,
+# unless the item is grandfathered. Enforced at start-time, mirroring
+# _kb_require_points (XACA-0624). Wired into kb-pick/kb-run/kb-work/
+# _kb_reopen_item by XACA-1083-003, immediately after _kb_require_points.
+#
+# Returns 0 if: the team's requireEpicOnStart is off (literal "false"), OR
+#   the item is grandfathered (see _kb_board_settings_is_grandfathered), OR
+#   the item's .epicId is non-empty AND resolves to an entry in the board's
+#   .epics[] (a dangling epicId does NOT satisfy the gate).
+# Prints the canonical error box and returns 1 otherwise.
+_kb_require_epic() {
+    local board_file="${1-}" index="${2-}" item_id="${3-}"
+
+    local team
+    team=$(_kb_jq_read "$board_file" '.team // empty' -r 2>/dev/null)
+
+    local settings require_epic
+    settings=$(_kb_board_settings_fetch "$team")
+    require_epic=$(_kb_bs_field "$settings" "requireEpicOnStart")
+
+    # Setting OFF (literal "false") -> pass immediately. Anything else
+    # (including "true", empty, or garbled) is REQUIRED.
+    if [[ "$require_epic" == "false" ]]; then
+        return 0
+    fi
+
+    local cutoff field created_at
+    cutoff=$(_kb_bs_field "$settings" "grandfatherCutoff")
+    field=$(_kb_bs_field "$settings" "creationTimestampField")
+    [[ -z "$field" ]] && field="addedAt"
+    created_at=$(_kb_jq_read "$board_file" '.backlog[$idx][$f] // empty' -r \
+        --argjson idx "$index" --arg f "$field" 2>/dev/null)
+
+    if _kb_board_settings_is_grandfathered "$cutoff" "$created_at"; then
+        return 0
+    fi
+
+    local epic_id epic_exists
+    epic_id=$(_kb_jq_read "$board_file" '.backlog[$idx].epicId // empty' -r \
+        --argjson idx "$index" 2>/dev/null)
+    if [[ -n "$epic_id" ]]; then
+        epic_exists=$(_kb_jq_read "$board_file" \
+            '([.epics[]? | select(.id == $eid)] | length) > 0' -r \
+            --arg eid "$epic_id" 2>/dev/null)
+        if [[ "$epic_exists" == "true" ]]; then
+            return 0
+        fi
+    fi
+
+    echo "─────────────────────────────────────"
+    echo "⛔ Cannot start [$item_id]: no Epic assigned."
+    echo "   This team requires every item to belong to an Epic before work begins."
+    echo "   Assign one, then retry:"
+    echo "     kb-epic add-item <EPIC-ID> $item_id"
+    echo "─────────────────────────────────────"
+    return 1
+}
+
+# _kb_require_release <board_file> <index> <item_id>
+# INVARIANT: when a team's requireReleaseOnStart is on, no top-level item may
+# start (status -> "in_progress") without a valid (non-dangling) release
+# assignment, unless the item is grandfathered. Enforced at start-time,
+# mirroring _kb_require_points (XACA-0624). Wired into kb-pick/kb-run/kb-work/
+# _kb_reopen_item by XACA-1083-003, immediately after _kb_require_epic.
+#
+# Returns 0 if: the team's requireReleaseOnStart is off (literal "false"), OR
+#   the item is grandfathered (see _kb_board_settings_is_grandfathered), OR
+#   the item's .releaseAssignment.releaseId is non-empty AND resolves to an
+#   entry in the board's .releases[] (a dangling releaseId does NOT satisfy
+#   the gate).
+# Prints the canonical error box and returns 1 otherwise.
+_kb_require_release() {
+    local board_file="${1-}" index="${2-}" item_id="${3-}"
+
+    local team
+    team=$(_kb_jq_read "$board_file" '.team // empty' -r 2>/dev/null)
+
+    local settings require_release
+    settings=$(_kb_board_settings_fetch "$team")
+    require_release=$(_kb_bs_field "$settings" "requireReleaseOnStart")
+
+    # Setting OFF (literal "false") -> pass immediately. Anything else
+    # (including "true", empty, or garbled) is REQUIRED.
+    if [[ "$require_release" == "false" ]]; then
+        return 0
+    fi
+
+    local cutoff field created_at
+    cutoff=$(_kb_bs_field "$settings" "grandfatherCutoff")
+    field=$(_kb_bs_field "$settings" "creationTimestampField")
+    [[ -z "$field" ]] && field="addedAt"
+    created_at=$(_kb_jq_read "$board_file" '.backlog[$idx][$f] // empty' -r \
+        --argjson idx "$index" --arg f "$field" 2>/dev/null)
+
+    if _kb_board_settings_is_grandfathered "$cutoff" "$created_at"; then
+        return 0
+    fi
+
+    local release_id release_exists
+    release_id=$(_kb_jq_read "$board_file" '.backlog[$idx].releaseAssignment.releaseId // empty' -r \
+        --argjson idx "$index" 2>/dev/null)
+    if [[ -n "$release_id" ]]; then
+        release_exists=$(_kb_jq_read "$board_file" \
+            '([.releases[]? | select(.id == $rid)] | length) > 0' -r \
+            --arg rid "$release_id" 2>/dev/null)
+        if [[ "$release_exists" == "true" ]]; then
+            return 0
+        fi
+    fi
+
+    echo "─────────────────────────────────────"
+    echo "⛔ Cannot start [$item_id]: no Release assigned."
+    echo "   This team requires every item to belong to a Release before work begins."
+    echo "   Assign one, then retry:"
+    echo "     kb-release assign $item_id <RELEASE-ID> [platform]"
+    echo "─────────────────────────────────────"
+    return 1
+}
+
 # Pick a task from backlog and mark it as active (simple assignment)
 kb-pick() {
     _kb_ensure_jq || return 1
@@ -10302,6 +10572,13 @@ kb-pick() {
     # Enforced at start-time via _kb_require_points (XACA-0822-008, ported from
     # canonical XACA-0624).
     _kb_require_points "$board_file" "$index" "$item_id" || return 1
+
+    # INVARIANT: when the team requires it, no top-level item may start without
+    # a valid Epic / Release assignment, unless grandfathered. Enforced at
+    # start-time via _kb_require_epic / _kb_require_release (XACA-1083 tap
+    # port), same shape/convention as _kb_require_points immediately above.
+    _kb_require_epic "$board_file" "$index" "$item_id" || return 1
+    _kb_require_release "$board_file" "$index" "$item_id" || return 1
 
     # Mark item as actively being worked on
     local timestamp
@@ -10667,6 +10944,13 @@ kb-run() {
     # Precondition check — does NOT write status; kb-pick is the write site.
     # (XACA-0822-008, ported from canonical XACA-0624)
     _kb_require_points "$board_file" "$index" "$item_id" || return 1
+
+    # INVARIANT: when the team requires it, no top-level item may start without
+    # a valid Epic / Release assignment, unless grandfathered. Precondition
+    # check — does NOT write status. (XACA-1083 tap port, same shape as
+    # _kb_require_points)
+    _kb_require_epic "$board_file" "$index" "$item_id" || return 1
+    _kb_require_release "$board_file" "$index" "$item_id" || return 1
 
     # Check if we're in the main worktree - if so, create/use a worktree for this item
     if _kb_is_main_worktree; then
@@ -11039,6 +11323,14 @@ kb-work() {
 
     echo ""
 
+    # INVARIANT: when the team requires it, no top-level item may start without
+    # a valid Epic / Release assignment, unless grandfathered. Precondition
+    # check — does NOT write status. (XACA-1083, same shape as _kb_require_points)
+    # NOTE (tap port): canonical kb-work also calls _kb_require_points here; the
+    # template never ported that XACA-0624 call, and XACA-1083 does not add it.
+    _kb_require_epic "$board_file" "$index" "$item_id" || return 1
+    _kb_require_release "$board_file" "$index" "$item_id" || return 1
+
     # Build the prompt (same as kb-run)
     # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
     # escapes in ANY text it's given — including user-authored board data
@@ -11236,6 +11528,20 @@ _kb_reopen_item() {
     # Re-gate on reopen — legacy items completed before XACA-0624 will be unestimated;
     # this is the right moment to capture an estimate. Items already estimated sail through.
     if ! _kb_require_points "$board_file" "$index" "$item_id"; then
+        return 1
+    fi
+
+    # INVARIANT: when the team requires it, no top-level item may (re)start
+    # without a valid Epic / Release assignment, unless grandfathered.
+    # Re-gate on reopen, mirroring the points re-gate immediately above
+    # (XACA-1083 tap port): a completed legacy item pre-dating this policy is
+    # exempt via grandfatherCutoff, exactly like the points gate; a
+    # non-grandfathered item reopened for debugging still needs a real
+    # Epic/Release just as it would to start fresh.
+    if ! _kb_require_epic "$board_file" "$index" "$item_id"; then
+        return 1
+    fi
+    if ! _kb_require_release "$board_file" "$index" "$item_id"; then
         return 1
     fi
 

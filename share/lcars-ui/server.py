@@ -106,6 +106,43 @@ except ImportError as e:
     # other name in this try/except's degrade-gracefully convention.
     _MIN_PLAUSIBLE_REGISTRY_BYTES = 200
 
+# Import per-team board start-gate settings (XACA-1083-001/004) — separate
+# try/except from the block above so a board_settings-specific import
+# failure (e.g. a bad kanban-hooks/board_settings.json syntax error breaking
+# nothing at import time, since load is lazy) can't take down the rest of
+# aiteamforge_paths's exports, and vice versa. Imported directly from
+# aiteamforge_paths (not the board_settings.py CLI shim) because the GET
+# endpoint below needs get_board_settings_team_config_raw/
+# get_board_settings_config_path, which board_settings.py does not re-export.
+try:
+    from aiteamforge_paths import (  # noqa: PLC0415
+        is_epic_required_for_team as _bs_is_epic_required_for_team,
+        is_release_required_for_team as _bs_is_release_required_for_team,
+        get_board_settings_grandfather_cutoff as _bs_get_grandfather_cutoff,
+        get_board_settings_team_config_raw as _bs_get_team_config_raw,
+        get_board_settings_config_path as _bs_get_config_path,
+        set_board_settings_for_team as _bs_set_for_team,
+    )
+    _BOARD_SETTINGS_AVAILABLE = True
+except ImportError as e:
+    _BOARD_SETTINGS_AVAILABLE = False
+    print(f"[LCARS] Warning: board_settings accessors not available, board-settings API fails closed: {e}")
+    # FAIL-CLOSED fallbacks (XACA-1083 contract): an unavailable module must
+    # never present as "nothing required" — both gates report required, and
+    # the setter never claims a successful write it didn't perform.
+    def _bs_is_epic_required_for_team(_team):  # type: ignore[no-redef]
+        return True
+    def _bs_is_release_required_for_team(_team):  # type: ignore[no-redef]
+        return True
+    def _bs_get_grandfather_cutoff():  # type: ignore[no-redef]
+        return None
+    def _bs_get_team_config_raw(_team):  # type: ignore[no-redef]
+        return {}
+    def _bs_get_config_path():  # type: ignore[no-redef]
+        return None
+    def _bs_set_for_team(_team, **_kwargs):  # type: ignore[no-redef]
+        return False
+
 # Import kanban activity logging from kanban-hooks
 try:
     from kanban_utils import log_activity, read_activity_log, get_lcars_tmp_dir
@@ -4961,6 +4998,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-0292: Team config (CR/CAB support flag)
         elif path == '/api/team-config':
             self.handle_update_team_config()
+        # XACA-1083-004: Board settings (requireEpicOnStart / requireReleaseOnStart)
+        elif path == '/api/board-settings':
+            self.handle_update_board_settings()
         # XACA-0281 Phase A.3: Team account config endpoints
         elif path == '/api/team-config/account/save':
             self.handle_team_account_save()
@@ -14860,6 +14900,199 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] ERROR updating team config: {e}")
             self._send_json_response({'success': False, 'error': str(e)}, status=500)
 
+    # =========================================================================
+    # BOARD SETTINGS API — XACA-1083-004 (requireEpicOnStart / requireReleaseOnStart)
+    # =========================================================================
+
+    def _board_settings_load_error(self) -> str | None:
+        """Return a human-readable warning string when board_settings.json is
+        missing/unreadable/malformed at its CURRENT resolved path, or None
+        when it loaded cleanly (or the accessor module itself is unavailable
+        — that case is reported separately as a distinct string so the UI
+        can tell "no config file yet" apart from "the whole feature is
+        offline").
+
+        This mirrors (does not reuse — see the module-level import comment)
+        the same three checks aiteamforge_paths.load_board_settings() makes
+        internally: it never raises there either, it just doesn't hand the
+        caller a machine-readable signal for *why* every team fell back to
+        the fail-closed default. Read-only; never writes.
+        """
+        if not _BOARD_SETTINGS_AVAILABLE:
+            return 'board_settings module unavailable — every team fails closed to true/true'
+        config_path = _bs_get_config_path()
+        if config_path is None:
+            return 'board_settings module unavailable — every team fails closed to true/true'
+        if not config_path.exists():
+            return f'board_settings.json not found at {config_path} — fails closed to true/true'
+        try:
+            raw = config_path.read_text(encoding='utf-8')
+            parsed = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as exc:
+            return f'board_settings.json at {config_path} could not be parsed: {exc} — fails closed to true/true'
+        if not isinstance(parsed, dict):
+            return f'board_settings.json at {config_path} root must be an object — fails closed to true/true'
+        return None
+
+    def _board_settings_response_fields(self, team: str) -> dict:
+        """Build the shared response-field dict for both GET and the POST
+        re-read (XACA-1083-004) — same field names both places so subitem
+        005's UI code has exactly one shape to read regardless of verb.
+
+        `...Explicit` is True only when the team's block in
+        board_settings.json carries that key as a literal JSON boolean —
+        i.e. the resolved value came from a real setting, not the
+        fail-closed default. Distinguishing "true because someone set it"
+        from "true because the config/team/key was missing or malformed" is
+        the whole point of exposing this (see the parent ticket brief).
+        """
+        raw_block = _bs_get_team_config_raw(team)
+        epic_explicit = isinstance(raw_block.get('requireEpicOnStart'), bool)
+        release_explicit = isinstance(raw_block.get('requireReleaseOnStart'), bool)
+        return {
+            'team': team,
+            'requireEpicOnStart': _bs_is_epic_required_for_team(team),
+            'requireReleaseOnStart': _bs_is_release_required_for_team(team),
+            'requireEpicOnStartExplicit': epic_explicit,
+            'requireReleaseOnStartExplicit': release_explicit,
+            'grandfatherCutoff': _bs_get_grandfather_cutoff(),
+            'loadError': self._board_settings_load_error(),
+        }
+
+    def serve_board_settings(self, query_string: str):
+        """GET /api/board-settings?team=<team> — per-team requireEpicOnStart /
+        requireReleaseOnStart, per XACA-1083.
+
+        Response: { team, requireEpicOnStart, requireReleaseOnStart,
+        requireEpicOnStartExplicit, requireReleaseOnStartExplicit,
+        grandfatherCutoff, loadError }. requireEpicOnStart/
+        requireReleaseOnStart ALWAYS resolve (fail-closed to true/true on any
+        read failure — see aiteamforge_paths.py's contract) so the UI can
+        treat this response as authoritative without a second fallback path
+        of its own; loadError is non-null only as a diagnostic, never as a
+        signal to ignore the booleans.
+
+        Mirrors serve_team_config()'s team validation (XACA-0292-011): an
+        unknown team is a 400, not a fail-closed true/true for a team that
+        was never real to begin with (that would mask a typo as data).
+        """
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            team = params.get('team', [None])[0] or LCARS_TEAM
+
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': f'Unknown team: {team}'}, status=400)
+                return
+
+            self._send_json_response(self._board_settings_response_fields(team))
+        except Exception as e:
+            print(f"[LCARS] ERROR serving board settings: {e}")
+            self._send_json_response({'error': str(e)}, status=500)
+
+    # Allowed top-level keys in the POST /api/board-settings payload
+    _BOARD_SETTINGS_ALLOWED_KEYS = {'team', 'requireEpicOnStart', 'requireReleaseOnStart'}
+
+    def handle_update_board_settings(self):
+        """POST /api/board-settings — toggle requireEpicOnStart and/or
+        requireReleaseOnStart for one team, per XACA-1083.
+
+        Accepted body: { team: str, requireEpicOnStart?: bool, requireReleaseOnStart?: bool }
+        At least one of the two boolean keys must be present. Response on
+        success is { success: true, ...same fields as GET... } — always a
+        FRESH re-read via set_board_settings_for_team's own cache-bust, never
+        an echo of the request body, so a write that silently coerced/
+        rejected something can never be misreported back as "saved".
+
+        Validation (XACA-1083-004 task brief — deliberately stricter than
+        Python truthiness):
+          - team must be present and a known team (TEAM_KANBAN_DIRS) -> 400
+          - unknown top-level keys -> 400
+          - neither boolean key present -> 400
+          - a present boolean key whose value is not a literal JSON bool
+            (e.g. the string "true", 1, null) -> 400, NOT coerced
+          - a write failure (aiteamforge_paths.set_board_settings_for_team
+            returns False) -> 500, body unchanged on disk; NEVER 200
+        """
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = json.loads(self.rfile.read(content_length)) if content_length else {}
+
+            if not isinstance(post_data, dict):
+                self._send_json_response({'success': False, 'error': 'Request body must be a JSON object'}, status=400)
+                return
+
+            unknown_top = set(post_data.keys()) - self._BOARD_SETTINGS_ALLOWED_KEYS
+            if unknown_top:
+                bad = ', '.join(sorted(unknown_top))
+                self._send_json_response({'success': False, 'error': f'Unknown key(s): {bad}'}, status=400)
+                return
+
+            team = post_data.get('team') or LCARS_TEAM
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'success': False, 'error': f'Unknown team: {team}'}, status=400)
+                return
+
+            has_epic = 'requireEpicOnStart' in post_data
+            has_release = 'requireReleaseOnStart' in post_data
+            if not has_epic and not has_release:
+                self._send_json_response(
+                    {'success': False, 'error': 'Provide at least one of requireEpicOnStart / requireReleaseOnStart'},
+                    status=400,
+                )
+                return
+
+            require_epic = None
+            if has_epic:
+                v = post_data['requireEpicOnStart']
+                # isinstance(v, bool), not truthiness: rejects "true"/1/0/null
+                # deliberately, matching the loader's own fail-closed
+                # isinstance(x, bool) contract (bool is an int subclass in
+                # Python, so an int check alone would accept 0/1).
+                if not isinstance(v, bool):
+                    self._send_json_response(
+                        {'success': False, 'error': f'requireEpicOnStart must be a JSON boolean, got {v!r}'},
+                        status=400,
+                    )
+                    return
+                require_epic = v
+
+            require_release = None
+            if has_release:
+                v = post_data['requireReleaseOnStart']
+                if not isinstance(v, bool):
+                    self._send_json_response(
+                        {'success': False, 'error': f'requireReleaseOnStart must be a JSON boolean, got {v!r}'},
+                        status=400,
+                    )
+                    return
+                require_release = v
+
+            if not _BOARD_SETTINGS_AVAILABLE:
+                self._send_json_response(
+                    {'success': False, 'error': 'board_settings module unavailable — write refused'},
+                    status=500,
+                )
+                return
+
+            ok = _bs_set_for_team(
+                team,
+                require_epic_on_start=require_epic,
+                require_release_on_start=require_release,
+            )
+            if not ok:
+                self._send_json_response(
+                    {'success': False, 'error': f'Failed to write board settings for team {team!r} — see server log; nothing was changed on disk'},
+                    status=500,
+                )
+                return
+
+            response_payload = {'success': True}
+            response_payload.update(self._board_settings_response_fields(team))
+            self._send_json_response(response_payload)
+        except Exception as e:
+            print(f"[LCARS] ERROR updating board settings: {e}")
+            self._send_json_response({'success': False, 'error': str(e)}, status=500)
+
     def _write_team_paths_registry(self, team_paths_file: Path, data: dict) -> None:
         """Atomically write *data* as the team-paths.json registry at *team_paths_file*.
 
@@ -18003,6 +18236,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-0292: Team config (CR/CAB support flag)
         elif path == '/api/team-config':
             self.serve_team_config(parsed.query)
+        # XACA-1083-004: Board settings (requireEpicOnStart / requireReleaseOnStart)
+        elif path == '/api/board-settings':
+            self.serve_board_settings(parsed.query)
         # XACA-0281 Phase A.3: Team account config endpoints
         elif path == '/api/team-config/account/current':
             self.serve_team_account_current(parsed.query)

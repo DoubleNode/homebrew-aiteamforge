@@ -2697,5 +2697,465 @@ class TestHandleUpdateReleaseStripLabelPrefix(unittest.TestCase):
         self.assertEqual(call_args[0][1], "Sprint 6")
 
 
+# ---------------------------------------------------------------------------
+# Tests: Board Settings API (XACA-1083-004) — GET/POST /api/board-settings
+# ---------------------------------------------------------------------------
+
+class _BoardSettingsEnv:
+    """Point AITEAMFORGE_BOARD_SETTINGS_CONFIG at *path* (or unset it) for the
+    duration of a `with` block, busting aiteamforge_paths' module-level
+    board-settings cache on both entry and exit so no test leaks state into
+    the next one. Mirrors kanban-hooks/test_board_settings_1083.py's
+    _EnvOverride (same env var, same cache-bust-on-both-sides shape); kept
+    as a separate small copy here rather than imported across the
+    kanban-hooks/lcars-ui boundary.
+
+    Tests using this NEVER point it at ~/.aiteamforge/board_settings.json or
+    a real board — always a tempfile.TemporaryDirectory() path or the
+    read-only committed kanban-hooks/board_settings.json seed.
+    """
+
+    def __init__(self, path=None):
+        self.path = path
+        self._old = None
+
+    def __enter__(self):
+        from aiteamforge_paths import bust_board_settings_cache
+        self._old = os.environ.get("AITEAMFORGE_BOARD_SETTINGS_CONFIG")
+        if self.path is None:
+            os.environ.pop("AITEAMFORGE_BOARD_SETTINGS_CONFIG", None)
+        else:
+            os.environ["AITEAMFORGE_BOARD_SETTINGS_CONFIG"] = str(self.path)
+        bust_board_settings_cache()
+        return self
+
+    def __exit__(self, *exc):
+        from aiteamforge_paths import bust_board_settings_cache
+        if self._old is not None:
+            os.environ["AITEAMFORGE_BOARD_SETTINGS_CONFIG"] = self._old
+        else:
+            os.environ.pop("AITEAMFORGE_BOARD_SETTINGS_CONFIG", None)
+        bust_board_settings_cache()
+
+
+def _board_settings_get(team="academy", config_path=None):
+    """Run GET /api/board-settings?team=<team> under an isolated config
+    path. Returns (status_code, response_dict)."""
+    handler, buf = _make_handler(path=f"/api/board-settings?team={team}")
+    with _BoardSettingsEnv(config_path):
+        handler.serve_board_settings(f"team={team}")
+    return handler._response_code, _response_json(buf)
+
+
+def _board_settings_post(body, config_path=None):
+    """Run POST /api/board-settings with *body* under an isolated config
+    path. Returns (status_code, response_dict)."""
+    body_bytes = json.dumps(body).encode()
+    handler, buf = _make_handler(
+        path="/api/board-settings",
+        method="POST",
+        body=body_bytes,
+        headers={"Content-Length": str(len(body_bytes))},
+    )
+    with _BoardSettingsEnv(config_path):
+        handler.handle_update_board_settings()
+    return handler._response_code, _response_json(buf)
+
+
+class TestServeBoardSettingsGet(unittest.TestCase):
+    """GET /api/board-settings — XACA-1083-004."""
+
+    def test_get_no_config_file_fails_closed_true_true(self):
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "does-not-exist" / "board_settings.json"
+            code, data = _board_settings_get(team="academy", config_path=missing)
+        self.assertEqual(code, 200)
+        self.assertEqual(data["team"], "academy")
+        self.assertIs(data["requireEpicOnStart"], True)
+        self.assertIs(data["requireReleaseOnStart"], True)
+        self.assertIs(data["requireEpicOnStartExplicit"], False)
+        self.assertIs(data["requireReleaseOnStartExplicit"], False)
+        self.assertIsNone(data["grandfatherCutoff"])
+        self.assertIsNotNone(data["loadError"])
+        self.assertIn("not found", data["loadError"])
+
+    def test_get_malformed_json_fails_closed_true_true_with_load_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "board_settings.json"
+            cfg.write_text("{not valid json", encoding="utf-8")
+            code, data = _board_settings_get(team="academy", config_path=cfg)
+        self.assertEqual(code, 200)
+        self.assertIs(data["requireEpicOnStart"], True)
+        self.assertIs(data["requireReleaseOnStart"], True)
+        self.assertIsNotNone(data["loadError"])
+        self.assertIn("could not be parsed", data["loadError"])
+
+    def test_get_command_seed_false_false(self):
+        """Committed kanban-hooks/board_settings.json ships command false/false
+        (12/12 pre-existing orphans — see docs/BOARD_SETTINGS.md)."""
+        repo_seed = Path(server.__file__).parent.parent / "kanban-hooks" / "board_settings.json"
+        code, data = _board_settings_get(team="command", config_path=repo_seed)
+        self.assertEqual(code, 200)
+        self.assertEqual(data["team"], "command")
+        self.assertIs(data["requireEpicOnStart"], False)
+        self.assertIs(data["requireReleaseOnStart"], False)
+        self.assertIs(data["requireEpicOnStartExplicit"], True)
+        self.assertIs(data["requireReleaseOnStartExplicit"], True)
+        # Relays whatever the committed seed says (the cutoff is set at go-live, not fixed here).
+        self.assertEqual(data["grandfatherCutoff"], json.loads(repo_seed.read_text())["grandfatherCutoff"])
+        self.assertRegex(data["grandfatherCutoff"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertIsNone(data["loadError"])
+
+    def test_get_academy_seed_true_true_explicit(self):
+        repo_seed = Path(server.__file__).parent.parent / "kanban-hooks" / "board_settings.json"
+        code, data = _board_settings_get(team="academy", config_path=repo_seed)
+        self.assertEqual(code, 200)
+        self.assertIs(data["requireEpicOnStart"], True)
+        self.assertIs(data["requireReleaseOnStart"], True)
+        self.assertIs(data["requireEpicOnStartExplicit"], True)
+        self.assertIs(data["requireReleaseOnStartExplicit"], True)
+        self.assertIsNone(data["loadError"])
+
+    def test_get_unknown_team_returns_400(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "board_settings.json"
+            cfg.write_text(json.dumps({"_schemaVersion": 1, "teams": {}}), encoding="utf-8")
+            code, data = _board_settings_get(team="not-a-real-team", config_path=cfg)
+        self.assertEqual(code, 400)
+        self.assertIn("error", data)
+
+
+class TestHandleUpdateBoardSettings(unittest.TestCase):
+    """POST /api/board-settings — XACA-1083-004."""
+
+    def _seed(self, tmpdir):
+        # XACA-1059-006: aiteamforge_paths._atomic_write_json refuses any
+        # board_settings.json write whose serialized payload is below
+        # _MIN_PLAUSIBLE_REGISTRY_BYTES (200 bytes) — a real anti-corruption
+        # floor from a different ticket, not something this endpoint can (or
+        # should) bypass. A minimal single-team fixture trips that floor and
+        # every "successful write" test would spuriously 500, so this seed
+        # mirrors the committed file's shape (multiple teams) to stay a
+        # realistic registry the floor is happy to accept.
+        cfg = Path(tmpdir) / "board_settings.json"
+        cfg.write_text(json.dumps({
+            "_schemaVersion": 1,
+            "grandfatherCutoff": "2026-09-25T00:00:00Z",
+            "creationTimestampField": "addedAt",
+            "teams": {
+                "academy": {"requireEpicOnStart": True, "requireReleaseOnStart": True},
+                "command": {"requireEpicOnStart": False, "requireReleaseOnStart": False},
+                "ios": {"requireEpicOnStart": True, "requireReleaseOnStart": True},
+            },
+        }), encoding="utf-8")
+        return cfg
+
+    def test_post_valid_toggle_round_trips(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._seed(td)
+            code, data = _board_settings_post(
+                {"team": "academy", "requireEpicOnStart": False}, config_path=cfg,
+            )
+            self.assertEqual(code, 200)
+            self.assertTrue(data["success"])
+            self.assertIs(data["requireEpicOnStart"], False)
+            self.assertIs(data["requireReleaseOnStart"], True)  # untouched key preserved
+            on_disk = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertIs(on_disk["teams"]["academy"]["requireEpicOnStart"], False)
+
+    def test_post_string_true_rejected_400_file_unchanged(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._seed(td)
+            before = cfg.read_text(encoding="utf-8")
+            code, data = _board_settings_post(
+                {"team": "academy", "requireEpicOnStart": "true"}, config_path=cfg,
+            )
+            self.assertEqual(code, 400)
+            self.assertIn("error", data)
+            self.assertEqual(cfg.read_text(encoding="utf-8"), before)
+
+    def test_post_integer_one_rejected_400(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._seed(td)
+            code, data = _board_settings_post(
+                {"team": "academy", "requireEpicOnStart": 1}, config_path=cfg,
+            )
+            self.assertEqual(code, 400)
+            self.assertIn("error", data)
+
+    def test_post_null_rejected_400(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._seed(td)
+            code, data = _board_settings_post(
+                {"team": "academy", "requireReleaseOnStart": None}, config_path=cfg,
+            )
+            self.assertEqual(code, 400)
+            self.assertIn("error", data)
+
+    def test_post_unknown_key_rejected_400(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._seed(td)
+            code, data = _board_settings_post(
+                {"team": "academy", "requireEpicOnStart": True, "bogusKey": 1}, config_path=cfg,
+            )
+            self.assertEqual(code, 400)
+            self.assertIn("error", data)
+
+    def test_post_unknown_team_rejected_400(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._seed(td)
+            code, data = _board_settings_post(
+                {"team": "not-a-real-team", "requireEpicOnStart": True}, config_path=cfg,
+            )
+            self.assertEqual(code, 400)
+            self.assertIn("error", data)
+
+    def test_post_neither_key_present_rejected_400(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._seed(td)
+            code, data = _board_settings_post({"team": "academy"}, config_path=cfg)
+            self.assertEqual(code, 400)
+            self.assertIn("error", data)
+
+    def test_post_write_failure_returns_500_file_unchanged(self):
+        if os.name != "posix" or (hasattr(os, "getuid") and os.getuid() == 0):
+            self.skipTest("directory-permission write-failure simulation needs a non-root POSIX user")
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._seed(td)
+            before = cfg.read_text(encoding="utf-8")
+            os.chmod(td, 0o500)  # r-x only: tmp-file creation for the atomic write must fail
+            try:
+                code, data = _board_settings_post(
+                    {"team": "academy", "requireEpicOnStart": False}, config_path=cfg,
+                )
+            finally:
+                os.chmod(td, 0o700)
+            self.assertEqual(code, 500)
+            self.assertIn("error", data)
+            self.assertEqual(cfg.read_text(encoding="utf-8"), before)
+
+    def test_post_response_is_freshly_re_read_not_echoed(self):
+        """Response reflects what set_board_settings_for_team actually wrote
+        (re-read from disk), not a bare echo of the request body."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._seed(td)
+            code, data = _board_settings_post(
+                {"team": "academy", "requireEpicOnStart": False, "requireReleaseOnStart": False},
+                config_path=cfg,
+            )
+            self.assertEqual(code, 200)
+            on_disk = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertEqual(data["requireEpicOnStart"], on_disk["teams"]["academy"]["requireEpicOnStart"])
+            self.assertEqual(data["requireReleaseOnStart"], on_disk["teams"]["academy"]["requireReleaseOnStart"])
+            self.assertIs(data["requireEpicOnStartExplicit"], True)
+            self.assertIs(data["requireReleaseOnStartExplicit"], True)
+
+
+# ---------------------------------------------------------------------------
+# Tests: cross-layer END-TO-END agreement — the LCARS API (in-process) and
+# the shell gate (kanban-helpers.sh, REAL subprocess) must resolve the SAME
+# team's setting from the SAME config file with the SAME key spelling.
+# XACA-1083-007 (Testing & Debugging).
+# ---------------------------------------------------------------------------
+
+class TestBoardSettingsAPIShellAgreement(unittest.TestCase):
+    """Proves the UI/API write path and the shell read path are not two
+    independently-maintained copies of the same idea: a POST via the
+    in-process handler that flips requireEpicOnStart for a team is
+    immediately visible to a REAL `zsh` subprocess sourcing the REAL
+    kanban-helpers.sh and calling the REAL `_kb_require_epic`, against the
+    SAME AITEAMFORGE_BOARD_SETTINGS_CONFIG file — never a mock, never a
+    second fixture file that could silently drift from the first.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import shutil
+        if shutil.which("zsh") is None:
+            raise unittest.SkipTest("zsh not on PATH — cannot drive the real shell gate")
+        cls.repo_root = Path(server.__file__).resolve().parent.parent
+        cls.kanban_helpers = cls.repo_root / "kanban-helpers.sh"
+        if not cls.kanban_helpers.is_file():
+            raise unittest.SkipTest(f"kanban-helpers.sh not found at {cls.kanban_helpers}")
+
+    def _seed(self, tmpdir):
+        cfg = Path(tmpdir) / "board_settings.json"
+        cfg.write_text(json.dumps({
+            "_schemaVersion": 1,
+            "grandfatherCutoff": "2026-09-25T00:00:00Z",
+            "creationTimestampField": "addedAt",
+            "teams": {
+                "academy": {"requireEpicOnStart": True, "requireReleaseOnStart": True},
+            },
+        }), encoding="utf-8")
+        return cfg
+
+    def _shell_require_epic_rc(self, cfg_path, board_path):
+        """Run the REAL kanban-helpers.sh in a REAL zsh subprocess, pointed
+        at *cfg_path* via AITEAMFORGE_BOARD_SETTINGS_CONFIG (the SAME file
+        the in-process API call just wrote to), and return
+        _kb_require_epic's exit code for item index 0 on *board_path*."""
+        import os as _os
+        import subprocess
+        script = (
+            'export KB_TEAM=academy KB_TERMINAL=agent SESSION_TYPE=agent\n'
+            f'source "{self.kanban_helpers}" 2>/dev/null\n'
+            f'_kb_require_epic "{board_path}" 0 "E2E-1" >/dev/null 2>&1\n'
+            'echo $?\n'
+        )
+        env = dict(_os.environ)
+        env["AITEAMFORGE_BOARD_SETTINGS_CONFIG"] = str(cfg_path)
+        result = subprocess.run(
+            ["zsh", "-c", script], capture_output=True, text=True, env=env, timeout=30,
+        )
+        return int(result.stdout.strip().splitlines()[-1])
+
+    def test_post_toggle_off_then_on_agrees_with_shell_gate(self):
+        from aiteamforge_paths import bust_board_settings_cache
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._seed(td)
+            board = Path(td) / "board.json"
+            board.write_text(json.dumps({
+                "team": "academy",
+                "epics": [],
+                "releases": [],
+                "backlog": [{"id": "E2E-1", "title": "end-to-end fixture"}],
+            }))
+
+            # Baseline: seed has requireEpicOnStart=True and the item carries
+            # no epicId -> the shell gate must refuse.
+            self.assertEqual(self._shell_require_epic_rc(cfg, board), 1)
+
+            # Turn the gate OFF via the in-process API handler.
+            with _BoardSettingsEnv(cfg):
+                code, data = _board_settings_post({"team": "academy", "requireEpicOnStart": False}, config_path=cfg)
+            self.assertEqual(code, 200)
+            self.assertIs(data["requireEpicOnStart"], False)
+
+            # The REAL shell subprocess, reading the file the API just wrote,
+            # must now pass — no restart, no cache to bust on the shell side
+            # (each shell invocation is a fresh process).
+            self.assertEqual(
+                self._shell_require_epic_rc(cfg, board), 0,
+                "shell gate did not see the API's write — API and shell disagree on the config file/key",
+            )
+
+            # Turn it back ON via the API.
+            with _BoardSettingsEnv(cfg):
+                code, data = _board_settings_post({"team": "academy", "requireEpicOnStart": True}, config_path=cfg)
+            self.assertEqual(code, 200)
+            self.assertIs(data["requireEpicOnStart"], True)
+
+            # The shell gate re-blocks immediately.
+            self.assertEqual(
+                self._shell_require_epic_rc(cfg, board), 1,
+                "shell gate did not see the API's re-enable — API and shell disagree on the config file/key",
+            )
+            bust_board_settings_cache()
+
+
+# ---------------------------------------------------------------------------
+# Mutation check: the API's isinstance(v, bool) guard (XACA-1083-004) — is
+# test_post_string_true_rejected_400_file_unchanged /
+# test_post_integer_one_rejected_400 actually pinned to that check, or would
+# they pass just as well against a weaker (truthiness) check? XACA-1083-007.
+#
+# MEASURED result of running this mutation (isinstance(v, bool) ->
+# bool(v)) against a COPY of server.py, loaded under a separate module name
+# so the real `server` module used by every other test in this file is
+# never touched: the two callers above do NOT flip to a silent 200 —
+# aiteamforge_paths.set_board_settings_for_team() carries its OWN
+# independent isinstance(x, bool) guard (see aiteamforge_paths.py's
+# set_board_settings_for_team docstring) and refuses the write, so the
+# response degrades from 400 ("requireEpicOnStart must be a JSON boolean")
+# to 500 ("Failed to write board settings ... nothing was changed on
+# disk") instead. The on-disk file is untouched either way (defense in
+# depth held), but `assertEqual(code, 400)` in both of those tests still
+# goes RED under this mutant (500 != 400) — so they DO catch it, just via
+# the status-code assertion rather than by the request silently succeeding.
+# This class re-asserts that measured result directly.
+# ---------------------------------------------------------------------------
+
+class TestBoardSettingsAPIIsinstanceBoolMutation(unittest.TestCase):
+    """Loads a COPY of server.py (never the real, already-imported `server`
+    module) with the two `isinstance(v, bool)` guards in
+    handle_update_board_settings weakened to `bool(v)` (truthiness), and
+    proves the existing non-bool-rejection tests would go RED against it —
+    i.e. those tests are not vacuously green. See the module comment above
+    for the measured degrade-to-500 (not silent-200) result."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server_path = Path(server.__file__).resolve()
+        with open(cls.server_path, "r", encoding="utf-8") as fh:
+            cls._lines = fh.readlines()
+        target = "                if not isinstance(v, bool):\n"
+        cls._mutant_line_nos = [i for i, ln in enumerate(cls._lines) if ln == target]
+        if len(cls._mutant_line_nos) != 2:
+            raise unittest.SkipTest(
+                f"expected exactly 2 'if not isinstance(v, bool):' lines in "
+                f"handle_update_board_settings, found {len(cls._mutant_line_nos)} — "
+                "source drifted, mutation harness needs updating, not silently skipped as a pass"
+            )
+
+    def _load_mutant_module(self, tmpdir):
+        import importlib.util
+        mutated = list(self._lines)
+        for i in self._mutant_line_nos:
+            mutated[i] = mutated[i].replace("isinstance(v, bool)", "bool(v)")
+        mutant_path = Path(tmpdir) / "server_mutant_xaca1083007.py"
+        mutant_path.write_text("".join(mutated), encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("server_mutant_xaca1083007", str(mutant_path))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["server_mutant_xaca1083007"] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def _post_via_mutant(self, module, body, cfg_path):
+        body_bytes = json.dumps(body).encode()
+        handler, buf = _make_handler(
+            path="/api/board-settings", method="POST", body=body_bytes,
+            headers={"Content-Length": str(len(body_bytes))},
+        )
+        # _make_handler builds a real `server` module handler; rebind its
+        # class methods to the mutant module's handler class so this call
+        # runs the MUTANT'S handle_update_board_settings, not the real one.
+        handler.__class__ = module.LCARSHandler
+        with _BoardSettingsEnv(cfg_path):
+            handler.handle_update_board_settings()
+        return handler._response_code, _response_json(buf)
+
+    def _seed(self, tmpdir):
+        cfg = Path(tmpdir) / "board_settings.json"
+        cfg.write_text(json.dumps({
+            "_schemaVersion": 1,
+            "grandfatherCutoff": "2026-09-25T00:00:00Z",
+            "creationTimestampField": "addedAt",
+            "teams": {"academy": {"requireEpicOnStart": True, "requireReleaseOnStart": True}},
+        }), encoding="utf-8")
+        return cfg
+
+    def test_mutant_degrades_string_true_from_400_to_500_not_silent_200(self):
+        with tempfile.TemporaryDirectory() as td:
+            module = self._load_mutant_module(td)
+            cfg = self._seed(td)
+            before = cfg.read_text(encoding="utf-8")
+            code, data = self._post_via_mutant(module, {"team": "academy", "requireEpicOnStart": "true"}, cfg)
+            # The REAL test (test_post_string_true_rejected_400_file_unchanged)
+            # asserts code == 400. Under this mutant it is 500, so that
+            # assertion goes RED -- the mutant is caught, not vacuously passed.
+            self.assertNotEqual(code, 400, "mutant unexpectedly still returns 400 -- mutation had no effect, cannot prove non-vacuity")
+            self.assertEqual(code, 500, "mutant did not silently accept (200) either -- aiteamforge_paths' own isinstance guard is a second, independent line of defense")
+            self.assertEqual(cfg.read_text(encoding="utf-8"), before, "on-disk file must stay unchanged even under the mutant (defense in depth)")
+
+    def test_mutant_degrades_integer_one_from_400_to_500_not_silent_200(self):
+        with tempfile.TemporaryDirectory() as td:
+            module = self._load_mutant_module(td)
+            cfg = self._seed(td)
+            code, data = self._post_via_mutant(module, {"team": "academy", "requireEpicOnStart": 1}, cfg)
+            self.assertNotEqual(code, 400, "mutant unexpectedly still returns 400 -- mutation had no effect, cannot prove non-vacuity")
+            self.assertEqual(code, 500)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -15949,6 +15949,13 @@ body {
     flex-shrink: 0;
 }
 
+/* XACA-1083-005: fail-closed board-settings checkboxes render checked+disabled
+   on any load error — dim them so "disabled" reads as a state, not a bug. */
+.team-config-checkbox:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
 .team-config-status {
     font-size: 11px;
     letter-spacing: 0.5px;
@@ -16046,6 +16053,30 @@ body {
     padding: 1px 5px;
     border-radius: 2px;
     vertical-align: middle;
+}
+
+/* XACA-1083-005: "(default)" badge — a value that resolved to the fail-closed
+   default rather than an explicit per-team setting. Deliberately calmer
+   (blue, not amber) than .team-config-tbd-badge: this is informational, not
+   a "needs configuration" warning. */
+.team-config-default-badge {
+    display: inline-block;
+    margin-left: 8px;
+    font-size: 9px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    color: var(--lcars-blue, #99ccff);
+    background: rgba(102, 204, 255, 0.12);
+    border: 1px solid rgba(102, 204, 255, 0.4);
+    padding: 1px 5px;
+    border-radius: 2px;
+    vertical-align: middle;
+    text-transform: none;
+}
+
+.board-settings-error-text {
+    color: var(--lcars-red, #cc6666);
+    font-weight: bold;
 }
 
 .team-config-row-save {

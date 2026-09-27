@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1083** — per-team **Require Epics** / **Require Releases** start gates, default ON. `kb-pick`, `kb-run`,
+  `kb-work` and reopen refuse to start an item that has no Epic or Release resolving on the board, unless the team turned
+  the setting off (Command ships OFF) or the item's `addedAt` is before the shipped `grandfatherCutoff`, so existing
+  items are exempt. Settings live in the new `kanban-hooks/board_settings.json`, can be overridden in
+  `~/.aiteamforge/board_settings.json`, and are toggled from LCARS SETTINGS → TEAM CONFIG (`GET`/`POST /api/board-settings`).
+  An unreadable or malformed setting counts as **required**, never "allow". The gates are ported into the kanban helpers
+  template. The template's `kb-work` still has no effort-points gate (a pre-existing XACA-0624 gap), and this change does not add one.
 - **XACA-1258** — `kb-spacedock` gains the `vpn-dns-conflict` check: it reports `[fail]` when a
   third-party VPN utun owns the default route while Tailscale MagicDNS (100.100.100.100) is still
   ordered ahead of the VPN's resolver, which silently breaks all name resolution (raw IPs keep

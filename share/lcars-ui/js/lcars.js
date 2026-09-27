@@ -84,6 +84,7 @@ const TEAM_SCOPED_PREFIXES = [
     '/api/release-config',
     '/api/calendar/items',
     '/api/daily-overview',   // XACA-0334: Daily Overview aggregator
+    '/api/board-settings',   // XACA-1083-005: per-team requireEpicOnStart/requireReleaseOnStart
 ];
 
 function apiUrl(path, extraParams) {
@@ -10237,6 +10238,7 @@ function switchSection(sectionName, skipAnimation = false) {
     // Load team config when switching to team-config section (XACA-0292)
     if (sectionName === 'team-config') {
         loadTeamConfig();
+        loadBoardSettings(); // XACA-1083-005
     }
 
     // Render CR list when switching to change-req section (XACA-0292-007)
@@ -21017,6 +21019,219 @@ async function saveTeamConfigCRSupport(checkbox, statusEl) {
             statusEl.textContent = 'Save failed';
             statusEl.className = 'team-config-status error';
         }
+    }
+}
+
+// =============================================================================
+// BOARD SETTINGS — XACA-1083-005
+// Loads and persists per-team requireEpicOnStart / requireReleaseOnStart via
+// GET/POST /api/board-settings (server contract from subitem 004).
+//
+// Fail-closed rendering contract: the server ALWAYS resolves the two
+// booleans (fail-closed to true on any read problem — see
+// aiteamforge_paths.py), so a response is never literally "missing" data.
+// But when `loadError` is non-null, or the fetch/parse itself fails, those
+// booleans are the fail-closed DEFAULT, not a real per-team read — so this
+// UI must not present them as an editable, trustworthy toggle. In that case
+// BOTH checkboxes render checked+disabled with a visible error, same as the
+// board_settings.py/server.py contract intends for kb-pick/kb-run gates.
+// =============================================================================
+
+const BOARD_SETTINGS_FIELDS = {
+    epic: {
+        key: 'requireEpicOnStart',
+        explicitKey: 'requireEpicOnStartExplicit',
+        checkboxId: 'board-settings-epic-checkbox',
+        statusId: 'board-settings-epic-status',
+        defaultBadgeId: 'board-settings-epic-default',
+        cutoffId: 'board-settings-epic-cutoff',
+    },
+    release: {
+        key: 'requireReleaseOnStart',
+        explicitKey: 'requireReleaseOnStartExplicit',
+        checkboxId: 'board-settings-release-checkbox',
+        statusId: 'board-settings-release-status',
+        defaultBadgeId: 'board-settings-release-default',
+        cutoffId: 'board-settings-release-cutoff',
+    },
+};
+
+// Last known-good (loadError === null) server response, used to revert a
+// checkbox after a failed POST — reverting to "whatever the click produced,
+// negated" would be wrong if the prior state itself came from a partial
+// success (e.g. only one of the two keys was posted).
+let _lastGoodBoardSettings = null;
+
+/**
+ * Fetch current board settings for CONFIG.team and render both checkboxes.
+ * Safe to call multiple times (re-reads server state each visit).
+ */
+async function loadBoardSettings() {
+    const epicCheckbox = document.getElementById('board-settings-epic-checkbox');
+    if (!epicCheckbox) return; // section not present in this build
+
+    const teamLabelEl = document.getElementById('board-settings-team-label');
+    if (teamLabelEl) teamLabelEl.textContent = CONFIG.team || '--';
+
+    try {
+        const response = await apiFetch(apiUrl('/api/board-settings'));
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        _renderBoardSettings(data);
+    } catch (err) {
+        console.error('[board-settings] Failed to load:', err);
+        _renderBoardSettingsFailClosed(`Failed to load board settings: ${err.message}`);
+    }
+}
+
+/**
+ * Render both checkboxes from a /api/board-settings response shape
+ * ({ team, requireEpicOnStart, requireReleaseOnStart, ...Explicit,
+ * grandfatherCutoff, loadError }). Routes to the fail-closed renderer when
+ * loadError is set — the booleans in that same payload are fail-closed
+ * defaults, not a real read, per the server contract above.
+ */
+function _renderBoardSettings(data) {
+    if (data && data.loadError) {
+        _renderBoardSettingsFailClosed(data.loadError);
+        return;
+    }
+
+    _lastGoodBoardSettings = data;
+    _hideBoardSettingsError();
+
+    Object.values(BOARD_SETTINGS_FIELDS).forEach(field => {
+        const checkbox = document.getElementById(field.checkboxId);
+        if (!checkbox) return;
+        const badge = document.getElementById(field.defaultBadgeId);
+        const cutoffEl = document.getElementById(field.cutoffId);
+        const statusEl = document.getElementById(field.statusId);
+
+        checkbox.checked = !!data[field.key];
+        checkbox.disabled = false;
+        checkbox.onchange = () => saveBoardSettingsFlag(field);
+
+        if (badge) badge.style.display = data[field.explicitKey] ? 'none' : 'inline-block';
+        if (cutoffEl) cutoffEl.textContent = data.grandfatherCutoff || '--';
+        if (statusEl) {
+            statusEl.textContent = '';
+            statusEl.className = 'team-config-status';
+        }
+    });
+}
+
+/**
+ * Fail-closed render: both checkboxes CHECKED + DISABLED, with `message`
+ * shown in the visible + aria-live error region. Never renders an
+ * unchecked box on a load failure — that would read as "gate is off" when
+ * the server-side gate (which does not consult this UI) is actually
+ * enforcing true/true.
+ */
+function _renderBoardSettingsFailClosed(message) {
+    Object.values(BOARD_SETTINGS_FIELDS).forEach(field => {
+        const checkbox = document.getElementById(field.checkboxId);
+        if (!checkbox) return;
+        const badge = document.getElementById(field.defaultBadgeId);
+        const statusEl = document.getElementById(field.statusId);
+
+        checkbox.checked = true;
+        checkbox.disabled = true;
+        checkbox.onchange = null;
+
+        if (badge) badge.style.display = 'none';
+        if (statusEl) {
+            statusEl.textContent = '';
+            statusEl.className = 'team-config-status';
+        }
+    });
+    _showBoardSettingsError(message);
+}
+
+function _showBoardSettingsError(message) {
+    const row = document.getElementById('board-settings-error-row');
+    const text = document.getElementById('board-settings-error-text');
+    if (text) text.textContent = message;
+    if (row) row.style.display = '';
+}
+
+function _hideBoardSettingsError() {
+    const row = document.getElementById('board-settings-error-row');
+    const text = document.getElementById('board-settings-error-text');
+    if (text) text.textContent = '';
+    if (row) row.style.display = 'none';
+}
+
+/**
+ * Persist one board-settings flag (requireEpicOnStart or
+ * requireReleaseOnStart) to the server.
+ *
+ * - Disables the checkbox for the duration of the POST.
+ * - On success: re-renders BOTH checkboxes from the RESPONSE (a fresh
+ *   re-read per the server contract), never from the click — the response
+ *   is authoritative even for the field that didn't change.
+ * - On any failure: reverts to the last known-good server state (not just
+ *   the negated click) and surfaces the error, both inline next to the
+ *   checkbox and in the shared aria-live error region.
+ */
+async function saveBoardSettingsFlag(field) {
+    const checkbox = document.getElementById(field.checkboxId);
+    if (!checkbox) return;
+    const statusEl = document.getElementById(field.statusId);
+    const requestedValue = checkbox.checked;
+
+    checkbox.disabled = true;
+    if (statusEl) {
+        statusEl.textContent = 'Saving...';
+        statusEl.className = 'team-config-status saving';
+    }
+
+    try {
+        const response = await apiFetch(apiUrl('/api/board-settings'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ team: CONFIG.team, [field.key]: requestedValue }),
+        });
+
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.success) {
+            throw new Error(result.error || `HTTP ${response.status}`);
+        }
+
+        _renderBoardSettings(result);
+
+        const freshStatusEl = document.getElementById(field.statusId);
+        if (freshStatusEl) {
+            freshStatusEl.textContent = 'Saved';
+            freshStatusEl.className = 'team-config-status saved';
+            setTimeout(() => {
+                if (freshStatusEl.className === 'team-config-status saved') {
+                    freshStatusEl.textContent = '';
+                    freshStatusEl.className = 'team-config-status';
+                }
+            }, 2000);
+        }
+    } catch (err) {
+        console.error('[board-settings] Save failed:', err);
+
+        // Revert to the last known-good server state rather than just
+        // flipping the checkbox back — that state may already reflect a
+        // prior partial success for the OTHER field.
+        if (_lastGoodBoardSettings) {
+            _renderBoardSettings(_lastGoodBoardSettings);
+        } else {
+            checkbox.checked = !requestedValue;
+            checkbox.disabled = false;
+        }
+
+        const freshStatusEl = document.getElementById(field.statusId);
+        if (freshStatusEl) {
+            freshStatusEl.textContent = 'Save failed';
+            freshStatusEl.className = 'team-config-status error';
+        }
+        _showBoardSettingsError(`Save failed: ${err.message}`);
     }
 }
 

@@ -1,0 +1,97 @@
+{
+  "_schemaVersion": 1,
+  "_comment": [
+    "Per-team board start-gate configuration.",
+    "XACA-1083 — per-team \"require Epic\" / \"require Release\" board settings",
+    "(child of EACA-0010). Plan doc: kanban/XACA-1083_require_epic_release_settings.md",
+    "",
+    "GATE POINT: enforcement happens at item START (kb-pick / kb-run), never at",
+    "kb-backlog add — an item cannot carry an epic at creation time (chicken-and-egg",
+    "with the Project Planner flow). See the plan doc's 'Design Decisions' section.",
+    "",
+    "FAIL-CLOSED CONTRACT (booleans): an absent file, unreadable file, malformed",
+    "JSON, a team missing from 'teams', or a non-boolean value for either",
+    "'requireEpicOnStart' / 'requireReleaseOnStart' (including the strings",
+    "\"true\"/\"false\", 0, 1, or null) MUST resolve to true (required) at the",
+    "loader. Never resolve bad input to 'allow'. See aiteamforge_paths.py",
+    "is_epic_required_for_team() / is_release_required_for_team(), and",
+    "subjects/testing-rigor/S004 for why a check that can't read its own config",
+    "must not render as the permissive result.",
+    "",
+    "GRANDFATHER CUTOFF: 'grandfatherCutoff' is a single ISO-8601 UTC timestamp.",
+    "An item is exempt from BOTH gates only when its creation timestamp (the",
+    "item-JSON field named by 'creationTimestampField', below) parses AND is",
+    "strictly before this cutoff. A missing or malformed cutoff — or a missing",
+    "or unparseable item timestamp — resolves to 'not exempt' (the gate",
+    "applies). This is deliberately the SAME fail-closed direction as the",
+    "booleans above: when this file, or the item it is checking, cannot be",
+    "trusted, the gate wins. Never resolve bad input to 'everything is exempt'.",
+    "See aiteamforge_paths.py is_item_grandfathered().",
+    "",
+    "'creationTimestampField' names the item-JSON field the shell gate reads to",
+    "get an item's creation instant. MEASURED 2026-09-25 (XACA-1083-001 sibling",
+    "input): the field is 'addedAt' — 0 of 709 open items across all 7 live",
+    "boards are missing it, and neither 'createdAt' nor 'created' exists",
+    "anywhere in the item schema. Left configurable here (rather than",
+    "hardcoded in the loader) purely so a future schema rename is a one-line",
+    "edit instead of a grep-and-replace across kanban-helpers.sh — the value",
+    "itself is confirmed, not provisional.",
+    "",
+    "Subitems are OUT OF SCOPE for this gate: they carry no epicId/release of",
+    "their own and 'kb-backlog sub start' is not gated today (not even on",
+    "points, XACA-0624's same precedent) — see XACA-1083-001 sibling note.",
+    "",
+    "'command' ships with BOTH settings false (12 of 12 open items are",
+    "orphaned — a 100% pre-existing miss makes a mandate impractical for that",
+    "team; see the plan doc's Measured Baseline). Every other team defaults to",
+    "true/true per the plan doc's Requirement #3."
+  ],
+  "grandfatherCutoff": "2026-09-26T22:02:39Z",
+  "creationTimestampField": "addedAt",
+  "teams": {
+    "academy": {
+      "requireEpicOnStart": true,
+      "requireReleaseOnStart": true
+    },
+    "ios": {
+      "requireEpicOnStart": true,
+      "requireReleaseOnStart": true
+    },
+    "android": {
+      "requireEpicOnStart": true,
+      "requireReleaseOnStart": true
+    },
+    "firebase": {
+      "requireEpicOnStart": true,
+      "requireReleaseOnStart": true
+    },
+    "command": {
+      "requireEpicOnStart": false,
+      "requireReleaseOnStart": false
+    },
+    "dns": {
+      "requireEpicOnStart": true,
+      "requireReleaseOnStart": true
+    },
+    "freelance": {
+      "requireEpicOnStart": true,
+      "requireReleaseOnStart": true
+    },
+    "mainevent": {
+      "requireEpicOnStart": true,
+      "requireReleaseOnStart": true
+    },
+    "legal": {
+      "requireEpicOnStart": true,
+      "requireReleaseOnStart": true
+    },
+    "medical": {
+      "requireEpicOnStart": true,
+      "requireReleaseOnStart": true
+    },
+    "finance": {
+      "requireEpicOnStart": true,
+      "requireReleaseOnStart": true
+    }
+  }
+}

@@ -328,6 +328,15 @@ _kb_resolve_selector() { echo 0; }
 _kb_release_sync() { :; }
 _kb_update_window() { :; }
 _kb_set_working_on() { :; }
+# XACA-1083 (tap port): kb-pick now ALSO gates on Epic/Release
+# (_kb_require_epic/_kb_require_release), fail-closed when the board's
+# .team is empty (as this synthetic fixture's board is, by design, to keep
+# this specific case scoped to only the points/estimate gate under test
+# here). Stub the settings fetch so this test keeps isolating XACA-0822-008
+# (points) from XACA-1083's independent epic/release gates, exactly as it
+# already stubs _kb_release_sync/_kb_update_window/_kb_set_working_on above
+# to isolate from unrelated kb-pick side effects.
+_kb_board_settings_fetch() { printf '%s\n' 'requireEpicOnStart=false' 'requireReleaseOnStart=false'; }
 kb-pick TST-0012
 "
 rc_allowed=$?

@@ -243,7 +243,7 @@ import os
 import stat
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -4536,3 +4536,514 @@ def wizard_hook_create_config(teams_dict: dict, force: bool = False) -> bool:
             file=sys.stderr,
         )
         return False
+
+
+# ---------------------------------------------------------------------------
+# Board settings loader — XACA-1083-001
+# ---------------------------------------------------------------------------
+# Loads, validates, and caches kanban-hooks/board_settings.json — per-team
+# "require Epic" / "require Release" start-gate booleans, plus a single
+# grandfather-cutoff timestamp that exempts pre-existing items.
+#
+# Mirrors the XACA-0619 TimePad loader shape exactly (see the section above):
+#
+#   1. $AITEAMFORGE_BOARD_SETTINGS_CONFIG env var (override for tests)
+#   2. ~/.aiteamforge/board_settings.json  (runtime user copy)
+#   3. <dev-team-root>/kanban-hooks/board_settings.json  (source/fallback)
+#
+# Divergence from the TimePad pattern (intentional, both flagged to the user):
+#
+#   1. TimePad's enable gate lives in the BOARD JSON (teamConfig.timepadSupport
+#      .enabled) and defaults to False (disabled) at every level — an unset
+#      integration should not silently start firing. This gate is the
+#      opposite shape: two per-team BOOLEANS live directly in this config
+#      file's committed schema (not in board JSON) and default to True
+#      (required) at every level — an unset/unreadable config should not
+#      silently PERMIT ungated work. Same "fail closed" principle, opposite
+#      literal default, because the two features guard against opposite risks.
+#   2. This module also owns a SETTER (set_board_settings_for_team, below).
+#      TimePad has no writer in this module at all — its only mutable state
+#      is the board-JSON enable flag, toggled by lcars-ui/server.py directly.
+#      The two booleans here need a runtime-writable per-team overlay (the
+#      LCARS Settings-tab checkboxes, XACA-1083-004/005), so this module
+#      provides one, reusing the existing _atomic_write_json primitive
+#      (temp file + os.replace, same as wizard_hook_create_config's write to
+#      team-paths.json) rather than inventing a second atomic-write path.
+#
+# Config file: kanban-hooks/board_settings.json  (committed schema; runtime
+#              copy at ~/.aiteamforge/board_settings.json — not committed)
+# Plan doc:    kanban/XACA-1083_require_epic_release_settings.md
+# ---------------------------------------------------------------------------
+
+_BOARD_SETTINGS_CACHE: dict | None = None
+_BOARD_SETTINGS_PATH_AT_LOAD: str | None = None  # detect env-var changes
+
+#: The two gate keys. Any per-team block value that is not a real bool for
+#: one of these keys resolves to True (required) — see
+#: _coerce_board_setting_bool.
+BOARD_SETTINGS_BOOLEAN_KEYS = ("requireEpicOnStart", "requireReleaseOnStart")
+
+#: Fail-closed default for both booleans: required.
+BOARD_SETTINGS_FAIL_CLOSED_DEFAULT = True
+
+#: Fallback creation-timestamp field name, used only when the config's
+#: 'creationTimestampField' key is itself absent/malformed. MEASURED
+#: 2026-09-25 (XACA-1083-001 sibling input): the real field is 'addedAt' —
+#: 0 of 709 open items across all 7 live boards are missing it. This
+#: constant exists purely so a missing/bad config key still resolves to the
+#: correct field instead of crashing; it is NOT a second source of truth —
+#: the shipped board_settings.json also carries 'addedAt' explicitly.
+DEFAULT_BOARD_SETTINGS_CREATION_TIMESTAMP_FIELD = "addedAt"
+
+
+def get_board_settings_config_path() -> Path:
+    """Return the path to board_settings.json, honouring
+    $AITEAMFORGE_BOARD_SETTINGS_CONFIG.
+
+    Search order:
+      1. $AITEAMFORGE_BOARD_SETTINGS_CONFIG env var (explicit override — tests use this)
+      2. ~/.aiteamforge/board_settings.json  (runtime user copy)
+      3. <this-file's-dir>/board_settings.json  (dev-team source fallback)
+    """
+    override = os.environ.get("AITEAMFORGE_BOARD_SETTINGS_CONFIG", "")
+    if override:
+        return Path(override).expanduser()
+    user_copy = Path.home() / ".aiteamforge" / "board_settings.json"
+    if user_copy.exists():
+        return user_copy
+    # Fallback: sibling in kanban-hooks/ (dev-team source tree)
+    return Path(__file__).parent / "board_settings.json"
+
+
+def _validate_board_settings_team_block(team_slug: str, block: Any) -> list[str]:
+    """Validate a single per-team block from board_settings.json.
+
+    Returns a list of error strings (empty = valid). Does NOT raise, and does
+    NOT mutate the block — a reported error means the FAIL-CLOSED accessors
+    (is_epic_required_for_team / is_release_required_for_team) will resolve
+    that field to True, not that loading aborts.
+    """
+    errors: list[str] = []
+    if not isinstance(block, dict):
+        errors.append(
+            f"teams.{team_slug}: block must be a dict, got {type(block).__name__}"
+        )
+        return errors  # can't check sub-fields if block isn't a dict
+    for key in BOARD_SETTINGS_BOOLEAN_KEYS:
+        if key not in block:
+            errors.append(
+                f"teams.{team_slug}.{key}: missing — resolves to True (required)"
+            )
+        elif not isinstance(block[key], bool):
+            errors.append(
+                f"teams.{team_slug}.{key}: must be a bool, got "
+                f"{type(block[key]).__name__!r} ({block[key]!r}) — resolves to "
+                "True (required)"
+            )
+    return errors
+
+
+def validate_board_settings(config: dict) -> list[str]:
+    """Validate every team block plus the top-level grandfather fields in a
+    parsed board_settings.json dict.
+
+    Returns a list of human-readable error strings (empty = all clean).
+    Never raises. A non-empty return does NOT mean the config fails to load —
+    see load_board_settings(); it means individual fields will fall through
+    to their fail-closed defaults.
+    """
+    errors: list[str] = []
+    teams = config.get("teams", {})
+    if not isinstance(teams, dict):
+        errors.append("'teams' must be a dict")
+    else:
+        for slug, block in teams.items():
+            errors.extend(_validate_board_settings_team_block(slug, block))
+
+    cutoff = config.get("grandfatherCutoff")
+    if cutoff is not None and (
+        not isinstance(cutoff, str) or _parse_iso8601_utc(cutoff) is None
+    ):
+        errors.append(
+            f"grandfatherCutoff: must be a parseable ISO-8601 string, got "
+            f"{cutoff!r} — resolves to 'no grandfathering' (gate applies to "
+            "every item)"
+        )
+
+    field = config.get("creationTimestampField")
+    if field is not None and (not isinstance(field, str) or not field):
+        errors.append(
+            f"creationTimestampField: must be a non-empty string, got "
+            f"{field!r} — falls back to "
+            f"{DEFAULT_BOARD_SETTINGS_CREATION_TIMESTAMP_FIELD!r}"
+        )
+
+    return errors
+
+
+def load_board_settings() -> dict:
+    """Load, validate, and cache the per-team board start-gate settings.
+
+    Returns the parsed dict from board_settings.json. On missing file, JSON
+    parse errors, or a non-dict root, the error is printed to stderr and an
+    empty-teams skeleton ``{"_schemaVersion": 1, "teams": {}}`` is returned —
+    every downstream accessor then falls through to its individual
+    fail-closed default (True for both booleans; "not exempt" for the
+    grandfather check). This mirrors load_timepad_config()'s degrade-gracefully
+    shape, but the *meaning* of "degraded" is the opposite: TimePad's empty
+    skeleton makes the integration inert (disabled); this module's empty
+    skeleton makes the gate MORE strict (every team requires epic+release,
+    nothing is grandfathered), because permissive-on-failure is the outcome
+    this feature exists to prevent.
+
+    Soft (per-field) validation failures are printed to stderr but do NOT
+    prevent the config from loading — the offending team block / field is
+    left in the result so callers can inspect it; the fail-closed accessors
+    below are what actually apply the safe default for that field.
+
+    Caching: result is cached until ``bust_board_settings_cache()`` is called
+    or ``$AITEAMFORGE_BOARD_SETTINGS_CONFIG`` changes between calls
+    (test-isolation, mirrors the TimePad loader).
+
+    Never raises.
+    """
+    global _BOARD_SETTINGS_CACHE, _BOARD_SETTINGS_PATH_AT_LOAD
+
+    config_path = get_board_settings_config_path()
+    config_path_str = str(config_path)
+
+    if (
+        _BOARD_SETTINGS_CACHE is not None
+        and _BOARD_SETTINGS_PATH_AT_LOAD == config_path_str
+    ):
+        return _BOARD_SETTINGS_CACHE
+
+    _empty: dict = {"_schemaVersion": 1, "teams": {}}
+
+    if not config_path.exists():
+        print(
+            f"[aiteamforge-paths] WARNING: board_settings.json not found at "
+            f"{config_path} — every team fails closed to "
+            "requireEpicOnStart=true, requireReleaseOnStart=true, no "
+            "grandfathering",
+            file=sys.stderr,
+        )
+        _BOARD_SETTINGS_CACHE = _empty
+        _BOARD_SETTINGS_PATH_AT_LOAD = config_path_str
+        return _BOARD_SETTINGS_CACHE
+
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+        config = json.loads(raw)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(
+            f"[aiteamforge-paths] WARNING: could not parse board_settings.json "
+            f"at {config_path}: {exc} — every team fails closed to "
+            "requireEpicOnStart=true, requireReleaseOnStart=true, no "
+            "grandfathering",
+            file=sys.stderr,
+        )
+        _BOARD_SETTINGS_CACHE = _empty
+        _BOARD_SETTINGS_PATH_AT_LOAD = config_path_str
+        return _BOARD_SETTINGS_CACHE
+
+    if not isinstance(config, dict):
+        print(
+            f"[aiteamforge-paths] WARNING: board_settings.json root must be a "
+            "dict — every team fails closed to requireEpicOnStart=true, "
+            "requireReleaseOnStart=true, no grandfathering",
+            file=sys.stderr,
+        )
+        _BOARD_SETTINGS_CACHE = _empty
+        _BOARD_SETTINGS_PATH_AT_LOAD = config_path_str
+        return _BOARD_SETTINGS_CACHE
+
+    errors = validate_board_settings(config)
+    for err in errors:
+        print(f"[aiteamforge-paths] BOARD SETTINGS WARNING: {err}", file=sys.stderr)
+
+    _BOARD_SETTINGS_CACHE = config
+    _BOARD_SETTINGS_PATH_AT_LOAD = config_path_str
+    return _BOARD_SETTINGS_CACHE
+
+
+def bust_board_settings_cache() -> None:
+    """Invalidate the board-settings cache.
+
+    The next call to load_board_settings() will re-read from disk. Intended
+    for tests and for callers (e.g. set_board_settings_for_team) that write a
+    new config to disk and need the cache to reflect it immediately.
+    """
+    global _BOARD_SETTINGS_CACHE, _BOARD_SETTINGS_PATH_AT_LOAD
+    _BOARD_SETTINGS_CACHE = None
+    _BOARD_SETTINGS_PATH_AT_LOAD = None
+
+
+def get_board_settings_team_config_raw(team_slug: str) -> dict:
+    """Return the raw config block for a team from board_settings.json.
+
+    Returns an empty dict if the team is not present or the config failed to
+    load. Does not raise. Low-level accessor — callers that need the
+    fail-closed gate decision must use is_epic_required_for_team /
+    is_release_required_for_team, NOT this function directly (an empty dict
+    or a malformed block here still means "required" at the gate, but this
+    function itself does not apply that default).
+
+    Args:
+        team_slug: Canonical team slug (e.g. "academy", "command").
+
+    Returns:
+        Per-team config dict, or {} if absent.
+    """
+    config = load_board_settings()
+    block = config.get("teams", {}).get(team_slug)
+    return block if isinstance(block, dict) else {}
+
+
+def _coerce_board_setting_bool(block: Any, key: str) -> bool:
+    """Return the fail-closed-coerced bool for *key* in *block*.
+
+    FAIL-CLOSED CONTRACT (XACA-1083): a non-dict block, a missing key, or any
+    value that is not a real Python bool — including the strings "true" /
+    "false", the ints 0 / 1, and None — resolves to True (required). Only a
+    literal ``True`` or ``False`` is honoured. Never raises.
+
+    Note: `isinstance(x, bool)` deliberately excludes ints, because in Python
+    `bool` is a subclass of `int` and `isinstance(1, bool)` is False — so
+    0/1 correctly fall through to the True default here rather than being
+    silently accepted as booleans.
+    """
+    if not isinstance(block, dict):
+        return BOARD_SETTINGS_FAIL_CLOSED_DEFAULT
+    val = block.get(key)
+    if not isinstance(val, bool):
+        return BOARD_SETTINGS_FAIL_CLOSED_DEFAULT
+    return val
+
+
+def is_epic_required_for_team(team_slug: str) -> bool:
+    """Return True iff team *team_slug* requires an Epic before an item may
+    start (kb-pick / kb-run), per board_settings.json's requireEpicOnStart.
+
+    FAIL-CLOSED: an unknown team, a missing file, malformed JSON, a missing
+    key, or a non-boolean value all resolve to True (required). Never
+    raises.
+    """
+    block = get_board_settings_team_config_raw(team_slug)
+    return _coerce_board_setting_bool(block, "requireEpicOnStart")
+
+
+def is_release_required_for_team(team_slug: str) -> bool:
+    """Return True iff team *team_slug* requires a Release assignment before
+    an item may start (kb-pick / kb-run), per board_settings.json's
+    requireReleaseOnStart.
+
+    FAIL-CLOSED: an unknown team, a missing file, malformed JSON, a missing
+    key, or a non-boolean value all resolve to True (required). Never
+    raises.
+    """
+    block = get_board_settings_team_config_raw(team_slug)
+    return _coerce_board_setting_bool(block, "requireReleaseOnStart")
+
+
+def get_board_settings_grandfather_cutoff() -> str | None:
+    """Return the raw 'grandfatherCutoff' string from board_settings.json, or
+    None when absent, not a string, or the config failed to load.
+
+    This is the RAW value — it is not validated for parseability here (a
+    malformed-but-present string is still returned so callers/tests can
+    inspect it). Use is_item_grandfathered() for the fail-closed
+    parse-and-compare gate decision; do not compare this value directly.
+    """
+    config = load_board_settings()
+    val = config.get("grandfatherCutoff")
+    return val if isinstance(val, str) and val else None
+
+
+def get_board_settings_creation_timestamp_field() -> str:
+    """Return the item-JSON field name that holds an item's creation instant,
+    per board_settings.json's 'creationTimestampField'.
+
+    Falls back to DEFAULT_BOARD_SETTINGS_CREATION_TIMESTAMP_FIELD ('addedAt',
+    measured 2026-09-25 against all 7 live boards) when the config key is
+    absent, not a string, or empty. Never raises.
+    """
+    config = load_board_settings()
+    val = config.get("creationTimestampField")
+    if isinstance(val, str) and val:
+        return val
+    return DEFAULT_BOARD_SETTINGS_CREATION_TIMESTAMP_FIELD
+
+
+def _parse_iso8601_utc(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp string into a timezone-aware UTC datetime.
+
+    Accepts a trailing 'Z' (converted to '+00:00' for datetime.fromisoformat)
+    and both naive and offset-bearing inputs; naive inputs are assumed UTC
+    (the schema documents this field as UTC). Returns None — never raises —
+    on any non-string input or any string that fails to parse.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    v = value.strip()
+    if v.endswith("Z") or v.endswith("z"):
+        v = v[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
+
+
+def is_item_grandfathered(created_at: Any) -> bool:
+    """Return True iff *created_at* is exempt from the requireEpicOnStart /
+    requireReleaseOnStart gates under the configured grandfather cutoff.
+
+    *created_at* is the raw value of the item's creation-timestamp field
+    (board_settings.json's 'creationTimestampField', measured as 'addedAt') —
+    pass whatever the board JSON holds there; this function handles all
+    parsing.
+
+    FAIL-CLOSED CONTRACT (both directions land on "gate applies"):
+      - A missing or malformed 'grandfatherCutoff' in board_settings.json
+        resolves to "no grandfathering" — this function returns False for
+        every item, never True for any.
+      - A missing or unparseable *created_at* also resolves to False — an
+        item this function cannot place in time is never assumed exempt.
+      - Only when BOTH the cutoff and created_at parse, and created_at is
+        strictly before the cutoff, does this return True.
+
+    Never raises.
+    """
+    cutoff_dt = _parse_iso8601_utc(get_board_settings_grandfather_cutoff())
+    if cutoff_dt is None:
+        return False
+    created_dt = _parse_iso8601_utc(created_at)
+    if created_dt is None:
+        return False
+    return created_dt < cutoff_dt
+
+
+def set_board_settings_for_team(
+    team_slug: str,
+    *,
+    require_epic_on_start: bool | None = None,
+    require_release_on_start: bool | None = None,
+) -> bool:
+    """Atomically set one or both gate booleans for a team in the RUNTIME
+    settings copy (~/.aiteamforge/board_settings.json, or the path in
+    $AITEAMFORGE_BOARD_SETTINGS_CONFIG when set). Intended for the
+    lcars-ui/server.py toggle endpoint (XACA-1083-004).
+
+    Never writes to the committed source file under kanban-hooks/ — only to
+    the runtime copy, exactly like the TimePad token/config split keeps
+    secrets out of the committed schema. If the runtime copy does not exist
+    yet, it is seeded from the committed kanban-hooks/board_settings.json (so
+    a first-ever toggle doesn't silently drop the other 10 teams' defaults);
+    if that also can't be read, an empty-teams skeleton is used instead.
+
+    Only the named team's block is modified; every other team's settings in
+    the resulting file are preserved byte-for-byte in structure (same
+    dict, only this one key changed).
+
+    Args:
+        team_slug:                Canonical team slug (e.g. "academy").
+        require_epic_on_start:    New value, or None to leave unchanged.
+        require_release_on_start: New value, or None to leave unchanged.
+
+    Returns:
+        True on success. Returns False — NEVER raises — on any failure:
+        bad arguments (non-bool value, empty team_slug, both args None), an
+        I/O error, or a write refused by the plausibility floor. A failed
+        write must never report success, so every failure path here returns
+        False without touching the file on disk (or leaves it exactly as it
+        was before this call — _atomic_write_json never partially writes).
+    """
+    if not team_slug or not isinstance(team_slug, str):
+        print(
+            "[aiteamforge-paths] ERROR: set_board_settings_for_team: "
+            f"team_slug must be a non-empty string, got {team_slug!r}",
+            file=sys.stderr,
+        )
+        return False
+    if require_epic_on_start is None and require_release_on_start is None:
+        print(
+            "[aiteamforge-paths] ERROR: set_board_settings_for_team: "
+            "at least one of require_epic_on_start / require_release_on_start "
+            "must be provided",
+            file=sys.stderr,
+        )
+        return False
+    if require_epic_on_start is not None and not isinstance(require_epic_on_start, bool):
+        print(
+            "[aiteamforge-paths] ERROR: set_board_settings_for_team: "
+            f"require_epic_on_start must be a bool, got "
+            f"{type(require_epic_on_start).__name__!r}",
+            file=sys.stderr,
+        )
+        return False
+    if require_release_on_start is not None and not isinstance(require_release_on_start, bool):
+        print(
+            "[aiteamforge-paths] ERROR: set_board_settings_for_team: "
+            f"require_release_on_start must be a bool, got "
+            f"{type(require_release_on_start).__name__!r}",
+            file=sys.stderr,
+        )
+        return False
+
+    override = os.environ.get("AITEAMFORGE_BOARD_SETTINGS_CONFIG", "")
+    target_path = (
+        Path(override).expanduser()
+        if override
+        else Path.home() / ".aiteamforge" / "board_settings.json"
+    )
+
+    base: dict | None = None
+    if target_path.exists():
+        try:
+            candidate = json.loads(target_path.read_text(encoding="utf-8"))
+            if isinstance(candidate, dict):
+                base = candidate
+        except (OSError, json.JSONDecodeError):
+            base = None  # fall through to the committed-source seed below
+
+    if base is None:
+        source_path = Path(__file__).parent / "board_settings.json"
+        try:
+            candidate = json.loads(source_path.read_text(encoding="utf-8"))
+            base = candidate if isinstance(candidate, dict) else None
+        except (OSError, json.JSONDecodeError):
+            base = None
+    if base is None:
+        base = {"_schemaVersion": 1, "teams": {}}
+
+    teams = base.get("teams")
+    if not isinstance(teams, dict):
+        teams = {}
+        base["teams"] = teams
+    block = teams.get(team_slug)
+    if not isinstance(block, dict):
+        block = {}
+    if require_epic_on_start is not None:
+        block["requireEpicOnStart"] = require_epic_on_start
+    if require_release_on_start is not None:
+        block["requireReleaseOnStart"] = require_release_on_start
+    teams[team_slug] = block
+
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(target_path, base)
+    except (OSError, ValueError) as exc:
+        print(
+            f"[aiteamforge-paths] ERROR: could not write board_settings.json "
+            f"at {target_path}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+    bust_board_settings_cache()
+    return True
