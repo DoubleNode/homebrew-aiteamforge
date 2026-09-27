@@ -87,9 +87,29 @@
             var header = document.createElement('div');
             header.className = 'engine-card-header';
 
+            var titleGroup = document.createElement('div');
+            titleGroup.className = 'engine-card-title-group';
+
             var nameEl = document.createElement('span');
             nameEl.className = 'engine-card-name';
             nameEl.textContent = engine.name || engine.slug;
+            titleGroup.appendChild(nameEl);
+
+            // XACA-1342-013: a secret-only engine (kind: "secret-only", e.g.
+            // release-notify/release-wiki) holds vault secrets only — no
+            // base_url/probe fields. It is never probed and never offered as
+            // a team AI credential (see lcars-ui's serve_engines_list /
+            // handle_team_account_assign); this badge just keeps an admin
+            // looking at THIS tab from mistaking it for a probeable AI engine.
+            if (engine.kind === 'secret-only') {
+                var kindBadge = document.createElement('span');
+                kindBadge.className = 'engine-card-kind-badge';
+                kindBadge.textContent = 'SECRETS ONLY';
+                kindBadge.title = 'Holds vault secrets only — not an AI engine (no base_url/probe).';
+                titleGroup.appendChild(kindBadge);
+            }
+
+            header.appendChild(titleGroup);
 
             var addBtn = document.createElement('button');
             addBtn.className = 'btn-lcars btn-lcars-new engine-add-btn';
@@ -98,7 +118,6 @@
                 LCARS_ENGINES.openAddAccountModal(engine.slug, engine.name || engine.slug);
             });
 
-            header.appendChild(nameEl);
             header.appendChild(addBtn);
             card.appendChild(header);
 

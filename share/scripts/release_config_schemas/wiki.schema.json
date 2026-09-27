@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release-wiki/v1",
+  "title": "Release Wiki Config (release-wiki/v1)",
+  "description": "XACA-1342 / spec docs/release-workflow/RELEASE-LIFECYCLE.md § 11.5. credential.secretRef is never a literal value (§ 2.2, § 11.4-11.5).",
+  "type": "object",
+  "required": ["$schema", "provider", "credential", "baseUrl", "docTypes"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "const": "release-wiki/v1" },
+    "provider": {
+      "type": "string",
+      "description": "§ 10.2: confluence first; GitHub wiki or repo docs later.",
+      "enum": ["confluence"]
+    },
+    "credential": {
+      "type": "object",
+      "description": "Never a literal token -- always a secretRef (§ 2.2, § 11.5).",
+      "required": ["secretRef"],
+      "additionalProperties": false,
+      "properties": {
+        "secretRef": {
+          "type": "string",
+          "description": "vault:<engine_slug>/<account_slug> or env:<VAR_NAME> only. A literal value is a validation error.",
+          "pattern": "^(vault:[a-z][a-z0-9-]{0,63}/[a-z][a-z0-9-]{0,63}|env:[A-Z_][A-Z0-9_]*)(?![\\s\\S])"
+        }
+      }
+    },
+    "baseUrl": {
+      "type": "string",
+      "description": "Wiki tenant base URL, e.g. https://<tenant>.example.net/wiki. This is a public tenant address, not a secret.",
+      "pattern": "^https://[^\\s]+(?![\\s\\S])"
+    },
+    "docTypes": {
+      "type": "object",
+      "description": "§ 12: cr, testing-log, cr-record. Each maps to a space + parent location.",
+      "minProperties": 1,
+      "propertyNames": { "enum": ["cr", "testing-log", "cr-record"] },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["space", "parent"],
+        "additionalProperties": false,
+        "properties": {
+          "space": { "type": "string", "minLength": 1 },
+          "parent": {
+            "type": "object",
+            "required": ["type", "id"],
+            "additionalProperties": false,
+            "properties": {
+              "type": { "type": "string", "enum": ["page", "folder"] },
+              "id": { "type": ["string", "integer"] }
+            }
+          }
+        }
+      }
+    },
+    "platformName": {
+      "type": "string",
+      "description": "Display name used by template rendering ({{platform.name}})."
+    }
+  }
+}

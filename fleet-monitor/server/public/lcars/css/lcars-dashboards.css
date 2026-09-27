@@ -1090,12 +1090,33 @@
     border-bottom: 2px solid var(--lcars-amber);
 }
 
+.engine-card-title-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
 .engine-card-name {
     font-size: 16px;
     font-weight: 600;
     color: var(--lcars-amber);
     letter-spacing: 3px;
     text-transform: uppercase;
+}
+
+/* XACA-1342-013: secret-only engine badge (release-notify, release-wiki, …) —
+   holds vault secrets only, never a probeable AI engine. */
+.engine-card-kind-badge {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--lcars-dark);
+    background: var(--lcars-surface);
+    border-radius: 4px;
+    padding: 3px 8px;
+    flex-shrink: 0;
 }
 
 .engine-card-body {

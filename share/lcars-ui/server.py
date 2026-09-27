@@ -16218,6 +16218,33 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     ai_credential = None
                 if isinstance(ai_credential, dict):
                     env_var_name = ai_credential.get('env_var_name') or ''
+                    # XACA-1342-013: defense-in-depth. handle_team_account_assign
+                    # already refuses to SAVE a secret-only engine (kind:
+                    # "secret-only") as a team's ai.credential, but
+                    # team-paths.json can also be hand-edited directly (the
+                    # Academy infra exception) -- refuse to probe one here too,
+                    # rather than sending a webhook/API token to Anthropic as
+                    # if it were an x-api-key.
+                    engine_slug_for_kind = ai_credential.get('engine_slug')
+                    if engine_slug_for_kind:
+                        _reg_data, _reg_source, _, _ = self._get_engines_registry()
+                        for _engine in (_reg_data.get('engines') or []):
+                            if _engine.get('slug') == engine_slug_for_kind:
+                                if self._is_secret_only_engine(_engine):
+                                    self._send_json_response({
+                                        'ok': False,
+                                        'probed': False,
+                                        'account_fingerprint': None,
+                                        'model_access': None,
+                                        'error': (
+                                            f"Team {team!r}'s saved credential references engine "
+                                            f"{engine_slug_for_kind!r}, which holds secrets only "
+                                            "(kind: 'secret-only') and cannot be probed as an AI "
+                                            'credential.'
+                                        ),
+                                    }, status=400)
+                                    return
+                                break
             else:
                 # env_var_name was supplied directly — the shape the edit
                 # modal's TEST CONNECTION button sends (lcars-ui/js/
@@ -16778,6 +16805,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # Local cache path for engines registry (written on each successful Fleet Monitor fetch)
     _ENGINES_CACHE_PATH = Path.home() / '.aiteamforge' / 'engines-cache.json'
 
+    @staticmethod
+    def _is_secret_only_engine(engine) -> bool:
+        """True when a Fleet Monitor engine entry is marked secret-only (XACA-1342-013).
+
+        A secret-only engine (e.g. `release-notify`, `release-wiki`) holds only
+        vault secrets -- no base_url/probe fields, nothing an AI-credential
+        consumer can use. It MUST NOT be offered as a team's AI credential and
+        MUST NOT be probed by TEST CONNECTION. It still shows up in the raw
+        Fleet Monitor registry (`_get_engines_registry`) so the vault UI can
+        attach secrets to it, and `handle_team_account_assign` still needs the
+        raw (unfiltered) registry to find it and reject it with a clear error
+        -- only the picker-facing `serve_engines_list` filters it out.
+        """
+        return isinstance(engine, dict) and engine.get('kind') == 'secret-only'
+
     def _fetch_engines_from_fleet_monitor(self, fleet_monitor_url=None):
         """Try to fetch /api/engines from Fleet Monitor. Returns (data_dict, error_str).
 
@@ -16918,6 +16960,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 force_refresh=force_refresh, fleet_monitor_url=resolved_fleet_url)
 
             response = dict(data)  # shallow copy — don't mutate the cache
+            # XACA-1342-013: this endpoint feeds ONLY the team AI-credential
+            # picker (lcars-team-account.js's loadTeamAccountList) -- a
+            # secret-only engine (kind: "secret-only", e.g. release-notify /
+            # release-wiki) holds a webhook/API token, not an Anthropic-shaped
+            # credential, and must never appear as a selectable option here.
+            # The Fleet Monitor Engines tab and vault UI still see it via the
+            # unfiltered /api/engines proxy inside _get_engines_registry --
+            # only this picker-facing shape is filtered.
+            response['engines'] = [
+                e for e in (response.get('engines') or [])
+                if not self._is_secret_only_engine(e)
+            ]
             response['_source'] = source
             if cache_age is not None:
                 response['_cache_age_seconds'] = cache_age
@@ -17033,6 +17087,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({
                     'success': False,
                     'error': f"Engine '{engine_slug}' not found in registry (source: {source})",
+                }, status=400)
+                return
+
+            # XACA-1342-013: defense-in-depth. serve_engines_list already keeps
+            # a secret-only engine (kind: "secret-only") out of the picker's
+            # dropdown, but this endpoint is reachable directly (curl, a stale
+            # cached picker, a hand-edited team-paths.json flow) -- refuse it
+            # here too rather than trusting the caller already filtered.
+            if self._is_secret_only_engine(matched_engine):
+                self._send_json_response({
+                    'success': False,
+                    'error': (
+                        f"Engine '{engine_slug}' holds secrets only (kind: 'secret-only') "
+                        'and cannot be assigned as a team AI credential.'
+                    ),
                 }, status=400)
                 return
 

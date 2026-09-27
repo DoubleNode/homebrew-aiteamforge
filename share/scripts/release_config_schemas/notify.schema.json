@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release-notify/v1",
+  "title": "Release Notify Config (release-notify/v1)",
+  "description": "XACA-1342 / spec docs/release-workflow/RELEASE-LIFECYCLE.md § 11.4. Aliases resolved from the calling team's notify.json; secretRef is never a literal value (§ 2.2, § 11.4).",
+  "type": "object",
+  "required": ["$schema", "aliases"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "const": "release-notify/v1" },
+    "aliases": {
+      "type": "object",
+      "description": "Keyed by alias name (e.g. 'cr-approver', 'release-channel'). At least one alias required.",
+      "minProperties": 1,
+      "propertyNames": { "type": "string", "minLength": 1 },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["provider", "target"],
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "§ 10.1: teams (HTTP flow / incoming webhook) first; slack, sms, email later, behind the same interface.",
+            "enum": ["teams", "slack", "sms", "email"]
+          },
+          "target": {
+            "type": "object",
+            "description": "Never a literal destination (URL/number) -- always a secretRef (§ 2.2, § 11.4).",
+            "required": ["secretRef"],
+            "additionalProperties": false,
+            "properties": {
+              "secretRef": {
+                "type": "string",
+                "description": "vault:<engine_slug>/<account_slug> or env:<VAR_NAME> only. A literal value is a validation error.",
+                "pattern": "^(vault:[a-z][a-z0-9-]{0,63}/[a-z][a-z0-9-]{0,63}|env:[A-Z_][A-Z0-9_]*)(?![\\s\\S])"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

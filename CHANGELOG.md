@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1342** — release config schemas (`release-notify/v1`, `release-wiki/v1`, `release-profile/v1`) and
+  `kb-release-config-validate` (`share/scripts/`): `secretRef` accepts only `vault:<engine>/<account>` or `env:<VAR>`,
+  literals in `secretRef`/`target`/`credential` are errors, and no resolved value is ever printed. LCARS never offers
+  or probes engines marked `kind: "secret-only"` as AI credentials; the Fleet Monitor Engines tab badges them.
 - **XACA-1083** — per-team **Require Epics** / **Require Releases** start gates, default ON. `kb-pick`, `kb-run`,
   `kb-work` and reopen refuse to start an item that has no Epic or Release resolving on the board, unless the team turned
   the setting off (Command ships OFF) or the item's `addedAt` is before the shipped `grandfatherCutoff`, so existing

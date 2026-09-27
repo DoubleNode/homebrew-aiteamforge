@@ -117,4 +117,24 @@ function findAccount(engineSlug, accountSlug) {
     return engine.accounts.find(a => a.slug === accountSlug) || null;
 }
 
-module.exports = { readEngines, writeEngines, findEngine, findAccount };
+/**
+ * True when an engine registry entry is marked secret-only (XACA-1342-013).
+ *
+ * A secret-only engine (`kind: "secret-only"`, e.g. `release-notify`,
+ * `release-wiki`) holds only vault secrets -- no base_url/probe_endpoint/
+ * probe_model, nothing an AI-credential consumer can act on. Any consumer
+ * that treats the engines registry as a list of probeable AI engines (a
+ * health/key probe, a usage collector, an AI-credential picker) MUST check
+ * this predicate and skip such an engine. Consumers that only manage
+ * accounts/secrets generically (this store's CRUD, the vault routes, the
+ * Fleet Monitor Engines tab's account table) do not need it -- a
+ * secret-only engine's accounts are ordinary account records.
+ *
+ * @param {object} engine
+ * @returns {boolean}
+ */
+function isSecretOnlyEngine(engine) {
+    return !!engine && engine.kind === 'secret-only';
+}
+
+module.exports = { readEngines, writeEngines, findEngine, findAccount, isSecretOnlyEngine };

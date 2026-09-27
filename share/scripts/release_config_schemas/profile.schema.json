@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release-profile/v1",
+  "title": "Release Content Profile (release-profile/v1)",
+  "description": "XACA-1342 / spec docs/release-workflow/RELEASE-LIFECYCLE.md § 11.3, reconciled against the Main Event CR seed (docs/release-workflow/PROFILE-MAIN-EVENT-CR-SEED/cr/profile.json, XCMD-0018-007). The seed's actual field shapes diverge from § 11.3's placeholder (nested objects instead of flat strings in several places); this schema models the seed's shapes and accepts the spec's flat-string forms as sugar where noted below. Nothing at the top level is required: this schema validates the SHAPE of whichever fields a profile carries, per the 'never restate a count -- verify against the fixture' spirit of the ticket -- a profile kind (cr/testing-log/cr-record/notice) is free to omit fields it doesn't use. additionalProperties is open at the top level (seed carries provenance metadata this schema does not need to check: $schema value 'seed-only', docType, team, seedSource, subjectPerspective, titleWordCount, titleSourceRule, releaseTypes, notifySourceRule) and closed inside every validated sub-object below.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Not constrained to a const here: the seed's own profile.json carries the literal value 'seed-only — not validated against Academy's real schema...' rather than 'release-profile/v1'. Left as an open string so the seed fixture is not rejected on this field."
+    },
+    "kind": {
+      "type": "string",
+      "description": "§ 11.1: cr | testing-log | cr-record | notice.",
+      "enum": ["cr", "testing-log", "cr-record", "notice"]
+    },
+    "docType": {
+      "type": "string",
+      "description": "Seed-only alternate spelling of 'kind' carried as provenance; not cross-checked against kind."
+    },
+    "audience": { "type": "string" },
+    "detailLevel": {
+      "type": "string",
+      "description": "§ 11.3 placeholder shows an enum (summary|standard|detailed); the seed's real value is free prose ('minimal — the whole CR should read in under a minute'), so this is modeled as an open string rather than the placeholder's enum."
+    },
+    "requiredSections": {
+      "type": "array",
+      "description": "§ 11.3 placeholder is a flat string array. The seed uses richer objects per section. A flat string is accepted as sugar for {id: <string>, label: <string>, required: true}.",
+      "items": {
+        "oneOf": [
+          { "type": "string", "minLength": 1 },
+          {
+            "type": "object",
+            "required": ["id", "label"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "label": { "type": "string" },
+              "required": { "type": "boolean" },
+              "format": { "type": "string" },
+              "sourceRule": { "type": "string" },
+              "accuracyGuardrail": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "tenseRule": { "type": "string" },
+              "fixedValue": {
+                "description": "Seed shape is an object of fixed field->value strings, but left type-open since it is opaque template data, not something this schema enforces the shape of."
+              },
+              "note": { "type": "string" }
+            }
+          }
+        ]
+      }
+    },
+    "bannedTokenPatterns": {
+      "type": "array",
+      "description": "§ 11.3 placeholder is a flat regex-string array. The seed uses richer objects. A flat string is accepted as sugar for {pattern: <string>, reason: \"\"}.",
+      "items": {
+        "oneOf": [
+          { "type": "string", "minLength": 1 },
+          {
+            "type": "object",
+            "required": ["pattern", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "pattern": { "type": "string" },
+              "reason": { "type": "string" },
+              "scopeNote": { "type": "string" },
+              "standaloneOnly": { "type": "boolean" }
+            }
+          }
+        ]
+      }
+    },
+    "linkPolicy": {
+      "description": "§ 11.3 placeholder shape {allowed, maxLinks} is accepted, but is not expressive enough for the seed's maxCount-bounded required links -- the seed's richer {defaultAllowLinks, standardLinks[], supersedesException, everythingElseBanned} shape is modeled directly and also accepted.",
+      "type": "object",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["allowed", "maxLinks"],
+          "properties": {
+            "allowed": { "type": "array", "items": { "type": "string" } },
+            "maxLinks": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "defaultAllowLinks": { "type": "boolean" },
+            "standardLinks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id"],
+                "additionalProperties": false,
+                "properties": {
+                  "id": { "type": "string" },
+                  "required": { "type": "boolean" },
+                  "maxCount": { "type": "integer", "minimum": 0 },
+                  "sourcePlaceholder": { "type": "string" },
+                  "mustResolveUnderFolder": { "type": "string" },
+                  "mustResolveUnderFolderNote": { "type": "string" },
+                  "placement": { "type": "string" }
+                }
+              }
+            },
+            "supersedesException": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string" },
+                "allowed": { "type": "boolean" },
+                "appliesTo": { "type": "array", "items": { "type": "string" } },
+                "maxLinksPerPage": { "type": "integer", "minimum": 0 },
+                "placement": { "type": "string" },
+                "sourceRule": { "type": "string" },
+                "needsLeadDecision": { "type": "string" }
+              }
+            },
+            "everythingElseBanned": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "titlePattern": { "type": "string" },
+    "titleWordCount": { "type": "string" },
+    "titleSourceRule": { "type": "string" },
+    "releaseTypes": { "type": "array", "items": { "type": "string" } },
+    "requireLeadDraftApproval": {
+      "type": "boolean",
+      "description": "§ 11.3 spec-compatible flat form. Read only from the cr kind."
+    },
+    "draftApproval": {
+      "type": "object",
+      "description": "Seed-compatible richer form. When present, requireLeadDraftApproval is derived as draftApproval.required.",
+      "additionalProperties": false,
+      "properties": {
+        "required": { "type": "boolean" },
+        "approver": { "type": "string" },
+        "note": { "type": "string" },
+        "sourceRule": { "type": "string" }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "description": "Read only from the cr kind. Provider-specific fields beyond 'provider' vary (manual vs. assumed-schedule per § 9.1) and are left open.",
+      "required": ["provider"],
+      "properties": {
+        "provider": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "notifyAlias": { "type": "string" },
+    "notifyTemplate": { "type": "string" },
+    "notifySourceRule": { "type": "string" },
+    "wikiDocType": {
+      "type": "string",
+      "description": "§ 11.3 spec-compatible flat form. When absent, derived from wiki.docType."
+    },
+    "wiki": {
+      "type": "object",
+      "description": "Seed-compatible nested form. wikiDocType derives from wiki.docType when present.",
+      "additionalProperties": false,
+      "properties": {
+        "docType": { "type": "string" },
+        "note": { "type": "string" }
+      }
+    },
+    "excludedFromScope": {
+      "type": "object",
+      "description": "Business-policy filter for guest-facing scope (XACA-1343 owns the rendering behavior; this schema only accepts the shape).",
+      "additionalProperties": false,
+      "properties": {
+        "note": { "type": "string" },
+        "categories": { "type": "array", "items": { "type": "string" } },
+        "action": { "type": "string" },
+        "sourceRule": { "type": "string" },
+        "needsLeadDecision": { "type": "string" }
+      }
+    }
+  },
+  "additionalProperties": true
+}
