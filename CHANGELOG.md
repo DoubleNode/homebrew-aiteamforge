@@ -197,8 +197,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
       `worktreeBranch`/`worktreeWindowId` (leaving `worktreeLinkedAt` dangling) — crash-recovery
       metadata (XACA-0884) a temporary block should never touch, and out of round 3's own scope.
       Reverted to the pre-round-3 behavior: none of the four fields are deleted.
-    - New table rows in `tests/test-xaca-1151-044-item-blocker-flush.zsh` (canonical, this repo's
-      outer counterpart) and this repo's own template test coverage, each with a negative control
+    - New table rows in the outer repo's `tests/test-xaca-1151-044-item-blocker-flush.zsh`
+      (canonical) and `tests/test-xaca-1151-prc-time-tracking.sh` (template port — this suite also
+      lives in the outer repo, not here), each with a negative control
       reproducing the exact round-3 bug from newly-frozen fixtures extracted verbatim from the
       round-3 commits, with their own runtime byte-provenance re-check. Bumped
       `tests/test-xaca-0819-pause-resume-active-span.sh`'s file-wide `_kb_flush_work_time` call-site
