@@ -10245,11 +10245,11 @@ _kb_require_points() {
 # canonical) — same signature, same message style, same exit convention
 # (0 = allowed to start, 1 = refused + box printed). Wired into kb-pick,
 # kb-run and _kb_reopen_item, immediately after _kb_require_points at each
-# (points -> epic -> release order). NOTE: canonical also gates kb-work; this
-# template's kb-work does not call _kb_require_points at all (pre-existing
-# tap gap, not introduced here — see the XACA-1083 tap-port retro), so the
-# epic/release gates are intentionally NOT added to kb-work either, to keep
-# all three start-gates co-located at identical call sites. `kb-backlog sub
+# (points -> epic -> release order), AND into kb-work (same position as
+# canonical, between the confirm prompt and the prompt build). This template's
+# kb-work does NOT call _kb_require_points (pre-existing XACA-0624 tap gap,
+# tracked on XACA-1151-052), so there kb-work runs epic -> release only; the
+# 052 body-parity port will restore the points call ahead of them. `kb-backlog sub
 # start` and `kb-backlog add` are deliberately NOT gated — see
 # docs/BOARD_SETTINGS.md § "Where it is enforced".
 #

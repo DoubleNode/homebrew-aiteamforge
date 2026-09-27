@@ -14932,6 +14932,19 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return f'board_settings.json at {config_path} could not be parsed: {exc} — fails closed to true/true'
         if not isinstance(parsed, dict):
             return f'board_settings.json at {config_path} root must be an object — fails closed to true/true'
+        # XACA-1083-015: mirror aiteamforge_paths.load_board_settings()'s
+        # non-dict-"teams" guard here too — a present-but-non-dict "teams"
+        # (null/list/string/number) used to reach
+        # get_board_settings_team_config_raw() unguarded and raise
+        # AttributeError, turning this into a 500 instead of a diagnostic
+        # loadError string. A missing "teams" key is fine (defaults to {}).
+        teams_value = parsed.get('teams', {})
+        if not isinstance(teams_value, dict):
+            return (
+                f"board_settings.json at {config_path} 'teams' must be an "
+                f"object, got {type(teams_value).__name__} — fails closed "
+                "to true/true"
+            )
         return None
 
     def _board_settings_response_fields(self, team: str) -> dict:

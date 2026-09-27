@@ -21044,7 +21044,6 @@ const BOARD_SETTINGS_FIELDS = {
         checkboxId: 'board-settings-epic-checkbox',
         statusId: 'board-settings-epic-status',
         defaultBadgeId: 'board-settings-epic-default',
-        cutoffId: 'board-settings-epic-cutoff',
     },
     release: {
         key: 'requireReleaseOnStart',
@@ -21052,9 +21051,71 @@ const BOARD_SETTINGS_FIELDS = {
         checkboxId: 'board-settings-release-checkbox',
         statusId: 'board-settings-release-status',
         defaultBadgeId: 'board-settings-release-default',
-        cutoffId: 'board-settings-release-cutoff',
     },
 };
+
+// XACA-1083-018: locale-independent month abbreviations for the cutoff-line
+// formatter below. Deliberately NOT toLocaleDateString/Intl — this needs to
+// render identically regardless of the viewer's OS locale/ICU data (and
+// regardless of the Node test environment's available locale data), and the
+// cutoff is always UTC, not the viewer's timezone (XACA-1083-018/019 task
+// brief: "don't depend on viewer timezone for correctness; label it UTC").
+const _BOARD_SETTINGS_MONTH_NAMES = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/**
+ * Format an ISO-8601 timestamp string as a human-readable, deterministic UTC
+ * date/time, e.g. "26 Sep 2026, 22:02 UTC". Returns null when *iso* is
+ * missing, not a string, or does not parse to a valid instant — callers
+ * must render the fail-closed "no items are exempt" message in that case
+ * (XACA-1083-018/019), never "Invalid Date" and never a blank string.
+ */
+function _formatBoardSettingsCutoffUTC(iso) {
+    if (typeof iso !== 'string' || !iso.trim()) return null;
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    const day = d.getUTCDate();
+    const month = _BOARD_SETTINGS_MONTH_NAMES[d.getUTCMonth()];
+    const year = d.getUTCFullYear();
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    const mm = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${day} ${month} ${year}, ${hh}:${mm} UTC`;
+}
+
+/**
+ * Render the ONE shared grandfather-cutoff line (XACA-1083-019). Toggles
+ * between the normal sentence (#board-settings-cutoff-line, holding the
+ * human-formatted text plus the raw ISO value on <time datetime="">/title
+ * for precision) and the fail-closed alternate
+ * (#board-settings-cutoff-none-line) via display none/'' — the same
+ * show/hide idiom used elsewhere in this section (see
+ * _showBoardSettingsError/_hideBoardSettingsError) — rather than
+ * overwriting the container's textContent, which would destroy the nested
+ * <time> element on a real DOM the next time a valid cutoff needs to be
+ * rendered back into it.
+ */
+function _renderBoardSettingsCutoffLine(rawCutoff) {
+    const lineEl = document.getElementById('board-settings-cutoff-line');
+    const timeEl = document.getElementById('board-settings-cutoff-value');
+    const noneEl = document.getElementById('board-settings-cutoff-none-line');
+
+    const human = _formatBoardSettingsCutoffUTC(rawCutoff);
+    if (human === null) {
+        if (lineEl) lineEl.style.display = 'none';
+        if (noneEl) noneEl.style.display = '';
+        return;
+    }
+
+    if (timeEl) {
+        timeEl.textContent = human;
+        timeEl.setAttribute('datetime', rawCutoff);
+        timeEl.title = rawCutoff;
+    }
+    if (lineEl) lineEl.style.display = '';
+    if (noneEl) noneEl.style.display = 'none';
+}
 
 // Last known-good (loadError === null) server response, used to revert a
 // checkbox after a failed POST — reverting to "whatever the click produced,
@@ -21102,12 +21163,12 @@ function _renderBoardSettings(data) {
 
     _lastGoodBoardSettings = data;
     _hideBoardSettingsError();
+    _renderBoardSettingsCutoffLine(data.grandfatherCutoff);
 
     Object.values(BOARD_SETTINGS_FIELDS).forEach(field => {
         const checkbox = document.getElementById(field.checkboxId);
         if (!checkbox) return;
         const badge = document.getElementById(field.defaultBadgeId);
-        const cutoffEl = document.getElementById(field.cutoffId);
         const statusEl = document.getElementById(field.statusId);
 
         checkbox.checked = !!data[field.key];
@@ -21115,7 +21176,6 @@ function _renderBoardSettings(data) {
         checkbox.onchange = () => saveBoardSettingsFlag(field);
 
         if (badge) badge.style.display = data[field.explicitKey] ? 'none' : 'inline-block';
-        if (cutoffEl) cutoffEl.textContent = data.grandfatherCutoff || '--';
         if (statusEl) {
             statusEl.textContent = '';
             statusEl.className = 'team-config-status';
@@ -21147,6 +21207,13 @@ function _renderBoardSettingsFailClosed(message) {
             statusEl.className = 'team-config-status';
         }
     });
+    // A load failure means the cutoff wasn't read reliably either (the
+    // server-side loader that hit this same failure also resolves
+    // grandfatherCutoff to "no grandfathering" — see
+    // aiteamforge_paths.get_board_settings_grandfather_cutoff) — so show the
+    // fail-closed "no items are exempt" line here too, not the stale value
+    // from a previous successful load.
+    _renderBoardSettingsCutoffLine(null);
     _showBoardSettingsError(message);
 }
 

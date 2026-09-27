@@ -225,6 +225,40 @@ def test_t3_team_block_not_dict_resolves_true():
     print("PASS T3e: non-dict team block -> required=true")
 
 
+def test_t3_non_dict_teams_resolves_true():
+    """T3e2 (XACA-1083-015): a present-but-non-dict 'teams' value (null, list,
+    string, or number) must fail closed to True/True for EVERY accessor
+    without raising -- the loader's 'Never raises' contract held for a
+    non-dict ROOT (T3c) but not for a non-dict 'teams' sitting inside an
+    otherwise-valid dict root, which used to reach
+    get_board_settings_team_config_raw() and raise AttributeError on
+    `.get()`. Also covers get_board_settings_team_config_raw() directly,
+    since is_epic_required_for_team()/is_release_required_for_team() alone
+    would mask a raise inside a lower layer if a future refactor added a
+    try/except at the wrong level."""
+    from aiteamforge_paths import (
+        is_epic_required_for_team,
+        is_release_required_for_team,
+        get_board_settings_team_config_raw,
+    )
+
+    for bad_teams in (None, [], "not-a-dict", 5, 3.14, True):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "cfg.json"
+            _write_json(cfg_path, {"_schemaVersion": 1, "teams": bad_teams})
+            with _EnvOverride(str(cfg_path)):
+                assert is_epic_required_for_team("academy") is True, (
+                    f"teams={bad_teams!r} must resolve requireEpicOnStart to True"
+                )
+                assert is_release_required_for_team("academy") is True, (
+                    f"teams={bad_teams!r} must resolve requireReleaseOnStart to True"
+                )
+                assert get_board_settings_team_config_raw("academy") == {}, (
+                    f"teams={bad_teams!r} must return {{}} from the raw accessor, not raise"
+                )
+    print("PASS T3e2: non-dict 'teams' (null/list/str/number/bool) -> required=true, never raises")
+
+
 def test_t3_missing_key_resolves_true():
     """T3f: a team block missing one of the two keys -> that key resolves True; the
     present key is honoured normally."""
@@ -538,6 +572,122 @@ def test_t5_setter_write_failure_leaves_existing_file_untouched():
     print("PASS T5g: write failure -> False, pre-existing file byte-for-byte untouched")
 
 
+def test_t5_setter_lock_held_times_out():
+    """T5h (XACA-1083-016): when the write lock is already held by another
+    owner, set_board_settings_for_team() must time out and return False --
+    never block forever, never write unlocked. Deterministic: the lock is
+    held via a second, independent open() + flock() on the same lock path
+    (a distinct lock owner even within this one process -- flock()
+    contends per open-file-description, not per-process), and the setter's
+    lock timeout is dialed down to a couple hundred ms so this test doesn't
+    pay the production 5s timeout."""
+    import fcntl
+
+    import aiteamforge_paths as ap
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_path = Path(tmpdir) / "runtime.json"
+        _write_json(cfg_path, _MULTI_TEAM_FIXTURE)
+        before_bytes = cfg_path.read_bytes()
+        lock_path = cfg_path.with_name(f"{cfg_path.name}.lock")
+
+        holder = open(lock_path, "a")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        old_timeout = ap._BOARD_SETTINGS_LOCK_TIMEOUT_SECONDS
+        try:
+            with _EnvOverride(str(cfg_path)):
+                ap._BOARD_SETTINGS_LOCK_TIMEOUT_SECONDS = 0.2
+                ok = ap.set_board_settings_for_team("academy", require_epic_on_start=False)
+                assert ok is False, "a held lock must make the setter fail, not write unlocked"
+                assert cfg_path.read_bytes() == before_bytes, (
+                    "file must be byte-for-byte untouched when the lock could not be acquired"
+                )
+        finally:
+            ap._BOARD_SETTINGS_LOCK_TIMEOUT_SECONDS = old_timeout
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            holder.close()
+    print("PASS T5h: a held lock makes the setter time out and return False; file untouched")
+
+
+def _t5i_worker(cfg_path_str: str, barrier, team_slug: str, key: str, value: bool, result_queue) -> None:
+    """Child-process target for test_t5_setter_concurrent_writers_no_lost_update.
+    Module-level (not a closure) so it is picklable for multiprocessing's
+    'spawn' start method."""
+    sys.path.insert(0, str(_KANBAN_HOOKS))
+    os.environ["AITEAMFORGE_BOARD_SETTINGS_CONFIG"] = cfg_path_str
+    from aiteamforge_paths import bust_board_settings_cache, set_board_settings_for_team
+
+    bust_board_settings_cache()
+    barrier.wait()  # release every worker at (as close as the OS allows to) the same instant
+    ok = set_board_settings_for_team(team_slug, **{key: value})
+    result_queue.put((team_slug, key, value, ok))
+
+
+def test_t5_setter_concurrent_writers_no_lost_update():
+    """T5i (XACA-1083-016): several OS processes toggle DIFFERENT teams'/
+    keys' settings against the SAME shared board_settings.json at (as
+    close as multiprocessing.Barrier can make it) the same instant. Every
+    writer's update must land -- none may be lost to an unlocked
+    read-modify-write race. Synchronized with a Barrier, not a sleep, so
+    this is deterministic rather than a timing-dependent race for the test
+    itself to win."""
+    import multiprocessing
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_path = Path(tmpdir) / "runtime.json"
+        # Seed from the real committed schema (11 teams + comments), not a
+        # bare skeleton -- _atomic_write_json's XACA-1059-006 plausibility
+        # floor refuses to write anything under 200 bytes, and a
+        # few-teams-only skeleton is too small to survive that floor once
+        # only ONE team's block has been toggled by a given worker.
+        shipped = json.loads((_KANBAN_HOOKS / "board_settings.json").read_text(
+            encoding="utf-8"
+        ))
+        # Strip the (irrelevant, purely descriptive) "_comment" key so the
+        # fixture isn't accidentally coupled to its prose changing later;
+        # the 11-team "teams" block alone is already well over the floor.
+        shipped.pop("_comment", None)
+        _write_json(cfg_path, shipped)
+
+        jobs = [
+            ("academy", "require_epic_on_start", False),
+            ("ios", "require_release_on_start", False),
+            ("android", "require_epic_on_start", False),
+            ("firebase", "require_release_on_start", False),
+            ("command", "require_epic_on_start", False),
+            ("dns", "require_release_on_start", False),
+        ]
+        _KEY_TO_JSON_FIELD = {
+            "require_epic_on_start": "requireEpicOnStart",
+            "require_release_on_start": "requireReleaseOnStart",
+        }
+
+        ctx = multiprocessing.get_context("spawn")
+        barrier = ctx.Barrier(len(jobs))
+        result_queue = ctx.Queue()
+        procs = [
+            ctx.Process(target=_t5i_worker, args=(str(cfg_path), barrier, team, key, value, result_queue))
+            for team, key, value in jobs
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=30)
+            assert not p.is_alive(), f"worker for {p} did not finish within 30s"
+            assert p.exitcode == 0, f"worker process exited abnormally: {p.exitcode}"
+
+        results = [result_queue.get_nowait() for _ in jobs]
+        for team, key, value, ok in results:
+            assert ok is True, f"{team}.{key} write reported failure"
+
+        final = json.loads(cfg_path.read_text(encoding="utf-8"))
+        for team, key, value in jobs:
+            json_field = _KEY_TO_JSON_FIELD[key]
+            got = final.get("teams", {}).get(team, {}).get(json_field)
+            assert got == value, f"lost update: {team}.{json_field} expected {value!r}, got {got!r}"
+    print(f"PASS T5i: {len(jobs)} concurrent cross-process writers to different teams/keys -- no lost update")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # T6 — CLI contract
 # ─────────────────────────────────────────────────────────────────────────────
@@ -664,6 +814,7 @@ def run_all() -> bool:
         test_t3_non_dict_root_resolves_true,
         test_t3_unknown_team_resolves_true,
         test_t3_team_block_not_dict_resolves_true,
+        test_t3_non_dict_teams_resolves_true,
         test_t3_missing_key_resolves_true,
         test_t3_non_boolean_values_resolve_true,
         test_t3_unreadable_file_resolves_true,
@@ -683,6 +834,8 @@ def run_all() -> bool:
         test_t5_setter_rejects_empty_team_slug,
         test_t5_setter_rejects_non_bool_value,
         test_t5_setter_write_failure_leaves_existing_file_untouched,
+        test_t5_setter_lock_held_times_out,
+        test_t5_setter_concurrent_writers_no_lost_update,
         # T6
         test_t6_cli_get_prints_expected_lines_and_exits_0,
         test_t6_cli_get_unknown_team_still_exits_0_fail_closed,

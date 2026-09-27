@@ -4595,6 +4595,43 @@ BOARD_SETTINGS_FAIL_CLOSED_DEFAULT = True
 #: the shipped board_settings.json also carries 'addedAt' explicitly.
 DEFAULT_BOARD_SETTINGS_CREATION_TIMESTAMP_FIELD = "addedAt"
 
+#: XACA-1083-016: bound on how long set_board_settings_for_team() will wait
+#: to acquire the cross-process write lock before giving up and returning
+#: False. This runs inside a synchronous HTTP handler (POST
+#: /api/board-settings), so an indefinite blocking wait would hang the
+#: request; 5s is generous for a single small-JSON RMW while still keeping
+#: a stuck/dead lock-holder from wedging the endpoint forever.
+_BOARD_SETTINGS_LOCK_TIMEOUT_SECONDS = 5.0
+
+#: Poll interval used while waiting for the lock (see
+#: _acquire_flock_with_timeout). Short enough to keep the effective wait
+#: close to the true release time, cheap enough not to matter at this
+#: contention level (single small JSON file, sub-millisecond critical
+#: section).
+_BOARD_SETTINGS_LOCK_POLL_INTERVAL_SECONDS = 0.02
+
+
+def _acquire_flock_with_timeout(fh, timeout_seconds: float) -> bool:
+    """Try to acquire an exclusive, non-blocking flock on file handle *fh*,
+    polling until *timeout_seconds* elapses. Returns True once acquired,
+    False if the deadline passes first. Never raises (an unexpected OSError
+    from flock itself is treated as "could not acquire").
+
+    Deterministic under test: a test can hold the lock on the same path
+    (opened separately, LOCK_EX) for as long as it likes and this will
+    reliably time out and return False rather than block forever or
+    succeed spuriously.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(_BOARD_SETTINGS_LOCK_POLL_INTERVAL_SECONDS)
+
 
 def get_board_settings_config_path() -> Path:
     """Return the path to board_settings.json, honouring
@@ -4758,6 +4795,32 @@ def load_board_settings() -> dict:
         _BOARD_SETTINGS_PATH_AT_LOAD = config_path_str
         return _BOARD_SETTINGS_CACHE
 
+    # XACA-1083-015: a present-but-non-dict "teams" (null / list / string /
+    # number) is a LOAD problem, not a per-team validation warning — every
+    # downstream accessor here (get_board_settings_team_config_raw and
+    # everything built on it) assumes `config["teams"]` supports `.get()`,
+    # and handing it a non-dict raises AttributeError, breaking the "Never
+    # raises" contract this whole module documents. A missing "teams" key
+    # is fine (every `.get("teams", {})` call below defaults it to `{}`,
+    # itself a dict) — only a PRESENT non-dict value is the problem. Treat
+    # it exactly like a non-dict root: fall back to the empty-teams
+    # skeleton so every team fails closed, and let this surface through the
+    # same channel as the other malformed-config cases (lcars-ui/server.py's
+    # _board_settings_load_error mirrors this same check for the API's
+    # `loadError` field).
+    teams_value = config.get("teams", {})
+    if not isinstance(teams_value, dict):
+        print(
+            f"[aiteamforge-paths] WARNING: board_settings.json 'teams' must "
+            f"be a dict, got {type(teams_value).__name__} — every team "
+            "fails closed to requireEpicOnStart=true, "
+            "requireReleaseOnStart=true, no grandfathering",
+            file=sys.stderr,
+        )
+        _BOARD_SETTINGS_CACHE = _empty
+        _BOARD_SETTINGS_PATH_AT_LOAD = config_path_str
+        return _BOARD_SETTINGS_CACHE
+
     errors = validate_board_settings(config)
     for err in errors:
         print(f"[aiteamforge-paths] BOARD SETTINGS WARNING: {err}", file=sys.stderr)
@@ -4796,7 +4859,15 @@ def get_board_settings_team_config_raw(team_slug: str) -> dict:
         Per-team config dict, or {} if absent.
     """
     config = load_board_settings()
-    block = config.get("teams", {}).get(team_slug)
+    # Defense-in-depth (XACA-1083-015): load_board_settings() already
+    # normalizes a non-dict "teams" to the empty skeleton before caching, so
+    # this should never see anything else — but this accessor's own
+    # docstring promises "Does not raise" independent of that upstream
+    # guard, so don't assume it holds.
+    teams = config.get("teams", {})
+    if not isinstance(teams, dict):
+        return {}
+    block = teams.get(team_slug)
     return block if isinstance(block, dict) else {}
 
 
@@ -4958,10 +5029,33 @@ def set_board_settings_for_team(
     Returns:
         True on success. Returns False — NEVER raises — on any failure:
         bad arguments (non-bool value, empty team_slug, both args None), an
-        I/O error, or a write refused by the plausibility floor. A failed
-        write must never report success, so every failure path here returns
-        False without touching the file on disk (or leaves it exactly as it
-        was before this call — _atomic_write_json never partially writes).
+        I/O error, a write refused by the plausibility floor, or a lock
+        that could not be acquired within the timeout (see
+        _BOARD_SETTINGS_LOCK_TIMEOUT_SECONDS below). A failed write must
+        never report success, so every failure path here returns False
+        without touching the file on disk (or leaves it exactly as it was
+        before this call — _atomic_write_json never partially writes).
+
+    Concurrency (XACA-1083-016): the read-modify-write below (read the
+    runtime copy, merge this team's block, write it back) is NOT safe to
+    run unlocked — every per-team LCARS server process can call this
+    function against the SAME shared ~/.aiteamforge/board_settings.json,
+    and two overlapping RMWs racing unlocked lose whichever update
+    finishes writing first (classic lost-update). Locking lives HERE, in
+    the loader, rather than in each caller, so every caller is covered by
+    construction. This reuses the fcntl.flock cross-process primitive
+    already established in this module for exactly this shape of shared
+    JSON RMW (see _rewrite_config_on_disk's team-paths.json lock a few
+    hundred lines above: lock a sibling `<name>.lock` file opened "a" —
+    never truncated, never unlinked, so a racing process blocked on the
+    same inode can never be handed a fresh one — rather than inventing a
+    second lock convention). It deliberately diverges from that helper in
+    one respect: this is a synchronous HTTP-handler code path (XACA-1083-
+    004's POST /api/board-settings), so it bounds the wait with LOCK_NB
+    polling instead of blocking indefinitely on LOCK_EX, and treats a
+    timeout as a hard failure rather than degrading to an in-memory-only
+    result — a settings toggle that silently didn't land on disk would be
+    worse than an explicit 500.
     """
     if not team_slug or not isinstance(team_slug, str):
         print(
@@ -5002,48 +5096,96 @@ def set_board_settings_for_team(
         else Path.home() / ".aiteamforge" / "board_settings.json"
     )
 
-    base: dict | None = None
-    if target_path.exists():
-        try:
-            candidate = json.loads(target_path.read_text(encoding="utf-8"))
-            if isinstance(candidate, dict):
-                base = candidate
-        except (OSError, json.JSONDecodeError):
-            base = None  # fall through to the committed-source seed below
-
-    if base is None:
-        source_path = Path(__file__).parent / "board_settings.json"
-        try:
-            candidate = json.loads(source_path.read_text(encoding="utf-8"))
-            base = candidate if isinstance(candidate, dict) else None
-        except (OSError, json.JSONDecodeError):
-            base = None
-    if base is None:
-        base = {"_schemaVersion": 1, "teams": {}}
-
-    teams = base.get("teams")
-    if not isinstance(teams, dict):
-        teams = {}
-        base["teams"] = teams
-    block = teams.get(team_slug)
-    if not isinstance(block, dict):
-        block = {}
-    if require_epic_on_start is not None:
-        block["requireEpicOnStart"] = require_epic_on_start
-    if require_release_on_start is not None:
-        block["requireReleaseOnStart"] = require_release_on_start
-    teams[team_slug] = block
-
     try:
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_json(target_path, base)
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
         print(
-            f"[aiteamforge-paths] ERROR: could not write board_settings.json "
-            f"at {target_path}: {exc}",
+            f"[aiteamforge-paths] ERROR: set_board_settings_for_team: could "
+            f"not create {target_path.parent}: {exc}",
             file=sys.stderr,
         )
         return False
 
-    bust_board_settings_cache()
-    return True
+    # XACA-1083-016: lock the sibling `<name>.lock` file, same naming and
+    # same fcntl.flock primitive as _rewrite_config_on_disk's team-paths.json
+    # lock above — "a" (never truncate), never unlinked, so a racing process
+    # blocked on this inode is never left holding a lock on a path that has
+    # been swapped out from under it.
+    lock_file = target_path.with_name(f"{target_path.name}.lock")
+    try:
+        lock_fh = open(lock_file, "a")
+    except OSError as exc:
+        print(
+            f"[aiteamforge-paths] ERROR: set_board_settings_for_team: could "
+            f"not open lock file {lock_file}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+    try:
+        if not _acquire_flock_with_timeout(lock_fh, _BOARD_SETTINGS_LOCK_TIMEOUT_SECONDS):
+            print(
+                "[aiteamforge-paths] ERROR: set_board_settings_for_team: "
+                f"could not acquire lock on {lock_file} within "
+                f"{_BOARD_SETTINGS_LOCK_TIMEOUT_SECONDS}s — refusing to "
+                "write unlocked",
+                file=sys.stderr,
+            )
+            return False
+        try:
+            # Read-modify-write happens ENTIRELY inside the lock, including
+            # the initial read — reading the "current" state before
+            # acquiring the lock (as an earlier version of this function
+            # did) is itself a TOCTOU window: two callers could both read
+            # the pre-toggle state, then serialize on the write, and the
+            # second writer's merge would be based on stale data, silently
+            # discarding the first writer's change to a DIFFERENT key/team
+            # in the same shared file.
+            base: dict | None = None
+            if target_path.exists():
+                try:
+                    candidate = json.loads(target_path.read_text(encoding="utf-8"))
+                    if isinstance(candidate, dict):
+                        base = candidate
+                except (OSError, json.JSONDecodeError):
+                    base = None  # fall through to the committed-source seed below
+
+            if base is None:
+                source_path = Path(__file__).parent / "board_settings.json"
+                try:
+                    candidate = json.loads(source_path.read_text(encoding="utf-8"))
+                    base = candidate if isinstance(candidate, dict) else None
+                except (OSError, json.JSONDecodeError):
+                    base = None
+            if base is None:
+                base = {"_schemaVersion": 1, "teams": {}}
+
+            teams = base.get("teams")
+            if not isinstance(teams, dict):
+                teams = {}
+                base["teams"] = teams
+            block = teams.get(team_slug)
+            if not isinstance(block, dict):
+                block = {}
+            if require_epic_on_start is not None:
+                block["requireEpicOnStart"] = require_epic_on_start
+            if require_release_on_start is not None:
+                block["requireReleaseOnStart"] = require_release_on_start
+            teams[team_slug] = block
+
+            try:
+                _atomic_write_json(target_path, base)
+            except (OSError, ValueError) as exc:
+                print(
+                    f"[aiteamforge-paths] ERROR: could not write "
+                    f"board_settings.json at {target_path}: {exc}",
+                    file=sys.stderr,
+                )
+                return False
+
+            bust_board_settings_cache()
+            return True
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_fh.close()

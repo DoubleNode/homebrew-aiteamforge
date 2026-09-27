@@ -2790,6 +2790,27 @@ class TestServeBoardSettingsGet(unittest.TestCase):
         self.assertIsNotNone(data["loadError"])
         self.assertIn("could not be parsed", data["loadError"])
 
+    def test_get_non_dict_teams_fails_closed_true_true_with_load_error_not_500(self):
+        """XACA-1083-015: a present-but-non-dict 'teams' (null/list/string/
+        number) used to reach get_board_settings_team_config_raw()'s
+        unguarded `.get()` and raise AttributeError, turning this endpoint
+        into a 500 instead of the documented fail-closed 200 + loadError
+        contract every other malformed-config case gets."""
+        for bad_teams in (None, [1, 2, 3], "not-a-dict", 5):
+            with self.subTest(bad_teams=bad_teams):
+                with tempfile.TemporaryDirectory() as td:
+                    cfg = Path(td) / "board_settings.json"
+                    cfg.write_text(
+                        json.dumps({"_schemaVersion": 1, "teams": bad_teams}),
+                        encoding="utf-8",
+                    )
+                    code, data = _board_settings_get(team="academy", config_path=cfg)
+                self.assertEqual(code, 200)
+                self.assertIs(data["requireEpicOnStart"], True)
+                self.assertIs(data["requireReleaseOnStart"], True)
+                self.assertIsNotNone(data["loadError"])
+                self.assertIn("teams", data["loadError"])
+
     def test_get_command_seed_false_false(self):
         """Committed kanban-hooks/board_settings.json ships command false/false
         (12/12 pre-existing orphans — see docs/BOARD_SETTINGS.md)."""

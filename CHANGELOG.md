@@ -20,6 +20,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `~/.aiteamforge/board_settings.json`, and are toggled from LCARS SETTINGS → TEAM CONFIG (`GET`/`POST /api/board-settings`).
   An unreadable or malformed setting counts as **required**, never "allow". The gates are ported into the kanban helpers
   template. The template's `kb-work` still has no effort-points gate (a pre-existing XACA-0624 gap), and this change does not add one.
+  Follow-up: a list/null/string `teams` value in the settings file now fails closed without an error; saving a setting
+  takes a file lock so two LCARS servers can't lose each other's update; the Settings tab shows one shared, readable
+  UTC cutoff line instead of repeating it per row; the template comment now correctly says `kb-work` is gated.
 - **XACA-1258** — `kb-spacedock` gains the `vpn-dns-conflict` check: it reports `[fail]` when a
   third-party VPN utun owns the default route while Tailscale MagicDNS (100.100.100.100) is still
   ordered ahead of the VPN's resolver, which silently breaks all name resolution (raw IPs keep

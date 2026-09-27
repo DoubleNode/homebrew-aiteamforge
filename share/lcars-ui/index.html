@@ -911,6 +911,21 @@
                                     Applies to team <strong id="board-settings-team-label">--</strong>.
                                     ON is the default for both settings.
                                 </span>
+                                <!-- XACA-1083-018/019: ONE shared cutoff line for both gates below —
+                                     the epic and release rows used to each restate this sentence with
+                                     the identical cutoff, which read as though the two gates had their
+                                     own independently configurable cutoffs when there is only ever one
+                                     global value. Human-formatted UTC text is the visible content; the
+                                     raw ISO-8601 value lives on <time datetime="..."> (and its title
+                                     tooltip) for precision. board-settings-cutoff-none-line is the
+                                     fail-closed alternate shown instead whenever the cutoff is missing
+                                     or unparseable — never a blank line, never "Invalid Date". -->
+                                <span class="team-config-hint" id="board-settings-cutoff-line">
+                                    Items added before <time id="board-settings-cutoff-value" datetime="">--</time> are exempt from both gates.
+                                </span>
+                                <span class="team-config-hint" id="board-settings-cutoff-none-line" style="display:none;">
+                                    No items are exempt from either gate — every item is subject to both gates.
+                                </span>
                             </div>
                         </div>
 
@@ -922,8 +937,7 @@
                                 </label>
                                 <span class="team-config-hint">
                                     Enforced when work STARTS (kb-pick / kb-run / kb-work / reopen) — not
-                                    at item creation. Items added before
-                                    <span id="board-settings-epic-cutoff">--</span> are exempt.
+                                    at item creation.
                                 </span>
                             </div>
                             <div class="team-config-row-right">
@@ -940,8 +954,7 @@
                                 </label>
                                 <span class="team-config-hint">
                                     Enforced when work STARTS (kb-pick / kb-run / kb-work / reopen) — not
-                                    at item creation. Items added before
-                                    <span id="board-settings-release-cutoff">--</span> are exempt.
+                                    at item creation.
                                 </span>
                             </div>
                             <div class="team-config-row-right">
@@ -2799,7 +2812,7 @@
     <script src="js/vendor/jspdf.umd.min.js?v=1"></script>
 <!-- XACA-0292-005: Reusable filter-bar component — must load before lcars.js -->
 <script src="js/lcars-filter-bar.js?v=1.1"></script>
-<script src="js/lcars.js?v=3.85"></script>
+<script src="js/lcars.js?v=3.86"></script>
 <!-- XACA-0293-001: CR cycle-time compute module — must load before lcars-cr-tab.js (no DOM/network deps) -->
 <script src="js/lcars-cr-metrics.js"></script>
 <!-- XACA-0293-013: Shared poll bus — single 5s interval for all tile modules; must load after lcars-cr-metrics.js and before tile scripts -->

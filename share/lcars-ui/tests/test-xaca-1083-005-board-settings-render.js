@@ -59,9 +59,11 @@ var boardSettingsSrc = extractBoardSettingsSrc();
 var ELEMENT_IDS = [
     'board-settings-team-label',
     'board-settings-epic-checkbox', 'board-settings-epic-status',
-    'board-settings-epic-default', 'board-settings-epic-cutoff',
+    'board-settings-epic-default',
     'board-settings-release-checkbox', 'board-settings-release-status',
-    'board-settings-release-default', 'board-settings-release-cutoff',
+    'board-settings-release-default',
+    'board-settings-cutoff-line', 'board-settings-cutoff-value',
+    'board-settings-cutoff-none-line',
     'board-settings-error-row', 'board-settings-error-text',
 ];
 
@@ -72,7 +74,14 @@ function makeElement() {
         onchange: null,
         textContent: '',
         className: '',
+        title: '',
         style: { display: '' },
+        _attrs: {},
+        setAttribute: function (name, value) { this._attrs[name] = value; },
+        getAttribute: function (name) {
+            return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null;
+        },
+        removeAttribute: function (name) { delete this._attrs[name]; },
     };
 }
 
@@ -141,7 +150,7 @@ var GOOD_RESPONSE = {
     requireReleaseOnStart: false,
     requireEpicOnStartExplicit: false,   // resolved via fail-closed default -> "(default)" badge
     requireReleaseOnStartExplicit: true, // explicitly set by the team -> no badge
-    grandfatherCutoff: '2026-09-01',
+    grandfatherCutoff: '2026-09-26T22:02:39Z',
     loadError: null,
 };
 
@@ -163,8 +172,14 @@ test('loadBoardSettings: normal response renders checkboxes, cutoff, team label,
     // requireReleaseOnStartExplicit=true -> no badge
     assert.equal(env.dom.elements['board-settings-release-default'].style.display, 'none');
 
-    assert.equal(env.dom.elements['board-settings-epic-cutoff'].textContent, '2026-09-01');
-    assert.equal(env.dom.elements['board-settings-release-cutoff'].textContent, '2026-09-01');
+    // XACA-1083-019: ONE shared cutoff line (not a per-row duplicate) —
+    // human-formatted UTC text visible, raw ISO value preserved for
+    // precision on <time datetime="">/title.
+    assert.equal(env.dom.elements['board-settings-cutoff-value'].textContent, '26 Sep 2026, 22:02 UTC');
+    assert.equal(env.dom.elements['board-settings-cutoff-value'].getAttribute('datetime'), '2026-09-26T22:02:39Z');
+    assert.equal(env.dom.elements['board-settings-cutoff-value'].title, '2026-09-26T22:02:39Z');
+    assert.equal(env.dom.elements['board-settings-cutoff-line'].style.display, '');
+    assert.equal(env.dom.elements['board-settings-cutoff-none-line'].style.display, 'none');
 
     // No load error -> error row hidden
     assert.equal(env.dom.elements['board-settings-error-row'].style.display, 'none');
@@ -244,7 +259,6 @@ test('saveBoardSettingsFlag: on success, re-renders from the RESPONSE (not the c
         checkboxId: 'board-settings-epic-checkbox',
         statusId: 'board-settings-epic-status',
         defaultBadgeId: 'board-settings-epic-default',
-        cutoffId: 'board-settings-epic-cutoff',
     };
     await saveEnv.sandbox.saveBoardSettingsFlag(epicField);
 
@@ -280,7 +294,6 @@ test('saveBoardSettingsFlag: on failure, reverts to the last known-good server s
         checkboxId: 'board-settings-epic-checkbox',
         statusId: 'board-settings-epic-status',
         defaultBadgeId: 'board-settings-epic-default',
-        cutoffId: 'board-settings-epic-cutoff',
     };
     await failingEnv.sandbox.saveBoardSettingsFlag(epicField);
 
@@ -313,7 +326,6 @@ test('saveBoardSettingsFlag: disables the checkbox for the duration of the POST'
         checkboxId: 'board-settings-epic-checkbox',
         statusId: 'board-settings-epic-status',
         defaultBadgeId: 'board-settings-epic-default',
-        cutoffId: 'board-settings-epic-cutoff',
     };
     var savePromise = inFlightEnv.sandbox.saveBoardSettingsFlag(epicField);
 
@@ -325,4 +337,32 @@ test('saveBoardSettingsFlag: disables the checkbox for the duration of the POST'
     await savePromise;
 
     assert.equal(inFlightEnv.dom.elements['board-settings-epic-checkbox'].disabled, false);
+});
+
+test('loadBoardSettings: missing/invalid grandfatherCutoff renders the fail-closed "no items are exempt" line, never blank or Invalid Date (XACA-1083-018/019)', async function () {
+    var casesEl = [null, undefined, '', 'not-a-real-timestamp'];
+    for (var i = 0; i < casesEl.length; i++) {
+        var badCutoffResponse = Object.assign({}, GOOD_RESPONSE, { grandfatherCutoff: casesEl[i] });
+        var env = makeEnv({ fetchImpl: function () { return Promise.resolve(fakeJsonResponse(200, badCutoffResponse)); } });
+
+        await env.sandbox.loadBoardSettings();
+
+        // The fail-closed alternate line is shown, the normal templated
+        // sentence is hidden -- never left rendering "Invalid Date" or "--".
+        assert.equal(env.dom.elements['board-settings-cutoff-line'].style.display, 'none', 'case ' + i);
+        assert.equal(env.dom.elements['board-settings-cutoff-none-line'].style.display, '', 'case ' + i);
+        assert.doesNotMatch(env.dom.elements['board-settings-cutoff-value'].textContent, /Invalid Date/, 'case ' + i);
+    }
+});
+
+test('loadBoardSettings: a loadError response also renders the fail-closed cutoff line, not a stale prior value', async function () {
+    var errorResponse = Object.assign({}, GOOD_RESPONSE, {
+        loadError: 'board_settings.json could not be parsed — fails closed to true/true',
+    });
+    var env = makeEnv({ fetchImpl: function () { return Promise.resolve(fakeJsonResponse(200, errorResponse)); } });
+
+    await env.sandbox.loadBoardSettings();
+
+    assert.equal(env.dom.elements['board-settings-cutoff-line'].style.display, 'none');
+    assert.equal(env.dom.elements['board-settings-cutoff-none-line'].style.display, '');
 });
