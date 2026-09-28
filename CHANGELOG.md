@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.27] - 2026-09-28
 - **XACA-0888** — the project-knowledge path resolver (`_kb_knowledge_project_path`) now fails loud
   instead of silently falling back to a plausible-looking `.../projects/unknown` path: outside a git
   repo (or inside a bare repo, where `git rev-parse --is-inside-work-tree` prints `false` even though
@@ -7447,7 +7449,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.26...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.27...HEAD
+[0.20.27]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.26...v0.20.27
 [0.20.26]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.25...v0.20.26
 [0.20.25]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.24...v0.20.25
 [0.20.24]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.23...v0.20.24
