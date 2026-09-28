@@ -22818,12 +22818,13 @@ _kb_cr_write_manifest_crid() {
     local releases_dir manifest_file tmp_manifest
     releases_dir=$(_kb_get_releases_dir "$team")
     if [[ -z "$releases_dir" ]]; then
-        # XACA-1151-056: template hardening (canonical does not guard this;
-        # deliberate divergence, see CHANGELOG) -- _kb_get_releases_dir is
-        # fail-closed for an unresolvable team, and an unguarded empty
-        # $releases_dir would build a root-relative manifest_file
+        # XACA-1151-056: _kb_get_releases_dir is fail-closed for an
+        # unresolvable team (empty + rc=1); an unguarded empty $releases_dir
+        # would build a root-relative manifest_file
         # ("/${rel_id}/manifest.json"). Warn and skip, same non-fatal
-        # contract as the pre-existing missing-manifest branch below.
+        # contract as the pre-existing missing-manifest branch below. Ported
+        # identically into canonical and the tap template -- see the
+        # XACA-1151-056 CHANGELOG entries in both repos.
         echo "kb-cr: WARNING — could not resolve releases directory for team '$team'; crIds not written (non-fatal)" >&2
         echo "  Run 'kb-release sync' to reconcile manifest drift." >&2
         return 0
@@ -22921,12 +22922,13 @@ _kb_cr_release_unlink() {
     local releases_dir manifest_file
     releases_dir=$(_kb_get_releases_dir "$team")
     if [[ -z "$releases_dir" ]]; then
-        # XACA-1151-056: template hardening (canonical does not guard this;
-        # deliberate divergence, see CHANGELOG) -- _kb_get_releases_dir is
-        # fail-closed for an unresolvable team, and an unguarded empty
-        # $releases_dir would build a root-relative manifest_file
+        # XACA-1151-056: _kb_get_releases_dir is fail-closed for an
+        # unresolvable team (empty + rc=1); an unguarded empty $releases_dir
+        # would build a root-relative manifest_file
         # ("/${current_rel_id}/manifest.json"). Warn and skip Site 3 only;
         # unlink already succeeded at Sites 1/2, so this stays non-fatal.
+        # Ported identically into canonical and the tap template -- see the
+        # XACA-1151-056 CHANGELOG entries in both repos.
         echo "kb-cr: WARNING — could not resolve releases directory for team '$team'; manifest crIds not updated (non-fatal)" >&2
     else
         manifest_file="${releases_dir}/${current_rel_id}/manifest.json"
