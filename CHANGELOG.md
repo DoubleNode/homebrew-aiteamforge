@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1151-061 (PR #982 review r1)** — `kb-backlog add`/`kb-backlog change`'s `--sub-repo`
+  validation now matches the supplied value as a LITERAL (`grep -qxF --`) instead of as a `grep`
+  regex/option (`grep -qx`), closing a bypass where a regex metachar (e.g. `.*`) or a leading `-e`
+  could defeat the umbrella membership check. Ported byte-identically from the dev-source
+  `kanban-helpers.sh` fix at both call sites (`add` and `change`).
 - **XACA-1151-051** — `kb-backlog` gains `--sub-repo` on `add`/`change`, a subitem-ID collision fix,
   and a completion-time-accuracy fix, closing the remaining drift from the dev-source kanban helpers.
   - `kb-backlog add`/`kb-backlog change` accept `--sub-repo <name>` to tag a backlog item with the

@@ -7228,7 +7228,7 @@ kb-backlog() {
                 if [[ -n "$umbrella_root" ]]; then
                     local sub_repos_list
                     sub_repos_list=$(_kb_umbrella_sub_repos 2>/dev/null)
-                    if ! echo "$sub_repos_list" | grep -qx "$sub_repo"; then
+                    if ! echo "$sub_repos_list" | grep -qxF -- "$sub_repo"; then
                         echo "Error: sub-repo '$sub_repo' not found in umbrella '$umbrella_root'"
                         echo "Available: $(echo "$sub_repos_list" | tr '\n' ' ' | sed 's/ $//')"
                         return 1
@@ -7438,7 +7438,7 @@ kb-backlog() {
                 if [[ -n "$umbrella_root_chg" ]]; then
                     local sub_repos_list_chg
                     sub_repos_list_chg=$(_kb_umbrella_sub_repos 2>/dev/null)
-                    if ! echo "$sub_repos_list_chg" | grep -qx "$change_sub_repo"; then
+                    if ! echo "$sub_repos_list_chg" | grep -qxF -- "$change_sub_repo"; then
                         echo "Error: sub-repo '$change_sub_repo' not found in umbrella '$umbrella_root_chg'"
                         echo "Available: $(echo "$sub_repos_list_chg" | tr '\n' ' ' | sed 's/ $//')"
                         return 1
