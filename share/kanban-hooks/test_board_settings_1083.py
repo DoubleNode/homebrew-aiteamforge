@@ -11,9 +11,16 @@ Covers:
   T6 — CLI contract (`get` / `set` subprocess invocations)
   T20 — XACA-1083-020: single grandfatherCutoff validator, shared by the
         shell gate (real zsh subprocess), the CLI, and is_item_grandfathered()
+  T21 — XACA-1083-021: created_at routed through the SAME validator as
+        grandfatherCutoff (was more lenient before); the validator itself
+        made version-independent (Python 3.9 vs 3.11+ fromisoformat
+        divergence); a documented-narrowing regression guard vs. the real
+        shell gate
 
-Run:
+Run (this suite MUST be green under BOTH interpreters -- see T21's own
+module comment for why):
     cd kanban-hooks && python3 test_board_settings_1083.py
+    cd kanban-hooks && /usr/bin/python3 test_board_settings_1083.py
 """
 from __future__ import annotations
 
@@ -468,12 +475,107 @@ _CUTOFF_MATRIX: list[tuple[str, bool]] = [
     ("2026-09-26T22:02:39+05:00", False),    # non-UTC offset -- REJECTED
     ("2026/09/26T22:02:39Z", False),         # wrong date separator
     ("2026-13-40T22:02:39Z", False),         # invalid calendar date (month 13)
+    # XACA-1083-021 additions. Every new row below is expected=False, which
+    # is why it's safe to add to THIS matrix (anchored on
+    # _CREATED_AT_BEFORE_ALL=2000, "before every VALID 2026 cutoff" --
+    # something that only holds for cutoffs the shell actually accepts as
+    # valid AND that fall after the anchor; a False row's truth doesn't
+    # depend on that at all, since an unparseable/uncompared cutoff is
+    # False regardless of anchor timing). Rows where the shell's real
+    # behavior is True-but-only-via-rollover (Feb 30, leap second, etc.) are
+    # deliberately NOT here -- see _DELIBERATE_NARROWING_MATRIX below.
+    ("2026-09-26T24:00:00Z", False),         # hour 24, Z -- the XACA-1083-021 regression case
+    ("2026-09-26T24:00:00.5Z", False),       # hour 24, fractional, Z
+    ("2026-09-26T24:00:00", False),          # hour 24, naive
+    (" 2026-09-26T22:02:39Z", False),        # leading space -- shell rejects too (unlike trailing)
+    ("2026-09-26T22:60:39Z", False),         # minute 60
+    ("2026-09-26T25:00:00Z", False),         # hour 25
+    ("2026-09-32T00:00:00Z", False),         # day 32 -- out of range for every month
+    ("2026-00-01T00:00:00Z", False),         # month 00
+    ("1969-12-31T23:59:59Z", False),         # pre-1970 -- shell/jq can't represent a negative epoch here
+    ("0001-01-01T00:00:00Z", False),         # year 1 -- below the 1970 floor
+    ("10000-01-01T00:00:00Z", False),        # year 10000 -- 5-digit year, fails the fixed-width match
 ]
 
 #: Well before every VALID cutoff in the matrix above (all in 2026), so a
 #: matrix cutoff that the validator/shell accepts always grandfathers an
-#: item created at this instant.
+#: item created at this instant. NOTE: every _CUTOFF_MATRIX row with
+#: expected=True is dated 2026, so this anchor is safe for the whole
+#: matrix -- a cutoff dated 1970 or earlier would break the "before every
+#: VALID cutoff" property, which is exactly why the new pre-1970/year-1
+#: rows above are only ever asserted as expected=False (see
+#: _CREATED_AT_MATRIX for the created_at-direction equivalents, anchored
+#: the other way, which DO exercise a valid 1970 timestamp as True).
 _CREATED_AT_BEFORE_ALL = "2000-01-01T00:00:00Z"
+
+#: Far enough in the future that it postdates every timestamp in
+#: _CREATED_AT_MATRIX and _DELIBERATE_NARROWING_MATRIX below -- the
+#: created_at-direction mirror of _CREATED_AT_BEFORE_ALL. Used as the FIXED
+#: cutoff while created_at is the varying value, so "shell exempts an item
+#: created at <value>" collapses to "shell can parse <value> as a
+#: timestamp" for every row (never a comparison-driven False).
+_CUTOFF_AFTER_ALL = "2099-01-01T00:00:00Z"
+
+#: XACA-1083-021: created_at now goes through the EXACT SAME validator as
+#: grandfatherCutoff (is_item_grandfathered() no longer uses the separate,
+#: more lenient _parse_iso8601_utc(), which has been removed). This matrix
+#: mirrors _CUTOFF_MATRIX's rows (MEASURED against the real shell gate,
+#: created_at role -- see _shell_is_grandfathered usage in
+#: test_t21_created_at_matrix_matches_shell) plus the specific "the six from
+#: the finding" cases the XACA-1083-021 task brief called out by name for
+#: created_at: date-only, offset ('+00:00'), space-separated, lowercase 'z',
+#: and 'T24:00:00Z' in both roles.
+_CREATED_AT_MATRIX: list[tuple[str, bool]] = [
+    ("2026-09-26T22:02:39Z", True),
+    ("2026-09-26T22:02:39", True),
+    ("2026-09-26T22:02:39.123Z", True),
+    ("2026-09-26T22:02:39.123456Z", True),
+    ("2026-09-26T22:02:39.123", True),
+    ("2026-09-26T22:02:39+00:00", False),    # finding: UTC offset -- Python used to exempt this
+    ("2026-09-26", False),                   # finding: date-only -- Python used to exempt this
+    ("2026-09-26 22:02:39Z", False),         # finding: space separator -- Python used to exempt this
+    ("2026-09-26T22:02:39z", False),         # finding: lowercase 'z' -- Python used to exempt this
+    ("garbage", False),
+    ("", False),
+    ("2026-09-26T22:02:39.Z", False),
+    ("2026-09-26T22:02:39+05:00", False),
+    ("2026/09/26T22:02:39Z", False),
+    ("2026-13-40T22:02:39Z", False),
+    ("2026-09-26T24:00:00Z", False),         # finding: T24:00:00Z -- Python used to exempt this
+    ("2026-09-26T24:00:00.5Z", False),
+    ("2026-09-26T24:00:00", False),
+    (" 2026-09-26T22:02:39Z", False),
+    ("2026-09-26T22:60:39Z", False),
+    ("2026-09-26T25:00:00Z", False),
+    ("2026-09-32T00:00:00Z", False),
+    ("2026-00-01T00:00:00Z", False),
+    ("1969-12-31T23:59:59Z", False),
+    ("1970-01-01T00:00:00Z", True),          # exactly the 1970 floor -- valid, and before _CUTOFF_AFTER_ALL
+    ("0001-01-01T00:00:00Z", False),
+    ("10000-01-01T00:00:00Z", False),
+]
+
+#: XACA-1083-021: cases where the real shell gate accepts a string (via
+#: mktime/timegm ROLLOVER rather than rejection) that this module's
+#: validator deliberately rejects outright -- documented, sanctioned
+#: narrowing (see _normalize_iso8601_gate_timestamp's docstring: "narrower
+#: is the fail-closed direction, never wider"). Each row is (label, value,
+#: shell_is_expected_to_parse_it). The test below re-measures the real
+#: shell (never assumes the label) in BOTH the cutoff role and the
+#: created_at role, and asserts the Python validator rejects it in both --
+#: i.e. Python can never be WIDER than the shell, even though it is
+#: narrower here by design.
+_DELIBERATE_NARROWING_MATRIX: list[tuple[str, str, bool]] = [
+    ("leap second 23:59:60Z", "2026-12-31T23:59:60Z", True),
+    ("Feb 30 (rolls to Mar 2)", "2026-02-30T00:00:00Z", True),
+    ("Feb 29 non-leap-year (rolls to Mar 1)", "2026-02-29T00:00:00Z", True),
+    ("day 0 (rolls to prior month's last day)", "2026-09-00T00:00:00Z", True),
+    ("trailing newline", "2026-09-26T22:02:39Z\n", True),
+    ("trailing space", "2026-09-26T22:02:39Z ", True),
+    ("unpadded month", "2026-9-26T22:02:39Z", True),
+    ("unpadded day", "2026-09-6T22:02:39Z", True),
+    ("unpadded hour", "2026-09-26T2:02:39Z", True),
+]
 
 
 def _shell_is_grandfathered(cutoff: str, created_at: str) -> bool:
@@ -619,6 +721,175 @@ def test_t20_cli_get_grandfather_cutoff_matches_validator():
                 f"cutoff {cutoff!r}: CLI printed {printed!r}, expected grandfatherCutoff={expected_val!r}"
             )
     print("PASS T20e: CLI `get` grandfatherCutoff= line matches the validator for every matrix entry")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T21 — XACA-1083-021: close the cutoff/created_at parity class for good, and
+# fix the Python-3.9 regression in _normalize_grandfather_cutoff (it used to
+# build a canonical string and hand it to datetime.fromisoformat(), whose
+# accepted grammar differs between 3.9 and 3.11+ -- see the long comment
+# above _normalize_iso8601_gate_timestamp() in aiteamforge_paths.py). Covers:
+#   - the regression itself: this whole file, run under BOTH `python3` (this
+#     machine's PATH interpreter) and /usr/bin/python3 (the real macOS
+#     system 3.9), must be green -- see the run instructions in this file's
+#     module docstring and the task's own dual-interpreter requirement.
+#   - is_item_grandfathered()'s created_at now goes through the exact same
+#     validator as grandfatherCutoff (T21b/c/d below).
+#   - the specific reviewer-found gaps: T24:00:00Z, pre-1970, a trailing
+#     '\n' past a '$'-anchored regex (T21a/b, extending _CUTOFF_MATRIX).
+#   - documented, sanctioned narrowing where the shell parses via mktime
+#     rollover and this module's validator deliberately does not (T21e).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_t21_created_at_matrix_matches_validator():
+    """T21a: _normalize_iso8601_gate_timestamp() accepts EXACTLY the
+    strings in _CREATED_AT_MATRIX that the label says it should -- the
+    created_at-direction counterpart of T20a."""
+    from aiteamforge_paths import _normalize_iso8601_gate_timestamp
+
+    for created_at, expected in _CREATED_AT_MATRIX:
+        canonical = _normalize_iso8601_gate_timestamp(created_at)
+        accepts = canonical is not None
+        assert accepts == expected, (
+            f"created_at {created_at!r}: python accepts={accepts} expected={expected}"
+        )
+        if accepts:
+            assert canonical is not None and canonical.endswith("Z") and "T" in canonical
+    print(f"PASS T21a: _normalize_iso8601_gate_timestamp matches the created_at matrix ({len(_CREATED_AT_MATRIX)} cases)")
+
+
+def test_t21_created_at_matrix_matches_shell():
+    """T21b: the REAL shell gate (zsh subprocess, real kanban-helpers.sh),
+    with created_at as the VARYING value and a fixed far-future cutoff
+    (_CUTOFF_AFTER_ALL), agrees with both the matrix label and the Python
+    validator for every created_at in _CREATED_AT_MATRIX -- the
+    created_at-direction counterpart of T20b, and the direct regression
+    guard for the reviewer finding that created_at was parsed more
+    leniently than grandfatherCutoff."""
+    import shutil
+
+    if shutil.which("zsh") is None:
+        print("SKIP T21b: zsh not on PATH")
+        return
+    if not (_REPO_ROOT / "kanban-helpers.sh").is_file():
+        print("SKIP T21b: kanban-helpers.sh not found")
+        return
+    from aiteamforge_paths import _normalize_iso8601_gate_timestamp
+
+    for created_at, expected in _CREATED_AT_MATRIX:
+        shell_exempt = _shell_is_grandfathered(_CUTOFF_AFTER_ALL, created_at)
+        assert shell_exempt == expected, (
+            f"created_at {created_at!r}: shell verdict={shell_exempt} expected={expected} -- "
+            "the MEASURED matrix has drifted from the real shell gate's actual behavior"
+        )
+        python_accepts = _normalize_iso8601_gate_timestamp(created_at) is not None
+        assert shell_exempt == python_accepts, (
+            f"created_at {created_at!r}: shell exempt={shell_exempt} python validator "
+            f"accepts={python_accepts} -- shell/python DIVERGE on created_at"
+        )
+    print(f"PASS T21b: shell gate and Python validator agree on every created_at ({len(_CREATED_AT_MATRIX)} cases)")
+
+
+def test_t21_is_item_grandfathered_uses_shared_validator_for_created_at():
+    """T21c: is_item_grandfathered() with a FIXED, valid cutoff and a
+    VARYING created_at from _CREATED_AT_MATRIX agrees with the shared
+    validator's accept/reject verdict for every row -- proving
+    is_item_grandfathered() routes created_at through
+    _normalize_iso8601_gate_timestamp() (not the old, more lenient,
+    now-removed _parse_iso8601_utc())."""
+    from aiteamforge_paths import _normalize_iso8601_gate_timestamp, is_item_grandfathered
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_path = Path(tmpdir) / "cfg.json"
+        _write_json(cfg_path, {"teams": {}, "grandfatherCutoff": _CUTOFF_AFTER_ALL})
+        with _EnvOverride(str(cfg_path)):
+            for created_at, expected in _CREATED_AT_MATRIX:
+                exempt = is_item_grandfathered(created_at)
+                assert exempt == expected, (
+                    f"created_at {created_at!r}: is_item_grandfathered={exempt} expected={expected}"
+                )
+    print("PASS T21c: is_item_grandfathered() agrees with the shared validator for every created_at")
+
+
+def test_t21_cross_layer_shell_parity_created_at_fixture():
+    """T21d: cross-layer parity fixture -- for every created_at in
+    _CREATED_AT_MATRIX, against a FIXED valid cutoff
+    (_CUTOFF_AFTER_ALL), the REAL shell gate's verdict equals Python's
+    is_item_grandfathered() verdict. This is the exact scenario named in
+    the XACA-1083-021 task brief: 'a fixture item with that addedAt
+    against a fixed valid cutoff'."""
+    import shutil
+
+    if shutil.which("zsh") is None:
+        print("SKIP T21d: zsh not on PATH")
+        return
+    if not (_REPO_ROOT / "kanban-helpers.sh").is_file():
+        print("SKIP T21d: kanban-helpers.sh not found")
+        return
+    from aiteamforge_paths import is_item_grandfathered
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_path = Path(tmpdir) / "cfg.json"
+        _write_json(cfg_path, {"teams": {}, "grandfatherCutoff": _CUTOFF_AFTER_ALL})
+        with _EnvOverride(str(cfg_path)):
+            for created_at, _ in _CREATED_AT_MATRIX:
+                shell_verdict = _shell_is_grandfathered(_CUTOFF_AFTER_ALL, created_at)
+                python_verdict = is_item_grandfathered(created_at)
+                assert shell_verdict == python_verdict, (
+                    f"created_at {created_at!r} vs fixed cutoff {_CUTOFF_AFTER_ALL!r}: "
+                    f"shell={shell_verdict} python={python_verdict} -- cross-layer DIVERGENCE"
+                )
+    print(f"PASS T21d: shell and is_item_grandfathered() agree on every fixture row ({len(_CREATED_AT_MATRIX)} cases)")
+
+
+def test_t21_deliberate_narrowing_never_wider_than_shell():
+    """T21e: for every case in _DELIBERATE_NARROWING_MATRIX -- inputs the
+    real shell gate accepts only via mktime/timegm ROLLOVER (leap second,
+    Feb 30, day 0, unpadded fields, trailing whitespace) -- the REAL shell
+    (re-measured, never assumed) exempts an item in BOTH the cutoff role
+    and the created_at role, while the Python validator rejects the value
+    outright in both roles too. This is the documented, SANCTIONED
+    narrowing (see _normalize_iso8601_gate_timestamp's docstring): never a
+    case where Python is WIDER (would exempt something the shell refuses),
+    only narrower (Python correctly say not-exempt while shell would have
+    accepted it) -- the safe fail-closed direction."""
+    import shutil
+
+    if shutil.which("zsh") is None:
+        print("SKIP T21e: zsh not on PATH")
+        return
+    if not (_REPO_ROOT / "kanban-helpers.sh").is_file():
+        print("SKIP T21e: kanban-helpers.sh not found")
+        return
+    from aiteamforge_paths import _normalize_iso8601_gate_timestamp
+
+    for label, value, shell_expected_to_parse in _DELIBERATE_NARROWING_MATRIX:
+        shell_as_cutoff = _shell_is_grandfathered(value, _CREATED_AT_BEFORE_ALL)
+        shell_as_created_at = _shell_is_grandfathered(_CUTOFF_AFTER_ALL, value)
+        assert shell_as_cutoff == shell_expected_to_parse, (
+            f"{label} ({value!r}) as cutoff: shell exempt={shell_as_cutoff} "
+            f"expected={shell_expected_to_parse} -- the measured narrowing matrix has drifted"
+        )
+        assert shell_as_created_at == shell_expected_to_parse, (
+            f"{label} ({value!r}) as created_at: shell exempt={shell_as_created_at} "
+            f"expected={shell_expected_to_parse} -- the measured narrowing matrix has drifted"
+        )
+        python_accepts = _normalize_iso8601_gate_timestamp(value) is not None
+        assert python_accepts is False, (
+            f"{label} ({value!r}): python validator accepts it (canonical="
+            f"{_normalize_iso8601_gate_timestamp(value)!r}) but this is supposed to be a "
+            "DELIBERATELY REJECTED case -- if the validator's grammar changed to accept this, "
+            "move it out of _DELIBERATE_NARROWING_MATRIX and into _CUTOFF_MATRIX/_CREATED_AT_MATRIX instead"
+        )
+        # The one invariant that actually matters: never wider than the shell.
+        # Python rejecting (False) while the shell exempts (True) is safe;
+        # the reverse (python True, shell False) would be the XACA-1083-020
+        # bug recurring, and is impossible here since python_accepts is
+        # asserted False above for every row.
+        assert not (python_accepts and not shell_as_cutoff), "python wider than shell (cutoff role)"
+        assert not (python_accepts and not shell_as_created_at), "python wider than shell (created_at role)"
+    print(f"PASS T21e: {len(_DELIBERATE_NARROWING_MATRIX)} deliberate-narrowing cases -- shell exempts, "
+          "python safely refuses, never the reverse")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1024,6 +1295,12 @@ def run_all() -> bool:
         test_t20_get_board_settings_grandfather_cutoff_returns_validated_value,
         test_t20_is_item_grandfathered_never_exempts_a_shell_rejected_cutoff,
         test_t20_cli_get_grandfather_cutoff_matches_validator,
+        # T21
+        test_t21_created_at_matrix_matches_validator,
+        test_t21_created_at_matrix_matches_shell,
+        test_t21_is_item_grandfathered_uses_shared_validator_for_created_at,
+        test_t21_cross_layer_shell_parity_created_at_fixture,
+        test_t21_deliberate_narrowing_never_wider_than_shell,
         # T5
         test_t5_setter_writes_and_is_readable_back,
         test_t5_setter_preserves_other_teams,

@@ -4653,22 +4653,56 @@ def get_board_settings_config_path() -> Path:
     return Path(__file__).parent / "board_settings.json"
 
 
-# XACA-1083-020: single grandfatherCutoff validator, shared by the shell
-# gate's Python-facing accessors, the CLI, and the LCARS API/UI. Prior to
-# this ticket, get_board_settings_grandfather_cutoff() returned the RAW
-# config string and is_item_grandfathered() parsed it with
-# _parse_iso8601_utc() (via datetime.fromisoformat), which is MORE lenient
-# than the shell gate (_kb_board_settings_is_grandfathered in
+# XACA-1083-020/021: single ISO-8601 "gate timestamp" validator, shared by
+# BOTH grandfatherCutoff AND an item's creation timestamp (created_at), and
+# in turn by the shell gate's Python-facing accessors, the CLI, and the
+# LCARS API/UI. Prior to XACA-1083-020, get_board_settings_grandfather_
+# cutoff() returned the RAW config string and is_item_grandfathered() parsed
+# it with _parse_iso8601_utc() (via datetime.fromisoformat), which is MORE
+# lenient than the shell gate (_kb_board_settings_is_grandfathered in
 # kanban-helpers.sh, built on jq's fromdateiso8601): Python accepted
 # '+00:00'/other UTC offsets, date-only strings, a space in place of 'T',
 # and lowercase 'z' — the shell rejects all of those (MEASURED against the
 # real shell gate, see docs/BOARD_SETTINGS.md § Grandfather Cutoff Grammar).
-# That divergence is exactly the LCARS UI bug this ticket closes: the UI
-# could state an exemption the shell gate would never honour. Every reader
-# of grandfatherCutoff now goes through this ONE validator.
+# That divergence is exactly the LCARS UI bug XACA-1083-020 closed for the
+# cutoff half. XACA-1083-021 closes the other two gaps a reviewer found in
+# that fix:
+#   1. This validator used to build the canonical string and hand it to
+#      datetime.fromisoformat() to confirm it names a real calendar
+#      date/time. Python 3.11+ rewrote fromisoformat() to be MORE lenient
+#      than 3.9/3.10 in ISO-8601-specific ways — critically, it treats
+#      'HH:MM:SS' == '24:00:00' as a valid "end of day" instant and rolls it
+#      to midnight the next day, where 3.9's fromisoformat (and the real
+#      macOS system /usr/bin/python3, which IS 3.9) raises. That meant this
+#      validator's behavior silently depended on which python3 happened to
+#      be on $PATH: on 3.11+ it accepted 'T24:00:00Z' as a valid cutoff (and
+#      is_item_grandfathered() would exempt an item whose created_at was
+#      'T24:00:00Z' too); on the real system 3.9 it also broke in the
+#      OPPOSITE direction — 3.9's fromisoformat has no 'Z'-suffix support at
+#      all, so it raised ValueError on every canonical, Z-suffixed cutoff
+#      this validator ever produces, meaning `board_settings.py get` printed
+#      an EMPTY grandfatherCutoff= on any machine whose python3 resolves to
+#      the 3.9 system interpreter — silently un-grandfathering every legacy
+#      item. Fixed by never calling fromisoformat() on untrusted input at
+#      all: this validator now builds the datetime purely from the regex's
+#      captured integer components via the plain `datetime(y, m, d, h, mi,
+#      s, tzinfo=...)` constructor, which enforces identical component
+#      bounds (month 1-12, day valid-for-that-month/year, hour 0-23, minute
+#      0-59, second 0-59) on every CPython version — MEASURED identical on
+#      3.9.6 and 3.14.5 (see test_board_settings_1083.py's T21 matrix).
+#   2. is_item_grandfathered() parsed created_at with the separate, more
+#      lenient _parse_iso8601_utc() (naive-assumed-UTC, but ALSO accepted
+#      UTC offsets, date-only, space-separated, and lowercase 'z' — every
+#      form this validator was written to reject for the cutoff half). An
+#      item could be reported exempt under a created_at the shell gate would
+#      never have parsed as valid, and vice versa. created_at now goes
+#      through this exact same validator — see is_item_grandfathered() below
+#      and _parse_iso8601_utc() has been removed (no remaining callers).
 #
 # Grammar accepted (a deliberate SUBSET of what the shell's jq expression
-# accepts — narrower is the fail-closed direction, never wider):
+# accepts — narrower is the fail-closed direction, never wider; MEASURED
+# against the real shell gate for both the cutoff and created_at roles, see
+# docs/BOARD_SETTINGS.md § "Grandfather Cutoff / Created-At Grammar"):
 #   'YYYY-MM-DDTHH:MM:SSZ'       canonical
 #   'YYYY-MM-DDTHH:MM:SS'        naive, treated as UTC (shell's `norm`
 #                                 appends 'Z' when the string doesn't already
@@ -4676,59 +4710,130 @@ def get_board_settings_config_path() -> Path:
 #   'YYYY-MM-DDTHH:MM:SS.fffZ'   fractional seconds, any digit count
 #   'YYYY-MM-DDTHH:MM:SS.fff'    naive + fractional
 # Fractional digits are always truncated (never rounded) — the shell's
-# `norm` filter drops them outright rather than parsing them.
+# `norm` filter drops them outright rather than parsing them. Year is
+# additionally bounded to [1970, 9999]: MEASURED, the shell's own jq/timegm
+# rejects any instant before 1970-01-01T00:00:00Z on this platform (negative
+# epoch), and a 5+ digit year fails to match the fixed 4-digit year group at
+# all — so this floor/ceiling is exact parity with the shell, not a
+# narrowing (see the '2026-13-40'-style REJECT rows are separate: those come
+# from the component-bounds check below, not the year check).
 #
-# Deliberately narrower than the shell's underlying libc strptime in a
-# handful of edge cases the shell also happens to accept: non-zero-padded
-# month/day/hour (e.g. '2026-9-6T2:2:39Z'), trailing whitespace, and a
-# seconds value of 60 (leap-second leniency in glibc's strptime/mktime).
-# None of those are ever emitted by board_settings.json's own writer
-# (set_board_settings_for_team always writes the canonical form) or by a
-# human editing the committed schema by hand in good faith; rejecting them
-# here is "this validator accepts a subset of what the shell accepts",
-# which is safe by the same fail-closed logic as everything else in this
-# module — the bug this ticket fixes is the opposite direction (Python
-# accepting something the shell rejects).
-_GRANDFATHER_CUTOFF_RE = re.compile(
-    r"^(?P<y>\d{4})-(?P<mo>\d{2})-(?P<d>\d{2})"
+# Deliberately narrower than the shell's underlying libc strptime/mktime in
+# a handful of edge cases the shell also happens to accept via rollover
+# rather than rejection: non-zero-padded month/day/hour (e.g.
+# '2026-9-6T2:2:39Z'), trailing whitespace/newline, a seconds value of 60
+# (leap-second leniency in mktime), and a calendar-invalid month-day pair
+# such as Feb 30 or day 0 (mktime normalizes these to the nearest real date
+# instead of rejecting them; this validator's datetime() constructor call
+# raises instead). None of those are ever emitted by board_settings.json's
+# own writer (set_board_settings_for_team always writes the canonical form)
+# or by a real item's addedAt (machine-generated, always canonical); this
+# validator being narrower there is safe by the same fail-closed logic as
+# everywhere else in this module — the class of bug XACA-1083-020/021 fixes
+# is exclusively the OPPOSITE direction (Python accepting/exempting
+# something the shell would reject/refuse to exempt).
+_ISO8601_GATE_TIMESTAMP_RE = re.compile(
+    r"(?P<y>\d{4})-(?P<mo>\d{2})-(?P<d>\d{2})"
     r"T(?P<h>\d{2}):(?P<mi>\d{2}):(?P<s>\d{2})"
     r"(?:\.(?P<frac>\d+))?"
-    r"(?P<z>Z)?$"
+    r"(?P<z>Z)?"
 )
 
+#: Lower/upper year bounds for _normalize_iso8601_gate_timestamp(). MEASURED
+#: against the real shell gate (kanban-helpers.sh's
+#: _kb_board_settings_is_grandfathered, a zsh subprocess built on jq's
+#: fromdateiso8601): a timestamp naming an instant before 1970-01-01T00:00:00Z
+#: is rejected outright on this platform (jq/timegm cannot represent a
+#: negative epoch here), and the shell's own libc strptime/mktime path never
+#: produces a real epoch for a 5+ digit year either (nothing to compare
+#: against — it fails to match the expected format at all). 9999 is also
+#: Python's own datetime.MAXYEAR, so the upper bound is enforced twice
+#: (once by the regex's fixed 4-digit year group, once explicitly here) —
+#: the explicit check exists for readability/self-documentation, not because
+#: the regex could ever admit a 5-digit year.
+_ISO8601_GATE_MIN_YEAR = 1970
+_ISO8601_GATE_MAX_YEAR = 9999
 
-def _normalize_grandfather_cutoff(value: Any) -> str | None:
-    """Validate + normalize a grandfatherCutoff candidate against the single
-    shared grammar (see the module comment directly above).
+
+def _normalize_iso8601_gate_timestamp(value: Any) -> str | None:
+    """Validate + normalize an ISO-8601 "gate timestamp" candidate — either
+    a grandfatherCutoff or an item's created_at — against the single shared
+    grammar (see the module comment directly above). Both roles use this
+    exact same function (XACA-1083-021): a divergence between how strictly
+    the two were parsed is exactly the class of bug that ticket closes.
 
     Returns the canonical 'YYYY-MM-DDTHH:MM:SSZ' string when *value* matches
-    the accepted grammar AND names a real calendar date/time (rejects e.g.
-    month 13 or Feb 30 — datetime.fromisoformat is the authority there,
-    same parser _parse_iso8601_utc already uses elsewhere in this module).
-    Returns None for anything else: non-string input, wrong shape, or an
-    invalid calendar date. None is the caller's signal for "no
-    grandfathering" — never raises.
+    the accepted grammar, its year is within [1970, 9999], AND it names a
+    real calendar date/time (rejects e.g. month 13, Feb 30, or hour 24).
+    Returns None for anything else: non-string input, wrong shape, an
+    out-of-range year, or an invalid calendar date/time. None is the
+    caller's signal for "not usable as a gate timestamp" — never raises.
 
-    Deliberately NOT datetime.strptime(): that lazily imports the stdlib
-    `_strptime`/`calendar` modules on first use, and at least one test
-    harness in this tree (lcars-ui/tests/test_server.py) stubs
-    sys.modules['calendar'] with an unrelated MagicMock before importing
-    server.py (to stand in for an app-local `calendar` sync package) —
-    triggering strptime's lazy import there resolves to that stub instead
-    of the real stdlib module and raises deep inside CPython. fromisoformat
-    never touches `calendar`, so this validator can't step on that landmine.
+    Deliberately does NOT use datetime.fromisoformat() or datetime.strptime()
+    on the raw string:
+      - fromisoformat()'s accepted grammar changed between Python 3.9 and
+        3.11+ (3.11 added 'Z'-suffix support AND ISO-8601's 'hour 24' end-
+        of-day leniency; 3.9 has neither) — using it here would make this
+        validator's behavior depend on which python3 interpreter happens to
+        be running it, which is the exact regression XACA-1083-021 fixes
+        (see the long comment above). The regex match + the plain
+        `datetime(y, m, d, h, mi, s, tzinfo=...)` constructor below are
+        BOTH version-independent: MEASURED identical accept/reject behavior
+        on 3.9.6 and 3.14.5 for the full matrix in
+        test_board_settings_1083.py's T21 section.
+      - datetime.strptime() lazily imports the stdlib `_strptime`/`calendar`
+        modules on first use, and at least one test harness in this tree
+        (lcars-ui/tests/test_server.py) stubs sys.modules['calendar'] with
+        an unrelated MagicMock before importing server.py (to stand in for
+        an app-local `calendar` sync package) — triggering strptime's lazy
+        import there resolves to that stub instead of the real stdlib
+        module and raises deep inside CPython. The plain datetime()
+        constructor never touches `calendar`, so this validator can't step
+        on that landmine either.
     """
     if not isinstance(value, str):
         return None
-    m = _GRANDFATHER_CUTOFF_RE.match(value)
+    # fullmatch(), not match() + a '$'-anchored pattern: a '$' anchor in
+    # Python's re module (without re.MULTILINE) matches either at the
+    # absolute end of the string OR immediately before a single trailing
+    # '\n' — so a match()-based check would have accepted e.g.
+    # '2026-09-26T22:02:39Z\n' as a valid cutoff. fullmatch() requires the
+    # ENTIRE string to match with nothing left over, trailing newline or
+    # otherwise (XACA-1083-021 review finding).
+    m = _ISO8601_GATE_TIMESTAMP_RE.fullmatch(value)
     if not m:
         return None
-    canonical = f"{m['y']}-{m['mo']}-{m['d']}T{m['h']}:{m['mi']}:{m['s']}Z"
+    year = int(m["y"])
+    if not (_ISO8601_GATE_MIN_YEAR <= year <= _ISO8601_GATE_MAX_YEAR):
+        return None
+    month = int(m["mo"])
+    day = int(m["d"])
+    hour = int(m["h"])
+    minute = int(m["mi"])
+    second = int(m["s"])
     try:
-        datetime.fromisoformat(canonical)
+        # A single constructor call validates month/day/hour/minute/second
+        # bounds all at once (including calendar-specific day-of-month and
+        # leap-year rules) — identically across every supported CPython
+        # version, unlike fromisoformat()/strptime().
+        datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
     except ValueError:
         return None
-    return canonical
+    return f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}Z"
+
+
+def _normalize_grandfather_cutoff(value: Any) -> str | None:
+    """Validate + normalize a grandfatherCutoff candidate.
+
+    Thin, name-preserving wrapper around _normalize_iso8601_gate_timestamp()
+    (XACA-1083-021) — kept as a separate function (rather than inlining the
+    shared helper at every call site) because it is part of this module's
+    public-ish surface: it's imported directly by
+    test_board_settings_1083.py's T20 suite and referenced by name in
+    docs/BOARD_SETTINGS.md. See _normalize_iso8601_gate_timestamp()'s
+    docstring for the full grammar and version-independence rationale.
+    """
+    return _normalize_iso8601_gate_timestamp(value)
 
 
 def _validate_board_settings_team_block(team_slug: str, block: Any) -> list[str]:
@@ -5031,30 +5136,6 @@ def get_board_settings_creation_timestamp_field() -> str:
     return DEFAULT_BOARD_SETTINGS_CREATION_TIMESTAMP_FIELD
 
 
-def _parse_iso8601_utc(value: Any) -> datetime | None:
-    """Parse an ISO-8601 timestamp string into a timezone-aware UTC datetime.
-
-    Accepts a trailing 'Z' (converted to '+00:00' for datetime.fromisoformat)
-    and both naive and offset-bearing inputs; naive inputs are assumed UTC
-    (the schema documents this field as UTC). Returns None — never raises —
-    on any non-string input or any string that fails to parse.
-    """
-    if not isinstance(value, str) or not value.strip():
-        return None
-    v = value.strip()
-    if v.endswith("Z") or v.endswith("z"):
-        v = v[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(v)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return dt
-
-
 def is_item_grandfathered(created_at: Any) -> bool:
     """Return True iff *created_at* is exempt from the requireEpicOnStart /
     requireReleaseOnStart gates under the configured grandfather cutoff.
@@ -5067,26 +5148,41 @@ def is_item_grandfathered(created_at: Any) -> bool:
     FAIL-CLOSED CONTRACT (both directions land on "gate applies"):
       - A missing or malformed 'grandfatherCutoff' in board_settings.json
         resolves to "no grandfathering" — this function returns False for
-        every item, never True for any. The cutoff is validated via
-        get_board_settings_grandfather_cutoff(), which shares its grammar
-        (_normalize_grandfather_cutoff) with the shell gate
-        (_kb_board_settings_is_grandfathered in kanban-helpers.sh) —
-        XACA-1083-020 — so this can never exempt an item the shell gate
-        would refuse to exempt, or vice versa.
+        every item, never True for any.
       - A missing or unparseable *created_at* also resolves to False — an
         item this function cannot place in time is never assumed exempt.
       - Only when BOTH the cutoff and created_at parse, and created_at is
         strictly before the cutoff, does this return True.
 
+    XACA-1083-020/021: the cutoff and created_at are now validated by the
+    EXACT SAME function, _normalize_iso8601_gate_timestamp() (shared with
+    the shell gate's grammar, _kb_board_settings_is_grandfathered in
+    kanban-helpers.sh) — so this can never exempt an item under a cutoff, or
+    based on a created_at, the shell gate would refuse to honour, or vice
+    versa. Before XACA-1083-021, created_at was parsed separately by the
+    now-removed _parse_iso8601_utc(), which was MORE lenient than the
+    cutoff's validator (it accepted UTC offsets, date-only strings, a space
+    instead of 'T', and lowercase 'z') — an item could be reported exempt
+    under a created_at value the shell gate's grammar would never have
+    accepted at all.
+
+    Both canonical strings produced by _normalize_iso8601_gate_timestamp()
+    are the fixed-width, zero-padded 'YYYY-MM-DDTHH:MM:SSZ' shape, so a
+    plain string comparison is chronologically correct here — no need to
+    re-parse either one back into a datetime (and, not incidentally, no
+    remaining call to datetime.fromisoformat()/strptime() anywhere in this
+    comparison, which is what made this function's behavior depend on the
+    running Python version in the first place).
+
     Never raises.
     """
-    cutoff_dt = _parse_iso8601_utc(get_board_settings_grandfather_cutoff())
-    if cutoff_dt is None:
+    cutoff_canonical = get_board_settings_grandfather_cutoff()
+    if cutoff_canonical is None:
         return False
-    created_dt = _parse_iso8601_utc(created_at)
-    if created_dt is None:
+    created_canonical = _normalize_iso8601_gate_timestamp(created_at)
+    if created_canonical is None:
         return False
-    return created_dt < cutoff_dt
+    return created_canonical < cutoff_canonical
 
 
 def set_board_settings_for_team(

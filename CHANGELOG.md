@@ -29,6 +29,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   UTC cutoff line instead of repeating it per row; the template comment now correctly says `kb-work` is gated.
   The cutoff now has one validator shared by the shell gate, the settings API and the Settings tab, so the tab
   can never say items are exempt when the gate would refuse them.
+  The validator no longer depends on the Python version (it works on the macOS system Python 3.9), rejects
+  hour 24 and pre-1970 values, and item creation times go through the same grammar.
 - **XACA-1258** — `kb-spacedock` gains the `vpn-dns-conflict` check: it reports `[fail]` when a
   third-party VPN utun owns the default route while Tailscale MagicDNS (100.100.100.100) is still
   ordered ahead of the VPN's resolver, which silently breaks all name resolution (raw IPs keep
