@@ -893,6 +893,107 @@ def test_t21_deliberate_narrowing_never_wider_than_shell():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# T22 — XACA-1083-022: non-ASCII decimal digits. Python's \d matches every
+# Unicode Nd digit and int() converts them; jq (the shell gate) accepts ASCII
+# 0-9 only. Every field x every script x both roles must be rejected by
+# Python, and the real shell must reject them too (the "never wider" rule).
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Zero code point of each non-ASCII decimal-digit script under test.
+_NON_ASCII_DIGIT_ZEROS = {
+    "fullwidth": 0xFF10,
+    "arabic-indic": 0x0660,
+    "devanagari": 0x0966,
+    "math-bold": 0x1D7CE,
+}
+
+#: ASCII base timestamp and the index of one digit inside each of its 7 fields.
+_T22_BASE = "2026-09-26T22:02:39.5Z"
+_T22_FIELD_DIGIT_INDEX = {
+    "year": 0, "month": 6, "day": 9, "hour": 12, "minute": 15, "second": 18, "frac": 20,
+}
+
+
+def _t22_variant(zero_cp: int, idx: int) -> str:
+    ch = _T22_BASE[idx]
+    assert ch.isdigit() and ch.isascii(), f"_T22_FIELD_DIGIT_INDEX points at {ch!r}"
+    return _T22_BASE[:idx] + chr(zero_cp + int(ch)) + _T22_BASE[idx + 1:]
+
+
+def _t22_cases():
+    for script, zero in _NON_ASCII_DIGIT_ZEROS.items():
+        for field, idx in _T22_FIELD_DIGIT_INDEX.items():
+            yield script, field, _t22_variant(zero, idx)
+
+
+def test_t22_non_ascii_digits_rejected_python_both_roles():
+    """T22a: 4 scripts x 7 fields: the shared validator rejects, the
+    created_at role never exempts, the cutoff role is never honored (the
+    getter returns None and nothing is exempted), and the `get` CLI prints
+    an empty cutoff instead of an ASCII-canonicalized one."""
+    from aiteamforge_paths import (
+        _normalize_iso8601_gate_timestamp,
+        get_board_settings_grandfather_cutoff,
+        is_item_grandfathered,
+    )
+
+    # Positive control: the ASCII base itself is accepted, so each rejection
+    # below is attributable to the substituted digit alone.
+    assert _normalize_iso8601_gate_timestamp(_T22_BASE) == "2026-09-26T22:02:39Z"
+
+    n = 0
+    for script, field, value in _t22_cases():
+        n += 1
+        label = f"{script}/{field} {value!r}"
+        assert _normalize_iso8601_gate_timestamp(value) is None, f"{label}: validator accepted"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "cfg.json"
+            _write_json(cfg_path, {"teams": {}, "grandfatherCutoff": _CUTOFF_AFTER_ALL})
+            with _EnvOverride(str(cfg_path)):
+                assert is_item_grandfathered(value) is False, f"{label}: created_at role exempted"
+            _write_json(cfg_path, {"teams": {}, "grandfatherCutoff": value})
+            with _EnvOverride(str(cfg_path)):
+                assert get_board_settings_grandfather_cutoff() is None, f"{label}: cutoff getter honored it"
+                assert is_item_grandfathered(_CREATED_AT_BEFORE_ALL) is False, f"{label}: cutoff role exempted"
+            env = dict(os.environ)
+            env["AITEAMFORGE_BOARD_SETTINGS_CONFIG"] = str(cfg_path)
+            result = _run_cli(["get", "academy"], env)
+            assert result.returncode == 0, f"{label}: stderr {result.stderr}"
+            lines = result.stdout.splitlines()
+            assert "grandfatherCutoff=" in lines, f"{label}: CLI printed {result.stdout!r}"
+    print(f"PASS T22a: {n} non-ASCII-digit variants rejected in both roles and by the CLI")
+
+
+def test_t22_non_ascii_digits_rejected_by_real_shell():
+    """T22b: the real shell gate rejects a non-ASCII-digit value in both
+    roles, one sample per script (field rotated) to bound runtime -- this is
+    what makes T22a a PARITY statement rather than an assumption."""
+    import shutil
+
+    if shutil.which("zsh") is None:
+        print("SKIP T22b: zsh not on PATH")
+        return
+    if not (_REPO_ROOT / "kanban-helpers.sh").is_file():
+        print("SKIP T22b: kanban-helpers.sh not found")
+        return
+    fields = list(_T22_FIELD_DIGIT_INDEX.items())
+    # Positive control: the ASCII base is exempted in both roles, so each
+    # False below is attributable to the substituted digit.
+    assert _shell_is_grandfathered(_T22_BASE, _CREATED_AT_BEFORE_ALL) is True
+    assert _shell_is_grandfathered(_CUTOFF_AFTER_ALL, _T22_BASE) is True
+    for i, (script, zero) in enumerate(_NON_ASCII_DIGIT_ZEROS.items()):
+        field, idx = fields[i % len(fields)]
+        value = _t22_variant(zero, idx)
+        assert _shell_is_grandfathered(value, _CREATED_AT_BEFORE_ALL) is False, (
+            f"{script}/{field} {value!r}: shell honored it as cutoff -- T22a's premise is wrong"
+        )
+        assert _shell_is_grandfathered(_CUTOFF_AFTER_ALL, value) is False, (
+            f"{script}/{field} {value!r}: shell exempted it as created_at -- T22a's premise is wrong"
+        )
+    print(f"PASS T22b: real shell rejects non-ASCII digits in both roles ({len(_NON_ASCII_DIGIT_ZEROS)} scripts)")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # T5 — Setter: atomic write, seeding, and every failure path
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1301,6 +1402,9 @@ def run_all() -> bool:
         test_t21_is_item_grandfathered_uses_shared_validator_for_created_at,
         test_t21_cross_layer_shell_parity_created_at_fixture,
         test_t21_deliberate_narrowing_never_wider_than_shell,
+        # T22
+        test_t22_non_ascii_digits_rejected_python_both_roles,
+        test_t22_non_ascii_digits_rejected_by_real_shell,
         # T5
         test_t5_setter_writes_and_is_readable_back,
         test_t5_setter_preserves_other_teams,

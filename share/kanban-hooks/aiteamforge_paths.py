@@ -4732,10 +4732,18 @@ def get_board_settings_config_path() -> Path:
 # everywhere else in this module — the class of bug XACA-1083-020/021 fixes
 # is exclusively the OPPOSITE direction (Python accepting/exempting
 # something the shell would reject/refuse to exempt).
+#
+# Digits are spelled [0-9], NEVER \d (XACA-1083-022): in a Python str
+# pattern \d matches every Unicode decimal digit (fullwidth, Arabic-Indic,
+# Devanagari, math-bold, ...) and int() then happily converts them, so a
+# fullwidth-digit year would validate and canonicalize to an ASCII instant.
+# The shell gate's jq fromdateiso8601 accepts ASCII 0-9 only, so \d made
+# this validator WIDER than the shell -- the one direction it must never
+# be. T22 pins this for 4 scripts x 7 fields x both roles.
 _ISO8601_GATE_TIMESTAMP_RE = re.compile(
-    r"(?P<y>\d{4})-(?P<mo>\d{2})-(?P<d>\d{2})"
-    r"T(?P<h>\d{2}):(?P<mi>\d{2}):(?P<s>\d{2})"
-    r"(?:\.(?P<frac>\d+))?"
+    r"(?P<y>[0-9]{4})-(?P<mo>[0-9]{2})-(?P<d>[0-9]{2})"
+    r"T(?P<h>[0-9]{2}):(?P<mi>[0-9]{2}):(?P<s>[0-9]{2})"
+    r"(?:\.(?P<frac>[0-9]+))?"
     r"(?P<z>Z)?"
 )
 
