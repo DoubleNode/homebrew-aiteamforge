@@ -16,6 +16,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   PR #983 round 1: a profile whose `kind` differs from the requested kind is rejected; group names
   may start with `_` (schema `profileGroup` pattern matches the resolver); a group that lacks a kind
   falls through to the default for that kind; a failed group copy cleans up and raises a clear error.
+  PR #983 round 2: the `profileGroup` schema pattern rejects a trailing newline, matching the resolver.
 - **XACA-1151-061 (PR #982 review r1)** — `kb-backlog add`/`kb-backlog change`'s `--sub-repo`
   validation now matches the supplied value as a LITERAL (`grep -qxF --`) instead of as a `grep`
   regex/option (`grep -qx`), closing a bypass where a regex metachar (e.g. `.*`) or a leading `-e`

@@ -286,7 +286,7 @@ def resolve_profile(
         raise ProfileResolutionError(
             f"profile.json kind mismatch: requested '{kind}', "
             f"merged profile declares '{merged_kind}'"
-            if isinstance(merged_kind, str) and len(merged_kind) <= 32
+            if merged_kind in PROFILE_KINDS
             else f"profile.json kind mismatch: requested '{kind}', "
             "merged profile declares a different kind"
         )
