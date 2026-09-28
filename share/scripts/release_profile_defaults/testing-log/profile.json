@@ -1,0 +1,11 @@
+{
+  "kind": "testing-log",
+  "audience": "engineers, approvers and auditors",
+  "detailLevel": "complete: every recorded test appears",
+  "requiredSections": [
+    {"id": "scope", "label": "Scope", "required": true},
+    {"id": "results", "label": "Test results by stage", "required": true},
+    {"id": "waivers", "label": "Waivers", "required": false}
+  ],
+  "wiki": {"docType": "testing-log"}
+}

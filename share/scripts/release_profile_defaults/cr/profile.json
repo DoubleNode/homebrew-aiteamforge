@@ -1,0 +1,35 @@
+{
+  "kind": "cr",
+  "audience": "approvers and stakeholders who are not engineers",
+  "detailLevel": "brief: the whole CR reads in a couple of minutes",
+  "requiredSections": [
+    {"id": "subject", "label": "Subject:", "required": true, "format": "<Release type>: <short plain-language title>"},
+    {"id": "description", "label": "Description:", "required": true, "format": "What is changing, in terms a user would notice"},
+    {"id": "anticipatedDate", "label": "Anticipated Date/Time of change:", "required": true},
+    {"id": "reasonForChange", "label": "Reason for change:", "required": true, "format": "1-3 sentences"},
+    {"id": "testing", "label": "Testing Documentation/Test details:", "required": true, "format": "Summary of testing plus a link to the Testing Log"},
+    {"id": "implementationPlan", "label": "Implementation Plan:", "required": true},
+    {"id": "rollbackPlan", "label": "Rollback Plan:", "required": true}
+  ],
+  "bannedTokenPatterns": [
+    {"pattern": "\\b[A-Z]{2,6}-\\d{2,6}\\b", "reason": "No raw ticket IDs in a CR body."},
+    {"pattern": "\\b[0-9a-f]{7,40}\\b", "reason": "No commit SHAs.", "scopeNote": "Apply only where context suggests a hash."},
+    {"pattern": "(?i)\\bPR\\s*#?\\d+\\b", "reason": "No pull request numbers."}
+  ],
+  "linkPolicy": {
+    "defaultAllowLinks": false,
+    "standardLinks": [
+      {"id": "testingLog", "required": true, "maxCount": 1, "sourcePlaceholder": "{{links.testingLog}}", "placement": "In or directly below the Testing Documentation field."}
+    ],
+    "everythingElseBanned": "No other links (no PR, repository or ticket links)."
+  },
+  "titlePattern": "[<MMM DD YYYY>] <ReleaseType>: <Platform> <Brief Title>",
+  "requireLeadDraftApproval": false,
+  "approval": {"provider": "manual"},
+  "wiki": {"docType": "cr"},
+  "excludedFromScope": {
+    "note": "Academy default excludes nothing; teams add categories in their own profile.",
+    "categories": [],
+    "action": "fold"
+  }
+}

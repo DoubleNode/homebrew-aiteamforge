@@ -54,6 +54,10 @@
         }
       }
     },
+    "profileGroup": {
+      "type": "string",
+      "description": "XACA-1343: optional content-profile group name. On first resolution the catalog scripts/release_profile_groups/<name>/<kind>/ is copied into the team's own config/profiles/_group/<kind>/ (never shared, § 2.2)."
+    },
     "platformName": {
       "type": "string",
       "description": "Display name used by template rendering ({{platform.name}})."

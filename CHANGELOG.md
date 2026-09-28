@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1343 (PR 1/4)** — ships the release-workflow content-profile resolver and the Academy
+  minimal default profiles. `share/scripts/release_profile_resolver.py` resolves each profile file
+  (`profile.json`, `template.md`, `style.md`) independently across team override → group copy →
+  Academy default, deep-merges `profile.json` team > group > default, and records the chain in
+  `profileResolvedFrom`. `share/scripts/release_profile_defaults/` gives an unconfigured team a
+  working CR, Testing Log, cr-record and CR-submitted notice. `wiki.schema.json` gains an optional
+  `profileGroup`. Library-only: no new command yet (consumed by `kb-wiki`/`kb-notify`, XACA-1344/1345).
 - **XACA-1151-061 (PR #982 review r1)** — `kb-backlog add`/`kb-backlog change`'s `--sub-repo`
   validation now matches the supplied value as a LITERAL (`grep -qxF --`) instead of as a `grep`
   regex/option (`grep -qx`), closing a bypass where a regex metachar (e.g. `.*`) or a leading `-e`

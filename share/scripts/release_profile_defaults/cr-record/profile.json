@@ -1,0 +1,13 @@
+{
+  "kind": "cr-record",
+  "audience": "auditors and release owners",
+  "detailLevel": "complete: full history of the change request",
+  "requiredSections": [
+    {"id": "header", "label": "Header", "required": true},
+    {"id": "links", "label": "Links", "required": true},
+    {"id": "stateHistory", "label": "CR state history", "required": true},
+    {"id": "noticeReceipts", "label": "Notice receipts", "required": true},
+    {"id": "prod", "label": "PROD deployment", "required": true}
+  ],
+  "wiki": {"docType": "cr-record"}
+}
