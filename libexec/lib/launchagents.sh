@@ -765,6 +765,217 @@ _xaca1097_launchctl_is_disabled() {
 }
 
 #──────────────────────────────────────────────────────────────────────────────
+# Installer-only LaunchAgents (XACA-1269) — the roster upgrade cannot self-heal
+#──────────────────────────────────────────────────────────────────────────────
+# WHY THIS EXISTS. The mandatory set above is what `aiteamforge upgrade`
+# re-materializes. Five agents are provisioned ONLY by install-kanban.sh and are
+# deliberately NOT in it, so once one goes missing NOTHING on the box brings it
+# back and (before this check) NOTHING SAID SO: M1Pro ran for months without
+# cellar-watch and lcars-watch, `brew upgrade` never refreshed the working dir,
+# LCARS kept serving old code, and `aiteamforge doctor` was all green.
+#
+# ONE DECLARED LIST. Both doctors (libexec/commands/aiteamforge-doctor.sh and
+# bin/aiteamforge-doctor.sh) call _xaca1269_check_installer_only_launchagents
+# below; neither owns a roster or a predicate of its own (sibling-heuristic drift,
+# XACA-0734 review #1). Adding a sixth installer-only agent = one line here.
+#
+# Fields: plist-basename | kind | fix-command | installer-function
+#   expected        WARN when absent (unless opted out / LaunchAgents not applicable)
+#   cr-per-team     the installer writes ONE plist PER CR-ENABLED TEAM
+#                   (com.aiteamforge.cr-confluence-poller.<team>.plist — the
+#                   un-suffixed name is the LEGACY global plist the installer
+#                   deletes). Gate: install-kanban.sh install_cr_confluence_poller_launchagent.
+#   knowledge-clone gated on ~/knowledge being a git clone
+#                   (install-kanban.sh install_knowledge_sync_launchagent).
+#   retired         INVERSE: absence is correct, a leftover is the defect
+#                   (XACA-0763-005 removed the install side).
+_xaca1269_installer_only_launchagent_roster() {
+  cat <<'EOF'
+com.aiteamforge.cellar-watch.plist|expected|aiteamforge setup|install_cellar_watch_launchagent
+com.aiteamforge.lcars-watch.plist|expected|aiteamforge setup|install_lcars_watch_launchagent
+com.aiteamforge.cr-confluence-poller.plist|cr-per-team|aiteamforge setup|install_cr_confluence_poller_launchagent
+com.aiteamforge.knowledge-sync.plist|knowledge-clone|aiteamforge upgrade|install_knowledge_sync_launchagent
+com.aiteamforge.lcars-runatload.plist|retired|aiteamforge upgrade|remove_legacy_lcars_runatload_agent
+EOF
+}
+
+# Exact-label membership in a captured `launchctl list` blob ($NF == label, no
+# regex, no substring — same contract as _xaca0734_launchctl_is_loaded, but over a
+# blob captured ONCE so the caller can tell "not loaded" from "launchctl failed").
+_xaca1269_list_has_label() {
+  local blob="$1" label="$2"
+  printf '%s\n' "$blob" \
+    | awk -v want="$label" '$NF == want { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+# Judge ONE agent whose plist is expected at <la_dir>/<basename>.
+# Usage: _xaca1269_judge_agent <emit> <la_dir> <basename> <fix-cmd> <installer-fn> <list_ok> <list_blob>
+# Present  -> loaded: pass | DISABLED: warn | not loaded: warn
+# Absent   -> opted out: pass | else warn (with install + opt-out remediation)
+_xaca1269_judge_agent() {
+  local emit="$1" la_dir="$2" base="$3" fixcmd="$4" fn="$5" list_ok="$6" blob="$7"
+  local label="${base%.plist}"
+  local plist="${la_dir}/${base}"
+  local uid
+
+  if [ -f "$plist" ]; then
+    if [ "$list_ok" != true ]; then
+      # Load state cannot be established; the one top-level "launchctl list
+      # failed" WARN already says so. Do not add a pass we cannot back.
+      return 0
+    fi
+    if _xaca1269_list_has_label "$blob" "$label"; then
+      "$emit" pass "${label} LaunchAgent loaded" ""
+    elif _xaca1097_launchctl_is_disabled "$label"; then
+      uid="$(id -u)"
+      "$emit" warn "${label} LaunchAgent DISABLED" \
+        "Enable: launchctl enable gui/${uid}/${label} && launchctl load ${plist}"
+    else
+      "$emit" warn "${label} LaunchAgent plist present but NOT loaded" \
+        "Load: launchctl load ${plist}"
+    fi
+    return 0
+  fi
+
+  if _xaca0734_is_opted_out "$base"; then
+    "$emit" pass "${base} absent (opted out — intentional)" ""
+    return 0
+  fi
+  "$emit" warn "Installer-only LaunchAgent MISSING: ${plist} — nothing re-creates it on upgrade" \
+    "Fix: ${fixcmd}   (${fn} in install-kanban.sh lands it)
+$(_xaca0734_print_optout_hint "$base")"
+  return 0
+}
+
+# Run the whole installer-only check.
+# Usage: _xaca1269_check_installer_only_launchagents <la_dir> <working_dir> <emit>
+# <emit> is the caller's reporter: emit <pass|warn|fail> <message> <remediation>
+# (remediation may be empty or multi-line). Always returns 0 (safe under set -e).
+_xaca1269_check_installer_only_launchagents() {
+  local la_dir="$1" wd="$2" emit="$3"
+  local base kind fixcmd fn
+  local blob list_rc=0 list_ok=true
+  local applicable=true
+
+  if ! _xaca0734_launchagents_applicable "$wd"; then
+    applicable=false
+  fi
+
+  # Capture ONCE and keep stderr: an unreadable/failed `launchctl list` must be
+  # visible, not collapse into "nothing is loaded".
+  blob="$(launchctl list 2>&1)" || list_rc=$?
+  if [ "$list_rc" -ne 0 ] || [ -z "$blob" ]; then
+    list_ok=false
+    "$emit" warn "Installer-only LaunchAgents: cannot verify load state (launchctl list failed, rc=${list_rc})" \
+      "Check: launchctl list   (output: ${blob:-<empty>})"
+  fi
+
+  while IFS='|' read -r -u 3 base kind fixcmd fn; do
+    [ -n "$base" ] || continue
+    case "$kind" in
+      expected)
+        if [ "$applicable" = true ]; then
+          _xaca1269_judge_agent "$emit" "$la_dir" "$base" "$fixcmd" "$fn" "$list_ok" "$blob"
+        fi
+        ;;
+      cr-per-team)
+        _xaca1269_judge_cr_pollers "$emit" "$la_dir" "$base" "$fixcmd" "$fn" "$list_ok" "$blob"
+        ;;
+      knowledge-clone)
+        # Installer gate (install_knowledge_sync_launchagent): [ -d "$root/.git" ]
+        # with root = ${KB_KNOWLEDGE_GLOBAL_ROOT:-$HOME/knowledge}.
+        if [ -d "${KB_KNOWLEDGE_GLOBAL_ROOT:-${HOME}/knowledge}/.git" ]; then
+          _xaca1269_judge_agent "$emit" "$la_dir" "$base" "$fixcmd" "$fn" "$list_ok" "$blob"
+        fi
+        ;;
+      retired)
+        _xaca1269_judge_retired "$emit" "$la_dir" "$base" "$fixcmd" "$fn" "$list_ok" "$blob"
+        ;;
+      *)
+        "$emit" warn "Installer-only LaunchAgent roster has unknown kind '${kind}' for ${base}" ""
+        ;;
+    esac
+  done 3<<EOF
+$(_xaca1269_installer_only_launchagent_roster)
+EOF
+  return 0
+}
+
+# INVERSE check: a retired agent must be GONE. Present plist or a registered
+# label is the defect.
+_xaca1269_judge_retired() {
+  local emit="$1" la_dir="$2" base="$3" fixcmd="$4" fn="$5" list_ok="$6" blob="$7"
+  local label="${base%.plist}"
+  local plist="${la_dir}/${base}"
+  local bad=false
+
+  if [ -f "$plist" ]; then
+    bad=true
+  elif [ "$list_ok" = true ] && _xaca1269_list_has_label "$blob" "$label"; then
+    bad=true
+  fi
+  if [ "$bad" = true ]; then
+    "$emit" warn "Retired LaunchAgent still present: ${label} (retired by XACA-0763-005; redundant with lcars-health)" \
+      "Fix: ${fixcmd}   (${fn} tears it down)
+Or:  launchctl unload ${plist} && rm ${plist}"
+  else
+    "$emit" pass "${label} retired agent absent (correct)" ""
+  fi
+  return 0
+}
+
+# cr-confluence-poller: per-team plists, config-gated. Gate (install-kanban.sh
+# install_cr_confluence_poller_launchagent): team is CR-enabled in
+# ~/.config/aiteamforge/cr-config.json (.teams[t]==true) AND has an entry in
+# ~/.config/aiteamforge/confluence-credentials.json (.teams[t]) AND matches
+# ^[a-zA-Z0-9_-]+$. Config absent == gate off (no warn). Config present but
+# unreadable / jq missing == AMBIGUOUS -> warn, never a silent pass.
+_xaca1269_judge_cr_pollers() {
+  local emit="$1" la_dir="$2" base="$3" fixcmd="$4" fn="$5" list_ok="$6" blob="$7"
+  local cfg="${HOME}/.config/aiteamforge/cr-config.json"
+  local creds="${HOME}/.config/aiteamforge/confluence-credentials.json"
+  local stem="${base%.plist}"
+  local teams team rc
+
+  if [ ! -f "$cfg" ]; then
+    return 0
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    "$emit" warn "CR poller check skipped: jq not found, cannot read ${cfg}" "Install jq (brew install jq)"
+    return 0
+  fi
+  rc=0
+  teams="$(jq -r '.teams | to_entries[] | select(.value==true) | .key' "$cfg" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    "$emit" warn "CR poller check: cannot parse ${cfg} (jq rc=${rc}) — enabled teams unknown" "${teams}"
+    return 0
+  fi
+  if [ -z "$teams" ]; then
+    return 0
+  fi
+  if [ ! -f "$creds" ]; then
+    return 0   # installer skips: "enabled but no credentials"
+  fi
+
+  for team in $teams; do
+    case "$team" in
+      *[!a-zA-Z0-9_-]*) continue ;;   # installer skips invalid names
+    esac
+    rc=0
+    jq -e --arg t "$team" '.teams[$t]' "$creds" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -eq 1 ]; then
+      continue                        # enabled but no credentials entry: installer skips
+    elif [ "$rc" -ne 0 ]; then
+      "$emit" warn "CR poller check: cannot read ${creds} (jq rc=${rc}) for team '${team}'" ""
+      continue
+    fi
+    _xaca1269_judge_agent "$emit" "$la_dir" "${stem}.${team}.plist" "$fixcmd" "$fn" "$list_ok" "$blob"
+  done
+  return 0
+}
+
+#──────────────────────────────────────────────────────────────────────────────
 # Renderer (moved here from aiteamforge-upgrade.sh by XACA-0734)
 #──────────────────────────────────────────────────────────────────────────────
 # Render a LaunchAgent template to a destination path.

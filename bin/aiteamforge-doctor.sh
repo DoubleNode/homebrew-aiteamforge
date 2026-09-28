@@ -884,6 +884,22 @@ check_config() {
   echo ""
 }
 
+# XACA-1269: reporter callback for _xaca1269_check_installer_only_launchagents
+# (libexec/lib/launchagents.sh). Remediation is printed unconditionally (NOT
+# VERBOSE-gated) for non-pass results, same contract as the mandatory-agent FAIL.
+_xaca1269_doctor_emit() {
+  local level="$1" msg="$2" fix="${3:-}" line
+  check_result "$level" "$msg"
+  if [ "$level" != pass ] && [ -n "$fix" ]; then
+    while IFS= read -r line; do
+      echo "    $line"
+    done <<EOF
+$fix
+EOF
+  fi
+  return 0
+}
+
 # Check services
 check_services() {
   echo -e "${CYAN}Checking services...${NC}"
@@ -987,6 +1003,13 @@ check_services() {
     else
       check_result warn "LCARS health LaunchAgent not loaded"
     fi
+  fi
+
+  # XACA-1269: installer-only agents + retired-agent inverse — the SAME shared
+  # evaluator `aiteamforge doctor` calls (libexec/lib/launchagents.sh). Skipped
+  # on the legacy fallback path where the lib itself is unavailable.
+  if [ "$_LAUNCHAGENTS_LIB_OK" = true ]; then
+    _xaca1269_check_installer_only_launchagents "$_la_dir" "$AITEAMFORGE_DIR" _xaca1269_doctor_emit
   fi
 
   echo ""

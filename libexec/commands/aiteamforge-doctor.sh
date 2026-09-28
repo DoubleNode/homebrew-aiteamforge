@@ -2116,6 +2116,22 @@ check_lcars_python_runtime() {
   fi
 }
 
+# XACA-1269: reporter callback for _xaca1269_check_installer_only_launchagents
+# (libexec/lib/launchagents.sh). Remediation is printed unconditionally (NOT
+# VERBOSE-gated) for non-pass results, same contract as the mandatory-agent FAIL.
+_xaca1269_doctor_emit() {
+  local level="$1" msg="$2" fix="${3:-}" line
+  check_result "$level" "$msg"
+  if [ "$level" != pass ] && [ -n "$fix" ]; then
+    while IFS= read -r line; do
+      echo "    $line"
+    done <<EOF
+$fix
+EOF
+  fi
+  return 0
+}
+
 # Check: LaunchAgents
 check_launchagents() {
   print_section "Checking LaunchAgents"
@@ -2254,6 +2270,11 @@ check_launchagents() {
       echo "    Load: launchctl load ~/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.plist"
     fi
   fi
+
+  # XACA-1269: installer-only agents (cellar-watch, lcars-watch, cr poller,
+  # knowledge-sync) + the retired lcars-runatload inverse. ONE roster and ONE
+  # evaluator in lib/launchagents.sh, shared with bin/aiteamforge-doctor.sh.
+  _xaca1269_check_installer_only_launchagents "$launchagents_dir" "$working_dir" _xaca1269_doctor_emit
 }
 
 # Check: Git Repositories

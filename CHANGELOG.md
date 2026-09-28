@@ -6,6 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1269-007** — `aiteamforge doctor` (BOTH copies: `libexec/commands/aiteamforge-doctor.sh` and
+  `bin/aiteamforge-doctor.sh`) now checks the five installer-only LaunchAgents that `aiteamforge
+  upgrade` can never self-heal: `cellar-watch`, `lcars-watch`, `cr-confluence-poller` (per-team plists,
+  gated on `cr-config.json` + credentials, mirroring `install_cr_confluence_poller_launchagent`),
+  `knowledge-sync` (gated on `~/knowledge/.git`, mirroring `install_knowledge_sync_launchagent`), plus
+  the INVERSE for the retired `lcars-runatload` (leftover plist/label = WARN). Missing, present-but-
+  unloaded and DISABLED (XACA-1097) are reported as distinct WARNs, each naming the agent, the
+  installer function that lands it, and the `launchagents.optout` line to silence it on purpose. A
+  failing `launchctl list` is its own WARN rather than reading as "nothing loaded". Missing MANDATORY
+  agents remain FAIL (XACA-0734, unchanged). One declared roster
+  (`_xaca1269_installer_only_launchagent_roster`) + one evaluator in `libexec/lib/launchagents.sh`;
+  neither doctor carries a list of its own. Background: M1Pro ran for months without cellar-watch and
+  lcars-watch with an all-green doctor. New suite
+  `tests/test-xaca-1269-installer-only-launchagents-doctor.sh` (36 assertions, both doctors executed
+  against a sandbox with a stub `launchctl`).
 - **XACA-1151-056** (PR-D review advisory, folded into PR-E) — `_kb_cr_write_manifest_crid` and
   `_kb_cr_release_unlink` built `manifest_file` directly from `_kb_get_releases_dir`'s output without
   checking it for empty. `_kb_get_releases_dir` is fail-closed (XACA-0383): an unresolvable team
