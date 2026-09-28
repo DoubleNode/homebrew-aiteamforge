@@ -17,6 +17,27 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `CHANGELOG.md`'s XACA-1151-056 entry and `tests/test-xaca-1146-kb-release-tap-parity.zsh` for the
   restored body-fidelity coverage of both functions.
 
+- **XACA-1151 PR-E (part 1)** — ported 8 more of the kanban helpers template's shipped functions to
+  byte parity with canonical, closing the last of the drift classified PORT-PARITY
+  (behaviour-equivalent) in the XACA-1151 audit: `_kb_ambiguous_tier_write_guard`,
+  `_kb_board_less_alias_of`, `_kb_jq_atomic_write`, `_kb_jq_read`, `_kb_overlay_code_to_slug`,
+  `_kb_overlay_lookup`, `_kb_team_lcars_port`, `_kb_val_global_sig`.
+  - `_kb_board_less_alias_of` now reuses `_kb_overlay_lookup` instead of an inlined duplicate Python
+    script, gaining a bounded retry-then-refuse on a torn/mid-write `team-paths.json` and a
+    self-description gate (an overlay entry is only trusted as board-less if it also carries a
+    `team_code`; an un-migrated/legacy-stub entry that merely happens to set `board_less: true` no
+    longer short-circuits straight to the alias without that gate). Consumer-visible, documented
+    behaviour widening: the `board_less` field now also accepts the strings `"true"`/`"True"`/`"TRUE"`
+    and the number `1`, not only a JSON boolean `true` — inert today because the only writer of this
+    field only ever assigns the JSON boolean.
+  - `_kb_ambiguous_tier_write_guard`'s advisory message now names the `.kb-team` sentinel as a
+    resolution layer alongside tmux and `KB_TEAM`, matching what the template's context resolver
+    (`_kb_detect_context`) actually supports.
+  - `_kb_overlay_code_to_slug` / `_kb_overlay_lookup` now call the shared `_kb_overlay_config_path`
+    instead of inlining the same `${AITEAMFORGE_CONFIG:-...}` expansion. `_kb_jq_read` picks up
+    canonical's nounset-hardened `${1-}`/`${2-}` parameter reads. `_kb_team_lcars_port` and
+    `_kb_val_global_sig` had no behaviour drift at all — comment/formatting only.
+
 ## [0.20.27] - 2026-09-28
 - **XACA-0888** — the project-knowledge path resolver (`_kb_knowledge_project_path`) now fails loud
   instead of silently falling back to a plausible-looking `.../projects/unknown` path: outside a git
@@ -252,26 +273,6 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     `finance-personal`) before matching, instead of falling through to the unknown-team default. The
     well-known case arms (still carrying install-time placeholders) and the unknown-team fallback are
     unchanged.
-- **XACA-1151 PR-E (part 1)** — ported 8 more of the kanban helpers template's shipped functions to
-  byte parity with canonical, closing the last of the drift classified PORT-PARITY
-  (behaviour-equivalent) in the XACA-1151 audit: `_kb_ambiguous_tier_write_guard`,
-  `_kb_board_less_alias_of`, `_kb_jq_atomic_write`, `_kb_jq_read`, `_kb_overlay_code_to_slug`,
-  `_kb_overlay_lookup`, `_kb_team_lcars_port`, `_kb_val_global_sig`.
-  - `_kb_board_less_alias_of` now reuses `_kb_overlay_lookup` instead of an inlined duplicate Python
-    script, gaining a bounded retry-then-refuse on a torn/mid-write `team-paths.json` and a
-    self-description gate (an overlay entry is only trusted as board-less if it also carries a
-    `team_code`; an un-migrated/legacy-stub entry that merely happens to set `board_less: true` no
-    longer short-circuits straight to the alias without that gate). Consumer-visible, documented
-    behaviour widening: the `board_less` field now also accepts the strings `"true"`/`"True"`/`"TRUE"`
-    and the number `1`, not only a JSON boolean `true` — inert today because the only writer of this
-    field only ever assigns the JSON boolean.
-  - `_kb_ambiguous_tier_write_guard`'s advisory message now names the `.kb-team` sentinel as a
-    resolution layer alongside tmux and `KB_TEAM`, matching what the template's context resolver
-    (`_kb_detect_context`) actually supports.
-  - `_kb_overlay_code_to_slug` / `_kb_overlay_lookup` now call the shared `_kb_overlay_config_path`
-    instead of inlining the same `${AITEAMFORGE_CONFIG:-...}` expansion. `_kb_jq_read` picks up
-    canonical's nounset-hardened `${1-}`/`${2-}` parameter reads. `_kb_team_lcars_port` and
-    `_kb_val_global_sig` had no behaviour drift at all — comment/formatting only.
 
 ## [0.20.26] - 2026-09-25
 - **XACA-1340** — agent panels no longer exit with "iTerm2 not running" while iTerm2 is running. The liveness check used `pgrep -f "iTerm.app"`, but macOS `pgrep` excludes the caller's ancestors unless `-a` is passed, and a local panel runs inside iTerm2, so the check never saw its own host. Panels launched over `ssh -t` (connect scripts) also probed the remote host. `share/scripts/agent-panel-display.sh` now skips the check under SSH and otherwise uses `pgrep -a -x iTerm2`.
