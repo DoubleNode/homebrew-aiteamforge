@@ -13,6 +13,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `profileResolvedFrom`. `share/scripts/release_profile_defaults/` gives an unconfigured team a
   working CR, Testing Log, cr-record and CR-submitted notice. `wiki.schema.json` gains an optional
   `profileGroup`. Library-only: no new command yet (consumed by `kb-wiki`/`kb-notify`, XACA-1344/1345).
+  PR #983 round 1: a profile whose `kind` differs from the requested kind is rejected; group names
+  may start with `_` (schema `profileGroup` pattern matches the resolver); a group that lacks a kind
+  falls through to the default for that kind; a failed group copy cleans up and raises a clear error.
 - **XACA-1151-061 (PR #982 review r1)** — `kb-backlog add`/`kb-backlog change`'s `--sub-repo`
   validation now matches the supplied value as a LITERAL (`grep -qxF --`) instead of as a `grep`
   regex/option (`grep -qx`), closing a bypass where a regex metachar (e.g. `.*`) or a leading `-e`

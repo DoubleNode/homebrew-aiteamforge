@@ -38,8 +38,14 @@ Group tier: the team's ``<kanban>/config/wiki.json`` may declare
 ``_group/<kind>/`` and resolution proceeds from the copy. The copy is never
 refreshed or overwritten afterwards (§ 2.2): once ``_group/<kind>/`` exists it
 is the team's own file set, and is used even if wiki.json later drops the
-declaration. A declared group whose catalog (or catalog kind directory) is
-missing raises ProfileResolutionError; it never falls through to default.
+declaration. A declared group whose catalog directory does not exist AT ALL
+(a typo'd name) raises ProfileResolutionError. A group that exists but does not
+provide a given kind (no ``<name>/<kind>/`` subdirectory) falls through to the
+default tier for that kind, exactly like a present-but-empty directory; nothing
+is recorded in profileResolvedFrom for the absent group tier. A copy failure
+(OSError) raises ProfileResolutionError and leaves no temp dir behind.
+A leading underscore in a group name (e.g. ``_layering_test``) marks it
+test-only; names are never used as team-tree path segments.
 
 Result of resolve_profile() (a dict, JSON-serialisable):
 
@@ -103,7 +109,7 @@ TIERS = ("team", "group", "default")  # highest precedence first
 _DEFAULTS_ROOT = _THIS_DIR / "release_profile_defaults"
 _GROUPS_ROOT = _THIS_DIR / "release_profile_groups"
 
-_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}(?![\s\S])")
+_SLUG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}(?![\s\S])")
 
 
 class ProfileResolutionError(Exception):
@@ -173,23 +179,32 @@ def _ensure_group_cache(
     cache = config_dir / "profiles" / "_group" / kind
     if cache.exists():
         return
-    catalog = groups_root / group / kind
-    if not catalog.is_dir():
+    group_dir = groups_root / group
+    if not group_dir.is_dir():
         raise ProfileResolutionError(
-            f"profileGroup '{group}' is declared but has no catalog for kind "
-            f"'{kind}' at {catalog}"
+            f"profileGroup '{group}' is declared but has no catalog at {group_dir}"
         )
-    cache.parent.mkdir(parents=True, exist_ok=True)
+    catalog = group_dir / kind
+    if not catalog.is_dir():
+        return  # group does not provide this kind: fall through to default
     tmp = cache.parent / f".{kind}.tmp-{os.getpid()}"
-    if tmp.exists():
-        shutil.rmtree(str(tmp))
-    shutil.copytree(str(catalog), str(tmp))
     try:
-        os.rename(str(tmp), str(cache))
-    except OSError:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        if tmp.exists():
+            shutil.rmtree(str(tmp))
+        shutil.copytree(str(catalog), str(tmp))
+        try:
+            os.rename(str(tmp), str(cache))
+        except OSError:
+            shutil.rmtree(str(tmp), ignore_errors=True)
+            if not cache.exists():
+                raise
+    except OSError as exc:
         shutil.rmtree(str(tmp), ignore_errors=True)
-        if not cache.exists():
-            raise
+        raise ProfileResolutionError(
+            f"cannot populate group cache for kind '{kind}' "
+            f"({type(exc).__name__})"
+        ) from exc
 
 
 def resolve_profile(
@@ -266,6 +281,15 @@ def resolve_profile(
         resolved_from[fname] = tier
         texts[label] = _read_text(tier_dirs[tier] / fname) if tier else None
 
+    merged_kind = merged.get("kind")
+    if merged_kind is not None and merged_kind != kind:
+        raise ProfileResolutionError(
+            f"profile.json kind mismatch: requested '{kind}', "
+            f"merged profile declares '{merged_kind}'"
+            if isinstance(merged_kind, str) and len(merged_kind) <= 32
+            else f"profile.json kind mismatch: requested '{kind}', "
+            "merged profile declares a different kind"
+        )
     errors = validate_profile_config(merged)
     if errors:
         raise ReleaseConfigValidationError(errors)

@@ -56,6 +56,7 @@
     },
     "profileGroup": {
       "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$",
       "description": "XACA-1343: optional content-profile group name. On first resolution the catalog scripts/release_profile_groups/<name>/<kind>/ is copied into the team's own config/profiles/_group/<kind>/ (never shared, § 2.2)."
     },
     "platformName": {
