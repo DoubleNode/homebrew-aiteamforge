@@ -781,6 +781,9 @@ _xaca1097_launchctl_is_disabled() {
 #
 # Fields: plist-basename | kind | fix-command | installer-function
 #   expected        WARN when absent (unless opted out / LaunchAgents not applicable)
+#   expected-lcars-ui  as `expected`, but only when $working_dir/lcars-ui exists —
+#                   the installer's own gate (install_lcars_watch_launchagent:
+#                   `[ ! -d "$AITEAMFORGE_DIR/lcars-ui" ]` -> skip). (XACA-1269-016a)
 #   cr-per-team     the installer writes ONE plist PER CR-ENABLED TEAM
 #                   (com.aiteamforge.cr-confluence-poller.<team>.plist — the
 #                   un-suffixed name is the LEGACY global plist the installer
@@ -792,7 +795,7 @@ _xaca1097_launchctl_is_disabled() {
 _xaca1269_installer_only_launchagent_roster() {
   cat <<'EOF'
 com.aiteamforge.cellar-watch.plist|expected|aiteamforge setup|install_cellar_watch_launchagent
-com.aiteamforge.lcars-watch.plist|expected|aiteamforge setup|install_lcars_watch_launchagent
+com.aiteamforge.lcars-watch.plist|expected-lcars-ui|aiteamforge setup|install_lcars_watch_launchagent
 com.aiteamforge.cr-confluence-poller.plist|cr-per-team|aiteamforge setup|install_cr_confluence_poller_launchagent
 com.aiteamforge.knowledge-sync.plist|knowledge-clone|aiteamforge upgrade|install_knowledge_sync_launchagent
 com.aiteamforge.lcars-runatload.plist|retired|aiteamforge upgrade|remove_legacy_lcars_runatload_agent
@@ -812,8 +815,12 @@ _xaca1269_list_has_label() {
 # Usage: _xaca1269_judge_agent <emit> <la_dir> <basename> <fix-cmd> <installer-fn> <list_ok> <list_blob>
 # Present  -> loaded: pass | DISABLED: warn | not loaded: warn
 # Absent   -> opted out: pass | else warn (with install + opt-out remediation)
+# <heals> (optional 8th arg) is "upgrade" when `aiteamforge upgrade` itself
+# re-creates the agent (knowledge-sync via update_knowledge_sync, XACA-0761); the
+# MISSING message must not claim otherwise (XACA-1269-014).
 _xaca1269_judge_agent() {
   local emit="$1" la_dir="$2" base="$3" fixcmd="$4" fn="$5" list_ok="$6" blob="$7"
+  local heals="${8:-}"
   local label="${base%.plist}"
   local plist="${la_dir}/${base}"
   local uid
@@ -841,9 +848,15 @@ _xaca1269_judge_agent() {
     "$emit" pass "${base} absent (opted out — intentional)" ""
     return 0
   fi
-  "$emit" warn "Installer-only LaunchAgent MISSING: ${plist} — nothing re-creates it on upgrade" \
-    "Fix: ${fixcmd}   (${fn} in install-kanban.sh lands it)
+  if [ "$heals" = upgrade ]; then
+    "$emit" warn "Installer-provisioned LaunchAgent MISSING: ${plist}" \
+      "Fix: ${fixcmd}   (update_knowledge_sync in aiteamforge-upgrade.sh runs ${fn} to re-create it)
 $(_xaca0734_print_optout_hint "$base")"
+  else
+    "$emit" warn "Installer-only LaunchAgent MISSING: ${plist} — nothing re-creates it on upgrade" \
+      "Fix: ${fixcmd}   (${fn} in install-kanban.sh lands it)
+$(_xaca0734_print_optout_hint "$base")"
+  fi
   return 0
 }
 
@@ -855,10 +868,15 @@ _xaca1269_check_installer_only_launchagents() {
   local la_dir="$1" wd="$2" emit="$3"
   local base kind fixcmd fn
   local blob list_rc=0 list_ok=true
-  local applicable=true
 
+  # XACA-1269-016b: one decision for the WHOLE check. A cockpit profile is a thin
+  # client (LCARS/kanban run on a remote host) and bin/aiteamforge-doctor.sh
+  # check_services returns early on it with "LaunchAgents not installed"; a
+  # kanban-declined install likewise has none. Deciding here — not per doctor, not
+  # per roster kind — keeps both doctors in agreement, and skips BEFORE the
+  # launchctl capture so a non-applicable box gets no spurious "list failed".
   if ! _xaca0734_launchagents_applicable "$wd"; then
-    applicable=false
+    return 0
   fi
 
   # Capture ONCE and keep stderr: an unreadable/failed `launchctl list` must be
@@ -874,7 +892,12 @@ _xaca1269_check_installer_only_launchagents() {
     [ -n "$base" ] || continue
     case "$kind" in
       expected)
-        if [ "$applicable" = true ]; then
+        _xaca1269_judge_agent "$emit" "$la_dir" "$base" "$fixcmd" "$fn" "$list_ok" "$blob"
+        ;;
+      expected-lcars-ui)
+        # Installer gate: install_lcars_watch_launchagent skips when
+        # $AITEAMFORGE_DIR/lcars-ui is absent (nothing to watch yet).
+        if [ -d "${wd}/lcars-ui" ]; then
           _xaca1269_judge_agent "$emit" "$la_dir" "$base" "$fixcmd" "$fn" "$list_ok" "$blob"
         fi
         ;;
@@ -885,7 +908,7 @@ _xaca1269_check_installer_only_launchagents() {
         # Installer gate (install_knowledge_sync_launchagent): [ -d "$root/.git" ]
         # with root = ${KB_KNOWLEDGE_GLOBAL_ROOT:-$HOME/knowledge}.
         if [ -d "${KB_KNOWLEDGE_GLOBAL_ROOT:-${HOME}/knowledge}/.git" ]; then
-          _xaca1269_judge_agent "$emit" "$la_dir" "$base" "$fixcmd" "$fn" "$list_ok" "$blob"
+          _xaca1269_judge_agent "$emit" "$la_dir" "$base" "$fixcmd" "$fn" "$list_ok" "$blob" upgrade
         fi
         ;;
       retired)
@@ -918,6 +941,12 @@ _xaca1269_judge_retired() {
     "$emit" warn "Retired LaunchAgent still present: ${label} (retired by XACA-0763-005; redundant with lcars-health)" \
       "Fix: ${fixcmd}   (${fn} tears it down)
 Or:  launchctl unload ${plist} && rm ${plist}"
+  elif [ "$list_ok" != true ]; then
+    # XACA-1269-015/018: plist is absent but a still-LOADED job cannot be ruled
+    # out. Not a pass we can back — say so, same fail direction as launchctl
+    # failures elsewhere in this check.
+    "$emit" warn "Retired LaunchAgent ${label}: plist absent but load state UNVERIFIED (launchctl list failed)" \
+      "Check: launchctl list | grep ${label}"
   else
     "$emit" pass "${label} retired agent absent (correct)" ""
   fi
@@ -946,7 +975,9 @@ _xaca1269_judge_cr_pollers() {
     return 0
   fi
   rc=0
-  teams="$(jq -r '.teams | to_entries[] | select(.value==true) | .key' "$cfg" 2>&1)" || rc=$?
+  # A valid config with no/null .teams means "no teams enabled" (XACA-1269-017);
+  # only genuinely unparseable JSON reaches the WARN below.
+  teams="$(jq -r '(.teams // {}) | to_entries[] | select(.value==true) | .key' "$cfg" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     "$emit" warn "CR poller check: cannot parse ${cfg} (jq rc=${rc}) — enabled teams unknown" "${teams}"
     return 0

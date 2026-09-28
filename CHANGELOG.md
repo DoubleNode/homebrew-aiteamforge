@@ -21,6 +21,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   lcars-watch with an all-green doctor. New suite
   `tests/test-xaca-1269-installer-only-launchagents-doctor.sh` (36 assertions, both doctors executed
   against a sandbox with a stub `launchctl`).
+  **PR #981 round 1 fold-ins (XACA-1269-014..018):** the knowledge-sync MISSING WARN no longer claims
+  upgrade cannot re-create it (`update_knowledge_sync` does; remediation now says so); the retired
+  `lcars-runatload` check no longer PASSES when `launchctl list` failed (UNVERIFIED WARN instead);
+  `lcars-watch` is only expected when `$AITEAMFORGE_DIR/lcars-ui` exists (installer gate); the
+  applicability decision (cockpit / kanban-declined) now lives once in the evaluator so both doctors
+  agree on cockpit boxes; a valid `cr-config.json` with missing/null `.teams` (e.g. `{}`) is "no teams
+  enabled" rather than a false "cannot parse" WARN. Seven regression cases added (both doctors).
 - **XACA-1151-056** (PR-D review advisory, folded into PR-E) — `_kb_cr_write_manifest_crid` and
   `_kb_cr_release_unlink` built `manifest_file` directly from `_kb_get_releases_dir`'s output without
   checking it for empty. `_kb_get_releases_dir` is fail-closed (XACA-0383): an unresolvable team

@@ -86,6 +86,9 @@ new_sandbox() {
     SB="$TEST_TMP_DIR/sb.$1"
     LA="$SB/home/Library/LaunchAgents"
     mkdir -p "$LA" "$SB/home/.aiteamforge" "$SB/home/.config/aiteamforge" "$SB/bin" "$AITEAMFORGE_DIR"
+    # lcars-watch is only expected once lcars-ui is installed (installer gate).
+    mkdir -p "$AITEAMFORGE_DIR/lcars-ui"
+    if [ -f "$AITEAMFORGE_DIR/.install-profile" ]; then rm "$AITEAMFORGE_DIR/.install-profile"; fi
     : > "$SB/lc-list"
     : > "$SB/lc-disabled"
     cat > "$SB/bin/launchctl" <<'STUB'
@@ -335,6 +338,84 @@ case_not_applicable() {
     _block_end
 }
 both case_not_applicable
+
+# ── ROUND 2 (PR #981 advisory fold-ins, XACA-1269-014..018) ─────────────────
+
+# 014: knowledge-sync MISSING text must not claim upgrade can't re-create it.
+case_r2_014() {
+    local w="$1"
+    _block_start "[$w] 014 knowledge-sync MISSING message: upgrade DOES re-create it"
+    new_sandbox "r2-014-$w"
+    mkdir -p "$SB/home/knowledge/.git"
+    run_doctor "$w"
+    assert_contains "$OUT" "MISSING: $LA/com.aiteamforge.knowledge-sync.plist" "knowledge-sync WARN absent"
+    assert_not_contains "$OUT" "knowledge-sync.plist — nothing re-creates it on upgrade" "false 'nothing re-creates it' claim"
+    assert_contains "$OUT" "update_knowledge_sync" "remediation does not name the upgrade path"
+    # the genuinely installer-only agents keep the original wording
+    assert_contains "$OUT" "$CELLAR.plist — nothing re-creates it on upgrade" "cellar-watch wording regressed"
+    _block_end
+}
+both case_r2_014
+
+# 015/018: retired agent must not PASS when launchctl list failed.
+case_r2_015() {
+    local w="$1"
+    _block_start "[$w] 015/018 retired agent + launchctl list FAILS -> no PASS, UNVERIFIED WARN"
+    new_sandbox "r2-015-$w"
+    : > "$SB/lc-fail"
+    run_doctor "$w"
+    assert_not_contains "$OUT" "retired agent absent (correct)" "retired PASS despite failed launchctl list"
+    assert_contains "$OUT" "load state UNVERIFIED" "no unverified WARN for retired agent"
+    _block_end
+}
+both case_r2_015
+
+# 016a: lcars-watch only expected when lcars-ui exists.
+case_r2_016a() {
+    local w="$1"
+    _block_start "[$w] 016a lcars-watch absent + NO lcars-ui dir -> no lcars-watch WARN; cellar still warns"
+    new_sandbox "r2-016a-$w"
+    rmdir "$AITEAMFORGE_DIR/lcars-ui"
+    run_doctor "$w"
+    assert_not_contains "$OUT" "$LWATCH.plist" "lcars-watch warned though installer would skip (no lcars-ui)"
+    assert_contains "$OUT" "MISSING: $LA/$CELLAR.plist" "cellar-watch must still warn"
+    _block_end
+}
+both case_r2_016a
+
+# 016b: cockpit profile: both doctors agree (no installer-only findings at all).
+case_r2_016b() {
+    local w="$1"
+    _block_start "[$w] 016b cockpit profile -> no cr/knowledge/retired/watcher findings (doctors agree)"
+    new_sandbox "r2-016b-$w"
+    printf 'cockpit\n' > "$AITEAMFORGE_DIR/.install-profile"
+    printf '{"teams":{"academy":true}}\n' > "$SB/home/.config/aiteamforge/cr-config.json"
+    printf '{"teams":{"academy":{"x":1}}}\n' > "$SB/home/.config/aiteamforge/confluence-credentials.json"
+    mkdir -p "$SB/home/knowledge/.git"
+    : > "$LA/com.aiteamforge.lcars-runatload.plist"
+    run_doctor "$w"
+    assert_not_contains "$OUT" "cr-confluence-poller" "cr finding on cockpit"
+    assert_not_contains "$OUT" "knowledge-sync" "knowledge finding on cockpit"
+    assert_not_contains "$OUT" "lcars-runatload" "retired finding on cockpit"
+    assert_not_contains "$OUT" "Installer-only LaunchAgent MISSING" "watcher finding on cockpit"
+    rm "$AITEAMFORGE_DIR/.install-profile"
+    _block_end
+}
+both case_r2_016b
+
+# 017: valid config with no/null .teams is "no teams enabled", not a parse error.
+case_r2_017() {
+    local w="$1" body
+    for body in '{}' '{"teams":null}'; do
+        _block_start "[$w] 017 cr-config $body -> no 'cannot parse' WARN"
+        new_sandbox "r2-017-$w"
+        printf '%s\n' "$body" > "$SB/home/.config/aiteamforge/cr-config.json"
+        run_doctor "$w"
+        assert_not_contains "$OUT" "cannot parse" "false parse WARN on valid config $body"
+        _block_end
+    done
+}
+both case_r2_017
 
 # ── 11. single-roster structure ─────────────────────────────────────────────
 _block_start "one shared roster: both doctors call the lib evaluator, neither re-declares agents"
