@@ -4600,8 +4600,10 @@ _kb_knowledge_project_layout_guard() {
 }
 
 # Internal: resolve project knowledge path
-# Precedence: .knowledge-config.yml → KB_KNOWLEDGE_PROJECT_PATH → default
-# Writes result to stdout; returns 1 if not inside a git repo.
+# Precedence: .knowledge-config.yml → KB_KNOWLEDGE_PROJECT_PATH → default.
+# FAILS LOUD (XACA-0888, USER-DECIDED POLICY): prints NOTHING to stdout and
+# returns 1 whenever it cannot determine where to write, never a
+# plausible-looking fallback. Callers MUST check the return code.
 _kb_knowledge_project_path() {
     local repo_root project_slug
 
@@ -4610,10 +4612,13 @@ _kb_knowledge_project_path() {
     # main repo root from it — project knowledge must always resolve to the main worktree.
     local git_common_dir
     git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
-    if [[ -z "$git_common_dir" ]]; then
-        # Not inside a git repo — use default under global root with "unknown" slug
-        echo "$(_kb_knowledge_global_root)/projects/unknown"
-        return 0
+    # XACA-0888-029: a bare repo prints "." (non-empty) here — require this too.
+    local is_work_tree
+    is_work_tree=$(git rev-parse --is-inside-work-tree 2>/dev/null)
+    if [[ -z "$git_common_dir" || "$is_work_tree" != "true" ]]; then
+        echo "kb: _kb_knowledge_project_path: not inside a git repository (cwd: ${PWD}) — cannot resolve a project-knowledge base." >&2
+        echo "  Fix: cd into the git repo this knowledge belongs to, or use the subject/team tier instead (kb-knowledge-add subject|team ...)." >&2
+        return 1
     fi
     if [[ "$git_common_dir" == ".git" ]]; then
         # Main worktree: --git-common-dir is relative, --show-toplevel is correct
@@ -5012,7 +5017,9 @@ _kb_knowledge_resolve_ref() {
             else
                 # project:<entry-id>
                 local proj_path
-                proj_path=$(_kb_knowledge_project_path)
+                # XACA-0888: effective resolver, rc now checked -- callers already
+                # check this function's rc, so failing loud propagates correctly.
+                proj_path=$(_kb_knowledge_project_path_effective) || return 1
                 _kb_resolve_entry_path "$proj_path" "$remainder"
             fi
             ;;
@@ -5583,8 +5590,12 @@ kb-knowledge-search() {
     # project path — if kb-knowledge-add redirected it to local_root — is
     # read from the SAME place it was written, not silently orphaned under
     # global_root.
+    #
+    # XACA-0888: stderr silenced -- best-effort lookup, must not spray a
+    # diagnostic on every search from outside a git repo, or leak into
+    # --json/--porcelain output.
     local project_path
-    project_path=$(_kb_knowledge_project_path_effective)
+    project_path=$(_kb_knowledge_project_path_effective 2>/dev/null)
 
     # TRANSITIONAL UNION (XACA-0883, delete per _kb_knowledge_project_path_legacy's
     # doc comment once a shadow-base sweep confirms every legacy base is empty
@@ -6525,7 +6536,10 @@ kb-knowledge-add() {
                 # local_root for a local-only session — an in-repo
                 # .knowledge-config.yml / KB_KNOWLEDGE_PROJECT_PATH override is
                 # already outside the synced repo and passes through unchanged.
-                target_dir=$(_kb_knowledge_project_path_effective)
+                # XACA-0888: rc IS checked now -- a resolver refusal used to leave
+                # target_dir empty and fall through to the layout guard, which
+                # fails OPEN on an empty string.
+                target_dir=$(_kb_knowledge_project_path_effective) || return 1
                 # XACA-0754-014: only the global-root FALLBACK case is
                 # ambiguity-sensitive — an in-repo/env-var override already
                 # points somewhere outside the synced repo regardless of
@@ -7081,7 +7095,9 @@ kb-knowledge-promote() {
         project)
             target_path_part=""
             target_entry_part="$target_remainder"
-            target_dir=$(_kb_knowledge_project_path)
+            # XACA-0888: switched to the "effective" resolver (PII routing parity
+            # with kb-knowledge-add) and rc is now checked.
+            target_dir=$(_kb_knowledge_project_path_effective) || return 1
             # XACA-0883-021/024: route through the same layout guard
             # kb-knowledge-add's bare-project branch uses, so an
             # ambiguous-registry (T3) work-tree REFUSES here too instead of
@@ -8345,8 +8361,11 @@ kb-knowledge-validate() {
     local local_root
     local_root=$(_kb_knowledge_local_root)
 
+    # XACA-0888: effective resolver, rc not checked (every use below is
+    # already `-d`-gated, so unresolved just skips project-tier validation).
+    # stderr silenced — the status line below is this command's own report.
     local project_path
-    project_path=$(_kb_knowledge_project_path)
+    project_path=$(_kb_knowledge_project_path_effective 2>/dev/null) || project_path=""
 
     local error_count=0
     local warning_count=0
@@ -8789,7 +8808,12 @@ kb-knowledge-validate() {
     else
         echo "  Local root:  ${local_root}  (absent — skipped)"
     fi
-    echo "  Projects:    ${global_root}/projects/*  (resolved context: ${project_path})"
+    if [[ -n "$project_path" ]]; then
+        echo "  Projects:    ${global_root}/projects/*  (resolved context: ${project_path})"
+    else
+        # XACA-0888: was blank before (empty var interpolates to nothing).
+        echo "  Projects:    ${global_root}/projects/*  (resolved context: <unresolved: not inside a git repo>)"
+    fi
     echo "═══════════════════════════════════════════════════════════════════════════"
     echo ""
 
@@ -9186,7 +9210,11 @@ kb-knowledge-validate() {
                 resolved_xref=$(_kb_knowledge_resolve_ref "$xref" "$_kb_val_xref_root" 2>/dev/null)
                 resolver_rc=$?
                 if [[ $resolver_rc -ne 0 ]]; then
-                    _kb_val_error "Broken cross-ref '${xref}' in ${ef} (resolver rejected — invalid format)"
+                    if [[ "$xref" == project:* && "$xref" != project:*:* && -z "$project_path" ]]; then
+                        _kb_val_error "Broken cross-ref '${xref}' in ${ef} (project tier unresolved — not inside a git repo)"
+                    else
+                        _kb_val_error "Broken cross-ref '${xref}' in ${ef} (resolver rejected — invalid format)"
+                    fi
                 elif [[ -n "$resolved_xref" ]] && [[ ! -f "$resolved_xref" ]]; then
                     _kb_val_error "Broken cross-ref '${xref}' in ${ef}"
                 fi
@@ -9344,8 +9372,12 @@ kb-knowledge-reindex() {
     # the current project if it lives outside the glob-walked roots" check
     # below also honours a local-redirected bare-project path, not just the
     # raw in-repo/env-var cases.
+    #
+    # XACA-0888: stderr silenced -- same rationale as kb-knowledge-search's
+    # identical call: best-effort, read-only, must not spray a diagnostic on
+    # every reindex run from outside a git repo.
     local project_path
-    project_path=$(_kb_knowledge_project_path_effective)
+    project_path=$(_kb_knowledge_project_path_effective 2>/dev/null)
 
     if [[ -n "$target_dir" ]]; then
         target_dir="${target_dir/#\~/$HOME}"

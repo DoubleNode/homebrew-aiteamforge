@@ -6,6 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-0888** — the project-knowledge path resolver (`_kb_knowledge_project_path`) now fails loud
+  instead of silently falling back to a plausible-looking `.../projects/unknown` path: outside a git
+  repo (or inside a bare repo, where `git rev-parse --is-inside-work-tree` prints `false` even though
+  `--git-common-dir` is non-empty) it prints nothing to stdout, reports the reason to stderr, and
+  returns 1. `kb-knowledge-add`, `kb-knowledge-promote` and the `project:<entry-id>` branch of
+  `_kb_knowledge_resolve_ref` now check that return code (`|| return 1`) instead of proceeding with an
+  empty `target_dir`/`proj_path`, which used to reach the layout guard's fail-OPEN empty-string case.
+  `kb-knowledge-search` and `kb-knowledge-reindex` silence the resolver's stderr on their best-effort,
+  read-only lookups so a run outside a git repo doesn't spray a diagnostic (or leak into `--json`/
+  `--porcelain` output). `kb-knowledge-validate` uses the same silenced resolver, reports an explicit
+  `<unresolved: not inside a git repo>` context line instead of an interpolated blank, and gives a
+  clearer validation error for an unresolvable `project:` cross-ref tier.
 - **XACA-1342** — release config schemas (`release-notify/v1`, `release-wiki/v1`, `release-profile/v1`) and
   `kb-release-config-validate` (`share/scripts/`): `secretRef` accepts only `vault:<engine>/<account>` or `env:<VAR>`,
   literals in `secretRef`/`target`/`credential` are errors, and no resolved value is ever printed. LCARS never offers
