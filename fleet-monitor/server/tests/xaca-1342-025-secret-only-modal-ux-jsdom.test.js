@@ -152,6 +152,37 @@ function placeholder(document, id) {
     return el.placeholder;
 }
 
+function setValue(document, id, value) {
+    const el = document.getElementById(id);
+    assert.ok(el, `expected #${id} to exist`);
+    el.value = value;
+}
+
+/**
+ * Stub window.fleetApiFetch (used by submitAddAccount/submitEditAccount, not
+ * window.fetch, which loadEngines() uses and setupEnginesUI() already stubs)
+ * and capture every call's method/url/parsed-JSON body, for the XACA-1342-029
+ * request-body assertions below. Always resolves 2xx so the submit functions
+ * proceed to their post-success loadEngines() refresh (window.fetch is stubbed
+ * separately) without hitting the network.
+ */
+function stubFleetApiFetch(window) {
+    const calls = [];
+    window.fleetApiFetch = async function fakeFleetApiFetch(url, opts) {
+        calls.push({
+            url,
+            method: (opts && opts.method) || 'GET',
+            body: (opts && opts.body) ? JSON.parse(opts.body) : undefined,
+        });
+        return {
+            ok: true,
+            status: (opts && opts.method === 'POST') ? 201 : 200,
+            json: async () => ({ slug: 'stub-account', account_id: 'stub-account' }),
+        };
+    };
+    return calls;
+}
+
 for (const variant of VARIANTS) {
     test(`${variant.name}: harness sanity -- real HTML + real lcars-engines.js load, engines fetch stub resolves both fixture engines`, async () => {
         const { document } = await setupEnginesUI(variant);
@@ -267,5 +298,267 @@ for (const variant of VARIANTS) {
         // The edit form fields must still be populated from the account object.
         assert.equal(document.getElementById('engines-edit-account-id').value, 'acc_01AbCdEf');
         assert.equal(document.getElementById('engines-edit-nickname').value, 'Darren Personal');
+    });
+
+    // -------------------------------------------------------------------
+    // XACA-1342-026 — engine card ADD button + empty state wording
+    // -------------------------------------------------------------------
+
+    test(`${variant.name}: renderEngineCard for a secret-only engine uses '+ ADD SECRET' and 'No secrets registered yet' wording`, async () => {
+        const { LCARS_ENGINES } = await setupEnginesUI(variant);
+
+        const card = LCARS_ENGINES.renderEngineCard({
+            slug: 'release-notify', name: 'Release Notify', kind: 'secret-only', accounts: []
+        });
+
+        const addBtn = card.querySelector('.engine-add-btn');
+        assert.ok(addBtn, 'expected an ADD button on the card');
+        assert.equal(addBtn.textContent, '+ ADD SECRET');
+
+        const empty = card.querySelector('.engines-accounts-empty');
+        assert.ok(empty, 'expected the empty-state element for a zero-account engine');
+        assert.equal(empty.textContent, 'No secrets registered yet. Click + ADD SECRET to define one.');
+    });
+
+    test(`${variant.name}: renderEngineCard for a normal AI engine keeps '+ ADD ACCOUNT' wording (regression)`, async () => {
+        const { LCARS_ENGINES } = await setupEnginesUI(variant);
+
+        const card = LCARS_ENGINES.renderEngineCard({ slug: 'anthropic', name: 'Anthropic', accounts: [] });
+
+        const addBtn = card.querySelector('.engine-add-btn');
+        assert.equal(addBtn.textContent, '+ ADD ACCOUNT');
+
+        const empty = card.querySelector('.engines-accounts-empty');
+        assert.equal(empty.textContent, 'No accounts registered yet. Click + ADD ACCOUNT to define one.');
+    });
+
+    // -------------------------------------------------------------------
+    // XACA-1342-027 — slug/nickname/env-var-hint label copy swap
+    // -------------------------------------------------------------------
+
+    test(`${variant.name}: ADD modal for a secret-only engine swaps slug label/placeholder/hint, nickname placeholder, and env-var hint copy`, async () => {
+        const { document, LCARS_ENGINES } = await setupEnginesUI(variant);
+
+        LCARS_ENGINES.openAddAccountModal(SECRET_ENGINE.slug, SECRET_ENGINE.name);
+
+        assert.equal(text(document, 'engines-add-slug-label'), 'Secret Slug *');
+        assert.equal(placeholder(document, 'engines-add-slug'), 'e.g. firebase-cr-approver');
+        assert.equal(
+            text(document, 'engines-add-slug-hint'),
+            'lowercase-kebab-case — IMMUTABLE after creation (e.g. firebase-cr-approver)'
+        );
+        assert.equal(placeholder(document, 'engines-add-nickname'), 'e.g. Firebase CR Approver Webhook');
+        assert.match(text(document, 'engines-add-env-var-hint'), /RELEASE_<TEAM>_<PURPOSE>/);
+        assert.doesNotMatch(text(document, 'engines-add-env-var-hint'), /Claude Max/);
+    });
+
+    test(`${variant.name}: ADD modal for a normal AI engine keeps original slug/nickname/env-var-hint copy (regression)`, async () => {
+        const { document, LCARS_ENGINES } = await setupEnginesUI(variant);
+
+        LCARS_ENGINES.openAddAccountModal(AI_ENGINE.slug, AI_ENGINE.name);
+
+        assert.equal(text(document, 'engines-add-slug-label'), 'Account Slug *');
+        assert.equal(placeholder(document, 'engines-add-slug'), 'e.g. darren-personal');
+        assert.equal(
+            text(document, 'engines-add-slug-hint'),
+            'lowercase-kebab-case — IMMUTABLE after creation (e.g. darren-personal)'
+        );
+        assert.equal(placeholder(document, 'engines-add-nickname'), 'e.g. Darren Personal Account');
+        assert.match(text(document, 'engines-add-env-var-hint'), /Claude Max/);
+    });
+
+    test(`${variant.name}: opening the AI engine ADD modal after a secret-only one restores slug/nickname/env-var-hint copy too (regression)`, async () => {
+        const { document, LCARS_ENGINES } = await setupEnginesUI(variant);
+
+        LCARS_ENGINES.openAddAccountModal(SECRET_ENGINE.slug, SECRET_ENGINE.name);
+        assert.equal(text(document, 'engines-add-slug-label'), 'Secret Slug *');
+
+        LCARS_ENGINES.openAddAccountModal(AI_ENGINE.slug, AI_ENGINE.name);
+        assert.equal(text(document, 'engines-add-slug-label'), 'Account Slug *');
+        assert.equal(placeholder(document, 'engines-add-slug'), 'e.g. darren-personal');
+        assert.equal(placeholder(document, 'engines-add-nickname'), 'e.g. Darren Personal Account');
+        assert.match(text(document, 'engines-add-env-var-hint'), /Claude Max/);
+    });
+
+    test(`${variant.name}: EDIT modal for a secret-only engine's account swaps slug label and env-var hint copy`, async () => {
+        const { document, LCARS_ENGINES } = await setupEnginesUI(variant);
+
+        LCARS_ENGINES.openEditAccountModal(SECRET_ENGINE.slug, SECRET_ENGINE.accounts[0]);
+
+        assert.equal(text(document, 'engines-edit-slug-label'), 'Secret Slug (IMMUTABLE)');
+        assert.match(text(document, 'engines-edit-env-var-hint'), /RELEASE_<TEAM>_<PURPOSE>/);
+        assert.doesNotMatch(text(document, 'engines-edit-env-var-hint'), /Claude Max/);
+    });
+
+    test(`${variant.name}: EDIT modal for a normal AI engine's account keeps original slug label and env-var hint copy (regression)`, async () => {
+        const { document, LCARS_ENGINES } = await setupEnginesUI(variant);
+
+        const aiAccount = {
+            slug: 'darren-personal', account_id: 'acc_01AbCdEf',
+            nickname: 'Darren Personal', env_var_name: 'ANTHROPIC_API_KEY_DARREN'
+        };
+        LCARS_ENGINES.openEditAccountModal(AI_ENGINE.slug, aiAccount);
+
+        assert.equal(text(document, 'engines-edit-slug-label'), 'Account Slug (IMMUTABLE)');
+        assert.match(text(document, 'engines-edit-env-var-hint'), /Claude Max/);
+    });
+
+    // -------------------------------------------------------------------
+    // XACA-1342-028 / 029 — submitAddAccount/submitEditAccount request bodies
+    // -------------------------------------------------------------------
+
+    test(`${variant.name}: submitAddAccount for a secret-only engine omits account_id and auth_type from the POST body`, async () => {
+        const { document, window, LCARS_ENGINES } = await setupEnginesUI(variant);
+        const calls = stubFleetApiFetch(window);
+
+        LCARS_ENGINES.openAddAccountModal(SECRET_ENGINE.slug, SECRET_ENGINE.name);
+        setValue(document, 'engines-add-slug', 'new-secret');
+        setValue(document, 'engines-add-nickname', 'New Secret');
+        setValue(document, 'engines-add-env-var', 'RELEASE_NEW_SECRET');
+
+        await LCARS_ENGINES.submitAddAccount();
+
+        assert.equal(calls.length, 1, 'expected exactly one fleetApiFetch call');
+        assert.equal(calls[0].method, 'POST');
+        assert.equal(calls[0].url, `/api/engines/${SECRET_ENGINE.slug}/accounts`);
+        assert.deepEqual(
+            Object.keys(calls[0].body).sort(),
+            ['env_var_name', 'nickname', 'slug'].sort()
+        );
+        assert.equal('account_id' in calls[0].body, false, 'account_id must be omitted, not sent blank');
+        assert.equal('auth_type' in calls[0].body, false, 'auth_type must be omitted entirely on POST for a secret-only engine');
+    });
+
+    test(`${variant.name}: submitAddAccount for a normal AI engine keeps account_id required, auth_type optional (regression)`, async () => {
+        const { document, window, LCARS_ENGINES } = await setupEnginesUI(variant);
+        const calls = stubFleetApiFetch(window);
+
+        LCARS_ENGINES.openAddAccountModal(AI_ENGINE.slug, AI_ENGINE.name);
+        setValue(document, 'engines-add-slug', 'darren-work');
+        setValue(document, 'engines-add-account-id', 'acc_ai_test');
+        setValue(document, 'engines-add-nickname', 'Darren Work');
+        setValue(document, 'engines-add-env-var', 'ANTHROPIC_API_KEY_DARREN_WORK');
+
+        await LCARS_ENGINES.submitAddAccount();
+
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].body.account_id, 'acc_ai_test');
+        assert.equal('auth_type' in calls[0].body, false, 'no Auth Type selected -> key omitted (unchanged POST semantics)');
+    });
+
+    test(`${variant.name}: submitEditAccount for a secret-only engine's account sends auth_type: null and no account_id when unset`, async () => {
+        const { window, LCARS_ENGINES } = await setupEnginesUI(variant);
+        const calls = stubFleetApiFetch(window);
+
+        // A secret-only account that has never had an account_id assigned
+        // (e.g. a legacy record predating the slug-default) -- the Account ID
+        // field is hidden for secret-only engines, so it opens blank.
+        const legacyAccount = {
+            slug: 'legacy-secret-no-id',
+            nickname: 'Legacy Secret No Id',
+            env_var_name: 'RELEASE_LEGACY_SECRET_NO_ID',
+        };
+        LCARS_ENGINES.openEditAccountModal(SECRET_ENGINE.slug, legacyAccount);
+
+        await LCARS_ENGINES.submitEditAccount();
+
+        assert.equal(calls.length, 1, 'expected exactly one fleetApiFetch call');
+        assert.equal(calls[0].method, 'PUT');
+        assert.equal(calls[0].url, `/api/engines/${SECRET_ENGINE.slug}/accounts/${legacyAccount.slug}`);
+        assert.equal(calls[0].body.auth_type, null, 'auth_type must be explicit null, never omitted, for a secret-only edit (XACA-1342-028)');
+        assert.equal('account_id' in calls[0].body, false, 'account_id omitted when blank so the server slug-default applies');
+    });
+
+    test(`${variant.name}: submitEditAccount for a normal AI engine's account always sends auth_type (regression)`, async () => {
+        const { window, LCARS_ENGINES } = await setupEnginesUI(variant);
+        const calls = stubFleetApiFetch(window);
+
+        const aiAccount = {
+            slug: 'darren-personal', account_id: 'acc_01AbCdEf',
+            nickname: 'Darren Personal', env_var_name: 'ANTHROPIC_API_KEY_DARREN'
+        };
+        LCARS_ENGINES.openEditAccountModal(AI_ENGINE.slug, aiAccount);
+
+        await LCARS_ENGINES.submitEditAccount();
+
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].body.account_id, 'acc_01AbCdEf');
+        assert.equal(calls[0].body.auth_type, null, 'no Auth Type selected -> explicit null (unchanged PUT semantics)');
+    });
+
+    test(`${variant.name}: submitEditAccount for a normal AI engine's account sends the selected auth_type enum value (regression)`, async () => {
+        const { window, LCARS_ENGINES } = await setupEnginesUI(variant);
+        const calls = stubFleetApiFetch(window);
+
+        const aiAccount = {
+            slug: 'darren-personal', account_id: 'acc_01AbCdEf',
+            nickname: 'Darren Personal', env_var_name: 'ANTHROPIC_API_KEY_DARREN',
+            auth_type: 'oauth_token'
+        };
+        LCARS_ENGINES.openEditAccountModal(AI_ENGINE.slug, aiAccount);
+
+        await LCARS_ENGINES.submitEditAccount();
+
+        assert.equal(calls[0].body.auth_type, 'oauth_token');
+    });
+
+    // -------------------------------------------------------------------
+    // XACA-1342-030 — accounts table column visibility
+    // -------------------------------------------------------------------
+
+    test(`${variant.name}: renderAccountTable for a secret-only engine hides ACCOUNT ID / AUTH TYPE / LAST VALIDATED columns`, async () => {
+        const { LCARS_ENGINES } = await setupEnginesUI(variant);
+
+        const wrapper = LCARS_ENGINES.renderAccountTable(SECRET_ENGINE);
+        const headers = Array.from(wrapper.querySelectorAll('thead th')).map((th) => th.textContent);
+        assert.deepEqual(headers, ['NICKNAME', 'ENV VAR', 'VAULT', 'CREATED', 'ACTIONS']);
+
+        const row = wrapper.querySelector('tbody tr');
+        assert.ok(row, 'expected one account row');
+        assert.equal(row.querySelector('.engine-col-account-id'), null);
+        assert.equal(row.querySelector('.engine-col-auth-type'), null);
+        assert.equal(row.querySelector('.engine-col-validated'), null);
+        assert.ok(row.querySelector('.engine-col-nickname'));
+        assert.ok(row.querySelector('.engine-col-env-var'));
+        assert.ok(row.querySelector('.engine-col-vault'));
+        assert.ok(row.querySelector('.engine-col-created'));
+        assert.ok(row.querySelector('.engine-col-actions'));
+    });
+
+    test(`${variant.name}: renderAccountTable for a normal AI engine keeps all columns (regression)`, async () => {
+        const { LCARS_ENGINES } = await setupEnginesUI(variant);
+
+        const aiEngineWithAccount = {
+            slug: AI_ENGINE.slug,
+            name: AI_ENGINE.name,
+            accounts: [{
+                slug: 'darren-personal',
+                account_id: 'acc_01AbCdEf',
+                nickname: 'Darren Personal',
+                env_var_name: 'ANTHROPIC_API_KEY_DARREN',
+                auth_type: 'oauth_token',
+                created_at: '2026-01-01T00:00:00.000Z',
+                last_validated_at: null,
+            }],
+        };
+
+        const wrapper = LCARS_ENGINES.renderAccountTable(aiEngineWithAccount);
+        const headers = Array.from(wrapper.querySelectorAll('thead th')).map((th) => th.textContent);
+        assert.deepEqual(
+            headers,
+            ['NICKNAME', 'ACCOUNT ID', 'ENV VAR', 'AUTH TYPE', 'VAULT', 'CREATED', 'LAST VALIDATED', 'ACTIONS']
+        );
+
+        const row = wrapper.querySelector('tbody tr');
+        assert.ok(row.querySelector('.engine-col-account-id'));
+        assert.ok(row.querySelector('.engine-col-auth-type'));
+        assert.ok(row.querySelector('.engine-col-validated'));
+    });
+
+    test(`${variant.name}: renderAccountRow defaults secretOnly via the cached engines list when the caller omits it`, async () => {
+        const { LCARS_ENGINES } = await setupEnginesUI(variant);
+
+        const row = LCARS_ENGINES.renderAccountRow(SECRET_ENGINE.slug, SECRET_ENGINE.accounts[0]);
+        assert.equal(row.querySelector('.engine-col-account-id'), null, 'secretOnly must be inferred, hiding the column');
     });
 }

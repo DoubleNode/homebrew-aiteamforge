@@ -284,6 +284,62 @@ test('PUT secret-only engine account -- explicit auth_type: null is accepted as 
 });
 
 // ===========================================================================
+// XACA-1342-028 -- a LEGACY stored auth_type on a secret-only account must
+// be clearable via PUT auth_type: null (the edit modal cannot offer a way
+// to pick a value -- Auth Type is hidden for secret-only engines -- but it
+// must still offer a way to CLEAR a value stored before this engine became
+// secret-only, or before XACA-1342-025 hid the field). The route itself
+// (validateAccountBody + the PUT handler above) already accepts null and
+// deletes the key for a secret-only account -- this seeds the "legacy"
+// precondition directly into the store, bypassing POST/PUT validation
+// (which would refuse to ever create such a state), to prove the CLEAR
+// path a real stray record would need actually works end-to-end.
+// ===========================================================================
+
+test('PUT secret-only engine account -- a LEGACY stored auth_type is cleared by auth_type: null', async () => {
+    // Seed the legacy state directly via the store -- validateAccountBody()
+    // would reject `auth_type` on a POST/PUT to this engine, so a real stray
+    // record (e.g. from before this engine was marked secret-only) can only
+    // be reproduced by writing the registry file directly, not through the API.
+    const now = new Date().toISOString();
+    const registry = enginesStore.readEngines();
+    const engine = registry.engines.find(e => e.slug === SECRET_ENGINE_SLUG);
+    engine.accounts.push({
+        slug: 'legacy-auth-type',
+        account_id: 'legacy-auth-type',
+        nickname: 'Legacy Auth Type',
+        env_var_name: 'RELEASE_LEGACY_AUTH_TYPE',
+        auth_type: 'api_key', // the legacy stray value under test
+        created_at: now,
+        updated_at: now,
+        last_validated_at: null
+    });
+    enginesStore.writeEngines(registry);
+
+    const preEngine = enginesStore.findEngine(SECRET_ENGINE_SLUG);
+    const preAccount = preEngine.accounts.find(a => a.slug === 'legacy-auth-type');
+    assert.equal(preAccount.auth_type, 'api_key', 'fixture setup must actually seed the legacy auth_type');
+
+    // This mirrors what the fixed lcars-engines.js submitEditAccount() now
+    // sends for a secret-only engine's account (XACA-1342-028): nickname/
+    // env_var_name unchanged, no account_id (blank -> re-defaults to slug),
+    // and an explicit auth_type: null to clear the stray value -- never the
+    // pre-fix `{}` (key omitted), which the PUT handler treats as "keep the
+    // existing value" and would leave the legacy auth_type in place.
+    const res = await updateAccount(SECRET_ENGINE_SLUG, 'legacy-auth-type', {
+        nickname: 'Legacy Auth Type',
+        env_var_name: 'RELEASE_LEGACY_AUTH_TYPE',
+        auth_type: null
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal('auth_type' in res.body, false, 'response must not carry a cleared auth_type');
+
+    const postEngine = enginesStore.findEngine(SECRET_ENGINE_SLUG);
+    const postAccount = postEngine.accounts.find(a => a.slug === 'legacy-auth-type');
+    assert.equal('auth_type' in postAccount, false, 'persisted account must no longer carry auth_type');
+});
+
+// ===========================================================================
 // Regression -- a normal AI engine's validation is completely unchanged
 // ===========================================================================
 

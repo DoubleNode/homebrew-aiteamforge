@@ -118,7 +118,9 @@
 
             var addBtn = document.createElement('button');
             addBtn.className = 'btn-lcars btn-lcars-new engine-add-btn';
-            addBtn.textContent = '+ ADD ACCOUNT';
+            // XACA-1342-026: a secret-only engine's modal is titled ADD SECRET,
+            // not ADD ACCOUNT — the button that opens it must say the same thing.
+            addBtn.textContent = engine.kind === 'secret-only' ? '+ ADD SECRET' : '+ ADD ACCOUNT';
             addBtn.addEventListener('click', function() {
                 LCARS_ENGINES.openAddAccountModal(engine.slug, engine.name || engine.slug);
             });
@@ -142,7 +144,10 @@
             if (!engine.accounts || engine.accounts.length === 0) {
                 var empty = document.createElement('div');
                 empty.className = 'engines-accounts-empty';
-                empty.textContent = 'No accounts registered yet. Click + ADD ACCOUNT to define one.';
+                // XACA-1342-026: match the ADD SECRET wording above for a secret-only engine.
+                empty.textContent = engine.kind === 'secret-only'
+                    ? 'No secrets registered yet. Click + ADD SECRET to define one.'
+                    : 'No accounts registered yet. Click + ADD ACCOUNT to define one.';
                 body.appendChild(empty);
             } else {
                 body.appendChild(LCARS_ENGINES.renderAccountTable(engine));
@@ -161,25 +166,31 @@
             var wrapper = document.createElement('div');
             wrapper.className = 'engine-accounts-table-wrapper';
 
+            // XACA-1342-030: for a secret-only engine, ACCOUNT ID is just a
+            // duplicate of the slug, AUTH TYPE is always empty (rejected by
+            // the server), and LAST VALIDATED is never probed — hide all
+            // three columns rather than show admins meaningless data.
+            var secretOnly = engine.kind === 'secret-only';
+
             var table = document.createElement('table');
             table.className = 'engine-accounts-table';
 
             var thead = document.createElement('thead');
             thead.innerHTML = '<tr>' +
                 '<th>NICKNAME</th>' +
-                '<th>ACCOUNT ID</th>' +
+                (secretOnly ? '' : '<th>ACCOUNT ID</th>') +
                 '<th>ENV VAR</th>' +
-                '<th>AUTH TYPE</th>' +
+                (secretOnly ? '' : '<th>AUTH TYPE</th>') +
                 '<th>VAULT</th>' +
                 '<th>CREATED</th>' +
-                '<th>LAST VALIDATED</th>' +
+                (secretOnly ? '' : '<th>LAST VALIDATED</th>') +
                 '<th>ACTIONS</th>' +
                 '</tr>';
             table.appendChild(thead);
 
             var tbody = document.createElement('tbody');
             engine.accounts.forEach(function(account) {
-                tbody.appendChild(LCARS_ENGINES.renderAccountRow(engine.slug, account));
+                tbody.appendChild(LCARS_ENGINES.renderAccountRow(engine.slug, account, secretOnly));
             });
             table.appendChild(tbody);
 
@@ -191,9 +202,15 @@
          * Build one table row for an account.
          * @param {string} engineSlug
          * @param {object} account - { slug, account_id, nickname, env_var_name, auth_type, created_at, last_validated_at }
+         * @param {boolean} [secretOnly] - XACA-1342-030: when true, omits the ACCOUNT ID,
+         *   AUTH TYPE and LAST VALIDATED cells to match the header renderAccountTable()
+         *   builds. Defaults to a lookup against the cached engines list when the caller
+         *   (e.g. a test calling this directly) omits it.
          * @returns {HTMLTableRowElement}
          */
-        renderAccountRow(engineSlug, account) {
+        renderAccountRow(engineSlug, account, secretOnly) {
+            if (secretOnly === undefined) secretOnly = isSecretOnlyEngineSlug(engineSlug);
+
             var tr = document.createElement('tr');
             tr.id = 'account-row-' + escHtml(engineSlug) + '-' + escHtml(account.slug);
 
@@ -203,13 +220,15 @@
 
             tr.innerHTML = [
                 '<td class="engine-col-nickname">' + escHtml(account.nickname || '—') + '</td>',
-                '<td class="engine-col-account-id" title="' + escHtml(account.account_id || '') + '">' +
-                    '<code>' + escHtml(accountIdDisplay) + '</code></td>',
+                secretOnly ? '' : (
+                    '<td class="engine-col-account-id" title="' + escHtml(account.account_id || '') + '">' +
+                    '<code>' + escHtml(accountIdDisplay) + '</code></td>'
+                ),
                 '<td class="engine-col-env-var"><code>' + escHtml(account.env_var_name || '—') + '</code></td>',
-                '<td class="engine-col-auth-type">' + authTypeBadge(account) + '</td>',
+                secretOnly ? '' : ('<td class="engine-col-auth-type">' + authTypeBadge(account) + '</td>'),
                 '<td class="engine-col-vault">' + vaultBadge(account) + '</td>',
                 '<td class="engine-col-created">' + fmtDate(account.created_at) + '</td>',
-                '<td class="engine-col-validated">' + fmtDate(account.last_validated_at) + '</td>',
+                secretOnly ? '' : ('<td class="engine-col-validated">' + fmtDate(account.last_validated_at) + '</td>'),
                 '<td class="engine-col-actions"></td>'
             ].join('');
 
@@ -548,17 +567,24 @@
                         // account_id (XACA-1342-025): omit when blank (secret-only
                         // engine, field hidden) so the server's existing/slug-default
                         // logic applies instead of sending an empty string.
-                        // auth_type: for a secret-only engine's account, never send the
-                        // key at all — it has no OAuth/API-key/gateway credential to
-                        // describe (XACA-1342-025). Otherwise always sent on PUT: an
-                        // explicit enum value to set it, or null to clear it — never
-                        // omitted, since the modal always has a selection (XACA-1178-004
-                        // PUT semantics: absent keeps the existing value, which would
+                        // auth_type: for a secret-only engine's account, the Auth Type
+                        // field is hidden and never user-editable, but a LEGACY account
+                        // may still carry a stored value from before this engine was
+                        // secret-only (or before XACA-1342-025 hid the field) — so this
+                        // always sends an explicit `auth_type: null` for a secret-only
+                        // engine to CLEAR any such stray value server-side, regardless
+                        // of what the hidden select's value happens to be
+                        // (XACA-1342-028; the server's PUT already treats null as
+                        // "remove the key", see engines-routes.js). For a normal AI
+                        // engine, auth_type is always sent on PUT: an explicit enum
+                        // value to set it, or null to clear it — never omitted, since
+                        // the modal always has a selection (XACA-1178-004 PUT
+                        // semantics: absent keeps the existing value, which would
                         // silently ignore a user's "(not set)" choice).
                         body: JSON.stringify(Object.assign(
                             { nickname: nickname, env_var_name: envVar },
                             accountId ? { account_id: accountId } : {},
-                            secretOnly ? {} : { auth_type: authType ? authType : null }
+                            { auth_type: secretOnly ? null : (authType ? authType : null) }
                         ))
                     }
                 );
@@ -748,11 +774,59 @@
             leadEl.textContent = secretOnly ? 'Adding secret to:' : 'Adding account to engine:';
         }
 
+        // XACA-1342-027: the slug field's label/placeholder/hint still read as
+        // "Account Slug" / "darren-personal" (an Anthropic-account example) even
+        // when the modal has been retitled ADD/EDIT SECRET above — swap them to
+        // secret-shaped wording too, ternary-covered both ways so reopening the
+        // SAME shared modal DOM for an AI engine restores the original copy.
+        var slugLabelEl = document.getElementById('engines-' + prefix + '-slug-label');
+        if (slugLabelEl) {
+            if (prefix === 'add') {
+                slugLabelEl.textContent = secretOnly ? 'Secret Slug *' : 'Account Slug *';
+            } else {
+                slugLabelEl.textContent = secretOnly ? 'Secret Slug (IMMUTABLE)' : 'Account Slug (IMMUTABLE)';
+            }
+        }
+
+        // Only the ADD modal's slug field is a free-text input with a
+        // placeholder; the EDIT modal's slug field is a disabled input showing
+        // the account's real (immutable) slug value, so there is no placeholder
+        // to swap there.
+        if (prefix === 'add') {
+            var slugEl = document.getElementById('engines-add-slug');
+            if (slugEl) {
+                slugEl.placeholder = secretOnly ? 'e.g. firebase-cr-approver' : 'e.g. darren-personal';
+            }
+        }
+
+        var slugHintEl = document.getElementById('engines-' + prefix + '-slug-hint');
+        if (slugHintEl) {
+            slugHintEl.textContent = secretOnly
+                ? 'lowercase-kebab-case — IMMUTABLE after creation (e.g. firebase-cr-approver)'
+                : 'lowercase-kebab-case — IMMUTABLE after creation (e.g. darren-personal)';
+        }
+
+        var nicknameEl = document.getElementById('engines-' + prefix + '-nickname');
+        if (nicknameEl) {
+            nicknameEl.placeholder = secretOnly ? 'e.g. Firebase CR Approver Webhook' : 'e.g. Darren Personal Account';
+        }
+
         var envVarEl = document.getElementById('engines-' + prefix + '-env-var');
         if (envVarEl) {
             envVarEl.placeholder = secretOnly
                 ? 'e.g. RELEASE_FIREBASE_CR_APPROVER'
                 : 'e.g. ANTHROPIC_API_KEY_DARREN or CLAUDE_ACCT_ME_TOKEN';
+        }
+
+        var envVarHintEl = document.getElementById('engines-' + prefix + '-env-var-hint');
+        if (envVarHintEl) {
+            envVarHintEl.innerHTML = secretOnly
+                ? 'Failover env var: must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code> ' +
+                    'on machines without the vault secret, named <code style="color: var(--lcars-peach);">RELEASE_&lt;TEAM&gt;_&lt;PURPOSE&gt;</code> ' +
+                    '(e.g. RELEASE_FIREBASE_CR_APPROVER).'
+                : 'Failover env var: must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code> ' +
+                    'on machines without the vault secret. Not necessarily a Console key — a Claude Max ' +
+                    'OAuth token works the same way.';
         }
 
         var secretEl = document.getElementById('engines-' + prefix + '-secret');

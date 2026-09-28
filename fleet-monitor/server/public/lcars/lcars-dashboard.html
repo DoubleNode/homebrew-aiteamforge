@@ -638,12 +638,12 @@
                                 </p>
 
                                 <div class="form-group">
-                                    <label class="form-label" for="engines-add-slug">Account Slug *</label>
+                                    <label class="form-label" for="engines-add-slug" id="engines-add-slug-label">Account Slug *</label>
                                     <input class="form-input" type="text" id="engines-add-slug"
                                         placeholder="e.g. darren-personal"
                                         autocomplete="off" spellcheck="false">
                                     <div class="form-error" id="engines-add-slug-err" style="display:none;"></div>
-                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
+                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;" id="engines-add-slug-hint">
                                         lowercase-kebab-case — IMMUTABLE after creation (e.g. darren-personal)
                                     </div>
                                 </div>
@@ -670,7 +670,7 @@
                                         placeholder="e.g. ANTHROPIC_API_KEY_DARREN or CLAUDE_ACCT_ME_TOKEN"
                                         autocomplete="off" spellcheck="false" style="font-family: monospace;">
                                     <div class="form-error" id="engines-add-env-var-err" style="display:none;"></div>
-                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
+                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;" id="engines-add-env-var-hint">
                                         Failover env var: must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code>
                                         on machines without the vault secret. Not necessarily a Console key — a Claude Max
                                         OAuth token works the same way.
@@ -724,7 +724,7 @@
                             </div>
                             <div class="modal-body">
                                 <div class="form-group">
-                                    <label class="form-label">Account Slug (IMMUTABLE)</label>
+                                    <label class="form-label" id="engines-edit-slug-label">Account Slug (IMMUTABLE)</label>
                                     <input class="form-input" type="text" id="engines-edit-slug" disabled
                                         style="font-family: monospace; opacity: 0.6;">
                                     <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
@@ -751,7 +751,7 @@
                                     <input class="form-input" type="text" id="engines-edit-env-var"
                                         autocomplete="off" spellcheck="false" style="font-family: monospace;">
                                     <div class="form-error" id="engines-edit-env-var-err" style="display:none;"></div>
-                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
+                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;" id="engines-edit-env-var-hint">
                                         Failover env var: must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code>
                                         on machines without the vault secret. Not necessarily a Console key — a Claude Max
                                         OAuth token works the same way.
