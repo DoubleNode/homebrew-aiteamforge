@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1151-056** (PR-D review advisory, folded into PR-E) — `_kb_cr_write_manifest_crid` and
+  `_kb_cr_release_unlink` built `manifest_file` directly from `_kb_get_releases_dir`'s output without
+  checking it for empty. `_kb_get_releases_dir` is fail-closed (XACA-0383): an unresolvable team
+  returns empty + rc=1, which an unguarded caller turns into a root-relative
+  `/<rel-id>/manifest.json` path. Guarded both call sites: an empty `releases_dir` now warns and
+  returns early (write side, same non-fatal contract as the pre-existing missing-manifest branch) or
+  skips Site 3 only (unlink side, sites 1/2 already succeeded). Canonical `kanban-helpers.sh` gets the
+  identical guard in the same change — this is a port, not template-only hardening; see the outer
+  `CHANGELOG.md`'s XACA-1151-056 entry and `tests/test-xaca-1146-kb-release-tap-parity.zsh` for the
+  restored body-fidelity coverage of both functions.
 
 ## [0.20.27] - 2026-09-28
 - **XACA-0888** — the project-knowledge path resolver (`_kb_knowledge_project_path`) now fails loud
