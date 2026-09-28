@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-0888 (2/3)** — port of the canonical registry-derived project-identity fix: new
+  `_kb_registry_lookup_repo_owner` (registry reader factored out of `_kb_canonical_kanban_dir_for_repo`,
+  now carrying the team key; also closes an empty/`"/"`-`working_dir` landmine that glob-matched every
+  repo) and `_kb_knowledge_resolve_project_identity` (registry, then a `.kb-team` sentinel) resolve WHICH
+  team owns a repo. `_kb_knowledge_project_path`'s case 3 no longer mints `basename(repo_root)` as a
+  project slug — it returns `<kanban_dir>/knowledge/project` directly and FAILS LOUD when neither source
+  resolves. Repo-root detection now prefers `git rev-parse --path-format=absolute --git-common-dir` so a
+  SUBDIRECTORY of the main repo resolves correctly. Ported byte-identical to both
+  `share/templates/kanban/kanban-helpers.template.sh` and `share/templates/aliases/kanban-aliases.sh`;
+  see the outer `CHANGELOG.md`'s XACA-0888 (2/3) entry for canonical test coverage.
 - **XACA-1343 (PR 1/4)** — ships the release-workflow content-profile resolver and the Academy
   minimal default profiles. `share/scripts/release_profile_resolver.py` resolves each profile file
   (`profile.json`, `template.md`, `style.md`) independently across team override → group copy →

@@ -15260,6 +15260,101 @@ _kb_knowledge_yaml_field() {
     grep -m1 "^${field}:" "$file" 2>/dev/null | sed "s/^${field}:[[:space:]]*//" | tr -d '"'"'"
 }
 
+# _kb_registry_lookup_repo_owner <repo_root> (XACA-0888)
+# Registry scan factored out of _kb_canonical_kanban_dir_for_repo (which
+# discarded the team id) so the new _kb_knowledge_resolve_project_identity
+# doesn't grow a second reader of team-paths.json. Same ancestor/depth/
+# existence rules; agreeing ids at one depth (e.g. a platform team id and a
+# longer alias for it) pick the lexicographically smallest as key.
+# stdout (rc 0): "<team_key>\t<kanban_dir>". rc 1 = no match. rc 2 = same-
+# depth kanban_dir disagreement (both silent — caller prints its own message).
+_kb_registry_lookup_repo_owner() {
+    local repo_root="${1-}"
+    if [[ -z "$repo_root" ]] || [[ ! -d "$repo_root" ]]; then
+        return 1
+    fi
+
+    local cfg
+    cfg=$(_kb_overlay_config_path)
+    [[ -f "$cfg" ]] || return 1
+
+    local pairs=""
+    if command -v jq &>/dev/null; then
+        pairs=$(jq -r '
+            .teams
+            | to_entries[]
+            | select(.value.working_dir != null and .value.kanban_dir != null and .value.working_dir != "" and .value.kanban_dir != "")
+            | "\(.key)\t\(.value.working_dir)\t\(.value.kanban_dir)"
+        ' "$cfg" 2>/dev/null)
+    elif command -v python3 &>/dev/null; then
+        pairs=$(python3 - "$cfg" <<'PYEOF'
+import json, sys
+cfg = sys.argv[1]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+for key, entry in data.get("teams", {}).items():
+    if not isinstance(entry, dict):
+        continue
+    wd = entry.get("working_dir")
+    kd = entry.get("kanban_dir")
+    if wd and kd:
+        print(f"{key}\t{wd}\t{kd}")
+PYEOF
+)
+    fi
+
+    [[ -z "$pairs" ]] && return 1
+
+    # zsh trap: these must be declared HERE, not inside the loop (PR #755).
+    local best_depth=-1 best_kanban="" best_key="" ambiguous="false" rlro_key rlro_wd rlro_kd rlro_depth _wd_resolved
+    while IFS=$'\t' read -r rlro_key rlro_wd rlro_kd; do
+        if [[ -z "$rlro_key" ]] || [[ -z "$rlro_wd" ]] || [[ -z "$rlro_kd" ]]; then
+            continue
+        fi
+        rlro_wd="${rlro_wd%/}"
+        # XACA-0888: a working_dir of literally "/" (filesystem root — not
+        # caught by the jq/python filters above, which only exclude "")
+        # trims to "" here, and an empty prefix ancestor-matches every repo
+        # on the box. Refuse it post-trim instead.
+        if [[ -z "$rlro_wd" ]]; then
+            continue
+        fi
+        _wd_resolved=$(cd "$rlro_wd" 2>/dev/null && pwd -P) || _wd_resolved=""
+        [[ -n "$_wd_resolved" ]] && rlro_wd="$_wd_resolved"
+        if [[ "$repo_root" != "$rlro_wd" ]] && [[ "$repo_root" != "$rlro_wd"/* ]]; then
+            continue
+        fi
+        if [[ ! -d "$rlro_kd" ]]; then
+            continue
+        fi
+        rlro_depth=${#rlro_wd}
+        if (( rlro_depth > best_depth )); then
+            best_depth=$rlro_depth
+            best_kanban="$rlro_kd"
+            best_key="$rlro_key"
+            ambiguous="false"
+        elif (( rlro_depth == best_depth )); then
+            if [[ "$rlro_kd" != "$best_kanban" ]]; then
+                ambiguous="true"
+            elif [[ "$rlro_key" < "$best_key" ]]; then
+                best_key="$rlro_key"  # agreeing alias — deterministic tie-break
+            fi
+        fi
+    done <<< "$pairs"
+
+    if (( best_depth < 0 )); then
+        return 1
+    fi
+    if [[ "$ambiguous" == "true" ]]; then
+        return 2
+    fi
+    printf '%s\t%s\n' "$best_key" "$best_kanban"
+    return 0
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # _kb_canonical_kanban_dir_for_repo [<repo_root>] (XACA-0883-001)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -15372,100 +15467,20 @@ _kb_canonical_kanban_dir_for_repo() {
     _cn_resolved=$(cd "$repo_root" 2>/dev/null && pwd -P) || _cn_resolved=""
     [[ -n "$_cn_resolved" ]] && repo_root="$_cn_resolved"
 
-    # ---- 1. Registry reverse-lookup ----
-    local cfg
-    cfg=$(_kb_overlay_config_path)
-    if [[ -f "$cfg" ]]; then
-        local pairs=""
-        if command -v jq &>/dev/null; then
-            pairs=$(jq -r '
-                .teams
-                | to_entries[]
-                | select(.value.working_dir != null and .value.kanban_dir != null and .value.working_dir != "" and .value.kanban_dir != "")
-                | "\(.value.working_dir)\t\(.value.kanban_dir)"
-            ' "$cfg" 2>/dev/null)
-        elif command -v python3 &>/dev/null; then
-            pairs=$(python3 - "$cfg" <<'PYEOF'
-import json, sys
-cfg = sys.argv[1]
-try:
-    with open(cfg) as fh:
-        data = json.load(fh)
-except Exception:
-    sys.exit(0)
-for entry in data.get("teams", {}).values():
-    if not isinstance(entry, dict):
-        continue
-    wd = entry.get("working_dir")
-    kd = entry.get("kanban_dir")
-    if wd and kd:
-        print(f"{wd}\t{kd}")
-PYEOF
-)
-        fi
-
-        if [[ -n "$pairs" ]]; then
-            # NOTE: every one of these is declared HERE, outside the while loop.
-            # A bare `local X` re-executed inside a loop makes zsh echo "X=<value>"
-            # to STDOUT and corrupt this function's return value (the PR #755
-            # review finding). Do not move any of these inside the loop.
-            local best_depth=-1 best_kanban="" ambiguous="false" wd kd depth _wd_resolved
-            while IFS=$'\t' read -r wd kd; do
-                if [[ -z "$wd" ]] || [[ -z "$kd" ]]; then
-                    continue
-                fi
-                wd="${wd%/}"
-                # XACA-0883-015: symlink-normalize the registry side too, so the
-                # ancestor test compares like with like (repo_root was already
-                # normalized above). Without this a registry working_dir spelled
-                # "/var/..." never matches a repo_root git reported as
-                # "/private/var/...", and a legitimately-owned repo silently
-                # falls through to the probe. Non-fatal: an unresolvable wd keeps
-                # its literal value and is simply compared as-is.
-                _wd_resolved=$(cd "$wd" 2>/dev/null && pwd -P) || _wd_resolved=""
-                [[ -n "$_wd_resolved" ]] && wd="$_wd_resolved"
-                # Ancestor test: repo_root == wd, or repo_root is nested under wd.
-                if [[ "$repo_root" != "$wd" ]] && [[ "$repo_root" != "$wd"/* ]]; then
-                    continue
-                fi
-                # L1: gate every registry candidate on existence — stale entries
-                # (e.g. a removed test tmpdir) must never be trusted blind.
-                if [[ ! -d "$kd" ]]; then
-                    continue
-                fi
-                depth=${#wd}
-                if (( depth > best_depth )); then
-                    best_depth=$depth
-                    best_kanban="$kd"
-                    ambiguous="false"
-                elif (( depth == best_depth )); then
-                    # L2: multiple team ids sharing one working_dir/kanban_dir is
-                    # normal (e.g. a platform team id and a longer alias for
-                    # it) — only a same-depth DISAGREEMENT is genuinely
-                    # ambiguous.
-                    if [[ "$kd" != "$best_kanban" ]]; then
-                        ambiguous="true"
-                    fi
-                fi
-            done <<< "$pairs"
-
-            if (( best_depth >= 0 )); then
-                if [[ "$ambiguous" == "true" ]]; then
-                    echo "kb: _kb_canonical_kanban_dir_for_repo: conflicting registry entries at the same depth for '$repo_root' — refusing to guess." >&2
-                    # XACA-0883-019: exit code 2 means AMBIGUOUS (conflicting
-                    # claims), distinct from 1 = no answer at all. Callers must
-                    # tell these apart — ambiguity is a hard refusal while
-                    # no-answer fails open. Previously the only signal was a
-                    # substring match on stderr, which forced the caller to
-                    # capture stderr through a temp file just to classify the
-                    # failure. A numeric code needs no filesystem at all.
-                    return 2
-                fi
-                echo "$best_kanban"
-                return 0
-            fi
-        fi
+    # ---- 1. Registry reverse-lookup (XACA-0888: now via the shared reader
+    # _kb_registry_lookup_repo_owner; rc/message contract unchanged) ----
+    local _cn_reg_result _cn_reg_rc
+    _cn_reg_result=$(_kb_registry_lookup_repo_owner "$repo_root")
+    _cn_reg_rc=$?
+    if (( _cn_reg_rc == 0 )); then
+        echo "${_cn_reg_result#*$'\t'}"
+        return 0
+    elif (( _cn_reg_rc == 2 )); then
+        echo "kb: _kb_canonical_kanban_dir_for_repo: conflicting registry entries at the same depth for '$repo_root' — refusing to guess." >&2
+        # XACA-0883-019: rc 2 = AMBIGUOUS, distinct from rc 1 = no answer.
+        return 2
     fi
+    # _cn_reg_rc == 1: no registry answer at all — fall through to the probe.
 
     # ---- 2. Sibling probe (fallback) ----
     local anc="$repo_root" parent sib hops=0
@@ -15487,6 +15502,101 @@ PYEOF
         hops=$((hops + 1))
     done
 
+    return 1
+}
+
+# _kb_knowledge_resolve_project_identity [<repo_root>] (XACA-0888)
+# Resolves WHICH team owns a repo root (identity — a name; unlike
+# _kb_canonical_kanban_dir_for_repo, which returns a bare directory). Needed
+# so case-3 below stops minting basename(repo_root) as a project slug.
+# Registry first (shared _kb_registry_lookup_repo_owner), else a .kb-team
+# sentinel (XACA-0454) walked up from repo_root — covers a subagent/non-tmux
+# session with no ambient team context (-019). No sibling-probe fallback:
+# that finds a directory with no identity attached.
+# stdout (rc 0): "<slug>\t<origin>\t<kanban_dir>", origin registry|sentinel.
+# rc 1 = no answer — FAIL LOUD (USER-DECIDED POLICY), never a basename
+# fallback. rc 2 = registry disagreement (see _kb_registry_lookup_repo_owner).
+_kb_knowledge_resolve_project_identity() {
+    local repo_root="${1-}"
+
+    if [[ -z "$repo_root" ]]; then
+        # XACA-0888-030: try the absolute form first (git >= 2.31) so a
+        # SUBDIRECTORY of the main repo resolves correctly. Fall back to the
+        # relative form only when the absolute flag itself is unsupported.
+        local _pi_common_abs
+        _pi_common_abs=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+        if [[ -n "$_pi_common_abs" ]]; then
+            repo_root=$(dirname "$_pi_common_abs")
+        else
+            local git_common_dir
+            git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
+            if [[ -z "$git_common_dir" ]]; then
+                echo "kb: _kb_knowledge_resolve_project_identity: not inside a git repository (cwd: ${PWD}) — cannot resolve a project identity." >&2
+                return 1
+            fi
+            if [[ "$git_common_dir" == ".git" ]]; then
+                repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+            else
+                repo_root=$(dirname "$git_common_dir")
+            fi
+        fi
+    fi
+
+    if [[ -z "$repo_root" ]] || [[ ! -d "$repo_root" ]]; then
+        return 1
+    fi
+    repo_root="${repo_root%/}"
+    # Symlink-normalize (XACA-0883-015 parity, see _kb_canonical_kanban_dir_for_repo).
+    local _pi_resolved
+    _pi_resolved=$(cd "$repo_root" 2>/dev/null && pwd -P) || _pi_resolved=""
+    [[ -n "$_pi_resolved" ]] && repo_root="$_pi_resolved"
+
+    # ---- 1. Registry ----
+    local _pi_reg_result _pi_reg_rc
+    _pi_reg_result=$(_kb_registry_lookup_repo_owner "$repo_root")
+    _pi_reg_rc=$?
+    if (( _pi_reg_rc == 0 )); then
+        printf '%s\tregistry\t%s\n' "${_pi_reg_result%%$'\t'*}" "${_pi_reg_result#*$'\t'}"
+        return 0
+    elif (( _pi_reg_rc == 2 )); then
+        echo "kb: _kb_knowledge_resolve_project_identity: conflicting registry entries at the same depth for '$repo_root' — refusing to guess." >&2
+        return 2
+    fi
+
+    # ---- 2. .kb-team sentinel, walked up from repo_root ----
+    local search_dir="$repo_root"
+    while [[ -n "$search_dir" && "$search_dir" != "/" ]]; do
+        if [[ -f "${search_dir}/.kb-team" ]]; then
+            local _pi_sentinel_line _pi_sentinel_team="" _pi_sentinel_kd
+            _pi_sentinel_line=$(head -n 1 "${search_dir}/.kb-team" 2>/dev/null | tr -d '[:space:]')
+            if [[ -n "$_pi_sentinel_line" ]]; then
+                # Same two sentinel shapes as _kb_resolve_context_fallback
+                # (XACA-0454/XACA-0628): freelance:<client>:<project>[:<term>]
+                # composes to freelance-<client>-<project>; else first field.
+                if [[ "$_pi_sentinel_line" == freelance:*:* ]]; then
+                    local _pi_fl_client _pi_fl_project _pi_fl_rest
+                    IFS=':' read -r _ _pi_fl_client _pi_fl_project _pi_fl_rest <<< "$_pi_sentinel_line"
+                    if [[ -n "$_pi_fl_client" && -n "$_pi_fl_project" ]]; then
+                        _pi_sentinel_team="freelance-${_pi_fl_client}-${_pi_fl_project}"
+                    fi
+                else
+                    _pi_sentinel_team="${_pi_sentinel_line%%:*}"
+                fi
+            fi
+            if [[ -n "$_pi_sentinel_team" ]]; then
+                _pi_sentinel_kd=$(_kb_get_kanban_dir "$_pi_sentinel_team" 2>/dev/null) || _pi_sentinel_kd=""
+                if [[ -n "$_pi_sentinel_kd" ]] && [[ -d "$_pi_sentinel_kd" ]]; then
+                    printf '%s\tsentinel\t%s\n' "$_pi_sentinel_team" "$_pi_sentinel_kd"
+                    return 0
+                fi
+            fi
+            break
+        fi
+        search_dir=$(dirname "$search_dir")
+    done
+
+    echo "kb: _kb_knowledge_resolve_project_identity: cannot attribute '$repo_root' to a team — no registry entry claims it, and no .kb-team sentinel names a resolvable team." >&2
+    echo "  Fix: register this repo's working_dir in ~/.aiteamforge/team-paths.json, or drop a '.kb-team' sentinel (one line: <team-id>) at the repo root, or set KB_KNOWLEDGE_PROJECT_PATH to an explicit absolute path for this session." >&2
     return 1
 }
 
@@ -15860,10 +15970,11 @@ _kb_knowledge_project_layout_guard() {
 }
 
 # Internal: resolve project knowledge path
-# Precedence: .knowledge-config.yml → KB_KNOWLEDGE_PROJECT_PATH → default.
-# FAILS LOUD (XACA-0888, USER-DECIDED POLICY): prints NOTHING to stdout and
-# returns 1 whenever it cannot determine where to write, never a
-# plausible-looking fallback. Callers MUST check the return code.
+# Precedence: .knowledge-config.yml → KB_KNOWLEDGE_PROJECT_PATH → registry-
+# derived default (XACA-0888; see case 3 below). FAILS LOUD (USER-DECIDED
+# POLICY): prints NOTHING to stdout and returns 1 whenever it cannot
+# determine where to write, never a plausible-looking fallback. Callers MUST
+# check the return code.
 _kb_knowledge_project_path() {
     local repo_root project_slug
 
@@ -15880,7 +15991,17 @@ _kb_knowledge_project_path() {
         echo "  Fix: cd into the git repo this knowledge belongs to, or use the subject/team tier instead (kb-knowledge-add subject|team ...)." >&2
         return 1
     fi
-    if [[ "$git_common_dir" == ".git" ]]; then
+    # XACA-0888-030: prefer the ABSOLUTE form (git >= 2.31) so a SUBDIRECTORY
+    # resolves correctly — the relative form below prints "../.git" (never
+    # literally ".git") from a subdirectory, so the old branch mis-detected
+    # that as a feature worktree and derived a relative repo_root="..".
+    # Falls back to the relative form only on older git (empty here already
+    # means "not a git repo", handled above).
+    local git_common_dir_abs
+    git_common_dir_abs=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    if [[ -n "$git_common_dir_abs" ]]; then
+        repo_root=$(dirname "$git_common_dir_abs")
+    elif [[ "$git_common_dir" == ".git" ]]; then
         # Main worktree: --git-common-dir is relative, --show-toplevel is correct
         repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
     else
@@ -16000,8 +16121,19 @@ _kb_knowledge_project_path() {
         return 0
     fi
 
-    # 3. Default
-    echo "$(_kb_knowledge_global_root)/projects/${project_slug}"
+    # 3. Default (XACA-0888: registry/sentinel-derived, NEVER a naive
+    # basename slug — see _kb_knowledge_resolve_project_identity's header).
+    # Resolved: <kanban_dir>/knowledge/project, no KB_KNOWLEDGE_PROJECT_PATH
+    # needed (XACA-0888-019 subagent parity). Unresolved: FAIL LOUD, rc
+    # propagated, resolver already printed the stderr message.
+    local _kp_identity _kp_identity_rc
+    _kp_identity=$(_kb_knowledge_resolve_project_identity "$repo_root")
+    _kp_identity_rc=$?
+    if (( _kp_identity_rc != 0 )); then
+        return "$_kp_identity_rc"
+    fi
+    # Field 3 of "<slug>\tregistry|sentinel\t<kanban_dir>".
+    echo "${_kp_identity##*$'\t'}/knowledge/project"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -16011,9 +16143,14 @@ _kb_knowledge_project_path() {
 # Returns the LEGACY (pre-XACA-0883) case-2 resolution — i.e. exactly what
 # _kb_knowledge_project_path would have returned before this ticket's layout
 # fix, with no {kanban_dir} token and no {repo_root}/kanban re-rooting.
-# Cases 1 and 3 are byte-identical to the current resolver (this ticket did
-# not touch them) and are duplicated here only so this function is a complete,
+# Case 1 is byte-identical to the current resolver (this ticket did not touch
+# it) and is duplicated here only so this function is a complete,
 # self-contained "what used to happen" answer.
+#
+# Case 3 is now DELIBERATELY DIVERGENT (XACA-0888): kept at the OLD
+# basename-fallback shape on purpose, since this function's only consumer is
+# kb-knowledge-search's LEGACY read union (never a writer) — finding entries
+# a pre-fix session wrote under the old rules.
 #
 # Why this exists: pre-fix installs may already have knowledge entries sitting
 # in shadow bases created by the pre-fix resolver — some of them another
@@ -16069,7 +16206,8 @@ _kb_knowledge_project_path_legacy() {
         return 0
     fi
 
-    # 3. Default (unchanged by XACA-0883 — duplicated verbatim)
+    # 3. Default (unchanged by XACA-0883 — duplicated verbatim; XACA-0888
+    # intentionally does NOT touch this either — see this function's header)
     echo "$(_kb_knowledge_global_root)/projects/${project_slug}"
 }
 
