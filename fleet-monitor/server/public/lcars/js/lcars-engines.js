@@ -30,6 +30,10 @@
     var _activeAccountSlug = null;
     var _initialized       = false;
 
+    // Last-fetched /api/engines list, cached so the modal-open/submit paths
+    // can look up an engine's `kind` without re-fetching (XACA-1342-025).
+    var _engines = [];
+
     // =========================================================================
     // PUBLIC API (attached to window.LCARS_ENGINES)
     // =========================================================================
@@ -52,6 +56,7 @@
                 }
                 var data = await resp.json();
                 var engines = (data && data.engines) ? data.engines : [];
+                _engines = engines;
 
                 container.innerHTML = '';
                 if (engines.length === 0) {
@@ -251,6 +256,8 @@
             var addSecret = document.getElementById('engines-add-secret');
             if (addSecret) addSecret.value = '';
 
+            applySecretOnlyModalState('add', isSecretOnlyEngineSlug(engineSlug));
+
             clearAddErrors();
             showModal('engines-add-modal');
         },
@@ -277,6 +284,8 @@
             // XACA-0538-001.
             var editSecret = document.getElementById('engines-edit-secret');
             if (editSecret) editSecret.value = '';
+
+            applySecretOnlyModalState('edit', isSecretOnlyEngineSlug(engineSlug));
 
             clearEditErrors();
             showModal('engines-edit-modal');
@@ -351,6 +360,11 @@
             var secretEl  = document.getElementById('engines-add-secret');
             var secret    = secretEl ? (secretEl.value || '') : '';
 
+            // XACA-1342-025: a secret-only engine (release-notify/release-wiki)
+            // has no "account id" field visible — account_id is optional and the
+            // server defaults it to the account slug when omitted.
+            var secretOnly = isSecretOnlyEngineSlug(_activeEngineSlug);
+
             clearAddErrors();
 
             var valid = true;
@@ -365,10 +379,10 @@
                 valid = false;
             }
 
-            if (!accountId) {
+            if (!secretOnly && !accountId) {
                 showFieldError('engines-add-account-id-err', 'Account ID is required.');
                 valid = false;
-            } else if (accountId.length > MAX_LEN) {
+            } else if (accountId && accountId.length > MAX_LEN) {
                 showFieldError('engines-add-account-id-err', 'Max ' + MAX_LEN + ' characters.');
                 valid = false;
             }
@@ -398,8 +412,14 @@
             // auth_type is optional on POST (XACA-1178-004/005): include the key only
             // when a type was explicitly selected. Omitting it — never sending null —
             // lets the server/launcher infer the type from the token prefix.
-            var addBody = { slug: slug, account_id: accountId, nickname: nickname, env_var_name: envVar };
-            if (authType) addBody.auth_type = authType;
+            // account_id (XACA-1342-025): omit entirely when blank — for a
+            // secret-only engine the server defaults it to the account slug;
+            // for an AI engine the field is required so this branch never fires.
+            var addBody = { slug: slug, nickname: nickname, env_var_name: envVar };
+            if (accountId) addBody.account_id = accountId;
+            // auth_type is never sent for a secret-only engine's account — it has
+            // no OAuth/API-key/gateway credential to describe (XACA-1342-025).
+            if (!secretOnly && authType) addBody.auth_type = authType;
 
             try {
                 var resp = await window.fleetApiFetch(
@@ -482,13 +502,16 @@
             var secretEl  = document.getElementById('engines-edit-secret');
             var secret    = secretEl ? (secretEl.value || '') : '';
 
+            // XACA-1342-025: same secret-only relaxation as submitAddAccount().
+            var secretOnly = isSecretOnlyEngineSlug(_activeEngineSlug);
+
             clearEditErrors();
 
             var valid = true;
-            if (!accountId) {
+            if (!secretOnly && !accountId) {
                 showFieldError('engines-edit-account-id-err', 'Account ID is required.');
                 valid = false;
-            } else if (accountId.length > MAX_LEN) {
+            } else if (accountId && accountId.length > MAX_LEN) {
                 showFieldError('engines-edit-account-id-err', 'Max ' + MAX_LEN + ' characters.');
                 valid = false;
             }
@@ -522,11 +545,21 @@
                     {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
-                        // auth_type is always sent on PUT: an explicit enum value to set it,
-                        // or null to clear it. Never omitted, since the modal always has a
-                        // selection (XACA-1178-004 PUT semantics: absent keeps the existing
-                        // value, which would silently ignore a user's "(not set)" choice).
-                        body: JSON.stringify({ account_id: accountId, nickname: nickname, env_var_name: envVar, auth_type: authType ? authType : null })
+                        // account_id (XACA-1342-025): omit when blank (secret-only
+                        // engine, field hidden) so the server's existing/slug-default
+                        // logic applies instead of sending an empty string.
+                        // auth_type: for a secret-only engine's account, never send the
+                        // key at all — it has no OAuth/API-key/gateway credential to
+                        // describe (XACA-1342-025). Otherwise always sent on PUT: an
+                        // explicit enum value to set it, or null to clear it — never
+                        // omitted, since the modal always has a selection (XACA-1178-004
+                        // PUT semantics: absent keeps the existing value, which would
+                        // silently ignore a user's "(not set)" choice).
+                        body: JSON.stringify(Object.assign(
+                            { nickname: nickname, env_var_name: envVar },
+                            accountId ? { account_id: accountId } : {},
+                            secretOnly ? {} : { auth_type: authType ? authType : null }
+                        ))
                     }
                 );
                 var data = await resp.json();
@@ -670,6 +703,70 @@
         }
         return '<span class="engine-vault-badge engine-vault-badge--none" ' +
             'title="No vault secret stored for this account">VAULT: not provisioned</span>';
+    }
+
+    /**
+     * True when the given engine slug refers to a secret-only engine
+     * (`kind: "secret-only"`, e.g. release-notify/release-wiki) in the
+     * last-fetched /api/engines list. Mirrors engines-store.js's
+     * isSecretOnlyEngine() predicate, client-side (XACA-1342-025).
+     * @param {string} engineSlug
+     * @returns {boolean}
+     */
+    function isSecretOnlyEngineSlug(engineSlug) {
+        var engine = _engines.find(function(e) { return e && e.slug === engineSlug; });
+        return !!(engine && engine.kind === 'secret-only');
+    }
+
+    /**
+     * Adjust the ADD/EDIT account modal for a secret-only engine (XACA-1342-025):
+     * a secret-only engine (release-notify/release-wiki) holds a webhook URL or
+     * opaque token, never an Anthropic-style AI account, so its modal must not
+     * ask an admin to invent an Account ID or pick an OAuth/API-key/Gateway
+     * Auth Type. Hides both fields, retitles the modal, and swaps the Env Var
+     * Name / Secret Value placeholders to webhook/token wording. A normal AI
+     * engine's modal is untouched (all fields shown, original wording restored).
+     * @param {'add'|'edit'} prefix
+     * @param {boolean} secretOnly
+     */
+    function applySecretOnlyModalState(prefix, secretOnly) {
+        var accountIdGroup = document.getElementById('engines-' + prefix + '-account-id-group');
+        if (accountIdGroup) accountIdGroup.hidden = secretOnly;
+
+        var authTypeGroup = document.getElementById('engines-' + prefix + '-auth-type-group');
+        if (authTypeGroup) authTypeGroup.hidden = secretOnly;
+
+        var titleEl = document.getElementById('engines-' + prefix + '-modal-title');
+        if (titleEl) {
+            titleEl.textContent = secretOnly
+                ? (prefix === 'add' ? 'ADD SECRET' : 'EDIT SECRET')
+                : (prefix === 'add' ? 'ADD ACCOUNT' : 'EDIT ACCOUNT');
+        }
+
+        var leadEl = document.getElementById('engines-add-modal-lead');
+        if (leadEl) {
+            leadEl.textContent = secretOnly ? 'Adding secret to:' : 'Adding account to engine:';
+        }
+
+        var envVarEl = document.getElementById('engines-' + prefix + '-env-var');
+        if (envVarEl) {
+            envVarEl.placeholder = secretOnly
+                ? 'e.g. RELEASE_FIREBASE_CR_APPROVER'
+                : 'e.g. ANTHROPIC_API_KEY_DARREN or CLAUDE_ACCT_ME_TOKEN';
+        }
+
+        var secretEl = document.getElementById('engines-' + prefix + '-secret');
+        if (secretEl) {
+            if (prefix === 'add') {
+                secretEl.placeholder = secretOnly
+                    ? 'paste the webhook URL or API token to seal it to authorized machines'
+                    : 'paste the API key to seal it to authorized machines';
+            } else {
+                secretEl.placeholder = secretOnly
+                    ? 'enter a new webhook URL or token to re-seal; blank = unchanged'
+                    : 'enter a new value to re-seal; blank = unchanged';
+            }
+        }
     }
 
     function showModal(id) {

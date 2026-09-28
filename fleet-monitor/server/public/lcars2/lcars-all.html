@@ -328,7 +328,7 @@
                 <div class="lcars-section" data-section="engines">
                     <section>
                         <div class="section-header" style="border-color: var(--lcars-amber);">
-                            <span class="section-title" style="color: var(--lcars-amber);">AI ENGINES</span>
+                            <span class="section-title" style="color: var(--lcars-amber);">ENGINES</span>
                             <div class="section-bar" style="background: var(--lcars-amber);"></div>
                         </div>
 
@@ -357,7 +357,7 @@
                             </div>
                             <div class="modal-body">
                                 <p class="modal-message" style="margin-bottom: 20px; font-size: 12px; color: var(--lcars-tan);">
-                                    Adding account to engine: <strong id="engines-add-engine-label" style="color: var(--lcars-peach);">—</strong>
+                                    <span id="engines-add-modal-lead">Adding account to engine:</span> <strong id="engines-add-engine-label" style="color: var(--lcars-peach);">—</strong>
                                 </p>
 
                                 <div class="form-group">
@@ -371,7 +371,7 @@
                                     </div>
                                 </div>
 
-                                <div class="form-group">
+                                <div class="form-group" id="engines-add-account-id-group">
                                     <label class="form-label" for="engines-add-account-id">Account ID *</label>
                                     <input class="form-input" type="text" id="engines-add-account-id"
                                         placeholder="e.g. acc_01AbCdEf..." style="font-family: monospace;"
@@ -401,7 +401,7 @@
                                 </div>
 
                                 <!-- Auth type (XACA-1178-005): optional, describes how env_var_name authenticates -->
-                                <div class="form-group">
+                                <div class="form-group" id="engines-add-auth-type-group">
                                     <label class="form-label" for="engines-add-auth-type">Auth Type</label>
                                     <select class="form-input" id="engines-add-auth-type">
                                         <option value="">(not set — infer from token)</option>
@@ -455,7 +455,7 @@
                                     </div>
                                 </div>
 
-                                <div class="form-group">
+                                <div class="form-group" id="engines-edit-account-id-group">
                                     <label class="form-label" for="engines-edit-account-id">Account ID *</label>
                                     <input class="form-input" type="text" id="engines-edit-account-id"
                                         autocomplete="off" spellcheck="false" style="font-family: monospace;">
@@ -482,7 +482,7 @@
                                 </div>
 
                                 <!-- Auth type (XACA-1178-005): optional, describes how env_var_name authenticates -->
-                                <div class="form-group">
+                                <div class="form-group" id="engines-edit-auth-type-group">
                                     <label class="form-label" for="engines-edit-auth-type">Auth Type</label>
                                     <select class="form-input" id="engines-edit-auth-type">
                                         <option value="">(not set — infer from token)</option>

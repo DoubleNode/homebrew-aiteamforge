@@ -13,6 +13,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Review round 1: `env:` refs must be `RELEASE_<TEAM>_<PURPOSE>` and are team-owned; `vault:` team ownership uses the
   longest registered team id; `vault:` refs resolve from the flattened `share/scripts/` layout; the installer and
   `aiteamforge upgrade` now install the validator, library and schemas, and the kanban-helpers template sources it.
+  Secret-only engines get a secret-shaped add/edit account form (no Auth Type or Account ID; `account_id` defaults to
+  the slug server-side, `auth_type` rejected); the Engines section header reads "ENGINES".
 - **XACA-1083** — per-team **Require Epics** / **Require Releases** start gates, default ON. `kb-pick`, `kb-run`,
   `kb-work` and reopen refuse to start an item that has no Epic or Release resolving on the board, unless the team turned
   the setting off (Command ships OFF) or the item's `addedAt` is before the shipped `grandfatherCutoff`, so existing

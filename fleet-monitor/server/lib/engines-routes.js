@@ -60,8 +60,19 @@ const MAX_SLUG_LEN       = 64;
  */
 const VALID_AUTH_TYPES = ['oauth_token', 'api_key', 'gateway_token'];
 
-function validateAccountBody(body) {
+/**
+ * @param {object} body
+ * @param {{ secretOnly?: boolean }} [options] - secretOnly (XACA-1342-025): the
+ *   target engine is a secret-only engine (release-notify/release-wiki, see
+ *   engines-store.js isSecretOnlyEngine()). Such an engine holds a webhook URL
+ *   or opaque token, never an Anthropic-style account — account_id becomes
+ *   optional (the route handlers default it to the account slug when omitted)
+ *   and auth_type is refused entirely (absent/null only), so no OAuth/API-key/
+ *   gateway state is ever recorded for a secret account.
+ */
+function validateAccountBody(body, options) {
     const errors = [];
+    const secretOnly = !!(options && options.secretOnly);
     const { slug, account_id, nickname, env_var_name, auth_type } = body;
 
     if (!slug || typeof slug !== 'string') {
@@ -72,7 +83,20 @@ function validateAccountBody(body) {
         errors.push(`slug max length is ${MAX_SLUG_LEN}`);
     }
 
-    if (!account_id || typeof account_id !== 'string' || !account_id.trim()) {
+    if (secretOnly) {
+        // account_id is optional for a secret-only engine — the caller
+        // defaults it to the account slug when omitted OR blank (a PUT that
+        // explicitly clears it back to '' is a legitimate way to ask for the
+        // slug default, not a validation error). A non-string value is still
+        // rejected as a type error, and an over-long value is still rejected.
+        if (account_id !== undefined && account_id !== null) {
+            if (typeof account_id !== 'string') {
+                errors.push('account_id must be a string when provided');
+            } else if (account_id.trim() && account_id.trim().length > MAX_FIELD_LEN) {
+                errors.push(`account_id max length is ${MAX_FIELD_LEN}`);
+            }
+        }
+    } else if (!account_id || typeof account_id !== 'string' || !account_id.trim()) {
         errors.push('account_id is required and must be non-empty');
     } else if (account_id.trim().length > MAX_FIELD_LEN) {
         errors.push(`account_id max length is ${MAX_FIELD_LEN}`);
@@ -92,10 +116,17 @@ function validateAccountBody(body) {
         errors.push(`env_var_name max length is ${MAX_FIELD_LEN}`);
     }
 
-    // auth_type is optional: absent or null is valid (POST omits the key;
-    // PUT treats null as "remove the key" — see the PUT handler below).
-    // Anything else provided must be one of the three enum values.
-    if (auth_type !== undefined && auth_type !== null) {
+    if (secretOnly) {
+        // A secret-only account's "secret" is a webhook URL or opaque token —
+        // never an OAuth/API-key/gateway credential — so no auth_type value
+        // is accepted here, only its absence or explicit null (XACA-1342-025).
+        if (auth_type !== undefined && auth_type !== null) {
+            errors.push('auth_type is not supported for secret-only engines');
+        }
+    } else if (auth_type !== undefined && auth_type !== null) {
+        // auth_type is optional: absent or null is valid (POST omits the key;
+        // PUT treats null as "remove the key" — see the PUT handler below).
+        // Anything else provided must be one of the three enum values.
         if (typeof auth_type !== 'string' || !VALID_AUTH_TYPES.includes(auth_type)) {
             errors.push(`auth_type must be one of: ${VALID_AUTH_TYPES.join(', ')}`);
         }
@@ -206,23 +237,33 @@ function registerEnginesRoutes(app) {
                 return res.status(404).json({ error: `Engine '${engineSlug}' not found` });
             }
 
-            const errors = validateAccountBody(req.body);
+            const engine = registry.engines[engineIdx];
+            const secretOnly = enginesStore.isSecretOnlyEngine(engine);
+
+            const errors = validateAccountBody(req.body, { secretOnly });
             if (errors.length > 0) {
                 return res.status(400).json({ error: 'Validation failed', details: errors });
             }
 
-            const { slug, account_id, nickname, env_var_name, auth_type } = req.body;
-            const engine = registry.engines[engineIdx];
+            const { slug, nickname, env_var_name, auth_type } = req.body;
+            let { account_id } = req.body;
 
             // 409 on slug collision
             if (engine.accounts.some(a => a.slug === slug)) {
                 return res.status(409).json({ error: `Account slug '${slug}' already exists in engine '${engineSlug}'` });
             }
 
+            // XACA-1342-025: a secret-only engine (release-notify/release-wiki)
+            // has no meaningful "account id" — default to the account slug
+            // rather than making an admin invent one for a webhook/token.
+            if (secretOnly && (!account_id || !String(account_id).trim())) {
+                account_id = slug;
+            }
+
             const now = new Date().toISOString();
             const newAccount = {
                 slug,
-                account_id: account_id.trim(),
+                account_id: String(account_id).trim(),
                 nickname: nickname.trim(),
                 env_var_name,
                 // Include auth_type only when provided (never store null) —
@@ -276,6 +317,7 @@ function registerEnginesRoutes(app) {
             // "provided overrides existing" merge the other fields use — see the PUT
             // doc comment above and XACA-0282-012 §2.2.
             const existing = engine.accounts[accountIdx];
+            const secretOnly = enginesStore.isSecretOnlyEngine(engine);
             const candidate = {
                 slug: accountSlug, // slug is immutable
                 account_id:   req.body.account_id  !== undefined ? req.body.account_id  : existing.account_id,
@@ -284,15 +326,23 @@ function registerEnginesRoutes(app) {
                 auth_type:    req.body.auth_type    !== undefined ? req.body.auth_type    : existing.auth_type
             };
 
-            const errors = validateAccountBody(candidate);
+            const errors = validateAccountBody(candidate, { secretOnly });
             if (errors.length > 0) {
                 return res.status(400).json({ error: 'Validation failed', details: errors });
+            }
+
+            // XACA-1342-025: same slug-default as POST, applied to the merged
+            // candidate (covers both "never had an account_id" and "PUT cleared
+            // it to blank" for a secret-only engine's account).
+            let candidateAccountId = candidate.account_id;
+            if (secretOnly && (!candidateAccountId || !String(candidateAccountId).trim())) {
+                candidateAccountId = accountSlug;
             }
 
             const now = new Date().toISOString();
             const updatedAccount = {
                 ...existing,
-                account_id:   candidate.account_id.trim(),
+                account_id:   String(candidateAccountId).trim(),
                 nickname:     candidate.nickname.trim(),
                 env_var_name: candidate.env_var_name,
                 updated_at:   now
