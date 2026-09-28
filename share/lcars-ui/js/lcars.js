@@ -21065,23 +21065,65 @@ const _BOARD_SETTINGS_MONTH_NAMES = [
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
 ];
 
+// XACA-1083-020: the server (get_board_settings_grandfather_cutoff, backed
+// by aiteamforge_paths._normalize_grandfather_cutoff) now only ever sends
+// EITHER this exact canonical shape OR null/absent — never a raw,
+// unvalidated config string. This regex is deliberately the strict
+// counterpart of that single shared validator, not a re-implementation of
+// its grammar: it accepts ONLY the one shape the server can emit.
+const _BOARD_SETTINGS_CUTOFF_CANONICAL_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/;
+
 /**
- * Format an ISO-8601 timestamp string as a human-readable, deterministic UTC
- * date/time, e.g. "26 Sep 2026, 22:02 UTC". Returns null when *iso* is
- * missing, not a string, or does not parse to a valid instant — callers
- * must render the fail-closed "no items are exempt" message in that case
- * (XACA-1083-018/019), never "Invalid Date" and never a blank string.
+ * Format a grandfatherCutoff value as a human-readable, deterministic UTC
+ * date/time, e.g. "26 Sep 2026, 22:02 UTC". Returns null when *raw* is
+ * missing, not a string, or is not EXACTLY the canonical
+ * 'YYYY-MM-DDTHH:MM:SSZ' shape the server's shared validator emits —
+ * callers must render the fail-closed "no items are exempt" message in
+ * that case (XACA-1083-018/019/020), never "Invalid Date" and never a
+ * blank string.
+ *
+ * Deliberately does NOT parse via `new Date(raw)`: that constructor is
+ * lenient about forms the shell gate (kanban-helpers.sh's
+ * _kb_board_settings_is_grandfathered) rejects outright — a UTC offset
+ * ('+00:00'), a date-only string, a space instead of 'T', a lowercase 'z'
+ * — which is exactly how this ticket's finding happened: the UI could
+ * state an exemption the shell would never honour. The server is now the
+ * single source of truth for whether a cutoff is valid (never re-validate
+ * leniently here), but this function still does its OWN strict shape+range
+ * check as defence in depth against a stale cache, a hand-edited response,
+ * or any other route that could hand this function something other than
+ * the server's current canonical-or-null contract.
  */
-function _formatBoardSettingsCutoffUTC(iso) {
-    if (typeof iso !== 'string' || !iso.trim()) return null;
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return null;
-    const day = d.getUTCDate();
-    const month = _BOARD_SETTINGS_MONTH_NAMES[d.getUTCMonth()];
-    const year = d.getUTCFullYear();
-    const hh = String(d.getUTCHours()).padStart(2, '0');
-    const mm = String(d.getUTCMinutes()).padStart(2, '0');
-    return `${day} ${month} ${year}, ${hh}:${mm} UTC`;
+function _formatBoardSettingsCutoffUTC(raw) {
+    if (typeof raw !== 'string') return null;
+    const m = _BOARD_SETTINGS_CUTOFF_CANONICAL_RE.exec(raw);
+    if (!m) return null;
+
+    const year = Number(m[1]);
+    const month = Number(m[2]);   // 1-12, as written
+    const day = Number(m[3]);
+    const hour = Number(m[4]);
+    const minute = Number(m[5]);
+    const second = Number(m[6]);
+
+    // Build the instant purely from the matched numeric components (never
+    // by handing the raw string back to Date's own parser) so a calendar
+    // range check can catch what the regex's fixed digit-widths can't (e.g.
+    // month 13, day 32): Date.UTC silently ROLLS OVER an out-of-range
+    // component instead of failing, so round-trip through getUTC*() and
+    // reject on any mismatch rather than render a rolled-over date.
+    const d = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+    if (
+        d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day ||
+        d.getUTCHours() !== hour || d.getUTCMinutes() !== minute || d.getUTCSeconds() !== second
+    ) {
+        return null;
+    }
+
+    const monthName = _BOARD_SETTINGS_MONTH_NAMES[d.getUTCMonth()];
+    const hh = String(hour).padStart(2, '0');
+    const mm = String(minute).padStart(2, '0');
+    return `${day} ${monthName} ${year}, ${hh}:${mm} UTC`;
 }
 
 /**

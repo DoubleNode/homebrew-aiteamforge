@@ -355,6 +355,50 @@ test('loadBoardSettings: missing/invalid grandfatherCutoff renders the fail-clos
     }
 });
 
+test('loadBoardSettings: a non-canonical grandfatherCutoff reaching the client (defence in depth) still renders "no items are exempt" — XACA-1083-020', async function () {
+    // The server (aiteamforge_paths._normalize_grandfather_cutoff) never
+    // sends these anymore — it sends the canonical shape or null — but this
+    // proves the CLIENT no longer trusts `new Date()` leniency either: every
+    // one of these was ACCEPTED by the old new Date(iso)-based renderer
+    // (rendered as a real date) and is exactly the class of string the
+    // shell gate (_kb_board_settings_is_grandfathered) rejects. A stale
+    // cache, a hand-edited response, or a future regression must not make
+    // this function state an exemption the shell would not honour.
+    var nonCanonicalCases = [
+        '2026-09-26T22:02:39+00:00',  // UTC offset form -- the headline divergence this ticket closes
+        '2026-09-26',                 // date-only
+        '2026-09-26 22:02:39Z',       // space instead of 'T'
+        '2026-09-26T22:02:39z',       // lowercase 'z'
+        '2026-09-26T22:02:39.123Z',   // fractional seconds -- valid for the SERVER's validator, but the
+                                       // server always normalizes fractional seconds away before sending,
+                                       // so a client that ever saw this raw would be looking at something
+                                       // NOT in the server's canonical-or-null contract
+        '2026-13-01T00:00:00Z',       // invalid calendar month
+    ];
+    for (var i = 0; i < nonCanonicalCases.length; i++) {
+        var badResponse = Object.assign({}, GOOD_RESPONSE, { grandfatherCutoff: nonCanonicalCases[i] });
+        var env = makeEnv({ fetchImpl: function () { return Promise.resolve(fakeJsonResponse(200, badResponse)); } });
+
+        await env.sandbox.loadBoardSettings();
+
+        assert.equal(env.dom.elements['board-settings-cutoff-line'].style.display, 'none', 'case ' + i + ': ' + nonCanonicalCases[i]);
+        assert.equal(env.dom.elements['board-settings-cutoff-none-line'].style.display, '', 'case ' + i + ': ' + nonCanonicalCases[i]);
+        assert.doesNotMatch(env.dom.elements['board-settings-cutoff-value'].textContent, /Invalid Date/, 'case ' + i);
+    }
+});
+
+test('loadBoardSettings: a canonical grandfatherCutoff renders the formatted UTC line — XACA-1083-020', async function () {
+    var canonicalResponse = Object.assign({}, GOOD_RESPONSE, { grandfatherCutoff: '2026-01-05T09:07:00Z' });
+    var env = makeEnv({ fetchImpl: function () { return Promise.resolve(fakeJsonResponse(200, canonicalResponse)); } });
+
+    await env.sandbox.loadBoardSettings();
+
+    assert.equal(env.dom.elements['board-settings-cutoff-value'].textContent, '5 Jan 2026, 09:07 UTC');
+    assert.equal(env.dom.elements['board-settings-cutoff-value'].getAttribute('datetime'), '2026-01-05T09:07:00Z');
+    assert.equal(env.dom.elements['board-settings-cutoff-line'].style.display, '');
+    assert.equal(env.dom.elements['board-settings-cutoff-none-line'].style.display, 'none');
+});
+
 test('loadBoardSettings: a loadError response also renders the fail-closed cutoff line, not a stale prior value', async function () {
     var errorResponse = Object.assign({}, GOOD_RESPONSE, {
         loadError: 'board_settings.json could not be parsed — fails closed to true/true',

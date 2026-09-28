@@ -2845,6 +2845,45 @@ class TestServeBoardSettingsGet(unittest.TestCase):
         self.assertEqual(code, 400)
         self.assertIn("error", data)
 
+    def test_get_grandfather_cutoff_matches_shared_validator(self):
+        """XACA-1083-020: grandfatherCutoff in the API response is always the
+        validated/canonical value or JSON null — NEVER the raw config
+        string. A cutoff a lenient `new Date()` (or the old
+        datetime.fromisoformat-based accessor) would have accepted but the
+        shell gate rejects (a UTC offset, date-only, a space separator, a
+        lowercase 'z') must come back null here too, so the LCARS UI can
+        never state an exemption the shell does not honour; a canonical
+        cutoff comes back unchanged."""
+        cases = [
+            ("2026-09-26T22:02:39Z", "2026-09-26T22:02:39Z"),
+            ("2026-09-26T22:02:39", "2026-09-26T22:02:39Z"),
+            ("2026-09-26T22:02:39.123Z", "2026-09-26T22:02:39Z"),
+            ("2026-09-26T22:02:39+00:00", None),
+            ("2026-09-26", None),
+            ("2026-09-26 22:02:39Z", None),
+            ("2026-09-26T22:02:39z", None),
+            ("garbage", None),
+        ]
+        for raw_cutoff, expected in cases:
+            with self.subTest(raw_cutoff=raw_cutoff):
+                with tempfile.TemporaryDirectory() as td:
+                    cfg = Path(td) / "board_settings.json"
+                    cfg.write_text(json.dumps({
+                        "_schemaVersion": 1,
+                        "grandfatherCutoff": raw_cutoff,
+                        "teams": {"academy": {"requireEpicOnStart": True, "requireReleaseOnStart": True}},
+                    }), encoding="utf-8")
+                    code, data = _board_settings_get(team="academy", config_path=cfg)
+                self.assertEqual(code, 200)
+                self.assertEqual(data["grandfatherCutoff"], expected)
+                # A bad cutoff alone is not a load error -- the booleans are
+                # still valid and load_board_settings() only WARNS to
+                # stderr for a per-field problem like this (never flips
+                # loadError, matching the existing treatment of a malformed
+                # boolean field -- see _board_settings_load_error's own
+                # docstring for which checks it mirrors).
+                self.assertIsNone(data["loadError"])
+
 
 class TestHandleUpdateBoardSettings(unittest.TestCase):
     """POST /api/board-settings — XACA-1083-004."""

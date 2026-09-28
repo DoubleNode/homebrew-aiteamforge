@@ -23,6 +23,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Follow-up: a list/null/string `teams` value in the settings file now fails closed without an error; saving a setting
   takes a file lock so two LCARS servers can't lose each other's update; the Settings tab shows one shared, readable
   UTC cutoff line instead of repeating it per row; the template comment now correctly says `kb-work` is gated.
+  The cutoff now has one validator shared by the shell gate, the settings API and the Settings tab, so the tab
+  can never say items are exempt when the gate would refuse them.
 - **XACA-1258** — `kb-spacedock` gains the `vpn-dns-conflict` check: it reports `[fail]` when a
   third-party VPN utun owns the default route while Tailscale MagicDNS (100.100.100.100) is still
   ordered ahead of the VPN's resolver, which silently breaks all name resolution (raw IPs keep

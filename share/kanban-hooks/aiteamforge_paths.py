@@ -240,6 +240,7 @@ import fcntl
 import itertools
 import json
 import os
+import re
 import stat
 import sys
 import time
@@ -4652,6 +4653,84 @@ def get_board_settings_config_path() -> Path:
     return Path(__file__).parent / "board_settings.json"
 
 
+# XACA-1083-020: single grandfatherCutoff validator, shared by the shell
+# gate's Python-facing accessors, the CLI, and the LCARS API/UI. Prior to
+# this ticket, get_board_settings_grandfather_cutoff() returned the RAW
+# config string and is_item_grandfathered() parsed it with
+# _parse_iso8601_utc() (via datetime.fromisoformat), which is MORE lenient
+# than the shell gate (_kb_board_settings_is_grandfathered in
+# kanban-helpers.sh, built on jq's fromdateiso8601): Python accepted
+# '+00:00'/other UTC offsets, date-only strings, a space in place of 'T',
+# and lowercase 'z' — the shell rejects all of those (MEASURED against the
+# real shell gate, see docs/BOARD_SETTINGS.md § Grandfather Cutoff Grammar).
+# That divergence is exactly the LCARS UI bug this ticket closes: the UI
+# could state an exemption the shell gate would never honour. Every reader
+# of grandfatherCutoff now goes through this ONE validator.
+#
+# Grammar accepted (a deliberate SUBSET of what the shell's jq expression
+# accepts — narrower is the fail-closed direction, never wider):
+#   'YYYY-MM-DDTHH:MM:SSZ'       canonical
+#   'YYYY-MM-DDTHH:MM:SS'        naive, treated as UTC (shell's `norm`
+#                                 appends 'Z' when the string doesn't already
+#                                 end in 'Z')
+#   'YYYY-MM-DDTHH:MM:SS.fffZ'   fractional seconds, any digit count
+#   'YYYY-MM-DDTHH:MM:SS.fff'    naive + fractional
+# Fractional digits are always truncated (never rounded) — the shell's
+# `norm` filter drops them outright rather than parsing them.
+#
+# Deliberately narrower than the shell's underlying libc strptime in a
+# handful of edge cases the shell also happens to accept: non-zero-padded
+# month/day/hour (e.g. '2026-9-6T2:2:39Z'), trailing whitespace, and a
+# seconds value of 60 (leap-second leniency in glibc's strptime/mktime).
+# None of those are ever emitted by board_settings.json's own writer
+# (set_board_settings_for_team always writes the canonical form) or by a
+# human editing the committed schema by hand in good faith; rejecting them
+# here is "this validator accepts a subset of what the shell accepts",
+# which is safe by the same fail-closed logic as everything else in this
+# module — the bug this ticket fixes is the opposite direction (Python
+# accepting something the shell rejects).
+_GRANDFATHER_CUTOFF_RE = re.compile(
+    r"^(?P<y>\d{4})-(?P<mo>\d{2})-(?P<d>\d{2})"
+    r"T(?P<h>\d{2}):(?P<mi>\d{2}):(?P<s>\d{2})"
+    r"(?:\.(?P<frac>\d+))?"
+    r"(?P<z>Z)?$"
+)
+
+
+def _normalize_grandfather_cutoff(value: Any) -> str | None:
+    """Validate + normalize a grandfatherCutoff candidate against the single
+    shared grammar (see the module comment directly above).
+
+    Returns the canonical 'YYYY-MM-DDTHH:MM:SSZ' string when *value* matches
+    the accepted grammar AND names a real calendar date/time (rejects e.g.
+    month 13 or Feb 30 — datetime.fromisoformat is the authority there,
+    same parser _parse_iso8601_utc already uses elsewhere in this module).
+    Returns None for anything else: non-string input, wrong shape, or an
+    invalid calendar date. None is the caller's signal for "no
+    grandfathering" — never raises.
+
+    Deliberately NOT datetime.strptime(): that lazily imports the stdlib
+    `_strptime`/`calendar` modules on first use, and at least one test
+    harness in this tree (lcars-ui/tests/test_server.py) stubs
+    sys.modules['calendar'] with an unrelated MagicMock before importing
+    server.py (to stand in for an app-local `calendar` sync package) —
+    triggering strptime's lazy import there resolves to that stub instead
+    of the real stdlib module and raises deep inside CPython. fromisoformat
+    never touches `calendar`, so this validator can't step on that landmine.
+    """
+    if not isinstance(value, str):
+        return None
+    m = _GRANDFATHER_CUTOFF_RE.match(value)
+    if not m:
+        return None
+    canonical = f"{m['y']}-{m['mo']}-{m['d']}T{m['h']}:{m['mi']}:{m['s']}Z"
+    try:
+        datetime.fromisoformat(canonical)
+    except ValueError:
+        return None
+    return canonical
+
+
 def _validate_board_settings_team_block(team_slug: str, block: Any) -> list[str]:
     """Validate a single per-team block from board_settings.json.
 
@@ -4698,13 +4777,11 @@ def validate_board_settings(config: dict) -> list[str]:
             errors.extend(_validate_board_settings_team_block(slug, block))
 
     cutoff = config.get("grandfatherCutoff")
-    if cutoff is not None and (
-        not isinstance(cutoff, str) or _parse_iso8601_utc(cutoff) is None
-    ):
+    if cutoff is not None and _normalize_grandfather_cutoff(cutoff) is None:
         errors.append(
-            f"grandfatherCutoff: must be a parseable ISO-8601 string, got "
-            f"{cutoff!r} — resolves to 'no grandfathering' (gate applies to "
-            "every item)"
+            f"grandfatherCutoff: must match the shared cutoff grammar "
+            f"(see docs/BOARD_SETTINGS.md), got {cutoff!r} — resolves to "
+            "'no grandfathering' (gate applies to every item)"
         )
 
     field = config.get("creationTimestampField")
@@ -4918,17 +4995,25 @@ def is_release_required_for_team(team_slug: str) -> bool:
 
 
 def get_board_settings_grandfather_cutoff() -> str | None:
-    """Return the raw 'grandfatherCutoff' string from board_settings.json, or
-    None when absent, not a string, or the config failed to load.
+    """Return the VALIDATED, canonical 'grandfatherCutoff' from
+    board_settings.json, or None when absent, not a string, the config
+    failed to load, or the raw string does not match the single shared
+    cutoff grammar (_normalize_grandfather_cutoff — XACA-1083-020).
 
-    This is the RAW value — it is not validated for parseability here (a
-    malformed-but-present string is still returned so callers/tests can
-    inspect it). Use is_item_grandfathered() for the fail-closed
-    parse-and-compare gate decision; do not compare this value directly.
+    XACA-1083-020: this used to return the RAW, unvalidated string, and
+    is_item_grandfathered() parsed it separately with a more lenient parser
+    (datetime.fromisoformat) than the shell gate uses (jq's
+    fromdateiso8601) — a cutoff like '2026-09-01+00:00' or a date-only
+    '2026-09-01' would parse here but never grandfather anything under the
+    real shell gate, so the LCARS UI (built on this accessor) could state an
+    exemption the shell would not honour. Every caller — the CLI (`get`),
+    the LCARS API/UI, and is_item_grandfathered() below — now sees the same
+    validated-or-None value, so that divergence cannot recur. Use
+    is_item_grandfathered() for the actual gate decision; this accessor is
+    for display/inspection.
     """
     config = load_board_settings()
-    val = config.get("grandfatherCutoff")
-    return val if isinstance(val, str) and val else None
+    return _normalize_grandfather_cutoff(config.get("grandfatherCutoff"))
 
 
 def get_board_settings_creation_timestamp_field() -> str:
@@ -4982,7 +5067,12 @@ def is_item_grandfathered(created_at: Any) -> bool:
     FAIL-CLOSED CONTRACT (both directions land on "gate applies"):
       - A missing or malformed 'grandfatherCutoff' in board_settings.json
         resolves to "no grandfathering" — this function returns False for
-        every item, never True for any.
+        every item, never True for any. The cutoff is validated via
+        get_board_settings_grandfather_cutoff(), which shares its grammar
+        (_normalize_grandfather_cutoff) with the shell gate
+        (_kb_board_settings_is_grandfathered in kanban-helpers.sh) —
+        XACA-1083-020 — so this can never exempt an item the shell gate
+        would refuse to exempt, or vice versa.
       - A missing or unparseable *created_at* also resolves to False — an
         item this function cannot place in time is never assumed exempt.
       - Only when BOTH the cutoff and created_at parse, and created_at is

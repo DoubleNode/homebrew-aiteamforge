@@ -9,6 +9,8 @@ Covers:
   T4 — Grandfather cutoff (fail-closed in BOTH directions, never "all exempt")
   T5 — Setter: atomic write success path, seeding, and every failure path
   T6 — CLI contract (`get` / `set` subprocess invocations)
+  T20 — XACA-1083-020: single grandfatherCutoff validator, shared by the
+        shell gate (real zsh subprocess), the CLI, and is_item_grandfathered()
 
 Run:
     cd kanban-hooks && python3 test_board_settings_1083.py
@@ -430,6 +432,196 @@ def test_t4_trailing_z_and_naive_timestamps_normalize_to_utc():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# T20 — XACA-1083-020: ONE grandfatherCutoff validator, shared by the shell
+# gate, the CLI, and the LCARS API/UI.
+#
+# The matrix below was MEASURED against the REAL shell gate
+# (_kb_board_settings_is_grandfathered in kanban-helpers.sh — a zsh function
+# built on jq's fromdateiso8601) with a fixed created_at
+# (_CREATED_AT_BEFORE_ALL, well before every cutoff below) BEFORE this
+# ticket's validator was written; see docs/BOARD_SETTINGS.md § "Grandfather
+# Cutoff Grammar" for the full recorded table. "accepted" means the shell
+# grandfathers an item created at _CREATED_AT_BEFORE_ALL under that raw
+# cutoff string.
+#
+# Prior to this ticket, get_board_settings_grandfather_cutoff() returned the
+# RAW string and is_item_grandfathered() parsed it with
+# datetime.fromisoformat (via _parse_iso8601_utc), which is MORE lenient
+# than the shell: it accepted '+00:00'/other UTC offsets, date-only
+# strings, a space instead of 'T', and lowercase 'z' — all of which the
+# shell rejects. That divergence is the LCARS UI bug XACA-1083-020 closes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CUTOFF_MATRIX: list[tuple[str, bool]] = [
+    ("2026-09-26T22:02:39Z", True),          # canonical
+    ("2026-09-26T22:02:39", True),           # naive -> treated as UTC
+    ("2026-09-26T22:02:39.123Z", True),      # fractional seconds
+    ("2026-09-26T22:02:39.123456Z", True),   # fractional, many digits
+    ("2026-09-26T22:02:39.123", True),       # naive + fractional
+    ("2026-09-26T22:02:39+00:00", False),    # UTC OFFSET form -- REJECTED (the headline divergence)
+    ("2026-09-26", False),                   # date-only -- REJECTED
+    ("2026-09-26 22:02:39Z", False),         # space instead of 'T' -- REJECTED
+    ("2026-09-26T22:02:39z", False),         # lowercase 'z' -- REJECTED
+    ("garbage", False),
+    ("", False),
+    ("2026-09-26T22:02:39.Z", False),        # empty fractional digits -- REJECTED
+    ("2026-09-26T22:02:39+05:00", False),    # non-UTC offset -- REJECTED
+    ("2026/09/26T22:02:39Z", False),         # wrong date separator
+    ("2026-13-40T22:02:39Z", False),         # invalid calendar date (month 13)
+]
+
+#: Well before every VALID cutoff in the matrix above (all in 2026), so a
+#: matrix cutoff that the validator/shell accepts always grandfathers an
+#: item created at this instant.
+_CREATED_AT_BEFORE_ALL = "2000-01-01T00:00:00Z"
+
+
+def _shell_is_grandfathered(cutoff: str, created_at: str) -> bool:
+    """Run the REAL _kb_board_settings_is_grandfathered in a REAL zsh
+    subprocess, sourcing the REAL kanban-helpers.sh directly -- never a
+    reimplementation of its jq expression. Returns True (exempt) iff the
+    function's exit code is 0. cutoff/created_at are passed as positional
+    shell args (never string-interpolated into the script) so no value in
+    the matrix needs shell-quoting.
+    """
+    kanban_helpers = _REPO_ROOT / "kanban-helpers.sh"
+    script = (
+        'export KB_TEAM=academy KB_TERMINAL=agent SESSION_TYPE=agent\n'
+        f'source "{kanban_helpers}" >/dev/null 2>&1\n'
+        '_kb_board_settings_is_grandfathered "$1" "$2"\n'
+        'echo $?\n'
+    )
+    env = dict(os.environ)
+    # FORBIDDEN ACTIONS note (XACA-1083-020 task brief): strip TMUX/TMUX_PANE
+    # in test envs -- this call never needs real-session context detection
+    # (the function under test takes no team/session args), but a leaked
+    # TMUX_PANE from the outer dev shell is exactly the kind of stray
+    # ambient state this suite must not depend on.
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    result = subprocess.run(
+        ["zsh", "-c", script, "_", cutoff, created_at],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    rc = int(result.stdout.strip().splitlines()[-1])
+    return rc == 0
+
+
+def test_t20_normalize_grandfather_cutoff_matches_shell_matrix():
+    """T20a: _normalize_grandfather_cutoff() accepts EXACTLY the strings the
+    real shell gate accepts, per the measured matrix -- never a superset (a
+    Python accept the shell rejects is the original bug this ticket
+    closes); a subset is fine (see the function's own docstring)."""
+    from aiteamforge_paths import _normalize_grandfather_cutoff
+
+    for cutoff, shell_accepts in _CUTOFF_MATRIX:
+        canonical = _normalize_grandfather_cutoff(cutoff)
+        python_accepts = canonical is not None
+        assert python_accepts == shell_accepts, (
+            f"cutoff {cutoff!r}: python accepts={python_accepts} "
+            f"shell accepts={shell_accepts} -- divergence!"
+        )
+        if python_accepts:
+            assert canonical is not None and canonical.endswith("Z") and "T" in canonical
+    print(f"PASS T20a: _normalize_grandfather_cutoff matches the shell matrix ({len(_CUTOFF_MATRIX)} cases)")
+
+
+def test_t20_cross_layer_shell_parity():
+    """T20b: the REAL shell gate (zsh subprocess, real kanban-helpers.sh)
+    and the Python validator agree on every cutoff in the matrix -- the
+    direct regression guard for the XACA-1083-020 finding: the LCARS UI
+    stating an exemption the shell gate does not honour."""
+    import shutil
+
+    if shutil.which("zsh") is None:
+        print("SKIP T20b: zsh not on PATH")
+        return
+    if not (_REPO_ROOT / "kanban-helpers.sh").is_file():
+        print("SKIP T20b: kanban-helpers.sh not found")
+        return
+    from aiteamforge_paths import _normalize_grandfather_cutoff
+
+    for cutoff, expected in _CUTOFF_MATRIX:
+        shell_exempt = _shell_is_grandfathered(cutoff, _CREATED_AT_BEFORE_ALL)
+        assert shell_exempt == expected, (
+            f"cutoff {cutoff!r}: shell verdict={shell_exempt} expected={expected} -- "
+            "the MEASURED matrix has drifted from the real shell gate's actual behavior"
+        )
+        python_accepts = _normalize_grandfather_cutoff(cutoff) is not None
+        assert shell_exempt == python_accepts, (
+            f"cutoff {cutoff!r}: shell exempt={shell_exempt} python validator "
+            f"accepts={python_accepts} -- shell/python DIVERGE, exactly the bug "
+            "XACA-1083-020 exists to close"
+        )
+    print(f"PASS T20b: shell gate and Python validator agree on every cutoff ({len(_CUTOFF_MATRIX)} cases)")
+
+
+def test_t20_get_board_settings_grandfather_cutoff_returns_validated_value():
+    """T20c: get_board_settings_grandfather_cutoff() returns exactly what
+    _normalize_grandfather_cutoff() would, for every cutoff in the matrix --
+    proving the accessor delegates instead of parsing separately."""
+    from aiteamforge_paths import _normalize_grandfather_cutoff, get_board_settings_grandfather_cutoff
+
+    for cutoff, _ in _CUTOFF_MATRIX:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "cfg.json"
+            _write_json(cfg_path, {"teams": {}, "grandfatherCutoff": cutoff})
+            with _EnvOverride(str(cfg_path)):
+                resolved = get_board_settings_grandfather_cutoff()
+            expected = _normalize_grandfather_cutoff(cutoff)
+            assert resolved == expected, (
+                f"cutoff {cutoff!r}: accessor returned {resolved!r}, validator says {expected!r}"
+            )
+    print("PASS T20c: get_board_settings_grandfather_cutoff() matches the validator for every matrix entry")
+
+
+def test_t20_is_item_grandfathered_never_exempts_a_shell_rejected_cutoff():
+    """T20d: for an item created well before every cutoff in the matrix,
+    is_item_grandfathered() returns True iff the shared validator accepts
+    the configured cutoff string -- it can never exempt an item under a
+    cutoff the shell gate would reject."""
+    from aiteamforge_paths import _normalize_grandfather_cutoff, is_item_grandfathered
+
+    for cutoff, _ in _CUTOFF_MATRIX:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "cfg.json"
+            _write_json(cfg_path, {"teams": {}, "grandfatherCutoff": cutoff})
+            with _EnvOverride(str(cfg_path)):
+                exempt = is_item_grandfathered(_CREATED_AT_BEFORE_ALL)
+            expected = _normalize_grandfather_cutoff(cutoff) is not None
+            assert exempt == expected, (
+                f"cutoff {cutoff!r}: is_item_grandfathered={exempt} expected={expected}"
+            )
+    print("PASS T20d: is_item_grandfathered() agrees with the validator for every matrix entry")
+
+
+def test_t20_cli_get_grandfather_cutoff_matches_validator():
+    """T20e: the `get` CLI's grandfatherCutoff= line is the validated/
+    canonical value (or empty for a rejected cutoff), never the raw config
+    string."""
+    from aiteamforge_paths import _normalize_grandfather_cutoff
+
+    for cutoff, _ in _CUTOFF_MATRIX:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "cfg.json"
+            _write_json(cfg_path, {
+                "teams": {"academy": {"requireEpicOnStart": True, "requireReleaseOnStart": True}},
+                "grandfatherCutoff": cutoff,
+            })
+            env = dict(os.environ)
+            env["AITEAMFORGE_BOARD_SETTINGS_CONFIG"] = str(cfg_path)
+            result = _run_cli(["get", "academy"], env)
+            assert result.returncode == 0, f"stderr: {result.stderr}"
+            lines = result.stdout.strip().splitlines()
+            printed = next(ln for ln in lines if ln.startswith("grandfatherCutoff="))
+            expected_val = _normalize_grandfather_cutoff(cutoff) or ""
+            assert printed == f"grandfatherCutoff={expected_val}", (
+                f"cutoff {cutoff!r}: CLI printed {printed!r}, expected grandfatherCutoff={expected_val!r}"
+            )
+    print("PASS T20e: CLI `get` grandfatherCutoff= line matches the validator for every matrix entry")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # T5 — Setter: atomic write, seeding, and every failure path
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -826,6 +1018,12 @@ def run_all() -> bool:
         test_t4_missing_or_malformed_created_at_never_grandfathers,
         test_t4_creation_timestamp_field_falls_back_to_addedAt,
         test_t4_trailing_z_and_naive_timestamps_normalize_to_utc,
+        # T20
+        test_t20_normalize_grandfather_cutoff_matches_shell_matrix,
+        test_t20_cross_layer_shell_parity,
+        test_t20_get_board_settings_grandfather_cutoff_returns_validated_value,
+        test_t20_is_item_grandfathered_never_exempts_a_shell_rejected_cutoff,
+        test_t20_cli_get_grandfather_cutoff_matches_validator,
         # T5
         test_t5_setter_writes_and_is_readable_back,
         test_t5_setter_preserves_other_teams,
