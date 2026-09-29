@@ -76,8 +76,12 @@ Line semantics (decided per SOURCE line, never inside the recursive renderer)
     (all evaluated `?` tags empty, at least one evaluated). Block tags on a
     dropped line still take effect (a `{{#if b}}` opened there still opens; its
     body lines and closing tag are unaffected). Inside a `#each` that spans
-    lines the drop applies to that iteration's copy of the line only; an
-    `#each` opened on the SAME line as the `?` is part of that one line. Text
+    lines the drop applies to that iteration's copy of the line only,
+    INCLUDING the text after the open tag on the opening line:
+    `{{#each L}}- {{this.v?}}` NEWLINE `{{/each}}` over [{v:""},{v:"q"}]
+    renders `- q` NEWLINE (the empty iteration's whole line is dropped). An
+    `#each` that opens AND closes on the same line as the `?` is part of that
+    one line. Text
     after the closing `{{/each}}` of a multi-line `#each` on the same source
     line belongs to the outer copy of that line.
 
@@ -106,7 +110,7 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_left, bisect_right
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, List, Optional, Set, Tuple
 
 __all__ = ["render", "TemplateRenderError", "MAX_DEPTH"]
 
@@ -295,7 +299,7 @@ def _layout(toks: List[_Tok]) -> List[_Tok]:
 # Node forms (tuples):
 #   ("text", str, sline)
 #   ("var", path, optional, line, sline, droppable)
-#   ("each", path, [nodes], line, sline)
+#   ("each", path, [nodes], line, sline, end_sline)  (end_sline set at {{/each}})
 #   ("if", path, [nodes], line, sline)
 
 def _check_path(path: str, line: int, raw: str) -> None:
@@ -337,6 +341,10 @@ def _parse(toks: List[_Tok]) -> list:
                 raise TemplateRenderError(
                     "unbalanced '{{%s}}' at line %d (open '#%s' from line %d)"
                     % (tag, t.line, open_kind, open_line))
+            if kind == "each":
+                # The each node is the last thing appended to `parent`; record
+                # its closing source line so the renderer knows if it spans lines.
+                parent[-1] = parent[-1] + (t.sline,)
             cur = parent
         else:
             optional = tag.endswith("?")
@@ -452,7 +460,11 @@ def _render_nodes(nodes: list, root: Any, this: Any, has_this: bool, st: _State)
             if _truthy(_resolve(node[1], root, this, has_this)):
                 _render_nodes(node[2], root, this, has_this, st)
         elif kind == "each":
-            _k, path, children, line, sline = node
+            _k, path, children, line, sline, end_sline = node
+            # Multi-line #each: text after the open tag on its opening line is
+            # part of EACH iteration's line instance (XACA-1343-028). A
+            # single-line #each keeps sharing the one line (owner == sline).
+            owner = -1 if end_sline > sline else sline
             seq = _resolve(path, root, this, has_this)
             if seq is _MISSING or seq is None:
                 raise TemplateRenderError(
@@ -463,7 +475,7 @@ def _render_nodes(nodes: list, root: Any, this: Any, has_this: bool, st: _State)
                     % (path, line, type(seq).__name__))
             for item in seq:
                 st.serial += 1
-                st.iters.append((sline, st.serial))
+                st.iters.append((owner, st.serial))
                 _render_nodes(children, root, item, True, st)
                 st.iters.pop()
 

@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1343 (PR 2b/4)** — ships `share/scripts/release_fact_dictionary.py`, the engine-fact dictionary
+  for release content-profile templates: the canonical fact names, their row shapes, deprecated aliases
+  that still resolve, and `build_fact_set()`, which assembles the facts a CR/Testing Log/notice renders
+  from. The renderer no longer leaves a dangling bullet when an optional value inside a multi-line
+  `#each` is empty. `wiki.schema.json`: documentation-only wording fix. Library-only for now.
 - **XACA-0888 (3/3) PR #985 round 4** — port of the canonical -053 message fix: the project-tier
   gate's local-only-session note is truthful whether the matched team is itself local-only (bare
   `kb-knowledge-add project "<title>"` from its repo) or not (run from that team's session). Ported

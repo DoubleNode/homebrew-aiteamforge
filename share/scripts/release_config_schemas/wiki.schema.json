@@ -61,7 +61,7 @@
     },
     "platformName": {
       "type": "string",
-      "description": "Display name used by template rendering ({{platform.name}})."
+      "description": "Display name of the team's platform. Fallback source for the `release.platform` fact when the release record carries no platform (see docs/release-workflow/FACT-DICTIONARY.md). Templates use `{{release.platform}}`; `{{platform.name}}` is a deprecated alias."
     }
   }
 }
