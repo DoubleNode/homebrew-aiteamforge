@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-0888 (3/3) PR #985 round 4** — port of the canonical -053 message fix: the project-tier
+  gate's local-only-session note is truthful whether the matched team is itself local-only (bare
+  `kb-knowledge-add project "<title>"` from its repo) or not (run from that team's session). Ported
+  byte-identical to both `share/templates/kanban/kanban-helpers.template.sh` and
+  `share/templates/aliases/kanban-aliases.sh`.
 - **XACA-0888 (3/3) PR #985 round 3** — port of the canonical round-3 fixes. `kb-knowledge-where`
   redirects the resolver's output with `>|` (a plain `>` onto the mktemp-created file fails under
   `setopt NO_CLOBBER`, so the resolver never ran and the previous call's `_KB_KP_*` globals were printed

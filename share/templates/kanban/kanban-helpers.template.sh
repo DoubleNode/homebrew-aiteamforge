@@ -15361,7 +15361,19 @@ _kb_knowledge_destination_guard() {
                 # local-only session (XACA-0888-046), so a "Fix: ... auto-routes"
                 # line would just be refused again. Say what is actually true.
                 echo "  '${slug}' matches: ${proj_gate_keys[*]}" >&2
-                echo "  Note: a local-only session never routes into another team's knowledge base (XACA-0888-046); to write to that team's own base, run this from that team's session." >&2
+                # XACA-0888-053: the advice differs by whether the matched team
+                # is itself local-only (a bare command from its repo works) or
+                # not (only that team's own session can write to its base).
+                local _pg_k _pg_local="" _pg_other=""
+                for _pg_k in "${proj_gate_keys[@]}"; do
+                    if _kb_is_local_only_team "$_pg_k"; then _pg_local+=" ${_pg_k}"; else _pg_other+=" ${_pg_k}"; fi
+                done
+                if [[ -n "$_pg_other" ]]; then
+                    echo "  Note: a local-only session never routes into another team's knowledge base (XACA-0888-046); to write to that team's own base (${_pg_other# }), run this from that team's session." >&2
+                fi
+                if [[ -n "$_pg_local" ]]; then
+                    echo "  Note: '${_pg_local# }' is itself a local-only team; from that team's repo run a bare  kb-knowledge-add project \"<title>\"  (no slug) -- it writes to that team's own kanban dir." >&2
+                fi
             elif (( ${#proj_gate_keys[@]} == 1 )); then
                 echo "  Did you mean the '${proj_gate_keys[1]}' team's OWN project-knowledge base?" >&2
                 echo "  Fix: kb-knowledge-add project ${proj_gate_keys[1]} \"<title>\"  # auto-routes there (XACA-0888)" >&2
