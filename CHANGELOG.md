@@ -10,6 +10,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   release content-profile templates (`{{path}}`, `{{#each}}`, `{{#if}}`, trailing-`?` line drop, HTML
   comments stripped). Fails closed on a missing required value, so a CR is never published with a
   blank field. Library-only: used by `kb-wiki`/`kb-notify` once XACA-1344/1345 land.
+  PR #986 round 1: line handling is decided per template source line, so a dropped line can no
+  longer leave half a line or swallow a later one; an optional `{{x?}}` drops its whole line only
+  when nothing else on the line has content, otherwise just the empty value; an unclosed `{{` or
+  `<!--` anywhere is an error; CRLF templates render cleanly; large or malformed input fails fast.
 - **XACA-0888 (3/3)** — port of the canonical explicit-slug team routing + diagnostic fix.
   `kb-knowledge-add project <slug> "<title>"` now routes an EXACT registered-team-id `<slug>`
   (e.g. `ios`) to that team's own `<kanban_dir>/knowledge/project` instead of minting
