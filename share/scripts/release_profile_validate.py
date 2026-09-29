@@ -734,6 +734,14 @@ def _check_banned(body: str, starts: List[int], profile: dict) -> List[Any]:
     if not isinstance(raw, list):
         return [Violation("profile-malformed", "bannedTokenPatterns must be a list")]
     out: List[Any] = []
+    # A reader sees the DECODED text (`T&#79;DO` reads TODO), so each pattern runs over
+    # the raw body AND the entity-decoded body (same decode `_check_links` uses); a line
+    # that matches the same text in both is reported once per pattern. Line numbers of a decoded hit
+    # refer to the decoded body. requiredSections / titlePattern are deliberately NOT
+    # decoded: a structural heading or a plain-text title that only exists after decoding
+    # is a false FAIL (fail closed), not an evasion.
+    dec = _unescape(body)
+    dec_starts = _line_starts(dec) if dec != body else None
     for i, item in enumerate(raw):
         if isinstance(item, str):
             pat, reason, standalone = item, "", False
@@ -748,12 +756,19 @@ def _check_banned(body: str, starts: List[int], profile: dict) -> List[Any]:
         if bad:
             out.append(bad)
             continue
+        seen: set = set()      # (line, matched text) the raw pass reported for THIS pattern
         out.append(_Job("finditer", pat, re.MULTILINE, body,
-                        _banned_then(pat, reason, body, starts), standalone))
+                        _banned_then(pat, reason, body, starts, seen), standalone))
+        if dec_starts is not None:
+            out.append(_Job("finditer", pat, re.MULTILINE, dec,
+                            _banned_then(pat, reason, dec, dec_starts, seen, True), standalone))
     return out
 
 
-def _banned_then(pat: str, reason: str, body: str, starts: List[int]):
+def _banned_then(pat: str, reason: str, body: str, starts: List[int], seen: Optional[set] = None,
+                 skip_seen: bool = False):
+    seen = set() if seen is None else seen
+
     def then(spans):
         res: List[Violation] = []
         for k, (s, e) in enumerate(spans):
@@ -761,10 +776,16 @@ def _banned_then(pat: str, reason: str, body: str, starts: List[int]):
                 res.append(Violation(
                     "banned-token", "/%s/: further matches omitted" % _clip(pat, 80)))
                 break
+            line = _line_of(starts, s)
+            key = (line, body[s:e])
+            if skip_seen and key in seen:      # the decoded pass repeats a raw hit: report once
+                continue
+            if not skip_seen:
+                seen.add(key)
             detail = "/%s/ matched '%s'" % (_clip(pat, 80), _snippet(body[s:e]))
             if reason:
                 detail += " - " + _clip(reason, 100)
-            res.append(Violation("banned-token", detail, _line_of(starts, s)))
+            res.append(Violation("banned-token", detail, line))
         return res
     return then
 
@@ -1049,7 +1070,13 @@ _RESIDUAL_TOKENS = (
 _FORBIDDEN_TAGS = ("a|img|area|iframe|object|embed|link|meta|form|svg|video|audio|source|base|"
                    "frame|frameset|input|button|track|script|style|use|image|picture|param|"
                    "applet|portal|math|blockquote|q|ins|del")
-_TAG_FORBIDDEN = re.compile(r"</?(?:" + _FORBIDDEN_TAGS + r")(?![A-Za-z0-9:_-])", re.I)
+# A link-capable tag must be an actual tag: `<name>` or `<name` + attributes + `>` (the
+# attributes may span lines; `[^<>]` keeps the scan linear). Prose such as `latency <a few
+# ms` or `x <q` has no terminator and is left alone: cmark needs the `>` to treat it as
+# raw HTML and an HTML5 parser drops an unterminated tag at EOF. Anything that CARRIES a
+# URL is still refused unterminated (`_TAG_URL_ATTR` needs no `>`, and the residual scan
+# catches `href=`, `//`, `scheme:` regardless).
+_TAG_FORBIDDEN = re.compile(r"</?(?:" + _FORBIDDEN_TAGS + r")(?![A-Za-z0-9:_-])[^<>]*>", re.I)
 _TAG_URL_ATTR = re.compile(
     r"<[A-Za-z][^<>]*?(?<![A-Za-z0-9_-])(?:" + "|".join(_URL_ATTRS) + r"|xlink:href)\s*=", re.I)
 _ANGLE_SCHEME = re.compile(r"<[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^<>\s]*>")
