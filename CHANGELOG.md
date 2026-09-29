@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-0888 (3/3)** — port of the canonical explicit-slug team routing + diagnostic fix.
+  `kb-knowledge-add project <slug> "<title>"` now routes an EXACT registered-team-id `<slug>`
+  (e.g. `ios`) to that team's own `<kanban_dir>/knowledge/project` instead of minting
+  `~/knowledge/projects/<slug>`; a near-miss (team-shaped but not exact) refuses via a new
+  `project` case in `_kb_knowledge_destination_guard`, with `--allow-new-project` as the escape
+  hatch. New `kb-knowledge-where` diagnostic (modelled on `kb-context-show`) reports the resolved
+  project-knowledge path and which precedence branch produced it. `_kb_knowledge_resolve_project_identity`'s
+  dead older-git fallback is fixed: it now validates the `--path-format=absolute` output is a real
+  absolute path before trusting it, rather than blindly `dirname`-ing whatever git echoes back on an
+  unrecognized flag. Ported byte-identical to both `share/templates/kanban/kanban-helpers.template.sh`
+  and `share/templates/aliases/kanban-aliases.sh` (aliases.sh's much shorter, pre-existing `kb-help`
+  carries no Knowledge Base section, so the `kb-knowledge-where` help line was ported to the template
+  copy only); see the outer `CHANGELOG.md`'s XACA-0888 (3/3) entry for canonical test coverage.
 - **XACA-0888 (2/3)** — port of the canonical registry-derived project-identity fix: new
   `_kb_registry_lookup_repo_owner` (registry reader factored out of `_kb_canonical_kanban_dir_for_repo`,
   now carrying the team key; also closes an empty/`"/"`-`working_dir` landmine that glob-matched every
