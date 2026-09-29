@@ -23,6 +23,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **XACA-1343 (PR 4/4)** — `release_profile_validate.py`: ordinary prose such as `latency <a few ms`
   is no longer mistaken for an HTML link tag (a tag must be closed with `>`, unless it carries a
   URL), and banned-token patterns now also catch tokens written with HTML entities (`T&#79;DO`).
+- **XACA-1284-005: port launch tty guard + consumer-aware cc check to the helpers template.**
+  `kanban-helpers.template.sh` gains `_kb_confirm_launch` and `_kb_ensure_cc_function` (byte-identical to
+  canonical) and its 8 launchers (`kb-run`, `kb-work`, `kb-run-review`, `kb-work-review`, `kb-run-test`,
+  `kb-work-test`, `kb-run-debug`, `kb-work-debug`) now: refuse with rc 2 when stdin is not a tty unless
+  `--yes`/`-y` or `KB_ASSUME_YES=1`; verify `cc` is a shell function (sourcing
+  `$AITEAMFORGE_DIR/share/aliases/cc-aliases.sh` on a consumer install) before piping the prompt to `\cc`,
+  so a bare `cc` can no longer fall through to the C compiler. `kb-quarantine-stub`'s default-NO prompt
+  refuses without a tty (also in `share/templates/aliases/kanban-aliases.sh`). The template has no `--delta`/`--round` gate launchers or `-ux` pair, so
+  `_kb_parse_gate_run_flags` is not ported.
+  XACA-1284-004: the template's review/test gate prompts no longer instruct a `while true` polling loop
+  (a launched `cc` session cannot sustain one and reported a monitoring loop that was not running); step 6 now
+  says to report the verdict and STOP, since `scripts/kb-pr-monitor` re-launches the gate each round.
 - **XACA-1343 (PR 3/4)** — ships `share/scripts/release_profile_validate.py`, the mechanical check a
   drafted CR / Testing Log must pass before it is published: required sections present, no banned
   tokens, links within the profile's policy, and a title that matches the profile's pattern. Any

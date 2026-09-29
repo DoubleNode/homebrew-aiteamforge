@@ -1814,6 +1814,11 @@ print(dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     # ── Confirmation prompt ───────────────────────────────────────────────────
     if [ "$flag_yes" -eq 0 ]; then
+        # XACA-1284-003: default-NO prompt -- refuse rather than read a dead stdin.
+        if [ ! -t 0 ]; then
+            echo "kb-quarantine-stub: non-interactive shell — refusing to quarantine without explicit confirmation (pass --yes)." >&2
+            return 1
+        fi
         printf "Continue? [y/N] "
         local answer
         read -r answer

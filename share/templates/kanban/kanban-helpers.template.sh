@@ -10966,14 +10966,138 @@ _kb_build_planning_gate_section() {
     printf '%s' "$_section"
 }
 
+# _kb_ensure_cc_function <caller-name>
+#
+# XACA-1300-014: the base ~/.zshrc (home-scripts/.zshrc) USED TO define a
+# raw `alias cc="claude --permission-mode bypassPermissions"` — this same
+# ticket removed it (see home-scripts/.zshrc's own comment at that spot).
+# Historically, only the per-team overlay files (.zshrc_<team>_<role>)
+# sourced claude_code_cc_aliases.sh, which `unalias cc`s and defines the
+# REAL cc() function (session-id pinning, credential routing,
+# session-account-map recording); the base rc never did. So a shell that
+# only sourced the base rc — an agent's own Bash-tool shell, in particular
+# — still had that alias active, and every kb-run-*/kb-work-*/kb-run-debug
+# call site below used to invoke a bare `cc`, which got ALIAS-EXPANDED, not
+# function-called.
+#
+# The guard below stays anyway, as defence for the cases the removed alias
+# does not cover: an older, not-yet-upgraded install; any OTHER rc file (a
+# custom dotfile, a different terminal profile, a future regression) that
+# defines the same shadowing alias; or simply a shell where
+# claude_code_cc_aliases.sh was never sourced at all, alias or not.
+#
+# This is worse than it sounds because of WHEN the expansion happens: zsh
+# (and bash) substitute an active alias into a function body at PARSE time,
+# the moment kanban-helpers.sh is first sourced in a shell — not at call
+# time. So even if claude_code_cc_aliases.sh gets sourced LATER in the same
+# shell (defining cc() and running `unalias cc`), the kb-run-*() function
+# bodies were already parsed with the alias substituted in; re-sourcing
+# claude_code_cc_aliases.sh afterward changes nothing already parsed. The
+# measured cost: kb-run-test/kb-run-review gate launches from such a shell
+# bypass cc() entirely -- no --session-id pinned, session-account-map.py
+# never called (0 of 2060 rows on M3Pro came from a headless launch).
+#
+# The fix has two parts, both required:
+#   1. Call sites use `\cc`, not `cc` -- the backslash suppresses alias
+#      lookup for that token ENTIRELY, at both parse time (nothing to
+#      substitute into the function body -- the literal text stays `\cc`)
+#      and run time (alias lookup skipped, so an accidentally-still-active
+#      alias in some OTHER shell can never intercept it either). Command
+#      lookup then proceeds straight to function/builtin/external-command,
+#      in that order.
+#   2. `\cc` alone is not enough: skipping the alias also means a shell
+#      that never defined the cc() function at all would fall through to
+#      whatever externally-named "cc" is on PATH -- typically the C
+#      compiler (clang), which exits 0 having silently done nothing. This
+#      function proves cc is a FUNCTION (not just callable) before any call
+#      site is allowed to proceed, sourcing claude_code_cc_aliases.sh on
+#      demand if it isn't yet, and refusing loudly -- never falling through
+#      to a bare `cc`/`\cc` -- if it still isn't after that.
+#
+# `type cc` is used rather than shell-specific introspection
+# (bash `declare -F` / zsh `${+functions[cc]}`) because this file is
+# sourced by both bash and zsh, and both shells' `type` output contains the
+# literal word "function" for a shell function ("cc is a function" in bash,
+# "cc is a shell function..." in zsh) and nothing else that would -- an
+# alias says "aliased to"/"is an alias for", an external command names its
+# path. One portable check, no shell branching needed.
+#
+# Returns 0 once cc is confirmed to be a function. Returns 1 and prints a
+# loud error otherwise; every call site below must check the return and
+# abort the launch rather than fall through.
+_kb_ensure_cc_function() {
+    local _kb_caller="${1:-kb-run}"
+    case "$(type cc 2>/dev/null)" in
+        *function*) return 0 ;;
+    esac
+    # Not a function yet -- try to source the aliases file. XACA-1284-005: two
+    # locations, tried in order, re-checking `type cc` after each source:
+    #   1. dev-team:  ${AITEAMFORGE_DIR:-$HOME/dev-team}/claude_code_cc_aliases.sh
+    #   2. consumer:  ${AITEAMFORGE_DIR:-$HOME/dev-team}/share/aliases/cc-aliases.sh
+    #      (a tap install ships cc() there; aiteamforge-env.sh sources it)
+    # Same body ships to the tap template, so keep it shell-neutral.
+    local _kb_cc_dev="${AITEAMFORGE_DIR:-$HOME/dev-team}/claude_code_cc_aliases.sh"
+    local _kb_cc_consumer="${AITEAMFORGE_DIR:-$HOME/dev-team}/share/aliases/cc-aliases.sh"
+    local _kb_cc_candidate
+    for _kb_cc_candidate in "$_kb_cc_dev" "$_kb_cc_consumer"; do
+        if [[ -f "$_kb_cc_candidate" ]]; then
+            source "$_kb_cc_candidate" >/dev/null 2>&1
+        fi
+        case "$(type cc 2>/dev/null)" in
+            *function*) return 0 ;;
+        esac
+    done
+    echo "✗ ${_kb_caller}: the cc() function is not defined and neither ${_kb_cc_dev} nor ${_kb_cc_consumer} could be sourced (or exist) — refusing to launch. A bare 'cc' here could silently resolve to the C compiler and do nothing. Source your cc aliases file (claude_code_cc_aliases.sh on dev, share/aliases/cc-aliases.sh on a tap install; a team overlay .zshrc_<team>_<role> does this automatically) in this shell and retry." >&2
+    return 1
+}
+
+# XACA-1284-003: shared launch-confirmation gate for the default-YES [Y/n]
+# prompts of the kb-run/kb-work launchers (plain, -review, -test, -ux, -debug).
+# Fails CLOSED when stdin is not a tty: a bare `read` on a dead stdin returns
+# EOF, leaves confirm empty, and the [Y/n] default-yes would silently launch a
+# session nobody approved.
+# Usage: _kb_confirm_launch <caller> <prompt-text> <assume_yes:0|1>
+# Returns: 0 = proceed (assume-yes, or tty answered anything but n/N)
+#          1 = user answered n/N (caller prints its own "Cancelled" and returns 0)
+#          2 = no tty and no --yes / KB_ASSUME_YES=1 (refused; caller must return non-zero)
+_kb_confirm_launch() {
+    local caller="${1-launcher}"
+    local prompt_text="${2-Continue? [Y/n]: }"
+    local assume_yes="${3-0}"
+    local confirm=""
+    if [[ "$assume_yes" == "1" || "${KB_ASSUME_YES:-}" == "1" ]]; then
+        echo "${caller}: --yes given, skipping confirmation"
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        echo "${caller}: refusing to launch -- stdin is not a terminal, so no confirmation is possible." >&2
+        echo "  re-run with --yes, or set KB_ASSUME_YES=1, to launch an unattended session" >&2
+        return 2
+    fi
+    printf '%s' "$prompt_text"
+    read -r confirm
+    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
 # Run a task from backlog - launch Claude Code with todo plan and worktree setup
 kb-run() {
     _kb_ensure_jq || return 1
 
-    local selector="$1"
+    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
+    local selector="" _kb_yes=0 _kb_arg
+    for _kb_arg in "$@"; do
+        case "$_kb_arg" in
+            --yes|-y) _kb_yes=1 ;;
+            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
+        esac
+    done
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-run <id>"
+        echo "Usage: kb-run <id> [--yes]"
+        echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Launches Claude Code with task details and auto-creates worktree."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-run XFRE-0001"
@@ -11104,11 +11228,11 @@ kb-run() {
 
     # Confirmation prompt
     local confirm
-    printf "Start working on this item? [Y/n]: "
-    read -r confirm
-
-    # Default to yes if empty, check for explicit no
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+    _kb_confirm_launch kb-run "Start working on this item? [Y/n]: " "$_kb_yes"
+    local _kb_confirm_rc=$?
+    if [[ $_kb_confirm_rc -eq 2 ]]; then
+        return 2
+    elif [[ $_kb_confirm_rc -ne 0 ]]; then
         echo "Cancelled. Item not started."
         return 0
     fi
@@ -11343,7 +11467,11 @@ kb-run() {
     _kb_set_working_on "$item_id" "DEV"
 
     # Launch cc with the prompt
-    echo -e "$prompt" | cc
+    if ! _kb_ensure_cc_function "kb-run"; then
+        unset CC_SESSION_NAME
+        return 1
+    fi
+    echo -e "$prompt" | \cc
 }
 
 # Work on a task without creating a worktree - for when you're already in the right place
@@ -11352,10 +11480,18 @@ kb-run() {
 kb-work() {
     _kb_ensure_jq || return 1
 
-    local selector="$1"
+    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
+    local selector="" _kb_yes=0 _kb_arg
+    for _kb_arg in "$@"; do
+        case "$_kb_arg" in
+            --yes|-y) _kb_yes=1 ;;
+            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
+        esac
+    done
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-work <id>"
+        echo "Usage: kb-work <id> [--yes]"
+        echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Launches Claude Code with task details WITHOUT creating worktree."
         echo "Use when you're already in the correct directory/worktree."
         echo "Use 'kb-backlog list' to see available items"
@@ -11488,10 +11624,11 @@ kb-work() {
     echo "📁 Working in current directory: $(pwd)"
     echo "   (No worktree will be created)"
     echo ""
-    printf "Start working on this item? [Y/n]: "
-    read -r confirm
-
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+    _kb_confirm_launch kb-work "Start working on this item? [Y/n]: " "$_kb_yes"
+    local _kb_confirm_rc=$?
+    if [[ $_kb_confirm_rc -eq 2 ]]; then
+        return 2
+    elif [[ $_kb_confirm_rc -ne 0 ]]; then
         echo "Cancelled. Item not started."
         return 0
     fi
@@ -11670,7 +11807,11 @@ kb-work() {
     _kb_set_working_on "$item_id" "DEV"
 
     # Launch cc with the prompt
-    echo -e "$prompt" | cc
+    if ! _kb_ensure_cc_function "kb-work"; then
+        unset CC_SESSION_NAME
+        return 1
+    fi
+    echo -e "$prompt" | \cc
 }
 
 # Reopen a completed/cancelled item for debugging
@@ -12110,32 +12251,15 @@ _kb_build_review_prompt() {
     prompt+="   \`\`\`\n"
     prompt+="   These subitems BLOCK merge. The creating agent must address each one and push fixes before merging.\n"
     prompt+="   Each gets its own subitem for independent tracking and must be resolved before PR merge.\n"
-    prompt+="\n6. **After submitting REQUEST_CHANGES**, enter the reviewer monitoring loop:\n"
-    prompt+="   \`\`\`bash\n"
-    prompt+="   # Record current HEAD SHA after submitting REQUEST_CHANGES\n"
-    prompt+="   LAST_SHA=\$(gh pr view <number> --json headRefOid --jq '.headRefOid')\n"
-    prompt+="   while true; do\n"
-    prompt+="     STATE=\$(gh pr view <number> --json state --jq '.state')\n"
-    prompt+="     [ \"\$STATE\" = \"CLOSED\" ] || [ \"\$STATE\" = \"MERGED\" ] && echo \"PR \$STATE — exiting.\" && break\n"
-    prompt+="     CURRENT_SHA=\$(gh pr view <number> --json headRefOid --jq '.headRefOid')\n"
-    prompt+="     if [ \"\$CURRENT_SHA\" != \"\$LAST_SHA\" ]; then\n"
-    prompt+="       sleep 30  # Stabilization: wait for rapid pushes to settle\n"
-    prompt+="       LAST_SHA=\$(gh pr view <number> --json headRefOid --jq '.headRefOid')\n"
-    prompt+="       gh pr checkout <number> && gh pr diff <number>\n"
-    prompt+="       # Re-review: (1) verify each requested change was addressed,\n"
-    prompt+="       # (2) check new code in fix commits for new issues.\n"
-    prompt+="       # Then: gh-bot-review --pr <number> --event APPROVE or REQUEST_CHANGES\n"
-    prompt+="     fi\n"
-    prompt+="     sleep 60\n"
-    prompt+="   done\n"
-    prompt+="   \`\`\`\n"
-    prompt+="   Re-review scope: verify blocking issues are resolved, check new code, skip unchanged code.\n"
+    prompt+="\n6. **After submitting your verdict, STOP.** Report the verdict, the PR review submission URL, and the subitems you filed, then end the session.\n"
+    prompt+="   **Do NOT start a polling or monitoring loop.** This session cannot keep one running, so reporting one is a false status.\n"
+    prompt+="   The creating agent's \`scripts/kb-pr-monitor\` re-launches this gate for the next round (it passes \`--delta <sha>\` for delta re-reviews).\n"
     prompt+="\n## CRITICAL Rules\n"
     prompt+="- **USE gh-bot-review** for submitting reviews, NOT \`gh pr review\` (same-account restriction)\n"
-    prompt+="- **DO NOT MERGE** the PR — the creating agent's monitoring loop handles merge after bot approval\n"
+    prompt+="- **DO NOT MERGE** the PR — the creating agent's \`scripts/kb-pr-monitor\` handles merge after the gates pass\n"
     prompt+="- **Blocking issues** go in REQUEST_CHANGES — must be fixed before approval\n"
     prompt+="- **[Review] subitems BLOCK MERGE** — add as kanban subitems (NOT PR comments); creating agent MUST resolve ALL [Review] subitems before merge\n"
-    prompt+="- **After REQUEST_CHANGES** — enter the reviewer monitoring loop (step 6 above)\n"
+    prompt+="- **After submitting** — stop and report (step 6 above); never claim a loop is running.\n"
     prompt+="- Be specific about what needs to change and why\n"
     prompt+="- Provide code examples when suggesting alternatives\n"
 
@@ -12148,10 +12272,18 @@ _kb_build_review_prompt() {
 kb-run-review() {
     _kb_ensure_jq || return 1
 
-    local selector="$1"
+    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
+    local selector="" _kb_yes=0 _kb_arg
+    for _kb_arg in "$@"; do
+        case "$_kb_arg" in
+            --yes|-y) _kb_yes=1 ;;
+            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
+        esac
+    done
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-run-review <id>"
+        echo "Usage: kb-run-review <id> [--yes]"
+        echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Switches to item's worktree and launches Claude Code to review the related PR."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-run-review XFRE-0001"
@@ -12195,10 +12327,11 @@ kb-run-review() {
 
     # Confirmation prompt
     local confirm
-    printf "Start reviewing this item's PR? [Y/n]: "
-    read -r confirm
-
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+    _kb_confirm_launch kb-run-review "Start reviewing this item's PR? [Y/n]: " "$_kb_yes"
+    local _kb_confirm_rc=$?
+    if [[ $_kb_confirm_rc -eq 2 ]]; then
+        return 2
+    elif [[ $_kb_confirm_rc -ne 0 ]]; then
         echo "Cancelled. Review not started."
         return 0
     fi
@@ -12222,7 +12355,11 @@ kb-run-review() {
     _kb_set_working_on "$item_id" "REVIEW"
 
     # Launch cc with the review prompt
-    printf '%s\n' "$prompt" | cc
+    if ! _kb_ensure_cc_function "kb-run-review"; then
+        unset CC_SESSION_NAME
+        return 1
+    fi
+    printf '%s\n' "$prompt" | \cc
 }
 
 # Review a PR for a kanban item in the current directory (no worktree switch)
@@ -12231,10 +12368,18 @@ kb-run-review() {
 kb-work-review() {
     _kb_ensure_jq || return 1
 
-    local selector="$1"
+    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
+    local selector="" _kb_yes=0 _kb_arg
+    for _kb_arg in "$@"; do
+        case "$_kb_arg" in
+            --yes|-y) _kb_yes=1 ;;
+            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
+        esac
+    done
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-work-review <id>"
+        echo "Usage: kb-work-review <id> [--yes]"
+        echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Launches Claude Code to review the related PR WITHOUT switching worktree."
         echo "Use when you're already in the correct directory/worktree."
         echo "Use 'kb-backlog list' to see available items"
@@ -12282,10 +12427,11 @@ kb-work-review() {
     echo "📁 Reviewing in current directory: $(pwd)"
     echo "   (No worktree switch will be made)"
     echo ""
-    printf "Start reviewing this item's PR? [Y/n]: "
-    read -r confirm
-
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+    _kb_confirm_launch kb-work-review "Start reviewing this item's PR? [Y/n]: " "$_kb_yes"
+    local _kb_confirm_rc=$?
+    if [[ $_kb_confirm_rc -eq 2 ]]; then
+        return 2
+    elif [[ $_kb_confirm_rc -ne 0 ]]; then
         echo "Cancelled. Review not started."
         return 0
     fi
@@ -12304,7 +12450,11 @@ kb-work-review() {
     _kb_set_working_on "$item_id" "REVIEW"
 
     # Launch cc with the review prompt
-    printf '%s\n' "$prompt" | cc
+    if ! _kb_ensure_cc_function "kb-work-review"; then
+        unset CC_SESSION_NAME
+        return 1
+    fi
+    printf '%s\n' "$prompt" | \cc
 }
 
 # Usage: _kb_build_test_prompt <item_id> <title> <description> <item_worktree_branch>
@@ -12377,32 +12527,15 @@ _kb_build_test_prompt() {
     prompt+="   \`\`\`\n"
     prompt+="   These subitems BLOCK merge. The creating agent must address each one and push fixes before merging.\n"
     prompt+="   Each gets its own subitem for independent tracking and must be resolved before PR merge.\n"
-    prompt+="\n6. **After submitting REQUEST_CHANGES**, enter the tester monitoring loop:\n"
-    prompt+="   \`\`\`bash\n"
-    prompt+="   # Record current HEAD SHA after submitting REQUEST_CHANGES\n"
-    prompt+="   LAST_SHA=\$(gh pr view <number> --json headRefOid --jq '.headRefOid')\n"
-    prompt+="   while true; do\n"
-    prompt+="     STATE=\$(gh pr view <number> --json state --jq '.state')\n"
-    prompt+="     [ \"\$STATE\" = \"CLOSED\" ] || [ \"\$STATE\" = \"MERGED\" ] && echo \"PR \$STATE — exiting.\" && break\n"
-    prompt+="     CURRENT_SHA=\$(gh pr view <number> --json headRefOid --jq '.headRefOid')\n"
-    prompt+="     if [ \"\$CURRENT_SHA\" != \"\$LAST_SHA\" ]; then\n"
-    prompt+="       sleep 30  # Stabilization: wait for rapid pushes to settle\n"
-    prompt+="       LAST_SHA=\$(gh pr view <number> --json headRefOid --jq '.headRefOid')\n"
-    prompt+="       gh pr checkout <number> && gh pr diff <number>\n"
-    prompt+="       # Re-test: (1) verify each reported failure was fixed,\n"
-    prompt+="       # (2) re-run lint and unit tests on the updated code.\n"
-    prompt+="       # Then: gh-bot-test --pr <number> --event APPROVE or REQUEST_CHANGES\n"
-    prompt+="     fi\n"
-    prompt+="     sleep 60\n"
-    prompt+="   done\n"
-    prompt+="   \`\`\`\n"
-    prompt+="   Re-test scope: verify all reported failures are resolved, re-run test suite, check new code.\n"
+    prompt+="\n6. **After submitting your verdict, STOP.** Report the verdict, the PR test submission URL, and the subitems you filed, then end the session.\n"
+    prompt+="   **Do NOT start a polling or monitoring loop.** This session cannot keep one running, so reporting one is a false status.\n"
+    prompt+="   The creating agent's \`scripts/kb-pr-monitor\` re-launches this gate for the next round (it passes \`--delta <sha>\` for delta re-reviews).\n"
     prompt+="\n## CRITICAL Rules\n"
     prompt+="- **USE gh-bot-test** for submitting test results, NOT \`gh pr review\` (same-account restriction)\n"
-    prompt+="- **DO NOT MERGE** the PR — the creating agent's monitoring loop handles merge after bot approval\n"
+    prompt+="- **DO NOT MERGE** the PR — the creating agent's \`scripts/kb-pr-monitor\` handles merge after the gates pass\n"
     prompt+="- **Blocking failures** go in REQUEST_CHANGES — must be fixed before approval\n"
     prompt+="- **[Test] subitems BLOCK MERGE** — add as kanban subitems (NOT PR comments); creating agent MUST resolve ALL [Test] subitems before merge\n"
-    prompt+="- **After REQUEST_CHANGES** — enter the tester monitoring loop (step 6 above)\n"
+    prompt+="- **After submitting** — stop and report (step 6 above); never claim a loop is running.\n"
     prompt+="- Be specific about what failed, how to reproduce it, and what the expected behavior is\n"
     prompt+="- Provide steps to reproduce for any failures you report\n"
 
@@ -12415,10 +12548,18 @@ _kb_build_test_prompt() {
 kb-run-test() {
     _kb_ensure_jq || return 1
 
-    local selector="$1"
+    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
+    local selector="" _kb_yes=0 _kb_arg
+    for _kb_arg in "$@"; do
+        case "$_kb_arg" in
+            --yes|-y) _kb_yes=1 ;;
+            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
+        esac
+    done
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-run-test <id>"
+        echo "Usage: kb-run-test <id> [--yes]"
+        echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Switches to item's worktree and launches Claude Code to QA test the related PR."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-run-test XFRE-0001"
@@ -12462,10 +12603,11 @@ kb-run-test() {
 
     # Confirmation prompt
     local confirm
-    printf "Start QA testing this item's PR? [Y/n]: "
-    read -r confirm
-
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+    _kb_confirm_launch kb-run-test "Start QA testing this item's PR? [Y/n]: " "$_kb_yes"
+    local _kb_confirm_rc=$?
+    if [[ $_kb_confirm_rc -eq 2 ]]; then
+        return 2
+    elif [[ $_kb_confirm_rc -ne 0 ]]; then
         echo "Cancelled. Test not started."
         return 0
     fi
@@ -12489,7 +12631,11 @@ kb-run-test() {
     _kb_set_working_on "$item_id" "TEST"
 
     # Launch cc with the test prompt
-    printf '%s\n' "$prompt" | cc
+    if ! _kb_ensure_cc_function "kb-run-test"; then
+        unset CC_SESSION_NAME
+        return 1
+    fi
+    printf '%s\n' "$prompt" | \cc
 }
 
 # QA test a PR for a kanban item in the current directory (no worktree switch)
@@ -12498,10 +12644,18 @@ kb-run-test() {
 kb-work-test() {
     _kb_ensure_jq || return 1
 
-    local selector="$1"
+    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
+    local selector="" _kb_yes=0 _kb_arg
+    for _kb_arg in "$@"; do
+        case "$_kb_arg" in
+            --yes|-y) _kb_yes=1 ;;
+            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
+        esac
+    done
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-work-test <id>"
+        echo "Usage: kb-work-test <id> [--yes]"
+        echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Launches Claude Code to QA test the related PR WITHOUT switching worktree."
         echo "Use when you're already in the correct directory/worktree."
         echo "Use 'kb-backlog list' to see available items"
@@ -12549,10 +12703,11 @@ kb-work-test() {
     echo "📁 Testing in current directory: $(pwd)"
     echo "   (No worktree switch will be made)"
     echo ""
-    printf "Start QA testing this item's PR? [Y/n]: "
-    read -r confirm
-
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+    _kb_confirm_launch kb-work-test "Start QA testing this item's PR? [Y/n]: " "$_kb_yes"
+    local _kb_confirm_rc=$?
+    if [[ $_kb_confirm_rc -eq 2 ]]; then
+        return 2
+    elif [[ $_kb_confirm_rc -ne 0 ]]; then
         echo "Cancelled. Test not started."
         return 0
     fi
@@ -12571,7 +12726,11 @@ kb-work-test() {
     _kb_set_working_on "$item_id" "TEST"
 
     # Launch cc with the test prompt
-    printf '%s\n' "$prompt" | cc
+    if ! _kb_ensure_cc_function "kb-work-test"; then
+        unset CC_SESSION_NAME
+        return 1
+    fi
+    printf '%s\n' "$prompt" | \cc
 }
 
 # Internal helper: Build the debug/investigation prompt text
@@ -12717,10 +12876,18 @@ _kb_build_debug_prompt() {
 kb-run-debug() {
     _kb_ensure_jq || return 1
 
-    local selector="$1"
+    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
+    local selector="" _kb_yes=0 _kb_arg
+    for _kb_arg in "$@"; do
+        case "$_kb_arg" in
+            --yes|-y) _kb_yes=1 ;;
+            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
+        esac
+    done
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-run-debug <id>"
+        echo "Usage: kb-run-debug <id> [--yes]"
+        echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Switches to item's worktree and launches Claude Code for debugging a completed/cancelled item."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-run-debug XFRE-0001"
@@ -12771,10 +12938,11 @@ kb-run-debug() {
 
     # Confirmation prompt
     local confirm
-    printf "Start debugging this item? [Y/n]: "
-    read -r confirm
-
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+    _kb_confirm_launch kb-run-debug "Start debugging this item? [Y/n]: " "$_kb_yes"
+    local _kb_confirm_rc=$?
+    if [[ $_kb_confirm_rc -eq 2 ]]; then
+        return 2
+    elif [[ $_kb_confirm_rc -ne 0 ]]; then
         echo "Cancelled. Debug session not started."
         return 0
     fi
@@ -12813,7 +12981,11 @@ kb-run-debug() {
     _kb_set_working_on "$item_id" "DEBUG"
 
     # Launch cc with the debug prompt
-    printf '%s\n' "$prompt" | cc
+    if ! _kb_ensure_cc_function "kb-run-debug"; then
+        unset CC_SESSION_NAME
+        return 1
+    fi
+    printf '%s\n' "$prompt" | \cc
 }
 
 # Debug a completed/cancelled kanban item in the current directory (no worktree switch)
@@ -12822,10 +12994,18 @@ kb-run-debug() {
 kb-work-debug() {
     _kb_ensure_jq || return 1
 
-    local selector="$1"
+    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
+    local selector="" _kb_yes=0 _kb_arg
+    for _kb_arg in "$@"; do
+        case "$_kb_arg" in
+            --yes|-y) _kb_yes=1 ;;
+            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
+        esac
+    done
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-work-debug <id>"
+        echo "Usage: kb-work-debug <id> [--yes]"
+        echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Launches Claude Code for debugging a completed/cancelled item WITHOUT switching worktree."
         echo "Use when you're already in the correct directory/worktree."
         echo "Use 'kb-backlog list' to see available items"
@@ -12880,10 +13060,11 @@ kb-work-debug() {
     echo "📁 Debugging in current directory: $(pwd)"
     echo "   (No worktree switch will be made)"
     echo ""
-    printf "Start debugging this item? [Y/n]: "
-    read -r confirm
-
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+    _kb_confirm_launch kb-work-debug "Start debugging this item? [Y/n]: " "$_kb_yes"
+    local _kb_confirm_rc=$?
+    if [[ $_kb_confirm_rc -eq 2 ]]; then
+        return 2
+    elif [[ $_kb_confirm_rc -ne 0 ]]; then
         echo "Cancelled. Debug session not started."
         return 0
     fi
@@ -12916,7 +13097,11 @@ kb-work-debug() {
     _kb_set_working_on "$item_id" "DEBUG"
 
     # Launch cc with the debug prompt
-    printf '%s\n' "$prompt" | cc
+    if ! _kb_ensure_cc_function "kb-work-debug"; then
+        unset CC_SESSION_NAME
+        return 1
+    fi
+    printf '%s\n' "$prompt" | \cc
 }
 
 # ============================================================================
@@ -27511,6 +27696,11 @@ print(dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     # ── Confirmation prompt ───────────────────────────────────────────────────
     if [ "$flag_yes" -eq 0 ]; then
+        # XACA-1284-003: default-NO prompt -- refuse rather than read a dead stdin.
+        if [ ! -t 0 ]; then
+            echo "kb-quarantine-stub: non-interactive shell — refusing to quarantine without explicit confirmation (pass --yes)." >&2
+            return 1
+        fi
         printf "Continue? [y/N] "
         local answer
         read -r answer
