@@ -22,6 +22,22 @@ Three kinds of name appear in a template, and only the first is an engine fact:
 Row-level ``this.*`` fields inside ``{{#each}}`` blocks are declared in
 ROW_SHAPES, keyed by the iterated array's canonical name.
 
+Date-only deploy windows (XACA-1343-036). ``kb-cr create --deploy-window
+2026-10-02`` stores ``2026-10-02T00:00:00Z`` (``_kb_cr_normalize_iso_date`` pads a
+bare date to UTC midnight and the padding is not recoverable). Converting that to a
+west-of-UTC team timezone shows the PREVIOUS evening, so the four window-derived facts
+(``cr.scheduledWindow``, ``release.scheduledDate``, ``release.scheduledTime``,
+``release.dateMMMDDYYYY``) use one rule, the same one LCARS ``_formatDeployWindow``
+uses: a window whose UTC time of day is exactly 00:00:00 (seconds; sub-second is
+ignored) is DATE-ONLY. Its calendar date is the UTC date, rendered as recorded with no
+timezone conversion, and it has no time (``release.scheduledTime`` is ``""``,
+``cr.scheduledWindow`` is the date alone). Every other value is a real instant and
+converts to the team timezone. Ambiguity: a genuine 00:00Z deploy time is
+indistinguishable from a padded date, because kb-cr discards the distinction at write
+time. We resolve it as date-only (the safe direction: the right day, no invented
+time). A deploy that really is at 00:00 UTC must be recorded at a non-midnight instant
+(e.g. 00:01Z); an offset form that equals UTC midnight is date-only too.
+
 Stdlib only; runs under /usr/bin/python3 3.9.
 """
 from __future__ import annotations
@@ -39,8 +55,10 @@ class FactSetError(ValueError):
     """The release/CR record is malformed in a way that would make a wrong fact set.
 
     Raised (fail closed) instead of skipping or guessing when a row array holds a
-    non-object row, or an array field is not an array. The message names the array
-    and the index, e.g. ``release.notices[0] is NoneType, expected an object``.
+    non-object row, an array field is not an array, or an object field (``soak``,
+    ``stageSha``, ``links``, ``waiver``) is not an object. The message names the field
+    and, for rows, the index, e.g. ``release.notices[0] is NoneType, expected an object``.
+    There is no silent normalization: a string where an array belongs raises.
     """
 
 # name -> {type, source, example, kinds}. ``kinds`` lists the profile kinds that
@@ -77,16 +95,16 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
                        "source": "release record `stages` (spec § 6.1), in stage order, timestamps ISO-8601 UTC",
                        "example": "[{\"name\": \"QA\", \"status\": \"passed\", ...}]", "kinds": ["cr-record"]},
     "release.dateMMMDDYYYY": {"type": "string",
-                              "source": "CR `deploy_window_planned` date, else the assembly date, team timezone, `MMM DD YYYY`",
+                              "source": "CR `deploy_window_planned` date (date-only windows unshifted), else the assembly date in the team timezone, `MMM DD YYYY`",
                               "example": "Sep 28 2026", "kinds": ["cr"]},
     "release.releaseType": {"type": "string", "source": "release record `releaseType`, title-cased; default \"Release\"",
                             "example": "Release", "kinds": ["cr"]},
     "release.briefTitle": {"type": "string",
                            "source": "release record `briefTitle`, else `name`; empty if neither is set",
                            "example": "Faster checkout and fixes", "kinds": ["cr"]},
-    "release.scheduledDate": {"type": "string", "source": "CR `deploy_window_planned`, date part, team timezone",
+    "release.scheduledDate": {"type": "string", "source": "CR `deploy_window_planned`, date part; team timezone, except a date-only window (UTC midnight, as `kb-cr` stores `--deploy-window YYYY-MM-DD`) keeps its date unshifted",
                               "example": "Oct 02 2026", "kinds": ["cr"]},
-    "release.scheduledTime": {"type": "string", "source": "CR `deploy_window_planned`, time part, team timezone",
+    "release.scheduledTime": {"type": "string", "source": "CR `deploy_window_planned`, time part, team timezone; empty for a date-only window (no time was entered)",
                               "example": "06:00 AM CDT", "kinds": ["cr"]},
     # ---- cr.* ------------------------------------------------------------
     "cr.id": {"type": "string", "source": "CR record `id`", "example": "CR-0107",
@@ -94,7 +112,7 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
     "cr.title": {"type": "string", "source": "CR record `title`", "example": "[Sep 28 2026] Release: iOS Faster checkout",
                  "kinds": ["cr-record", "notice"]},
     "cr.risk": {"type": "string", "source": "CR record `risk`", "example": "Low", "kinds": ["cr-record"]},
-    "cr.scheduledWindow": {"type": "string", "source": "CR record `deploy_window_planned`, team timezone, `MMM DD YYYY hh:mm AM/PM TZ`; an unparseable value is passed through as recorded",
+    "cr.scheduledWindow": {"type": "string", "source": "CR record `deploy_window_planned`, team timezone, `MMM DD YYYY hh:mm AM/PM TZ`; a date-only window (UTC midnight) renders as the bare date `MMM DD YYYY`, unshifted; an unparseable value is passed through as recorded",
                            "example": "Oct 02 2026 06:00 AM CDT", "kinds": ["cr-record", "notice"]},
     "cr.approver": {"type": "string", "source": "CR record `approver`", "example": "Change Advisory Board",
                     "kinds": ["cr-record"]},
@@ -225,14 +243,39 @@ def _fmt_ts(value: Any, tz: str) -> str:
     return dt.astimezone(_tzinfo(tz)).strftime("%b %d %Y %I:%M %p %Z")
 
 
+def _date_only(dt: datetime) -> bool:
+    """True when ``dt`` is exactly 00:00:00 UTC: a kb-cr date-only window (see docstring)."""
+    u = dt.astimezone(timezone.utc)
+    return u.hour == 0 and u.minute == 0 and u.second == 0
+
+
 def _fmt_date(value: Any, tz: str) -> Optional[str]:
+    """Calendar date of a deploy window. Date-only windows keep their UTC date, unshifted."""
     dt = _parse_iso(value)
-    return dt.astimezone(_tzinfo(tz)).strftime("%b %d %Y") if dt else None
+    if dt is None:
+        return None
+    if _date_only(dt):
+        return dt.astimezone(timezone.utc).strftime("%b %d %Y")
+    return dt.astimezone(_tzinfo(tz)).strftime("%b %d %Y")
 
 
 def _fmt_time(value: Any, tz: str) -> Optional[str]:
+    """Time of a deploy window in the team tz; None for a date-only or unparseable window."""
     dt = _parse_iso(value)
-    return dt.astimezone(_tzinfo(tz)).strftime("%I:%M %p %Z") if dt else None
+    if dt is None or _date_only(dt):
+        return None
+    return dt.astimezone(_tzinfo(tz)).strftime("%I:%M %p %Z")
+
+
+def _fmt_window(value: Any, tz: str) -> str:
+    """``cr.scheduledWindow``: date+time in the team tz, the bare date when date-only,
+    the value as recorded when it is not ISO-8601."""
+    dt = _parse_iso(value)
+    if dt is None:
+        return "" if value is None else str(value)
+    if _date_only(dt):
+        return _fmt_date(value, tz) or ""
+    return _fmt_ts(value, tz)
 
 
 def _get(rec: Optional[Dict[str, Any]], *names: str, default: Any = "") -> Any:
@@ -260,8 +303,38 @@ def _rows(value: Any, name: str, *, allow_str: bool = False) -> List[Any]:
     return value
 
 
+def _obj(value: Any, name: str) -> Dict[str, Any]:
+    """An optional object field: None reads as {}; anything else that is not an object raises.
+
+    Deliberately not ``value or {}``: that would turn ``[]``/``""``/``0`` into an empty
+    object silently.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise FactSetError("%s is %s, expected an object" % (name, type(value).__name__))
+    return value
+
+
+def _str_list(value: Any, name: str) -> List[str]:
+    """An optional array of strings (test ids). A bare string is NOT split or wrapped."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise FactSetError("%s is %s, expected an array" % (name, type(value).__name__))
+    for i, v in enumerate(value):
+        if not isinstance(v, str):
+            raise FactSetError("%s[%d] is %s, expected a string" % (name, i, type(v).__name__))
+    return list(value)
+
+
 def _tests(release: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return _rows(release.get("tests"), "tests")
+    rows = _rows(release.get("tests"), "tests")
+    for i, t in enumerate(rows):  # id / supersededBy are used as dict keys: they must be hashable scalars
+        for f in ("id", "supersededBy"):
+            if isinstance(t.get(f), (list, dict)):
+                raise FactSetError("tests[%d].%s is %s, expected a scalar" % (i, f, type(t[f]).__name__))
+    return rows
 
 
 def _stages(release: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -283,6 +356,8 @@ def _waiver(stage: Dict[str, Any], stage_name: str) -> Optional[Dict[str, Any]]:
     w = stage.get("waiver")
     if w is not None and not isinstance(w, dict):
         raise FactSetError("stages.%s.waiver is %s, expected an object" % (stage_name, type(w).__name__))
+    if w is not None:
+        _str_list(w.get("tests"), "stages.%s.waiver.tests" % stage_name)
     return w
 
 
@@ -397,7 +472,7 @@ def _soak_token(which: str) -> "re.Pattern[str]":
 
 
 def _soak(release: Dict[str, Any], which: str) -> str:
-    explicit = (release.get("soak") or {}).get(which)
+    explicit = _obj(release.get("soak"), "soak").get(which)
     if explicit:
         return str(explicit)
     token = _soak_token(which)
@@ -422,12 +497,17 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
     apply_excluded_from_scope() (a no-op until XACA-1343-006).
     Inputs are never mutated (``content`` is deep-copied too).
 
-    Malformed rows fail closed: a non-object row in ``tests``, ``notices`` (release or
-    CR), the CR activity log or ``stages`` raises FactSetError naming the array and
-    index. ``items`` additionally accepts a bare string as a title-only row.
+    Malformed input fails closed: a non-object row in ``tests``, ``notices`` (release or
+    CR), the CR activity log or ``stages``, a non-array where an array belongs (including
+    ``stages.X.waiver.tests`` as a string, never split into characters), or a non-object
+    ``soak``/``stageSha``/``links``/``waiver``/record raises FactSetError naming the
+    field and index. ``items`` additionally accepts a bare string as a title-only row.
+    Date-only deploy windows: see the module docstring.
     """
-    rel = copy.deepcopy(release_record or {})
-    cr = copy.deepcopy(cr_record) if cr_record is not None else {}
+    rel = _obj(copy.deepcopy(release_record), "release_record")
+    cr = _obj(copy.deepcopy(cr_record), "cr_record")
+    if content is not None and not isinstance(content, dict):
+        raise FactSetError("content is %s, expected an object" % type(content).__name__)
     _tests(rel)
     _stages(rel)
     now = now or datetime.now(timezone.utc)
@@ -435,19 +515,20 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
     current = str(_get(rel, "currentStage", "stage"))
 
     items, folded = apply_excluded_from_scope(_items(rel), excluded_from_scope)
-    rel_links, cr_links = rel.get("links") or {}, cr.get("links") or {}
+    rel_links, cr_links = _obj(rel.get("links"), "release.links"), _obj(cr.get("links"), "cr.links")
+    stage_sha = _obj(rel.get("stageSha"), "release.stageSha")
 
     history = [{
         "state": e.get("to", e.get("state", "")), "verb": e.get("verb", ""), "actor": e.get("actor", ""),
         "timestampCT": _fmt_ts(e.get("ts"), tz), "note": str(e.get("note") or ""),
-    } for e in _rows(cr.get("activity_log") or cr.get("activityLog"), "cr.activity_log")]
+    } for e in _rows(_get(cr, "activity_log", "activityLog", default=None), "cr.activity_log")]
 
     waivers = []
     for sname, st in _stages(rel).items():
         w = _waiver(st, sname)
         if w:
             waivers.append({"by": w.get("by", ""), "reason": w.get("reason", ""), "ts": w.get("ts", ""),
-                            "tests": list(w.get("tests") or [])})
+                            "tests": _str_list(w.get("tests"), "stages.%s.waiver.tests" % sname)})
 
     notices = [{"ts": n.get("ts", ""), "provider": n.get("provider", ""), "alias": n.get("alias", ""),
                 "template": n.get("template", ""), "ok": bool(n.get("ok")), "error": str(n.get("error") or "")}
@@ -458,7 +539,7 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
             "id": rel.get("id", ""), "version": rel.get("version", ""),
             "platform": rel.get("platform") or platform_name,
             "branch": rel.get("branch", ""),
-            "stageSha": (rel.get("stageSha") or {}).get(current, ""),
+            "stageSha": stage_sha.get(current, ""),
             "currentStage": current, "items": items, "foldedItemCount": folded,
             "scopeNote": _get(rel, "scopeNote", default=DEFAULT_SCOPE_NOTE),
             "stages": [{"name": n, "enteredAt": _stages(rel)[n].get("enteredAt", ""),
@@ -468,12 +549,12 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
             "dateMMMDDYYYY": _fmt_date(window, tz) or now.astimezone(_tzinfo(tz)).strftime("%b %d %Y"),
             "releaseType": str(_get(rel, "releaseType", default="Release")).title(),
             "briefTitle": str(_get(rel, "briefTitle", "name")),
-            "scheduledDate": _fmt_date(window, tz) or str(window),
+            "scheduledDate": _fmt_date(window, tz) or ("" if window is None else str(window)),
             "scheduledTime": _fmt_time(window, tz) or "",
         },
         "cr": {
             "id": cr.get("id", ""), "title": cr.get("title", ""), "risk": cr.get("risk", ""),
-            "scheduledWindow": _fmt_ts(window, tz), "approver": cr.get("approver", ""),
+            "scheduledWindow": _fmt_window(window, tz), "approver": cr.get("approver", ""),
             "approvalAssumed": bool(_get(cr, "approval_assumed", "approvalAssumed", default=False)),
             "approvalBasis": _get(cr, "approval_basis", "approvalBasis"),
             "approvalExpectedAt": _fmt_ts(_get(cr, "cr_approval_expected_at", "approvalExpectedAt", default=None), tz),
@@ -484,7 +565,7 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
             "crRequestPage": _get(cr_links, "crRequestPage", default=_get(rel_links, "crRequestPage")),
         },
         "prod": {
-            "deployedSha": (rel.get("stageSha") or {}).get("GAMMA", ""),
+            "deployedSha": stage_sha.get("GAMMA", ""),
             "deployedAt": _fmt_ts(_get(cr, "cr_deployed_prod_at", "deployedProdAt", default=None), tz),
             "soak2h": _soak(rel, "2h"), "soak24h": _soak(rel, "24h"),
         },

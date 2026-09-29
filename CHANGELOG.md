@@ -14,6 +14,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   PR #987 round 1: `resolve_aliases()`/`build_fact_set()` never modify the caller's data; soak
   results match the duration as a whole token (a 12h soak is no longer read as the 2h one);
   `cr.scheduledWindow` is formatted in the team timezone; a malformed row raises a named error.
+  PR #987 round 2: a date-only deploy window (stored as midnight UTC) now keeps its calendar day
+  instead of showing the previous evening in US timezones; malformed fields raise a named error
+  rather than being silently mis-read.
 - **XACA-0888 (3/3) PR #985 round 4** — port of the canonical -053 message fix: the project-tier
   gate's local-only-session note is truthful whether the matched team is itself local-only (bare
   `kb-knowledge-add project "<title>"` from its repo) or not (run from that team's session). Ported
