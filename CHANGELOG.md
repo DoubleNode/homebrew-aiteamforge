@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1344 (PR 2/3)** — `kb-wiki publish` and `kb-wiki patch-section` now work.
+  - `publish` creates the one page for a release or CR key, or updates it.
+    - It never creates a second page for the same key.
+    - It fails if the page it was told about is gone.
+    - It refuses (exit 4, with a diff, nothing changed) if someone edited the page since the last publish.
+  - `patch-section` replaces the text under one heading and leaves the rest of the page untouched.
+  - `read`, `find`, `children`, `url` and `doctor` are still stubs until PR 3.
 - **XACA-1284-016: helpers-template launchers propagate `cc`'s exit status.** All 8 template
   launchers (`kb-run`, `kb-work`, `kb-{run,work}-{review,test,debug}`) capture `cc`'s rc and return it
   with a `✗ <launcher>: cc exited N` message on stderr, so a refused launch (routing/credential abort,

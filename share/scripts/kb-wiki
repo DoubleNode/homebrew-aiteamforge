@@ -1,23 +1,45 @@
 #!/usr/bin/env python3
 """kb-wiki: publish and read release-workflow wiki docs (XACA-1344).
 
-Thin argparse dispatcher over kanban-hooks/release_wiki.py. EARLY STUB
-CONTRACT (XACA-1344 PR 1/3): the CLI surface and exit codes below are stable
-so XACA-1349 can build against them; subcommands are wired in by later PRs.
+Thin argparse dispatcher over kanban-hooks/release_wiki.py. The CLI surface
+and exit codes below are stable so XACA-1349 can build against them.
+
+Wired (XACA-1344 PR 2/3): publish, patch-section. Still stubs (exit 3, PR 3/3):
+read, find, children, url, doctor.
+
+kb-wiki does NOT write the release/CR record. The caller (engine, XACA-1348/
+1349) passes the stored state in (--page-id, --stored-version) and stores the
+printed record {"pageId","url","version"} itself.
+
+  publish       --team T --doc D --key K --title S --body-file F
+                [--page-id ID (--stored-version V | --expect-version N)] [--json]
+      No --page-id: create. Refuses (exit 1) if the parent is missing/wrong
+      type or a page with that title already exists (adopt it via --page-id).
+      With --page-id: update. A missing page is exit 1, NEVER a create.
+  patch-section --team T --doc D --key K --page-id ID --heading H --body-file F
+                (--stored-version V | --expect-version N) [--json]
+      Replaces only the content under heading H (exit 1 if absent/ambiguous).
 
 Exit codes (the engine may rely on these):
   0  ok
-  1  wiki/provider error (credentials, not found, transport, conflict)
-  2  usage error (argparse; bad --doc, malformed --key, missing argument)
+  1  wiki/provider error (credentials, not found, transport, duplicate title,
+     bad parent, heading absent/ambiguous, missing/invalid wiki.json)
+  2  usage error (argparse; bad --doc, malformed --key, missing argument, no
+     team, --doc not mapped in wiki.json docTypes, update without a version)
   3  NOT_IMPLEMENTED: subcommand not wired yet. One line on stderr:
          kb-wiki: <subcommand> not implemented yet (XACA-1344)
-  4  version-guard refusal (RESERVED for PR 2; never emitted today)
+  4  version-guard refusal: live version != stored/expected (newer, older, or a
+     409 race). Prints a unified diff (live vs rendered) on stdout; the page
+     is left unchanged.
 
 Subcommands: publish, read, find, children, url, patch-section, doctor.
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -25,6 +47,9 @@ from pathlib import Path
 EXIT_OK, EXIT_WIKI_ERROR, EXIT_USAGE, EXIT_NOT_IMPLEMENTED, EXIT_VERSION_GUARD = 0, 1, 2, 3, 4
 DOC_TYPES = ("cr", "testing-log", "cr-record")
 KEY_RE = re.compile(r"^(REL|CR)-[A-Za-z0-9][A-Za-z0-9._-]*(?![\s\S])")  # not $: it matches before a final \n
+TEAM_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}(?![\s\S])")
+TEST_PROVIDER_VAR = "KB_WIKI_TEST_PROVIDER_FILE"  # test-only: a .py file defining make_provider()
+ALLOW_ANY_DIR_VAR = "RELEASE_CONFIG_VALIDATE_ALLOW_ANY_DIR"  # same hatch as the validator CLI
 
 
 def _find_hooks_dir():
@@ -35,6 +60,12 @@ def _find_hooks_dir():
         if (cand / "release_wiki.py").is_file():
             return cand
     return None
+
+
+def _nonneg_int(value):
+    if not re.fullmatch(r"[0-9]+", value):
+        raise argparse.ArgumentTypeError(f"invalid version {value!r} (expected a non-negative integer)")
+    return int(value)
 
 
 def _key(value):
@@ -48,7 +79,8 @@ def build_parser():
     sub = p.add_subparsers(dest="command", metavar="<subcommand>")
     sub.required = True
 
-    def add(name, help_, doc=True, key=True, body=False, heading=False, expect=False):
+    def add(name, help_, doc=True, key=True, body=False, heading=False,
+            versions=False, title=False, page_id=False):
         s = sub.add_parser(name, help=help_, description=help_)
         s.add_argument("--team", help="team id (default: $KB_TEAM)")
         s.add_argument("--json", action="store_true", help="machine-readable output")
@@ -60,22 +92,175 @@ def build_parser():
             s.add_argument("--body-file", required=True, help="rendered body (storage format)")
         if heading:
             s.add_argument("--heading", required=True, help="heading whose body is replaced")
-        if expect:
-            s.add_argument("--expect-version", type=int, metavar="N",
-                           help="refuse unless the live page is at version N")
+        if title:
+            s.add_argument("--title", required=True, help="page title")
+        if page_id:
+            s.add_argument("--page-id", required=(name == "patch-section"),
+                           help="stored page id: update it (never create)")
+        if versions:
+            s.add_argument("--stored-version", type=_nonneg_int, metavar="V",
+                           help="version recorded at last publish; refuse if live differs")
+            s.add_argument("--expect-version", type=_nonneg_int, metavar="N",
+                           help="refuse unless the live page is at exactly version N")
+        if versions:  # test-only override, mirrors kb-release-config-validate
+            s.add_argument("--config-dir", help=argparse.SUPPRESS)
         return s
 
-    add("publish", "create or update the one page for (doc, key)", body=True, expect=True)
+    add("publish", "create or update the one page for (doc, key)", body=True,
+        versions=True, title=True, page_id=True)
     add("read", "print body + version, labels, ancestors")
     add("find", "look up the page for (doc, key)")
     add("children", "list children of the doc type's mapped parent", key=False)
     add("url", "print the page URL")
     add("patch-section", "replace only the body under one heading",
-        body=True, heading=True, expect=True)
+        body=True, heading=True, versions=True, page_id=True)
     s = add("doctor", "check credentials, parents, write access, title patterns",
             doc=False, key=False)
     s.add_argument("--doc", choices=DOC_TYPES, help="limit to one doc type")
     return p
+
+
+class _Usage(Exception):
+    pass
+
+
+class _ConfigError(Exception):
+    pass
+
+
+def _err(msg):
+    print(f"kb-wiki: {msg}", file=sys.stderr)
+
+
+def _resolve_config_dir(team, override):
+    """Same convention as scripts/release_config_validate.py::_resolve_config_dir
+    (<team kanban>/config via aiteamforge_paths; --config-dir only for tests and
+    only under kanban/config unless the validator's escape hatch is set). It is
+    re-stated here, not imported, because that module needs jsonschema at import
+    time and this resolution must work on a bare system python."""
+    def allowed(p):
+        return os.environ.get(ALLOW_ANY_DIR_VAR) == "1" or p.parts[-2:] == ("kanban", "config")
+
+    if override is not None:
+        cand = Path(override).expanduser().resolve()
+        if not allowed(cand):
+            raise _Usage(f"--config-dir must be a team's <kanban>/config directory (got {cand})")
+        return cand
+    import aiteamforge_paths
+    try:
+        kdir = aiteamforge_paths.get_team_kanban_dir(team)
+    except KeyError as exc:
+        raise _Usage(str(exc)) from None
+    cand = (Path(kdir) / "config").resolve()
+    if not allowed(cand):
+        raise _Usage(f"resolved config dir {cand} does not end in kanban/config; refusing")
+    return cand
+
+
+def _full_validate(config):
+    """Run XACA-1342's schema validator when importable (it needs jsonschema)."""
+    here = Path(__file__).resolve().parent
+    for cand in (here / "release_config_validate.py",
+                 here.parent / "scripts" / "release_config_validate.py"):
+        if cand.is_file():
+            spec = importlib.util.spec_from_file_location("release_config_validate", cand)
+            mod = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(mod)
+            except ImportError:
+                _err("schema validator unavailable (jsonschema missing); "
+                     "checking only the fields kb-wiki uses")
+                return
+            errors = mod.validate_wiki_config(config)
+            if errors:
+                raise _ConfigError("wiki.json invalid: " + "; ".join(errors))
+            return
+
+
+def _load_wiki_config(team, doc, override):
+    """Returns (config, space, parent_type, parent_id). Missing/invalid wiki.json
+    is _ConfigError (exit 1); an unmapped --doc is _Usage (exit 2)."""
+    cfg_path = _resolve_config_dir(team, override) / "wiki.json"
+    try:
+        config = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise _ConfigError(f"wiki.json not found for team '{team}' ({cfg_path})") from None
+    except (OSError, ValueError) as exc:
+        raise _ConfigError(f"cannot read wiki.json ({type(exc).__name__})") from None
+    if not isinstance(config, dict):
+        raise _ConfigError("wiki.json must be a JSON object")
+    _full_validate(config)
+    if config.get("provider") != "confluence":
+        raise _ConfigError("wiki.json provider must be 'confluence'")
+    doc_types = config.get("docTypes")
+    if not isinstance(doc_types, dict):
+        raise _ConfigError("wiki.json docTypes must be an object")
+    entry = doc_types.get(doc)
+    if entry is None:
+        raise _Usage(f"doc type '{doc}' is not mapped in wiki.json docTypes")
+    try:
+        space, parent = entry["space"], entry["parent"]
+        ptype, pid = parent["type"], parent["id"]
+    except (KeyError, TypeError):
+        raise _ConfigError(f"wiki.json docTypes.{doc} needs space and parent{{type,id}}") from None
+    if not (isinstance(space, str) and space and ptype in ("page", "folder")
+            and isinstance(pid, (str, int)) and not isinstance(pid, bool) and str(pid)):
+        raise _ConfigError(f"wiki.json docTypes.{doc} has an invalid space/parent")
+    return config, space, ptype, str(pid)
+
+
+def _make_provider(team, config):
+    hook = os.environ.get(TEST_PROVIDER_VAR)
+    if hook:
+        _err(f"WARNING: {TEST_PROVIDER_VAR} is set; using a test provider")
+        spec = importlib.util.spec_from_file_location("kb_wiki_test_provider", hook)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.make_provider()
+    from release_wiki_confluence import ConfluenceProvider, load_credential
+    ref = (config.get("credential") or {}).get("secretRef")
+    return ConfluenceProvider(load_credential(team, secret_ref=ref, base_url=config.get("baseUrl")))
+
+
+def _read_body(path):
+    try:
+        return Path(path).read_bytes().decode("utf-8")  # bytes: no newline translation
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _Usage(f"cannot read --body-file ({type(exc).__name__})") from None
+
+
+def _run(args):
+    import release_wiki as rw
+    team = args.team or os.environ.get("KB_TEAM", "")
+    if not team:
+        raise _Usage("no team: pass --team or set $KB_TEAM")
+    if not TEAM_RE.match(team):
+        raise _Usage(f"invalid team id {team!r}")
+    is_patch = args.command == "patch-section"
+    if args.page_id is not None and not re.fullmatch(r"[0-9]+", args.page_id):
+        raise _Usage("--page-id must be numeric")
+    versioned = args.stored_version is not None or args.expect_version is not None
+    if args.page_id is not None and not versioned:
+        raise _Usage("updating an existing page needs --stored-version or --expect-version")
+    if args.page_id is None and versioned:
+        raise _Usage("--stored-version/--expect-version only apply with --page-id")
+    body = _read_body(args.body_file)
+    if not is_patch and not body.strip():
+        raise _Usage("--body-file is empty; refusing to publish a blank page")
+    config, space, ptype, pid = _load_wiki_config(team, args.doc, args.config_dir)
+    provider = _make_provider(team, config)
+    if is_patch:
+        res = rw.patch_section(provider, args.page_id, args.heading, body,
+                               args.stored_version, args.expect_version)
+    else:
+        res = rw.publish(provider, space, ptype, pid, args.title, body, args.page_id,
+                         args.stored_version, args.expect_version)
+    if args.json:
+        print(json.dumps(res.record()))
+    else:
+        verb = "created" if res.created else ("patched" if is_patch else "updated")
+        print(f"kb-wiki: {verb} {args.key} pageId={res.page_id} version={res.version} url={res.url}")
+    return EXIT_OK
 
 
 def main(argv=None):
@@ -83,9 +268,32 @@ def main(argv=None):
     hooks = _find_hooks_dir()
     if hooks is not None:
         sys.path.insert(0, str(hooks))
-    # Real subcommands land in PR 2/3; until then every verb is a stub.
-    print(f"kb-wiki: {args.command} not implemented yet (XACA-1344)", file=sys.stderr)
-    return EXIT_NOT_IMPLEMENTED
+    if args.command not in ("publish", "patch-section"):
+        # read/find/children/url/doctor land in PR 3/3.
+        print(f"kb-wiki: {args.command} not implemented yet (XACA-1344)", file=sys.stderr)
+        return EXIT_NOT_IMPLEMENTED
+    import release_wiki as rw
+    try:
+        return _run(args)
+    except (_Usage, rw.WikiUsageError) as exc:
+        _err(str(exc))
+        return EXIT_USAGE
+    except _ConfigError as exc:
+        _err(str(exc))
+        return EXIT_WIKI_ERROR
+    except rw.WikiGuardError as exc:
+        _err(f"version guard: {exc}")
+        sys.stdout.write(exc.diff)
+        return EXIT_VERSION_GUARD
+    except rw.WikiConflictError as exc:
+        _err(f"version guard: {exc}")
+        return EXIT_VERSION_GUARD
+    except rw.WikiError as exc:
+        _err(f"{type(exc).__name__}: {exc}")
+        return EXIT_WIKI_ERROR
+    except Exception as exc:  # never a traceback, never a secret
+        _err(f"unexpected {type(exc).__name__}")
+        return EXIT_WIKI_ERROR
 
 
 if __name__ == "__main__":
