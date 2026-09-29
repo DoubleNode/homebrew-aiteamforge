@@ -9774,6 +9774,10 @@ kb-knowledge-reindex() {
 }
 
 # Show detailed help for all kanban commands
+# XACA-0888: this listing predates any Knowledge Base section (no
+# kb-knowledge-* command is documented here at all) — kb-knowledge-where
+# has nothing to attach to, so it is not listed in this copy; see
+# kanban-helpers.template.sh's kb-help for the full Knowledge Base listing.
 kb-help() {
     echo ""
     echo "Kanban Helper Commands"
