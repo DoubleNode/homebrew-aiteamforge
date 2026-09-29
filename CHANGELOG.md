@@ -16,6 +16,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   look-alike host or `user@host` trick no longer passes; a required link whose URL is not known yet
   is now a violation instead of being satisfied by any link; `www.` and bare-email links are
   counted; a profile regex that runs away is stopped after about 5 seconds and fails the check.
+  PR #988 round 2: when a profile restricts links, any link-like text the parser does not
+  recognise as an allowed link (`//host`, a `scheme:`, `href=`/`src=` attributes, Markdown link
+  syntax) is now a violation, so unusual formatting can no longer slip a link past the check;
+  `mailto:` links must name only plain, allowed recipients.
 - **XACA-1343 (PR 2b/4)** — ships `share/scripts/release_fact_dictionary.py`, the engine-fact dictionary
   for release content-profile templates: the canonical fact names, their row shapes, deprecated aliases
   that still resolve, and `build_fact_set()`, which assembles the facts a CR/Testing Log/notice renders

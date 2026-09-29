@@ -75,10 +75,33 @@ LINKS (linkPolicy)
     whitespace or one of * _ ~ ( < > quotes [, trailing punctuation and an
     unbalanced `)` trimmed) and a bare `user@host.tld` email (recorded and judged
     as `mailto:user@host.tld`; the host needs a dot). Relative and `#anchor`
-    targets count too (fail closed). A link is counted once: the span of a
-    `[t](url)` (text included) or `<url>` is masked before the scheme-less scans.
-    Link text over 300 chars is not recognised as `[t](url)` (an absolute URL
-    inside it is still found; a relative target would not be).
+    targets count too (fail closed). Any HTML attribute that takes a URL (href, src,
+    srcset, action, formaction, poster, data, cite, ...) on ANY tag is a link,
+    quoted or unquoted; each srcset candidate is one. Markdown link text may nest
+    brackets, span lines, contain `\\]` and be any length (a linear bracket-stack
+    pass). A link is counted once: the brackets and target of `[t](url)` (and the
+    text too when it is just a displayed URL) or the span of `<url>` are blanked
+    before the scheme-less scans; other link text stays scanned.
+
+    RESIDUAL SCAN (the class guard, `link-unrecognized`). The extractor only
+    IDENTIFIES links (which is testingLog, counting, maxCount); it is not the
+    policy's boundary, because any syntax it misses would escape the policy. So when
+    the profile RESTRICTS links, the body left after every recognised link is
+    blanked is scanned for ANY link-like token, whatever the syntax: `//` + a
+    host-ish char (protocol-relative), a `scheme:` from a broad list (https, ftp,
+    mailto, tel, sms, javascript, data, file, vbscript, ssh, git, ws, ...) or any
+    `scheme://`, `www.`, a bare `x@y.tld`, an HTML URL attribute name followed by
+    `=` (href/src/srcset/action/formaction/poster/data/... , any case, optional
+    whitespace), CSS `url(`/`url=`/`@import`, and the Markdown constructs `](`,
+    `]:` and `][` (a `[text][label]` use of a recognised definition is exempt, as is
+    a `[^n]:` footnote). Each hit is a violation naming its line (10 max). Over-
+    matching costs a false alarm on odd prose; under-matching is the fail-open
+    direction, so it errs toward the former.
+    "Restricts links": the simple shape ({allowed, maxLinks}) always; the seed shape
+    unless defaultAllowLinks is true AND everythingElseBanned is empty/absent (an
+    empty `{}` policy reads as the banned seed shape). A profile with NO linkPolicy
+    key restricts nothing, so it gets no residual check.
+    Link targets over 2048 chars are kept as an unpermittable stub, never skipped.
 
     URL matching is STRUCTURAL, never a string prefix (`_url_permitted`):
       * scheme equal, case-insensitive; a host-only entry means http or https.
@@ -93,6 +116,10 @@ LINKS (linkPolicy)
       * mailto: EVERY recipient (path, and to/cc/bcc headers) must match:
         `mailto:ops@x.com` is that exact address (case-insensitive);
         `mailto:x.com` / `mailto:@x.com` is any address at exactly that domain.
+        Recipients are percent-decoded ONCE, split on ',' ';' and whitespace, and
+        each must be a plain unquoted addr-spec (`[A-Za-z0-9._+-]+@host.tld`): a
+        quoted local part, a second '@', a leftover '%' or anything else refuses
+        the whole link (`_mail_addresses` -> None).
       * relative / `#anchor` targets and non-http(s)/ftp/mailto schemes are never
         permitted by `allowed`. An entry that does not parse matches nothing.
     Standard-link identity (`_same_url`) uses the same scheme/host/port rules and
@@ -147,7 +174,7 @@ LIMITS
     `(a|a)*b`, `(a|aa)+$`, `(.*a){25}`, `(a{1,99}){1,99}b` -- which is why the
     execution bound exists; do not treat the screen as a safety boundary. The
     validator's own link/section scans are linear-time (per-line supersede flags,
-    an '@' walk instead of a regex for emails, bounded link-text scan).
+    an '@' walk instead of a regex for emails, a bracket-stack pass for links).
 """
 from __future__ import annotations
 
@@ -732,11 +759,25 @@ class _Link:
         self.url, self.line, self.start = url, line, start
 
 
-_MD_INLINE = re.compile(
-    r"!?\[[^\]\n]{0,300}\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
+# Markdown inline links are found by a linear bracket-stack pass (`_md_inline`), not
+# a regex: link text may nest brackets, span lines and contain `\\]`, at any length.
+_BR_TOK = re.compile(r"\\.|[\[\]]|\n[ \t]*\n", re.S)
+_WS = re.compile(r"\s*")
+_DEST_END = re.compile(r"[)\s>]")
+_MAX_DEST = 2048   # a longer target is recorded as an unpermittable stub, never skipped
 _REF_DEF = re.compile(r"^[ \t]{0,3}\[([^\]\n]+)\]:[ \t]*<?(\S+?)>?(?=\s|$)", re.M)
+_FOOTNOTE_DEF = re.compile(r"^[ \t]{0,3}\[\^[^\]\n]*\]:", re.M)
+_REF_USE = re.compile(r"\]\[([^\]\n]*)\]")
 _AUTOLINK = re.compile(r"<((?:https?|ftp)://[^>\s]+|mailto:[^>\s]+)>")
-_HTML_A = re.compile(r"<a\s[^>]*?href\s*=\s*[\"']([^\"']*)[\"'][^>]*>", re.I)
+# Any HTML attribute that takes a URL, on any tag, quoted or unquoted, whitespace
+# around '=' allowed, name case-insensitive (`data-href=` is not one: '-' precedes).
+_URL_ATTRS = ("href", "src", "srcset", "action", "formaction", "poster", "data", "cite",
+              "background", "ping", "longdesc", "manifest", "srcdoc", "lowsrc", "dynsrc", "usemap")
+_HTML_ATTR = re.compile(
+    r"(?<![A-Za-z0-9_-])(" + "|".join(_URL_ATTRS) + r")\s*=\s*"
+    r"(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'<>`]+))", re.I)
+_DISPLAYED_URL = re.compile(
+    r"(?:(?:https?|ftp)://|mailto:)\S+|www\.\S+|[^\s@]+@[^\s@]+\.[^\s@]+", re.I)
 _BARE = re.compile(r"(?:(?:https?|ftp)://|mailto:)[^\s<>\[\]()\"']+", re.I)
 # GFM extended www autolink: `www.` + a domain, at the start of a line or after
 # whitespace or one of * _ ~ ( (widened here with < > quotes [ : more is fail-closed).
@@ -786,8 +827,9 @@ def _mask_spans(text: str, spans: List[Tuple[int, int]]) -> str:
         return text
     parts, pos = [], 0
     for s, e in sorted(spans):
-        if s < pos:
+        if e <= pos:
             continue
+        s = max(s, pos)
         parts.append(text[pos:s])
         parts.append(re.sub(r"[^\n]", " ", text[s:e]))
         pos = e
@@ -795,32 +837,121 @@ def _mask_spans(text: str, spans: List[Tuple[int, int]]) -> str:
     return "".join(parts)
 
 
-def _extract_links(body: str, starts: List[int]) -> List[_Link]:
-    """Every link the way GitHub would render it. A `www.x` autolink is recorded
-    as `http://www.x` and a bare `user@host.tld` as `mailto:user@host.tld`, so the
-    policy checks see the URL a reader would actually follow."""
+def _md_inline(body: str):
+    """-> [(url, span_start, text_start, text_end, span_end)] for every `[t](url)` /
+    `![t](url)`. ONE forward pass with a bracket stack (linear): nested brackets,
+    newlines and `\\]` in the text and any text length are all fine; a blank line
+    ends every open bracket. Nested links are all reported (fail closed). The target
+    is parsed by hand (a regex here backtracks quadratically on `](` + spaces); the
+    end of a target run is looked up through a one-entry cache, so overlapping
+    attempts never rescan it. A target longer than _MAX_DEST is kept as a stub that
+    no allow-list matches."""
+    out = []
+    stack: List[int] = []
+    n = len(body)
+    cache = (-1, -1)        # (run start, first terminator at/after it); n = none
+    for m in _BR_TOK.finditer(body):
+        t = m.group(0)
+        if t == "[":
+            stack.append(m.start())
+        elif t == "]":
+            if not stack:
+                continue
+            ts = stack.pop()
+            if not body.startswith("(", m.end()):
+                continue
+            i = _WS.match(body, m.end() + 1).end()
+            if body.startswith("<", i):
+                i += 1
+            if cache[0] <= i <= cache[1]:
+                end = cache[1]
+            else:
+                mm = _DEST_END.search(body, i)
+                end = mm.start() if mm else n
+                cache = (i, end)
+            if end == i:
+                continue
+            j = end + 1 if body.startswith(">", end) else end
+            k = _WS.match(body, j).end()
+            if k > j and k < n and body[k] in "\"'":
+                q = body.find(body[k], k + 1)
+                if q != -1:
+                    k = _WS.match(body, q + 1).end()
+            if not body.startswith(")", k):
+                continue
+            url = body[i:end] if end - i <= _MAX_DEST else body[i:i + 32] + "\x00<oversize>"
+            ss = ts - 1 if ts > 0 and body[ts - 1] == "!" else ts
+            out.append((url, ss, ts + 1, m.start(), k + 1))
+        elif t[0] == "\n":
+            stack.clear()
+    return out
+
+
+def _norm_label(s: str) -> str:
+    return " ".join(s.split()).lower()
+
+
+def _extract(body: str, starts: List[int]):
+    """-> (links, residual): every link the way GitHub would render it, and the body
+    with every RECOGNISED link span blanked out (newlines kept) - the input of the
+    fail-closed residual scan (`_residual_hits`). A `www.x` autolink is recorded as
+    `http://www.x` and a bare `user@host.tld` as `mailto:user@host.tld`, so the policy
+    checks see the URL a reader would actually follow."""
     found: List[_Link] = []
     work = body
 
-    def scan(rx, group: int, filt=None):
+    def scan(rx, group: int, filt=None, record=True):
         nonlocal work
         spans = []
         for m in rx.finditer(work):
             if filt and not filt(m):
                 continue
-            url = m.group(group)
-            if rx is _BARE:
-                url = url.rstrip(_TRAIL)
-            elif rx is _WWW:
-                url = "http://" + _trim_autolink(url)
-            found.append(_Link(url.strip(), _line_of(starts, m.start()), m.start()))
+            if record:
+                url = m.group(group)
+                if rx is _BARE:
+                    url = url.rstrip(_TRAIL)
+                elif rx is _WWW:
+                    url = "http://" + _trim_autolink(url)
+                found.append(_Link(url.strip(), _line_of(starts, m.start()), m.start()))
             spans.append((m.start(), m.end()))
         work = _mask_spans(work, spans)
 
-    scan(_MD_INLINE, 1)
-    scan(_REF_DEF, 2, lambda m: not m.group(1).startswith("^"))
+    # [t](url): mask the brackets and the target; the text is masked too only when it
+    # is itself just a displayed URL (`[https://x](https://x)`), otherwise it stays in
+    # `work` so anything link-like inside it is still extracted / residual-scanned.
+    spans = []
+    for url, ss, ts, te, se in _md_inline(body):
+        found.append(_Link(url.strip(), _line_of(starts, ss), ss))
+        spans.append((ss, ts))
+        spans.append((te, se))
+        if te - ts <= 2000 and _DISPLAYED_URL.fullmatch(body[ts:te].strip()):
+            spans.append((ts, te))
+    work = _mask_spans(work, spans)
+
+    scan(_FOOTNOTE_DEF, 0, record=False)          # `[^1]: note` is not a link
+    labels = set()
+
+    def is_def(m):
+        if m.group(1).startswith("^"):
+            return False
+        labels.add(_norm_label(m.group(1)))
+        return True
+
+    scan(_REF_DEF, 2, is_def)
+    # `[text][label]` whose label is a definition we already recognised (and judge)
+    scan(_REF_USE, 0, lambda m: _norm_label(m.group(1)) in labels, record=False)
     scan(_AUTOLINK, 1)
-    scan(_HTML_A, 1)
+
+    spans = []
+    for m in _HTML_ATTR.finditer(work):
+        val = next((g for g in m.groups()[1:] if g is not None), "")
+        cands = [c.strip().split(None, 1)[0] if c.strip() else ""
+                 for c in val.split(",")] if m.group(1).lower() == "srcset" else [val]
+        for c in cands:
+            found.append(_Link(c.strip(), _line_of(starts, m.start()), m.start()))
+        spans.append((m.start(), m.end()))
+    work = _mask_spans(work, spans)
+
     scan(_BARE, 0)
     scan(_WWW, 0)
     spans = _email_spans(work)
@@ -828,7 +959,59 @@ def _extract_links(body: str, starts: List[int]) -> List[_Link]:
         found.append(_Link("mailto:" + work[s:e], _line_of(starts, s), s))
     work = _mask_spans(work, spans)
     found.sort(key=lambda l: l.start)
-    return [l for l in found if l.url]
+    return [l for l in found if l.url], work
+
+
+def _extract_links(body: str, starts: List[int]) -> List[_Link]:
+    return _extract(body, starts)[0]
+
+
+# ---- fail-closed residual scan: the class guard --------------------------------
+# The extractor above IDENTIFIES links (which one is testingLog, counting, maxCount).
+# It cannot be the whole policy: any syntax it misses would escape the linkPolicy
+# altogether. So, when the profile restricts links, whatever is left of the body once
+# every recognised link is blanked is scanned for ANY link-like token, independent of
+# Markdown/HTML syntax. Over-matching costs a false alarm on odd prose; under-matching
+# is a publish that carries an off-policy link.
+_SCHEMES = ("https?|ftp|ftps|mailto|tel|sms|javascript|data|file|vbscript|ssh|git|ws|wss|"
+            "irc|news|gopher|blob|cid|about|view-source")
+_RESIDUAL_TOKENS = (
+    ("protocol-relative //host",
+     re.compile(r"//[A-Za-z0-9_\[.~%@-]")),
+    ("scheme:",
+     re.compile(r"(?<![A-Za-z0-9+.\-])(?:" + _SCHEMES + r"):(?=\S)", re.I)),
+    ("scheme://",
+     re.compile(r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]*://")),
+    ("www.", re.compile(r"(?<![A-Za-z0-9])www\.[A-Za-z0-9]", re.I)),
+    ("email address", re.compile(r"[^\s@]@[^\s@]*\.[A-Za-z0-9]")),
+    ("html url attribute", re.compile(
+        r"(?<![A-Za-z0-9_-])(?:" + "|".join(_URL_ATTRS) + r"|xlink:href)\s*=", re.I)),
+    ("css/meta url", re.compile(r"(?<![A-Za-z0-9_-])url\s*[(=]|@import\b", re.I)),
+    ("markdown link ](", re.compile(r"\]\(")),
+    ("markdown reference ]:", re.compile(r"\]:")),
+    ("markdown reference ][", re.compile(r"\]\[")),
+)
+
+
+def _residual_hits(residual: str, body: str, starts: List[int]) -> List[Violation]:
+    hits = []
+    for name, rx in _RESIDUAL_TOKENS:
+        for m in rx.finditer(residual):
+            hits.append((m.start(), name))
+            if len(hits) > 4 * MAX_MATCHES_PER_PATTERN:
+                break
+    hits.sort()
+    out: List[Violation] = []
+    for off, name in hits:
+        if len(out) >= MAX_MATCHES_PER_PATTERN:
+            out.append(Violation("link-unrecognized", "further unrecognised link-like text omitted"))
+            break
+        out.append(Violation(
+            "link-unrecognized",
+            "link-like text (%s) was not recognised as a link, so it cannot be checked "
+            "against linkPolicy: '%s'" % (name, _snippet(body[off:off + 40])),
+            _line_of(starts, off)))
+    return out
 
 
 # ---------------------------------------------------------------- URL matching
@@ -864,16 +1047,33 @@ def _split_url(raw: Any):
             sp.path, sp.query, sp.fragment)
 
 
-def _mail_addresses(path: str, query: str) -> List[str]:
-    addrs = unquote(path).split(",")
-    try:
-        for k, vs in parse_qs(query).items():
-            if k.lower() in ("to", "cc", "bcc"):
-                for v in vs:
-                    addrs.extend(v.split(","))
-    except ValueError:
-        return []
-    return [a.strip().lower() for a in addrs if a.strip()]
+_MAIL_STRICT = re.compile(r"[A-Za-z0-9._+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+_MAIL_SPLIT = re.compile(r"[,;\s]+")
+_MAIL_HEADERS = ("to", "cc", "bcc")
+
+
+def _mail_addresses(path: str, query: str) -> Optional[List[str]]:
+    """-> the lower-cased recipients of a mailto target (path plus to/cc/bcc headers),
+    or None when ANY recipient is not a plain unquoted addr-spec.
+    Everything is percent-decoded ONCE first, then split on ',' ';' and whitespace
+    (Outlook treats ';' as a separator; '%2C' / '%20' decode into separators), and
+    every piece must match `local@domain.tld` with a local part of [A-Za-z0-9._+-]:
+    a quoted local part, a second '@', a leftover '%' (double encoding) or anything
+    else is refused - fail closed."""
+    raw = [unquote(path)]
+    for pair in query.split("&"):       # never on ";": that is a recipient separator
+        k, _, v = pair.partition("=")
+        if unquote(k).strip().lower() in _MAIL_HEADERS:
+            raw.append(unquote(v))
+    addrs: List[str] = []
+    for chunk in raw:
+        for a in _MAIL_SPLIT.split(chunk):
+            if not a:
+                continue
+            if not _MAIL_STRICT.fullmatch(a):
+                return None
+            addrs.append(a.lower())
+    return addrs
 
 
 class _Allow:
@@ -900,7 +1100,7 @@ def _parse_allowed(entry: Any) -> Optional[_Allow]:
     a = _Allow()
     if e.lower().startswith("mailto:"):
         addr = unquote(e[7:].split("?", 1)[0]).strip().lower()
-        if not addr or "," in addr:
+        if not addr or not re.fullmatch(r"(?:[a-z0-9._+-]*@)?[a-z0-9-]+(?:\.[a-z0-9-]+)*", addr):
             return None
         a.mail = True
         if "@" in addr:
@@ -958,7 +1158,7 @@ def _url_permitted(url: str, allowed: List[_Allow]) -> bool:
     scheme, host, port, path, query, _frag = parts
     if scheme == "mailto":
         addrs = _mail_addresses(path, query)
-        if not addrs:
+        if not addrs:            # None (a recipient is not a strict addr-spec) or empty
             return False
         mails = [a for a in allowed if a.mail]
         for addr in addrs:
@@ -996,7 +1196,8 @@ def _canon_url(u: Any):
         return None
     scheme, host, port, path, query, frag = p
     if scheme == "mailto":
-        return ("mailto", tuple(_mail_addresses(path, query)))
+        addrs = _mail_addresses(path, query)
+        return None if addrs is None else ("mailto", tuple(addrs))
     return (scheme, host, port, path.rstrip("/"), query, frag)
 
 
@@ -1037,15 +1238,28 @@ def _check_links(body: str, lines: List[str], starts: List[int], profile: dict,
         return []
     if not isinstance(pol, dict):
         return [Violation("profile-malformed", "linkPolicy must be an object")]
-    links = _extract_links(body, starts)
     simple = ("allowed" in pol) or ("maxLinks" in pol)
     seed = any(k in pol for k in (
         "defaultAllowLinks", "standardLinks", "supersedesException", "everythingElseBanned"))
     if simple and seed:
         return [Violation("profile-malformed", "linkPolicy mixes the simple and the seed shape")]
+    links, residual = _extract(body, starts)
+    res = _links_simple(links, pol) if simple else _links_seed(body, lines, links, pol, facts)
+    if _restricts_links(pol, simple) and not any(v.rule == "profile-malformed" for v in res):
+        res = res + _residual_hits(residual, body, starts)
+    return res
+
+
+def _restricts_links(pol: dict, simple: bool) -> bool:
+    """Does this linkPolicy restrict links (so unrecognised link-like text is a
+    violation)? The simple shape always does (`allowed`/`maxLinks`); the seed shape
+    does unless defaultAllowLinks is true AND everythingElseBanned is empty/absent
+    (the same test `_links_seed` uses for 'everything else'). An empty `{}` policy is
+    read as the seed shape with absent keys = banned, so it restricts. A profile with
+    NO linkPolicy key never reaches here: nothing is restricted, no residual check."""
     if simple:
-        return _links_simple(links, pol)
-    return _links_seed(body, lines, links, pol, facts)
+        return True
+    return not (pol.get("defaultAllowLinks") is True and not pol.get("everythingElseBanned"))
 
 
 def _links_simple(links: List[_Link], pol: dict) -> List[Violation]:
