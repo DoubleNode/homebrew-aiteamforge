@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1151 (PR-E3a)** — `kb-run-debug` and the worktree switch it uses now behave like the dev-team copy.
+  - `kb-run-debug` finds the team from the item ID when no shell context is set, names its session `[Debug] <id>: <title>`, and offers to remove a worktree it created once the session ends.
+  - The worktree switch now sends an item that has a `subRepo` into that sub-repo, and warns and asks before running in a directory that is not a git repository. Without a terminal it refuses instead of asking.
+  - Five helpers those need are now shipped: `_kb_git_context`, `_kb_route_to_subrepo`, `_kb_warn_no_git_context`, `_kb_resolve_run_team`, `_kb_offer_worktree_cleanup`.
+  - Byte-identical to the dev-team functions. No adaptation was kept in any of the three re-ported functions (`_kb_is_main_worktree`, `_kb_switch_to_item_worktree`, `kb-run-debug`). `kb-run` and `kb-work` are not touched here (PR-E3b).
 - **XACA-1344 (PR 2/3)** — `kb-wiki publish` and `kb-wiki patch-section` now work.
   - `publish` creates the one page for a release or CR key, or updates it.
     - It never creates a second page for the same key.

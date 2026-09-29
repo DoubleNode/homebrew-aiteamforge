@@ -813,27 +813,156 @@ _kb_get_worktree_short() {
     fi
 }
 
-# Check if we're in the main worktree (not a secondary worktree)
-# Returns 0 (true) if in main worktree, 1 (false) if in secondary worktree
-_kb_is_main_worktree() {
+# Detect the three-state git context for the current working directory.
+#
+# Three states:
+#   main      — inside the main worktree of a git repo (.git is a directory,
+#               git-dir == git-common-dir)
+#   secondary — inside a secondary worktree (.git is a file pointing to
+#               the main repo's worktrees/ subdirectory)
+#   none      — NOT inside any git repo at all (umbrella-repo parent dir,
+#               e.g. DNSFramework/ which holds independent sub-repos)
+#
+# Echoes one of: main | secondary | none
+# Returns 0 for main/secondary (we are somewhere inside git), 1 for none.
+_kb_git_context() {
     local git_dir common_dir
     git_dir=$(git rev-parse --git-dir 2>/dev/null)
     common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
 
-    # If not in a git repo, return false
-    [[ -z "$git_dir" ]] && return 1
-
-    # If .git is a file (pointing to main repo), we're in a secondary worktree
-    if [[ -f "$git_dir" ]]; then
+    if [[ -z "$git_dir" ]]; then
+        echo "none"
         return 1
     fi
 
-    # If git-dir equals git-common-dir, we're in the main worktree
-    if [[ "$git_dir" == "$common_dir" ]]; then
+    # .git is a file → secondary worktree
+    if [[ -f "$git_dir" ]]; then
+        echo "secondary"
         return 0
     fi
 
+    # git-dir equals git-common-dir → main worktree
+    if [[ "$git_dir" == "$common_dir" ]]; then
+        echo "main"
+        return 0
+    fi
+
+    echo "secondary"
+    return 0
+}
+
+# Check if we're in the main worktree (not a secondary worktree)
+# Returns 0 (true) if in main worktree, 1 (false) if in secondary worktree or not in a git repo.
+# Thin wrapper around _kb_git_context for backward compatibility.
+_kb_is_main_worktree() {
+    [[ "$(_kb_git_context)" == "main" ]]
+}
+
+# Loud warning + interactive prompt for when kb-run* is launched from a directory
+# that is NOT inside any git repository (the "umbrella-repo" case, e.g. running
+# kb-run from DNSFramework/ instead of DNSFramework/DNSProtocols/).
+#
+# Prints a formatted warning box explaining the situation, then prompts the user.
+# Returns 0 to continue with legacy behaviour (user said yes).
+# Returns 1 to abort (user said no or pressed Enter).
+_kb_warn_no_git_context() {
+    local cmd_name="${1:-kb-run}"
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════════╗"
+    echo "║              ⚠️  NOT IN A GIT REPOSITORY  ⚠️                      ║"
+    echo "╠══════════════════════════════════════════════════════════════════╣"
+    echo "║                                                                  ║"
+    echo "║  The current directory is NOT inside a git repository.           ║"
+    echo "║                                                                  ║"
+    echo "║  This is typical of umbrella-repo projects where a parent        ║"
+    echo "║  directory (e.g. DNSFramework/) holds multiple independent       ║"
+    echo "║  sub-repos (DNSCrashWorkarounds/, DNSProtocols/, etc.), each     ║"
+    echo "║  with their own .git directory.                                  ║"
+    echo "║                                                                  ║"
+    echo "║  Without a git repo, $cmd_name cannot create a worktree for     ║"
+    echo "║  isolation. The task will run on whatever branch is current      ║"
+    echo "║  inside the sub-repo you eventually land in.                     ║"
+    echo "║                                                                  ║"
+    echo "║  Recommended actions:                                            ║"
+    echo "║   (a) cd into the correct sub-repo first, then re-run           ║"
+    echo "║       e.g.  cd DNSProtocols && $cmd_name <id>                  ║"
+    echo "║   (b) Set KB_UMBRELLA_ROOT and add a subRepo field to the        ║"
+    echo "║       kanban item — see XACA-0184 for the full umbrella-repo     ║"
+    echo "║       support roadmap.                                           ║"
+    echo "║                                                                  ║"
+    echo "╚══════════════════════════════════════════════════════════════════╝"
+    echo ""
+    local confirm
+    # XACA-1284-003: default-NO prompt -- with no tty there is nobody to answer; refuse.
+    if [[ ! -t 0 ]]; then
+        echo "Non-interactive shell — refusing to launch on the current directory without explicit confirmation." >&2
+        return 1
+    fi
+    printf "Continue anyway and launch on current directory? [y/N]: "
+    read -r confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo "WARNING: Proceeding without worktree isolation — task will run on current branch."
+        echo ""
+        return 0
+    fi
+    echo "Aborted. cd into the correct sub-repo and try again."
     return 1
+}
+
+# XACA-0184: cd into the item's subRepo when launching from an umbrella context.
+# Usage: _kb_route_to_subrepo <item_id> <sub_repo_value>
+# Returns:
+#   0 — routed successfully (cwd is now inside the sub-repo)
+#   0 — no routing needed (sub_repo empty or no umbrella detected), cwd unchanged
+#   1 — routing was requested and failed (caller should abort)
+_kb_route_to_subrepo() {
+    local item_id="${1-}"
+    local sub_repo="${2-}"
+
+    # Nothing to do if the item has no subRepo field.
+    [[ -z "$sub_repo" ]] && return 0
+
+    # Guard: reject path-traversal values — subRepo must be a bare directory name.
+    if [[ "$sub_repo" == *..* ]] || [[ "$sub_repo" == */* ]]; then
+        echo "⚠️  Invalid subRepo value '$sub_repo' — must be a bare directory name" >&2
+        return 1
+    fi
+
+    local umbrella_root
+    umbrella_root=$(_kb_umbrella_root 2>/dev/null)
+
+    if [[ -z "$umbrella_root" ]]; then
+        # Item declares subRepo but no umbrella context detected — log a hint and continue.
+        echo "   Item has subRepo='$sub_repo' but no umbrella context detected." >&2
+        echo "   Set KB_UMBRELLA_ROOT or cd into the umbrella parent to enable auto-routing." >&2
+        return 0
+    fi
+
+    local sub_repo_path="${umbrella_root}/${sub_repo}"
+
+    if [[ ! -d "$sub_repo_path" ]]; then
+        echo "Warning: Item [$item_id] has subRepo '$sub_repo' but directory not found:" >&2
+        echo "    $sub_repo_path" >&2
+        echo "   Available sub-repos in ${umbrella_root}:" >&2
+        _kb_umbrella_sub_repos | sed 's/^/     - /' >&2
+        echo "   Update the item with: kb-backlog change $item_id --sub-repo <correct-name>" >&2
+        # Fall through — the git-context warning guard will prompt if cwd is non-git.
+        return 0
+    fi
+
+    if [[ ! -d "$sub_repo_path/.git" ]] && [[ ! -f "$sub_repo_path/.git" ]]; then
+        echo "Warning: subRepo target '$sub_repo_path' exists but is not a git repository." >&2
+        # Fall through.
+        return 0
+    fi
+
+    echo "Routing to subRepo: $sub_repo_path" >&2
+    cd "$sub_repo_path" || {
+        echo "Error: Failed to cd into sub-repo: $sub_repo_path" >&2
+        return 1
+    }
+    return 0
 }
 
 # Check if we're already in the correct worktree for a given item.
@@ -12000,16 +12129,194 @@ _kb_discover_worktree() {
     return 1
 }
 
+# Offer to remove a session-created worktree after Claude exits.
+# Canonical helper — ONE copy here so kb-run/-review/-test/-debug all share the same
+# logic and cannot drift (k501 sibling-drift pattern; four launchers, one authority).
+#
+# Usage: _kb_offer_worktree_cleanup <worktree_path> <branch>
+#
+# Safety gates:
+#   1. TTY guard — silently skips in non-interactive shells (piped/CI contexts)
+#   2. KB_WT_CLEANUP_PROMPT=0/false/no — kill-switch for the prompt (default: enabled)
+#   3. Worktree must still exist on disk
+#   4. Branch classification via _wt_classify_branch (shared with wt-finish — they agree)
+#      merged           → friendly prompt, default N
+#      unmerged-commits → LOUD warning that commits would be lost, explicit confirm, default N
+#      remote-gone      → caution warning, explicit confirm, default N
+#   5. On 'y'/'Y' only: calls wt-finish with project context auto-set for Academy
+#   6. Reads from /dev/tty so it works after `echo ... | cc` (stdin was a pipe)
+_kb_offer_worktree_cleanup() {
+    local wt_path="${1-}"
+    local wt_branch="${2-}"
+
+    # Guard 1: TTY — skip silently in non-interactive / piped contexts
+    if [[ ! -t 0 ]] || [[ ! -t 1 ]]; then
+        return 0
+    fi
+
+    # Guard 2: kill-switch — lowercase the value so 'False'/'NO'/'FALSE' also
+    # disable the prompt, not just lowercase 0/false/no (XACA-0598-014).
+    local ks
+    ks=$(printf '%s' "${KB_WT_CLEANUP_PROMPT-}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$ks" == "0" ]] || [[ "$ks" == "false" ]] || [[ "$ks" == "no" ]]; then
+        return 0
+    fi
+
+    # Guard 3: worktree must still exist on disk
+    if [[ ! -d "$wt_path" ]]; then
+        return 0
+    fi
+
+    # Resolve the branch fresh from the worktree itself. Call sites historically
+    # passed inconsistent values (kb-run a pre-cc snapshot, the variants a
+    # post-exit re-query); deriving it here makes all four launchers behave
+    # identically and immune to that drift (XACA-0598-011). The passed arg
+    # remains a fallback if the live lookup fails.
+    local fresh_branch
+    fresh_branch=$(git -C "$wt_path" branch --show-current 2>/dev/null)
+    [[ -n "$fresh_branch" ]] && wt_branch="$fresh_branch"
+
+    # Guard 4: classify the branch
+    local wt_class
+    # _wt_classify_branch lives in worktree-helpers.sh; it is sourced in every
+    # terminal that sources kanban-helpers.sh (both files are in the same startup chain).
+    if ! command -v _wt_classify_branch &>/dev/null; then
+        return 0
+    fi
+    wt_class=$(_wt_classify_branch "$wt_branch" "$wt_path")
+
+    local reply
+    echo ""
+    echo "─────────────────────────────────────"
+
+    case "$wt_class" in
+        merged)
+            echo "Worktree cleanup: $wt_path"
+            echo "Branch '$wt_branch' appears merged or fully integrated."
+            printf "Remove this worktree now? [y/N] "
+            ;;
+        unmerged-commits)
+            echo "⚠️  WARNING: Worktree has UNMERGED COMMITS"
+            echo "   Path:   $wt_path"
+            echo "   Branch: $wt_branch"
+            echo "   Removing it now would LOSE work that is not on any remote."
+            printf "Remove anyway? (NOT recommended) [y/N] "
+            ;;
+        remote-gone|*)
+            echo "⚠️  Caution: remote branch is gone but local commits may remain."
+            echo "   Path:   $wt_path"
+            echo "   Branch: $wt_branch"
+            printf "Remove this worktree? [y/N] "
+            ;;
+    esac
+
+    # Read from /dev/tty explicitly — stdin may be a closed pipe after `echo | cc`
+    read -r reply </dev/tty
+    echo "─────────────────────────────────────"
+
+    if [[ "$reply" == "y" ]] || [[ "$reply" == "Y" ]]; then
+        # Ensure Academy project context is set so wt-finish can locate the worktree dir.
+        # Derive the worktree name (the basename) from the path.
+        local wt_name
+        wt_name=$(basename "$wt_path")
+
+        # wt-finish requires WT_PROJECT and WT_DIR. Set Academy context if not already set.
+        # This is safe — the launchers only create worktrees under the Academy worktrees dir.
+        if [[ -z "${WT_PROJECT-}" ]]; then
+            if command -v wt-project &>/dev/null; then
+                wt-project academy 2>/dev/null
+            fi
+        fi
+
+        # wt-finish may run `git worktree remove` which requires cwd to NOT be inside
+        # the worktree being removed. cd to the main repo root first. Use
+        # --path-format=absolute + a quoted dirname (not `| xargs dirname`, which
+        # word-splits on paths containing spaces — XACA-0598-013).
+        local git_common main_repo
+        git_common=$(git -C "$wt_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+        if [[ -n "$git_common" ]]; then
+            main_repo=$(dirname "$git_common")
+        fi
+        if [[ -n "$main_repo" ]] && [[ -d "$main_repo" ]]; then
+            cd "$main_repo" || true
+        fi
+
+        wt-finish "$wt_name"
+    else
+        echo "Worktree kept. Run 'wt-finish' later to remove it."
+    fi
+    return 0
+}
+
+# Resolve the team for a kb-run-family command (kb-run / -review / -test / -ux / -debug).
+# Prefers ambient shell context (tmux pane / KB_TEAM / .kb-team sentinel). When context
+# detection HARD-FAILS (the ERROR:ERROR sentinel — e.g. a plain non-tmux shell with no
+# env and no sentinel), it falls back to the team encoded in a fully-qualified selector
+# ID (e.g. XFIR-0144 → firebase) so a valid ID isn't dead-ended with a confusing
+# "unknown team 'ERROR'" (XACA-0759). Fallback emits a one-time warning to stderr.
+#
+# Design notes:
+#   * Ambient context WINS when it resolves — cross-team safety is unchanged. This only
+#     engages when context is genuinely absent, never to override a real terminal team.
+#   * On total failure (no context AND selector isn't a resolvable ID — e.g. a bare
+#     index or title search), it echoes the original "ERROR" team so the caller's
+#     board-not-found path prints the existing "refusing to default to Academy" guidance.
+# Args: <selector>  (the same first arg the caller received)
+# Echoes: resolved team slug (or "ERROR" when unresolvable)
+# Returns: 0 when a team was resolved (context or ID); 1 when unresolvable
+_kb_resolve_run_team() {
+    local selector="${1-}"
+    local context team id_team
+    context=$(_kb_detect_context)
+    team="${context%%:*}"
+
+    # Ambient context resolved to a real team — use it (happy path, unchanged behavior).
+    if [[ -n "$team" && "$team" != "ERROR" ]]; then
+        echo "$team"
+        return 0
+    fi
+
+    # Context hard-failed. If the selector is a fully-qualified ID whose 3-letter code
+    # resolves to a known team, derive the team from it rather than dead-ending.
+    # NOTE: this ID pattern intentionally mirrors the one in _kb_get_team_from_code
+    # (which does the actual code→team lookup). Keep the two in sync if the
+    # X<CODE>-#### ID grammar ever changes.
+    if [[ "$selector" =~ ^X[A-Z]{3}-[0-9]+ ]]; then
+        id_team=$(_kb_get_team_from_code "$selector")
+        if [[ -n "$id_team" ]]; then
+            echo "⚠️  No shell context (tmux pane / KB_TEAM / .kb-team sentinel all absent) —" >&2
+            echo "    deriving team '${id_team}' from selector '${selector}'." >&2
+            echo "    Set a durable context to silence this: kb-context-set ${id_team}" >&2
+            echo "    (or drop a '.kb-team' sentinel in the repo root; see kb-context-show)" >&2
+            echo "$id_team"
+            return 0
+        fi
+    fi
+
+    # Unresolvable: preserve legacy behavior — echo the (ERROR) context team so the
+    # caller's board check surfaces the existing guidance.
+    echo "$team"
+    return 1
+}
+
 # Internal helper: Attempt to switch to an item's worktree with fallback discovery
 # If item_worktree is set and valid, uses it directly.
 # If not, runs _kb_discover_worktree and optionally backlinks to the kanban item.
 # Sets item_worktree and item_worktree_branch in caller scope if discovered.
-# Usage: _kb_switch_to_item_worktree <board_file> <index> <item_id>
+# XACA-0573: switch path intentionally does NOT call _kb_confirm_existing_worktree.
+# kb-run-review / kb-run-test / kb-run-debug all delegate here; the existing worktree
+# is the EXPECTED state (the item was created via kb-run first). Adding a prompt would
+# break the frictionless-switch ergonomics. Only kb-run's create path (silent-reuse +
+# destructive-recreate branches) is gated. See feedback_pre_work_overlap_check + k501
+# sibling-heuristic-drift — three siblings get the same treatment, on purpose.
+# Usage: _kb_switch_to_item_worktree <board_file> <index> <item_id> [cmd_name]
+# Expects caller-scope variables from _kb_display_item_box: item_worktree, item_worktree_branch, title
 # Returns 0 if switched, 1 if no worktree found (stays in current dir)
 _kb_switch_to_item_worktree() {
-    local board_file="$1"
-    local index="$2"
-    local item_id="$3"
+    local board_file="${1-}"
+    local index="${2-}"
+    local item_id="${3-}"
+    local cmd_name="${4:-kb-run}"
 
     # item_worktree is set by _kb_display_item_box in the caller's scope
     if [[ -n "$item_worktree" ]] && [[ -d "$item_worktree" ]]; then
@@ -12082,6 +12389,75 @@ _kb_switch_to_item_worktree() {
             echo "⚠️  Worktree reset failed. Worktree may not be on latest code." >&2
         fi
         return 0
+    fi
+
+    # XACA-0184: If the item has a subRepo and we're in an umbrella context, cd into
+    # the sub-repo before the git-context check runs. Covers kb-run-review, kb-run-test,
+    # kb-run-debug, and the fallthrough path in kb-run (no existing worktree found).
+    local _switch_sub_repo
+    _switch_sub_repo=$(_kb_jq_read "$board_file" ".backlog[$index].subRepo // empty" -r 2>/dev/null)
+    _kb_route_to_subrepo "$item_id" "$_switch_sub_repo" || return 1
+
+    # Guard: if not in any git repo (umbrella-repo parent dir), warn loudly and prompt.
+    if [[ "$(_kb_git_context)" == "none" ]]; then
+        _kb_warn_no_git_context "$cmd_name" || return 1
+    fi
+
+    # No existing worktree found — create one if we're in the main repo
+    if _kb_is_main_worktree; then
+        echo "─────────────────────────────────────"
+        echo "📁 No existing worktree found."
+        echo "   Creating worktree for isolated work..."
+        echo "─────────────────────────────────────"
+
+        local new_worktree
+        new_worktree=$(_kb_create_item_worktree "$item_id" "$title")
+
+        if [[ -n "$new_worktree" ]] && [[ -d "$new_worktree" ]]; then
+            cd "$new_worktree" || {
+                echo "Error: Failed to cd into worktree: $new_worktree"
+                return 1
+            }
+
+            # Link worktree to kanban item for future fast lookups
+            local wt_branch wt_timestamp
+            wt_branch=$(git branch --show-current 2>/dev/null || echo "")
+            wt_timestamp=$(_kb_get_timestamp)
+            _kb_jq_update "$board_file" \
+                '.backlog[$idx].worktree = $wt |
+                 .backlog[$idx].worktreeBranch = $wtb |
+                 .backlog[$idx].worktreeLinkedAt = $ts |
+                 .lastUpdated = $ts' \
+                --argjson idx "$index" \
+                --arg wt "$new_worktree" \
+                --arg wtb "$wt_branch" \
+                --arg ts "$wt_timestamp"
+            echo "✓ Linked worktree to [$item_id]"
+
+            # Update caller's scope
+            item_worktree="$new_worktree"
+            item_worktree_branch="$wt_branch"
+            # XACA-0598: signal to caller that THIS call created the worktree
+            # (vs reuse/discover). Caller declares these locals; we mutate them here
+            # following the same pattern as item_worktree/item_worktree_branch above.
+            kb_wt_session_created=1
+            kb_wt_session_path="$new_worktree"
+
+            local reset_rc=0
+            _kb_reset_worktree || reset_rc=$?
+            if [[ $reset_rc -eq 2 ]]; then
+                echo "⛔ Worktree operation aborted by user." >&2
+                return 1
+            elif [[ $reset_rc -eq 1 ]]; then
+                echo "⚠️  Worktree reset failed. Worktree may not be on latest code." >&2
+            fi
+            return 0
+        else
+            echo "─────────────────────────────────────"
+            echo "⚠️  Worktree creation failed. Staying in current directory."
+            echo "─────────────────────────────────────"
+            return 1
+        fi
     fi
 
     echo "─────────────────────────────────────"
@@ -12950,10 +13326,15 @@ kb-run-debug() {
         return 1
     fi
 
-    local context team board_file
-    context=$(_kb_detect_context)
-    team="${context%%:*}"
-    board_file=$(_kb_get_board_file "$team")
+    local team board_file
+    team=$(_kb_resolve_run_team "$selector")
+    # If board resolution fails outright, _kb_get_board_file already printed a
+    # specific reason to stderr — an "unknown team" refusal, or a board-less
+    # alias's "use <x> instead" guidance (e.g. mainevent → command, XACA-0727).
+    # Return without piling a generic "no board" line on top of it. (XACA-0759 review #2)
+    if ! board_file=$(_kb_get_board_file "$team"); then
+        return 1
+    fi
 
     if [[ ! -f "$board_file" ]]; then
         echo "Error: No kanban board found for team '$team'"
@@ -12981,6 +13362,8 @@ kb-run-debug() {
     # Extract and display item details for debug confirmation
     local item_id title description jira_id github_issue priority item_status due_date tags
     local subitem_count item_worktree item_worktree_branch
+    # XACA-0598: session-scope flag — set to 1 by _kb_switch_to_item_worktree if it creates
+    local kb_wt_session_created=0 kb_wt_session_path=""
     _kb_display_item_box "$item_json" "DEBUG REQUEST" "worktree,branch"
 
     # If item is completed or cancelled, offer to reopen it
@@ -13010,7 +13393,7 @@ kb-run-debug() {
 
     # Switch to the item's worktree if we're not already in it
     if ! _kb_is_correct_worktree "$item_worktree" "$item_worktree_branch"; then
-        _kb_switch_to_item_worktree "$board_file" "$index" "$item_id"
+        _kb_switch_to_item_worktree "$board_file" "$index" "$item_id" "kb-run-debug"
     fi
 
     # Re-read subitem count/list AFTER the possible reopen above (XACA-0801): reopen only
@@ -13035,12 +13418,21 @@ kb-run-debug() {
     _kb_set_working_on "$item_id" "DEBUG"
 
     # Launch cc with the debug prompt
+    export CC_SESSION_NAME="[Debug] ${item_id}: ${title}"
     if ! _kb_ensure_cc_function "kb-run-debug"; then
         unset CC_SESSION_NAME
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+    unset CC_SESSION_NAME
+
+    # XACA-0598: offer wt-finish cleanup only when THIS invocation created the worktree
+    # XACA-1284: if-form, not `[[ ]] &&` -- as a function's LAST command a false test made a
+    # successful launch exit 1 whenever no worktree was created (an --yes caller would read failure).
+    if [[ "${kb_wt_session_created:-0}" == "1" ]]; then
+        _kb_offer_worktree_cleanup "$kb_wt_session_path" "$(git -C "$kb_wt_session_path" branch --show-current 2>/dev/null)"
+    fi
 
     # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
     # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
