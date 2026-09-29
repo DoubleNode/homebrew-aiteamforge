@@ -83,6 +83,23 @@ LINKS (linkPolicy)
     text too when it is just a displayed URL) or the span of `<url>` are blanked
     before the scheme-less scans; other link text stays scanned.
 
+    DECODE FIRST. HTML character references (`&amp;`, `&#38;`, `&#x26;`, `&#64;`, ...)
+    are decoded once over the WHOLE body before extraction and the residual scan, and
+    every extracted target is decoded once more; a target that still holds a
+    reference after that (double encoding) is refused. Only `&name;` / `&#n;` forms
+    with the semicolon are decoded (so a real `?a=1&section=2` is untouched). Decoding
+    can only make more text look like a link, never hide one; the price is that an
+    escaped code sample (`&lt;a href=..&gt;`) is flagged. Line numbers in link
+    violations refer to the decoded body. Link TEXT is never exempt: it goes through
+    every scan, and only text byte-for-byte equal to its own target is deduplicated.
+
+    STRICT SYNTAX (`link-syntax-forbidden`, same "restricts links" rule as below).
+    Under a restrictive policy only plain Markdown links (`[t](url)`, reference
+    links) and bare URLs may carry a link. Refused outright: raw HTML link-bearing
+    tags (a, img, area, iframe, object, embed, link, meta, form, svg, video, audio,
+    source, base, ... and ANY tag carrying a URL attribute) and CommonMark angle
+    autolinks (`<scheme:...>`, `<x@y>`). HTML comments and ordinary `<` text are fine.
+
     RESIDUAL SCAN (the class guard, `link-unrecognized`). The extractor only
     IDENTIFIES links (which is testingLog, counting, maxCount); it is not the
     policy's boundary, because any syntax it misses would escape the policy. So when
@@ -119,7 +136,8 @@ LINKS (linkPolicy)
         Recipients are percent-decoded ONCE, split on ',' ';' and whitespace, and
         each must be a plain unquoted addr-spec (`[A-Za-z0-9._+-]+@host.tld`): a
         quoted local part, a second '@', a leftover '%' or anything else refuses
-        the whole link (`_mail_addresses` -> None).
+        the whole link (`_mail_addresses` -> None), as does a query holding
+        `;to=` / `;cc=` / `;bcc=` (some clients read ';' as a header separator).
       * relative / `#anchor` targets and non-http(s)/ftp/mailto schemes are never
         permitted by `allowed`. An entry that does not parse matches nothing.
     Standard-link identity (`_same_url`) uses the same scheme/host/port rules and
@@ -178,6 +196,7 @@ LIMITS
 """
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -768,7 +787,7 @@ _MAX_DEST = 2048   # a longer target is recorded as an unpermittable stub, never
 _REF_DEF = re.compile(r"^[ \t]{0,3}\[([^\]\n]+)\]:[ \t]*<?(\S+?)>?(?=\s|$)", re.M)
 _FOOTNOTE_DEF = re.compile(r"^[ \t]{0,3}\[\^[^\]\n]*\]:", re.M)
 _REF_USE = re.compile(r"\]\[([^\]\n]*)\]")
-_AUTOLINK = re.compile(r"<((?:https?|ftp)://[^>\s]+|mailto:[^>\s]+)>")
+_AUTOLINK = re.compile(r"<((?:https?|ftp)://[^>\s]+|mailto:[^>\s]+)>", re.I)
 # Any HTML attribute that takes a URL, on any tag, quoted or unquoted, whitespace
 # around '=' allowed, name case-insensitive (`data-href=` is not one: '-' precedes).
 _URL_ATTRS = ("href", "src", "srcset", "action", "formaction", "poster", "data", "cite",
@@ -776,8 +795,6 @@ _URL_ATTRS = ("href", "src", "srcset", "action", "formaction", "poster", "data",
 _HTML_ATTR = re.compile(
     r"(?<![A-Za-z0-9_-])(" + "|".join(_URL_ATTRS) + r")\s*=\s*"
     r"(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'<>`]+))", re.I)
-_DISPLAYED_URL = re.compile(
-    r"(?:(?:https?|ftp)://|mailto:)\S+|www\.\S+|[^\s@]+@[^\s@]+\.[^\s@]+", re.I)
 _BARE = re.compile(r"(?:(?:https?|ftp)://|mailto:)[^\s<>\[\]()\"']+", re.I)
 # GFM extended www autolink: `www.` + a domain, at the start of a line or after
 # whitespace or one of * _ ~ ( (widened here with < > quotes [ : more is fail-closed).
@@ -838,7 +855,7 @@ def _mask_spans(text: str, spans: List[Tuple[int, int]]) -> str:
 
 
 def _md_inline(body: str):
-    """-> [(url, span_start, text_start, text_end, span_end)] for every `[t](url)` /
+    """-> [(url, span_start, text_start, text_end, span_end, raw_target)] for every `[t](url)` /
     `![t](url)`. ONE forward pass with a bracket stack (linear): nested brackets,
     newlines and `\\]` in the text and any text length are all fine; a blank line
     ends every open bracket. Nested links are all reported (fail closed). The target
@@ -881,10 +898,38 @@ def _md_inline(body: str):
                 continue
             url = body[i:end] if end - i <= _MAX_DEST else body[i:i + 32] + "\x00<oversize>"
             ss = ts - 1 if ts > 0 and body[ts - 1] == "!" else ts
-            out.append((url, ss, ts + 1, m.start(), k + 1))
+            out.append((url, ss, ts + 1, m.start(), k + 1,
+                        body[i:end] if end - i <= _MAX_DEST else None))
         elif t[0] == "\n":
             stack.clear()
     return out
+
+
+# HTML character references. A renderer decodes them in link targets and attribute
+# values, so `&amp;bcc=` IS a mailto header separator and `&#64;` IS an '@'. The whole
+# body is decoded once before extraction (`_check_links`) and every extracted target is
+# decoded again; a target that STILL carries a reference (double encoding) is refused.
+# Only `&name;` / `&#n;` / `&#xh;` forms with the semicolon are decoded (html.unescape
+# alone would also turn `&section=` or `&copy=` in a real query string into text), plus
+# a bare `&amp` not followed by a name character.
+_ENTITY = re.compile(r"&(?:#[0-9]{1,10}|#[xX][0-9a-fA-F]{1,8}|[A-Za-z][A-Za-z0-9]{0,31});"
+                     r"|&[aA][mM][pP](?![A-Za-z0-9=;])")
+_ENTITY_LEFT = re.compile(r"&[#A-Za-z0-9]+;")
+
+
+def _unescape(text: str) -> str:
+    if "&" not in text:
+        return text
+    return _ENTITY.sub(lambda m: html.unescape(m.group(0)), text)
+
+
+def _decode_target(u: str) -> str:
+    """-> the target as a renderer / mail client sees it, or an unpermittable stub
+    when it still holds a character reference after decoding (double encoding)."""
+    d = _unescape(u)
+    if _ENTITY_LEFT.search(d):
+        return "\x00<entity>" + d[:32]
+    return d
 
 
 def _norm_label(s: str) -> str:
@@ -916,15 +961,17 @@ def _extract(body: str, starts: List[int]):
             spans.append((m.start(), m.end()))
         work = _mask_spans(work, spans)
 
-    # [t](url): mask the brackets and the target; the text is masked too only when it
-    # is itself just a displayed URL (`[https://x](https://x)`), otherwise it stays in
-    # `work` so anything link-like inside it is still extracted / residual-scanned.
+    # [t](url): mask the brackets and the target. The TEXT is never masked on the
+    # strength of what it looks like: it goes through every scan below (an autolink,
+    # email or tag inside it is a real link to a renderer). The one exception is text
+    # that is byte-for-byte its own target (`[https://x](https://x)`): that is the
+    # same link, already recorded, so it is deduplicated by masking exactly it.
     spans = []
-    for url, ss, ts, te, se in _md_inline(body):
+    for url, ss, ts, te, se, raw in _md_inline(body):
         found.append(_Link(url.strip(), _line_of(starts, ss), ss))
         spans.append((ss, ts))
         spans.append((te, se))
-        if te - ts <= 2000 and _DISPLAYED_URL.fullmatch(body[ts:te].strip()):
+        if raw is not None and te - ts <= _MAX_DEST + 64 and body[ts:te].strip() == raw:
             spans.append((ts, te))
     work = _mask_spans(work, spans)
 
@@ -959,6 +1006,8 @@ def _extract(body: str, starts: List[int]):
         found.append(_Link("mailto:" + work[s:e], _line_of(starts, s), s))
     work = _mask_spans(work, spans)
     found.sort(key=lambda l: l.start)
+    for l in found:
+        l.url = _decode_target(l.url)
     return [l for l in found if l.url], work
 
 
@@ -991,6 +1040,47 @@ _RESIDUAL_TOKENS = (
     ("markdown reference ]:", re.compile(r"\]:")),
     ("markdown reference ][", re.compile(r"\]\[")),
 )
+
+
+# ---- strict syntax: under a restrictive policy a permitted link may only be plain
+# Markdown (`[t](url)`, reference links) or a bare URL. Raw HTML link carriers and
+# CommonMark angle autolinks are refused outright (`link-syntax-forbidden`): they have
+# too many renderer-side readings to police one variant at a time.
+_FORBIDDEN_TAGS = ("a|img|area|iframe|object|embed|link|meta|form|svg|video|audio|source|base|"
+                   "frame|frameset|input|button|track|script|style|use|image|picture|param|"
+                   "applet|portal|math|blockquote|q|ins|del")
+_TAG_FORBIDDEN = re.compile(r"</?(?:" + _FORBIDDEN_TAGS + r")(?![A-Za-z0-9:_-])", re.I)
+_TAG_URL_ATTR = re.compile(
+    r"<[A-Za-z][^<>]*?(?<![A-Za-z0-9_-])(?:" + "|".join(_URL_ATTRS) + r"|xlink:href)\s*=", re.I)
+_ANGLE_SCHEME = re.compile(r"<[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^<>\s]*>")
+_ANGLE_EMAIL = re.compile(r"<[^<>\s@]+@[^<>\s@]+>")
+_SYNTAX_TOKENS = (("raw HTML link tag", _TAG_FORBIDDEN), ("raw HTML tag with a URL attribute", _TAG_URL_ATTR),
+                  ("angle autolink <scheme:...>", _ANGLE_SCHEME), ("angle autolink <x@y>", _ANGLE_EMAIL))
+
+
+def _syntax_hits(body: str, starts: List[int]) -> List[Violation]:
+    hits = []
+    for name, rx in _SYNTAX_TOKENS:
+        for m in rx.finditer(body):
+            hits.append((m.start(), name))
+            if len(hits) > 4 * MAX_MATCHES_PER_PATTERN:
+                break
+    hits.sort()
+    out: List[Violation] = []
+    seen = set()
+    for off, name in hits:
+        ln = _line_of(starts, off)
+        if (ln, name) in seen:
+            continue
+        seen.add((ln, name))
+        if len(out) >= MAX_MATCHES_PER_PATTERN:
+            out.append(Violation("link-syntax-forbidden", "further forbidden link syntax omitted"))
+            break
+        out.append(Violation(
+            "link-syntax-forbidden",
+            "%s is not allowed under a restrictive linkPolicy; write a plain Markdown link "
+            "or a bare URL instead: '%s'" % (name, _snippet(body[off:off + 40])), ln))
+    return out
 
 
 def _residual_hits(residual: str, body: str, starts: List[int]) -> List[Violation]:
@@ -1050,6 +1140,7 @@ def _split_url(raw: Any):
 _MAIL_STRICT = re.compile(r"[A-Za-z0-9._+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 _MAIL_SPLIT = re.compile(r"[,;\s]+")
 _MAIL_HEADERS = ("to", "cc", "bcc")
+_MAIL_SEMI_HEADER = re.compile(r";\s*(?:to|cc|bcc)\s*=", re.I)
 
 
 def _mail_addresses(path: str, query: str) -> Optional[List[str]]:
@@ -1060,6 +1151,8 @@ def _mail_addresses(path: str, query: str) -> Optional[List[str]]:
     every piece must match `local@domain.tld` with a local part of [A-Za-z0-9._+-]:
     a quoted local part, a second '@', a leftover '%' (double encoding) or anything
     else is refused - fail closed."""
+    if _MAIL_SEMI_HEADER.search(unquote(query)):
+        return None      # `;to=` / `;cc=` / `;bcc=`: a client may read ';' as a header separator
     raw = [unquote(path)]
     for pair in query.split("&"):       # never on ";": that is a recipient separator
         k, _, v = pair.partition("=")
@@ -1243,10 +1336,18 @@ def _check_links(body: str, lines: List[str], starts: List[int], profile: dict,
         "defaultAllowLinks", "standardLinks", "supersedesException", "everythingElseBanned"))
     if simple and seed:
         return [Violation("profile-malformed", "linkPolicy mixes the simple and the seed shape")]
+    # Decode HTML character references ONCE, before anything else looks at the body, so
+    # every later stage sees what a renderer sees (`&#47;&#47;h`, `&amp;bcc=`, `&#64;`).
+    # This can only turn text INTO a recognisable link (never hide one), so it is a
+    # fail-closed direction; a `&lt;a href=..&gt;` code sample is therefore flagged.
+    # Line numbers below refer to the decoded body.
+    body = _unescape(body)
+    lines = body.split("\n")
+    starts = _line_starts(body)
     links, residual = _extract(body, starts)
     res = _links_simple(links, pol) if simple else _links_seed(body, lines, links, pol, facts)
     if _restricts_links(pol, simple) and not any(v.rule == "profile-malformed" for v in res):
-        res = res + _residual_hits(residual, body, starts)
+        res = res + _syntax_hits(body, starts) + _residual_hits(residual, body, starts)
     return res
 
 

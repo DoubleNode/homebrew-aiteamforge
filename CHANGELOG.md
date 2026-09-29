@@ -20,6 +20,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   recognise as an allowed link (`//host`, a `scheme:`, `href=`/`src=` attributes, Markdown link
   syntax) is now a violation, so unusual formatting can no longer slip a link past the check;
   `mailto:` links must name only plain, allowed recipients.
+  PR #988 round 3: HTML entities are decoded before links are checked, link text is checked like
+  any other text, and under a restrictive profile raw HTML link tags and `<...>` autolinks are
+  refused outright; only Markdown links and bare URLs may carry an allowed link.
 - **XACA-1343 (PR 2b/4)** — ships `share/scripts/release_fact_dictionary.py`, the engine-fact dictionary
   for release content-profile templates: the canonical fact names, their row shapes, deprecated aliases
   that still resolve, and `build_fact_set()`, which assembles the facts a CR/Testing Log/notice renders
