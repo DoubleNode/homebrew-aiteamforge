@@ -16315,7 +16315,17 @@ kb-knowledge-where() {
         echo "  Fix: cd into the git repo this knowledge belongs to, or set KB_KNOWLEDGE_PROJECT_PATH, or add a .knowledge-config.yml, or use the subject/team tier instead."
         return 1
     fi
-    if [[ "$git_common_dir" == ".git" ]]; then
+    # XACA-0888: prefer the absolute form (git >= 2.31) so a SUBDIRECTORY of
+    # the main repo reports its true repo root here, not a relative ".."
+    # (git_common_dir is CWD-relative, e.g. "../.git" one level down, which
+    # only equals literally ".git" at the repo root itself) — same -030/-039
+    # shape _kb_knowledge_project_path and _kb_knowledge_resolve_project_identity
+    # already use.
+    local git_common_dir_abs
+    git_common_dir_abs=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    if [[ -n "$git_common_dir_abs" ]]; then
+        repo_root=$(dirname "$git_common_dir_abs")
+    elif [[ "$git_common_dir" == ".git" ]]; then
         repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
     else
         repo_root=$(dirname "$git_common_dir")
