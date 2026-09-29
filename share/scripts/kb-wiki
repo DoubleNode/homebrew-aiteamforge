@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""kb-wiki: publish and read release-workflow wiki docs (XACA-1344).
+
+Thin argparse dispatcher over kanban-hooks/release_wiki.py. EARLY STUB
+CONTRACT (XACA-1344 PR 1/3): the CLI surface and exit codes below are stable
+so XACA-1349 can build against them; subcommands are wired in by later PRs.
+
+Exit codes (the engine may rely on these):
+  0  ok
+  1  wiki/provider error (credentials, not found, transport, conflict)
+  2  usage error (argparse; bad --doc, malformed --key, missing argument)
+  3  NOT_IMPLEMENTED: subcommand not wired yet. One line on stderr:
+         kb-wiki: <subcommand> not implemented yet (XACA-1344)
+  4  version-guard refusal (RESERVED for PR 2; never emitted today)
+
+Subcommands: publish, read, find, children, url, patch-section, doctor.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+EXIT_OK, EXIT_WIKI_ERROR, EXIT_USAGE, EXIT_NOT_IMPLEMENTED, EXIT_VERSION_GUARD = 0, 1, 2, 3, 4
+DOC_TYPES = ("cr", "testing-log", "cr-record")
+KEY_RE = re.compile(r"^(REL|CR)-[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _find_hooks_dir():
+    """kanban-hooks/ is a sibling of scripts/ in the dev tree and in the tap's
+    share/ layout; a flattened tap install puts the modules next to this file."""
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / "kanban-hooks", here):
+        if (cand / "release_wiki.py").is_file():
+            return cand
+    return None
+
+
+def _key(value):
+    if not KEY_RE.match(value):
+        raise argparse.ArgumentTypeError(f"invalid key {value!r} (expected REL-... or CR-...)")
+    return value
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="kb-wiki", description="Release-workflow wiki publisher.")
+    sub = p.add_subparsers(dest="command", metavar="<subcommand>")
+    sub.required = True
+
+    def add(name, help_, doc=True, key=True, body=False, heading=False, expect=False):
+        s = sub.add_parser(name, help=help_, description=help_)
+        s.add_argument("--team", help="team id (default: $KB_TEAM)")
+        s.add_argument("--json", action="store_true", help="machine-readable output")
+        if doc:
+            s.add_argument("--doc", required=True, choices=DOC_TYPES, help="doc type")
+        if key:
+            s.add_argument("--key", required=True, type=_key, help="REL-/CR- id")
+        if body:
+            s.add_argument("--body-file", required=True, help="rendered body (storage format)")
+        if heading:
+            s.add_argument("--heading", required=True, help="heading whose body is replaced")
+        if expect:
+            s.add_argument("--expect-version", type=int, metavar="N",
+                           help="refuse unless the live page is at version N")
+        return s
+
+    add("publish", "create or update the one page for (doc, key)", body=True, expect=True)
+    add("read", "print body + version, labels, ancestors")
+    add("find", "look up the page for (doc, key)")
+    add("children", "list children of the doc type's mapped parent", key=False)
+    add("url", "print the page URL")
+    add("patch-section", "replace only the body under one heading",
+        body=True, heading=True, expect=True)
+    s = add("doctor", "check credentials, parents, write access, title patterns",
+            doc=False, key=False)
+    s.add_argument("--doc", choices=DOC_TYPES, help="limit to one doc type")
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    hooks = _find_hooks_dir()
+    if hooks is not None:
+        sys.path.insert(0, str(hooks))
+    # Real subcommands land in PR 2/3; until then every verb is a stub.
+    print(f"kb-wiki: {args.command} not implemented yet (XACA-1344)", file=sys.stderr)
+    return EXIT_NOT_IMPLEMENTED
+
+
+if __name__ == "__main__":
+    sys.exit(main())

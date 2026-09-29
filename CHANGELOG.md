@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1344 (PR 1/3)** — ships `share/scripts/kb-wiki`, the wiki publishing CLI, as a stub:
+  all seven subcommands (`publish`, `read`, `find`, `children`, `url`, `patch-section`, `doctor`)
+  parse their arguments and exit 3 with `not implemented yet` until PRs 2-3 land, so the release
+  engine can build against the real interface. Also ships its libraries
+  `share/kanban-hooks/release_wiki.py` (provider interface) and `release_wiki_confluence.py`
+  (Confluence client; credentials from the team's `secretRef`, falling back to the CR poller's
+  credentials file, never another team's entry).
 - **XACA-1343 (PR 3/4)** — ships `share/scripts/release_profile_validate.py`, the mechanical check a
   drafted CR / Testing Log must pass before it is published: required sections present, no banned
   tokens, links within the profile's policy, and a title that matches the profile's pattern. Any
