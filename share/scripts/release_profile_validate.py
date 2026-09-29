@@ -17,10 +17,12 @@ bannedTokenPatterns, linkPolicy, titlePattern is valid for every body.
 Everything here FAILS CLOSED: a malformed profile, an invalid or risky regex,
 an oversized body all produce violations (never a crash, never a pass).
 
-`facts` is optional. It is only used to resolve linkPolicy.standardLinks[]
-`sourcePlaceholder` values (e.g. "{{links.testingLog}}") to the concrete URL, so
-each standard link can be identified individually. Without it, standard links
-are matched as a pool (see LINKS).
+`facts` resolves linkPolicy.standardLinks[] `sourcePlaceholder` values (e.g.
+"{{links.testingLog}}") to the concrete URL, so each standard link is identified
+individually. It is REQUIRED in practice whenever the profile has a required,
+placeholder-backed standard link: without it (or when the value is missing, '',
+None, blank or not a string) that link cannot be identified and the draft FAILS
+(`link-required-unresolved`); see LINKS.
 
 SECTIONS (requiredSections)
     A section is located by its `label` (flat-string sugar: label == id). The
@@ -67,27 +69,53 @@ BANNED TOKENS (bannedTokenPatterns)
 LINKS (linkPolicy)
     A link is any of: Markdown inline link or image `[t](url)` / `![t](url)`,
     reference definition `[ref]: url`, autolink `<https://...>`, HTML
-    `<a href="...">`, or a bare http(s)/ftp/mailto URL. Relative and `#anchor`
-    targets count too (fail closed). Bare URLs are counted because the default
-    templates render `{{links.testingLog}}` as a bare URL. A `[t](url)` is one
-    link, not two (the span is masked before the bare-URL scan).
-    Simple shape {allowed, maxLinks}: a link is permitted iff its URL starts
-    with an `allowed` entry or its host equals one; an empty `allowed` permits
-    nothing. Permitted links beyond maxLinks are a violation.
+    `<a href="...">`, a bare http(s)/ftp/mailto URL, and the GFM extended
+    autolinks GitHub renders without a scheme: `www.host/path` (recorded and
+    judged as `http://www.host/path`, boundary rules as GFM: line start or after
+    whitespace or one of * _ ~ ( < > quotes [, trailing punctuation and an
+    unbalanced `)` trimmed) and a bare `user@host.tld` email (recorded and judged
+    as `mailto:user@host.tld`; the host needs a dot). Relative and `#anchor`
+    targets count too (fail closed). A link is counted once: the span of a
+    `[t](url)` (text included) or `<url>` is masked before the scheme-less scans.
+    Link text over 300 chars is not recognised as `[t](url)` (an absolute URL
+    inside it is still found; a relative target would not be).
+
+    URL matching is STRUCTURAL, never a string prefix (`_url_permitted`):
+      * scheme equal, case-insensitive; a host-only entry means http or https.
+      * hostname equal after lower-casing. A plain host does NOT permit its
+        subdomains; an entry starting `.` or `*.` (e.g. `*.example.com`) permits
+        subdomains ONLY, not the apex. Any link with userinfo (`user@host`), a
+        backslash, whitespace or no host is refused outright.
+      * effective port equal (explicit, else the scheme default 80/443/21).
+      * path: the entry path must equal the link path or continue it at a `/`
+        (`/space` permits `/space/x`, not `/spaceevil`); paths are case-sensitive;
+        a `..` segment (also %2e-encoded) is refused when the entry has a path.
+      * mailto: EVERY recipient (path, and to/cc/bcc headers) must match:
+        `mailto:ops@x.com` is that exact address (case-insensitive);
+        `mailto:x.com` / `mailto:@x.com` is any address at exactly that domain.
+      * relative / `#anchor` targets and non-http(s)/ftp/mailto schemes are never
+        permitted by `allowed`. An entry that does not parse matches nothing.
+    Standard-link identity (`_same_url`) uses the same scheme/host/port rules and
+    additionally compares path (one trailing `/` tolerated), query and fragment.
+
+    Simple shape {allowed, maxLinks}: a link is permitted iff it matches an
+    `allowed` entry as above; an empty `allowed` permits nothing. Permitted links
+    beyond maxLinks are a violation.
     Seed shape {defaultAllowLinks, standardLinks[], supersedesException,
     everythingElseBanned}, evaluated in this order:
-      a. standardLinks entry whose sourcePlaceholder resolves (via `facts`) to a
-         URL claims links equal to it (count <= maxCount when present; absent
-         with required:true is a violation);
+      a. each standardLinks entry whose sourcePlaceholder resolves (via `facts`) to
+         a non-blank string claims the links equal to it (count <= maxCount when
+         present; absent with required:true is `link-required-missing`);
+         an entry that does NOT resolve claims nothing: if it is required it is a
+         `link-required-unresolved` violation naming its placeholder (there is no
+         pool: an unidentifiable required link is never satisfied by "some" link);
+         if it is optional it is inert and permits no link;
       b. supersedesException (only if allowed: true): up to maxLinksPerPage
-         (default 1) leftover links that sit on a line mentioning
-         supersede/cancel/replace, outside a References/Appendix section, and not
-         a github host. `mustResolveUnderFolder`, `appliesTo`,
+         (default 1) leftover http(s) links (no userinfo) that sit on a line
+         mentioning supersede/cancel/replace, outside a References/Appendix
+         section, and not a github host. `mustResolveUnderFolder`, `appliesTo`,
          `needsLeadDecision` are publish-time / prose and are not enforced here;
-      c. standardLinks entries that cannot be resolved share a pool: capacity =
-         sum of their maxCount (an entry without maxCount is unbounded), and
-         at least as many links as unresolved required entries must exist;
-      d. anything left is "everything else" and is a violation unless
+      c. anything left is "everything else" and is a violation unless
          defaultAllowLinks is true AND everythingElseBanned is empty/absent.
          (Absent keys mean banned: fail closed.)
 
@@ -100,20 +128,41 @@ TITLE (titlePattern)
     non-blank characters. Otherwise the pattern is a regular expression.
 
 LIMITS
-    Python's `re` has no timeout. Bounds: body <= MAX_BODY_CHARS (over -> one
-    `body-too-large` violation, no regex is run on it); title <= MAX_TITLE_CHARS;
-    pattern <= MAX_PATTERN_CHARS; every profile regex is compiled once; and a
-    static screen rejects nested unbounded quantifiers such as `(a+)+`
-    (`unsafe-pattern`). The screen is a heuristic, not a proof: profiles are
-    team-owned config, not hostile input, and this keeps accidents out.
+    Python's `re` has no timeout, so profile regexes are BOUNDED BY EXECUTION:
+    every banned-token, section format/guardrail and title regex runs in one
+    stdlib-only child interpreter (`sys.executable -I <this file> --regex-child`,
+    no fork, no multiprocessing start method, identical under macOS spawn) with a
+    hard wall-clock limit of REGEX_TIMEOUT_SECONDS (5s) for the whole draft, counted
+    from the child's `ready` line (interpreter start-up on a loaded machine has its own
+    CHILD_STARTUP_GRACE_SECONDS, 30s, after which it is `pattern-scan-failed`). On
+    timeout the child is killed and the result is a fail-closed `pattern-timeout`
+    violation naming the pattern that was running; a child that cannot start or
+    crashes is `pattern-scan-failed`. A slow machine can therefore block a publish
+    (retry); it can never pass one. Other bounds: body <= MAX_BODY_CHARS (over ->
+    one `body-too-large` violation, no regex is run on it); title <=
+    MAX_TITLE_CHARS; pattern <= MAX_PATTERN_CHARS; every profile regex is compiled
+    once. A static screen still runs first and rejects the obvious nested
+    unbounded quantifiers such as `(a+)+` (`unsafe-pattern`) cheaply. It is a
+    heuristic and known NOT to catch overlapping alternation or bounded nests --
+    `(a|a)*b`, `(a|aa)+$`, `(.*a){25}`, `(a{1,99}){1,99}b` -- which is why the
+    execution bound exists; do not treat the screen as a safety boundary. The
+    validator's own link/section scans are linear-time (per-line supersede flags,
+    an '@' walk instead of a regex for emails, bounded link-text scan).
 """
 from __future__ import annotations
 
+import json
+import os
 import re
+import selectors
+import subprocess
+import sys
+import threading
+import time
 from bisect import bisect_right
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlsplit
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, unquote, urlsplit
 
 __all__ = [
     "validate_draft",
@@ -125,6 +174,8 @@ __all__ = [
     "MAX_PATTERN_CHARS",
     "MAX_MATCHES_PER_PATTERN",
     "SNIPPET_CHARS",
+    "REGEX_TIMEOUT_SECONDS",
+    "CHILD_STARTUP_GRACE_SECONDS",
 ]
 
 MAX_BODY_CHARS = 200_000
@@ -132,6 +183,8 @@ MAX_TITLE_CHARS = 1_000
 MAX_PATTERN_CHARS = 2_000
 MAX_MATCHES_PER_PATTERN = 10
 SNIPPET_CHARS = 40
+REGEX_TIMEOUT_SECONDS = 5.0
+CHILD_STARTUP_GRACE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -221,6 +274,168 @@ def _compile(pattern: Any, where: str, flags: int = re.MULTILINE):
         return None, Violation(
             "invalid-pattern",
             "%s: /%s/ does not compile (%s)" % (where, _clip(pattern, 80), _clip(str(exc), 80)))
+
+
+# ------------------------------------------------- bounded regex execution
+#
+# Python's `re` has no timeout and the static screen above is a heuristic, so
+# every profile regex is EXECUTED in a stdlib-only child interpreter (this same
+# file, run as a script) under one hard wall-clock limit. Checks do not run a
+# profile regex themselves: they emit a `_Job` and a `then` callback that turns
+# the child's answer into Violations. No fork and no multiprocessing start method
+# is involved (subprocess + a JSON pipe behaves the same under macOS spawn).
+
+_CHILD_FLAG = "--regex-child"
+
+
+class _Job:
+    __slots__ = ("op", "pattern", "flags", "text", "standalone", "then")
+
+    def __init__(self, op: str, pattern: str, flags: int, text: str,
+                 then: Callable[[Any], List["Violation"]], standalone: bool = False):
+        self.op, self.pattern, self.flags, self.text = op, pattern, int(flags), text
+        self.standalone, self.then = standalone, then
+
+
+def _run_regex_child(jobs: List[_Job]):
+    """-> (results {job index: result}, failure (job index, 'timeout'|'failed') or None)."""
+    texts: List[str] = []
+    tindex: Dict[int, int] = {}
+    spec = []
+    for j in jobs:
+        k = id(j.text)
+        if k not in tindex:
+            tindex[k] = len(texts)
+            texts.append(j.text)
+        spec.append({"op": j.op, "pattern": j.pattern, "flags": j.flags,
+                     "t": tindex[k], "standalone": j.standalone})
+    payload = json.dumps({"texts": texts, "jobs": spec}).encode("ascii")
+    here = os.path.abspath(__file__)
+    if not sys.executable or not here.endswith(".py"):
+        return {}, (0, "failed")
+    try:
+        proc = subprocess.Popen([sys.executable, "-I", here, _CHILD_FLAG],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL)
+    except OSError:
+        return {}, (0, "failed")
+
+    def feed() -> None:
+        try:
+            proc.stdin.write(payload)
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass  # child gone (killed or crashed): the reader side reports it
+
+    threading.Thread(target=feed, daemon=True).start()
+    # Two clocks. The child prints `ready` as soon as the interpreter is up, so a
+    # loaded machine's slow exec/import is charged to CHILD_STARTUP_GRACE_SECONDS, and
+    # REGEX_TIMEOUT_SECONDS bounds only the regex work itself (from `ready`).
+    fd = proc.stdout.fileno()
+    sel = selectors.DefaultSelector()
+    sel.register(fd, selectors.EVENT_READ)
+    deadline = time.monotonic() + CHILD_STARTUP_GRACE_SECONDS
+    ready = timed_out = garbled = False
+    buf = b""
+    results: Dict[int, Any] = {}
+    while len(results) < len(jobs):
+        left = deadline - time.monotonic()
+        if left <= 0 or not sel.select(left):
+            timed_out = True
+            break
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break  # EOF: the child exited early
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            line = line.strip()
+            if not line:
+                continue
+            if line == b"ready" and not ready:
+                ready = True
+                deadline = time.monotonic() + REGEX_TIMEOUT_SECONDS
+                continue
+            try:
+                idx, res = json.loads(line.decode("ascii"))
+                if not isinstance(idx, int) or not 0 <= idx < len(jobs) or res == "error":
+                    raise ValueError("bad result")
+                results[idx] = res
+            except (ValueError, TypeError):
+                garbled = True
+    sel.close()
+    if timed_out or garbled or len(results) < len(jobs):
+        proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    proc.stdout.close()
+    if len(results) == len(jobs) and not garbled and not timed_out:
+        return results, None
+    culprit = next((i for i in range(len(jobs)) if i not in results), 0)
+    return results, (culprit, "timeout" if (timed_out and ready) else "failed")
+
+
+def _resolve_jobs(items: List[Any]) -> List[Violation]:
+    """Run every `_Job` in `items` in ONE bounded child, splice the violations in
+    place. A timeout or crash becomes a fail-closed `pattern-timeout` /
+    `pattern-scan-failed` violation naming the pattern that was running."""
+    jobs = [it for it in items if isinstance(it, _Job)]
+    if not jobs:
+        return list(items)
+    results, failure = _run_regex_child(jobs)
+    out: List[Violation] = []
+    ji = 0
+    for it in items:
+        if not isinstance(it, _Job):
+            out.append(it)
+            continue
+        if ji in results:
+            out.extend(it.then(results[ji]))
+        elif failure is not None and failure[0] == ji:
+            if failure[1] == "timeout":
+                out.append(Violation(
+                    "pattern-timeout",
+                    "/%s/ did not finish within %gs (catastrophic backtracking?); draft not validated"
+                    % (_clip(it.pattern, 80), REGEX_TIMEOUT_SECONDS)))
+            else:
+                out.append(Violation(
+                    "pattern-scan-failed",
+                    "/%s/ could not be evaluated (regex child failed); draft not validated"
+                    % _clip(it.pattern, 80)))
+        ji += 1
+    return out
+
+
+def _regex_child_main() -> int:
+    sys.stdout.write("ready\n")
+    sys.stdout.flush()
+    data = json.loads(sys.stdin.read())
+    texts = data["texts"]
+    for idx, j in enumerate(data["jobs"]):
+        try:
+            rx = re.compile(j["pattern"], j["flags"])
+            text = texts[j["t"]]
+            if j["op"] == "finditer":
+                res: Any = []
+                for m in rx.finditer(text):
+                    if j["standalone"] and not _is_standalone(text, m.start(), m.end()):
+                        continue
+                    res.append([m.start(), m.end()])
+                    if len(res) > MAX_MATCHES_PER_PATTERN:
+                        break
+            elif j["op"] == "search":
+                m = rx.search(text)
+                res = [m.start(), m.end()] if m else None
+            else:
+                res = rx.fullmatch(text) is not None
+        except (re.error, RecursionError, OverflowError, ValueError):
+            res = "error"
+        sys.stdout.write(json.dumps([idx, res]) + "\n")
+        sys.stdout.flush()
+    return 0
 
 
 # --------------------------------------------------------------- line helpers
@@ -398,19 +613,16 @@ def _check_sections(body: str, lines: List[str], profile: dict) -> List[Violatio
 _RX_PREFIX = re.compile(r"^(?:regex|re):", re.I)
 
 
-def _check_section_rules(sec: _Section, text: str, first_line: int) -> List[Violation]:
-    out: List[Violation] = []
+def _check_section_rules(sec: _Section, text: str, first_line: int) -> List[Any]:
+    out: List[Any] = []
     fmt = sec.spec.get("format")
     if isinstance(fmt, str) and _RX_PREFIX.match(fmt):
         pat = _RX_PREFIX.sub("", fmt, count=1)
         rx, bad = _compile(pat, "section '%s' format" % sec.id)
         if bad:
             out.append(bad)
-        elif not rx.search(text):
-            out.append(Violation(
-                "section-format",
-                "section '%s': text does not match format /%s/" % (sec.id, _clip(pat, 80)),
-                first_line))
+        else:
+            out.append(_Job("search", pat, re.MULTILINE, text, _format_then(sec.id, pat, first_line)))
     guards = sec.spec.get("accuracyGuardrail")
     if isinstance(guards, list):
         for g in guards:
@@ -421,14 +633,32 @@ def _check_section_rules(sec: _Section, text: str, first_line: int) -> List[Viol
             if bad:
                 out.append(bad)
                 continue
-            m = rx.search(text)
-            if m:
-                out.append(Violation(
-                    "section-guardrail",
-                    "section '%s': forbidden /%s/ matched '%s'"
-                    % (sec.id, _clip(pat, 80), _snippet(m.group(0))),
-                    first_line + text.count("\n", 0, m.start())))
+            out.append(_Job("search", pat, re.MULTILINE, text,
+                            _guardrail_then(sec.id, pat, text, first_line)))
     return out
+
+
+def _format_then(sid: str, pat: str, first_line: int):
+    def then(r):
+        if r:
+            return []
+        return [Violation(
+            "section-format",
+            "section '%s': text does not match format /%s/" % (sid, _clip(pat, 80)),
+            first_line)]
+    return then
+
+
+def _guardrail_then(sid: str, pat: str, text: str, first_line: int):
+    def then(r):
+        if not r:
+            return []
+        return [Violation(
+            "section-guardrail",
+            "section '%s': forbidden /%s/ matched '%s'"
+            % (sid, _clip(pat, 80), _snippet(text[r[0]:r[1]])),
+            first_line + text.count("\n", 0, r[0]))]
+    return then
 
 
 # --------------------------------------------------------------- banned tokens
@@ -451,13 +681,13 @@ def _is_standalone(body: str, ms: int, me: int) -> bool:
     return bool(_FILL.match(before)) and bool(_FILL.match(after))
 
 
-def _check_banned(body: str, starts: List[int], profile: dict) -> List[Violation]:
+def _check_banned(body: str, starts: List[int], profile: dict) -> List[Any]:
     raw = profile.get("bannedTokenPatterns")
     if raw is None:
         return []
     if not isinstance(raw, list):
         return [Violation("profile-malformed", "bannedTokenPatterns must be a list")]
-    out: List[Violation] = []
+    out: List[Any] = []
     for i, item in enumerate(raw):
         if isinstance(item, str):
             pat, reason, standalone = item, "", False
@@ -472,21 +702,25 @@ def _check_banned(body: str, starts: List[int], profile: dict) -> List[Violation
         if bad:
             out.append(bad)
             continue
-        listed = 0
-        for m in rx.finditer(body):
-            if standalone and not _is_standalone(body, m.start(), m.end()):
-                continue
-            if listed >= MAX_MATCHES_PER_PATTERN:
-                out.append(Violation(
-                    "banned-token",
-                    "/%s/: further matches omitted" % _clip(pat, 80)))
+        out.append(_Job("finditer", pat, re.MULTILINE, body,
+                        _banned_then(pat, reason, body, starts), standalone))
+    return out
+
+
+def _banned_then(pat: str, reason: str, body: str, starts: List[int]):
+    def then(spans):
+        res: List[Violation] = []
+        for k, (s, e) in enumerate(spans):
+            if k >= MAX_MATCHES_PER_PATTERN:
+                res.append(Violation(
+                    "banned-token", "/%s/: further matches omitted" % _clip(pat, 80)))
                 break
-            listed += 1
-            detail = "/%s/ matched '%s'" % (_clip(pat, 80), _snippet(m.group(0)))
+            detail = "/%s/ matched '%s'" % (_clip(pat, 80), _snippet(body[s:e]))
             if reason:
                 detail += " - " + _clip(reason, 100)
-            out.append(Violation("banned-token", detail, _line_of(starts, m.start())))
-    return out
+            res.append(Violation("banned-token", detail, _line_of(starts, s)))
+        return res
+    return then
 
 
 # ---------------------------------------------------------------------- links
@@ -499,48 +733,286 @@ class _Link:
 
 
 _MD_INLINE = re.compile(
-    r"!?\[[^\]\n]*\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
+    r"!?\[[^\]\n]{0,300}\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
 _REF_DEF = re.compile(r"^[ \t]{0,3}\[([^\]\n]+)\]:[ \t]*<?(\S+?)>?(?=\s|$)", re.M)
 _AUTOLINK = re.compile(r"<((?:https?|ftp)://[^>\s]+|mailto:[^>\s]+)>")
 _HTML_A = re.compile(r"<a\s[^>]*?href\s*=\s*[\"']([^\"']*)[\"'][^>]*>", re.I)
 _BARE = re.compile(r"(?:(?:https?|ftp)://|mailto:)[^\s<>\[\]()\"']+", re.I)
+# GFM extended www autolink: `www.` + a domain, at the start of a line or after
+# whitespace or one of * _ ~ ( (widened here with < > quotes [ : more is fail-closed).
+_WWW = re.compile(
+    "(?:^|(?<=[\\s*_~(<>\"'\\[]))www\\.[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*[^\\s<]*", re.I | re.M)
 _TRAIL = ".,;:!?*_"
+_EMAIL_LOCAL = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-")
+_EMAIL_DOMAIN = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.")
+_EMAIL_CAP = 256  # per-side scan cap: keeps the '@' walk linear on hostile bodies
 
 
-def _mask(text: str, start: int, end: int) -> str:
-    seg = re.sub(r"[^\n]", " ", text[start:end])
-    return text[:start] + seg + text[end:]
+def _trim_autolink(u: str) -> str:
+    """GFM: strip trailing punctuation and an unbalanced ')' from an extended autolink."""
+    while u:
+        c = u[-1]
+        if c in ".,;:!?*_~'\"":
+            u = u[:-1]
+        elif c == ")" and u.count(")") > u.count("("):
+            u = u[:-1]
+        else:
+            break
+    return u
+
+
+def _email_spans(text: str) -> List[Tuple[int, int]]:
+    """GFM extended email autolinks (`user@host.tld`), found by walking outward
+    from each '@' (a regex here is quadratic on a long run of local-part chars)."""
+    out: List[Tuple[int, int]] = []
+    i = text.find("@")
+    while i != -1:
+        a = i
+        while a > 0 and i - a < _EMAIL_CAP and text[a - 1] in _EMAIL_LOCAL:
+            a -= 1
+        b = i + 1
+        while b < len(text) and b - i < _EMAIL_CAP and text[b] in _EMAIL_DOMAIN:
+            b += 1
+        dom = text[i + 1:b].rstrip(".").rstrip("-_").rstrip(".")
+        if a < i and dom and "." in dom and dom[0] not in ".-_":
+            out.append((a, i + 1 + len(dom)))
+        i = text.find("@", i + 1)
+    return out
+
+
+def _mask_spans(text: str, spans: List[Tuple[int, int]]) -> str:
+    """Blank out spans (newlines kept, so line numbers survive) in ONE pass."""
+    if not spans:
+        return text
+    parts, pos = [], 0
+    for s, e in sorted(spans):
+        if s < pos:
+            continue
+        parts.append(text[pos:s])
+        parts.append(re.sub(r"[^\n]", " ", text[s:e]))
+        pos = e
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 def _extract_links(body: str, starts: List[int]) -> List[_Link]:
+    """Every link the way GitHub would render it. A `www.x` autolink is recorded
+    as `http://www.x` and a bare `user@host.tld` as `mailto:user@host.tld`, so the
+    policy checks see the URL a reader would actually follow."""
     found: List[_Link] = []
     work = body
 
     def scan(rx, group: int, filt=None):
         nonlocal work
-        for m in list(rx.finditer(work)):
-            url = m.group(group)
+        spans = []
+        for m in rx.finditer(work):
             if filt and not filt(m):
                 continue
+            url = m.group(group)
             if rx is _BARE:
                 url = url.rstrip(_TRAIL)
+            elif rx is _WWW:
+                url = "http://" + _trim_autolink(url)
             found.append(_Link(url.strip(), _line_of(starts, m.start()), m.start()))
-            work = _mask(work, m.start(), m.end())
+            spans.append((m.start(), m.end()))
+        work = _mask_spans(work, spans)
 
     scan(_MD_INLINE, 1)
     scan(_REF_DEF, 2, lambda m: not m.group(1).startswith("^"))
     scan(_AUTOLINK, 1)
     scan(_HTML_A, 1)
     scan(_BARE, 0)
+    scan(_WWW, 0)
+    spans = _email_spans(work)
+    for s, e in spans:
+        found.append(_Link("mailto:" + work[s:e], _line_of(starts, s), s))
+    work = _mask_spans(work, spans)
     found.sort(key=lambda l: l.start)
     return [l for l in found if l.url]
 
 
-def _norm_url(u: str) -> str:
-    return u.strip().rstrip("/")
+# ---------------------------------------------------------------- URL matching
+
+_DEFAULT_PORT = {"http": 80, "https": 443, "ftp": 21}
+_BAD_URL_CHARS = re.compile(r"[\x00-\x20\x7f\\]")
+
+
+def _split_url(raw: Any):
+    """-> (scheme, host, port, path, query, fragment), or None when the URL is
+    unusable. `port` is the EFFECTIVE port (explicit, else the scheme default).
+    Only http/https/ftp/mailto parse; anything with userinfo (`user@host`), a
+    backslash, whitespace or a control character, or a missing host is None.
+    Callers treat None as 'not permitted' (fail closed)."""
+    if not isinstance(raw, str):
+        return None
+    u = raw.strip()
+    if not u or _BAD_URL_CHARS.search(u):
+        return None
+    try:
+        sp = urlsplit(u)
+        scheme = sp.scheme.lower()
+        if scheme == "mailto":
+            return ("mailto", "", None, sp.path, sp.query, sp.fragment)
+        if scheme not in _DEFAULT_PORT or "@" in sp.netloc:
+            return None
+        host, port = sp.hostname, sp.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    return (scheme, host.lower(), port if port is not None else _DEFAULT_PORT[scheme],
+            sp.path, sp.query, sp.fragment)
+
+
+def _mail_addresses(path: str, query: str) -> List[str]:
+    addrs = unquote(path).split(",")
+    try:
+        for k, vs in parse_qs(query).items():
+            if k.lower() in ("to", "cc", "bcc"):
+                for v in vs:
+                    addrs.extend(v.split(","))
+    except ValueError:
+        return []
+    return [a.strip().lower() for a in addrs if a.strip()]
+
+
+class _Allow:
+    """One parsed `linkPolicy.allowed` entry. See LINKS in the module docstring."""
+    __slots__ = ("mail", "local", "domain", "scheme", "host", "sub", "port", "path")
+
+    def __init__(self):
+        self.mail = False
+        self.local: Optional[str] = None
+        self.domain = ""
+        self.scheme: Optional[str] = None
+        self.host = ""
+        self.sub = False
+        self.port: Optional[int] = None
+        self.path = ""
+
+
+def _parse_allowed(entry: Any) -> Optional[_Allow]:
+    if not isinstance(entry, str) or not entry.strip():
+        return None
+    e = entry.strip()
+    if _BAD_URL_CHARS.search(e):
+        return None
+    a = _Allow()
+    if e.lower().startswith("mailto:"):
+        addr = unquote(e[7:].split("?", 1)[0]).strip().lower()
+        if not addr or "," in addr:
+            return None
+        a.mail = True
+        if "@" in addr:
+            local, a.domain = addr.rsplit("@", 1)
+            a.local = local or None
+        else:
+            a.domain = addr
+        return a if a.domain else None
+    if "://" in e:
+        scheme, rest = e.split("://", 1)
+        a.scheme = scheme.lower()
+        if a.scheme not in _DEFAULT_PORT:
+            return None
+    else:
+        rest = e
+    if rest.startswith("*.") or rest.startswith("."):
+        a.sub = True
+        rest = rest[2:] if rest.startswith("*.") else rest[1:]
+    try:
+        sp = urlsplit("//" + rest)
+        if "@" in sp.netloc:
+            return None
+        host, a.port = sp.hostname, sp.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    a.host = host.lower()
+    a.path = sp.path.rstrip("/")
+    return a
+
+
+def _parse_allowed_list(allowed: List[Any]) -> List[_Allow]:
+    return [a for a in (_parse_allowed(x) for x in allowed) if a is not None]
+
+
+def _url_permitted(url: str, allowed: List[_Allow]) -> bool:
+    """Structural allow-list match (never a string prefix):
+      * scheme equal, case-insensitive (a host-only entry means http or https);
+      * hostname equal after lower-casing (userinfo never reaches the host: any
+        `user@host` link is rejected outright); an entry starting `.` or `*.`
+        matches SUBDOMAINS ONLY, not the apex; a plain host does not match its
+        subdomains;
+      * effective port equal (explicit, else the scheme default);
+      * path: the entry path must equal the link path or be followed by `/` in
+        it, so `/space` permits `/space/x` but not `/spaceevil`; a link with a
+        `..` segment is refused when the entry has a path; case-sensitive;
+      * mailto: every recipient (path, and to/cc/bcc headers) must match an
+        entry: `mailto:a@x.com` is that exact address, `mailto:x.com` (or
+        `mailto:@x.com`) is any address at exactly that domain;
+      * relative and `#anchor` targets are never permitted."""
+    parts = _split_url(url)
+    if parts is None:
+        return False
+    scheme, host, port, path, query, _frag = parts
+    if scheme == "mailto":
+        addrs = _mail_addresses(path, query)
+        if not addrs:
+            return False
+        mails = [a for a in allowed if a.mail]
+        for addr in addrs:
+            if "@" not in addr:
+                return False
+            local, dom = addr.rsplit("@", 1)
+            if not any(m.domain == dom and (m.local is None or m.local == local) for m in mails):
+                return False
+        return True
+    segs = unquote(path).split("/")
+    for a in allowed:
+        if a.mail:
+            continue
+        if a.scheme is None:
+            if scheme not in ("http", "https"):
+                continue
+        elif a.scheme != scheme:
+            continue
+        if a.sub:
+            if not host.endswith("." + a.host):
+                continue
+        elif host != a.host:
+            continue
+        if port != (a.port if a.port is not None else _DEFAULT_PORT[scheme]):
+            continue
+        if a.path and (".." in segs or not (path == a.path or path.startswith(a.path + "/"))):
+            continue
+        return True
+    return False
+
+
+def _canon_url(u: Any):
+    p = _split_url(u)
+    if p is None:
+        return None
+    scheme, host, port, path, query, frag = p
+    if scheme == "mailto":
+        return ("mailto", tuple(_mail_addresses(path, query)))
+    return (scheme, host, port, path.rstrip("/"), query, frag)
+
+
+def _same_url(a: str, b: str) -> bool:
+    """Standard-link identity: same scheme, host (case-insensitive), effective
+    port, path (one trailing '/' tolerated), query and fragment. A URL that does
+    not parse (or carries userinfo) is equal only to a byte-identical string."""
+    ca, cb = _canon_url(a), _canon_url(b)
+    if ca is not None and cb is not None:
+        return ca == cb
+    return a.strip() == b.strip()
 
 
 def _resolve_placeholder(ph: Any, facts: Any) -> Optional[str]:
+    """-> the URL a `{{a.b}}` placeholder names in `facts`, or None when it does not
+    resolve to a non-blank string (facts None/{}, path missing, '', None, non-str)."""
     if not isinstance(ph, str) or not isinstance(facts, dict):
         return None
     m = re.fullmatch(r"\{\{\s*([A-Za-z0-9_.]+)\s*\}\}", ph.strip())
@@ -551,24 +1023,11 @@ def _resolve_placeholder(ph: Any, facts: Any) -> Optional[str]:
         if not isinstance(cur, dict) or part not in cur:
             return None
         cur = cur[part]
-    return cur if isinstance(cur, str) and cur.strip() else None
+    return cur.strip() if isinstance(cur, str) and cur.strip() else None
 
 
 _SUPERSEDE_LINE = re.compile(r"\b(supersed\w*|cancel+ed|cancel+ation|replac(?:e|es|ed|ement))\b", re.I)
 _BAD_HEADING = re.compile(r"^\s*(references?|appendix)\b", re.I)
-
-
-def _url_permitted(url: str, allowed: List[str]) -> bool:
-    try:
-        host = (urlsplit(url).hostname or "").lower()
-    except ValueError:
-        host = ""
-    for a in allowed:
-        if not isinstance(a, str) or not a:
-            continue
-        if url.lower().startswith(a.lower()) or (host and host == a.lower()):
-            return True
-    return False
 
 
 def _check_links(body: str, lines: List[str], starts: List[int], profile: dict,
@@ -595,10 +1054,11 @@ def _links_simple(links: List[_Link], pol: dict) -> List[Violation]:
             or not isinstance(mx, int) or mx < 0):
         return [Violation("profile-malformed",
                           "linkPolicy needs allowed:[...] and maxLinks:int>=0 together")]
+    parsed = _parse_allowed_list(allowed)
     out: List[Violation] = []
     ok: List[_Link] = []
     for l in links:
-        if _url_permitted(l.url, allowed):
+        if _url_permitted(l.url, parsed):
             ok.append(l)
         elif len(out) < MAX_MATCHES_PER_PATTERN:
             out.append(Violation("link-not-allowed",
@@ -616,15 +1076,25 @@ def _links_seed(body: str, lines: List[str], links: List[_Link], pol: dict,
         return [Violation("profile-malformed", "linkPolicy.standardLinks must be a list of objects")]
     remaining = list(links)
 
-    # a. resolved standard links
-    unresolved: List[dict] = []
+    # a. standard links, each identified by its resolved URL
     for e in std:
         url = _resolve_placeholder(e.get("sourcePlaceholder"), facts)
         if url is None:
-            unresolved.append(e)
+            # Unresolved: NEVER pooled and never claims a link. A required entry is
+            # a violation (its identity is unknown, so nothing can satisfy it); an
+            # optional one simply stays inert, and every link stays 'everything else'.
+            if e.get("required") is True:
+                ph = e.get("sourcePlaceholder")
+                out.append(Violation(
+                    "link-required-unresolved",
+                    "required standard link '%s' cannot be identified: placeholder %s did not "
+                    "resolve to a URL in facts" % (
+                        _clip(e.get("id"), 40),
+                        _clip(ph, 60) if isinstance(ph, str) and ph else "(none declared)")))
             continue
-        mine = [l for l in remaining if _norm_url(l.url) == _norm_url(url)]
-        remaining = [l for l in remaining if l not in mine]
+        mine = [l for l in remaining if _same_url(l.url, url)]
+        mine_ids = {id(l) for l in mine}
+        remaining = [l for l in remaining if id(l) not in mine_ids]
         mc = e.get("maxCount")
         if isinstance(mc, int) and not isinstance(mc, bool) and len(mine) > mc:
             out.append(Violation(
@@ -641,34 +1111,19 @@ def _links_seed(body: str, lines: List[str], links: List[_Link], pol: dict,
         if isinstance(cap, bool) or not isinstance(cap, int) or cap < 0:
             out.append(Violation("profile-malformed", "supersedesException.maxLinksPerPage must be int>=0"))
             cap = 0
-        elig = [l for l in remaining if _supersede_eligible(l, lines)]
-        taken = elig[:cap]
-        remaining = [l for l in remaining if l not in taken]
+        if cap and remaining:
+            ok_line = _supersede_line_flags(lines)
+            taken_ids = set()
+            for l in remaining:
+                if len(taken_ids) >= cap:
+                    break
+                if _supersede_eligible(l, ok_line):
+                    taken_ids.add(id(l))
+            remaining = [l for l in remaining if id(l) not in taken_ids]
     elif exc is not None and not isinstance(exc, dict):
         out.append(Violation("profile-malformed", "supersedesException must be an object"))
 
-    # c. pooled (unresolvable) standard links
-    if unresolved:
-        cap: Optional[int] = 0
-        need = 0
-        for e in unresolved:
-            mc = e.get("maxCount")
-            if isinstance(mc, int) and not isinstance(mc, bool):
-                if cap is not None:
-                    cap += mc
-            else:
-                cap = None
-            if e.get("required") is True:
-                need += 1
-        take = remaining if cap is None else remaining[:cap]
-        remaining = [] if cap is None else remaining[cap:]
-        if len(take) < need:
-            ids = ", ".join(str(e.get("id")) for e in unresolved if e.get("required") is True)
-            out.append(Violation(
-                "link-required-missing",
-                "expected at least %d standard link(s) (%s), found %d" % (need, ids, len(take))))
-
-    # d. everything else
+    # c. everything else
     banned = not (pol.get("defaultAllowLinks") is True and not pol.get("everythingElseBanned"))
     if banned:
         for l in remaining[:MAX_MATCHES_PER_PATTERN]:
@@ -680,21 +1135,27 @@ def _links_seed(body: str, lines: List[str], links: List[_Link], pol: dict,
     return out
 
 
-def _supersede_eligible(link: _Link, lines: List[str]) -> bool:
-    if not (1 <= link.line <= len(lines)):
-        return False
-    if not _SUPERSEDE_LINE.search(lines[link.line - 1]):
-        return False
-    try:
-        if "github" in (urlsplit(link.url).hostname or "").lower():
-            return False
-    except ValueError:
-        return False
-    for j in range(link.line - 1, -1, -1):
-        hm = _HEADING.match(lines[j])
+def _supersede_line_flags(lines: List[str]) -> List[bool]:
+    """Per line (0-based): does it mention supersede/cancel/replace AND sit outside
+    a References/Appendix section? Built once in O(lines) (the nearest preceding
+    heading, if any, decides the section)."""
+    flags: List[bool] = []
+    in_bad = False
+    for ln in lines:
+        hm = _HEADING.match(ln)
         if hm:
-            return not _BAD_HEADING.match(hm.group(2))
-    return True
+            in_bad = bool(_BAD_HEADING.match(hm.group(2)))
+        flags.append((not in_bad) and bool(_SUPERSEDE_LINE.search(ln)))
+    return flags
+
+
+def _supersede_eligible(link: _Link, ok_line: List[bool]) -> bool:
+    """A supersedes-exception link is an http(s) URL without userinfo, not on a
+    github host, on a line flagged by `_supersede_line_flags`."""
+    if not (1 <= link.line <= len(ok_line)) or not ok_line[link.line - 1]:
+        return False
+    p = _split_url(link.url)
+    return p is not None and p[0] in ("http", "https") and "github" not in p[1]
 
 
 # ---------------------------------------------------------------------- title
@@ -733,7 +1194,7 @@ def _literal(text: str) -> str:
     return r"\s+".join(re.escape(p) for p in re.split(r"\s+", text)) if text else ""
 
 
-def _check_title(title: Any, profile: dict) -> List[Violation]:
+def _check_title(title: Any, profile: dict) -> List[Any]:
     pat = profile.get("titlePattern")
     if pat is None:
         return []
@@ -748,11 +1209,15 @@ def _check_title(title: Any, profile: dict) -> List[Violation]:
     rx, bad = _compile(_title_regex(pat), "titlePattern", 0)
     if bad:
         return [bad]
-    if not rx.fullmatch(title):
+    rxs = _title_regex(pat)
+
+    def then(ok):
+        if ok:
+            return []
         return [Violation(
             "title-pattern",
             "title '%s' does not match titlePattern '%s'" % (_clip(title, 80), _clip(pat, 80)))]
-    return []
+    return [_Job("fullmatch", rxs, 0, title, then)]
 
 
 # ------------------------------------------------------------------ public API
@@ -764,19 +1229,19 @@ def validate_draft(rendered_body: str, title: str, profile: dict, *,
         raise TypeError("rendered_body must be a str")
     if not isinstance(profile, dict):
         return [Violation("profile-malformed", "profile must be an object")]
-    out = _check_title(title, profile)
+    out: List[Any] = _check_title(title, profile)
     if len(rendered_body) > MAX_BODY_CHARS:
         out.append(Violation(
             "body-too-large",
             "body is %d chars, limit is %d; not validated" % (len(rendered_body), MAX_BODY_CHARS)))
-        return out
+        return _resolve_jobs(out)
     body = rendered_body.replace("\r\n", "\n").replace("\r", "\n")
     lines = body.split("\n")
     starts = _line_starts(body)
     out.extend(_check_sections(body, lines, profile))
     out.extend(_check_banned(body, starts, profile))
     out.extend(_check_links(body, lines, starts, profile, facts))
-    return out
+    return _resolve_jobs(out)
 
 
 def assert_draft_valid(rendered_body: str, title: str, profile: dict, *,
@@ -785,3 +1250,7 @@ def assert_draft_valid(rendered_body: str, title: str, profile: dict, *,
     v = validate_draft(rendered_body, title, profile, facts=facts)
     if v:
         raise DraftValidationError(v)
+
+
+if __name__ == "__main__" and sys.argv[1:] == [_CHILD_FLAG]:
+    sys.exit(_regex_child_main())

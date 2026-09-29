@@ -12,6 +12,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   failure blocks publish. `release_fact_dictionary.py` now applies a profile's `excludedFromScope`:
   matching items are dropped (`omit`) or dropped and counted into the "behind-the-scenes
   maintenance" line (`fold`). Library-only until `kb-wiki` (XACA-1344) lands.
+  PR #988 round 1: allowed links are compared by parsed host, port and whole path segments, so a
+  look-alike host or `user@host` trick no longer passes; a required link whose URL is not known yet
+  is now a violation instead of being satisfied by any link; `www.` and bare-email links are
+  counted; a profile regex that runs away is stopped after about 5 seconds and fails the check.
 - **XACA-1343 (PR 2b/4)** — ships `share/scripts/release_fact_dictionary.py`, the engine-fact dictionary
   for release content-profile templates: the canonical fact names, their row shapes, deprecated aliases
   that still resolve, and `build_fact_set()`, which assembles the facts a CR/Testing Log/notice renders
