@@ -3516,8 +3516,8 @@ _kb_knowledge_suggest_team_slugs() {
 # write). Reusing that fuzzy matcher as a gating decision caught ordinary
 # project names that merely started with or contained a team id
 # ('ios-app', 'dnsframework', 'firebase-functions', 'commander', 'dev-team'),
-# contradicting kb-knowledge-add --help's "An ordinary project name is never
-# gated" — measured 2026-09-28, XACA-0888 A3 review round 1.
+# contradicting the promise that an unrelated name is never gated — measured
+# 2026-09-28, XACA-0888 A3 review round 1.
 #
 # Gate ONLY when the slug IS a team identity, in one of two exact senses:
 #   - case-insensitively equals a registered team id ("id")
@@ -3526,6 +3526,14 @@ _kb_knowledge_suggest_team_slugs() {
 # A basename can match MULTIPLE teams (e.g. 'dev-team' is the basename of
 # both ~/dev-team (academy) and Main Event's own '.../dev-team'
 # (mainevent-dev-team)) — every match is returned, not just the first.
+#
+# XACA-0888-050, the exact guarantee: a name that is neither a registered
+# team id nor a registered repo-root basename is never gated. The converse is
+# deliberate, not a bug: any name that IS a registered repo basename is gated
+# — including generic ones ('general', 'personal', 'dashboard', 'caravan',
+# 'coparenting', 'dnsframework', 'dev-team' on the real registry) — because
+# the rule fails CLOSED and --allow-new-project is the override. Callers may
+# receive the same key twice (id AND basename); the guard dedupes.
 _kb_knowledge_project_gate_teams() {
     local slug="${1-}"
     [[ -z "$slug" ]] && return 0
@@ -4060,7 +4068,10 @@ _kb_knowledge_destination_guard() {
             # for why the old fuzzy "did you mean" matcher was the wrong tool
             # for a gating decision. Empty match = ordinary unrelated name,
             # return 0 fast (no friction added).
-            local -a proj_gate_keys
+            # XACA-0888-049: -U (unique) — a team whose id equals its own
+            # repo-root basename (e.g. 'spacedock') matches on BOTH the "id"
+            # and "basename" rules and must be listed once, not twice.
+            local -aU proj_gate_keys
             proj_gate_keys=()
             local _pg_key _pg_reason
             while IFS=$'\t' read -r _pg_key _pg_reason; do
@@ -4085,7 +4096,13 @@ _kb_knowledge_destination_guard() {
             fi
 
             echo "Error: '${slug}' matches a registered team's identity — refusing to create a new project-tier directory under that name instead of routing to the team's own project-knowledge base." >&2
-            if (( ${#proj_gate_keys[@]} == 1 )); then
+            if _kb_current_session_is_local_only_team; then
+                # XACA-0888-049: explicit-slug team routing is OFF for a
+                # local-only session (XACA-0888-046), so a "Fix: ... auto-routes"
+                # line would just be refused again. Say what is actually true.
+                echo "  '${slug}' matches: ${proj_gate_keys[*]}" >&2
+                echo "  Note: a local-only session never routes into another team's knowledge base (XACA-0888-046); to write to that team's own base, run this from that team's session." >&2
+            elif (( ${#proj_gate_keys[@]} == 1 )); then
                 echo "  Did you mean the '${proj_gate_keys[1]}' team's OWN project-knowledge base?" >&2
                 echo "  Fix: kb-knowledge-add project ${proj_gate_keys[1]} \"<title>\"  # auto-routes there (XACA-0888)" >&2
             else
@@ -5204,7 +5221,14 @@ kb-knowledge-where() {
         echo "kb-knowledge-where: mktemp failed" >&2
         return 1
     }
-    _kb_knowledge_project_path > "$_kw_tmp"
+    # XACA-0888-048: `>|`, NOT `>`. mktemp has just CREATED $_kw_tmp, so under
+    # `setopt NO_CLOBBER` a plain `>` fails with "file exists" and the resolver
+    # never runs at all — leaving the PREVIOUS call's _KB_KP_* globals to be
+    # reported as if they were this call's answer (the -044 class again). The
+    # explicit reset below is the defence in depth: whatever stops the
+    # resolver from running, stale state can never be printed as a result.
+    typeset -g _KB_KP_BRANCH="" _KB_KP_REPO_ROOT="" _KB_KP_SLUG=""
+    _kb_knowledge_project_path >| "$_kw_tmp"
     local _kw_rc=$?
     local base
     base=$(<"$_kw_tmp")
@@ -6761,8 +6785,10 @@ kb-knowledge-add() {
         echo "             of a team's own repo root (XACA-0888-045). Also waives the"
         echo "             fail-closed refusal when the slug IS an exact registered"
         echo "             team id but that team's kanban directory is missing or"
-        echo "             unresolvable (XACA-0888-043). An ordinary project name is"
-        echo "             never gated."
+        echo "             unresolvable (XACA-0888-043). A name that is neither a"
+        echo "             registered team id nor a registered repo-root basename is"
+        echo "             never gated (generic basenames such as 'general' or"
+        echo "             'dashboard' ARE gated when a team's repo uses them)."
         echo ""
         echo "Examples:"
         echo "  kb-knowledge-add agent emh \"kapt error patterns\""

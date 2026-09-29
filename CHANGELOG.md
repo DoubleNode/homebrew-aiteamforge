@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-0888 (3/3) PR #985 round 3** — port of the canonical round-3 fixes. `kb-knowledge-where`
+  redirects the resolver's output with `>|` (a plain `>` onto the mktemp-created file fails under
+  `setopt NO_CLOBBER`, so the resolver never ran and the previous call's `_KB_KP_*` globals were printed
+  as this call's answer) and resets those globals itself before the call. The project-tier gate dedupes
+  a team whose id equals its repo basename and, in a local-only session (where explicit-slug routing is
+  off), prints a truthful note instead of an "auto-routes" Fix line that would be refused again. `--help`
+  and the `_kb_knowledge_project_gate_teams` header now state the exact guarantee: a name that is neither
+  a registered team id nor a registered repo-root basename is never gated (generic registered basenames
+  ARE gated; `--allow-new-project` overrides). Ported byte-identical to both
+  `share/templates/kanban/kanban-helpers.template.sh` and `share/templates/aliases/kanban-aliases.sh`.
 - **XACA-0888 (3/3) PR #985 review-round fix** — port of the canonical fixes for 2 blocking + 3
   advisory findings. `kb-knowledge-add`'s explicit-slug branch now fails CLOSED (not open into the
   synced global root) for an EXACT registered-team-id slug whose kanban dir is missing or
