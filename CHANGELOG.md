@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1344 (PR 3/3)** — all `kb-wiki` commands now work.
+  - `read`, `find`, `children` and `url` look pages up.
+  - `kb-wiki doctor` checks a team's wiki setup: config, credentials (it never prints them), parent
+    pages, write permission (it never writes to find out), title patterns and the resolved profile
+    chain. It fails if anything is wrong.
+  - The shipped Testing Log and CR Record profiles now include their standard title patterns.
+  - With `--json`, a refused publish prints one JSON document that includes the diff.
 - **XACA-1151 (PR-E3a)** — `kb-run-debug` and the worktree switch it uses now behave like the dev-team copy.
   - `kb-run-debug` finds the team from the item ID when no shell context is set, names its session `[Debug] <id>: <title>`, and offers to remove a worktree it created once the session ends.
   - The worktree switch now sends an item that has a `subRepo` into that sub-repo, and warns and asks before running in a directory that is not a git repository. Without a terminal it refuses instead of asking.

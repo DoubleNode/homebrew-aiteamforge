@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release_wiki import (  # noqa: E402
     WikiAncestor, WikiConflictError, WikiError, WikiCredentialError, WikiNotFoundError,
-    WikiPage, WikiProvider, WikiTransportError,
+    WikiPage, WikiProvider, WikiResolverUnavailableError, WikiTransportError,
 )
 
 CREDS_FILE_ENV = "KB_CR_POLLER_CREDS_FILE"  # same override as the poller
@@ -60,7 +60,7 @@ def _load_secret_module():
             try:
                 spec.loader.exec_module(mod)
             except ImportError as exc:  # e.g. jsonschema missing on system python
-                raise WikiCredentialError(
+                raise WikiResolverUnavailableError(
                     f"cannot load secret resolver ({type(exc).__name__}); "
                     "install jsonschema or use a python that has it") from None
             return mod
@@ -410,3 +410,25 @@ class ConfluenceProvider(WikiProvider):
 
     def page_url(self, page_id):
         return f"{self.cred.base_url}/pages/viewpage.action?pageId={page_id}"
+
+    # doctor support (XACA-1344-006)
+    def credential_summary(self):
+        host = urllib.parse.urlsplit(self.cred.base_url).hostname or ""
+        return {"source": self.cred.source, "host": host}
+
+    def can_write(self, space, parent_type, parent_id):
+        """Read-only permission probe; nothing is created. Asks the SPACE which
+        operations the current user holds. v1 `content/{id}?expand=operations`
+        describes operations ON that page (update/delete), not creating a child,
+        so it cannot answer this. UNCONFIRMED against live Confluence
+        (XACA-1344-008): that `GET /rest/api/space/{key}?expand=operations`
+        returns [{"operation": "create", "targetType": "page"}, ...] for the
+        caller. True only on an explicit create/page entry; False only for a
+        non-empty, well-formed list without one; anything else is None."""
+        if not (isinstance(space, str) and re.fullmatch(r"[A-Za-z0-9~][A-Za-z0-9_.~-]{0,254}", space)):
+            raise WikiError("invalid space key")
+        data = self._call("GET", f"/rest/api/space/{urllib.parse.quote(space, safe='')}?expand=operations")
+        ops = data.get("operations")
+        if not isinstance(ops, list) or not ops or not all(isinstance(o, dict) for o in ops):
+            return None
+        return any(o.get("operation") == "create" and o.get("targetType") == "page" for o in ops)

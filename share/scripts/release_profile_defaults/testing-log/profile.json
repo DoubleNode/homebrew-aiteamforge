@@ -2,6 +2,7 @@
   "kind": "testing-log",
   "audience": "engineers, approvers and auditors",
   "detailLevel": "complete: every recorded test appears",
+  "titlePattern": "v<Ver> - <RelId> - <Platform> Testing Log",
   "requiredSections": [
     {"id": "scope", "label": "Scope", "required": true},
     {"id": "results", "label": "Test results by stage", "required": true},

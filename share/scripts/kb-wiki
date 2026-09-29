@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """kb-wiki: publish and read release-workflow wiki docs (XACA-1344).
 
-Thin argparse dispatcher over kanban-hooks/release_wiki.py. The CLI surface
-and exit codes below are stable so XACA-1349 can build against them.
+THE CLI CONTRACT. Thin argparse dispatcher over kanban-hooks/release_wiki.py.
+The engine tickets (XACA-1348/1349) and the future wiki-signal provider build
+against this text; changing a flag, a JSON key or an exit code is a breaking
+change. All seven subcommands are real (XACA-1344 PR 3/3); none is a stub.
 
-Wired (XACA-1344 PR 2/3): publish, patch-section. Still stubs (exit 3, PR 3/3):
-read, find, children, url, doctor.
+kb-wiki does NOT write the release/CR record. The caller passes the stored
+state in (--page-id, --stored-version) and stores the printed record itself.
 
-kb-wiki does NOT write the release/CR record. The caller (engine, XACA-1348/
-1349) passes the stored state in (--page-id, --stored-version) and stores the
-printed record {"pageId","url","version"} itself.
+Every subcommand takes --team T (default $KB_TEAM) and --json. Without --json
+the output is for humans and NOT stable. With --json stdout is exactly one JSON
+document and nothing else (diagnostics go to stderr). --doc is one of cr,
+testing-log, cr-record and must be mapped in the team's wiki.json docTypes.
+--key is REL-... or CR-... (echoed back, never used to look anything up).
+--page-id is numeric.
 
-  publish       --team T --doc D --key K --title S --body-file F
+WRITE VERBS
+  publish       --doc D --key K --title S --body-file F
                 [--page-id ID (--stored-version V | --expect-version N) [--adopt]] [--json]
       Identity is a label kb-wiki-<doc>-<key lowercased> (e.g.
       kb-wiki-testing-log-rel-5) stamped on create and required on update.
@@ -23,25 +29,66 @@ printed record {"pageId","url","version"} itself.
       With --page-id: update. A missing page is exit 1, NEVER a create; the
       page must be under the doc's configured parent (and not be it) and in
       its space, and carry this (doc, key) label. --adopt labels an UNLABELLED
-      page (after the location check); another key's page is always refused.
-  patch-section --team T --doc D --key K --page-id ID --heading H --body-file F
+      page (after the location check) and refuses when another page already
+      carries the label; another key's page is always refused.
+      JSON: {"pageId": "<id>", "url": "<url>", "version": <int>}
+  patch-section --doc D --key K --page-id ID --heading H --body-file F
                 (--stored-version V | --expect-version N) [--json]
       Replaces only the content under heading H (exit 1 if absent/ambiguous, or
       if the replacement holds a heading of the same or higher level). The
       section ends at the next same/higher heading or the close of the element
       enclosing the heading. Same location + identity guards as publish update.
+      JSON: the same {"pageId","url","version"} record.
+
+READ VERBS (provider-generic: no Confluence-only field at the top level)
+  read          --doc D --key K --page-id ID [--json]
+      JSON: {"doc","key","pageId","title","version":int,"url","kind":"page",
+             "labels":[str],"ancestors":[{"id","title"}],"body"}
+      Exit 1 if the page does not exist.
+  find          --doc D --key K --title T [--json]
+      Exact-title search in the doc type's mapped space. ZERO MATCHES IS AN
+      ANSWER, NOT AN ERROR: exit 0 with an empty list.
+      JSON: {"doc","key","title","space","matches":[{"pageId","title",
+             "version","url","kind","labels","ancestors":[{"id","title"}]}]}
+  children      --doc D [--page-id ID] [--json]
+      Lists the children of the doc type's mapped parent (its configured type,
+      page or folder). --page-id lists that page's children instead; it is a
+      page id unless it equals the mapped parent's id, when the mapped type
+      applies.
+      JSON: {"doc","parentType","parentId","children":[<match record above>]}
+  url           --doc D --key K --page-id ID [--json]
+      Prints the page URL after confirming the page exists (exit 1 if not).
+      JSON: {"doc","key","pageId","url"}
+
+  doctor        [--doc D] [--json]
+      Runs, in order: wiki-json (loads + validates), credentials (reports the
+      SOURCE, secretRef or credentials-file, and the base URL host; never the
+      email, token or a resolved value), then per doc type: parent-read (the
+      mapped parent exists and is the configured type), write-permission
+      (never writes; PASS only when the provider positively confirms, else
+      WARN "not verifiable without writing"), title-pattern (XACA-1343's own
+      validator), profile-chain (INFO: default -> group -> team layering).
+      Text: one line per check, `PASS|WARN|FAIL|INFO [doc] check: reason`.
+      JSON: a list of {"check","docType"|null,"status","reason"[,"data"]}.
+      A check that needs jsonschema (unavailable under /usr/bin/python3 3.9)
+      reports WARN "validator unavailable (jsonschema not installed)", never
+      PASS. Exit 1 if ANY check FAILs; WARN and INFO alone exit 0.
 
 Exit codes (the engine may rely on these):
-  0  ok
+  0  ok (find with zero matches, and doctor with only PASS/WARN/INFO, are 0)
   1  wiki/provider error (credentials, not found, transport, duplicate title,
-     bad parent, heading absent/ambiguous, missing/invalid wiki.json)
+     bad parent, heading absent/ambiguous, missing/invalid wiki.json), or a
+     doctor FAIL
   2  usage error (argparse; bad --doc, malformed --key, missing argument, no
      team, --doc not mapped in wiki.json docTypes, update without a version)
-  3  NOT_IMPLEMENTED: subcommand not wired yet. One line on stderr:
-         kb-wiki: <subcommand> not implemented yet (XACA-1344)
+  3  RETIRED. Was NOT_IMPLEMENTED ("<subcommand> not implemented yet") while
+     read/find/children/url/doctor were stubs; never emitted since PR 3/3.
+     Callers that coded against it: the verb now exists, handle 0/1/2 instead.
   4  version-guard refusal: live version != stored/expected (newer, older, or a
-     409 race). Prints a unified diff (live vs rendered) on stdout; the page
-     is left unchanged.
+     409 race). The page is left unchanged. Without --json the unified diff
+     (live vs rendered) goes to stdout; with --json stdout is the one document
+     {"refused":"version-guard","message":...,"diff":...} ("diff" is "" for a
+     409 race, where there is nothing to compare).
 
 Subcommands: publish, read, find, children, url, patch-section, doctor.
 """
@@ -55,7 +102,7 @@ import re
 import sys
 from pathlib import Path
 
-EXIT_OK, EXIT_WIKI_ERROR, EXIT_USAGE, EXIT_NOT_IMPLEMENTED, EXIT_VERSION_GUARD = 0, 1, 2, 3, 4
+EXIT_OK, EXIT_WIKI_ERROR, EXIT_USAGE, EXIT_VERSION_GUARD = 0, 1, 2, 4  # 3 is retired
 DOC_TYPES = ("cr", "testing-log", "cr-record")
 KEY_RE = re.compile(r"^(REL|CR)-[A-Za-z0-9][A-Za-z0-9._-]*(?![\s\S])")  # not $: it matches before a final \n
 TEAM_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}(?![\s\S])")
@@ -106,8 +153,8 @@ def build_parser():
         if title:
             s.add_argument("--title", required=True, help="page title")
         if page_id:
-            s.add_argument("--page-id", required=(name == "patch-section"),
-                           help="stored page id: update it (never create)")
+            s.add_argument("--page-id", required=(name in ("patch-section", "read", "url")),
+                           help="page id (publish: update it, never create)")
         if versions:
             if name == "publish":
                 s.add_argument("--adopt", action="store_true",
@@ -116,16 +163,17 @@ def build_parser():
                            help="version recorded at last publish; refuse if live differs")
             s.add_argument("--expect-version", type=_nonneg_int, metavar="N",
                            help="refuse unless the live page is at exactly version N")
-        if versions:  # test-only override, mirrors kb-release-config-validate
-            s.add_argument("--config-dir", help=argparse.SUPPRESS)
+        s.add_argument("--config-dir", help=argparse.SUPPRESS)  # test-only, mirrors the validator CLI
         return s
 
     add("publish", "create or update the one page for (doc, key)", body=True,
         versions=True, title=True, page_id=True)
-    add("read", "print body + version, labels, ancestors")
-    add("find", "look up the page for (doc, key)")
-    add("children", "list children of the doc type's mapped parent", key=False)
-    add("url", "print the page URL")
+    add("read", "print body + version, labels, ancestors", page_id=True)
+    add("find", "exact-title search in the doc type's space; zero matches is exit 0, "
+        "an answer not an error", title=True)
+    add("children", "list children of the doc type's mapped parent (or --page-id)",
+        key=False, page_id=True)
+    add("url", "print the URL of an existing page (exit 1 if it is missing)", page_id=True)
     add("patch-section", "replace only the body under one heading",
         body=True, heading=True, versions=True, page_id=True)
     s = add("doctor", "check credentials, parents, write access, title patterns",
@@ -171,8 +219,10 @@ def _resolve_config_dir(team, override):
     return cand
 
 
-def _full_validate(config):
-    """Run XACA-1342's schema validator when importable (it needs jsonschema)."""
+def _full_validate(config, quiet=False):
+    """Run XACA-1342's schema validator when importable (it needs jsonschema).
+    Returns True when the schema was applied, False when it could not be
+    (doctor turns False into a WARN, never a PASS)."""
     here = Path(__file__).resolve().parent
     for cand in (here / "release_config_validate.py",
                  here.parent / "scripts" / "release_config_validate.py"):
@@ -182,19 +232,21 @@ def _full_validate(config):
             try:
                 spec.loader.exec_module(mod)
             except ImportError:
-                _err("schema validator unavailable (jsonschema missing); "
-                     "checking only the fields kb-wiki uses")
-                return
+                if not quiet:
+                    _err("schema validator unavailable (jsonschema missing); "
+                         "checking only the fields kb-wiki uses")
+                return False
             errors = mod.validate_wiki_config(config)
             if errors:
                 raise _ConfigError("wiki.json invalid: " + "; ".join(errors))
-            return
-    _err("schema validator not found; checking only the fields kb-wiki uses")
+            return True
+    if not quiet:
+        _err("schema validator not found; checking only the fields kb-wiki uses")
+    return False
 
 
-def _load_wiki_config(team, doc, override):
-    """Returns (config, space, parent_type, parent_id). Missing/invalid wiki.json
-    is _ConfigError (exit 1); an unmapped --doc is _Usage (exit 2)."""
+def _read_wiki_json(team, override):
+    """Load wiki.json as a dict (missing/unreadable/non-object is _ConfigError)."""
     cfg_path = _resolve_config_dir(team, override) / "wiki.json"
     try:
         config = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -204,15 +256,12 @@ def _load_wiki_config(team, doc, override):
         raise _ConfigError(f"cannot read wiki.json ({type(exc).__name__})") from None
     if not isinstance(config, dict):
         raise _ConfigError("wiki.json must be a JSON object")
-    _full_validate(config)
-    if config.get("provider") != "confluence":
-        raise _ConfigError("wiki.json provider must be 'confluence'")
-    doc_types = config.get("docTypes")
-    if not isinstance(doc_types, dict):
-        raise _ConfigError("wiki.json docTypes must be an object")
-    entry = doc_types.get(doc)
-    if entry is None:
-        raise _Usage(f"doc type '{doc}' is not mapped in wiki.json docTypes")
+    return config
+
+
+def _doc_mapping(config, doc):
+    """(space, parent_type, parent_id) for a doc type; _ConfigError if invalid."""
+    entry = config["docTypes"][doc]
     try:
         space, parent = entry["space"], entry["parent"]
         ptype, pid = parent["type"], parent["id"]
@@ -221,7 +270,22 @@ def _load_wiki_config(team, doc, override):
     if not (isinstance(space, str) and space and ptype in ("page", "folder")
             and isinstance(pid, (str, int)) and not isinstance(pid, bool) and str(pid)):
         raise _ConfigError(f"wiki.json docTypes.{doc} has an invalid space/parent")
-    return config, space, ptype, str(pid)
+    return space, ptype, str(pid)
+
+
+def _load_wiki_config(team, doc, override):
+    """Returns (config, space, parent_type, parent_id). Missing/invalid wiki.json
+    is _ConfigError (exit 1); an unmapped --doc is _Usage (exit 2)."""
+    config = _read_wiki_json(team, override)
+    _full_validate(config)
+    if config.get("provider") != "confluence":
+        raise _ConfigError("wiki.json provider must be 'confluence'")
+    doc_types = config.get("docTypes")
+    if not isinstance(doc_types, dict):
+        raise _ConfigError("wiki.json docTypes must be an object")
+    if doc_types.get(doc) is None:
+        raise _Usage(f"doc type '{doc}' is not mapped in wiki.json docTypes")
+    return (config,) + _doc_mapping(config, doc)
 
 
 def _make_provider(team, config):
@@ -244,16 +308,26 @@ def _read_body(path):
         raise _Usage(f"cannot read --body-file ({type(exc).__name__})") from None
 
 
-def _run(args):
-    import release_wiki as rw
+def _team_of(args):
     team = args.team or os.environ.get("KB_TEAM", "")
     if not team:
         raise _Usage("no team: pass --team or set $KB_TEAM")
     if not TEAM_RE.match(team):
         raise _Usage(f"invalid team id {team!r}")
-    is_patch = args.command == "patch-section"
-    if args.page_id is not None and not re.fullmatch(r"[0-9]+", args.page_id):
+    return team
+
+
+def _check_page_id(args):
+    page_id = getattr(args, "page_id", None)
+    if page_id is not None and not re.fullmatch(r"[0-9]+", page_id):
         raise _Usage("--page-id must be numeric")
+
+
+def _run(args):
+    import release_wiki as rw
+    team = _team_of(args)
+    is_patch = args.command == "patch-section"
+    _check_page_id(args)
     versioned = args.stored_version is not None or args.expect_version is not None
     if args.page_id is not None and not versioned:
         raise _Usage("updating an existing page needs --stored-version or --expect-version")
@@ -283,34 +357,256 @@ def _run(args):
     return EXIT_OK
 
 
+def _fmt_page(rec):
+    anc = " > ".join(f"{a['id']} {a['title']}".strip() for a in rec["ancestors"]) or "-"
+    return (f"pageId={rec['pageId']} version={rec['version']} kind={rec['kind']} "
+            f"title={rec['title']!r} url={rec['url']} ancestors={anc}")
+
+
+def _run_read(args):
+    """read / find / children / url."""
+    import release_wiki as rw
+    team = _team_of(args)
+    _check_page_id(args)
+    config, space, ptype, pid = _load_wiki_config(team, args.doc, args.config_dir)
+    provider = _make_provider(team, config)
+    cmd, doc, key = args.command, args.doc, getattr(args, "key", None)
+    if cmd == "read":
+        rec = rw.read_page(provider, args.page_id)
+        if args.json:
+            print(json.dumps({"doc": doc, "key": key, **rec}))
+        else:
+            print(f"kb-wiki: {_fmt_page(rec)}")
+            print(f"labels: {', '.join(rec['labels']) or '-'}")
+            print()
+            print(rec["body"])
+    elif cmd == "find":
+        matches = rw.find_pages(provider, space, args.title)
+        if args.json:
+            print(json.dumps({"doc": doc, "key": key, "title": args.title,
+                              "space": space, "matches": matches}))
+        elif not matches:
+            print(f"kb-wiki: no page titled {args.title!r} in space {space}")
+        else:
+            for m in matches:
+                print(f"kb-wiki: {_fmt_page(m)}")
+    elif cmd == "children":
+        page_id = getattr(args, "page_id", None)
+        if page_id is not None and page_id != pid:
+            ptype, pid = "page", page_id  # an explicit id is a page unless it IS the mapped parent
+        kids = rw.child_records(provider, ptype, pid)
+        if args.json:
+            print(json.dumps({"doc": doc, "parentType": ptype, "parentId": pid, "children": kids}))
+        else:
+            print(f"kb-wiki: {len(kids)} child(ren) of {ptype} {pid}")
+            for k in kids:
+                print(f"  {_fmt_page(k)}")
+    else:  # url
+        url = rw.confirmed_url(provider, args.page_id)
+        if args.json:
+            print(json.dumps({"doc": doc, "key": key, "pageId": args.page_id, "url": url}))
+        else:
+            print(url)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------- doctor
+
+TITLE_SHAPES = {"testing-log": ("ver", "relId", "platform"), "cr-record": ("ver", "relId", "crId")}
+# Spec 12.1 shapes, in XACA-1343's <Name> template syntax (the plan's {ver}
+# notation is not a syntax XACA-1343 implements); the shipped defaults carry these.
+EXPECTED_TITLE = {"testing-log": "v<Ver> - <RelId> - <Platform> Testing Log",
+                  "cr-record": "v<Ver> - <RelId> - <CrId>"}
+NEEDS_JSONSCHEMA = "validator unavailable (jsonschema not installed)"
+_SAFE_HOST = re.compile(r"[A-Za-z0-9.-]{1,253}(?![\s\S])")
+_SAFE_DOC = re.compile(r"[a-z][a-z0-9-]{0,31}(?![\s\S])")
+
+
+def _import_profile_modules():
+    """(resolver, validator) from scripts/. ImportError propagates; the caller
+    tells 'jsonschema missing' (exc.name == 'jsonschema') from other causes."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import release_profile_resolver
+        import release_profile_validate
+    except ImportError:
+        # XACA-1343's resolver registers release_config_validate in sys.modules
+        # BEFORE executing it and leaves the half-built module behind on failure;
+        # a second import would then die with AttributeError instead of ImportError.
+        sys.modules.pop("release_config_validate", None)
+        raise
+    return release_profile_resolver, release_profile_validate
+
+
+def _title_pattern_check(rw, doc, profile, validator):
+    """XACA-1343's validate_draft owns validity (compile, unsafe-pattern screen,
+    bounded execution). The probe title only makes it run; a probe MISMATCH
+    ('title-pattern') is expected and ignored, every other rule is a defect."""
+    name = "title-pattern"
+    pat = profile.get("titlePattern")
+    if pat is None:
+        if doc == "cr":  # schema: optional; cr keeps each team's own rule
+            return rw.Check(name, rw.WARN, "no titlePattern; cr keeps its team's existing "
+                            "title rule (schema allows absence)", doc)
+        return rw.Check(name, rw.FAIL, f"titlePattern is missing (expected shape "
+                        f"'{EXPECTED_TITLE[doc]}')", doc)
+    if not isinstance(pat, str) or not pat.strip():
+        return rw.Check(name, rw.FAIL, "titlePattern must be a non-empty string", doc)
+    bad = [v for v in validator.validate_draft("", "probe", {"titlePattern": pat})
+           if v.rule != "title-pattern"]
+    if bad:
+        return rw.Check(name, rw.FAIL, f"titlePattern invalid: {bad[0].rule}: "
+                        f"{rw._one_line(bad[0].detail)}", doc)
+    missing = [t for t in TITLE_SHAPES.get(doc, ()) if "{%s}" % t.lower() not in pat.lower()
+               and "<%s>" % t.lower() not in pat.lower()]
+    if missing:
+        return rw.Check(name, rw.WARN, f"titlePattern is valid but does not mention "
+                        f"{', '.join(missing)} (expected '{EXPECTED_TITLE[doc]}')", doc)
+    return rw.Check(name, rw.PASS, "titlePattern is present and valid", doc)
+
+
+def _profile_checks(rw, team, doc, kanban_dir, out):
+    try:
+        resolver, validator = _import_profile_modules()
+    except ImportError as exc:  # jsonschema missing (system python 3.9) or modules absent
+        why = NEEDS_JSONSCHEMA if getattr(exc, "name", None) == "jsonschema" \
+            else f"profile modules unavailable ({type(exc).__name__})"
+        out.append(rw.Check("title-pattern", rw.WARN, why, doc))
+        out.append(rw.Check("profile-chain", rw.WARN, why, doc))
+        return
+    try:
+        res = resolver.resolve_profile(team, doc, kanban_dir=kanban_dir)
+    except Exception as exc:  # ProfileResolutionError / ReleaseConfigValidationError / OSError
+        msg = f"profile resolution failed ({type(exc).__name__}): {rw._one_line(exc)}"
+        out.append(rw.Check("title-pattern", rw.FAIL, msg, doc))
+        out.append(rw.Check("profile-chain", rw.FAIL, msg, doc))
+        return
+    out.append(_title_pattern_check(rw, doc, res["profile"], validator))
+    frm = res["profileResolvedFrom"]
+    chain = {"kind": frm.get("kind"),
+             "profile.json": list(reversed(frm.get("profile.json") or [])),  # default -> team
+             "template.md": frm.get("template.md"), "style.md": frm.get("style.md")}
+    text = "; ".join(f"{f}: {' -> '.join(v) if isinstance(v, list) else v}"
+                     for f, v in chain.items() if f != "kind" and v)
+    out.append(rw.Check("profile-chain", rw.INFO, text or "no profile files found", doc, chain))
+
+
+def _credential_checks(rw, team, config):
+    """-> (provider or None, [Check])."""
+    name = "credentials"
+    cred = config.get("credential")
+    ref = cred.get("secretRef") if isinstance(cred, dict) else None
+    try:
+        provider = _make_provider(team, config)
+    except rw.WikiResolverUnavailableError:
+        return None, [rw.Check(name, rw.WARN, f"secret resolver: {NEEDS_JSONSCHEMA}")]
+    except rw.WikiCredentialError as exc:
+        return None, [rw.Check(name, rw.FAIL, f"credentials do not resolve: {rw._one_line(exc)}")]
+    except rw.WikiError as exc:
+        return None, [rw.Check(name, rw.FAIL, f"provider unavailable ({type(exc).__name__}): "
+                                              f"{rw._one_line(exc)}")]
+    except Exception as exc:  # e.g. a broken test-provider file; never a traceback
+        return None, [rw.Check(name, rw.FAIL, f"provider unavailable ({type(exc).__name__})")]
+    summary = provider.credential_summary()
+    source = summary.get("source") if isinstance(summary, dict) else None
+    host = summary.get("host") if isinstance(summary, dict) else None
+    source = source if source in ("secretRef", "credentials-file") else None
+    host = host if isinstance(host, str) and _SAFE_HOST.fullmatch(host) else None
+    if source is None or host is None:
+        return provider, [rw.Check(name, rw.WARN, "credentials resolved but the provider "
+                                   "did not report a source/host")]
+    if isinstance(ref, str) and ref and source == "credentials-file":
+        return provider, [rw.Check(name, rw.WARN, f"secretRef did not resolve; using the "
+                                   f"credentials file (host={host})")]
+    return provider, [rw.Check(name, rw.PASS, f"credentials resolved (source={source}, host={host})")]
+
+
+def _doctor(args):
+    import release_wiki as rw
+    team = _team_of(args)
+    checks = []
+    try:
+        config = _read_wiki_json(team, args.config_dir)
+        validated = _full_validate(config, quiet=True)
+        if config.get("provider") != "confluence":
+            raise _ConfigError("wiki.json provider must be 'confluence'")
+        if not isinstance(config.get("docTypes"), dict):
+            raise _ConfigError("wiki.json docTypes must be an object")
+    except _ConfigError as exc:
+        return [rw.Check("wiki-json", rw.FAIL, rw._one_line(exc))]
+    if validated:
+        checks.append(rw.Check("wiki-json", rw.PASS, "loaded and schema-valid"))
+    else:
+        checks.append(rw.Check("wiki-json", rw.WARN, f"loaded; schema not applied: {NEEDS_JSONSCHEMA}"))
+    docs = config["docTypes"]
+    for extra in sorted(k for k in docs if k not in DOC_TYPES):
+        shown = extra if isinstance(extra, str) and _SAFE_DOC.fullmatch(extra) else "<malformed>"
+        checks.append(rw.Check("wiki-json", rw.WARN, f"docTypes.{shown} is not a known doc type; ignored"))
+    if args.doc is not None and args.doc not in docs:
+        raise _Usage(f"doc type '{args.doc}' is not mapped in wiki.json docTypes")
+    selected = [d for d in DOC_TYPES if d in docs and args.doc in (None, d)]
+    if not selected:
+        checks.append(rw.Check("wiki-json", rw.WARN, "no known doc types are mapped"))
+    provider, cred = _credential_checks(rw, team, config)
+    checks.extend(cred)
+    kanban_dir = _resolve_config_dir(team, args.config_dir).parent
+    for doc in selected:
+        try:
+            space, ptype, pid = _doc_mapping(config, doc)
+        except _ConfigError as exc:
+            checks.append(rw.Check("parent-read", rw.FAIL, str(exc), doc))
+            checks.append(rw.Check("write-permission", rw.WARN, "skipped: invalid mapping", doc))
+        else:
+            if provider is None:
+                checks.append(rw.Check("parent-read", rw.WARN, "skipped: credentials unavailable", doc))
+                checks.append(rw.Check("write-permission", rw.WARN, "skipped: credentials unavailable", doc))
+            else:
+                checks.append(rw.check_parent(provider, doc, ptype, pid))
+                checks.append(rw.check_write(provider, doc, space, ptype, pid))
+        _profile_checks(rw, team, doc, kanban_dir, checks)
+    return checks
+
+
+def _run_doctor(args):
+    import release_wiki as rw
+    checks = _doctor(args)
+    if args.json:
+        print(json.dumps([c.to_dict() for c in checks]))
+    else:
+        for c in checks:
+            where = f" [{c.doc}]" if c.doc else ""
+            print(f"{c.status}{where} {c.name}: {c.reason}")
+    return rw.doctor_exit_code(checks)
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     hooks = _find_hooks_dir()
     if hooks is not None:
         sys.path.insert(0, str(hooks))
-    if args.command not in ("publish", "patch-section"):
-        # read/find/children/url/doctor land in PR 3/3.
-        print(f"kb-wiki: {args.command} not implemented yet (XACA-1344)", file=sys.stderr)
-        return EXIT_NOT_IMPLEMENTED
     try:
         import release_wiki as rw
     except ImportError:
         _err("cannot import release_wiki (kanban-hooks/ not found next to scripts/)")
         return EXIT_WIKI_ERROR
+    runner = {"publish": _run, "patch-section": _run, "doctor": _run_doctor}.get(args.command, _run_read)
     try:
-        return _run(args)
+        return runner(args)
     except (_Usage, rw.WikiUsageError) as exc:
         _err(str(exc))
         return EXIT_USAGE
     except _ConfigError as exc:
         _err(str(exc))
         return EXIT_WIKI_ERROR
-    except rw.WikiGuardError as exc:
+    except (rw.WikiGuardError, rw.WikiConflictError) as exc:
         _err(f"version guard: {exc}")
-        sys.stdout.write(exc.diff)
-        return EXIT_VERSION_GUARD
-    except rw.WikiConflictError as exc:
-        _err(f"version guard: {exc}")
+        diff = getattr(exc, "diff", "") or ""
+        if getattr(args, "json", False):  # --json: stdout is exactly one document
+            print(json.dumps({"refused": "version-guard", "message": str(exc), "diff": diff}))
+        else:
+            sys.stdout.write(diff)
         return EXIT_VERSION_GUARD
     except rw.WikiError as exc:
         _err(f"{type(exc).__name__}: {exc}")

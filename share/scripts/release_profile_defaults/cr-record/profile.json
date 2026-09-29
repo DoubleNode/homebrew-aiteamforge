@@ -2,6 +2,7 @@
   "kind": "cr-record",
   "audience": "auditors and release owners",
   "detailLevel": "complete: full history of the change request",
+  "titlePattern": "v<Ver> - <RelId> - <CrId>",
   "requiredSections": [
     {"id": "header", "label": "Header", "required": true},
     {"id": "links", "label": "Links", "required": true},

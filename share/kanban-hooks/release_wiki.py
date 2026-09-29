@@ -28,6 +28,11 @@ class WikiCredentialError(WikiError):
     """Credentials missing, malformed, unsafe, or rejected (401/403)."""
 
 
+class WikiResolverUnavailableError(WikiCredentialError):
+    """The secret resolver could not be loaded (jsonschema missing on this
+    python). Distinct from a credential that is wrong: doctor reports WARN."""
+
+
 class WikiNotFoundError(WikiError):
     """Page/folder does not exist (404)."""
 
@@ -115,6 +120,19 @@ class WikiProvider(abc.ABC):
     @abc.abstractmethod
     def page_url(self, page_id: str) -> str:
         """Stable browse URL for a page id; no network."""
+
+    # Non-abstract on purpose (PR 3/3): a provider that does not override them
+    # reports "nothing to say" / "not verifiable", never a fabricated answer.
+    def credential_summary(self) -> dict:
+        """Non-secret {"source": ..., "host": ...} for `doctor`. Never the
+        email, token, or a resolved ref value."""
+        return {}
+
+    def can_write(self, space: str, parent_type: str, parent_id: str) -> Optional[bool]:
+        """True / False when the provider can tell, WITHOUT writing, whether the
+        current identity may create pages under the parent; None when it cannot.
+        Implementations must never create a probe page."""
+        return None
 
 
 # ---------------------------------------------------------------- PR 2 errors
@@ -584,3 +602,119 @@ def patch_section(provider: WikiProvider, page_id: str, heading: str, new_conten
     check_identity(live, label, adopt=False)
     patched = replace_section(live.body, heading, new_content)
     return _guarded_update(provider, live, live.title, patched, stored_version, expect_version)
+
+
+# ---------------------------------------------------------------- PR 3: readers
+
+# Stable JSON shapes the engine (XACA-1348/1349) and the future wiki-signal
+# provider parse. Provider-generic: nothing here is Confluence-specific.
+
+
+def _ancestor_record(a: WikiAncestor) -> dict:
+    return {"id": a.id, "title": a.title}
+
+
+def page_record(p: WikiPage, body: bool = False) -> dict:
+    rec = {"pageId": p.id, "title": p.title, "version": p.version, "url": p.url,
+           "labels": list(p.labels), "ancestors": [_ancestor_record(a) for a in p.ancestors],
+           "kind": p.kind}
+    if body:
+        rec["body"] = p.body
+    return rec
+
+
+def read_page(provider: WikiProvider, page_id: str) -> dict:
+    """Body + metadata of an existing page. WikiNotFoundError if absent."""
+    return page_record(provider.get_page(page_id), body=True)
+
+
+def find_pages(provider: WikiProvider, space: str, title: str) -> List[dict]:
+    """Exact-title matches in `space` (0..n). An empty list is an answer, not an
+    error. The provider's lookup may be fuzzy (case-insensitive), so the exact
+    comparison is re-applied here."""
+    if not isinstance(title, str) or not title.strip():
+        raise WikiUsageError("title must not be empty")
+    return [page_record(p) for p in provider.find_by_title(space, title) if p.title == title]
+
+
+def child_records(provider: WikiProvider, parent_type: str, parent_id: str) -> List[dict]:
+    if parent_type not in ("page", "folder"):
+        raise WikiUsageError(f"unsupported parent type: {parent_type!r}")
+    return [page_record(p) for p in provider.list_children(parent_type, str(parent_id))]
+
+
+def confirmed_url(provider: WikiProvider, page_id: str) -> str:
+    """The page URL, but only for a page that exists (a real read, not a format)."""
+    page = provider.get_page(page_id)
+    return page.url or provider.page_url(page.id)
+
+
+# ---------------------------------------------------------------- PR 3: doctor
+
+PASS, WARN, FAIL, INFO = "PASS", "WARN", "FAIL", "INFO"
+
+
+@dataclass(frozen=True)
+class Check:
+    name: str
+    status: str  # PASS | WARN | FAIL | INFO
+    reason: str
+    doc: Optional[str] = None
+    data: Optional[dict] = None  # structured detail (INFO chain); never secrets
+
+    def to_dict(self) -> dict:
+        d = {"check": self.name, "docType": self.doc, "status": self.status, "reason": self.reason}
+        if self.data is not None:
+            d["data"] = self.data
+        return d
+
+
+def _one_line(text: str, limit: int = 200) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def check_parent(provider: WikiProvider, doc: str, parent_type: str, parent_id: str) -> Check:
+    """The mapped parent exists and is of the configured type (page vs folder)."""
+    name = "parent-read"
+    if parent_type not in ("page", "folder"):
+        return Check(name, FAIL, f"unsupported parent type {parent_type!r}", doc)
+    try:
+        parent = (provider.get_folder(parent_id) if parent_type == "folder"
+                  else provider.get_page(parent_id))
+    except WikiNotFoundError:
+        return Check(name, FAIL, f"parent {parent_type} {parent_id} does not exist", doc)
+    except WikiError as exc:
+        return Check(name, FAIL, f"cannot read parent ({type(exc).__name__}): {_one_line(exc)}", doc)
+    if parent.kind != parent_type:
+        return Check(name, FAIL,
+                     f"parent {parent_id} is a {parent.kind}, configured as {parent_type}", doc)
+    return Check(name, PASS, f"{parent_type} {parent_id} exists and is a {parent_type}", doc)
+
+
+def check_write(provider: WikiProvider, doc: str, space: str,
+                parent_type: str, parent_id: str) -> Check:
+    """Write permission WITHOUT writing. PASS only on an explicit True: an
+    unknown (None) or unrecognised answer is WARN, never a pass by assumption."""
+    name = "write-permission"
+    try:
+        answer = provider.can_write(space, parent_type, parent_id)
+    except (WikiCredentialError, WikiNotFoundError) as exc:
+        return Check(name, FAIL, f"write access check failed ({type(exc).__name__}): "
+                                 f"{_one_line(exc)}", doc)
+    except WikiError as exc:
+        return Check(name, WARN, f"write permission not verifiable ({type(exc).__name__}): "
+                                 f"{_one_line(exc)}", doc)
+    if answer is True:
+        return Check(name, PASS, f"current identity may create pages in space {space}", doc)
+    if answer is False:
+        return Check(name, FAIL, f"current identity may NOT create pages in space {space}", doc)
+    if answer is None:
+        return Check(name, WARN, "write permission not verifiable without writing", doc)
+    return Check(name, WARN, "provider gave an unrecognised write-permission answer; "
+                             "not treating it as a pass", doc)
+
+
+def doctor_exit_code(checks: List[Check]) -> int:
+    """1 if ANY check FAILed; WARN and INFO alone never fail the run."""
+    return 1 if any(c.status == FAIL for c in checks) else 0
