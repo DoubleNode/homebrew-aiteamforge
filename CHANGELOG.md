@@ -33,6 +33,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   PR #990 round 2: an unclosed `<a` is treated as prose only when the draft contains no other tag,
   comment or closing `>` at all, so no HTML block can form behind any prefix (footnotes, a byte-order
   mark, lists or quotes); a leading byte-order mark is dropped before checking.
+  PR #990 round 3: `<source` is also treated as a block-opening tag, as older Markdown renderers do.
 - **XACA-1284-005: port launch tty guard + consumer-aware cc check to the helpers template.**
   `kanban-helpers.template.sh` gains `_kb_confirm_launch` and `_kb_ensure_cc_function` (byte-identical to
   canonical) and its 8 launchers (`kb-run`, `kb-work`, `kb-run-review`, `kb-work-review`, `kb-run-test`,

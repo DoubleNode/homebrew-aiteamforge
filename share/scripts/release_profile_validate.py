@@ -1136,6 +1136,9 @@ _FORBIDDEN_TAGS = ("a|img|area|iframe|object|embed|link|meta|form|svg|video|audi
 # an unterminated `<a name=x` as inline text (inline raw HTML also needs the `>`) and
 # escapes it, and there is no later tag `>` to close it. If ANY of (1)-(3) fails the
 # strict match is used. Over-refusal is fine: a release draft has no raw HTML.
+# The type-6 list is the UNION across spec versions: CommonMark 0.31 replaced `source`
+# with `search`, but 0.29/0.30 renderers (cmark-gfm, i.e. GitHub) still open a block on
+# `source`, so both are listed.
 # URL-bearing fragments never depend on this: `_TAG_URL_ATTR`, the link extractor and the
 # residual scan catch `href=`, `//`, `scheme:` whatever the tag looks like.
 _TYPE1_TYPE6_NAMES = frozenset((
@@ -1145,7 +1148,7 @@ _TYPE1_TYPE6_NAMES = frozenset((
     "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset",
     "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe", "legend",
     "li", "link", "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option",
-    "p", "param", "search", "section", "summary", "table", "tbody", "td", "tfoot", "th",
+    "p", "param", "search", "section", "source", "summary", "table", "tbody", "td", "tfoot", "th",
     "thead", "title", "tr", "track", "ul"))
 _RELAXABLE_TAGS = "|".join(sorted(t for t in _FORBIDDEN_TAGS.split("|") if t not in _TYPE1_TYPE6_NAMES))
 _TAG_FORBIDDEN = re.compile(r"</?(?:" + _FORBIDDEN_TAGS + r")(?![A-Za-z0-9:_-])", re.I)
