@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1343 (PR 3/4)** — ships `share/scripts/release_profile_validate.py`, the mechanical check a
+  drafted CR / Testing Log must pass before it is published: required sections present, no banned
+  tokens, links within the profile's policy, and a title that matches the profile's pattern. Any
+  failure blocks publish. `release_fact_dictionary.py` now applies a profile's `excludedFromScope`:
+  matching items are dropped (`omit`) or dropped and counted into the "behind-the-scenes
+  maintenance" line (`fold`). Library-only until `kb-wiki` (XACA-1344) lands.
 - **XACA-1343 (PR 2b/4)** — ships `share/scripts/release_fact_dictionary.py`, the engine-fact dictionary
   for release content-profile templates: the canonical fact names, their row shapes, deprecated aliases
   that still resolve, and `build_fact_set()`, which assembles the facts a CR/Testing Log/notice renders

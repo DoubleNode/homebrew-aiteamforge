@@ -361,17 +361,92 @@ def _waiver(stage: Dict[str, Any], stage_name: str) -> Optional[Dict[str, Any]]:
     return w
 
 
-# ----------------------------------------------------- scope-exclusion hook
+# ----------------------------------------------------- scope-exclusion filter
+class ExcludedScopeError(ValueError):
+    """Malformed ``excludedFromScope`` block or item; the filter fails closed."""
+
+
+_EXCLUDED_ACTIONS = ("fold", "omit")
+
+
+def _item_category_tags(item: Dict[str, Any]) -> Optional[List[str]]:
+    """The item's category tags, or None when it carries no category field at all."""
+    found = False
+    tags: List[str] = []
+    for key in ("category", "categories"):
+        val = item.get(key)
+        if val is None:
+            continue
+        found = True
+        vals = [val] if isinstance(val, str) else val
+        if not isinstance(vals, (list, tuple)) or not all(isinstance(v, str) for v in vals):
+            raise ExcludedScopeError(
+                f"item {item.get('id')!r}: {key!r} must be a string or a list of strings")
+        tags.extend(vals)
+    return tags if found else None
+
+
 def apply_excluded_from_scope(items: List[Dict[str, Any]],
                               excluded: Optional[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
-    """HOOK for XACA-1343-006 (Phase 3). Returns ``(items, folded_count)``.
+    """Apply profile ``excludedFromScope`` ({categories[], action: fold|omit}).
 
-    Called by build_fact_set() on the assembled item list, before rendering.
-    Phase 2 deliberately does not filter: it returns the items unchanged and a
-    fold count of 0. -006 implements ``profile.json`` ``excludedFromScope``
-    ({categories[], action: fold|omit}) here, without changing any caller.
+    Returns ``(kept_items, folded_count)``. Called by build_fact_set() on the assembled
+    item list before rendering. Inputs are never mutated; the returned list is new.
+
+    Matching (an item is excluded if either rule hits):
+      (a) Tag path: the item has a ``category`` (str) or ``categories`` (list of str)
+          field and any tag case-insensitively equals (whitespace-trimmed) one of
+          ``excluded["categories"]``.
+      (b) Title fallback: the item has NO category field at all, and a configured
+          category appears in its ``title`` as a case-insensitive whole word or phrase
+          ("ops" does not match "Shops").
+    When an item carries a category field (even an empty one) the title is never
+    consulted, so one item cannot be hit twice by two mechanisms.
+
+    Actions: ``omit`` drops matched items (folded_count stays 0); ``fold`` drops them and
+    counts each into folded_count.
+
+    No-op (items copied, count 0): ``excluded`` is None, or its ``categories`` is empty
+    or absent. Fails closed with ExcludedScopeError on a non-dict block, non-list or
+    non-string/blank categories, an unknown or missing ``action`` (when categories are
+    given), or a non-dict item / malformed item category field.
     """
-    return list(items), 0
+    if excluded is None:
+        return list(items), 0
+    if not isinstance(excluded, dict):
+        raise ExcludedScopeError(f"excludedFromScope must be an object, got {type(excluded).__name__}")
+    action = excluded.get("action")
+    if action is not None and action not in _EXCLUDED_ACTIONS:
+        raise ExcludedScopeError(
+            f"excludedFromScope.action must be one of {list(_EXCLUDED_ACTIONS)}, got {action!r}")
+    cats = excluded.get("categories")
+    if cats is None:
+        cats = []
+    if not isinstance(cats, list) or not all(isinstance(c, str) and c.strip() for c in cats):
+        raise ExcludedScopeError("excludedFromScope.categories must be a list of non-blank strings")
+    if not cats:
+        return list(items), 0
+    if action is None:
+        raise ExcludedScopeError("excludedFromScope.action is required when categories are given")
+
+    wanted = {c.strip().casefold() for c in cats}
+    phrases = [re.compile(r"(?<!\w)" + re.escape(c.strip()) + r"(?!\w)", re.IGNORECASE) for c in cats]
+    kept: List[Dict[str, Any]] = []
+    removed = 0
+    for item in items:
+        if not isinstance(item, dict):
+            raise ExcludedScopeError(f"items must be objects, got {type(item).__name__}")
+        tags = _item_category_tags(item)
+        if tags is not None:
+            hit = any(t.strip().casefold() in wanted for t in tags)
+        else:
+            title = str(item.get("title") or "")
+            hit = any(p.search(title) for p in phrases)
+        if hit:
+            removed += 1
+        else:
+            kept.append(dict(item))
+    return kept, (removed if action == "fold" else 0)
 
 
 # ------------------------------------------------------------ assembly
@@ -382,7 +457,9 @@ def _items(release: Dict[str, Any]) -> List[Dict[str, Any]]:
         if isinstance(it, dict):
             row = {"id": str(it.get("id", "")), "title": str(it.get("title", ""))}
             if it.get("category") is not None:
-                row["category"] = it["category"]  # carried for -006's tag path; not part of ROW_SHAPES
+                row["category"] = it["category"]  # carried for the -006 tag path; not part of ROW_SHAPES
+            if it.get("categories") is not None:
+                row["categories"] = it["categories"]  # same, list form
             out.append(row)
         else:
             out.append({"id": "", "title": str(it)})
@@ -411,6 +488,8 @@ def build_stage_facts(release_record: Dict[str, Any], stage_name: str, *, tz: st
     build_fact_set() calls this for ``release.currentStage``. A caller that
     renders one table per stage calls it per stage and sets ``facts["stage"]``.
     """
+    if not isinstance(release_record, dict):  # unlike build_fact_set, None is NOT read as {}: a stage view needs a record
+        raise FactSetError("release_record is %s, expected an object" % type(release_record).__name__)
     recs = [t for t in _tests(release_record) if t.get("stage") == stage_name]
     row_of = {t.get("id"): i + 1 for i, t in enumerate(recs)}
     waived = _waived_ids(release_record)
@@ -494,7 +573,7 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
     ``content`` is the caller's prose slots, passed through under ``content``.
     ``platform_name`` is the wiki.json ``platformName`` fallback for ``release.platform``.
     ``excluded_from_scope`` is the profile's ``excludedFromScope`` block, forwarded to
-    apply_excluded_from_scope() (a no-op until XACA-1343-006).
+    apply_excluded_from_scope() (XACA-1343-006).
     Inputs are never mutated (``content`` is deep-copied too).
 
     Malformed input fails closed: a non-object row in ``tests``, ``notices`` (release or
