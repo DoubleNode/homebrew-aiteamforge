@@ -735,13 +735,15 @@ def _check_banned(body: str, starts: List[int], profile: dict) -> List[Any]:
         return [Violation("profile-malformed", "bannedTokenPatterns must be a list")]
     out: List[Any] = []
     # A reader sees the DECODED text (`T&#79;DO` reads TODO), so each pattern runs over
-    # the raw body AND the entity-decoded body (same decode `_check_links` uses); a line
-    # that matches the same text in both is reported once per pattern. Line numbers of a decoded hit
-    # refer to the decoded body. requiredSections / titlePattern are deliberately NOT
+    # the raw body AND the entity-decoded body (same decode `_check_links` uses). Every
+    # decoded match is mapped back to its RAW offset (`_unescape_map`, linear), so its
+    # line is the raw line even when `&#10;` decodes to a newline, and an occurrence both
+    # passes see is reported once (keyed on the raw offset) while different occurrences
+    # are all kept. Banned-token violations are returned in line order (validate_draft).
+    # requiredSections / titlePattern are deliberately NOT
     # decoded: a structural heading or a plain-text title that only exists after decoding
     # is a false FAIL (fail closed), not an evasion.
-    dec = _unescape(body)
-    dec_starts = _line_starts(dec) if dec != body else None
+    dec, to_raw = _unescape_map(body)
     for i, item in enumerate(raw):
         if isinstance(item, str):
             pat, reason, standalone = item, "", False
@@ -756,17 +758,20 @@ def _check_banned(body: str, starts: List[int], profile: dict) -> List[Any]:
         if bad:
             out.append(bad)
             continue
-        seen: set = set()      # (line, matched text) the raw pass reported for THIS pattern
+        seen: set = set()      # raw offsets the raw pass reported for THIS pattern
         out.append(_Job("finditer", pat, re.MULTILINE, body,
                         _banned_then(pat, reason, body, starts, seen), standalone))
-        if dec_starts is not None:
+        if to_raw is not None:
             out.append(_Job("finditer", pat, re.MULTILINE, dec,
-                            _banned_then(pat, reason, dec, dec_starts, seen, True), standalone))
+                            _banned_then(pat, reason, dec, starts, seen, to_raw), standalone))
     return out
 
 
 def _banned_then(pat: str, reason: str, body: str, starts: List[int], seen: Optional[set] = None,
-                 skip_seen: bool = False):
+                 to_raw: Optional[Callable[[int], int]] = None):
+    """`then` for one banned pattern over `body`. With `to_raw` (the decoded pass) match
+    offsets are mapped back to raw-body offsets: the line is the RAW line, and a match
+    whose raw offset the raw pass already reported is skipped (same occurrence)."""
     seen = set() if seen is None else seen
 
     def then(spans):
@@ -776,16 +781,15 @@ def _banned_then(pat: str, reason: str, body: str, starts: List[int], seen: Opti
                 res.append(Violation(
                     "banned-token", "/%s/: further matches omitted" % _clip(pat, 80)))
                 break
-            line = _line_of(starts, s)
-            key = (line, body[s:e])
-            if skip_seen and key in seen:      # the decoded pass repeats a raw hit: report once
+            raw_off = s if to_raw is None else to_raw(s)
+            if to_raw is not None and raw_off in seen:
                 continue
-            if not skip_seen:
-                seen.add(key)
+            if to_raw is None:
+                seen.add(raw_off)
             detail = "/%s/ matched '%s'" % (_clip(pat, 80), _snippet(body[s:e]))
             if reason:
                 detail += " - " + _clip(reason, 100)
-            res.append(Violation("banned-token", detail, line))
+            res.append(Violation("banned-token", detail, _line_of(starts, raw_off)))
         return res
     return then
 
@@ -944,6 +948,41 @@ def _unescape(text: str) -> str:
     return _ENTITY.sub(lambda m: html.unescape(m.group(0)), text)
 
 
+def _unescape_map(text: str):
+    """-> (decoded, to_raw) where to_raw(decoded_offset) is the offset in `text` of the
+    same character (an offset inside a decoded reference maps to the reference's start).
+    Linear: one pass over the references, then a bisect per lookup. (text, None) when
+    nothing decodes."""
+    if "&" not in text:
+        return text, None
+    dec_pos: List[int] = []
+    raw_pos: List[int] = []
+    plain: List[bool] = []
+    parts: List[str] = []
+    pr = pd = 0
+    for m in _ENTITY.finditer(text):
+        if m.start() > pr:
+            dec_pos.append(pd), raw_pos.append(pr), plain.append(True)
+            parts.append(text[pr:m.start()])
+            pd += m.start() - pr
+        rep = html.unescape(m.group(0))
+        dec_pos.append(pd), raw_pos.append(m.start()), plain.append(False)
+        parts.append(rep)
+        pd += len(rep)
+        pr = m.end()
+    if not parts:
+        return text, None
+    if pr < len(text):
+        dec_pos.append(pd), raw_pos.append(pr), plain.append(True)
+        parts.append(text[pr:])
+
+    def to_raw(d: int) -> int:
+        i = bisect_right(dec_pos, d) - 1
+        return raw_pos[i] + (d - dec_pos[i]) if plain[i] else raw_pos[i]
+
+    return "".join(parts), to_raw
+
+
 def _decode_target(u: str) -> str:
     """-> the target as a renderer / mail client sees it, or an unpermittable stub
     when it still holds a character reference after decoding (double encoding)."""
@@ -1070,13 +1109,26 @@ _RESIDUAL_TOKENS = (
 _FORBIDDEN_TAGS = ("a|img|area|iframe|object|embed|link|meta|form|svg|video|audio|source|base|"
                    "frame|frameset|input|button|track|script|style|use|image|picture|param|"
                    "applet|portal|math|blockquote|q|ins|del")
-# A link-capable tag must be an actual tag: `<name>` or `<name` + attributes + `>` (the
-# attributes may span lines; `[^<>]` keeps the scan linear). Prose such as `latency <a few
-# ms` or `x <q` has no terminator and is left alone: cmark needs the `>` to treat it as
-# raw HTML and an HTML5 parser drops an unterminated tag at EOF. Anything that CARRIES a
-# URL is still refused unterminated (`_TAG_URL_ATTR` needs no `>`, and the residual scan
-# catches `href=`, `//`, `scheme:` regardless).
+# Two readings of a forbidden tag name:
+#  * the body has NO possible HTML-block opener (`_HTML_BLOCK_OPENER`): the tag must be
+#    terminated, `<name>` or `<name` + attributes + `>` (attributes may span lines;
+#    `[^<>]` keeps the scan linear). Prose such as `latency <a few ms` or `x <q` is then
+#    left alone: inline raw HTML in cmark needs the `>`, and cmark escapes the `<`.
+#  * the body has ANY possible opener: cmark passes HTML-block lines through verbatim and
+#    an HTML5 parser reads `<` as an attribute-name character, so the next tag's `>`
+#    (even one cmark emits itself) closes an unterminated `<a name=x`. Then every
+#    `<name` of a forbidden tag is refused, terminator or not.
+# A URL-free real tag such as `<a title="<">` can pass the first reading: no URL, so no
+# link, and URL detection is the residual scan's job (`href=`, `//`, `scheme:` are caught
+# there whatever the tag looks like; `<a title="<" href=rel>` is refused by it).
+_TAG_FORBIDDEN_ANY = re.compile(r"</?(?:" + _FORBIDDEN_TAGS + r")(?![A-Za-z0-9:_-])", re.I)
 _TAG_FORBIDDEN = re.compile(r"</?(?:" + _FORBIDDEN_TAGS + r")(?![A-Za-z0-9:_-])[^<>]*>", re.I)
+# A line whose first content, after any run of whitespace, blockquote `>` markers and list
+# markers (`-` `*` `+` `1.` `1)`), is `<`. Deliberately loose (all CommonMark HTML block
+# types 1-7, comments, `<?`, `<!X`, CDATA, indented, nested): over-refusal is fine, a
+# release draft has no raw HTML blocks.
+_HTML_BLOCK_OPENER = re.compile(
+    r"^(?:[ \t]*(?:>|[-*+](?=[ \t]|$)|[0-9]{1,9}[.)](?=[ \t]|$)))*[ \t]*<", re.M)
 _TAG_URL_ATTR = re.compile(
     r"<[A-Za-z][^<>]*?(?<![A-Za-z0-9_-])(?:" + "|".join(_URL_ATTRS) + r"|xlink:href)\s*=", re.I)
 _ANGLE_SCHEME = re.compile(r"<[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^<>\s]*>")
@@ -1087,7 +1139,10 @@ _SYNTAX_TOKENS = (("raw HTML link tag", _TAG_FORBIDDEN), ("raw HTML tag with a U
 
 def _syntax_hits(body: str, starts: List[int]) -> List[Violation]:
     hits = []
+    block = _HTML_BLOCK_OPENER.search(body) is not None
     for name, rx in _SYNTAX_TOKENS:
+        if block and rx is _TAG_FORBIDDEN:
+            rx = _TAG_FORBIDDEN_ANY
         for m in rx.finditer(body):
             hits.append((m.start(), name))
             if len(hits) > 4 * MAX_MATCHES_PER_PATTERN:
@@ -1583,7 +1638,19 @@ def validate_draft(rendered_body: str, title: str, profile: dict, *,
     out.extend(_check_sections(body, lines, profile))
     out.extend(_check_banned(body, starts, profile))
     out.extend(_check_links(body, lines, starts, profile, facts))
-    return _resolve_jobs(out)
+    return _sort_banned(_resolve_jobs(out))
+
+
+def _sort_banned(vs: List[Violation]) -> List[Violation]:
+    """Put the banned-token violations in line order (stable), in the slots they
+    already occupy; every other violation keeps its place."""
+    idx = [i for i, v in enumerate(vs) if v.rule == "banned-token"]
+    if len(idx) > 1:
+        ordered = sorted((vs[i] for i in idx), key=lambda v: (v.line is None, v.line or 0))
+        vs = list(vs)
+        for i, v in zip(idx, ordered):
+            vs[i] = v
+    return vs
 
 
 def assert_draft_valid(rendered_body: str, title: str, profile: dict, *,

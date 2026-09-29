@@ -27,6 +27,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **XACA-1343 (PR 4/4)** — `release_profile_validate.py`: ordinary prose such as `latency <a few ms`
   is no longer mistaken for an HTML link tag (a tag must be closed with `>`, unless it carries a
   URL), and banned-token patterns now also catch tokens written with HTML entities (`T&#79;DO`).
+  PR #990 round 1: inside a raw HTML block an unclosed `<a` / `<img` / `<q` is refused again (a
+  browser would turn it into a real element), and an entity-encoded banned token is reported once,
+  on its source line, in line order.
 - **XACA-1284-005: port launch tty guard + consumer-aware cc check to the helpers template.**
   `kanban-helpers.template.sh` gains `_kb_confirm_launch` and `_kb_ensure_cc_function` (byte-identical to
   canonical) and its 8 launchers (`kb-run`, `kb-work`, `kb-run-review`, `kb-work-review`, `kb-run-test`,
