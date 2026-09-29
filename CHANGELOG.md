@@ -17,6 +17,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   stops at 25), sends the token only over https, reports every failure as a `kb-wiki` error
   (exit 1) instead of a raw Python exception, checks page and folder ids before using them in a
   URL, and rejects a `--key` with a trailing newline.
+  PR #989 round 2: a credential value that is not text (a number, list or object) is now a
+  clear credential error instead of a crash or a garbled login, and a mistyped site address such
+  as `https//host` is refused instead of being guessed at.
 - **XACA-1343 (PR 4/4)** — `release_profile_validate.py`: ordinary prose such as `latency <a few ms`
   is no longer mistaken for an HTML link tag (a tag must be closed with `>`, unless it carries a
   URL), and banned-token patterns now also catch tokens written with HTML entities (`T&#79;DO`).
