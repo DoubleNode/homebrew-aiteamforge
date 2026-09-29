@@ -6,6 +6,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1151 (PR-E3b)** — `kb-run`, `kb-work` and `kb-work-debug` now behave like the dev-team copies.
+  - `kb-run` and `kb-work` warn and ask before starting a blocked item; without a terminal they refuse with the list of blockers. Answering no now ends quietly instead of failing.
+  - Both add a "Prior Knowledge" section to the prompt when the knowledge search finds something (turn it off with `KB_PRIOR_KNOWLEDGE_DISABLED=1`), and both name the session `<id>: <title>` while it runs.
+  - `kb-work` now refuses an item that has no effort estimate, as `kb-run` already did.
+  - `kb-run` finds the team from the item ID when no shell context is set, sends an item with a `subRepo` into that sub-repo, warns and asks before running outside a git repository, and offers to remove a worktree only when that run created it.
+  - Both record which account a session used after it ends, via `session-account-map-record.sh`.
+  - `kb-work-debug` names its session `[Debug] <id>: <title>`.
+  - Two helpers these need are now shipped: `_kb_blocked_soft_gate` and `_kb_build_prior_knowledge_section`.
+  - Byte-identical to the dev-team functions except six lines per function that point at this install (`${AITEAMFORGE_DIR}`) instead of `~/dev-team`.
 - **XACA-1344 (PR 3/3)** — all `kb-wiki` commands now work.
   - `read`, `find`, `children` and `url` look pages up.
   - `kb-wiki doctor` checks a team's wiki setup: config, credentials (it never prints them), parent

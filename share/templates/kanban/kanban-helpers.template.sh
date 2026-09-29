@@ -11211,6 +11211,319 @@ _kb_confirm_launch() {
     return 0
 }
 
+# _kb_blocked_soft_gate <item_id> <board_file> <blocked_by_csv> <item_json>
+# Soft-gate helper for kb-run/kb-work (XACA-0311).
+# Called when an item's status/priority/blockedBy signals it is blocked.
+# Prints a short ⚠ warning banner, then delegates to _kb_display_item_box for
+# the full normal item display, then prompts the user to continue or abort.
+#
+# Sets `_kb_blocked_already_displayed=1` in caller scope when the full display
+# has been rendered, so callers skip their own _kb_display_item_box call.
+#
+# Return codes (callers MUST map these):
+#   0 — user confirmed Y AND all blockers are now resolved → proceed normally
+#   1 — user answered N/empty → graceful exit (caller returns 0)
+#   2 — non-TTY caller, OR user confirmed Y but blockers still incomplete →
+#        hard-error box already printed; caller should return 1 (hard-exit)
+#
+# IMPORTANT: non-TTY uses rc=2 (not rc=1) so CI/scripts get a loud hard-exit
+# instead of the silent rc=0 that rc=1 produces via the caller's graceful path.
+_kb_blocked_soft_gate() {
+    local item_id="${1-}"
+    local board_file="${2-}"
+    local blocked_by="${3-}"
+    local item_json="${4-}"
+    local title
+    title=$(printf '%s\n' "$item_json" | jq -r '.title // empty')
+
+    # Non-interactive guard — print hard-error box and return 2 so callers
+    # propagate rc=1 (loud failure).  Pre-XACA-0311 behaviour was a hard-exit;
+    # returning 1 here conflated non-TTY with user-said-N (rc=1 → caller returns
+    # 0, silent success) — regression fixed in PR #331 follow-up.
+    if ! [ -t 0 ] || ! [ -t 1 ]; then
+        local _nontty_blockers=""
+        local _bid
+        for _bid in $(printf '%s\n' "$blocked_by" | tr ',' '\n'); do
+            local _btrim="${_bid## }"; _btrim="${_btrim%% }"
+            [[ -z "$_btrim" ]] && continue
+            _nontty_blockers+="    ⛔ $_btrim\n"
+        done
+        echo "╔══════════════════════════════════════════════════════════════════╗"
+        echo "║  ⛔ BLOCKED: Cannot start - dependencies not complete            ║"
+        echo "╠══════════════════════════════════════════════════════════════════╣"
+        echo "║  Blocked by:                                                     ║"
+        echo -e "$_nontty_blockers"
+        echo "╠══════════════════════════════════════════════════════════════════╣"
+        echo "║  To proceed, either:                                             ║"
+        echo "║    1. Complete the blocking item(s) listed above                 ║"
+        echo "║    2. Remove a blocker: kb-backlog unblock $item_id <blocker-id> ║"
+        echo "╚══════════════════════════════════════════════════════════════════╝"
+        return 2
+    fi
+
+    # ── Soft warning banner (NOT the hard-error box) ─────────────────────────
+    # Design note (XACA-0311-009): When item_status==blocked but blockedBy is
+    # empty, the block is a manual status flag with no dependency blockers.
+    # The re-check loop below iterates nothing → rc=0 → work proceeds after
+    # user confirms Y.  An explicit "manually flagged" note is shown so the
+    # operator understands what they are overriding.
+    echo ""
+    echo "⚠  WARNING: This item is marked as blocked."
+    local has_blockers=0
+    local blocker
+    for blocker in $(printf '%s\n' "$blocked_by" | tr ',' '\n'); do
+        local blocker_trim="${blocker## }"
+        blocker_trim="${blocker_trim%% }"
+        [[ -n "$blocker_trim" ]] && { has_blockers=1; break; }
+    done
+    if [[ "$has_blockers" -eq 1 ]]; then
+        echo "   Blocked by:"
+        for blocker in $(printf '%s\n' "$blocked_by" | tr ',' '\n'); do
+            local blocker_trim="${blocker## }"
+            blocker_trim="${blocker_trim%% }"
+            if [[ -n "$blocker_trim" ]]; then
+                local blocker_title blocker_status
+                blocker_title=$(_kb_jq_read "$board_file" \
+                    '.backlog[] | select(.id == $id) | .title // "Unknown"' \
+                    --arg id "$blocker_trim" -r 2>/dev/null || echo "Unknown")
+                # XACA-0948-006: "unknown" is preserved ONLY for a blocker id that
+                # is not on the board at all (dangling reference) -- a genuinely
+                # different condition from "found, but no status recorded", which
+                # now resolves via ITEM_STATUS_CONTRACT.md §1.5 like every other
+                # item-status site (contract.md is silent on this distinction;
+                # collapsing it would make a real reference error look identical
+                # to an ordinary unrecorded item).
+                blocker_status=$(_kb_jq_read "$board_file" \
+                    "${_KB_ITEM_STATUS_JQ_DEFS} [.backlog[] | select(.id == \$bid)] | if length == 0 then \"unknown\" else (first | kb_resolve_item_status) end" \
+                    --arg bid "$blocker_trim" -r 2>/dev/null || echo "unknown")
+                echo "     ⛔ $blocker_trim — $blocker_title [$blocker_status]"
+            fi
+        done
+    else
+        echo "   (Status manually flagged; no dependency blockers)"
+    fi
+
+    # ── Full item display via the standard renderer ──────────────────────────
+    # Reuses _kb_display_item_box so the operator sees the same complete view
+    # they get for non-blocked items (description, tags, subitems, etc.).
+    # _kb_display_item_box sets caller-scope variables (item_id, title,
+    # description, ...); via dynamic scoping those propagate up to kb-run /
+    # kb-work because they pre-declare those names as `local`.
+    _kb_display_item_box "$item_json" "KANBAN ITEM DETAILS (BLOCKED)" "subitem_detail"
+
+    # Tell callers they can skip their own display_item_box call.
+    _kb_blocked_already_displayed=1
+
+    # ── Prompt ───────────────────────────────────────────────────────────────
+    # Use '< /dev/tty' for stdin discipline parity with other interactive reads
+    # in this file (see lines ~707/742).  The non-TTY guard above ensures
+    # /dev/tty is available before we reach this point (XACA-0311-008).
+    local answer
+    printf "Continue anyway? [y/N]: "
+    read -r answer < /dev/tty
+
+    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+        echo "Exiting — no work started."
+        return 1
+    fi
+
+    # ── Re-check blockers after user confirms Y ───────────────────────────────
+    local blocked_by_ids incomplete_blockers
+    blocked_by_ids=$(printf '%s\n' "$blocked_by" | tr ',' '\n')
+    incomplete_blockers=""
+    while IFS= read -r blocker_id; do
+        local btrim="${blocker_id## }"
+        btrim="${btrim%% }"
+        [[ -z "$btrim" ]] && continue
+        # XACA-0948-006: same not-found-vs-unrecorded distinction as the banner
+        # above -- "unknown" only for a dangling blocker reference; a found item
+        # with no recorded status resolves via ITEM_STATUS_CONTRACT.md §1.5.
+        local b_status
+        b_status=$(_kb_jq_read "$board_file" \
+            "${_KB_ITEM_STATUS_JQ_DEFS} [.backlog[] | select(.id == \$bid)] | if length == 0 then \"unknown\" else (first | kb_resolve_item_status) end" \
+            --arg bid "$btrim" -r 2>/dev/null)
+        if [[ -n "$b_status" ]] && [[ "$b_status" != "completed" ]] && [[ "$b_status" != "cancelled" ]]; then
+            local b_title
+            b_title=$(_kb_jq_read "$board_file" \
+                '.backlog[] | select(.id == $bid) | .title // "Unknown"' \
+                --arg bid "$btrim" -r 2>/dev/null)
+            # XACA-1128: $b_title is user-authored board data and this whole
+            # block is later emitted via `echo -e "$incomplete_blockers"`,
+            # which expands backslash escapes — a literal `\bword\b` would be
+            # mangled and `\c` would truncate the rest. Escape here, at read.
+            b_title="${b_title//\\/\\\\}"
+            incomplete_blockers+="    ⛔ $btrim: $b_title [$b_status]\n"
+        fi
+    done <<< "$blocked_by_ids"
+
+    if [[ -n "$incomplete_blockers" ]]; then
+        # Blockers still present → hard-error box (existing wording preserved)
+        echo "╔══════════════════════════════════════════════════════════════════╗"
+        echo "║  ⛔ BLOCKED: Cannot start - dependencies not complete            ║"
+        echo "╠══════════════════════════════════════════════════════════════════╣"
+        echo "║  Blocked by:                                                     ║"
+        echo -e "$incomplete_blockers"
+        echo "╠══════════════════════════════════════════════════════════════════╣"
+        echo "║  To proceed, either:                                             ║"
+        echo "║    1. Complete the blocking item(s) listed above                 ║"
+        echo "║    2. Remove a blocker: kb-backlog unblock $item_id <blocker-id> ║"
+        echo "╚══════════════════════════════════════════════════════════════════╝"
+        return 2
+    fi
+
+    # All blockers resolved — caller proceeds normally
+    return 0
+}
+
+# Auto-surface relevant prior knowledge for a task pickup prompt.
+#
+# Publishes the section into the GLOBAL var $_KB_PRIOR_KNOWLEDGE_SECTION (NOT stdout).
+# It is set to "" when: KB_PRIOR_KNOWLEDGE_DISABLED is set, zero hits, the inline wait
+# times out, or any error; otherwise to a "## Prior Knowledge" block using literal \n
+# separators (matching the surrounding prompt+= idiom; echo -e "$prompt" in
+# kb-run/kb-work expands them to real newlines at launch time).
+#
+# CRITICAL — call this as a plain STATEMENT, never in $(...) command substitution:
+#   _kb_build_prior_knowledge_section "$id" "$title"
+#   [[ -n "$_KB_PRIOR_KNOWLEDGE_SECTION" ]] && prompt+="\n\n$_KB_PRIOR_KNOWLEDGE_SECTION"
+# The SECTION is timeout-bounded but the underlying search is NOT killed — it is
+# detached (`&!`) and runs to completion so its kb-search.jsonl telemetry ALWAYS fires
+# (the attributed pre-work signal is the ticket's primary deliverable). A $(...) capture
+# would run this whole function in a subshell that exits the instant it returns, killing
+# the detached search before its telemetry write — defeating the deliverable (XACA-0720).
+#
+# Usage: _kb_build_prior_knowledge_section <item_id> "<title>"
+# Env knobs:
+#   KB_PRIOR_KNOWLEDGE_DISABLED  — 1/true/yes (any case) → skip entirely (default: off)
+#   KB_PRIOR_KNOWLEDGE_TIMEOUT   — watchdog seconds (default: 5)
+#   KB_PRIOR_KNOWLEDGE_MAX       — max knowledge entries to render (default: 5)
+#
+# Side-effect: calls kb-knowledge-search, which fires its existing kb-search.jsonl
+# telemetry (persona-attributed via _kb_detect_context). This IS the required
+# pre-work KB-adoption signal. Do NOT set KB_SEARCH_TELEMETRY_DISABLED here.
+#
+# Implementation notes:
+#   - macOS has no timeout(1): the search is detached (double-subshell) and the
+#     INLINE wait is bounded by a marker-file poll — the search is never killed,
+#     so its telemetry always lands (XACA-0720: a kill-at-timeout design dropped
+#     the telemetry write whenever the live search outran the timeout).
+#   - All internal vars use _-prefix to avoid clobbering caller-scope vars set by
+#     _kb_display_item_box (item_id, title, description, etc.).
+#   - Loop vars declared before the loop (zsh local-in-loop stdout gotcha, k501).
+#   - kanban-helpers.sh is dev-only (not tap-mirrored, XACA-0632).
+_kb_build_prior_knowledge_section() {
+    setopt LOCAL_OPTIONS NO_NOMATCH 2>/dev/null || true
+    # Output channel is a global (see header): every early-return below leaves it "".
+    typeset -g _KB_PRIOR_KNOWLEDGE_SECTION=""
+    local _item_id="${1-}"
+    local _title="${2-}"
+
+    # Kill switch: KB_PRIOR_KNOWLEDGE_DISABLED=1|true|yes (any case)
+    local _disabled="${KB_PRIOR_KNOWLEDGE_DISABLED:-0}"
+    case "$_disabled" in
+        1|true|yes|TRUE|YES|True|Yes) return 0 ;;
+    esac
+
+    # Build search terms: item_id and title as separate OR terms (XACA-0738).
+    # kb-knowledge-search now accepts multiple positional args with OR semantics —
+    # an entry matches if it contains ANY term (grep -Fqi, fixed-string). This
+    # replaces the brittle COMPOUND "<id> <title>" query (XACA-0720) that required
+    # both strings to appear contiguously — id and title were not searched
+    # independently. With OR-matching both surface relevant entries on their own.
+    # --porcelain output (TSV, one line per result) is consumed below via the
+    # tab-split parser, replacing the fragile human-text line-state scraper.
+    local _query_title="$_title"
+    # Strip leading taxonomy prefixes (EPIC: RELEASE: REL-XXXX: TODO: Checklist:)
+    _query_title=$(printf '%s' "$_query_title" \
+        | sed -E 's/^(EPIC|RELEASE|REL-[A-Z0-9-]+|TODO|Checklist)[[:space:]]*:[[:space:]]*//')
+
+    # Build the OR-term list: id and title as separate positional args (XACA-0738).
+    local -a _search_terms=()
+    [[ -n "$_item_id" ]]     && _search_terms+=("$_item_id")
+    [[ -n "$_query_title" ]] && _search_terms+=("$_query_title")
+    [[ ${#_search_terms[@]} -eq 0 ]] && return 0
+
+    # Best-effort, timeout-bounded search that ALWAYS lets telemetry fire.
+    #
+    # XACA-0720 fix: the original design killed the search at the timeout. But
+    # kb-knowledge-search writes its kb-search.jsonl telemetry as its LAST step,
+    # and the live KB search runs ~7-9s — longer than the 5s default. So a kill
+    # at 5s skipped the telemetry write (the ticket's PRIMARY deliverable) on
+    # every real pickup, AND never rendered a section. Verified empirically:
+    # default-timeout kill → zero new telemetry lines.
+    #
+    # New design: detach the search so it runs to COMPLETION in the background
+    # (telemetry always lands), and only the *inline section* is timeout-bounded.
+    # We wait up to _timeout for a marker file the search drops on completion —
+    # marker-file detection, not `kill -0`, because a finished-but-unreaped child
+    # is a zombie whose pid still answers `kill -0` (false "still running"). If the
+    # search beats the budget we render the section; otherwise it is omitted
+    # (best-effort) while the detached search finishes on its own and a detached
+    # reaper removes the temp files. We start the search with zsh's `&!` (background
+    # AND disown in one step): a plain `( … ) &` inside a subshell gets SIGHUP'd when
+    # the intermediate subshell exits — killing the search before its telemetry write
+    # — whereas `&!` detaches the job so it survives to completion and emits no
+    # job-control notice. `&!` is zsh-specific; kanban-helpers.sh is zsh-only.
+    local _timeout=${KB_PRIOR_KNOWLEDGE_TIMEOUT:-5}
+    local _max=${KB_PRIOR_KNOWLEDGE_MAX:-5}
+    local _tmpfile
+    _tmpfile=$(mktemp 2>/dev/null) || return 0
+    local _donefile="${_tmpfile}.done"
+
+    { kb-knowledge-search --porcelain "${_search_terms[@]}" > "$_tmpfile" 2>/dev/null; : > "$_donefile"; } &!
+
+    local _waited=0
+    while [[ ! -f "$_donefile" ]]; do
+        [[ $_waited -ge $_timeout ]] && break
+        sleep 1
+        _waited=$((_waited + 1))
+    done
+
+    if [[ ! -f "$_donefile" ]]; then
+        # Timed out: do NOT kill — let the detached search complete so its
+        # telemetry write lands; a detached reaper clears the temp files after.
+        { while [[ ! -f "$_donefile" ]]; do sleep 1; done; rm -f "$_tmpfile" "$_donefile" 2>/dev/null; } &!
+        return 0
+    fi
+
+    local _search_out
+    _search_out=$(cat "$_tmpfile" 2>/dev/null)
+    rm -f "$_tmpfile" "$_donefile" 2>/dev/null
+
+    # Check for zero results: --porcelain emits empty stdout on miss (no text indicator).
+    if [[ -z "$_search_out" ]]; then
+        return 0
+    fi
+
+    # Parse --porcelain TSV output (XACA-0738): one line per result, TAB-separated:
+    #   tier<TAB>title<TAB>tags<TAB>path   (path is HOME-relative, without leading ~/)
+    # Declare all loop vars before the loop (avoids zsh local-in-loop stdout emission
+    # on 2nd+ iterations — see k501-zsh-local-in-loop-gotcha.md).
+    local _entries_text=""
+    local _entry_count=0
+    local _p_tier _p_title _p_tags _p_path
+
+    while IFS=$'\t' read -r _p_tier _p_title _p_tags _p_path; do
+        [[ $_entry_count -ge $_max ]] && break
+        [[ -z "$_p_path" ]] && continue  # skip malformed/empty lines
+        # XACA-1128: this section is emitted via `echo -e "$prompt"`, which expands
+        # backslash escapes. Knowledge-entry titles and paths are AUTHORED TEXT, so a
+        # `\c` in one would truncate the whole agent prompt and a `\t` would eat
+        # characters. Escape at this boundary, exactly as the prompt builders do.
+        _p_title="${_p_title//\\/\\\\}"
+        _p_path="${_p_path//\\/\\\\}"
+        _p_tier="${_p_tier//\\/\\\\}"
+        _entries_text+="- [${_p_tier}] ${_p_title} | ~/${_p_path}\n"
+        _entry_count=$((_entry_count + 1))
+    done <<< "$_search_out"
+
+    [[ $_entry_count -eq 0 ]] && return 0
+
+    # Publish via the global (NOT stdout) — see header: keeps the detached search alive.
+    # Literal \n matches the prompt+= idiom; echo -e "$prompt" expands them at launch.
+    _KB_PRIOR_KNOWLEDGE_SECTION="## Prior Knowledge\n_Auto-surfaced from the knowledge base for this task. Informational — verify before relying on any entry; it reflects what was true when written._\n\n${_entries_text}"
+}
+
 # Run a task from backlog - launch Claude Code with todo plan and worktree setup
 kb-run() {
     _kb_ensure_jq || return 1
@@ -11231,14 +11544,22 @@ kb-run() {
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-run XFRE-0001"
         echo ""
+        echo "Auto-created worktrees will prompt for cleanup when Claude exits."
+        echo "Disable with: KB_WT_CLEANUP_PROMPT=0"
+        echo ""
         echo "For simple assignment without Claude, use: kb-pick <id>"
         return 1
     fi
 
-    local context team board_file
-    context=$(_kb_detect_context)
-    team="${context%%:*}"
-    board_file=$(_kb_get_board_file "$team")
+    local team board_file
+    team=$(_kb_resolve_run_team "$selector")
+    # If board resolution fails outright, _kb_get_board_file already printed a
+    # specific reason to stderr — an "unknown team" refusal, or a board-less
+    # alias's "use <x> instead" guidance (e.g. mainevent → command, XACA-0727).
+    # Return without piling a generic "no board" line on top of it. (XACA-0759 review #2)
+    if ! board_file=$(_kb_get_board_file "$team"); then
+        return 1
+    fi
 
     if [[ ! -f "$board_file" ]]; then
         echo "Error: No kanban board found for team '$team'"
@@ -11265,94 +11586,42 @@ kb-run() {
 
     # Extract only fields needed for blocked check; _kb_display_item_box extracts the rest
     local item_id title description jira_id github_issue priority item_status due_date tags
-    local subitem_count item_worktree item_worktree_branch
+    local subitem_count item_worktree item_worktree_branch sub_repo
+    # XACA-0598: session-scope flag — 1 only when this invocation CREATES the worktree
+    # (vs attaching to an existing one). Guards the wt-finish offer post-cc-exit.
+    local kb_wt_session_created=0 kb_wt_session_path=""
     item_id=$(printf '%s\n' "$item_json" | jq -r '.id // empty')
     title=$(printf '%s\n' "$item_json" | jq -r '.title // empty')
     priority=$(printf '%s\n' "$item_json" | jq -r '.priority // "medium"')
-    # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-run).
+    # XACA-0948-006: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-run).
     item_status=$(printf '%s\n' "$item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
+    sub_repo=$(printf '%s\n' "$item_json" | jq -r '.subRepo // empty')
 
     # Check if item is blocked (XACA-0020)
     # Check status, priority, AND blockedBy array - any of these can indicate blocked state
     local blocked_by
     blocked_by=$(printf '%s\n' "$item_json" | jq -r '(.blockedBy // []) | join(", ")')
+    local _kb_blocked_already_displayed=0
     if [[ "$item_status" == "blocked" ]] || [[ "$priority" == "blocked" ]] || [[ -n "$blocked_by" ]]; then
-        echo ""
-        echo "╔══════════════════════════════════════════════════════════════════╗"
-        echo "║                     ⚠️  ITEM BLOCKED  ⚠️                           ║"
-        echo "╠══════════════════════════════════════════════════════════════════╣"
-        echo "║"
-        echo "║  ID:       $item_id"
-        echo "║  Title:    $title"
-        echo "║"
-        echo "║  This item cannot be started because it is blocked by:"
-        for blocker in $(echo "$blocked_by" | tr ',' '\n'); do
-            local blocker_trim="${blocker## }"
-            blocker_trim="${blocker_trim%% }"
-            if [[ -n "$blocker_trim" ]]; then
-                local blocker_title
-                blocker_title=$(_kb_jq_read "$board_file" '.backlog[] | select(.id == $id) | .title' --arg id "$blocker_trim" -r 2>/dev/null || echo "")
-                echo "║    → [$blocker_trim] $blocker_title"
-            fi
-        done
-        echo "║"
-        echo "║  Complete the blocking items first, or use:"
-        echo "║    kb-backlog unblock $item_id"
-        echo "║  to remove the blockers."
-        echo "║"
-        echo "╚══════════════════════════════════════════════════════════════════╝"
-        return 1
-    fi
-
-    # Display item details for confirmation
-    _kb_display_item_box "$item_json" "KANBAN ITEM DETAILS" "subitem_detail"
-
-    # Check if item is blocked by incomplete items
-    local blocked_by_ids incomplete_blockers
-    blocked_by_ids=$(printf '%s\n' "$item_json" | jq -r '(.blockedBy // []) | .[]' 2>/dev/null)
-
-    if [[ -n "$blocked_by_ids" ]]; then
-        incomplete_blockers=""
-        while IFS= read -r blocker_id; do
-            [[ -z "$blocker_id" ]] && continue
-            # Check if blocker exists and is not completed
-            local blocker_status
-            # XACA-0948: "unknown" is preserved ONLY for a blocker id that is
-            # not on the board at all (dangling reference) -- a genuinely
-            # different condition from "found, but no status recorded", which
-            # now resolves via ITEM_STATUS_CONTRACT.md §1.5 like every other
-            # item-status site.
-            blocker_status=$(_kb_jq_read "$board_file" \
-                "${_KB_ITEM_STATUS_JQ_DEFS} [.backlog[] | select(.id == \$bid)] | if length == 0 then \"unknown\" else (first | kb_resolve_item_status) end" \
-                --arg bid "$blocker_id" -r 2>/dev/null)
-
-            if [[ -n "$blocker_status" ]] && [[ "$blocker_status" != "completed" ]] && [[ "$blocker_status" != "cancelled" ]]; then
-                local blocker_title
-                blocker_title=$(_kb_jq_read "$board_file" \
-                    '.backlog[] | select(.id == $bid) | .title // "Unknown"' \
-                    --arg bid "$blocker_id" -r 2>/dev/null)
-                # XACA-1128: $blocker_title is user-authored board data and this
-                # whole block is later emitted via `echo -e "$incomplete_blockers"`,
-                # which expands backslash escapes — a literal `\bword\b` would be
-                # mangled and `\c` would truncate the rest. Escape here, at read.
-                blocker_title="${blocker_title//\\/\\\\}"
-                incomplete_blockers+="    ⛔ $blocker_id: $blocker_title [$blocker_status]\n"
-            fi
-        done <<< "$blocked_by_ids"
-
-        if [[ -n "$incomplete_blockers" ]]; then
-            echo "╔══════════════════════════════════════════════════════════════════╗"
-            echo "║  ⛔ BLOCKED: Cannot start - dependencies not complete            ║"
-            echo "╠══════════════════════════════════════════════════════════════════╣"
-            echo "║  Blocked by:                                                     ║"
-            echo -e "$incomplete_blockers"
-            echo "╠══════════════════════════════════════════════════════════════════╣"
-            echo "║  To proceed, either:                                             ║"
-            echo "║    1. Complete the blocking item(s) listed above                 ║"
-            echo "║    2. Remove a blocker: kb-backlog unblock $item_id <blocker-id> ║"
-            echo "╚══════════════════════════════════════════════════════════════════╝"
+        # XACA-0311: soft gate — warn + prompt instead of immediate hard-exit
+        # rc contract: 0=proceed, 1=user-said-N (graceful), 2=non-TTY or still-blocked (hard-exit)
+        _kb_blocked_soft_gate "$item_id" "$board_file" "$blocked_by" "$item_json"
+        local _gate_rc=$?
+        if [[ $_gate_rc -eq 1 ]]; then
+            # User answered N/empty — graceful exit (no error)
+            return 0
+        elif [[ $_gate_rc -eq 2 ]]; then
+            # Non-TTY caller OR user confirmed Y but blockers still incomplete —
+            # hard-error box already printed by helper; propagate failure
             return 1
         fi
+        # rc=0: user confirmed Y and blockers resolved — fall through to normal flow
+        # The soft-gate already rendered _kb_display_item_box and set the flag.
+    fi
+
+    # Display item details for confirmation (skip when soft-gate already showed it)
+    if [[ "$_kb_blocked_already_displayed" != "1" ]]; then
+        _kb_display_item_box "$item_json" "KANBAN ITEM DETAILS" "subitem_detail"
     fi
 
     # Confirmation prompt
@@ -11369,16 +11638,24 @@ kb-run() {
     echo ""
 
     # INVARIANT: no top-level item may hold status == "in_progress" while UNESTIMATED.
-    # Precondition check — does NOT write status; kb-pick is the write site.
-    # (XACA-0822-008, ported from canonical XACA-0624)
+    # Precondition check — does NOT write status; kb-pick is the write site. (XACA-0624)
     _kb_require_points "$board_file" "$index" "$item_id" || return 1
 
     # INVARIANT: when the team requires it, no top-level item may start without
     # a valid Epic / Release assignment, unless grandfathered. Precondition
-    # check — does NOT write status. (XACA-1083 tap port, same shape as
-    # _kb_require_points)
+    # check — does NOT write status. (XACA-1083, same shape as _kb_require_points)
     _kb_require_epic "$board_file" "$index" "$item_id" || return 1
     _kb_require_release "$board_file" "$index" "$item_id" || return 1
+
+    # XACA-0184: If the item has a subRepo and we're in an umbrella context, cd into
+    # the sub-repo before the git-context check runs. This lets users run kb-run from
+    # the umbrella parent directory — the script auto-navigates to the correct sub-repo.
+    _kb_route_to_subrepo "$item_id" "$sub_repo" || return 1
+
+    # Guard: if not in any git repo (umbrella-repo parent dir), warn loudly and prompt.
+    if [[ "$(_kb_git_context)" == "none" ]]; then
+        _kb_warn_no_git_context "kb-run" || return 1
+    fi
 
     # Check if we're in the main worktree - if so, create/use a worktree for this item
     if _kb_is_main_worktree; then
@@ -11411,6 +11688,10 @@ kb-run() {
                 --arg wtb "$wt_branch" \
                 --arg ts "$wt_timestamp"
             echo "✓ Linked worktree to [$item_id]"
+
+            # XACA-0598: mark this invocation as the creator so the offer fires post-cc-exit
+            kb_wt_session_created=1
+            kb_wt_session_path="$new_worktree"
 
             # Reset worktree to remote main branch for clean starting state
             local reset_rc=0
@@ -11461,6 +11742,16 @@ kb-run() {
 
     if [[ -n "$github_issue" ]]; then
         prompt+="\n## GitHub: $_kb_prompt_github_issue"
+    fi
+
+    # Prior knowledge injection (XACA-0720): surface relevant KB entries before subitems.
+    # Best-effort: skipped on error/timeout/no-hits; section appears only when non-empty.
+    # MUST be a plain statement (NOT $(...)) — the helper detaches its KB search so the
+    # attributed pre-work telemetry always fires; a command-substitution subshell would
+    # kill that search on return. The section is published into $_KB_PRIOR_KNOWLEDGE_SECTION.
+    _kb_build_prior_knowledge_section "$item_id" "$title"
+    if [[ -n "$_KB_PRIOR_KNOWLEDGE_SECTION" ]]; then
+        prompt+="\n\n${_KB_PRIOR_KNOWLEDGE_SECTION}"
     fi
 
     # Planning gate (XACA-0801): items with ZERO subitems have no Review/Test/UX merge
@@ -11596,12 +11887,81 @@ kb-run() {
     _kb_set_working_on "$item_id" "DEV"
 
     # Launch cc with the prompt
+    export CC_SESSION_NAME="${item_id}: ${title}"
     if ! _kb_ensure_cc_function "kb-run"; then
         unset CC_SESSION_NAME
         return 1
     fi
     echo -e "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+    unset CC_SESSION_NAME
+
+    # XACA-0279-006: record session→account mapping after cc exits.
+    # The primary hook fires inside _cc_launch; this call handles the edge case
+    # where cc() fell through to plain claude (no _cc_launch path).
+    #
+    # XACA-0977-025 (round 4): pass the GATED identity explicitly, exactly
+    # like ccc()/_cc_launch's own record calls (BLOCKING B) -- previously
+    # this call passed NO --account-id/--account-nickname flags at all, so
+    # the shim fell back to reading the raw, UNGATED CLAUDE_ACTIVE_ACCOUNT_ID
+    # / _NICKNAME env vars itself, which can be exported with real metadata
+    # even when no token ever resolved (engine guard, empty env-var, vault
+    # down with no fallback -- XACA-0977-013/015). Since this record call
+    # runs unconditionally after EVERY cc invocation (not only the
+    # no-_cc_launch fallback case), an ungated write here could silently
+    # overwrite -- lookup is most-recent-wins -- a correct gated record
+    # _cc_launch itself just wrote moments earlier, with the wrong (raw)
+    # value. CLAUDE_BILLED_ACCOUNT_ID/_NICKNAME are the exported gated pair
+    # (see claude_code_cc_aliases.sh); `${+VAR}` guards the case where they
+    # were never exported at all in this shell (cc() took its outermost
+    # "no SESSION_TYPE/SESSION_NAME" branch and never touched _cc_launch),
+    # in which case there is no gated opinion to pass and the shim's
+    # existing raw-env fallback is unchanged.
+    #
+    # TAP DIVERGENCE (XACA-0810 co-change guard): this change is deliberately
+    # NOT ported to homebrew-tap/share/templates/kanban/kanban-helpers.template.sh.
+    # Measured 2026-09-12: the tap copy's kb-run/kb-work never call
+    # session-account-map-record.sh at all, the shim is not shipped to consumers,
+    # and CLAUDE_BILLED_ACCOUNT_ID is unreferenced anywhere in the tap. There is
+    # no counterpart to port into -- these functions diverged long before this
+    # ticket. Porting would mean importing the whole session-account-map
+    # subsystem into the tap, which is out of scope here. Waived via a
+    # Tap-Divergence trailer rather than a manifest entry because this is a
+    # one-off body divergence, not a canonical-only function.
+    #
+    # XACA-0977 round 6 (BLOCKING A): the shim's own contract is positional
+    # SESSION_ID first, THEN flags (session-account-map-record.sh [SESSION_ID]
+    # [--account-id <id>] [--account-nickname <nick>]) -- see its own
+    # SESSION_ID="${1:-...}" line. The branch below used to call it with
+    # FLAGS ONLY and no leading positional argument at all, so the shim's
+    # own $1 became the literal string "--account-id" and its argparse
+    # rejected the resulting bogus --session-id (rc=2), recording NOTHING --
+    # silenced by this call's own `2>/dev/null || true`. Measured via
+    # `zsh -x`: SESSION_ID=--account-id, ACCOUNT_ID=<the real gated value>,
+    # ACCOUNT_ID_EXPLICIT never reached. This is a REGRESSION vs. the merge
+    # base (git rev 638d86bb), which called the shim with no arguments at
+    # all and therefore correctly fell back to $CLAUDE_SESSION_ID (empty in
+    # this repo -- there is no in-repo setter -- so historically a no-op,
+    # but a HARMLESS no-op, not a parse error). Passing that same fallback
+    # explicitly as $1 here restores the merge-base contract while still
+    # letting the flags reach the shim as flags.
+    if [[ -x "${AITEAMFORGE_DIR}/scripts/session-account-map-record.sh" ]]; then
+        if (( ${+CLAUDE_BILLED_ACCOUNT_ID} )); then
+            "${AITEAMFORGE_DIR}/scripts/session-account-map-record.sh" \
+                "${CLAUDE_SESSION_ID:-}" \
+                --account-id "$CLAUDE_BILLED_ACCOUNT_ID" \
+                --account-nickname "${CLAUDE_BILLED_ACCOUNT_NICKNAME:-}" 2>/dev/null || true
+        else
+            "${AITEAMFORGE_DIR}/scripts/session-account-map-record.sh" 2>/dev/null || true
+        fi
+    fi
+
+    # XACA-0598: offer wt-finish cleanup only when THIS invocation created the worktree
+    # XACA-1284: if-form, not `[[ ]] &&` -- as a function's LAST command a false test made a
+    # successful launch exit 1 whenever no worktree was created (an --yes caller would read failure).
+    if [[ "${kb_wt_session_created:-0}" == "1" ]]; then
+        _kb_offer_worktree_cleanup "$kb_wt_session_path" "$worktree_branch"
+    fi
 
     # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
     # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
@@ -11673,88 +12033,33 @@ kb-work() {
     item_id=$(printf '%s\n' "$item_json" | jq -r '.id // empty')
     title=$(printf '%s\n' "$item_json" | jq -r '.title // empty')
     priority=$(printf '%s\n' "$item_json" | jq -r '.priority // "medium"')
-    # XACA-0948: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-work).
+    # XACA-0948-006: ITEM_STATUS_CONTRACT.md §1.5 resolution (kb-work).
     item_status=$(printf '%s\n' "$item_json" | jq -r "${_KB_ITEM_STATUS_JQ_DEFS} kb_resolve_item_status")
 
     # Check if item is blocked
     local blocked_by
     blocked_by=$(printf '%s\n' "$item_json" | jq -r '(.blockedBy // []) | join(", ")')
+    local _kb_blocked_already_displayed=0
     if [[ "$item_status" == "blocked" ]] || [[ "$priority" == "blocked" ]] || [[ -n "$blocked_by" ]]; then
-        echo ""
-        echo "╔══════════════════════════════════════════════════════════════════╗"
-        echo "║                     ⚠️  ITEM BLOCKED  ⚠️                           ║"
-        echo "╠══════════════════════════════════════════════════════════════════╣"
-        echo "║"
-        echo "║  ID:       $item_id"
-        echo "║  Title:    $title"
-        echo "║"
-        echo "║  This item cannot be started because it is blocked by:"
-        for blocker in $(echo "$blocked_by" | tr ',' '\n'); do
-            local blocker_trim="${blocker## }"
-            blocker_trim="${blocker_trim%% }"
-            if [[ -n "$blocker_trim" ]]; then
-                local blocker_title
-                blocker_title=$(_kb_jq_read "$board_file" '.backlog[] | select(.id == $id) | .title' --arg id "$blocker_trim" -r 2>/dev/null || echo "")
-                echo "║    → [$blocker_trim] $blocker_title"
-            fi
-        done
-        echo "║"
-        echo "║  Complete the blocking items first, or use:"
-        echo "║    kb-backlog unblock $item_id"
-        echo "║  to remove the blockers."
-        echo "║"
-        echo "╚══════════════════════════════════════════════════════════════════╝"
-        return 1
-    fi
-
-    # Display item details for confirmation
-    _kb_display_item_box "$item_json" "KANBAN ITEM DETAILS" "subitem_detail"
-
-    # Check if item is blocked by incomplete items
-    local blocked_by_ids incomplete_blockers
-    blocked_by_ids=$(printf '%s\n' "$item_json" | jq -r '(.blockedBy // []) | .[]' 2>/dev/null)
-
-    if [[ -n "$blocked_by_ids" ]]; then
-        incomplete_blockers=""
-        while IFS= read -r blocker_id; do
-            [[ -z "$blocker_id" ]] && continue
-            local blocker_status
-            # XACA-0948: "unknown" is preserved ONLY for a blocker id that is
-            # not on the board at all (dangling reference) -- a genuinely
-            # different condition from "found, but no status recorded", which
-            # now resolves via ITEM_STATUS_CONTRACT.md §1.5 like every other
-            # item-status site.
-            blocker_status=$(_kb_jq_read "$board_file" \
-                "${_KB_ITEM_STATUS_JQ_DEFS} [.backlog[] | select(.id == \$bid)] | if length == 0 then \"unknown\" else (first | kb_resolve_item_status) end" \
-                --arg bid "$blocker_id" -r 2>/dev/null)
-
-            if [[ -n "$blocker_status" ]] && [[ "$blocker_status" != "completed" ]] && [[ "$blocker_status" != "cancelled" ]]; then
-                local blocker_title
-                blocker_title=$(_kb_jq_read "$board_file" \
-                    '.backlog[] | select(.id == $bid) | .title // "Unknown"' \
-                    --arg bid "$blocker_id" -r 2>/dev/null)
-                # XACA-1128: $blocker_title is user-authored board data and this
-                # whole block is later emitted via `echo -e "$incomplete_blockers"`,
-                # which expands backslash escapes — a literal `\bword\b` would be
-                # mangled and `\c` would truncate the rest. Escape here, at read.
-                blocker_title="${blocker_title//\\/\\\\}"
-                incomplete_blockers+="    ⛔ $blocker_id: $blocker_title [$blocker_status]\n"
-            fi
-        done <<< "$blocked_by_ids"
-
-        if [[ -n "$incomplete_blockers" ]]; then
-            echo "╔══════════════════════════════════════════════════════════════════╗"
-            echo "║  ⛔ BLOCKED: Cannot start - dependencies not complete            ║"
-            echo "╠══════════════════════════════════════════════════════════════════╣"
-            echo "║  Blocked by:                                                     ║"
-            echo -e "$incomplete_blockers"
-            echo "╠══════════════════════════════════════════════════════════════════╣"
-            echo "║  To proceed, either:                                             ║"
-            echo "║    1. Complete the blocking item(s) listed above                 ║"
-            echo "║    2. Remove a blocker: kb-backlog unblock $item_id <blocker-id> ║"
-            echo "╚══════════════════════════════════════════════════════════════════╝"
+        # XACA-0311: soft gate — warn + prompt instead of immediate hard-exit
+        # rc contract: 0=proceed, 1=user-said-N (graceful), 2=non-TTY or still-blocked (hard-exit)
+        _kb_blocked_soft_gate "$item_id" "$board_file" "$blocked_by" "$item_json"
+        local _gate_rc=$?
+        if [[ $_gate_rc -eq 1 ]]; then
+            # User answered N/empty — graceful exit (no error)
+            return 0
+        elif [[ $_gate_rc -eq 2 ]]; then
+            # Non-TTY caller OR user confirmed Y but blockers still incomplete —
+            # hard-error box already printed by helper; propagate failure
             return 1
         fi
+        # rc=0: user confirmed Y and blockers resolved — fall through to normal flow
+        # The soft-gate already rendered _kb_display_item_box and set the flag.
+    fi
+
+    # Display item details for confirmation (skip when soft-gate already showed it)
+    if [[ "$_kb_blocked_already_displayed" != "1" ]]; then
+        _kb_display_item_box "$item_json" "KANBAN ITEM DETAILS" "subitem_detail"
     fi
 
     # Confirmation prompt - note we're NOT creating a worktree
@@ -11773,11 +12078,13 @@ kb-work() {
 
     echo ""
 
+    # INVARIANT: no top-level item may hold status == "in_progress" while UNESTIMATED.
+    # Precondition check — does NOT write status; kb-pick is the write site. (XACA-0624)
+    _kb_require_points "$board_file" "$index" "$item_id" || return 1
+
     # INVARIANT: when the team requires it, no top-level item may start without
     # a valid Epic / Release assignment, unless grandfathered. Precondition
     # check — does NOT write status. (XACA-1083, same shape as _kb_require_points)
-    # NOTE (tap port): canonical kb-work also calls _kb_require_points here; the
-    # template never ported that XACA-0624 call, and XACA-1083 does not add it.
     _kb_require_epic "$board_file" "$index" "$item_id" || return 1
     _kb_require_release "$board_file" "$index" "$item_id" || return 1
 
@@ -11811,6 +12118,16 @@ kb-work() {
 
     if [[ -n "$github_issue" ]]; then
         prompt+="\n## GitHub: $_kb_prompt_github_issue"
+    fi
+
+    # Prior knowledge injection (XACA-0720): surface relevant KB entries before subitems.
+    # Best-effort: skipped on error/timeout/no-hits; section appears only when non-empty.
+    # MUST be a plain statement (NOT $(...)) — the helper detaches its KB search so the
+    # attributed pre-work telemetry always fires; a command-substitution subshell would
+    # kill that search on return. The section is published into $_KB_PRIOR_KNOWLEDGE_SECTION.
+    _kb_build_prior_knowledge_section "$item_id" "$title"
+    if [[ -n "$_KB_PRIOR_KNOWLEDGE_SECTION" ]]; then
+        prompt+="\n\n${_KB_PRIOR_KNOWLEDGE_SECTION}"
     fi
 
     # Planning gate (XACA-0801): items with ZERO subitems have no Review/Test/UX merge
@@ -11945,12 +12262,74 @@ kb-work() {
     _kb_set_working_on "$item_id" "DEV"
 
     # Launch cc with the prompt
+    export CC_SESSION_NAME="${item_id}: ${title}"
     if ! _kb_ensure_cc_function "kb-work"; then
         unset CC_SESSION_NAME
         return 1
     fi
     echo -e "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+    unset CC_SESSION_NAME
+
+    # XACA-0279-006: record session→account mapping after cc exits.
+    # The primary hook fires inside _cc_launch; this call handles the edge case
+    # where cc() fell through to plain claude (no _cc_launch path).
+    #
+    # XACA-0977-025 (round 4): pass the GATED identity explicitly, exactly
+    # like ccc()/_cc_launch's own record calls (BLOCKING B) -- previously
+    # this call passed NO --account-id/--account-nickname flags at all, so
+    # the shim fell back to reading the raw, UNGATED CLAUDE_ACTIVE_ACCOUNT_ID
+    # / _NICKNAME env vars itself, which can be exported with real metadata
+    # even when no token ever resolved (engine guard, empty env-var, vault
+    # down with no fallback -- XACA-0977-013/015). Since this record call
+    # runs unconditionally after EVERY cc invocation (not only the
+    # no-_cc_launch fallback case), an ungated write here could silently
+    # overwrite -- lookup is most-recent-wins -- a correct gated record
+    # _cc_launch itself just wrote moments earlier, with the wrong (raw)
+    # value. CLAUDE_BILLED_ACCOUNT_ID/_NICKNAME are the exported gated pair
+    # (see claude_code_cc_aliases.sh); `${+VAR}` guards the case where they
+    # were never exported at all in this shell (cc() took its outermost
+    # "no SESSION_TYPE/SESSION_NAME" branch and never touched _cc_launch),
+    # in which case there is no gated opinion to pass and the shim's
+    # existing raw-env fallback is unchanged.
+    #
+    # TAP DIVERGENCE (XACA-0810 co-change guard): this change is deliberately
+    # NOT ported to homebrew-tap/share/templates/kanban/kanban-helpers.template.sh.
+    # Measured 2026-09-12: the tap copy's kb-run/kb-work never call
+    # session-account-map-record.sh at all, the shim is not shipped to consumers,
+    # and CLAUDE_BILLED_ACCOUNT_ID is unreferenced anywhere in the tap. There is
+    # no counterpart to port into -- these functions diverged long before this
+    # ticket. Porting would mean importing the whole session-account-map
+    # subsystem into the tap, which is out of scope here. Waived via a
+    # Tap-Divergence trailer rather than a manifest entry because this is a
+    # one-off body divergence, not a canonical-only function.
+    #
+    # XACA-0977 round 6 (BLOCKING A): the shim's own contract is positional
+    # SESSION_ID first, THEN flags (session-account-map-record.sh [SESSION_ID]
+    # [--account-id <id>] [--account-nickname <nick>]) -- see its own
+    # SESSION_ID="${1:-...}" line. The branch below used to call it with
+    # FLAGS ONLY and no leading positional argument at all, so the shim's
+    # own $1 became the literal string "--account-id" and its argparse
+    # rejected the resulting bogus --session-id (rc=2), recording NOTHING --
+    # silenced by this call's own `2>/dev/null || true`. Measured via
+    # `zsh -x`: SESSION_ID=--account-id, ACCOUNT_ID=<the real gated value>,
+    # ACCOUNT_ID_EXPLICIT never reached. This is a REGRESSION vs. the merge
+    # base (git rev 638d86bb), which called the shim with no arguments at
+    # all and therefore correctly fell back to $CLAUDE_SESSION_ID (empty in
+    # this repo -- there is no in-repo setter -- so historically a no-op,
+    # but a HARMLESS no-op, not a parse error). Passing that same fallback
+    # explicitly as $1 here restores the merge-base contract while still
+    # letting the flags reach the shim as flags.
+    if [[ -x "${AITEAMFORGE_DIR}/scripts/session-account-map-record.sh" ]]; then
+        if (( ${+CLAUDE_BILLED_ACCOUNT_ID} )); then
+            "${AITEAMFORGE_DIR}/scripts/session-account-map-record.sh" \
+                "${CLAUDE_SESSION_ID:-}" \
+                --account-id "$CLAUDE_BILLED_ACCOUNT_ID" \
+                --account-nickname "${CLAUDE_BILLED_ACCOUNT_NICKNAME:-}" 2>/dev/null || true
+        else
+            "${AITEAMFORGE_DIR}/scripts/session-account-map-record.sh" 2>/dev/null || true
+        fi
+    fi
 
     # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
     # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
@@ -13610,12 +13989,14 @@ kb-work-debug() {
     _kb_set_working_on "$item_id" "DEBUG"
 
     # Launch cc with the debug prompt
+    export CC_SESSION_NAME="[Debug] ${item_id}: ${title}"
     if ! _kb_ensure_cc_function "kb-work-debug"; then
         unset CC_SESSION_NAME
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+    unset CC_SESSION_NAME
 
     # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
     # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
