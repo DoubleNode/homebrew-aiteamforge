@@ -3507,6 +3507,70 @@ _kb_knowledge_suggest_team_slugs() {
     _kb_knowledge_registered_team_slugs | _kb_knowledge_suggest_from_list "$want"
 }
 
+# _kb_knowledge_project_gate_teams <slug> (XACA-0888-045)
+# Registered teams a project-tier <slug> should be GATED against — one
+# "<team_key>\t<reason>" pair per line, reason "id" or "basename". PRECISE by
+# design, unlike _kb_knowledge_suggest_team_slugs above (a human "did you
+# mean" matcher, prefix/substring in EITHER direction against the WHOLE
+# registry — tuned for typo suggestions, not for deciding whether to refuse a
+# write). Reusing that fuzzy matcher as a gating decision caught ordinary
+# project names that merely started with or contained a team id
+# ('ios-app', 'dnsframework', 'firebase-functions', 'commander', 'dev-team'),
+# contradicting kb-knowledge-add --help's "An ordinary project name is never
+# gated" — measured 2026-09-28, XACA-0888 A3 review round 1.
+#
+# Gate ONLY when the slug IS a team identity, in one of two exact senses:
+#   - case-insensitively equals a registered team id ("id")
+#   - case-insensitively equals the basename of a registered team's own repo
+#     root / working_dir ("basename")
+# A basename can match MULTIPLE teams (e.g. 'dev-team' is the basename of
+# both ~/dev-team (academy) and Main Event's own '.../dev-team'
+# (mainevent-dev-team)) — every match is returned, not just the first.
+_kb_knowledge_project_gate_teams() {
+    local slug="${1-}"
+    [[ -z "$slug" ]] && return 0
+    local slug_lc
+    slug_lc=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')
+
+    local s s_lc
+    while IFS= read -r s; do
+        [[ -z "$s" ]] && continue
+        s_lc=$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')
+        [[ "$s_lc" == "$slug_lc" ]] && printf '%s\tid\n' "$s"
+    done < <(_kb_knowledge_registered_team_slugs)
+
+    local pairs
+    pairs=$(_kb_registry_team_working_kanban_pairs 2>/dev/null)
+    [[ -z "$pairs" ]] && return 0
+    local pg_key pg_wd pg_kd pg_base pg_base_lc
+    while IFS=$'\t' read -r pg_key pg_wd pg_kd; do
+        [[ -z "$pg_key" || -z "$pg_wd" ]] && continue
+        pg_base="${pg_wd%/}"
+        pg_base="${pg_base##*/}"
+        [[ -z "$pg_base" ]] && continue
+        pg_base_lc=$(printf '%s' "$pg_base" | tr '[:upper:]' '[:lower:]')
+        [[ "$pg_base_lc" == "$slug_lc" ]] && printf '%s\tbasename\n' "$pg_key"
+    done <<< "$pairs"
+    return 0
+}
+
+# _kb_knowledge_tier_dir <tier:agent|agents|team|teams|project|projects> <slug> <write_root>
+# The ONE place that joins a write root, a tier, and a slug into a knowledge
+# directory path. Echoes it; returns 1 for an unhandled tier.
+#
+# XACA-0934-018: this join used to be written out twice — once inside
+# _kb_knowledge_destination_guard (to decide) and again at the kb-knowledge-add
+# call site (to write). Two literals for one path is a correctness hazard, not
+# a style nit: if either drifts, the guard silently inspects a DIFFERENT
+# directory than the one the write lands in, and every assertion the guard
+# makes becomes a statement about the wrong place. Both spellings now come from
+# here, so drift is impossible rather than merely unlikely.
+#
+# Accepts singular and plural tier spellings because the two families of caller
+# name the tier differently: the guard's contract is singular (agent/team,
+# matching kb-knowledge-add's `tier` variable), while kb-knowledge-promote's
+# refs are plural (agents:/teams:, matching the on-disk directory names).
+
 # _kb_knowledge_tier_dir <tier:agent|agents|team|teams|project|projects> <slug> <write_root>
 # The ONE place that joins a write root, a tier, and a slug into a knowledge
 # directory path. Echoes it; returns 1 for an unhandled tier.
@@ -3987,12 +4051,23 @@ _kb_knowledge_destination_guard() {
             return 1
             ;;
         project)
-            # Caller only reaches this case for a non-exact-match slug (see
-            # kb-knowledge-add's explicit-slug branch). Empty suggestions =
-            # ordinary unrelated name, return 0 fast (no friction added).
-            local -a proj_suggestions
-            proj_suggestions=($(_kb_knowledge_suggest_team_slugs "$slug"))
-            if (( ${#proj_suggestions[@]} == 0 )); then
+            # Caller only reaches this case for a slug kb-knowledge-add's own
+            # EXACT registered-team-id routing did not already handle (see
+            # its explicit-slug branch, which also fail-closes an exact match
+            # whose kanban dir is missing/unresolvable — XACA-0888-043,
+            # rather than falling through to here). XACA-0888-045: gate
+            # PRECISELY via _kb_knowledge_project_gate_teams — see its header
+            # for why the old fuzzy "did you mean" matcher was the wrong tool
+            # for a gating decision. Empty match = ordinary unrelated name,
+            # return 0 fast (no friction added).
+            local -a proj_gate_keys
+            proj_gate_keys=()
+            local _pg_key _pg_reason
+            while IFS=$'\t' read -r _pg_key _pg_reason; do
+                [[ -z "$_pg_key" ]] && continue
+                proj_gate_keys+=("$_pg_key")
+            done < <(_kb_knowledge_project_gate_teams "$slug")
+            if (( ${#proj_gate_keys[@]} == 0 )); then
                 return 0
             fi
 
@@ -4005,18 +4080,22 @@ _kb_knowledge_destination_guard() {
             fi
 
             if [[ "$allow" == "true" ]]; then
-                echo "Warning: '${slug}' is not a registered team, but looks like one — creating a NEW project directory named '${slug}' because --allow-new-project was passed." >&2
+                echo "Warning: '${slug}' matches a registered team's identity — creating a NEW project directory named '${slug}' anyway because --allow-new-project was passed." >&2
                 return 0
             fi
 
-            echo "Error: '${slug}' is not a registered team, but looks enough like one that this write is probably misrouted — refusing to create a new project-tier directory under that name." >&2
-            if (( ${#proj_suggestions[@]} == 1 )); then
-                echo "  Did you mean the '${proj_suggestions[1]}' team's OWN project-knowledge base?" >&2
-                echo "  Fix: kb-knowledge-add project ${proj_suggestions[1]} \"<title>\"  # auto-routes there (XACA-0888)" >&2
+            echo "Error: '${slug}' matches a registered team's identity — refusing to create a new project-tier directory under that name instead of routing to the team's own project-knowledge base." >&2
+            if (( ${#proj_gate_keys[@]} == 1 )); then
+                echo "  Did you mean the '${proj_gate_keys[1]}' team's OWN project-knowledge base?" >&2
+                echo "  Fix: kb-knowledge-add project ${proj_gate_keys[1]} \"<title>\"  # auto-routes there (XACA-0888)" >&2
             else
-                echo "  Did you mean one of these teams: ${proj_suggestions[*]}" >&2
+                echo "  '${slug}' matches MULTIPLE teams: ${proj_gate_keys[*]}" >&2
+                local _pg_i
+                for (( _pg_i = 1; _pg_i <= ${#proj_gate_keys[@]}; _pg_i++ )); do
+                    echo "  Fix: kb-knowledge-add project ${proj_gate_keys[_pg_i]} \"<title>\"  # auto-routes to that team (XACA-0888)" >&2
+                done
             fi
-            echo "  Why: a project slug shaped like a team id is the exact signature of XACA-0888 defect C — a plausible destination that attracted no scrutiny." >&2
+            echo "  Why: a project slug that matches a registered team's identity is the exact signature of XACA-0888 defect C — a plausible destination that attracted no scrutiny." >&2
             echo "  Override: pass --allow-new-project if '${slug}' really is an unrelated project name." >&2
             return 1
             ;;
@@ -4038,34 +4117,29 @@ _kb_knowledge_yaml_field() {
     grep -m1 "^${field}:" "$file" 2>/dev/null | sed "s/^${field}:[[:space:]]*//" | tr -d '"'"'"
 }
 
-# _kb_registry_lookup_repo_owner <repo_root> (XACA-0888)
-# Registry scan factored out of _kb_canonical_kanban_dir_for_repo (which
-# discarded the team id) so the new _kb_knowledge_resolve_project_identity
-# doesn't grow a second reader of team-paths.json. Same ancestor/depth/
-# existence rules; agreeing ids at one depth (e.g. a platform team id and a
-# longer alias for it) pick the lexicographically smallest as key.
-# stdout (rc 0): "<team_key>\t<kanban_dir>". rc 1 = no match. rc 2 = same-
-# depth kanban_dir disagreement (both silent — caller prints its own message).
-_kb_registry_lookup_repo_owner() {
-    local repo_root="${1-}"
-    if [[ -z "$repo_root" ]] || [[ ! -d "$repo_root" ]]; then
-        return 1
-    fi
-
+# _kb_registry_team_working_kanban_pairs (XACA-0888-045)
+# Every registered team entry's "<key>\t<working_dir>\t<kanban_dir>", one per
+# line, for entries that have BOTH fields non-empty. Factored out of
+# _kb_registry_lookup_repo_owner (which used to build this same jq/python
+# query inline) so a second reader — _kb_knowledge_project_gate_teams, which
+# needs the SAME raw pairs to test a slug against each team's repo-root
+# BASENAME — never grows an independent implementation of "read team-paths.json
+# and list working_dir/kanban_dir". Two queries for one registry read is a
+# correctness hazard, same rationale as _kb_knowledge_tier_dir's header.
+_kb_registry_team_working_kanban_pairs() {
     local cfg
     cfg=$(_kb_overlay_config_path)
     [[ -f "$cfg" ]] || return 1
 
-    local pairs=""
     if command -v jq &>/dev/null; then
-        pairs=$(jq -r '
+        jq -r '
             .teams
             | to_entries[]
             | select(.value.working_dir != null and .value.kanban_dir != null and .value.working_dir != "" and .value.kanban_dir != "")
             | "\(.key)\t\(.value.working_dir)\t\(.value.kanban_dir)"
-        ' "$cfg" 2>/dev/null)
+        ' "$cfg" 2>/dev/null
     elif command -v python3 &>/dev/null; then
-        pairs=$(python3 - "$cfg" <<'PYEOF'
+        python3 - "$cfg" <<'PYEOF'
 import json, sys
 cfg = sys.argv[1]
 try:
@@ -4081,8 +4155,26 @@ for key, entry in data.get("teams", {}).items():
     if wd and kd:
         print(f"{key}\t{wd}\t{kd}")
 PYEOF
-)
     fi
+    return 0
+}
+
+# _kb_registry_lookup_repo_owner <repo_root> (XACA-0888)
+# Registry scan factored out of _kb_canonical_kanban_dir_for_repo (which
+# discarded the team id) so the new _kb_knowledge_resolve_project_identity
+# doesn't grow a second reader of team-paths.json. Same ancestor/depth/
+# existence rules; agreeing ids at one depth (e.g. 'ios' +
+# 'mainevent-maineventapp-ios') pick the lexicographically smallest as key.
+# stdout (rc 0): "<team_key>\t<kanban_dir>". rc 1 = no match. rc 2 = same-
+# depth kanban_dir disagreement (both silent — caller prints its own message).
+_kb_registry_lookup_repo_owner() {
+    local repo_root="${1-}"
+    if [[ -z "$repo_root" ]] || [[ ! -d "$repo_root" ]]; then
+        return 1
+    fi
+
+    local pairs=""
+    pairs=$(_kb_registry_team_working_kanban_pairs)
 
     [[ -z "$pairs" ]] && return 1
 
@@ -4752,7 +4844,21 @@ _kb_knowledge_project_layout_guard() {
 # POLICY): prints NOTHING to stdout and returns 1 whenever it cannot
 # determine where to write, never a plausible-looking fallback. Callers MUST
 # check the return code.
+#
+# XACA-0888-044: records WHICH precedence branch produced its answer (or its
+# refusal) in the global $_KB_KP_BRANCH — one of "not-a-git-repo",
+# "config-worktree", "config-container", "env-template", "registry",
+# "sentinel", "ambiguous", "unresolved" — on EVERY return path, success or
+# failure. Also records the repo root it resolved (once known) in
+# $_KB_KP_REPO_ROOT, and, for case 3, the attributed slug in $_KB_KP_SLUG.
+# kb-knowledge-where reads these instead of independently re-deriving which
+# branch would fire: two implementations of the same precedence chain had
+# already drifted twice (a `.git`-internal cwd, and a whitespace-only config
+# value — see kb-knowledge-where's regression tests). `typeset -g`, no
+# subshell needed to set it — same pattern as _kb_protected_tag_of. Always
+# reset FIRST so a caller never reads a stale value from an unrelated call.
 _kb_knowledge_project_path() {
+    typeset -g _KB_KP_BRANCH="" _KB_KP_REPO_ROOT="" _KB_KP_SLUG=""
     local repo_root project_slug
 
     # Worktree-aware root resolution: --show-toplevel returns the worktree dir, not
@@ -4764,6 +4870,7 @@ _kb_knowledge_project_path() {
     local is_work_tree
     is_work_tree=$(git rev-parse --is-inside-work-tree 2>/dev/null)
     if [[ -z "$git_common_dir" || "$is_work_tree" != "true" ]]; then
+        _KB_KP_BRANCH="not-a-git-repo"
         echo "kb: _kb_knowledge_project_path: not inside a git repository (cwd: ${PWD}) — cannot resolve a project-knowledge base." >&2
         echo "  Fix: cd into the git repo this knowledge belongs to, or use the subject/team tier instead (kb-knowledge-add subject|team ...)." >&2
         return 1
@@ -4785,6 +4892,7 @@ _kb_knowledge_project_path() {
         # Feature worktree: --git-common-dir is the absolute main .git; parent is main repo
         repo_root=$(dirname "$git_common_dir")
     fi
+    _KB_KP_REPO_ROOT="$repo_root"
 
     project_slug=$(basename "$repo_root")
 
@@ -4830,6 +4938,11 @@ _kb_knowledge_project_path() {
         config_path="${config_path## }"
         config_path="${config_path%% }"
         if [[ -n "$config_path" ]]; then
+            if [[ "$config_file" == "${repo_root}/.knowledge-config.yml" ]]; then
+                _KB_KP_BRANCH="config-worktree"
+            else
+                _KB_KP_BRANCH="config-container"
+            fi
             # Expand leading ./ relative to the config file's OWN directory (see above)
             if [[ "$config_path" == ./* ]]; then
                 config_path="$(dirname "$config_file")/${config_path#./}"
@@ -4842,6 +4955,7 @@ _kb_knowledge_project_path() {
     # 2. KB_KNOWLEDGE_PROJECT_PATH env var (template-expand {repo_root},
     #    {project}, and {kanban_dir})
     if [[ -n "$KB_KNOWLEDGE_PROJECT_PATH" ]]; then
+        _KB_KP_BRANCH="env-template"
         # XACA-0883 (D1): resolve the canonical kanban dir once so both halves
         # of the fix can use it — (a) the new {kanban_dir} token, and (b) the
         # layout-correction rewrite below. Fails open (empty var) when the repo
@@ -4862,25 +4976,27 @@ _kb_knowledge_project_path() {
         fi
 
         # (b) Layout-correct the existing {repo_root}-derived form (XACA-0883
-        # D1b). Deployed team shells commonly export the identical
+        # D1b). All 55 deployed team shells export the identical
         # '{repo_root}/kanban/knowledge/project'. For container-layout teams
-        # (iOS/Android/Firebase/DNS) repo_root is the git work-tree,
+        # (iOS/Android/Firebase/DNS/MainEvent) repo_root is the git work-tree,
         # a CHILD of the container, while the real kanban/ is the container's —
         # a SIBLING of the work-tree. Unpatched, that template expands to a
-        # shadow kanban/ under the work-tree instead of the canonical one.
-        # Re-root any expansion whose "kanban" segment came from {repo_root}
-        # onto the canonical kanban dir, preserving whatever comes after
-        # "kanban" verbatim (a team could point the template somewhere other
-        # than knowledge/project under kanban/, so this must not hardcode
-        # that suffix).
+        # shadow kanban/ under the work-tree instead of the canonical one
+        # (measured 2026-08-19, excl. INDEX.md: iOS 1, Firebase 33). Re-root any
+        # expansion whose "kanban" segment came from {repo_root} onto the
+        # canonical kanban dir, preserving whatever comes after "kanban"
+        # verbatim (a team could point the template somewhere other than
+        # knowledge/project under kanban/, so this must not hardcode that
+        # suffix).
         #
-        # FAIL-OPEN, non-negotiable (XACA-0883 guard contract §3.2): if the
-        # canonical dir can't be resolved with confidence, or it's identical
-        # to {repo_root}/kanban (the kanban-inside-repo case, where no
-        # rewrite is needed), emit exactly what the pre-fix code emitted.
-        # There are unregistered container/freelance projects the registry
-        # cannot resolve; breaking them would be a worse regression than the
-        # bug being fixed. Silent — no warning spam on every call.
+        # FAIL-OPEN, non-negotiable (XACA-0883 guard contract §3.2 / brief L1):
+        # if the canonical dir can't be resolved with confidence, or it's
+        # identical to {repo_root}/kanban (the kanban-inside-repo case, where
+        # no rewrite is needed), emit exactly what the pre-fix code emitted.
+        # There are unregistered container projects on this machine (Bandwear
+        # x2, Caravan, 2 DNS sub-repos) the registry cannot resolve; breaking
+        # them would be a worse regression than the bug being fixed. Silent —
+        # no warning spam on every call.
         if [[ -n "$canonical_kanban_dir" ]] && [[ "$canonical_kanban_dir" != "${repo_root}/kanban" ]]; then
             local legacy_kanban_prefix="${repo_root}/kanban"
             # XACA-0883-017: the prefix must end on a PATH-SEGMENT boundary.
@@ -4907,8 +5023,16 @@ _kb_knowledge_project_path() {
     _kp_identity=$(_kb_knowledge_resolve_project_identity "$repo_root")
     _kp_identity_rc=$?
     if (( _kp_identity_rc != 0 )); then
+        _KB_KP_BRANCH="unresolved"
+        (( _kp_identity_rc == 2 )) && _KB_KP_BRANCH="ambiguous"
         return "$_kp_identity_rc"
     fi
+    # "<slug>\t<origin:registry|sentinel>\t<kanban_dir>" — field 2 IS the
+    # branch label (kb-knowledge-resolve_project_identity's own contract),
+    # field 3 is the kanban dir, field 1 the attributed slug.
+    _KB_KP_SLUG="${_kp_identity%%$'\t'*}"
+    local _kp_origin="${_kp_identity#*$'\t'}"
+    _KB_KP_BRANCH="${_kp_origin%%$'\t'*}"
     # Field 3 of "<slug>\tregistry|sentinel\t<kanban_dir>".
     echo "${_kp_identity##*$'\t'}/knowledge/project"
 }
@@ -5007,13 +5131,24 @@ _kb_knowledge_project_path_legacy() {
 # indirection.
 #
 # Used by BOTH the writer (kb-knowledge-add's bare-project branch) and the
-# reader (kb-knowledge-search's unfiltered "current project" resolution, and
-# kb-knowledge-reindex's project_path reindex) so a local-redirected write is
-# never orphaned from search/reindex.
+# reader (kb-knowledge-search's unfiltered "current project" resolution) so
+# a local-redirected write is never orphaned from search.
 _kb_knowledge_project_path_effective() {
     local base
     base=$(_kb_knowledge_project_path) || return $?
+    _kb_knowledge_project_path_local_redirect "$base"
+}
 
+# _kb_knowledge_project_path_local_redirect <base> (XACA-0888-044)
+# The post-processing step _kb_knowledge_project_path_effective applies on
+# top of the resolver's raw answer, factored out so kb-knowledge-where can
+# apply the IDENTICAL redirect when reporting the effective path instead of
+# growing its own copy of this 4-line check. Deterministic function of
+# (base, current session) — not itself a precedence branch, so recomputing
+# it a second time (rather than threading it through a global) cannot drift
+# from what _kb_knowledge_project_path_effective did with the same base.
+_kb_knowledge_project_path_local_redirect() {
+    local base="${1-}"
     local global_root
     global_root=$(_kb_knowledge_global_root)
     if [[ "$base" == "${global_root}/projects/"* ]] && _kb_current_session_is_local_only_team; then
@@ -5023,6 +5158,7 @@ _kb_knowledge_project_path_effective() {
         return 0
     fi
     echo "$base"
+    return 0
 }
 
 # kb-knowledge-where (XACA-0888-015)
@@ -5030,11 +5166,23 @@ _kb_knowledge_project_path_effective() {
 # project-knowledge path AND which branch of _kb_knowledge_project_path's
 # resolution chain produced it — every silent-misfile defect this ticket
 # fixes was invisible for want of a way to ask the resolver what it decided.
-# RE-DERIVES which branch would fire (cheap precedence checks only) rather
-# than threading state out of _kb_knowledge_project_path — same rationale as
-# kb-context-show's own header comment. It does NOT re-implement path
-# construction; it calls the real resolver once for the actual path, so the
-# two can disagree only on the LABEL, never the path.
+#
+# XACA-0888-044: this used to RE-DERIVE which branch would fire with its own
+# independent git-repo / config-file / whitespace-trimming checks, and that
+# second implementation drifted from the real resolver twice — a cwd INSIDE
+# `.git` (the resolver's -029 is-inside-work-tree check has no counterpart
+# here) and a whitespace-only `project_knowledge_path` (the resolver trims
+# ONE space per side; this used to strip ALL whitespace, so a value the
+# resolver treated as present read here as absent). Both are the same class
+# of bug: two implementations of one precedence chain WILL disagree.
+#
+# Fixed at the root, not per-instance: _kb_knowledge_project_path now
+# records which branch it took in the global $_KB_KP_BRANCH on EVERY return
+# path (see its header). This function calls it DIRECTLY — a plain
+# redirect, never `$(...)`, which forks a subshell in zsh and would discard
+# that `typeset -g` write — then reports the resolver's own recorded label.
+# It does NOT re-implement precedence; the label and the path can now only
+# ever agree, because both come from the one real call.
 kb-knowledge-where() {
     if [[ "${1-}" == "--help" ]] || [[ "${1-}" == "-h" ]]; then
         echo "Usage: kb-knowledge-where"
@@ -5046,86 +5194,47 @@ kb-knowledge-where() {
         return 0
     fi
 
-    local git_common_dir repo_root
-    git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
-    if [[ -z "$git_common_dir" ]]; then
-        echo "Project-knowledge path: <unresolved>"
-        echo "Resolution branch:      unresolved (not inside a git repository)"
-        echo "  cwd: ${PWD}"
-        echo "  Fix: cd into the git repo this knowledge belongs to, or set KB_KNOWLEDGE_PROJECT_PATH, or add a .knowledge-config.yml, or use the subject/team tier instead."
+    # Direct, in-process call (no `$(...)`) so $_KB_KP_BRANCH survives —
+    # capture its stdout via a real temp file instead (a plain `>` redirect
+    # does not fork). stderr is left attached to the caller's fd2 as before,
+    # so the resolver's own diagnostic (e.g. the -039 "git >= 2.31 is
+    # required" message) still surfaces exactly once.
+    local _kw_tmp
+    _kw_tmp=$(mktemp "${TMPDIR:-/tmp}/kb-knowledge-where.XXXXXX" 2>/dev/null) || {
+        echo "kb-knowledge-where: mktemp failed" >&2
         return 1
-    fi
-    # XACA-0888: prefer the absolute form (git >= 2.31) so a SUBDIRECTORY of
-    # the main repo reports its true repo root here, not a relative ".."
-    # (git_common_dir is CWD-relative, e.g. "../.git" one level down, which
-    # only equals literally ".git" at the repo root itself) — same -030/-039
-    # shape _kb_knowledge_project_path and _kb_knowledge_resolve_project_identity
-    # already use.
-    local git_common_dir_abs
-    git_common_dir_abs=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
-    if [[ -n "$git_common_dir_abs" ]]; then
-        repo_root=$(dirname "$git_common_dir_abs")
-    elif [[ "$git_common_dir" == ".git" ]]; then
-        repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
-    else
-        repo_root=$(dirname "$git_common_dir")
-    fi
+    }
+    _kb_knowledge_project_path > "$_kw_tmp"
+    local _kw_rc=$?
+    local base
+    base=$(<"$_kw_tmp")
+    rm -f "$_kw_tmp"
+    local branch="${_KB_KP_BRANCH:-unresolved}"
 
-    local branch="" slug="" team=""
-    local canonical container
-    canonical=$(_kb_canonical_kanban_dir_for_repo "$repo_root" 2>/dev/null) || canonical=""
-    if [[ -n "$canonical" ]]; then
-        container=$(dirname "$canonical")
-    else
-        container=""
-    fi
-
-    # Same precedence as _kb_knowledge_project_path: config-worktree, then
-    # config-container, then env-template, then registry/sentinel.
-    if [[ -f "${repo_root}/.knowledge-config.yml" ]] && \
-       [[ -n "$(grep -m1 '^project_knowledge_path:' "${repo_root}/.knowledge-config.yml" 2>/dev/null | sed 's/^project_knowledge_path:[[:space:]]*//' | tr -d '"'"'" | tr -d '[:space:]')" ]]; then
-        branch="config-worktree"
-    elif [[ -n "$container" ]] && [[ "$container" != "$repo_root" ]] && [[ -f "${container}/.knowledge-config.yml" ]] && \
-         [[ -n "$(grep -m1 '^project_knowledge_path:' "${container}/.knowledge-config.yml" 2>/dev/null | sed 's/^project_knowledge_path:[[:space:]]*//' | tr -d '"'"'" | tr -d '[:space:]')" ]]; then
-        branch="config-container"
-    elif [[ -n "$KB_KNOWLEDGE_PROJECT_PATH" ]]; then
-        branch="env-template"
-    else
-        local identity identity_rc
-        identity=$(_kb_knowledge_resolve_project_identity "$repo_root")
-        identity_rc=$?
-        if (( identity_rc == 0 )); then
-            slug="${identity%%$'\t'*}"
-            team="$slug"
-            branch="${identity#*$'\t'}"
-            branch="${branch%%$'\t'*}"
-        elif (( identity_rc == 2 )); then
-            branch="ambiguous"
+    if (( _kw_rc != 0 )); then
+        echo "Project-knowledge path: <unresolved>"
+        if [[ "$branch" == "not-a-git-repo" ]]; then
+            echo "Resolution branch:      unresolved (not inside a git repository)"
+            echo "  cwd: ${PWD}"
+            echo "  Fix: cd into the git repo this knowledge belongs to, or set KB_KNOWLEDGE_PROJECT_PATH, or add a .knowledge-config.yml, or use the subject/team tier instead."
         else
-            branch="unresolved"
+            echo "Resolution branch:      ${branch}"
+            echo "  repo: ${_KB_KP_REPO_ROOT}"
+            echo "  Fix: register this repo's working_dir in ~/.aiteamforge/team-paths.json, or drop a '.kb-team' sentinel (one line: <team-id>) at the repo root, or set KB_KNOWLEDGE_PROJECT_PATH to an explicit absolute path for this session."
         fi
-    fi
-
-    # stderr silenced: the branch-detection pass above already surfaced the
-    # diagnostic once; this call would otherwise repeat it.
-    local resolved rc
-    resolved=$(_kb_knowledge_project_path_effective 2>/dev/null)
-    rc=$?
-
-    if (( rc != 0 )); then
-        echo "Project-knowledge path: <unresolved>"
-        echo "Resolution branch:      ${branch:-unresolved}"
-        echo "  repo: ${repo_root}"
         return 1
     fi
+
+    local resolved
+    resolved=$(_kb_knowledge_project_path_local_redirect "$base")
 
     echo "Project-knowledge path: ${resolved}"
     echo "Resolution branch:      ${branch}"
-    if [[ -n "$slug" ]]; then
-        echo "Slug:                    ${slug}"
-        echo "Team:                    ${team}"
+    if [[ -n "$_KB_KP_SLUG" ]]; then
+        echo "Slug:                    ${_KB_KP_SLUG}"
+        echo "Team:                    ${_KB_KP_SLUG}"
     fi
-    echo "  repo: ${repo_root}"
+    echo "  repo: ${_KB_KP_REPO_ROOT}"
     return 0
 }
 
@@ -6647,8 +6756,13 @@ kb-knowledge-add() {
         echo "             Does NOT waive either agent-tier check above."
         echo "  --allow-new-project"
         echo "             named-project tier only (XACA-0888): create a project"
-        echo "             directory whose slug looks like a registered team id."
-        echo "             An ordinary project name is never gated."
+        echo "             directory whose slug matches a registered team's identity —"
+        echo "             case-insensitively equals a team id, or equals the basename"
+        echo "             of a team's own repo root (XACA-0888-045). Also waives the"
+        echo "             fail-closed refusal when the slug IS an exact registered"
+        echo "             team id but that team's kanban directory is missing or"
+        echo "             unresolvable (XACA-0888-043). An ordinary project name is"
+        echo "             never gated."
         echo ""
         echo "Examples:"
         echo "  kb-knowledge-add agent emh \"kapt error patterns\""
@@ -6827,13 +6941,55 @@ kb-knowledge-add() {
                 # routes to that team's own canonical base instead of minting
                 # ~/knowledge/projects/<slug> (e.g. 'project ios'). A
                 # near-miss is caught below by _kb_knowledge_destination_guard.
+                #
+                # XACA-0888-046: a LOCAL-ONLY session (finance-personal /
+                # legal-coparenting / medical-general) never gets this
+                # routing — it is a CROSS-directory write (target_dir points
+                # at ANOTHER team's real, possibly fleet-synced, kanban dir
+                # on disk), and a personal session must never write
+                # PII-risk content outside its own local root, no matter
+                # what slug it types. Pre-A3 behaviour is preserved for
+                # these sessions: skip straight to the guard below, which
+                # only ever writes under write_root (already local_root
+                # here per the redirect two lines up), never elsewhere.
+                local _kb_add_proj_exact_team=false
                 local _kb_add_proj_team_kd=""
-                if _kb_knowledge_registered_team_slugs | grep -qxF "$proj_slug"; then
+                if ! _kb_current_session_is_local_only_team && \
+                   _kb_knowledge_registered_team_slugs | grep -qxF "$proj_slug"; then
+                    _kb_add_proj_exact_team=true
                     _kb_add_proj_team_kd=$(_kb_get_kanban_dir "$proj_slug" 2>/dev/null) || _kb_add_proj_team_kd=""
                 fi
-                if [[ -n "$_kb_add_proj_team_kd" ]] && [[ -d "$_kb_add_proj_team_kd" ]]; then
+                if [[ "$_kb_add_proj_exact_team" == "true" ]] && [[ -n "$_kb_add_proj_team_kd" ]] && [[ -d "$_kb_add_proj_team_kd" ]]; then
                     target_dir="${_kb_add_proj_team_kd}/knowledge/project"
                     echo "Note: '${proj_slug}' is a registered team — routing to its own project-knowledge base at ${target_dir} instead of creating projects/${proj_slug} (XACA-0888)." >&2
+                elif [[ "$_kb_add_proj_exact_team" == "true" ]]; then
+                    # XACA-0888-043: an EXACT registered-team-id slug whose
+                    # kanban dir is missing/unresolvable used to fall through
+                    # to the guard below — but the guard's near-miss matcher
+                    # deliberately EXCLUDES an exact match of itself (it only
+                    # suggests OTHER slugs), so with no similarly-named
+                    # sibling team it found nothing to gate on and returned 0,
+                    # fail-OPEN, minting ~/knowledge/projects/<team-id> in the
+                    # SYNCED global root (defect C surviving the fix).
+                    # Fail CLOSED here instead — this branch is reached ONLY
+                    # for a slug that IS a registered team id, so "not a
+                    # registered team" would also be a false claim; report
+                    # what's actually true (registered, but unresolvable).
+                    if [[ "$flag_allow_new_project" == "true" ]]; then
+                        echo "Warning: '${proj_slug}' is a registered team, but its kanban directory could not be resolved — creating a project-tier directory named '${proj_slug}' anyway because --allow-new-project was passed." >&2
+                        target_dir=$(_kb_knowledge_tier_dir project "$proj_slug" "$write_root")
+                    else
+                        local _kb_add_proj_kd_err=""
+                        _kb_add_proj_kd_err=$(_kb_get_kanban_dir "$proj_slug" 2>&1 >/dev/null)
+                        if [[ -n "$_kb_add_proj_team_kd" ]]; then
+                            echo "Error: '${proj_slug}' is a registered team, but its kanban directory (${_kb_add_proj_team_kd}) does not exist on this machine — refusing to create a new project-tier directory named '${proj_slug}' instead of the team's own (missing) project-knowledge base." >&2
+                        else
+                            echo "Error: '${proj_slug}' is a registered team, but its kanban directory could not be resolved on this machine — refusing to create a new project-tier directory named '${proj_slug}' instead of the team's own project-knowledge base." >&2
+                        fi
+                        [[ -n "$_kb_add_proj_kd_err" ]] && echo "  ${_kb_add_proj_kd_err}" >&2
+                        echo "  Override: pass --allow-new-project if '${proj_slug}' really is meant as a standalone project name, not the team." >&2
+                        return 1
+                    fi
                 else
                     _kb_knowledge_destination_guard project "$proj_slug" "$write_root" "$flag_allow_new_project" || return 1
                     target_dir=$(_kb_knowledge_tier_dir project "$proj_slug" "$write_root")
@@ -6845,9 +7001,12 @@ kb-knowledge-add() {
                 # local_root for a local-only session — an in-repo
                 # .knowledge-config.yml / KB_KNOWLEDGE_PROJECT_PATH override is
                 # already outside the synced repo and passes through unchanged.
-                # XACA-0888: rc IS checked now -- a resolver refusal used to leave
-                # target_dir empty and fall through to the layout guard, which
-                # fails OPEN on an empty string.
+                #
+                # XACA-0888: rc IS checked now (`|| return 1`) — previously
+                # wasn't, so a resolver refusal left target_dir empty and fell
+                # through to _kb_knowledge_project_layout_guard, which fails
+                # OPEN on an empty string, so the write proceeded against a
+                # bogus (cwd-relative) destination instead of refusing.
                 target_dir=$(_kb_knowledge_project_path_effective) || return 1
                 # XACA-0754-014: only the global-root FALLBACK case is
                 # ambiguity-sensitive — an in-repo/env-var override already
@@ -7035,9 +7194,24 @@ FRONTMATTER
     # derivation) would previously accumulate silently across every
     # subsequent call until someone ran a whole-tree kb-knowledge-validate by
     # hand, exactly the blind spot XACA-0991 exists to close. --file scopes
-    # kb-knowledge-validate to just this one path — sub-second, and the three
-    # whole-tree structural checks it still runs (duplicate ID-slot, INDEX
-    # orphan, duplicate persona-dir) are directory/filename-listing cheap.
+    # the CONTENT-validation loop to just this one path, but the three
+    # whole-tree structural checks (duplicate ID-slot, INDEX orphan,
+    # duplicate persona-dir) still run over the FULL tree every call — they
+    # are NOT sub-second and NOT "directory/filename-listing cheap" in
+    # aggregate. XACA-1080 found this claim false as originally written (a
+    # bare adjective with no measurement behind it: filed 2026-09-04 after
+    # this call measured 249,691ms in production) and replaced the fork-heavy
+    # INDEX-orphan scan with a single awk pass per file (XACA-1080-002),
+    # which was 89.5% of wall time pre-fix. Post-fix MEASUREMENT, not a
+    # target: 87s for `kb-knowledge-validate --quiet --file <entry>`,
+    # 2026-09-11, against 184 INDEX.md files / 17,667 total lines under
+    # ~/knowledge + ~/knowledge-local (`find ~/knowledge ~/knowledge-local
+    # -name INDEX.md | wc -l`, then `... -exec cat {} + | wc -l`), machine
+    # under concurrent fleet load (`uptime` showed load avg ~8-23, 67 users —
+    # this number is NOT a quiet-machine figure). If a future --file call
+    # runs materially slower than this at a similar INDEX.md count, treat it
+    # as a real regression to profile (XACA-1080-001's instrumented-profile
+    # method), not as machine noise to wave off.
     #
     # `local out; out=$(cmd)` is split across two statements deliberately —
     # `local out=$(cmd)` would fold local's own (always-0) exit status over

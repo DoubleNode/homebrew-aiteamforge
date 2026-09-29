@@ -6,6 +6,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-0888 (3/3) PR #985 review-round fix** — port of the canonical fixes for 2 blocking + 3
+  advisory findings. `kb-knowledge-add`'s explicit-slug branch now fails CLOSED (not open into the
+  synced global root) for an EXACT registered-team-id slug whose kanban dir is missing or
+  unresolvable, with a truthful message (never "is not a registered team" for a team that IS
+  registered) — and this routing is skipped entirely for a local-only session, which keeps its
+  pre-A3 behaviour and never writes into another team's kanban dir. `_kb_knowledge_destination_guard`'s
+  `project` case now gates via new `_kb_knowledge_project_gate_teams` (case-insensitive exact team id,
+  or the basename of a registered team's own repo root — a basename can name MULTIPLE teams) instead
+  of the fuzzy prefix/substring "did you mean" matcher, which over-gated ordinary project names
+  (`ios-app`, `dnsframework`, `firebase-functions`, `commander`). New `_kb_registry_team_working_kanban_pairs`
+  factors the registry-pairs read out of `_kb_registry_lookup_repo_owner` so the new basename-matcher
+  never grows an independent reader of `team-paths.json`. `_kb_knowledge_project_path` now records
+  which precedence branch produced its answer (or refusal) in `typeset -g $_KB_KP_BRANCH` (plus
+  `$_KB_KP_REPO_ROOT`/`$_KB_KP_SLUG`) on every return path; `kb-knowledge-where` reads that instead of
+  re-deriving the branch with its own independent checks, which had drifted from the real resolver
+  twice (a cwd inside `.git`; a whitespace-only `.knowledge-config.yml` value). New
+  `_kb_knowledge_project_path_local_redirect` factors the local-only-session redirect step out of
+  `_kb_knowledge_project_path_effective` so `kb-knowledge-where` applies the identical redirect
+  instead of growing its own copy. Ported byte-identical to both
+  `share/templates/kanban/kanban-helpers.template.sh` and `share/templates/aliases/kanban-aliases.sh`;
+  see the outer `CHANGELOG.md`'s XACA-0888 (3/3) fix-round entry for canonical test coverage.
 - **XACA-1343 (PR 2a/4)** — ships `share/scripts/release_template_render.py`, the shared renderer for
   release content-profile templates (`{{path}}`, `{{#each}}`, `{{#if}}`, trailing-`?` line drop, HTML
   comments stripped). Fails closed on a missing required value, so a CR is never published with a
