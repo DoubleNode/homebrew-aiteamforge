@@ -34,6 +34,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_TZ = "America/Chicago"
 
+
+class FactSetError(ValueError):
+    """The release/CR record is malformed in a way that would make a wrong fact set.
+
+    Raised (fail closed) instead of skipping or guessing when a row array holds a
+    non-object row, or an array field is not an array. The message names the array
+    and the index, e.g. ``release.notices[0] is NoneType, expected an object``.
+    """
+
 # name -> {type, source, example, kinds}. ``kinds`` lists the profile kinds that
 # use the fact in the Academy defaults or the Main Event seed; the fact set itself
 # is one shared dict for every kind. ``source`` names the engine record field.
@@ -85,8 +94,8 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
     "cr.title": {"type": "string", "source": "CR record `title`", "example": "[Sep 28 2026] Release: iOS Faster checkout",
                  "kinds": ["cr-record", "notice"]},
     "cr.risk": {"type": "string", "source": "CR record `risk`", "example": "Low", "kinds": ["cr-record"]},
-    "cr.scheduledWindow": {"type": "string", "source": "CR record `deploy_window_planned`, as recorded",
-                           "example": "Oct 02 2026 06:00-08:00 CT", "kinds": ["cr-record", "notice"]},
+    "cr.scheduledWindow": {"type": "string", "source": "CR record `deploy_window_planned`, team timezone, `MMM DD YYYY hh:mm AM/PM TZ`; an unparseable value is passed through as recorded",
+                           "example": "Oct 02 2026 06:00 AM CDT", "kinds": ["cr-record", "notice"]},
     "cr.approver": {"type": "string", "source": "CR record `approver`", "example": "Change Advisory Board",
                     "kinds": ["cr-record"]},
     "cr.approvalAssumed": {"type": "boolean", "source": "CR record `approval_assumed`", "example": "true",
@@ -110,7 +119,7 @@ CANONICAL_FACTS: Dict[str, Dict[str, Any]] = {
                          "kinds": ["cr-record"]},
     "prod.deployedAt": {"type": "string", "source": "CR record `cr_deployed_prod_at`, team timezone",
                         "example": "Oct 02 2026 06:12 AM CDT", "kinds": ["cr-record"]},
-    "prod.soak2h": {"type": "string", "source": "release `soak.2h`, else result of the GAMMA test named like `soak` + `2h`; \"pending\" if none",
+    "prod.soak2h": {"type": "string", "source": "release `soak.2h`, else result of the GAMMA test named like `soak` + `2h` as a whole token (`soak 12h` does not match; `2 h` does, `2hr` does not); \"pending\" if none",
                     "example": "PASS", "kinds": ["cr-record"]},
     "prod.soak24h": {"type": "string", "source": "as `prod.soak2h`, for `24h`", "example": "pending",
                      "kinds": ["cr-record"]},
@@ -234,6 +243,49 @@ def _get(rec: Optional[Dict[str, Any]], *names: str, default: Any = "") -> Any:
     return default
 
 
+def _rows(value: Any, name: str, *, allow_str: bool = False) -> List[Any]:
+    """Validate a row array: every row must be an object (or, if ``allow_str``, a string).
+
+    Fail closed: a malformed row raises FactSetError naming the array and index
+    rather than being skipped, because a skipped row is a silently wrong record.
+    """
+    if value is None or value == []:
+        return []
+    if not isinstance(value, list):
+        raise FactSetError("%s is %s, expected an array" % (name, type(value).__name__))
+    for i, row in enumerate(value):
+        if isinstance(row, dict) or (allow_str and isinstance(row, str)):
+            continue
+        raise FactSetError("%s[%d] is %s, expected an object" % (name, i, type(row).__name__))
+    return value
+
+
+def _tests(release: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return _rows(release.get("tests"), "tests")
+
+
+def _stages(release: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """``stages`` mapping with each value an object (a null stage entry reads as {})."""
+    st = release.get("stages")
+    if st is None:
+        return {}
+    if not isinstance(st, dict):
+        raise FactSetError("stages is %s, expected an object" % type(st).__name__)
+    out = {}
+    for k, v in st.items():
+        if v is not None and not isinstance(v, dict):
+            raise FactSetError("stages.%s is %s, expected an object" % (k, type(v).__name__))
+        out[k] = v or {}
+    return out
+
+
+def _waiver(stage: Dict[str, Any], stage_name: str) -> Optional[Dict[str, Any]]:
+    w = stage.get("waiver")
+    if w is not None and not isinstance(w, dict):
+        raise FactSetError("stages.%s.waiver is %s, expected an object" % (stage_name, type(w).__name__))
+    return w
+
+
 # ----------------------------------------------------- scope-exclusion hook
 def apply_excluded_from_scope(items: List[Dict[str, Any]],
                               excluded: Optional[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
@@ -250,7 +302,8 @@ def apply_excluded_from_scope(items: List[Dict[str, Any]],
 # ------------------------------------------------------------ assembly
 def _items(release: Dict[str, Any]) -> List[Dict[str, Any]]:
     out = []
-    for it in release.get("items") or []:
+    # a bare string is the legacy title-only shorthand; any other non-object raises
+    for it in _rows(release.get("items"), "items", allow_str=True):
         if isinstance(it, dict):
             row = {"id": str(it.get("id", "")), "title": str(it.get("title", ""))}
             if it.get("category") is not None:
@@ -262,8 +315,8 @@ def _items(release: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _stage_names(release: Dict[str, Any]) -> List[str]:
-    names = list((release.get("stages") or {}).keys())
-    for t in release.get("tests") or []:
+    names = list(_stages(release))
+    for t in _tests(release):
         if t.get("stage") and t["stage"] not in names:
             names.append(t["stage"])
     return sorted(names, key=lambda s: STAGE_ORDER.index(s) if s in STAGE_ORDER else len(STAGE_ORDER))
@@ -271,8 +324,8 @@ def _stage_names(release: Dict[str, Any]) -> List[str]:
 
 def _waived_ids(release: Dict[str, Any]) -> set:
     ids = set()
-    for st in (release.get("stages") or {}).values():
-        for tid in ((st or {}).get("waiver") or {}).get("tests") or []:
+    for name, st in _stages(release).items():
+        for tid in (_waiver(st, name) or {}).get("tests") or []:
             ids.add(tid)
     return ids
 
@@ -283,7 +336,7 @@ def build_stage_facts(release_record: Dict[str, Any], stage_name: str, *, tz: st
     build_fact_set() calls this for ``release.currentStage``. A caller that
     renders one table per stage calls it per stage and sets ``facts["stage"]``.
     """
-    recs = [t for t in (release_record.get("tests") or []) if t.get("stage") == stage_name]
+    recs = [t for t in _tests(release_record) if t.get("stage") == stage_name]
     row_of = {t.get("id"): i + 1 for i, t in enumerate(recs)}
     waived = _waived_ids(release_record)
     rows, totals = [], {"automated": 0, "manual": 0, "pass": 0, "fail": 0, "waived": 0}
@@ -322,7 +375,7 @@ def _by_stage(release: Dict[str, Any], tz: str) -> List[Dict[str, Any]]:
 def _failures(release: Dict[str, Any], tz: str) -> List[Dict[str, Any]]:
     out = []
     for name in _stage_names(release):
-        recs = [t for t in (release.get("tests") or []) if t.get("stage") == name]
+        recs = [t for t in _tests(release) if t.get("stage") == name]
         row_of = {t.get("id"): i + 1 for i, t in enumerate(recs)}
         for i, t in enumerate(recs, start=1):
             if t.get("result") == "FAIL":
@@ -332,13 +385,25 @@ def _failures(release: Dict[str, Any], tz: str) -> List[Dict[str, Any]]:
     return out
 
 
+def _soak_token(which: str) -> "re.Pattern[str]":
+    """Whole-token duration match: ``2h`` must not be found inside ``12h``/``22h``/``72h``.
+
+    No digit may precede the number and no letter/digit may follow the ``h``, so
+    ``soak2h``, ``soak-2h`` and ``soak 2 h`` match; ``soak 12h``, ``soak 124h`` (for
+    24h), ``2hr`` and ``2hours`` do not.
+    """
+    num = which[:-1] if which.endswith("h") else which
+    return re.compile(r"(?<![0-9])%s\s*h(?![a-z0-9])" % re.escape(num), re.I)
+
+
 def _soak(release: Dict[str, Any], which: str) -> str:
     explicit = (release.get("soak") or {}).get(which)
     if explicit:
         return str(explicit)
-    for t in release.get("tests") or []:
+    token = _soak_token(which)
+    for t in _tests(release):
         name = str(t.get("test", "")).lower()
-        if t.get("stage") == "GAMMA" and "soak" in name and which in name and not t.get("supersededBy"):
+        if t.get("stage") == "GAMMA" and "soak" in name and token.search(name) and not t.get("supersededBy"):
             return str(t.get("result", "pending"))
     return "pending"
 
@@ -355,10 +420,16 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
     ``platform_name`` is the wiki.json ``platformName`` fallback for ``release.platform``.
     ``excluded_from_scope`` is the profile's ``excludedFromScope`` block, forwarded to
     apply_excluded_from_scope() (a no-op until XACA-1343-006).
-    Inputs are never mutated.
+    Inputs are never mutated (``content`` is deep-copied too).
+
+    Malformed rows fail closed: a non-object row in ``tests``, ``notices`` (release or
+    CR), the CR activity log or ``stages`` raises FactSetError naming the array and
+    index. ``items`` additionally accepts a bare string as a title-only row.
     """
     rel = copy.deepcopy(release_record or {})
     cr = copy.deepcopy(cr_record) if cr_record is not None else {}
+    _tests(rel)
+    _stages(rel)
     now = now or datetime.now(timezone.utc)
     window = _get(cr, "deploy_window_planned", "deployWindowPlanned")
     current = str(_get(rel, "currentStage", "stage"))
@@ -369,18 +440,18 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
     history = [{
         "state": e.get("to", e.get("state", "")), "verb": e.get("verb", ""), "actor": e.get("actor", ""),
         "timestampCT": _fmt_ts(e.get("ts"), tz), "note": str(e.get("note") or ""),
-    } for e in (cr.get("activity_log") or cr.get("activityLog") or [])]
+    } for e in _rows(cr.get("activity_log") or cr.get("activityLog"), "cr.activity_log")]
 
     waivers = []
-    for st in (rel.get("stages") or {}).values():
-        w = (st or {}).get("waiver")
+    for sname, st in _stages(rel).items():
+        w = _waiver(st, sname)
         if w:
             waivers.append({"by": w.get("by", ""), "reason": w.get("reason", ""), "ts": w.get("ts", ""),
                             "tests": list(w.get("tests") or [])})
 
     notices = [{"ts": n.get("ts", ""), "provider": n.get("provider", ""), "alias": n.get("alias", ""),
                 "template": n.get("template", ""), "ok": bool(n.get("ok")), "error": str(n.get("error") or "")}
-               for n in list(rel.get("notices") or []) + list(cr.get("notices") or [])]
+               for n in _rows(rel.get("notices"), "release.notices") + _rows(cr.get("notices"), "cr.notices")]
 
     facts: Dict[str, Any] = {
         "release": {
@@ -390,10 +461,10 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
             "stageSha": (rel.get("stageSha") or {}).get(current, ""),
             "currentStage": current, "items": items, "foldedItemCount": folded,
             "scopeNote": _get(rel, "scopeNote", default=DEFAULT_SCOPE_NOTE),
-            "stages": [{"name": n, "enteredAt": (rel["stages"][n] or {}).get("enteredAt", ""),
-                        "completedAt": (rel["stages"][n] or {}).get("completedAt") or "",
-                        "status": (rel["stages"][n] or {}).get("status", "")}
-                       for n in _stage_names(rel) if n in (rel.get("stages") or {})],
+            "stages": [{"name": n, "enteredAt": _stages(rel)[n].get("enteredAt", ""),
+                        "completedAt": _stages(rel)[n].get("completedAt") or "",
+                        "status": _stages(rel)[n].get("status", "")}
+                       for n in _stage_names(rel) if n in _stages(rel)],
             "dateMMMDDYYYY": _fmt_date(window, tz) or now.astimezone(_tzinfo(tz)).strftime("%b %d %Y"),
             "releaseType": str(_get(rel, "releaseType", default="Release")).title(),
             "briefTitle": str(_get(rel, "briefTitle", "name")),
@@ -402,7 +473,7 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
         },
         "cr": {
             "id": cr.get("id", ""), "title": cr.get("title", ""), "risk": cr.get("risk", ""),
-            "scheduledWindow": str(window), "approver": cr.get("approver", ""),
+            "scheduledWindow": _fmt_ts(window, tz), "approver": cr.get("approver", ""),
             "approvalAssumed": bool(_get(cr, "approval_assumed", "approvalAssumed", default=False)),
             "approvalBasis": _get(cr, "approval_basis", "approvalBasis"),
             "approvalExpectedAt": _fmt_ts(_get(cr, "cr_approval_expected_at", "approvalExpectedAt", default=None), tz),
@@ -421,7 +492,7 @@ def build_fact_set(release_record: Dict[str, Any], cr_record: Optional[Dict[str,
         "tests": {"byStage": _by_stage(rel, tz), "failuresAndReruns": _failures(rel, tz)},
         "waivers": waivers,
         "notices": notices,
-        "content": dict(content or {}),
+        "content": copy.deepcopy(dict(content or {})),
     }
     return facts
 
@@ -456,10 +527,10 @@ def resolve_aliases(facts: Dict[str, Any]) -> Dict[str, Any]:
     rewrite_aliases() on the template source, which covers every alias. Bracket forms inside a token (``{{items[].title}}``)
     are not renderer syntax and are not supported; use ``{{#each items}}``.
     """
-    out = copy.copy(facts)
+    out = copy.deepcopy(facts)  # the nested setdefault in _assign must never reach the caller's dicts
     for alias, target in DEPRECATED_ALIASES.items():
         try:
-            _assign(out, _strip_arr(alias), _lookup(out, _strip_arr(target)))
+            _assign(out, _strip_arr(alias), copy.deepcopy(_lookup(out, _strip_arr(target))))
         except (KeyError, TypeError):
             continue
     return out

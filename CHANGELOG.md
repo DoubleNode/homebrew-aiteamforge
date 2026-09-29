@@ -11,6 +11,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   that still resolve, and `build_fact_set()`, which assembles the facts a CR/Testing Log/notice renders
   from. The renderer no longer leaves a dangling bullet when an optional value inside a multi-line
   `#each` is empty. `wiki.schema.json`: documentation-only wording fix. Library-only for now.
+  PR #987 round 1: `resolve_aliases()`/`build_fact_set()` never modify the caller's data; soak
+  results match the duration as a whole token (a 12h soak is no longer read as the 2h one);
+  `cr.scheduledWindow` is formatted in the team timezone; a malformed row raises a named error.
 - **XACA-0888 (3/3) PR #985 round 4** — port of the canonical -053 message fix: the project-tier
   gate's local-only-session note is truthful whether the matched team is itself local-only (bare
   `kb-knowledge-add project "<title>"` from its repo) or not (run from that team's session). Ported
