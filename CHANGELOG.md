@@ -24,6 +24,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - Updates and section patches refuse any page that isn't under the configured parent or that
       belongs to another key.
     - `--adopt` claims an existing unlabelled page.
+    - Round 2: `--adopt` refuses if another page already belongs to that key. Keys are
+      case-insensitive, so `CR-Ab` and `CR-aB` are the same record.
     - Section patches work inside page layouts, and refuse replacement text that would duplicate the
       heading.
 - **XACA-1284-016: helpers-template launchers propagate `cc`'s exit status.** All 8 template

@@ -15,6 +15,9 @@ printed record {"pageId","url","version"} itself.
                 [--page-id ID (--stored-version V | --expect-version N) [--adopt]] [--json]
       Identity is a label kb-wiki-<doc>-<key lowercased> (e.g.
       kb-wiki-testing-log-rel-5) stamped on create and required on update.
+      Keys are CASE-INSENSITIVE: CR-Ab and CR-aB are the same record and the
+      same page (real ids exist in both casings, e.g. CR-academy-... and
+      CR-ACADEMY-...; user decision 2026-09-29, XACA-1344-030).
       No --page-id: create. Refuses (exit 1) if the parent is missing/wrong
       type, a page already carries the (doc, key) label, or the title exists.
       With --page-id: update. A missing page is exit 1, NEVER a create; the

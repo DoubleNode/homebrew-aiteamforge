@@ -258,7 +258,9 @@ def identity_label(doc: str, key: str) -> str:
     """Provider-generic identity of the one page for (doc, key):
     `kb-wiki-<doc>-<key lowercased>`, e.g. `kb-wiki-testing-log-rel-5`.
     Lowercase, no spaces, only [a-z0-9._-] (UNCONFIRMED against live
-    Confluence: dots in labels). Anything else is a WikiUsageError."""
+    Confluence: dots in labels). Anything else is a WikiUsageError.
+    Keys are case-INSENSITIVE by design: keys differing only by case are the
+    same record (user decision 2026-09-29, XACA-1344-030)."""
     if doc not in _DOC_TYPES:
         raise WikiUsageError(f"unknown doc type {doc!r}")
     if not isinstance(key, str) or not _KEY_PART.match(key):
@@ -313,6 +315,17 @@ def check_identity(live: WikiPage, label: str, adopt: bool = False) -> bool:
         "(this OVERWRITES its title and body)")
 
 
+def _refuse_if_label_owned_elsewhere(provider: WikiProvider, space: str, label: str,
+                                     page_id: str) -> None:
+    """--adopt must never create a second owner of a (doc, key): if any OTHER
+    page in the space already carries `label`, refuse before any write."""
+    owners = [p.id for p in provider.find_by_label(space, label) if p.id != str(page_id)]
+    if owners:
+        raise WikiDuplicateError(
+            f"page {owners[0]} already carries {label!r}; refusing to adopt page {page_id} "
+            f"as a second page for this record (publish with --page-id {owners[0]})")
+
+
 def publish(provider: WikiProvider, space: str, parent_type: str, parent_id,
             title: str, body: str, page_id: Optional[str] = None,
             stored_version: Optional[int] = None,
@@ -338,6 +351,8 @@ def publish(provider: WikiProvider, space: str, parent_type: str, parent_id,
         live = provider.get_page(page_id)  # missing -> WikiNotFoundError, no create
         check_location(live, space, parent_id)
         needs_label = check_identity(live, label, adopt)
+        if needs_label:
+            _refuse_if_label_owned_elsewhere(provider, space, label, live.id)
         return _guarded_update(provider, live, title, body, stored_version, expect_version,
                                label if needs_label else None)
 
