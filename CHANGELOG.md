@@ -13,6 +13,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     chain. It fails if anything is wrong.
   - The shipped Testing Log and CR Record profiles now include their standard title patterns.
   - With `--json`, a refused publish prints one JSON document that includes the diff.
+  - PR #995 round 1: the `--json` contract now states that stdout is empty on exit 1 or 2 (the
+    reason is on stderr), so check the exit code before parsing.
 - **XACA-1151 (PR-E3a)** — `kb-run-debug` and the worktree switch it uses now behave like the dev-team copy.
   - `kb-run-debug` finds the team from the item ID when no shell context is set, names its session `[Debug] <id>: <title>`, and offers to remove a worktree it created once the session ends.
   - The worktree switch now sends an item that has a `subRepo` into that sub-repo, and warns and asks before running in a directory that is not a git repository. Without a terminal it refuses instead of asking.

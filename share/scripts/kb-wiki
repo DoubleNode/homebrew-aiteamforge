@@ -11,7 +11,9 @@ state in (--page-id, --stored-version) and stores the printed record itself.
 
 Every subcommand takes --team T (default $KB_TEAM) and --json. Without --json
 the output is for humans and NOT stable. With --json stdout is exactly one JSON
-document and nothing else (diagnostics go to stderr). --doc is one of cr,
+document and nothing else (diagnostics go to stderr) on exit 0 and exit 4; on
+exit 1 or 2 stdout is EMPTY (the reason is on stderr) -- check the exit code
+before parsing. --doc is one of cr,
 testing-log, cr-record and must be mapped in the team's wiki.json docTypes.
 --key is REL-... or CR-... (echoed back, never used to look anything up).
 --page-id is numeric.
