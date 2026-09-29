@@ -117,6 +117,8 @@ def _parse_secret(value: str) -> Tuple[str, str]:
     bad = WikiCredentialError(
         "secretRef value must be '<email>:<api_token>' or JSON "
         '{"email":..., "api_token":...}')
+    if not isinstance(value, str):  # bytes/int from a resolver: refuse, never coerce
+        raise bad
     text = value.strip()
     if text.startswith("{"):
         try:
@@ -128,18 +130,33 @@ def _parse_secret(value: str) -> Tuple[str, str]:
         email, sep, token = text.partition(":")
         if not sep:
             raise bad
-    if not (isinstance(email, str) and isinstance(token, str) and email and token):
+    if not (_nonblank_str(email) and _nonblank_str(token)):
         raise bad
     return email, token
 
 
+def _nonblank_str(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+# A scheme-looking prefix ("http:", "https:/x") that is NOT a bare host:port.
+_SCHEME_TYPO = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:(?![0-9]+(?:/|(?![\s\S])))")
+
+
 def _site_to_base(site: str) -> str:
     """Normalize to https://<host>[:port][/path]/wiki. https only (any casing);
-    a bare host gets https://; any other scheme is refused (token over cleartext)."""
-    raw = (site or "").strip()
+    a bare host gets https://; any other scheme is refused (token over cleartext).
+    Scheme typos (http:/x, https//x) and whitespace are refused, never guessed at."""
+    if not isinstance(site, str):
+        raise WikiCredentialError("base URL must be a string")
+    raw = site.strip()
     if not raw:
         raise WikiCredentialError("base URL is empty")
+    if any(c.isspace() for c in raw):
+        raise WikiCredentialError("malformed base URL (whitespace)")
     if "://" not in raw:
+        if _SCHEME_TYPO.match(raw) or raw.lower().startswith(("http/", "https/", "http//", "https//")):
+            raise WikiCredentialError("malformed base URL (scheme typo)")
         raw = "https://" + raw
     try:
         u = urllib.parse.urlsplit(raw)
@@ -171,6 +188,8 @@ def load_credential(
     `resolver`/`resolution_error` are test seams; by default both come from
     release_config_validate (resolve_secret_ref / SecretResolutionError).
     """
+    if base_url is not None and not isinstance(base_url, str):
+        raise WikiCredentialError("baseUrl must be a string")
     if secret_ref:
         if resolver is None:
             mod = _load_secret_module()
@@ -195,7 +214,7 @@ def load_credential(
     # isolation (spec 2.2) -- the same rule resolve_secret_ref enforces.
     entry = data["teams"].get(team)
     if not isinstance(entry, dict) or not all(
-            entry.get(k) for k in ("site", "email", "api_token")):
+            _nonblank_str(entry.get(k)) for k in ("site", "email", "api_token")):
         raise WikiCredentialError(f"No complete credentials for team '{team}'")
     return ConfluenceCredential(entry["email"], entry["api_token"],
                                 _site_to_base(base_url or entry["site"]), "credentials-file")
@@ -357,6 +376,8 @@ class ConfluenceProvider(WikiProvider):
                           kind="folder")
 
     def list_children(self, parent_type, parent_id):
+        if parent_type not in ("page", "folder"):
+            raise WikiTransportError(f"unsupported parent type: {parent_type}")
         pid = _id(parent_id, parent_type)
         if parent_type == "folder":
             # UNCONFIRMED endpoint name (v2 direct-children); verify live in 008.
