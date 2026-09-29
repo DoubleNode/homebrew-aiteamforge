@@ -8,7 +8,9 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import http.client
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -19,12 +21,13 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release_wiki import (  # noqa: E402
-    WikiAncestor, WikiConflictError, WikiCredentialError, WikiNotFoundError,
+    WikiAncestor, WikiConflictError, WikiError, WikiCredentialError, WikiNotFoundError,
     WikiPage, WikiProvider, WikiTransportError,
 )
 
 CREDS_FILE_ENV = "KB_CR_POLLER_CREDS_FILE"  # same override as the poller
 DEFAULT_CREDS_FILE = Path.home() / ".config" / "aiteamforge" / "confluence-credentials.json"
+MAX_PAGES = 1000  # pagination cap: hitting it raises, never truncates
 EXPAND = "body.storage,version,metadata.labels,ancestors"
 
 # transport(method, url, headers, body) -> (status, response_bytes)
@@ -69,7 +72,7 @@ def _resolve_creds_file() -> Path:
     return Path(override).expanduser() if override else DEFAULT_CREDS_FILE
 
 
-def _load_creds_file() -> dict:
+def _read_creds_file() -> dict:
     """Adapted from scripts/cr-confluence-poller.py::load_credentials()."""
     creds_file = _resolve_creds_file()
     if not creds_file.exists():
@@ -100,6 +103,15 @@ def _load_creds_file() -> dict:
     return data
 
 
+def _load_creds_file() -> dict:
+    """Poller-parity loader; every failure is a WikiCredentialError carrying the
+    poller's exact message text (chained, so the original type stays visible)."""
+    try:
+        return _read_creds_file()
+    except (OSError, ValueError) as exc:  # FileNotFound/Permission/JSON/schema
+        raise WikiCredentialError(str(exc)) from exc
+
+
 def _parse_secret(value: str) -> Tuple[str, str]:
     """`email:token` (first colon) or JSON {"email","api_token"}. Never echoes value."""
     bad = WikiCredentialError(
@@ -122,10 +134,29 @@ def _parse_secret(value: str) -> Tuple[str, str]:
 
 
 def _site_to_base(site: str) -> str:
-    site = site.strip().rstrip("/")
-    if not site.startswith("http"):
-        site = "https://" + site
-    return site if site.endswith("/wiki") else site + "/wiki"
+    """Normalize to https://<host>[:port][/path]/wiki. https only (any casing);
+    a bare host gets https://; any other scheme is refused (token over cleartext)."""
+    raw = (site or "").strip()
+    if not raw:
+        raise WikiCredentialError("base URL is empty")
+    if "://" not in raw:
+        raw = "https://" + raw
+    try:
+        u = urllib.parse.urlsplit(raw)
+        u.port  # validates the port
+    except ValueError:
+        raise WikiCredentialError("malformed base URL") from None
+    if u.scheme.lower() != "https":
+        raise WikiCredentialError(f"base URL must use https (got scheme '{u.scheme}')")
+    if not u.hostname or u.username is not None:
+        raise WikiCredentialError("malformed base URL")
+    path = u.path.rstrip("/")
+    if not path.endswith("/wiki"):
+        path += "/wiki"
+    return "https://" + u.netloc.lower() + path
+
+
+_REF_NAMEABLE = re.compile(r"(vault:[a-z][a-z0-9-]{0,63}/[a-z][a-z0-9-]{0,63}|env:[A-Z][A-Z0-9_]{0,127})")
 
 
 def load_credential(
@@ -146,8 +177,13 @@ def load_credential(
             resolver, resolution_error = mod.resolve_secret_ref, mod.SecretResolutionError
         try:
             value = resolver(secret_ref, team)
-        except (resolution_error or Exception):
+        except (resolution_error or Exception) as exc:
             value = None  # fall through to the credentials file
+            # Name the ref only if it is grammar-shaped (a literal secret pasted
+            # into secretRef must never be echoed); never the resolved value.
+            shown = secret_ref if _REF_NAMEABLE.fullmatch(secret_ref) else "<malformed>"
+            print(f"kb-wiki: secretRef {shown} did not resolve "
+                  f"({type(exc).__name__}); using credentials file", file=sys.stderr)
         if value is not None:
             if not base_url:
                 raise WikiCredentialError("baseUrl is required with a secretRef credential")
@@ -169,14 +205,33 @@ def load_credential(
 
 
 def urllib_transport(method, url, headers, body):
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    """Every failure mode becomes a WikiTransportError (never echoes headers)."""
     try:
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
+        try:
+            return exc.code, exc.read()
+        except (OSError, http.client.HTTPException) as inner:
+            raise WikiTransportError(
+                f"network error reading HTTP {exc.code} body: {type(inner).__name__}",
+                exc.code) from inner
     except urllib.error.URLError as exc:
-        raise WikiTransportError(f"network error: {exc.reason}") from None
+        raise WikiTransportError(f"network error: {exc.reason}") from exc
+    except (OSError, http.client.HTTPException) as exc:  # timeout, reset, RemoteDisconnected
+        raise WikiTransportError(f"network error: {type(exc).__name__}") from exc
+    except ValueError as exc:  # malformed URL
+        raise WikiTransportError("malformed request URL") from exc
+
+
+def _id(value, what: str) -> str:
+    """Numeric ids only (str of ASCII digits, or a positive int); else WikiError."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return str(value)
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        return value
+    raise WikiError(f"invalid {what} id (must be numeric)")
 
 
 # ---------------------------------------------------------------- provider
@@ -202,27 +257,72 @@ class ConfluenceProvider(WikiProvider):
         if not 200 <= status < 300:
             raise WikiTransportError(f"Confluence HTTP {status} for {method} {route}", status)
         try:
-            return json.loads(raw.decode("utf-8")) if raw else {}
+            data = json.loads(raw.decode("utf-8")) if raw else {}
+        except ValueError as exc:
+            raise WikiTransportError("Confluence returned non-JSON body", status) from exc
+        if not isinstance(data, dict):
+            raise WikiTransportError("Confluence returned an unexpected JSON shape", status)
+        return data
+
+    def _next_path(self, link: Any) -> str:
+        """Turn a server-supplied `_links.next` into a path relative to base_url.
+        Absolute links must be https on the SAME host (the Basic-auth header
+        rides every request). v1 next is base-relative; v2 next may carry the
+        /wiki context prefix (unconfirmed live), so both are accepted."""
+        if not isinstance(link, str) or not link:
+            raise WikiTransportError("malformed pagination link")
+        try:
+            u = urllib.parse.urlsplit(link)
+            base = urllib.parse.urlsplit(self.cred.base_url)
         except ValueError:
-            raise WikiTransportError("Confluence returned non-JSON body", status) from None
+            raise WikiTransportError("malformed pagination link") from None
+        if u.scheme or u.netloc:
+            if u.scheme.lower() != "https" or u.netloc.lower() != base.netloc.lower():
+                raise WikiTransportError("refusing pagination link to a different host")
+        path = u.path
+        if not path.startswith("/"):
+            raise WikiTransportError("malformed pagination link")
+        if path == base.path or path.startswith(base.path + "/"):
+            path = path[len(base.path):]
+        return path + ("?" + u.query if u.query else "")
+
+    def _collect(self, path: str) -> list:
+        """GET a collection, following _links.next until absent. Fail closed:
+        exceeding MAX_PAGES raises instead of returning a partial list."""
+        results: list = []
+        for _ in range(MAX_PAGES):
+            data = self._call("GET", path)
+            chunk = data.get("results", [])
+            if not isinstance(chunk, list):
+                raise WikiTransportError("Confluence returned an unexpected results shape")
+            results.extend(chunk)
+            links = data.get("_links")
+            nxt = links.get("next") if isinstance(links, dict) else None
+            if not nxt:
+                return results
+            path = self._next_path(nxt)
+        raise WikiTransportError(f"pagination exceeded {MAX_PAGES} pages; refusing a partial result")
 
     def _page(self, d: dict, kind: str = "page") -> WikiPage:
-        pid = str(d.get("id", ""))
-        webui = (d.get("_links") or {}).get("webui", "")
-        labels = ((d.get("metadata") or {}).get("labels") or {}).get("results") or []
-        return WikiPage(
-            id=pid, title=d.get("title", ""),
-            version=int(((d.get("version") or {}).get("number")) or 0),
-            body=((d.get("body") or {}).get("storage") or {}).get("value", ""),
-            url=self.cred.base_url + webui if webui else self.page_url(pid),
-            labels=tuple(x.get("name", "") for x in labels),
-            ancestors=tuple(WikiAncestor(str(a.get("id", "")), a.get("title", ""))
-                            for a in d.get("ancestors") or []),
-            kind=kind)
+        try:
+            pid = str(d.get("id", ""))
+            webui = (d.get("_links") or {}).get("webui", "")
+            labels = ((d.get("metadata") or {}).get("labels") or {}).get("results") or []
+            return WikiPage(
+                id=pid, title=d.get("title", ""),
+                version=int(((d.get("version") or {}).get("number")) or 0),
+                body=((d.get("body") or {}).get("storage") or {}).get("value", ""),
+                url=self.cred.base_url + webui if webui else self.page_url(pid),
+                labels=tuple(x.get("name", "") for x in labels),
+                ancestors=tuple(WikiAncestor(str(a.get("id", "")), a.get("title", ""))
+                                for a in d.get("ancestors") or []),
+                kind=kind)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise WikiTransportError("Confluence returned an unexpected page shape") from exc
 
     # v1 pages
     def get_page(self, page_id):
-        return self._page(self._call("GET", f"/rest/api/content/{page_id}?expand={EXPAND}"))
+        return self._page(self._call("GET", f"/rest/api/content/{_id(page_id, 'page')}?expand={EXPAND}"))
 
     def create_page(self, space, title, body, parent_type, parent_id):
         if parent_type not in ("page", "folder"):
@@ -230,7 +330,7 @@ class ConfluenceProvider(WikiProvider):
         # UNCONFIRMED against live Confluence (verify in XACA-1344-008): a
         # folder-typed parent passed via v1 `ancestors`. Page parents are proven.
         payload = {"type": "page", "title": title, "space": {"key": space},
-                   "ancestors": [{"id": str(parent_id)}],
+                   "ancestors": [{"id": _id(parent_id, "parent")}],
                    "body": {"storage": {"value": body, "representation": "storage"}}}
         return self._page(self._call("POST", f"/rest/api/content?expand={EXPAND}", payload))
 
@@ -238,29 +338,33 @@ class ConfluenceProvider(WikiProvider):
         payload = {"type": "page", "title": title,
                    "version": {"number": current_version + 1},
                    "body": {"storage": {"value": body, "representation": "storage"}}}
-        return self._page(self._call("PUT", f"/rest/api/content/{page_id}?expand={EXPAND}",
+        return self._page(self._call("PUT", f"/rest/api/content/{_id(page_id, 'page')}?expand={EXPAND}",
                                      payload))
 
     def find_by_title(self, space, title, parent_id=None):
+        pid = _id(parent_id, "parent") if parent_id is not None else None
         q = urllib.parse.urlencode({"spaceKey": space, "title": title, "type": "page",
                                     "expand": EXPAND})
-        data = self._call("GET", f"/rest/api/content?{q}")
-        pages = [self._page(r) for r in data.get("results", [])]
-        if parent_id is not None:
-            pages = [p for p in pages if p.ancestors and p.ancestors[-1].id == str(parent_id)]
+        # Gather EVERY page of results first; only then filter by parent.
+        pages = [self._page(r) for r in self._collect(f"/rest/api/content?{q}")]
+        if pid is not None:
+            pages = [p for p in pages if p.ancestors and p.ancestors[-1].id == pid]
         return pages
 
     # v2 folders
     def get_folder(self, folder_id):
-        return self._page(self._call("GET", f"/api/v2/folders/{folder_id}"), kind="folder")
+        return self._page(self._call("GET", f"/api/v2/folders/{_id(folder_id, 'folder')}"),
+                          kind="folder")
 
     def list_children(self, parent_type, parent_id):
+        pid = _id(parent_id, parent_type)
         if parent_type == "folder":
             # UNCONFIRMED endpoint name (v2 direct-children); verify live in 008.
-            data = self._call("GET", f"/api/v2/folders/{parent_id}/direct-children")
-            return [self._page(r, kind=r.get("type", "page")) for r in data.get("results", [])]
-        data = self._call("GET", f"/rest/api/content/{parent_id}/child/page?expand=version")
-        return [self._page(r) for r in data.get("results", [])]
+            rows = self._collect(f"/api/v2/folders/{pid}/direct-children")
+            return [self._page(r, kind=r.get("type", "page") if isinstance(r, dict) else "page")
+                    for r in rows]
+        return [self._page(r) for r in
+                self._collect(f"/rest/api/content/{pid}/child/page?expand=version")]
 
     def page_url(self, page_id):
         return f"{self.cred.base_url}/pages/viewpage.action?pageId={page_id}"

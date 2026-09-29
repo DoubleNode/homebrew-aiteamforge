@@ -13,6 +13,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `share/kanban-hooks/release_wiki.py` (provider interface) and `release_wiki_confluence.py`
   (Confluence client; credentials from the team's `secretRef`, falling back to the CR poller's
   credentials file, never another team's entry).
+  PR #989 round 1: the client now follows every page of Confluence list results (it no longer
+  stops at 25), sends the token only over https, reports every failure as a `kb-wiki` error
+  (exit 1) instead of a raw Python exception, checks page and folder ids before using them in a
+  URL, and rejects a `--key` with a trailing newline.
 - **XACA-1343 (PR 3/4)** — ships `share/scripts/release_profile_validate.py`, the mechanical check a
   drafted CR / Testing Log must pass before it is published: required sections present, no banned
   tokens, links within the profile's policy, and a title that matches the profile's pattern. Any

@@ -24,7 +24,7 @@ from pathlib import Path
 
 EXIT_OK, EXIT_WIKI_ERROR, EXIT_USAGE, EXIT_NOT_IMPLEMENTED, EXIT_VERSION_GUARD = 0, 1, 2, 3, 4
 DOC_TYPES = ("cr", "testing-log", "cr-record")
-KEY_RE = re.compile(r"^(REL|CR)-[A-Za-z0-9][A-Za-z0-9._-]*$")
+KEY_RE = re.compile(r"^(REL|CR)-[A-Za-z0-9][A-Za-z0-9._-]*(?![\s\S])")  # not $: it matches before a final \n
 
 
 def _find_hooks_dir():
