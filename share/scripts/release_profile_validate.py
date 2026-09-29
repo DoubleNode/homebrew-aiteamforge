@@ -99,6 +99,9 @@ LINKS (linkPolicy)
     tags (a, img, area, iframe, object, embed, link, meta, form, svg, video, audio,
     source, base, ... and ANY tag carrying a URL attribute) and CommonMark angle
     autolinks (`<scheme:...>`, `<x@y>`). HTML comments and ordinary `<` text are fine.
+    An UNTERMINATED forbidden tag counts as prose (`latency <a few ms`) only when the
+    whole body has no other tag-like `<`, no block-opening tag name and no `>` after
+    it (see `_relaxation_ok`); otherwise it is refused. One leading U+FEFF is dropped.
 
     RESIDUAL SCAN (the class guard, `link-unrecognized`). The extractor only
     IDENTIFIES links (which is testingLog, counting, maxCount); it is not the
@@ -1109,26 +1112,59 @@ _RESIDUAL_TOKENS = (
 _FORBIDDEN_TAGS = ("a|img|area|iframe|object|embed|link|meta|form|svg|video|audio|source|base|"
                    "frame|frameset|input|button|track|script|style|use|image|picture|param|"
                    "applet|portal|math|blockquote|q|ins|del")
-# Two readings of a forbidden tag name:
-#  * the body has NO possible HTML-block opener (`_HTML_BLOCK_OPENER`): the tag must be
-#    terminated, `<name>` or `<name` + attributes + `>` (attributes may span lines;
-#    `[^<>]` keeps the scan linear). Prose such as `latency <a few ms` or `x <q` is then
-#    left alone: inline raw HTML in cmark needs the `>`, and cmark escapes the `<`.
-#  * the body has ANY possible opener: cmark passes HTML-block lines through verbatim and
-#    an HTML5 parser reads `<` as an attribute-name character, so the next tag's `>`
-#    (even one cmark emits itself) closes an unterminated `<a name=x`. Then every
-#    `<name` of a forbidden tag is refused, terminator or not.
-# A URL-free real tag such as `<a title="<">` can pass the first reading: no URL, so no
-# link, and URL detection is the residual scan's job (`href=`, `//`, `scheme:` are caught
-# there whatever the tag looks like; `<a title="<" href=rel>` is refused by it).
-_TAG_FORBIDDEN_ANY = re.compile(r"</?(?:" + _FORBIDDEN_TAGS + r")(?![A-Za-z0-9:_-])", re.I)
-_TAG_FORBIDDEN = re.compile(r"</?(?:" + _FORBIDDEN_TAGS + r")(?![A-Za-z0-9:_-])[^<>]*>", re.I)
-# A line whose first content, after any run of whitespace, blockquote `>` markers and list
-# markers (`-` `*` `+` `1.` `1)`), is `<`. Deliberately loose (all CommonMark HTML block
-# types 1-7, comments, `<?`, `<!X`, CDATA, indented, nested): over-refusal is fine, a
-# release draft has no raw HTML blocks.
-_HTML_BLOCK_OPENER = re.compile(
-    r"^(?:[ \t]*(?:>|[-*+](?=[ \t]|$)|[0-9]{1,9}[.)](?=[ \t]|$)))*[ \t]*<", re.M)
+# The forbidden-tag rule and when an UNTERMINATED tag may be read as prose.
+#
+# `_TAG_FORBIDDEN` matches `<name` (or `</name`) of a forbidden tag with no terminator
+# needed: the strict, container-agnostic reading. `_relaxation_ok(body)` lets the caller
+# skip it (so `latency <a few ms` is clean) ONLY when all of the following hold for the
+# whole decoded body:
+#   (1) every `<` followed by [A-Za-z!?/] starts a RELAXABLE candidate, i.e. a forbidden
+#       tag name that is not a CommonMark type-1 or type-6 block name. So there is no
+#       other tag, closing tag, comment, PI, declaration or CDATA anywhere;
+#   (2) (part of 1) a type-1/type-6 name, forbidden or not, is never a relaxable
+#       candidate: `<pre <script <style <textarea` and the type-6 list open a block from
+#       `<name` + whitespace/EOL alone;
+#   (3) no `>` appears after the first candidate, so every candidate is unterminated.
+# WHY THIS MAKES "AN HTML BLOCK EXISTS" IMPOSSIBLE, WHATEVER PRECEDES THE LINE (list
+# marker, `>`, footnote label `[^1]:`, indent, BOM, anything). Every CommonMark HTML
+# block start condition is anchored on the characters `<` + [A-Za-z!?/]: types 2-5 are
+# `<!--`, `<?`, `<!X`, `<![CDATA[` (`<!` `<?`); types 1 and 6 are `<`/`</` + a fixed
+# name; type 7 is a COMPLETE open/closing tag, which needs a `>`. (1)+(2) exclude every
+# such `<` except unterminated relaxable candidates, and (3) leaves no `>` for a type-7
+# tag to end on. The container prefix decides only WHERE a block could start, never
+# WHETHER one exists, so no prefix list is needed (or kept). With no block, cmark treats
+# an unterminated `<a name=x` as inline text (inline raw HTML also needs the `>`) and
+# escapes it, and there is no later tag `>` to close it. If ANY of (1)-(3) fails the
+# strict match is used. Over-refusal is fine: a release draft has no raw HTML.
+# URL-bearing fragments never depend on this: `_TAG_URL_ATTR`, the link extractor and the
+# residual scan catch `href=`, `//`, `scheme:` whatever the tag looks like.
+_TYPE1_TYPE6_NAMES = frozenset((
+    "pre", "script", "style", "textarea",
+    "address", "article", "aside", "base", "basefont", "blockquote", "body", "caption",
+    "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt",
+    "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset",
+    "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe", "legend",
+    "li", "link", "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option",
+    "p", "param", "search", "section", "summary", "table", "tbody", "td", "tfoot", "th",
+    "thead", "title", "tr", "track", "ul"))
+_RELAXABLE_TAGS = "|".join(sorted(t for t in _FORBIDDEN_TAGS.split("|") if t not in _TYPE1_TYPE6_NAMES))
+_TAG_FORBIDDEN = re.compile(r"</?(?:" + _FORBIDDEN_TAGS + r")(?![A-Za-z0-9:_-])", re.I)
+_LT_TAGLIKE = re.compile(r"<[A-Za-z!?/]")
+_RELAXABLE = re.compile(r"</?(?:" + _RELAXABLE_TAGS + r")(?![A-Za-z0-9:_-])", re.I)
+
+
+def _relaxation_ok(body: str) -> bool:
+    """True when conditions (1)-(3) above hold, i.e. unterminated forbidden tags may be
+    treated as prose. Linear: one pass over the `<` positions, O(1) work each."""
+    first = -1
+    for m in _LT_TAGLIKE.finditer(body):
+        if _RELAXABLE.match(body, m.start()) is None:
+            return False
+        if first < 0:
+            first = m.start()
+    return first < 0 or body.find(">", first) == -1
+
+
 _TAG_URL_ATTR = re.compile(
     r"<[A-Za-z][^<>]*?(?<![A-Za-z0-9_-])(?:" + "|".join(_URL_ATTRS) + r"|xlink:href)\s*=", re.I)
 _ANGLE_SCHEME = re.compile(r"<[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^<>\s]*>")
@@ -1139,10 +1175,10 @@ _SYNTAX_TOKENS = (("raw HTML link tag", _TAG_FORBIDDEN), ("raw HTML tag with a U
 
 def _syntax_hits(body: str, starts: List[int]) -> List[Violation]:
     hits = []
-    block = _HTML_BLOCK_OPENER.search(body) is not None
+    relaxed = _relaxation_ok(body)
     for name, rx in _SYNTAX_TOKENS:
-        if block and rx is _TAG_FORBIDDEN:
-            rx = _TAG_FORBIDDEN_ANY
+        if relaxed and rx is _TAG_FORBIDDEN:
+            continue
         for m in rx.finditer(body):
             hits.append((m.start(), name))
             if len(hits) > 4 * MAX_MATCHES_PER_PATTERN:
@@ -1632,6 +1668,8 @@ def validate_draft(rendered_body: str, title: str, profile: dict, *,
             "body-too-large",
             "body is %d chars, limit is %d; not validated" % (len(rendered_body), MAX_BODY_CHARS)))
         return _resolve_jobs(out)
+    if rendered_body.startswith("\ufeff"):
+        rendered_body = rendered_body[1:]          # cmark drops one leading BOM before parsing
     body = rendered_body.replace("\r\n", "\n").replace("\r", "\n")
     lines = body.split("\n")
     starts = _line_starts(body)
