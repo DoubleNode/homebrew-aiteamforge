@@ -65,6 +65,7 @@ class WikiPage:
     labels: Tuple[str, ...] = ()
     ancestors: Tuple[WikiAncestor, ...] = ()
     kind: str = "page"  # "page" | "folder"
+    space: str = ""  # space key when the provider exposes it ("" = unknown)
 
 
 # ---------------------------------------------------------------- interface
@@ -94,6 +95,14 @@ class WikiProvider(abc.ABC):
         self, space: str, title: str, parent_id: Optional[str] = None
     ) -> List[WikiPage]:
         """Exact-title lookup; [] when nothing matches."""
+
+    @abc.abstractmethod
+    def find_by_label(self, space: str, label: str) -> List[WikiPage]:
+        """Every page in `space` carrying `label`; [] when none."""
+
+    @abc.abstractmethod
+    def add_label(self, page_id: str, label: str) -> None:
+        """Attach `label` to a page. Raises a WikiError on any failure."""
 
     @abc.abstractmethod
     def list_children(self, parent_type: str, parent_id: str) -> List[WikiPage]:
@@ -127,6 +136,11 @@ class WikiDuplicateError(WikiError):
     def __init__(self, message: str, page_id: str = "") -> None:
         super().__init__(message)
         self.page_id = page_id
+
+
+class WikiIdentityError(WikiError):
+    """The page is not the one for this (doc, key): it carries another key's
+    kb-wiki label, or none, or the label could not be applied/verified."""
 
 
 class WikiPatchError(WikiError):
@@ -196,9 +210,28 @@ def check_version_guard(live: WikiPage, new_body: str,
         raise WikiGuardError(reason, live.version, _diff(live.body, new_body))
 
 
+def _apply_label(provider: WikiProvider, page_id: str, label: str) -> None:
+    """Fail closed: the label must be applied AND read back."""
+    try:
+        provider.add_label(page_id, label)
+        ok = label in provider.get_page(page_id).labels
+    except WikiNotFoundError:
+        raise
+    except WikiError as exc:
+        raise WikiIdentityError(
+            f"could not label page {page_id} ({type(exc).__name__}); "
+            f"re-run with --page-id {page_id} --adopt") from exc
+    if not ok:
+        raise WikiIdentityError(
+            f"label {label!r} did not stick on page {page_id}; re-run with --page-id {page_id} --adopt")
+
+
 def _guarded_update(provider: WikiProvider, live: WikiPage, title: str, body: str,
-                    stored_version: Optional[int], expect_version: Optional[int]) -> PublishResult:
+                    stored_version: Optional[int], expect_version: Optional[int],
+                    label: Optional[str] = None) -> PublishResult:
     check_version_guard(live, body, stored_version, expect_version)
+    if label is not None:
+        _apply_label(provider, live.id, label)
     try:
         page = provider.update_page(live.id, title, body, live.version)
     except WikiConflictError as exc:
@@ -216,28 +249,102 @@ def _guarded_update(provider: WikiProvider, live: WikiPage, title: str, body: st
 # ---------------------------------------------------------------- publish
 
 
+LABEL_PREFIX = "kb-wiki-"
+_DOC_TYPES = ("cr", "testing-log", "cr-record")
+_KEY_PART = re.compile(r"(REL|CR)-[A-Za-z0-9][A-Za-z0-9._-]*(?![\s\S])")
+
+
+def identity_label(doc: str, key: str) -> str:
+    """Provider-generic identity of the one page for (doc, key):
+    `kb-wiki-<doc>-<key lowercased>`, e.g. `kb-wiki-testing-log-rel-5`.
+    Lowercase, no spaces, only [a-z0-9._-] (UNCONFIRMED against live
+    Confluence: dots in labels). Anything else is a WikiUsageError."""
+    if doc not in _DOC_TYPES:
+        raise WikiUsageError(f"unknown doc type {doc!r}")
+    if not isinstance(key, str) or not _KEY_PART.match(key):
+        raise WikiUsageError(f"invalid key {key!r} (expected REL-... or CR-...)")
+    return f"{LABEL_PREFIX}{doc}-{key.lower()}"
+
+
+def _owner_of(label: str) -> str:
+    """Human name for another page's kb-wiki label: 'key cr-2 (doc cr)'."""
+    rest = label[len(LABEL_PREFIX):]
+    for doc in sorted(_DOC_TYPES, key=len, reverse=True):
+        if rest.startswith(doc + "-"):
+            return f"key {rest[len(doc) + 1:]} (doc {doc})"
+    return f"label {label}"
+
+
+def _kbwiki_labels(page: WikiPage) -> List[str]:
+    return [l for l in page.labels if l.startswith(LABEL_PREFIX)]
+
+
+def check_location(live: WikiPage, space: str, parent_id) -> None:
+    """Refuse (WikiLocationError, before ANY write) unless `live` sits under the
+    doc type's configured parent, is not that parent itself, and (when the
+    provider exposes it) is in the configured space."""
+    parent_id = str(parent_id)
+    if live.id == parent_id:
+        raise WikiLocationError(f"page {live.id} IS the configured parent; refusing to overwrite it")
+    if live.space and live.space != space:
+        raise WikiLocationError(
+            f"page {live.id} is in space {live.space!r}, not the configured {space!r}")
+    if not any(a.id == parent_id for a in live.ancestors):
+        raise WikiLocationError(
+            f"page {live.id} is not under the configured parent {parent_id}; "
+            "it belongs to a different doc type, tree or space")
+
+
+def check_identity(live: WikiPage, label: str, adopt: bool = False) -> bool:
+    """The live page must carry THIS (doc, key) label. Returns True when the
+    label still has to be applied (an unlabelled page with adopt=True). A page
+    labelled for any other identity is refused even with adopt."""
+    others = [l for l in _kbwiki_labels(live) if l != label]
+    if others:
+        raise WikiIdentityError(
+            f"page {live.id} belongs to {_owner_of(others[0])}, not this record; refusing")
+    if label in live.labels:
+        return False
+    if adopt:
+        return True
+    raise WikiIdentityError(
+        f"page {live.id} carries no {label!r} label (legacy or hand-made page); refusing. "
+        "Only if you are certain it is this record's page, re-run with --adopt "
+        "(this OVERWRITES its title and body)")
+
+
 def publish(provider: WikiProvider, space: str, parent_type: str, parent_id,
             title: str, body: str, page_id: Optional[str] = None,
             stored_version: Optional[int] = None,
-            expect_version: Optional[int] = None) -> PublishResult:
+            expect_version: Optional[int] = None, *,
+            label: str, adopt: bool = False) -> PublishResult:
     """Create the one page for a (doc, key), or update the stored one.
 
-    Update path (page_id given): the page MUST exist; WikiNotFoundError
-    propagates and there is NEVER a fall-back to create. Create path: the
-    parent must exist with the configured type, no page of that title may
-    already exist (WikiDuplicateError: adopt it), and the created page must
-    read back under the parent."""
+    `label` is the (doc, key) identity (see identity_label). Update path
+    (page_id given): the page MUST exist (WikiNotFoundError, NEVER a create),
+    sit under the configured parent/space, and carry `label`; `adopt=True`
+    labels an unlabelled page after those checks (never another key's page).
+    Create path: parent must exist with the configured type; no page in the
+    space may already carry `label` or the title; the new page is labelled and
+    must read back under the parent WITH the label."""
     if not isinstance(title, str) or not title.strip():
         raise WikiUsageError("title must not be empty")
     if parent_type not in ("page", "folder"):
         raise WikiUsageError(f"unsupported parent type: {parent_type!r}")
+    if not isinstance(label, str) or not label.startswith(LABEL_PREFIX):
+        raise WikiUsageError("label must be an identity_label()")
+    parent_id = str(parent_id)
     if page_id is not None:
         live = provider.get_page(page_id)  # missing -> WikiNotFoundError, no create
-        return _guarded_update(provider, live, title, body, stored_version, expect_version)
+        check_location(live, space, parent_id)
+        needs_label = check_identity(live, label, adopt)
+        return _guarded_update(provider, live, title, body, stored_version, expect_version,
+                               label if needs_label else None)
 
+    if adopt:
+        raise WikiUsageError("--adopt only applies with --page-id")
     if stored_version is not None or expect_version is not None:
         raise WikiUsageError("--stored-version/--expect-version only apply with --page-id")
-    parent_id = str(parent_id)
     try:
         parent = (provider.get_folder(parent_id) if parent_type == "folder"
                   else provider.get_page(parent_id))
@@ -246,24 +353,58 @@ def publish(provider: WikiProvider, space: str, parent_type: str, parent_id,
     if parent.kind != parent_type:
         raise WikiLocationError(
             f"configured parent {parent_id} is a {parent.kind}, expected {parent_type}")
-    # Space-wide (not just under the parent): a same-titled page anywhere in the
-    # space would make the create fail or duplicate; either way, adopt instead.
+    # Identity first: the (doc, key) label, searched space-wide. A hit means the
+    # page already exists (title changed, record lost): never mint a second one.
+    labelled = provider.find_by_label(space, label)
+    if len(labelled) == 1:
+        raise WikiDuplicateError(
+            f"the page for this record already exists (pageId {labelled[0].id}, label {label!r}); "
+            f"update it with --page-id {labelled[0].id} and its stored version instead of "
+            "creating a second page", labelled[0].id)
+    if labelled:
+        ids = ", ".join(p.id for p in labelled)
+        raise WikiDuplicateError(
+            f"{len(labelled)} pages already carry label {label!r} (pageIds {ids}); "
+            "resolve the duplicates by hand, nothing was created")
+    # Then the title (space-wide: a same-titled page anywhere would make the
+    # create fail or duplicate).
     existing = provider.find_by_title(space, title)
     if existing:
-        under = [p for p in existing if p.ancestors and p.ancestors[-1].id == parent_id]
-        first = (under or existing)[0]
-        where = "under the configured parent" if under else "elsewhere in the space"
+        raise _title_refusal(existing, title, label, parent_id)
+    try:
+        created = provider.create_page(space, title, body, parent_type, parent_id)
+    except WikiConflictError as exc:  # a 409 on POST is a name clash, not a version guard
         raise WikiDuplicateError(
-            f"a page titled {title!r} already exists {where} (pageId {first.id}); "
-            f"adopt it with --page-id {first.id} instead of creating a second page",
-            first.id)
-    created = provider.create_page(space, title, body, parent_type, parent_id)
+            f"create refused (HTTP 409): a page titled {title!r} probably exists; nothing was created") from exc
+    _apply_label(provider, created.id, label)  # fail closed, verified on read-back
     back = provider.get_page(created.id)
     if not any(a.id == parent_id for a in back.ancestors):
         raise WikiLocationError(
             f"page {created.id} was created but does not sit under parent {parent_id}; "
             "not recording it (fix or remove it manually)")
     return PublishResult(back.id, back.url, back.version, created=True)
+
+
+def _title_refusal(existing: List[WikiPage], title: str, label: str, parent_id: str) -> WikiError:
+    """Refusal for a same-titled page. Only suggests --page-id when that page is
+    this record's own or carries no kb-wiki label; another key's page is named
+    as owned and never offered for adoption."""
+    for p in existing:
+        others = [l for l in _kbwiki_labels(p) if l != label]
+        if others:
+            return WikiDuplicateError(
+                f"a page titled {title!r} already exists (pageId {p.id}) and belongs to "
+                f"{_owner_of(others[0])}; refusing. Choose a different title")
+    first = existing[0]
+    if label in first.labels:
+        return WikiDuplicateError(
+            f"the page for this record already exists (pageId {first.id}); update it with "
+            f"--page-id {first.id} and its stored version", first.id)
+    return WikiDuplicateError(
+        f"a page titled {title!r} already exists (pageId {first.id}) with no kb-wiki label "
+        f"(legacy or hand-made). If you are certain it is this record's page, adopt it with "
+        f"--page-id {first.id} --adopt and its version (this OVERWRITES its title and body)",
+        first.id)
 
 
 # ---------------------------------------------------------------- patch-section
@@ -330,7 +471,7 @@ def _norm(text: str) -> str:
 
 
 def _headings(body: str, tokens: list) -> list:
-    """[(level, open_start, close_end, text)] for real headings only: never
+    """[(level, open_start, close_end, text, close_token_index)] for real headings only: never
     inside a raw/code region, CDATA or comment (those are not tag tokens)."""
     found, raw, k = [], 0, 0
     while k < len(tokens):
@@ -352,7 +493,7 @@ def _headings(body: str, tokens: list) -> list:
                 j += 1
             if j >= len(tokens):
                 raise WikiPatchError("malformed page body: unclosed heading")
-            found.append((int(name[1]), start, tokens[j][2], _norm("".join(parts))))
+            found.append((int(name[1]), start, tokens[j][2], _norm("".join(parts)), j))
             k = j
         k += 1
     return found
@@ -372,20 +513,40 @@ def _require_balanced(fragment: str, what: str) -> None:
 
 def replace_section(body: str, heading: str, new_content: str) -> str:
     """Return `body` with only the content under `heading` replaced: from the
-    end of the heading element to the next heading of the same or higher level
-    (or end of body). Every other character is untouched. WikiPatchError if the
-    heading is absent, ambiguous, or the splice would break the markup."""
+    end of the heading element to the next heading of the same or higher level,
+    the close of the element enclosing the heading (layout cell, macro body...),
+    or end of body, whichever comes first. Every other character is untouched.
+    WikiPatchError if the heading is absent, ambiguous, the replacement would
+    contain a heading of the same or higher level, or the splice would break
+    the markup."""
     want = _norm(heading)
     if not want:
         raise WikiUsageError("heading must not be empty")
-    heads = _headings(body, _tokens(body))
+    tokens = _tokens(body)
+    heads = _headings(body, tokens)
     hits = [i for i, h in enumerate(heads) if h[3] == want]
     if not hits:
         raise WikiPatchError(f"heading not found: {want!r}")
     if len(hits) > 1:
         raise WikiPatchError(f"heading is ambiguous ({len(hits)} matches): {want!r}")
-    level, _open, start, _text = heads[hits[0]]
+    level, _open, start, _text, close_idx = heads[hits[0]]
     end = next((h[1] for h in heads[hits[0] + 1:] if h[0] <= level), len(body))
+    depth = 0
+    for kind, tstart, _tend, name in tokens[close_idx + 1:]:
+        if tstart >= end:
+            break
+        if kind == "open" and name not in _VOID:
+            depth += 1
+        elif kind == "close":
+            if depth == 0:  # closes the element enclosing the heading
+                end = tstart
+                break
+            depth -= 1
+    for h in _headings(new_content, _tokens(new_content)):
+        if h[0] <= level:
+            raise WikiPatchError(
+                f"replacement content contains an h{h[0]} heading, which would duplicate or "
+                f"split the h{level} section {want!r}; only deeper headings are allowed")
     _require_balanced(body[start:end], "existing section")
     _require_balanced(new_content, "replacement content")
     return body[:start] + new_content + body[end:]
@@ -393,13 +554,18 @@ def replace_section(body: str, heading: str, new_content: str) -> str:
 
 def patch_section(provider: WikiProvider, page_id: str, heading: str, new_content: str,
                   stored_version: Optional[int] = None,
-                  expect_version: Optional[int] = None) -> PublishResult:
-    """Replace one section of an existing page under the same version guard as
-    publish. A missing page raises WikiNotFoundError; nothing is ever created."""
+                  expect_version: Optional[int] = None, *,
+                  space: str, parent_id, label: str) -> PublishResult:
+    """Replace one section of an existing page under the same guards as an
+    update-publish: location (under the doc's parent/space, not the parent),
+    identity (carries this (doc, key) label; no adopt here), version. A missing
+    page raises WikiNotFoundError; nothing is ever created."""
     _check_version_arg("stored_version", stored_version)
     _check_version_arg("expect_version", expect_version)
     if stored_version is None and expect_version is None:
         raise WikiUsageError("patch-section needs --stored-version or --expect-version")
     live = provider.get_page(page_id)
+    check_location(live, space, parent_id)
+    check_identity(live, label, adopt=False)
     patched = replace_section(live.body, heading, new_content)
     return _guarded_update(provider, live, live.title, patched, stored_version, expect_version)

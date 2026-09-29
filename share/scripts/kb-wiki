@@ -12,13 +12,21 @@ kb-wiki does NOT write the release/CR record. The caller (engine, XACA-1348/
 printed record {"pageId","url","version"} itself.
 
   publish       --team T --doc D --key K --title S --body-file F
-                [--page-id ID (--stored-version V | --expect-version N)] [--json]
+                [--page-id ID (--stored-version V | --expect-version N) [--adopt]] [--json]
+      Identity is a label kb-wiki-<doc>-<key lowercased> (e.g.
+      kb-wiki-testing-log-rel-5) stamped on create and required on update.
       No --page-id: create. Refuses (exit 1) if the parent is missing/wrong
-      type or a page with that title already exists (adopt it via --page-id).
-      With --page-id: update. A missing page is exit 1, NEVER a create.
+      type, a page already carries the (doc, key) label, or the title exists.
+      With --page-id: update. A missing page is exit 1, NEVER a create; the
+      page must be under the doc's configured parent (and not be it) and in
+      its space, and carry this (doc, key) label. --adopt labels an UNLABELLED
+      page (after the location check); another key's page is always refused.
   patch-section --team T --doc D --key K --page-id ID --heading H --body-file F
                 (--stored-version V | --expect-version N) [--json]
-      Replaces only the content under heading H (exit 1 if absent/ambiguous).
+      Replaces only the content under heading H (exit 1 if absent/ambiguous, or
+      if the replacement holds a heading of the same or higher level). The
+      section ends at the next same/higher heading or the close of the element
+      enclosing the heading. Same location + identity guards as publish update.
 
 Exit codes (the engine may rely on these):
   0  ok
@@ -98,6 +106,9 @@ def build_parser():
             s.add_argument("--page-id", required=(name == "patch-section"),
                            help="stored page id: update it (never create)")
         if versions:
+            if name == "publish":
+                s.add_argument("--adopt", action="store_true",
+                               help="with --page-id: label an unlabelled legacy page (overwrites it)")
             s.add_argument("--stored-version", type=_nonneg_int, metavar="V",
                            help="version recorded at last publish; refuse if live differs")
             s.add_argument("--expect-version", type=_nonneg_int, metavar="N",
@@ -175,6 +186,7 @@ def _full_validate(config):
             if errors:
                 raise _ConfigError("wiki.json invalid: " + "; ".join(errors))
             return
+    _err("schema validator not found; checking only the fields kb-wiki uses")
 
 
 def _load_wiki_config(team, doc, override):
@@ -247,14 +259,19 @@ def _run(args):
     body = _read_body(args.body_file)
     if not is_patch and not body.strip():
         raise _Usage("--body-file is empty; refusing to publish a blank page")
+    if not is_patch and args.adopt and args.page_id is None:
+        raise _Usage("--adopt only applies with --page-id")
+    label = rw.identity_label(args.doc, args.key)
     config, space, ptype, pid = _load_wiki_config(team, args.doc, args.config_dir)
     provider = _make_provider(team, config)
     if is_patch:
         res = rw.patch_section(provider, args.page_id, args.heading, body,
-                               args.stored_version, args.expect_version)
+                               args.stored_version, args.expect_version,
+                               space=space, parent_id=pid, label=label)
     else:
         res = rw.publish(provider, space, ptype, pid, args.title, body, args.page_id,
-                         args.stored_version, args.expect_version)
+                         args.stored_version, args.expect_version,
+                         label=label, adopt=args.adopt)
     if args.json:
         print(json.dumps(res.record()))
     else:
@@ -272,7 +289,11 @@ def main(argv=None):
         # read/find/children/url/doctor land in PR 3/3.
         print(f"kb-wiki: {args.command} not implemented yet (XACA-1344)", file=sys.stderr)
         return EXIT_NOT_IMPLEMENTED
-    import release_wiki as rw
+    try:
+        import release_wiki as rw
+    except ImportError:
+        _err("cannot import release_wiki (kanban-hooks/ not found next to scripts/)")
+        return EXIT_WIKI_ERROR
     try:
         return _run(args)
     except (_Usage, rw.WikiUsageError) as exc:

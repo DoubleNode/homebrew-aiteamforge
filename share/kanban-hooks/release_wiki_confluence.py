@@ -28,7 +28,7 @@ from release_wiki import (  # noqa: E402
 CREDS_FILE_ENV = "KB_CR_POLLER_CREDS_FILE"  # same override as the poller
 DEFAULT_CREDS_FILE = Path.home() / ".config" / "aiteamforge" / "confluence-credentials.json"
 MAX_PAGES = 1000  # pagination cap: hitting it raises, never truncates
-EXPAND = "body.storage,version,metadata.labels,ancestors"
+EXPAND = "body.storage,version,metadata.labels,ancestors,space"
 
 # transport(method, url, headers, body) -> (status, response_bytes)
 Transport = Callable[[str, str, Dict[str, str], Optional[bytes]], Tuple[int, bytes]]
@@ -244,6 +244,10 @@ def urllib_transport(method, url, headers, body):
         raise WikiTransportError("malformed request URL") from exc
 
 
+_SPACE_KEY = re.compile(r"[A-Za-z0-9~_-]{1,255}")
+_LABEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,254}")
+
+
 def _id(value, what: str) -> str:
     """Numeric ids only (str of ASCII digits, or a positive int); else WikiError."""
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
@@ -261,7 +265,7 @@ class ConfluenceProvider(WikiProvider):
         self.cred = cred
         self._transport = transport or urllib_transport
 
-    def _call(self, method: str, path: str, payload: Optional[dict] = None) -> Any:
+    def _call(self, method: str, path: str, payload: Any = None) -> Any:
         headers = {"Authorization": self.cred.auth_header(),
                    "Accept": "application/json", "Content-Type": "application/json"}
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -335,7 +339,7 @@ class ConfluenceProvider(WikiProvider):
                 labels=tuple(x.get("name", "") for x in labels),
                 ancestors=tuple(WikiAncestor(str(a.get("id", "")), a.get("title", ""))
                                 for a in d.get("ancestors") or []),
-                kind=kind)
+                kind=kind, space=str((d.get("space") or {}).get("key", "")))
         except (AttributeError, TypeError, ValueError) as exc:
             raise WikiTransportError("Confluence returned an unexpected page shape") from exc
 
@@ -369,6 +373,23 @@ class ConfluenceProvider(WikiProvider):
         if pid is not None:
             pages = [p for p in pages if p.ancestors and p.ancestors[-1].id == pid]
         return pages
+
+    # identity labels (kb-wiki-<doc>-<key>)
+    def find_by_label(self, space, label):
+        if not _SPACE_KEY.fullmatch(space or "") or not _LABEL.fullmatch(label or ""):
+            raise WikiError("invalid space key or label")
+        # UNCONFIRMED against live Confluence (XACA-1344-008): CQL through the v1
+        # content search endpoint; both values are regex-validated above.
+        cql = f'label = "{label}" AND space = "{space}" AND type = page'
+        q = urllib.parse.urlencode({"cql": cql, "expand": EXPAND})
+        return [self._page(r) for r in self._collect(f"/rest/api/content/search?{q}")]
+
+    def add_label(self, page_id, label):
+        if not _LABEL.fullmatch(label or ""):
+            raise WikiError("invalid label")
+        # UNCONFIRMED against live Confluence (XACA-1344-008): v1 label POST.
+        self._call("POST", f"/rest/api/content/{_id(page_id, 'page')}/label",
+                   [{"prefix": "global", "name": label}])
 
     # v2 folders
     def get_folder(self, folder_id):

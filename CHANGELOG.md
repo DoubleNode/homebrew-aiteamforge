@@ -13,6 +13,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - It refuses (exit 4, with a diff, nothing changed) if someone edited the page since the last publish.
   - `patch-section` replaces the text under one heading and leaves the rest of the page untouched.
   - `read`, `find`, `children`, `url` and `doctor` are still stubs until PR 3.
+  - PR #992 round 1:
+    - Each page is now tagged with a label for its document type and key. That label, not the title,
+      decides which page belongs to a release or CR, so renaming can no longer create a second page.
+    - Updates and section patches refuse any page that isn't under the configured parent or that
+      belongs to another key.
+    - `--adopt` claims an existing unlabelled page.
+    - Section patches work inside page layouts, and refuse replacement text that would duplicate the
+      heading.
 - **XACA-1284-016: helpers-template launchers propagate `cc`'s exit status.** All 8 template
   launchers (`kb-run`, `kb-work`, `kb-{run,work}-{review,test,debug}`) capture `cc`'s rc and return it
   with a `✗ <launcher>: cc exited N` message on stderr, so a refused launch (routing/credential abort,
