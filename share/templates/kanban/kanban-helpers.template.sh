@@ -12185,6 +12185,31 @@ _kb_offer_worktree_cleanup() {
     fi
     wt_class=$(_wt_classify_branch "$wt_branch" "$wt_path")
 
+    # Guard 5: this function removes the worktree by calling wt-finish. Resolve the
+    # worktree's OWN main repo (from the path we were given, never from the caller's
+    # WT_* context) and confirm wt-finish exists BEFORE prompting, so the user is
+    # never asked "remove it?" about something we cannot do. A consumer shell may
+    # lack wt-finish; say so and hand over the manual command instead of failing
+    # silently. XACA-1151-067 (PR #993 r1).
+    local wt_abs git_common main_repo
+    wt_abs=$(cd "$wt_path" 2>/dev/null && pwd -P)
+    git_common=$(git -C "$wt_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    # quoted dirname, not `| xargs dirname` (word-splits on spaces — XACA-0598-013)
+    if [[ -n "$git_common" ]]; then
+        main_repo=$(dirname "$git_common")
+    fi
+    if [[ -z "$wt_abs" ]] || [[ -z "$main_repo" ]] || [[ ! -d "$main_repo" ]]; then
+        echo "Worktree cleanup skipped: could not determine the main repository for: $wt_path"
+        echo "Remove it manually from its main repo: git worktree remove \"$wt_path\""
+        return 0
+    fi
+    if ! command -v wt-finish &>/dev/null; then
+        echo "Worktree cleanup skipped: wt-finish is not available in this shell."
+        echo "Remove it manually: git -C \"$main_repo\" worktree remove \"$wt_abs\""
+        echo "(add --force to discard uncommitted changes)"
+        return 0
+    fi
+
     local reply
     echo ""
     echo "─────────────────────────────────────"
@@ -12215,33 +12240,36 @@ _kb_offer_worktree_cleanup() {
     echo "─────────────────────────────────────"
 
     if [[ "$reply" == "y" ]] || [[ "$reply" == "Y" ]]; then
-        # Ensure Academy project context is set so wt-finish can locate the worktree dir.
-        # Derive the worktree name (the basename) from the path.
+        # Remove exactly the worktree at the path we were given. wt-finish resolves
+        # "$WT_DIR/<name>" from the caller's WT_* context, and `wt-project <name>`
+        # maps to fixed per-project directories that are not where the launchers put
+        # worktrees (<project_root>/worktrees/<id>). So do NOT depend on, or mutate,
+        # the caller's context: run wt-finish in a SUBSHELL whose WT_DIR/WT_MAIN are
+        # derived from $wt_path itself. Nothing (WT_*, cwd, CURRENT_WORKTREE) leaks
+        # back into the caller. wt-finish's remaining WT_PROJECT dependence is
+        # `_wt_get_main_branch`, whose case arms are project-specific main-branch
+        # vars; a neutral value takes the `*)` arm (basename of WT_MAIN) so a
+        # caller's unrelated WT_PROJECT cannot steer the merge classification.
         local wt_name
-        wt_name=$(basename "$wt_path")
+        wt_name=$(basename "$wt_abs")
 
-        # wt-finish requires WT_PROJECT and WT_DIR. Set Academy context if not already set.
-        # This is safe — the launchers only create worktrees under the Academy worktrees dir.
-        if [[ -z "${WT_PROJECT-}" ]]; then
-            if command -v wt-project &>/dev/null; then
-                wt-project academy 2>/dev/null
-            fi
+        local _kb_wt_rc=0
+        (
+            WT_DIR=$(dirname "$wt_abs")
+            WT_MAIN="$main_repo"
+            WT_PROJECT="kb-worktree-cleanup"
+            # git worktree remove requires cwd to NOT be inside the worktree.
+            cd "$main_repo" || exit 1
+            wt-finish "$wt_name"
+        ) || _kb_wt_rc=$?
+        if [[ "$_kb_wt_rc" -ne 0 ]]; then
+            echo "Worktree not removed (wt-finish exited $_kb_wt_rc): $wt_abs"
         fi
-
-        # wt-finish may run `git worktree remove` which requires cwd to NOT be inside
-        # the worktree being removed. cd to the main repo root first. Use
-        # --path-format=absolute + a quoted dirname (not `| xargs dirname`, which
-        # word-splits on paths containing spaces — XACA-0598-013).
-        local git_common main_repo
-        git_common=$(git -C "$wt_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
-        if [[ -n "$git_common" ]]; then
-            main_repo=$(dirname "$git_common")
+        # If the caller was standing inside the worktree that is now gone, leave
+        # them in the main repo instead of a dead directory.
+        if [[ ! -d "$PWD" ]]; then
+            cd "$main_repo" 2>/dev/null || true
         fi
-        if [[ -n "$main_repo" ]] && [[ -d "$main_repo" ]]; then
-            cd "$main_repo" || true
-        fi
-
-        wt-finish "$wt_name"
     else
         echo "Worktree kept. Run 'wt-finish' later to remove it."
     fi
@@ -12311,7 +12339,15 @@ _kb_resolve_run_team() {
 # sibling-heuristic-drift — three siblings get the same treatment, on purpose.
 # Usage: _kb_switch_to_item_worktree <board_file> <index> <item_id> [cmd_name]
 # Expects caller-scope variables from _kb_display_item_box: item_worktree, item_worktree_branch, title
-# Returns 0 if switched, 1 if no worktree found (stays in current dir)
+# Returns (XACA-1151-068 contract -- every caller MUST honour it):
+#   0  switched (or already in the right place); continue
+#   1  SOFT: no worktree could be set up ("No worktree found ... Staying in current
+#      directory" / "Worktree creation failed. Staying in current directory"); the
+#      caller MAY continue and launch in the current directory (kb-run parity)
+#   2  HARD refusal: invalid subRepo, no-git-context refused/aborted, cd into the
+#      worktree failed, or the user aborted the reset; the caller MUST NOT launch
+#      (return non-zero before cc). A blanket `|| return 1` is wrong: it would turn
+#      the two soft paths into refusals.
 _kb_switch_to_item_worktree() {
     local board_file="${1-}"
     local index="${2-}"
@@ -12333,13 +12369,13 @@ _kb_switch_to_item_worktree() {
             echo "─────────────────────────────────────"
             cd "$item_worktree" || {
                 echo "Error: Failed to cd into worktree: $item_worktree"
-                return 1
+                return 2
             }
             local reset_rc=0
             _kb_reset_worktree || reset_rc=$?
             if [[ $reset_rc -eq 2 ]]; then
                 echo "⛔ Worktree operation aborted by user." >&2
-                return 1
+                return 2
             elif [[ $reset_rc -eq 1 ]]; then
                 echo "⚠️  Worktree reset failed. Worktree may not be on latest code." >&2
             fi
@@ -12358,7 +12394,7 @@ _kb_switch_to_item_worktree() {
         echo "─────────────────────────────────────"
         cd "$discovered" || {
             echo "Error: Failed to cd into worktree: $discovered"
-            return 1
+            return 2
         }
 
         # Backlink to kanban item for future fast lookups
@@ -12384,7 +12420,7 @@ _kb_switch_to_item_worktree() {
         _kb_reset_worktree || reset_rc=$?
         if [[ $reset_rc -eq 2 ]]; then
             echo "⛔ Worktree operation aborted by user." >&2
-            return 1
+            return 2
         elif [[ $reset_rc -eq 1 ]]; then
             echo "⚠️  Worktree reset failed. Worktree may not be on latest code." >&2
         fi
@@ -12396,11 +12432,11 @@ _kb_switch_to_item_worktree() {
     # kb-run-debug, and the fallthrough path in kb-run (no existing worktree found).
     local _switch_sub_repo
     _switch_sub_repo=$(_kb_jq_read "$board_file" ".backlog[$index].subRepo // empty" -r 2>/dev/null)
-    _kb_route_to_subrepo "$item_id" "$_switch_sub_repo" || return 1
+    _kb_route_to_subrepo "$item_id" "$_switch_sub_repo" || return 2
 
     # Guard: if not in any git repo (umbrella-repo parent dir), warn loudly and prompt.
     if [[ "$(_kb_git_context)" == "none" ]]; then
-        _kb_warn_no_git_context "$cmd_name" || return 1
+        _kb_warn_no_git_context "$cmd_name" || return 2
     fi
 
     # No existing worktree found — create one if we're in the main repo
@@ -12416,7 +12452,7 @@ _kb_switch_to_item_worktree() {
         if [[ -n "$new_worktree" ]] && [[ -d "$new_worktree" ]]; then
             cd "$new_worktree" || {
                 echo "Error: Failed to cd into worktree: $new_worktree"
-                return 1
+                return 2
             }
 
             # Link worktree to kanban item for future fast lookups
@@ -12447,7 +12483,7 @@ _kb_switch_to_item_worktree() {
             _kb_reset_worktree || reset_rc=$?
             if [[ $reset_rc -eq 2 ]]; then
                 echo "⛔ Worktree operation aborted by user." >&2
-                return 1
+                return 2
             elif [[ $reset_rc -eq 1 ]]; then
                 echo "⚠️  Worktree reset failed. Worktree may not be on latest code." >&2
             fi
@@ -12717,6 +12753,8 @@ kb-run-review() {
     # Extract and display item details for review confirmation
     local item_id title description jira_id github_issue priority item_status due_date tags
     local subitem_count item_worktree item_worktree_branch
+    # XACA-0598: session-scope flag — set to 1 by _kb_switch_to_item_worktree if it creates
+    local kb_wt_session_created=0 kb_wt_session_path=""
     _kb_display_item_box "$item_json" "PR REVIEW REQUEST" "worktree,branch"
 
     # Confirmation prompt
@@ -12734,7 +12772,13 @@ kb-run-review() {
 
     # Switch to the item's worktree if we're not already in it
     if ! _kb_is_correct_worktree "$item_worktree" "$item_worktree_branch"; then
-        _kb_switch_to_item_worktree "$board_file" "$index" "$item_id"
+        # XACA-1151-068: honour the switch's contract -- rc 2 is a HARD refusal (never
+        # launch); rc 1 is the soft "staying in current directory" path (continue).
+        local _kb_switch_rc=0
+        _kb_switch_to_item_worktree "$board_file" "$index" "$item_id" "kb-run-review" || _kb_switch_rc=$?
+        if [[ $_kb_switch_rc -eq 2 ]]; then
+            return 1
+        fi
     fi
 
     # Build the review prompt using shared helper
@@ -13011,6 +13055,8 @@ kb-run-test() {
     # Extract and display item details for test confirmation
     local item_id title description jira_id github_issue priority item_status due_date tags
     local subitem_count item_worktree item_worktree_branch
+    # XACA-0598: session-scope flag — set to 1 by _kb_switch_to_item_worktree if it creates
+    local kb_wt_session_created=0 kb_wt_session_path=""
     _kb_display_item_box "$item_json" "PR TEST REQUEST" "worktree,branch"
 
     # Confirmation prompt
@@ -13028,7 +13074,13 @@ kb-run-test() {
 
     # Switch to the item's worktree if we're not already in it
     if ! _kb_is_correct_worktree "$item_worktree" "$item_worktree_branch"; then
-        _kb_switch_to_item_worktree "$board_file" "$index" "$item_id"
+        # XACA-1151-068: honour the switch's contract -- rc 2 is a HARD refusal (never
+        # launch); rc 1 is the soft "staying in current directory" path (continue).
+        local _kb_switch_rc=0
+        _kb_switch_to_item_worktree "$board_file" "$index" "$item_id" "kb-run-test" || _kb_switch_rc=$?
+        if [[ $_kb_switch_rc -eq 2 ]]; then
+            return 1
+        fi
     fi
 
     # Build the test prompt using shared helper
@@ -13393,7 +13445,13 @@ kb-run-debug() {
 
     # Switch to the item's worktree if we're not already in it
     if ! _kb_is_correct_worktree "$item_worktree" "$item_worktree_branch"; then
-        _kb_switch_to_item_worktree "$board_file" "$index" "$item_id" "kb-run-debug"
+        # XACA-1151-068: honour the switch's contract -- rc 2 is a HARD refusal (never
+        # launch); rc 1 is the soft "staying in current directory" path (continue).
+        local _kb_switch_rc=0
+        _kb_switch_to_item_worktree "$board_file" "$index" "$item_id" "kb-run-debug" || _kb_switch_rc=$?
+        if [[ $_kb_switch_rc -eq 2 ]]; then
+            return 1
+        fi
     fi
 
     # Re-read subitem count/list AFTER the possible reopen above (XACA-0801): reopen only
