@@ -11472,6 +11472,15 @@ kb-run() {
         return 1
     fi
     echo -e "$prompt" | \cc
+    local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+
+    # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
+    # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
+    # and a gate session that died is not a completed gate either -- propagate it, loudly.
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-run: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
+        return $_kb_cc_rc
+    fi
 }
 
 # Work on a task without creating a worktree - for when you're already in the right place
@@ -11812,6 +11821,15 @@ kb-work() {
         return 1
     fi
     echo -e "$prompt" | \cc
+    local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+
+    # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
+    # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
+    # and a gate session that died is not a completed gate either -- propagate it, loudly.
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-work: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
+        return $_kb_cc_rc
+    fi
 }
 
 # Reopen a completed/cancelled item for debugging
@@ -12360,6 +12378,15 @@ kb-run-review() {
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
+    local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+
+    # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
+    # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
+    # and a gate session that died is not a completed gate either -- propagate it, loudly.
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-run-review: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
+        return $_kb_cc_rc
+    fi
 }
 
 # Review a PR for a kanban item in the current directory (no worktree switch)
@@ -12455,6 +12482,15 @@ kb-work-review() {
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
+    local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+
+    # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
+    # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
+    # and a gate session that died is not a completed gate either -- propagate it, loudly.
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-work-review: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
+        return $_kb_cc_rc
+    fi
 }
 
 # Usage: _kb_build_test_prompt <item_id> <title> <description> <item_worktree_branch>
@@ -12636,6 +12672,15 @@ kb-run-test() {
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
+    local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+
+    # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
+    # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
+    # and a gate session that died is not a completed gate either -- propagate it, loudly.
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-run-test: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
+        return $_kb_cc_rc
+    fi
 }
 
 # QA test a PR for a kanban item in the current directory (no worktree switch)
@@ -12731,6 +12776,15 @@ kb-work-test() {
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
+    local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+
+    # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
+    # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
+    # and a gate session that died is not a completed gate either -- propagate it, loudly.
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-work-test: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
+        return $_kb_cc_rc
+    fi
 }
 
 # Internal helper: Build the debug/investigation prompt text
@@ -12986,6 +13040,15 @@ kb-run-debug() {
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
+    local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+
+    # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
+    # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
+    # and a gate session that died is not a completed gate either -- propagate it, loudly.
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-run-debug: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
+        return $_kb_cc_rc
+    fi
 }
 
 # Debug a completed/cancelled kanban item in the current directory (no worktree switch)
@@ -13102,6 +13165,15 @@ kb-work-debug() {
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
+    local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+
+    # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
+    # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
+    # and a gate session that died is not a completed gate either -- propagate it, loudly.
+    if (( _kb_cc_rc != 0 )); then
+        echo "✗ kb-work-debug: cc exited $_kb_cc_rc -- the session may not have launched (see the error above); do not treat this as a completed launch." >&2
+        return $_kb_cc_rc
+    fi
 }
 
 # ============================================================================

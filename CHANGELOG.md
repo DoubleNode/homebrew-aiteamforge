@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1284-016: helpers-template launchers propagate `cc`'s exit status.** All 8 template
+  launchers (`kb-run`, `kb-work`, `kb-{run,work}-{review,test,debug}`) capture `cc`'s rc and return it
+  with a `✗ <launcher>: cc exited N` message on stderr, so a refused launch (routing/credential abort,
+  missing `claude`) no longer reads as success. Mirrors the canonical `kanban-helpers.sh` fix (PR #991).
 - **XACA-1344 (PR 1/3)** — ships `share/scripts/kb-wiki`, the wiki publishing CLI, as a stub:
   all seven subcommands (`publish`, `read`, `find`, `children`, `url`, `patch-section`, `doctor`)
   parse their arguments and exit 3 with `not implemented yet` until PRs 2-3 land, so the release
