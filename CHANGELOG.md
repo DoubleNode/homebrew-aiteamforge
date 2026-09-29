@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1151 (PR-E3b):** `tests/test-xaca-0822-template-canonical-parity.sh` XACA-0822-008 now calls `kb-run TST-0010 --yes` instead of piping `y`. Since XACA-1284 (#991) `kb-run` refuses with rc 2 when it has no tty and no `--yes`, so the piped form never reached the unestimated-item gate the row exists to test (it failed 10/11 on develop).
 - **XACA-1151 (PR-E3b)** — `kb-run`, `kb-work` and `kb-work-debug` now behave like the dev-team copies.
   - `kb-run` and `kb-work` warn and ask before starting a blocked item; without a terminal they refuse with the list of blockers. Answering no now ends quietly instead of failing.
   - Both add a "Prior Knowledge" section to the prompt when the knowledge search finds something (turn it off with `KB_PRIOR_KNOWLEDGE_DISABLED=1`), and both name the session `<id>: <title>` while it runs.

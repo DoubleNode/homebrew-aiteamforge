@@ -352,7 +352,9 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # XACA-0822-008c: kb-run refuses to start an UNESTIMATED item — the gate must
 # fire AFTER the user confirms [Y] but BEFORE any worktree/status mutation.
-# Feeds "y" on stdin for the confirmation prompt; asserts exit != 0 and the
+# Passes --yes to accept the confirmation non-interactively (since XACA-1284,
+# kb-run refuses with rc 2 when there is no tty and no --yes, BEFORE this gate --
+# piping "y" on stdin no longer reaches it); asserts exit != 0 and the
 # board status is untouched (kb-run's gate is a precondition check only —
 # kb-pick is the write site, per canonical XACA-0624).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -365,7 +367,7 @@ _run_zsh "
 _kb_detect_context() { echo 'testteam:agent'; }
 _kb_get_board_file() { echo '$_BOARD_FILE'; }
 _kb_resolve_selector() { echo 0; }
-echo y | kb-run TST-0010
+kb-run TST-0010 --yes </dev/null
 "
 rc="$?"
 status_after="$(jq -r '.backlog[0].status' "$_BOARD_FILE" 2>/dev/null)"
