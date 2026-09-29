@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1343 (PR 2a/4)** — ships `share/scripts/release_template_render.py`, the shared renderer for
+  release content-profile templates (`{{path}}`, `{{#each}}`, `{{#if}}`, trailing-`?` line drop, HTML
+  comments stripped). Fails closed on a missing required value, so a CR is never published with a
+  blank field. Library-only: used by `kb-wiki`/`kb-notify` once XACA-1344/1345 land.
 - **XACA-0888 (3/3)** — port of the canonical explicit-slug team routing + diagnostic fix.
   `kb-knowledge-add project <slug> "<title>"` now routes an EXACT registered-team-id `<slug>`
   (e.g. `ios`) to that team's own `<kanban_dir>/knowledge/project` instead of minting
