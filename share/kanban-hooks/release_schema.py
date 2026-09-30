@@ -48,6 +48,8 @@ def validate_test_record(rec):
     for f in _STR_FIELDS:
         if not isinstance(rec[f], str) or not rec[f].strip():
             errs.append("%s must be a non-empty string" % f)
+    if isinstance(rec["id"], str) and rec["id"].startswith("sha:"):
+        errs.append("id must not start with 'sha:' (reserved for supersede placeholders)")
     if rec["stage"] not in STAGES:
         errs.append("stage must be one of %s" % (list(STAGES),))
     if rec["type"] not in TEST_TYPES:
@@ -90,35 +92,41 @@ def supersede_transition_ok(rec, new_value, tests):
     """THE single supersededBy transition rule (spec 6.5), used by set_superseded AND
     check_append_only. `rec` is the record as it stands, `tests` the snapshot that
     must contain the target. Spec 6.5: the target is "the first new record for the
-    same test". Legal transitions are exactly:
+    same test". Every SHA comparison is case-insensitive (lower() on BOTH sides).
+    Legal transitions are exactly:
 
-      null       -> "sha:<non-empty LOWER-case hex>"   (placeholder until a record exists;
-                    upper-case is REFUSED, not normalised, so the value written is the value
-                    matched later)
+      null       -> "sha:<X>" with X non-empty LOWER-case hex and X != rec.sha
+                    (placeholder until a record exists; upper-case is REFUSED, not
+                    normalised, so the value written is the value matched later; a
+                    record can never point at its own SHA)
       null       -> a record id T where T exists, T is not rec, T.test == rec.test,
                     T.sha != rec.sha (a new SHA: the stage moved), and T appears LATER
                     in tests[] than rec
-      "sha:<X>"  -> a record id T with T.test == rec.test, T.sha == X (compared
-                    case-insensitively, so a legacy upper-case placeholder can still be
-                    upgraded), T not rec, and T LATER than rec in tests[]
+      "sha:<X>"  -> a record id T with T.sha == X, T.sha != rec.sha (this also closes a
+                    legacy placeholder that already names rec's own SHA), T.test == rec.test,
+                    T not rec, and T LATER than rec in tests[]
 
-    Everything else is illegal: id -> other id, sha -> other sha, anything -> null/""/
-    non-string, "sha:" with an empty/non-hex/upper-case value.
+    A record id starting with "sha:" is reserved (validate_test_record refuses it) and can
+    never be a target. Everything else is illegal: id -> other id, sha -> other sha,
+    anything -> null/""/non-string, "sha:" with an empty/non-hex/upper-case value.
 
-    Ordering caveat: SHAs cannot be ordered without git, so "moving backward to an older
-    SHA" is not directly detectable. "Later position in tests[] + different sha" is the
-    enforceable proxy (records are append-only, so position is time order).
+    Ordering caveat (ACCEPTED limitation): SHAs cannot be ordered without git, so a later
+    record at an OLDER SHA is not detectable. "Later position in tests[] + different sha"
+    is the enforceable proxy (records are append-only, so position is time order).
     """
     if not isinstance(new_value, str) or not new_value:
         return False
     old = rec.get("supersededBy")
+    rec_sha = str(rec.get("sha")).lower()
     if old is None and new_value.startswith("sha:"):
-        return re.fullmatch(r"[0-9a-f]+", new_value[4:]) is not None
+        x = new_value[4:]
+        return re.fullmatch(r"[0-9a-f]+", x) is not None and x.lower() != rec_sha
     is_placeholder = isinstance(old, str) and old.startswith("sha:")
     if old is not None and not is_placeholder:
         return False
-    by_id = _ids(tests)
-    target = by_id.get(new_value)
+    if new_value.startswith("sha:"):
+        return False  # reserved prefix: never an id target
+    target = _ids(tests).get(new_value)
     if target is None or new_value == rec.get("id") or target.get("test") != rec.get("test"):
         return False
     order = {}
@@ -128,9 +136,9 @@ def supersede_transition_ok(rec, new_value, tests):
     if rec.get("id") not in order or order[new_value] <= order[rec["id"]]:
         return False
     target_sha = str(target.get("sha")).lower()
-    if is_placeholder:
-        return target_sha == old[4:].lower()
-    return target_sha != str(rec.get("sha")).lower()
+    if target_sha == rec_sha:
+        return False
+    return target_sha == old[4:].lower() if is_placeholder else True
 
 
 def set_superseded(tests, rec_id, superseded_by):
