@@ -41,6 +41,54 @@ ALWAYS_ENABLED = ("PLANNED", "DEV", "GAMMA", "PROD")
 TEST_STAGES = ("DEV", "QA", "ALPHA", "BETA", "GAMMA")  # stages whose exit gate is a test set
 PASSED, FAILED, WAIVED, PENDING, RUNNING = "passed", "failed", "waived", "pending", "running"
 
+# Stable machine-readable codes (XACA-1346-052/054). Reasons stay human strings; evaluate() and
+# validate_waiver() return a PARALLEL `reasonCodes` list (and `reasonData`, per-reason params such
+# as the stage/test a remedy names) so a UI never has to pattern-match prose. "other" = no remedy.
+CODE_OTHER = "other"
+CODE_GAMMA_CONFIRM_REQUIRED = "GAMMA_CONFIRM_REQUIRED"      # lead has not confirmed the prod deploy
+CODE_GAMMA_ACTOR_NOT_LEAD = "GAMMA_ACTOR_NOT_LEAD"          # confirmation asserted by a non-lead
+CODE_WAIVER_NEEDED = "WAIVER_NEEDED"                        # test FAIL / non-optional SKIP: a lead waiver can fix it
+CODE_TEST_MISSING = "TEST_MISSING"                          # no current record: a waiver CANNOT cover it
+CODE_WAIVER_VOID_SHA = "WAIVER_VOID_SHA"                    # waiver granted at another SHA
+CODE_WAIVER_VOID_INVALID = "WAIVER_VOID_INVALID"            # stored waiver malformed
+CODE_WAIVER_NOT_LEAD = "WAIVER_NOT_LEAD"                    # grantor is not the release lead
+CODE_NOT_IN_LEADS = "NOT_IN_LEADS"                          # actor not in releaseConfig.leads
+CODE_LEADS_NOT_CONFIGURED = "LEADS_NOT_CONFIGURED"          # releaseConfig.leads missing/empty: NO lead command can succeed
+REASON_CODES = (CODE_OTHER, CODE_GAMMA_CONFIRM_REQUIRED, CODE_GAMMA_ACTOR_NOT_LEAD, CODE_WAIVER_NEEDED,
+                CODE_TEST_MISSING, CODE_WAIVER_VOID_SHA, CODE_WAIVER_VOID_INVALID, CODE_WAIVER_NOT_LEAD,
+                CODE_NOT_IN_LEADS, CODE_LEADS_NOT_CONFIGURED)
+
+# The text fragments _grade builds and _row_code classifies on: ONE definition, used by both.
+_VOID_MARK = "; waiver VOID: "
+_VOID_SHA_MARK = _VOID_MARK + "waiver sha "
+
+
+class Reasons(list):
+    """list of reason strings carrying parallel `.codes` / `.data` lists (kept in lockstep)."""
+
+    def __init__(self, items=(), codes=None, data=None):
+        super().__init__(items)
+        self.codes = list(codes) if codes is not None else [CODE_OTHER] * len(self)
+        self.data = list(data) if data is not None else [None] * len(self)
+
+    def append(self, msg, code=CODE_OTHER, data=None):
+        super().append(msg)
+        self.codes.append(code)
+        self.data.append(data)
+
+    def extend(self, other):
+        if isinstance(other, Reasons):
+            super().extend(other)
+            self.codes.extend(other.codes)
+            self.data.extend(other.data)
+        else:
+            for m in other:
+                self.append(m)
+
+    def payload(self):
+        """{"reasons", "reasonCodes", "reasonData"} as plain JSON-able lists."""
+        return {"reasons": list(self), "reasonCodes": list(self.codes), "reasonData": list(self.data)}
+
 
 def _cr_flag(v):
     if not isinstance(v, bool):
@@ -192,9 +240,9 @@ def _grade(expected, tests, sha, waiver, stage=None):
             if w_ok:
                 rows.append((name, WAIVED, ""))
                 continue
-            why += "; waiver VOID: waiver sha %s != graded sha %s" % (waiver.get("sha"), sha)
+            why += _VOID_SHA_MARK + "%s != graded sha %s" % (waiver.get("sha"), sha)
         elif rec is not None and bad and waiver:
-            why += "; waiver VOID: " + bad
+            why += _VOID_MARK + bad
         rows.append((name, outcome, why))
     return rows
 
@@ -217,10 +265,10 @@ def derive_stage_status(stage_record, tests, expected, stage=None):
 
 def validate_waiver(waiver, stage_record, actor_is_lead):
     """Reasons a waiver is not acceptable ([] = valid). Lead check is the caller's fact."""
-    r = []
+    r = Reasons()
     w = waiver if isinstance(waiver, dict) else {}
     if not actor_is_lead:
-        r.append("only the release lead may grant a waiver")
+        r.append("only the release lead may grant a waiver", CODE_WAIVER_NOT_LEAD)
     for f in ("by", "reason", "ts", "sha"):
         if not str(w.get(f) or "").strip():
             r.append("waiver is missing required field '%s'" % f)
@@ -236,9 +284,22 @@ def validate_waiver(waiver, stage_record, actor_is_lead):
     return r
 
 
+def _row_code(outcome, why):
+    """Code for one _grade row that blocks the gate (outcome missing|failed)."""
+    if outcome == "missing":
+        return CODE_TEST_MISSING
+    if _VOID_SHA_MARK in why:
+        return CODE_WAIVER_VOID_SHA
+    if _VOID_MARK in why:
+        return CODE_WAIVER_VOID_INVALID
+    if why.startswith("expected test entry is malformed"):
+        return CODE_OTHER
+    return CODE_WAIVER_NEEDED
+
+
 def _exit_conditions(release, cur, cr_on, ctx):
     """Stage-specific unmet conditions for leaving `cur` (spec 3.2), all collected."""
-    r = []
+    r = Reasons()
     sha = _graded_sha(release, cur)
     if cur == "PLANNED":
         items = ctx.get("items")
@@ -315,14 +376,15 @@ def _exit_conditions(release, cur, cr_on, ctx):
             wv = rec.get("waiver")
             for _n, outcome, why in _grade(expected, release.get("tests"), sha, wv, cur):
                 if outcome in ("missing", FAILED):
-                    r.append("%s: %s" % (cur, why))
+                    r.append("%s: %s" % (cur, why), _row_code(outcome, why),
+                             {"stage": cur, "test": _n, "sha": sha})
     return r
 
 
 def evaluate(release, target_stage, flow_config, *, cr_support_enabled, actor=None, context=None):
     """Promote gate. Returns {allowed, reasons[], current, target, next, actor, status}."""
     ctx = context or {}
-    reasons = []
+    reasons = Reasons()
     order = enabled_stages(flow_config, cr_support_enabled=cr_support_enabled)
     cur = current_stage(release)
     nxt = None
@@ -342,12 +404,14 @@ def evaluate(release, target_stage, flow_config, *, cr_support_enabled, actor=No
         elif target_stage != nxt:
             reasons.append("skipping refused: next enabled stage after %s is %s, not %s" % (cur, nxt, target_stage))
         if target_stage == "GAMMA" and not ctx.get("deploy_confirmed"):
-            reasons.append("GAMMA: lead must explicitly confirm the production deploy")
+            reasons.append("GAMMA: lead must explicitly confirm the production deploy",
+                           CODE_GAMMA_CONFIRM_REQUIRED, {"stage": "GAMMA"})
         reasons.extend(_exit_conditions(release, cur, cr_support_enabled, ctx))
     rec = (release.get("stages") or {}).get(cur) or {}
     status = derive_stage_status(dict(rec, sha=_graded_sha(release, cur)), release.get("tests"), rec.get("expected"), cur) \
         if cur in TEST_STAGES else None
-    return {"allowed": not reasons, "reasons": reasons, "current": cur, "target": target_stage,
+    return {"allowed": not reasons, "reasons": list(reasons), "reasonCodes": list(reasons.codes),
+            "reasonData": list(reasons.data), "current": cur, "target": target_stage,
             "next": nxt, "actor": actor, "status": status}
 
 

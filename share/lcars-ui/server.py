@@ -8360,6 +8360,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return False, "actor '%s' is not in releaseConfig.leads" % actor.strip()
         return True, None
 
+    @staticmethod
+    def _leads_configured(release_config):
+        leads = release_config.get('leads')
+        return isinstance(leads, list) and any(isinstance(x, str) and x.strip() for x in leads)
+
+    @classmethod
+    def _lead_reason_code(cls, release_config):
+        """Code for an `_actor_is_lead` refusal: an unconfigured list is its own class (no lead
+        command can succeed until the board is configured)."""
+        return (_release_gate.CODE_NOT_IN_LEADS if cls._leads_configured(release_config)
+                else _release_gate.CODE_LEADS_NOT_CONFIGURED)
+
     def _release_repo_root(self, team):
         """Team's git working dir (aiteamforge_paths registry), else kanban dir's parent."""
         try:
@@ -8552,10 +8564,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         noop_log = dict(stage=legacy_target, actor=actor, mode=mode,
                                         platform=body.get('platform'), configWarning=cfg_warning)
                     noop_payload = {"allowed": True, "noop": True, "mode": mode, "from": legacy_target,
-                                    "to": legacy_target, "reasons": [], "success": True,
+                                    "to": legacy_target, "reasons": [], "reasonCodes": [], "reasonData": [],
+                                    "success": True,
                                     "previousEnvironment": legacy_target, "newEnvironment": legacy_target}
                     if cfg_warning:
                         noop_payload["configWarning"] = cfg_warning
+                    if dry_run:
+                        noop_payload["dryRun"] = True
                     raise _DeferredResponse.json(noop_payload, 200)
                 cr_on = self._crsupport_enabled(board_raw)
                 flow = data.get('flowConfig') or {}
@@ -8569,9 +8584,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 eff_target = target or nxt
                 verdict = _release_gate.evaluate(release, eff_target or cur, flow, cr_support_enabled=cr_on,
                                                  actor=actor, context=ctx)
-                reasons = list(verdict['reasons'])
+                reasons = _release_gate.Reasons(verdict['reasons'], verdict['reasonCodes'], verdict['reasonData'])
                 if eff_target == 'GAMMA' and confirm and not is_lead:
-                    reasons.append("GAMMA: deploy confirmation refused: " + lead_reason)
+                    reasons.append("GAMMA: deploy confirmation refused: " + lead_reason,
+                                   _release_gate.CODE_GAMMA_ACTOR_NOT_LEAD if self._leads_configured(rcfg)
+                                   else _release_gate.CODE_LEADS_NOT_CONFIGURED, {"stage": "GAMMA"})
+                # A lead command can never succeed while releaseConfig.leads is missing/empty: say so as
+                # its own reason so a UI suggests configuring it instead of a command that is refused.
+                _lead_fixable = {_release_gate.CODE_GAMMA_CONFIRM_REQUIRED, _release_gate.CODE_WAIVER_NEEDED,
+                                 _release_gate.CODE_WAIVER_VOID_SHA, _release_gate.CODE_WAIVER_VOID_INVALID}
+                if (not self._leads_configured(rcfg)
+                        and _release_gate.CODE_LEADS_NOT_CONFIGURED not in reasons.codes
+                        and _lead_fixable.intersection(reasons.codes)):
+                    reasons.append("releaseConfig.leads is missing or empty; nobody can be authorized as lead "
+                                   "(fails closed)", _release_gate.CODE_LEADS_NOT_CONFIGURED)
                 # Structurally impossible moves are refused in BOTH modes: report mode must
                 # never write a stage that is unknown, disabled, unchanged, backward or past PROD.
                 hard = (eff_target is None or cur == 'PROD' or eff_target == cur
@@ -8604,7 +8630,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if not proceed and cfg_warning:
                     reasons.append(cfg_warning)
 
-            base = {"mode": mode, "from": cur, "to": eff_target, "reasons": reasons}
+            # reasons stay strings; reasonCodes/reasonData are PARALLEL lists (XACA-1346-052/054) so
+            # the LCARS modal maps a reason to its remedy without pattern-matching prose.
+            base = {"mode": mode, "from": cur, "to": eff_target, "reasons": list(reasons),
+                    "reasonCodes": list(reasons.codes), "reasonData": list(reasons.data)}
             if cfg_warning:
                 base["configWarning"] = cfg_warning
             if dry_run:
@@ -8615,7 +8644,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     dict(base, allowed=bool(proceed), dryRun=True, next=nxt,
                          error=None if proceed and not reasons else self._reasons_error(reasons)),
                     status=200)
-            logctx = dict(actor=actor, mode=mode, reasons=reasons, confirmDeploy=confirm,
+            logctx = dict(actor=actor, mode=mode, reasons=list(reasons), confirmDeploy=confirm,
                           cut=cut, configWarning=cfg_warning)
             if not written:
                 self._log_release_activity(release_id, 'release_promote_refused', cur, eff_target, **logctx)
@@ -8746,13 +8775,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                           "tests": list(tests), "sha": graded}
                 reasons = _release_gate.validate_waiver(waiver, dict(srec_ro, sha=graded), is_lead)
                 if not is_lead:
-                    reasons.append(lead_reason)
+                    reasons.append(lead_reason, self._lead_reason_code(rcfg))
                 if stage != cur:
                     reasons.append("stage %s is not the current stage (%s); only the current stage can be waived"
                                    % (stage, cur))
                 if reasons:
                     status = 403 if not is_lead else 409
-                    payload = {"reasons": reasons, "error": self._reasons_error(reasons)}
+                    payload = dict(reasons.payload(), error=self._reasons_error(reasons))
                 else:
                     prior = srec_ro.get('waiver')
                     if release.get('stages') is not stages:  # was absent/malformed: replace, never clobber a dict

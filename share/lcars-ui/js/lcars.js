@@ -12067,16 +12067,16 @@ function viewReleaseItems(releaseId) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PROMOTE MODAL (XACA-0026, redesigned XACA-1346-048/047/049)
+// PROMOTE MODAL (XACA-0026, redesigned XACA-1346-048/047/049/052/053/054)
 //
 // Stage state is RELEASE-LEVEL, so the modal is about the RELEASE, not its platforms:
 //   1. REVIEW: one preview "current stage -> target stage", computed by the SERVER
 //      (POST /promote {dryRun:true}: the real gate, no write, no log). Unmet conditions are
-//      listed. Platforms are shown read-only (they all move together).
+//      listed, each next to the remedy that fixes THAT condition. Platforms are read-only.
 //   2. RESULT: on confirm ONE request {targetStage: <previewed stage>, actor, confirmDeploy:false}.
 //      Sending the previewed stage means a STALE preview is refused (409), never skipped past.
 // The UI never confirms a production deploy: the server has no auth and leads are CLI-attested
-// (decision XACA-1346-038), so a GAMMA / lead-only refusal shows the CLI path forward.
+// (decision XACA-1346-038), so lead-only refusals show the CLI path forward.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 let promoteModalState = {
@@ -12084,57 +12084,160 @@ let promoteModalState = {
     releaseData: null,
     currentStep: 1,
     preview: null,
-    result: null
+    result: null,
+    inFlight: false
 };
 
 // >>> PROMOTE-MODAL-PURE-START (DOM-free; sliced by lcars-ui/tests/test-xaca-1346-promote-modal-single-request.js)
+/**
+ * The CLI commands the modal advises. PR 3b (kanban-helpers.sh kb-release-promote / kb-release-waive)
+ * ADDS these flags: they are NOT on develop before 3b merges, which is why every remedy is built from
+ * THIS table and nowhere else. PR 3b's zsh suite cross-checks `flags` against the CLI parsers, and
+ * test-xaca-1346-promote-modal-single-request.js asserts each built command uses exactly the declared
+ * flag set. Change a flag here and in the CLI together, never in a string.
+ */
+const PROMOTE_REMEDY_COMMANDS = {
+    GAMMA_CONFIRM: { command: 'kb-release promote', flags: ['--to', '--confirm-deploy', '--actor'] },
+    WAIVE: { command: 'kb-release waive', flags: ['--stage', '--tests', '--reason', '--by'] }
+};
+
+function promoteQuoteArg(value) {
+    const v = String(value);
+    return /^[A-Za-z0-9_.:\/-]+$/.test(v) ? v : JSON.stringify(v);
+}
+
+function promoteGammaCommand(releaseId) {
+    return PROMOTE_REMEDY_COMMANDS.GAMMA_CONFIRM.command + ' ' + releaseId +
+        ' --to GAMMA --confirm-deploy --actor <lead>';
+}
+
+function promoteWaiveCommand(releaseId, data, by) {
+    const stage = (data && data.stage) ? data.stage : '<STAGE>';
+    const test = (data && data.test) ? promoteQuoteArg(data.test) : '<test>';
+    return PROMOTE_REMEDY_COMMANDS.WAIVE.command + ' ' + releaseId + ' --stage ' + stage +
+        ' --tests ' + test + ' --reason "..." --by ' + by;
+}
+
+/**
+ * Per-reason-class remedy, keyed on the server's stable reason CODE (release_gate.REASON_CODES),
+ * never on prose. `conditional` = the promote is allowed anyway (report mode), so the remedy is
+ * phrased as what ENFORCE mode would require, not as an instruction that contradicts PROMOTE.
+ * Returns {text, command|null} or null (no remedy: the reason stands alone).
+ */
+function promoteRemedyFor(code, data, releaseId, conditional, leadsMissing) {
+    const phrase = (imperative, needs) =>
+        conditional ? 'In enforce mode this would require ' + needs + ':' : imperative + ':';
+    const leadCommand = (mk) => (leadsMissing ? null : mk());
+    let r = null;
+    switch (code) {
+        case 'GAMMA_CONFIRM_REQUIRED':
+        case 'GAMMA_ACTOR_NOT_LEAD':
+            r = { text: phrase('A release lead must confirm the production deploy', "a release lead's deploy confirmation"),
+                  command: leadCommand(() => promoteGammaCommand(releaseId)) };
+            break;
+        case 'WAIVER_NEEDED':
+            r = { text: phrase('A release lead can waive this test', "a release lead's waiver for this test"),
+                  command: leadCommand(() => promoteWaiveCommand(releaseId, data, '<lead>')) };
+            break;
+        case 'WAIVER_NOT_LEAD':
+        case 'NOT_IN_LEADS':
+            r = { text: phrase('Re-grant it as a release lead (a name listed in releaseConfig.leads)',
+                               'a waiver granted by a name listed in releaseConfig.leads'),
+                  command: leadCommand(() => promoteWaiveCommand(releaseId, data, '<a name in releaseConfig.leads>')) };
+            break;
+        case 'WAIVER_VOID_SHA':
+            r = { text: phrase('The waiver was granted at a different SHA. Re-run the test at the new SHA, or have a lead re-waive at that SHA',
+                               'the test re-run at the new SHA, or a lead re-waiving at that SHA'),
+                  command: leadCommand(() => promoteWaiveCommand(releaseId, data, '<lead>')) };
+            break;
+        case 'WAIVER_VOID_INVALID':
+            r = { text: phrase('The stored waiver is invalid; have a release lead grant it again', 'a valid waiver from a release lead'),
+                  command: leadCommand(() => promoteWaiveCommand(releaseId, data, '<lead>')) };
+            break;
+        case 'TEST_MISSING':
+            r = { text: 'Run this test at the graded SHA (a waiver cannot cover a test that has no record).', command: null };
+            break;
+        case 'LEADS_NOT_CONFIGURED':
+            r = { text: 'Configure releaseConfig.leads on this board (the list of release leads); no lead command can succeed until it is set.', command: null };
+            break;
+        default:
+            r = null;
+    }
+    return r;
+}
+
+/**
+ * Pair every reason with its remedy. Every applicable remedy is shown, but an identical remedy is
+ * shown ONCE (next to the first reason it fixes). `payload` = {reasons, reasonCodes, reasonData}.
+ */
+function buildPromoteReasonItems(releaseId, payload, conditional) {
+    const reasons = Array.isArray(payload && payload.reasons) ? payload.reasons.map(String) : [];
+    const codes = Array.isArray(payload && payload.reasonCodes) ? payload.reasonCodes : [];
+    const data = Array.isArray(payload && payload.reasonData) ? payload.reasonData : [];
+    const leadsMissing = codes.indexOf('LEADS_NOT_CONFIGURED') !== -1;
+    const seen = new Set();
+    return reasons.map((text, i) => {
+        let remedy = promoteRemedyFor(codes[i] || 'other', data[i] || null, releaseId, !!conditional, leadsMissing);
+        if (remedy) {
+            const key = remedy.text + '\u0000' + (remedy.command || '');
+            if (seen.has(key)) { remedy = null; } else { seen.add(key); }
+        }
+        return { text: text, code: codes[i] || 'other', remedy: remedy };
+    });
+}
+
 function promotePlatformLabel(platform) {
     const known = { ios: 'iOS', android: 'Android', firebase: 'Firebase', web: 'Web' };
     const p = String(platform);
     return known[p] || (p.charAt(0).toUpperCase() + p.slice(1));
 }
 
-/** True when a refusal is about a lead-only action (GAMMA deploy confirmation, waivers). */
-function promoteNeedsLead(target, reasons) {
-    if (target === 'GAMMA') return true;
-    return (reasons || []).some(r => /\blead\b|releaseConfig\.leads/i.test(String(r)));
-}
-
-function promotePathForward(releaseId, target, reasons) {
-    if (!promoteNeedsLead(target, reasons)) return null;
-    return "GAMMA requires a release lead's deploy confirmation: run `kb-release promote " +
-        releaseId + " --confirm-deploy --actor <lead>`";
+/** CSS class for a stage badge; an unknown stage gets env-unknown, never a class built from null. */
+function promoteEnvClass(stage) {
+    return 'env-' + (stage ? String(stage).toLowerCase() : 'unknown');
 }
 
 /**
  * View model for the REVIEW step from the server's dry-run payload
- * ({allowed, mode, from, to, next, reasons, error}).
+ * ({allowed, mode, from, to, next, reasons, reasonCodes, reasonData, error}).
  */
 function buildPromotePreviewModel(release, preview) {
-    const reasons = Array.isArray(preview && preview.reasons) ? preview.reasons.map(String) : [];
+    const releaseId = release && release.id;
+    const payload = {
+        reasons: Array.isArray(preview && preview.reasons) ? preview.reasons.slice() : [],
+        reasonCodes: Array.isArray(preview && preview.reasonCodes) ? preview.reasonCodes.slice() : [],
+        reasonData: Array.isArray(preview && preview.reasonData) ? preview.reasonData.slice() : []
+    };
     const to = (preview && preview.to) || null;
     const from = (preview && preview.from) || null;
     const allowed = !!(preview && preview.allowed === true && to);
-    const platforms = Object.keys((release && release.platforms) || {}).map(promotePlatformLabel);
+    const platformEntries = Object.entries((release && release.platforms) || {});
+    const platformLines = platformEntries.map(([name, d]) => {
+        const data = d || {};
+        const version = data.version ? 'v' + data.version : 'version not set';
+        const build = (data.buildNumber !== undefined && data.buildNumber !== null) ? ' (build ' + data.buildNumber + ')' : '';
+        return promotePlatformLabel(name) + ' ' + version + build;
+    });
     const warnings = [];
     if (to === 'PROD') warnings.push('This promotes the release to PRODUCTION.');
     if (to === 'GAMMA') warnings.push('GAMMA is live in production: the release lead must confirm the deploy.');
+    if (!to && !payload.reasons.length) {
+        payload.reasons.push((preview && preview.error) || 'The server did not return a target stage.');
+    }
     let reasonsHeading = null;
-    if (reasons.length) {
+    if (payload.reasons.length) {
         reasonsHeading = allowed
             ? 'The gate would refuse this promotion in enforce mode (it will still proceed in report mode):'
             : 'This promotion is refused:';
     }
-    if (!to && !reasons.length) {
-        reasons.push((preview && preview.error) || 'The server did not return a target stage.');
-        reasonsHeading = 'This promotion is refused:';
-    }
     return {
         from: from, to: to, canPromote: allowed,
         mode: (preview && preview.mode) || null,
-        platformsInfo: platforms.length ? 'Platforms moving together: ' + platforms.join(', ') : null,
-        warnings: warnings, reasons: reasons, reasonsHeading: reasonsHeading,
-        pathForward: promotePathForward(release && release.id, to, reasons)
+        platformsInfo: platformLines.length ? 'Platforms moving together (read-only):' : null,
+        platformLines: platformLines,
+        warnings: warnings,
+        reasons: payload.reasons, reasonsHeading: reasonsHeading,
+        reasonItems: buildPromoteReasonItems(releaseId, payload, allowed)
     };
 }
 
@@ -12153,18 +12256,22 @@ function buildPromoteResultModel(releaseId, preview, outcome) {
             title: 'Release promoted: ' + from + ' → ' + to,
             reasons: reasons,
             reasonsHeading: reasons.length ? 'Promoted; the gate would have refused in enforce mode:' : null,
-            pathForward: null,
+            reasonItems: buildPromoteReasonItems(releaseId, data, true),
             toast: 'Release ' + releaseId + ' promoted to ' + to
         };
     }
     let reasons = Array.isArray(data.reasons) ? data.reasons.map(String) : [];
-    if (!reasons.length) reasons = [data.error || ('HTTP ' + (outcome && outcome.status))];
+    let payload = data;
+    if (!reasons.length) {
+        reasons = [data.error || ('HTTP ' + (outcome && outcome.status))];
+        payload = { reasons: reasons };
+    }
     const target = (preview && preview.to) || data.to || null;
     return {
         success: false, from: (preview && preview.from) || null, to: target,
         title: 'Promotion refused',
         reasons: reasons, reasonsHeading: 'Unmet conditions:',
-        pathForward: promotePathForward(releaseId, target, reasons),
+        reasonItems: buildPromoteReasonItems(releaseId, payload, false),
         toast: 'Promotion refused: ' + reasons[0]
     };
 }
@@ -12175,7 +12282,7 @@ function buildPromoteResultModel(releaseId, preview, outcome) {
  * @param {string} releaseId - The release ID to promote
  */
 async function promoteRelease(releaseId) {
-    promoteModalState = { releaseId: releaseId, releaseData: null, currentStep: 1, preview: null, result: null };
+    promoteModalState = { releaseId: releaseId, releaseData: null, currentStep: 1, preview: null, result: null, inFlight: false };
 
     try {
         const releaseResponse = await fetch(apiUrl(`/api/releases/${releaseId}`));
@@ -12200,7 +12307,8 @@ async function promoteRelease(releaseId) {
         const data = await response.json().catch(() => ({}));
         promoteModalState.preview = response.ok
             ? data
-            : { allowed: false, reasons: Array.isArray(data.reasons) ? data.reasons : [data.error || `HTTP ${response.status}`] };
+            : { allowed: false, reasons: Array.isArray(data.reasons) ? data.reasons : [data.error || `HTTP ${response.status}`],
+                reasonCodes: data.reasonCodes, reasonData: data.reasonData };
     } catch (error) {
         promoteModalState.preview = { allowed: false, reasons: [error.message] };
     }
@@ -12208,19 +12316,37 @@ async function promoteRelease(releaseId) {
     populatePromotePreview();
     updatePromoteStepIndicator(1);
     showPromoteStep(1);
+    document.getElementById('promote-cancel-btn').disabled = false;
     document.getElementById('promote-modal').style.display = 'flex';
 }
 
 /**
- * Hide the promote modal
+ * Hide the promote modal. Refused while a promote request is in flight: a request cannot be
+ * cancelled (it will still complete and write), so the modal stays up and shows the result.
  */
 function hidePromoteModal() {
+    if (promoteModalState.inFlight) return;
     document.getElementById('promote-modal').style.display = 'none';
-    promoteModalState = { releaseId: null, releaseData: null, currentStep: 1, preview: null, result: null };
+    promoteModalState = { releaseId: null, releaseData: null, currentStep: 1, preview: null, result: null, inFlight: false };
 }
 
 function promoteListHtml(items) {
     return `<ul class="warning-list">${items.map(i => `<li>${escapeHtml(String(i))}</li>`).join('')}</ul>`;
+}
+
+/** Reasons as a list, each followed by the remedy that fixes it (command in <code>). */
+function promoteReasonItemsHtml(items) {
+    return `<ul class="warning-list">${items.map(i => {
+        let html = `<li>${escapeHtml(i.text)}`;
+        if (i.remedy) {
+            html += `<div class="promote-remedy">${escapeHtml(i.remedy.text)}`;
+            if (i.remedy.command) {
+                html += ` <code>${escapeHtml(i.remedy.command)}</code>`;
+            }
+            html += '</div>';
+        }
+        return html + '</li>';
+    }).join('')}</ul>`;
 }
 
 /**
@@ -12242,23 +12368,20 @@ function populatePromotePreview() {
         html += `
             <div class="promote-preview-item">
                 <div class="preview-transition">
-                    <span class="env-badge env-${escapeHtml(String(m.from).toLowerCase())}">${escapeHtml(m.from)}</span>
+                    <span class="env-badge ${escapeHtml(promoteEnvClass(m.from))}">${escapeHtml(m.from || 'UNKNOWN')}</span>
                     <span class="transition-arrow">→</span>
-                    <span class="env-badge env-${escapeHtml(m.to.toLowerCase())}">${escapeHtml(m.to)}</span>
+                    <span class="env-badge ${escapeHtml(promoteEnvClass(m.to))}">${escapeHtml(m.to)}</span>
                 </div>
             </div>`;
     }
     if (m.platformsInfo) {
-        html += `<p class="promote-instruction">${escapeHtml(m.platformsInfo)}</p>`;
+        html += `<p class="promote-instruction">${escapeHtml(m.platformsInfo)}</p>${promoteListHtml(m.platformLines)}`;
     }
-    if (m.reasons.length) {
-        html += `<div class="promote-warnings"><h4 class="warning-title">${escapeHtml(m.reasonsHeading)}</h4>${promoteListHtml(m.reasons)}</div>`;
+    if (m.reasonItems.length) {
+        html += `<div class="promote-warnings"><h4 class="warning-title">${escapeHtml(m.reasonsHeading)}</h4>${promoteReasonItemsHtml(m.reasonItems)}</div>`;
     }
     if (m.warnings.length) {
         html += `<div class="promote-warnings"><h4 class="warning-title">WARNINGS</h4>${promoteListHtml(m.warnings)}</div>`;
-    }
-    if (m.pathForward) {
-        html += `<p class="promote-instruction">${escapeHtml(m.pathForward)}</p>`;
     }
     document.getElementById('promote-preview').innerHTML = html;
 
@@ -12302,12 +12425,16 @@ function promoteStepNext() {
     const step = promoteModalState.currentStep;
     if (step === 1) {
         if (!promoteModalState.previewModel || !promoteModalState.previewModel.canPromote) return;
+        if (promoteModalState.inFlight) return;
         promoteModalState.currentStep = 2;
         updatePromoteStepIndicator(2);
         showPromoteStep(2);
         document.getElementById('promote-progress').style.display = 'block';
         document.getElementById('promote-results').style.display = 'none';
         document.getElementById('promote-next-btn').disabled = true;
+        // Once the request is in flight it cannot be cancelled: disable Cancel (and the X, via the
+        // hidePromoteModal guard) and show the eventual result instead of pretending to cancel.
+        document.getElementById('promote-cancel-btn').disabled = true;
         executePromotion();
     } else {
         hidePromoteModal();
@@ -12326,6 +12453,7 @@ async function executePromotion() {
     const progressMessage = document.getElementById('progress-message');
     progressMessage.textContent = `Promoting ${releaseId} to ${preview && preview.to}...`;
     progressBar.style.width = '50%';
+    promoteModalState.inFlight = true;
 
     let outcome;
     try {
@@ -12339,6 +12467,7 @@ async function executePromotion() {
     } catch (error) {
         outcome = { ok: false, status: 0, data: { error: error.message } };
     }
+    promoteModalState.inFlight = false;
     const model = buildPromoteResultModel(releaseId, preview, outcome);
 
     progressBar.style.width = '100%';
@@ -12348,18 +12477,16 @@ async function executePromotion() {
 }
 
 /**
- * Display the promotion result (one release-level outcome)
+ * Display the promotion result (one release-level outcome). The container is an aria-live region
+ * (index.html), so a screen reader announces the result or the refusal reasons.
  */
 function displayPromotionResult(model) {
     document.getElementById('promote-progress').style.display = 'none';
     const resultsEl = document.getElementById('promote-results');
 
     let html = `<div class="results-summary"><div class="results-status ${model.success ? 'success' : 'error'}">${model.success ? '✓' : '✗'} ${escapeHtml(model.title)}</div>`;
-    if (model.reasons.length) {
-        html += `<div class="results-list"><p class="promote-instruction">${escapeHtml(model.reasonsHeading || '')}</p>${promoteListHtml(model.reasons)}</div>`;
-    }
-    if (model.pathForward) {
-        html += `<p class="promote-instruction">${escapeHtml(model.pathForward)}</p>`;
+    if (model.reasonItems.length) {
+        html += `<div class="results-list"><p class="promote-instruction">${escapeHtml(model.reasonsHeading || '')}</p>${promoteReasonItemsHtml(model.reasonItems)}</div>`;
     }
     html += '</div>';
     resultsEl.innerHTML = html;

@@ -38,7 +38,7 @@
     <link rel="stylesheet" href="css/lcars-fleet.css">
     <link rel="stylesheet" href="css/lcars-fleet-theme.css">
     <!-- KanBan-specific overrides (Division/Org color coordination) -->
-    <link rel="stylesheet" href="css/lcars.css?v=32.37">
+    <link rel="stylesheet" href="css/lcars.css?v=32.38">
     <!-- Activity Timeline Panel -->
     <link rel="stylesheet" href="css/lcars-activity.css">
     <!-- Claude Usage Indicator widget (XACA-0243-004/005) -->
@@ -2313,7 +2313,7 @@
                         <span class="release-id">--</span>
                     </div>
                     <h3 class="promote-section-title">PROMOTION PREVIEW</h3>
-                    <div class="promote-preview-list" id="promote-preview">
+                    <div class="promote-preview-list" id="promote-preview" role="status" aria-live="polite">
                         <!-- Populated dynamically -->
                     </div>
                 </div>
@@ -2327,7 +2327,7 @@
                             <div class="progress-bar" id="promote-progress-bar"></div>
                         </div>
                     </div>
-                    <div class="promote-results" id="promote-results" style="display: none;"></div>
+                    <div class="promote-results" id="promote-results" style="display: none;" role="status" aria-live="polite" aria-atomic="true"></div>
                 </div>
             </div>
             <div class="lcars-modal-footer">
@@ -2788,7 +2788,7 @@
     <script src="js/vendor/jspdf.umd.min.js?v=1"></script>
 <!-- XACA-0292-005: Reusable filter-bar component — must load before lcars.js -->
 <script src="js/lcars-filter-bar.js?v=1.1"></script>
-<script src="js/lcars.js?v=3.89"></script>
+<script src="js/lcars.js?v=3.90"></script>
 <!-- XACA-0293-001: CR cycle-time compute module — must load before lcars-cr-tab.js (no DOM/network deps) -->
 <script src="js/lcars-cr-metrics.js"></script>
 <!-- XACA-0293-013: Shared poll bus — single 5s interval for all tile modules; must load after lcars-cr-metrics.js and before tile scripts -->
