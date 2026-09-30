@@ -79,9 +79,11 @@ def _leaf(name, result, notes):
 
 
 # ------------------------------------------------------------------------- TAP
-# Case-insensitive and whitespace-tolerant on purpose: a line that LOOKS like a failing test
-# ("NOT OK", "not  ok", "not okay") must never be dropped as noise -> silent PASS.
-_TAP_TEST = re.compile(r"^(\s*)(not\s+ok|ok\b)\s*(\d+)?\s*(?:-\s*)?(.*)$", re.IGNORECASE)
+# Asymmetric on purpose (fails closed): `not ok` is case- and whitespace-tolerant, because a line
+# that LOOKS like a failing test ("NOT OK", "not  ok", "not okay") must never be dropped as noise.
+# A passing `ok` must be lowercase (TAP spec) and followed by whitespace or end of line, so log
+# noise such as "OK: connected" / "okay" / "OK 1 - a" is never counted as a pass (XACA-1347-019).
+_TAP_TEST = re.compile(r"^(\s*)((?i:not\s+ok)|ok(?=\s|$))\s*(\d+)?\s*(?:-\s*)?(.*)$")
 _TAP_PLAN = re.compile(r"^1\.\.(\d+)\s*(?:#.*)?$")
 _TAP_DIRECTIVE = re.compile(r"\s#\s*(SKIP\w*|TODO)\b[\s:]*(.*)$", re.IGNORECASE)
 _TAP_BAIL = re.compile(r"^\s*Bail out!\s*(.*)$", re.IGNORECASE)
@@ -158,21 +160,30 @@ def _junit_int(suite, attr):
     if raw is None:
         return None
     try:
-        return int(raw.strip())
+        val = int(raw.strip())
     except ValueError:
-        raise _ParseError("JUnit <testsuite %s=%r> is not an integer" % (attr, raw))
+        raise _ParseError("JUnit <%s %s=%r> is not an integer" % (suite.tag, attr, raw))
+    if val < 0:
+        raise _ParseError("JUnit <%s %s=%r> is negative" % (suite.tag, attr, raw))
+    return val
 
 
-def _check_junit_counts(suite, cases):
-    """Declared totals must agree with the <testcase> elements actually present; a suite that
-    claims failures it does not itemise (or more tests than it lists) is truncated/lying."""
+def _check_junit_counts(suite, is_leaf):
+    """Declared totals must agree with the <testcase> elements actually present. Applied at EVERY
+    level (<testsuites> root, parent suites, leaves): declared failures+errors must be matched by
+    at least that many failing <testcase> in the element's SUBTREE, else the report is lying or
+    truncated (fail closed). Declared LOWER than actual is fine here: the failing cases still FAIL.
+    `tests=` is an exact-equality check on leaves only (aggregates legitimately differ)."""
     tests = _junit_int(suite, "tests")
-    if tests is not None and tests != len(cases):
-        raise _ParseError("JUnit suite %r declares tests=%d but has %d <testcase>" % (suite.get("name"), tests, len(cases)))
     declared = sum(v for v in (_junit_int(suite, "failures"), _junit_int(suite, "errors")) if v)
-    actual = sum(1 for tc in cases if tc.find("failure") is not None or tc.find("error") is not None)
+    subtree = list(suite.iter("testcase"))
+    name = suite.get("name") or suite.tag
+    if is_leaf and tests is not None and tests != len(subtree):
+        raise _ParseError("JUnit suite %r declares tests=%d but has %d <testcase>" % (name, tests, len(subtree)))
+    actual = sum(1 for tc in subtree if tc.find("failure") is not None or tc.find("error") is not None)
     if declared > actual:
-        raise _ParseError("JUnit suite %r declares %d failure(s)/error(s) but only %d failing <testcase>" % (suite.get("name"), declared, actual))
+        raise _ParseError("JUnit <%s> %r declares %d failure(s)/error(s) but only %d failing <testcase> in its subtree"
+                          % (suite.tag, name, declared, actual))
 
 
 def _parse_junit(text, default_test):
@@ -188,11 +199,12 @@ def _parse_junit(text, default_test):
     if root.tag == "testsuites" and root.findall("testcase"):
         raise _ParseError("JUnit <testcase> directly under <testsuites> (no <testsuite>) is not supported")
     suites = list(root.iter("testsuite"))   # includes root and NESTED suites: none may be skipped
+    if root.tag == "testsuites":
+        _check_junit_counts(root, False)    # the aggregate root is reconciled too (XACA-1347-015)
     results = []
     for suite in suites:
         cases = suite.findall("testcase")
-        if suite.find("testsuite") is None:
-            _check_junit_counts(suite, cases)
+        _check_junit_counts(suite, suite.find("testsuite") is None)
         if not cases:
             continue
         name = suite.get("name") or suite.get("file") or default_test or "(unnamed suite)"
@@ -219,17 +231,41 @@ def _parse_junit(text, default_test):
 
 
 # ----------------------------------------------------------------------- JSONL
+_JSONL_KEYS = ("test", "result", "notes", "parent")
+
+
+class _DupKey(ValueError):
+    pass
+
+
+def _no_dup_keys(pairs):
+    """object_pairs_hook: a repeated key is ambiguous (last-wins would let FAIL then PASS grade
+    PASS), so it is rejected. Unknown keys are rejected by the caller with the line number."""
+    seen = {}
+    for k, v in pairs:
+        if k in seen:
+            raise _DupKey(k)
+        seen[k] = v
+    return seen
+
+
 def _parse_jsonl(text, default_test):
     entries = []
     for n, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
         try:
-            obj = json.loads(line)
+            obj = json.loads(line, object_pairs_hook=_no_dup_keys)
+        except _DupKey as exc:
+            raise _ParseError("line %d: duplicate JSON key %s" % (n, exc))
         except ValueError as exc:
             raise _ParseError("line %d: invalid JSON (%s)" % (n, exc))
         if not isinstance(obj, dict):
             raise _ParseError("line %d: expected a JSON object" % n)
+        for key in obj:
+            if key not in _JSONL_KEYS:
+                raise _ParseError("line %d: unknown key %r (allowed: %s); result-bearing keys such as "
+                                  "children/status/outcome are not supported" % (n, key, ", ".join(_JSONL_KEYS)))
         test = obj.get("test")
         if not isinstance(test, str) or not test.strip():
             raise _ParseError("line %d: 'test' must be a non-empty string" % n)

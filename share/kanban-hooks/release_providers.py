@@ -24,6 +24,9 @@ _AUTOMATED = _COMMON | {"command", "parser", "listCommand", "cwd", "env", "timeo
 _MANUAL = _COMMON | {"cases", "device", "filter"}
 _BOOL_FIELDS = ("perFile", "continueOnFailure", "readOnly", "optional")
 _SECRET_KEY = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CRED|BEARER|COOKIE|SIGNATURE)", re.IGNORECASE)
+# Short words that only count as a WHOLE `_`-delimited token, so PATH / PATTERN / AUTHOR don't trigger
+# (XACA-1347-020): GH_PAT, AUTH, BASIC_AUTH, PRIVATE_KEY_PEM, PRIVATE_FOO.
+_SECRET_TOKEN = re.compile(r"(?:^|_)(?:PAT|AUTH|PRIVATE)(?:_|$)", re.IGNORECASE)
 _SECRETREF = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*")   # used with fullmatch: `$` would accept a trailing newline
 _SCHEDULE = re.compile(r"T\+[0-9]+[hm]")             # used with fullmatch; ASCII digits only
 _DEVICE_FIELDS = ("required", "description")
@@ -62,7 +65,7 @@ def _validate_env(where, env, errs):
         return
     for k, v in env.items():
         if isinstance(v, str):
-            if _SECRET_KEY.search(str(k)):
+            if _SECRET_KEY.search(str(k)) or _SECRET_TOKEN.search(str(k)):
                 errs.append("%s: env.%s looks like a secret but is a literal string; "
                             "secrets MUST be {\"secretRef\": \"env:<NAME>\"}" % (where, k))
         elif isinstance(v, dict):
