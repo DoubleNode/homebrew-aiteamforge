@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+
+## [0.20.28] - 2026-09-29
 - **XACA-1151 (PR-F)** — the review and test launchers now honour `--delta` and `--round`, and their prompts carry the severity rules.
   - `kb-run-review`, `kb-run-test`, `kb-work-review` and `kb-work-test` take `--delta <sha>` (re-check only what changed since a commit you already approved), `--round <N>` (round 4 and up adds the circuit-breaker wording) and `--yes`, in any order. A malformed sha or round, an unknown flag or a second id is refused before any session starts. Before this, everything after the id was ignored, so the `--delta` that `kb-pr-monitor` asks for silently ran as a full review.
   - The review and test prompts now ask for `[Blocking]` / `[Advisory]` tags, for every failing variant of a defect class in one round, and end with "report and stop" instead of a polling loop.
@@ -7721,7 +7723,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.27...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.28...HEAD
+[0.20.28]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.27...v0.20.28
 [0.20.27]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.26...v0.20.27
 [0.20.26]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.25...v0.20.26
 [0.20.25]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.20.24...v0.20.25
