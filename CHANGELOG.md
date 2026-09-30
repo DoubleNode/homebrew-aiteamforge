@@ -7,6 +7,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 - **XACA-1346** — new `kanban-hooks/release_schema.py`: pure release-record schema helpers (test-record validation, stage statuses, append-only supersede rule) that the release gate and server import.
+  - XACA-1346 (PR 2/3): new `kanban-hooks/release_gate.py`, the pure promote/regress gate evaluator (no I/O; not yet wired into the server).
 - **XACA-1345** — new `kb-notify` command for release notices, with a Microsoft Teams provider.
   - `kb-notify send --to <alias> (--template <name> --data <json> | --text <str>) [--ref REL-…|CR-…]` delivers to an alias from the calling team's `notify.json`; `kb-notify test --to <alias>` checks the route and secret and sends nothing.
   - Teams supports a Power Automate flow (`shape: "flow"`, the default) or a plain incoming webhook (`shape: "webhook"`); `notify.schema.json` gains the optional `shape` field.

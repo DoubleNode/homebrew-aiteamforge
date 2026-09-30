@@ -1,0 +1,342 @@
+"""Pure release gate evaluator (XACA-1346-004, spec RELEASE-LIFECYCLE.md 3, 5.3, 6.4).
+
+NO I/O, no server/board imports, deterministic. The promote endpoint (PR 3) and
+any future caller feed it plain dicts and act on the returned verdict.
+
+Record shape read (release-level state, XACA-1346-001):
+  release.stage                     optional explicit current stage
+  release.stages{S}                 {enteredAt, status, expected[], sha, waiver?}
+  release.stageSha{S}               graded SHA per stage (wins over stages[S].sha)
+  release.tests[]                   append-only; superseded records carry supersededBy
+  release.branch                    release branch (spec 4.1)
+  release.cr                        {state, approvedAt, deployWindowPlanned}  (documented, not yet written by anyone)
+  release.platforms{P}.version      PLANNED version check
+
+Waiver shape (spec 6.1 plus one DELIBERATE addition): stages.<S>.waiver =
+{by, reason, ts, tests[], sha}. `sha` is not in the 6.1 sketch; it is REQUIRED here
+as the explicit binding for 6.4 "valid only for the SHA graded against". The PR 3
+writer populates it. `tests` may name a current record id or a test name (a bare
+string counts as one name); a waiver can never cover a test with no current record.
+The gate re-validates by/reason/ts (non-blank) and treats a malformed waiver as void.
+
+CR enablement (lead decision, XACA-1346 round 3): teamConfig.crSupport.enabled is the
+SOLE source of truth for whether the CR stage exists (spec 3.1). It arrives as the
+REQUIRED keyword-only `cr_support_enabled` (a real bool, else ValueError; omitted =
+TypeError, never a silent CR skip). flowConfig.stages.CR is IGNORED because the
+flow-config endpoint can toggle it. GAMMA is always enabled (3.1); flowConfig is
+never read for it. `intentionallyEmpty` counts only when it `is True`.
+
+Data the release record does not carry (items, sibling releases, clock, branch
+HEAD, lead deploy confirmation) arrives via the ``context`` dict. A condition
+whose data is absent is UNMET ("cannot verify"), never assumed satisfied.
+  context = {items: [{id, status, prMerged}], other_releases: [release,...],
+             now: ISO-8601, branch_head: sha, deploy_confirmed: bool}
+"""
+from datetime import datetime, timezone
+
+STAGES = ["PLANNED", "DEV", "QA", "ALPHA", "BETA", "CR", "GAMMA", "PROD"]
+ALWAYS_ENABLED = ("PLANNED", "DEV", "GAMMA", "PROD")
+TEST_STAGES = ("DEV", "QA", "ALPHA", "BETA", "GAMMA")  # stages whose exit gate is a test set
+PASSED, FAILED, WAIVED, PENDING, RUNNING = "passed", "failed", "waived", "pending", "running"
+
+
+def _cr_flag(v):
+    if not isinstance(v, bool):
+        raise ValueError("cr_support_enabled must be a bool (teamConfig.crSupport.enabled), got %r" % (v,))
+    return v
+
+
+def enabled_stages(flow_config, *, cr_support_enabled):
+    """Ordered enabled stages. CR exists iff cr_support_enabled (spec 3.1);
+    flowConfig's CR key is ignored. A missing QA/ALPHA/BETA entry counts as ENABLED: fail closed, never
+    silently drop a test stage."""
+    cfg = (flow_config or {}).get("stages") or {}
+    _cr_flag(cr_support_enabled)
+    out = []
+    for s in STAGES:
+        if s in ALWAYS_ENABLED:
+            out.append(s)
+        elif s == "CR":
+            if _cr_flag(cr_support_enabled):
+                out.append(s)
+        elif (cfg.get(s) or {}).get("enabled", True) is not False:
+            out.append(s)
+    return out
+
+
+def _platforms(release):
+    p = release.get("platforms")
+    return p if isinstance(p, dict) else {}
+
+
+def current_stage(release):
+    """Rule: explicit release.stage; else the furthest stage in stages{} with an
+    enteredAt; else the EARLIEST legacy platforms.*.environment (conservative:
+    a release is only as far along as its slowest platform); else PLANNED."""
+    st = release.get("stage")
+    if st in STAGES:
+        return st
+    entered = [s for s, r in (release.get("stages") or {}).items()
+               if s in STAGES and isinstance(r, dict) and r.get("enteredAt")]
+    if entered:
+        return max(entered, key=STAGES.index)
+    legacy = [p.get("environment") for p in _platforms(release).values()
+              if isinstance(p, dict) and p.get("environment") in STAGES]
+    return min(legacy, key=STAGES.index) if legacy else "PLANNED"
+
+
+def _parse_ts(v):
+    try:
+        d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _norm_expected(expected):
+    """[str | {test, optional}] -> [(test, optional)]"""
+    out = []
+    for e in expected or []:
+        if isinstance(e, dict):
+            out.append((e.get("test"), bool(e.get("optional"))))
+        else:
+            out.append((e, False))
+    return out
+
+
+def _graded_sha(release, stage):
+    return (release.get("stageSha") or {}).get(stage) or \
+        ((release.get("stages") or {}).get(stage) or {}).get("sha")
+
+
+def _current_record(tests, stage, name, sha):
+    """Latest non-superseded record for `name` at the graded sha (spec 6.4)."""
+    found = None
+    for r in tests or []:
+        if (r.get("test") == name and (stage is None or r.get("stage") == stage)
+                and sha and r.get("sha") == sha and not r.get("supersededBy")):
+            found = r  # later in append-only list wins
+    return found
+
+
+def _waiver_problem(waiver):
+    """Why a stored waiver is void regardless of SHA (defence in depth), or None."""
+    if not isinstance(waiver, dict):
+        return "waiver is not an object"
+    for f in ("by", "reason", "ts"):
+        v = waiver.get(f)
+        if not isinstance(v, str) or not v.strip():
+            return "waiver is malformed: '%s' is blank" % f
+    return _tests_problem(waiver)
+
+
+def _tests_problem(waiver):
+    t = waiver.get("tests")
+    if t is None or isinstance(t, str):
+        return None
+    if not isinstance(t, (list, tuple)) or not all(isinstance(x, str) for x in t):
+        return "waiver is malformed: 'tests' must be a string or a list of strings"
+    return None
+
+
+def _waiver_tests(waiver):
+    t = waiver.get("tests")
+    if isinstance(t, str):
+        return {t}
+    if isinstance(t, (list, tuple)):
+        return {x for x in t if isinstance(x, str)}
+    return set()
+
+
+def _grade(expected, tests, sha, waiver, stage=None):
+    """-> [(test, outcome, detail)] outcome in passed|failed|waived|missing"""
+    bad = _waiver_problem(waiver) if waiver else None
+    w_ok = bool(waiver) and bad is None and bool(sha) and waiver.get("sha") == sha
+    covered = _waiver_tests(waiver) if waiver and bad is None else set()
+    rows = []
+    for name, optional in _norm_expected(expected):
+        rec = _current_record(tests, stage, name, sha)
+        if rec and rec.get("result") == "PASS":
+            rows.append((name, PASSED, ""))
+            continue
+        if rec is None:
+            outcome, why = "missing", "expected test '%s' has no current record at SHA %s (missing != passing)" % (name, sha or "<none recorded>")
+            if name in covered:
+                why += "; waiver cannot cover a missing test"
+        elif rec.get("result") == "SKIP" and optional:
+            rows.append((name, PASSED, ""))
+            continue
+        elif rec.get("result") == "SKIP":
+            outcome, why = FAILED, "test '%s' was SKIPped and is not optional (needs a lead waiver)" % name
+        else:
+            outcome, why = FAILED, "test '%s' result is %s" % (name, rec.get("result"))
+        if rec is not None and waiver and (name in covered or rec.get("id") in covered):
+            if w_ok:
+                rows.append((name, WAIVED, ""))
+                continue
+            why += "; waiver VOID: waiver sha %s != graded sha %s" % (waiver.get("sha"), sha)
+        elif rec is not None and bad and waiver:
+            why += "; waiver VOID: " + bad
+        rows.append((name, outcome, why))
+    return rows
+
+
+def derive_stage_status(stage_record, tests, expected, stage=None):
+    """Spec 3.4. `tests` are the stage's records; graded at stage_record['sha']."""
+    sr = stage_record or {}
+    rows = _grade(expected, tests, sr.get("sha"), sr.get("waiver"), stage)
+    if not rows:
+        if sr.get("intentionallyEmpty") is True:
+            return PASSED
+        return RUNNING if sr.get("status") == RUNNING else PENDING
+    outs = [r[1] for r in rows]
+    if FAILED in outs:
+        return FAILED
+    if "missing" in outs:
+        return PENDING if all(o == "missing" for o in outs) and sr.get("status") != RUNNING else RUNNING
+    return WAIVED if WAIVED in outs else PASSED
+
+
+def validate_waiver(waiver, stage_record, actor_is_lead):
+    """Reasons a waiver is not acceptable ([] = valid). Lead check is the caller's fact."""
+    r = []
+    w = waiver if isinstance(waiver, dict) else {}
+    if not actor_is_lead:
+        r.append("only the release lead may grant a waiver")
+    for f in ("by", "reason", "ts", "sha"):
+        if not str(w.get(f) or "").strip():
+            r.append("waiver is missing required field '%s'" % f)
+    if _tests_problem(w):
+        r.append(_tests_problem(w))
+    elif not _waiver_tests(w):
+        r.append("waiver must name the test record ids/tests it covers")
+    graded = (stage_record or {}).get("sha")
+    if not graded:
+        r.append("stage has no graded sha; nothing to bind the waiver to")
+    elif w.get("sha") and w.get("sha") != graded:
+        r.append("waiver sha %s != stage graded sha %s (a new SHA voids waivers)" % (w.get("sha"), graded))
+    return r
+
+
+def _exit_conditions(release, cur, cr_on, ctx):
+    """Stage-specific unmet conditions for leaving `cur` (spec 3.2), all collected."""
+    r = []
+    sha = _graded_sha(release, cur)
+    if cur == "PLANNED":
+        items = ctx.get("items")
+        if items is None:
+            r.append("PLANNED: cannot verify assigned items (context.items absent)")
+        elif not items:
+            r.append("PLANNED: at least one item must be assigned")
+        vers = [p.get("version") for p in _platforms(release).values() if isinstance(p, dict)]
+        if not any(str(v or "").strip() for v in vers):
+            r.append("PLANNED: a version must be set (platforms.<plat>.version)")
+        others = ctx.get("other_releases")
+        if others is None:
+            r.append("PLANNED: cannot verify version uniqueness (context.other_releases absent)")
+        mine = [(pn, p["version"]) for pn, p in _platforms(release).items()
+                if isinstance(p, dict) and p.get("version")]
+        for o in others or []:
+            if not isinstance(o, dict):
+                r.append("PLANNED: malformed entry in context.other_releases")
+                continue
+            same_id = bool(release.get("id")) and o.get("id") == release.get("id")
+            if o is release or same_id or o.get("status") == "completed":
+                continue
+            op = o.get("platforms") if isinstance(o.get("platforms"), dict) else {}
+            for pn, ver in mine:
+                theirs = op.get(pn)
+                if isinstance(theirs, dict) and theirs.get("version") == ver:
+                    r.append("PLANNED: version %s on %s already used by open release %s" % (ver, pn, o.get("id")))
+    if cur == "DEV":
+        if not release.get("branch"):
+            r.append("DEV: release has no branch recorded (spec 4.1)")
+        items = ctx.get("items")
+        if items is None:
+            r.append("DEV: cannot verify item completion (context.items absent)")
+        else:
+            if not items:
+                r.append("DEV: no items assigned")
+            for it in items:
+                if it.get("status") != "completed" or not it.get("prMerged"):
+                    r.append("DEV: item %s is not completed with its PR merged into the release branch" % it.get("id"))
+        head = ctx.get("branch_head")
+        if not head:
+            r.append("DEV: cannot verify DEV deploy SHA == branch HEAD (context.branch_head absent)")
+        elif sha != head:
+            r.append("DEV: stageSha.DEV %s != release branch HEAD %s" % (sha, head))
+    if cur == "CR":
+        cr = release.get("cr") or {}
+        if cr.get("state") != "cr-approved":
+            r.append("CR: CR state is '%s', must be cr-approved" % cr.get("state"))
+        now, ap, win = _parse_ts(ctx.get("now")), _parse_ts(cr.get("approvedAt")), _parse_ts(cr.get("deployWindowPlanned"))
+        if not (now and ap and win):
+            r.append("CR: cannot verify approval time / deploy window (need context.now, cr.approvedAt, cr.deployWindowPlanned)")
+        elif now < max(ap, win):
+            r.append("CR: now is before max(cr_approved_at, deploy_window_planned)")
+        head = ctx.get("branch_head")
+        if not head or head != sha:
+            r.append("CR: release branch HEAD %s != stageSha.CR %s (branch moved or unknown)" % (head, sha))
+    if cur == "GAMMA" and cr_on:
+        if (release.get("cr") or {}).get("state") != "cr-completed":
+            r.append("GAMMA: CR must be cr-completed")
+    if cur in TEST_STAGES:
+        rec = (release.get("stages") or {}).get(cur) or {}
+        expected = rec.get("expected")
+        if not _norm_expected(expected):
+            if rec.get("intentionallyEmpty") is not True:
+                r.append("%s: empty expected test set fails the gate unless declared intentionally empty" % cur)
+        else:
+            wv = rec.get("waiver")
+            for _n, outcome, why in _grade(expected, release.get("tests"), sha, wv, cur):
+                if outcome in ("missing", FAILED):
+                    r.append("%s: %s" % (cur, why))
+    return r
+
+
+def evaluate(release, target_stage, flow_config, *, cr_support_enabled, actor=None, context=None):
+    """Promote gate. Returns {allowed, reasons[], current, target, next, actor, status}."""
+    ctx = context or {}
+    reasons = []
+    order = enabled_stages(flow_config, cr_support_enabled=cr_support_enabled)
+    cur = current_stage(release)
+    nxt = None
+    if cur == "PROD":
+        reasons.append("release is at PROD (terminal); nothing to promote to")
+    else:
+        later = [s for s in order if STAGES.index(s) > STAGES.index(cur)]
+        nxt = later[0] if later else None
+        if target_stage not in STAGES:
+            reasons.append("unknown target stage '%s'" % target_stage)
+        elif target_stage == cur:
+            reasons.append("release is already at %s" % cur)
+        elif STAGES.index(target_stage) < STAGES.index(cur):
+            reasons.append("backward move %s -> %s refused; use regress (with a reason)" % (cur, target_stage))
+        elif target_stage not in order:
+            reasons.append("target %s is disabled for this team; next enabled stage is %s" % (target_stage, nxt))
+        elif target_stage != nxt:
+            reasons.append("skipping refused: next enabled stage after %s is %s, not %s" % (cur, nxt, target_stage))
+        if target_stage == "GAMMA" and not ctx.get("deploy_confirmed"):
+            reasons.append("GAMMA: lead must explicitly confirm the production deploy")
+        reasons.extend(_exit_conditions(release, cur, cr_support_enabled, ctx))
+    rec = (release.get("stages") or {}).get(cur) or {}
+    status = derive_stage_status(dict(rec, sha=_graded_sha(release, cur)), release.get("tests"), rec.get("expected"), cur) \
+        if cur in TEST_STAGES else None
+    return {"allowed": not reasons, "reasons": reasons, "current": cur, "target": target_stage,
+            "next": nxt, "actor": actor, "status": status}
+
+
+def evaluate_regress(release, target_stage, flow_config, reason, *, cr_support_enabled):
+    """The only sanctioned backward move: strictly earlier enabled stage + non-blank reason."""
+    reasons = []
+    order = enabled_stages(flow_config, cr_support_enabled=cr_support_enabled)
+    cur = current_stage(release)
+    if not str(reason or "").strip():
+        reasons.append("regress requires a non-empty reason")
+    if target_stage not in STAGES:
+        reasons.append("unknown target stage '%s'" % target_stage)
+    elif STAGES.index(target_stage) >= STAGES.index(cur):
+        reasons.append("regress target %s is not strictly earlier than current stage %s" % (target_stage, cur))
+    elif target_stage not in order:
+        reasons.append("regress target %s is disabled for this team" % target_stage)
+    return {"allowed": not reasons, "reasons": reasons, "current": cur, "target": target_stage}
