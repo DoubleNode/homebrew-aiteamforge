@@ -7336,7 +7336,7 @@ kb-backlog() {
             # Validate and normalize OS parameter (case-insensitive)
             local normalized_os=""
             if [[ -n "$os_param" ]]; then
-                local os_lower="${os_param,,}"  # Convert to lowercase
+                local os_lower="${(L)os_param}"  # Convert to lowercase (zsh-native)
                 case "$os_lower" in
                     ios) normalized_os="iOS" ;;
                     android) normalized_os="Android" ;;
@@ -8491,6 +8491,8 @@ kb-backlog() {
                         echo "Error: [$item_id] is completed -- refusing to demote." >&2
                         echo "  Demoting a completed item discards its completion record from the board's" >&2
                         echo "  work-state view while leaving completedAt in place." >&2
+                        echo "  If this completion was recorded in error, prefer:  kb-run-debug $item_id" >&2
+                        echo "                                                     (or kb-work-debug $item_id)" >&2
                         echo "  To demote anyway:                                  kb-backlog demote $item_id --force" >&2
                         return 1
                     fi
@@ -8673,7 +8675,7 @@ kb-backlog() {
                     # Validate and normalize OS parameter (case-insensitive)
                     local sub_normalized_os=""
                     if [[ -n "$sub_os_param" ]]; then
-                        local sub_os_lower="${sub_os_param,,}"  # Convert to lowercase
+                        local sub_os_lower="${(L)sub_os_param}"  # Convert to lowercase (zsh-native)
                         case "$sub_os_lower" in
                             ios) sub_normalized_os="iOS" ;;
                             android) sub_normalized_os="Android" ;;
@@ -12990,14 +12992,88 @@ _kb_display_item_box() {
     echo ""
 }
 
+# XACA-1299-004/005: shared argv parser for kb-run-{review,test,ux} and their
+# kb-work-* twins. All six launchers take a single positional <id> selector
+# plus two optional flags, either order:
+#   --delta <sha>   7-40 hex chars, the commit this gate last APPROVED. Threads
+#                   into the prompt builder as a delta-scoped re-review scope.
+#   --round <N>     positive integer, the current gate round. N>=4 threads the
+#                   round-4 circuit-breaker language into the prompt.
+#   --yes | -y      (XACA-1284-003) skip the launch confirmation prompt; sets
+#                   _KB_GATE_ASSUME_YES=1 for _kb_confirm_launch. Needed from
+#                   any shell without a tty.
+# Usage: _kb_parse_gate_run_flags "$@"
+# On success (rc 0) sets globals _KB_GATE_SELECTOR / _KB_GATE_DELTA_SHA /
+# _KB_GATE_ROUND (the latter two empty when the flag was not given) plus
+# _KB_GATE_ASSUME_YES (0 unless --yes/-y) and returns 0. On any validation error -- unknown flag, a flag missing its
+# value, a malformed sha/round, or more than one positional arg -- prints a
+# specific error to stderr and returns 1. Callers MUST NOT proceed to launch
+# a session when this returns non-zero.
+_kb_parse_gate_run_flags() {
+    _KB_GATE_SELECTOR=""
+    _KB_GATE_DELTA_SHA=""
+    _KB_GATE_ROUND=""
+    _KB_GATE_ASSUME_YES=0
+    local saw_positional=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --delta)
+                if [[ $# -lt 2 || -z "${2-}" ]]; then
+                    echo "Error: --delta requires a commit SHA argument" >&2
+                    return 1
+                fi
+                if [[ ! "$2" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+                    echo "Error: --delta '$2' doesn't look like a git commit SHA (expected 7-40 hex chars)" >&2
+                    return 1
+                fi
+                _KB_GATE_DELTA_SHA="$2"
+                shift 2
+                ;;
+            --round)
+                if [[ $# -lt 2 || -z "${2-}" ]]; then
+                    echo "Error: --round requires a positive integer argument" >&2
+                    return 1
+                fi
+                if [[ ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+                    echo "Error: --round '$2' is not a positive integer" >&2
+                    return 1
+                fi
+                _KB_GATE_ROUND="$2"
+                shift 2
+                ;;
+            --yes|-y)
+                _KB_GATE_ASSUME_YES=1
+                shift
+                ;;
+            --*)
+                echo "Error: unknown flag '$1'" >&2
+                return 1
+                ;;
+            *)
+                if [[ "$saw_positional" -eq 1 ]]; then
+                    echo "Error: unexpected extra argument '$1' (selector already set to '$_KB_GATE_SELECTOR')" >&2
+                    return 1
+                fi
+                _KB_GATE_SELECTOR="$1"
+                saw_positional=1
+                shift
+                ;;
+        esac
+    done
+    return 0
+}
+
 # Internal helper: Build the standard PR review prompt text
 # Usage: _kb_build_review_prompt <item_id> <title> <description> <item_worktree_branch>
+#                                 [<delta_sha>] [<round>]   (XACA-1299-004/005, both optional)
 # Echoes the complete review prompt to stdout
 _kb_build_review_prompt() {
-    local item_id="$1"
-    local title="$2"
-    local description="$3"
-    local item_worktree_branch="$4"
+    local item_id="${1-}"
+    local title="${2-}"
+    local description="${3-}"
+    local item_worktree_branch="${4-}"
+    local delta_sha="${5-}"
+    local round="${6-}"
 
     # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
     # escapes in ANY text it's given — including user-authored ticket text
@@ -13025,6 +13101,34 @@ _kb_build_review_prompt() {
         prompt+="\n**Branch:** $item_worktree_branch\n"
     fi
 
+    # XACA-1299-005: delta-scoped re-review. Only present when the caller has
+    # an approved_sha to re-review from (RESPAWN_TESTER/REVIEWER, not the
+    # initial round or a post-rebase full re-review).
+    if [[ -n "$delta_sha" ]]; then
+        prompt+="\n## XACA-1299: Delta-Scoped Re-Review\n"
+        prompt+="You previously **APPROVED** \`$delta_sha\`. Re-verify ONLY the changes since then:\n"
+        prompt+="\`\`\`bash\n"
+        prompt+="git diff $delta_sha..HEAD\n"
+        prompt+="git log $delta_sha..HEAD --oneline\n"
+        prompt+="\`\`\`\n"
+        prompt+="Do NOT re-review code untouched by this range. EXCEPTION: if a delta change alters a\n"
+        prompt+="contract, caller, or shared helper such that previously-approved code is now affected,\n"
+        prompt+="widen to that affected area and say so explicitly in the review body. The class-exhaustive\n"
+        prompt+="requirement below still applies to anything you find in this delta.\n"
+        prompt+="**Fail-safe — fall back to a FULL review of the whole PR, and state why**, if either holds:\n"
+        prompt+="- \`git merge-base --is-ancestor $delta_sha HEAD\` fails (not an ancestor of HEAD)\n"
+        prompt+="- \`git log $delta_sha..HEAD --merges\` is non-empty (range contains a merge commit)\n"
+    fi
+
+    # XACA-1299-004: round-4+ circuit breaker. Compact by design — loaded every round.
+    if [[ -n "$round" ]] && [[ "$round" -ge 4 ]]; then
+        prompt+="\n## XACA-1299: Round ${round} Circuit-Breaker\n"
+        prompt+="This is review round ${round} (circuit-breaker territory). A NEW [Blocking] finding at\n"
+        prompt+="this round must demonstrate a regression from the latest push, or name a concrete harm\n"
+        prompt+="(security, data loss, breaking change, wrong result, fail-open guard). Anything else must\n"
+        prompt+="be filed as [Review][Advisory] with a proposed spin-out ticket in the review body.\n"
+    fi
+
     prompt+="\n## Your Mission\n"
     prompt+="1. **Find the open PR** for this item. Try these approaches:\n"
     prompt+="   - Run: \`gh pr list --head $item_worktree_branch\` (if branch is known)\n"
@@ -13041,6 +13145,17 @@ _kb_build_review_prompt() {
     prompt+="   gh pr diff <number>\n"
     prompt+="   \`\`\`\n"
     prompt+="\n4. **Submit your review** using gh-bot-review (NOT gh pr review):\n"
+    prompt+="   **Class-exhaustive findings (XACA-1299, required for every BLOCKING finding):** before\n"
+    prompt+="   submitting, don't stop at the first failing case — enumerate the whole defect class and\n"
+    prompt+="   report ALL failing variants in THIS round (not one per round). In the REQUEST_CHANGES\n"
+    prompt+="   body, for each blocking class:\n"
+    prompt+="   \`\`\`\n"
+    prompt+="   Class: <defect class name>\n"
+    prompt+="   Variants checked: <input/shape variants you tried>\n"
+    prompt+="   Variants found: <which fail, with location>\n"
+    prompt+="   \`\`\`\n"
+    prompt+="   Also tell the implementer the fix must ship with a table-driven adversarial-input test\n"
+    prompt+="   covering every enumerated variant — not just the reported instance.\n"
     prompt+="   \`\`\`bash\n"
     prompt+="   # To approve:\n"
     prompt+="   gh-bot-review --pr <number> --event APPROVE --body \"LGTM - <summary of why it's good>\"\n"
@@ -13052,22 +13167,38 @@ _kb_build_review_prompt() {
     prompt+="   # Write feedback to /tmp/review-<number>.md, then:\n"
     prompt+="   gh-bot-review --pr <number> --event REQUEST_CHANGES --body-file /tmp/review-<number>.md\n"
     prompt+="   \`\`\`\n"
-    prompt+="\n5. **Capture suggestions as merge-blocking kanban subitems** (do NOT leave them only as PR comments):\n"
+    prompt+="\n5. **Classify severity, then file as a kanban subitem** (do NOT leave findings only as PR comments):\n"
+    prompt+="   Append the severity tag directly after [Review], no space: [Review][Blocking] or [Review][Advisory].\n"
+    prompt+="   **[Blocking]** (or no tag — same effect): security, data loss, breaking change w/o migration,\n"
+    prompt+="   missing error handling, wrong result, fail-open on a guard/gate, vacuous/tautological test,\n"
+    prompt+="   regression of a closed defect, canonical-source (homebrew-tap/) violation.\n"
+    prompt+="   **[Advisory]**: style, naming, refactor/duplication, doc nits, micro-optimization, process hygiene.\n"
+    prompt+="   Tiebreak: if you can name the concrete harm, it blocks; if you can only name a preference, it\n"
+    prompt+="   advises; if you did not check, it blocks. [Advisory] is the ONLY token that de-gates the merge —\n"
+    prompt+="   a malformed SEVERITY tag (wrong case, a typo, a detached space) still resolves BLOCKING; a\n"
+    prompt+="   malformed CLASS tag (reordered, lowercase, leading space) isn't a finding at all here and gates\n"
+    prompt+="   nothing on merge — it still blocks kb-done via the open-subitem count.\n"
     prompt+="   \`\`\`bash\n"
     prompt+="   source ${AITEAMFORGE_DIR}/kanban-helpers.sh\n"
-    prompt+="   # One subitem per suggestion — title MUST start with [Review]\n"
-    prompt+="   kb-backlog sub add $item_id \"[Review] <actionable suggestion> (PR #<number>)\"\n"
+    prompt+="   # One subitem per suggestion\n"
+    prompt+="   kb-backlog sub add $item_id \"[Review][Blocking] <finding> (PR #<number>)\"\n"
+    prompt+="   kb-backlog sub add $item_id \"[Review][Advisory] <finding> (PR #<number>)\"\n"
     prompt+="   \`\`\`\n"
-    prompt+="   These subitems BLOCK merge. The creating agent must address each one and push fixes before merging.\n"
-    prompt+="   Each gets its own subitem for independent tracking and must be resolved before PR merge.\n"
+    prompt+="   [Blocking] subitems BLOCK MERGE — the creating agent must address each and push fixes first.\n"
+    prompt+="   [Advisory] subitems do NOT block merge but still block kb-done until disposed (fold in / spin\n"
+    prompt+="   out via Project Planner / user-approved decline) — filing [Advisory] is not dropping the finding.\n"
     prompt+="\n6. **After submitting your verdict, STOP.** Report the verdict, the PR review submission URL, and the subitems you filed, then end the session.\n"
     prompt+="   **Do NOT start a polling or monitoring loop.** This session cannot keep one running, so reporting one is a false status.\n"
     prompt+="   The creating agent's \`scripts/kb-pr-monitor\` re-launches this gate for the next round (it passes \`--delta <sha>\` for delta re-reviews).\n"
+    prompt+="   **On a re-review round** (delta mode, or a prior REQUEST_CHANGES on this PR): (1) verify each requested\n"
+    prompt+="   change was addressed, (2) for each prior BLOCKING class, confirm a table-driven adversarial-input test now\n"
+    prompt+="   covers every enumerated variant — a fix of only the reported instance is ITSELF a BLOCKING finding (the\n"
+    prompt+="   class recurs next round), (3) check new code in fix commits for new issues; skip unchanged code.\n"
     prompt+="\n## CRITICAL Rules\n"
     prompt+="- **USE gh-bot-review** for submitting reviews, NOT \`gh pr review\` (same-account restriction)\n"
     prompt+="- **DO NOT MERGE** the PR — the creating agent's \`scripts/kb-pr-monitor\` handles merge after the gates pass\n"
     prompt+="- **Blocking issues** go in REQUEST_CHANGES — must be fixed before approval\n"
-    prompt+="- **[Review] subitems BLOCK MERGE** — add as kanban subitems (NOT PR comments); creating agent MUST resolve ALL [Review] subitems before merge\n"
+    prompt+="- **[Review][Blocking] subitems BLOCK MERGE** — [Review][Advisory] ones do not, but still gate kb-done; add as kanban subitems (NOT PR comments)\n"
     prompt+="- **After submitting** — stop and report (step 6 above); never claim a loop is running.\n"
     prompt+="- Be specific about what needs to change and why\n"
     prompt+="- Provide code examples when suggesting alternatives\n"
@@ -13081,30 +13212,34 @@ _kb_build_review_prompt() {
 kb-run-review() {
     _kb_ensure_jq || return 1
 
-    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
-    local selector="" _kb_yes=0 _kb_arg
-    for _kb_arg in "$@"; do
-        case "$_kb_arg" in
-            --yes|-y) _kb_yes=1 ;;
-            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
-        esac
-    done
+    # XACA-1299-004/005: --delta <sha> / --round <N>, either order, either optional.
+    _kb_parse_gate_run_flags "$@" || return 1
+    local selector="$_KB_GATE_SELECTOR"
+    local delta_sha="$_KB_GATE_DELTA_SHA"
+    local round="$_KB_GATE_ROUND"
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-run-review <id> [--yes]"
+        echo "Usage: kb-run-review <id> [--delta <sha>] [--round <N>] [--yes]"
         echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Switches to item's worktree and launches Claude Code to review the related PR."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-run-review XFRE-0001"
+        echo "  --delta <sha>   re-review only the changes since this previously-approved commit"
+        echo "  --round <N>     current gate round (N>=4 adds the circuit-breaker prompt language)"
         echo ""
         echo "To review without switching worktree, use: kb-work-review <id>"
         return 1
     fi
 
-    local context team board_file
-    context=$(_kb_detect_context)
-    team="${context%%:*}"
-    board_file=$(_kb_get_board_file "$team")
+    local team board_file
+    team=$(_kb_resolve_run_team "$selector")
+    # If board resolution fails outright, _kb_get_board_file already printed a
+    # specific reason to stderr — an "unknown team" refusal, or a board-less
+    # alias's "use <x> instead" guidance (e.g. mainevent → command, XACA-0727).
+    # Return without piling a generic "no board" line on top of it. (XACA-0759 review #2)
+    if ! board_file=$(_kb_get_board_file "$team"); then
+        return 1
+    fi
 
     if [[ ! -f "$board_file" ]]; then
         echo "Error: No kanban board found for team '$team'"
@@ -13138,7 +13273,7 @@ kb-run-review() {
 
     # Confirmation prompt
     local confirm
-    _kb_confirm_launch kb-run-review "Start reviewing this item's PR? [Y/n]: " "$_kb_yes"
+    _kb_confirm_launch kb-run-review "Start reviewing this item's PR? [Y/n]: " "$_KB_GATE_ASSUME_YES"
     local _kb_confirm_rc=$?
     if [[ $_kb_confirm_rc -eq 2 ]]; then
         return 2
@@ -13162,7 +13297,7 @@ kb-run-review() {
 
     # Build the review prompt using shared helper
     local prompt
-    prompt=$(_kb_build_review_prompt "$item_id" "$title" "$description" "$item_worktree_branch")
+    prompt=$(_kb_build_review_prompt "$item_id" "$title" "$description" "$item_worktree_branch" "$delta_sha" "$round")
 
     echo "Launching Claude Code for PR review of [$item_id]: $title"
     echo "─────────────────────────────────────"
@@ -13172,12 +13307,21 @@ kb-run-review() {
     _kb_set_working_on "$item_id" "REVIEW"
 
     # Launch cc with the review prompt
+    export CC_SESSION_NAME="[Review] ${item_id}: ${title}"
     if ! _kb_ensure_cc_function "kb-run-review"; then
         unset CC_SESSION_NAME
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+    unset CC_SESSION_NAME
+
+    # XACA-0598: offer wt-finish cleanup only when THIS invocation created the worktree
+    # XACA-1284: if-form, not `[[ ]] &&` -- as a function's LAST command a false test made a
+    # successful launch exit 1 whenever no worktree was created (an --yes caller would read failure).
+    if [[ "${kb_wt_session_created:-0}" == "1" ]]; then
+        _kb_offer_worktree_cleanup "$kb_wt_session_path" "$(git -C "$kb_wt_session_path" branch --show-current 2>/dev/null)"
+    fi
 
     # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
     # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
@@ -13194,22 +13338,21 @@ kb-run-review() {
 kb-work-review() {
     _kb_ensure_jq || return 1
 
-    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
-    local selector="" _kb_yes=0 _kb_arg
-    for _kb_arg in "$@"; do
-        case "$_kb_arg" in
-            --yes|-y) _kb_yes=1 ;;
-            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
-        esac
-    done
+    # XACA-1299-004/005: --delta <sha> / --round <N>, either order, either optional.
+    _kb_parse_gate_run_flags "$@" || return 1
+    local selector="$_KB_GATE_SELECTOR"
+    local delta_sha="$_KB_GATE_DELTA_SHA"
+    local round="$_KB_GATE_ROUND"
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-work-review <id> [--yes]"
+        echo "Usage: kb-work-review <id> [--delta <sha>] [--round <N>] [--yes]"
         echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Launches Claude Code to review the related PR WITHOUT switching worktree."
         echo "Use when you're already in the correct directory/worktree."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-work-review XFRE-0001"
+        echo "  --delta <sha>   re-review only the changes since this previously-approved commit"
+        echo "  --round <N>     current gate round (N>=4 adds the circuit-breaker prompt language)"
         echo ""
         echo "For automatic worktree switch, use: kb-run-review <id>"
         return 1
@@ -13253,7 +13396,7 @@ kb-work-review() {
     echo "📁 Reviewing in current directory: $(pwd)"
     echo "   (No worktree switch will be made)"
     echo ""
-    _kb_confirm_launch kb-work-review "Start reviewing this item's PR? [Y/n]: " "$_kb_yes"
+    _kb_confirm_launch kb-work-review "Start reviewing this item's PR? [Y/n]: " "$_KB_GATE_ASSUME_YES"
     local _kb_confirm_rc=$?
     if [[ $_kb_confirm_rc -eq 2 ]]; then
         return 2
@@ -13266,7 +13409,7 @@ kb-work-review() {
 
     # Build the review prompt using shared helper
     local prompt
-    prompt=$(_kb_build_review_prompt "$item_id" "$title" "$description" "$item_worktree_branch")
+    prompt=$(_kb_build_review_prompt "$item_id" "$title" "$description" "$item_worktree_branch" "$delta_sha" "$round")
 
     echo "Launching Claude Code for PR review of [$item_id]: $title"
     echo "─────────────────────────────────────"
@@ -13276,12 +13419,14 @@ kb-work-review() {
     _kb_set_working_on "$item_id" "REVIEW"
 
     # Launch cc with the review prompt
+    export CC_SESSION_NAME="[Review] ${item_id}: ${title}"
     if ! _kb_ensure_cc_function "kb-work-review"; then
         unset CC_SESSION_NAME
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+    unset CC_SESSION_NAME
 
     # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
     # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
@@ -13295,10 +13440,12 @@ kb-work-review() {
 # Usage: _kb_build_test_prompt <item_id> <title> <description> <item_worktree_branch>
 # Echoes the complete QA test prompt to stdout
 _kb_build_test_prompt() {
-    local item_id="$1"
-    local title="$2"
-    local description="$3"
-    local item_worktree_branch="$4"
+    local item_id="${1-}"
+    local title="${2-}"
+    local description="${3-}"
+    local item_worktree_branch="${4-}"
+    local delta_sha="${5-}"
+    local round="${6-}"
 
     # XACA-1128: this prompt is emitted via `echo -e`, which expands backslash
     # escapes in ANY text it's given — including user-authored ticket text
@@ -13326,6 +13473,34 @@ _kb_build_test_prompt() {
         prompt+="\n**Branch:** $item_worktree_branch\n"
     fi
 
+    # XACA-1299-005: delta-scoped re-test. Only present when the caller has
+    # an approved_sha to re-test from (RESPAWN_TESTER/REVIEWER, not the
+    # initial round or a post-rebase full re-test).
+    if [[ -n "$delta_sha" ]]; then
+        prompt+="\n## XACA-1299: Delta-Scoped Re-Test\n"
+        prompt+="You previously **APPROVED** \`$delta_sha\`. Re-verify ONLY the changes since then:\n"
+        prompt+="\`\`\`bash\n"
+        prompt+="git diff $delta_sha..HEAD\n"
+        prompt+="git log $delta_sha..HEAD --oneline\n"
+        prompt+="\`\`\`\n"
+        prompt+="Do NOT re-run the full test sweep on code untouched by this range. EXCEPTION: if a delta\n"
+        prompt+="change alters a contract, caller, or shared helper such that previously-approved code is\n"
+        prompt+="now affected, widen to that affected area and say so explicitly in the test report. The\n"
+        prompt+="class-exhaustive requirement below still applies to anything you find in this delta.\n"
+        prompt+="**Fail-safe — fall back to a FULL test pass of the whole PR, and state why**, if either holds:\n"
+        prompt+="- \`git merge-base --is-ancestor $delta_sha HEAD\` fails (not an ancestor of HEAD)\n"
+        prompt+="- \`git log $delta_sha..HEAD --merges\` is non-empty (range contains a merge commit)\n"
+    fi
+
+    # XACA-1299-004: round-4+ circuit breaker. Compact by design — loaded every round.
+    if [[ -n "$round" ]] && [[ "$round" -ge 4 ]]; then
+        prompt+="\n## XACA-1299: Round ${round} Circuit-Breaker\n"
+        prompt+="This is test round ${round} (circuit-breaker territory). A NEW [Blocking] finding at this\n"
+        prompt+="round must demonstrate a regression from the latest push, or name a concrete harm\n"
+        prompt+="(security, data loss, breaking change, wrong result, fail-open guard). Anything else must\n"
+        prompt+="be filed as [Test][Advisory] with a proposed spin-out ticket in the test report.\n"
+    fi
+
     prompt+="\n## Your Mission\n"
     prompt+="1. **Find the open PR** for this item. Try these approaches:\n"
     prompt+="   - Run: \`gh pr list --head $item_worktree_branch\` (if branch is known)\n"
@@ -13343,6 +13518,17 @@ _kb_build_test_prompt() {
     prompt+="   gh pr diff <number>\n"
     prompt+="   \`\`\`\n"
     prompt+="\n4. **Submit your test result** using gh-bot-test (NOT gh pr review):\n"
+    prompt+="   **Class-exhaustive findings (XACA-1299, required for every BLOCKING finding):** before\n"
+    prompt+="   submitting, don't stop at the first failing case — enumerate the whole defect class and\n"
+    prompt+="   report ALL failing variants in THIS round (not one per round). In the REQUEST_CHANGES\n"
+    prompt+="   body, for each blocking class:\n"
+    prompt+="   \`\`\`\n"
+    prompt+="   Class: <defect class name>\n"
+    prompt+="   Variants checked: <input/shape variants you tried>\n"
+    prompt+="   Variants found: <which fail, with location>\n"
+    prompt+="   \`\`\`\n"
+    prompt+="   Also tell the implementer the fix must ship with a table-driven adversarial-input test\n"
+    prompt+="   covering every enumerated variant — not just the reported instance.\n"
     prompt+="   \`\`\`bash\n"
     prompt+="   # To approve (all tests pass):\n"
     prompt+="   gh-bot-test --pr <number> --event APPROVE --body \"Tests pass - <summary of what was verified>\"\n"
@@ -13354,22 +13540,38 @@ _kb_build_test_prompt() {
     prompt+="   # Write report to /tmp/test-<number>.md, then:\n"
     prompt+="   gh-bot-test --pr <number> --event REQUEST_CHANGES --body-file /tmp/test-<number>.md\n"
     prompt+="   \`\`\`\n"
-    prompt+="\n5. **Capture test suggestions as merge-blocking kanban subitems** (do NOT leave them only as PR comments):\n"
+    prompt+="\n5. **Classify severity, then file as a kanban subitem** (do NOT leave findings only as PR comments):\n"
+    prompt+="   Append the severity tag directly after [Test], no space: [Test][Blocking] or [Test][Advisory].\n"
+    prompt+="   **[Blocking]** (or no tag — same effect): security, data loss, breaking change w/o migration,\n"
+    prompt+="   missing error handling, wrong result, fail-open on a guard/gate, vacuous/tautological test,\n"
+    prompt+="   regression of a closed defect, canonical-source (homebrew-tap/) violation.\n"
+    prompt+="   **[Advisory]**: coverage suggestions where existing tests are sound, style, process hygiene.\n"
+    prompt+="   Tiebreak: if you can name the concrete harm, it blocks; if you can only name a preference, it\n"
+    prompt+="   advises; if you did not check, it blocks. [Advisory] is the ONLY token that de-gates the merge —\n"
+    prompt+="   a malformed SEVERITY tag (wrong case, a typo, a detached space) still resolves BLOCKING; a\n"
+    prompt+="   malformed CLASS tag (reordered, lowercase, leading space) isn't a finding at all here and gates\n"
+    prompt+="   nothing on merge — it still blocks kb-done via the open-subitem count.\n"
     prompt+="   \`\`\`bash\n"
     prompt+="   source ${AITEAMFORGE_DIR}/kanban-helpers.sh\n"
-    prompt+="   # One subitem per suggestion — title MUST start with [Test]\n"
-    prompt+="   kb-backlog sub add $item_id \"[Test] <actionable suggestion> (PR #<number>)\"\n"
+    prompt+="   # One subitem per suggestion\n"
+    prompt+="   kb-backlog sub add $item_id \"[Test][Blocking] <finding> (PR #<number>)\"\n"
+    prompt+="   kb-backlog sub add $item_id \"[Test][Advisory] <finding> (PR #<number>)\"\n"
     prompt+="   \`\`\`\n"
-    prompt+="   These subitems BLOCK merge. The creating agent must address each one and push fixes before merging.\n"
-    prompt+="   Each gets its own subitem for independent tracking and must be resolved before PR merge.\n"
+    prompt+="   [Blocking] subitems BLOCK MERGE — the creating agent must address each and push fixes first.\n"
+    prompt+="   [Advisory] subitems do NOT block merge but still block kb-done until disposed (fold in / spin\n"
+    prompt+="   out via Project Planner / user-approved decline) — filing [Advisory] is not dropping the finding.\n"
     prompt+="\n6. **After submitting your verdict, STOP.** Report the verdict, the PR test submission URL, and the subitems you filed, then end the session.\n"
     prompt+="   **Do NOT start a polling or monitoring loop.** This session cannot keep one running, so reporting one is a false status.\n"
     prompt+="   The creating agent's \`scripts/kb-pr-monitor\` re-launches this gate for the next round (it passes \`--delta <sha>\` for delta re-reviews).\n"
+    prompt+="   **On a re-test round** (delta mode, or a prior REQUEST_CHANGES on this PR): (1) verify each reported\n"
+    prompt+="   failure was fixed, (2) for each prior BLOCKING class, confirm a table-driven adversarial-input test now\n"
+    prompt+="   covers every enumerated variant — a fix of only the reported instance is ITSELF a BLOCKING finding (the\n"
+    prompt+="   class recurs next round), (3) re-run lint and unit tests on the updated code and check new code.\n"
     prompt+="\n## CRITICAL Rules\n"
     prompt+="- **USE gh-bot-test** for submitting test results, NOT \`gh pr review\` (same-account restriction)\n"
     prompt+="- **DO NOT MERGE** the PR — the creating agent's \`scripts/kb-pr-monitor\` handles merge after the gates pass\n"
     prompt+="- **Blocking failures** go in REQUEST_CHANGES — must be fixed before approval\n"
-    prompt+="- **[Test] subitems BLOCK MERGE** — add as kanban subitems (NOT PR comments); creating agent MUST resolve ALL [Test] subitems before merge\n"
+    prompt+="- **[Test][Blocking] subitems BLOCK MERGE** — [Test][Advisory] ones do not, but still gate kb-done; add as kanban subitems (NOT PR comments)\n"
     prompt+="- **After submitting** — stop and report (step 6 above); never claim a loop is running.\n"
     prompt+="- Be specific about what failed, how to reproduce it, and what the expected behavior is\n"
     prompt+="- Provide steps to reproduce for any failures you report\n"
@@ -13383,30 +13585,34 @@ _kb_build_test_prompt() {
 kb-run-test() {
     _kb_ensure_jq || return 1
 
-    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
-    local selector="" _kb_yes=0 _kb_arg
-    for _kb_arg in "$@"; do
-        case "$_kb_arg" in
-            --yes|-y) _kb_yes=1 ;;
-            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
-        esac
-    done
+    # XACA-1299-004/005: --delta <sha> / --round <N>, either order, either optional.
+    _kb_parse_gate_run_flags "$@" || return 1
+    local selector="$_KB_GATE_SELECTOR"
+    local delta_sha="$_KB_GATE_DELTA_SHA"
+    local round="$_KB_GATE_ROUND"
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-run-test <id> [--yes]"
+        echo "Usage: kb-run-test <id> [--delta <sha>] [--round <N>] [--yes]"
         echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Switches to item's worktree and launches Claude Code to QA test the related PR."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-run-test XFRE-0001"
+        echo "  --delta <sha>   re-test only the changes since this previously-approved commit"
+        echo "  --round <N>     current gate round (N>=4 adds the circuit-breaker prompt language)"
         echo ""
         echo "To test without switching worktree, use: kb-work-test <id>"
         return 1
     fi
 
-    local context team board_file
-    context=$(_kb_detect_context)
-    team="${context%%:*}"
-    board_file=$(_kb_get_board_file "$team")
+    local team board_file
+    team=$(_kb_resolve_run_team "$selector")
+    # If board resolution fails outright, _kb_get_board_file already printed a
+    # specific reason to stderr — an "unknown team" refusal, or a board-less
+    # alias's "use <x> instead" guidance (e.g. mainevent → command, XACA-0727).
+    # Return without piling a generic "no board" line on top of it. (XACA-0759 review #2)
+    if ! board_file=$(_kb_get_board_file "$team"); then
+        return 1
+    fi
 
     if [[ ! -f "$board_file" ]]; then
         echo "Error: No kanban board found for team '$team'"
@@ -13440,7 +13646,7 @@ kb-run-test() {
 
     # Confirmation prompt
     local confirm
-    _kb_confirm_launch kb-run-test "Start QA testing this item's PR? [Y/n]: " "$_kb_yes"
+    _kb_confirm_launch kb-run-test "Start QA testing this item's PR? [Y/n]: " "$_KB_GATE_ASSUME_YES"
     local _kb_confirm_rc=$?
     if [[ $_kb_confirm_rc -eq 2 ]]; then
         return 2
@@ -13464,7 +13670,7 @@ kb-run-test() {
 
     # Build the test prompt using shared helper
     local prompt
-    prompt=$(_kb_build_test_prompt "$item_id" "$title" "$description" "$item_worktree_branch")
+    prompt=$(_kb_build_test_prompt "$item_id" "$title" "$description" "$item_worktree_branch" "$delta_sha" "$round")
 
     echo "Launching Claude Code for PR QA testing of [$item_id]: $title"
     echo "─────────────────────────────────────"
@@ -13474,12 +13680,21 @@ kb-run-test() {
     _kb_set_working_on "$item_id" "TEST"
 
     # Launch cc with the test prompt
+    export CC_SESSION_NAME="[Test] ${item_id}: ${title}"
     if ! _kb_ensure_cc_function "kb-run-test"; then
         unset CC_SESSION_NAME
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+    unset CC_SESSION_NAME
+
+    # XACA-0598: offer wt-finish cleanup only when THIS invocation created the worktree
+    # XACA-1284: if-form, not `[[ ]] &&` -- as a function's LAST command a false test made a
+    # successful launch exit 1 whenever no worktree was created (an --yes caller would read failure).
+    if [[ "${kb_wt_session_created:-0}" == "1" ]]; then
+        _kb_offer_worktree_cleanup "$kb_wt_session_path" "$(git -C "$kb_wt_session_path" branch --show-current 2>/dev/null)"
+    fi
 
     # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
     # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
@@ -13496,22 +13711,21 @@ kb-run-test() {
 kb-work-test() {
     _kb_ensure_jq || return 1
 
-    # XACA-1284-003: accept --yes/-y in either position; first non-flag arg is the selector.
-    local selector="" _kb_yes=0 _kb_arg
-    for _kb_arg in "$@"; do
-        case "$_kb_arg" in
-            --yes|-y) _kb_yes=1 ;;
-            *) [[ -z "$selector" ]] && selector="$_kb_arg" ;;
-        esac
-    done
+    # XACA-1299-004/005: --delta <sha> / --round <N>, either order, either optional.
+    _kb_parse_gate_run_flags "$@" || return 1
+    local selector="$_KB_GATE_SELECTOR"
+    local delta_sha="$_KB_GATE_DELTA_SHA"
+    local round="$_KB_GATE_ROUND"
 
     if [[ -z "$selector" ]]; then
-        echo "Usage: kb-work-test <id> [--yes]"
+        echo "Usage: kb-work-test <id> [--delta <sha>] [--round <N>] [--yes]"
         echo "  --yes, -y   skip the confirmation prompt (required without a tty; or set KB_ASSUME_YES=1)"
         echo "Launches Claude Code to QA test the related PR WITHOUT switching worktree."
         echo "Use when you're already in the correct directory/worktree."
         echo "Use 'kb-backlog list' to see available items"
         echo "Example: kb-work-test XFRE-0001"
+        echo "  --delta <sha>   re-test only the changes since this previously-approved commit"
+        echo "  --round <N>     current gate round (N>=4 adds the circuit-breaker prompt language)"
         echo ""
         echo "For automatic worktree switch, use: kb-run-test <id>"
         return 1
@@ -13555,7 +13769,7 @@ kb-work-test() {
     echo "📁 Testing in current directory: $(pwd)"
     echo "   (No worktree switch will be made)"
     echo ""
-    _kb_confirm_launch kb-work-test "Start QA testing this item's PR? [Y/n]: " "$_kb_yes"
+    _kb_confirm_launch kb-work-test "Start QA testing this item's PR? [Y/n]: " "$_KB_GATE_ASSUME_YES"
     local _kb_confirm_rc=$?
     if [[ $_kb_confirm_rc -eq 2 ]]; then
         return 2
@@ -13568,7 +13782,7 @@ kb-work-test() {
 
     # Build the test prompt using shared helper
     local prompt
-    prompt=$(_kb_build_test_prompt "$item_id" "$title" "$description" "$item_worktree_branch")
+    prompt=$(_kb_build_test_prompt "$item_id" "$title" "$description" "$item_worktree_branch" "$delta_sha" "$round")
 
     echo "Launching Claude Code for PR QA testing of [$item_id]: $title"
     echo "─────────────────────────────────────"
@@ -13578,12 +13792,14 @@ kb-work-test() {
     _kb_set_working_on "$item_id" "TEST"
 
     # Launch cc with the test prompt
+    export CC_SESSION_NAME="[Test] ${item_id}: ${title}"
     if ! _kb_ensure_cc_function "kb-work-test"; then
         unset CC_SESSION_NAME
         return 1
     fi
     printf '%s\n' "$prompt" | \cc
     local _kb_cc_rc=$?   # XACA-1284-016: capture before anything else runs
+    unset CC_SESSION_NAME
 
     # XACA-1284-016: a launch that did not happen must never read as success. cc() returns
     # non-zero when it launched nothing (routing/credential refusal rc 1, missing claude rc 127),
@@ -23487,10 +23703,12 @@ kb-release-create() {
             --arg project "$project" \
             --arg targetDate "$target_date" \
             --arg shortTitle "$short_title" \
+            --arg team "$team" \
             --arg environments "$environments" \
             '{
                 name: $name,
                 type: $type,
+                team: $team,
                 platforms: ($platforms | split(",")),
                 environments: ($environments | split(",")),
                 project: (if $project != "" then $project else null end),
@@ -23505,9 +23723,11 @@ kb-release-create() {
             --arg project "$project" \
             --arg targetDate "$target_date" \
             --arg shortTitle "$short_title" \
+            --arg team "$team" \
             '{
                 name: $name,
                 type: $type,
+                team: $team,
                 platforms: ($platforms | split(",")),
                 project: (if $project != "" then $project else null end),
                 targetDate: (if $targetDate != "" then $targetDate else null end),
@@ -23538,6 +23758,7 @@ kb-release-create() {
         release_id=$(printf '%s\n' "$body" | jq -r '.id // empty')
         release_name=$(printf '%s\n' "$body" | jq -r '.name // empty')
         echo "✓ Created release: $release_name ($release_id)"
+        echo "  Team: $team (LCARS port $_lcars_port)"
         echo "  Type: $rel_type"
         echo "  Platforms: $platforms"
         [[ -n "$environments" ]] && echo "  Environments: $environments"

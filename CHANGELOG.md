@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
+- **XACA-1151 (PR-F)** — the review and test launchers now honour `--delta` and `--round`, and their prompts carry the severity rules.
+  - `kb-run-review`, `kb-run-test`, `kb-work-review` and `kb-work-test` take `--delta <sha>` (re-check only what changed since a commit you already approved), `--round <N>` (round 4 and up adds the circuit-breaker wording) and `--yes`, in any order. A malformed sha or round, an unknown flag or a second id is refused before any session starts. Before this, everything after the id was ignored, so the `--delta` that `kb-pr-monitor` asks for silently ran as a full review.
+  - The review and test prompts now ask for `[Blocking]` / `[Advisory]` tags, for every failing variant of a defect class in one round, and end with "report and stop" instead of a polling loop.
+  - The four launchers name their session `[Review] <id>: <title>` or `[Test] <id>: <title>`, find the team from the item ID when no shell context is set, and offer to remove a worktree they created.
+  - `kb-backlog add ... <os>` and `kb-backlog sub add ... <os>` no longer stop with "bad substitution" under zsh.
+  - A refused `kb-backlog demote` of a completed item now points at `kb-run-debug`, and `kb-release-create` sends and prints the team.
+  - New helper `_kb_parse_gate_run_flags`. The launchers and the parser are byte-identical to the dev-team copies; the two prompts differ by one line that points at this install (`${AITEAMFORGE_DIR}`) instead of `~/dev-team`.
 - **XACA-1151 (PR-E3b):** `tests/test-xaca-0822-template-canonical-parity.sh` XACA-0822-008 now calls `kb-run TST-0010 --yes` instead of piping `y`. Since XACA-1284 (#991) `kb-run` refuses with rc 2 when it has no tty and no `--yes`, so the piped form never reached the unestimated-item gate the row exists to test (it failed 10/11 on develop).
 - **XACA-1151 (PR-E3b)** — `kb-run`, `kb-work` and `kb-work-debug` now behave like the dev-team copies.
   - `kb-run` and `kb-work` warn and ask before starting a blocked item; without a terminal they refuse with the list of blockers. Answering no now ends quietly instead of failing.
